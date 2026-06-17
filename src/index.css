@@ -1,0 +1,135 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #f9fafb;
+  background: #0b1118;
+  font-family:
+    Poppins, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    sans-serif;
+}
+
+body {
+  min-width: 320px;
+  min-height: 100vh;
+  margin: 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+@property --star-border-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+
+.star-border {
+  position: absolute;
+  overflow: visible;
+}
+
+.star-border--ellipse {
+  border-radius: 50%;
+}
+
+.star-border--rounded {
+  border-radius: 48px;
+}
+
+.auth-mode-panel {
+  animation: auth-mode-panel-in 720ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@keyframes auth-mode-panel-in {
+  from {
+    opacity: 0;
+    transform: translateY(48px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.star-border::before,
+.star-border::after {
+  position: absolute;
+  inset: 0;
+  content: "";
+  border-radius: inherit;
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  mask-composite: exclude;
+}
+
+.star-border::before {
+  padding: 1px;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.star-border::after {
+  inset: -2px;
+  padding: 3px;
+  background: conic-gradient(
+    from var(--star-border-angle),
+    rgba(255, 255, 255, 0.02) 0%,
+    rgba(255, 255, 255, 0.2) 10%,
+    rgba(255, 255, 255, 0.02) 20%,
+    transparent 24%,
+    transparent 100%
+  );
+  filter: drop-shadow(0 0 8px rgba(255, 255, 255, 0.08));
+  animation: star-border-spin var(--star-border-speed, 6s) linear infinite;
+}
+
+.star-border--rounded::before {
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.star-border--rounded::after {
+  background: conic-gradient(
+    from var(--star-border-angle),
+    rgba(255, 255, 255, 0.06) 0%,
+    rgba(255, 255, 255, 0.62) 8%,
+    rgba(255, 255, 255, 0.12) 17%,
+    transparent 23%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.06) 50%,
+    rgba(255, 255, 255, 0.62) 58%,
+    rgba(255, 255, 255, 0.12) 67%,
+    transparent 73%,
+    transparent 100%
+  );
+  filter: drop-shadow(0 0 12px rgba(255, 255, 255, 0.26));
+}
+
+@keyframes star-border-spin {
+  0% {
+    --star-border-angle: 0deg;
+  }
+  to {
+    --star-border-angle: 360deg;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .star-border::after {
+    animation: none;
+    opacity: 0;
+  }
+}
