@@ -8,6 +8,7 @@ import { KlineStore } from "./modules/kline/KlineStore";
 import { BinanceMarketService } from "./modules/market/BinanceMarketService";
 import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import { TradingService } from "./market/TradingService";
+import { TradingStore } from "./storage/TradingStore";
 import type { MarketSymbol, MarketTick, TradeSide } from "./types";
 
 dotenv.config();
@@ -20,6 +21,7 @@ app.use(express.json());
 const klineStore = new KlineStore();
 const market = new BinanceMarketService(klineStore);
 await market.start();
+const tradingStore = new TradingStore();
 
 const tradingMarket = {
   getSymbol(symbol: string) {
@@ -37,7 +39,8 @@ const tradingMarket = {
   },
 };
 
-const trading = new TradingService(tradingMarket);
+const trading = new TradingService(tradingMarket, tradingStore);
+trading.getAccount("demo-user");
 
 registerMarketRoutes(app, market);
 
@@ -82,6 +85,10 @@ app.get("/api/admin/positions", (_request, response) => {
 
 app.get("/api/admin/orders", (_request, response) => {
   response.json(trading.listOrders());
+});
+
+app.get("/api/admin/balance-adjustments", (_request, response) => {
+  response.json(trading.listAdjustments());
 });
 
 app.post("/api/admin/accounts/:userId/adjust-balance", (request, response) => {
@@ -221,6 +228,7 @@ function sendBadRequest(response: express.Response, error: unknown) {
 
 process.on("SIGINT", async () => {
   await market.stop();
+  tradingStore.close();
   server.close();
   process.exit(0);
 });

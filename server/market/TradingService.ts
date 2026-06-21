@@ -9,6 +9,7 @@ import type {
   TradeSide,
   TradingAccount,
 } from "../types";
+import type { TradingStore } from "../storage/TradingStore";
 
 const defaultInitialBalance = 10_000;
 
@@ -34,7 +35,17 @@ export class TradingService {
   private orders: OrderRecord[] = [];
   private adjustments: BalanceAdjustment[] = [];
 
-  constructor(private market: TradingMarket) {}
+  constructor(
+    private market: TradingMarket,
+    private store?: TradingStore,
+  ) {
+    for (const account of store?.listAccounts() ?? []) {
+      this.accounts.set(account.userId, account);
+    }
+    this.positions = store?.listPositions() ?? [];
+    this.orders = store?.listOrders() ?? [];
+    this.adjustments = store?.listAdjustments() ?? [];
+  }
 
   getAccount(userId: string, currency = "USD") {
     const account = this.ensureAccount(userId, currency);
@@ -46,7 +57,8 @@ export class TradingService {
   }
 
   adjustBalance(userId: string, type: BalanceAdjustment["type"], amount: number, note?: string) {
-    const account = this.ensureAccount(userId);
+    const normalizedUserId = normalizeUserId(userId);
+    const account = this.ensureAccount(normalizedUserId);
     if (!Number.isFinite(amount) || amount < 0) {
       throw new Error("调整金额不能小于 0。");
     }
@@ -62,12 +74,13 @@ export class TradingService {
       account.balance = amount;
     }
     account.updatedAt = Date.now();
-    this.accounts.set(userId, account);
+    this.accounts.set(normalizedUserId, account);
+    this.store?.upsertAccount(account);
 
     const adjustment: BalanceAdjustment = {
       id: `ADJ-${Date.now().toString(36).toUpperCase()}`,
       accountId: account.id,
-      userId,
+      userId: normalizedUserId,
       type,
       amount,
       previousBalance,
@@ -76,6 +89,7 @@ export class TradingService {
       createdAt: Date.now(),
     };
     this.adjustments = [adjustment, ...this.adjustments].slice(0, 200);
+    this.store?.saveAdjustment(adjustment);
     return this.toAccountView(account);
   }
 
@@ -110,6 +124,7 @@ export class TradingService {
       entrySpread: tick.spread,
     };
     this.positions = [position, ...this.positions].slice(0, 200);
+    this.store?.savePosition(position);
     this.recordFilledOrder({
       userId,
       accountId: account.id,
@@ -161,7 +176,9 @@ export class TradingService {
     account.balance = roundMoney(account.balance + pnl);
     account.updatedAt = Date.now();
     this.accounts.set(userId, account);
+    this.store?.upsertAccount(account);
     this.positions = this.positions.filter((item) => item.id !== position.id);
+    this.store?.deletePosition(position.id);
 
     this.recordFilledOrder({
       userId,
@@ -197,8 +214,12 @@ export class TradingService {
     return this.orders.filter((order) => !userId || order.userId === userId);
   }
 
+  listAdjustments(userId?: string) {
+    return this.adjustments.filter((adjustment) => !userId || adjustment.userId === userId);
+  }
+
   private ensureAccount(userId: string, currency = "USD") {
-    const normalized = userId || "demo-user";
+    const normalized = normalizeUserId(userId);
     const existing = this.accounts.get(normalized);
     if (existing) {
       return existing;
@@ -217,6 +238,7 @@ export class TradingService {
       updatedAt: Date.now(),
     };
     this.accounts.set(normalized, account);
+    this.store?.upsertAccount(account);
     return account;
   }
 
@@ -375,6 +397,7 @@ export class TradingService {
       createdAt: Date.now(),
     };
     this.orders = [order, ...this.orders].slice(0, 500);
+    this.store?.saveOrder(order);
   }
 
   private recordFilledOrder(input: {
@@ -417,7 +440,12 @@ export class TradingService {
       createdAt: Date.now(),
     };
     this.orders = [order, ...this.orders].slice(0, 500);
+    this.store?.saveOrder(order);
   }
+}
+
+function normalizeUserId(userId: string) {
+  return userId?.trim() || "demo-user";
 }
 
 function roundMoney(value: number) {

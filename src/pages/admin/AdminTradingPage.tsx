@@ -6,11 +6,13 @@ import { Input } from "../../components/ui/Input";
 import {
   adjustAdminAccountBalance,
   fetchAdminAccounts,
+  fetchAdminBalanceAdjustments,
   fetchAdminMarketStatus,
   fetchAdminOrders,
   fetchAdminPositions,
   fetchMarketSymbols,
   type AdminMarketStatus,
+  type BalanceAdjustment,
   type OrderRecord,
   type PositionView,
   type TradingAccount,
@@ -23,6 +25,7 @@ export function AdminTradingPage() {
   const [accounts, setAccounts] = useState<TradingAccount[]>([]);
   const [positions, setPositions] = useState<PositionView[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [adjustments, setAdjustments] = useState<BalanceAdjustment[]>([]);
   const [marketStatus, setMarketStatus] = useState<AdminMarketStatus[]>([]);
   const [adjustUserId, setAdjustUserId] = useState("");
   const [adjustType, setAdjustType] = useState<"deposit" | "withdraw" | "reset">("deposit");
@@ -36,15 +39,17 @@ export function AdminTradingPage() {
   const loadData = async () => {
     const nextSymbols = await fetchMarketSymbols();
     setSymbolsFromBackend(nextSymbols);
-    const [nextAccounts, nextPositions, nextOrders, nextMarketStatus] = await Promise.all([
+    const [nextAccounts, nextPositions, nextOrders, nextAdjustments, nextMarketStatus] = await Promise.all([
       fetchAdminAccounts(),
       fetchAdminPositions(),
       fetchAdminOrders(),
+      fetchAdminBalanceAdjustments(),
       fetchAdminMarketStatus(),
     ]);
     setAccounts(nextAccounts);
     setPositions(nextPositions);
     setOrders(nextOrders);
+    setAdjustments(nextAdjustments);
     setMarketStatus(nextMarketStatus);
   };
 
@@ -75,7 +80,7 @@ export function AdminTradingPage() {
         <Stat label="模拟账户" value={accounts.length} />
         <Stat label="当前持仓" value={positions.length} />
         <Stat label="订单记录" value={orders.length} />
-        <Stat label="行情品种" value={marketStatus.length} />
+        <Stat label="资金流水" value={adjustments.length} />
       </div>
 
       <Card>
@@ -191,6 +196,40 @@ export function AdminTradingPage() {
                   <td className="px-5 py-4">{order.side} / {order.volume}</td>
                   <td className="px-5 py-4">{order.price?.toFixed(5) ?? "-"}</td>
                   <td className="px-5 py-4 text-muted">{order.reason ?? (order.pnl !== undefined ? `P/L ${order.pnl.toFixed(2)}` : "模拟成交")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <SectionTitle title="资金流水" />
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="border-b border-line bg-white/[0.03] text-muted">
+              <tr>
+                <th className="px-5 py-3 font-medium">时间</th>
+                <th className="px-5 py-3 font-medium">用户</th>
+                <th className="px-5 py-3 font-medium">类型</th>
+                <th className="px-5 py-3 font-medium">金额</th>
+                <th className="px-5 py-3 font-medium">调整前</th>
+                <th className="px-5 py-3 font-medium">调整后</th>
+                <th className="px-5 py-3 font-medium">备注</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {adjustments.length === 0 ? (
+                <tr><td className="px-5 py-8 text-center text-muted" colSpan={7}>暂无资金流水。</td></tr>
+              ) : adjustments.slice(0, 30).map((adjustment) => (
+                <tr key={adjustment.id}>
+                  <td className="px-5 py-4 text-muted">{new Date(adjustment.createdAt).toLocaleString("zh-CN")}</td>
+                  <td className="px-5 py-4 font-mono text-xs">{adjustment.userId}</td>
+                  <td className="px-5 py-4">{adjustment.type === "deposit" ? "入金" : adjustment.type === "withdraw" ? "扣减" : "重置"}</td>
+                  <td className="px-5 py-4">{adjustment.amount.toFixed(2)}</td>
+                  <td className="px-5 py-4">{adjustment.previousBalance.toFixed(2)}</td>
+                  <td className="px-5 py-4">{adjustment.nextBalance.toFixed(2)}</td>
+                  <td className="px-5 py-4 text-muted">{adjustment.note || "-"}</td>
                 </tr>
               ))}
             </tbody>

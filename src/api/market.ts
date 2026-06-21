@@ -78,6 +78,18 @@ export type OrderRecord = {
   createdAt: number;
 };
 
+export type BalanceAdjustment = {
+  id: string;
+  accountId: string;
+  userId: string;
+  type: "deposit" | "withdraw" | "reset";
+  amount: number;
+  previousBalance: number;
+  nextBalance: number;
+  note?: string;
+  createdAt: number;
+};
+
 export type AdminMarketStatus = {
   symbol: string;
   apiSymbol: string;
@@ -211,6 +223,11 @@ export async function fetchAdminPositions() {
 export async function fetchAdminOrders() {
   const response = await fetch("/api/admin/orders");
   return response.json() as Promise<OrderRecord[]>;
+}
+
+export async function fetchAdminBalanceAdjustments() {
+  const response = await fetch("/api/admin/balance-adjustments");
+  return response.json() as Promise<BalanceAdjustment[]>;
 }
 
 export async function adjustAdminAccountBalance(userId: string, type: "deposit" | "withdraw" | "reset", amount: number, note = "") {

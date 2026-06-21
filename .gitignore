@@ -11,3 +11,4 @@ dist/
 coverage/
 
 server/data/candles.json
+server/data/trading.sqlite*

@@ -61,6 +61,28 @@ export function AccountPage() {
           <Info label="创建时间" value={account?.createdAt ? new Date(account.createdAt).toLocaleString("zh-CN") : "-"} />
         </div>
       </Card>
+      <Card>
+        <h2 className="font-semibold">最近订单</h2>
+        {orders.length === 0 ? (
+          <p className="mt-4 text-sm text-muted">暂无订单记录。</p>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {orders.slice(0, 5).map((order) => (
+              <div key={order.id} className="flex flex-col gap-2 rounded-lg border border-line bg-white/[0.03] p-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="font-medium">
+                    {order.symbol} · {order.action === "open" ? "开仓" : "平仓"} · {order.side}
+                  </p>
+                  <p className="mt-1 text-xs text-muted">{new Date(order.createdAt).toLocaleString("zh-CN")}</p>
+                </div>
+                <div className="text-sm text-muted">
+                  {order.status === "rejected" ? order.reason : `${order.price?.toFixed(5) ?? "-"} / ${order.volume}`}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
     </div>
   );
 }
