@@ -1,4 +1,3 @@
-import type { MarketDataService } from "./MarketDataService";
 import type {
   BalanceAdjustment,
   MarketSource,
@@ -13,13 +12,29 @@ import type {
 
 const defaultInitialBalance = 10_000;
 
+type TradingMarket = {
+  getSymbol(symbol: string): MarketSymbol | null;
+  getTicker(symbol: string): {
+    symbol: string;
+    status: "connected" | "stale" | "disconnected";
+    tick?: {
+      bid: number;
+      ask: number;
+      last: number;
+      spread: number;
+      source: MarketSource;
+      timestamp: number;
+    };
+  };
+};
+
 export class TradingService {
   private accounts = new Map<string, TradingAccount>();
   private positions: Position[] = [];
   private orders: OrderRecord[] = [];
   private adjustments: BalanceAdjustment[] = [];
 
-  constructor(private market: MarketDataService) {}
+  constructor(private market: TradingMarket) {}
 
   getAccount(userId: string, currency = "USD") {
     const account = this.ensureAccount(userId, currency);
@@ -265,7 +280,7 @@ export class TradingService {
     return null;
   }
 
-  private validateCloseOrder(config: MarketSymbol | null, position: Position, ticker: ReturnType<MarketDataService["getTicker"]>) {
+  private validateCloseOrder(config: MarketSymbol | null, position: Position, ticker: ReturnType<TradingMarket["getTicker"]>) {
     if (!config) {
       return `品种 ${position.symbol} 未配置。`;
     }
@@ -275,7 +290,7 @@ export class TradingService {
     return this.validateTicker(ticker, config);
   }
 
-  private validateTicker(ticker: ReturnType<MarketDataService["getTicker"]>, config: MarketSymbol) {
+  private validateTicker(ticker: ReturnType<TradingMarket["getTicker"]>, config: MarketSymbol) {
     if (!ticker.tick) {
       return "行情不存在，禁止市价成交。";
     }

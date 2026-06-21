@@ -9,7 +9,7 @@ import {
   fetchAdminMarketStatus,
   fetchAdminOrders,
   fetchAdminPositions,
-  syncMarketSymbols,
+  fetchMarketSymbols,
   type AdminMarketStatus,
   type OrderRecord,
   type PositionView,
@@ -19,7 +19,7 @@ import { useSymbolStore } from "../../store/symbolStore";
 import { formatPrice } from "../../utils/price";
 
 export function AdminTradingPage() {
-  const symbols = useSymbolStore((state) => state.symbols);
+  const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
   const [accounts, setAccounts] = useState<TradingAccount[]>([]);
   const [positions, setPositions] = useState<PositionView[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
@@ -34,7 +34,8 @@ export function AdminTradingPage() {
   }, []);
 
   const loadData = async () => {
-    await syncMarketSymbols(symbols);
+    const nextSymbols = await fetchMarketSymbols();
+    setSymbolsFromBackend(nextSymbols);
     const [nextAccounts, nextPositions, nextOrders, nextMarketStatus] = await Promise.all([
       fetchAdminAccounts(),
       fetchAdminPositions(),

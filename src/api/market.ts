@@ -1,5 +1,5 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
-import type { TradeSymbol } from "../types/market";
+import type { QuoteStatus, TradeSymbol } from "../types/market";
 
 export type ApiCandle = {
   symbol: string;
@@ -87,6 +87,10 @@ export type AdminMarketStatus = {
   ticker: ApiTicker | null;
 };
 
+type ApiMarketSymbol = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "updatedAt"> & {
+  status?: MarketStatus;
+};
+
 function userHeaders(userId?: string | null): Record<string, string> {
   return userId ? { "x-user-id": userId } : {};
 }
@@ -97,31 +101,73 @@ export async function syncMarketSymbols(symbols: TradeSymbol[]) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ symbols }),
   });
+
+  if (!response.ok) {
+    return fetchMarketSymbols();
+  }
+
   return response.json();
+}
+
+export async function fetchMarketSymbols() {
+  const response = await fetch("/api/market/symbols");
+  if (!response.ok) {
+    throw new Error("品种列表加载失败。");
+  }
+
+  const payload = (await response.json()) as ApiMarketSymbol[];
+  const now = new Date().toISOString();
+  return payload.map((symbol) => ({
+    ...symbol,
+    id: `SYM-${symbol.symbol}`,
+    quoteStatus: toQuoteStatus(symbol.status),
+    createdAt: now,
+    updatedAt: now,
+  })) satisfies TradeSymbol[];
 }
 
 export async function fetchTicker(symbol: string) {
   const response = await fetch(`/api/market/ticker?symbol=${symbol}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.message ?? "最新行情加载失败。");
+  }
   return response.json() as Promise<ApiTicker>;
 }
 
 export async function fetchCandles(symbol: string, interval: CandleInterval, limit = 500) {
   const response = await fetch(`/api/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.message ?? "K 线加载失败。");
+  }
   return response.json() as Promise<ApiCandle[]>;
 }
 
 export async function fetchTradingAccount(userId?: string | null, currency = "USD") {
   const response = await fetch(`/api/trading/account?currency=${currency}`, { headers: userHeaders(userId) });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.message ?? "账户加载失败。");
+  }
   return response.json() as Promise<TradingAccount>;
 }
 
 export async function fetchPositions(userId?: string | null) {
   const response = await fetch("/api/trading/positions", { headers: userHeaders(userId) });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.message ?? "持仓加载失败。");
+  }
   return response.json() as Promise<PositionView[]>;
 }
 
 export async function fetchOrders(userId?: string | null) {
   const response = await fetch("/api/trading/orders", { headers: userHeaders(userId) });
+  if (!response.ok) {
+    const payload = await response.json().catch(() => null);
+    throw new Error(payload?.message ?? "订单加载失败。");
+  }
   return response.json() as Promise<OrderRecord[]>;
 }
 
@@ -183,4 +229,14 @@ export async function adjustAdminAccountBalance(userId: string, type: "deposit" 
 export async function fetchAdminMarketStatus() {
   const response = await fetch("/api/admin/market/status");
   return response.json() as Promise<AdminMarketStatus[]>;
+}
+
+function toQuoteStatus(status?: MarketStatus): QuoteStatus {
+  if (status === "connected") {
+    return "normal";
+  }
+  if (status === "disconnected") {
+    return "error";
+  }
+  return "stale";
 }

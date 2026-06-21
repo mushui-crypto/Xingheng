@@ -3,7 +3,7 @@ import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
-import { syncMarketSymbols } from "../../api/market";
+import { fetchMarketSymbols, syncMarketSymbols } from "../../api/market";
 import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
 import type { SymbolCategory, TradeSymbol } from "../../types/market";
@@ -30,6 +30,7 @@ const emptyDraft: SymbolDraft = {
 
 export function AdminSymbolsPage() {
   const symbols = useSymbolStore((state) => state.symbols);
+  const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
   const addSymbol = useSymbolStore((state) => state.addSymbol);
   const updateSymbol = useSymbolStore((state) => state.updateSymbol);
   const setTradeStatus = useSymbolStore((state) => state.setTradeStatus);
@@ -52,7 +53,10 @@ export function AdminSymbolsPage() {
   );
 
   useEffect(() => {
-    void syncMarketSymbols(symbols);
+    void fetchMarketSymbols().then(setSymbolsFromBackend).catch(() => undefined);
+  }, [setSymbolsFromBackend]);
+
+  useEffect(() => {
     updateStatuses();
     void refreshAllQuotes();
     const timer = window.setInterval(updateStatuses, 5000);

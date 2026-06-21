@@ -8,12 +8,12 @@ import { Card } from "../../components/ui/Card";
 import {
   closePosition,
   fetchCandles,
+  fetchMarketSymbols,
   fetchOrders,
   fetchPositions,
   fetchTicker,
   fetchTradingAccount,
   placeMarketOrder,
-  syncMarketSymbols,
   type ApiCandle,
   type ApiTicker,
   type OrderRecord,
@@ -33,6 +33,7 @@ export function TradingPage() {
   const currency = useConfigStore((state) => state.config.defaultCurrency);
   const currentUserId = useAuthStore((state) => state.currentUserId);
   const allSymbols = useSymbolStore((state) => state.symbols);
+  const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
   const symbols = useMemo(() => allSymbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"), [allSymbols]);
   const symbolConfigKey = useMemo(
     () =>
@@ -42,7 +43,7 @@ export function TradingPage() {
     [symbols],
   );
   const [searchParams, setSearchParams] = useSearchParams();
-  const initialSymbol = searchParams.get("symbol")?.toUpperCase() ?? symbols[0]?.symbol ?? "XAUUSD";
+  const initialSymbol = searchParams.get("symbol")?.toUpperCase() ?? symbols[0]?.symbol ?? "BTCUSDT";
   const [selectedSymbol, setSelectedSymbol] = useState(initialSymbol);
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? symbols[0];
   const symbol = selectedConfig?.symbol ?? selectedSymbol;
@@ -81,8 +82,10 @@ export function TradingPage() {
   }, [selectedConfig?.minLot, selectedConfig?.symbol, setSearchParams]);
 
   useEffect(() => {
-    void syncMarketSymbols(symbols);
-  }, [symbolConfigKey]);
+    void fetchMarketSymbols()
+      .then(setSymbolsFromBackend)
+      .catch((error) => setMessage(error instanceof Error ? error.message : "品种列表加载失败。"));
+  }, [setSymbolsFromBackend]);
 
   useEffect(() => {
     if (!chartContainerRef.current) {
@@ -107,6 +110,7 @@ export function TradingPage() {
       downColor: "#EF4444",
       borderDownColor: "#EF4444",
       wickDownColor: "#EF4444",
+      priceFormat: getChartPriceFormat(digits),
     });
 
     chartRef.current = chart;
@@ -125,10 +129,15 @@ export function TradingPage() {
   }, [themeColor]);
 
   useEffect(() => {
+    candleSeriesRef.current?.applyOptions({
+      priceFormat: getChartPriceFormat(digits),
+    });
+  }, [digits]);
+
+  useEffect(() => {
     let cancelled = false;
 
     async function loadInitialData() {
-      await syncMarketSymbols(symbols);
       const [candles, nextTicker, nextAccount, nextPositions, nextOrders] = await Promise.all([
         fetchCandles(symbol, interval),
         fetchTicker(symbol),
@@ -452,5 +461,14 @@ function toChartCandle(candle: ApiCandle): CandlestickData {
     high: candle.high,
     low: candle.low,
     close: candle.close,
+  };
+}
+
+function getChartPriceFormat(digits: number) {
+  const precision = Math.min(Math.max(Math.trunc(digits), 0), 8);
+  return {
+    type: "price" as const,
+    precision,
+    minMove: 10 ** -precision,
   };
 }

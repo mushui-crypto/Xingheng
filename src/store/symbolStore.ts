@@ -13,50 +13,13 @@ type SymbolStore = {
   setTradeStatus: (id: string, tradeStatus: TradeSymbol["tradeStatus"]) => void;
   deleteSymbol: (id: string) => void;
   setQuoteStatus: (symbol: string, quoteStatus: QuoteStatus) => void;
+  setSymbolsFromBackend: (symbols: TradeSymbol[]) => void;
   resetSymbols: () => void;
 };
 
 const now = new Date().toISOString();
 
 export const defaultTradeSymbols: TradeSymbol[] = [
-  {
-    id: "SYM-XAUUSD",
-    symbol: "XAUUSD",
-    displayName: "Gold",
-    apiSymbol: "XAUUSD",
-    category: "metal",
-    digits: 2,
-    spread: 0.3,
-    leverage: 100,
-    contractSize: 100,
-    minLot: 0.01,
-    maxLot: 10,
-    lotStep: 0.01,
-    tradeStatus: "enabled",
-    quoteStatus: "stale",
-    isVisible: true,
-    createdAt: now,
-    updatedAt: now,
-  },
-  {
-    id: "SYM-EURUSD",
-    symbol: "EURUSD",
-    displayName: "Euro / US Dollar",
-    apiSymbol: "EURUSD",
-    category: "forex",
-    digits: 5,
-    spread: 0.00012,
-    leverage: 100,
-    contractSize: 100000,
-    minLot: 0.01,
-    maxLot: 20,
-    lotStep: 0.01,
-    tradeStatus: "enabled",
-    quoteStatus: "stale",
-    isVisible: true,
-    createdAt: now,
-    updatedAt: now,
-  },
   {
     id: "SYM-BTCUSDT",
     symbol: "BTCUSDT",
@@ -67,9 +30,47 @@ export const defaultTradeSymbols: TradeSymbol[] = [
     spread: 10,
     leverage: 20,
     contractSize: 1,
-    minLot: 0.01,
-    maxLot: 5,
-    lotStep: 0.01,
+    minLot: 0.001,
+    maxLot: 10,
+    lotStep: 0.001,
+    tradeStatus: "enabled",
+    quoteStatus: "stale",
+    isVisible: true,
+    createdAt: now,
+    updatedAt: now,
+  },
+  {
+    id: "SYM-ETHUSDT",
+    symbol: "ETHUSDT",
+    displayName: "Ethereum / USDT",
+    apiSymbol: "ETHUSDT",
+    category: "crypto",
+    digits: 2,
+    spread: 1,
+    leverage: 20,
+    contractSize: 1,
+    minLot: 0.001,
+    maxLot: 100,
+    lotStep: 0.001,
+    tradeStatus: "enabled",
+    quoteStatus: "stale",
+    isVisible: true,
+    createdAt: now,
+    updatedAt: now,
+  },
+  {
+    id: "SYM-DOGEUSDT",
+    symbol: "DOGEUSDT",
+    displayName: "Dogecoin / USDT",
+    apiSymbol: "DOGEUSDT",
+    category: "crypto",
+    digits: 6,
+    spread: 0.00001,
+    leverage: 10,
+    contractSize: 1,
+    minLot: 1,
+    maxLot: 100000,
+    lotStep: 1,
     tradeStatus: "enabled",
     quoteStatus: "stale",
     isVisible: true,
@@ -82,8 +83,34 @@ function persist(symbols: TradeSymbol[]) {
   writeStorage(storageKeys.tradeSymbols, symbols);
 }
 
+function loadBinanceSymbols() {
+  const stored = readStorage<TradeSymbol[]>(storageKeys.tradeSymbols, defaultTradeSymbols);
+  const supported = new Set(defaultTradeSymbols.map((symbol) => symbol.symbol));
+  const migrated = defaultTradeSymbols.map((defaultSymbol) => {
+    const previous = stored.find((symbol) => symbol.symbol === defaultSymbol.symbol);
+    return {
+      ...defaultSymbol,
+      tradeStatus: previous?.tradeStatus ?? defaultSymbol.tradeStatus,
+      quoteStatus: previous?.quoteStatus ?? defaultSymbol.quoteStatus,
+      isVisible: previous?.isVisible ?? defaultSymbol.isVisible,
+      createdAt: previous?.createdAt ?? defaultSymbol.createdAt,
+      updatedAt: previous?.updatedAt ?? defaultSymbol.updatedAt,
+    };
+  });
+
+  if (
+    stored.length !== migrated.length ||
+    stored.some((symbol) => !supported.has(symbol.symbol)) ||
+    JSON.stringify(stored) !== JSON.stringify(migrated)
+  ) {
+    persist(migrated);
+  }
+
+  return migrated;
+}
+
 export const useSymbolStore = create<SymbolStore>((set, get) => ({
-  symbols: readStorage<TradeSymbol[]>(storageKeys.tradeSymbols, defaultTradeSymbols),
+  symbols: loadBinanceSymbols(),
   getSymbolConfig: (symbol) =>
     get().symbols.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase()) ?? null,
   visibleSymbols: () => get().symbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"),
@@ -138,6 +165,20 @@ export const useSymbolStore = create<SymbolStore>((set, get) => ({
       return;
     }
     const symbols = get().symbols.map((item) => (item.symbol === symbol ? { ...item, quoteStatus } : item));
+    persist(symbols);
+    set({ symbols });
+  },
+  setSymbolsFromBackend: (backendSymbols) => {
+    const current = get().symbols;
+    const symbols = backendSymbols.map((symbol) => {
+      const previous = current.find((item) => item.symbol === symbol.symbol);
+      return {
+        ...symbol,
+        quoteStatus: previous?.quoteStatus ?? symbol.quoteStatus,
+        createdAt: previous?.createdAt ?? symbol.createdAt,
+        updatedAt: new Date().toISOString(),
+      };
+    });
     persist(symbols);
     set({ symbols });
   },

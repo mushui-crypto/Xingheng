@@ -1,6 +1,12 @@
-# 星衡行情与 K 线模块
+# 星衡 Binance 行情与 K 线模块
 
-本模块采用“第三方真实行情源 + 内部模拟交易”的结构。
+本模块采用“Binance 公开行情源 + 内部 K 线服务”的单体结构，当前只支持：
+
+- `BTCUSDT`
+- `ETHUSDT`
+- `DOGEUSDT`
+
+后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
 
 ## 本地启动
 
@@ -13,100 +19,116 @@ npm run dev
 
 API：`http://127.0.0.1:8787`
 
-交易页面：`/app/trading`
-
-行情列表：`/app/markets`
-
-后台品种管理：`/admin/symbols`
-
-## 品种与报价配置
-
-前端本地模拟存储新增两个 localStorage key：
-
-```text
-trade_symbols
-market_quotes
-```
-
-`trade_symbols` 保存可交易品种配置，包括展示 symbol、公开行情 API symbol、点差、杠杆、合约单位、最小/最大手数、手数步进、报价小数位、交易状态和可见状态。
-
-`market_quotes` 保存最近一次标准化后的报价缓存。若公开行情源只返回 last，本地报价层会按品种点差生成：
-
-```text
-bid = last - spread / 2
-ask = last + spread / 2
-```
-
-并按品种 `digits` 四舍五入。
-
-## 真实行情源
-
-默认没有 `TRADERMADE_API_KEY` 时会使用本地 mock XAUUSD 行情，方便开发和演示。
-
-接入 TraderMade：
+单独启动 API：
 
 ```bash
-cp .env.example .env
+npm run start:api
 ```
 
-然后填写：
+## 模块结构
 
-```bash
-TRADERMADE_API_KEY=你的 TraderMade Streaming API Key
+| 模块 | 文件 | 说明 |
+| --- | --- | --- |
+| Binance REST | `server/binance/BinanceRestClient.ts` | 拉取历史 K 线 |
+| Binance WebSocket | `server/binance/BinanceKlineEngine.ts` | 订阅 `kline_1m` 实时流 |
+| 1m K 线生成器 | `server/binance/BinanceKlineEngine.ts` | 标准化 Binance kline 为内部 OHLCV |
+| 内存存储 | `server/storage/InMemoryCandleStore.ts` | 保存历史 K 线和当前未完成 K 线 |
+| 支持品种 | `server/config/supportedSymbols.ts` | 固定维护 BTC/ETH/DOGE |
+| API 入口 | `server/index.ts` | REST API 与 WebSocket 推送 |
+
+## Binance REST 历史 K 线
+
+服务启动时会为每个支持品种拉取最近 500 根 `1m` K 线：
+
+```http
+GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=500
 ```
 
-TraderMade 适配器使用官方 v2 WebSocket 流程：
+外部数据会被转换为内部结构：
 
-1. 连接 `wss://stream.tradermade.com/feedAdv`
-2. 发送 `{"action":"login","key":"...","fmt":"JSON"}`
-3. 收到 `login_ok` 后订阅 `["XAUUSD:QUOTE"]`
-4. 外部 tick 转换为内部统一格式
+```ts
+type Candle = {
+  symbol: string;
+  interval: "1m";
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+```
+
+其中 `time` 使用秒级 Unix 时间戳。
+
+## Binance WebSocket 实时 K 线
+
+服务订阅 Binance combined stream：
+
+```text
+wss://stream.binance.com:9443/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m/dogeusdt@kline_1m
+```
+
+每条 kline 消息会更新内存中的当前 1m K 线，并通过本地 WebSocket 推送给订阅客户端。Binance 标记当前 K 线已收盘时，会同时写入历史 K 线列表。
 
 ## 存储
 
-当前未完成 K 线：
+当前只使用进程内存：
 
-- 优先 Redis：配置 `REDIS_URL`
-- 未配置时降级到 `server/data/candles.json`
+- 历史 K 线：按 `symbol + interval` 保存，单序列最多保留 5000 根。
+- 当前 K 线：保存每个品种当前未完成的 `1m` K 线。
+- 服务重启后数据会重新从 Binance REST 拉取。
 
-已完成历史 K 线：
+后续如需持久化，可以在 `CandleStore` 接口下替换为 PostgreSQL/Redis 实现。
 
-- 优先 PostgreSQL：配置 `DATABASE_URL`
-- 未配置时降级到 `server/data/candles.json`
+## REST API
 
-PostgreSQL 表会自动创建：
+### 健康检查
 
-```sql
-create table if not exists candles (
-  symbol text not null,
-  interval text not null,
-  time integer not null,
-  open double precision not null,
-  high double precision not null,
-  low double precision not null,
-  close double precision not null,
-  volume double precision not null,
-  primary key(symbol, interval, time)
-);
+```http
+GET /api/health
 ```
 
-## API
+### 支持品种
 
 ```http
 GET /api/market/symbols
-GET /api/market/ticker?symbol=XAUUSD
-GET /api/market/candles?symbol=XAUUSD&interval=1m&limit=500
-GET /api/trading/positions
-POST /api/trading/order
 ```
 
-市价单规则：
+### 最新 ticker
 
-- 买入按 ask 成交
-- 卖出按 bid 成交
-- 多单浮盈亏按当前 bid
-- 空单浮盈亏按当前 ask
-- 行情 stale 或 disconnected 时拒绝成交
+```http
+GET /api/market/ticker?symbol=BTCUSDT
+```
+
+### 获取 K 线
+
+```http
+GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
+```
+
+参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `symbol` | 仅支持 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT` |
+| `interval` | 仅支持 `1m` |
+| `limit` | 1-1000，默认 500 |
+
+## 时间字段与状态规则
+
+时间字段统一说明：
+
+- `ticker.timestamp`：毫秒级 Unix 时间戳，表示后端最后一次收到 Binance 实时行情的时间。
+- `candle.time`：秒级 Unix 时间戳，表示这根 K 线的开始时间。
+- `/klines` 的 `timestamp`：秒级 Unix 时间戳，和 `candle.time` 含义一致。
+- 交易订单里的 `quoteTime`：毫秒级 Unix 时间戳，来自成交时使用的 ticker。
+
+行情状态：
+
+- `connected`：10 秒内收到过 Binance 实时行情。
+- `stale`：超过 10 秒没有收到实时行情，行情已过期，禁止市价成交。
+- `disconnected`：尚未收到行情，或 Binance WebSocket 已断开。
 
 ## WebSocket
 
@@ -116,25 +138,51 @@ POST /api/trading/order
 ws://127.0.0.1:8787/ws
 ```
 
-订阅 ticker：
+当前建议前端优先使用 `/ws`，因为它同时支持旧前端需要的 ticker 和 candle 订阅。
 
-```json
-{
-  "type": "subscribe",
-  "channel": "ticker",
-  "symbol": "XAUUSD"
-}
+兼容路径：
+
+```text
+ws://127.0.0.1:8787/ws/market
 ```
 
-订阅 K 线：
+`/ws/market` 只推送新版 `kline` 格式，作为后续行情模块专用通道保留。
+
+订阅实时 K 线：
 
 ```json
 {
   "type": "subscribe",
   "channel": "candle",
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "interval": "1m"
 }
 ```
 
-支持周期：`1m`、`5m`、`15m`、`1h`。
+推送格式：
+
+```json
+{
+  "type": "candle",
+  "symbol": "BTCUSDT",
+  "interval": "1m",
+  "data": {
+    "time": 1782060360,
+    "open": 64116,
+    "high": 64158,
+    "low": 64116,
+    "close": 64158,
+    "volume": 1.25995
+  }
+}
+```
+
+也可以订阅 ticker：
+
+```json
+{
+  "type": "subscribe",
+  "channel": "ticker",
+  "symbol": "BTCUSDT"
+}
+```

@@ -1,4 +1,4 @@
-export type MarketSource = "tradermade" | "mock";
+export type MarketSource = "binance" | "tradermade" | "mock";
 export type MarketStatus = "connected" | "stale" | "disconnected";
 export type CandleInterval = "1m" | "5m" | "15m" | "1h";
 

@@ -4,13 +4,14 @@ import { Link } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { syncMarketSymbols } from "../../api/market";
+import { fetchMarketSymbols } from "../../api/market";
 import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
 import { formatPrice } from "../../utils/price";
 
 export function MarketsPage() {
   const symbols = useSymbolStore((state) => state.symbols);
+  const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
   const quotes = useQuoteStore((state) => state.quotes);
   const refreshAllQuotes = useQuoteStore((state) => state.refreshAllQuotes);
   const updateStatuses = useQuoteStore((state) => state.updateStatuses);
@@ -25,7 +26,10 @@ export function MarketsPage() {
   );
 
   useEffect(() => {
-    void syncMarketSymbols(symbols);
+    void fetchMarketSymbols().then(setSymbolsFromBackend).catch(() => undefined);
+  }, [setSymbolsFromBackend]);
+
+  useEffect(() => {
     updateStatuses();
     void refreshAllQuotes();
     const timer = window.setInterval(updateStatuses, 5000);
@@ -33,7 +37,8 @@ export function MarketsPage() {
   }, [refreshAllQuotes, symbolConfigKey, updateStatuses]);
 
   const handleRefresh = async () => {
-    await syncMarketSymbols(symbols);
+    const nextSymbols = await fetchMarketSymbols();
+    setSymbolsFromBackend(nextSymbols);
     updateStatuses();
     await refreshAllQuotes();
   };
