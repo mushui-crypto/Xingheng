@@ -1,10 +1,8 @@
-# 星衡 Binance 行情与 K 线模块
+# 星衡 Binance 永续合约行情与 K 线模块
 
-本模块采用“Binance 公开行情源 + 内部 K 线服务”的单体结构，当前只支持：
+本模块采用“Binance 原生 USDT-M 永续合约行情源 + 内部 K 线服务”的单体结构，当前只支持：
 
-- `BTCUSDT`
-- `ETHUSDT`
-- `DOGEUSDT`
+- `PERP BTC/USDT`，内部请求 Binance 时使用 `BTCUSDT`
 
 后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
 
@@ -29,19 +27,19 @@ npm run start:api
 
 | 模块 | 文件 | 说明 |
 | --- | --- | --- |
-| Binance REST | `server/binance/BinanceRestClient.ts` | 拉取历史 K 线 |
-| Binance WebSocket | `server/binance/BinanceKlineEngine.ts` | 订阅 `kline_1m` 实时流 |
-| 1m K 线生成器 | `server/binance/BinanceKlineEngine.ts` | 标准化 Binance kline 为内部 OHLCV |
-| 内存存储 | `server/storage/InMemoryCandleStore.ts` | 保存历史 K 线和当前未完成 K 线 |
-| 支持品种 | `server/config/supportedSymbols.ts` | 固定维护 BTC/ETH/DOGE |
-| API 入口 | `server/index.ts` | REST API 与 WebSocket 推送 |
+| 行情服务 | `server/modules/market/BinanceMarketService.ts` | 启动 Binance REST 初始化、WebSocket 实时订阅、断线重连和状态更新 |
+| Binance REST | `server/modules/market/BinanceRestClient.ts` | 按周期拉取历史 K 线 |
+| K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史 K 线和当前未完成 K 线 |
+| 支持品种 | `server/config/supportedSymbols.ts` | 固定维护 BTCUSDT |
+| 行情 API | `server/modules/api/marketRoutes.ts` | 注册行情 REST API |
+| API 与 WebSocket 入口 | `server/index.ts` | 启动 REST API、交易接口和 `/ws` 推送 |
 
 ## Binance REST 历史 K 线
 
-服务启动时会为每个支持品种拉取最近 500 根 `1m` K 线：
+服务启动时会为每个支持品种、每个支持周期拉取最近 500 根 K 线：
 
 ```http
-GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=500
+GET https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=500
 ```
 
 外部数据会被转换为内部结构：
@@ -49,7 +47,7 @@ GET https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1m&limit=500
 ```ts
 type Candle = {
   symbol: string;
-  interval: "1m";
+  interval: "1m" | "5m" | "15m" | "1h";
   time: number;
   open: number;
   high: number;
@@ -66,20 +64,24 @@ type Candle = {
 服务订阅 Binance combined stream：
 
 ```text
-wss://stream.binance.com:9443/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m/dogeusdt@kline_1m
+wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/btcusdt@kline_15m/btcusdt@kline_1h/...
 ```
 
-每条 kline 消息会更新内存中的当前 1m K 线，并通过本地 WebSocket 推送给订阅客户端。Binance 标记当前 K 线已收盘时，会同时写入历史 K 线列表。
+每条 kline 消息会更新内存中的当前 K 线，并通过本地 WebSocket 推送给订阅客户端。Binance 标记当前 K 线已收盘时，会同时写入历史 K 线列表。
+
+Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，再根据品种配置加上模拟点差。也就是说：Binance 提供实时价格，系统内部再算出用于模拟成交的 Bid/Ask。
+
+当前默认使用 Binance 原生 USDT-M futures 端点。需要切换端点时，可以通过 `.env` 配置 `BINANCE_REST_BASE_URL`、`BINANCE_KLINE_PATH` 和 `BINANCE_STREAM_BASE_URL`。
 
 ## 存储
 
 当前只使用进程内存：
 
 - 历史 K 线：按 `symbol + interval` 保存，单序列最多保留 5000 根。
-- 当前 K 线：保存每个品种当前未完成的 `1m` K 线。
+- 当前 K 线：保存每个品种、每个周期当前未完成的 K 线。
 - 服务重启后数据会重新从 Binance REST 拉取。
 
-后续如需持久化，可以在 `CandleStore` 接口下替换为 PostgreSQL/Redis 实现。
+当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金调整日志使用 SQLite，入口是 `server/storage/TradingStore.ts`。
 
 ## REST API
 
@@ -111,8 +113,8 @@ GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 
 | 参数 | 说明 |
 | --- | --- |
-| `symbol` | 仅支持 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT` |
-| `interval` | 仅支持 `1m` |
+| `symbol` | 仅支持 `BTCUSDT` |
+| `interval` | 支持 `1m`、`5m`、`15m`、`1h` |
 | `limit` | 1-1000，默认 500 |
 
 ## 时间字段与状态规则
@@ -138,15 +140,7 @@ GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 ws://127.0.0.1:8787/ws
 ```
 
-当前建议前端优先使用 `/ws`，因为它同时支持旧前端需要的 ticker 和 candle 订阅。
-
-兼容路径：
-
-```text
-ws://127.0.0.1:8787/ws/market
-```
-
-`/ws/market` 只推送新版 `kline` 格式，作为后续行情模块专用通道保留。
+当前前端统一使用 `/ws`，它支持 ticker 和 candle 订阅；旧兼容通道已移除。
 
 订阅实时 K 线：
 

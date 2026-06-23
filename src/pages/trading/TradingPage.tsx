@@ -55,6 +55,8 @@ export function TradingPage() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [volume, setVolume] = useState(selectedConfig?.minLot ?? 0.01);
   const [message, setMessage] = useState("");
+  const [chartMessage, setChartMessage] = useState("");
+  const [chartLoading, setChartLoading] = useState(true);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -138,8 +140,31 @@ export function TradingPage() {
     let cancelled = false;
 
     async function loadInitialData() {
-      const [candles, nextTicker, nextAccount, nextPositions, nextOrders] = await Promise.all([
-        fetchCandles(symbol, interval),
+      setChartLoading(true);
+      setChartMessage("");
+
+      try {
+        const candles = normalizeChartCandles(await fetchCandles(symbol, interval));
+        if (cancelled) {
+          return;
+        }
+        if (candles.length === 0) {
+          setChartMessage("暂未取得可展示的K线数据，系统会继续刷新。");
+        } else {
+          candleSeriesRef.current?.setData(candles.map(toChartCandle));
+          chartRef.current?.timeScale().fitContent();
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setChartMessage(error instanceof Error ? error.message : "K线加载失败，系统会继续刷新。");
+        }
+      } finally {
+        if (!cancelled) {
+          setChartLoading(false);
+        }
+      }
+
+      const [nextTicker, nextAccount, nextPositions, nextOrders] = await Promise.all([
         fetchTicker(symbol),
         fetchTradingAccount(currentUserId, currency),
         fetchPositions(currentUserId),
@@ -148,8 +173,6 @@ export function TradingPage() {
       if (cancelled) {
         return;
       }
-      candleSeriesRef.current?.setData(candles.map(toChartCandle));
-      chartRef.current?.timeScale().fitContent();
       setTicker(nextTicker);
       setAccount(nextAccount);
       setPositions(nextPositions);
@@ -171,13 +194,19 @@ export function TradingPage() {
     });
 
     socket.addEventListener("message", (event) => {
-      const payload = JSON.parse(event.data) as { type: string; interval?: CandleInterval; data?: ApiCandle } & ApiTicker;
+      let payload: ({ type: string; interval?: CandleInterval; data?: ApiCandle } & ApiTicker) | null = null;
+      try {
+        payload = JSON.parse(event.data) as { type: string; interval?: CandleInterval; data?: ApiCandle } & ApiTicker;
+      } catch {
+        return;
+      }
       if (payload.type === "ticker" && payload.symbol === symbol) {
         setTicker((current) => ({ ...current, ...payload }));
         void refreshTradingState();
       }
-      if (payload.type === "candle" && payload.interval === interval && payload.data) {
+      if (payload.type === "candle" && payload.interval === interval && payload.data && isValidCandle(payload.data)) {
         candleSeriesRef.current?.update(toChartCandle(payload.data));
+        setChartMessage("");
       }
     });
 
@@ -283,7 +312,14 @@ export function TradingPage() {
               ))}
             </div>
           </div>
-          <div ref={chartContainerRef} className="h-[460px] w-full" />
+          <div className="relative">
+            <div ref={chartContainerRef} className="h-[460px] w-full" />
+            {chartLoading || chartMessage ? (
+              <div className="pointer-events-none absolute inset-x-4 top-4 rounded-lg border border-line bg-[#0B1118]/85 px-4 py-3 text-sm text-muted backdrop-blur">
+                {chartLoading ? "K线加载中..." : chartMessage}
+              </div>
+            ) : null}
+          </div>
         </Card>
 
         <div className="space-y-4">
@@ -424,7 +460,7 @@ export function TradingPage() {
                       {order.bid === null || order.ask === null ? "-" : `${formatPrice(order.bid, digits)} / ${formatPrice(order.ask, digits)}`}
                     </td>
                     <td className="px-5 py-4 text-muted">{order.source}</td>
-                    <td className="px-5 py-4 text-muted">{order.reason ?? (order.pnl !== undefined ? `P/L ${order.pnl.toFixed(2)}` : "模拟成交")}</td>
+                    <td className="px-5 py-4 text-muted">{order.reason ?? (typeof order.pnl === "number" ? `P/L ${order.pnl.toFixed(2)}` : "模拟成交")}</td>
                   </tr>
                 ))}
               </tbody>
@@ -462,6 +498,26 @@ function toChartCandle(candle: ApiCandle): CandlestickData {
     low: candle.low,
     close: candle.close,
   };
+}
+
+function normalizeChartCandles(candles: ApiCandle[]) {
+  const byTime = new Map<number, ApiCandle>();
+  for (const candle of candles) {
+    if (isValidCandle(candle)) {
+      byTime.set(candle.time, candle);
+    }
+  }
+  return [...byTime.values()].sort((a, b) => a.time - b.time);
+}
+
+function isValidCandle(candle: ApiCandle) {
+  return (
+    Number.isFinite(candle.time) &&
+    Number.isFinite(candle.open) &&
+    Number.isFinite(candle.high) &&
+    Number.isFinite(candle.low) &&
+    Number.isFinite(candle.close)
+  );
 }
 
 function getChartPriceFormat(digits: number) {

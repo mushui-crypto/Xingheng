@@ -12,15 +12,15 @@
 
 #### Binance 接入
 
-- 设计并实现 Binance 行情适配器，接入现货或合约公开行情 WebSocket/REST。
+- 维护 Binance 行情服务，接入现货公开行情 WebSocket/REST。
 - 将 Binance 原始 ticker、trade、kline 数据转换为项目内部统一行情结构。
 - 处理连接生命周期：启动、订阅、心跳、断线重连、限频、错误上报。
-- 保持适配器接口与 `server/adapters/MarketDataAdapter.ts` 兼容，避免把交易所私有字段泄漏到业务层。
-- 明确 Binance symbol 与平台 symbol 的映射规则，例如 `BTCUSDT`、`ETHUSDT`。
+- 当前主线不再保留旧 TraderMade/Mock Adapter 链路，避免把交易所私有字段泄漏到业务层。
+- 明确 Binance symbol 与平台 symbol 的映射规则，当前主线只保留 `BTCUSDT`。
 
 #### K 线引擎
 
-- 维护 `server/market/CandleAggregator.ts` 及相关聚合逻辑。
+- 维护 `server/modules/market/BinanceMarketService.ts`、`server/modules/kline/KlineStore.ts` 及相关 K 线逻辑。
 - 支持 `1m`、`5m`、`15m`、`1h` 等周期的 OHLCV 生成、更新和补齐。
 - 保证 tick 到 candle 的时间桶计算稳定，处理乱序、重复、空成交量和跨周期聚合。
 - 提供前端图表需要的历史 K 线与实时 K 线推送。
@@ -28,9 +28,9 @@
 
 #### 数据存储
 
-- 维护 `server/storage/*` 中的 K 线存储策略。
-- 优先支持 PostgreSQL 持久化历史 K 线，Redis 缓存未完成 K 线。
-- 保留本地 JSON 降级路径，便于无外部依赖的开发演示。
+- 维护 `server/storage/TradingStore.ts` 中的模拟账户、订单、持仓、资金流水持久化。
+- 当前交易数据使用 SQLite，本阶段不再使用 Redis/PostgreSQL 作为主线依赖。
+- K 线当前使用内存 + Binance REST 回补，服务重启后重新拉取公开行情。
 - 设计必要的数据表、索引、upsert 策略和保留周期。
 - 确保存储层接口稳定，不让 API 层直接依赖具体数据库实现。
 
@@ -48,11 +48,11 @@
 | --- | --- |
 | API 入口 | `server/index.ts` |
 | 类型定义 | `server/types.ts` |
-| 行情适配器 | `server/adapters/*` |
-| 行情服务 | `server/market/MarketDataService.ts` |
-| K 线聚合 | `server/market/CandleAggregator.ts` |
+| 行情服务 | `server/modules/market/BinanceMarketService.ts` |
+| K 线存储 | `server/modules/kline/KlineStore.ts` |
+| 行情 API | `server/modules/api/marketRoutes.ts` |
 | 模拟交易 | `server/market/TradingService.ts` |
-| 存储 | `server/storage/*` |
+| 交易存储 | `server/storage/TradingStore.ts` |
 | 行情文档 | `MARKET_DATA.md` |
 | 产品边界 | `PRD.md` |
 

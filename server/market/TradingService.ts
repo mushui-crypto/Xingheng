@@ -12,6 +12,7 @@ import type {
 import type { TradingStore } from "../storage/TradingStore";
 
 const defaultInitialBalance = 10_000;
+const defaultAsset = "USDT";
 
 type TradingMarket = {
   getSymbol(symbol: string): MarketSymbol | null;
@@ -47,7 +48,7 @@ export class TradingService {
     this.adjustments = store?.listAdjustments() ?? [];
   }
 
-  getAccount(userId: string, currency = "USD") {
+  getAccount(userId: string, currency = defaultAsset) {
     const account = this.ensureAccount(userId, currency);
     return this.toAccountView(account);
   }
@@ -218,7 +219,41 @@ export class TradingService {
     return this.adjustments.filter((adjustment) => !userId || adjustment.userId === userId);
   }
 
-  private ensureAccount(userId: string, currency = "USD") {
+  creditBalance(userId: string, amount: number) {
+    assertPositiveAmount(amount);
+    const account = this.ensureAccount(userId);
+    const balanceBefore = account.balance;
+    account.balance = roundMoney(account.balance + amount);
+    account.updatedAt = Date.now();
+    this.accounts.set(account.userId, account);
+    this.store?.upsertAccount(account);
+    return {
+      account: this.toAccountView(account),
+      balanceBefore,
+      balanceAfter: account.balance,
+    };
+  }
+
+  debitFreeMargin(userId: string, amount: number) {
+    assertPositiveAmount(amount);
+    const account = this.ensureAccount(userId);
+    const accountView = this.toAccountView(account);
+    if (accountView.freeMargin < amount) {
+      throw new Error("交易账户可用保证金不足。");
+    }
+    const balanceBefore = account.balance;
+    account.balance = roundMoney(account.balance - amount);
+    account.updatedAt = Date.now();
+    this.accounts.set(account.userId, account);
+    this.store?.upsertAccount(account);
+    return {
+      account: this.toAccountView(account),
+      balanceBefore,
+      balanceAfter: account.balance,
+    };
+  }
+
+  private ensureAccount(userId: string, currency = defaultAsset) {
     const normalized = normalizeUserId(userId);
     const existing = this.accounts.get(normalized);
     if (existing) {
@@ -229,6 +264,7 @@ export class TradingService {
       id: `ACC-${normalized}`,
       userId: normalized,
       currency,
+      asset: defaultAsset,
       balance: defaultInitialBalance,
       equity: defaultInitialBalance,
       usedMargin: 0,
@@ -249,6 +285,8 @@ export class TradingService {
     const equity = roundMoney(account.balance + floatingPnl);
     return {
       ...account,
+      asset: defaultAsset,
+      currency: account.currency || defaultAsset,
       floatingPnl,
       usedMargin,
       equity,
@@ -446,6 +484,12 @@ export class TradingService {
 
 function normalizeUserId(userId: string) {
   return userId?.trim() || "demo-user";
+}
+
+function assertPositiveAmount(amount: number) {
+  if (!Number.isFinite(amount) || amount <= 0) {
+    throw new Error("金额必须大于 0。");
+  }
 }
 
 function roundMoney(value: number) {

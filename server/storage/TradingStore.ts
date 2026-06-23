@@ -1,7 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { BalanceAdjustment, OrderRecord, Position, TradingAccount } from "../types";
+import type {
+  BalanceAdjustment,
+  FundingAccount,
+  FundingLedgerEntry,
+  OrderRecord,
+  Position,
+  TradingAccount,
+  WithdrawalRequest,
+} from "../types";
 
 const defaultDbPath = resolve(process.cwd(), "server/data/trading.sqlite");
 
@@ -9,6 +17,9 @@ type AccountRow = TradingAccount;
 type PositionRow = Omit<Position, "source"> & { source: Position["source"] };
 type OrderRow = Omit<OrderRecord, "simulated"> & { simulated: number };
 type AdjustmentRow = BalanceAdjustment;
+type FundingAccountRow = Omit<FundingAccount, "available">;
+type FundingLedgerRow = FundingLedgerEntry;
+type WithdrawalRequestRow = WithdrawalRequest;
 
 export class TradingStore {
   private db: DatabaseSync;
@@ -19,6 +30,18 @@ export class TradingStore {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.migrate();
+  }
+
+  transaction<T>(fn: () => T) {
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const result = fn();
+      this.db.exec("COMMIT;");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK;");
+      throw error;
+    }
   }
 
   listAccounts() {
@@ -163,6 +186,124 @@ export class TradingStore {
       );
   }
 
+  listFundingAccounts() {
+    const rows = this.db.prepare("SELECT * FROM funding_accounts ORDER BY createdAt DESC").all() as FundingAccountRow[];
+    return rows.map(toFundingAccount);
+  }
+
+  getFundingAccount(userId: string) {
+    const row = this.db.prepare("SELECT * FROM funding_accounts WHERE userId = ?").get(userId) as FundingAccountRow | undefined;
+    return row ? toFundingAccount(row) : null;
+  }
+
+  upsertFundingAccount(account: FundingAccount) {
+    this.db
+      .prepare(
+        `INSERT INTO funding_accounts (id, userId, asset, balance, frozen, createdAt, updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET
+           id = excluded.id,
+           asset = excluded.asset,
+           balance = excluded.balance,
+           frozen = excluded.frozen,
+           createdAt = excluded.createdAt,
+           updatedAt = excluded.updatedAt`,
+      )
+      .run(account.id, account.userId, account.asset, account.balance, account.frozen, account.createdAt, account.updatedAt);
+  }
+
+  listFundingLedger(userId?: string) {
+    const sql = userId
+      ? "SELECT * FROM funding_ledger WHERE userId = ? ORDER BY createdAt DESC"
+      : "SELECT * FROM funding_ledger ORDER BY createdAt DESC";
+    return (userId ? this.db.prepare(sql).all(userId) : this.db.prepare(sql).all()) as FundingLedgerRow[];
+  }
+
+  saveFundingLedger(entry: FundingLedgerEntry) {
+    this.db
+      .prepare(
+        `INSERT INTO funding_ledger (
+           id, userId, accountId, accountType, type, source, asset, amount,
+           balanceBefore, balanceAfter, frozenBefore, frozenAfter, status,
+           relatedId, network, walletAddress, txHash, remark, createdAt, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO NOTHING`,
+      )
+      .run(
+        entry.id,
+        entry.userId,
+        entry.accountId,
+        entry.accountType,
+        entry.type,
+        entry.source,
+        entry.asset,
+        entry.amount,
+        entry.balanceBefore,
+        entry.balanceAfter,
+        entry.frozenBefore,
+        entry.frozenAfter,
+        entry.status,
+        entry.relatedId ?? null,
+        entry.network ?? null,
+        entry.walletAddress ?? null,
+        entry.txHash ?? null,
+        entry.remark ?? null,
+        entry.createdAt,
+        entry.updatedAt,
+      );
+  }
+
+  listWithdrawalRequests(userId?: string) {
+    const sql = userId
+      ? "SELECT * FROM withdrawal_requests WHERE userId = ? ORDER BY createdAt DESC"
+      : "SELECT * FROM withdrawal_requests ORDER BY createdAt DESC";
+    return (userId ? this.db.prepare(sql).all(userId) : this.db.prepare(sql).all()) as WithdrawalRequestRow[];
+  }
+
+  getWithdrawalRequest(id: string) {
+    return this.db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(id) as WithdrawalRequestRow | undefined;
+  }
+
+  saveWithdrawalRequest(request: WithdrawalRequest) {
+    this.db
+      .prepare(
+        `INSERT INTO withdrawal_requests (
+           id, userId, asset, amount, status, network, walletAddress, txHash,
+           remark, reviewNote, createdAt, reviewedAt, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           userId = excluded.userId,
+           asset = excluded.asset,
+           amount = excluded.amount,
+           status = excluded.status,
+           network = excluded.network,
+           walletAddress = excluded.walletAddress,
+           txHash = excluded.txHash,
+           remark = excluded.remark,
+           reviewNote = excluded.reviewNote,
+           createdAt = excluded.createdAt,
+           reviewedAt = excluded.reviewedAt,
+           updatedAt = excluded.updatedAt`,
+      )
+      .run(
+        request.id,
+        request.userId,
+        request.asset,
+        request.amount,
+        request.status,
+        request.network ?? null,
+        request.walletAddress ?? null,
+        request.txHash ?? null,
+        request.remark ?? null,
+        request.reviewNote ?? null,
+        request.createdAt,
+        request.reviewedAt ?? null,
+        request.updatedAt,
+      );
+  }
+
   close() {
     this.db.close();
   }
@@ -237,6 +378,72 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_positions_userId ON positions(userId);
       CREATE INDEX IF NOT EXISTS idx_orders_userId ON orders(userId);
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
+
+      CREATE TABLE IF NOT EXISTS funding_accounts (
+        id TEXT NOT NULL,
+        userId TEXT PRIMARY KEY,
+        asset TEXT NOT NULL,
+        balance REAL NOT NULL,
+        frozen REAL NOT NULL,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS funding_ledger (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        accountId TEXT NOT NULL,
+        accountType TEXT NOT NULL,
+        type TEXT NOT NULL,
+        source TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        amount REAL NOT NULL,
+        balanceBefore REAL NOT NULL,
+        balanceAfter REAL NOT NULL,
+        frozenBefore REAL NOT NULL,
+        frozenAfter REAL NOT NULL,
+        status TEXT NOT NULL,
+        relatedId TEXT,
+        network TEXT,
+        walletAddress TEXT,
+        txHash TEXT,
+        remark TEXT,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS withdrawal_requests (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        asset TEXT NOT NULL,
+        amount REAL NOT NULL,
+        status TEXT NOT NULL,
+        network TEXT,
+        walletAddress TEXT,
+        txHash TEXT,
+        remark TEXT,
+        reviewNote TEXT,
+        createdAt INTEGER NOT NULL,
+        reviewedAt INTEGER,
+        updatedAt INTEGER NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
+      CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);
+      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_userId ON withdrawal_requests(userId);
+      CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests(status);
     `);
   }
+}
+
+function toFundingAccount(row: FundingAccountRow): FundingAccount {
+  return {
+    ...row,
+    asset: "USDT",
+    available: roundMoney(row.balance - row.frozen),
+  };
+}
+
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
 }

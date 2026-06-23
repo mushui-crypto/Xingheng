@@ -3,12 +3,12 @@ import dotenv from "dotenv";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { registerMarketRoutes } from "./modules/api/marketRoutes";
-import { toPublicKlineMessage } from "./modules/kline/klineFormat";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { BinanceMarketService } from "./modules/market/BinanceMarketService";
 import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
+import { WalletService } from "./wallet/WalletService";
 import type { MarketSymbol, MarketTick, TradeSide } from "./types";
 
 dotenv.config();
@@ -41,11 +41,12 @@ const tradingMarket = {
 
 const trading = new TradingService(tradingMarket, tradingStore);
 trading.getAccount("demo-user");
+const wallet = new WalletService(tradingStore, trading);
 
 registerMarketRoutes(app, market);
 
 app.get("/api/trading/account", (request, response) => {
-  response.json(trading.getAccount(getUserId(request), String(request.query.currency ?? "USD")));
+  response.json(trading.getAccount(getUserId(request), String(request.query.currency ?? "USDT")));
 });
 
 app.get("/api/trading/positions", (request, response) => {
@@ -97,7 +98,86 @@ app.post("/api/admin/accounts/:userId/adjust-balance", (request, response) => {
     if (type !== "deposit" && type !== "withdraw" && type !== "reset") {
       throw new Error("资金调整类型不正确。");
     }
-    response.json(trading.adjustBalance(request.params.userId, type, Number(request.body?.amount), request.body?.note));
+    response.json(wallet.adjustFundingBalance(request.params.userId, type, Number(request.body?.amount), request.body?.note));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.get("/api/wallet/accounts", (request, response) => {
+  response.json(wallet.getAccounts(getUserId(request)));
+});
+
+app.get("/api/wallet/ledger", (request, response) => {
+  response.json(wallet.listLedger(getUserId(request)));
+});
+
+app.post("/api/wallet/transfer", (request, response) => {
+  try {
+    response.json(
+      wallet.transfer(
+        getUserId(request),
+        normalizeWalletAccountType(request.body?.from),
+        normalizeWalletAccountType(request.body?.to),
+        Number(request.body?.amount),
+        request.body?.remark,
+      ),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/wallet/withdrawals", (request, response) => {
+  try {
+    response.json(
+      wallet.createWithdrawal(getUserId(request), {
+        amount: Number(request.body?.amount),
+        network: request.body?.network,
+        walletAddress: request.body?.walletAddress,
+        remark: request.body?.remark,
+      }),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.get("/api/wallet/withdrawals", (request, response) => {
+  response.json(wallet.listWithdrawals(getUserId(request)));
+});
+
+app.get("/api/admin/wallet/accounts", (_request, response) => {
+  response.json(wallet.listAccounts());
+});
+
+app.get("/api/admin/wallet/ledger", (_request, response) => {
+  response.json(wallet.listLedger());
+});
+
+app.get("/api/admin/wallet/withdrawals", (_request, response) => {
+  response.json(wallet.listWithdrawals());
+});
+
+app.post("/api/admin/wallet/deposit", (request, response) => {
+  try {
+    response.json(wallet.deposit(String(request.body?.userId ?? "demo-user"), Number(request.body?.amount), request.body?.remark));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/admin/wallet/withdrawals/:id/approve", (request, response) => {
+  try {
+    response.json(wallet.approveWithdrawal(request.params.id, request.body?.reviewNote, request.body?.txHash));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/admin/wallet/withdrawals/:id/reject", (request, response) => {
+  try {
+    response.json(wallet.rejectWithdrawal(request.params.id, request.body?.reviewNote));
   } catch (error) {
     sendBadRequest(response, error);
   }
@@ -111,25 +191,14 @@ registerSocketHub(server, market);
 
 function registerSocketHub(httpServer: typeof server, marketService: BinanceMarketService) {
   const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
-  const marketSubscriptions = new Map<WebSocket, Set<string>>();
-  const legacySubscriptions = new Map<WebSocket, Set<string>>();
+  const subscriptions = new Map<WebSocket, Set<string>>();
 
-  wss.on("connection", (socket, request) => {
-    const path = request.url?.split("?")[0] ?? "/ws/market";
-    const isMarketSocket = path === "/ws/market";
-    const subscriptions = isMarketSocket ? marketSubscriptions : legacySubscriptions;
+  wss.on("connection", (socket) => {
     subscriptions.set(socket, new Set());
     socket.on("message", (raw) => {
       try {
         const message = JSON.parse(String(raw)) as Record<string, string>;
         if (message.type !== "subscribe") {
-          return;
-        }
-
-        if (isMarketSocket) {
-          const symbol = normalizeSymbol(message.symbol ?? "BTCUSDT");
-          const interval = normalizeInterval(message.interval ?? "1m");
-          subscriptions.get(socket)?.add(`${symbol}:${interval}`);
           return;
         }
 
@@ -150,7 +219,7 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
   marketService.on("tick", (tick) => {
     const config = tradingMarket.getSymbol(tick.symbol);
     const quote = config ? applyConfiguredSpread(tick, config) : tick;
-    broadcast(legacySubscriptions, `ticker:${tick.symbol}`, {
+    broadcast(subscriptions, `ticker:${tick.symbol}`, {
       type: "ticker",
       symbol: quote.symbol,
       bid: quote.bid,
@@ -165,7 +234,7 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
 
   marketService.on("status", (symbol, status) => {
     const ticker = tradingMarket.getTicker(symbol);
-    broadcast(legacySubscriptions, `ticker:${symbol}`, {
+    broadcast(subscriptions, `ticker:${symbol}`, {
       type: "ticker",
       symbol,
       status,
@@ -174,8 +243,7 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
   });
 
   marketService.on("kline", (candle) => {
-    broadcast(marketSubscriptions, `${candle.symbol}:${candle.interval}`, toPublicKlineMessage(candle));
-    broadcast(legacySubscriptions, `candle:${candle.symbol}:${candle.interval}`, {
+    broadcast(subscriptions, `candle:${candle.symbol}:${candle.interval}`, {
       type: "candle",
       symbol: candle.symbol,
       interval: candle.interval,
@@ -202,6 +270,13 @@ function broadcast(subscriptions: Map<WebSocket, Set<string>>, key: string, payl
 function normalizeSide(value: unknown): TradeSide {
   if (value !== "buy" && value !== "sell") {
     throw new Error("订单方向必须是 buy 或 sell。");
+  }
+  return value;
+}
+
+function normalizeWalletAccountType(value: unknown) {
+  if (value !== "funding" && value !== "trading") {
+    throw new Error("账户类型必须是 funding 或 trading。");
   }
   return value;
 }

@@ -1,4 +1,4 @@
-export type MarketSource = "binance" | "tradermade" | "mock";
+export type MarketSource = "binance";
 export type MarketStatus = "connected" | "stale" | "disconnected";
 export type CandleInterval = "1m" | "5m" | "15m" | "1h";
 
@@ -67,6 +67,7 @@ export type TradingAccount = {
   id: string;
   userId: string;
   currency: string;
+  asset?: "USDT";
   balance: number;
   equity: number;
   usedMargin: number;
@@ -110,4 +111,71 @@ export type BalanceAdjustment = {
   nextBalance: number;
   note?: string;
   createdAt: number;
+};
+
+export type WalletAccountType = "funding" | "trading";
+export type WalletAsset = "USDT";
+
+export type FundingAccount = {
+  id: string;
+  userId: string;
+  asset: WalletAsset;
+  balance: number;
+  frozen: number;
+  available: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type FundingLedgerType =
+  | "deposit"
+  | "withdrawal_freeze"
+  | "withdrawal_approved"
+  | "withdrawal_rejected"
+  | "transfer_in"
+  | "transfer_out"
+  | "adjustment";
+
+export type FundingLedgerSource = "admin_manual" | "withdrawal_request" | "internal_transfer" | "onchain_reserved";
+export type FundingLedgerStatus = "pending" | "completed" | "rejected";
+
+export type FundingLedgerEntry = {
+  id: string;
+  userId: string;
+  accountId: string;
+  accountType: WalletAccountType;
+  type: FundingLedgerType;
+  source: FundingLedgerSource;
+  asset: WalletAsset;
+  amount: number;
+  balanceBefore: number;
+  balanceAfter: number;
+  frozenBefore: number;
+  frozenAfter: number;
+  status: FundingLedgerStatus;
+  relatedId?: string | null;
+  network?: string | null;
+  walletAddress?: string | null;
+  txHash?: string | null;
+  remark?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type WithdrawalStatus = "pending" | "approved" | "rejected";
+
+export type WithdrawalRequest = {
+  id: string;
+  userId: string;
+  asset: WalletAsset;
+  amount: number;
+  status: WithdrawalStatus;
+  network?: string | null;
+  walletAddress?: string | null;
+  txHash?: string | null;
+  remark?: string | null;
+  reviewNote?: string | null;
+  createdAt: number;
+  reviewedAt?: number | null;
+  updatedAt: number;
 };

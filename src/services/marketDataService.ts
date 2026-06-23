@@ -4,9 +4,7 @@ import { getQuoteStatus } from "../utils/marketStatus";
 import { calculateBidAsk, roundByDigits } from "../utils/price";
 
 const fallbackLast: Record<string, number> = {
-  XAUUSD: 2350.2,
-  EURUSD: 1.08245,
-  BTCUSDT: 104250,
+  BTCUSDT: 64000,
 };
 
 export async function refreshQuoteFromPublicApi(symbolConfig: TradeSymbol, previous?: Quote | null): Promise<Quote> {

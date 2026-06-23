@@ -45,6 +45,7 @@ export type TradingAccount = {
   id: string;
   userId: string;
   currency: string;
+  asset?: "USDT";
   balance: number;
   equity: number;
   usedMargin: number;
@@ -73,8 +74,8 @@ export type OrderRecord = {
   source: string;
   quoteTime: number | null;
   simulated: true;
-  reason?: string;
-  pnl?: number;
+  reason?: string | null;
+  pnl?: number | null;
   createdAt: number;
 };
 

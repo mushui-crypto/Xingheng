@@ -23,7 +23,7 @@ export const defaultTradeSymbols: TradeSymbol[] = [
   {
     id: "SYM-BTCUSDT",
     symbol: "BTCUSDT",
-    displayName: "Bitcoin / USDT",
+    displayName: "PERP BTC/USDT",
     apiSymbol: "BTCUSDT",
     category: "crypto",
     digits: 2,
@@ -39,44 +39,6 @@ export const defaultTradeSymbols: TradeSymbol[] = [
     createdAt: now,
     updatedAt: now,
   },
-  {
-    id: "SYM-ETHUSDT",
-    symbol: "ETHUSDT",
-    displayName: "Ethereum / USDT",
-    apiSymbol: "ETHUSDT",
-    category: "crypto",
-    digits: 2,
-    spread: 1,
-    leverage: 20,
-    contractSize: 1,
-    minLot: 0.001,
-    maxLot: 100,
-    lotStep: 0.001,
-    tradeStatus: "enabled",
-    quoteStatus: "stale",
-    isVisible: true,
-    createdAt: now,
-    updatedAt: now,
-  },
-  {
-    id: "SYM-DOGEUSDT",
-    symbol: "DOGEUSDT",
-    displayName: "Dogecoin / USDT",
-    apiSymbol: "DOGEUSDT",
-    category: "crypto",
-    digits: 6,
-    spread: 0.00001,
-    leverage: 10,
-    contractSize: 1,
-    minLot: 1,
-    maxLot: 100000,
-    lotStep: 1,
-    tradeStatus: "enabled",
-    quoteStatus: "stale",
-    isVisible: true,
-    createdAt: now,
-    updatedAt: now,
-  },
 ];
 
 function persist(symbols: TradeSymbol[]) {
@@ -84,7 +46,8 @@ function persist(symbols: TradeSymbol[]) {
 }
 
 function loadBinanceSymbols() {
-  const stored = readStorage<TradeSymbol[]>(storageKeys.tradeSymbols, defaultTradeSymbols);
+  const saved = readStorage<unknown>(storageKeys.tradeSymbols, defaultTradeSymbols);
+  const stored = Array.isArray(saved) ? saved.filter(isTradeSymbolRecord) : defaultTradeSymbols;
   const supported = new Set(defaultTradeSymbols.map((symbol) => symbol.symbol));
   const migrated = defaultTradeSymbols.map((defaultSymbol) => {
     const previous = stored.find((symbol) => symbol.symbol === defaultSymbol.symbol);
@@ -107,6 +70,15 @@ function loadBinanceSymbols() {
   }
 
   return migrated;
+}
+
+function isTradeSymbolRecord(value: unknown): value is TradeSymbol {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const symbol = value as Partial<TradeSymbol>;
+  return typeof symbol.symbol === "string" && typeof symbol.apiSymbol === "string";
 }
 
 export const useSymbolStore = create<SymbolStore>((set, get) => ({

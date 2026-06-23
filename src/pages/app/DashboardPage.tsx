@@ -24,7 +24,7 @@ export function DashboardPage() {
         <Card>
           <p className="text-sm text-muted">模拟账户权益</p>
           <p className="mt-3 text-3xl font-semibold">{config.defaultCurrency} 100,000.00</p>
-          <p className="mt-2 text-xs text-muted">可进入交易终端查看 XAUUSD 实时行情。</p>
+          <p className="mt-2 text-xs text-muted">可进入交易终端查看 Binance 加密行情。</p>
         </Card>
         <Card>
           <p className="text-sm text-muted">账户状态</p>
@@ -48,7 +48,7 @@ export function DashboardPage() {
           </div>
           <div>
             <h2 className="font-semibold">模拟账户入口</h2>
-            <p className="text-sm text-muted">查看 XAUUSD K线、实时报价，并提交内部模拟市价单。</p>
+            <p className="text-sm text-muted">查看 PERP BTC/USDT K线、实时报价，并提交内部模拟市价单。</p>
           </div>
         </div>
         <Link

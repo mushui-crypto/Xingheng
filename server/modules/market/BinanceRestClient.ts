@@ -1,7 +1,8 @@
 import type { Candle, CandleInterval } from "../../types";
 import { normalizeInterval, normalizeLimit, normalizeSymbol } from "./marketConfig";
 
-const binanceRestBaseUrl = "https://api.binance.com";
+const binanceRestBaseUrl = process.env.BINANCE_REST_BASE_URL ?? "https://fapi.binance.com";
+const binanceKlinePath = process.env.BINANCE_KLINE_PATH ?? "/fapi/v1/klines";
 
 type BinanceKlineRow = [
   number,
@@ -25,7 +26,7 @@ export class BinanceRestClient {
     const normalizedSymbol = normalizeSymbol(symbol);
     const normalizedInterval = normalizeInterval(interval);
     const normalizedLimit = normalizeLimit(limit);
-    const url = new URL("/api/v3/klines", this.baseUrl);
+    const url = new URL(binanceKlinePath, this.baseUrl);
     url.searchParams.set("symbol", normalizedSymbol);
     url.searchParams.set("interval", normalizedInterval);
     url.searchParams.set("limit", String(normalizedLimit));

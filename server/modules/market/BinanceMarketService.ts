@@ -31,13 +31,15 @@ type BinanceKlinePayload = {
   };
 };
 
-const defaultStreamBaseUrl = "wss://stream.binance.com:9443/stream";
+const defaultStreamBaseUrl = process.env.BINANCE_STREAM_BASE_URL ?? "wss://fstream.binance.com/stream";
 const staleAfterMs = 10_000;
+const restPollMs = 5_000;
 
 export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
   private socket: WebSocket | null = null;
   private reconnectTimer: NodeJS.Timeout | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
+  private restPollTimer: NodeJS.Timeout | null = null;
   private manuallyStopped = false;
   private latestTicks = new Map<string, MarketTick>();
   private status = new Map<string, MarketStatus>();
@@ -56,6 +58,7 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     await this.seedHistory();
     this.connect();
     this.statusTimer = setInterval(() => this.refreshStatuses(), 2000);
+    this.restPollTimer = setInterval(() => void this.pollRestCandles(), restPollMs);
   }
 
   async stop() {
@@ -63,6 +66,10 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     if (this.statusTimer) {
       clearInterval(this.statusTimer);
       this.statusTimer = null;
+    }
+    if (this.restPollTimer) {
+      clearInterval(this.restPollTimer);
+      this.restPollTimer = null;
     }
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -75,7 +82,17 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
   async getKlines(symbol: string, interval: CandleInterval, limit: number) {
     const normalizedSymbol = normalizeSymbol(symbol);
     const normalizedInterval = normalizeInterval(interval);
-    const candles = await this.restClient.getKlines(normalizedSymbol, normalizedInterval, limit);
+    let candles: Candle[];
+    try {
+      candles = await this.restClient.getKlines(normalizedSymbol, normalizedInterval, limit);
+    } catch (error) {
+      const stored = this.store.getCandles(normalizedSymbol, normalizedInterval, limit);
+      if (stored.length > 0) {
+        console.error(`[market] REST klines failed, using cached ${normalizedSymbol} ${normalizedInterval} candles`, error);
+        return ensureNoDuplicateCandles(stored);
+      }
+      throw error;
+    }
 
     for (const candle of candles) {
       this.store.upsertHistory(candle);
@@ -110,12 +127,55 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
           for (const candle of candles) {
             this.store.upsertHistory(candle);
           }
+          if (interval === realtimeInterval) {
+            this.seedTickFromCandle(candles.at(-1));
+          }
           console.log(`[market] seeded ${candles.length} ${interval} klines for ${symbol}`);
         } catch (error) {
           console.error(`[market] failed to seed ${symbol} ${interval} klines`, error);
         }
       })),
     );
+  }
+
+  private seedTickFromCandle(candle: Candle | undefined) {
+    if (!candle) {
+      return;
+    }
+
+    const tick: MarketTick = {
+      symbol: candle.symbol,
+      bid: candle.close,
+      ask: candle.close,
+      last: candle.close,
+      spread: 0,
+      source: "binance",
+      timestamp: Date.now(),
+    };
+
+    this.latestTicks.set(candle.symbol, tick);
+    this.setStatus(candle.symbol, "connected");
+    this.emit("tick", tick);
+  }
+
+  private async pollRestCandles() {
+    await Promise.all(this.symbols.flatMap((symbol) => supportedIntervals.map(async (interval) => {
+      try {
+        const candles = await this.restClient.getKlines(symbol, interval, 2);
+        const latest = candles.at(-1);
+        if (!latest) {
+          return;
+        }
+
+        this.store.updateCurrent(latest);
+        if (interval === realtimeInterval) {
+          this.seedTickFromCandle(latest);
+        }
+        this.emit("kline", latest);
+      } catch (error) {
+        console.error(`[market] REST candle poll failed for ${symbol} ${interval}`, error);
+      }
+    })));
   }
 
   private connect() {
