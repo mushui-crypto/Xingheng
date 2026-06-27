@@ -149,7 +149,7 @@ export function AdminTradingPage() {
                   <td className="px-5 py-4">{funding.balance.toFixed(2)}</td>
                   <td className="px-5 py-4">{funding.frozen.toFixed(2)}</td>
                   <td className="px-5 py-4">{funding.available.toFixed(2)}</td>
-                  <td className="px-5 py-4">{trading.equity.toFixed(2)} {trading.asset ?? trading.currency ?? "USDT"}</td>
+                  <td className="px-5 py-4">{trading.equity.toFixed(2)} {trading.asset}</td>
                 </tr>
               ))}
             </tbody>
@@ -177,8 +177,8 @@ export function AdminTradingPage() {
               ) : accounts.map((account) => (
                 <tr key={account.id}>
                   <td className="px-5 py-4 font-mono text-xs">{account.userId}</td>
-                  <td className="px-5 py-4">{account.balance.toFixed(2)} {account.asset ?? account.currency}</td>
-                  <td className="px-5 py-4">{account.equity.toFixed(2)} {account.asset ?? account.currency}</td>
+                  <td className="px-5 py-4">{account.balance.toFixed(2)} {account.asset}</td>
+                  <td className="px-5 py-4">{account.equity.toFixed(2)} {account.asset}</td>
                   <td className="px-5 py-4">{account.usedMargin.toFixed(2)}</td>
                   <td className="px-5 py-4">{account.freeMargin.toFixed(2)}</td>
                   <td className={`px-5 py-4 ${account.floatingPnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>{account.floatingPnl.toFixed(2)}</td>

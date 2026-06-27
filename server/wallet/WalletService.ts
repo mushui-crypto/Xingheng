@@ -26,7 +26,7 @@ export class WalletService {
     const normalizedUserId = normalizeUserId(userId);
     return {
       funding: this.ensureFundingAccount(normalizedUserId),
-      trading: this.trading.getAccount(normalizedUserId, asset),
+      trading: this.trading.getAccount(normalizedUserId),
     };
   }
 

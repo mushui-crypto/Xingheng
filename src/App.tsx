@@ -8,7 +8,6 @@ import { MarketsPage } from "./pages/app/MarketsPage";
 import { TradingPage } from "./pages/trading/TradingPage";
 import { AdminDashboardPage } from "./pages/admin/AdminDashboardPage";
 import { AdminLoginPage } from "./pages/admin/AdminLoginPage";
-import { AdminSettingsPage } from "./pages/admin/AdminSettingsPage";
 import { AdminSymbolsPage } from "./pages/admin/AdminSymbolsPage";
 import { AdminTradingPage } from "./pages/admin/AdminTradingPage";
 import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
@@ -29,7 +28,6 @@ export default function App() {
       <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
       <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
       <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
-      <Route path="/admin/settings" element={<AdminScreen><AdminSettingsPage /></AdminScreen>} />
       <Route path="*" element={<Navigate to="/login" replace />} />
     </Routes>
   );

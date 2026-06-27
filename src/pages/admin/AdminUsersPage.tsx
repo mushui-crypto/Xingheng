@@ -2,33 +2,17 @@ import { useEffect } from "react";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { storageKeys } from "../../utils/storage";
 import { useUserStore } from "../../store/userStore";
 import { formatDateTime } from "../../utils/validators";
 
 export function AdminUsersPage() {
   const users = useUserStore((state) => state.users);
-  const reloadUsers = useUserStore((state) => state.reloadUsers);
+  const loadAdminUsers = useUserStore((state) => state.loadAdminUsers);
   const setUserStatus = useUserStore((state) => state.setUserStatus);
 
   useEffect(() => {
-    reloadUsers();
-
-    const handleFocus = () => reloadUsers();
-    const handleStorage = (event: StorageEvent) => {
-      if (event.key === storageKeys.users) {
-        reloadUsers();
-      }
-    };
-
-    window.addEventListener("focus", handleFocus);
-    window.addEventListener("storage", handleStorage);
-
-    return () => {
-      window.removeEventListener("focus", handleFocus);
-      window.removeEventListener("storage", handleStorage);
-    };
-  }, [reloadUsers]);
+    void loadAdminUsers();
+  }, [loadAdminUsers]);
 
   return (
     <div className="space-y-6">
@@ -67,11 +51,11 @@ export function AdminUsersPage() {
                     <td className="px-5 py-4 text-muted">{formatDateTime(user.createdAt)}</td>
                     <td className="px-5 py-4">
                       {user.status === "active" ? (
-                        <Button variant="danger" onClick={() => setUserStatus(user.id, "disabled")}>
+                        <Button variant="danger" onClick={() => void setUserStatus(user.id, "disabled")}>
                           禁用
                         </Button>
                       ) : (
-                        <Button variant="secondary" onClick={() => setUserStatus(user.id, "active")}>
+                        <Button variant="secondary" onClick={() => void setUserStatus(user.id, "active")}>
                           启用
                         </Button>
                       )}

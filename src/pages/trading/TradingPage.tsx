@@ -20,8 +20,6 @@ import {
   type PositionView,
   type TradingAccount,
 } from "../../api/market";
-import { useAuthStore } from "../../store/authStore";
-import { useConfigStore } from "../../store/configStore";
 import { useSymbolStore } from "../../store/symbolStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
@@ -29,9 +27,8 @@ import { formatPrice } from "../../utils/price";
 const intervals: CandleInterval[] = ["1m", "5m", "15m", "1h"];
 
 export function TradingPage() {
-  const themeColor = useConfigStore((state) => state.config.themeColor);
-  const currency = useConfigStore((state) => state.config.defaultCurrency);
-  const currentUserId = useAuthStore((state) => state.currentUserId);
+  const themeColor = "#00C896";
+  const currency = "USDT";
   const allSymbols = useSymbolStore((state) => state.symbols);
   const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
   const symbols = useMemo(() => allSymbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"), [allSymbols]);
@@ -166,9 +163,9 @@ export function TradingPage() {
 
       const [nextTicker, nextAccount, nextPositions, nextOrders] = await Promise.all([
         fetchTicker(symbol),
-        fetchTradingAccount(currentUserId, currency),
-        fetchPositions(currentUserId),
-        fetchOrders(currentUserId),
+        fetchTradingAccount(),
+        fetchPositions(),
+        fetchOrders(),
       ]);
       if (cancelled) {
         return;
@@ -183,7 +180,7 @@ export function TradingPage() {
     return () => {
       cancelled = true;
     };
-  }, [currency, currentUserId, interval, symbol, symbolConfigKey]);
+  }, [interval, symbol, symbolConfigKey]);
 
   useEffect(() => {
     const socket = new WebSocket(wsUrl);
@@ -219,9 +216,9 @@ export function TradingPage() {
 
   const refreshTradingState = async () => {
     const [nextAccount, nextPositions, nextOrders] = await Promise.all([
-      fetchTradingAccount(currentUserId, currency),
-      fetchPositions(currentUserId),
-      fetchOrders(currentUserId),
+      fetchTradingAccount(),
+      fetchPositions(),
+      fetchOrders(),
     ]);
     setAccount(nextAccount);
     setPositions(nextPositions);
@@ -231,7 +228,7 @@ export function TradingPage() {
   const submitOrder = async (side: "buy" | "sell") => {
     setMessage("");
     try {
-      const position = await placeMarketOrder(symbol, side, volume, currentUserId);
+      const position = await placeMarketOrder(symbol, side, volume);
       await refreshTradingState();
       setMessage(`${side === "buy" ? "买入" : "卖出"}已成交，价格 ${formatPrice(position.entryPrice, digits)}`);
     } catch (error) {
@@ -243,7 +240,7 @@ export function TradingPage() {
   const submitClose = async (positionId: string) => {
     setMessage("");
     try {
-      const result = await closePosition(positionId, currentUserId);
+      const result = await closePosition(positionId);
       await refreshTradingState();
       setMessage(`平仓已成交，价格 ${formatPrice(result.closePrice, digits)}，盈亏 ${result.pnl.toFixed(2)} ${currency}`);
     } catch (error) {

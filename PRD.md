@@ -1,19 +1,19 @@
-# 星衡 TradeSim Pro 模拟交易平台 PRD
+# 星衡模拟交易平台 PRD
 
-版本：v0.1.0  
-整理日期：2026-06-16  
+版本：v0.3.1  
+整理日期：2026-06-27  
 文档范围：基于当前代码已实现能力整理，不包含未落地的真实入金、出金、撮合、清算、KYC、风控后台等生产交易所能力。
 
 ## 1. 产品概述
 
-星衡 TradeSim Pro 是一个“外部行情源 + 内部模拟交易 + 白标后台”的交易模拟 MVP。系统面向希望演示外汇、贵金属、加密货币等 CFD/保证金类交易流程的运营方，提供用户注册登录、行情查看、K 线图、模拟市价单、持仓/订单展示，以及后台用户、品种、资金和白标配置管理。
+星衡是一个“Binance 行情源 + 内部模拟交易 + 内部资金账户”的交易模拟 MVP。系统当前聚焦加密行情演示，提供用户注册登录、行情查看、K 线图、模拟市价单、持仓/订单展示、统一资金账户、出金申请以及后台用户、品种、交易和资金管理能力。
 
-当前交易均为虚拟成交，不涉及真实资金交易。行情可接入 TraderMade WebSocket；未配置真实行情 Key 时，系统自动使用本地 Mock 行情。
+当前交易均为虚拟成交，不涉及真实资金交易。当前主行情源为 Binance，当前主资金资产固定为 `USDT`。
 
 ## 2. 产品目标
 
 1. 提供可演示的用户端模拟交易闭环：注册、登录、看行情、下市价单、看持仓、平仓、看订单。
-2. 提供后台基础运营能力：用户启停、交易品种配置、行情状态查看、模拟账户资金调整、白标信息配置。
+2. 提供后台基础运营能力：用户启停、交易品种配置、行情状态查看、模拟账户查询、资金账户管理、出金审核。
 3. 建立行情标准化与 K 线聚合能力，为后续接入真实行情、多品种交易、风控和报表打基础。
 
 ## 3. 用户角色
@@ -22,7 +22,7 @@
 | --- | --- | --- |
 | 游客 | 未登录访问者 | 可访问用户登录、注册页；其他用户页会跳转登录 |
 | 注册用户 | 模拟交易用户 | 查看首页、行情、交易终端、我的账户；提交模拟市价单和平仓 |
-| 管理员 | 后台操作人员 | 固定账号登录后台，管理用户、品种、交易查询、系统配置 |
+| 管理员 | 后台操作人员 | 固定账号登录后台，管理用户、品种、交易和资金 |
 
 管理员默认账号：
 
@@ -39,7 +39,7 @@
 | --- | --- | --- |
 | `/login` | 用户登录 | 邮箱密码登录；禁用用户无法登录 |
 | `/register` | 用户注册 | 邮箱、昵称、密码注册；校验邮箱、密码长度、重复邮箱 |
-| `/app/dashboard` | 首页 | 展示欢迎语、风险提示、账户入口、默认币种等概览 |
+| `/app/dashboard` | 首页 | 展示欢迎语、模拟环境提示、真实账户概览和账户入口 |
 | `/app/markets` | 行情 | 展示用户端可见品种的 Bid/Ask/Last、涨跌幅、状态、更新时间 |
 | `/app/trading` | 交易终端 | K 线图、实时 ticker、模拟市价单、持仓、订单记录 |
 | `/app/account` | 我的账户 | 用户资料、资金指标、持仓/订单数量、账户状态 |
@@ -49,11 +49,10 @@
 | 路由 | 页面 | 功能 |
 | --- | --- | --- |
 | `/admin/login` | 后台登录 | 固定管理员账号登录 |
-| `/admin/dashboard` | 数据概览 | 注册用户、启用/禁用用户、默认币种、白标信息 |
+| `/admin/dashboard` | 数据概览 | 注册用户、启用/禁用用户等基础概览 |
 | `/admin/users` | 用户管理 | 查看注册用户；启用/禁用用户 |
 | `/admin/symbols` | 品种管理 | 新增、编辑、停用/启用、软删除品种；配置交易规格 |
 | `/admin/trading` | 交易查询 | 查看模拟账户、持仓、订单、行情状态；调整虚拟资金 |
-| `/admin/settings` | 系统配置 | 配置平台名称、Logo 文案、主题色、默认币种、风险提示 |
 
 ## 5. 已有功能说明
 
@@ -84,11 +83,26 @@
 | --- | --- |
 | 邮箱不存在或密码错误 | 返回“邮箱或密码不正确。” |
 | 用户状态为 `disabled` | 返回“账号已禁用，请联系管理员。” |
-| 登录成功 | 进入 `/app/dashboard` |
+| 登录成功 | 服务端返回 Bearer Token 和当前用户信息，进入 `/app/dashboard` |
+
+当前实现说明：
+
+| 项目 | 说明 |
+| --- | --- |
+| 登录接口 | `POST /api/auth/login` |
+| 注册接口 | `POST /api/auth/register` |
+| 登出接口 | `POST /api/auth/logout` |
+| 当前用户接口 | `GET /api/auth/me` |
+| 登录态保存 | 前端仅保存 `userToken`、`isLoggedIn`、`currentUserId` |
+| 不再保存 | 不再在前端本地保存完整用户注册表和密码 |
+
+Bearer Token = 服务端发的一次登录凭证。
+
+人话理解：像门禁卡。前端后面访问交易和钱包接口时，带上这张卡，后端才认这个用户是谁。
 
 #### 后台登录
 
-后台使用固定管理员账号密码。当前未接入服务端鉴权、RBAC 或管理员账号体系。
+后台使用固定管理员账号密码，通过服务端 `POST /api/admin/login` 获取 Bearer Token。当前未接入 RBAC、多管理员账号体系或权限细分。
 
 ### 5.2 用户端首页
 
@@ -96,10 +110,10 @@
 
 | 模块 | 内容 |
 | --- | --- |
-| 欢迎区 | 当前用户昵称/邮箱、平台名称、风险提示 |
-| 模拟账户权益 | 展示默认文案中的 `100,000.00`，当前非实时接口值 |
+| 欢迎区 | 当前用户昵称/邮箱、模拟环境提示 |
+| 交易账户权益 | 实时展示交易账户 `Equity` |
 | 账户状态 | Active |
-| 当前币种 | 后台系统配置中的默认币种 |
+| 资金账户可用余额 | 实时展示资金账户 `available` |
 | 模拟账户入口 | 跳转我的账户 |
 
 ### 5.3 行情模块
@@ -110,7 +124,7 @@
 
 | 字段 | 说明 |
 | --- | --- |
-| 品种代码 | 如 XAUUSD、EURUSD、BTCUSDT |
+| 品种代码 | 如 BTCUSDT、ETHUSDT、DOGEUSDT |
 | 展示名称 | 后台配置的 displayName |
 | Bid | 标准化买价 |
 | Ask | 标准化卖价 |
@@ -124,9 +138,9 @@
 
 | Symbol | 名称 | 分类 | Digits | Spread | 杠杆 | 合约单位 | 手数范围 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| XAUUSD | Gold | metal | 2 | 0.3 | 100 | 100 | 0.01-10 / 0.01 |
-| EURUSD | Euro / US Dollar | forex | 5 | 0.00012 | 100 | 100000 | 0.01-20 / 0.01 |
 | BTCUSDT | Bitcoin / USDT | crypto | 2 | 10 | 20 | 1 | 0.01-5 / 0.01 |
+| ETHUSDT | Ethereum / USDT | crypto | 2 | 2 | 20 | 1 | 0.01-20 / 0.01 |
+| DOGEUSDT | Dogecoin / USDT | crypto | 6 | 0.00002 | 20 | 1 | 1-100000 / 1 |
 
 ### 5.4 交易终端
 
@@ -198,14 +212,18 @@
 | 模块 | 字段 |
 | --- | --- |
 | 用户资料 | 用户 ID、邮箱、昵称、状态、注册时间 |
-| 资金指标 | Balance、Equity、Used Margin、Free Margin |
-| 模拟账户状态 | 账户 ID、浮动盈亏、当前持仓数、订单记录数、币种、创建时间 |
+| 资金账户 | Balance、Frozen、Available |
+| 交易账户 | Balance、Equity、Used Margin、Free Margin、Floating P/L |
+| 功能区 | 资金账户与交易账户内部转账、出金申请 |
+| 记录区 | 出金申请列表、最近资金流水、最近订单 |
 
 交易账户当前由用户首次访问交易/账户接口时自动创建。
 
+当前用户端交易和钱包接口已统一使用 Bearer Token 鉴权，不再允许前端自己传 `userId` 伪装身份。
+
 ### 5.6 后台数据概览
 
-展示注册用户、启用用户、禁用用户、默认币种，以及当前白标平台名称、Logo 文案、风险提示。
+展示注册用户、启用用户、禁用用户等基础统计。
 
 ### 5.7 后台用户管理
 
@@ -216,6 +234,8 @@
 | 用户列表 | 展示用户 ID、邮箱、昵称、状态、注册时间 |
 | 禁用用户 | 将 `active` 用户置为 `disabled` |
 | 启用用户 | 将 `disabled` 用户置为 `active` |
+
+后台用户列表和启停操作当前均从服务端读取，不再读取浏览器本地用户缓存。
 
 影响：
 
@@ -234,7 +254,7 @@
 | 编辑品种 | 修改已有品种配置 |
 | 停用/启用 | 快速切换 `enabled` / `disabled` |
 | 删除品种 | 当前为软删除：设置 `isVisible=false` 且 `tradeStatus=disabled` |
-| 恢复默认品种 | 重置为默认 XAUUSD、EURUSD、BTCUSDT |
+| 恢复默认品种 | 重置为默认 BTCUSDT、ETHUSDT、DOGEUSDT |
 | 刷新行情 | 拉取并刷新前端本地报价 |
 
 交易状态：
@@ -251,11 +271,14 @@
 
 | 模块 | 功能 |
 | --- | --- |
-| 指标卡片 | 模拟账户数、当前持仓数、订单记录数、行情品种数 |
-| 资金调整 | 按用户 ID 增加、扣减或重置虚拟 Balance |
-| 模拟账户 | 查看每个用户的 Balance、Equity、Used Margin、Free Margin、Floating P/L |
+| 指标卡片 | 资金账户数、出金申请数、当前持仓数、资金流水数 |
+| 后台入金 | 按用户 ID 给资金账户入金 |
+| 资金账户 | 查看每个用户的 Funding Balance、Frozen、Available |
+| 交易账户 | 查看每个用户的 Balance、Equity、Used Margin、Free Margin、Floating P/L |
+| 出金审核 | 查看并审核出金申请 |
+| 资金流水 | 查看全量资金流水 |
 | 行情状态 | 查看每个品种的 API Symbol、连接状态、Bid/Ask、来源、行情时间 |
-| 最近订单 | 查看最近 30 条订单 |
+| 最近订单 | 查看最近订单 |
 
 资金调整规则：
 
@@ -266,60 +289,27 @@
 | reset | Balance 重置为指定金额 |
 | 金额校验 | 金额不得小于 0 |
 
-### 5.10 后台系统配置
-
-配置项：
-
-| 字段 | 默认值 | 影响范围 |
-| --- | --- | --- |
-| 平台名称 | TradeSim Pro | 用户端、后台品牌展示 |
-| Logo 文案 | TSP | 用户端、后台 Logo |
-| 主题色 | `#00C896` | 主要按钮、Logo、图表涨色 |
-| 默认币种 | USD | 账户展示、账户创建 |
-| 风险提示文案 | 模拟交易风险提示 | 登录、首页等文案 |
-
 ## 6. 行情与交易服务
 
 ### 6.1 行情源
 
-| 模式 | 触发条件 | 说明 |
-| --- | --- | --- |
-| TraderMade | 配置 `TRADERMADE_API_KEY` | 使用 `wss://stream.tradermade.com/feedAdv` 订阅行情 |
-| Mock | 未配置 `TRADERMADE_API_KEY` | 使用本地模拟行情，便于开发演示 |
+当前使用 Binance 行情服务：
 
-TraderMade 接入流程：
-
-1. 建立 WebSocket 连接。
-2. 发送 login 消息：`{"action":"login","key":"...","fmt":"JSON"}`。
-3. 登录成功后订阅配置品种的 `apiSymbol`。
-4. 外部 tick 标准化为内部 `MarketTick`。
+- 支持 `BTCUSDT / ETHUSDT / DOGEUSDT`
+- 支持 `1m / 5m / 15m / 1h` K 线
+- 服务启动时通过 REST 拉取历史 K 线
+- 运行时通过 WebSocket 接收实时 ticker / kline
+- 系统内部按品种配置 spread 生成用于模拟成交的 Bid / Ask
 
 ### 6.2 K 线聚合
 
 系统根据实时 tick 聚合 `1m`、`5m`、`15m`、`1h` K 线。
 
-存储策略：
+当前 K 线只保存在进程内存中：
 
-| 数据 | 优先存储 | 降级存储 |
-| --- | --- | --- |
-| 当前未完成 K 线 | Redis，配置 `REDIS_URL` | `server/data/candles.json` |
-| 已完成历史 K 线 | PostgreSQL，配置 `DATABASE_URL` | `server/data/candles.json` |
-
-PostgreSQL 表：
-
-```sql
-create table if not exists candles (
-  symbol text not null,
-  interval text not null,
-  time integer not null,
-  open double precision not null,
-  high double precision not null,
-  low double precision not null,
-  close double precision not null,
-  volume double precision not null,
-  primary key(symbol, interval, time)
-);
-```
+- 启动时从 Binance 拉最近历史 K 线
+- 运行中持续更新未收盘 K 线
+- 服务重启后重新从 Binance 拉取
 
 ## 7. 接口清单
 
@@ -338,7 +328,7 @@ create table if not exists candles (
 ```json
 {
   "ok": true,
-  "source": "mock"
+  "source": "binance"
 }
 ```
 
@@ -348,30 +338,30 @@ create table if not exists candles (
 | --- | --- | --- | --- |
 | GET | `/api/market/symbols` | - | 获取服务端当前品种配置与行情状态 |
 | PUT | `/api/market/symbols/config` | `{ "symbols": MarketSymbol[] }` | 同步前端品种配置到服务端行情服务 |
-| GET | `/api/market/ticker` | query: `symbol`，默认 XAUUSD | 获取单品种最新 ticker |
+| GET | `/api/market/ticker` | query: `symbol`，默认 BTCUSDT | 获取单品种最新 ticker |
 | GET | `/api/market/candles` | query: `symbol`、`interval`、`limit` | 获取 K 线，`limit` 最大 1000 |
 
-`GET /api/market/ticker?symbol=XAUUSD` 响应：
+`GET /api/market/ticker?symbol=BTCUSDT` 响应：
 
 ```json
 {
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "status": "connected",
   "bid": 2320.1,
   "ask": 2320.4,
   "last": 2320.25,
   "spread": 0.3,
-  "source": "mock",
+  "source": "binance",
   "timestamp": 1760000000000
 }
 ```
 
-`GET /api/market/candles?symbol=XAUUSD&interval=1m&limit=500` 响应：
+`GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500` 响应：
 
 ```json
 [
   {
-    "symbol": "XAUUSD",
+    "symbol": "BTCUSDT",
     "interval": "1m",
     "time": 1760000000,
     "open": 2320.1,
@@ -389,10 +379,10 @@ create table if not exists candles (
 
 | 方法 | 路径 | 参数/Body | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/trading/account` | header: `x-user-id`；query: `currency` | 获取或创建模拟交易账户 |
+| GET | `/api/trading/account` | header: `x-user-id` | 获取或创建模拟交易账户（资产固定为 `USDT`） |
 | GET | `/api/trading/positions` | header: `x-user-id` | 获取当前用户持仓 |
 | GET | `/api/trading/orders` | header: `x-user-id` | 获取当前用户订单 |
-| POST | `/api/trading/order` | `{ "symbol": "XAUUSD", "side": "buy", "volume": 0.01 }` | 提交模拟市价单 |
+| POST | `/api/trading/order` | `{ "symbol": "BTCUSDT", "side": "buy", "volume": 0.01 }` | 提交模拟市价单 |
 | POST | `/api/trading/positions/:id/close` | header: `x-user-id` | 平指定持仓 |
 
 `TradingAccount` 响应结构：
@@ -401,7 +391,7 @@ create table if not exists candles (
 {
   "id": "ACC-USR-XXX",
   "userId": "USR-XXX",
-  "currency": "USD",
+  "asset": "USDT",
   "balance": 10000,
   "equity": 10000,
   "usedMargin": 0,
@@ -418,13 +408,13 @@ create table if not exists candles (
 {
   "id": "POS-XXX",
   "userId": "USR-XXX",
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "side": "long",
   "volume": 0.01,
   "entryPrice": 2320.4,
   "margin": 23.2,
   "openedAt": 1760000000000,
-  "source": "mock",
+  "source": "binance",
   "quoteTime": 1760000000000,
   "entryBid": 2320.1,
   "entryAsk": 2320.4,
@@ -449,8 +439,19 @@ create table if not exists candles (
 | GET | `/api/admin/accounts` | - | 获取全部模拟账户 |
 | GET | `/api/admin/positions` | - | 获取全部持仓 |
 | GET | `/api/admin/orders` | - | 获取全部订单 |
+| GET | `/api/admin/wallet/accounts` | - | 获取全部资金账户与交易账户 |
+| GET | `/api/admin/wallet/ledger` | - | 获取全部资金流水 |
+| GET | `/api/admin/wallet/withdrawals` | - | 获取全部出金申请 |
+| POST | `/api/admin/wallet/deposit` | `{ "userId": "demo-user", "amount": 1000, "remark": "admin deposit" }` | 给资金账户入金 |
+| POST | `/api/admin/wallet/withdrawals/:id/approve` | `{ "reviewNote": "approved", "txHash": "reserved" }` | 通过出金申请 |
+| POST | `/api/admin/wallet/withdrawals/:id/reject` | `{ "reviewNote": "rejected" }` | 拒绝出金申请 |
 | POST | `/api/admin/accounts/:id/adjust-balance` | `{ "type": "deposit", "amount": 1000, "note": "后台手动调整" }` | 调整指定用户虚拟资金 |
 | GET | `/api/admin/market/status` | - | 获取全部品种行情状态 |
+
+说明：
+
+- 所有 `/api/admin/*` 接口都要求 Bearer Token。
+- 通过 `POST /api/admin/login` 获取 token。
 
 资金调整类型：
 
@@ -472,7 +473,7 @@ create table if not exists candles (
 {
   "type": "subscribe",
   "channel": "ticker",
-  "symbol": "XAUUSD"
+  "symbol": "BTCUSDT"
 }
 ```
 
@@ -481,12 +482,12 @@ create table if not exists candles (
 ```json
 {
   "type": "ticker",
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "bid": 2320.1,
   "ask": 2320.4,
   "last": 2320.25,
   "spread": 0.3,
-  "source": "mock",
+  "source": "binance",
   "status": "connected",
   "timestamp": 1760000000000
 }
@@ -500,7 +501,7 @@ create table if not exists candles (
 {
   "type": "subscribe",
   "channel": "candle",
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "interval": "1m"
 }
 ```
@@ -510,7 +511,7 @@ create table if not exists candles (
 ```json
 {
   "type": "candle",
-  "symbol": "XAUUSD",
+  "symbol": "BTCUSDT",
   "interval": "1m",
   "data": {
     "time": 1760000000,
@@ -545,24 +546,14 @@ create table if not exists candles (
 | status | `active` / `disabled` | 用户状态 |
 | createdAt | string | 注册时间 |
 
-### 8.2 平台配置 PlatformConfig
-
-| 字段 | 类型 | 说明 |
-| --- | --- | --- |
-| platformName | string | 平台名称 |
-| logoText | string | Logo 文案 |
-| themeColor | string | 主题色 |
-| defaultCurrency | string | 默认账户币种 |
-| riskNotice | string | 风险提示 |
-
-### 8.3 交易品种 MarketSymbol / TradeSymbol
+### 8.2 交易品种 MarketSymbol / TradeSymbol
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
 | symbol | string | 内部展示品种代码 |
 | displayName | string | 展示名称 |
 | apiSymbol | string | 行情源订阅代码 |
-| category | enum | `forex`、`metal`、`crypto`、`index`、`stock` |
+| category | enum | 当前默认使用 `crypto`，字段保留给后续扩展 |
 | digits | number | 报价小数位 |
 | spread | number | 固定点差 |
 | leverage | number | 杠杆 |
@@ -573,7 +564,7 @@ create table if not exists candles (
 | tradeStatus | enum | `enabled`、`close_only`、`disabled` |
 | isVisible | boolean | 用户端是否可见 |
 
-### 8.4 订单 OrderRecord
+### 8.3 订单 OrderRecord
 
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |
@@ -601,9 +592,9 @@ create table if not exists candles (
 
 | 数据 | 当前存储 | 说明 |
 | --- | --- | --- |
-| 用户、登录态、管理员登录态、白标配置、品种配置、前端报价缓存 | 浏览器 `localStorage` | 不同浏览器/设备不共享 |
-| 模拟账户、持仓、订单、资金调整记录 | API 服务进程内存 | 服务重启后丢失 |
-| 当前/历史 K 线 | Redis/PostgreSQL 优先，文件降级 | 未配置外部存储时使用 `server/data/candles.json` |
+| 用户、登录态、管理员登录态、品种配置 | 浏览器 `localStorage` | 不同浏览器/设备不共享 |
+| 模拟账户、持仓、订单、资金账户、资金流水、出金申请 | SQLite | 服务重启后可恢复 |
+| 当前/历史 K 线 | API 服务进程内存 | 服务重启后重新从 Binance 拉取 |
 
 localStorage key：
 
@@ -612,9 +603,7 @@ localStorage key：
 | `xingheng.users` | 注册用户 |
 | `xingheng.auth` | 用户登录态 |
 | `xingheng.adminAuth` | 管理员登录态 |
-| `xingheng.config` | 白标配置 |
 | `xingheng.tradeSymbols.v2` | 品种配置 |
-| `xingheng.marketQuotes.v2` | 前端报价缓存 |
 
 ## 10. 非功能与风控要求
 
@@ -632,7 +621,7 @@ localStorage key：
 
 | 方向 | 要求 |
 | --- | --- |
-| 鉴权 | 服务端 Session/JWT、管理员账号体系、RBAC |
+| 鉴权 | 多管理员账号体系、RBAC、用户侧服务端鉴权 |
 | 密码安全 | 密码哈希、重置密码、登录限流 |
 | 数据持久化 | 用户、账户、订单、持仓、调整记录入库 |
 | 风控 | 最大持仓、最大杠杆、强平线、风控日志、异常行情熔断 |
@@ -642,10 +631,10 @@ localStorage key：
 ## 11. 已知限制
 
 1. 当前是模拟交易 MVP，不是生产级交易所或真实经纪商系统。
-2. 用户注册和登录在前端本地完成，密码明文保存在浏览器 localStorage。
-3. 后台管理员为固定账号，未接入服务端鉴权。
-4. 交易账户、持仓、订单保存在 API 服务内存，服务重启会丢失。
-5. 首页“模拟账户权益 100,000.00”是静态展示，实际交易账户初始 Balance 为 10,000。
+2. 用户注册和登录当前仍在前端本地完成，密码明文保存在浏览器 localStorage。
+3. 后台管理员当前是单固定账号方案，虽已接入服务端 Bearer Token 鉴权，但未支持多管理员、权限分级和密码安全加固。
+4. 交易账户、持仓、订单、资金账户、资金流水、出金申请已持久化到 SQLite；K 线仍保存在 API 服务进程内存，服务重启后需重新从 Binance 拉取。
+5. 交易账户当前资产固定为 `USDT`，如后续扩展多资产，需要重新设计交易账户资产模型。
 6. 品种配置从前端同步到服务端，服务端重启后会回到默认品种，需前端再次同步。
 7. 当前仅支持市价单，不支持限价单、止损止盈、挂单撤单、部分平仓。
 8. 当前无手续费、隔夜费、滑点、爆仓/强平、交易时段等规则。
@@ -655,11 +644,10 @@ localStorage key：
 
 | 优先级 | 需求 | 说明 |
 | --- | --- | --- |
-| P0 | 服务端用户与管理员鉴权 | 将用户、管理员、登录态迁移到服务端 |
-| P0 | 交易数据持久化 | 账户、持仓、订单、资金调整入库 |
-| P0 | 账户首页修正 | 首页权益改为真实 `/api/trading/account` 数据 |
+| P0 | 用户侧服务端鉴权 | 将用户注册、登录和登录态迁移到服务端 |
+| P1 | 多资产账户设计 | 如后续扩展非 USDT 交易账户，需要重新设计账户资产字段与保证金口径 |
 | P1 | 订单能力增强 | 支持挂单、止盈止损、部分平仓、撤单 |
 | P1 | 风控能力 | 最大手数、最大持仓、保证金率、强平规则 |
-| P1 | 资金流水 | 记录每笔资金调整、成交盈亏账变 |
+| P1 | 资金流水增强 | 进一步补齐成交盈亏、异常回滚等账变场景 |
 | P2 | 报表导出 | 用户交易记录、后台订单/账户导出 |
 | P2 | 行情监控 | 行情源延迟、断线、异常跳价监控 |

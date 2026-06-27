@@ -15,14 +15,11 @@ import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { Input } from "../../components/ui/Input";
-import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
 import { formatDateTime } from "../../utils/validators";
 
 export function AccountPage() {
-  const currentUserId = useAuthStore((state) => state.currentUserId);
-  const userId = currentUserId || "demo-user";
-  const user = useUserStore((state) => state.getById(currentUserId));
+  const user = useUserStore((state) => state.currentUser);
   const [funding, setFunding] = useState<FundingAccount | null>(null);
   const [account, setAccount] = useState<TradingAccount | null>(null);
   const [positions, setPositions] = useState<PositionView[]>([]);
@@ -38,18 +35,18 @@ export function AccountPage() {
 
   useEffect(() => {
     void loadAccount();
-  }, [userId]);
+  }, []);
 
-  const asset = funding?.asset ?? account?.asset ?? account?.currency ?? "USDT";
+  const asset = funding?.asset ?? account?.asset ?? "USDT";
 
   const loadAccount = async () => {
     const [walletAccounts, nextPositions, nextOrders, nextLedger, nextWithdrawals, fallbackTradingAccount] = await Promise.all([
-      fetchWalletAccounts(userId),
-      fetchPositions(userId),
-      fetchOrders(userId),
-      fetchWalletLedger(userId),
-      fetchWithdrawalRequests(userId),
-      fetchTradingAccount(userId, "USDT"),
+      fetchWalletAccounts(),
+      fetchPositions(),
+      fetchOrders(),
+      fetchWalletLedger(),
+      fetchWithdrawalRequests(),
+      fetchTradingAccount(),
     ]);
     setFunding(walletAccounts.funding);
     setAccount(walletAccounts.trading ?? fallbackTradingAccount);
@@ -64,7 +61,7 @@ export function AccountPage() {
     const from: WalletAccountType = transferDirection === "funding_to_trading" ? "funding" : "trading";
     const to: WalletAccountType = transferDirection === "funding_to_trading" ? "trading" : "funding";
     try {
-      await transferWalletBalance(from, to, transferAmount, "用户内部转账", userId);
+      await transferWalletBalance(from, to, transferAmount, "用户内部转账");
       await loadAccount();
       setMessage("内部转账已完成。");
     } catch (error) {
@@ -75,7 +72,7 @@ export function AccountPage() {
   const submitWithdrawal = async () => {
     setMessage("");
     try {
-      await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户出金申请", userId);
+      await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户出金申请");
       await loadAccount();
       setMessage("出金申请已提交，等待后台审核。");
     } catch (error) {
@@ -123,7 +120,7 @@ export function AccountPage() {
           <h2 className="font-semibold">交易账户</h2>
           <div className="mt-4 grid gap-4 md:grid-cols-2">
             <Info label="账户 ID" value={account?.id ?? "-"} />
-            <Info label="资产" value={account?.asset ?? account?.currency ?? "USDT"} />
+            <Info label="资产" value={account?.asset ?? "USDT"} />
             <Info label="Balance" value={formatMoney(account?.balance, asset)} />
             <Info label="Equity" value={formatMoney(account?.equity, asset)} />
             <Info label="Used Margin" value={formatMoney(account?.usedMargin, asset)} />
@@ -176,7 +173,7 @@ export function AccountPage() {
           <Info label="浮动盈亏" value={formatMoney(account?.floatingPnl, asset)} />
           <Info label="当前持仓" value={`${positions.length} 笔`} />
           <Info label="订单记录" value={`${orders.length} 条`} />
-          <Info label="账户资产" value={account?.asset ?? account?.currency ?? asset} />
+          <Info label="账户资产" value={account?.asset ?? asset} />
           <Info label="创建时间" value={account?.createdAt ? new Date(account.createdAt).toLocaleString("zh-CN") : "-"} />
         </div>
       </Card>

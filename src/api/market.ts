@@ -1,5 +1,6 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
 import type { QuoteStatus, TradeSymbol } from "../types/market";
+import { readStorage, storageKeys } from "../utils/storage";
 
 export type ApiCandle = {
   symbol: string;
@@ -44,8 +45,7 @@ export type PositionView = {
 export type TradingAccount = {
   id: string;
   userId: string;
-  currency: string;
-  asset?: "USDT";
+  asset: "USDT";
   balance: number;
   equity: number;
   usedMargin: number;
@@ -105,7 +105,13 @@ type ApiMarketSymbol = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "u
 };
 
 function userHeaders(userId?: string | null): Record<string, string> {
-  return userId ? { "x-user-id": userId } : {};
+  const auth = readStorage<{ isLoggedIn?: boolean; userToken?: string | null }>(storageKeys.auth, {});
+  return auth.userToken ? { Authorization: `Bearer ${auth.userToken}` } : {};
+}
+
+function adminHeaders(): Record<string, string> {
+  const auth = readStorage<{ isAdminLoggedIn?: boolean; adminToken?: string | null }>(storageKeys.adminAuth, {});
+  return auth.adminToken ? { Authorization: `Bearer ${auth.adminToken}` } : {};
 }
 
 export async function syncMarketSymbols(symbols: TradeSymbol[]) {
@@ -157,8 +163,8 @@ export async function fetchCandles(symbol: string, interval: CandleInterval, lim
   return response.json() as Promise<ApiCandle[]>;
 }
 
-export async function fetchTradingAccount(userId?: string | null, currency = "USD") {
-  const response = await fetch(`/api/trading/account?currency=${currency}`, { headers: userHeaders(userId) });
+export async function fetchTradingAccount() {
+  const response = await fetch("/api/trading/account", { headers: userHeaders() });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.message ?? "账户加载失败。");
@@ -166,8 +172,8 @@ export async function fetchTradingAccount(userId?: string | null, currency = "US
   return response.json() as Promise<TradingAccount>;
 }
 
-export async function fetchPositions(userId?: string | null) {
-  const response = await fetch("/api/trading/positions", { headers: userHeaders(userId) });
+export async function fetchPositions() {
+  const response = await fetch("/api/trading/positions", { headers: userHeaders() });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.message ?? "持仓加载失败。");
@@ -175,8 +181,8 @@ export async function fetchPositions(userId?: string | null) {
   return response.json() as Promise<PositionView[]>;
 }
 
-export async function fetchOrders(userId?: string | null) {
-  const response = await fetch("/api/trading/orders", { headers: userHeaders(userId) });
+export async function fetchOrders() {
+  const response = await fetch("/api/trading/orders", { headers: userHeaders() });
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
     throw new Error(payload?.message ?? "订单加载失败。");
@@ -184,10 +190,10 @@ export async function fetchOrders(userId?: string | null) {
   return response.json() as Promise<OrderRecord[]>;
 }
 
-export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number, userId?: string | null) {
+export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number) {
   const response = await fetch("/api/trading/order", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders(userId) },
+    headers: { "Content-Type": "application/json", ...userHeaders() },
     body: JSON.stringify({ symbol, side, volume }),
   });
 
@@ -198,10 +204,10 @@ export async function placeMarketOrder(symbol: string, side: TradeSide, volume: 
   return payload as PositionView;
 }
 
-export async function closePosition(positionId: string, userId?: string | null) {
+export async function closePosition(positionId: string) {
   const response = await fetch(`/api/trading/positions/${positionId}/close`, {
     method: "POST",
-    headers: userHeaders(userId),
+    headers: userHeaders(),
   });
 
   const payload = await response.json();
@@ -212,29 +218,29 @@ export async function closePosition(positionId: string, userId?: string | null) 
 }
 
 export async function fetchAdminAccounts() {
-  const response = await fetch("/api/admin/accounts");
+  const response = await fetch("/api/admin/accounts", { headers: adminHeaders() });
   return response.json() as Promise<TradingAccount[]>;
 }
 
 export async function fetchAdminPositions() {
-  const response = await fetch("/api/admin/positions");
+  const response = await fetch("/api/admin/positions", { headers: adminHeaders() });
   return response.json() as Promise<PositionView[]>;
 }
 
 export async function fetchAdminOrders() {
-  const response = await fetch("/api/admin/orders");
+  const response = await fetch("/api/admin/orders", { headers: adminHeaders() });
   return response.json() as Promise<OrderRecord[]>;
 }
 
 export async function fetchAdminBalanceAdjustments() {
-  const response = await fetch("/api/admin/balance-adjustments");
+  const response = await fetch("/api/admin/balance-adjustments", { headers: adminHeaders() });
   return response.json() as Promise<BalanceAdjustment[]>;
 }
 
 export async function adjustAdminAccountBalance(userId: string, type: "deposit" | "withdraw" | "reset", amount: number, note = "") {
   const response = await fetch(`/api/admin/accounts/${userId}/adjust-balance`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...adminHeaders() },
     body: JSON.stringify({ type, amount, note }),
   });
   const payload = await response.json();
@@ -245,7 +251,7 @@ export async function adjustAdminAccountBalance(userId: string, type: "deposit" 
 }
 
 export async function fetchAdminMarketStatus() {
-  const response = await fetch("/api/admin/market/status");
+  const response = await fetch("/api/admin/market/status", { headers: adminHeaders() });
   return response.json() as Promise<AdminMarketStatus[]>;
 }
 

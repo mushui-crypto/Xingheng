@@ -1,5 +1,4 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { useConfigStore } from "../../store/configStore";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   children: ReactNode;
@@ -14,8 +13,7 @@ const variantClasses = {
 };
 
 export function Button({ children, className = "", variant = "primary", style, ...props }: ButtonProps) {
-  const themeColor = useConfigStore((state) => state.config.themeColor);
-  const primaryStyle = variant === "primary" ? { backgroundColor: themeColor, ...style } : style;
+  const primaryStyle = variant === "primary" ? { backgroundColor: "#00C896", ...style } : style;
 
   return (
     <button

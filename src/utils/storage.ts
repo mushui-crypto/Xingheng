@@ -2,7 +2,6 @@ export const storageKeys = {
   users: "xingheng.users",
   auth: "xingheng.auth",
   adminAuth: "xingheng.adminAuth",
-  config: "xingheng.config",
   tradeSymbols: "xingheng.tradeSymbols.v2",
   marketQuotes: "xingheng.marketQuotes.v2",
 } as const;

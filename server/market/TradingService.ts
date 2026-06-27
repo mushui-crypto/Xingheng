@@ -48,8 +48,8 @@ export class TradingService {
     this.adjustments = store?.listAdjustments() ?? [];
   }
 
-  getAccount(userId: string, currency = defaultAsset) {
-    const account = this.ensureAccount(userId, currency);
+  getAccount(userId: string) {
+    const account = this.ensureAccount(userId);
     return this.toAccountView(account);
   }
 
@@ -253,7 +253,7 @@ export class TradingService {
     };
   }
 
-  private ensureAccount(userId: string, currency = defaultAsset) {
+  private ensureAccount(userId: string) {
     const normalized = normalizeUserId(userId);
     const existing = this.accounts.get(normalized);
     if (existing) {
@@ -263,7 +263,6 @@ export class TradingService {
     const account: TradingAccount = {
       id: `ACC-${normalized}`,
       userId: normalized,
-      currency,
       asset: defaultAsset,
       balance: defaultInitialBalance,
       equity: defaultInitialBalance,
@@ -286,7 +285,6 @@ export class TradingService {
     return {
       ...account,
       asset: defaultAsset,
-      currency: account.currency || defaultAsset,
       floatingPnl,
       usedMargin,
       equity,

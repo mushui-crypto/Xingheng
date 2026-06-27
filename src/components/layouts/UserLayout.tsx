@@ -1,8 +1,7 @@
 import { CandlestickChart, Home, LineChart, LogOut, UserRound } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAuthStore } from "../../store/authStore";
-import { useConfigStore } from "../../store/configStore";
 import { useUserStore } from "../../store/userStore";
 
 type UserLayoutProps = {
@@ -11,10 +10,13 @@ type UserLayoutProps = {
 
 export function UserLayout({ children }: UserLayoutProps) {
   const navigate = useNavigate();
-  const { config } = useConfigStore();
-  const currentUserId = useAuthStore((state) => state.currentUserId);
+  const syncSession = useAuthStore((state) => state.syncSession);
   const logout = useAuthStore((state) => state.logout);
-  const currentUser = useUserStore((state) => state.getById(currentUserId));
+  const currentUser = useUserStore((state) => state.currentUser);
+
+  useEffect(() => {
+    void syncSession();
+  }, [syncSession]);
 
   const handleLogout = () => {
     logout();
@@ -58,15 +60,12 @@ export function UserLayout({ children }: UserLayoutProps) {
   function Brand({ compact = false }: { compact?: boolean }) {
     return (
       <div className="flex items-center gap-3">
-        <div
-          className="flex h-10 w-10 items-center justify-center rounded-lg text-sm font-black text-[#07110f]"
-          style={{ backgroundColor: config.themeColor }}
-        >
-          {config.logoText}
+        <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-400 text-sm font-black text-[#07110f]">
+          XH
         </div>
         {!compact ? (
           <div>
-            <p className="font-semibold tracking-wide">{config.platformName}</p>
+            <p className="font-semibold tracking-wide">Xing Heng</p>
             <p className="text-xs text-muted">模拟交易控制台</p>
           </div>
         ) : null}

@@ -66,8 +66,7 @@ export type PositionView = Position & {
 export type TradingAccount = {
   id: string;
   userId: string;
-  currency: string;
-  asset?: "USDT";
+  asset: "USDT";
   balance: number;
   equity: number;
   usedMargin: number;
@@ -163,6 +162,16 @@ export type FundingLedgerEntry = {
 };
 
 export type WithdrawalStatus = "pending" | "approved" | "rejected";
+
+export type UserStatus = "active" | "disabled";
+
+export type User = {
+  id: string;
+  email: string;
+  nickname?: string;
+  status: UserStatus;
+  createdAt: string;
+};
 
 export type WithdrawalRequest = {
   id: string;

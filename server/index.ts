@@ -1,7 +1,9 @@
 import cors from "cors";
+import crypto from "node:crypto";
 import dotenv from "dotenv";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
+import { UserService } from "./auth/UserService";
 import { registerMarketRoutes } from "./modules/api/marketRoutes";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { BinanceMarketService } from "./modules/market/BinanceMarketService";
@@ -9,11 +11,13 @@ import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modu
 import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
 import { WalletService } from "./wallet/WalletService";
-import type { MarketSymbol, MarketTick, TradeSide } from "./types";
+import type { MarketSymbol, MarketTick, TradeSide, User } from "./types";
 
 dotenv.config();
 
 const port = Number(process.env.API_PORT ?? 8787);
+const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() || "admin@example.com";
+const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -42,11 +46,95 @@ const tradingMarket = {
 const trading = new TradingService(tradingMarket, tradingStore);
 trading.getAccount("demo-user");
 const wallet = new WalletService(tradingStore, trading);
+const users = new UserService(tradingStore);
+const activeAdminTokens = new Set<string>();
+
+declare global {
+  namespace Express {
+    interface Request {
+      user?: User;
+    }
+  }
+}
+
+app.post("/api/auth/register", (request, response) => {
+  try {
+    response.status(201).json(users.register(request.body ?? {}));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/auth/login", (request, response) => {
+  try {
+    response.json(users.login(request.body?.email, request.body?.password));
+  } catch (error) {
+    response.status(401).json({ message: error instanceof Error ? error.message : "登录失败。" });
+  }
+});
+
+app.post("/api/auth/logout", (request, response) => {
+  users.logout(getUserBearerToken(request));
+  response.json({ ok: true });
+});
+
+app.get("/api/auth/me", (request, response) => {
+  const user = users.getCurrentUser(getUserBearerToken(request));
+  if (!user) {
+    response.status(401).json({ message: "用户未登录或登录已失效。" });
+    return;
+  }
+  response.json(user);
+});
+
+app.post("/api/admin/login", (request, response) => {
+  const email = String(request.body?.email ?? "").trim().toLowerCase();
+  const password = String(request.body?.password ?? "");
+  if (email !== adminEmail || password !== adminPassword) {
+    response.status(401).json({ message: "管理员账号或密码不正确。" });
+    return;
+  }
+
+  const token = crypto.randomBytes(24).toString("hex");
+  activeAdminTokens.add(token);
+  response.json({ token });
+});
+
+app.post("/api/admin/logout", (request, response) => {
+  const token = getAdminBearerToken(request);
+  if (token) {
+    activeAdminTokens.delete(token);
+  }
+  response.json({ ok: true });
+});
+
+app.use("/api/admin", (request, response, next) => {
+  if (request.path === "/login") {
+    next();
+    return;
+  }
+  const token = getAdminBearerToken(request);
+  if (!token || !activeAdminTokens.has(token)) {
+    response.status(401).json({ message: "管理员未登录或登录已失效。" });
+    return;
+  }
+  next();
+});
 
 registerMarketRoutes(app, market);
 
+app.use(["/api/trading", "/api/wallet"], (request, response, next) => {
+  const user = users.authenticate(getUserBearerToken(request));
+  if (!user) {
+    response.status(401).json({ message: "用户未登录或登录已失效。" });
+    return;
+  }
+  request.user = user;
+  next();
+});
+
 app.get("/api/trading/account", (request, response) => {
-  response.json(trading.getAccount(getUserId(request), String(request.query.currency ?? "USDT")));
+  response.json(trading.getAccount(getUserId(request)));
 });
 
 app.get("/api/trading/positions", (request, response) => {
@@ -78,6 +166,22 @@ app.post("/api/trading/positions/:positionId/close", (request, response) => {
 
 app.get("/api/admin/accounts", (_request, response) => {
   response.json(trading.listAccounts());
+});
+
+app.get("/api/admin/users", (_request, response) => {
+  response.json(users.listUsers());
+});
+
+app.post("/api/admin/users/:id/status", (request, response) => {
+  try {
+    const status = request.body?.status;
+    if (status !== "active" && status !== "disabled") {
+      throw new Error("用户状态不正确。");
+    }
+    response.json(users.setUserStatus(request.params.id, status));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
 });
 
 app.get("/api/admin/positions", (_request, response) => {
@@ -259,6 +363,18 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
   });
 }
 
+function getAdminBearerToken(request: express.Request) {
+  const authorization = request.headers.authorization;
+  if (!authorization) {
+    return null;
+  }
+  const [scheme, token] = authorization.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return null;
+  }
+  return token;
+}
+
 function broadcast(subscriptions: Map<WebSocket, Set<string>>, key: string, payload: unknown) {
   for (const [socket, keys] of subscriptions) {
     if (socket.readyState === socket.OPEN && keys.has(key)) {
@@ -293,8 +409,19 @@ function applyConfiguredSpread(tick: MarketTick, config: MarketSymbol): MarketTi
 }
 
 function getUserId(request: express.Request) {
-  const header = request.header("x-user-id");
-  return header?.trim() || "demo-user";
+  return request.user?.id ?? "demo-user";
+}
+
+function getUserBearerToken(request: express.Request) {
+  const authorization = request.headers.authorization;
+  if (!authorization) {
+    return null;
+  }
+  const [scheme, token] = authorization.split(" ");
+  if (scheme !== "Bearer" || !token) {
+    return null;
+  }
+  return token;
 }
 
 function sendBadRequest(response: express.Response, error: unknown) {

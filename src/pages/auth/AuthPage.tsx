@@ -2,7 +2,6 @@ import { ArrowRight, Eye, EyeOff } from "lucide-react";
 import { FormEvent, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuthStore } from "../../store/authStore";
-import { useConfigStore } from "../../store/configStore";
 import { useUserStore } from "../../store/userStore";
 import { isValidEmail } from "../../utils/validators";
 import { AuthFrame } from "./AuthFrame";
@@ -30,15 +29,18 @@ export function AuthPage() {
 function LoginForm() {
   const navigate = useNavigate();
   const login = useAuthStore((state) => state.login);
-  const { config } = useConfigStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
 
-  const handleSubmit = (event: FormEvent) => {
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    const result = login(email, password);
+    setSubmitting(true);
+    const result = await login(email, password);
+    setSubmitting(false);
     if (!result.ok) {
       setMessage(result.message);
       return;
@@ -49,7 +51,7 @@ function LoginForm() {
   return (
     <>
       <AuthHeader
-        title={`Enter ${config.platformName === "TradeSim Pro" ? "StellarX" : config.platformName}`}
+        title="Enter Xing Heng"
         subtitle="Sign in or create an account to continue."
       />
 
@@ -87,7 +89,7 @@ function LoginForm() {
 
         {message ? <p className="border border-red-400/35 bg-red-500/10 p-3 text-sm text-red-200">{message}</p> : null}
 
-        <AuthSubmitButton>Sign in</AuthSubmitButton>
+        <AuthSubmitButton disabled={submitting}>{submitting ? "Signing In..." : "Sign in"}</AuthSubmitButton>
       </form>
     </>
   );
@@ -96,13 +98,14 @@ function LoginForm() {
 function RegisterForm() {
   const navigate = useNavigate();
   const registerUser = useUserStore((state) => state.registerUser);
-  const { config } = useConfigStore();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [message, setMessage] = useState("");
 
-  const handleSubmit = (event: FormEvent) => {
+  const [submitting, setSubmitting] = useState(false);
+
+  const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setMessage("");
 
@@ -121,7 +124,9 @@ function RegisterForm() {
       return;
     }
 
-    const result = registerUser({ email, password });
+    setSubmitting(true);
+    const result = await registerUser({ email, password });
+    setSubmitting(false);
     if (!result.ok) {
       setMessage(result.message);
       return;
@@ -132,7 +137,7 @@ function RegisterForm() {
   return (
     <>
       <AuthHeader
-        title={`Create ${config.platformName === "TradeSim Pro" ? "StellarX" : config.platformName}`}
+        title="Create Xing Heng"
         subtitle="Create an account to enter the simulation console."
       />
 
@@ -150,7 +155,7 @@ function RegisterForm() {
 
         {message ? <p className="border border-red-400/35 bg-red-500/10 p-3 text-sm text-red-200">{message}</p> : null}
 
-        <AuthSubmitButton>Create Account</AuthSubmitButton>
+        <AuthSubmitButton disabled={submitting}>{submitting ? "Creating..." : "Create Account"}</AuthSubmitButton>
       </form>
     </>
   );
@@ -196,11 +201,12 @@ function AuthInput({
   );
 }
 
-function AuthSubmitButton({ children }: { children: string }) {
+function AuthSubmitButton({ children, disabled = false }: { children: string; disabled?: boolean }) {
   return (
     <button
-      className="relative flex h-[72px] w-full items-center justify-center rounded-[3px] border border-white bg-black px-6 text-[17px] font-medium tracking-[2px] text-white transition hover:bg-white hover:text-black"
+      className="relative flex h-[72px] w-full items-center justify-center rounded-[3px] border border-white bg-black px-6 text-[17px] font-medium tracking-[2px] text-white transition hover:bg-white hover:text-black disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-black disabled:hover:text-white"
       type="submit"
+      disabled={disabled}
     >
       {children}
       <ArrowRight className="absolute right-6" size={22} />

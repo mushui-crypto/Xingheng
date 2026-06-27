@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { StarBorder } from "../../components/ui/StarBorder";
-import { useConfigStore } from "../../store/configStore";
 
 type AuthFrameProps = {
   activeTab: "login" | "register";
@@ -9,9 +8,6 @@ type AuthFrameProps = {
 };
 
 export function AuthFrame({ activeTab, children }: AuthFrameProps) {
-  const { config } = useConfigStore();
-  const brandName = config.platformName === "TradeSim Pro" ? "Xing Heng" : config.platformName;
-
   return (
     <div className="min-h-screen overflow-hidden bg-black text-white" style={{ fontFamily: "Poppins, Inter, sans-serif" }}>
       <div className="min-h-screen lg:grid lg:h-[1080px] lg:min-h-0 lg:w-[1920px] lg:grid-cols-[1200px_720px]">
@@ -32,7 +28,7 @@ export function AuthFrame({ activeTab, children }: AuthFrameProps) {
               src="/assets/xingheng-constellation@2x.png"
             />
             <img
-              alt={`${brandName} logo`}
+              alt="Xing Heng logo"
               className="pointer-events-none absolute left-[204px] top-[464px] z-10 h-[152px] w-[791.5px] max-w-none object-fill"
               src="/assets/xingheng-lockup@2x.png"
             />

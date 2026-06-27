@@ -6,7 +6,6 @@ export type TradeSide = "buy" | "sell";
 export type User = {
   id: string;
   email: string;
-  password: string;
   nickname?: string;
   status: UserStatus;
   createdAt: string;
@@ -15,16 +14,10 @@ export type User = {
 export type AuthState = {
   currentUserId: string | null;
   isLoggedIn: boolean;
+  userToken: string | null;
 };
 
 export type AdminAuthState = {
   isAdminLoggedIn: boolean;
-};
-
-export type PlatformConfig = {
-  platformName: string;
-  logoText: string;
-  themeColor: string;
-  defaultCurrency: string;
-  riskNotice: string;
+  adminToken: string | null;
 };

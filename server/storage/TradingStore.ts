@@ -8,6 +8,7 @@ import type {
   OrderRecord,
   Position,
   TradingAccount,
+  User,
   WithdrawalRequest,
 } from "../types";
 
@@ -20,6 +21,7 @@ type AdjustmentRow = BalanceAdjustment;
 type FundingAccountRow = Omit<FundingAccount, "available">;
 type FundingLedgerRow = FundingLedgerEntry;
 type WithdrawalRequestRow = WithdrawalRequest;
+type UserRow = User & { password: string };
 
 export class TradingStore {
   private db: DatabaseSync;
@@ -48,6 +50,31 @@ export class TradingStore {
     return this.db.prepare("SELECT * FROM accounts ORDER BY createdAt DESC").all() as AccountRow[];
   }
 
+  listUsers() {
+    return this.db.prepare("SELECT id, email, nickname, status, createdAt FROM users ORDER BY createdAt DESC").all() as User[];
+  }
+
+  findUserByEmail(email: string) {
+    return this.db.prepare("SELECT * FROM users WHERE email = ?").get(email) as UserRow | undefined;
+  }
+
+  findUserById(id: string) {
+    return this.db.prepare("SELECT id, email, nickname, status, createdAt FROM users WHERE id = ?").get(id) as User | undefined;
+  }
+
+  createUser(user: UserRow) {
+    this.db
+      .prepare(
+        `INSERT INTO users (id, email, password, nickname, status, createdAt)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt);
+  }
+
+  updateUserStatus(id: string, status: User["status"]) {
+    this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
+  }
+
   upsertAccount(account: TradingAccount) {
     this.db
       .prepare(
@@ -67,7 +94,7 @@ export class TradingStore {
       .run(
         account.id,
         account.userId,
-        account.currency,
+        account.asset,
         account.balance,
         account.equity,
         account.usedMargin,
@@ -323,6 +350,15 @@ export class TradingStore {
         updatedAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL UNIQUE,
+        password TEXT NOT NULL,
+        nickname TEXT,
+        status TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS positions (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
@@ -378,6 +414,7 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_positions_userId ON positions(userId);
       CREATE INDEX IF NOT EXISTS idx_orders_userId ON orders(userId);
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
+      CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
       CREATE TABLE IF NOT EXISTS funding_accounts (
         id TEXT NOT NULL,

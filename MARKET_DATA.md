@@ -1,8 +1,10 @@
-# 星衡 Binance 永续合约行情与 K 线模块
+# 星衡 Binance 行情与 K 线模块
 
-本模块采用“Binance 原生 USDT-M 永续合约行情源 + 内部 K 线服务”的单体结构，当前只支持：
+本模块采用“Binance 行情源 + 内部 K 线服务 + 内部模拟点差”的单体结构，当前支持：
 
-- `PERP BTC/USDT`，内部请求 Binance 时使用 `BTCUSDT`
+- `BTCUSDT`
+- `ETHUSDT`
+- `DOGEUSDT`
 
 后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
 
@@ -30,7 +32,7 @@ npm run start:api
 | 行情服务 | `server/modules/market/BinanceMarketService.ts` | 启动 Binance REST 初始化、WebSocket 实时订阅、断线重连和状态更新 |
 | Binance REST | `server/modules/market/BinanceRestClient.ts` | 按周期拉取历史 K 线 |
 | K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史 K 线和当前未完成 K 线 |
-| 支持品种 | `server/config/supportedSymbols.ts` | 固定维护 BTCUSDT |
+| 支持品种 | `server/config/supportedSymbols.ts` | 当前维护 `BTCUSDT / ETHUSDT / DOGEUSDT` |
 | 行情 API | `server/modules/api/marketRoutes.ts` | 注册行情 REST API |
 | API 与 WebSocket 入口 | `server/index.ts` | 启动 REST API、交易接口和 `/ws` 推送 |
 
@@ -71,7 +73,7 @@ wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/btcus
 
 Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，再根据品种配置加上模拟点差。也就是说：Binance 提供实时价格，系统内部再算出用于模拟成交的 Bid/Ask。
 
-当前默认使用 Binance 原生 USDT-M futures 端点。需要切换端点时，可以通过 `.env` 配置 `BINANCE_REST_BASE_URL`、`BINANCE_KLINE_PATH` 和 `BINANCE_STREAM_BASE_URL`。
+当前默认使用 Binance 原生行情端点。需要切换端点时，可以通过 `.env` 配置 `BINANCE_REST_BASE_URL`、`BINANCE_KLINE_PATH` 和 `BINANCE_STREAM_BASE_URL`。
 
 ## 存储
 
@@ -81,7 +83,7 @@ Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，�
 - 当前 K 线：保存每个品种、每个周期当前未完成的 K 线。
 - 服务重启后数据会重新从 Binance REST 拉取。
 
-当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金调整日志使用 SQLite，入口是 `server/storage/TradingStore.ts`。
+当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金账户、资金流水和出金申请使用 SQLite，入口是 `server/storage/TradingStore.ts`。
 
 ## REST API
 
@@ -113,7 +115,7 @@ GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 
 | 参数 | 说明 |
 | --- | --- |
-| `symbol` | 仅支持 `BTCUSDT` |
+| `symbol` | 支持 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT` |
 | `interval` | 支持 `1m`、`5m`、`15m`、`1h` |
 | `limit` | 1-1000，默认 500 |
 
@@ -180,3 +182,10 @@ ws://127.0.0.1:8787/ws
   "symbol": "BTCUSDT"
 }
 ```
+
+## 当前实现边界
+
+- 行情来自 Binance。
+- Bid / Ask 不是 Binance 原样盘口，而是系统基于最新价和品种配置 spread 生成。
+- 下单、持仓、盈亏、账户、资金账户、出金申请全部是内部模拟，不接真实交易。
+- 当前主资金资产固定为 `USDT`。
