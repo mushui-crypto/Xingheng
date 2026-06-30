@@ -31,7 +31,7 @@ export function TradingPage() {
   const currency = "USDT";
   const allSymbols = useSymbolStore((state) => state.symbols);
   const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
-  const symbols = useMemo(() => allSymbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"), [allSymbols]);
+  const symbols = useMemo(() => allSymbols.filter((item) => item.isVisible), [allSymbols]);
   const symbolConfigKey = useMemo(
     () =>
       JSON.stringify(
@@ -259,15 +259,15 @@ export function TradingPage() {
   }
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
+    <div className="xh-page">
+      <div className="xh-page-header">
         <div>
-          <p className="text-sm text-muted">公开行情源 + 内部模拟交易</p>
-          <h1 className="mt-2 text-2xl font-semibold">{symbol} 交易终端</h1>
+          <p className="text-sm text-muted">Binance 合约行情 + 内部模拟交易</p>
+          <h1 className="xh-title mt-2">{symbol} 交易终端</h1>
         </div>
-        <div className="flex flex-wrap items-center gap-3">
+        <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:items-center">
           <select
-            className="rounded-lg border border-line bg-[#0f1722] px-3.5 py-2.5 text-sm text-white outline-none focus:border-emerald-400"
+            className="w-full border border-line bg-black px-3.5 py-2.5 text-sm text-white outline-none transition focus:border-white md:w-auto"
             value={symbol}
             onChange={(event) => setSelectedSymbol(event.target.value)}
           >
@@ -277,7 +277,9 @@ export function TradingPage() {
               </option>
             ))}
           </select>
-          <Badge tone={statusTone}>{statusText}</Badge>
+          <div className="self-start">
+            <Badge tone={statusTone}>{statusText}</Badge>
+          </div>
         </div>
       </div>
 
@@ -288,20 +290,19 @@ export function TradingPage() {
         <AccountStat label="Free Margin" value={account?.freeMargin} suffix={currency} />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
+      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="p-0">
-          <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line p-4">
+          <div className="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-2">
               <Activity size={18} style={{ color: themeColor }} />
               <span className="font-semibold">{symbol}</span>
               <span className="text-sm text-muted">{selectedConfig.displayName}</span>
             </div>
-            <div className="flex rounded-lg border border-line bg-[#0f1722] p-1">
+            <div className="no-scrollbar flex overflow-x-auto border border-line bg-black p-1">
               {intervals.map((item) => (
                 <button
                   key={item}
-                  className={`rounded-md px-3 py-1.5 text-sm transition ${interval === item ? "text-[#07110f]" : "text-muted hover:text-white"}`}
-                  style={interval === item ? { backgroundColor: themeColor } : undefined}
+                  className={`shrink-0 px-3 py-1.5 text-sm transition ${interval === item ? "bg-white text-black" : "text-muted hover:text-white"}`}
                   onClick={() => setIntervalValue(item)}
                 >
                   {item}
@@ -310,9 +311,9 @@ export function TradingPage() {
             </div>
           </div>
           <div className="relative">
-            <div ref={chartContainerRef} className="h-[460px] w-full" />
+            <div ref={chartContainerRef} className="h-[320px] w-full sm:h-[420px] lg:h-[460px]" />
             {chartLoading || chartMessage ? (
-              <div className="pointer-events-none absolute inset-x-4 top-4 rounded-lg border border-line bg-[#0B1118]/85 px-4 py-3 text-sm text-muted backdrop-blur">
+              <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-sm text-muted backdrop-blur">
                 {chartLoading ? "K线加载中..." : chartMessage}
               </div>
             ) : null}
@@ -322,7 +323,7 @@ export function TradingPage() {
         <div className="space-y-4">
           <Card>
             <h2 className="font-semibold">最新报价</h2>
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="mt-4 grid grid-cols-1 gap-3 min-[380px]:grid-cols-2">
               <Quote label="Last" value={ticker.last} digits={digits} />
               <Quote label="Spread" value={ticker.spread} digits={digits} />
               <Quote label="Bid" value={ticker.bid} digits={digits} />
@@ -333,7 +334,7 @@ export function TradingPage() {
               <p>更新时间：{ticker.timestamp ? new Date(ticker.timestamp).toLocaleString("zh-CN") : "-"}</p>
             </div>
             {ticker.status !== "connected" ? (
-              <div className="mt-4 flex gap-2 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">
+              <div className="mt-4 flex gap-2 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">
                 <AlertTriangle className="mt-0.5 shrink-0" size={16} />
                 {ticker.status === "stale" ? "超过 10 秒未收到行情，市价单已暂停。" : "行情连接中断，正在等待重连。"}
               </div>
@@ -347,7 +348,7 @@ export function TradingPage() {
                 交易手数（{selectedConfig.minLot}-{selectedConfig.maxLot} / {selectedConfig.lotStep}）
               </span>
               <input
-                className="w-full rounded-lg border border-line bg-[#0f1722] px-3.5 py-3 text-sm text-white outline-none focus:border-emerald-400"
+                className="w-full border border-line bg-black px-3.5 py-3 text-sm text-white outline-none transition focus:border-white"
                 min={selectedConfig.minLot}
                 max={selectedConfig.maxLot}
                 step={selectedConfig.lotStep}
@@ -356,7 +357,7 @@ export function TradingPage() {
                 onChange={(event) => setVolume(Number(event.target.value))}
               />
             </label>
-            <div className="mt-4 grid grid-cols-2 gap-3">
+            <div className="mt-4 grid grid-cols-1 gap-3 min-[380px]:grid-cols-2">
               <Button disabled={orderDisabled} onClick={() => submitOrder("buy")}>
                 <ArrowUp size={16} /> 买入 Ask
               </Button>
@@ -365,9 +366,11 @@ export function TradingPage() {
               </Button>
             </div>
             {selectedConfig.tradeStatus !== "enabled" ? (
-              <p className="mt-3 text-sm text-amber-200">当前品种状态为 {selectedConfig.tradeStatus}，不可新开仓。</p>
+              <p className="mt-3 text-sm text-amber-200">
+                当前品种状态为 {selectedConfig.tradeStatus}，仅允许平仓，不可新开仓。
+              </p>
             ) : null}
-            {message ? <p className="mt-4 rounded-lg border border-line bg-white/[0.03] p-3 text-sm text-slate-200">{message}</p> : null}
+            {message ? <p className="mt-4 xh-message">{message}</p> : null}
           </Card>
         </div>
       </div>
@@ -382,7 +385,7 @@ export function TradingPage() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-left text-sm">
-              <thead className="border-b border-line bg-white/[0.03] text-muted">
+              <thead className="xh-thead">
                 <tr>
                   <th className="px-5 py-3 font-medium">方向</th>
                   <th className="px-5 py-3 font-medium">品种</th>
@@ -403,7 +406,7 @@ export function TradingPage() {
                     <td className="px-5 py-4">{formatPrice(position.entryPrice, digits)}</td>
                     <td className="px-5 py-4">{formatPrice(position.markPrice ?? undefined, digits)}</td>
                     <td className="px-5 py-4">{position.margin.toFixed(2)}</td>
-                    <td className={`px-5 py-4 ${Number(position.pnl) >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                    <td className={`px-5 py-4 ${Number(position.pnl) >= 0 ? "text-white" : "text-red-300"}`}>
                       {position.pnl?.toFixed(2) ?? "-"}
                     </td>
                     <td className="px-5 py-4">
@@ -429,7 +432,7 @@ export function TradingPage() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1160px] text-left text-sm">
-              <thead className="border-b border-line bg-white/[0.03] text-muted">
+              <thead className="xh-thead">
                 <tr>
                   <th className="px-5 py-3 font-medium">时间</th>
                   <th className="px-5 py-3 font-medium">动作</th>
@@ -480,7 +483,7 @@ function AccountStat({ label, value, suffix }: { label: string; value?: number; 
 
 function Quote({ label, value, digits }: { label: string; value?: number; digits: number }) {
   return (
-    <div className="rounded-lg border border-line bg-[#0f1722] p-3">
+    <div className="border border-line bg-black p-3">
       <p className="text-xs uppercase text-muted">{label}</p>
       <p className="mt-2 text-lg font-semibold">{formatPrice(value, digits)}</p>
     </div>

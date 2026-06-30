@@ -29,11 +29,11 @@ export function DashboardPage() {
   }, []);
 
   return (
-    <div className="space-y-6">
-      <section className="rounded-xl border border-line bg-gradient-to-br from-[#111827] to-[#0d141d] p-6">
-        <p className="text-sm text-muted">欢迎回来</p>
-        <h1 className="mt-2 text-2xl font-semibold md:text-3xl">
-          {user?.nickname || user?.email}，这里是 Xing Heng
+    <div className="xh-page">
+      <section className="border border-line bg-black p-6">
+        <p className="xh-kicker">Mission control</p>
+        <h1 className="mt-2 xh-title">
+          {user?.nickname || user?.email}，这里是星衡
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-muted">
           当前为模拟交易环境，所有交易均为内部模拟成交，不涉及真实资金交易。
@@ -58,11 +58,11 @@ export function DashboardPage() {
         </Card>
       </div>
 
-      {message ? <p className="rounded-lg border border-line bg-white/[0.03] p-3 text-sm text-slate-200">{message}</p> : null}
+      {message ? <p className="xh-message">{message}</p> : null}
 
       <Card className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
         <div className="flex items-center gap-3">
-          <div className="flex h-12 w-12 items-center justify-center rounded-lg bg-emerald-400 text-[#07110f]">
+          <div className="flex h-12 w-12 items-center justify-center border border-white bg-white text-black">
             <WalletCards size={22} />
           </div>
           <div>
@@ -72,7 +72,7 @@ export function DashboardPage() {
         </div>
         <Link
           to="/app/account"
-          className="inline-flex items-center gap-2 text-sm font-semibold text-emerald-400"
+          className="inline-flex items-center gap-2 text-sm font-semibold uppercase tracking-[0.08em] text-white underline-offset-4 hover:underline"
         >
           查看账户资料 <ArrowRight size={16} />
         </Link>

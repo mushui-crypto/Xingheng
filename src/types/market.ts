@@ -1,6 +1,6 @@
 export type SymbolCategory = "forex" | "metal" | "crypto" | "index" | "stock";
 export type TradeStatus = "enabled" | "close_only" | "disabled";
-export type QuoteStatus = "normal" | "delayed" | "error" | "stale";
+export type QuoteStatus = "connected" | "stale" | "disconnected";
 
 export type TradeSymbol = {
   id: string;

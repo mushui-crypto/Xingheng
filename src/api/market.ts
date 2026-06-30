@@ -1,6 +1,7 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
 import type { QuoteStatus, TradeSymbol } from "../types/market";
 import { readStorage, storageKeys } from "../utils/storage";
+import { handleUserAuthFailure } from "./session";
 
 export type ApiCandle = {
   symbol: string;
@@ -114,6 +115,17 @@ function adminHeaders(): Record<string, string> {
   return auth.adminToken ? { Authorization: `Bearer ${auth.adminToken}` } : {};
 }
 
+async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    if (options?.userAuthFailure && (response.status === 401 || response.status === 403)) {
+      handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
+    }
+    throw new Error(payload?.message ?? fallbackMessage);
+  }
+  return payload as T;
+}
+
 export async function syncMarketSymbols(symbols: TradeSymbol[]) {
   const response = await fetch("/api/market/symbols/config", {
     method: "PUT",
@@ -121,20 +133,21 @@ export async function syncMarketSymbols(symbols: TradeSymbol[]) {
     body: JSON.stringify({ symbols }),
   });
 
-  if (!response.ok) {
-    return fetchMarketSymbols();
-  }
-
-  return response.json();
+  return readJson<ApiMarketSymbol[]>(response, "品种配置保存失败。").then((payload) => {
+    const now = new Date().toISOString();
+    return payload.map((symbol) => ({
+      ...symbol,
+      id: `SYM-${symbol.symbol}`,
+      quoteStatus: toQuoteStatus(symbol.status),
+      createdAt: now,
+      updatedAt: now,
+    })) satisfies TradeSymbol[];
+  });
 }
 
 export async function fetchMarketSymbols() {
   const response = await fetch("/api/market/symbols");
-  if (!response.ok) {
-    throw new Error("品种列表加载失败。");
-  }
-
-  const payload = (await response.json()) as ApiMarketSymbol[];
+  const payload = await readJson<ApiMarketSymbol[]>(response, "品种列表加载失败。");
   const now = new Date().toISOString();
   return payload.map((symbol) => ({
     ...symbol,
@@ -147,47 +160,27 @@ export async function fetchMarketSymbols() {
 
 export async function fetchTicker(symbol: string) {
   const response = await fetch(`/api/market/ticker?symbol=${symbol}`);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.message ?? "最新行情加载失败。");
-  }
-  return response.json() as Promise<ApiTicker>;
+  return readJson<ApiTicker>(response, "最新行情加载失败。");
 }
 
 export async function fetchCandles(symbol: string, interval: CandleInterval, limit = 500) {
   const response = await fetch(`/api/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.message ?? "K 线加载失败。");
-  }
-  return response.json() as Promise<ApiCandle[]>;
+  return readJson<ApiCandle[]>(response, "K 线加载失败。");
 }
 
 export async function fetchTradingAccount() {
   const response = await fetch("/api/trading/account", { headers: userHeaders() });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.message ?? "账户加载失败。");
-  }
-  return response.json() as Promise<TradingAccount>;
+  return readJson<TradingAccount>(response, "账户加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchPositions() {
   const response = await fetch("/api/trading/positions", { headers: userHeaders() });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.message ?? "持仓加载失败。");
-  }
-  return response.json() as Promise<PositionView[]>;
+  return readJson<PositionView[]>(response, "持仓加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchOrders() {
   const response = await fetch("/api/trading/orders", { headers: userHeaders() });
-  if (!response.ok) {
-    const payload = await response.json().catch(() => null);
-    throw new Error(payload?.message ?? "订单加载失败。");
-  }
-  return response.json() as Promise<OrderRecord[]>;
+  return readJson<OrderRecord[]>(response, "订单加载失败。", { userAuthFailure: true });
 }
 
 export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number) {
@@ -197,11 +190,7 @@ export async function placeMarketOrder(symbol: string, side: TradeSide, volume: 
     body: JSON.stringify({ symbol, side, volume }),
   });
 
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.message ?? "市价单被拒绝。");
-  }
-  return payload as PositionView;
+  return readJson<PositionView>(response, "市价单被拒绝。", { userAuthFailure: true });
 }
 
 export async function closePosition(positionId: string) {
@@ -210,31 +199,29 @@ export async function closePosition(positionId: string) {
     headers: userHeaders(),
   });
 
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.message ?? "平仓被拒绝。");
-  }
-  return payload as { positionId: string; closePrice: number; pnl: number; account: TradingAccount };
+  return readJson<{ positionId: string; closePrice: number; pnl: number; account: TradingAccount }>(response, "平仓被拒绝。", {
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchAdminAccounts() {
   const response = await fetch("/api/admin/accounts", { headers: adminHeaders() });
-  return response.json() as Promise<TradingAccount[]>;
+  return readJson<TradingAccount[]>(response, "后台交易账户加载失败。");
 }
 
 export async function fetchAdminPositions() {
   const response = await fetch("/api/admin/positions", { headers: adminHeaders() });
-  return response.json() as Promise<PositionView[]>;
+  return readJson<PositionView[]>(response, "后台持仓加载失败。");
 }
 
 export async function fetchAdminOrders() {
   const response = await fetch("/api/admin/orders", { headers: adminHeaders() });
-  return response.json() as Promise<OrderRecord[]>;
+  return readJson<OrderRecord[]>(response, "后台订单加载失败。");
 }
 
 export async function fetchAdminBalanceAdjustments() {
   const response = await fetch("/api/admin/balance-adjustments", { headers: adminHeaders() });
-  return response.json() as Promise<BalanceAdjustment[]>;
+  return readJson<BalanceAdjustment[]>(response, "后台资金调整记录加载失败。");
 }
 
 export async function adjustAdminAccountBalance(userId: string, type: "deposit" | "withdraw" | "reset", amount: number, note = "") {
@@ -243,24 +230,14 @@ export async function adjustAdminAccountBalance(userId: string, type: "deposit" 
     headers: { "Content-Type": "application/json", ...adminHeaders() },
     body: JSON.stringify({ type, amount, note }),
   });
-  const payload = await response.json();
-  if (!response.ok) {
-    throw new Error(payload.message ?? "资金调整失败。");
-  }
-  return payload as TradingAccount;
+  return readJson<TradingAccount>(response, "资金调整失败。");
 }
 
 export async function fetchAdminMarketStatus() {
   const response = await fetch("/api/admin/market/status", { headers: adminHeaders() });
-  return response.json() as Promise<AdminMarketStatus[]>;
+  return readJson<AdminMarketStatus[]>(response, "后台行情状态加载失败。");
 }
 
 function toQuoteStatus(status?: MarketStatus): QuoteStatus {
-  if (status === "connected") {
-    return "normal";
-  }
-  if (status === "disconnected") {
-    return "error";
-  }
-  return "stale";
+  return status ?? "disconnected";
 }

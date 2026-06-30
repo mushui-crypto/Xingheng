@@ -8,6 +8,7 @@ type LoginResult = { ok: true } | { ok: false; message: string };
 type AuthStore = AuthState & {
   login: (email: string, password: string) => Promise<LoginResult>;
   logout: () => void;
+  expireSession: () => void;
   syncSession: () => Promise<void>;
 };
 
@@ -53,6 +54,11 @@ export const useAuthStore = create<AuthStore>((set) => ({
         headers: { Authorization: `Bearer ${current.userToken}` },
       }).catch(() => undefined);
     }
+    writeStorage(storageKeys.auth, defaultAuthState);
+    set(defaultAuthState);
+    useUserStore.getState().clear();
+  },
+  expireSession: () => {
     writeStorage(storageKeys.auth, defaultAuthState);
     set(defaultAuthState);
     useUserStore.getState().clear();

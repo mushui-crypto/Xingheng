@@ -95,7 +95,7 @@ export function AdminTradingPage() {
   };
 
   return (
-    <div className="space-y-6">
+    <div className="xh-page">
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">交易 / 资金查询</h1>
@@ -122,14 +122,14 @@ export function AdminTradingPage() {
           <Input label="备注" value={depositRemark} onChange={(event) => setDepositRemark(event.target.value)} />
           <Button disabled={!depositUserId.trim() || depositAmount <= 0} onClick={() => void submitDeposit()}>确认入金</Button>
         </div>
-        {message ? <p className="mt-4 rounded-lg border border-line bg-white/[0.03] p-3 text-sm text-slate-200">{message}</p> : null}
+        {message ? <p className="mt-4 xh-message">{message}</p> : null}
       </Card>
 
       <Card className="overflow-hidden p-0">
         <SectionTitle title="资金账户" />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[980px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">用户 ID</th>
                 <th className="px-5 py-3 font-medium">资产</th>
@@ -161,7 +161,7 @@ export function AdminTradingPage() {
         <SectionTitle title="交易账户" />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[980px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">用户 ID</th>
                 <th className="px-5 py-3 font-medium">Balance</th>
@@ -181,7 +181,7 @@ export function AdminTradingPage() {
                   <td className="px-5 py-4">{account.equity.toFixed(2)} {account.asset}</td>
                   <td className="px-5 py-4">{account.usedMargin.toFixed(2)}</td>
                   <td className="px-5 py-4">{account.freeMargin.toFixed(2)}</td>
-                  <td className={`px-5 py-4 ${account.floatingPnl >= 0 ? "text-emerald-300" : "text-red-300"}`}>{account.floatingPnl.toFixed(2)}</td>
+                  <td className={`px-5 py-4 ${account.floatingPnl >= 0 ? "text-white" : "text-red-300"}`}>{account.floatingPnl.toFixed(2)}</td>
                 </tr>
               ))}
             </tbody>
@@ -199,7 +199,7 @@ export function AdminTradingPage() {
         </div>
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1120px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">时间</th>
                 <th className="px-5 py-3 font-medium">用户</th>
@@ -240,7 +240,7 @@ export function AdminTradingPage() {
         <SectionTitle title="行情状态" />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[900px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">品种</th>
                 <th className="px-5 py-3 font-medium">API Symbol</th>
@@ -270,7 +270,7 @@ export function AdminTradingPage() {
         <SectionTitle title="最近订单" />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1120px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">时间</th>
                 <th className="px-5 py-3 font-medium">用户</th>
@@ -306,7 +306,7 @@ export function AdminTradingPage() {
         <SectionTitle title="统一资金流水" />
         <div className="overflow-x-auto">
           <table className="w-full min-w-[1120px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
+            <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">时间</th>
                 <th className="px-5 py-3 font-medium">用户</th>

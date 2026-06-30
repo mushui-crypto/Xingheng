@@ -14,10 +14,12 @@ export function AdminDashboardPage() {
   }, [loadAdminUsers]);
 
   return (
-    <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-semibold">数据概览</h1>
-        <p className="mt-2 text-sm text-muted">当前展示基础用户统计与系统运行概览。</p>
+    <div className="xh-page">
+      <div className="xh-page-header">
+        <div>
+          <h1 className="xh-title">数据概览</h1>
+          <p className="xh-subtitle">当前展示基础用户统计与系统运行概览。</p>
+        </div>
       </div>
       <div className="grid gap-4 md:grid-cols-3">
         <Stat icon={<UsersRound size={22} />} label="注册用户" value={String(users.length)} />
@@ -33,7 +35,7 @@ function Stat({ icon, label, value }: { icon: React.ReactNode; label: string; va
     <Card>
       <div className="flex items-center justify-between">
         <p className="text-sm text-muted">{label}</p>
-        <span className="text-emerald-400">{icon}</span>
+        <span className="text-white/80">{icon}</span>
       </div>
       <p className="mt-4 text-3xl font-semibold">{value}</p>
     </Card>

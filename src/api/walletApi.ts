@@ -1,5 +1,6 @@
 import type { TradingAccount } from "./market";
 import { readStorage, storageKeys } from "../utils/storage";
+import { handleUserAuthFailure } from "./session";
 
 export type WalletAsset = "USDT";
 export type WalletAccountType = "funding" | "trading";
@@ -76,9 +77,12 @@ function adminHeaders(): Record<string, string> {
   return auth.adminToken ? { Authorization: `Bearer ${auth.adminToken}` } : {};
 }
 
-async function readJson<T>(response: Response, fallbackMessage: string) {
+async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
+    if (options?.userAuthFailure && (response.status === 401 || response.status === 403)) {
+      handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
+    }
     throw new Error(payload?.message ?? fallbackMessage);
   }
   return payload as T;
@@ -86,12 +90,12 @@ async function readJson<T>(response: Response, fallbackMessage: string) {
 
 export async function fetchWalletAccounts() {
   const response = await fetch("/api/wallet/accounts", { headers: userHeaders() });
-  return readJson<WalletAccounts>(response, "钱包账户加载失败。");
+  return readJson<WalletAccounts>(response, "钱包账户加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchWalletLedger() {
   const response = await fetch("/api/wallet/ledger", { headers: userHeaders() });
-  return readJson<FundingLedgerEntry[]>(response, "资金流水加载失败。");
+  return readJson<FundingLedgerEntry[]>(response, "资金流水加载失败。", { userAuthFailure: true });
 }
 
 export async function transferWalletBalance(
@@ -105,7 +109,7 @@ export async function transferWalletBalance(
     headers: { "Content-Type": "application/json", ...userHeaders() },
     body: JSON.stringify({ from, to, amount, remark }),
   });
-  return readJson<WalletAccounts>(response, "内部转账失败。");
+  return readJson<WalletAccounts>(response, "内部转账失败。", { userAuthFailure: true });
 }
 
 export async function createWithdrawalRequest(amount: number, network: string, walletAddress: string, remark: string) {
@@ -114,12 +118,12 @@ export async function createWithdrawalRequest(amount: number, network: string, w
     headers: { "Content-Type": "application/json", ...userHeaders() },
     body: JSON.stringify({ amount, network, walletAddress, remark }),
   });
-  return readJson<WithdrawalRequest>(response, "出金申请提交失败。");
+  return readJson<WithdrawalRequest>(response, "出金申请提交失败。", { userAuthFailure: true });
 }
 
 export async function fetchWithdrawalRequests() {
   const response = await fetch("/api/wallet/withdrawals", { headers: userHeaders() });
-  return readJson<WithdrawalRequest[]>(response, "出金申请加载失败。");
+  return readJson<WithdrawalRequest[]>(response, "出金申请加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchAdminWalletAccounts() {

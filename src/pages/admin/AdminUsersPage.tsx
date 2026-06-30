@@ -15,7 +15,7 @@ export function AdminUsersPage() {
   }, [loadAdminUsers]);
 
   return (
-    <div className="space-y-6">
+    <div className="xh-page">
       <div>
         <h1 className="text-2xl font-semibold">用户管理</h1>
         <p className="mt-2 text-sm text-muted">查看所有注册用户，并控制账号启用状态。</p>
@@ -29,7 +29,7 @@ export function AdminUsersPage() {
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[760px] text-left text-sm">
-              <thead className="border-b border-line bg-white/[0.03] text-muted">
+              <thead className="xh-thead">
                 <tr>
                   <th className="px-5 py-3 font-medium">用户 ID</th>
                   <th className="px-5 py-3 font-medium">邮箱</th>

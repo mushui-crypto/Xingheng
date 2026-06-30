@@ -33,7 +33,9 @@ type BinanceKlinePayload = {
 
 const defaultStreamBaseUrl = process.env.BINANCE_STREAM_BASE_URL ?? "wss://fstream.binance.com/stream";
 const staleAfterMs = 10_000;
+const staleReconnectAfterMs = 30_000;
 const restPollMs = 5_000;
+const reconnectDelayMs = 3_000;
 
 export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
   private socket: WebSocket | null = null;
@@ -43,6 +45,7 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
   private manuallyStopped = false;
   private latestTicks = new Map<string, MarketTick>();
   private status = new Map<string, MarketStatus>();
+  private staleSince = new Map<string, number>();
 
   constructor(
     private store: KlineStore,
@@ -75,6 +78,7 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    this.socket?.removeAllListeners();
     this.socket?.close();
     this.socket = null;
   }
@@ -154,7 +158,6 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     };
 
     this.latestTicks.set(candle.symbol, tick);
-    this.setStatus(candle.symbol, "connected");
     this.emit("tick", tick);
   }
 
@@ -169,7 +172,7 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
 
         this.store.updateCurrent(latest);
         if (interval === realtimeInterval) {
-          this.seedTickFromCandle(latest);
+          this.updateTickFromCandle(latest, Date.now());
         }
         this.emit("kline", latest);
       } catch (error) {
@@ -178,21 +181,38 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     })));
   }
 
-  private connect() {
+  private connect(reason = "initial") {
+    if (this.manuallyStopped) {
+      return;
+    }
+    if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+      console.log(`[market] skip Binance kline stream connect (${reason}): socket already active`);
+      return;
+    }
+
     const streams = this.symbols
       .flatMap((symbol) => supportedIntervals.map((interval) => `${symbol.toLowerCase()}@kline_${interval}`))
       .join("/");
     const url = `${this.streamBaseUrl}?streams=${streams}`;
-    this.socket = new WebSocket(url);
+    const socket = new WebSocket(url);
+    this.socket = socket;
+    console.log(`[market] connecting Binance kline stream (${reason}): ${this.symbols.join(", ")} (${supportedIntervals.join(", ")})`);
 
-    this.socket.on("open", () => {
+    socket.on("open", () => {
+      if (this.socket !== socket || this.manuallyStopped) {
+        return;
+      }
       for (const symbol of this.symbols) {
         this.setStatus(symbol, "connected");
+        this.staleSince.delete(symbol);
       }
       console.log(`[market] Binance kline stream connected: ${this.symbols.join(", ")} (${supportedIntervals.join(", ")})`);
     });
 
-    this.socket.on("message", (raw) => {
+    socket.on("message", (raw) => {
+      if (this.socket !== socket || this.manuallyStopped) {
+        return;
+      }
       try {
         this.handleMessage(JSON.parse(String(raw)) as BinanceKlinePayload);
       } catch (error) {
@@ -200,18 +220,29 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
       }
     });
 
-    this.socket.on("close", () => {
+    socket.on("close", (code, reasonBuffer) => {
+      if (this.socket !== socket) {
+        return;
+      }
+      this.socket = null;
       for (const symbol of this.symbols) {
         this.setStatus(symbol, "disconnected");
       }
-      this.scheduleReconnect();
+      const closeReason = reasonBuffer.toString() || "no reason";
+      console.warn(`[market] Binance kline stream closed: code=${code} reason=${closeReason}`);
+      this.scheduleReconnect("close");
     });
 
-    this.socket.on("error", (error) => {
-      console.error("[market] Binance stream error", error.message);
+    socket.on("error", (error) => {
+      if (this.socket !== socket || this.manuallyStopped) {
+        return;
+      }
+      console.error(`[market] Binance kline stream error: ${error.message}`);
       for (const symbol of this.symbols) {
         this.setStatus(symbol, "disconnected");
       }
+      this.terminateSocket("error");
+      this.scheduleReconnect("error");
     });
   }
 
@@ -240,19 +271,9 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     }
 
     this.setStatus(symbol, "connected");
+    this.staleSince.delete(symbol);
     if (interval === realtimeInterval) {
-      const tick: MarketTick = {
-        symbol,
-        bid: candle.close,
-        ask: candle.close,
-        last: candle.close,
-        spread: 0,
-        source: "binance",
-        timestamp: payload.data?.E ?? Date.now(),
-      };
-
-      this.latestTicks.set(symbol, tick);
-      this.emit("tick", tick);
+      this.updateTickFromCandle(candle, payload.data?.E ?? Date.now());
     }
     this.emit("kline", candle);
     console.log(
@@ -260,27 +281,55 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     );
   }
 
-  private scheduleReconnect() {
+  private scheduleReconnect(reason: "close" | "error" | "stale watchdog") {
     if (this.manuallyStopped || this.reconnectTimer) {
       return;
     }
 
+    console.warn(`[market] scheduling Binance kline stream reconnect in ${reconnectDelayMs}ms (${reason})`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      this.connect();
-    }, 3000);
+      this.connect(`reconnect after ${reason}`);
+    }, reconnectDelayMs);
   }
 
   private refreshStatuses() {
+    const now = Date.now();
     for (const symbol of this.symbols) {
       const tick = this.latestTicks.get(symbol);
       if (!tick) {
         this.setStatus(symbol, "disconnected");
+        this.staleSince.delete(symbol);
         continue;
       }
 
-      this.setStatus(symbol, Date.now() - tick.timestamp > staleAfterMs ? "stale" : "connected");
+      const isStale = now - tick.timestamp > staleAfterMs;
+      this.setStatus(symbol, isStale ? "stale" : "connected");
+      if (!isStale) {
+        this.staleSince.delete(symbol);
+        continue;
+      }
+
+      const staleStartedAt = this.staleSince.get(symbol) ?? now;
+      this.staleSince.set(symbol, staleStartedAt);
+      if (now - staleStartedAt > staleReconnectAfterMs) {
+        console.warn(
+          `[market] Binance kline stream stale watchdog triggered for ${symbol}: no realtime tick for ${now - tick.timestamp}ms`,
+        );
+        this.terminateSocket("stale watchdog");
+        this.scheduleReconnect("stale watchdog");
+        break;
+      }
     }
+  }
+
+  private terminateSocket(reason: "error" | "stale watchdog") {
+    if (!this.socket) {
+      return;
+    }
+
+    console.warn(`[market] terminating Binance kline stream socket (${reason})`);
+    this.socket.terminate();
   }
 
   private setStatus(symbol: string, next: MarketStatus) {
@@ -290,6 +339,23 @@ export class BinanceMarketService extends EventEmitter<BinanceMarketEvents> {
     if (previous !== next) {
       this.emit("status", normalized, next);
     }
+  }
+
+  private updateTickFromCandle(candle: Candle, timestamp: number) {
+    const tick: MarketTick = {
+      symbol: candle.symbol,
+      bid: candle.close,
+      ask: candle.close,
+      last: candle.close,
+      spread: 0,
+      source: "binance",
+      timestamp,
+    };
+
+    this.latestTicks.set(candle.symbol, tick);
+    this.setStatus(candle.symbol, "connected");
+    this.staleSince.delete(candle.symbol);
+    this.emit("tick", tick);
   }
 }
 

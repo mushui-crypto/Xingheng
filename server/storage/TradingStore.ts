@@ -5,6 +5,7 @@ import type {
   BalanceAdjustment,
   FundingAccount,
   FundingLedgerEntry,
+  MarketSymbol,
   OrderRecord,
   Position,
   TradingAccount,
@@ -22,6 +23,7 @@ type FundingAccountRow = Omit<FundingAccount, "available">;
 type FundingLedgerRow = FundingLedgerEntry;
 type WithdrawalRequestRow = WithdrawalRequest;
 type UserRow = User & { password: string };
+type MarketSymbolRow = Omit<MarketSymbol, "isVisible"> & { isVisible: number };
 
 export class TradingStore {
   private db: DatabaseSync;
@@ -73,6 +75,52 @@ export class TradingStore {
 
   updateUserStatus(id: string, status: User["status"]) {
     this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
+  }
+
+  getMarketSymbol(symbol: string) {
+    const row = this.db.prepare("SELECT * FROM market_symbols WHERE symbol = ?").get(symbol) as MarketSymbolRow | undefined;
+    return row ? toMarketSymbol(row) : null;
+  }
+
+  upsertMarketSymbol(symbol: MarketSymbol) {
+    this.db
+      .prepare(
+        `INSERT INTO market_symbols (
+           symbol, displayName, apiSymbol, category, digits, spread, leverage, contractSize,
+           minLot, maxLot, lotStep, tradeStatus, isVisible, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(symbol) DO UPDATE SET
+           displayName = excluded.displayName,
+           apiSymbol = excluded.apiSymbol,
+           category = excluded.category,
+           digits = excluded.digits,
+           spread = excluded.spread,
+           leverage = excluded.leverage,
+           contractSize = excluded.contractSize,
+           minLot = excluded.minLot,
+           maxLot = excluded.maxLot,
+           lotStep = excluded.lotStep,
+           tradeStatus = excluded.tradeStatus,
+           isVisible = excluded.isVisible,
+           updatedAt = excluded.updatedAt`,
+      )
+      .run(
+        symbol.symbol,
+        symbol.displayName,
+        symbol.apiSymbol,
+        symbol.category,
+        symbol.digits,
+        symbol.spread,
+        symbol.leverage,
+        symbol.contractSize,
+        symbol.minLot,
+        symbol.maxLot,
+        symbol.lotStep,
+        symbol.tradeStatus,
+        symbol.isVisible ? 1 : 0,
+        Date.now(),
+      );
   }
 
   upsertAccount(account: TradingAccount) {
@@ -416,6 +464,23 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
+      CREATE TABLE IF NOT EXISTS market_symbols (
+        symbol TEXT PRIMARY KEY,
+        displayName TEXT NOT NULL,
+        apiSymbol TEXT NOT NULL,
+        category TEXT NOT NULL,
+        digits INTEGER NOT NULL,
+        spread REAL NOT NULL,
+        leverage REAL NOT NULL,
+        contractSize REAL NOT NULL,
+        minLot REAL NOT NULL,
+        maxLot REAL NOT NULL,
+        lotStep REAL NOT NULL,
+        tradeStatus TEXT NOT NULL,
+        isVisible INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS funding_accounts (
         id TEXT NOT NULL,
         userId TEXT PRIMARY KEY,
@@ -478,6 +543,13 @@ function toFundingAccount(row: FundingAccountRow): FundingAccount {
     ...row,
     asset: "USDT",
     available: roundMoney(row.balance - row.frozen),
+  };
+}
+
+function toMarketSymbol(row: MarketSymbolRow): MarketSymbol {
+  return {
+    ...row,
+    isVisible: Boolean(row.isVisible),
   };
 }
 

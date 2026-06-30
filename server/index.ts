@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
-import { registerMarketRoutes } from "./modules/api/marketRoutes";
+import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { BinanceMarketService } from "./modules/market/BinanceMarketService";
 import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
@@ -30,7 +30,7 @@ const tradingStore = new TradingStore();
 const tradingMarket = {
   getSymbol(symbol: string) {
     const normalized = symbol.toUpperCase();
-    return defaultMarketSymbols.find((item) => item.symbol === normalized || item.apiSymbol === normalized) ?? null;
+    return getEditableMarketSymbol(normalized) ?? defaultMarketSymbols.find((item) => item.symbol === normalized || item.apiSymbol === normalized) ?? null;
   },
   getTicker(symbol: string) {
     const normalized = normalizeSymbol(symbol);
@@ -121,12 +121,16 @@ app.use("/api/admin", (request, response, next) => {
   next();
 });
 
-registerMarketRoutes(app, market);
+registerMarketRoutes(app, market, tradingStore);
 
 app.use(["/api/trading", "/api/wallet"], (request, response, next) => {
   const user = users.authenticate(getUserBearerToken(request));
   if (!user) {
     response.status(401).json({ message: "用户未登录或登录已失效。" });
+    return;
+  }
+  if (user.status === "disabled") {
+    response.status(403).json({ message: "账号已禁用，请联系管理员。" });
     return;
   }
   request.user = user;

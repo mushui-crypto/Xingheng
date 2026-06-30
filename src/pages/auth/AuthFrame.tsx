@@ -28,7 +28,7 @@ export function AuthFrame({ activeTab, children }: AuthFrameProps) {
               src="/assets/xingheng-constellation@2x.png"
             />
             <img
-              alt="Xing Heng logo"
+              alt="星衡 logo"
               className="pointer-events-none absolute left-[204px] top-[464px] z-10 h-[152px] w-[791.5px] max-w-none object-fill"
               src="/assets/xingheng-lockup@2x.png"
             />

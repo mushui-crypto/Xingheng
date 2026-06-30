@@ -1,10 +1,10 @@
 # 星衡 Binance 行情与 K 线模块
 
-本模块采用“Binance 行情源 + 内部 K 线服务 + 内部模拟点差”的单体结构，当前支持：
+本模块采用“Binance 合约行情源 + 内部 K 线服务 + 内部模拟点差”的单体结构，当前 MVP 只支持：
 
 - `BTCUSDT`
-- `ETHUSDT`
-- `DOGEUSDT`
+
+`ETHUSDT`、`DOGEUSDT` 和其他 symbol 后续再增加，当前不属于 MVP 交易闭环。
 
 后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
 
@@ -32,13 +32,13 @@ npm run start:api
 | 行情服务 | `server/modules/market/BinanceMarketService.ts` | 启动 Binance REST 初始化、WebSocket 实时订阅、断线重连和状态更新 |
 | Binance REST | `server/modules/market/BinanceRestClient.ts` | 按周期拉取历史 K 线 |
 | K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史 K 线和当前未完成 K 线 |
-| 支持品种 | `server/config/supportedSymbols.ts` | 当前维护 `BTCUSDT / ETHUSDT / DOGEUSDT` |
+| 支持品种 | `server/config/supportedSymbols.ts` | 当前维护 `BTCUSDT` |
 | 行情 API | `server/modules/api/marketRoutes.ts` | 注册行情 REST API |
 | API 与 WebSocket 入口 | `server/index.ts` | 启动 REST API、交易接口和 `/ws` 推送 |
 
 ## Binance REST 历史 K 线
 
-服务启动时会为每个支持品种、每个支持周期拉取最近 500 根 K 线：
+服务启动时会为 `BTCUSDT` 的每个支持周期拉取最近 500 根 K 线：
 
 ```http
 GET https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=500
@@ -71,7 +71,7 @@ wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/btcus
 
 每条 kline 消息会更新内存中的当前 K 线，并通过本地 WebSocket 推送给订阅客户端。Binance 标记当前 K 线已收盘时，会同时写入历史 K 线列表。
 
-Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，再根据品种配置加上模拟点差。也就是说：Binance 提供实时价格，系统内部再算出用于模拟成交的 Bid/Ask。
+Ticker 报价当前由 Binance 合约 `1m` K 线的最新 close 生成，再根据 `BTCUSDT` 品种配置加上模拟点差。也就是说：Binance 提供实时价格，系统内部再算出用于模拟成交的 Bid/Ask。
 
 当前默认使用 Binance 原生行情端点。需要切换端点时，可以通过 `.env` 配置 `BINANCE_REST_BASE_URL`、`BINANCE_KLINE_PATH` 和 `BINANCE_STREAM_BASE_URL`。
 
@@ -115,7 +115,7 @@ GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 
 | 参数 | 说明 |
 | --- | --- |
-| `symbol` | 支持 `BTCUSDT`、`ETHUSDT`、`DOGEUSDT` |
+| `symbol` | 当前支持 `BTCUSDT` |
 | `interval` | 支持 `1m`、`5m`、`15m`、`1h` |
 | `limit` | 1-1000，默认 500 |
 
@@ -187,5 +187,7 @@ ws://127.0.0.1:8787/ws
 
 - 行情来自 Binance。
 - Bid / Ask 不是 Binance 原样盘口，而是系统基于最新价和品种配置 spread 生成。
+- 当前 MVP 只保留 `BTCUSDT`，后台品种管理只允许编辑 `BTCUSDT` 的展示名、点差、杠杆、合约单位、手数规则、交易状态和可见性，不允许修改 `symbol` / `apiSymbol`，也不允许新增其他 symbol。
+- `enabled` 表示允许开仓和平仓；`disabled` / `close_only` 在产品语义上合并为禁止新开仓但允许平仓。
 - 下单、持仓、盈亏、账户、资金账户、出金申请全部是内部模拟，不接真实交易。
 - 当前主资金资产固定为 `USDT`。

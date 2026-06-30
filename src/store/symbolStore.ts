@@ -85,7 +85,7 @@ export const useSymbolStore = create<SymbolStore>((set, get) => ({
   symbols: loadBinanceSymbols(),
   getSymbolConfig: (symbol) =>
     get().symbols.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase()) ?? null,
-  visibleSymbols: () => get().symbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"),
+  visibleSymbols: () => get().symbols.filter((item) => item.isVisible),
   addSymbol: (draft) => {
     const timestamp = new Date().toISOString();
     const symbol: TradeSymbol = {

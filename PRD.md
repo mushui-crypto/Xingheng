@@ -1,19 +1,19 @@
 # 星衡模拟交易平台 PRD
 
-版本：v0.3.1  
-整理日期：2026-06-27  
+版本：v0.3.2  
+整理日期：2026-06-29  
 文档范围：基于当前代码已实现能力整理，不包含未落地的真实入金、出金、撮合、清算、KYC、风控后台等生产交易所能力。
 
 ## 1. 产品概述
 
-星衡是一个“Binance 行情源 + 内部模拟交易 + 内部资金账户”的交易模拟 MVP。系统当前聚焦加密行情演示，提供用户注册登录、行情查看、K 线图、模拟市价单、持仓/订单展示、统一资金账户、出金申请以及后台用户、品种、交易和资金管理能力。
+星衡是一个“Binance 合约行情源 + 内部模拟交易 + 内部资金账户”的交易模拟 MVP。系统当前聚焦 `BTCUSDT` 合约行情演示，提供用户注册登录、行情查看、K 线图、模拟市价单、持仓/订单展示、统一资金账户、出金申请以及后台用户、单品种配置、交易和资金管理能力。
 
-当前交易均为虚拟成交，不涉及真实资金交易。当前主行情源为 Binance，当前主资金资产固定为 `USDT`。
+当前交易均为虚拟成交，不涉及真实资金交易。当前主行情源为 Binance 合约行情，当前唯一交易品种为 `BTCUSDT`，当前主资金资产固定为 `USDT`。
 
 ## 2. 产品目标
 
 1. 提供可演示的用户端模拟交易闭环：注册、登录、看行情、下市价单、看持仓、平仓、看订单。
-2. 提供后台基础运营能力：用户启停、交易品种配置、行情状态查看、模拟账户查询、资金账户管理、出金审核。
+2. 提供后台基础运营能力：用户启停、`BTCUSDT` 品种配置、行情状态查看、模拟账户查询、资金账户管理、出金审核。
 3. 建立行情标准化与 K 线聚合能力，为后续接入真实行情、多品种交易、风控和报表打基础。
 
 ## 3. 用户角色
@@ -51,7 +51,7 @@
 | `/admin/login` | 后台登录 | 固定管理员账号登录 |
 | `/admin/dashboard` | 数据概览 | 注册用户、启用/禁用用户等基础概览 |
 | `/admin/users` | 用户管理 | 查看注册用户；启用/禁用用户 |
-| `/admin/symbols` | 品种管理 | 新增、编辑、停用/启用、软删除品种；配置交易规格 |
+| `/admin/symbols` | 品种管理 | 编辑 `BTCUSDT` 展示与交易规格；当前不允许新增其他 symbol |
 | `/admin/trading` | 交易查询 | 查看模拟账户、持仓、订单、行情状态；调整虚拟资金 |
 
 ## 5. 已有功能说明
@@ -118,13 +118,13 @@ Bearer Token = 服务端发的一次登录凭证。
 
 ### 5.3 行情模块
 
-用户端行情页展示后台配置为 `isVisible=true` 的品种。
+用户端行情页展示后台配置为 `isVisible=true` 的 `BTCUSDT`。当前 MVP 只保留 `BTCUSDT`，`ETHUSDT`、`DOGEUSDT` 和其他品种后续再增加。
 
 展示字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| 品种代码 | 如 BTCUSDT、ETHUSDT、DOGEUSDT |
+| 品种代码 | 当前为 BTCUSDT |
 | 展示名称 | 后台配置的 displayName |
 | Bid | 标准化买价 |
 | Ask | 标准化卖价 |
@@ -138,9 +138,7 @@ Bearer Token = 服务端发的一次登录凭证。
 
 | Symbol | 名称 | 分类 | Digits | Spread | 杠杆 | 合约单位 | 手数范围 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| BTCUSDT | Bitcoin / USDT | crypto | 2 | 10 | 20 | 1 | 0.01-5 / 0.01 |
-| ETHUSDT | Ethereum / USDT | crypto | 2 | 2 | 20 | 1 | 0.01-20 / 0.01 |
-| DOGEUSDT | Dogecoin / USDT | crypto | 6 | 0.00002 | 20 | 1 | 1-100000 / 1 |
+| BTCUSDT | PERP BTC/USDT | crypto | 2 | 10 | 20 | 1 | 0.001-10 / 0.001 |
 
 ### 5.4 交易终端
 
@@ -154,7 +152,7 @@ Bearer Token = 服务端发的一次登录凭证。
 | 支持周期 | `1m`、`5m`、`15m`、`1h` |
 | 初始数据 | 从 `/api/market/candles` 拉取 |
 | 实时更新 | 通过 WebSocket 订阅 candle 推送 |
-| 无历史数据 | 服务端会生成 seed 历史 K 线 |
+| 历史数据 | 服务端从 Binance 合约 REST 拉取历史 K 线；服务重启后重新回补 |
 
 #### 最新报价
 
@@ -184,7 +182,7 @@ Bearer Token = 服务端发的一次登录凭证。
 | 校验项 | 规则 |
 | --- | --- |
 | 品种配置 | 未配置品种拒单 |
-| 交易状态 | `disabled` 禁止开仓和平仓；`close_only` 禁止新开仓 |
+| 交易状态 | `enabled` 允许开仓和平仓；`disabled` / `close_only` 均禁止新开仓但允许平仓 |
 | 行情存在性 | 无 tick 拒单 |
 | 行情状态 | 非 `connected` 拒单 |
 | Bid/Ask | 必须为正数且 Ask > Bid |
@@ -221,6 +219,8 @@ Bearer Token = 服务端发的一次登录凭证。
 
 当前用户端交易和钱包接口已统一使用 Bearer Token 鉴权，不再允许前端自己传 `userId` 伪装身份。
 
+用户被后台禁用后，应立即禁止交易和钱包访问。MVP 可不做完整 token 主动回收，但每次用户侧接口鉴权都必须检查用户当前状态；如果用户状态为 `disabled`，即使 token 仍存在，也应拒绝访问交易、钱包和账户接口。
+
 ### 5.6 后台数据概览
 
 展示注册用户、启用用户、禁用用户等基础统计。
@@ -250,20 +250,24 @@ Bearer Token = 服务端发的一次登录凭证。
 
 | 功能 | 说明 |
 | --- | --- |
-| 新增品种 | 配置 symbol、displayName、apiSymbol、分类、报价位数、点差、杠杆、合约单位、手数规则、交易状态、可见性 |
-| 编辑品种 | 修改已有品种配置 |
-| 停用/启用 | 快速切换 `enabled` / `disabled` |
-| 删除品种 | 当前为软删除：设置 `isVisible=false` 且 `tradeStatus=disabled` |
-| 恢复默认品种 | 重置为默认 BTCUSDT、ETHUSDT、DOGEUSDT |
+| 编辑品种 | 当前只允许编辑 `BTCUSDT` |
+| 允许修改字段 | `displayName`、`spread`、`leverage`、`contractSize`、`minLot`、`maxLot`、`lotStep`、`tradeStatus`、`isVisible` |
+| 不允许修改字段 | `symbol`、`apiSymbol` |
+| 停用/启用 | 切换 `enabled` / `disabled`，其中 `disabled` 只禁止新开仓，允许已有持仓平仓 |
+| 配置持久化 | 后台保存后必须服务端持久化，刷新页面和服务重启后不丢失 |
 | 刷新行情 | 拉取并刷新前端本地报价 |
+
+当前阶段不允许新增其他 symbol，也不允许通过后台把 `ETHUSDT`、`DOGEUSDT` 或其他品种加入真实交易闭环。
 
 交易状态：
 
 | 状态 | 含义 |
 | --- | --- |
 | `enabled` | 可开仓、可平仓 |
-| `close_only` | 仅允许平仓，不允许新开仓 |
-| `disabled` | 禁止开仓和平仓，用户端交易不可用 |
+| `close_only` | 兼容旧字段，产品语义等同于禁止新开仓但允许平仓 |
+| `disabled` | 禁止新开仓但允许已有持仓平仓 |
+
+产品口径不设计“禁止平仓”状态，避免用户因后台配置无法退出已有持仓。
 
 ### 5.9 后台交易查询
 
@@ -293,9 +297,9 @@ Bearer Token = 服务端发的一次登录凭证。
 
 ### 6.1 行情源
 
-当前使用 Binance 行情服务：
+当前使用 Binance 合约行情服务：
 
-- 支持 `BTCUSDT / ETHUSDT / DOGEUSDT`
+- 当前 MVP 只支持 `BTCUSDT`
 - 支持 `1m / 5m / 15m / 1h` K 线
 - 服务启动时通过 REST 拉取历史 K 线
 - 运行时通过 WebSocket 接收实时 ticker / kline
@@ -337,7 +341,7 @@ Bearer Token = 服务端发的一次登录凭证。
 | 方法 | 路径 | 参数/Body | 说明 |
 | --- | --- | --- | --- |
 | GET | `/api/market/symbols` | - | 获取服务端当前品种配置与行情状态 |
-| PUT | `/api/market/symbols/config` | `{ "symbols": MarketSymbol[] }` | 同步前端品种配置到服务端行情服务 |
+| PUT | `/api/market/symbols/config` | `BTCUSDT` 可编辑字段 | 保存 `BTCUSDT` 服务端品种配置 |
 | GET | `/api/market/ticker` | query: `symbol`，默认 BTCUSDT | 获取单品种最新 ticker |
 | GET | `/api/market/candles` | query: `symbol`、`interval`、`limit` | 获取 K 线，`limit` 最大 1000 |
 
@@ -375,15 +379,15 @@ Bearer Token = 服务端发的一次登录凭证。
 
 #### 用户交易接口
 
-用户身份通过请求头 `x-user-id` 传入；未传时默认 `demo-user`。
+用户身份通过 Bearer Token 鉴权。前端不允许通过 `x-user-id` 或请求参数传入用户 ID 来伪装身份。
 
 | 方法 | 路径 | 参数/Body | 说明 |
 | --- | --- | --- | --- |
-| GET | `/api/trading/account` | header: `x-user-id` | 获取或创建模拟交易账户（资产固定为 `USDT`） |
-| GET | `/api/trading/positions` | header: `x-user-id` | 获取当前用户持仓 |
-| GET | `/api/trading/orders` | header: `x-user-id` | 获取当前用户订单 |
+| GET | `/api/trading/account` | Bearer Token | 获取或创建模拟交易账户（资产固定为 `USDT`） |
+| GET | `/api/trading/positions` | Bearer Token | 获取当前用户持仓 |
+| GET | `/api/trading/orders` | Bearer Token | 获取当前用户订单 |
 | POST | `/api/trading/order` | `{ "symbol": "BTCUSDT", "side": "buy", "volume": 0.01 }` | 提交模拟市价单 |
-| POST | `/api/trading/positions/:id/close` | header: `x-user-id` | 平指定持仓 |
+| POST | `/api/trading/positions/:id/close` | Bearer Token | 平指定持仓 |
 
 `TradingAccount` 响应结构：
 
@@ -564,6 +568,8 @@ Bearer Token = 服务端发的一次登录凭证。
 | tradeStatus | enum | `enabled`、`close_only`、`disabled` |
 | isVisible | boolean | 用户端是否可见 |
 
+当前 MVP 只允许后台编辑 `BTCUSDT` 的可配置字段；`symbol` 和 `apiSymbol` 固定为 `BTCUSDT`，不可编辑。`close_only` 和 `disabled` 为兼容字段，产品行为均为禁止新开仓但允许平仓。
+
 ### 8.3 订单 OrderRecord
 
 | 字段 | 类型 | 说明 |
@@ -592,18 +598,18 @@ Bearer Token = 服务端发的一次登录凭证。
 
 | 数据 | 当前存储 | 说明 |
 | --- | --- | --- |
-| 用户、登录态、管理员登录态、品种配置 | 浏览器 `localStorage` | 不同浏览器/设备不共享 |
-| 模拟账户、持仓、订单、资金账户、资金流水、出金申请 | SQLite | 服务重启后可恢复 |
+| 用户、模拟账户、持仓、订单、资金账户、资金流水、出金申请 | SQLite | 服务重启后可恢复 |
+| 用户登录态、管理员登录态 | 前端 `localStorage` 保存 token，服务端校验 token | 不保存完整用户注册表和密码 |
+| `BTCUSDT` 品种配置 | 服务端持久化，建议 SQLite | 后台保存后刷新页面和服务重启不丢失 |
 | 当前/历史 K 线 | API 服务进程内存 | 服务重启后重新从 Binance 拉取 |
 
 localStorage key：
 
 | Key | 说明 |
 | --- | --- |
-| `xingheng.users` | 注册用户 |
 | `xingheng.auth` | 用户登录态 |
 | `xingheng.adminAuth` | 管理员登录态 |
-| `xingheng.tradeSymbols.v2` | 品种配置 |
+| `xingheng.tradeSymbols.v2` | 前端品种 UI 状态缓存，不作为交易规则最终口径 |
 
 ## 10. 非功能与风控要求
 
@@ -621,9 +627,9 @@ localStorage key：
 
 | 方向 | 要求 |
 | --- | --- |
-| 鉴权 | 多管理员账号体系、RBAC、用户侧服务端鉴权 |
+| 鉴权 | 多管理员账号体系、RBAC、token 过期/刷新、禁用用户 token 主动回收 |
 | 密码安全 | 密码哈希、重置密码、登录限流 |
-| 数据持久化 | 用户、账户、订单、持仓、调整记录入库 |
+| 数据持久化 | 品种配置版本记录、操作审计、异常回滚 |
 | 风控 | 最大持仓、最大杠杆、强平线、风控日志、异常行情熔断 |
 | 真实交易合规 | KYC、AML、资金账户、出入金、报表、监管审计 |
 | 监控 | 行情延迟、WebSocket 连接、API 错误率、订单拒绝率 |
@@ -631,23 +637,73 @@ localStorage key：
 ## 11. 已知限制
 
 1. 当前是模拟交易 MVP，不是生产级交易所或真实经纪商系统。
-2. 用户注册和登录当前仍在前端本地完成，密码明文保存在浏览器 localStorage。
+2. 用户注册和登录已服务端化；密码安全仍是 MVP 安全债，后续需要补充密码哈希、登录限流、token 过期/刷新等能力。
 3. 后台管理员当前是单固定账号方案，虽已接入服务端 Bearer Token 鉴权，但未支持多管理员、权限分级和密码安全加固。
 4. 交易账户、持仓、订单、资金账户、资金流水、出金申请已持久化到 SQLite；K 线仍保存在 API 服务进程内存，服务重启后需重新从 Binance 拉取。
 5. 交易账户当前资产固定为 `USDT`，如后续扩展多资产，需要重新设计交易账户资产模型。
-6. 品种配置从前端同步到服务端，服务端重启后会回到默认品种，需前端再次同步。
+6. 当前 MVP 只允许编辑 `BTCUSDT`，不支持新增其他 symbol；后台保存的 `BTCUSDT` 配置要求服务端持久化，刷新页面和服务重启后不丢失。
 7. 当前仅支持市价单，不支持限价单、止损止盈、挂单撤单、部分平仓。
 8. 当前无手续费、隔夜费、滑点、爆仓/强平、交易时段等规则。
-9. 当前没有真实充值、提现、钱包、账变流水、KYC、代理返佣等交易所/经纪商生产模块。
+9. 当前没有真实主网充值、提现、KYC、代理返佣等交易所/经纪商生产模块；后续 BNB Smart Chain Testnet 出金属于测试链验证，不代表真实资金能力。
 
 ## 12. 建议下一阶段需求
 
 | 优先级 | 需求 | 说明 |
 | --- | --- | --- |
-| P0 | 用户侧服务端鉴权 | 将用户注册、登录和登录态迁移到服务端 |
+| P0 | 禁用用户鉴权状态检查 | 用户被后台禁用后，每次交易/钱包鉴权都应拒绝访问 |
+| P0 | `BTCUSDT` 品种配置持久化 | 后台品种配置保存后刷新页面和服务重启不丢失 |
+| P1 | 部分平仓 | 剩余持仓保留原 entryPrice，margin 按剩余 volume 重算 |
+| P1 | 限价开仓与撤单 | 第一版只支持限价开仓 + 撤单，pending 阶段不冻结保证金，触发时再校验 |
+| P1 | 持仓级 TP/SL | 第一版只做持仓级止盈止损，触发后按市价平仓 |
+| P1 | BNB Smart Chain Testnet 出金 | 审核通过后先广播，链上确认后正式扣减；失败释放冻结 |
 | P1 | 多资产账户设计 | 如后续扩展非 USDT 交易账户，需要重新设计账户资产字段与保证金口径 |
-| P1 | 订单能力增强 | 支持挂单、止盈止损、部分平仓、撤单 |
 | P1 | 风控能力 | 最大手数、最大持仓、保证金率、强平规则 |
 | P1 | 资金流水增强 | 进一步补齐成交盈亏、异常回滚等账变场景 |
 | P2 | 报表导出 | 用户交易记录、后台订单/账户导出 |
 | P2 | 行情监控 | 行情源延迟、断线、异常跳价监控 |
+
+### 12.1 V0.4 交易增强边界
+
+交易增强优先级：
+
+1. 部分平仓
+2. 限价开仓与撤单
+3. 持仓级 TP/SL
+
+部分平仓第一版：
+
+- 用户可对已有持仓输入平仓 volume。
+- 平仓 volume 必须大于 0 且不超过当前持仓 volume。
+- 多单按 Bid 平仓，空单按 Ask 平仓。
+- 剩余持仓保留原 entryPrice。
+- 剩余持仓 margin 按剩余 volume 重算。
+- 已平部分生成 close 订单并记录已实现盈亏。
+
+限价单第一版：
+
+- 只支持限价开仓和撤单。
+- pending 阶段不冻结保证金。
+- 行情触发时重新校验用户状态、品种状态、行情状态、Bid/Ask、手数规则和可用保证金。
+- 触发时校验失败则订单转为 rejected，并记录拒绝原因。
+- 不支持限价平仓、部分成交、修改挂单和挂单保证金冻结。
+
+持仓级 TP/SL 第一版：
+
+- 每个持仓可设置止盈价和止损价。
+- 触发后按市价平仓。
+- 行情 stale/disconnected 时不触发。
+- 不支持独立止盈止损挂单、OCO、分批止盈和移动止损。
+
+### 12.2 BNB Smart Chain Testnet 钱包边界
+
+当前 MVP 的入金、转账和出金审核仍是内部模拟账本流程，不触达主网真实资金。
+
+后续测试链阶段使用 `BNB Smart Chain Testnet`：
+
+- 用户提交测试链出金申请后先冻结 Funding 可用余额。
+- 后台审核通过后先广播测试链交易。
+- 链上确认后再正式扣减 Funding balance 和 frozen。
+- 广播失败或链上确认失败时释放冻结金额，出金申请标记失败。
+- 记录测试链 txHash、网络、地址、链上状态和失败原因。
+
+测试链资产只用于技术验证，不代表真实资产价值；真实主网出入金、托管、清算、KYC/AML 与合规审计不属于当前 MVP 范围。

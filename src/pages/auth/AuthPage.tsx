@@ -1,6 +1,7 @@
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useState } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
+import { USER_AUTH_MESSAGE_KEY } from "../../api/session";
 import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
 import { isValidEmail } from "../../utils/validators";
@@ -36,6 +37,14 @@ function LoginForm() {
 
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    const authMessage = window.sessionStorage.getItem(USER_AUTH_MESSAGE_KEY);
+    if (authMessage) {
+      window.sessionStorage.removeItem(USER_AUTH_MESSAGE_KEY);
+      setMessage(authMessage);
+    }
+  }, []);
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setSubmitting(true);
@@ -51,8 +60,8 @@ function LoginForm() {
   return (
     <>
       <AuthHeader
-        title="Enter Xing Heng"
-        subtitle="Sign in or create an account to continue."
+        title="进入星衡"
+        subtitle="登录或创建账号以进入模拟交易控制台。"
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
@@ -137,8 +146,8 @@ function RegisterForm() {
   return (
     <>
       <AuthHeader
-        title="Create Xing Heng"
-        subtitle="Create an account to enter the simulation console."
+        title="创建星衡账号"
+        subtitle="创建账号后进入星衡模拟交易控制台。"
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
