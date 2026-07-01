@@ -10,6 +10,7 @@ import { BinanceMarketService } from "./modules/market/BinanceMarketService";
 import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
+import { OnchainWalletService } from "./wallet/OnchainWalletService";
 import { WalletService } from "./wallet/WalletService";
 import type { MarketSymbol, MarketTick, TradeSide, User } from "./types";
 
@@ -45,7 +46,8 @@ const tradingMarket = {
 
 const trading = new TradingService(tradingMarket, tradingStore);
 trading.getAccount("demo-user");
-const wallet = new WalletService(tradingStore, trading);
+const onchainWallet = new OnchainWalletService(tradingStore);
+const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const users = new UserService(tradingStore);
 const activeAdminTokens = new Set<string>();
 
@@ -216,6 +218,18 @@ app.get("/api/wallet/accounts", (request, response) => {
   response.json(wallet.getAccounts(getUserId(request)));
 });
 
+app.get("/api/wallet/deposit-address", (request, response) => {
+  try {
+    response.json(wallet.getDepositAddress(getUserId(request)));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.get("/api/wallet/deposits", (request, response) => {
+  response.json(wallet.listOnchainDeposits(getUserId(request)));
+});
+
 app.get("/api/wallet/ledger", (request, response) => {
   response.json(wallet.listLedger(getUserId(request)));
 });
@@ -259,6 +273,14 @@ app.get("/api/admin/wallet/accounts", (_request, response) => {
   response.json(wallet.listAccounts());
 });
 
+app.get("/api/admin/wallet/deposit-addresses", (_request, response) => {
+  response.json(wallet.listDepositAddresses());
+});
+
+app.get("/api/admin/wallet/deposits", (_request, response) => {
+  response.json(wallet.listOnchainDeposits());
+});
+
 app.get("/api/admin/wallet/ledger", (_request, response) => {
   response.json(wallet.listLedger());
 });
@@ -275,9 +297,25 @@ app.post("/api/admin/wallet/deposit", (request, response) => {
   }
 });
 
-app.post("/api/admin/wallet/withdrawals/:id/approve", (request, response) => {
+app.post("/api/admin/wallet/onchain/scan", async (_request, response) => {
   try {
-    response.json(wallet.approveWithdrawal(request.params.id, request.body?.reviewNote, request.body?.txHash));
+    response.json(await wallet.scanDeposits());
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/admin/wallet/withdrawals/confirm", async (_request, response) => {
+  try {
+    response.json(await wallet.confirmWithdrawals());
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/admin/wallet/withdrawals/:id/approve", async (request, response) => {
+  try {
+    response.json(await wallet.approveWithdrawal(request.params.id, request.body?.reviewNote));
   } catch (error) {
     sendBadRequest(response, error);
   }

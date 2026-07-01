@@ -8,13 +8,9 @@ type SymbolStore = {
   symbols: TradeSymbol[];
   getSymbolConfig: (symbol: string) => TradeSymbol | null;
   visibleSymbols: () => TradeSymbol[];
-  addSymbol: (draft: SymbolDraft) => void;
   updateSymbol: (id: string, draft: SymbolDraft) => void;
-  setTradeStatus: (id: string, tradeStatus: TradeSymbol["tradeStatus"]) => void;
-  deleteSymbol: (id: string) => void;
   setQuoteStatus: (symbol: string, quoteStatus: QuoteStatus) => void;
   setSymbolsFromBackend: (symbols: TradeSymbol[]) => void;
-  resetSymbols: () => void;
 };
 
 const now = new Date().toISOString();
@@ -86,21 +82,6 @@ export const useSymbolStore = create<SymbolStore>((set, get) => ({
   getSymbolConfig: (symbol) =>
     get().symbols.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase()) ?? null,
   visibleSymbols: () => get().symbols.filter((item) => item.isVisible),
-  addSymbol: (draft) => {
-    const timestamp = new Date().toISOString();
-    const symbol: TradeSymbol = {
-      ...draft,
-      id: `SYM-${Date.now().toString(36).toUpperCase()}`,
-      symbol: draft.symbol.trim().toUpperCase(),
-      apiSymbol: draft.apiSymbol.trim().toUpperCase(),
-      quoteStatus: "stale",
-      createdAt: timestamp,
-      updatedAt: timestamp,
-    };
-    const symbols = [symbol, ...get().symbols];
-    persist(symbols);
-    set({ symbols });
-  },
   updateSymbol: (id, draft) => {
     const timestamp = new Date().toISOString();
     const symbols = get().symbols.map((item) =>
@@ -113,20 +94,6 @@ export const useSymbolStore = create<SymbolStore>((set, get) => ({
             updatedAt: timestamp,
           }
         : item,
-    );
-    persist(symbols);
-    set({ symbols });
-  },
-  setTradeStatus: (id, tradeStatus) => {
-    const symbols = get().symbols.map((item) =>
-      item.id === id ? { ...item, tradeStatus, updatedAt: new Date().toISOString() } : item,
-    );
-    persist(symbols);
-    set({ symbols });
-  },
-  deleteSymbol: (id) => {
-    const symbols = get().symbols.map((item) =>
-      item.id === id ? { ...item, isVisible: false, tradeStatus: "disabled" as const, updatedAt: new Date().toISOString() } : item,
     );
     persist(symbols);
     set({ symbols });
@@ -153,9 +120,5 @@ export const useSymbolStore = create<SymbolStore>((set, get) => ({
     });
     persist(symbols);
     set({ symbols });
-  },
-  resetSymbols: () => {
-    persist(defaultTradeSymbols);
-    set({ symbols: defaultTradeSymbols });
   },
 }));

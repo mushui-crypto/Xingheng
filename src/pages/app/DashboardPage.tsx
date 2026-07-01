@@ -5,6 +5,8 @@ import { fetchWalletAccounts, type WalletAccounts } from "../../api/walletApi";
 import { Card } from "../../components/ui/Card";
 import { useUserStore } from "../../store/userStore";
 
+const tokenIconSrc = "/assets/xingheng-logo@2x.png";
+
 export function DashboardPage() {
   const user = useUserStore((state) => state.currentUser);
   const [accounts, setAccounts] = useState<WalletAccounts | null>(null);
@@ -43,7 +45,10 @@ export function DashboardPage() {
       <div className="grid gap-4 md:grid-cols-3">
         <Card>
           <p className="text-sm text-muted">交易账户权益</p>
-          <p className="mt-3 text-3xl font-semibold">USDT {accounts?.trading.equity?.toFixed(2) ?? "--"}</p>
+          <div className="mt-3 flex items-center gap-3">
+            <img src={tokenIconSrc} alt="USDT token icon" className="h-9 w-9 object-contain" />
+            <p className="text-3xl font-semibold">USDT {accounts?.trading.equity?.toFixed(2) ?? "--"}</p>
+          </div>
           <p className="mt-2 text-xs text-muted">实时读取当前交易账户权益。</p>
         </Card>
         <Card>
@@ -53,7 +58,10 @@ export function DashboardPage() {
         </Card>
         <Card>
           <p className="text-sm text-muted">资金账户可用余额</p>
-          <p className="mt-3 text-3xl font-semibold">USDT {accounts?.funding.available?.toFixed(2) ?? "--"}</p>
+          <div className="mt-3 flex items-center gap-3">
+            <img src={tokenIconSrc} alt="USDT token icon" className="h-9 w-9 object-contain" />
+            <p className="text-3xl font-semibold">USDT {accounts?.funding.available?.toFixed(2) ?? "--"}</p>
+          </div>
           <p className="mt-2 text-xs text-muted">实时读取当前资金账户可用余额。</p>
         </Card>
       </div>

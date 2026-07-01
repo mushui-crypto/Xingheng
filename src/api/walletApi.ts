@@ -4,6 +4,9 @@ import { handleUserAuthFailure } from "./session";
 
 export type WalletAsset = "USDT";
 export type WalletAccountType = "funding" | "trading";
+export type WalletNetwork = "BSC_TESTNET";
+export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
+export type WithdrawalStatus = "pending_review" | "broadcasting" | "broadcasted" | "confirmed" | "failed" | "rejected";
 
 export type FundingAccount = {
   id: string;
@@ -34,7 +37,7 @@ export type FundingLedgerEntry = {
     | "transfer_in"
     | "transfer_out"
     | "adjustment";
-  source: "admin_manual" | "withdrawal_request" | "internal_transfer" | "onchain_reserved";
+  source: "admin_manual" | "withdrawal_request" | "internal_transfer" | "onchain_deposit" | "onchain_reserved";
   asset: WalletAsset;
   amount: number;
   balanceBefore: number;
@@ -56,14 +59,67 @@ export type WithdrawalRequest = {
   userId: string;
   asset: WalletAsset;
   amount: number;
-  status: "pending" | "approved" | "rejected";
+  status: WithdrawalStatus;
   network?: string | null;
   walletAddress?: string | null;
   txHash?: string | null;
+  onchainStatus?: WithdrawalStatus | null;
+  chainId?: number | null;
+  tokenAddress?: string | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+  broadcastTxHash?: string | null;
+  broadcastedAt?: number | null;
+  confirmedAt?: number | null;
+  failedAt?: number | null;
+  failedReason?: string | null;
+  confirmations?: number | null;
+  broadcastAttemptCount?: number | null;
+  lastBroadcastAttemptAt?: number | null;
   remark?: string | null;
   reviewNote?: string | null;
   createdAt: number;
   reviewedAt?: number | null;
+  updatedAt: number;
+};
+
+export type DepositAddress = {
+  id: string;
+  userId: string;
+  network: WalletNetwork;
+  address: string;
+  derivationIndex: number;
+  createdAt: number;
+  updatedAt: number;
+  chainId?: number;
+  tokenAddress?: string;
+  tokenDecimals?: number;
+  tokenSymbol?: string;
+  explorerBaseUrl?: string;
+};
+
+export type OnchainDeposit = {
+  id: string;
+  userId: string;
+  asset: WalletAsset;
+  network: WalletNetwork;
+  chainId: number;
+  tokenAddress: string;
+  fromAddress: string;
+  toAddress: string;
+  amount: string;
+  amountDecimal: number;
+  txHash: string;
+  logIndex: number;
+  blockNumber: number;
+  blockHash?: string | null;
+  confirmations: number;
+  status: OnchainDepositStatus;
+  creditedLedgerId?: string | null;
+  failedReason?: string | null;
+  detectedAt: number;
+  confirmedAt?: number | null;
+  createdAt: number;
   updatedAt: number;
 };
 
@@ -91,6 +147,16 @@ async function readJson<T>(response: Response, fallbackMessage: string, options?
 export async function fetchWalletAccounts() {
   const response = await fetch("/api/wallet/accounts", { headers: userHeaders() });
   return readJson<WalletAccounts>(response, "钱包账户加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchDepositAddress() {
+  const response = await fetch("/api/wallet/deposit-address", { headers: userHeaders() });
+  return readJson<DepositAddress>(response, "充值地址加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchOnchainDeposits() {
+  const response = await fetch("/api/wallet/deposits", { headers: userHeaders() });
+  return readJson<OnchainDeposit[]>(response, "链上充值记录加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchWalletLedger() {
@@ -131,6 +197,16 @@ export async function fetchAdminWalletAccounts() {
   return readJson<WalletAccounts[]>(response, "后台钱包账户加载失败。");
 }
 
+export async function fetchAdminDepositAddresses() {
+  const response = await fetch("/api/admin/wallet/deposit-addresses", { headers: adminHeaders() });
+  return readJson<DepositAddress[]>(response, "后台充值地址加载失败。");
+}
+
+export async function fetchAdminOnchainDeposits() {
+  const response = await fetch("/api/admin/wallet/deposits", { headers: adminHeaders() });
+  return readJson<OnchainDeposit[]>(response, "后台链上充值记录加载失败。");
+}
+
 export async function fetchAdminWalletLedger() {
   const response = await fetch("/api/admin/wallet/ledger", { headers: adminHeaders() });
   return readJson<FundingLedgerEntry[]>(response, "后台资金流水加载失败。");
@@ -166,4 +242,30 @@ export async function rejectWithdrawalRequest(id: string, reviewNote: string) {
     body: JSON.stringify({ reviewNote }),
   });
   return readJson<WithdrawalRequest>(response, "出金拒绝失败。");
+}
+
+export async function runAdminOnchainScan() {
+  const response = await fetch("/api/admin/wallet/onchain/scan", {
+    method: "POST",
+    headers: adminHeaders(),
+  });
+  return readJson<{
+    fromBlock?: number;
+    toBlock?: number;
+    scannedBlocks?: number;
+    deposits?: number;
+    saved?: number;
+    credited?: number;
+    status?: "ok" | "rate_limited";
+    rateLimited?: boolean;
+    message?: string;
+  }>(response, "链上扫描触发失败。");
+}
+
+export async function confirmAdminWithdrawals() {
+  const response = await fetch("/api/admin/wallet/withdrawals/confirm", {
+    method: "POST",
+    headers: adminHeaders(),
+  });
+  return readJson<WithdrawalRequest[]>(response, "出金确认触发失败。");
 }

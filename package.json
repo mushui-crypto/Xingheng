@@ -9,11 +9,17 @@
     "dev:api": "tsx watch server/index.ts",
     "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
     "preview": "vite preview",
-    "start:api": "tsx server/index.ts"
+    "start:api": "tsx server/index.ts",
+    "chain:compile": "hardhat compile --config hardhat.config.cjs",
+    "chain:deploy:bscTestnet": "hardhat run chain/scripts/deploy-token.cjs --config hardhat.config.cjs --network bscTestnet",
+    "chain:mint": "hardhat run chain/scripts/mint-token.cjs --config hardhat.config.cjs --network bscTestnet",
+    "chain:transfer": "hardhat run chain/scripts/transfer-token.cjs --config hardhat.config.cjs --network bscTestnet"
   },
   "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
+    "ethers": "^6.15.0",
     "express": "^5.2.1",
     "lightweight-charts": "^5.2.0",
     "lucide-react": "^0.468.0",
@@ -24,6 +30,7 @@
     "zustand": "^5.0.5"
   },
   "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^4.0.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^25.9.3",
@@ -35,6 +42,7 @@
     "concurrently": "^10.0.3",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
+    "hardhat": "^3.0.0",
     "tsx": "^4.22.4",
     "typescript": "^5.8.3",
     "vite": "^8.0.16"

@@ -1,24 +1,35 @@
+import { HDNodeWallet } from "ethers";
 import type { TradingService } from "../market/TradingService";
 import type { TradingStore } from "../storage/TradingStore";
+import { OnchainWalletService } from "./OnchainWalletService";
 import type {
+  DepositAddress,
   FundingAccount,
   FundingLedgerEntry,
   FundingLedgerStatus,
   FundingLedgerType,
   WalletAccountType,
+  WalletNetwork,
   WithdrawalRequest,
 } from "../types";
 
 const defaultUserId = "demo-user";
 const asset = "USDT";
+const depositNetwork: WalletNetwork = "BSC_TESTNET";
 
 type TransferSide = WalletAccountType;
 
 export class WalletService {
+  private depositMnemonic: string;
+  private depositDerivationPath: string;
+
   constructor(
     private store: TradingStore,
     private trading: TradingService,
+    private onchain: OnchainWalletService,
   ) {
+    this.depositMnemonic = process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "";
+    this.depositDerivationPath = process.env.BSC_TESTNET_DERIVATION_PATH?.trim() || "m/44'/60'/0'/0";
     this.ensureFundingAccount(defaultUserId);
   }
 
@@ -49,6 +60,29 @@ export class WalletService {
 
   listWithdrawals(userId?: string) {
     return this.store.listWithdrawalRequests(userId ? normalizeUserId(userId) : undefined);
+  }
+
+  getDepositAddress(userId: string) {
+    const normalizedUserId = normalizeUserId(userId);
+    const address = this.store.transaction(() => this.getOrCreateDepositAddress(normalizedUserId));
+    return {
+      ...this.onchain.getPublicConfig(),
+      ...address,
+    };
+  }
+
+  listDepositAddresses() {
+    return this.store.listDepositAddresses();
+  }
+
+  listOnchainDeposits(userId?: string) {
+    return this.store.listOnchainDeposits(userId ? normalizeUserId(userId) : undefined);
+  }
+
+  async scanDeposits() {
+    const result = await this.onchain.scanDeposits();
+    const credited = this.creditConfirmedDeposits();
+    return { ...result, credited };
   }
 
   deposit(userId: string, amount: number, remark?: string) {
@@ -153,10 +187,23 @@ export class WalletService {
         userId: normalizedUserId,
         asset,
         amount: roundMoney(input.amount),
-        status: "pending",
-        network: normalizeOptional(input.network),
+        status: "pending_review",
+        network: depositNetwork,
         walletAddress: normalizeOptional(input.walletAddress),
         txHash: null,
+        onchainStatus: "pending_review",
+        chainId: this.onchain.config.chainId,
+        tokenAddress: this.onchain.config.tokenAddress,
+        fromAddress: null,
+        toAddress: normalizeOptional(input.walletAddress),
+        broadcastTxHash: null,
+        broadcastedAt: null,
+        confirmedAt: null,
+        failedAt: null,
+        failedReason: null,
+        confirmations: 0,
+        broadcastAttemptCount: 0,
+        lastBroadcastAttemptAt: null,
         remark: normalizeOptional(input.remark),
         reviewNote: null,
         createdAt: now,
@@ -193,12 +240,43 @@ export class WalletService {
     });
   }
 
-  approveWithdrawal(id: string, reviewNote?: string, txHash?: string) {
-    return this.reviewWithdrawal(id, "approved", reviewNote, txHash);
+  async approveWithdrawal(id: string, reviewNote?: string) {
+    const broadcasting = this.markWithdrawalBroadcasting(id, reviewNote);
+    try {
+      const broadcast = await this.onchain.broadcastWithdrawal(broadcasting);
+      return this.markWithdrawalBroadcasted(id, broadcast);
+    } catch (error) {
+      return this.failWithdrawal(id, error instanceof Error ? error.message : "出金广播失败。");
+    }
   }
 
   rejectWithdrawal(id: string, reviewNote?: string) {
-    return this.reviewWithdrawal(id, "rejected", reviewNote);
+    return this.rejectPendingWithdrawal(id, reviewNote);
+  }
+
+  async confirmWithdrawals() {
+    const results: WithdrawalRequest[] = [];
+    for (const request of this.store.listWithdrawalsByStatuses(["broadcasted"])) {
+      const txHash = request.broadcastTxHash ?? request.txHash;
+      if (!txHash) {
+        results.push(this.failWithdrawal(request.id, "缺少 txHash，无法确认链上出金。"));
+        continue;
+      }
+      const status = await this.onchain.getTransactionStatus(txHash);
+      if (!status.found) {
+        continue;
+      }
+      if (status.failed) {
+        results.push(this.failWithdrawal(request.id, "链上交易执行失败。", status.confirmations));
+        continue;
+      }
+      if (status.confirmed) {
+        results.push(this.confirmWithdrawal(request.id, status.confirmations));
+      } else {
+        this.store.saveWithdrawalRequest({ ...request, confirmations: status.confirmations, updatedAt: Date.now() });
+      }
+    }
+    return results;
   }
 
   private transferFundingToTrading(userId: string, amount: number, remark?: string) {
@@ -307,14 +385,14 @@ export class WalletService {
     });
   }
 
-  private reviewWithdrawal(id: string, status: "approved" | "rejected", reviewNote?: string, txHash?: string) {
+  private markWithdrawalBroadcasting(id: string, reviewNote?: string) {
     return this.store.transaction(() => {
       const request = this.store.getWithdrawalRequest(id);
       if (!request) {
         throw new Error("出金申请不存在。");
       }
-      if (request.status !== "pending") {
-        throw new Error("只能审核 pending 状态的出金申请。");
+      if (request.status !== "pending_review") {
+        throw new Error("只能审核 pending_review 状态的出金申请。");
       }
 
       const before = this.ensureFundingAccount(request.userId);
@@ -322,22 +400,70 @@ export class WalletService {
         throw new Error("资金账户冻结金额不足，无法审核。");
       }
       const now = Date.now();
+      const updated: WithdrawalRequest = {
+        ...request,
+        status: "broadcasting",
+        onchainStatus: "broadcasting",
+        reviewNote: normalizeOptional(reviewNote),
+        reviewedAt: now,
+        broadcastAttemptCount: (request.broadcastAttemptCount ?? 0) + 1,
+        lastBroadcastAttemptAt: now,
+        updatedAt: now,
+      };
+      this.store.saveWithdrawalRequest(updated);
+      return updated;
+    });
+  }
+
+  private markWithdrawalBroadcasted(id: string, broadcast: { txHash: string; fromAddress: string; toAddress: string }) {
+    return this.store.transaction(() => {
+      const request = this.store.getWithdrawalRequest(id);
+      if (!request || request.status !== "broadcasting") {
+        throw new Error("出金申请状态不是 broadcasting。");
+      }
+      const now = Date.now();
+      const updated: WithdrawalRequest = {
+        ...request,
+        status: "broadcasted",
+        onchainStatus: "broadcasted",
+        txHash: broadcast.txHash,
+        broadcastTxHash: broadcast.txHash,
+        fromAddress: broadcast.fromAddress,
+        toAddress: broadcast.toAddress,
+        broadcastedAt: now,
+        updatedAt: now,
+      };
+      this.store.saveWithdrawalRequest(updated);
+      return updated;
+    });
+  }
+
+  private confirmWithdrawal(id: string, confirmations: number) {
+    return this.store.transaction(() => {
+      const request = this.store.getWithdrawalRequest(id);
+      if (!request || request.status !== "broadcasted") {
+        throw new Error("出金申请状态不是 broadcasted。");
+      }
+      const before = this.ensureFundingAccount(request.userId);
+      if (before.frozen < request.amount) {
+        throw new Error("资金账户冻结金额不足，无法确认出金。");
+      }
+      const now = Date.now();
       const after = this.withAvailable({
         ...before,
-        balance: status === "approved" ? roundMoney(before.balance - request.amount) : before.balance,
+        balance: roundMoney(before.balance - request.amount),
         frozen: roundMoney(before.frozen - request.amount),
         updatedAt: now,
       });
       if (after.balance < 0 || after.frozen < 0) {
-        throw new Error("资金账户余额异常，无法审核。");
+        throw new Error("资金账户余额异常，无法确认出金。");
       }
-
       const updated: WithdrawalRequest = {
         ...request,
-        status,
-        txHash: normalizeOptional(txHash) ?? request.txHash ?? null,
-        reviewNote: normalizeOptional(reviewNote),
-        reviewedAt: now,
+        status: "confirmed",
+        onchainStatus: "confirmed",
+        confirmations,
+        confirmedAt: now,
         updatedAt: now,
       };
       this.store.upsertFundingAccount(after);
@@ -347,23 +473,131 @@ export class WalletService {
           userId: request.userId,
           accountId: after.id,
           accountType: "funding",
-          type: status === "approved" ? "withdrawal_approved" : "withdrawal_rejected",
+          type: "withdrawal_approved",
           source: "withdrawal_request",
           amount: request.amount,
           balanceBefore: before.balance,
           balanceAfter: after.balance,
           frozenBefore: before.frozen,
           frozenAfter: after.frozen,
-          status: status === "approved" ? "completed" : "rejected",
+          status: "completed",
           relatedId: request.id,
           network: request.network,
           walletAddress: request.walletAddress,
-          txHash: updated.txHash,
+          txHash: updated.broadcastTxHash ?? updated.txHash,
           remark: updated.reviewNote,
         }),
       );
       return updated;
     });
+  }
+
+  private rejectPendingWithdrawal(id: string, reviewNote?: string) {
+    return this.releaseWithdrawal(id, "rejected", normalizeOptional(reviewNote) ?? "后台拒绝出金。");
+  }
+
+  private failWithdrawal(id: string, failedReason: string, confirmations?: number) {
+    return this.releaseWithdrawal(id, "failed", failedReason, confirmations);
+  }
+
+  private releaseWithdrawal(id: string, status: "failed" | "rejected", reason: string, confirmations?: number) {
+    return this.store.transaction(() => {
+      const request = this.store.getWithdrawalRequest(id);
+      if (!request) {
+        throw new Error("出金申请不存在。");
+      }
+      if (!["pending_review", "broadcasting", "broadcasted"].includes(request.status)) {
+        throw new Error("当前出金状态不能释放冻结。");
+      }
+      const before = this.ensureFundingAccount(request.userId);
+      if (before.frozen < request.amount) {
+        throw new Error("资金账户冻结金额不足，无法释放。");
+      }
+      const now = Date.now();
+      const after = this.withAvailable({
+        ...before,
+        frozen: roundMoney(before.frozen - request.amount),
+        updatedAt: now,
+      });
+      this.store.upsertFundingAccount(after);
+      const updated: WithdrawalRequest = {
+        ...request,
+        status,
+        onchainStatus: status,
+        failedAt: status === "failed" ? now : request.failedAt,
+        failedReason: status === "failed" ? reason : request.failedReason,
+        confirmations: confirmations ?? request.confirmations,
+        reviewNote: status === "rejected" ? reason : request.reviewNote,
+        reviewedAt: status === "rejected" ? now : request.reviewedAt,
+        updatedAt: now,
+      };
+      this.store.saveWithdrawalRequest(updated);
+      this.store.saveFundingLedger(
+        this.createLedger({
+          userId: request.userId,
+          accountId: after.id,
+          accountType: "funding",
+          type: "withdrawal_rejected",
+          source: "withdrawal_request",
+          amount: request.amount,
+          balanceBefore: before.balance,
+          balanceAfter: after.balance,
+          frozenBefore: before.frozen,
+          frozenAfter: after.frozen,
+          status: "rejected",
+          relatedId: request.id,
+          network: request.network,
+          walletAddress: request.walletAddress,
+          txHash: request.broadcastTxHash ?? request.txHash,
+          remark: reason,
+        }),
+      );
+      return updated;
+    });
+  }
+
+  private creditConfirmedDeposits() {
+    let credited = 0;
+    for (const deposit of this.store.listOnchainDeposits()) {
+      if (deposit.status !== "confirmed" || deposit.creditedLedgerId) {
+        continue;
+      }
+      this.store.transaction(() => {
+        const current = this.store.getOnchainDeposit(deposit.id);
+        if (!current || current.status !== "confirmed" || current.creditedLedgerId) {
+          return;
+        }
+        const before = this.ensureFundingAccount(current.userId);
+        const after = this.withAvailable({
+          ...before,
+          balance: roundMoney(before.balance + current.amountDecimal),
+          updatedAt: Date.now(),
+        });
+        const ledger = this.createLedger({
+          userId: current.userId,
+          accountId: after.id,
+          accountType: "funding",
+          type: "deposit",
+          source: "onchain_deposit",
+          amount: current.amountDecimal,
+          balanceBefore: before.balance,
+          balanceAfter: after.balance,
+          frozenBefore: before.frozen,
+          frozenAfter: after.frozen,
+          status: "completed",
+          relatedId: current.id,
+          network: current.network,
+          walletAddress: current.toAddress,
+          txHash: current.txHash,
+          remark: "BSC Testnet 链上充值确认入账",
+        });
+        this.store.upsertFundingAccount(after);
+        this.store.saveFundingLedger(ledger);
+        this.store.saveOnchainDeposit({ ...current, creditedLedgerId: ledger.id, updatedAt: Date.now() });
+        credited += 1;
+      });
+    }
+    return credited;
   }
 
   private ensureFundingAccount(userId: string) {
@@ -386,6 +620,29 @@ export class WalletService {
     });
     this.store.upsertFundingAccount(account);
     return account;
+  }
+
+  private getOrCreateDepositAddress(userId: string): DepositAddress {
+    const existing = this.store.getDepositAddressByUserId(userId);
+    if (existing) {
+      return existing;
+    }
+
+    const derivationIndex = (this.store.getMaxDepositDerivationIndex() ?? -1) + 1;
+    const path = `${this.depositDerivationPath}/${derivationIndex}`;
+    const wallet = HDNodeWallet.fromPhrase(normalizeRequiredValue(this.depositMnemonic, "BSC_TESTNET_DEPOSIT_MNEMONIC"), undefined, path);
+    const now = Date.now();
+    const address: DepositAddress = {
+      id: `ADDR-${userId}`,
+      userId,
+      network: depositNetwork,
+      address: wallet.address,
+      derivationIndex,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.store.saveDepositAddress(address);
+    return address;
   }
 
   private withAvailable(account: FundingAccount): FundingAccount {
@@ -448,6 +705,13 @@ function normalizeUserId(userId: string) {
 function normalizeOptional(value: unknown) {
   const normalized = typeof value === "string" ? value.trim() : "";
   return normalized || null;
+}
+
+function normalizeRequiredValue(value: string, name: string) {
+  if (!value) {
+    throw new Error(`缺少环境变量 ${name}。`);
+  }
+  return value;
 }
 
 function assertPositiveAmount(amount: number) {

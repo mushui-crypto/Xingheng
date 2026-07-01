@@ -16,17 +16,27 @@ import {
 } from "../../api/market";
 import {
   approveWithdrawalRequest,
+  confirmAdminWithdrawals,
   depositFundingAccount,
+  fetchAdminDepositAddresses,
+  fetchAdminOnchainDeposits,
   fetchAdminWalletAccounts,
   fetchAdminWalletLedger,
   fetchAdminWithdrawalRequests,
   rejectWithdrawalRequest,
+  runAdminOnchainScan,
+  type DepositAddress,
   type FundingLedgerEntry,
+  type OnchainDeposit,
+  type OnchainDepositStatus,
   type WalletAccounts,
   type WithdrawalRequest,
 } from "../../api/walletApi";
 import { useSymbolStore } from "../../store/symbolStore";
 import { formatPrice } from "../../utils/price";
+
+const bscTestnetLabel = "BNB Smart Chain Testnet";
+const requiredConfirmations = 1;
 
 export function AdminTradingPage() {
   const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
@@ -36,36 +46,52 @@ export function AdminTradingPage() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [ledger, setLedger] = useState<FundingLedgerEntry[]>([]);
   const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [depositAddresses, setDepositAddresses] = useState<DepositAddress[]>([]);
+  const [deposits, setDeposits] = useState<OnchainDeposit[]>([]);
   const [marketStatus, setMarketStatus] = useState<AdminMarketStatus[]>([]);
   const [depositUserId, setDepositUserId] = useState("demo-user");
   const [depositAmount, setDepositAmount] = useState(1000);
   const [depositRemark, setDepositRemark] = useState("后台手动入金");
   const [reviewNote, setReviewNote] = useState("后台审核");
   const [message, setMessage] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
 
   useEffect(() => {
     void loadData();
   }, []);
 
   const loadData = async () => {
-    const nextSymbols = await fetchMarketSymbols();
-    setSymbolsFromBackend(nextSymbols);
-    const [nextAccounts, nextWalletAccounts, nextPositions, nextOrders, nextLedger, nextWithdrawals, nextMarketStatus] = await Promise.all([
-      fetchAdminAccounts(),
-      fetchAdminWalletAccounts(),
-      fetchAdminPositions(),
-      fetchAdminOrders(),
-      fetchAdminWalletLedger(),
-      fetchAdminWithdrawalRequests(),
-      fetchAdminMarketStatus(),
-    ]);
-    setAccounts(nextAccounts);
-    setWalletAccounts(nextWalletAccounts);
-    setPositions(nextPositions);
-    setOrders(nextOrders);
-    setLedger(nextLedger);
-    setWithdrawals(nextWithdrawals);
-    setMarketStatus(nextMarketStatus);
+    setIsLoading(true);
+    setLoadError("");
+    try {
+      const nextSymbols = await fetchMarketSymbols();
+      setSymbolsFromBackend(nextSymbols);
+      const [nextAccounts, nextWalletAccounts, nextPositions, nextOrders, nextLedger, nextWithdrawals, nextDepositAddresses, nextDeposits, nextMarketStatus] = await Promise.all([
+        fetchAdminAccounts(),
+        fetchAdminWalletAccounts(),
+        fetchAdminPositions(),
+        fetchAdminOrders(),
+        fetchAdminWalletLedger(),
+        fetchAdminWithdrawalRequests(),
+        fetchAdminDepositAddresses(),
+        fetchAdminOnchainDeposits(),
+        fetchAdminMarketStatus(),
+      ]);
+      setAccounts(nextAccounts);
+      setWalletAccounts(nextWalletAccounts);
+      setPositions(nextPositions);
+      setOrders(nextOrders);
+      setLedger(nextLedger);
+      setWithdrawals(nextWithdrawals);
+      setDepositAddresses(nextDepositAddresses);
+      setDeposits(nextDeposits);
+      setMarketStatus(nextMarketStatus);
+    } catch (error) {
+      setLoadError(error instanceof Error ? error.message : "后台资金数据加载失败，请稍后重试。");
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   const submitDeposit = async () => {
@@ -88,9 +114,38 @@ export function AdminTradingPage() {
         await rejectWithdrawalRequest(id, reviewNote);
       }
       await loadData();
-      setMessage(action === "approve" ? "出金申请已通过。" : "出金申请已拒绝，冻结金额已释放。");
+      setMessage(action === "approve" ? "出金申请已进入链上广播流程。" : "出金申请已拒绝，冻结金额已释放。");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "出金审核失败。");
+    }
+  };
+
+  const triggerOnchainScan = async () => {
+    setMessage("");
+    try {
+      const result = await runAdminOnchainScan();
+      await loadData();
+      if (result.status === "rate_limited" || result.rateLimited) {
+        setMessage(result.message ?? "RPC 限流，请稍后重试或更换 RPC。");
+        return;
+      }
+      setMessage(
+        result.message
+          ?? `链上扫描已执行。扫描区块：${result.scannedBlocks ?? 0}，新增记录：${result.deposits ?? 0}，已入账：${result.credited ?? 0}。`,
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "链上扫描执行失败。");
+    }
+  };
+
+  const triggerWithdrawalConfirm = async () => {
+    setMessage("");
+    try {
+      const result = await confirmAdminWithdrawals();
+      await loadData();
+      setMessage(`出金确认已执行，状态变化 ${result.length} 笔。`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "出金确认执行失败。");
     }
   };
 
@@ -99,12 +154,17 @@ export function AdminTradingPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">交易 / 资金查询</h1>
-          <p className="mt-2 text-sm text-muted">查看资金账户、交易账户、出金审核、流水、持仓、订单和行情状态。</p>
+          <p className="mt-2 text-sm text-muted">查看资金账户、交易账户、充值地址、链上充值、出金审核、流水、持仓、订单和行情状态。</p>
         </div>
-        <Button variant="secondary" onClick={() => void loadData()}>
-          刷新数据
-        </Button>
+        <div className="flex flex-wrap gap-2">
+          <Button variant="secondary" disabled={isLoading} onClick={() => void triggerOnchainScan()}>扫描充值</Button>
+          <Button variant="secondary" disabled={isLoading} onClick={() => void triggerWithdrawalConfirm()}>确认出金</Button>
+          <Button variant="secondary" disabled={isLoading} onClick={() => void loadData()}>刷新数据</Button>
+        </div>
       </div>
+
+      {isLoading ? <InlineState title="正在同步后台资金数据" description="正在读取充值地址、链上充值、出金审核和资金流水。" /> : null}
+      {loadError ? <InlineState tone="danger" title="后台资金数据加载失败" description={loadError} actionLabel="重新加载" onAction={() => void loadData()} /> : null}
 
       <div className="grid gap-4 md:grid-cols-4">
         <Stat label="资金账户" value={walletAccounts.length} />
@@ -115,7 +175,7 @@ export function AdminTradingPage() {
 
       <Card>
         <h2 className="font-semibold">后台入金到资金账户</h2>
-        <p className="mt-2 text-sm text-muted">V0.3 入金先进资金账户，用户再自行转入交易账户。</p>
+        <p className="mt-2 text-sm text-muted">用于后台手动调整资金账户；链上充值应优先查看下方链上充值记录，避免和真实测试网流水混淆。</p>
         <div className="mt-4 grid gap-4 md:grid-cols-[1fr_180px_1fr_auto] md:items-end">
           <Input label="用户 ID" value={depositUserId} onChange={(event) => setDepositUserId(event.target.value)} placeholder="demo-user" />
           <Input label="金额" type="number" min={0} value={depositAmount} onChange={(event) => setDepositAmount(Number(event.target.value))} />
@@ -190,39 +250,137 @@ export function AdminTradingPage() {
       </Card>
 
       <Card className="overflow-hidden p-0">
-        <div className="flex flex-col gap-3 border-b border-line p-4 md:flex-row md:items-end md:justify-between">
-          <div>
-            <h2 className="font-semibold">出金申请审核</h2>
-            <p className="mt-1 text-sm text-muted">通过会扣减资金账户余额，拒绝会释放冻结金额。</p>
-          </div>
-          <Input className="md:w-72" label="审核说明" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} />
-        </div>
+        <RecordHeader
+          title="充值地址分配"
+          description="每个用户在 BNB Smart Chain Testnet 上对应一个专属充值地址，用于把链上充值归属到正确用户。"
+        />
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1120px] text-left text-sm">
+          <table className="w-full min-w-[980px] text-left text-sm">
+            <thead className="xh-thead">
+              <tr>
+                <th className="px-5 py-3 font-medium">用户 ID</th>
+                <th className="px-5 py-3 font-medium">网络</th>
+                <th className="px-5 py-3 font-medium">充值地址</th>
+                <th className="px-5 py-3 font-medium">派生序号</th>
+                <th className="px-5 py-3 font-medium">更新时间</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {depositAddresses.length === 0 ? (
+                <tr>
+                  <td className="px-5 py-8" colSpan={5}>
+                    <EmptyState title="暂无充值地址记录" description="用户首次进入账户页并请求充值地址后，地址会出现在这里。" />
+                  </td>
+                </tr>
+              ) : depositAddresses.map((item) => (
+                <tr key={item.id}>
+                  <td className="px-5 py-4 font-mono text-xs">{item.userId}</td>
+                  <td className="px-5 py-4">{formatNetwork(item.network)}</td>
+                  <td className="px-5 py-4"><AddressText value={item.address} /></td>
+                  <td className="px-5 py-4">{item.derivationIndex}</td>
+                  <td className="px-5 py-4 text-muted">{new Date(item.updatedAt).toLocaleString("zh-CN")}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <RecordHeader
+          title="链上充值记录"
+          description="链上充值从检测到交易开始记录，达到确认要求后才入账到用户资金账户。"
+        />
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1440px] text-left text-sm">
             <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">时间</th>
                 <th className="px-5 py-3 font-medium">用户</th>
                 <th className="px-5 py-3 font-medium">金额</th>
                 <th className="px-5 py-3 font-medium">状态</th>
-                <th className="px-5 py-3 font-medium">Network / Wallet</th>
+                <th className="px-5 py-3 font-medium">确认数</th>
+                <th className="px-5 py-3 font-medium">来源地址</th>
+                <th className="px-5 py-3 font-medium">充值地址</th>
+                <th className="px-5 py-3 font-medium">交易哈希</th>
+                <th className="px-5 py-3 font-medium">说明</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-line">
+              {deposits.length === 0 ? (
+                <tr>
+                  <td className="px-5 py-8" colSpan={9}>
+                    <EmptyState title="暂无链上充值记录" description="触发扫描后，如测试网有转入专属地址的代币交易，会显示检测、确认和入账状态。" />
+                  </td>
+                </tr>
+              ) : deposits.map((deposit) => (
+                <tr key={deposit.id}>
+                  <td className="px-5 py-4 text-muted">{new Date(deposit.detectedAt).toLocaleString("zh-CN")}</td>
+                  <td className="px-5 py-4 font-mono text-xs">{deposit.userId}</td>
+                  <td className="px-5 py-4">{deposit.amountDecimal.toFixed(2)} {deposit.asset}</td>
+                  <td className="px-5 py-4"><StatusCell status={deposit.status} /></td>
+                  <td className="px-5 py-4 text-muted">{formatConfirmations(deposit.confirmations)}</td>
+                  <td className="px-5 py-4"><AddressText value={deposit.fromAddress} /></td>
+                  <td className="px-5 py-4"><AddressText value={deposit.toAddress} /></td>
+                  <td className="px-5 py-4 text-muted">{renderTxLink(deposit.txHash)}</td>
+                  <td className="px-5 py-4">{renderReason(deposit.failedReason)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card className="overflow-hidden p-0">
+        <div className="flex flex-col gap-3 border-b border-line p-4 md:flex-row md:items-end md:justify-between">
+          <div>
+            <h2 className="font-semibold">出金申请审核</h2>
+            <p className="mt-1 text-sm text-muted">通过后先广播链上交易，确认后才正式扣减；拒绝或失败会释放冻结金额。</p>
+          </div>
+          <Input className="md:w-72" label="审核说明" value={reviewNote} onChange={(event) => setReviewNote(event.target.value)} />
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full min-w-[1560px] text-left text-sm">
+            <thead className="xh-thead">
+              <tr>
+                <th className="px-5 py-3 font-medium">时间</th>
+                <th className="px-5 py-3 font-medium">用户</th>
+                <th className="px-5 py-3 font-medium">金额</th>
+                <th className="px-5 py-3 font-medium">申请状态</th>
+                <th className="px-5 py-3 font-medium">链上状态</th>
+                <th className="px-5 py-3 font-medium">确认数</th>
+                <th className="px-5 py-3 font-medium">网络 / 目标地址</th>
+                <th className="px-5 py-3 font-medium">热钱包 / 合约</th>
+                <th className="px-5 py-3 font-medium">交易哈希</th>
                 <th className="px-5 py-3 font-medium">审核说明</th>
                 <th className="px-5 py-3 font-medium">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
               {withdrawals.length === 0 ? (
-                <tr><td className="px-5 py-8 text-center text-muted" colSpan={7}>暂无出金申请。</td></tr>
+                <tr>
+                  <td className="px-5 py-8" colSpan={11}>
+                    <EmptyState title="暂无出金申请" description="用户提交出金后，会在这里处理审核、广播、确认和失败原因。" />
+                  </td>
+                </tr>
               ) : withdrawals.map((withdrawal) => (
                 <tr key={withdrawal.id}>
                   <td className="px-5 py-4 text-muted">{new Date(withdrawal.createdAt).toLocaleString("zh-CN")}</td>
                   <td className="px-5 py-4 font-mono text-xs">{withdrawal.userId}</td>
                   <td className="px-5 py-4">{withdrawal.amount.toFixed(2)} {withdrawal.asset}</td>
-                  <td className="px-5 py-4"><WithdrawalBadge status={withdrawal.status} /></td>
-                  <td className="px-5 py-4 text-muted">{withdrawal.network ?? "-"} / {withdrawal.walletAddress ?? "-"}</td>
-                  <td className="px-5 py-4 text-muted">{withdrawal.reviewNote ?? withdrawal.remark ?? "-"}</td>
+                  <td className="px-5 py-4"><StatusCell status={withdrawal.status} /></td>
+                  <td className="px-5 py-4">{withdrawal.onchainStatus ? <StatusCell status={withdrawal.onchainStatus} /> : <span className="text-muted">待审核后生成</span>}</td>
+                  <td className="px-5 py-4 text-muted">{formatConfirmations(withdrawal.confirmations ?? 0)}</td>
                   <td className="px-5 py-4">
-                    {withdrawal.status === "pending" ? (
+                    <StackedChainText primary={formatNetwork(withdrawal.network)} secondary={withdrawal.walletAddress} />
+                  </td>
+                  <td className="px-5 py-4">
+                    <StackedChainText primary={withdrawal.fromAddress ?? "-"} secondary={withdrawal.tokenAddress} />
+                  </td>
+                  <td className="px-5 py-4 text-muted">{renderTxLink(withdrawal.broadcastTxHash ?? withdrawal.txHash)}</td>
+                  <td className="px-5 py-4">{renderReason(withdrawal.failedReason ?? withdrawal.reviewNote ?? withdrawal.remark)}</td>
+                  <td className="px-5 py-4">
+                    {withdrawal.status === "pending_review" ? (
                       <div className="flex gap-2">
                         <Button onClick={() => void reviewWithdrawal(withdrawal.id, "approve")}>通过</Button>
                         <Button variant="danger" onClick={() => void reviewWithdrawal(withdrawal.id, "reject")}>拒绝</Button>
@@ -360,6 +518,53 @@ function SectionTitle({ title }: { title: string }) {
   );
 }
 
+function RecordHeader({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="border-b border-line p-4">
+      <h2 className="font-semibold">{title}</h2>
+      <p className="mt-1 text-sm leading-6 text-muted">{description}</p>
+    </div>
+  );
+}
+
+function EmptyState({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="mx-auto max-w-md border border-white/10 bg-white/[0.025] p-5 text-center">
+      <p className="font-medium text-white">{title}</p>
+      <p className="mt-2 text-sm leading-6 text-muted">{description}</p>
+    </div>
+  );
+}
+
+function InlineState({
+  title,
+  description,
+  tone = "neutral",
+  actionLabel,
+  onAction,
+}: {
+  title: string;
+  description: string;
+  tone?: "neutral" | "danger";
+  actionLabel?: string;
+  onAction?: () => void;
+}) {
+  const toneClass = tone === "danger" ? "border-red-400/40 bg-red-500/10 text-red-100" : "border-white/15 bg-white/[0.03] text-slate-200";
+  return (
+    <div className={`flex flex-col gap-3 border p-4 md:flex-row md:items-center md:justify-between ${toneClass}`}>
+      <div>
+        <p className="text-sm font-semibold text-white">{title}</p>
+        <p className="mt-1 text-sm leading-6 text-muted">{description}</p>
+      </div>
+      {actionLabel && onAction ? (
+        <Button className="md:shrink-0" variant="secondary" onClick={onAction}>
+          {actionLabel}
+        </Button>
+      ) : null}
+    </div>
+  );
+}
+
 function formatLedgerType(type: FundingLedgerEntry["type"]) {
   const labels: Record<FundingLedgerEntry["type"], string> = {
     deposit: "入金",
@@ -375,10 +580,101 @@ function formatLedgerType(type: FundingLedgerEntry["type"]) {
 
 function LedgerBadge({ status }: { status: FundingLedgerEntry["status"] }) {
   const tone = status === "completed" ? "success" : status === "rejected" ? "danger" : "neutral";
-  return <Badge tone={tone}>{status}</Badge>;
+  return <Badge tone={tone}>{formatStatus(status)}</Badge>;
 }
 
-function WithdrawalBadge({ status }: { status: WithdrawalRequest["status"] }) {
-  const tone = status === "approved" ? "success" : status === "rejected" ? "danger" : "neutral";
-  return <Badge tone={tone}>{status}</Badge>;
+function WithdrawalBadge({ status }: { status: WithdrawalRequest["status"] | OnchainDepositStatus }) {
+  const tone = status === "confirmed" ? "success" : status === "rejected" || status === "failed" ? "danger" : "neutral";
+  return <Badge tone={tone}>{formatStatus(status)}</Badge>;
+}
+
+function StatusCell({ status }: { status: WithdrawalRequest["status"] | OnchainDepositStatus }) {
+  return (
+    <div className="space-y-1">
+      <WithdrawalBadge status={status} />
+      <p className="text-xs leading-5 text-muted">{formatStatusHint(status)}</p>
+    </div>
+  );
+}
+
+function formatStatus(status: FundingLedgerEntry["status"] | WithdrawalRequest["status"] | OnchainDepositStatus) {
+  const labels: Record<string, string> = {
+    pending: "处理中",
+    completed: "已完成",
+    rejected: "已拒绝",
+    pending_review: "待审核",
+    broadcasting: "广播中",
+    broadcasted: "已广播",
+    confirmed: "已确认",
+    failed: "失败",
+    detected: "已检测",
+    confirming: "确认中",
+  };
+  return labels[status] ?? status;
+}
+
+function formatStatusHint(status: WithdrawalRequest["status"] | OnchainDepositStatus) {
+  const hints: Record<string, string> = {
+    pending_review: "等待人工审核",
+    broadcasting: "准备提交链上",
+    broadcasted: "已提交链上",
+    confirmed: "链上已确认",
+    failed: "失败后需排查",
+    rejected: "已释放冻结",
+    detected: "已扫到交易",
+    confirming: "等待区块确认",
+  };
+  return hints[status] ?? "等待同步";
+}
+
+function AddressText({ value }: { value?: string | null }) {
+  if (!value) {
+    return <span className="text-muted">-</span>;
+  }
+  return <span className="break-all font-mono text-xs text-muted">{value}</span>;
+}
+
+function StackedChainText({ primary, secondary }: { primary: string; secondary?: string | null }) {
+  return (
+    <div className="space-y-1">
+      <p className="text-sm text-white">{primary}</p>
+      <AddressText value={secondary} />
+    </div>
+  );
+}
+
+function formatConfirmations(value: number) {
+  return `${value} / ${requiredConfirmations}`;
+}
+
+function formatNetwork(value?: string | null) {
+  return value === "BSC_TESTNET" ? bscTestnetLabel : value ?? "-";
+}
+
+function renderTxLink(txHash?: string | null) {
+  if (!txHash) {
+    return "-";
+  }
+  return (
+    <a
+      className="inline-flex flex-col gap-1 text-white underline underline-offset-2"
+      href={`https://testnet.bscscan.com/tx/${txHash}`}
+      target="_blank"
+      rel="noreferrer"
+    >
+      <span>查看交易</span>
+      <span className="font-mono text-[11px] text-muted no-underline">{shortenHash(txHash)}</span>
+    </a>
+  );
+}
+
+function renderReason(value?: string | null) {
+  if (!value) {
+    return <span className="text-muted">-</span>;
+  }
+  return <span className="block max-w-[240px] text-sm leading-5 text-amber-100">{value}</span>;
+}
+
+function shortenHash(value: string) {
+  return value.length <= 14 ? value : `${value.slice(0, 8)}...${value.slice(-6)}`;
 }

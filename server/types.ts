@@ -114,6 +114,53 @@ export type BalanceAdjustment = {
 
 export type WalletAccountType = "funding" | "trading";
 export type WalletAsset = "USDT";
+export type WalletNetwork = "BSC_TESTNET";
+export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
+export type WithdrawalStatus = "pending_review" | "broadcasting" | "broadcasted" | "confirmed" | "failed" | "rejected";
+
+export type DepositAddress = {
+  id: string;
+  userId: string;
+  network: WalletNetwork;
+  address: string;
+  derivationIndex: number;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type OnchainDeposit = {
+  id: string;
+  userId: string;
+  asset: WalletAsset;
+  network: WalletNetwork;
+  chainId: number;
+  tokenAddress: string;
+  fromAddress: string;
+  toAddress: string;
+  amount: string;
+  amountDecimal: number;
+  txHash: string;
+  logIndex: number;
+  blockNumber: number;
+  blockHash?: string | null;
+  confirmations: number;
+  status: OnchainDepositStatus;
+  creditedLedgerId?: string | null;
+  failedReason?: string | null;
+  detectedAt: number;
+  confirmedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ChainScanCursor = {
+  id: string;
+  network: WalletNetwork;
+  chainId: number;
+  tokenAddress: string;
+  lastScannedBlock: number;
+  updatedAt: number;
+};
 
 export type FundingAccount = {
   id: string;
@@ -135,7 +182,7 @@ export type FundingLedgerType =
   | "transfer_out"
   | "adjustment";
 
-export type FundingLedgerSource = "admin_manual" | "withdrawal_request" | "internal_transfer" | "onchain_reserved";
+export type FundingLedgerSource = "admin_manual" | "withdrawal_request" | "internal_transfer" | "onchain_deposit" | "onchain_reserved";
 export type FundingLedgerStatus = "pending" | "completed" | "rejected";
 
 export type FundingLedgerEntry = {
@@ -161,8 +208,6 @@ export type FundingLedgerEntry = {
   updatedAt: number;
 };
 
-export type WithdrawalStatus = "pending" | "approved" | "rejected";
-
 export type UserStatus = "active" | "disabled";
 
 export type User = {
@@ -182,6 +227,19 @@ export type WithdrawalRequest = {
   network?: string | null;
   walletAddress?: string | null;
   txHash?: string | null;
+  onchainStatus?: WithdrawalStatus | null;
+  chainId?: number | null;
+  tokenAddress?: string | null;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+  broadcastTxHash?: string | null;
+  broadcastedAt?: number | null;
+  confirmedAt?: number | null;
+  failedAt?: number | null;
+  failedReason?: string | null;
+  confirmations?: number | null;
+  broadcastAttemptCount?: number | null;
+  lastBroadcastAttemptAt?: number | null;
   remark?: string | null;
   reviewNote?: string | null;
   createdAt: number;
