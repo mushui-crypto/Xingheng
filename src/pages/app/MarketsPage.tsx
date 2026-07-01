@@ -44,11 +44,11 @@ export function MarketsPage() {
   };
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+    <div className="xh-page">
+      <div className="xh-page-header">
         <div>
-          <h1 className="text-2xl font-semibold">行情</h1>
-          <p className="mt-2 text-sm text-muted">公开行情报价经内部标准化后生成 Bid / Ask，供图表和后续模拟交易模块使用。</p>
+          <h1 className="xh-title">行情</h1>
+          <p className="xh-subtitle">Binance 合约行情经内部标准化后生成 Bid / Ask，供图表和模拟交易模块使用。</p>
         </div>
         <Button variant="secondary" onClick={() => void handleRefresh()}>
           <RefreshCw size={16} />
@@ -63,26 +63,64 @@ export function MarketsPage() {
             <p className="mt-2 text-sm text-muted">请在后台品种管理中启用品种并设置为用户端可见。</p>
           </div>
         ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[920px] text-left text-sm">
-              <thead className="border-b border-line bg-white/[0.03] text-muted">
+          <>
+          <div className="grid gap-0 divide-y divide-line md:hidden">
+            {visibleSymbols.map((symbol) => {
+              const quote = quoteBySymbol.get(symbol.symbol);
+              const closeOnly = symbol.tradeStatus !== "enabled";
+              return (
+                <article key={symbol.id} className={closeOnly ? "space-y-4 p-4 opacity-60" : "space-y-4 p-4"}>
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-lg font-semibold">{symbol.symbol}</p>
+                      <p className="mt-1 text-xs text-muted">{symbol.displayName}</p>
+                    </div>
+                    <Badge tone={quote?.status === "connected" ? "success" : quote?.status === "disconnected" ? "danger" : "neutral"}>
+                      {closeOnly ? "仅平仓" : quote?.status ?? "stale"}
+                    </Badge>
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <MarketMetric label="Bid" value={formatPrice(quote?.bid, symbol.digits)} />
+                    <MarketMetric label="Ask" value={formatPrice(quote?.ask, symbol.digits)} />
+                    <MarketMetric label="Last" value={formatPrice(quote?.last, symbol.digits)} />
+                    <MarketMetric
+                      label="Change"
+                      tone={Number(quote?.changePercent ?? 0) >= 0 ? "positive" : "negative"}
+                      value={quote ? `${quote.changePercent.toFixed(2)}%` : "-"}
+                    />
+                  </div>
+                  <div className="flex flex-col gap-3 border-t border-line pt-4">
+                    <p className="text-xs leading-5 text-muted">
+                      更新时间：{quote?.localUpdatedAt ? new Date(quote.localUpdatedAt).toLocaleString("zh-CN") : "-"}
+                    </p>
+                    <Link className="xh-action-link justify-center" to={`/app/trading?symbol=${symbol.symbol}`}>
+                      查看图表 <ArrowRight size={15} />
+                    </Link>
+                  </div>
+                </article>
+              );
+            })}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
+            <table className="xh-table min-w-[920px]">
+              <thead className="xh-thead">
                 <tr>
-                  <th className="px-5 py-3 font-medium">品种</th>
-                  <th className="px-5 py-3 font-medium">Bid</th>
-                  <th className="px-5 py-3 font-medium">Ask</th>
-                  <th className="px-5 py-3 font-medium">Last</th>
-                  <th className="px-5 py-3 font-medium">Change %</th>
-                  <th className="px-5 py-3 font-medium">状态</th>
-                  <th className="px-5 py-3 font-medium">更新时间</th>
-                  <th className="px-5 py-3 font-medium">操作</th>
+                  <th className="xh-th">品种</th>
+                  <th className="xh-th">Bid</th>
+                  <th className="xh-th">Ask</th>
+                  <th className="xh-th">Last</th>
+                  <th className="xh-th">Change %</th>
+                  <th className="xh-th">状态</th>
+                  <th className="xh-th">更新时间</th>
+                  <th className="xh-th">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
                 {visibleSymbols.map((symbol) => {
                   const quote = quoteBySymbol.get(symbol.symbol);
-                  const disabled = symbol.tradeStatus === "disabled";
+                  const closeOnly = symbol.tradeStatus !== "enabled";
                   return (
-                    <tr key={symbol.id} className={disabled ? "opacity-55" : undefined}>
+                    <tr key={symbol.id} className={closeOnly ? "opacity-55" : undefined}>
                       <td className="px-5 py-4">
                         <p className="font-semibold">{symbol.symbol}</p>
                         <p className="text-xs text-muted">{symbol.displayName}</p>
@@ -90,12 +128,12 @@ export function MarketsPage() {
                       <td className="px-5 py-4 font-mono">{formatPrice(quote?.bid, symbol.digits)}</td>
                       <td className="px-5 py-4 font-mono">{formatPrice(quote?.ask, symbol.digits)}</td>
                       <td className="px-5 py-4 font-mono">{formatPrice(quote?.last, symbol.digits)}</td>
-                      <td className={`px-5 py-4 ${Number(quote?.changePercent ?? 0) >= 0 ? "text-emerald-300" : "text-red-300"}`}>
+                      <td className={`px-5 py-4 ${Number(quote?.changePercent ?? 0) >= 0 ? "text-white" : "text-red-300"}`}>
                         {quote ? `${quote.changePercent.toFixed(2)}%` : "-"}
                       </td>
                       <td className="px-5 py-4">
-                        <Badge tone={quote?.status === "normal" ? "success" : quote?.status === "error" ? "danger" : "neutral"}>
-                          {disabled ? "disabled" : quote?.status ?? "stale"}
+                        <Badge tone={quote?.status === "connected" ? "success" : quote?.status === "disconnected" ? "danger" : "neutral"}>
+                          {closeOnly ? "仅允许平仓" : quote?.status ?? "stale"}
                         </Badge>
                       </td>
                       <td className="px-5 py-4 text-muted">
@@ -103,7 +141,7 @@ export function MarketsPage() {
                       </td>
                       <td className="px-5 py-4">
                         <Link
-                          className="inline-flex items-center gap-2 rounded-lg border border-line px-3 py-2 text-sm text-slate-200 transition hover:border-slate-500"
+                          className="xh-action-link"
                           to={`/app/trading?symbol=${symbol.symbol}`}
                         >
                           查看图表 <ArrowRight size={15} />
@@ -115,8 +153,19 @@ export function MarketsPage() {
               </tbody>
             </table>
           </div>
+          </>
         )}
       </Card>
+    </div>
+  );
+}
+
+function MarketMetric({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "positive" | "negative" }) {
+  const toneClass = tone === "negative" ? "text-red-300" : "text-white";
+  return (
+    <div className="border border-line bg-black p-3">
+      <p className="text-[11px] uppercase tracking-[0.14em] text-dim">{label}</p>
+      <p className={`mt-2 break-all font-mono text-base font-semibold ${toneClass}`}>{value}</p>
     </div>
   );
 }

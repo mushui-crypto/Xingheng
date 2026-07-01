@@ -17,16 +17,12 @@ export function isQuoteStale(quote: Quote, staleSeconds: number): boolean {
 
 export function getQuoteStatus(quote: Quote, staleSeconds = 30): QuoteStatus {
   if (!isQuoteValid(quote)) {
-    return "error";
-  }
-
-  if (quote.status === "delayed") {
-    return "delayed";
+    return "disconnected";
   }
 
   if (isQuoteStale(quote, staleSeconds)) {
     return "stale";
   }
 
-  return "normal";
+  return "connected";
 }
