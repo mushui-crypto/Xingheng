@@ -52,7 +52,7 @@ export function UserLayout({ children }: UserLayoutProps) {
             <TopLink to="/app/dashboard" icon={<Home size={16} />} label="首页" />
             <TopLink to="/app/markets" icon={<LineChart size={16} />} label="行情" />
             <TopLink to="/app/trading" icon={<CandlestickChart size={16} />} label="交易终端" />
-            <TopLink to="/app/account" icon={<UserRound size={16} />} label="账户" />
+            <TopLink to="/app/account" icon={<UserRound size={16} />} label="资金账户" />
           </nav>
           <div className="hidden items-center gap-4 lg:flex">
             <p className="max-w-[260px] truncate text-xs uppercase tracking-[0.16em] text-muted">

@@ -11,7 +11,7 @@ export function DashboardPage() {
   const user = useUserStore((state) => state.currentUser);
   const [accounts, setAccounts] = useState<WalletAccounts | null>(null);
   const [message, setMessage] = useState("");
-  const simulationAccount = accounts?.simulation ?? accounts?.trading ?? null;
+  const simulationEquity = accounts?.simulation?.equity ?? accounts?.trading?.equity;
 
   useEffect(() => {
     let cancelled = false;
@@ -48,7 +48,7 @@ export function DashboardPage() {
           <p className="text-sm text-muted">模拟账户权益</p>
           <div className="mt-3 flex items-center gap-3">
             <img src={tokenIconSrc} alt="USDT token icon" className="h-9 w-9 object-contain" />
-            <p className="text-3xl font-semibold">USDT {simulationAccount?.equity?.toFixed(2) ?? "--"}</p>
+            <p className="text-3xl font-semibold">USDT {simulationEquity?.toFixed(2) ?? "--"}</p>
           </div>
           <p className="mt-2 text-xs text-muted">实时读取当前模拟账户权益；旧 trading 字段仅作兼容兜底。</p>
         </Card>

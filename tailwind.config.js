@@ -4,13 +4,16 @@ export default {
   theme: {
     extend: {
       colors: {
-        shell: "#0B1118",
-        panel: "#111827",
-        line: "#1F2937",
-        muted: "#9CA3AF",
+        shell: "#080808",
+        panel: "#101010",
+        panel2: "#151515",
+        line: "#2B2B2B",
+        line2: "#3A3A3A",
+        muted: "#A6A6A6",
+        dim: "#737373",
       },
       boxShadow: {
-        glow: "0 0 36px rgba(0, 200, 150, 0.14)",
+        glow: "none",
       },
     },
   },
