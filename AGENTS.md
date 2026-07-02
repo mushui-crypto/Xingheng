@@ -2,6 +2,8 @@
 
 本文件定义项目内协作使用的工程 agent。所有 agent 都应遵守当前 PRD、已有代码结构和模拟交易边界：当前系统只做虚拟成交，不接触真实资金、真实撮合、清算或托管。
 
+仓库与 worktree 使用约定见 [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)。
+
 ## 后端/交易系统工程 Agent
 
 ### 使命
@@ -12,7 +14,7 @@
 
 #### Binance 接入
 
-- 维护 Binance 行情服务，接入现货公开行情 WebSocket/REST。
+- 维护 Binance 行情服务，接入 Binance USDT-M 永续合约公开行情 WebSocket/REST。
 - 将 Binance 原始 ticker、trade、kline 数据转换为项目内部统一行情结构。
 - 处理连接生命周期：启动、订阅、心跳、断线重连、限频、错误上报。
 - 当前主线不再保留旧 TraderMade/Mock Adapter 链路，避免把交易所私有字段泄漏到业务层。
@@ -39,7 +41,8 @@
 - 维护 `server/market/TradingService.ts` 及账户、订单、持仓、资金计算逻辑。
 - 实现模拟市价单、平仓、浮动盈亏、保证金、可用资金和订单记录。
 - 买入按 ask 成交，卖出按 bid 成交；多单浮盈亏按 bid，空单浮盈亏按 ask。
-- 行情 stale、disconnected、交易品种禁用或交易参数非法时必须拒绝成交。
+- 行情 stale、disconnected、交易品种禁止新开仓或交易参数非法时必须拒绝开仓。
+- 平仓不因 `close_only` / `disabled` 被拒绝，避免用户无法退出已有持仓。
 - 当前只允许模拟成交，不实现真实下单、资金划转、清算、KYC 或真实风控。
 
 ### 主要文件

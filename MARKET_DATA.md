@@ -4,6 +4,8 @@
 
 - `PERP BTC/USDT`，内部请求 Binance 时使用 `BTCUSDT`
 
+`ETHUSDT`、`DOGEUSDT` 和其他 symbol 后续再增加，当前不属于 MVP 交易闭环。
+
 后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
 
 ## 本地启动
@@ -36,7 +38,7 @@ npm run start:api
 
 ## Binance REST 历史 K 线
 
-服务启动时会为每个支持品种、每个支持周期拉取最近 500 根 K 线：
+服务启动时会为 `BTCUSDT` 的每个支持周期拉取最近 500 根 K 线：
 
 ```http
 GET https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=500
@@ -81,7 +83,7 @@ Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，�
 - 当前 K 线：保存每个品种、每个周期当前未完成的 K 线。
 - 服务重启后数据会重新从 Binance REST 拉取。
 
-当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金调整日志使用 SQLite，入口是 `server/storage/TradingStore.ts`。
+当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金账户、资金流水、转账记录、链上充值记录和出金申请使用 SQLite，入口是 `server/storage/TradingStore.ts`。
 
 ## REST API
 
@@ -180,3 +182,14 @@ ws://127.0.0.1:8787/ws
   "symbol": "BTCUSDT"
 }
 ```
+
+## 当前实现边界
+
+- 行情来自 Binance USDT-M 永续合约公开行情。
+- Bid / Ask 不是 Binance 原样盘口，而是系统基于最新价和品种配置 spread 生成。
+- 当前 MVP 只保留 `BTCUSDT`，后台品种管理只允许编辑 `BTCUSDT` 的展示名、点差、杠杆、合约单位、手数规则、交易状态和可见性。
+- 不允许修改 `symbol` / `apiSymbol`，也不允许新增其他 symbol。
+- `enabled` 表示允许开仓和平仓；`disabled` / `close_only` 在当前产品语义上统一为禁止新开仓但允许平仓。
+- 行情超过 10 秒未更新时状态为 `stale`，禁止市价成交。
+- 下单、持仓、盈亏、账户、资金账户、内部转账、链上充值记录、出金申请全部属于内部系统能力；当前不接真实交易所下单。
+- 当前主资金资产固定为 `USDT`。
