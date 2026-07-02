@@ -10,6 +10,7 @@ import type {
   TradingAccount,
 } from "../types";
 import type { TradingStore } from "../storage/TradingStore";
+import crypto from "node:crypto";
 
 const defaultInitialBalance = 10_000;
 const defaultAsset = "USDT";
@@ -48,8 +49,8 @@ export class TradingService {
     this.adjustments = store?.listAdjustments() ?? [];
   }
 
-  getAccount(userId: string, currency = defaultAsset) {
-    const account = this.ensureAccount(userId, currency);
+  getAccount(userId: string) {
+    const account = this.ensureAccount(userId);
     return this.toAccountView(account);
   }
 
@@ -79,7 +80,7 @@ export class TradingService {
     this.store?.upsertAccount(account);
 
     const adjustment: BalanceAdjustment = {
-      id: `ADJ-${Date.now().toString(36).toUpperCase()}`,
+      id: makeId("ADJ"),
       accountId: account.id,
       userId: normalizedUserId,
       type,
@@ -110,7 +111,7 @@ export class TradingService {
     const entryPrice = side === "buy" ? tick.ask : tick.bid;
     const margin = this.calculateMargin(safeConfig, entryPrice, volume);
     const position: Position = {
-      id: `POS-${Date.now().toString(36).toUpperCase()}`,
+      id: makeId("POS"),
       userId,
       symbol: safeConfig.symbol,
       side: positionSide,
@@ -253,7 +254,7 @@ export class TradingService {
     };
   }
 
-  private ensureAccount(userId: string, currency = defaultAsset) {
+  private ensureAccount(userId: string) {
     const normalized = normalizeUserId(userId);
     const existing = this.accounts.get(normalized);
     if (existing) {
@@ -263,7 +264,6 @@ export class TradingService {
     const account: TradingAccount = {
       id: `ACC-${normalized}`,
       userId: normalized,
-      currency,
       asset: defaultAsset,
       balance: defaultInitialBalance,
       equity: defaultInitialBalance,
@@ -286,7 +286,6 @@ export class TradingService {
     return {
       ...account,
       asset: defaultAsset,
-      currency: account.currency || defaultAsset,
       floatingPnl,
       usedMargin,
       equity,
@@ -317,11 +316,8 @@ export class TradingService {
     if (!config) {
       return `品种 ${symbol.toUpperCase()} 未配置。`;
     }
-    if (config.tradeStatus === "disabled") {
-      return "品种已停用，禁止交易。";
-    }
-    if (config.tradeStatus === "close_only") {
-      return "品种仅允许平仓，禁止新开仓。";
+    if (config.tradeStatus !== "enabled") {
+      return "当前品种禁止新开仓，但允许平仓。";
     }
     const ticker = this.market.getTicker(config.symbol);
     const quoteRejection = this.validateTicker(ticker, config);
@@ -343,9 +339,6 @@ export class TradingService {
   private validateCloseOrder(config: MarketSymbol | null, position: Position, ticker: ReturnType<TradingMarket["getTicker"]>) {
     if (!config) {
       return `品种 ${position.symbol} 未配置。`;
-    }
-    if (config.tradeStatus === "disabled") {
-      return "品种已停用，禁止平仓。";
     }
     return this.validateTicker(ticker, config);
   }
@@ -413,7 +406,7 @@ export class TradingService {
     const tick = ticker.tick;
     const positionSide: PositionSide = side === "buy" ? "long" : "short";
     const order: OrderRecord = {
-      id: `ORD-${Date.now().toString(36).toUpperCase()}`,
+      id: makeId("ORD"),
       userId,
       accountId,
       positionId,
@@ -456,7 +449,7 @@ export class TradingService {
     pnl?: number;
   }) {
     const order: OrderRecord = {
-      id: `ORD-${Date.now().toString(36).toUpperCase()}`,
+      id: makeId("ORD"),
       userId: input.userId,
       accountId: input.accountId,
       positionId: input.positionId,
@@ -494,4 +487,8 @@ function assertPositiveAmount(amount: number) {
 
 function roundMoney(value: number) {
   return Number(value.toFixed(2));
+}
+
+function makeId(prefix: string) {
+  return `${prefix}-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
 }

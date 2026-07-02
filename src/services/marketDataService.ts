@@ -32,16 +32,16 @@ export async function refreshQuoteFromPublicApi(symbolConfig: TradeSymbol, previ
       timestamp: ticker.timestamp ?? Date.now(),
       localUpdatedAt: new Date().toISOString(),
       source: ticker.source ?? "public_api",
-      status: ticker.status === "stale" ? "stale" : ticker.status === "disconnected" ? "error" : "normal",
+      status: ticker.status,
     };
 
     return { ...quote, status: getQuoteStatus(quote) };
   } catch {
-    return buildFallbackQuote(symbolConfig, previous, "error");
+    return buildFallbackQuote(symbolConfig, previous, "disconnected");
   }
 }
 
-export function buildFallbackQuote(symbolConfig: TradeSymbol, previous?: Quote | null, status: Quote["status"] = "normal") {
+export function buildFallbackQuote(symbolConfig: TradeSymbol, previous?: Quote | null, status: Quote["status"] = "connected") {
   const base = previous?.last ?? fallbackLast[symbolConfig.symbol] ?? 100;
   const drift = (Math.random() - 0.5) * symbolConfig.spread * 1.6;
   const last = normalizePrice(base + drift, symbolConfig.digits);

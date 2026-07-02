@@ -1,6 +1,5 @@
 import { create } from "zustand";
 import type { User, UserStatus } from "../types";
-import { readStorage, storageKeys, writeStorage } from "../utils/storage";
 
 type RegisterInput = {
   email: string;
@@ -10,49 +9,116 @@ type RegisterInput = {
 
 type UserStore = {
   users: User[];
-  reloadUsers: () => void;
-  registerUser: (input: RegisterInput) => { ok: true; user: User } | { ok: false; message: string };
-  findByEmail: (email: string) => User | undefined;
+  currentUser: User | null;
+  setCurrentUser: (user: User | null) => void;
+  loadCurrentUser: () => Promise<User | null>;
+  loadAdminUsers: () => Promise<void>;
+  registerUser: (input: RegisterInput) => Promise<{ ok: true; user: User } | { ok: false; message: string }>;
   getById: (id: string | null) => User | undefined;
-  setUserStatus: (id: string, status: UserStatus) => void;
+  setUserStatus: (id: string, status: UserStatus) => Promise<{ ok: true } | { ok: false; message: string }>;
+  clear: () => void;
 };
 
-function persistUsers(users: User[]) {
-  writeStorage(storageKeys.users, users);
+function getUserToken() {
+  try {
+    const raw = localStorage.getItem("xingheng.auth");
+    const auth = raw ? (JSON.parse(raw) as { userToken?: string | null }) : null;
+    return auth?.userToken ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function getAdminToken() {
+  try {
+    const raw = localStorage.getItem("xingheng.adminAuth");
+    const auth = raw ? (JSON.parse(raw) as { adminToken?: string | null }) : null;
+    return auth?.adminToken ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export const useUserStore = create<UserStore>((set, get) => ({
-  users: readStorage<User[]>(storageKeys.users, []),
-  reloadUsers: () => {
-    set({ users: readStorage<User[]>(storageKeys.users, []) });
-  },
-  registerUser: ({ email, password, nickname }) => {
-    const normalizedEmail = email.trim().toLowerCase();
-    const exists = get().users.some((user) => user.email.toLowerCase() === normalizedEmail);
-
-    if (exists) {
-      return { ok: false, message: "该邮箱已注册，请直接登录。" };
+  users: [],
+  currentUser: null,
+  setCurrentUser: (user) => set({ currentUser: user }),
+  loadCurrentUser: async () => {
+    const token = getUserToken();
+    if (!token) {
+      set({ currentUser: null });
+      return null;
     }
 
-    const user: User = {
-      id: `USR-${Date.now().toString(36).toUpperCase()}`,
-      email: normalizedEmail,
-      password,
-      nickname: nickname?.trim() || undefined,
-      status: "active",
-      createdAt: new Date().toISOString(),
-    };
-    const users = [user, ...get().users];
-    persistUsers(users);
-    set({ users });
-    return { ok: true, user };
+    const response = await fetch("/api/auth/me", {
+      headers: { Authorization: `Bearer ${token}` },
+    });
+
+    if (!response.ok) {
+      set({ currentUser: null });
+      return null;
+    }
+
+    const user = (await response.json()) as User;
+    set({ currentUser: user });
+    return user;
   },
-  findByEmail: (email) =>
-    get().users.find((user) => user.email.toLowerCase() === email.trim().toLowerCase()),
-  getById: (id) => get().users.find((user) => user.id === id),
-  setUserStatus: (id, status) => {
+  loadAdminUsers: async () => {
+    const token = getAdminToken();
+    const response = await fetch("/api/admin/users", {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+
+    if (!response.ok) {
+      throw new Error("用户列表加载失败。");
+    }
+
+    const users = (await response.json()) as User[];
+    set({ users });
+  },
+  registerUser: async ({ email, password, nickname }) => {
+    const response = await fetch("/api/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, nickname }),
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok || !payload?.id) {
+      return { ok: false, message: payload?.message ?? "注册失败。" };
+    }
+
+    return { ok: true, user: payload as User };
+  },
+  getById: (id) => {
+    if (!id) {
+      return undefined;
+    }
+    const { currentUser, users } = get();
+    if (currentUser?.id === id) {
+      return currentUser;
+    }
+    return users.find((user) => user.id === id);
+  },
+  setUserStatus: async (id, status) => {
+    const token = getAdminToken();
+    const response = await fetch(`/api/admin/users/${id}/status`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ status }),
+    });
+    const payload = await response.json().catch(() => null);
+
+    if (!response.ok) {
+      return { ok: false, message: payload?.message ?? "用户状态更新失败。" };
+    }
+
     const users = get().users.map((user) => (user.id === id ? { ...user, status } : user));
-    persistUsers(users);
     set({ users });
+    return { ok: true };
   },
+  clear: () => set({ users: [], currentUser: null }),
 }));

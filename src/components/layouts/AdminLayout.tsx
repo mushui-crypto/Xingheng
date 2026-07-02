@@ -1,8 +1,7 @@
-import { BarChart3, ListChecks, ListTree, LogOut, Settings, UsersRound } from "lucide-react";
+import { BarChart3, ListChecks, ListTree, LogOut, UsersRound } from "lucide-react";
 import type { ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAdminAuthStore } from "../../store/adminAuthStore";
-import { useConfigStore } from "../../store/configStore";
 
 type AdminLayoutProps = {
   children: ReactNode;
@@ -10,7 +9,6 @@ type AdminLayoutProps = {
 
 export function AdminLayout({ children }: AdminLayoutProps) {
   const navigate = useNavigate();
-  const { config } = useConfigStore();
   const logout = useAdminAuthStore((state) => state.logout);
 
   const handleLogout = () => {
@@ -20,56 +18,60 @@ export function AdminLayout({ children }: AdminLayoutProps) {
 
   return (
     <div className="min-h-screen bg-shell text-white">
-      <aside className="fixed inset-y-0 left-0 hidden w-68 border-r border-line bg-[#0d141d] p-5 md:block md:w-72">
-        <div className="flex items-center gap-3">
-          <div
-            className="flex h-10 w-10 items-center justify-center rounded-lg text-sm font-black text-[#07110f]"
-            style={{ backgroundColor: config.themeColor }}
-          >
-            {config.logoText}
+      <header className="sticky top-0 z-30 border-b border-white/15 bg-black/92 backdrop-blur">
+        <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <img
+                alt="星衡 logo"
+                className="h-9 w-9 border border-white/20 object-contain"
+                src="/assets/xingheng-logo@2x.png"
+              />
+              <div>
+                <p className="text-sm font-semibold uppercase tracking-[0.26em]">星衡</p>
+                <p className="text-[11px] uppercase tracking-[0.16em] text-muted">Admin control</p>
+              </div>
+            </div>
+            <button
+              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black lg:hidden"
+              onClick={handleLogout}
+            >
+              <LogOut size={15} />
+              退出
+            </button>
           </div>
-          <div>
-            <p className="font-semibold tracking-wide">{config.platformName}</p>
-            <p className="text-xs text-muted">后台管理</p>
+          <nav className="no-scrollbar flex gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
+            <TopLink to="/admin/dashboard" icon={<BarChart3 size={16} />} label="数据概览" />
+            <TopLink to="/admin/users" icon={<UsersRound size={16} />} label="用户管理" />
+            <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
+            <TopLink to="/admin/trading" icon={<ListChecks size={16} />} label="交易查询" />
+          </nav>
+          <div className="hidden items-center gap-4 lg:flex">
+            <p className="text-xs uppercase tracking-[0.16em] text-muted">
+              ROLE <span className="text-white">管理员</span>
+            </p>
+            <button
+              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black"
+              onClick={handleLogout}
+            >
+              <LogOut size={15} />
+              退出
+            </button>
           </div>
         </div>
-        <nav className="mt-8 space-y-2">
-          <SideLink to="/admin/dashboard" icon={<BarChart3 size={18} />} label="数据概览" />
-          <SideLink to="/admin/users" icon={<UsersRound size={18} />} label="用户管理" />
-          <SideLink to="/admin/symbols" icon={<ListTree size={18} />} label="品种管理" />
-          <SideLink to="/admin/trading" icon={<ListChecks size={18} />} label="交易查询" />
-          <SideLink to="/admin/settings" icon={<Settings size={18} />} label="系统配置" />
-          <button
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left text-sm text-muted transition hover:bg-white/5 hover:text-white"
-            onClick={handleLogout}
-          >
-            <LogOut size={18} />
-            退出登录
-          </button>
-        </nav>
-      </aside>
-      <div className="md:pl-72">
-        <header className="sticky top-0 z-10 border-b border-line bg-shell/90 px-5 py-4 backdrop-blur">
-          <div className="flex items-center justify-between">
-            <p className="font-semibold md:hidden">{config.platformName} 后台</p>
-            <p className="ml-auto text-sm text-muted">
-              当前身份 <span className="text-white">管理员</span>
-            </p>
-          </div>
-        </header>
-        <main className="p-5 md:p-8">{children}</main>
-      </div>
+      </header>
+      <main className="mx-auto max-w-[1480px] px-4 py-5 md:px-8 md:py-8">{children}</main>
     </div>
   );
 }
 
-function SideLink({ to, icon, label }: { to: string; icon: ReactNode; label: string }) {
+function TopLink({ to, icon, label }: { to: string; icon: ReactNode; label: string }) {
   return (
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition ${
-          isActive ? "bg-white/10 text-white" : "text-muted hover:bg-white/5 hover:text-white"
+        `flex shrink-0 items-center gap-2 border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition md:px-4 ${
+          isActive ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"
         }`
       }
     >

@@ -1,5 +1,4 @@
 import type { ButtonHTMLAttributes, ReactNode } from "react";
-import { useConfigStore } from "../../store/configStore";
 
 type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   children: ReactNode;
@@ -7,20 +6,17 @@ type ButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
 };
 
 const variantClasses = {
-  primary: "text-[#07110f] hover:brightness-110",
-  secondary: "border border-line bg-[#16202c] text-white hover:border-slate-500",
-  ghost: "text-muted hover:bg-white/5 hover:text-white",
-  danger: "border border-red-500/40 bg-red-500/10 text-red-200 hover:bg-red-500/20",
+  primary: "border border-white bg-white text-black hover:bg-black hover:text-white active:bg-white active:text-black",
+  secondary: "border border-white/25 bg-black text-white hover:border-white hover:bg-white/[0.04]",
+  ghost: "border border-transparent text-muted hover:border-white/15 hover:bg-white/[0.035] hover:text-white",
+  danger: "border border-red-400/60 bg-black text-red-200 hover:bg-red-500/15",
 };
 
 export function Button({ children, className = "", variant = "primary", style, ...props }: ButtonProps) {
-  const themeColor = useConfigStore((state) => state.config.themeColor);
-  const primaryStyle = variant === "primary" ? { backgroundColor: themeColor, ...style } : style;
-
   return (
     <button
-      className={`inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${variantClasses[variant]} ${className}`}
-      style={primaryStyle}
+      className={`inline-flex items-center justify-center gap-2 whitespace-nowrap px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] transition active:translate-y-px disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-50 ${variantClasses[variant]} ${className}`}
+      style={style}
       {...props}
     >
       {children}
