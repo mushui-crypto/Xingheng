@@ -5,7 +5,6 @@ import { useSearchParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { Select } from "../../components/ui/Select";
 import {
   closePosition,
   fetchCandles,
@@ -53,13 +52,11 @@ export function TradingPage() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [volume, setVolume] = useState(selectedConfig?.minLot ?? 0.01);
   const [message, setMessage] = useState("");
-  const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
   const [chartMessage, setChartMessage] = useState("");
   const [chartLoading, setChartLoading] = useState(true);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
-  const closingPositionIdRef = useRef<string | null>(null);
 
   const statusTone = ticker.status === "connected" ? "success" : ticker.status === "stale" ? "neutral" : "danger";
   const statusText = ticker.status === "connected" ? "实时行情" : ticker.status === "stale" ? "行情延迟" : "行情连接中断";
@@ -241,11 +238,6 @@ export function TradingPage() {
   };
 
   const submitClose = async (positionId: string) => {
-    if (closingPositionIdRef.current) {
-      return;
-    }
-    closingPositionIdRef.current = positionId;
-    setClosingPositionId(positionId);
     setMessage("");
     try {
       const result = await closePosition(positionId);
@@ -254,9 +246,6 @@ export function TradingPage() {
     } catch (error) {
       await refreshTradingState();
       setMessage(error instanceof Error ? error.message : "平仓被拒绝。");
-    } finally {
-      closingPositionIdRef.current = null;
-      setClosingPositionId(null);
     }
   };
 
@@ -277,14 +266,17 @@ export function TradingPage() {
           <h1 className="xh-title mt-2">{symbol} 交易终端</h1>
         </div>
         <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:items-center">
-          <Select
-            label="选择品种"
-            hideLabel
-            className="py-2.5 md:w-auto"
+          <select
+            className="w-full border border-line bg-black px-3.5 py-2.5 text-sm text-white outline-none transition focus:border-white md:w-auto"
             value={symbol}
             onChange={(event) => setSelectedSymbol(event.target.value)}
-            options={symbols.map((item) => ({ value: item.symbol, label: `${item.symbol} · ${item.displayName}` }))}
-          />
+          >
+            {symbols.map((item) => (
+              <option key={item.id} value={item.symbol}>
+                {item.symbol} · {item.displayName}
+              </option>
+            ))}
+          </select>
           <div className="self-start">
             <Badge tone={statusTone}>{statusText}</Badge>
           </div>
@@ -418,12 +410,8 @@ export function TradingPage() {
                       {position.pnl?.toFixed(2) ?? "-"}
                     </td>
                     <td className="px-5 py-4">
-                      <Button
-                        variant="secondary"
-                        disabled={closingPositionId !== null}
-                        onClick={() => submitClose(position.id)}
-                      >
-                        <XCircle size={16} /> {closingPositionId === position.id ? "平仓中" : "平仓"}
+                      <Button variant="secondary" onClick={() => submitClose(position.id)}>
+                        <XCircle size={16} /> 平仓
                       </Button>
                     </td>
                   </tr>
