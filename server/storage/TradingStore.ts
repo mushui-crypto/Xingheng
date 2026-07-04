@@ -87,6 +87,25 @@ export class TradingStore {
       .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt);
   }
 
+  upsertSeedUser(user: UserRow) {
+    const existingById = this.db.prepare("SELECT * FROM users WHERE id = ?").get(user.id) as UserRow | undefined;
+    const existingByEmail = this.db.prepare("SELECT * FROM users WHERE email = ?").get(user.email) as UserRow | undefined;
+    const existing = existingById ?? existingByEmail;
+
+    if (!existing) {
+      this.createUser(user);
+      return;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE users
+         SET id = ?, email = ?, password = ?, nickname = ?, status = ?
+         WHERE id = ?`,
+      )
+      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, existing.id);
+  }
+
   updateUserStatus(id: string, status: User["status"]) {
     this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
   }
