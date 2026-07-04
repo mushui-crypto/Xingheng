@@ -147,6 +147,16 @@ textarea {
     @apply inline-flex items-center gap-2 border border-white/20 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-white hover:text-white active:translate-y-px;
   }
 
+  .xh-auth-input:-webkit-autofill,
+  .xh-auth-input:-webkit-autofill:hover,
+  .xh-auth-input:-webkit-autofill:focus {
+    -webkit-text-fill-color: #ffffff;
+    caret-color: #ffffff;
+    box-shadow: 0 0 0 1000px rgba(14, 14, 14, 0.96) inset;
+    border-color: #2e2e2e;
+    transition: background-color 9999s ease-out;
+  }
+
   .xh-data-table {
     @apply w-full overflow-x-auto;
   }
