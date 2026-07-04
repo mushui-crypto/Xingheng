@@ -47,10 +47,24 @@ type QuickAction = "deposit" | "withdraw" | "transfer" | "internal-transfer";
 type TransferAccount = Extract<WalletAccountType, "wallet" | "funding" | "simulation" | "realTrading">;
 type LedgerTab = "ledger" | "deposits" | "withdrawals" | "transfers";
 type TradeOrderFilter = "all" | "buy" | "sell" | "filled" | "rejected";
+type LocalWallet = {
+  id: string;
+  name: string;
+  address: string;
+  balance: number;
+};
+type LocalSimulationAccount = {
+  id: string;
+  name: string;
+  balance: number;
+  createdAt: number;
+};
 
 const tokenIconSrc = "/assets/xingheng-logo@2x.png";
 const bscTestnetLabel = "BNB Smart Chain Testnet";
 const requiredConfirmations = 1;
+const localWalletsKey = "xingheng.account.localWallets";
+const localSimulationAccountsKey = "xingheng.account.localSimulationAccounts";
 const transferAccountOptions = [
   { value: "wallet", label: "钱包" },
   { value: "funding", label: "资金账户" },
@@ -78,6 +92,13 @@ export function AccountPage() {
   const [withdrawAmount, setWithdrawAmount] = useState(100);
   const [withdrawNetwork] = useState("BSC_TESTNET");
   const [withdrawAddress, setWithdrawAddress] = useState("");
+  const [localWallets, setLocalWallets] = useState<LocalWallet[]>(() => readLocalWallets());
+  const [localSimulationAccounts, setLocalSimulationAccounts] = useState<LocalSimulationAccount[]>(() => readLocalSimulationAccounts());
+  const [isAddWalletOpen, setIsAddWalletOpen] = useState(false);
+  const [walletName, setWalletName] = useState("");
+  const [simulationRechargeAmount, setSimulationRechargeAmount] = useState(100);
+  const [activeSimulationRechargeId, setActiveSimulationRechargeId] = useState<string | null>(null);
+  const [simulationFeedback, setSimulationFeedback] = useState("");
   const [message, setMessage] = useState("");
   const [activeAction, setActiveAction] = useState<QuickAction | null>(null);
   const [activeSection, setActiveSection] = useState<AccountSection>(() => readSectionFromUrl());
@@ -87,6 +108,14 @@ export function AccountPage() {
   useEffect(() => {
     void loadAccount();
   }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(localWalletsKey, JSON.stringify(localWallets));
+  }, [localWallets]);
+
+  useEffect(() => {
+    window.localStorage.setItem(localSimulationAccountsKey, JSON.stringify(localSimulationAccounts));
+  }, [localSimulationAccounts]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -192,9 +221,62 @@ export function AccountPage() {
     try {
       await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户提现申请");
       await loadAccount();
-      setMessage("提现申请已提交，等待后台审核。");
+      const successMessage = "提现申请已提交，等待后台审核。";
+      setMessage(successMessage);
+      return { ok: true, message: successMessage };
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "提现申请提交失败。");
+      const errorMessage = error instanceof Error ? error.message : "提现申请提交失败。";
+      setMessage(errorMessage);
+      return { ok: false, message: errorMessage };
+    }
+  };
+
+  const addWallet = () => {
+    const index = localWallets.length + 2;
+    const wallet: LocalWallet = {
+      id: `local-wallet-${Date.now()}`,
+      name: walletName.trim() || `钱包#${String(index).padStart(3, "0")}`,
+      address: generateLocalWalletAddress(),
+      balance: 0,
+    };
+    setLocalWallets((wallets) => [...wallets, wallet]);
+    setWalletName("");
+    setIsAddWalletOpen(false);
+    setMessage("钱包已添加。");
+  };
+
+  const addSimulationAccount = () => {
+    const currentCount = 1 + localSimulationAccounts.length;
+    if (currentCount >= 5) {
+      setMessage("模拟账户最多 5 个。");
+      return;
+    }
+    const nextIndex = currentCount + 1;
+    setLocalSimulationAccounts((accounts) => [
+      ...accounts,
+      {
+        id: `SIM-LOCAL-${Date.now()}`,
+        name: `测试账户${nextIndex}`,
+        balance: 0,
+        createdAt: Date.now(),
+      },
+    ]);
+    setMessage("模拟账户已新增。");
+  };
+
+  const rechargeSimulationAccount = async () => {
+    setSimulationFeedback("");
+    try {
+      await transferWalletAccount("funding", "simulation", simulationRechargeAmount, "充值模拟账户资金");
+      await loadAccount();
+      const successMessage = "模拟账户资金已充值。";
+      setSimulationFeedback(successMessage);
+      setMessage(successMessage);
+      setActiveSimulationRechargeId(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "模拟账户充值失败。";
+      setSimulationFeedback(errorMessage);
+      setMessage(errorMessage);
     }
   };
 
@@ -242,7 +324,7 @@ export function AccountPage() {
               onInternalTransferRecipientChange={setInternalTransferRecipient}
               onSubmitInternalTransfer={submitInternalTransfer}
               onSubmitTransfer={submitTransfer}
-              onSubmitWithdrawal={() => void submitWithdrawal()}
+              onSubmitWithdrawal={submitWithdrawal}
               onTransferAmountChange={setTransferAmount}
               onTransferFromChange={setTransferFrom}
               onTransferToChange={setTransferTo}
@@ -271,17 +353,48 @@ export function AccountPage() {
               asset={asset}
               depositAddress={depositAddress}
               wallet={wallet}
+              localWallets={localWallets}
               onCopyDepositAddress={() => void copyDepositAddress()}
+              onAddWallet={() => setIsAddWalletOpen(true)}
             />
           ) : null}
           {activeSection === "funding" ? <FundingSection asset={asset} funding={funding} /> : null}
           {activeSection === "trading" ? <RealTradingSection account={realTradingAccount} asset={asset} /> : null}
-          {activeSection === "simulation" ? <SimulationSection account={simulationAccount} asset={asset} /> : null}
+          {activeSection === "simulation" ? (
+            <SimulationSection
+              account={simulationAccount}
+              asset={asset}
+              localAccounts={localSimulationAccounts}
+              onAddAccount={addSimulationAccount}
+              onRecharge={(accountId) => {
+                setSimulationFeedback("");
+                setActiveSimulationRechargeId(accountId);
+              }}
+            />
+          ) : null}
           {activeSection === "ledger" ? <LedgerSection fundingOrders={fundingOrders} /> : null}
           {activeSection === "onchain-deposits" ? <OnchainDepositsSection ownAddress={depositAddress?.address} records={onchainRecords} /> : null}
           {activeSection === "trade-orders" ? <TradeOrdersSection orders={orders} /> : null}
         </section>
       </div>
+      <Modal open={isAddWalletOpen} title="添加钱包" onClose={() => setIsAddWalletOpen(false)}>
+        <div className="space-y-5">
+          <Input label="钱包名称" value={walletName} onChange={(event) => setWalletName(event.target.value)} placeholder="钱包名称" />
+          <Input label="网络" value={bscTestnetLabel} disabled />
+          <Button onClick={addWallet}>确认添加</Button>
+        </div>
+      </Modal>
+      <Modal open={activeSimulationRechargeId !== null} title="充值模拟账户资金" onClose={() => setActiveSimulationRechargeId(null)}>
+        <div className="space-y-5">
+          <Input label="转出账户" value="资金账户" disabled />
+          <Input label="转入账户" value="模拟账户" disabled />
+          <Input label="金额" type="number" min={0} value={simulationRechargeAmount} onChange={(event) => setSimulationRechargeAmount(Number(event.target.value))} />
+          <Button disabled={simulationRechargeAmount <= 0} onClick={() => void rechargeSimulationAccount()}>
+            确认充值
+          </Button>
+          {simulationFeedback ? <p className="border border-white/15 bg-white/[0.035] p-3 text-sm leading-6 text-slate-200">{simulationFeedback}</p> : null}
+        </div>
+      </Modal>
     </div>
   );
 }
@@ -347,7 +460,7 @@ function QuickActionPanel({
   onInternalTransferRecipientChange: (value: string) => void;
   onSubmitInternalTransfer: () => Promise<{ ok: boolean; message: string }>;
   onSubmitTransfer: () => Promise<{ ok: boolean; message: string }>;
-  onSubmitWithdrawal: () => void;
+  onSubmitWithdrawal: () => Promise<{ ok: boolean; message: string }>;
   onTransferAmountChange: (value: number) => void;
   onTransferFromChange: (value: TransferAccount) => void;
   onTransferToChange: (value: TransferAccount) => void;
@@ -357,6 +470,7 @@ function QuickActionPanel({
   const actions = quickActionsForSection(activeSection);
   const [transferFeedback, setTransferFeedback] = useState("");
   const [internalTransferFeedback, setInternalTransferFeedback] = useState("");
+  const [withdrawFeedback, setWithdrawFeedback] = useState("");
   const showActionHeader = activeSection !== "overview";
 
   useEffect(() => {
@@ -366,6 +480,9 @@ function QuickActionPanel({
     if (activeAction !== "internal-transfer") {
       setInternalTransferFeedback("");
     }
+    if (activeAction !== "withdraw") {
+      setWithdrawFeedback("");
+    }
   }, [activeAction]);
 
   if (actions.length === 0 || (!showActionHeader && activeAction === null)) {
@@ -374,63 +491,72 @@ function QuickActionPanel({
 
   return (
     <>
-      {showActionHeader || activeAction === "deposit" || activeAction === "withdraw" ? (
+      {showActionHeader ? (
         <Card>
-          {showActionHeader ? (
-            <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-              <div>
-                <h2 className="xh-panel-title">快捷操作</h2>
-              </div>
-              <div className="flex flex-wrap gap-2">
-                {actions.includes("deposit") ? (
-                  <Button variant={activeAction === "deposit" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "deposit" ? null : "deposit")}>
-                    充值
-                  </Button>
-                ) : null}
-                {actions.includes("withdraw") ? (
-                  <Button variant={activeAction === "withdraw" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "withdraw" ? null : "withdraw")}>
-                    提现
-                  </Button>
-                ) : null}
-                {actions.includes("transfer") ? (
-                  <Button variant={activeAction === "transfer" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "transfer" ? null : "transfer")}>
-                    划转
-                  </Button>
-                ) : null}
-                {actions.includes("internal-transfer") ? (
-                  <Button variant={activeAction === "internal-transfer" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "internal-transfer" ? null : "internal-transfer")}>
-                    内部转账
-                  </Button>
-                ) : null}
-                {actions.includes("trade") ? (
-                  <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
-                    去交易
-                  </Link>
-                ) : null}
-              </div>
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <h2 className="xh-panel-title">快捷操作</h2>
             </div>
-          ) : null}
-
-          {activeAction === "deposit" ? (
-            <div className={showActionHeader ? "mt-5 border-t border-line pt-5" : ""}>
-              <DepositAddressPanel asset={asset} depositAddress={depositAddress} onCopyDepositAddress={onCopyDepositAddress} />
+            <div className="flex flex-wrap gap-2">
+              {actions.includes("deposit") ? (
+                <Button variant={activeAction === "deposit" ? "primary" : "secondary"} onClick={() => onActionChange("deposit")}>
+                  充值
+                </Button>
+              ) : null}
+              {actions.includes("withdraw") ? (
+                <Button variant={activeAction === "withdraw" ? "primary" : "secondary"} onClick={() => onActionChange("withdraw")}>
+                  提现
+                </Button>
+              ) : null}
+              {actions.includes("transfer") ? (
+                <Button variant={activeAction === "transfer" ? "primary" : "secondary"} onClick={() => onActionChange("transfer")}>
+                  划转
+                </Button>
+              ) : null}
+              {actions.includes("internal-transfer") ? (
+                <Button variant={activeAction === "internal-transfer" ? "primary" : "secondary"} onClick={() => onActionChange("internal-transfer")}>
+                  内部转账
+                </Button>
+              ) : null}
+              {actions.includes("trade") ? (
+                <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
+                  去交易
+                </Link>
+              ) : null}
             </div>
-          ) : null}
-          {activeAction === "withdraw" ? (
-            <div className={showActionHeader ? "mt-5 border-t border-line pt-5" : ""}>
-              <WithdrawalForm
-                asset={asset}
-                funding={funding}
-                withdrawAddress={withdrawAddress}
-                withdrawAmount={withdrawAmount}
-                onSubmitWithdrawal={onSubmitWithdrawal}
-                onWithdrawAddressChange={onWithdrawAddressChange}
-                onWithdrawAmountChange={onWithdrawAmountChange}
-              />
-            </div>
-          ) : null}
+          </div>
         </Card>
       ) : null}
+      <Modal
+        open={activeAction === "deposit"}
+        title="充值"
+        onClose={() => onActionChange(null)}
+      >
+        <DepositAddressPanel asset={asset} depositAddress={depositAddress} onCopyDepositAddress={onCopyDepositAddress} />
+      </Modal>
+      <Modal
+        open={activeAction === "withdraw"}
+        title="提现"
+        onClose={() => onActionChange(null)}
+      >
+        <WithdrawalForm
+          asset={asset}
+          funding={funding}
+          withdrawAddress={withdrawAddress}
+          withdrawAmount={withdrawAmount}
+          withdrawFeedback={withdrawFeedback}
+          onSubmitWithdrawal={async () => {
+            setWithdrawFeedback("");
+            const result = await onSubmitWithdrawal();
+            setWithdrawFeedback(result.message);
+            if (result.ok) {
+              onActionChange(null);
+            }
+          }}
+          onWithdrawAddressChange={onWithdrawAddressChange}
+          onWithdrawAmountChange={onWithdrawAmountChange}
+        />
+      </Modal>
       <Modal
         open={activeAction === "transfer"}
         title="账户划转"
@@ -713,12 +839,16 @@ function OverviewFundingTable({ rows }: { rows: OverviewFundingRow[] }) {
 function WalletOverviewSection({
   asset,
   depositAddress,
+  localWallets,
   wallet,
+  onAddWallet,
   onCopyDepositAddress,
 }: {
   asset: string;
   depositAddress: DepositAddress | null;
+  localWallets: LocalWallet[];
   wallet: FundingAccount | null;
+  onAddWallet: () => void;
   onCopyDepositAddress: () => void;
 }) {
   const [selectedWalletId, setSelectedWalletId] = useState("primary");
@@ -736,20 +866,13 @@ function WalletOverviewSection({
       change24h: walletPnl,
       onCopyAddress: depositAddress?.address ? onCopyDepositAddress : undefined,
     },
-    {
-      id: "demo-secondary",
-      name: "钱包#002",
-      address: "0x2F6C8b9A1d4E3F7A9C0b12D45e8F9012cA34B567",
-      balance: 0,
+    ...localWallets.map((item) => ({
+      id: item.id,
+      name: item.name,
+      address: item.address,
+      balance: item.balance,
       change24h: 0,
-    },
-    {
-      id: "demo-third",
-      name: "钱包#003",
-      address: "0x91A4d7C20bE8F13a56cD9A02b7F4E6C8D13579B0",
-      balance: 0,
-      change24h: 0,
-    },
+    })),
   ];
   const selectedWallet = walletCards.find((wallet) => wallet.id === selectedWalletId) ?? walletCards[0];
   const assetRows = Array.from({ length: 5 }, (_, index) => ({
@@ -778,7 +901,7 @@ function WalletOverviewSection({
         <div className="xh-wallet-list-pane">
           <div className="xh-wallet-pane-header">
             <h3>钱包列表</h3>
-            <WalletActionButton label="管理钱包" />
+            <WalletActionButton label="添加钱包" onClick={onAddWallet} />
           </div>
           <div className="xh-wallet-list">
             {walletCards.map((wallet) => (
@@ -806,7 +929,7 @@ function WalletOverviewSection({
               </div>
             ))}
           </div>
-          <button className="xh-wallet-add-demo" type="button">
+          <button className="xh-wallet-add-demo" type="button" onClick={onAddWallet}>
             添加钱包
           </button>
         </div>
@@ -1039,23 +1162,62 @@ function BoundaryTile({ title, description }: { title: string; description: stri
   );
 }
 
-function SimulationSection({ account, asset }: { account: TradingAccount | null; asset: string }) {
+function SimulationSection({
+  account,
+  asset,
+  localAccounts,
+  onAddAccount,
+  onRecharge,
+}: {
+  account: TradingAccount | null;
+  asset: string;
+  localAccounts: LocalSimulationAccount[];
+  onAddAccount: () => void;
+  onRecharge: (accountId: string) => void;
+}) {
   const accountAsset = account?.asset ?? asset;
-  const simulationAccounts = [1, 2];
+  const simulationAccounts = [
+    { id: account?.id ?? "primary-simulation", name: "测试账户1", account },
+    ...localAccounts.map((item) => ({
+      id: item.id,
+      name: item.name,
+      account: {
+        ...(account ?? createEmptyTradingAccount(item.id, accountAsset)),
+        id: item.id,
+        balance: item.balance,
+        equity: item.balance,
+        freeMargin: item.balance,
+        usedMargin: 0,
+        floatingPnl: 0,
+      },
+    })),
+  ];
 
   return (
     <div className="xh-simulation-page">
-      <button className="xh-simulation-add-button" type="button" aria-disabled="true" title="接口待接入">
+      <button className="xh-simulation-add-button" type="button" disabled={simulationAccounts.length >= 5} onClick={onAddAccount}>
         新增模拟账户
       </button>
-      {simulationAccounts.map((index) => (
-        <SimulationAccountCard account={account} asset={accountAsset} index={index} key={index} />
+      {simulationAccounts.map((item, index) => (
+        <SimulationAccountCard account={item.account} asset={accountAsset} index={index + 1} name={item.name} key={item.id} onRecharge={() => onRecharge(item.id)} />
       ))}
     </div>
   );
 }
 
-function SimulationAccountCard({ account, asset, index }: { account: TradingAccount | null; asset: string; index: number }) {
+function SimulationAccountCard({
+  account,
+  asset,
+  index,
+  name,
+  onRecharge,
+}: {
+  account: TradingAccount | null;
+  asset: string;
+  index: number;
+  name: string;
+  onRecharge: () => void;
+}) {
   const equity = account?.equity ?? 0;
   const balance = account?.balance ?? 1000;
   const usedMargin = account?.usedMargin ?? 0;
@@ -1081,9 +1243,9 @@ function SimulationAccountCard({ account, asset, index }: { account: TradingAcco
   return (
     <section className="xh-simulation-account-card">
       <div className="xh-simulation-card-header">
-        <h2>测试账户{index}</h2>
+        <h2>{name || `测试账户${index}`}</h2>
         <div className="xh-simulation-card-actions">
-          <SimulationActionButton label="重置资金" />
+          <SimulationActionButton label="充值资金" onClick={onRecharge} />
           <SimulationActionButton asLink label="去交易" to="/app/trading?symbol=BTCUSDT" />
           <SimulationActionButton label="更多" />
         </div>
@@ -1110,7 +1272,7 @@ function SimulationAccountCard({ account, asset, index }: { account: TradingAcco
   );
 }
 
-function SimulationActionButton({ asLink = false, label, to }: { asLink?: boolean; label: string; to?: string }) {
+function SimulationActionButton({ asLink = false, label, onClick, to }: { asLink?: boolean; label: string; onClick?: () => void; to?: string }) {
   if (asLink && to) {
     return (
       <Link className="xh-simulation-action-button" to={to}>
@@ -1120,7 +1282,7 @@ function SimulationActionButton({ asLink = false, label, to }: { asLink?: boolea
   }
 
   return (
-    <button className="xh-simulation-action-button" type="button" aria-disabled="true" title="接口待接入">
+    <button className="xh-simulation-action-button" type="button" onClick={onClick} disabled={!onClick && label !== "更多"} title={!onClick && label !== "更多" ? "接口待接入" : undefined}>
       {label}
     </button>
   );
@@ -1323,6 +1485,7 @@ function WithdrawalForm({
   funding,
   withdrawAddress,
   withdrawAmount,
+  withdrawFeedback,
   onSubmitWithdrawal,
   onWithdrawAddressChange,
   onWithdrawAmountChange,
@@ -1331,6 +1494,7 @@ function WithdrawalForm({
   funding: FundingAccount | null;
   withdrawAddress: string;
   withdrawAmount: number;
+  withdrawFeedback: string;
   onSubmitWithdrawal: () => void;
   onWithdrawAddressChange: (value: string) => void;
   onWithdrawAmountChange: (value: number) => void;
@@ -1351,6 +1515,7 @@ function WithdrawalForm({
       <Button className="mt-4" disabled={withdrawAmount <= 0 || !withdrawAddress.trim()} onClick={onSubmitWithdrawal}>
         提交提现申请
       </Button>
+      {withdrawFeedback ? <p className="mt-4 border border-white/15 bg-white/[0.035] p-3 text-sm leading-6 text-slate-200">{withdrawFeedback}</p> : null}
     </div>
   );
 }
@@ -1906,6 +2071,53 @@ function shortenChainAddress(value: string) {
 
 function shortenWalletAddress(value: string) {
   return value.length <= 12 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
+function readLocalWallets(): LocalWallet[] {
+  return readLocalArray<LocalWallet>(localWalletsKey).filter((wallet) => wallet.id && wallet.address);
+}
+
+function readLocalSimulationAccounts(): LocalSimulationAccount[] {
+  return readLocalArray<LocalSimulationAccount>(localSimulationAccountsKey).filter((account) => account.id).slice(0, 4);
+}
+
+function readLocalArray<T>(key: string): T[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+  try {
+    const value = window.localStorage.getItem(key);
+    const parsed = value ? JSON.parse(value) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function generateLocalWalletAddress() {
+  const bytes = cryptoRandomHex(20);
+  return `0x${bytes}`;
+}
+
+function cryptoRandomHex(byteLength: number) {
+  const bytes = new Uint8Array(byteLength);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function createEmptyTradingAccount(id: string, asset: string): TradingAccount {
+  return {
+    id,
+    userId: "local",
+    asset: asset as "USDT",
+    balance: 0,
+    equity: 0,
+    usedMargin: 0,
+    freeMargin: 0,
+    floatingPnl: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
 }
 
 function quickActionsForSection(section: AccountSection): Array<QuickAction | "trade"> {
