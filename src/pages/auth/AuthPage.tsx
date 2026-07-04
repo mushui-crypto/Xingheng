@@ -24,6 +24,10 @@ const seedCredentials: RememberedCredentials = {
   password: "demo123",
 };
 
+const authInputClass =
+  "xh-auth-input h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45";
+const authPasswordInputClass = `${authInputClass} pr-14`;
+
 function readRememberedCredentials() {
   return readStorage<RememberedCredentials>(storageKeys.rememberedCredentials, emptyCredentials);
 }
@@ -99,10 +103,11 @@ function LoginForm() {
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
-        <AuthInput label="Email" placeholder="Enter your email" type="email" value={email} onChange={setEmail} />
+        <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
         <AuthPasswordInput
           label="Password"
           placeholder="Enter your password"
+          autoComplete="current-password"
           value={password}
           onChange={setPassword}
           visible={showPassword}
@@ -182,10 +187,11 @@ function RegisterForm() {
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
-        <AuthInput label="Email" placeholder="Enter your email" type="email" value={email} onChange={setEmail} />
+        <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
         <AuthPasswordInput
           label="Password"
           placeholder="Enter your password"
+          autoComplete="new-password"
           value={password}
           onChange={setPassword}
           minLength={6}
@@ -195,6 +201,7 @@ function RegisterForm() {
         <AuthPasswordInput
           label="Confirm password"
           placeholder="Repeat your password"
+          autoComplete="new-password"
           value={confirmPassword}
           onChange={setConfirmPassword}
           minLength={6}
@@ -223,6 +230,7 @@ function AuthInput({
   label,
   placeholder,
   type = "text",
+  autoComplete,
   value,
   onChange,
   minLength,
@@ -230,6 +238,7 @@ function AuthInput({
   label: string;
   placeholder: string;
   type?: string;
+  autoComplete?: string;
   value: string;
   onChange: (value: string) => void;
   minLength?: number;
@@ -238,9 +247,10 @@ function AuthInput({
     <label className="block">
       <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">{label}</span>
       <input
-        className="h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45"
+        className={authInputClass}
         placeholder={placeholder}
         type={type}
+        autoComplete={autoComplete}
         value={value}
         minLength={minLength}
         onChange={(event) => onChange(event.target.value)}
@@ -253,6 +263,7 @@ function AuthInput({
 function AuthPasswordInput({
   label,
   placeholder,
+  autoComplete,
   value,
   onChange,
   minLength,
@@ -261,6 +272,7 @@ function AuthPasswordInput({
 }: {
   label: string;
   placeholder: string;
+  autoComplete?: string;
   value: string;
   onChange: (value: string) => void;
   minLength?: number;
@@ -272,9 +284,10 @@ function AuthPasswordInput({
       <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">{label}</span>
       <div className="relative">
         <input
-          className="h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 pr-14 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45"
+          className={authPasswordInputClass}
           placeholder={placeholder}
           type={visible ? "text" : "password"}
+          autoComplete={autoComplete}
           value={value}
           minLength={minLength}
           onChange={(event) => onChange(event.target.value)}
