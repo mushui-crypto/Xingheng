@@ -810,8 +810,84 @@ textarea {
   }
 
   @media (max-width: 960px) {
+    .xh-account-layout {
+      display: block;
+      min-height: calc(100vh - 60px);
+    }
+
+    .xh-account-sidebar {
+      position: sticky;
+      top: 60px;
+      z-index: 20;
+      min-height: 0;
+      border-right-width: 0;
+      border-bottom: 1px solid #2b2b2b;
+      padding: 12px 16px;
+    }
+
+    .xh-account-nav {
+      flex-direction: row;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: transparent;
+      padding-bottom: 1px;
+    }
+
+    .xh-account-nav-group {
+      width: auto;
+      min-width: max-content;
+      padding: 0 2px;
+      color: #737373;
+    }
+
+    .xh-account-nav-button {
+      width: auto;
+      min-width: max-content;
+      height: 38px;
+      padding-left: 14px;
+      padding-right: 14px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .xh-account-nav-button.is-child {
+      padding-left: 14px;
+    }
+
+    .xh-account-content {
+      width: 100%;
+      overflow: visible;
+      padding: 16px;
+    }
+
     .xh-wallet-panel {
       grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .xh-account-sidebar {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .xh-account-content {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .xh-record-panel,
+    .xh-overview-panel,
+    .xh-asset-summary-panel,
+    .xh-funding-assets-panel,
+    .xh-wallet-list-pane,
+    .xh-wallet-detail-pane,
+    .xh-wallet-asset-pane,
+    .xh-simulation-account-card,
+    .xh-trading-boundary-panel {
+      padding: 16px;
     }
   }
 }
