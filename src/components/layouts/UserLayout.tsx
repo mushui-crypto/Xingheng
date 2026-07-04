@@ -1,6 +1,5 @@
-import { CandlestickChart, Home, LineChart, LogOut, UserRound } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { USER_AUTH_FAILED_EVENT } from "../../api/session";
 import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
@@ -11,10 +10,12 @@ type UserLayoutProps = {
 
 export function UserLayout({ children }: UserLayoutProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const syncSession = useAuthStore((state) => state.syncSession);
   const logout = useAuthStore((state) => state.logout);
   const expireSession = useAuthStore((state) => state.expireSession);
   const currentUser = useUserStore((state) => state.currentUser);
+  const isAccountPage = location.pathname.startsWith("/app/account");
 
   useEffect(() => {
     void syncSession();
@@ -36,39 +37,31 @@ export function UserLayout({ children }: UserLayoutProps) {
 
   return (
     <div className="min-h-screen bg-shell text-white">
-      <header className="sticky top-0 z-30 border-b border-white/15 bg-black/92 backdrop-blur">
-        <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center justify-between gap-4">
+      <header className="sticky top-0 z-30 h-[60px] border border-[#2b2b2b] bg-black">
+        <div className="flex h-full w-full items-center justify-between gap-6 overflow-hidden px-4 py-2.5 md:px-8">
+          <div className="flex min-w-0 items-center gap-6 lg:gap-10">
             <Brand />
-            <button
-              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black lg:hidden"
-              onClick={handleLogout}
-            >
-              <LogOut size={15} />
-              退出
-            </button>
+            <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
+              <TopLink to="/app/dashboard" label="首页" />
+              <TopLink to="/app/markets" label="行情" />
+              <TopLink to="/app/trading" label="交易终端" />
+              <TopLink to="/app/account" label="账户总览" />
+            </nav>
           </div>
-          <nav className="no-scrollbar flex gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
-            <TopLink to="/app/dashboard" icon={<Home size={16} />} label="首页" />
-            <TopLink to="/app/markets" icon={<LineChart size={16} />} label="行情" />
-            <TopLink to="/app/trading" icon={<CandlestickChart size={16} />} label="交易终端" />
-            <TopLink to="/app/account" icon={<UserRound size={16} />} label="资金账户" />
-          </nav>
-          <div className="hidden items-center gap-4 lg:flex">
-            <p className="max-w-[260px] truncate text-xs uppercase tracking-[0.16em] text-muted">
-              USER <span className="text-white">{currentUser?.email}</span>
-            </p>
+          <div className="hidden shrink-0 items-center gap-[18px] md:flex">
+            <div className="max-w-[260px] truncate border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5]">
+              {(currentUser?.email ?? "TEST@TEST.COM").toUpperCase()}
+            </div>
             <button
-              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black"
+              className="inline-flex items-center justify-center border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04]"
               onClick={handleLogout}
             >
-              <LogOut size={15} />
               退出
             </button>
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-[1480px] px-4 py-5 md:px-8 md:py-8">{children}</main>
+      <main className={isAccountPage ? "w-full bg-[#080808] p-0" : "mx-auto max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
     </div>
   );
 
@@ -77,29 +70,25 @@ export function UserLayout({ children }: UserLayoutProps) {
       <div className="flex items-center gap-3">
         <img
           alt="星衡 logo"
-          className="h-9 w-9 border border-white/20 object-contain"
+          className="h-9 w-9 object-contain"
           src="/assets/xingheng-logo@2x.png"
         />
-        <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.26em]">星衡</p>
-          <p className="text-[11px] uppercase tracking-[0.16em] text-muted">Simulation console</p>
-        </div>
+        <p className="whitespace-nowrap text-[15px] font-bold leading-none text-[#f5f5f5]">StellaX</p>
       </div>
     );
   }
 }
 
-function TopLink({ to, icon, label }: { to: string; icon: ReactNode; label: string }) {
+function TopLink({ to, label }: { to: string; label: string }) {
   return (
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex shrink-0 items-center gap-2 border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition md:px-4 ${
-          isActive ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"
+        `flex shrink-0 items-center justify-center px-4 py-2.5 text-[13px] font-medium leading-none transition ${
+          isActive ? "bg-[#f5f5f5] text-black" : "bg-black text-[#f5f5f5] hover:bg-white/[0.06]"
         }`
       }
     >
-      {icon}
       {label}
     </NavLink>
   );

@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { X } from "lucide-react";
 import { Button } from "./Button";
 
 type ModalProps = {
@@ -43,8 +44,8 @@ export function Modal({ open, title, description, children, onClose }: ModalProp
             </h2>
             {description ? <p className="mt-2 text-sm leading-6 text-muted">{description}</p> : null}
           </div>
-          <Button type="button" variant="ghost" onClick={onClose}>
-            关闭
+          <Button type="button" className="h-9 w-9 px-0" variant="ghost" aria-label="关闭" onClick={onClose}>
+            <X size={18} aria-hidden="true" />
           </Button>
         </div>
         <div className="mt-5">{children}</div>

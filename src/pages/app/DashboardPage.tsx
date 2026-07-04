@@ -36,7 +36,7 @@ export function DashboardPage() {
       <section className="border border-line bg-black p-6">
         <p className="xh-kicker">Mission control</p>
         <h1 className="mt-2 xh-title">
-          {user?.nickname || user?.email}，这里是星衡
+          {user?.nickname || user?.email}
         </h1>
         <p className="mt-3 max-w-2xl text-sm leading-6 text-muted">
           当前为模拟交易环境，所有交易均为内部模拟成交，不涉及真实资金交易。
@@ -50,12 +50,12 @@ export function DashboardPage() {
             <img src={tokenIconSrc} alt="USDT token icon" className="h-9 w-9 object-contain" />
             <p className="text-3xl font-semibold">USDT {simulationEquity?.toFixed(2) ?? "--"}</p>
           </div>
-          <p className="mt-2 text-xs text-muted">实时读取当前模拟账户权益；旧 trading 字段仅作兼容兜底。</p>
+          <p className="mt-2 text-xs text-muted">模拟账户权益</p>
         </Card>
         <Card>
           <p className="text-sm text-muted">账户状态</p>
           <p className="mt-3 text-3xl font-semibold">Active</p>
-          <p className="mt-2 text-xs text-muted">当前账号允许登录模拟交易环境。</p>
+          <p className="mt-2 text-xs text-muted">模拟交易可用</p>
         </Card>
         <Card>
           <p className="text-sm text-muted">资金账户可用余额</p>
@@ -63,7 +63,7 @@ export function DashboardPage() {
             <img src={tokenIconSrc} alt="USDT token icon" className="h-9 w-9 object-contain" />
             <p className="text-3xl font-semibold">USDT {accounts?.funding.available?.toFixed(2) ?? "--"}</p>
           </div>
-          <p className="mt-2 text-xs text-muted">实时读取当前资金账户可用余额。</p>
+          <p className="mt-2 text-xs text-muted">资金账户可用</p>
         </Card>
       </div>
 
