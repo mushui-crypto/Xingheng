@@ -47,11 +47,60 @@ textarea {
   table {
     white-space: nowrap;
   }
+
+  .xh-account-content {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
 }
 
 @layer components {
   .xh-page {
     @apply space-y-6;
+  }
+
+  .xh-account-workspace {
+    @apply w-full max-w-none bg-[#080808];
+    min-height: calc(100vh - 60px);
+    font-family:
+      "Noto Sans SC", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+      "Segoe UI", sans-serif;
+  }
+
+  .xh-account-layout {
+    @apply grid min-h-[calc(100vh-60px)] gap-0 items-stretch;
+    grid-template-columns: 300px minmax(0, 1fr);
+  }
+
+  .xh-account-sidebar {
+    @apply min-w-0 border-r border-[#2b2b2b] bg-black px-4 py-8;
+    min-height: calc(100vh - 60px);
+  }
+
+  .xh-account-content {
+    @apply min-w-0 space-y-5 overflow-hidden bg-[#080808] py-8;
+    padding-left: clamp(32px, calc((100vw - 1600px) / 2), 160px);
+    padding-right: clamp(32px, calc((100vw - 1600px) / 2), 160px);
+  }
+
+  .xh-account-nav {
+    @apply no-scrollbar flex w-full max-w-full flex-col gap-2 overflow-visible bg-black;
+  }
+
+  .xh-account-nav-group {
+    @apply flex h-[14px] shrink-0 items-center px-0 text-[12px] font-medium leading-none text-[#737373] w-full;
+  }
+
+  .xh-account-nav-button {
+    @apply flex h-[46px] w-full shrink-0 items-center bg-black pl-4 pr-[14px] text-left text-sm font-medium leading-none text-[#a6a6a6] transition hover:bg-white/[0.04] hover:text-[#f5f5f5];
+  }
+
+  .xh-account-nav-button.is-child {
+    @apply pl-7;
+  }
+
+  .xh-account-nav-button.is-active {
+    @apply bg-[#f5f5f5] font-bold text-black hover:bg-[#f5f5f5] hover:text-black;
   }
 
   .xh-page-header {
@@ -96,6 +145,750 @@ textarea {
 
   .xh-action-link {
     @apply inline-flex items-center gap-2 border border-white/20 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-white hover:text-white active:translate-y-px;
+  }
+
+  .xh-data-table {
+    @apply w-full overflow-x-auto;
+  }
+
+  .xh-data-table-inner {
+    min-width: var(--xh-data-table-min-width);
+    width: 100%;
+  }
+
+  .xh-data-table-row {
+    display: grid;
+    grid-template-columns: var(--xh-data-table-columns);
+    align-items: center;
+  }
+
+  .xh-data-table-cell {
+    @apply min-w-0 px-5 text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-data-table-cell.is-right {
+    @apply text-right;
+  }
+
+  .xh-data-table-cell.is-center {
+    @apply text-center;
+  }
+
+  .xh-data-table-head {
+    @apply h-7 border-b border-[#2b2b2b];
+  }
+
+  .xh-data-table-head .xh-data-table-cell {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-data-table-body {
+    margin-top: 0;
+  }
+
+  .xh-data-table-body-row {
+    @apply h-[60px] border-b border-[#2b2b2b];
+  }
+
+  .xh-data-table-empty {
+    @apply border-b border-[#2b2b2b] px-5 py-8 text-center text-sm text-[#a6a6a6];
+  }
+
+  .xh-overview-stack {
+    @apply space-y-5;
+  }
+
+  .xh-overview-panel {
+    @apply bg-[#101010] p-5;
+  }
+
+  .xh-overview-panel-header {
+    @apply flex flex-col gap-4 md:flex-row md:items-start md:justify-between;
+  }
+
+  .xh-overview-info-grid {
+    @apply mt-[18px] grid gap-5 sm:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .xh-overview-info {
+    @apply min-w-0 space-y-1.5;
+  }
+
+  .xh-overview-info dt {
+    @apply text-xs font-normal text-[#a6a6a6];
+  }
+
+  .xh-overview-info dd {
+    @apply break-all text-[13px] font-medium text-[#f5f5f5];
+  }
+
+  .xh-overview-actions {
+    @apply flex flex-wrap gap-2;
+  }
+
+  .xh-overview-action {
+    @apply inline-flex min-h-[40px] items-center justify-center border border-white/15 bg-black px-4 py-2 text-[13px] font-medium text-[#f5f5f5] transition hover:border-white hover:bg-white/[0.04] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-white/15 disabled:hover:bg-black;
+  }
+
+  .xh-asset-summary-panel {
+    @apply min-h-[194px] border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-asset-summary-top {
+    @apply flex min-h-[92px] flex-col justify-between gap-5 md:flex-row md:items-start;
+  }
+
+  .xh-asset-summary-main {
+    @apply min-w-0;
+  }
+
+  .xh-asset-summary-main h2 {
+    @apply h-5 text-base font-medium leading-5 text-[#f5f5f5];
+  }
+
+  .xh-asset-summary-value {
+    @apply mt-1 flex h-10 min-w-0 items-end gap-2;
+  }
+
+  .xh-asset-summary-number {
+    @apply block truncate text-[32px] font-semibold leading-10 tracking-[-0.03em] text-[#f5f5f5];
+  }
+
+  .xh-asset-summary-unit {
+    @apply mb-1 block text-sm font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-asset-summary-pnl {
+    @apply mt-2 flex h-5 flex-wrap items-center gap-1.5 text-xs font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-asset-summary-actions {
+    @apply flex shrink-0 flex-wrap justify-start gap-2 md:justify-end;
+  }
+
+  .xh-asset-summary-actions .xh-overview-action,
+  .xh-asset-summary-actions .xh-wallet-action {
+    @apply h-9 min-h-0 min-w-[58px] px-3 py-0 text-[13px] leading-none;
+  }
+
+  .xh-asset-summary-info-grid {
+    @apply mt-4 grid gap-5 md:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .xh-overview-metric {
+    @apply mt-[18px] flex flex-col items-start gap-2;
+  }
+
+  .xh-overview-metric-value {
+    @apply text-2xl font-bold tracking-[-0.02em] text-[#f5f5f5];
+  }
+
+  .xh-overview-pnl {
+    @apply flex flex-wrap gap-1.5 text-xs text-[#f5f5f5];
+  }
+
+  .xh-overview-table-wrap {
+    @apply mt-4 overflow-x-auto;
+  }
+
+  .xh-overview-table {
+    @apply w-full min-w-[760px] table-fixed text-left;
+  }
+
+  .xh-overview-table th {
+    @apply px-5 pb-3 text-xs font-normal text-[#a6a6a6];
+  }
+
+  .xh-overview-table th:not(:first-child),
+  .xh-overview-table td:not(:first-child) {
+    @apply text-right;
+  }
+
+  .xh-overview-table td {
+    @apply px-5 py-2.5 text-[13px] font-medium text-[#f5f5f5];
+  }
+
+  .xh-overview-table tbody tr + tr td {
+    @apply border-t border-white/[0.06];
+  }
+
+  .xh-overview-table-number,
+  .xh-overview-table-time {
+    @apply whitespace-nowrap;
+  }
+
+  .xh-overview-table th:nth-child(3),
+  .xh-overview-table td.xh-overview-table-asset {
+    @apply whitespace-nowrap text-center;
+  }
+
+  .xh-overview-status {
+    @apply whitespace-nowrap;
+  }
+
+  .xh-overview-status.is-success {
+    @apply text-emerald-400;
+  }
+
+  .xh-overview-status.is-danger {
+    @apply text-red-400;
+  }
+
+  .xh-overview-status.is-warning {
+    @apply text-amber-400;
+  }
+
+  .xh-overview-status.is-progress {
+    @apply text-blue-400;
+  }
+
+  .xh-overview-status.is-muted {
+    @apply text-slate-400;
+  }
+
+  .xh-funding-page {
+    @apply space-y-5;
+  }
+
+  .xh-funding-summary-panel {
+    @apply min-h-[194px];
+  }
+
+  .xh-funding-summary-header {
+    @apply flex min-h-9 items-start justify-between gap-5;
+  }
+
+  .xh-funding-summary-header h2,
+  .xh-funding-assets-panel h2 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-funding-actions {
+    @apply flex shrink-0 flex-wrap justify-end gap-2;
+  }
+
+  .xh-funding-balance {
+    @apply mt-6 text-2xl font-bold leading-8 tracking-[-0.02em] text-[#f5f5f5];
+  }
+
+  .xh-funding-info-grid {
+    @apply mt-[14px] grid gap-5 md:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .xh-funding-info {
+    @apply min-w-0;
+  }
+
+  .xh-funding-info p {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-funding-info span {
+    @apply mt-1.5 block break-all text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-funding-assets-panel {
+    @apply min-h-[404px] border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-funding-assets-table {
+    @apply mt-[14px];
+  }
+
+  .xh-funding-token-cell {
+    @apply flex min-w-0 items-center gap-2.5;
+  }
+
+  .xh-funding-token-icon {
+    @apply h-9 w-9 shrink-0 rounded-full object-contain;
+  }
+
+  .xh-funding-row-actions {
+    @apply inline-flex items-center justify-end gap-2.5;
+  }
+
+  .xh-funding-row-actions button {
+    @apply text-sm font-normal leading-5 text-[#f5f5f5] transition hover:text-white/70;
+  }
+
+  .xh-trading-account-page {
+    @apply space-y-5;
+  }
+
+  .xh-trading-summary-panel {
+    @apply min-h-[194px];
+  }
+
+  .xh-simulation-page {
+    @apply flex w-full flex-col items-start gap-5;
+  }
+
+  .xh-simulation-add-button {
+    @apply inline-flex h-9 min-w-[128px] shrink-0 items-center justify-center whitespace-nowrap border border-[#2b2b2b] bg-black px-4 text-[13px] font-medium leading-4 text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] active:translate-y-px;
+  }
+
+  .xh-simulation-summary-panel {
+    @apply min-h-[194px];
+  }
+
+  .xh-simulation-account-card {
+    @apply flex min-h-[280px] w-full flex-col items-start gap-4 overflow-hidden border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-simulation-card-header {
+    @apply flex min-h-9 w-full flex-col gap-4 md:flex-row md:items-start md:justify-between;
+  }
+
+  .xh-simulation-card-header h2 {
+    @apply whitespace-nowrap text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-simulation-card-actions {
+    @apply flex shrink-0 flex-wrap items-center gap-2;
+  }
+
+  .xh-simulation-action-button {
+    @apply inline-flex h-9 min-w-[58px] shrink-0 items-center justify-center whitespace-nowrap border border-[#2b2b2b] bg-black px-4 text-[13px] font-medium leading-4 text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] active:translate-y-px;
+  }
+
+  .xh-simulation-action-button:first-child {
+    @apply w-[84px];
+  }
+
+  .xh-simulation-action-button:nth-child(2) {
+    @apply w-[71px];
+  }
+
+  .xh-simulation-action-button:nth-child(3) {
+    @apply w-[58px];
+  }
+
+  .xh-simulation-primary-metric {
+    @apply min-w-0;
+  }
+
+  .xh-simulation-primary-metric p {
+    @apply text-xs font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-simulation-primary-metric div {
+    @apply mt-1 flex min-w-0 items-end gap-2;
+  }
+
+  .xh-simulation-primary-metric strong {
+    @apply block truncate text-[32px] font-bold leading-10 tracking-normal text-[#f5f5f5];
+  }
+
+  .xh-simulation-primary-metric span {
+    @apply mb-1 block text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-simulation-info-grid {
+    @apply flex w-full flex-col gap-4 overflow-hidden;
+  }
+
+  .xh-simulation-info-row {
+    @apply grid w-full gap-5 overflow-hidden md:grid-cols-2 xl:grid-cols-4;
+  }
+
+  .xh-simulation-info {
+    @apply min-w-0 overflow-hidden;
+  }
+
+  .xh-simulation-info p {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-simulation-info > span {
+    @apply mt-1.5 block truncate whitespace-nowrap text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-trading-boundary-panel {
+    @apply min-h-[225px] border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-trading-boundary-panel h2 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-trading-boundary-panel > p {
+    @apply mt-4 text-xs font-normal leading-6 text-[#a6a6a6];
+  }
+
+  .xh-trading-boundary-grid {
+    @apply mt-[15px] grid gap-[14px] md:grid-cols-3;
+  }
+
+  .xh-trading-boundary-tile {
+    @apply h-[105px] overflow-hidden border border-[#2b2b2b] bg-transparent p-3;
+  }
+
+  .xh-trading-boundary-tile p {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-trading-boundary-tile strong {
+    @apply mt-1.5 block text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-trading-boundary-tile span {
+    @apply mt-1.5 block text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-record-panel {
+    @apply min-h-[231px] border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-record-panel h2 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-record-panel-orders {
+    @apply min-h-[236px];
+  }
+
+  .xh-record-panel-ledger {
+    @apply min-h-[281px];
+  }
+
+  .xh-record-panel .xh-data-table {
+    @apply mt-4;
+  }
+
+  .xh-record-panel .xh-record-table {
+    @apply mt-4;
+  }
+
+  .xh-record-filters {
+    @apply mt-4 flex h-[34px] flex-wrap items-center gap-2 overflow-x-auto;
+  }
+
+  .xh-record-filter {
+    @apply inline-flex h-[34px] shrink-0 items-center justify-center border border-[#2b2b2b] bg-transparent px-3 py-0 text-xs font-medium leading-none text-[#a6a6a6] transition hover:border-white/40 hover:text-[#f5f5f5];
+  }
+
+  .xh-record-filter.is-active {
+    @apply border-[#f5f5f5] bg-[#f5f5f5] text-black hover:border-[#f5f5f5] hover:text-black;
+  }
+
+  .xh-record-table .xh-data-table-body {
+    margin-top: 0;
+  }
+
+  .xh-record-table .xh-data-table-empty {
+    @apply flex min-h-[98px] items-center justify-center border border-[#2b2b2b] py-0;
+  }
+
+  .xh-record-empty-content {
+    @apply mx-auto max-w-[520px] text-center;
+  }
+
+  .xh-record-empty-content p {
+    @apply text-sm font-medium leading-5 text-[#f5f5f5];
+  }
+
+  .xh-record-empty-content span {
+    @apply mt-2 block text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-wallet-overview {
+    @apply space-y-5;
+  }
+
+  .xh-wallet-hero {
+    @apply shadow-none;
+  }
+
+  .xh-wallet-card-header {
+    @apply flex min-h-[100px] flex-col gap-5 md:flex-row md:items-center md:justify-between;
+  }
+
+  .xh-wallet-title {
+    @apply text-base font-medium leading-6 tracking-normal text-[#f5f5f5];
+  }
+
+  .xh-wallet-hero-metric {
+    @apply min-w-0 flex-1;
+  }
+
+  .xh-wallet-hero-network {
+    @apply min-w-0 flex-1 border-t border-[#2b2b2b] pt-5 md:min-h-[60px] md:border-l md:border-t-0 md:pl-[18px] md:pt-0;
+  }
+
+  .xh-wallet-actions {
+    @apply flex flex-wrap gap-2 md:justify-end;
+  }
+
+  .xh-wallet-action {
+    @apply inline-flex h-9 items-center justify-center gap-2 border border-[#2b2b2b] bg-black px-4 py-0 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] active:translate-y-px disabled:cursor-not-allowed disabled:text-[#777] disabled:opacity-100 disabled:hover:bg-black;
+  }
+
+  .xh-wallet-panel {
+    @apply grid overflow-visible border-0 bg-transparent p-0 shadow-none;
+    grid-template-columns: minmax(360px, 480px) minmax(0, 1fr);
+    gap: 20px;
+    background-color: transparent !important;
+    padding: 0 !important;
+    width: 100%;
+  }
+
+  .xh-wallet-list-pane {
+    @apply min-w-0 border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-wallet-pane-header {
+    @apply flex h-9 items-start justify-between gap-[18px];
+  }
+
+  .xh-wallet-pane-header h3 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-wallet-pane-header p {
+    @apply mt-1 text-xs leading-5 text-muted;
+  }
+
+  .xh-wallet-list {
+    @apply mt-[18px] space-y-[18px];
+  }
+
+  .xh-wallet-list-card {
+    @apply flex h-16 w-full cursor-pointer flex-col justify-between overflow-hidden border border-[#2b2b2b] bg-transparent p-3 text-left text-[#f5f5f5] transition hover:border-white/40 hover:bg-black focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/70 active:translate-y-px;
+  }
+
+  .xh-wallet-list-card.is-active {
+    @apply border-[#f5f5f5] bg-black text-[#f5f5f5] shadow-none;
+  }
+
+  .xh-wallet-list-card-top {
+    @apply flex items-start justify-between gap-3;
+  }
+
+  .xh-wallet-list-card-top strong {
+    @apply block text-sm font-normal leading-5;
+  }
+
+  .xh-wallet-list-card-top b {
+    @apply whitespace-nowrap text-sm font-normal leading-5;
+  }
+
+  .xh-wallet-list-card-bottom {
+    @apply flex min-w-0 items-center justify-start gap-2 text-xs leading-5 text-[#f5f5f5];
+  }
+
+  .xh-wallet-list-card.is-active .xh-wallet-list-card-bottom {
+    @apply text-[#d7d7d7];
+  }
+
+  .xh-wallet-copy-inline {
+    @apply font-sans text-xs text-[#f5f5f5] underline-offset-2 hover:underline;
+  }
+
+  .xh-wallet-address-line {
+    @apply inline-flex max-w-full min-w-0 items-center gap-1.5 whitespace-nowrap text-xs leading-5 text-[#f5f5f5];
+  }
+
+  .xh-wallet-address-text {
+    @apply min-w-0 max-w-[132px] overflow-hidden text-ellipsis font-normal;
+    scrollbar-width: none;
+  }
+
+  .xh-wallet-address-text::-webkit-scrollbar {
+    display: none;
+  }
+
+  .xh-wallet-copy-icon {
+    @apply inline-flex h-[18px] w-[18px] shrink-0 items-center justify-center text-[#a6a6a6] transition hover:text-[#f5f5f5] focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/70;
+  }
+
+  .xh-wallet-add-demo {
+    @apply mt-[18px] h-9 w-full border border-[#2b2b2b] bg-black px-4 py-0 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:text-[#777];
+  }
+
+  .xh-wallet-detail-column {
+    @apply flex min-w-0 w-full flex-col gap-5;
+  }
+
+  .xh-wallet-detail-pane {
+    @apply min-h-[154px] min-w-0 w-full border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-wallet-detail-header {
+    @apply flex flex-col gap-[18px] xl:flex-row xl:items-start xl:justify-between;
+  }
+
+  .xh-wallet-detail-header h3 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
+  .xh-wallet-detail-title {
+    @apply flex h-9 min-w-0 flex-col justify-between;
+  }
+
+  .xh-wallet-detail-title p {
+    @apply text-xs leading-5 text-[#f5f5f5];
+  }
+
+  .xh-wallet-detail-balance {
+    @apply mt-[18px] flex flex-col items-start gap-3 sm:flex-row sm:items-end sm:justify-between;
+  }
+
+  .xh-wallet-detail-balance .xh-overview-metric {
+    @apply mt-0;
+  }
+
+  .xh-wallet-asset-pane {
+    @apply min-h-[418px] min-w-0 w-full border border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-wallet-tabs {
+    @apply flex h-9 items-center gap-5 text-[13px] font-medium leading-none;
+  }
+
+  .xh-wallet-tabs button {
+    @apply h-9 border border-[#2b2b2b] px-4 py-0 text-[#a6a6a6] transition hover:text-[#f5f5f5];
+  }
+
+  .xh-wallet-tabs button.is-active {
+    @apply border-[#f5f5f5] bg-black text-[#f5f5f5];
+  }
+
+  .xh-wallet-asset-header {
+    @apply mt-[18px] grid h-6 grid-cols-3 items-start gap-5 border-b border-[#2b2b2b] pb-1 text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-wallet-asset-header span {
+    @apply min-w-0 flex-1;
+  }
+
+  .xh-wallet-asset-header span:last-child {
+    @apply text-right;
+  }
+
+  .xh-wallet-asset-header span:nth-child(2) {
+    @apply text-right;
+  }
+
+  .xh-wallet-asset-list {
+    @apply mt-0;
+  }
+
+  .xh-wallet-asset-row {
+    @apply grid h-[60px] grid-cols-3 items-center gap-5 border-b border-[#2b2b2b] text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  .xh-wallet-asset-row > span:nth-child(2) {
+    @apply text-right;
+  }
+
+  .xh-wallet-token-cell {
+    @apply flex min-w-0 items-center gap-2.5;
+  }
+
+  .xh-wallet-token-icon {
+    @apply h-9 w-9 shrink-0 rounded-full object-contain;
+  }
+
+  .xh-wallet-row-actions {
+    @apply flex items-center justify-end gap-2.5;
+  }
+
+  .xh-wallet-row-actions button {
+    @apply text-sm leading-5 text-[#f5f5f5] transition hover:text-white/70;
+  }
+
+  .xh-wallet-network {
+    @apply space-y-1 text-sm;
+  }
+
+  .xh-wallet-network p {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-wallet-network span {
+    @apply text-sm font-normal leading-5 text-[#f5f5f5];
+  }
+
+  @media (max-width: 960px) {
+    .xh-account-layout {
+      display: block;
+      min-height: calc(100vh - 60px);
+    }
+
+    .xh-account-sidebar {
+      position: sticky;
+      top: 60px;
+      z-index: 20;
+      min-height: 0;
+      border-right-width: 0;
+      border-bottom: 1px solid #2b2b2b;
+      padding: 12px 16px;
+    }
+
+    .xh-account-nav {
+      flex-direction: row;
+      align-items: center;
+      gap: 8px;
+      overflow-x: auto;
+      overflow-y: hidden;
+      background: transparent;
+      padding-bottom: 1px;
+    }
+
+    .xh-account-nav-group {
+      width: auto;
+      min-width: max-content;
+      padding: 0 2px;
+      color: #737373;
+    }
+
+    .xh-account-nav-button {
+      width: auto;
+      min-width: max-content;
+      height: 38px;
+      padding-left: 14px;
+      padding-right: 14px;
+      text-align: center;
+      white-space: nowrap;
+    }
+
+    .xh-account-nav-button.is-child {
+      padding-left: 14px;
+    }
+
+    .xh-account-content {
+      width: 100%;
+      overflow: visible;
+      padding: 16px;
+    }
+
+    .xh-wallet-panel {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .xh-account-sidebar {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .xh-account-content {
+      padding-left: 12px;
+      padding-right: 12px;
+    }
+
+    .xh-record-panel,
+    .xh-overview-panel,
+    .xh-asset-summary-panel,
+    .xh-funding-assets-panel,
+    .xh-wallet-list-pane,
+    .xh-wallet-detail-pane,
+    .xh-wallet-asset-pane,
+    .xh-simulation-account-card,
+    .xh-trading-boundary-panel {
+      padding: 16px;
+    }
   }
 }
 

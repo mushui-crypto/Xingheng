@@ -218,6 +218,35 @@ app.get("/api/wallet/accounts", (request, response) => {
   response.json(wallet.getAccounts(getUserId(request)));
 });
 
+app.get("/api/wallet/overview", (request, response) => {
+  response.json(wallet.getOverview(getUserId(request)));
+});
+
+app.get("/api/wallet/recent-activities", (request, response) => {
+  response.json(wallet.listRecentActivities(getUserId(request)));
+});
+
+app.get("/api/wallet/funding-orders", (request, response) => {
+  response.json(
+    wallet.listFundingOrders(getUserId(request), {
+      type: typeof request.query.type === "string" ? request.query.type : undefined,
+      limit: Number(request.query.limit),
+      page: Number(request.query.page),
+      pageSize: Number(request.query.pageSize),
+    }),
+  );
+});
+
+app.get("/api/wallet/onchain-records", (request, response) => {
+  response.json(
+    wallet.listOnchainRecords(getUserId(request), {
+      limit: Number(request.query.limit),
+      page: Number(request.query.page),
+      pageSize: Number(request.query.pageSize),
+    }),
+  );
+});
+
 app.get("/api/wallet/deposit-address", (request, response) => {
   try {
     response.json(wallet.getDepositAddress(getUserId(request)));
@@ -472,8 +501,8 @@ function normalizeSide(value: unknown): TradeSide {
 }
 
 function normalizeWalletAccountType(value: unknown): WalletAccountType {
-  if (value !== "funding" && value !== "trading" && value !== "simulation" && value !== "realTrading") {
-    throw new Error("账户类型必须是 funding、trading、simulation 或 realTrading。");
+  if (value !== "wallet" && value !== "funding" && value !== "trading" && value !== "simulation" && value !== "realTrading") {
+    throw new Error("账户类型必须是 wallet、funding、trading、simulation 或 realTrading。");
   }
   return value;
 }

@@ -10,10 +10,21 @@ type RegisterInput = {
   nickname?: string;
 };
 
+const defaultSeedUser: UserRecord = {
+  id: "demo-user",
+  email: "demo@example.com",
+  password: "demo123",
+  nickname: "星衡演示用户",
+  status: "active",
+  createdAt: "2026-01-01T00:00:00.000Z",
+};
+
 export class UserService {
   private activeTokens = new Map<string, string>();
 
-  constructor(private store: TradingStore) {}
+  constructor(private store: TradingStore) {
+    this.store.upsertSeedUser(defaultSeedUser);
+  }
 
   register(input: RegisterInput) {
     const email = String(input.email ?? "").trim().toLowerCase();

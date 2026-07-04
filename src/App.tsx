@@ -1,39 +1,43 @@
+import { lazy, Suspense, type ReactNode } from "react";
 import { Navigate, Route, Routes } from "react-router-dom";
 import { AdminLayout } from "./components/layouts/AdminLayout";
 import { UserLayout } from "./components/layouts/UserLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
-import { AccountPage } from "./pages/app/AccountPage";
-import { DashboardPage } from "./pages/app/DashboardPage";
-import { MarketsPage } from "./pages/app/MarketsPage";
-import { TradingPage } from "./pages/trading/TradingPage";
-import { AdminDashboardPage } from "./pages/admin/AdminDashboardPage";
-import { AdminLoginPage } from "./pages/admin/AdminLoginPage";
-import { AdminSymbolsPage } from "./pages/admin/AdminSymbolsPage";
-import { AdminTradingPage } from "./pages/admin/AdminTradingPage";
-import { AdminUsersPage } from "./pages/admin/AdminUsersPage";
-import { AuthPage } from "./pages/auth/AuthPage";
+
+const AuthPage = lazy(() => import("./pages/auth/AuthPage").then((module) => ({ default: module.AuthPage })));
+const DashboardPage = lazy(() => import("./pages/app/DashboardPage").then((module) => ({ default: module.DashboardPage })));
+const MarketsPage = lazy(() => import("./pages/app/MarketsPage").then((module) => ({ default: module.MarketsPage })));
+const TradingPage = lazy(() => import("./pages/trading/TradingPage").then((module) => ({ default: module.TradingPage })));
+const AccountPage = lazy(() => import("./pages/app/AccountPage").then((module) => ({ default: module.AccountPage })));
+const AdminLoginPage = lazy(() => import("./pages/admin/AdminLoginPage").then((module) => ({ default: module.AdminLoginPage })));
+const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage").then((module) => ({ default: module.AdminDashboardPage })));
+const AdminUsersPage = lazy(() => import("./pages/admin/AdminUsersPage").then((module) => ({ default: module.AdminUsersPage })));
+const AdminSymbolsPage = lazy(() => import("./pages/admin/AdminSymbolsPage").then((module) => ({ default: module.AdminSymbolsPage })));
+const AdminTradingPage = lazy(() => import("./pages/admin/AdminTradingPage").then((module) => ({ default: module.AdminTradingPage })));
 
 export default function App() {
   return (
-    <Routes>
-      <Route path="/" element={<Navigate to="/login" replace />} />
-      <Route path="/login" element={<AuthPage />} />
-      <Route path="/register" element={<AuthPage />} />
-      <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
-      <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
-      <Route path="/app/trading" element={<UserScreen><TradingPage /></UserScreen>} />
-      <Route path="/app/account" element={<UserScreen><AccountPage /></UserScreen>} />
-      <Route path="/admin/login" element={<AdminLoginPage />} />
-      <Route path="/admin/dashboard" element={<AdminScreen><AdminDashboardPage /></AdminScreen>} />
-      <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
-      <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
-      <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
-      <Route path="*" element={<Navigate to="/login" replace />} />
-    </Routes>
+    <Suspense fallback={<RouteFallback />}>
+      <Routes>
+        <Route path="/" element={<Navigate to="/login" replace />} />
+        <Route path="/login" element={<AuthPage />} />
+        <Route path="/register" element={<AuthPage />} />
+        <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
+        <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
+        <Route path="/app/trading" element={<UserScreen><TradingPage /></UserScreen>} />
+        <Route path="/app/account" element={<UserScreen><AccountPage /></UserScreen>} />
+        <Route path="/admin/login" element={<AdminLoginPage />} />
+        <Route path="/admin/dashboard" element={<AdminScreen><AdminDashboardPage /></AdminScreen>} />
+        <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
+        <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
+        <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    </Suspense>
   );
 }
 
-function UserScreen({ children }: { children: React.ReactNode }) {
+function UserScreen({ children }: { children: ReactNode }) {
   return (
     <ProtectedRoute type="user">
       <UserLayout>{children}</UserLayout>
@@ -41,10 +45,18 @@ function UserScreen({ children }: { children: React.ReactNode }) {
   );
 }
 
-function AdminScreen({ children }: { children: React.ReactNode }) {
+function AdminScreen({ children }: { children: ReactNode }) {
   return (
     <ProtectedRoute type="admin">
       <AdminLayout>{children}</AdminLayout>
     </ProtectedRoute>
+  );
+}
+
+function RouteFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-black text-sm tracking-[0.18em] text-white/60">
+      LOADING
+    </div>
   );
 }

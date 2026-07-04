@@ -11,7 +11,7 @@ const tones = {
 
 export function Badge({ children, tone = "neutral" }: BadgeProps) {
   return (
-    <span className={`inline-flex border px-2.5 py-1 text-xs font-medium uppercase tracking-[0.08em] ${tones[tone]}`}>
+    <span className={`inline-flex whitespace-nowrap border px-2.5 py-1 text-xs font-medium uppercase tracking-[0.08em] ${tones[tone]}`}>
       {children}
     </span>
   );

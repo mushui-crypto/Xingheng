@@ -112,7 +112,7 @@ export type BalanceAdjustment = {
   createdAt: number;
 };
 
-export type WalletAccountType = "funding" | "trading" | "simulation" | "realTrading";
+export type WalletAccountType = "wallet" | "funding" | "trading" | "simulation" | "realTrading";
 export type WalletAsset = "USDT";
 export type WalletNetwork = "BSC_TESTNET";
 export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
@@ -175,6 +175,23 @@ export type FundingAccount = {
   updatedAt: number;
 };
 
+export type AccountOverview = {
+  asset: WalletAsset;
+  walletEquity: number;
+  fundingEquity: number;
+  realTradingEquity: number;
+  totalEquity: number;
+  accountTodayPnl: number;
+  accountTodayPnlRate: number;
+  simulationTotalEquity: number;
+  simulationTodayPnl: number;
+  simulationTodayPnlRate: number;
+  simulationAccountCount: number;
+  simulationAccountLimit: number;
+  canCreateSimulationAccount: boolean;
+  recentFundingActivities: RecentFundingActivity[];
+};
+
 export type AccountTransferRecord = {
   id: string;
   transferType: AccountTransferType;
@@ -233,6 +250,66 @@ export type FundingLedgerEntry = {
   remark?: string | null;
   createdAt: number;
   updatedAt: number;
+};
+
+export type RecentFundingActivity = {
+  id: string;
+  activityType:
+    | "onchain_deposit"
+    | "withdrawal"
+    | "account_transfer"
+    | "internal_transfer"
+    | "funding_ledger";
+  title: string;
+  accountType?: WalletAccountType | null;
+  fromAccountType?: WalletAccountType | null;
+  toAccountType?: WalletAccountType | null;
+  amount: number;
+  asset: WalletAsset;
+  status: string;
+  direction: "in" | "out" | "neutral";
+  txHash?: string | null;
+  remark?: string | null;
+  createdAt: number;
+};
+
+export type FundingOrderType = "deposit" | "withdrawal" | "account_transfer" | "internal_transfer";
+export type FundingOrderDisplayStatus = "processing" | "pending" | "completed" | "cancelled" | "failed";
+export type FundingOrderDirection = "in" | "out" | "neutral";
+
+export type FundingOrder = {
+  id: string;
+  orderType: FundingOrderType;
+  accountType: "funding";
+  amount: number;
+  asset: WalletAsset;
+  status: string;
+  displayStatus: FundingOrderDisplayStatus;
+  direction: FundingOrderDirection;
+  fromAccountType?: WalletAccountType | null;
+  toAccountType?: WalletAccountType | null;
+  relatedLedgerId?: string | null;
+  relatedTransferId?: string | null;
+  relatedWithdrawalId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type OnchainRecord = {
+  id: string;
+  type: "deposit" | "withdrawal";
+  amount: number;
+  asset: WalletAsset;
+  network: WalletNetwork | string;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+  txHash?: string | null;
+  confirmations?: number | null;
+  chainStatus: string;
+  createdAt: number;
+  updatedAt: number;
+  relatedWithdrawalId?: string | null;
+  relatedDepositId?: string | null;
 };
 
 export type UserStatus = "active" | "disabled";

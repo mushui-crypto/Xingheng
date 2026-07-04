@@ -3,12 +3,15 @@ import { readStorage, storageKeys } from "../utils/storage";
 import { handleUserAuthFailure } from "./session";
 
 export type WalletAsset = "USDT";
-export type WalletAccountType = "funding" | "trading" | "simulation" | "realTrading";
+export type WalletAccountType = "wallet" | "funding" | "trading" | "simulation" | "realTrading";
 export type WalletNetwork = "BSC_TESTNET";
 export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
 export type WithdrawalStatus = "pending_review" | "broadcasting" | "broadcasted" | "confirmed" | "failed" | "rejected";
 export type AccountTransferType = "account_transfer" | "internal_transfer";
 export type AccountTransferStatus = "completed" | "failed" | "reversed";
+export type FundingOrderType = "deposit" | "withdrawal" | "account_transfer" | "internal_transfer";
+export type FundingOrderDisplayStatus = "processing" | "pending" | "completed" | "cancelled" | "failed";
+export type FundingOrderDirection = "in" | "out" | "neutral";
 
 export type FundingAccount = {
   id: string;
@@ -21,15 +24,115 @@ export type FundingAccount = {
   updatedAt: number;
 };
 
+export type RealTradingAccount = FundingAccount & {
+  status?: "active" | "disabled";
+  opened?: boolean;
+  enabled?: boolean;
+};
+
+export type SimulationAccountView = TradingAccount & {
+  availableMargin?: number;
+  unrealizedPnl?: number;
+};
+
+export type SimulationSummary = {
+  asset: WalletAsset;
+  totalEquity: number;
+  todayPnl: number;
+  todayPnlRate: number;
+  accountCount: number;
+  accountLimit: number;
+  canCreateSimulationAccount: boolean;
+};
+
 export type WalletAccounts = {
+  wallet?: FundingAccount | null;
   funding: FundingAccount;
-  realTrading?: FundingAccount | null;
-  simulation?: TradingAccount | null;
+  realTrading?: RealTradingAccount | null;
+  simulation?: SimulationAccountView | null;
+  simulationSummary?: SimulationSummary;
+  simulationAccounts?: SimulationAccountView[];
   /**
    * 旧后端兼容字段：历史上 trading 表示模拟交易账户。
    * 前端只允许把它作为 simulation 的兜底，不再作为“交易账户”主口径展示。
    */
-  trading?: TradingAccount | null;
+  trading?: SimulationAccountView | null;
+};
+
+export type RecentFundingActivity = {
+  id: string;
+  activityType: "onchain_deposit" | "withdrawal" | "account_transfer" | "internal_transfer" | "funding_ledger";
+  title: string;
+  accountType?: WalletAccountType | null;
+  fromAccountType?: WalletAccountType | null;
+  toAccountType?: WalletAccountType | null;
+  amount: number;
+  asset: WalletAsset;
+  status: string;
+  direction: "in" | "out" | "neutral";
+  txHash?: string | null;
+  remark?: string | null;
+  createdAt: number;
+};
+
+export type PaginatedEnvelope<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+  hasMore: boolean;
+};
+
+export type FundingOrder = {
+  id: string;
+  orderType: FundingOrderType;
+  accountType: "funding";
+  amount: number;
+  asset: WalletAsset;
+  status: string;
+  displayStatus: FundingOrderDisplayStatus;
+  direction: FundingOrderDirection;
+  fromAccountType?: WalletAccountType | null;
+  toAccountType?: WalletAccountType | null;
+  relatedLedgerId?: string | null;
+  relatedTransferId?: string | null;
+  relatedWithdrawalId?: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type OnchainRecord = {
+  id: string;
+  type: "deposit" | "withdrawal";
+  amount: number;
+  asset: WalletAsset;
+  network: WalletNetwork | string;
+  fromAddress?: string | null;
+  toAddress?: string | null;
+  txHash?: string | null;
+  confirmations?: number | null;
+  chainStatus: string;
+  createdAt: number;
+  updatedAt: number;
+  relatedWithdrawalId?: string | null;
+  relatedDepositId?: string | null;
+};
+
+export type AccountOverview = {
+  asset: WalletAsset;
+  walletEquity: number;
+  fundingEquity: number;
+  realTradingEquity: number;
+  totalEquity: number;
+  accountTodayPnl: number;
+  accountTodayPnlRate: number;
+  simulationTotalEquity: number;
+  simulationTodayPnl: number;
+  simulationTodayPnlRate: number;
+  simulationAccountCount: number;
+  simulationAccountLimit: number;
+  canCreateSimulationAccount: boolean;
+  recentFundingActivities?: RecentFundingActivity[];
 };
 
 export type AccountTransferRecord = {
@@ -187,6 +290,28 @@ export async function fetchWalletAccounts() {
   return readJson<WalletAccounts>(response, "钱包账户加载失败。", { userAuthFailure: true });
 }
 
+export async function fetchAccountOverview() {
+  const response = await fetch("/api/wallet/overview", { headers: userHeaders() });
+  return readJson<AccountOverview>(response, "账户总览加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchRecentFundingActivities() {
+  const response = await fetch("/api/wallet/recent-activities", { headers: userHeaders() });
+  return readJson<RecentFundingActivity[]>(response, "近期资金记录加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchFundingOrders(type: "all" | "deposit" | "withdrawal" | "transfer" | FundingOrderType = "all", limit = 50) {
+  const params = new URLSearchParams({ type, limit: String(limit) });
+  const response = await fetch(`/api/wallet/funding-orders?${params.toString()}`, { headers: userHeaders() });
+  return readJson<PaginatedEnvelope<FundingOrder>>(response, "资金订单加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchOnchainRecords(limit = 50) {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const response = await fetch(`/api/wallet/onchain-records?${params.toString()}`, { headers: userHeaders() });
+  return readJson<PaginatedEnvelope<OnchainRecord>>(response, "链上充提记录加载失败。", { userAuthFailure: true });
+}
+
 export async function fetchDepositAddress() {
   const response = await fetch("/api/wallet/deposit-address", { headers: userHeaders() });
   return readJson<DepositAddress>(response, "充值地址加载失败。", { userAuthFailure: true });
@@ -236,12 +361,12 @@ export async function createWithdrawalRequest(amount: number, network: string, w
     headers: { "Content-Type": "application/json", ...userHeaders() },
     body: JSON.stringify({ amount, network, walletAddress, remark }),
   });
-  return readJson<WithdrawalRequest>(response, "出金申请提交失败。", { userAuthFailure: true });
+  return readJson<WithdrawalRequest>(response, "提现申请提交失败。", { userAuthFailure: true });
 }
 
 export async function fetchWithdrawalRequests() {
   const response = await fetch("/api/wallet/withdrawals", { headers: userHeaders() });
-  return readJson<WithdrawalRequest[]>(response, "出金申请加载失败。", { userAuthFailure: true });
+  return readJson<WithdrawalRequest[]>(response, "提现申请加载失败。", { userAuthFailure: true });
 }
 
 export async function fetchAdminWalletAccounts() {
@@ -271,7 +396,7 @@ export async function fetchAdminWalletTransfers() {
 
 export async function fetchAdminWithdrawalRequests() {
   const response = await fetch("/api/admin/wallet/withdrawals", { headers: adminHeaders() });
-  return readJson<WithdrawalRequest[]>(response, "后台出金申请加载失败。");
+  return readJson<WithdrawalRequest[]>(response, "后台提现申请加载失败。");
 }
 
 export async function depositFundingAccount(userId: string, amount: number, remark: string) {
@@ -280,7 +405,7 @@ export async function depositFundingAccount(userId: string, amount: number, rema
     headers: { "Content-Type": "application/json", ...adminHeaders() },
     body: JSON.stringify({ userId, amount, remark }),
   });
-  return readJson<WalletAccounts>(response, "后台入金失败。");
+  return readJson<WalletAccounts>(response, "后台充值失败。");
 }
 
 export async function approveWithdrawalRequest(id: string, reviewNote: string, txHash = "") {
@@ -289,7 +414,7 @@ export async function approveWithdrawalRequest(id: string, reviewNote: string, t
     headers: { "Content-Type": "application/json", ...adminHeaders() },
     body: JSON.stringify({ reviewNote, txHash }),
   });
-  return readJson<WithdrawalRequest>(response, "出金审核通过失败。");
+  return readJson<WithdrawalRequest>(response, "提现审核通过失败。");
 }
 
 export async function rejectWithdrawalRequest(id: string, reviewNote: string) {
@@ -298,7 +423,7 @@ export async function rejectWithdrawalRequest(id: string, reviewNote: string) {
     headers: { "Content-Type": "application/json", ...adminHeaders() },
     body: JSON.stringify({ reviewNote }),
   });
-  return readJson<WithdrawalRequest>(response, "出金拒绝失败。");
+  return readJson<WithdrawalRequest>(response, "提现拒绝失败。");
 }
 
 export async function runAdminOnchainScan() {
@@ -324,5 +449,5 @@ export async function confirmAdminWithdrawals() {
     method: "POST",
     headers: adminHeaders(),
   });
-  return readJson<WithdrawalRequest[]>(response, "出金确认触发失败。");
+  return readJson<WithdrawalRequest[]>(response, "提现确认触发失败。");
 }
