@@ -5,6 +5,8 @@ import { handleUserAuthFailure } from "./session";
 export type WalletAsset = "USDT";
 export type WalletAccountType = "wallet" | "funding" | "trading" | "simulation" | "realTrading";
 export type WalletNetwork = "BSC_TESTNET";
+export type ExternalWalletProvider = "metamask";
+export type ExternalWalletBindStatus = "pending" | "active";
 export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
 export type WithdrawalStatus = "pending_review" | "broadcasting" | "broadcasted" | "confirmed" | "failed" | "rejected";
 export type AccountTransferType = "account_transfer" | "internal_transfer";
@@ -31,8 +33,29 @@ export type RealTradingAccount = FundingAccount & {
 };
 
 export type SimulationAccountView = TradingAccount & {
+  name?: string;
+  status?: "active" | "deleted" | "disabled";
+  lastResetAt?: number | null;
+  nextResetAvailableAt?: number | null;
+  canReset?: boolean;
   availableMargin?: number;
   unrealizedPnl?: number;
+};
+
+export type SimulationAccountsResponse = {
+  items: SimulationAccountView[];
+  accountCount: number;
+  accountLimit: number;
+  canCreate: boolean;
+};
+
+export type SimulationAccountMutationResponse = {
+  account: SimulationAccountView;
+  accountCount?: number;
+  accountLimit?: number;
+  canCreate?: boolean;
+  nextResetAvailableAt?: number | null;
+  canReset?: boolean;
 };
 
 export type SimulationSummary = {
@@ -133,6 +156,36 @@ export type AccountOverview = {
   simulationAccountLimit: number;
   canCreateSimulationAccount: boolean;
   recentFundingActivities?: RecentFundingActivity[];
+};
+
+export type ExternalWalletBinding = {
+  id: string;
+  userId: string;
+  walletAddress: string;
+  network: WalletNetwork;
+  provider: ExternalWalletProvider;
+  isDefault: boolean;
+  bindStatus: ExternalWalletBindStatus;
+  nonce: string;
+  challenge: string;
+  challengeExpiresAt: number;
+  lastVerifiedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ExternalWalletChallenge = {
+  challengeId: string;
+  walletAddress: string;
+  network: WalletNetwork;
+  provider: ExternalWalletProvider;
+  nonce: string;
+  message: string;
+  expiresAt: number;
+};
+
+export type ExternalWalletBindingResponse = {
+  binding: ExternalWalletBinding | null;
 };
 
 export type AccountTransferRecord = {
@@ -290,6 +343,45 @@ export async function fetchWalletAccounts() {
   return readJson<WalletAccounts>(response, "钱包账户加载失败。", { userAuthFailure: true });
 }
 
+export async function fetchSimulationAccounts() {
+  const response = await fetch("/api/wallet/simulation-accounts", { headers: userHeaders() });
+  return readJson<SimulationAccountsResponse>(response, "模拟账户加载失败。", { userAuthFailure: true });
+}
+
+export async function createSimulationAccount(name?: string) {
+  const response = await fetch("/api/wallet/simulation-accounts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...userHeaders() },
+    body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+  });
+  return readJson<SimulationAccountMutationResponse>(response, "模拟账户创建失败。", { userAuthFailure: true });
+}
+
+export async function renameSimulationAccount(id: string, name: string) {
+  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json", ...userHeaders() },
+    body: JSON.stringify({ name }),
+  });
+  return readJson<SimulationAccountMutationResponse>(response, "模拟账户重命名失败。", { userAuthFailure: true });
+}
+
+export async function deleteSimulationAccount(id: string) {
+  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+    headers: userHeaders(),
+  });
+  return readJson<{ ok: true }>(response, "模拟账户删除失败。", { userAuthFailure: true });
+}
+
+export async function resetSimulationAccount(id: string) {
+  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}/reset`, {
+    method: "POST",
+    headers: userHeaders(),
+  });
+  return readJson<SimulationAccountMutationResponse>(response, "模拟账户资金重置失败。", { userAuthFailure: true });
+}
+
 export async function fetchAccountOverview() {
   const response = await fetch("/api/wallet/overview", { headers: userHeaders() });
   return readJson<AccountOverview>(response, "账户总览加载失败。", { userAuthFailure: true });
@@ -310,6 +402,37 @@ export async function fetchOnchainRecords(limit = 50) {
   const params = new URLSearchParams({ limit: String(limit) });
   const response = await fetch(`/api/wallet/onchain-records?${params.toString()}`, { headers: userHeaders() });
   return readJson<PaginatedEnvelope<OnchainRecord>>(response, "链上充提记录加载失败。", { userAuthFailure: true });
+}
+
+export async function fetchExternalWalletBinding() {
+  const response = await fetch("/api/wallet/external-wallet", { headers: userHeaders() });
+  return readJson<ExternalWalletBindingResponse>(response, "第三方钱包绑定状态加载失败。", { userAuthFailure: true });
+}
+
+export async function createExternalWalletChallenge(walletAddress: string, network: WalletNetwork = "BSC_TESTNET", provider: ExternalWalletProvider = "metamask") {
+  const response = await fetch("/api/wallet/external-wallet/challenge", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...userHeaders() },
+    body: JSON.stringify({ walletAddress, network, provider }),
+  });
+  return readJson<ExternalWalletChallenge>(response, "第三方钱包签名请求失败。", { userAuthFailure: true });
+}
+
+export async function bindExternalWallet(challengeId: string, walletAddress: string, signature: string) {
+  const response = await fetch("/api/wallet/external-wallet/bind", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...userHeaders() },
+    body: JSON.stringify({ challengeId, walletAddress, signature }),
+  });
+  return readJson<{ binding: ExternalWalletBinding }>(response, "第三方钱包绑定失败。", { userAuthFailure: true });
+}
+
+export async function unbindExternalWallet() {
+  const response = await fetch("/api/wallet/external-wallet", {
+    method: "DELETE",
+    headers: userHeaders(),
+  });
+  return readJson<ExternalWalletBindingResponse & { ok?: true }>(response, "第三方钱包解绑失败。", { userAuthFailure: true });
 }
 
 export async function fetchDepositAddress() {

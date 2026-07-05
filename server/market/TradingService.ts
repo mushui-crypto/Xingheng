@@ -6,13 +6,14 @@ import type {
   Position,
   PositionSide,
   PositionView,
+  SimulationAccount,
   TradeSide,
   TradingAccount,
 } from "../types";
 import type { TradingStore } from "../storage/TradingStore";
 import crypto from "node:crypto";
 
-const defaultInitialBalance = 10_000;
+const defaultInitialBalance = 100_000;
 const defaultAsset = "USDT";
 
 type TradingMarket = {
@@ -41,24 +42,24 @@ export class TradingService {
     private market: TradingMarket,
     private store?: TradingStore,
   ) {
-    for (const account of store?.listAccounts() ?? []) {
-      this.accounts.set(account.userId, account);
-    }
     this.positions = store?.listPositions() ?? [];
     this.orders = store?.listOrders() ?? [];
     this.adjustments = store?.listAdjustments() ?? [];
   }
 
-  getAccount(userId: string) {
-    const account = this.ensureAccount(userId);
-    return this.toAccountView(account);
+  getAccount(userId: string, simulationAccountId?: string) {
+    return this.toSimulationAccountTradingView(this.getActiveSimulationAccount(userId, simulationAccountId));
   }
 
   listAccounts() {
-    return [...this.accounts.values()].map((account) => this.toAccountView(account));
+    return (this.store?.listSimulationAccounts() ?? []).map((account) => this.toSimulationAccountTradingView(account));
   }
 
   adjustBalance(userId: string, type: BalanceAdjustment["type"], amount: number, note?: string) {
+    throw new Error("旧单模拟账户已停用，请使用真实模拟账户接口管理模拟资金。");
+  }
+
+  private adjustLegacyBalance(userId: string, type: BalanceAdjustment["type"], amount: number, note?: string) {
     const normalizedUserId = normalizeUserId(userId);
     const account = this.ensureAccount(normalizedUserId);
     if (!Number.isFinite(amount) || amount < 0) {
@@ -95,10 +96,11 @@ export class TradingService {
     return this.toAccountView(account);
   }
 
-  marketOrder(userId: string, symbol: string, side: TradeSide, volume: number) {
-    const account = this.ensureAccount(userId);
+  marketOrder(userId: string, simulationAccountId: string | undefined, symbol: string, side: TradeSide, volume: number) {
+    const account = this.getActiveSimulationAccount(userId, simulationAccountId);
     const config = this.market.getSymbol(symbol);
-    const rejection = this.validateOpenOrder(config, symbol, side, volume, account);
+    const accountView = this.toSimulationAccountTradingView(account);
+    const rejection = this.validateOpenOrder(config, symbol, side, volume, accountView);
     if (rejection) {
       this.recordRejectedOrder(userId, account.id, config?.symbol ?? symbol, side, volume, rejection);
       throw new Error(rejection);
@@ -113,6 +115,8 @@ export class TradingService {
     const position: Position = {
       id: makeId("POS"),
       userId,
+      accountId: account.id,
+      simulationAccountId: account.id,
       symbol: safeConfig.symbol,
       side: positionSide,
       volume,
@@ -127,6 +131,7 @@ export class TradingService {
     };
     this.positions = [position, ...this.positions].slice(0, 200);
     this.store?.savePosition(position);
+    this.store?.upsertSimulationAccount(this.refreshSimulationAccount(account));
     this.recordFilledOrder({
       userId,
       accountId: account.id,
@@ -147,11 +152,11 @@ export class TradingService {
     return this.toView(position);
   }
 
-  closePosition(userId: string, positionId: string) {
-    const position = this.positions.find((item) => item.id === positionId && item.userId === userId);
-    const account = this.ensureAccount(userId);
+  closePosition(userId: string, positionId: string, simulationAccountId?: string) {
+    const account = this.getActiveSimulationAccount(userId, simulationAccountId);
+    const position = this.positions.find((item) => item.id === positionId && item.userId === userId && item.accountId === account.id);
     if (!position) {
-      throw new Error("持仓不存在或已平仓。");
+      throw new Error("持仓不存在或不属于当前模拟账户。");
     }
 
     const config = this.market.getSymbol(position.symbol);
@@ -175,16 +180,17 @@ export class TradingService {
     const closeSide: TradeSide = position.side === "long" ? "sell" : "buy";
     const closePrice = position.side === "long" ? tick.bid : tick.ask;
     const pnl = this.calculatePnl(position, closePrice);
-    account.balance = roundMoney(account.balance + pnl);
-    account.updatedAt = Date.now();
-    this.accounts.set(userId, account);
-    this.store?.upsertAccount(account);
+    const nextAccount = this.refreshSimulationAccount(account);
+    nextAccount.balance = roundMoney(nextAccount.balance + pnl);
+    nextAccount.updatedAt = Date.now();
     this.positions = this.positions.filter((item) => item.id !== position.id);
     this.store?.deletePosition(position.id);
+    const savedAccount = this.refreshSimulationAccount(nextAccount);
+    this.store?.upsertSimulationAccount(savedAccount);
 
     this.recordFilledOrder({
       userId,
-      accountId: account.id,
+      accountId: savedAccount.id,
       positionId: position.id,
       symbol: position.symbol,
       side: closeSide,
@@ -204,16 +210,24 @@ export class TradingService {
       positionId: position.id,
       closePrice,
       pnl,
-      account: this.toAccountView(account),
+      account: this.toSimulationAccountTradingView(savedAccount),
     };
   }
 
-  listPositions(userId?: string) {
-    return this.positions.filter((position) => !userId || position.userId === userId).map((position) => this.toView(position));
+  listPositions(userId?: string, simulationAccountId?: string) {
+    if (userId && !simulationAccountId) {
+      return [];
+    }
+    return this.positions
+      .filter((position) => (!userId || position.userId === userId) && (!simulationAccountId || position.accountId === simulationAccountId))
+      .map((position) => this.toView(position));
   }
 
-  listOrders(userId?: string) {
-    return this.orders.filter((order) => !userId || order.userId === userId);
+  listOrders(userId?: string, simulationAccountId?: string) {
+    if (userId && !simulationAccountId) {
+      return [];
+    }
+    return this.orders.filter((order) => (!userId || order.userId === userId) && (!simulationAccountId || order.accountId === simulationAccountId));
   }
 
   listAdjustments(userId?: string) {
@@ -221,6 +235,10 @@ export class TradingService {
   }
 
   creditBalance(userId: string, amount: number) {
+    throw new Error("模拟账户资金与资金账户不联动，请使用真实模拟账户接口。");
+  }
+
+  private creditLegacyBalance(userId: string, amount: number) {
     assertPositiveAmount(amount);
     const account = this.ensureAccount(userId);
     const balanceBefore = account.balance;
@@ -236,6 +254,10 @@ export class TradingService {
   }
 
   debitFreeMargin(userId: string, amount: number) {
+    throw new Error("模拟账户资金与资金账户不联动，请使用真实模拟账户接口。");
+  }
+
+  private debitLegacyFreeMargin(userId: string, amount: number) {
     assertPositiveAmount(amount);
     const account = this.ensureAccount(userId);
     const accountView = this.toAccountView(account);
@@ -278,13 +300,51 @@ export class TradingService {
     return account;
   }
 
+  private getActiveSimulationAccount(userId: string, simulationAccountId?: string) {
+    const normalizedUserId = normalizeUserId(userId);
+    const normalizedAccountId = simulationAccountId?.trim();
+    if (!normalizedAccountId) {
+      throw new Error("请先选择模拟账户。");
+    }
+    const account = this.store?.getSimulationAccount(normalizedAccountId);
+    if (!account || account.userId !== normalizedUserId || account.status !== "active") {
+      throw new Error("模拟账户不存在或不可用。");
+    }
+    return account;
+  }
+
+  private toSimulationAccountTradingView(account: SimulationAccount) {
+    const tradingAccount: TradingAccount = {
+      ...account,
+      id: account.id,
+      asset: "USDT",
+      simulationAccountId: account.id,
+    };
+    return this.toAccountView(tradingAccount);
+  }
+
+  private refreshSimulationAccount(account: SimulationAccount): SimulationAccount {
+    const view = this.toSimulationAccountTradingView(account);
+    return {
+      ...account,
+      balance: roundMoney(view.balance),
+      equity: view.equity,
+      usedMargin: view.usedMargin,
+      freeMargin: view.freeMargin,
+      floatingPnl: view.floatingPnl,
+      updatedAt: Date.now(),
+    };
+  }
+
   private toAccountView(account: TradingAccount) {
-    const positions = this.listPositions(account.userId);
+    const accountId = account.simulationAccountId ?? account.id;
+    const positions = this.listPositions(account.userId, accountId);
     const floatingPnl = roundMoney(positions.reduce((sum, position) => sum + (position.pnl ?? 0), 0));
     const usedMargin = roundMoney(positions.reduce((sum, position) => sum + position.margin, 0));
     const equity = roundMoney(account.balance + floatingPnl);
     return {
       ...account,
+      simulationAccountId: accountId,
       asset: defaultAsset,
       floatingPnl,
       usedMargin,
@@ -311,7 +371,7 @@ export class TradingService {
     symbol: string,
     _side: TradeSide,
     volume: number,
-    account: TradingAccount,
+    account: { freeMargin: number },
   ) {
     if (!config) {
       return `品种 ${symbol.toUpperCase()} 未配置。`;
@@ -330,7 +390,7 @@ export class TradingService {
     }
     const entryPrice = _side === "buy" ? ticker.tick!.ask : ticker.tick!.bid;
     const margin = this.calculateMargin(config, entryPrice, volume);
-    if (this.toAccountView(account).freeMargin < margin) {
+    if (account.freeMargin < margin) {
       return "可用保证金不足，市价单已拒绝。";
     }
     return null;
@@ -409,6 +469,7 @@ export class TradingService {
       id: makeId("ORD"),
       userId,
       accountId,
+      simulationAccountId: accountId,
       positionId,
       symbol,
       side,
@@ -452,6 +513,7 @@ export class TradingService {
       id: makeId("ORD"),
       userId: input.userId,
       accountId: input.accountId,
+      simulationAccountId: input.accountId,
       positionId: input.positionId,
       symbol: input.symbol,
       side: input.side,

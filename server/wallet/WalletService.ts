@@ -1,4 +1,5 @@
-import { HDNodeWallet } from "ethers";
+import crypto from "node:crypto";
+import { getAddress, HDNodeWallet, verifyMessage } from "ethers";
 import type { TradingService } from "../market/TradingService";
 import type { TradingStore } from "../storage/TradingStore";
 import { OnchainWalletService } from "./OnchainWalletService";
@@ -6,6 +7,9 @@ import type {
   AccountTransferRecord,
   AccountOverview,
   DepositAddress,
+  ExternalWalletBinding,
+  ExternalWalletChallenge,
+  ExternalWalletProvider,
   FundingAccount,
   FundingLedgerEntry,
   FundingLedgerStatus,
@@ -16,6 +20,8 @@ import type {
   OnchainDeposit,
   OnchainRecord,
   RecentFundingActivity,
+  SimulationAccount,
+  SimulationAccountView,
   WalletAccountType,
   WalletNetwork,
   WithdrawalRequest,
@@ -24,6 +30,9 @@ import type {
 const defaultUserId = "demo-user";
 const asset = "USDT";
 const depositNetwork: WalletNetwork = "BSC_TESTNET";
+const simulationAccountLimit = 5;
+const simulationInitialBalance = 100_000;
+const simulationResetCooldownMs = 24 * 60 * 60 * 1000;
 
 type TransferSide = WalletAccountType;
 type NormalizedTransferSide = "wallet" | "funding" | "simulation" | "realTrading";
@@ -236,8 +245,9 @@ export class WalletService {
 
   getAccounts(userId: string) {
     const normalizedUserId = normalizeUserId(userId);
-    const simulation = this.trading.getAccount(normalizedUserId);
-    const simulationView = this.withSimulationCompatibility(simulation);
+    const simulationAccounts = this.listSimulationAccountViews(normalizedUserId);
+    const simulationSummary = this.buildSimulationSummary(simulationAccounts);
+    const simulationView = simulationAccounts[0] ?? this.createEmptySimulationCompatibility(normalizedUserId);
     const realTrading = this.withRealTradingStatus(this.ensureRealTradingAccount(normalizedUserId));
     return {
       wallet: this.getWalletAccount(normalizedUserId),
@@ -245,16 +255,8 @@ export class WalletService {
       realTrading,
       simulation: simulationView,
       trading: simulationView,
-      simulationSummary: {
-        asset,
-        totalEquity: roundMoney(simulation.equity),
-        todayPnl: 0,
-        todayPnlRate: 0,
-        accountCount: 1,
-        accountLimit: 5,
-        canCreateSimulationAccount: true,
-      },
-      simulationAccounts: [simulationView],
+      simulationSummary,
+      simulationAccounts,
     };
   }
 
@@ -263,7 +265,7 @@ export class WalletService {
     const wallet = this.getWalletAccount(normalizedUserId);
     const funding = this.ensureFundingAccount(normalizedUserId);
     const realTrading = this.ensureRealTradingAccount(normalizedUserId);
-    const simulation = this.trading.getAccount(normalizedUserId);
+    const simulationSummary = this.buildSimulationSummary(this.listSimulationAccountViews(normalizedUserId));
     const walletEquity = roundMoney(wallet.available);
     const fundingEquity = roundMoney(funding.balance);
     const realTradingEquity = this.isRealTradingOpened(realTrading) ? roundMoney(realTrading.balance) : 0;
@@ -275,12 +277,12 @@ export class WalletService {
       totalEquity: roundMoney(walletEquity + fundingEquity + realTradingEquity),
       accountTodayPnl: 0,
       accountTodayPnlRate: 0,
-      simulationTotalEquity: roundMoney(simulation.equity),
-      simulationTodayPnl: 0,
-      simulationTodayPnlRate: 0,
-      simulationAccountCount: 1,
-      simulationAccountLimit: 5,
-      canCreateSimulationAccount: true,
+      simulationTotalEquity: simulationSummary.totalEquity,
+      simulationTodayPnl: simulationSummary.todayPnl,
+      simulationTodayPnlRate: simulationSummary.todayPnlRate,
+      simulationAccountCount: simulationSummary.accountCount,
+      simulationAccountLimit: simulationSummary.accountLimit,
+      canCreateSimulationAccount: simulationSummary.canCreateSimulationAccount,
       recentFundingActivities: this.listRecentActivities(normalizedUserId, 6),
     };
   }
@@ -548,6 +550,234 @@ export class WalletService {
       pageSize,
       hasMore: start + items.length < records.length,
     };
+  }
+
+  listSimulationAccounts(userId: string) {
+    const normalizedUserId = normalizeUserId(userId);
+    const items = this.listSimulationAccountViews(normalizedUserId);
+    return {
+      items,
+      accountCount: items.length,
+      accountLimit: simulationAccountLimit,
+      canCreate: items.length < simulationAccountLimit,
+    };
+  }
+
+  createSimulationAccount(userId: string, input: { name?: string } = {}) {
+    const normalizedUserId = normalizeUserId(userId);
+    return this.store.transaction(() => {
+      const existing = this.store.listSimulationAccounts(normalizedUserId);
+      if (existing.length >= simulationAccountLimit) {
+        throw new Error(`模拟账户最多 ${simulationAccountLimit} 个。`);
+      }
+      const now = Date.now();
+      const account: SimulationAccount = {
+        id: makeId("SIM"),
+        userId: normalizedUserId,
+        name: normalizeSimulationAccountName(input.name, `模拟账户 ${existing.length + 1}`),
+        asset,
+        balance: simulationInitialBalance,
+        equity: simulationInitialBalance,
+        usedMargin: 0,
+        freeMargin: simulationInitialBalance,
+        floatingPnl: 0,
+        status: "active",
+        lastResetAt: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.store.upsertSimulationAccount(account);
+      const items = this.listSimulationAccountViews(normalizedUserId);
+      return {
+        account: this.toSimulationAccountView(account),
+        accountCount: items.length,
+        accountLimit: simulationAccountLimit,
+        canCreate: items.length < simulationAccountLimit,
+      };
+    });
+  }
+
+  renameSimulationAccount(userId: string, accountId: string, input: { name?: string }) {
+    const account = this.getOwnedSimulationAccount(userId, accountId);
+    const next: SimulationAccount = {
+      ...account,
+      name: normalizeSimulationAccountName(input.name),
+      updatedAt: Date.now(),
+    };
+    this.store.upsertSimulationAccount(next);
+    return { account: this.toSimulationAccountView(next) };
+  }
+
+  deleteSimulationAccount(userId: string, accountId: string) {
+    const account = this.getOwnedSimulationAccount(userId, accountId);
+    this.store.upsertSimulationAccount({
+      ...account,
+      status: "deleted",
+      updatedAt: Date.now(),
+    });
+    return { ok: true };
+  }
+
+  resetSimulationAccount(userId: string, accountId: string) {
+    const account = this.getOwnedSimulationAccount(userId, accountId);
+    if (account.usedMargin > 0) {
+      throw new Error("当前模拟账户存在持仓或占用保证金，暂不能重置资金。");
+    }
+    const now = Date.now();
+    const nextResetAvailableAt = account.lastResetAt ? account.lastResetAt + simulationResetCooldownMs : null;
+    if (nextResetAvailableAt && nextResetAvailableAt > now) {
+      throw new Error("模拟账户每 24 小时只能重置一次。");
+    }
+
+    const next: SimulationAccount = {
+      ...account,
+      balance: simulationInitialBalance,
+      equity: simulationInitialBalance,
+      usedMargin: 0,
+      freeMargin: simulationInitialBalance,
+      floatingPnl: 0,
+      lastResetAt: now,
+      updatedAt: now,
+    };
+    this.store.upsertSimulationAccount(next);
+    const view = this.toSimulationAccountView(next);
+    return {
+      account: view,
+      nextResetAvailableAt: view.nextResetAvailableAt,
+      canReset: view.canReset,
+    };
+  }
+
+  createExternalWalletChallenge(
+    userId: string,
+    input: { walletAddress?: string; network?: string; provider?: string },
+  ): ExternalWalletChallenge {
+    const normalizedUserId = normalizeUserId(userId);
+    const walletAddress = normalizeWalletAddress(input.walletAddress);
+    const network = normalizeExternalWalletNetwork(input.network);
+    const provider = normalizeExternalWalletProvider(input.provider);
+    const now = Date.now();
+    return this.store.transaction(() => {
+      const existingForUser = this.store.getExternalWalletBindingByUserId(normalizedUserId);
+      if (existingForUser?.bindStatus === "active") {
+        throw new Error("当前用户已绑定第三方钱包，请先解绑后再绑定新地址。");
+      }
+
+      const existingForAddress = this.store.getExternalWalletBindingByAddress(walletAddress);
+      if (existingForAddress && existingForAddress.userId !== normalizedUserId) {
+        if (existingForAddress.bindStatus === "active" || existingForAddress.challengeExpiresAt > now) {
+          throw new Error("该钱包地址已被其他用户绑定或正在绑定中。");
+        }
+        this.store.deleteExternalWalletBinding(existingForAddress.id);
+      }
+
+      const nonce = crypto.randomBytes(16).toString("hex");
+      const expiresAt = now + 10 * 60 * 1000;
+      const challengeId = existingForUser?.id ?? makeId("EW");
+      const message = buildExternalWalletChallengeMessage({
+        userId: normalizedUserId,
+        walletAddress,
+        network,
+        provider,
+        nonce,
+        issuedAt: now,
+        expiresAt,
+      });
+      const binding: ExternalWalletBinding = {
+        id: challengeId,
+        userId: normalizedUserId,
+        walletAddress,
+        network,
+        provider,
+        isDefault: false,
+        bindStatus: "pending",
+        nonce,
+        challenge: message,
+        challengeExpiresAt: expiresAt,
+        lastVerifiedAt: null,
+        createdAt: existingForUser?.createdAt ?? now,
+        updatedAt: now,
+      };
+      this.store.saveExternalWalletBinding(binding);
+      return {
+        challengeId,
+        walletAddress,
+        network,
+        provider,
+        nonce,
+        message,
+        expiresAt,
+      };
+    });
+  }
+
+  bindExternalWallet(
+    userId: string,
+    input: { challengeId?: string; walletAddress?: string; signature?: string },
+  ): { binding: ExternalWalletBinding } {
+    const normalizedUserId = normalizeUserId(userId);
+    const challengeId = normalizeRequiredInput(input.challengeId, "challengeId");
+    const walletAddress = normalizeWalletAddress(input.walletAddress);
+    const signature = normalizeRequiredInput(input.signature, "signature");
+    return this.store.transaction(() => {
+      const binding = this.store.getExternalWalletBindingById(challengeId);
+      if (!binding || binding.userId !== normalizedUserId) {
+        throw new Error("签名 challenge 不存在或不属于当前用户。");
+      }
+      if (binding.bindStatus === "active") {
+        throw new Error("该第三方钱包已完成绑定。");
+      }
+      if (binding.challengeExpiresAt <= Date.now()) {
+        throw new Error("签名 challenge 已过期，请重新获取。");
+      }
+      if (binding.walletAddress !== walletAddress) {
+        throw new Error("提交的钱包地址与 challenge 不一致。");
+      }
+
+      let recoveredAddress: string;
+      try {
+        recoveredAddress = normalizeWalletAddress(verifyMessage(binding.challenge, signature));
+      } catch {
+        throw new Error("签名验证失败，请确认使用 MetaMask 当前地址签名。");
+      }
+      if (recoveredAddress !== walletAddress) {
+        throw new Error("签名地址与绑定地址不一致。");
+      }
+
+      const existingForAddress = this.store.getExternalWalletBindingByAddress(walletAddress);
+      if (existingForAddress && existingForAddress.userId !== normalizedUserId) {
+        throw new Error("该钱包地址已被其他用户绑定。");
+      }
+
+      const now = Date.now();
+      const activeBinding: ExternalWalletBinding = {
+        ...binding,
+        walletAddress,
+        isDefault: true,
+        bindStatus: "active",
+        lastVerifiedAt: now,
+        updatedAt: now,
+      };
+      this.store.saveExternalWalletBinding(activeBinding);
+      return { binding: activeBinding };
+    });
+  }
+
+  getExternalWalletBinding(userId: string): { binding: ExternalWalletBinding | null } {
+    const binding = this.store.getExternalWalletBindingByUserId(normalizeUserId(userId));
+    return { binding: binding?.bindStatus === "active" ? binding : null };
+  }
+
+  unbindExternalWallet(userId: string): { ok: true; binding: null } {
+    const binding = this.store.getExternalWalletBindingByUserId(normalizeUserId(userId));
+    if (binding) {
+      this.store.deleteExternalWalletBinding(binding.id);
+    }
+    return { ok: true, binding: null };
+  }
+
+  listExternalWalletBindings() {
+    return this.store.listExternalWalletBindings().filter((binding) => binding.bindStatus === "active");
   }
 
   listWithdrawals(userId?: string) {
@@ -966,128 +1196,12 @@ export class WalletService {
     });
   }
 
-  private transferFundingToSimulation(userId: string, amount: number, remark?: string | null) {
-    return this.store.transaction(() => {
-      const fundingBefore = this.ensureFundingAccount(userId);
-      if (fundingBefore.available < amount) {
-        throw new Error("资金账户可用余额不足。");
-      }
-
-      const fundingAfter = this.withAvailable({
-        ...fundingBefore,
-        balance: roundMoney(fundingBefore.balance - amount),
-        updatedAt: Date.now(),
-      });
-      this.store.upsertFundingAccount(fundingAfter);
-      const tradingMove = this.trading.creditBalance(userId, amount);
-
-      const transfer = this.createTransferRecord({
-        transferType: "account_transfer",
-        amount,
-        fromUserId: userId,
-        toUserId: userId,
-        fromAccountType: "funding",
-        toAccountType: "simulation",
-        remark,
-      });
-      this.store.saveAccountTransfer(transfer);
-      this.store.saveFundingLedger(
-        this.createLedger({
-          userId,
-          accountId: fundingAfter.id,
-          accountType: "funding",
-          type: "transfer_out",
-          source: "account_transfer",
-          amount,
-          balanceBefore: fundingBefore.balance,
-          balanceAfter: fundingAfter.balance,
-          frozenBefore: fundingBefore.frozen,
-          frozenAfter: fundingAfter.frozen,
-          status: "completed",
-          relatedId: transfer.id,
-          remark,
-        }),
-      );
-      this.store.saveFundingLedger(
-        this.createLedger({
-          userId,
-          accountId: tradingMove.account.id,
-          accountType: "simulation",
-          type: "transfer_in",
-          source: "account_transfer",
-          amount,
-          balanceBefore: tradingMove.balanceBefore,
-          balanceAfter: tradingMove.balanceAfter,
-          frozenBefore: 0,
-          frozenAfter: 0,
-          status: "completed",
-          relatedId: transfer.id,
-          remark,
-        }),
-      );
-
-      return { transfer, accounts: this.getAccounts(userId) };
-    });
+  private transferFundingToSimulation(userId: string, amount: number, remark?: string | null): never {
+    throw new Error("模拟账户资金与资金账户不联动，请在模拟账户页使用重置资金。");
   }
 
-  private transferSimulationToFunding(userId: string, amount: number, remark?: string | null) {
-    return this.store.transaction(() => {
-      const fundingBefore = this.ensureFundingAccount(userId);
-      const tradingMove = this.trading.debitFreeMargin(userId, amount);
-      const fundingAfter = this.withAvailable({
-        ...fundingBefore,
-        balance: roundMoney(fundingBefore.balance + amount),
-        updatedAt: Date.now(),
-      });
-      this.store.upsertFundingAccount(fundingAfter);
-
-      const transfer = this.createTransferRecord({
-        transferType: "account_transfer",
-        amount,
-        fromUserId: userId,
-        toUserId: userId,
-        fromAccountType: "simulation",
-        toAccountType: "funding",
-        remark,
-      });
-      this.store.saveAccountTransfer(transfer);
-      this.store.saveFundingLedger(
-        this.createLedger({
-          userId,
-          accountId: tradingMove.account.id,
-          accountType: "simulation",
-          type: "transfer_out",
-          source: "account_transfer",
-          amount,
-          balanceBefore: tradingMove.balanceBefore,
-          balanceAfter: tradingMove.balanceAfter,
-          frozenBefore: 0,
-          frozenAfter: 0,
-          status: "completed",
-          relatedId: transfer.id,
-          remark,
-        }),
-      );
-      this.store.saveFundingLedger(
-        this.createLedger({
-          userId,
-          accountId: fundingAfter.id,
-          accountType: "funding",
-          type: "transfer_in",
-          source: "account_transfer",
-          amount,
-          balanceBefore: fundingBefore.balance,
-          balanceAfter: fundingAfter.balance,
-          frozenBefore: fundingBefore.frozen,
-          frozenAfter: fundingAfter.frozen,
-          status: "completed",
-          relatedId: transfer.id,
-          remark,
-        }),
-      );
-
-      return { transfer, accounts: this.getAccounts(userId) };
-    });
+  private transferSimulationToFunding(userId: string, amount: number, remark?: string | null): never {
+    throw new Error("模拟账户资金与资金账户不联动，不能划转到资金账户。");
   }
 
   private transferFundingToRealTrading(userId: string, amount: number, remark?: string | null) {
@@ -1485,6 +1599,72 @@ export class WalletService {
       frozen: roundMoney(account.frozen),
       available: roundMoney(account.balance - account.frozen),
     };
+  }
+
+  private listSimulationAccountViews(userId: string): SimulationAccountView[] {
+    return this.store.listSimulationAccounts(normalizeUserId(userId)).map((account) => this.toSimulationAccountView(account));
+  }
+
+  private buildSimulationSummary(accounts: SimulationAccountView[]) {
+    return {
+      asset,
+      totalEquity: roundMoney(accounts.reduce((sum, account) => sum + account.equity, 0)),
+      todayPnl: 0,
+      todayPnlRate: 0,
+      accountCount: accounts.length,
+      accountLimit: simulationAccountLimit,
+      canCreateSimulationAccount: accounts.length < simulationAccountLimit,
+    };
+  }
+
+  private toSimulationAccountView(account: SimulationAccount): SimulationAccountView {
+    const nextResetAvailableAt = account.lastResetAt ? account.lastResetAt + simulationResetCooldownMs : null;
+    const canReset = account.status === "active" && (!nextResetAvailableAt || nextResetAvailableAt <= Date.now());
+    return this.withSimulationCompatibility({
+      ...account,
+      balance: roundMoney(account.balance),
+      equity: roundMoney(account.equity),
+      usedMargin: roundMoney(account.usedMargin),
+      freeMargin: roundMoney(account.freeMargin),
+      floatingPnl: roundMoney(account.floatingPnl),
+      lastResetAt: account.lastResetAt ?? null,
+      nextResetAvailableAt,
+      canReset,
+    });
+  }
+
+  private createEmptySimulationCompatibility(userId: string): SimulationAccountView {
+    return this.withSimulationCompatibility({
+      id: "",
+      userId,
+      simulationAccountId: "",
+      name: "未创建模拟账户",
+      asset,
+      balance: 0,
+      equity: 0,
+      usedMargin: 0,
+      freeMargin: 0,
+      floatingPnl: 0,
+      status: "disabled" as const,
+      createdAt: 0,
+      updatedAt: 0,
+      lastResetAt: null,
+      nextResetAvailableAt: null,
+      canReset: false,
+    });
+  }
+
+  private getOwnedSimulationAccount(userId: string, accountId: string) {
+    const normalizedUserId = normalizeUserId(userId);
+    const normalizedAccountId = normalizeRequiredInput(accountId, "accountId");
+    const account = this.store.getSimulationAccount(normalizedAccountId);
+    if (!account || account.userId !== normalizedUserId || account.status === "deleted") {
+      throw new Error("模拟账户不存在。");
+    }
+    if (account.status === "disabled") {
+      throw new Error("模拟账户已禁用。");
+    }
+    return account;
   }
 
   private withSimulationCompatibility<T extends { freeMargin: number; floatingPnl: number }>(account: T) {
@@ -2020,6 +2200,76 @@ function normalizeRequiredValue(value: string, name: string) {
     throw new Error(`缺少环境变量 ${name}。`);
   }
   return value;
+}
+
+function normalizeRequiredInput(value: unknown, fieldName: string) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  if (!normalized) {
+    throw new Error(`缺少参数 ${fieldName}。`);
+  }
+  return normalized;
+}
+
+function normalizeSimulationAccountName(value: unknown, fallback?: string) {
+  const normalized = typeof value === "string" ? value.trim() : "";
+  const name = normalized || fallback;
+  if (!name) {
+    throw new Error("模拟账户名称不能为空。");
+  }
+  if (name.length > 30) {
+    throw new Error("模拟账户名称不能超过 30 个字符。");
+  }
+  return name;
+}
+
+function normalizeWalletAddress(value: unknown) {
+  const raw = normalizeRequiredInput(value, "walletAddress");
+  try {
+    return getAddress(raw);
+  } catch {
+    throw new Error("钱包地址格式不正确。");
+  }
+}
+
+function normalizeExternalWalletNetwork(value: unknown): WalletNetwork {
+  const normalized = typeof value === "string" && value.trim() ? value.trim().toUpperCase() : depositNetwork;
+  if (normalized !== depositNetwork) {
+    throw new Error("当前仅支持 BSC_TESTNET 网络。");
+  }
+  return depositNetwork;
+}
+
+function normalizeExternalWalletProvider(value: unknown): ExternalWalletProvider {
+  const normalized = typeof value === "string" && value.trim() ? value.trim().toLowerCase() : "metamask";
+  if (normalized !== "metamask") {
+    throw new Error("当前仅支持 MetaMask 第三方钱包。");
+  }
+  return "metamask";
+}
+
+function buildExternalWalletChallengeMessage(input: {
+  userId: string;
+  walletAddress: string;
+  network: WalletNetwork;
+  provider: ExternalWalletProvider;
+  nonce: string;
+  issuedAt: number;
+  expiresAt: number;
+}) {
+  return [
+    "Stella X 第三方钱包绑定验证",
+    "",
+    "请确认你正在把该第三方钱包绑定到 Stella X 账户。",
+    "星衡不会获取你的私钥，也不会代你发起链上转账。",
+    "",
+    `User ID: ${input.userId}`,
+    `Wallet Address: ${input.walletAddress}`,
+    `Network: ${input.network}`,
+    `Provider: ${input.provider}`,
+    `Nonce: ${input.nonce}`,
+    `Issued At: ${new Date(input.issuedAt).toISOString()}`,
+    `Expires At: ${new Date(input.expiresAt).toISOString()}`,
+  ].join("\n");
 }
 
 function normalizeAccountType(value: WalletAccountType): NormalizedTransferSide {

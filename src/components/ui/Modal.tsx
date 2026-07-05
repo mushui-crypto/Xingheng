@@ -1,4 +1,5 @@
-import { useEffect, type ReactNode } from "react";
+import { useEffect, useId, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Button } from "./Button";
 
@@ -10,7 +11,44 @@ type ModalProps = {
   onClose: () => void;
 };
 
+let openModalCount = 0;
+let originalBodyOverflow = "";
+let originalBodyPaddingRight = "";
+
+function lockDocumentScroll() {
+  const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
+
+  if (openModalCount === 0) {
+    originalBodyOverflow = document.body.style.overflow;
+    originalBodyPaddingRight = document.body.style.paddingRight;
+    document.body.style.overflow = "hidden";
+
+    if (scrollbarWidth > 0) {
+      document.body.style.paddingRight = `${scrollbarWidth}px`;
+    }
+  }
+
+  openModalCount += 1;
+
+  return () => {
+    openModalCount = Math.max(0, openModalCount - 1);
+
+    if (openModalCount === 0) {
+      document.body.style.overflow = originalBodyOverflow;
+      document.body.style.paddingRight = originalBodyPaddingRight;
+    }
+  };
+}
+
 export function Modal({ open, title, description, children, onClose }: ModalProps) {
+  const titleId = useId();
+
+  useEffect(() => {
+    if (!open) return;
+
+    return lockDocumentScroll();
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
 
@@ -28,28 +66,33 @@ export function Modal({ open, title, description, children, onClose }: ModalProp
     return null;
   }
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-end bg-black/75 p-3 backdrop-blur-sm md:items-center md:justify-center md:p-6" onClick={onClose}>
+  return createPortal(
+    <div
+      className="xh-modal-backdrop"
+      onClick={onClose}
+    >
       <section
         role="dialog"
         aria-modal="true"
-        aria-labelledby="xh-modal-title"
-        className="w-full border border-white/15 bg-[#050505] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.55),inset_0_1px_0_rgba(255,255,255,0.05)] md:max-w-lg md:p-6"
+        aria-labelledby={titleId}
+        className="xh-modal-shell"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-start justify-between gap-4">
+        <div className="xh-modal-header">
           <div>
-            <h2 id="xh-modal-title" className="xh-panel-title">
+            <h2 id={titleId} className="xh-modal-title">
               {title}
             </h2>
-            {description ? <p className="mt-2 text-sm leading-6 text-muted">{description}</p> : null}
+            {description ? <p className="xh-modal-description">{description}</p> : null}
           </div>
-          <Button type="button" className="h-9 w-9 px-0" variant="ghost" aria-label="关闭" onClick={onClose}>
+          <Button type="button" className="xh-modal-close" variant="ghost" aria-label="关闭" onClick={onClose}>
             <X size={18} aria-hidden="true" />
           </Button>
         </div>
-        <div className="mt-5">{children}</div>
+        <div className="xh-modal-divider" />
+        <div className="xh-modal-body">{children}</div>
       </section>
-    </div>
+    </div>,
+    document.body,
   );
 }

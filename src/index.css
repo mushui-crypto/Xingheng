@@ -8,6 +8,7 @@
   font-family:
     Poppins, Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
     sans-serif;
+  scrollbar-gutter: stable;
 }
 
 body {
@@ -240,12 +241,108 @@ textarea {
     @apply inline-flex min-h-[40px] items-center justify-center border border-white/15 bg-black px-4 py-2 text-[13px] font-medium text-[#f5f5f5] transition hover:border-white hover:bg-white/[0.04] active:translate-y-px disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:border-white/15 disabled:hover:bg-black;
   }
 
+  .xh-modal-backdrop {
+    @apply fixed inset-0 z-50 flex items-end overflow-y-auto bg-black/75 p-3 md:items-center md:justify-center md:p-6;
+  }
+
+  .xh-modal-shell {
+    @apply w-full border border-[#2b2b2b] bg-[#050505] shadow-[0_24px_80px_rgba(0,0,0,0.55)] md:max-w-[560px];
+  }
+
+  .xh-modal-header {
+    @apply flex items-start justify-between gap-4 px-6 pb-[18px] pt-6;
+  }
+
+  .xh-modal-title {
+    @apply text-xl font-semibold leading-[26px] tracking-[-0.02em] text-[#f5f5f5];
+  }
+
+  .xh-modal-description {
+    @apply mt-2 text-sm leading-6 text-muted;
+  }
+
+  .xh-modal-close {
+    @apply h-9 w-9 shrink-0 border border-[#2b2b2b] px-0 text-[#f5f5f5] hover:border-white/40 hover:bg-white/[0.04] hover:text-white;
+  }
+
+  .xh-modal-divider {
+    @apply mx-6 h-px bg-[#2b2b2b];
+  }
+
+  .xh-modal-body {
+    @apply px-6 pb-6 pt-[18px];
+  }
+
+  .xh-account-modal-form {
+    @apply flex flex-col gap-[18px];
+  }
+
+  .xh-account-modal-field {
+    @apply block min-w-0;
+  }
+
+  .xh-account-modal-field > p,
+  .xh-account-modal-field > span:first-child {
+    @apply mb-2 block text-xs font-normal leading-[18px] text-[#a6a6a6];
+  }
+
+  .xh-account-modal-value,
+  .xh-account-modal-control {
+    @apply flex min-h-[60px] w-full items-center border border-[#2b2b2b] bg-black px-3.5 text-sm font-normal leading-[18px] text-[#f5f5f5] outline-none transition placeholder:text-[#777] focus:border-white/60 focus:bg-[#0d0d0d] disabled:cursor-not-allowed disabled:text-[#a6a6a6] disabled:opacity-100;
+  }
+
+  .xh-account-modal-value {
+    @apply overflow-hidden break-all;
+  }
+
+  .xh-account-modal-value.is-mono,
+  .xh-account-modal-control[type="text"] {
+    @apply font-mono text-[13px];
+  }
+
+  .xh-account-modal-select-wrap {
+    @apply relative block;
+  }
+
+  .xh-account-modal-select-wrap select {
+    @apply appearance-none pr-12;
+  }
+
+  .xh-account-modal-select-wrap::after {
+    content: "";
+    @apply pointer-events-none absolute right-5 top-1/2 h-2 w-2 -translate-y-[60%] rotate-45 border-b border-r border-[#a6a6a6];
+  }
+
+  .xh-transfer-stack {
+    @apply flex flex-col gap-[14px];
+  }
+
+  .xh-transfer-swap {
+    @apply h-10 w-full border-[#2b2b2b] bg-black text-[13px] font-medium normal-case tracking-normal text-[#f5f5f5] hover:border-white/40 hover:bg-white/[0.04];
+  }
+
+  .xh-account-modal-submit {
+    @apply mt-0 h-9 w-full border-white bg-white px-4 py-0 text-[13px] font-semibold normal-case tracking-normal text-black hover:bg-[#f5f5f5] hover:text-black disabled:border-[#2b2b2b] disabled:bg-[#202020] disabled:text-[#777] disabled:opacity-100;
+  }
+
+  .xh-account-modal-feedback {
+    @apply border border-[#2b2b2b] bg-white/[0.035] p-3 text-sm leading-6 text-[#d7d7d7];
+  }
+
   .xh-asset-summary-panel {
     @apply min-h-[194px] border border-[#2b2b2b] bg-[#101010] p-5;
   }
 
+  .xh-asset-summary-panel.is-compact {
+    @apply min-h-0;
+  }
+
   .xh-asset-summary-top {
     @apply flex min-h-[92px] flex-col justify-between gap-5 md:flex-row md:items-start;
+  }
+
+  .xh-asset-summary-panel.is-compact .xh-asset-summary-top {
+    @apply min-h-0;
   }
 
   .xh-asset-summary-main {
@@ -257,11 +354,11 @@ textarea {
   }
 
   .xh-asset-summary-value {
-    @apply mt-1 flex h-10 min-w-0 items-end gap-2;
+    @apply mt-2 flex min-h-[46px] min-w-0 items-end gap-2;
   }
 
   .xh-asset-summary-number {
-    @apply block truncate text-[32px] font-semibold leading-10 tracking-[-0.03em] text-[#f5f5f5];
+    @apply block truncate text-[32px] font-semibold leading-[46px] tracking-[-0.03em] text-[#f5f5f5];
   }
 
   .xh-asset-summary-unit {
@@ -269,7 +366,7 @@ textarea {
   }
 
   .xh-asset-summary-pnl {
-    @apply mt-2 flex h-5 flex-wrap items-center gap-1.5 text-xs font-normal leading-5 text-[#f5f5f5];
+    @apply mt-3 flex min-h-5 flex-wrap items-center gap-1.5 text-xs font-normal leading-5 text-[#f5f5f5];
   }
 
   .xh-asset-summary-actions {
@@ -286,11 +383,11 @@ textarea {
   }
 
   .xh-overview-metric {
-    @apply mt-[18px] flex flex-col items-start gap-2;
+    @apply mt-6 flex flex-col items-start gap-3;
   }
 
   .xh-overview-metric-value {
-    @apply text-2xl font-bold tracking-[-0.02em] text-[#f5f5f5];
+    @apply text-2xl font-bold leading-9 tracking-[-0.02em] text-[#f5f5f5];
   }
 
   .xh-overview-pnl {
@@ -437,6 +534,19 @@ textarea {
     @apply inline-flex h-9 min-w-[128px] shrink-0 items-center justify-center whitespace-nowrap border border-[#2b2b2b] bg-black px-4 text-[13px] font-medium leading-4 text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] active:translate-y-px;
   }
 
+  .xh-simulation-add-button:disabled,
+  .xh-simulation-action-button:disabled {
+    @apply cursor-not-allowed opacity-45 hover:border-[#2b2b2b] hover:bg-black active:translate-y-0;
+  }
+
+  .xh-simulation-empty {
+    @apply flex min-h-[180px] w-full flex-col items-start justify-center gap-4 border border-dashed border-[#2b2b2b] bg-[#101010] p-5;
+  }
+
+  .xh-simulation-empty h2 {
+    @apply text-base font-medium leading-6 text-[#f5f5f5];
+  }
+
   .xh-simulation-summary-panel {
     @apply min-h-[194px];
   }
@@ -455,6 +565,10 @@ textarea {
 
   .xh-simulation-card-actions {
     @apply flex shrink-0 flex-wrap items-center gap-2;
+  }
+
+  .xh-simulation-more-menu {
+    @apply inline-flex flex-wrap items-center gap-2;
   }
 
   .xh-simulation-action-button {
@@ -482,11 +596,11 @@ textarea {
   }
 
   .xh-simulation-primary-metric div {
-    @apply mt-1 flex min-w-0 items-end gap-2;
+    @apply mt-2 flex min-w-0 items-end gap-2;
   }
 
   .xh-simulation-primary-metric strong {
-    @apply block truncate text-[32px] font-bold leading-10 tracking-normal text-[#f5f5f5];
+    @apply block truncate text-[32px] font-bold leading-[46px] tracking-normal text-[#f5f5f5];
   }
 
   .xh-simulation-primary-metric span {
@@ -635,7 +749,7 @@ textarea {
 
   .xh-wallet-panel {
     @apply grid overflow-visible border-0 bg-transparent p-0 shadow-none;
-    grid-template-columns: minmax(360px, 480px) minmax(0, 1fr);
+    grid-template-columns: 360px minmax(0, 1fr);
     gap: 20px;
     background-color: transparent !important;
     padding: 0 !important;
@@ -662,6 +776,10 @@ textarea {
     @apply mt-[18px] space-y-[18px];
   }
 
+  .xh-wallet-bind-warning {
+    @apply mt-3 border border-amber-400/30 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100;
+  }
+
   .xh-wallet-list-card {
     @apply flex h-16 w-full cursor-pointer flex-col justify-between overflow-hidden border border-[#2b2b2b] bg-transparent p-3 text-left text-[#f5f5f5] transition hover:border-white/40 hover:bg-black focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/70 active:translate-y-px;
   }
@@ -686,6 +804,10 @@ textarea {
     @apply flex min-w-0 items-center justify-start gap-2 text-xs leading-5 text-[#f5f5f5];
   }
 
+  .xh-wallet-bind-status {
+    @apply mt-2 inline-flex w-fit border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[11px] leading-4 text-[#d7d7d7];
+  }
+
   .xh-wallet-list-card.is-active .xh-wallet-list-card-bottom {
     @apply text-[#d7d7d7];
   }
@@ -703,6 +825,10 @@ textarea {
     scrollbar-width: none;
   }
 
+  .xh-wallet-address-text.is-full {
+    @apply max-w-none whitespace-normal break-all;
+  }
+
   .xh-wallet-address-text::-webkit-scrollbar {
     display: none;
   }
@@ -713,6 +839,16 @@ textarea {
 
   .xh-wallet-add-demo {
     @apply mt-[18px] h-9 w-full border border-[#2b2b2b] bg-black px-4 py-0 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04] disabled:cursor-not-allowed disabled:text-[#777];
+  }
+
+  .xh-toast {
+    @apply pointer-events-none fixed bottom-6 right-6 z-[80] max-w-[min(360px,calc(100vw-32px))] border border-[#2b2b2b] bg-[#101010] px-4 py-3 text-sm leading-5 text-[#f5f5f5] opacity-0 shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition duration-200 ease-out;
+    transform: translateY(8px);
+  }
+
+  .xh-toast.is-visible {
+    @apply opacity-100;
+    transform: translateY(0);
   }
 
   .xh-wallet-detail-column {
@@ -745,6 +881,18 @@ textarea {
 
   .xh-wallet-detail-balance .xh-overview-metric {
     @apply mt-0;
+  }
+
+  .xh-external-wallet-boundary {
+    @apply border border-white/10 bg-white/[0.025] px-4 py-3;
+  }
+
+  .xh-external-wallet-boundary p {
+    @apply text-xs uppercase tracking-[0.16em] text-[#a6a6a6];
+  }
+
+  .xh-external-wallet-boundary strong {
+    @apply mt-2 block text-base font-medium text-[#f5f5f5];
   }
 
   .xh-wallet-asset-pane {
@@ -874,6 +1022,13 @@ textarea {
 
     .xh-wallet-panel {
       grid-template-columns: 1fr;
+    }
+
+    .xh-toast {
+      left: 16px;
+      right: 16px;
+      bottom: 16px;
+      max-width: none;
     }
   }
 

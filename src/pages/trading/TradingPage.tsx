@@ -21,6 +21,7 @@ import {
   type PositionView,
   type TradingAccount,
 } from "../../api/market";
+import { fetchSimulationAccounts, type SimulationAccountView } from "../../api/walletApi";
 import { useSymbolStore } from "../../store/symbolStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
@@ -51,6 +52,9 @@ export function TradingPage() {
   const [account, setAccount] = useState<TradingAccount | null>(null);
   const [positions, setPositions] = useState<PositionView[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
+  const [simulationAccounts, setSimulationAccounts] = useState<SimulationAccountView[]>([]);
+  const [simulationAccountsLoading, setSimulationAccountsLoading] = useState(true);
+  const [selectedSimulationAccountId, setSelectedSimulationAccountId] = useState(searchParams.get("simulationAccountId") ?? "");
   const [volume, setVolume] = useState(selectedConfig?.minLot ?? 0.01);
   const [message, setMessage] = useState("");
   const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
@@ -63,7 +67,15 @@ export function TradingPage() {
 
   const statusTone = ticker.status === "connected" ? "success" : ticker.status === "stale" ? "neutral" : "danger";
   const statusText = ticker.status === "connected" ? "实时行情" : ticker.status === "stale" ? "行情延迟" : "行情连接中断";
-  const orderDisabled = ticker.status !== "connected" || !ticker.bid || !ticker.ask || selectedConfig?.tradeStatus !== "enabled";
+  const selectedSimulationAccount = simulationAccounts.find((item) => item.id === selectedSimulationAccountId) ?? null;
+  const hasSimulationAccounts = simulationAccounts.length > 0;
+  const needsSimulationAccount = !selectedSimulationAccountId || !selectedSimulationAccount;
+  const orderDisabled =
+    needsSimulationAccount ||
+    ticker.status !== "connected" ||
+    !ticker.bid ||
+    !ticker.ask ||
+    selectedConfig?.tradeStatus !== "enabled";
 
   const wsUrl = useMemo(() => {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -79,15 +91,47 @@ export function TradingPage() {
   useEffect(() => {
     if (selectedConfig) {
       setVolume(selectedConfig.minLot);
-      setSearchParams({ symbol: selectedConfig.symbol });
+      const nextParams: Record<string, string> = { symbol: selectedConfig.symbol };
+      if (selectedSimulationAccountId) {
+        nextParams.simulationAccountId = selectedSimulationAccountId;
+      }
+      setSearchParams(nextParams);
     }
-  }, [selectedConfig?.minLot, selectedConfig?.symbol, setSearchParams]);
+  }, [selectedConfig?.minLot, selectedConfig?.symbol, selectedSimulationAccountId, setSearchParams]);
 
   useEffect(() => {
     void fetchMarketSymbols()
       .then(setSymbolsFromBackend)
       .catch((error) => setMessage(error instanceof Error ? error.message : "品种列表加载失败。"));
   }, [setSymbolsFromBackend]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSimulationAccountsLoading(true);
+    void fetchSimulationAccounts()
+      .then((payload) => {
+        if (cancelled) {
+          return;
+        }
+        const activeAccounts = payload.items.filter((item) => item.status !== "deleted" && item.status !== "disabled");
+        setSimulationAccounts(activeAccounts);
+        setSelectedSimulationAccountId((current) => {
+          if (!current) {
+            return "";
+          }
+          return activeAccounts.some((item) => item.id === current) ? current : "";
+        });
+      })
+      .catch((error) => setMessage(error instanceof Error ? error.message : "模拟账户加载失败。"))
+      .finally(() => {
+        if (!cancelled) {
+          setSimulationAccountsLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!chartContainerRef.current) {
@@ -164,12 +208,14 @@ export function TradingPage() {
         }
       }
 
-      const [nextTicker, nextAccount, nextPositions, nextOrders] = await Promise.all([
-        fetchTicker(symbol),
-        fetchTradingAccount(),
-        fetchPositions(),
-        fetchOrders(),
-      ]);
+      const tradingStatePromise = selectedSimulationAccountId
+        ? Promise.all([
+            fetchTradingAccount(selectedSimulationAccountId),
+            fetchPositions(selectedSimulationAccountId),
+            fetchOrders(selectedSimulationAccountId),
+          ])
+        : Promise.resolve<[TradingAccount | null, PositionView[], OrderRecord[]]>([null, [], []]);
+      const [nextTicker, [nextAccount, nextPositions, nextOrders]] = await Promise.all([fetchTicker(symbol), tradingStatePromise]);
       if (cancelled) {
         return;
       }
@@ -183,7 +229,7 @@ export function TradingPage() {
     return () => {
       cancelled = true;
     };
-  }, [interval, symbol, symbolConfigKey]);
+  }, [interval, selectedSimulationAccountId, symbol, symbolConfigKey]);
 
   useEffect(() => {
     const socket = new WebSocket(wsUrl);
@@ -215,27 +261,48 @@ export function TradingPage() {
     });
 
     return () => socket.close();
-  }, [interval, symbol, wsUrl]);
+  }, [interval, selectedSimulationAccountId, symbol, wsUrl]);
 
-  const refreshTradingState = async () => {
+  const refreshTradingState = async (simulationAccountId = selectedSimulationAccountId) => {
+    if (!simulationAccountId) {
+      setAccount(null);
+      setPositions([]);
+      setOrders([]);
+      return;
+    }
     const [nextAccount, nextPositions, nextOrders] = await Promise.all([
-      fetchTradingAccount(),
-      fetchPositions(),
-      fetchOrders(),
+      fetchTradingAccount(simulationAccountId),
+      fetchPositions(simulationAccountId),
+      fetchOrders(simulationAccountId),
     ]);
+    if (simulationAccountId !== selectedSimulationAccountId) {
+      return;
+    }
     setAccount(nextAccount);
-    setPositions(nextPositions);
-    setOrders(nextOrders);
+    setPositions(nextPositions.filter((position) => position.simulationAccountId === simulationAccountId || position.accountId === simulationAccountId));
+    setOrders(nextOrders.filter((order) => order.simulationAccountId === simulationAccountId || order.accountId === simulationAccountId));
+  };
+
+  const selectSimulationAccount = (accountId: string) => {
+    setSelectedSimulationAccountId(accountId);
+    setMessage("");
+    setAccount(null);
+    setPositions([]);
+    setOrders([]);
   };
 
   const submitOrder = async (side: "buy" | "sell") => {
     setMessage("");
+    if (!selectedSimulationAccountId || !selectedSimulationAccount) {
+      setMessage("请先选择模拟账户。");
+      return;
+    }
     try {
-      const position = await placeMarketOrder(symbol, side, volume);
-      await refreshTradingState();
+      const position = await placeMarketOrder(symbol, side, volume, selectedSimulationAccountId);
+      await refreshTradingState(selectedSimulationAccountId);
       setMessage(`${side === "buy" ? "买入" : "卖出"}已成交，价格 ${formatPrice(position.entryPrice, digits)}`);
     } catch (error) {
-      await refreshTradingState();
+      await refreshTradingState(selectedSimulationAccountId);
       setMessage(error instanceof Error ? error.message : "市价单被拒绝。");
     }
   };
@@ -247,12 +314,18 @@ export function TradingPage() {
     closingPositionIdRef.current = positionId;
     setClosingPositionId(positionId);
     setMessage("");
+    if (!selectedSimulationAccountId || !selectedSimulationAccount) {
+      setMessage("请先选择模拟账户。");
+      closingPositionIdRef.current = null;
+      setClosingPositionId(null);
+      return;
+    }
     try {
-      const result = await closePosition(positionId);
-      await refreshTradingState();
+      const result = await closePosition(positionId, selectedSimulationAccountId);
+      await refreshTradingState(selectedSimulationAccountId);
       setMessage(`平仓已成交，价格 ${formatPrice(result.closePrice, digits)}，盈亏 ${result.pnl.toFixed(2)} ${currency}`);
     } catch (error) {
-      await refreshTradingState();
+      await refreshTradingState(selectedSimulationAccountId);
       setMessage(error instanceof Error ? error.message : "平仓被拒绝。");
     } finally {
       closingPositionIdRef.current = null;
@@ -290,6 +363,53 @@ export function TradingPage() {
           </div>
         </div>
       </div>
+
+      <Card className="p-0">
+        <div className="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
+          <div>
+            <h2 className="font-semibold">模拟账户</h2>
+            <p className="mt-1 text-sm text-muted">
+              {hasSimulationAccounts ? "选择后显示该账户的权益、持仓与订单。" : "创建模拟账户后才能开始模拟交易。"}
+            </p>
+          </div>
+          <div className="flex w-full flex-col gap-3 sm:flex-row lg:w-auto lg:items-center">
+            <Select
+              label="选择模拟账户"
+              className="min-w-0 py-2.5 sm:min-w-[280px]"
+              value={selectedSimulationAccountId}
+              onChange={(event) => selectSimulationAccount(event.target.value)}
+              disabled={simulationAccountsLoading || !hasSimulationAccounts}
+              options={[
+                { value: "", label: simulationAccountsLoading ? "模拟账户加载中" : "请选择模拟账户" },
+                ...simulationAccounts.map((item) => ({
+                  value: item.id,
+                  label: `${item.name ?? "模拟账户"} · ${item.equity.toFixed(2)} ${item.asset}`,
+                })),
+              ]}
+            />
+            <a
+              className={`inline-flex items-center justify-center gap-2 whitespace-nowrap border px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] transition active:translate-y-px ${
+                hasSimulationAccounts
+                  ? "border-white/25 bg-black text-white hover:border-white hover:bg-white/[0.04]"
+                  : "border-white bg-white text-black hover:bg-black hover:text-white"
+              }`}
+              href="/app/account?section=simulation"
+            >
+              {hasSimulationAccounts ? "管理模拟账户" : "创建模拟账户"}
+            </a>
+          </div>
+        </div>
+        {!hasSimulationAccounts && !simulationAccountsLoading ? (
+          <div className="border-t border-line px-4 py-5">
+            <div className="border border-line bg-black p-5">
+              <p className="font-medium">暂无模拟账户</p>
+              <p className="mt-2 text-sm text-muted">请先到账户页创建模拟账户，再返回交易页选择账户下单。</p>
+            </div>
+          </div>
+        ) : needsSimulationAccount ? (
+          <div className="border-t border-line px-4 py-3 text-sm text-amber-100">请选择模拟账户后再查看持仓、订单和提交市价单。</div>
+        ) : null}
+      </Card>
 
       <div className="grid gap-4 md:grid-cols-4">
         <AccountStat label="Balance" value={account?.balance} suffix={currency} />
@@ -378,6 +498,7 @@ export function TradingPage() {
                 当前品种状态为 {selectedConfig.tradeStatus}，仅允许平仓，不可新开仓。
               </p>
             ) : null}
+            {needsSimulationAccount ? <p className="mt-3 text-sm text-amber-200">请先选择模拟账户。</p> : null}
             {message ? <p className="mt-4 xh-message">{message}</p> : null}
           </Card>
         </div>
@@ -386,10 +507,14 @@ export function TradingPage() {
       <Card className="overflow-hidden p-0">
         <div className="border-b border-line p-4">
           <h2 className="font-semibold">模拟持仓</h2>
-          <p className="mt-1 text-sm text-muted">多单浮盈亏按当前 bid，空单浮盈亏按当前 ask；平仓后盈亏进入 Balance。</p>
+          <p className="mt-1 text-sm text-muted">
+            {selectedSimulationAccount ? `${selectedSimulationAccount.name ?? "当前模拟账户"} · ${selectedSimulationAccount.id}` : "选择模拟账户后展示对应持仓。"}
+          </p>
         </div>
-        {positions.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted">暂无持仓。</div>
+        {needsSimulationAccount ? (
+          <div className="p-8 text-center text-sm text-muted">请选择模拟账户。</div>
+        ) : positions.length === 0 ? (
+          <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无持仓。</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[980px] text-left text-sm">
@@ -437,10 +562,14 @@ export function TradingPage() {
       <Card className="overflow-hidden p-0">
         <div className="border-b border-line p-4">
           <h2 className="font-semibold">订单记录</h2>
-          <p className="mt-1 text-sm text-muted">记录开仓、平仓、拒单及成交时行情快照。</p>
+          <p className="mt-1 text-sm text-muted">
+            {selectedSimulationAccount ? `${selectedSimulationAccount.name ?? "当前模拟账户"} · ${selectedSimulationAccount.id}` : "选择模拟账户后展示对应订单。"}
+          </p>
         </div>
-        {orders.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted">暂无订单记录。</div>
+        {needsSimulationAccount ? (
+          <div className="p-8 text-center text-sm text-muted">请选择模拟账户。</div>
+        ) : orders.length === 0 ? (
+          <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无订单记录。</div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full min-w-[1160px] text-left text-sm">

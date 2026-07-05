@@ -45,6 +45,8 @@ export type PositionSide = "long" | "short";
 export type Position = {
   id: string;
   userId: string;
+  accountId: string;
+  simulationAccountId: string;
   symbol: string;
   side: PositionSide;
   volume: number;
@@ -66,6 +68,7 @@ export type PositionView = Position & {
 export type TradingAccount = {
   id: string;
   userId: string;
+  simulationAccountId?: string;
   asset: "USDT";
   balance: number;
   equity: number;
@@ -76,10 +79,24 @@ export type TradingAccount = {
   updatedAt: number;
 };
 
+export type SimulationAccountStatus = "active" | "deleted" | "disabled";
+
+export type SimulationAccount = TradingAccount & {
+  name: string;
+  status: SimulationAccountStatus;
+  lastResetAt?: number | null;
+};
+
+export type SimulationAccountView = SimulationAccount & {
+  nextResetAvailableAt?: number | null;
+  canReset: boolean;
+};
+
 export type OrderRecord = {
   id: string;
   userId: string;
   accountId: string;
+  simulationAccountId: string;
   positionId?: string;
   symbol: string;
   side: TradeSide;
@@ -115,6 +132,8 @@ export type BalanceAdjustment = {
 export type WalletAccountType = "wallet" | "funding" | "trading" | "simulation" | "realTrading";
 export type WalletAsset = "USDT";
 export type WalletNetwork = "BSC_TESTNET";
+export type ExternalWalletProvider = "metamask";
+export type ExternalWalletBindStatus = "pending" | "active";
 export type OnchainDepositStatus = "detected" | "confirming" | "confirmed" | "failed";
 export type WithdrawalStatus = "pending_review" | "broadcasting" | "broadcasted" | "confirmed" | "failed" | "rejected";
 export type AccountTransferType = "account_transfer" | "internal_transfer";
@@ -128,6 +147,32 @@ export type DepositAddress = {
   derivationIndex: number;
   createdAt: number;
   updatedAt: number;
+};
+
+export type ExternalWalletBinding = {
+  id: string;
+  userId: string;
+  walletAddress: string;
+  network: WalletNetwork;
+  provider: ExternalWalletProvider;
+  isDefault: boolean;
+  bindStatus: ExternalWalletBindStatus;
+  nonce: string;
+  challenge: string;
+  challengeExpiresAt: number;
+  lastVerifiedAt?: number | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ExternalWalletChallenge = {
+  challengeId: string;
+  walletAddress: string;
+  network: WalletNetwork;
+  provider: ExternalWalletProvider;
+  nonce: string;
+  message: string;
+  expiresAt: number;
 };
 
 export type OnchainDeposit = {
