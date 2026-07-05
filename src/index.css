@@ -651,6 +651,26 @@ textarea {
     @apply mt-4 text-xs font-normal leading-6 text-[#a6a6a6];
   }
 
+  .xh-trading-simulation-card {
+    @apply border border-[#4a4a4a] bg-[#101010] p-5;
+  }
+
+  .xh-trading-simulation-grid {
+    @apply grid gap-x-8 gap-y-5 sm:grid-cols-2 lg:grid-cols-4;
+  }
+
+  .xh-trading-simulation-item {
+    @apply min-w-0;
+  }
+
+  .xh-trading-simulation-item p {
+    @apply text-xs font-normal leading-5 text-[#a6a6a6];
+  }
+
+  .xh-trading-simulation-item span {
+    @apply mt-1.5 block truncate text-sm font-medium leading-5 text-[#f5f5f5];
+  }
+
   .xh-trading-boundary-grid {
     @apply mt-[15px] grid gap-[14px] md:grid-cols-3;
   }

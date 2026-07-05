@@ -1570,7 +1570,7 @@ function SimulationAccountCard({
         </div>
         <div className="xh-simulation-card-actions">
           <SimulationActionButton label="重置资金" onClick={account.canReset === false ? undefined : onReset} disabled={account.canReset === false} />
-          <SimulationActionButton asLink label={isCurrent ? "进入模拟交易" : "模拟交易"} to={`/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(account.id)}`} onClick={onTrade} />
+          <SimulationActionButton asLink label="进入模拟交易" to={`/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(account.id)}`} onClick={onTrade} />
           <SimulationMoreMenu onDelete={onDelete} onRename={onRename} />
         </div>
       </div>

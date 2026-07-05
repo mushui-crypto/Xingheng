@@ -391,44 +391,11 @@ export function TradingPage() {
         </div>
       </div>
 
-      <Card>
-        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
-          <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2">
-              <h2 className="font-semibold">当前模拟账户</h2>
-              {selectedSimulationAccount ? <Badge tone="success">使用中</Badge> : <Badge tone="neutral">未选择</Badge>}
-            </div>
-            <p className="mt-2 truncate text-sm text-muted">
-              {simulationAccountsLoading
-                ? "模拟账户加载中"
-                : selectedSimulationAccount
-                  ? `${selectedSimulationAccount.name || "模拟账户"} · ${shortSimulationId(selectedSimulationAccount.id)}`
-                  : hasSimulationAccounts
-                    ? "模拟账户不可用"
-                    : "请先在账户页创建模拟账户"}
-            </p>
-          </div>
-          <div className="grid min-w-0 grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:min-w-[360px]">
-            <CurrentAccountMetric
-              label="权益"
-              value={account?.equity ?? selectedSimulationAccount?.equity}
-              suffix={currency}
-            />
-            <CurrentAccountMetric
-              label="余额"
-              value={account?.balance ?? selectedSimulationAccount?.balance}
-              suffix={currency}
-            />
-          </div>
-        </div>
-      </Card>
-
-      <div className="grid gap-4 md:grid-cols-4">
-        <AccountStat label="Balance" value={account?.balance} suffix={currency} />
-        <AccountStat label="Equity" value={account?.equity} suffix={currency} />
-        <AccountStat label="Used Margin" value={account?.usedMargin} suffix={currency} />
-        <AccountStat label="Free Margin" value={account?.freeMargin} suffix={currency} />
-      </div>
+      <SimulationAccountContextPanel
+        account={account}
+        currency={currency}
+        simulationAccount={selectedSimulationAccount}
+      />
 
       <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
         <Card className="p-0">
@@ -625,22 +592,54 @@ export function TradingPage() {
   );
 }
 
-function AccountStat({ label, value, suffix }: { label: string; value?: number; suffix: string }) {
+function SimulationAccountContextPanel({
+  account,
+  currency,
+  simulationAccount,
+}: {
+  account: TradingAccount | null;
+  currency: string;
+  simulationAccount: SimulationAccountView | null;
+}) {
+  const balance = account?.balance ?? simulationAccount?.balance;
+  const equity = account?.equity ?? simulationAccount?.equity;
+  const usedMargin = account?.usedMargin ?? simulationAccount?.usedMargin;
+  const freeMargin = account?.freeMargin ?? simulationAccount?.freeMargin ?? simulationAccount?.availableMargin;
+  const floatingPnl = account?.floatingPnl ?? simulationAccount?.floatingPnl ?? simulationAccount?.unrealizedPnl;
+  const marginBase = (usedMargin ?? 0) + (freeMargin ?? 0);
+  const marginRatio = marginBase > 0 ? `${(((usedMargin ?? 0) / marginBase) * 100).toFixed(2)}%` : "0.00%";
+
   return (
-    <Card>
-      <p className="text-sm text-muted">{label}</p>
-      <p className="mt-3 text-2xl font-semibold">{value?.toFixed(2) ?? "-"} <span className="text-sm text-muted">{suffix}</span></p>
-    </Card>
+    <section className="xh-trading-simulation-card">
+      <div className="xh-trading-simulation-grid">
+        <SimulationContextItem label="账户 ID" value={simulationAccount ? shortSimulationId(simulationAccount.id) : "-"} mono />
+        <SimulationContextItem label="账户类型" value="模拟账户" />
+        <SimulationContextItem label="账户资产" value={formatAccountMoney(equity, currency)} />
+        <SimulationContextItem label="保证金比例" value={marginRatio} />
+        <SimulationContextItem label="浮动盈亏" value={formatSignedAccountMoney(floatingPnl, currency)} tone={getSignedTone(floatingPnl)} />
+        <SimulationContextItem label="账户余额" value={formatAccountMoney(balance, currency)} />
+        <SimulationContextItem label="已用保证金" value={formatAccountMoney(usedMargin, currency)} />
+        <SimulationContextItem label="可用保证金" value={formatAccountMoney(freeMargin, currency)} />
+      </div>
+    </section>
   );
 }
 
-function CurrentAccountMetric({ label, value, suffix }: { label: string; value?: number; suffix: string }) {
+function SimulationContextItem({
+  label,
+  mono = false,
+  tone,
+  value,
+}: {
+  label: string;
+  mono?: boolean;
+  tone?: "positive" | "negative" | "neutral";
+  value: string;
+}) {
   return (
-    <div className="border border-line bg-black px-4 py-3">
-      <p className="text-xs text-muted">{label}</p>
-      <p className="mt-1 text-lg font-semibold">
-        {value?.toFixed(2) ?? "-"} <span className="text-xs text-muted">{suffix}</span>
-      </p>
+    <div className="xh-trading-simulation-item">
+      <p>{label}</p>
+      <span className={`${mono ? "font-mono text-xs" : ""} ${tone === "positive" ? "text-emerald-300" : tone === "negative" ? "text-red-300" : ""}`}>{value}</span>
     </div>
   );
 }
@@ -707,6 +706,24 @@ function readCurrentSimulationAccountId() {
   } catch {
     return "";
   }
+}
+
+function formatAccountMoney(value: number | undefined, currency: string) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)} ${currency}` : "-";
+}
+
+function formatSignedAccountMoney(value: number | undefined, currency: string) {
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    return "-";
+  }
+  return `${value >= 0 ? "" : "-"}${Math.abs(value).toFixed(2)} ${currency}`;
+}
+
+function getSignedTone(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
+    return "neutral" as const;
+  }
+  return value > 0 ? "positive" as const : "negative" as const;
 }
 
 function shortSimulationId(value: string) {
