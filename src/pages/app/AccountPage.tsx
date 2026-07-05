@@ -72,6 +72,7 @@ const tokenIconSrc = "/assets/xingheng-logo@2x.png";
 const bscTestnetLabel = "BNB Smart Chain Testnet";
 const bscTestnetChainId = "0x61";
 const requiredConfirmations = 1;
+const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
 const transferAccountOptions = [
   { value: "wallet", label: "钱包" },
   { value: "funding", label: "资金账户" },
@@ -102,6 +103,7 @@ export function AccountPage() {
   const [externalWalletStatus, setExternalWalletStatus] = useState("");
   const [externalWalletError, setExternalWalletError] = useState("");
   const [simulationAccounts, setSimulationAccounts] = useState<SimulationAccountView[]>([]);
+  const [currentSimulationAccountId, setCurrentSimulationAccountId] = useState(() => readCurrentSimulationAccountId());
   const [simulationAccountLimit, setSimulationAccountLimit] = useState(5);
   const [canCreateSimulationAccount, setCanCreateSimulationAccount] = useState(true);
   const [isAddWalletOpen, setIsAddWalletOpen] = useState(false);
@@ -154,6 +156,10 @@ export function AccountPage() {
   }, []);
 
   const asset = wallet?.asset ?? funding?.asset ?? simulationAccount?.asset ?? realTradingAccount?.asset ?? "USDT";
+  const activeSimulationAccountId = simulationAccounts.some((account) => account.id === currentSimulationAccountId)
+    ? currentSimulationAccountId
+    : simulationAccounts[0]?.id ?? "";
+  const activeSimulationAccount = simulationAccounts.find((account) => account.id === activeSimulationAccountId) ?? null;
 
   const loadAccount = async () => {
     setIsLoading(true);
@@ -490,8 +496,9 @@ export function AccountPage() {
               wallet={wallet}
               funding={funding}
               realTradingAccount={realTradingAccount}
-              simulationAccount={simulationAccount}
+              simulationAccount={activeSimulationAccount}
               onActionChange={setActiveAction}
+              onSectionChange={changeSection}
               user={user}
             />
           ) : null}
@@ -532,6 +539,7 @@ export function AccountPage() {
           {activeSection === "simulation" ? (
             <SimulationSection
               asset={asset}
+              currentAccountId={activeSimulationAccountId}
               accounts={simulationAccounts}
               accountLimit={simulationAccountLimit}
               canCreate={canCreateSimulationAccount}
@@ -545,6 +553,10 @@ export function AccountPage() {
               onReset={(accountId) => {
                 setSimulationFeedback("");
                 setActiveSimulationResetId(accountId);
+              }}
+              onTrade={(accountId) => {
+                setCurrentSimulationAccountId(accountId);
+                writeCurrentSimulationAccountId(accountId);
               }}
             />
           ) : null}
@@ -716,7 +728,7 @@ function QuickActionPanel({
               ) : null}
               {actions.includes("trade") ? (
                 <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
-                  去交易
+                  模拟交易
                 </Link>
               ) : null}
             </div>
@@ -817,6 +829,7 @@ function OverviewSection({
   realTradingAccount,
   simulationAccount,
   onActionChange,
+  onSectionChange,
   user,
 }: {
   asset: string;
@@ -825,12 +838,15 @@ function OverviewSection({
   wallet: FundingAccount | null;
   funding: FundingAccount | null;
   realTradingAccount: RealTradingAccount | null;
-  simulationAccount: TradingAccount | null;
+  simulationAccount: SimulationAccountView | null;
   onActionChange: (action: QuickAction | null) => void;
+  onSectionChange: (section: AccountSection) => void;
   user: ReturnType<typeof useUserStore.getState>["currentUser"];
 }) {
   const estimatedTotalAsset = accountOverview?.totalEquity ?? (wallet?.available ?? 0) + (funding?.balance ?? 0) + (realTradingAccount?.balance ?? 0);
-  const simulationAsset = accountOverview?.simulationTotalEquity ?? simulationAccount?.equity ?? 0;
+  const simulationAsset = simulationAccount?.equity ?? 0;
+  const simulationPnl = simulationAccount?.floatingPnl ?? simulationAccount?.unrealizedPnl ?? 0;
+  const simulationTradeHref = simulationAccount?.id ? `/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(simulationAccount.id)}` : "/app/trading?symbol=BTCUSDT";
   const recentTransactions = recentFundingActivities.map(mapRecentFundingActivity);
 
   return (
@@ -856,9 +872,6 @@ function OverviewSection({
             <OverviewActionButton label="提现" onClick={() => onActionChange("withdraw")} />
             <OverviewActionButton label="划转" onClick={() => onActionChange("transfer")} />
             <OverviewActionButton label="内部转账" onClick={() => onActionChange("internal-transfer")} />
-            <Link className="xh-overview-action" to="/app/trading?symbol=BTCUSDT">
-              去交易
-            </Link>
           </>
         }
         infos={[]}
@@ -866,13 +879,19 @@ function OverviewSection({
 
       <AssetSummaryPanel
         title="模拟账户资产"
-        asset={asset}
+        asset={simulationAccount?.asset ?? asset}
         value={simulationAsset}
-        pnl={accountOverview?.simulationTodayPnl ?? simulationAccount?.floatingPnl ?? 0}
+        changeLabel="浮动盈亏"
+        pnl={simulationPnl}
         actions={
-          <Link className="xh-overview-action" to="/app/trading?symbol=BTCUSDT">
-            模拟交易
-          </Link>
+          <>
+            <Link className="xh-overview-action" to={simulationTradeHref}>
+              模拟交易
+            </Link>
+            <button className="xh-overview-action" type="button" onClick={() => onSectionChange("simulation")}>
+              切换模拟账户
+            </button>
+          </>
         }
         infos={[]}
       />
@@ -1446,6 +1465,7 @@ function BoundaryTile({ title, description }: { title: string; description: stri
 
 function SimulationSection({
   asset,
+  currentAccountId,
   accounts,
   accountLimit,
   canCreate,
@@ -1454,8 +1474,10 @@ function SimulationSection({
   onDelete,
   onRename,
   onReset,
+  onTrade,
 }: {
   asset: string;
+  currentAccountId: string;
   accounts: SimulationAccountView[];
   accountLimit: number;
   canCreate: boolean;
@@ -1464,6 +1486,7 @@ function SimulationSection({
   onDelete: (accountId: string) => void;
   onRename: (account: SimulationAccountView) => void;
   onReset: (accountId: string) => void;
+  onTrade: (accountId: string) => void;
 }) {
   const accountAsset = accounts[0]?.asset ?? asset;
 
@@ -1484,11 +1507,13 @@ function SimulationSection({
           <SimulationAccountCard
             account={account}
             asset={accountAsset}
+            isCurrent={account.id === currentAccountId}
             index={index + 1}
             key={account.id}
             onDelete={() => onDelete(account.id)}
             onRename={() => onRename(account)}
             onReset={() => onReset(account.id)}
+            onTrade={() => onTrade(account.id)}
           />
         ))
       )}
@@ -1499,17 +1524,21 @@ function SimulationSection({
 function SimulationAccountCard({
   account,
   asset,
+  isCurrent,
   index,
   onDelete,
   onRename,
   onReset,
+  onTrade,
 }: {
   account: SimulationAccountView;
   asset: string;
+  isCurrent: boolean;
   index: number;
   onDelete: () => void;
   onRename: () => void;
   onReset: () => void;
+  onTrade: () => void;
 }) {
   const equity = account.equity ?? 0;
   const balance = account.balance ?? 0;
@@ -1522,7 +1551,6 @@ function SimulationAccountCard({
     [
       { label: "账户 ID", value: account.id },
       { label: "账户类型", value: "模拟账户" },
-      { label: "账户状态", value: formatSimulationAccountStatus(account.status) },
       { label: "保证金比例", value: marginRatio },
     ],
     [
@@ -1534,12 +1562,15 @@ function SimulationAccountCard({
   ];
 
   return (
-    <section className="xh-simulation-account-card">
+    <section className={`xh-simulation-account-card ${isCurrent ? "is-current" : "is-idle"}`}>
       <div className="xh-simulation-card-header">
-        <h2>{account.name || `模拟账户${index}`}</h2>
+        <div className="xh-simulation-card-title">
+          <h2>{account.name || `模拟账户${index}`}</h2>
+          <SimulationUsageBadge isCurrent={isCurrent} status={account.status} />
+        </div>
         <div className="xh-simulation-card-actions">
           <SimulationActionButton label="重置资金" onClick={account.canReset === false ? undefined : onReset} disabled={account.canReset === false} />
-          <SimulationActionButton asLink label="去交易" to="/app/trading?symbol=BTCUSDT" />
+          <SimulationActionButton asLink label={isCurrent ? "进入模拟交易" : "模拟交易"} to={`/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(account.id)}`} onClick={onTrade} />
           <SimulationMoreMenu onDelete={onDelete} onRename={onRename} />
         </div>
       </div>
@@ -1563,6 +1594,16 @@ function SimulationAccountCard({
       </div>
     </section>
   );
+}
+
+function SimulationUsageBadge({ isCurrent, status }: { isCurrent: boolean; status?: SimulationAccountView["status"] }) {
+  if (status === "disabled") {
+    return <span className="xh-simulation-usage-badge is-disabled">已禁用</span>;
+  }
+  if (status === "deleted") {
+    return <span className="xh-simulation-usage-badge is-disabled">已删除</span>;
+  }
+  return <span className={`xh-simulation-usage-badge ${isCurrent ? "is-current" : "is-idle"}`}>{isCurrent ? "使用中" : "未使用"}</span>;
 }
 
 function SimulationMoreMenu({ onDelete, onRename }: { onDelete: () => void; onRename: () => void }) {
@@ -1589,7 +1630,7 @@ function SimulationActionButton({
 }) {
   if (asLink && to) {
     return (
-      <Link className="xh-simulation-action-button" to={to}>
+      <Link className="xh-simulation-action-button" to={to} onClick={onClick}>
         {label}
       </Link>
     );
@@ -1680,7 +1721,7 @@ function OnchainDepositsSection({
   onCopyAddress: (value: string) => void;
 }) {
   const columns: DataTableColumn<OnchainRecord>[] = [
-    { key: "time", header: "时间", render: (row) => formatTimestamp(row.createdAt) },
+    { key: "time", header: "时间", render: (row) => <span className="whitespace-nowrap">{formatTimestamp(row.createdAt)}</span> },
     { key: "type", header: "类型", render: (row) => formatOnchainRecordType(row.type), align: "center" },
     { key: "amount", header: "金额", render: (row) => formatNumber(row.amount), align: "right" },
     { key: "asset", header: "资产", render: (row) => row.asset, align: "center" },
@@ -1698,7 +1739,7 @@ function OnchainDepositsSection({
         columns={columns}
         rows={records.slice(0, 10)}
         getRowKey={(row) => row.id}
-        gridTemplateColumns="minmax(160px,1fr) 80px 120px 80px minmax(160px,0.9fr) minmax(210px,1.1fr) minmax(210px,1.1fr) minmax(170px,1fr) 120px"
+        gridTemplateColumns="minmax(180px,1fr) 80px 120px 80px minmax(160px,0.9fr) minmax(210px,1.1fr) minmax(210px,1.1fr) minmax(170px,1fr) 120px"
         minWidth="1260px"
         emptyState={<RecordEmptyState title="暂无链上充提记录" />}
       />
@@ -2488,17 +2529,20 @@ function formatUserStatus(value?: string) {
   return "-";
 }
 
-function formatSimulationAccountStatus(value?: SimulationAccountView["status"]) {
-  if (value === "active" || !value) {
-    return "使用中";
+function readCurrentSimulationAccountId() {
+  try {
+    return window.localStorage.getItem(currentSimulationAccountKey) ?? "";
+  } catch {
+    return "";
   }
-  if (value === "disabled") {
-    return "已禁用";
+}
+
+function writeCurrentSimulationAccountId(accountId: string) {
+  try {
+    window.localStorage.setItem(currentSimulationAccountKey, accountId);
+  } catch {
+    // localStorage 不可用时仍允许通过 URL 参数进入交易页。
   }
-  if (value === "deleted") {
-    return "已删除";
-  }
-  return value;
 }
 
 function formatExternalWalletBindStatus(value: ExternalWalletBinding["bindStatus"]) {
@@ -2542,12 +2586,12 @@ function quickActionsForSection(section: AccountSection): Array<QuickAction | "t
   const actions: Record<AccountSection, Array<QuickAction | "trade">> = {
     overview: ["deposit", "withdraw", "transfer", "internal-transfer", "trade"],
     "wallet-overview": ["deposit", "withdraw", "transfer", "internal-transfer"],
-    funding: ["deposit", "withdraw", "transfer", "internal-transfer"],
+    funding: [],
     trading: ["transfer"],
     simulation: [],
-    ledger: ["transfer", "internal-transfer"],
-    "onchain-deposits": ["deposit"],
-    "trade-orders": ["trade"],
+    ledger: [],
+    "onchain-deposits": [],
+    "trade-orders": [],
   };
   return actions[section];
 }

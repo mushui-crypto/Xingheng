@@ -27,6 +27,7 @@ import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
 
 const intervals: CandleInterval[] = ["1m", "5m", "15m", "1h"];
+const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
 
 export function TradingPage() {
   const themeColor = "#00C896";
@@ -54,9 +55,10 @@ export function TradingPage() {
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [simulationAccounts, setSimulationAccounts] = useState<SimulationAccountView[]>([]);
   const [simulationAccountsLoading, setSimulationAccountsLoading] = useState(true);
-  const [selectedSimulationAccountId, setSelectedSimulationAccountId] = useState(searchParams.get("simulationAccountId") ?? "");
+  const [selectedSimulationAccountId, setSelectedSimulationAccountId] = useState(searchParams.get("simulationAccountId") ?? readCurrentSimulationAccountId());
   const [volume, setVolume] = useState(selectedConfig?.minLot ?? 0.01);
   const [message, setMessage] = useState("");
+  const [toastMessage, setToastMessage] = useState("");
   const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
   const [chartMessage, setChartMessage] = useState("");
   const [chartLoading, setChartLoading] = useState(true);
@@ -64,6 +66,8 @@ export function TradingPage() {
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const closingPositionIdRef = useRef<string | null>(null);
+  const initialSimulationAccountIdRef = useRef(searchParams.get("simulationAccountId") ?? "");
+  const switchToastShownRef = useRef(false);
 
   const statusTone = ticker.status === "connected" ? "success" : ticker.status === "stale" ? "neutral" : "danger";
   const statusText = ticker.status === "connected" ? "实时行情" : ticker.status === "stale" ? "行情延迟" : "行情连接中断";
@@ -71,6 +75,7 @@ export function TradingPage() {
   const hasSimulationAccounts = simulationAccounts.length > 0;
   const needsSimulationAccount = !selectedSimulationAccountId || !selectedSimulationAccount;
   const orderDisabled =
+    simulationAccountsLoading ||
     needsSimulationAccount ||
     ticker.status !== "connected" ||
     !ticker.bid ||
@@ -116,10 +121,11 @@ export function TradingPage() {
         const activeAccounts = payload.items.filter((item) => item.status !== "deleted" && item.status !== "disabled");
         setSimulationAccounts(activeAccounts);
         setSelectedSimulationAccountId((current) => {
-          if (!current) {
-            return "";
+          const requestedAccountId = current || readCurrentSimulationAccountId();
+          if (requestedAccountId && activeAccounts.some((item) => item.id === requestedAccountId)) {
+            return requestedAccountId;
           }
-          return activeAccounts.some((item) => item.id === current) ? current : "";
+          return activeAccounts[0]?.id ?? "";
         });
       })
       .catch((error) => setMessage(error instanceof Error ? error.message : "模拟账户加载失败。"))
@@ -132,6 +138,31 @@ export function TradingPage() {
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    if (selectedSimulationAccountId) {
+      window.localStorage.setItem(currentSimulationAccountKey, selectedSimulationAccountId);
+    }
+  }, [selectedSimulationAccountId]);
+
+  useEffect(() => {
+    if (!toastMessage) {
+      return;
+    }
+    const timer = window.setTimeout(() => setToastMessage(""), 2200);
+    return () => window.clearTimeout(timer);
+  }, [toastMessage]);
+
+  useEffect(() => {
+    if (switchToastShownRef.current || !initialSimulationAccountIdRef.current || !selectedSimulationAccount) {
+      return;
+    }
+    if (selectedSimulationAccount.id !== initialSimulationAccountIdRef.current) {
+      return;
+    }
+    switchToastShownRef.current = true;
+    setToastMessage(`已切换至模拟账户：${selectedSimulationAccount.name || shortSimulationId(selectedSimulationAccount.id)}`);
+  }, [selectedSimulationAccount]);
 
   useEffect(() => {
     if (!chartContainerRef.current) {
@@ -208,7 +239,8 @@ export function TradingPage() {
         }
       }
 
-      const tradingStatePromise = selectedSimulationAccountId
+      const shouldLoadTradingState = Boolean(selectedSimulationAccountId && selectedSimulationAccount && !simulationAccountsLoading);
+      const tradingStatePromise = shouldLoadTradingState
         ? Promise.all([
             fetchTradingAccount(selectedSimulationAccountId),
             fetchPositions(selectedSimulationAccountId),
@@ -221,15 +253,15 @@ export function TradingPage() {
       }
       setTicker(nextTicker);
       setAccount(nextAccount);
-      setPositions(nextPositions);
-      setOrders(nextOrders);
+      setPositions(nextPositions.filter((position) => position.simulationAccountId === selectedSimulationAccountId || position.accountId === selectedSimulationAccountId));
+      setOrders(nextOrders.filter((order) => order.simulationAccountId === selectedSimulationAccountId || order.accountId === selectedSimulationAccountId));
     }
 
     void loadInitialData().catch((error) => setMessage(error instanceof Error ? error.message : "行情初始化失败。"));
     return () => {
       cancelled = true;
     };
-  }, [interval, selectedSimulationAccountId, symbol, symbolConfigKey]);
+  }, [interval, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, symbolConfigKey]);
 
   useEffect(() => {
     const socket = new WebSocket(wsUrl);
@@ -248,7 +280,9 @@ export function TradingPage() {
       }
       if (payload.type === "ticker" && payload.symbol === symbol) {
         setTicker((current) => ({ ...current, ...payload }));
-        void refreshTradingState();
+        if (!simulationAccountsLoading && selectedSimulationAccount) {
+          void refreshTradingState();
+        }
       }
       if (payload.type === "candle" && payload.interval === interval && payload.data && isValidCandle(payload.data)) {
         candleSeriesRef.current?.update(toChartCandle(payload.data));
@@ -261,7 +295,7 @@ export function TradingPage() {
     });
 
     return () => socket.close();
-  }, [interval, selectedSimulationAccountId, symbol, wsUrl]);
+  }, [interval, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, wsUrl]);
 
   const refreshTradingState = async (simulationAccountId = selectedSimulationAccountId) => {
     if (!simulationAccountId) {
@@ -281,14 +315,6 @@ export function TradingPage() {
     setAccount(nextAccount);
     setPositions(nextPositions.filter((position) => position.simulationAccountId === simulationAccountId || position.accountId === simulationAccountId));
     setOrders(nextOrders.filter((order) => order.simulationAccountId === simulationAccountId || order.accountId === simulationAccountId));
-  };
-
-  const selectSimulationAccount = (accountId: string) => {
-    setSelectedSimulationAccountId(accountId);
-    setMessage("");
-    setAccount(null);
-    setPositions([]);
-    setOrders([]);
   };
 
   const submitOrder = async (side: "buy" | "sell") => {
@@ -344,6 +370,7 @@ export function TradingPage() {
 
   return (
     <div className="xh-page">
+      <Toast message={toastMessage} />
       <div className="xh-page-header">
         <div>
           <p className="text-sm text-muted">Binance 合约行情 + 内部模拟交易</p>
@@ -364,51 +391,36 @@ export function TradingPage() {
         </div>
       </div>
 
-      <Card className="p-0">
-        <div className="flex flex-col gap-4 p-4 lg:flex-row lg:items-center lg:justify-between">
-          <div>
-            <h2 className="font-semibold">模拟账户</h2>
-            <p className="mt-1 text-sm text-muted">
-              {hasSimulationAccounts ? "选择后显示该账户的权益、持仓与订单。" : "创建模拟账户后才能开始模拟交易。"}
+      <Card>
+        <div className="flex flex-col gap-5 lg:flex-row lg:items-center lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="font-semibold">当前模拟账户</h2>
+              {selectedSimulationAccount ? <Badge tone="success">使用中</Badge> : <Badge tone="neutral">未选择</Badge>}
+            </div>
+            <p className="mt-2 truncate text-sm text-muted">
+              {simulationAccountsLoading
+                ? "模拟账户加载中"
+                : selectedSimulationAccount
+                  ? `${selectedSimulationAccount.name || "模拟账户"} · ${shortSimulationId(selectedSimulationAccount.id)}`
+                  : hasSimulationAccounts
+                    ? "模拟账户不可用"
+                    : "请先在账户页创建模拟账户"}
             </p>
           </div>
-          <div className="flex w-full flex-col gap-3 sm:flex-row lg:w-auto lg:items-center">
-            <Select
-              label="选择模拟账户"
-              className="min-w-0 py-2.5 sm:min-w-[280px]"
-              value={selectedSimulationAccountId}
-              onChange={(event) => selectSimulationAccount(event.target.value)}
-              disabled={simulationAccountsLoading || !hasSimulationAccounts}
-              options={[
-                { value: "", label: simulationAccountsLoading ? "模拟账户加载中" : "请选择模拟账户" },
-                ...simulationAccounts.map((item) => ({
-                  value: item.id,
-                  label: `${item.name ?? "模拟账户"} · ${item.equity.toFixed(2)} ${item.asset}`,
-                })),
-              ]}
+          <div className="grid min-w-0 grid-cols-1 gap-3 min-[420px]:grid-cols-2 lg:min-w-[360px]">
+            <CurrentAccountMetric
+              label="权益"
+              value={account?.equity ?? selectedSimulationAccount?.equity}
+              suffix={currency}
             />
-            <a
-              className={`inline-flex items-center justify-center gap-2 whitespace-nowrap border px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] transition active:translate-y-px ${
-                hasSimulationAccounts
-                  ? "border-white/25 bg-black text-white hover:border-white hover:bg-white/[0.04]"
-                  : "border-white bg-white text-black hover:bg-black hover:text-white"
-              }`}
-              href="/app/account?section=simulation"
-            >
-              {hasSimulationAccounts ? "管理模拟账户" : "创建模拟账户"}
-            </a>
+            <CurrentAccountMetric
+              label="余额"
+              value={account?.balance ?? selectedSimulationAccount?.balance}
+              suffix={currency}
+            />
           </div>
         </div>
-        {!hasSimulationAccounts && !simulationAccountsLoading ? (
-          <div className="border-t border-line px-4 py-5">
-            <div className="border border-line bg-black p-5">
-              <p className="font-medium">暂无模拟账户</p>
-              <p className="mt-2 text-sm text-muted">请先到账户页创建模拟账户，再返回交易页选择账户下单。</p>
-            </div>
-          </div>
-        ) : needsSimulationAccount ? (
-          <div className="border-t border-line px-4 py-3 text-sm text-amber-100">请选择模拟账户后再查看持仓、订单和提交市价单。</div>
-        ) : null}
       </Card>
 
       <div className="grid gap-4 md:grid-cols-4">
@@ -498,7 +510,7 @@ export function TradingPage() {
                 当前品种状态为 {selectedConfig.tradeStatus}，仅允许平仓，不可新开仓。
               </p>
             ) : null}
-            {needsSimulationAccount ? <p className="mt-3 text-sm text-amber-200">请先选择模拟账户。</p> : null}
+            {!simulationAccountsLoading && needsSimulationAccount ? <p className="mt-3 text-sm text-amber-200">模拟账户不可用。</p> : null}
             {message ? <p className="mt-4 xh-message">{message}</p> : null}
           </Card>
         </div>
@@ -512,7 +524,7 @@ export function TradingPage() {
           </p>
         </div>
         {needsSimulationAccount ? (
-          <div className="p-8 text-center text-sm text-muted">请选择模拟账户。</div>
+          <div className="p-8 text-center text-sm text-muted">{hasSimulationAccounts ? "模拟账户不可用。" : "请先创建模拟账户。"}</div>
         ) : positions.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无持仓。</div>
         ) : (
@@ -567,7 +579,7 @@ export function TradingPage() {
           </p>
         </div>
         {needsSimulationAccount ? (
-          <div className="p-8 text-center text-sm text-muted">请选择模拟账户。</div>
+          <div className="p-8 text-center text-sm text-muted">{hasSimulationAccounts ? "模拟账户不可用。" : "请先创建模拟账户。"}</div>
         ) : orders.length === 0 ? (
           <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无订单记录。</div>
         ) : (
@@ -622,6 +634,25 @@ function AccountStat({ label, value, suffix }: { label: string; value?: number; 
   );
 }
 
+function CurrentAccountMetric({ label, value, suffix }: { label: string; value?: number; suffix: string }) {
+  return (
+    <div className="border border-line bg-black px-4 py-3">
+      <p className="text-xs text-muted">{label}</p>
+      <p className="mt-1 text-lg font-semibold">
+        {value?.toFixed(2) ?? "-"} <span className="text-xs text-muted">{suffix}</span>
+      </p>
+    </div>
+  );
+}
+
+function Toast({ message }: { message: string }) {
+  return (
+    <div className={`xh-toast ${message ? "is-visible" : ""}`} aria-live="polite" aria-atomic="true">
+      {message}
+    </div>
+  );
+}
+
 function Quote({ label, value, digits }: { label: string; value?: number; digits: number }) {
   return (
     <div className="border border-line bg-black p-3">
@@ -668,4 +699,16 @@ function getChartPriceFormat(digits: number) {
     precision,
     minMove: 10 ** -precision,
   };
+}
+
+function readCurrentSimulationAccountId() {
+  try {
+    return window.localStorage.getItem(currentSimulationAccountKey) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function shortSimulationId(value: string) {
+  return value.length <= 14 ? value : `${value.slice(0, 7)}...${value.slice(-4)}`;
 }
