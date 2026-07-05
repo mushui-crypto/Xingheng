@@ -45,7 +45,6 @@ const tradingMarket = {
 };
 
 const trading = new TradingService(tradingMarket, tradingStore);
-trading.getAccount("demo-user");
 const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const users = new UserService(tradingStore);
@@ -140,15 +139,19 @@ app.use(["/api/trading", "/api/wallet"], (request, response, next) => {
 });
 
 app.get("/api/trading/account", (request, response) => {
-  response.json(trading.getAccount(getUserId(request)));
+  try {
+    response.json(trading.getAccount(getUserId(request), getSimulationAccountId(request)));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
 });
 
 app.get("/api/trading/positions", (request, response) => {
-  response.json(trading.listPositions(getUserId(request)));
+  response.json(trading.listPositions(getUserId(request), getSimulationAccountId(request)));
 });
 
 app.get("/api/trading/orders", (request, response) => {
-  response.json(trading.listOrders(getUserId(request)));
+  response.json(trading.listOrders(getUserId(request), getSimulationAccountId(request)));
 });
 
 app.post("/api/trading/order", (request, response) => {
@@ -156,7 +159,7 @@ app.post("/api/trading/order", (request, response) => {
     const symbol = normalizeSymbol(String(request.body?.symbol ?? "BTCUSDT"));
     const side = normalizeSide(request.body?.side);
     const volume = Number(request.body?.volume);
-    response.json(trading.marketOrder(getUserId(request), symbol, side, volume));
+    response.json(trading.marketOrder(getUserId(request), getSimulationAccountId(request), symbol, side, volume));
   } catch (error) {
     sendBadRequest(response, error);
   }
@@ -164,7 +167,7 @@ app.post("/api/trading/order", (request, response) => {
 
 app.post("/api/trading/positions/:positionId/close", (request, response) => {
   try {
-    response.json(trading.closePosition(getUserId(request), request.params.positionId));
+    response.json(trading.closePosition(getUserId(request), request.params.positionId, getSimulationAccountId(request)));
   } catch (error) {
     sendBadRequest(response, error);
   }
@@ -216,6 +219,148 @@ app.post("/api/admin/accounts/:userId/adjust-balance", (request, response) => {
 
 app.get("/api/wallet/accounts", (request, response) => {
   response.json(wallet.getAccounts(getUserId(request)));
+});
+
+app.get("/api/wallet/simulation-accounts", (request, response) => {
+  response.json(wallet.listSimulationAccounts(getUserId(request)));
+});
+
+app.post("/api/wallet/simulation-accounts", (request, response) => {
+  try {
+    response.json(wallet.createSimulationAccount(getUserId(request), { name: request.body?.name }));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.patch("/api/wallet/simulation-accounts/:id", (request, response) => {
+  try {
+    response.json(wallet.renameSimulationAccount(getUserId(request), request.params.id, { name: request.body?.name }));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.delete("/api/wallet/simulation-accounts/:id", (request, response) => {
+  try {
+    response.json(wallet.deleteSimulationAccount(getUserId(request), request.params.id));
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/wallet/simulation-accounts/:id/reset", (request, response) => {
+  try {
+    response.json(wallet.resetSimulationAccount(getUserId(request), request.params.id));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (message === "模拟账户每 24 小时只能重置一次。") {
+      response.status(429).json({ message });
+      return;
+    }
+    sendBadRequest(response, error);
+  }
+});
+
+app.get("/api/wallet/overview", (request, response) => {
+  response.json(wallet.getOverview(getUserId(request)));
+});
+
+app.get("/api/wallet/recent-activities", (request, response) => {
+  response.json(wallet.listRecentActivities(getUserId(request)));
+});
+
+app.get("/api/wallet/funding-orders", (request, response) => {
+  response.json(
+    wallet.listFundingOrders(getUserId(request), {
+      type: typeof request.query.type === "string" ? request.query.type : undefined,
+      limit: Number(request.query.limit),
+      page: Number(request.query.page),
+      pageSize: Number(request.query.pageSize),
+    }),
+  );
+});
+
+app.get("/api/wallet/onchain-records", (request, response) => {
+  response.json(
+    wallet.listOnchainRecords(getUserId(request), {
+      limit: Number(request.query.limit),
+      page: Number(request.query.page),
+      pageSize: Number(request.query.pageSize),
+    }),
+  );
+});
+
+app.post("/api/wallet/external/challenge", (request, response) => {
+  try {
+    response.json(
+      wallet.createExternalWalletChallenge(getUserId(request), {
+        walletAddress: request.body?.walletAddress,
+        network: request.body?.network,
+        provider: request.body?.provider,
+      }),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/wallet/external-wallet/challenge", (request, response) => {
+  try {
+    response.json(
+      wallet.createExternalWalletChallenge(getUserId(request), {
+        walletAddress: request.body?.walletAddress,
+        network: request.body?.network,
+        provider: request.body?.provider,
+      }),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/wallet/external/bind", (request, response) => {
+  try {
+    response.json(
+      wallet.bindExternalWallet(getUserId(request), {
+        challengeId: request.body?.challengeId,
+        walletAddress: request.body?.walletAddress,
+        signature: request.body?.signature,
+      }),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.post("/api/wallet/external-wallet/bind", (request, response) => {
+  try {
+    response.json(
+      wallet.bindExternalWallet(getUserId(request), {
+        challengeId: request.body?.challengeId,
+        walletAddress: request.body?.walletAddress,
+        signature: request.body?.signature,
+      }),
+    );
+  } catch (error) {
+    sendBadRequest(response, error);
+  }
+});
+
+app.get("/api/wallet/external", (request, response) => {
+  response.json(wallet.getExternalWalletBinding(getUserId(request)));
+});
+
+app.get("/api/wallet/external-wallet", (request, response) => {
+  response.json(wallet.getExternalWalletBinding(getUserId(request)));
+});
+
+app.delete("/api/wallet/external", (request, response) => {
+  response.json(wallet.unbindExternalWallet(getUserId(request)));
+});
+
+app.delete("/api/wallet/external-wallet", (request, response) => {
+  response.json(wallet.unbindExternalWallet(getUserId(request)));
 });
 
 app.get("/api/wallet/deposit-address", (request, response) => {
@@ -326,6 +471,10 @@ app.get("/api/admin/wallet/transfers", (_request, response) => {
 
 app.get("/api/admin/wallet/withdrawals", (_request, response) => {
   response.json(wallet.listWithdrawals());
+});
+
+app.get("/api/admin/wallet/external-bindings", (_request, response) => {
+  response.json(wallet.listExternalWalletBindings());
 });
 
 app.post("/api/admin/wallet/deposit", (request, response) => {
@@ -472,8 +621,8 @@ function normalizeSide(value: unknown): TradeSide {
 }
 
 function normalizeWalletAccountType(value: unknown): WalletAccountType {
-  if (value !== "funding" && value !== "trading" && value !== "simulation" && value !== "realTrading") {
-    throw new Error("账户类型必须是 funding、trading、simulation 或 realTrading。");
+  if (value !== "wallet" && value !== "funding" && value !== "trading" && value !== "simulation" && value !== "realTrading") {
+    throw new Error("账户类型必须是 wallet、funding、trading、simulation 或 realTrading。");
   }
   return value;
 }
@@ -491,6 +640,11 @@ function applyConfiguredSpread(tick: MarketTick, config: MarketSymbol): MarketTi
 
 function getUserId(request: express.Request) {
   return request.user?.id ?? "demo-user";
+}
+
+function getSimulationAccountId(request: express.Request) {
+  const value = request.body?.simulationAccountId ?? request.query.simulationAccountId;
+  return typeof value === "string" ? value.trim() : undefined;
 }
 
 function getUserBearerToken(request: express.Request) {

@@ -4,10 +4,41 @@ import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { USER_AUTH_MESSAGE_KEY } from "../../api/session";
 import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
+import { readStorage, storageKeys, writeStorage } from "../../utils/storage";
 import { isValidEmail } from "../../utils/validators";
 import { AuthFrame } from "./AuthFrame";
 
 type AuthMode = "login" | "register";
+type RememberedCredentials = {
+  email: string;
+  password: string;
+};
+
+const emptyCredentials: RememberedCredentials = {
+  email: "",
+  password: "",
+};
+
+const seedCredentials: RememberedCredentials = {
+  email: "demo@example.com",
+  password: "demo123",
+};
+
+const authInputClass =
+  "xh-auth-input h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45";
+const authPasswordInputClass = `${authInputClass} pr-14`;
+
+function readRememberedCredentials() {
+  return readStorage<RememberedCredentials>(storageKeys.rememberedCredentials, emptyCredentials);
+}
+
+function saveRememberedCredentials(email: string, password: string) {
+  writeStorage(storageKeys.rememberedCredentials, { email, password });
+}
+
+function clearRememberedCredentials() {
+  writeStorage(storageKeys.rememberedCredentials, emptyCredentials);
+}
 
 export function AuthPage() {
   const location = useLocation();
@@ -30,8 +61,10 @@ export function AuthPage() {
 function LoginForm() {
   const navigate = useNavigate();
   const login = useAuthStore((state) => state.login);
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  const [rememberedCredentials] = useState(() => readRememberedCredentials());
+  const [email, setEmail] = useState(rememberedCredentials.email || seedCredentials.email);
+  const [password, setPassword] = useState(rememberedCredentials.password || seedCredentials.password);
+  const [rememberPassword, setRememberPassword] = useState(Boolean(rememberedCredentials.email && rememberedCredentials.password));
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -54,6 +87,11 @@ function LoginForm() {
       setMessage(result.message);
       return;
     }
+    if (rememberPassword) {
+      saveRememberedCredentials(email, password);
+    } else {
+      clearRememberedCredentials();
+    }
     navigate("/app/dashboard", { replace: true });
   };
 
@@ -65,33 +103,29 @@ function LoginForm() {
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
-        <AuthInput label="Email" placeholder="Enter your email" type="email" value={email} onChange={setEmail} />
-        <label className="block">
-          <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">Password</span>
-          <div className="relative">
-            <input
-              className="h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 pr-14 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45"
-              placeholder="Enter your password"
-              type={showPassword ? "text" : "password"}
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
-            <button
-              className="absolute right-5 top-1/2 -translate-y-1/2 text-white/75 transition hover:text-white"
-              type="button"
-              onClick={() => setShowPassword((value) => !value)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              {showPassword ? <Eye size={19} /> : <EyeOff size={19} />}
-            </button>
-          </div>
-        </label>
+        <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
+        <AuthPasswordInput
+          label="Password"
+          placeholder="Enter your password"
+          autoComplete="current-password"
+          value={password}
+          onChange={setPassword}
+          visible={showPassword}
+          onToggleVisible={() => setShowPassword((value) => !value)}
+        />
 
         <div className="flex items-center justify-between text-[15px] text-[#919191]">
           <label className="inline-flex items-center gap-3">
-            <input className="h-4 w-4 rounded border-white/25 bg-transparent" type="checkbox" />
-            Remember me
+            <input
+              className="h-4 w-4 rounded border-white/25 bg-transparent"
+              type="checkbox"
+              checked={rememberPassword}
+              onChange={(event) => {
+                setRememberPassword(event.target.checked);
+                if (!event.target.checked) clearRememberedCredentials();
+              }}
+            />
+            Remember password
           </label>
           <span>Forgot password?</span>
         </div>
@@ -110,6 +144,8 @@ function RegisterForm() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [message, setMessage] = useState("");
 
   const [submitting, setSubmitting] = useState(false);
@@ -151,15 +187,26 @@ function RegisterForm() {
       />
 
       <form className="space-y-6" onSubmit={handleSubmit}>
-        <AuthInput label="Email" placeholder="Enter your email" type="email" value={email} onChange={setEmail} />
-        <AuthInput label="Password" placeholder="Enter your password" type="password" value={password} onChange={setPassword} minLength={6} />
-        <AuthInput
+        <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
+        <AuthPasswordInput
+          label="Password"
+          placeholder="Enter your password"
+          autoComplete="new-password"
+          value={password}
+          onChange={setPassword}
+          minLength={6}
+          visible={showPassword}
+          onToggleVisible={() => setShowPassword((value) => !value)}
+        />
+        <AuthPasswordInput
           label="Confirm password"
           placeholder="Repeat your password"
-          type="password"
+          autoComplete="new-password"
           value={confirmPassword}
           onChange={setConfirmPassword}
           minLength={6}
+          visible={showConfirmPassword}
+          onToggleVisible={() => setShowConfirmPassword((value) => !value)}
         />
 
         {message ? <p className="border border-red-400/35 bg-red-500/10 p-3 text-sm text-red-200">{message}</p> : null}
@@ -183,6 +230,7 @@ function AuthInput({
   label,
   placeholder,
   type = "text",
+  autoComplete,
   value,
   onChange,
   minLength,
@@ -190,6 +238,7 @@ function AuthInput({
   label: string;
   placeholder: string;
   type?: string;
+  autoComplete?: string;
   value: string;
   onChange: (value: string) => void;
   minLength?: number;
@@ -198,14 +247,61 @@ function AuthInput({
     <label className="block">
       <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">{label}</span>
       <input
-        className="h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45"
+        className={authInputClass}
         placeholder={placeholder}
         type={type}
+        autoComplete={autoComplete}
         value={value}
         minLength={minLength}
         onChange={(event) => onChange(event.target.value)}
         required
       />
+    </label>
+  );
+}
+
+function AuthPasswordInput({
+  label,
+  placeholder,
+  autoComplete,
+  value,
+  onChange,
+  minLength,
+  visible,
+  onToggleVisible,
+}: {
+  label: string;
+  placeholder: string;
+  autoComplete?: string;
+  value: string;
+  onChange: (value: string) => void;
+  minLength?: number;
+  visible: boolean;
+  onToggleVisible: () => void;
+}) {
+  return (
+    <label className="block">
+      <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">{label}</span>
+      <div className="relative">
+        <input
+          className={authPasswordInputClass}
+          placeholder={placeholder}
+          type={visible ? "text" : "password"}
+          autoComplete={autoComplete}
+          value={value}
+          minLength={minLength}
+          onChange={(event) => onChange(event.target.value)}
+          required
+        />
+        <button
+          className="absolute right-5 top-1/2 -translate-y-1/2 text-white/75 transition hover:text-white"
+          type="button"
+          onClick={onToggleVisible}
+          aria-label={visible ? "Hide password" : "Show password"}
+        >
+          {visible ? <Eye size={19} /> : <EyeOff size={19} />}
+        </button>
+      </div>
     </label>
   );
 }

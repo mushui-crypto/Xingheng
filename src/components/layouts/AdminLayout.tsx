@@ -19,7 +19,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
   return (
     <div className="min-h-screen bg-shell text-white">
       <header className="sticky top-0 z-30 border-b border-white/15 bg-black/92 backdrop-blur">
-        <div className="mx-auto flex max-w-[1480px] flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex w-full flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <img

@@ -6,12 +6,14 @@ import type {
   BalanceAdjustment,
   ChainScanCursor,
   DepositAddress,
+  ExternalWalletBinding,
   FundingAccount,
   FundingLedgerEntry,
   MarketSymbol,
   OnchainDeposit,
   OrderRecord,
   Position,
+  SimulationAccount,
   TradingAccount,
   User,
   WithdrawalRequest,
@@ -24,12 +26,22 @@ type AccountRow = Omit<TradingAccount, "asset" | "id"> & {
   asset?: TradingAccount["asset"] | null;
   currency?: TradingAccount["asset"] | null;
 };
-type PositionRow = Omit<Position, "source"> & { source: Position["source"] };
-type OrderRow = Omit<OrderRecord, "simulated"> & { simulated: number };
+type SimulationAccountRow = Omit<SimulationAccount, "asset" | "lastResetAt"> & {
+  asset?: SimulationAccount["asset"] | null;
+  currency?: SimulationAccount["asset"] | null;
+  lastResetAt?: number | null;
+};
+type PositionRow = Omit<Position, "source" | "accountId" | "simulationAccountId"> & {
+  accountId?: string | null;
+  simulationAccountId?: string | null;
+  source: Position["source"];
+};
+type OrderRow = Omit<OrderRecord, "simulated" | "simulationAccountId"> & { simulated: number; simulationAccountId?: string | null };
 type AdjustmentRow = BalanceAdjustment;
 type FundingAccountRow = Omit<FundingAccount, "available">;
 type RealTradingAccountRow = Omit<FundingAccount, "available">;
 type DepositAddressRow = DepositAddress;
+type ExternalWalletBindingRow = Omit<ExternalWalletBinding, "isDefault"> & { isDefault: number };
 type OnchainDepositRow = OnchainDeposit;
 type ChainScanCursorRow = ChainScanCursor;
 type FundingLedgerRow = FundingLedgerEntry;
@@ -85,6 +97,25 @@ export class TradingStore {
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt);
+  }
+
+  upsertSeedUser(user: UserRow) {
+    const existingById = this.db.prepare("SELECT * FROM users WHERE id = ?").get(user.id) as UserRow | undefined;
+    const existingByEmail = this.db.prepare("SELECT * FROM users WHERE email = ?").get(user.email) as UserRow | undefined;
+    const existing = existingById ?? existingByEmail;
+
+    if (!existing) {
+      this.createUser(user);
+      return;
+    }
+
+    this.db
+      .prepare(
+        `UPDATE users
+         SET id = ?, email = ?, password = ?, nickname = ?, status = ?
+         WHERE id = ?`,
+      )
+      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, existing.id);
   }
 
   updateUserStatus(id: string, status: User["status"]) {
@@ -168,17 +199,94 @@ export class TradingStore {
       );
   }
 
+  listSimulationAccounts(userId?: string, includeDeleted = false) {
+    const conditions: string[] = [];
+    const params: string[] = [];
+    if (userId) {
+      conditions.push("userId = ?");
+      params.push(userId);
+    }
+    if (!includeDeleted) {
+      conditions.push("status != 'deleted'");
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM simulation_accounts ${where} ORDER BY createdAt ASC`)
+      .all(...params) as SimulationAccountRow[];
+    return rows.map(toSimulationAccount);
+  }
+
+  getSimulationAccount(id: string) {
+    const row = this.db.prepare("SELECT * FROM simulation_accounts WHERE id = ?").get(id) as SimulationAccountRow | undefined;
+    return row ? toSimulationAccount(row) : undefined;
+  }
+
+  upsertSimulationAccount(account: SimulationAccount) {
+    const normalized = toSimulationAccount(account);
+    this.db
+      .prepare(
+        `INSERT INTO simulation_accounts (
+           id, userId, name, currency, balance, equity, usedMargin, freeMargin, floatingPnl,
+           status, lastResetAt, createdAt, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           userId = excluded.userId,
+           name = excluded.name,
+           currency = excluded.currency,
+           balance = excluded.balance,
+           equity = excluded.equity,
+           usedMargin = excluded.usedMargin,
+           freeMargin = excluded.freeMargin,
+           floatingPnl = excluded.floatingPnl,
+           status = excluded.status,
+           lastResetAt = excluded.lastResetAt,
+           updatedAt = excluded.updatedAt`,
+      )
+      .run(
+        normalized.id,
+        normalized.userId,
+        normalized.name,
+        normalized.asset,
+        normalized.balance,
+        normalized.equity,
+        normalized.usedMargin,
+        normalized.freeMargin,
+        normalized.floatingPnl,
+        normalized.status,
+        normalized.lastResetAt ?? null,
+        normalized.createdAt,
+        normalized.updatedAt,
+      );
+  }
+
   listPositions() {
-    return this.db.prepare("SELECT * FROM positions ORDER BY openedAt DESC").all() as PositionRow[] as Position[];
+    const rows = this.db
+      .prepare(
+        `SELECT positions.*
+         FROM positions
+         INNER JOIN simulation_accounts ON simulation_accounts.id = positions.accountId
+         ORDER BY positions.openedAt DESC`,
+      )
+      .all() as PositionRow[];
+    return rows.map((row) => {
+      const accountId = row.accountId ?? row.simulationAccountId ?? `LEGACY-${row.userId}`;
+      return {
+        ...row,
+        accountId,
+        simulationAccountId: accountId,
+      };
+    }) satisfies Position[];
   }
 
   savePosition(position: Position) {
     this.db
       .prepare(
-        `INSERT INTO positions (id, userId, symbol, side, volume, entryPrice, margin, openedAt, source, quoteTime, entryBid, entryAsk, entrySpread)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO positions (id, userId, accountId, symbol, side, volume, entryPrice, margin, openedAt, source, quoteTime, entryBid, entryAsk, entrySpread)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            userId = excluded.userId,
+           accountId = excluded.accountId,
            symbol = excluded.symbol,
            side = excluded.side,
            volume = excluded.volume,
@@ -194,6 +302,7 @@ export class TradingStore {
       .run(
         position.id,
         position.userId,
+        position.accountId,
         position.symbol,
         position.side,
         position.volume,
@@ -213,8 +322,36 @@ export class TradingStore {
   }
 
   listOrders() {
-    const rows = this.db.prepare("SELECT * FROM orders ORDER BY createdAt DESC").all() as OrderRow[];
-    return rows.map((row) => ({ ...row, simulated: Boolean(row.simulated) as true })) satisfies OrderRecord[];
+    const rows = this.db
+      .prepare(
+        `SELECT orders.*
+         FROM orders
+         INNER JOIN simulation_accounts ON simulation_accounts.id = orders.accountId
+         ORDER BY orders.createdAt DESC`,
+      )
+      .all() as OrderRow[];
+    return rows.map((row) => ({ ...row, simulationAccountId: row.simulationAccountId ?? row.accountId, simulated: Boolean(row.simulated) as true })) satisfies OrderRecord[];
+  }
+
+  cleanupLegacyTradingData() {
+    this.db.exec(`
+      DELETE FROM positions
+      WHERE accountId IS NULL
+         OR accountId = ''
+         OR accountId LIKE 'LEGACY-%'
+         OR accountId LIKE 'ACC-%'
+         OR accountId NOT IN (SELECT id FROM simulation_accounts);
+
+      DELETE FROM orders
+      WHERE accountId IS NULL
+         OR accountId = ''
+         OR accountId LIKE 'LEGACY-%'
+         OR accountId LIKE 'ACC-%'
+         OR accountId NOT IN (SELECT id FROM simulation_accounts);
+
+      DELETE FROM balance_adjustments;
+      DELETE FROM accounts;
+    `);
   }
 
   saveOrder(order: OrderRecord) {
@@ -466,6 +603,71 @@ export class TradingStore {
       );
   }
 
+  getExternalWalletBindingByUserId(userId: string) {
+    const row = this.db.prepare("SELECT * FROM external_wallet_bindings WHERE userId = ?").get(userId) as ExternalWalletBindingRow | undefined;
+    return row ? toExternalWalletBinding(row) : undefined;
+  }
+
+  getExternalWalletBindingByAddress(walletAddress: string) {
+    const row = this.db
+      .prepare("SELECT * FROM external_wallet_bindings WHERE lower(walletAddress) = lower(?)")
+      .get(walletAddress) as ExternalWalletBindingRow | undefined;
+    return row ? toExternalWalletBinding(row) : undefined;
+  }
+
+  getExternalWalletBindingById(id: string) {
+    const row = this.db.prepare("SELECT * FROM external_wallet_bindings WHERE id = ?").get(id) as ExternalWalletBindingRow | undefined;
+    return row ? toExternalWalletBinding(row) : undefined;
+  }
+
+  listExternalWalletBindings() {
+    const rows = this.db
+      .prepare("SELECT * FROM external_wallet_bindings ORDER BY updatedAt DESC, createdAt DESC")
+      .all() as ExternalWalletBindingRow[];
+    return rows.map(toExternalWalletBinding);
+  }
+
+  saveExternalWalletBinding(binding: ExternalWalletBinding) {
+    this.db
+      .prepare(
+        `INSERT INTO external_wallet_bindings (
+           id, userId, walletAddress, network, provider, isDefault, bindStatus,
+           nonce, challenge, challengeExpiresAt, lastVerifiedAt, createdAt, updatedAt
+         )
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(userId) DO UPDATE SET
+           walletAddress = excluded.walletAddress,
+           network = excluded.network,
+           provider = excluded.provider,
+           isDefault = excluded.isDefault,
+           bindStatus = excluded.bindStatus,
+           nonce = excluded.nonce,
+           challenge = excluded.challenge,
+           challengeExpiresAt = excluded.challengeExpiresAt,
+           lastVerifiedAt = excluded.lastVerifiedAt,
+           updatedAt = excluded.updatedAt`,
+      )
+      .run(
+        binding.id,
+        binding.userId,
+        binding.walletAddress,
+        binding.network,
+        binding.provider,
+        binding.isDefault ? 1 : 0,
+        binding.bindStatus,
+        binding.nonce,
+        binding.challenge,
+        binding.challengeExpiresAt,
+        binding.lastVerifiedAt ?? null,
+        binding.createdAt,
+        binding.updatedAt,
+      );
+  }
+
+  deleteExternalWalletBinding(id: string) {
+    this.db.prepare("DELETE FROM external_wallet_bindings WHERE id = ?").run(id);
+  }
+
   listFundingLedger(userId?: string) {
     const sql = userId
       ? "SELECT * FROM funding_ledger WHERE userId = ? ORDER BY createdAt DESC"
@@ -669,6 +871,22 @@ export class TradingStore {
         updatedAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS simulation_accounts (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        name TEXT NOT NULL,
+        currency TEXT NOT NULL,
+        balance REAL NOT NULL,
+        equity REAL NOT NULL,
+        usedMargin REAL NOT NULL,
+        freeMargin REAL NOT NULL,
+        floatingPnl REAL NOT NULL,
+        status TEXT NOT NULL,
+        lastResetAt INTEGER,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         email TEXT NOT NULL UNIQUE,
@@ -681,6 +899,7 @@ export class TradingStore {
       CREATE TABLE IF NOT EXISTS positions (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
+        accountId TEXT,
         symbol TEXT NOT NULL,
         side TEXT NOT NULL,
         volume REAL NOT NULL,
@@ -732,6 +951,7 @@ export class TradingStore {
 
       CREATE INDEX IF NOT EXISTS idx_positions_userId ON positions(userId);
       CREATE INDEX IF NOT EXISTS idx_orders_userId ON orders(userId);
+      CREATE INDEX IF NOT EXISTS idx_orders_accountId ON orders(accountId);
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
 
@@ -851,6 +1071,22 @@ export class TradingStore {
         updatedAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS external_wallet_bindings (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL UNIQUE,
+        walletAddress TEXT NOT NULL UNIQUE,
+        network TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        isDefault INTEGER NOT NULL,
+        bindStatus TEXT NOT NULL,
+        nonce TEXT NOT NULL,
+        challenge TEXT NOT NULL,
+        challengeExpiresAt INTEGER NOT NULL,
+        lastVerifiedAt INTEGER,
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS onchain_deposits (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
@@ -890,12 +1126,17 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_accounts_userId ON real_trading_accounts(userId);
+      CREATE INDEX IF NOT EXISTS idx_simulation_accounts_userId ON simulation_accounts(userId);
+      CREATE INDEX IF NOT EXISTS idx_simulation_accounts_status ON simulation_accounts(status);
       CREATE INDEX IF NOT EXISTS idx_account_transfer_records_fromUserId ON account_transfer_records(fromUserId);
       CREATE INDEX IF NOT EXISTS idx_account_transfer_records_toUserId ON account_transfer_records(toUserId);
       CREATE INDEX IF NOT EXISTS idx_account_transfer_records_createdAt ON account_transfer_records(createdAt);
       CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_userId ON withdrawal_requests(userId);
       CREATE INDEX IF NOT EXISTS idx_withdrawal_requests_status ON withdrawal_requests(status);
       CREATE INDEX IF NOT EXISTS idx_wallet_addresses_address ON wallet_addresses(address);
+      CREATE INDEX IF NOT EXISTS idx_external_wallet_bindings_userId ON external_wallet_bindings(userId);
+      CREATE INDEX IF NOT EXISTS idx_external_wallet_bindings_walletAddress ON external_wallet_bindings(walletAddress);
+      CREATE INDEX IF NOT EXISTS idx_external_wallet_bindings_status ON external_wallet_bindings(bindStatus);
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_userId ON onchain_deposits(userId);
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_status ON onchain_deposits(status);
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_toAddress ON onchain_deposits(toAddress);
@@ -914,6 +1155,9 @@ export class TradingStore {
     this.addColumnIfMissing("withdrawal_requests", "confirmations", "INTEGER");
     this.addColumnIfMissing("withdrawal_requests", "broadcastAttemptCount", "INTEGER DEFAULT 0");
     this.addColumnIfMissing("withdrawal_requests", "lastBroadcastAttemptAt", "INTEGER");
+    this.addColumnIfMissing("positions", "accountId", "TEXT");
+    this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
+    this.cleanupLegacyTradingData();
     this.db.prepare("UPDATE withdrawal_requests SET status = 'pending_review' WHERE status = 'pending'").run();
     this.db.prepare("UPDATE withdrawal_requests SET status = 'confirmed', onchainStatus = 'confirmed' WHERE status = 'approved'").run();
     this.db.prepare("UPDATE withdrawal_requests SET onchainStatus = status WHERE onchainStatus IS NULL").run();
@@ -940,6 +1184,35 @@ function toMarketSymbol(row: MarketSymbolRow): MarketSymbol {
   return {
     ...row,
     isVisible: Boolean(row.isVisible),
+  };
+}
+
+function toExternalWalletBinding(row: ExternalWalletBindingRow): ExternalWalletBinding {
+  return {
+    ...row,
+    network: "BSC_TESTNET",
+    provider: "metamask",
+    bindStatus: row.bindStatus === "active" ? "active" : "pending",
+    isDefault: Boolean(row.isDefault),
+    lastVerifiedAt: row.lastVerifiedAt ?? null,
+  };
+}
+
+function toSimulationAccount(row: SimulationAccountRow | SimulationAccount): SimulationAccount {
+  return {
+    id: row.id,
+    userId: row.userId,
+    name: row.name?.trim() || "模拟账户",
+    asset: row.asset ?? row.currency ?? "USDT",
+    balance: row.balance,
+    equity: row.equity,
+    usedMargin: row.usedMargin,
+    freeMargin: row.freeMargin,
+    floatingPnl: row.floatingPnl,
+    status: row.status === "disabled" || row.status === "deleted" ? row.status : "active",
+    lastResetAt: row.lastResetAt ?? null,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
   };
 }
 

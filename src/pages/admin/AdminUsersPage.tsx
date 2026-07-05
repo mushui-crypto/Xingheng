@@ -24,7 +24,6 @@ export function AdminUsersPage() {
         {users.length === 0 ? (
           <div className="p-10 text-center">
             <p className="font-medium">暂无注册用户</p>
-            <p className="mt-2 text-sm text-muted">用户在注册页创建账号后会显示在这里。</p>
           </div>
         ) : (
           <div className="overflow-x-auto">

@@ -28,6 +28,8 @@ export type ApiTicker = {
 export type PositionView = {
   id: string;
   userId: string;
+  accountId: string;
+  simulationAccountId: string;
   symbol: string;
   side: "long" | "short";
   volume: number;
@@ -46,6 +48,7 @@ export type PositionView = {
 export type TradingAccount = {
   id: string;
   userId: string;
+  simulationAccountId?: string;
   asset: "USDT";
   balance: number;
   equity: number;
@@ -60,6 +63,7 @@ export type OrderRecord = {
   id: string;
   userId: string;
   accountId: string;
+  simulationAccountId: string;
   positionId?: string;
   symbol: string;
   side: TradeSide;
@@ -168,35 +172,41 @@ export async function fetchCandles(symbol: string, interval: CandleInterval, lim
   return readJson<ApiCandle[]>(response, "K 线加载失败。");
 }
 
-export async function fetchTradingAccount() {
-  const response = await fetch("/api/trading/account", { headers: userHeaders() });
+function withSimulationAccount(path: string, simulationAccountId: string) {
+  const params = new URLSearchParams({ simulationAccountId });
+  return `${path}?${params.toString()}`;
+}
+
+export async function fetchTradingAccount(simulationAccountId: string) {
+  const response = await fetch(withSimulationAccount("/api/trading/account", simulationAccountId), { headers: userHeaders() });
   return readJson<TradingAccount>(response, "账户加载失败。", { userAuthFailure: true });
 }
 
-export async function fetchPositions() {
-  const response = await fetch("/api/trading/positions", { headers: userHeaders() });
+export async function fetchPositions(simulationAccountId: string) {
+  const response = await fetch(withSimulationAccount("/api/trading/positions", simulationAccountId), { headers: userHeaders() });
   return readJson<PositionView[]>(response, "持仓加载失败。", { userAuthFailure: true });
 }
 
-export async function fetchOrders() {
-  const response = await fetch("/api/trading/orders", { headers: userHeaders() });
+export async function fetchOrders(simulationAccountId: string) {
+  const response = await fetch(withSimulationAccount("/api/trading/orders", simulationAccountId), { headers: userHeaders() });
   return readJson<OrderRecord[]>(response, "订单加载失败。", { userAuthFailure: true });
 }
 
-export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number) {
+export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number, simulationAccountId: string) {
   const response = await fetch("/api/trading/order", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ symbol, side, volume }),
+    body: JSON.stringify({ symbol, side, volume, simulationAccountId }),
   });
 
   return readJson<PositionView>(response, "市价单被拒绝。", { userAuthFailure: true });
 }
 
-export async function closePosition(positionId: string) {
+export async function closePosition(positionId: string, simulationAccountId: string) {
   const response = await fetch(`/api/trading/positions/${positionId}/close`, {
     method: "POST",
-    headers: userHeaders(),
+    headers: { "Content-Type": "application/json", ...userHeaders() },
+    body: JSON.stringify({ simulationAccountId }),
   });
 
   return readJson<{ positionId: string; closePrice: number; pnl: number; account: TradingAccount }>(response, "平仓被拒绝。", {

@@ -1,30 +1,41 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState, type InputHTMLAttributes, type MouseEvent, type ReactNode, type SelectHTMLAttributes } from "react";
+import { ArrowRightLeft, Copy, Globe2 } from "lucide-react";
 import { Link } from "react-router-dom";
-import { fetchOrders, fetchPositions, fetchTradingAccount, type OrderRecord, type PositionView, type TradingAccount } from "../../api/market";
+import { fetchOrders, type OrderRecord, type TradingAccount } from "../../api/market";
 import {
+  bindExternalWallet,
+  createExternalWalletChallenge,
   createInternalTransfer,
+  createSimulationAccount,
   createWithdrawalRequest,
+  deleteSimulationAccount,
+  fetchExternalWalletBinding,
+  fetchAccountOverview,
   fetchDepositAddress,
-  fetchOnchainDeposits,
+  fetchFundingOrders,
+  fetchOnchainRecords,
+  fetchRecentFundingActivities,
   fetchWalletAccounts,
-  fetchWalletLedger,
-  fetchWalletTransfers,
-  fetchWithdrawalRequests,
+  renameSimulationAccount,
+  resetSimulationAccount,
+  unbindExternalWallet,
   transferWalletAccount,
-  type AccountTransferRecord,
+  type AccountOverview,
   type DepositAddress,
+  type ExternalWalletBinding,
   type FundingAccount,
-  type FundingLedgerEntry,
-  type OnchainDeposit,
+  type FundingOrder,
+  type OnchainRecord,
+  type RecentFundingActivity,
+  type RealTradingAccount,
+  type SimulationAccountView,
   type WalletAccountType,
-  type WithdrawalRequest,
 } from "../../api/walletApi";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { Input } from "../../components/ui/Input";
+import { DataTable, type DataTableColumn } from "../../components/ui/DataTable";
 import { Modal } from "../../components/ui/Modal";
-import { Select } from "../../components/ui/Select";
 import { useUserStore } from "../../store/userStore";
 import { formatDateTime } from "../../utils/validators";
 
@@ -34,47 +45,77 @@ const accountSections = [
   "funding",
   "trading",
   "simulation",
-  "withdrawals",
-  "deposits",
   "ledger",
   "onchain-deposits",
   "trade-orders",
 ] as const;
 
 type AccountSection = (typeof accountSections)[number];
-type QuickAction = "deposit" | "withdraw" | "transfer" | "internal-transfer";
-type TransferAccount = Extract<WalletAccountType, "funding" | "simulation" | "realTrading">;
+type QuickAction = "deposit" | "withdraw" | "transfer" | "internal-transfer" | "exchange";
+type TransferAccount = Extract<WalletAccountType, "wallet" | "funding" | "realTrading">;
+type LedgerTab = "ledger" | "deposits" | "withdrawals" | "transfers";
+type TradeOrderFilter = "all" | "buy" | "sell" | "filled" | "rejected";
+type EthereumProvider = {
+  isMetaMask?: boolean;
+  request: (args: { method: string; params?: unknown[] | Record<string, unknown> }) => Promise<unknown>;
+  on?: (eventName: "accountsChanged" | "chainChanged", handler: (...args: unknown[]) => void) => void;
+  removeListener?: (eventName: "accountsChanged" | "chainChanged", handler: (...args: unknown[]) => void) => void;
+};
+
+declare global {
+  interface Window {
+    ethereum?: EthereumProvider;
+  }
+}
 
 const tokenIconSrc = "/assets/xingheng-logo@2x.png";
 const bscTestnetLabel = "BNB Smart Chain Testnet";
+const bscTestnetChainId = "0x61";
 const requiredConfirmations = 1;
+const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
 const transferAccountOptions = [
+  { value: "wallet", label: "钱包" },
   { value: "funding", label: "资金账户" },
-  { value: "simulation", label: "模拟账户" },
   { value: "realTrading", label: "交易账户" },
 ];
 
 export function AccountPage() {
   const user = useUserStore((state) => state.currentUser);
+  const [wallet, setWallet] = useState<FundingAccount | null>(null);
+  const [accountOverview, setAccountOverview] = useState<AccountOverview | null>(null);
   const [funding, setFunding] = useState<FundingAccount | null>(null);
   const [simulationAccount, setSimulationAccount] = useState<TradingAccount | null>(null);
-  const [realTradingAccount, setRealTradingAccount] = useState<FundingAccount | null>(null);
-  const [positions, setPositions] = useState<PositionView[]>([]);
+  const [realTradingAccount, setRealTradingAccount] = useState<RealTradingAccount | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
-  const [ledger, setLedger] = useState<FundingLedgerEntry[]>([]);
-  const [transfers, setTransfers] = useState<AccountTransferRecord[]>([]);
-  const [withdrawals, setWithdrawals] = useState<WithdrawalRequest[]>([]);
+  const [fundingOrders, setFundingOrders] = useState<FundingOrder[]>([]);
+  const [recentFundingActivities, setRecentFundingActivities] = useState<RecentFundingActivity[]>([]);
   const [depositAddress, setDepositAddress] = useState<DepositAddress | null>(null);
-  const [deposits, setDeposits] = useState<OnchainDeposit[]>([]);
-  const [transferFrom, setTransferFrom] = useState<TransferAccount>("funding");
-  const [transferTo, setTransferTo] = useState<TransferAccount>("simulation");
+  const [onchainRecords, setOnchainRecords] = useState<OnchainRecord[]>([]);
+  const [transferFrom, setTransferFrom] = useState<TransferAccount>("wallet");
+  const [transferTo, setTransferTo] = useState<TransferAccount>("funding");
   const [transferAmount, setTransferAmount] = useState(100);
   const [internalTransferRecipient, setInternalTransferRecipient] = useState("");
   const [internalTransferAmount, setInternalTransferAmount] = useState(100);
   const [withdrawAmount, setWithdrawAmount] = useState(100);
   const [withdrawNetwork] = useState("BSC_TESTNET");
   const [withdrawAddress, setWithdrawAddress] = useState("");
+  const [externalWalletBinding, setExternalWalletBinding] = useState<ExternalWalletBinding | null>(null);
+  const [externalWalletStatus, setExternalWalletStatus] = useState("");
+  const [externalWalletError, setExternalWalletError] = useState("");
+  const [simulationAccounts, setSimulationAccounts] = useState<SimulationAccountView[]>([]);
+  const [currentSimulationAccountId, setCurrentSimulationAccountId] = useState(() => readCurrentSimulationAccountId());
+  const [simulationAccountLimit, setSimulationAccountLimit] = useState(5);
+  const [canCreateSimulationAccount, setCanCreateSimulationAccount] = useState(true);
+  const [isAddWalletOpen, setIsAddWalletOpen] = useState(false);
+  const [isBindingExternalWallet, setIsBindingExternalWallet] = useState(false);
+  const [activeSimulationResetId, setActiveSimulationResetId] = useState<string | null>(null);
+  const [activeSimulationRenameId, setActiveSimulationRenameId] = useState<string | null>(null);
+  const [activeSimulationDeleteId, setActiveSimulationDeleteId] = useState<string | null>(null);
+  const [simulationRenameValue, setSimulationRenameValue] = useState("");
+  const [isSimulationSubmitting, setIsSimulationSubmitting] = useState(false);
+  const [simulationFeedback, setSimulationFeedback] = useState("");
   const [message, setMessage] = useState("");
+  const [toastMessage, setToastMessage] = useState("");
   const [activeAction, setActiveAction] = useState<QuickAction | null>(null);
   const [activeSection, setActiveSection] = useState<AccountSection>(() => readSectionFromUrl());
   const [isLoading, setIsLoading] = useState(false);
@@ -82,6 +123,27 @@ export function AccountPage() {
 
   useEffect(() => {
     void loadAccount();
+  }, []);
+
+  useEffect(() => {
+    if (!toastMessage) {
+      return;
+    }
+    const timer = window.setTimeout(() => setToastMessage(""), 2200);
+    return () => window.clearTimeout(timer);
+  }, [toastMessage]);
+
+  useEffect(() => {
+    const ethereum = window.ethereum;
+    if (!ethereum?.isMetaMask || !ethereum.on) {
+      return undefined;
+    }
+    const handleAccountsChanged = () => {
+      setExternalWalletStatus("");
+      setExternalWalletError("");
+    };
+    ethereum.on("accountsChanged", handleAccountsChanged);
+    return () => ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
   }, []);
 
   useEffect(() => {
@@ -93,38 +155,64 @@ export function AccountPage() {
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
-  const asset = funding?.asset ?? simulationAccount?.asset ?? realTradingAccount?.asset ?? "USDT";
-  const depositOrders = useMemo(() => deposits.filter((deposit) => deposit.status === "confirmed"), [deposits]);
+  const asset = wallet?.asset ?? funding?.asset ?? simulationAccount?.asset ?? realTradingAccount?.asset ?? "USDT";
+  const activeSimulationAccountId = simulationAccounts.some((account) => account.id === currentSimulationAccountId)
+    ? currentSimulationAccountId
+    : simulationAccounts[0]?.id ?? "";
+  const activeSimulationAccount = simulationAccounts.find((account) => account.id === activeSimulationAccountId) ?? null;
 
   const loadAccount = async () => {
     setIsLoading(true);
     setLoadError("");
     try {
-      const [walletAccounts, nextPositions, nextOrders, nextLedger, nextTransfers, nextWithdrawals, nextDepositAddress, nextDeposits, fallbackTradingAccount] = await Promise.all([
+      const [
+        walletAccounts,
+        nextOverview,
+        nextRecentFundingActivities,
+        nextFundingOrders,
+        nextOnchainRecords,
+        nextDepositAddress,
+      ] = await Promise.all([
         fetchWalletAccounts(),
-        fetchPositions(),
-        fetchOrders(),
-        fetchWalletLedger(),
-        fetchWalletTransfers(),
-        fetchWithdrawalRequests(),
+        fetchAccountOverview(),
+        fetchRecentFundingActivities(),
+        fetchFundingOrders("all", 50),
+        fetchOnchainRecords(50),
         fetchDepositAddress(),
-        fetchOnchainDeposits(),
-        fetchTradingAccount(),
       ]);
+      setWallet(walletAccounts.wallet ?? null);
+      setAccountOverview(nextOverview);
       setFunding(walletAccounts.funding);
-      setSimulationAccount(walletAccounts.simulation ?? walletAccounts.trading ?? fallbackTradingAccount);
+      const nextSimulationAccounts = walletAccounts.simulationAccounts ?? [];
+      setSimulationAccounts(nextSimulationAccounts);
+      setSimulationAccount(nextSimulationAccounts[0] ?? walletAccounts.simulation ?? walletAccounts.trading ?? null);
+      setSimulationAccountLimit(walletAccounts.simulationSummary?.accountLimit ?? nextOverview.simulationAccountLimit ?? 5);
+      setCanCreateSimulationAccount(walletAccounts.simulationSummary?.canCreateSimulationAccount ?? nextOverview.canCreateSimulationAccount ?? nextSimulationAccounts.length < 5);
+      const nextOrders = nextSimulationAccounts.length > 0
+        ? (await Promise.all(nextSimulationAccounts.map((account) => fetchOrders(account.id)))).flat()
+        : [];
       setRealTradingAccount(walletAccounts.realTrading ?? null);
-      setPositions(nextPositions);
       setOrders(nextOrders);
-      setLedger(nextLedger);
-      setTransfers(nextTransfers);
-      setWithdrawals(nextWithdrawals);
+      setFundingOrders(nextFundingOrders.items);
+      setRecentFundingActivities(nextRecentFundingActivities);
+      setOnchainRecords(nextOnchainRecords.items);
       setDepositAddress(nextDepositAddress);
-      setDeposits(nextDeposits);
+      await loadExternalWalletBinding();
     } catch (error) {
       setLoadError(error instanceof Error ? error.message : "资金数据加载失败，请稍后重试。");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const loadExternalWalletBinding = async () => {
+    try {
+      const response = await fetchExternalWalletBinding();
+      setExternalWalletBinding(response.binding);
+      setExternalWalletError("");
+    } catch (error) {
+      setExternalWalletBinding(null);
+      setExternalWalletError(error instanceof Error ? error.message : "第三方钱包绑定接口待接入。");
     }
   };
 
@@ -139,7 +227,7 @@ export function AccountPage() {
   const submitTransfer = async () => {
     setMessage("");
     if (!isTransferPairAllowed(transferFrom, transferTo)) {
-      const blockedMessage = "账户划转必须经过资金账户，暂不支持模拟账户与交易账户直接互转。";
+      const blockedMessage = "账户划转必须经过资金账户，模拟账户资金请在模拟账户页使用重置资金。";
       setMessage(blockedMessage);
       return { ok: false, message: blockedMessage };
     }
@@ -179,49 +267,198 @@ export function AccountPage() {
   const submitWithdrawal = async () => {
     setMessage("");
     try {
-      await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户出金申请");
+      await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户提现申请");
       await loadAccount();
-      setMessage("出金申请已提交，等待后台审核。");
+      const successMessage = "提现申请已提交，等待后台审核。";
+      setMessage(successMessage);
+      return { ok: true, message: successMessage };
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "出金申请提交失败。");
+      const errorMessage = error instanceof Error ? error.message : "提现申请提交失败。";
+      setMessage(errorMessage);
+      return { ok: false, message: errorMessage };
+    }
+  };
+
+  const bindMetaMaskWallet = async () => {
+    setExternalWalletStatus("");
+    setExternalWalletError("");
+    setIsBindingExternalWallet(true);
+    try {
+      const ethereum = getMetaMaskEthereum();
+      setExternalWalletStatus("连接 MetaMask");
+      const walletAddress = await requestCurrentMetaMaskAddress(ethereum);
+
+      setExternalWalletStatus("检查 BSC Testnet");
+      await ensureBscTestnet(ethereum);
+
+      setExternalWalletStatus("请求签名");
+      const challenge = await createExternalWalletChallenge(walletAddress);
+      const signature = await ethereum.request({
+        method: "personal_sign",
+        params: [challenge.message, walletAddress],
+      }) as string;
+      const latestWalletAddress = await readCurrentMetaMaskAddress(ethereum);
+      if (latestWalletAddress !== walletAddress) {
+        throw new Error("MetaMask 当前地址已变化，请重新发起绑定。");
+      }
+
+      setExternalWalletStatus("提交绑定");
+      const result = await bindExternalWallet(challenge.challengeId, walletAddress, signature);
+      setExternalWalletBinding(result.binding);
+      setIsAddWalletOpen(false);
+      setMessage("第三方钱包已绑定。");
+    } catch (error) {
+      const errorMessage = normalizeWalletError(error);
+      setExternalWalletError(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setExternalWalletStatus("");
+      setIsBindingExternalWallet(false);
+    }
+  };
+
+  const unbindMetaMaskWallet = async () => {
+    setExternalWalletStatus("");
+    setExternalWalletError("");
+    setIsBindingExternalWallet(true);
+    try {
+      await unbindExternalWallet();
+      setExternalWalletBinding(null);
+      setIsAddWalletOpen(false);
+      setMessage("第三方钱包已解绑。");
+    } catch (error) {
+      const errorMessage = normalizeWalletError(error);
+      setExternalWalletError(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setIsBindingExternalWallet(false);
+    }
+  };
+
+  const addSimulationAccount = async () => {
+    setSimulationFeedback("");
+    setIsSimulationSubmitting(true);
+    try {
+      const nextName = `模拟账户${simulationAccounts.length + 1}`;
+      await createSimulationAccount(nextName);
+      await loadAccount();
+      const successMessage = "模拟账户已新增。";
+      setSimulationFeedback(successMessage);
+      setMessage(successMessage);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "模拟账户创建失败。";
+      setSimulationFeedback(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setIsSimulationSubmitting(false);
+    }
+  };
+
+  const submitSimulationReset = async () => {
+    if (!activeSimulationResetId) {
+      return;
+    }
+    setSimulationFeedback("");
+    setIsSimulationSubmitting(true);
+    try {
+      await resetSimulationAccount(activeSimulationResetId);
+      await loadAccount();
+      const successMessage = "模拟账户资金已重置。";
+      setSimulationFeedback(successMessage);
+      setMessage(successMessage);
+      setActiveSimulationResetId(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "模拟账户资金重置失败。";
+      setSimulationFeedback(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setIsSimulationSubmitting(false);
+    }
+  };
+
+  const openSimulationRename = (account: SimulationAccountView) => {
+    setSimulationFeedback("");
+    setActiveSimulationRenameId(account.id);
+    setSimulationRenameValue(account.name || "");
+  };
+
+  const submitSimulationRename = async () => {
+    if (!activeSimulationRenameId) {
+      return;
+    }
+    setSimulationFeedback("");
+    setIsSimulationSubmitting(true);
+    try {
+      await renameSimulationAccount(activeSimulationRenameId, simulationRenameValue.trim());
+      await loadAccount();
+      const successMessage = "模拟账户已重命名。";
+      setSimulationFeedback(successMessage);
+      setMessage(successMessage);
+      setActiveSimulationRenameId(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "模拟账户重命名失败。";
+      setSimulationFeedback(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setIsSimulationSubmitting(false);
+    }
+  };
+
+  const submitSimulationDelete = async () => {
+    if (!activeSimulationDeleteId) {
+      return;
+    }
+    setSimulationFeedback("");
+    setIsSimulationSubmitting(true);
+    try {
+      await deleteSimulationAccount(activeSimulationDeleteId);
+      await loadAccount();
+      const successMessage = "模拟账户已删除。";
+      setSimulationFeedback(successMessage);
+      setMessage(successMessage);
+      setActiveSimulationDeleteId(null);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : "模拟账户删除失败。";
+      setSimulationFeedback(errorMessage);
+      setMessage(errorMessage);
+    } finally {
+      setIsSimulationSubmitting(false);
     }
   };
 
   const copyDepositAddress = async () => {
     if (!depositAddress?.address) {
-      setMessage("充值地址还未加载完成。");
+      setToastMessage("充值地址还未加载完成。");
       return;
     }
     try {
       await navigator.clipboard.writeText(depositAddress.address);
-      setMessage("充值地址已复制。");
+      setToastMessage("地址已复制。");
     } catch {
-      setMessage("浏览器未允许复制，请手动选择地址复制。");
+      setToastMessage("复制失败，请手动复制。");
+    }
+  };
+
+  const copyChainAddress = async (value: string) => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setToastMessage("地址已复制。");
+    } catch {
+      setToastMessage("复制失败，请手动复制。");
     }
   };
 
   return (
-    <div className="xh-page">
-      <section className="border border-white/15 bg-black p-5 md:p-7">
-        <p className="xh-kicker">Account operations</p>
-        <h1 className="mt-3 xh-title">资金控制台</h1>
-        <p className="xh-subtitle">
-          账户总览、资产账户、订单记录和充值 / 出金 / 划转入口统一归集在此页面。当前钱包网络为 {bscTestnetLabel}。
-        </p>
-      </section>
-
-      {isLoading ? <InlineState title="正在加载资金数据" description="正在同步资金账户、充值地址、链上记录和出金状态。" /> : null}
+    <div className="xh-account-workspace">
+      {isLoading ? <InlineState title="资金数据同步中" /> : null}
       {loadError ? <InlineState tone="danger" title="资金数据加载失败" description={loadError} actionLabel="重新加载" onAction={() => void loadAccount()} /> : null}
 
-      <div className="grid gap-6 lg:grid-cols-[260px_minmax(0,1fr)]">
-        <aside className="lg:sticky lg:top-28 lg:self-start">
+      <div className="xh-account-layout">
+        <aside className="xh-account-sidebar">
           <AccountNav activeSection={activeSection} onChange={changeSection} />
-          <div className="mt-3 hidden border border-white/15 bg-white/[0.03] p-4 text-xs leading-5 text-muted lg:block">
-            账户页侧边导航只在本页内切换内容；顶部主导航负责跨页面跳转。
-          </div>
         </aside>
 
-        <main className="min-w-0 space-y-5">
+        <section className="xh-account-content">
           <QuickActionPanel
             activeSection={activeSection}
             activeAction={activeAction}
@@ -241,7 +478,7 @@ export function AccountPage() {
             onInternalTransferRecipientChange={setInternalTransferRecipient}
             onSubmitInternalTransfer={submitInternalTransfer}
             onSubmitTransfer={submitTransfer}
-            onSubmitWithdrawal={() => void submitWithdrawal()}
+            onSubmitWithdrawal={submitWithdrawal}
             onTransferAmountChange={setTransferAmount}
             onTransferFromChange={setTransferFrom}
             onTransferToChange={setTransferTo}
@@ -254,45 +491,134 @@ export function AccountPage() {
           {activeSection === "overview" ? (
             <OverviewSection
               asset={asset}
-              deposits={deposits}
+              accountOverview={accountOverview}
+              recentFundingActivities={recentFundingActivities}
+              wallet={wallet}
               funding={funding}
-              orders={orders}
-              positions={positions}
               realTradingAccount={realTradingAccount}
-              simulationAccount={simulationAccount}
+              simulationAccount={activeSimulationAccount}
+              onActionChange={setActiveAction}
+              onSectionChange={changeSection}
               user={user}
-              withdrawals={withdrawals}
             />
           ) : null}
-          {activeSection === "wallet-overview" ? <WalletOverviewSection asset={asset} depositAddress={depositAddress} deposits={deposits} funding={funding} withdrawals={withdrawals} /> : null}
-          {activeSection === "funding" ? <FundingSection asset={asset} depositAddress={depositAddress} funding={funding} /> : null}
-          {activeSection === "trading" ? <RealTradingSection account={realTradingAccount} asset={asset} /> : null}
-          {activeSection === "simulation" ? <SimulationSection account={simulationAccount} asset={asset} orders={orders} positions={positions} /> : null}
-          {activeSection === "withdrawals" ? <WithdrawalsSection asset={asset} funding={funding} withdrawals={withdrawals} /> : null}
-          {activeSection === "deposits" ? <DepositOrdersSection deposits={depositOrders} /> : null}
-          {activeSection === "ledger" ? <LedgerSection ledger={ledger} transfers={transfers} /> : null}
-          {activeSection === "onchain-deposits" ? <OnchainDepositsSection deposits={deposits} /> : null}
+          {activeSection === "wallet-overview" ? (
+            <WalletOverviewSection
+              asset={asset}
+              depositAddress={depositAddress}
+              externalWalletBinding={externalWalletBinding}
+              externalWalletError={externalWalletError}
+              wallet={wallet}
+              onCopyDepositAddress={() => void copyDepositAddress()}
+              onCopyChainAddress={(value) => void copyChainAddress(value)}
+              onAddWallet={() => {
+                setExternalWalletError("");
+                setExternalWalletStatus("");
+                setIsAddWalletOpen(true);
+              }}
+              onDeposit={() => setActiveAction("deposit")}
+              onExchange={() => setActiveAction("exchange")}
+              onTrade={() => {
+                window.location.href = "/app/trading?symbol=BTCUSDT";
+              }}
+              onWithdraw={() => setActiveAction("withdraw")}
+            />
+          ) : null}
+          {activeSection === "funding" ? <FundingSection asset={asset} funding={funding} /> : null}
+          {activeSection === "trading" ? (
+            <RealTradingSection
+              account={realTradingAccount}
+              asset={asset}
+              onTransfer={() => {
+                setTransferFrom("funding");
+                setTransferTo("realTrading");
+                setActiveAction("transfer");
+              }}
+            />
+          ) : null}
+          {activeSection === "simulation" ? (
+            <SimulationSection
+              asset={asset}
+              currentAccountId={activeSimulationAccountId}
+              accounts={simulationAccounts}
+              accountLimit={simulationAccountLimit}
+              canCreate={canCreateSimulationAccount}
+              isSubmitting={isSimulationSubmitting}
+              onAddAccount={() => void addSimulationAccount()}
+              onDelete={(accountId) => {
+                setSimulationFeedback("");
+                setActiveSimulationDeleteId(accountId);
+              }}
+              onRename={openSimulationRename}
+              onReset={(accountId) => {
+                setSimulationFeedback("");
+                setActiveSimulationResetId(accountId);
+              }}
+              onTrade={(accountId) => {
+                setCurrentSimulationAccountId(accountId);
+                writeCurrentSimulationAccountId(accountId);
+              }}
+            />
+          ) : null}
+          {activeSection === "ledger" ? <LedgerSection fundingOrders={fundingOrders} /> : null}
+          {activeSection === "onchain-deposits" ? <OnchainDepositsSection ownAddress={depositAddress?.address} records={onchainRecords} onCopyAddress={(value) => void copyChainAddress(value)} /> : null}
           {activeSection === "trade-orders" ? <TradeOrdersSection orders={orders} /> : null}
-        </main>
+        </section>
       </div>
+      <Toast message={toastMessage} />
+      <Modal open={isAddWalletOpen} title="绑定第三方钱包" onClose={() => setIsAddWalletOpen(false)}>
+        <ExternalWalletBindPanel
+          binding={externalWalletBinding}
+          error={externalWalletError}
+          isSubmitting={isBindingExternalWallet}
+          status={externalWalletStatus}
+          onBind={() => void bindMetaMaskWallet()}
+          onUnbind={() => void unbindMetaMaskWallet()}
+        />
+      </Modal>
+      <Modal open={activeSimulationResetId !== null} title="重置模拟账户资金" onClose={() => setActiveSimulationResetId(null)}>
+        <AccountModalForm>
+          <AccountModalInput label="重置后资金" value="100000 USDT" disabled />
+          <Button className="xh-account-modal-submit" disabled={isSimulationSubmitting} onClick={() => void submitSimulationReset()}>
+            {isSimulationSubmitting ? "处理中" : "确认重置"}
+          </Button>
+          {simulationFeedback ? <AccountModalFeedback>{simulationFeedback}</AccountModalFeedback> : null}
+        </AccountModalForm>
+      </Modal>
+      <Modal open={activeSimulationRenameId !== null} title="重命名模拟账户" onClose={() => setActiveSimulationRenameId(null)}>
+        <AccountModalForm>
+          <AccountModalInput label="账户名称" maxLength={30} value={simulationRenameValue} onChange={(event) => setSimulationRenameValue(event.target.value)} />
+          <Button className="xh-account-modal-submit" disabled={isSimulationSubmitting || !simulationRenameValue.trim()} onClick={() => void submitSimulationRename()}>
+            {isSimulationSubmitting ? "处理中" : "保存名称"}
+          </Button>
+          {simulationFeedback ? <AccountModalFeedback>{simulationFeedback}</AccountModalFeedback> : null}
+        </AccountModalForm>
+      </Modal>
+      <Modal open={activeSimulationDeleteId !== null} title="删除模拟账户" onClose={() => setActiveSimulationDeleteId(null)}>
+        <AccountModalForm>
+          <AccountModalInput label="处理方式" value="删除后不回流资金账户" disabled />
+          <Button className="xh-account-modal-submit" disabled={isSimulationSubmitting} onClick={() => void submitSimulationDelete()}>
+            {isSimulationSubmitting ? "处理中" : "确认删除"}
+          </Button>
+          {simulationFeedback ? <AccountModalFeedback>{simulationFeedback}</AccountModalFeedback> : null}
+        </AccountModalForm>
+      </Modal>
     </div>
   );
 }
 
 function AccountNav({ activeSection, onChange }: { activeSection: AccountSection; onChange: (section: AccountSection) => void }) {
   return (
-    <nav className="no-scrollbar flex gap-2 overflow-x-auto border border-white/15 bg-black p-2 lg:flex-col lg:overflow-visible">
+    <nav className="xh-account-nav">
       <SectionButton active={activeSection === "overview"} label="账户总览" onClick={() => onChange("overview")} />
       <NavGroup title="资产" />
-      <SectionButton active={activeSection === "wallet-overview"} label="钱包总览" level="child" onClick={() => onChange("wallet-overview")} />
       <SectionButton active={activeSection === "funding"} label="资金账户" level="child" onClick={() => onChange("funding")} />
+      <SectionButton active={activeSection === "wallet-overview"} label="钱包总览" level="child" onClick={() => onChange("wallet-overview")} />
       <SectionButton active={activeSection === "trading"} label="交易账户" level="child" onClick={() => onChange("trading")} />
       <SectionButton active={activeSection === "simulation"} label="模拟账户" level="child" onClick={() => onChange("simulation")} />
       <NavGroup title="订单" />
-      <SectionButton active={activeSection === "withdrawals"} label="出金订单" level="child" onClick={() => onChange("withdrawals")} />
-      <SectionButton active={activeSection === "deposits"} label="入金订单" level="child" onClick={() => onChange("deposits")} />
       <SectionButton active={activeSection === "ledger"} label="资金流水" level="child" onClick={() => onChange("ledger")} />
-      <SectionButton active={activeSection === "onchain-deposits"} label="链上充值记录" level="child" onClick={() => onChange("onchain-deposits")} />
+      <SectionButton active={activeSection === "onchain-deposits"} label="链上充提记录" level="child" onClick={() => onChange("onchain-deposits")} />
       <SectionButton active={activeSection === "trade-orders"} label="交易订单" level="child" onClick={() => onChange("trade-orders")} />
     </nav>
   );
@@ -342,7 +668,7 @@ function QuickActionPanel({
   onInternalTransferRecipientChange: (value: string) => void;
   onSubmitInternalTransfer: () => Promise<{ ok: boolean; message: string }>;
   onSubmitTransfer: () => Promise<{ ok: boolean; message: string }>;
-  onSubmitWithdrawal: () => void;
+  onSubmitWithdrawal: () => Promise<{ ok: boolean; message: string }>;
   onTransferAmountChange: (value: number) => void;
   onTransferFromChange: (value: TransferAccount) => void;
   onTransferToChange: (value: TransferAccount) => void;
@@ -352,6 +678,8 @@ function QuickActionPanel({
   const actions = quickActionsForSection(activeSection);
   const [transferFeedback, setTransferFeedback] = useState("");
   const [internalTransferFeedback, setInternalTransferFeedback] = useState("");
+  const [withdrawFeedback, setWithdrawFeedback] = useState("");
+  const showActionHeader = !["overview", "wallet-overview", "trading"].includes(activeSection);
 
   useEffect(() => {
     if (activeAction !== "transfer") {
@@ -360,72 +688,86 @@ function QuickActionPanel({
     if (activeAction !== "internal-transfer") {
       setInternalTransferFeedback("");
     }
+    if (activeAction !== "withdraw") {
+      setWithdrawFeedback("");
+    }
   }, [activeAction]);
 
-  if (actions.length === 0) {
+  if (actions.length === 0 || (!showActionHeader && activeAction === null)) {
     return null;
   }
 
   return (
-    <Card>
-      <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-        <div>
-          <h2 className="xh-panel-title">快捷操作</h2>
-          <p className="mt-2 max-w-2xl text-sm leading-6 text-muted">
-            子页面只保留统一入口；点击后展开对应操作，避免把充值、出金和划转表单重复铺满每个页面。
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {actions.includes("deposit") ? (
-            <Button variant={activeAction === "deposit" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "deposit" ? null : "deposit")}>
-              充值
-            </Button>
-          ) : null}
-          {actions.includes("withdraw") ? (
-            <Button variant={activeAction === "withdraw" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "withdraw" ? null : "withdraw")}>
-              出金
-            </Button>
-          ) : null}
-          {actions.includes("transfer") ? (
-            <Button variant={activeAction === "transfer" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "transfer" ? null : "transfer")}>
-              划转
-            </Button>
-          ) : null}
-          {actions.includes("internal-transfer") ? (
-            <Button variant={activeAction === "internal-transfer" ? "primary" : "secondary"} onClick={() => onActionChange(activeAction === "internal-transfer" ? null : "internal-transfer")}>
-              内部转账
-            </Button>
-          ) : null}
-          {actions.includes("trade") ? (
-            <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
-              去交易
-            </Link>
-          ) : null}
-        </div>
-      </div>
-
-      {activeAction === "deposit" ? (
-        <div className="mt-5 border-t border-line pt-5">
-          <DepositAddressPanel asset={asset} depositAddress={depositAddress} onCopyDepositAddress={onCopyDepositAddress} />
-        </div>
+    <>
+      {showActionHeader ? (
+        <Card>
+          <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+            <div>
+              <h2 className="xh-panel-title">快捷操作</h2>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              {actions.includes("deposit") ? (
+                <Button variant={activeAction === "deposit" ? "primary" : "secondary"} onClick={() => onActionChange("deposit")}>
+                  充值
+                </Button>
+              ) : null}
+              {actions.includes("withdraw") ? (
+                <Button variant={activeAction === "withdraw" ? "primary" : "secondary"} onClick={() => onActionChange("withdraw")}>
+                  提现
+                </Button>
+              ) : null}
+              {actions.includes("transfer") ? (
+                <Button variant={activeAction === "transfer" ? "primary" : "secondary"} onClick={() => onActionChange("transfer")}>
+                  划转
+                </Button>
+              ) : null}
+              {actions.includes("internal-transfer") ? (
+                <Button variant={activeAction === "internal-transfer" ? "primary" : "secondary"} onClick={() => onActionChange("internal-transfer")}>
+                  内部转账
+                </Button>
+              ) : null}
+              {actions.includes("trade") ? (
+                <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
+                  模拟交易
+                </Link>
+              ) : null}
+            </div>
+          </div>
+        </Card>
       ) : null}
-      {activeAction === "withdraw" ? (
-        <div className="mt-5 border-t border-line pt-5">
-          <WithdrawalForm
-            asset={asset}
-            funding={funding}
-            withdrawAddress={withdrawAddress}
-            withdrawAmount={withdrawAmount}
-            onSubmitWithdrawal={onSubmitWithdrawal}
-            onWithdrawAddressChange={onWithdrawAddressChange}
-            onWithdrawAmountChange={onWithdrawAmountChange}
-          />
-        </div>
-      ) : null}
+      <Modal
+        open={activeAction === "deposit"}
+        title="充值"
+        onClose={() => onActionChange(null)}
+      >
+        <DepositAddressPanel asset={asset} depositAddress={depositAddress} onCopyDepositAddress={onCopyDepositAddress} />
+      </Modal>
+      <Modal
+        open={activeAction === "withdraw"}
+        title="提现"
+        onClose={() => onActionChange(null)}
+      >
+        <WithdrawalForm
+          asset={asset}
+          funding={funding}
+          withdrawAddress={withdrawAddress}
+          withdrawAmount={withdrawAmount}
+          withdrawFeedback={withdrawFeedback}
+          onSubmitWithdrawal={async () => {
+            setWithdrawFeedback("");
+            const result = await onSubmitWithdrawal();
+            setWithdrawFeedback(result.message);
+            if (result.ok) {
+              onActionChange(null);
+            }
+          }}
+          onWithdrawAddressChange={onWithdrawAddressChange}
+          onWithdrawAmountChange={onWithdrawAmountChange}
+        />
+      </Modal>
       <Modal
         open={activeAction === "transfer"}
         title="账户划转"
-        description="划转 = 同一用户在资金账户、交易账户、模拟账户之间调拨余额。当前必须经过资金账户中转。"
         onClose={() => onActionChange(null)}
       >
         <TransferForm
@@ -449,7 +791,6 @@ function QuickActionPanel({
       <Modal
         open={activeAction === "internal-transfer"}
         title="内部转账"
-        description="内部转账 = 当前用户把资金账户余额转给另一位平台用户的资金账户。可用 recipient 填用户 ID 或邮箱。"
         onClose={() => onActionChange(null)}
       >
         <InternalTransferForm
@@ -468,62 +809,247 @@ function QuickActionPanel({
           }}
         />
       </Modal>
-    </Card>
+      <Modal
+        open={activeAction === "exchange"}
+        title="兑换"
+        onClose={() => onActionChange(null)}
+      >
+        <ExchangeForm />
+      </Modal>
+    </>
   );
 }
 
 function OverviewSection({
   asset,
-  deposits,
+  accountOverview,
+  recentFundingActivities,
+  wallet,
   funding,
-  orders,
-  positions,
   realTradingAccount,
   simulationAccount,
+  onActionChange,
+  onSectionChange,
   user,
-  withdrawals,
 }: {
   asset: string;
-  deposits: OnchainDeposit[];
+  accountOverview: AccountOverview | null;
+  recentFundingActivities: RecentFundingActivity[];
+  wallet: FundingAccount | null;
   funding: FundingAccount | null;
-  orders: OrderRecord[];
-  positions: PositionView[];
-  realTradingAccount: FundingAccount | null;
-  simulationAccount: TradingAccount | null;
+  realTradingAccount: RealTradingAccount | null;
+  simulationAccount: SimulationAccountView | null;
+  onActionChange: (action: QuickAction | null) => void;
+  onSectionChange: (section: AccountSection) => void;
   user: ReturnType<typeof useUserStore.getState>["currentUser"];
-  withdrawals: WithdrawalRequest[];
 }) {
-  const pendingWithdrawals = withdrawals.filter((item) => item.status !== "confirmed" && item.status !== "rejected" && item.status !== "failed").length;
-  const confirmingDeposits = deposits.filter((item) => item.status === "detected" || item.status === "confirming").length;
+  const estimatedTotalAsset = accountOverview?.totalEquity ?? (wallet?.available ?? 0) + (funding?.balance ?? 0) + (realTradingAccount?.balance ?? 0);
+  const simulationAsset = simulationAccount?.equity ?? 0;
+  const simulationPnl = simulationAccount?.floatingPnl ?? simulationAccount?.unrealizedPnl ?? 0;
+  const simulationTradeHref = simulationAccount?.id ? `/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(simulationAccount.id)}` : "/app/trading?symbol=BTCUSDT";
+  const recentTransactions = recentFundingActivities.map(mapRecentFundingActivity);
 
   return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="账户总览" description="这里展示身份、权限和最近状态，不承载完整资产明细或订单表单。" />
-        <dl className="mt-5 grid gap-5 md:grid-cols-2">
-          <Info label="用户 ID" value={user?.id || "-"} />
-          <Info label="邮箱" value={user?.email || "-"} />
-          <Info label="昵称" value={user?.nickname || "未设置"} />
-          <Info label="账号状态" value={formatUserStatus(user?.status)} />
-          <Info label="注册时间" value={user?.createdAt ? formatDateTime(user.createdAt) : "-"} />
+    <div className="xh-overview-stack">
+      <Card className="xh-overview-panel">
+        <SectionHeader title="账户总览" />
+        <dl className="xh-overview-info-grid">
+          <OverviewInfo label="用户 ID" value={user?.id || "-"} />
+          <OverviewInfo label="邮箱" value={user?.email || "-"} />
+          <OverviewInfo label="账号状态" value={formatUserStatus(user?.status)} />
+          <OverviewInfo label="注册时间" value={user?.createdAt ? formatDateTime(user.createdAt) : "-"} />
         </dl>
       </Card>
 
-      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <Metric label="资金账户可用" value={funding?.available} currency={asset} />
-        <Metric label="资金冻结" value={funding?.frozen} currency={asset} />
-        <Metric label="交易账户可用" value={realTradingAccount?.available} currency={asset} />
-        <Metric label="模拟账户权益" value={simulationAccount?.equity} currency={asset} />
+      <AssetSummaryPanel
+        title="预估总资产"
+        asset={asset}
+        value={estimatedTotalAsset}
+        pnl={accountOverview?.accountTodayPnl ?? 0}
+        actions={
+          <>
+            <OverviewActionButton label="充值" onClick={() => onActionChange("deposit")} />
+            <OverviewActionButton label="提现" onClick={() => onActionChange("withdraw")} />
+            <OverviewActionButton label="划转" onClick={() => onActionChange("transfer")} />
+            <OverviewActionButton label="内部转账" onClick={() => onActionChange("internal-transfer")} />
+          </>
+        }
+        infos={[]}
+      />
+
+      <AssetSummaryPanel
+        title="模拟账户资产"
+        asset={simulationAccount?.asset ?? asset}
+        value={simulationAsset}
+        changeLabel="浮动盈亏"
+        pnl={simulationPnl}
+        actions={
+          <>
+            <Link className="xh-overview-action" to={simulationTradeHref}>
+              模拟交易
+            </Link>
+            <button className="xh-overview-action" type="button" onClick={() => onSectionChange("simulation")}>
+              切换模拟账户
+            </button>
+          </>
+        }
+        infos={[]}
+      />
+
+      <Card className="xh-overview-panel overflow-hidden">
+        <SectionHeader title="近期资金记录" />
+        <OverviewFundingTable rows={recentTransactions} />
+      </Card>
+    </div>
+  );
+}
+
+function OverviewPanelHeader({ actions, title }: { actions?: ReactNode; title: string }) {
+  return (
+    <div className="xh-overview-panel-header">
+      <SectionHeader title={title} />
+      {actions ? <div className="xh-overview-actions">{actions}</div> : null}
+    </div>
+  );
+}
+
+type AssetSummaryInfo = {
+  label: string;
+  value: string;
+};
+
+function AssetSummaryPanel({
+  actions,
+  asset,
+  changeLabel = "今日盈亏",
+  className = "",
+  infos,
+  pnl,
+  pnlText,
+  title,
+  value,
+}: {
+  actions?: ReactNode;
+  asset: string;
+  changeLabel?: string;
+  className?: string;
+  infos: AssetSummaryInfo[];
+  pnl?: number;
+  pnlText?: string;
+  title: string;
+  value: number;
+}) {
+  return (
+    <section className={`xh-asset-summary-panel ${infos.length === 0 ? "is-compact" : ""} ${className}`}>
+      <div className="xh-asset-summary-top">
+        <div className="xh-asset-summary-main">
+          <h2>{title}</h2>
+          <div className="xh-asset-summary-value">
+            <span className="xh-asset-summary-number">{formatNumber(value)}</span>
+            <span className="xh-asset-summary-unit">{asset}</span>
+          </div>
+          <p className="xh-asset-summary-pnl">
+            <span>{changeLabel}</span>
+            <span className={getSignedToneClass(pnl ?? 0)}>{pnlText ?? formatSignedMoney(pnl ?? 0, asset)}</span>
+          </p>
+        </div>
+        {actions ? <div className="xh-asset-summary-actions">{actions}</div> : null}
       </div>
 
-      <Card>
-        <SectionHeader title="待处理事项" description="只展示需要关注的状态入口，详细记录请进入对应订单子页面。" />
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
-          <FlowStep title="出金处理中" description={`${pendingWithdrawals} 笔待审核、广播中或待链上确认的出金订单。`} />
-          <FlowStep title="充值确认中" description={`${confirmingDeposits} 笔链上充值仍在等待确认或入账。`} />
-          <FlowStep title="模拟交易活动" description={`${positions.length} 笔持仓，${orders.length} 条订单记录。`} />
+      {infos.length > 0 ? (
+        <div className="xh-asset-summary-info-grid">
+          {infos.map((info) => (
+            <FundingInfo key={info.label} label={info.label} value={info.value} />
+          ))}
         </div>
-      </Card>
+      ) : null}
+    </section>
+  );
+}
+
+function OverviewInfo({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="xh-overview-info">
+      <dt>{label}</dt>
+      <dd>{value}</dd>
+    </div>
+  );
+}
+
+function OverviewActionButton({ disabled = false, label, onClick }: { disabled?: boolean; label: string; onClick?: () => void }) {
+  return (
+    <button className="xh-overview-action" disabled={disabled} type="button" onClick={onClick}>
+      {label}
+    </button>
+  );
+}
+
+function OverviewAssetMetric({
+  asset,
+  changeLabel = "今日盈亏",
+  pnl,
+  pnlText,
+  value,
+}: {
+  asset: string;
+  changeLabel?: string;
+  pnl?: number;
+  pnlText?: string;
+  value: number;
+}) {
+  return (
+    <div className="xh-overview-metric">
+      <p className="xh-overview-metric-value">{formatMoney(value, asset)}</p>
+      <p className="xh-overview-pnl">
+        <span>{changeLabel}</span>
+        <span className={getSignedToneClass(pnl ?? 0)}>{pnlText ?? formatSignedMoney(pnl ?? 0, asset)}</span>
+      </p>
+    </div>
+  );
+}
+
+type OverviewFundingRow = {
+  id: string;
+  type: string;
+  amount: number;
+  asset: string;
+  time: number;
+  status: string;
+};
+
+function OverviewFundingTable({ rows }: { rows: OverviewFundingRow[] }) {
+  return (
+    <div className="xh-overview-table-wrap">
+      <table className="xh-overview-table">
+        <thead>
+          <tr>
+            <th>交易类型</th>
+            <th>金额</th>
+            <th>资产</th>
+            <th>时间</th>
+            <th>状态</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr>
+              <td colSpan={5}>
+                <EmptyState title="暂无充提交易" />
+              </td>
+            </tr>
+          ) : (
+            rows.map((row) => (
+              <tr key={row.id}>
+                <td>{row.type}</td>
+                <td className="xh-overview-table-number">{formatNumber(row.amount)}</td>
+                <td className="xh-overview-table-asset">{row.asset}</td>
+                <td className="xh-overview-table-time">{formatTimestamp(row.time)}</td>
+                <td className={`xh-overview-status ${getOverviewStatusClass(row.status)}`}>{formatOverviewStatus(row.status)}</td>
+              </tr>
+            ))
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }
@@ -531,400 +1057,742 @@ function OverviewSection({
 function WalletOverviewSection({
   asset,
   depositAddress,
-  deposits,
-  funding,
-  withdrawals,
+  externalWalletBinding,
+  externalWalletError,
+  wallet,
+  onAddWallet,
+  onCopyChainAddress,
+  onCopyDepositAddress,
+  onDeposit,
+  onExchange,
+  onTrade,
+  onWithdraw,
 }: {
   asset: string;
   depositAddress: DepositAddress | null;
-  deposits: OnchainDeposit[];
-  funding: FundingAccount | null;
-  withdrawals: WithdrawalRequest[];
+  externalWalletBinding: ExternalWalletBinding | null;
+  externalWalletError: string;
+  wallet: FundingAccount | null;
+  onAddWallet: () => void;
+  onCopyChainAddress: (value: string) => void;
+  onCopyDepositAddress: () => void;
+  onDeposit: () => void;
+  onExchange: () => void;
+  onTrade: () => void;
+  onWithdraw: () => void;
 }) {
+  const [selectedWalletId, setSelectedWalletId] = useState("primary");
+  const fallbackAddress = "0x7A3B2fE4C9aA0fA0A5d9b2Ca6D13F905AfB99F12";
+  const walletBalance = wallet?.balance ?? 0;
+  const walletAvailable = wallet?.available ?? 0;
+  const walletFrozen = wallet?.frozen ?? 0;
+  const walletPnl = 0;
+  const thirdPartyWalletLabel = externalWalletBinding
+    ? `${shortenWalletAddress(externalWalletBinding.walletAddress)} 已绑定`
+    : "未绑定";
+  const walletCards: WalletOverviewCard[] = [
+    {
+      id: "primary",
+      name: "Stella X 钱包",
+      address: depositAddress?.address ?? fallbackAddress,
+      balance: walletBalance,
+      change24h: walletPnl,
+      onCopyAddress: depositAddress?.address ? onCopyDepositAddress : undefined,
+    },
+    ...(externalWalletBinding ? [{
+      id: externalWalletBinding.id,
+      name: "第三方钱包",
+      address: externalWalletBinding.walletAddress,
+      balance: 0,
+      change24h: 0,
+      bindStatus: externalWalletBinding.bindStatus,
+    }] : []),
+  ];
+  const selectedWallet = walletCards.find((wallet) => wallet.id === selectedWalletId) ?? walletCards[0];
+  const assetRows = Array.from({ length: 5 }, (_, index) => ({
+    id: `stlx-${index + 1}`,
+    symbol: asset,
+    balance: formatNumber(index === 0 ? walletBalance : 0),
+  }));
+
   return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="钱包总览" description="钱包总览是资金模块的汇总页，只放网络、资产、地址和近期链上状态。" />
-        <div className="mt-5 grid gap-4 md:grid-cols-3">
-          <TokenSummary asset={asset} description="当前账户资产固定为 USDT，测试币图标复用星衡 Logo。" />
-          <ChainInfo label="钱包网络" value={bscTestnetLabel} />
-          <ChainInfo label="充值地址状态" value={depositAddress?.address ? "已分配专属地址" : "地址加载中"} />
-        </div>
-      </Card>
-
-      <div className="grid gap-4 md:grid-cols-3">
-        <Metric label="资金余额" value={funding?.balance} currency={asset} />
-        <Metric label="冻结金额" value={funding?.frozen} currency={asset} />
-        <Metric label="资金可用" value={funding?.available} currency={asset} />
-      </div>
-
-      <Card>
-        <SectionHeader title="最近链上状态" description="展示最近充值和出金进度，完整记录请进入订单分组。" />
-        <div className="mt-5 grid gap-3 xl:grid-cols-2">
-          <RecentDepositList deposits={deposits} />
-          <RecentWithdrawalList withdrawals={withdrawals} />
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function FundingSection({ asset, depositAddress, funding }: { asset: string; depositAddress: DepositAddress | null; funding: FundingAccount | null }) {
-  return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="资金账户" description="资金账户承载充值入账、出金冻结和内部划转后的资金余额。" />
-        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <TokenSummary asset={asset} description="Funding Account 当前固定使用 USDT。" />
-          <InfoTile label="账户 ID" value={funding?.id ?? "-"} />
-          <InfoTile label="充值网络" value={bscTestnetLabel} />
-          <InfoTile label="资金余额" value={formatMoney(funding?.balance, asset)} />
-          <InfoTile label="冻结金额" value={formatMoney(funding?.frozen, asset)} />
-          <InfoTile label="资金可用" value={formatMoney(funding?.available, asset)} />
-        </div>
-      </Card>
-
-      <Card>
-        <SectionHeader title="充值地址摘要" description="这里只展示地址摘要，完整复制入口统一放在顶部快捷操作中。" />
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <InfoTile label="专属地址" value={depositAddress?.address ?? "充值地址加载中"} mono />
-          <InfoTile label="测试币合约" value={depositAddress?.tokenAddress ?? "合约地址加载中"} mono />
-        </div>
-        <div className="mt-3 border border-amber-400/25 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100">
-          只向该地址充值 BNB Smart Chain Testnet 上的测试代币。充值到其他网络或其他代币，星衡不会自动入账。
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function RealTradingSection({ account, asset }: { account: FundingAccount | null; asset: string }) {
-  return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="交易账户" description="交易账户 = 未来真实交易入口。当前第一版只承载余额、冻结和可用余额，不接真实下单。"/>
-        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <TokenSummary asset={asset} description="当前只做账户账本占位，便于后续接真实交易能力。" />
-          <InfoTile label="账户 ID" value={account?.id ?? "-"} />
-          <InfoTile label="创建时间" value={formatTimestamp(account?.createdAt)} />
-          <InfoTile label="余额" value={formatMoney(account?.balance, asset)} />
-          <InfoTile label="冻结金额" value={formatMoney(account?.frozen, asset)} />
-          <InfoTile label="可用余额" value={formatMoney(account?.available, asset)} />
-        </div>
-      </Card>
-      <Card>
-        <SectionHeader title="当前边界" description="本页现在只展示交易账户账本，不混入模拟持仓、模拟订单或真实链上托管语义。" />
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
-          <FlowStep title="可接收划转" description="当前支持资金账户与交易账户之间划转。" />
-          <FlowStep title="未接真实下单" description="真实开仓、平仓、持仓和风控接口后续再接。" />
-          <FlowStep title="不混模拟数据" description="模拟交易仍只在模拟账户页面展示。" />
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function SimulationSection({ account, asset, orders, positions }: { account: TradingAccount | null; asset: string; orders: OrderRecord[]; positions: PositionView[] }) {
-  return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="模拟账户" description="现有模拟交易账户能力归属到这里，当前主读 simulation；trading 只作为兼容旧字段兜底。" />
-        <div className="mt-5 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-          <TokenSummary asset={account?.asset ?? asset} description="模拟交易账户仅用于虚拟成交、持仓和盈亏演示。" />
-          <InfoTile label="账户 ID" value={account?.id ?? "-"} />
-          <InfoTile label="创建时间" value={formatTimestamp(account?.createdAt)} />
-          <InfoTile label="Balance" value={formatMoney(account?.balance, asset)} />
-          <InfoTile label="Equity" value={formatMoney(account?.equity, asset)} />
-          <InfoTile label="Used Margin" value={formatMoney(account?.usedMargin, asset)} />
-          <InfoTile label="Free Margin" value={formatMoney(account?.freeMargin, asset)} />
-          <InfoTile label="浮动盈亏" value={formatMoney(account?.floatingPnl, asset)} />
-          <InfoTile label="当前持仓" value={`${positions.length} 笔`} />
-          <InfoTile label="订单记录" value={`${orders.length} 条`} />
-        </div>
-      </Card>
-      <Card>
-        <SectionHeader title="模拟边界" description="模拟账户不代表真实交易账户，也不接真实撮合、清算或资金托管。" />
-        <div className="mt-5 grid gap-3 md:grid-cols-3">
-          <FlowStep title="虚拟成交" description="开仓和平仓在星衡内部模拟完成。" />
-          <FlowStep title="虚拟资金" description="盈亏、保证金和权益只用于模拟交易展示。" />
-          <FlowStep title="真实交易占位" description="真实交易账户将由交易账户页面承载，当前暂不接入。" />
-        </div>
-      </Card>
-    </div>
-  );
-}
-
-function WithdrawalsSection({ asset, funding, withdrawals }: { asset: string; funding: FundingAccount | null; withdrawals: WithdrawalRequest[] }) {
-  return (
-    <div className="space-y-5">
-      <Card>
-        <SectionHeader title="出金订单" description="出金先冻结资金，后台审核通过后进入链上广播，链上确认后才正式扣减。" />
-        <div className="mt-4 grid gap-3 md:grid-cols-3">
-          <ChainInfo label="可用余额" value={formatMoney(funding?.available, asset)} />
-          <ChainInfo label="冻结规则" value="提交后先冻结，失败或拒绝后释放" />
-          <ChainInfo label="确认规则" value={`${requiredConfirmations} 次区块确认后正式扣款`} />
-        </div>
-      </Card>
-      <WithdrawalTable withdrawals={withdrawals} />
-    </div>
-  );
-}
-
-function DepositOrdersSection({ deposits }: { deposits: OnchainDeposit[] }) {
-  return (
-    <Card className="overflow-hidden p-0">
-      <RecordHeader
-        title="入金订单"
-        description="入金订单先由已确认的链上充值记录派生展示。已确认 = 链上交易达到确认要求，并已进入资金账户。"
+    <div className="xh-wallet-overview">
+      <AssetSummaryPanel
+        className="xh-wallet-hero"
+        title="预估总资产"
+        asset={asset}
+        value={walletBalance}
+        pnl={walletPnl}
+        infos={[
+          { label: "钱包网络", value: bscTestnetLabel },
+          { label: "第三方钱包", value: thirdPartyWalletLabel },
+          { label: "可划转", value: formatMoney(walletAvailable, asset) },
+          { label: "已归集", value: formatMoney(walletFrozen, asset) },
+        ]}
       />
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[980px] text-left text-sm">
-          <thead className="border-b border-line bg-white/[0.03] text-muted">
-            <tr>
-              <th className="px-5 py-3 font-medium">入账时间</th>
-              <th className="px-5 py-3 font-medium">金额</th>
-              <th className="px-5 py-3 font-medium">状态</th>
-              <th className="px-5 py-3 font-medium">网络</th>
-              <th className="px-5 py-3 font-medium">交易哈希</th>
-              <th className="px-5 py-3 font-medium">说明</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-line">
-            {deposits.length === 0 ? (
-              <tr>
-                <td className="px-5 py-8" colSpan={6}>
-                  <EmptyState title="暂无入金订单" description="链上充值确认并入账后，会在这里以用户订单视角展示。" />
-                </td>
-              </tr>
-            ) : (
-              deposits.slice(0, 10).map((deposit) => (
-                <tr key={deposit.id}>
-                  <td className="px-5 py-4 text-muted">{formatTimestamp(deposit.confirmedAt ?? deposit.updatedAt ?? deposit.detectedAt)}</td>
-                  <td className="px-5 py-4">{formatMoney(deposit.amountDecimal, deposit.asset)}</td>
-                  <td className="px-5 py-4"><StatusCell status={deposit.status} /></td>
-                  <td className="px-5 py-4 text-muted">{formatNetwork(deposit.network)}</td>
-                  <td className="px-5 py-4 text-muted">{renderTxLink(deposit.txHash)}</td>
-                  <td className="px-5 py-4 text-muted">链上充值已确认并进入资金账户。</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+
+      <div className="xh-wallet-panel">
+        <div className="xh-wallet-list-pane">
+          <div className="xh-wallet-pane-header">
+            <h3>钱包列表</h3>
+            <WalletActionButton label={externalWalletBinding ? "管理第三方钱包" : "绑定第三方钱包"} onClick={onAddWallet} />
+          </div>
+          {externalWalletError ? <p className="xh-wallet-bind-warning">{externalWalletError}</p> : null}
+          <div className="xh-wallet-list">
+            {walletCards.map((wallet) => (
+              <div
+                key={wallet.id}
+                aria-pressed={selectedWallet.id === wallet.id}
+                className={`xh-wallet-list-card ${selectedWallet.id === wallet.id ? "is-active" : ""}`}
+                role="button"
+                tabIndex={0}
+                onClick={() => setSelectedWalletId(wallet.id)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    setSelectedWalletId(wallet.id);
+                  }
+                }}
+              >
+                <span className="xh-wallet-list-card-top">
+                  <strong>{wallet.name}</strong>
+                  <b>{wallet.id === "primary" ? formatMoney(wallet.balance, asset) : shortenWalletAddress(wallet.address)}</b>
+                </span>
+                <span className="xh-wallet-list-card-bottom">
+                  <WalletAddressLine address={wallet.address} onCopyAddress={wallet.onCopyAddress ?? (() => onCopyChainAddress(wallet.address))} />
+                </span>
+                {wallet.bindStatus ? <span className="xh-wallet-bind-status">{formatExternalWalletBindStatus(wallet.bindStatus)}</span> : null}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="xh-wallet-detail-column">
+          <div className="xh-wallet-detail-pane">
+            <div className="xh-wallet-detail-header">
+              <div className="xh-wallet-detail-title">
+                <h3>{selectedWallet.name}</h3>
+                <WalletAddressLine address={selectedWallet.address} full onCopyAddress={selectedWallet.onCopyAddress ?? (() => onCopyChainAddress(selectedWallet.address))} />
+              </div>
+              <div className="xh-wallet-actions">
+                {selectedWallet.id === "primary" ? (
+                  <>
+                    <WalletActionButton label="交易" onClick={onTrade} />
+                    <WalletActionButton label="兑换" onClick={onExchange} />
+                    <WalletActionButton label="发送" onClick={onWithdraw} />
+                    <WalletActionButton label="收款" onClick={selectedWallet.onCopyAddress} />
+                  </>
+                ) : (
+                  <Badge tone="neutral">MetaMask</Badge>
+                )}
+              </div>
+            </div>
+
+            <div className="xh-wallet-detail-balance">
+              {selectedWallet.id === "primary" ? (
+                <OverviewAssetMetric value={selectedWallet.balance} asset={asset} pnl={selectedWallet.change24h} />
+              ) : (
+                <OverviewAssetMetric
+                  value={selectedWallet.balance}
+                  asset={asset}
+                  changeLabel="权益金额"
+                  pnl={0}
+                  pnlText={formatMoney(selectedWallet.balance, asset)}
+                />
+              )}
+            </div>
+          </div>
+
+          <div className="xh-wallet-asset-pane">
+            <div className="xh-wallet-tabs">
+              <button className="is-active" type="button">资产</button>
+              <button type="button">活动</button>
+            </div>
+
+            <div className="xh-wallet-asset-header">
+              <span>币种</span>
+              <span>余额</span>
+              <span>操作</span>
+            </div>
+
+            <div className="xh-wallet-asset-list">
+              {assetRows.map((row) => (
+                <div className="xh-wallet-asset-row" key={row.id}>
+                  <span className="xh-wallet-token-cell">
+                    <img alt="STLX" className="xh-wallet-token-icon" src={tokenIconSrc} />
+                    <span>{row.symbol}</span>
+                  </span>
+                  <span>{row.balance}</span>
+                  <span className="xh-wallet-row-actions">
+                    <button type="button" onClick={onDeposit}>充值</button>
+                    <button type="button" onClick={onWithdraw}>提现</button>
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
       </div>
-    </Card>
-  );
-}
-
-function LedgerSection({ ledger, transfers }: { ledger: FundingLedgerEntry[]; transfers: AccountTransferRecord[] }) {
-  return (
-    <div className="space-y-5">
-      <Card className="overflow-hidden p-0">
-        <RecordHeader title="资金流水" description="资金流水记录余额、冻结金额和账户间划转的变化明细。" />
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[960px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
-              <tr>
-                <th className="px-5 py-3 font-medium">时间</th>
-                <th className="px-5 py-3 font-medium">账户</th>
-                <th className="px-5 py-3 font-medium">类型</th>
-                <th className="px-5 py-3 font-medium">金额</th>
-                <th className="px-5 py-3 font-medium">余额变化</th>
-                <th className="px-5 py-3 font-medium">冻结变化</th>
-                <th className="px-5 py-3 font-medium">状态</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line">
-              {ledger.length === 0 ? (
-                <tr>
-                  <td className="px-5 py-8" colSpan={7}>
-                    <EmptyState title="暂无资金流水" description="充值入账、出金冻结、内部转账完成后，会在这里显示资金变化明细。" />
-                  </td>
-                </tr>
-              ) : (
-                ledger.slice(0, 10).map((entry) => (
-                  <tr key={entry.id}>
-                    <td className="px-5 py-4 text-muted">{formatTimestamp(entry.createdAt)}</td>
-                    <td className="px-5 py-4">{formatWalletAccountLabel(entry.accountType)}</td>
-                    <td className="px-5 py-4">{formatLedgerType(entry.type)}</td>
-                    <td className="px-5 py-4">{formatMoney(entry.amount, entry.asset)}</td>
-                    <td className="px-5 py-4 text-muted">{entry.balanceBefore.toFixed(2)} → {entry.balanceAfter.toFixed(2)}</td>
-                    <td className="px-5 py-4 text-muted">{entry.frozenBefore.toFixed(2)} → {entry.frozenAfter.toFixed(2)}</td>
-                    <td className="px-5 py-4"><StatusBadge status={entry.status} /></td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
-
-      <Card className="overflow-hidden p-0">
-        <RecordHeader title="转账记录" description="这里单独展示账户划转和用户间内部转账，便于区分同账户调拨和跨用户转账。" />
-        <div className="overflow-x-auto">
-          <table className="w-full min-w-[980px] text-left text-sm">
-            <thead className="border-b border-line bg-white/[0.03] text-muted">
-              <tr>
-                <th className="px-5 py-3 font-medium">时间</th>
-                <th className="px-5 py-3 font-medium">类型</th>
-                <th className="px-5 py-3 font-medium">方向</th>
-                <th className="px-5 py-3 font-medium">金额</th>
-                <th className="px-5 py-3 font-medium">状态</th>
-                <th className="px-5 py-3 font-medium">备注</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-line">
-              {transfers.length === 0 ? (
-                <tr>
-                  <td className="px-5 py-8" colSpan={6}>
-                    <EmptyState title="暂无转账记录" description="完成账户划转或内部转账后，会在这里显示独立记录。" />
-                  </td>
-                </tr>
-              ) : (
-                transfers.slice(0, 10).map((transfer) => (
-                  <tr key={transfer.id}>
-                    <td className="px-5 py-4 text-muted">{formatTimestamp(transfer.createdAt)}</td>
-                    <td className="px-5 py-4">{formatTransferType(transfer.transferType)}</td>
-                    <td className="px-5 py-4 text-muted">{formatWalletAccountLabel(transfer.fromAccountType)} → {formatWalletAccountLabel(transfer.toAccountType)}</td>
-                    <td className="px-5 py-4">{formatMoney(transfer.amount, transfer.asset)}</td>
-                    <td className="px-5 py-4"><StatusBadge status={transfer.status === "failed" ? "failed" : transfer.status === "reversed" ? "rejected" : "completed"} /></td>
-                    <td className="px-5 py-4 text-muted">{transfer.remark ?? "-"}</td>
-                  </tr>
-                ))
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
     </div>
   );
 }
 
-function OnchainDepositsSection({ deposits }: { deposits: OnchainDeposit[] }) {
-  return (
-    <Card className="overflow-hidden p-0">
-      <RecordHeader
-        title="链上充值记录"
-        description="链上充值记录展示扫描过程，包含检测、确认中、已确认和失败状态。"
-      />
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[1240px] text-left text-sm">
-          <thead className="border-b border-line bg-white/[0.03] text-muted">
-            <tr>
-              <th className="px-5 py-3 font-medium">检测时间</th>
-              <th className="px-5 py-3 font-medium">金额</th>
-              <th className="px-5 py-3 font-medium">状态</th>
-              <th className="px-5 py-3 font-medium">确认数</th>
-              <th className="px-5 py-3 font-medium">来源地址</th>
-              <th className="px-5 py-3 font-medium">收款地址</th>
-              <th className="px-5 py-3 font-medium">交易哈希</th>
-              <th className="px-5 py-3 font-medium">说明</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-line">
-            {deposits.length === 0 ? (
-              <tr>
-                <td className="px-5 py-8" colSpan={8}>
-                  <EmptyState title="暂无链上充值记录" description="向专属地址充值测试代币后，扫描服务检测到交易才会出现在这里。" />
-                </td>
-              </tr>
-            ) : (
-              deposits.slice(0, 10).map((deposit) => (
-                <tr key={deposit.id}>
-                  <td className="px-5 py-4 text-muted">{formatTimestamp(deposit.detectedAt)}</td>
-                  <td className="px-5 py-4">{formatMoney(deposit.amountDecimal, deposit.asset)}</td>
-                  <td className="px-5 py-4"><StatusCell status={deposit.status} /></td>
-                  <td className="px-5 py-4 text-muted">{formatConfirmations(deposit.confirmations)}</td>
-                  <td className="px-5 py-4"><AddressText value={deposit.fromAddress} /></td>
-                  <td className="px-5 py-4"><AddressText value={deposit.toAddress} /></td>
-                  <td className="px-5 py-4 text-muted">{renderTxLink(deposit.txHash)}</td>
-                  <td className="px-5 py-4">{renderReason(deposit.failedReason)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+type WalletOverviewCard = {
+  id: string;
+  name: string;
+  address: string;
+  balance: number;
+  change24h: number;
+  bindStatus?: ExternalWalletBinding["bindStatus"];
+  onCopyAddress?: () => void;
+};
+
+function ExternalWalletBindPanel({
+  binding,
+  error,
+  isSubmitting,
+  status,
+  onBind,
+  onUnbind,
+}: {
+  binding: ExternalWalletBinding | null;
+  error: string;
+  isSubmitting: boolean;
+  status: string;
+  onBind: () => void;
+  onUnbind: () => void;
+}) {
+  if (binding) {
+    return (
+      <div className="space-y-4">
+        <ChainInfo label="钱包类型" value="MetaMask" />
+        <ChainInfo label="网络" value={bscTestnetLabel} />
+        <ChainInfo label="绑定地址" value={binding.walletAddress} />
+        <div className="flex flex-wrap items-center gap-3">
+          <Badge tone="success">已绑定</Badge>
+          <Button variant="secondary" disabled={isSubmitting} onClick={onUnbind}>
+            解除绑定
+          </Button>
+        </div>
+        {error ? <p className="border border-red-400/35 bg-red-500/10 p-3 text-sm leading-6 text-red-100">{error}</p> : null}
       </div>
-    </Card>
+    );
+  }
+
+  const hasMetaMask = typeof window !== "undefined" && Boolean(window.ethereum?.isMetaMask);
+
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-3 md:grid-cols-2">
+        <ChainInfo label="钱包类型" value="MetaMask" />
+        <ChainInfo label="网络" value={bscTestnetLabel} />
+      </div>
+      <div className="border border-white/10 bg-white/[0.025] p-4">
+        <p className="text-sm font-medium text-white">第三方钱包绑定</p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Badge tone={hasMetaMask ? "success" : "danger"}>{hasMetaMask ? "MetaMask 已检测" : "未检测到 MetaMask"}</Badge>
+          <Badge tone="neutral">单地址绑定</Badge>
+        </div>
+      </div>
+      <Button disabled={!hasMetaMask || isSubmitting} onClick={onBind}>
+        {isSubmitting ? status || "绑定中" : "连接并签名"}
+      </Button>
+      {status && isSubmitting ? <p className="border border-white/15 bg-white/[0.035] p-3 text-sm leading-6 text-slate-200">{status}</p> : null}
+      {error ? <p className="border border-red-400/35 bg-red-500/10 p-3 text-sm leading-6 text-red-100">{error}</p> : null}
+    </div>
+  );
+}
+
+function WalletAddressLine({ address, full = false, onCopyAddress }: { address: string; full?: boolean; onCopyAddress?: () => void }) {
+  const handleCopy = async (event: MouseEvent<HTMLButtonElement>) => {
+    event.stopPropagation();
+    if (onCopyAddress) {
+      onCopyAddress();
+      return;
+    }
+    try {
+      await navigator.clipboard.writeText(address);
+    } catch {
+      // 复制失败不影响地址展示；用户仍可手动选择完整地址。
+    }
+  };
+
+  return (
+    <span className="xh-wallet-address-line">
+      <span className={`xh-wallet-address-text ${full ? "is-full" : ""}`} title={address}>
+        {full ? address : shortenWalletAddress(address)}
+      </span>
+      <button aria-label="复制钱包地址" className="xh-wallet-copy-icon" type="button" onClick={(event) => void handleCopy(event)}>
+        <Copy size={13} strokeWidth={1.8} />
+      </button>
+    </span>
+  );
+}
+
+type FundingAssetRow = {
+  id: string;
+  symbol: string;
+  balance: number;
+  available: number;
+  frozen: number;
+};
+
+const fundingAssetRows: FundingAssetRow[] = [
+  { id: "usd1", symbol: "USD1", balance: 239.91, available: 239.91, frozen: 239.91 },
+  { id: "usde", symbol: "USDe", balance: 239.91, available: 239.91, frozen: 239.91 },
+  { id: "usdi", symbol: "USDI", balance: 239.91, available: 239.91, frozen: 239.91 },
+  { id: "usdl", symbol: "USDL", balance: 239.91, available: 239.91, frozen: 239.91 },
+  { id: "usdc", symbol: "USDC", balance: 239.91, available: 239.91, frozen: 239.91 },
+];
+
+function FundingSection({ asset, funding }: { asset: string; funding: FundingAccount | null }) {
+  const columns: DataTableColumn<FundingAssetRow>[] = [
+    {
+      key: "asset",
+      header: "资产",
+      render: (row) => (
+        <span className="xh-funding-token-cell">
+          <img alt="星衡资产图标" className="xh-funding-token-icon" src={tokenIconSrc} />
+          <span>{row.symbol}</span>
+        </span>
+      ),
+    },
+    { key: "balance", header: "余额", align: "right", render: (row) => formatNumber(row.balance) },
+    { key: "available", header: "可用", align: "right", render: (row) => formatNumber(row.available) },
+    { key: "frozen", header: "冻结", align: "right", render: (row) => formatNumber(row.frozen) },
+    {
+      key: "actions",
+      header: "操作",
+      align: "right",
+      render: () => (
+        <span className="xh-funding-row-actions">
+          <button type="button">充值</button>
+          <button type="button">提现</button>
+        </span>
+      ),
+    },
+  ];
+
+  return (
+    <div className="xh-funding-page">
+      <AssetSummaryPanel
+        className="xh-funding-summary-panel"
+        title="预估总资产"
+        asset={asset}
+        value={funding?.available ?? 0}
+        pnl={0}
+        actions={
+          <>
+            <WalletActionButton label="充值" />
+            <WalletActionButton label="提现" />
+            <WalletActionButton label="划转" />
+          </>
+        }
+        infos={[
+          { label: "账户 ID", value: funding?.id ?? "FUND-USR-MR2Z51C2" },
+          { label: "冻结金额", value: formatMoney(funding?.frozen ?? 0, asset) },
+          { label: "可用资金", value: formatMoney(funding?.available ?? 0, asset) },
+        ]}
+      />
+
+      <section className="xh-funding-assets-panel">
+        <h2>资产详情</h2>
+        <DataTable
+          className="xh-funding-assets-table"
+          columns={columns}
+          rows={fundingAssetRows}
+          getRowKey={(row) => row.id}
+          gridTemplateColumns="minmax(320px,1fr) 160px 160px 160px 160px"
+          minWidth="920px"
+        />
+      </section>
+    </div>
+  );
+}
+
+function FundingInfo({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="xh-funding-info">
+      <p>{label}</p>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function RealTradingSection({ account, asset, onTransfer }: { account: RealTradingAccount | null; asset: string; onTransfer: () => void }) {
+  const isOpened = account?.opened !== false && account?.status !== "disabled";
+  return (
+    <div className="xh-trading-account-page">
+      <AssetSummaryPanel
+        className="xh-trading-summary-panel"
+        title="预估总资产"
+        asset={asset}
+        value={isOpened ? account?.available ?? 0 : 0}
+        pnl={0}
+        actions={
+          <WalletActionButton label="划转" disabled={!isOpened} onClick={isOpened ? onTransfer : undefined} />
+        }
+        infos={[
+          { label: "账户 ID", value: account?.id ?? "REAL-USR-MR2Z51C2" },
+          { label: "账户状态", value: isOpened ? "已开通" : "暂未开通" },
+          { label: "余额", value: formatMoney(isOpened ? account?.balance ?? 0 : 0, asset) },
+          { label: "可用余额", value: formatMoney(isOpened ? account?.available ?? 0 : 0, asset) },
+        ]}
+      />
+
+      <section className="xh-trading-boundary-panel">
+        <h2>当前边界</h2>
+        <p>本页现在只展示交易账户账本，不混入模拟持仓、模拟订单或真实链上托管语义。</p>
+        <div className="xh-trading-boundary-grid">
+          <BoundaryTile title="可接收划转" description="资金账户与交易账户之间可划转。" />
+          <BoundaryTile title="未接真实下单" description="真实开仓、平仓和风控接口后续接入。" />
+          <BoundaryTile title="不混模拟数据" description="模拟交易只在模拟账户页面展示。" />
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function BoundaryTile({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="xh-trading-boundary-tile">
+      <p>{title}</p>
+      <strong>—</strong>
+      <span>{description}</span>
+    </div>
+  );
+}
+
+function SimulationSection({
+  asset,
+  currentAccountId,
+  accounts,
+  accountLimit,
+  canCreate,
+  isSubmitting,
+  onAddAccount,
+  onDelete,
+  onRename,
+  onReset,
+  onTrade,
+}: {
+  asset: string;
+  currentAccountId: string;
+  accounts: SimulationAccountView[];
+  accountLimit: number;
+  canCreate: boolean;
+  isSubmitting: boolean;
+  onAddAccount: () => void;
+  onDelete: (accountId: string) => void;
+  onRename: (account: SimulationAccountView) => void;
+  onReset: (accountId: string) => void;
+  onTrade: (accountId: string) => void;
+}) {
+  const accountAsset = accounts[0]?.asset ?? asset;
+
+  return (
+    <div className="xh-simulation-page">
+      <button className="xh-simulation-add-button" type="button" disabled={!canCreate || isSubmitting} onClick={onAddAccount}>
+        {isSubmitting ? "处理中" : `新增模拟账户 ${accounts.length}/${accountLimit}`}
+      </button>
+      {accounts.length === 0 ? (
+        <section className="xh-simulation-empty">
+          <h2>暂无模拟账户</h2>
+          <Button disabled={!canCreate || isSubmitting} onClick={onAddAccount}>
+            创建模拟账户
+          </Button>
+        </section>
+      ) : (
+        accounts.map((account, index) => (
+          <SimulationAccountCard
+            account={account}
+            asset={accountAsset}
+            isCurrent={account.id === currentAccountId}
+            index={index + 1}
+            key={account.id}
+            onDelete={() => onDelete(account.id)}
+            onRename={() => onRename(account)}
+            onReset={() => onReset(account.id)}
+            onTrade={() => onTrade(account.id)}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function SimulationAccountCard({
+  account,
+  asset,
+  isCurrent,
+  index,
+  onDelete,
+  onRename,
+  onReset,
+  onTrade,
+}: {
+  account: SimulationAccountView;
+  asset: string;
+  isCurrent: boolean;
+  index: number;
+  onDelete: () => void;
+  onRename: () => void;
+  onReset: () => void;
+  onTrade: () => void;
+}) {
+  const equity = account.equity ?? 0;
+  const balance = account.balance ?? 0;
+  const usedMargin = account.usedMargin ?? 0;
+  const freeMargin = account.freeMargin ?? account.availableMargin ?? 0;
+  const marginBase = usedMargin + freeMargin;
+  const marginRatio = marginBase > 0 ? `${((usedMargin / marginBase) * 100).toFixed(2)}%` : "0.00%";
+  const floatingPnl = account.floatingPnl ?? account.unrealizedPnl ?? 0;
+  const infoRows = [
+    [
+      { label: "账户 ID", value: account.id },
+      { label: "账户类型", value: "模拟账户" },
+      { label: "保证金比例", value: marginRatio },
+    ],
+    [
+      { label: "浮动盈亏", value: <span className={getSignedToneClass(floatingPnl)}>{formatSignedGroupedMoney(floatingPnl, asset)}</span> },
+      { label: "账户余额", value: formatGroupedMoney(balance, asset) },
+      { label: "已用保证金", value: formatGroupedMoney(usedMargin, asset) },
+      { label: "可用保证金", value: formatGroupedMoney(freeMargin, asset) },
+    ],
+  ];
+
+  return (
+    <section className={`xh-simulation-account-card ${isCurrent ? "is-current" : "is-idle"}`}>
+      <div className="xh-simulation-card-header">
+        <div className="xh-simulation-card-title">
+          <h2>{account.name || `模拟账户${index}`}</h2>
+          <SimulationUsageBadge isCurrent={isCurrent} status={account.status} />
+        </div>
+        <div className="xh-simulation-card-actions">
+          <SimulationActionButton label="重置资金" onClick={account.canReset === false ? undefined : onReset} disabled={account.canReset === false} />
+          <SimulationActionButton asLink label={isCurrent ? "进入模拟交易" : "模拟交易"} to={`/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(account.id)}`} onClick={onTrade} />
+          <SimulationMoreMenu onDelete={onDelete} onRename={onRename} />
+        </div>
+      </div>
+
+      <div className="xh-simulation-primary-metric">
+        <p>模拟账户资产</p>
+        <div>
+          <strong>{formatGroupedNumber(equity)}</strong>
+          <span>{asset}</span>
+        </div>
+      </div>
+
+      <div className="xh-simulation-info-grid">
+        {infoRows.map((row, rowIndex) => (
+          <div className="xh-simulation-info-row" key={rowIndex}>
+            {row.map((item) => (
+              <SimulationInfo key={item.label} label={item.label} value={item.value} />
+            ))}
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function SimulationUsageBadge({ isCurrent, status }: { isCurrent: boolean; status?: SimulationAccountView["status"] }) {
+  if (status === "disabled") {
+    return <span className="xh-simulation-usage-badge is-disabled">已禁用</span>;
+  }
+  if (status === "deleted") {
+    return <span className="xh-simulation-usage-badge is-disabled">已删除</span>;
+  }
+  return <span className={`xh-simulation-usage-badge ${isCurrent ? "is-current" : "is-idle"}`}>{isCurrent ? "使用中" : "未使用"}</span>;
+}
+
+function SimulationMoreMenu({ onDelete, onRename }: { onDelete: () => void; onRename: () => void }) {
+  return (
+    <span className="xh-simulation-more-menu">
+      <SimulationActionButton label="重命名" onClick={onRename} />
+      <SimulationActionButton label="删除" onClick={onDelete} />
+    </span>
+  );
+}
+
+function SimulationActionButton({
+  asLink = false,
+  disabled = false,
+  label,
+  onClick,
+  to,
+}: {
+  asLink?: boolean;
+  disabled?: boolean;
+  label: string;
+  onClick?: () => void;
+  to?: string;
+}) {
+  if (asLink && to) {
+    return (
+      <Link className="xh-simulation-action-button" to={to} onClick={onClick}>
+        {label}
+      </Link>
+    );
+  }
+
+  return (
+    <button className="xh-simulation-action-button" type="button" onClick={onClick} disabled={disabled || !onClick} title={disabled ? "暂不可用" : undefined}>
+      {label}
+    </button>
+  );
+}
+
+function SimulationInfo({ label, value }: { label: string; value: ReactNode }) {
+  return (
+    <div className="xh-simulation-info">
+      <p>{label}</p>
+      <span>{value}</span>
+    </div>
+  );
+}
+
+function FundingOrdersTable({ emptyTitle, orders }: { emptyTitle: string; orders: FundingOrder[] }) {
+  const columns: DataTableColumn<FundingOrder>[] = [
+    { key: "time", header: "时间", render: (order) => formatTimestamp(order.createdAt) },
+    { key: "category", header: "类别", render: (order) => formatFundingOrderType(order.orderType) },
+    { key: "amount", header: "金额", render: (order) => formatNumber(order.amount), align: "right" },
+    { key: "asset", header: "资产", render: (order) => order.asset, align: "center" },
+    { key: "direction", header: "方向", render: (order) => formatFundingOrderDirection(order) },
+    { key: "orderNo", header: "订单号", render: (order) => <MonoText value={order.relatedWithdrawalId ?? order.relatedTransferId ?? order.relatedLedgerId ?? order.id} /> },
+    { key: "status", header: "状态", render: (order) => <StatusBadge status={order.displayStatus} />, align: "center" },
+  ];
+
+  return (
+    <DataTable
+      className="xh-record-table"
+      columns={columns}
+      rows={orders.slice(0, 10)}
+      getRowKey={(order) => order.id}
+      gridTemplateColumns="minmax(160px,1fr) 120px 120px 80px minmax(180px,1.2fr) minmax(180px,1fr) 120px"
+      minWidth="940px"
+      emptyState={<RecordEmptyState title={emptyTitle} />}
+    />
+  );
+}
+
+function LedgerSection({ fundingOrders }: { fundingOrders: FundingOrder[] }) {
+  const [activeTab, setActiveTab] = useState<LedgerTab>("ledger");
+  const visibleOrders = activeTab === "deposits"
+    ? fundingOrders.filter((order) => order.orderType === "deposit")
+    : activeTab === "withdrawals"
+      ? fundingOrders.filter((order) => order.orderType === "withdrawal" || order.orderType === "internal_transfer")
+      : activeTab === "transfers"
+        ? fundingOrders.filter((order) => order.orderType === "account_transfer")
+        : fundingOrders;
+  const emptyTitle = activeTab === "deposits"
+    ? "暂无充值记录"
+    : activeTab === "withdrawals"
+      ? "暂无提现记录"
+      : activeTab === "transfers"
+        ? "暂无划转记录"
+        : "暂无资金流水";
+
+  return (
+    <RecordPanel
+      className="xh-record-panel-ledger"
+      title="资金流水"
+      filters={
+        <>
+          <LedgerTabButton active={activeTab === "ledger"} label="总览" onClick={() => setActiveTab("ledger")} />
+          <LedgerTabButton active={activeTab === "deposits"} label="充值" onClick={() => setActiveTab("deposits")} />
+          <LedgerTabButton active={activeTab === "withdrawals"} label="提现" onClick={() => setActiveTab("withdrawals")} />
+          <LedgerTabButton active={activeTab === "transfers"} label="划转" onClick={() => setActiveTab("transfers")} />
+        </>
+      }
+    >
+      <FundingOrdersTable emptyTitle={emptyTitle} orders={visibleOrders} />
+    </RecordPanel>
+  );
+}
+
+function OnchainDepositsSection({
+  ownAddress,
+  records,
+  onCopyAddress,
+}: {
+  ownAddress?: string | null;
+  records: OnchainRecord[];
+  onCopyAddress: (value: string) => void;
+}) {
+  const columns: DataTableColumn<OnchainRecord>[] = [
+    { key: "time", header: "时间", render: (row) => <span className="whitespace-nowrap">{formatTimestamp(row.createdAt)}</span> },
+    { key: "type", header: "类型", render: (row) => formatOnchainRecordType(row.type), align: "center" },
+    { key: "amount", header: "金额", render: (row) => formatNumber(row.amount), align: "right" },
+    { key: "asset", header: "资产", render: (row) => row.asset, align: "center" },
+    { key: "network", header: "网络", render: (row) => formatNetwork(row.network) },
+    { key: "to", header: "转入地址", render: (row) => <ChainAddress value={row.toAddress} ownAddress={ownAddress} onCopyAddress={onCopyAddress} /> },
+    { key: "from", header: "转出地址", render: (row) => <ChainAddress value={row.fromAddress} ownAddress={ownAddress} onCopyAddress={onCopyAddress} /> },
+    { key: "tx", header: "交易哈希", render: (row) => renderTxLink(row.txHash) },
+    { key: "status", header: "状态", render: (row) => <OnchainStatusBadge type={row.type} status={row.chainStatus} />, align: "center" },
+  ];
+
+  return (
+    <RecordPanel className="xh-record-panel-onchain" title="链上充提记录">
+      <DataTable
+        className="xh-record-table"
+        columns={columns}
+        rows={records.slice(0, 10)}
+        getRowKey={(row) => row.id}
+        gridTemplateColumns="minmax(180px,1fr) 80px 120px 80px minmax(160px,0.9fr) minmax(210px,1.1fr) minmax(210px,1.1fr) minmax(170px,1fr) 120px"
+        minWidth="1260px"
+        emptyState={<RecordEmptyState title="暂无链上充提记录" />}
+      />
+    </RecordPanel>
   );
 }
 
 function TradeOrdersSection({ orders }: { orders: OrderRecord[] }) {
-  return (
-    <Card>
-      <SectionHeader title="交易订单" description="当前展示模拟交易订单，真实交易订单后续归入交易账户体系。" />
-      {orders.length === 0 ? (
-        <div className="mt-4">
-          <EmptyState title="暂无订单记录" description="交易页产生模拟开仓或平仓后，订单会同步到这里。" />
-        </div>
-      ) : (
-        <div className="mt-4 space-y-3">
-          {orders.slice(0, 10).map((order) => (
-            <div key={order.id} className="flex flex-col gap-3 border border-line bg-white/[0.03] p-4 md:flex-row md:items-center md:justify-between">
-              <div>
-                <p className="font-medium">
-                  {order.symbol} · {order.action === "open" ? "开仓" : "平仓"} · {formatTradeSide(order.side)}
-                </p>
-                <p className="mt-1 text-xs text-muted">{formatTimestamp(order.createdAt)}</p>
-              </div>
-              <div className="text-sm text-muted">
-                {order.status === "rejected" ? order.reason : `${order.price?.toFixed(5) ?? "-"} / ${order.volume}`}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </Card>
-  );
-}
+  const [activeFilter, setActiveFilter] = useState<TradeOrderFilter>("all");
+  const filteredOrders = orders.filter((order) => {
+    if (activeFilter === "all") {
+      return true;
+    }
+    if (activeFilter === "buy" || activeFilter === "sell") {
+      return order.side === activeFilter;
+    }
+    return order.status === activeFilter;
+  });
+  const columns: DataTableColumn<OrderRecord>[] = [
+    { key: "time", header: "时间", render: (order) => formatTimestamp(order.createdAt) },
+    { key: "symbol", header: "品种", render: (order) => order.symbol },
+    { key: "side", header: "方向", render: (order) => formatTradeSide(order.side), align: "center" },
+    { key: "action", header: "动作", render: (order) => (order.action === "open" ? "开仓" : "平仓"), align: "center" },
+    { key: "volume", header: "数量", render: (order) => order.volume.toString(), align: "right" },
+    { key: "price", header: "成交价", render: (order) => order.price?.toFixed(5) ?? "-", align: "right" },
+    { key: "status", header: "状态", render: (order) => formatOrderStatus(order.status), align: "center" },
+    { key: "reason", header: "说明", render: (order) => order.reason ?? "-" },
+  ];
 
-function WithdrawalTable({ withdrawals }: { withdrawals: WithdrawalRequest[] }) {
   return (
-    <Card className="overflow-hidden p-0">
-      <RecordHeader
-        title="出金申请记录"
-        description="出金先冻结资金，后台审核通过后进入链上广播，链上确认后才正式扣减。"
+    <RecordPanel
+      className="xh-record-panel-orders"
+      title="交易订单"
+      filters={
+        <>
+          <RecordFilterButton active={activeFilter === "all"} label="全部" onClick={() => setActiveFilter("all")} />
+          <RecordFilterButton active={activeFilter === "buy"} label="买入" onClick={() => setActiveFilter("buy")} />
+          <RecordFilterButton active={activeFilter === "sell"} label="卖出" onClick={() => setActiveFilter("sell")} />
+          <RecordFilterButton active={activeFilter === "filled"} label="已成交" onClick={() => setActiveFilter("filled")} />
+          <RecordFilterButton active={activeFilter === "rejected"} label="已拒绝" onClick={() => setActiveFilter("rejected")} />
+        </>
+      }
+    >
+      <DataTable
+        className="xh-record-table"
+        columns={columns}
+        rows={filteredOrders.slice(0, 10)}
+        getRowKey={(order) => order.id}
+        gridTemplateColumns="170px 110px 90px 90px 100px 130px 100px minmax(180px,1fr)"
+        minWidth="970px"
+        emptyState={<RecordEmptyState title="暂无订单记录" />}
       />
-      <div className="overflow-x-auto">
-        <table className="w-full min-w-[1320px] text-left text-sm">
-          <thead className="border-b border-line bg-white/[0.03] text-muted">
-            <tr>
-              <th className="px-5 py-3 font-medium">时间</th>
-              <th className="px-5 py-3 font-medium">金额</th>
-              <th className="px-5 py-3 font-medium">申请状态</th>
-              <th className="px-5 py-3 font-medium">链上阶段</th>
-              <th className="px-5 py-3 font-medium">确认数</th>
-              <th className="px-5 py-3 font-medium">网络</th>
-              <th className="px-5 py-3 font-medium">目标地址</th>
-              <th className="px-5 py-3 font-medium">交易哈希</th>
-              <th className="px-5 py-3 font-medium">说明</th>
-            </tr>
-          </thead>
-          <tbody className="divide-y divide-line">
-            {withdrawals.length === 0 ? (
-              <tr>
-                <td className="px-5 py-8" colSpan={9}>
-                  <EmptyState title="暂无出金申请" description="提交出金申请后，会在这里显示审核、广播、确认或失败状态。" />
-                </td>
-              </tr>
-            ) : (
-              withdrawals.slice(0, 10).map((withdrawal) => (
-                <tr key={withdrawal.id}>
-                  <td className="px-5 py-4 text-muted">{formatTimestamp(withdrawal.createdAt)}</td>
-                  <td className="px-5 py-4">{formatMoney(withdrawal.amount, withdrawal.asset)}</td>
-                  <td className="px-5 py-4"><StatusCell status={withdrawal.status} /></td>
-                  <td className="px-5 py-4">{withdrawal.onchainStatus ? <StatusCell status={withdrawal.onchainStatus} /> : <span className="text-muted">待审核后生成</span>}</td>
-                  <td className="px-5 py-4 text-muted">{formatConfirmations(withdrawal.confirmations ?? 0)}</td>
-                  <td className="px-5 py-4 text-muted">{formatNetwork(withdrawal.network)}</td>
-                  <td className="px-5 py-4"><AddressText value={withdrawal.walletAddress} /></td>
-                  <td className="px-5 py-4 text-muted">{renderTxLink(withdrawal.broadcastTxHash ?? withdrawal.txHash)}</td>
-                  <td className="px-5 py-4">{renderReason(withdrawal.failedReason ?? withdrawal.reviewNote ?? withdrawal.remark)}</td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-    </Card>
+    </RecordPanel>
   );
 }
 
@@ -938,43 +1806,14 @@ function DepositAddressPanel({
   onCopyDepositAddress: () => void;
 }) {
   return (
-    <div>
-      <SectionHeader
-        title="测试网充值地址"
-        description="专属地址 = 系统为每个用户固定分配的一条测试链地址，用来识别是谁充值的。"
-      />
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <FlowStep title="收款地址" description="复制专属地址并从测试钱包转入代币。" />
-        <FlowStep title="链上确认" description={`扫描服务检测交易，并等待 ${requiredConfirmations} 次区块确认。`} />
-        <FlowStep title="资金入账" description="确认后记入星衡资金账户，前台资产显示为 USDT。" />
-      </div>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <ChainInfo label="网络" value={bscTestnetLabel} />
-        <ChainInfo label="前台资产" value={asset} />
-        <ChainInfo label="确认要求" value={`${requiredConfirmations} 次区块确认`} />
-      </div>
-      <div className="mt-4 border border-white/10 bg-white/[0.03] p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-dim">Deposit address</p>
-        <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <p className="break-all font-mono text-sm text-white">{depositAddress?.address ?? "充值地址加载中"}</p>
-          <Button className="md:shrink-0" variant="secondary" disabled={!depositAddress?.address} onClick={onCopyDepositAddress}>
-            复制地址
-          </Button>
-        </div>
-      </div>
-      <div className="mt-3 border border-white/10 bg-black/30 p-4">
-        <p className="text-xs font-semibold uppercase tracking-[0.16em] text-dim">Token contract</p>
-        <div className="mt-3 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <p className="break-all font-mono text-sm text-muted">{depositAddress?.tokenAddress ?? "合约地址加载中"}</p>
-          {depositAddress?.tokenAddress ? (
-            <span className="text-xs text-muted">{depositAddress.tokenSymbol ?? asset} · {depositAddress.tokenDecimals ?? 18} 位精度</span>
-          ) : null}
-        </div>
-      </div>
-      <div className="mt-3 border border-amber-400/25 bg-amber-400/10 p-3 text-xs leading-5 text-amber-100">
-        只向该地址充值 BNB Smart Chain Testnet 上的测试代币。充值到其他网络或其他代币，星衡不会自动入账。
-      </div>
-    </div>
+    <AccountModalForm>
+      <AccountModalValue label="网络" value={bscTestnetLabel} />
+      <AccountModalValue label="资产" value={asset} />
+      <AccountModalValue label="钱包地址" value={depositAddress?.address ?? "充值地址加载中"} mono />
+      <Button className="xh-account-modal-submit" disabled={!depositAddress?.address} onClick={onCopyDepositAddress}>
+        复制地址
+      </Button>
+    </AccountModalForm>
   );
 }
 
@@ -983,6 +1822,7 @@ function WithdrawalForm({
   funding,
   withdrawAddress,
   withdrawAmount,
+  withdrawFeedback,
   onSubmitWithdrawal,
   onWithdrawAddressChange,
   onWithdrawAmountChange,
@@ -991,30 +1831,22 @@ function WithdrawalForm({
   funding: FundingAccount | null;
   withdrawAddress: string;
   withdrawAmount: number;
+  withdrawFeedback: string;
   onSubmitWithdrawal: () => void;
   onWithdrawAddressChange: (value: string) => void;
   onWithdrawAmountChange: (value: number) => void;
 }) {
   return (
-    <div>
-      <SectionHeader
-        title="提交出金申请"
-        description="当前出金会先冻结资金，审核通过后广播到 BSC Testnet，链上确认后再正式扣减。"
-      />
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <ChainInfo label="可用余额" value={formatMoney(funding?.available, asset)} />
-        <ChainInfo label="冻结规则" value="失败或拒绝后释放冻结" />
-        <ChainInfo label="网络" value={bscTestnetLabel} />
-      </div>
-      <div className="mt-5 grid gap-4 md:grid-cols-3">
-        <Input label="金额" type="number" min={0} value={withdrawAmount} onChange={(event) => onWithdrawAmountChange(Number(event.target.value))} />
-        <Input label="网络" value={bscTestnetLabel} disabled />
-        <Input label="出金地址" value={withdrawAddress} onChange={(event) => onWithdrawAddressChange(event.target.value)} placeholder="0x..." />
-      </div>
-      <Button className="mt-4" disabled={withdrawAmount <= 0 || !withdrawAddress.trim()} onClick={onSubmitWithdrawal}>
-        提交出金申请
+    <AccountModalForm>
+      <AccountModalValue label="可用余额" value={formatMoney(funding?.available, asset)} />
+      <AccountModalInput label="金额" type="number" min={0} value={withdrawAmount} onChange={(event) => onWithdrawAmountChange(Number(event.target.value))} />
+      <AccountModalInput label="网络" value={bscTestnetLabel} disabled />
+      <AccountModalInput label="提现地址" value={withdrawAddress} onChange={(event) => onWithdrawAddressChange(event.target.value)} placeholder="0x..." />
+      <Button className="xh-account-modal-submit" disabled={withdrawAmount <= 0 || !withdrawAddress.trim()} onClick={onSubmitWithdrawal}>
+        提交提现申请
       </Button>
-    </div>
+      {withdrawFeedback ? <AccountModalFeedback>{withdrawFeedback}</AccountModalFeedback> : null}
+    </AccountModalForm>
   );
 }
 
@@ -1045,25 +1877,21 @@ function TransferForm({
   };
 
   return (
-    <div className="space-y-5">
-      <div className="grid gap-3 md:grid-cols-[1fr_auto_1fr] md:items-end">
-        <Select label="转出账户" value={transferFrom} options={options} onChange={(event) => onTransferFromChange(event.target.value as TransferAccount)} />
-        <Button type="button" className="h-[46px] w-full md:w-auto md:px-3" variant="secondary" onClick={swapAccounts}>
+    <AccountModalForm>
+      <div className="xh-transfer-stack">
+        <AccountModalSelect label="转出账户" value={transferFrom} options={options} onChange={(event) => onTransferFromChange(event.target.value as TransferAccount)} />
+        <Button type="button" className="xh-transfer-swap" variant="secondary" onClick={swapAccounts}>
+          <ArrowRightLeft size={16} aria-hidden="true" />
           交换
         </Button>
-        <Select label="转入账户" value={transferTo} options={options} onChange={(event) => onTransferToChange(event.target.value as TransferAccount)} />
+        <AccountModalSelect label="转入账户" value={transferTo} options={options} onChange={(event) => onTransferToChange(event.target.value as TransferAccount)} />
       </div>
-      <div className="grid gap-4 md:grid-cols-[1fr_auto] md:items-end">
-        <Input label="金额" type="number" min={0} value={transferAmount} onChange={(event) => onTransferAmountChange(Number(event.target.value))} />
-        <Button className="h-[46px]" disabled={transferAmount <= 0} onClick={onSubmitTransfer}>
-          确认划转
-        </Button>
-      </div>
-      <p className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">
-        当前只支持 资金账户 ↔ 模拟账户、资金账户 ↔ 交易账户。模拟账户与交易账户之间不能直接互转。
-      </p>
-      {transferFeedback ? <p className="border border-white/15 bg-white/[0.035] p-3 text-sm leading-6 text-slate-200">{transferFeedback}</p> : null}
-    </div>
+      <AccountModalInput label="金额" type="number" min={0} value={transferAmount} onChange={(event) => onTransferAmountChange(Number(event.target.value))} />
+      <Button className="xh-account-modal-submit" disabled={transferAmount <= 0} onClick={onSubmitTransfer}>
+        确认划转
+      </Button>
+      {transferFeedback ? <AccountModalFeedback>{transferFeedback}</AccountModalFeedback> : null}
+    </AccountModalForm>
   );
 }
 
@@ -1083,81 +1911,197 @@ function InternalTransferForm({
   onSubmit: () => void | Promise<void>;
 }) {
   return (
-    <div className="space-y-5">
-      <div className="grid gap-4 md:grid-cols-2">
-        <Input label="收款人" value={recipient} onChange={(event) => onRecipientChange(event.target.value)} placeholder="用户 ID 或邮箱" />
-        <Input label="金额" type="number" min={0} value={amount} onChange={(event) => onAmountChange(Number(event.target.value))} />
-      </div>
-      <Button className="h-[46px]" disabled={amount <= 0 || !recipient.trim()} onClick={onSubmit}>
+    <AccountModalForm>
+      <AccountModalInput label="收款人" value={recipient} onChange={(event) => onRecipientChange(event.target.value)} placeholder="用户 ID 或邮箱" />
+      <AccountModalInput label="金额" type="number" min={0} value={amount} onChange={(event) => onAmountChange(Number(event.target.value))} />
+      <Button className="xh-account-modal-submit" disabled={amount <= 0 || !recipient.trim()} onClick={onSubmit}>
         确认内部转账
       </Button>
-      <p className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">
-        内部转账只发生在平台内部：当前固定为 资金账户 → 另一位用户的资金账户，不触发链上转账。
-      </p>
-      {transferFeedback ? <p className="border border-white/15 bg-white/[0.035] p-3 text-sm leading-6 text-slate-200">{transferFeedback}</p> : null}
+      {transferFeedback ? <AccountModalFeedback>{transferFeedback}</AccountModalFeedback> : null}
+    </AccountModalForm>
+  );
+}
+
+function ExchangeForm() {
+  return (
+    <AccountModalForm>
+      <AccountModalValue label="支付资产" value="USDT" />
+      <AccountModalValue label="获得资产" value="暂未开放" />
+      <AccountModalInput label="兑换金额" type="number" min={0} value={0} disabled />
+      <Button className="xh-account-modal-submit" disabled>
+        确认兑换
+      </Button>
+    </AccountModalForm>
+  );
+}
+
+function AccountModalForm({ children }: { children: ReactNode }) {
+  return <div className="xh-account-modal-form">{children}</div>;
+}
+
+function AccountModalValue({ label, mono = false, value }: { label: string; mono?: boolean; value: string }) {
+  return (
+    <div className="xh-account-modal-field">
+      <p>{label}</p>
+      <div className={`xh-account-modal-value ${mono ? "is-mono" : ""}`}>{value}</div>
     </div>
   );
 }
 
-function RecentDepositList({ deposits }: { deposits: OnchainDeposit[] }) {
-  const recent = deposits.slice(0, 3);
+function AccountModalInput({ label, className = "", ...props }: InputHTMLAttributes<HTMLInputElement> & { label: string }) {
   return (
-    <div className="border border-white/10 bg-white/[0.025] p-4">
-      <p className="text-sm font-semibold text-white">最近充值</p>
-      {recent.length === 0 ? (
-        <p className="mt-3 text-sm leading-6 text-muted">暂无链上充值记录。</p>
-      ) : (
-        <div className="mt-3 space-y-3">
-          {recent.map((deposit) => (
-            <div key={deposit.id} className="flex flex-col gap-2 border-t border-line pt-3 first:border-t-0 first:pt-0">
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-medium">{formatMoney(deposit.amountDecimal, deposit.asset)}</span>
-                <StatusBadge status={deposit.status} />
-              </div>
-              <p className="text-xs text-muted">{formatTimestamp(deposit.detectedAt)} · {shortenHash(deposit.txHash)}</p>
-            </div>
+    <label className="xh-account-modal-field">
+      <span>{label}</span>
+      <input className={`xh-account-modal-control ${className}`} {...props} />
+    </label>
+  );
+}
+
+function AccountModalSelect({
+  label,
+  options,
+  className = "",
+  ...props
+}: SelectHTMLAttributes<HTMLSelectElement> & { label: string; options: Array<{ value: string; label: string; disabled?: boolean }> }) {
+  return (
+    <label className="xh-account-modal-field">
+      <span>{label}</span>
+      <span className="xh-account-modal-select-wrap">
+        <select className={`xh-account-modal-control ${className}`} {...props}>
+          {options.map((option) => (
+            <option key={option.value} value={option.value} disabled={option.disabled}>
+              {option.label}
+            </option>
           ))}
-        </div>
-      )}
+        </select>
+      </span>
+    </label>
+  );
+}
+
+function AccountModalFeedback({ children }: { children: ReactNode }) {
+  return <p className="xh-account-modal-feedback">{children}</p>;
+}
+
+function WalletNetworkLabel() {
+  return (
+    <div className="xh-wallet-network">
+      <p>钱包网络</p>
+      <span>{bscTestnetLabel}</span>
     </div>
   );
 }
 
-function RecentWithdrawalList({ withdrawals }: { withdrawals: WithdrawalRequest[] }) {
-  const recent = withdrawals.slice(0, 3);
+function WalletActionButton({ disabled = false, icon, label, onClick }: { disabled?: boolean; icon?: ReactNode; label: string; onClick?: () => void }) {
   return (
-    <div className="border border-white/10 bg-white/[0.025] p-4">
-      <p className="text-sm font-semibold text-white">最近出金</p>
-      {recent.length === 0 ? (
-        <p className="mt-3 text-sm leading-6 text-muted">暂无出金申请。</p>
-      ) : (
-        <div className="mt-3 space-y-3">
-          {recent.map((withdrawal) => (
-            <div key={withdrawal.id} className="flex flex-col gap-2 border-t border-line pt-3 first:border-t-0 first:pt-0">
-              <div className="flex items-center justify-between gap-3">
-                <span className="font-medium">{formatMoney(withdrawal.amount, withdrawal.asset)}</span>
-                <StatusBadge status={withdrawal.status} />
-              </div>
-              <p className="text-xs text-muted">{formatTimestamp(withdrawal.createdAt)} · {formatNetwork(withdrawal.network)}</p>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <button className="xh-wallet-action" disabled={disabled} type="button" onClick={onClick}>
+      {icon}
+      {label}
+    </button>
   );
+}
+
+function getMetaMaskEthereum() {
+  const ethereum = window.ethereum;
+  if (!ethereum?.isMetaMask) {
+    throw new Error("请先安装 MetaMask。");
+  }
+  return ethereum;
+}
+
+async function requestCurrentMetaMaskAddress(ethereum: EthereumProvider) {
+  try {
+    await ethereum.request({
+      method: "wallet_requestPermissions",
+      params: [{ eth_accounts: {} }],
+    });
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: number }).code : undefined;
+    if (code === 4001) {
+      throw error;
+    }
+  }
+
+  const walletAddress = await readCurrentMetaMaskAddress(ethereum);
+  if (walletAddress) {
+    return walletAddress;
+  }
+
+  const accounts = await ethereum.request({ method: "eth_requestAccounts" }) as string[];
+  const fallbackAddress = normalizeMetaMaskAddress(accounts[0]);
+  if (!fallbackAddress) {
+    throw new Error("未获取到 MetaMask 地址。");
+  }
+  return fallbackAddress;
+}
+
+async function readCurrentMetaMaskAddress(ethereum: EthereumProvider) {
+  const accounts = await ethereum.request({ method: "eth_accounts" }) as string[];
+  return normalizeMetaMaskAddress(accounts[0]);
+}
+
+function normalizeMetaMaskAddress(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : "";
+}
+
+async function ensureBscTestnet(ethereum: EthereumProvider) {
+  const currentChainId = await ethereum.request({ method: "eth_chainId" });
+  if (currentChainId === bscTestnetChainId) {
+    return;
+  }
+
+  try {
+    await ethereum.request({
+      method: "wallet_switchEthereumChain",
+      params: [{ chainId: bscTestnetChainId }],
+    });
+  } catch (error) {
+    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: number }).code : undefined;
+    if (code !== 4902) {
+      throw error;
+    }
+    await ethereum.request({
+      method: "wallet_addEthereumChain",
+      params: [
+        {
+          chainId: bscTestnetChainId,
+          chainName: bscTestnetLabel,
+          nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
+          rpcUrls: ["https://data-seed-prebsc-1-s1.binance.org:8545/"],
+          blockExplorerUrls: ["https://testnet.bscscan.com"],
+        },
+      ],
+    });
+  }
+}
+
+function normalizeWalletError(error: unknown) {
+  if (typeof error === "object" && error !== null) {
+    const maybeError = error as { code?: number; message?: string };
+    if (maybeError.code === 4001) {
+      return "用户已取消 MetaMask 操作。";
+    }
+    if (maybeError.message) {
+      return maybeError.message;
+    }
+  }
+  return error instanceof Error ? error.message : "第三方钱包绑定失败。";
 }
 
 function NavGroup({ title }: { title: string }) {
-  return <div className="shrink-0 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-dim lg:mt-2">{title}</div>;
+  return <div className="xh-account-nav-group">{title}</div>;
 }
 
-function SectionButton({ active, label, level = "root", onClick }: { active: boolean; label: string; level?: "root" | "child"; onClick: () => void }) {
+function LedgerTabButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
+  return <RecordFilterButton active={active} label={label} onClick={onClick} />;
+}
+
+function RecordFilterButton({ active, label, onClick }: { active: boolean; label: string; onClick: () => void }) {
   return (
     <button
+      type="button"
       aria-pressed={active}
-      className={`shrink-0 border px-4 py-3 text-left text-sm font-semibold transition lg:w-full ${
-        active ? "border-white bg-white text-black" : "border-white/10 text-muted hover:border-white/40 hover:text-white"
-      } ${level === "child" ? "lg:pl-7" : ""}`}
+      className={`xh-record-filter ${active ? "is-active" : ""}`}
       onClick={onClick}
     >
       {label}
@@ -1165,11 +2109,43 @@ function SectionButton({ active, label, level = "root", onClick }: { active: boo
   );
 }
 
-function SectionHeader({ title, description }: { title: string; description: string }) {
+function RecordPanel({
+  children,
+  className = "",
+  filters,
+  title,
+}: {
+  children: ReactNode;
+  className?: string;
+  filters?: ReactNode;
+  title: string;
+}) {
+  return (
+    <section className={`xh-record-panel ${className}`}>
+      <h2>{title}</h2>
+      {filters ? <div className="xh-record-filters">{filters}</div> : null}
+      {children}
+    </section>
+  );
+}
+
+function SectionButton({ active, label, level = "root", onClick }: { active: boolean; label: string; level?: "root" | "child"; onClick: () => void }) {
+  return (
+    <button
+      aria-pressed={active}
+      className={`xh-account-nav-button ${active ? "is-active" : ""} ${level === "child" ? "is-child" : ""}`}
+      onClick={onClick}
+    >
+      {label}
+    </button>
+  );
+}
+
+function SectionHeader({ title, description }: { title: string; description?: string }) {
   return (
     <div>
       <h2 className="xh-panel-title">{title}</h2>
-      <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">{description}</p>
+      {description ? <p className="mt-2 max-w-3xl text-sm leading-6 text-muted">{description}</p> : null}
     </div>
   );
 }
@@ -1192,13 +2168,13 @@ function InfoTile({ label, value, mono = false }: { label: string; value: string
   );
 }
 
-function TokenSummary({ asset, description }: { asset: string; description: string }) {
+function TokenSummary({ asset, description }: { asset: string; description?: string }) {
   return (
     <div className="flex items-center gap-3 border border-white/10 bg-white/[0.03] px-4 py-3">
       <img src={tokenIconSrc} alt={`${asset} token icon`} className="h-10 w-10 object-contain" />
       <div>
         <p className="text-sm font-medium text-white">{asset}</p>
-        <p className="text-xs leading-5 text-muted">{description}</p>
+        {description ? <p className="text-xs leading-5 text-muted">{description}</p> : null}
       </div>
     </div>
   );
@@ -1213,20 +2189,29 @@ function ChainInfo({ label, value }: { label: string; value: string }) {
   );
 }
 
-function RecordHeader({ title, description }: { title: string; description: string }) {
+function RecordHeader({ title, description }: { title: string; description?: string }) {
   return (
     <div className="border-b border-line p-4">
       <h2 className="font-semibold tracking-[-0.01em] text-white">{title}</h2>
-      <p className="mt-1 text-sm leading-6 text-muted">{description}</p>
+      {description ? <p className="mt-1 text-sm leading-6 text-muted">{description}</p> : null}
     </div>
   );
 }
 
-function EmptyState({ title, description }: { title: string; description: string }) {
+function EmptyState({ title, description }: { title: string; description?: string }) {
   return (
     <div className="mx-auto max-w-md border border-white/10 bg-white/[0.025] p-5 text-center">
       <p className="font-medium text-white">{title}</p>
-      <p className="mt-2 text-sm leading-6 text-muted">{description}</p>
+      {description ? <p className="mt-2 text-sm leading-6 text-muted">{description}</p> : null}
+    </div>
+  );
+}
+
+function RecordEmptyState({ title, description }: { title: string; description?: string }) {
+  return (
+    <div className="xh-record-empty-content">
+      <p>{title}</p>
+      {description ? <span>{description}</span> : null}
     </div>
   );
 }
@@ -1239,7 +2224,7 @@ function InlineState({
   onAction,
 }: {
   title: string;
-  description: string;
+  description?: string;
   tone?: "neutral" | "danger";
   actionLabel?: string;
   onAction?: () => void;
@@ -1249,7 +2234,7 @@ function InlineState({
     <div className={`flex flex-col gap-3 border p-4 md:flex-row md:items-center md:justify-between ${toneClass}`}>
       <div>
         <p className="text-sm font-semibold text-white">{title}</p>
-        <p className="mt-1 text-sm leading-6 text-muted">{description}</p>
+        {description ? <p className="mt-1 text-sm leading-6 text-muted">{description}</p> : null}
       </div>
       {actionLabel && onAction ? (
         <Button className="md:shrink-0" variant="secondary" onClick={onAction}>
@@ -1284,13 +2269,95 @@ function formatMoney(value: number | undefined | null, asset: string) {
   return `${formatNumber(value)} ${asset}`;
 }
 
+function formatSignedMoney(value: number, asset: string) {
+  const prefix = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${prefix}${Math.abs(value).toFixed(2)} ${asset}`;
+}
+
 function formatNumber(value: number | undefined | null) {
   return typeof value === "number" ? value.toFixed(2) : "-";
+}
+
+function formatGroupedMoney(value: number | undefined | null, asset: string) {
+  return `${formatGroupedNumber(value)} ${asset}`;
+}
+
+function formatSignedGroupedMoney(value: number, asset: string) {
+  const prefix = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${prefix}${formatGroupedNumber(Math.abs(value))} ${asset}`;
+}
+
+function formatGroupedNumber(value: number | undefined | null) {
+  return typeof value === "number"
+    ? value.toLocaleString("en-US", {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+    : "-";
+}
+
+function getSignedToneClass(value: number) {
+  if (value > 0) {
+    return "text-emerald-400";
+  }
+  if (value < 0) {
+    return "text-red-400";
+  }
+  return "text-muted";
+}
+
+function getOverviewStatusClass(status: string) {
+  if (status === "completed" || status === "confirmed") {
+    return "is-success";
+  }
+  if (status === "failed") {
+    return "is-danger";
+  }
+  if (status === "pending_review") {
+    return "is-warning";
+  }
+  if (status === "broadcasting" || status === "broadcasted" || status === "detected" || status === "confirming" || status === "pending") {
+    return "is-progress";
+  }
+  if (status === "rejected") {
+    return "is-muted";
+  }
+  return "is-muted";
+}
+
+function formatOverviewStatus(status: string) {
+  const labels: Record<string, string> = {
+    completed: "已完成",
+    confirmed: "已完成",
+    failed: "失败",
+    pending_review: "待审核",
+    broadcasting: "进行中",
+    broadcasted: "进行中",
+    detected: "进行中",
+    confirming: "进行中",
+    pending: "进行中",
+    rejected: "已取消",
+  };
+  return labels[status] ?? status;
+}
+
+function mapRecentFundingActivity(activity: RecentFundingActivity): OverviewFundingRow {
+  return {
+    id: activity.id,
+    type: activity.title,
+    amount: activity.amount,
+    asset: activity.asset,
+    time: activity.createdAt,
+    status: activity.status,
+  };
 }
 
 function isTransferPairAllowed(from: TransferAccount, to: TransferAccount) {
   if (from === to) {
     return false;
+  }
+  if (from === "wallet" || to === "wallet") {
+    return from === "wallet" && to === "funding";
   }
   return from === "funding" || to === "funding";
 }
@@ -1302,23 +2369,9 @@ function formatTimestamp(value?: number | null) {
   return new Date(value).toLocaleString("zh-CN");
 }
 
-function formatLedgerType(type: FundingLedgerEntry["type"]) {
-  const labels: Record<FundingLedgerEntry["type"], string> = {
-    deposit: "入金",
-    withdrawal_freeze: "出金冻结",
-    withdrawal_approved: "出金通过",
-    withdrawal_rejected: "出金拒绝",
-    transfer_in: "转入",
-    transfer_out: "转出",
-    internal_transfer_in: "内部转入",
-    internal_transfer_out: "内部转出",
-    adjustment: "调整",
-  };
-  return labels[type];
-}
-
 function formatWalletAccountLabel(type: WalletAccountType) {
   const labels: Record<WalletAccountType, string> = {
+    wallet: "钱包",
     funding: "资金账户",
     simulation: "模拟账户",
     realTrading: "交易账户",
@@ -1327,59 +2380,120 @@ function formatWalletAccountLabel(type: WalletAccountType) {
   return labels[type];
 }
 
-function formatTransferType(type: AccountTransferRecord["transferType"]) {
-  return type === "internal_transfer" ? "内部转账" : "账户划转";
+function formatFundingOrderType(type: FundingOrder["orderType"]) {
+  const labels: Record<FundingOrder["orderType"], string> = {
+    deposit: "充值",
+    withdrawal: "提现",
+    account_transfer: "划转",
+    internal_transfer: "内部转账",
+  };
+  return labels[type];
 }
 
-function StatusBadge({ status }: { status: FundingLedgerEntry["status"] | WithdrawalRequest["status"] | OnchainDeposit["status"] }) {
+function formatFundingOrderDirection(order: FundingOrder) {
+  if (order.fromAccountType && order.toAccountType) {
+    return `${formatWalletAccountLabel(order.fromAccountType)} → ${formatWalletAccountLabel(order.toAccountType)}`;
+  }
+  if (order.direction === "in") {
+    return `到达 ${formatWalletAccountLabel(order.accountType)}`;
+  }
+  if (order.direction === "out") {
+    return `从 ${formatWalletAccountLabel(order.accountType)} 出账`;
+  }
+  return "-";
+}
+
+function formatOnchainRecordType(type: OnchainRecord["type"]) {
+  return type === "deposit" ? "充值" : "提现";
+}
+
+function MonoText({ value }: { value?: string | null }) {
+  if (!value) {
+    return <span className="text-muted">-</span>;
+  }
+  return (
+    <span className="break-all font-mono text-xs text-muted" title={value}>
+      {shortenHash(value)}
+    </span>
+  );
+}
+
+function ChainAddress({
+  value,
+  ownAddress,
+  onCopyAddress,
+}: {
+  value?: string | null;
+  ownAddress?: string | null;
+  onCopyAddress: (value: string) => void;
+}) {
+  if (!value) {
+    return <span className="text-muted">-</span>;
+  }
+  const isOwnAddress = ownAddress ? value.toLowerCase() === ownAddress.toLowerCase() : false;
+  return (
+    <span className={`inline-flex items-center gap-1.5 whitespace-nowrap ${isOwnAddress ? "text-emerald-300" : "text-muted"}`}>
+      <span className="font-mono text-xs" title={value}>{shortenChainAddress(value)}</span>
+      <a
+        aria-label="查看地址链上数据"
+        className="inline-flex text-white/80 transition hover:text-white"
+        href={`https://testnet.bscscan.com/address/${value}`}
+        target="_blank"
+        rel="noreferrer"
+      >
+        <Globe2 size={13} />
+      </a>
+      <button aria-label="复制地址" className="inline-flex text-white/80 transition hover:text-white" type="button" onClick={() => onCopyAddress(value)}>
+        <Copy size={13} />
+      </button>
+    </span>
+  );
+}
+
+function Toast({ message }: { message: string }) {
+  return (
+    <div className={`xh-toast ${message ? "is-visible" : ""}`} role="status" aria-live="polite" aria-atomic="true">
+      {message}
+    </div>
+  );
+}
+
+function StatusBadge({ status }: { status: string }) {
   const tone =
     status === "completed" || status === "confirmed"
       ? "success"
-      : status === "rejected" || status === "failed"
+      : status === "cancelled" || status === "rejected" || status === "failed" || status === "reversed"
         ? "danger"
         : "neutral";
   return <Badge tone={tone}>{formatStatus(status)}</Badge>;
 }
 
-function StatusCell({ status }: { status: FundingLedgerEntry["status"] | WithdrawalRequest["status"] | OnchainDeposit["status"] }) {
-  return (
-    <div className="space-y-1">
-      <StatusBadge status={status} />
-      <p className="text-xs leading-5 text-muted">{formatStatusHint(status)}</p>
-    </div>
-  );
+function OnchainStatusBadge({ type, status }: { type: OnchainRecord["type"]; status: string }) {
+  if (type === "deposit" && status === "confirmed") {
+    return <Badge tone="success">钱包到账</Badge>;
+  }
+  return <StatusBadge status={status} />;
 }
 
-function formatStatus(status: FundingLedgerEntry["status"] | WithdrawalRequest["status"] | OnchainDeposit["status"]) {
+function formatStatus(status: string) {
   const labels: Record<string, string> = {
-    pending: "处理中",
+    processing: "进行中",
+    pending: "待处理",
     completed: "已完成",
-    rejected: "已拒绝",
-    pending_review: "待审核",
-    broadcasting: "广播中",
-    broadcasted: "已广播",
-    confirmed: "已确认",
+    cancelled: "已取消",
+    rejected: "已取消",
+    reversed: "已取消",
+    pending_review: "待处理",
+    broadcasting: "进行中",
+    broadcasted: "进行中",
+    confirmed: "已完成",
     failed: "失败",
-    detected: "已检测",
-    confirming: "确认中",
+    detected: "进行中",
+    confirming: "进行中",
+    filled: "已完成",
+    canceled: "已取消",
   };
   return labels[status] ?? status;
-}
-
-function formatStatusHint(status: FundingLedgerEntry["status"] | WithdrawalRequest["status"] | OnchainDeposit["status"]) {
-  const hints: Record<string, string> = {
-    pending: "等待处理",
-    completed: "账本已完成",
-    rejected: "资金已解冻",
-    pending_review: "等待后台审核",
-    broadcasting: "准备提交链上",
-    broadcasted: "已提交链上",
-    confirmed: "链上已确认",
-    failed: "资金已释放或需处理",
-    detected: "已扫到交易",
-    confirming: "等待区块确认",
-  };
-  return hints[status] ?? "状态待同步";
 }
 
 function AddressText({ value }: { value?: string | null }) {
@@ -1401,6 +2515,10 @@ function formatTradeSide(value: OrderRecord["side"]) {
   return value === "buy" ? "买入" : "卖出";
 }
 
+function formatOrderStatus(value: OrderRecord["status"]) {
+  return value === "filled" ? "已成交" : "已拒绝";
+}
+
 function formatUserStatus(value?: string) {
   if (value === "active") {
     return "正常";
@@ -1411,52 +2529,78 @@ function formatUserStatus(value?: string) {
   return "-";
 }
 
+function readCurrentSimulationAccountId() {
+  try {
+    return window.localStorage.getItem(currentSimulationAccountKey) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeCurrentSimulationAccountId(accountId: string) {
+  try {
+    window.localStorage.setItem(currentSimulationAccountKey, accountId);
+  } catch {
+    // localStorage 不可用时仍允许通过 URL 参数进入交易页。
+  }
+}
+
+function formatExternalWalletBindStatus(value: ExternalWalletBinding["bindStatus"]) {
+  if (value === "active") {
+    return "已绑定";
+  }
+  return "待签名";
+}
+
 function renderTxLink(txHash?: string | null) {
   if (!txHash) {
     return "-";
   }
   return (
     <a
-      className="inline-flex flex-col gap-1 text-white underline underline-offset-2"
+      className="inline-flex items-center gap-1.5 whitespace-nowrap font-mono text-xs text-muted transition hover:text-white"
       href={`https://testnet.bscscan.com/tx/${txHash}`}
       target="_blank"
       rel="noreferrer"
+      aria-label={`在 BscScan Testnet 查看交易 ${txHash}`}
     >
-      <span>查看交易</span>
-      <span className="font-mono text-[11px] text-muted no-underline">{shortenHash(txHash)}</span>
+      <span>{shortenHash(txHash)}</span>
+      <Globe2 aria-hidden="true" className="h-3.5 w-3.5 shrink-0" strokeWidth={1.8} />
     </a>
   );
-}
-
-function renderReason(value?: string | null) {
-  if (!value) {
-    return <span className="text-muted">-</span>;
-  }
-  return <span className="block max-w-[220px] text-sm leading-5 text-amber-100">{value}</span>;
 }
 
 function shortenHash(value: string) {
   return value.length <= 14 ? value : `${value.slice(0, 8)}...${value.slice(-6)}`;
 }
 
+function shortenChainAddress(value: string) {
+  return value.length <= 14 ? value : `${value.slice(0, 6)}...${value.slice(-6)}`;
+}
+
+function shortenWalletAddress(value: string) {
+  return value.length <= 12 ? value : `${value.slice(0, 6)}...${value.slice(-4)}`;
+}
+
 function quickActionsForSection(section: AccountSection): Array<QuickAction | "trade"> {
   const actions: Record<AccountSection, Array<QuickAction | "trade">> = {
     overview: ["deposit", "withdraw", "transfer", "internal-transfer", "trade"],
     "wallet-overview": ["deposit", "withdraw", "transfer", "internal-transfer"],
-    funding: ["deposit", "withdraw", "transfer", "internal-transfer"],
+    funding: [],
     trading: ["transfer"],
-    simulation: ["trade"],
-    withdrawals: ["withdraw"],
-    deposits: ["deposit"],
-    ledger: ["transfer", "internal-transfer"],
-    "onchain-deposits": ["deposit"],
-    "trade-orders": ["trade"],
+    simulation: [],
+    ledger: [],
+    "onchain-deposits": [],
+    "trade-orders": [],
   };
   return actions[section];
 }
 
 function readSectionFromUrl(): AccountSection {
   const section = new URLSearchParams(window.location.search).get("section");
+  if (section === "withdrawals" || section === "deposits") {
+    return "ledger";
+  }
   return isAccountSection(section) ? section : "overview";
 }
 
