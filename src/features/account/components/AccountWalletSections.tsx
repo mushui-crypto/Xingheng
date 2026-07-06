@@ -13,7 +13,7 @@ import {
   shortenWalletAddress,
 } from "../lib/accountUtils";
 import { bscTestnetLabel, tokenIconSrc } from "../model/constants";
-import { ChainInfo } from "./AccountDisplayPrimitives";
+import { ChainInfo, RecordEmptyState } from "./AccountDisplayPrimitives";
 import {
   OverviewAssetMetric,
   WalletAddressLine,
@@ -122,13 +122,15 @@ export function WalletOverviewSection({
                 }}
               >
                 <span className="xh-wallet-list-card-top">
-                  <strong>{wallet.name}</strong>
-                  <b>{wallet.id === "primary" ? formatMoney(wallet.balance, asset) : shortenWalletAddress(wallet.address)}</b>
+                  <span className="xh-wallet-list-card-title">
+                    <strong>{wallet.name}</strong>
+                    {wallet.bindStatus ? <span className="xh-wallet-bind-status">{formatExternalWalletBindStatus(wallet.bindStatus)}</span> : null}
+                  </span>
+                  <b>{wallet.id === "primary" ? formatMoney(wallet.balance, asset) : "MetaMask"}</b>
                 </span>
                 <span className="xh-wallet-list-card-bottom">
                   <WalletAddressLine address={wallet.address} onCopyAddress={wallet.onCopyAddress ?? (() => onCopyChainAddress(wallet.address))} />
                 </span>
-                {wallet.bindStatus ? <span className="xh-wallet-bind-status">{formatExternalWalletBindStatus(wallet.bindStatus)}</span> : null}
               </div>
             ))}
           </div>
@@ -159,45 +161,61 @@ export function WalletOverviewSection({
               {selectedWallet.id === "primary" ? (
                 <OverviewAssetMetric value={selectedWallet.balance} asset={asset} pnl={selectedWallet.change24h} />
               ) : (
-                <OverviewAssetMetric
-                  value={selectedWallet.balance}
-                  asset={asset}
-                  changeLabel="权益金额"
-                  pnl={0}
-                  pnlText={formatMoney(selectedWallet.balance, asset)}
-                />
+                <div className="xh-external-wallet-boundary">
+                  <p>链上余额</p>
+                  <strong>暂未读取</strong>
+                </div>
               )}
             </div>
           </div>
 
-          <div className="xh-wallet-asset-pane">
-            <div className="xh-wallet-tabs">
-              <button className="is-active" type="button">资产</button>
-              <button type="button">活动</button>
-            </div>
+          {selectedWallet.id === "primary" ? (
+            <div className="xh-wallet-asset-pane">
+              <div className="xh-wallet-tabs">
+                <button className="is-active" type="button">资产</button>
+                <button type="button">活动</button>
+              </div>
 
-            <div className="xh-wallet-asset-header">
-              <span>币种</span>
-              <span>余额</span>
-              <span>操作</span>
-            </div>
+              <div className="xh-wallet-asset-header">
+                <span>币种</span>
+                <span>余额</span>
+                <span>操作</span>
+              </div>
 
-            <div className="xh-wallet-asset-list">
-              {assetRows.map((row) => (
-                <div className="xh-wallet-asset-row" key={row.id}>
-                  <span className="xh-wallet-token-cell">
-                    <img alt="STLX" className="xh-wallet-token-icon" src={tokenIconSrc} />
-                    <span>{row.symbol}</span>
-                  </span>
-                  <span>{row.balance}</span>
-                  <span className="xh-wallet-row-actions">
-                    <button type="button" onClick={onDeposit}>充值</button>
-                    <button type="button" onClick={onWithdraw}>提现</button>
-                  </span>
-                </div>
-              ))}
+              <div className="xh-wallet-asset-list">
+                {assetRows.map((row) => (
+                  <div className="xh-wallet-asset-row" key={row.id}>
+                    <span className="xh-wallet-token-cell">
+                      <img alt="STLX" className="xh-wallet-token-icon" src={tokenIconSrc} />
+                      <span>{row.symbol}</span>
+                    </span>
+                    <span>{row.balance}</span>
+                    <span className="xh-wallet-row-actions">
+                      <button type="button" onClick={onDeposit}>充值</button>
+                      <button type="button" onClick={onWithdraw}>提现</button>
+                    </span>
+                  </div>
+                ))}
+              </div>
             </div>
-          </div>
+          ) : (
+            <div className="xh-wallet-asset-pane">
+              <div className="xh-wallet-tabs">
+                <button className="is-active" type="button">资产</button>
+                <button type="button">活动</button>
+              </div>
+
+              <div className="xh-wallet-asset-header">
+                <span>币种</span>
+                <span>余额</span>
+                <span>操作</span>
+              </div>
+
+              <div className="xh-wallet-asset-empty">
+                <RecordEmptyState title="暂无第三方钱包资产" />
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>

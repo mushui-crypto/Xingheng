@@ -968,7 +968,7 @@ textarea {
   }
 
   .xh-wallet-list-card {
-    @apply flex h-16 w-full cursor-pointer flex-col justify-between overflow-hidden border border-[#2b2b2b] bg-transparent p-3 text-left text-[#f5f5f5] transition hover:border-white/40 hover:bg-black focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/70 active:translate-y-px;
+    @apply flex h-[80px] w-full cursor-pointer flex-col justify-between overflow-hidden border border-[#2b2b2b] bg-transparent p-3 text-left text-[#f5f5f5] transition hover:border-white/40 hover:bg-black focus-visible:outline focus-visible:outline-1 focus-visible:outline-white/70 active:translate-y-px;
   }
 
   .xh-wallet-list-card.is-active {
@@ -979,8 +979,12 @@ textarea {
     @apply flex items-start justify-between gap-3;
   }
 
+  .xh-wallet-list-card-title {
+    @apply flex min-w-0 items-center gap-2;
+  }
+
   .xh-wallet-list-card-top strong {
-    @apply block text-sm font-normal leading-5;
+    @apply block min-w-0 text-sm font-normal leading-5;
   }
 
   .xh-wallet-list-card-top b {
@@ -992,7 +996,7 @@ textarea {
   }
 
   .xh-wallet-bind-status {
-    @apply mt-2 inline-flex w-fit border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[11px] leading-4 text-[#d7d7d7];
+    @apply inline-flex w-fit shrink-0 whitespace-nowrap border border-white/15 bg-white/[0.04] px-2 py-0.5 text-[11px] leading-4 text-[#d7d7d7];
   }
 
   .xh-wallet-list-card.is-active .xh-wallet-list-card-bottom {
@@ -1124,6 +1128,10 @@ textarea {
 
   .xh-wallet-asset-row > span:nth-child(2) {
     @apply text-right;
+  }
+
+  .xh-wallet-asset-empty {
+    @apply flex min-h-[98px] items-center justify-center border-b border-[#2b2b2b];
   }
 
   .xh-wallet-token-cell {
