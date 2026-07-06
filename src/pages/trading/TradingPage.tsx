@@ -1,9 +1,7 @@
-import { createChart, type CandlestickData, CandlestickSeries, type IChartApi, type ISeriesApi } from "lightweight-charts";
-import { Activity, AlertTriangle, ArrowDown, ArrowUp, XCircle } from "lucide-react";
+import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
-import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { MarketSymbolPicker } from "../../components/trading/MarketSymbolPicker";
 import {
@@ -25,10 +23,15 @@ import { fetchSimulationAccounts, type SimulationAccountView } from "../../api/w
 import { useSymbolStore } from "../../store/symbolStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
-import { formatQuantity, normalizeQuantity } from "../../utils/quantity";
-
-const intervals: CandleInterval[] = ["1m", "5m", "15m", "1h"];
-const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
+import { normalizeQuantity } from "../../utils/quantity";
+import { SimulationAccountContextPanel } from "../../features/trading/components/SimulationAccountContextPanel";
+import { TradingChartPanel } from "../../features/trading/components/TradingChartPanel";
+import { TradingOrderPanel } from "../../features/trading/components/TradingOrderPanel";
+import { TradingOrdersTable, TradingPositionsTable } from "../../features/trading/components/TradingRecords";
+import { Toast } from "../../features/trading/components/TradingFeedback";
+import { getChartPriceFormat, isValidCandle, normalizeChartCandles, toChartCandle } from "../../features/trading/lib/chart";
+import { readCurrentSimulationAccountId, shortSimulationId } from "../../features/trading/lib/simulationAccount";
+import { currentSimulationAccountKey } from "../../features/trading/model/constants";
 
 export function TradingPage() {
   const themeColor = "#00C896";
@@ -398,334 +401,50 @@ export function TradingPage() {
       />
 
       <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <Card className="p-0">
-          <div className="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex items-center gap-2">
-              <Activity size={18} style={{ color: themeColor }} />
-              <span className="font-semibold">{symbol}</span>
-              <span className="text-sm text-muted">{selectedConfig.displayName}</span>
-            </div>
-            <div className="no-scrollbar flex overflow-x-auto border border-line bg-black p-1">
-              {intervals.map((item) => (
-                <button
-                  key={item}
-                  className={`shrink-0 px-3 py-1.5 text-sm transition ${interval === item ? "bg-white text-black" : "text-muted hover:text-white"}`}
-                  onClick={() => setIntervalValue(item)}
-                >
-                  {item}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="relative">
-            <div ref={chartContainerRef} className="h-[320px] w-full sm:h-[420px] lg:h-[460px]" />
-            {chartLoading || chartMessage ? (
-              <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-sm text-muted backdrop-blur">
-                {chartLoading ? "K线加载中..." : chartMessage}
-              </div>
-            ) : null}
-          </div>
-        </Card>
+        <TradingChartPanel
+          chartContainerRef={chartContainerRef}
+          chartLoading={chartLoading}
+          chartMessage={chartMessage}
+          interval={interval}
+          onIntervalChange={setIntervalValue}
+          selectedConfig={selectedConfig}
+          symbol={symbol}
+          themeColor={themeColor}
+        />
 
-        <div className="space-y-4">
-          <Card>
-            <h2 className="font-semibold">最新报价</h2>
-            <div className="mt-4 grid grid-cols-1 gap-3 min-[380px]:grid-cols-2">
-              <Quote label="Last" value={ticker.last} digits={digits} />
-              <Quote label="Spread" value={ticker.spread} digits={digits} />
-              <Quote label="Bid" value={ticker.bid} digits={digits} />
-              <Quote label="Ask" value={ticker.ask} digits={digits} />
-            </div>
-            <div className="mt-4 space-y-1 text-xs text-muted">
-              <p>来源：{ticker.source ?? "-"}</p>
-              <p>更新时间：{ticker.timestamp ? new Date(ticker.timestamp).toLocaleString("zh-CN") : "-"}</p>
-            </div>
-            {ticker.status !== "connected" ? (
-              <div className="mt-4 flex gap-2 border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-100">
-                <AlertTriangle className="mt-0.5 shrink-0" size={16} />
-                {ticker.status === "stale" ? "超过 10 秒未收到行情，市价单已暂停。" : "行情连接中断，正在等待重连。"}
-              </div>
-            ) : null}
-          </Card>
-
-          <Card>
-            <h2 className="font-semibold">模拟市价单</h2>
-            <label className="mt-4 block">
-              <span className="mb-2 block text-sm text-muted">
-                交易手数（{formatQuantity(selectedConfig.minLot, selectedConfig.lotStep)}-{formatQuantity(selectedConfig.maxLot, selectedConfig.lotStep)} / {formatQuantity(selectedConfig.lotStep, selectedConfig.lotStep)}）
-              </span>
-              <input
-                className="w-full border border-line bg-black px-3.5 py-3 text-sm text-white outline-none transition focus:border-white"
-                min={selectedConfig.minLot}
-                max={selectedConfig.maxLot}
-                step={selectedConfig.lotStep}
-                type="number"
-                value={volume}
-                onChange={(event) => setVolume(Number(event.target.value))}
-              />
-            </label>
-            <div className="mt-4 grid grid-cols-1 gap-3 min-[380px]:grid-cols-2">
-              <Button disabled={orderDisabled} onClick={() => submitOrder("buy")}>
-                <ArrowUp size={16} /> 买入 Ask
-              </Button>
-              <Button disabled={orderDisabled} variant="danger" onClick={() => submitOrder("sell")}>
-                <ArrowDown size={16} /> 卖出 Bid
-              </Button>
-            </div>
-            {selectedConfig.tradeStatus !== "enabled" ? (
-              <p className="mt-3 text-sm text-amber-200">
-                当前品种状态为 {selectedConfig.tradeStatus}，仅允许平仓，不可新开仓。
-              </p>
-            ) : null}
-            {!simulationAccountsLoading && needsSimulationAccount ? <p className="mt-3 text-sm text-amber-200">模拟账户不可用。</p> : null}
-            {message ? <p className="mt-4 xh-message">{message}</p> : null}
-          </Card>
-        </div>
+        <TradingOrderPanel
+          digits={digits}
+          message={message}
+          needsSimulationAccount={needsSimulationAccount}
+          onSubmitOrder={submitOrder}
+          orderDisabled={orderDisabled}
+          selectedConfig={selectedConfig}
+          setVolume={setVolume}
+          simulationAccountsLoading={simulationAccountsLoading}
+          ticker={ticker}
+          volume={volume}
+        />
       </div>
 
-      <Card className="overflow-hidden p-0">
-        <div className="border-b border-line p-4">
-          <h2 className="font-semibold">模拟持仓</h2>
-          <p className="mt-1 text-sm text-muted">
-            {selectedSimulationAccount ? `${selectedSimulationAccount.name ?? "当前模拟账户"} · ${selectedSimulationAccount.id}` : "选择模拟账户后展示对应持仓。"}
-          </p>
-        </div>
-        {needsSimulationAccount ? (
-          <div className="p-8 text-center text-sm text-muted">{hasSimulationAccounts ? "模拟账户不可用。" : "请先创建模拟账户。"}</div>
-        ) : positions.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无持仓。</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[980px] text-left text-sm">
-              <thead className="xh-thead">
-                <tr>
-                  <th className="px-5 py-3 font-medium">方向</th>
-                  <th className="px-5 py-3 font-medium">品种</th>
-                  <th className="px-5 py-3 font-medium">手数</th>
-                  <th className="px-5 py-3 font-medium">开仓价</th>
-                  <th className="px-5 py-3 font-medium">标记价</th>
-                  <th className="px-5 py-3 font-medium">保证金</th>
-                  <th className="px-5 py-3 font-medium">浮盈亏</th>
-                  <th className="px-5 py-3 font-medium">操作</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {positions.map((position) => (
-                  <tr key={position.id}>
-                    <td className="px-5 py-4">{position.side === "long" ? "多单" : "空单"}</td>
-                    <td className="px-5 py-4">{position.symbol}</td>
-                    <td className="px-5 py-4">{formatQuantity(position.volume, selectedConfig.lotStep)}</td>
-                    <td className="px-5 py-4">{formatPrice(position.entryPrice, digits)}</td>
-                    <td className="px-5 py-4">{formatPrice(position.markPrice ?? undefined, digits)}</td>
-                    <td className="px-5 py-4">{position.margin.toFixed(2)}</td>
-                    <td className={`px-5 py-4 ${Number(position.pnl) >= 0 ? "text-white" : "text-red-300"}`}>
-                      {position.pnl?.toFixed(2) ?? "-"}
-                    </td>
-                    <td className="px-5 py-4">
-                      <Button
-                        variant="secondary"
-                        disabled={closingPositionId !== null}
-                        onClick={() => submitClose(position.id)}
-                      >
-                        <XCircle size={16} /> {closingPositionId === position.id ? "平仓中" : "平仓"}
-                      </Button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <TradingPositionsTable
+        closingPositionId={closingPositionId}
+        digits={digits}
+        hasSimulationAccounts={hasSimulationAccounts}
+        lotStep={selectedConfig.lotStep}
+        needsSimulationAccount={needsSimulationAccount}
+        onClosePosition={submitClose}
+        positions={positions}
+        selectedSimulationAccount={selectedSimulationAccount}
+      />
 
-      <Card className="overflow-hidden p-0">
-        <div className="border-b border-line p-4">
-          <h2 className="font-semibold">订单记录</h2>
-          <p className="mt-1 text-sm text-muted">
-            {selectedSimulationAccount ? `${selectedSimulationAccount.name ?? "当前模拟账户"} · ${selectedSimulationAccount.id}` : "选择模拟账户后展示对应订单。"}
-          </p>
-        </div>
-        {needsSimulationAccount ? (
-          <div className="p-8 text-center text-sm text-muted">{hasSimulationAccounts ? "模拟账户不可用。" : "请先创建模拟账户。"}</div>
-        ) : orders.length === 0 ? (
-          <div className="p-8 text-center text-sm text-muted">当前模拟账户暂无订单记录。</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="w-full min-w-[1160px] text-left text-sm">
-              <thead className="xh-thead">
-                <tr>
-                  <th className="px-5 py-3 font-medium">时间</th>
-                  <th className="px-5 py-3 font-medium">动作</th>
-                  <th className="px-5 py-3 font-medium">状态</th>
-                  <th className="px-5 py-3 font-medium">品种</th>
-                  <th className="px-5 py-3 font-medium">方向/手数</th>
-                  <th className="px-5 py-3 font-medium">成交价</th>
-                  <th className="px-5 py-3 font-medium">Bid / Ask</th>
-                  <th className="px-5 py-3 font-medium">来源</th>
-                  <th className="px-5 py-3 font-medium">说明</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-line">
-                {orders.map((order) => (
-                  <tr key={order.id}>
-                    <td className="px-5 py-4 text-muted">{new Date(order.createdAt).toLocaleString("zh-CN")}</td>
-                    <td className="px-5 py-4">{order.action === "open" ? "开仓" : "平仓"}</td>
-                    <td className="px-5 py-4">
-                      <Badge tone={order.status === "filled" ? "success" : "danger"}>{order.status}</Badge>
-                    </td>
-                    <td className="px-5 py-4">{order.symbol}</td>
-                    <td className="px-5 py-4">{order.side} / {formatQuantity(order.volume, selectedConfig.lotStep)}</td>
-                    <td className="px-5 py-4">{order.price === null ? "-" : formatPrice(order.price, digits)}</td>
-                    <td className="px-5 py-4 text-xs text-muted">
-                      {order.bid === null || order.ask === null ? "-" : `${formatPrice(order.bid, digits)} / ${formatPrice(order.ask, digits)}`}
-                    </td>
-                    <td className="px-5 py-4 text-muted">{order.source}</td>
-                    <td className="px-5 py-4 text-muted">{order.reason ?? (typeof order.pnl === "number" ? `P/L ${order.pnl.toFixed(2)}` : "模拟成交")}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Card>
+      <TradingOrdersTable
+        digits={digits}
+        hasSimulationAccounts={hasSimulationAccounts}
+        lotStep={selectedConfig.lotStep}
+        needsSimulationAccount={needsSimulationAccount}
+        orders={orders}
+        selectedSimulationAccount={selectedSimulationAccount}
+      />
     </div>
   );
-}
-
-function SimulationAccountContextPanel({
-  account,
-  currency,
-  simulationAccount,
-}: {
-  account: TradingAccount | null;
-  currency: string;
-  simulationAccount: SimulationAccountView | null;
-}) {
-  const balance = account?.balance ?? simulationAccount?.balance;
-  const equity = account?.equity ?? simulationAccount?.equity;
-  const usedMargin = account?.usedMargin ?? simulationAccount?.usedMargin;
-  const freeMargin = account?.freeMargin ?? simulationAccount?.freeMargin ?? simulationAccount?.availableMargin;
-  const floatingPnl = account?.floatingPnl ?? simulationAccount?.floatingPnl ?? simulationAccount?.unrealizedPnl;
-  const marginBase = (usedMargin ?? 0) + (freeMargin ?? 0);
-  const marginRatio = marginBase > 0 ? `${(((usedMargin ?? 0) / marginBase) * 100).toFixed(2)}%` : "0.00%";
-
-  return (
-    <section className="xh-trading-simulation-card">
-      <div className="xh-trading-simulation-grid">
-        <SimulationContextItem label="账户 ID" value={simulationAccount ? shortSimulationId(simulationAccount.id) : "-"} mono />
-        <SimulationContextItem label="账户类型" value="模拟账户" />
-        <SimulationContextItem label="账户资产" value={formatAccountMoney(equity, currency)} />
-        <SimulationContextItem label="保证金比例" value={marginRatio} />
-        <SimulationContextItem label="浮动盈亏" value={formatSignedAccountMoney(floatingPnl, currency)} tone={getSignedTone(floatingPnl)} />
-        <SimulationContextItem label="账户余额" value={formatAccountMoney(balance, currency)} />
-        <SimulationContextItem label="已用保证金" value={formatAccountMoney(usedMargin, currency)} />
-        <SimulationContextItem label="可用保证金" value={formatAccountMoney(freeMargin, currency)} />
-      </div>
-    </section>
-  );
-}
-
-function SimulationContextItem({
-  label,
-  mono = false,
-  tone,
-  value,
-}: {
-  label: string;
-  mono?: boolean;
-  tone?: "positive" | "negative" | "neutral";
-  value: string;
-}) {
-  return (
-    <div className="xh-trading-simulation-item">
-      <p>{label}</p>
-      <span className={`${mono ? "font-mono text-xs" : ""} ${tone === "positive" ? "text-emerald-300" : tone === "negative" ? "text-red-300" : ""}`}>{value}</span>
-    </div>
-  );
-}
-
-function Toast({ message }: { message: string }) {
-  return (
-    <div className={`xh-toast ${message ? "is-visible" : ""}`} aria-live="polite" aria-atomic="true">
-      {message}
-    </div>
-  );
-}
-
-function Quote({ label, value, digits }: { label: string; value?: number; digits: number }) {
-  return (
-    <div className="border border-line bg-black p-3">
-      <p className="text-xs uppercase text-muted">{label}</p>
-      <p className="mt-2 text-lg font-semibold">{formatPrice(value, digits)}</p>
-    </div>
-  );
-}
-
-function toChartCandle(candle: ApiCandle): CandlestickData {
-  return {
-    time: candle.time as CandlestickData["time"],
-    open: candle.open,
-    high: candle.high,
-    low: candle.low,
-    close: candle.close,
-  };
-}
-
-function normalizeChartCandles(candles: ApiCandle[]) {
-  const byTime = new Map<number, ApiCandle>();
-  for (const candle of candles) {
-    if (isValidCandle(candle)) {
-      byTime.set(candle.time, candle);
-    }
-  }
-  return [...byTime.values()].sort((a, b) => a.time - b.time);
-}
-
-function isValidCandle(candle: ApiCandle) {
-  return (
-    Number.isFinite(candle.time) &&
-    Number.isFinite(candle.open) &&
-    Number.isFinite(candle.high) &&
-    Number.isFinite(candle.low) &&
-    Number.isFinite(candle.close)
-  );
-}
-
-function getChartPriceFormat(digits: number) {
-  const precision = Math.min(Math.max(Math.trunc(digits), 0), 8);
-  return {
-    type: "price" as const,
-    precision,
-    minMove: 10 ** -precision,
-  };
-}
-
-function readCurrentSimulationAccountId() {
-  try {
-    return window.localStorage.getItem(currentSimulationAccountKey) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function formatAccountMoney(value: number | undefined, currency: string) {
-  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(2)} ${currency}` : "-";
-}
-
-function formatSignedAccountMoney(value: number | undefined, currency: string) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return "-";
-  }
-  return `${value >= 0 ? "" : "-"}${Math.abs(value).toFixed(2)} ${currency}`;
-}
-
-function getSignedTone(value: number | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value) || value === 0) {
-    return "neutral" as const;
-  }
-  return value > 0 ? "positive" as const : "negative" as const;
-}
-
-function shortSimulationId(value: string) {
-  return value.length <= 14 ? value : `${value.slice(0, 7)}...${value.slice(-4)}`;
 }
