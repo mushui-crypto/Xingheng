@@ -1,5 +1,5 @@
 import type { TradingAccount } from "./market";
-import { handleUserAuthFailure } from "./session";
+import { adminHeaders, requestJson, userHeaders } from "./httpClient";
 
 export type WalletAsset = "USDT";
 export type WalletAccountType = "wallet" | "funding" | "trading" | "simulation" | "realTrading";
@@ -316,164 +316,185 @@ export type OnchainDeposit = {
   updatedAt: number;
 };
 
-function userHeaders(userId?: string | null): Record<string, string> {
-  return {};
-}
-
-function adminHeaders(): Record<string, string> {
-  return {};
-}
-
-async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    if (options?.userAuthFailure && (response.status === 401 || response.status === 403)) {
-      handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
-    }
-    throw new Error(payload?.message ?? fallbackMessage);
-  }
-  return payload as T;
-}
-
-async function fetchExternalWalletApi(input: string, init: RequestInit | undefined, fallbackMessage: string) {
-  try {
-    return await fetch(input, init);
-  } catch {
-    throw new Error(`${fallbackMessage} 无法连接服务，请检查网络或稍后重试。`);
-  }
-}
-
 export async function fetchWalletAccounts() {
-  const response = await fetch("/api/wallet/accounts", { headers: userHeaders() });
-  return readJson<WalletAccounts>(response, "钱包账户加载失败。", { userAuthFailure: true });
+  return requestJson<WalletAccounts>("/api/wallet/accounts", "钱包账户加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchSimulationAccounts() {
-  const response = await fetch("/api/wallet/simulation-accounts", { headers: userHeaders() });
-  return readJson<SimulationAccountsResponse>(response, "模拟账户加载失败。", { userAuthFailure: true });
+  return requestJson<SimulationAccountsResponse>("/api/wallet/simulation-accounts", "模拟账户加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function createSimulationAccount(name?: string) {
-  const response = await fetch("/api/wallet/simulation-accounts", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+  return requestJson<SimulationAccountMutationResponse>("/api/wallet/simulation-accounts", "模拟账户创建失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify(name?.trim() ? { name: name.trim() } : {}),
+    },
+    userAuthFailure: true,
   });
-  return readJson<SimulationAccountMutationResponse>(response, "模拟账户创建失败。", { userAuthFailure: true });
 }
 
 export async function renameSimulationAccount(id: string, name: string) {
-  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}`, {
-    method: "PATCH",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ name }),
-  });
-  return readJson<SimulationAccountMutationResponse>(response, "模拟账户重命名失败。", { userAuthFailure: true });
+  return requestJson<SimulationAccountMutationResponse>(
+    `/api/wallet/simulation-accounts/${encodeURIComponent(id)}`,
+    "模拟账户重命名失败。",
+    {
+      init: {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...userHeaders() },
+        body: JSON.stringify({ name }),
+      },
+      userAuthFailure: true,
+    },
+  );
 }
 
 export async function deleteSimulationAccount(id: string) {
-  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}`, {
-    method: "DELETE",
-    headers: userHeaders(),
+  return requestJson<{ ok: true }>(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}`, "模拟账户删除失败。", {
+    init: {
+      method: "DELETE",
+      headers: userHeaders(),
+    },
+    userAuthFailure: true,
   });
-  return readJson<{ ok: true }>(response, "模拟账户删除失败。", { userAuthFailure: true });
 }
 
 export async function resetSimulationAccount(id: string) {
-  const response = await fetch(`/api/wallet/simulation-accounts/${encodeURIComponent(id)}/reset`, {
-    method: "POST",
-    headers: userHeaders(),
-  });
-  return readJson<SimulationAccountMutationResponse>(response, "模拟账户资金重置失败。", { userAuthFailure: true });
+  return requestJson<SimulationAccountMutationResponse>(
+    `/api/wallet/simulation-accounts/${encodeURIComponent(id)}/reset`,
+    "模拟账户资金重置失败。",
+    {
+      init: {
+        method: "POST",
+        headers: userHeaders(),
+      },
+      userAuthFailure: true,
+    },
+  );
 }
 
 export async function fetchAccountOverview() {
-  const response = await fetch("/api/wallet/overview", { headers: userHeaders() });
-  return readJson<AccountOverview>(response, "账户总览加载失败。", { userAuthFailure: true });
+  return requestJson<AccountOverview>("/api/wallet/overview", "账户总览加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchRecentFundingActivities() {
-  const response = await fetch("/api/wallet/recent-activities", { headers: userHeaders() });
-  return readJson<RecentFundingActivity[]>(response, "近期资金记录加载失败。", { userAuthFailure: true });
+  return requestJson<RecentFundingActivity[]>("/api/wallet/recent-activities", "近期资金记录加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchFundingOrders(type: "all" | "deposit" | "withdrawal" | "transfer" | FundingOrderType = "all", limit = 50) {
   const params = new URLSearchParams({ type, limit: String(limit) });
-  const response = await fetch(`/api/wallet/funding-orders?${params.toString()}`, { headers: userHeaders() });
-  return readJson<PaginatedEnvelope<FundingOrder>>(response, "资金订单加载失败。", { userAuthFailure: true });
+  return requestJson<PaginatedEnvelope<FundingOrder>>(`/api/wallet/funding-orders?${params.toString()}`, "资金订单加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchOnchainRecords(limit = 50) {
   const params = new URLSearchParams({ limit: String(limit) });
-  const response = await fetch(`/api/wallet/onchain-records?${params.toString()}`, { headers: userHeaders() });
-  return readJson<PaginatedEnvelope<OnchainRecord>>(response, "链上充提记录加载失败。", { userAuthFailure: true });
+  return requestJson<PaginatedEnvelope<OnchainRecord>>(`/api/wallet/onchain-records?${params.toString()}`, "链上充提记录加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchExternalWalletBinding() {
-  const response = await fetchExternalWalletApi(
+  return requestJson<ExternalWalletBindingResponse>(
     "/api/wallet/external-wallet",
-    { headers: userHeaders() },
     "第三方钱包绑定状态加载失败。",
+    {
+      init: { headers: userHeaders() },
+      userAuthFailure: true,
+      networkErrorMessage: "第三方钱包绑定状态加载失败。 无法连接服务，请检查网络或稍后重试。",
+    },
   );
-  return readJson<ExternalWalletBindingResponse>(response, "第三方钱包绑定状态加载失败。", { userAuthFailure: true });
 }
 
 export async function createExternalWalletChallenge(walletAddress: string, network: WalletNetwork = "BSC_TESTNET", provider: ExternalWalletProvider = "metamask") {
-  const response = await fetchExternalWalletApi(
+  return requestJson<ExternalWalletChallenge>(
     "/api/wallet/external-wallet/challenge",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...userHeaders() },
-      body: JSON.stringify({ walletAddress, network, provider }),
-    },
     "第三方钱包签名请求失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...userHeaders() },
+        body: JSON.stringify({ walletAddress, network, provider }),
+      },
+      userAuthFailure: true,
+      networkErrorMessage: "第三方钱包签名请求失败。 无法连接服务，请检查网络或稍后重试。",
+    },
   );
-  return readJson<ExternalWalletChallenge>(response, "第三方钱包签名请求失败。", { userAuthFailure: true });
 }
 
 export async function bindExternalWallet(challengeId: string, walletAddress: string, signature: string) {
-  const response = await fetchExternalWalletApi(
+  return requestJson<{ binding: ExternalWalletBinding }>(
     "/api/wallet/external-wallet/bind",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json", ...userHeaders() },
-      body: JSON.stringify({ challengeId, walletAddress, signature }),
-    },
     "第三方钱包绑定失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...userHeaders() },
+        body: JSON.stringify({ challengeId, walletAddress, signature }),
+      },
+      userAuthFailure: true,
+      networkErrorMessage: "第三方钱包绑定失败。 无法连接服务，请检查网络或稍后重试。",
+    },
   );
-  return readJson<{ binding: ExternalWalletBinding }>(response, "第三方钱包绑定失败。", { userAuthFailure: true });
 }
 
 export async function unbindExternalWallet() {
-  const response = await fetchExternalWalletApi(
+  return requestJson<ExternalWalletBindingResponse & { ok?: true }>(
     "/api/wallet/external-wallet",
-    {
-      method: "DELETE",
-      headers: userHeaders(),
-    },
     "第三方钱包解绑失败。",
+    {
+      init: {
+        method: "DELETE",
+        headers: userHeaders(),
+      },
+      userAuthFailure: true,
+      networkErrorMessage: "第三方钱包解绑失败。 无法连接服务，请检查网络或稍后重试。",
+    },
   );
-  return readJson<ExternalWalletBindingResponse & { ok?: true }>(response, "第三方钱包解绑失败。", { userAuthFailure: true });
 }
 
 export async function fetchDepositAddress() {
-  const response = await fetch("/api/wallet/deposit-address", { headers: userHeaders() });
-  return readJson<DepositAddress>(response, "充值地址加载失败。", { userAuthFailure: true });
+  return requestJson<DepositAddress>("/api/wallet/deposit-address", "充值地址加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchOnchainDeposits() {
-  const response = await fetch("/api/wallet/deposits", { headers: userHeaders() });
-  return readJson<OnchainDeposit[]>(response, "链上充值记录加载失败。", { userAuthFailure: true });
+  return requestJson<OnchainDeposit[]>("/api/wallet/deposits", "链上充值记录加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchWalletLedger() {
-  const response = await fetch("/api/wallet/ledger", { headers: userHeaders() });
-  return readJson<FundingLedgerEntry[]>(response, "资金流水加载失败。", { userAuthFailure: true });
+  return requestJson<FundingLedgerEntry[]>("/api/wallet/ledger", "资金流水加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchWalletTransfers() {
-  const response = await fetch("/api/wallet/transfers", { headers: userHeaders() });
-  return readJson<AccountTransferRecord[]>(response, "转账记录加载失败。", { userAuthFailure: true });
+  return requestJson<AccountTransferRecord[]>("/api/wallet/transfers", "转账记录加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function transferWalletAccount(
@@ -482,100 +503,113 @@ export async function transferWalletAccount(
   amount: number,
   remark: string,
 ) {
-  const response = await fetch("/api/wallet/account-transfer", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ from, to, amount, remark }),
+  return requestJson<AccountTransferResponse>("/api/wallet/account-transfer", "账户划转失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ from, to, amount, remark }),
+    },
+    userAuthFailure: true,
   });
-  return readJson<AccountTransferResponse>(response, "账户划转失败。", { userAuthFailure: true });
 }
 
 export async function createInternalTransfer(recipient: string, amount: number, remark: string, clientRequestId?: string) {
-  const response = await fetch("/api/wallet/internal-transfer", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ recipient, amount, remark, clientRequestId }),
+  return requestJson<AccountTransferResponse>("/api/wallet/internal-transfer", "内部转账失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ recipient, amount, remark, clientRequestId }),
+    },
+    userAuthFailure: true,
   });
-  return readJson<AccountTransferResponse>(response, "内部转账失败。", { userAuthFailure: true });
 }
 
 export async function createWithdrawalRequest(amount: number, network: string, walletAddress: string, remark: string) {
-  const response = await fetch("/api/wallet/withdrawals", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ amount, network, walletAddress, remark }),
+  return requestJson<WithdrawalRequest>("/api/wallet/withdrawals", "提现申请提交失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ amount, network, walletAddress, remark }),
+    },
+    userAuthFailure: true,
   });
-  return readJson<WithdrawalRequest>(response, "提现申请提交失败。", { userAuthFailure: true });
 }
 
 export async function fetchWithdrawalRequests() {
-  const response = await fetch("/api/wallet/withdrawals", { headers: userHeaders() });
-  return readJson<WithdrawalRequest[]>(response, "提现申请加载失败。", { userAuthFailure: true });
+  return requestJson<WithdrawalRequest[]>("/api/wallet/withdrawals", "提现申请加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
 }
 
 export async function fetchAdminWalletAccounts() {
-  const response = await fetch("/api/admin/wallet/accounts", { headers: adminHeaders() });
-  return readJson<WalletAccounts[]>(response, "后台钱包账户加载失败。");
+  return requestJson<WalletAccounts[]>("/api/admin/wallet/accounts", "后台钱包账户加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminDepositAddresses() {
-  const response = await fetch("/api/admin/wallet/deposit-addresses", { headers: adminHeaders() });
-  return readJson<DepositAddress[]>(response, "后台充值地址加载失败。");
+  return requestJson<DepositAddress[]>("/api/admin/wallet/deposit-addresses", "后台充值地址加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminOnchainDeposits() {
-  const response = await fetch("/api/admin/wallet/deposits", { headers: adminHeaders() });
-  return readJson<OnchainDeposit[]>(response, "后台链上充值记录加载失败。");
+  return requestJson<OnchainDeposit[]>("/api/admin/wallet/deposits", "后台链上充值记录加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminWalletLedger() {
-  const response = await fetch("/api/admin/wallet/ledger", { headers: adminHeaders() });
-  return readJson<FundingLedgerEntry[]>(response, "后台资金流水加载失败。");
+  return requestJson<FundingLedgerEntry[]>("/api/admin/wallet/ledger", "后台资金流水加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminWalletTransfers() {
-  const response = await fetch("/api/admin/wallet/transfers", { headers: adminHeaders() });
-  return readJson<AccountTransferRecord[]>(response, "后台转账记录加载失败。");
+  return requestJson<AccountTransferRecord[]>("/api/admin/wallet/transfers", "后台转账记录加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminWithdrawalRequests() {
-  const response = await fetch("/api/admin/wallet/withdrawals", { headers: adminHeaders() });
-  return readJson<WithdrawalRequest[]>(response, "后台提现申请加载失败。");
+  return requestJson<WithdrawalRequest[]>("/api/admin/wallet/withdrawals", "后台提现申请加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function depositFundingAccount(userId: string, amount: number, remark: string) {
-  const response = await fetch("/api/admin/wallet/deposit", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...adminHeaders() },
-    body: JSON.stringify({ userId, amount, remark }),
+  return requestJson<WalletAccounts>("/api/admin/wallet/deposit", "后台充值失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...adminHeaders() },
+      body: JSON.stringify({ userId, amount, remark }),
+    },
   });
-  return readJson<WalletAccounts>(response, "后台充值失败。");
 }
 
 export async function approveWithdrawalRequest(id: string, reviewNote: string, txHash = "") {
-  const response = await fetch(`/api/admin/wallet/withdrawals/${id}/approve`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...adminHeaders() },
-    body: JSON.stringify({ reviewNote, txHash }),
+  return requestJson<WithdrawalRequest>(`/api/admin/wallet/withdrawals/${id}/approve`, "提现审核通过失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...adminHeaders() },
+      body: JSON.stringify({ reviewNote, txHash }),
+    },
   });
-  return readJson<WithdrawalRequest>(response, "提现审核通过失败。");
 }
 
 export async function rejectWithdrawalRequest(id: string, reviewNote: string) {
-  const response = await fetch(`/api/admin/wallet/withdrawals/${id}/reject`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...adminHeaders() },
-    body: JSON.stringify({ reviewNote }),
+  return requestJson<WithdrawalRequest>(`/api/admin/wallet/withdrawals/${id}/reject`, "提现拒绝失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...adminHeaders() },
+      body: JSON.stringify({ reviewNote }),
+    },
   });
-  return readJson<WithdrawalRequest>(response, "提现拒绝失败。");
 }
 
 export async function runAdminOnchainScan() {
-  const response = await fetch("/api/admin/wallet/onchain/scan", {
-    method: "POST",
-    headers: adminHeaders(),
-  });
-  return readJson<{
+  return requestJson<{
     fromBlock?: number;
     toBlock?: number;
     scannedBlocks?: number;
@@ -585,13 +619,19 @@ export async function runAdminOnchainScan() {
     status?: "ok" | "rate_limited";
     rateLimited?: boolean;
     message?: string;
-  }>(response, "链上扫描触发失败。");
+  }>("/api/admin/wallet/onchain/scan", "链上扫描触发失败。", {
+    init: {
+      method: "POST",
+      headers: adminHeaders(),
+    },
+  });
 }
 
 export async function confirmAdminWithdrawals() {
-  const response = await fetch("/api/admin/wallet/withdrawals/confirm", {
-    method: "POST",
-    headers: adminHeaders(),
+  return requestJson<WithdrawalRequest[]>("/api/admin/wallet/withdrawals/confirm", "提现确认触发失败。", {
+    init: {
+      method: "POST",
+      headers: adminHeaders(),
+    },
   });
-  return readJson<WithdrawalRequest[]>(response, "提现确认触发失败。");
 }

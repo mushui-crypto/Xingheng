@@ -1,6 +1,6 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
 import type { QuoteStatus, TradeSymbol } from "../types/market";
-import { handleUserAuthFailure } from "./session";
+import { adminHeaders, requestJson, userHeaders } from "./httpClient";
 
 export type ApiCandle = {
   symbol: string;
@@ -108,33 +108,14 @@ type ApiMarketSymbol = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "u
   status?: MarketStatus;
 };
 
-function userHeaders(userId?: string | null): Record<string, string> {
-  return {};
-}
-
-function adminHeaders(): Record<string, string> {
-  return {};
-}
-
-async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
-  const payload = await response.json().catch(() => null);
-  if (!response.ok) {
-    if (options?.userAuthFailure && (response.status === 401 || response.status === 403)) {
-      handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
-    }
-    throw new Error(payload?.message ?? fallbackMessage);
-  }
-  return payload as T;
-}
-
 export async function syncMarketSymbols(symbols: TradeSymbol[]) {
-  const response = await fetch("/api/admin/market/symbols/config", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ symbols }),
-  });
-
-  return readJson<ApiMarketSymbol[]>(response, "品种配置保存失败。").then((payload) => {
+  return requestJson<ApiMarketSymbol[]>("/api/admin/market/symbols/config", "品种配置保存失败。", {
+    init: {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ symbols }),
+    },
+  }).then((payload) => {
     const now = new Date().toISOString();
     return payload.map((symbol) => ({
       ...symbol,
@@ -147,8 +128,7 @@ export async function syncMarketSymbols(symbols: TradeSymbol[]) {
 }
 
 export async function fetchMarketSymbols() {
-  const response = await fetch("/api/market/symbols");
-  const payload = await readJson<ApiMarketSymbol[]>(response, "品种列表加载失败。");
+  const payload = await requestJson<ApiMarketSymbol[]>("/api/market/symbols", "品种列表加载失败。");
   const now = new Date().toISOString();
   return payload.map((symbol) => ({
     ...symbol,
@@ -160,13 +140,11 @@ export async function fetchMarketSymbols() {
 }
 
 export async function fetchTicker(symbol: string) {
-  const response = await fetch(`/api/market/ticker?symbol=${symbol}`);
-  return readJson<ApiTicker>(response, "最新行情加载失败。");
+  return requestJson<ApiTicker>(`/api/market/ticker?symbol=${symbol}`, "最新行情加载失败。");
 }
 
 export async function fetchCandles(symbol: string, interval: CandleInterval, limit = 500) {
-  const response = await fetch(`/api/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}`);
-  return readJson<ApiCandle[]>(response, "K 线加载失败。");
+  return requestJson<ApiCandle[]>(`/api/market/candles?symbol=${symbol}&interval=${interval}&limit=${limit}`, "K 线加载失败。");
 }
 
 function withSimulationAccount(path: string, simulationAccountId: string) {
@@ -175,74 +153,90 @@ function withSimulationAccount(path: string, simulationAccountId: string) {
 }
 
 export async function fetchTradingAccount(simulationAccountId: string) {
-  const response = await fetch(withSimulationAccount("/api/trading/account", simulationAccountId), { headers: userHeaders() });
-  return readJson<TradingAccount>(response, "账户加载失败。", { userAuthFailure: true });
-}
-
-export async function fetchPositions(simulationAccountId: string) {
-  const response = await fetch(withSimulationAccount("/api/trading/positions", simulationAccountId), { headers: userHeaders() });
-  return readJson<PositionView[]>(response, "持仓加载失败。", { userAuthFailure: true });
-}
-
-export async function fetchOrders(simulationAccountId: string) {
-  const response = await fetch(withSimulationAccount("/api/trading/orders", simulationAccountId), { headers: userHeaders() });
-  return readJson<OrderRecord[]>(response, "订单加载失败。", { userAuthFailure: true });
-}
-
-export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number, simulationAccountId: string) {
-  const response = await fetch("/api/trading/order", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ symbol, side, volume, simulationAccountId }),
-  });
-
-  return readJson<PositionView>(response, "市价单被拒绝。", { userAuthFailure: true });
-}
-
-export async function closePosition(positionId: string, simulationAccountId: string) {
-  const response = await fetch(`/api/trading/positions/${positionId}/close`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ simulationAccountId }),
-  });
-
-  return readJson<{ positionId: string; closePrice: number; pnl: number; account: TradingAccount }>(response, "平仓被拒绝。", {
+  return requestJson<TradingAccount>(withSimulationAccount("/api/trading/account", simulationAccountId), "账户加载失败。", {
+    init: { headers: userHeaders() },
     userAuthFailure: true,
   });
 }
 
+export async function fetchPositions(simulationAccountId: string) {
+  return requestJson<PositionView[]>(withSimulationAccount("/api/trading/positions", simulationAccountId), "持仓加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
+}
+
+export async function fetchOrders(simulationAccountId: string) {
+  return requestJson<OrderRecord[]>(withSimulationAccount("/api/trading/orders", simulationAccountId), "订单加载失败。", {
+    init: { headers: userHeaders() },
+    userAuthFailure: true,
+  });
+}
+
+export async function placeMarketOrder(symbol: string, side: TradeSide, volume: number, simulationAccountId: string) {
+  return requestJson<PositionView>("/api/trading/order", "市价单被拒绝。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ symbol, side, volume, simulationAccountId }),
+    },
+    userAuthFailure: true,
+  });
+}
+
+export async function closePosition(positionId: string, simulationAccountId: string) {
+  return requestJson<{ positionId: string; closePrice: number; pnl: number; account: TradingAccount }>(
+    `/api/trading/positions/${positionId}/close`,
+    "平仓被拒绝。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...userHeaders() },
+        body: JSON.stringify({ simulationAccountId }),
+      },
+      userAuthFailure: true,
+    },
+  );
+}
+
 export async function fetchAdminAccounts() {
-  const response = await fetch("/api/admin/accounts", { headers: adminHeaders() });
-  return readJson<TradingAccount[]>(response, "后台交易账户加载失败。");
+  return requestJson<TradingAccount[]>("/api/admin/accounts", "后台交易账户加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminPositions() {
-  const response = await fetch("/api/admin/positions", { headers: adminHeaders() });
-  return readJson<PositionView[]>(response, "后台持仓加载失败。");
+  return requestJson<PositionView[]>("/api/admin/positions", "后台持仓加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminOrders() {
-  const response = await fetch("/api/admin/orders", { headers: adminHeaders() });
-  return readJson<OrderRecord[]>(response, "后台订单加载失败。");
+  return requestJson<OrderRecord[]>("/api/admin/orders", "后台订单加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function fetchAdminBalanceAdjustments() {
-  const response = await fetch("/api/admin/balance-adjustments", { headers: adminHeaders() });
-  return readJson<BalanceAdjustment[]>(response, "后台资金调整记录加载失败。");
+  return requestJson<BalanceAdjustment[]>("/api/admin/balance-adjustments", "后台资金调整记录加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 export async function adjustAdminAccountBalance(userId: string, type: "deposit" | "withdraw" | "reset", amount: number, note = "") {
-  const response = await fetch(`/api/admin/accounts/${userId}/adjust-balance`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...adminHeaders() },
-    body: JSON.stringify({ type, amount, note }),
+  return requestJson<TradingAccount>(`/api/admin/accounts/${userId}/adjust-balance`, "资金调整失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...adminHeaders() },
+      body: JSON.stringify({ type, amount, note }),
+    },
   });
-  return readJson<TradingAccount>(response, "资金调整失败。");
 }
 
 export async function fetchAdminMarketStatus() {
-  const response = await fetch("/api/admin/market/status", { headers: adminHeaders() });
-  return readJson<AdminMarketStatus[]>(response, "后台行情状态加载失败。");
+  return requestJson<AdminMarketStatus[]>("/api/admin/market/status", "后台行情状态加载失败。", {
+    init: { headers: adminHeaders() },
+  });
 }
 
 function toQuoteStatus(status?: MarketStatus): QuoteStatus {
