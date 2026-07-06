@@ -297,7 +297,8 @@ function toMarketSymbol(market: HyperliquidPerpMarket): MarketSymbol {
   const maxPriceDecimals = Math.max(0, 6 - market.szDecimals);
   const significantDecimals = Math.max(0, 4 - Math.floor(Math.log10(market.markPrice)));
   const digits = Math.min(maxPriceDecimals, significantDecimals);
-  const lotStep = 10 ** -market.szDecimals;
+  const lotStep = roundToDecimals(10 ** -market.szDecimals, market.szDecimals);
+  const maxLot = roundToDecimals(Math.floor(1_000_000 / market.markPrice / lotStep) * lotStep, market.szDecimals);
   return {
     symbol,
     displayName: `${market.coin} Perpetual`,
@@ -308,11 +309,15 @@ function toMarketSymbol(market: HyperliquidPerpMarket): MarketSymbol {
     leverage: market.maxLeverage,
     contractSize: 1,
     minLot: lotStep,
-    maxLot: Math.max(lotStep, Number((Math.floor(1_000_000 / market.markPrice / lotStep) * lotStep).toFixed(8))),
+    maxLot: Math.max(lotStep, maxLot),
     lotStep,
     tradeStatus: "enabled",
     isVisible: true,
   };
+}
+
+function roundToDecimals(value: number, decimals: number) {
+  return Number(value.toFixed(Math.max(0, decimals)));
 }
 
 function subscriptionsForKey(key: string) {

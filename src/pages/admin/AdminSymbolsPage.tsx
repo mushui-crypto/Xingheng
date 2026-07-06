@@ -9,6 +9,7 @@ import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
 import type { TradeSymbol } from "../../types/market";
 import { formatPrice } from "../../utils/price";
+import { formatQuantity } from "../../utils/quantity";
 
 type SymbolDraft = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "updatedAt">;
 
@@ -171,7 +172,7 @@ export function AdminSymbolsPage() {
                     <td className="px-5 py-4 text-xs text-muted">
                       <p>点差 {symbol.spread} · {symbol.digits} 位</p>
                       <p>杠杆 1:{symbol.leverage} · 合约 {symbol.contractSize}</p>
-                      <p>手数 {symbol.minLot}-{symbol.maxLot} / {symbol.lotStep}</p>
+                      <p>手数 {formatQuantity(symbol.minLot, symbol.lotStep)}-{formatQuantity(symbol.maxLot, symbol.lotStep)} / {formatQuantity(symbol.lotStep, symbol.lotStep)}</p>
                     </td>
                     <td className="px-5 py-4">
                       <Badge tone={symbol.tradeStatus === "enabled" ? "success" : "neutral"}>

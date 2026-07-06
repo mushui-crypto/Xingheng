@@ -1,6 +1,7 @@
 import { Check, ChevronDown, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { TradeSymbol, TradeStatus } from "../../types/market";
+import { formatQuantity } from "../../utils/quantity";
 import { Modal } from "../ui/Modal";
 
 type MarketSymbolPickerProps = {
@@ -160,7 +161,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
                     {isSelected ? <Check className="xh-market-row-check" size={16} aria-hidden="true" /> : null}
                   </span>
                   <span className="xh-market-row-value">{item.leverage}×</span>
-                  <span className="xh-market-row-value">{item.minLot}</span>
+                  <span className="xh-market-row-value">{formatQuantity(item.minLot, item.lotStep)}</span>
                   <MarketStatus status={item.tradeStatus} />
                 </button>
               );

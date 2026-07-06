@@ -25,6 +25,7 @@ import { fetchSimulationAccounts, type SimulationAccountView } from "../../api/w
 import { useSymbolStore } from "../../store/symbolStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
+import { formatQuantity, normalizeQuantity } from "../../utils/quantity";
 
 const intervals: CandleInterval[] = ["1m", "5m", "15m", "1h"];
 const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
@@ -95,7 +96,7 @@ export function TradingPage() {
 
   useEffect(() => {
     if (selectedConfig) {
-      setVolume(selectedConfig.minLot);
+      setVolume(normalizeQuantity(selectedConfig.minLot));
       const nextParams: Record<string, string> = { symbol: selectedConfig.symbol };
       if (selectedSimulationAccountId) {
         nextParams.simulationAccountId = selectedSimulationAccountId;
@@ -451,7 +452,7 @@ export function TradingPage() {
             <h2 className="font-semibold">模拟市价单</h2>
             <label className="mt-4 block">
               <span className="mb-2 block text-sm text-muted">
-                交易手数（{selectedConfig.minLot}-{selectedConfig.maxLot} / {selectedConfig.lotStep}）
+                交易手数（{formatQuantity(selectedConfig.minLot, selectedConfig.lotStep)}-{formatQuantity(selectedConfig.maxLot, selectedConfig.lotStep)} / {formatQuantity(selectedConfig.lotStep, selectedConfig.lotStep)}）
               </span>
               <input
                 className="w-full border border-line bg-black px-3.5 py-3 text-sm text-white outline-none transition focus:border-white"
@@ -513,7 +514,7 @@ export function TradingPage() {
                   <tr key={position.id}>
                     <td className="px-5 py-4">{position.side === "long" ? "多单" : "空单"}</td>
                     <td className="px-5 py-4">{position.symbol}</td>
-                    <td className="px-5 py-4">{position.volume}</td>
+                    <td className="px-5 py-4">{formatQuantity(position.volume, selectedConfig.lotStep)}</td>
                     <td className="px-5 py-4">{formatPrice(position.entryPrice, digits)}</td>
                     <td className="px-5 py-4">{formatPrice(position.markPrice ?? undefined, digits)}</td>
                     <td className="px-5 py-4">{position.margin.toFixed(2)}</td>
@@ -573,7 +574,7 @@ export function TradingPage() {
                       <Badge tone={order.status === "filled" ? "success" : "danger"}>{order.status}</Badge>
                     </td>
                     <td className="px-5 py-4">{order.symbol}</td>
-                    <td className="px-5 py-4">{order.side} / {order.volume}</td>
+                    <td className="px-5 py-4">{order.side} / {formatQuantity(order.volume, selectedConfig.lotStep)}</td>
                     <td className="px-5 py-4">{order.price === null ? "-" : formatPrice(order.price, digits)}</td>
                     <td className="px-5 py-4 text-xs text-muted">
                       {order.bid === null || order.ask === null ? "-" : `${formatPrice(order.bid, digits)} / ${formatPrice(order.ask, digits)}`}
