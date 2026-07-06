@@ -1,42 +1,58 @@
 import crypto from "node:crypto";
-import { getAddress, HDNodeWallet, verifyMessage } from "ethers";
+import { HDNodeWallet, verifyMessage } from "ethers";
 import type { TradingService } from "../market/TradingService";
 import type { TradingStore } from "../storage/TradingStore";
 import { OnchainWalletService } from "./OnchainWalletService";
+import { asset, defaultUserId, depositNetwork, simulationAccountLimit, simulationInitialBalance, simulationResetCooldownMs } from "./walletConstants";
+import type { NormalizedTransferSide } from "./walletConstants";
+import { createDemoDeposit, createDemoLedgerEntries, createDemoWithdrawal } from "./demoWalletData";
+import {
+  assertNonNegativeAmount,
+  assertPositiveAmount,
+  buildExternalWalletChallengeMessage,
+  getLedgerDirection,
+  getLedgerDisplayStatus,
+  getTransferDisplayStatus,
+  getTransferFundingDirection,
+  getWithdrawalDisplayStatus,
+  makeId,
+  matchesFundingOrderFilter,
+  normalizeAccountType,
+  normalizeExternalWalletNetwork,
+  normalizeExternalWalletProvider,
+  normalizeFundingOrderFilter,
+  normalizeOptional,
+  normalizePage,
+  normalizePageSize,
+  normalizeRequiredInput,
+  normalizeRequiredValue,
+  normalizeSimulationAccountName,
+  normalizeUserId,
+  normalizeWalletAddress,
+  pickPrimaryFundingLedger,
+  resolvePageSize,
+  roundMoney,
+} from "./walletUtils";
 import type {
   AccountTransferRecord,
   AccountOverview,
   DepositAddress,
   ExternalWalletBinding,
   ExternalWalletChallenge,
-  ExternalWalletProvider,
   FundingAccount,
   FundingLedgerEntry,
   FundingLedgerStatus,
   FundingLedgerType,
   FundingOrder,
-  FundingOrderDisplayStatus,
-  FundingOrderType,
-  OnchainDeposit,
   OnchainRecord,
   RecentFundingActivity,
   SimulationAccount,
   SimulationAccountView,
   WalletAccountType,
-  WalletNetwork,
   WithdrawalRequest,
 } from "../types";
 
-const defaultUserId = "demo-user";
-const asset = "USDT";
-const depositNetwork: WalletNetwork = "BSC_TESTNET";
-const simulationAccountLimit = 5;
-const simulationInitialBalance = 100_000;
-const simulationResetCooldownMs = 24 * 60 * 60 * 1000;
-
 type TransferSide = WalletAccountType;
-type NormalizedTransferSide = "wallet" | "funding" | "simulation" | "realTrading";
-type FundingOrderFilter = "all" | "deposit" | "withdrawal" | "transfer" | FundingOrderType;
 
 export class WalletService {
   private depositMnemonic: string;
@@ -1815,497 +1831,4 @@ export class WalletService {
       updatedAt: now,
     };
   }
-}
-
-function normalizeUserId(userId: string) {
-  return userId?.trim() || defaultUserId;
-}
-
-function getLedgerDirection(entry: FundingLedgerEntry): RecentFundingActivity["direction"] {
-  if (entry.type === "deposit" || entry.type === "transfer_in" || entry.type === "internal_transfer_in") {
-    return "in";
-  }
-  if (
-    entry.type === "transfer_out" ||
-    entry.type === "internal_transfer_out" ||
-    entry.type === "withdrawal_freeze" ||
-    entry.type === "withdrawal_approved"
-  ) {
-    return "out";
-  }
-  return "neutral";
-}
-
-function normalizeFundingOrderFilter(value: string | undefined): FundingOrderFilter {
-  if (
-    value === "deposit" ||
-    value === "withdrawal" ||
-    value === "transfer" ||
-    value === "account_transfer" ||
-    value === "internal_transfer"
-  ) {
-    return value;
-  }
-  return "all";
-}
-
-function matchesFundingOrderFilter(order: FundingOrder, filter: FundingOrderFilter) {
-  if (filter === "all") {
-    return true;
-  }
-  if (filter === "transfer") {
-    return order.orderType === "account_transfer" || order.orderType === "internal_transfer";
-  }
-  return order.orderType === filter;
-}
-
-function getLedgerDisplayStatus(status: FundingLedgerStatus): FundingOrderDisplayStatus {
-  if (status === "completed") {
-    return "completed";
-  }
-  if (status === "rejected") {
-    return "cancelled";
-  }
-  return "pending";
-}
-
-function getWithdrawalDisplayStatus(status: WithdrawalRequest["status"]): FundingOrderDisplayStatus {
-  if (status === "confirmed") {
-    return "completed";
-  }
-  if (status === "failed") {
-    return "failed";
-  }
-  if (status === "rejected") {
-    return "cancelled";
-  }
-  if (status === "broadcasting" || status === "broadcasted") {
-    return "processing";
-  }
-  return "pending";
-}
-
-function getTransferDisplayStatus(status: AccountTransferRecord["status"]): FundingOrderDisplayStatus {
-  if (status === "completed") {
-    return "completed";
-  }
-  if (status === "reversed") {
-    return "cancelled";
-  }
-  return "failed";
-}
-
-function getTransferFundingDirection(transfer: AccountTransferRecord, userId: string): FundingOrder["direction"] {
-  if (transfer.transferType === "internal_transfer") {
-    if (transfer.toUserId === userId) {
-      return "in";
-    }
-    if (transfer.fromUserId === userId) {
-      return "out";
-    }
-    return "neutral";
-  }
-  if (transfer.toAccountType === "funding") {
-    return "in";
-  }
-  if (transfer.fromAccountType === "funding") {
-    return "out";
-  }
-  return "neutral";
-}
-
-function pickPrimaryFundingLedger(entries: FundingLedgerEntry[] | undefined) {
-  if (!entries || entries.length === 0) {
-    return null;
-  }
-  return [...entries].sort((a, b) => {
-    const fundingDeltaA = Math.abs(a.balanceAfter - a.balanceBefore) + Math.abs(a.frozenAfter - a.frozenBefore);
-    const fundingDeltaB = Math.abs(b.balanceAfter - b.balanceBefore) + Math.abs(b.frozenAfter - b.frozenBefore);
-    return fundingDeltaB - fundingDeltaA || b.updatedAt - a.updatedAt;
-  })[0];
-}
-
-function normalizePageSize(value: number | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return 50;
-  }
-  return Math.min(200, Math.max(1, Math.trunc(value)));
-}
-
-function resolvePageSize(limit: number | undefined, pageSize: number | undefined) {
-  return typeof pageSize === "number" && Number.isFinite(pageSize) ? pageSize : limit;
-}
-
-function normalizePage(value: number | undefined) {
-  if (typeof value !== "number" || !Number.isFinite(value)) {
-    return 1;
-  }
-  return Math.max(1, Math.trunc(value));
-}
-
-function createDemoDeposit(input: {
-  id: string;
-  userId: string;
-  toAddress: string;
-  tokenAddress: string;
-  amount: string;
-  amountDecimal: number;
-  txHash: string;
-  logIndex: number;
-  blockNumber: number;
-  confirmations: number;
-  status: OnchainDeposit["status"];
-  creditedLedgerId?: string | null;
-  failedReason?: string | null;
-  createdAt: number;
-  confirmedAt?: number | null;
-}): OnchainDeposit {
-  return {
-    id: input.id,
-    userId: input.userId,
-    asset,
-    network: depositNetwork,
-    chainId: Number(process.env.BSC_TESTNET_CHAIN_ID ?? 97),
-    tokenAddress: input.tokenAddress,
-    fromAddress: "0x1111111111111111111111111111111111111111",
-    toAddress: input.toAddress,
-    amount: input.amount,
-    amountDecimal: roundMoney(input.amountDecimal),
-    txHash: input.txHash,
-    logIndex: input.logIndex,
-    blockNumber: input.blockNumber,
-    blockHash: `0x${input.blockNumber.toString(16).padStart(64, "0")}`,
-    confirmations: input.confirmations,
-    status: input.status,
-    creditedLedgerId: input.creditedLedgerId ?? null,
-    failedReason: input.failedReason ?? null,
-    detectedAt: input.createdAt,
-    confirmedAt: input.confirmedAt ?? null,
-    createdAt: input.createdAt,
-    updatedAt: input.confirmedAt ?? input.createdAt,
-  };
-}
-
-function createDemoWithdrawal(input: {
-  id: string;
-  userId: string;
-  amount: number;
-  status: WithdrawalRequest["status"];
-  walletAddress: string;
-  tokenAddress: string;
-  broadcastTxHash?: string | null;
-  failedReason?: string | null;
-  confirmations?: number | null;
-  createdAt: number;
-  reviewedAt?: number | null;
-  broadcastedAt?: number | null;
-  confirmedAt?: number | null;
-  failedAt?: number | null;
-  remark?: string | null;
-}): WithdrawalRequest {
-  return {
-    id: input.id,
-    userId: input.userId,
-    asset,
-    amount: roundMoney(input.amount),
-    status: input.status,
-    network: depositNetwork,
-    walletAddress: input.walletAddress,
-    txHash: input.broadcastTxHash ?? null,
-    onchainStatus: input.status,
-    chainId: Number(process.env.BSC_TESTNET_CHAIN_ID ?? 97),
-    tokenAddress: input.tokenAddress,
-    fromAddress: "0x5555555555555555555555555555555555555555",
-    toAddress: input.walletAddress,
-    broadcastTxHash: input.broadcastTxHash ?? null,
-    broadcastedAt: input.broadcastedAt ?? null,
-    confirmedAt: input.confirmedAt ?? null,
-    failedAt: input.failedAt ?? null,
-    failedReason: input.failedReason ?? null,
-    confirmations: input.confirmations ?? 0,
-    broadcastAttemptCount: input.broadcastTxHash ? 1 : 0,
-    lastBroadcastAttemptAt: input.broadcastedAt ?? null,
-    remark: input.remark ?? null,
-    reviewNote: input.reviewedAt ? "演示数据：后台审核通过" : null,
-    createdAt: input.createdAt,
-    reviewedAt: input.reviewedAt ?? null,
-    updatedAt: input.failedAt ?? input.confirmedAt ?? input.broadcastedAt ?? input.reviewedAt ?? input.createdAt,
-  };
-}
-
-function createDemoLedgerEntries(input: { userId: string; accountId: string; depositAddress: string }): FundingLedgerEntry[] {
-  const createdAt = Date.parse("2026-07-03T09:30:00+08:00");
-  const userId = input.userId;
-  const accountId = input.accountId;
-  const makeEntry = (
-    entry: Omit<FundingLedgerEntry, "userId" | "accountId" | "accountType" | "asset" | "network" | "createdAt" | "updatedAt"> & {
-      createdAt: number;
-      network?: string | null;
-    },
-  ): FundingLedgerEntry => ({
-    userId,
-    accountId,
-    accountType: "funding",
-    asset,
-    network: entry.network ?? null,
-    ...entry,
-    amount: roundMoney(entry.amount),
-    balanceBefore: roundMoney(entry.balanceBefore),
-    balanceAfter: roundMoney(entry.balanceAfter),
-    frozenBefore: roundMoney(entry.frozenBefore),
-    frozenAfter: roundMoney(entry.frozenAfter),
-    updatedAt: entry.createdAt,
-  });
-
-  return [
-    makeEntry({
-      id: "LED-DEMO-ONCHAIN-001",
-      type: "deposit",
-      source: "onchain_deposit",
-      amount: 2500,
-      balanceBefore: 0,
-      balanceAfter: 2500,
-      frozenBefore: 0,
-      frozenAfter: 0,
-      status: "completed",
-      relatedId: "DEP-DEMO-CONFIRMED-001",
-      network: depositNetwork,
-      walletAddress: input.depositAddress,
-      txHash: "0x1000000000000000000000000000000000000000000000000000000000000001",
-      remark: "演示数据：钱包划转入资金账户",
-      createdAt: createdAt + 180_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-TRANSFER-IN-001",
-      type: "transfer_in",
-      source: "account_transfer",
-      amount: 1500,
-      balanceBefore: 2500,
-      balanceAfter: 4000,
-      frozenBefore: 0,
-      frozenAfter: 0,
-      status: "completed",
-      relatedId: "TRF-DEMO-SIM-FUND-001",
-      walletAddress: null,
-      txHash: null,
-      remark: "演示数据：模拟账户转入资金账户",
-      createdAt: createdAt + 240_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-WITHDRAW-PENDING-001",
-      type: "withdrawal_freeze",
-      source: "withdrawal_request",
-      amount: 250,
-      balanceBefore: 4000,
-      balanceAfter: 4000,
-      frozenBefore: 0,
-      frozenAfter: 250,
-      status: "pending",
-      relatedId: "WDR-DEMO-PENDING-001",
-      network: depositNetwork,
-      walletAddress: "0x2222222222222222222222222222222222222222",
-      txHash: null,
-      remark: "演示数据：出金待审核，资金已冻结",
-      createdAt: createdAt + 480_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-WITHDRAW-FREEZE-001",
-      type: "withdrawal_freeze",
-      source: "withdrawal_request",
-      amount: 600,
-      balanceBefore: 4000,
-      balanceAfter: 4000,
-      frozenBefore: 250,
-      frozenAfter: 850,
-      status: "pending",
-      relatedId: "WDR-DEMO-CONFIRMED-001",
-      network: depositNetwork,
-      walletAddress: "0x3333333333333333333333333333333333333333",
-      txHash: null,
-      remark: "演示数据：已审核出金的冻结记录",
-      createdAt: createdAt + 540_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-WITHDRAW-CONFIRMED-001",
-      type: "withdrawal_approved",
-      source: "withdrawal_request",
-      amount: 600,
-      balanceBefore: 4000,
-      balanceAfter: 3400,
-      frozenBefore: 850,
-      frozenAfter: 250,
-      status: "completed",
-      relatedId: "WDR-DEMO-CONFIRMED-001",
-      network: depositNetwork,
-      walletAddress: "0x3333333333333333333333333333333333333333",
-      txHash: "0x2000000000000000000000000000000000000000000000000000000000000001",
-      remark: "演示数据：出金链上确认后正式扣减",
-      createdAt: createdAt + 780_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-TRANSFER-OUT-001",
-      type: "transfer_out",
-      source: "account_transfer",
-      amount: 200,
-      balanceBefore: 3400,
-      balanceAfter: 3200,
-      frozenBefore: 250,
-      frozenAfter: 250,
-      status: "completed",
-      relatedId: "TRF-DEMO-FUND-REAL-001",
-      walletAddress: null,
-      txHash: null,
-      remark: "演示数据：资金账户转入真实交易账户",
-      createdAt: createdAt + 900_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-WITHDRAW-FAILED-FREEZE-001",
-      type: "withdrawal_freeze",
-      source: "withdrawal_request",
-      amount: 120,
-      balanceBefore: 3200,
-      balanceAfter: 3200,
-      frozenBefore: 250,
-      frozenAfter: 370,
-      status: "pending",
-      relatedId: "WDR-DEMO-FAILED-001",
-      network: depositNetwork,
-      walletAddress: "0x4444444444444444444444444444444444444444",
-      txHash: null,
-      remark: "演示数据：失败出金的冻结记录",
-      createdAt: createdAt + 1_080_000,
-    }),
-    makeEntry({
-      id: "LED-DEMO-WITHDRAW-FAILED-RELEASE-001",
-      type: "withdrawal_rejected",
-      source: "withdrawal_request",
-      amount: 120,
-      balanceBefore: 3200,
-      balanceAfter: 3200,
-      frozenBefore: 370,
-      frozenAfter: 250,
-      status: "rejected",
-      relatedId: "WDR-DEMO-FAILED-001",
-      network: depositNetwork,
-      walletAddress: "0x4444444444444444444444444444444444444444",
-      txHash: "0x2000000000000000000000000000000000000000000000000000000000000002",
-      remark: "演示数据：RPC 广播超时，冻结资金已释放",
-      createdAt: createdAt + 1_260_000,
-    }),
-  ];
-}
-
-function normalizeOptional(value: unknown) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  return normalized || null;
-}
-
-function normalizeRequiredValue(value: string, name: string) {
-  if (!value) {
-    throw new Error(`缺少环境变量 ${name}。`);
-  }
-  return value;
-}
-
-function normalizeRequiredInput(value: unknown, fieldName: string) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  if (!normalized) {
-    throw new Error(`缺少参数 ${fieldName}。`);
-  }
-  return normalized;
-}
-
-function normalizeSimulationAccountName(value: unknown, fallback?: string) {
-  const normalized = typeof value === "string" ? value.trim() : "";
-  const name = normalized || fallback;
-  if (!name) {
-    throw new Error("模拟账户名称不能为空。");
-  }
-  if (name.length > 30) {
-    throw new Error("模拟账户名称不能超过 30 个字符。");
-  }
-  return name;
-}
-
-function normalizeWalletAddress(value: unknown) {
-  const raw = normalizeRequiredInput(value, "walletAddress");
-  try {
-    return getAddress(raw);
-  } catch {
-    throw new Error("钱包地址格式不正确。");
-  }
-}
-
-function normalizeExternalWalletNetwork(value: unknown): WalletNetwork {
-  const normalized = typeof value === "string" && value.trim() ? value.trim().toUpperCase() : depositNetwork;
-  if (normalized !== depositNetwork) {
-    throw new Error("当前仅支持 BSC_TESTNET 网络。");
-  }
-  return depositNetwork;
-}
-
-function normalizeExternalWalletProvider(value: unknown): ExternalWalletProvider {
-  const normalized = typeof value === "string" && value.trim() ? value.trim().toLowerCase() : "metamask";
-  if (normalized !== "metamask") {
-    throw new Error("当前仅支持 MetaMask 第三方钱包。");
-  }
-  return "metamask";
-}
-
-function buildExternalWalletChallengeMessage(input: {
-  userId: string;
-  walletAddress: string;
-  network: WalletNetwork;
-  provider: ExternalWalletProvider;
-  nonce: string;
-  issuedAt: number;
-  expiresAt: number;
-}) {
-  return [
-    "Stella X 第三方钱包绑定验证",
-    "",
-    "请确认你正在把该第三方钱包绑定到 Stella X 账户。",
-    "星衡不会获取你的私钥，也不会代你发起链上转账。",
-    "",
-    `User ID: ${input.userId}`,
-    `Wallet Address: ${input.walletAddress}`,
-    `Network: ${input.network}`,
-    `Provider: ${input.provider}`,
-    `Nonce: ${input.nonce}`,
-    `Issued At: ${new Date(input.issuedAt).toISOString()}`,
-    `Expires At: ${new Date(input.expiresAt).toISOString()}`,
-  ].join("\n");
-}
-
-function normalizeAccountType(value: WalletAccountType): NormalizedTransferSide {
-  if (value === "wallet") {
-    return "wallet";
-  }
-  if (value === "trading" || value === "simulation") {
-    return "simulation";
-  }
-  if (value === "funding" || value === "realTrading") {
-    return value;
-  }
-  throw new Error("账户类型不正确。");
-}
-
-function assertPositiveAmount(amount: number) {
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("金额必须大于 0。");
-  }
-}
-
-function assertNonNegativeAmount(amount: number) {
-  if (!Number.isFinite(amount) || amount < 0) {
-    throw new Error("金额不能小于 0。");
-  }
-}
-
-function roundMoney(value: number) {
-  return Number(value.toFixed(2));
-}
-
-function makeId(prefix: string) {
-  return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
 }
