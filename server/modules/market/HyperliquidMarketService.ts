@@ -14,7 +14,6 @@ import {
   normalizeInterval,
   normalizeSymbol,
   setSupportedMarketSymbols,
-  supportedIntervals,
   toHyperliquidCoin,
 } from "./marketConfig";
 

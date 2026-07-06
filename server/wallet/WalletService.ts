@@ -1217,11 +1217,11 @@ export class WalletService {
     });
   }
 
-  private transferFundingToSimulation(userId: string, amount: number, remark?: string | null): never {
+  private transferFundingToSimulation(_userId: string, _amount: number, _remark?: string | null): never {
     throw new Error("模拟账户资金与资金账户不联动，请在模拟账户页使用重置资金。");
   }
 
-  private transferSimulationToFunding(userId: string, amount: number, remark?: string | null): never {
+  private transferSimulationToFunding(_userId: string, _amount: number, _remark?: string | null): never {
     throw new Error("模拟账户资金与资金账户不联动，不能划转到资金账户。");
   }
 
