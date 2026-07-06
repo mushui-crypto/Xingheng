@@ -9,7 +9,7 @@ export function AdminLoginPage() {
   const navigate = useNavigate();
   const isAdminLoggedIn = useAdminAuthStore((state) => state.isAdminLoggedIn);
   const login = useAdminAuthStore((state) => state.login);
-  const [email, setEmail] = useState("admin@example.com");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [message, setMessage] = useState("");
 
@@ -48,7 +48,7 @@ export function AdminLoginPage() {
             type="password"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
-            placeholder="admin123"
+            autoComplete="current-password"
             required
           />
           {message ? <p className="border border-red-400/30 bg-red-400/10 p-3 text-sm text-red-200">{message}</p> : null}

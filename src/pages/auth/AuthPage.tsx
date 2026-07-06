@@ -9,35 +9,28 @@ import { isValidEmail } from "../../utils/validators";
 import { AuthFrame } from "./AuthFrame";
 
 type AuthMode = "login" | "register";
-type RememberedCredentials = {
+type RememberedEmail = {
   email: string;
-  password: string;
 };
 
-const emptyCredentials: RememberedCredentials = {
+const emptyRememberedEmail: RememberedEmail = {
   email: "",
-  password: "",
-};
-
-const seedCredentials: RememberedCredentials = {
-  email: "demo@example.com",
-  password: "demo123",
 };
 
 const authInputClass =
   "xh-auth-input h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45";
 const authPasswordInputClass = `${authInputClass} pr-14`;
 
-function readRememberedCredentials() {
-  return readStorage<RememberedCredentials>(storageKeys.rememberedCredentials, emptyCredentials);
+function readRememberedEmail() {
+  return readStorage<RememberedEmail>(storageKeys.rememberedEmail, emptyRememberedEmail);
 }
 
-function saveRememberedCredentials(email: string, password: string) {
-  writeStorage(storageKeys.rememberedCredentials, { email, password });
+function saveRememberedEmail(email: string) {
+  writeStorage(storageKeys.rememberedEmail, { email });
 }
 
-function clearRememberedCredentials() {
-  writeStorage(storageKeys.rememberedCredentials, emptyCredentials);
+function clearRememberedEmail() {
+  writeStorage(storageKeys.rememberedEmail, emptyRememberedEmail);
 }
 
 export function AuthPage() {
@@ -61,10 +54,10 @@ export function AuthPage() {
 function LoginForm() {
   const navigate = useNavigate();
   const login = useAuthStore((state) => state.login);
-  const [rememberedCredentials] = useState(() => readRememberedCredentials());
-  const [email, setEmail] = useState(rememberedCredentials.email || seedCredentials.email);
-  const [password, setPassword] = useState(rememberedCredentials.password || seedCredentials.password);
-  const [rememberPassword, setRememberPassword] = useState(Boolean(rememberedCredentials.email && rememberedCredentials.password));
+  const [rememberedEmail] = useState(() => readRememberedEmail());
+  const [email, setEmail] = useState(rememberedEmail.email);
+  const [password, setPassword] = useState("");
+  const [rememberEmail, setRememberEmail] = useState(Boolean(rememberedEmail.email));
   const [showPassword, setShowPassword] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -87,10 +80,10 @@ function LoginForm() {
       setMessage(result.message);
       return;
     }
-    if (rememberPassword) {
-      saveRememberedCredentials(email, password);
+    if (rememberEmail) {
+      saveRememberedEmail(email);
     } else {
-      clearRememberedCredentials();
+      clearRememberedEmail();
     }
     navigate("/app/dashboard", { replace: true });
   };
@@ -119,13 +112,13 @@ function LoginForm() {
             <input
               className="h-4 w-4 rounded border-white/25 bg-transparent"
               type="checkbox"
-              checked={rememberPassword}
+              checked={rememberEmail}
               onChange={(event) => {
-                setRememberPassword(event.target.checked);
-                if (!event.target.checked) clearRememberedCredentials();
+                setRememberEmail(event.target.checked);
+                if (!event.target.checked) clearRememberedEmail();
               }}
             />
-            Remember password
+            Remember email
           </label>
           <span>Forgot password?</span>
         </div>
@@ -159,8 +152,8 @@ function RegisterForm() {
       return;
     }
 
-    if (password.length < 6) {
-      setMessage("密码至少需要 6 位。");
+    if (password.length < 8) {
+      setMessage("密码至少需要 8 位。");
       return;
     }
 
@@ -194,7 +187,7 @@ function RegisterForm() {
           autoComplete="new-password"
           value={password}
           onChange={setPassword}
-          minLength={6}
+          minLength={8}
           visible={showPassword}
           onToggleVisible={() => setShowPassword((value) => !value)}
         />
@@ -204,7 +197,7 @@ function RegisterForm() {
           autoComplete="new-password"
           value={confirmPassword}
           onChange={setConfirmPassword}
-          minLength={6}
+          minLength={8}
           visible={showConfirmPassword}
           onToggleVisible={() => setShowConfirmPassword((value) => !value)}
         />

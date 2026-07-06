@@ -5,7 +5,7 @@ import { useSearchParams } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
-import { Select } from "../../components/ui/Select";
+import { MarketSymbolPicker } from "../../components/trading/MarketSymbolPicker";
 import {
   closePosition,
   fetchCandles,
@@ -373,18 +373,17 @@ export function TradingPage() {
       <Toast message={toastMessage} />
       <div className="xh-page-header">
         <div>
-          <p className="text-sm text-muted">Binance 合约行情 + 内部模拟交易</p>
-          <h1 className="xh-title mt-2">{symbol} 交易终端</h1>
+          <h1 className="sr-only">{symbol} 交易终端</h1>
+          <p className="text-sm text-muted">Hyperliquid 永续 · 内部模拟交易</p>
+          <div className="mt-2">
+            <MarketSymbolPicker
+              symbols={symbols}
+              selectedSymbol={symbol}
+              onSelect={setSelectedSymbol}
+            />
+          </div>
         </div>
         <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:items-center">
-          <Select
-            label="选择品种"
-            hideLabel
-            className="py-2.5 md:w-auto"
-            value={symbol}
-            onChange={(event) => setSelectedSymbol(event.target.value)}
-            options={symbols.map((item) => ({ value: item.symbol, label: `${item.symbol} · ${item.displayName}` }))}
-          />
           <div className="self-start">
             <Badge tone={statusTone}>{statusText}</Badge>
           </div>

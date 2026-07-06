@@ -71,6 +71,10 @@ declare global {
 const tokenIconSrc = "/assets/xingheng-logo@2x.png";
 const bscTestnetLabel = "BNB Smart Chain Testnet";
 const bscTestnetChainId = "0x61";
+const bscTestnetRpcUrls = [
+  "https://bsc-testnet-dataseed.bnbchain.org",
+  "https://data-seed-prebsc-1-s1.bnbchain.org:8545",
+];
 const requiredConfirmations = 1;
 const currentSimulationAccountKey = "xingheng.trading.currentSimulationAccountId";
 const transferAccountOptions = [
@@ -2045,33 +2049,41 @@ function normalizeMetaMaskAddress(value: unknown) {
 }
 
 async function ensureBscTestnet(ethereum: EthereumProvider) {
-  const currentChainId = await ethereum.request({ method: "eth_chainId" });
-  if (currentChainId === bscTestnetChainId) {
-    return;
-  }
-
   try {
-    await ethereum.request({
-      method: "wallet_switchEthereumChain",
-      params: [{ chainId: bscTestnetChainId }],
-    });
-  } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: number }).code : undefined;
-    if (code !== 4902) {
-      throw error;
+    const currentChainId = await ethereum.request({ method: "eth_chainId" });
+    if (currentChainId === bscTestnetChainId) {
+      return;
     }
-    await ethereum.request({
-      method: "wallet_addEthereumChain",
-      params: [
-        {
-          chainId: bscTestnetChainId,
-          chainName: bscTestnetLabel,
-          nativeCurrency: { name: "BNB", symbol: "BNB", decimals: 18 },
-          rpcUrls: ["https://data-seed-prebsc-1-s1.binance.org:8545/"],
-          blockExplorerUrls: ["https://testnet.bscscan.com"],
-        },
-      ],
-    });
+
+    try {
+      await ethereum.request({
+        method: "wallet_switchEthereumChain",
+        params: [{ chainId: bscTestnetChainId }],
+      });
+    } catch (error) {
+      const code = typeof error === "object" && error !== null && "code" in error ? (error as { code?: number }).code : undefined;
+      if (code !== 4902) {
+        throw error;
+      }
+      await ethereum.request({
+        method: "wallet_addEthereumChain",
+        params: [
+          {
+            chainId: bscTestnetChainId,
+            chainName: bscTestnetLabel,
+            nativeCurrency: { name: "Test BNB", symbol: "tBNB", decimals: 18 },
+            rpcUrls: bscTestnetRpcUrls,
+            blockExplorerUrls: ["https://testnet.bscscan.com"],
+          },
+        ],
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "";
+    if (/failed to fetch/i.test(message)) {
+      throw new Error("BSC Testnet 网络节点暂时无法连接，请检查网络或稍后重试。");
+    }
+    throw error;
   }
 }
 

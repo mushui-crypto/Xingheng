@@ -9,6 +9,8 @@ type ModalProps = {
   description?: string;
   children: ReactNode;
   onClose: () => void;
+  shellClassName?: string;
+  bodyClassName?: string;
 };
 
 let openModalCount = 0;
@@ -40,13 +42,29 @@ function lockDocumentScroll() {
   };
 }
 
-export function Modal({ open, title, description, children, onClose }: ModalProps) {
+export function Modal({
+  open,
+  title,
+  description,
+  children,
+  onClose,
+  shellClassName = "",
+  bodyClassName = "",
+}: ModalProps) {
   const titleId = useId();
 
   useEffect(() => {
     if (!open) return;
 
-    return lockDocumentScroll();
+    const previouslyFocusedElement = document.activeElement;
+    const releaseScrollLock = lockDocumentScroll();
+
+    return () => {
+      releaseScrollLock();
+      if (previouslyFocusedElement instanceof HTMLElement) {
+        previouslyFocusedElement.focus();
+      }
+    };
   }, [open]);
 
   useEffect(() => {
@@ -75,7 +93,7 @@ export function Modal({ open, title, description, children, onClose }: ModalProp
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
-        className="xh-modal-shell"
+        className={`xh-modal-shell ${shellClassName}`}
         onClick={(event) => event.stopPropagation()}
       >
         <div className="xh-modal-header">
@@ -90,7 +108,7 @@ export function Modal({ open, title, description, children, onClose }: ModalProp
           </Button>
         </div>
         <div className="xh-modal-divider" />
-        <div className="xh-modal-body">{children}</div>
+        <div className={`xh-modal-body ${bodyClassName}`}>{children}</div>
       </section>
     </div>,
     document.body,

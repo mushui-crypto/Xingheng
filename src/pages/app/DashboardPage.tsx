@@ -76,7 +76,7 @@ export function DashboardPage() {
           </div>
           <div>
             <h2 className="font-semibold">模拟账户入口</h2>
-            <p className="text-sm text-muted">查看 PERP BTC/USDT K线、实时报价，并提交内部模拟市价单。</p>
+            <p className="text-sm text-muted">查看 Hyperliquid 永续 K 线与实时报价，并提交内部模拟市价单。</p>
           </div>
         </div>
         <Link

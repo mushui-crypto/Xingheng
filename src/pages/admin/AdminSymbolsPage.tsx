@@ -12,20 +12,17 @@ import { formatPrice } from "../../utils/price";
 
 type SymbolDraft = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "updatedAt">;
 
-const MANAGED_SYMBOL = "BTCUSDT";
-
 export function AdminSymbolsPage() {
   const symbols = useSymbolStore((state) => state.symbols);
   const setSymbolsFromBackend = useSymbolStore((state) => state.setSymbolsFromBackend);
-  const updateSymbol = useSymbolStore((state) => state.updateSymbol);
   const quotes = useQuoteStore((state) => state.quotes);
   const refreshAllQuotes = useQuoteStore((state) => state.refreshAllQuotes);
   const updateStatuses = useQuoteStore((state) => state.updateStatuses);
-  const managedSymbol = symbols.find((item) => item.symbol === MANAGED_SYMBOL) ?? symbols[0] ?? null;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<SymbolDraft | null>(null);
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const managedSymbol = symbols.find((item) => item.id === editingId) ?? symbols[0] ?? null;
 
   const quoteBySymbol = useMemo(() => new Map(quotes.map((quote) => [quote.symbol, quote])), [quotes]);
   const symbolConfigKey = useMemo(
@@ -62,8 +59,8 @@ export function AdminSymbolsPage() {
 
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
-    if (!editingId || !draft || !managedSymbol || managedSymbol.symbol !== MANAGED_SYMBOL) {
-      setMessage("当前阶段仅允许编辑 BTCUSDT。");
+    if (!editingId || !draft || !managedSymbol) {
+      setMessage("请选择需要编辑的品种。");
       return;
     }
     const normalized: SymbolDraft = {
@@ -78,13 +75,11 @@ export function AdminSymbolsPage() {
       tradeStatus: draft.tradeStatus,
       isVisible: draft.isVisible,
     };
-    const nextSymbols = symbols.map((item) => (item.id === editingId ? { ...item, ...normalized, updatedAt: new Date().toISOString() } : item));
     setSaving(true);
     try {
-      const backendSymbols = await syncMarketSymbols(nextSymbols);
+      const backendSymbols = await syncMarketSymbols([{ ...managedSymbol, ...normalized, updatedAt: new Date().toISOString() }]);
       setSymbolsFromBackend(backendSymbols);
-      updateSymbol(editingId, normalized);
-      setMessage("BTCUSDT 品种配置已保存。");
+      setMessage(`${managedSymbol.symbol} 品种配置已保存。`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "品种配置保存失败。");
     } finally {
@@ -97,7 +92,7 @@ export function AdminSymbolsPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">品种管理</h1>
-          <p className="mt-2 text-sm text-muted">当前阶段只允许维护 BTCUSDT，symbol 与 apiSymbol 固定不可编辑。</p>
+          <p className="mt-2 text-sm text-muted">品种目录自动同步自 Hyperliquid；symbol、API Symbol、精度与最小手数不可编辑。</p>
         </div>
         <div className="flex gap-3">
           <Button variant="secondary" onClick={() => void refreshAllQuotes()}>
@@ -116,9 +111,9 @@ export function AdminSymbolsPage() {
             <Input label="固定点差" type="number" step="0.00001" value={draft.spread} onChange={(event) => setNumberValue("spread", event.target.value)} required />
             <Input label="杠杆" type="number" value={draft.leverage} onChange={(event) => setNumberValue("leverage", event.target.value)} required />
             <Input label="合约单位" type="number" value={draft.contractSize} onChange={(event) => setNumberValue("contractSize", event.target.value)} required />
-            <Input label="最小手数" type="number" step="0.01" value={draft.minLot} onChange={(event) => setNumberValue("minLot", event.target.value)} required />
+            <Input label="最小手数" type="number" value={draft.minLot} onChange={() => undefined} disabled required />
             <Input label="最大手数" type="number" step="0.01" value={draft.maxLot} onChange={(event) => setNumberValue("maxLot", event.target.value)} required />
-            <Input label="手数步进" type="number" step="0.01" value={draft.lotStep} onChange={(event) => setNumberValue("lotStep", event.target.value)} required />
+            <Input label="手数步进" type="number" value={draft.lotStep} onChange={() => undefined} disabled required />
             <Select
               label="交易状态"
               value={draft.tradeStatus}
@@ -140,11 +135,11 @@ export function AdminSymbolsPage() {
           </div>
           {message ? <p className="border border-white/25 bg-white/[0.03] p-3 text-sm text-slate-200">{message}</p> : null}
           <div className="flex gap-3">
-            <Button type="submit" disabled={saving}>{saving ? "保存中..." : "保存 BTCUSDT"}</Button>
+            <Button type="submit" disabled={saving}>{saving ? "保存中..." : `保存 ${managedSymbol?.symbol ?? "品种"}`}</Button>
           </div>
         </form>
         ) : (
-          <p className="text-sm text-muted">未取得 BTCUSDT 配置，请刷新行情后重试。</p>
+          <p className="text-sm text-muted">尚未取得 Hyperliquid 品种目录，请稍后刷新。</p>
         )}
       </Card>
 

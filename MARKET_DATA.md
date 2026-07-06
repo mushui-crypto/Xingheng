@@ -1,150 +1,127 @@
-# 星衡 Binance 永续合约行情与 K 线模块
+# 星衡 Hyperliquid 永续行情与 K 线模块
 
-本模块采用“Binance 原生 USDT-M 永续合约行情源 + 内部 K 线服务”的单体结构，当前只支持：
+当前行情主线只使用 Hyperliquid 公开 API，不保留 Binance 行情 Adapter。
 
-- `PERP BTC/USDT`，内部请求 Binance 时使用 `BTCUSDT`
+- 平台内部交易品种：`{COIN}USDT`
+- Hyperliquid perpetual coin：`{COIN}`
+- 模拟账户记账资产：`USDT`
+- 行情只用于内部模拟成交，不向 Hyperliquid 提交真实订单
 
-`ETHUSDT`、`DOGEUSDT` 和其他 symbol 后续再增加，当前不属于 MVP 交易闭环。
+例如平台 `BTCUSDT` 映射 Hyperliquid `BTC` perpetual。平台 symbol 是内部模拟
+标识，不表示系统接入同名 CEX 市场，也不表示用户持有 Hyperliquid 账户。
 
-后端/交易系统工程 Agent 负责本模块的 Binance 接入、K 线引擎、数据存储和实时推送。详细职责见 `AGENTS.md`。
-
-## 本地启动
-
-```bash
-npm install
-npm run dev
-```
-
-前端：`http://localhost:5173`
-
-API：`http://127.0.0.1:8787`
-
-单独启动 API：
-
-```bash
-npm run start:api
-```
+服务启动时调用 `metaAndAssetCtxs` 同步主 DEX 品种目录，排除
+`isDelisted=true` 与带 DEX 前缀的 HIP-3 市场。全市场列表使用单个
+`allMids` 订阅；BBO、成交和 K 线按前端实际访问动态订阅并在连接关闭时取消。
 
 ## 模块结构
 
 | 模块 | 文件 | 说明 |
 | --- | --- | --- |
-| 行情服务 | `server/modules/market/BinanceMarketService.ts` | 启动 Binance REST 初始化、WebSocket 实时订阅、断线重连和状态更新 |
-| Binance REST | `server/modules/market/BinanceRestClient.ts` | 按周期拉取历史 K 线 |
-| K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史 K 线和当前未完成 K 线 |
-| 支持品种 | `server/config/supportedSymbols.ts` | 固定维护 BTCUSDT |
-| 行情 API | `server/modules/api/marketRoutes.ts` | 注册行情 REST API |
-| API 与 WebSocket 入口 | `server/index.ts` | 启动 REST API、交易接口和 `/ws` 推送 |
+| 行情服务 | `server/modules/market/HyperliquidMarketService.ts` | WebSocket 订阅、心跳、断线重连、状态更新 |
+| REST 客户端 | `server/modules/market/HyperliquidRestClient.ts` | `candleSnapshot` 历史 K 线与分页 |
+| K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史与当前 K 线 |
+| 品种映射 | `server/modules/market/marketConfig.ts` | `{COIN}USDT -> {COIN}` |
+| 行情 API | `server/modules/api/marketRoutes.ts` | 对前端输出内部标准化结构 |
+| API/WebSocket 入口 | `server/index.ts` | REST、交易接口和本地 `/ws` 推送 |
 
-## Binance REST 历史 K 线
+## 外部接口
 
-服务启动时会为 `BTCUSDT` 的每个支持周期拉取最近 500 根 K 线：
-
-```http
-GET https://fapi.binance.com/fapi/v1/klines?symbol=BTCUSDT&interval=15m&limit=500
-```
-
-外部数据会被转换为内部结构：
-
-```ts
-type Candle = {
-  symbol: string;
-  interval: "1m" | "5m" | "15m" | "1h";
-  time: number;
-  open: number;
-  high: number;
-  low: number;
-  close: number;
-  volume: number;
-};
-```
-
-其中 `time` 使用秒级 Unix 时间戳。
-
-## Binance WebSocket 实时 K 线
-
-服务订阅 Binance combined stream：
+默认主网端点：
 
 ```text
-wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/btcusdt@kline_5m/btcusdt@kline_15m/btcusdt@kline_1h/...
+REST:      https://api.hyperliquid.xyz/info
+WebSocket: wss://api.hyperliquid.xyz/ws
 ```
 
-每条 kline 消息会更新内存中的当前 K 线，并通过本地 WebSocket 推送给订阅客户端。Binance 标记当前 K 线已收盘时，会同时写入历史 K 线列表。
+可通过环境变量覆盖：
 
-Ticker 报价当前由 Binance 永续合约 `1m` K 线的最新 close 生成，再根据品种配置加上模拟点差。也就是说：Binance 提供实时价格，系统内部再算出用于模拟成交的 Bid/Ask。
+```env
+HYPERLIQUID_REST_BASE_URL=https://api.hyperliquid.xyz
+HYPERLIQUID_STREAM_URL=wss://api.hyperliquid.xyz/ws
+```
 
-当前默认使用 Binance 原生 USDT-M futures 端点。需要切换端点时，可以通过 `.env` 配置 `BINANCE_REST_BASE_URL`、`BINANCE_KLINE_PATH` 和 `BINANCE_STREAM_BASE_URL`。
+公开行情不使用钱包、API Key、签名或私钥。
 
-## 存储
+## 历史 K 线
 
-当前只使用进程内存：
+服务通过 `POST /info` 请求 `candleSnapshot`：
 
-- 历史 K 线：按 `symbol + interval` 保存，单序列最多保留 5000 根。
-- 当前 K 线：保存每个品种、每个周期当前未完成的 K 线。
-- 服务重启后数据会重新从 Binance REST 拉取。
+```json
+{
+  "type": "candleSnapshot",
+  "req": {
+    "coin": "BTC",
+    "interval": "15m",
+    "startTime": 1780000000000,
+    "endTime": 1780100000000
+  }
+}
+```
 
-当前没有 Redis/PostgreSQL 行情存储链路。模拟账户、订单、持仓、资金账户、资金流水、转账记录、链上充值记录和出金申请使用 SQLite，入口是 `server/storage/TradingStore.ts`。
+支持 `1m`、`5m`、`15m`、`1h`。服务启动时每个周期回补最近 500
+根；API 允许请求 1-1000 根并按 Hyperliquid 的单页限制自动分页。内部
+`Candle.time` 统一为秒级 Unix 时间戳。
 
-## REST API
+## 实时订阅
 
-### 健康检查
+用户打开具体交易品种时按需订阅：
+
+```json
+{ "method": "subscribe", "subscription": { "type": "bbo", "coin": "BTC" } }
+{ "method": "subscribe", "subscription": { "type": "trades", "coin": "BTC" } }
+{ "method": "subscribe", "subscription": { "type": "candle", "coin": "BTC", "interval": "1m" } }
+```
+
+`candle` 会分别订阅 `1m`、`5m`、`15m`、`1h`。
+
+内部原始 ticker 口径：
+
+- `bid`：Hyperliquid BBO 最优买价
+- `ask`：Hyperliquid BBO 最优卖价
+- `last`：Hyperliquid 最新成交价
+- `timestamp`：BBO 与最新成交时间的较新值
+- `source`：`hyperliquid`
+
+平台现有品种配置会在 API/模拟交易层基于 `last` 应用模拟 spread；因此最终
+用户成交 Bid/Ask 是平台模拟报价，不等同于向 Hyperliquid 真实盘口成交。
+
+连接每 30 秒发送 `{ "method": "ping" }` 心跳。断线后使用指数退避重连；
+WebSocket 恢复前，行情状态为 `disconnected`。
+
+## 状态与交易保护
+
+- `connected`：10 秒内收到有效 ticker
+- `stale`：最后有效 ticker 超过 10 秒
+- `disconnected`：尚无有效 BBO/成交组合，或 WebSocket 已断开
+
+`stale` 与 `disconnected` 禁止新开仓。已有仓位仍按交易引擎既有规则处理，
+避免因品种 `close_only` / `disabled` 阻塞平仓。
+
+## 内部 API
 
 ```http
 GET /api/health
-```
-
-### 支持品种
-
-```http
 GET /api/market/symbols
-```
-
-### 最新 ticker
-
-```http
 GET /api/market/ticker?symbol=BTCUSDT
-```
-
-### 获取 K 线
-
-```http
 GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 ```
 
-参数：
-
-| 参数 | 说明 |
-| --- | --- |
-| `symbol` | 仅支持 `BTCUSDT` |
-| `interval` | 支持 `1m`、`5m`、`15m`、`1h` |
-| `limit` | 1-1000，默认 500 |
-
-## 时间字段与状态规则
-
-时间字段统一说明：
-
-- `ticker.timestamp`：毫秒级 Unix 时间戳，表示后端最后一次收到 Binance 实时行情的时间。
-- `candle.time`：秒级 Unix 时间戳，表示这根 K 线的开始时间。
-- `/klines` 的 `timestamp`：秒级 Unix 时间戳，和 `candle.time` 含义一致。
-- 交易订单里的 `quoteTime`：毫秒级 Unix 时间戳，来自成交时使用的 ticker。
-
-行情状态：
-
-- `connected`：10 秒内收到过 Binance 实时行情。
-- `stale`：超过 10 秒没有收到实时行情，行情已过期，禁止市价成交。
-- `disconnected`：尚未收到行情，或 Binance WebSocket 已断开。
-
-## WebSocket
-
-连接：
+前端 WebSocket：
 
 ```text
 ws://127.0.0.1:8787/ws
 ```
 
-当前前端统一使用 `/ws`，它支持 ticker 和 candle 订阅；旧兼容通道已移除。
+订阅示例：
 
-订阅实时 K 线：
+```json
+{
+  "type": "subscribe",
+  "channel": "ticker",
+  "symbol": "BTCUSDT"
+}
+```
 
 ```json
 {
@@ -155,41 +132,9 @@ ws://127.0.0.1:8787/ws
 }
 ```
 
-推送格式：
+## 存储边界
 
-```json
-{
-  "type": "candle",
-  "symbol": "BTCUSDT",
-  "interval": "1m",
-  "data": {
-    "time": 1782060360,
-    "open": 64116,
-    "high": 64158,
-    "low": 64116,
-    "close": 64158,
-    "volume": 1.25995
-  }
-}
-```
-
-也可以订阅 ticker：
-
-```json
-{
-  "type": "subscribe",
-  "channel": "ticker",
-  "symbol": "BTCUSDT"
-}
-```
-
-## 当前实现边界
-
-- 行情来自 Binance USDT-M 永续合约公开行情。
-- Bid / Ask 不是 Binance 原样盘口，而是系统基于最新价和品种配置 spread 生成。
-- 当前 MVP 只保留 `BTCUSDT`，后台品种管理只允许编辑 `BTCUSDT` 的展示名、点差、杠杆、合约单位、手数规则、交易状态和可见性。
-- 不允许修改 `symbol` / `apiSymbol`，也不允许新增其他 symbol。
-- `enabled` 表示允许开仓和平仓；`disabled` / `close_only` 在当前产品语义上统一为禁止新开仓但允许平仓。
-- 行情超过 10 秒未更新时状态为 `stale`，禁止市价成交。
-- 下单、持仓、盈亏、账户、资金账户、内部转账、链上充值记录、出金申请全部属于内部系统能力；当前不接真实交易所下单。
-- 当前主资金资产固定为 `USDT`。
+- K 线保存在进程内存，每个 `symbol + interval` 最多 5000 根。
+- 服务重启后重新从 Hyperliquid `candleSnapshot` 回补。
+- 用户、模拟账户、订单、持仓和资金记录继续使用 SQLite。
+- 当前不接真实交易所下单、真实资金托管、清算或生产级风控。

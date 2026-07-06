@@ -1,6 +1,5 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
 import type { QuoteStatus, TradeSymbol } from "../types/market";
-import { readStorage, storageKeys } from "../utils/storage";
 import { handleUserAuthFailure } from "./session";
 
 export type ApiCandle = {
@@ -110,13 +109,11 @@ type ApiMarketSymbol = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "u
 };
 
 function userHeaders(userId?: string | null): Record<string, string> {
-  const auth = readStorage<{ isLoggedIn?: boolean; userToken?: string | null }>(storageKeys.auth, {});
-  return auth.userToken ? { Authorization: `Bearer ${auth.userToken}` } : {};
+  return {};
 }
 
 function adminHeaders(): Record<string, string> {
-  const auth = readStorage<{ isAdminLoggedIn?: boolean; adminToken?: string | null }>(storageKeys.adminAuth, {});
-  return auth.adminToken ? { Authorization: `Bearer ${auth.adminToken}` } : {};
+  return {};
 }
 
 async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
@@ -131,7 +128,7 @@ async function readJson<T>(response: Response, fallbackMessage: string, options?
 }
 
 export async function syncMarketSymbols(symbols: TradeSymbol[]) {
-  const response = await fetch("/api/market/symbols/config", {
+  const response = await fetch("/api/admin/market/symbols/config", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ symbols }),

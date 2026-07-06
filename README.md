@@ -1,6 +1,6 @@
 # Xing Heng TradeSim Pro
 
-星衡 TradeSim Pro 是一个基于 Binance 公共行情的模拟交易系统。当前阶段只做：
+星衡 TradeSim Pro 是一个基于 Hyperliquid 主 DEX 活跃永续公开行情的模拟交易系统。当前阶段只做：
 
 - 公共行情接入
 - K 线生成与查询
@@ -75,6 +75,15 @@ npm run build
 
 当前 `.env` 已被忽略，不会提交到仓库。
 
+生产环境必须显式配置 `NODE_ENV=production`、`ADMIN_EMAIL`、至少 12 位的
+`ADMIN_PASSWORD`、`TRADING_DB_PATH` 和反向代理对应的
+`CORS_ALLOWED_ORIGINS`。如果 API 位于一层可信反向代理后，再设置
+`TRUST_PROXY=true`。生产会话使用 `Secure`、`HttpOnly`、`SameSite=Strict`
+Cookie，因此必须通过 HTTPS 访问。
+
+演示用户仅在非生产环境默认启用；生产环境不会自动创建演示用户。私钥、助记词
+和管理员密码不得写入仓库、前端构建产物或部署镜像。
+
 ## 目录结构
 
 ```text
@@ -107,7 +116,7 @@ npm run build
 
 当前已完成：
 
-- Binance 公共行情接入
+- Hyperliquid 公共行情接入
 - 模拟交易闭环
 - SQLite 持久化
 - 资金账户 / 交易账户体系

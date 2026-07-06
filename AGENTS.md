@@ -17,15 +17,15 @@
 
 - 当前阶段是“模拟交易 MVP + BSC Testnet 钱包闭环完善 + 账户体系重构与界面统一”。
 - 当前目标是验证以下闭环：
-  - Binance USDT-M 永续合约公开行情接入
-  - `BTCUSDT` 单品种模拟交易
+  - Hyperliquid BTC perpetual 公开行情接入
+  - Hyperliquid 主 DEX 活跃永续品种模拟交易
   - 资金账户 / 模拟账户 / 交易账户体系
   - 账户划转、用户间内部转账
   - BSC Testnet USDT 充值地址、链上充值记录、出金申请、后台审核与确认
 
 ### 当前明确边界
 
-- 当前仅支持 `BTCUSDT`
+- 当前品种目录同步 Hyperliquid 主 DEX 活跃 perpetual，排除已下架与 HIP-3
 - 当前主资金资产仅支持 `USDT`
 - 当前钱包网络仅支持 `BSC_TESTNET`
 - 账户页命名统一为：`Stella X 钱包` 表示平台分配并托管的测试网地址；`第三方钱包` 表示用户绑定的 MetaMask 地址
@@ -72,17 +72,17 @@
 
 ### 负责范围
 
-#### Binance 接入
+#### Hyperliquid 接入
 
-- 维护 Binance 行情服务，接入 Binance USDT-M 永续合约公开行情 WebSocket/REST。
-- 将 Binance 原始 ticker、trade、kline 数据转换为项目内部统一行情结构。
+- 维护 Hyperliquid 行情服务，接入公开 `bbo`、`trades`、`candle` WebSocket 与 `candleSnapshot` REST。
+- 将 Hyperliquid 原始行情转换为项目内部统一结构。
 - 处理连接生命周期：启动、订阅、心跳、断线重连、限频、错误上报。
-- 当前主线不再保留旧 TraderMade/Mock Adapter 链路，避免把交易所私有字段泄漏到业务层。
-- 明确 Binance symbol 与平台 symbol 的映射规则，当前主线只保留 `BTCUSDT`。
+- 当前主线不保留 Binance、TraderMade 或 Mock Adapter，避免多行情口径并存。
+- 平台内部 `{COIN}USDT` 映射到 Hyperliquid perpetual coin `{COIN}`。
 
 #### K 线引擎
 
-- 维护 `server/modules/market/BinanceMarketService.ts`、`server/modules/kline/KlineStore.ts` 及相关 K 线逻辑。
+- 维护 `server/modules/market/HyperliquidMarketService.ts`、`server/modules/market/HyperliquidRestClient.ts`、`server/modules/kline/KlineStore.ts`。
 - 支持 `1m`、`5m`、`15m`、`1h` 等周期的 OHLCV 生成、更新和补齐。
 - 保证 tick 到 candle 的时间桶计算稳定，处理乱序、重复、空成交量和跨周期聚合。
 - 提供前端图表需要的历史 K 线与实时 K 线推送。
@@ -92,7 +92,7 @@
 
 - 维护 `server/storage/TradingStore.ts` 中的模拟账户、订单、持仓、资金流水持久化。
 - 当前交易数据使用 SQLite，本阶段不再使用 Redis/PostgreSQL 作为主线依赖。
-- K 线当前使用内存 + Binance REST 回补，服务重启后重新拉取公开行情。
+- K 线当前使用内存 + Hyperliquid `candleSnapshot` 回补，服务重启后重新拉取公开行情。
 - 设计必要的数据表、索引、upsert 策略和保留周期。
 - 确保存储层接口稳定，不让 API 层直接依赖具体数据库实现。
 
@@ -111,7 +111,7 @@
 | --- | --- |
 | API 入口 | `server/index.ts` |
 | 类型定义 | `server/types.ts` |
-| 行情服务 | `server/modules/market/BinanceMarketService.ts` |
+| 行情服务 | `server/modules/market/HyperliquidMarketService.ts` |
 | K 线存储 | `server/modules/kline/KlineStore.ts` |
 | 行情 API | `server/modules/api/marketRoutes.ts` |
 | 模拟交易 | `server/market/TradingService.ts` |

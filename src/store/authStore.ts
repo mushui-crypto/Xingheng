@@ -15,12 +15,13 @@ type AuthStore = AuthState & {
 const defaultAuthState: AuthState = {
   currentUserId: null,
   isLoggedIn: false,
-  userToken: null,
 };
 
 const persistedAuth = readStorage<AuthState>(storageKeys.auth, defaultAuthState);
 const initialAuthState =
-  persistedAuth.isLoggedIn && persistedAuth.userToken && persistedAuth.currentUserId ? persistedAuth : defaultAuthState;
+  persistedAuth.isLoggedIn && persistedAuth.currentUserId
+    ? { currentUserId: persistedAuth.currentUserId, isLoggedIn: true }
+    : defaultAuthState;
 
 export const useAuthStore = create<AuthStore>((set) => ({
   ...initialAuthState,
@@ -32,14 +33,13 @@ export const useAuthStore = create<AuthStore>((set) => ({
     });
     const payload = await response.json().catch(() => null);
 
-    if (!response.ok || !payload?.token || !payload?.user?.id) {
+    if (!response.ok || !payload?.user?.id) {
       return { ok: false, message: payload?.message ?? "邮箱或密码不正确。" };
     }
 
     const authState: AuthState = {
       currentUserId: String(payload.user.id),
       isLoggedIn: true,
-      userToken: String(payload.token),
     };
     writeStorage(storageKeys.auth, authState);
     set(authState);
@@ -47,13 +47,7 @@ export const useAuthStore = create<AuthStore>((set) => ({
     return { ok: true };
   },
   logout: () => {
-    const current = useAuthStore.getState();
-    if (current.userToken) {
-      void fetch("/api/auth/logout", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${current.userToken}` },
-      }).catch(() => undefined);
-    }
+    void fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     writeStorage(storageKeys.auth, defaultAuthState);
     set(defaultAuthState);
     useUserStore.getState().clear();
@@ -64,14 +58,6 @@ export const useAuthStore = create<AuthStore>((set) => ({
     useUserStore.getState().clear();
   },
   syncSession: async () => {
-    const current = useAuthStore.getState();
-    if (!current.userToken) {
-      writeStorage(storageKeys.auth, defaultAuthState);
-      set(defaultAuthState);
-      useUserStore.getState().clear();
-      return;
-    }
-
     const user = await useUserStore.getState().loadCurrentUser().catch(() => null);
     if (!user) {
       writeStorage(storageKeys.auth, defaultAuthState);
@@ -83,7 +69,6 @@ export const useAuthStore = create<AuthStore>((set) => ({
     const nextState: AuthState = {
       currentUserId: user.id,
       isLoggedIn: true,
-      userToken: current.userToken,
     };
     writeStorage(storageKeys.auth, nextState);
     set(nextState);

@@ -3,7 +3,6 @@ import { storageKeys, writeStorage } from "../utils/storage";
 const expiredAuthState = {
   currentUserId: null,
   isLoggedIn: false,
-  userToken: null,
 };
 
 export const USER_AUTH_FAILED_EVENT = "xingheng:user-auth-failed";
