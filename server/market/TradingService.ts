@@ -13,7 +13,6 @@ import type {
 import type { TradingStore } from "../storage/TradingStore";
 import crypto from "node:crypto";
 
-const defaultInitialBalance = 100_000;
 const defaultAsset = "USDT";
 
 type TradingMarket = {
@@ -33,7 +32,6 @@ type TradingMarket = {
 };
 
 export class TradingService {
-  private accounts = new Map<string, TradingAccount>();
   private positions: Position[] = [];
   private orders: OrderRecord[] = [];
   private adjustments: BalanceAdjustment[] = [];
@@ -55,45 +53,8 @@ export class TradingService {
     return (this.store?.listSimulationAccounts() ?? []).map((account) => this.toSimulationAccountTradingView(account));
   }
 
-  adjustBalance(userId: string, type: BalanceAdjustment["type"], amount: number, note?: string) {
+  adjustBalance(_userId: string, _type: BalanceAdjustment["type"], _amount: number, _note?: string) {
     throw new Error("旧单模拟账户已停用，请使用真实模拟账户接口管理模拟资金。");
-  }
-
-  private adjustLegacyBalance(userId: string, type: BalanceAdjustment["type"], amount: number, note?: string) {
-    const normalizedUserId = normalizeUserId(userId);
-    const account = this.ensureAccount(normalizedUserId);
-    if (!Number.isFinite(amount) || amount < 0) {
-      throw new Error("调整金额不能小于 0。");
-    }
-
-    const previousBalance = account.balance;
-    if (type === "deposit") {
-      account.balance += amount;
-    }
-    if (type === "withdraw") {
-      account.balance = Math.max(0, account.balance - amount);
-    }
-    if (type === "reset") {
-      account.balance = amount;
-    }
-    account.updatedAt = Date.now();
-    this.accounts.set(normalizedUserId, account);
-    this.store?.upsertAccount(account);
-
-    const adjustment: BalanceAdjustment = {
-      id: makeId("ADJ"),
-      accountId: account.id,
-      userId: normalizedUserId,
-      type,
-      amount,
-      previousBalance,
-      nextBalance: account.balance,
-      note,
-      createdAt: Date.now(),
-    };
-    this.adjustments = [adjustment, ...this.adjustments].slice(0, 200);
-    this.store?.saveAdjustment(adjustment);
-    return this.toAccountView(account);
   }
 
   marketOrder(userId: string, simulationAccountId: string | undefined, symbol: string, side: TradeSide, volume: number) {
@@ -234,70 +195,12 @@ export class TradingService {
     return this.adjustments.filter((adjustment) => !userId || adjustment.userId === userId);
   }
 
-  creditBalance(userId: string, amount: number) {
+  creditBalance(_userId: string, _amount: number) {
     throw new Error("模拟账户资金与资金账户不联动，请使用真实模拟账户接口。");
   }
 
-  private creditLegacyBalance(userId: string, amount: number) {
-    assertPositiveAmount(amount);
-    const account = this.ensureAccount(userId);
-    const balanceBefore = account.balance;
-    account.balance = roundMoney(account.balance + amount);
-    account.updatedAt = Date.now();
-    this.accounts.set(account.userId, account);
-    this.store?.upsertAccount(account);
-    return {
-      account: this.toAccountView(account),
-      balanceBefore,
-      balanceAfter: account.balance,
-    };
-  }
-
-  debitFreeMargin(userId: string, amount: number) {
+  debitFreeMargin(_userId: string, _amount: number) {
     throw new Error("模拟账户资金与资金账户不联动，请使用真实模拟账户接口。");
-  }
-
-  private debitLegacyFreeMargin(userId: string, amount: number) {
-    assertPositiveAmount(amount);
-    const account = this.ensureAccount(userId);
-    const accountView = this.toAccountView(account);
-    if (accountView.freeMargin < amount) {
-      throw new Error("交易账户可用保证金不足。");
-    }
-    const balanceBefore = account.balance;
-    account.balance = roundMoney(account.balance - amount);
-    account.updatedAt = Date.now();
-    this.accounts.set(account.userId, account);
-    this.store?.upsertAccount(account);
-    return {
-      account: this.toAccountView(account),
-      balanceBefore,
-      balanceAfter: account.balance,
-    };
-  }
-
-  private ensureAccount(userId: string) {
-    const normalized = normalizeUserId(userId);
-    const existing = this.accounts.get(normalized);
-    if (existing) {
-      return existing;
-    }
-
-    const account: TradingAccount = {
-      id: `ACC-${normalized}`,
-      userId: normalized,
-      asset: defaultAsset,
-      balance: defaultInitialBalance,
-      equity: defaultInitialBalance,
-      usedMargin: 0,
-      freeMargin: defaultInitialBalance,
-      floatingPnl: 0,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    this.accounts.set(normalized, account);
-    this.store?.upsertAccount(account);
-    return account;
   }
 
   private getActiveSimulationAccount(userId: string, simulationAccountId?: string) {
@@ -539,12 +442,6 @@ export class TradingService {
 
 function normalizeUserId(userId: string) {
   return userId?.trim() || "demo-user";
-}
-
-function assertPositiveAmount(amount: number) {
-  if (!Number.isFinite(amount) || amount <= 0) {
-    throw new Error("金额必须大于 0。");
-  }
 }
 
 function roundMoney(value: number) {
