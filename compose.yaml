@@ -1,0 +1,60 @@
+name: xingheng
+
+services:
+  api:
+    build:
+      context: .
+      target: api
+    env_file:
+      - .env.production
+    environment:
+      NODE_ENV: production
+      API_PORT: "8787"
+      TRADING_DB_PATH: /app/data/trading.sqlite
+      TRUST_PROXY: "true"
+      BSC_TESTNET_CHAIN_ID: "97"
+    init: true
+    restart: unless-stopped
+    stop_grace_period: 20s
+    volumes:
+      - sqlite_data:/app/data
+      - sqlite_backups:/backups
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - fetch('http://127.0.0.1:8787/api/health').then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+
+  web:
+    build:
+      context: .
+      target: web
+    environment:
+      DOMAIN: "${DOMAIN:?DOMAIN is required; use --env-file .env.production}"
+    entrypoint:
+      - /bin/sh
+      - -c
+    command:
+      - test -n "$$DOMAIN" || { echo "DOMAIN is required" >&2; exit 1; }; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  sqlite_data:
+  sqlite_backups:
+  caddy_data:
+  caddy_config:

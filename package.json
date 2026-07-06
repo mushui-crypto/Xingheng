@@ -7,9 +7,12 @@
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:api": "tsx watch server/index.ts",
-    "build": "tsc -b && tsc -p tsconfig.server.json && vite build",
+    "build": "tsc -b && tsc -p tsconfig.server.json && npm run build:api && vite build",
+    "build:api": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outfile=dist-server/index.js",
+    "deploy:validate": "node scripts/validate-deploy.mjs",
+    "verify:production-safety": "tsx scripts/verify-production-wallet.ts && node scripts/verify-production-config.mjs && node scripts/verify-restore.mjs",
     "preview": "vite preview",
-    "start:api": "tsx server/index.ts"
+    "start:api": "node dist-server/index.js"
   },
   "dependencies": {
     "cors": "^2.8.6",
@@ -34,6 +37,7 @@
     "@vitejs/plugin-react": "^5.0.0",
     "autoprefixer": "^10.4.20",
     "concurrently": "^10.0.3",
+    "esbuild": "^0.28.1",
     "postcss": "^8.4.49",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.22.4",
