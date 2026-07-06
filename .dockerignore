@@ -1,0 +1,15 @@
+.git
+.github
+.codex
+node_modules
+dist
+dist-server
+.env
+.env.*
+!.env.example
+!.env.production.example
+server/data
+backups
+coverage
+*.log
+.DS_Store

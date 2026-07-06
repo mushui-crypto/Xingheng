@@ -55,10 +55,10 @@ npm install
 npm run dev
 ```
 
-只启动后端：
+只启动后端开发环境：
 
 ```bash
-npm run start:api
+npm run dev:api
 ```
 
 构建：
@@ -66,6 +66,28 @@ npm run start:api
 ```bash
 npm run build
 ```
+
+`npm run start:api` 用于运行已经由构建生成的 `dist-server/index.js`，不依赖
+开发期的 `tsx`。
+
+## 生产部署
+
+生产基线使用单台服务器的 Docker Compose：Caddy 自动 HTTPS 并托管前端静态文件，
+单个非 root Node API 进程负责接口与 WebSocket，SQLite 保存到 named volume。
+
+```bash
+cp .env.production.example .env.production
+chmod 600 .env.production
+# 填写域名、管理员账号与安全密钥后：
+docker compose --env-file .env.production config
+docker compose --env-file .env.production build
+docker compose --env-file .env.production up -d
+./scripts/smoke.sh "https://你的域名"
+```
+
+完整的部署、升级、日志、SQLite 一致性备份、恢复和回滚步骤见
+[`deploy/README.md`](./deploy/README.md)。生产环境不得启动多个 API 实例，也不得
+直接复制正在写入的 SQLite/WAL 文件。
 
 ## 环境变量
 

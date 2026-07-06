@@ -1,5 +1,6 @@
 import cors from "cors";
 import dotenv from "dotenv";
+import { isAddress } from "ethers";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
@@ -24,6 +25,7 @@ const adminAuthConfigured = Boolean(adminEmail && adminPassword.length >= 12);
 const userCookieName = "xh_user_session";
 const adminCookieName = "xh_admin_session";
 const allowedOrigins = getAllowedOrigins();
+validateProductionConfig();
 const app = express();
 if (process.env.TRUST_PROXY === "true") {
   app.set("trust proxy", 1);
@@ -569,11 +571,11 @@ app.post("/api/admin/wallet/withdrawals/:id/reject", (request, response) => {
   }
 });
 
-const server = app.listen(port, () => {
+const server = app.listen(port, "0.0.0.0", () => {
   console.log(`[api] listening on http://127.0.0.1:${port}`);
 });
 
-registerSocketHub(server, market);
+const socketHub = registerSocketHub(server, market);
 
 function registerSocketHub(httpServer: typeof server, marketService: HyperliquidMarketService) {
   const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
@@ -659,6 +661,8 @@ function registerSocketHub(httpServer: typeof server, marketService: Hyperliquid
       },
     });
   });
+
+  return wss;
 }
 
 function getAdminBearerToken(request: express.Request) {
@@ -715,18 +719,44 @@ function sendBadRequest(response: express.Response, error: unknown) {
   response.status(400).json({ message: error instanceof Error ? error.message : "bad request" });
 }
 
-process.on("SIGINT", async () => {
-  await market.stop();
-  tradingStore.close();
-  server.close();
-  process.exit(0);
-});
+let shutdownStarted = false;
+async function shutdown(signal: string) {
+  if (shutdownStarted) return;
+  shutdownStarted = true;
+  console.log(`[api] received ${signal}, shutting down`);
 
-process.on("SIGTERM", async () => {
-  await market.stop();
-  tradingStore.close();
-  server.close();
-});
+  const forceExit = setTimeout(() => {
+    console.error("[api] graceful shutdown timed out");
+    process.exit(1);
+  }, 15_000);
+  forceExit.unref();
+
+  try {
+    await market.stop();
+    for (const client of socketHub.clients) client.terminate();
+    await new Promise<void>((resolve, reject) => {
+      socketHub.close((socketError) => {
+        if (socketError) reject(socketError);
+        else resolve();
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.close((serverError) => {
+        if (serverError) reject(serverError);
+        else resolve();
+      });
+    });
+    tradingStore.close();
+    clearTimeout(forceExit);
+    process.exit(0);
+  } catch (error) {
+    console.error("[api] graceful shutdown failed", error);
+    process.exit(1);
+  }
+}
+
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
 function getRequestToken(request: express.Request, cookieName: string) {
   const authorization = request.headers.authorization;
@@ -793,6 +823,75 @@ function getAllowedOrigins() {
     configured.push("http://localhost:5173", "http://127.0.0.1:5173");
   }
   return new Set(configured);
+}
+
+function validateProductionConfig() {
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("API_PORT 必须是有效端口。");
+  }
+  const configuredChainId = Number(process.env.BSC_TESTNET_CHAIN_ID ?? 97);
+  if (configuredChainId !== 97) {
+    throw new Error("当前仅允许 BSC Testnet（BSC_TESTNET_CHAIN_ID=97）。");
+  }
+  if (!isProduction) return;
+
+  const required = [
+    ["DOMAIN", process.env.DOMAIN?.trim() ?? ""],
+    ["ADMIN_EMAIL", adminEmail],
+    ["ADMIN_PASSWORD（至少 12 位）", adminPassword.length >= 12 ? adminPassword : ""],
+    ["TRADING_DB_PATH", process.env.TRADING_DB_PATH?.trim() ?? ""],
+    ["CORS_ALLOWED_ORIGINS", process.env.CORS_ALLOWED_ORIGINS?.trim() ?? ""],
+    ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
+    ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
+  ] as const;
+  const missing = required.filter(([, value]) => !value).map(([name]) => name);
+  if (missing.length) {
+    throw new Error(`生产环境缺少必填配置：${missing.join("、")}。`);
+  }
+  const domain = process.env.DOMAIN!.trim();
+  if (
+    domain.includes("://") ||
+    domain.includes("/") ||
+    domain.includes(":") ||
+    !/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i.test(domain)
+  ) {
+    throw new Error("DOMAIN 必须是纯域名，不得包含协议、路径或端口。");
+  }
+  if (domain === "trade.example.com" || domain.endsWith(".invalid") || domain.includes("replace-me")) {
+    throw new Error("DOMAIN 仍是示例占位值，请填写正式域名。");
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail) || adminEmail === "admin@example.com" || adminEmail.endsWith("@example.invalid")) {
+    throw new Error("ADMIN_EMAIL 必须是有效且非示例的管理员邮箱。");
+  }
+  if (
+    adminPassword === "replace-with-a-long-random-secret" ||
+    adminPassword.includes("REPLACE_WITH") ||
+    adminPassword.toLowerCase().includes("replace-me")
+  ) {
+    throw new Error("ADMIN_PASSWORD 仍是示例占位值，请生成独立随机密码。");
+  }
+  for (const origin of allowedOrigins) {
+    const url = new URL(origin);
+    if (url.protocol !== "https:" || url.origin !== origin) {
+      throw new Error("生产环境 CORS_ALLOWED_ORIGINS 必须是 HTTPS origin，不得包含路径。");
+    }
+  }
+  if (!allowedOrigins.has(`https://${domain}`)) {
+    throw new Error("CORS_ALLOWED_ORIGINS 必须包含与 DOMAIN 对应的 HTTPS origin。");
+  }
+  let rpcUrl: URL;
+  try {
+    rpcUrl = new URL(process.env.BSC_TESTNET_RPC_URL!.trim());
+  } catch {
+    throw new Error("BSC_TESTNET_RPC_URL 必须是有效的 HTTP(S) URL。");
+  }
+  if (!["http:", "https:"].includes(rpcUrl.protocol) || !rpcUrl.hostname) {
+    throw new Error("BSC_TESTNET_RPC_URL 必须是 HTTP(S) URL。");
+  }
+  const tokenAddress = process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? "";
+  if (!isAddress(tokenAddress) || /^0x0{40}$/i.test(tokenAddress)) {
+    throw new Error("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零的测试网合约地址。");
+  }
 }
 
 function rejectCrossOriginMutation(request: express.Request, response: express.Response, next: express.NextFunction) {

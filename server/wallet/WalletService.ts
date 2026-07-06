@@ -49,12 +49,17 @@ export class WalletService {
   ) {
     this.depositMnemonic = process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "";
     this.depositDerivationPath = process.env.BSC_TESTNET_DERIVATION_PATH?.trim() || "m/44'/60'/0'/0";
-    this.ensureFundingAccount(defaultUserId);
-    this.ensureRealTradingAccount(defaultUserId);
-    this.seedDemoWalletData();
+    if (process.env.NODE_ENV !== "production") {
+      this.ensureFundingAccount(defaultUserId);
+      this.ensureRealTradingAccount(defaultUserId);
+      this.seedDemoWalletData();
+    }
   }
 
   private seedDemoWalletData() {
+    if (process.env.NODE_ENV === "production") {
+      return;
+    }
     const userId = defaultUserId;
     const hasSeededDemoData =
       this.store.listFundingLedger(userId).some((entry) => entry.id === "LED-DEMO-ONCHAIN-001") &&
