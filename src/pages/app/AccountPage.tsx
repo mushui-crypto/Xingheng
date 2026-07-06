@@ -86,6 +86,15 @@ import type {
 } from "../../features/account/model/types";
 import { useUserStore } from "../../store/userStore";
 
+type AccountActionResult = {
+  ok: boolean;
+  message: string;
+};
+
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 export function AccountPage() {
   const user = useUserStore((state) => state.currentUser);
   const [wallet, setWallet] = useState<FundingAccount | null>(null);
@@ -206,7 +215,7 @@ export function AccountPage() {
       setDepositAddress(nextDepositAddress);
       await loadExternalWalletBinding();
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "资金数据加载失败，请稍后重试。");
+      setLoadError(getErrorMessage(error, "资金数据加载失败，请稍后重试。"));
     } finally {
       setIsLoading(false);
     }
@@ -219,7 +228,7 @@ export function AccountPage() {
       setExternalWalletError("");
     } catch (error) {
       setExternalWalletBinding(null);
-      setExternalWalletError(error instanceof Error ? error.message : "第三方钱包绑定接口待接入。");
+      setExternalWalletError(getErrorMessage(error, "第三方钱包绑定接口待接入。"));
     }
   };
 
@@ -245,7 +254,7 @@ export function AccountPage() {
       setMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "账户划转失败。";
+      const errorMessage = getErrorMessage(error, "账户划转失败。");
       setMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
@@ -265,7 +274,7 @@ export function AccountPage() {
       setMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "内部转账失败。";
+      const errorMessage = getErrorMessage(error, "内部转账失败。");
       setMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
@@ -280,7 +289,7 @@ export function AccountPage() {
       setMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "提现申请提交失败。";
+      const errorMessage = getErrorMessage(error, "提现申请提交失败。");
       setMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
@@ -353,7 +362,7 @@ export function AccountPage() {
       setSimulationFeedback(successMessage);
       setMessage(successMessage);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "模拟账户创建失败。";
+      const errorMessage = getErrorMessage(error, "模拟账户创建失败。");
       setSimulationFeedback(errorMessage);
       setMessage(errorMessage);
     } finally {
@@ -375,7 +384,7 @@ export function AccountPage() {
       setMessage(successMessage);
       setActiveSimulationResetId(null);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "模拟账户资金重置失败。";
+      const errorMessage = getErrorMessage(error, "模拟账户资金重置失败。");
       setSimulationFeedback(errorMessage);
       setMessage(errorMessage);
     } finally {
@@ -403,7 +412,7 @@ export function AccountPage() {
       setMessage(successMessage);
       setActiveSimulationRenameId(null);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "模拟账户重命名失败。";
+      const errorMessage = getErrorMessage(error, "模拟账户重命名失败。");
       setSimulationFeedback(errorMessage);
       setMessage(errorMessage);
     } finally {
@@ -425,7 +434,7 @@ export function AccountPage() {
       setMessage(successMessage);
       setActiveSimulationDeleteId(null);
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : "模拟账户删除失败。";
+      const errorMessage = getErrorMessage(error, "模拟账户删除失败。");
       setSimulationFeedback(errorMessage);
       setMessage(errorMessage);
     } finally {
@@ -656,9 +665,9 @@ function QuickActionPanel({
   onCopyDepositAddress: () => void;
   onInternalTransferAmountChange: (value: number) => void;
   onInternalTransferRecipientChange: (value: string) => void;
-  onSubmitInternalTransfer: () => Promise<{ ok: boolean; message: string }>;
-  onSubmitTransfer: () => Promise<{ ok: boolean; message: string }>;
-  onSubmitWithdrawal: () => Promise<{ ok: boolean; message: string }>;
+  onSubmitInternalTransfer: () => Promise<AccountActionResult>;
+  onSubmitTransfer: () => Promise<AccountActionResult>;
+  onSubmitWithdrawal: () => Promise<AccountActionResult>;
   onTransferAmountChange: (value: number) => void;
   onTransferFromChange: (value: TransferAccount) => void;
   onTransferToChange: (value: TransferAccount) => void;
@@ -686,6 +695,18 @@ function QuickActionPanel({
   if (actions.length === 0 || (!showActionHeader && activeAction === null)) {
     return null;
   }
+
+  const runModalAction = async (
+    submit: () => Promise<AccountActionResult>,
+    setFeedback: (message: string) => void,
+  ) => {
+    setFeedback("");
+    const result = await submit();
+    setFeedback(result.message);
+    if (result.ok) {
+      onActionChange(null);
+    }
+  };
 
   return (
     <>
@@ -743,14 +764,7 @@ function QuickActionPanel({
           withdrawAddress={withdrawAddress}
           withdrawAmount={withdrawAmount}
           withdrawFeedback={withdrawFeedback}
-          onSubmitWithdrawal={async () => {
-            setWithdrawFeedback("");
-            const result = await onSubmitWithdrawal();
-            setWithdrawFeedback(result.message);
-            if (result.ok) {
-              onActionChange(null);
-            }
-          }}
+          onSubmitWithdrawal={() => void runModalAction(onSubmitWithdrawal, setWithdrawFeedback)}
           onWithdrawAddressChange={onWithdrawAddressChange}
           onWithdrawAmountChange={onWithdrawAmountChange}
         />
@@ -764,14 +778,7 @@ function QuickActionPanel({
           transferAmount={transferAmount}
           transferFrom={transferFrom}
           transferTo={transferTo}
-          onSubmitTransfer={async () => {
-            setTransferFeedback("");
-            const result = await onSubmitTransfer();
-            setTransferFeedback(result.message);
-            if (result.ok) {
-              onActionChange(null);
-            }
-          }}
+          onSubmitTransfer={() => void runModalAction(onSubmitTransfer, setTransferFeedback)}
           transferFeedback={transferFeedback}
           onTransferAmountChange={onTransferAmountChange}
           onTransferFromChange={onTransferFromChange}
@@ -789,14 +796,7 @@ function QuickActionPanel({
           transferFeedback={internalTransferFeedback}
           onAmountChange={onInternalTransferAmountChange}
           onRecipientChange={onInternalTransferRecipientChange}
-          onSubmit={async () => {
-            setInternalTransferFeedback("");
-            const result = await onSubmitInternalTransfer();
-            setInternalTransferFeedback(result.message);
-            if (result.ok) {
-              onActionChange(null);
-            }
-          }}
+          onSubmit={() => void runModalAction(onSubmitInternalTransfer, setInternalTransferFeedback)}
         />
       </Modal>
       <Modal
