@@ -1,5 +1,5 @@
 import { BarChart3, ListChecks, ListTree, LogOut, UsersRound } from "lucide-react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAdminAuthStore } from "../../store/adminAuthStore";
 
@@ -10,6 +10,15 @@ type AdminLayoutProps = {
 export function AdminLayout({ children }: AdminLayoutProps) {
   const navigate = useNavigate();
   const logout = useAdminAuthStore((state) => state.logout);
+  const syncSession = useAdminAuthStore((state) => state.syncSession);
+
+  useEffect(() => {
+    void syncSession().then((valid) => {
+      if (!valid) {
+        navigate("/admin/login", { replace: true });
+      }
+    });
+  }, [navigate, syncSession]);
 
   const handleLogout = () => {
     logout();

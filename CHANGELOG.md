@@ -2,6 +2,24 @@
 
 本文档记录星衡项目的阶段版本。
 
+## 0.3.0 - Hyperliquid 行情源切换
+
+日期：2026-07-06
+
+状态：已实现
+
+### 已完成
+
+- 从 BTC 单品种升级为 Hyperliquid 主 DEX 全量活跃 perpetual 自动目录。
+- 排除已下架与 HIP-3 市场；下架历史配置软禁用并保留记录。
+- 行情列表使用 `allMids`，BBO、成交与 K 线改为按需订阅和释放。
+- 删除 Binance REST/WebSocket 行情 Adapter 与对应环境变量。
+- 接入 Hyperliquid `candleSnapshot` 历史 K 线。
+- 接入 Hyperliquid `bbo`、`trades`、`candle` WebSocket 订阅。
+- 平台内部 `BTCUSDT` 固定映射到 Hyperliquid perpetual coin `BTC`。
+- 增加 WebSocket 心跳、指数退避重连、行情 stale/disconnected 保护。
+- 保持模拟交易边界，不接 Hyperliquid 真实下单、钱包或签名能力。
+
 ## 0.1.0 - Binance 行情 + 模拟交易 MVP
 
 日期：2026-06-22

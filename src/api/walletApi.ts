@@ -1,5 +1,4 @@
 import type { TradingAccount } from "./market";
-import { readStorage, storageKeys } from "../utils/storage";
 import { handleUserAuthFailure } from "./session";
 
 export type WalletAsset = "USDT";
@@ -318,13 +317,11 @@ export type OnchainDeposit = {
 };
 
 function userHeaders(userId?: string | null): Record<string, string> {
-  const auth = readStorage<{ isLoggedIn?: boolean; userToken?: string | null }>(storageKeys.auth, {});
-  return auth.userToken ? { Authorization: `Bearer ${auth.userToken}` } : {};
+  return {};
 }
 
 function adminHeaders(): Record<string, string> {
-  const auth = readStorage<{ isAdminLoggedIn?: boolean; adminToken?: string | null }>(storageKeys.adminAuth, {});
-  return auth.adminToken ? { Authorization: `Bearer ${auth.adminToken}` } : {};
+  return {};
 }
 
 async function readJson<T>(response: Response, fallbackMessage: string, options?: { userAuthFailure?: boolean }) {
@@ -336,6 +333,14 @@ async function readJson<T>(response: Response, fallbackMessage: string, options?
     throw new Error(payload?.message ?? fallbackMessage);
   }
   return payload as T;
+}
+
+async function fetchExternalWalletApi(input: string, init: RequestInit | undefined, fallbackMessage: string) {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new Error(`${fallbackMessage} 无法连接服务，请检查网络或稍后重试。`);
+  }
 }
 
 export async function fetchWalletAccounts() {
@@ -405,33 +410,49 @@ export async function fetchOnchainRecords(limit = 50) {
 }
 
 export async function fetchExternalWalletBinding() {
-  const response = await fetch("/api/wallet/external-wallet", { headers: userHeaders() });
+  const response = await fetchExternalWalletApi(
+    "/api/wallet/external-wallet",
+    { headers: userHeaders() },
+    "第三方钱包绑定状态加载失败。",
+  );
   return readJson<ExternalWalletBindingResponse>(response, "第三方钱包绑定状态加载失败。", { userAuthFailure: true });
 }
 
 export async function createExternalWalletChallenge(walletAddress: string, network: WalletNetwork = "BSC_TESTNET", provider: ExternalWalletProvider = "metamask") {
-  const response = await fetch("/api/wallet/external-wallet/challenge", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ walletAddress, network, provider }),
-  });
+  const response = await fetchExternalWalletApi(
+    "/api/wallet/external-wallet/challenge",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ walletAddress, network, provider }),
+    },
+    "第三方钱包签名请求失败。",
+  );
   return readJson<ExternalWalletChallenge>(response, "第三方钱包签名请求失败。", { userAuthFailure: true });
 }
 
 export async function bindExternalWallet(challengeId: string, walletAddress: string, signature: string) {
-  const response = await fetch("/api/wallet/external-wallet/bind", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...userHeaders() },
-    body: JSON.stringify({ challengeId, walletAddress, signature }),
-  });
+  const response = await fetchExternalWalletApi(
+    "/api/wallet/external-wallet/bind",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...userHeaders() },
+      body: JSON.stringify({ challengeId, walletAddress, signature }),
+    },
+    "第三方钱包绑定失败。",
+  );
   return readJson<{ binding: ExternalWalletBinding }>(response, "第三方钱包绑定失败。", { userAuthFailure: true });
 }
 
 export async function unbindExternalWallet() {
-  const response = await fetch("/api/wallet/external-wallet", {
-    method: "DELETE",
-    headers: userHeaders(),
-  });
+  const response = await fetchExternalWalletApi(
+    "/api/wallet/external-wallet",
+    {
+      method: "DELETE",
+      headers: userHeaders(),
+    },
+    "第三方钱包解绑失败。",
+  );
   return readJson<ExternalWalletBindingResponse & { ok?: true }>(response, "第三方钱包解绑失败。", { userAuthFailure: true });
 }
 

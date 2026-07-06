@@ -6,13 +6,13 @@
 
 ## 1. 产品概述
 
-星衡当前是一个“Binance 合约行情源 + 内部模拟交易 + 内部账户体系 + BSC Testnet 钱包闭环”的交易模拟 MVP。
+星衡当前是一个“Hyperliquid BTC perpetual 公开行情源 + 内部模拟交易 + 内部账户体系 + BSC Testnet 钱包闭环”的交易模拟 MVP。
 
 系统当前主线聚焦：
 
-- 单交易品种：`BTCUSDT`
+- 交易品种：自动同步 Hyperliquid 主 DEX 全部活跃 perpetual
 - 主资金资产：`USDT`
-- 行情来源：Binance USDT-M 永续合约公开行情
+- 行情来源：Hyperliquid BTC perpetual 公开行情；`BTCUSDT` 是平台内部 symbol
 - 交易性质：仅内部模拟成交，不接真实交易所下单
 - 钱包网络：`BSC Testnet`
 
@@ -30,7 +30,7 @@
 
 1. 提供可运行的用户端模拟交易闭环：注册、登录、看行情、下单、持仓、平仓、订单查询。
 2. 提供基础账户与钱包闭环：资金账户、模拟账户、交易账户、账户划转、内部转账、测试网充值地址、出金申请。
-3. 提供后台运营闭环：用户启停、`BTCUSDT` 单品种配置、资金调整、链上充值扫描、出金审核与确认。
+3. 提供后台运营闭环：用户启停、Hyperliquid 品种覆盖配置、资金调整、链上充值扫描、出金审核与确认。
 4. 为后续真实交易、更多品种、多链钱包与风控能力保留结构，但当前不承诺这些能力已落地。
 
 ## 3. 用户角色
@@ -41,20 +41,22 @@
 | 注册用户 | 模拟交易用户 | 查看首页、行情、交易终端、账户页；执行账户操作 |
 | 管理员 | 后台操作人员 | 固定账号登录后台，管理用户、品种、资金、充值、出金 |
 
-管理员默认账号：
+管理员账号：
 
-| 字段 | 默认值 |
+| 字段 | 配置 |
 | --- | --- |
-| 邮箱 | `admin@example.com` |
-| 密码 | `admin123` |
+| 邮箱 | 环境变量 `ADMIN_EMAIL`，不提供生产默认值 |
+| 密码 | 环境变量 `ADMIN_PASSWORD`，至少 12 位，不提供生产默认值 |
 
-普通用户种子账号：
+普通用户种子账号（仅非生产环境默认启用，生产环境自动关闭）：
 
 | 字段 | 默认值 |
 | --- | --- |
 | 用户 ID | `demo-user` |
 | 邮箱 | `demo@example.com` |
 | 密码 | `demo123` |
+
+用户密码使用 scrypt 哈希存储；历史明文密码会在首次成功登录时自动迁移。用户与管理员会话通过 HttpOnly Cookie 保存，数据库仅保存令牌哈希和过期时间。
 
 ## 4. 信息架构
 
@@ -65,7 +67,7 @@
 | `/login` | 用户登录 | 邮箱密码登录；禁用用户无法登录 |
 | `/register` | 用户注册 | 邮箱、昵称、密码注册 |
 | `/app/dashboard` | 首页 | 展示账户摘要、入口和模拟环境提示 |
-| `/app/markets` | 行情 | 展示 `BTCUSDT` 行情与状态 |
+| `/app/markets` | 行情 | 展示 Hyperliquid 活跃永续品种行情与状态 |
 | `/app/trading` | 交易终端 | K 线图、最新报价、模拟下单、持仓、订单 |
 | `/app/account` | 账户页 | 账户总览、资产、订单、充值/提现/划转入口 |
 
@@ -108,7 +110,7 @@
 | `/admin/login` | 后台登录 | 固定管理员账号登录 |
 | `/admin/dashboard` | 数据概览 | 展示用户与运营摘要 |
 | `/admin/users` | 用户管理 | 查看用户、启用/禁用用户 |
-| `/admin/symbols` | 品种管理 | 编辑 `BTCUSDT` 配置 |
+| `/admin/symbols` | 品种管理 | 编辑 Hyperliquid 同步品种的平台覆盖配置 |
 | `/admin/trading` | 交易与资金管理 | 查看账户、充值、转账、出金、链上记录、行情状态 |
 
 ## 5. 已实现功能说明
@@ -122,7 +124,7 @@
 | 规则项 | 说明 |
 | --- | --- |
 | 邮箱格式 | 必须为有效邮箱 |
-| 密码长度 | 至少 6 位 |
+| 密码长度 | 8 到 128 位 |
 | 确认密码 | 必须一致 |
 | 邮箱唯一性 | 不可重复注册 |
 | 默认状态 | `active` |
@@ -130,19 +132,19 @@
 
 #### 用户登录
 
-用户登录成功后，服务端返回 Bearer Token。后续用户侧交易、钱包、账户接口统一使用 Bearer Token 鉴权。
+用户登录成功后，服务端设置 HttpOnly 会话 Cookie。后续用户侧交易、钱包、账户接口使用该 Cookie 鉴权。
 
 | 场景 | 结果 |
 | --- | --- |
 | 邮箱不存在或密码错误 | 返回“邮箱或密码不正确。” |
 | 用户状态为 `disabled` | 返回“账号已禁用，请联系管理员。” |
-| 登录成功 | 返回 Bearer Token 与用户信息 |
+| 登录成功 | 设置会话 Cookie 并返回用户信息 |
 
 当前不再允许前端通过 `x-user-id` 或 query 参数伪装用户身份。
 
 #### 后台登录
 
-后台通过 `POST /api/admin/login` 获取 Bearer Token。当前未接入 RBAC、多管理员体系或权限细分。
+后台通过 `POST /api/admin/login` 建立 HttpOnly Cookie 会话。当前未接入 RBAC、多管理员体系或权限细分。
 
 #### 禁用用户规则
 
@@ -150,7 +152,7 @@
 
 - 应立即禁止交易接口访问
 - 应立即禁止钱包接口访问
-- MVP 可不做完整 token 主动回收
+- 禁用时立即回收该用户的已有会话
 - 但每次鉴权都必须检查用户当前状态
 
 即使用户仍持有旧 token，只要状态已变为 `disabled`，也必须被拒绝访问。
@@ -168,13 +170,13 @@
 
 ### 5.3 行情模块
 
-当前行情页只展示后台配置为 `isVisible=true` 的 `BTCUSDT`。
+当前行情页展示 Hyperliquid 主 DEX 活跃 perpetual 中后台配置为 `isVisible=true` 的品种。
 
 展示字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| 品种代码 | `BTCUSDT` |
+| 品种代码 | 平台 `{COIN}USDT`，例如 `BTCUSDT`、`ETHUSDT` |
 | 展示名称 | 后台配置的 displayName |
 | Bid | 系统标准化买价 |
 | Ask | 系统标准化卖价 |
@@ -187,7 +189,7 @@
 
 | Symbol | 名称 | 分类 | Digits | Spread | 杠杆 | 合约单位 | 手数范围 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| BTCUSDT | PERP BTC/USDT | crypto | 2 | 10 | 20 | 1 | 0.001-10 / 0.001 |
+| 动态同步 | `{COIN} Perpetual` | crypto | 按 Hyperliquid 元数据 | 平台配置 | 不高于来源上限 | 1 | 按 `szDecimals` |
 
 ### 5.4 交易终端
 
@@ -201,7 +203,7 @@
 | 支持周期 | `1m`、`5m`、`15m`、`1h` |
 | 初始数据 | `/api/market/candles` |
 | 实时更新 | `/ws` 订阅 candle |
-| 历史数据来源 | Binance REST 拉取并回补 |
+| 历史数据来源 | Hyperliquid `candleSnapshot` 拉取并回补 |
 
 #### 行情状态
 
@@ -486,13 +488,13 @@
 
 ### 5.9 后台品种管理
 
-当前后台只允许维护 `BTCUSDT`。
+当前后台维护由 Hyperliquid 主 DEX 自动同步的活跃 perpetual 品种。
 
 | 功能 | 说明 |
 | --- | --- |
-| 编辑品种 | 当前只允许编辑 `BTCUSDT` |
+| 编辑品种 | 可编辑任一已同步品种的平台覆盖配置 |
 | 可编辑字段 | `displayName`、`spread`、`leverage`、`contractSize`、`minLot`、`maxLot`、`lotStep`、`tradeStatus`、`isVisible` |
-| 不可编辑字段 | `symbol`、`apiSymbol` |
+| 不可编辑字段 | `symbol`、`apiSymbol`、`digits`、`minLot`、`lotStep` |
 | 新增其他 symbol | 当前不允许 |
 | 配置持久化 | 服务端持久化，刷新和重启不丢失 |
 
@@ -528,13 +530,16 @@
 
 ### 6.1 行情源
 
-当前使用 Binance USDT-M 永续合约公开行情：
+当前使用 Hyperliquid 主 DEX 活跃 perpetual 公开行情：
 
-- REST：拉取历史 K 线
-- WebSocket：接收实时 ticker / kline
-- 内部按品种配置 spread 生成用于模拟成交的 Bid / Ask
+- REST `candleSnapshot`：拉取历史 K 线
+- WebSocket `bbo` / `trades` / `candle`：接收实时盘口、成交与 K 线
+- 平台内部 `{COIN}USDT` 映射到 Hyperliquid coin `{COIN}`
+- `metaAndAssetCtxs` 同步品种目录并排除 `isDelisted=true` 与 HIP-3
+- `allMids` 提供全市场列表报价，BBO / trades / candle 按用户访问动态订阅
+- API 与模拟交易层按品种配置 spread 生成模拟成交 Bid / Ask
 
-当前主线不再保留 TraderMade / Mock 行情链路作为产品口径。
+当前主线不保留 Binance、TraderMade 或 Mock 行情 Adapter。
 
 ### 6.2 K 线聚合
 
@@ -548,7 +553,7 @@
 当前 K 线存储方式：
 
 - 进程内内存保存当前与历史 K 线
-- 服务启动时从 Binance REST 回补
+- 服务启动时从 Hyperliquid `candleSnapshot` 回补
 - 服务重启后重新拉取
 
 ### 6.3 数据存储
@@ -581,13 +586,15 @@
 | POST | `/api/auth/logout` | 用户登出 |
 | GET | `/api/auth/me` | 获取当前用户 |
 | POST | `/api/admin/login` | 后台登录 |
+| POST | `/api/admin/logout` | 后台登出 |
+| GET | `/api/admin/me` | 获取当前管理员会话 |
 
 ### 7.2 行情接口
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | GET | `/api/market/symbols` | 获取品种配置与行情状态 |
-| PUT | `/api/market/symbols/config` | 保存 `BTCUSDT` 品种配置 |
+| PUT | `/api/admin/market/symbols/config` | 保存 `BTCUSDT` 品种配置（管理员鉴权） |
 | GET | `/api/market/ticker` | 获取最新 ticker |
 | GET | `/api/market/candles` | 获取 K 线 |
 
@@ -659,7 +666,7 @@
 
 ## 9. 已知限制与风险
 
-1. 当前只有 `BTCUSDT`，多品种尚未开放。
+1. 当前仅同步 Hyperliquid 主 DEX；HIP-3、Spot 与已下架品种不开放。
 2. `close_only` 与 `disabled` 当前产品语义已收敛，但接口字段仍保留两个值做兼容。
 3. `wallet.balance` 当前不是实时链上余额，而是基于已确认充值记录计算；不能误表述为实时钱包托管余额。
 4. BSC Testnet 公共 RPC 可能对 `eth_getLogs` 限流，影响真实链上充值扫描稳定性。

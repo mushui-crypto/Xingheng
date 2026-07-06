@@ -14,10 +14,8 @@ export type User = {
 export type AuthState = {
   currentUserId: string | null;
   isLoggedIn: boolean;
-  userToken: string | null;
 };
 
 export type AdminAuthState = {
   isAdminLoggedIn: boolean;
-  adminToken: string | null;
 };

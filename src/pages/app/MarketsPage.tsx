@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ArrowRight, RefreshCw } from "lucide-react";
 import { Link } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
@@ -15,8 +15,16 @@ export function MarketsPage() {
   const quotes = useQuoteStore((state) => state.quotes);
   const refreshAllQuotes = useQuoteStore((state) => state.refreshAllQuotes);
   const updateStatuses = useQuoteStore((state) => state.updateStatuses);
+  const [search, setSearch] = useState("");
   const quoteBySymbol = new Map(quotes.map((quote) => [quote.symbol, quote]));
-  const visibleSymbols = symbols.filter((symbol) => symbol.isVisible);
+  const normalizedSearch = search.trim().toUpperCase();
+  const visibleSymbols = symbols.filter(
+    (symbol) =>
+      symbol.isVisible &&
+      (!normalizedSearch ||
+        symbol.symbol.includes(normalizedSearch) ||
+        symbol.apiSymbol.toUpperCase().includes(normalizedSearch)),
+  );
   const symbolConfigKey = useMemo(
     () =>
       JSON.stringify(
@@ -48,12 +56,20 @@ export function MarketsPage() {
       <div className="xh-page-header">
         <div>
           <h1 className="xh-title">行情</h1>
-          <p className="xh-subtitle">Binance 合约行情经内部标准化后生成 Bid / Ask，供图表和模拟交易模块使用。</p>
+          <p className="xh-subtitle">Hyperliquid 主 DEX 活跃永续品种，公开行情经内部标准化后用于模拟交易。</p>
         </div>
-        <Button variant="secondary" onClick={() => void handleRefresh()}>
-          <RefreshCw size={16} />
-          刷新行情
-        </Button>
+        <div className="flex w-full gap-3 md:w-auto">
+          <input
+            className="min-w-0 flex-1 border border-line bg-black px-3.5 py-2.5 text-sm text-white outline-none md:w-64"
+            placeholder="搜索币种"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <Button variant="secondary" onClick={() => void handleRefresh()}>
+            <RefreshCw size={16} />
+            刷新行情
+          </Button>
+        </div>
       </div>
 
       <Card className="overflow-hidden p-0">

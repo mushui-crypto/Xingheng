@@ -23,8 +23,8 @@ export const defaultTradeSymbols: TradeSymbol[] = [
   {
     id: "SYM-BTCUSDT",
     symbol: "BTCUSDT",
-    displayName: "PERP BTC/USDT",
-    apiSymbol: "BTCUSDT",
+    displayName: "BTC Perpetual",
+    apiSymbol: "BTC",
     category: "crypto",
     digits: 2,
     spread: 10,
@@ -45,7 +45,7 @@ function persist(symbols: TradeSymbol[]) {
   writeStorage(storageKeys.tradeSymbols, symbols);
 }
 
-function loadBinanceSymbols() {
+function loadMarketSymbols() {
   const saved = readStorage<unknown>(storageKeys.tradeSymbols, defaultTradeSymbols);
   const stored = Array.isArray(saved) ? saved.filter(isTradeSymbolRecord) : defaultTradeSymbols;
   const supported = new Set(defaultTradeSymbols.map((symbol) => symbol.symbol));
@@ -82,7 +82,7 @@ function isTradeSymbolRecord(value: unknown): value is TradeSymbol {
 }
 
 export const useSymbolStore = create<SymbolStore>((set, get) => ({
-  symbols: loadBinanceSymbols(),
+  symbols: loadMarketSymbols(),
   getSymbolConfig: (symbol) =>
     get().symbols.find((item) => item.symbol.toUpperCase() === symbol.toUpperCase()) ?? null,
   visibleSymbols: () => get().symbols.filter((item) => item.isVisible && item.tradeStatus !== "disabled"),

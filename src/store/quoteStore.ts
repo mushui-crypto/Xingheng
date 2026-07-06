@@ -37,8 +37,9 @@ export const useQuoteStore = create<QuoteStore>((set, get) => ({
   },
   refreshAllQuotes: async () => {
     const symbols = useSymbolStore.getState().symbols.filter((item) => item.isVisible);
-    for (const symbol of symbols) {
-      await get().refreshQuote(symbol.symbol);
+    const batchSize = 12;
+    for (let index = 0; index < symbols.length; index += batchSize) {
+      await Promise.all(symbols.slice(index, index + batchSize).map((symbol) => get().refreshQuote(symbol.symbol)));
     }
   },
   updateStatuses: () => {

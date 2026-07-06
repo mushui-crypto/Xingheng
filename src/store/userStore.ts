@@ -19,40 +19,12 @@ type UserStore = {
   clear: () => void;
 };
 
-function getUserToken() {
-  try {
-    const raw = localStorage.getItem("xingheng.auth");
-    const auth = raw ? (JSON.parse(raw) as { userToken?: string | null }) : null;
-    return auth?.userToken ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function getAdminToken() {
-  try {
-    const raw = localStorage.getItem("xingheng.adminAuth");
-    const auth = raw ? (JSON.parse(raw) as { adminToken?: string | null }) : null;
-    return auth?.adminToken ?? null;
-  } catch {
-    return null;
-  }
-}
-
 export const useUserStore = create<UserStore>((set, get) => ({
   users: [],
   currentUser: null,
   setCurrentUser: (user) => set({ currentUser: user }),
   loadCurrentUser: async () => {
-    const token = getUserToken();
-    if (!token) {
-      set({ currentUser: null });
-      return null;
-    }
-
-    const response = await fetch("/api/auth/me", {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const response = await fetch("/api/auth/me");
 
     if (!response.ok) {
       set({ currentUser: null });
@@ -64,10 +36,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
     return user;
   },
   loadAdminUsers: async () => {
-    const token = getAdminToken();
-    const response = await fetch("/api/admin/users", {
-      headers: token ? { Authorization: `Bearer ${token}` } : {},
-    });
+    const response = await fetch("/api/admin/users");
 
     if (!response.ok) {
       throw new Error("用户列表加载失败。");
@@ -101,13 +70,9 @@ export const useUserStore = create<UserStore>((set, get) => ({
     return users.find((user) => user.id === id);
   },
   setUserStatus: async (id, status) => {
-    const token = getAdminToken();
     const response = await fetch(`/api/admin/users/${id}/status`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ status }),
     });
     const payload = await response.json().catch(() => null);

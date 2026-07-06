@@ -1,4 +1,4 @@
-export type MarketSource = "binance";
+export type MarketSource = "hyperliquid";
 export type MarketStatus = "connected" | "stale" | "disconnected";
 export type CandleInterval = "1m" | "5m" | "15m" | "1h";
 

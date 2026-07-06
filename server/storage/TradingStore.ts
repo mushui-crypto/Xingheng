@@ -18,6 +18,7 @@ import type {
   User,
   WithdrawalRequest,
 } from "../types";
+import type { SessionRole } from "../auth/security";
 
 const defaultDbPath = resolve(process.cwd(), "server/data/trading.sqlite");
 
@@ -48,6 +49,13 @@ type FundingLedgerRow = FundingLedgerEntry;
 type WithdrawalRequestRow = WithdrawalRequest;
 type AccountTransferRow = AccountTransferRecord;
 type UserRow = User & { password: string };
+type AuthSessionRow = {
+  tokenHash: string;
+  subjectId: string;
+  role: SessionRole;
+  expiresAt: number;
+  createdAt: number;
+};
 type MarketSymbolRow = Omit<MarketSymbol, "isVisible"> & { isVisible: number };
 
 export class TradingStore {
@@ -90,6 +98,10 @@ export class TradingStore {
     return this.db.prepare("SELECT id, email, nickname, status, createdAt FROM users WHERE id = ?").get(id) as User | undefined;
   }
 
+  listUserPasswordRecords() {
+    return this.db.prepare("SELECT id, password FROM users").all() as Array<Pick<UserRow, "id" | "password">>;
+  }
+
   createUser(user: UserRow) {
     this.db
       .prepare(
@@ -97,6 +109,10 @@ export class TradingStore {
          VALUES (?, ?, ?, ?, ?, ?)`,
       )
       .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt);
+  }
+
+  updateUserPassword(id: string, password: string) {
+    this.db.prepare("UPDATE users SET password = ? WHERE id = ?").run(password, id);
   }
 
   upsertSeedUser(user: UserRow) {
@@ -109,22 +125,62 @@ export class TradingStore {
       return;
     }
 
-    this.db
-      .prepare(
-        `UPDATE users
-         SET id = ?, email = ?, password = ?, nickname = ?, status = ?
-         WHERE id = ?`,
-      )
-      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, existing.id);
+    if (existing.id !== user.id || existing.email !== user.email) {
+      this.db.prepare("UPDATE users SET id = ?, email = ? WHERE id = ?").run(user.id, user.email, existing.id);
+    }
   }
 
   updateUserStatus(id: string, status: User["status"]) {
     this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
+    if (status === "disabled") {
+      this.deleteAuthSessionsForSubject(id, "user");
+    }
+  }
+
+  createAuthSession(session: AuthSessionRow) {
+    this.purgeExpiredAuthSessions();
+    this.db
+      .prepare(
+        `INSERT INTO auth_sessions (tokenHash, subjectId, role, expiresAt, createdAt)
+         VALUES (?, ?, ?, ?, ?)`,
+      )
+      .run(session.tokenHash, session.subjectId, session.role, session.expiresAt, session.createdAt);
+  }
+
+  findAuthSession(tokenHash: string, role: SessionRole) {
+    const session = this.db
+      .prepare("SELECT * FROM auth_sessions WHERE tokenHash = ? AND role = ?")
+      .get(tokenHash, role) as AuthSessionRow | undefined;
+    if (!session) {
+      return null;
+    }
+    if (session.expiresAt <= Date.now()) {
+      this.deleteAuthSession(tokenHash, role);
+      return null;
+    }
+    return session;
+  }
+
+  deleteAuthSession(tokenHash: string, role: SessionRole) {
+    this.db.prepare("DELETE FROM auth_sessions WHERE tokenHash = ? AND role = ?").run(tokenHash, role);
+  }
+
+  deleteAuthSessionsForSubject(subjectId: string, role: SessionRole) {
+    this.db.prepare("DELETE FROM auth_sessions WHERE subjectId = ? AND role = ?").run(subjectId, role);
+  }
+
+  purgeExpiredAuthSessions() {
+    this.db.prepare("DELETE FROM auth_sessions WHERE expiresAt <= ?").run(Date.now());
   }
 
   getMarketSymbol(symbol: string) {
     const row = this.db.prepare("SELECT * FROM market_symbols WHERE symbol = ?").get(symbol) as MarketSymbolRow | undefined;
     return row ? toMarketSymbol(row) : null;
+  }
+
+  listMarketSymbols() {
+    const rows = this.db.prepare("SELECT * FROM market_symbols ORDER BY symbol").all() as MarketSymbolRow[];
+    return rows.map(toMarketSymbol);
   }
 
   upsertMarketSymbol(symbol: MarketSymbol) {
@@ -896,6 +952,14 @@ export class TradingStore {
         createdAt TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS auth_sessions (
+        tokenHash TEXT PRIMARY KEY,
+        subjectId TEXT NOT NULL,
+        role TEXT NOT NULL,
+        expiresAt INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS positions (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
@@ -954,6 +1018,8 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_orders_accountId ON orders(accountId);
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_subject ON auth_sessions(subjectId, role);
+      CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiresAt ON auth_sessions(expiresAt);
 
       CREATE TABLE IF NOT EXISTS market_symbols (
         symbol TEXT PRIMARY KEY,

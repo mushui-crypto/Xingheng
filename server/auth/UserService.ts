@@ -1,6 +1,6 @@
-import crypto from "node:crypto";
 import type { TradingStore } from "../storage/TradingStore";
 import type { User } from "../types";
+import { createSessionToken, hashPassword, hashSessionToken, isHashedPassword, verifyPassword } from "./security";
 
 type UserRecord = User & { password: string };
 
@@ -20,10 +20,22 @@ const defaultSeedUser: UserRecord = {
 };
 
 export class UserService {
-  private activeTokens = new Map<string, string>();
-
   constructor(private store: TradingStore) {
-    this.store.upsertSeedUser(defaultSeedUser);
+    const isProduction = process.env.NODE_ENV === "production";
+    const seedEnabled = !isProduction && process.env.SEED_DEMO_USER_ENABLED !== "false";
+    if (seedEnabled) {
+      this.store.upsertSeedUser({ ...defaultSeedUser, password: hashPassword(process.env.SEED_DEMO_USER_PASSWORD || defaultSeedUser.password) });
+    } else if (isProduction) {
+      const existingDemoUser = this.store.findUserByEmail(defaultSeedUser.email);
+      if (existingDemoUser?.id === defaultSeedUser.id && existingDemoUser.status !== "disabled") {
+        this.store.updateUserStatus(existingDemoUser.id, "disabled");
+      }
+    }
+    for (const user of this.store.listUserPasswordRecords()) {
+      if (!isHashedPassword(user.password)) {
+        this.store.updateUserPassword(user.id, hashPassword(user.password));
+      }
+    }
   }
 
   register(input: RegisterInput) {
@@ -34,8 +46,8 @@ export class UserService {
     if (!isValidEmail(email)) {
       throw new Error("请输入有效的邮箱地址。");
     }
-    if (password.length < 6) {
-      throw new Error("密码至少需要 6 位。");
+    if (password.length < 8 || password.length > 128) {
+      throw new Error("密码长度需要在 8 到 128 位之间。");
     }
     if (this.store.findUserByEmail(email)) {
       throw new Error("该邮箱已注册，请直接登录。");
@@ -44,7 +56,7 @@ export class UserService {
     const user: UserRecord = {
       id: `USR-${Date.now().toString(36).toUpperCase()}`,
       email,
-      password,
+      password: hashPassword(password),
       nickname,
       status: "active",
       createdAt: new Date().toISOString(),
@@ -58,21 +70,31 @@ export class UserService {
     const password = String(passwordInput ?? "");
     const user = this.store.findUserByEmail(email);
 
-    if (!user || user.password !== password) {
+    if (!user || !verifyPassword(password, user.password)) {
       throw new Error("邮箱或密码不正确。");
     }
     if (user.status === "disabled") {
       throw new Error("账号已禁用，请联系管理员。");
     }
 
-    const token = crypto.randomBytes(24).toString("hex");
-    this.activeTokens.set(token, user.id);
+    if (!isHashedPassword(user.password)) {
+      this.store.updateUserPassword(user.id, hashPassword(password));
+    }
+    const token = createSessionToken();
+    const now = Date.now();
+    this.store.createAuthSession({
+      tokenHash: hashSessionToken(token),
+      subjectId: user.id,
+      role: "user",
+      expiresAt: now + getSessionTtlMs(),
+      createdAt: now,
+    });
     return { token, user: this.toUserView(user) };
   }
 
   logout(token: string | null | undefined) {
     if (token) {
-      this.activeTokens.delete(token);
+      this.store.deleteAuthSession(hashSessionToken(token), "user");
     }
   }
 
@@ -80,11 +102,11 @@ export class UserService {
     if (!token) {
       return null;
     }
-    const userId = this.activeTokens.get(token);
-    if (!userId) {
+    const session = this.store.findAuthSession(hashSessionToken(token), "user");
+    if (!session) {
       return null;
     }
-    return this.store.findUserById(userId) ?? null;
+    return this.store.findUserById(session.subjectId) ?? null;
   }
 
   getCurrentUser(token: string | null | undefined) {
@@ -113,6 +135,11 @@ export class UserService {
       createdAt: user.createdAt,
     };
   }
+}
+
+function getSessionTtlMs() {
+  const hours = Number(process.env.USER_SESSION_TTL_HOURS ?? 24);
+  return Math.max(1, Math.min(24 * 30, Number.isFinite(hours) ? hours : 24)) * 60 * 60 * 1000;
 }
 
 function isValidEmail(email: string) {

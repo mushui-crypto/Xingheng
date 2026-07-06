@@ -1,13 +1,13 @@
 import cors from "cors";
-import crypto from "node:crypto";
 import dotenv from "dotenv";
 import express from "express";
 import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
+import { createSessionToken, hashSessionToken, secureTextEqual } from "./auth/security";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { KlineStore } from "./modules/kline/KlineStore";
-import { BinanceMarketService } from "./modules/market/BinanceMarketService";
-import { defaultMarketSymbols, normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
+import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
+import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
 import { OnchainWalletService } from "./wallet/OnchainWalletService";
@@ -17,21 +17,46 @@ import type { MarketSymbol, MarketTick, TradeSide, User, WalletAccountType } fro
 dotenv.config();
 
 const port = Number(process.env.API_PORT ?? 8787);
-const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() || "admin@example.com";
-const adminPassword = process.env.ADMIN_PASSWORD || "admin123";
+const isProduction = process.env.NODE_ENV === "production";
+const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() ?? "";
+const adminPassword = process.env.ADMIN_PASSWORD ?? "";
+const adminAuthConfigured = Boolean(adminEmail && adminPassword.length >= 12);
+const userCookieName = "xh_user_session";
+const adminCookieName = "xh_admin_session";
+const allowedOrigins = getAllowedOrigins();
 const app = express();
-app.use(cors());
-app.use(express.json());
+if (process.env.TRUST_PROXY === "true") {
+  app.set("trust proxy", 1);
+}
+app.disable("x-powered-by");
+app.use(securityHeaders);
+app.use(
+  cors({
+    credentials: true,
+    origin(origin, callback) {
+      callback(null, !origin || allowedOrigins.has(origin));
+    },
+  }),
+);
+app.use(rejectCrossOriginMutation);
+app.use(express.json({ limit: "64kb" }));
+app.use("/api/auth", (_request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  next();
+});
+app.use("/api/admin", (_request, response, next) => {
+  response.setHeader("Cache-Control", "no-store");
+  next();
+});
 
 const klineStore = new KlineStore();
-const market = new BinanceMarketService(klineStore);
+const market = new HyperliquidMarketService(klineStore);
 await market.start();
 const tradingStore = new TradingStore();
 
 const tradingMarket = {
   getSymbol(symbol: string) {
-    const normalized = symbol.toUpperCase();
-    return getEditableMarketSymbol(normalized) ?? defaultMarketSymbols.find((item) => item.symbol === normalized || item.apiSymbol === normalized) ?? null;
+    return getEditableMarketSymbol(symbol);
   },
   getTicker(symbol: string) {
     const normalized = normalizeSymbol(symbol);
@@ -48,7 +73,10 @@ const trading = new TradingService(tradingMarket, tradingStore);
 const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const users = new UserService(tradingStore);
-const activeAdminTokens = new Set<string>();
+const authRateLimit = createRateLimiter({
+  windowMs: 15 * 60 * 1000,
+  max: Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10),
+});
 
 declare global {
   namespace Express {
@@ -58,7 +86,7 @@ declare global {
   }
 }
 
-app.post("/api/auth/register", (request, response) => {
+app.post("/api/auth/register", authRateLimit, (request, response) => {
   try {
     response.status(201).json(users.register(request.body ?? {}));
   } catch (error) {
@@ -66,9 +94,12 @@ app.post("/api/auth/register", (request, response) => {
   }
 });
 
-app.post("/api/auth/login", (request, response) => {
+app.post("/api/auth/login", authRateLimit, (request, response) => {
   try {
-    response.json(users.login(request.body?.email, request.body?.password));
+    const result = users.login(request.body?.email, request.body?.password);
+    setSessionCookie(response, userCookieName, result.token, getUserSessionTtlMs());
+    response.setHeader("Cache-Control", "no-store");
+    response.json({ user: result.user });
   } catch (error) {
     response.status(401).json({ message: error instanceof Error ? error.message : "登录失败。" });
   }
@@ -76,6 +107,7 @@ app.post("/api/auth/login", (request, response) => {
 
 app.post("/api/auth/logout", (request, response) => {
   users.logout(getUserBearerToken(request));
+  clearSessionCookie(response, userCookieName);
   response.json({ ok: true });
 });
 
@@ -88,24 +120,39 @@ app.get("/api/auth/me", (request, response) => {
   response.json(user);
 });
 
-app.post("/api/admin/login", (request, response) => {
+app.post("/api/admin/login", authRateLimit, (request, response) => {
+  if (!adminAuthConfigured) {
+    response.status(503).json({ message: "管理员登录尚未配置，请设置至少 12 位的 ADMIN_PASSWORD。" });
+    return;
+  }
   const email = String(request.body?.email ?? "").trim().toLowerCase();
   const password = String(request.body?.password ?? "");
-  if (email !== adminEmail || password !== adminPassword) {
+  if (!secureTextEqual(email, adminEmail) || !secureTextEqual(password, adminPassword)) {
     response.status(401).json({ message: "管理员账号或密码不正确。" });
     return;
   }
 
-  const token = crypto.randomBytes(24).toString("hex");
-  activeAdminTokens.add(token);
-  response.json({ token });
+  const token = createSessionToken();
+  const now = Date.now();
+  const ttlMs = getAdminSessionTtlMs();
+  tradingStore.createAuthSession({
+    tokenHash: hashSessionToken(token),
+    subjectId: adminEmail,
+    role: "admin",
+    expiresAt: now + ttlMs,
+    createdAt: now,
+  });
+  setSessionCookie(response, adminCookieName, token, ttlMs);
+  response.setHeader("Cache-Control", "no-store");
+  response.json({ ok: true });
 });
 
 app.post("/api/admin/logout", (request, response) => {
   const token = getAdminBearerToken(request);
   if (token) {
-    activeAdminTokens.delete(token);
+    tradingStore.deleteAuthSession(hashSessionToken(token), "admin");
   }
+  clearSessionCookie(response, adminCookieName);
   response.json({ ok: true });
 });
 
@@ -115,11 +162,16 @@ app.use("/api/admin", (request, response, next) => {
     return;
   }
   const token = getAdminBearerToken(request);
-  if (!token || !activeAdminTokens.has(token)) {
+  const session = token ? tradingStore.findAuthSession(hashSessionToken(token), "admin") : null;
+  if (!adminAuthConfigured || !session || session.subjectId !== adminEmail) {
     response.status(401).json({ message: "管理员未登录或登录已失效。" });
     return;
   }
   next();
+});
+
+app.get("/api/admin/me", (_request, response) => {
+  response.json({ email: adminEmail, role: "admin" });
 });
 
 registerMarketRoutes(app, market, tradingStore);
@@ -523,12 +575,14 @@ const server = app.listen(port, () => {
 
 registerSocketHub(server, market);
 
-function registerSocketHub(httpServer: typeof server, marketService: BinanceMarketService) {
+function registerSocketHub(httpServer: typeof server, marketService: HyperliquidMarketService) {
   const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
   const subscriptions = new Map<WebSocket, Set<string>>();
+  const releases = new Map<WebSocket, Map<string, () => void>>();
 
   wss.on("connection", (socket) => {
     subscriptions.set(socket, new Set());
+    releases.set(socket, new Map());
     socket.on("message", (raw) => {
       try {
         const message = JSON.parse(String(raw)) as Record<string, string>;
@@ -537,17 +591,31 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
         }
 
         if (message.channel === "ticker") {
-          subscriptions.get(socket)?.add(`ticker:${normalizeSymbol(message.symbol ?? "BTCUSDT")}`);
+          const symbol = normalizeSymbol(message.symbol ?? "BTCUSDT");
+          const key = `ticker:${symbol}`;
+          subscriptions.get(socket)?.add(key);
+          if (!releases.get(socket)?.has(key)) {
+            releases.get(socket)?.set(key, marketService.addTickerSubscription(symbol));
+          }
         }
         if (message.channel === "candle") {
           const interval = normalizeInterval(message.interval ?? "1m");
-          subscriptions.get(socket)?.add(`candle:${normalizeSymbol(message.symbol ?? "BTCUSDT")}:${interval}`);
+          const symbol = normalizeSymbol(message.symbol ?? "BTCUSDT");
+          const key = `candle:${symbol}:${interval}`;
+          subscriptions.get(socket)?.add(key);
+          if (!releases.get(socket)?.has(key)) {
+            releases.get(socket)?.set(key, marketService.addCandleSubscription(symbol, interval));
+          }
         }
       } catch (error) {
         socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "invalid message" }));
       }
     });
-    socket.on("close", () => subscriptions.delete(socket));
+    socket.on("close", () => {
+      releases.get(socket)?.forEach((release) => release());
+      releases.delete(socket);
+      subscriptions.delete(socket);
+    });
   });
 
   marketService.on("tick", (tick) => {
@@ -594,15 +662,7 @@ function registerSocketHub(httpServer: typeof server, marketService: BinanceMark
 }
 
 function getAdminBearerToken(request: express.Request) {
-  const authorization = request.headers.authorization;
-  if (!authorization) {
-    return null;
-  }
-  const [scheme, token] = authorization.split(" ");
-  if (scheme !== "Bearer" || !token) {
-    return null;
-  }
-  return token;
+  return getRequestToken(request, adminCookieName);
 }
 
 function broadcast(subscriptions: Map<WebSocket, Set<string>>, key: string, payload: unknown) {
@@ -648,15 +708,7 @@ function getSimulationAccountId(request: express.Request) {
 }
 
 function getUserBearerToken(request: express.Request) {
-  const authorization = request.headers.authorization;
-  if (!authorization) {
-    return null;
-  }
-  const [scheme, token] = authorization.split(" ");
-  if (scheme !== "Bearer" || !token) {
-    return null;
-  }
-  return token;
+  return getRequestToken(request, userCookieName);
 }
 
 function sendBadRequest(response: express.Response, error: unknown) {
@@ -669,3 +721,140 @@ process.on("SIGINT", async () => {
   server.close();
   process.exit(0);
 });
+
+process.on("SIGTERM", async () => {
+  await market.stop();
+  tradingStore.close();
+  server.close();
+});
+
+function getRequestToken(request: express.Request, cookieName: string) {
+  const authorization = request.headers.authorization;
+  if (authorization) {
+    const [scheme, token] = authorization.split(" ");
+    if (scheme === "Bearer" && token) {
+      return token;
+    }
+  }
+  return parseCookies(request.headers.cookie)[cookieName] ?? null;
+}
+
+function parseCookies(header: string | undefined) {
+  const cookies: Record<string, string> = {};
+  for (const part of header?.split(";") ?? []) {
+    const separator = part.indexOf("=");
+    if (separator <= 0) {
+      continue;
+    }
+    const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
+    try {
+      cookies[name] = decodeURIComponent(value);
+    } catch {
+      cookies[name] = value;
+    }
+  }
+  return cookies;
+}
+
+function setSessionCookie(response: express.Response, name: string, token: string, ttlMs: number) {
+  response.setHeader(
+    "Set-Cookie",
+    `${name}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(ttlMs / 1000)}${isProduction ? "; Secure" : ""}`,
+  );
+}
+
+function clearSessionCookie(response: express.Response, name: string) {
+  response.setHeader(
+    "Set-Cookie",
+    `${name}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${isProduction ? "; Secure" : ""}`,
+  );
+}
+
+function getUserSessionTtlMs() {
+  return boundedHours(process.env.USER_SESSION_TTL_HOURS, 24, 24 * 30) * 60 * 60 * 1000;
+}
+
+function getAdminSessionTtlMs() {
+  return boundedHours(process.env.ADMIN_SESSION_TTL_HOURS, 8, 24) * 60 * 60 * 1000;
+}
+
+function boundedHours(raw: string | undefined, fallback: number, maximum: number) {
+  const value = Number(raw ?? fallback);
+  return Math.max(1, Math.min(maximum, Number.isFinite(value) ? value : fallback));
+}
+
+function getAllowedOrigins() {
+  const configured = (process.env.CORS_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  if (!isProduction) {
+    configured.push("http://localhost:5173", "http://127.0.0.1:5173");
+  }
+  return new Set(configured);
+}
+
+function rejectCrossOriginMutation(request: express.Request, response: express.Response, next: express.NextFunction) {
+  if (["GET", "HEAD", "OPTIONS"].includes(request.method)) {
+    next();
+    return;
+  }
+  const origin = request.headers.origin;
+  if (!origin) {
+    next();
+    return;
+  }
+  const forwardedProtocol = request.headers["x-forwarded-proto"];
+  const protocol = typeof forwardedProtocol === "string" ? forwardedProtocol.split(",")[0].trim() : request.protocol;
+  const sameOrigin = `${protocol}://${request.get("host")}`;
+  if (origin !== sameOrigin && !allowedOrigins.has(origin)) {
+    response.status(403).json({ message: "请求来源不受信任。" });
+    return;
+  }
+  next();
+}
+
+function securityHeaders(request: express.Request, response: express.Response, next: express.NextFunction) {
+  response.setHeader("X-Content-Type-Options", "nosniff");
+  response.setHeader("X-Frame-Options", "DENY");
+  response.setHeader("Referrer-Policy", "no-referrer");
+  response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  response.setHeader("Cross-Origin-Opener-Policy", "same-origin");
+  if (isProduction) {
+    response.setHeader(
+      "Content-Security-Policy",
+      "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' wss:",
+    );
+    if (request.secure || request.headers["x-forwarded-proto"] === "https") {
+      response.setHeader("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    }
+  }
+  next();
+}
+
+function createRateLimiter(options: { windowMs: number; max: number }) {
+  const attempts = new Map<string, { count: number; resetAt: number }>();
+  const limit = Number.isFinite(options.max) ? Math.max(1, Math.floor(options.max)) : 10;
+  return (request: express.Request, response: express.Response, next: express.NextFunction) => {
+    const now = Date.now();
+    const key = request.ip || request.socket.remoteAddress || "unknown";
+    const current = attempts.get(key);
+    const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + options.windowMs } : current;
+    entry.count += 1;
+    attempts.set(key, entry);
+    if (attempts.size > 10_000) {
+      for (const [storedKey, value] of attempts) {
+        if (value.resetAt <= now) {
+          attempts.delete(storedKey);
+        }
+      }
+    }
+    if (entry.count > limit) {
+      response.setHeader("Retry-After", String(Math.ceil((entry.resetAt - now) / 1000)));
+      response.status(429).json({ message: "尝试次数过多，请稍后再试。" });
+      return;
+    }
+    next();
+  };
+}
