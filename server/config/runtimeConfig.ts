@@ -33,7 +33,12 @@ function getAllowedOrigins(isProduction: boolean) {
     .map((value) => value.trim())
     .filter(Boolean);
   if (!isProduction) {
-    configured.push("http://localhost:5173", "http://127.0.0.1:5173");
+    configured.push(
+      "http://localhost:5173",
+      "http://127.0.0.1:5173",
+      "http://localhost:5174",
+      "http://127.0.0.1:5174",
+    );
   }
   return new Set(configured);
 }

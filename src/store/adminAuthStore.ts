@@ -21,6 +21,7 @@ export const useAdminAuthStore = create<AdminAuthStore>((set) => ({
   login: async (email, password) => {
     const response = await fetch("/api/admin/login", {
       method: "POST",
+      credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email, password }),
     });
@@ -34,7 +35,7 @@ export const useAdminAuthStore = create<AdminAuthStore>((set) => ({
     return { ok: true };
   },
   logout: () => {
-    void fetch("/api/admin/logout", { method: "POST" }).catch(() => undefined);
+    void fetch("/api/admin/logout", { method: "POST", credentials: "include" }).catch(() => undefined);
     writeStorage(storageKeys.adminAuth, defaultAdminAuthState);
     set(defaultAdminAuthState);
   },
@@ -43,7 +44,7 @@ export const useAdminAuthStore = create<AdminAuthStore>((set) => ({
     set(defaultAdminAuthState);
   },
   syncSession: async () => {
-    const response = await fetch("/api/admin/me").catch(() => null);
+    const response = await fetch("/api/admin/me", { credentials: "include" }).catch(() => null);
     if (!response?.ok) {
       writeStorage(storageKeys.adminAuth, defaultAdminAuthState);
       set(defaultAdminAuthState);

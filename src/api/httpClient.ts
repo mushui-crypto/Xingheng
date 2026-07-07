@@ -18,7 +18,7 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
   let response: Response;
 
   try {
-    response = await fetch(input, options.init);
+    response = await fetch(input, { credentials: "include", ...options.init });
   } catch (error) {
     if (options.networkErrorMessage) {
       throw new Error(options.networkErrorMessage);
