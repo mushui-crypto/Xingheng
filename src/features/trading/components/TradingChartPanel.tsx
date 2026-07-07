@@ -3,7 +3,7 @@ import type { RefObject } from "react";
 import { Card } from "../../../components/ui/Card";
 import type { CandleInterval } from "../../../types";
 import type { TradeSymbol } from "../../../types/market";
-import { tradingIntervals } from "../model/constants";
+import { tradingIntervalLabels, tradingIntervals } from "../model/constants";
 
 export function TradingChartPanel({
   chartContainerRef,
@@ -32,14 +32,14 @@ export function TradingChartPanel({
           <span className="font-semibold">{symbol}</span>
           <span className="text-sm text-muted">{selectedConfig.displayName}</span>
         </div>
-        <div className="no-scrollbar flex overflow-x-auto border border-line bg-black p-1">
+        <div className="no-scrollbar flex max-w-full overflow-x-auto border border-line bg-black p-1">
           {tradingIntervals.map((item) => (
             <button
               key={item}
-              className={`shrink-0 px-3 py-1.5 text-sm transition ${interval === item ? "bg-white text-black" : "text-muted hover:text-white"}`}
+              className={`shrink-0 px-2.5 py-1.5 text-sm transition sm:px-3 ${interval === item ? "bg-white text-black" : "text-muted hover:text-white"}`}
               onClick={() => onIntervalChange(item)}
             >
-              {item}
+              {tradingIntervalLabels[item]}
             </button>
           ))}
         </div>
