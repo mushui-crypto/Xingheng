@@ -102,6 +102,7 @@ export type AdminMarketStatus = {
   providerCoin: string;
   sourceDex: string;
   sourceType: MarketSourceType;
+  iconUrl?: string | null;
   category: SymbolCategory;
   displayName: string;
   tradeStatus: string;
@@ -248,6 +249,7 @@ function toTradeSymbol(symbol: ApiMarketSymbol, timestamp: string): TradeSymbol 
     providerCoin: symbol.providerCoin ?? symbol.apiSymbol,
     sourceDex: symbol.sourceDex ?? "main",
     sourceType: symbol.sourceType ?? "main",
+    iconUrl: symbol.iconUrl ?? null,
     quoteStatus: toQuoteStatus(symbol.status),
     createdAt: timestamp,
     updatedAt: timestamp,

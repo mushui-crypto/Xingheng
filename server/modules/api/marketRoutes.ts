@@ -21,12 +21,12 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
   });
 
   app.get("/api/market/symbols", (_request, response) => {
-    response.json(getMarketSymbols().map((symbol) => ({ ...symbol, status: market.getStatus(symbol.symbol) })));
+    response.json(getMarketSymbols().map((symbol) => withMarketIconUrl({ ...symbol, status: market.getStatus(symbol.symbol) })));
   });
 
   app.put("/api/admin/market/symbols/config", (request, response) => {
     try {
-      response.json(updateMarketSymbolsConfig(request.body?.symbols, store).map((symbol) => ({
+      response.json(updateMarketSymbolsConfig(request.body?.symbols, store).map((symbol) => withMarketIconUrl({
         ...symbol,
         status: market.getStatus(symbol.symbol),
       })));
@@ -65,6 +65,7 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
       sourceDex: symbol.sourceDex,
       sourceType: symbol.sourceType,
       category: symbol.category,
+      iconUrl: toHyperliquidIconUrl(symbol.providerCoin),
       displayName: symbol.displayName,
       tradeStatus: symbol.tradeStatus,
       status: market.getStatus(symbol.symbol),
@@ -82,6 +83,21 @@ function getMarketSymbols() {
     if (a.isVisible !== b.isVisible) return a.isVisible ? -1 : 1;
     return a.symbol.localeCompare(b.symbol);
   });
+}
+
+function withMarketIconUrl<T extends MarketSymbol>(symbol: T) {
+  return {
+    ...symbol,
+    iconUrl: toHyperliquidIconUrl(symbol.providerCoin),
+  };
+}
+
+function toHyperliquidIconUrl(providerCoin: unknown) {
+  const coin = String(providerCoin ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(coin)) {
+    return null;
+  }
+  return `https://app.hyperliquid.xyz/coins/${coin}.svg`;
 }
 
 function syncCatalog(market: HyperliquidMarketService, store?: TradingStore) {

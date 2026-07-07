@@ -49,6 +49,7 @@ export type MarketSymbol = {
   sourceDex: string;
   sourceType: MarketSourceType;
   category: MarketCategory;
+  iconUrl?: string | null;
   digits: number;
   spread: number;
   leverage: number;

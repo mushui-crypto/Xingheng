@@ -286,6 +286,15 @@ textarea {
     @apply h-10 w-10 text-base;
   }
 
+  .xh-market-token.is-image,
+  .xh-market-row-token.is-image {
+    @apply bg-transparent text-transparent;
+  }
+
+  .xh-market-icon-image {
+    @apply h-full w-full rounded-full object-cover;
+  }
+
   .xh-market-trigger-symbol {
     @apply block truncate text-2xl font-semibold leading-7 tracking-[-0.02em];
   }

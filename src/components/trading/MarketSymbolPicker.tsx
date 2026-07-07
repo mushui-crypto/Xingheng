@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { SymbolCategory, TradeSymbol, TradeStatus } from "../../types/market";
 import { formatQuantity } from "../../utils/quantity";
 import { Modal } from "../ui/Modal";
+import { MarketIcon } from "./MarketIcon";
 
 type MarketSymbolPickerProps = {
   symbols: TradeSymbol[];
@@ -80,9 +81,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
         aria-expanded={open}
         onClick={() => setOpen(true)}
       >
-        <span className="xh-market-token" aria-hidden="true">
-          {selected.apiSymbol.slice(0, 1)}
-        </span>
+        <MarketIcon className="xh-market-token" iconUrl={selected.iconUrl} fallback={selected.apiSymbol} />
         <span className="min-w-0 text-left">
           <span className="xh-market-trigger-symbol">
             {selected.apiSymbol}
@@ -182,9 +181,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
                   onClick={() => selectSymbol(item.symbol)}
                 >
                   <span className="xh-market-row-main">
-                    <span className="xh-market-row-token" aria-hidden="true">
-                      {item.apiSymbol.slice(0, 1)}
-                    </span>
+                    <MarketIcon className="xh-market-row-token" iconUrl={item.iconUrl} fallback={item.apiSymbol} />
                     <span className="min-w-0">
                       <strong>{marketDisplaySymbol(item)}</strong>
                       <small>{item.displayName} · {item.sourceDex}</small>

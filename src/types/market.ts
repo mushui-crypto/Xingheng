@@ -12,6 +12,7 @@ export type TradeSymbol = {
   providerCoin: string;
   sourceDex: string;
   sourceType: MarketSourceType;
+  iconUrl?: string | null;
   category: SymbolCategory;
   digits: number;
   spread: number;

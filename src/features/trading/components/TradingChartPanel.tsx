@@ -1,5 +1,6 @@
 import { Activity } from "lucide-react";
 import type { RefObject } from "react";
+import { MarketIcon } from "../../../components/trading/MarketIcon";
 import { Card } from "../../../components/ui/Card";
 import type { CandleInterval } from "../../../types";
 import type { TradeSymbol } from "../../../types/market";
@@ -29,6 +30,7 @@ export function TradingChartPanel({
       <div className="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex items-center gap-2">
           <Activity size={18} style={{ color: themeColor }} />
+          <MarketIcon className="xh-market-row-token" iconUrl={selectedConfig.iconUrl} fallback={selectedConfig.apiSymbol} />
           <span className="font-semibold">{symbol}</span>
           <span className="text-sm text-muted">{selectedConfig.displayName}</span>
         </div>
