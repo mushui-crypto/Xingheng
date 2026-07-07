@@ -25,6 +25,10 @@ export const defaultTradeSymbols: TradeSymbol[] = [
     symbol: "BTCUSDT",
     displayName: "BTC Perpetual",
     apiSymbol: "BTC",
+    providerMarketId: "BTC",
+    providerCoin: "BTC",
+    sourceDex: "main",
+    sourceType: "main",
     category: "crypto",
     digits: 2,
     spread: 10,
@@ -78,7 +82,14 @@ function isTradeSymbolRecord(value: unknown): value is TradeSymbol {
   }
 
   const symbol = value as Partial<TradeSymbol>;
-  return typeof symbol.symbol === "string" && typeof symbol.apiSymbol === "string";
+  return (
+    typeof symbol.symbol === "string" &&
+    typeof symbol.apiSymbol === "string" &&
+    typeof symbol.providerMarketId === "string" &&
+    typeof symbol.providerCoin === "string" &&
+    typeof symbol.sourceDex === "string" &&
+    (symbol.sourceType === "main" || symbol.sourceType === "hip3")
+  );
 }
 
 export const useSymbolStore = create<SymbolStore>((set, get) => ({

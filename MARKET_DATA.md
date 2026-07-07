@@ -2,17 +2,24 @@
 
 当前行情主线只使用 Hyperliquid 公开 API，不保留 Binance 行情 Adapter。
 
-- 平台内部交易品种：`{COIN}USDT`
-- Hyperliquid perpetual coin：`{COIN}`
+- 平台内部交易品种：主 DEX 使用 `{COIN}USDT`；HIP-3 / 特殊 DEX 使用 `{DEX}-{COIN}USDT`
+- Hyperliquid perpetual coin：主 DEX 使用 `{COIN}`；HIP-3 / 特殊 DEX 使用 `providerMarketId`，例如 `xyz:TSLA`
 - 模拟账户记账资产：`USDT`
 - 行情只用于内部模拟成交，不向 Hyperliquid 提交真实订单
 
-例如平台 `BTCUSDT` 映射 Hyperliquid `BTC` perpetual。平台 symbol 是内部模拟
-标识，不表示系统接入同名 CEX 市场，也不表示用户持有 Hyperliquid 账户。
+例如平台 `BTCUSDT` 映射 Hyperliquid `BTC` perpetual，`XYZ-TSLAUSDT`
+映射 Hyperliquid `xyz:TSLA` perpetual。平台 symbol 是内部模拟标识，不表示
+系统接入同名 CEX 市场，也不表示用户持有 Hyperliquid 账户。
 
-服务启动时调用 `metaAndAssetCtxs` 同步主 DEX 品种目录，排除
-`isDelisted=true` 与带 DEX 前缀的 HIP-3 市场。全市场列表使用单个
-`allMids` 订阅；BBO、成交和 K 线按前端实际访问动态订阅并在连接关闭时取消。
+服务启动时先调用 `perpDexs` 发现主 DEX 与 HIP-3 / 特殊 DEX，再按 dex 调用
+`metaAndAssetCtxs` 同步目录，并结合 `perpConciseAnnotations` /
+`perpCategories` 归类为 `crypto`、`metals`、`us_equities`、`indices` 或
+`other`。`isDelisted=true`、无有效 `midPx/markPx` 的市场不纳入可交易目录。
+主 DEX 品种默认可见且可模拟交易；HIP-3 / 特殊 DEX 默认不可见且
+`tradeStatus=disabled`，需后台显式启用后才允许内部模拟开仓。
+
+全市场 mids 按 source dex 订阅 `allMids`；BBO、成交和 K 线按前端实际访问动态
+订阅并在连接关闭时取消。
 
 ## 模块结构
 
@@ -21,7 +28,7 @@
 | 行情服务 | `server/modules/market/HyperliquidMarketService.ts` | WebSocket 订阅、心跳、断线重连、状态更新 |
 | REST 客户端 | `server/modules/market/HyperliquidRestClient.ts` | `candleSnapshot` 历史 K 线与分页 |
 | K 线内存存储 | `server/modules/kline/KlineStore.ts` | 保存历史与当前 K 线 |
-| 品种映射 | `server/modules/market/marketConfig.ts` | `{COIN}USDT -> {COIN}` |
+| 品种映射 | `server/modules/market/marketConfig.ts` | 平台 symbol -> Hyperliquid `providerMarketId` |
 | 行情 API | `server/modules/api/marketRoutes.ts` | 对前端输出内部标准化结构 |
 | API/WebSocket 入口 | `server/index.ts` | REST、交易接口和本地 `/ws` 推送 |
 
@@ -59,6 +66,20 @@ HYPERLIQUID_STREAM_URL=wss://api.hyperliquid.xyz/ws
 }
 ```
 
+HIP-3 / 特殊 DEX 的 `coin` 使用完整 `providerMarketId`，例如：
+
+```json
+{
+  "type": "candleSnapshot",
+  "req": {
+    "coin": "xyz:TSLA",
+    "interval": "15m",
+    "startTime": 1780000000000,
+    "endTime": 1780100000000
+  }
+}
+```
+
 支持 `1m`、`5m`、`15m`、`1h`。服务启动时每个周期回补最近 500
 根；API 允许请求 1-1000 根并按 Hyperliquid 的单页限制自动分页。内部
 `Candle.time` 统一为秒级 Unix 时间戳。
@@ -71,6 +92,14 @@ HYPERLIQUID_STREAM_URL=wss://api.hyperliquid.xyz/ws
 { "method": "subscribe", "subscription": { "type": "bbo", "coin": "BTC" } }
 { "method": "subscribe", "subscription": { "type": "trades", "coin": "BTC" } }
 { "method": "subscribe", "subscription": { "type": "candle", "coin": "BTC", "interval": "1m" } }
+```
+
+HIP-3 / 特殊 DEX 按完整 `providerMarketId` 订阅：
+
+```json
+{ "method": "subscribe", "subscription": { "type": "bbo", "coin": "xyz:TSLA" } }
+{ "method": "subscribe", "subscription": { "type": "trades", "coin": "xyz:TSLA" } }
+{ "method": "subscribe", "subscription": { "type": "candle", "coin": "xyz:TSLA", "interval": "1m" } }
 ```
 
 `candle` 会分别订阅 `1m`、`5m`、`15m`、`1h`。

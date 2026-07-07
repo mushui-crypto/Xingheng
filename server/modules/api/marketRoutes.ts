@@ -60,6 +60,11 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
     response.json(getMarketSymbols().map((symbol) => ({
       symbol: symbol.symbol,
       apiSymbol: symbol.apiSymbol,
+      providerMarketId: symbol.providerMarketId,
+      providerCoin: symbol.providerCoin,
+      sourceDex: symbol.sourceDex,
+      sourceType: symbol.sourceType,
+      category: symbol.category,
       displayName: symbol.displayName,
       tradeStatus: symbol.tradeStatus,
       status: market.getStatus(symbol.symbol),
@@ -86,9 +91,10 @@ function syncCatalog(market: HyperliquidMarketService, store?: TradingStore) {
     activeSymbols.add(provider.symbol);
     const saved = persisted.get(provider.symbol);
     const merged: MarketSymbol = saved
-      ? {
+        ? {
           ...provider,
           displayName: saved.displayName,
+          category: saved.category,
           spread: saved.spread,
           leverage: Math.min(saved.leverage, provider.leverage),
           contractSize: saved.contractSize,
@@ -117,9 +123,22 @@ function updateMarketSymbolsConfig(input: unknown, store?: TradingStore) {
     const current = editableMarketSymbols.get(symbol);
     if (!current) throw new Error(`品种 ${symbol} 不存在。`);
     if (String(incoming.apiSymbol ?? "") !== current.apiSymbol) throw new Error(`${symbol} 的 apiSymbol 不允许修改。`);
+    if (
+      incoming.providerMarketId !== undefined &&
+      String(incoming.providerMarketId) !== current.providerMarketId
+    ) {
+      throw new Error(`${symbol} 的 providerMarketId 不允许修改。`);
+    }
+    if (incoming.sourceDex !== undefined && String(incoming.sourceDex) !== current.sourceDex) {
+      throw new Error(`${symbol} 的 sourceDex 不允许修改。`);
+    }
+    if (incoming.sourceType !== undefined && String(incoming.sourceType) !== current.sourceType) {
+      throw new Error(`${symbol} 的 sourceType 不允许修改。`);
+    }
     const next: MarketSymbol = {
       ...current,
       displayName: normalizeNonEmptyString(incoming.displayName, "displayName"),
+      category: normalizeCategory(incoming.category ?? current.category),
       spread: normalizePositiveNumber(incoming.spread, "spread"),
       leverage: normalizePositiveNumber(incoming.leverage, "leverage"),
       contractSize: normalizePositiveNumber(incoming.contractSize, "contractSize"),
@@ -162,6 +181,12 @@ function normalizePositiveNumber(value: unknown, field: string) {
 }
 function normalizeTradeStatus(value: unknown): MarketSymbol["tradeStatus"] {
   if (value !== "enabled" && value !== "close_only" && value !== "disabled") throw new Error("tradeStatus 不正确。");
+  return value;
+}
+function normalizeCategory(value: unknown): MarketSymbol["category"] {
+  if (value !== "crypto" && value !== "metals" && value !== "us_equities" && value !== "indices" && value !== "other") {
+    throw new Error("category 不正确。");
+  }
   return value;
 }
 function normalizeBoolean(value: unknown, field: string) {

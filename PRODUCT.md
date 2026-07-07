@@ -17,7 +17,7 @@ product
 
 当前产品目标：
 
-- 提供 Hyperliquid 主 DEX 全量活跃 perpetual 品种的模拟行情查看能力。
+- 提供 Hyperliquid 主 DEX 全量活跃 perpetual，以及后台显式启用的 Hyperliquid HIP-3 贵金属/美股/指数等特殊 perpetual 的模拟行情查看能力。
 - 提供仅限内部模拟成交的交易闭环，包括下单、持仓、平仓、订单与账户状态查询。
 - 提供资金账户、模拟账户、交易账户之间的账户体系、记录查询、划转与内部转账能力。
 - 提供 BSC Testnet USDT 的测试网充值地址分配、链上充值记录、出金申请、后台审核与确认闭环。
@@ -77,8 +77,9 @@ product
 
 ## Scope Constraints
 
-- 当前品种目录自动同步 Hyperliquid 主 DEX 活跃 perpetual，排除已下架与 HIP-3 市场
-- 平台内部 symbol 使用 `{COIN}USDT`，例如 Hyperliquid `BTC` 映射为 `BTCUSDT`
+- 当前品种目录自动同步 Hyperliquid 主 DEX 活跃 perpetual，并接入 Hyperliquid `perpDexs` 发现到的 HIP-3 / 特殊 DEX perpetual；已下架、无有效报价的品种不纳入可交易目录
+- 主 DEX 平台内部 symbol 使用 `{COIN}USDT`，例如 Hyperliquid `BTC` 映射为 `BTCUSDT`；HIP-3 / 特殊 DEX 使用 `{DEX}-{COIN}USDT`，例如 `xyz:TSLA` 映射为 `XYZ-TSLAUSDT`
+- HIP-3 / 特殊 DEX 品种默认 `isVisible=false` 且 `tradeStatus=disabled`，需后台显式启用后才允许内部模拟开仓
 - 当前主资金资产仅为 `USDT`
 - 当前钱包网络仅为 `BSC_TESTNET`
 - 当前钱包能力仅围绕单充值地址、测试网充值记录与出金审核闭环

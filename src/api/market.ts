@@ -1,5 +1,5 @@
 import type { CandleInterval, MarketStatus, TradeSide } from "../types";
-import type { QuoteStatus, TradeSymbol } from "../types/market";
+import type { MarketSourceType, QuoteStatus, SymbolCategory, TradeSymbol } from "../types/market";
 import { adminHeaders, requestJson, userHeaders } from "./httpClient";
 
 export type ApiCandle = {
@@ -98,6 +98,11 @@ export type BalanceAdjustment = {
 export type AdminMarketStatus = {
   symbol: string;
   apiSymbol: string;
+  providerMarketId: string;
+  providerCoin: string;
+  sourceDex: string;
+  sourceType: MarketSourceType;
+  category: SymbolCategory;
   displayName: string;
   tradeStatus: string;
   status: MarketStatus;
