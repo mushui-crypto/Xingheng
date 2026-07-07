@@ -111,6 +111,10 @@ export type AdminMarketStatus = {
 
 type ApiMarketSymbol = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "updatedAt"> & {
   status?: MarketStatus;
+  providerMarketId?: string;
+  providerCoin?: string;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
 };
 
 export async function syncMarketSymbols(symbols: TradeSymbol[]) {
@@ -122,26 +126,14 @@ export async function syncMarketSymbols(symbols: TradeSymbol[]) {
     },
   }).then((payload) => {
     const now = new Date().toISOString();
-    return payload.map((symbol) => ({
-      ...symbol,
-      id: `SYM-${symbol.symbol}`,
-      quoteStatus: toQuoteStatus(symbol.status),
-      createdAt: now,
-      updatedAt: now,
-    })) satisfies TradeSymbol[];
+    return payload.map((symbol) => toTradeSymbol(symbol, now)) satisfies TradeSymbol[];
   });
 }
 
 export async function fetchMarketSymbols() {
   const payload = await requestJson<ApiMarketSymbol[]>("/api/market/symbols", "品种列表加载失败。");
   const now = new Date().toISOString();
-  return payload.map((symbol) => ({
-    ...symbol,
-    id: `SYM-${symbol.symbol}`,
-    quoteStatus: toQuoteStatus(symbol.status),
-    createdAt: now,
-    updatedAt: now,
-  })) satisfies TradeSymbol[];
+  return payload.map((symbol) => toTradeSymbol(symbol, now)) satisfies TradeSymbol[];
 }
 
 export async function fetchTicker(symbol: string) {
@@ -246,4 +238,18 @@ export async function fetchAdminMarketStatus() {
 
 function toQuoteStatus(status?: MarketStatus): QuoteStatus {
   return status ?? "disconnected";
+}
+
+function toTradeSymbol(symbol: ApiMarketSymbol, timestamp: string): TradeSymbol {
+  return {
+    ...symbol,
+    id: `SYM-${symbol.symbol}`,
+    providerMarketId: symbol.providerMarketId ?? symbol.apiSymbol,
+    providerCoin: symbol.providerCoin ?? symbol.apiSymbol,
+    sourceDex: symbol.sourceDex ?? "main",
+    sourceType: symbol.sourceType ?? "main",
+    quoteStatus: toQuoteStatus(symbol.status),
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  };
 }

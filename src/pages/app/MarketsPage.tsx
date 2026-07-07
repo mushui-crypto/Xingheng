@@ -207,15 +207,17 @@ export function MarketsPage() {
 }
 
 function matchesSearch(symbol: TradeSymbol, keyword: string) {
-  return (
-    !keyword ||
-    symbol.symbol.toUpperCase().includes(keyword) ||
-    symbol.displayName.toUpperCase().includes(keyword) ||
-    symbol.apiSymbol.toUpperCase().includes(keyword) ||
-    symbol.providerMarketId.toUpperCase().includes(keyword) ||
-    symbol.providerCoin.toUpperCase().includes(keyword) ||
-    symbol.sourceDex.toUpperCase().includes(keyword)
-  );
+  if (!keyword) {
+    return true;
+  }
+  return [
+    symbol.symbol,
+    symbol.displayName,
+    symbol.apiSymbol,
+    symbol.providerMarketId,
+    symbol.providerCoin,
+    symbol.sourceDex,
+  ].some((value) => String(value ?? "").toUpperCase().includes(keyword));
 }
 
 function categoryLabel(category: SymbolCategory) {

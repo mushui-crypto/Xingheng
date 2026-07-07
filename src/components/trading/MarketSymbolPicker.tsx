@@ -42,16 +42,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
     return symbols
       .filter((item) => item.category === categoryFilter)
       .filter((item) => matchesFilter(item, marketFilter))
-      .filter(
-        (item) =>
-          !keyword ||
-          item.symbol.toUpperCase().includes(keyword) ||
-          item.apiSymbol.toUpperCase().includes(keyword) ||
-          item.displayName.toUpperCase().includes(keyword) ||
-          item.providerMarketId.toUpperCase().includes(keyword) ||
-          item.providerCoin.toUpperCase().includes(keyword) ||
-          item.sourceDex.toUpperCase().includes(keyword),
-      )
+      .filter((item) => matchesSearch(item, keyword))
       .sort((a, b) => a.symbol.localeCompare(b.symbol));
   }, [categoryFilter, marketFilter, search, symbols]);
 
@@ -238,4 +229,18 @@ function matchesFilter(symbol: TradeSymbol, filter: MarketFilter) {
     return symbol.minLot <= 0.01;
   }
   return symbol.tradeStatus === filter;
+}
+
+function matchesSearch(symbol: TradeSymbol, keyword: string) {
+  if (!keyword) {
+    return true;
+  }
+  return [
+    symbol.symbol,
+    symbol.apiSymbol,
+    symbol.displayName,
+    symbol.providerMarketId,
+    symbol.providerCoin,
+    symbol.sourceDex,
+  ].some((value) => String(value ?? "").toUpperCase().includes(keyword));
 }
