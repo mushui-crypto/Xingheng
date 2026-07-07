@@ -187,13 +187,18 @@ export class TradingStore {
     this.db
       .prepare(
         `INSERT INTO market_symbols (
-           symbol, displayName, apiSymbol, category, digits, spread, leverage, contractSize,
+           symbol, displayName, apiSymbol, providerMarketId, providerCoin, sourceDex, sourceType, category,
+           digits, spread, leverage, contractSize,
            minLot, maxLot, lotStep, tradeStatus, isVisible, updatedAt
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(symbol) DO UPDATE SET
            displayName = excluded.displayName,
            apiSymbol = excluded.apiSymbol,
+           providerMarketId = excluded.providerMarketId,
+           providerCoin = excluded.providerCoin,
+           sourceDex = excluded.sourceDex,
+           sourceType = excluded.sourceType,
            category = excluded.category,
            digits = excluded.digits,
            spread = excluded.spread,
@@ -210,6 +215,10 @@ export class TradingStore {
         symbol.symbol,
         symbol.displayName,
         symbol.apiSymbol,
+        symbol.providerMarketId,
+        symbol.providerCoin,
+        symbol.sourceDex,
+        symbol.sourceType,
         symbol.category,
         symbol.digits,
         symbol.spread,
@@ -1025,6 +1034,10 @@ export class TradingStore {
         symbol TEXT PRIMARY KEY,
         displayName TEXT NOT NULL,
         apiSymbol TEXT NOT NULL,
+        providerMarketId TEXT NOT NULL DEFAULT '',
+        providerCoin TEXT NOT NULL DEFAULT '',
+        sourceDex TEXT NOT NULL DEFAULT 'main',
+        sourceType TEXT NOT NULL DEFAULT 'main',
         category TEXT NOT NULL,
         digits INTEGER NOT NULL,
         spread REAL NOT NULL,
@@ -1222,6 +1235,10 @@ export class TradingStore {
     this.addColumnIfMissing("withdrawal_requests", "broadcastAttemptCount", "INTEGER DEFAULT 0");
     this.addColumnIfMissing("withdrawal_requests", "lastBroadcastAttemptAt", "INTEGER");
     this.addColumnIfMissing("positions", "accountId", "TEXT");
+    this.addColumnIfMissing("market_symbols", "providerMarketId", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("market_symbols", "providerCoin", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("market_symbols", "sourceDex", "TEXT NOT NULL DEFAULT 'main'");
+    this.addColumnIfMissing("market_symbols", "sourceType", "TEXT NOT NULL DEFAULT 'main'");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
     this.cleanupLegacyTradingData();
     this.db.prepare("UPDATE withdrawal_requests SET status = 'pending_review' WHERE status = 'pending'").run();
@@ -1247,10 +1264,28 @@ function toFundingAccount(row: FundingAccountRow): FundingAccount {
 }
 
 function toMarketSymbol(row: MarketSymbolRow): MarketSymbol {
+  const providerMarketId = row.providerMarketId || row.apiSymbol;
+  const providerCoin = row.providerCoin || providerMarketId.split(":").at(-1)!;
+  const sourceDex = row.sourceDex || (providerMarketId.includes(":") ? providerMarketId.split(":")[0] : "main");
   return {
     ...row,
+    providerMarketId,
+    providerCoin,
+    sourceDex,
+    sourceType: row.sourceType === "hip3" ? "hip3" : "main",
+    category: normalizeMarketCategory(row.category),
     isVisible: Boolean(row.isVisible),
   };
+}
+
+function normalizeMarketCategory(value: string): MarketSymbol["category"] {
+  if (value === "crypto" || value === "metals" || value === "us_equities" || value === "indices" || value === "other") {
+    return value;
+  }
+  if (value === "metal") return "metals";
+  if (value === "stock") return "us_equities";
+  if (value === "index") return "indices";
+  return "other";
 }
 
 function toExternalWalletBinding(row: ExternalWalletBindingRow): ExternalWalletBinding {

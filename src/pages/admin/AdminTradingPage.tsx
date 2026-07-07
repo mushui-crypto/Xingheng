@@ -417,11 +417,12 @@ export function AdminTradingPage() {
       <Card className="overflow-hidden p-0">
         <SectionTitle title="行情状态" />
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[900px] text-left text-sm">
+          <table className="w-full min-w-[1040px] text-left text-sm">
             <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">品种</th>
-                <th className="px-5 py-3 font-medium">API Symbol</th>
+                <th className="px-5 py-3 font-medium">分类 / 来源</th>
+                <th className="px-5 py-3 font-medium">来源标识</th>
                 <th className="px-5 py-3 font-medium">状态</th>
                 <th className="px-5 py-3 font-medium">Bid / Ask</th>
                 <th className="px-5 py-3 font-medium">来源</th>
@@ -432,7 +433,15 @@ export function AdminTradingPage() {
               {marketStatus.map((item) => (
                 <tr key={item.symbol}>
                   <td className="px-5 py-4">{item.symbol}<p className="text-xs text-muted">{item.displayName}</p></td>
-                  <td className="px-5 py-4 text-muted">{item.apiSymbol}</td>
+                  <td className="px-5 py-4 text-xs text-muted">
+                    <p>{item.category}</p>
+                    <p>{item.sourceType} · {item.sourceDex}</p>
+                  </td>
+                  <td className="px-5 py-4 text-xs text-muted">
+                    <p>API {item.apiSymbol}</p>
+                    <p>Market {item.providerMarketId}</p>
+                    <p>Coin {item.providerCoin}</p>
+                  </td>
                   <td className="px-5 py-4"><Badge tone={item.status === "connected" ? "success" : item.status === "stale" ? "neutral" : "danger"}>{item.status}</Badge></td>
                   <td className="px-5 py-4">{formatPrice(item.ticker?.bid, 5)} / {formatPrice(item.ticker?.ask, 5)}</td>
                   <td className="px-5 py-4 text-muted">{item.ticker?.source ?? "-"}</td>

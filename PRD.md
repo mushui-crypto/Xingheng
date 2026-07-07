@@ -170,14 +170,16 @@
 
 ### 5.3 行情模块
 
-当前行情页展示 Hyperliquid 主 DEX 活跃 perpetual 中后台配置为 `isVisible=true` 的品种。
+当前行情页展示 Hyperliquid 主 DEX 活跃 perpetual 与后台显式启用的 HIP-3 / 特殊 DEX perpetual 中 `isVisible=true` 的品种。
 
 展示字段：
 
 | 字段 | 说明 |
 | --- | --- |
-| 品种代码 | 平台 `{COIN}USDT`，例如 `BTCUSDT`、`ETHUSDT` |
+| 品种代码 | 主 DEX 为平台 `{COIN}USDT`，例如 `BTCUSDT`、`ETHUSDT`；HIP-3 / 特殊 DEX 为 `{DEX}-{COIN}USDT`，例如 `XYZ-TSLAUSDT` |
 | 展示名称 | 后台配置的 displayName |
+| 来源定位 | 后端返回 `providerMarketId`、`providerCoin`、`sourceDex`、`sourceType` |
+| 分类 | `crypto`、`metals`、`us_equities`、`indices`、`other` |
 | Bid | 系统标准化买价 |
 | Ask | 系统标准化卖价 |
 | Last | 最新价 |
@@ -189,7 +191,8 @@
 
 | Symbol | 名称 | 分类 | Digits | Spread | 杠杆 | 合约单位 | 手数范围 |
 | --- | --- | --- | ---: | ---: | ---: | ---: | --- |
-| 动态同步 | `{COIN} Perpetual` | crypto | 按 Hyperliquid 元数据 | 平台配置 | 不高于来源上限 | 1 | 按 `szDecimals` |
+| 主 DEX 动态同步 | `{COIN} Perpetual` | crypto | 按 Hyperliquid 元数据 | 平台配置 | 不高于来源上限 | 1 | 按 `szDecimals` |
+| HIP-3 / 特殊 DEX 动态同步 | Hyperliquid 注解或 `{COIN} Perpetual` | metals / us_equities / indices / other | 按 Hyperliquid 元数据 | 平台配置 | 不高于来源上限 | 1 | 按 `szDecimals` |
 
 ### 5.4 交易终端
 
@@ -488,15 +491,21 @@
 
 ### 5.9 后台品种管理
 
-当前后台维护由 Hyperliquid 主 DEX 自动同步的活跃 perpetual 品种。
+当前后台维护由 Hyperliquid 主 DEX 与 `perpDexs` 发现的 HIP-3 / 特殊 DEX 自动同步的 perpetual 品种。
 
 | 功能 | 说明 |
 | --- | --- |
 | 编辑品种 | 可编辑任一已同步品种的平台覆盖配置 |
-| 可编辑字段 | `displayName`、`spread`、`leverage`、`contractSize`、`minLot`、`maxLot`、`lotStep`、`tradeStatus`、`isVisible` |
-| 不可编辑字段 | `symbol`、`apiSymbol`、`digits`、`minLot`、`lotStep` |
+| 可编辑字段 | `displayName`、`category`、`spread`、`leverage`、`contractSize`、`maxLot`、`tradeStatus`、`isVisible` |
+| 不可编辑字段 | `symbol`、`apiSymbol`、`providerMarketId`、`providerCoin`、`sourceDex`、`sourceType`、`digits`、`minLot`、`lotStep` |
 | 新增其他 symbol | 当前不允许 |
 | 配置持久化 | 服务端持久化，刷新和重启不丢失 |
+
+默认启停口径：
+
+- 主 DEX 品种默认 `tradeStatus=enabled`、`isVisible=true`，保持旧 crypto 合约兼容。
+- HIP-3 / 特殊 DEX 品种默认 `tradeStatus=disabled`、`isVisible=false`，后台显式启用后才允许内部模拟开仓。
+- `disabled` / `close_only` 均禁止新开仓但不阻塞已有持仓平仓。
 
 交易状态口径：
 

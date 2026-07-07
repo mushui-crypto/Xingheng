@@ -38,7 +38,17 @@ export function normalizeLimit(value: unknown) {
 
 export function toHyperliquidCoin(symbol: string) {
   const normalized = normalizeSymbol(symbol);
-  return getSupportedMarketSymbols().find((item) => item.symbol === normalized)!.apiSymbol;
+  return getSupportedMarketSymbols().find((item) => item.symbol === normalized)!.providerMarketId;
+}
+
+export function toHyperliquidDex(symbol: string) {
+  const normalized = normalizeSymbol(symbol);
+  const config = getSupportedMarketSymbols().find((item) => item.symbol === normalized)!;
+  return config.sourceType === "hip3" ? config.sourceDex : "";
+}
+
+export function getSupportedSourceDexs() {
+  return [...new Set(getSupportedMarketSymbols().map((item) => item.sourceDex))];
 }
 
 export function intervalDurationMs(interval: CandleInterval) {

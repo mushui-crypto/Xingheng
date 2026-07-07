@@ -1,6 +1,6 @@
 import { Check, ChevronDown, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { TradeSymbol, TradeStatus } from "../../types/market";
+import type { SymbolCategory, TradeSymbol, TradeStatus } from "../../types/market";
 import { formatQuantity } from "../../utils/quantity";
 import { Modal } from "../ui/Modal";
 
@@ -11,6 +11,15 @@ type MarketSymbolPickerProps = {
 };
 
 type MarketFilter = "all" | TradeStatus | "high_leverage" | "small_minimum";
+type CategoryFilter = SymbolCategory;
+
+const categoryFilters: Array<{ value: CategoryFilter; label: string }> = [
+  { value: "crypto", label: "Crypto" },
+  { value: "metals", label: "贵金属" },
+  { value: "us_equities", label: "美股合约" },
+  { value: "indices", label: "指数" },
+  { value: "other", label: "其他" },
+];
 
 const marketFilters: Array<{ value: MarketFilter; label: string }> = [
   { value: "all", label: "全部" },
@@ -24,31 +33,43 @@ const marketFilters: Array<{ value: MarketFilter; label: string }> = [
 export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: MarketSymbolPickerProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("crypto");
   const [marketFilter, setMarketFilter] = useState<MarketFilter>("all");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const selected = symbols.find((item) => item.symbol === selectedSymbol) ?? symbols[0];
   const filteredSymbols = useMemo(() => {
     const keyword = search.trim().toUpperCase();
     return symbols
+      .filter((item) => item.category === categoryFilter)
       .filter((item) => matchesFilter(item, marketFilter))
       .filter(
         (item) =>
           !keyword ||
-          item.symbol.includes(keyword) ||
+          item.symbol.toUpperCase().includes(keyword) ||
           item.apiSymbol.toUpperCase().includes(keyword) ||
-          item.displayName.toUpperCase().includes(keyword),
+          item.displayName.toUpperCase().includes(keyword) ||
+          item.providerMarketId.toUpperCase().includes(keyword) ||
+          item.providerCoin.toUpperCase().includes(keyword) ||
+          item.sourceDex.toUpperCase().includes(keyword),
       )
-      .sort((a, b) => a.apiSymbol.localeCompare(b.apiSymbol));
-  }, [marketFilter, search, symbols]);
+      .sort((a, b) => a.symbol.localeCompare(b.symbol));
+  }, [categoryFilter, marketFilter, search, symbols]);
+
+  const categoryCounts = useMemo(
+    () => new Map(categoryFilters.map((category) => [category.value, symbols.filter((item) => item.category === category.value).length])),
+    [symbols],
+  );
 
   useEffect(() => {
     if (!open) {
       setSearch("");
+      setCategoryFilter(selected?.category ?? "crypto");
       setMarketFilter("all");
       return;
     }
+    setCategoryFilter(selected?.category ?? "crypto");
     window.requestAnimationFrame(() => searchInputRef.current?.focus());
-  }, [open]);
+  }, [open, selected?.category]);
 
   if (!selected) {
     return null;
@@ -84,7 +105,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
       <Modal
         open={open}
         title="选择市场"
-        description={`${symbols.length} 个 Hyperliquid 主 DEX 活跃永续合约`}
+        description={`${symbols.length} 个 Hyperliquid 永续合约，仅用于内部模拟交易`}
         onClose={() => setOpen(false)}
         shellClassName="xh-market-modal"
         bodyClassName="xh-market-modal-body"
@@ -95,7 +116,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
             ref={searchInputRef}
             type="search"
             value={search}
-            placeholder="搜索币种、交易对或名称"
+            placeholder="搜索 symbol、名称、来源 coin 或 dex"
             aria-label="搜索市场"
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -106,9 +127,28 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
           ) : null}
         </div>
 
+        <div className="xh-market-filters" role="tablist" aria-label="市场分类">
+          {categoryFilters.map((category) => {
+            const count = categoryCounts.get(category.value) ?? 0;
+            return (
+              <button
+                key={category.value}
+                type="button"
+                role="tab"
+                aria-selected={categoryFilter === category.value}
+                className={categoryFilter === category.value ? "is-active" : ""}
+                onClick={() => setCategoryFilter(category.value)}
+              >
+                {category.label}
+                <span>{count}</span>
+              </button>
+            );
+          })}
+        </div>
+
         <div className="xh-market-filters" role="tablist" aria-label="市场筛选">
           {marketFilters.map((filter) => {
-            const count = symbols.filter((item) => matchesFilter(item, filter.value)).length;
+            const count = symbols.filter((item) => item.category === categoryFilter && matchesFilter(item, filter.value)).length;
             return (
               <button
                 key={filter.value}
@@ -155,8 +195,8 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
                       {item.apiSymbol.slice(0, 1)}
                     </span>
                     <span className="min-w-0">
-                      <strong>{item.apiSymbol}/USDT</strong>
-                      <small>{item.displayName}</small>
+                      <strong>{marketDisplaySymbol(item)}</strong>
+                      <small>{item.displayName} · {item.sourceDex}</small>
                     </span>
                     {isSelected ? <Check className="xh-market-row-check" size={16} aria-hidden="true" /> : null}
                   </span>
@@ -176,6 +216,10 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
       </Modal>
     </>
   );
+}
+
+function marketDisplaySymbol(symbol: TradeSymbol) {
+  return symbol.sourceType === "main" ? `${symbol.apiSymbol}/USDT` : symbol.symbol;
 }
 
 function MarketStatus({ status }: { status: TradeStatus }) {

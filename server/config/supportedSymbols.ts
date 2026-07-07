@@ -6,6 +6,10 @@ let marketSymbols: MarketSymbol[] = [
     symbol: "BTCUSDT",
     displayName: "BTC Perpetual",
     apiSymbol: "BTC",
+    providerMarketId: "BTC",
+    providerCoin: "BTC",
+    sourceDex: "main",
+    sourceType: "main",
     category: "crypto",
     digits: 0,
     spread: 1,
@@ -21,9 +25,18 @@ let marketSymbols: MarketSymbol[] = [
 
 export function setSupportedMarketSymbols(symbols: MarketSymbol[]) {
   marketSymbols = symbols.map((symbol) => ({ ...symbol }));
+  const providerCoinCounts = new Map<string, number>();
+  for (const symbol of marketSymbols) {
+    const providerCoin = symbol.providerCoin.toUpperCase();
+    providerCoinCounts.set(providerCoin, (providerCoinCounts.get(providerCoin) ?? 0) + 1);
+  }
   for (const symbol of marketSymbols) {
     legacyAliases.set(symbol.symbol.toUpperCase(), symbol.symbol);
     legacyAliases.set(symbol.apiSymbol.toUpperCase(), symbol.symbol);
+    legacyAliases.set(symbol.providerMarketId.toUpperCase(), symbol.symbol);
+    if (providerCoinCounts.get(symbol.providerCoin.toUpperCase()) === 1) {
+      legacyAliases.set(symbol.providerCoin.toUpperCase(), symbol.symbol);
+    }
   }
 }
 
@@ -38,7 +51,10 @@ export function getSupportedCryptoSymbols() {
 export function resolveSupportedSymbol(value: string) {
   const normalized = value.trim().toUpperCase();
   const configuredSymbol = marketSymbols.find(
-    (symbol) => symbol.symbol.toUpperCase() === normalized || symbol.apiSymbol.toUpperCase() === normalized,
+    (symbol) =>
+      symbol.symbol.toUpperCase() === normalized ||
+      symbol.apiSymbol.toUpperCase() === normalized ||
+      symbol.providerMarketId.toUpperCase() === normalized,
   );
   return configuredSymbol?.symbol ?? legacyAliases.get(normalized) ?? null;
 }

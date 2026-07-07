@@ -7,11 +7,19 @@ import { Select } from "../../components/ui/Select";
 import { fetchMarketSymbols, syncMarketSymbols } from "../../api/market";
 import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
-import type { TradeSymbol } from "../../types/market";
+import type { SymbolCategory, TradeSymbol } from "../../types/market";
 import { formatPrice } from "../../utils/price";
 import { formatQuantity } from "../../utils/quantity";
 
 type SymbolDraft = Omit<TradeSymbol, "id" | "quoteStatus" | "createdAt" | "updatedAt">;
+
+const categoryOptions: Array<{ value: SymbolCategory; label: string }> = [
+  { value: "crypto", label: "crypto（加密永续）" },
+  { value: "metals", label: "metals（贵金属合约）" },
+  { value: "us_equities", label: "us_equities（美股合约）" },
+  { value: "indices", label: "indices（指数合约）" },
+  { value: "other", label: "other（其他）" },
+];
 
 export function AdminSymbolsPage() {
   const symbols = useSymbolStore((state) => state.symbols);
@@ -23,9 +31,24 @@ export function AdminSymbolsPage() {
   const [draft, setDraft] = useState<SymbolDraft | null>(null);
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [search, setSearch] = useState("");
   const managedSymbol = symbols.find((item) => item.id === editingId) ?? symbols[0] ?? null;
 
   const quoteBySymbol = useMemo(() => new Map(quotes.map((quote) => [quote.symbol, quote])), [quotes]);
+  const filteredSymbols = useMemo(() => {
+    const keyword = search.trim().toUpperCase();
+    return symbols.filter(
+      (symbol) =>
+        !keyword ||
+        symbol.symbol.toUpperCase().includes(keyword) ||
+        symbol.displayName.toUpperCase().includes(keyword) ||
+        symbol.apiSymbol.toUpperCase().includes(keyword) ||
+        symbol.providerMarketId.toUpperCase().includes(keyword) ||
+        symbol.providerCoin.toUpperCase().includes(keyword) ||
+        symbol.sourceDex.toUpperCase().includes(keyword) ||
+        symbol.category.toUpperCase().includes(keyword),
+    );
+  }, [search, symbols]);
   const symbolConfigKey = useMemo(
     () =>
       JSON.stringify(
@@ -67,6 +90,7 @@ export function AdminSymbolsPage() {
     const normalized: SymbolDraft = {
       ...managedSymbol,
       displayName: draft.displayName,
+      category: draft.category,
       spread: draft.spread,
       leverage: draft.leverage,
       contractSize: draft.contractSize,
@@ -93,7 +117,7 @@ export function AdminSymbolsPage() {
       <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
         <div>
           <h1 className="text-2xl font-semibold">品种管理</h1>
-          <p className="mt-2 text-sm text-muted">品种目录自动同步自 Hyperliquid；symbol、API Symbol、精度与最小手数不可编辑。</p>
+          <p className="mt-2 text-sm text-muted">品种目录自动同步自 Hyperliquid；symbol、来源标识、精度与最小手数不可编辑。</p>
         </div>
         <div className="flex gap-3">
           <Button variant="secondary" onClick={() => void refreshAllQuotes()}>
@@ -109,6 +133,16 @@ export function AdminSymbolsPage() {
             <Input label="品种代码" value={draft.symbol} onChange={() => undefined} disabled required />
             <Input label="展示名称" value={draft.displayName} onChange={(event) => setDraftValue("displayName", event.target.value)} required />
             <Input label="API Symbol" value={draft.apiSymbol} onChange={() => undefined} disabled required />
+            <Input label="Provider Market ID" value={draft.providerMarketId} onChange={() => undefined} disabled required />
+            <Input label="Provider Coin" value={draft.providerCoin} onChange={() => undefined} disabled required />
+            <Input label="Source DEX" value={draft.sourceDex} onChange={() => undefined} disabled required />
+            <Input label="Source Type" value={draft.sourceType} onChange={() => undefined} disabled required />
+            <Select
+              label="分类"
+              value={draft.category}
+              onChange={(event) => setDraftValue("category", event.target.value as SymbolCategory)}
+              options={categoryOptions}
+            />
             <Input label="固定点差" type="number" step="0.00001" value={draft.spread} onChange={(event) => setNumberValue("spread", event.target.value)} required />
             <Input label="杠杆" type="number" value={draft.leverage} onChange={(event) => setNumberValue("leverage", event.target.value)} required />
             <Input label="合约单位" type="number" value={draft.contractSize} onChange={(event) => setNumberValue("contractSize", event.target.value)} required />
@@ -145,12 +179,21 @@ export function AdminSymbolsPage() {
       </Card>
 
       <Card className="overflow-hidden p-0">
+        <div className="border-b border-line p-4">
+          <input
+            className="w-full border border-line bg-black px-3.5 py-2.5 text-sm text-white outline-none md:w-96"
+            placeholder="搜索 symbol、名称、来源 coin、dex 或分类"
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+          />
+        </div>
         <div className="overflow-x-auto">
-          <table className="w-full min-w-[1180px] text-left text-sm">
+          <table className="w-full min-w-[1360px] text-left text-sm">
             <thead className="xh-thead">
               <tr>
                 <th className="px-5 py-3 font-medium">品种</th>
-                <th className="px-5 py-3 font-medium">API Symbol</th>
+                <th className="px-5 py-3 font-medium">分类 / 来源</th>
+                <th className="px-5 py-3 font-medium">来源标识</th>
                 <th className="px-5 py-3 font-medium">规格</th>
                 <th className="px-5 py-3 font-medium">交易状态</th>
                 <th className="px-5 py-3 font-medium">最新价 / Bid / Ask</th>
@@ -160,7 +203,7 @@ export function AdminSymbolsPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-line">
-              {symbols.map((symbol) => {
+              {filteredSymbols.map((symbol) => {
                 const quote = quoteBySymbol.get(symbol.symbol);
                 return (
                   <tr key={symbol.id} className={!symbol.isVisible ? "opacity-55" : undefined}>
@@ -168,7 +211,15 @@ export function AdminSymbolsPage() {
                       <p className="font-semibold">{symbol.symbol}</p>
                       <p className="text-xs text-muted">{symbol.displayName}</p>
                     </td>
-                    <td className="px-5 py-4 text-muted">{symbol.apiSymbol}</td>
+                    <td className="px-5 py-4 text-xs text-muted">
+                      <p>{categoryLabel(symbol.category)}</p>
+                      <p>{symbol.sourceType} · {symbol.sourceDex}</p>
+                    </td>
+                    <td className="px-5 py-4 text-xs text-muted">
+                      <p>API {symbol.apiSymbol}</p>
+                      <p>Market {symbol.providerMarketId}</p>
+                      <p>Coin {symbol.providerCoin}</p>
+                    </td>
                     <td className="px-5 py-4 text-xs text-muted">
                       <p>点差 {symbol.spread} · {symbol.digits} 位</p>
                       <p>杠杆 1:{symbol.leverage} · 合约 {symbol.contractSize}</p>
@@ -207,6 +258,9 @@ export function AdminSymbolsPage() {
                   </tr>
                 );
               })}
+              {filteredSymbols.length === 0 ? (
+                <tr><td className="px-5 py-8 text-center text-muted" colSpan={8}>没有匹配的品种。</td></tr>
+              ) : null}
             </tbody>
           </table>
         </div>
@@ -225,4 +279,8 @@ export function AdminSymbolsPage() {
 
 function tradeStatusLabel(status: TradeSymbol["tradeStatus"]) {
   return status === "enabled" ? "允许开仓和平仓" : "仅允许平仓";
+}
+
+function categoryLabel(category: SymbolCategory) {
+  return categoryOptions.find((option) => option.value === category)?.label ?? "other（其他）";
 }

@@ -23,11 +23,18 @@ export type Candle = {
   volume: number;
 };
 
+export type MarketCategory = "crypto" | "metals" | "us_equities" | "indices" | "other";
+export type MarketSourceType = "main" | "hip3";
+
 export type MarketSymbol = {
   symbol: string;
   displayName: string;
   apiSymbol: string;
-  category: "forex" | "metal" | "crypto" | "index" | "stock";
+  providerMarketId: string;
+  providerCoin: string;
+  sourceDex: string;
+  sourceType: MarketSourceType;
+  category: MarketCategory;
   digits: number;
   spread: number;
   leverage: number;

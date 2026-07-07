@@ -7,7 +7,16 @@ import { Card } from "../../components/ui/Card";
 import { fetchMarketSymbols } from "../../api/market";
 import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
+import type { SymbolCategory, TradeSymbol } from "../../types/market";
 import { formatPrice } from "../../utils/price";
+
+const categoryFilters: Array<{ value: SymbolCategory; label: string }> = [
+  { value: "crypto", label: "Crypto" },
+  { value: "metals", label: "贵金属" },
+  { value: "us_equities", label: "美股合约" },
+  { value: "indices", label: "指数" },
+  { value: "other", label: "其他" },
+];
 
 export function MarketsPage() {
   const symbols = useSymbolStore((state) => state.symbols);
@@ -16,15 +25,14 @@ export function MarketsPage() {
   const refreshAllQuotes = useQuoteStore((state) => state.refreshAllQuotes);
   const updateStatuses = useQuoteStore((state) => state.updateStatuses);
   const [search, setSearch] = useState("");
+  const [category, setCategory] = useState<SymbolCategory>("crypto");
   const quoteBySymbol = new Map(quotes.map((quote) => [quote.symbol, quote]));
   const normalizedSearch = search.trim().toUpperCase();
-  const visibleSymbols = symbols.filter(
-    (symbol) =>
-      symbol.isVisible &&
-      (!normalizedSearch ||
-        symbol.symbol.includes(normalizedSearch) ||
-        symbol.apiSymbol.toUpperCase().includes(normalizedSearch)),
+  const visibleSymbols = symbols.filter((symbol) => symbol.isVisible);
+  const categoryCounts = new Map(
+    categoryFilters.map((filter) => [filter.value, visibleSymbols.filter((symbol) => symbol.category === filter.value).length]),
   );
+  const filteredSymbols = visibleSymbols.filter((symbol) => symbol.category === category && matchesSearch(symbol, normalizedSearch));
   const symbolConfigKey = useMemo(
     () =>
       JSON.stringify(
@@ -56,12 +64,12 @@ export function MarketsPage() {
       <div className="xh-page-header">
         <div>
           <h1 className="xh-title">行情</h1>
-          <p className="xh-subtitle">Hyperliquid 主 DEX 活跃永续品种，公开行情经内部标准化后用于模拟交易。</p>
+          <p className="xh-subtitle">Hyperliquid 永续合约行情，公开行情经内部标准化后仅用于内部模拟交易。</p>
         </div>
         <div className="flex w-full gap-3 md:w-auto">
           <input
             className="min-w-0 flex-1 border border-line bg-black px-3.5 py-2.5 text-sm text-white outline-none md:w-64"
-            placeholder="搜索币种"
+            placeholder="搜索 symbol、名称、来源 coin 或 dex"
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
@@ -73,15 +81,32 @@ export function MarketsPage() {
       </div>
 
       <Card className="overflow-hidden p-0">
-        {visibleSymbols.length === 0 ? (
+        <div className="flex flex-wrap gap-2 border-b border-line p-4">
+          {categoryFilters.map((filter) => {
+            const count = categoryCounts.get(filter.value) ?? 0;
+            return (
+              <button
+                key={filter.value}
+                type="button"
+                className={`border px-3 py-2 text-sm transition ${
+                  category === filter.value ? "border-white bg-white text-black" : "border-line text-muted hover:text-white"
+                }`}
+                onClick={() => setCategory(filter.value)}
+              >
+                {filter.label} <span className="ml-1 text-xs opacity-70">{count}</span>
+              </button>
+            );
+          })}
+        </div>
+        {filteredSymbols.length === 0 ? (
           <div className="p-10 text-center">
             <p className="font-medium">暂无可见品种</p>
-            <p className="mt-2 text-sm text-muted">请在后台品种管理中启用品种并设置为用户端可见。</p>
+            <p className="mt-2 text-sm text-muted">请尝试其他分类或关键词；特殊市场需在后台启用并设置为用户端可见。</p>
           </div>
         ) : (
           <>
           <div className="grid gap-0 divide-y divide-line md:hidden">
-            {visibleSymbols.map((symbol) => {
+            {filteredSymbols.map((symbol) => {
               const quote = quoteBySymbol.get(symbol.symbol);
               const closeOnly = symbol.tradeStatus !== "enabled";
               return (
@@ -118,10 +143,11 @@ export function MarketsPage() {
             })}
           </div>
           <div className="hidden overflow-x-auto md:block">
-            <table className="xh-table min-w-[920px]">
+            <table className="xh-table min-w-[980px]">
               <thead className="xh-thead">
                 <tr>
                   <th className="xh-th">品种</th>
+                  <th className="xh-th">分类 / 来源</th>
                   <th className="xh-th">Bid</th>
                   <th className="xh-th">Ask</th>
                   <th className="xh-th">Last</th>
@@ -132,7 +158,7 @@ export function MarketsPage() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-line">
-                {visibleSymbols.map((symbol) => {
+                {filteredSymbols.map((symbol) => {
                   const quote = quoteBySymbol.get(symbol.symbol);
                   const closeOnly = symbol.tradeStatus !== "enabled";
                   return (
@@ -140,6 +166,10 @@ export function MarketsPage() {
                       <td className="px-5 py-4">
                         <p className="font-semibold">{symbol.symbol}</p>
                         <p className="text-xs text-muted">{symbol.displayName}</p>
+                      </td>
+                      <td className="px-5 py-4 text-xs text-muted">
+                        <p>{categoryLabel(symbol.category)}</p>
+                        <p>{symbol.sourceDex} · {symbol.providerCoin}</p>
                       </td>
                       <td className="px-5 py-4 font-mono">{formatPrice(quote?.bid, symbol.digits)}</td>
                       <td className="px-5 py-4 font-mono">{formatPrice(quote?.ask, symbol.digits)}</td>
@@ -174,6 +204,22 @@ export function MarketsPage() {
       </Card>
     </div>
   );
+}
+
+function matchesSearch(symbol: TradeSymbol, keyword: string) {
+  return (
+    !keyword ||
+    symbol.symbol.toUpperCase().includes(keyword) ||
+    symbol.displayName.toUpperCase().includes(keyword) ||
+    symbol.apiSymbol.toUpperCase().includes(keyword) ||
+    symbol.providerMarketId.toUpperCase().includes(keyword) ||
+    symbol.providerCoin.toUpperCase().includes(keyword) ||
+    symbol.sourceDex.toUpperCase().includes(keyword)
+  );
+}
+
+function categoryLabel(category: SymbolCategory) {
+  return categoryFilters.find((filter) => filter.value === category)?.label ?? "其他";
 }
 
 function MarketMetric({ label, value, tone = "neutral" }: { label: string; value: string; tone?: "neutral" | "positive" | "negative" }) {

@@ -1,4 +1,5 @@
-export type SymbolCategory = "forex" | "metal" | "crypto" | "index" | "stock";
+export type SymbolCategory = "crypto" | "metals" | "us_equities" | "indices" | "other";
+export type MarketSourceType = "main" | "hip3";
 export type TradeStatus = "enabled" | "close_only" | "disabled";
 export type QuoteStatus = "connected" | "stale" | "disconnected";
 
@@ -7,6 +8,10 @@ export type TradeSymbol = {
   symbol: string;
   displayName: string;
   apiSymbol: string;
+  providerMarketId: string;
+  providerCoin: string;
+  sourceDex: string;
+  sourceType: MarketSourceType;
   category: SymbolCategory;
   digits: number;
   spread: number;

@@ -11,6 +11,7 @@ import {
 import {
   getSupportedCryptoSymbols,
   getSupportedMarketSymbols,
+  getSupportedSourceDexs,
   normalizeInterval,
   normalizeSymbol,
   setSupportedMarketSymbols,
@@ -117,7 +118,9 @@ export class HyperliquidMarketService extends EventEmitter<HyperliquidMarketEven
     this.socket.on("open", () => {
       this.reconnectAttempts = 0;
       this.startHeartbeat();
-      this.subscribe({ type: "allMids" });
+      for (const sourceDex of getSupportedSourceDexs()) {
+        this.subscribe({ type: "allMids", ...(sourceDex === "main" ? {} : { dex: sourceDex }) });
+      }
       for (const [key, count] of this.subscriptionCounts) {
         if (count > 0) subscriptionsForKey(key).forEach((subscription) => this.subscribe(subscription));
       }
@@ -141,11 +144,11 @@ export class HyperliquidMarketService extends EventEmitter<HyperliquidMarketEven
     });
   }
 
-  private subscribe(subscription: Record<string, string>) {
+  private subscribe(subscription: Record<string, string | undefined>) {
     this.socket?.send(JSON.stringify({ method: "subscribe", subscription }));
   }
 
-  private addSubscription(key: string, subscriptions: Array<Record<string, string>>) {
+  private addSubscription(key: string, subscriptions: Array<Record<string, string | undefined>>) {
     const previous = this.subscriptionCounts.get(key) ?? 0;
     this.subscriptionCounts.set(key, previous + 1);
     if (previous === 0 && this.socket?.readyState === WebSocket.OPEN) {
@@ -292,17 +295,25 @@ export class HyperliquidMarketService extends EventEmitter<HyperliquidMarketEven
 }
 
 function toMarketSymbol(market: HyperliquidPerpMarket): MarketSymbol {
-  const symbol = `${market.coin.toUpperCase()}USDT`;
+  const symbol =
+    market.sourceType === "main"
+      ? `${market.providerCoin.toUpperCase()}USDT`
+      : `${market.sourceDex.toUpperCase()}-${market.providerCoin.toUpperCase()}USDT`;
   const maxPriceDecimals = Math.max(0, 6 - market.szDecimals);
   const significantDecimals = Math.max(0, 4 - Math.floor(Math.log10(market.markPrice)));
   const digits = Math.min(maxPriceDecimals, significantDecimals);
   const lotStep = roundToDecimals(10 ** -market.szDecimals, market.szDecimals);
   const maxLot = roundToDecimals(Math.floor(1_000_000 / market.markPrice / lotStep) * lotStep, market.szDecimals);
+  const isMainMarket = market.sourceType === "main";
   return {
     symbol,
-    displayName: `${market.coin} Perpetual`,
-    apiSymbol: market.coin,
-    category: "crypto",
+    displayName: market.displayName ?? `${market.providerCoin} Perpetual`,
+    apiSymbol: market.sourceType === "main" ? market.providerCoin : market.providerMarketId,
+    providerMarketId: market.providerMarketId,
+    providerCoin: market.providerCoin,
+    sourceDex: market.sourceDex,
+    sourceType: market.sourceType,
+    category: market.category,
     digits,
     spread: 10 ** -digits,
     leverage: market.maxLeverage,
@@ -310,8 +321,8 @@ function toMarketSymbol(market: HyperliquidPerpMarket): MarketSymbol {
     minLot: lotStep,
     maxLot: Math.max(lotStep, maxLot),
     lotStep,
-    tradeStatus: "enabled",
-    isVisible: true,
+    tradeStatus: isMainMarket ? "enabled" : "disabled",
+    isVisible: isMainMarket,
   };
 }
 
