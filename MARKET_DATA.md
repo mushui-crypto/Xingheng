@@ -136,6 +136,20 @@ GET /api/market/ticker?symbol=BTCUSDT
 GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 ```
 
+`GET /api/market/symbols`、`PUT /api/admin/market/symbols/config` 与
+`GET /api/admin/market/status` 的品种对象会返回可空 `iconUrl`。该字段由
+`providerCoin` 派生，不请求外部资源、不写入 SQLite：
+
+```json
+{
+  "symbol": "ETHUSDT",
+  "providerCoin": "ETH",
+  "iconUrl": "https://app.hyperliquid.xyz/coins/ETH.svg"
+}
+```
+
+如果 `providerCoin` 缺失或不符合安全路径字符要求，`iconUrl` 返回 `null`。
+
 前端 WebSocket：
 
 ```text

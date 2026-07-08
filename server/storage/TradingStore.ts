@@ -56,7 +56,7 @@ type AuthSessionRow = {
   expiresAt: number;
   createdAt: number;
 };
-type MarketSymbolRow = Omit<MarketSymbol, "isVisible"> & { isVisible: number };
+type MarketSymbolRow = Omit<MarketSymbol, "isVisible" | "iconUrl"> & { isVisible: number };
 
 export class TradingStore {
   private db: DatabaseSync;

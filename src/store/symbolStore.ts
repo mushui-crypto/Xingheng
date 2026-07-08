@@ -29,6 +29,7 @@ export const defaultTradeSymbols: TradeSymbol[] = [
     providerCoin: "BTC",
     sourceDex: "main",
     sourceType: "main",
+    iconUrl: null,
     category: "crypto",
     digits: 2,
     spread: 10,

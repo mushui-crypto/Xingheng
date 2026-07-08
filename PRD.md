@@ -180,6 +180,7 @@
 | 展示名称 | 后台配置的 displayName |
 | 来源定位 | 后端返回 `providerMarketId`、`providerCoin`、`sourceDex`、`sourceType` |
 | 分类 | `crypto`、`metals`、`us_equities`、`indices`、`other` |
+| 图标 URL | 后端返回可空 `iconUrl`，由 `providerCoin` 派生为 `https://app.hyperliquid.xyz/coins/{providerCoin}.svg` |
 | Bid | 系统标准化买价 |
 | Ask | 系统标准化卖价 |
 | Last | 最新价 |

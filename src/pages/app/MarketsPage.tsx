@@ -4,6 +4,7 @@ import { Link } from "react-router-dom";
 import { Badge } from "../../components/ui/Badge";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
+import { MarketIcon } from "../../components/trading/MarketIcon";
 import { fetchMarketSymbols } from "../../api/market";
 import { useQuoteStore } from "../../store/quoteStore";
 import { useSymbolStore } from "../../store/symbolStore";
@@ -112,9 +113,12 @@ export function MarketsPage() {
               return (
                 <article key={symbol.id} className={closeOnly ? "space-y-4 p-4 opacity-60" : "space-y-4 p-4"}>
                   <div className="flex items-start justify-between gap-3">
-                    <div>
-                      <p className="text-lg font-semibold">{symbol.symbol}</p>
-                      <p className="mt-1 text-xs text-muted">{symbol.displayName}</p>
+                    <div className="flex min-w-0 items-center gap-3">
+                      <MarketIcon className="xh-market-row-token" iconUrl={symbol.iconUrl} fallback={symbol.apiSymbol} />
+                      <div className="min-w-0">
+                        <p className="truncate text-lg font-semibold">{symbol.symbol}</p>
+                        <p className="mt-1 truncate text-xs text-muted">{symbol.displayName}</p>
+                      </div>
                     </div>
                     <Badge tone={quote?.status === "connected" ? "success" : quote?.status === "disconnected" ? "danger" : "neutral"}>
                       {closeOnly ? "仅平仓" : quote?.status ?? "stale"}
@@ -164,8 +168,13 @@ export function MarketsPage() {
                   return (
                     <tr key={symbol.id} className={closeOnly ? "opacity-55" : undefined}>
                       <td className="px-5 py-4">
-                        <p className="font-semibold">{symbol.symbol}</p>
-                        <p className="text-xs text-muted">{symbol.displayName}</p>
+                        <div className="flex min-w-0 items-center gap-3">
+                          <MarketIcon className="xh-market-row-token" iconUrl={symbol.iconUrl} fallback={symbol.apiSymbol} />
+                          <div className="min-w-0">
+                            <p className="truncate font-semibold">{symbol.symbol}</p>
+                            <p className="truncate text-xs text-muted">{symbol.displayName}</p>
+                          </div>
+                        </div>
                       </td>
                       <td className="px-5 py-4 text-xs text-muted">
                         <p>{categoryLabel(symbol.category)}</p>
