@@ -91,6 +91,14 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config }:
     }
   });
 
+  app.post("/api/auth/password-reset-code/verify", authRateLimit, (request, response) => {
+    try {
+      response.json(users.verifyPasswordResetCode(request.body ?? {}));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
   app.post("/api/auth/password-reset", authRateLimit, (request, response) => {
     try {
       response.json(users.resetPassword(request.body ?? {}));

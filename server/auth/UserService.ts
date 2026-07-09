@@ -20,6 +20,11 @@ type ResetPasswordInput = {
   token?: string;
 };
 
+type VerifyPasswordResetCodeInput = {
+  email: string;
+  code?: string;
+};
+
 const emailTokenTtlMs = 10 * 60 * 1000;
 const emailTokenCooldownMs = 60 * 1000;
 const emailTokenDailyWindowMs = 24 * 60 * 60 * 1000;
@@ -129,6 +134,27 @@ export class UserService {
       resetLink: `${this.appPublicUrl}/reset-password?email=${encodeURIComponent(email)}&token=${encodeURIComponent(token.rawToken)}`,
     });
     return this.emailResponse(token.code, token.rawToken);
+  }
+
+  verifyPasswordResetCode(input: VerifyPasswordResetCodeInput) {
+    const email = normalizeEmail(input.email);
+    if (!isValidEmail(email)) {
+      throw new Error("请输入有效的邮箱地址。");
+    }
+    const user = this.store.findUserByEmail(email);
+    if (!user) {
+      throw new Error("该邮箱尚未注册。");
+    }
+    const codeToken = this.verifyEmailCode(email, "password_reset", normalizeEmailCode(input.code), "验证码无效或已过期。");
+    if (codeToken.userId !== user.id) {
+      throw new Error("验证码无效或已过期。");
+    }
+    const resetToken = this.createEmailToken(email, "password_reset", user.id);
+    this.store.transaction(() => {
+      this.store.markEmailTokenUsed(codeToken.id);
+      this.store.createEmailToken(resetToken.record);
+    });
+    return { ok: true, resetToken: resetToken.rawToken };
   }
 
   resetPassword(input: ResetPasswordInput) {

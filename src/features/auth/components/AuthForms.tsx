@@ -233,11 +233,13 @@ type PasswordResetStep = "code" | "password";
 
 export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: string }) {
   const requestPasswordReset = useUserStore((state) => state.requestPasswordReset);
+  const verifyPasswordResetCode = useUserStore((state) => state.verifyPasswordResetCode);
   const resetPassword = useUserStore((state) => state.resetPassword);
   const navigate = useNavigate();
   const [step, setStep] = useState<PasswordResetStep>("code");
   const [email, setEmail] = useState(initialEmail);
   const [code, setCode] = useState("");
+  const [resetToken, setResetToken] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -245,12 +247,23 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
   const [feedback, setFeedback] = useState<AuthFeedbackState | null>(null);
   const [cooldown, setCooldown] = useState(0);
   const [sendingCode, setSendingCode] = useState(false);
+  const [verifyingCode, setVerifyingCode] = useState(false);
   const [submittingReset, setSubmittingReset] = useState(false);
 
   useCooldownTimer(cooldown, setCooldown);
 
   const handleEmailChange = (nextEmail: string) => {
     setEmail(nextEmail);
+    setResetToken("");
+    setFeedback(null);
+    if (step === "password") {
+      setStep("code");
+    }
+  };
+
+  const handleCodeChange = (nextCode: string) => {
+    setCode(nextCode);
+    setResetToken("");
     setFeedback(null);
     if (step === "password") {
       setStep("code");
@@ -276,9 +289,10 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
     setFeedback({ tone: "success", text: result.devCode ? `${result.message}。开发验证码：${result.devCode}` : "验证码已发送" });
   };
 
-  const handleVerifyCode = (event: FormEvent) => {
+  const handleVerifyCode = async (event: FormEvent) => {
     event.preventDefault();
     setFeedback(null);
+    setResetToken("");
     if (!isValidEmail(email)) {
       setFeedback({ tone: "error", text: "请输入有效的邮箱地址。" });
       return;
@@ -287,6 +301,14 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
       setFeedback({ tone: "error", text: "请输入 6 位邮箱验证码。" });
       return;
     }
+    setVerifyingCode(true);
+    const result = await verifyPasswordResetCode(email, code.trim());
+    setVerifyingCode(false);
+    if (!result.ok) {
+      setFeedback({ tone: "error", text: result.message });
+      return;
+    }
+    setResetToken(result.resetToken);
     setStep("password");
   };
 
@@ -298,8 +320,8 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
       setStep("code");
       return;
     }
-    if (!/^\d{6}$/.test(code.trim())) {
-      setFeedback({ tone: "error", text: "请输入 6 位邮箱验证码。" });
+    if (!resetToken) {
+      setFeedback({ tone: "error", text: "请先验证邮箱验证码。" });
       setStep("code");
       return;
     }
@@ -312,7 +334,7 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
       return;
     }
     setSubmittingReset(true);
-    const result = await resetPassword({ email, password, code });
+    const result = await resetPassword({ email, password, token: resetToken });
     setSubmittingReset(false);
     if (!result.ok) {
       setFeedback({ tone: "error", text: result.message });
@@ -335,13 +357,13 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
             label="Email code"
             placeholder="Enter 6-digit code"
             value={code}
-            onChange={setCode}
+            onChange={handleCodeChange}
             buttonText={sendingCode ? "Sending..." : cooldown > 0 ? `${cooldown}s` : "Send code"}
             buttonDisabled={sendingCode || cooldown > 0}
             onSend={handleSendCode}
           />
           {feedback ? <AuthFeedback feedback={feedback} /> : null}
-          <AuthSubmitButton>Next</AuthSubmitButton>
+          <AuthSubmitButton disabled={verifyingCode}>{verifyingCode ? "Verifying..." : "Next"}</AuthSubmitButton>
         </form>
       ) : (
         <form className="space-y-6" onSubmit={handleResetPassword}>

@@ -11,7 +11,6 @@ type RegisterInput = {
 type ResetPasswordInput = {
   email: string;
   password: string;
-  code?: string;
   token?: string;
 };
 
@@ -24,6 +23,7 @@ type UserStore = {
   requestRegisterCode: (email: string) => Promise<{ ok: true; message: string; devCode?: string } | { ok: false; message: string }>;
   registerUser: (input: RegisterInput) => Promise<{ ok: true; user: User } | { ok: false; message: string }>;
   requestPasswordReset: (email: string) => Promise<{ ok: true; message: string; devCode?: string; devToken?: string } | { ok: false; message: string }>;
+  verifyPasswordResetCode: (email: string, code: string) => Promise<{ ok: true; resetToken: string } | { ok: false; message: string }>;
   resetPassword: (input: ResetPasswordInput) => Promise<{ ok: true } | { ok: false; message: string }>;
   getById: (id: string | null) => User | undefined;
   setUserStatus: (id: string, status: UserStatus) => Promise<{ ok: true } | { ok: false; message: string }>;
@@ -94,11 +94,23 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
     return { ok: true, message: payload?.message ?? "验证码已发送", devCode: payload?.devCode, devToken: payload?.devToken };
   },
-  resetPassword: async ({ email, password, code, token }) => {
+  verifyPasswordResetCode: async (email, code) => {
+    const response = await fetch("/api/auth/password-reset-code/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, code }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || payload?.ok === false || !payload?.resetToken) {
+      return { ok: false, message: payload?.message ?? "验证码无效或已过期。" };
+    }
+    return { ok: true, resetToken: String(payload.resetToken) };
+  },
+  resetPassword: async ({ email, password, token }) => {
     const response = await fetch("/api/auth/password-reset", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, code, token }),
+      body: JSON.stringify({ email, password, token }),
     });
     const payload = await response.json().catch(() => null);
     if (!response.ok || payload?.ok === false) {
