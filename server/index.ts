@@ -9,6 +9,7 @@ import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { registerUserTradingRoutes } from "./modules/api/userTradingRoutes";
 import { registerUserWalletRoutes } from "./modules/api/userWalletRoutes";
+import { EmailService } from "./modules/email/EmailService";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
@@ -60,8 +61,9 @@ const tradingMarket = {
 const trading = new TradingService(tradingMarket, tradingStore);
 const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
-const users = new UserService(tradingStore);
-registerAuthRoutes({ app, users, tradingStore, config });
+const email = new EmailService(config);
+const users = new UserService(tradingStore, email, config.appPublicUrl);
+registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore);
 

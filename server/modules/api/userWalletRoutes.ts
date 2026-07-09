@@ -223,7 +223,7 @@ export function registerUserWalletRoutes(app: express.Express, wallet: WalletSer
         wallet.createWithdrawal(getUserId(request), {
           amount: Number(request.body?.amount),
           network: request.body?.network,
-          walletAddress: request.body?.walletAddress,
+          toAddress: request.body?.toAddress,
           remark: request.body?.remark,
         }),
       );

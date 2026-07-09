@@ -63,7 +63,10 @@ export class WalletService {
     private trading: TradingService,
     private onchain: OnchainWalletService,
   ) {
-    this.depositMnemonic = process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "";
+    this.depositMnemonic = normalizeRequiredValue(
+      process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "",
+      "BSC_TESTNET_DEPOSIT_MNEMONIC",
+    );
     this.depositDerivationPath = process.env.BSC_TESTNET_DERIVATION_PATH?.trim() || "m/44'/60'/0'/0";
     if (process.env.NODE_ENV !== "production") {
       this.ensureFundingAccount(defaultUserId);
@@ -216,7 +219,7 @@ export class WalletService {
           userId,
           amount: 250,
           status: "pending_review",
-          walletAddress: "0x2222222222222222222222222222222222222222",
+          toAddress: "0x2222222222222222222222222222222222222222",
           tokenAddress: this.onchain.config.tokenAddress,
           createdAt: createdAt + 480_000,
           remark: "演示数据：等待后台审核",
@@ -228,7 +231,7 @@ export class WalletService {
           userId,
           amount: 600,
           status: "confirmed",
-          walletAddress: "0x3333333333333333333333333333333333333333",
+          toAddress: "0x3333333333333333333333333333333333333333",
           tokenAddress: this.onchain.config.tokenAddress,
           broadcastTxHash: "0x2000000000000000000000000000000000000000000000000000000000000001",
           confirmations: 12,
@@ -245,7 +248,7 @@ export class WalletService {
           userId,
           amount: 120,
           status: "failed",
-          walletAddress: "0x4444444444444444444444444444444444444444",
+          toAddress: "0x4444444444444444444444444444444444444444",
           tokenAddress: this.onchain.config.tokenAddress,
           broadcastTxHash: "0x2000000000000000000000000000000000000000000000000000000000000002",
           failedReason: "演示数据：RPC 广播超时，冻结资金已释放",
@@ -550,7 +553,7 @@ export class WalletService {
       asset: withdrawal.asset,
       network: withdrawal.network ?? depositNetwork,
       fromAddress: withdrawal.fromAddress ?? null,
-      toAddress: withdrawal.toAddress ?? withdrawal.walletAddress ?? null,
+      toAddress: withdrawal.toAddress ?? null,
       txHash: withdrawal.broadcastTxHash ?? withdrawal.txHash ?? null,
       confirmations: withdrawal.confirmations ?? null,
       chainStatus: withdrawal.onchainStatus ?? withdrawal.status,
@@ -807,11 +810,15 @@ export class WalletService {
 
   getDepositAddress(userId: string) {
     const normalizedUserId = normalizeUserId(userId);
-    const address = this.store.transaction(() => this.getOrCreateDepositAddress(normalizedUserId));
+    const address = this.store.transaction(() => this.getOrCreateDepositAddressIfConfigured(normalizedUserId));
     return {
       ...this.onchain.getPublicConfig(),
       ...address,
     };
+  }
+
+  ensureDepositAddressForRegisteredUser(userId: string) {
+    return this.getOrCreateDepositAddress(normalizeUserId(userId));
   }
 
   listDepositAddresses() {
@@ -1029,9 +1036,10 @@ export class WalletService {
     });
   }
 
-  createWithdrawal(userId: string, input: { amount: number; network?: string; walletAddress?: string; remark?: string }) {
+  createWithdrawal(userId: string, input: { amount: number; network?: string; toAddress?: string; remark?: string }) {
     assertPositiveAmount(input.amount);
     const normalizedUserId = normalizeUserId(userId);
+    const toAddress = normalizeRequiredInput(input.toAddress, "toAddress");
     return this.store.transaction(() => {
       const before = this.ensureFundingAccount(normalizedUserId);
       if (before.available < input.amount) {
@@ -1046,13 +1054,12 @@ export class WalletService {
         amount: roundMoney(input.amount),
         status: "pending_review",
         network: depositNetwork,
-        walletAddress: normalizeOptional(input.walletAddress),
         txHash: null,
         onchainStatus: "pending_review",
         chainId: this.onchain.config.chainId,
         tokenAddress: this.onchain.config.tokenAddress,
         fromAddress: null,
-        toAddress: normalizeOptional(input.walletAddress),
+        toAddress,
         broadcastTxHash: null,
         broadcastedAt: null,
         confirmedAt: null,
@@ -1089,7 +1096,7 @@ export class WalletService {
           status: "pending",
           relatedId: request.id,
           network: request.network,
-          walletAddress: request.walletAddress,
+          address: request.toAddress,
           remark: request.remark,
         }),
       );
@@ -1103,7 +1110,7 @@ export class WalletService {
       const broadcast = await this.onchain.broadcastWithdrawal(broadcasting);
       return this.markWithdrawalBroadcasted(id, broadcast);
     } catch (error) {
-      return this.failWithdrawal(id, error instanceof Error ? error.message : "出金广播失败。");
+      return this.failWithdrawal(id, error instanceof Error ? error.message : "提现广播失败。");
     }
   }
 
@@ -1116,7 +1123,7 @@ export class WalletService {
     for (const request of this.store.listWithdrawalsByStatuses(["broadcasted"])) {
       const txHash = request.broadcastTxHash ?? request.txHash;
       if (!txHash) {
-        results.push(this.failWithdrawal(request.id, "缺少 txHash，无法确认链上出金。"));
+        results.push(this.failWithdrawal(request.id, "缺少 txHash，无法确认链上提现。"));
         continue;
       }
       const status = await this.onchain.getTransactionStatus(txHash);
@@ -1208,7 +1215,7 @@ export class WalletService {
           status: "completed",
           relatedId: transfer.id,
           network: depositNetwork,
-          walletAddress: this.store.getDepositAddressByUserId(userId)?.address ?? null,
+          address: this.store.getDepositAddressByUserId(userId)?.address ?? null,
           remark: remark ?? "钱包划转入资金账户",
         }),
       );
@@ -1371,10 +1378,10 @@ export class WalletService {
     return this.store.transaction(() => {
       const request = this.store.getWithdrawalRequest(id);
       if (!request) {
-        throw new Error("出金申请不存在。");
+        throw new Error("提现申请不存在。");
       }
       if (request.status !== "pending_review") {
-        throw new Error("只能审核 pending_review 状态的出金申请。");
+        throw new Error("只能审核 pending_review 状态的提现申请。");
       }
 
       const before = this.ensureFundingAccount(request.userId);
@@ -1401,7 +1408,7 @@ export class WalletService {
     return this.store.transaction(() => {
       const request = this.store.getWithdrawalRequest(id);
       if (!request || request.status !== "broadcasting") {
-        throw new Error("出金申请状态不是 broadcasting。");
+        throw new Error("提现申请状态不是 broadcasting。");
       }
       const now = Date.now();
       const updated: WithdrawalRequest = {
@@ -1424,11 +1431,11 @@ export class WalletService {
     return this.store.transaction(() => {
       const request = this.store.getWithdrawalRequest(id);
       if (!request || request.status !== "broadcasted") {
-        throw new Error("出金申请状态不是 broadcasted。");
+        throw new Error("提现申请状态不是 broadcasted。");
       }
       const before = this.ensureFundingAccount(request.userId);
       if (before.frozen < request.amount) {
-        throw new Error("资金账户冻结金额不足，无法确认出金。");
+        throw new Error("资金账户冻结金额不足，无法确认提现。");
       }
       const now = Date.now();
       const after = this.withAvailable({
@@ -1438,7 +1445,7 @@ export class WalletService {
         updatedAt: now,
       });
       if (after.balance < 0 || after.frozen < 0) {
-        throw new Error("资金账户余额异常，无法确认出金。");
+        throw new Error("资金账户余额异常，无法确认提现。");
       }
       const updated: WithdrawalRequest = {
         ...request,
@@ -1465,7 +1472,7 @@ export class WalletService {
           status: "completed",
           relatedId: request.id,
           network: request.network,
-          walletAddress: request.walletAddress,
+          address: request.toAddress,
           txHash: updated.broadcastTxHash ?? updated.txHash,
           remark: updated.reviewNote,
         }),
@@ -1475,7 +1482,7 @@ export class WalletService {
   }
 
   private rejectPendingWithdrawal(id: string, reviewNote?: string) {
-    return this.releaseWithdrawal(id, "rejected", normalizeOptional(reviewNote) ?? "后台拒绝出金。");
+    return this.releaseWithdrawal(id, "rejected", normalizeOptional(reviewNote) ?? "后台拒绝提现。");
   }
 
   private failWithdrawal(id: string, failedReason: string, confirmations?: number) {
@@ -1486,10 +1493,10 @@ export class WalletService {
     return this.store.transaction(() => {
       const request = this.store.getWithdrawalRequest(id);
       if (!request) {
-        throw new Error("出金申请不存在。");
+        throw new Error("提现申请不存在。");
       }
       if (!["pending_review", "broadcasting", "broadcasted"].includes(request.status)) {
-        throw new Error("当前出金状态不能释放冻结。");
+        throw new Error("当前提现状态不能释放冻结。");
       }
       const before = this.ensureFundingAccount(request.userId);
       if (before.frozen < request.amount) {
@@ -1529,7 +1536,7 @@ export class WalletService {
           status: "rejected",
           relatedId: request.id,
           network: request.network,
-          walletAddress: request.walletAddress,
+          address: request.toAddress,
           txHash: request.broadcastTxHash ?? request.txHash,
           remark: reason,
         }),
@@ -1611,6 +1618,40 @@ export class WalletService {
     };
     this.store.saveDepositAddress(address);
     return address;
+  }
+
+  private getOrCreateDepositAddressIfConfigured(userId: string): DepositAddress {
+    const existing = this.store.getDepositAddressByUserId(userId);
+    if (existing) {
+      return {
+        ...existing,
+        isConfigured: true,
+        message: null,
+      };
+    }
+    if (!this.depositMnemonic) {
+      return this.createUnavailableDepositAddress(userId);
+    }
+    return {
+      ...this.getOrCreateDepositAddress(userId),
+      isConfigured: true,
+      message: null,
+    };
+  }
+
+  private createUnavailableDepositAddress(userId: string): DepositAddress {
+    const now = Date.now();
+    return {
+      id: `ADDR-${userId}-UNCONFIGURED`,
+      userId,
+      network: depositNetwork,
+      address: "",
+      derivationIndex: -1,
+      createdAt: now,
+      updatedAt: now,
+      isConfigured: false,
+      message: "测试网充值地址未配置，请联系管理员。",
+    };
   }
 
   private withAvailable(account: FundingAccount): FundingAccount {
@@ -1735,7 +1776,7 @@ export class WalletService {
 
   private getLedgerActivityTitle(entry: FundingLedgerEntry) {
     if (entry.source === "admin_manual" && entry.type === "deposit") {
-      return "后台手工入金";
+      return "后台手工充值";
     }
     if (entry.type === "withdrawal_freeze") {
       return "提现冻结";
@@ -1775,7 +1816,7 @@ export class WalletService {
     status: FundingLedgerStatus;
     relatedId?: string | null;
     network?: string | null;
-    walletAddress?: string | null;
+    address?: string | null;
     txHash?: string | null;
     remark?: string | null;
   }): FundingLedgerEntry {
@@ -1796,7 +1837,7 @@ export class WalletService {
       status: input.status,
       relatedId: input.relatedId ?? null,
       network: input.network ?? null,
-      walletAddress: input.walletAddress ?? null,
+      address: input.address ?? null,
       txHash: input.txHash ?? null,
       remark: input.remark ?? null,
       createdAt: now,

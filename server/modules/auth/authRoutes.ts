@@ -4,6 +4,7 @@ import { createSessionToken, hashSessionToken, secureTextEqual } from "../../aut
 import type { RuntimeConfig } from "../../config/runtimeConfig";
 import type { TradingStore } from "../../storage/TradingStore";
 import type { User } from "../../types";
+import type { WalletService } from "../../wallet/WalletService";
 import { sendBadRequest } from "../api/httpResponses";
 import { createRateLimiter } from "../security/httpSecurity";
 import {
@@ -28,15 +29,17 @@ declare global {
 type AuthRouteDependencies = {
   app: express.Express;
   users: UserService;
+  wallet: WalletService;
   tradingStore: TradingStore;
   config: RuntimeConfig;
 };
 
-export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRouteDependencies) {
+export function registerAuthRoutes({ app, users, wallet, tradingStore, config }: AuthRouteDependencies) {
   const authRateLimit = createRateLimiter({
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10),
   });
+  const emailRequestRateLimit = createEmailRequestRateLimiter();
 
   app.use("/api/auth", (_request, response, next) => {
     response.setHeader("Cache-Control", "no-store");
@@ -49,7 +52,15 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
 
   app.post("/api/auth/register", authRateLimit, (request, response) => {
     try {
-      response.status(201).json(users.register(request.body ?? {}));
+      response.status(201).json(users.register(request.body ?? {}, (user) => wallet.ensureDepositAddressForRegisteredUser(user.id)));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
+  app.post("/api/auth/register-code", authRateLimit, emailRequestRateLimit("register"), async (request, response) => {
+    try {
+      response.json(await users.requestRegisterCode(request.body?.email));
     } catch (error) {
       sendBadRequest(response, error);
     }
@@ -70,6 +81,22 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
     users.logout(getUserBearerToken(request));
     clearSessionCookie(response, userCookieName, config.isProduction);
     response.json({ ok: true });
+  });
+
+  app.post("/api/auth/password-reset-code", authRateLimit, emailRequestRateLimit("password_reset"), async (request, response) => {
+    try {
+      response.json(await users.requestPasswordReset(request.body?.email));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
+  app.post("/api/auth/password-reset", authRateLimit, (request, response) => {
+    try {
+      response.json(users.resetPassword(request.body ?? {}));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
   });
 
   app.get("/api/auth/me", (request, response) => {
@@ -134,6 +161,45 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
   app.get("/api/admin/me", (_request, response) => {
     response.json({ email: config.adminEmail, role: "admin" });
   });
+}
+
+function createEmailRequestRateLimiter() {
+  const shortWindow = createPurposeRateWindow(15 * 60 * 1000, Number(process.env.AUTH_EMAIL_IP_SHORT_MAX ?? 5));
+  const dailyWindow = createPurposeRateWindow(24 * 60 * 60 * 1000, Number(process.env.AUTH_EMAIL_IP_DAILY_MAX ?? 20));
+  return (purpose: "register" | "password_reset") => (request: express.Request, response: express.Response, next: express.NextFunction) => {
+    const key = `${purpose}:${request.ip || request.socket.remoteAddress || "unknown"}`;
+    const shortRetryAfter = shortWindow.hit(key);
+    const dailyRetryAfter = dailyWindow.hit(key);
+    const retryAfter = Math.max(shortRetryAfter, dailyRetryAfter);
+    if (retryAfter > 0) {
+      response.setHeader("Retry-After", String(retryAfter));
+      response.status(429).json({ message: "验证码请求过于频繁，请稍后再试。" });
+      return;
+    }
+    next();
+  };
+}
+
+function createPurposeRateWindow(windowMs: number, rawMax: number) {
+  const attempts = new Map<string, { count: number; resetAt: number }>();
+  const max = Number.isFinite(rawMax) ? Math.max(1, Math.floor(rawMax)) : 5;
+  return {
+    hit(key: string) {
+      const now = Date.now();
+      const current = attempts.get(key);
+      const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + windowMs } : current;
+      entry.count += 1;
+      attempts.set(key, entry);
+      if (attempts.size > 10_000) {
+        for (const [storedKey, value] of attempts) {
+          if (value.resetAt <= now) {
+            attempts.delete(storedKey);
+          }
+        }
+      }
+      return entry.count > max ? Math.max(1, Math.ceil((entry.resetAt - now) / 1000)) : 0;
+    },
+  };
 }
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {

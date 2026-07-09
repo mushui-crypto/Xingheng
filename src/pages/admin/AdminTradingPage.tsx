@@ -392,7 +392,7 @@ export function AdminTradingPage() {
                   <td className="px-5 py-4">{withdrawal.onchainStatus ? <StatusCell status={withdrawal.onchainStatus} /> : <span className="text-muted">待审核后生成</span>}</td>
                   <td className="px-5 py-4 text-muted">{formatConfirmations(withdrawal.confirmations ?? 0)}</td>
                   <td className="px-5 py-4">
-                    <StackedChainText primary={formatNetwork(withdrawal.network)} secondary={withdrawal.walletAddress} />
+                    <StackedChainText primary={formatNetwork(withdrawal.network)} secondary={withdrawal.toAddress} />
                   </td>
                   <td className="px-5 py-4">
                     <StackedChainText primary={withdrawal.fromAddress ?? "-"} secondary={withdrawal.tokenAddress} />

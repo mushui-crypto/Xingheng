@@ -5,6 +5,14 @@ type RegisterInput = {
   email: string;
   password: string;
   nickname?: string;
+  code: string;
+};
+
+type ResetPasswordInput = {
+  email: string;
+  password: string;
+  code?: string;
+  token?: string;
 };
 
 type UserStore = {
@@ -13,7 +21,10 @@ type UserStore = {
   setCurrentUser: (user: User | null) => void;
   loadCurrentUser: () => Promise<User | null>;
   loadAdminUsers: () => Promise<void>;
+  requestRegisterCode: (email: string) => Promise<{ ok: true; message: string; devCode?: string } | { ok: false; message: string }>;
   registerUser: (input: RegisterInput) => Promise<{ ok: true; user: User } | { ok: false; message: string }>;
+  requestPasswordReset: (email: string) => Promise<{ ok: true; message: string; devCode?: string; devToken?: string } | { ok: false; message: string }>;
+  resetPassword: (input: ResetPasswordInput) => Promise<{ ok: true } | { ok: false; message: string }>;
   getById: (id: string | null) => User | undefined;
   setUserStatus: (id: string, status: UserStatus) => Promise<{ ok: true } | { ok: false; message: string }>;
   clear: () => void;
@@ -45,11 +56,23 @@ export const useUserStore = create<UserStore>((set, get) => ({
     const users = (await response.json()) as User[];
     set({ users });
   },
-  registerUser: async ({ email, password, nickname }) => {
+  requestRegisterCode: async (email) => {
+    const response = await fetch("/api/auth/register-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, message: payload?.message ?? "验证码发送失败。" };
+    }
+    return { ok: true, message: payload?.message ?? "验证码已发送", devCode: payload?.devCode };
+  },
+  registerUser: async ({ email, password, nickname, code }) => {
     const response = await fetch("/api/auth/register", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, nickname }),
+      body: JSON.stringify({ email, password, nickname, code }),
     });
     const payload = await response.json().catch(() => null);
 
@@ -58,6 +81,30 @@ export const useUserStore = create<UserStore>((set, get) => ({
     }
 
     return { ok: true, user: payload as User };
+  },
+  requestPasswordReset: async (email) => {
+    const response = await fetch("/api/auth/password-reset-code", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, message: payload?.message ?? "验证码发送失败。" };
+    }
+    return { ok: true, message: payload?.message ?? "验证码已发送", devCode: payload?.devCode, devToken: payload?.devToken };
+  },
+  resetPassword: async ({ email, password, code, token }) => {
+    const response = await fetch("/api/auth/password-reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email, password, code, token }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok) {
+      return { ok: false, message: payload?.message ?? "密码重置失败。" };
+    }
+    return { ok: true };
   },
   getById: (id) => {
     if (!id) {

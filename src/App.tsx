@@ -22,6 +22,8 @@ export default function App() {
         <Route path="/" element={<Navigate to="/login" replace />} />
         <Route path="/login" element={<AuthPage />} />
         <Route path="/register" element={<AuthPage />} />
+        <Route path="/forgot-password" element={<AuthPage />} />
+        <Route path="/reset-password" element={<AuthPage />} />
         <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
         <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
         <Route path="/app/trading" element={<UserScreen><TradingPage /></UserScreen>} />

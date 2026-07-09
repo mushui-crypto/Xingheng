@@ -169,6 +169,8 @@ export type DepositAddress = {
   derivationIndex: number;
   createdAt: number;
   updatedAt: number;
+  isConfigured?: boolean;
+  message?: string | null;
 };
 
 export type ExternalWalletBinding = {
@@ -312,7 +314,7 @@ export type FundingLedgerEntry = {
   status: FundingLedgerStatus;
   relatedId?: string | null;
   network?: string | null;
-  walletAddress?: string | null;
+  address?: string | null;
   txHash?: string | null;
   remark?: string | null;
   createdAt: number;
@@ -387,6 +389,21 @@ export type User = {
   nickname?: string;
   status: UserStatus;
   createdAt: string;
+  emailVerifiedAt?: string | null;
+};
+
+export type EmailTokenPurpose = "register" | "password_reset";
+
+export type EmailTokenRecord = {
+  id: string;
+  email: string;
+  purpose: EmailTokenPurpose;
+  userId?: string | null;
+  codeHash: string;
+  tokenHash: string;
+  expiresAt: number;
+  usedAt?: number | null;
+  createdAt: number;
 };
 
 export type WithdrawalRequest = {
@@ -396,7 +413,6 @@ export type WithdrawalRequest = {
   amount: number;
   status: WithdrawalStatus;
   network?: string | null;
-  walletAddress?: string | null;
   txHash?: string | null;
   onchainStatus?: WithdrawalStatus | null;
   chainId?: number | null;

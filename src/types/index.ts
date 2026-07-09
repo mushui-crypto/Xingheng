@@ -23,6 +23,7 @@ export type User = {
   nickname?: string;
   status: UserStatus;
   createdAt: string;
+  emailVerifiedAt?: string | null;
 };
 
 export type AuthState = {
