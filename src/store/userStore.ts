@@ -89,7 +89,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
       body: JSON.stringify({ email }),
     });
     const payload = await response.json().catch(() => null);
-    if (!response.ok) {
+    if (!response.ok || payload?.ok === false) {
       return { ok: false, message: payload?.message ?? "验证码发送失败。" };
     }
     return { ok: true, message: payload?.message ?? "验证码已发送", devCode: payload?.devCode, devToken: payload?.devToken };
@@ -101,7 +101,7 @@ export const useUserStore = create<UserStore>((set, get) => ({
       body: JSON.stringify({ email, password, code, token }),
     });
     const payload = await response.json().catch(() => null);
-    if (!response.ok) {
+    if (!response.ok || payload?.ok === false) {
       return { ok: false, message: payload?.message ?? "密码重置失败。" };
     }
     return { ok: true };

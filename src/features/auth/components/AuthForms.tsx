@@ -267,6 +267,8 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
     const result = await requestPasswordReset(email);
     setSendingCode(false);
     if (!result.ok) {
+      setCooldown(0);
+      setStep("code");
       setFeedback({ tone: "error", text: result.message });
       return;
     }
@@ -373,9 +375,8 @@ export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: strin
           <AuthSubmitButton disabled={submittingReset}>{submittingReset ? "Resetting..." : "Reset password"}</AuthSubmitButton>
         </form>
       )}
-      <div className="mt-6 flex items-center justify-between text-sm text-[#919191]">
+      <div className="mt-6 text-sm text-[#919191]">
         <Link className="transition hover:text-white" to="/login">返回登录</Link>
-        <Link className="transition hover:text-white" to="/reset-password">使用重置链接</Link>
       </div>
     </>
   );

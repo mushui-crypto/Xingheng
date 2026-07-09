@@ -114,14 +114,14 @@ export class UserService {
     if (!isValidEmail(email)) {
       throw new Error("请输入有效的邮箱地址。");
     }
+    const user = this.store.findUserByEmail(email);
+    if (!user) {
+      throw new Error("该邮箱尚未注册。");
+    }
     this.assertEmailTokenCooldown(email, "password_reset");
     this.assertEmailTokenDailyLimit(email, "password_reset");
-    const user = this.store.findUserByEmail(email);
-    const token = this.createEmailToken(email, "password_reset", user?.id);
+    const token = this.createEmailToken(email, "password_reset", user.id);
     this.store.createEmailToken(token.record);
-    if (!user) {
-      return this.emailResponse();
-    }
     await this.emailService.sendVerificationMail({
       to: email,
       code: token.code,
@@ -142,7 +142,7 @@ export class UserService {
     }
     const user = this.store.findUserByEmail(email);
     if (!user) {
-      throw new Error("验证码无效或已过期。");
+      throw new Error("该邮箱尚未注册。");
     }
     const token = input.token
       ? this.verifyResetLinkToken(email, input.token)
