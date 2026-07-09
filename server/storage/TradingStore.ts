@@ -203,6 +203,13 @@ export class TradingStore {
     return row ? toEmailToken(row) : null;
   }
 
+  countEmailTokensSince(email: string, purpose: EmailTokenPurpose, since: number) {
+    const row = this.db
+      .prepare("SELECT COUNT(*) AS count FROM email_tokens WHERE email = ? AND purpose = ? AND createdAt >= ?")
+      .get(email, purpose, since) as { count: number } | undefined;
+    return Number(row?.count ?? 0);
+  }
+
   findLatestUsableEmailToken(email: string, purpose: EmailTokenPurpose, now = Date.now()) {
     const row = this.db
       .prepare(
@@ -604,7 +611,7 @@ export class TradingStore {
   }
 
   listDepositAddresses() {
-    return this.db.prepare("SELECT * FROM wallet_addresses ORDER BY derivationIndex ASC, createdAt ASC").all() as DepositAddressRow[];
+    return this.db.prepare("SELECT * FROM wallet_addresses ORDER BY derivationIndex ASC, createdAt ASC").all() as unknown as DepositAddressRow[];
   }
 
   listOnchainDeposits(userId?: string) {

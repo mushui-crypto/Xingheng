@@ -1,4 +1,5 @@
 import { ArrowRight, Eye, EyeOff } from "lucide-react";
+import type { ReactNode } from "react";
 import { useEffect } from "react";
 
 export type AuthFeedbackTone = "success" | "error";
@@ -155,6 +156,10 @@ export function AuthFeedback({ feedback }: { feedback: AuthFeedbackState }) {
       {feedback.text}
     </p>
   );
+}
+
+export function AuthInlineNote({ children }: { children: ReactNode }) {
+  return <div className="border border-white/10 bg-white/[0.03] p-3 text-sm leading-6 text-[#b8b8b8]">{children}</div>;
 }
 
 export function AuthSubmitButton({ children, disabled = false }: { children: string; disabled?: boolean }) {

@@ -169,6 +169,8 @@ export type DepositAddress = {
   derivationIndex: number;
   createdAt: number;
   updatedAt: number;
+  isConfigured?: boolean;
+  message?: string | null;
 };
 
 export type ExternalWalletBinding = {

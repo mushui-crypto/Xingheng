@@ -22,6 +22,8 @@ type ResetPasswordInput = {
 
 const emailTokenTtlMs = 10 * 60 * 1000;
 const emailTokenCooldownMs = 60 * 1000;
+const emailTokenDailyWindowMs = 24 * 60 * 60 * 1000;
+const emailTokenDailyLimit = 5;
 
 const defaultSeedUser: UserRecord = {
   id: "demo-user",
@@ -65,6 +67,7 @@ export class UserService {
       throw new Error("该邮箱已注册，请直接登录。");
     }
     this.assertEmailTokenCooldown(email, "register");
+    this.assertEmailTokenDailyLimit(email, "register");
     const token = this.createEmailToken(email, "register");
     this.store.createEmailToken(token.record);
     await this.emailService.sendVerificationMail({ to: email, code: token.code, purpose: "register" });
@@ -111,6 +114,7 @@ export class UserService {
       throw new Error("请输入有效的邮箱地址。");
     }
     this.assertEmailTokenCooldown(email, "password_reset");
+    this.assertEmailTokenDailyLimit(email, "password_reset");
     const user = this.store.findUserByEmail(email);
     const token = this.createEmailToken(email, "password_reset", user?.id);
     this.store.createEmailToken(token.record);
@@ -231,6 +235,13 @@ export class UserService {
     const latest = this.store.findLatestEmailToken(email, purpose);
     if (latest && latest.createdAt + emailTokenCooldownMs > Date.now()) {
       throw new Error("验证码已发送，请 1 分钟后再试。");
+    }
+  }
+
+  private assertEmailTokenDailyLimit(email: string, purpose: "register" | "password_reset") {
+    const count = this.store.countEmailTokensSince(email, purpose, Date.now() - emailTokenDailyWindowMs);
+    if (count >= emailTokenDailyLimit) {
+      throw new Error("验证码发送次数过多，请 24 小时后再试。");
     }
   }
 

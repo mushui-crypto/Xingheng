@@ -807,7 +807,7 @@ export class WalletService {
 
   getDepositAddress(userId: string) {
     const normalizedUserId = normalizeUserId(userId);
-    const address = this.store.transaction(() => this.getOrCreateDepositAddress(normalizedUserId));
+    const address = this.store.transaction(() => this.getOrCreateDepositAddressIfConfigured(normalizedUserId));
     return {
       ...this.onchain.getPublicConfig(),
       ...address,
@@ -1611,6 +1611,40 @@ export class WalletService {
     };
     this.store.saveDepositAddress(address);
     return address;
+  }
+
+  private getOrCreateDepositAddressIfConfigured(userId: string): DepositAddress {
+    const existing = this.store.getDepositAddressByUserId(userId);
+    if (existing) {
+      return {
+        ...existing,
+        isConfigured: true,
+        message: null,
+      };
+    }
+    if (!this.depositMnemonic) {
+      return this.createUnavailableDepositAddress(userId);
+    }
+    return {
+      ...this.getOrCreateDepositAddress(userId),
+      isConfigured: true,
+      message: null,
+    };
+  }
+
+  private createUnavailableDepositAddress(userId: string): DepositAddress {
+    const now = Date.now();
+    return {
+      id: `ADDR-${userId}-UNCONFIGURED`,
+      userId,
+      network: depositNetwork,
+      address: "",
+      derivationIndex: -1,
+      createdAt: now,
+      updatedAt: now,
+      isConfigured: false,
+      message: "测试网充值地址未配置，请联系管理员。",
+    };
   }
 
   private withAvailable(account: FundingAccount): FundingAccount {

@@ -10,6 +10,7 @@ import {
   AuthFeedback,
   type AuthFeedbackState,
   AuthHeader,
+  AuthInlineNote,
   AuthInput,
   AuthPasswordInput,
   AuthSubmitButton,
@@ -228,25 +229,43 @@ export function RegisterForm() {
   );
 }
 
-export function ForgotPasswordForm() {
+type PasswordResetStep = "code" | "password";
+
+export function ForgotPasswordForm({ initialEmail = "" }: { initialEmail?: string }) {
   const requestPasswordReset = useUserStore((state) => state.requestPasswordReset);
-  const [email, setEmail] = useState("");
+  const resetPassword = useUserStore((state) => state.resetPassword);
+  const navigate = useNavigate();
+  const [step, setStep] = useState<PasswordResetStep>("code");
+  const [email, setEmail] = useState(initialEmail);
+  const [code, setCode] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [feedback, setFeedback] = useState<AuthFeedbackState | null>(null);
   const [cooldown, setCooldown] = useState(0);
-  const [submitting, setSubmitting] = useState(false);
+  const [sendingCode, setSendingCode] = useState(false);
+  const [submittingReset, setSubmittingReset] = useState(false);
 
   useCooldownTimer(cooldown, setCooldown);
 
-  const handleSubmit = async (event: FormEvent) => {
-    event.preventDefault();
+  const handleEmailChange = (nextEmail: string) => {
+    setEmail(nextEmail);
+    setFeedback(null);
+    if (step === "password") {
+      setStep("code");
+    }
+  };
+
+  const handleSendCode = async () => {
     setFeedback(null);
     if (!isValidEmail(email)) {
       setFeedback({ tone: "error", text: "请输入有效的邮箱地址。" });
       return;
     }
-    setSubmitting(true);
+    setSendingCode(true);
     const result = await requestPasswordReset(email);
-    setSubmitting(false);
+    setSendingCode(false);
     if (!result.ok) {
       setFeedback({ tone: "error", text: result.message });
       return;
@@ -255,19 +274,108 @@ export function ForgotPasswordForm() {
     setFeedback({ tone: "success", text: result.devCode ? `${result.message}。开发验证码：${result.devCode}` : "验证码已发送" });
   };
 
+  const handleVerifyCode = (event: FormEvent) => {
+    event.preventDefault();
+    setFeedback(null);
+    if (!isValidEmail(email)) {
+      setFeedback({ tone: "error", text: "请输入有效的邮箱地址。" });
+      return;
+    }
+    if (!/^\d{6}$/.test(code.trim())) {
+      setFeedback({ tone: "error", text: "请输入 6 位邮箱验证码。" });
+      return;
+    }
+    setStep("password");
+  };
+
+  const handleResetPassword = async (event: FormEvent) => {
+    event.preventDefault();
+    setFeedback(null);
+    if (!isValidEmail(email)) {
+      setFeedback({ tone: "error", text: "请输入有效的邮箱地址。" });
+      setStep("code");
+      return;
+    }
+    if (!/^\d{6}$/.test(code.trim())) {
+      setFeedback({ tone: "error", text: "请输入 6 位邮箱验证码。" });
+      setStep("code");
+      return;
+    }
+    if (password.length < 8) {
+      setFeedback({ tone: "error", text: "密码至少需要 8 位。" });
+      return;
+    }
+    if (password !== confirmPassword) {
+      setFeedback({ tone: "error", text: "两次输入的密码不一致。" });
+      return;
+    }
+    setSubmittingReset(true);
+    const result = await resetPassword({ email, password, code });
+    setSubmittingReset(false);
+    if (!result.ok) {
+      setFeedback({ tone: "error", text: result.message });
+      return;
+    }
+    window.sessionStorage.setItem(USER_AUTH_MESSAGE_KEY, "密码已重置，请使用新密码登录。");
+    navigate("/login", { replace: true });
+  };
+
   return (
     <>
-      <AuthHeader title="找回密码" subtitle="输入注册邮箱，我们会发送 10 分钟内有效的验证码和重置链接。" />
-      <form className="space-y-6" onSubmit={handleSubmit}>
-        <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
-        {feedback ? <AuthFeedback feedback={feedback} /> : null}
-        <AuthSubmitButton disabled={submitting || cooldown > 0}>
-          {submitting ? "Sending..." : cooldown > 0 ? `Resend in ${cooldown}s` : "Send verification code"}
-        </AuthSubmitButton>
-      </form>
+      <AuthHeader
+        title="找回密码"
+        subtitle={step === "code" ? "输入注册邮箱并获取验证码，验证后在本页设置新密码。" : "验证码已填写，请设置新的登录密码。"}
+      />
+      {step === "code" ? (
+        <form className="space-y-6" onSubmit={handleVerifyCode}>
+          <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={handleEmailChange} />
+          <AuthCodeInput
+            label="Email code"
+            placeholder="Enter 6-digit code"
+            value={code}
+            onChange={setCode}
+            buttonText={sendingCode ? "Sending..." : cooldown > 0 ? `${cooldown}s` : "Send code"}
+            buttonDisabled={sendingCode || cooldown > 0}
+            onSend={handleSendCode}
+          />
+          {feedback ? <AuthFeedback feedback={feedback} /> : null}
+          <AuthSubmitButton>Next</AuthSubmitButton>
+        </form>
+      ) : (
+        <form className="space-y-6" onSubmit={handleResetPassword}>
+          <AuthInlineNote>
+            <p>邮箱：{email}</p>
+            <button className="mt-1 text-white transition hover:text-white/75" type="button" onClick={() => setStep("code")}>
+              返回修改邮箱或验证码
+            </button>
+          </AuthInlineNote>
+          <AuthPasswordInput
+            label="New password"
+            placeholder="Enter new password"
+            autoComplete="new-password"
+            value={password}
+            onChange={setPassword}
+            minLength={8}
+            visible={showPassword}
+            onToggleVisible={() => setShowPassword((value) => !value)}
+          />
+          <AuthPasswordInput
+            label="Confirm password"
+            placeholder="Repeat new password"
+            autoComplete="new-password"
+            value={confirmPassword}
+            onChange={setConfirmPassword}
+            minLength={8}
+            visible={showConfirmPassword}
+            onToggleVisible={() => setShowConfirmPassword((value) => !value)}
+          />
+          {feedback ? <AuthFeedback feedback={feedback} /> : null}
+          <AuthSubmitButton disabled={submittingReset}>{submittingReset ? "Resetting..." : "Reset password"}</AuthSubmitButton>
+        </form>
+      )}
       <div className="mt-6 flex items-center justify-between text-sm text-[#919191]">
         <Link className="transition hover:text-white" to="/login">返回登录</Link>
-        <Link className="transition hover:text-white" to={`/reset-password${email ? `?email=${encodeURIComponent(email)}` : ""}`}>输入验证码重置</Link>
+        <Link className="transition hover:text-white" to="/reset-password">使用重置链接</Link>
       </div>
     </>
   );
@@ -278,7 +386,6 @@ export function ResetPasswordForm() {
   const navigate = useNavigate();
   const resetPassword = useUserStore((state) => state.resetPassword);
   const [email, setEmail] = useState(searchParams.get("email") ?? "");
-  const [code, setCode] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -287,15 +394,15 @@ export function ResetPasswordForm() {
   const [submitting, setSubmitting] = useState(false);
   const token = searchParams.get("token") ?? "";
 
+  if (!token) {
+    return <ForgotPasswordForm initialEmail={email} />;
+  }
+
   const handleSubmit = async (event: FormEvent) => {
     event.preventDefault();
     setFeedback(null);
     if (!isValidEmail(email)) {
       setFeedback({ tone: "error", text: "请输入有效的邮箱地址。" });
-      return;
-    }
-    if (!token && !/^\d{6}$/.test(code.trim())) {
-      setFeedback({ tone: "error", text: "请输入 6 位邮箱验证码。" });
       return;
     }
     if (password.length < 8) {
@@ -307,7 +414,7 @@ export function ResetPasswordForm() {
       return;
     }
     setSubmitting(true);
-    const result = await resetPassword({ email, password, code, token });
+    const result = await resetPassword({ email, password, token });
     setSubmitting(false);
     if (!result.ok) {
       setFeedback({ tone: "error", text: result.message });
@@ -319,10 +426,9 @@ export function ResetPasswordForm() {
 
   return (
     <>
-      <AuthHeader title="重置密码" subtitle={token ? "链接有效期为 10 分钟，请设置新的登录密码。" : "输入邮箱验证码和新的登录密码。"} />
+      <AuthHeader title="重置密码" subtitle="链接有效期为 10 分钟，请设置新的登录密码。" />
       <form className="space-y-6" onSubmit={handleSubmit}>
         <AuthInput label="Email" placeholder="Enter your email" type="email" autoComplete="email" value={email} onChange={setEmail} />
-        {!token ? <AuthInput label="Email code" placeholder="Enter 6-digit code" type="text" autoComplete="one-time-code" value={code} onChange={setCode} /> : null}
         <AuthPasswordInput
           label="New password"
           placeholder="Enter new password"
