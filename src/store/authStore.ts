@@ -6,6 +6,7 @@ import { useUserStore } from "./userStore";
 type LoginResult = { ok: true } | { ok: false; message: string };
 
 type AuthStore = AuthState & {
+  isSessionReady: boolean;
   login: (email: string, password: string) => Promise<LoginResult>;
   logout: () => void;
   expireSession: () => void;
@@ -25,6 +26,7 @@ const initialAuthState =
 
 export const useAuthStore = create<AuthStore>((set) => ({
   ...initialAuthState,
+  isSessionReady: !initialAuthState.isLoggedIn,
   login: async (email, password) => {
     const response = await fetch("/api/auth/login", {
       method: "POST",
@@ -42,26 +44,27 @@ export const useAuthStore = create<AuthStore>((set) => ({
       isLoggedIn: true,
     };
     writeStorage(storageKeys.auth, authState);
-    set(authState);
+    set({ ...authState, isSessionReady: true });
     useUserStore.getState().setCurrentUser(payload.user);
     return { ok: true };
   },
   logout: () => {
     void fetch("/api/auth/logout", { method: "POST" }).catch(() => undefined);
     writeStorage(storageKeys.auth, defaultAuthState);
-    set(defaultAuthState);
+    set({ ...defaultAuthState, isSessionReady: true });
     useUserStore.getState().clear();
   },
   expireSession: () => {
     writeStorage(storageKeys.auth, defaultAuthState);
-    set(defaultAuthState);
+    set({ ...defaultAuthState, isSessionReady: true });
     useUserStore.getState().clear();
   },
   syncSession: async () => {
+    set({ isSessionReady: false });
     const user = await useUserStore.getState().loadCurrentUser().catch(() => null);
     if (!user) {
       writeStorage(storageKeys.auth, defaultAuthState);
-      set(defaultAuthState);
+      set({ ...defaultAuthState, isSessionReady: true });
       useUserStore.getState().clear();
       return;
     }
@@ -71,6 +74,6 @@ export const useAuthStore = create<AuthStore>((set) => ({
       isLoggedIn: true,
     };
     writeStorage(storageKeys.auth, nextState);
-    set(nextState);
+    set({ ...nextState, isSessionReady: true });
   },
 }));

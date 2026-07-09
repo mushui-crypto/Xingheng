@@ -6,7 +6,7 @@ import type { TradingStore } from "../../storage/TradingStore";
 import type { User } from "../../types";
 import type { WalletService } from "../../wallet/WalletService";
 import { sendBadRequest } from "../api/httpResponses";
-import { createRateLimiter } from "../security/httpSecurity";
+import { createRateLimiter, isLocalDevelopmentRequest } from "../security/httpSecurity";
 import {
   adminCookieName,
   clearSessionCookie,
@@ -38,6 +38,7 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config }:
   const authRateLimit = createRateLimiter({
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10),
+    skip: config.isProduction ? undefined : isLocalDevelopmentRequest,
   });
   const emailRequestRateLimit = createEmailRequestRateLimiter();
 

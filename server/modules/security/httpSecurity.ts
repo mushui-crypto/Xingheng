@@ -52,10 +52,23 @@ export function createSecurityHeaders(isProduction: boolean) {
   };
 }
 
-export function createRateLimiter(options: { windowMs: number; max: number }) {
+export function isLocalDevelopmentRequest(request: express.Request) {
+  const candidates = [
+    request.ip,
+    request.socket.remoteAddress,
+    typeof request.headers["x-forwarded-for"] === "string" ? request.headers["x-forwarded-for"].split(",")[0]?.trim() : "",
+  ];
+  return candidates.some((value) => isLocalAddress(value));
+}
+
+export function createRateLimiter(options: { windowMs: number; max: number; skip?: (request: express.Request) => boolean }) {
   const attempts = new Map<string, { count: number; resetAt: number }>();
   const limit = Number.isFinite(options.max) ? Math.max(1, Math.floor(options.max)) : 10;
   return (request: express.Request, response: express.Response, next: express.NextFunction) => {
+    if (options.skip?.(request)) {
+      next();
+      return;
+    }
     const now = Date.now();
     const key = request.ip || request.socket.remoteAddress || "unknown";
     const current = attempts.get(key);
@@ -76,4 +89,10 @@ export function createRateLimiter(options: { windowMs: number; max: number }) {
     }
     next();
   };
+}
+
+function isLocalAddress(value: string | undefined) {
+  if (!value) return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === "127.0.0.1" || normalized === "::1" || normalized === "::ffff:127.0.0.1" || normalized === "localhost";
 }
