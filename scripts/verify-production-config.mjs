@@ -5,9 +5,16 @@ const baseEnvironment = {
   NODE_ENV: "production",
   API_PORT: "18789",
   DOMAIN: "trade.stellarx.test",
+  APP_PUBLIC_URL: "https://trade.stellarx.test",
   CORS_ALLOWED_ORIGINS: "https://trade.stellarx.test",
   ADMIN_EMAIL: "ops@stellarx.test",
   ADMIN_PASSWORD: "test-only-random-password-123",
+  SMTP_HOST: "smtp.stellarx.test",
+  SMTP_PORT: "587",
+  SMTP_SECURE: "false",
+  SMTP_USER: "smtp-user",
+  SMTP_PASSWORD: "smtp-password-123",
+  SMTP_FROM: "Stella X <no-reply@stellarx.test>",
   TRADING_DB_PATH: "/tmp/xingheng-config-verification.sqlite",
   BSC_TESTNET_CHAIN_ID: "97",
   BSC_TESTNET_RPC_URL: "https://rpc.test.invalid",
@@ -20,6 +27,9 @@ const cases = [
   ["example admin email", { ADMIN_EMAIL: "admin@example.com" }, "ADMIN_EMAIL 必须是有效且非示例"],
   ["invalid admin email", { ADMIN_EMAIL: "not-an-email" }, "ADMIN_EMAIL 必须是有效且非示例"],
   ["example password", { ADMIN_PASSWORD: "replace-with-a-long-random-secret" }, "ADMIN_PASSWORD 仍是示例占位值"],
+  ["missing app public url", { APP_PUBLIC_URL: undefined }, "生产环境缺少必填配置：APP_PUBLIC_URL"],
+  ["mismatched app public url", { APP_PUBLIC_URL: "https://other.stellarx.test" }, "APP_PUBLIC_URL 必须与 DOMAIN"],
+  ["placeholder SMTP", { SMTP_HOST: "REPLACE_WITH_SMTP_HOST" }, "SMTP 配置仍是示例占位值"],
   ["placeholder RPC", { BSC_TESTNET_RPC_URL: "REPLACE_WITH_BSC_TESTNET_RPC_URL" }, "BSC_TESTNET_RPC_URL 必须是有效的 HTTP(S)"],
   ["non-http RPC", { BSC_TESTNET_RPC_URL: "ftp://rpc.example.net" }, "BSC_TESTNET_RPC_URL 必须是 HTTP(S)"],
   ["placeholder token address", { BSC_TESTNET_TOKEN_ADDRESS: "REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS" }, "BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零"],
@@ -27,9 +37,15 @@ const cases = [
 ];
 
 for (const [name, overrides, expected] of cases) {
+  const env = { ...baseEnvironment, ...overrides };
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined) {
+      delete env[key];
+    }
+  }
   const result = spawnSync(process.execPath, ["dist-server/index.js"], {
     encoding: "utf8",
-    env: { ...baseEnvironment, ...overrides },
+    env,
     timeout: 5_000,
   });
   const output = `${result.stdout}\n${result.stderr}`;

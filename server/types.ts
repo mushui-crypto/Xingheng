@@ -387,6 +387,21 @@ export type User = {
   nickname?: string;
   status: UserStatus;
   createdAt: string;
+  emailVerifiedAt?: string | null;
+};
+
+export type EmailTokenPurpose = "register" | "password_reset";
+
+export type EmailTokenRecord = {
+  id: string;
+  email: string;
+  purpose: EmailTokenPurpose;
+  userId?: string | null;
+  codeHash: string;
+  tokenHash: string;
+  expiresAt: number;
+  usedAt?: number | null;
+  createdAt: number;
 };
 
 export type WithdrawalRequest = {

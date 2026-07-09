@@ -55,6 +55,14 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
     }
   });
 
+  app.post("/api/auth/register-code", authRateLimit, async (request, response) => {
+    try {
+      response.json(await users.requestRegisterCode(request.body?.email));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
   app.post("/api/auth/login", authRateLimit, (request, response) => {
     try {
       const result = users.login(request.body?.email, request.body?.password);
@@ -70,6 +78,22 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
     users.logout(getUserBearerToken(request));
     clearSessionCookie(response, userCookieName, config.isProduction);
     response.json({ ok: true });
+  });
+
+  app.post("/api/auth/password-reset-code", authRateLimit, async (request, response) => {
+    try {
+      response.json(await users.requestPasswordReset(request.body?.email));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
+  app.post("/api/auth/password-reset", authRateLimit, (request, response) => {
+    try {
+      response.json(users.resetPassword(request.body ?? {}));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
   });
 
   app.get("/api/auth/me", (request, response) => {

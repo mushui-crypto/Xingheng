@@ -6,6 +6,8 @@ import type {
   BalanceAdjustment,
   ChainScanCursor,
   DepositAddress,
+  EmailTokenPurpose,
+  EmailTokenRecord,
   ExternalWalletBinding,
   FundingAccount,
   FundingLedgerEntry,
@@ -57,6 +59,10 @@ type AuthSessionRow = {
   createdAt: number;
 };
 type MarketSymbolRow = Omit<MarketSymbol, "isVisible" | "iconUrl"> & { isVisible: number };
+type EmailTokenRow = Omit<EmailTokenRecord, "userId" | "usedAt"> & {
+  userId?: string | null;
+  usedAt?: number | null;
+};
 
 export class TradingStore {
   private db: DatabaseSync;
@@ -87,7 +93,7 @@ export class TradingStore {
   }
 
   listUsers() {
-    return this.db.prepare("SELECT id, email, nickname, status, createdAt FROM users ORDER BY createdAt DESC").all() as User[];
+    return this.db.prepare("SELECT id, email, nickname, status, createdAt, emailVerifiedAt FROM users ORDER BY createdAt DESC").all() as User[];
   }
 
   findUserByEmail(email: string) {
@@ -95,7 +101,7 @@ export class TradingStore {
   }
 
   findUserById(id: string) {
-    return this.db.prepare("SELECT id, email, nickname, status, createdAt FROM users WHERE id = ?").get(id) as User | undefined;
+    return this.db.prepare("SELECT id, email, nickname, status, createdAt, emailVerifiedAt FROM users WHERE id = ?").get(id) as User | undefined;
   }
 
   listUserPasswordRecords() {
@@ -105,10 +111,10 @@ export class TradingStore {
   createUser(user: UserRow) {
     this.db
       .prepare(
-        `INSERT INTO users (id, email, password, nickname, status, createdAt)
-         VALUES (?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO users (id, email, password, nickname, status, createdAt, emailVerifiedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
       )
-      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt);
+      .run(user.id, user.email, user.password, user.nickname ?? null, user.status, user.createdAt, user.emailVerifiedAt ?? null);
   }
 
   updateUserPassword(id: string, password: string) {
@@ -167,6 +173,71 @@ export class TradingStore {
 
   deleteAuthSessionsForSubject(subjectId: string, role: SessionRole) {
     this.db.prepare("DELETE FROM auth_sessions WHERE subjectId = ? AND role = ?").run(subjectId, role);
+  }
+
+  createEmailToken(record: EmailTokenRecord) {
+    this.db
+      .prepare(
+        `INSERT INTO email_tokens (
+          id, email, purpose, userId, codeHash, tokenHash, expiresAt, usedAt, createdAt
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.id,
+        record.email,
+        record.purpose,
+        record.userId ?? null,
+        record.codeHash,
+        record.tokenHash,
+        record.expiresAt,
+        record.usedAt ?? null,
+        record.createdAt,
+      );
+  }
+
+  findLatestEmailToken(email: string, purpose: EmailTokenPurpose) {
+    const row = this.db
+      .prepare("SELECT * FROM email_tokens WHERE email = ? AND purpose = ? ORDER BY createdAt DESC LIMIT 1")
+      .get(email, purpose) as EmailTokenRow | undefined;
+    return row ? toEmailToken(row) : null;
+  }
+
+  findLatestUsableEmailToken(email: string, purpose: EmailTokenPurpose, now = Date.now()) {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM email_tokens
+         WHERE email = ? AND purpose = ? AND usedAt IS NULL AND expiresAt > ?
+         ORDER BY createdAt DESC LIMIT 1`,
+      )
+      .get(email, purpose, now) as EmailTokenRow | undefined;
+    return row ? toEmailToken(row) : null;
+  }
+
+  findUsableEmailTokenByCodeHash(email: string, purpose: EmailTokenPurpose, codeHash: string, now = Date.now()) {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM email_tokens
+         WHERE email = ? AND purpose = ? AND codeHash = ? AND usedAt IS NULL AND expiresAt > ?
+         ORDER BY createdAt DESC LIMIT 1`,
+      )
+      .get(email, purpose, codeHash, now) as EmailTokenRow | undefined;
+    return row ? toEmailToken(row) : null;
+  }
+
+  findUsableEmailTokenByTokenHash(email: string, purpose: EmailTokenPurpose, tokenHash: string, now = Date.now()) {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM email_tokens
+         WHERE email = ? AND purpose = ? AND tokenHash = ? AND usedAt IS NULL AND expiresAt > ?
+         ORDER BY createdAt DESC LIMIT 1`,
+      )
+      .get(email, purpose, tokenHash, now) as EmailTokenRow | undefined;
+    return row ? toEmailToken(row) : null;
+  }
+
+  markEmailTokenUsed(id: string, usedAt = Date.now()) {
+    this.db.prepare("UPDATE email_tokens SET usedAt = ? WHERE id = ? AND usedAt IS NULL").run(usedAt, id);
   }
 
   purgeExpiredAuthSessions() {
@@ -958,7 +1029,20 @@ export class TradingStore {
         password TEXT NOT NULL,
         nickname TEXT,
         status TEXT NOT NULL,
-        createdAt TEXT NOT NULL
+        createdAt TEXT NOT NULL,
+        emailVerifiedAt TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS email_tokens (
+        id TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        userId TEXT,
+        codeHash TEXT NOT NULL,
+        tokenHash TEXT NOT NULL,
+        expiresAt INTEGER NOT NULL,
+        usedAt INTEGER,
+        createdAt INTEGER NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS auth_sessions (
@@ -1027,6 +1111,8 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_orders_accountId ON orders(accountId);
       CREATE INDEX IF NOT EXISTS idx_adjustments_userId ON balance_adjustments(userId);
       CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+      CREATE INDEX IF NOT EXISTS idx_email_tokens_email_purpose ON email_tokens(email, purpose, createdAt);
+      CREATE INDEX IF NOT EXISTS idx_email_tokens_tokenHash ON email_tokens(tokenHash);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_subject ON auth_sessions(subjectId, role);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiresAt ON auth_sessions(expiresAt);
 
@@ -1235,12 +1321,14 @@ export class TradingStore {
     this.addColumnIfMissing("withdrawal_requests", "broadcastAttemptCount", "INTEGER DEFAULT 0");
     this.addColumnIfMissing("withdrawal_requests", "lastBroadcastAttemptAt", "INTEGER");
     this.addColumnIfMissing("positions", "accountId", "TEXT");
+    this.addColumnIfMissing("users", "emailVerifiedAt", "TEXT");
     this.addColumnIfMissing("market_symbols", "providerMarketId", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "providerCoin", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "sourceDex", "TEXT NOT NULL DEFAULT 'main'");
     this.addColumnIfMissing("market_symbols", "sourceType", "TEXT NOT NULL DEFAULT 'main'");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
     this.cleanupLegacyTradingData();
+    this.db.prepare("UPDATE users SET emailVerifiedAt = createdAt WHERE emailVerifiedAt IS NULL").run();
     this.db.prepare("UPDATE withdrawal_requests SET status = 'pending_review' WHERE status = 'pending'").run();
     this.db.prepare("UPDATE withdrawal_requests SET status = 'confirmed', onchainStatus = 'confirmed' WHERE status = 'approved'").run();
     this.db.prepare("UPDATE withdrawal_requests SET onchainStatus = status WHERE onchainStatus IS NULL").run();
@@ -1275,6 +1363,14 @@ function toMarketSymbol(row: MarketSymbolRow): MarketSymbol {
     sourceType: row.sourceType === "hip3" ? "hip3" : "main",
     category: normalizeMarketCategory(row.category),
     isVisible: Boolean(row.isVisible),
+  };
+}
+
+function toEmailToken(row: EmailTokenRow): EmailTokenRecord {
+  return {
+    ...row,
+    userId: row.userId ?? null,
+    usedAt: row.usedAt ?? null,
   };
 }
 

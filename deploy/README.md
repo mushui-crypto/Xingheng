@@ -15,7 +15,7 @@
 cp .env.production.example .env.production
 chmod 600 .env.production
 # 替换所有 replace-me / REPLACE_WITH 占位值；这些值刻意不可部署，API 会拒绝启动。
-# 核对 DOMAIN、CORS_ALLOWED_ORIGINS、ADMIN_EMAIL、ADMIN_PASSWORD、RPC 和测试网合约地址。
+# 核对 DOMAIN、APP_PUBLIC_URL、CORS_ALLOWED_ORIGINS、ADMIN_EMAIL、ADMIN_PASSWORD、SMTP、RPC 和测试网合约地址。
 docker compose --env-file .env.production config
 docker compose --env-file .env.production build
 docker compose --env-file .env.production up -d
@@ -27,6 +27,47 @@ Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由
 内部网络访问。`/api/*` 和 `/ws` 会先反代到 API，其余路径由静态前端处理；不存在
 的路径回退到 `index.html`。Web 容器只接收 `DOMAIN`；管理员密码、私钥和助记词
 仅进入 API 容器。所有手工 Compose 命令都必须带 `--env-file .env.production`。
+
+## 邮件服务配置
+
+注册和找回密码均依赖邮箱验证码。生产环境必须配置 SMTP，否则 API 启动会拒绝：
+
+```bash
+APP_PUBLIC_URL=https://你的域名
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_SECURE=false
+SMTP_USER=your-smtp-user
+SMTP_PASSWORD=your-smtp-password
+SMTP_FROM="Stella X <no-reply@example.com>"
+```
+
+常见取值：
+
+- 587 端口通常配 `SMTP_SECURE=false`，使用 STARTTLS。
+- 465 端口通常配 `SMTP_SECURE=true`。
+- `APP_PUBLIC_URL` 必须与 `DOMAIN` 对应的 HTTPS origin 一致，用于生成找回密码链接。
+
+Resend SMTP 推荐填法：
+
+```bash
+SMTP_HOST=smtp.resend.com
+SMTP_PORT=465
+SMTP_SECURE=true
+SMTP_USER=resend
+SMTP_PASSWORD=Resend API Key
+SMTP_FROM="Stella X <no-reply@已验证域名>"
+```
+
+`SMTP_PASSWORD` 是 Resend API Key，只能写入服务器本机 `.env.production` 或外部密钥系统，
+不得提交到 Git，也不要粘贴到日志、Issue 或对话中。`SMTP_FROM` 必须使用 Resend 已验证域名。
+`.gitignore` 默认忽略 `.env.*`，只放行 `.env.example` 和 `.env.production.example`。
+
+上线前或部署后需要由拥有测试收件箱权限的人做一次真实发信 smoke：发送注册验证码或找回
+密码邮件到测试邮箱，确认 Resend Activity 和收件箱都能看到邮件。没有收件邮箱授权时，
+测试验收不应擅自发真实邮件。
+
+开发环境未配置 SMTP 时，验证码和重置链接会打印到 API 日志；生产环境不会这样兜底。
 
 ## 日常操作
 

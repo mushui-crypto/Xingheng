@@ -3,10 +3,20 @@ import { isAddress } from "ethers";
 export type RuntimeConfig = {
   port: number;
   isProduction: boolean;
+  appPublicUrl: string;
   adminEmail: string;
   adminPassword: string;
   adminAuthConfigured: boolean;
   allowedOrigins: Set<string>;
+  smtp: {
+    host: string;
+    port: number;
+    secure: boolean;
+    user: string;
+    password: string;
+    from: string;
+    configured: boolean;
+  };
 };
 
 export function loadRuntimeConfig(): RuntimeConfig {
@@ -15,16 +25,48 @@ export function loadRuntimeConfig(): RuntimeConfig {
   const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase() ?? "";
   const adminPassword = process.env.ADMIN_PASSWORD ?? "";
   const allowedOrigins = getAllowedOrigins(isProduction);
+  const domain = process.env.DOMAIN?.trim() ?? "";
+  const configuredAppPublicUrl = process.env.APP_PUBLIC_URL?.trim() ?? "";
+  const appPublicUrl = normalizeAppPublicUrl(configuredAppPublicUrl || (!isProduction && domain ? `https://${domain}` : "http://localhost:5173"));
+  const smtp = loadSmtpConfig();
   const config = {
     port,
     isProduction,
+    appPublicUrl,
     adminEmail,
     adminPassword,
     adminAuthConfigured: Boolean(adminEmail && adminPassword.length >= 12),
     allowedOrigins,
+    smtp,
   };
   validateProductionConfig(config);
   return config;
+}
+
+function normalizeAppPublicUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return url.origin;
+  } catch {
+    return value;
+  }
+}
+
+function loadSmtpConfig(): RuntimeConfig["smtp"] {
+  const port = Number(process.env.SMTP_PORT ?? 587);
+  const host = process.env.SMTP_HOST?.trim() ?? "";
+  const user = process.env.SMTP_USER?.trim() ?? "";
+  const password = process.env.SMTP_PASSWORD ?? "";
+  const from = process.env.SMTP_FROM?.trim() ?? "";
+  return {
+    host,
+    port: Number.isInteger(port) ? port : 587,
+    secure: process.env.SMTP_SECURE === "true",
+    user,
+    password,
+    from,
+    configured: Boolean(host && from && Number.isInteger(port) && port > 0 && port <= 65_535 && user && password),
+  };
 }
 
 function getAllowedOrigins(isProduction: boolean) {
@@ -57,6 +99,12 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["DOMAIN", process.env.DOMAIN?.trim() ?? ""],
     ["ADMIN_EMAIL", config.adminEmail],
     ["ADMIN_PASSWORD（至少 12 位）", config.adminPassword.length >= 12 ? config.adminPassword : ""],
+    ["APP_PUBLIC_URL", process.env.APP_PUBLIC_URL?.trim() ?? ""],
+    ["SMTP_HOST", config.smtp.host],
+    ["SMTP_PORT", String(config.smtp.port)],
+    ["SMTP_USER", config.smtp.user],
+    ["SMTP_PASSWORD", config.smtp.password],
+    ["SMTP_FROM", config.smtp.from],
     ["TRADING_DB_PATH", process.env.TRADING_DB_PATH?.trim() ?? ""],
     ["CORS_ALLOWED_ORIGINS", process.env.CORS_ALLOWED_ORIGINS?.trim() ?? ""],
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
@@ -100,6 +148,19 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   if (!config.allowedOrigins.has(`https://${domain}`)) {
     throw new Error("CORS_ALLOWED_ORIGINS 必须包含与 DOMAIN 对应的 HTTPS origin。");
+  }
+  if (config.appPublicUrl !== `https://${domain}`) {
+    throw new Error("APP_PUBLIC_URL 必须与 DOMAIN 对应的 HTTPS origin 一致。");
+  }
+  if (!config.smtp.configured) {
+    throw new Error("生产环境必须配置 SMTP_HOST、SMTP_PORT、SMTP_FROM，用于注册和找回密码验证码。");
+  }
+  if (
+    [config.smtp.host, config.smtp.user, config.smtp.password, config.smtp.from].some(
+      (value) => value.includes("REPLACE_WITH") || value.toLowerCase().includes("replace-me") || value.endsWith(".invalid"),
+    )
+  ) {
+    throw new Error("SMTP 配置仍是示例占位值，请填写正式邮件服务参数。");
   }
   let rpcUrl: URL;
   try {
