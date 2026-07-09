@@ -13,24 +13,31 @@ export function ProtectedRoute({ children, type }: ProtectedRouteProps) {
   const isLoggedIn = useAuthStore((state) => state.isLoggedIn);
   const isSessionReady = useAuthStore((state) => state.isSessionReady);
   const syncSession = useAuthStore((state) => state.syncSession);
+  const expireSession = useAuthStore((state) => state.expireSession);
   const isAdminLoggedIn = useAdminAuthStore((state) => state.isAdminLoggedIn);
   const currentUser = useUserStore((state) => state.currentUser);
 
   useEffect(() => {
-    if (type === "user" && isLoggedIn && (!isSessionReady || !currentUser)) {
+    if (type === "user" && isLoggedIn && !isSessionReady) {
       void syncSession();
     }
-  }, [currentUser, isLoggedIn, isSessionReady, syncSession, type]);
+  }, [isLoggedIn, isSessionReady, syncSession, type]);
+
+  useEffect(() => {
+    if (type === "user" && isLoggedIn && isSessionReady && !currentUser) {
+      expireSession();
+    }
+  }, [currentUser, expireSession, isLoggedIn, isSessionReady, type]);
 
   if (type === "admin" && !isAdminLoggedIn) {
     return <Navigate to="/admin/login" replace />;
   }
 
-  if (type === "user" && isLoggedIn && (!isSessionReady || !currentUser)) {
+  if (type === "user" && isLoggedIn && !isSessionReady) {
     return <ProtectedRouteFallback />;
   }
 
-  if (type === "user" && !isLoggedIn) {
+  if (type === "user" && (!isLoggedIn || !currentUser)) {
     return <Navigate to="/login" replace />;
   }
 
