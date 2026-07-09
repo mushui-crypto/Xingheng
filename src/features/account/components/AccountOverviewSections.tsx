@@ -1,4 +1,9 @@
-import type { ReactNode } from "react";
+import {
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
 import type {
   AccountOverview,
@@ -148,12 +153,16 @@ export function AssetSummaryPanel({
         <div className="xh-asset-summary-main">
           <h2>{title}</h2>
           <div className="xh-asset-summary-value">
-            <span className="xh-asset-summary-number">{formatNumber(value)}</span>
+            <CountUpNumber className="xh-asset-summary-number" value={value} formatter={formatNumber} />
             <span className="xh-asset-summary-unit">{asset}</span>
           </div>
           <p className="xh-asset-summary-pnl">
             <span>{changeLabel}</span>
-            <span className={getSignedToneClass(pnl ?? 0)}>{pnlText ?? formatSignedMoney(pnl ?? 0, asset)}</span>
+            <span className={getSignedToneClass(pnl ?? 0)}>
+              {pnlText ? pnlText : (
+                <CountUpNumber value={pnl ?? 0} formatter={(nextValue) => formatSignedMoney(nextValue, asset)} />
+              )}
+            </span>
           </p>
         </div>
         {actions ? <div className="xh-asset-summary-actions">{actions}</div> : null}
@@ -167,6 +176,118 @@ export function AssetSummaryPanel({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function CountUpNumber({
+  className,
+  duration = 900,
+  formatter,
+  value,
+}: {
+  className?: string;
+  duration?: number;
+  formatter: (value: number) => string;
+  value: number | null | undefined;
+}) {
+  const elementRef = useRef<HTMLSpanElement | null>(null);
+  const frameRef = useRef<number | null>(null);
+  const hasAnimatedRef = useRef(false);
+  const latestValueRef = useRef(value);
+  const [displayValue, setDisplayValue] = useState<number | null>(typeof value === "number" ? 0 : null);
+
+  useEffect(() => {
+    latestValueRef.current = value;
+
+    if (typeof value !== "number") {
+      setDisplayValue(null);
+      return;
+    }
+
+    if (!hasAnimatedRef.current && value === 0) {
+      setDisplayValue(0);
+      return;
+    }
+
+    const prefersReducedMotion =
+      typeof window !== "undefined" &&
+      typeof window.matchMedia === "function" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+    if (prefersReducedMotion || hasAnimatedRef.current) {
+      hasAnimatedRef.current = true;
+      setDisplayValue(value);
+      return;
+    }
+
+    let observer: IntersectionObserver | null = null;
+
+    const cancelFrame = () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
+    };
+
+    const animateCountUp = () => {
+      if (hasAnimatedRef.current) {
+        return;
+      }
+
+      hasAnimatedRef.current = true;
+      cancelFrame();
+
+      const targetValue = typeof latestValueRef.current === "number" ? latestValueRef.current : 0;
+      const startTime = window.performance.now();
+
+      const tick = (time: number) => {
+        const progress = Math.min((time - startTime) / duration, 1);
+        const easedProgress = 1 - Math.pow(1 - progress, 3);
+
+        setDisplayValue(targetValue * easedProgress);
+
+        if (progress < 1) {
+          frameRef.current = window.requestAnimationFrame(tick);
+        } else {
+          frameRef.current = null;
+          setDisplayValue(targetValue);
+        }
+      };
+
+      frameRef.current = window.requestAnimationFrame(tick);
+    };
+
+    const node = elementRef.current;
+
+    if (!node || typeof IntersectionObserver === "undefined") {
+      animateCountUp();
+      return () => {
+        cancelFrame();
+      };
+    }
+
+    observer = new IntersectionObserver(
+      ([entry]) => {
+        if (entry?.isIntersecting) {
+          observer?.disconnect();
+          animateCountUp();
+        }
+      },
+      { threshold: 0.35 },
+    );
+
+    observer.observe(node);
+
+    return () => {
+      observer?.disconnect();
+      cancelFrame();
+    };
+  }, [duration, value]);
+
+  return (
+    <span ref={elementRef} className={className}>
+      {typeof displayValue === "number" ? formatter(displayValue) : "-"}
+    </span>
   );
 }
 
@@ -194,7 +315,9 @@ export function OverviewFundingTable({ rows }: { rows: OverviewFundingRow[] }) {
             rows.map((row) => (
               <tr key={row.id}>
                 <td>{row.type}</td>
-                <td className="xh-overview-table-number">{formatNumber(row.amount)}</td>
+                <td className="xh-overview-table-number">
+                  <CountUpNumber value={row.amount} formatter={formatNumber} />
+                </td>
                 <td className="xh-overview-table-asset">{row.asset}</td>
                 <td className="xh-overview-table-time">{formatTimestamp(row.time)}</td>
                 <td className={`xh-overview-status ${getOverviewStatusClass(row.status)}`}>{formatOverviewStatus(row.status)}</td>
