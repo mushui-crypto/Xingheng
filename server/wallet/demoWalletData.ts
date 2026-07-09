@@ -50,7 +50,7 @@ export function createDemoWithdrawal(input: {
   userId: string;
   amount: number;
   status: WithdrawalRequest["status"];
-  walletAddress: string;
+  toAddress: string;
   tokenAddress: string;
   broadcastTxHash?: string | null;
   failedReason?: string | null;
@@ -69,13 +69,12 @@ export function createDemoWithdrawal(input: {
     amount: roundMoney(input.amount),
     status: input.status,
     network: depositNetwork,
-    walletAddress: input.walletAddress,
     txHash: input.broadcastTxHash ?? null,
     onchainStatus: input.status,
     chainId: Number(process.env.BSC_TESTNET_CHAIN_ID ?? 97),
     tokenAddress: input.tokenAddress,
     fromAddress: "0x5555555555555555555555555555555555555555",
-    toAddress: input.walletAddress,
+    toAddress: input.toAddress,
     broadcastTxHash: input.broadcastTxHash ?? null,
     broadcastedAt: input.broadcastedAt ?? null,
     confirmedAt: input.confirmedAt ?? null,
@@ -129,7 +128,7 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "completed",
       relatedId: "DEP-DEMO-CONFIRMED-001",
       network: depositNetwork,
-      walletAddress: input.depositAddress,
+      address: input.depositAddress,
       txHash: "0x1000000000000000000000000000000000000000000000000000000000000001",
       remark: "演示数据：钱包划转入资金账户",
       createdAt: createdAt + 180_000,
@@ -145,7 +144,7 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       frozenAfter: 0,
       status: "completed",
       relatedId: "TRF-DEMO-SIM-FUND-001",
-      walletAddress: null,
+      address: null,
       txHash: null,
       remark: "演示数据：模拟账户转入资金账户",
       createdAt: createdAt + 240_000,
@@ -162,9 +161,9 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "pending",
       relatedId: "WDR-DEMO-PENDING-001",
       network: depositNetwork,
-      walletAddress: "0x2222222222222222222222222222222222222222",
+      address: "0x2222222222222222222222222222222222222222",
       txHash: null,
-      remark: "演示数据：出金待审核，资金已冻结",
+      remark: "演示数据：提现待审核，资金已冻结",
       createdAt: createdAt + 480_000,
     }),
     makeEntry({
@@ -179,9 +178,9 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "pending",
       relatedId: "WDR-DEMO-CONFIRMED-001",
       network: depositNetwork,
-      walletAddress: "0x3333333333333333333333333333333333333333",
+      address: "0x3333333333333333333333333333333333333333",
       txHash: null,
-      remark: "演示数据：已审核出金的冻结记录",
+      remark: "演示数据：已审核提现的冻结记录",
       createdAt: createdAt + 540_000,
     }),
     makeEntry({
@@ -196,9 +195,9 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "completed",
       relatedId: "WDR-DEMO-CONFIRMED-001",
       network: depositNetwork,
-      walletAddress: "0x3333333333333333333333333333333333333333",
+      address: "0x3333333333333333333333333333333333333333",
       txHash: "0x2000000000000000000000000000000000000000000000000000000000000001",
-      remark: "演示数据：出金链上确认后正式扣减",
+      remark: "演示数据：提现链上确认后正式扣减",
       createdAt: createdAt + 780_000,
     }),
     makeEntry({
@@ -212,7 +211,7 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       frozenAfter: 250,
       status: "completed",
       relatedId: "TRF-DEMO-FUND-REAL-001",
-      walletAddress: null,
+      address: null,
       txHash: null,
       remark: "演示数据：资金账户转入真实交易账户",
       createdAt: createdAt + 900_000,
@@ -229,9 +228,9 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "pending",
       relatedId: "WDR-DEMO-FAILED-001",
       network: depositNetwork,
-      walletAddress: "0x4444444444444444444444444444444444444444",
+      address: "0x4444444444444444444444444444444444444444",
       txHash: null,
-      remark: "演示数据：失败出金的冻结记录",
+      remark: "演示数据：失败提现的冻结记录",
       createdAt: createdAt + 1_080_000,
     }),
     makeEntry({
@@ -246,7 +245,7 @@ export function createDemoLedgerEntries(input: { userId: string; accountId: stri
       status: "rejected",
       relatedId: "WDR-DEMO-FAILED-001",
       network: depositNetwork,
-      walletAddress: "0x4444444444444444444444444444444444444444",
+      address: "0x4444444444444444444444444444444444444444",
       txHash: "0x2000000000000000000000000000000000000000000000000000000000000002",
       remark: "演示数据：RPC 广播超时，冻结资金已释放",
       createdAt: createdAt + 1_260_000,

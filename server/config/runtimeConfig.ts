@@ -109,6 +109,7 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["CORS_ALLOWED_ORIGINS", process.env.CORS_ALLOWED_ORIGINS?.trim() ?? ""],
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
     ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
+    ["BSC_TESTNET_DEPOSIT_MNEMONIC", process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {

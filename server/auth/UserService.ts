@@ -74,7 +74,7 @@ export class UserService {
     return this.emailResponse(token.code);
   }
 
-  register(input: RegisterInput) {
+  register(input: RegisterInput, afterCreate?: (user: User) => void) {
     const email = normalizeEmail(input.email);
     const password = String(input.password ?? "");
     const nickname = input.nickname?.trim() || undefined;
@@ -104,6 +104,7 @@ export class UserService {
     this.store.transaction(() => {
       this.store.createUser(user);
       this.store.markEmailTokenUsed(token.id);
+      afterCreate?.(this.toUserView(user));
     });
     return this.toUserView(user);
   }

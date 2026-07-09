@@ -189,20 +189,20 @@ export class OnchainWalletService {
   async broadcastWithdrawal(request: WithdrawalRequest) {
     const privateKey = process.env.BSC_TESTNET_PRIVATE_KEY?.trim();
     if (!privateKey) {
-      throw new Error("缺少 BSC_TESTNET_PRIVATE_KEY，无法广播测试网出金。");
+      throw new Error("缺少 BSC_TESTNET_PRIVATE_KEY，无法广播测试网提现。");
     }
-    if (!request.walletAddress || !isAddress(request.walletAddress)) {
-      throw new Error("出金钱包地址格式不正确。");
+    if (!request.toAddress || !isAddress(request.toAddress)) {
+      throw new Error("提现目标地址格式不正确。");
     }
 
     const wallet = new Wallet(privateKey, this.provider);
     const tokenWithSigner = this.token.connect(wallet) as Contract;
     const value = parseUnits(String(request.amount), this.config.tokenDecimals);
-    const tx = await tokenWithSigner.transfer(request.walletAddress, value);
+    const tx = await tokenWithSigner.transfer(request.toAddress, value);
     return {
       txHash: tx.hash as string,
       fromAddress: wallet.address,
-      toAddress: request.walletAddress,
+      toAddress: request.toAddress,
     };
   }
 

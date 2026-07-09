@@ -240,7 +240,7 @@ export type FundingLedgerEntry = {
   status: "pending" | "completed" | "rejected";
   relatedId?: string | null;
   network?: string | null;
-  walletAddress?: string | null;
+  address?: string | null;
   txHash?: string | null;
   remark?: string | null;
   createdAt: number;
@@ -254,7 +254,6 @@ export type WithdrawalRequest = {
   amount: number;
   status: WithdrawalStatus;
   network?: string | null;
-  walletAddress?: string | null;
   txHash?: string | null;
   onchainStatus?: WithdrawalStatus | null;
   chainId?: number | null;
@@ -524,12 +523,12 @@ export async function createInternalTransfer(recipient: string, amount: number, 
   });
 }
 
-export async function createWithdrawalRequest(amount: number, network: string, walletAddress: string, remark: string) {
+export async function createWithdrawalRequest(amount: number, network: string, toAddress: string, remark: string) {
   return requestJson<WithdrawalRequest>("/api/wallet/withdrawals", "提现申请提交失败。", {
     init: {
       method: "POST",
       headers: { "Content-Type": "application/json", ...userHeaders() },
-      body: JSON.stringify({ amount, network, walletAddress, remark }),
+      body: JSON.stringify({ amount, network, toAddress, remark }),
     },
     userAuthFailure: true,
   });

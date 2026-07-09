@@ -148,7 +148,7 @@ export function WalletOverviewSection({
                   <>
                     <WalletActionButton label="交易" onClick={onTrade} />
                     <WalletActionButton label="兑换" onClick={onExchange} />
-                    <WalletActionButton label="发送" onClick={onWithdraw} />
+                    <WalletActionButton label="提现" onClick={onWithdraw} />
                     <WalletActionButton label="收款" onClick={selectedWallet.onCopyAddress} />
                   </>
                 ) : (
