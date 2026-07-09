@@ -4,6 +4,7 @@ import { createSessionToken, hashSessionToken, secureTextEqual } from "../../aut
 import type { RuntimeConfig } from "../../config/runtimeConfig";
 import type { TradingStore } from "../../storage/TradingStore";
 import type { User } from "../../types";
+import type { WalletService } from "../../wallet/WalletService";
 import { sendBadRequest } from "../api/httpResponses";
 import { createRateLimiter } from "../security/httpSecurity";
 import {
@@ -28,11 +29,12 @@ declare global {
 type AuthRouteDependencies = {
   app: express.Express;
   users: UserService;
+  wallet: WalletService;
   tradingStore: TradingStore;
   config: RuntimeConfig;
 };
 
-export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRouteDependencies) {
+export function registerAuthRoutes({ app, users, wallet, tradingStore, config }: AuthRouteDependencies) {
   const authRateLimit = createRateLimiter({
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10),
@@ -49,7 +51,7 @@ export function registerAuthRoutes({ app, users, tradingStore, config }: AuthRou
 
   app.post("/api/auth/register", authRateLimit, (request, response) => {
     try {
-      response.status(201).json(users.register(request.body ?? {}));
+      response.status(201).json(users.register(request.body ?? {}, (user) => wallet.ensureDepositAddressForRegisteredUser(user.id)));
     } catch (error) {
       sendBadRequest(response, error);
     }

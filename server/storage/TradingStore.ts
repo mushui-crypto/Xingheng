@@ -735,8 +735,8 @@ export class TradingStore {
 
   listFundingLedger(userId?: string) {
     const sql = userId
-      ? "SELECT * FROM funding_ledger WHERE userId = ? ORDER BY createdAt DESC"
-      : "SELECT * FROM funding_ledger ORDER BY createdAt DESC";
+      ? "SELECT id, userId, accountId, accountType, type, source, asset, amount, balanceBefore, balanceAfter, frozenBefore, frozenAfter, status, relatedId, network, address, txHash, remark, createdAt, updatedAt FROM funding_ledger WHERE userId = ? ORDER BY createdAt DESC"
+      : "SELECT id, userId, accountId, accountType, type, source, asset, amount, balanceBefore, balanceAfter, frozenBefore, frozenAfter, status, relatedId, network, address, txHash, remark, createdAt, updatedAt FROM funding_ledger ORDER BY createdAt DESC";
     return (userId ? this.db.prepare(sql).all(userId) : this.db.prepare(sql).all()) as FundingLedgerRow[];
   }
 
@@ -746,7 +746,7 @@ export class TradingStore {
         `INSERT INTO funding_ledger (
            id, userId, accountId, accountType, type, source, asset, amount,
            balanceBefore, balanceAfter, frozenBefore, frozenAfter, status,
-           relatedId, network, walletAddress, txHash, remark, createdAt, updatedAt
+           relatedId, network, address, txHash, remark, createdAt, updatedAt
          )
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
@@ -767,7 +767,7 @@ export class TradingStore {
         entry.status,
         entry.relatedId ?? null,
         entry.network ?? null,
-        entry.walletAddress ?? null,
+        entry.address ?? null,
         entry.txHash ?? null,
         entry.remark ?? null,
         entry.createdAt,
@@ -831,8 +831,8 @@ export class TradingStore {
 
   listWithdrawalRequests(userId?: string) {
     const sql = userId
-      ? "SELECT * FROM withdrawal_requests WHERE userId = ? ORDER BY createdAt DESC"
-      : "SELECT * FROM withdrawal_requests ORDER BY createdAt DESC";
+      ? "SELECT id, userId, asset, amount, status, network, txHash, onchainStatus, chainId, tokenAddress, fromAddress, toAddress, broadcastTxHash, broadcastedAt, confirmedAt, failedAt, failedReason, confirmations, broadcastAttemptCount, lastBroadcastAttemptAt, remark, reviewNote, createdAt, reviewedAt, updatedAt FROM withdrawal_requests WHERE userId = ? ORDER BY createdAt DESC"
+      : "SELECT id, userId, asset, amount, status, network, txHash, onchainStatus, chainId, tokenAddress, fromAddress, toAddress, broadcastTxHash, broadcastedAt, confirmedAt, failedAt, failedReason, confirmations, broadcastAttemptCount, lastBroadcastAttemptAt, remark, reviewNote, createdAt, reviewedAt, updatedAt FROM withdrawal_requests ORDER BY createdAt DESC";
     return (userId ? this.db.prepare(sql).all(userId) : this.db.prepare(sql).all()) as WithdrawalRequestRow[];
   }
 
@@ -842,31 +842,32 @@ export class TradingStore {
     }
     const placeholders = statuses.map(() => "?").join(", ");
     return this.db
-      .prepare(`SELECT * FROM withdrawal_requests WHERE status IN (${placeholders}) ORDER BY createdAt ASC`)
+      .prepare(`SELECT id, userId, asset, amount, status, network, txHash, onchainStatus, chainId, tokenAddress, fromAddress, toAddress, broadcastTxHash, broadcastedAt, confirmedAt, failedAt, failedReason, confirmations, broadcastAttemptCount, lastBroadcastAttemptAt, remark, reviewNote, createdAt, reviewedAt, updatedAt FROM withdrawal_requests WHERE status IN (${placeholders}) ORDER BY createdAt ASC`)
       .all(...statuses) as WithdrawalRequestRow[];
   }
 
   getWithdrawalRequest(id: string) {
-    return this.db.prepare("SELECT * FROM withdrawal_requests WHERE id = ?").get(id) as WithdrawalRequestRow | undefined;
+    return this.db
+      .prepare("SELECT id, userId, asset, amount, status, network, txHash, onchainStatus, chainId, tokenAddress, fromAddress, toAddress, broadcastTxHash, broadcastedAt, confirmedAt, failedAt, failedReason, confirmations, broadcastAttemptCount, lastBroadcastAttemptAt, remark, reviewNote, createdAt, reviewedAt, updatedAt FROM withdrawal_requests WHERE id = ?")
+      .get(id) as WithdrawalRequestRow | undefined;
   }
 
   saveWithdrawalRequest(request: WithdrawalRequest) {
     this.db
       .prepare(
         `INSERT INTO withdrawal_requests (
-           id, userId, asset, amount, status, network, walletAddress, txHash,
+           id, userId, asset, amount, status, network, txHash,
            onchainStatus, chainId, tokenAddress, fromAddress, toAddress, broadcastTxHash,
            broadcastedAt, confirmedAt, failedAt, failedReason, confirmations,
            broadcastAttemptCount, lastBroadcastAttemptAt, remark, reviewNote, createdAt, reviewedAt, updatedAt
          )
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            userId = excluded.userId,
            asset = excluded.asset,
            amount = excluded.amount,
            status = excluded.status,
            network = excluded.network,
-           walletAddress = excluded.walletAddress,
            txHash = excluded.txHash,
            onchainStatus = excluded.onchainStatus,
            chainId = excluded.chainId,
@@ -894,7 +895,6 @@ export class TradingStore {
         request.amount,
         request.status,
         request.network ?? null,
-        request.walletAddress ?? null,
         request.txHash ?? null,
         request.onchainStatus ?? request.status,
         request.chainId ?? null,
@@ -1087,7 +1087,7 @@ export class TradingStore {
         status TEXT NOT NULL,
         relatedId TEXT,
         network TEXT,
-        walletAddress TEXT,
+        address TEXT,
         txHash TEXT,
         remark TEXT,
         createdAt INTEGER NOT NULL,
@@ -1118,7 +1118,6 @@ export class TradingStore {
         amount REAL NOT NULL,
         status TEXT NOT NULL,
         network TEXT,
-        walletAddress TEXT,
         txHash TEXT,
         onchainStatus TEXT,
         chainId INTEGER,
@@ -1234,6 +1233,7 @@ export class TradingStore {
     this.addColumnIfMissing("withdrawal_requests", "confirmations", "INTEGER");
     this.addColumnIfMissing("withdrawal_requests", "broadcastAttemptCount", "INTEGER DEFAULT 0");
     this.addColumnIfMissing("withdrawal_requests", "lastBroadcastAttemptAt", "INTEGER");
+    this.addColumnIfMissing("funding_ledger", "address", "TEXT");
     this.addColumnIfMissing("positions", "accountId", "TEXT");
     this.addColumnIfMissing("market_symbols", "providerMarketId", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "providerCoin", "TEXT NOT NULL DEFAULT ''");
@@ -1247,11 +1247,15 @@ export class TradingStore {
   }
 
   private addColumnIfMissing(table: string, column: string, definition: string) {
-    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (columns.some((item) => item.name === column)) {
+    if (this.columnExists(table, column)) {
       return;
     }
     this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition};`);
+  }
+
+  private columnExists(table: string, column: string) {
+    const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return columns.some((item) => item.name === column);
   }
 }
 

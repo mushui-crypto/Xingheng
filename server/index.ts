@@ -61,7 +61,7 @@ const trading = new TradingService(tradingMarket, tradingStore);
 const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const users = new UserService(tradingStore);
-registerAuthRoutes({ app, users, tradingStore, config });
+registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore);
 

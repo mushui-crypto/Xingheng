@@ -38,7 +38,7 @@ export class UserService {
     }
   }
 
-  register(input: RegisterInput) {
+  register(input: RegisterInput, afterCreate?: (user: User) => void) {
     const email = String(input.email ?? "").trim().toLowerCase();
     const password = String(input.password ?? "");
     const nickname = input.nickname?.trim() || undefined;
@@ -61,7 +61,10 @@ export class UserService {
       status: "active",
       createdAt: new Date().toISOString(),
     };
-    this.store.createUser(user);
+    this.store.transaction(() => {
+      this.store.createUser(user);
+      afterCreate?.(this.toUserView(user));
+    });
     return this.toUserView(user);
   }
 

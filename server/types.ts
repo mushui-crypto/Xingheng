@@ -312,7 +312,7 @@ export type FundingLedgerEntry = {
   status: FundingLedgerStatus;
   relatedId?: string | null;
   network?: string | null;
-  walletAddress?: string | null;
+  address?: string | null;
   txHash?: string | null;
   remark?: string | null;
   createdAt: number;
@@ -396,7 +396,6 @@ export type WithdrawalRequest = {
   amount: number;
   status: WithdrawalStatus;
   network?: string | null;
-  walletAddress?: string | null;
   txHash?: string | null;
   onchainStatus?: WithdrawalStatus | null;
   chainId?: number | null;
