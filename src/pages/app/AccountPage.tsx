@@ -130,12 +130,16 @@ export function AccountPage() {
   const [simulationRenameValue, setSimulationRenameValue] = useState("");
   const [isSimulationSubmitting, setIsSimulationSubmitting] = useState(false);
   const [simulationFeedback, setSimulationFeedback] = useState("");
-  const [message, setMessage] = useState("");
   const [toastMessage, setToastMessage] = useState("");
   const [activeAction, setActiveAction] = useState<QuickAction | null>(null);
   const [activeSection, setActiveSection] = useState<AccountSection>(() => readSectionFromUrl());
   const [isLoading, setIsLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
+
+  const clearTransientFeedback = () => {
+    setSimulationFeedback("");
+    setToastMessage("");
+  };
 
   useEffect(() => {
     void loadAccount();
@@ -166,6 +170,7 @@ export function AccountPage() {
     const onPopState = () => {
       setActiveSection(readSectionFromUrl());
       setActiveAction(null);
+      clearTransientFeedback();
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
@@ -235,33 +240,34 @@ export function AccountPage() {
   const changeSection = (section: AccountSection) => {
     setActiveSection(section);
     setActiveAction(null);
+    clearTransientFeedback();
     const nextUrl = new URL(window.location.href);
     nextUrl.searchParams.set("section", section);
     window.history.pushState(null, "", `${nextUrl.pathname}${nextUrl.search}${nextUrl.hash}`);
   };
 
   const submitTransfer = async () => {
-    setMessage("");
+    setToastMessage("");
     if (!isTransferPairAllowed(transferFrom, transferTo)) {
       const blockedMessage = "账户划转必须经过资金账户，模拟账户资金请在模拟账户页使用重置资金。";
-      setMessage(blockedMessage);
+      setToastMessage(blockedMessage);
       return { ok: false, message: blockedMessage };
     }
     try {
       await transferWalletAccount(transferFrom, transferTo, transferAmount, "用户账户划转");
       await loadAccount();
       const successMessage = "账户划转已完成。";
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
       const errorMessage = getErrorMessage(error, "账户划转失败。");
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
   };
 
   const submitInternalTransfer = async () => {
-    setMessage("");
+    setToastMessage("");
     try {
       await createInternalTransfer(
         internalTransferRecipient.trim(),
@@ -271,26 +277,26 @@ export function AccountPage() {
       );
       await loadAccount();
       const successMessage = "内部转账已提交并完成。";
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
       const errorMessage = getErrorMessage(error, "内部转账失败。");
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
   };
 
   const submitWithdrawal = async () => {
-    setMessage("");
+    setToastMessage("");
     try {
       await createWithdrawalRequest(withdrawAmount, withdrawNetwork, withdrawAddress, "用户提现申请");
       await loadAccount();
       const successMessage = "提现申请已提交，等待后台审核。";
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       return { ok: true, message: successMessage };
     } catch (error) {
       const errorMessage = getErrorMessage(error, "提现申请提交失败。");
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
       return { ok: false, message: errorMessage };
     }
   };
@@ -322,11 +328,11 @@ export function AccountPage() {
       const result = await bindExternalWallet(challenge.challengeId, walletAddress, signature);
       setExternalWalletBinding(result.binding);
       setIsAddWalletOpen(false);
-      setMessage("第三方钱包已绑定。");
+      setToastMessage("第三方钱包已绑定。");
     } catch (error) {
       const errorMessage = normalizeWalletError(error);
       setExternalWalletError(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setExternalWalletStatus("");
       setIsBindingExternalWallet(false);
@@ -341,11 +347,11 @@ export function AccountPage() {
       await unbindExternalWallet();
       setExternalWalletBinding(null);
       setIsAddWalletOpen(false);
-      setMessage("第三方钱包已解绑。");
+      setToastMessage("第三方钱包已解绑。");
     } catch (error) {
       const errorMessage = normalizeWalletError(error);
       setExternalWalletError(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setIsBindingExternalWallet(false);
     }
@@ -359,12 +365,10 @@ export function AccountPage() {
       await createSimulationAccount(nextName);
       await loadAccount();
       const successMessage = "模拟账户已新增。";
-      setSimulationFeedback(successMessage);
-      setMessage(successMessage);
+      setToastMessage(successMessage);
     } catch (error) {
       const errorMessage = getErrorMessage(error, "模拟账户创建失败。");
-      setSimulationFeedback(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setIsSimulationSubmitting(false);
     }
@@ -380,13 +384,12 @@ export function AccountPage() {
       await resetSimulationAccount(activeSimulationResetId);
       await loadAccount();
       const successMessage = "模拟账户资金已重置。";
-      setSimulationFeedback(successMessage);
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       setActiveSimulationResetId(null);
     } catch (error) {
       const errorMessage = getErrorMessage(error, "模拟账户资金重置失败。");
       setSimulationFeedback(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setIsSimulationSubmitting(false);
     }
@@ -408,13 +411,12 @@ export function AccountPage() {
       await renameSimulationAccount(activeSimulationRenameId, simulationRenameValue.trim());
       await loadAccount();
       const successMessage = "模拟账户已重命名。";
-      setSimulationFeedback(successMessage);
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       setActiveSimulationRenameId(null);
     } catch (error) {
       const errorMessage = getErrorMessage(error, "模拟账户重命名失败。");
       setSimulationFeedback(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setIsSimulationSubmitting(false);
     }
@@ -430,13 +432,12 @@ export function AccountPage() {
       await deleteSimulationAccount(activeSimulationDeleteId);
       await loadAccount();
       const successMessage = "模拟账户已删除。";
-      setSimulationFeedback(successMessage);
-      setMessage(successMessage);
+      setToastMessage(successMessage);
       setActiveSimulationDeleteId(null);
     } catch (error) {
       const errorMessage = getErrorMessage(error, "模拟账户删除失败。");
       setSimulationFeedback(errorMessage);
-      setMessage(errorMessage);
+      setToastMessage(errorMessage);
     } finally {
       setIsSimulationSubmitting(false);
     }
@@ -501,9 +502,6 @@ export function AccountPage() {
             onWithdrawAddressChange={setWithdrawAddress}
             onWithdrawAmountChange={setWithdrawAmount}
           />
-
-          {message ? <p className="xh-message">{message}</p> : null}
-
           {activeSection === "overview" ? (
             <OverviewSection
               asset={asset}
