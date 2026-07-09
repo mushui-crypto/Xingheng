@@ -11,15 +11,10 @@ type UserLayoutProps = {
 export function UserLayout({ children }: UserLayoutProps) {
   const navigate = useNavigate();
   const location = useLocation();
-  const syncSession = useAuthStore((state) => state.syncSession);
   const logout = useAuthStore((state) => state.logout);
   const expireSession = useAuthStore((state) => state.expireSession);
   const currentUser = useUserStore((state) => state.currentUser);
   const isAccountPage = location.pathname.startsWith("/app/account");
-
-  useEffect(() => {
-    void syncSession();
-  }, [syncSession]);
 
   useEffect(() => {
     const handleAuthFailure = () => {
