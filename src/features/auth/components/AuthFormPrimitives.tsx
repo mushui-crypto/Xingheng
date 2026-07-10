@@ -9,13 +9,13 @@ export type AuthFeedbackState = {
 };
 
 const authInputClass =
-  "xh-auth-input h-[68px] w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-6 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45";
+  "xh-auth-input h-14 w-full rounded border border-[#2e2e2e] bg-[rgba(14,14,14,0.96)] px-4 text-base text-white outline-none transition placeholder:text-[#919191] focus:border-white/45 sm:h-[68px] sm:px-6";
 const authPasswordInputClass = `${authInputClass} pr-14`;
 
 export function AuthHeader({ title, subtitle }: { title: string; subtitle: string }) {
   return (
     <div className="mb-8">
-      <h1 className="text-[32px] font-medium leading-10 tracking-[0.2px]">{title}</h1>
+      <h1 className="text-[clamp(1.75rem,7vw,2rem)] font-medium leading-tight tracking-[0.2px]">{title}</h1>
       <p className="mt-2 text-[15px] leading-6 text-[#919191]">{subtitle}</p>
     </div>
   );
@@ -75,7 +75,7 @@ export function AuthCodeInput({
   return (
     <label className="block">
       <span className="mb-3 block text-sm font-medium uppercase tracking-[1.4px] text-white">{label}</span>
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-3 sm:flex-row">
         <input
           className={authInputClass}
           placeholder={placeholder}
@@ -88,7 +88,7 @@ export function AuthCodeInput({
           required
         />
         <button
-          className="h-[68px] min-w-[132px] rounded border border-white/30 px-4 text-sm font-medium uppercase tracking-[1px] text-white transition hover:border-white disabled:cursor-not-allowed disabled:opacity-50"
+          className="min-h-11 rounded border border-white/30 px-4 py-3 text-sm font-medium uppercase tracking-[1px] text-white transition hover:border-white disabled:cursor-not-allowed disabled:opacity-50 sm:h-[68px] sm:min-w-[132px] sm:py-0"
           type="button"
           disabled={buttonDisabled}
           onClick={onSend}
@@ -165,7 +165,7 @@ export function AuthInlineNote({ children }: { children: ReactNode }) {
 export function AuthSubmitButton({ children, disabled = false }: { children: string; disabled?: boolean }) {
   return (
     <button
-      className="relative flex h-[72px] w-full items-center justify-center rounded-[3px] border border-white bg-black px-6 text-[17px] font-medium tracking-[2px] text-white transition hover:bg-white hover:text-black disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-black disabled:hover:text-white"
+      className="relative flex min-h-14 w-full items-center justify-center rounded-[3px] border border-white bg-black px-6 py-4 text-[16px] font-medium tracking-[1.4px] text-white transition hover:bg-white hover:text-black disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:bg-black disabled:hover:text-white sm:min-h-[72px] sm:text-[17px] sm:tracking-[2px]"
       type="submit"
       disabled={disabled}
     >

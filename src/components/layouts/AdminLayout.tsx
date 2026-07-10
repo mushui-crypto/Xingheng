@@ -26,9 +26,9 @@ export function AdminLayout({ children }: AdminLayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-shell text-white">
+    <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
       <header className="sticky top-0 z-30 border-b border-white/15 bg-black/92 backdrop-blur">
-        <div className="flex w-full flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
+        <div className="flex w-full min-w-0 flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-center justify-between gap-4">
             <div className="flex items-center gap-3">
               <img
@@ -49,7 +49,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
               退出
             </button>
           </div>
-          <nav className="no-scrollbar flex gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
+          <nav className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
             <TopLink to="/admin/dashboard" icon={<BarChart3 size={16} />} label="数据概览" />
             <TopLink to="/admin/users" icon={<UsersRound size={16} />} label="用户管理" />
             <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
@@ -69,7 +69,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
           </div>
         </div>
       </header>
-      <main className="mx-auto max-w-[1480px] px-4 py-5 md:px-8 md:py-8">{children}</main>
+      <main className="mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8">{children}</main>
     </div>
   );
 }
@@ -79,7 +79,7 @@ function TopLink({ to, icon, label }: { to: string; icon: ReactNode; label: stri
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex shrink-0 items-center gap-2 border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition md:px-4 ${
+        `flex min-h-11 shrink-0 items-center gap-2 border px-3 py-2 text-xs font-semibold uppercase tracking-[0.14em] transition md:px-4 ${
           isActive ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"
         }`
       }

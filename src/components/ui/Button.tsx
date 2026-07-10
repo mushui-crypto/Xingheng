@@ -15,7 +15,7 @@ const variantClasses = {
 export function Button({ children, className = "", variant = "primary", style, ...props }: ButtonProps) {
   return (
     <button
-      className={`inline-flex items-center justify-center gap-2 whitespace-nowrap px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] transition active:translate-y-px disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-50 ${variantClasses[variant]} ${className}`}
+      className={`inline-flex min-h-11 min-w-0 items-center justify-center gap-2 whitespace-nowrap px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] transition active:translate-y-px disabled:cursor-not-allowed disabled:translate-y-0 disabled:opacity-50 ${variantClasses[variant]} ${className}`}
       style={style}
       {...props}
     >
