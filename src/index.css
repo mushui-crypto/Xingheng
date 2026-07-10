@@ -14,6 +14,7 @@
 body {
   min-width: 320px;
   min-height: 100vh;
+  min-height: 100dvh;
   margin: 0;
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.035), transparent 280px),
@@ -29,6 +30,10 @@ textarea {
 
 * {
   box-sizing: border-box;
+}
+
+#root {
+  min-width: 0;
 }
 
 ::selection {
@@ -55,9 +60,50 @@ textarea {
   }
 }
 
+@media (max-width: 1023px) {
+  .xh-account-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .xh-account-sidebar {
+    min-height: auto;
+    border-right: 0;
+    border-bottom: 1px solid #2b2b2b;
+    padding: 12px 16px;
+    position: sticky;
+    top: 60px;
+    z-index: 20;
+  }
+
+  .xh-account-nav {
+    flex-direction: row;
+    gap: 8px;
+    overflow-x: auto;
+  }
+
+  .xh-account-nav-group {
+    display: none;
+  }
+
+  .xh-account-nav-button,
+  .xh-account-nav-button.is-child {
+    width: auto;
+    min-height: 44px;
+    padding-left: 14px;
+    padding-right: 14px;
+    white-space: nowrap;
+  }
+
+  .xh-account-content {
+    padding-top: 20px;
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
 @layer components {
   .xh-page {
-    @apply space-y-6;
+    @apply min-w-0 space-y-6;
   }
 
   .xh-account-workspace {
@@ -69,7 +115,7 @@ textarea {
   }
 
   .xh-account-layout {
-    @apply grid min-h-[calc(100vh-60px)] gap-0 items-stretch;
+    @apply grid min-h-[calc(100vh-60px)] min-w-0 gap-0 items-stretch;
     grid-template-columns: 300px minmax(0, 1fr);
   }
 
@@ -93,7 +139,7 @@ textarea {
   }
 
   .xh-account-nav-button {
-    @apply flex h-[46px] w-full shrink-0 items-center bg-black pl-4 pr-[14px] text-left text-sm font-medium leading-none text-[#a6a6a6] transition hover:bg-white/[0.04] hover:text-[#f5f5f5];
+    @apply flex min-h-[46px] w-full shrink-0 items-center bg-black pl-4 pr-[14px] text-left text-sm font-medium leading-none text-[#a6a6a6] transition hover:bg-white/[0.04] hover:text-[#f5f5f5];
   }
 
   .xh-account-nav-button.is-child {
@@ -125,7 +171,7 @@ textarea {
   }
 
   .xh-table {
-    @apply w-full text-left text-sm;
+    @apply w-full min-w-full text-left text-sm;
   }
 
   .xh-thead {
@@ -141,7 +187,7 @@ textarea {
   }
 
   .xh-action-link {
-    @apply inline-flex items-center gap-2 border border-white/20 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-white hover:text-white active:translate-y-px;
+    @apply inline-flex min-h-11 items-center gap-2 border border-white/20 px-3 py-2 text-sm font-semibold text-slate-200 transition hover:border-white hover:text-white active:translate-y-px;
   }
 
   .xh-auth-input:-webkit-autofill,
@@ -155,7 +201,7 @@ textarea {
   }
 
   .xh-data-table {
-    @apply w-full overflow-x-auto;
+    @apply w-full min-w-0 overflow-x-auto;
   }
 
   .xh-data-table-inner {
@@ -206,7 +252,7 @@ textarea {
   }
 
   .xh-overview-panel {
-    @apply bg-[#101010] p-5;
+    @apply min-w-0 bg-[#101010] p-4 sm:p-5;
   }
 
   .xh-overview-panel-header {
@@ -242,11 +288,11 @@ textarea {
   }
 
   .xh-modal-shell {
-    @apply w-full border border-[#2b2b2b] bg-[#050505] md:max-w-[560px];
+    @apply w-full max-w-[calc(100vw-24px)] border border-[#2b2b2b] bg-[#050505] md:max-w-[560px];
   }
 
   .xh-modal-header {
-    @apply flex items-start justify-between gap-4 px-6 pb-[18px] pt-6;
+    @apply flex items-start justify-between gap-4 px-4 pb-[18px] pt-5 sm:px-6 sm:pt-6;
   }
 
   .xh-modal-title {
@@ -262,11 +308,11 @@ textarea {
   }
 
   .xh-modal-divider {
-    @apply mx-6 h-px bg-[#2b2b2b];
+    @apply mx-4 h-px bg-[#2b2b2b] sm:mx-6;
   }
 
   .xh-modal-body {
-    @apply px-6 pb-6 pt-[18px];
+    @apply px-4 pb-5 pt-[18px] sm:px-6 sm:pb-6;
   }
 
   .xh-market-trigger {

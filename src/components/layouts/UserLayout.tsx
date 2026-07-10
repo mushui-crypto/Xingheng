@@ -31,10 +31,10 @@ export function UserLayout({ children }: UserLayoutProps) {
   };
 
   return (
-    <div className="min-h-screen bg-shell text-white">
+    <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
       <header className="sticky top-0 z-30 h-[60px] border border-[#2b2b2b] bg-black">
-        <div className="flex h-full w-full items-center justify-between gap-6 overflow-hidden px-4 py-2.5 md:px-8">
-          <div className="flex min-w-0 items-center gap-6 lg:gap-10">
+        <div className="flex h-full w-full min-w-0 items-center justify-between gap-3 overflow-hidden px-3 py-2.5 sm:px-4 md:gap-6 md:px-8">
+          <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-6 lg:gap-10">
             <Brand />
             <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
               <TopLink to="/app/dashboard" label="首页" />
@@ -56,19 +56,19 @@ export function UserLayout({ children }: UserLayoutProps) {
           </div>
         </div>
       </header>
-      <main className={isAccountPage ? "w-full bg-[#080808] p-0" : "mx-auto max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
+      <main className={isAccountPage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
     </div>
   );
 
   function Brand() {
     return (
-      <div className="flex items-center gap-3">
+      <div className="flex shrink-0 items-center gap-2 sm:gap-3">
         <img
           alt="星衡 logo"
-          className="h-9 w-9 object-contain"
+          className="h-8 w-8 object-contain sm:h-9 sm:w-9"
           src="/assets/xingheng-logo@2x.png"
         />
-        <p className="whitespace-nowrap text-[15px] font-bold leading-none text-[#f5f5f5]">StellaX</p>
+        <p className="hidden whitespace-nowrap text-[15px] font-bold leading-none text-[#f5f5f5] sm:block">StellaX</p>
       </div>
     );
   }
@@ -79,7 +79,7 @@ function TopLink({ to, label }: { to: string; label: string }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `flex shrink-0 items-center justify-center px-4 py-2.5 text-[13px] font-medium leading-none transition ${
+        `flex min-h-11 shrink-0 items-center justify-center px-3 py-2.5 text-[13px] font-medium leading-none transition sm:px-4 ${
           isActive ? "bg-[#f5f5f5] text-black" : "bg-black text-[#f5f5f5] hover:bg-white/[0.06]"
         }`
       }
