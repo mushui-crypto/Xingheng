@@ -1,3 +1,7 @@
+stellaxtrade.com {
+	redir https://app.stellaxtrade.com{uri} permanent
+}
+
 {$DOMAIN} {
 	encode zstd gzip
 
