@@ -1,5 +1,5 @@
 import { lazy, Suspense, type ReactNode } from "react";
-import { Navigate, Route, Routes } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AdminLayout } from "./components/layouts/AdminLayout";
 import { UserLayout } from "./components/layouts/UserLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
@@ -8,6 +8,7 @@ const AuthPage = lazy(() => import("./pages/auth/AuthPage").then((module) => ({ 
 const DashboardPage = lazy(() => import("./pages/app/DashboardPage").then((module) => ({ default: module.DashboardPage })));
 const MarketsPage = lazy(() => import("./pages/app/MarketsPage").then((module) => ({ default: module.MarketsPage })));
 const TradingPage = lazy(() => import("./pages/trading/TradingPage").then((module) => ({ default: module.TradingPage })));
+const RealTradePage = lazy(() => import("./pages/trading/RealTradePage").then((module) => ({ default: module.RealTradePage })));
 const AccountPage = lazy(() => import("./pages/app/AccountPage").then((module) => ({ default: module.AccountPage })));
 const AdminLoginPage = lazy(() => import("./pages/admin/AdminLoginPage").then((module) => ({ default: module.AdminLoginPage })));
 const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage").then((module) => ({ default: module.AdminDashboardPage })));
@@ -26,7 +27,9 @@ export default function App() {
         <Route path="/reset-password" element={<AuthPage />} />
         <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
         <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
-        <Route path="/app/trading" element={<UserScreen><TradingPage /></UserScreen>} />
+        <Route path="/app/trade" element={<UserScreen><RealTradePage /></UserScreen>} />
+        <Route path="/app/demo" element={<UserScreen><TradingPage /></UserScreen>} />
+        <Route path="/app/trading" element={<DemoRedirect />} />
         <Route path="/app/account" element={<UserScreen><AccountPage /></UserScreen>} />
         <Route path="/admin/login" element={<AdminLoginPage />} />
         <Route path="/admin/dashboard" element={<AdminScreen><AdminDashboardPage /></AdminScreen>} />
@@ -37,6 +40,11 @@ export default function App() {
       </Routes>
     </Suspense>
   );
+}
+
+function DemoRedirect() {
+  const location = useLocation();
+  return <Navigate to={`/app/demo${location.search}`} replace />;
 }
 
 function UserScreen({ children }: { children: ReactNode }) {

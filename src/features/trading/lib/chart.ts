@@ -1,7 +1,9 @@
 import type { CandlestickData } from "lightweight-charts";
 import type { ApiCandle } from "../../../api/market";
 
-export function toChartCandle(candle: ApiCandle): CandlestickData {
+type CandleLike = Pick<ApiCandle, "time" | "open" | "high" | "low" | "close">;
+
+export function toChartCandle(candle: CandleLike): CandlestickData {
   return {
     time: candle.time as CandlestickData["time"],
     open: candle.open,
@@ -11,8 +13,8 @@ export function toChartCandle(candle: ApiCandle): CandlestickData {
   };
 }
 
-export function normalizeChartCandles(candles: ApiCandle[]) {
-  const byTime = new Map<number, ApiCandle>();
+export function normalizeChartCandles<T extends CandleLike>(candles: T[]) {
+  const byTime = new Map<number, T>();
   for (const candle of candles) {
     if (isValidCandle(candle)) {
       byTime.set(candle.time, candle);
@@ -21,7 +23,7 @@ export function normalizeChartCandles(candles: ApiCandle[]) {
   return [...byTime.values()].sort((a, b) => a.time - b.time);
 }
 
-export function isValidCandle(candle: ApiCandle) {
+export function isValidCandle(candle: CandleLike) {
   return (
     Number.isFinite(candle.time) &&
     Number.isFinite(candle.open) &&

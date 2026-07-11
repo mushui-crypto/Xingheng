@@ -533,7 +533,7 @@ export function AccountPage() {
               onDeposit={() => setActiveAction("deposit")}
               onExchange={() => setActiveAction("exchange")}
               onTrade={() => {
-                window.location.href = "/app/trading?symbol=BTCUSDT";
+                window.location.href = "/app/demo?symbol=BTCUSDT";
               }}
               onWithdraw={() => setActiveAction("withdraw")}
             />
@@ -736,7 +736,7 @@ function QuickActionPanel({
                 </Button>
               ) : null}
               {actions.includes("trade") ? (
-                <Link className="xh-action-link" to="/app/trading?symbol=BTCUSDT">
+                <Link className="xh-action-link" to="/app/demo?symbol=BTCUSDT">
                   模拟交易
                 </Link>
               ) : null}
