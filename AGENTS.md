@@ -2,7 +2,7 @@
 
 本文件定义项目内协作使用的工程 agent。所有 agent 都应遵守当前 PRD、已有代码结构和最新产品边界：保留 `/app/demo` demo 模拟交易能力，同时新增 `/app/trade` Hyperliquid 真实交易接入方向；真实交易第一阶段先用 Hyperliquid testnet，用户自带钱包 / API wallet 授权，平台后端不得保存用户 API wallet 私钥、助记词或可直接代签的明文凭证。
 
-仓库与 worktree 使用约定见 [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)。
+仓库与 worktree 使用约定见 [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)；任务分发、回收、交接、同步和切换协同见 [`项目沟通规则.md`](./项目沟通规则.md)。
 
 ## 共享产品上下文（摘自 PRODUCT.md）
 
@@ -66,6 +66,7 @@
 - 前端 Agent：优先保证信息层级、账户归属、状态反馈、接口口径一致，不自行扩产品能力；`/app/trade` 与 `/app/demo` 必须在入口、文案、风险提示和数据源上隔离。
 - UI / 设计 Agent：优先做任务型产品界面，不往营销页或概念页方向发散；默认只调用 `impeccable` 作为主 design skill，`frontend-design` 与 `design-taste-frontend` 默认停用，除非用户或项目管理明确要求额外启用。
 - 测试 Agent：验收时同时核对功能通过与产品边界未被突破。
+- 所有工程 Agent：涉及切换 worktree、分支、交接、回收、同步文档、测试放行、提交推送或合并时，统一按 `项目沟通规则.md` 执行，不沿用旧对话里的临时口径。
 
 ## 后端/交易系统工程 Agent
 
