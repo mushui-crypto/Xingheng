@@ -26,7 +26,7 @@ import { formatPrice } from "../../utils/price";
 import { normalizeQuantity } from "../../utils/quantity";
 import { SimulationAccountContextPanel } from "../../features/trading/components/SimulationAccountContextPanel";
 import { TradingChartPanel } from "../../features/trading/components/TradingChartPanel";
-import { TradingOrderPanel } from "../../features/trading/components/TradingOrderPanel";
+import { TradingOrderPanel, TradingQuotePanel } from "../../features/trading/components/TradingOrderPanel";
 import { TradingOrdersTable, TradingPositionsTable } from "../../features/trading/components/TradingRecords";
 import { Toast } from "../../features/trading/components/TradingFeedback";
 import { getChartPriceFormat, isValidCandle, normalizeChartCandles, toChartCandle } from "../../features/trading/lib/chart";
@@ -373,78 +373,102 @@ export function TradingPage() {
   }
 
   return (
-    <div className="xh-page">
+    <div className="xh-trade-terminal">
       <Toast message={toastMessage} />
-      <div className="xh-page-header">
-        <div>
+      <section className="xh-trade-marketbar">
+        <div className="xh-trade-marketbar-main">
           <h1 className="sr-only">{symbol} 交易终端</h1>
-          <p className="text-sm text-muted">Hyperliquid 永续 · 内部模拟交易</p>
-          <div className="mt-2">
-            <MarketSymbolPicker
-              symbols={symbols}
-              selectedSymbol={symbol}
-              onSelect={setSelectedSymbol}
+          <MarketSymbolPicker
+            symbols={symbols}
+            selectedSymbol={symbol}
+            onSelect={setSelectedSymbol}
+          />
+          <Badge tone={statusTone}>{statusText}</Badge>
+        </div>
+        <div className="xh-trade-market-stats">
+          <TradeStat label="标记" value={formatPrice(ticker.last, digits)} />
+          <TradeStat label="Bid" value={formatPrice(ticker.bid, digits)} />
+          <TradeStat label="Ask" value={formatPrice(ticker.ask, digits)} />
+          <TradeStat label="Spread" value={formatPrice(ticker.spread, digits)} />
+          <TradeStat label="来源" value={ticker.source ?? "-"} muted />
+          <TradeStat label="更新时间" value={ticker.timestamp ? new Date(ticker.timestamp).toLocaleTimeString("zh-CN") : "-"} muted />
+        </div>
+      </section>
+
+      <div className="xh-trade-grid">
+        <main className="xh-trade-main">
+          <section className="xh-trade-workbench">
+            <div className="xh-trade-chart-stage">
+              <TradingChartPanel
+                chartContainerRef={chartContainerRef}
+                chartLoading={chartLoading}
+                chartMessage={chartMessage}
+                interval={interval}
+                onIntervalChange={setIntervalValue}
+                selectedConfig={selectedConfig}
+                symbol={symbol}
+                themeColor={themeColor}
+              />
+            </div>
+
+            <div className="xh-trade-depth-stage">
+              <TradingQuotePanel
+                digits={digits}
+                ticker={ticker}
+              />
+            </div>
+          </section>
+
+          <div className="xh-trade-record-stack">
+            <TradingPositionsTable
+              closingPositionId={closingPositionId}
+              digits={digits}
+              hasSimulationAccounts={hasSimulationAccounts}
+              lotStep={selectedConfig.lotStep}
+              needsSimulationAccount={needsSimulationAccount}
+              onClosePosition={submitClose}
+              positions={positions}
+              selectedSimulationAccount={selectedSimulationAccount}
+            />
+
+            <TradingOrdersTable
+              digits={digits}
+              hasSimulationAccounts={hasSimulationAccounts}
+              lotStep={selectedConfig.lotStep}
+              needsSimulationAccount={needsSimulationAccount}
+              orders={orders}
+              selectedSimulationAccount={selectedSimulationAccount}
             />
           </div>
-        </div>
-        <div className="flex w-full flex-col gap-3 md:w-auto md:flex-row md:flex-wrap md:items-center">
-          <div className="self-start">
-            <Badge tone={statusTone}>{statusText}</Badge>
-          </div>
-        </div>
+        </main>
+
+        <aside className="xh-trade-order-rail">
+          <TradingOrderPanel
+            message={message}
+            needsSimulationAccount={needsSimulationAccount}
+            onSubmitOrder={submitOrder}
+            orderDisabled={orderDisabled}
+            selectedConfig={selectedConfig}
+            setVolume={setVolume}
+            simulationAccountsLoading={simulationAccountsLoading}
+            volume={volume}
+          />
+          <SimulationAccountContextPanel
+            account={account}
+            currency={currency}
+            simulationAccount={selectedSimulationAccount}
+          />
+        </aside>
       </div>
+    </div>
+  );
+}
 
-      <SimulationAccountContextPanel
-        account={account}
-        currency={currency}
-        simulationAccount={selectedSimulationAccount}
-      />
-
-      <div className="grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-        <TradingChartPanel
-          chartContainerRef={chartContainerRef}
-          chartLoading={chartLoading}
-          chartMessage={chartMessage}
-          interval={interval}
-          onIntervalChange={setIntervalValue}
-          selectedConfig={selectedConfig}
-          symbol={symbol}
-          themeColor={themeColor}
-        />
-
-        <TradingOrderPanel
-          digits={digits}
-          message={message}
-          needsSimulationAccount={needsSimulationAccount}
-          onSubmitOrder={submitOrder}
-          orderDisabled={orderDisabled}
-          selectedConfig={selectedConfig}
-          setVolume={setVolume}
-          simulationAccountsLoading={simulationAccountsLoading}
-          ticker={ticker}
-          volume={volume}
-        />
-      </div>
-
-      <TradingPositionsTable
-        closingPositionId={closingPositionId}
-        digits={digits}
-        hasSimulationAccounts={hasSimulationAccounts}
-        lotStep={selectedConfig.lotStep}
-        needsSimulationAccount={needsSimulationAccount}
-        onClosePosition={submitClose}
-        positions={positions}
-        selectedSimulationAccount={selectedSimulationAccount}
-      />
-
-      <TradingOrdersTable
-        digits={digits}
-        hasSimulationAccounts={hasSimulationAccounts}
-        lotStep={selectedConfig.lotStep}
-        needsSimulationAccount={needsSimulationAccount}
-        orders={orders}
-        selectedSimulationAccount={selectedSimulationAccount}
-      />
+function TradeStat({ label, muted = false, value }: { label: string; muted?: boolean; value: string }) {
+  return (
+    <div className="xh-trade-stat">
+      <span>{label}</span>
+      <strong className={muted ? "text-muted" : ""}>{value}</strong>
     </div>
   );
 }

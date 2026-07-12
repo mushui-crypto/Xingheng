@@ -63,7 +63,7 @@ export function OverviewSection({
   const estimatedTotalAsset = accountOverview?.totalEquity ?? (wallet?.available ?? 0) + (funding?.balance ?? 0) + (realTradingAccount?.balance ?? 0);
   const simulationAsset = simulationAccount?.equity ?? 0;
   const simulationPnl = simulationAccount?.floatingPnl ?? simulationAccount?.unrealizedPnl ?? 0;
-  const simulationTradeHref = simulationAccount?.id ? `/app/trading?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(simulationAccount.id)}` : "/app/trading?symbol=BTCUSDT";
+  const simulationTradeHref = simulationAccount?.id ? `/app/demo?symbol=BTCUSDT&simulationAccountId=${encodeURIComponent(simulationAccount.id)}` : "/app/demo?symbol=BTCUSDT";
   const recentTransactions = recentFundingActivities.map(mapRecentFundingActivity);
 
   return (

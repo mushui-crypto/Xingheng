@@ -49,12 +49,6 @@ export function AuthFrame({ activeTab, children }: AuthFrameProps) {
               <AuthTab active={activeTab === "register"} to="/register">
                 Create account
               </AuthTab>
-              <span
-                aria-hidden="true"
-                className={`absolute bottom-0 left-0 h-0.5 bg-[rgba(199,199,199,0.9)] transition-[transform,width] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] ${
-                  activeTab === "login" ? "w-[88px] translate-x-0 sm:w-[99px]" : "w-[174px] translate-x-[104px] sm:w-[204px] sm:translate-x-[123px]"
-                }`}
-              />
             </nav>
             {children}
           </div>
@@ -76,11 +70,17 @@ function AuthTab({
   return (
     <Link
       to={to}
-      className={`flex h-[47px] shrink-0 items-center justify-start whitespace-nowrap py-[10px] text-[16px] font-medium not-italic uppercase leading-normal tracking-[1.2px] transition sm:text-[18px] sm:tracking-[1.6px] ${
+      className={`relative flex h-[47px] shrink-0 items-center justify-start whitespace-nowrap border-b-2 border-transparent py-[10px] text-[16px] font-medium not-italic uppercase leading-normal tracking-[1.2px] transition sm:text-[18px] sm:tracking-[1.6px] ${
         active ? "text-white" : "text-[rgba(145,145,145,0.82)] hover:text-white/70"
       }`}
     >
       {children}
+      <span
+        aria-hidden="true"
+        className={`pointer-events-none absolute inset-x-0 bottom-[-1px] h-0.5 origin-left bg-[rgba(199,199,199,0.9)] transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)] ${
+          active ? "scale-x-100" : "scale-x-0"
+        }`}
+      />
     </Link>
   );
 }

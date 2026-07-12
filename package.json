@@ -15,6 +15,7 @@
     "start:api": "node dist-server/index.js"
   },
   "dependencies": {
+    "@nktkas/hyperliquid": "^0.33.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",
     "ethers": "^6.17.0",

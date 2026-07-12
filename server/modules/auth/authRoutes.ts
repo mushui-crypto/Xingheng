@@ -212,7 +212,7 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
 }
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
-  app.use(["/api/trading", "/api/wallet"], (request, response, next) => {
+  app.use(["/api/trading", "/api/wallet", "/api/real-trading"], (request, response, next) => {
     const user = users.authenticate(getUserBearerToken(request));
     if (!user) {
       response.status(401).json({ message: "用户未登录或登录已失效。" });
