@@ -30,18 +30,9 @@ import { RealTradingOrderPanel } from "../../features/realTrading/components/Rea
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
+import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
 
 const networkLabel = "Hyperliquid Testnet";
-
-type BrowserEthereum = {
-  request: (payload: { method: string; params?: unknown[] | object }) => Promise<unknown>;
-  on?: (event: "accountsChanged", listener: (accounts: unknown) => void) => void;
-  removeListener?: (event: "accountsChanged", listener: (accounts: unknown) => void) => void;
-};
-
-function getBrowserEthereum() {
-  return (window as Window & { ethereum?: BrowserEthereum }).ethereum;
-}
 
 export function RealTradePage() {
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
@@ -62,13 +53,14 @@ export function RealTradePage() {
   const [accountError, setAccountError] = useState("");
   const [chartMessage, setChartMessage] = useState("");
   const [connectMessage, setConnectMessage] = useState("");
+  const [walletProvider, setWalletProvider] = useState<Eip1193Provider | null>(null);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
   const isConnected = Boolean(walletAddress);
-  const digits = selectedConfig?.priceDecimals ?? 2;
+  const digits = selectedConfig?.pxDecimals ?? 2;
   const symbolOptions = useMemo(
     () => (symbols.length > 0 ? symbols : [{ symbol: selectedSymbol, providerCoin: "BTC", status: "pending" }]).map((item) => ({
       label: `${item.symbol} · ${item.providerCoin}`,
@@ -145,30 +137,44 @@ export function RealTradePage() {
   }, [selectedSymbol]);
 
   useEffect(() => {
-    const ethereum = getBrowserEthereum();
-    if (!ethereum?.on) {
+    let active = true;
+    void discoverInjectedEthereumProvider().then((provider) => {
+      if (active) {
+        setWalletProvider(provider);
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!walletProvider?.on) {
       return;
     }
 
-    const handleAccountsChanged = (accounts: unknown) => {
+    const handleAccountsChanged = (...args: unknown[]) => {
+      const accounts = args[0];
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
       setWalletAddress(address);
       setConnectMessage(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。");
       void loadAccount(address);
     };
 
-    ethereum.on("accountsChanged", handleAccountsChanged);
-    return () => ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
+    walletProvider.on("accountsChanged", handleAccountsChanged);
+    return () => walletProvider.removeListener?.("accountsChanged", handleAccountsChanged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [walletProvider]);
 
   useEffect(() => {
-    if (!chartContainerRef.current) {
+    const container = chartContainerRef.current;
+    if (!container) {
       return;
     }
 
-    const chart = createChart(chartContainerRef.current, {
-      height: 520,
+    const chart = createChart(container, {
+      height: container.clientHeight || 520,
+      width: container.clientWidth || 900,
       layout: { background: { color: "#05090d" }, textColor: "#9CA3AF" },
       grid: {
         vertLines: { color: "#132126" },
@@ -191,12 +197,16 @@ export function RealTradePage() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
 
-    const resize = () => chart.applyOptions({ width: chartContainerRef.current?.clientWidth ?? 900 });
-    resize();
-    window.addEventListener("resize", resize);
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      const { height, width } = entry.contentRect;
+      if (height > 0 && width > 0) {
+        chart.applyOptions({ height, width });
+      }
+    });
+    resizeObserver.observe(container);
 
     return () => {
-      window.removeEventListener("resize", resize);
+      resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -247,12 +257,13 @@ export function RealTradePage() {
 
   const connectWallet = async () => {
     setConnectMessage("");
-    const ethereum = getBrowserEthereum();
+    const ethereum = walletProvider ?? await discoverInjectedEthereumProvider();
     if (!ethereum?.request) {
       setConnectMessage("未检测到浏览器钱包。请使用支持 EIP-1193 的钱包连接主账户地址。");
       return;
     }
     try {
+      setWalletProvider(ethereum);
       const accounts = await ethereum.request({ method: "eth_requestAccounts" });
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
       if (!address) {
@@ -327,22 +338,29 @@ export function RealTradePage() {
                   ))}
                 </div>
               </div>
-              <StatePanel
-                loading={marketLoading}
-                error={marketError}
-                empty={!marketSummary}
-                emptyText="等待 /api/real-trading/market/* 返回真实 Testnet 行情。"
-                onRetry={() => void loadMarket(selectedSymbol)}
-              >
-                <div className="relative border-t border-line bg-black/35">
-                  <div ref={chartContainerRef} className="h-[360px] w-full sm:h-[460px] xl:h-[560px]" />
-                  {chartLoading || chartMessage ? (
-                    <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-sm text-muted backdrop-blur">
-                      {chartLoading ? "真实 K线加载中..." : chartMessage}
-                    </div>
-                  ) : null}
-                </div>
-              </StatePanel>
+              <div className="relative border-t border-line bg-black/35">
+                <div ref={chartContainerRef} className="h-[360px] w-full sm:h-[460px] xl:h-[560px]" />
+                {marketLoading ? (
+                  <div className="absolute inset-0 flex flex-col justify-center gap-3 bg-black/85 p-6" aria-busy="true" aria-label="行情加载中">
+                    <div className="h-3 w-1/3 animate-pulse bg-white/10" />
+                    <div className="h-3 w-2/3 animate-pulse bg-white/10" />
+                    <div className="h-3 w-1/2 animate-pulse bg-white/10" />
+                  </div>
+                ) : marketError ? (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/90 p-8 text-center text-sm text-red-200" role="alert">
+                    <p>{marketError}</p>
+                    <Button className="mt-4" onClick={() => void loadMarket(selectedSymbol)} variant="secondary">重新加载</Button>
+                  </div>
+                ) : !marketSummary ? (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/90 p-8 text-center text-sm text-muted">
+                    等待 /api/real-trading/market/* 返回真实 Testnet 行情。
+                  </div>
+                ) : chartLoading || chartMessage ? (
+                  <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-sm text-muted backdrop-blur">
+                    {chartLoading ? "真实 K线加载中..." : chartMessage}
+                  </div>
+                ) : null}
+              </div>
             </Card>
 
             <div className="xh-trade-depth-stage">
@@ -385,8 +403,8 @@ export function RealTradePage() {
             markPrice={marketSummary?.markPrice}
             maxLeverage={selectedConfig?.maxLeverage}
             onSubmitted={() => void loadAccount(walletAddress)}
-            priceDecimals={selectedConfig?.priceDecimals}
-            provider={getBrowserEthereum()}
+            provider={walletProvider ?? undefined}
+            szDecimals={selectedConfig?.szDecimals}
             symbol={selectedSymbol}
             walletAddress={walletAddress}
           />

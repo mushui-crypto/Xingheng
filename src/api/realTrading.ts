@@ -7,10 +7,11 @@ export type RealTradingSymbol = {
   symbol: string;
   providerCoin: string;
   assetId?: number;
-  priceDecimals?: number;
-  sizeDecimals?: number;
+  szDecimals?: number;
+  pxDecimals?: number;
   maxLeverage?: number;
   status?: string;
+  network?: RealTradingNetwork;
 };
 
 export type RealMarketSummary = {

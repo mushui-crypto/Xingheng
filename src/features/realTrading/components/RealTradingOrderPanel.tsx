@@ -6,6 +6,7 @@ import { Card } from "../../../components/ui/Card";
 import { Input } from "../../../components/ui/Input";
 import { Select } from "../../../components/ui/Select";
 import { HyperliquidSessionSigner, normalizeSdkError } from "../lib/hyperliquidSdk";
+import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
 
 type ActionState = "idle" | "initializing" | "authorizing" | "authorized" | "submitting";
 
@@ -15,8 +16,8 @@ export function RealTradingOrderPanel({
   markPrice,
   maxLeverage,
   onSubmitted,
-  priceDecimals = 2,
   provider,
+  szDecimals = 0,
   symbol,
   walletAddress,
 }: {
@@ -25,8 +26,8 @@ export function RealTradingOrderPanel({
   markPrice?: number | null;
   maxLeverage?: number;
   onSubmitted: () => void;
-  priceDecimals?: number;
   provider?: Eip1193Provider;
+  szDecimals?: number;
   symbol: string;
   walletAddress: string;
 }) {
@@ -54,9 +55,9 @@ export function RealTradingOrderPanel({
   useEffect(() => {
     if (orderType === "market" && typeof markPrice === "number") {
       const protectionPrice = markPrice * (side === "buy" ? 1.01 : 0.99);
-      setPrice(protectionPrice.toFixed(priceDecimals));
+      setPrice(normalizeHyperliquidPrice(protectionPrice, szDecimals, side === "buy" ? "up" : "down"));
     }
-  }, [markPrice, orderType, priceDecimals, side]);
+  }, [markPrice, orderType, side, szDecimals]);
 
   async function authorizeSession() {
     if (!provider || !walletAddress) return;
@@ -97,8 +98,15 @@ export function RealTradingOrderPanel({
       setMessage("请输入有效的价格和数量。");
       return;
     }
+    let normalizedPrice: string;
+    try {
+      normalizedPrice = normalizeHyperliquidPrice(price, szDecimals, side === "buy" ? "up" : "down");
+    } catch {
+      setMessage("请输入有效的价格和数量。");
+      return;
+    }
     await runAction(
-      () => signer.placeOrder({ asset: assetId, isBuy: side === "buy", price, size, reduceOnly, market: orderType === "market" }),
+      () => signer.placeOrder({ asset: assetId, isBuy: side === "buy", price: normalizedPrice, size, reduceOnly, market: orderType === "market" }),
       reduceOnly ? "reduce-only 平仓请求已发送。" : "真实订单请求已发送。",
     );
   }
