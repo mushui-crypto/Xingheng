@@ -1,5 +1,5 @@
 import type { Candle, CandleInterval, MarketCategory, MarketSourceType } from "../../types";
-import { intervalDurationMs, normalizeInterval, normalizeLimit, normalizeSymbol, toHyperliquidCoin } from "./marketConfig";
+import { intervalDurationMs, normalizeInterval, normalizeLimit, normalizeSymbol, toHyperliquidCoin, toHyperliquidDex } from "./marketConfig";
 
 const defaultRestBaseUrl = process.env.HYPERLIQUID_REST_BASE_URL ?? "https://api.hyperliquid.xyz";
 const requestTimeoutMs = 15_000;
@@ -28,9 +28,72 @@ type HyperliquidUniverseItem = {
 
 type HyperliquidAssetContext = {
   markPx?: string;
+  oraclePx?: string;
   midPx?: string;
+  prevDayPx?: string;
   dayNtlVlm?: string;
   openInterest?: string;
+  funding?: string;
+  nextFundingTime?: number;
+};
+
+type HyperliquidBookLevel = {
+  px: string | number;
+  sz: string | number;
+  n?: number;
+};
+
+type HyperliquidTrade = {
+  px?: string | number;
+  price?: string | number;
+  sz?: string | number;
+  size?: string | number;
+  side?: string;
+  time?: number;
+  timestamp?: number;
+  tid?: string | number;
+  hash?: string;
+};
+
+export type DemoMarketSummary = {
+  symbol: string;
+  markPrice: number | null;
+  oraclePrice: number | null;
+  midPrice: number | null;
+  previousDayPrice: number | null;
+  dayChange: number | null;
+  dayChangePercent: number | null;
+  dayNotionalVolume: number | null;
+  openInterest: number | null;
+  funding: number | null;
+  nextFundingTime: number | null;
+  status: "connected" | "unavailable";
+  timestamp: number;
+};
+
+export type DemoOrderbookLevel = {
+  price: number;
+  size: number;
+  cumulativeSize: number;
+  total: number;
+  orderCount: number | null;
+};
+
+export type DemoOrderbook = {
+  symbol: string;
+  asks: DemoOrderbookLevel[];
+  bids: DemoOrderbookLevel[];
+  timestamp: number;
+};
+
+export type DemoTrade = {
+  symbol: string;
+  price: number;
+  size: number;
+  side: "buy" | "sell" | "unknown";
+  timestamp: number;
+  tradeId?: string | null;
+  txHash?: string | null;
 };
 
 export type HyperliquidPerpMarket = {
@@ -74,6 +137,53 @@ export class HyperliquidRestClient {
       markets.push(...(await this.getPerpetualMarketsForDex(dex, annotations)));
     }
     return markets;
+  }
+
+  async getMarketSummary(symbol: string): Promise<DemoMarketSummary> {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const coin = toHyperliquidCoin(normalizedSymbol);
+    const dex = toHyperliquidDex(normalizedSymbol);
+    const payload = await this.postInfo({
+      type: "metaAndAssetCtxs",
+      ...(dex ? { dex } : {}),
+    });
+    if (!Array.isArray(payload) || !payload[0] || !Array.isArray(payload[0].universe) || !Array.isArray(payload[1])) {
+      throw new Error("Hyperliquid metaAndAssetCtxs returned an invalid payload.");
+    }
+    const universe = payload[0].universe as HyperliquidUniverseItem[];
+    const contexts = payload[1] as HyperliquidAssetContext[];
+    const index = universe.findIndex((item) => item.name === coin || (dex && `${dex}:${item.name}` === coin));
+    if (index < 0) {
+      throw new Error(`品种 ${normalizedSymbol} 不存在。`);
+    }
+    return normalizeDemoMarketSummary(normalizedSymbol, contexts[index] ?? {});
+  }
+
+  async getOrderbook(symbol: string): Promise<DemoOrderbook> {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const coin = toHyperliquidCoin(normalizedSymbol);
+    const payload = await this.postInfo({ type: "l2Book", coin });
+    const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+    const bids = normalizeDemoBookSide(Array.isArray(levels[0]) ? levels[0] : [], "desc");
+    const asks = normalizeDemoBookSide(Array.isArray(levels[1]) ? levels[1] : [], "asc");
+    return {
+      symbol: normalizedSymbol,
+      bids,
+      asks,
+      timestamp: Number(payload?.time ?? Date.now()),
+    };
+  }
+
+  async getTrades(symbol: string): Promise<DemoTrade[]> {
+    const normalizedSymbol = normalizeSymbol(symbol);
+    const coin = toHyperliquidCoin(normalizedSymbol);
+    const payload = await this.postInfo({ type: "recentTrades", coin });
+    if (!Array.isArray(payload)) {
+      throw new Error("Hyperliquid recentTrades returned an invalid payload.");
+    }
+    return payload
+      .map((trade) => normalizeDemoTrade(trade, normalizedSymbol))
+      .filter((trade): trade is DemoTrade => trade !== null);
   }
 
   private async getPerpetualMarketsForDex(
@@ -244,6 +354,82 @@ function normalizeProviderCategory(value: unknown, providerCoin: string): Market
     return "metals";
   }
   return "other";
+}
+
+export function normalizeDemoMarketSummary(symbol: string, context: HyperliquidAssetContext): DemoMarketSummary {
+  const markPrice = toNullableNumber(context.markPx);
+  const previousDayPrice = toNullableNumber(context.prevDayPx);
+  const dayChange = markPrice !== null && previousDayPrice !== null ? markPrice - previousDayPrice : null;
+  const dayChangePercent = dayChange !== null && previousDayPrice !== null && previousDayPrice !== 0
+    ? (dayChange / previousDayPrice) * 100
+    : null;
+  return {
+    symbol,
+    markPrice,
+    oraclePrice: toNullableNumber(context.oraclePx),
+    midPrice: toNullableNumber(context.midPx),
+    previousDayPrice,
+    dayChange,
+    dayChangePercent,
+    dayNotionalVolume: toNullableNumber(context.dayNtlVlm),
+    openInterest: toNullableNumber(context.openInterest),
+    funding: toNullableNumber(context.funding),
+    nextFundingTime: typeof context.nextFundingTime === "number" ? context.nextFundingTime : null,
+    status: markPrice !== null ? "connected" : "unavailable",
+    timestamp: Date.now(),
+  };
+}
+
+export function normalizeDemoBookSide(levels: HyperliquidBookLevel[], direction: "asc" | "desc"): DemoOrderbookLevel[] {
+  let cumulativeSize = 0;
+  return levels
+    .map((level) => ({
+      price: toRequiredNumber(level.px),
+      size: toRequiredNumber(level.sz),
+      orderCount: typeof level.n === "number" ? level.n : null,
+    }))
+    .filter((level) => level.price !== null && level.size !== null)
+    .sort((left, right) => direction === "asc" ? left.price! - right.price! : right.price! - left.price!)
+    .map((level) => {
+      cumulativeSize += level.size!;
+      return { price: level.price!, size: level.size!, orderCount: level.orderCount, cumulativeSize, total: cumulativeSize };
+    });
+}
+
+export function normalizeDemoTrade(row: unknown, symbol: string): DemoTrade | null {
+  const value = row && typeof row === "object" ? row as HyperliquidTrade : {};
+  const price = toRequiredNumber(value.px ?? value.price);
+  const size = toRequiredNumber(value.sz ?? value.size);
+  const timestamp = toRequiredNumber(value.time ?? value.timestamp);
+  if (price === null || size === null || timestamp === null) return null;
+  return {
+    symbol,
+    price,
+    size,
+    side: normalizeTradeSide(value.side),
+    timestamp,
+    tradeId: value.tid !== undefined ? String(value.tid) : null,
+    txHash: value.hash !== undefined ? String(value.hash) : null,
+  };
+}
+
+function toNullableNumber(value: unknown) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function toRequiredNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+}
+
+function normalizeTradeSide(value: unknown) {
+  const side = typeof value === "string" ? value.toLowerCase() : value;
+  if (side === "b" || side === "buy") return "buy";
+  if (side === "a" || side === "sell") return "sell";
+  return "unknown";
 }
 
 function delay(ms: number) {

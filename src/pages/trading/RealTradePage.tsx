@@ -1,9 +1,9 @@
 import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from "lightweight-charts";
-import { ChevronDown, RefreshCw } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Button } from "../../components/ui/Button";
-import { MarketIcon } from "../../components/trading/MarketIcon";
+import { MarketSymbolPicker, type MarketPickerSymbol } from "../../components/trading/MarketSymbolPicker";
 import {
   fetchRealAccountSummary,
   fetchRealCandles,
@@ -29,11 +29,15 @@ import {
 import { getChartPriceFormat, normalizeChartCandles, positionLatestCandleInInitialView, toChartCandle } from "../../features/trading/lib/chart";
 import { RealTradingOrderPanel } from "../../features/realTrading/components/RealTradingOrderPanel";
 import { RealPositionsTable } from "../../features/realTrading/components/RealPositionsTable";
+import { MarketDepthPanel } from "../../features/trading/components/MarketDepthPanel";
+import { TradeStat } from "../../features/trading/components/TradeStat";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../../features/realTrading/model/types";
 import { enrichPositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
+import { resolveRealTradingCategory } from "../../features/realTrading/lib/marketCategory";
 import { resolvePositionSymbol, submitPositionCloseRequest, submitPositionTpslRequest } from "../../features/realTrading/lib/positionActions";
 import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
+import { formatCompactMoney, formatFundingPercent, formatMarketDayChange, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
 import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
@@ -74,11 +78,24 @@ export function RealTradePage() {
   )) ?? null;
   const isConnected = Boolean(walletAddress);
   const digits = selectedConfig?.pxDecimals ?? 2;
-  const symbolOptions = useMemo(
-    () => (symbols.length > 0 ? symbols : [{ symbol: selectedSymbol, providerCoin: "BTC", status: "pending" }]).map((item) => ({
-      label: `${item.symbol} · ${item.providerCoin}`,
-      value: item.symbol,
-    })),
+  const pickerSymbols = useMemo<MarketPickerSymbol[]>(
+    () => {
+      const availableSymbols: RealTradingSymbol[] = symbols.length > 0
+        ? symbols
+        : [{ symbol: selectedSymbol, providerCoin: "BTC", status: "pending" }];
+      return availableSymbols.map((item) => ({
+        apiSymbol: item.providerCoin,
+        category: resolveRealTradingCategory(item.providerMarketId, item.category),
+        displayName: item.providerCoin,
+        iconUrl: item.iconUrl,
+        id: item.assetId ?? item.symbol,
+        leverage: item.maxLeverage,
+        providerCoin: item.providerCoin,
+        providerMarketId: item.providerMarketId,
+        sourceDex: item.providerMarketId?.includes(":") ? item.providerMarketId.split(":", 1)[0] : "main",
+        symbol: item.symbol,
+      }));
+    },
     [selectedSymbol, symbols],
   );
 
@@ -382,30 +399,21 @@ export function RealTradePage() {
     <div className="xh-trade-terminal xh-real-trade-terminal">
       <section className="xh-trade-marketbar">
         <div className="xh-trade-marketbar-main">
-          <MarketIcon
-            className="xh-real-symbol-mark"
-            fallback={selectedConfig?.providerCoin ?? selectedSymbol}
-            iconUrl={selectedConfig?.iconUrl}
+          <MarketSymbolPicker
+            context="real"
+            onSelect={setSelectedSymbol}
+            selectedSymbol={selectedSymbol}
+            symbols={pickerSymbols}
+            triggerVariant="terminal"
           />
-          <label className="xh-real-symbol-picker">
-            <span className="sr-only">真实交易品种</span>
-            <span className="xh-real-symbol-title">
-              {selectedSymbol}
-              <ChevronDown size={15} aria-hidden="true" />
-            </span>
-            <span className="xh-real-symbol-source">Hyperliquid perpetual · Testnet</span>
-            <select value={selectedSymbol} onChange={(event) => setSelectedSymbol(event.target.value)}>
-              {symbolOptions.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-          </label>
           <span className="xh-real-market-badge">PERP · REAL</span>
         </div>
         <div className="xh-trade-market-stats">
           <TradeStat label="Mark" value={formatPrice(marketSummary?.markPrice ?? undefined, digits)} />
-          <TradeStat label="24h Change" value={formatDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)} tone={numberTone(marketSummary?.dayChange)} />
+          <TradeStat label="24h Change" value={formatMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)} tone={marketNumberTone(marketSummary?.dayChange)} />
           <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
           <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
-          <TradeStat label="Funding" value={formatPercent(marketSummary?.funding)} tone={numberTone(marketSummary?.funding)} />
+          <TradeStat label="Funding" value={formatFundingPercent(marketSummary?.funding)} tone={marketNumberTone(marketSummary?.funding)} />
           <TradeStat label="Status" value={marketSummary?.status ?? (marketLoading ? "LOADING" : "-")} tone={marketSummary?.status?.toLowerCase() === "live" ? "positive" : undefined} />
         </div>
       </section>
@@ -439,7 +447,7 @@ export function RealTradePage() {
                 <span>H&nbsp; {formatPrice(latestCandle?.high, digits)}</span>
                 <span>L&nbsp; {formatPrice(latestCandle?.low, digits)}</span>
                 <span>C&nbsp; {formatPrice(latestCandle?.close, digits)}</span>
-                <span>24h&nbsp; <b className={toneClass(numberTone(marketSummary?.dayChange))}>{formatDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)}</b></span>
+                <span>24h&nbsp; <b className={toneClass(marketNumberTone(marketSummary?.dayChange))}>{formatMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)}</b></span>
               </div>
               <div className="xh-real-chart-canvas">
                 <div ref={chartContainerRef} className="h-full w-full" />
@@ -474,7 +482,7 @@ export function RealTradePage() {
                 emptyText="-"
                 onRetry={() => void loadMarket(selectedSymbol)}
               >
-                <DepthAndTrades orderbook={orderbook} trades={trades} digits={digits} markPrice={marketSummary?.markPrice} midPrice={marketSummary?.midPrice} />
+                <MarketDepthPanel ariaLabel="真实盘口数据" orderbook={orderbook} trades={trades} digits={digits} markPrice={marketSummary?.markPrice} midPrice={marketSummary?.midPrice} />
               </StatePanel>
             </div>
           </section>
@@ -524,64 +532,6 @@ export function RealTradePage() {
   );
 }
 
-function DepthAndTrades({ digits, markPrice, midPrice, orderbook, trades }: { digits: number; markPrice?: number | null; midPrice?: number | null; orderbook: RealOrderbook | null; trades: RealTrade[] }) {
-  const [tab, setTab] = useState<"book" | "trades">("book");
-  const asks = orderbook?.asks.slice(0, 10).reverse() ?? [];
-  const bids = orderbook?.bids.slice(0, 10) ?? [];
-  return (
-    <section className="xh-real-depth-panel">
-      <div className="xh-real-depth-tabs" role="tablist" aria-label="真实盘口数据">
-        <button className={tab === "book" ? "is-active" : ""} onClick={() => setTab("book")} role="tab" type="button">Order Book</button>
-        <button className={tab === "trades" ? "is-active" : ""} onClick={() => setTab("trades")} role="tab" type="button">Recent Trades</button>
-      </div>
-      {tab === "book" ? (
-        <>
-          <div className="xh-real-book-head">
-            <span>Price (USDT)</span><span>Size ({orderbook?.symbol?.replace("USDT", "") || "BTC"})</span><span>Total</span>
-          </div>
-          <BookSide levels={asks} digits={digits} tone="ask" />
-          <div className="xh-real-book-mid">
-            <strong>{formatBookPrice(midPrice ?? orderbook?.bids[0]?.price ?? orderbook?.asks[0]?.price, digits)}</strong>
-            <span className="xh-real-book-change">-</span>
-            <span>Mark {formatBookPrice(markPrice, digits)}</span>
-          </div>
-          <BookSide levels={bids} digits={digits} tone="bid" />
-        </>
-      ) : (
-        <div className="xh-real-trades-list">
-          <div className="xh-real-book-head"><span>Side</span><span>Price</span><span>Size</span></div>
-          {trades.length === 0 ? (
-            <EmptyLine text="暂无真实成交数据。" />
-          ) : trades.slice(0, 24).map((trade, index) => (
-            <div key={trade.tradeId ?? trade.txHash ?? `${trade.timestamp}-${index}`} className="xh-real-book-row">
-              <span className={trade.side === "sell" ? "text-red-300" : "text-emerald-300"}>{trade.side}</span>
-              <span className="font-mono">{formatPrice(trade.price, digits)}</span>
-              <span className="text-right font-mono text-muted">{trade.size}</span>
-            </div>
-          ))}
-        </div>
-      )}
-    </section>
-  );
-}
-
-function BookSide({ digits, levels, tone }: { digits: number; levels: { price: number; size: number; total?: number }[]; tone: "ask" | "bid" }) {
-  if (levels.length === 0) {
-    return <EmptyLine text={tone === "ask" ? "暂无卖盘。" : "暂无买盘。"} />;
-  }
-  return (
-    <div className="xh-real-book-side">
-      {levels.map((level, index) => (
-        <div key={`${tone}-${level.price}-${index}`} className={`xh-real-book-row is-${tone}`}>
-          <span>{formatBookPrice(level.price, digits)}</span>
-          <span>{level.size}</span>
-          <span>{formatBookTotal(level, levels, index)}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function ConnectionPanel({
   account,
   accountError,
@@ -600,7 +550,7 @@ function ConnectionPanel({
       <div className="xh-real-account-metrics">
         <AccountMetric label="现货" value={accountLoading ? "-" : formatAccountMoney(account?.spotUsdcBalance)} />
         <AccountMetric label="合约" value={accountLoading ? "-" : formatAccountMoney(contractEquity)} />
-        <AccountMetric label="未实现盈亏" tone={numberTone(account?.totalUnrealizedPnl)} value={accountLoading ? "-" : formatAccountNumber(account?.totalUnrealizedPnl)} />
+        <AccountMetric label="未实现盈亏" tone={marketNumberTone(account?.totalUnrealizedPnl)} value={accountLoading ? "-" : formatAccountNumber(account?.totalUnrealizedPnl)} />
         <AccountMetric label="全仓保证金比率" value={accountLoading ? "-" : formatRatioPercent(account?.crossMarginRatio)} />
         <AccountMetric label="维持保证金" value={accountLoading ? "-" : formatAccountMoney(account?.crossMaintenanceMarginUsed)} />
         <AccountMetric label="全仓账户杠杆" value={accountLoading ? "-" : formatCrossLeverage(contractEquity, positions)} />
@@ -751,10 +701,6 @@ function StatePanel({
   return <>{children}</>;
 }
 
-function EmptyLine({ text }: { text: string }) {
-  return <div className="border-b border-line px-4 py-3 text-sm text-muted">{text}</div>;
-}
-
 function Metric({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-center justify-between gap-3 border-b border-line pb-2 text-sm last:border-b-0">
@@ -768,30 +714,12 @@ function AccountMetric({ label, tone, value }: { label: string; tone?: "positive
   return <div><span>{label}</span><strong className={tone ? `is-${tone}` : ""}>{value}</strong></div>;
 }
 
-function TradeStat({ label, tone, value }: { label: string; tone?: "positive" | "negative"; value: string }) {
-  return (
-    <div className={`xh-trade-stat ${tone ? `is-${tone}` : ""}`}>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
 function formatNumber(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "-";
 }
 
 function formatMoney(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? `$${value.toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "-";
-}
-
-function formatPercent(value?: number | null) {
-  return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(4)}%` : "-";
-}
-
-function formatCompactMoney(value?: number | null) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
-  return `$${new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 2 }).format(value)}`;
 }
 
 function formatAccountMoney(value?: number | null) {
@@ -806,14 +734,6 @@ function formatRatioPercent(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "-";
 }
 
-function formatDayChange(change?: number | null, percent?: number | null) {
-  if (typeof change !== "number" || !Number.isFinite(change)) return "-";
-  const changeText = `${change >= 0 ? "+" : "-"}${Math.abs(change).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
-  return typeof percent === "number" && Number.isFinite(percent)
-    ? `${changeText} / ${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`
-    : changeText;
-}
-
 function formatCrossLeverage(accountValue: number | null | undefined, positions: RealPosition[]) {
   const notional = positions.reduce((sum, position) => {
     if (typeof position.size !== "number" || !Number.isFinite(position.size) || typeof position.markPx !== "number" || !Number.isFinite(position.markPx)) {
@@ -826,17 +746,6 @@ function formatCrossLeverage(accountValue: number | null | undefined, positions:
   return `${(notional / accountValue).toFixed(2)}x`;
 }
 
-function formatBookTotal(level: { total?: number; size: number }, levels: { size: number }[], index: number) {
-  if (typeof level.total === "number" && Number.isFinite(level.total)) return formatNumber(level.total);
-  return formatNumber(levels.slice(0, index + 1).reduce((sum, item) => sum + item.size, 0));
-}
-
-function formatBookPrice(value: number | null | undefined, digits: number) {
-  return typeof value === "number" && Number.isFinite(value)
-    ? value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })
-    : "-";
-}
-
 function formatTime(value?: number) {
   if (typeof value !== "number" || !Number.isFinite(value)) return "-";
   return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
@@ -847,15 +756,6 @@ function formatOrderType(order: RealOpenOrder) {
   return order.status ?? order.orderType ?? "-";
 }
 
-function numberTone(value?: number | null): "positive" | "negative" | undefined {
-  if (typeof value !== "number" || value === 0) return undefined;
-  return value > 0 ? "positive" : "negative";
-}
-
 function toneClass(tone?: "positive" | "negative") {
   return tone ? `is-${tone}` : "";
-}
-
-function multiplyFinite(left?: number | null, right?: number | null) {
-  return typeof left === "number" && Number.isFinite(left) && typeof right === "number" && Number.isFinite(right) ? left * right : null;
 }

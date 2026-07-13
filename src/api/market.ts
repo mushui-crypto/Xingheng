@@ -24,6 +24,46 @@ export type ApiTicker = {
   status: MarketStatus;
 };
 
+export type ApiMarketSummary = {
+  symbol: string;
+  markPrice?: number | null;
+  oraclePrice?: number | null;
+  midPrice?: number | null;
+  previousDayPrice?: number | null;
+  dayChange?: number | null;
+  dayChangePercent?: number | null;
+  dayNotionalVolume?: number | null;
+  openInterest?: number | null;
+  funding?: number | null;
+  nextFundingTime?: number | null;
+  status?: string;
+  timestamp?: number;
+};
+
+export type ApiMarketOrderbookLevel = {
+  price: number;
+  size: number;
+  cumulativeSize?: number;
+  total?: number;
+  orderCount?: number | null;
+};
+
+export type ApiMarketOrderbook = {
+  symbol: string;
+  asks: ApiMarketOrderbookLevel[];
+  bids: ApiMarketOrderbookLevel[];
+  timestamp?: number;
+};
+
+export type ApiMarketTrade = {
+  price: number;
+  size: number;
+  side: "buy" | "sell" | string;
+  timestamp: number;
+  tradeId?: string;
+  txHash?: string;
+};
+
 export type PositionView = {
   id: string;
   userId: string;
@@ -139,6 +179,18 @@ export async function fetchMarketSymbols() {
 
 export async function fetchTicker(symbol: string) {
   return requestJson<ApiTicker>(`/api/market/ticker?symbol=${symbol}`, "最新行情加载失败。");
+}
+
+export async function fetchMarketSummary(symbol: string) {
+  return requestJson<ApiMarketSummary>(`/api/market/summary?symbol=${encodeURIComponent(symbol)}`, "行情摘要加载失败。");
+}
+
+export async function fetchMarketOrderbook(symbol: string) {
+  return requestJson<ApiMarketOrderbook>(`/api/market/orderbook?symbol=${encodeURIComponent(symbol)}`, "订单簿加载失败。");
+}
+
+export async function fetchMarketTrades(symbol: string) {
+  return requestJson<ApiMarketTrade[]>(`/api/market/trades?symbol=${encodeURIComponent(symbol)}`, "最新成交加载失败。");
 }
 
 export async function fetchCandles(symbol: string, interval: CandleInterval, limit = 500) {

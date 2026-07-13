@@ -133,22 +133,45 @@ WebSocket 恢复前，行情状态为 `disconnected`。
 GET /api/health
 GET /api/market/symbols
 GET /api/market/ticker?symbol=BTCUSDT
+GET /api/market/summary?symbol=BTCUSDT
+GET /api/market/orderbook?symbol=BTCUSDT
+GET /api/market/trades?symbol=BTCUSDT
 GET /api/market/candles?symbol=BTCUSDT&interval=1m&limit=500
 ```
 
 `GET /api/market/symbols`、`PUT /api/admin/market/symbols/config` 与
 `GET /api/admin/market/status` 的品种对象会返回可空 `iconUrl`。该字段由
-`providerCoin` 派生，不请求外部资源、不写入 SQLite：
+完整 `providerMarketId` 派生，不请求外部资源、不写入 SQLite；主 DEX 例如
+`BTC`，HIP-3 / 特殊 DEX 例如 `xyz:GOLD`：
 
 ```json
 {
   "symbol": "ETHUSDT",
+  "providerMarketId": "ETH",
   "providerCoin": "ETH",
   "iconUrl": "https://app.hyperliquid.xyz/coins/ETH.svg"
 }
 ```
 
-如果 `providerCoin` 缺失或不符合安全路径字符要求，`iconUrl` 返回 `null`。
+如果 `providerMarketId` 缺失或不符合安全路径字符要求，`iconUrl` 返回 `null`。
+
+`GET /api/market/summary`、`GET /api/market/orderbook` 与
+`GET /api/market/trades` 使用 Hyperliquid 主网公开 `/info` REST，不使用
+Testnet，不接钱包、API Key 或签名。响应结构与 `/app/trade` 的真实交易只读
+市场接口保持同构：
+
+- `summary` 返回 `symbol / markPrice / oraclePrice / midPrice /
+  previousDayPrice / dayChange / dayChangePercent / dayNotionalVolume /
+  openInterest / funding / nextFundingTime / status / timestamp`
+- `orderbook` 返回真实 L2 深度，`asks` 升序、`bids` 降序，每档包含
+  `price / size / cumulativeSize / total / orderCount`
+- `trades` 返回最新逐笔成交，包含 `price / size / side / timestamp`，
+  `tradeId / txHash` 可空
+
+一致性口径：上述 orderbook / trades 用于 demo 页面市场信息展示；demo 模拟下单、
+持仓盯市和平仓仍继续使用 `/api/market/ticker` 输出的平台开户模拟 `bid / ask`
+口径，即 Hyperliquid 主网公开行情加平台模拟 spread。这样不伪造真实 L2 深度或
+逐笔成交，也不改变既有模拟成交价规则。
 
 前端 WebSocket：
 

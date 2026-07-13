@@ -13,11 +13,14 @@ import type {
   RealTradingPosition,
   RealTradingSpotBalance,
   RealTradingSymbol,
+  RealTradingMarketCategory,
   RealTradingTrade,
 } from "./hyperliquidTypes";
 
 const requestTimeoutMs = 15_000;
-const hyperliquidIconBaseUrl = "https://app.hyperliquid.xyz/coins";
+const hyperliquidTestnetIconBaseUrl = "https://app.hyperliquid-testnet.xyz/coins";
+const categoryCacheTtlMs = 5 * 60_000;
+const metalProviderCoins = new Set(["GOLD", "SILVER", "PLATINUM", "PALLADIUM"]);
 
 type HyperliquidUniverseItem = {
   name: string;
@@ -59,16 +62,25 @@ type HyperliquidCandle = {
 };
 
 export class HyperliquidInfoClient {
+  private categoryCache: { expiresAt: number; value: Map<string, RealTradingMarketCategory> } | null = null;
+  private categoryRequest: Promise<Map<string, RealTradingMarketCategory>> | null = null;
+
   constructor(private baseUrl: string) {}
 
   async getSymbols(): Promise<RealTradingSymbol[]> {
-    const { universe, contexts } = await this.getMetaAndContexts();
+    const [{ universe, contexts }, categoryMap] = await Promise.all([
+      this.getMetaAndContexts(),
+      this.getPerpCategoryMap().catch(() => new Map<string, RealTradingMarketCategory>()),
+    ]);
     return universe.map((item, index) => {
       const marginCapabilities = normalizeSymbolMarginCapabilities(item);
+      const providerMarketId = item.name;
       return {
-        symbol: toInternalSymbol(item.name),
+        symbol: toInternalSymbol(providerMarketId),
+        providerMarketId,
         providerCoin: item.name,
-        iconUrl: buildHyperliquidIconUrl(item.name),
+        category: resolveRealTradingSymbolCategory(providerMarketId, categoryMap),
+        iconUrl: buildRealTradingIconUrl(providerMarketId),
         assetId: index,
         szDecimals: Number(item.szDecimals ?? 0),
         pxDecimals: inferPriceDecimals(contexts[index]),
@@ -235,6 +247,33 @@ export class HyperliquidInfoClient {
 
   private async getSpotClearinghouseState(address: string) {
     return this.postInfo({ type: "spotClearinghouseState", user: address });
+  }
+
+  private async getPerpCategoryMap() {
+    const now = Date.now();
+    if (this.categoryCache && this.categoryCache.expiresAt > now) {
+      return this.categoryCache.value;
+    }
+    if (this.categoryRequest) {
+      return this.categoryRequest;
+    }
+    this.categoryRequest = this.fetchPerpCategoryMap()
+      .then((value) => {
+        this.categoryCache = { expiresAt: Date.now() + categoryCacheTtlMs, value };
+        return value;
+      })
+      .finally(() => {
+        this.categoryRequest = null;
+      });
+    return this.categoryRequest;
+  }
+
+  private async fetchPerpCategoryMap() {
+    const [categories, conciseAnnotations] = await Promise.all([
+      this.postInfo({ type: "perpCategories" }).catch(() => null),
+      this.postInfo({ type: "perpConciseAnnotations" }).catch(() => null),
+    ]);
+    return buildRealTradingCategoryMap(categories, conciseAnnotations);
   }
 
   private async postInfo(body: unknown) {
@@ -501,9 +540,81 @@ function toProviderCoin(symbol: string) {
   return normalized.endsWith("USDT") ? normalized.slice(0, -4) : normalized;
 }
 
-function buildHyperliquidIconUrl(providerCoin: string) {
-  const coin = String(providerCoin ?? "").trim();
-  return /^[A-Za-z0-9:_-]+$/.test(coin) ? `${hyperliquidIconBaseUrl}/${encodeURIComponent(coin)}.svg` : null;
+function getProviderCoinFromMarketId(providerMarketId: string) {
+  return providerMarketId.includes(":") ? providerMarketId.split(":").at(-1) ?? providerMarketId : providerMarketId;
+}
+
+export function buildRealTradingIconUrl(providerMarketId: unknown) {
+  const marketId = String(providerMarketId ?? "").trim();
+  return /^[A-Za-z0-9:_-]+$/.test(marketId) ? `${hyperliquidTestnetIconBaseUrl}/${marketId}.svg` : null;
+}
+
+export function buildRealTradingCategoryMap(...payloads: unknown[]) {
+  const map = new Map<string, RealTradingMarketCategory>();
+  for (const payload of payloads) {
+    if (!Array.isArray(payload)) continue;
+    for (const row of payload) {
+      if (!Array.isArray(row) || typeof row[0] !== "string") continue;
+      const marketId = row[0].trim();
+      if (!marketId) continue;
+      const value = row[1];
+      const rawCategory = typeof value === "string"
+        ? value
+        : value && typeof value === "object"
+          ? (value as { category?: unknown }).category
+          : undefined;
+      const normalizedCategory = normalizeRealTradingMarketCategory(rawCategory, marketId);
+      map.set(marketId, normalizedCategory);
+      map.set(marketId.toUpperCase(), normalizedCategory);
+    }
+  }
+  return map;
+}
+
+export function resolveRealTradingSymbolCategory(
+  providerMarketId: unknown,
+  categoryMap = new Map<string, RealTradingMarketCategory>(),
+): RealTradingMarketCategory {
+  const marketId = String(providerMarketId ?? "").trim();
+  if (!marketId) return "other";
+  return categoryMap.get(marketId)
+    ?? categoryMap.get(marketId.toUpperCase())
+    ?? normalizeRealTradingMarketCategory(null, marketId);
+}
+
+export function normalizeRealTradingMarketCategory(
+  value: unknown,
+  providerMarketId: unknown,
+): RealTradingMarketCategory {
+  const marketId = String(providerMarketId ?? "").trim();
+  const providerCoin = getProviderCoinFromMarketId(marketId).toUpperCase();
+  const category = String(value ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+
+  if (category === "crypto" || category === "cryptocurrency" || category === "cryptocurrencies") {
+    return "crypto";
+  }
+  if (["stock", "stocks", "equity", "equities", "us_equity", "us_equities", "share", "shares"].includes(category)) {
+    return "us_equities";
+  }
+  if (category === "index" || category === "indices") {
+    return "indices";
+  }
+  if (category === "metal" || category === "metals") {
+    return "metals";
+  }
+  if ((category === "commodity" || category === "commodities") && metalProviderCoins.has(providerCoin)) {
+    return "metals";
+  }
+  if (!marketId.includes(":")) {
+    return "crypto";
+  }
+  if (!category && metalProviderCoins.has(providerCoin)) {
+    return "metals";
+  }
+  return "other";
 }
 
 export function normalizeSymbolMarginCapabilities(item: { marginMode?: unknown; onlyIsolated?: unknown }) {

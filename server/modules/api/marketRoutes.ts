@@ -46,6 +46,33 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
     }
   });
 
+  app.get("/api/market/summary", async (request, response) => {
+    try {
+      const symbol = normalizeSymbol(String(request.query.symbol ?? "BTCUSDT"));
+      response.json(await market.getSummary(symbol));
+    } catch (error) {
+      response.status(400).json({ message: error instanceof Error ? error.message : "bad request" });
+    }
+  });
+
+  app.get("/api/market/orderbook", async (request, response) => {
+    try {
+      const symbol = normalizeSymbol(String(request.query.symbol ?? "BTCUSDT"));
+      response.json(await market.getOrderbook(symbol));
+    } catch (error) {
+      response.status(400).json({ message: error instanceof Error ? error.message : "bad request" });
+    }
+  });
+
+  app.get("/api/market/trades", async (request, response) => {
+    try {
+      const symbol = normalizeSymbol(String(request.query.symbol ?? "BTCUSDT"));
+      response.json(await market.getTrades(symbol));
+    } catch (error) {
+      response.status(400).json({ message: error instanceof Error ? error.message : "bad request" });
+    }
+  });
+
   app.get("/api/market/candles", async (request, response) => {
     try {
       const symbol = normalizeSymbol(String(request.query.symbol ?? "BTCUSDT"));
@@ -65,7 +92,7 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
       sourceDex: symbol.sourceDex,
       sourceType: symbol.sourceType,
       category: symbol.category,
-      iconUrl: toHyperliquidIconUrl(symbol.providerCoin),
+      iconUrl: buildDemoMarketIconUrl(symbol.providerMarketId),
       displayName: symbol.displayName,
       tradeStatus: symbol.tradeStatus,
       status: market.getStatus(symbol.symbol),
@@ -88,16 +115,16 @@ function getMarketSymbols() {
 function withMarketIconUrl<T extends MarketSymbol>(symbol: T) {
   return {
     ...symbol,
-    iconUrl: toHyperliquidIconUrl(symbol.providerCoin),
+    iconUrl: buildDemoMarketIconUrl(symbol.providerMarketId),
   };
 }
 
-function toHyperliquidIconUrl(providerCoin: unknown) {
-  const coin = String(providerCoin ?? "").trim();
-  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(coin)) {
+export function buildDemoMarketIconUrl(providerMarketId: unknown) {
+  const marketId = String(providerMarketId ?? "").trim();
+  if (!/^[A-Za-z0-9][A-Za-z0-9:._-]{0,127}$/.test(marketId)) {
     return null;
   }
-  return `https://app.hyperliquid.xyz/coins/${coin}.svg`;
+  return `https://app.hyperliquid.xyz/coins/${marketId}.svg`;
 }
 
 function syncCatalog(market: HyperliquidMarketService, store?: TradingStore) {

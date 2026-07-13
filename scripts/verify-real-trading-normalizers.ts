@@ -1,14 +1,21 @@
 import assert from "node:assert/strict";
+import { buildDemoMarketIconUrl } from "../server/modules/api/marketRoutes";
+import { normalizeDemoBookSide, normalizeDemoMarketSummary, normalizeDemoTrade } from "../server/modules/market/HyperliquidRestClient";
+import { resolveRealTradingCategory } from "../src/features/realTrading/lib/marketCategory";
 import {
+  buildRealTradingCategoryMap,
+  buildRealTradingIconUrl,
   normalizeBookSide,
   normalizeFees,
   normalizeFill,
   normalizeHistoricalOrder,
   normalizeMarketSummary,
+  normalizeRealTradingMarketCategory,
   normalizeOpenOrder,
   normalizePositions,
   normalizeSymbolMarginCapabilities,
   normalizeSpotBalances,
+  resolveRealTradingSymbolCategory,
 } from "../server/modules/hyperliquid/HyperliquidInfoClient";
 
 const summary = normalizeMarketSummary("BTCUSDT", "BTC", {
@@ -29,6 +36,55 @@ assert.equal(invalidSummary.markPrice, null);
 assert.equal(invalidSummary.dayChange, null);
 assert.equal(invalidSummary.dayChangePercent, null);
 
+const demoSummary = normalizeDemoMarketSummary("BTCUSDT", {
+  markPx: "105",
+  oraclePx: "104",
+  midPx: "104.5",
+  prevDayPx: "100",
+  dayNtlVlm: "888",
+  openInterest: "12",
+  funding: "0.0002",
+  nextFundingTime: 12345,
+});
+assert.equal(demoSummary.markPrice, 105);
+assert.equal(demoSummary.dayChange, 5);
+assert.equal(demoSummary.dayChangePercent, 5);
+assert.equal(demoSummary.status, "connected");
+
+const invalidDemoSummary = normalizeDemoMarketSummary("BTCUSDT", { markPx: "", prevDayPx: "0" });
+assert.equal(invalidDemoSummary.markPrice, null);
+assert.equal(invalidDemoSummary.status, "unavailable");
+
+assert.equal(buildRealTradingIconUrl("BTC"), "https://app.hyperliquid-testnet.xyz/coins/BTC.svg");
+assert.equal(buildRealTradingIconUrl("xyz:GOLD"), "https://app.hyperliquid-testnet.xyz/coins/xyz:GOLD.svg");
+assert.equal(buildRealTradingIconUrl("xyz:AAPL"), "https://app.hyperliquid-testnet.xyz/coins/xyz:AAPL.svg");
+assert.equal(buildRealTradingIconUrl("bad coin"), null);
+assert.equal(buildDemoMarketIconUrl("BTC"), "https://app.hyperliquid.xyz/coins/BTC.svg");
+assert.equal(buildDemoMarketIconUrl("xyz:GOLD"), "https://app.hyperliquid.xyz/coins/xyz:GOLD.svg");
+assert.equal(buildDemoMarketIconUrl("xyz:AAPL"), "https://app.hyperliquid.xyz/coins/xyz:AAPL.svg");
+assert.equal(buildDemoMarketIconUrl("bad coin"), null);
+assert.equal(resolveRealTradingSymbolCategory("BTC"), "crypto");
+assert.equal(normalizeRealTradingMarketCategory("stocks", "xyz:AAPL"), "us_equities");
+assert.equal(normalizeRealTradingMarketCategory("equities", "xyz:TSLA"), "us_equities");
+assert.equal(normalizeRealTradingMarketCategory("indices", "xyz:SP500"), "indices");
+assert.equal(normalizeRealTradingMarketCategory("commodities", "xyz:GOLD"), "metals");
+assert.equal(normalizeRealTradingMarketCategory(null, "xyz:SILVER"), "metals");
+assert.equal(normalizeRealTradingMarketCategory("commodities", "xyz:OIL"), "other");
+assert.equal(resolveRealTradingSymbolCategory("xyz:UNKNOWN"), "other");
+const categoryMap = buildRealTradingCategoryMap(
+  [["xyz:AAPL", "stocks"], ["xyz:GOLD", { category: "commodities", displayName: "Gold" }]],
+  [["xyz:SP500", { category: "indices" }], ["xyz:UNKNOWN", { category: "mystery" }]],
+);
+assert.equal(resolveRealTradingSymbolCategory("xyz:AAPL", categoryMap), "us_equities");
+assert.equal(resolveRealTradingSymbolCategory("xyz:GOLD", categoryMap), "metals");
+assert.equal(resolveRealTradingSymbolCategory("xyz:SP500", categoryMap), "indices");
+assert.equal(resolveRealTradingSymbolCategory("xyz:UNKNOWN", categoryMap), "other");
+assert.equal(resolveRealTradingCategory("BTC"), "crypto");
+assert.equal(resolveRealTradingCategory("xyz:GOLD"), "metals");
+assert.equal(resolveRealTradingCategory("xyz:SP500"), "indices");
+assert.equal(resolveRealTradingCategory("nq:TEST"), "other");
+assert.equal(resolveRealTradingCategory("flx:TSLA", "us_equities"), "us_equities");
+
 const book = normalizeBookSide([
   { px: "101", sz: "2", n: 1 },
   { px: "100", sz: "3", n: 2 },
@@ -38,6 +94,25 @@ assert.deepEqual(book.map((level) => [level.price, level.size, level.cumulativeS
   [100, 3, 3, 3],
   [101, 2, 5, 5],
 ]);
+
+const demoBook = normalizeDemoBookSide([
+  { px: "101", sz: "2", n: 1 },
+  { px: "100", sz: "3", n: 2 },
+  { px: "bad", sz: "9" },
+], "desc");
+assert.deepEqual(demoBook.map((level) => [level.price, level.size, level.cumulativeSize, level.total]), [
+  [101, 2, 2, 2],
+  [100, 3, 5, 5],
+]);
+
+const demoTrade = normalizeDemoTrade({ px: "100001", sz: "0.01", side: "B", time: 789, tid: 12, hash: "0xabc" }, "BTCUSDT");
+assert.equal(demoTrade?.price, 100001);
+assert.equal(demoTrade?.size, 0.01);
+assert.equal(demoTrade?.side, "buy");
+assert.equal(demoTrade?.timestamp, 789);
+assert.equal(demoTrade?.tradeId, "12");
+assert.equal(demoTrade?.txHash, "0xabc");
+assert.equal(normalizeDemoTrade({ px: "bad", sz: "0.01", time: 789 }, "BTCUSDT"), null);
 
 assert.deepEqual(normalizeSymbolMarginCapabilities({}).supportedMarginModes, ["cross", "isolated"]);
 assert.equal(normalizeSymbolMarginCapabilities({}).marginModeConstraint, "cross_and_isolated");
