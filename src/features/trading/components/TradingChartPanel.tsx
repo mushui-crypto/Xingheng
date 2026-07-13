@@ -1,59 +1,78 @@
-import { Activity } from "lucide-react";
+import { RefreshCw } from "lucide-react";
 import type { RefObject } from "react";
-import { MarketIcon } from "../../../components/trading/MarketIcon";
-import { Card } from "../../../components/ui/Card";
+import type { ApiCandle, ApiTicker } from "../../../api/market";
 import type { CandleInterval } from "../../../types";
 import type { TradeSymbol } from "../../../types/market";
+import { formatPrice } from "../../../utils/price";
+import { formatMarketDayChange, marketNumberTone } from "../lib/marketSummary";
 import { tradingIntervalLabels, tradingIntervals } from "../model/constants";
 
 export function TradingChartPanel({
   chartContainerRef,
   chartLoading,
   chartMessage,
+  dayChange,
+  dayChangePercent,
   interval,
+  latestCandle,
+  marketDataLoading,
   onIntervalChange,
+  onRefreshMarketData,
   selectedConfig,
-  symbol,
-  themeColor,
+  ticker,
 }: {
   chartContainerRef: RefObject<HTMLDivElement | null>;
   chartLoading: boolean;
   chartMessage: string;
+  dayChange?: number | null;
+  dayChangePercent?: number | null;
   interval: CandleInterval;
+  latestCandle: ApiCandle | null;
+  marketDataLoading: boolean;
   onIntervalChange: (interval: CandleInterval) => void;
+  onRefreshMarketData: () => void;
   selectedConfig: TradeSymbol;
-  symbol: string;
-  themeColor: string;
+  ticker: ApiTicker;
 }) {
+  const digits = selectedConfig.digits;
   return (
-    <Card className="p-0">
-      <div className="flex flex-col gap-3 border-b border-line p-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-2">
-          <Activity size={18} style={{ color: themeColor }} />
-          <MarketIcon className="xh-market-row-token" iconUrl={selectedConfig.iconUrl} fallback={selectedConfig.apiSymbol} />
-          <span className="font-semibold">{symbol}</span>
-          <span className="text-sm text-muted">{selectedConfig.displayName}</span>
-        </div>
-        <div className="no-scrollbar flex max-w-full overflow-x-auto border border-line bg-black p-1">
-          {tradingIntervals.map((item) => (
+    <section className="flex min-h-0 flex-1 flex-col">
+      <div className="xh-real-chart-toolbar">
+        <div className="no-scrollbar flex max-w-full overflow-x-auto">
+          {tradingIntervals.filter((item) => ["1m", "5m", "15m", "1h", "4h", "8h", "12h", "1d", "1w", "1M"].includes(item)).map((item) => (
             <button
               key={item}
-              className={`shrink-0 px-2.5 py-1.5 text-sm transition sm:px-3 ${interval === item ? "bg-white text-black" : "text-muted hover:text-white"}`}
+              className={`xh-real-interval ${interval === item ? "is-active" : ""}`}
               onClick={() => onIntervalChange(item)}
+              type="button"
             >
               {tradingIntervalLabels[item]}
             </button>
           ))}
         </div>
+        <div className="xh-real-live-source">
+          <span /> {ticker.source ?? "Hyperliquid"} · WS
+          <button aria-label="刷新模拟行情" disabled={marketDataLoading} onClick={onRefreshMarketData} type="button">
+            <RefreshCw className={marketDataLoading ? "animate-spin" : ""} size={14} />
+          </button>
+        </div>
       </div>
-      <div className="relative">
-        <div ref={chartContainerRef} className="h-[320px] w-full sm:h-[420px] lg:h-[460px]" />
+      <div className="xh-real-candle-summary">
+        <strong>HYPERLIQUID DEMO</strong>
+        <span>O&nbsp; {formatPrice(latestCandle?.open, digits)}</span>
+        <span>H&nbsp; {formatPrice(latestCandle?.high, digits)}</span>
+        <span>L&nbsp; {formatPrice(latestCandle?.low, digits)}</span>
+        <span>C&nbsp; {formatPrice(latestCandle?.close, digits)}</span>
+        <span>24h&nbsp; <b className={marketNumberTone(dayChange) ? `is-${marketNumberTone(dayChange)}` : ""}>{formatMarketDayChange(dayChange, dayChangePercent)}</b></span>
+      </div>
+      <div className="xh-real-chart-canvas">
+        <div ref={chartContainerRef} className="h-full w-full" />
         {chartLoading || chartMessage ? (
-          <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-sm text-muted backdrop-blur">
+          <div className="pointer-events-none absolute inset-x-4 top-4 border border-line bg-black/85 px-4 py-3 text-[12px] text-muted">
             {chartLoading ? "K线加载中..." : chartMessage}
           </div>
         ) : null}
       </div>
-    </Card>
+    </section>
   );
 }

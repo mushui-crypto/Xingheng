@@ -1,4 +1,5 @@
 import type { CandleInterval } from "../types";
+import type { SymbolCategory } from "../types/market";
 import { requestJson, userHeaders } from "./httpClient";
 
 export type RealTradingNetwork = "hyperliquid-testnet";
@@ -6,7 +7,9 @@ export type RealTradingMarginMode = "cross" | "isolated";
 
 export type RealTradingSymbol = {
   symbol: string;
+  providerMarketId?: string;
   providerCoin: string;
+  category?: SymbolCategory;
   iconUrl?: string | null;
   assetId?: number;
   szDecimals?: number;

@@ -1,9 +1,13 @@
 import type { CandleInterval } from "../../types";
 import type { HyperliquidRealTradingNetwork } from "./hyperliquidConfig";
 
+export type RealTradingMarketCategory = "crypto" | "metals" | "us_equities" | "indices" | "other";
+
 export type RealTradingSymbol = {
   symbol: string;
+  providerMarketId: string;
   providerCoin: string;
+  category: RealTradingMarketCategory;
   iconUrl: string | null;
   assetId: number;
   szDecimals: number;

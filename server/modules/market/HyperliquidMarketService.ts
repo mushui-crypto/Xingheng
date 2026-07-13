@@ -90,6 +90,18 @@ export class HyperliquidMarketService extends EventEmitter<HyperliquidMarketEven
     return ensureNoDuplicateCandles(this.store.getCandles(normalizedSymbol, normalizedInterval, limit));
   }
 
+  async getSummary(symbol: string) {
+    return this.restClient.getMarketSummary(normalizeSymbol(symbol));
+  }
+
+  async getOrderbook(symbol: string) {
+    return this.restClient.getOrderbook(normalizeSymbol(symbol));
+  }
+
+  async getTrades(symbol: string) {
+    return this.restClient.getTrades(normalizeSymbol(symbol));
+  }
+
   getTicker(symbol: string) {
     const normalized = normalizeSymbol(symbol);
     return { symbol: normalized, status: this.getStatus(normalized), tick: this.latestTicks.get(normalized) };

@@ -1,14 +1,33 @@
 import { Check, ChevronDown, Search } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { SymbolCategory, TradeSymbol, TradeStatus } from "../../types/market";
+import type { MarketSourceType, SymbolCategory, TradeStatus } from "../../types/market";
 import { formatQuantity } from "../../utils/quantity";
 import { Modal } from "../ui/Modal";
 import { MarketIcon } from "./MarketIcon";
 
 type MarketSymbolPickerProps = {
-  symbols: TradeSymbol[];
+  symbols: MarketPickerSymbol[];
   selectedSymbol: string;
   onSelect: (symbol: string) => void;
+  context?: "demo" | "real";
+  triggerVariant?: "default" | "terminal";
+};
+
+export type MarketPickerSymbol = {
+  id?: string | number;
+  symbol: string;
+  displayName: string;
+  apiSymbol: string;
+  providerMarketId?: string;
+  providerCoin?: string;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
+  iconUrl?: string | null;
+  category?: SymbolCategory;
+  leverage?: number;
+  minLot?: number;
+  lotStep?: number;
+  tradeStatus?: TradeStatus;
 };
 
 type MarketFilter = "all" | TradeStatus | "high_leverage" | "small_minimum";
@@ -31,21 +50,29 @@ const marketFilters: Array<{ value: MarketFilter; label: string }> = [
   { value: "disabled", label: "已暂停" },
 ];
 
-export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: MarketSymbolPickerProps) {
+export function MarketSymbolPicker({
+  context = "demo",
+  onSelect,
+  selectedSymbol,
+  symbols,
+  triggerVariant = "default",
+}: MarketSymbolPickerProps) {
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("crypto");
   const [marketFilter, setMarketFilter] = useState<MarketFilter>("all");
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const selected = symbols.find((item) => item.symbol === selectedSymbol) ?? symbols[0];
+  const hasCategories = symbols.some((item) => item.category);
+  const hasMarketFilters = symbols.some((item) => item.tradeStatus);
   const filteredSymbols = useMemo(() => {
     const keyword = search.trim().toUpperCase();
     return symbols
-      .filter((item) => item.category === categoryFilter)
-      .filter((item) => matchesFilter(item, marketFilter))
+      .filter((item) => !hasCategories || item.category === categoryFilter)
+      .filter((item) => !hasMarketFilters || matchesFilter(item, marketFilter))
       .filter((item) => matchesSearch(item, keyword))
       .sort((a, b) => a.symbol.localeCompare(b.symbol));
-  }, [categoryFilter, marketFilter, search, symbols]);
+  }, [categoryFilter, hasCategories, hasMarketFilters, marketFilter, search, symbols]);
 
   const categoryCounts = useMemo(
     () => new Map(categoryFilters.map((category) => [category.value, symbols.filter((item) => item.category === category.value).length])),
@@ -76,18 +103,22 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
     <>
       <button
         type="button"
-        className="xh-market-trigger"
+        className={`xh-market-trigger ${triggerVariant === "terminal" ? "is-terminal" : ""}`}
         aria-haspopup="dialog"
         aria-expanded={open}
         onClick={() => setOpen(true)}
       >
-        <MarketIcon className="xh-market-token" iconUrl={selected.iconUrl} fallback={selected.apiSymbol} />
+        <MarketIcon className="xh-market-token" iconUrl={selected.iconUrl} fallback={selected.providerCoin ?? selected.apiSymbol} />
         <span className="min-w-0 text-left">
           <span className="xh-market-trigger-symbol">
-            {selected.apiSymbol}
-            <span>/USDT</span>
+            {triggerVariant === "terminal" ? selected.symbol : selected.apiSymbol}
+            {triggerVariant === "default" ? <span>/USDT</span> : null}
           </span>
-          <span className="xh-market-trigger-name">{selected.displayName}</span>
+          <span className="xh-market-trigger-name">
+            {triggerVariant === "terminal"
+              ? `Hyperliquid perpetual · ${context === "real" ? "Testnet" : "Demo"}`
+              : selected.displayName}
+          </span>
         </span>
         <ChevronDown className="xh-market-trigger-chevron" size={18} aria-hidden="true" />
       </button>
@@ -95,7 +126,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
       <Modal
         open={open}
         title="选择市场"
-        description={`${symbols.length} 个 Hyperliquid 永续合约，仅用于内部模拟交易`}
+        description={`${symbols.length} 个 Hyperliquid 永续合约 · ${context === "real" ? "Hyperliquid Testnet" : "内部模拟交易"}`}
         onClose={() => setOpen(false)}
         shellClassName="xh-market-modal"
         bodyClassName="xh-market-modal-body"
@@ -117,7 +148,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
           ) : null}
         </div>
 
-        <div className="xh-market-filters" role="tablist" aria-label="市场分类">
+        {hasCategories ? <div className="xh-market-filters" role="tablist" aria-label="市场分类">
           {categoryFilters.map((category) => {
             const count = categoryCounts.get(category.value) ?? 0;
             return (
@@ -134,9 +165,9 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
               </button>
             );
           })}
-        </div>
+        </div> : null}
 
-        <div className="xh-market-filters" role="tablist" aria-label="市场筛选">
+        {hasMarketFilters ? <div className="xh-market-filters" role="tablist" aria-label="市场筛选">
           {marketFilters.map((filter) => {
             const count = symbols.filter((item) => item.category === categoryFilter && matchesFilter(item, filter.value)).length;
             return (
@@ -153,12 +184,12 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
               </button>
             );
           })}
-        </div>
+        </div> : null}
 
         <div className="xh-market-list-header" aria-hidden="true">
           <span>市场</span>
           <span>杠杆</span>
-          <span>最小数量</span>
+          <span>{hasMarketFilters ? "最小数量" : "来源"}</span>
           <span>状态</span>
         </div>
 
@@ -173,7 +204,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
               const isSelected = item.symbol === selectedSymbol;
               return (
                 <button
-                  key={item.id}
+                  key={item.id ?? item.symbol}
                   type="button"
                   role="option"
                   aria-selected={isSelected}
@@ -181,16 +212,18 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
                   onClick={() => selectSymbol(item.symbol)}
                 >
                   <span className="xh-market-row-main">
-                    <MarketIcon className="xh-market-row-token" iconUrl={item.iconUrl} fallback={item.apiSymbol} />
+                    <MarketIcon className="xh-market-row-token" iconUrl={item.iconUrl} fallback={item.providerCoin ?? item.apiSymbol} />
                     <span className="min-w-0">
                       <strong>{marketDisplaySymbol(item)}</strong>
-                      <small>{item.displayName} · {item.sourceDex}</small>
+                      <small>{item.displayName}{item.sourceDex ? ` · ${item.sourceDex}` : ""}</small>
                     </span>
                     {isSelected ? <Check className="xh-market-row-check" size={16} aria-hidden="true" /> : null}
                   </span>
-                  <span className="xh-market-row-value">{item.leverage}×</span>
-                  <span className="xh-market-row-value">{formatQuantity(item.minLot, item.lotStep)}</span>
-                  <MarketStatus status={item.tradeStatus} />
+                  <span className="xh-market-row-value">{item.leverage ? `${item.leverage}×` : "-"}</span>
+                  <span className="xh-market-row-value">{hasMarketFilters ? formatQuantity(item.minLot ?? 0, item.lotStep ?? 1) : (item.sourceDex ?? "Hyperliquid")}</span>
+                  {item.tradeStatus
+                    ? <MarketStatus status={item.tradeStatus} />
+                    : <span className="xh-market-status is-enabled">Testnet</span>}
                 </button>
               );
             })
@@ -206,7 +239,7 @@ export function MarketSymbolPicker({ symbols, selectedSymbol, onSelect }: Market
   );
 }
 
-function marketDisplaySymbol(symbol: TradeSymbol) {
+function marketDisplaySymbol(symbol: MarketPickerSymbol) {
   return symbol.sourceType === "main" ? `${symbol.apiSymbol}/USDT` : symbol.symbol;
 }
 
@@ -215,20 +248,20 @@ function MarketStatus({ status }: { status: TradeStatus }) {
   return <span className={`xh-market-status is-${status}`}>{label}</span>;
 }
 
-function matchesFilter(symbol: TradeSymbol, filter: MarketFilter) {
+function matchesFilter(symbol: MarketPickerSymbol, filter: MarketFilter) {
   if (filter === "all") {
     return true;
   }
   if (filter === "high_leverage") {
-    return symbol.leverage >= 20;
+    return (symbol.leverage ?? 0) >= 20;
   }
   if (filter === "small_minimum") {
-    return symbol.minLot <= 0.01;
+    return (symbol.minLot ?? Number.POSITIVE_INFINITY) <= 0.01;
   }
   return symbol.tradeStatus === filter;
 }
 
-function matchesSearch(symbol: TradeSymbol, keyword: string) {
+function matchesSearch(symbol: MarketPickerSymbol, keyword: string) {
   if (!keyword) {
     return true;
   }
