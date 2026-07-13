@@ -1,4 +1,8 @@
 import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
+
+const serverEntry = fileURLToPath(new URL("../dist-server/index.js", import.meta.url));
 
 const baseEnvironment = {
   ...process.env,
@@ -43,9 +47,10 @@ for (const [name, overrides, expected] of cases) {
       delete env[key];
     }
   }
-  const result = spawnSync(process.execPath, ["dist-server/index.js"], {
+  const result = spawnSync(process.execPath, [serverEntry], {
     encoding: "utf8",
     env,
+    cwd: tmpdir(),
     timeout: 5_000,
   });
   const output = `${result.stdout}\n${result.stderr}`;
