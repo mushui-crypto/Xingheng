@@ -65,8 +65,10 @@ server/modules/api/realTradingRoutes.ts
 `GET /api/real-trading/market/symbols`
 
 - 返回 Hyperliquid testnet 可交易 perpetual 列表。
-- 字段包含内部 symbol、provider coin、iconUrl、assetId、price/size 精度、maxLeverage、supportedMarginModes、marginModeConstraint、status。
-- `iconUrl` 由 `providerCoin` 派生：`https://app.hyperliquid.xyz/coins/{providerCoin}.svg`，providerCoin 异常时返回 `null`。
+- 字段包含内部 symbol、providerMarketId、provider coin、category、iconUrl、assetId、price/size 精度、maxLeverage、supportedMarginModes、marginModeConstraint、status。
+- `providerMarketId` 为 Hyperliquid Testnet 原始 market id；主 DEX 示例为 `BTC`，XYZ / HIP-3 示例为 `xyz:GOLD`、`xyz:AAPL`。
+- `category` 为 `"crypto"|"metals"|"us_equities"|"indices"|"other"`；来源优先使用 Hyperliquid Testnet `perpCategories` 与 `perpConciseAnnotations`，`stocks/equities` 映射为 `us_equities`，`indices` 映射为 `indices`，`commodities` 且 provider coin 为 `GOLD/SILVER/PLATINUM/PALLADIUM` 映射为 `metals`。分类接口不可用时不阻断 symbols：主 DEX 默认 `crypto`，可识别贵金属默认 `metals`，其余 HIP-3 / 特殊市场默认 `other`，不从 demo 主网借分类。
+- `/app/trade` 的 `iconUrl` 由 `providerMarketId` 派生：`https://app.hyperliquid-testnet.xyz/coins/{providerMarketId}.svg`，其中冒号保留不转义；providerMarketId 异常时返回 `null`。通用 demo/market API 的图标域名按其主行情网络语义保持独立。
 - `supportedMarginModes` 为 `("cross"|"isolated")[]`；`marginModeConstraint` 为 `"cross_and_isolated"|"isolated_only"`。
 - 当 Hyperliquid meta item 的 `marginMode` 为 `strictIsolated` / `noCross`，或 legacy `onlyIsolated=true` 时，只返回 `supportedMarginModes=["isolated"]`、`marginModeConstraint="isolated_only"`；其他品种返回 `["cross","isolated"]`、`cross_and_isolated`。
 - `maxLeverage` 继续使用 Hyperliquid `meta.universe[].maxLeverage`。

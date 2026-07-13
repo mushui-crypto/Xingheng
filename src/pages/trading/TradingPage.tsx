@@ -1,12 +1,14 @@
 import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Badge } from "../../components/ui/Badge";
 import { Card } from "../../components/ui/Card";
 import { MarketSymbolPicker } from "../../components/trading/MarketSymbolPicker";
 import {
   closePosition,
   fetchCandles,
+  fetchMarketOrderbook,
+  fetchMarketSummary,
+  fetchMarketTrades,
   fetchMarketSymbols,
   fetchOrders,
   fetchPositions,
@@ -14,6 +16,9 @@ import {
   fetchTradingAccount,
   placeMarketOrder,
   type ApiCandle,
+  type ApiMarketOrderbook,
+  type ApiMarketSummary,
+  type ApiMarketTrade,
   type ApiTicker,
   type OrderRecord,
   type PositionView,
@@ -26,10 +31,13 @@ import { formatPrice } from "../../utils/price";
 import { normalizeQuantity } from "../../utils/quantity";
 import { SimulationAccountContextPanel } from "../../features/trading/components/SimulationAccountContextPanel";
 import { TradingChartPanel } from "../../features/trading/components/TradingChartPanel";
-import { TradingOrderPanel, TradingQuotePanel } from "../../features/trading/components/TradingOrderPanel";
-import { TradingOrdersTable, TradingPositionsTable } from "../../features/trading/components/TradingRecords";
+import { MarketDepthPanel } from "../../features/trading/components/MarketDepthPanel";
+import { TradeStat } from "../../features/trading/components/TradeStat";
+import { TradingOrderPanel } from "../../features/trading/components/TradingOrderPanel";
+import { TradingRecords } from "../../features/trading/components/TradingRecords";
 import { Toast } from "../../features/trading/components/TradingFeedback";
 import { getChartPriceFormat, isValidCandle, normalizeChartCandles, toChartCandle } from "../../features/trading/lib/chart";
+import { formatCompactMoney, formatFundingPercent, formatMarketDayChange, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import { readCurrentSimulationAccountId, shortSimulationId } from "../../features/trading/lib/simulationAccount";
 import { mergeTradingSearchParams } from "../../features/trading/lib/tradingSearchParams";
 import { currentSimulationAccountKey } from "../../features/trading/model/constants";
@@ -55,6 +63,11 @@ export function TradingPage() {
   const digits = selectedConfig?.digits ?? 2;
   const [interval, setIntervalValue] = useState<CandleInterval>("1m");
   const [ticker, setTicker] = useState<ApiTicker>({ symbol, status: "disconnected" });
+  const [marketSummary, setMarketSummary] = useState<ApiMarketSummary | null>(null);
+  const [orderbook, setOrderbook] = useState<ApiMarketOrderbook | null>(null);
+  const [marketTrades, setMarketTrades] = useState<ApiMarketTrade[]>([]);
+  const [marketDataError, setMarketDataError] = useState("");
+  const [marketDataLoading, setMarketDataLoading] = useState(true);
   const [account, setAccount] = useState<TradingAccount | null>(null);
   const [positions, setPositions] = useState<PositionView[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
@@ -67,14 +80,15 @@ export function TradingPage() {
   const [closingPositionId, setClosingPositionId] = useState<string | null>(null);
   const [chartMessage, setChartMessage] = useState("");
   const [chartLoading, setChartLoading] = useState(true);
+  const [latestCandle, setLatestCandle] = useState<ApiCandle | null>(null);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const closingPositionIdRef = useRef<string | null>(null);
   const initialSimulationAccountIdRef = useRef(searchParams.get("simulationAccountId") ?? "");
+  const marketDataRequestRef = useRef(0);
   const switchToastShownRef = useRef(false);
 
-  const statusTone = ticker.status === "connected" ? "success" : ticker.status === "stale" ? "neutral" : "danger";
   const statusText = ticker.status === "connected" ? "实时行情" : ticker.status === "stale" ? "行情延迟" : "行情连接中断";
   const selectedSimulationAccount = simulationAccounts.find((item) => item.id === selectedSimulationAccountId) ?? null;
   const hasSimulationAccounts = simulationAccounts.length > 0;
@@ -91,6 +105,28 @@ export function TradingPage() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     return `${protocol}//${window.location.host}/ws`;
   }, []);
+
+  const loadMarketData = async (targetSymbol = symbol) => {
+    const requestId = ++marketDataRequestRef.current;
+    setMarketDataLoading(true);
+    setMarketDataError("");
+    try {
+      const [nextSummary, nextOrderbook, nextTrades] = await Promise.all([
+        fetchMarketSummary(targetSymbol),
+        fetchMarketOrderbook(targetSymbol),
+        fetchMarketTrades(targetSymbol),
+      ]);
+      if (requestId !== marketDataRequestRef.current) return;
+      setMarketSummary(nextSummary);
+      setOrderbook(nextOrderbook);
+      setMarketTrades(nextTrades);
+    } catch (error) {
+      if (requestId !== marketDataRequestRef.current) return;
+      setMarketDataError(error instanceof Error ? error.message : "市场数据加载失败。");
+    } finally {
+      if (requestId === marketDataRequestRef.current) setMarketDataLoading(false);
+    }
+  };
 
   useEffect(() => {
     if (symbols.length > 0 && !symbols.some((item) => item.symbol === selectedSymbol)) {
@@ -113,6 +149,18 @@ export function TradingPage() {
       .then(setSymbolsFromBackend)
       .catch((error) => setMessage(error instanceof Error ? error.message : "品种列表加载失败。"));
   }, [setSymbolsFromBackend]);
+
+  useEffect(() => {
+    setMarketSummary(null);
+    setOrderbook(null);
+    setMarketTrades([]);
+    void loadMarketData(symbol);
+
+    return () => {
+      marketDataRequestRef.current += 1;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [symbol]);
 
   useEffect(() => {
     let cancelled = false;
@@ -173,8 +221,9 @@ export function TradingPage() {
       return;
     }
 
-    const chart = createChart(chartContainerRef.current, {
-      height: 460,
+    const container = chartContainerRef.current;
+    const chart = createChart(container, {
+      height: container.clientHeight || 520,
       layout: { background: { color: "#0B1118" }, textColor: "#9CA3AF" },
       grid: {
         vertLines: { color: "#17202d" },
@@ -197,12 +246,14 @@ export function TradingPage() {
     chartRef.current = chart;
     candleSeriesRef.current = candleSeries;
 
-    const resize = () => chart.applyOptions({ width: chartContainerRef.current?.clientWidth ?? 900 });
-    resize();
-    window.addEventListener("resize", resize);
+    const resizeObserver = new ResizeObserver(([entry]) => {
+      const { height, width } = entry.contentRect;
+      if (height > 0 && width > 0) chart.applyOptions({ height, width });
+    });
+    resizeObserver.observe(container);
 
     return () => {
-      window.removeEventListener("resize", resize);
+      resizeObserver.disconnect();
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
@@ -228,9 +279,11 @@ export function TradingPage() {
           return;
         }
         if (candles.length === 0) {
+          setLatestCandle(null);
           setChartMessage("暂未取得可展示的K线数据，系统会继续刷新。");
         } else {
           candleSeriesRef.current?.setData(candles.map(toChartCandle));
+          setLatestCandle(candles[candles.length - 1]);
           chartRef.current?.timeScale().fitContent();
         }
       } catch (error) {
@@ -290,6 +343,7 @@ export function TradingPage() {
       }
       if (payload.type === "candle" && payload.interval === interval && payload.data && isValidCandle(payload.data)) {
         candleSeriesRef.current?.update(toChartCandle(payload.data));
+        setLatestCandle(payload.data);
         setChartMessage("");
       }
     });
@@ -373,25 +427,31 @@ export function TradingPage() {
   }
 
   return (
-    <div className="xh-trade-terminal">
+    <div className="xh-trade-terminal xh-real-trade-terminal xh-demo-trade-terminal">
       <Toast message={toastMessage} />
       <section className="xh-trade-marketbar">
         <div className="xh-trade-marketbar-main">
           <h1 className="sr-only">{symbol} 交易终端</h1>
           <MarketSymbolPicker
+            context="demo"
             symbols={symbols}
             selectedSymbol={symbol}
             onSelect={setSelectedSymbol}
+            triggerVariant="terminal"
           />
-          <Badge tone={statusTone}>{statusText}</Badge>
+          <span className="xh-real-market-badge">PERP · DEMO</span>
         </div>
         <div className="xh-trade-market-stats">
-          <TradeStat label="标记" value={formatPrice(ticker.last, digits)} />
-          <TradeStat label="Bid" value={formatPrice(ticker.bid, digits)} />
-          <TradeStat label="Ask" value={formatPrice(ticker.ask, digits)} />
-          <TradeStat label="Spread" value={formatPrice(ticker.spread, digits)} />
-          <TradeStat label="来源" value={ticker.source ?? "-"} muted />
-          <TradeStat label="更新时间" value={ticker.timestamp ? new Date(ticker.timestamp).toLocaleTimeString("zh-CN") : "-"} muted />
+          <TradeStat label="Mark" value={formatPrice(marketSummary?.markPrice ?? undefined, digits)} />
+          <TradeStat label="24h Change" value={formatMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)} tone={marketNumberTone(marketSummary?.dayChange)} />
+          <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
+          <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
+          <TradeStat label="Funding" value={formatFundingPercent(marketSummary?.funding)} tone={marketNumberTone(marketSummary?.funding)} />
+          <TradeStat
+            label="Status"
+            value={marketDataError ? "ERROR" : (marketSummary?.status ?? statusText)}
+            tone={marketDataError || ticker.status === "disconnected" ? "negative" : ticker.status === "connected" ? "positive" : undefined}
+          />
         </div>
       </section>
 
@@ -403,54 +463,56 @@ export function TradingPage() {
                 chartContainerRef={chartContainerRef}
                 chartLoading={chartLoading}
                 chartMessage={chartMessage}
+                dayChange={marketSummary?.dayChange}
+                dayChangePercent={marketSummary?.dayChangePercent}
                 interval={interval}
+                latestCandle={latestCandle}
+                marketDataLoading={marketDataLoading}
                 onIntervalChange={setIntervalValue}
+                onRefreshMarketData={() => void loadMarketData(symbol)}
                 selectedConfig={selectedConfig}
-                symbol={symbol}
-                themeColor={themeColor}
+                ticker={ticker}
               />
             </div>
 
             <div className="xh-trade-depth-stage">
-              <TradingQuotePanel
+              <MarketDepthPanel
+                ariaLabel="模拟盘口数据"
                 digits={digits}
-                ticker={ticker}
+                markPrice={marketSummary?.markPrice}
+                midPrice={marketSummary?.midPrice}
+                orderbook={orderbook}
+                trades={marketTrades}
               />
             </div>
           </section>
 
-          <div className="xh-trade-record-stack">
-            <TradingPositionsTable
-              closingPositionId={closingPositionId}
-              digits={digits}
-              hasSimulationAccounts={hasSimulationAccounts}
-              lotStep={selectedConfig.lotStep}
-              needsSimulationAccount={needsSimulationAccount}
-              onClosePosition={submitClose}
-              positions={positions}
-              selectedSimulationAccount={selectedSimulationAccount}
-            />
-
-            <TradingOrdersTable
-              digits={digits}
-              hasSimulationAccounts={hasSimulationAccounts}
-              lotStep={selectedConfig.lotStep}
-              needsSimulationAccount={needsSimulationAccount}
-              orders={orders}
-              selectedSimulationAccount={selectedSimulationAccount}
-            />
-          </div>
+          <TradingRecords
+            closingPositionId={closingPositionId}
+            contractSize={selectedConfig.contractSize}
+            digits={digits}
+            hasSimulationAccounts={hasSimulationAccounts}
+            lotStep={selectedConfig.lotStep}
+            needsSimulationAccount={needsSimulationAccount}
+            onClosePosition={submitClose}
+            orders={orders}
+            positions={positions}
+            selectedSimulationAccount={selectedSimulationAccount}
+          />
         </main>
 
         <aside className="xh-trade-order-rail">
           <TradingOrderPanel
+            account={account}
             message={message}
             needsSimulationAccount={needsSimulationAccount}
             onSubmitOrder={submitOrder}
             orderDisabled={orderDisabled}
+            positionSize={positions.filter((position) => position.symbol === symbol).reduce((total, position) => total + position.volume, 0)}
             selectedConfig={selectedConfig}
             setVolume={setVolume}
             simulationAccountsLoading={simulationAccountsLoading}
+            ticker={ticker}
             volume={volume}
           />
           <SimulationAccountContextPanel
@@ -460,15 +522,6 @@ export function TradingPage() {
           />
         </aside>
       </div>
-    </div>
-  );
-}
-
-function TradeStat({ label, muted = false, value }: { label: string; muted?: boolean; value: string }) {
-  return (
-    <div className="xh-trade-stat">
-      <span>{label}</span>
-      <strong className={muted ? "text-muted" : ""}>{value}</strong>
     </div>
   );
 }
