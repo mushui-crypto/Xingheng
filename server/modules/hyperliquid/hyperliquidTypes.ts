@@ -3,10 +3,55 @@ import type { HyperliquidRealTradingNetwork } from "./hyperliquidConfig";
 
 export type RealTradingMarketCategory = "crypto" | "metals" | "us_equities" | "indices" | "other";
 
+export type RealTradingMarketSourceType = "main" | "hip3";
+
+export type RealTradingMarketStatus = "active" | "close_only" | "disabled" | "delisted";
+
+export type HyperliquidUniverseItem = {
+  name: string;
+  szDecimals: number;
+  maxLeverage: number;
+  isDelisted?: boolean;
+  marginMode?: "strictIsolated" | "noCross" | "normal";
+  onlyIsolated?: boolean;
+};
+
+export type HyperliquidAssetContext = {
+  markPx?: string;
+  oraclePx?: string;
+  midPx?: string;
+  prevDayPx?: string;
+  dayNtlVlm?: string;
+  openInterest?: string;
+  funding?: string;
+  nextFundingTime?: number;
+};
+
+export type RealTradingMarketDefinition = {
+  symbol: string;
+  providerMarketId: string;
+  providerCoin: string;
+  sourceDex: string;
+  sourceType: RealTradingMarketSourceType;
+  category: RealTradingMarketCategory;
+  assetId: number;
+  universeIndex: number;
+  universeItem: HyperliquidUniverseItem;
+  context: HyperliquidAssetContext;
+};
+
+export type RealTradingMarketCatalog = {
+  markets: RealTradingMarketDefinition[];
+  bySymbol: Map<string, RealTradingMarketDefinition>;
+  byProviderMarketId: Map<string, RealTradingMarketDefinition>;
+};
+
 export type RealTradingSymbol = {
   symbol: string;
   providerMarketId: string;
   providerCoin: string;
+  sourceDex: string;
+  sourceType: RealTradingMarketSourceType;
   category: RealTradingMarketCategory;
   iconUrl: string | null;
   assetId: number;
@@ -15,7 +60,7 @@ export type RealTradingSymbol = {
   maxLeverage: number;
   supportedMarginModes: Array<"cross" | "isolated">;
   marginModeConstraint: "cross_and_isolated" | "isolated_only";
-  status: "active" | "delisted";
+  status: RealTradingMarketStatus;
   network: HyperliquidRealTradingNetwork;
 };
 

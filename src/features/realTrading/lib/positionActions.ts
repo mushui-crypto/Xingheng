@@ -2,6 +2,7 @@ import type { RealPosition, RealTradingSymbol } from "../../../api/realTrading";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 import type { HyperliquidLimitOrderInput, HyperliquidSessionSigner } from "./hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "./hyperliquidPrice";
+import { resolveRealTradingSymbolForRecord } from "./realTradingMarket";
 import { buildPositionTpslOrders } from "./tpslOrders";
 
 export async function submitPositionCloseRequest(
@@ -32,8 +33,7 @@ export async function submitPositionCloseRequest(
 }
 
 export function resolvePositionSymbol(position: RealPosition, symbols: RealTradingSymbol[]) {
-  const config = symbols.find((item) => item.symbol === position.symbol)
-    ?? symbols.find((item) => item.providerCoin === position.coin);
+  const config = resolveRealTradingSymbolForRecord(position, symbols);
   if (!config || typeof config.assetId !== "number") {
     throw new Error(`${position.coin} 缺少真实交易资产映射。`);
   }

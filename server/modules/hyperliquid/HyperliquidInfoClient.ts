@@ -1,12 +1,16 @@
 import type { CandleInterval } from "../../types";
-import { normalizeInterval, normalizeLimit, normalizeSymbol } from "../market/marketConfig";
+import { normalizeInterval, normalizeLimit } from "../market/marketConfig";
 import { hyperliquidTestnetNetwork } from "./hyperliquidConfig";
 import type {
+  HyperliquidAssetContext,
+  HyperliquidUniverseItem,
   RealTradingAccountSummary,
   RealTradingCandle,
   RealTradingFees,
   RealTradingFill,
   RealTradingHistoricalOrder,
+  RealTradingMarketCatalog,
+  RealTradingMarketDefinition,
   RealTradingMarketSummary,
   RealTradingOpenOrder,
   RealTradingOrderbook,
@@ -20,27 +24,13 @@ import type {
 const requestTimeoutMs = 15_000;
 const hyperliquidTestnetIconBaseUrl = "https://app.hyperliquid-testnet.xyz/coins";
 const categoryCacheTtlMs = 5 * 60_000;
+const marketCatalogCacheTtlMs = 5 * 60_000;
+const hip3OrderbookValidationConcurrency = 4;
 const metalProviderCoins = new Set(["GOLD", "SILVER", "PLATINUM", "PALLADIUM"]);
+const defaultTrustedHyperliquidTestnetHip3Dexes = ["xyz"];
+const indexProviderCoins = new Set(["SPX", "SPY", "NDX", "NASDAQ", "QQQ", "DOW", "DJI", "IWM", "RUT", "VIX"]);
 
-type HyperliquidUniverseItem = {
-  name: string;
-  szDecimals: number;
-  maxLeverage: number;
-  isDelisted?: boolean;
-  marginMode?: "strictIsolated" | "noCross" | "normal";
-  onlyIsolated?: boolean;
-};
-
-type HyperliquidAssetContext = {
-  markPx?: string;
-  oraclePx?: string;
-  midPx?: string;
-  prevDayPx?: string;
-  dayNtlVlm?: string;
-  openInterest?: string;
-  funding?: string;
-  nextFundingTime?: number;
-};
+export const trustedHyperliquidTestnetHip3Dexes = parseTrustedHyperliquidTestnetHip3Dexes();
 
 type HyperliquidBookLevel = {
   px: string | number;
@@ -64,56 +54,50 @@ type HyperliquidCandle = {
 export class HyperliquidInfoClient {
   private categoryCache: { expiresAt: number; value: Map<string, RealTradingMarketCategory> } | null = null;
   private categoryRequest: Promise<Map<string, RealTradingMarketCategory>> | null = null;
+  private marketCatalogCache: { expiresAt: number; value: RealTradingMarketCatalog } | null = null;
+  private marketCatalogRequest: Promise<RealTradingMarketCatalog> | null = null;
 
   constructor(private baseUrl: string) {}
 
   async getSymbols(): Promise<RealTradingSymbol[]> {
-    const [{ universe, contexts }, categoryMap] = await Promise.all([
-      this.getMetaAndContexts(),
-      this.getPerpCategoryMap().catch(() => new Map<string, RealTradingMarketCategory>()),
-    ]);
-    return universe.map((item, index) => {
+    const catalog = await this.getMarketCatalog();
+    return catalog.markets.map((market) => {
+      const item = market.universeItem;
       const marginCapabilities = normalizeSymbolMarginCapabilities(item);
-      const providerMarketId = item.name;
       return {
-        symbol: toInternalSymbol(providerMarketId),
-        providerMarketId,
-        providerCoin: item.name,
-        category: resolveRealTradingSymbolCategory(providerMarketId, categoryMap),
-        iconUrl: buildRealTradingIconUrl(providerMarketId),
-        assetId: index,
+        symbol: market.symbol,
+        providerMarketId: market.providerMarketId,
+        providerCoin: market.providerCoin,
+        sourceDex: market.sourceDex,
+        sourceType: market.sourceType,
+        category: market.category,
+        iconUrl: buildRealTradingIconUrl(market.providerMarketId),
+        assetId: market.assetId,
         szDecimals: Number(item.szDecimals ?? 0),
-        pxDecimals: inferPriceDecimals(contexts[index]),
+        pxDecimals: inferPriceDecimals(market.context),
         maxLeverage: Number(item.maxLeverage ?? 1),
         supportedMarginModes: marginCapabilities.supportedMarginModes,
         marginModeConstraint: marginCapabilities.marginModeConstraint,
-        status: item.isDelisted ? "delisted" : "active",
+        status: "active",
         network: hyperliquidTestnetNetwork,
       };
     });
   }
 
   async getSummary(symbolInput: string): Promise<RealTradingMarketSummary> {
-    const symbol = normalizeSymbol(symbolInput);
-    const coin = toProviderCoin(symbol);
-    const { universe, contexts } = await this.getMetaAndContexts();
-    const index = universe.findIndex((item) => item.name === coin);
-    if (index < 0) {
-      throw new Error(`真实交易品种 ${symbol} 不存在。`);
-    }
-    return normalizeMarketSummary(symbol, coin, contexts[index] ?? {});
+    const market = await this.resolveMarket(symbolInput);
+    return normalizeMarketSummary(market.symbol, market.providerCoin, market.context);
   }
 
   async getOrderbook(symbolInput: string): Promise<RealTradingOrderbook> {
-    const symbol = normalizeSymbol(symbolInput);
-    const coin = toProviderCoin(symbol);
-    const payload = await this.postInfo({ type: "l2Book", coin });
+    const market = await this.resolveMarket(symbolInput);
+    const payload = await this.postInfo({ type: "l2Book", coin: market.providerMarketId });
     const levels = Array.isArray(payload?.levels) ? payload.levels : [];
     const bids = normalizeBookSide(Array.isArray(levels[0]) ? levels[0] : [], "desc");
     const asks = normalizeBookSide(Array.isArray(levels[1]) ? levels[1] : [], "asc");
     return {
-      symbol,
-      providerCoin: coin,
+      symbol: market.symbol,
+      providerCoin: market.providerCoin,
       bids,
       asks,
       timestamp: Number(payload?.time ?? Date.now()),
@@ -122,15 +106,14 @@ export class HyperliquidInfoClient {
   }
 
   async getTrades(symbolInput: string): Promise<RealTradingTrade[]> {
-    const symbol = normalizeSymbol(symbolInput);
-    const coin = toProviderCoin(symbol);
-    const payload = await this.postInfo({ type: "recentTrades", coin });
+    const market = await this.resolveMarket(symbolInput);
+    const payload = await this.postInfo({ type: "recentTrades", coin: market.providerMarketId });
     if (!Array.isArray(payload)) {
       throw new Error("Hyperliquid recentTrades returned an invalid payload.");
     }
     return payload.map((trade): RealTradingTrade => ({
-      symbol,
-      providerCoin: coin,
+      symbol: market.symbol,
+      providerCoin: market.providerCoin,
       price: Number(trade.px ?? trade.price ?? 0),
       size: Number(trade.sz ?? trade.size ?? 0),
       side: normalizeTradeSide(trade.side),
@@ -142,21 +125,20 @@ export class HyperliquidInfoClient {
   }
 
   async getCandles(symbolInput: string, intervalInput: string, limitInput: unknown): Promise<RealTradingCandle[]> {
-    const symbol = normalizeSymbol(symbolInput);
-    const coin = toProviderCoin(symbol);
+    const market = await this.resolveMarket(symbolInput);
     const interval = normalizeInterval(intervalInput);
     const limit = normalizeLimit(limitInput);
     const endTime = Date.now();
     const startTime = endTime - intervalDurationMs(interval) * (limit + 2);
     const payload = await this.postInfo({
       type: "candleSnapshot",
-      req: { coin, interval, startTime, endTime },
+      req: { coin: market.providerMarketId, interval, startTime, endTime },
     });
     if (!Array.isArray(payload)) {
       throw new Error("Hyperliquid candleSnapshot returned an invalid payload.");
     }
     return payload
-      .map((row) => normalizeCandle(row as HyperliquidCandle, symbol, coin, interval))
+      .map((row) => normalizeCandle(row as HyperliquidCandle, market.symbol, market.providerCoin, interval))
       .filter((candle): candle is RealTradingCandle => candle !== null)
       .sort((left, right) => left.time - right.time)
       .slice(-limit);
@@ -230,8 +212,144 @@ export class HyperliquidInfoClient {
     }
   }
 
-  private async getMetaAndContexts() {
-    const payload = await this.postInfo({ type: "metaAndAssetCtxs" });
+  private async getMarketCatalog(): Promise<RealTradingMarketCatalog> {
+    const now = Date.now();
+    if (this.marketCatalogCache && this.marketCatalogCache.expiresAt > now) {
+      return this.marketCatalogCache.value;
+    }
+    if (this.marketCatalogRequest) {
+      return this.marketCatalogRequest;
+    }
+    this.marketCatalogRequest = this.fetchMarketCatalog()
+      .then((value) => {
+        this.marketCatalogCache = { expiresAt: Date.now() + marketCatalogCacheTtlMs, value };
+        return value;
+      })
+      .finally(() => {
+        this.marketCatalogRequest = null;
+      });
+    return this.marketCatalogRequest;
+  }
+
+  private async resolveMarket(symbolInput: string): Promise<RealTradingMarketDefinition> {
+    const symbol = normalizeRealTradingSymbol(symbolInput);
+    const catalog = await this.getMarketCatalog();
+    const market = catalog.bySymbol.get(symbol);
+    if (!market) {
+      throw new Error(`真实交易品种 ${symbol} 不存在。`);
+    }
+    return market;
+  }
+
+  private async fetchMarketCatalog(): Promise<RealTradingMarketCatalog> {
+    const [mainMarketData, categoryMap, perpDexs] = await Promise.all([
+      this.getMetaAndContexts(),
+      this.getPerpCategoryMap().catch(() => new Map<string, RealTradingMarketCategory>()),
+      this.getPerpDexs().catch((error) => {
+        console.warn(`[real-trading] Hyperliquid perpDexs discovery unavailable; HIP-3 markets skipped: ${sanitizeError(error)}`);
+        return [];
+      }),
+    ]);
+    const markets: RealTradingMarketDefinition[] = [];
+    const bySymbol = new Map<string, RealTradingMarketDefinition>();
+    const byProviderMarketId = new Map<string, RealTradingMarketDefinition>();
+
+    const buildMarkets = (
+      universe: HyperliquidUniverseItem[],
+      contexts: HyperliquidAssetContext[],
+      sourceDex: string,
+      sourceType: "main" | "hip3",
+      perpDexIndex: number | null,
+    ) => universe.flatMap((item, universeIndex): RealTradingMarketDefinition[] => {
+        const context = contexts[universeIndex];
+        const providerMarketId = String(item?.name ?? "").trim();
+        if (
+          item?.isDelisted
+          || !context
+          || !isValidProviderMarketId(providerMarketId, sourceDex, sourceType)
+          || (sourceType === "main" && toNullablePositiveNumber(context.midPx) === null)
+          || (sourceType === "hip3" && !hasReliableHip3Quote(context))
+        ) {
+          return [];
+        }
+        const providerCoin = getProviderCoinFromMarketId(providerMarketId);
+        const symbol = toInternalMarketSymbol(providerCoin, sourceDex, sourceType);
+        if (!symbol) return [];
+        return [{
+          symbol,
+          providerMarketId,
+          providerCoin,
+          sourceDex,
+          sourceType,
+          category: resolveRealTradingSymbolCategory(providerMarketId, categoryMap),
+          assetId: calculateHyperliquidAssetId(universeIndex, perpDexIndex),
+          universeIndex,
+          universeItem: item,
+          context,
+        }];
+      });
+
+    const addMarkets = (candidates: RealTradingMarketDefinition[]) => {
+      candidates.forEach((market) => {
+        if (bySymbol.has(market.symbol) || byProviderMarketId.has(market.providerMarketId)) return;
+        markets.push(market);
+        bySymbol.set(market.symbol, market);
+        byProviderMarketId.set(market.providerMarketId, market);
+      });
+    };
+
+    addMarkets(buildMarkets(mainMarketData.universe, mainMarketData.contexts, "main", "main", null));
+
+    for (const dex of perpDexs) {
+      if (!trustedHyperliquidTestnetHip3Dexes.some((trustedDex) => trustedDex.toLowerCase() === dex.name.toLowerCase())) {
+        continue;
+      }
+      try {
+        const marketData = await this.getMetaAndContexts(dex.name);
+        const hip3Candidates = buildMarkets(marketData.universe, marketData.contexts, dex.name, "hip3", dex.index);
+        const tradableHip3Markets = await filterWithConcurrency(
+          hip3Candidates,
+          hip3OrderbookValidationConcurrency,
+          (market) => this.hasTwoSidedOrderbook(market.providerMarketId),
+        );
+        addMarkets(tradableHip3Markets);
+      } catch (error) {
+        console.warn(`[real-trading] Hyperliquid HIP-3 DEX ${dex.name} unavailable; skipped: ${sanitizeError(error)}`);
+      }
+    }
+
+    return { markets, bySymbol, byProviderMarketId };
+  }
+
+  private async hasTwoSidedOrderbook(providerMarketId: string) {
+    try {
+      const payload = await this.postInfo({ type: "l2Book", coin: providerMarketId });
+      const levels = Array.isArray(payload?.levels) ? payload.levels : [];
+      return Array.isArray(levels[0]) && levels[0].length > 0
+        && Array.isArray(levels[1]) && levels[1].length > 0;
+    } catch (error) {
+      console.warn(`[real-trading] Hyperliquid HIP-3 market ${providerMarketId} orderbook unavailable; skipped: ${sanitizeError(error)}`);
+      return false;
+    }
+  }
+
+  private async getPerpDexs() {
+    const payload = await this.postInfo({ type: "perpDexs" });
+    if (!Array.isArray(payload)) {
+      throw new Error("Hyperliquid perpDexs returned an invalid payload.");
+    }
+    return payload.flatMap((item, index) => {
+      const name = item && typeof item === "object" ? String(item.name ?? "").trim() : "";
+      const explicitIndex = item && typeof item === "object"
+        ? Number((item as { index?: unknown; perpDexIndex?: unknown }).perpDexIndex ?? (item as { index?: unknown }).index)
+        : NaN;
+      const perpDexIndex = Number.isSafeInteger(explicitIndex) && explicitIndex >= 0 ? explicitIndex : index;
+      return name ? [{ name, index: perpDexIndex }] : [];
+    });
+  }
+
+  private async getMetaAndContexts(dex?: string) {
+    const payload = await this.postInfo({ type: "metaAndAssetCtxs", ...(dex ? { dex } : {}) });
     if (!Array.isArray(payload) || !payload[0] || !Array.isArray(payload[0].universe) || !Array.isArray(payload[1])) {
       throw new Error("Hyperliquid metaAndAssetCtxs returned an invalid payload.");
     }
@@ -292,7 +410,11 @@ export class HyperliquidInfoClient {
 }
 
 export function normalizeRealTradingSymbol(value: unknown) {
-  return normalizeSymbol(String(value ?? "BTCUSDT"));
+  const symbol = String(value ?? "BTCUSDT").trim().toUpperCase();
+  if (!/^[A-Z0-9][A-Z0-9_-]*USDT$/.test(symbol)) {
+    throw new Error(`真实交易品种 ${symbol || "(empty)"} 不合法。`);
+  }
+  return symbol;
 }
 
 export function normalizeAddress(value: unknown) {
@@ -532,16 +654,74 @@ function normalizeAccountSummary(
 }
 
 function toInternalSymbol(providerCoin: string) {
-  return `${providerCoin.toUpperCase()}USDT`;
+  const marketId = String(providerCoin ?? "").trim();
+  const separatorIndex = marketId.indexOf(":");
+  if (separatorIndex > 0) {
+    return toInternalMarketSymbol(
+      marketId.slice(separatorIndex + 1),
+      marketId.slice(0, separatorIndex),
+      "hip3",
+    );
+  }
+  return toInternalMarketSymbol(marketId, "main", "main");
 }
 
-function toProviderCoin(symbol: string) {
-  const normalized = normalizeSymbol(symbol);
-  return normalized.endsWith("USDT") ? normalized.slice(0, -4) : normalized;
+function toInternalMarketSymbol(providerCoin: string, sourceDex: string, sourceType: "main" | "hip3") {
+  const coin = providerCoin.trim().toUpperCase();
+  if (!coin) return "";
+  return sourceType === "hip3"
+    ? `${sourceDex.trim().toUpperCase()}-${coin}USDT`
+    : `${coin}USDT`;
+}
+
+function hasReliableHip3Quote(context: HyperliquidAssetContext) {
+  const markPrice = toNullablePositiveNumber(context.markPx);
+  const midPrice = toNullablePositiveNumber(context.midPx);
+  const oraclePrice = toNullablePositiveNumber(context.oraclePx);
+  return markPrice !== null && (midPrice !== null || oraclePrice !== null);
+}
+
+function isValidProviderMarketId(providerMarketId: string, sourceDex: string, sourceType: "main" | "hip3") {
+  if (!/^[A-Za-z0-9][A-Za-z0-9:_-]*$/.test(providerMarketId)) return false;
+  if (sourceType === "main") return !providerMarketId.includes(":");
+  const separatorIndex = providerMarketId.indexOf(":");
+  return separatorIndex > 0
+    && providerMarketId.slice(0, separatorIndex).toLowerCase() === sourceDex.toLowerCase()
+    && providerMarketId.slice(separatorIndex + 1).length > 0;
+}
+
+export function calculateHyperliquidAssetId(universeIndex: number, perpDexIndex: number | null) {
+  if (!Number.isSafeInteger(universeIndex) || universeIndex < 0) {
+    throw new Error("Hyperliquid universe index is invalid.");
+  }
+  if (perpDexIndex === null) return universeIndex;
+  if (!Number.isSafeInteger(perpDexIndex) || perpDexIndex < 0) {
+    throw new Error("Hyperliquid perpetual DEX index is invalid.");
+  }
+  return 100_000 + perpDexIndex * 10_000 + universeIndex;
 }
 
 function getProviderCoinFromMarketId(providerMarketId: string) {
   return providerMarketId.includes(":") ? providerMarketId.split(":").at(-1) ?? providerMarketId : providerMarketId;
+}
+
+async function filterWithConcurrency<T>(
+  values: T[],
+  concurrency: number,
+  predicate: (value: T) => Promise<boolean>,
+) {
+  if (values.length === 0) return [];
+  const accepted = new Array<boolean>(values.length).fill(false);
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(1, concurrency), values.length);
+  await Promise.all(Array.from({ length: workerCount }, async () => {
+    while (nextIndex < values.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      accepted[currentIndex] = await predicate(values[currentIndex]);
+    }
+  }));
+  return values.filter((_, index) => accepted[index]);
 }
 
 export function buildRealTradingIconUrl(providerMarketId: unknown) {
@@ -611,10 +791,25 @@ export function normalizeRealTradingMarketCategory(
   if (!marketId.includes(":")) {
     return "crypto";
   }
+  if (!category && indexProviderCoins.has(providerCoin)) {
+    return "indices";
+  }
+  if (!category && /^[A-Z]{1,5}$/.test(providerCoin) && !metalProviderCoins.has(providerCoin) && !indexProviderCoins.has(providerCoin)) {
+    return "us_equities";
+  }
   if (!category && metalProviderCoins.has(providerCoin)) {
     return "metals";
   }
   return "other";
+}
+
+function parseTrustedHyperliquidTestnetHip3Dexes() {
+  const raw = process.env.HYPERLIQUID_TESTNET_HIP3_DEX_ALLOWLIST;
+  const values = String(raw || defaultTrustedHyperliquidTestnetHip3Dexes.join(","))
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  return [...new Set(values)];
 }
 
 export function normalizeSymbolMarginCapabilities(item: { marginMode?: unknown; onlyIsolated?: unknown }) {

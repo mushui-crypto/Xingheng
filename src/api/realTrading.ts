@@ -1,5 +1,5 @@
 import type { CandleInterval } from "../types";
-import type { SymbolCategory } from "../types/market";
+import type { MarketSourceType, SymbolCategory, TradeStatus } from "../types/market";
 import { requestJson, userHeaders } from "./httpClient";
 
 export type RealTradingNetwork = "hyperliquid-testnet";
@@ -9,6 +9,8 @@ export type RealTradingSymbol = {
   symbol: string;
   providerMarketId?: string;
   providerCoin: string;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
   category?: SymbolCategory;
   iconUrl?: string | null;
   assetId?: number;
@@ -18,6 +20,7 @@ export type RealTradingSymbol = {
   supportedMarginModes?: RealTradingMarginMode[];
   marginModeConstraint?: "cross_and_isolated" | "isolated_only";
   status?: string;
+  tradeStatus?: TradeStatus;
   network?: RealTradingNetwork;
 };
 
@@ -100,6 +103,11 @@ export type RealAccountSummary = {
 export type RealPosition = {
   coin: string;
   symbol?: string;
+  providerMarketId?: string;
+  providerCoin?: string;
+  assetId?: number;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
   side: "long" | "short" | string;
   size: number;
   entryPx?: number | null;
@@ -129,6 +137,12 @@ export type RealOpenOrder = {
   id?: string;
   oid?: number | string;
   coin?: string;
+  symbol?: string;
+  providerMarketId?: string;
+  providerCoin?: string;
+  assetId?: number;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
   side?: string;
   price?: number | null;
   size?: number | null;
@@ -156,6 +170,12 @@ export type RealHistoricalOrder = RealOpenOrder & {
 
 export type RealFill = {
   coin?: string;
+  symbol?: string;
+  providerMarketId?: string;
+  providerCoin?: string;
+  assetId?: number;
+  sourceDex?: string;
+  sourceType?: MarketSourceType;
   side?: string;
   px?: number | string | null;
   sz?: number | string | null;

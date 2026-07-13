@@ -35,6 +35,12 @@ import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../../fe
 import { enrichPositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
 import { resolveRealTradingCategory } from "../../features/realTrading/lib/marketCategory";
 import { resolvePositionSymbol, submitPositionCloseRequest, submitPositionTpslRequest } from "../../features/realTrading/lib/positionActions";
+import {
+  recordBelongsToMarket,
+  resolveRealTradingSourceDex,
+  resolveRealTradingSourceType,
+  resolveRealTradingSymbolForRecord,
+} from "../../features/realTrading/lib/realTradingMarket";
 import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import { formatCompactMoney, formatFundingPercent, formatMarketDayChange, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
@@ -74,7 +80,8 @@ export function RealTradePage() {
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
   const selectedPosition = positions.find((item) => (
     Math.abs(item.size) > 0
-    && (item.symbol === selectedSymbol || item.coin === selectedConfig?.providerCoin)
+    && selectedConfig !== null
+    && recordBelongsToMarket(item, selectedConfig, symbols)
   )) ?? null;
   const isConnected = Boolean(walletAddress);
   const digits = selectedConfig?.pxDecimals ?? 2;
@@ -85,14 +92,19 @@ export function RealTradePage() {
         : [{ symbol: selectedSymbol, providerCoin: "BTC", status: "pending" }];
       return availableSymbols.map((item) => ({
         apiSymbol: item.providerCoin,
-        category: resolveRealTradingCategory(item.providerMarketId, item.category),
+        category: resolveRealTradingCategory(
+          item.providerMarketId,
+          item.category,
+          resolveRealTradingSourceType(item),
+        ),
         displayName: item.providerCoin,
         iconUrl: item.iconUrl,
         id: item.assetId ?? item.symbol,
         leverage: item.maxLeverage,
         providerCoin: item.providerCoin,
         providerMarketId: item.providerMarketId,
-        sourceDex: item.providerMarketId?.includes(":") ? item.providerMarketId.split(":", 1)[0] : "main",
+        sourceDex: resolveRealTradingSourceDex(item),
+        sourceType: resolveRealTradingSourceType(item),
         symbol: item.symbol,
       }));
     },
@@ -367,7 +379,7 @@ export function RealTradePage() {
   };
 
   const handleCancelOrder = async (order: RealOpenOrder) => {
-    const config = symbols.find((item) => item.providerCoin === order.coin || item.symbol === order.coin);
+    const config = resolveRealTradingSymbolForRecord(order, symbols);
     const oid = Number(order.oid);
     if (!config || typeof config.assetId !== "number") throw new Error(`${order.coin ?? "当前品种"} 缺少真实交易资产映射。`);
     if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("当前委托缺少有效 OID。");
@@ -381,7 +393,9 @@ export function RealTradePage() {
 
   const handlePositionTpsl = async (request: RealPositionTpslRequest) => {
     const config = resolvePositionSymbol(request.position, symbols);
-    const currentTriggers = openOrders.filter((order) => order.coin === request.position.coin && order.isTrigger);
+    const currentTriggers = openOrders.filter((order) => (
+      order.isTrigger && recordBelongsToMarket(order, config, symbols)
+    ));
     const existingTriggers = currentTriggers.map((order) => {
       const oid = Number(order.oid);
       if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("当前止盈止损委托缺少有效 OID，无法安全替换。");
@@ -498,6 +512,7 @@ export function RealTradePage() {
             onTpslRequest={handlePositionTpsl}
             openOrders={openOrders}
             positions={positions}
+            symbols={symbols}
           />
         </main>
 
@@ -571,6 +586,7 @@ function RealRecords({
   onTpslRequest,
   openOrders,
   positions,
+  symbols,
 }: {
   accountLoading: boolean;
   bestAsk?: number | null;
@@ -582,6 +598,7 @@ function RealRecords({
   onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
   positions: RealPosition[];
+  symbols: RealTradingSymbol[];
 }) {
   const [tab, setTab] = useState<"positions" | "open" | "orders" | "fills">("positions");
   const tabs = [
@@ -605,7 +622,7 @@ function RealRecords({
         empty={false}
         emptyText="-"
       >
-        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} rows={positions} /> : null}
+        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} rows={positions} symbols={symbols} /> : null}
         {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
         {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => item.order ?? item)} /> : null}
         {tab === "fills" ? <FillTable rows={history?.fills ?? []} /> : null}
