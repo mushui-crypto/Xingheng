@@ -6,6 +6,7 @@ export type RealTradingNetwork = "hyperliquid-testnet";
 export type RealTradingSymbol = {
   symbol: string;
   providerCoin: string;
+  iconUrl?: string | null;
   assetId?: number;
   szDecimals?: number;
   pxDecimals?: number;
@@ -19,6 +20,9 @@ export type RealMarketSummary = {
   markPrice?: number | null;
   oraclePrice?: number | null;
   midPrice?: number | null;
+  previousDayPrice?: number | null;
+  dayChange?: number | null;
+  dayChangePercent?: number | null;
   dayNotionalVolume?: number | null;
   openInterest?: number | null;
   funding?: number | null;
@@ -31,6 +35,8 @@ export type RealOrderbookLevel = {
   price: number;
   size: number;
   total?: number;
+  cumulativeSize?: number;
+  orderCount?: number | null;
 };
 
 export type RealOrderbook = {
@@ -68,21 +74,47 @@ export type RealAccountSummary = {
   usedMargin?: number | null;
   totalUnrealizedPnl?: number | null;
   crossAccountValue?: number | null;
+  crossMaintenanceMarginUsed?: number | null;
+  crossTotalMarginUsed?: number | null;
+  crossTotalNotionalPosition?: number | null;
+  crossMarginRatio?: number | null;
   isolatedAccountValue?: number | null;
+  spotUsdcBalance?: number | null;
+  spotBalances?: Array<{
+    coin: string;
+    total: number | null;
+    hold: number | null;
+    available: number | null;
+  }>;
+  warnings?: string[];
   cross?: unknown;
   isolated?: unknown;
 };
 
 export type RealPosition = {
   coin: string;
+  symbol?: string;
   side: "long" | "short" | string;
   size: number;
   entryPx?: number | null;
+  entryPrice?: number | null;
   markPx?: number | null;
+  markPrice?: number | null;
   liqPx?: number | null;
+  liquidationPrice?: number | null;
+  positionValue?: number | null;
+  returnOnEquity?: number | null;
   margin?: number | null;
   leverage?: number | null;
   unrealizedPnl?: number | null;
+  fundingAllTime?: number | null;
+  fundingSinceChange?: number | null;
+  fundingSinceOpen?: number | null;
+  cumFunding?: {
+    allTime: number | null;
+    sinceChange: number | null;
+    sinceOpen: number | null;
+  };
 };
 
 export type RealOpenOrder = {
@@ -94,6 +126,16 @@ export type RealOpenOrder = {
   size?: number | null;
   status?: string;
   timestamp?: number;
+  limitPx?: number | string | null;
+  sz?: number | string | null;
+  cloid?: string | null;
+  reduceOnly?: boolean | null;
+  isPositionTpsl?: boolean | null;
+  isTrigger?: boolean | null;
+  orderType?: string | null;
+  origSz?: number | null;
+  triggerCondition?: string | null;
+  triggerPx?: number | null;
 };
 
 export type RealHistoricalOrder = RealOpenOrder & {
@@ -113,6 +155,25 @@ export type RealFill = {
   oid?: number | string;
   tid?: number | string;
   closedPnl?: number | string | null;
+  price?: number | null;
+  size?: number | null;
+  timestamp?: number | null;
+  fee?: number | null;
+  feeToken?: string | null;
+  hash?: string | null;
+  direction?: string | null;
+};
+
+export type RealTradingFees = {
+  makerRate: number | null;
+  takerRate: number | null;
+  spotMakerRate: number | null;
+  spotTakerRate: number | null;
+  activeReferralDiscount: number | null;
+  activeStakingDiscount: number | null;
+  timestamp: number;
+  network: RealTradingNetwork;
+  warnings?: string[];
 };
 
 export type RealOrderHistory = {
@@ -184,6 +245,13 @@ export async function fetchRealCandles(symbol: string, interval: CandleInterval,
 
 export async function fetchRealAccountSummary(address: string) {
   return requestJson<RealAccountSummary>(`/api/real-trading/account/summary?address=${encodeURIComponent(address)}`, "真实账户加载失败。", {
+    init: { headers: realTradingHeaders() },
+    userAuthFailure: true,
+  });
+}
+
+export async function fetchRealTradingFees(address: string) {
+  return requestJson<RealTradingFees>(`/api/real-trading/account/fees?address=${encodeURIComponent(address)}`, "真实交易费率加载失败。", {
     init: { headers: realTradingHeaders() },
     userAuthFailure: true,
   });

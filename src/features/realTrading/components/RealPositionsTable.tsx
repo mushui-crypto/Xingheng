@@ -1,24 +1,30 @@
 import { useState } from "react";
-import type { RealPosition } from "../../../api/realTrading";
+import type { RealOpenOrder, RealPosition } from "../../../api/realTrading";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
+import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 
-export type RealPositionCloseRequest = {
-  mode: "limit" | "market" | "reverse";
-  positions: RealPosition[];
-  scope: "all" | "single";
-};
+export type { RealPositionCloseRequest } from "../model/types";
 
 type CloseIntent = RealPositionCloseRequest | null;
 
 export function RealPositionsTable({
+  bestAsk,
+  bestBid,
   onCloseRequest,
+  openOrders = [],
+  onTpslRequest,
   rows,
 }: {
+  bestAsk?: number | null;
+  bestBid?: number | null;
   onCloseRequest?: (request: RealPositionCloseRequest) => Promise<void> | void;
+  openOrders?: RealOpenOrder[];
+  onTpslRequest?: (request: RealPositionTpslRequest) => Promise<void> | void;
   rows: RealPosition[];
 }) {
   const [intent, setIntent] = useState<CloseIntent>(null);
+  const [tpslIntent, setTpslIntent] = useState<RealPositionTpslRequest | null>(null);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
 
@@ -29,7 +35,22 @@ export function RealPositionsTable({
 
   function requestSingleClose(position: RealPosition, mode: RealPositionCloseRequest["mode"]) {
     setStatus("");
-    setIntent({ mode, positions: [position], scope: "single" });
+    const counterpartyPrice = position.side === "long" ? bestBid : bestAsk;
+    setIntent({
+      limitPrice: mode === "limit" && typeof counterpartyPrice === "number" ? String(counterpartyPrice) : undefined,
+      mode,
+      positions: [position],
+      scope: "single",
+    });
+  }
+
+  function requestTpsl(position: RealPosition) {
+    setStatus("");
+    setTpslIntent({
+      position,
+      slPrice: triggerPrice(openOrders, position.coin, "sl"),
+      tpPrice: triggerPrice(openOrders, position.coin, "tp"),
+    });
   }
 
   async function confirmClose() {
@@ -44,6 +65,27 @@ export function RealPositionsTable({
       await onCloseRequest(intent);
       setStatus(intent.scope === "all" ? "全部平仓请求已提交" : "平仓请求已提交");
       setIntent(null);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "平仓请求失败");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  async function confirmTpsl() {
+    if (!tpslIntent) return;
+    if (!onTpslRequest) {
+      setStatus("止盈止损接口待接入");
+      setTpslIntent(null);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onTpslRequest(tpslIntent);
+      setStatus("止盈止损请求已提交");
+      setTpslIntent(null);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "止盈止损请求失败");
     } finally {
       setSubmitting(false);
     }
@@ -76,14 +118,14 @@ export function RealPositionsTable({
               <strong>{row.coin}</strong>
               <span className={sideTone}>{formatNumber(row.size)}</span>
               <span>{formatCurrency(positionValue(row))}</span>
-              <span>{formatNumber(row.entryPx)}</span>
-              <span>{formatNumber(row.markPx)}</span>
+              <span>{formatNumber(row.entryPx ?? row.entryPrice)}</span>
+              <span>{formatNumber(row.markPx ?? row.markPrice)}</span>
               <span className={pnlTone}>{formatPnl(row)}</span>
-              <span>{formatNumber(row.liqPx)}</span>
+              <span>{formatNumber(row.liqPx ?? row.liquidationPrice)}</span>
               <span>{formatMargin(row)}</span>
-              <span>-</span>
-              <span>-</span>
-              <span>-</span>
+              <span>{formatSignedMoney(row.fundingSinceOpen ?? row.cumFunding?.sinceOpen)}</span>
+              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row.coin, "tp")}</button>
+              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row.coin, "sl")}</button>
               <div className="xh-real-position-actions">
                 <button onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
                 <button onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
@@ -107,6 +149,12 @@ export function RealPositionsTable({
           <CloseMetric label="订单" value={intent?.mode === "market" ? "Reduce-only · Market" : intent?.mode === "limit" ? "Reduce-only · Limit" : "Close + Reverse"} />
           <CloseMetric label="网络" value="Hyperliquid Testnet" />
         </div>
+        {intent?.mode === "limit" ? (
+          <label className="xh-real-close-limit-field">
+            <span>限价</span>
+            <div><input autoFocus inputMode="decimal" onChange={(event) => setIntent((current) => current ? { ...current, limitPrice: event.target.value } : current)} value={intent.limitPrice ?? ""} /><b>USDC</b></div>
+          </label>
+        ) : null}
         <div className="xh-real-confirm-warning" role="note">
           {intent?.scope === "all"
             ? "全部持仓将以市价平仓。市场波动可能产生滑点，提交后无法撤销。"
@@ -118,9 +166,31 @@ export function RealPositionsTable({
         </div>
         <div className="xh-real-confirm-actions">
           <Button disabled={submitting} onClick={() => setIntent(null)} type="button" variant="secondary">取消</Button>
-          <Button disabled={submitting || intent?.positions.length === 0} onClick={() => void confirmClose()} type="button" variant="danger">
+          <Button disabled={submitting || intent?.positions.length === 0 || (intent?.mode === "limit" && !(Number(intent.limitPrice) > 0))} onClick={() => void confirmClose()} type="button" variant="danger">
             {submitting ? "提交中" : "确认平仓"}
           </Button>
+        </div>
+      </Modal>
+
+      <Modal
+        open={tpslIntent !== null}
+        title="设置止盈/止损"
+        onClose={() => setTpslIntent(null)}
+        shellClassName="xh-real-confirm-modal"
+      >
+        <div className="xh-real-confirm-summary">
+          <CloseMetric label="资产" value={tpslIntent?.position.coin ?? "-"} />
+          <CloseMetric label="方向" value={tpslIntent?.position.side === "short" ? "做空" : "做多"} />
+          <CloseMetric label="标记价格" value={formatNumber(tpslIntent?.position.markPx ?? tpslIntent?.position.markPrice)} />
+          <CloseMetric label="数量" value={formatNumber(tpslIntent?.position.size)} />
+        </div>
+        <div className="xh-real-tpsl-fields">
+          <label className="xh-real-close-limit-field"><span>止盈价</span><div><input inputMode="decimal" onChange={(event) => setTpslIntent((current) => current ? { ...current, tpPrice: event.target.value } : current)} value={tpslIntent?.tpPrice ?? ""} /><b>USDC</b></div></label>
+          <label className="xh-real-close-limit-field"><span>止损价</span><div><input inputMode="decimal" onChange={(event) => setTpslIntent((current) => current ? { ...current, slPrice: event.target.value } : current)} value={tpslIntent?.slPrice ?? ""} /><b>USDC</b></div></label>
+        </div>
+        <div className="xh-real-confirm-actions">
+          <Button disabled={submitting} onClick={() => setTpslIntent(null)} type="button" variant="secondary">取消</Button>
+          <Button disabled={submitting || (!tpslIntent?.tpPrice?.trim() && !tpslIntent?.slPrice?.trim())} onClick={() => void confirmTpsl()} type="button">{submitting ? "提交中" : "确认"}</Button>
         </div>
       </Modal>
     </div>
@@ -144,14 +214,33 @@ function closeModeLabel(mode?: RealPositionCloseRequest["mode"]) {
 }
 
 function positionValue(position: RealPosition) {
-  if (typeof position.markPx !== "number" || !Number.isFinite(position.markPx)) return null;
-  return Math.abs(position.size) * position.markPx;
+  if (typeof position.positionValue === "number" && Number.isFinite(position.positionValue)) return position.positionValue;
+  const markPrice = position.markPx ?? position.markPrice;
+  if (typeof markPrice !== "number" || !Number.isFinite(markPrice)) return null;
+  return Math.abs(position.size) * markPrice;
 }
 
 function formatPnl(position: RealPosition) {
   const pnl = formatSignedMoney(position.unrealizedPnl);
+  if (typeof position.returnOnEquity === "number" && Number.isFinite(position.returnOnEquity)) {
+    return `${pnl} (${(position.returnOnEquity * 100).toFixed(2)}%)`;
+  }
   if (typeof position.unrealizedPnl !== "number" || typeof position.margin !== "number" || position.margin === 0) return pnl;
   return `${pnl} (${((position.unrealizedPnl / position.margin) * 100).toFixed(2)}%)`;
+}
+
+function formatTriggerPrice(orders: RealOpenOrder[], coin: string, type: "tp" | "sl") {
+  const value = triggerPrice(orders, coin, type);
+  return value ? formatNumber(Number(value)) : "设置";
+}
+
+function triggerPrice(orders: RealOpenOrder[], coin: string, type: "tp" | "sl") {
+  const order = orders.find((item) => {
+    if (item.coin !== coin || !item.isTrigger) return false;
+    const text = `${item.orderType ?? ""} ${item.triggerCondition ?? ""}`.toLowerCase();
+    return type === "tp" ? text.includes("take") || text.includes("tp") : text.includes("stop") || text.includes("sl");
+  });
+  return typeof order?.triggerPx === "number" && Number.isFinite(order.triggerPx) ? String(order.triggerPx) : undefined;
 }
 
 function formatMargin(position: RealPosition) {

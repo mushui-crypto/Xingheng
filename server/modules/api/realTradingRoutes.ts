@@ -65,6 +65,14 @@ export function registerRealTradingRoutes({ app, info, exchange }: RealTradingRo
     }
   });
 
+  app.get("/api/real-trading/account/fees", async (request, response) => {
+    try {
+      response.json(await info.getFees(normalizeAddress(request.query.address)));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
   app.get("/api/real-trading/positions", async (request, response) => {
     try {
       response.json(await info.getPositions(normalizeAddress(request.query.address)));

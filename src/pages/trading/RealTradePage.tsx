@@ -3,6 +3,7 @@ import { ChevronDown, RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Button } from "../../components/ui/Button";
+import { MarketIcon } from "../../components/trading/MarketIcon";
 import {
   fetchRealAccountSummary,
   fetchRealCandles,
@@ -12,6 +13,7 @@ import {
   fetchRealOrderbook,
   fetchRealPositions,
   fetchRealTrades,
+  fetchRealTradingFees,
   fetchRealTradingSymbols,
   type RealAccountSummary,
   type RealCandle,
@@ -21,11 +23,16 @@ import {
   type RealOrderbook,
   type RealPosition,
   type RealTrade,
+  type RealTradingFees,
   type RealTradingSymbol,
 } from "../../api/realTrading";
 import { getChartPriceFormat, normalizeChartCandles, positionLatestCandleInInitialView, toChartCandle } from "../../features/trading/lib/chart";
 import { RealTradingOrderPanel } from "../../features/realTrading/components/RealTradingOrderPanel";
 import { RealPositionsTable } from "../../features/realTrading/components/RealPositionsTable";
+import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../../features/realTrading/model/types";
+import { enrichPositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
+import { resolvePositionSymbol, submitPositionCloseRequest, submitPositionTpslRequest } from "../../features/realTrading/lib/positionActions";
+import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
@@ -40,6 +47,7 @@ export function RealTradePage() {
   const [orderbook, setOrderbook] = useState<RealOrderbook | null>(null);
   const [trades, setTrades] = useState<RealTrade[]>([]);
   const [account, setAccount] = useState<RealAccountSummary | null>(null);
+  const [fees, setFees] = useState<RealTradingFees | null>(null);
   const [positions, setPositions] = useState<RealPosition[]>([]);
   const [openOrders, setOpenOrders] = useState<RealOpenOrder[]>([]);
   const [history, setHistory] = useState<RealOrderHistory | null>(null);
@@ -55,6 +63,7 @@ export function RealTradePage() {
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
   const isConnected = Boolean(walletAddress);
@@ -100,6 +109,7 @@ export function RealTradePage() {
     if (!address) {
       setAccountError("");
       setAccount(null);
+      setFees(null);
       setPositions([]);
       setOpenOrders([]);
       setHistory(null);
@@ -108,19 +118,23 @@ export function RealTradePage() {
     setAccountLoading(true);
     setAccountError("");
     try {
-      const [nextAccount, nextPositions, nextOpenOrders, nextHistory] = await Promise.all([
+      const [nextAccount, nextFees, nextPositions, nextOpenOrders, nextHistory] = await Promise.all([
         fetchRealAccountSummary(address),
+        fetchRealTradingFees(address),
         fetchRealPositions(address),
         fetchRealOpenOrders(address),
         fetchRealOrderHistory(address),
       ]);
+      const enrichedPositions = await enrichPositionMarks(nextPositions, fetchRealMarketSummary);
       setAccount(nextAccount);
-      setPositions(nextPositions);
+      setFees(nextFees);
+      setPositions(enrichedPositions);
       setOpenOrders(nextOpenOrders);
       setHistory(nextHistory);
     } catch (error) {
       setAccountError(error instanceof Error ? error.message : "真实账户数据加载失败。");
       setAccount(null);
+      setFees(null);
       setPositions([]);
       setOpenOrders([]);
       setHistory(null);
@@ -275,19 +289,59 @@ export function RealTradePage() {
       }
       setWalletAddress(address);
       await loadAccount(address);
-      setConnectMessage("主账户地址已连接。当前仅启用只读账户查询，交易授权尚未接入。");
+      setConnectMessage("主账户地址已连接。");
     } catch (error) {
       setConnectMessage(error instanceof Error ? error.message : "钱包连接失败。");
     }
+  };
+
+  const handlePositionClose = async (request: RealPositionCloseRequest) => {
+    const completed = await tradingSession.runAction(
+      (signer) => submitPositionCloseRequest(signer, request, symbols),
+      request.scope === "all" ? "全部平仓请求已发送。" : request.mode === "reverse" ? "反手请求已发送。" : "平仓请求已发送。",
+    );
+    if (!completed) throw new Error("交易请求未完成，请查看下单区状态。");
+    await loadAccount(walletAddress);
+  };
+
+  const handleCancelOrder = async (order: RealOpenOrder) => {
+    const config = symbols.find((item) => item.providerCoin === order.coin || item.symbol === order.coin);
+    const oid = Number(order.oid);
+    if (!config || typeof config.assetId !== "number") throw new Error(`${order.coin ?? "当前品种"} 缺少真实交易资产映射。`);
+    if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("当前委托缺少有效 OID。");
+    const completed = await tradingSession.runAction(
+      (signer) => signer.cancelOrder(config.assetId!, oid),
+      "撤单请求已发送。",
+    );
+    if (!completed) throw new Error("撤单请求未完成，请查看下单区状态。");
+    await loadAccount(walletAddress);
+  };
+
+  const handlePositionTpsl = async (request: RealPositionTpslRequest) => {
+    const config = resolvePositionSymbol(request.position, symbols);
+    const currentTriggers = openOrders.filter((order) => order.coin === request.position.coin && order.isTrigger);
+    const existingTriggers = currentTriggers.map((order) => {
+      const oid = Number(order.oid);
+      if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("当前止盈止损委托缺少有效 OID，无法安全替换。");
+      return { asset: config.assetId!, oid };
+    });
+    const completed = await tradingSession.runAction(async (signer) => {
+      if (existingTriggers.length > 0) await signer.cancelOrders(existingTriggers);
+      await submitPositionTpslRequest(signer, request, symbols);
+    }, "止盈止损请求已发送。");
+    if (!completed) throw new Error("止盈止损请求未完成，请查看下单区状态。");
+    await loadAccount(walletAddress);
   };
 
   return (
     <div className="xh-trade-terminal xh-real-trade-terminal">
       <section className="xh-trade-marketbar">
         <div className="xh-trade-marketbar-main">
-          <div className="xh-real-symbol-mark" aria-hidden="true">
-            {(selectedConfig?.providerCoin ?? selectedSymbol).charAt(0)}
-          </div>
+          <MarketIcon
+            className="xh-real-symbol-mark"
+            fallback={selectedConfig?.providerCoin ?? selectedSymbol}
+            iconUrl={selectedConfig?.iconUrl}
+          />
           <label className="xh-real-symbol-picker">
             <span className="sr-only">真实交易品种</span>
             <span className="xh-real-symbol-title">
@@ -303,7 +357,7 @@ export function RealTradePage() {
         </div>
         <div className="xh-trade-market-stats">
           <TradeStat label="Mark" value={formatPrice(marketSummary?.markPrice ?? undefined, digits)} />
-          <TradeStat label="24h Change" value="-" />
+          <TradeStat label="24h Change" value={formatDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)} tone={numberTone(marketSummary?.dayChange)} />
           <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
           <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
           <TradeStat label="Funding" value={formatPercent(marketSummary?.funding)} tone={numberTone(marketSummary?.funding)} />
@@ -340,7 +394,7 @@ export function RealTradePage() {
                 <span>H&nbsp; {formatPrice(latestCandle?.high, digits)}</span>
                 <span>L&nbsp; {formatPrice(latestCandle?.low, digits)}</span>
                 <span>C&nbsp; {formatPrice(latestCandle?.close, digits)}</span>
-                <span>24h&nbsp; <b>-</b></span>
+                <span>24h&nbsp; <b className={toneClass(numberTone(marketSummary?.dayChange))}>{formatDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)}</b></span>
               </div>
               <div className="xh-real-chart-canvas">
                 <div ref={chartContainerRef} className="h-full w-full" />
@@ -375,15 +429,20 @@ export function RealTradePage() {
                 emptyText="-"
                 onRetry={() => void loadMarket(selectedSymbol)}
               >
-                <DepthAndTrades orderbook={orderbook} trades={trades} digits={digits} />
+                <DepthAndTrades orderbook={orderbook} trades={trades} digits={digits} markPrice={marketSummary?.markPrice} midPrice={marketSummary?.midPrice} />
               </StatePanel>
             </div>
           </section>
 
           <RealRecords
             accountLoading={accountLoading}
+            bestAsk={orderbook?.asks[0]?.price}
+            bestBid={orderbook?.bids[0]?.price}
             error={accountError}
             history={history}
+            onCancelOrder={handleCancelOrder}
+            onCloseRequest={handlePositionClose}
+            onTpslRequest={handlePositionTpsl}
             openOrders={openOrders}
             positions={positions}
           />
@@ -396,14 +455,14 @@ export function RealTradePage() {
             connected={isConnected}
             connectionMessage={connectMessage}
             markPrice={marketSummary?.markPrice}
+            fees={fees}
             maxLeverage={selectedConfig?.maxLeverage}
             onConnect={connectWallet}
             onSubmitted={() => void loadAccount(walletAddress)}
             positionSize={positions.filter((item) => item.coin === selectedConfig?.providerCoin).reduce((total, item) => total + Math.abs(item.size), 0)}
-            provider={walletProvider ?? undefined}
+            session={tradingSession}
             szDecimals={selectedConfig?.szDecimals}
             symbol={selectedSymbol}
-            walletAddress={walletAddress}
           />
           <ConnectionPanel
             account={account}
@@ -417,7 +476,7 @@ export function RealTradePage() {
   );
 }
 
-function DepthAndTrades({ digits, orderbook, trades }: { digits: number; orderbook: RealOrderbook | null; trades: RealTrade[] }) {
+function DepthAndTrades({ digits, markPrice, midPrice, orderbook, trades }: { digits: number; markPrice?: number | null; midPrice?: number | null; orderbook: RealOrderbook | null; trades: RealTrade[] }) {
   const [tab, setTab] = useState<"book" | "trades">("book");
   const asks = orderbook?.asks.slice(0, 10) ?? [];
   const bids = orderbook?.bids.slice(0, 10) ?? [];
@@ -434,9 +493,9 @@ function DepthAndTrades({ digits, orderbook, trades }: { digits: number; orderbo
           </div>
           <BookSide levels={asks} digits={digits} tone="ask" />
           <div className="xh-real-book-mid">
-            <strong>{formatBookPrice(orderbook?.bids[0]?.price ?? orderbook?.asks.at(-1)?.price, digits)}</strong>
+            <strong>{formatBookPrice(midPrice ?? orderbook?.bids[0]?.price ?? orderbook?.asks.at(-1)?.price, digits)}</strong>
             <span className="xh-real-book-change">-</span>
-            <span>Mark {formatBookPrice(orderbook?.bids[0]?.price, digits)}</span>
+            <span>Mark {formatBookPrice(markPrice, digits)}</span>
           </div>
           <BookSide levels={bids} digits={digits} tone="bid" />
         </>
@@ -491,11 +550,11 @@ function ConnectionPanel({
     <section aria-busy={accountLoading} className="xh-real-account-panel">
       <h2 className="xh-real-account-title">账户权益</h2>
       <div className="xh-real-account-metrics">
-        <AccountMetric label="现货" value="-" />
+        <AccountMetric label="现货" value={accountLoading ? "-" : formatAccountMoney(account?.spotUsdcBalance)} />
         <AccountMetric label="合约" value={accountLoading ? "-" : formatAccountMoney(contractEquity)} />
         <AccountMetric label="未实现盈亏" tone={numberTone(account?.totalUnrealizedPnl)} value={accountLoading ? "-" : formatAccountNumber(account?.totalUnrealizedPnl)} />
-        <AccountMetric label="全仓保证金比率" value="-" />
-        <AccountMetric label="维持保证金" value="-" />
+        <AccountMetric label="全仓保证金比率" value={accountLoading ? "-" : formatRatioPercent(account?.crossMarginRatio)} />
+        <AccountMetric label="维持保证金" value={accountLoading ? "-" : formatAccountMoney(account?.crossMaintenanceMarginUsed)} />
         <AccountMetric label="全仓账户杠杆" value={accountLoading ? "-" : formatCrossLeverage(contractEquity, positions)} />
       </div>
       {accountError ? <p className="xh-real-account-error" role="alert">{accountError}</p> : null}
@@ -505,14 +564,24 @@ function ConnectionPanel({
 
 function RealRecords({
   accountLoading,
+  bestAsk,
+  bestBid,
   error,
   history,
+  onCancelOrder,
+  onCloseRequest,
+  onTpslRequest,
   openOrders,
   positions,
 }: {
   accountLoading: boolean;
+  bestAsk?: number | null;
+  bestBid?: number | null;
   error: string;
   history: RealOrderHistory | null;
+  onCancelOrder: (order: RealOpenOrder) => Promise<void>;
+  onCloseRequest: (request: RealPositionCloseRequest) => Promise<void>;
+  onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
   positions: RealPosition[];
 }) {
@@ -538,8 +607,8 @@ function RealRecords({
         empty={false}
         emptyText="-"
       >
-        {tab === "positions" ? <RealPositionsTable rows={positions} /> : null}
-        {tab === "open" ? <OrderTable emptyText="暂无当前委托。" rows={openOrders} /> : null}
+        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} rows={positions} /> : null}
+        {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
         {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => item.order ?? item)} /> : null}
         {tab === "fills" ? <FillTable rows={history?.fills ?? []} /> : null}
         {history?.warnings.length ? (
@@ -550,8 +619,42 @@ function RealRecords({
   );
 }
 
-function OrderTable({ emptyText, rows }: { emptyText: string; rows: RealOpenOrder[] }) {
-  return <div className="xh-real-record-table"><div className="xh-real-record-head"><span>资产</span><span>方向</span><span>价格</span><span>数量</span><span>状态</span><span>OID</span><span>时间</span></div>{rows.length === 0 ? <RecordEmpty text={emptyText} /> : rows.map((row, index) => <div className="xh-real-record-row" key={`${row.oid ?? row.id}-${index}`}><strong>{row.coin ?? "-"}</strong><span>{row.side ?? "-"}</span><span>{formatNumber(row.price)}</span><span>{formatNumber(row.size)}</span><span>{row.status ?? "-"}</span><span>{row.oid ?? "-"}</span><span>{formatTime(row.timestamp)}</span></div>)}</div>;
+function OrderTable({ emptyText, onCancel, rows }: { emptyText: string; onCancel?: (order: RealOpenOrder) => Promise<void>; rows: RealOpenOrder[] }) {
+  const [cancelingOid, setCancelingOid] = useState<string | null>(null);
+  const [status, setStatus] = useState("");
+
+  async function cancel(order: RealOpenOrder) {
+    if (!onCancel) return;
+    const oid = String(order.oid ?? "");
+    setCancelingOid(oid);
+    setStatus("");
+    try {
+      await onCancel(order);
+      setStatus("撤单请求已发送");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "撤单请求失败");
+    } finally {
+      setCancelingOid(null);
+    }
+  }
+
+  return (
+    <div className="xh-real-record-table">
+      <div className={`xh-real-record-head ${onCancel ? "has-action" : ""}`}>
+        <span>资产</span><span>方向</span><span>价格</span><span>数量</span><span>状态</span><span>OID</span><span>时间</span>{onCancel ? <span /> : null}
+      </div>
+      {rows.length === 0 ? <RecordEmpty text={emptyText} /> : rows.map((row, index) => {
+        const oid = String(row.oid ?? "");
+        return (
+          <div className={`xh-real-record-row ${onCancel ? "has-action" : ""}`} key={`${row.oid ?? row.id}-${index}`}>
+            <strong>{row.coin ?? "-"}</strong><span>{row.side ?? "-"}</span><span>{formatNumber(row.price)}</span><span>{formatNumber(row.size)}</span><span>{formatOrderType(row)}</span><span>{row.oid ?? "-"}</span><span>{formatTime(row.timestamp)}</span>
+            {onCancel ? <button disabled={cancelingOid === oid} onClick={() => void cancel(row)} type="button">{cancelingOid === oid ? "撤单中" : "撤单"}</button> : null}
+          </div>
+        );
+      })}
+      {status ? <p className="xh-real-position-status" role="status">{status}</p> : null}
+    </div>
+  );
 }
 
 function FillTable({ rows }: { rows: RealOrderHistory["fills"] }) {
@@ -651,6 +754,18 @@ function formatAccountNumber(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "-";
 }
 
+function formatRatioPercent(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${(value * 100).toFixed(2)}%` : "-";
+}
+
+function formatDayChange(change?: number | null, percent?: number | null) {
+  if (typeof change !== "number" || !Number.isFinite(change)) return "-";
+  const changeText = `${change >= 0 ? "+" : "-"}${Math.abs(change).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
+  return typeof percent === "number" && Number.isFinite(percent)
+    ? `${changeText} / ${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`
+    : changeText;
+}
+
 function formatCrossLeverage(accountValue: number | null | undefined, positions: RealPosition[]) {
   const notional = positions.reduce((sum, position) => {
     if (typeof position.size !== "number" || !Number.isFinite(position.size) || typeof position.markPx !== "number" || !Number.isFinite(position.markPx)) {
@@ -679,9 +794,18 @@ function formatTime(value?: number) {
   return new Date(value).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
 }
 
+function formatOrderType(order: RealOpenOrder) {
+  if (order.isTrigger) return order.orderType ?? order.triggerCondition ?? "TP/SL";
+  return order.status ?? order.orderType ?? "-";
+}
+
 function numberTone(value?: number | null): "positive" | "negative" | undefined {
   if (typeof value !== "number" || value === 0) return undefined;
   return value > 0 ? "positive" : "negative";
+}
+
+function toneClass(tone?: "positive" | "negative") {
+  return tone ? `is-${tone}` : "";
 }
 
 function multiplyFinite(left?: number | null, right?: number | null) {

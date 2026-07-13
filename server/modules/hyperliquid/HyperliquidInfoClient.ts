@@ -4,14 +4,20 @@ import { hyperliquidTestnetNetwork } from "./hyperliquidConfig";
 import type {
   RealTradingAccountSummary,
   RealTradingCandle,
+  RealTradingFees,
+  RealTradingFill,
+  RealTradingHistoricalOrder,
   RealTradingMarketSummary,
+  RealTradingOpenOrder,
   RealTradingOrderbook,
   RealTradingPosition,
+  RealTradingSpotBalance,
   RealTradingSymbol,
   RealTradingTrade,
 } from "./hyperliquidTypes";
 
 const requestTimeoutMs = 15_000;
+const hyperliquidIconBaseUrl = "https://app.hyperliquid.xyz/coins";
 
 type HyperliquidUniverseItem = {
   name: string;
@@ -24,6 +30,7 @@ type HyperliquidAssetContext = {
   markPx?: string;
   oraclePx?: string;
   midPx?: string;
+  prevDayPx?: string;
   dayNtlVlm?: string;
   openInterest?: string;
   funding?: string;
@@ -57,6 +64,7 @@ export class HyperliquidInfoClient {
     return universe.map((item, index) => ({
       symbol: toInternalSymbol(item.name),
       providerCoin: item.name,
+      iconUrl: buildHyperliquidIconUrl(item.name),
       assetId: index,
       szDecimals: Number(item.szDecimals ?? 0),
       pxDecimals: inferPriceDecimals(contexts[index]),
@@ -74,21 +82,7 @@ export class HyperliquidInfoClient {
     if (index < 0) {
       throw new Error(`真实交易品种 ${symbol} 不存在。`);
     }
-    const context = contexts[index] ?? {};
-    return {
-      symbol,
-      providerCoin: coin,
-      markPrice: toNullableNumber(context.markPx),
-      oraclePrice: toNullableNumber(context.oraclePx),
-      midPrice: toNullableNumber(context.midPx),
-      dayNotionalVolume: toNullableNumber(context.dayNtlVlm),
-      openInterest: toNullableNumber(context.openInterest),
-      funding: toNullableNumber(context.funding),
-      nextFundingTime: typeof context.nextFundingTime === "number" ? context.nextFundingTime : null,
-      status: "connected",
-      timestamp: Date.now(),
-      network: hyperliquidTestnetNetwork,
-    };
+    return normalizeMarketSummary(symbol, coin, contexts[index] ?? {});
   }
 
   async getOrderbook(symbolInput: string): Promise<RealTradingOrderbook> {
@@ -151,34 +145,33 @@ export class HyperliquidInfoClient {
 
   async getAccountSummary(address: string): Promise<RealTradingAccountSummary> {
     const normalizedAddress = normalizeAddress(address);
-    const state = await this.getClearinghouseState(normalizedAddress);
-    const marginSummary = state.marginSummary ?? {};
-    const crossSummary = state.crossMarginSummary ?? {};
-    const positions = normalizePositions(state.assetPositions);
-    const totalUnrealizedPnl = positions.reduce((sum, position) => sum + (position.unrealizedPnl ?? 0), 0);
-    const accountValue = toNullableNumber(marginSummary.accountValue);
-    const usedMargin = toNullableNumber(marginSummary.totalMarginUsed);
-    return {
-      address: normalizedAddress,
-      accountValue,
-      withdrawable: toNullableNumber(state.withdrawable),
-      usedMargin,
-      availableMargin: accountValue !== null && usedMargin !== null ? Math.max(0, accountValue - usedMargin) : null,
-      totalUnrealizedPnl,
-      crossAccountValue: toNullableNumber(crossSummary.accountValue),
-      isolatedAccountValue: null,
-      timestamp: Date.now(),
-      network: hyperliquidTestnetNetwork,
-    };
+    const [state, spotResult] = await Promise.all([
+      this.getClearinghouseState(normalizedAddress),
+      this.getSpotClearinghouseState(normalizedAddress)
+        .then((payload) => ({ ok: true as const, payload }))
+        .catch((error) => ({ ok: false as const, warning: `spotClearinghouseState unavailable: ${sanitizeError(error)}` })),
+    ]);
+    return normalizeAccountSummary(normalizedAddress, state, spotResult);
   }
 
   async getPositions(address: string): Promise<RealTradingPosition[]> {
-    const state = await this.getClearinghouseState(normalizeAddress(address));
-    return normalizePositions(state.assetPositions);
+    const normalizedAddress = normalizeAddress(address);
+    const [state, marketContextsResult] = await Promise.all([
+      this.getClearinghouseState(normalizedAddress),
+      this.getMetaAndContexts()
+        .then(({ universe, contexts }) => ({ ok: true as const, value: buildMarketContextsByCoin(universe, contexts) }))
+        .catch(() => ({ ok: false as const, value: new Map<string, HyperliquidAssetContext>() })),
+    ]);
+    return normalizePositions(state.assetPositions, marketContextsResult.value);
   }
 
-  async getOpenOrders(address: string) {
-    return this.postInfo({ type: "openOrders", user: normalizeAddress(address) });
+  async getOpenOrders(address: string): Promise<RealTradingOpenOrder[]> {
+    const user = normalizeAddress(address);
+    const payload = await this.postInfo({ type: "frontendOpenOrders", user }).catch(() => this.postInfo({ type: "openOrders", user }));
+    if (!Array.isArray(payload)) {
+      throw new Error("Hyperliquid open orders returned an invalid payload.");
+    }
+    return payload.map(normalizeOpenOrder);
   }
 
   async getOrderHistory(address: string) {
@@ -188,14 +181,34 @@ export class HyperliquidInfoClient {
       this.postInfo({ type: "userFills", user }).catch((error) => ({ error: sanitizeError(error) })),
     ]);
     return {
-      orders: Array.isArray(orders) ? orders : [],
-      fills: Array.isArray(fills) ? fills : [],
+      orders: Array.isArray(orders) ? orders.map(normalizeHistoricalOrder) : [],
+      fills: Array.isArray(fills) ? fills.map(normalizeFill) : [],
       nextCursor: null,
       warnings: [
         !Array.isArray(orders) && "historicalOrders unavailable",
         !Array.isArray(fills) && "userFills unavailable",
       ].filter(Boolean),
     };
+  }
+
+  async getFees(address: string): Promise<RealTradingFees> {
+    const user = normalizeAddress(address);
+    try {
+      const payload = await this.postInfo({ type: "userFees", user });
+      return normalizeFees(payload);
+    } catch (error) {
+      return {
+        makerRate: null,
+        takerRate: null,
+        spotMakerRate: null,
+        spotTakerRate: null,
+        activeReferralDiscount: null,
+        activeStakingDiscount: null,
+        timestamp: Date.now(),
+        network: hyperliquidTestnetNetwork,
+        warnings: [`userFees unavailable: ${sanitizeError(error)}`],
+      };
+    }
   }
 
   private async getMetaAndContexts() {
@@ -211,6 +224,10 @@ export class HyperliquidInfoClient {
 
   private async getClearinghouseState(address: string) {
     return this.postInfo({ type: "clearinghouseState", user: address });
+  }
+
+  private async getSpotClearinghouseState(address: string) {
+    return this.postInfo({ type: "spotClearinghouseState", user: address });
   }
 
   private async postInfo(body: unknown) {
@@ -240,6 +257,231 @@ export function normalizeAddress(value: unknown) {
   return address;
 }
 
+export function normalizeMarketSummary(symbol: string, providerCoin: string, context: HyperliquidAssetContext): RealTradingMarketSummary {
+  const markPrice = toNullableNumber(context.markPx);
+  const previousDayPrice = toNullableNumber(context.prevDayPx);
+  const dayChange = markPrice !== null && previousDayPrice !== null ? markPrice - previousDayPrice : null;
+  const dayChangePercent = dayChange !== null && previousDayPrice !== null && previousDayPrice !== 0
+    ? (dayChange / previousDayPrice) * 100
+    : null;
+  return {
+    symbol,
+    providerCoin,
+    markPrice,
+    oraclePrice: toNullableNumber(context.oraclePx),
+    midPrice: toNullableNumber(context.midPx),
+    previousDayPrice,
+    dayChange,
+    dayChangePercent,
+    dayNotionalVolume: toNullableNumber(context.dayNtlVlm),
+    openInterest: toNullableNumber(context.openInterest),
+    funding: toNullableNumber(context.funding),
+    nextFundingTime: typeof context.nextFundingTime === "number" ? context.nextFundingTime : null,
+    status: "connected",
+    timestamp: Date.now(),
+    network: hyperliquidTestnetNetwork,
+  };
+}
+
+export function normalizeBookSide(levels: HyperliquidBookLevel[], direction: "asc" | "desc") {
+  let cumulativeSize = 0;
+  return levels
+    .map((level) => ({
+      price: toRequiredNumber(level.px),
+      size: toRequiredNumber(level.sz),
+      orderCount: typeof level.n === "number" ? level.n : null,
+    }))
+    .filter((level) => level.price !== null && level.size !== null)
+    .sort((left, right) => direction === "asc" ? left.price! - right.price! : right.price! - left.price!)
+    .map((level) => {
+      cumulativeSize += level.size!;
+      return { price: level.price!, size: level.size!, orderCount: level.orderCount, cumulativeSize, total: cumulativeSize };
+    });
+}
+
+export function normalizePositions(value: unknown, marketContextsByCoin = new Map<string, HyperliquidAssetContext>()): RealTradingPosition[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry) => {
+    const position = entry?.position ?? {};
+    const size = toNullableNumber(position.szi);
+    if (size === null || size === 0) return [];
+    const coin = String(position.coin ?? "");
+    const entryPx = toNullableNumber(position.entryPx);
+    const rawMarkPx = toNullablePositiveNumber(position.markPx);
+    const contextMarkPx = toNullablePositiveNumber(getMarketContextForCoin(marketContextsByCoin, coin)?.markPx);
+    const markPx = rawMarkPx ?? contextMarkPx;
+    const liqPx = toNullableNumber(position.liquidationPx);
+    const margin = toNullableNumber(position.marginUsed ?? position.positionValue);
+    const positionValue = toNullableNumber(position.positionValue);
+    const fundingAllTime = toNullableNumber(position.cumFunding?.allTime);
+    const fundingSinceChange = toNullableNumber(position.cumFunding?.sinceChange);
+    const fundingSinceOpen = toNullableNumber(position.cumFunding?.sinceOpen);
+    return [{
+      coin,
+      symbol: toInternalSymbol(coin),
+      side: size >= 0 ? "long" : "short",
+      size: Math.abs(size),
+      entryPrice: entryPx,
+      entryPx,
+      markPrice: markPx,
+      markPx,
+      liquidationPrice: liqPx,
+      liqPx,
+      positionValue,
+      returnOnEquity: toNullableNumber(position.returnOnEquity ?? position.roe),
+      margin,
+      leverage: toNullableNumber(position.leverage?.value ?? position.leverage),
+      unrealizedPnl: toNullableNumber(position.unrealizedPnl),
+      fundingAllTime,
+      fundingSinceChange,
+      fundingSinceOpen,
+      cumFunding: {
+        allTime: fundingAllTime,
+        sinceChange: fundingSinceChange,
+        sinceOpen: fundingSinceOpen,
+      },
+      rawStatus: typeof position.type === "string" ? position.type : null,
+      network: hyperliquidTestnetNetwork,
+    }];
+  });
+}
+
+export function normalizeOpenOrder(row: unknown): RealTradingOpenOrder {
+  const value = row && typeof row === "object" ? row as Record<string, any> : {};
+  const coin = value.coin !== undefined ? String(value.coin) : null;
+  const side = normalizeOrderSide(value.side ?? value.isBuy);
+  const price = toNullableNumber(value.price ?? value.limitPx);
+  const size = toNullableNumber(value.size ?? value.sz);
+  return {
+    coin,
+    symbol: coin ? toInternalSymbol(coin) : null,
+    side,
+    price,
+    size,
+    timestamp: toNullableNumber(value.timestamp ?? value.time),
+    status: value.status !== undefined ? String(value.status) : null,
+    limitPx: toNullableNumber(value.limitPx ?? value.price),
+    sz: toNullableNumber(value.sz ?? value.size),
+    oid: normalizeOptionalId(value.oid),
+    cloid: value.cloid !== undefined && value.cloid !== null ? String(value.cloid) : null,
+    reduceOnly: toNullableBoolean(value.reduceOnly),
+    isPositionTpsl: toNullableBoolean(value.isPositionTpsl),
+    isTrigger: toNullableBoolean(value.isTrigger),
+    orderType: value.orderType !== undefined && value.orderType !== null ? String(value.orderType) : null,
+    origSz: toNullableNumber(value.origSz),
+    triggerCondition: value.triggerCondition !== undefined && value.triggerCondition !== null ? String(value.triggerCondition) : null,
+    triggerPx: toNullableNumber(value.triggerPx),
+    raw: value,
+    network: hyperliquidTestnetNetwork,
+  };
+}
+
+export function normalizeHistoricalOrder(row: unknown): RealTradingHistoricalOrder {
+  const value = row && typeof row === "object" ? row as Record<string, any> : {};
+  const order = value.order && typeof value.order === "object" ? value.order : value;
+  const normalized = normalizeOpenOrder({
+    ...order,
+    status: value.status ?? order.status,
+    statusTimestamp: value.statusTimestamp ?? order.statusTimestamp,
+  });
+  return {
+    ...normalized,
+    statusTimestamp: toNullableNumber(value.statusTimestamp ?? order.statusTimestamp),
+    raw: value,
+  };
+}
+
+export function normalizeFill(row: unknown): RealTradingFill {
+  const value = row && typeof row === "object" ? row as Record<string, any> : {};
+  const coin = value.coin !== undefined ? String(value.coin) : null;
+  return {
+    coin,
+    symbol: coin ? toInternalSymbol(coin) : null,
+    side: normalizeTradeSide(value.side),
+    price: toNullableNumber(value.px ?? value.price),
+    size: toNullableNumber(value.sz ?? value.size),
+    timestamp: toNullableNumber(value.time ?? value.timestamp),
+    fee: toNullableNumber(value.fee),
+    feeToken: value.feeToken !== undefined && value.feeToken !== null ? String(value.feeToken) : null,
+    hash: value.hash !== undefined && value.hash !== null ? String(value.hash) : null,
+    direction: value.dir !== undefined && value.dir !== null ? String(value.dir) : value.direction !== undefined && value.direction !== null ? String(value.direction) : null,
+    raw: value,
+    network: hyperliquidTestnetNetwork,
+  };
+}
+
+export function normalizeSpotBalances(payload: unknown): RealTradingSpotBalance[] {
+  const balances = Array.isArray((payload as any)?.balances) ? (payload as any).balances : [];
+  return balances.map((row: any): RealTradingSpotBalance => {
+    const coin = String(row.coin ?? row.token ?? "");
+    const total = toNullableNumber(row.total);
+    const hold = toNullableNumber(row.hold);
+    return {
+      coin,
+      total,
+      hold,
+      available: total !== null && hold !== null ? total - hold : null,
+    };
+  }).filter((balance: RealTradingSpotBalance) => balance.coin.length > 0);
+}
+
+export function normalizeFees(payload: unknown): RealTradingFees {
+  const value = payload && typeof payload === "object" ? payload as Record<string, any> : {};
+  const activeReferralDiscount = value.activeReferralDiscount !== undefined
+    ? toNullableNumber(value.activeReferralDiscount)
+    : toNullableBoolean(value.activeReferralDiscountBps) === false
+      ? null
+      : toNullableNumber(value.activeReferralDiscountBps);
+  return {
+    makerRate: toNullableNumber(value.userAddRate ?? value.makerRate),
+    takerRate: toNullableNumber(value.userCrossRate ?? value.takerRate),
+    spotMakerRate: toNullableNumber(value.spotAddRate ?? value.spotMakerRate),
+    spotTakerRate: toNullableNumber(value.spotCrossRate ?? value.spotTakerRate),
+    activeReferralDiscount,
+    activeStakingDiscount: toNullableNumber(value.activeStakingDiscount ?? value.activeStakingDiscountBps),
+    timestamp: Date.now(),
+    network: hyperliquidTestnetNetwork,
+  };
+}
+
+function normalizeAccountSummary(
+  normalizedAddress: string,
+  state: any,
+  spotResult: { ok: true; payload: unknown } | { ok: false; warning: string },
+): RealTradingAccountSummary {
+  const marginSummary = state.marginSummary ?? {};
+  const crossSummary = state.crossMarginSummary ?? {};
+  const positions = normalizePositions(state.assetPositions);
+  const totalUnrealizedPnl = positions.reduce((sum, position) => sum + (position.unrealizedPnl ?? 0), 0);
+  const accountValue = toNullableNumber(marginSummary.accountValue);
+  const usedMargin = toNullableNumber(marginSummary.totalMarginUsed);
+  const crossAccountValue = toNullableNumber(crossSummary.accountValue);
+  const crossMaintenanceMarginUsed = toNullableNumber(state.crossMaintenanceMarginUsed);
+  const spotBalances = spotResult.ok ? normalizeSpotBalances(spotResult.payload) : [];
+  const spotUsdcBalance = spotBalances.find((balance) => balance.coin.toUpperCase() === "USDC")?.total ?? null;
+  return {
+    address: normalizedAddress,
+    accountValue,
+    withdrawable: toNullableNumber(state.withdrawable),
+    usedMargin,
+    availableMargin: accountValue !== null && usedMargin !== null ? Math.max(0, accountValue - usedMargin) : null,
+    totalUnrealizedPnl,
+    crossAccountValue,
+    crossMaintenanceMarginUsed,
+    crossTotalMarginUsed: toNullableNumber(crossSummary.totalMarginUsed),
+    crossTotalNotionalPosition: toNullableNumber(crossSummary.totalNtlPos),
+    crossMarginRatio: crossMaintenanceMarginUsed !== null && crossAccountValue !== null && crossAccountValue > 0
+      ? crossMaintenanceMarginUsed / crossAccountValue
+      : null,
+    isolatedAccountValue: null,
+    spotUsdcBalance,
+    spotBalances,
+    timestamp: Date.now(),
+    network: hyperliquidTestnetNetwork,
+    warnings: spotResult.ok ? [] : [spotResult.warning],
+  };
+}
+
 function toInternalSymbol(providerCoin: string) {
   return `${providerCoin.toUpperCase()}USDT`;
 }
@@ -249,6 +491,28 @@ function toProviderCoin(symbol: string) {
   return normalized.endsWith("USDT") ? normalized.slice(0, -4) : normalized;
 }
 
+function buildHyperliquidIconUrl(providerCoin: string) {
+  const coin = String(providerCoin ?? "").trim();
+  return /^[A-Za-z0-9:_-]+$/.test(coin) ? `${hyperliquidIconBaseUrl}/${encodeURIComponent(coin)}.svg` : null;
+}
+
+function buildMarketContextsByCoin(universe: HyperliquidUniverseItem[], contexts: HyperliquidAssetContext[]) {
+  const map = new Map<string, HyperliquidAssetContext>();
+  universe.forEach((item, index) => {
+    const coin = String(item.name ?? "").trim();
+    const context = contexts[index];
+    if (coin && context) {
+      map.set(coin, context);
+      map.set(coin.toUpperCase(), context);
+    }
+  });
+  return map;
+}
+
+function getMarketContextForCoin(marketContextsByCoin: Map<string, HyperliquidAssetContext>, coin: string) {
+  return marketContextsByCoin.get(coin) ?? marketContextsByCoin.get(coin.toUpperCase());
+}
+
 function inferPriceDecimals(context?: HyperliquidAssetContext) {
   const values = [context?.markPx, context?.oraclePx, context?.midPx].filter((value): value is string => typeof value === "string");
   const decimals = values.map((value) => value.split(".")[1]?.length ?? 0);
@@ -256,29 +520,46 @@ function inferPriceDecimals(context?: HyperliquidAssetContext) {
 }
 
 function toNullableNumber(value: unknown) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string" && value.trim() === "") return null;
   const number = Number(value);
   return Number.isFinite(number) ? number : null;
 }
 
-function normalizeBookSide(levels: HyperliquidBookLevel[], direction: "asc" | "desc") {
-  let cumulativeSize = 0;
-  return levels
-    .map((level) => ({
-      price: Number(level.px),
-      size: Number(level.sz),
-      orderCount: typeof level.n === "number" ? level.n : null,
-    }))
-    .filter((level) => Number.isFinite(level.price) && Number.isFinite(level.size))
-    .sort((left, right) => direction === "asc" ? left.price - right.price : right.price - left.price)
-    .map((level) => {
-      cumulativeSize += level.size;
-      return { ...level, cumulativeSize };
-    });
+function toNullablePositiveNumber(value: unknown) {
+  const number = toNullableNumber(value);
+  return number !== null && number > 0 ? number : null;
+}
+
+function toRequiredNumber(value: unknown) {
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function toNullableBoolean(value: unknown) {
+  if (typeof value === "boolean") return value;
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return null;
+}
+
+function normalizeOptionalId(value: unknown) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "string" && value.length > 0) return value;
+  return null;
 }
 
 function normalizeTradeSide(value: unknown) {
-  if (value === "B" || value === "buy") return "buy";
-  if (value === "A" || value === "sell") return "sell";
+  const side = typeof value === "string" ? value.toLowerCase() : value;
+  if (side === "b" || side === "buy") return "buy";
+  if (side === "a" || side === "sell") return "sell";
+  return "unknown";
+}
+
+function normalizeOrderSide(value: unknown) {
+  const side = typeof value === "string" ? value.toLowerCase() : value;
+  if (side === true || side === "b" || side === "buy") return "buy";
+  if (side === false || side === "a" || side === "sell") return "sell";
   return "unknown";
 }
 
@@ -303,30 +584,6 @@ function intervalDurationMs(interval: CandleInterval) {
   if (unit === "d") return value * 24 * 60 * 60_000;
   if (unit === "w") return value * 7 * 24 * 60 * 60_000;
   return 30 * 24 * 60 * 60_000;
-}
-
-function normalizePositions(value: unknown): RealTradingPosition[] {
-  if (!Array.isArray(value)) return [];
-  return value.flatMap((entry) => {
-    const position = entry?.position ?? {};
-    const size = Number(position.szi ?? 0);
-    if (!Number.isFinite(size) || size === 0) return [];
-    const coin = String(position.coin ?? "");
-    return [{
-      coin,
-      symbol: toInternalSymbol(coin),
-      side: size >= 0 ? "long" : "short",
-      size: Math.abs(size),
-      entryPrice: toNullableNumber(position.entryPx),
-      markPrice: toNullableNumber(position.markPx),
-      liquidationPrice: toNullableNumber(position.liquidationPx),
-      margin: toNullableNumber(position.marginUsed ?? position.positionValue),
-      leverage: toNullableNumber(position.leverage?.value ?? position.leverage),
-      unrealizedPnl: toNullableNumber(position.unrealizedPnl),
-      rawStatus: typeof position.type === "string" ? position.type : null,
-      network: hyperliquidTestnetNetwork,
-    }];
-  });
 }
 
 function sanitizeError(error: unknown) {

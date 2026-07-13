@@ -749,6 +749,10 @@ textarea {
     @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#ff981f] text-sm font-bold text-black;
   }
 
+  .xh-real-symbol-mark.is-image {
+    @apply bg-transparent text-transparent;
+  }
+
   .xh-real-symbol-picker {
     @apply relative block min-w-0 cursor-pointer;
   }
@@ -830,6 +834,7 @@ textarea {
   .xh-trade-order-rail {
     @apply grid min-w-0 bg-[#0c0e12];
     grid-template-rows: max-content 220px;
+    box-shadow: inset 1px 0 #25282f;
   }
 
   .xh-trade-panel-header {
@@ -882,6 +887,10 @@ textarea {
 
   .xh-real-candle-summary b {
     @apply font-medium text-[#38d9a9];
+  }
+
+  .xh-real-candle-summary b.is-negative {
+    @apply text-[#ff4d6d];
   }
 
   .xh-real-chart-canvas {
@@ -1019,6 +1028,15 @@ textarea {
     @apply font-medium text-[#f5f5f5];
   }
 
+  .xh-real-record-head.has-action,
+  .xh-real-record-row.has-action {
+    grid-template-columns: repeat(7, minmax(0, 1fr)) 64px;
+  }
+
+  .xh-real-record-row.has-action > button {
+    @apply justify-self-end border-0 bg-transparent px-0 text-[14px] text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
+  }
+
   .xh-real-position-shell {
     @apply min-h-0 overflow-x-auto;
   }
@@ -1090,6 +1108,10 @@ textarea {
     @apply h-8 border border-[#343941] bg-[#0a0c10] px-1 text-[14px] text-[#d8dde3] transition hover:border-white/60 hover:text-white;
   }
 
+  .xh-real-position-trigger-button {
+    @apply justify-self-start border-0 bg-transparent px-0 text-[12px] text-[#d8dde3] underline-offset-4 transition hover:text-white hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#f5f5f5];
+  }
+
   .xh-real-position-empty {
     @apply flex h-[190px] items-center justify-center text-[12px] text-[#7f8995];
   }
@@ -1112,7 +1134,6 @@ textarea {
 
   .xh-real-order-panel {
     @apply flex flex-col gap-4 bg-[#0c0e12] p-4;
-    box-shadow: inset 1px 0 #25282f;
   }
 
   .xh-real-order-topline {
@@ -1202,6 +1223,10 @@ textarea {
 
   .xh-real-order-field b {
     @apply text-[14px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-order-tpsl-fields {
+    @apply grid grid-cols-2 gap-2;
   }
 
   .xh-real-position-percent-control {
@@ -1471,6 +1496,30 @@ textarea {
     @apply mt-4 border border-[#5a4521] bg-[#211b10] p-3 text-[12px] leading-5 text-[#f5c56e];
   }
 
+  .xh-real-close-limit-field {
+    @apply mt-4 block;
+  }
+
+  .xh-real-close-limit-field > span {
+    @apply mb-2 block text-[12px] text-[#8a95a1];
+  }
+
+  .xh-real-close-limit-field > div {
+    @apply flex h-10 items-center border border-[#25282f] bg-[#0c0e12] px-3 focus-within:border-[#66717d];
+  }
+
+  .xh-real-close-limit-field input {
+    @apply min-w-0 flex-1 bg-transparent text-[14px] text-[#e8ecf2] outline-none;
+  }
+
+  .xh-real-close-limit-field b {
+    @apply text-[14px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-tpsl-fields {
+    @apply grid grid-cols-2 gap-3;
+  }
+
   .xh-real-confirm-skip {
     @apply mt-4 flex min-h-10 cursor-pointer items-center gap-2 text-[14px] text-[#cbd1d8];
   }
@@ -1489,7 +1538,6 @@ textarea {
 
   .xh-real-account-panel {
     @apply h-[220px] border-t border-[#25282f] bg-[#0c0e12] p-4 text-[12px];
-    box-shadow: inset 1px 0 #25282f;
   }
 
   .xh-real-account-title {
@@ -1565,6 +1613,7 @@ textarea {
 
     .xh-trade-order-rail {
       @apply grid-cols-2 grid-rows-none border-l-0 border-t border-[#25282f];
+      box-shadow: none;
     }
 
     .xh-real-order-panel {

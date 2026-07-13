@@ -1,6 +1,6 @@
 # Hyperliquid 真实交易接入契约
 
-更新时间：2026-07-11
+更新时间：2026-07-13
 
 本文件定义 `/app/trade` Hyperliquid testnet 真实交易接入的第一阶段工程契约。`/app/demo` 继续承接当前 demo 模拟交易能力，除兼容跳转与命名迁移外，不在真实交易任务中改写既有模拟交易逻辑。
 
@@ -65,16 +65,19 @@ server/modules/api/realTradingRoutes.ts
 `GET /api/real-trading/market/symbols`
 
 - 返回 Hyperliquid testnet 可交易 perpetual 列表。
-- 字段需包含内部 symbol、provider coin、assetId、price/size 精度、maxLeverage、status。
+- 字段包含内部 symbol、provider coin、iconUrl、assetId、price/size 精度、maxLeverage、status。
+- `iconUrl` 由 `providerCoin` 派生：`https://app.hyperliquid.xyz/coins/{providerCoin}.svg`，providerCoin 异常时返回 `null`。
 
 `GET /api/real-trading/market/summary?symbol=BTCUSDT`
 
-- 返回 mark/oracle/mid/24h 成交量/open interest/funding/nextFundingTime/status/timestamp。
+- 返回 `markPrice / oraclePrice / midPrice / previousDayPrice / dayChange / dayChangePercent / dayNotionalVolume / openInterest / funding / nextFundingTime / status / timestamp`。
+- `dayChange = markPrice - previousDayPrice`；`dayChangePercent = dayChange / previousDayPrice * 100`。任一输入无效或分母为 0 时返回 `null`。
 
 `GET /api/real-trading/market/orderbook?symbol=BTCUSDT`
 
 - 返回 Hyperliquid 公共 L2 深度，不叠加平台 spread。
-- asks 升序、bids 降序，需返回累计量。
+- asks 升序、bids 降序。
+- 每档返回 `price / size / cumulativeSize / total / orderCount`；`total` 是 `cumulativeSize` 的兼容别名。
 
 `GET /api/real-trading/market/trades?symbol=BTCUSDT`
 
@@ -90,19 +93,36 @@ server/modules/api/realTradingRoutes.ts
 
 `GET /api/real-trading/account/summary?address=0x...`
 
-- 返回账户权益、可用保证金、已用保证金、总浮盈亏、cross/isolated 摘要。
+- 返回账户权益、可用保证金、已用保证金、总浮盈亏、cross 摘要、spot USDC 余额和 warning。
+- 核心字段：`accountValue / withdrawable / usedMargin / availableMargin / totalUnrealizedPnl / crossAccountValue / crossMaintenanceMarginUsed / crossTotalMarginUsed / crossTotalNotionalPosition / crossMarginRatio / spotUsdcBalance / spotBalances / warnings`。
+- `crossMarginRatio = crossMaintenanceMarginUsed / crossAccountValue`；分母无效或小于等于 0 时返回 `null`。
+- `spotBalances` 标准化为 `{ coin, total, hold, available }`；`available = total - hold`，任一输入无效时返回 `null`。
+- `spotClearinghouseState` 不可用时，不阻断 summary，`spotUsdcBalance=null`、`spotBalances=[]`，并在 `warnings` 返回原因。
+
+`GET /api/real-trading/account/fees?address=0x...`
+
+- 读取官方 `userFees`，只返回费率，不做服务端下单或代签。
+- 最小字段：`makerRate / takerRate / spotMakerRate / spotTakerRate / activeReferralDiscount / activeStakingDiscount / timestamp / network / warnings`。
+- `userFees` 不可用时费率返回 `null`，并在 `warnings` 返回原因。
 
 `GET /api/real-trading/positions?address=0x...`
 
-- 返回真实持仓，包含 coin、side、size、entryPx、markPx、liqPx、margin、leverage、unrealizedPnl。
+- 返回真实持仓，包含 `coin / symbol / side / size / entryPrice / entryPx / markPrice / markPx / liquidationPrice / liqPx / positionValue / returnOnEquity / margin / leverage / unrealizedPnl / cumFunding / fundingAllTime / fundingSinceChange / fundingSinceOpen`。
+- `entryPx / markPx / liqPx` 是前端契约字段；`entryPrice / markPrice / liquidationPrice` 继续保留兼容。
+- `markPrice / markPx` 优先使用 `clearinghouseState.position.markPx`；该字段为空或非法时，按当前持仓自己的 Hyperliquid `coin` 从 `metaAndAssetCtxs` 对应 asset context 回退取 `markPx`，找不到可靠值时返回 `null`，不使用页面当前选中品种价格代替。
+- 页面“资金费”优先使用 `fundingSinceOpen`。
 
 `GET /api/real-trading/orders/open?address=0x...`
 
-- 返回真实当前委托。
+- 优先读取官方 `frontendOpenOrders`，不可用时回退 `openOrders` 并做等价标准化。
+- 每条委托返回 `price / size / timestamp / status`，并保留原始兼容字段 `limitPx / sz`。
+- TP/SL 与触发单元数据标准化为 `isPositionTpsl / isTrigger / orderType / origSz / reduceOnly / triggerCondition / triggerPx`。
 
 `GET /api/real-trading/orders/history?address=0x...`
 
 - 返回历史委托 / 成交分页；Hyperliquid info 接口有分页限制时必须显式返回 `nextCursor` 或提示前端继续分页。
+- `orders` 标准化 `price / size / timestamp / status / statusTimestamp`，并保留 `limitPx / sz`。
+- `fills` 标准化 `price / size / timestamp / fee / feeToken / hash / direction`；字段缺失时返回 `null`，不伪造。
 
 ### 4.3 签名动作提交
 
@@ -174,6 +194,16 @@ server/modules/api/realTradingRoutes.ts
 - 后端不得采用“用户把 API wallet 私钥交给服务器，再由服务器 SDK 代签”的方案。
 - 后端 exchange proxy 只负责 allowlist 校验、限流、审计、转发和响应标准化，不负责保存私钥或生成用户交易签名。
 - 如果当前 TypeScript SDK 不能满足“不保存私钥 + 前端本地签名”的边界，必须停止并回到项目管理确认，而不是改成后端保存私钥。
+
+## 5.2 当前前端动作口径
+
+- `/app/trade` 的开仓、单仓市价/限价平仓、全部市价平仓、反手、撤单、杠杆更新和 TP/SL 均由浏览器内 `@nktkas/hyperliquid` 会话签名器构造并签名，再经现有 `/api/real-trading/exchange` 转发；不新增后端动作接口。
+- 限价平仓确认弹窗默认填入对手方最优一档：多仓平仓使用 best bid，空仓平仓使用 best ask；用户可在提交前编辑。
+- 开仓前可勾选 TP/SL 并填写止盈价、止损价，入场单和固定数量的子触发单以 `normalTpsl` grouping 一起提交；该模式对应与父订单关联的 OCO TP/SL。
+- 持仓形成后可从持仓表的止盈/止损列设置或替换触发单；替换时先撤销该品种现有 trigger orders，再提交新的 `positionTpsl`。
+- TP/SL 使用 market trigger；触发后的保护价按官方默认容差口径设置为触发价上下 10%。
+- 反手按“先 reduce-only 市价平掉原仓，再按同数量反向市价开仓”顺序执行。前一动作已成交而后一动作失败时不会自动回滚，验收需覆盖该部分完成状态。
+- 会话 agent wallet 仍只保存在页面运行内存中；刷新、切换 provider 或钱包地址变化后必须重新授权。
 
 ## 6. 测试验收重点
 

@@ -31,6 +31,7 @@ import { TradingOrdersTable, TradingPositionsTable } from "../../features/tradin
 import { Toast } from "../../features/trading/components/TradingFeedback";
 import { getChartPriceFormat, isValidCandle, normalizeChartCandles, toChartCandle } from "../../features/trading/lib/chart";
 import { readCurrentSimulationAccountId, shortSimulationId } from "../../features/trading/lib/simulationAccount";
+import { mergeTradingSearchParams } from "../../features/trading/lib/tradingSearchParams";
 import { currentSimulationAccountKey } from "../../features/trading/model/constants";
 
 export function TradingPage() {
@@ -100,11 +101,10 @@ export function TradingPage() {
   useEffect(() => {
     if (selectedConfig) {
       setVolume(normalizeQuantity(selectedConfig.minLot));
-      const nextParams: Record<string, string> = { symbol: selectedConfig.symbol };
-      if (selectedSimulationAccountId) {
-        nextParams.simulationAccountId = selectedSimulationAccountId;
-      }
-      setSearchParams(nextParams);
+      setSearchParams(
+        (current) => mergeTradingSearchParams(current, selectedConfig.symbol, selectedSimulationAccountId),
+        { replace: true },
+      );
     }
   }, [selectedConfig?.minLot, selectedConfig?.symbol, selectedSimulationAccountId, setSearchParams]);
 

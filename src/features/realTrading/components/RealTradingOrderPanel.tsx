@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, type CSSProperties } from "react";
-import type { Eip1193Provider } from "ethers";
 import { ChevronDown } from "lucide-react";
 import { Button } from "../../../components/ui/Button";
 import { Checkbox } from "../../../components/ui/Checkbox";
 import { Modal } from "../../../components/ui/Modal";
-import { HyperliquidSessionSigner, normalizeSdkError } from "../lib/hyperliquidSdk";
+import type { RealTradingFees } from "../../../api/realTrading";
+import { normalizeSdkError } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
+import type { HyperliquidSessionController } from "../lib/useHyperliquidSessionSigner";
+import { buildPositionTpslOrders } from "../lib/tpslOrders";
 
-type ActionState = "idle" | "initializing" | "authorizing" | "authorized" | "submitting";
 const skipOrderConfirmationKey = "stellax.realTrading.skipOrderConfirmation";
 const positionPercentSteps = [0, 25, 50, 75, 100] as const;
 const positionPercentSnapThreshold = 2;
@@ -17,54 +18,47 @@ export function RealTradingOrderPanel({
   availableMargin,
   connected,
   connectionMessage,
+  fees,
   markPrice,
   maxLeverage,
   onConnect,
   onSubmitted,
   positionSize,
-  provider,
+  session,
   szDecimals = 0,
   symbol,
-  walletAddress,
 }: {
   assetId?: number;
   availableMargin?: number | null;
   connected: boolean;
   connectionMessage?: string;
+  fees?: RealTradingFees | null;
   markPrice?: number | null;
   maxLeverage?: number;
   onConnect: () => void;
   onSubmitted: () => void;
   positionSize?: number;
-  provider?: Eip1193Provider;
+  session: HyperliquidSessionController;
   szDecimals?: number;
   symbol: string;
-  walletAddress: string;
 }) {
-  const signerRef = useRef<HyperliquidSessionSigner | null>(null);
   const sizeInputSourceRef = useRef<"manual" | "slider">("manual");
-  const [state, setState] = useState<ActionState>("idle");
-  const [message, setMessage] = useState("");
   const [side, setSide] = useState("buy");
   const [orderType, setOrderType] = useState("limit");
   const [price, setPrice] = useState("");
   const [size, setSize] = useState("");
   const [reduceOnly, setReduceOnly] = useState(false);
+  const [tpslEnabled, setTpslEnabled] = useState(false);
+  const [tpPrice, setTpPrice] = useState("");
+  const [slPrice, setSlPrice] = useState("");
   const [leverage, setLeverage] = useState("5");
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipNextConfirmation, setSkipNextConfirmation] = useState(false);
   const [pendingSide, setPendingSide] = useState<"buy" | "sell">("buy");
   const [positionPercent, setPositionPercent] = useState(0);
-  const authorized = state === "authorized" || state === "submitting";
-  const busy = state === "initializing" || state === "authorizing" || state === "submitting";
+  const { authorized, busy, message } = session;
   const canSubmit = authorized && !busy && typeof assetId === "number";
   const actionDisabled = !connected || busy || typeof assetId !== "number";
-
-  useEffect(() => {
-    signerRef.current = null;
-    setState("idle");
-    setMessage(connected ? "钱包地址已变化，需要重新初始化会话签名器。" : "");
-  }, [connected, walletAddress]);
 
   useEffect(() => {
     if (orderType === "market" && typeof markPrice === "number") {
@@ -82,63 +76,48 @@ export function RealTradingOrderPanel({
   }, [availableMargin, leverage, markPrice, orderType, positionSize, price, reduceOnly, side, szDecimals]);
 
   async function authorizeSession() {
-    if (!provider || !walletAddress) return;
-    setMessage("");
-    try {
-      setState("initializing");
-      const signer = await HyperliquidSessionSigner.create(provider, walletAddress);
-      signerRef.current = signer;
-      setState("authorizing");
-      await signer.approveAgent();
-      setState("authorized");
-      setMessage(`会话 API wallet 已授权：${signer.agentAddress.slice(0, 6)}...${signer.agentAddress.slice(-4)}`);
-      if (typeof assetId === "number") {
-        try {
-          await signer.updateLeverage(assetId, Number(leverage));
-        } catch (error) {
-          setMessage(normalizeSdkError(error));
-        }
+    const signer = await session.authorize();
+    if (signer && typeof assetId === "number") {
+      try {
+        await signer.updateLeverage(assetId, Number(leverage));
+        session.setMessage("会话签名器已初始化。");
+        onSubmitted();
+      } catch (error) {
+        session.setError(normalizeSdkError(error));
       }
-    } catch (error) {
-      signerRef.current = null;
-      setState("idle");
-      setMessage(normalizeSdkError(error));
     }
   }
 
   async function runAction(action: () => Promise<unknown>, success: string) {
-    setMessage("");
-    setState("submitting");
-    try {
-      await action();
-      setState("authorized");
-      setMessage(success);
-      onSubmitted();
-    } catch (error) {
-      setState("authorized");
-      setMessage(normalizeSdkError(error));
-    }
+    const completed = await session.runAction(() => action(), success);
+    if (completed) onSubmitted();
   }
 
   async function submitOrder(orderSide: "buy" | "sell" = side === "sell" ? "sell" : "buy") {
-    const signer = signerRef.current;
+    const signer = session.signer;
     if (!signer || typeof assetId !== "number") return;
     const orderPrice = resolveOrderPrice(orderSide);
     if (!orderPrice || !size || Number(orderPrice) <= 0 || Number(size) <= 0) {
-      setMessage("请输入有效的价格和数量。");
+      session.setError("请输入有效的价格和数量。");
       return;
     }
     let normalizedPrice: string;
     try {
       normalizedPrice = normalizeHyperliquidPrice(orderPrice, szDecimals, orderSide === "buy" ? "up" : "down");
     } catch {
-      setMessage("请输入有效的价格和数量。");
+      session.setError("请输入有效的价格和数量。");
       return;
     }
-    await runAction(
-      () => signer.placeOrder({ asset: assetId, isBuy: orderSide === "buy", price: normalizedPrice, size, reduceOnly, market: orderType === "market" }),
-      reduceOnly ? "reduce-only 平仓请求已发送。" : "真实订单请求已发送。",
-    );
+    const entryOrder = { asset: assetId, isBuy: orderSide === "buy", price: normalizedPrice, size, reduceOnly, market: orderType === "market" };
+    try {
+      const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, orderPrice) : [];
+      await runAction(
+        () => triggers.length > 0 ? signer.placeOrderWithTpsl(entryOrder, triggers) : signer.placeOrder(entryOrder),
+        reduceOnly ? "reduce-only 平仓请求已发送。" : tpslEnabled ? "真实订单与止盈止损请求已发送。" : "真实订单请求已发送。",
+      );
+    } catch (error) {
+      session.setError(error instanceof Error ? error.message : "止盈止损参数无效。");
+    }
   }
 
   function resolveOrderPrice(orderSide: "buy" | "sell") {
@@ -147,25 +126,42 @@ export function RealTradingOrderPanel({
     return normalizeHyperliquidPrice(markPrice * (orderSide === "buy" ? 1.01 : 0.99), szDecimals, orderSide === "buy" ? "up" : "down");
   }
 
+  function resolveTpslOrders(orderSide: "buy" | "sell", referenceValue = resolveOrderPrice(orderSide)) {
+    if (typeof assetId !== "number") return [];
+    return buildPositionTpslOrders({
+      asset: assetId,
+      closingIsBuy: orderSide === "sell",
+      referencePrice: Number(referenceValue),
+      size,
+      slPrice,
+      szDecimals,
+      tpPrice,
+    });
+  }
+
   function requestOrder(orderSide: "buy" | "sell") {
     setSide(orderSide);
-    setMessage("");
+    session.setMessage("");
     if (!connected) {
       onConnect();
       return;
     }
     if (!authorized) {
-      if (!provider) {
-        setMessage("未检测到钱包签名器。");
-        return;
-      }
       void authorizeSession();
       return;
     }
     const orderPrice = resolveOrderPrice(orderSide);
     if (!orderPrice || !size || Number(orderPrice) <= 0 || Number(size) <= 0) {
-      setMessage("请输入有效的价格和数量。");
+      session.setError("请输入有效的价格和数量。");
       return;
+    }
+    if (tpslEnabled && !reduceOnly) {
+      try {
+        resolveTpslOrders(orderSide, orderPrice);
+      } catch (error) {
+        session.setError(error instanceof Error ? error.message : "止盈止损参数无效。");
+        return;
+      }
     }
     if (window.localStorage.getItem(skipOrderConfirmationKey) === "1") {
       void submitOrder(orderSide);
@@ -219,11 +215,11 @@ export function RealTradingOrderPanel({
   }
 
   async function submitLeverage(nextLeverage = leverage) {
-    const signer = signerRef.current;
+    const signer = session.signer;
     const value = Number(nextLeverage);
     if (!signer || typeof assetId !== "number") return;
     if (!Number.isInteger(value) || value < 1 || value > (maxLeverage ?? 50)) {
-      setMessage(`杠杆必须为 1-${maxLeverage ?? 50} 的整数。`);
+      session.setError(`杠杆必须为 1-${maxLeverage ?? 50} 的整数。`);
       return;
     }
     await runAction(() => signer.updateLeverage(assetId, value), "杠杆更新请求已发送。");
@@ -267,6 +263,12 @@ export function RealTradingOrderPanel({
             <span>数量</span>
             <div><input inputMode="decimal" value={size} onChange={(event) => changeSize(event.target.value)} /><b>{symbol.replace("USDT", "")}</b></div>
           </label>
+          {tpslEnabled && !reduceOnly ? (
+            <div className="xh-real-order-tpsl-fields">
+              <label className="xh-real-order-field"><span>止盈价</span><div><input inputMode="decimal" value={tpPrice} onChange={(event) => setTpPrice(event.target.value)} /><b>USDC</b></div></label>
+              <label className="xh-real-order-field"><span>止损价</span><div><input inputMode="decimal" value={slPrice} onChange={(event) => setSlPrice(event.target.value)} /><b>USDC</b></div></label>
+            </div>
+          ) : null}
         </div>
         <div className="xh-real-position-percent-control">
           <div className="xh-real-position-percent">
@@ -313,17 +315,17 @@ export function RealTradingOrderPanel({
         {!connected && connectionMessage ? <p className="xh-real-connect-error" role="alert">{connectionMessage}</p> : null}
         <div className="xh-real-order-checks">
           <Checkbox checked={reduceOnly} label="只减仓" onChange={(event) => setReduceOnly(event.target.checked)} />
-          <Checkbox disabled label="止盈/止损" />
+          <Checkbox checked={tpslEnabled} disabled={reduceOnly} label="止盈/止损" onChange={(event) => setTpslEnabled(event.target.checked)} />
         </div>
       </fieldset>
 
       <div className="xh-real-order-metrics">
         <PanelMetric label="强平价格" value="-" />
-        <PanelMetric label="订单价值" value={estimateValue(price, size)} />
-        <PanelMetric label="所需保证金" value="-" />
-        <PanelMetric label="费用" value="-" />
+        <PanelMetric label="订单价值" value={estimateValue(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size)} />
+        <PanelMetric label="所需保证金" value={estimateMargin(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, leverage)} />
+        <PanelMetric label="费用" value={estimateFee(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, orderType === "market" ? fees?.takerRate : fees?.makerRate)} />
       </div>
-      {message ? <p className={`xh-real-order-message ${authorized ? "is-success" : ""}`} role="status">{message}</p> : null}
+      {message ? <p className={`xh-real-order-message ${session.messageTone === "success" ? "is-success" : ""}`} role="status">{message}</p> : null}
       <Modal open={confirmOpen} title="确认订单" onClose={() => setConfirmOpen(false)} shellClassName="xh-real-confirm-modal">
         <div className="xh-real-confirm-summary">
           <ConfirmMetric label="品种" value={symbol} />
@@ -334,6 +336,8 @@ export function RealTradingOrderPanel({
           <ConfirmMetric label="数量" value={`${size || "-"} ${symbol.replace("USDT", "")}`} />
           <ConfirmMetric label="订单价值" value={estimateValue(resolveOrderPrice(pendingSide), size)} />
           <ConfirmMetric label="杠杆" value={`${leverage}x · 全仓`} />
+          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止盈价" value={tpPrice ? `${tpPrice} USDC` : "-"} /> : null}
+          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止损价" value={slPrice ? `${slPrice} USDC` : "-"} /> : null}
         </div>
         <div className="xh-real-confirm-warning" role="note">
           Hyperliquid Testnet 真实订单。确认后将请求本地签名，订单结果以交易所返回为准。
@@ -370,6 +374,20 @@ function formatMoney(value?: number | null) {
 function estimateValue(price: string, size: string) {
   const value = Number(price) * Number(size);
   return Number.isFinite(value) && value > 0 ? `${value.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC` : "-";
+}
+
+function estimateMargin(price: string, size: string, leverage: string) {
+  const value = Number(price) * Number(size);
+  const leverageValue = Number(leverage);
+  const margin = value / leverageValue;
+  return Number.isFinite(margin) && margin > 0 ? `${margin.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC` : "-";
+}
+
+function estimateFee(price: string, size: string, rate?: number | null) {
+  const fee = Number(price) * Number(size) * Number(rate);
+  return typeof rate === "number" && Number.isFinite(fee) && fee > 0
+    ? `${fee.toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC`
+    : "-";
 }
 
 function formatOrderSize(value: number, decimals: number) {

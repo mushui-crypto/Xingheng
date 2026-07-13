@@ -4,6 +4,7 @@ import type { HyperliquidRealTradingNetwork } from "./hyperliquidConfig";
 export type RealTradingSymbol = {
   symbol: string;
   providerCoin: string;
+  iconUrl: string | null;
   assetId: number;
   szDecimals: number;
   pxDecimals: number;
@@ -18,6 +19,9 @@ export type RealTradingMarketSummary = {
   markPrice: number | null;
   oraclePrice: number | null;
   midPrice: number | null;
+  previousDayPrice: number | null;
+  dayChange: number | null;
+  dayChangePercent: number | null;
   dayNotionalVolume: number | null;
   openInterest: number | null;
   funding: number | null;
@@ -31,6 +35,7 @@ export type RealTradingOrderbookLevel = {
   price: number;
   size: number;
   cumulativeSize: number;
+  total: number;
   orderCount: number | null;
 };
 
@@ -68,6 +73,13 @@ export type RealTradingCandle = {
   network: HyperliquidRealTradingNetwork;
 };
 
+export type RealTradingSpotBalance = {
+  coin: string;
+  total: number | null;
+  hold: number | null;
+  available: number | null;
+};
+
 export type RealTradingAccountSummary = {
   address: string;
   accountValue: number | null;
@@ -76,9 +88,16 @@ export type RealTradingAccountSummary = {
   availableMargin: number | null;
   totalUnrealizedPnl: number | null;
   crossAccountValue: number | null;
+  crossMaintenanceMarginUsed: number | null;
+  crossTotalMarginUsed: number | null;
+  crossTotalNotionalPosition: number | null;
+  crossMarginRatio: number | null;
   isolatedAccountValue: number | null;
+  spotUsdcBalance: number | null;
+  spotBalances: RealTradingSpotBalance[];
   timestamp: number;
   network: HyperliquidRealTradingNetwork;
+  warnings?: string[];
 };
 
 export type RealTradingPosition = {
@@ -87,13 +106,87 @@ export type RealTradingPosition = {
   side: "long" | "short";
   size: number;
   entryPrice: number | null;
+  entryPx: number | null;
   markPrice: number | null;
+  markPx: number | null;
   liquidationPrice: number | null;
+  liqPx: number | null;
+  positionValue: number | null;
+  returnOnEquity: number | null;
   margin: number | null;
   leverage: number | null;
   unrealizedPnl: number | null;
+  fundingAllTime: number | null;
+  fundingSinceChange: number | null;
+  fundingSinceOpen: number | null;
+  cumFunding: {
+    allTime: number | null;
+    sinceChange: number | null;
+    sinceOpen: number | null;
+  };
   rawStatus?: string | null;
   network: HyperliquidRealTradingNetwork;
+};
+
+export type RealTradingOpenOrder = {
+  coin: string | null;
+  symbol: string | null;
+  side: "buy" | "sell" | "unknown";
+  price: number | null;
+  size: number | null;
+  timestamp: number | null;
+  status: string | null;
+  limitPx: number | null;
+  sz: number | null;
+  oid: number | string | null;
+  cloid: string | null;
+  reduceOnly: boolean | null;
+  isPositionTpsl: boolean | null;
+  isTrigger: boolean | null;
+  orderType: string | null;
+  origSz: number | null;
+  triggerCondition: string | null;
+  triggerPx: number | null;
+  raw?: unknown;
+  network: HyperliquidRealTradingNetwork;
+};
+
+export type RealTradingHistoricalOrder = RealTradingOpenOrder & {
+  statusTimestamp: number | null;
+};
+
+export type RealTradingFill = {
+  coin: string | null;
+  symbol: string | null;
+  side: "buy" | "sell" | "unknown";
+  price: number | null;
+  size: number | null;
+  timestamp: number | null;
+  fee: number | null;
+  feeToken: string | null;
+  hash: string | null;
+  direction: string | null;
+  raw?: unknown;
+  network: HyperliquidRealTradingNetwork;
+};
+
+export type RealTradingOrderHistory = {
+  orders: RealTradingHistoricalOrder[];
+  fills: RealTradingFill[];
+  nextCursor: null;
+  warnings: string[];
+};
+
+export type RealTradingFees = {
+  makerRate: number | null;
+  takerRate: number | null;
+  spotMakerRate: number | null;
+  spotTakerRate: number | null;
+  activeReferralDiscount: number | null;
+  activeStakingDiscount: number | null;
+  timestamp: number;
+  network: HyperliquidRealTradingNetwork;
+  warnings?: string[];
 };
 
 export type RealTradingExchangeRequest = {
