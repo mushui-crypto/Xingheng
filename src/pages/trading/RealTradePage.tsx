@@ -23,7 +23,7 @@ import {
   type RealTrade,
   type RealTradingSymbol,
 } from "../../api/realTrading";
-import { getChartPriceFormat, normalizeChartCandles, toChartCandle } from "../../features/trading/lib/chart";
+import { getChartPriceFormat, normalizeChartCandles, positionLatestCandleInInitialView, toChartCandle } from "../../features/trading/lib/chart";
 import { RealTradingOrderPanel } from "../../features/realTrading/components/RealTradingOrderPanel";
 import { RealPositionsTable } from "../../features/realTrading/components/RealPositionsTable";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
@@ -236,7 +236,9 @@ export function RealTradePage() {
         }
         candleSeriesRef.current?.setData(candles.map(toChartCandle));
         setLatestCandle(candles[candles.length - 1]);
-        chartRef.current?.timeScale().fitContent();
+        if (chartRef.current) {
+          positionLatestCandleInInitialView(chartRef.current, candles.length);
+        }
       } catch (error) {
         if (!cancelled) {
           candleSeriesRef.current?.setData([]);

@@ -1,7 +1,9 @@
-import type { CandlestickData } from "lightweight-charts";
+import type { CandlestickData, IChartApi } from "lightweight-charts";
 import type { ApiCandle } from "../../../api/market";
 
 type CandleLike = Pick<ApiCandle, "time" | "open" | "high" | "low" | "close">;
+
+const INITIAL_LATEST_CANDLE_POSITION = 2 / 3;
 
 export function toChartCandle(candle: CandleLike): CandlestickData {
   return {
@@ -40,4 +42,15 @@ export function getChartPriceFormat(digits: number) {
     precision,
     minMove: 10 ** -precision,
   };
+}
+
+export function positionLatestCandleInInitialView(chart: IChartApi, candleCount: number) {
+  const timeScale = chart.timeScale();
+  timeScale.fitContent();
+
+  if (!Number.isFinite(candleCount) || candleCount <= 0) {
+    return;
+  }
+
+  timeScale.scrollToPosition(candleCount * (1 - INITIAL_LATEST_CANDLE_POSITION), false);
 }
