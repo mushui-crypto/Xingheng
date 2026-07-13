@@ -1,8 +1,8 @@
 # 星衡工程 Agents
 
-本文件定义项目内协作使用的工程 agent。所有 agent 都应遵守当前 PRD、已有代码结构和最新产品边界：保留 `/app/demo` demo 模拟交易能力，同时新增 `/app/trade` Hyperliquid testnet 真实交易接入方向；平台后端不得保存用户 API wallet 私钥、助记词或可直接代签的明文凭证。
+本文件定义项目内协作使用的工程 agent。所有 agent 都应遵守当前 PRD、已有代码结构和最新产品边界：保留 `/app/demo` demo 模拟交易能力，同时新增 `/app/trade` Hyperliquid 真实交易接入方向；真实交易第一阶段先用 Hyperliquid testnet，用户自带钱包 / API wallet 授权，平台后端不得保存用户 API wallet 私钥、助记词或可直接代签的明文凭证。
 
-仓库与 worktree 使用约定见 [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)。
+仓库与 worktree 使用约定见 [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)；任务分发、回收、交接、同步和切换协同见 [`项目沟通规则.md`](./项目沟通规则.md)。
 
 ## 共享产品上下文（摘自 PRODUCT.md）
 
@@ -26,12 +26,12 @@
 
 ### 当前明确边界
 
-- 当前品种目录同步 Hyperliquid 主 DEX 活跃 perpetual，排除已下架与 HIP-3
+- 当前品种目录同步 Hyperliquid 主 DEX 活跃 perpetual，并可包含后台显式启用的 Hyperliquid 特殊 perpetual
 - 当前主资金资产仅支持 `USDT`
 - 当前钱包网络仅支持 `BSC_TESTNET`
 - 账户页命名统一为：`Stella X 钱包` 表示平台分配并托管的测试网地址；`第三方钱包` 表示用户绑定的 MetaMask 地址
 - `/app/demo` 当前交易为内部模拟成交，既有模拟交易能力不得被真实交易改造破坏
-- `/app/trade` 进入 Hyperliquid testnet 真实交易接入方向；真实交易核心动作优先使用 Hyperliquid SDK 或官方签名范例在前端 / 用户本地完成签名，后端只做只读 REST 聚合与已签名 exchange 转发
+- `/app/trade` 进入真实交易接入开发方向：第一阶段接 Hyperliquid testnet，支持用户自带钱包 / API wallet 授权交易；平台不保存 API wallet 私钥
 - 当前不包含平台资金托管、平台代管真实资产、主网生产真钱包、多链、多资产、多钱包、KYC、AML、生产级风控
 
 ### 用户与使用场景
@@ -66,6 +66,7 @@
 - 前端 Agent：优先保证信息层级、账户归属、状态反馈、接口口径一致，不自行扩产品能力；`/app/trade` 与 `/app/demo` 必须在入口、文案、风险提示和数据源上隔离。
 - UI / 设计 Agent：优先做任务型产品界面，不往营销页或概念页方向发散；默认只调用 `impeccable` 作为主 design skill，`frontend-design` 与 `design-taste-frontend` 默认停用，除非用户或项目管理明确要求额外启用。
 - 测试 Agent：验收时同时核对功能通过与产品边界未被突破。
+- 所有工程 Agent：涉及切换 worktree、分支、交接、回收、同步文档、测试放行、提交推送或合并时，统一按 `项目沟通规则.md` 执行，不沿用旧对话里的临时口径。
 
 ## 后端/交易系统工程 Agent
 
@@ -112,10 +113,9 @@
 
 - 新增真实交易能力默认落在 `/app/trade`，不得改写或替换 `/app/demo` 的模拟交易闭环。
 - 第一阶段先接 Hyperliquid testnet，后续 mainnet 必须重新回到项目管理确认。
-- 用户 API wallet 私钥不得保存到后端数据库、日志、环境变量或本地持久化文件。
-- 后端只读接口可用 REST 封装，包括 symbols、summary、orderbook、trades、candles、account summary、positions、open orders、history。
-- 后端 `exchange` 只负责已签名 payload 的 allowlist 校验、限流、脱敏审计、转发和响应标准化，不负责签名、nonce、action 构造或 API wallet / agent wallet 授权。
-- 真实交易只读字段契约：market summary 使用 `markPrice / oraclePrice / midPrice / dayNotionalVolume`；account summary 使用 `accountValue / totalUnrealizedPnl`，不补短字段兼容。
+- 支持方向包括真实账户读取、真实行情、限价单、市价单、杠杆、撤单、平仓、清算/强平状态展示、订单与成交历史。
+- 用户 API wallet 私钥不得保存到后端数据库、日志、环境变量或本地持久化文件；后端只保存非敏感授权状态、地址、公钥、配置或审计记录。
+- 真实交易接口和类型必须与 demo 模拟交易接口隔离命名，避免前端误把模拟成交当真实成交。
 
 ### 主要文件
 

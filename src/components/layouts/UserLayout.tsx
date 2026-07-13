@@ -15,6 +15,10 @@ export function UserLayout({ children }: UserLayoutProps) {
   const expireSession = useAuthStore((state) => state.expireSession);
   const currentUser = useUserStore((state) => state.currentUser);
   const isAccountPage = location.pathname.startsWith("/app/account");
+  const isTradingPage =
+    location.pathname.startsWith("/app/trade") ||
+    location.pathname.startsWith("/app/demo") ||
+    location.pathname.startsWith("/app/trading");
 
   useEffect(() => {
     const handleAuthFailure = () => {
@@ -32,14 +36,15 @@ export function UserLayout({ children }: UserLayoutProps) {
 
   return (
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
-      <header className="sticky top-0 z-30 h-[60px] border border-[#2b2b2b] bg-black">
+      <header className="sticky top-0 z-30 h-[60px] border-b border-[#2b2b2b] bg-black">
         <div className="flex h-full w-full min-w-0 items-center justify-between gap-3 overflow-hidden px-3 py-2.5 sm:px-4 md:gap-6 md:px-8">
           <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-6 lg:gap-10">
             <Brand />
             <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
               <TopLink to="/app/dashboard" label="首页" />
               <TopLink to="/app/markets" label="行情" />
-              <TopLink to="/app/trading" label="交易终端" />
+              <TopLink to="/app/trade" label="真实交易" />
+              <TopLink to="/app/demo" label="模拟交易" />
               <TopLink to="/app/account" label="账户总览" />
             </nav>
           </div>
@@ -56,7 +61,7 @@ export function UserLayout({ children }: UserLayoutProps) {
           </div>
         </div>
       </header>
-      <main className={isAccountPage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
+      <main className={isAccountPage || isTradingPage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
     </div>
   );
 

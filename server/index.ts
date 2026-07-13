@@ -7,9 +7,13 @@ import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/a
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
+import { registerRealTradingRoutes } from "./modules/api/realTradingRoutes";
 import { registerUserTradingRoutes } from "./modules/api/userTradingRoutes";
 import { registerUserWalletRoutes } from "./modules/api/userWalletRoutes";
 import { EmailService } from "./modules/email/EmailService";
+import { HyperliquidExchangeProxy } from "./modules/hyperliquid/HyperliquidExchangeProxy";
+import { getHyperliquidRealTradingConfig } from "./modules/hyperliquid/hyperliquidConfig";
+import { HyperliquidInfoClient } from "./modules/hyperliquid/HyperliquidInfoClient";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
@@ -63,11 +67,15 @@ const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const email = new EmailService(config);
 const users = new UserService(tradingStore, email, config.appPublicUrl);
+const realTradingConfig = getHyperliquidRealTradingConfig();
+const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
+const realTradingExchange = new HyperliquidExchangeProxy(realTradingConfig.baseUrl);
 registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
+registerRealTradingRoutes({ app, info: realTradingInfo, exchange: realTradingExchange });
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });
 registerUserWalletRoutes(app, wallet);

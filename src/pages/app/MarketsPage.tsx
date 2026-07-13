@@ -138,7 +138,7 @@ export function MarketsPage() {
                     <p className="text-xs leading-5 text-muted">
                       更新时间：{quote?.localUpdatedAt ? new Date(quote.localUpdatedAt).toLocaleString("zh-CN") : "-"}
                     </p>
-                    <Link className="xh-action-link justify-center" to={`/app/trading?symbol=${symbol.symbol}`}>
+                    <Link className="xh-action-link justify-center" to={`/app/demo?symbol=${symbol.symbol}`}>
                       查看图表 <ArrowRight size={15} />
                     </Link>
                   </div>
@@ -197,7 +197,7 @@ export function MarketsPage() {
                       <td className="px-5 py-4">
                         <Link
                           className="xh-action-link"
-                          to={`/app/trading?symbol=${symbol.symbol}`}
+                          to={`/app/demo?symbol=${symbol.symbol}`}
                         >
                           查看图表 <ArrowRight size={15} />
                         </Link>

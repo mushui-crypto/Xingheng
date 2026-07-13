@@ -9,6 +9,7 @@ type ModalProps = {
   description?: string;
   children: ReactNode;
   onClose: () => void;
+  closeDisabled?: boolean;
   shellClassName?: string;
   bodyClassName?: string;
 };
@@ -48,6 +49,7 @@ export function Modal({
   description,
   children,
   onClose,
+  closeDisabled = false,
   shellClassName = "",
   bodyClassName = "",
 }: ModalProps) {
@@ -71,14 +73,14 @@ export function Modal({
     if (!open) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
+      if (event.key === "Escape" && !closeDisabled) {
         onClose();
       }
     };
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [open, onClose]);
+  }, [closeDisabled, open, onClose]);
 
   if (!open) {
     return null;
@@ -87,9 +89,10 @@ export function Modal({
   return createPortal(
     <div
       className="xh-modal-backdrop"
-      onClick={onClose}
+      onClick={closeDisabled ? undefined : onClose}
     >
       <section
+        aria-busy={closeDisabled}
         role="dialog"
         aria-modal="true"
         aria-labelledby={titleId}
@@ -103,7 +106,7 @@ export function Modal({
             </h2>
             {description ? <p className="xh-modal-description">{description}</p> : null}
           </div>
-          <Button type="button" className="xh-modal-close" variant="ghost" aria-label="关闭" onClick={onClose}>
+          <Button type="button" className="xh-modal-close" variant="ghost" aria-label="关闭" disabled={closeDisabled} onClick={onClose}>
             <X size={18} aria-hidden="true" />
           </Button>
         </div>
