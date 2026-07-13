@@ -65,8 +65,11 @@ server/modules/api/realTradingRoutes.ts
 `GET /api/real-trading/market/symbols`
 
 - 返回 Hyperliquid testnet 可交易 perpetual 列表。
-- 字段包含内部 symbol、provider coin、iconUrl、assetId、price/size 精度、maxLeverage、status。
+- 字段包含内部 symbol、provider coin、iconUrl、assetId、price/size 精度、maxLeverage、supportedMarginModes、marginModeConstraint、status。
 - `iconUrl` 由 `providerCoin` 派生：`https://app.hyperliquid.xyz/coins/{providerCoin}.svg`，providerCoin 异常时返回 `null`。
+- `supportedMarginModes` 为 `("cross"|"isolated")[]`；`marginModeConstraint` 为 `"cross_and_isolated"|"isolated_only"`。
+- 当 Hyperliquid meta item 的 `marginMode` 为 `strictIsolated` / `noCross`，或 legacy `onlyIsolated=true` 时，只返回 `supportedMarginModes=["isolated"]`、`marginModeConstraint="isolated_only"`；其他品种返回 `["cross","isolated"]`、`cross_and_isolated`。
+- `maxLeverage` 继续使用 Hyperliquid `meta.universe[].maxLeverage`。
 
 `GET /api/real-trading/market/summary?symbol=BTCUSDT`
 
@@ -107,9 +110,11 @@ server/modules/api/realTradingRoutes.ts
 
 `GET /api/real-trading/positions?address=0x...`
 
-- 返回真实持仓，包含 `coin / symbol / side / size / entryPrice / entryPx / markPrice / markPx / liquidationPrice / liqPx / positionValue / returnOnEquity / margin / leverage / unrealizedPnl / cumFunding / fundingAllTime / fundingSinceChange / fundingSinceOpen`。
+- 返回真实持仓，包含 `coin / symbol / side / size / entryPrice / entryPx / markPrice / markPx / liquidationPrice / liqPx / positionValue / returnOnEquity / margin / marginMode / leverage / maxLeverage / unrealizedPnl / cumFunding / fundingAllTime / fundingSinceChange / fundingSinceOpen`。
 - `entryPx / markPx / liqPx` 是前端契约字段；`entryPrice / markPrice / liquidationPrice` 继续保留兼容。
 - `markPrice / markPx` 优先使用 `clearinghouseState.position.markPx`；该字段为空或非法时，按当前持仓自己的 Hyperliquid `coin` 从 `metaAndAssetCtxs` 对应 asset context 回退取 `markPx`，找不到可靠值时返回 `null`，不使用页面当前选中品种价格代替。
+- 追加 `marginMode: "cross"|"isolated"|null`，取 `position.leverage.type`；`leverage` 继续取 `position.leverage.value`，`maxLeverage` 优先取 `position.maxLeverage`，缺失或非法时返回 `null`。
+- `position.type` 不作为 margin mode 或 rawStatus 使用。
 - 页面“资金费”优先使用 `fundingSinceOpen`。
 
 `GET /api/real-trading/orders/open?address=0x...`
@@ -165,6 +170,7 @@ server/modules/api/realTradingRoutes.ts
   - `updateLeverage`
   - 必要的 close / reduce-only order 仍按 `order` 表达
 - `approveAgent` 仅允许 Hyperliquid Testnet：`action.hyperliquidChain` 必须为 `Testnet`，`action.agentAddress` 必须为合法 EVM 地址。
+- `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是 1 到 50 的 safe integer；非法请求在后端直接拒绝，不转发到 Hyperliquid。品种实际最大杠杆仍由前端根据 symbols `maxLeverage` 限制，并由 Hyperliquid 最终校验。
 - 禁止 withdraw、transfer、staking、builder fee 等资金转移类动作。
 - 后端只做 allowlist 校验、基础字段校验、请求限流、脱敏审计和响应标准化，不修改签名内容，不生成 nonce / signature / expiresAfter。
 
@@ -198,6 +204,11 @@ server/modules/api/realTradingRoutes.ts
 ## 5.2 当前前端动作口径
 
 - `/app/trade` 的开仓、单仓市价/限价平仓、全部市价平仓、反手、撤单、杠杆更新和 TP/SL 均由浏览器内 `@nktkas/hyperliquid` 会话签名器构造并签名，再经现有 `/api/real-trading/exchange` 转发；不新增后端动作接口。
+- 真实 K 线首次按当前品种与周期加载 500 根历史数据，之后每 2 秒仅拉取最近 2 根并用 `series.update()` 增量更新最新蜡烛，不重置用户缩放或时间轴位置；页面处于后台时跳过轮询，重新可见后立即补拉一次。
+- 下单面板以两个紧凑按钮展示当前品种的保证金模式与杠杆，点击任一按钮打开同一个“保证金与杠杆”弹窗；全仓对应 `updateLeverage.isCross=true`，逐仓对应 `false`。滑杆与数字输入只修改弹窗草稿，确认时才提交一次 SDK 动作，取消不提交。
+- 杠杆范围按当前品种 `maxLeverage` 取 `1..maxLeverage` 整数；已有持仓优先使用持仓返回的 `marginMode / leverage / maxLeverage`，无持仓时仅复用当前浏览器会话内该 symbol 已成功提交的配置，切换品种不得串用。旧 symbols 响应缺少模式能力字段时兼容为全仓和逐仓均可选。
+- `marginModeConstraint=isolated_only` 时全仓选项禁用，首次默认逐仓；当前阶段不提供 isolated margin add/remove，也不展示为可用能力。
+- 下单确认显示 `{leverage}x · 全仓/逐仓`，所需保证金估算使用当前已确认杠杆。会话首次授权后的初始 `updateLeverage` 同样使用当前品种已选择的模式与杠杆。
 - 限价平仓确认弹窗默认填入对手方最优一档：多仓平仓使用 best bid，空仓平仓使用 best ask；用户可在提交前编辑。
 - 开仓前可勾选 TP/SL 并填写止盈价、止损价，入场单和固定数量的子触发单以 `normalTpsl` grouping 一起提交；该模式对应与父订单关联的 OCO TP/SL。
 - 持仓形成后可从持仓表的止盈/止损列设置或替换触发单；替换时先撤销该品种现有 trigger orders，再提交新的 `positionTpsl`。

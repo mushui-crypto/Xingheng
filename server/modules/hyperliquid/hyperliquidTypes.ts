@@ -9,6 +9,8 @@ export type RealTradingSymbol = {
   szDecimals: number;
   pxDecimals: number;
   maxLeverage: number;
+  supportedMarginModes: Array<"cross" | "isolated">;
+  marginModeConstraint: "cross_and_isolated" | "isolated_only";
   status: "active" | "delisted";
   network: HyperliquidRealTradingNetwork;
 };
@@ -114,7 +116,9 @@ export type RealTradingPosition = {
   positionValue: number | null;
   returnOnEquity: number | null;
   margin: number | null;
+  marginMode: "cross" | "isolated" | null;
   leverage: number | null;
+  maxLeverage: number | null;
   unrealizedPnl: number | null;
   fundingAllTime: number | null;
   fundingSinceChange: number | null;

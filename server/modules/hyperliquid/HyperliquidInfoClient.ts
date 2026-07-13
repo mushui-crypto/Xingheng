@@ -24,6 +24,8 @@ type HyperliquidUniverseItem = {
   szDecimals: number;
   maxLeverage: number;
   isDelisted?: boolean;
+  marginMode?: "strictIsolated" | "noCross" | "normal";
+  onlyIsolated?: boolean;
 };
 
 type HyperliquidAssetContext = {
@@ -61,17 +63,22 @@ export class HyperliquidInfoClient {
 
   async getSymbols(): Promise<RealTradingSymbol[]> {
     const { universe, contexts } = await this.getMetaAndContexts();
-    return universe.map((item, index) => ({
-      symbol: toInternalSymbol(item.name),
-      providerCoin: item.name,
-      iconUrl: buildHyperliquidIconUrl(item.name),
-      assetId: index,
-      szDecimals: Number(item.szDecimals ?? 0),
-      pxDecimals: inferPriceDecimals(contexts[index]),
-      maxLeverage: Number(item.maxLeverage ?? 1),
-      status: item.isDelisted ? "delisted" : "active",
-      network: hyperliquidTestnetNetwork,
-    }));
+    return universe.map((item, index) => {
+      const marginCapabilities = normalizeSymbolMarginCapabilities(item);
+      return {
+        symbol: toInternalSymbol(item.name),
+        providerCoin: item.name,
+        iconUrl: buildHyperliquidIconUrl(item.name),
+        assetId: index,
+        szDecimals: Number(item.szDecimals ?? 0),
+        pxDecimals: inferPriceDecimals(contexts[index]),
+        maxLeverage: Number(item.maxLeverage ?? 1),
+        supportedMarginModes: marginCapabilities.supportedMarginModes,
+        marginModeConstraint: marginCapabilities.marginModeConstraint,
+        status: item.isDelisted ? "delisted" : "active",
+        network: hyperliquidTestnetNetwork,
+      };
+    });
   }
 
   async getSummary(symbolInput: string): Promise<RealTradingMarketSummary> {
@@ -316,6 +323,7 @@ export function normalizePositions(value: unknown, marketContextsByCoin = new Ma
     const fundingAllTime = toNullableNumber(position.cumFunding?.allTime);
     const fundingSinceChange = toNullableNumber(position.cumFunding?.sinceChange);
     const fundingSinceOpen = toNullableNumber(position.cumFunding?.sinceOpen);
+    const leverage = toNullableNumber(position.leverage?.value ?? position.leverage);
     return [{
       coin,
       symbol: toInternalSymbol(coin),
@@ -330,7 +338,9 @@ export function normalizePositions(value: unknown, marketContextsByCoin = new Ma
       positionValue,
       returnOnEquity: toNullableNumber(position.returnOnEquity ?? position.roe),
       margin,
-      leverage: toNullableNumber(position.leverage?.value ?? position.leverage),
+      marginMode: normalizePositionMarginMode(position.leverage?.type),
+      leverage,
+      maxLeverage: toNullableNumber(position.maxLeverage),
       unrealizedPnl: toNullableNumber(position.unrealizedPnl),
       fundingAllTime,
       fundingSinceChange,
@@ -340,7 +350,7 @@ export function normalizePositions(value: unknown, marketContextsByCoin = new Ma
         sinceChange: fundingSinceChange,
         sinceOpen: fundingSinceOpen,
       },
-      rawStatus: typeof position.type === "string" ? position.type : null,
+      rawStatus: typeof position.status === "string" ? position.status : null,
       network: hyperliquidTestnetNetwork,
     }];
   });
@@ -494,6 +504,26 @@ function toProviderCoin(symbol: string) {
 function buildHyperliquidIconUrl(providerCoin: string) {
   const coin = String(providerCoin ?? "").trim();
   return /^[A-Za-z0-9:_-]+$/.test(coin) ? `${hyperliquidIconBaseUrl}/${encodeURIComponent(coin)}.svg` : null;
+}
+
+export function normalizeSymbolMarginCapabilities(item: { marginMode?: unknown; onlyIsolated?: unknown }) {
+  const isolatedOnly = item.marginMode === "strictIsolated" || item.marginMode === "noCross" || item.onlyIsolated === true;
+  return isolatedOnly
+    ? {
+      supportedMarginModes: ["isolated"] as Array<"cross" | "isolated">,
+      marginModeConstraint: "isolated_only" as const,
+    }
+    : {
+      supportedMarginModes: ["cross", "isolated"] as Array<"cross" | "isolated">,
+      marginModeConstraint: "cross_and_isolated" as const,
+    };
+}
+
+function normalizePositionMarginMode(value: unknown) {
+  const normalized = typeof value === "string" ? value.toLowerCase() : value;
+  if (normalized === "cross") return "cross";
+  if (normalized === "isolated") return "isolated";
+  return null;
 }
 
 function buildMarketContextsByCoin(universe: HyperliquidUniverseItem[], contexts: HyperliquidAssetContext[]) {

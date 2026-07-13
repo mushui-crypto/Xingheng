@@ -2,6 +2,7 @@ import type { CandleInterval } from "../types";
 import { requestJson, userHeaders } from "./httpClient";
 
 export type RealTradingNetwork = "hyperliquid-testnet";
+export type RealTradingMarginMode = "cross" | "isolated";
 
 export type RealTradingSymbol = {
   symbol: string;
@@ -11,6 +12,8 @@ export type RealTradingSymbol = {
   szDecimals?: number;
   pxDecimals?: number;
   maxLeverage?: number;
+  supportedMarginModes?: RealTradingMarginMode[];
+  marginModeConstraint?: "cross_and_isolated" | "isolated_only";
   status?: string;
   network?: RealTradingNetwork;
 };
@@ -105,7 +108,9 @@ export type RealPosition = {
   positionValue?: number | null;
   returnOnEquity?: number | null;
   margin?: number | null;
+  marginMode?: RealTradingMarginMode | null;
   leverage?: number | null;
+  maxLeverage?: number | null;
   unrealizedPnl?: number | null;
   fundingAllTime?: number | null;
   fundingSinceChange?: number | null;

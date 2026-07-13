@@ -4,7 +4,9 @@ import { submitPositionCloseRequest, submitPositionTpslRequest } from "../src/fe
 import {
   buildEntryTpslOrderRequest,
   buildPositionTpslOrderRequest,
+  buildUpdateLeverageRequest,
   normalizeSdkError,
+  submitMarginLeverageUpdate,
   type HyperliquidLimitOrderInput,
   type HyperliquidSessionSigner,
   type HyperliquidTriggerOrderInput,
@@ -12,6 +14,7 @@ import {
 import { buildPositionTpslOrders } from "../src/features/realTrading/lib/tpslOrders";
 import { enrichPositionMarks } from "../src/features/realTrading/lib/enrichPositionMarks";
 import { mergeTradingSearchParams } from "../src/features/trading/lib/tradingSearchParams";
+import { resolveMarginLeverageSelection } from "../src/features/realTrading/model/marginLeverage";
 
 const symbol: RealTradingSymbol = { assetId: 0, providerCoin: "BTC", symbol: "BTCUSDT", szDecimals: 5 };
 const longPosition: RealPosition = { coin: "BTC", markPx: 60_000, side: "long", size: 0.01, symbol: "BTCUSDT" };
@@ -159,6 +162,55 @@ assert.equal(
   normalizeSdkError(new Error("order 0: Trigger order has unexpected type.")),
   "TP/SL 订单组合被 Hyperliquid 拒绝：order 0: Trigger order has unexpected type.",
 );
+
+assert.deepEqual(buildUpdateLeverageRequest(0, 1, "cross"), { asset: 0, isCross: true, leverage: 1 });
+assert.deepEqual(buildUpdateLeverageRequest(1, 20, "isolated"), { asset: 1, isCross: false, leverage: 20 });
+
+let leverageUpdateCount = 0;
+let lastLeverageUpdate: unknown[] = [];
+const leverageSigner = {
+  async updateLeverage(...args: unknown[]) {
+    leverageUpdateCount += 1;
+    lastLeverageUpdate = args;
+  },
+};
+await submitMarginLeverageUpdate(leverageSigner, 0, 20, "isolated");
+assert.equal(leverageUpdateCount, 1);
+assert.deepEqual(lastLeverageUpdate, [0, 20, "isolated"]);
+
+const defaultMarginSelection = resolveMarginLeverageSelection({ maxLeverage: 20 });
+assert.equal(defaultMarginSelection.marginMode, "cross");
+assert.equal(defaultMarginSelection.leverage, 5);
+assert.deepEqual(defaultMarginSelection.supportedMarginModes, ["cross", "isolated"]);
+
+const isolatedOnlySelection = resolveMarginLeverageSelection({
+  marginModeConstraint: "isolated_only",
+  maxLeverage: 3,
+  sessionSelection: { leverage: 20, marginMode: "cross" },
+  supportedMarginModes: ["isolated"],
+});
+assert.equal(isolatedOnlySelection.marginMode, "isolated");
+assert.equal(isolatedOnlySelection.leverage, 3);
+
+const positionMarginSelection = resolveMarginLeverageSelection({
+  maxLeverage: 50,
+  position: { coin: "BTC", leverage: 8, marginMode: "isolated", maxLeverage: 10, side: "long", size: 0.01 },
+  sessionSelection: { leverage: 2, marginMode: "cross" },
+});
+assert.equal(positionMarginSelection.marginMode, "isolated");
+assert.equal(positionMarginSelection.leverage, 8);
+assert.equal(positionMarginSelection.maxLeverage, 10);
+
+const symbolASelection = resolveMarginLeverageSelection({
+  maxLeverage: 20,
+  sessionSelection: { leverage: 15, marginMode: "isolated" },
+});
+const symbolBSelection = resolveMarginLeverageSelection({
+  maxLeverage: 3,
+  sessionSelection: { leverage: 9, marginMode: "cross" },
+});
+assert.deepEqual([symbolASelection.leverage, symbolASelection.marginMode], [15, "isolated"]);
+assert.deepEqual([symbolBSelection.leverage, symbolBSelection.marginMode], [3, "cross"]);
 
 console.log("real trading actions smoke passed");
 

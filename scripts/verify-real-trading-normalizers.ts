@@ -7,6 +7,7 @@ import {
   normalizeMarketSummary,
   normalizeOpenOrder,
   normalizePositions,
+  normalizeSymbolMarginCapabilities,
   normalizeSpotBalances,
 } from "../server/modules/hyperliquid/HyperliquidInfoClient";
 
@@ -38,6 +39,15 @@ assert.deepEqual(book.map((level) => [level.price, level.size, level.cumulativeS
   [101, 2, 5, 5],
 ]);
 
+assert.deepEqual(normalizeSymbolMarginCapabilities({}).supportedMarginModes, ["cross", "isolated"]);
+assert.equal(normalizeSymbolMarginCapabilities({}).marginModeConstraint, "cross_and_isolated");
+assert.deepEqual(normalizeSymbolMarginCapabilities({ marginMode: "strictIsolated" }).supportedMarginModes, ["isolated"]);
+assert.equal(normalizeSymbolMarginCapabilities({ marginMode: "strictIsolated" }).marginModeConstraint, "isolated_only");
+assert.deepEqual(normalizeSymbolMarginCapabilities({ marginMode: "noCross" }).supportedMarginModes, ["isolated"]);
+assert.equal(normalizeSymbolMarginCapabilities({ marginMode: "noCross" }).marginModeConstraint, "isolated_only");
+assert.deepEqual(normalizeSymbolMarginCapabilities({ onlyIsolated: true }).supportedMarginModes, ["isolated"]);
+assert.equal(normalizeSymbolMarginCapabilities({ onlyIsolated: true }).marginModeConstraint, "isolated_only");
+
 const positions = normalizePositions([
   {
     position: {
@@ -49,9 +59,12 @@ const positions = normalizePositions([
       marginUsed: "150",
       positionValue: "1475",
       returnOnEquity: "-0.1",
-      leverage: { value: 10 },
+      leverage: { type: "isolated", value: 10 },
+      maxLeverage: 20,
       unrealizedPnl: "-25",
       cumFunding: { allTime: "1.2", sinceChange: "0.3", sinceOpen: "0.2" },
+      type: "legacy-type-should-not-be-status",
+      status: "open",
     },
   },
   { position: { coin: "BTC", szi: "0" } },
@@ -66,6 +79,10 @@ assert.equal(positions[0].liqPx, 3500);
 assert.equal(positions[0].liquidationPrice, 3500);
 assert.equal(positions[0].positionValue, 1475);
 assert.equal(positions[0].returnOnEquity, -0.1);
+assert.equal(positions[0].marginMode, "isolated");
+assert.equal(positions[0].leverage, 10);
+assert.equal(positions[0].maxLeverage, 20);
+assert.equal(positions[0].rawStatus, "open");
 assert.equal(positions[0].fundingSinceOpen, 0.2);
 
 const fallbackPositions = normalizePositions([
@@ -76,6 +93,7 @@ const fallbackPositions = normalizePositions([
       entryPx: "60000",
       markPx: "0",
       positionValue: "120",
+      leverage: { type: "cross", value: 5 },
     },
   },
   {
@@ -91,6 +109,7 @@ const fallbackPositions = normalizePositions([
       coin: "SOL",
       szi: "2",
       markPx: "-1",
+      leverage: { type: "portfolio", value: "bad" },
     },
   },
   {
@@ -108,8 +127,11 @@ const fallbackPositions = normalizePositions([
 assert.equal(fallbackPositions.length, 4);
 assert.equal(fallbackPositions.find((position) => position.coin === "BTC")?.markPx, 68123.5);
 assert.equal(fallbackPositions.find((position) => position.coin === "BTC")?.markPrice, 68123.5);
+assert.equal(fallbackPositions.find((position) => position.coin === "BTC")?.marginMode, "cross");
 assert.equal(fallbackPositions.find((position) => position.coin === "ETH")?.markPx, 2950);
 assert.equal(fallbackPositions.find((position) => position.coin === "SOL")?.markPx, null);
+assert.equal(fallbackPositions.find((position) => position.coin === "SOL")?.marginMode, null);
+assert.equal(fallbackPositions.find((position) => position.coin === "SOL")?.leverage, null);
 assert.equal(fallbackPositions.find((position) => position.coin === "DOGE")?.markPx, null);
 
 const order = normalizeOpenOrder({

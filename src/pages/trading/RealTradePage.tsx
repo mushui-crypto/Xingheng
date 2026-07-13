@@ -38,6 +38,8 @@ import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
 import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
 
+const realCandlePollingIntervalMs = 2_000;
+
 export function RealTradePage() {
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
@@ -66,6 +68,10 @@ export function RealTradePage() {
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
+  const selectedPosition = positions.find((item) => (
+    Math.abs(item.size) > 0
+    && (item.symbol === selectedSymbol || item.coin === selectedConfig?.providerCoin)
+  )) ?? null;
   const isConnected = Boolean(walletAddress);
   const digits = selectedConfig?.pxDecimals ?? 2;
   const symbolOptions = useMemo(
@@ -233,6 +239,9 @@ export function RealTradePage() {
 
   useEffect(() => {
     let cancelled = false;
+    let latestCandleTime = Number.NEGATIVE_INFINITY;
+    let polling = false;
+    let pollingTimer: number | undefined;
 
     async function loadChart() {
       setChartLoading(true);
@@ -249,7 +258,9 @@ export function RealTradePage() {
           return;
         }
         candleSeriesRef.current?.setData(candles.map(toChartCandle));
-        setLatestCandle(candles[candles.length - 1]);
+        const latest = candles[candles.length - 1];
+        latestCandleTime = latest.time;
+        setLatestCandle(latest);
         if (chartRef.current) {
           positionLatestCandleInInitialView(chartRef.current, candles.length);
         }
@@ -266,9 +277,43 @@ export function RealTradePage() {
       }
     }
 
-    void loadChart();
+    async function refreshLatestCandle() {
+      if (cancelled || polling || document.visibilityState === "hidden") return;
+      polling = true;
+      try {
+        const candles = normalizeChartCandles(await fetchRealCandles(selectedSymbol, interval, 2));
+        if (cancelled || candles.length === 0) return;
+        const latest = candles[candles.length - 1];
+        if (latest.time < latestCandleTime) return;
+        candleSeriesRef.current?.update(toChartCandle(latest));
+        latestCandleTime = latest.time;
+        setLatestCandle(latest);
+        setChartMessage("");
+      } catch {
+        // Keep the last valid candle visible; the next polling tick retries automatically.
+      } finally {
+        polling = false;
+      }
+    }
+
+    function handleVisibilityChange() {
+      if (document.visibilityState === "visible") {
+        void refreshLatestCandle();
+      }
+    }
+
+    void loadChart().finally(() => {
+      if (!cancelled) {
+        pollingTimer = window.setInterval(() => void refreshLatestCandle(), realCandlePollingIntervalMs);
+      }
+    });
+    document.addEventListener("visibilitychange", handleVisibilityChange);
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", handleVisibilityChange);
+      if (pollingTimer !== undefined) {
+        window.clearInterval(pollingTimer);
+      }
     };
   }, [interval, selectedSymbol]);
 
@@ -456,11 +501,14 @@ export function RealTradePage() {
             connectionMessage={connectMessage}
             markPrice={marketSummary?.markPrice}
             fees={fees}
+            marginModeConstraint={selectedConfig?.marginModeConstraint}
             maxLeverage={selectedConfig?.maxLeverage}
             onConnect={connectWallet}
-            onSubmitted={() => void loadAccount(walletAddress)}
-            positionSize={positions.filter((item) => item.coin === selectedConfig?.providerCoin).reduce((total, item) => total + Math.abs(item.size), 0)}
+            onSubmitted={() => loadAccount(walletAddress)}
+            position={selectedPosition}
+            positionSize={selectedPosition ? Math.abs(selectedPosition.size) : 0}
             session={tradingSession}
+            supportedMarginModes={selectedConfig?.supportedMarginModes}
             szDecimals={selectedConfig?.szDecimals}
             symbol={selectedSymbol}
           />
@@ -478,7 +526,7 @@ export function RealTradePage() {
 
 function DepthAndTrades({ digits, markPrice, midPrice, orderbook, trades }: { digits: number; markPrice?: number | null; midPrice?: number | null; orderbook: RealOrderbook | null; trades: RealTrade[] }) {
   const [tab, setTab] = useState<"book" | "trades">("book");
-  const asks = orderbook?.asks.slice(0, 10) ?? [];
+  const asks = orderbook?.asks.slice(0, 10).reverse() ?? [];
   const bids = orderbook?.bids.slice(0, 10) ?? [];
   return (
     <section className="xh-real-depth-panel">
@@ -493,7 +541,7 @@ function DepthAndTrades({ digits, markPrice, midPrice, orderbook, trades }: { di
           </div>
           <BookSide levels={asks} digits={digits} tone="ask" />
           <div className="xh-real-book-mid">
-            <strong>{formatBookPrice(midPrice ?? orderbook?.bids[0]?.price ?? orderbook?.asks.at(-1)?.price, digits)}</strong>
+            <strong>{formatBookPrice(midPrice ?? orderbook?.bids[0]?.price ?? orderbook?.asks[0]?.price, digits)}</strong>
             <span className="xh-real-book-change">-</span>
             <span>Mark {formatBookPrice(markPrice, digits)}</span>
           </div>

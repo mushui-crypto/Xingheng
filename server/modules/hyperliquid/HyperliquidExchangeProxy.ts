@@ -104,6 +104,9 @@ function assertAllowedAction(action: Record<string, unknown>) {
   if (type === "approveAgent") {
     assertApproveAgentAction(action);
   }
+  if (type === "updateLeverage") {
+    assertUpdateLeverageAction(action);
+  }
   const lowerPayload = JSON.stringify(action).toLowerCase();
   for (const word of forbiddenActionWords) {
     if (lowerPayload.includes(word.toLowerCase())) {
@@ -117,6 +120,21 @@ function assertApproveAgentAction(action: Record<string, unknown>) {
     throw new Error("approveAgent 仅允许 Hyperliquid Testnet。");
   }
   normalizeAddress(action.agentAddress);
+}
+
+function assertUpdateLeverageAction(action: Record<string, unknown>) {
+  if (action.type !== "updateLeverage") {
+    throw new Error("updateLeverage action type 不正确。");
+  }
+  if (!Number.isSafeInteger(action.asset) || Number(action.asset) < 0) {
+    throw new Error("updateLeverage asset 必须是大于等于 0 的安全整数。");
+  }
+  if (typeof action.isCross !== "boolean") {
+    throw new Error("updateLeverage isCross 必须是布尔值。");
+  }
+  if (!Number.isSafeInteger(action.leverage) || Number(action.leverage) < 1 || Number(action.leverage) > 50) {
+    throw new Error("updateLeverage leverage 必须是 1 到 50 的安全整数。");
+  }
 }
 
 function normalizeProviderError(result: unknown) {

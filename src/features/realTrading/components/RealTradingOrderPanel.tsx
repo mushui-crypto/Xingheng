@@ -3,11 +3,18 @@ import { ChevronDown } from "lucide-react";
 import { Button } from "../../../components/ui/Button";
 import { Checkbox } from "../../../components/ui/Checkbox";
 import { Modal } from "../../../components/ui/Modal";
-import type { RealTradingFees } from "../../../api/realTrading";
-import { normalizeSdkError } from "../lib/hyperliquidSdk";
+import type { RealPosition, RealTradingFees, RealTradingMarginMode } from "../../../api/realTrading";
+import { MarginLeverageModal } from "./MarginLeverageModal";
+import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
 import type { HyperliquidSessionController } from "../lib/useHyperliquidSessionSigner";
 import { buildPositionTpslOrders } from "../lib/tpslOrders";
+import {
+  marginModeLabel,
+  resolveMarginLeverageSelection,
+  type MarginLeverageSessionState,
+  type MarginLeverageSelection,
+} from "../model/marginLeverage";
 
 const skipOrderConfirmationKey = "stellax.realTrading.skipOrderConfirmation";
 const positionPercentSteps = [0, 25, 50, 75, 100] as const;
@@ -20,11 +27,14 @@ export function RealTradingOrderPanel({
   connectionMessage,
   fees,
   markPrice,
+  marginModeConstraint,
   maxLeverage,
   onConnect,
   onSubmitted,
   positionSize,
+  position,
   session,
+  supportedMarginModes,
   szDecimals = 0,
   symbol,
 }: {
@@ -34,11 +44,14 @@ export function RealTradingOrderPanel({
   connectionMessage?: string;
   fees?: RealTradingFees | null;
   markPrice?: number | null;
+  marginModeConstraint?: "cross_and_isolated" | "isolated_only";
   maxLeverage?: number;
   onConnect: () => void;
-  onSubmitted: () => void;
+  onSubmitted: () => Promise<void> | void;
   positionSize?: number;
+  position?: RealPosition | null;
   session: HyperliquidSessionController;
+  supportedMarginModes?: RealTradingMarginMode[];
   szDecimals?: number;
   symbol: string;
 }) {
@@ -51,13 +64,22 @@ export function RealTradingOrderPanel({
   const [tpslEnabled, setTpslEnabled] = useState(false);
   const [tpPrice, setTpPrice] = useState("");
   const [slPrice, setSlPrice] = useState("");
-  const [leverage, setLeverage] = useState("5");
+  const [marginSelections, setMarginSelections] = useState<MarginLeverageSessionState>({});
+  const [marginModalOpen, setMarginModalOpen] = useState(false);
+  const [marginSubmitting, setMarginSubmitting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [skipNextConfirmation, setSkipNextConfirmation] = useState(false);
   const [pendingSide, setPendingSide] = useState<"buy" | "sell">("buy");
   const [positionPercent, setPositionPercent] = useState(0);
   const { authorized, busy, message } = session;
-  const canSubmit = authorized && !busy && typeof assetId === "number";
+  const marginSelection = resolveMarginLeverageSelection({
+    marginModeConstraint,
+    maxLeverage,
+    position,
+    sessionSelection: marginSelections[symbol],
+    supportedMarginModes,
+  });
+  const leverage = String(marginSelection.leverage);
   const actionDisabled = !connected || busy || typeof assetId !== "number";
 
   useEffect(() => {
@@ -76,21 +98,17 @@ export function RealTradingOrderPanel({
   }, [availableMargin, leverage, markPrice, orderType, positionSize, price, reduceOnly, side, szDecimals]);
 
   async function authorizeSession() {
-    const signer = await session.authorize();
-    if (signer && typeof assetId === "number") {
-      try {
-        await signer.updateLeverage(assetId, Number(leverage));
-        session.setMessage("会话签名器已初始化。");
-        onSubmitted();
-      } catch (error) {
-        session.setError(normalizeSdkError(error));
-      }
-    }
+    if (typeof assetId !== "number") return;
+    const completed = await session.runAction(
+      (signer) => submitMarginLeverageUpdate(signer, assetId, marginSelection.leverage, marginSelection.marginMode),
+      "会话签名器已初始化。",
+    );
+    if (completed) await onSubmitted();
   }
 
   async function runAction(action: () => Promise<unknown>, success: string) {
     const completed = await session.runAction(() => action(), success);
-    if (completed) onSubmitted();
+    if (completed) await onSubmitted();
   }
 
   async function submitOrder(orderSide: "buy" | "sell" = side === "sell" ? "sell" : "buy") {
@@ -214,31 +232,40 @@ export function RealTradingOrderPanel({
     return Math.min(100, Math.max(0, Math.round((numericSize / maximum) * 100)));
   }
 
-  async function submitLeverage(nextLeverage = leverage) {
-    const signer = session.signer;
-    const value = Number(nextLeverage);
-    if (!signer || typeof assetId !== "number") return;
-    if (!Number.isInteger(value) || value < 1 || value > (maxLeverage ?? 50)) {
-      session.setError(`杠杆必须为 1-${maxLeverage ?? 50} 的整数。`);
-      return;
-    }
-    await runAction(() => signer.updateLeverage(assetId, value), "杠杆更新请求已发送。");
+  function openMarginModal() {
+    session.setMessage("");
+    setMarginModalOpen(true);
   }
 
-  function changeLeverage(nextLeverage: string) {
-    setLeverage(nextLeverage);
-    if (canSubmit) {
-      void submitLeverage(nextLeverage);
+  async function submitMarginSelection(nextSelection: Pick<MarginLeverageSelection, "leverage" | "marginMode">) {
+    if (typeof assetId !== "number") {
+      session.setError("当前品种缺少可用的 Hyperliquid asset id。");
+      return;
+    }
+    setMarginSubmitting(true);
+    try {
+      const completed = await session.runAction(
+        (signer) => submitMarginLeverageUpdate(signer, assetId, nextSelection.leverage, nextSelection.marginMode),
+        `已更新为 ${nextSelection.leverage}x · ${marginModeLabel(nextSelection.marginMode)}。`,
+      );
+      if (!completed) return;
+      setMarginSelections((current) => ({ ...current, [symbol]: nextSelection }));
+      await onSubmitted();
+      setMarginModalOpen(false);
+    } finally {
+      setMarginSubmitting(false);
     }
   }
 
   return (
     <section className="xh-real-order-panel">
       <div className="xh-real-order-topline">
-        <label><span className="sr-only">保证金模式</span><select disabled value="cross" onChange={() => undefined}><option value="cross">全仓</option></select><ChevronDown aria-hidden="true" size={18} /></label>
-        <div className="xh-real-leverage-control">
-          <label><span className="sr-only">杠杆</span><select value={leverage} onChange={(event) => changeLeverage(event.target.value)}>{leverageOptions(maxLeverage).map((value) => <option key={value} value={value}>{value}x</option>)}</select><ChevronDown aria-hidden="true" size={18} /></label>
-        </div>
+        <button aria-haspopup="dialog" disabled={busy || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+          <span>{marginModeLabel(marginSelection.marginMode)}</span><ChevronDown aria-hidden="true" size={16} />
+        </button>
+        <button aria-haspopup="dialog" disabled={busy || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+          <span>{marginSelection.leverage}x</span><ChevronDown aria-hidden="true" size={16} />
+        </button>
       </div>
 
       <div className="xh-real-position-tabs" role="tablist" aria-label="仓位动作">
@@ -335,7 +362,7 @@ export function RealTradingOrderPanel({
           <ConfirmMetric label="价格" value={`${resolveOrderPrice(pendingSide) || "-"} USDC`} />
           <ConfirmMetric label="数量" value={`${size || "-"} ${symbol.replace("USDT", "")}`} />
           <ConfirmMetric label="订单价值" value={estimateValue(resolveOrderPrice(pendingSide), size)} />
-          <ConfirmMetric label="杠杆" value={`${leverage}x · 全仓`} />
+          <ConfirmMetric label="杠杆" value={`${marginSelection.leverage}x · ${marginModeLabel(marginSelection.marginMode)}`} />
           {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止盈价" value={tpPrice ? `${tpPrice} USDC` : "-"} /> : null}
           {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止损价" value={slPrice ? `${slPrice} USDC` : "-"} /> : null}
         </div>
@@ -351,6 +378,17 @@ export function RealTradingOrderPanel({
           <Button onClick={confirmOrder} type="button" variant={pendingSide === "buy" ? "primary" : "danger"}>确认订单</Button>
         </div>
       </Modal>
+      <MarginLeverageModal
+        connected={connected}
+        errorMessage={marginModalOpen && session.messageTone === "error" ? message : ""}
+        onClose={() => {
+          if (!marginSubmitting) setMarginModalOpen(false);
+        }}
+        onConfirm={submitMarginSelection}
+        open={marginModalOpen}
+        selection={marginSelection}
+        submitting={marginSubmitting || busy}
+      />
     </section>
   );
 }
@@ -361,10 +399,6 @@ function ConfirmMetric({ label, tone, value }: { label: string; tone?: "buy" | "
 
 function PanelMetric({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function leverageOptions(maxLeverage = 50) {
-  return [1, 2, 3, 5, 10, 15, 20, 25, 50].filter((value) => value <= maxLeverage);
 }
 
 function formatMoney(value?: number | null) {

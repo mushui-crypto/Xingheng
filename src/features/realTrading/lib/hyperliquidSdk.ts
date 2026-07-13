@@ -1,6 +1,6 @@
 import { ExchangeClient, type IRequestTransport } from "@nktkas/hyperliquid";
 import { BrowserProvider, Wallet, type Eip1193Provider, type HDNodeWallet, type JsonRpcSigner } from "ethers";
-import { forwardSignedRealTradingExchange } from "../../../api/realTrading";
+import { forwardSignedRealTradingExchange, type RealTradingMarginMode } from "../../../api/realTrading";
 
 const agentName = "StellaX Session";
 
@@ -103,9 +103,22 @@ export class HyperliquidSessionSigner {
     return this.agentExchange.cancel({ cancels: orders.map((order) => ({ a: order.asset, o: order.oid })) });
   }
 
-  updateLeverage(asset: number, leverage: number) {
-    return this.agentExchange.updateLeverage({ asset, isCross: true, leverage });
+  updateLeverage(asset: number, leverage: number, marginMode: RealTradingMarginMode = "cross") {
+    return this.agentExchange.updateLeverage(buildUpdateLeverageRequest(asset, leverage, marginMode));
   }
+}
+
+export function buildUpdateLeverageRequest(asset: number, leverage: number, marginMode: RealTradingMarginMode) {
+  return { asset, isCross: marginMode === "cross", leverage };
+}
+
+export function submitMarginLeverageUpdate(
+  signer: Pick<HyperliquidSessionSigner, "updateLeverage">,
+  asset: number,
+  leverage: number,
+  marginMode: RealTradingMarginMode,
+) {
+  return signer.updateLeverage(asset, leverage, marginMode);
 }
 
 function toSdkLimitOrder(input: HyperliquidLimitOrderInput) {
