@@ -733,27 +733,44 @@ textarea {
   }
 
   .xh-trade-terminal {
-    @apply min-w-0 space-y-1;
+    @apply min-w-0 bg-[#08090c] text-[#f5f5f5];
+    min-height: calc(100vh - 60px);
   }
 
   .xh-trade-marketbar {
-    @apply flex min-w-0 flex-col gap-3 border border-[#1f2a2e] bg-[#0b1719] px-3 py-3 xl:flex-row xl:items-center xl:justify-between;
-  }
-
-  .xh-real-boundary {
-    @apply flex gap-3 border border-emerald-400/25 bg-emerald-400/10 px-3 py-2.5 text-sm leading-6 text-emerald-100;
-  }
-
-  .xh-real-boundary svg {
-    @apply mt-1 shrink-0;
+    @apply flex h-[78px] min-w-0 items-center gap-6 border-b border-[#25282f] bg-black px-5 py-3;
   }
 
   .xh-trade-marketbar-main {
-    @apply flex min-w-0 flex-wrap items-center gap-3;
+    @apply flex min-w-[248px] items-center gap-3;
+  }
+
+  .xh-real-symbol-mark {
+    @apply flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#ff981f] text-sm font-bold text-black;
+  }
+
+  .xh-real-symbol-picker {
+    @apply relative block min-w-0 cursor-pointer;
+  }
+
+  .xh-real-symbol-picker select {
+    @apply absolute inset-0 h-full w-full cursor-pointer opacity-0;
+  }
+
+  .xh-real-symbol-title {
+    @apply flex items-center gap-2 text-[17px] font-semibold leading-6 text-[#f5f5f5];
+  }
+
+  .xh-real-symbol-source {
+    @apply mt-1 block whitespace-nowrap text-[12px] leading-5 text-[#8a959c];
+  }
+
+  .xh-real-market-badge {
+    @apply shrink-0 rounded-[3px] bg-[#103b32] px-3 py-2 text-[12px] font-medium tracking-[0.03em] text-[#57d9b1];
   }
 
   .xh-trade-market-stats {
-    @apply grid min-w-0 grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-6 xl:flex xl:items-center xl:gap-6;
+    @apply flex min-w-0 items-center gap-10 overflow-hidden border-l border-[#25282f] pl-6;
   }
 
   .xh-trade-stat {
@@ -761,37 +778,49 @@ textarea {
   }
 
   .xh-trade-stat span {
-    @apply block text-[11px] font-medium uppercase tracking-[0.12em] text-[#7f8b92];
+    @apply block whitespace-nowrap text-[10px] font-medium uppercase leading-4 text-[#69777e];
   }
 
   .xh-trade-stat strong {
-    @apply mt-1 block truncate text-sm font-semibold text-[#f5f5f5];
+    @apply mt-1 block truncate text-[13px] font-semibold leading-5 text-[#f5f5f5];
+  }
+
+  .xh-trade-stat.is-positive strong {
+    @apply text-[#38d9a9];
+  }
+
+  .xh-trade-stat.is-negative strong {
+    @apply text-[#ff4d6d];
+  }
+
+  .xh-real-trade-terminal .xh-trade-stat span {
+    @apply text-[12px] leading-5 text-[#8a959c];
   }
 
   .xh-trade-grid {
-    @apply grid min-w-0 gap-2 xl:grid-cols-[minmax(0,1fr)_360px] xl:gap-0;
+    @apply grid min-w-0 grid-cols-[minmax(0,1fr)_360px] gap-0;
+    min-height: max(720px, calc(100vh - 138px));
   }
 
   .xh-trade-main,
   .xh-trade-order-rail {
-    @apply min-w-0;
+    @apply h-full min-h-0 min-w-0;
   }
 
   .xh-trade-main {
-    @apply space-y-0;
+    @apply grid min-w-0 grid-rows-[636px_minmax(0,1fr)];
   }
 
   .xh-trade-workbench {
-    @apply grid min-w-0 gap-2 xl:grid-cols-[minmax(0,1fr)_360px] xl:gap-0;
+    @apply grid min-w-0 grid-cols-[minmax(0,1fr)_340px] gap-0;
   }
 
-  .xh-trade-chart-stage,
-  .xh-trade-depth-stage {
-    @apply min-w-0;
+  .xh-trade-chart-stage {
+    @apply flex min-w-0 flex-col bg-[#0c0e12];
   }
 
   .xh-trade-depth-stage {
-    @apply space-y-0;
+    @apply min-w-0 overflow-hidden bg-[#0c0e12];
   }
 
   .xh-trade-record-stack {
@@ -799,11 +828,8 @@ textarea {
   }
 
   .xh-trade-order-rail {
-    @apply space-y-2;
-  }
-
-  .xh-trade-order-rail {
-    @apply xl:border-l xl:border-white/10 xl:pl-0;
+    @apply grid min-w-0 bg-[#0c0e12];
+    grid-template-rows: max-content 220px;
   }
 
   .xh-trade-panel-header {
@@ -816,6 +842,686 @@ textarea {
 
   .xh-trade-panel-header span {
     @apply truncate text-xs text-muted;
+  }
+
+  .xh-real-chart-toolbar {
+    @apply flex h-[55px] items-center justify-between border-b border-[#25282f] px-3;
+  }
+
+  .xh-real-interval {
+    @apply h-9 shrink-0 px-3 text-[14px] font-medium text-[#9ba5af] transition hover:text-white;
+  }
+
+  .xh-real-interval.is-active {
+    @apply bg-[#11141a] text-[#f5f5f5];
+  }
+
+  .xh-real-live-source {
+    @apply flex shrink-0 items-center gap-2 text-[12px] text-[#9ba5af];
+  }
+
+  .xh-real-live-source > span {
+    @apply h-2 w-2 rounded-full bg-[#5ea7f7];
+  }
+
+  .xh-real-live-source button {
+    @apply ml-1 flex h-8 w-8 items-center justify-center text-[#8a95a1] transition hover:text-white disabled:opacity-40;
+  }
+
+  .xh-real-candle-summary {
+    @apply no-scrollbar flex h-[37px] items-center gap-5 overflow-x-auto border-b border-[#171a20] px-3 text-[12px] text-[#c2c8ce];
+  }
+
+  .xh-real-candle-summary strong {
+    @apply shrink-0 font-medium text-[#5ea7f7];
+  }
+
+  .xh-real-candle-summary span {
+    @apply shrink-0;
+  }
+
+  .xh-real-candle-summary b {
+    @apply font-medium text-[#38d9a9];
+  }
+
+  .xh-real-chart-canvas {
+    @apply relative min-h-0 flex-1;
+  }
+
+  .xh-real-depth-panel {
+    @apply h-[636px] overflow-hidden bg-[#0c0e12];
+    box-shadow: inset 1px 0 #25282f;
+  }
+
+  .xh-real-depth-tabs {
+    @apply grid h-[38px] grid-cols-2 border-b border-[#25282f];
+  }
+
+  .xh-real-depth-tabs button {
+    @apply relative px-3 py-2.5 text-[12px] font-medium leading-[18px] text-[#7a8596];
+  }
+
+  .xh-real-depth-tabs button.is-active {
+    @apply text-[#e8ecf2];
+  }
+
+  .xh-real-depth-tabs button.is-active::after {
+    content: "";
+    @apply absolute inset-x-0 bottom-[-1px] h-px bg-[#f5f5f5];
+  }
+
+  .xh-real-book-head,
+  .xh-real-book-row {
+    @apply grid items-center overflow-hidden px-2.5 text-[12px];
+    grid-template-columns: 122px 102px 96px;
+  }
+
+  .xh-real-book-head {
+    @apply h-8 font-medium leading-6 text-[#7a8596];
+  }
+
+  .xh-real-book-head span:nth-child(n+2),
+  .xh-real-book-row span:nth-child(n+2) {
+    @apply text-right;
+  }
+
+  .xh-real-book-row {
+    @apply h-[26px] font-normal leading-[18px];
+  }
+
+  .xh-real-book-row span {
+    @apply truncate;
+  }
+
+  .xh-real-book-row span:first-child {
+    @apply text-left;
+  }
+
+  .xh-real-book-row span:nth-child(2) {
+    @apply text-[#e8ecf2];
+  }
+
+  .xh-real-book-row span:nth-child(3) {
+    @apply text-[#7a8596];
+  }
+
+  .xh-real-book-row.is-ask span:first-child {
+    @apply text-[#f43f5e];
+  }
+
+  .xh-real-book-row.is-bid span:first-child {
+    @apply text-[#10b981];
+  }
+
+  .xh-real-book-mid {
+    @apply flex h-[46px] items-baseline gap-2 overflow-hidden bg-[#0f1116] px-2.5 py-2 text-[12px] leading-[18px];
+  }
+
+  .xh-real-book-mid strong {
+    @apply shrink-0 text-[20px] font-medium leading-[30px] text-[#29c78a];
+  }
+
+  .xh-real-book-mid span {
+    @apply shrink-0 text-[#7a8596];
+  }
+
+  .xh-real-book-mid .xh-real-book-change {
+    @apply text-[#7a8596];
+  }
+
+  .xh-real-trades-list {
+    @apply h-[592px] overflow-y-auto;
+  }
+
+  .xh-real-records {
+    @apply min-h-0 overflow-hidden border-t border-[#25282f] bg-[#0c0e12];
+  }
+
+  .xh-real-record-tabs {
+    @apply flex h-[42px] items-stretch gap-1 border-b border-[#25282f] px-2;
+  }
+
+  .xh-real-record-tabs button {
+    @apply relative px-3 text-[14px] text-[#8f99a4];
+  }
+
+  .xh-real-record-tabs button.is-active {
+    @apply text-[#f5f5f5];
+  }
+
+  .xh-real-record-tabs button.is-active::after {
+    content: "";
+    @apply absolute inset-x-0 bottom-[-1px] h-px bg-[#f5f5f5];
+  }
+
+  .xh-real-record-tabs span {
+    @apply ml-1 rounded-full bg-[#20242c] px-1.5 py-0.5 text-[12px];
+  }
+
+  .xh-real-record-table {
+    @apply min-w-[900px] text-[12px];
+  }
+
+  .xh-real-record-head,
+  .xh-real-record-row {
+    @apply grid grid-cols-7 items-center gap-4 px-3;
+  }
+
+  .xh-real-record-head {
+    @apply h-[42px] border-b border-[#171a20] text-[#8f99a4];
+  }
+
+  .xh-real-record-row {
+    @apply h-[42px] border-b border-[#171a20] text-[#cbd1d8];
+  }
+
+  .xh-real-record-row strong {
+    @apply font-medium text-[#f5f5f5];
+  }
+
+  .xh-real-position-shell {
+    @apply min-h-0 overflow-x-auto;
+  }
+
+  .xh-real-position-table {
+    width: 100%;
+    min-width: 1420px;
+  }
+
+  .xh-real-position-head,
+  .xh-real-position-row {
+    display: grid;
+    grid-template-columns:
+      minmax(80px, 0.8fr)
+      minmax(100px, 0.9fr)
+      minmax(112px, 1.15fr)
+      minmax(94px, 1fr)
+      minmax(94px, 1fr)
+      minmax(132px, 1.25fr)
+      minmax(94px, 1fr)
+      minmax(118px, 1.1fr)
+      minmax(82px, 0.8fr)
+      minmax(62px, 0.6fr)
+      minmax(62px, 0.6fr)
+      minmax(190px, 1.6fr);
+    column-gap: 12px;
+    align-items: center;
+    padding: 0 12px;
+  }
+
+  .xh-real-position-head {
+    @apply h-[42px] border-b border-[#171a20] text-[12px] text-[#8f99a4];
+  }
+
+  .xh-real-position-head > button {
+    @apply h-full justify-self-end border-0 bg-transparent px-0 text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
+  }
+
+  .xh-real-position-row {
+    @apply h-[44px] border-b border-[#171a20] text-[12px] text-[#cbd1d8];
+    border-left: 3px solid transparent;
+  }
+
+  .xh-real-position-row.is-long {
+    border-left-color: #29c78a;
+  }
+
+  .xh-real-position-row.is-short {
+    border-left-color: #f43f5e;
+  }
+
+  .xh-real-position-row strong {
+    @apply font-medium text-[#f5f5f5];
+  }
+
+  .xh-real-position-row .is-positive {
+    @apply text-[#29c78a];
+  }
+
+  .xh-real-position-row .is-negative {
+    @apply text-[#f43f5e];
+  }
+
+  .xh-real-position-actions {
+    @apply grid grid-cols-3 gap-1.5;
+  }
+
+  .xh-real-position-actions button {
+    @apply h-8 border border-[#343941] bg-[#0a0c10] px-1 text-[14px] text-[#d8dde3] transition hover:border-white/60 hover:text-white;
+  }
+
+  .xh-real-position-empty {
+    @apply flex h-[190px] items-center justify-center text-[12px] text-[#7f8995];
+  }
+
+  .xh-real-position-status {
+    @apply border-t border-[#25282f] px-3 py-2 text-[12px] text-[#f5c56e];
+  }
+
+  .xh-real-record-empty {
+    @apply flex h-[190px] items-center justify-center;
+  }
+
+  .xh-real-record-empty strong {
+    @apply text-[12px] font-medium text-[#7f8995];
+  }
+
+  .xh-real-record-empty span {
+    @apply hidden;
+  }
+
+  .xh-real-order-panel {
+    @apply flex flex-col gap-4 bg-[#0c0e12] p-4;
+    box-shadow: inset 1px 0 #25282f;
+  }
+
+  .xh-real-order-topline {
+    @apply grid grid-cols-2 gap-1;
+  }
+
+  .xh-real-order-topline label {
+    @apply relative block;
+  }
+
+  .xh-real-order-topline select {
+    @apply h-10 w-full appearance-none border border-[#25282f] bg-[#08090b] px-3 pr-10 text-[13px] font-medium text-[#e8ecf2] opacity-100 outline-none;
+  }
+
+  .xh-real-order-topline svg {
+    @apply pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[#e8ecf2];
+  }
+
+  .xh-real-leverage-control {
+    @apply min-w-0;
+  }
+
+  .xh-real-position-tabs {
+    @apply grid h-10 grid-cols-2 gap-1;
+  }
+
+  .xh-real-position-tabs button {
+    @apply border border-[#25282f] bg-[#08090b] text-[12px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-position-tabs button.is-active {
+    @apply border-white bg-white text-black;
+  }
+
+  .xh-real-type-tabs {
+    @apply flex h-8 items-center border-b border-[#25282f];
+  }
+
+  .xh-real-type-tabs button {
+    @apply relative h-full px-2.5 py-1.5 text-[12px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-type-tabs button.is-active {
+    @apply text-[#e8ecf2];
+  }
+
+  .xh-real-type-tabs button.is-active::after {
+    content: "";
+    @apply absolute inset-x-0 bottom-[-1px] h-px bg-[#f5f5f5];
+  }
+
+  .xh-real-order-balance {
+    @apply grid grid-cols-[1fr_auto] gap-y-2 text-[12px];
+  }
+
+  .xh-real-order-balance span {
+    @apply text-[#7f8995];
+  }
+
+  .xh-real-order-balance strong {
+    @apply text-right font-medium text-[#f5f5f5];
+  }
+
+  .xh-real-order-form {
+    @apply flex flex-col gap-4;
+  }
+
+  .xh-real-order-entry-fields {
+    @apply flex flex-col gap-2;
+  }
+
+  .xh-real-order-field {
+    @apply block;
+  }
+
+  .xh-real-order-field > span {
+    @apply mb-[7px] block text-[12px] text-[#7a8596];
+  }
+
+  .xh-real-order-field > div {
+    @apply flex h-10 items-center border border-[#25282f] bg-[#0a0c10] px-3 focus-within:border-[#66717d];
+  }
+
+  .xh-real-order-field input {
+    @apply min-w-0 flex-1 bg-transparent text-[14px] text-[#e8ecf2] outline-none disabled:text-[#7f8995];
+  }
+
+  .xh-real-order-field b {
+    @apply text-[14px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-position-percent-control {
+    @apply grid grid-cols-[minmax(0,1fr)_67px] items-center gap-[14px];
+  }
+
+  .xh-real-position-percent {
+    @apply relative h-10;
+  }
+
+  .xh-real-position-percent > input[type="range"] {
+    @apply relative z-[2] block h-10 w-full cursor-pointer appearance-none outline-none;
+    background: transparent;
+  }
+
+  .xh-real-position-percent-track {
+    --position-percent: 0%;
+    @apply pointer-events-none absolute inset-x-[5px] top-1/2 z-0 h-1 -translate-y-1/2;
+    background: linear-gradient(to right, #dddddd 0 var(--position-percent), #7a8596 var(--position-percent) 100%);
+  }
+
+  .xh-real-position-percent > input[type="range"]::-webkit-slider-runnable-track {
+    height: 4px;
+    background: transparent;
+  }
+
+  .xh-real-position-percent > input[type="range"]::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+    margin-top: -4px;
+    appearance: none;
+    border: 0;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.25);
+    transition: transform 120ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .xh-real-position-percent > input[type="range"]::-moz-range-track {
+    height: 4px;
+    background: transparent;
+  }
+
+  .xh-real-position-percent > input[type="range"]::-moz-range-progress {
+    height: 4px;
+    background: transparent;
+  }
+
+  .xh-real-position-percent > input[type="range"]::-moz-range-thumb {
+    width: 12px;
+    height: 12px;
+    border: 0;
+    border-radius: 12px;
+    background: #ffffff;
+    box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.25);
+    transition: transform 120ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .xh-real-position-percent > input[type="range"]:hover::-webkit-slider-thumb,
+  .xh-real-position-percent > input[type="range"]:focus-visible::-webkit-slider-thumb {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.3);
+  }
+
+  .xh-real-position-percent > input[type="range"]:hover::-moz-range-thumb,
+  .xh-real-position-percent > input[type="range"]:focus-visible::-moz-range-thumb {
+    box-shadow: 0 0 0 5px rgba(255, 255, 255, 0.3);
+  }
+
+  .xh-real-position-percent > input[type="range"]:active::-webkit-slider-thumb {
+    transform: scale(0.88);
+    box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.32);
+  }
+
+  .xh-real-position-percent > input[type="range"]:active::-moz-range-thumb {
+    transform: scale(0.88);
+    box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.32);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xh-real-position-percent > input[type="range"]::-webkit-slider-thumb,
+    .xh-real-position-percent > input[type="range"]::-moz-range-thumb {
+      transition: none;
+    }
+
+    .xh-real-position-percent > input[type="range"]:active::-webkit-slider-thumb,
+    .xh-real-position-percent > input[type="range"]:active::-moz-range-thumb {
+      transform: none;
+    }
+  }
+
+  .xh-real-position-percent-nodes {
+    @apply pointer-events-none absolute inset-x-[5px] top-1/2 z-[1] h-[10px] -translate-y-1/2;
+  }
+
+  .xh-real-position-percent-nodes span {
+    @apply absolute top-0 h-[10px] w-[10px] -translate-x-1/2 rounded-full border-2 border-[#7a8596] bg-[#0c0e12];
+  }
+
+  .xh-real-position-percent-nodes span.is-active {
+    @apply border-[#f5f5f5] bg-[#f5f5f5];
+  }
+
+  .xh-real-position-percent-input {
+    @apply flex h-10 items-center border border-[#25282f] bg-[#08090b] px-3 focus-within:border-white/70;
+  }
+
+  .xh-real-position-percent-input input {
+    @apply min-w-0 flex-1 appearance-none bg-transparent text-left text-[14px] font-medium text-[#e8ecf2] outline-none;
+  }
+
+  .xh-real-position-percent-input input::-webkit-inner-spin-button,
+  .xh-real-position-percent-input input::-webkit-outer-spin-button {
+    margin: 0;
+    appearance: none;
+  }
+
+  .xh-real-position-percent-input b {
+    @apply ml-2 text-[14px] font-medium text-[#7a8596];
+  }
+
+  .xh-real-side-buttons {
+    @apply grid grid-cols-2 gap-2;
+  }
+
+  .xh-real-side-buttons button {
+    @apply h-10 border border-[#25282f] text-[14px] font-medium text-[#9ba5af];
+    outline: none;
+    transition: background-color 160ms cubic-bezier(0.22, 1, 0.36, 1), border-color 160ms cubic-bezier(0.22, 1, 0.36, 1), color 160ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .xh-real-side-buttons button:focus-visible {
+    outline: 1px solid rgba(255, 255, 255, 0.72);
+    outline-offset: 2px;
+  }
+
+  .xh-real-side-buttons button:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .xh-real-side-buttons button.is-buy-active {
+    @apply border-[#1bc893] bg-[#0f2b24] text-[#38d9a9];
+  }
+
+  .xh-real-side-buttons button.is-buy-active:not(:disabled):hover,
+  .xh-real-side-buttons button.is-buy-active:not(:disabled):focus-visible {
+    border-color: rgba(41, 199, 138, 0.14);
+    background: #29c78a;
+    color: #ffffff;
+  }
+
+  .xh-real-side-buttons button.is-sell-active {
+    @apply border-[#ff4d6d] bg-[#32151c] text-[#ff6b83];
+  }
+
+  .xh-real-side-buttons button.is-sell-active:not(:disabled):hover,
+  .xh-real-side-buttons button.is-sell-active:not(:disabled):focus-visible {
+    border-color: rgba(244, 63, 94, 0.14);
+    background: #f43f5e;
+    color: #ffffff;
+  }
+
+  .xh-real-connect-wallet {
+    @apply h-10 w-full border border-[#25282f] bg-[#0f1116] text-[12px] font-medium text-[#7a8596] transition hover:border-white/40 hover:text-[#e8ecf2] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white;
+  }
+
+  .xh-real-connect-error {
+    @apply border border-[#5a4521] bg-[#211b10] p-2.5 text-[12px] leading-5 text-[#f5c56e];
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xh-real-side-buttons button {
+      transition: none;
+    }
+  }
+
+  .xh-real-order-checks {
+    @apply flex flex-col items-start gap-2 text-[12px] text-[#7a8596];
+  }
+
+  .xh-checkbox {
+    @apply flex min-h-[18px] cursor-pointer items-center gap-2;
+  }
+
+  .xh-checkbox input[type="checkbox"] {
+    @apply grid h-4 w-4 shrink-0 cursor-pointer appearance-none place-content-center border border-[#7c8794] bg-transparent outline-none transition focus-visible:border-white;
+  }
+
+  .xh-checkbox input[type="checkbox"]::before {
+    content: "";
+    width: 8px;
+    height: 8px;
+    background: #f5f5f5;
+    transform: scale(0);
+    transition: transform 120ms ease-out;
+  }
+
+  .xh-checkbox input[type="checkbox"]:checked {
+    border-color: #f5f5f5;
+  }
+
+  .xh-checkbox input[type="checkbox"]:checked::before {
+    transform: scale(1);
+  }
+
+  .xh-checkbox.is-disabled {
+    @apply cursor-not-allowed opacity-45;
+  }
+
+  .xh-checkbox input[type="checkbox"]:disabled {
+    @apply cursor-not-allowed;
+  }
+
+  .xh-real-order-metrics {
+    @apply flex flex-col gap-2 border-t border-[#25282f] pt-4;
+  }
+
+  .xh-real-order-metrics > div {
+    @apply flex items-center justify-between text-[12px];
+  }
+
+  .xh-real-order-metrics span {
+    @apply text-[#7f8995];
+  }
+
+  .xh-real-order-metrics strong {
+    @apply font-medium text-[#f5f5f5];
+  }
+
+  .xh-real-order-message,
+  .xh-real-account-message {
+    @apply mt-3 border border-[#5a4521] bg-[#211b10] p-2.5 text-[12px] leading-5 text-[#f5c56e];
+  }
+
+  .xh-real-order-message.is-success {
+    @apply border-[#19523f] bg-[#0d241d] text-[#52d8ad];
+  }
+
+  .xh-real-confirm-modal {
+    @apply md:max-w-[480px];
+  }
+
+  .xh-real-confirm-summary {
+    @apply divide-y divide-[#25282f] border border-[#25282f] bg-[#0c0e12];
+  }
+
+  .xh-real-confirm-summary > div {
+    @apply flex min-h-10 items-center justify-between gap-5 px-3 text-[12px];
+  }
+
+  .xh-real-confirm-summary span {
+    @apply text-[#8a95a1];
+  }
+
+  .xh-real-confirm-summary strong {
+    @apply text-right font-medium text-[#f5f5f5];
+  }
+
+  .xh-real-confirm-summary strong.is-buy {
+    @apply text-[#38d9a9];
+  }
+
+  .xh-real-confirm-summary strong.is-sell {
+    @apply text-[#ff6b83];
+  }
+
+  .xh-real-confirm-warning {
+    @apply mt-4 border border-[#5a4521] bg-[#211b10] p-3 text-[12px] leading-5 text-[#f5c56e];
+  }
+
+  .xh-real-confirm-skip {
+    @apply mt-4 flex min-h-10 cursor-pointer items-center gap-2 text-[14px] text-[#cbd1d8];
+  }
+
+  .xh-real-confirm-skip input {
+    @apply h-4 w-4 accent-white;
+  }
+
+  .xh-real-confirm-actions {
+    @apply mt-5 grid grid-cols-2 gap-3;
+  }
+
+  .xh-real-confirm-actions button {
+    @apply min-h-11 px-3 py-2 text-[14px] normal-case tracking-normal;
+  }
+
+  .xh-real-account-panel {
+    @apply h-[220px] border-t border-[#25282f] bg-[#0c0e12] p-4 text-[12px];
+    box-shadow: inset 1px 0 #25282f;
+  }
+
+  .xh-real-account-title {
+    @apply font-normal leading-[normal] text-[#e8ecf2];
+  }
+
+  .xh-real-account-metrics {
+    @apply mt-[14px] flex h-[156px] flex-col items-stretch gap-2 overflow-hidden bg-[#0f1116] px-2 py-1;
+  }
+
+  .xh-real-account-metrics > div {
+    @apply flex h-[18px] shrink-0 items-center justify-between gap-4 border-0 pb-0 leading-[normal];
+  }
+
+  .xh-real-account-metrics span {
+    @apply text-[#7a8596];
+  }
+
+  .xh-real-account-metrics strong {
+    @apply min-w-0 truncate text-right font-medium text-[#e8ecf2];
+  }
+
+  .xh-real-account-metrics strong.is-positive {
+    @apply text-[#38d9a9];
+  }
+
+  .xh-real-account-metrics strong.is-negative {
+    @apply text-[#ff6b83];
+  }
+
+  .xh-real-account-error {
+    @apply mt-3 border-t border-[#25282f] pt-3 text-[12px] leading-5 text-[#ff8a9d];
   }
 
   .xh-trade-quote-panel,
@@ -843,17 +1549,59 @@ textarea {
     @apply min-w-0 truncate text-right font-mono text-sm font-semibold;
   }
 
-  @media (min-width: 1280px) {
-    .xh-trade-workbench > * + * {
-      margin-left: -1px;
+  @media (max-width: 1279px) {
+    .xh-trade-marketbar {
+      @apply h-auto min-h-[78px] flex-wrap gap-5;
     }
 
-    .xh-trade-main > * + * {
-      margin-top: -1px;
+    .xh-trade-market-stats {
+      @apply no-scrollbar overflow-x-auto border-l-0 pl-0;
     }
 
-    .xh-trade-order-rail > * + * {
-      margin-top: -1px;
+    .xh-trade-grid {
+      @apply grid-cols-1;
+      height: auto;
+    }
+
+    .xh-trade-order-rail {
+      @apply grid-cols-2 grid-rows-none border-l-0 border-t border-[#25282f];
+    }
+
+    .xh-real-order-panel {
+      box-shadow: none;
+    }
+
+    .xh-real-account-panel {
+      border-top-width: 0;
+    }
+  }
+
+  @media (max-width: 900px) {
+    .xh-trade-main {
+      @apply flex flex-col;
+    }
+
+    .xh-trade-workbench {
+      @apply grid-cols-1;
+    }
+
+    .xh-trade-depth-stage {
+      height: 636px;
+    }
+
+    .xh-real-depth-panel,
+    .xh-real-account-panel {
+      box-shadow: none;
+      border-top: 1px solid #25282f;
+    }
+
+    .xh-real-records {
+      min-height: 327px;
+      overflow-x: auto;
+    }
+
+    .xh-trade-order-rail {
+      @apply grid-cols-1;
     }
   }
 

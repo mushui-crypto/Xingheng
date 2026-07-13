@@ -36,7 +36,7 @@ export function UserLayout({ children }: UserLayoutProps) {
 
   return (
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
-      <header className="sticky top-0 z-30 h-[60px] border border-[#2b2b2b] bg-black">
+      <header className="sticky top-0 z-30 h-[60px] border-b border-[#2b2b2b] bg-black">
         <div className="flex h-full w-full min-w-0 items-center justify-between gap-3 overflow-hidden px-3 py-2.5 sm:px-4 md:gap-6 md:px-8">
           <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-6 lg:gap-10">
             <Brand />

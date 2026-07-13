@@ -63,9 +63,12 @@ export type RealCandle = {
 export type RealAccountSummary = {
   address: string;
   accountValue?: number | null;
+  withdrawable?: number | null;
   availableMargin?: number | null;
   usedMargin?: number | null;
   totalUnrealizedPnl?: number | null;
+  crossAccountValue?: number | null;
+  isolatedAccountValue?: number | null;
   cross?: unknown;
   isolated?: unknown;
 };

@@ -1,0 +1,183 @@
+import { useState } from "react";
+import type { RealPosition } from "../../../api/realTrading";
+import { Button } from "../../../components/ui/Button";
+import { Modal } from "../../../components/ui/Modal";
+
+export type RealPositionCloseRequest = {
+  mode: "limit" | "market" | "reverse";
+  positions: RealPosition[];
+  scope: "all" | "single";
+};
+
+type CloseIntent = RealPositionCloseRequest | null;
+
+export function RealPositionsTable({
+  onCloseRequest,
+  rows,
+}: {
+  onCloseRequest?: (request: RealPositionCloseRequest) => Promise<void> | void;
+  rows: RealPosition[];
+}) {
+  const [intent, setIntent] = useState<CloseIntent>(null);
+  const [status, setStatus] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  function requestAllClose() {
+    setStatus("");
+    setIntent({ mode: "market", positions: rows, scope: "all" });
+  }
+
+  function requestSingleClose(position: RealPosition, mode: RealPositionCloseRequest["mode"]) {
+    setStatus("");
+    setIntent({ mode, positions: [position], scope: "single" });
+  }
+
+  async function confirmClose() {
+    if (!intent) return;
+    if (!onCloseRequest) {
+      setStatus("平仓接口待接入");
+      setIntent(null);
+      return;
+    }
+    setSubmitting(true);
+    try {
+      await onCloseRequest(intent);
+      setStatus(intent.scope === "all" ? "全部平仓请求已提交" : "平仓请求已提交");
+      setIntent(null);
+    } finally {
+      setSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="xh-real-position-shell">
+      <div className="xh-real-position-table">
+        <div className="xh-real-position-head">
+          <span>资产</span>
+          <span>数量</span>
+          <span>仓位价值</span>
+          <span>开仓价格</span>
+          <span>标记价格</span>
+          <span>盈亏（ROE%）</span>
+          <span>强平价格</span>
+          <span>保证金</span>
+          <span>资金费</span>
+          <span>止盈</span>
+          <span>止损</span>
+          <button onClick={requestAllClose} type="button">全部平仓</button>
+        </div>
+        {rows.length === 0 ? (
+          <div className="xh-real-position-empty">暂无真实持仓</div>
+        ) : rows.map((row, index) => {
+          const pnlTone = numberTone(row.unrealizedPnl);
+          const sideTone = positionSideTone(row.side);
+          return (
+            <div className={`xh-real-position-row is-${row.side}`} key={`${row.coin}-${row.side}-${index}`}>
+              <strong>{row.coin}</strong>
+              <span className={sideTone}>{formatNumber(row.size)}</span>
+              <span>{formatCurrency(positionValue(row))}</span>
+              <span>{formatNumber(row.entryPx)}</span>
+              <span>{formatNumber(row.markPx)}</span>
+              <span className={pnlTone}>{formatPnl(row)}</span>
+              <span>{formatNumber(row.liqPx)}</span>
+              <span>{formatMargin(row)}</span>
+              <span>-</span>
+              <span>-</span>
+              <span>-</span>
+              <div className="xh-real-position-actions">
+                <button onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
+                <button onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
+                <button onClick={() => requestSingleClose(row, "reverse")} type="button">反手</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {status ? <p className="xh-real-position-status" role="status">{status}</p> : null}
+
+      <Modal
+        open={intent !== null}
+        title={intent?.scope === "all" ? "确认全部平仓" : closeTitle(intent?.mode)}
+        onClose={() => setIntent(null)}
+        shellClassName="xh-real-confirm-modal"
+      >
+        <div className="xh-real-confirm-summary">
+          <CloseMetric label="范围" value={intent?.scope === "all" ? `全部持仓 · ${intent.positions.length}` : intent?.positions[0]?.coin ?? "-"} />
+          <CloseMetric label="方式" value={closeModeLabel(intent?.mode)} />
+          <CloseMetric label="订单" value={intent?.mode === "market" ? "Reduce-only · Market" : intent?.mode === "limit" ? "Reduce-only · Limit" : "Close + Reverse"} />
+          <CloseMetric label="网络" value="Hyperliquid Testnet" />
+        </div>
+        <div className="xh-real-confirm-warning" role="note">
+          {intent?.scope === "all"
+            ? "全部持仓将以市价平仓。市场波动可能产生滑点，提交后无法撤销。"
+            : intent?.mode === "market"
+              ? "该持仓将以市价平仓。市场波动可能产生滑点，提交后无法撤销。"
+              : intent?.mode === "reverse"
+                ? "当前持仓将被平仓并反向开仓，成交结果以交易所返回为准。"
+                : "限价平仓不会保证立即成交，未成交订单将保留在当前委托。"}
+        </div>
+        <div className="xh-real-confirm-actions">
+          <Button disabled={submitting} onClick={() => setIntent(null)} type="button" variant="secondary">取消</Button>
+          <Button disabled={submitting || intent?.positions.length === 0} onClick={() => void confirmClose()} type="button" variant="danger">
+            {submitting ? "提交中" : "确认平仓"}
+          </Button>
+        </div>
+      </Modal>
+    </div>
+  );
+}
+
+function CloseMetric({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function closeTitle(mode?: RealPositionCloseRequest["mode"]) {
+  if (mode === "market") return "确认市价平仓";
+  if (mode === "reverse") return "确认反手";
+  return "确认限价平仓";
+}
+
+function closeModeLabel(mode?: RealPositionCloseRequest["mode"]) {
+  if (mode === "market") return "市价";
+  if (mode === "reverse") return "反手";
+  return "限价";
+}
+
+function positionValue(position: RealPosition) {
+  if (typeof position.markPx !== "number" || !Number.isFinite(position.markPx)) return null;
+  return Math.abs(position.size) * position.markPx;
+}
+
+function formatPnl(position: RealPosition) {
+  const pnl = formatSignedMoney(position.unrealizedPnl);
+  if (typeof position.unrealizedPnl !== "number" || typeof position.margin !== "number" || position.margin === 0) return pnl;
+  return `${pnl} (${((position.unrealizedPnl / position.margin) * 100).toFixed(2)}%)`;
+}
+
+function formatMargin(position: RealPosition) {
+  const margin = formatCurrency(position.margin);
+  return typeof position.leverage === "number" ? `${margin} · ${position.leverage}x` : margin;
+}
+
+function formatNumber(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 4 }) : "-";
+}
+
+function formatCurrency(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC` : "-";
+}
+
+function formatSignedMoney(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value >= 0 ? "+" : "-"}$${Math.abs(value).toLocaleString("en-US", { maximumFractionDigits: 2 })}` : "-";
+}
+
+function numberTone(value?: number | null) {
+  if (typeof value !== "number" || value === 0) return "";
+  return value > 0 ? "is-positive" : "is-negative";
+}
+
+function positionSideTone(side: RealPosition["side"]) {
+  if (side === "long") return "is-positive";
+  if (side === "short") return "is-negative";
+  return "";
+}
