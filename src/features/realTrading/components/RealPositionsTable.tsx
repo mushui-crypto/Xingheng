@@ -1,7 +1,8 @@
 import { useState } from "react";
-import type { RealOpenOrder, RealPosition } from "../../../api/realTrading";
+import type { RealOpenOrder, RealPosition, RealTradingSymbol } from "../../../api/realTrading";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
+import { recordBelongsToMarket, resolveRealTradingSymbolForRecord } from "../lib/realTradingMarket";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 
 export type { RealPositionCloseRequest } from "../model/types";
@@ -15,6 +16,7 @@ export function RealPositionsTable({
   openOrders = [],
   onTpslRequest,
   rows,
+  symbols,
 }: {
   bestAsk?: number | null;
   bestBid?: number | null;
@@ -22,6 +24,7 @@ export function RealPositionsTable({
   openOrders?: RealOpenOrder[];
   onTpslRequest?: (request: RealPositionTpslRequest) => Promise<void> | void;
   rows: RealPosition[];
+  symbols: RealTradingSymbol[];
 }) {
   const [intent, setIntent] = useState<CloseIntent>(null);
   const [tpslIntent, setTpslIntent] = useState<RealPositionTpslRequest | null>(null);
@@ -48,8 +51,8 @@ export function RealPositionsTable({
     setStatus("");
     setTpslIntent({
       position,
-      slPrice: triggerPrice(openOrders, position.coin, "sl"),
-      tpPrice: triggerPrice(openOrders, position.coin, "tp"),
+      slPrice: triggerPrice(openOrders, position, symbols, "sl"),
+      tpPrice: triggerPrice(openOrders, position, symbols, "tp"),
     });
   }
 
@@ -124,8 +127,8 @@ export function RealPositionsTable({
               <span>{formatNumber(row.liqPx ?? row.liquidationPrice)}</span>
               <span>{formatMargin(row)}</span>
               <span>{formatSignedMoney(row.fundingSinceOpen ?? row.cumFunding?.sinceOpen)}</span>
-              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row.coin, "tp")}</button>
-              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row.coin, "sl")}</button>
+              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "tp")}</button>
+              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "sl")}</button>
               <div className="xh-real-position-actions">
                 <button onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
                 <button onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
@@ -229,14 +232,26 @@ function formatPnl(position: RealPosition) {
   return `${pnl} (${((position.unrealizedPnl / position.margin) * 100).toFixed(2)}%)`;
 }
 
-function formatTriggerPrice(orders: RealOpenOrder[], coin: string, type: "tp" | "sl") {
-  const value = triggerPrice(orders, coin, type);
+function formatTriggerPrice(
+  orders: RealOpenOrder[],
+  position: RealPosition,
+  symbols: RealTradingSymbol[],
+  type: "tp" | "sl",
+) {
+  const value = triggerPrice(orders, position, symbols, type);
   return value ? formatNumber(Number(value)) : "设置";
 }
 
-function triggerPrice(orders: RealOpenOrder[], coin: string, type: "tp" | "sl") {
+function triggerPrice(
+  orders: RealOpenOrder[],
+  position: RealPosition,
+  symbols: RealTradingSymbol[],
+  type: "tp" | "sl",
+) {
+  const market = resolveRealTradingSymbolForRecord(position, symbols);
+  if (!market) return undefined;
   const order = orders.find((item) => {
-    if (item.coin !== coin || !item.isTrigger) return false;
+    if (!item.isTrigger || !recordBelongsToMarket(item, market, symbols)) return false;
     const text = `${item.orderType ?? ""} ${item.triggerCondition ?? ""}`.toLowerCase();
     return type === "tp" ? text.includes("take") || text.includes("tp") : text.includes("stop") || text.includes("sl");
   });

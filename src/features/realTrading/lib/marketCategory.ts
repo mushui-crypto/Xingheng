@@ -1,17 +1,11 @@
-import type { SymbolCategory } from "../../../types/market";
-
-const metalMarkets = new Set(["GOLD", "SILVER", "PLATINUM", "PALLADIUM"]);
-const indexMarkets = new Set(["IDX0", "JP225", "KR200", "SP500", "US500", "USTECH", "XYZ100"]);
+import type { MarketSourceType, SymbolCategory } from "../../../types/market";
 
 export function resolveRealTradingCategory(
   providerMarketId: string | undefined,
   category?: SymbolCategory,
+  sourceType?: MarketSourceType,
 ): SymbolCategory {
   if (category) return category;
-  const marketId = String(providerMarketId ?? "").trim();
-  if (!marketId.includes(":")) return "crypto";
-  const providerCoin = marketId.split(":").at(-1)?.toUpperCase() ?? "";
-  if (metalMarkets.has(providerCoin)) return "metals";
-  if (indexMarkets.has(providerCoin)) return "indices";
-  return "other";
+  if (sourceType) return sourceType === "main" ? "crypto" : "other";
+  return String(providerMarketId ?? "").includes(":") ? "other" : "crypto";
 }
