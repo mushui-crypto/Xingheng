@@ -16,6 +16,10 @@ export type HyperliquidUniverseItem = {
   onlyIsolated?: boolean;
 };
 
+export type HyperliquidUniverseItemPayload = Omit<HyperliquidUniverseItem, "szDecimals"> & {
+  szDecimals?: unknown;
+};
+
 export type HyperliquidAssetContext = {
   markPx?: string;
   oraclePx?: string;

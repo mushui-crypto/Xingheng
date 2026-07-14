@@ -42,8 +42,9 @@ import {
   resolveRealTradingSymbolForRecord,
 } from "../../features/realTrading/lib/realTradingMarket";
 import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
+import { getRealTradingDisplayPriceDecimals } from "../../features/realTrading/lib/realTradingDisplayPrecision";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
-import { formatCompactMoney, formatFundingPercent, formatMarketDayChange, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
+import { formatCompactMoney, formatFundingPercent, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
 import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
@@ -84,7 +85,7 @@ export function RealTradePage() {
     && recordBelongsToMarket(item, selectedConfig, symbols)
   )) ?? null;
   const isConnected = Boolean(walletAddress);
-  const digits = selectedConfig?.pxDecimals ?? 2;
+  const digits = getRealTradingDisplayPriceDecimals(selectedConfig?.pxDecimals);
   const pickerSymbols = useMemo<MarketPickerSymbol[]>(
     () => {
       const availableSymbols: RealTradingSymbol[] = symbols.length > 0
@@ -424,7 +425,7 @@ export function RealTradePage() {
         </div>
         <div className="xh-trade-market-stats">
           <TradeStat label="Mark" value={formatPrice(marketSummary?.markPrice ?? undefined, digits)} />
-          <TradeStat label="24h Change" value={formatMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)} tone={marketNumberTone(marketSummary?.dayChange)} />
+          <TradeStat label="24h Change" value={formatRealMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent, digits)} tone={marketNumberTone(marketSummary?.dayChange)} />
           <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
           <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
           <TradeStat label="Funding" value={formatFundingPercent(marketSummary?.funding)} tone={marketNumberTone(marketSummary?.funding)} />
@@ -461,7 +462,7 @@ export function RealTradePage() {
                 <span>H&nbsp; {formatPrice(latestCandle?.high, digits)}</span>
                 <span>L&nbsp; {formatPrice(latestCandle?.low, digits)}</span>
                 <span>C&nbsp; {formatPrice(latestCandle?.close, digits)}</span>
-                <span>24h&nbsp; <b className={toneClass(marketNumberTone(marketSummary?.dayChange))}>{formatMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent)}</b></span>
+                <span>24h&nbsp; <b className={toneClass(marketNumberTone(marketSummary?.dayChange))}>{formatRealMarketDayChange(marketSummary?.dayChange, marketSummary?.dayChangePercent, digits)}</b></span>
               </div>
               <div className="xh-real-chart-canvas">
                 <div ref={chartContainerRef} className="h-full w-full" />
@@ -545,6 +546,14 @@ export function RealTradePage() {
       </div>
     </div>
   );
+}
+
+function formatRealMarketDayChange(change: number | null | undefined, percent: number | null | undefined, digits: number) {
+  if (typeof change !== "number" || !Number.isFinite(change)) return "-";
+  const changeText = `${change >= 0 ? "+" : "-"}${Math.abs(change).toFixed(digits)}`;
+  return typeof percent === "number" && Number.isFinite(percent)
+    ? `${changeText} / ${percent >= 0 ? "+" : ""}${percent.toFixed(2)}%`
+    : changeText;
 }
 
 function ConnectionPanel({

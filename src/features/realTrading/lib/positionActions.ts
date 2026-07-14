@@ -2,6 +2,7 @@ import type { RealPosition, RealTradingSymbol } from "../../../api/realTrading";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 import type { HyperliquidLimitOrderInput, HyperliquidSessionSigner } from "./hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "./hyperliquidPrice";
+import { assertValidHyperliquidSizeDecimals, formatHyperliquidOrderSizeFloor } from "./hyperliquidSize";
 import { resolveRealTradingSymbolForRecord } from "./realTradingMarket";
 import { buildPositionTpslOrders } from "./tpslOrders";
 
@@ -48,13 +49,14 @@ export async function submitPositionTpslRequest(
   const config = resolvePositionSymbol(request.position, symbols);
   const markPrice = request.position.markPx ?? request.position.markPrice;
   if (typeof markPrice !== "number" || !Number.isFinite(markPrice)) throw new Error(`${request.position.coin} 缺少有效标记价格。`);
+  const szDecimals = assertValidHyperliquidSizeDecimals(config.szDecimals, config.symbol);
   const triggers = buildPositionTpslOrders({
     asset: config.assetId!,
     closingIsBuy: request.position.side === "short",
     referencePrice: markPrice,
-    size: formatOrderSize(request.position.size, config.szDecimals ?? 0),
+    size: formatPositionOrderSize(request.position.size, szDecimals, config.symbol),
     slPrice: request.slPrice,
-    szDecimals: config.szDecimals ?? 0,
+    szDecimals,
     tpPrice: request.tpPrice,
   });
   await signer.placePositionTpsl(triggers);
@@ -76,18 +78,20 @@ function buildCloseOrder(
   if (!Number.isFinite(rawPrice) || rawPrice <= 0) {
     throw new Error(`${position.coin} 缺少有效的平仓价格。`);
   }
+  const szDecimals = assertValidHyperliquidSizeDecimals(config.szDecimals, config.symbol);
   return {
     asset: config.assetId!,
     isBuy,
     market,
-    price: normalizeHyperliquidPrice(rawPrice, config.szDecimals ?? 0, isBuy ? "up" : "down"),
+    price: normalizeHyperliquidPrice(rawPrice, szDecimals, isBuy ? "up" : "down"),
     reduceOnly: true,
-    size: formatOrderSize(position.size, config.szDecimals ?? 0),
+    size: formatPositionOrderSize(position.size, szDecimals, config.symbol),
   };
 }
 
-function formatOrderSize(value: number, decimals: number) {
+function formatPositionOrderSize(value: number, decimals: number, symbol: string) {
   if (!Number.isFinite(value) || value <= 0) throw new Error("持仓数量无效。");
-  const fixed = value.toFixed(Math.max(0, decimals));
-  return fixed.includes(".") ? fixed.replace(/0+$/, "").replace(/\.$/, "") : fixed;
+  const formatted = formatHyperliquidOrderSizeFloor(value, decimals, symbol);
+  if (!formatted) throw new Error("持仓数量无效。");
+  return formatted;
 }
