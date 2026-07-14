@@ -1,10 +1,11 @@
 import { formatPrice } from "@nktkas/hyperliquid/utils";
+import { assertValidHyperliquidSizeDecimals } from "./hyperliquidSize";
 
 export type HyperliquidPriceDirection = "up" | "down";
 
 export function normalizeHyperliquidPrice(
   value: string | number,
-  szDecimals: number,
+  szDecimals: unknown,
   direction: HyperliquidPriceDirection = "down",
 ) {
   const numericValue = Number(value);
@@ -12,7 +13,7 @@ export function normalizeHyperliquidPrice(
     throw new Error("请输入有效的价格。");
   }
 
-  const normalizedSizeDecimals = Math.max(0, Math.trunc(szDecimals));
+  const normalizedSizeDecimals = assertValidHyperliquidSizeDecimals(szDecimals);
   const formattedDown = formatPrice(value, normalizedSizeDecimals, "perp");
   if (direction === "down" || Number(formattedDown) >= numericValue) {
     return formattedDown;

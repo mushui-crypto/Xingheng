@@ -7,6 +7,8 @@ import type { RealPosition, RealTradingFees, RealTradingMarginMode } from "../..
 import { MarginLeverageModal } from "./MarginLeverageModal";
 import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
+import { buildRealTradingEntryOrderInput } from "../lib/realTradingOrderValidation";
+import { assertValidHyperliquidSizeDecimals, formatHyperliquidOrderSizeFloor, getHyperliquidSizeInputStep } from "../lib/hyperliquidSize";
 import type { HyperliquidSessionController } from "../lib/useHyperliquidSessionSigner";
 import { buildPositionTpslOrders } from "../lib/tpslOrders";
 import {
@@ -35,7 +37,7 @@ export function RealTradingOrderPanel({
   position,
   session,
   supportedMarginModes,
-  szDecimals = 0,
+  szDecimals,
   symbol,
 }: {
   assetId?: number;
@@ -81,11 +83,27 @@ export function RealTradingOrderPanel({
   });
   const leverage = String(marginSelection.leverage);
   const actionDisabled = !connected || busy || typeof assetId !== "number";
+  const sizeInputStep = getHyperliquidSizeInputStep(szDecimals);
+
+  useEffect(() => {
+    sizeInputSourceRef.current = "manual";
+    setPrice("");
+    setSize("");
+    setTpPrice("");
+    setSlPrice("");
+    setPositionPercent(0);
+    setConfirmOpen(false);
+    session.setMessage("");
+  }, [assetId, symbol, szDecimals]);
 
   useEffect(() => {
     if (orderType === "market" && typeof markPrice === "number") {
       const protectionPrice = markPrice * (side === "buy" ? 1.01 : 0.99);
-      setPrice(normalizeHyperliquidPrice(protectionPrice, szDecimals, side === "buy" ? "up" : "down"));
+      try {
+        setPrice(normalizeHyperliquidPrice(protectionPrice, szDecimals, side === "buy" ? "up" : "down"));
+      } catch {
+        setPrice("");
+      }
     }
   }, [markPrice, orderType, side, szDecimals]);
 
@@ -112,25 +130,20 @@ export function RealTradingOrderPanel({
   }
 
   async function submitOrder(orderSide: "buy" | "sell" = side === "sell" ? "sell" : "buy") {
+    let draft: ReturnType<typeof buildOrderDraft>;
+    try {
+      draft = buildOrderDraft(orderSide);
+    } catch (error) {
+      session.setError(error instanceof Error ? error.message : "请输入有效的价格和数量。");
+      return;
+    }
+
     const signer = session.signer;
-    if (!signer || typeof assetId !== "number") return;
-    const orderPrice = resolveOrderPrice(orderSide);
-    if (!orderPrice || !size || Number(orderPrice) <= 0 || Number(size) <= 0) {
-      session.setError("请输入有效的价格和数量。");
-      return;
-    }
-    let normalizedPrice: string;
+    if (!signer) return;
     try {
-      normalizedPrice = normalizeHyperliquidPrice(orderPrice, szDecimals, orderSide === "buy" ? "up" : "down");
-    } catch {
-      session.setError("请输入有效的价格和数量。");
-      return;
-    }
-    const entryOrder = { asset: assetId, isBuy: orderSide === "buy", price: normalizedPrice, size, reduceOnly, market: orderType === "market" };
-    try {
-      const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, orderPrice) : [];
+      const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price) : [];
       await runAction(
-        () => triggers.length > 0 ? signer.placeOrderWithTpsl(entryOrder, triggers) : signer.placeOrder(entryOrder),
+        () => triggers.length > 0 ? signer.placeOrderWithTpsl(draft.entryOrder, triggers) : signer.placeOrder(draft.entryOrder),
         reduceOnly ? "reduce-only 平仓请求已发送。" : tpslEnabled ? "真实订单与止盈止损请求已发送。" : "真实订单请求已发送。",
       );
     } catch (error) {
@@ -141,18 +154,38 @@ export function RealTradingOrderPanel({
   function resolveOrderPrice(orderSide: "buy" | "sell") {
     if (orderType !== "market") return price;
     if (typeof markPrice !== "number" || !Number.isFinite(markPrice)) return "";
-    return normalizeHyperliquidPrice(markPrice * (orderSide === "buy" ? 1.01 : 0.99), szDecimals, orderSide === "buy" ? "up" : "down");
+    try {
+      return normalizeHyperliquidPrice(markPrice * (orderSide === "buy" ? 1.01 : 0.99), szDecimals, orderSide === "buy" ? "up" : "down");
+    } catch {
+      return "";
+    }
   }
 
-  function resolveTpslOrders(orderSide: "buy" | "sell", referenceValue = resolveOrderPrice(orderSide)) {
+  function buildOrderDraft(orderSide: "buy" | "sell") {
+    const orderPrice = resolveOrderPrice(orderSide);
+    const entryOrder = buildRealTradingEntryOrderInput({
+      assetId,
+      orderPrice,
+      orderSide,
+      orderType: orderType === "market" ? "market" : "limit",
+      reduceOnly,
+      size,
+      szDecimals,
+      symbol,
+    });
+    return { entryOrder };
+  }
+
+  function resolveTpslOrders(orderSide: "buy" | "sell", normalizedSize: string, referenceValue = resolveOrderPrice(orderSide)) {
     if (typeof assetId !== "number") return [];
+    const decimals = assertValidHyperliquidSizeDecimals(szDecimals, symbol);
     return buildPositionTpslOrders({
       asset: assetId,
       closingIsBuy: orderSide === "sell",
       referencePrice: Number(referenceValue),
-      size,
+      size: normalizedSize,
       slPrice,
-      szDecimals,
+      szDecimals: decimals,
       tpPrice,
     });
   }
@@ -164,22 +197,19 @@ export function RealTradingOrderPanel({
       onConnect();
       return;
     }
+    let draft: ReturnType<typeof buildOrderDraft>;
+    try {
+      draft = buildOrderDraft(orderSide);
+      if (tpslEnabled && !reduceOnly) {
+        resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price);
+      }
+    } catch (error) {
+      session.setError(error instanceof Error ? error.message : "请输入有效的价格和数量。");
+      return;
+    }
     if (!authorized) {
       void authorizeSession();
       return;
-    }
-    const orderPrice = resolveOrderPrice(orderSide);
-    if (!orderPrice || !size || Number(orderPrice) <= 0 || Number(size) <= 0) {
-      session.setError("请输入有效的价格和数量。");
-      return;
-    }
-    if (tpslEnabled && !reduceOnly) {
-      try {
-        resolveTpslOrders(orderSide, orderPrice);
-      } catch (error) {
-        session.setError(error instanceof Error ? error.message : "止盈止损参数无效。");
-        return;
-      }
     }
     if (window.localStorage.getItem(skipOrderConfirmationKey) === "1") {
       void submitOrder(orderSide);
@@ -222,7 +252,11 @@ export function RealTradingOrderPanel({
 
   function sizeForPercent(value: number) {
     if (value <= 0) return "";
-    return formatOrderSize(maxOrderSize() * (value / 100), szDecimals);
+    try {
+      return formatHyperliquidOrderSizeFloor(maxOrderSize() * (value / 100), szDecimals, symbol);
+    } catch {
+      return "";
+    }
   }
 
   function percentForSize(value: string) {
@@ -257,6 +291,29 @@ export function RealTradingOrderPanel({
     }
   }
 
+  const confirmEntryOrder = confirmOpen ? safeBuildOrderDraft(pendingSide)?.entryOrder ?? null : null;
+  const confirmTriggers = confirmOpen && confirmEntryOrder && tpslEnabled && !reduceOnly
+    ? safeResolveTpslOrders(pendingSide, confirmEntryOrder.size, confirmEntryOrder.price)
+    : [];
+  const confirmTpPrice = confirmTriggers.find((order) => order.tpsl === "tp")?.triggerPrice;
+  const confirmSlPrice = confirmTriggers.find((order) => order.tpsl === "sl")?.triggerPrice;
+
+  function safeBuildOrderDraft(orderSide: "buy" | "sell") {
+    try {
+      return buildOrderDraft(orderSide);
+    } catch {
+      return null;
+    }
+  }
+
+  function safeResolveTpslOrders(orderSide: "buy" | "sell", normalizedSize: string, referenceValue: string) {
+    try {
+      return resolveTpslOrders(orderSide, normalizedSize, referenceValue);
+    } catch {
+      return [];
+    }
+  }
+
   return (
     <section className="xh-real-order-panel">
       <div className="xh-real-order-topline">
@@ -288,7 +345,7 @@ export function RealTradingOrderPanel({
           ) : null}
           <label className="xh-real-order-field">
             <span>数量</span>
-            <div><input inputMode="decimal" value={size} onChange={(event) => changeSize(event.target.value)} /><b>{symbol.replace("USDT", "")}</b></div>
+            <div><input inputMode="decimal" step={sizeInputStep} value={size} onChange={(event) => changeSize(event.target.value)} /><b>{symbol.replace("USDT", "")}</b></div>
           </label>
           {tpslEnabled && !reduceOnly ? (
             <div className="xh-real-order-tpsl-fields">
@@ -359,12 +416,12 @@ export function RealTradingOrderPanel({
           <ConfirmMetric label="方向" value={pendingSide === "buy" ? "买入 / 做多" : "卖出 / 做空"} tone={pendingSide} />
           <ConfirmMetric label="仓位" value={reduceOnly ? "平仓 · Reduce-only" : "开仓"} />
           <ConfirmMetric label="类型" value={orderType === "market" ? "市价 IOC" : "限价"} />
-          <ConfirmMetric label="价格" value={`${resolveOrderPrice(pendingSide) || "-"} USDC`} />
-          <ConfirmMetric label="数量" value={`${size || "-"} ${symbol.replace("USDT", "")}`} />
-          <ConfirmMetric label="订单价值" value={estimateValue(resolveOrderPrice(pendingSide), size)} />
+          <ConfirmMetric label="价格" value={`${confirmEntryOrder?.price ?? "-"} USDC`} />
+          <ConfirmMetric label="数量" value={`${confirmEntryOrder?.size ?? "-"} ${symbol.replace("USDT", "")}`} />
+          <ConfirmMetric label="订单价值" value={estimateValue(confirmEntryOrder?.price ?? "", confirmEntryOrder?.size ?? "")} />
           <ConfirmMetric label="杠杆" value={`${marginSelection.leverage}x · ${marginModeLabel(marginSelection.marginMode)}`} />
-          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止盈价" value={tpPrice ? `${tpPrice} USDC` : "-"} /> : null}
-          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止损价" value={slPrice ? `${slPrice} USDC` : "-"} /> : null}
+          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止盈价" value={confirmTpPrice ? `${confirmTpPrice} USDC` : "-"} /> : null}
+          {tpslEnabled && !reduceOnly ? <ConfirmMetric label="止损价" value={confirmSlPrice ? `${confirmSlPrice} USDC` : "-"} /> : null}
         </div>
         <div className="xh-real-confirm-warning" role="note">
           Hyperliquid Testnet 真实订单。确认后将请求本地签名，订单结果以交易所返回为准。
@@ -422,13 +479,6 @@ function estimateFee(price: string, size: string, rate?: number | null) {
   return typeof rate === "number" && Number.isFinite(fee) && fee > 0
     ? `${fee.toLocaleString("en-US", { maximumFractionDigits: 4 })} USDC`
     : "-";
-}
-
-function formatOrderSize(value: number, decimals: number) {
-  const factor = 10 ** Math.max(0, decimals);
-  const floored = Math.floor(value * factor) / factor;
-  const fixed = floored.toFixed(Math.max(0, decimals));
-  return fixed.includes(".") ? fixed.replace(/0+$/, "").replace(/\.$/, "") : fixed;
 }
 
 function normalizePositionPercent(value: number) {

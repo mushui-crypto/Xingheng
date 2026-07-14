@@ -12,7 +12,9 @@
     "deploy:validate": "node scripts/validate-deploy.mjs",
     "verify:production-safety": "tsx scripts/verify-production-wallet.ts && node scripts/verify-production-config.mjs && node scripts/verify-restore.mjs",
     "preview": "vite preview",
-    "start:api": "node dist-server/index.js"
+    "start:api": "node dist-server/index.js",
+    "test:hyperliquid-precision": "tsx --test server/modules/hyperliquid/hyperliquidPrecision.test.ts",
+    "verify:hyperliquid-testnet-precision": "tsx scripts/verify-hyperliquid-testnet-precision.ts"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.33.1",

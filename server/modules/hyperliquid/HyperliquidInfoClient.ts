@@ -1,9 +1,14 @@
 import type { CandleInterval } from "../../types";
 import { normalizeInterval, normalizeLimit } from "../market/marketConfig";
 import { hyperliquidTestnetNetwork } from "./hyperliquidConfig";
+import {
+  getHyperliquidPerpDisplayPriceDecimals,
+  normalizeHyperliquidPerpSzDecimals,
+} from "./hyperliquidPrecision";
 import type {
   HyperliquidAssetContext,
   HyperliquidUniverseItem,
+  HyperliquidUniverseItemPayload,
   RealTradingAccountSummary,
   RealTradingCandle,
   RealTradingFees,
@@ -73,8 +78,8 @@ export class HyperliquidInfoClient {
         category: market.category,
         iconUrl: buildRealTradingIconUrl(market.providerMarketId),
         assetId: market.assetId,
-        szDecimals: Number(item.szDecimals ?? 0),
-        pxDecimals: inferPriceDecimals(market.context),
+        szDecimals: item.szDecimals,
+        pxDecimals: getHyperliquidPerpDisplayPriceDecimals(item.szDecimals),
         maxLeverage: Number(item.maxLeverage ?? 1),
         supportedMarginModes: marginCapabilities.supportedMarginModes,
         marginModeConstraint: marginCapabilities.marginModeConstraint,
@@ -255,7 +260,7 @@ export class HyperliquidInfoClient {
     const byProviderMarketId = new Map<string, RealTradingMarketDefinition>();
 
     const buildMarkets = (
-      universe: HyperliquidUniverseItem[],
+      universe: HyperliquidUniverseItemPayload[],
       contexts: HyperliquidAssetContext[],
       sourceDex: string,
       sourceType: "main" | "hip3",
@@ -272,6 +277,13 @@ export class HyperliquidInfoClient {
         ) {
           return [];
         }
+        const szDecimals = normalizeHyperliquidPerpSzDecimals(item?.szDecimals);
+        if (szDecimals === null) {
+          console.warn(
+            `[real-trading] Hyperliquid market ${providerMarketId || "<unknown>"} has invalid szDecimals metadata; skipped.`,
+          );
+          return [];
+        }
         const providerCoin = getProviderCoinFromMarketId(providerMarketId);
         const symbol = toInternalMarketSymbol(providerCoin, sourceDex, sourceType);
         if (!symbol) return [];
@@ -284,7 +296,7 @@ export class HyperliquidInfoClient {
           category: resolveRealTradingSymbolCategory(providerMarketId, categoryMap),
           assetId: calculateHyperliquidAssetId(universeIndex, perpDexIndex),
           universeIndex,
-          universeItem: item,
+          universeItem: { ...item, szDecimals },
           context,
         }];
       });
@@ -354,7 +366,7 @@ export class HyperliquidInfoClient {
       throw new Error("Hyperliquid metaAndAssetCtxs returned an invalid payload.");
     }
     return {
-      universe: payload[0].universe as HyperliquidUniverseItem[],
+      universe: payload[0].universe as HyperliquidUniverseItemPayload[],
       contexts: payload[1] as HyperliquidAssetContext[],
     };
   }
@@ -832,7 +844,10 @@ function normalizePositionMarginMode(value: unknown) {
   return null;
 }
 
-function buildMarketContextsByCoin(universe: HyperliquidUniverseItem[], contexts: HyperliquidAssetContext[]) {
+function buildMarketContextsByCoin(
+  universe: Array<Pick<HyperliquidUniverseItemPayload, "name">>,
+  contexts: HyperliquidAssetContext[],
+) {
   const map = new Map<string, HyperliquidAssetContext>();
   universe.forEach((item, index) => {
     const coin = String(item.name ?? "").trim();
@@ -847,12 +862,6 @@ function buildMarketContextsByCoin(universe: HyperliquidUniverseItem[], contexts
 
 function getMarketContextForCoin(marketContextsByCoin: Map<string, HyperliquidAssetContext>, coin: string) {
   return marketContextsByCoin.get(coin) ?? marketContextsByCoin.get(coin.toUpperCase());
-}
-
-function inferPriceDecimals(context?: HyperliquidAssetContext) {
-  const values = [context?.markPx, context?.oraclePx, context?.midPx].filter((value): value is string => typeof value === "string");
-  const decimals = values.map((value) => value.split(".")[1]?.length ?? 0);
-  return Math.max(0, Math.min(8, ...decimals, 2));
 }
 
 function toNullableNumber(value: unknown) {
