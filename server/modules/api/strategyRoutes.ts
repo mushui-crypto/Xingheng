@@ -3,6 +3,7 @@ import type { IctStrategyRuntime } from "../strategy/runtime/IctStrategyRuntime"
 import { readForwardReport } from "../strategy/runtime/ForwardReportService";
 import type { ForwardPaperWorker } from "../strategy/runtime/ForwardPaperWorker";
 import { readHistoryReport } from "../strategy/runtime/HistoryReportService";
+import { readStrategyCandles } from "../strategy/runtime/StrategyCandlesService";
 
 export function registerStrategyRoutes(
   app: express.Express,
@@ -32,6 +33,15 @@ export function registerStrategyRoutes(
     }
     const result = await readHistoryReport(request.query);
     response.status(result.ok ? 200 : result.statusCode).json(result.report);
+  });
+
+  app.get("/api/strategy/ict/candles", async (request, response) => {
+    if (!request.user) {
+      response.status(401).json({ message: "用户未登录或登录已失效。" });
+      return;
+    }
+    const result = await readStrategyCandles(request.query);
+    response.status(result.statusCode).json(result.report);
   });
 
   app.get("/api/admin/strategy/health", async (_request, response) => {

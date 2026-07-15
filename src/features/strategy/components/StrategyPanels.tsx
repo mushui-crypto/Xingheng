@@ -231,7 +231,10 @@ function Detail({ label, tone = "", value }: { label: string; tone?: string; val
   return <div><dt>{label}</dt><dd className={tone}>{value}</dd></div>;
 }
 
-export function RecentStrategyTrades({ report }: { report: StrategyForwardReport | null }) {
+export function RecentStrategyTrades({ onLocateTrade, report }: {
+  report: StrategyForwardReport | null;
+  onLocateTrade: (trade: StrategyForwardTrade) => void;
+}) {
   const trades = report?.recentCompletedTrades ?? [];
   return (
     <section className="xh-strategy-panel" aria-labelledby="strategy-trades-title">
@@ -240,10 +243,11 @@ export function RecentStrategyTrades({ report }: { report: StrategyForwardReport
       </div>
       <div className="xh-strategy-table-wrap" role="region" aria-label="最近已完成交易表格，可横向滚动" tabIndex={0}>
         <table className="xh-strategy-table is-trades">
-          <thead><tr><th>退出时间</th><th>方向</th><th>入场</th><th>退出</th><th>净收益</th><th>R</th><th>结果</th></tr></thead>
+          <thead><tr><th>定位</th><th>退出时间</th><th>方向</th><th>入场</th><th>退出</th><th>净收益</th><th>R</th><th>结果</th></tr></thead>
           <tbody>
             {trades.length ? trades.map((trade) => (
               <tr key={`${trade.signalTime ?? "signal"}-${trade.entryTime ?? "entry"}-${trade.exitTime ?? "open"}`}>
+                <td><LocateTradeButton trade={trade} onLocateTrade={onLocateTrade} /></td>
                 <td>{formatStrategyDateTime(trade.exitTime)}</td>
                 <td className={trade.side === "long" ? "is-positive" : trade.side === "short" ? "is-negative" : ""}>{trade.side === "long" ? "做多" : trade.side === "short" ? "做空" : "—"}</td>
                 <td>{formatStrategyPrice(trade.entryPrice)}</td>
@@ -252,11 +256,24 @@ export function RecentStrategyTrades({ report }: { report: StrategyForwardReport
                 <td className={strategyNumberTone(trade.rMultiple)}>{formatAverageR(trade.rMultiple)}</td>
                 <td>{formatExitReason(trade.exitReason)}</td>
               </tr>
-            )) : <tr><td className="xh-strategy-table-empty" colSpan={7}>{report ? "当前已完成交易为 0" : "尚无交易报告"}</td></tr>}
+            )) : <tr><td className="xh-strategy-table-empty" colSpan={8}>{report ? "当前已完成交易为 0" : "尚无交易报告"}</td></tr>}
           </tbody>
         </table>
       </div>
     </section>
+  );
+}
+
+function LocateTradeButton({ onLocateTrade, trade }: { onLocateTrade: (trade: StrategyForwardTrade) => void; trade: StrategyForwardTrade }) {
+  return (
+    <button
+      type="button"
+      className="xh-strategy-locate-trade"
+      onClick={() => onLocateTrade(trade)}
+      aria-label={`在K线上定位${formatStrategyDateTime(trade.entryTime)}的交易`}
+    >
+      定位
+    </button>
   );
 }
 

@@ -112,3 +112,32 @@ export type StrategyHistoryQuery = {
   limit?: number;
   cursor?: string;
 };
+
+export type StrategyCandleInterval = "5m" | "15m" | "1h" | "4h";
+
+export type StrategyCandle = {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+};
+
+export type StrategyCandlesReport = {
+  source: "binance_usdm";
+  symbol: "BTCUSDT";
+  interval: StrategyCandleInterval;
+  status: "available" | "unavailable";
+  requestedRange: { from: string; to: string };
+  dataThrough: string | null;
+  candles: StrategyCandle[];
+  warnings: string[];
+};
+
+export type StrategyCandlesQuery = {
+  interval: StrategyCandleInterval;
+  from: string;
+  to: string;
+  limit?: number;
+};
