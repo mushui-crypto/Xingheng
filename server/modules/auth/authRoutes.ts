@@ -211,8 +211,17 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
   };
 }
 
+export const userAuthenticatedApiPrefixes = [
+  "/api/trading",
+  "/api/wallet",
+  "/api/real-trading",
+  "/api/strategy/ict/forward",
+  "/api/strategy/ict/history",
+  "/api/strategy/ict/candles",
+];
+
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
-  app.use(["/api/trading", "/api/wallet", "/api/real-trading", "/api/strategy/ict/forward", "/api/strategy/ict/history"], (request, response, next) => {
+  app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
     const user = users.authenticate(getUserBearerToken(request));
     if (!user) {
       response.status(401).json({ message: "用户未登录或登录已失效。" });

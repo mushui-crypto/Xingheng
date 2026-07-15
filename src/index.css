@@ -276,6 +276,124 @@ textarea {
     @apply mt-0 shrink-0 sm:text-right;
   }
 
+  .xh-strategy-trade-chart {
+    @apply overflow-hidden p-0;
+    scroll-margin-top: 76px;
+  }
+
+  .xh-strategy-chart-header {
+    @apply flex min-w-0 flex-col gap-4 border-b border-[#25282f] px-5 py-4 sm:flex-row sm:items-center sm:justify-between md:px-6;
+  }
+
+  .xh-strategy-chart-header h2 {
+    @apply text-[16px] font-semibold leading-6 text-[#f5f5f5];
+  }
+
+  .xh-strategy-chart-header p {
+    @apply mt-1 text-[12px] leading-5 text-[#8f99a5];
+  }
+
+  .xh-strategy-chart-intervals {
+    @apply flex h-9 shrink-0 items-stretch border border-[#343941] bg-[#08090b];
+  }
+
+  .xh-strategy-chart-intervals button {
+    @apply min-w-12 border-0 border-r border-[#343941] bg-transparent px-3 text-[13px] font-medium text-[#8f99a5] outline-none transition-colors last:border-r-0 hover:bg-white/[0.04] hover:text-[#f5f5f5] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/70;
+  }
+
+  .xh-strategy-chart-intervals button.is-active {
+    @apply bg-[#f5f5f5] text-black;
+  }
+
+  .xh-strategy-chart-ohlc {
+    @apply flex min-w-0 flex-wrap items-center gap-x-5 gap-y-1 border-b border-[#1d2026] bg-[#08090b] px-5 py-2 text-[12px] leading-5 tabular-nums text-[#7f8995] md:px-6;
+  }
+
+  .xh-strategy-chart-ohlc strong {
+    @apply ml-1 font-medium text-[#d9dde3];
+  }
+
+  .xh-strategy-chart-stage {
+    @apply relative min-w-0 bg-[#07090d];
+  }
+
+  .xh-strategy-chart-canvas {
+    @apply h-[420px] min-w-0 w-full;
+  }
+
+  .xh-strategy-chart-skeleton,
+  .xh-strategy-chart-state {
+    @apply absolute inset-0 z-10 flex items-center justify-center bg-[#07090d];
+  }
+
+  .xh-strategy-chart-skeleton {
+    @apply flex-col gap-4 px-6;
+  }
+
+  .xh-strategy-chart-skeleton span {
+    @apply block h-px w-full max-w-3xl animate-pulse bg-white/[0.08];
+  }
+
+  .xh-strategy-chart-skeleton span:nth-child(2) {
+    @apply max-w-xl;
+  }
+
+  .xh-strategy-chart-state {
+    @apply flex-col gap-3 px-5 text-center text-[13px] leading-5 text-[#8f99a5];
+  }
+
+  .xh-strategy-chart-state button {
+    @apply inline-flex h-9 items-center justify-center border border-[#4a515b] bg-transparent px-4 text-[13px] font-medium text-[#e7ebef] outline-none transition-colors hover:border-[#e7ebef] focus-visible:ring-1 focus-visible:ring-white/70;
+  }
+
+  .xh-strategy-chart-marker-status {
+    @apply border-y border-[#25282f] bg-[#08090b] px-5 py-2 text-[12px] leading-5 text-[#8f99a5] md:px-6;
+  }
+
+  .xh-strategy-marker-empty {
+    @apply min-h-16 px-5 py-5 text-[13px] leading-5 text-[#7f8995] md:px-6;
+  }
+
+  .xh-strategy-marker-detail {
+    @apply min-w-0 px-5 py-4 md:px-6;
+  }
+
+  .xh-strategy-marker-detail-title {
+    @apply flex min-w-0 items-center gap-3;
+  }
+
+  .xh-strategy-marker-detail-title strong {
+    @apply text-[14px] font-semibold text-[#f5f5f5];
+  }
+
+  .xh-strategy-marker-detail-title span {
+    @apply text-[12px] text-[#8f99a5];
+  }
+
+  .xh-strategy-marker-detail dl {
+    @apply mt-3 grid min-w-0 grid-cols-2 gap-x-6 md:grid-cols-3 xl:grid-cols-6;
+  }
+
+  .xh-strategy-marker-detail dl > div {
+    @apply min-w-0 border-t border-[#1d2026] py-3;
+  }
+
+  .xh-strategy-marker-detail dt {
+    @apply text-[12px] leading-5 text-[#7f8995];
+  }
+
+  .xh-strategy-marker-detail dd {
+    @apply mt-1 min-w-0 break-words text-[13px] font-medium leading-5 tabular-nums text-[#e7ebef];
+  }
+
+  .xh-strategy-marker-detail dd.is-positive {
+    @apply text-[#52d8ad];
+  }
+
+  .xh-strategy-marker-detail dd.is-negative {
+    @apply text-[#ff667f];
+  }
+
   .xh-strategy-progress-grid {
     @apply mt-5 grid gap-5 md:grid-cols-2;
   }
@@ -317,11 +435,11 @@ textarea {
   }
 
   .xh-strategy-table.is-trades {
-    min-width: 900px;
+    min-width: 980px;
   }
 
   .xh-strategy-table.is-history-trades {
-    min-width: 1680px;
+    min-width: 1760px;
   }
 
   .xh-strategy-table th {
@@ -348,6 +466,10 @@ textarea {
 
   .xh-strategy-table .xh-strategy-table-empty {
     @apply h-24 text-center text-[13px] text-[#7f8995];
+  }
+
+  .xh-strategy-locate-trade {
+    @apply inline-flex h-8 items-center justify-center border border-[#343941] bg-transparent px-3 text-[12px] font-medium text-[#c5ccd4] outline-none transition-colors hover:border-[#00C896] hover:text-[#64d9b7] focus-visible:border-[#00C896] focus-visible:ring-1 focus-visible:ring-[#00C896] active:bg-[#0d2b25];
   }
 
   .xh-strategy-range-options {
@@ -492,6 +614,81 @@ textarea {
 
   .xh-strategy-loading-panel {
     @apply h-44;
+  }
+
+  @media (max-width: 1023px) {
+    .xh-strategy-chart-header {
+      @apply items-start;
+    }
+
+    .xh-strategy-chart-canvas {
+      @apply h-[360px];
+    }
+
+    .xh-strategy-marker-detail dl {
+      @apply grid-cols-2;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .xh-strategy-trade-chart {
+      scroll-margin-top: 68px;
+    }
+
+    .xh-strategy-chart-header,
+    .xh-strategy-chart-ohlc,
+    .xh-strategy-chart-marker-status,
+    .xh-strategy-marker-empty,
+    .xh-strategy-marker-detail {
+      @apply px-4;
+    }
+
+    .xh-strategy-chart-header {
+      @apply gap-3;
+    }
+
+    .xh-strategy-chart-header > div:first-child,
+    .xh-strategy-chart-intervals {
+      @apply w-full;
+    }
+
+    .xh-strategy-chart-intervals button {
+      @apply min-w-0 flex-1 px-2;
+    }
+
+    .xh-strategy-chart-ohlc {
+      @apply grid grid-cols-3 gap-x-3 gap-y-1;
+    }
+
+    .xh-strategy-chart-ohlc span {
+      @apply min-w-0 truncate;
+    }
+
+    .xh-strategy-chart-ohlc span:first-child {
+      @apply col-span-3;
+    }
+
+    .xh-strategy-chart-canvas {
+      @apply h-[320px];
+    }
+
+    .xh-strategy-marker-detail-title {
+      @apply items-start justify-between;
+    }
+
+    .xh-strategy-marker-detail dl {
+      @apply grid-cols-1;
+    }
+  }
+
+  @media (pointer: coarse) {
+    .xh-strategy-chart-intervals {
+      @apply h-11;
+    }
+
+    .xh-strategy-locate-trade {
+      @apply h-11;
+    }
   }
 
   .xh-title {
