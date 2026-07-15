@@ -79,6 +79,33 @@ test("forward paper worker records sanitized failures and keeps previous report"
   assert.doesNotMatch(status.lastError ?? "", /secret-token/);
 });
 
+test("forward paper worker redacts filesystem paths from write failures", async () => {
+  const originalWarn = console.warn;
+  let loggedSummary = "";
+  console.warn = (...args: unknown[]) => {
+    loggedSummary = String(args.at(-1) ?? "");
+  };
+  const worker = new ForwardPaperWorker({
+    now: fixedNow,
+    loadCandles: async () => makeCandles(ROUTE_B_FORWARD_START - 900, 6),
+    writeReport: async () => {
+      throw new Error("EEXIST: file already exists, mkdir '/dev/null'; rename /tmp/a.tmp -> /tmp/a.json; source=file:///tmp/source.json");
+    },
+  });
+  try {
+    await worker.checkNow();
+    const error = worker.getStatus().lastError ?? "";
+    assert.equal(loggedSummary, error);
+    assert.match(error, /\[path\]/);
+    assert.doesNotMatch(error, /\/dev\/null/);
+    assert.doesNotMatch(error, /\/tmp\/a\.tmp/);
+    assert.doesNotMatch(error, /\/tmp\/a\.json/);
+    assert.doesNotMatch(error, /file:\/\//);
+  } finally {
+    console.warn = originalWarn;
+  }
+});
+
 test("atomicWriteJson writes recoverable JSON", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "xingheng-forward-atomic-"));
   try {

@@ -25,6 +25,38 @@ export type StrategyForwardTrade = {
   exitReason: string | null;
 };
 
+export type StrategyAssumptions = {
+  venue: "binance_usdm_btcusdt_perpetual";
+  symbol: "BTCUSDT";
+  leverageSelection: 100;
+  marginMode: "cross";
+  marginFraction: number;
+  effectiveNotionalEquityMultiple: 2;
+  onePositionAtATime: true;
+  fundingIgnored: true;
+  markPriceAndDynamicBracketIgnored: true;
+  automaticOrdersEnabled: false;
+};
+
+export type StrategyDataQuality = {
+  source: string;
+  interval: "5m";
+  candleCount: number;
+  missingBarCount: number;
+  updatedAt: string | null;
+};
+
+export type StrategyForwardWorker = {
+  enabled: boolean;
+  running: boolean;
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastCompletedCandleAt: string | null;
+  nextCheckAt: string | null;
+  consecutiveFailures: number;
+  lastError: string | null;
+};
+
 export type StrategyForwardReport = {
   routeId: string;
   status: "collecting" | "observation_gate_reached_pending_review" | "unavailable";
@@ -37,25 +69,8 @@ export type StrategyForwardReport = {
     mode: "either";
     reached: boolean;
   };
-  assumptions: {
-    venue: "binance_usdm_btcusdt_perpetual";
-    symbol: "BTCUSDT";
-    leverageSelection: 100;
-    marginMode: "cross";
-    marginFraction: number;
-    effectiveNotionalEquityMultiple: 2;
-    onePositionAtATime: true;
-    fundingIgnored: true;
-    markPriceAndDynamicBracketIgnored: true;
-    automaticOrdersEnabled: false;
-  };
-  dataQuality: {
-    source: string;
-    interval: "5m";
-    candleCount: number;
-    missingBarCount: number;
-    updatedAt: string | null;
-  };
+  assumptions: StrategyAssumptions;
+  dataQuality: StrategyDataQuality;
   metrics: StrategyForwardMetrics;
   diagnostics: {
     signals: number;
@@ -66,5 +81,34 @@ export type StrategyForwardReport = {
   };
   openPosition: StrategyForwardTrade | null;
   recentCompletedTrades: StrategyForwardTrade[];
+  worker?: StrategyForwardWorker;
   warnings: string[];
+};
+
+export type StrategyHistoryReport = {
+  routeId: string;
+  status: "available" | "unavailable";
+  requestedRange: { from: string | null; to: string | null };
+  availableRange: { from: string | null; to: string | null };
+  dataThrough: string | null;
+  attributionField: "entryTime";
+  dataQuality: StrategyDataQuality;
+  metrics: StrategyForwardMetrics;
+  completedTrades: StrategyForwardTrade[];
+  pagination: {
+    limit: number;
+    cursor: string | null;
+    nextCursor: string | null;
+    hasMore: boolean;
+    total: number;
+  };
+  assumptions: StrategyAssumptions;
+  warnings: string[];
+};
+
+export type StrategyHistoryQuery = {
+  from?: string;
+  to?: string;
+  limit?: number;
+  cursor?: string;
 };

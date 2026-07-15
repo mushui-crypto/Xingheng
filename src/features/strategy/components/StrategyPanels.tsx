@@ -87,6 +87,45 @@ export function ObservationProgress({ report }: { report: StrategyForwardReport 
   );
 }
 
+export function StrategyWorkerPanel({ report }: { report: StrategyForwardReport | null }) {
+  const worker = report?.worker;
+  const stale = Boolean(worker?.enabled && worker.lastCompletedCandleAt && Date.now() - Date.parse(worker.lastCompletedCandleAt) > 15 * 60 * 1000);
+  const failed = Boolean(worker?.consecutiveFailures || worker?.lastError);
+  const state = !worker
+    ? { label: "等待 Worker 状态", tone: "is-unavailable" }
+    : !worker.enabled
+      ? { label: "自动 Paper 已暂停", tone: "is-paused" }
+      : worker.running
+        ? { label: "自动 Paper 检查中", tone: "is-running" }
+        : failed
+          ? { label: "自动 Paper 更新失败", tone: "is-error" }
+          : stale
+            ? { label: "数据推进延迟", tone: "is-stale" }
+            : { label: "自动 Paper 运行中", tone: "is-healthy" };
+
+  return (
+    <section className="xh-strategy-panel xh-strategy-worker" aria-labelledby="strategy-worker-title">
+      <div className="xh-strategy-panel-header">
+        <div>
+          <h2 id="strategy-worker-title">自动 Paper 状态</h2>
+          <p>自动更新研究报告，不连接交易接口，不产生订单。</p>
+        </div>
+        <span className={`xh-strategy-worker-state ${state.tone}`} role="status" aria-live="polite">{state.label}</span>
+      </div>
+      <dl className="xh-strategy-detail-list">
+        <Detail label="最后成功更新" value={formatStrategyDateTime(worker?.lastSuccessAt)} />
+        <Detail label="数据推进至" value={formatStrategyDateTime(worker?.lastCompletedCandleAt)} />
+        <Detail label="最近检查" value={formatStrategyDateTime(worker?.lastAttemptAt)} />
+        <Detail label="下次检查" value={worker?.enabled ? formatStrategyDateTime(worker.nextCheckAt) : "—"} />
+        <Detail label="连续失败" value={worker ? `${worker.consecutiveFailures} 次` : "—"} tone={failed ? "is-negative" : ""} />
+        <Detail label="执行边界" value="Paper only · 自动订单关闭" />
+      </dl>
+      {worker?.lastError ? <p className="xh-strategy-worker-alert" role="alert">{worker.lastError}</p> : null}
+      {stale && !failed ? <p className="xh-strategy-worker-alert is-stale" role="status">最新 5m 已收盘K线超过 15 分钟未推进。</p> : null}
+    </section>
+  );
+}
+
 function ProgressMetric({ label, progress, value }: { label: string; progress: number; value: string }) {
   return (
     <div className="xh-strategy-progress-item">

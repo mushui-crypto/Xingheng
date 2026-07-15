@@ -161,6 +161,32 @@ textarea {
       "Segoe UI", sans-serif;
   }
 
+  .xh-strategy-forward-view,
+  .xh-strategy-history-view {
+    @apply min-w-0 space-y-4;
+  }
+
+  .xh-strategy-view-tabs {
+    @apply flex h-11 min-w-0 items-stretch border-b border-[#25282f] bg-black;
+  }
+
+  .xh-strategy-view-tabs button {
+    @apply relative min-w-28 border-0 bg-transparent px-5 text-[14px] font-medium text-[#8f99a5] outline-none transition-colors hover:text-[#e7ebef] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/70;
+  }
+
+  .xh-strategy-view-tabs button::after {
+    content: "";
+    @apply absolute inset-x-0 bottom-0 h-px bg-transparent;
+  }
+
+  .xh-strategy-view-tabs button.is-active {
+    @apply text-[#f5f5f5];
+  }
+
+  .xh-strategy-view-tabs button.is-active::after {
+    @apply bg-[#f5f5f5];
+  }
+
   .xh-strategy-header {
     @apply flex min-w-0 flex-col gap-5 border border-[#25282f] bg-black px-5 py-5 md:flex-row md:items-center md:justify-between md:px-6;
   }
@@ -195,6 +221,38 @@ textarea {
 
   .xh-strategy-statuses .is-unavailable {
     @apply border-[#4a515b] bg-[#12151a] text-[#c1c8d0];
+  }
+
+  .xh-strategy-worker-state,
+  .xh-strategy-backtest-label {
+    @apply inline-flex min-h-7 shrink-0 items-center border px-2.5 text-[12px] font-medium leading-none;
+  }
+
+  .xh-strategy-worker-state.is-healthy,
+  .xh-strategy-worker-state.is-running {
+    @apply border-[#2c7d69] bg-[#0d2b25] text-[#64d9b7];
+  }
+
+  .xh-strategy-worker-state.is-paused,
+  .xh-strategy-worker-state.is-unavailable,
+  .xh-strategy-backtest-label {
+    @apply border-[#3b414a] bg-[#11141a] text-[#aab3bd];
+  }
+
+  .xh-strategy-worker-state.is-stale {
+    @apply border-[#78652c] bg-[#261f0d] text-[#e2c76f];
+  }
+
+  .xh-strategy-worker-state.is-error {
+    @apply border-[#6b2a36] bg-[#271015] text-[#ff8b9e];
+  }
+
+  .xh-strategy-worker-alert {
+    @apply mt-4 border border-[#6b2a36] bg-[#271015] px-3 py-2 text-[12px] leading-5 text-[#ff9aaa];
+  }
+
+  .xh-strategy-worker-alert.is-stale {
+    @apply border-[#78652c] bg-[#261f0d] text-[#e2c76f];
   }
 
   .xh-strategy-panel {
@@ -262,6 +320,10 @@ textarea {
     min-width: 900px;
   }
 
+  .xh-strategy-table.is-history-trades {
+    min-width: 1680px;
+  }
+
   .xh-strategy-table th {
     @apply h-9 whitespace-nowrap border-b border-[#25282f] px-3 text-[12px] font-normal text-[#8f99a5];
   }
@@ -286,6 +348,65 @@ textarea {
 
   .xh-strategy-table .xh-strategy-table-empty {
     @apply h-24 text-center text-[13px] text-[#7f8995];
+  }
+
+  .xh-strategy-range-options {
+    @apply mt-4 flex min-w-0 flex-wrap gap-2;
+  }
+
+  .xh-strategy-range-options button,
+  .xh-strategy-pagination button,
+  .xh-strategy-custom-range button {
+    @apply inline-flex h-9 items-center justify-center border border-[#343941] bg-[#0b0d11] px-3 text-[13px] font-medium text-[#aab3bd] outline-none transition-colors hover:border-[#69727e] hover:text-[#f5f5f5] focus-visible:border-white/70 disabled:cursor-not-allowed disabled:opacity-35;
+  }
+
+  .xh-strategy-range-options button.is-active {
+    @apply border-[#f5f5f5] bg-[#f5f5f5] text-black;
+  }
+
+  .xh-strategy-custom-range {
+    @apply mt-4 grid min-w-0 gap-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] sm:items-end;
+  }
+
+  .xh-strategy-custom-range label {
+    @apply grid min-w-0 gap-1.5 text-[12px] text-[#8f99a5];
+  }
+
+  .xh-strategy-custom-range input {
+    @apply h-10 min-w-0 w-full border border-[#343941] bg-[#08090b] px-3 text-[14px] text-[#e7ebef] outline-none focus:border-white/70;
+    color-scheme: dark;
+  }
+
+  .xh-strategy-custom-range button {
+    @apply h-10 text-[#f5f5f5];
+  }
+
+  .xh-strategy-custom-range p {
+    @apply text-[12px] leading-5 text-[#ff8b9e] sm:col-span-3;
+  }
+
+  .xh-strategy-range-warning {
+    @apply mt-4 border border-[#78652c] bg-[#261f0d] px-3 py-2 text-[12px] leading-5 text-[#e2c76f];
+  }
+
+  .xh-strategy-assumptions {
+    @apply mt-4 border-t border-[#25282f] pt-4;
+  }
+
+  .xh-strategy-assumptions summary {
+    @apply cursor-pointer text-[13px] font-medium text-[#c5ccd4] outline-none hover:text-white focus-visible:text-white;
+  }
+
+  .xh-strategy-assumptions > div {
+    @apply mt-3 flex flex-wrap gap-x-6 gap-y-2 text-[12px] leading-5 text-[#8f99a5];
+  }
+
+  .xh-strategy-pagination {
+    @apply mt-4 flex min-w-0 flex-col gap-3 border-t border-[#25282f] pt-4 text-[12px] text-[#8f99a5] sm:flex-row sm:items-center sm:justify-between;
+  }
+
+  .xh-strategy-pagination > div {
+    @apply flex gap-2;
   }
 
   .xh-strategy-config-grid {

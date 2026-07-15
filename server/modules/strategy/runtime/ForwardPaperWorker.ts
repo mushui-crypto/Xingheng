@@ -154,6 +154,10 @@ function sanitizeWorkerError(error: unknown) {
   const message = error instanceof Error ? error.message : String(error);
   return message
     .replace(/https?:\/\/\S+/g, "[url]")
+    .replace(/file:\/\/[^\s'")\]}<>]+/g, "[path]")
+    .replace(/(['"])(?:[A-Za-z]:\\|\/|\.{1,2}\/|~\/)[^'"]+\1/g, "$1[path]$1")
+    .replace(/(^|[\s([{,:>])([A-Za-z]:\\[^\s'")\]}<>]+)/g, "$1[path]")
+    .replace(/(^|[\s([{,:>])((?:\/|\.{1,2}\/|~\/)[^\s'")\]}<>]+)/g, "$1[path]")
     .replace(/[A-Za-z0-9+/=_-]{32,}/g, "[redacted]")
     .slice(0, 240);
 }
