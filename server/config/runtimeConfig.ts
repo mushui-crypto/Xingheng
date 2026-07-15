@@ -176,4 +176,10 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (!isAddress(tokenAddress) || /^0x0{40}$/i.test(tokenAddress)) {
     throw new Error("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零的测试网合约地址。");
   }
+  if (process.env.STRATEGY_EMAIL_ALERTS_ENABLED === "true") {
+    const recipient = process.env.STRATEGY_ALERT_EMAIL_TO?.trim() ?? "";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipient) || recipient.endsWith("@example.invalid")) {
+      throw new Error("STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例的告警收件邮箱。");
+    }
+  }
 }

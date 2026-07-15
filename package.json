@@ -26,6 +26,8 @@
     "research:ict:leverage100x": "tsx scripts/backtest-ict-leverage-route.ts",
     "research:ict:forward": "tsx scripts/forward-ict-binance.ts",
     "research:ict:history": "tsx scripts/generate-ict-history-report.ts",
+    "strategy:history:check": "node scripts/check-strategy-history-report.mjs",
+    "research:ict:route-a": "tsx scripts/research-ict-route-a-trend-pullback.ts",
     "verify:hyperliquid-testnet-precision": "tsx scripts/verify-hyperliquid-testnet-precision.ts"
   },
   "dependencies": {

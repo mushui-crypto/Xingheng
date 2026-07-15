@@ -12,6 +12,12 @@ const spaResponse = await fetch(`${baseUrl}/__deployment_smoke_route__`);
 if (!spaResponse.ok || !(spaResponse.headers.get("content-type") ?? "").includes("text/html")) {
   throw new Error("SPA fallback check failed");
 }
+for (const route of ["/app/demo", "/app/trade"]) {
+  const response = await fetch(`${baseUrl}${route}`);
+  if (!response.ok || !(response.headers.get("content-type") ?? "").includes("text/html")) {
+    throw new Error(`${route} check failed`);
+  }
+}
 
 const wsUrl = `${baseUrl.replace(/^http/, "ws")}/ws`;
 await new Promise((resolve, reject) => {

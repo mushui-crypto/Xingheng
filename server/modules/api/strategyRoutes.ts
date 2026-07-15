@@ -33,4 +33,18 @@ export function registerStrategyRoutes(
     const result = await readHistoryReport(request.query);
     response.status(result.ok ? 200 : result.statusCode).json(result.report);
   });
+
+  app.get("/api/admin/strategy/health", async (_request, response) => {
+    const forward = await readForwardReport();
+    const worker = await options.forwardPaperWorker?.getHealth(forward.ok);
+    response.json({
+      forwardReport: {
+        readable: forward.ok,
+        status: forward.report.status,
+        through: forward.report.through,
+        warnings: forward.report.warnings,
+      },
+      worker,
+    });
+  });
 }

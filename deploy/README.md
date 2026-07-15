@@ -8,7 +8,8 @@
 
 要求：安装 Docker Engine 与 Docker Compose plugin；域名 A/AAAA 记录已指向服务器，
 并开放入站 TCP 80/443 和 UDP 443。服务器出站网络必须能访问
-`api.hyperliquid.xyz:443`（HTTPS/WSS）及配置的 BSC Testnet RPC；若云厂商或节点区域
+`api.hyperliquid.xyz:443`（HTTPS/WSS）、`fapi.binance.com:443`（策略 Paper 前向
+公开K线）、`data.binance.vision:443`（仅手工历史报告生成）及配置的 BSC Testnet RPC；若云厂商或节点区域
 限制上述连接，API 会启动失败，应先更换可访问的节点或网络，不应绕过行情就绪检查。
 
 ```bash
@@ -27,6 +28,78 @@ Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由
 内部网络访问。`/api/*` 和 `/ws` 会先反代到 API，其余路径由静态前端处理；不存在
 的路径回退到 `index.html`。Web 容器只接收 `DOMAIN`；管理员密码、私钥和助记词
 仅进入 API 容器。所有手工 Compose 命令都必须带 `--env-file .env.production`。
+
+## 策略 Paper 运维
+
+策略模块只做 Binance Route B Paper 前向验证与历史回测只读展示，不接 Binance 交易
+API、不读取交易所 API key、不下单，`automaticOrdersEnabled` 固定为 `false`。
+
+生产 Compose 使用独立 `strategy_data` named volume，和 SQLite 的 `sqlite_data` 分离：
+
+```bash
+STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json
+STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json
+STRATEGY_FORWARD_WORKER_ENABLED=true
+STRATEGY_FORWARD_WORKER_POLL_MS=300000
+```
+
+前向 Paper Worker 启动后立即检查一次；之后默认每 5 分钟轻量查询最新已收盘 5m K 线。
+只有 closed candle 推进时，才下载完整前向区间并重算报告。Binance 出网失败、限频、
+数据缺口或报告写入失败不会让 API 退出，也不会让 `/api/health` 变为失败；前端只读接口会
+继续返回上一份有效报告和脱敏后的 worker failure 状态。策略失败不得影响 `/app/demo`、
+`/app/trade` 或 SQLite 数据。
+
+后台运维状态：
+
+```http
+GET /api/admin/strategy/health
+```
+
+该接口走现有后台登录保护，只返回脱敏状态：worker enabled/running/lastAttemptAt/
+lastSuccessAt/lastCompletedCandleAt/nextCheckAt/consecutiveFailures/lastError、报告可读性、
+freshness 状态与告警条件。不要把本地路径、SMTP 密钥或外部 token 暴露到接口。
+
+告警条件：连续失败 `>=3`、启用后超过宽限期仍无首次成功、最近 closed candle 超过 15 分钟
+未推进、前向报告不可读。
+
+本轮外部告警先使用 SMTP/Resend 邮件，默认关闭：
+
+```bash
+STRATEGY_EMAIL_ALERTS_ENABLED=false
+STRATEGY_ALERT_EMAIL_TO=ops@example.invalid
+STRATEGY_ALERT_COOLDOWN_MS=900000
+```
+
+生产启用时由项目管理在服务器 `.env.production` 写入实际收件邮箱；业务代码不硬编码个人
+邮箱。邮件发送失败只写脱敏结构化日志，不影响 Worker、API health 或前向报告。其他外部
+告警渠道后续再处理，本轮未实现、未配置。
+
+历史回测报告需要手工一次性生成，不在 Docker build、API 启动或 HTTP 请求中执行：
+
+```bash
+docker compose --env-file .env.production --profile strategy-tools build strategy-history
+docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history
+docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
+```
+
+生成脚本从 Binance Vision 下载官方历史归档、校验 checksum、拒绝 5m 缺口，并用临时文件
++ rename 原子覆盖 `route-b-history.json`。失败时旧报告保留；若旧报告仍可读，线上页面继续
+展示旧数据。历史报告可重建，日常备份可把 `strategy_data` 作为独立 JSON 数据卷备份；
+不要把它纳入 SQLite `.backup` / restore 流程，也不要在恢复 SQLite 时覆盖策略 JSON。
+
+部署或故障 smoke 建议：
+
+```bash
+docker compose --env-file .env.production ps
+docker compose --env-file .env.production logs --tail=200 api
+curl -fsS "https://你的域名/api/health"
+curl -fsS "https://你的域名/app/demo" >/dev/null
+curl -fsS "https://你的域名/app/trade" >/dev/null
+```
+
+如果 Binance 暂时不可达，预期是 API health 仍为 200，`/app/demo` 与 `/app/trade` 不受影响，
+`/api/strategy/ict/forward` 返回旧报告和安全的 worker failure；不要因此自动重启或恢复
+SQLite。
 
 ## 邮件服务配置
 
@@ -123,7 +196,7 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
   提供 20 秒退出窗口。
 - API 健康检查失败时 Web 不会首次启动，但已运行的 Caddy 不等同于业务健康；
   运维监控应直接检查 `https://域名/api/health`。
-- 证书、数据库和备份分别使用 `caddy_data`、`sqlite_data`、`sqlite_backups`
+- 证书、数据库、策略报告和备份分别使用 `caddy_data`、`sqlite_data`、`strategy_data`、`sqlite_backups`
   named volume。删除卷会删除对应持久数据，日常升级不得使用
   `docker compose --env-file .env.production down -v`。
 - 私钥、助记词和管理员密码只放权限受限的服务器 `.env.production` 或外部密钥系统，

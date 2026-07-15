@@ -10,11 +10,18 @@ type VerificationMailInput = {
   resetLink?: string;
 };
 
+type StrategyAlertMailInput = {
+  to: string;
+  subject: string;
+  title: string;
+  bodyLines: string[];
+};
+
 export class EmailService {
   private transporter: nodemailer.Transporter | null;
 
-  constructor(private config: RuntimeConfig) {
-    this.transporter = config.smtp.configured
+  constructor(private config: RuntimeConfig, transporter?: nodemailer.Transporter | null) {
+    this.transporter = transporter !== undefined ? transporter : config.smtp.configured
       ? nodemailer.createTransport({
           host: config.smtp.host,
           port: config.smtp.port,
@@ -46,6 +53,29 @@ export class EmailService {
 
     const mail = renderVerificationMail(input);
 
+    await this.transporter.sendMail({
+      from: this.config.smtp.from,
+      to: input.to,
+      subject: mail.subject,
+      text: mail.text,
+      html: mail.html,
+    });
+  }
+
+  async sendStrategyAlertMail(input: StrategyAlertMailInput) {
+    if (!this.transporter) {
+      if (this.config.isProduction) {
+        throw new Error("邮件服务尚未配置，请联系管理员。");
+      }
+      console.info(`[email:dev] strategy-alert to=${input.to} subject=${input.subject}`);
+      return;
+    }
+    const mail = createMailContent({
+      subject: input.subject,
+      title: input.title,
+      lead: input.bodyLines[0] ?? input.title,
+      bodyLines: input.bodyLines.slice(1),
+    });
     await this.transporter.sendMail({
       from: this.config.smtp.from,
       to: input.to,

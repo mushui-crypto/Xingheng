@@ -237,6 +237,22 @@ export async function loadBinanceFuturesClosedKlines(options: BinanceKlineLoader
   return normalizeCandles(candles);
 }
 
+export async function loadLatestBinanceFuturesClosedKline(options: { now: number; fetchFn?: typeof fetch }) {
+  const fetchFn = options.fetchFn ?? fetch;
+  const url = new URL("https://fapi.binance.com/fapi/v1/klines");
+  url.searchParams.set("symbol", ROUTE_B_SYMBOL);
+  url.searchParams.set("interval", ROUTE_B_INTERVAL);
+  url.searchParams.set("limit", "3");
+  const response = await fetchFn(url, { signal: AbortSignal.timeout(15_000) });
+  if (!response.ok) throw new Error(`Binance latest kline request failed: ${response.status}.`);
+  const rows = await response.json() as unknown[][];
+  const closed = rows
+    .map(klineRowToCandle)
+    .filter((candle): candle is Candle => Boolean(candle) && candle!.time + ROUTE_B_INTERVAL_SECONDS <= options.now)
+    .sort((left, right) => left.time - right.time);
+  return closed.at(-1) ?? null;
+}
+
 export async function atomicWriteJson(filePath: string, value: unknown) {
   const resolved = path.resolve(filePath);
   await mkdir(path.dirname(resolved), { recursive: true });

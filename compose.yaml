@@ -11,6 +11,9 @@ services:
       NODE_ENV: production
       API_PORT: "8787"
       TRADING_DB_PATH: /app/data/trading.sqlite
+      STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
+      STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
+      STRATEGY_FORWARD_WORKER_POLL_MS: "300000"
       TRUST_PROXY: "true"
       BSC_TESTNET_CHAIN_ID: "97"
     init: true
@@ -18,6 +21,7 @@ services:
     stop_grace_period: 20s
     volumes:
       - sqlite_data:/app/data
+      - strategy_data:/app/strategy-data
       - sqlite_backups:/backups
     healthcheck:
       test:
@@ -53,8 +57,27 @@ services:
       - caddy_data:/data
       - caddy_config:/config
 
+  strategy-history:
+    profiles:
+      - strategy-tools
+    build:
+      context: .
+      target: strategy-tools
+    environment:
+      NODE_ENV: production
+      STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
+      STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
+    volumes:
+      - strategy_data:/app/strategy-data
+    restart: "no"
+    command:
+      - npm
+      - run
+      - research:ict:history
+
 volumes:
   sqlite_data:
+  strategy_data:
   sqlite_backups:
   caddy_data:
   caddy_config:

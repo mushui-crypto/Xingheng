@@ -37,18 +37,35 @@ npm run research:ict:history
 不应提交 Git，不应放入会随镜像重建丢失的临时仓库根目录文件。
 
 服务端默认启动自动 Paper Worker：启动后立即检查一次 Binance USD-M `BTCUSDT`
-公开 `5m` 已收盘K线，之后按短周期轮询；只有最新已收盘K线推进时才重新计算并
-原子写入前向报告。Worker 不读取 Binance API key，不接交易 API，不产生真实订单；
+公开 `5m` 已收盘K线，之后按默认 5 分钟轮询；轮询先轻量读取最新 closed candle，
+只有最新已收盘K线推进时才下载完整前向区间、重新计算并原子写入前向报告。
+Worker 不读取 Binance API key，不接交易 API，不产生真实订单；
 失败时保留上一份有效报告，并在只读接口返回 `worker` 状态。可配置项：
 
 - `STRATEGY_FORWARD_WORKER_ENABLED=false`：运维显式关闭自动 Paper Worker。
-- `STRATEGY_FORWARD_WORKER_POLL_MS`：轮询间隔，默认 `30000`，最小 `5000`，最大 `300000`。
+- `STRATEGY_FORWARD_WORKER_POLL_MS`：轮询间隔，默认 `300000`，最小 `5000`，最大 `300000`。
 - `STRATEGY_FORWARD_REPORT_PATH`：前向 Paper 报告持久化路径。
+- `STRATEGY_EMAIL_ALERTS_ENABLED=false`：策略邮件告警默认关闭。
+- `STRATEGY_ALERT_EMAIL_TO`：策略告警收件邮箱，生产由项目管理配置，业务代码不硬编码个人邮箱。
 
 历史回测只读报告由 `npm run research:ict:history` 预生成，默认写入
 `server/data/strategy/research-ict-route-b-history.json`；生产可通过
 `STRATEGY_HISTORY_REPORT_PATH` 指向持久化卷。用户端接口只读取该报告，不在请求中
 下载 Binance Vision 或重跑 2024 至今的回测。
+
+生产 Compose 固定使用独立 `strategy_data` named volume，默认路径为：
+
+```bash
+STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json
+STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json
+```
+
+历史报告生产生成使用一次性 tools service，不在 API runtime 中执行：
+
+```bash
+docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history
+docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
+```
 
 ## 数据限制
 
@@ -153,7 +170,7 @@ V1 的预设验证门槛要求 `PF >= 1.15` 且 `平均 R >= 0.10`。验证集�
 
 止损消融结论：移除盘中硬止损会放大尾部风险；开发集无止损版本出现约 `-14.18R` 单笔亏损，结果显著弱于硬止损版本，因此冻结候选保留硬止损。
 
-已拒绝的增频方案：ETHUSDT 跨资产扩展在 2024、2025、2026H1 全部亏损；MSS/FVG 延续 setup 没有形成稳定优势；把波动阈值降至 `1.18` 虽能增加 2024–2025 机会，但截至 2026-07-13 的 PF 降至 `1.036`，因此未进入当前影子候选。V3 的强制时段平仓结果仍保留为历史基线，不覆盖为 V5 结果。
+已拒绝的增频方案：ETHUSDT 跨资产扩展在 2024、2025、2026H1 全部亏损；MSS/FVG 延续 setup 没有形成稳定优势；把波动阈值降至 `1.18` 虽能增加 2024–2025 机会，但截至 2026-07-13 的 PF 降至 `1.036`，因此未进入当前影子候选。Route A 预注册的独立趋势回撤 V7 虽把2024–2025组合交易数从159笔增至278笔，但组合PF降至1.107、最大回撤升至5.03%，2025组合转亏；V7独立多空两侧均亏损，已按 `STRATEGY_ROUTE_A_RESEARCH.md` 否决，不修改V5或Route B。V3 的强制时段平仓结果仍保留为历史基线，不覆盖为 V5 结果。
 
 ## 明确边界
 

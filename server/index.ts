@@ -27,6 +27,7 @@ import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
 import { ForwardPaperWorker } from "./modules/strategy/runtime/ForwardPaperWorker";
 import { IctStrategyRuntime } from "./modules/strategy/runtime/IctStrategyRuntime";
+import { StrategyEmailNotifier } from "./modules/strategy/runtime/StrategyEmailNotifier";
 import { OnchainWalletService } from "./wallet/OnchainWalletService";
 import { WalletService } from "./wallet/WalletService";
 import type { MarketSymbol, MarketTick } from "./types";
@@ -52,8 +53,6 @@ const strategyRuntime = new IctStrategyRuntime(market, klineStore);
 await strategyRuntime.start().catch((error) => {
   console.error("[strategy] ICT shadow runtime failed to start", error instanceof Error ? error.message : error);
 });
-const forwardPaperWorker = new ForwardPaperWorker();
-forwardPaperWorker.start();
 const tradingStore = new TradingStore();
 
 const tradingMarket = {
@@ -75,6 +74,9 @@ const trading = new TradingService(tradingMarket, tradingStore);
 const onchainWallet = new OnchainWalletService(tradingStore);
 const wallet = new WalletService(tradingStore, trading, onchainWallet);
 const email = new EmailService(config);
+const strategyNotifier = new StrategyEmailNotifier({ email });
+const forwardPaperWorker = new ForwardPaperWorker({ notifier: strategyNotifier });
+forwardPaperWorker.start();
 const users = new UserService(tradingStore, email, config.appPublicUrl);
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);

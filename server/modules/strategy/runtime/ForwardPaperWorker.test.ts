@@ -12,6 +12,7 @@ test("forward paper worker starts with an immediate run and keeps automatic orde
   let lastReport: any = null;
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => makeCandles(ROUTE_B_FORWARD_START - 900, 6),
     writeReport: async (report) => {
       writes += 1;
@@ -33,6 +34,7 @@ test("forward paper worker does not rewrite when closed candle has not advanced"
   const candles = makeCandles(ROUTE_B_FORWARD_START - 900, 6);
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => candles,
     writeReport: async () => { writes += 1; },
   });
@@ -46,6 +48,7 @@ test("forward paper worker is single-flight", async () => {
   const holder: { release?: () => void } = {};
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => {
       loadCount += 1;
       await new Promise<void>((resolve) => { holder.release = resolve; });
@@ -55,6 +58,7 @@ test("forward paper worker is single-flight", async () => {
   });
   const first = worker.checkNow();
   const second = worker.checkNow();
+  await Promise.resolve();
   assert.equal(loadCount, 1);
   assert.ok(holder.release);
   holder.release();
@@ -66,6 +70,7 @@ test("forward paper worker records sanitized failures and keeps previous report"
   let writes = 0;
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => {
       throw new Error("fetch failed https://example.com/secret-token-abcdefghijklmnopqrstuvwxyz123456");
     },
@@ -87,6 +92,7 @@ test("forward paper worker redacts filesystem paths from write failures", async 
   };
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => makeCandles(ROUTE_B_FORWARD_START - 900, 6),
     writeReport: async () => {
       throw new Error("EEXIST: file already exists, mkdir '/dev/null'; rename /tmp/a.tmp -> /tmp/a.json; source=file:///tmp/source.json");
@@ -95,7 +101,7 @@ test("forward paper worker redacts filesystem paths from write failures", async 
   try {
     await worker.checkNow();
     const error = worker.getStatus().lastError ?? "";
-    assert.equal(loggedSummary, error);
+    assert.equal(JSON.parse(loggedSummary).error, error);
     assert.match(error, /\[path\]/);
     assert.doesNotMatch(error, /\/dev\/null/);
     assert.doesNotMatch(error, /\/tmp\/a\.tmp/);
@@ -121,6 +127,7 @@ test("forward paper worker stop clears timer", () => {
   let cleared = false;
   const worker = new ForwardPaperWorker({
     now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
     loadCandles: async () => makeCandles(ROUTE_B_FORWARD_START - 900, 6),
     writeReport: async () => undefined,
     setTimer: (() => 7 as any),
@@ -132,8 +139,53 @@ test("forward paper worker stop clears timer", () => {
   assert.equal(worker.getStatus().nextCheckAt, null);
 });
 
+test("forward paper worker skips full history download when latest closed candle has not advanced", async () => {
+  let fullHistoryLoads = 0;
+  let writes = 0;
+  const worker = new ForwardPaperWorker({
+    now: fixedNow,
+    loadLatestClosedCandle: async () => latestCandle(),
+    loadCandles: async () => {
+      fullHistoryLoads += 1;
+      return makeCandles(ROUTE_B_FORWARD_START - 900, 6);
+    },
+    writeReport: async () => { writes += 1; },
+  });
+  await worker.checkNow();
+  await worker.checkNow();
+  await worker.checkNow();
+  assert.equal(fullHistoryLoads, 1);
+  assert.equal(writes, 1);
+});
+
+test("forward paper worker health exposes alert conditions without throwing", async () => {
+  let now = (ROUTE_B_FORWARD_START + 2_000) * 1000;
+  const worker = new ForwardPaperWorker({
+    now: () => now,
+    loadLatestClosedCandle: async () => latestCandle(),
+    loadCandles: async () => {
+      throw new Error("network failed");
+    },
+    firstSuccessGraceMs: 1,
+    staleAfterMs: 15 * 60 * 1000,
+  });
+  await worker.checkNow();
+  await worker.checkNow();
+  await worker.checkNow();
+  now += 2_000;
+  const health = await worker.getHealth(false);
+  assert.equal(health.freshness.status, "report_unreadable");
+  assert.ok(health.alerts.some((alert) => alert.code === "consecutive_failures"));
+  assert.ok(health.alerts.some((alert) => alert.code === "no_first_success"));
+  assert.ok(health.alerts.some((alert) => alert.code === "report_unreadable"));
+});
+
 function fixedNow() {
   return (ROUTE_B_FORWARD_START + 1_800) * 1000;
+}
+
+function latestCandle() {
+  return makeCandles(ROUTE_B_FORWARD_START - 900, 6).at(-1)!;
 }
 
 function makeCandles(start: number, count: number): Candle[] {

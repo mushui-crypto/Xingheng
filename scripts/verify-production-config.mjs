@@ -23,6 +23,8 @@ const baseEnvironment = {
   BSC_TESTNET_CHAIN_ID: "97",
   BSC_TESTNET_RPC_URL: "https://rpc.test.invalid",
   BSC_TESTNET_TOKEN_ADDRESS: "0x1111111111111111111111111111111111111111",
+  STRATEGY_EMAIL_ALERTS_ENABLED: "false",
+  STRATEGY_ALERT_EMAIL_TO: "ops@stellarx.test",
 };
 
 const cases = [
@@ -38,6 +40,7 @@ const cases = [
   ["non-http RPC", { BSC_TESTNET_RPC_URL: "ftp://rpc.example.net" }, "BSC_TESTNET_RPC_URL 必须是 HTTP(S)"],
   ["placeholder token address", { BSC_TESTNET_TOKEN_ADDRESS: "REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS" }, "BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零"],
   ["zero token address", { BSC_TESTNET_TOKEN_ADDRESS: "0x0000000000000000000000000000000000000000" }, "BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零"],
+  ["enabled strategy email alert without recipient", { STRATEGY_EMAIL_ALERTS_ENABLED: "true", STRATEGY_ALERT_EMAIL_TO: "ops@example.invalid" }, "STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例"],
 ];
 
 for (const [name, overrides, expected] of cases) {
