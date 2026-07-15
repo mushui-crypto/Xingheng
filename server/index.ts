@@ -8,6 +8,7 @@ import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { registerRealTradingRoutes } from "./modules/api/realTradingRoutes";
+import { registerStrategyRoutes } from "./modules/api/strategyRoutes";
 import { registerUserTradingRoutes } from "./modules/api/userTradingRoutes";
 import { registerUserWalletRoutes } from "./modules/api/userWalletRoutes";
 import { EmailService } from "./modules/email/EmailService";
@@ -24,6 +25,8 @@ import {
 } from "./modules/security/httpSecurity";
 import { TradingService } from "./market/TradingService";
 import { TradingStore } from "./storage/TradingStore";
+import { ForwardPaperWorker } from "./modules/strategy/runtime/ForwardPaperWorker";
+import { IctStrategyRuntime } from "./modules/strategy/runtime/IctStrategyRuntime";
 import { OnchainWalletService } from "./wallet/OnchainWalletService";
 import { WalletService } from "./wallet/WalletService";
 import type { MarketSymbol, MarketTick } from "./types";
@@ -45,6 +48,12 @@ app.use(express.json({ limit: "64kb" }));
 const klineStore = new KlineStore();
 const market = new HyperliquidMarketService(klineStore);
 await market.start();
+const strategyRuntime = new IctStrategyRuntime(market, klineStore);
+await strategyRuntime.start().catch((error) => {
+  console.error("[strategy] ICT shadow runtime failed to start", error instanceof Error ? error.message : error);
+});
+const forwardPaperWorker = new ForwardPaperWorker();
+forwardPaperWorker.start();
 const tradingStore = new TradingStore();
 
 const tradingMarket = {
@@ -75,6 +84,7 @@ registerAuthRoutes({ app, users, wallet, tradingStore, config });
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
+registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker });
 registerRealTradingRoutes({ app, info: realTradingInfo, exchange: realTradingExchange });
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });
@@ -207,6 +217,8 @@ async function shutdown(signal: string) {
   forceExit.unref();
 
   try {
+    forwardPaperWorker.stop();
+    strategyRuntime.stop();
     await market.stop();
     for (const client of socketHub.clients) client.terminate();
     await new Promise<void>((resolve, reject) => {

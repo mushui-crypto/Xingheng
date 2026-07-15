@@ -14,6 +14,18 @@
     "preview": "vite preview",
     "start:api": "node dist-server/index.js",
     "test:hyperliquid-precision": "tsx --test server/modules/hyperliquid/hyperliquidPrecision.test.ts",
+    "test:strategy": "tsx --test server/modules/strategy/**/*.test.ts",
+    "backtest:ict:btc": "tsx scripts/backtest-ict-btc.ts",
+    "backtest:ict:binance": "tsx scripts/backtest-ict-binance.ts",
+    "research:ict:grid": "tsx scripts/research-ict-grid.ts",
+    "research:ict:combine": "tsx scripts/combine-ict-research-years.ts",
+    "research:ict:validate": "tsx scripts/validate-ict-candidate.ts",
+    "research:ict:validate:v2": "tsx scripts/validate-ict-candidate-v2.ts",
+    "backtest:ict:v4:ytd": "tsx scripts/backtest-ict-v4-ytd.ts 2026-07-13 v4",
+    "backtest:ict:ytd": "tsx scripts/backtest-ict-v4-ytd.ts",
+    "research:ict:leverage100x": "tsx scripts/backtest-ict-leverage-route.ts",
+    "research:ict:forward": "tsx scripts/forward-ict-binance.ts",
+    "research:ict:history": "tsx scripts/generate-ict-history-report.ts",
     "verify:hyperliquid-testnet-precision": "tsx scripts/verify-hyperliquid-testnet-precision.ts"
   },
   "dependencies": {

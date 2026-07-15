@@ -11,6 +11,10 @@ dist-server/
 
 .vite/
 coverage/
+.cache/
+backtest-*.json
+research-*.json
+server/data/strategy/*.json
 
 server/data/candles.json
 server/data/trading.sqlite*
