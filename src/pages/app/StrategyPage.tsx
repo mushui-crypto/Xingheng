@@ -17,6 +17,7 @@ import {
   type StrategyHistoryRange,
   type StrategyView,
 } from "../../features/strategy/components/StrategyHistoryPanels";
+import { StrategyTradeChart } from "../../features/strategy/components/StrategyTradeChart";
 import type { StrategyForwardReport, StrategyHistoryQuery } from "../../features/strategy/model/types";
 import {
   initialStrategyHistoryRequestState,
@@ -47,6 +48,11 @@ export function StrategyPage() {
   const [customFrom, setCustomFrom] = useState("2024-01-01");
   const [customTo, setCustomTo] = useState("2026-07-13");
   const [customError, setCustomError] = useState("");
+  const [chartFocus, setChartFocus] = useState<{
+    view: StrategyView;
+    trade: NonNullable<StrategyForwardReport["openPosition"]>;
+    revision: number;
+  } | null>(null);
 
   useEffect(() => {
     let controller: AbortController | null = null;
@@ -107,11 +113,24 @@ export function StrategyPage() {
   }, [activeView, historyCursor, historyQuery.from, historyQuery.to]);
 
   const availableReport = report?.status === "unavailable" ? null : report;
+  const availableHistoryReport = historyRequest.report?.status === "available" ? historyRequest.report : null;
+
+  const handleViewChange = (view: StrategyView) => {
+    setActiveView(view);
+    setChartFocus(null);
+  };
+
+  const handleLocateTrade = (view: StrategyView, trade: NonNullable<StrategyForwardReport["openPosition"]>) => {
+    setChartFocus((current) => ({ view, trade, revision: (current?.revision ?? 0) + 1 }));
+  };
+
+  const resetChartFocus = () => setChartFocus(null);
 
   const handleRangeChange = (range: StrategyHistoryRange) => {
     setHistoryRange(range);
     setCustomError("");
     if (range === "custom") return;
+    resetChartFocus();
     setHistoryQuery(historyRanges[range]);
     setHistoryCursor(null);
     setPreviousCursors([]);
@@ -127,6 +146,7 @@ export function StrategyPage() {
       return;
     }
     setCustomError("");
+    resetChartFocus();
     setHistoryQuery({ from: customFrom, to: customTo });
     setHistoryCursor(null);
     setPreviousCursors([]);
@@ -135,12 +155,14 @@ export function StrategyPage() {
   const handleNextPage = () => {
     const nextCursor = historyRequest.report?.pagination.nextCursor;
     if (!nextCursor) return;
+    resetChartFocus();
     setPreviousCursors((current) => [...current, historyCursor]);
     setHistoryCursor(nextCursor);
   };
 
   const handlePreviousPage = () => {
     if (!previousCursors.length) return;
+    resetChartFocus();
     setHistoryCursor(previousCursors.at(-1) ?? null);
     setPreviousCursors((current) => current.slice(0, -1));
   };
@@ -148,9 +170,22 @@ export function StrategyPage() {
   return (
     <div className="xh-strategy-page">
       <StrategyPageHeader report={report} loading={loading} error={Boolean(error)} />
-      <StrategyViewTabs active={activeView} onChange={setActiveView} />
+      <StrategyViewTabs active={activeView} onChange={handleViewChange} />
       {activeView === "forward" ? (
         <div className="xh-strategy-forward-view" role="tabpanel" aria-label="前向 Paper">
+          <StrategyTradeChart
+            mode="forward"
+            contextState={loading ? "loading" : error || !availableReport ? "unavailable" : "ready"}
+            trades={availableReport ? [
+              ...(availableReport.openPosition ? [availableReport.openPosition] : []),
+              ...availableReport.recentCompletedTrades,
+            ] : []}
+            fallbackTime={availableReport?.openPosition?.entryTime
+              ?? availableReport?.recentCompletedTrades.at(-1)?.entryTime
+              ?? availableReport?.through
+              ?? null}
+            focusRequest={chartFocus?.view === "forward" ? chartFocus : null}
+          />
           {loading ? <StrategyLoadingState /> : (
             <>
               {error ? <StrategyErrorState message={error} /> : null}
@@ -159,12 +194,23 @@ export function StrategyPage() {
               <StrategyMetricsTable report={availableReport} />
               <StrategyConfigPanel report={availableReport} />
               <StrategyRuntimePanels report={availableReport} />
-              <RecentStrategyTrades report={availableReport} />
+              <RecentStrategyTrades report={availableReport} onLocateTrade={(trade) => handleLocateTrade("forward", trade)} />
             </>
           )}
         </div>
       ) : (
         <StrategyHistoryView
+          chart={(
+            <StrategyTradeChart
+              mode="history"
+              contextState={historyRequest.loading ? "loading" : historyRequest.error || !availableHistoryReport ? "unavailable" : "ready"}
+              trades={availableHistoryReport?.completedTrades ?? []}
+              fallbackTime={availableHistoryReport?.completedTrades.at(-1)?.entryTime
+                ?? availableHistoryReport?.dataThrough
+                ?? null}
+              focusRequest={chartFocus?.view === "history" ? chartFocus : null}
+            />
+          )}
           report={historyRequest.report}
           loading={historyRequest.loading}
           error={historyRequest.error}
@@ -179,6 +225,7 @@ export function StrategyPage() {
           onApplyCustom={handleApplyCustom}
           onNextPage={handleNextPage}
           onPreviousPage={handlePreviousPage}
+          onLocateTrade={(trade) => handleLocateTrade("history", trade)}
         />
       )}
     </div>

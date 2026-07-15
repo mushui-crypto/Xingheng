@@ -147,6 +147,32 @@ Binance Vision 已确认完整日，接口响应会明确 `availableRange` 与 `
 - `assumptions.automaticOrdersEnabled=false`
 - `warnings`，例如无报告、报告损坏或请求范围被裁剪
 
+策略图表 K 线只读接口：
+
+```http
+GET /api/strategy/ict/candles?interval=5m&from=2026-07-15T00:00:00.000Z&to=2026-07-15T06:00:00.000Z&limit=500
+```
+
+该接口要求用户登录，固定读取 Binance USD-M `BTCUSDT` 公共 K 线，只用于
+`/app/strategy` 的前向 Paper 与历史回测交易标记图表。接口不读取 Binance API key，
+不接交易 API，不触发 Paper Worker 重算，不下载多年 Binance Vision 归档，也不修改
+`/app/demo` 或 `/app/trade`。响应使用内部标准化结构：
+
+- `source=binance_usdm`
+- `symbol=BTCUSDT`
+- `interval=5m|15m|1h|4h`
+- `status=available|unavailable`
+- `requestedRange.from/to`
+- `dataThrough`
+- `candles[{time,open,high,low,close,volume}]`
+- `warnings`
+
+`time` 统一为 Unix 秒。默认 `interval=5m`、`limit=500`，最大 `limit=1000`；
+单次请求窗口不能超过对应 interval 的 `1000` 根 K 线，前端应围绕当前视窗或选中交易
+附近按窗口请求。服务端只返回已收盘 K 线，并对 Binance 原始响应做排序、去重和数值
+校验；网络失败、限频、超时或空数据返回安全状态，不影响 Paper Worker、全局 health、
+`/app/demo` 或 `/app/trade`。
+
 路线 A 首个 V6 实验采用 `0.8333%` 止损下限及结构上限，BTC 60,000 时对应 500。2024–2025 为 77 笔、PF 1.404，2026 至 7 月 13 日为 17 笔、PF 1.460；质量为正但机会数约减半，因此没有通过路线 A 的增频目标，不替换 V5。
 
 | 区间 | 交易数 | 净收益 | PF | 平均 R | 最大回撤 |

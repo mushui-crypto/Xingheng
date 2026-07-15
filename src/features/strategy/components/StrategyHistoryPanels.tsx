@@ -1,4 +1,4 @@
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import type { StrategyHistoryReport, StrategyForwardTrade } from "../model/types";
 import {
   formatAverageR,
@@ -17,6 +17,7 @@ export type StrategyView = "forward" | "history";
 export type StrategyHistoryRange = "2024_2025" | "2026" | "all" | "custom";
 
 type HistoryViewProps = {
+  chart: ReactNode;
   report: StrategyHistoryReport | null;
   loading: boolean;
   error: string;
@@ -31,6 +32,7 @@ type HistoryViewProps = {
   onApplyCustom: () => void;
   onNextPage: () => void;
   onPreviousPage: () => void;
+  onLocateTrade: (trade: StrategyForwardTrade) => void;
 };
 
 export function StrategyViewTabs({ active, onChange }: { active: StrategyView; onChange: (view: StrategyView) => void }) {
@@ -50,6 +52,7 @@ export function StrategyHistoryView(props: HistoryViewProps) {
   const availableReport = props.report?.status === "available" ? props.report : null;
   return (
     <div className="xh-strategy-history-view" role="tabpanel" aria-label="历史回测">
+      {props.chart}
       <HistoryRangePanel {...props} report={availableReport} />
       {props.error ? <StrategyErrorState message={props.error} /> : null}
       {props.loading ? <StrategyLoadingState /> : (
@@ -61,6 +64,7 @@ export function StrategyHistoryView(props: HistoryViewProps) {
             canGoPrevious={props.canGoPrevious}
             onNextPage={props.onNextPage}
             onPreviousPage={props.onPreviousPage}
+            onLocateTrade={props.onLocateTrade}
           />
         </>
       )}
@@ -169,9 +173,10 @@ function HistoryContextPanel({ report }: { report: StrategyHistoryReport | null 
   );
 }
 
-function HistoryTradesPanel({ report, canGoPrevious, onNextPage, onPreviousPage }: {
+function HistoryTradesPanel({ report, canGoPrevious, onLocateTrade, onNextPage, onPreviousPage }: {
   report: StrategyHistoryReport | null;
   canGoPrevious: boolean;
+  onLocateTrade: (trade: StrategyForwardTrade) => void;
   onNextPage: () => void;
   onPreviousPage: () => void;
 }) {
@@ -188,11 +193,11 @@ function HistoryTradesPanel({ report, canGoPrevious, onNextPage, onPreviousPage 
       <div className="xh-strategy-table-wrap" role="region" aria-label="历史回测交易明细，可横向滚动" tabIndex={0}>
         <table className="xh-strategy-table is-history-trades">
           <thead>
-            <tr><th>类型</th><th>方向</th><th>信号时间</th><th>入场时间</th><th>出场时间</th><th>入场价</th><th>出场价</th><th>止损</th><th>目标</th><th>净盈亏</th><th>R</th><th>费用</th><th>退出原因</th></tr>
+            <tr><th>定位</th><th>类型</th><th>方向</th><th>信号时间</th><th>入场时间</th><th>出场时间</th><th>入场价</th><th>出场价</th><th>止损</th><th>目标</th><th>净盈亏</th><th>R</th><th>费用</th><th>退出原因</th></tr>
           </thead>
           <tbody>
-            {trades.length ? trades.map((trade) => <HistoryTradeRow key={tradeKey(trade)} trade={trade} />) : (
-              <tr><td className="xh-strategy-table-empty" colSpan={13}>{report ? "当前区间已完成回测交易为 0" : "尚无历史回测报告"}</td></tr>
+            {trades.length ? trades.map((trade) => <HistoryTradeRow key={tradeKey(trade)} trade={trade} onLocateTrade={onLocateTrade} />) : (
+              <tr><td className="xh-strategy-table-empty" colSpan={14}>{report ? "当前区间已完成回测交易为 0" : "尚无历史回测报告"}</td></tr>
             )}
           </tbody>
         </table>
@@ -210,9 +215,19 @@ function HistoryTradesPanel({ report, canGoPrevious, onNextPage, onPreviousPage 
   );
 }
 
-function HistoryTradeRow({ trade }: { trade: StrategyForwardTrade }) {
+function HistoryTradeRow({ onLocateTrade, trade }: { onLocateTrade: (trade: StrategyForwardTrade) => void; trade: StrategyForwardTrade }) {
   return (
     <tr>
+      <td>
+        <button
+          type="button"
+          className="xh-strategy-locate-trade"
+          onClick={() => onLocateTrade(trade)}
+          aria-label={`在K线上定位${formatStrategyDateTime(trade.entryTime)}的回测交易`}
+        >
+          定位
+        </button>
+      </td>
       <td><span className="xh-strategy-backtest-label">回测交易</span></td>
       <td className={trade.side === "long" ? "is-positive" : trade.side === "short" ? "is-negative" : ""}>{formatSide(trade.side)}</td>
       <td>{formatStrategyDateTime(trade.signalTime)}</td>

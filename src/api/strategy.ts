@@ -1,5 +1,11 @@
 import { requestJson } from "./httpClient";
-import type { StrategyForwardReport, StrategyHistoryQuery, StrategyHistoryReport } from "../features/strategy/model/types";
+import type {
+  StrategyCandlesQuery,
+  StrategyCandlesReport,
+  StrategyForwardReport,
+  StrategyHistoryQuery,
+  StrategyHistoryReport,
+} from "../features/strategy/model/types";
 
 export function fetchStrategyForwardReport(signal?: AbortSignal) {
   return requestJson<StrategyForwardReport>(
@@ -26,6 +32,24 @@ export function fetchStrategyHistoryReport(query: StrategyHistoryQuery, signal?:
     {
       init: { signal },
       networkErrorMessage: "历史回测服务暂时不可用。",
+      userAuthFailure: true,
+    },
+  );
+}
+
+export function fetchStrategyCandles(query: StrategyCandlesQuery, signal?: AbortSignal) {
+  const search = new URLSearchParams({
+    interval: query.interval,
+    from: query.from,
+    to: query.to,
+  });
+  if (query.limit) search.set("limit", String(query.limit));
+  return requestJson<StrategyCandlesReport>(
+    `/api/strategy/ict/candles?${search.toString()}`,
+    "策略K线暂时无法读取，请稍后再试。",
+    {
+      init: { signal },
+      networkErrorMessage: "策略K线服务暂时不可用。",
       userAuthFailure: true,
     },
   );
