@@ -13,7 +13,7 @@ import {
 } from "../lib/formatters";
 import { StrategyErrorState, StrategyLoadingState } from "./StrategyPanels";
 
-export type StrategyView = "forward" | "history";
+export type StrategyView = "forward" | "history" | "martingale";
 export type StrategyHistoryRange = "2024_2025" | "2026" | "all" | "custom";
 
 type HistoryViewProps = {
@@ -43,6 +43,9 @@ export function StrategyViewTabs({ active, onChange }: { active: StrategyView; o
       </button>
       <button type="button" role="tab" aria-selected={active === "history"} className={active === "history" ? "is-active" : ""} onClick={() => onChange("history")}>
         历史回测
+      </button>
+      <button type="button" role="tab" aria-selected={active === "martingale"} className={active === "martingale" ? "is-active" : ""} onClick={() => onChange("martingale")}>
+        马丁网格 Paper
       </button>
     </div>
   );

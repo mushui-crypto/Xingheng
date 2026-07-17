@@ -13,16 +13,24 @@ const intervalSeconds: Record<StrategyCandleInterval, number> = {
 export type StrategyTradeMarkerEvent = {
   id: string;
   tradeKey: string;
-  kind: "entry" | "exit";
+  kind: "entry" | "add" | "exit";
   side: "long" | "short";
   bucketTime: number;
   exactTime: string;
   price: number;
-  label: "多开" | "空开" | "平多" | "平空";
+  label: string;
   position: "aboveBar" | "belowBar";
-  shape: "arrowUp" | "arrowDown" | "square";
+  shape: "arrowUp" | "arrowDown" | "circle" | "square";
   color: string;
-  trade: StrategyForwardTrade;
+  detail: {
+    contextLabel: string;
+    groupId: string | null;
+    level: number | null;
+    quantity: number | null;
+    fee: number | null;
+    netPnl: number | null;
+    exitReason: string | null;
+  };
 };
 
 export function strategyIntervalSeconds(interval: StrategyCandleInterval) {
@@ -62,7 +70,15 @@ export function buildStrategyTradeMarkerEvents(
         position: trade.side === "long" ? "belowBar" : "aboveBar",
         shape: trade.side === "long" ? "arrowUp" : "arrowDown",
         color: trade.side === "long" ? "#00C896" : "#FF667F",
-        trade,
+        detail: {
+          contextLabel: trade.side === "long" ? "做多交易" : "做空交易",
+          groupId: null,
+          level: null,
+          quantity: trade.quantity,
+          fee: trade.fees,
+          netPnl: trade.netPnl,
+          exitReason: null,
+        },
       });
     }
     const exitBucket = trade.exitTime ? bucketStrategyTradeTime(trade.exitTime, interval) : null;
@@ -79,7 +95,15 @@ export function buildStrategyTradeMarkerEvents(
         position: trade.side === "long" ? "aboveBar" : "belowBar",
         shape: "square",
         color: trade.side === "long" ? "#FF667F" : "#00C896",
-        trade,
+        detail: {
+          contextLabel: trade.side === "long" ? "做多交易" : "做空交易",
+          groupId: null,
+          level: null,
+          quantity: trade.quantity,
+          fee: trade.fees,
+          netPnl: trade.netPnl,
+          exitReason: trade.exitReason,
+        },
       });
     }
   }
@@ -115,8 +139,12 @@ export function calculateStrategyCandleWindow(
 function compareMarkerEvents(left: StrategyTradeMarkerEvent, right: StrategyTradeMarkerEvent) {
   return left.bucketTime - right.bucketTime
     || Date.parse(left.exactTime) - Date.parse(right.exactTime)
-    || (left.kind === right.kind ? 0 : left.kind === "entry" ? -1 : 1)
+    || markerKindOrder(left.kind) - markerKindOrder(right.kind)
     || left.id.localeCompare(right.id);
+}
+
+function markerKindOrder(kind: StrategyTradeMarkerEvent["kind"]) {
+  return kind === "entry" ? 0 : kind === "add" ? 1 : 2;
 }
 
 function validIso(value: string | null | undefined) {

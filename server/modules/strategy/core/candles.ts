@@ -7,6 +7,8 @@ const intervalMinutes: Partial<Record<CandleInterval, number>> = {
   "15m": 15,
   "30m": 30,
   "1h": 60,
+  "2h": 120,
+  "4h": 240,
 };
 
 export function aggregateCandles(candles: Candle[], interval: CandleInterval) {
@@ -25,6 +27,14 @@ export function aggregateCandles(candles: Candle[], interval: CandleInterval) {
     existing.low = Math.min(existing.low, candle.low);
     existing.close = candle.close;
     existing.volume += candle.volume;
+    existing.quoteVolume = sumOptional(existing.quoteVolume, candle.quoteVolume);
+    existing.tradeCount = sumOptional(existing.tradeCount, candle.tradeCount);
+    existing.takerBuyBaseVolume = sumOptional(existing.takerBuyBaseVolume, candle.takerBuyBaseVolume);
+    existing.takerBuyQuoteVolume = sumOptional(existing.takerBuyQuoteVolume, candle.takerBuyQuoteVolume);
   }
   return [...buckets.values()].sort((left, right) => left.time - right.time);
+}
+
+function sumOptional(left: number | undefined, right: number | undefined) {
+  return left === undefined || right === undefined ? undefined : left + right;
 }

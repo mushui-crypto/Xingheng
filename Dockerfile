@@ -11,7 +11,8 @@ ENV NODE_ENV=production \
     API_PORT=8787 \
     TRADING_DB_PATH=/app/data/trading.sqlite \
     STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json \
-    STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json
+    STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json \
+    MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 WORKDIR /app
 RUN apt-get update \
   && apt-get install -y --no-install-recommends sqlite3 \
@@ -30,7 +31,8 @@ CMD ["node", "dist-server/index.js"]
 FROM build AS strategy-tools
 ENV NODE_ENV=production \
     STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json \
-    STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json
+    STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json \
+    MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 RUN apt-get update \
   && apt-get install -y --no-install-recommends unzip \
   && rm -rf /var/lib/apt/lists/* \

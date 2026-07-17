@@ -35,6 +35,10 @@ export type Candle = {
   low: number;
   close: number;
   volume: number;
+  quoteVolume?: number;
+  tradeCount?: number;
+  takerBuyBaseVolume?: number;
+  takerBuyQuoteVolume?: number;
 };
 
 export type MarketCategory = "crypto" | "metals" | "us_equities" | "indices" | "other";

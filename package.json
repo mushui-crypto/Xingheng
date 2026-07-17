@@ -28,7 +28,20 @@
     "research:ict:history": "tsx scripts/generate-ict-history-report.ts",
     "strategy:history:check": "node scripts/check-strategy-history-report.mjs",
     "research:ict:route-a": "tsx scripts/research-ict-route-a-trend-pullback.ts",
-    "verify:hyperliquid-testnet-precision": "tsx scripts/verify-hyperliquid-testnet-precision.ts"
+    "research:ict:btc:entry-expansion": "tsx scripts/research-btc-entry-expansion-v2.ts",
+    "research:ict:btc:entry-capacity": "tsx scripts/research-btc-entry-capacity-v1.ts",
+    "research:ict:btc:entry-capacity:diagnose": "tsx scripts/diagnose-btc-v5-entry-capacity.ts",
+    "research:ict:btc:multi-position": "tsx scripts/research-btc-multi-position-v1.ts",
+    "research:ict:btc:session-sweep": "tsx scripts/research-btc-session-sweep-v1.ts",
+    "research:ict:btc:orderflow": "tsx scripts/research-btc-orderflow-v1.ts",
+    "research:ict:btc:fib-reclaim": "tsx scripts/research-btc-fib-reclaim-v1.ts",
+    "research:ict:eth:v5": "tsx scripts/research-ict-eth-v5.ts",
+    "verify:hyperliquid-testnet-precision": "tsx scripts/verify-hyperliquid-testnet-precision.ts",
+    "research:ict:eth:smc:v1": "tsx scripts/research-ict-eth-smc-v1.ts",
+    "research:ict:eth:smc:v2": "tsx scripts/research-ict-eth-smc-v2.ts",
+    "research:ict:eth:smc:v4": "tsx scripts/research-ict-eth-smc-v4.ts",
+    "research:ict:eth:smc:v4:normal-tp": "tsx scripts/research-ict-eth-smc-v4-normal-tp.ts",
+    "research:ict:xau:quick": "tsx scripts/research-ict-xau-quick.ts"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.33.1",

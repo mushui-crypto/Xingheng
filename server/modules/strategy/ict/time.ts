@@ -14,6 +14,7 @@ export function timeInZone(timestampSeconds: number, timeZone: string) {
       day: "2-digit",
       hour: "2-digit",
       minute: "2-digit",
+      weekday: "short",
       hourCycle: "h23",
     });
     formatters.set(timeZone, formatter);
@@ -21,11 +22,13 @@ export function timeInZone(timestampSeconds: number, timeZone: string) {
   const parts = Object.fromEntries(
     formatter.formatToParts(new Date(timestampSeconds * 1000))
       .filter((part) => part.type !== "literal")
-      .map((part) => [part.type, Number(part.value)]),
+      .map((part) => [part.type, part.type === "weekday" ? part.value : Number(part.value)]),
   );
   return {
     dateKey: `${parts.year}-${String(parts.month).padStart(2, "0")}-${String(parts.day).padStart(2, "0")}`,
-    minuteOfDay: parts.hour * 60 + parts.minute,
+    minuteOfDay: Number(parts.hour) * 60 + Number(parts.minute),
+    weekday: String(parts.weekday),
+    isWeekend: parts.weekday === "Sat" || parts.weekday === "Sun",
   };
 }
 

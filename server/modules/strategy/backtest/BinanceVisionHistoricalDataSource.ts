@@ -74,21 +74,31 @@ export class BinanceVisionHistoricalDataSource {
     const directory = path.join(this.cacheDirectory, request.symbol, "5m");
     const zipPath = path.join(directory, fileName);
     const checksumPath = `${zipPath}.CHECKSUM`;
-    const csvCachePath = `${zipPath}.candles.json`;
+    const csvCachePath = `${zipPath}.candles-v2.json`;
+    const csvCacheChecksumPath = `${csvCachePath}.SOURCE_SHA256`;
     await mkdir(directory, { recursive: true });
-
-    const cached = await readFile(csvCachePath, "utf8").then((value) => JSON.parse(value) as Candle[]).catch(() => null);
-    if (cached?.length) return { fileName, candles: normalizeCandles(cached).candles };
 
     await Promise.all([
       ensureDownloaded(`${this.baseUrl}/${request.symbol}/5m/${fileName}`, zipPath),
       ensureDownloaded(`${this.baseUrl}/${request.symbol}/5m/${fileName}.CHECKSUM`, checksumPath),
     ]);
-    await verifyChecksum(zipPath, checksumPath);
+    const archiveChecksum = await verifyChecksum(zipPath, checksumPath);
+
+    const [cached, cachedSourceChecksum] = await Promise.all([
+      readFile(csvCachePath, "utf8").then((value) => JSON.parse(value) as Candle[]).catch(() => null),
+      readFile(csvCacheChecksumPath, "utf8").then((value) => value.trim()).catch(() => null),
+    ]);
+    if (cached?.length && cachedSourceChecksum === archiveChecksum) {
+      return { fileName, candles: normalizeCandles(cached).candles };
+    }
+
     const { stdout } = await execFileAsync("unzip", ["-p", zipPath], { maxBuffer: 128 * 1024 * 1024 });
     const candles = parseBinanceKlines(stdout, request.symbol);
     if (candles.length === 0) throw new Error(`Binance Vision file ${fileName} contains no valid candles.`);
-    await writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8");
+    await Promise.all([
+      writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8"),
+      writeFile(csvCacheChecksumPath, `${archiveChecksum}\n`, "utf8"),
+    ]);
     return { fileName, candles };
   }
 
@@ -125,21 +135,31 @@ export class BinanceVisionHistoricalDataSource {
     const directory = path.join(this.cacheDirectory, request.symbol, "5m", "daily");
     const zipPath = path.join(directory, fileName);
     const checksumPath = `${zipPath}.CHECKSUM`;
-    const csvCachePath = `${zipPath}.candles.json`;
+    const csvCachePath = `${zipPath}.candles-v2.json`;
+    const csvCacheChecksumPath = `${csvCachePath}.SOURCE_SHA256`;
     await mkdir(directory, { recursive: true });
-
-    const cached = await readFile(csvCachePath, "utf8").then((value) => JSON.parse(value) as Candle[]).catch(() => null);
-    if (cached?.length) return { fileName, candles: normalizeCandles(cached).candles };
 
     await Promise.all([
       ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/5m/${fileName}`, zipPath),
       ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/5m/${fileName}.CHECKSUM`, checksumPath),
     ]);
-    await verifyChecksum(zipPath, checksumPath);
+    const archiveChecksum = await verifyChecksum(zipPath, checksumPath);
+
+    const [cached, cachedSourceChecksum] = await Promise.all([
+      readFile(csvCachePath, "utf8").then((value) => JSON.parse(value) as Candle[]).catch(() => null),
+      readFile(csvCacheChecksumPath, "utf8").then((value) => value.trim()).catch(() => null),
+    ]);
+    if (cached?.length && cachedSourceChecksum === archiveChecksum) {
+      return { fileName, candles: normalizeCandles(cached).candles };
+    }
+
     const { stdout } = await execFileAsync("unzip", ["-p", zipPath], { maxBuffer: 16 * 1024 * 1024 });
     const candles = parseBinanceKlines(stdout, request.symbol);
     if (candles.length === 0) throw new Error(`Binance Vision file ${fileName} contains no valid candles.`);
-    await writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8");
+    await Promise.all([
+      writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8"),
+      writeFile(csvCacheChecksumPath, `${archiveChecksum}\n`, "utf8"),
+    ]);
     return { fileName, candles };
   }
 }
@@ -186,6 +206,7 @@ async function verifyChecksum(zipPath: string, checksumPath: string) {
   if (!expected || !/^[a-f0-9]{64}$/.test(expected)) throw new Error(`Invalid checksum file: ${checksumPath}`);
   const actual = crypto.createHash("sha256").update(await readFile(zipPath)).digest("hex");
   if (actual !== expected) throw new Error(`Checksum mismatch for ${path.basename(zipPath)}.`);
+  return actual;
 }
 
 export function parseBinanceKlines(csv: string, symbol = "BTCUSDT") {
@@ -199,9 +220,42 @@ export function parseBinanceKlines(csv: string, symbol = "BTCUSDT") {
     const low = Number(columns[3]);
     const close = Number(columns[4]);
     const volume = Number(columns[5]);
-    if (![openTime, open, high, low, close, volume].every(Number.isFinite)) continue;
+    const quoteVolume = Number(columns[7]);
+    const tradeCount = Number(columns[8]);
+    const takerBuyBaseVolume = Number(columns[9]);
+    const takerBuyQuoteVolume = Number(columns[10]);
+    if (![
+      openTime,
+      open,
+      high,
+      low,
+      close,
+      volume,
+      quoteVolume,
+      tradeCount,
+      takerBuyBaseVolume,
+      takerBuyQuoteVolume,
+    ].every(Number.isFinite)) continue;
     if (open <= 0 || high <= 0 || low <= 0 || close <= 0 || high < low) continue;
-    candles.push({ symbol, interval: "5m", time: Math.trunc(openTime / 1000), open, high, low, close, volume });
+    if (
+      volume < 0 || quoteVolume < 0 || tradeCount < 0 ||
+      takerBuyBaseVolume < 0 || takerBuyQuoteVolume < 0 ||
+      takerBuyBaseVolume > volume + 1e-9 || takerBuyQuoteVolume > quoteVolume + 1e-6
+    ) continue;
+    candles.push({
+      symbol,
+      interval: "5m",
+      time: Math.trunc(openTime / 1000),
+      open,
+      high,
+      low,
+      close,
+      volume,
+      quoteVolume,
+      tradeCount: Math.trunc(tradeCount),
+      takerBuyBaseVolume,
+      takerBuyQuoteVolume,
+    });
   }
   return normalizeCandles(candles).candles;
 }

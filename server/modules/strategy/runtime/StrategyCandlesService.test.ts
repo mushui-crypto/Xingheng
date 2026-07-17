@@ -18,6 +18,8 @@ test("strategy candles route rejects unauthenticated requests", async () => {
     const response = await fetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/ict/candles`);
     assert.equal(response.status, 401);
     assert.deepEqual(await response.json(), { message: "用户未登录或登录已失效。" });
+    const martingale = await fetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/martingale/candles?symbol=ETHUSDT`);
+    assert.equal(martingale.status, 401);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
@@ -59,6 +61,12 @@ test("strategy candles route is covered by user auth middleware", async () => {
     const body = await authenticated.json() as any;
     assert.equal(body.status, "available");
     assert.equal(body.candles.length, 1);
+
+    const martingaleEth = await previousFetch(`${baseUrl}/api/strategy/martingale/candles?symbol=ETHUSDT&limit=1`, {
+      headers: { authorization: "Bearer valid-token" },
+    });
+    assert.equal(martingaleEth.status, 200);
+    assert.equal((await martingaleEth.json() as any).symbol, "ETHUSDT");
 
     const disabled = await previousFetch(`${baseUrl}/api/strategy/ict/candles?limit=1`, {
       headers: { authorization: "Bearer disabled-token" },
@@ -131,6 +139,22 @@ test("strategy candles support official 15m, 1h and 4h intervals", async () => {
   }
 });
 
+test("martingale candles support ETHUSDT without sharing the BTC cache key", async () => {
+  const cache: StrategyCandlesCache = new Map();
+  const symbols: string[] = [];
+  const fetchFn = async (input: string | URL | Request) => {
+    const url = input instanceof Request ? new URL(input.url) : new URL(String(input));
+    symbols.push(url.searchParams.get("symbol") ?? "");
+    return jsonResponse([kline("2026-07-15T12:00:00.000Z", "3000", "3010", "2990", "3005", "12")]);
+  };
+  const query = { interval: "5m", from: "2026-07-15T12:00:00.000Z", to: "2026-07-15T12:00:00.000Z", limit: "1" };
+  const eth = await readStrategyCandles({ ...query, symbol: "ETHUSDT" }, { now: () => NOW, fetchFn: fetchFn as typeof fetch, cache });
+  const btc = await readStrategyCandles({ ...query, symbol: "BTCUSDT" }, { now: () => NOW, fetchFn: fetchFn as typeof fetch, cache });
+  assert.equal(eth.report.symbol, "ETHUSDT");
+  assert.equal(btc.report.symbol, "BTCUSDT");
+  assert.deepEqual(symbols, ["ETHUSDT", "BTCUSDT"]);
+});
+
 test("strategy candles support old historical windows and cap large limits", async () => {
   let requestedStartTime: string | null = null;
   let requestedLimit: string | null = null;
@@ -167,6 +191,7 @@ test("strategy candles reject historical requests that would require multi-year 
 
 test("strategy candles validate interval, range, limit and maximum window", async () => {
   const cases = [
+    [{ symbol: "SOLUSDT" }, "invalid_symbol"],
     [{ interval: "1m" }, "invalid_interval"],
     [{ from: "bad" }, "invalid_from"],
     [{ from: "2026-07-15T12:00:00.000Z", to: "2026-07-15T11:00:00.000Z" }, "invalid_range"],

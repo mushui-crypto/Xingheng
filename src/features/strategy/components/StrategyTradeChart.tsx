@@ -12,18 +12,16 @@ import {
   type UTCTimestamp,
 } from "lightweight-charts";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { fetchStrategyCandles } from "../../../api/strategy";
+import { fetchMartingaleCandles, fetchStrategyCandles } from "../../../api/strategy";
+import type { MartingaleSymbol } from "../model/martingaleTypes";
 import type {
   StrategyCandle,
   StrategyCandleInterval,
-  StrategyForwardTrade,
 } from "../model/types";
 import {
-  buildStrategyTradeMarkerEvents,
   calculateStrategyCandleWindow,
   resolveStrategyChartCenter,
   strategyChartIntervals,
-  strategyTradeKey,
   type StrategyTradeMarkerEvent,
 } from "../lib/tradeChart";
 import {
@@ -37,21 +35,38 @@ import {
 export type StrategyChartContextState = "loading" | "ready" | "unavailable";
 
 export type StrategyChartFocusRequest = {
-  trade: StrategyForwardTrade;
+  centerTime: string;
+  markerId: string | null;
   revision: number;
 } | null;
 
 type StrategyTradeChartProps = {
-  mode: "forward" | "history";
+  mode: "forward" | "history" | "martingale";
   contextState: StrategyChartContextState;
-  trades: StrategyForwardTrade[];
+  symbol?: MartingaleSymbol;
+  candleSource?: "ict" | "martingale";
+  markerDataCount: number;
+  markerDataSignature: string;
+  buildMarkerEvents: (interval: StrategyCandleInterval) => StrategyTradeMarkerEvent[];
   fallbackTime: string | null;
   focusRequest: StrategyChartFocusRequest;
+  description?: string;
 };
 
 type ChartLoadState = "idle" | "loading" | "ready" | "empty" | "error";
 
-export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, mode, trades }: StrategyTradeChartProps) {
+export function StrategyTradeChart({
+  buildMarkerEvents,
+  candleSource = "ict",
+  contextState,
+  description,
+  fallbackTime,
+  focusRequest,
+  markerDataCount,
+  markerDataSignature,
+  mode,
+  symbol = "BTCUSDT",
+}: StrategyTradeChartProps) {
   const rootRef = useRef<HTMLElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -66,12 +81,10 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
   const [activeCandle, setActiveCandle] = useState<StrategyCandle | null>(null);
   const [selectedEvent, setSelectedEvent] = useState<StrategyTradeMarkerEvent | null>(null);
   const [visibleMarkerCount, setVisibleMarkerCount] = useState(0);
-  const tradeSignature = useMemo(() => JSON.stringify(trades), [trades]);
-  const focusTrade = focusRequest?.trade ?? null;
-  const centerTime = resolveStrategyChartCenter(focusTrade, fallbackTime);
+  const centerTime = resolveStrategyChartCenter(null, focusRequest?.centerTime ?? fallbackTime);
   const markerEvents = useMemo(
-    () => buildStrategyTradeMarkerEvents(trades, interval),
-    [interval, tradeSignature],
+    () => buildMarkerEvents(interval),
+    [interval, markerDataSignature],
   );
 
   useEffect(() => {
@@ -160,15 +173,30 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
 
     const controller = new AbortController();
     const requestWindow = calculateStrategyCandleWindow(centerTime, interval);
+    seriesRef.current?.setData([]);
+    markersRef.current?.setMarkers([]);
+    markerEventMapRef.current.clear();
+    candleMapRef.current.clear();
+    setVisibleMarkerCount(0);
+    setActiveCandle(null);
     setLoadState("loading");
     setError("");
     setSelectedEvent(null);
-    void fetchStrategyCandles({
-      interval,
-      from: requestWindow.from,
-      to: requestWindow.to,
-      limit: requestWindow.limit,
-    }, controller.signal)
+    const candleRequest = candleSource === "martingale"
+      ? fetchMartingaleCandles({
+        symbol,
+        interval,
+        from: requestWindow.from,
+        to: requestWindow.to,
+        limit: requestWindow.limit,
+      }, controller.signal)
+      : fetchStrategyCandles({
+        interval,
+        from: requestWindow.from,
+        to: requestWindow.to,
+        limit: requestWindow.limit,
+      }, controller.signal);
+    void candleRequest
       .then((report) => {
         if (controller.signal.aborted) return;
         if (report.status !== "available") {
@@ -205,9 +233,9 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
         setVisibleMarkerCount(visibleEvents.length);
         setLoadState("ready");
 
-        const selectedEntryId = focusTrade ? `${strategyTradeKey(focusTrade)}:entry` : null;
-        setSelectedEvent(selectedEntryId ? markerEventMapRef.current.get(selectedEntryId) ?? null : null);
-        positionChart(chartRef.current, candles, requestWindow.focusBucketTime, Boolean(focusTrade));
+        const selectedMarkerId = focusRequest?.markerId ?? null;
+        setSelectedEvent(selectedMarkerId ? markerEventMapRef.current.get(selectedMarkerId) ?? null : null);
+        positionChart(chartRef.current, candles, requestWindow.focusBucketTime, Boolean(focusRequest));
       })
       .catch((reason) => {
         if (controller.signal.aborted) return;
@@ -222,7 +250,7 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
       });
 
     return () => controller.abort();
-  }, [centerTime, contextState, focusRequest?.revision, interval, markerEvents, retryRevision]);
+  }, [candleSource, centerTime, contextState, focusRequest?.revision, interval, markerEvents, retryRevision, symbol]);
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -243,7 +271,7 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
       <div className="xh-strategy-chart-header">
         <div>
           <h2 id={`strategy-chart-title-${mode}`}>策略交易K线</h2>
-          <p>Binance USD-M · BTCUSDT · Paper only / 自动下单关闭</p>
+          <p>{description ?? `Binance USD-M · ${symbol} · Paper only / 自动下单关闭`}</p>
         </div>
         <div className="xh-strategy-chart-intervals" role="group" aria-label="K线周期">
           {strategyChartIntervals.map((item) => (
@@ -270,7 +298,7 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
       </div>
 
       <div className="xh-strategy-chart-stage">
-        <div ref={containerRef} className="xh-strategy-chart-canvas" aria-label={`${interval} BTCUSDT K线图`} />
+        <div ref={containerRef} className="xh-strategy-chart-canvas" aria-label={`${interval} ${symbol} K线图`} />
         {contextState === "loading" || loadState === "loading" ? <div className="xh-strategy-chart-skeleton" aria-label="策略K线加载中" aria-busy="true"><span /><span /><span /></div> : null}
         {stateMessage ? (
           <div className="xh-strategy-chart-state" role={loadState === "error" ? "alert" : "status"}>
@@ -283,11 +311,11 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
       <div className="xh-strategy-chart-marker-status" role="status">
         {loadState !== "ready"
           ? "等待K线与交易标记数据。"
-          : trades.length === 0
+          : markerDataCount === 0
           ? "当前报告暂无可标记交易。"
           : visibleMarkerCount === 0
             ? "当前K线窗口未包含交易标记，可点击下方交易记录定位。"
-            : `当前窗口 ${visibleMarkerCount} 个开平仓标记。点击标记查看详情。`}
+            : `当前窗口 ${visibleMarkerCount} 个成交标记。点击标记查看详情。`}
       </div>
       <StrategyMarkerDetail event={selectedEvent} />
     </section>
@@ -296,21 +324,22 @@ export function StrategyTradeChart({ contextState, fallbackTime, focusRequest, m
 
 function StrategyMarkerDetail({ event }: { event: StrategyTradeMarkerEvent | null }) {
   if (!event) {
-    return <div className="xh-strategy-marker-empty">点击开平仓标记或下方交易记录查看执行详情。</div>;
+    return <div className="xh-strategy-marker-empty">点击成交标记或下方交易记录查看执行详情。</div>;
   }
   return (
     <div className="xh-strategy-marker-detail" aria-live="polite">
       <div className="xh-strategy-marker-detail-title">
         <strong>{event.kind === "exit" ? `× ${event.label}` : event.label}</strong>
-        <span>{event.side === "long" ? "做多交易" : "做空交易"}</span>
+        <span>{event.detail.contextLabel}</span>
       </div>
       <dl>
         <Detail label="成交时间" value={formatStrategyDateTime(event.exactTime)} />
         <Detail label="成交价格" value={formatStrategyPrice(event.price)} />
-        <Detail label="数量" value={formatQuantity(event.trade.quantity)} />
-        <Detail label="交易净盈亏" value={formatNullableMoney(event.trade.netPnl)} tone={strategyNumberTone(event.trade.netPnl)} />
-        <Detail label="手续费" value={formatFee(event.trade.fees)} />
-        <Detail label="退出原因" value={event.kind === "exit" ? formatExitReason(event.trade.exitReason) : "—"} />
+        <Detail label="层级" value={event.detail.level === null ? "—" : `第 ${event.detail.level} 层`} />
+        <Detail label="数量" value={formatQuantity(event.detail.quantity)} />
+        <Detail label="净盈亏" value={formatNullableMoney(event.detail.netPnl)} tone={strategyNumberTone(event.detail.netPnl)} />
+        <Detail label="手续费" value={formatFee(event.detail.fee)} />
+        <Detail label="退出原因" value={event.kind === "exit" ? formatExitReason(event.detail.exitReason) : "—"} />
       </dl>
     </div>
   );
@@ -345,7 +374,7 @@ function toSeriesMarker(event: StrategyTradeMarkerEvent): SeriesMarker<Time> {
     shape: event.shape,
     color: event.color,
     text: event.kind === "exit" ? `× ${event.label}` : event.label,
-    size: event.kind === "entry" ? 1.4 : 1.1,
+    size: event.kind === "entry" ? 1.4 : event.kind === "add" ? 1.2 : 1.1,
   };
 }
 
