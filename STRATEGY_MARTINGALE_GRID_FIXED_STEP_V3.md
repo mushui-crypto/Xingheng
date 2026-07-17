@@ -1,6 +1,6 @@
 # 固定价差12层高周期定向马丁网格 V3
 
-状态：参数设计已冻结，自动 Paper 与前端只读展示已实现，尚未历史资格验证
+状态：参数设计已冻结，自动 Paper 与前端只读展示已实现；2024-01-01 至 2026-07-15 首次历史资格验证未通过
 研究 Route ID：`binance-usdm-martingale-grid-fixed-step-htf-v3-research`
 Paper Route ID：`binance-usdm-martingale-grid-fixed-step-htf-v3-paper`
 边界：独立路线，不修改当前自动运行的马丁V1，不产生真实订单
@@ -106,6 +106,8 @@ Paper Route ID：`binance-usdm-martingale-grid-fixed-step-htf-v3-paper`
 - 与当前马丁V1的信号、频率、费用效率和尾部风险对照。
 
 历史运行通过也只能进入独立Paper，不得覆盖当前马丁V1报告。
+
+首次历史运行结果见 `STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3_RESULT.md`。基础成本下组合虽然录得微弱正收益，但 2024、2025 不稳定，BTC 单品种亏损，双倍成本测试转为显著负收益，因此不得称为正收益候选；当前自动 Paper 仅用于继续观察执行与数据链路。
 
 ## 自动 Paper 与前端实现
 

@@ -32,6 +32,15 @@ test("parses Binance USD-M kline CSV into the normalized Candle contract", () =>
   });
 });
 
+test("preserves a requested one-minute research interval", () => {
+  const candles = parseBinanceKlines(
+    "1591258320000,9640.7,9642.4,9640.6,9642.0,206,1591258379999,2.1,48,119,1.2,0",
+    "BTCUSDT",
+    "1m",
+  );
+  assert.equal(candles[0].interval, "1m");
+});
+
 test("builds an inclusive daily range across a month boundary", () => {
   assert.deepEqual(dayRange("2026-06-30", "2026-07-02"), [
     { symbol: "BTCUSDT", date: "2026-06-30" },

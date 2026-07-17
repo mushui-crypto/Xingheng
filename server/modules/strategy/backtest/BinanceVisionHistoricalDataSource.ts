@@ -23,7 +23,7 @@ export type BinanceVisionDayRequest = {
 export type HistoricalDataQuality = {
   source: "binance_vision_usdm";
   market: SupportedResearchSymbol;
-  interval: "5m";
+  interval: SupportedResearchInterval;
   files: string[];
   checksumVerified: boolean;
   candleCount: number;
@@ -38,6 +38,7 @@ export class BinanceVisionHistoricalDataSource {
     private baseUrl = defaultBaseUrl,
     private cacheDirectory = path.resolve(".cache/strategy/binance-vision"),
     private dailyBaseUrl = defaultDailyBaseUrl,
+    private interval: SupportedResearchInterval = "5m",
   ) {}
 
   async loadMonths(requests: BinanceVisionMonthRequest[]) {
@@ -55,12 +56,12 @@ export class BinanceVisionHistoricalDataSource {
     const quality: HistoricalDataQuality = {
       source: "binance_vision_usdm",
       market,
-      interval: "5m",
+      interval: this.interval,
       files,
       checksumVerified: true,
       candleCount: candles.length,
       duplicateCount,
-      missingBarCount: countMissingBars(candles),
+      missingBarCount: countMissingBars(candles, intervalSeconds(this.interval)),
       firstCandleTime: candles[0]?.time ?? null,
       lastCandleTime: candles.at(-1)?.time ?? null,
     };
@@ -70,8 +71,8 @@ export class BinanceVisionHistoricalDataSource {
   async loadMonth(request: BinanceVisionMonthRequest) {
     validateMonth(request);
     const month = String(request.month).padStart(2, "0");
-    const fileName = `${request.symbol}-5m-${request.year}-${month}.zip`;
-    const directory = path.join(this.cacheDirectory, request.symbol, "5m");
+    const fileName = `${request.symbol}-${this.interval}-${request.year}-${month}.zip`;
+    const directory = path.join(this.cacheDirectory, request.symbol, this.interval);
     const zipPath = path.join(directory, fileName);
     const checksumPath = `${zipPath}.CHECKSUM`;
     const csvCachePath = `${zipPath}.candles-v2.json`;
@@ -79,8 +80,8 @@ export class BinanceVisionHistoricalDataSource {
     await mkdir(directory, { recursive: true });
 
     await Promise.all([
-      ensureDownloaded(`${this.baseUrl}/${request.symbol}/5m/${fileName}`, zipPath),
-      ensureDownloaded(`${this.baseUrl}/${request.symbol}/5m/${fileName}.CHECKSUM`, checksumPath),
+      ensureDownloaded(`${this.baseUrl}/${request.symbol}/${this.interval}/${fileName}`, zipPath),
+      ensureDownloaded(`${this.baseUrl}/${request.symbol}/${this.interval}/${fileName}.CHECKSUM`, checksumPath),
     ]);
     const archiveChecksum = await verifyChecksum(zipPath, checksumPath);
 
@@ -93,7 +94,7 @@ export class BinanceVisionHistoricalDataSource {
     }
 
     const { stdout } = await execFileAsync("unzip", ["-p", zipPath], { maxBuffer: 128 * 1024 * 1024 });
-    const candles = parseBinanceKlines(stdout, request.symbol);
+    const candles = parseBinanceKlines(stdout, request.symbol, this.interval);
     if (candles.length === 0) throw new Error(`Binance Vision file ${fileName} contains no valid candles.`);
     await Promise.all([
       writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8"),
@@ -117,12 +118,12 @@ export class BinanceVisionHistoricalDataSource {
     const quality: HistoricalDataQuality = {
       source: "binance_vision_usdm",
       market,
-      interval: "5m",
+      interval: this.interval,
       files,
       checksumVerified: true,
       candleCount: candles.length,
       duplicateCount,
-      missingBarCount: countMissingBars(candles),
+      missingBarCount: countMissingBars(candles, intervalSeconds(this.interval)),
       firstCandleTime: candles[0]?.time ?? null,
       lastCandleTime: candles.at(-1)?.time ?? null,
     };
@@ -131,8 +132,8 @@ export class BinanceVisionHistoricalDataSource {
 
   async loadDay(request: BinanceVisionDayRequest) {
     validateDay(request);
-    const fileName = `${request.symbol}-5m-${request.date}.zip`;
-    const directory = path.join(this.cacheDirectory, request.symbol, "5m", "daily");
+    const fileName = `${request.symbol}-${this.interval}-${request.date}.zip`;
+    const directory = path.join(this.cacheDirectory, request.symbol, this.interval, "daily");
     const zipPath = path.join(directory, fileName);
     const checksumPath = `${zipPath}.CHECKSUM`;
     const csvCachePath = `${zipPath}.candles-v2.json`;
@@ -140,8 +141,8 @@ export class BinanceVisionHistoricalDataSource {
     await mkdir(directory, { recursive: true });
 
     await Promise.all([
-      ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/5m/${fileName}`, zipPath),
-      ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/5m/${fileName}.CHECKSUM`, checksumPath),
+      ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/${this.interval}/${fileName}`, zipPath),
+      ensureDownloaded(`${this.dailyBaseUrl}/${request.symbol}/${this.interval}/${fileName}.CHECKSUM`, checksumPath),
     ]);
     const archiveChecksum = await verifyChecksum(zipPath, checksumPath);
 
@@ -154,7 +155,7 @@ export class BinanceVisionHistoricalDataSource {
     }
 
     const { stdout } = await execFileAsync("unzip", ["-p", zipPath], { maxBuffer: 16 * 1024 * 1024 });
-    const candles = parseBinanceKlines(stdout, request.symbol);
+    const candles = parseBinanceKlines(stdout, request.symbol, this.interval);
     if (candles.length === 0) throw new Error(`Binance Vision file ${fileName} contains no valid candles.`);
     await Promise.all([
       writeFile(csvCachePath, `${JSON.stringify(candles)}\n`, "utf8"),
@@ -209,7 +210,7 @@ async function verifyChecksum(zipPath: string, checksumPath: string) {
   return actual;
 }
 
-export function parseBinanceKlines(csv: string, symbol = "BTCUSDT") {
+export function parseBinanceKlines(csv: string, symbol = "BTCUSDT", interval: SupportedResearchInterval = "5m") {
   const candles: Candle[] = [];
   for (const line of csv.split(/\r?\n/)) {
     if (!line.trim()) continue;
@@ -244,7 +245,7 @@ export function parseBinanceKlines(csv: string, symbol = "BTCUSDT") {
     ) continue;
     candles.push({
       symbol,
-      interval: "5m",
+      interval,
       time: Math.trunc(openTime / 1000),
       open,
       high,
@@ -270,11 +271,11 @@ function normalizeCandles(candles: Candle[]) {
   return { candles: [...byTime.values()].sort((left, right) => left.time - right.time), duplicateCount };
 }
 
-function countMissingBars(candles: Candle[]) {
+function countMissingBars(candles: Candle[], expectedSeconds: number) {
   let missing = 0;
   for (let index = 1; index < candles.length; index += 1) {
     const delta = candles[index].time - candles[index - 1].time;
-    if (delta > 300) missing += Math.floor(delta / 300) - 1;
+    if (delta > expectedSeconds) missing += Math.floor(delta / expectedSeconds) - 1;
   }
   return missing;
 }
@@ -298,7 +299,12 @@ function parseDate(value: string) {
 }
 
 export type SupportedResearchSymbol = "BTCUSDT" | "ETHUSDT";
+export type SupportedResearchInterval = "1m" | "5m";
 const supportedResearchSymbols: SupportedResearchSymbol[] = ["BTCUSDT", "ETHUSDT"];
+
+function intervalSeconds(interval: SupportedResearchInterval) {
+  return interval === "1m" ? 60 : 300;
+}
 
 function parseYearMonth(value: string) {
   const match = /^(\d{4})-(\d{2})$/.exec(value);
