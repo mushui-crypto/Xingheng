@@ -1,9 +1,18 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Eip1193Provider } from "ethers";
-import { HyperliquidSessionSigner, normalizeSdkError } from "./hyperliquidSdk";
+import { getHyperliquidReconciliationReceipt, HyperliquidSessionSigner, isHyperliquidPendingReconciliationError, normalizeSdkError } from "./hyperliquidSdk";
 
 export type HyperliquidSessionState = "idle" | "initializing" | "authorizing" | "authorized" | "submitting";
 export type HyperliquidSessionMessageTone = "error" | "success" | "";
+
+export type HyperliquidActionResult = {
+  completed: boolean;
+  error?: string;
+  reconciliationRequired?: boolean;
+  reconciliationRequestId?: string;
+  reconciliationCloids?: string[];
+  result?: unknown;
+};
 
 export type HyperliquidSessionController = {
   authorize: () => Promise<HyperliquidSessionSigner | null>;
@@ -12,6 +21,7 @@ export type HyperliquidSessionController = {
   message: string;
   messageTone: HyperliquidSessionMessageTone;
   runAction: (action: (signer: HyperliquidSessionSigner) => Promise<unknown>, successMessage: string) => Promise<boolean>;
+  runActionResult: (action: (signer: HyperliquidSessionSigner) => Promise<unknown>, successMessage: string) => Promise<HyperliquidActionResult>;
   setError: (message: string) => void;
   setMessage: (message: string) => void;
   signer: HyperliquidSessionSigner | null;
@@ -65,23 +75,35 @@ export function useHyperliquidSessionSigner(provider: Eip1193Provider | null, wa
     }
   }, [provider, setError, setMessage, walletAddress]);
 
-  const runAction = useCallback(async (action: (activeSigner: HyperliquidSessionSigner) => Promise<unknown>, successMessage: string) => {
+  const runActionResult = useCallback(async (action: (activeSigner: HyperliquidSessionSigner) => Promise<unknown>, successMessage: string): Promise<HyperliquidActionResult> => {
     const activeSigner = signer ?? await authorize();
-    if (!activeSigner) return false;
+    if (!activeSigner) return { completed: false, error: "会话签名器未授权。" };
     setMessageValue("");
     setMessageTone("");
     setState("submitting");
     try {
-      await action(activeSigner);
+      const result = await action(activeSigner);
       setState("authorized");
       setMessage(successMessage);
-      return true;
+      return { completed: true, result };
     } catch (error) {
       setState("authorized");
-      setError(normalizeSdkError(error));
-      return false;
+      const normalizedError = normalizeSdkError(error);
+      setError(normalizedError);
+      const receipt = getHyperliquidReconciliationReceipt(error);
+      return {
+        completed: false,
+        error: normalizedError,
+        reconciliationRequired: isHyperliquidPendingReconciliationError(error),
+        reconciliationRequestId: receipt?.requestId,
+        reconciliationCloids: receipt?.cloids ?? (receipt?.cloid ? [receipt.cloid] : undefined),
+      };
     }
   }, [authorize, setError, setMessage, signer]);
+
+  const runAction = useCallback(async (action: (activeSigner: HyperliquidSessionSigner) => Promise<unknown>, successMessage: string) => (
+    await runActionResult(action, successMessage)
+  ).completed, [runActionResult]);
 
   return {
     authorize,
@@ -90,6 +112,7 @@ export function useHyperliquidSessionSigner(provider: Eip1193Provider | null, wa
     message,
     messageTone,
     runAction,
+    runActionResult,
     setError,
     setMessage,
     signer,

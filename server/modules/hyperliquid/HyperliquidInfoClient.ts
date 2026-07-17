@@ -197,6 +197,33 @@ export class HyperliquidInfoClient {
     };
   }
 
+  async getOrderStatus(address: string, cloidInput: unknown) {
+    const user = normalizeAddress(address);
+    const cloid = normalizeCloid(cloidInput);
+    const payload = await this.postInfo({ type: "orderStatus", user, oid: cloid });
+    if (payload?.status === "unknownOid") {
+      return {
+        authoritative: true as const,
+        cloid,
+        network: hyperliquidTestnetNetwork,
+        order: null,
+        status: "unknown" as const,
+        timestamp: Date.now(),
+      };
+    }
+    if (payload?.status !== "order" || !payload.order) {
+      throw new Error("Hyperliquid orderStatus returned an invalid payload.");
+    }
+    return {
+      authoritative: true as const,
+      cloid,
+      network: hyperliquidTestnetNetwork,
+      order: normalizeHistoricalOrder(payload.order),
+      status: "order" as const,
+      timestamp: Date.now(),
+    };
+  }
+
   async getFees(address: string): Promise<RealTradingFees> {
     const user = normalizeAddress(address);
     try {
@@ -437,6 +464,12 @@ export function normalizeAddress(value: unknown) {
   return address;
 }
 
+export function normalizeCloid(value: unknown) {
+  const cloid = String(value ?? "").trim().toLowerCase();
+  if (!/^0x[a-f0-9]{32}$/.test(cloid)) throw new Error("请输入有效的 Hyperliquid cloid。");
+  return cloid;
+}
+
 export function normalizeMarketSummary(symbol: string, providerCoin: string, context: HyperliquidAssetContext): RealTradingMarketSummary {
   const markPrice = toNullableNumber(context.markPx);
   const previousDayPrice = toNullableNumber(context.prevDayPx);
@@ -660,6 +693,7 @@ function normalizeAccountSummary(
     spotUsdcBalance,
     spotBalances,
     timestamp: Date.now(),
+    status: "connected",
     network: hyperliquidTestnetNetwork,
     warnings: spotResult.ok ? [] : [spotResult.warning],
   };

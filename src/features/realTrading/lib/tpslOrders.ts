@@ -1,9 +1,11 @@
 import type { HyperliquidTriggerOrderInput } from "./hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "./hyperliquidPrice";
+import { deriveHyperliquidCloid, type HyperliquidCloid } from "./hyperliquidCloid";
 
 export function buildPositionTpslOrders({
   asset,
   closingIsBuy,
+  parentCloid,
   referencePrice,
   size,
   slPrice,
@@ -12,6 +14,7 @@ export function buildPositionTpslOrders({
 }: {
   asset: number;
   closingIsBuy: boolean;
+  parentCloid: HyperliquidCloid;
   referencePrice: number;
   size: string;
   slPrice?: string;
@@ -25,14 +28,15 @@ export function buildPositionTpslOrders({
   validateTriggerDirection({ closingIsBuy, referencePrice, sl, tp });
 
   const orders: HyperliquidTriggerOrderInput[] = [];
-  if (tp !== null) orders.push(buildTriggerOrder(asset, closingIsBuy, size, tp, "tp", szDecimals));
-  if (sl !== null) orders.push(buildTriggerOrder(asset, closingIsBuy, size, sl, "sl", szDecimals));
+  if (tp !== null) orders.push(buildTriggerOrder(asset, closingIsBuy, parentCloid, size, tp, "tp", szDecimals));
+  if (sl !== null) orders.push(buildTriggerOrder(asset, closingIsBuy, parentCloid, size, sl, "sl", szDecimals));
   return orders;
 }
 
 function buildTriggerOrder(
   asset: number,
   isBuy: boolean,
+  parentCloid: HyperliquidCloid,
   size: string,
   triggerPrice: number,
   tpsl: "sl" | "tp",
@@ -41,6 +45,7 @@ function buildTriggerOrder(
   const price = triggerPrice * (isBuy ? 1.1 : 0.9);
   return {
     asset,
+    cloid: deriveHyperliquidCloid(parentCloid, tpsl),
     isBuy,
     price: normalizeHyperliquidPrice(price, szDecimals, isBuy ? "up" : "down"),
     size,

@@ -1,29 +1,33 @@
 import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from "lightweight-charts";
 import { RefreshCw } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Button } from "../../components/ui/Button";
 import { MarketSymbolPicker, type MarketPickerSymbol } from "../../components/trading/MarketSymbolPicker";
 import {
   fetchRealAccountSummary,
   fetchRealCandles,
+  fetchRealTradingCloidStatus,
+  fetchRealTradingOrderAudit,
   fetchRealMarketSummary,
-  fetchRealOpenOrders,
-  fetchRealOrderHistory,
   fetchRealOrderbook,
   fetchRealPositions,
   fetchRealTrades,
   fetchRealTradingFees,
+  fetchRealTradingOrderState,
   fetchRealTradingSymbols,
+  requestRealTradingRealtimeToken,
   type RealAccountSummary,
   type RealCandle,
   type RealMarketSummary,
   type RealOpenOrder,
   type RealOrderHistory,
+  type RealTradingOrderState,
   type RealOrderbook,
   type RealPosition,
   type RealTrade,
   type RealTradingFees,
+  type RealTradingUserStreamEvent,
   type RealTradingSymbol,
 } from "../../api/realTrading";
 import { getChartPriceFormat, normalizeChartCandles, positionLatestCandleInInitialView, toChartCandle } from "../../features/trading/lib/chart";
@@ -43,6 +47,19 @@ import {
 } from "../../features/realTrading/lib/realTradingMarket";
 import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
 import { getRealTradingDisplayPriceDecimals } from "../../features/realTrading/lib/realTradingDisplayPrecision";
+import {
+  initialRealTradingRealtimeState,
+  normalizeRealTradingConnectionStatus,
+  normalizeRealTradingOrderStatus,
+  realTradingOrderStatusLabel,
+  realTradingRealtimeReducer,
+  type RealTradingConnectionStatus,
+  type RealTradingOrderLifecycle,
+} from "../../features/realTrading/model/realtimeState";
+import {
+  decideRealTradingUserStreamSequence,
+  parseRealTradingUserStreamEvent,
+} from "../../features/realTrading/model/userStreamState";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import { formatCompactMoney, formatFundingPercent, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import type { CandleInterval } from "../../types";
@@ -50,6 +67,8 @@ import { formatPrice } from "../../utils/price";
 import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
 
 const realCandlePollingIntervalMs = 2_000;
+const realMarketStaleAfterMs = 10_000;
+const realOrderFallbackPollingIntervalMs = 5_000;
 
 export function RealTradePage() {
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
@@ -73,9 +92,15 @@ export function RealTradePage() {
   const [latestCandle, setLatestCandle] = useState<RealCandle | null>(null);
   const [connectMessage, setConnectMessage] = useState("");
   const [walletProvider, setWalletProvider] = useState<Eip1193Provider | null>(null);
+  const [realtimeState, dispatchRealtime] = useReducer(realTradingRealtimeReducer, initialRealTradingRealtimeState);
+  const [orderConnectionStatus, setOrderConnectionStatus] = useState<RealTradingConnectionStatus>("reconnecting");
+  const [userStreamRetryKey, setUserStreamRetryKey] = useState(0);
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const orderSequenceRef = useRef<number | null>(null);
+  const userStreamSequenceRef = useRef<number | null>(null);
+  const accountRequestGenerationRef = useRef(0);
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
@@ -85,6 +110,14 @@ export function RealTradePage() {
     && recordBelongsToMarket(item, selectedConfig, symbols)
   )) ?? null;
   const isConnected = Boolean(walletAddress);
+  const effectiveConnectionStatus = isConnected
+    ? combineConnectionStatuses(realtimeState.connectionStatus, orderConnectionStatus)
+    : realtimeState.connectionStatus;
+  const marketReady = effectiveConnectionStatus === "connected";
+  const pendingReconciliationOrders = realtimeState.orders.filter((order) => order.status === "pending_reconciliation");
+  const contractEquity = account?.crossAccountValue ?? account?.accountValue;
+  const totalExposure = positions.reduce((sum, item) => sum + realPositionNotional(item), 0)
+    + openOrders.reduce((sum, item) => sum + realOrderNotional(item), 0);
   const digits = getRealTradingDisplayPriceDecimals(selectedConfig?.pxDecimals);
   const pickerSymbols = useMemo<MarketPickerSymbol[]>(
     () => {
@@ -111,10 +144,18 @@ export function RealTradePage() {
     },
     [selectedSymbol, symbols],
   );
+  const wsUrl = useMemo(() => {
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    return `${protocol}//${window.location.host}/ws`;
+  }, []);
 
   const loadMarket = async (symbol = selectedSymbol) => {
+    dispatchRealtime({ type: "retry_requested" });
     setMarketLoading(true);
     setMarketError("");
+    setMarketSummary(null);
+    setOrderbook(null);
+    setTrades([]);
     try {
       const [nextSymbols, nextSummary, nextOrderbook, nextTrades] = await Promise.all([
         fetchRealTradingSymbols().catch((error) => {
@@ -131,51 +172,100 @@ export function RealTradePage() {
       setMarketSummary(nextSummary);
       setOrderbook(nextOrderbook);
       setTrades(nextTrades);
+      dispatchRealtime({
+        type: "heartbeat",
+        at: Date.now(),
+        status: resolveMarketConnectionStatus(nextSummary, nextOrderbook),
+      });
     } catch (error) {
       setMarketError(error instanceof Error ? error.message : "真实交易市场数据加载失败。");
       setMarketSummary(null);
       setOrderbook(null);
       setTrades([]);
+      dispatchRealtime({ type: "connection_failed" });
     } finally {
       setMarketLoading(false);
     }
   };
 
-  const loadAccount = async (address = walletAddress) => {
-    if (!address) {
-      setAccountError("");
+  const applyOrderState = (nextState: RealTradingOrderState) => {
+    const connectionStatus = normalizeRealTradingConnectionStatus(nextState.status) ?? "connected";
+    setOrderConnectionStatus(connectionStatus);
+    if (nextState.mode === "snapshot") {
+      orderSequenceRef.current = nextState.sequence;
+      if (nextState.stale || nextState.reconnecting || connectionStatus !== "connected") {
+        setOpenOrders([]);
+        setHistory({ orders: [], fills: [], nextCursor: null, warnings: nextState.warnings });
+        dispatchRealtime({ type: "snapshot_succeeded", orders: [] });
+        return;
+      }
+      const nextHistory = { orders: nextState.orders, fills: nextState.fills, nextCursor: null, warnings: nextState.warnings };
+      setOpenOrders(nextState.openOrders);
+      setHistory(nextHistory);
+      dispatchRealtime({ type: "snapshot_succeeded", orders: buildSnapshotOrderLifecycles(nextState.openOrders, nextHistory) });
+      return;
+    }
+
+    if (orderSequenceRef.current !== nextState.baseSequence) {
+      orderSequenceRef.current = null;
+      setOpenOrders([]);
+      setHistory(null);
+      dispatchRealtime({ type: "snapshot_started" });
+      return;
+    }
+    orderSequenceRef.current = nextState.sequence;
+    setOpenOrders((current) => applyOpenOrderIncremental(current, nextState));
+    setHistory((current) => applyHistoryIncremental(current, nextState));
+    lifecycleUpdatesFromIncremental(nextState).forEach((order) => dispatchRealtime({ type: "order_updated", order }));
+  };
+
+  const refreshOrderState = async (address: string, forceSnapshot = false) => {
+    const state = await fetchRealTradingOrderState(address, forceSnapshot ? null : orderSequenceRef.current);
+    applyOrderState(state);
+  };
+
+  const loadAccount = async (address = walletAddress, forceSnapshot = false) => {
+    const requestGeneration = ++accountRequestGenerationRef.current;
+    if (forceSnapshot) orderSequenceRef.current = null;
+    const needsSnapshot = orderSequenceRef.current === null;
+    if (needsSnapshot) {
+      setOrderConnectionStatus("reconnecting");
+      dispatchRealtime({ type: "snapshot_started" });
       setAccount(null);
       setFees(null);
       setPositions([]);
       setOpenOrders([]);
       setHistory(null);
+    }
+    if (!address) {
+      setAccountError("");
+      orderSequenceRef.current = null;
+      setOrderConnectionStatus("connected");
+      dispatchRealtime({ type: "snapshot_succeeded", orders: [] });
       return;
     }
     setAccountLoading(true);
     setAccountError("");
     try {
-      const [nextAccount, nextFees, nextPositions, nextOpenOrders, nextHistory] = await Promise.all([
+      const [nextAccount, nextFees, nextPositions, nextOrderState] = await Promise.all([
         fetchRealAccountSummary(address),
         fetchRealTradingFees(address),
         fetchRealPositions(address),
-        fetchRealOpenOrders(address),
-        fetchRealOrderHistory(address),
+        fetchRealTradingOrderState(address, needsSnapshot ? null : orderSequenceRef.current),
       ]);
       const enrichedPositions = await enrichPositionMarks(nextPositions, fetchRealMarketSummary);
+      if (requestGeneration !== accountRequestGenerationRef.current) return;
       setAccount(nextAccount);
       setFees(nextFees);
       setPositions(enrichedPositions);
-      setOpenOrders(nextOpenOrders);
-      setHistory(nextHistory);
+      applyOrderState(nextOrderState);
     } catch (error) {
-      setAccountError(error instanceof Error ? error.message : "真实账户数据加载失败。");
-      setAccount(null);
-      setFees(null);
-      setPositions([]);
-      setOpenOrders([]);
-      setHistory(null);
+      if (requestGeneration !== accountRequestGenerationRef.current) return;
+      const message = error instanceof Error ? error.message : "真实账户数据加载失败。";
+      setAccountError(message);
+      dispatchRealtime({ type: "snapshot_failed", message });
     } finally {
-      setAccountLoading(false);
+      if (requestGeneration === accountRequestGenerationRef.current) setAccountLoading(false);
     }
   };
 
@@ -204,6 +294,7 @@ export function RealTradePage() {
     const handleAccountsChanged = (...args: unknown[]) => {
       const accounts = args[0];
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
+      orderSequenceRef.current = null;
       setWalletAddress(address);
       setConnectMessage(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。");
       void loadAccount(address);
@@ -213,6 +304,227 @@ export function RealTradePage() {
     return () => walletProvider.removeListener?.("accountsChanged", handleAccountsChanged);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [walletProvider]);
+
+  useEffect(() => {
+    if (!walletAddress) return;
+    if (orderConnectionStatus === "connected") return;
+    let cancelled = false;
+    let polling = false;
+    const poll = async () => {
+      if (cancelled || polling || document.visibilityState === "hidden") return;
+      polling = true;
+      try {
+        await refreshOrderState(walletAddress);
+      } catch {
+        if (!cancelled) setOrderConnectionStatus("stale");
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), realOrderFallbackPollingIntervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [orderConnectionStatus, walletAddress]);
+
+  useEffect(() => {
+    if (!walletAddress) {
+      userStreamSequenceRef.current = null;
+      return;
+    }
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let reconnectTimer: number | null = null;
+    let reconnectAttempt = 0;
+
+    const clearAuthoritativeUserState = () => {
+      accountRequestGenerationRef.current += 1;
+      orderSequenceRef.current = null;
+      setAccount(null);
+      setPositions([]);
+      setOpenOrders([]);
+      setHistory(null);
+      dispatchRealtime({ type: "snapshot_started" });
+    };
+
+    const scheduleReconnect = () => {
+      if (cancelled || reconnectTimer !== null) return;
+      setOrderConnectionStatus("reconnecting");
+      clearAuthoritativeUserState();
+      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempt, 5));
+      reconnectAttempt += 1;
+      reconnectTimer = window.setTimeout(() => {
+        reconnectTimer = null;
+        void connect();
+      }, delay);
+    };
+
+    const applyStreamEvent = (event: RealTradingUserStreamEvent) => {
+      const sequenceDecision = decideRealTradingUserStreamSequence(userStreamSequenceRef.current, event);
+      if (sequenceDecision === "ignore") return;
+      if (sequenceDecision === "gap") {
+        setAccountError("真实交易实时序列不连续，正在恢复权威快照。");
+        userStreamSequenceRef.current = null;
+        socket?.close();
+        scheduleReconnect();
+        return;
+      }
+      userStreamSequenceRef.current = event.sequence;
+      const connectionStatus = normalizeRealTradingConnectionStatus(event.status) ?? "reconnecting";
+      setOrderConnectionStatus(connectionStatus);
+      if (event.stale || event.reconnecting || connectionStatus !== "connected") {
+        clearAuthoritativeUserState();
+        return;
+      }
+      setAccountError("");
+      reconnectAttempt = 0;
+      if (event.channel === "snapshot") {
+        if (!applyUserStreamSnapshot(event.data, applyOrderState, setAccount, setPositions)) {
+          setAccountError("真实交易实时快照格式异常，正在重新同步。");
+          socket?.close();
+        }
+        return;
+      }
+      if (event.channel === "open_orders" && Array.isArray(event.data)) {
+        const nextOrders = event.data as RealOpenOrder[];
+        setOpenOrders(nextOrders);
+        buildSnapshotOrderLifecycles(nextOrders, emptyRealOrderHistory()).forEach((order) => {
+          dispatchRealtime({ type: "order_updated", order });
+        });
+        return;
+      }
+      if (event.channel === "orders" && Array.isArray(event.data)) {
+        const nextOrders = event.data as RealOrderHistory["orders"];
+        setHistory((current) => mergeStreamOrders(current, nextOrders));
+        buildSnapshotOrderLifecycles([], { ...emptyRealOrderHistory(), orders: nextOrders }).forEach((order) => {
+          dispatchRealtime({ type: "order_updated", order });
+        });
+        return;
+      }
+      if (event.channel === "fills" && Array.isArray(event.data)) {
+        const nextFills = event.data as RealOrderHistory["fills"];
+        setHistory((current) => mergeStreamFills(current, nextFills));
+        buildSnapshotOrderLifecycles([], { ...emptyRealOrderHistory(), fills: nextFills }).forEach((order) => {
+          dispatchRealtime({ type: "order_updated", order });
+        });
+        return;
+      }
+      if (event.channel === "account") {
+        if (!applyUserStreamAccount(event.data, setAccount, setPositions)) {
+          setAccountError("真实交易账户增量格式异常，正在重新同步。");
+          socket?.close();
+        }
+      }
+    };
+
+    async function connect() {
+      if (cancelled) return;
+      setOrderConnectionStatus("reconnecting");
+      try {
+        const grant = await requestRealTradingRealtimeToken(walletAddress);
+        if (cancelled) return;
+        socket = new WebSocket(wsUrl);
+        socket.addEventListener("open", () => {
+          if (cancelled || !socket) return;
+          socket.send(JSON.stringify({ type: "subscribe", channel: "real-trading-user", token: grant.token }));
+        });
+        socket.addEventListener("message", (message) => {
+          if (cancelled) return;
+          let payload: unknown;
+          try {
+            payload = JSON.parse(String(message.data));
+          } catch {
+            return;
+          }
+          const event = parseRealTradingUserStreamEvent(payload, walletAddress);
+          if (event) {
+            applyStreamEvent(event);
+            return;
+          }
+          if (isSocketError(payload)) {
+            setAccountError(payload.message);
+            socket?.close();
+          }
+        });
+        socket.addEventListener("close", () => {
+          if (!cancelled) scheduleReconnect();
+        });
+        socket.addEventListener("error", () => socket?.close());
+      } catch (error) {
+        if (!cancelled) {
+          setAccountError(error instanceof Error ? error.message : "真实交易实时订阅失败。");
+          scheduleReconnect();
+        }
+      }
+    }
+
+    userStreamSequenceRef.current = null;
+    void connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer !== null) window.clearTimeout(reconnectTimer);
+      socket?.close();
+    };
+    // The stream owns its reconnect lifecycle; account/symbol renders must not create parallel sockets.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userStreamRetryKey, walletAddress, wsUrl]);
+
+  useEffect(() => {
+    if (!walletAddress || pendingReconciliationOrders.length === 0) return;
+    let cancelled = false;
+    let checking = false;
+    const reconcile = async () => {
+      if (cancelled || checking || document.visibilityState === "hidden") return;
+      checking = true;
+      try {
+        const results = await Promise.allSettled(pendingReconciliationOrders.map(async (order) => {
+          if (order.requestId) return { kind: "audit" as const, value: await fetchRealTradingOrderAudit(order.requestId) };
+          return { kind: "cloid" as const, value: await fetchRealTradingCloidStatus(walletAddress, order.clientOrderId) };
+        }));
+        if (cancelled) return;
+        results.forEach((result, index) => {
+          if (result.status !== "fulfilled") return;
+          const pending = pendingReconciliationOrders[index];
+          if (result.value.kind === "audit") {
+            const audit = result.value.value;
+            if (audit.reconcileRequired) return;
+            dispatchRealtime({
+              type: "order_updated",
+              order: {
+                ...pending,
+                message: audit.errorCategory ?? undefined,
+                requestId: audit.requestId,
+                status: normalizeRealTradingOrderStatus(audit.orderState) ?? "accepted",
+                updatedAt: audit.timestamp,
+              },
+            });
+            return;
+          }
+          const cloidStatus = result.value.value;
+          if (cloidStatus.status !== "order" || !cloidStatus.order) return;
+          const lifecycle = orderLifecycleFromSnapshot(cloidStatus.order, "accepted", pending.clientOrderId);
+          dispatchRealtime({ type: "order_updated", order: { ...lifecycle, clientOrderId: pending.clientOrderId, updatedAt: cloidStatus.timestamp } });
+        });
+      } finally {
+        checking = false;
+      }
+    };
+    void reconcile();
+    const timer = window.setInterval(() => void reconcile(), realOrderFallbackPollingIntervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [pendingReconciliationOrders.map((order) => `${order.clientOrderId}:${order.requestId ?? ""}`).join("|"), walletAddress]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      dispatchRealtime({ type: "heartbeat_timeout", at: Date.now(), staleAfterMs: realMarketStaleAfterMs });
+    }, 1_000);
+    return () => window.clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     const container = chartContainerRef.current;
@@ -319,6 +631,7 @@ export function RealTradePage() {
         latestCandleTime = latest.time;
         setLatestCandle(latest);
         setChartMessage("");
+        dispatchRealtime({ type: "heartbeat", at: Date.now() });
       } catch {
         // Keep the last valid candle visible; the next polling tick retries automatically.
       } finally {
@@ -362,6 +675,7 @@ export function RealTradePage() {
         setConnectMessage("钱包未返回账户地址。");
         return;
       }
+      orderSequenceRef.current = null;
       setWalletAddress(address);
       await loadAccount(address);
       setConnectMessage("主账户地址已连接。");
@@ -410,6 +724,15 @@ export function RealTradePage() {
     await loadAccount(walletAddress);
   };
 
+  const retryRealtimeSnapshot = async () => {
+    userStreamSequenceRef.current = null;
+    setUserStreamRetryKey((current) => current + 1);
+    await Promise.all([
+      loadMarket(selectedSymbol),
+      walletAddress ? loadAccount(walletAddress, true) : Promise.resolve(),
+    ]);
+  };
+
   return (
     <div className="xh-trade-terminal xh-real-trade-terminal">
       <section className="xh-trade-marketbar">
@@ -429,9 +752,21 @@ export function RealTradePage() {
           <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
           <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
           <TradeStat label="Funding" value={formatFundingPercent(marketSummary?.funding)} tone={marketNumberTone(marketSummary?.funding)} />
-          <TradeStat label="Status" value={marketSummary?.status ?? (marketLoading ? "LOADING" : "-")} tone={marketSummary?.status?.toLowerCase() === "live" ? "positive" : undefined} />
+          <TradeStat label="Status" value={connectionStatusLabel(effectiveConnectionStatus)} tone={marketReady ? "positive" : undefined} />
         </div>
       </section>
+
+      {effectiveConnectionStatus !== "connected" ? (
+        <section className={`xh-real-connection-banner is-${effectiveConnectionStatus}`} role="alert">
+          <div>
+            <strong>{connectionStatusTitle(effectiveConnectionStatus)}</strong>
+            <span>{connectionStatusMessage(effectiveConnectionStatus)}</span>
+          </div>
+          <Button disabled={effectiveConnectionStatus === "reconnecting"} onClick={() => void retryRealtimeSnapshot()} type="button" variant="secondary">
+            {effectiveConnectionStatus === "reconnecting" ? "重连中" : "手动重试"}
+          </Button>
+        </section>
+      ) : null}
 
       <div className="xh-trade-grid">
         <main className="xh-trade-main">
@@ -450,7 +785,7 @@ export function RealTradePage() {
                   ))}
                 </div>
                 <div className="xh-real-live-source">
-                  <span /> Hyperliquid · REST
+                  <span /> Hyperliquid · REST + USER WS
                   <button aria-label="刷新真实行情" disabled={marketLoading} onClick={() => void loadMarket(selectedSymbol)} type="button">
                     <RefreshCw className={marketLoading ? "animate-spin" : ""} size={14} />
                   </button>
@@ -523,18 +858,25 @@ export function RealTradePage() {
             availableMargin={account?.availableMargin ?? account?.withdrawable}
             connected={isConnected}
             connectionMessage={connectMessage}
+            equity={contractEquity}
             markPrice={marketSummary?.markPrice}
             fees={fees}
+            latestOrderLifecycle={realtimeState.orders[0] ?? null}
             marginModeConstraint={selectedConfig?.marginModeConstraint}
+            marketReady={marketReady}
             maxLeverage={selectedConfig?.maxLeverage}
             onConnect={connectWallet}
+            onOrderLifecycle={(phase, order) => dispatchRealtime({ type: phase === "submitted" ? "order_submitted" : "order_updated", order })}
             onSubmitted={() => loadAccount(walletAddress)}
+            openOrderCount={openOrders.length}
+            reconciliationPending={pendingReconciliationOrders.length > 0}
             position={selectedPosition}
             positionSize={selectedPosition ? Math.abs(selectedPosition.size) : 0}
             session={tradingSession}
             supportedMarginModes={selectedConfig?.supportedMarginModes}
             szDecimals={selectedConfig?.szDecimals}
             symbol={selectedSymbol}
+            totalExposure={totalExposure}
           />
           <ConnectionPanel
             account={account}
@@ -633,7 +975,12 @@ function RealRecords({
       >
         {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} rows={positions} symbols={symbols} /> : null}
         {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
-        {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => item.order ?? item)} /> : null}
+        {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => ({
+          ...item.order,
+          ...item,
+          status: item.status ?? item.order?.status,
+          timestamp: item.statusTimestamp ?? item.timestamp,
+        }))} /> : null}
         {tab === "fills" ? <FillTable rows={history?.fills ?? []} /> : null}
         {history?.warnings.length ? (
           <p className="border-t border-line px-4 py-3 text-xs text-amber-200" role="status">部分历史数据暂不可用：{history.warnings.join("；")}</p>
@@ -778,10 +1125,259 @@ function formatTime(value?: number) {
 }
 
 function formatOrderType(order: RealOpenOrder) {
+  const lifecycleStatus = normalizeRealTradingOrderStatus(order.lifecycleStatus ?? order.status);
+  if (lifecycleStatus) return realTradingOrderStatusLabel(lifecycleStatus);
   if (order.isTrigger) return order.orderType ?? order.triggerCondition ?? "TP/SL";
-  return order.status ?? order.orderType ?? "-";
+  return order.orderType ?? "-";
 }
 
 function toneClass(tone?: "positive" | "negative") {
   return tone ? `is-${tone}` : "";
+}
+
+function resolveMarketConnectionStatus(summary: RealMarketSummary, orderbook: RealOrderbook) {
+  return normalizeRealTradingConnectionStatus(
+    summary.connectionStatus
+    ?? summary.realtimeStatus
+    ?? orderbook.connectionStatus
+    ?? orderbook.realtimeStatus
+    ?? summary.status,
+  ) ?? "connected";
+}
+
+function connectionStatusLabel(status: typeof initialRealTradingRealtimeState.connectionStatus) {
+  return {
+    connected: "CONNECTED",
+    stale: "STALE",
+    disconnected: "DISCONNECTED",
+    reconnecting: "RECONNECTING",
+  }[status];
+}
+
+function connectionStatusTitle(status: typeof initialRealTradingRealtimeState.connectionStatus) {
+  return {
+    connected: "行情已连接",
+    stale: "行情数据已延迟",
+    disconnected: "行情数据连接已中断",
+    reconnecting: "正在恢复行情快照",
+  }[status];
+}
+
+function connectionStatusMessage(status: typeof initialRealTradingRealtimeState.connectionStatus) {
+  return {
+    connected: "真实交易行情可用。",
+    stale: "超过 10 秒未取得新行情，已暂停新订单。可手动重试恢复快照。",
+    disconnected: "当前真实行情不可用，已暂停新订单。请检查网络后手动重试。",
+    reconnecting: "旧快照已撤下，恢复完成前不会使用旧行情或旧账户状态。",
+  }[status];
+}
+
+function combineConnectionStatuses(
+  market: RealTradingConnectionStatus,
+  orders: RealTradingConnectionStatus,
+): RealTradingConnectionStatus {
+  const severity: Record<RealTradingConnectionStatus, number> = {
+    connected: 0,
+    stale: 1,
+    reconnecting: 2,
+    disconnected: 3,
+  };
+  return severity[market] >= severity[orders] ? market : orders;
+}
+
+function buildSnapshotOrderLifecycles(openOrders: RealOpenOrder[], history: RealOrderHistory) {
+  const byId = new Map<string, RealTradingOrderLifecycle>();
+  const add = (record: RealTradingOrderLifecycle) => {
+    const key = record.exchangeOrderId ?? record.clientOrderId;
+    const previous = byId.get(key);
+    if (!previous || previous.updatedAt <= record.updatedAt) byId.set(key, record);
+  };
+
+  openOrders.forEach((order, index) => {
+    add(orderLifecycleFromSnapshot(order, "accepted", `open:${index}`));
+  });
+  history.orders.forEach((item, index) => {
+    const order = { ...item.order, ...item };
+    add(orderLifecycleFromSnapshot(order, "accepted", `history:${index}`, item.statusTimestamp));
+  });
+  history.fills.forEach((fill, index) => {
+    const exchangeOrderId = fill.oid === undefined ? undefined : String(fill.oid);
+    add({
+      clientOrderId: exchangeOrderId ? `snapshot:${exchangeOrderId}` : `fill:${fill.tid ?? index}`,
+      exchangeOrderId,
+      status: "filled",
+      symbol: fill.symbol ?? fill.coin,
+      updatedAt: normalizeSnapshotTimestamp(fill.timestamp ?? fill.time),
+    });
+  });
+  return [...byId.values()];
+}
+
+function orderLifecycleFromSnapshot(
+  order: RealOpenOrder,
+  fallbackStatus: RealTradingOrderLifecycle["status"],
+  fallbackId: string,
+  fallbackTimestamp?: number,
+): RealTradingOrderLifecycle {
+  const exchangeOrderId = order.oid === undefined ? undefined : String(order.oid);
+  return {
+    clientOrderId: order.cloid ?? order.clientOrderId ?? (exchangeOrderId ? `snapshot:${exchangeOrderId}` : fallbackId),
+    exchangeOrderId,
+    status: normalizeRealTradingOrderStatus(order.lifecycleStatus ?? order.status) ?? fallbackStatus,
+    symbol: order.symbol ?? order.coin,
+    updatedAt: normalizeSnapshotTimestamp(order.updatedAt ?? fallbackTimestamp ?? order.timestamp),
+  };
+}
+
+function normalizeSnapshotTimestamp(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return Date.now();
+  return value < 10_000_000_000 ? value * 1_000 : value;
+}
+
+function realPositionNotional(position: RealPosition) {
+  if (typeof position.positionValue === "number" && Number.isFinite(position.positionValue)) return Math.abs(position.positionValue);
+  const markPrice = position.markPx ?? position.markPrice;
+  return typeof markPrice === "number" && Number.isFinite(markPrice) ? Math.abs(position.size * markPrice) : 0;
+}
+
+function realOrderNotional(order: RealOpenOrder) {
+  const price = Number(order.price ?? order.limitPx);
+  const size = Number(order.size ?? order.sz);
+  return Number.isFinite(price) && Number.isFinite(size) ? Math.abs(price * size) : 0;
+}
+
+function applyOpenOrderIncremental(current: RealOpenOrder[], state: Extract<RealTradingOrderState, { mode: "incremental" }>) {
+  const removed = new Set(state.openOrders.removedOrderIds);
+  const next = current.filter((order) => !removed.has(realOrderIdentity(order)));
+  state.openOrders.upserted.forEach((order) => {
+    const identity = realOrderIdentity(order);
+    const index = next.findIndex((item) => realOrderIdentity(item) === identity);
+    if (index >= 0) next[index] = order;
+    else next.push(order);
+  });
+  return next;
+}
+
+function applyHistoryIncremental(
+  current: RealOrderHistory | null,
+  state: Extract<RealTradingOrderState, { mode: "incremental" }>,
+): RealOrderHistory {
+  const orders = [...(current?.orders ?? [])];
+  const fills = [...(current?.fills ?? [])];
+  const orderKeys = new Set(orders.map(realHistoricalOrderIdentity));
+  const fillKeys = new Set(fills.map(realFillIdentity));
+  state.terminalOrders.forEach((order) => {
+    const key = realHistoricalOrderIdentity(order);
+    if (!orderKeys.has(key)) {
+      orderKeys.add(key);
+      orders.unshift(order);
+    }
+  });
+  state.fills.forEach((fill) => {
+    const key = realFillIdentity(fill);
+    if (!fillKeys.has(key)) {
+      fillKeys.add(key);
+      fills.unshift(fill);
+    }
+  });
+  return { orders, fills, nextCursor: current?.nextCursor ?? null, warnings: state.warnings };
+}
+
+type StateSetter<T> = (value: T | ((current: T) => T)) => void;
+
+function applyUserStreamSnapshot(
+  value: unknown,
+  applyOrderState: (state: RealTradingOrderState) => void,
+  setAccount: StateSetter<RealAccountSummary | null>,
+  setPositions: StateSetter<RealPosition[]>,
+) {
+  if (!isRecord(value) || !isRealTradingOrderState(value.orders) || !isRecord(value.account) || !Array.isArray(value.positions)) {
+    return false;
+  }
+  applyOrderState(value.orders);
+  setAccount(value.account as RealAccountSummary);
+  setPositions(value.positions as RealPosition[]);
+  return true;
+}
+
+function applyUserStreamAccount(
+  value: unknown,
+  setAccount: StateSetter<RealAccountSummary | null>,
+  setPositions: StateSetter<RealPosition[]>,
+) {
+  if (!isRecord(value) || !isRecord(value.account) || !Array.isArray(value.positions)) return false;
+  const update = value.account as Partial<RealAccountSummary>;
+  setAccount((current) => current ? { ...current, ...update } : update as RealAccountSummary);
+  setPositions(value.positions as RealPosition[]);
+  return true;
+}
+
+function mergeStreamOrders(current: RealOrderHistory | null, incoming: RealOrderHistory["orders"]): RealOrderHistory {
+  const byIdentity = new Map<string, RealOrderHistory["orders"][number]>();
+  [...incoming, ...(current?.orders ?? [])].forEach((order) => {
+    const key = `${order.oid ?? order.cloid ?? "unknown"}:${order.status ?? "unknown"}:${order.statusTimestamp ?? order.timestamp ?? 0}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, order);
+  });
+  return { ...(current ?? emptyRealOrderHistory()), orders: [...byIdentity.values()].slice(0, 2_000) };
+}
+
+function mergeStreamFills(current: RealOrderHistory | null, incoming: RealOrderHistory["fills"]): RealOrderHistory {
+  const byIdentity = new Map<string, RealOrderHistory["fills"][number]>();
+  [...incoming, ...(current?.fills ?? [])].forEach((fill) => {
+    const key = `${fill.hash ?? ""}:${fill.tid ?? fill.oid ?? ""}:${fill.timestamp ?? fill.time ?? 0}:${fill.price ?? fill.px ?? ""}:${fill.size ?? fill.sz ?? ""}`;
+    if (!byIdentity.has(key)) byIdentity.set(key, fill);
+  });
+  return { ...(current ?? emptyRealOrderHistory()), fills: [...byIdentity.values()].slice(0, 2_000) };
+}
+
+function emptyRealOrderHistory(): RealOrderHistory {
+  return { orders: [], fills: [], nextCursor: null, warnings: [] };
+}
+
+function isRealTradingOrderState(value: unknown): value is RealTradingOrderState {
+  if (!isRecord(value) || value.authoritative !== true || !Number.isSafeInteger(value.sequence)) return false;
+  return value.mode === "snapshot" || value.mode === "incremental";
+}
+
+function isSocketError(value: unknown): value is { type: "error"; message: string } {
+  return isRecord(value) && value.type === "error" && typeof value.message === "string";
+}
+
+function isRecord(value: unknown): value is Record<string, any> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function lifecycleUpdatesFromIncremental(state: Extract<RealTradingOrderState, { mode: "incremental" }>) {
+  const history: RealOrderHistory = {
+    orders: state.terminalOrders,
+    fills: state.fills,
+    nextCursor: null,
+    warnings: state.warnings,
+  };
+  return [
+    ...buildSnapshotOrderLifecycles(state.openOrders.upserted, history),
+    ...state.openOrders.removedOrderIds.map((exchangeOrderId) => ({
+      clientOrderId: `snapshot:${exchangeOrderId}`,
+      exchangeOrderId,
+      message: "订单已从当前委托移除，正在等待交易所终态对账。",
+      status: "pending_reconciliation" as const,
+      updatedAt: state.timestamp,
+    })),
+  ];
+}
+
+function realOrderIdentity(order: RealOpenOrder) {
+  if (order.oid !== undefined && order.oid !== null) return String(order.oid);
+  if (order.cloid) return order.cloid;
+  if (order.clientOrderId) return order.clientOrderId;
+  return `${order.coin ?? order.symbol ?? "unknown"}:${order.side ?? ""}:${order.timestamp ?? 0}:${order.price ?? order.limitPx ?? ""}:${order.size ?? order.sz ?? ""}`;
+}
+
+function realHistoricalOrderIdentity(order: RealOrderHistory["orders"][number]) {
+  const normalized = { ...order.order, ...order };
+  return `${realOrderIdentity(normalized)}:${normalized.status ?? "unknown"}:${order.statusTimestamp ?? order.timestamp ?? 0}`;
+}
+
+function realFillIdentity(fill: RealOrderHistory["fills"][number]) {
+  return `${fill.hash ?? ""}:${fill.tid ?? ""}:${fill.oid ?? ""}:${fill.coin ?? fill.symbol ?? ""}:${fill.timestamp ?? fill.time ?? 0}:${fill.price ?? fill.px ?? ""}:${fill.size ?? fill.sz ?? ""}`;
 }

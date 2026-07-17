@@ -1,16 +1,21 @@
+import { randomUUID } from "node:crypto";
 import type express from "express";
 import { sendBadRequest } from "./httpResponses";
-import { normalizeAddress, normalizeRealTradingSymbol } from "../hyperliquid/HyperliquidInfoClient";
-import type { HyperliquidExchangeProxy } from "../hyperliquid/HyperliquidExchangeProxy";
+import { normalizeAddress, normalizeCloid, normalizeRealTradingSymbol } from "../hyperliquid/HyperliquidInfoClient";
+import { RealTradingExchangeSubmissionError, type HyperliquidExchangeProxy } from "../hyperliquid/HyperliquidExchangeProxy";
 import type { HyperliquidInfoClient } from "../hyperliquid/HyperliquidInfoClient";
+import type { RealTradingOrderStateService } from "../hyperliquid/RealTradingOrderStateService";
+import type { RealTradingRealtimeTokenService } from "../hyperliquid/RealTradingRealtimeTokenService";
 
 type RealTradingRouteDependencies = {
   app: express.Express;
   info: HyperliquidInfoClient;
   exchange: HyperliquidExchangeProxy;
+  orderState: RealTradingOrderStateService;
+  realtimeTokens: RealTradingRealtimeTokenService;
 };
 
-export function registerRealTradingRoutes({ app, info, exchange }: RealTradingRouteDependencies) {
+export function registerRealTradingRoutes({ app, info, exchange, orderState, realtimeTokens }: RealTradingRouteDependencies) {
   const exchangeRateLimit = createRealTradingRateLimiter();
 
   app.get("/api/real-trading/market/symbols", async (_request, response) => {
@@ -97,18 +102,82 @@ export function registerRealTradingRoutes({ app, info, exchange }: RealTradingRo
     }
   });
 
-  app.post("/api/real-trading/exchange", exchangeRateLimit, async (request, response) => {
+  app.get("/api/real-trading/orders/state", async (request, response) => {
     try {
-      response.json(await exchange.forward(request.body));
+      response.json(await orderState.read(
+        normalizeAddress(request.query.address),
+        normalizeOptionalSequence(request.query.afterSequence),
+      ));
     } catch (error) {
       sendBadRequest(response, error);
     }
   });
+
+  app.get("/api/real-trading/orders/status", async (request, response) => {
+    try {
+      response.setHeader("Cache-Control", "no-store");
+      response.json(await info.getOrderStatus(
+        normalizeAddress(request.query.address),
+        normalizeCloid(request.query.cloid),
+      ));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
+  app.post("/api/real-trading/realtime/token", (request, response) => {
+    try {
+      response.setHeader("Cache-Control", "no-store");
+      response.json(realtimeTokens.issue(request.user!.id, request.body?.address));
+    } catch (error) {
+      sendBadRequest(response, error);
+    }
+  });
+
+  app.post("/api/real-trading/exchange", exchangeRateLimit, async (request, response) => {
+    const requestId = randomUUID();
+    const submittedAt = Date.now();
+    try {
+      response.json(await exchange.forward(request.body, {
+        requestId,
+        submittedAt,
+        userId: request.user!.id,
+      }));
+    } catch (error) {
+      if (error instanceof RealTradingExchangeSubmissionError) {
+        response.status(error.httpStatus).json(error.receipt);
+        return;
+      }
+      response.status(500).json({
+        ok: false,
+        network: "hyperliquid-testnet",
+        requestId,
+        actionType: "unknown",
+        submittedAt,
+        timestamp: Date.now(),
+        accepted: false,
+        rejected: true,
+        outcome: "rejected",
+        needsReconciliation: false,
+        message: "真实交易请求处理失败。",
+      });
+    }
+  });
+}
+
+function normalizeOptionalSequence(value: unknown) {
+  if (value === undefined || value === null || value === "") return null;
+  const sequence = Number(value);
+  if (!Number.isSafeInteger(sequence) || sequence < 0) throw new Error("afterSequence 必须是非负安全整数。");
+  return sequence;
 }
 
 function createRealTradingRateLimiter() {
   const windowMs = 60_000;
-  const max = Number(process.env.REAL_TRADING_EXCHANGE_RATE_LIMIT_MAX ?? 30);
+  const configuredMax = Number(process.env.REAL_TRADING_EXCHANGE_RATE_LIMIT_MAX);
+  const max = Number.isFinite(configuredMax) && configuredMax >= 1
+    ? Math.min(300, Math.floor(configuredMax))
+    : 30;
   const attempts = new Map<string, { count: number; resetAt: number }>();
   return (request: express.Request, response: express.Response, next: express.NextFunction) => {
     const now = Date.now();
@@ -117,10 +186,28 @@ function createRealTradingRateLimiter() {
     const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + windowMs } : current;
     entry.count += 1;
     attempts.set(key, entry);
-    if (entry.count > Math.max(1, Math.floor(max))) {
+    if (attempts.size > 10_000) {
+      for (const [storedKey, value] of attempts) {
+        if (value.resetAt <= now) attempts.delete(storedKey);
+      }
+    }
+    if (entry.count > max) {
       const retryAfter = Math.max(1, Math.ceil((entry.resetAt - now) / 1000));
+      const requestId = randomUUID();
       response.setHeader("Retry-After", String(retryAfter));
-      response.status(429).json({ message: "真实交易请求过于频繁，请稍后再试。" });
+      response.status(429).json({
+        ok: false,
+        network: "hyperliquid-testnet",
+        requestId,
+        actionType: typeof request.body?.action?.type === "string" ? request.body.action.type.slice(0, 64) : "unknown",
+        submittedAt: now,
+        timestamp: now,
+        accepted: false,
+        rejected: true,
+        outcome: "rejected",
+        needsReconciliation: false,
+        message: "真实交易请求过于频繁，请稍后再试。",
+      });
       return;
     }
     next();

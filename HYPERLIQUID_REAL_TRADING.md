@@ -1,6 +1,6 @@
 # Hyperliquid 真实交易接入契约
 
-更新时间：2026-07-13
+更新时间：2026-07-17
 
 本文件定义 `/app/trade` Hyperliquid testnet 真实交易接入的第一阶段工程契约。`/app/demo` 继续承接当前 demo 模拟交易能力，除兼容跳转与命名迁移外，不在真实交易任务中改写既有模拟交易逻辑。
 
@@ -59,6 +59,8 @@ server/modules/api/realTradingRoutes.ts
 - 在数据库、日志、文档或错误信息中保存 / 打印用户 API wallet 私钥、助记词、签名材料。
 
 ## 4. 第一阶段 API 契约
+
+鉴权边界：`/api/real-trading/market/*` 是公开 Testnet 行情；`account / positions / orders / exchange / realtime` 必须通过有效用户会话鉴权，禁用用户返回 `403`。不得用 query、`x-user-id` 或 WebSocket 地址参数绕过用户会话。
 
 ### 4.1 只读市场
 
@@ -158,9 +160,24 @@ server/modules/api/realTradingRoutes.ts
   "ok": true,
   "network": "hyperliquid-testnet",
   "result": {},
-  "timestamp": 1710000001000
+  "timestamp": 1710000001000,
+  "requestId": "server-generated-uuid",
+  "actionType": "order",
+  "submittedAt": 1710000000000,
+  "accepted": true,
+  "rejected": false,
+  "outcome": "accepted",
+  "needsReconciliation": false,
+  "orderStatuses": []
 }
 ```
+
+兼容规则：既有 `ok / network / result / message / status / timestamp` 保留；新增字段用于跟踪与对账。`outcome` 为 `accepted / rejected / partial / pending_reconciliation`：
+
+- 上游明确整批成功：`accepted=true, rejected=false, outcome=accepted`。
+- 上游明确整批拒绝：`accepted=false, rejected=true, outcome=rejected`。
+- batch 部分成功：`accepted=true, rejected=true, outcome=partial`，`orderStatuses` 保留逐订单 `index / status / providerStatus / oid / message`，必须继续权威对账。
+- 已可能转发但发生超时/网络中断：`accepted=false, rejected=false, outcome=pending_reconciliation`；这不是拒绝，禁止盲目重试。
 
 校验：
 
@@ -172,9 +189,62 @@ server/modules/api/realTradingRoutes.ts
   - `updateLeverage`
   - 必要的 close / reduce-only order 仍按 `order` 表达
 - `approveAgent` 仅允许 Hyperliquid Testnet：`action.hyperliquidChain` 必须为 `Testnet`，`action.agentAddress` 必须为合法 EVM 地址。
-- `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是 1 到 50 的 safe integer；非法请求在后端直接拒绝，不转发到 Hyperliquid。品种实际最大杠杆仍由前端根据 symbols `maxLeverage` 限制，并由 Hyperliquid 最终校验。
+- `approveAgent` 转发前必须按 SDK 相同的 EIP-712 数据恢复签名地址，并确认签名者等于声明的 `masterAddress`；交易所明确接受后，SQLite 只记录 `(userId, masterAddress, agentAddress, approvedAt)` 的非敏感授权绑定。
+- 后续 `order / cancel / updateLeverage` 转发前必须恢复 L1 action 签名地址，并确认它等于当前登录用户及 `masterAddress` 已绑定的 agent wallet；不存在绑定或签名不匹配时 fail closed，避免用未绑定地址绕过账户风险快照。
+- `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是正 safe integer；P0 服务端风险门禁默认再限制为 `1..20x`，环境变量只能显式调整该平台上限。品种实际最大杠杆仍由前端取 `min(symbols.maxLeverage, 平台上限)`，并由 Hyperliquid 最终校验。
 - 禁止 withdraw、transfer、staking、builder fee 等资金转移类动作。
-- 后端只做 allowlist 校验、基础字段校验、请求限流、脱敏审计和响应标准化，不修改签名内容，不生成 nonce / signature / expiresAfter。
+- 后端只做 allowlist、基础字段、签名账户绑定、风险门禁、请求限流、脱敏审计和响应标准化；不修改签名内容，不生成 nonce / signature / expiresAfter，也不保存可代签材料。
+- 每笔 `order` 必须在浏览器签名前写入 `order.c`，格式固定为 `0x` + 32 位十六进制 `cloid`。服务端不会事后修改已签名 action。
+- 服务端按 `(userId, masterAddress, network, cloid)` 建立 SQLite 唯一约束并在转发前原子占位。同一 cloid 已有终态时返回原回执，处理中或结果未知时返回 `409 / pending_reconciliation`，不得再次转发。
+
+### 4.4 服务端最小风险门禁
+
+风险门禁只用于阻止新增敞口，不替代 Hyperliquid 风控。默认值可通过环境变量收紧或调整：
+
+| 规则 | 默认值 | 环境变量 |
+| --- | ---: | --- |
+| 最大杠杆 | `20x` | `REAL_TRADING_RISK_MAX_LEVERAGE` |
+| 单笔新增名义 / 权益 | `50%` | `REAL_TRADING_RISK_MAX_ORDER_NOTIONAL_EQUITY_RATIO` |
+| 持仓 + 非 reduce-only 当前委托 + 本批新增名义 / 权益 | `200%` | `REAL_TRADING_RISK_MAX_TOTAL_NOTIONAL_EQUITY_RATIO` |
+| 当前委托 + 本批新增委托 | `20` | `REAL_TRADING_RISK_MAX_OPEN_ORDERS` |
+| 账户 / 市场快照最大年龄 | `10s` | `REAL_TRADING_RISK_MAX_SNAPSHOT_AGE_MS` |
+
+- 开仓前必须重新读取账户、持仓、当前委托、品种目录和对应市场 summary；任一 REST 读取失败、`status!=connected` 或 timestamp 过期时 fail closed。
+- 账户已有任一持仓杠杆高于平台上限时，不允许继续新增敞口。
+- `reduce-only` 平仓/保护单不因账户已超限而被阻断；`cancel` 始终不经过新增敞口门禁。
+- 服务端只校验已签名 action，不修改价格、数量、杠杆、cloid 或签名内容。
+
+### 4.5 权威订单状态与用户实时流
+
+降级 / 恢复接口：
+
+`GET /api/real-trading/orders/state?address=0x...&afterSequence=123`
+
+- 首次、sequence 不连续和断线恢复返回 `mode=snapshot`；正常连续轮询返回 `mode=incremental`。
+- 每个响应包含 `sequence / timestamp / status / stale / reconnecting / authoritative=true`。
+- 增量只比较 Hyperliquid `openOrders + historicalOrders + userFills` 两次权威快照；不会把 exchange 回执或“open order 消失”推测成成交。
+- 上游失败且有缓存时返回 `stale=true, reconnecting=true` 的旧快照；首次失败返回 sequence `0` 的空快照，绝不伪造订单或成交。恢复后强制重新发完整 snapshot。
+
+`GET /api/real-trading/orders/status?address=0x...&cloid=0x...`
+
+- 使用 Hyperliquid 官方 `orderStatus` 按 128-bit cloid 查询权威状态。
+- `unknownOid` 标准化为 `status=unknown, order=null`，只表示当前未找到，不得推断成拒绝或允许盲目重下。
+- 页面遇到 `pending_reconciliation` 时保留该状态并周期查询同一 cloid；查到订单后才用权威状态替换。等待期间暂停新的开仓，但保留 reduce-only 退出能力。
+
+主实时链路使用 Hyperliquid Testnet user WebSocket，不把短轮询包装成完整实时：
+
+1. 已登录用户调用 `POST /api/real-trading/realtime/token`，body 为 `{ "address": "0x..." }`，取得默认 60 秒、一次性、绑定 userId/address 的 token。
+2. 客户端连接星衡现有 `/ws` 后发送 `{ "type":"subscribe", "channel":"real-trading-user", "token":"..." }`。
+3. 服务端按 master address 复用 Hyperliquid SDK `orderUpdates / userFills / openOrders / clearinghouseState` 订阅并引用计数释放；同一用户同时只允许一个 master address。
+4. 下游事件统一带 `mode / sequence / timestamp / status / stale / reconnecting / authoritative / source / address / channel / data`。
+5. 首次连接和每次重连后先拉 REST 权威 snapshot，再继续 WS incremental；断线时立即推送 `status=reconnecting, stale=true`。REST `orders/state` 继续作为恢复和降级路径。
+
+### 4.6 SQLite 审计与保留
+
+- `real_trading_exchange_audit` 默认保留 180 天（`REAL_TRADING_AUDIT_RETENTION_DAYS`），启动及最多每 6 小时做一次有界清理，不在每次请求执行全表 purge。
+- 只保存 `requestId / userId / network / masterAddress / actionType / cloid[] / outcome / errorCategory / providerStatus / HTTP status / 时间` 等不可重放元数据。
+- 禁止保存或记录 signature、nonce、私钥、助记词、seed、原始已签名 payload；审计 message 使用固定分类文案，不保存上游或请求原文。
+- `real_trading_order_idempotency` 只保存 cloid 唯一键、处理状态和脱敏标准回执，不保存签名请求；结果未知固定为 `pending_reconciliation`，等待权威订单/成交状态决定。
 
 ## 5. 前端签名边界
 
