@@ -162,7 +162,8 @@ textarea {
   }
 
   .xh-strategy-forward-view,
-  .xh-strategy-history-view {
+  .xh-strategy-history-view,
+  .xh-strategy-martingale-view {
     @apply min-w-0 space-y-4;
   }
 
@@ -472,6 +473,86 @@ textarea {
     @apply inline-flex h-8 items-center justify-center border border-[#343941] bg-transparent px-3 text-[12px] font-medium text-[#c5ccd4] outline-none transition-colors hover:border-[#00C896] hover:text-[#64d9b7] focus-visible:border-[#00C896] focus-visible:ring-1 focus-visible:ring-[#00C896] active:bg-[#0d2b25];
   }
 
+  .xh-strategy-locate-trade:disabled {
+    @apply cursor-not-allowed border-[#25282f] text-[#59616c] opacity-60 hover:border-[#25282f] hover:text-[#59616c];
+  }
+
+  .xh-strategy-symbol-switch {
+    @apply grid h-11 w-full max-w-[360px] grid-cols-2 border border-[#343941] bg-[#08090b] p-1;
+  }
+
+  .xh-strategy-symbol-switch button {
+    @apply border-0 bg-transparent px-4 text-[13px] font-medium text-[#8f99a5] outline-none transition-colors hover:text-[#f5f5f5] focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/70;
+  }
+
+  .xh-strategy-symbol-switch button.is-active {
+    @apply bg-[#f5f5f5] text-black;
+  }
+
+  .xh-strategy-martingale-summary .xh-strategy-panel-header {
+    @apply border-b-0 pb-0;
+  }
+
+  .xh-strategy-table.is-martingale-metrics {
+    min-width: 720px;
+  }
+
+  .xh-strategy-martingale-combined {
+    @apply border-t border-[#25282f] pt-1;
+  }
+
+  .xh-strategy-martingale-groups {
+    @apply mt-4 grid gap-3;
+  }
+
+  .xh-strategy-martingale-group {
+    @apply min-w-0 border border-[#25282f] bg-[#08090b];
+  }
+
+  .xh-strategy-martingale-group-row {
+    @apply grid min-w-0 gap-0 px-4 py-2 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-[repeat(6,minmax(0,1fr))_auto];
+  }
+
+  .xh-strategy-martingale-group-row > div:not(.xh-strategy-martingale-actions) {
+    @apply min-w-0 border-b border-[#1d2026] py-3 sm:px-2 xl:border-b-0;
+  }
+
+  .xh-strategy-martingale-group-row span {
+    @apply block text-[12px] leading-5 text-[#7f8995];
+  }
+
+  .xh-strategy-martingale-group-row strong {
+    @apply mt-1 block break-words text-[13px] font-medium leading-5 tabular-nums text-[#e7ebef];
+  }
+
+  .xh-strategy-martingale-group-row strong.is-positive {
+    @apply text-[#52d8ad];
+  }
+
+  .xh-strategy-martingale-group-row strong.is-negative {
+    @apply text-[#ff667f];
+  }
+
+  .xh-strategy-martingale-actions {
+    @apply flex min-w-0 items-center gap-2 py-3 sm:col-span-2 sm:px-2 lg:col-span-4 xl:col-span-1 xl:justify-end;
+  }
+
+  .xh-strategy-martingale-fills {
+    @apply border-t border-[#25282f];
+  }
+
+  .xh-strategy-martingale-fills summary {
+    @apply flex min-h-10 cursor-pointer items-center px-4 text-[12px] font-medium text-[#aab3bd] outline-none hover:text-white focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/70;
+  }
+
+  .xh-strategy-martingale-fills .xh-strategy-table-wrap {
+    @apply mt-0 border-t border-[#1d2026];
+  }
+
+  .xh-strategy-table.is-martingale-fills {
+    min-width: 840px;
+  }
+
   .xh-strategy-range-options {
     @apply mt-4 flex min-w-0 flex-wrap gap-2;
   }
@@ -631,6 +712,26 @@ textarea {
   }
 
   @media (max-width: 480px) {
+    .xh-strategy-view-tabs {
+      @apply h-auto grid grid-cols-3;
+    }
+
+    .xh-strategy-view-tabs button {
+      @apply h-11 min-w-0 px-2 text-[13px];
+    }
+
+    .xh-strategy-symbol-switch {
+      @apply max-w-none;
+    }
+
+    .xh-strategy-martingale-actions {
+      @apply flex-col items-stretch;
+    }
+
+    .xh-strategy-martingale-actions .xh-strategy-locate-trade {
+      @apply w-full;
+    }
+
     .xh-strategy-trade-chart {
       scroll-margin-top: 68px;
     }

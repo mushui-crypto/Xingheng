@@ -53,6 +53,9 @@ export function formatExitReason(value: string | null) {
     liquidation: "清算",
     session_close: "时段结束",
     end_of_data: "观察中",
+    take_profit: "整组止盈",
+    group_stop: "整组止损",
+    timeout: "24小时超时",
   }[value] ?? value;
 }
 

@@ -147,6 +147,20 @@ Binance Vision 已确认完整日，接口响应会明确 `availableRange` 与 `
 - `assumptions.automaticOrdersEnabled=false`
 - `warnings`，例如无报告、报告损坏或请求范围被裁剪
 
+## 独立自动马丁网格 Paper
+
+独立路线 `binance-usdm-martingale-grid-paper-v1` 从 `2026-07-16T19:20:00Z`（北京时间 `2026-07-17 03:20`）开始，只使用 Binance USD-M `BTCUSDT / ETHUSDT` 公开 5 分钟已收盘 K 线。它不修改冻结 V5 或 Route B，不连接交易 API，不需要 API key，自动订单固定关闭。完整规则见 `STRATEGY_MARTINGALE_GRID_PAPER_V1.md`。
+
+服务端启动时默认同时启动独立 Worker；BTC 或 ETH 的 closed candle 推进后确定性复算并原子写入 `server/data/strategy/research-martingale-grid-paper.json`。数据缺口、网络或写入失败保留上一份有效报告且不影响主服务。登录用户只读接口：
+
+```http
+GET /api/strategy/martingale/forward
+```
+
+环境变量为 `MARTINGALE_GRID_PAPER_WORKER_ENABLED`、`MARTINGALE_GRID_PAPER_WORKER_POLL_MS` 和 `MARTINGALE_GRID_PAPER_REPORT_PATH`。首版使用 BTC/ETH 各 5,000 USDT 独立 Paper 账本、5x隔离风险模型、第一层0.5%保证金、1.35倍、最多5层、ATR/价格比例自适应间距、整组目标和1.5%计划损失上限。观察门槛为60天或100个已完成网格组任一先达到。
+
+马丁页签K线使用 `GET /api/strategy/martingale/candles`，要求登录且只允许 `BTCUSDT / ETHUSDT`；接口复用内部标准化K线契约、缓存、已收盘过滤和安全错误响应，不允许前端直连交易所。
+
 策略图表 K 线只读接口：
 
 ```http

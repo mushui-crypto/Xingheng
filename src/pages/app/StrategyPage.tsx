@@ -18,6 +18,14 @@ import {
   type StrategyView,
 } from "../../features/strategy/components/StrategyHistoryPanels";
 import { StrategyTradeChart } from "../../features/strategy/components/StrategyTradeChart";
+import {
+  MartingalePageHeader,
+  MartingaleStrategyView,
+} from "../../features/strategy/components/MartingaleStrategyView";
+import {
+  buildStrategyTradeMarkerEvents,
+  strategyTradeKey,
+} from "../../features/strategy/lib/tradeChart";
 import type { StrategyForwardReport, StrategyHistoryQuery } from "../../features/strategy/model/types";
 import {
   initialStrategyHistoryRequestState,
@@ -49,8 +57,9 @@ export function StrategyPage() {
   const [customTo, setCustomTo] = useState("2026-07-13");
   const [customError, setCustomError] = useState("");
   const [chartFocus, setChartFocus] = useState<{
-    view: StrategyView;
-    trade: NonNullable<StrategyForwardReport["openPosition"]>;
+    view: "forward" | "history";
+    centerTime: string;
+    markerId: string | null;
     revision: number;
   } | null>(null);
 
@@ -114,14 +123,25 @@ export function StrategyPage() {
 
   const availableReport = report?.status === "unavailable" ? null : report;
   const availableHistoryReport = historyRequest.report?.status === "available" ? historyRequest.report : null;
+  const forwardTrades = availableReport ? [
+    ...(availableReport.openPosition ? [availableReport.openPosition] : []),
+    ...availableReport.recentCompletedTrades,
+  ] : [];
+  const historyTrades = availableHistoryReport?.completedTrades ?? [];
 
   const handleViewChange = (view: StrategyView) => {
     setActiveView(view);
     setChartFocus(null);
   };
 
-  const handleLocateTrade = (view: StrategyView, trade: NonNullable<StrategyForwardReport["openPosition"]>) => {
-    setChartFocus((current) => ({ view, trade, revision: (current?.revision ?? 0) + 1 }));
+  const handleLocateTrade = (view: "forward" | "history", trade: NonNullable<StrategyForwardReport["openPosition"]>) => {
+    if (!trade.entryTime) return;
+    setChartFocus((current) => ({
+      view,
+      centerTime: trade.entryTime as string,
+      markerId: `${strategyTradeKey(trade)}:entry`,
+      revision: (current?.revision ?? 0) + 1,
+    }));
   };
 
   const resetChartFocus = () => setChartFocus(null);
@@ -169,17 +189,18 @@ export function StrategyPage() {
 
   return (
     <div className="xh-strategy-page">
-      <StrategyPageHeader report={report} loading={loading} error={Boolean(error)} />
+      {activeView === "martingale"
+        ? <MartingalePageHeader />
+        : <StrategyPageHeader report={report} loading={loading} error={Boolean(error)} />}
       <StrategyViewTabs active={activeView} onChange={handleViewChange} />
       {activeView === "forward" ? (
         <div className="xh-strategy-forward-view" role="tabpanel" aria-label="前向 Paper">
           <StrategyTradeChart
             mode="forward"
             contextState={loading ? "loading" : error || !availableReport ? "unavailable" : "ready"}
-            trades={availableReport ? [
-              ...(availableReport.openPosition ? [availableReport.openPosition] : []),
-              ...availableReport.recentCompletedTrades,
-            ] : []}
+            markerDataCount={forwardTrades.length}
+            markerDataSignature={JSON.stringify(forwardTrades)}
+            buildMarkerEvents={(interval) => buildStrategyTradeMarkerEvents(forwardTrades, interval)}
             fallbackTime={availableReport?.openPosition?.entryTime
               ?? availableReport?.recentCompletedTrades.at(-1)?.entryTime
               ?? availableReport?.through
@@ -198,13 +219,15 @@ export function StrategyPage() {
             </>
           )}
         </div>
-      ) : (
+      ) : activeView === "history" ? (
         <StrategyHistoryView
           chart={(
             <StrategyTradeChart
               mode="history"
               contextState={historyRequest.loading ? "loading" : historyRequest.error || !availableHistoryReport ? "unavailable" : "ready"}
-              trades={availableHistoryReport?.completedTrades ?? []}
+              markerDataCount={historyTrades.length}
+              markerDataSignature={JSON.stringify(historyTrades)}
+              buildMarkerEvents={(interval) => buildStrategyTradeMarkerEvents(historyTrades, interval)}
               fallbackTime={availableHistoryReport?.completedTrades.at(-1)?.entryTime
                 ?? availableHistoryReport?.dataThrough
                 ?? null}
@@ -227,6 +250,8 @@ export function StrategyPage() {
           onPreviousPage={handlePreviousPage}
           onLocateTrade={(trade) => handleLocateTrade("history", trade)}
         />
+      ) : (
+        <MartingaleStrategyView />
       )}
     </div>
   );

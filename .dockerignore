@@ -11,5 +11,9 @@ dist-server
 server/data
 backups
 coverage
+research-data
+research-*.csv
+scripts/__pycache__
+*.pyc
 *.log
 .DS_Store

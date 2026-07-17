@@ -6,6 +6,11 @@ import type {
   StrategyHistoryQuery,
   StrategyHistoryReport,
 } from "../features/strategy/model/types";
+import type {
+  MartingaleCandlesQuery,
+  MartingaleCandlesReport,
+  MartingaleForwardReport,
+} from "../features/strategy/model/martingaleTypes";
 
 export function fetchStrategyForwardReport(signal?: AbortSignal) {
   return requestJson<StrategyForwardReport>(
@@ -50,6 +55,37 @@ export function fetchStrategyCandles(query: StrategyCandlesQuery, signal?: Abort
     {
       init: { signal },
       networkErrorMessage: "策略K线服务暂时不可用。",
+      userAuthFailure: true,
+    },
+  );
+}
+
+export function fetchMartingaleForwardReport(signal?: AbortSignal) {
+  return requestJson<MartingaleForwardReport>(
+    "/api/strategy/martingale/forward",
+    "马丁网格 Paper 报告暂时无法读取，请稍后再试。",
+    {
+      init: { signal },
+      networkErrorMessage: "马丁网格 Paper 服务暂时不可用。",
+      userAuthFailure: true,
+    },
+  );
+}
+
+export function fetchMartingaleCandles(query: MartingaleCandlesQuery, signal?: AbortSignal) {
+  const search = new URLSearchParams({
+    symbol: query.symbol,
+    interval: query.interval,
+    from: query.from,
+    to: query.to,
+  });
+  if (query.limit) search.set("limit", String(query.limit));
+  return requestJson<MartingaleCandlesReport>(
+    `/api/strategy/martingale/candles?${search.toString()}`,
+    "马丁网格策略K线暂时无法读取，请稍后再试。",
+    {
+      init: { signal },
+      networkErrorMessage: "马丁网格策略K线服务暂时不可用。",
       userAuthFailure: true,
     },
   );

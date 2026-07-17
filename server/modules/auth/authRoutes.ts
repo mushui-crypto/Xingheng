@@ -218,6 +218,7 @@ export const userAuthenticatedApiPrefixes = [
   "/api/strategy/ict/forward",
   "/api/strategy/ict/history",
   "/api/strategy/ict/candles",
+  "/api/strategy/martingale",
 ];
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {

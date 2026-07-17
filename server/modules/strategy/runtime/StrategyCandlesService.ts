@@ -1,7 +1,8 @@
 import type { Candle } from "../../../types";
 
 const SOURCE = "binance_usdm" as const;
-const SYMBOL = "BTCUSDT" as const;
+const DEFAULT_SYMBOL = "BTCUSDT" as const;
+const SUPPORTED_SYMBOLS = ["BTCUSDT", "ETHUSDT"] as const;
 const SUPPORTED_INTERVALS = ["5m", "15m", "1h", "4h"] as const;
 const DEFAULT_LIMIT = 500;
 const MAX_LIMIT = 1000;
@@ -9,6 +10,7 @@ const CACHE_TTL_MS = 15_000;
 const FETCH_TIMEOUT_MS = 15_000;
 
 type StrategyCandleInterval = typeof SUPPORTED_INTERVALS[number];
+type StrategyCandleSymbol = typeof SUPPORTED_SYMBOLS[number];
 
 const INTERVAL_SECONDS: Record<StrategyCandleInterval, number> = {
   "5m": 5 * 60,
@@ -18,6 +20,7 @@ const INTERVAL_SECONDS: Record<StrategyCandleInterval, number> = {
 };
 
 export type StrategyCandlesQuery = {
+  symbol?: unknown;
   interval?: unknown;
   from?: unknown;
   to?: unknown;
@@ -35,7 +38,7 @@ export type PublicStrategyCandle = {
 
 export type StrategyCandlesResponse = {
   source: typeof SOURCE;
-  symbol: typeof SYMBOL;
+  symbol: StrategyCandleSymbol;
   interval: StrategyCandleInterval;
   status: "available" | "unavailable";
   requestedRange: { from: string; to: string };
@@ -76,7 +79,7 @@ export async function readStrategyCandles(
       statusCode: 200,
       report: {
         source: SOURCE,
-        symbol: SYMBOL,
+        symbol: request.symbol,
         interval: request.interval,
         status: "available",
         requestedRange: {
@@ -91,13 +94,14 @@ export async function readStrategyCandles(
   } catch (error) {
     const reason = error instanceof UserQueryError ? error.message : "binance_candles_unavailable";
     const interval = safeNormalizeInterval(query.interval);
+    const symbol = safeNormalizeSymbol(query.symbol);
     const fallbackRange = makeFallbackRange(query, nowMs, interval);
     return {
       ok: false,
       statusCode: error instanceof UserQueryError ? 400 : 503,
       report: {
         source: SOURCE,
-        symbol: SYMBOL,
+        symbol,
         interval,
         status: "unavailable",
         requestedRange: fallbackRange,
@@ -110,6 +114,7 @@ export async function readStrategyCandles(
 }
 
 function normalizeRequest(query: StrategyCandlesQuery, nowMs: number) {
+  const symbol = normalizeSymbol(query.symbol);
   const interval = normalizeInterval(query.interval);
   const intervalMs = INTERVAL_SECONDS[interval] * 1000;
   const limit = normalizeLimit(query.limit);
@@ -124,7 +129,21 @@ function normalizeRequest(query: StrategyCandlesQuery, nowMs: number) {
   if (fromMs > toMs) throw new UserQueryError("invalid_range");
   const maxWindowMs = (MAX_LIMIT - 1) * intervalMs;
   if (toMs - fromMs > maxWindowMs) throw new UserQueryError("max_window_exceeded");
-  return { interval, intervalMs, fromMs, toMs, limit };
+  return { symbol, interval, intervalMs, fromMs, toMs, limit };
+}
+
+function normalizeSymbol(value: unknown): StrategyCandleSymbol {
+  if (value === undefined || value === null || value === "") return DEFAULT_SYMBOL;
+  if (SUPPORTED_SYMBOLS.includes(value as StrategyCandleSymbol)) return value as StrategyCandleSymbol;
+  throw new UserQueryError("invalid_symbol");
+}
+
+function safeNormalizeSymbol(value: unknown): StrategyCandleSymbol {
+  try {
+    return normalizeSymbol(value);
+  } catch {
+    return DEFAULT_SYMBOL;
+  }
 }
 
 function normalizeInterval(value: unknown): StrategyCandleInterval {
@@ -160,6 +179,7 @@ async function loadCachedCandles(
   options: { nowMs: number; fetchFn: typeof fetch; cache: StrategyCandlesCache },
 ) {
   const cacheKey = [
+    request.symbol,
     request.interval,
     request.fromMs,
     request.toMs,
@@ -177,7 +197,7 @@ async function loadCachedCandles(
 
 async function loadBinanceCandles(request: ReturnType<typeof normalizeRequest>, fetchFn: typeof fetch) {
   const url = new URL("https://fapi.binance.com/fapi/v1/klines");
-  url.searchParams.set("symbol", SYMBOL);
+  url.searchParams.set("symbol", request.symbol);
   url.searchParams.set("interval", request.interval);
   url.searchParams.set("startTime", String(request.fromMs));
   url.searchParams.set("endTime", String(request.toMs + request.intervalMs - 1));
@@ -186,7 +206,7 @@ async function loadBinanceCandles(request: ReturnType<typeof normalizeRequest>, 
   if (!response.ok) throw new Error(`Binance strategy candles request failed: ${response.status}.`);
   const rows = await response.json() as unknown[][];
   return normalizeCandles(rows
-    .map((row) => klineRowToCandle(row, request.interval))
+    .map((row) => klineRowToCandle(row, request.symbol, request.interval))
     .filter((candle): candle is Candle => Boolean(candle))
     .filter((candle) => {
       const openMs = candle.time * 1000;
@@ -194,9 +214,9 @@ async function loadBinanceCandles(request: ReturnType<typeof normalizeRequest>, 
     }));
 }
 
-function klineRowToCandle(row: unknown[], interval: StrategyCandleInterval): Candle | null {
+function klineRowToCandle(row: unknown[], symbol: StrategyCandleSymbol, interval: StrategyCandleInterval): Candle | null {
   const candle: Candle = {
-    symbol: SYMBOL,
+    symbol,
     interval,
     time: Math.trunc(Number(row[0]) / 1000),
     open: Number(row[1]),
