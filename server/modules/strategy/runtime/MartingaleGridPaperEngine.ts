@@ -282,13 +282,12 @@ export function buildMartingaleGridPaperReport(
 export function simulateMartingaleGridSymbol(
   symbol: MartingaleGridSymbol,
   inputCandles: Candle[],
-  options: { forwardStart?: number; config?: MartingaleGridConfig } = {},
+  options: { forwardStart?: number; config?: MartingaleGridConfig; signalIntervalMinutes?: 5 | 15 } = {},
 ): SymbolSimulation {
   const config = options.config ?? makeConfig();
   const forwardStart = options.forwardStart ?? MARTINGALE_GRID_FORWARD_START;
   const candles = normalizeCandles(inputCandles).filter((candle) => candle.symbol === symbol);
-  const atrValues = calculateAtr(candles, config.atrPeriod);
-  const rsiValues = calculateRsi(candles, config.rsiPeriod);
+  const signalInputs = calculateSignalInputs(candles, config, options.signalIntervalMinutes ?? 5);
   const trendValues = calculateCompleted15mTrend(candles, config.fastEmaPeriod15m, config.slowEmaPeriod15m);
   const completed: MartingaleGridCompletedGroup[] = [];
   const equityCurve: Array<{ time: number; equity: number }> = [];
@@ -329,11 +328,9 @@ export function simulateMartingaleGridSymbol(
     equityCurve.push({ time: candle.time, equity: realizedEquity + unrealized });
 
     if (!open && !pending && !lockedUtcDate && candle.time >= forwardStart) {
-      const currentRsi = rsiValues[index];
-      const previousRsi = rsiValues[index - 1];
-      const atr = atrValues[index];
+      const { currentRsi, previousRsi, atr, eligible } = signalInputs[index];
       const trend = trendValues[index];
-      if (currentRsi !== null && previousRsi !== null && atr !== null && trend) {
+      if (eligible && currentRsi !== null && previousRsi !== null && atr !== null && trend) {
         const side = trend === "up" && previousRsi > config.longRsiThreshold && currentRsi <= config.longRsiThreshold
           ? "long"
           : trend === "down" && previousRsi < config.shortRsiThreshold && currentRsi >= config.shortRsiThreshold
@@ -354,6 +351,46 @@ export function simulateMartingaleGridSymbol(
     equityCurve,
     diagnostics: { signals, startedGroups, dailyLossLocks },
   };
+}
+
+function calculateSignalInputs(candles: Candle[], config: MartingaleGridConfig, intervalMinutes: 5 | 15) {
+  const empty = () => ({ currentRsi: null, previousRsi: null, atr: null, eligible: false }) as {
+    currentRsi: number | null;
+    previousRsi: number | null;
+    atr: number | null;
+    eligible: boolean;
+  };
+  if (intervalMinutes === 5) {
+    const atrValues = calculateAtr(candles, config.atrPeriod);
+    const rsiValues = calculateRsi(candles, config.rsiPeriod);
+    return candles.map((_, index) => ({
+      currentRsi: rsiValues[index],
+      previousRsi: index > 0 ? rsiValues[index - 1] : null,
+      atr: atrValues[index],
+      eligible: true,
+    }));
+  }
+
+  const aggregated = aggregateCandles(candles, "15m");
+  const atrValues = calculateAtr(aggregated, config.atrPeriod);
+  const rsiValues = calculateRsi(aggregated, config.rsiPeriod);
+  const output = candles.map(empty);
+  let completedIndex = -1;
+  for (let index = 0; index < candles.length; index += 1) {
+    const candleCloseTime = candles[index].time + MARTINGALE_GRID_INTERVAL_SECONDS;
+    const previousCompletedIndex = completedIndex;
+    while (completedIndex + 1 < aggregated.length && aggregated[completedIndex + 1].time + 15 * 60 <= candleCloseTime) {
+      completedIndex += 1;
+    }
+    if (completedIndex === previousCompletedIndex || completedIndex < 1) continue;
+    output[index] = {
+      currentRsi: rsiValues[completedIndex],
+      previousRsi: rsiValues[completedIndex - 1],
+      atr: atrValues[completedIndex],
+      eligible: true,
+    };
+  }
+  return output;
 }
 
 function startGroup(

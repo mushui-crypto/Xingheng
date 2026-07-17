@@ -28,6 +28,7 @@ import { TradingStore } from "./storage/TradingStore";
 import { ForwardPaperWorker } from "./modules/strategy/runtime/ForwardPaperWorker";
 import { IctStrategyRuntime } from "./modules/strategy/runtime/IctStrategyRuntime";
 import { MartingaleGridPaperWorker } from "./modules/strategy/runtime/MartingaleGridPaperWorker";
+import { FixedGridPaperWorker } from "./modules/strategy/runtime/FixedGridPaperWorker";
 import { StrategyEmailNotifier } from "./modules/strategy/runtime/StrategyEmailNotifier";
 import { OnchainWalletService } from "./wallet/OnchainWalletService";
 import { WalletService } from "./wallet/WalletService";
@@ -80,6 +81,8 @@ const forwardPaperWorker = new ForwardPaperWorker({ notifier: strategyNotifier }
 forwardPaperWorker.start();
 const martingaleGridPaperWorker = new MartingaleGridPaperWorker();
 martingaleGridPaperWorker.start();
+const fixedGridPaperWorker = new FixedGridPaperWorker();
+fixedGridPaperWorker.start();
 const users = new UserService(tradingStore, email, config.appPublicUrl);
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
@@ -89,7 +92,7 @@ registerAuthRoutes({ app, users, wallet, tradingStore, config });
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
-registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker });
+registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({ app, info: realTradingInfo, exchange: realTradingExchange });
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });
@@ -224,6 +227,7 @@ async function shutdown(signal: string) {
   try {
     forwardPaperWorker.stop();
     martingaleGridPaperWorker.stop();
+    fixedGridPaperWorker.stop();
     strategyRuntime.stop();
     await market.stop();
     for (const client of socketHub.clients) client.terminate();

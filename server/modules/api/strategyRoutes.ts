@@ -6,11 +6,17 @@ import { readHistoryReport } from "../strategy/runtime/HistoryReportService";
 import { readStrategyCandles } from "../strategy/runtime/StrategyCandlesService";
 import type { MartingaleGridPaperWorker } from "../strategy/runtime/MartingaleGridPaperWorker";
 import { readMartingaleGridReport } from "../strategy/runtime/MartingaleGridReportService";
+import type { FixedGridPaperWorker } from "../strategy/runtime/FixedGridPaperWorker";
+import { readFixedGridReport } from "../strategy/runtime/FixedGridReportService";
 
 export function registerStrategyRoutes(
   app: express.Express,
   runtime: IctStrategyRuntime,
-  options: { forwardPaperWorker?: ForwardPaperWorker; martingaleGridPaperWorker?: MartingaleGridPaperWorker } = {},
+  options: {
+    forwardPaperWorker?: ForwardPaperWorker;
+    martingaleGridPaperWorker?: MartingaleGridPaperWorker;
+    fixedGridPaperWorker?: FixedGridPaperWorker;
+  } = {},
 ) {
   app.get("/api/strategy/ict/status", (_request, response) => {
     response.json(runtime.getStatus());
@@ -67,10 +73,23 @@ export function registerStrategyRoutes(
     });
   });
 
+  app.get("/api/strategy/martingale/fixed-grid/forward", async (request, response) => {
+    if (!request.user) {
+      response.status(401).json({ message: "用户未登录或登录已失效。" });
+      return;
+    }
+    const result = await readFixedGridReport();
+    response.status(result.ok ? 200 : result.statusCode).json({
+      ...result.report,
+      worker: options.fixedGridPaperWorker?.getStatus(),
+    });
+  });
+
   app.get("/api/admin/strategy/health", async (_request, response) => {
     const forward = await readForwardReport();
     const worker = await options.forwardPaperWorker?.getHealth(forward.ok);
     const martingaleGrid = await options.martingaleGridPaperWorker?.getHealth();
+    const fixedGrid = await options.fixedGridPaperWorker?.getHealth();
     response.json({
       forwardReport: {
         readable: forward.ok,
@@ -80,6 +99,7 @@ export function registerStrategyRoutes(
       },
       worker,
       martingaleGrid,
+      fixedGrid,
     });
   });
 }

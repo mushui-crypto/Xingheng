@@ -15,7 +15,7 @@ ENV NODE_ENV=production \
     MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends sqlite3 \
+  && apt-get install -y --no-install-recommends sqlite3 unzip \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force

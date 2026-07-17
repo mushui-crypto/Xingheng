@@ -11,6 +11,7 @@ import type {
   MartingaleCandlesReport,
   MartingaleForwardReport,
 } from "../features/strategy/model/martingaleTypes";
+import type { FixedGridForwardReport } from "../features/strategy/model/fixedGridTypes";
 
 export function fetchStrategyForwardReport(signal?: AbortSignal) {
   return requestJson<StrategyForwardReport>(
@@ -67,6 +68,18 @@ export function fetchMartingaleForwardReport(signal?: AbortSignal) {
     {
       init: { signal },
       networkErrorMessage: "马丁网格 Paper 服务暂时不可用。",
+      userAuthFailure: true,
+    },
+  );
+}
+
+export function fetchFixedGridForwardReport(signal?: AbortSignal) {
+  return requestJson<FixedGridForwardReport>(
+    "/api/strategy/martingale/fixed-grid/forward",
+    "固定价差网格 Paper 报告暂时无法读取，请稍后再试。",
+    {
+      init: { signal },
+      networkErrorMessage: "固定价差网格 Paper 服务暂时不可用。",
       userAuthFailure: true,
     },
   );

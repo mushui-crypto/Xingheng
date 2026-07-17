@@ -70,3 +70,5 @@ GET /api/strategy/martingale/candles?symbol=BTCUSDT&interval=5m&from=...&to=...&
 ## 观察门槛
 
 从 `2026-07-16T19:20:00Z`（北京时间 `2026-07-17 03:20`）开始，累计 60 天或 100 个已完成网格组任一先达到后进入人工复核。复核前不得把该路线包装成正收益候选，也不得接入 Testnet 或实盘订单。
+
+历史复算已按 `STRATEGY_MARTINGALE_GRID_HISTORY_V1.md` 完成，结论见 `STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md`：基础成本下组合PF `1.304`，但平均仅 `0.0049R`，双倍成本PF降至 `0.378`并转为亏损，状态为历史资格不通过。前向Worker继续运行只代表保留实验记录，不代表候选资格。
