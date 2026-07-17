@@ -1,11 +1,13 @@
 import { ExchangeClient, type IRequestTransport } from "@nktkas/hyperliquid";
 import { BrowserProvider, Wallet, type Eip1193Provider, type HDNodeWallet, type JsonRpcSigner } from "ethers";
-import { forwardSignedRealTradingExchange, type RealTradingMarginMode } from "../../../api/realTrading";
+import { forwardSignedRealTradingExchange, type RealTradingExchangeResponse, type RealTradingMarginMode } from "../../../api/realTrading";
+import type { HyperliquidCloid } from "./hyperliquidCloid";
 
 const agentName = "StellaX Session";
 
 export type HyperliquidLimitOrderInput = {
   asset: number;
+  cloid: HyperliquidCloid;
   isBuy: boolean;
   market: boolean;
   price: string;
@@ -15,6 +17,7 @@ export type HyperliquidLimitOrderInput = {
 
 export type HyperliquidTriggerOrderInput = {
   asset: number;
+  cloid: HyperliquidCloid;
   isBuy: boolean;
   price: string;
   size: string;
@@ -32,20 +35,61 @@ class BackendExchangeTransport implements IRequestTransport<"exchange"> {
       throw new Error("只允许发送 Hyperliquid Testnet exchange 请求。");
     }
     const signed = payload as Record<string, unknown>;
+    const action = signed.action as Record<string, unknown>;
+    const clientRequestId = createRealTradingClientRequestId(action);
     const response = await forwardSignedRealTradingExchange({
+      clientRequestId,
       network: "hyperliquid-testnet",
       masterAddress: this.masterAddress,
-      action: signed.action as Record<string, unknown>,
+      action,
       nonce: Number(signed.nonce),
       signature: signed.signature,
       vaultAddress: typeof signed.vaultAddress === "string" ? signed.vaultAddress : null,
       expiresAfter: typeof signed.expiresAfter === "number" ? signed.expiresAfter : null,
     });
+    if (isReconciliationResponse(response)) {
+      throw new HyperliquidPendingReconciliationError(response.message || "订单结果暂未确认，正在等待交易所对账。", response);
+    }
     if (!response.ok) {
       throw new Error(response.message || "Hyperliquid Testnet 拒绝了交易请求。");
     }
-    return response.result as T;
+    return { result: response.result, stellaxReceipt: response } as T;
   }
+}
+
+export class HyperliquidPendingReconciliationError extends Error {
+  readonly needsReconciliation = true;
+  readonly receipt: RealTradingExchangeResponse;
+
+  constructor(message: string, receipt: RealTradingExchangeResponse) {
+    super(message);
+    this.name = "HyperliquidPendingReconciliationError";
+    this.receipt = receipt;
+  }
+}
+
+export function isHyperliquidPendingReconciliationError(error: unknown): error is HyperliquidPendingReconciliationError {
+  return error instanceof HyperliquidPendingReconciliationError
+    || (Boolean(error) && typeof error === "object" && (error as { needsReconciliation?: unknown }).needsReconciliation === true);
+}
+
+export function getHyperliquidReconciliationReceipt(error: unknown) {
+  if (error instanceof HyperliquidPendingReconciliationError) return error.receipt;
+  if (!error || typeof error !== "object") return null;
+  const receipt = (error as { receipt?: unknown }).receipt;
+  return receipt && typeof receipt === "object" ? receipt as RealTradingExchangeResponse : null;
+}
+
+export function createRealTradingClientRequestId(action: Record<string, unknown>) {
+  if (action.type === "order" && Array.isArray(action.orders)) {
+    const primaryCloid = (action.orders[0] as Record<string, unknown> | undefined)?.c;
+    if (typeof primaryCloid === "string" && /^0x[0-9a-fA-F]{32}$/.test(primaryCloid)) {
+      return `rt-${primaryCloid.slice(2).toLowerCase()}`;
+    }
+  }
+  const randomId = globalThis.crypto?.randomUUID?.();
+  if (!randomId) throw new Error("当前浏览器缺少安全随机数能力，禁止发送真实交易动作。");
+  return `rt-${randomId}`;
 }
 
 export class HyperliquidSessionSigner {
@@ -125,6 +169,7 @@ function toSdkLimitOrder(input: HyperliquidLimitOrderInput) {
   return {
     a: input.asset,
     b: input.isBuy,
+    c: input.cloid,
     p: input.price,
     s: input.size,
     r: input.reduceOnly,
@@ -136,6 +181,7 @@ function toSdkTriggerOrder(input: HyperliquidTriggerOrderInput) {
   return {
     a: input.asset,
     b: input.isBuy,
+    c: input.cloid,
     p: input.price,
     s: input.size,
     r: true,
@@ -174,4 +220,22 @@ export function normalizeSdkError(error: unknown) {
   if (lower.includes("network") || lower.includes("fetch") || lower.includes("timeout")) return "网络请求失败，请稍后重试。";
   if (lower.includes("trigger order has unexpected type")) return `TP/SL 订单组合被 Hyperliquid 拒绝：${message}`;
   return message;
+}
+
+function isReconciliationResponse(response: {
+  lifecycleStatus?: string;
+  needsReconciliation?: boolean;
+  outcome?: string;
+  reconciliationStatus?: string;
+  reconcileRequired?: boolean;
+}) {
+  const status = `${response.lifecycleStatus ?? ""} ${response.reconciliationStatus ?? ""}`.toLowerCase();
+  return response.reconcileRequired === true
+    || response.needsReconciliation === true
+    || response.outcome === "pending_reconciliation"
+    || response.outcome === "partial"
+    || status.includes("unknown")
+    || status.includes("pending_reconciliation")
+    || status.includes("needs_reconciliation")
+    || status.includes("partial");
 }

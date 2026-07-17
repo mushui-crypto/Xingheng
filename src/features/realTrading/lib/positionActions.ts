@@ -5,6 +5,7 @@ import { normalizeHyperliquidPrice } from "./hyperliquidPrice";
 import { assertValidHyperliquidSizeDecimals, formatHyperliquidOrderSizeFloor } from "./hyperliquidSize";
 import { resolveRealTradingSymbolForRecord } from "./realTradingMarket";
 import { buildPositionTpslOrders } from "./tpslOrders";
+import { deriveHyperliquidCloid, type HyperliquidCloid } from "./hyperliquidCloid";
 
 export async function submitPositionCloseRequest(
   signer: HyperliquidSessionSigner,
@@ -15,20 +16,20 @@ export async function submitPositionCloseRequest(
   if (request.mode === "reverse") {
     const position = request.positions[0];
     const config = resolvePositionSymbol(position, symbols);
-    const closeOrder = buildCloseOrder(position, config, true);
+    const closeOrder = buildCloseOrder(position, config, true, undefined, deriveHyperliquidCloid(request.cloid, "reverse-close"));
     await signer.placeOrder(closeOrder);
-    await signer.placeOrder({ ...closeOrder, reduceOnly: false });
+    await signer.placeOrder({ ...closeOrder, cloid: deriveHyperliquidCloid(request.cloid, "reverse-open"), reduceOnly: false });
     return;
   }
 
-  const orders = request.positions.map((position) => {
+  const orders = request.positions.map((position, index) => {
     const config = resolvePositionSymbol(position, symbols);
     if (request.mode === "limit") {
       const price = Number(request.limitPrice);
       if (!Number.isFinite(price) || price <= 0) throw new Error("请输入有效的限价平仓价格。");
-      return buildCloseOrder(position, config, false, request.limitPrice);
+      return buildCloseOrder(position, config, false, request.limitPrice, deriveHyperliquidCloid(request.cloid, `close:${index}`));
     }
-    return buildCloseOrder(position, config, true);
+    return buildCloseOrder(position, config, true, undefined, deriveHyperliquidCloid(request.cloid, `close:${index}`));
   });
   await signer.placeOrders(orders);
 }
@@ -53,6 +54,7 @@ export async function submitPositionTpslRequest(
   const triggers = buildPositionTpslOrders({
     asset: config.assetId!,
     closingIsBuy: request.position.side === "short",
+    parentCloid: request.cloid,
     referencePrice: markPrice,
     size: formatPositionOrderSize(request.position.size, szDecimals, config.symbol),
     slPrice: request.slPrice,
@@ -67,7 +69,9 @@ function buildCloseOrder(
   config: RealTradingSymbol,
   market: boolean,
   limitPrice?: string,
+  cloid?: HyperliquidCloid,
 ): HyperliquidLimitOrderInput {
+  if (!cloid) throw new Error("平仓请求缺少 Hyperliquid cloid。");
   const isBuy = position.side === "short";
   const markPrice = position.markPx ?? position.markPrice;
   const rawPrice = market
@@ -81,6 +85,7 @@ function buildCloseOrder(
   const szDecimals = assertValidHyperliquidSizeDecimals(config.szDecimals, config.symbol);
   return {
     asset: config.assetId!,
+    cloid,
     isBuy,
     market,
     price: normalizeHyperliquidPrice(rawPrice, szDecimals, isBuy ? "up" : "down"),

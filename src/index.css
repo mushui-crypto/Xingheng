@@ -1480,6 +1480,34 @@ textarea {
     @apply shrink-0 rounded-[3px] bg-[#103b32] px-3 py-2 text-[12px] font-medium tracking-[0.03em] text-[#57d9b1];
   }
 
+  .xh-real-connection-banner {
+    @apply flex min-h-14 items-center justify-between gap-4 border-b border-[#5a4521] bg-[#211b10] px-5 py-3 text-[12px] text-[#f5c56e];
+  }
+
+  .xh-real-connection-banner > div {
+    @apply flex min-w-0 flex-col gap-1;
+  }
+
+  .xh-real-connection-banner strong {
+    @apply font-medium text-[#ffe1a5];
+  }
+
+  .xh-real-connection-banner span {
+    @apply leading-5;
+  }
+
+  .xh-real-connection-banner.is-disconnected {
+    @apply border-[#68303a] bg-[#281419] text-[#ff9aaa];
+  }
+
+  .xh-real-connection-banner.is-disconnected strong {
+    @apply text-[#ffc2cc];
+  }
+
+  .xh-real-connection-banner button {
+    @apply min-h-9 shrink-0 px-3 py-2 text-[12px] normal-case tracking-normal;
+  }
+
   .xh-trade-market-stats {
     @apply flex min-w-0 items-center gap-10 overflow-hidden border-l border-[#25282f] pl-6;
   }
@@ -2149,6 +2177,14 @@ textarea {
     @apply flex flex-col items-start gap-2 text-[12px] text-[#7a8596];
   }
 
+  .xh-real-risk-policy-note {
+    @apply text-[11px] leading-5 text-[#7a8596];
+  }
+
+  .xh-real-risk-policy-note.is-warning {
+    @apply border border-[#5a4521] bg-[#211b10] px-2.5 py-2 text-[#f5c56e];
+  }
+
   .xh-checkbox {
     @apply flex min-h-[18px] cursor-pointer items-center gap-2;
   }
@@ -2205,6 +2241,58 @@ textarea {
 
   .xh-real-order-message.is-success {
     @apply border-[#19523f] bg-[#0d241d] text-[#52d8ad];
+  }
+
+  .xh-real-order-lifecycle {
+    @apply grid grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1 border border-[#39414c] bg-[#11161c] p-2.5 text-[12px] text-[#aeb8c4];
+  }
+
+  .xh-real-order-lifecycle > span {
+    @apply text-[#8a95a1];
+  }
+
+  .xh-real-order-lifecycle > strong {
+    @apply text-right font-medium text-[#e8ecf2];
+  }
+
+  .xh-real-order-lifecycle > small {
+    @apply col-span-2 break-words text-[11px] leading-4 text-[#8a95a1];
+  }
+
+  .xh-real-order-lifecycle > button {
+    @apply col-span-2 mt-1 min-h-8 border border-[#4a515b] bg-transparent px-2 text-[12px] text-[#d8dde3] transition-colors hover:border-white/60 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .xh-real-order-lifecycle.is-accepted,
+  .xh-real-order-lifecycle.is-partial,
+  .xh-real-order-lifecycle.is-filled {
+    @apply border-[#19523f] bg-[#0d241d];
+  }
+
+  .xh-real-order-lifecycle.is-pending_reconciliation {
+    @apply border-[#5a4521] bg-[#211b10];
+  }
+
+  .xh-real-order-lifecycle.is-pending_reconciliation > strong {
+    @apply text-[#f5c56e];
+  }
+
+  .xh-real-order-lifecycle.is-accepted > strong,
+  .xh-real-order-lifecycle.is-partial > strong,
+  .xh-real-order-lifecycle.is-filled > strong {
+    @apply text-[#52d8ad];
+  }
+
+  .xh-real-order-lifecycle.is-rejected,
+  .xh-real-order-lifecycle.is-expired,
+  .xh-real-order-lifecycle.is-cancelled {
+    @apply border-[#68303a] bg-[#281419];
+  }
+
+  .xh-real-order-lifecycle.is-rejected > strong,
+  .xh-real-order-lifecycle.is-expired > strong,
+  .xh-real-order-lifecycle.is-cancelled > strong {
+    @apply text-[#ff9aaa];
   }
 
   .xh-real-confirm-modal {
@@ -2537,6 +2625,14 @@ textarea {
   }
 
   @media (max-width: 480px) {
+    .xh-real-connection-banner {
+      @apply items-start px-3;
+    }
+
+    .xh-real-connection-banner > button {
+      @apply mt-0.5;
+    }
+
     .xh-trade-marketbar {
       @apply gap-4 px-3;
     }

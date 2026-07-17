@@ -151,6 +151,7 @@ export type RealTradingAccountSummary = {
   spotUsdcBalance: number | null;
   spotBalances: RealTradingSpotBalance[];
   timestamp: number;
+  status: "connected" | "stale" | "unavailable";
   network: HyperliquidRealTradingNetwork;
   warnings?: string[];
 };
@@ -254,4 +255,72 @@ export type RealTradingExchangeRequest = {
   signature: unknown;
   vaultAddress?: string | null;
   expiresAfter?: number | null;
+};
+
+export type RealTradingExchangeReceipt = {
+  ok: boolean;
+  network: HyperliquidRealTradingNetwork;
+  result?: unknown;
+  message?: string;
+  status?: number;
+  timestamp: number;
+  requestId: string;
+  actionType: string;
+  submittedAt: number;
+  accepted: boolean;
+  rejected: boolean;
+  outcome: "accepted" | "rejected" | "partial" | "pending_reconciliation";
+  needsReconciliation: boolean;
+  orderStatuses?: Array<{
+    index: number;
+    status: "accepted" | "rejected";
+    providerStatus: "resting" | "filled" | "error" | "unknown";
+    oid: string | number | null;
+    message: string | null;
+  }>;
+};
+
+export type RealTradingOrderConnectionStatus = "connected" | "stale" | "reconnecting";
+
+export type RealTradingOrderSnapshot = {
+  mode: "snapshot";
+  sequence: number;
+  timestamp: number;
+  status: RealTradingOrderConnectionStatus;
+  stale: boolean;
+  reconnecting: boolean;
+  authoritative: true;
+  openOrders: RealTradingOpenOrder[];
+  orders: RealTradingHistoricalOrder[];
+  fills: RealTradingFill[];
+  warnings: string[];
+};
+
+export type RealTradingOrderIncremental = {
+  mode: "incremental";
+  baseSequence: number;
+  sequence: number;
+  timestamp: number;
+  status: RealTradingOrderConnectionStatus;
+  stale: false;
+  reconnecting: false;
+  authoritative: true;
+  openOrders: {
+    upserted: RealTradingOpenOrder[];
+    removedOrderIds: string[];
+  };
+  terminalOrders: RealTradingHistoricalOrder[];
+  fills: RealTradingFill[];
+  warnings: string[];
+};
+
+export type RealTradingOrderState = RealTradingOrderSnapshot | RealTradingOrderIncremental;
+
+export type RealTradingCloidStatus = {
+  authoritative: true;
+  cloid: string;
+  network: HyperliquidRealTradingNetwork;
+  order: RealTradingHistoricalOrder | null;
+  status: "order" | "unknown";
+  timestamp: number;
 };

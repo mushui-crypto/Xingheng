@@ -8,6 +8,7 @@ import { MarginLeverageModal } from "./MarginLeverageModal";
 import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
 import { buildRealTradingEntryOrderInput } from "../lib/realTradingOrderValidation";
+import { createHyperliquidCloid, type HyperliquidCloid } from "../lib/hyperliquidCloid";
 import { assertValidHyperliquidSizeDecimals, formatHyperliquidOrderSizeFloor, getHyperliquidSizeInputStep } from "../lib/hyperliquidSize";
 import type { HyperliquidSessionController } from "../lib/useHyperliquidSessionSigner";
 import { buildPositionTpslOrders } from "../lib/tpslOrders";
@@ -17,8 +18,14 @@ import {
   type MarginLeverageSessionState,
   type MarginLeverageSelection,
 } from "../model/marginLeverage";
+import { preflightRealTradingOrder, realTradingRiskPolicy } from "../model/riskPolicy";
+import { canSkipRealTradingConfirmationForSession } from "../model/confirmationPolicy";
+import {
+  extractExchangeOrderUpdates,
+  realTradingOrderStatusLabel,
+  type RealTradingOrderLifecycle,
+} from "../model/realtimeState";
 
-const skipOrderConfirmationKey = "stellax.realTrading.skipOrderConfirmation";
 const positionPercentSteps = [0, 25, 50, 75, 100] as const;
 const positionPercentSnapThreshold = 2;
 
@@ -27,35 +34,49 @@ export function RealTradingOrderPanel({
   availableMargin,
   connected,
   connectionMessage,
+  equity,
   fees,
+  latestOrderLifecycle,
   markPrice,
+  marketReady,
   marginModeConstraint,
   maxLeverage,
   onConnect,
+  onOrderLifecycle,
   onSubmitted,
+  openOrderCount,
   positionSize,
   position,
+  reconciliationPending,
   session,
   supportedMarginModes,
   szDecimals,
   symbol,
+  totalExposure,
 }: {
   assetId?: number;
   availableMargin?: number | null;
   connected: boolean;
   connectionMessage?: string;
+  equity?: number | null;
   fees?: RealTradingFees | null;
+  latestOrderLifecycle?: RealTradingOrderLifecycle | null;
   markPrice?: number | null;
+  marketReady: boolean;
   marginModeConstraint?: "cross_and_isolated" | "isolated_only";
   maxLeverage?: number;
   onConnect: () => void;
+  onOrderLifecycle: (phase: "submitted" | "updated", order: RealTradingOrderLifecycle) => void;
   onSubmitted: () => Promise<void> | void;
+  openOrderCount: number;
   positionSize?: number;
   position?: RealPosition | null;
+  reconciliationPending: boolean;
   session: HyperliquidSessionController;
   supportedMarginModes?: RealTradingMarginMode[];
   szDecimals?: number;
   symbol: string;
+  totalExposure: number;
 }) {
   const sizeInputSourceRef = useRef<"manual" | "slider">("manual");
   const [side, setSide] = useState("buy");
@@ -70,8 +91,10 @@ export function RealTradingOrderPanel({
   const [marginModalOpen, setMarginModalOpen] = useState(false);
   const [marginSubmitting, setMarginSubmitting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
-  const [skipNextConfirmation, setSkipNextConfirmation] = useState(false);
+  const [skipLimitConfirmationForSession, setSkipLimitConfirmationForSession] = useState(false);
+  const [pendingClientOrderId, setPendingClientOrderId] = useState("");
   const [pendingSide, setPendingSide] = useState<"buy" | "sell">("buy");
+  const [retryIntent, setRetryIntent] = useState<{ cloid: HyperliquidCloid; side: "buy" | "sell" } | null>(null);
   const [positionPercent, setPositionPercent] = useState(0);
   const { authorized, busy, message } = session;
   const marginSelection = resolveMarginLeverageSelection({
@@ -82,7 +105,8 @@ export function RealTradingOrderPanel({
     supportedMarginModes,
   });
   const leverage = String(marginSelection.leverage);
-  const actionDisabled = !connected || busy || typeof assetId !== "number";
+  const entrySafetyBlocked = (!marketReady || reconciliationPending) && !reduceOnly;
+  const actionDisabled = !connected || entrySafetyBlocked || busy || typeof assetId !== "number";
   const sizeInputStep = getHyperliquidSizeInputStep(szDecimals);
 
   useEffect(() => {
@@ -117,22 +141,16 @@ export function RealTradingOrderPanel({
 
   async function authorizeSession() {
     if (typeof assetId !== "number") return;
-    const completed = await session.runAction(
-      (signer) => submitMarginLeverageUpdate(signer, assetId, marginSelection.leverage, marginSelection.marginMode),
-      "会话签名器已初始化。",
-    );
-    if (completed) await onSubmitted();
+    await session.authorize();
   }
 
-  async function runAction(action: () => Promise<unknown>, success: string) {
-    const completed = await session.runAction(() => action(), success);
-    if (completed) await onSubmitted();
-  }
-
-  async function submitOrder(orderSide: "buy" | "sell" = side === "sell" ? "sell" : "buy") {
+  async function submitOrder(
+    orderSide: "buy" | "sell" = side === "sell" ? "sell" : "buy",
+    cloid = createHyperliquidCloid(),
+  ) {
     let draft: ReturnType<typeof buildOrderDraft>;
     try {
-      draft = buildOrderDraft(orderSide);
+      draft = buildOrderDraft(orderSide, cloid);
     } catch (error) {
       session.setError(error instanceof Error ? error.message : "请输入有效的价格和数量。");
       return;
@@ -140,14 +158,32 @@ export function RealTradingOrderPanel({
 
     const signer = session.signer;
     if (!signer) return;
+    const submittedAt = Date.now();
+    const lifecycleBase = { clientOrderId: cloid, symbol, updatedAt: submittedAt };
+    onOrderLifecycle("submitted", { ...lifecycleBase, status: "submitted" });
     try {
-      const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price) : [];
-      await runAction(
+      const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price, cloid) : [];
+      const outcome = await session.runActionResult(
         () => triggers.length > 0 ? signer.placeOrderWithTpsl(draft.entryOrder, triggers) : signer.placeOrder(draft.entryOrder),
         reduceOnly ? "reduce-only 平仓请求已发送。" : tpslEnabled ? "真实订单与止盈止损请求已发送。" : "真实订单请求已发送。",
       );
+      if (!outcome.completed) {
+        const status = outcome.reconciliationRequired ? "pending_reconciliation" : "rejected";
+        onOrderLifecycle("updated", { ...lifecycleBase, message: outcome.error, requestId: outcome.reconciliationRequestId, status, updatedAt: Date.now() });
+        setRetryIntent(!outcome.reconciliationRequired && outcome.error && isRetryableOrderError(outcome.error) ? { cloid, side: orderSide } : null);
+        if (outcome.reconciliationRequired) await onSubmitted();
+        return;
+      }
+      extractExchangeOrderUpdates(outcome.result, { ...lifecycleBase, updatedAt: Date.now() }).forEach((order) => {
+        onOrderLifecycle("updated", order);
+      });
+      setRetryIntent(null);
+      await onSubmitted();
     } catch (error) {
-      session.setError(error instanceof Error ? error.message : "止盈止损参数无效。");
+      const message = error instanceof Error ? error.message : "止盈止损参数无效。";
+      session.setError(message);
+      onOrderLifecycle("updated", { ...lifecycleBase, message, status: "rejected", updatedAt: Date.now() });
+      setRetryIntent(isRetryableOrderError(message) ? { cloid, side: orderSide } : null);
     }
   }
 
@@ -161,10 +197,11 @@ export function RealTradingOrderPanel({
     }
   }
 
-  function buildOrderDraft(orderSide: "buy" | "sell") {
+  function buildOrderDraft(orderSide: "buy" | "sell", cloid: HyperliquidCloid) {
     const orderPrice = resolveOrderPrice(orderSide);
     const entryOrder = buildRealTradingEntryOrderInput({
       assetId,
+      cloid,
       orderPrice,
       orderSide,
       orderType: orderType === "market" ? "market" : "limit",
@@ -176,12 +213,18 @@ export function RealTradingOrderPanel({
     return { entryOrder };
   }
 
-  function resolveTpslOrders(orderSide: "buy" | "sell", normalizedSize: string, referenceValue = resolveOrderPrice(orderSide)) {
+  function resolveTpslOrders(
+    orderSide: "buy" | "sell",
+    normalizedSize: string,
+    referenceValue = resolveOrderPrice(orderSide),
+    parentCloid = createHyperliquidCloid(),
+  ) {
     if (typeof assetId !== "number") return [];
     const decimals = assertValidHyperliquidSizeDecimals(szDecimals, symbol);
     return buildPositionTpslOrders({
       asset: assetId,
       closingIsBuy: orderSide === "sell",
+      parentCloid,
       referencePrice: Number(referenceValue),
       size: normalizedSize,
       slPrice,
@@ -197,35 +240,53 @@ export function RealTradingOrderPanel({
       onConnect();
       return;
     }
+    const nextClientOrderId = createHyperliquidCloid();
     let draft: ReturnType<typeof buildOrderDraft>;
     try {
-      draft = buildOrderDraft(orderSide);
+      draft = buildOrderDraft(orderSide, nextClientOrderId);
       if (tpslEnabled && !reduceOnly) {
-        resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price);
+        resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price, nextClientOrderId);
       }
     } catch (error) {
       session.setError(error instanceof Error ? error.message : "请输入有效的价格和数量。");
+      return;
+    }
+    const orderNotional = Number(draft.entryOrder.price) * Number(draft.entryOrder.size);
+    const riskErrors = preflightRealTradingOrder({
+      equity,
+      openOrderCount,
+      orderNotional,
+      reduceOnly,
+      totalExposure,
+    });
+    if (riskErrors.length > 0) {
+      session.setError(`${riskErrors.join(" ")} 最终结果以服务端风控为准。`);
       return;
     }
     if (!authorized) {
       void authorizeSession();
       return;
     }
-    if (window.localStorage.getItem(skipOrderConfirmationKey) === "1") {
-      void submitOrder(orderSide);
+    if (canSkipOrderConfirmation() && skipLimitConfirmationForSession) {
+      void submitOrder(orderSide, nextClientOrderId);
       return;
     }
     setPendingSide(orderSide);
-    setSkipNextConfirmation(false);
+    setPendingClientOrderId(nextClientOrderId);
     setConfirmOpen(true);
   }
 
   function confirmOrder() {
-    if (skipNextConfirmation) {
-      window.localStorage.setItem(skipOrderConfirmationKey, "1");
-    }
     setConfirmOpen(false);
-    void submitOrder(pendingSide);
+    void submitOrder(pendingSide, pendingClientOrderId as HyperliquidCloid || createHyperliquidCloid());
+  }
+
+  function canSkipOrderConfirmation() {
+    return canSkipRealTradingConfirmationForSession({
+      orderType: orderType === "market" ? "market" : "limit",
+      reduceOnly,
+      tpslEnabled,
+    });
   }
 
   function changePositionPercent(value: number) {
@@ -247,7 +308,12 @@ export function RealTradingOrderPanel({
     const orderPrice = explicitPrice > 0 ? explicitPrice : (markPrice ?? 0);
     const margin = availableMargin ?? 0;
     const leverageValue = Number(leverage);
-    return orderPrice > 0 && margin > 0 && leverageValue > 0 ? (margin * leverageValue) / orderPrice : 0;
+    if (!(orderPrice > 0) || !(margin > 0) || !(leverageValue > 0)) return 0;
+    const marginNotional = margin * leverageValue;
+    const equityValue = typeof equity === "number" && Number.isFinite(equity) && equity > 0 ? equity : 0;
+    const singleOrderNotional = equityValue * realTradingRiskPolicy.maxSingleOrderEquityRatio;
+    const remainingExposureNotional = Math.max(0, equityValue * realTradingRiskPolicy.maxTotalExposureEquityRatio - totalExposure);
+    return Math.min(marginNotional, singleOrderNotional, remainingExposureNotional) / orderPrice;
   }
 
   function sizeForPercent(value: number) {
@@ -291,24 +357,25 @@ export function RealTradingOrderPanel({
     }
   }
 
-  const confirmEntryOrder = confirmOpen ? safeBuildOrderDraft(pendingSide)?.entryOrder ?? null : null;
+  const confirmCloid = pendingClientOrderId as HyperliquidCloid;
+  const confirmEntryOrder = confirmOpen && confirmCloid ? safeBuildOrderDraft(pendingSide, confirmCloid)?.entryOrder ?? null : null;
   const confirmTriggers = confirmOpen && confirmEntryOrder && tpslEnabled && !reduceOnly
-    ? safeResolveTpslOrders(pendingSide, confirmEntryOrder.size, confirmEntryOrder.price)
+    ? safeResolveTpslOrders(pendingSide, confirmEntryOrder.size, confirmEntryOrder.price, confirmCloid)
     : [];
   const confirmTpPrice = confirmTriggers.find((order) => order.tpsl === "tp")?.triggerPrice;
   const confirmSlPrice = confirmTriggers.find((order) => order.tpsl === "sl")?.triggerPrice;
 
-  function safeBuildOrderDraft(orderSide: "buy" | "sell") {
+  function safeBuildOrderDraft(orderSide: "buy" | "sell", cloid: HyperliquidCloid) {
     try {
-      return buildOrderDraft(orderSide);
+      return buildOrderDraft(orderSide, cloid);
     } catch {
       return null;
     }
   }
 
-  function safeResolveTpslOrders(orderSide: "buy" | "sell", normalizedSize: string, referenceValue: string) {
+  function safeResolveTpslOrders(orderSide: "buy" | "sell", normalizedSize: string, referenceValue: string, parentCloid: HyperliquidCloid) {
     try {
-      return resolveTpslOrders(orderSide, normalizedSize, referenceValue);
+      return resolveTpslOrders(orderSide, normalizedSize, referenceValue, parentCloid);
     } catch {
       return [];
     }
@@ -401,6 +468,19 @@ export function RealTradingOrderPanel({
           <Checkbox checked={reduceOnly} label="只减仓" onChange={(event) => setReduceOnly(event.target.checked)} />
           <Checkbox checked={tpslEnabled} disabled={reduceOnly} label="止盈/止损" onChange={(event) => setTpslEnabled(event.target.checked)} />
         </div>
+        <p className="xh-real-risk-policy-note">
+          风控预检：最高 20x · 单笔 ≤ 权益 50% · 总敞口 ≤ 权益 200% · 当前委托 ≤ 20 笔。服务端规则为准。
+        </p>
+        {!marketReady ? (
+          <p className="xh-real-risk-policy-note is-warning" role="alert">
+            行情或账户实时状态未就绪，暂停新开仓；撤单和合法 Reduce-only 平仓仍可用。
+          </p>
+        ) : null}
+        {reconciliationPending ? (
+          <p className="xh-real-risk-policy-note is-warning" role="alert">
+            存在结果未知的订单，正在按同一 cloid 查询 Hyperliquid 权威状态；完成前禁止提交新的开仓订单。
+          </p>
+        ) : null}
       </fieldset>
 
       <div className="xh-real-order-metrics">
@@ -410,6 +490,19 @@ export function RealTradingOrderPanel({
         <PanelMetric label="费用" value={estimateFee(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, orderType === "market" ? fees?.takerRate : fees?.makerRate)} />
       </div>
       {message ? <p className={`xh-real-order-message ${session.messageTone === "success" ? "is-success" : ""}`} role="status">{message}</p> : null}
+      {latestOrderLifecycle ? (
+        <div className={`xh-real-order-lifecycle is-${latestOrderLifecycle.status}`} role="status">
+          <span>订单状态</span>
+          <strong>{realTradingOrderStatusLabel(latestOrderLifecycle.status)}</strong>
+          {latestOrderLifecycle.exchangeOrderId ? <small>OID {latestOrderLifecycle.exchangeOrderId}</small> : null}
+          {latestOrderLifecycle.message ? <small>{latestOrderLifecycle.message}</small> : null}
+          {retryIntent?.cloid === latestOrderLifecycle.clientOrderId ? (
+            <button disabled={busy || (!marketReady && !reduceOnly)} onClick={() => void submitOrder(retryIntent.side, retryIntent.cloid)} type="button">
+              使用同一 cloid 重试
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       <Modal open={confirmOpen} title="确认订单" onClose={() => setConfirmOpen(false)} shellClassName="xh-real-confirm-modal">
         <div className="xh-real-confirm-summary">
           <ConfirmMetric label="品种" value={symbol} />
@@ -426,10 +519,12 @@ export function RealTradingOrderPanel({
         <div className="xh-real-confirm-warning" role="note">
           Hyperliquid Testnet 真实订单。确认后将请求本地签名，订单结果以交易所返回为准。
         </div>
-        <label className="xh-real-confirm-skip">
-          <input checked={skipNextConfirmation} onChange={(event) => setSkipNextConfirmation(event.target.checked)} type="checkbox" />
-          下次不再提醒
-        </label>
+        {canSkipOrderConfirmation() ? (
+          <label className="xh-real-confirm-skip">
+            <input checked={skipLimitConfirmationForSession} onChange={(event) => setSkipLimitConfirmationForSession(event.target.checked)} type="checkbox" />
+            本次页面会话内，普通限价单不再提醒
+          </label>
+        ) : null}
         <div className="xh-real-confirm-actions">
           <Button onClick={() => setConfirmOpen(false)} type="button" variant="secondary">取消</Button>
           <Button onClick={confirmOrder} type="button" variant={pendingSide === "buy" ? "primary" : "danger"}>确认订单</Button>
@@ -456,6 +551,11 @@ function ConfirmMetric({ label, tone, value }: { label: string; tone?: "buy" | "
 
 function PanelMetric({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function isRetryableOrderError(message: string) {
+  const normalized = message.toLowerCase();
+  return normalized.includes("网络") || normalized.includes("network") || normalized.includes("fetch") || normalized.includes("timeout");
 }
 
 function formatMoney(value?: number | null) {

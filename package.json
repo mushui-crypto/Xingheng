@@ -41,7 +41,18 @@
     "research:ict:eth:smc:v2": "tsx scripts/research-ict-eth-smc-v2.ts",
     "research:ict:eth:smc:v4": "tsx scripts/research-ict-eth-smc-v4.ts",
     "research:ict:eth:smc:v4:normal-tp": "tsx scripts/research-ict-eth-smc-v4-normal-tp.ts",
-    "research:ict:xau:quick": "tsx scripts/research-ict-xau-quick.ts"
+    "research:ict:xau:quick": "tsx scripts/research-ict-xau-quick.ts",
+    "research:martingale:fixed-grid:v3:history": "tsx scripts/research-fixed-grid-v3-history.ts",
+    "research:martingale:fixed-grid:v4:20x": "tsx scripts/research-fixed-grid-v4-20x.ts",
+    "research:martingale:exchange:directional:v1": "tsx scripts/research-exchange-style-directional-martingale-v1.ts",
+    "research:martingale:exchange:directional:v2": "tsx scripts/research-exchange-style-directional-martingale-v2.ts",
+    "research:martingale:exchange:directional:v2b:eth": "tsx scripts/research-exchange-style-directional-martingale-v2b-eth.ts",
+    "research:martingale:exchange:directional:v3:pullback": "tsx scripts/research-exchange-style-directional-martingale-v3-pullback.ts",
+    "research:martingale:exchange:range:v1": "tsx scripts/research-exchange-style-range-grid-v1.ts",
+    "research:rsi:events": "tsx scripts/research-rsi-overbought-oversold-events.ts",
+    "research:rsi:1m": "tsx scripts/research-rsi-context-1m-execution-v1.ts",
+    "research:trend-pullback:1m": "tsx scripts/research-trend-pullback-1m-execution-v2.ts",
+    "research:structure-breakout:1m": "tsx scripts/research-structure-breakout-1m-execution-v3.ts"
   },
   "dependencies": {
     "@nktkas/hyperliquid": "^0.33.1",

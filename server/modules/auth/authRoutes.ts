@@ -214,7 +214,11 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
 export const userAuthenticatedApiPrefixes = [
   "/api/trading",
   "/api/wallet",
-  "/api/real-trading",
+  "/api/real-trading/account",
+  "/api/real-trading/positions",
+  "/api/real-trading/orders",
+  "/api/real-trading/exchange",
+  "/api/real-trading/realtime",
   "/api/strategy/ict/forward",
   "/api/strategy/ict/history",
   "/api/strategy/ict/candles",

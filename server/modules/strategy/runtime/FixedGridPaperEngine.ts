@@ -28,10 +28,10 @@ export type FixedGridConfig = {
   maximumGroupLossFraction: number;
   targetGridSteps: number;
   stopBeyondLastGridSteps: number;
-  directionValidityHours: number;
+  directionValidityHours: number | null;
   swingLeftBars: number;
   swingRightBars: number;
-  maximumHoldingMinutes: number;
+  maximumHoldingMinutes: number | null;
   takerFeeRate: number;
   slippageRate: number;
   stopAfterLossForUtcDay: true;
@@ -92,7 +92,7 @@ export type FixedGridWorkingPlan = {
   side: "long" | "short";
   anchorPrice: number;
   confirmedAt: number;
-  expiresAt: number;
+  expiresAt: number | null;
   orders: FixedGridOrder[];
 };
 
@@ -333,7 +333,7 @@ export function simulateFixedGridSymbol(
     const candle = candles[index];
     const utcDate = new Date(candle.time * 1000).toISOString().slice(0, 10);
     if (lockedUtcDate && lockedUtcDate !== utcDate) lockedUtcDate = null;
-    if (plan && candle.time >= plan.expiresAt) {
+    if (plan && plan.expiresAt !== null && candle.time >= plan.expiresAt) {
       plan = null;
       expiredPlans += 1;
     }
@@ -366,7 +366,9 @@ export function simulateFixedGridSymbol(
         side,
         anchorPrice: direction.anchorPrice,
         confirmedAt: direction.confirmedAt,
-        expiresAt: direction.confirmedAt + config.directionValidityHours * 3600,
+        expiresAt: config.directionValidityHours === null
+          ? null
+          : direction.confirmedAt + config.directionValidityHours * 3600,
         gridStep: config.gridStepBySymbol[symbol],
       };
       confirmations += 1;
@@ -491,7 +493,7 @@ function startGroup(plan: InternalPlan, candle: Candle, equity: number, config: 
 }
 
 function processGroup(group: InternalOpenGroup, candle: Candle, config: FixedGridConfig): FixedGridCompletedGroup | null {
-  if (candle.time - group.entryTime >= config.maximumHoldingMinutes * 60) {
+  if (config.maximumHoldingMinutes !== null && candle.time - group.entryTime >= config.maximumHoldingMinutes * 60) {
     return closeGroup(group, candle.time, adverseExitPrice(group.side, candle.open, config.slippageRate), "timeout", config);
   }
   while (group.fills.length < config.maximumLayers) {

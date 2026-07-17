@@ -71,6 +71,63 @@ test("fixed grid route remains Paper-only with exchange ordering disabled", () =
   assert.equal(report.configuration.maximumLayers, 12);
 });
 
+test("fixed grid can disable the holding timeout without disabling structural exits", () => {
+  const candles = makeTrendingWave("BTCUSDT");
+  const directions = calculateFixedGridDirections(candles);
+  const confirmationIndex = directions.findIndex((point) => point.confirmation === "long_break");
+  const anchor = directions[confirmationIndex].anchorPrice!;
+  const entryTime = candles[confirmationIndex].time + 300;
+  const entryCandle: Candle = {
+    symbol: "BTCUSDT", interval: "5m", time: entryTime,
+    open: anchor, high: anchor, low: anchor - 210, close: anchor - 200, volume: 10,
+  };
+  const laterCandle: Candle = {
+    ...entryCandle,
+    time: entryTime + 24 * 3600,
+    open: anchor - 200,
+    high: anchor - 150,
+    low: anchor - 250,
+    close: anchor - 200,
+  };
+  const prefix = [...candles.slice(0, confirmationIndex + 1), entryCandle, laterCandle];
+  const timed = simulateFixedGridSymbol("BTCUSDT", prefix, {
+    forwardStart: candles[0].time,
+    config: { ...FIXED_GRID_CONFIG, maximumHoldingMinutes: 60 },
+  });
+  const untimed = simulateFixedGridSymbol("BTCUSDT", prefix, {
+    forwardStart: candles[0].time,
+    config: { ...FIXED_GRID_CONFIG, maximumHoldingMinutes: null },
+  });
+
+  assert.equal(timed.completed.at(-1)?.exitReason, "timeout");
+  assert.equal(untimed.completed.length, 0);
+  assert.ok(untimed.open);
+  assert.equal(untimed.open!.stopPrice, anchor - 2_800);
+});
+
+test("fixed grid can keep one unfilled plan without an expiry until a newer confirmation replaces it", () => {
+  const candles = makeTrendingWave("BTCUSDT");
+  const directions = calculateFixedGridDirections(candles);
+  const confirmationIndex = directions.findIndex((point) => point.confirmation === "long_break");
+  const prefix = candles.slice(0, confirmationIndex + 1);
+  const later = Array.from({ length: 100 }, (_, index): Candle => ({
+    ...prefix.at(-1)!,
+    time: prefix.at(-1)!.time + (index + 1) * 300,
+    open: directions[confirmationIndex].anchorPrice!,
+    high: directions[confirmationIndex].anchorPrice! + 50,
+    low: directions[confirmationIndex].anchorPrice! - 50,
+    close: directions[confirmationIndex].anchorPrice!,
+  }));
+  const result = simulateFixedGridSymbol("BTCUSDT", [...prefix, ...later], {
+    forwardStart: candles[0].time,
+    config: { ...FIXED_GRID_CONFIG, directionValidityHours: null },
+  });
+
+  assert.ok(result.plan);
+  assert.equal(result.plan!.expiresAt, null);
+  assert.equal(result.diagnostics.expiredPlans, 0);
+});
+
 function makeTrendingWave(symbol: "BTCUSDT" | "ETHUSDT"): Candle[] {
   const start = 1_780_000_000 - (1_780_000_000 % 300);
   const base = symbol === "BTCUSDT" ? 60_000 : 3_000;

@@ -5,6 +5,13 @@ import { requestJson, userHeaders } from "./httpClient";
 export type RealTradingNetwork = "hyperliquid-testnet";
 export type RealTradingMarginMode = "cross" | "isolated";
 
+export type RealTradingRealtimeMetadata = {
+  connectionStatus?: string;
+  lastUpdateAt?: number | string | null;
+  realtimeStatus?: string;
+  snapshotAt?: number | string | null;
+};
+
 export type RealTradingSymbol = {
   symbol: string;
   providerMarketId?: string;
@@ -24,7 +31,7 @@ export type RealTradingSymbol = {
   network?: RealTradingNetwork;
 };
 
-export type RealMarketSummary = {
+export type RealMarketSummary = RealTradingRealtimeMetadata & {
   symbol: string;
   markPrice?: number | null;
   oraclePrice?: number | null;
@@ -48,7 +55,7 @@ export type RealOrderbookLevel = {
   orderCount?: number | null;
 };
 
-export type RealOrderbook = {
+export type RealOrderbook = RealTradingRealtimeMetadata & {
   symbol: string;
   asks: RealOrderbookLevel[];
   bids: RealOrderbookLevel[];
@@ -147,6 +154,9 @@ export type RealOpenOrder = {
   price?: number | null;
   size?: number | null;
   status?: string;
+  lifecycleStatus?: string;
+  clientOrderId?: string | null;
+  updatedAt?: number | null;
   timestamp?: number;
   limitPx?: number | string | null;
   sz?: number | string | null;
@@ -209,9 +219,13 @@ export type RealOrderHistory = {
   fills: RealFill[];
   nextCursor: string | null;
   warnings: string[];
+  connectionStatus?: string;
+  realtimeStatus?: string;
+  snapshotAt?: number | string | null;
 };
 
 export type SignedRealTradingExchangePayload = {
+  clientRequestId: string;
   network: RealTradingNetwork;
   masterAddress: string;
   action: Record<string, unknown>;
@@ -227,7 +241,106 @@ export type RealTradingExchangeResponse = {
   result?: unknown;
   message?: string;
   status?: number;
+  lifecycleStatus?: string;
+  reconciliationStatus?: string;
+  cloid?: string | null;
+  needsReconciliation?: boolean;
+  requestId?: string;
+  actionType?: string;
+  submittedAt?: number;
+  accepted?: boolean;
+  rejected?: boolean;
+  outcome?: "accepted" | "rejected" | "partial" | "pending_reconciliation";
+  orderStatuses?: Array<{
+    index: number;
+    status: "accepted" | "rejected";
+    providerStatus: "resting" | "filled" | "error" | "unknown";
+    oid: string | number | null;
+    message: string | null;
+  }>;
+  clientRequestId?: string;
+  cloids?: string[];
+  orderState?: "submitted" | "accepted" | "partial" | "filled" | "cancelled" | "rejected" | "expired";
+  errorCategory?: string | null;
+  retryable?: boolean;
+  reconcileRequired?: boolean;
   timestamp: number;
+};
+
+export type RealTradingOrderAudit = {
+  requestId: string;
+  clientRequestId?: string | null;
+  cloid?: string | null;
+  cloids?: string[];
+  orderState: "submitted" | "accepted" | "partial" | "filled" | "cancelled" | "rejected" | "expired";
+  errorCategory?: string | null;
+  retryable: boolean;
+  reconcileRequired: boolean;
+  timestamp: number;
+};
+
+export type RealTradingOrderSnapshot = {
+  authoritative: true;
+  fills: RealFill[];
+  mode: "snapshot";
+  openOrders: RealOpenOrder[];
+  orders: RealHistoricalOrder[];
+  reconnecting: boolean;
+  sequence: number;
+  stale: boolean;
+  status: "connected" | "stale" | "reconnecting";
+  timestamp: number;
+  warnings: string[];
+};
+
+export type RealTradingOrderIncremental = {
+  authoritative: true;
+  baseSequence: number;
+  fills: RealFill[];
+  mode: "incremental";
+  openOrders: {
+    removedOrderIds: string[];
+    upserted: RealOpenOrder[];
+  };
+  reconnecting: false;
+  sequence: number;
+  stale: false;
+  status: "connected";
+  terminalOrders: RealHistoricalOrder[];
+  timestamp: number;
+  warnings: string[];
+};
+
+export type RealTradingOrderState = RealTradingOrderSnapshot | RealTradingOrderIncremental;
+
+export type RealTradingCloidStatus = {
+  authoritative: true;
+  cloid: string;
+  network: RealTradingNetwork;
+  order: RealHistoricalOrder | null;
+  status: "order" | "unknown";
+  timestamp: number;
+};
+
+export type RealTradingRealtimeToken = {
+  address: string;
+  expiresAt: number;
+  token: string;
+};
+
+export type RealTradingUserStreamEvent = {
+  address: string;
+  authoritative: true;
+  channel: "snapshot" | "orders" | "fills" | "open_orders" | "account" | "connection";
+  data: unknown;
+  mode: "snapshot" | "incremental";
+  reconnecting: boolean;
+  sequence: number;
+  source: "hyperliquid-user-ws" | "hyperliquid-rest-snapshot";
+  stale: boolean;
+  status: "connected" | "stale" | "reconnecting";
+  timestamp: number;
+  type: "real-trading-user";
 };
 
 const realTradingHeaders = () => userHeaders();
@@ -306,6 +419,47 @@ export async function fetchRealOrderHistory(address: string) {
   });
 }
 
+export async function fetchRealTradingOrderState(address: string, afterSequence?: number | null) {
+  const sequence = typeof afterSequence === "number" ? `&afterSequence=${afterSequence}` : "";
+  return requestJson<RealTradingOrderState>(`/api/real-trading/orders/state?address=${encodeURIComponent(address)}${sequence}`, "真实订单状态加载失败。", {
+    init: { headers: realTradingHeaders() },
+    userAuthFailure: true,
+  });
+}
+
+export async function fetchRealTradingCloidStatus(address: string, cloid: string) {
+  return requestJson<RealTradingCloidStatus>(
+    `/api/real-trading/orders/status?address=${encodeURIComponent(address)}&cloid=${encodeURIComponent(cloid)}`,
+    "真实订单对账状态加载失败。",
+    {
+      init: { headers: realTradingHeaders() },
+      userAuthFailure: true,
+    },
+  );
+}
+
+export async function fetchRealTradingOrderAudit(requestId: string) {
+  return requestJson<RealTradingOrderAudit>(
+    `/api/real-trading/orders/audit?requestId=${encodeURIComponent(requestId)}`,
+    "真实订单审计状态加载失败。",
+    {
+      init: { headers: realTradingHeaders() },
+      userAuthFailure: true,
+    },
+  );
+}
+
+export async function requestRealTradingRealtimeToken(address: string) {
+  return requestJson<RealTradingRealtimeToken>("/api/real-trading/realtime/token", "真实交易实时订阅授权失败。", {
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...realTradingHeaders() },
+      body: JSON.stringify({ address }),
+    },
+    userAuthFailure: true,
+  });
+}
+
 export async function forwardSignedRealTradingExchange(payload: SignedRealTradingExchangePayload) {
   return requestJson<RealTradingExchangeResponse>("/api/real-trading/exchange", "真实交易请求发送失败。", {
     init: {
@@ -313,6 +467,7 @@ export async function forwardSignedRealTradingExchange(payload: SignedRealTradin
       headers: { "Content-Type": "application/json", ...realTradingHeaders() },
       body: JSON.stringify(payload),
     },
+    acceptErrorResponse: true,
     userAuthFailure: true,
   });
 }
