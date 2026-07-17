@@ -1539,9 +1539,8 @@ textarea {
   }
 
   .xh-trade-order-rail {
-    @apply grid min-w-0 bg-[#0c0e12];
+    @apply grid min-w-0 border-l border-[#25282f] bg-[#0c0e12];
     grid-template-rows: max-content 220px;
-    box-shadow: inset 1px 0 #25282f;
   }
 
   .xh-trade-panel-header {
