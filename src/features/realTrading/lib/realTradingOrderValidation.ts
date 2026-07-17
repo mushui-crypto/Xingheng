@@ -1,9 +1,11 @@
 import type { HyperliquidLimitOrderInput } from "./hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "./hyperliquidPrice";
 import { assertValidHyperliquidSizeDecimals, normalizeHyperliquidOrderSizeInput } from "./hyperliquidSize";
+import { assertHyperliquidCloid, type HyperliquidCloid } from "./hyperliquidCloid";
 
 export type RealTradingEntryOrderValidationInput = {
   assetId?: number;
+  cloid: HyperliquidCloid;
   orderSide: "buy" | "sell";
   orderType: "limit" | "market";
   orderPrice: string;
@@ -15,6 +17,7 @@ export type RealTradingEntryOrderValidationInput = {
 
 export function buildRealTradingEntryOrderInput({
   assetId,
+  cloid,
   orderSide,
   orderType,
   orderPrice,
@@ -31,6 +34,7 @@ export function buildRealTradingEntryOrderInput({
   const normalizedPrice = normalizeHyperliquidPrice(orderPrice, decimals, orderSide === "buy" ? "up" : "down");
   return {
     asset: assetId,
+    cloid: assertHyperliquidCloid(cloid),
     isBuy: orderSide === "buy",
     market: orderType === "market",
     price: normalizedPrice,

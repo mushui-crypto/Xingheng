@@ -3,6 +3,7 @@ import type { RealOpenOrder, RealPosition, RealTradingSymbol } from "../../../ap
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 import { recordBelongsToMarket, resolveRealTradingSymbolForRecord } from "../lib/realTradingMarket";
+import { createHyperliquidCloid } from "../lib/hyperliquidCloid";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 
 export type { RealPositionCloseRequest } from "../model/types";
@@ -33,13 +34,14 @@ export function RealPositionsTable({
 
   function requestAllClose() {
     setStatus("");
-    setIntent({ mode: "market", positions: rows, scope: "all" });
+    setIntent({ cloid: createHyperliquidCloid(), mode: "market", positions: rows, scope: "all" });
   }
 
   function requestSingleClose(position: RealPosition, mode: RealPositionCloseRequest["mode"]) {
     setStatus("");
     const counterpartyPrice = position.side === "long" ? bestBid : bestAsk;
     setIntent({
+      cloid: createHyperliquidCloid(),
       limitPrice: mode === "limit" && typeof counterpartyPrice === "number" ? String(counterpartyPrice) : undefined,
       mode,
       positions: [position],
@@ -50,6 +52,7 @@ export function RealPositionsTable({
   function requestTpsl(position: RealPosition) {
     setStatus("");
     setTpslIntent({
+      cloid: createHyperliquidCloid(),
       position,
       slPrice: triggerPrice(openOrders, position, symbols, "sl"),
       tpPrice: triggerPrice(openOrders, position, symbols, "tp"),

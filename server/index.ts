@@ -13,8 +13,13 @@ import { registerUserTradingRoutes } from "./modules/api/userTradingRoutes";
 import { registerUserWalletRoutes } from "./modules/api/userWalletRoutes";
 import { EmailService } from "./modules/email/EmailService";
 import { HyperliquidExchangeProxy } from "./modules/hyperliquid/HyperliquidExchangeProxy";
+import { HyperliquidSignatureVerifier } from "./modules/hyperliquid/HyperliquidSignatureVerifier";
 import { getHyperliquidRealTradingConfig } from "./modules/hyperliquid/hyperliquidConfig";
 import { HyperliquidInfoClient } from "./modules/hyperliquid/HyperliquidInfoClient";
+import { RealTradingOrderStateService } from "./modules/hyperliquid/RealTradingOrderStateService";
+import { RealTradingRealtimeTokenService } from "./modules/hyperliquid/RealTradingRealtimeTokenService";
+import { RealTradingRiskGuard } from "./modules/hyperliquid/RealTradingRiskGuard";
+import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingUserStreamManager";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
@@ -86,14 +91,29 @@ fixedGridPaperWorker.start();
 const users = new UserService(tradingStore, email, config.appPublicUrl);
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
-const realTradingExchange = new HyperliquidExchangeProxy(realTradingConfig.baseUrl);
+const realTradingRisk = new RealTradingRiskGuard(realTradingInfo);
+const realTradingExchange = new HyperliquidExchangeProxy(
+  realTradingConfig.baseUrl,
+  realTradingRisk,
+  tradingStore,
+  new HyperliquidSignatureVerifier(),
+);
+const realTradingOrderState = new RealTradingOrderStateService(realTradingInfo);
+const realTradingRealtimeTokens = new RealTradingRealtimeTokenService();
+const realTradingUserStreams = new RealTradingUserStreamManager(realTradingInfo, realTradingOrderState);
 registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
-registerRealTradingRoutes({ app, info: realTradingInfo, exchange: realTradingExchange });
+registerRealTradingRoutes({
+  app,
+  info: realTradingInfo,
+  exchange: realTradingExchange,
+  orderState: realTradingOrderState,
+  realtimeTokens: realTradingRealtimeTokens,
+});
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });
 registerUserWalletRoutes(app, wallet);
@@ -103,16 +123,23 @@ const server = app.listen(port, "0.0.0.0", () => {
   console.log(`[api] listening on http://127.0.0.1:${port}`);
 });
 
-const socketHub = registerSocketHub(server, market);
+const socketHub = registerSocketHub(server, market, realTradingRealtimeTokens, realTradingUserStreams);
 
-function registerSocketHub(httpServer: typeof server, marketService: HyperliquidMarketService) {
-  const wss = new WebSocketServer({ server: httpServer, perMessageDeflate: false });
+function registerSocketHub(
+  httpServer: typeof server,
+  marketService: HyperliquidMarketService,
+  realtimeTokens: RealTradingRealtimeTokenService,
+  userStreams: RealTradingUserStreamManager,
+) {
+  const wss = new WebSocketServer({ server: httpServer, maxPayload: 64 * 1024, perMessageDeflate: false });
   const subscriptions = new Map<WebSocket, Set<string>>();
   const releases = new Map<WebSocket, Map<string, () => void>>();
+  const realTradingReleases = new Map<WebSocket, () => void>();
 
   wss.on("connection", (socket) => {
     subscriptions.set(socket, new Set());
     releases.set(socket, new Map());
+    realTradingReleases.set(socket, () => {});
     socket.on("message", (raw) => {
       try {
         const message = JSON.parse(String(raw)) as Record<string, string>;
@@ -137,12 +164,32 @@ function registerSocketHub(httpServer: typeof server, marketService: Hyperliquid
             releases.get(socket)?.set(key, marketService.addCandleSubscription(symbol, interval));
           }
         }
+        if (message.channel === "real-trading-user") {
+          const grant = realtimeTokens.consume(message.token);
+          if (!grant) {
+            socket.send(JSON.stringify({ type: "error", message: "真实交易实时订阅 token 无效或已过期。" }));
+            return;
+          }
+          realTradingReleases.get(socket)?.();
+          void userStreams.acquire(grant.userId, grant.address, (event) => {
+            if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(event));
+          }).then((release) => {
+            if (socket.readyState !== socket.OPEN) release();
+            else realTradingReleases.set(socket, release);
+          }).catch((error) => {
+            if (socket.readyState === socket.OPEN) {
+              socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "真实交易实时订阅失败。" }));
+            }
+          });
+        }
       } catch (error) {
         socket.send(JSON.stringify({ type: "error", message: error instanceof Error ? error.message : "invalid message" }));
       }
     });
     socket.on("close", () => {
       releases.get(socket)?.forEach((release) => release());
+      realTradingReleases.get(socket)?.();
+      realTradingReleases.delete(socket);
       releases.delete(socket);
       subscriptions.delete(socket);
     });
@@ -229,6 +276,7 @@ async function shutdown(signal: string) {
     martingaleGridPaperWorker.stop();
     fixedGridPaperWorker.stop();
     strategyRuntime.stop();
+    await realTradingUserStreams.stop();
     await market.stop();
     for (const client of socketHub.clients) client.terminate();
     await new Promise<void>((resolve, reject) => {

@@ -21,6 +21,13 @@ import type {
   WithdrawalRequest,
 } from "../types";
 import type { SessionRole } from "../auth/security";
+import type {
+  RealTradingAuditRecord,
+  RealTradingIdempotencyReservation,
+  RealTradingIdempotencyResult,
+  RealTradingIdempotencyState,
+} from "../modules/hyperliquid/realTradingAuditTypes";
+import type { RealTradingAgentBinding } from "../modules/hyperliquid/HyperliquidSignatureVerifier";
 
 const defaultDbPath = resolve(process.cwd(), "server/data/trading.sqlite");
 
@@ -63,9 +70,18 @@ type EmailTokenRow = Omit<EmailTokenRecord, "userId" | "usedAt"> & {
   userId?: string | null;
   usedAt?: number | null;
 };
+type RealTradingAuditRow = Omit<RealTradingAuditRecord, "clientOrderIds"> & { clientOrderIds: string };
+type RealTradingIdempotencyRow = {
+  requestId: string;
+  state: RealTradingIdempotencyState;
+  submittedAt: number;
+  receiptJson: string | null;
+};
+type RealTradingAgentBindingRow = RealTradingAgentBinding;
 
 export class TradingStore {
   private db: DatabaseSync;
+  private lastRealTradingAuditMaintenanceAt = 0;
 
   constructor(dbPath = process.env.TRADING_DB_PATH ?? defaultDbPath) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -73,6 +89,7 @@ export class TradingStore {
     this.db.exec("PRAGMA journal_mode = WAL;");
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.migrate();
+    this.maintainRealTradingAudit();
   }
 
   transaction<T>(fn: () => T) {
@@ -995,6 +1012,147 @@ export class TradingStore {
       );
   }
 
+  saveRealTradingAudit(record: RealTradingAuditRecord) {
+    this.maintainRealTradingAudit(record.completedAt);
+    this.db
+      .prepare(
+        `INSERT INTO real_trading_exchange_audit (
+           requestId, userId, network, masterAddress, actionType, clientOrderIds, outcome, errorCategory,
+           providerStatus, httpStatus, message, submittedAt, completedAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        record.requestId,
+        record.userId,
+        record.network,
+        record.masterAddress,
+        record.actionType,
+        JSON.stringify(record.clientOrderIds),
+        record.outcome,
+        record.errorCategory,
+        record.providerStatus,
+        record.httpStatus,
+        record.message,
+        record.submittedAt,
+        record.completedAt,
+      );
+  }
+
+  listRealTradingAudit(userId?: string) {
+    if (userId) {
+      const rows = this.db
+        .prepare("SELECT * FROM real_trading_exchange_audit WHERE userId = ? ORDER BY submittedAt DESC")
+        .all(userId) as RealTradingAuditRow[];
+      return rows.map(toRealTradingAuditRecord);
+    }
+    const rows = this.db
+      .prepare("SELECT * FROM real_trading_exchange_audit ORDER BY submittedAt DESC")
+      .all() as RealTradingAuditRow[];
+    return rows.map(toRealTradingAuditRecord);
+  }
+
+  findRealTradingAgentBinding(userId: string, masterAddress: string) {
+    return this.db.prepare(
+      `SELECT userId, masterAddress, agentAddress, approvedAt, updatedAt
+       FROM real_trading_agent_bindings
+       WHERE userId = ? AND masterAddress = ?`,
+    ).get(userId, masterAddress.toLowerCase()) as RealTradingAgentBindingRow | undefined;
+  }
+
+  upsertRealTradingAgentBinding(binding: RealTradingAgentBinding) {
+    this.db.prepare(
+      `INSERT INTO real_trading_agent_bindings (
+         userId, masterAddress, agentAddress, approvedAt, updatedAt
+       ) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(userId, masterAddress) DO UPDATE SET
+         agentAddress = excluded.agentAddress,
+         approvedAt = excluded.approvedAt,
+         updatedAt = excluded.updatedAt`,
+    ).run(
+      binding.userId,
+      binding.masterAddress.toLowerCase(),
+      binding.agentAddress.toLowerCase(),
+      binding.approvedAt,
+      binding.updatedAt,
+    );
+  }
+
+  reserveRealTradingOrderRequest(reservation: RealTradingIdempotencyReservation): RealTradingIdempotencyResult {
+    return this.transaction(() => {
+      const existing = reservation.clientOrderIds.map((cloid) => this.db.prepare(
+        `SELECT requestId, state, submittedAt, receiptJson FROM real_trading_order_idempotency
+         WHERE userId = ? AND masterAddress = ? AND network = ? AND cloid = ?`,
+      ).get(reservation.userId, reservation.masterAddress, reservation.network, cloid) as RealTradingIdempotencyRow | undefined);
+      const present = existing.filter((row): row is RealTradingIdempotencyRow => Boolean(row));
+      if (present.length > 0) {
+        const first = present[0];
+        const exactExistingRequest = present.length === reservation.clientOrderIds.length
+          && present.every((row) => row.requestId === first.requestId);
+        return {
+          kind: "existing",
+          requestId: exactExistingRequest ? first.requestId : "conflict",
+          state: exactExistingRequest ? first.state : "processing",
+          submittedAt: exactExistingRequest ? first.submittedAt : reservation.submittedAt,
+          receiptJson: exactExistingRequest ? first.receiptJson : null,
+        };
+      }
+      const insert = this.db.prepare(
+        `INSERT INTO real_trading_order_idempotency (
+           userId, masterAddress, network, cloid, requestId, actionType, state, receiptJson, submittedAt, completedAt
+         ) VALUES (?, ?, ?, ?, ?, ?, 'processing', NULL, ?, NULL)`,
+      );
+      reservation.clientOrderIds.forEach((cloid) => insert.run(
+        reservation.userId,
+        reservation.masterAddress,
+        reservation.network,
+        cloid,
+        reservation.requestId,
+        reservation.actionType,
+        reservation.submittedAt,
+      ));
+      return { kind: "reserved" };
+    });
+  }
+
+  completeRealTradingOrderRequest(
+    requestId: string,
+    state: Exclude<RealTradingIdempotencyState, "processing">,
+    receiptJson: string,
+    completedAt: number,
+  ) {
+    this.db.prepare(
+      `UPDATE real_trading_order_idempotency
+       SET state = ?, receiptJson = ?, completedAt = ?
+       WHERE requestId = ?`,
+    ).run(state, receiptJson, completedAt, requestId);
+  }
+
+  purgeExpiredRealTradingAudit(now = Date.now()) {
+    const retentionDays = parsePositiveEnvironmentNumber(process.env.REAL_TRADING_AUDIT_RETENTION_DAYS, 180);
+    const cutoff = now - retentionDays * 24 * 60 * 60 * 1_000;
+    const batchSize = 1_000;
+    const changes = this.db.prepare(
+      `DELETE FROM real_trading_exchange_audit
+       WHERE rowid IN (
+         SELECT rowid FROM real_trading_exchange_audit WHERE completedAt < ? ORDER BY completedAt ASC LIMIT ?
+       )`,
+    ).run(cutoff, batchSize).changes;
+    this.db.prepare(
+      `DELETE FROM real_trading_order_idempotency
+       WHERE rowid IN (
+         SELECT rowid FROM real_trading_order_idempotency
+         WHERE completedAt IS NOT NULL AND completedAt < ? ORDER BY completedAt ASC LIMIT ?
+       )`,
+    ).run(cutoff, batchSize);
+    return changes;
+  }
+
+  private maintainRealTradingAudit(now = Date.now()) {
+    if (now - this.lastRealTradingAuditMaintenanceAt < 6 * 60 * 60 * 1_000) return;
+    this.purgeExpiredRealTradingAudit(now);
+    this.lastRealTradingAuditMaintenanceAt = now;
+  }
+
   close() {
     this.db.close();
   }
@@ -1294,6 +1452,45 @@ export class TradingStore {
         UNIQUE(network, tokenAddress)
       );
 
+      CREATE TABLE IF NOT EXISTS real_trading_exchange_audit (
+        requestId TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        network TEXT NOT NULL,
+        masterAddress TEXT,
+        actionType TEXT NOT NULL,
+        clientOrderIds TEXT NOT NULL DEFAULT '[]',
+        outcome TEXT NOT NULL,
+        errorCategory TEXT,
+        providerStatus TEXT,
+        httpStatus INTEGER NOT NULL,
+        message TEXT,
+        submittedAt INTEGER NOT NULL,
+        completedAt INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS real_trading_order_idempotency (
+        userId TEXT NOT NULL,
+        masterAddress TEXT NOT NULL,
+        network TEXT NOT NULL,
+        cloid TEXT NOT NULL,
+        requestId TEXT NOT NULL,
+        actionType TEXT NOT NULL,
+        state TEXT NOT NULL,
+        receiptJson TEXT,
+        submittedAt INTEGER NOT NULL,
+        completedAt INTEGER,
+        PRIMARY KEY (userId, masterAddress, network, cloid)
+      );
+
+      CREATE TABLE IF NOT EXISTS real_trading_agent_bindings (
+        userId TEXT NOT NULL,
+        masterAddress TEXT NOT NULL,
+        agentAddress TEXT NOT NULL,
+        approvedAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, masterAddress)
+      );
+
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_accounts_userId ON real_trading_accounts(userId);
@@ -1312,6 +1509,10 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_status ON onchain_deposits(status);
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_toAddress ON onchain_deposits(toAddress);
       CREATE INDEX IF NOT EXISTS idx_onchain_deposits_blockNumber ON onchain_deposits(blockNumber);
+      CREATE INDEX IF NOT EXISTS idx_real_trading_audit_userId ON real_trading_exchange_audit(userId, submittedAt);
+      CREATE INDEX IF NOT EXISTS idx_real_trading_audit_completedAt ON real_trading_exchange_audit(completedAt);
+      CREATE INDEX IF NOT EXISTS idx_real_trading_order_idempotency_requestId ON real_trading_order_idempotency(requestId);
+      CREATE INDEX IF NOT EXISTS idx_real_trading_agent_bindings_agent ON real_trading_agent_bindings(agentAddress);
     `);
     this.addColumnIfMissing("withdrawal_requests", "onchainStatus", "TEXT");
     this.addColumnIfMissing("withdrawal_requests", "chainId", "INTEGER");
@@ -1333,6 +1534,8 @@ export class TradingStore {
     this.addColumnIfMissing("market_symbols", "providerCoin", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "sourceDex", "TEXT NOT NULL DEFAULT 'main'");
     this.addColumnIfMissing("market_symbols", "sourceType", "TEXT NOT NULL DEFAULT 'main'");
+    this.addColumnIfMissing("real_trading_exchange_audit", "clientOrderIds", "TEXT NOT NULL DEFAULT '[]'");
+    this.addColumnIfMissing("real_trading_exchange_audit", "errorCategory", "TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
     this.cleanupLegacyTradingData();
     this.db.prepare("UPDATE users SET emailVerifiedAt = createdAt WHERE emailVerifiedAt IS NULL").run();
@@ -1383,6 +1586,17 @@ function toEmailToken(row: EmailTokenRow): EmailTokenRecord {
     userId: row.userId ?? null,
     usedAt: row.usedAt ?? null,
   };
+}
+
+function toRealTradingAuditRecord(row: RealTradingAuditRow): RealTradingAuditRecord {
+  let clientOrderIds: string[] = [];
+  try {
+    const parsed = JSON.parse(row.clientOrderIds);
+    if (Array.isArray(parsed)) clientOrderIds = parsed.filter((value): value is string => typeof value === "string");
+  } catch {
+    // Legacy/malformed audit metadata is returned without client order ids.
+  }
+  return { ...row, clientOrderIds };
 }
 
 function normalizeMarketCategory(value: string): MarketSymbol["category"] {
@@ -1441,4 +1655,9 @@ function toTradingAccount(row: AccountRow | TradingAccount): TradingAccount {
 
 function roundMoney(value: number) {
   return Number(value.toFixed(2));
+}
+
+function parsePositiveEnvironmentNumber(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
