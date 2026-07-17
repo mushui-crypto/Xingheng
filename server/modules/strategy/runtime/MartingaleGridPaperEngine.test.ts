@@ -60,6 +60,34 @@ test("paper report fixes exchange-order capability off and keeps symbols isolate
   assert.equal(report.metrics.initialEquity, 10_000);
 });
 
+test("15m entry mode confirms only a completed 15m signal and enters on the next 5m open", () => {
+  const start = 1_780_000_000 - (1_780_000_000 % 900);
+  const fifteenMinuteCloses = [100, 101, 102, 103, 104, 105, 106, 150, 140, 141];
+  const candles = fifteenMinuteCloses.flatMap((close, bucket) => Array.from({ length: 3 }, (_, offset) => ({
+    symbol: "BTCUSDT",
+    interval: "5m" as const,
+    time: start + bucket * 900 + offset * 300,
+    open: close,
+    high: close + 0.2,
+    low: close - 0.2,
+    close,
+    volume: 10,
+  })));
+  const config = { ...compactConfig, longRsiThreshold: 90 };
+  const result = simulateMartingaleGridSymbol("BTCUSDT", candles, {
+    forwardStart: start,
+    config,
+    signalIntervalMinutes: 15,
+  });
+
+  assert.equal(result.diagnostics.signals, 1);
+  assert.equal(result.diagnostics.startedGroups, 1);
+  assert.ok(result.open);
+  assert.equal(result.open!.signalTime % 900, 600);
+  assert.equal(result.open!.entryTime, result.open!.signalTime + 300);
+  assert.equal(result.open!.entryTime % 900, 0);
+});
+
 function makeLongSetupCandles(exitOnEntryCandle: boolean): Candle[] {
   const start = 1_780_000_000 - (1_780_000_000 % 300);
   const closes = Array.from({ length: 30 }, (_, index) => 100 + index)

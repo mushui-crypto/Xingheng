@@ -30,11 +30,25 @@ import {
 import type { StrategyChartFocusRequest } from "./StrategyTradeChart";
 import { StrategyTradeChart } from "./StrategyTradeChart";
 import { StrategyErrorState, StrategyLoadingState } from "./StrategyPanels";
+import { FixedGridStrategyView } from "./FixedGridStrategyView";
 
 const martingaleRefreshMs = 60_000;
 const symbols: MartingaleSymbol[] = ["BTCUSDT", "ETHUSDT"];
 
 export function MartingaleStrategyView() {
+  const [variant, setVariant] = useState<"fixed-grid" | "classic">("fixed-grid");
+  return (
+    <div className="xh-strategy-martingale-view" role="tabpanel" aria-label="马丁网格 Paper">
+      <div className="xh-strategy-variant-switch" role="tablist" aria-label="马丁网格策略版本">
+        <button type="button" role="tab" aria-selected={variant === "fixed-grid"} className={variant === "fixed-grid" ? "is-active" : ""} onClick={() => setVariant("fixed-grid")}>固定价差 12 层 V3</button>
+        <button type="button" role="tab" aria-selected={variant === "classic"} className={variant === "classic" ? "is-active" : ""} onClick={() => setVariant("classic")}>经典指标网格 V1</button>
+      </div>
+      {variant === "fixed-grid" ? <FixedGridStrategyView /> : <ClassicMartingaleStrategyView />}
+    </div>
+  );
+}
+
+function ClassicMartingaleStrategyView() {
   const [request, dispatch] = useReducer(martingaleRequestReducer, initialMartingaleRequestState);
   const [symbol, setSymbol] = useState<MartingaleSymbol>("BTCUSDT");
   const [focusRequest, setFocusRequest] = useState<StrategyChartFocusRequest>(null);
@@ -103,7 +117,7 @@ export function MartingaleStrategyView() {
     : "马丁网格 Paper 报告暂不可用。";
 
   return (
-    <div className="xh-strategy-martingale-view" role="tabpanel" aria-label="马丁网格 Paper">
+    <div className="xh-strategy-martingale-classic">
       <MartingaleRouteSummary report={report} loading={request.loading} />
       <SymbolSwitch active={symbol} onChange={handleSymbolChange} />
       <StrategyTradeChart
@@ -140,6 +154,7 @@ export function MartingalePageHeader() {
       <div><h1>策略交易</h1><p>Binance USD-M BTC/ETH · 5x 隔离风险模型</p></div>
       <div className="xh-strategy-statuses" aria-label="马丁网格策略执行状态">
         <span className="is-observing">Paper only</span>
+        <span className="is-review">V1 资格未通过 · V3 待验证</span>
         <span className="is-disabled">自动真实订单关闭</span>
       </div>
     </header>
@@ -151,7 +166,7 @@ function MartingaleRouteSummary({ loading, report }: { loading: boolean; report:
   return (
     <section className="xh-strategy-panel xh-strategy-martingale-summary" aria-labelledby="martingale-summary-title">
       <div className="xh-strategy-panel-header">
-        <div><h2 id="martingale-summary-title">马丁网格 Paper</h2><p>有限5层、趋势过滤、整组止盈止损；仅观察自动 Paper，不连接交易接口。</p></div>
+        <div><h2 id="martingale-summary-title">马丁网格 Paper</h2><p>历史资格未通过，当前仅保留自动 Paper 实验记录，不作为历史合格候选。</p></div>
         <span className={`xh-strategy-worker-state ${loading || !report ? "is-unavailable" : review ? "is-stale" : "is-healthy"}`} role="status">
           {loading ? "报告加载中" : !report ? "等待报告" : review ? "等待人工复核" : "Paper 收集中"}
         </span>

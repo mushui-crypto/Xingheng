@@ -16,6 +16,9 @@ services:
       STRATEGY_FORWARD_WORKER_POLL_MS: "300000"
       MARTINGALE_GRID_PAPER_REPORT_PATH: /app/strategy-data/martingale-grid-paper.json
       MARTINGALE_GRID_PAPER_WORKER_POLL_MS: "300000"
+      FIXED_GRID_PAPER_REPORT_PATH: /app/strategy-data/fixed-grid-paper.json
+      FIXED_GRID_ARCHIVE_CACHE_PATH: /app/strategy-data/fixed-grid-archive-cache
+      FIXED_GRID_PAPER_WORKER_POLL_MS: "300000"
       TRUST_PROXY: "true"
       BSC_TESTNET_CHAIN_ID: "97"
     init: true
@@ -70,6 +73,7 @@ services:
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
       MARTINGALE_GRID_PAPER_REPORT_PATH: /app/strategy-data/martingale-grid-paper.json
+      FIXED_GRID_PAPER_REPORT_PATH: /app/strategy-data/fixed-grid-paper.json
     volumes:
       - strategy_data:/app/strategy-data
     restart: "no"

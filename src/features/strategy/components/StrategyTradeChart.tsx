@@ -2,10 +2,12 @@ import {
   CandlestickSeries,
   createChart,
   createSeriesMarkers,
+  LineStyle,
   type CandlestickData,
   type IChartApi,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
+  type IPriceLine,
   type MouseEventParams,
   type SeriesMarker,
   type Time,
@@ -40,6 +42,15 @@ export type StrategyChartFocusRequest = {
   revision: number;
 } | null;
 
+export type StrategyChartPriceLevel = {
+  id: string;
+  label: string;
+  price: number;
+  color: string;
+  style?: "solid" | "dashed";
+  axisLabelVisible?: boolean;
+};
+
 type StrategyTradeChartProps = {
   mode: "forward" | "history" | "martingale";
   contextState: StrategyChartContextState;
@@ -51,6 +62,7 @@ type StrategyTradeChartProps = {
   fallbackTime: string | null;
   focusRequest: StrategyChartFocusRequest;
   description?: string;
+  priceLevels?: StrategyChartPriceLevel[];
 };
 
 type ChartLoadState = "idle" | "loading" | "ready" | "empty" | "error";
@@ -65,6 +77,7 @@ export function StrategyTradeChart({
   markerDataCount,
   markerDataSignature,
   mode,
+  priceLevels = [],
   symbol = "BTCUSDT",
 }: StrategyTradeChartProps) {
   const rootRef = useRef<HTMLElement | null>(null);
@@ -72,6 +85,7 @@ export function StrategyTradeChart({
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const markersRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  const priceLinesRef = useRef<IPriceLine[]>([]);
   const markerEventMapRef = useRef(new Map<string, StrategyTradeMarkerEvent>());
   const candleMapRef = useRef(new Map<number, StrategyCandle>());
   const [interval, setInterval] = useState<StrategyCandleInterval>("5m");
@@ -153,9 +167,32 @@ export function StrategyTradeChart({
       chartRef.current = null;
       seriesRef.current = null;
       markersRef.current = null;
+      priceLinesRef.current = [];
       candleMapRef.current.clear();
     };
   }, []);
+
+  useEffect(() => {
+    const series = seriesRef.current;
+    if (!series) return;
+    priceLinesRef.current.forEach((line) => series.removePriceLine(line));
+    priceLinesRef.current = priceLevels
+      .filter((level) => Number.isFinite(level.price) && level.price > 0)
+      .map((level) => series.createPriceLine({
+        price: level.price,
+        color: level.color,
+        lineWidth: 1,
+        lineStyle: level.style === "solid" ? LineStyle.Solid : LineStyle.Dashed,
+        axisLabelVisible: level.axisLabelVisible ?? true,
+        title: level.label,
+      }));
+    return () => {
+      const currentSeries = seriesRef.current;
+      if (!currentSeries) return;
+      priceLinesRef.current.forEach((line) => currentSeries.removePriceLine(line));
+      priceLinesRef.current = [];
+    };
+  }, [priceLevels]);
 
   useEffect(() => {
     if (contextState !== "ready") {
@@ -316,6 +353,7 @@ export function StrategyTradeChart({
           : visibleMarkerCount === 0
             ? "当前K线窗口未包含交易标记，可点击下方交易记录定位。"
             : `当前窗口 ${visibleMarkerCount} 个成交标记。点击标记查看详情。`}
+        {priceLevels.length ? ` 当前显示 ${priceLevels.length} 条 Paper 计划价格线。` : ""}
       </div>
       <StrategyMarkerDetail event={selectedEvent} />
     </section>

@@ -1,5 +1,7 @@
 # 策略研究模块
 
+BTC、ETH、Route B、自动Paper、数据源与主要否决路线的统一交接入口见 `STRATEGY_BTC_ETH_HANDOFF.md`；马丁网格专题见 `STRATEGY_MARTINGALE_GRID_HANDOFF.md`。
+
 当前模块用于把 ICT 概念转化为可复现、可回测的客观规则。它是研究与验证工具，不构成收益承诺、投资建议或平台代客交易能力。
 
 ## 当前实现
@@ -160,6 +162,10 @@ GET /api/strategy/martingale/forward
 环境变量为 `MARTINGALE_GRID_PAPER_WORKER_ENABLED`、`MARTINGALE_GRID_PAPER_WORKER_POLL_MS` 和 `MARTINGALE_GRID_PAPER_REPORT_PATH`。首版使用 BTC/ETH 各 5,000 USDT 独立 Paper 账本、5x隔离风险模型、第一层0.5%保证金、1.35倍、最多5层、ATR/价格比例自适应间距、整组目标和1.5%计划损失上限。观察门槛为60天或100个已完成网格组任一先达到。
 
 马丁页签K线使用 `GET /api/strategy/martingale/candles`，要求登录且只允许 `BTCUSDT / ETHUSDT`；接口复用内部标准化K线契约、缓存、已收盘过滤和安全错误响应，不允许前端直连交易所。
+
+独立历史复算已按预注册完成，评价区间为2021-01-01至2026-07-15，BTC/ETH各591,264根5分钟K线、checksum通过、重复0、缺口0。组合1,622组、净收益160.53、PF 1.304、平均0.0049R、标记最大回撤0.91%；BTC PF 1.093，ETH PF 1.546。双倍手续费与滑点后净亏损411.63、PF 0.378。由于平均R与双倍成本门槛失败，状态固定为 `rejected_historical_qualification`；完整结果见 `STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md`。自动Paper可继续记录，但不得解释为历史合格候选。
+
+15分钟入场 V2 已按独立预注册完成受控复算：只把 RSI/ATR 信号从5分钟改为已完成15分钟，下一根5分钟开盘执行，其余 V1 参数冻结。2021-01-01至2026-07-15 的 BTC/ETH 各591,264根K线中，两标的合格信号和完成组均为0；15分钟极值回撤与同周期15分钟顺势过滤没有同时满足。两次运行哈希一致，路线固定为 `rejected_historical_qualification`，不修改当前自动Paper。详见 `STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2_RESULT.md`。
 
 策略图表 K 线只读接口：
 

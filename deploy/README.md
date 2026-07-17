@@ -41,6 +41,13 @@ STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json
 STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json
 STRATEGY_FORWARD_WORKER_ENABLED=true
 STRATEGY_FORWARD_WORKER_POLL_MS=300000
+MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
+MARTINGALE_GRID_PAPER_WORKER_ENABLED=true
+MARTINGALE_GRID_PAPER_WORKER_POLL_MS=300000
+FIXED_GRID_PAPER_REPORT_PATH=/app/strategy-data/fixed-grid-paper.json
+FIXED_GRID_ARCHIVE_CACHE_PATH=/app/strategy-data/fixed-grid-archive-cache
+FIXED_GRID_PAPER_WORKER_ENABLED=true
+FIXED_GRID_PAPER_WORKER_POLL_MS=300000
 ```
 
 前向 Paper Worker 启动后立即检查一次；之后默认每 5 分钟轻量查询最新已收盘 5m K 线。
