@@ -1480,34 +1480,6 @@ textarea {
     @apply shrink-0 rounded-[3px] bg-[#103b32] px-3 py-2 text-[12px] font-medium tracking-[0.03em] text-[#57d9b1];
   }
 
-  .xh-real-connection-banner {
-    @apply flex min-h-14 items-center justify-between gap-4 border-b border-[#5a4521] bg-[#211b10] px-5 py-3 text-[12px] text-[#f5c56e];
-  }
-
-  .xh-real-connection-banner > div {
-    @apply flex min-w-0 flex-col gap-1;
-  }
-
-  .xh-real-connection-banner strong {
-    @apply font-medium text-[#ffe1a5];
-  }
-
-  .xh-real-connection-banner span {
-    @apply leading-5;
-  }
-
-  .xh-real-connection-banner.is-disconnected {
-    @apply border-[#68303a] bg-[#281419] text-[#ff9aaa];
-  }
-
-  .xh-real-connection-banner.is-disconnected strong {
-    @apply text-[#ffc2cc];
-  }
-
-  .xh-real-connection-banner button {
-    @apply min-h-9 shrink-0 px-3 py-2 text-[12px] normal-case tracking-normal;
-  }
-
   .xh-trade-market-stats {
     @apply flex min-w-0 items-center gap-10 overflow-hidden border-l border-[#25282f] pl-6;
   }
@@ -1520,15 +1492,22 @@ textarea {
     @apply block whitespace-nowrap text-[10px] font-medium uppercase leading-4 text-[#69777e];
   }
 
-  .xh-trade-stat strong {
+  .xh-trade-stat strong,
+  .xh-trade-stat-action {
     @apply mt-1 block truncate text-[13px] font-semibold leading-5 text-[#f5f5f5];
   }
 
-  .xh-trade-stat.is-positive strong {
+  .xh-trade-stat-action {
+    @apply text-left normal-case tracking-normal underline decoration-[#69777e] underline-offset-4 focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white;
+  }
+
+  .xh-trade-stat.is-positive strong,
+  .xh-trade-stat.is-positive .xh-trade-stat-action {
     @apply text-[#38d9a9];
   }
 
-  .xh-trade-stat.is-negative strong {
+  .xh-trade-stat.is-negative strong,
+  .xh-trade-stat.is-negative .xh-trade-stat-action {
     @apply text-[#ff4d6d];
   }
 
@@ -2284,39 +2263,6 @@ textarea {
     @apply h-10 w-full border border-[#25282f] bg-[#0f1116] text-[12px] font-medium text-[#7a8596] transition hover:border-white/40 hover:text-[#e8ecf2] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white;
   }
 
-  .xh-real-connect-error {
-    @apply border border-[#5a4521] bg-[#211b10] p-2.5 text-[12px] leading-5 text-[#f5c56e];
-  }
-
-  .xh-real-session-status {
-    @apply grid grid-cols-3 border-y border-[#25282f] bg-[#0b0e12] py-2 text-[11px];
-  }
-
-  .xh-real-session-status > div {
-    @apply min-w-0 border-r border-[#25282f] px-2 last:border-r-0;
-  }
-
-  .xh-real-session-status span,
-  .xh-real-session-status strong {
-    @apply block truncate;
-  }
-
-  .xh-real-session-status span {
-    @apply text-[#69777e];
-  }
-
-  .xh-real-session-status strong {
-    @apply mt-1 font-medium text-[#c7cdd5];
-  }
-
-  .xh-real-session-status.is-ready strong {
-    @apply text-[#52d8ad];
-  }
-
-  .xh-real-session-status.is-pending strong {
-    @apply text-[#f5c56e];
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .xh-real-side-buttons button {
       transition: none;
@@ -2447,10 +2393,6 @@ textarea {
 
   .xh-real-reconciliation-list {
     @apply max-h-[320px] space-y-2 overflow-y-auto border-y border-[#5a4521] bg-[#17140e] p-3;
-  }
-
-  .xh-real-reconciliation-clear {
-    @apply border-y border-[#19523f] bg-[#0d241d] px-3 py-2 text-[11px] text-[#52d8ad];
   }
 
   .xh-real-reconciliation-heading {
@@ -2959,14 +2901,6 @@ textarea {
   }
 
   @media (max-width: 480px) {
-    .xh-real-connection-banner {
-      @apply items-start px-3;
-    }
-
-    .xh-real-connection-banner > button {
-      @apply mt-0.5;
-    }
-
     .xh-trade-marketbar {
       @apply gap-4 px-3;
     }
@@ -2981,11 +2915,13 @@ textarea {
     }
 
     .xh-trade-market-stats .xh-trade-stat span,
-    .xh-trade-market-stats .xh-trade-stat strong {
+    .xh-trade-market-stats .xh-trade-stat strong,
+    .xh-trade-market-stats .xh-trade-stat-action {
       @apply whitespace-nowrap;
     }
 
-    .xh-trade-market-stats .xh-trade-stat strong {
+    .xh-trade-market-stats .xh-trade-stat strong,
+    .xh-trade-market-stats .xh-trade-stat-action {
       overflow: visible;
       text-overflow: clip;
     }
@@ -3343,13 +3279,59 @@ textarea {
   }
 
   .xh-toast {
-    @apply pointer-events-none fixed bottom-6 right-6 z-[80] max-w-[min(360px,calc(100vw-32px))] border border-[#2b2b2b] bg-[#101010] px-4 py-3 text-sm leading-5 text-[#f5f5f5] opacity-0 shadow-[0_8px_24px_rgba(0,0,0,0.28)] transition duration-200 ease-out;
-    transform: translateY(8px);
+    @apply pointer-events-auto fixed right-5 top-[76px] z-[80] flex w-[min(380px,calc(100vw-32px))] items-start justify-between gap-3 border border-[#39414c] bg-[#101419] px-4 py-3 text-[12px] leading-5 text-[#f5f5f5] opacity-0 shadow-[0_4px_8px_rgba(0,0,0,0.34)] transition duration-200 ease-out;
+    transform: translateY(-8px);
   }
 
   .xh-toast.is-visible {
     @apply opacity-100;
     transform: translateY(0);
+  }
+
+  .xh-toast-copy {
+    @apply flex min-w-0 flex-1 flex-col gap-0.5;
+  }
+
+  .xh-toast-copy strong {
+    @apply text-[11px] font-semibold text-[#aeb8c4];
+  }
+
+  .xh-toast-copy span {
+    @apply break-words text-[#f5f5f5];
+  }
+
+  .xh-toast > button {
+    @apply shrink-0 px-1 py-0.5 text-[11px] text-[#8a95a1] hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white;
+  }
+
+  .xh-toast.is-success {
+    @apply border-[#23644f];
+  }
+
+  .xh-toast.is-success .xh-toast-copy strong {
+    @apply text-[#52d8ad];
+  }
+
+  .xh-toast.is-warning {
+    @apply border-[#6f5429];
+  }
+
+  .xh-toast.is-warning .xh-toast-copy strong {
+    @apply text-[#f5c56e];
+  }
+
+  .xh-toast.is-error {
+    @apply border-[#743441];
+  }
+
+  .xh-toast.is-error .xh-toast-copy strong {
+    @apply text-[#ff8ca0];
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .xh-toast {
+      transition: none;
+    }
   }
 
   .xh-wallet-detail-column {
@@ -3530,10 +3512,10 @@ textarea {
     }
 
     .xh-toast {
-      left: 16px;
-      right: 16px;
-      bottom: 16px;
-      max-width: none;
+      left: 12px;
+      right: 12px;
+      top: 68px;
+      width: auto;
     }
   }
 

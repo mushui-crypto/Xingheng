@@ -38,6 +38,10 @@ type ExchangeStore = {
   releaseRealTradingOrderRequest?(requestId: string): void;
 };
 
+type RealTradingAccountRoleChecker = {
+  getUserRole(address: string): Promise<string>;
+};
+
 type ExchangeForwardContext = { requestId: string; userId: string; submittedAt?: number };
 
 export class RealTradingExchangeSubmissionError extends Error {
@@ -52,6 +56,7 @@ export class HyperliquidExchangeProxy {
     private readonly risk?: RealTradingRiskGuard,
     private readonly store?: ExchangeStore,
     private readonly signatureVerifier?: RealTradingSignatureVerifier,
+    private readonly accountRoles?: RealTradingAccountRoleChecker,
   ) {}
 
   async forward(input: unknown, context: ExchangeForwardContext): Promise<RealTradingExchangeReceipt> {
@@ -71,6 +76,7 @@ export class HyperliquidExchangeProxy {
         userId: context.userId,
         bindings: toAgentBindingStore(this.store),
       }) ?? null;
+      await this.assertApproveAgentAccountActivated(request);
       clientOrderIds = actionType === "order" ? extractClientOrderIds(request.action) : [];
       if (actionType === "order") {
         if (!this.store?.reserveRealTradingOrderRequest) {
@@ -259,6 +265,23 @@ export class HyperliquidExchangeProxy {
         actionType: record.actionType,
         errorCategory: "audit_storage_error",
       });
+    }
+  }
+
+  private async assertApproveAgentAccountActivated(request: RealTradingExchangeRequest) {
+    if (request.action.type !== "approveAgent" || !this.accountRoles) return;
+    let role: string;
+    try {
+      role = await this.accountRoles.getUserRole(request.masterAddress);
+    } catch (error) {
+      console.warn("[real-trading] Hyperliquid Testnet userRole check unavailable; falling back to provider response", {
+        masterAddress: maskAddress(request.masterAddress),
+        error: safeOperationalErrorSummary(error),
+      });
+      return;
+    }
+    if (role.trim().toLowerCase() === "missing") {
+      throw new Error("Hyperliquid Testnet account_not_activated: master account role is missing.");
     }
   }
 }
@@ -450,6 +473,7 @@ function auditRecord(input: {
 
 function categorizeLocalError(error: unknown) {
   const message = error instanceof Error ? error.message : "";
+  if (message.includes("account_not_activated")) return "account_not_activated";
   if (message.includes("cloid")) return "invalid_or_duplicate_cloid";
   if (message.includes("风险") || message.includes("权益") || message.includes("敞口") || message.includes("杠杆") || message.includes("委托")) return "risk_rejection";
   if (message.includes("签名") || message.includes("nonce") || message.includes("action") || message.includes("network")) return "validation_rejection";
@@ -458,6 +482,7 @@ function categorizeLocalError(error: unknown) {
 
 function classifyLocalFailure(error: unknown) {
   const message = error instanceof Error ? error.message : "";
+  if (message.includes("account_not_activated")) return { code: "RT_ACCOUNT_NOT_ACTIVATED", httpStatus: 409 };
   if (message.includes("暂不允许") || message.includes("不支持 vaultAddress") || message.includes("Mainnet") || message.includes("仅允许 Hyperliquid Testnet")) {
     return { code: "RT_ACTION_NOT_ALLOWED", httpStatus: 403 };
   }
@@ -486,6 +511,9 @@ function sortValue(value: unknown): unknown {
 
 function safeLocalErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "真实交易请求校验失败。";
+  if (message.includes("account_not_activated")) {
+    return "该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。";
+  }
   if (message.includes("signatureChainId")) {
     return "请切换钱包网络到 Arbitrum Sepolia 后重新授权。";
   }
@@ -506,6 +534,12 @@ function safeLocalErrorMessage(error: unknown) {
   }
   const redacted = redactErrorText(message).trim();
   return redacted ? redacted.slice(0, 300) : "真实交易请求校验失败。";
+}
+
+function safeOperationalErrorSummary(error: unknown) {
+  const message = error instanceof Error ? error.message : String(error);
+  if (containsSensitiveErrorMaterial(message)) return "upstream_check_unavailable";
+  return redactErrorText(message).trim().slice(0, 200) || "upstream_check_unavailable";
 }
 
 function containsSensitiveErrorMaterial(value: string) {
@@ -543,6 +577,7 @@ function publicCategoryMessage(category: string) {
     risk_rejection: "服务端风险策略拒绝。",
     validation_rejection: "请求契约校验拒绝。",
     invalid_or_duplicate_cloid: "cloid 校验拒绝。",
+    account_not_activated: "Hyperliquid Testnet 账户未激活。",
     local_rejection: "服务端本地拒绝。",
   };
   return messages[category] ?? "真实交易请求未被接受。";

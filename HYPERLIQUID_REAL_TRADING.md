@@ -190,6 +190,7 @@ server/modules/api/realTradingRoutes.ts
   - 必要的 close / reduce-only order 仍按 `order` 表达
 - `approveAgent` 仅允许 Hyperliquid Testnet：`action.hyperliquidChain` 必须为 `Testnet`，`action.agentAddress` 必须为合法 EVM 地址。
 - `approveAgent.action.signatureChainId` 固定要求为 Arbitrum Sepolia `421614 / 0x66eee`。前端必须在钱包不处于该网络时先展示明确网络提示，并由用户点击后主动切链；后端 fail-closed 拒绝其他签名链。交易网络边界仍同时由 `hyperliquidChain=Testnet`、Testnet endpoint 与后端 allowlist 保证，签名链不等于 Mainnet 放行。
+- `approveAgent` 转发前会只读查询 Hyperliquid Testnet `userRole(masterAddress)`；仅当上游明确返回 `role=missing` 时，本地拒绝且不转发，HTTP `409`、`errorCode=RT_ACCOUNT_NOT_ACTIVATED`、公开文案为“该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。”。`userRole` 网络失败或不可读不得误判为未激活，继续走既有 provider fallback 与脱敏审计。
 - `approveAgent` 转发前必须按 SDK 相同的 EIP-712 数据恢复签名地址，并确认签名者等于声明的 `masterAddress`；交易所明确接受后，SQLite 只记录 `(userId, masterAddress, agentAddress, approvedAt)` 的非敏感授权绑定。
 - 后续 `order / cancel / updateLeverage` 转发前必须恢复 L1 action 签名地址，并确认它等于当前登录用户及 `masterAddress` 已绑定的 agent wallet；不存在绑定或签名不匹配时 fail closed，避免用未绑定地址绕过账户风险快照。
 - `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是正 safe integer；P0 服务端风险门禁默认再限制为 `1..20x`，环境变量只能显式调整该平台上限。品种实际最大杠杆仍由前端取 `min(symbols.maxLeverage, 平台上限)`，并由 Hyperliquid 最终校验。

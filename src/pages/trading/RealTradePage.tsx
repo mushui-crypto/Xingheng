@@ -38,6 +38,7 @@ import { RealTradingOrderPanel } from "../../features/realTrading/components/Rea
 import { RealPositionsTable } from "../../features/realTrading/components/RealPositionsTable";
 import { MarketDepthPanel } from "../../features/trading/components/MarketDepthPanel";
 import { TradeStat } from "../../features/trading/components/TradeStat";
+import { Toast, useTradingToast } from "../../features/trading/components/TradingFeedback";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../../features/realTrading/model/types";
 import { enrichPositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
 import { resolveRealTradingCategory } from "../../features/realTrading/lib/marketCategory";
@@ -110,8 +111,6 @@ export function RealTradePage() {
   const [accountError, setAccountError] = useState("");
   const [chartMessage, setChartMessage] = useState("");
   const [latestCandle, setLatestCandle] = useState<RealCandle | null>(null);
-  const [connectMessage, setConnectMessage] = useState("");
-  const [signerCleared, setSignerCleared] = useState(false);
   const [walletProvider, setWalletProvider] = useState<Eip1193Provider | null>(null);
   const [realtimeState, dispatchRealtime] = useReducer(realTradingRealtimeReducer, initialRealTradingRealtimeState);
   const [orderConnectionStatus, setOrderConnectionStatus] = useState<RealTradingConnectionStatus>("reconnecting");
@@ -128,6 +127,7 @@ export function RealTradePage() {
   const accountRequestGenerationRef = useRef(0);
   const marketRequestGenerationRef = useRef(0);
   const marketRequestInFlightRef = useRef(false);
+  const { dismissToast, showToast, toast } = useTradingToast();
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
@@ -182,6 +182,18 @@ export function RealTradePage() {
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     return `${protocol}//${window.location.host}/ws`;
   }, []);
+
+  useEffect(() => {
+    if (!tradingSession.message) return;
+    showToast(
+      tradingSession.message,
+      tradingSession.messageTone === "error"
+        ? "error"
+        : tradingSession.messageTone === "success"
+          ? "success"
+          : "warning",
+    );
+  }, [showToast, tradingSession.message, tradingSession.messageTone]);
 
   const loadMarket = async (
     symbol = selectedSymbol,
@@ -362,8 +374,7 @@ export function RealTradePage() {
             if (!address) return;
             orderSequenceRef.current = null;
             setWalletAddress(address);
-            setSignerCleared(true);
-            setConnectMessage("已恢复钱包只读连接；本地 signer 已清除，请重新授权 Agent 后再交易。");
+            showToast("已恢复钱包只读连接；本地 signer 已清除，请重新授权 Agent 后再交易。", "warning");
             void loadAccount(address, true);
           }).catch(() => undefined);
         }
@@ -423,8 +434,7 @@ export function RealTradePage() {
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
       orderSequenceRef.current = null;
       setWalletAddress(address);
-      setSignerCleared(Boolean(address));
-      setConnectMessage(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。");
+      showToast(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。", "warning");
       void loadAccount(address);
     };
 
@@ -791,10 +801,9 @@ export function RealTradePage() {
   }, [interval, selectedSymbol]);
 
   const connectWallet = async () => {
-    setConnectMessage("");
     const ethereum = walletProvider ?? await discoverInjectedEthereumProvider();
     if (!ethereum?.request) {
-      setConnectMessage("未检测到浏览器钱包。请使用支持 EIP-1193 的钱包连接主账户地址。");
+      showToast("未检测到浏览器钱包。请使用支持 EIP-1193 的钱包连接主账户地址。", "error");
       return;
     }
     try {
@@ -802,16 +811,15 @@ export function RealTradePage() {
       const accounts = await ethereum.request({ method: "eth_requestAccounts" });
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
       if (!address) {
-        setConnectMessage("钱包未返回账户地址。");
+        showToast("钱包未返回账户地址。", "error");
         return;
       }
       orderSequenceRef.current = null;
       setWalletAddress(address);
-      setSignerCleared(false);
       await loadAccount(address);
-      setConnectMessage("主账户地址已连接。");
+      showToast("主账户地址已连接。", "success");
     } catch (error) {
-      setConnectMessage(error instanceof Error ? error.message : "钱包连接失败。");
+      showToast(error instanceof Error ? error.message : "钱包连接失败。", "error");
     }
   };
 
@@ -894,6 +902,7 @@ export function RealTradePage() {
   };
 
   const retryRealtimeSnapshot = async () => {
+    showToast("正在重新连接真实行情与账户状态。", "info");
     userStreamSequenceRef.current = null;
     setUserStreamRetryKey((current) => current + 1);
     await Promise.all([
@@ -904,6 +913,7 @@ export function RealTradePage() {
 
   return (
     <div className="xh-trade-terminal xh-real-trade-terminal">
+      <Toast onDismiss={dismissToast} toast={toast} />
       <section className="xh-trade-marketbar">
         <div className="xh-trade-marketbar-main">
           <MarketSymbolPicker
@@ -921,21 +931,15 @@ export function RealTradePage() {
           <TradeStat label="24h Volume" value={formatCompactMoney(marketSummary?.dayNotionalVolume)} />
           <TradeStat label="Open Interest" value={formatCompactMoney(multiplyFinite(marketSummary?.openInterest, marketSummary?.markPrice))} />
           <TradeStat label="Funding" value={formatFundingPercent(marketSummary?.funding)} tone={marketNumberTone(marketSummary?.funding)} />
-          <TradeStat label="Status" value={connectionStatusLabel(effectiveConnectionStatus)} tone={marketReady ? "positive" : undefined} />
+          <TradeStat
+            actionLabel={effectiveConnectionStatus === "stale" || effectiveConnectionStatus === "disconnected" ? "重新连接真实行情" : undefined}
+            label="Status"
+            onAction={effectiveConnectionStatus === "stale" || effectiveConnectionStatus === "disconnected" ? () => void retryRealtimeSnapshot() : undefined}
+            value={connectionStatusLabel(effectiveConnectionStatus)}
+            tone={marketReady ? "positive" : undefined}
+          />
         </div>
       </section>
-
-      {effectiveConnectionStatus !== "connected" ? (
-        <section className={`xh-real-connection-banner is-${effectiveConnectionStatus}`} role="alert">
-          <div>
-            <strong>{connectionStatusTitle(effectiveConnectionStatus)}</strong>
-            <span>{connectionStatusMessage(effectiveConnectionStatus)}</span>
-          </div>
-          <Button disabled={effectiveConnectionStatus === "reconnecting"} onClick={() => void retryRealtimeSnapshot()} type="button" variant="secondary">
-            {effectiveConnectionStatus === "reconnecting" ? "重连中" : "手动重试"}
-          </Button>
-        </section>
-      ) : null}
 
       <div className="xh-trade-grid">
         <main className="xh-trade-main">
@@ -1016,6 +1020,7 @@ export function RealTradePage() {
             history={history}
             onCancelOrder={handleCancelOrder}
             onCloseRequest={handlePositionClose}
+            onFeedback={showToast}
             onSelectSymbol={setSelectedSymbol}
             onTpslRequest={handlePositionTpsl}
             openOrders={openOrders}
@@ -1029,7 +1034,6 @@ export function RealTradePage() {
             assetId={selectedConfig?.assetId}
             availableMargin={account?.availableMargin ?? account?.withdrawable}
             connected={isConnected}
-            connectionMessage={connectMessage}
             equity={contractEquity}
             markPrice={marketSummary?.markPrice}
             fees={fees}
@@ -1047,7 +1051,6 @@ export function RealTradePage() {
             reconciliationMessage={reconciliationAccess.message}
             reconciliationPending={reconciliationPending}
             reconciliationRecords={reconciliationRecords}
-            signerCleared={signerCleared}
             position={selectedPosition}
             positionSize={selectedPosition ? Math.abs(selectedPosition.size) : 0}
             session={tradingSession}
@@ -1112,6 +1115,7 @@ function RealRecords({
   history,
   onCancelOrder,
   onCloseRequest,
+  onFeedback,
   onSelectSymbol,
   onTpslRequest,
   openOrders,
@@ -1127,6 +1131,7 @@ function RealRecords({
   history: RealOrderHistory | null;
   onCancelOrder: (order: RealOpenOrder) => Promise<void>;
   onCloseRequest: (request: RealPositionCloseRequest) => Promise<void>;
+  onFeedback: (message: string, tone: "error" | "info" | "success" | "warning") => void;
   onSelectSymbol: (symbol: string) => void;
   onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
@@ -1163,8 +1168,8 @@ function RealRecords({
             {error} 当前显示上次快照；仅保留撤单和 Reduce-only 安全退出，反手及新增风险已禁用。
           </p>
         ) : null}
-        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onSelectSymbol={onSelectSymbol} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
-        {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
+        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onFeedback={onFeedback} onSelectSymbol={onSelectSymbol} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
+        {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} onFeedback={onFeedback} rows={openOrders} /> : null}
         {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => ({
           ...item.order,
           ...item,
@@ -1180,20 +1185,17 @@ function RealRecords({
   );
 }
 
-function OrderTable({ emptyText, onCancel, rows }: { emptyText: string; onCancel?: (order: RealOpenOrder) => Promise<void>; rows: RealOpenOrder[] }) {
+function OrderTable({ emptyText, onCancel, onFeedback, rows }: { emptyText: string; onCancel?: (order: RealOpenOrder) => Promise<void>; onFeedback?: (message: string, tone: "error" | "info" | "success" | "warning") => void; rows: RealOpenOrder[] }) {
   const [cancelingOid, setCancelingOid] = useState<string | null>(null);
-  const [status, setStatus] = useState("");
 
   async function cancel(order: RealOpenOrder) {
     if (!onCancel) return;
     const oid = String(order.oid ?? "");
     setCancelingOid(oid);
-    setStatus("");
     try {
       await onCancel(order);
-      setStatus("撤单请求已发送");
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "撤单请求失败");
+      onFeedback?.(error instanceof Error ? error.message : "撤单请求失败。", "error");
     } finally {
       setCancelingOid(null);
     }
@@ -1213,7 +1215,6 @@ function OrderTable({ emptyText, onCancel, rows }: { emptyText: string; onCancel
           </div>
         );
       })}
-      {status ? <p className="xh-real-position-status" role="status">{status}</p> : null}
     </div>
   );
 }
@@ -1353,24 +1354,6 @@ function connectionStatusLabel(status: typeof initialRealTradingRealtimeState.co
     stale: "STALE",
     disconnected: "DISCONNECTED",
     reconnecting: "RECONNECTING",
-  }[status];
-}
-
-function connectionStatusTitle(status: typeof initialRealTradingRealtimeState.connectionStatus) {
-  return {
-    connected: "行情已连接",
-    stale: "行情数据已延迟",
-    disconnected: "行情数据连接已中断",
-    reconnecting: "正在恢复行情快照",
-  }[status];
-}
-
-function connectionStatusMessage(status: typeof initialRealTradingRealtimeState.connectionStatus) {
-  return {
-    connected: "真实交易行情可用。",
-    stale: "超过 10 秒未取得新行情，已暂停新订单。可手动重试恢复快照。",
-    disconnected: "当前真实行情不可用，已暂停新订单。请检查网络后手动重试。",
-    reconnecting: "旧快照已撤下，恢复完成前不会使用旧行情或旧账户状态。",
   }[status];
 }
 

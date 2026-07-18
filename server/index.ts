@@ -98,6 +98,7 @@ const realTradingExchange = new HyperliquidExchangeProxy(
   realTradingRisk,
   tradingStore,
   new HyperliquidSignatureVerifier(),
+  realTradingInfo,
 );
 const realTradingOrderState = new RealTradingOrderStateService(realTradingInfo);
 const realTradingRealtimeTokens = new RealTradingRealtimeTokenService();

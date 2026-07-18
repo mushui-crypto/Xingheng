@@ -248,6 +248,16 @@ export class HyperliquidInfoClient {
     }
   }
 
+  async getUserRole(address: string): Promise<string> {
+    const user = normalizeAddress(address);
+    const payload = await this.postInfo({ type: "userRole", user });
+    const role = String(payload?.role ?? "").trim().toLowerCase();
+    if (!role) {
+      throw new Error("Hyperliquid userRole returned an invalid payload.");
+    }
+    return role;
+  }
+
   private async getMarketCatalog(): Promise<RealTradingMarketCatalog> {
     const now = Date.now();
     if (this.marketCatalogCache && this.marketCatalogCache.expiresAt > now) {

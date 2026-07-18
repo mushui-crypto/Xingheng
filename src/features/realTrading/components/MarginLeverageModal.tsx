@@ -6,7 +6,6 @@ import { clampLeverage, marginModeLabel, type MarginLeverageSelection } from "..
 
 export function MarginLeverageModal({
   connected,
-  errorMessage,
   onClose,
   onConfirm,
   open,
@@ -14,7 +13,6 @@ export function MarginLeverageModal({
   submitting,
 }: {
   connected: boolean;
-  errorMessage?: string;
   onClose: () => void;
   onConfirm: (selection: Pick<MarginLeverageSelection, "leverage" | "marginMode">) => Promise<void> | void;
   open: boolean;
@@ -142,8 +140,6 @@ export function MarginLeverageModal({
       </div>
 
       {!connected ? <p className="xh-margin-leverage-state">请先连接主账户钱包。</p> : null}
-      {errorMessage ? <p className="xh-margin-leverage-error" role="alert">保证金与杠杆更新失败：{errorMessage}</p> : null}
-
       <div className="xh-margin-leverage-actions">
         <Button disabled={submitting} onClick={onClose} type="button" variant="secondary">取消</Button>
         <Button disabled={!connected || submitting} onClick={confirm} type="button">
