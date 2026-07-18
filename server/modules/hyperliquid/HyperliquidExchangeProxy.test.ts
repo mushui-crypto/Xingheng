@@ -203,7 +203,8 @@ test("local signature validation errors return actionable safe messages without 
   const cases = [
     {
       error: "approveAgent 仅允许 Hyperliquid Testnet signatureChainId。",
-      expected: "请使用 Hyperliquid Testnet 签名参数 signatureChainId=0x66eee 后重试。",
+      expected: "请切换钱包网络到 Arbitrum Sepolia 后重新授权。",
+      httpStatus: 403,
     },
     {
       error: "approveAgent 签名账户与 masterAddress 不一致。",
@@ -228,7 +229,7 @@ test("local signature validation errors return actionable safe messages without 
       () => new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier).forward(approveAgentPayload(), context),
       (error: unknown) => {
         assert.ok(error instanceof RealTradingExchangeSubmissionError);
-        assert.equal(error.httpStatus, 400);
+        assert.equal(error.httpStatus, item.httpStatus ?? 400);
         assert.equal(error.receipt.message, item.expected);
         assert.doesNotMatch(error.receipt.message ?? "", /包含禁止的敏感字段/);
         assert.doesNotMatch(JSON.stringify(error.receipt), /private.?key|mnemonic|raw.?payload/i);
@@ -236,6 +237,23 @@ test("local signature validation errors return actionable safe messages without 
       },
     );
   }
+});
+
+test("approveAgent rejects Mainnet action semantics locally", async () => {
+  await assert.rejects(
+    () => new HyperliquidExchangeProxy("https://example.test").forward({
+      ...approveAgentPayload(),
+      action: { ...approveAgentPayload().action, hyperliquidChain: "Mainnet" },
+    }, context),
+    (error: unknown) => {
+      assert.ok(error instanceof RealTradingExchangeSubmissionError);
+      assert.equal(error.httpStatus, 403);
+      assert.equal(error.receipt.errorCode, "RT_ACTION_NOT_ALLOWED");
+      assert.equal(error.receipt.actionType, "approveAgent");
+      assert.match(error.receipt.message ?? "", /Testnet/);
+      return true;
+    },
+  );
 });
 
 test("unknown local signature errors are redacted before reaching receipts", async () => {

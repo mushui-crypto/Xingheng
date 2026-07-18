@@ -2,7 +2,7 @@ import { useState } from "react";
 import type { RealOpenOrder, RealPosition, RealTradingSymbol } from "../../../api/realTrading";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
-import { recordBelongsToMarket, resolveRealTradingSymbolForRecord } from "../lib/realTradingMarket";
+import { recordBelongsToMarket, resolveRealTradingNavigationSymbol, resolveRealTradingSymbolForRecord } from "../lib/realTradingMarket";
 import { createHyperliquidCloid } from "../lib/hyperliquidCloid";
 import { positionOperationKey } from "../model/reconciliation";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
@@ -16,6 +16,7 @@ export function RealPositionsTable({
   bestAsk,
   bestBid,
   onCloseRequest,
+  onSelectSymbol,
   openOrders = [],
   onTpslRequest,
   pendingOperationKeys = [],
@@ -27,6 +28,7 @@ export function RealPositionsTable({
   bestAsk?: number | null;
   bestBid?: number | null;
   onCloseRequest?: (request: RealPositionCloseRequest) => Promise<void> | void;
+  onSelectSymbol?: (symbol: string) => void;
   openOrders?: RealOpenOrder[];
   onTpslRequest?: (request: RealPositionTpslRequest) => Promise<void> | void;
   pendingOperationKeys?: string[];
@@ -112,7 +114,7 @@ export function RealPositionsTable({
   }
 
   return (
-    <div className="xh-real-position-shell">
+    <div aria-label="真实持仓明细，中间指标可横向滚动" className="xh-real-position-shell" role="region" tabIndex={0}>
       <div className="xh-real-position-table">
         <div className="xh-real-position-head">
           <span>资产</span>
@@ -135,9 +137,21 @@ export function RealPositionsTable({
           const sideTone = positionSideTone(row.side);
           const exposurePending = pendingOperations.has(positionOperationKey(row, "exposure"));
           const rowTpslPending = pendingOperations.has(positionOperationKey(row, "tpsl"));
+          const rowSymbol = resolveRealTradingNavigationSymbol(row, symbols);
           return (
             <div className={`xh-real-position-row is-${row.side}`} key={`${row.coin}-${row.side}-${index}`}>
-              <strong>{row.coin}</strong>
+              <strong>
+                {rowSymbol && onSelectSymbol ? (
+                  <button
+                    aria-label={`查看 ${rowSymbol} 行情`}
+                    className="xh-position-symbol-button"
+                    onClick={() => onSelectSymbol(rowSymbol)}
+                    type="button"
+                  >
+                    {row.coin}
+                  </button>
+                ) : row.coin}
+              </strong>
               <span className={sideTone}>{formatNumber(row.size)}</span>
               <span>{formatCurrency(positionValue(row))}</span>
               <span>{formatNumber(row.entryPx ?? row.entryPrice)}</span>

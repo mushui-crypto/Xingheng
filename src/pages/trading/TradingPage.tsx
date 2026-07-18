@@ -495,6 +495,7 @@ export function TradingPage() {
             lotStep={selectedConfig.lotStep}
             needsSimulationAccount={needsSimulationAccount}
             onClosePosition={submitClose}
+            onSelectSymbol={setSelectedSymbol}
             orders={orders}
             positions={positions}
             selectedSimulationAccount={selectedSimulationAccount}

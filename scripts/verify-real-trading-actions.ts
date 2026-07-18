@@ -205,6 +205,14 @@ assert.equal(mergedParams.get("source"), "acceptance");
 
 assert.equal(
   normalizeSdkError(new Error("Failed to sign the typed data using the wallet")),
+  "钱包签名失败，请重试。",
+);
+assert.equal(
+  normalizeSdkError({ code: 4001, message: "Request failed" }),
+  "用户拒绝了本地签名。",
+);
+assert.equal(
+  normalizeSdkError({ code: "ACTION_REJECTED", message: "Action rejected" }),
   "用户拒绝了本地签名。",
 );
 assert.equal(

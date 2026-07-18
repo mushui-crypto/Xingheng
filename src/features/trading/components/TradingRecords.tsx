@@ -12,6 +12,7 @@ export function TradingRecords({
   lotStep,
   needsSimulationAccount,
   onClosePosition,
+  onSelectSymbol,
   orders,
   positions,
   selectedSimulationAccount,
@@ -23,6 +24,7 @@ export function TradingRecords({
   lotStep: number;
   needsSimulationAccount: boolean;
   onClosePosition: (positionId: string) => void;
+  onSelectSymbol: (symbol: string) => void;
   orders: OrderRecord[];
   positions: PositionView[];
   selectedSimulationAccount: SimulationAccountView | null;
@@ -39,11 +41,20 @@ export function TradingRecords({
         <p className="xh-demo-record-account">{selectedSimulationAccount?.name ?? "模拟账户"}</p>
       </div>
       {tab === "positions" ? (
-        <div className="xh-real-record-table xh-demo-position-table">
+        <div aria-label="模拟持仓明细，中间指标可横向滚动" className="xh-real-record-table xh-demo-position-table" role="region" tabIndex={0}>
           <div className="xh-real-record-head xh-demo-position-grid"><span>资产</span><span>方向</span><span>数量</span><span>仓位价值</span><span>开仓价格</span><span>标记价格</span><span>盈亏</span><span>保证金</span><span>操作</span></div>
           {needsSimulationAccount || positions.length === 0 ? <RecordEmpty text={emptyText} /> : positions.map((position) => (
             <div className={`xh-real-record-row xh-demo-position-grid is-${position.side}`} key={position.id}>
-              <strong>{position.symbol}</strong>
+              <strong>
+                <button
+                  aria-label={`查看 ${position.symbol} 行情`}
+                  className="xh-position-symbol-button"
+                  onClick={() => onSelectSymbol(position.symbol)}
+                  type="button"
+                >
+                  {position.symbol}
+                </button>
+              </strong>
               <span>{position.side === "long" ? "做多" : "做空"}</span>
               <span className={position.side === "long" ? "is-positive" : "is-negative"}>{formatQuantity(position.volume, lotStep)}</span>
               <span>{formatPrice((position.markPrice ?? position.entryPrice) * position.volume * contractSize, digits)}</span>
@@ -51,7 +62,9 @@ export function TradingRecords({
               <span>{formatPrice(position.markPrice ?? undefined, digits)}</span>
               <span className={(position.pnl ?? 0) >= 0 ? "is-positive" : "is-negative"}>{position.pnl?.toFixed(2) ?? "-"}</span>
               <span>{position.margin.toFixed(2)}</span>
-              <button disabled={closingPositionId !== null} onClick={() => onClosePosition(position.id)} type="button">{closingPositionId === position.id ? "平仓中" : "平仓"}</button>
+              <div className="xh-demo-position-actions">
+                <button disabled={closingPositionId !== null} onClick={() => onClosePosition(position.id)} type="button">{closingPositionId === position.id ? "平仓中" : "平仓"}</button>
+              </div>
             </div>
           ))}
         </div>

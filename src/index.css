@@ -1762,6 +1762,58 @@ textarea {
     @apply font-medium text-[#f5f5f5];
   }
 
+  .xh-position-symbol-button {
+    min-height: 32px;
+    display: inline-flex;
+    align-items: center;
+    border: 0;
+    background: transparent;
+    padding: 0 8px 0 0;
+    color: inherit;
+    font: inherit;
+    cursor: pointer;
+    transition: color 160ms ease;
+  }
+
+  .xh-position-symbol-button:hover {
+    color: #ffffff;
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  .xh-position-symbol-button:focus-visible {
+    outline: 1px solid #ffffff;
+    outline-offset: 2px;
+  }
+
+  .xh-wallet-network-modal {
+    width: min(440px, calc(100vw - 32px));
+  }
+
+  .xh-wallet-network-summary {
+    @apply grid gap-3;
+  }
+
+  .xh-wallet-network-summary > div {
+    @apply flex items-center justify-between gap-4 border-b border-line pb-3 text-[14px];
+  }
+
+  .xh-wallet-network-summary span {
+    @apply text-muted;
+  }
+
+  .xh-wallet-network-summary strong {
+    @apply text-right font-medium text-white;
+  }
+
+  .xh-wallet-network-note {
+    @apply mt-4 text-[12px] leading-5 text-muted;
+  }
+
+  .xh-wallet-network-error {
+    @apply mt-3 text-[12px] leading-5 text-red-300;
+  }
+
   .xh-demo-record-account {
     @apply ml-auto flex items-center px-3 text-[12px] text-[#7f8995];
   }
@@ -1769,6 +1821,18 @@ textarea {
   .xh-demo-position-table,
   .xh-demo-order-table {
     @apply overflow-x-auto;
+  }
+
+  .xh-demo-position-table {
+    width: 100%;
+    min-width: 0;
+    overscroll-behavior-inline: contain;
+  }
+
+  .xh-demo-position-table:focus-visible,
+  .xh-real-position-shell:focus-visible {
+    outline: 1px solid #7a8596;
+    outline-offset: -1px;
   }
 
   .xh-demo-position-grid {
@@ -1781,14 +1845,6 @@ textarea {
     min-width: 1180px;
   }
 
-  .xh-demo-position-grid.is-long {
-    border-left: 3px solid #29c78a;
-  }
-
-  .xh-demo-position-grid.is-short {
-    border-left: 3px solid #f43f5e;
-  }
-
   .xh-demo-position-grid .is-positive,
   .xh-demo-order-grid .is-positive {
     @apply text-[#29c78a];
@@ -1799,8 +1855,43 @@ textarea {
     @apply text-[#f43f5e];
   }
 
-  .xh-demo-position-grid > button {
-    @apply h-8 border border-[#343941] bg-[#0a0c10] text-[12px] text-[#d8dde3] transition hover:border-white/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40;
+  .xh-demo-position-actions {
+    @apply h-full items-center justify-center;
+  }
+
+  .xh-demo-position-actions button {
+    @apply h-8 w-full border border-[#343941] bg-[#0a0c10] text-[12px] text-[#d8dde3] transition hover:border-white/60 hover:text-white disabled:cursor-not-allowed disabled:opacity-40;
+  }
+
+  .xh-demo-position-grid > :first-child,
+  .xh-demo-position-grid > :last-child {
+    position: sticky;
+    z-index: 2;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    background: #0c0e12;
+  }
+
+  .xh-demo-position-grid > :first-child {
+    left: 0;
+    box-shadow: 12px 0 0 #0c0e12, 13px 0 0 #25282f;
+  }
+
+  .xh-demo-position-grid > :last-child {
+    right: 0;
+    justify-content: center;
+    box-shadow: -12px 0 0 #0c0e12, -13px 0 0 #25282f;
+  }
+
+  .xh-demo-position-grid.is-long > :first-child {
+    border-left: 3px solid #29c78a;
+    padding-left: 8px;
+  }
+
+  .xh-demo-position-grid.is-short > :first-child {
+    border-left: 3px solid #f43f5e;
+    padding-left: 8px;
   }
 
   .xh-real-record-head.has-action,
@@ -1814,6 +1905,7 @@ textarea {
 
   .xh-real-position-shell {
     @apply min-h-0 overflow-x-auto;
+    overscroll-behavior-inline: contain;
   }
 
   .xh-real-position-table {
@@ -1850,17 +1942,46 @@ textarea {
     @apply h-full justify-self-end border-0 bg-transparent px-0 text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
   }
 
+  .xh-real-position-head > :first-child,
+  .xh-real-position-head > :last-child,
+  .xh-real-position-row > :first-child,
+  .xh-real-position-row > :last-child {
+    position: sticky;
+    z-index: 2;
+    align-self: stretch;
+    display: flex;
+    align-items: center;
+    background: #0c0e12;
+  }
+
+  .xh-real-position-head > :first-child,
+  .xh-real-position-row > :first-child {
+    left: 0;
+    box-shadow: 12px 0 0 #0c0e12, 13px 0 0 #25282f;
+  }
+
+  .xh-real-position-head > :last-child,
+  .xh-real-position-row > :last-child {
+    right: 0;
+    box-shadow: -12px 0 0 #0c0e12, -13px 0 0 #25282f;
+  }
+
+  .xh-real-position-head > :last-child {
+    justify-content: flex-end;
+  }
+
+  .xh-real-position-row.is-long > :first-child {
+    border-left: 3px solid #29c78a;
+    padding-left: 8px;
+  }
+
+  .xh-real-position-row.is-short > :first-child {
+    border-left: 3px solid #f43f5e;
+    padding-left: 8px;
+  }
+
   .xh-real-position-row {
     @apply h-[44px] border-b border-[#171a20] text-[12px] text-[#cbd1d8];
-    border-left: 3px solid transparent;
-  }
-
-  .xh-real-position-row.is-long {
-    border-left-color: #29c78a;
-  }
-
-  .xh-real-position-row.is-short {
-    border-left-color: #f43f5e;
   }
 
   .xh-real-position-row strong {
@@ -1876,7 +1997,7 @@ textarea {
   }
 
   .xh-real-position-actions {
-    @apply grid grid-cols-3 gap-1.5;
+    @apply grid h-full grid-cols-3 items-center gap-1.5;
   }
 
   .xh-real-position-actions button {

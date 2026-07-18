@@ -2,9 +2,9 @@ import { ExchangeClient, type IRequestTransport } from "@nktkas/hyperliquid";
 import { BrowserProvider, Wallet, type Eip1193Provider, type HDNodeWallet, type JsonRpcSigner } from "ethers";
 import { forwardSignedRealTradingExchange, type RealTradingExchangeResponse, type RealTradingMarginMode } from "../../../api/realTrading";
 import type { HyperliquidCloid } from "./hyperliquidCloid";
+import { assertHyperliquidSignatureNetwork, hyperliquidSignatureChain } from "./walletNetwork";
 
 const agentName = "StellaX Session";
-const hyperliquidTestnetSignatureChainId = "0x66eee" as const;
 
 export type HyperliquidLimitOrderInput = {
   asset: number;
@@ -106,12 +106,13 @@ export class HyperliquidSessionSigner {
     this.masterExchange = new ExchangeClient({
       transport,
       wallet: masterSigner,
-      signatureChainId: hyperliquidTestnetSignatureChainId,
+      signatureChainId: hyperliquidSignatureChain.chainId,
     });
     this.agentExchange = new ExchangeClient({ transport, wallet: this.agentWallet });
   }
 
   static async create(provider: Eip1193Provider, expectedMasterAddress: string) {
+    await assertHyperliquidSignatureNetwork(provider);
     const browserProvider = new BrowserProvider(provider);
     const masterSigner = await browserProvider.getSigner();
     const masterAddress = await masterSigner.getAddress();
@@ -212,18 +213,64 @@ export function buildPositionTpslOrderRequest(triggers: HyperliquidTriggerOrderI
 }
 
 export function normalizeSdkError(error: unknown) {
-  const message = error instanceof Error ? error.message : "真实交易操作失败。";
-  const lower = message.toLowerCase();
+  const { codes, messages } = collectSdkErrorSignals(error);
+  const message = getSafeSdkErrorMessage(error);
+  const lower = messages.join(" ").toLowerCase();
   if (
-    lower.includes("user rejected")
+    codes.has("4001")
+    || codes.has("action_rejected")
+    || lower.includes("user rejected")
     || lower.includes("user denied")
-    || lower.includes("failed to sign the typed data using the wallet")
-    || lower.includes("4001")
   ) return "用户拒绝了本地签名。";
+  if (
+    (lower.includes("provided chainid") && lower.includes("active chainid"))
+    || (lower.includes("chainid") && (lower.includes("must match") || lower.includes("does not match")))
+    || (lower.includes("chain id") && (lower.includes("must match") || lower.includes("does not match")))
+  ) return "签名链与当前钱包网络不一致，请重试授权。";
+  if (
+    lower.includes("typed data")
+    || lower.includes("typed-data")
+    || lower.includes("signing failed")
+    || lower.includes("signature failed")
+    || lower.includes("signature failure")
+  ) return "钱包签名失败，请重试。";
   if (lower.includes("insufficient") || lower.includes("margin")) return "可用余额或保证金不足。";
   if (lower.includes("allow") || lower.includes("暂不允许")) return "后端安全 allowlist 尚未允许此动作。";
   if (lower.includes("network") || lower.includes("fetch") || lower.includes("timeout")) return "网络请求失败，请稍后重试。";
   if (lower.includes("trigger order has unexpected type")) return `TP/SL 订单组合被 Hyperliquid 拒绝：${message}`;
+  return message;
+}
+
+function collectSdkErrorSignals(error: unknown) {
+  const codes = new Set<string>();
+  const messages: string[] = [];
+  const visited = new Set<object>();
+
+  function visit(value: unknown, depth: number) {
+    if (!value || typeof value !== "object" || depth > 4 || visited.has(value)) return;
+    visited.add(value);
+    const record = value as Record<string, unknown>;
+    if (typeof record.code === "number" || typeof record.code === "string") {
+      codes.add(String(record.code).toLowerCase());
+    }
+    if (typeof record.message === "string") messages.push(record.message.slice(0, 500));
+    visit(record.cause, depth + 1);
+    visit(record.error, depth + 1);
+    visit(record.info, depth + 1);
+  }
+
+  visit(error, 0);
+  if (typeof error === "string") messages.push(error.slice(0, 500));
+  return { codes, messages };
+}
+
+function getSafeSdkErrorMessage(error: unknown) {
+  const fallback = "真实交易操作失败。";
+  const message = error instanceof Error ? error.message : typeof error === "string" ? error : fallback;
+  if (!message || message.length > 500) return fallback;
+  if (/private\s*key|mnemonic|seed\s*phrase|authorization\s*:|bearer\s+|signature\s*[:=]\s*0x/i.test(message)) {
+    return fallback;
+  }
   return message;
 }
 

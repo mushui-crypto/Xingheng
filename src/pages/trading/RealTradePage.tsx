@@ -2,6 +2,7 @@ import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from 
 import { RefreshCw } from "lucide-react";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
 import { MarketSymbolPicker, type MarketPickerSymbol } from "../../components/trading/MarketSymbolPicker";
 import {
@@ -89,8 +90,9 @@ const realReconciliationPollingIntervalMs = 15_000;
 const realUserStreamMaxReconnectAttempts = 5;
 
 export function RealTradePage() {
+  const [searchParams, setSearchParams] = useSearchParams();
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
-  const [selectedSymbol, setSelectedSymbol] = useState("BTCUSDT");
+  const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get("symbol")?.toUpperCase() ?? "BTCUSDT");
   const [interval, setInterval] = useState<CandleInterval>("5m");
   const [walletAddress, setWalletAddress] = useState("");
   const [marketSummary, setMarketSummary] = useState<RealMarketSummary | null>(null);
@@ -237,6 +239,15 @@ export function RealTradePage() {
       }
     }
   };
+
+  useEffect(() => {
+    setSearchParams((current) => {
+      if (current.get("symbol") === selectedSymbol) return current;
+      const next = new URLSearchParams(current);
+      next.set("symbol", selectedSymbol);
+      return next;
+    }, { replace: true });
+  }, [selectedSymbol, setSearchParams]);
 
   const applyOrderState = (nextState: RealTradingOrderState) => {
     const connectionStatus = normalizeRealTradingConnectionStatus(nextState.status) ?? "connected";
@@ -1005,6 +1016,7 @@ export function RealTradePage() {
             history={history}
             onCancelOrder={handleCancelOrder}
             onCloseRequest={handlePositionClose}
+            onSelectSymbol={setSelectedSymbol}
             onTpslRequest={handlePositionTpsl}
             openOrders={openOrders}
             positions={positions}
@@ -1100,6 +1112,7 @@ function RealRecords({
   history,
   onCancelOrder,
   onCloseRequest,
+  onSelectSymbol,
   onTpslRequest,
   openOrders,
   positions,
@@ -1114,6 +1127,7 @@ function RealRecords({
   history: RealOrderHistory | null;
   onCancelOrder: (order: RealOpenOrder) => Promise<void>;
   onCloseRequest: (request: RealPositionCloseRequest) => Promise<void>;
+  onSelectSymbol: (symbol: string) => void;
   onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
   positions: RealPosition[];
@@ -1149,7 +1163,7 @@ function RealRecords({
             {error} 当前显示上次快照；仅保留撤单和 Reduce-only 安全退出，反手及新增风险已禁用。
           </p>
         ) : null}
-        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
+        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onSelectSymbol={onSelectSymbol} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
         {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
         {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => ({
           ...item.order,

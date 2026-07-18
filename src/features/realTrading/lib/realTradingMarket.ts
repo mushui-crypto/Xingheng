@@ -81,6 +81,13 @@ export function recordBelongsToMarket(
   return resolveRealTradingSymbolForRecord(record, symbols)?.symbol === symbol.symbol;
 }
 
+export function resolveRealTradingNavigationSymbol(
+  record: RealTradingMarketRecord,
+  symbols: RealTradingSymbol[],
+) {
+  return resolveRealTradingSymbolForRecord(record, symbols)?.symbol ?? null;
+}
+
 function normalize(value: unknown) {
   return String(value ?? "").trim().toUpperCase();
 }
