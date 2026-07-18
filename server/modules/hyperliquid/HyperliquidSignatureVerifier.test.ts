@@ -46,6 +46,13 @@ test("approveAgent signature must belong to the declared master account", async 
     () => verifier.verify({ ...request, masterAddress: Wallet.createRandom().address }, { userId: "USR-1" }),
     /masterAddress/,
   );
+  assert.throws(
+    () => verifier.verify({
+      ...request,
+      action: { ...action, signatureChainId: "0x1" },
+    }, { userId: "USR-1" }),
+    /signatureChainId/,
+  );
 });
 
 test("exchange action signer must match the user-bound API wallet", async () => {
