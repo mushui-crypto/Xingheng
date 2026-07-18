@@ -15,6 +15,7 @@ export type RealTradingOrderLifecycle = {
   requestId?: string;
   exchangeOrderId?: string;
   message?: string;
+  operationKey?: string;
   status: RealTradingOrderLifecycleStatus;
   symbol?: string;
   updatedAt: number;
@@ -108,7 +109,7 @@ export function realTradingRealtimeReducer(
     case "snapshot_failed":
       return {
         ...state,
-        orders: [],
+        orders: state.orders.filter((order) => order.status === "pending_reconciliation"),
         snapshotError: action.message,
         snapshotLoading: false,
       };
@@ -159,15 +160,30 @@ export function extractExchangeOrderUpdates(
   result: unknown,
   fallback: Omit<RealTradingOrderLifecycle, "exchangeOrderId" | "message" | "status">,
 ): RealTradingOrderLifecycle[] {
+  const receipt = findReceipt(result);
+  const receiptUpdatedAt = normalizeLifecycleTimestamp(receipt?.timestamp) ?? fallback.updatedAt;
   const statuses = findStatuses(result);
-  if (statuses.length === 0) return [{ ...fallback, status: "accepted" }];
-  return statuses.map((item, index) => normalizeExchangeStatus(item, fallback, index));
+  if (statuses.length === 0) return [{
+    ...fallback,
+    clientOrderId: receipt?.cloids?.[0] ?? receipt?.cloid ?? fallback.clientOrderId,
+    ...(receipt?.errorCategory ? { message: receipt.errorCategory } : {}),
+    requestId: receipt?.requestId ?? fallback.requestId,
+    status: normalizeRealTradingOrderStatus(receipt?.orderState) ?? "accepted",
+    updatedAt: receiptUpdatedAt,
+  }];
+  return statuses.map((item, index) => normalizeExchangeStatus(item, {
+    ...fallback,
+    clientOrderId: receipt?.cloids?.[index] ?? (index === 0 ? receipt?.cloid : undefined) ?? fallback.clientOrderId,
+    requestId: receipt?.requestId ?? fallback.requestId,
+    updatedAt: receiptUpdatedAt,
+  }, index, Boolean(receipt?.cloids?.[index])));
 }
 
 function normalizeExchangeStatus(
   value: unknown,
   fallback: Omit<RealTradingOrderLifecycle, "exchangeOrderId" | "message" | "status">,
   index: number,
+  explicitCloid = false,
 ): RealTradingOrderLifecycle {
   const item = isRecord(value) ? value : {};
   const error = typeof item.error === "string" ? item.error : undefined;
@@ -184,11 +200,33 @@ function normalizeExchangeStatus(
   const oid = item.oid ?? filled?.oid ?? resting?.oid;
   return {
     ...fallback,
-    clientOrderId: index === 0 ? fallback.clientOrderId : `${fallback.clientOrderId}:${index}`,
+    clientOrderId: index === 0 || explicitCloid ? fallback.clientOrderId : `${fallback.clientOrderId}:${index}`,
     exchangeOrderId: typeof oid === "number" || typeof oid === "string" ? String(oid) : undefined,
     message: error,
     status,
   };
+}
+
+function findReceipt(value: unknown): {
+  cloid?: string | null;
+  cloids?: string[];
+  errorCategory?: string | null;
+  orderState?: string;
+  requestId?: string;
+  timestamp?: number;
+} | null {
+  if (!isRecord(value)) return null;
+  if (isRecord(value.stellaxReceipt)) return value.stellaxReceipt;
+  for (const key of ["response", "data", "result"]) {
+    const nested = findReceipt(value[key]);
+    if (nested) return nested;
+  }
+  return null;
+}
+
+function normalizeLifecycleTimestamp(value: unknown) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value < 10_000_000_000 ? value * 1_000 : value;
 }
 
 function normalizeFilledStatus(value: Record<string, unknown>): RealTradingOrderLifecycleStatus {
@@ -221,10 +259,17 @@ function upsertOrder(
   const existing = orders[existingIndex];
   if (
     enforceForwardProgress
-    && (terminalStatuses.has(existing.status) || statusRank[next.status] < statusRank[existing.status])
+    && (
+      statusRank[next.status] < statusRank[existing.status]
+      || (terminalStatuses.has(existing.status) && next.updatedAt <= existing.updatedAt)
+    )
   ) return orders;
   const updated = [...orders];
-  updated[existingIndex] = { ...existing, ...next };
+  updated[existingIndex] = {
+    ...existing,
+    ...next,
+    clientOrderId: preferredClientOrderId(existing.clientOrderId, next.clientOrderId),
+  };
   return sortOrders(updated);
 }
 
@@ -236,9 +281,16 @@ function mergeAuthoritativeSnapshot(
   pending: RealTradingOrderLifecycle[],
   authoritative: RealTradingOrderLifecycle[],
 ) {
-  const resolvedClientIds = new Set(authoritative.map((order) => order.clientOrderId));
-  const unresolved = pending.filter((order) => !resolvedClientIds.has(order.clientOrderId));
-  return sortOrders([...authoritative, ...unresolved]);
+  return authoritative.reduce<RealTradingOrderLifecycle[]>(
+    (orders, order) => upsertOrder(orders, order, true),
+    pending,
+  );
+}
+
+function preferredClientOrderId(existing: string, next: string) {
+  const isCloid = (value: string) => /^0x[0-9a-f]{32}$/i.test(value);
+  if (isCloid(existing)) return existing;
+  return isCloid(next) ? next : next;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

@@ -16,10 +16,9 @@ export async function submitPositionCloseRequest(
   if (request.mode === "reverse") {
     const position = request.positions[0];
     const config = resolvePositionSymbol(position, symbols);
-    const closeOrder = buildCloseOrder(position, config, true, undefined, deriveHyperliquidCloid(request.cloid, "reverse-close"));
+    const closeOrder = buildCloseOrder(position, config, true, undefined, request.cloid);
     await signer.placeOrder(closeOrder);
-    await signer.placeOrder({ ...closeOrder, cloid: deriveHyperliquidCloid(request.cloid, "reverse-open"), reduceOnly: false });
-    return;
+    return signer.placeOrder({ ...closeOrder, cloid: deriveHyperliquidCloid(request.cloid, "reverse-open"), reduceOnly: false });
   }
 
   const orders = request.positions.map((position, index) => {
@@ -27,11 +26,11 @@ export async function submitPositionCloseRequest(
     if (request.mode === "limit") {
       const price = Number(request.limitPrice);
       if (!Number.isFinite(price) || price <= 0) throw new Error("请输入有效的限价平仓价格。");
-      return buildCloseOrder(position, config, false, request.limitPrice, deriveHyperliquidCloid(request.cloid, `close:${index}`));
+      return buildCloseOrder(position, config, false, request.limitPrice, index === 0 ? request.cloid : deriveHyperliquidCloid(request.cloid, `close:${index}`));
     }
-    return buildCloseOrder(position, config, true, undefined, deriveHyperliquidCloid(request.cloid, `close:${index}`));
+    return buildCloseOrder(position, config, true, undefined, index === 0 ? request.cloid : deriveHyperliquidCloid(request.cloid, `close:${index}`));
   });
-  await signer.placeOrders(orders);
+  return signer.placeOrders(orders);
 }
 
 export function resolvePositionSymbol(position: RealPosition, symbols: RealTradingSymbol[]) {
@@ -61,7 +60,7 @@ export async function submitPositionTpslRequest(
     szDecimals,
     tpPrice: request.tpPrice,
   });
-  await signer.placePositionTpsl(triggers);
+  return signer.placePositionTpsl(triggers);
 }
 
 function buildCloseOrder(

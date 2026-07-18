@@ -49,6 +49,7 @@ import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useH
 import { getRealTradingDisplayPriceDecimals } from "../../features/realTrading/lib/realTradingDisplayPrecision";
 import {
   initialRealTradingRealtimeState,
+  extractExchangeOrderUpdates,
   normalizeRealTradingConnectionStatus,
   normalizeRealTradingOrderStatus,
   realTradingOrderStatusLabel,
@@ -60,6 +61,13 @@ import {
   decideRealTradingUserStreamSequence,
   parseRealTradingUserStreamEvent,
 } from "../../features/realTrading/model/userStreamState";
+import {
+  buildAuthoritativeOrderLifecycles,
+  lifecycleFromAuthoritativeOrder,
+  lifecyclesFromActionFailure,
+  lookupReconciliationWithCloidFallback,
+  positionOperationKey,
+} from "../../features/realTrading/model/reconciliation";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import { formatCompactMoney, formatFundingPercent, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import type { CandleInterval } from "../../types";
@@ -67,6 +75,7 @@ import { formatPrice } from "../../utils/price";
 import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
 
 const realCandlePollingIntervalMs = 2_000;
+const realMarketPollingIntervalMs = 2_000;
 const realMarketStaleAfterMs = 10_000;
 const realOrderFallbackPollingIntervalMs = 5_000;
 
@@ -101,6 +110,8 @@ export function RealTradePage() {
   const orderSequenceRef = useRef<number | null>(null);
   const userStreamSequenceRef = useRef<number | null>(null);
   const accountRequestGenerationRef = useRef(0);
+  const marketRequestGenerationRef = useRef(0);
+  const marketRequestInFlightRef = useRef(false);
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
@@ -115,6 +126,11 @@ export function RealTradePage() {
     : realtimeState.connectionStatus;
   const marketReady = effectiveConnectionStatus === "connected";
   const pendingReconciliationOrders = realtimeState.orders.filter((order) => order.status === "pending_reconciliation");
+  const pendingOperationKeys = useMemo(
+    () => [...new Set(pendingReconciliationOrders.flatMap((order) => order.operationKey ? [order.operationKey] : []))],
+    [pendingReconciliationOrders],
+  );
+  const pendingOperationSet = useMemo(() => new Set(pendingOperationKeys), [pendingOperationKeys]);
   const contractEquity = account?.crossAccountValue ?? account?.accountValue;
   const totalExposure = positions.reduce((sum, item) => sum + realPositionNotional(item), 0)
     + openOrders.reduce((sum, item) => sum + realOrderNotional(item), 0);
@@ -149,42 +165,60 @@ export function RealTradePage() {
     return `${protocol}//${window.location.host}/ws`;
   }, []);
 
-  const loadMarket = async (symbol = selectedSymbol) => {
-    dispatchRealtime({ type: "retry_requested" });
-    setMarketLoading(true);
-    setMarketError("");
-    setMarketSummary(null);
-    setOrderbook(null);
-    setTrades([]);
+  const loadMarket = async (
+    symbol = selectedSymbol,
+    options: { background?: boolean; includeSymbols?: boolean } = {},
+  ) => {
+    const background = options.background === true;
+    if (background && marketRequestInFlightRef.current) return;
+    const requestGeneration = ++marketRequestGenerationRef.current;
+    marketRequestInFlightRef.current = true;
+    const includeSymbols = options.includeSymbols !== false;
+    if (!background) dispatchRealtime({ type: "retry_requested" });
+    if (!background) {
+      setMarketLoading(true);
+      setMarketError("");
+      setMarketSummary(null);
+      setOrderbook(null);
+      setTrades([]);
+    }
     try {
       const [nextSymbols, nextSummary, nextOrderbook, nextTrades] = await Promise.all([
-        fetchRealTradingSymbols().catch((error) => {
-          throw error;
-        }),
+        includeSymbols ? fetchRealTradingSymbols() : Promise.resolve<RealTradingSymbol[] | null>(null),
         fetchRealMarketSummary(symbol),
         fetchRealOrderbook(symbol),
         fetchRealTrades(symbol),
       ]);
-      setSymbols(nextSymbols);
-      if (nextSymbols.length > 0 && !nextSymbols.some((item) => item.symbol === symbol)) {
-        setSelectedSymbol(nextSymbols[0].symbol);
+      if (requestGeneration !== marketRequestGenerationRef.current) return;
+      if (nextSymbols) {
+        setSymbols(nextSymbols);
+        if (nextSymbols.length > 0 && !nextSymbols.some((item) => item.symbol === symbol)) {
+          setSelectedSymbol(nextSymbols[0].symbol);
+        }
       }
       setMarketSummary(nextSummary);
       setOrderbook(nextOrderbook);
       setTrades(nextTrades);
+      setMarketError("");
       dispatchRealtime({
         type: "heartbeat",
         at: Date.now(),
         status: resolveMarketConnectionStatus(nextSummary, nextOrderbook),
       });
     } catch (error) {
-      setMarketError(error instanceof Error ? error.message : "真实交易市场数据加载失败。");
-      setMarketSummary(null);
-      setOrderbook(null);
-      setTrades([]);
+      if (requestGeneration !== marketRequestGenerationRef.current) return;
+      if (!background) {
+        setMarketError(error instanceof Error ? error.message : "真实交易市场数据加载失败。");
+        setMarketSummary(null);
+        setOrderbook(null);
+        setTrades([]);
+      }
       dispatchRealtime({ type: "connection_failed" });
     } finally {
-      setMarketLoading(false);
+      if (requestGeneration === marketRequestGenerationRef.current) {
+        marketRequestInFlightRef.current = false;
+        if (!background) setMarketLoading(false);
+      }
     }
   };
 
@@ -194,15 +228,13 @@ export function RealTradePage() {
     if (nextState.mode === "snapshot") {
       orderSequenceRef.current = nextState.sequence;
       if (nextState.stale || nextState.reconnecting || connectionStatus !== "connected") {
-        setOpenOrders([]);
-        setHistory({ orders: [], fills: [], nextCursor: null, warnings: nextState.warnings });
-        dispatchRealtime({ type: "snapshot_succeeded", orders: [] });
+        dispatchRealtime({ type: "snapshot_started" });
         return;
       }
       const nextHistory = { orders: nextState.orders, fills: nextState.fills, nextCursor: null, warnings: nextState.warnings };
       setOpenOrders(nextState.openOrders);
       setHistory(nextHistory);
-      dispatchRealtime({ type: "snapshot_succeeded", orders: buildSnapshotOrderLifecycles(nextState.openOrders, nextHistory) });
+      dispatchRealtime({ type: "snapshot_succeeded", orders: buildAuthoritativeOrderLifecycles(nextState.openOrders, nextHistory, nextState.timestamp) });
       return;
     }
 
@@ -263,6 +295,7 @@ export function RealTradePage() {
       if (requestGeneration !== accountRequestGenerationRef.current) return;
       const message = error instanceof Error ? error.message : "真实账户数据加载失败。";
       setAccountError(message);
+      setOrderConnectionStatus("stale");
       dispatchRealtime({ type: "snapshot_failed", message });
     } finally {
       if (requestGeneration === accountRequestGenerationRef.current) setAccountLoading(false);
@@ -270,7 +303,23 @@ export function RealTradePage() {
   };
 
   useEffect(() => {
+    let cancelled = false;
+    let refreshing = false;
+    const refresh = async () => {
+      if (cancelled || refreshing || document.visibilityState === "hidden") return;
+      refreshing = true;
+      try {
+        await loadMarket(selectedSymbol, { background: true, includeSymbols: false });
+      } finally {
+        refreshing = false;
+      }
+    };
     void loadMarket(selectedSymbol);
+    const timer = window.setInterval(() => void refresh(), realMarketPollingIntervalMs);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSymbol]);
 
@@ -339,20 +388,16 @@ export function RealTradePage() {
     let reconnectTimer: number | null = null;
     let reconnectAttempt = 0;
 
-    const clearAuthoritativeUserState = () => {
+    const markAuthoritativeUserStateRecovering = () => {
       accountRequestGenerationRef.current += 1;
       orderSequenceRef.current = null;
-      setAccount(null);
-      setPositions([]);
-      setOpenOrders([]);
-      setHistory(null);
       dispatchRealtime({ type: "snapshot_started" });
     };
 
     const scheduleReconnect = () => {
       if (cancelled || reconnectTimer !== null) return;
       setOrderConnectionStatus("reconnecting");
-      clearAuthoritativeUserState();
+      markAuthoritativeUserStateRecovering();
       const delay = Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempt, 5));
       reconnectAttempt += 1;
       reconnectTimer = window.setTimeout(() => {
@@ -375,7 +420,7 @@ export function RealTradePage() {
       const connectionStatus = normalizeRealTradingConnectionStatus(event.status) ?? "reconnecting";
       setOrderConnectionStatus(connectionStatus);
       if (event.stale || event.reconnecting || connectionStatus !== "connected") {
-        clearAuthoritativeUserState();
+        markAuthoritativeUserStateRecovering();
         return;
       }
       setAccountError("");
@@ -390,7 +435,7 @@ export function RealTradePage() {
       if (event.channel === "open_orders" && Array.isArray(event.data)) {
         const nextOrders = event.data as RealOpenOrder[];
         setOpenOrders(nextOrders);
-        buildSnapshotOrderLifecycles(nextOrders, emptyRealOrderHistory()).forEach((order) => {
+        buildAuthoritativeOrderLifecycles(nextOrders, emptyRealOrderHistory(), event.timestamp).forEach((order) => {
           dispatchRealtime({ type: "order_updated", order });
         });
         return;
@@ -398,7 +443,7 @@ export function RealTradePage() {
       if (event.channel === "orders" && Array.isArray(event.data)) {
         const nextOrders = event.data as RealOrderHistory["orders"];
         setHistory((current) => mergeStreamOrders(current, nextOrders));
-        buildSnapshotOrderLifecycles([], { ...emptyRealOrderHistory(), orders: nextOrders }).forEach((order) => {
+        buildAuthoritativeOrderLifecycles([], { ...emptyRealOrderHistory(), orders: nextOrders }, event.timestamp).forEach((order) => {
           dispatchRealtime({ type: "order_updated", order });
         });
         return;
@@ -406,7 +451,7 @@ export function RealTradePage() {
       if (event.channel === "fills" && Array.isArray(event.data)) {
         const nextFills = event.data as RealOrderHistory["fills"];
         setHistory((current) => mergeStreamFills(current, nextFills));
-        buildSnapshotOrderLifecycles([], { ...emptyRealOrderHistory(), fills: nextFills }).forEach((order) => {
+        buildAuthoritativeOrderLifecycles([], { ...emptyRealOrderHistory(), fills: nextFills }, event.timestamp).forEach((order) => {
           dispatchRealtime({ type: "order_updated", order });
         });
         return;
@@ -479,10 +524,10 @@ export function RealTradePage() {
       if (cancelled || checking || document.visibilityState === "hidden") return;
       checking = true;
       try {
-        const results = await Promise.allSettled(pendingReconciliationOrders.map(async (order) => {
-          if (order.requestId) return { kind: "audit" as const, value: await fetchRealTradingOrderAudit(order.requestId) };
-          return { kind: "cloid" as const, value: await fetchRealTradingCloidStatus(walletAddress, order.clientOrderId) };
-        }));
+        const results = await Promise.allSettled(pendingReconciliationOrders.map((order) => lookupReconciliationWithCloidFallback(
+          { address: walletAddress, cloid: order.clientOrderId, requestId: order.requestId },
+          { fetchAudit: fetchRealTradingOrderAudit, fetchCloid: fetchRealTradingCloidStatus },
+        )));
         if (cancelled) return;
         results.forEach((result, index) => {
           if (result.status !== "fulfilled") return;
@@ -504,7 +549,7 @@ export function RealTradePage() {
           }
           const cloidStatus = result.value.value;
           if (cloidStatus.status !== "order" || !cloidStatus.order) return;
-          const lifecycle = orderLifecycleFromSnapshot(cloidStatus.order, "accepted", pending.clientOrderId);
+          const lifecycle = lifecycleFromAuthoritativeOrder(cloidStatus.order, "accepted", pending.clientOrderId, cloidStatus.timestamp);
           dispatchRealtime({ type: "order_updated", order: { ...lifecycle, clientOrderId: pending.clientOrderId, updatedAt: cloidStatus.timestamp } });
         });
       } finally {
@@ -631,7 +676,6 @@ export function RealTradePage() {
         latestCandleTime = latest.time;
         setLatestCandle(latest);
         setChartMessage("");
-        dispatchRealtime({ type: "heartbeat", at: Date.now() });
       } catch {
         // Keep the last valid candle visible; the next polling tick retries automatically.
       } finally {
@@ -684,13 +728,43 @@ export function RealTradePage() {
     }
   };
 
+  const runTrackedPositionAction = async (
+    cloid: string,
+    symbol: string,
+    operationKeys: string[],
+    action: Parameters<typeof tradingSession.runActionResult>[0],
+    successMessage: string,
+  ) => {
+    const lifecycleBase = { clientOrderId: cloid, operationKey: operationKeys[0], symbol, updatedAt: Date.now() };
+    dispatchRealtime({ type: "order_submitted", order: { ...lifecycleBase, status: "submitted" } });
+    const outcome = await tradingSession.runActionResult(action, successMessage);
+    if (!outcome.completed) {
+      lifecyclesFromActionFailure({ cloid, operationKeys, outcome, symbol, updatedAt: Date.now() }).forEach((order) => {
+        dispatchRealtime({ type: "order_updated", order });
+      });
+      if (outcome.reconciliationRequired) {
+        throw new Error("交易结果未知，正在使用原 requestId / cloid 对账；对账完成前不会重复提交。");
+      }
+      throw new Error(outcome.error || "交易请求未完成，请查看下单区状态。");
+    }
+    extractExchangeOrderUpdates(outcome.result, { ...lifecycleBase, updatedAt: Date.now() }).forEach((order, index) => {
+      dispatchRealtime({ type: "order_updated", order: { ...order, operationKey: operationKeys[index] ?? operationKeys[0] } });
+    });
+    await loadAccount(walletAddress);
+  };
+
   const handlePositionClose = async (request: RealPositionCloseRequest) => {
-    const completed = await tradingSession.runAction(
+    const operationKeys = request.positions.map((position) => positionOperationKey(position, "exposure"));
+    if (operationKeys.some((key) => pendingOperationSet.has(key))) {
+      throw new Error("该持仓已有结果未知的平仓或反手请求，权威对账完成前不会重复提交。");
+    }
+    await runTrackedPositionAction(
+      request.cloid,
+      request.positions[0]?.symbol ?? request.positions[0]?.coin ?? selectedSymbol,
+      operationKeys,
       (signer) => submitPositionCloseRequest(signer, request, symbols),
       request.scope === "all" ? "全部平仓请求已发送。" : request.mode === "reverse" ? "反手请求已发送。" : "平仓请求已发送。",
     );
-    if (!completed) throw new Error("交易请求未完成，请查看下单区状态。");
-    await loadAccount(walletAddress);
   };
 
   const handleCancelOrder = async (order: RealOpenOrder) => {
@@ -707,6 +781,10 @@ export function RealTradePage() {
   };
 
   const handlePositionTpsl = async (request: RealPositionTpslRequest) => {
+    const operationKey = positionOperationKey(request.position, "tpsl");
+    if (pendingOperationSet.has(operationKey)) {
+      throw new Error("该持仓已有结果未知的止盈止损请求，权威对账完成前不会重复提交。");
+    }
     const config = resolvePositionSymbol(request.position, symbols);
     const currentTriggers = openOrders.filter((order) => (
       order.isTrigger && recordBelongsToMarket(order, config, symbols)
@@ -716,12 +794,16 @@ export function RealTradePage() {
       if (!Number.isSafeInteger(oid) || oid <= 0) throw new Error("当前止盈止损委托缺少有效 OID，无法安全替换。");
       return { asset: config.assetId!, oid };
     });
-    const completed = await tradingSession.runAction(async (signer) => {
-      if (existingTriggers.length > 0) await signer.cancelOrders(existingTriggers);
-      await submitPositionTpslRequest(signer, request, symbols);
-    }, "止盈止损请求已发送。");
-    if (!completed) throw new Error("止盈止损请求未完成，请查看下单区状态。");
-    await loadAccount(walletAddress);
+    await runTrackedPositionAction(
+      request.cloid,
+      request.position.symbol ?? request.position.coin,
+      [operationKey],
+      async (signer) => {
+        if (existingTriggers.length > 0) await signer.cancelOrders(existingTriggers);
+        return submitPositionTpslRequest(signer, request, symbols);
+      },
+      "止盈止损请求已发送。",
+    );
   };
 
   const retryRealtimeSnapshot = async () => {
@@ -838,6 +920,8 @@ export function RealTradePage() {
           </section>
 
           <RealRecords
+            pendingOperationKeys={pendingOperationKeys}
+            riskIncreasingActionsBlocked={!marketReady}
             accountLoading={accountLoading}
             bestAsk={orderbook?.asks[0]?.price}
             bestBid={orderbook?.bids[0]?.price}
@@ -869,6 +953,7 @@ export function RealTradePage() {
             onOrderLifecycle={(phase, order) => dispatchRealtime({ type: phase === "submitted" ? "order_submitted" : "order_updated", order })}
             onSubmitted={() => loadAccount(walletAddress)}
             openOrderCount={openOrders.length}
+            pendingOperationKeys={pendingOperationKeys}
             reconciliationPending={pendingReconciliationOrders.length > 0}
             position={selectedPosition}
             positionSize={selectedPosition ? Math.abs(selectedPosition.size) : 0}
@@ -937,6 +1022,8 @@ function RealRecords({
   onTpslRequest,
   openOrders,
   positions,
+  pendingOperationKeys,
+  riskIncreasingActionsBlocked,
   symbols,
 }: {
   accountLoading: boolean;
@@ -949,9 +1036,12 @@ function RealRecords({
   onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
   positions: RealPosition[];
+  pendingOperationKeys: string[];
+  riskIncreasingActionsBlocked: boolean;
   symbols: RealTradingSymbol[];
 }) {
   const [tab, setTab] = useState<"positions" | "open" | "orders" | "fills">("positions");
+  const hasRecoverableSnapshot = positions.length > 0 || openOrders.length > 0 || history !== null;
   const tabs = [
     { key: "positions", label: "持仓", count: positions.length },
     { key: "open", label: "当前委托", count: openOrders.length },
@@ -969,11 +1059,16 @@ function RealRecords({
       </div>
       <StatePanel
         loading={accountLoading}
-        error={error}
+        error={hasRecoverableSnapshot ? "" : error}
         empty={false}
         emptyText="-"
       >
-        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} rows={positions} symbols={symbols} /> : null}
+        {error && hasRecoverableSnapshot ? (
+          <p className="border-b border-line px-4 py-3 text-xs text-amber-200" role="alert">
+            {error} 当前显示上次快照；仅保留撤单和 Reduce-only 安全退出，反手及新增风险已禁用。
+          </p>
+        ) : null}
+        {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
         {tab === "open" ? <OrderTable emptyText="暂无当前委托。" onCancel={onCancelOrder} rows={openOrders} /> : null}
         {tab === "orders" ? <OrderTable emptyText="暂无历史委托。" rows={(history?.orders ?? []).map((item) => ({
           ...item.order,
@@ -1136,13 +1231,25 @@ function toneClass(tone?: "positive" | "negative") {
 }
 
 function resolveMarketConnectionStatus(summary: RealMarketSummary, orderbook: RealOrderbook) {
-  return normalizeRealTradingConnectionStatus(
+  const reported = normalizeRealTradingConnectionStatus(
     summary.connectionStatus
     ?? summary.realtimeStatus
     ?? orderbook.connectionStatus
     ?? orderbook.realtimeStatus
     ?? summary.status,
   ) ?? "connected";
+  if (reported !== "connected") return reported;
+  const timestamps = [summary.timestamp, orderbook.timestamp]
+    .map(normalizeMarketTimestamp)
+    .filter((value): value is number => value !== null);
+  return timestamps.length > 0 && Date.now() - Math.min(...timestamps) > realMarketStaleAfterMs
+    ? "stale"
+    : "connected";
+}
+
+function normalizeMarketTimestamp(value: number | undefined) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return null;
+  return value < 10_000_000_000 ? value * 1_000 : value;
 }
 
 function connectionStatusLabel(status: typeof initialRealTradingRealtimeState.connectionStatus) {
@@ -1183,55 +1290,6 @@ function combineConnectionStatuses(
     disconnected: 3,
   };
   return severity[market] >= severity[orders] ? market : orders;
-}
-
-function buildSnapshotOrderLifecycles(openOrders: RealOpenOrder[], history: RealOrderHistory) {
-  const byId = new Map<string, RealTradingOrderLifecycle>();
-  const add = (record: RealTradingOrderLifecycle) => {
-    const key = record.exchangeOrderId ?? record.clientOrderId;
-    const previous = byId.get(key);
-    if (!previous || previous.updatedAt <= record.updatedAt) byId.set(key, record);
-  };
-
-  openOrders.forEach((order, index) => {
-    add(orderLifecycleFromSnapshot(order, "accepted", `open:${index}`));
-  });
-  history.orders.forEach((item, index) => {
-    const order = { ...item.order, ...item };
-    add(orderLifecycleFromSnapshot(order, "accepted", `history:${index}`, item.statusTimestamp));
-  });
-  history.fills.forEach((fill, index) => {
-    const exchangeOrderId = fill.oid === undefined ? undefined : String(fill.oid);
-    add({
-      clientOrderId: exchangeOrderId ? `snapshot:${exchangeOrderId}` : `fill:${fill.tid ?? index}`,
-      exchangeOrderId,
-      status: "filled",
-      symbol: fill.symbol ?? fill.coin,
-      updatedAt: normalizeSnapshotTimestamp(fill.timestamp ?? fill.time),
-    });
-  });
-  return [...byId.values()];
-}
-
-function orderLifecycleFromSnapshot(
-  order: RealOpenOrder,
-  fallbackStatus: RealTradingOrderLifecycle["status"],
-  fallbackId: string,
-  fallbackTimestamp?: number,
-): RealTradingOrderLifecycle {
-  const exchangeOrderId = order.oid === undefined ? undefined : String(order.oid);
-  return {
-    clientOrderId: order.cloid ?? order.clientOrderId ?? (exchangeOrderId ? `snapshot:${exchangeOrderId}` : fallbackId),
-    exchangeOrderId,
-    status: normalizeRealTradingOrderStatus(order.lifecycleStatus ?? order.status) ?? fallbackStatus,
-    symbol: order.symbol ?? order.coin,
-    updatedAt: normalizeSnapshotTimestamp(order.updatedAt ?? fallbackTimestamp ?? order.timestamp),
-  };
-}
-
-function normalizeSnapshotTimestamp(value?: number | null) {
-  if (typeof value !== "number" || !Number.isFinite(value)) return Date.now();
-  return value < 10_000_000_000 ? value * 1_000 : value;
 }
 
 function realPositionNotional(position: RealPosition) {
@@ -1355,7 +1413,7 @@ function lifecycleUpdatesFromIncremental(state: Extract<RealTradingOrderState, {
     warnings: state.warnings,
   };
   return [
-    ...buildSnapshotOrderLifecycles(state.openOrders.upserted, history),
+    ...buildAuthoritativeOrderLifecycles(state.openOrders.upserted, history, state.timestamp),
     ...state.openOrders.removedOrderIds.map((exchangeOrderId) => ({
       clientOrderId: `snapshot:${exchangeOrderId}`,
       exchangeOrderId,

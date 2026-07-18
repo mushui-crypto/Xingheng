@@ -41,6 +41,7 @@ const defaultSeedUser: UserRecord = {
 };
 
 export class UserService {
+  private readonly statusListeners = new Set<(userId: string, status: User["status"]) => void>();
   constructor(
     private store: TradingStore,
     private emailService: EmailService,
@@ -230,6 +231,17 @@ export class UserService {
     return this.store.findUserById(session.subjectId) ?? null;
   }
 
+  authenticateIncludingDisabledRevocation(token: string | null | undefined) {
+    const active = this.authenticate(token);
+    if (active || !token) return active;
+    return this.store.findDisabledRevokedSession(hashSessionToken(token)) ?? null;
+  }
+
+  onStatusChange(listener: (userId: string, status: User["status"]) => void) {
+    this.statusListeners.add(listener);
+    return () => this.statusListeners.delete(listener);
+  }
+
   getCurrentUser(token: string | null | undefined) {
     return this.authenticate(token);
   }
@@ -244,6 +256,7 @@ export class UserService {
       throw new Error("用户不存在。");
     }
     this.store.updateUserStatus(id, status);
+    this.statusListeners.forEach((listener) => listener(id, status));
     return this.store.findUserById(id);
   }
 

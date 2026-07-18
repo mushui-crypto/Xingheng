@@ -6,6 +6,7 @@ import { RealTradingExchangeSubmissionError, type HyperliquidExchangeProxy } fro
 import type { HyperliquidInfoClient } from "../hyperliquid/HyperliquidInfoClient";
 import type { RealTradingOrderStateService } from "../hyperliquid/RealTradingOrderStateService";
 import type { RealTradingRealtimeTokenService } from "../hyperliquid/RealTradingRealtimeTokenService";
+import type { RealTradingAuditRecord } from "../hyperliquid/realTradingAuditTypes";
 
 type RealTradingRouteDependencies = {
   app: express.Express;
@@ -13,9 +14,12 @@ type RealTradingRouteDependencies = {
   exchange: HyperliquidExchangeProxy;
   orderState: RealTradingOrderStateService;
   realtimeTokens: RealTradingRealtimeTokenService;
+  auditStore: {
+    findRealTradingAudit(userId: string, input: { requestId?: string | null; cloid?: string | null }): unknown;
+  };
 };
 
-export function registerRealTradingRoutes({ app, info, exchange, orderState, realtimeTokens }: RealTradingRouteDependencies) {
+export function registerRealTradingRoutes({ app, info, exchange, orderState, realtimeTokens, auditStore }: RealTradingRouteDependencies) {
   const exchangeRateLimit = createRealTradingRateLimiter();
 
   app.get("/api/real-trading/market/symbols", async (_request, response) => {
@@ -125,6 +129,26 @@ export function registerRealTradingRoutes({ app, info, exchange, orderState, rea
     }
   });
 
+  app.get("/api/real-trading/orders/audit", (request, response) => {
+    try {
+      const requestId = typeof request.query.requestId === "string" ? request.query.requestId.trim() : "";
+      const cloid = typeof request.query.cloid === "string" ? normalizeCloid(request.query.cloid) : "";
+      if ((!requestId && !cloid) || (requestId && cloid)) {
+        response.status(400).json({ message: "requestId 与 cloid 必须且只能提供一个。", errorCode: "RT_INVALID_REQUEST" });
+        return;
+      }
+      const audit = auditStore.findRealTradingAudit(request.user!.id, { requestId, cloid });
+      if (!audit) {
+        response.status(404).json({ message: "未找到对应的真实交易审计记录。", errorCode: "RT_AUDIT_NOT_FOUND" });
+        return;
+      }
+      response.setHeader("Cache-Control", "no-store");
+      response.json(toPublicRealTradingOrderAudit(audit as RealTradingAuditRecord));
+    } catch {
+      response.status(400).json({ message: "审计查询参数不正确。", errorCode: "RT_INVALID_REQUEST" });
+    }
+  });
+
   app.post("/api/real-trading/realtime/token", (request, response) => {
     try {
       response.setHeader("Cache-Control", "no-store");
@@ -163,6 +187,21 @@ export function registerRealTradingRoutes({ app, info, exchange, orderState, rea
       });
     }
   });
+}
+
+export function toPublicRealTradingOrderAudit(audit: RealTradingAuditRecord) {
+  const reconcileRequired = audit.outcome === "pending_reconciliation" || audit.outcome === "partial";
+  const orderState = audit.outcome === "pending_reconciliation" ? "submitted" : audit.outcome;
+  return {
+    requestId: audit.requestId,
+    cloid: audit.clientOrderIds.length === 1 ? audit.clientOrderIds[0] : null,
+    cloids: audit.clientOrderIds,
+    orderState,
+    errorCategory: audit.errorCategory,
+    retryable: false,
+    reconcileRequired,
+    timestamp: audit.completedAt,
+  };
 }
 
 function normalizeOptionalSequence(value: unknown) {

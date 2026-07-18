@@ -14,3 +14,10 @@ test("realtime tokens are address-bound, one-time, and replace older grants for 
   });
   assert.equal(service.consume(second.token), null);
 });
+
+test("disabling a user can revoke an outstanding realtime token", () => {
+  const service = new RealTradingRealtimeTokenService(60_000);
+  const grant = service.issue("USR-disabled", "0x1111111111111111111111111111111111111111");
+  service.revokeUser("USR-disabled");
+  assert.equal(service.consume(grant.token), null);
+});

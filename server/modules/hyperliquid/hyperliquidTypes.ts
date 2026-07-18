@@ -271,6 +271,9 @@ export type RealTradingExchangeReceipt = {
   rejected: boolean;
   outcome: "accepted" | "rejected" | "partial" | "pending_reconciliation";
   needsReconciliation: boolean;
+  errorCode?: string | null;
+  retryable?: boolean;
+  reconcileRequired?: boolean;
   orderStatuses?: Array<{
     index: number;
     status: "accepted" | "rejected";

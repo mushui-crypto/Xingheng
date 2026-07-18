@@ -36,6 +36,8 @@ type AddressStream = {
   starting: boolean;
   stopped: boolean;
   disconnected: boolean;
+  seenProviderEvents: Set<string>;
+  lastProviderTimestampByChannel: Map<string, number>;
 };
 
 type UserStreamFactory = () => {
@@ -74,6 +76,8 @@ export class RealTradingUserStreamManager {
         starting: false,
         stopped: false,
         disconnected: false,
+        seenProviderEvents: new Set(),
+        lastProviderTimestampByChannel: new Map(),
       };
       this.streams.set(address, stream);
     }
@@ -99,6 +103,14 @@ export class RealTradingUserStreamManager {
 
   async stop() {
     await Promise.all([...this.streams.values()].map((stream) => this.stopStream(stream)));
+  }
+
+  async revokeUser(userId: string) {
+    const address = this.activeAddressByUser.get(userId);
+    if (!address) return;
+    const stream = this.streams.get(address);
+    if (stream) await this.stopStream(stream);
+    this.activeAddressByUser.delete(userId);
   }
 
   private async start(stream: AddressStream) {
@@ -133,11 +145,20 @@ export class RealTradingUserStreamManager {
       }
       stream.subscriptions = await Promise.all([
         client.orderUpdates({ user: stream.address as `0x${string}` }, (rows) => {
-          this.emit(stream, "orders", rows.map(normalizeHistoricalOrder), "connected", false, false);
+          const filtered = filterProviderRows(
+            stream,
+            "orders",
+            rows.map(normalizeHistoricalOrder),
+            (row) => row.statusTimestamp ?? row.timestamp,
+          );
+          if (filtered.outOfOrder) void this.emitSnapshot(stream);
+          if (filtered.rows.length) this.emit(stream, "orders", filtered.rows, "connected", false, false);
         }, { onError }),
         client.userFills({ user: stream.address as `0x${string}` }, (event) => {
           if (event.isSnapshot) return;
-          this.emit(stream, "fills", event.fills.map(normalizeFill), "connected", false, false);
+          const filtered = filterProviderRows(stream, "fills", event.fills.map(normalizeFill), (row) => row.timestamp);
+          if (filtered.outOfOrder) void this.emitSnapshot(stream);
+          if (filtered.rows.length) this.emit(stream, "fills", filtered.rows, "connected", false, false);
         }, { onError }),
         client.openOrders({ user: stream.address as `0x${string}` }, (event) => {
           this.emit(stream, "open_orders", event.orders.map(normalizeOpenOrder), "connected", false, false);
@@ -236,6 +257,32 @@ export class RealTradingUserStreamManager {
       if (this.activeAddressByUser.get(userId) === stream.address) this.activeAddressByUser.delete(userId);
     }
   }
+}
+
+function filterProviderRows<T>(
+  stream: AddressStream,
+  channel: "orders" | "fills",
+  rows: T[],
+  timestampOf: (row: T) => number | null,
+) {
+  const previousTimestamp = stream.lastProviderTimestampByChannel.get(channel) ?? 0;
+  let latestTimestamp = previousTimestamp;
+  let outOfOrder = false;
+  const accepted = rows.filter((row) => {
+    const timestamp = Number(timestampOf(row));
+    if (Number.isFinite(timestamp) && timestamp < previousTimestamp) {
+      outOfOrder = true;
+      return false;
+    }
+    const key = `${channel}:${JSON.stringify(row)}`;
+    if (stream.seenProviderEvents.has(key)) return false;
+    stream.seenProviderEvents.add(key);
+    if (Number.isFinite(timestamp)) latestTimestamp = Math.max(latestTimestamp, timestamp);
+    return true;
+  });
+  if (stream.seenProviderEvents.size > 2_000) stream.seenProviderEvents.clear();
+  stream.lastProviderTimestampByChannel.set(channel, latestTimestamp);
+  return { rows: accepted, outOfOrder };
 }
 
 function normalizeRealtimeAccountState(address: string, state: any) {

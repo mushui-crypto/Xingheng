@@ -4,6 +4,7 @@ import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 import { recordBelongsToMarket, resolveRealTradingSymbolForRecord } from "../lib/realTradingMarket";
 import { createHyperliquidCloid } from "../lib/hyperliquidCloid";
+import { positionOperationKey } from "../model/reconciliation";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../model/types";
 
 export type { RealPositionCloseRequest } from "../model/types";
@@ -11,33 +12,45 @@ export type { RealPositionCloseRequest } from "../model/types";
 type CloseIntent = RealPositionCloseRequest | null;
 
 export function RealPositionsTable({
+  actionsBlocked = false,
   bestAsk,
   bestBid,
   onCloseRequest,
   openOrders = [],
   onTpslRequest,
+  pendingOperationKeys = [],
   rows,
+  riskIncreasingActionsBlocked = false,
   symbols,
 }: {
+  actionsBlocked?: boolean;
   bestAsk?: number | null;
   bestBid?: number | null;
   onCloseRequest?: (request: RealPositionCloseRequest) => Promise<void> | void;
   openOrders?: RealOpenOrder[];
   onTpslRequest?: (request: RealPositionTpslRequest) => Promise<void> | void;
+  pendingOperationKeys?: string[];
   rows: RealPosition[];
+  riskIncreasingActionsBlocked?: boolean;
   symbols: RealTradingSymbol[];
 }) {
   const [intent, setIntent] = useState<CloseIntent>(null);
   const [tpslIntent, setTpslIntent] = useState<RealPositionTpslRequest | null>(null);
   const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const pendingOperations = new Set(pendingOperationKeys);
+  const allClosePending = rows.some((position) => pendingOperations.has(positionOperationKey(position, "exposure")));
+  const intentPending = intent?.positions.some((position) => pendingOperations.has(positionOperationKey(position, "exposure"))) ?? false;
+  const tpslPending = tpslIntent ? pendingOperations.has(positionOperationKey(tpslIntent.position, "tpsl")) : false;
 
   function requestAllClose() {
+    if (allClosePending) return;
     setStatus("");
     setIntent({ cloid: createHyperliquidCloid(), mode: "market", positions: rows, scope: "all" });
   }
 
   function requestSingleClose(position: RealPosition, mode: RealPositionCloseRequest["mode"]) {
+    if (pendingOperations.has(positionOperationKey(position, "exposure"))) return;
     setStatus("");
     const counterpartyPrice = position.side === "long" ? bestBid : bestAsk;
     setIntent({
@@ -50,6 +63,7 @@ export function RealPositionsTable({
   }
 
   function requestTpsl(position: RealPosition) {
+    if (pendingOperations.has(positionOperationKey(position, "tpsl"))) return;
     setStatus("");
     setTpslIntent({
       cloid: createHyperliquidCloid(),
@@ -112,13 +126,15 @@ export function RealPositionsTable({
           <span>资金费</span>
           <span>止盈</span>
           <span>止损</span>
-          <button onClick={requestAllClose} type="button">全部平仓</button>
+          <button disabled={actionsBlocked || allClosePending} onClick={requestAllClose} type="button">全部平仓</button>
         </div>
         {rows.length === 0 ? (
           <div className="xh-real-position-empty">暂无真实持仓</div>
         ) : rows.map((row, index) => {
           const pnlTone = numberTone(row.unrealizedPnl);
           const sideTone = positionSideTone(row.side);
+          const exposurePending = pendingOperations.has(positionOperationKey(row, "exposure"));
+          const rowTpslPending = pendingOperations.has(positionOperationKey(row, "tpsl"));
           return (
             <div className={`xh-real-position-row is-${row.side}`} key={`${row.coin}-${row.side}-${index}`}>
               <strong>{row.coin}</strong>
@@ -130,12 +146,12 @@ export function RealPositionsTable({
               <span>{formatNumber(row.liqPx ?? row.liquidationPrice)}</span>
               <span>{formatMargin(row)}</span>
               <span>{formatSignedMoney(row.fundingSinceOpen ?? row.cumFunding?.sinceOpen)}</span>
-              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "tp")}</button>
-              <button className="xh-real-position-trigger-button" onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "sl")}</button>
+              <button className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "tp")}</button>
+              <button className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "sl")}</button>
               <div className="xh-real-position-actions">
-                <button onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
-                <button onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
-                <button onClick={() => requestSingleClose(row, "reverse")} type="button">反手</button>
+                <button disabled={actionsBlocked || exposurePending} onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
+                <button disabled={actionsBlocked || exposurePending} onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
+                <button disabled={actionsBlocked || exposurePending || riskIncreasingActionsBlocked} onClick={() => requestSingleClose(row, "reverse")} type="button">反手</button>
               </div>
             </div>
           );
@@ -172,7 +188,7 @@ export function RealPositionsTable({
         </div>
         <div className="xh-real-confirm-actions">
           <Button disabled={submitting} onClick={() => setIntent(null)} type="button" variant="secondary">取消</Button>
-          <Button disabled={submitting || intent?.positions.length === 0 || (intent?.mode === "limit" && !(Number(intent.limitPrice) > 0))} onClick={() => void confirmClose()} type="button" variant="danger">
+          <Button disabled={actionsBlocked || intentPending || submitting || intent?.positions.length === 0 || (intent?.mode === "limit" && !(Number(intent.limitPrice) > 0))} onClick={() => void confirmClose()} type="button" variant="danger">
             {submitting ? "提交中" : "确认平仓"}
           </Button>
         </div>
@@ -196,7 +212,7 @@ export function RealPositionsTable({
         </div>
         <div className="xh-real-confirm-actions">
           <Button disabled={submitting} onClick={() => setTpslIntent(null)} type="button" variant="secondary">取消</Button>
-          <Button disabled={submitting || (!tpslIntent?.tpPrice?.trim() && !tpslIntent?.slPrice?.trim())} onClick={() => void confirmTpsl()} type="button">{submitting ? "提交中" : "确认"}</Button>
+          <Button disabled={actionsBlocked || tpslPending || submitting || (!tpslIntent?.tpPrice?.trim() && !tpslIntent?.slPrice?.trim())} onClick={() => void confirmTpsl()} type="button">{submitting ? "提交中" : "确认"}</Button>
         </div>
       </Modal>
     </div>

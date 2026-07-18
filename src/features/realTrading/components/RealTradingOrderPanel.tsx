@@ -20,6 +20,7 @@ import {
 } from "../model/marginLeverage";
 import { preflightRealTradingOrder, realTradingRiskPolicy } from "../model/riskPolicy";
 import { canSkipRealTradingConfirmationForSession } from "../model/confirmationPolicy";
+import { lifecyclesFromActionFailure, orderOperationKey } from "../model/reconciliation";
 import {
   extractExchangeOrderUpdates,
   realTradingOrderStatusLabel,
@@ -47,6 +48,7 @@ export function RealTradingOrderPanel({
   openOrderCount,
   positionSize,
   position,
+  pendingOperationKeys = [],
   reconciliationPending,
   session,
   supportedMarginModes,
@@ -71,6 +73,7 @@ export function RealTradingOrderPanel({
   openOrderCount: number;
   positionSize?: number;
   position?: RealPosition | null;
+  pendingOperationKeys?: string[];
   reconciliationPending: boolean;
   session: HyperliquidSessionController;
   supportedMarginModes?: RealTradingMarginMode[];
@@ -105,8 +108,10 @@ export function RealTradingOrderPanel({
     supportedMarginModes,
   });
   const leverage = String(marginSelection.leverage);
+  const currentOperationKey = orderOperationKey(symbol, reduceOnly);
+  const currentOperationPending = pendingOperationKeys.includes(currentOperationKey);
   const entrySafetyBlocked = (!marketReady || reconciliationPending) && !reduceOnly;
-  const actionDisabled = !connected || entrySafetyBlocked || busy || typeof assetId !== "number";
+  const actionDisabled = !connected || entrySafetyBlocked || currentOperationPending || busy || typeof assetId !== "number";
   const sizeInputStep = getHyperliquidSizeInputStep(szDecimals);
 
   useEffect(() => {
@@ -159,7 +164,8 @@ export function RealTradingOrderPanel({
     const signer = session.signer;
     if (!signer) return;
     const submittedAt = Date.now();
-    const lifecycleBase = { clientOrderId: cloid, symbol, updatedAt: submittedAt };
+    const operationKey = orderOperationKey(symbol, reduceOnly);
+    const lifecycleBase = { clientOrderId: cloid, operationKey, symbol, updatedAt: submittedAt };
     onOrderLifecycle("submitted", { ...lifecycleBase, status: "submitted" });
     try {
       const triggers = tpslEnabled && !reduceOnly ? resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price, cloid) : [];
@@ -168,8 +174,13 @@ export function RealTradingOrderPanel({
         reduceOnly ? "reduce-only 平仓请求已发送。" : tpslEnabled ? "真实订单与止盈止损请求已发送。" : "真实订单请求已发送。",
       );
       if (!outcome.completed) {
-        const status = outcome.reconciliationRequired ? "pending_reconciliation" : "rejected";
-        onOrderLifecycle("updated", { ...lifecycleBase, message: outcome.error, requestId: outcome.reconciliationRequestId, status, updatedAt: Date.now() });
+        lifecyclesFromActionFailure({
+          cloid,
+          operationKeys: [operationKey],
+          outcome,
+          symbol,
+          updatedAt: Date.now(),
+        }).forEach((order) => onOrderLifecycle("updated", order));
         setRetryIntent(!outcome.reconciliationRequired && outcome.error && isRetryableOrderError(outcome.error) ? { cloid, side: orderSide } : null);
         if (outcome.reconciliationRequired) await onSubmitted();
         return;
@@ -338,6 +349,10 @@ export function RealTradingOrderPanel({
   }
 
   async function submitMarginSelection(nextSelection: Pick<MarginLeverageSelection, "leverage" | "marginMode">) {
+    if (!marketReady || reconciliationPending) {
+      session.setError("实时账户状态未就绪，暂不能调整保证金模式或杠杆。");
+      return;
+    }
     if (typeof assetId !== "number") {
       session.setError("当前品种缺少可用的 Hyperliquid asset id。");
       return;
@@ -384,10 +399,10 @@ export function RealTradingOrderPanel({
   return (
     <section className="xh-real-order-panel">
       <div className="xh-real-order-topline">
-        <button aria-haspopup="dialog" disabled={busy || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number"} onClick={openMarginModal} type="button">
           <span>{marginModeLabel(marginSelection.marginMode)}</span><ChevronDown aria-hidden="true" size={16} />
         </button>
-        <button aria-haspopup="dialog" disabled={busy || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number"} onClick={openMarginModal} type="button">
           <span>{marginSelection.leverage}x</span><ChevronDown aria-hidden="true" size={16} />
         </button>
       </div>

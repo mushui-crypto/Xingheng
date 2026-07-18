@@ -57,6 +57,32 @@ test("clearinghouse events publish normalized account and positions without repl
   await manager.stop();
 });
 
+test("revoking a disabled user closes the active upstream stream", async () => {
+  const upstream = createFakeUpstream();
+  const manager = new RealTradingUserStreamManager(fakeInfo() as any, fakeOrderState() as any, upstream.factory as any);
+  await manager.acquire("USR-disabled", address, () => {});
+  await waitFor(() => upstream.subscribeCount === 4);
+  await manager.revokeUser("USR-disabled");
+  assert.equal(upstream.closeCount, 1);
+  assert.equal(upstream.unsubscribeCount, 4);
+});
+
+test("duplicate events are ignored and out-of-order provider order events trigger snapshot recovery", async () => {
+  const events: RealTradingUserStreamEvent[] = [];
+  const upstream = createFakeUpstream();
+  const manager = new RealTradingUserStreamManager(fakeInfo() as any, fakeOrderState() as any, upstream.factory as any);
+  await manager.acquire("USR-ordering", address, (event) => events.push(event));
+  await waitFor(() => Boolean(upstream.orderListener));
+  const snapshotsBefore = events.filter((event) => event.channel === "snapshot").length;
+  const newest = { order: { coin: "BTC", oid: 7, side: "B", limitPx: "60000", sz: "0.01" }, status: "filled", statusTimestamp: 200 };
+  upstream.orderListener?.([newest]);
+  upstream.orderListener?.([newest]);
+  upstream.orderListener?.([{ ...newest, status: "open", statusTimestamp: 100 }]);
+  await waitFor(() => events.filter((event) => event.channel === "snapshot").length > snapshotsBefore);
+  assert.equal(events.filter((event) => event.channel === "orders").length, 1);
+  await manager.revokeUser("USR-ordering");
+});
+
 function fakeInfo() {
   return {
     async getAccountSummary() {
@@ -91,6 +117,7 @@ function fakeOrderState() {
 function createFakeUpstream() {
   const state = {
     clearinghouseListener: null as ((event: any) => void) | null,
+    orderListener: null as ((event: any[]) => void) | null,
     closeCount: 0,
     createCount: 0,
     subscribeCount: 0,
@@ -117,7 +144,10 @@ function createFakeUpstream() {
             return subscription();
           },
           openOrders: subscription,
-          orderUpdates: subscription,
+          orderUpdates: async (_params: unknown, listener: (event: any[]) => void) => {
+            state.orderListener = listener;
+            return subscription();
+          },
           userFills: subscription,
         },
       };

@@ -52,6 +52,32 @@ test("real-trading audit schema stores only non-replayable metadata and retains 
     "0x2222222222222222222222222222222222222222",
   );
   assert.equal(store.findRealTradingAgentBinding("USR-other", "0x1111111111111111111111111111111111111111"), undefined);
+
+  const baseReservation = {
+    requestId: "request-a",
+    userId: "USR-test",
+    network: "hyperliquid-testnet" as const,
+    masterAddress: "0x1111111111111111111111111111111111111111",
+    clientOrderIds: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+    actionType: "order" as const,
+    requestFingerprint: "fingerprint-a",
+    submittedAt: now,
+  };
+  assert.equal(store.reserveRealTradingOrderRequest(baseReservation).kind, "reserved");
+  store.saveRealTradingAudit(record("request-a", now + 1));
+  assert.equal(store.findRealTradingAudit("USR-test", { requestId: "request-a" })?.requestId, "request-a");
+  assert.equal(
+    store.findRealTradingAudit("USR-test", { cloid: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })?.requestId,
+    "request-a",
+  );
+  assert.equal(store.findRealTradingAudit("USR-other", { requestId: "request-a" }), undefined);
+  const changed = store.reserveRealTradingOrderRequest({
+    ...baseReservation,
+    requestId: "request-b",
+    requestFingerprint: "fingerprint-changed",
+  });
+  assert.equal(changed.kind, "existing");
+  if (changed.kind === "existing") assert.equal(changed.requestId, "conflict");
 });
 
 function record(requestId: string, completedAt: number) {

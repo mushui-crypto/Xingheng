@@ -91,7 +91,11 @@ export class HyperliquidInfoClient {
 
   async getSummary(symbolInput: string): Promise<RealTradingMarketSummary> {
     const market = await this.resolveMarket(symbolInput);
-    return normalizeMarketSummary(market.symbol, market.providerCoin, market.context);
+    // Catalog metadata may be cached, but risk decisions require a newly collected context.
+    const fresh = await this.getMetaAndContexts(market.sourceType === "hip3" ? market.sourceDex : undefined);
+    const context = fresh.contexts[market.universeIndex];
+    if (!context) throw new Error("Hyperliquid market context is unavailable.");
+    return normalizeMarketSummary(market.symbol, market.providerCoin, context);
   }
 
   async getOrderbook(symbolInput: string): Promise<RealTradingOrderbook> {

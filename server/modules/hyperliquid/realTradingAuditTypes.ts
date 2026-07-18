@@ -30,6 +30,7 @@ export type RealTradingIdempotencyReservation = {
   network: HyperliquidRealTradingNetwork;
   masterAddress: string;
   clientOrderIds: string[];
+  requestFingerprint: string;
   actionType: "order";
   submittedAt: number;
 };
@@ -42,4 +43,5 @@ export type RealTradingIdempotencyResult =
       state: RealTradingIdempotencyState;
       submittedAt: number;
       receiptJson: string | null;
+      requestFingerprint?: string;
     };
