@@ -3,7 +3,7 @@ import { ChevronDown } from "lucide-react";
 import { Button } from "../../../components/ui/Button";
 import { Checkbox } from "../../../components/ui/Checkbox";
 import { Modal } from "../../../components/ui/Modal";
-import type { RealPosition, RealTradingFees, RealTradingMarginMode } from "../../../api/realTrading";
+import type { RealPosition, RealTradingFees, RealTradingMarginMode, RealTradingReconciliationRecord } from "../../../api/realTrading";
 import { MarginLeverageModal } from "./MarginLeverageModal";
 import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
@@ -26,6 +26,7 @@ import {
   realTradingOrderStatusLabel,
   type RealTradingOrderLifecycle,
 } from "../model/realtimeState";
+import { resolveRealTradingSessionPresentation } from "../model/sessionPresentation";
 
 const positionPercentSteps = [0, 25, 50, 75, 100] as const;
 const positionPercentSnapThreshold = 2;
@@ -50,7 +51,12 @@ export function RealTradingOrderPanel({
   position,
   pendingOperationKeys = [],
   reconciliationPending,
+  reconciliationError,
+  reconciliationLoading,
+  reconciliationMessage,
+  reconciliationRecords,
   session,
+  signerCleared,
   supportedMarginModes,
   szDecimals,
   symbol,
@@ -75,7 +81,12 @@ export function RealTradingOrderPanel({
   position?: RealPosition | null;
   pendingOperationKeys?: string[];
   reconciliationPending: boolean;
+  reconciliationError?: string;
+  reconciliationLoading?: boolean;
+  reconciliationMessage?: string;
+  reconciliationRecords?: RealTradingReconciliationRecord[];
   session: HyperliquidSessionController;
+  signerCleared?: boolean;
   supportedMarginModes?: RealTradingMarginMode[];
   szDecimals?: number;
   symbol: string;
@@ -100,6 +111,11 @@ export function RealTradingOrderPanel({
   const [retryIntent, setRetryIntent] = useState<{ cloid: HyperliquidCloid; side: "buy" | "sell" } | null>(null);
   const [positionPercent, setPositionPercent] = useState(0);
   const { authorized, busy, message } = session;
+  const sessionPresentation = resolveRealTradingSessionPresentation({
+    connected,
+    signerCleared: Boolean(signerCleared),
+    state: session.state,
+  });
   const marginSelection = resolveMarginLeverageSelection({
     marginModeConstraint,
     maxLeverage,
@@ -411,6 +427,11 @@ export function RealTradingOrderPanel({
         <button className={!reduceOnly ? "is-active" : ""} onClick={() => setReduceOnly(false)} role="tab" type="button">开仓</button>
         <button className={reduceOnly ? "is-active" : ""} onClick={() => setReduceOnly(true)} role="tab" type="button">平仓</button>
       </div>
+      <div className={`xh-real-session-status is-${sessionPresentation.tone}`} role="status">
+        <StatusItem label="钱包" value={sessionPresentation.wallet} />
+        <StatusItem label="Agent" value={sessionPresentation.agent} />
+        <StatusItem label="Signer" value={sessionPresentation.signer} />
+      </div>
       <div className="xh-real-type-tabs" role="tablist" aria-label="订单类型">
         <button className={orderType === "market" ? "is-active" : ""} onClick={() => setOrderType("market")} role="tab" type="button">市价</button>
         <button className={orderType === "limit" ? "is-active" : ""} onClick={() => setOrderType("limit")} role="tab" type="button">限价</button>
@@ -478,7 +499,7 @@ export function RealTradingOrderPanel({
         {!connected ? (
           <button className="xh-real-connect-wallet" onClick={onConnect} type="button">连接钱包</button>
         ) : null}
-        {!connected && connectionMessage ? <p className="xh-real-connect-error" role="alert">{connectionMessage}</p> : null}
+        {connectionMessage ? <p className="xh-real-connect-error" role={connected ? "status" : "alert"}>{connectionMessage}</p> : null}
         <div className="xh-real-order-checks">
           <Checkbox checked={reduceOnly} label="只减仓" onChange={(event) => setReduceOnly(event.target.checked)} />
           <Checkbox checked={tpslEnabled} disabled={reduceOnly} label="止盈/止损" onChange={(event) => setTpslEnabled(event.target.checked)} />
@@ -493,10 +514,25 @@ export function RealTradingOrderPanel({
         ) : null}
         {reconciliationPending ? (
           <p className="xh-real-risk-policy-note is-warning" role="alert">
-            存在结果未知的订单，正在按同一 cloid 查询 Hyperliquid 权威状态；完成前禁止提交新的开仓订单。
+            {reconciliationLoading ? "正在读取待对账状态，确认完成前暂停新增风险动作。" : reconciliationMessage || "存在结果未知的订单，完成前暂停新增风险动作。"}
           </p>
         ) : null}
+        {reconciliationError ? <p className="xh-real-risk-policy-note is-warning" role="alert">{reconciliationError}</p> : null}
       </fieldset>
+
+      {reconciliationRecords && reconciliationRecords.length > 0 ? (
+        <section className="xh-real-reconciliation-list" aria-label="待对账交易">
+          <div className="xh-real-reconciliation-heading">
+            <strong>待对账</strong>
+            <span>{reconciliationRecords.length}</span>
+          </div>
+          {reconciliationRecords.map((record) => (
+            <ReconciliationItem key={record.requestId} record={record} />
+          ))}
+        </section>
+      ) : !reconciliationLoading && !reconciliationError ? (
+        <p className="xh-real-reconciliation-clear" role="status">待对账状态已同步 · 无待处理记录</p>
+      ) : null}
 
       <div className="xh-real-order-metrics">
         <PanelMetric label="强平价格" value="-" />
@@ -510,6 +546,9 @@ export function RealTradingOrderPanel({
           <span>订单状态</span>
           <strong>{realTradingOrderStatusLabel(latestOrderLifecycle.status)}</strong>
           {latestOrderLifecycle.exchangeOrderId ? <small>OID {latestOrderLifecycle.exchangeOrderId}</small> : null}
+          {latestOrderLifecycle.requestId ? <small>Request {truncateIdentifier(latestOrderLifecycle.requestId)}</small> : null}
+          {latestOrderLifecycle.clientOrderId && !latestOrderLifecycle.clientOrderId.startsWith("audit:") ? <small>Cloid {truncateIdentifier(latestOrderLifecycle.clientOrderId)}</small> : null}
+          {latestOrderLifecycle.submittedAt ? <small>提交 {formatLifecycleTime(latestOrderLifecycle.submittedAt)}</small> : null}
           {latestOrderLifecycle.message ? <small>{latestOrderLifecycle.message}</small> : null}
           {retryIntent?.cloid === latestOrderLifecycle.clientOrderId ? (
             <button disabled={busy || (!marketReady && !reduceOnly)} onClick={() => void submitOrder(retryIntent.side, retryIntent.cloid)} type="button">
@@ -566,6 +605,70 @@ function ConfirmMetric({ label, tone, value }: { label: string; tone?: "buy" | "
 
 function PanelMetric({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function StatusItem({ label, value }: { label: string; value: string }) {
+  return <div><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function ReconciliationItem({ record }: { record: RealTradingReconciliationRecord }) {
+  return (
+    <article className={`xh-real-reconciliation-item ${record.manualReview ? "is-manual" : "is-automatic"}`}>
+      <div>
+        <strong>{realTradingActionLabel(record.actionType)}</strong>
+        <span>{record.manualReview ? "人工核对" : record.autoRecoverable ? "自动核对" : "待核对"}</span>
+      </div>
+      <dl>
+        <div><dt>提交</dt><dd>{formatLifecycleTime(record.submittedAt)}</dd></div>
+        <div><dt>Request</dt><dd><CopyIdentifier value={record.requestId} /></dd></div>
+        <div>
+          <dt>Cloid</dt>
+          <dd>{record.clientOrderIds.length > 0 ? record.clientOrderIds.map((cloid) => <CopyIdentifier key={cloid} value={cloid} />) : "-"}</dd>
+        </div>
+        <div><dt>最近核对</dt><dd>{formatLifecycleTime(record.lastReconcileAttemptAt)}</dd></div>
+      </dl>
+      <p>{record.manualReview ? "需要人工核对，禁止盲目重试。" : "系统正在按权威 orderStatus 自动核对。"}</p>
+      {record.errorCategory ? <small>错误类别：{record.errorCategory}</small> : null}
+    </article>
+  );
+}
+
+function CopyIdentifier({ value }: { value: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(value);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1_500);
+    } catch {
+      setCopied(false);
+    }
+  };
+  return (
+    <button aria-label={`复制 ${value}`} className="xh-real-copy-id" onClick={() => void copy()} title={value} type="button">
+      {copied ? "已复制" : truncateIdentifier(value)}
+    </button>
+  );
+}
+
+function truncateIdentifier(value: string) {
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-6)}` : value;
+}
+
+function formatLifecycleTime(value?: number | null) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return "-";
+  const milliseconds = value < 10_000_000_000 ? value * 1_000 : value;
+  return new Date(milliseconds).toLocaleString("zh-CN", { hour12: false });
+}
+
+function realTradingActionLabel(value: string) {
+  const labels: Record<string, string> = {
+    approveAgent: "Agent 授权",
+    cancel: "撤单",
+    order: "订单",
+    updateLeverage: "杠杆 / 保证金",
+  };
+  return labels[value] ?? value;
 }
 
 function isRetryableOrderError(message: string) {

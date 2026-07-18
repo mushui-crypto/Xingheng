@@ -22,6 +22,7 @@ import type {
 } from "../types";
 import type { SessionRole } from "../auth/security";
 import type {
+  RealTradingAuditOutcome,
   RealTradingAuditRecord,
   RealTradingIdempotencyReservation,
   RealTradingIdempotencyResult,
@@ -72,17 +73,27 @@ type EmailTokenRow = Omit<EmailTokenRecord, "userId" | "usedAt"> & {
 };
 type RealTradingAuditRow = Omit<RealTradingAuditRecord, "clientOrderIds"> & { clientOrderIds: string };
 type RealTradingIdempotencyRow = {
+  userId?: string;
+  masterAddress?: string;
+  network?: string;
+  cloid?: string;
+  actionType?: string;
   requestId: string;
   state: RealTradingIdempotencyState;
   submittedAt: number;
   receiptJson: string | null;
   requestFingerprint: string;
+  completedAt?: number | null;
+  reconcileAttemptCount?: number | null;
+  lastReconcileAttemptAt?: number | null;
+  lastReconcileError?: string | null;
 };
 type RealTradingAgentBindingRow = RealTradingAgentBinding;
 
 export class TradingStore {
   private db: DatabaseSync;
   private lastRealTradingAuditMaintenanceAt = 0;
+  private lastRealTradingAuditPurgeDeleted = 0;
 
   constructor(dbPath = process.env.TRADING_DB_PATH ?? defaultDbPath) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -1086,6 +1097,192 @@ export class TradingStore {
     return undefined;
   }
 
+  listUserRealTradingReconciliationRecords(userId: string) {
+    const rows = this.db.prepare(
+      `SELECT
+         audit.requestId,
+         audit.actionType,
+         audit.clientOrderIds,
+         audit.errorCategory,
+         audit.submittedAt,
+         audit.completedAt,
+         COUNT(idem.cloid) AS idempotencyRowCount,
+         MAX(idem.lastReconcileAttemptAt) AS lastReconcileAttemptAt,
+         MAX(idem.reconcileAttemptCount) AS reconcileAttemptCount
+       FROM real_trading_exchange_audit audit
+       LEFT JOIN real_trading_order_idempotency idem ON idem.requestId = audit.requestId
+       WHERE audit.userId = ? AND audit.outcome = 'pending_reconciliation'
+       GROUP BY audit.requestId
+       ORDER BY audit.submittedAt ASC`,
+    ).all(userId) as Array<RealTradingAuditRow & {
+      idempotencyRowCount?: number | null;
+      lastReconcileAttemptAt?: number | null;
+      reconcileAttemptCount?: number | null;
+    }>;
+    return rows.map((row) => {
+      const record = toRealTradingAuditRecord(row);
+      const autoRecoverable = record.actionType === "order" && Number(row.idempotencyRowCount ?? 0) > 0;
+      return {
+        requestId: record.requestId,
+        actionType: record.actionType,
+        submittedAt: record.submittedAt,
+        clientOrderIds: record.clientOrderIds,
+        autoRecoverable,
+        manualReview: !autoRecoverable,
+        lastReconcileAttemptAt: row.lastReconcileAttemptAt ?? null,
+        errorCategory: record.errorCategory,
+        blockingScope: autoRecoverable ? "new_risk" : "manual_review",
+      };
+    });
+  }
+
+  listPendingRealTradingReconciliations(limit = 50) {
+    const safeLimit = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 500) : 50;
+    const requestRows = this.db.prepare(
+      `SELECT requestId
+       FROM real_trading_order_idempotency
+       WHERE state IN ('processing', 'pending_reconciliation')
+       GROUP BY requestId
+       ORDER BY MIN(submittedAt) ASC
+       LIMIT ?`,
+    ).all(safeLimit) as Array<{ requestId: string }>;
+    if (requestRows.length === 0) return [];
+    const placeholders = requestRows.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT
+         idem.userId,
+         idem.masterAddress,
+         idem.network,
+         idem.cloid,
+         idem.requestId,
+         idem.actionType,
+         idem.state,
+         idem.submittedAt,
+         idem.completedAt,
+         idem.receiptJson,
+         idem.requestFingerprint,
+         idem.reconcileAttemptCount,
+         idem.lastReconcileAttemptAt,
+         idem.lastReconcileError,
+         audit.outcome AS auditOutcome,
+         audit.errorCategory AS auditErrorCategory,
+         audit.completedAt AS auditCompletedAt
+       FROM real_trading_order_idempotency idem
+       LEFT JOIN real_trading_exchange_audit audit ON audit.requestId = idem.requestId
+       WHERE idem.requestId IN (${placeholders}) AND idem.state IN ('processing', 'pending_reconciliation')
+       ORDER BY idem.submittedAt ASC, idem.cloid ASC`,
+    ).all(...requestRows.map((row) => row.requestId)) as Array<RealTradingIdempotencyRow & {
+      auditOutcome?: string | null;
+      auditErrorCategory?: string | null;
+      auditCompletedAt?: number | null;
+    }>;
+    return rows.map((row) => ({
+      userId: String(row.userId ?? ""),
+      masterAddress: String(row.masterAddress ?? ""),
+      network: String(row.network ?? ""),
+      cloid: String(row.cloid ?? ""),
+      requestId: row.requestId,
+      actionType: String(row.actionType ?? ""),
+      state: row.state,
+      submittedAt: row.submittedAt,
+      completedAt: row.completedAt ?? null,
+      reconcileAttemptCount: row.reconcileAttemptCount ?? 0,
+      lastReconcileAttemptAt: row.lastReconcileAttemptAt ?? null,
+      lastReconcileError: row.lastReconcileError ?? null,
+      auditOutcome: row.auditOutcome ?? null,
+      auditErrorCategory: row.auditErrorCategory ?? null,
+      auditCompletedAt: row.auditCompletedAt ?? null,
+    }));
+  }
+
+  recordRealTradingReconciliationAttempt(requestId: string, attemptedAt: number, error: string | null) {
+    this.db.prepare(
+      `UPDATE real_trading_order_idempotency
+       SET reconcileAttemptCount = COALESCE(reconcileAttemptCount, 0) + 1,
+           lastReconcileAttemptAt = ?,
+           lastReconcileError = ?
+       WHERE requestId = ?`,
+    ).run(attemptedAt, error, requestId);
+  }
+
+  updateRealTradingAuditReconciliation(
+    requestId: string,
+    outcome: Exclude<RealTradingAuditOutcome, "pending_reconciliation">,
+    input: {
+      errorCategory: string | null;
+      providerStatus: string | null;
+      httpStatus: number;
+      message: string | null;
+      completedAt: number;
+    },
+  ) {
+    this.db.prepare(
+      `UPDATE real_trading_exchange_audit
+       SET outcome = ?,
+           errorCategory = ?,
+           providerStatus = ?,
+           httpStatus = ?,
+           message = ?,
+           completedAt = ?
+       WHERE requestId = ?`,
+    ).run(
+      outcome,
+      input.errorCategory,
+      input.providerStatus,
+      input.httpStatus,
+      input.message,
+      input.completedAt,
+      requestId,
+    );
+  }
+
+  getRealTradingOperationsSummary(now = Date.now(), windowMs = 24 * 60 * 60 * 1_000) {
+    const auditPending = this.db.prepare(
+      `SELECT MIN(submittedAt) AS oldestSubmittedAt, COUNT(*) AS pendingCount
+       FROM real_trading_exchange_audit
+       WHERE outcome = 'pending_reconciliation'`,
+    ).get() as { oldestSubmittedAt?: number | null; pendingCount?: number | null };
+    const autoRecoverable = this.db.prepare(
+      `SELECT COUNT(DISTINCT audit.requestId) AS count
+       FROM real_trading_exchange_audit audit
+       JOIN real_trading_order_idempotency idem ON idem.requestId = audit.requestId
+       WHERE audit.outcome = 'pending_reconciliation'
+         AND audit.actionType = 'order'
+         AND idem.state IN ('processing', 'pending_reconciliation')`,
+    ).get() as { count?: number | null };
+    const idempotencyPending = this.db.prepare(
+      `SELECT MIN(submittedAt) AS oldestSubmittedAt, COUNT(DISTINCT requestId) AS pendingCount
+       FROM real_trading_order_idempotency
+       WHERE state IN ('processing', 'pending_reconciliation')`,
+    ).get() as { oldestSubmittedAt?: number | null; pendingCount?: number | null };
+    const pendingCount = Number(auditPending.pendingCount ?? 0);
+    const autoRecoverableCount = Number(autoRecoverable.count ?? 0);
+    const oldestSubmittedAt = minNullableNumber(auditPending.oldestSubmittedAt, idempotencyPending.oldestSubmittedAt);
+    const safeWindowMs = Math.max(60_000, Number.isFinite(windowMs) ? windowMs : 24 * 60 * 60 * 1_000);
+    const rows = this.db.prepare(
+      `SELECT actionType, outcome, COUNT(*) AS count
+       FROM real_trading_exchange_audit
+       WHERE completedAt >= ?
+       GROUP BY actionType, outcome
+       ORDER BY actionType, outcome`,
+    ).all(now - safeWindowMs) as Array<{ actionType: string; outcome: RealTradingAuditOutcome; count: number }>;
+    return {
+      pendingCount,
+      autoRecoverablePendingCount: autoRecoverableCount,
+      manualReviewPendingCount: Math.max(0, pendingCount - autoRecoverableCount),
+      idempotencyPendingWithoutAuditCount: Math.max(0, Number(idempotencyPending.pendingCount ?? 0) - autoRecoverableCount),
+      oldestPendingSubmittedAt: oldestSubmittedAt,
+      oldestPendingAgeMs: oldestSubmittedAt !== null ? Math.max(0, now - oldestSubmittedAt) : null,
+      recentWindowMs: safeWindowMs,
+      recentCounts: rows.map((row) => ({
+        actionType: row.actionType,
+        outcome: row.outcome,
+        count: Number(row.count),
+      })),
+      auditCleanup: this.getRealTradingAuditMaintenanceStatus(),
+    };
+  }
+
   findRealTradingAgentBinding(userId: string, masterAddress: string) {
     return this.db.prepare(
       `SELECT userId, masterAddress, agentAddress, approvedAt, updatedAt
@@ -1179,14 +1376,24 @@ export class TradingStore {
          SELECT rowid FROM real_trading_exchange_audit WHERE completedAt < ? ORDER BY completedAt ASC LIMIT ?
        )`,
     ).run(cutoff, batchSize).changes;
-    this.db.prepare(
+    const idempotencyChanges = this.db.prepare(
       `DELETE FROM real_trading_order_idempotency
        WHERE rowid IN (
          SELECT rowid FROM real_trading_order_idempotency
          WHERE completedAt IS NOT NULL AND completedAt < ? ORDER BY completedAt ASC LIMIT ?
        )`,
-    ).run(cutoff, batchSize);
+    ).run(cutoff, batchSize).changes;
+    this.lastRealTradingAuditPurgeDeleted = Number(changes) + Number(idempotencyChanges);
     return changes;
+  }
+
+  getRealTradingAuditMaintenanceStatus() {
+    const retentionDays = parsePositiveEnvironmentNumber(process.env.REAL_TRADING_AUDIT_RETENTION_DAYS, 180);
+    return {
+      retentionDays,
+      lastMaintenanceAt: this.lastRealTradingAuditMaintenanceAt || null,
+      lastDeletedRows: this.lastRealTradingAuditPurgeDeleted,
+    };
   }
 
   private maintainRealTradingAudit(now = Date.now()) {
@@ -1532,6 +1739,9 @@ export class TradingStore {
         receiptJson TEXT,
         submittedAt INTEGER NOT NULL,
         completedAt INTEGER,
+        reconcileAttemptCount INTEGER NOT NULL DEFAULT 0,
+        lastReconcileAttemptAt INTEGER,
+        lastReconcileError TEXT,
         PRIMARY KEY (userId, masterAddress, network, cloid)
       );
 
@@ -1590,6 +1800,9 @@ export class TradingStore {
     this.addColumnIfMissing("real_trading_exchange_audit", "clientOrderIds", "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing("real_trading_exchange_audit", "errorCategory", "TEXT");
     this.addColumnIfMissing("real_trading_order_idempotency", "requestFingerprint", "TEXT NOT NULL DEFAULT ''");
+    this.addColumnIfMissing("real_trading_order_idempotency", "reconcileAttemptCount", "INTEGER NOT NULL DEFAULT 0");
+    this.addColumnIfMissing("real_trading_order_idempotency", "lastReconcileAttemptAt", "INTEGER");
+    this.addColumnIfMissing("real_trading_order_idempotency", "lastReconcileError", "TEXT");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
     this.cleanupLegacyTradingData();
     this.db.prepare("UPDATE users SET emailVerifiedAt = createdAt WHERE emailVerifiedAt IS NULL").run();
@@ -1714,4 +1927,9 @@ function roundMoney(value: number) {
 function parsePositiveEnvironmentNumber(value: string | undefined, fallback: number) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function minNullableNumber(...values: unknown[]) {
+  const numbers = values.filter((value): value is number => typeof value === "number" && Number.isFinite(value));
+  return numbers.length ? Math.min(...numbers) : null;
 }

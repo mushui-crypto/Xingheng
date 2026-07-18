@@ -15,9 +15,12 @@ import { buildPositionTpslOrders } from "../src/features/realTrading/lib/tpslOrd
 import { enrichPositionMarks } from "../src/features/realTrading/lib/enrichPositionMarks";
 import { mergeTradingSearchParams } from "../src/features/trading/lib/tradingSearchParams";
 import { resolveMarginLeverageSelection } from "../src/features/realTrading/model/marginLeverage";
+import { assertHyperliquidCloid, deriveHyperliquidCloid } from "../src/features/realTrading/lib/hyperliquidCloid";
 
 const symbol: RealTradingSymbol = { assetId: 0, providerCoin: "BTC", symbol: "BTCUSDT", szDecimals: 5 };
+const ethSymbol: RealTradingSymbol = { assetId: 1, providerCoin: "ETH", symbol: "ETHUSDT", szDecimals: 4 };
 const longPosition: RealPosition = { coin: "BTC", markPx: 60_000, side: "long", size: 0.01, symbol: "BTCUSDT" };
+const shortPosition: RealPosition = { coin: "ETH", markPx: 3_000, side: "short", size: 0.1, symbol: "ETHUSDT" };
 const submitted: HyperliquidLimitOrderInput[][] = [];
 const submittedTriggers: HyperliquidTriggerOrderInput[][] = [];
 const signer = {
@@ -32,19 +35,47 @@ const signer = {
   },
 } as unknown as HyperliquidSessionSigner;
 
-await submitPositionCloseRequest(signer, { mode: "market", positions: [longPosition], scope: "single" }, [symbol]);
-assert.equal(submitted[0][0].isBuy, false);
-assert.equal(submitted[0][0].reduceOnly, true);
-assert.equal(submitted[0][0].market, true);
-assert.equal(submitted[0][0].size, "0.01");
+const marketCloseCloid = testCloid(1);
+await submitPositionCloseRequest(signer, { cloid: marketCloseCloid, mode: "market", positions: [longPosition], scope: "single" }, [symbol]);
+const marketCloseOrder = submitted.at(-1)?.[0];
+assert.equal(marketCloseOrder?.cloid, marketCloseCloid);
+assert.equal(marketCloseOrder?.isBuy, false);
+assert.equal(marketCloseOrder?.reduceOnly, true);
+assert.equal(marketCloseOrder?.market, true);
+assert.equal(marketCloseOrder?.size, "0.01");
 
-await submitPositionCloseRequest(signer, { limitPrice: "59900", mode: "limit", positions: [longPosition], scope: "single" }, [symbol]);
-assert.equal(submitted[1][0].price, "59900");
-assert.equal(submitted[1][0].market, false);
+const limitCloseCloid = testCloid(2);
+await submitPositionCloseRequest(signer, { cloid: limitCloseCloid, limitPrice: "59900", mode: "limit", positions: [longPosition], scope: "single" }, [symbol]);
+const limitCloseOrder = submitted.at(-1)?.[0];
+assert.equal(limitCloseOrder?.cloid, limitCloseCloid);
+assert.equal(limitCloseOrder?.price, "59900");
+assert.equal(limitCloseOrder?.market, false);
 
+const reverseCloid = testCloid(3);
+const reverseStart = submitted.length;
+await submitPositionCloseRequest(signer, { cloid: reverseCloid, mode: "reverse", positions: [longPosition], scope: "single" }, [symbol]);
+const reverseCloseOrder = submitted[reverseStart]?.[0];
+const reverseOpenOrder = submitted[reverseStart + 1]?.[0];
+assert.equal(reverseCloseOrder?.cloid, reverseCloid);
+assert.equal(reverseCloseOrder?.reduceOnly, true);
+assert.equal(reverseOpenOrder?.cloid, deriveHyperliquidCloid(reverseCloid, "reverse-open"));
+assert.equal(reverseOpenOrder?.reduceOnly, false);
+assert.equal(reverseOpenOrder?.isBuy, reverseCloseOrder?.isBuy);
+
+const closeAllCloid = testCloid(4);
+await submitPositionCloseRequest(signer, { cloid: closeAllCloid, mode: "market", positions: [longPosition, shortPosition], scope: "all" }, [symbol, ethSymbol]);
+const closeAllOrders = submitted.at(-1) ?? [];
+assert.equal(closeAllOrders.length, 2);
+assert.equal(closeAllOrders[0]?.cloid, closeAllCloid);
+assert.equal(closeAllOrders[1]?.cloid, deriveHyperliquidCloid(closeAllCloid, "close:1"));
+assert.ok(closeAllOrders.every((order) => /^0x[0-9a-f]{32}$/.test(order.cloid)));
+assert.ok(closeAllOrders.every((order) => order.reduceOnly));
+
+const longTpslCloid = testCloid(5);
 const longTriggers = buildPositionTpslOrders({
   asset: 0,
   closingIsBuy: false,
+  parentCloid: longTpslCloid,
   referencePrice: 60_000,
   size: "0.01",
   slPrice: "59000",
@@ -55,9 +86,14 @@ assert.deepEqual(longTriggers.map((order) => order.tpsl), ["tp", "sl"]);
 assert.ok(longTriggers.every((order) => order.isBuy === false));
 assert.equal(longTriggers[0].triggerPrice, "62000");
 assert.equal(longTriggers[1].triggerPrice, "59000");
+assert.deepEqual(longTriggers.map((order) => order.cloid), [
+  deriveHyperliquidCloid(longTpslCloid, "tp"),
+  deriveHyperliquidCloid(longTpslCloid, "sl"),
+]);
 
 const longEntryTpslRequest = buildEntryTpslOrderRequest({
   asset: 0,
+  cloid: testCloid(6),
   isBuy: true,
   market: false,
   price: "60000",
@@ -69,6 +105,7 @@ assertEntryTpslRequest(longEntryTpslRequest, { childIsBuy: false, parentIsBuy: t
 const shortTpOnly = buildPositionTpslOrders({
   asset: 0,
   closingIsBuy: true,
+  parentCloid: testCloid(7),
   referencePrice: 60_000,
   size: "0.01",
   szDecimals: 5,
@@ -76,6 +113,7 @@ const shortTpOnly = buildPositionTpslOrders({
 });
 const shortEntryTpRequest = buildEntryTpslOrderRequest({
   asset: 0,
+  cloid: testCloid(8),
   isBuy: false,
   market: true,
   price: "59400",
@@ -87,6 +125,7 @@ assertEntryTpslRequest(shortEntryTpRequest, { childIsBuy: true, parentIsBuy: fal
 const longSlOnly = buildPositionTpslOrders({
   asset: 0,
   closingIsBuy: false,
+  parentCloid: testCloid(9),
   referencePrice: 60_000,
   size: "0.01",
   slPrice: "59000",
@@ -94,6 +133,7 @@ const longSlOnly = buildPositionTpslOrders({
 });
 const longEntrySlRequest = buildEntryTpslOrderRequest({
   asset: 0,
+  cloid: testCloid(10),
   isBuy: true,
   market: false,
   price: "60000",
@@ -109,6 +149,7 @@ assert.ok(positionTpslRequest.orders.every((order) => "trigger" in order.t && or
 assert.throws(() => buildPositionTpslOrders({
   asset: 0,
   closingIsBuy: false,
+  parentCloid: testCloid(11),
   referencePrice: 60_000,
   size: "0.01",
   szDecimals: 5,
@@ -136,14 +177,22 @@ assert.equal(enrichedPositions[0].markPrice, 62_848);
 assert.equal(enrichedPositions[1].markPx, 62_848);
 assert.equal(enrichedPositions[2].markPx, 3_000);
 
-await submitPositionCloseRequest(signer, { mode: "market", positions: [enrichedPositions[0]], scope: "single" }, [symbol]);
+const enrichedCloseCloid = testCloid(12);
+await submitPositionCloseRequest(signer, { cloid: enrichedCloseCloid, mode: "market", positions: [enrichedPositions[0]], scope: "single" }, [symbol]);
 assert.equal(submitted.at(-1)?.[0].price, "62219");
+assert.equal(submitted.at(-1)?.[0].cloid, enrichedCloseCloid);
+const positionTpslCloid = testCloid(13);
 await submitPositionTpslRequest(signer, {
+  cloid: positionTpslCloid,
   position: enrichedPositions[0],
   slPrice: "60000",
   tpPrice: "70000",
 }, [symbol]);
 assert.deepEqual(submittedTriggers[0].map((order) => order.triggerPrice), ["70000", "60000"]);
+assert.deepEqual(submittedTriggers[0].map((order) => order.cloid), [
+  deriveHyperliquidCloid(positionTpslCloid, "tp"),
+  deriveHyperliquidCloid(positionTpslCloid, "sl"),
+]);
 
 const mergedParams = mergeTradingSearchParams(
   new URLSearchParams("symbol=BTCUSDT&source=acceptance"),
@@ -236,4 +285,8 @@ function assertEntryTpslRequest(
   assert.ok(children.every((order) => order.s === parent.s));
   assert.deepEqual(children.map((order) => "trigger" in order.t ? order.t.trigger.tpsl : null), expected.tpsl);
   assert.ok(children.every((order) => "trigger" in order.t && order.t.trigger.isMarket));
+}
+
+function testCloid(value: number) {
+  return assertHyperliquidCloid(`0x${value.toString(16).padStart(32, "0")}`);
 }

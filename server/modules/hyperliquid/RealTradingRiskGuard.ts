@@ -22,6 +22,20 @@ export class RealTradingRiskGuard {
     release();
   }
 
+  getHealth() {
+    const inFlightByAddress = [...this.inFlight.entries()].map(([address, value]) => ({
+      masterAddress: maskAddress(address),
+      count: value.count,
+      notional: value.notional,
+    }));
+    return {
+      limits: this.limits,
+      inFlightCount: inFlightByAddress.reduce((sum, item) => sum + item.count, 0),
+      inFlightNotional: inFlightByAddress.reduce((sum, item) => sum + item.notional, 0),
+      inFlightByAddress,
+    };
+  }
+
   async reserveAllowed(request: RealTradingExchangeRequest): Promise<() => void> {
     if (request.action.type === "updateLeverage") {
       const leverage = Number(request.action.leverage);
@@ -192,6 +206,11 @@ function readPositiveNumber(name: string, fallback: number, integer = false) {
   const parsed = Number(process.env[name]);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return integer ? Math.max(1, Math.floor(parsed)) : parsed;
+}
+
+function maskAddress(address: string) {
+  const value = String(address);
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : "[address]";
 }
 
 function formatPercent(ratio: number) {

@@ -11,12 +11,18 @@ export type RealTradingOrderLifecycleStatus =
   | "pending_reconciliation";
 
 export type RealTradingOrderLifecycle = {
+  actionType?: string;
+  autoRecoverable?: boolean;
   clientOrderId: string;
+  clientOrderIds?: string[];
+  errorCategory?: string | null;
   requestId?: string;
   exchangeOrderId?: string;
+  manualReview?: boolean;
   message?: string;
   operationKey?: string;
   status: RealTradingOrderLifecycleStatus;
+  submittedAt?: number | null;
   symbol?: string;
   updatedAt: number;
 };
@@ -38,7 +44,8 @@ export type RealTradingRealtimeAction =
   | { type: "order_updated"; order: RealTradingOrderLifecycle }
   | { type: "snapshot_started" }
   | { type: "snapshot_succeeded"; orders: RealTradingOrderLifecycle[] }
-  | { type: "snapshot_failed"; message: string };
+  | { type: "snapshot_failed"; message: string }
+  | { type: "reconciliation_synchronized"; orders: RealTradingOrderLifecycle[] };
 
 export const initialRealTradingRealtimeState: RealTradingRealtimeState = {
   connectionStatus: "reconnecting",
@@ -113,9 +120,28 @@ export function realTradingRealtimeReducer(
         snapshotError: action.message,
         snapshotLoading: false,
       };
+    case "reconciliation_synchronized":
+      return {
+        ...state,
+        orders: mergeReconciliationSnapshot(state.orders, action.orders),
+      };
     default:
       return state;
   }
+}
+
+function mergeReconciliationSnapshot(
+  current: RealTradingOrderLifecycle[],
+  reconciliation: RealTradingOrderLifecycle[],
+) {
+  const withoutPending = current.filter((order) => (
+    order.status !== "pending_reconciliation"
+    || (order.autoRecoverable === undefined && order.manualReview === undefined)
+  ));
+  return reconciliation.reduce<RealTradingOrderLifecycle[]>(
+    (orders, order) => upsertOrder(orders, order, false),
+    withoutPending,
+  );
 }
 
 export function normalizeRealTradingConnectionStatus(value: unknown): RealTradingConnectionStatus | null {

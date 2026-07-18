@@ -6,6 +6,9 @@ import { RealTradingExchangeSubmissionError, type HyperliquidExchangeProxy } fro
 import type { HyperliquidInfoClient } from "../hyperliquid/HyperliquidInfoClient";
 import type { RealTradingOrderStateService } from "../hyperliquid/RealTradingOrderStateService";
 import type { RealTradingRealtimeTokenService } from "../hyperliquid/RealTradingRealtimeTokenService";
+import type { RealTradingReconciliationService } from "../hyperliquid/RealTradingReconciliationService";
+import type { RealTradingRiskGuard } from "../hyperliquid/RealTradingRiskGuard";
+import type { RealTradingUserStreamManager } from "../hyperliquid/RealTradingUserStreamManager";
 import type { RealTradingAuditRecord } from "../hyperliquid/realTradingAuditTypes";
 
 type RealTradingRouteDependencies = {
@@ -16,10 +19,25 @@ type RealTradingRouteDependencies = {
   realtimeTokens: RealTradingRealtimeTokenService;
   auditStore: {
     findRealTradingAudit(userId: string, input: { requestId?: string | null; cloid?: string | null }): unknown;
+    listUserRealTradingReconciliationRecords?(userId: string): unknown[];
+    getRealTradingOperationsSummary?(now?: number, windowMs?: number): unknown;
   };
+  risk?: RealTradingRiskGuard;
+  userStreams?: RealTradingUserStreamManager;
+  reconciliation?: RealTradingReconciliationService;
 };
 
-export function registerRealTradingRoutes({ app, info, exchange, orderState, realtimeTokens, auditStore }: RealTradingRouteDependencies) {
+export function registerRealTradingRoutes({
+  app,
+  info,
+  exchange,
+  orderState,
+  realtimeTokens,
+  auditStore,
+  risk,
+  userStreams,
+  reconciliation,
+}: RealTradingRouteDependencies) {
   const exchangeRateLimit = createRealTradingRateLimiter();
 
   app.get("/api/real-trading/market/symbols", async (_request, response) => {
@@ -129,6 +147,20 @@ export function registerRealTradingRoutes({ app, info, exchange, orderState, rea
     }
   });
 
+  app.get("/api/real-trading/orders/reconciliation", (request, response) => {
+    try {
+      response.setHeader("Cache-Control", "no-store");
+      const records = auditStore.listUserRealTradingReconciliationRecords?.(request.user!.id) ?? [];
+      response.json({ network: "hyperliquid-testnet", records: records.map(toPublicRealTradingReconciliationRecord) });
+    } catch {
+      response.status(500).json({
+        network: "hyperliquid-testnet",
+        message: "真实交易对账状态读取失败。",
+        errorCode: "RT_RECONCILIATION_UNAVAILABLE",
+      });
+    }
+  });
+
   app.get("/api/real-trading/orders/audit", (request, response) => {
     try {
       const requestId = typeof request.query.requestId === "string" ? request.query.requestId.trim() : "";
@@ -187,6 +219,58 @@ export function registerRealTradingRoutes({ app, info, exchange, orderState, rea
       });
     }
   });
+
+  app.get("/api/admin/real-trading/operations", (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    const now = Date.now();
+    const reconciliationHealth = reconciliation?.getHealth(now) ?? { enabled: false, status: "unavailable" };
+    const userStreamHealth = userStreams?.getHealth(now) ?? { status: "unavailable" };
+    const operations = auditStore.getRealTradingOperationsSummary?.(now) ?? {
+      pendingCount: "unavailable",
+      autoRecoverablePendingCount: "unavailable",
+      manualReviewPendingCount: "unavailable",
+      oldestPendingSubmittedAt: null,
+      oldestPendingAgeMs: null,
+      recentCounts: [],
+      auditCleanup: "unavailable",
+    };
+    response.json({
+      network: "hyperliquid-testnet",
+      status: deriveRealTradingOperationsStatus(reconciliationHealth, userStreamHealth, operations),
+      generatedAt: now,
+      reconciliation: reconciliationHealth,
+      userStreams: userStreamHealth,
+      risk: risk?.getHealth() ?? { status: "unavailable" },
+      operations,
+      mainnetReadinessGaps: [
+        "Mainnet 入口、配置开关和部署变量尚未冻结。",
+        "真实资金、Builder fee、资金划转与提现类 exchange action 仍被禁止。",
+        "需要独立完成受控 Testnet 签名动作回归、风控参数复核、审计保留与告警策略确认。",
+        "需要重新评估法律合规、KYC/AML、用户风险披露与生产级事故响应流程。",
+      ],
+    });
+  });
+}
+
+function deriveRealTradingOperationsStatus(reconciliation: any, userStreams: any, operations: any) {
+  if (reconciliation?.status === "unavailable" || userStreams?.status === "unavailable" || operations?.pendingCount === "unavailable") {
+    return "unavailable";
+  }
+  if (
+    Number(reconciliation?.consecutiveFailures ?? 0) > 0
+    || reconciliation?.stale === true
+    || Number(operations?.manualReviewPendingCount ?? 0) > 0
+    || Number(operations?.idempotencyPendingWithoutAuditCount ?? 0) > 0
+    || hasDegradedStream(userStreams)
+  ) {
+    return "degraded";
+  }
+  return "ok";
+}
+
+function hasDegradedStream(userStreams: any) {
+  const streams = Array.isArray(userStreams?.streams) ? userStreams.streams : [];
+  return streams.some((stream: any) => stream?.stale === true || stream?.reconnecting === true || stream?.status === "stale" || stream?.status === "reconnecting");
 }
 
 export function toPublicRealTradingOrderAudit(audit: RealTradingAuditRecord) {
@@ -201,6 +285,24 @@ export function toPublicRealTradingOrderAudit(audit: RealTradingAuditRecord) {
     retryable: false,
     reconcileRequired,
     timestamp: audit.completedAt,
+  };
+}
+
+export function toPublicRealTradingReconciliationRecord(record: any) {
+  const clientOrderIds = Array.isArray(record?.clientOrderIds)
+    ? record.clientOrderIds.filter((value: unknown): value is string => typeof value === "string")
+    : [];
+  const autoRecoverable = record?.autoRecoverable === true;
+  return {
+    requestId: String(record?.requestId ?? ""),
+    actionType: String(record?.actionType ?? "unknown").slice(0, 64),
+    submittedAt: typeof record?.submittedAt === "number" ? record.submittedAt : null,
+    clientOrderIds,
+    autoRecoverable,
+    manualReview: record?.manualReview === true || !autoRecoverable,
+    lastReconcileAttemptAt: typeof record?.lastReconcileAttemptAt === "number" ? record.lastReconcileAttemptAt : null,
+    errorCategory: typeof record?.errorCategory === "string" ? record.errorCategory.slice(0, 80) : null,
+    blockingScope: record?.blockingScope === "manual_review" ? "manual_review" : "new_risk",
   };
 }
 

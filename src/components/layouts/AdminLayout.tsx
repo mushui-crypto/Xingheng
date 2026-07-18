@@ -1,4 +1,4 @@
-import { BarChart3, ListChecks, ListTree, LogOut, UsersRound } from "lucide-react";
+import { BarChart3, ListChecks, ListTree, LogOut, RadioTower, UsersRound } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { useAdminAuthStore } from "../../store/adminAuthStore";
@@ -54,6 +54,7 @@ export function AdminLayout({ children }: AdminLayoutProps) {
             <TopLink to="/admin/users" icon={<UsersRound size={16} />} label="用户管理" />
             <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
             <TopLink to="/admin/trading" icon={<ListChecks size={16} />} label="交易查询" />
+            <TopLink to="/admin/real-trading" icon={<RadioTower size={16} />} label="真实交易运维" />
           </nav>
           <div className="hidden items-center gap-4 lg:flex">
             <p className="text-xs uppercase tracking-[0.16em] text-muted">

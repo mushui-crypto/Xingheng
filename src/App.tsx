@@ -16,6 +16,7 @@ const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage")
 const AdminUsersPage = lazy(() => import("./pages/admin/AdminUsersPage").then((module) => ({ default: module.AdminUsersPage })));
 const AdminSymbolsPage = lazy(() => import("./pages/admin/AdminSymbolsPage").then((module) => ({ default: module.AdminSymbolsPage })));
 const AdminTradingPage = lazy(() => import("./pages/admin/AdminTradingPage").then((module) => ({ default: module.AdminTradingPage })));
+const AdminRealTradingOperationsPage = lazy(() => import("./pages/admin/AdminRealTradingOperationsPage").then((module) => ({ default: module.AdminRealTradingOperationsPage })));
 
 export default function App() {
   return (
@@ -38,6 +39,7 @@ export default function App() {
         <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
         <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
         <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
+        <Route path="/admin/real-trading" element={<AdminScreen><AdminRealTradingOperationsPage /></AdminScreen>} />
         <Route path="*" element={<Navigate to="/login" replace />} />
       </Routes>
     </Suspense>
