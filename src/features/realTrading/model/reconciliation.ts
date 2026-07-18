@@ -34,13 +34,13 @@ export function buildAuthoritativeOrderLifecycles(
     lifecycles.push(lifecycleFromAuthoritativeOrder(order, "accepted", `history:${index}`, item.statusTimestamp ?? authoritativeAt));
   });
   history.fills.forEach((fill, index) => {
-    const exchangeOrderId = fill.oid === undefined ? undefined : String(fill.oid);
+    const exchangeOrderId = fill.oid ?? undefined;
     lifecycles.push({
       clientOrderId: exchangeOrderId ? `snapshot:${exchangeOrderId}` : `fill:${fill.tid ?? index}`,
       exchangeOrderId,
       status: exchangeOrderId && openOrderIds.has(exchangeOrderId) ? "partial" : "filled",
       symbol: fill.symbol ?? fill.coin,
-      updatedAt: normalizeAuthoritativeTimestamp(fill.timestamp ?? fill.time, authoritativeAt),
+      updatedAt: normalizeAuthoritativeTimestamp(fill.timestamp, authoritativeAt),
     });
   });
   return lifecycles;

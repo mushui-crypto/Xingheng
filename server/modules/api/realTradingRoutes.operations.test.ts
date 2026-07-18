@@ -52,7 +52,8 @@ test("admin real-trading operations health is admin-only and returns a testnet, 
     auditStore: store,
     risk: {
       getHealth: () => ({
-        limits: { maxLeverage: 20 },
+        limits: { maxSnapshotAgeMs: 10_000 },
+        removedPlatformLimits: { maxLeverage: "provider_enforced" },
         inFlightByAddress: [{ masterAddress: "0x1111...1111", count: 1, notional: 100 }],
       }),
     } as any,
@@ -83,6 +84,9 @@ test("admin real-trading operations health is admin-only and returns a testnet, 
     assert.equal(payload.network, "hyperliquid-testnet");
     assert.equal(payload.status, "degraded");
     assert.equal(payload.reconciliation.enabled, true);
+    assert.equal(payload.risk.limits.maxSnapshotAgeMs, 10_000);
+    assert.equal(payload.risk.removedPlatformLimits.maxLeverage, "provider_enforced");
+    assert.equal(payload.risk.limits.maxLeverage, undefined);
     assert.equal(payload.operations.manualReviewPendingCount, 1);
     assert.equal(payload.operations.auditCleanup.retentionDays, 180);
     assert.doesNotMatch(JSON.stringify(payload), /adminpassword123|signature|private.?key|mnemonic|raw.?payload/i);
@@ -119,7 +123,7 @@ test("admin real-trading operations health is degraded when reconciliation worke
     realtimeTokens: {} as any,
     auditStore: store,
     risk: {
-      getHealth: () => ({ limits: { maxLeverage: 20 }, inFlightByAddress: [] }),
+      getHealth: () => ({ limits: { maxSnapshotAgeMs: 10_000 }, removedPlatformLimits: { maxLeverage: "provider_enforced" }, inFlightByAddress: [] }),
     } as any,
     userStreams: {
       getHealth: () => ({ activeStreamCount: 0, streams: [] }),

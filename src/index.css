@@ -1741,6 +1741,23 @@ textarea {
     @apply font-medium text-[#f5f5f5];
   }
 
+  .xh-real-record-head,
+  .xh-real-record-row,
+  .xh-real-position-head,
+  .xh-real-position-row,
+  .xh-real-order-balance,
+  .xh-real-order-metrics {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .xh-real-record-row .is-positive {
+    @apply text-[#29c78a];
+  }
+
+  .xh-real-record-row .is-negative {
+    @apply text-[#f43f5e];
+  }
+
   .xh-position-symbol-button {
     min-height: 32px;
     display: inline-flex;
@@ -1917,10 +1934,6 @@ textarea {
     @apply h-[42px] border-b border-[#171a20] text-[12px] text-[#8f99a4];
   }
 
-  .xh-real-position-head > button {
-    @apply h-full justify-self-end border-0 bg-transparent px-0 text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
-  }
-
   .xh-real-position-head > :first-child,
   .xh-real-position-head > :last-child,
   .xh-real-position-row > :first-child,
@@ -1946,7 +1959,12 @@ textarea {
   }
 
   .xh-real-position-head > :last-child {
-    justify-content: flex-end;
+    justify-content: stretch;
+  }
+
+  .xh-real-position-head > :nth-child(2),
+  .xh-real-position-row > :nth-child(2) {
+    padding-left: 12px;
   }
 
   .xh-real-position-row.is-long > :first-child {
@@ -1976,7 +1994,19 @@ textarea {
   }
 
   .xh-real-position-actions {
-    @apply grid h-full grid-cols-3 items-center gap-1.5;
+    @apply grid h-full grid-cols-3 items-center gap-1.5 border-l border-[#25282f] pl-3;
+  }
+
+  .xh-real-position-actions-head {
+    @apply grid-cols-[1fr_auto] gap-3;
+  }
+
+  .xh-real-position-actions-head > span {
+    @apply text-[12px] text-[#8f99a4];
+  }
+
+  .xh-real-position-actions-head > button {
+    @apply h-full border-0 bg-transparent px-0 text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
   }
 
   .xh-real-position-actions button {

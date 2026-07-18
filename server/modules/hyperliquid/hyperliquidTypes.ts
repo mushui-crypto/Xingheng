@@ -220,11 +220,13 @@ export type RealTradingFill = {
   price: number | null;
   size: number | null;
   timestamp: number | null;
+  oid: number | string | null;
+  tid: number | string | null;
+  closedPnl: number | null;
   fee: number | null;
   feeToken: string | null;
   hash: string | null;
   direction: string | null;
-  raw?: unknown;
   network: HyperliquidRealTradingNetwork;
 };
 

@@ -2,16 +2,11 @@ import type { HyperliquidInfoClient } from "./HyperliquidInfoClient";
 import type { RealTradingExchangeRequest, RealTradingPosition } from "./hyperliquidTypes";
 
 export type RealTradingRiskLimits = {
-  maxLeverage: number;
-  maxOrderNotionalEquityRatio: number;
-  maxTotalNotionalEquityRatio: number;
-  maxOpenOrders: number;
   maxSnapshotAgeMs: number;
 };
 
 export class RealTradingRiskGuard {
   readonly limits: RealTradingRiskLimits;
-  private readonly inFlight = new Map<string, { count: number; notional: number }>();
 
   constructor(private readonly info: HyperliquidInfoClient, limits = loadRealTradingRiskLimits()) {
     this.limits = limits;
@@ -23,40 +18,35 @@ export class RealTradingRiskGuard {
   }
 
   getHealth() {
-    const inFlightByAddress = [...this.inFlight.entries()].map(([address, value]) => ({
-      masterAddress: maskAddress(address),
-      count: value.count,
-      notional: value.notional,
-    }));
     return {
+      status: "active",
       limits: this.limits,
-      inFlightCount: inFlightByAddress.reduce((sum, item) => sum + item.count, 0),
-      inFlightNotional: inFlightByAddress.reduce((sum, item) => sum + item.notional, 0),
-      inFlightByAddress,
+      removedPlatformLimits: {
+        maxLeverage: "provider_enforced",
+        maxOrderNotionalEquityRatio: "provider_enforced",
+        maxTotalNotionalEquityRatio: "provider_enforced",
+        maxOpenOrders: "provider_enforced",
+      },
+      inFlightCount: 0,
+      inFlightNotional: 0,
+      inFlightByAddress: [],
     };
   }
 
   async reserveAllowed(request: RealTradingExchangeRequest): Promise<() => void> {
-    if (request.action.type === "updateLeverage") {
-      const leverage = Number(request.action.leverage);
-      if (leverage > this.limits.maxLeverage) {
-        throw new Error(`真实交易杠杆不得超过 ${this.limits.maxLeverage}x。`);
-      }
-      return () => {};
-    }
     if (request.action.type !== "order") return () => {};
 
     const orders = normalizeOrderItems(request.action.orders);
     const openingOrders = orders.filter((order) => order.r !== true);
-    const [account, positions, openOrders, symbols] = await Promise.all([
-      this.info.getAccountSummary(request.masterAddress),
-      this.info.getPositions(request.masterAddress),
-      this.info.getOpenOrders(request.masterAddress),
-      this.info.getSymbols(),
-    ]);
+    const symbols = await this.info.getSymbols();
     const symbolsByAsset = new Map(symbols.map((symbol) => [symbol.assetId, symbol]));
-    assertReduceOnlyOrders(orders.filter((order) => order.r === true), positions, symbolsByAsset);
+    const reduceOnlyOrders = orders.filter((order) => order.r === true);
+    if (reduceOnlyOrders.length > 0) {
+      const positions = await this.info.getPositions(request.masterAddress);
+      assertReduceOnlyOrders(reduceOnlyOrders, positions, symbolsByAsset);
+    }
     if (openingOrders.length === 0) return () => {};
+    const account = await this.info.getAccountSummary(request.masterAddress);
     assertFreshAccount(account.status, account.timestamp, this.limits.maxSnapshotAgeMs);
     const marketSummaries = await Promise.all([...new Set(openingOrders.map(readOrderAsset))].map(async (assetId) => {
       const symbol = symbolsByAsset.get(assetId);
@@ -68,54 +58,13 @@ export class RealTradingRiskGuard {
       return summary;
     }));
     if (marketSummaries.length === 0) throw new Error("真实交易市场状态不可用，暂不允许新增敞口。");
-    const equity = account.accountValue;
-    if (equity === null || !Number.isFinite(equity) || equity <= 0) {
-      throw new Error("真实交易账户权益不可用，暂不允许新增敞口。");
-    }
-
-    const orderNotionals = openingOrders.map(calculateOrderNotional);
-    const maxOrderNotional = equity * this.limits.maxOrderNotionalEquityRatio;
-    if (orderNotionals.some((notional) => notional > maxOrderNotional)) {
-      throw new Error(`单笔新增名义价值不得超过账户权益的 ${formatPercent(this.limits.maxOrderNotionalEquityRatio)}。`);
-    }
-
-    if (positions.some((position) => position.leverage !== null && position.leverage > this.limits.maxLeverage)) {
-      throw new Error(`账户存在超过 ${this.limits.maxLeverage}x 的持仓，降低杠杆前不得新增敞口。`);
-    }
-    const key = request.masterAddress.toLowerCase();
-    const pending = this.inFlight.get(key) ?? { count: 0, notional: 0 };
-    const currentNotional = calculatePositionNotional(positions) + calculateOpenOrderNotional(openOrders) + pending.notional;
-    const submittedNotional = orderNotionals.reduce((sum, value) => sum + value, 0);
-    if (currentNotional + submittedNotional > equity * this.limits.maxTotalNotionalEquityRatio) {
-      throw new Error(`新增敞口后总持仓名义价值不得超过账户权益的 ${formatPercent(this.limits.maxTotalNotionalEquityRatio)}。`);
-    }
-
-    if (openOrders.length + pending.count + openingOrders.length > this.limits.maxOpenOrders) {
-      throw new Error(`当前新增敞口委托不得超过 ${this.limits.maxOpenOrders} 笔。`);
-    }
-    this.inFlight.set(key, { count: pending.count + openingOrders.length, notional: pending.notional + submittedNotional });
-    let released = false;
-    return () => {
-      if (released) return;
-      released = true;
-      const current = this.inFlight.get(key);
-      if (!current) return;
-      const next = {
-        count: Math.max(0, current.count - openingOrders.length),
-        notional: Math.max(0, current.notional - submittedNotional),
-      };
-      if (next.count === 0 && next.notional === 0) this.inFlight.delete(key);
-      else this.inFlight.set(key, next);
-    };
+    openingOrders.forEach(assertOpeningOrderShape);
+    return () => {};
   }
 }
 
 export function loadRealTradingRiskLimits(): RealTradingRiskLimits {
   return {
-    maxLeverage: readPositiveNumber("REAL_TRADING_RISK_MAX_LEVERAGE", 20, true),
-    maxOrderNotionalEquityRatio: readPositiveNumber("REAL_TRADING_RISK_MAX_ORDER_NOTIONAL_EQUITY_RATIO", 0.5),
-    maxTotalNotionalEquityRatio: readPositiveNumber("REAL_TRADING_RISK_MAX_TOTAL_NOTIONAL_EQUITY_RATIO", 2),
-    maxOpenOrders: readPositiveNumber("REAL_TRADING_RISK_MAX_OPEN_ORDERS", 20, true),
     maxSnapshotAgeMs: readPositiveNumber("REAL_TRADING_RISK_MAX_SNAPSHOT_AGE_MS", 10_000, true),
   };
 }
@@ -132,42 +81,18 @@ function normalizeOrderItems(value: unknown) {
   });
 }
 
-function calculateOrderNotional(order: Record<string, unknown>) {
+function assertOpeningOrderShape(order: Record<string, unknown>) {
   const price = Number(order.p);
   const size = Number(order.s);
   if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(size) || size <= 0) {
     throw new Error("新增敞口订单的价格和数量必须是正数。");
   }
-  const notional = price * size;
-  if (!Number.isFinite(notional)) throw new Error("新增敞口订单名义价值无效。");
-  return notional;
 }
 
 function readOrderAsset(order: Record<string, unknown>) {
   const asset = Number(order.a);
   if (!Number.isSafeInteger(asset) || asset < 0) throw new Error("新增敞口订单资产编号无效。");
   return asset;
-}
-
-function calculatePositionNotional(positions: RealTradingPosition[]) {
-  return positions.reduce((sum, position) => {
-    const direct = position.positionValue;
-    if (direct !== null && Number.isFinite(direct)) return sum + Math.abs(direct);
-    const referencePrice = position.markPrice ?? position.entryPrice;
-    return referencePrice !== null && Number.isFinite(referencePrice)
-      ? sum + Math.abs(position.size * referencePrice)
-      : sum;
-  }, 0);
-}
-
-function calculateOpenOrderNotional(openOrders: Array<{ reduceOnly: boolean | null; price: number | null; size: number | null }>) {
-  return openOrders.reduce((sum, order) => {
-    if (order.reduceOnly === true) return sum;
-    if (order.price === null || order.size === null || !Number.isFinite(order.price) || !Number.isFinite(order.size)) {
-      throw new Error("现有委托名义价值不可核对，暂不允许新增敞口。");
-    }
-    return sum + Math.abs(order.price * order.size);
-  }, 0);
 }
 
 function assertReduceOnlyOrders(
@@ -206,13 +131,4 @@ function readPositiveNumber(name: string, fallback: number, integer = false) {
   const parsed = Number(process.env[name]);
   if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
   return integer ? Math.max(1, Math.floor(parsed)) : parsed;
-}
-
-function maskAddress(address: string) {
-  const value = String(address);
-  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : "[address]";
-}
-
-function formatPercent(ratio: number) {
-  return `${Number((ratio * 100).toFixed(2))}%`;
 }

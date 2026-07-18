@@ -5,20 +5,10 @@ import { RealTradingRiskGuard } from "./RealTradingRiskGuard";
 import type { RealTradingExchangeRequest } from "./hyperliquidTypes";
 
 const limits = {
-  maxLeverage: 20,
-  maxOrderNotionalEquityRatio: 0.5,
-  maxTotalNotionalEquityRatio: 2,
-  maxOpenOrders: 20,
   maxSnapshotAgeMs: 10_000,
 };
 
-test("risk guard enforces the default leverage ceiling", async () => {
-  const guard = new RealTradingRiskGuard({} as HyperliquidInfoClient, limits);
-  await assert.rejects(() => guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 21 })), /20x/);
-  await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 20 }));
-});
-
-test("risk guard allows legal leverage and margin mode changes without account or balance reads", async () => {
+test("risk guard no longer enforces a platform leverage ceiling or reads account state for updateLeverage", async () => {
   let reads = 0;
   const info = {
     async getAccountSummary() { reads += 1; throw new Error("account summary unavailable"); },
@@ -29,64 +19,57 @@ test("risk guard allows legal leverage and margin mode changes without account o
   const guard = new RealTradingRiskGuard(info, limits);
 
   await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 1 }));
-  await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: false, leverage: 20 }));
-  await assert.rejects(() => guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 21 })), /20x/);
+  await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: false, leverage: 100 }));
   assert.equal(reads, 0);
 });
 
-test("risk guard rejects oversized opening orders and aggregate exposure", async () => {
-  const info = stubInfo({ equity: 100, positionNotional: 160, openOrders: 0 });
-  const guard = new RealTradingRiskGuard(info, limits);
-  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "51", s: "1", r: false }])), /50%/);
-  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "41", s: "1", r: false }])), /200%/);
+test("risk guard no longer blocks large opening notional, aggregate exposure, existing high leverage, or more than 20 open orders", async () => {
+  const reads: string[] = [];
+  const guard = new RealTradingRiskGuard(stubInfo({
+    accountValue: 0,
+    positionNotional: 10_000_000,
+    positionLeverage: 100,
+    openOrders: 99,
+  }, reads), limits);
+
+  await guard.assertAllowed(orderRequest([{ p: "1000000000", s: "1000", r: false }]));
+  assert.deepEqual(reads, ["getSymbols", "getAccountSummary", "getSummary:BTCUSDT"]);
 });
 
-test("risk guard limits opening-order count but allows only a valid reduce-only close", async () => {
-  let reads = 0;
-  const info = stubInfo({ equity: 100, positionNotional: 10, openOrders: 20 }, () => { reads += 1; });
-  const guard = new RealTradingRiskGuard(info, limits);
-  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /20/);
+test("risk guard fails closed for opening risk when account or market snapshots are stale", async () => {
+  const staleAccount = new RealTradingRiskGuard(stubInfo({ staleAccount: true }), limits);
+  await assert.rejects(() => staleAccount.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /快照已过期/);
+  const staleMarket = new RealTradingRiskGuard(stubInfo({ staleMarket: true }), limits);
+  await assert.rejects(() => staleMarket.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /行情已过期/);
+});
+
+test("risk guard validates opening order shape but delegates notional and leverage limits to Hyperliquid", async () => {
+  const guard = new RealTradingRiskGuard(stubInfo(), limits);
+  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "0", s: "1", r: false }])), /价格和数量/);
+  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "-1", r: false }])), /价格和数量/);
+});
+
+test("risk guard allows cancel without account reads and preserves reduce-only anti-reversal checks", async () => {
+  const cancelReads: string[] = [];
+  const cancelGuard = new RealTradingRiskGuard(stubInfo({}, cancelReads), limits);
+  await cancelGuard.assertAllowed(request({ type: "cancel", cancels: [{ a: 0, o: 1 }] }));
+  assert.deepEqual(cancelReads, []);
+
+  const reads: string[] = [];
+  const guard = new RealTradingRiskGuard(stubInfo({ positionNotional: 10 }, reads), limits);
   await guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: true, b: false }]));
-  assert.ok(reads > 0, "reduce-only is checked against authoritative positions");
+  assert.deepEqual(reads, ["getSymbols", "getPositions"]);
   await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: true, b: true }])), /方向/);
   await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "11", r: true, b: false }])), /超过可平持仓/);
 });
 
-test("risk guard atomically counts same-account in-flight exposure", async () => {
-  const guard = new RealTradingRiskGuard(stubInfo({ equity: 100, positionNotional: 130, openOrders: 0 }), limits);
-  const release = await guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }]));
-  await assert.rejects(
-    () => guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }])),
-    /200%/,
-  );
-  release();
-  const releaseAfter = await guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }]));
-  releaseAfter();
-});
-
-test("risk guard includes existing opening orders and rejects excessive existing leverage", async () => {
-  const withOrders = new RealTradingRiskGuard(stubInfo({
-    equity: 100,
-    positionNotional: 140,
-    openOrders: 1,
-    openOrderNotional: 20,
-  }), limits);
-  await assert.rejects(() => withOrders.assertAllowed(orderRequest([{ p: "41", s: "1", r: false }])), /200%/);
-
-  const highLeverage = new RealTradingRiskGuard(stubInfo({
-    equity: 100,
-    positionNotional: 1,
-    positionLeverage: 21,
-    openOrders: 0,
-  }), limits);
-  await assert.rejects(() => highLeverage.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /20x/);
-});
-
-test("risk guard fails closed on stale account or market snapshots", async () => {
-  const staleAccount = new RealTradingRiskGuard(stubInfo({ equity: 100, positionNotional: 0, openOrders: 0, staleAccount: true }), limits);
-  await assert.rejects(() => staleAccount.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /快照已过期/);
-  const staleMarket = new RealTradingRiskGuard(stubInfo({ equity: 100, positionNotional: 0, openOrders: 0, staleMarket: true }), limits);
-  await assert.rejects(() => staleMarket.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /行情已过期/);
+test("risk guard health marks removed platform limits as provider-enforced instead of exposing stale defaults", () => {
+  const health = new RealTradingRiskGuard({} as HyperliquidInfoClient, limits).getHealth();
+  assert.deepEqual(health.limits, { maxSnapshotAgeMs: 10_000 });
+  assert.equal(health.removedPlatformLimits.maxLeverage, "provider_enforced");
+  assert.equal(health.removedPlatformLimits.maxOrderNotionalEquityRatio, "provider_enforced");
+  assert.equal(health.removedPlatformLimits.maxTotalNotionalEquityRatio, "provider_enforced");
+  assert.equal(health.removedPlatformLimits.maxOpenOrders, "provider_enforced");
 });
 
 function request(action: Record<string, unknown>): RealTradingExchangeRequest {
@@ -105,27 +88,27 @@ function orderRequest(orders: Array<Record<string, unknown>>) {
 
 function stubInfo(
   values: {
-    equity: number;
-    positionNotional: number;
-    openOrders: number;
+    accountValue?: number | null;
+    positionNotional?: number;
+    openOrders?: number;
     openOrderNotional?: number;
     positionLeverage?: number;
     staleAccount?: boolean;
     staleMarket?: boolean;
-  },
-  onRead = () => {},
+  } = {},
+  reads: string[] = [],
 ) {
   return {
     async getAccountSummary() {
-      onRead();
+      reads.push("getAccountSummary");
       return {
-        accountValue: values.equity,
+        accountValue: values.accountValue ?? 100,
         status: values.staleAccount ? "stale" : "connected",
         timestamp: values.staleAccount ? Date.now() - 20_000 : Date.now(),
       };
     },
     async getPositions() {
-      onRead();
+      reads.push("getPositions");
       return values.positionNotional ? [{
         symbol: "BTCUSDT",
         side: "long",
@@ -135,20 +118,20 @@ function stubInfo(
       }] : [];
     },
     async getOpenOrders() {
-      onRead();
-      return Array.from({ length: values.openOrders }, (_, oid) => ({
+      reads.push("getOpenOrders");
+      return Array.from({ length: values.openOrders ?? 0 }, (_, oid) => ({
         oid,
         reduceOnly: false,
-        price: values.openOrderNotional ? values.openOrderNotional / values.openOrders : 0.1,
+        price: values.openOrderNotional ? values.openOrderNotional / (values.openOrders ?? 1) : 0.1,
         size: 1,
       }));
     },
     async getSymbols() {
-      onRead();
+      reads.push("getSymbols");
       return [{ assetId: 0, symbol: "BTCUSDT", status: "active" }];
     },
-    async getSummary() {
-      onRead();
+    async getSummary(symbol: string) {
+      reads.push(`getSummary:${symbol}`);
       return { status: values.staleMarket ? "stale" : "connected", timestamp: values.staleMarket ? Date.now() - 20_000 : Date.now() };
     },
   } as unknown as HyperliquidInfoClient;

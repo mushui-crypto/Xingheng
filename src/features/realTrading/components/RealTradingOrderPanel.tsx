@@ -10,7 +10,7 @@ import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
 import { buildRealTradingEntryOrderInput } from "../lib/realTradingOrderValidation";
 import { createHyperliquidCloid, type HyperliquidCloid } from "../lib/hyperliquidCloid";
-import { assertValidHyperliquidSizeDecimals, formatHyperliquidOrderSizeFloor, getHyperliquidSizeInputStep } from "../lib/hyperliquidSize";
+import { assertValidHyperliquidSizeDecimals, getHyperliquidSizeInputStep } from "../lib/hyperliquidSize";
 import type { HyperliquidSessionController } from "../lib/useHyperliquidSessionSigner";
 import { buildPositionTpslOrders } from "../lib/tpslOrders";
 import {
@@ -19,12 +19,18 @@ import {
   type MarginLeverageSessionState,
   type MarginLeverageSelection,
 } from "../model/marginLeverage";
-import { preflightRealTradingOrder, realTradingRiskPolicy } from "../model/riskPolicy";
+import {
+  defaultRealTradingOrderType,
+  normalizeOrderPercent,
+  resolveOrderValue,
+  resolveMaximumOrderQuantity,
+  resolvePercentForQuantity,
+  resolveQuantityForPercent,
+} from "../model/orderSizing";
 import { canSkipRealTradingConfirmationForSession } from "../model/confirmationPolicy";
 import { lifecyclesFromActionFailure, orderOperationKey } from "../model/reconciliation";
 import {
   extractExchangeOrderUpdates,
-  realTradingOrderStatusLabel,
   type RealTradingOrderLifecycle,
 } from "../model/realtimeState";
 
@@ -34,10 +40,10 @@ const positionPercentSnapThreshold = 2;
 export function RealTradingOrderPanel({
   assetId,
   availableMargin,
+  bestAsk,
+  bestBid,
   connected,
-  equity,
   fees,
-  latestOrderLifecycle,
   markPrice,
   marketReady,
   marginModeConstraint,
@@ -45,7 +51,6 @@ export function RealTradingOrderPanel({
   onConnect,
   onOrderLifecycle,
   onSubmitted,
-  openOrderCount,
   positionSize,
   position,
   pendingOperationKeys = [],
@@ -58,14 +63,13 @@ export function RealTradingOrderPanel({
   supportedMarginModes,
   szDecimals,
   symbol,
-  totalExposure,
 }: {
   assetId?: number;
   availableMargin?: number | null;
+  bestAsk?: number | null;
+  bestBid?: number | null;
   connected: boolean;
-  equity?: number | null;
   fees?: RealTradingFees | null;
-  latestOrderLifecycle?: RealTradingOrderLifecycle | null;
   markPrice?: number | null;
   marketReady: boolean;
   marginModeConstraint?: "cross_and_isolated" | "isolated_only";
@@ -73,7 +77,6 @@ export function RealTradingOrderPanel({
   onConnect: () => void;
   onOrderLifecycle: (phase: "submitted" | "updated", order: RealTradingOrderLifecycle) => void;
   onSubmitted: () => Promise<void> | void;
-  openOrderCount: number;
   positionSize?: number;
   position?: RealPosition | null;
   pendingOperationKeys?: string[];
@@ -86,11 +89,10 @@ export function RealTradingOrderPanel({
   supportedMarginModes?: RealTradingMarginMode[];
   szDecimals?: number;
   symbol: string;
-  totalExposure: number;
 }) {
   const sizeInputSourceRef = useRef<"manual" | "slider">("manual");
   const [side, setSide] = useState("buy");
-  const [orderType, setOrderType] = useState("limit");
+  const [orderType, setOrderType] = useState<string>(defaultRealTradingOrderType);
   const [price, setPrice] = useState("");
   const [size, setSize] = useState("");
   const [reduceOnly, setReduceOnly] = useState(false);
@@ -104,7 +106,6 @@ export function RealTradingOrderPanel({
   const [skipLimitConfirmationForSession, setSkipLimitConfirmationForSession] = useState(false);
   const [pendingClientOrderId, setPendingClientOrderId] = useState("");
   const [pendingSide, setPendingSide] = useState<"buy" | "sell">("buy");
-  const [retryIntent, setRetryIntent] = useState<{ cloid: HyperliquidCloid; side: "buy" | "sell" } | null>(null);
   const [positionPercent, setPositionPercent] = useState(0);
   const { authorized, busy } = session;
   const marginSelection = resolveMarginLeverageSelection({
@@ -120,11 +121,16 @@ export function RealTradingOrderPanel({
   const entrySafetyBlocked = (!marketReady || reconciliationPending) && !reduceOnly;
   const actionDisabled = !connected || entrySafetyBlocked || currentOperationPending || busy || typeof assetId !== "number";
   const sizeInputStep = getHyperliquidSizeInputStep(szDecimals);
+  const sizingSide = side === "sell" ? "sell" : "buy";
+  const estimatedOrderPrice = resolveEstimatedOrderPrice(sizingSide);
+  const maximumOrderQuantity = maximumQuantityForSide(sizingSide);
+  const orderValue = resolveOrderValue(size, estimatedOrderPrice);
 
   useEffect(() => {
     sizeInputSourceRef.current = "manual";
     setPrice("");
     setSize("");
+    setOrderType(defaultRealTradingOrderType);
     setTpPrice("");
     setSlPrice("");
     setPositionPercent(0);
@@ -149,7 +155,7 @@ export function RealTradingOrderPanel({
       return;
     }
     setPositionPercent(percentForSize(size));
-  }, [availableMargin, leverage, markPrice, orderType, positionSize, price, reduceOnly, side, szDecimals]);
+  }, [availableMargin, bestAsk, bestBid, leverage, markPrice, orderType, positionSize, price, reduceOnly, side, szDecimals]);
 
   async function authorizeSession() {
     if (typeof assetId !== "number") return;
@@ -188,20 +194,17 @@ export function RealTradingOrderPanel({
           symbol,
           updatedAt: Date.now(),
         }).forEach((order) => onOrderLifecycle("updated", order));
-        setRetryIntent(!outcome.reconciliationRequired && outcome.error && isRetryableOrderError(outcome.error) ? { cloid, side: orderSide } : null);
         if (outcome.reconciliationRequired) await onSubmitted();
         return;
       }
       extractExchangeOrderUpdates(outcome.result, { ...lifecycleBase, updatedAt: Date.now() }).forEach((order) => {
         onOrderLifecycle("updated", order);
       });
-      setRetryIntent(null);
       await onSubmitted();
     } catch (error) {
       const message = error instanceof Error ? error.message : "止盈止损参数无效。";
       session.setError(message);
       onOrderLifecycle("updated", { ...lifecycleBase, message, status: "rejected", updatedAt: Date.now() });
-      setRetryIntent(isRetryableOrderError(message) ? { cloid, side: orderSide } : null);
     }
   }
 
@@ -215,7 +218,29 @@ export function RealTradingOrderPanel({
     }
   }
 
-  function buildOrderDraft(orderSide: "buy" | "sell", cloid: HyperliquidCloid) {
+  function resolveEstimatedOrderPrice(orderSide: "buy" | "sell") {
+    if (orderType === "limit") {
+      const limitPrice = Number(price);
+      return Number.isFinite(limitPrice) && limitPrice > 0 ? limitPrice : null;
+    }
+    const bookPrice = orderSide === "buy" ? bestAsk : bestBid;
+    if (typeof bookPrice === "number" && Number.isFinite(bookPrice) && bookPrice > 0) return bookPrice;
+    return typeof markPrice === "number" && Number.isFinite(markPrice) && markPrice > 0 ? markPrice : null;
+  }
+
+  function maximumQuantityForSide(orderSide: "buy" | "sell") {
+    return resolveMaximumOrderQuantity({
+      availableMargin,
+      leverage: marginSelection.leverage,
+      orderPrice: resolveEstimatedOrderPrice(orderSide),
+      positionSize,
+      reduceOnly,
+      symbol,
+      szDecimals,
+    });
+  }
+
+  function buildOrderDraft(orderSide: "buy" | "sell", cloid: HyperliquidCloid, orderSize = size) {
     const orderPrice = resolveOrderPrice(orderSide);
     const entryOrder = buildRealTradingEntryOrderInput({
       assetId,
@@ -224,7 +249,7 @@ export function RealTradingOrderPanel({
       orderSide,
       orderType: orderType === "market" ? "market" : "limit",
       reduceOnly,
-      size,
+      size: orderSize,
       szDecimals,
       symbol,
     });
@@ -259,26 +284,18 @@ export function RealTradingOrderPanel({
       return;
     }
     const nextClientOrderId = createHyperliquidCloid();
+    const nextSize = sizeInputSourceRef.current === "slider"
+      ? resolveQuantityForPercent(maximumQuantityForSide(orderSide), positionPercent, szDecimals, symbol)
+      : size;
+    if (nextSize !== size) setSize(nextSize);
     let draft: ReturnType<typeof buildOrderDraft>;
     try {
-      draft = buildOrderDraft(orderSide, nextClientOrderId);
+      draft = buildOrderDraft(orderSide, nextClientOrderId, nextSize);
       if (tpslEnabled && !reduceOnly) {
         resolveTpslOrders(orderSide, draft.entryOrder.size, draft.entryOrder.price, nextClientOrderId);
       }
     } catch (error) {
       session.setError(error instanceof Error ? error.message : "请输入有效的价格和数量。");
-      return;
-    }
-    const orderNotional = Number(draft.entryOrder.price) * Number(draft.entryOrder.size);
-    const riskErrors = preflightRealTradingOrder({
-      equity,
-      openOrderCount,
-      orderNotional,
-      reduceOnly,
-      totalExposure,
-    });
-    if (riskErrors.length > 0) {
-      session.setError(`${riskErrors.join(" ")} 最终结果以服务端风控为准。`);
       return;
     }
     if (!authorized) {
@@ -308,7 +325,7 @@ export function RealTradingOrderPanel({
   }
 
   function changePositionPercent(value: number) {
-    const normalizedValue = normalizePositionPercent(value);
+    const normalizedValue = normalizeOrderPercent(value);
     sizeInputSourceRef.current = "slider";
     setPositionPercent(normalizedValue);
     setSize(sizeForPercent(normalizedValue));
@@ -320,34 +337,12 @@ export function RealTradingOrderPanel({
     setPositionPercent(percentForSize(value));
   }
 
-  function maxOrderSize() {
-    if (reduceOnly) return Math.max(0, positionSize ?? 0);
-    const explicitPrice = Number(resolveOrderPrice(side === "sell" ? "sell" : "buy"));
-    const orderPrice = explicitPrice > 0 ? explicitPrice : (markPrice ?? 0);
-    const margin = availableMargin ?? 0;
-    const leverageValue = Number(leverage);
-    if (!(orderPrice > 0) || !(margin > 0) || !(leverageValue > 0)) return 0;
-    const marginNotional = margin * leverageValue;
-    const equityValue = typeof equity === "number" && Number.isFinite(equity) && equity > 0 ? equity : 0;
-    const singleOrderNotional = equityValue * realTradingRiskPolicy.maxSingleOrderEquityRatio;
-    const remainingExposureNotional = Math.max(0, equityValue * realTradingRiskPolicy.maxTotalExposureEquityRatio - totalExposure);
-    return Math.min(marginNotional, singleOrderNotional, remainingExposureNotional) / orderPrice;
-  }
-
   function sizeForPercent(value: number) {
-    if (value <= 0) return "";
-    try {
-      return formatHyperliquidOrderSizeFloor(maxOrderSize() * (value / 100), szDecimals, symbol);
-    } catch {
-      return "";
-    }
+    return resolveQuantityForPercent(maximumOrderQuantity, value, szDecimals, symbol);
   }
 
   function percentForSize(value: string) {
-    const numericSize = Number(value);
-    const maximum = maxOrderSize();
-    if (!Number.isFinite(numericSize) || numericSize <= 0 || maximum <= 0) return 0;
-    return Math.min(100, Math.max(0, Math.round((numericSize / maximum) * 100)));
+    return resolvePercentForQuantity(value, maximumOrderQuantity);
   }
 
   function openMarginModal() {
@@ -406,10 +401,10 @@ export function RealTradingOrderPanel({
   return (
     <section className="xh-real-order-panel">
       <div className="xh-real-order-topline">
-        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number" || !(Number(maxLeverage) >= 1)} onClick={openMarginModal} type="button">
           <span>{marginModeLabel(marginSelection.marginMode)}</span><ChevronDown aria-hidden="true" size={16} />
         </button>
-        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number"} onClick={openMarginModal} type="button">
+        <button aria-haspopup="dialog" disabled={busy || !marketReady || reconciliationPending || typeof assetId !== "number" || !(Number(maxLeverage) >= 1)} onClick={openMarginModal} type="button">
           <span>{marginSelection.leverage}x</span><ChevronDown aria-hidden="true" size={16} />
         </button>
       </div>
@@ -425,7 +420,11 @@ export function RealTradingOrderPanel({
 
       <fieldset className="xh-real-order-form" disabled={busy}>
         <div className="xh-real-order-entry-fields">
-          <div className="xh-real-order-balance"><span>可用余额</span><strong>{formatMoney(availableMargin)} USDT</strong><span>当前仓位</span><strong>{positionSize ?? 0}</strong></div>
+          <div className="xh-real-order-balance">
+            <span>可用余额</span><strong>{formatMoney(availableMargin)} USDC</strong>
+            <span>{reduceOnly ? "可平数量" : "可开数量"}</span><strong>{maximumOrderQuantity || "0"} {symbol.replace("USDT", "")}</strong>
+            <span>当前仓位</span><strong>{positionSize ?? 0}</strong>
+          </div>
           {orderType === "limit" ? (
             <label className="xh-real-order-field">
               <span>价格</span>
@@ -489,9 +488,6 @@ export function RealTradingOrderPanel({
           <Checkbox checked={reduceOnly} label="只减仓" onChange={(event) => setReduceOnly(event.target.checked)} />
           <Checkbox checked={tpslEnabled} disabled={reduceOnly} label="止盈/止损" onChange={(event) => setTpslEnabled(event.target.checked)} />
         </div>
-        <p className="xh-real-risk-policy-note">
-          风控预检：最高 20x · 单笔 ≤ 权益 50% · 总敞口 ≤ 权益 200% · 当前委托 ≤ 20 笔。服务端规则为准。
-        </p>
         {!marketReady ? (
           <p className="xh-real-risk-policy-note is-warning" role="alert">
             行情或账户实时状态未就绪，暂停新开仓；撤单和合法 Reduce-only 平仓仍可用。
@@ -519,26 +515,10 @@ export function RealTradingOrderPanel({
 
       <div className="xh-real-order-metrics">
         <PanelMetric label="强平价格" value="-" />
-        <PanelMetric label="订单价值" value={estimateValue(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size)} />
+        <PanelMetric label="订单价值" value={formatOrderValue(orderValue)} />
         <PanelMetric label="所需保证金" value={estimateMargin(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, leverage)} />
         <PanelMetric label="费用" value={estimateFee(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, orderType === "market" ? fees?.takerRate : fees?.makerRate)} />
       </div>
-      {latestOrderLifecycle ? (
-        <div className={`xh-real-order-lifecycle is-${latestOrderLifecycle.status}`} role="status">
-          <span>订单状态</span>
-          <strong>{realTradingOrderStatusLabel(latestOrderLifecycle.status)}</strong>
-          {latestOrderLifecycle.exchangeOrderId ? <small>OID {latestOrderLifecycle.exchangeOrderId}</small> : null}
-          {latestOrderLifecycle.requestId ? <small>Request {truncateIdentifier(latestOrderLifecycle.requestId)}</small> : null}
-          {latestOrderLifecycle.clientOrderId && !latestOrderLifecycle.clientOrderId.startsWith("audit:") ? <small>Cloid {truncateIdentifier(latestOrderLifecycle.clientOrderId)}</small> : null}
-          {latestOrderLifecycle.submittedAt ? <small>提交 {formatLifecycleTime(latestOrderLifecycle.submittedAt)}</small> : null}
-          {latestOrderLifecycle.message ? <small>{latestOrderLifecycle.message}</small> : null}
-          {retryIntent?.cloid === latestOrderLifecycle.clientOrderId ? (
-            <button disabled={busy || (!marketReady && !reduceOnly)} onClick={() => void submitOrder(retryIntent.side, retryIntent.cloid)} type="button">
-              使用同一 cloid 重试
-            </button>
-          ) : null}
-        </div>
-      ) : null}
       <Modal open={confirmOpen} title="确认订单" onClose={() => setConfirmOpen(false)} shellClassName="xh-real-confirm-modal">
         <div className="xh-real-confirm-summary">
           <ConfirmMetric label="品种" value={symbol} />
@@ -649,11 +629,6 @@ function realTradingActionLabel(value: string) {
   return labels[value] ?? value;
 }
 
-function isRetryableOrderError(message: string) {
-  const normalized = message.toLowerCase();
-  return normalized.includes("网络") || normalized.includes("network") || normalized.includes("fetch") || normalized.includes("timeout");
-}
-
 function formatMoney(value?: number | null) {
   return typeof value === "number" && Number.isFinite(value) ? value.toLocaleString("en-US", { maximumFractionDigits: 2 }) : "0.00";
 }
@@ -661,6 +636,10 @@ function formatMoney(value?: number | null) {
 function estimateValue(price: string, size: string) {
   const value = Number(price) * Number(size);
   return Number.isFinite(value) && value > 0 ? `${value.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC` : "-";
+}
+
+function formatOrderValue(value: number | null) {
+  return value === null ? "-" : `${value.toLocaleString("en-US", { maximumFractionDigits: 2 })} USDC`;
 }
 
 function estimateMargin(price: string, size: string, leverage: string) {
@@ -677,13 +656,8 @@ function estimateFee(price: string, size: string, rate?: number | null) {
     : "-";
 }
 
-function normalizePositionPercent(value: number) {
-  if (!Number.isFinite(value)) return 0;
-  return Math.min(100, Math.max(0, Math.round(value)));
-}
-
 function snapPositionPercent(value: number) {
-  const normalizedValue = normalizePositionPercent(value);
+  const normalizedValue = normalizeOrderPercent(value);
   const nearestStep = positionPercentSteps.reduce((nearest, step) => (
     Math.abs(step - normalizedValue) < Math.abs(nearest - normalizedValue) ? step : nearest
   ));

@@ -624,18 +624,23 @@ export function normalizeHistoricalOrder(row: unknown): RealTradingHistoricalOrd
 export function normalizeFill(row: unknown): RealTradingFill {
   const value = row && typeof row === "object" ? row as Record<string, any> : {};
   const coin = value.coin !== undefined ? String(value.coin) : null;
+  const direction = value.dir !== undefined && value.dir !== null
+    ? String(value.dir)
+    : value.direction !== undefined && value.direction !== null ? String(value.direction) : null;
   return {
     coin,
     symbol: coin ? toInternalSymbol(coin) : null,
-    side: normalizeTradeSide(value.side),
+    side: normalizeTradeSide(value.side ?? value.crossed ?? direction),
     price: toNullableNumber(value.px ?? value.price),
     size: toNullableNumber(value.sz ?? value.size),
     timestamp: toNullableNumber(value.time ?? value.timestamp),
+    oid: normalizeOptionalId(value.oid),
+    tid: normalizeOptionalId(value.tid),
+    closedPnl: toNullableNumber(value.closedPnl),
     fee: toNullableNumber(value.fee),
     feeToken: value.feeToken !== undefined && value.feeToken !== null ? String(value.feeToken) : null,
     hash: value.hash !== undefined && value.hash !== null ? String(value.hash) : null,
-    direction: value.dir !== undefined && value.dir !== null ? String(value.dir) : value.direction !== undefined && value.direction !== null ? String(value.direction) : null,
-    raw: value,
+    direction,
     network: hyperliquidTestnetNetwork,
   };
 }
@@ -944,8 +949,8 @@ function normalizeOptionalId(value: unknown) {
 
 function normalizeTradeSide(value: unknown) {
   const side = typeof value === "string" ? value.toLowerCase() : value;
-  if (side === "b" || side === "buy") return "buy";
-  if (side === "a" || side === "sell") return "sell";
+  if (side === "b" || side === "buy" || side === true || side === "open long" || side === "close short") return "buy";
+  if (side === "a" || side === "sell" || side === false || side === "open short" || side === "close long") return "sell";
   return "unknown";
 }
 
