@@ -51,8 +51,34 @@ test("approveAgent signature must belong to the declared master account", async 
       ...request,
       action: { ...action, signatureChainId: "0x1" },
     }, { userId: "USR-1" }),
-    /signatureChainId/,
+    /0x66eee/,
   );
+});
+
+test("approveAgent only accepts Arbitrum Sepolia signatureChainId while preserving Testnet action semantics", async () => {
+  const valid = await signedApproveAgentRequest("0X66EEE");
+  const validVerified = verifier.verify(valid.request, { userId: "USR-fixed" });
+  assert.equal(validVerified.masterAddress, valid.master.address.toLowerCase());
+  assert.equal(validVerified.agentAddress, valid.agent.address.toLowerCase());
+
+  const wrongChain = await signedApproveAgentRequest("0x3e7");
+  assert.throws(
+    () => verifier.verify(wrongChain.request, { userId: "USR-fixed" }),
+    /0x66eee/,
+  );
+});
+
+test("approveAgent rejects malformed, zero, negative, and oversized signatureChainId values", async () => {
+  const signed = await signedApproveAgentRequest("0x66eee");
+  for (const signatureChainId of ["", "3e7", "0x", "0x0", "-0x1", "0xg", `0x${"f".repeat(65)}`]) {
+    assert.throws(
+      () => verifier.verify({
+        ...signed.request,
+        action: { ...signed.action, signatureChainId },
+      }, { userId: "USR-dynamic" }),
+      /signatureChainId/,
+    );
+  }
 });
 
 test("exchange action signer must match the user-bound API wallet", async () => {
@@ -128,6 +154,31 @@ test("verifies the exact approveAgent and order payloads emitted by the Hyperliq
   });
   assert.equal(orderVerified.signerAddress, agent.address.toLowerCase());
 });
+
+async function signedApproveAgentRequest(signatureChainId: string) {
+  const master = Wallet.createRandom();
+  const agent = Wallet.createRandom();
+  const nonce = Date.now();
+  const action = {
+    type: "approveAgent",
+    hyperliquidChain: "Testnet",
+    signatureChainId,
+    agentAddress: agent.address,
+    agentName: "xingheng-dynamic-chain-test",
+    nonce,
+  };
+  const signature = await master.signTypedData(
+    {
+      name: "HyperliquidSignTransaction",
+      version: "1",
+      chainId: BigInt(signatureChainId),
+      verifyingContract: "0x0000000000000000000000000000000000000000",
+    },
+    ApproveAgentTypes,
+    action,
+  );
+  return { master, agent, action, request: exchangeRequest(master.address, action, nonce, signature) };
+}
 
 function exchangeRequest(
   masterAddress: string,

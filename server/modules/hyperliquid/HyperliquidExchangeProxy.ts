@@ -458,7 +458,7 @@ function categorizeLocalError(error: unknown) {
 
 function classifyLocalFailure(error: unknown) {
   const message = error instanceof Error ? error.message : "";
-  if (message.includes("暂不允许") || message.includes("不支持 vaultAddress") || message.includes("Mainnet")) {
+  if (message.includes("暂不允许") || message.includes("不支持 vaultAddress") || message.includes("Mainnet") || message.includes("仅允许 Hyperliquid Testnet")) {
     return { code: "RT_ACTION_NOT_ALLOWED", httpStatus: 403 };
   }
   if (message.includes("cloid") || message.includes("幂等")) return { code: "RT_IDEMPOTENCY_CONFLICT", httpStatus: 409 };
@@ -487,7 +487,7 @@ function sortValue(value: unknown): unknown {
 function safeLocalErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "真实交易请求校验失败。";
   if (message.includes("signatureChainId")) {
-    return "请使用 Hyperliquid Testnet 签名参数 signatureChainId=0x66eee 后重试。";
+    return "请切换钱包网络到 Arbitrum Sepolia 后重新授权。";
   }
   if (message.includes("签名账户与 masterAddress 不一致")) {
     return "签名钱包与声明的主账户不一致，请切换到对应主钱包后重试。";

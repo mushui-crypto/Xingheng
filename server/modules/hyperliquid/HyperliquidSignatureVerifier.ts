@@ -45,15 +45,15 @@ export class HyperliquidSignatureVerifier implements RealTradingSignatureVerifie
     if (request.action.type === "approveAgent") {
       const actionNonce = Number(request.action.nonce);
       if (actionNonce !== request.nonce) throw new Error("approveAgent nonce 与请求 nonce 不一致。");
-      const signatureChainId = String(request.action.signatureChainId ?? "");
-      if (signatureChainId.toLowerCase() !== "0x66eee") {
-        throw new Error("approveAgent 仅允许 Hyperliquid Testnet signatureChainId。");
+      const signatureChainId = normalizeSignatureChainId(request.action.signatureChainId);
+      if (signatureChainId !== 421614n) {
+        throw new Error("approveAgent signatureChainId 必须为 Arbitrum Sepolia 0x66eee。");
       }
       const signerAddress = verifyTypedData(
         {
           name: "HyperliquidSignTransaction",
           version: "1",
-          chainId: Number.parseInt(signatureChainId, 16),
+          chainId: signatureChainId,
           verifyingContract: "0x0000000000000000000000000000000000000000",
         },
         ApproveAgentTypes,
@@ -94,6 +94,16 @@ export class HyperliquidSignatureVerifier implements RealTradingSignatureVerifie
     }
     return { kind: "agent", masterAddress, signerAddress, agentAddress: binding.agentAddress.toLowerCase() };
   }
+}
+
+function normalizeSignatureChainId(value: unknown) {
+  const raw = typeof value === "string" ? value.trim() : "";
+  if (!/^0x[0-9a-f]+$/i.test(raw)) throw new Error("approveAgent signatureChainId 必须是正整数 0x 十六进制字符串。");
+  const hex = raw.slice(2);
+  if (hex.length > 64) throw new Error("approveAgent signatureChainId 超出安全范围。");
+  const parsed = BigInt(`0x${hex}`);
+  if (parsed <= 0n) throw new Error("approveAgent signatureChainId 必须大于 0。");
+  return parsed;
 }
 
 function serializeSignature(value: unknown) {

@@ -5,6 +5,7 @@ import { Checkbox } from "../../../components/ui/Checkbox";
 import { Modal } from "../../../components/ui/Modal";
 import type { RealPosition, RealTradingFees, RealTradingMarginMode, RealTradingReconciliationRecord } from "../../../api/realTrading";
 import { MarginLeverageModal } from "./MarginLeverageModal";
+import { WalletNetworkGateModal } from "./WalletNetworkGateModal";
 import { submitMarginLeverageUpdate } from "../lib/hyperliquidSdk";
 import { normalizeHyperliquidPrice } from "../lib/hyperliquidPrice";
 import { buildRealTradingEntryOrderInput } from "../lib/realTradingOrderValidation";
@@ -595,6 +596,7 @@ export function RealTradingOrderPanel({
         selection={marginSelection}
         submitting={marginSubmitting || busy}
       />
+      <WalletNetworkGateModal session={session} />
     </section>
   );
 }
