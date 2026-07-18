@@ -82,7 +82,7 @@ test("authoritative snapshot keeps cloid identity and treats a fill with an open
   const lifecycles = buildAuthoritativeOrderLifecycles(
     [{ cloid, coin: "BTC", oid: 42, status: "open" }],
     {
-      fills: [{ coin: "BTC", oid: 42, price: 60_000, size: 0.001, timestamp: 150 }],
+      fills: [{ closedPnl: 0, coin: "BTC", fee: 0, oid: "42", price: 60_000, size: 0.001, timestamp: 150 }],
       nextCursor: null,
       orders: [],
       warnings: [],

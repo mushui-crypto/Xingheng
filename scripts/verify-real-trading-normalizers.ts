@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { buildDemoMarketIconUrl } from "../server/modules/api/marketRoutes";
 import { normalizeDemoBookSide, normalizeDemoMarketSummary, normalizeDemoTrade } from "../server/modules/market/HyperliquidRestClient";
-import { resolveRealTradingCategory } from "../src/features/realTrading/lib/marketCategory";
 import {
   buildRealTradingCategoryMap,
   buildRealTradingIconUrl,
@@ -79,11 +78,11 @@ assert.equal(resolveRealTradingSymbolCategory("xyz:AAPL", categoryMap), "us_equi
 assert.equal(resolveRealTradingSymbolCategory("xyz:GOLD", categoryMap), "metals");
 assert.equal(resolveRealTradingSymbolCategory("xyz:SP500", categoryMap), "indices");
 assert.equal(resolveRealTradingSymbolCategory("xyz:UNKNOWN", categoryMap), "other");
-assert.equal(resolveRealTradingCategory("BTC"), "crypto");
-assert.equal(resolveRealTradingCategory("xyz:GOLD"), "metals");
-assert.equal(resolveRealTradingCategory("xyz:SP500"), "indices");
-assert.equal(resolveRealTradingCategory("nq:TEST"), "other");
-assert.equal(resolveRealTradingCategory("flx:TSLA", "us_equities"), "us_equities");
+assert.equal(resolveRealTradingSymbolCategory("BTC"), "crypto");
+assert.equal(resolveRealTradingSymbolCategory("xyz:GOLD"), "metals");
+assert.equal(resolveRealTradingSymbolCategory("xyz:SPX"), "indices");
+assert.equal(resolveRealTradingSymbolCategory("nq:TEST"), "us_equities");
+assert.equal(normalizeRealTradingMarketCategory("us_equities", "flx:TSLA"), "us_equities");
 
 const book = normalizeBookSide([
   { px: "101", sz: "2", n: 1 },
@@ -247,17 +246,43 @@ const fill = normalizeFill({
   px: "100001",
   sz: "0.01",
   time: 789,
+  oid: 123456789,
+  tid: "987654321",
+  closedPnl: "0",
   fee: "0.4",
   feeToken: "USDC",
   hash: "0xabc",
   dir: "Open Long",
+  rawProviderSecret: "must-not-leak",
 });
 assert.equal(fill.price, 100001);
 assert.equal(fill.size, 0.01);
+assert.equal(fill.timestamp, 789);
+assert.equal(fill.oid, 123456789);
+assert.equal(fill.tid, "987654321");
+assert.equal(fill.closedPnl, 0);
 assert.equal(fill.fee, 0.4);
 assert.equal(fill.feeToken, "USDC");
 assert.equal(fill.hash, "0xabc");
 assert.equal(fill.direction, "Open Long");
+assert.equal("raw" in fill, false);
+
+const wsFill = normalizeFill({
+  coin: "BTC",
+  side: "A",
+  price: "0",
+  size: "0",
+  timestamp: 0,
+  oid: "0",
+  closedPnl: "-1.25",
+  dir: "Close Long",
+});
+assert.equal(wsFill.side, "sell");
+assert.equal(wsFill.price, 0);
+assert.equal(wsFill.size, 0);
+assert.equal(wsFill.timestamp, 0);
+assert.equal(wsFill.oid, "0");
+assert.equal(wsFill.closedPnl, -1.25);
 
 const balances = normalizeSpotBalances({ balances: [{ coin: "USDC", total: "500", hold: "25" }, { coin: "BAD", total: "x", hold: "1" }] });
 assert.deepEqual(balances[0], { coin: "USDC", total: 500, hold: 25, available: 475 });

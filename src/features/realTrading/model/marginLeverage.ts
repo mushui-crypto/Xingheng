@@ -1,5 +1,4 @@
 import type { RealPosition, RealTradingMarginMode } from "../../../api/realTrading";
-import { realTradingRiskPolicy } from "./riskPolicy";
 
 export type MarginLeverageSelection = {
   leverage: number;
@@ -10,7 +9,6 @@ export type MarginLeverageSelection = {
 
 export type MarginLeverageSessionState = Record<string, Pick<MarginLeverageSelection, "leverage" | "marginMode">>;
 
-const legacyMaxLeverage = realTradingRiskPolicy.maxLeverage;
 const defaultLeverage = 5;
 
 export function resolveMarginLeverageSelection({
@@ -59,8 +57,7 @@ export function normalizeSupportedMarginModes(
 }
 
 export function normalizeMaxLeverage(value?: number | null) {
-  const sourceLimit = Number.isFinite(value) && Number(value) >= 1 ? Math.floor(Number(value)) : legacyMaxLeverage;
-  return Math.min(sourceLimit, realTradingRiskPolicy.maxLeverage);
+  return Number.isFinite(value) && Number(value) >= 1 ? Math.floor(Number(value)) : 1;
 }
 
 export function clampLeverage(value: number, maxLeverage: number) {

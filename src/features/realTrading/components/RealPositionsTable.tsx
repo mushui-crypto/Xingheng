@@ -124,7 +124,10 @@ export function RealPositionsTable({
           <span>资金费</span>
           <span>止盈</span>
           <span>止损</span>
-          <button disabled={actionsBlocked || allClosePending} onClick={requestAllClose} type="button">全部平仓</button>
+          <div className="xh-real-position-actions xh-real-position-actions-head">
+            <span>操作</span>
+            <button disabled={actionsBlocked || allClosePending} onClick={requestAllClose} type="button">全部平仓</button>
+          </div>
         </div>
         {rows.length === 0 ? (
           <div className="xh-real-position-empty">暂无真实持仓</div>

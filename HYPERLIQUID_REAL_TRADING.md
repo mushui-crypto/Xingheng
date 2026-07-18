@@ -193,27 +193,24 @@ server/modules/api/realTradingRoutes.ts
 - `approveAgent` 转发前会只读查询 Hyperliquid Testnet `userRole(masterAddress)`；仅当上游明确返回 `role=missing` 时，本地拒绝且不转发，HTTP `409`、`errorCode=RT_ACCOUNT_NOT_ACTIVATED`、公开文案为“该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。”。`userRole` 网络失败或不可读不得误判为未激活，继续走既有 provider fallback 与脱敏审计。
 - `approveAgent` 转发前必须按 SDK 相同的 EIP-712 数据恢复签名地址，并确认签名者等于声明的 `masterAddress`；交易所明确接受后，SQLite 只记录 `(userId, masterAddress, agentAddress, approvedAt)` 的非敏感授权绑定。
 - 后续 `order / cancel / updateLeverage` 转发前必须恢复 L1 action 签名地址，并确认它等于当前登录用户及 `masterAddress` 已绑定的 agent wallet；不存在绑定或签名不匹配时 fail closed，避免用未绑定地址绕过账户风险快照。
-- `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是正 safe integer；P0 服务端风险门禁默认再限制为 `1..20x`，环境变量只能显式调整该平台上限。品种实际最大杠杆仍由前端取 `min(symbols.maxLeverage, 平台上限)`，并由 Hyperliquid 最终校验。
+- `updateLeverage` 专项校验：`action.type` 必须为 `updateLeverage`，`asset` 必须是大于等于 0 的 safe integer，`isCross` 必须是 boolean，`leverage` 必须是正 safe integer。服务端不再设置平台自定义最高杠杆上限；品种实际最大杠杆、账户状态与交易所规则由 Hyperliquid Testnet 最终裁决，provider 拒绝不得被误报为成功。
 - 禁止 withdraw、transfer、staking、builder fee 等资金转移类动作。
 - 后端只做 allowlist、基础字段、签名账户绑定、风险门禁、请求限流、脱敏审计和响应标准化；不修改签名内容，不生成 nonce / signature / expiresAfter，也不保存可代签材料。
 - 每笔 `order` 必须在浏览器签名前写入 `order.c`，格式固定为 `0x` + 32 位十六进制 `cloid`。服务端不会事后修改已签名 action。
 - 服务端按 `(userId, masterAddress, network, cloid)` 建立 SQLite 唯一约束并在转发前原子占位。同一 cloid 已有终态时返回原回执，处理中或结果未知时返回 `409 / pending_reconciliation`，不得再次转发。
 
-### 4.4 服务端最小风险门禁
+### 4.4 服务端最小可信度门禁
 
-风险门禁只用于阻止新增敞口，不替代 Hyperliquid 风控。默认值可通过环境变量收紧或调整：
+服务端不再设置平台自定义最高杠杆、单笔新增名义 / 权益、总敞口 / 权益或当前委托数量上限；这些约束交由 Hyperliquid Testnet 按品种、账户和交易所规则裁决。服务端只保留新增风险前的最小可信度门禁，不替代交易所风控。
 
 | 规则 | 默认值 | 环境变量 |
 | --- | ---: | --- |
-| 最大杠杆 | `20x` | `REAL_TRADING_RISK_MAX_LEVERAGE` |
-| 单笔新增名义 / 权益 | `50%` | `REAL_TRADING_RISK_MAX_ORDER_NOTIONAL_EQUITY_RATIO` |
-| 持仓 + 非 reduce-only 当前委托 + 本批新增名义 / 权益 | `200%` | `REAL_TRADING_RISK_MAX_TOTAL_NOTIONAL_EQUITY_RATIO` |
-| 当前委托 + 本批新增委托 | `20` | `REAL_TRADING_RISK_MAX_OPEN_ORDERS` |
 | 账户 / 市场快照最大年龄 | `10s` | `REAL_TRADING_RISK_MAX_SNAPSHOT_AGE_MS` |
 
-- 开仓前必须重新读取账户、持仓、当前委托、品种目录和对应市场 summary；任一 REST 读取失败、`status!=connected` 或 timestamp 过期时 fail closed。
-- 账户已有任一持仓杠杆高于平台上限时，不允许继续新增敞口。
+- 新增风险订单转发前必须读取账户摘要、品种目录和对应市场 summary；任一 REST 读取失败、账户 `status!=connected`、市场 `status!=connected` 或 timestamp 过期时 fail closed。
+- 新增风险订单仍校验已签名 action 中价格、数量和 asset 为可解释的正数 / 有效编号，但不计算平台名义价值上限。
 - `reduce-only` 平仓/保护单不因账户已超限而被阻断；`cancel` 始终不经过新增敞口门禁。
+- `reduce-only` 仍读取权威持仓和品种目录，校验同品种、反方向、数量不超过可平持仓，避免越过零仓位反手。
 - 服务端只校验已签名 action，不修改价格、数量、杠杆、cloid 或签名内容。
 
 ### 4.5 权威订单状态与用户实时流
@@ -270,7 +267,7 @@ server/modules/api/realTradingRoutes.ts
 - 返回字段包括：
   - `reconciliation`：enabled / running / lastAttemptAt / lastSuccessAt / lastCompletedAt / consecutiveFailures / lastError / lastScannedPending / lastRecoveredRequests / nextCheckAt。
   - `userStreams`：活跃 stream 数、活跃用户数、maxStreamCount，以及每个脱敏地址的 status / reconnecting / stale / sequence / lastSnapshotAt / lastEventAt。
-  - `risk`：当前风控默认/环境变量配置、in-flight count/notional 与脱敏地址聚合。
+  - `risk`：当前最小可信度门禁配置、已移除的平台自定义上限标记，以及兼容的 in-flight 空聚合。
   - `operations`：pending 数量、最老 pending 时间与年龄、近 24 小时 accepted / rejected / partial / pending 计数、审计清理状态。
   - `mainnetReadinessGaps`：Mainnet 准入前置缺口清单。
 - 顶层 `status` 为 `ok / degraded / unavailable`：无 active stream 属于 idle，不降级；reconciliation 连续失败或 stale、存在 manualReview pending、存在无审计的 idempotency pending、或 active stream stale/reconnecting 时返回 `degraded`；组件不可用时返回 `unavailable`。

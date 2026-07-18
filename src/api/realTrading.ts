@@ -187,15 +187,12 @@ export type RealFill = {
   sourceDex?: string;
   sourceType?: MarketSourceType;
   side?: string;
-  px?: number | string | null;
-  sz?: number | string | null;
-  time?: number;
-  oid?: number | string;
+  price: number | null;
+  size: number | null;
+  closedPnl: number | null;
+  timestamp: number | null;
+  oid: string | null;
   tid?: number | string;
-  closedPnl?: number | string | null;
-  price?: number | null;
-  size?: number | null;
-  timestamp?: number | null;
   fee?: number | null;
   feeToken?: string | null;
   hash?: string | null;
@@ -511,18 +508,20 @@ export async function fetchRealOpenOrders(address: string) {
 }
 
 export async function fetchRealOrderHistory(address: string) {
-  return requestJson<RealOrderHistory>(`/api/real-trading/orders/history?address=${encodeURIComponent(address)}`, "真实历史订单加载失败。", {
+  const payload = await requestJson<unknown>(`/api/real-trading/orders/history?address=${encodeURIComponent(address)}`, "真实历史订单加载失败。", {
     init: { headers: realTradingHeaders() },
     userAuthFailure: true,
   });
+  return normalizeRealOrderHistory(payload);
 }
 
 export async function fetchRealTradingOrderState(address: string, afterSequence?: number | null) {
   const sequence = typeof afterSequence === "number" ? `&afterSequence=${afterSequence}` : "";
-  return requestJson<RealTradingOrderState>(`/api/real-trading/orders/state?address=${encodeURIComponent(address)}${sequence}`, "真实订单状态加载失败。", {
+  const payload = await requestJson<unknown>(`/api/real-trading/orders/state?address=${encodeURIComponent(address)}${sequence}`, "真实订单状态加载失败。", {
     init: { headers: realTradingHeaders() },
     userAuthFailure: true,
   });
+  return normalizeRealTradingOrderState(payload);
 }
 
 export async function fetchRealTradingCloidStatus(address: string, cloid: string) {
@@ -590,4 +589,74 @@ export async function forwardSignedRealTradingExchange(payload: SignedRealTradin
     acceptErrorResponse: true,
     userAuthFailure: true,
   });
+}
+
+export function normalizeRealFills(value: unknown): RealFill[] {
+  return Array.isArray(value) ? value.map(normalizeRealFill) : [];
+}
+
+export function normalizeRealFill(value: unknown): RealFill {
+  const source = isRecord(value) ? value : {};
+  return {
+    ...(typeof source.coin === "string" ? { coin: source.coin } : {}),
+    ...(typeof source.symbol === "string" ? { symbol: source.symbol } : {}),
+    ...(typeof source.providerMarketId === "string" ? { providerMarketId: source.providerMarketId } : {}),
+    ...(typeof source.providerCoin === "string" ? { providerCoin: source.providerCoin } : {}),
+    ...(typeof source.assetId === "number" ? { assetId: source.assetId } : {}),
+    ...(typeof source.sourceDex === "string" ? { sourceDex: source.sourceDex } : {}),
+    ...(typeof source.sourceType === "string" ? { sourceType: source.sourceType as MarketSourceType } : {}),
+    ...(typeof source.side === "string" ? { side: source.side } : {}),
+    ...(typeof source.tid === "string" || typeof source.tid === "number" ? { tid: source.tid } : {}),
+    ...(typeof source.feeToken === "string" ? { feeToken: source.feeToken } : {}),
+    ...(typeof source.hash === "string" ? { hash: source.hash } : {}),
+    ...(typeof source.direction === "string" ? { direction: source.direction } : {}),
+    fee: finiteNumber(source.fee),
+    oid: identifierString(source.oid),
+    price: finiteNumber(source.price ?? source.px),
+    closedPnl: finiteNumber(source.closedPnl ?? source.realizedPnl),
+    size: finiteNumber(source.size ?? source.sz),
+    timestamp: normalizeEventTimestamp(source.timestamp ?? source.time),
+  };
+}
+
+export function normalizeRealOrderHistory(value: unknown): RealOrderHistory {
+  const source = isRecord(value) ? value : {};
+  return {
+    orders: Array.isArray(source.orders) ? source.orders as RealHistoricalOrder[] : [],
+    fills: normalizeRealFills(source.fills),
+    nextCursor: typeof source.nextCursor === "string" ? source.nextCursor : null,
+    warnings: Array.isArray(source.warnings) ? source.warnings.filter((item): item is string => typeof item === "string") : [],
+    ...(typeof source.connectionStatus === "string" ? { connectionStatus: source.connectionStatus } : {}),
+    ...(typeof source.realtimeStatus === "string" ? { realtimeStatus: source.realtimeStatus } : {}),
+    ...(source.snapshotAt !== undefined ? { snapshotAt: source.snapshotAt as number | string | null } : {}),
+  };
+}
+
+export function normalizeRealTradingOrderState(value: unknown): RealTradingOrderState {
+  if (!isRecord(value) || (value.mode !== "snapshot" && value.mode !== "incremental")) {
+    throw new Error("真实订单状态响应格式无效。");
+  }
+  return { ...value, fills: normalizeRealFills(value.fills) } as RealTradingOrderState;
+}
+
+function finiteNumber(value: unknown) {
+  if (value === null || value === undefined || value === "") return null;
+  const number = Number(value);
+  return Number.isFinite(number) ? number : null;
+}
+
+function identifierString(value: unknown) {
+  if (typeof value === "string" && value.trim()) return value;
+  if (typeof value === "number" && Number.isFinite(value)) return String(value);
+  return null;
+}
+
+function normalizeEventTimestamp(value: unknown) {
+  const timestamp = finiteNumber(value);
+  if (timestamp === null || timestamp <= 0) return null;
+  return timestamp;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

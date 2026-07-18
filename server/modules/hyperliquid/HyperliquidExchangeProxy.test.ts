@@ -441,6 +441,51 @@ test("cancel success requires a matching per-item provider status", async (t) =>
   assert.equal(receipt.outcome, "accepted");
 });
 
+test("updateLeverage greater than the removed platform ceiling is forwarded and provider rejections stay rejected", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let forwardedBody = "";
+  globalThis.fetch = async (_input, init) => {
+    forwardedBody = String(init?.body ?? "");
+    return new Response(JSON.stringify({ status: "err", response: { type: "error", error: "leverage too high" } }), { status: 400 });
+  };
+  const receipt = await new HyperliquidExchangeProxy("https://example.test").forward({
+    ...validPayload(),
+    action: { type: "updateLeverage", asset: 0, isCross: true, leverage: 100 },
+  }, context);
+  assert.match(forwardedBody, /updateLeverage/);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.outcome, "rejected");
+  assert.equal(receipt.errorCode, "RT_PROVIDER_REJECTED");
+  assert.equal(receipt.message, "Hyperliquid Testnet 拒绝了交易请求。");
+});
+
+test("updateLeverage still rejects invalid local contract fields before forwarding", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ status: "ok", response: { type: "default" } }), { status: 200 });
+  };
+  const invalidActions = [
+    { type: "updateLeverage", asset: -1, isCross: true, leverage: 1 },
+    { type: "updateLeverage", asset: 0.5, isCross: true, leverage: 1 },
+    { type: "updateLeverage", asset: 0, isCross: "true", leverage: 1 },
+    { type: "updateLeverage", asset: 0, isCross: true, leverage: 0 },
+    { type: "updateLeverage", asset: 0, isCross: true, leverage: 1.5 },
+  ];
+  for (const action of invalidActions) {
+    await assert.rejects(
+      () => new HyperliquidExchangeProxy("https://example.test").forward({ ...validPayload(), action }, context),
+      (error: unknown) => error instanceof RealTradingExchangeSubmissionError
+        && error.receipt.outcome === "rejected"
+        && error.receipt.errorCode === "RT_INVALID_REQUEST",
+    );
+  }
+  assert.equal(fetchCount, 0);
+});
+
 class AuditSpy {
   records: RealTradingAuditRecord[] = [];
   saveRealTradingAudit(record: RealTradingAuditRecord) {

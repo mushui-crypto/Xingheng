@@ -18,6 +18,8 @@ import {
   fetchRealTradingFees,
   fetchRealTradingOrderState,
   fetchRealTradingSymbols,
+  normalizeRealFills,
+  normalizeRealTradingOrderState,
   requestRealTradingRealtimeToken,
   type RealAccountSummary,
   type RealCandle,
@@ -51,6 +53,8 @@ import {
 } from "../../features/realTrading/lib/realTradingMarket";
 import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
 import { getRealTradingDisplayPriceDecimals } from "../../features/realTrading/lib/realTradingDisplayPrecision";
+import { presentRealFill } from "../../features/realTrading/model/realFillPresentation";
+import { presentOrderLifecycleToast } from "../../features/realTrading/model/orderLifecycleToast";
 import {
   initialRealTradingRealtimeState,
   extractExchangeOrderUpdates,
@@ -127,6 +131,8 @@ export function RealTradePage() {
   const accountRequestGenerationRef = useRef(0);
   const marketRequestGenerationRef = useRef(0);
   const marketRequestInFlightRef = useRef(false);
+  const lifecycleToastKeysRef = useRef(new Set<string>());
+  const pageMountedAtRef = useRef(Date.now());
   const { dismissToast, showToast, toast } = useTradingToast();
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
 
@@ -149,9 +155,6 @@ export function RealTradePage() {
     [pendingReconciliationOrders],
   );
   const pendingOperationSet = useMemo(() => new Set(pendingOperationKeys), [pendingOperationKeys]);
-  const contractEquity = account?.crossAccountValue ?? account?.accountValue;
-  const totalExposure = positions.reduce((sum, item) => sum + realPositionNotional(item), 0)
-    + openOrders.reduce((sum, item) => sum + realOrderNotional(item), 0);
   const digits = getRealTradingDisplayPriceDecimals(selectedConfig?.pxDecimals);
   const pickerSymbols = useMemo<MarketPickerSymbol[]>(
     () => {
@@ -194,6 +197,16 @@ export function RealTradePage() {
           : "warning",
     );
   }, [showToast, tradingSession.message, tradingSession.messageTone]);
+
+  useEffect(() => {
+    const order = realtimeState.orders[0];
+    if (!order) return;
+    const toastPresentation = presentOrderLifecycleToast(order);
+    if (lifecycleToastKeysRef.current.has(toastPresentation.key)) return;
+    lifecycleToastKeysRef.current.add(toastPresentation.key);
+    if (order.updatedAt < pageMountedAtRef.current) return;
+    showToast(toastPresentation.message, toastPresentation.tone);
+  }, [realtimeState.orders, showToast]);
 
   const loadMarket = async (
     symbol = selectedSymbol,
@@ -544,7 +557,7 @@ export function RealTradePage() {
         return;
       }
       if (event.channel === "fills" && Array.isArray(event.data)) {
-        const nextFills = event.data as RealOrderHistory["fills"];
+        const nextFills = normalizeRealFills(event.data);
         setHistory((current) => mergeStreamFills(current, nextFills));
         buildAuthoritativeOrderLifecycles([], { ...emptyRealOrderHistory(), fills: nextFills }, event.timestamp).forEach((order) => {
           dispatchRealtime({ type: "order_updated", order });
@@ -1033,18 +1046,17 @@ export function RealTradePage() {
           <RealTradingOrderPanel
             assetId={selectedConfig?.assetId}
             availableMargin={account?.availableMargin ?? account?.withdrawable}
+            bestAsk={orderbook?.asks[0]?.price}
+            bestBid={orderbook?.bids[0]?.price}
             connected={isConnected}
-            equity={contractEquity}
             markPrice={marketSummary?.markPrice}
             fees={fees}
-            latestOrderLifecycle={realtimeState.orders[0] ?? null}
             marginModeConstraint={selectedConfig?.marginModeConstraint}
             marketReady={marketReady}
             maxLeverage={selectedConfig?.maxLeverage}
             onConnect={connectWallet}
             onOrderLifecycle={(phase, order) => dispatchRealtime({ type: phase === "submitted" ? "order_submitted" : "order_updated", order })}
             onSubmitted={() => loadAccount(walletAddress)}
-            openOrderCount={openOrders.length}
             pendingOperationKeys={pendingOperationKeys}
             reconciliationError={reconciliationError}
             reconciliationLoading={reconciliationLoading}
@@ -1057,7 +1069,6 @@ export function RealTradePage() {
             supportedMarginModes={selectedConfig?.supportedMarginModes}
             szDecimals={selectedConfig?.szDecimals}
             symbol={selectedSymbol}
-            totalExposure={totalExposure}
           />
           <ConnectionPanel
             account={account}
@@ -1220,7 +1231,10 @@ function OrderTable({ emptyText, onCancel, onFeedback, rows }: { emptyText: stri
 }
 
 function FillTable({ rows }: { rows: RealOrderHistory["fills"] }) {
-  return <div className="xh-real-record-table"><div className="xh-real-record-head"><span>资产</span><span>方向</span><span>价格</span><span>数量</span><span>已实现盈亏</span><span>OID</span><span>时间</span></div>{rows.length === 0 ? <RecordEmpty text="暂无真实成交。" /> : rows.map((row, index) => <div className="xh-real-record-row" key={`${row.tid ?? row.oid}-${index}`}><strong>{row.coin ?? "-"}</strong><span>{row.side ?? "-"}</span><span>{row.px ?? "-"}</span><span>{row.sz ?? "-"}</span><span>{row.closedPnl ?? "-"}</span><span>{row.oid ?? "-"}</span><span>{formatTime(row.time)}</span></div>)}</div>;
+  return <div className="xh-real-record-table"><div className="xh-real-record-head"><span>资产</span><span>方向</span><span>价格</span><span>数量</span><span>已实现盈亏</span><span>OID</span><span>时间</span></div>{rows.length === 0 ? <RecordEmpty text="暂无真实成交。" /> : rows.map((row, index) => {
+    const fill = presentRealFill(row);
+    return <div className="xh-real-record-row" key={`${row.tid ?? row.oid}-${index}`}><strong>{row.coin ?? "-"}</strong><span>{row.side ?? "-"}</span><span>{fill.price}</span><span>{fill.size}</span><span className={fill.realizedPnlTone ? `is-${fill.realizedPnlTone}` : ""}>{fill.realizedPnl}</span><span>{fill.oid}</span><span>{fill.time}</span></div>;
+  })}</div>;
 }
 
 function RecordEmpty({ text }: { text: string }) {
@@ -1372,18 +1386,6 @@ function combineConnectionStatuses(
   );
 }
 
-function realPositionNotional(position: RealPosition) {
-  if (typeof position.positionValue === "number" && Number.isFinite(position.positionValue)) return Math.abs(position.positionValue);
-  const markPrice = position.markPx ?? position.markPrice;
-  return typeof markPrice === "number" && Number.isFinite(markPrice) ? Math.abs(position.size * markPrice) : 0;
-}
-
-function realOrderNotional(order: RealOpenOrder) {
-  const price = Number(order.price ?? order.limitPx);
-  const size = Number(order.size ?? order.sz);
-  return Number.isFinite(price) && Number.isFinite(size) ? Math.abs(price * size) : 0;
-}
-
 function applyOpenOrderIncremental(current: RealOpenOrder[], state: Extract<RealTradingOrderState, { mode: "incremental" }>) {
   const removed = new Set(state.openOrders.removedOrderIds);
   const next = current.filter((order) => !removed.has(realOrderIdentity(order)));
@@ -1432,7 +1434,7 @@ function applyUserStreamSnapshot(
   if (!isRecord(value) || !isRealTradingOrderState(value.orders) || !isRecord(value.account) || !Array.isArray(value.positions)) {
     return false;
   }
-  applyOrderState(value.orders);
+  applyOrderState(normalizeRealTradingOrderState(value.orders));
   setAccount(value.account as RealAccountSummary);
   setPositions(value.positions as RealPosition[]);
   return true;
@@ -1462,7 +1464,7 @@ function mergeStreamOrders(current: RealOrderHistory | null, incoming: RealOrder
 function mergeStreamFills(current: RealOrderHistory | null, incoming: RealOrderHistory["fills"]): RealOrderHistory {
   const byIdentity = new Map<string, RealOrderHistory["fills"][number]>();
   [...incoming, ...(current?.fills ?? [])].forEach((fill) => {
-    const key = `${fill.hash ?? ""}:${fill.tid ?? fill.oid ?? ""}:${fill.timestamp ?? fill.time ?? 0}:${fill.price ?? fill.px ?? ""}:${fill.size ?? fill.sz ?? ""}`;
+    const key = `${fill.hash ?? ""}:${fill.tid ?? fill.oid ?? ""}:${fill.timestamp ?? 0}:${fill.price ?? ""}:${fill.size ?? ""}`;
     if (!byIdentity.has(key)) byIdentity.set(key, fill);
   });
   return { ...(current ?? emptyRealOrderHistory()), fills: [...byIdentity.values()].slice(0, 2_000) };
@@ -1517,5 +1519,5 @@ function realHistoricalOrderIdentity(order: RealOrderHistory["orders"][number]) 
 }
 
 function realFillIdentity(fill: RealOrderHistory["fills"][number]) {
-  return `${fill.hash ?? ""}:${fill.tid ?? ""}:${fill.oid ?? ""}:${fill.coin ?? fill.symbol ?? ""}:${fill.timestamp ?? fill.time ?? 0}:${fill.price ?? fill.px ?? ""}:${fill.size ?? fill.sz ?? ""}`;
+  return `${fill.hash ?? ""}:${fill.tid ?? ""}:${fill.oid ?? ""}:${fill.coin ?? fill.symbol ?? ""}:${fill.timestamp ?? 0}:${fill.price ?? ""}:${fill.size ?? ""}`;
 }
