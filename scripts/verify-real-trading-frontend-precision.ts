@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildPositionTpslOrders } from "../src/features/realTrading/lib/tpslOrders";
+import { assertHyperliquidCloid, deriveHyperliquidCloid } from "../src/features/realTrading/lib/hyperliquidCloid";
 import { normalizeHyperliquidPrice } from "../src/features/realTrading/lib/hyperliquidPrice";
 import {
   formatHyperliquidOrderSizeFloor,
@@ -12,6 +13,10 @@ import { buildRealTradingEntryOrderInput } from "../src/features/realTrading/lib
 import { resolveRealTradingSymbolForRecord, recordBelongsToMarket } from "../src/features/realTrading/lib/realTradingMarket";
 import { submitPositionCloseRequest, submitPositionTpslRequest } from "../src/features/realTrading/lib/positionActions";
 import type { RealOpenOrder, RealPosition, RealTradingSymbol } from "../src/api/realTrading";
+
+function testCloid(value: number) {
+  return assertHyperliquidCloid(`0x${value.toString(16).padStart(32, "0")}`);
+}
 
 test("DOGE size precision blocks decimal quantities before signer", () => {
   assert.equal(normalizeHyperliquidOrderSizeInput("1", 0, "DOGEUSDT"), "1");
@@ -25,6 +30,7 @@ test("DOGE size precision blocks decimal quantities before signer", () => {
   assert.throws(() => {
     buildRealTradingEntryOrderInput({
       assetId: 12,
+      cloid: testCloid(1),
       orderPrice: "0.07123456",
       orderSide: "buy",
       orderType: "limit",
@@ -65,6 +71,7 @@ test("Hyperliquid perpetual price normalization handles DOGE lows and integer pr
 test("limit, market protection, TP and SL prices use the same normalization entry", () => {
   const limit = buildRealTradingEntryOrderInput({
     assetId: 12,
+    cloid: testCloid(2),
     orderPrice: "0.07123456",
     orderSide: "buy",
     orderType: "limit",
@@ -78,6 +85,7 @@ test("limit, market protection, TP and SL prices use the same normalization entr
   const marketProtectionPrice = normalizeHyperliquidPrice(0.07123456 * 1.01, 0, "up");
   const market = buildRealTradingEntryOrderInput({
     assetId: 12,
+    cloid: testCloid(3),
     orderPrice: marketProtectionPrice,
     orderSide: "buy",
     orderType: "market",
@@ -91,6 +99,7 @@ test("limit, market protection, TP and SL prices use the same normalization entr
   const triggers = buildPositionTpslOrders({
     asset: 12,
     closingIsBuy: false,
+    parentCloid: testCloid(4),
     referencePrice: 0.07123456,
     size: "10",
     slPrice: "0.06",
@@ -110,6 +119,7 @@ test("switching to DOGE cannot submit stale BTC decimal quantity", () => {
   assert.throws(() => {
     buildRealTradingEntryOrderInput({
       assetId: 12,
+      cloid: testCloid(5),
       orderPrice: "0.07123456",
       orderSide: "buy",
       orderType: "limit",
@@ -135,6 +145,7 @@ test("display precision follows pxDecimals for current market only", () => {
 test("confirm modal draft normalizes without signer and market switch reset contract is explicit", () => {
   const draft = buildRealTradingEntryOrderInput({
     assetId: 12,
+    cloid: testCloid(6),
     orderPrice: "0.07123456",
     orderSide: "buy",
     orderType: "limit",
@@ -146,6 +157,7 @@ test("confirm modal draft normalizes without signer and market switch reset cont
   const triggers = buildPositionTpslOrders({
     asset: 12,
     closingIsBuy: false,
+    parentCloid: draft.cloid,
     referencePrice: Number(draft.price),
     size: draft.size,
     slPrice: "0.06",
@@ -175,6 +187,7 @@ test("confirm modal draft normalizes without signer and market switch reset cont
 
   const staleBtcDraft = () => buildRealTradingEntryOrderInput({
     assetId: 12,
+    cloid: testCloid(7),
     orderPrice: "0.07123456",
     orderSide: "buy",
     orderType: "limit",
@@ -248,15 +261,17 @@ test("main DEX and HIP-3 account records resolve by symbol/providerMarketId/asse
     },
   };
 
-  await submitPositionCloseRequest(signer, { mode: "market", positions: [mainPosition, hip3Position], scope: "all" }, symbols);
+  const closeAllCloid = testCloid(8);
+  await submitPositionCloseRequest(signer, { cloid: closeAllCloid, mode: "market", positions: [mainPosition, hip3Position], scope: "all" }, symbols);
   assert.deepEqual(placedOrders[0], [
-    { asset: 0, isBuy: false, market: true, price: "64350", reduceOnly: true, size: "0.12345" },
-    { asset: 10001, isBuy: true, market: true, price: "124.7", reduceOnly: true, size: "1.2345" },
+    { asset: 0, cloid: closeAllCloid, isBuy: false, market: true, price: "64350", reduceOnly: true, size: "0.12345" },
+    { asset: 10001, cloid: deriveHyperliquidCloid(closeAllCloid, "close:1"), isBuy: true, market: true, price: "124.7", reduceOnly: true, size: "1.2345" },
   ]);
 
-  await submitPositionTpslRequest(signer, { position: goldPosition, slPrice: "2300.12345", tpPrice: "2400.12345" }, symbols);
-  assert.deepEqual(placedTriggers[0].map((order: any) => ({ asset: order.asset, size: order.size, tpsl: order.tpsl })), [
-    { asset: 10002, size: "2.3456", tpsl: "tp" },
-    { asset: 10002, size: "2.3456", tpsl: "sl" },
+  const positionTpslCloid = testCloid(9);
+  await submitPositionTpslRequest(signer, { cloid: positionTpslCloid, position: goldPosition, slPrice: "2300.12345", tpPrice: "2400.12345" }, symbols);
+  assert.deepEqual(placedTriggers[0].map((order: any) => ({ asset: order.asset, cloid: order.cloid, size: order.size, tpsl: order.tpsl })), [
+    { asset: 10002, cloid: deriveHyperliquidCloid(positionTpslCloid, "tp"), size: "2.3456", tpsl: "tp" },
+    { asset: 10002, cloid: deriveHyperliquidCloid(positionTpslCloid, "sl"), size: "2.3456", tpsl: "sl" },
   ]);
 });

@@ -37,6 +37,9 @@ test("real-trading audit schema stores only non-replayable metadata and retains 
   idempotencyDb.close();
   const idempotencyNames = idempotencyColumns.map((column) => column.name);
   assert.equal(idempotencyNames.includes("cloid"), true);
+  assert.equal(idempotencyNames.includes("reconcileAttemptCount"), true);
+  assert.equal(idempotencyNames.includes("lastReconcileAttemptAt"), true);
+  assert.equal(idempotencyNames.includes("lastReconcileError"), true);
   assert.equal(idempotencyNames.includes("signature"), false);
   assert.equal(idempotencyNames.includes("payload"), false);
 
@@ -65,6 +68,7 @@ test("real-trading audit schema stores only non-replayable metadata and retains 
   };
   assert.equal(store.reserveRealTradingOrderRequest(baseReservation).kind, "reserved");
   store.saveRealTradingAudit(record("request-a", now + 1));
+  store.completeRealTradingOrderRequest("request-a", "accepted", JSON.stringify({ requestId: "request-a", outcome: "accepted" }), now + 1);
   assert.equal(store.findRealTradingAudit("USR-test", { requestId: "request-a" })?.requestId, "request-a");
   assert.equal(
     store.findRealTradingAudit("USR-test", { cloid: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" })?.requestId,
@@ -78,6 +82,66 @@ test("real-trading audit schema stores only non-replayable metadata and retains 
   });
   assert.equal(changed.kind, "existing");
   if (changed.kind === "existing") assert.equal(changed.requestId, "conflict");
+
+  const pendingReservation = {
+    ...baseReservation,
+    requestId: "request-pending",
+    clientOrderIds: ["0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    requestFingerprint: "fingerprint-pending",
+    submittedAt: now + 2,
+  };
+  assert.equal(store.reserveRealTradingOrderRequest(pendingReservation).kind, "reserved");
+  store.completeRealTradingOrderRequest("request-pending", "pending_reconciliation", JSON.stringify({ requestId: "request-pending" }), now + 3);
+  store.saveRealTradingAudit({ ...record("request-pending", now + 3), outcome: "pending_reconciliation", errorCategory: "provider_transport_unknown" });
+  assert.equal(store.listPendingRealTradingReconciliations()[0]?.requestId, "request-pending");
+  store.recordRealTradingReconciliationAttempt("request-pending", now + 4, "ECONNRESET [path]");
+  assert.equal(store.listPendingRealTradingReconciliations()[0]?.reconcileAttemptCount, 1);
+  store.saveRealTradingAudit({
+    ...record("request-manual", now + 4),
+    actionType: "cancel",
+    clientOrderIds: [],
+    outcome: "pending_reconciliation",
+    errorCategory: "provider_transport_unknown",
+  });
+  const userReconciliation = store.listUserRealTradingReconciliationRecords("USR-test");
+  assert.equal(userReconciliation.find((item) => item.requestId === "request-pending")?.autoRecoverable, true);
+  assert.equal(userReconciliation.find((item) => item.requestId === "request-manual")?.manualReview, true);
+  store.updateRealTradingAuditReconciliation("request-pending", "accepted", {
+    errorCategory: null,
+    providerStatus: "reconciled_order_status",
+    httpStatus: 200,
+    message: "reconciled",
+    completedAt: now + 5,
+  });
+  store.completeRealTradingOrderRequest("request-pending", "accepted", JSON.stringify({ requestId: "request-pending", outcome: "accepted" }), now + 5);
+  const operations = store.getRealTradingOperationsSummary(now + 6);
+  assert.equal(operations.pendingCount, 1);
+  assert.equal(operations.manualReviewPendingCount, 1);
+  assert.equal(operations.recentCounts.some((item) => item.outcome === "accepted"), true);
+});
+
+test("pending reconciliation listing limits by complete request instead of cloid row", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-audit-limit-"));
+  const store = new TradingStore(join(directory, "test.sqlite"));
+  t.after(() => {
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const now = Date.now();
+  store.reserveRealTradingOrderRequest({
+    requestId: "request-multi",
+    userId: "USR-test",
+    network: "hyperliquid-testnet",
+    masterAddress: "0x1111111111111111111111111111111111111111",
+    clientOrderIds: ["0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+    actionType: "order",
+    requestFingerprint: "fingerprint-multi",
+    submittedAt: now,
+  });
+  store.completeRealTradingOrderRequest("request-multi", "pending_reconciliation", JSON.stringify({ requestId: "request-multi" }), now);
+  const pending = store.listPendingRealTradingReconciliations(1);
+  assert.equal(pending.length, 2);
+  assert.deepEqual(pending.map((item) => item.requestId), ["request-multi", "request-multi"]);
 });
 
 function record(requestId: string, completedAt: number) {

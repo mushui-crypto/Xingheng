@@ -29,6 +29,59 @@ Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由
 的路径回退到 `index.html`。Web 容器只接收 `DOMAIN`；管理员密码、私钥和助记词
 仅进入 API 容器。所有手工 Compose 命令都必须带 `--env-file .env.production`。
 
+## Hyperliquid Testnet 真实交易运维
+
+`/app/trade` 第一阶段固定 Hyperliquid Testnet。平台后端不保存用户 API wallet 私钥、
+助记词、签名或可重放 payload；exchange 动作只转发前端已签名请求，并继续拒绝 Mainnet、
+资金转移、Builder fee 等越界动作。
+
+生产 `.env.production` 中可调整以下安全默认值；Compose 已通过 `env_file` 注入 API 容器，
+不需要在 `compose.yaml` 里硬编码：
+
+```bash
+REAL_TRADING_EXCHANGE_RATE_LIMIT_MAX=30
+REAL_TRADING_RISK_MAX_LEVERAGE=20
+REAL_TRADING_RISK_MAX_ORDER_NOTIONAL_EQUITY_RATIO=0.5
+REAL_TRADING_RISK_MAX_TOTAL_NOTIONAL_EQUITY_RATIO=2
+REAL_TRADING_RISK_MAX_OPEN_ORDERS=20
+REAL_TRADING_RISK_MAX_SNAPSHOT_AGE_MS=10000
+REAL_TRADING_AUDIT_RETENTION_DAYS=180
+REAL_TRADING_REALTIME_TOKEN_TTL_MS=60000
+REAL_TRADING_REALTIME_MAX_ADDRESSES=100
+REAL_TRADING_RECONCILIATION_INTERVAL_MS=60000
+REAL_TRADING_RECONCILIATION_BATCH_SIZE=50
+```
+
+Pending reconciliation worker 启动后立即检查一次，之后按
+`REAL_TRADING_RECONCILIATION_INTERVAL_MS` 限频运行；合法范围为 `30000..300000` 毫秒，
+非法或缺失时使用 `60000`。每轮按 `REAL_TRADING_RECONCILIATION_BATCH_SIZE` 读取待恢复
+request；合法范围为 `1..500`，非法或缺失时使用 `50`。该 worker 只查询 Hyperliquid
+Testnet `orderStatus`，不会重放原 order/cancel、不会重新发送签名 payload。只有同一
+request 的全部 cloid 均查到权威订单时才自动恢复；非 order 或仍未知的 pending 会留给
+运营核对。
+
+后台只读状态：
+
+```http
+GET /api/admin/real-trading/operations
+```
+
+该接口走现有后台登录保护，返回 Testnet 网络、reconciliation 状态、实时 user stream
+状态、风险 in-flight、pending 数量与最老年龄、近 24 小时 accepted/rejected/partial/
+pending 计数和审计清理状态。顶层状态为 `ok / degraded / unavailable`；存在 manual review
+pending、reconciliation 连续失败或 stale、active stream stale/reconnecting 时应按
+`degraded` 处理。无 active stream 属于 `idle` 场景，不单独视为异常。
+
+用户刷新恢复接口：
+
+```http
+GET /api/real-trading/orders/reconciliation
+```
+
+该接口走用户登录保护，禁用用户返回 `403`，只返回当前用户仍需对账的脱敏 pending 记录，
+用于前端硬刷新后恢复页面锁与审计轮询；HTTP 请求本身不访问 Hyperliquid、不触发恢复、
+不重放订单。
+
 ## 策略 Paper 运维
 
 策略模块只做 Binance Route B Paper 前向验证与历史回测只读展示，不接 Binance 交易

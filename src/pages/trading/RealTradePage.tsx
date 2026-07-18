@@ -9,6 +9,7 @@ import {
   fetchRealCandles,
   fetchRealTradingCloidStatus,
   fetchRealTradingOrderAudit,
+  fetchRealTradingReconciliation,
   fetchRealMarketSummary,
   fetchRealOrderbook,
   fetchRealPositions,
@@ -27,6 +28,7 @@ import {
   type RealPosition,
   type RealTrade,
   type RealTradingFees,
+  type RealTradingReconciliationRecord,
   type RealTradingUserStreamEvent,
   type RealTradingSymbol,
 } from "../../api/realTrading";
@@ -58,6 +60,11 @@ import {
   type RealTradingOrderLifecycle,
 } from "../../features/realTrading/model/realtimeState";
 import {
+  reconciliationRecordsToLifecycles,
+  resolveReconciliationAccess,
+} from "../../features/realTrading/model/reconciliationRecovery";
+import { decideUserStreamReconnect } from "../../features/realTrading/model/userStreamReconnect";
+import {
   decideRealTradingUserStreamSequence,
   parseRealTradingUserStreamEvent,
 } from "../../features/realTrading/model/userStreamState";
@@ -78,6 +85,8 @@ const realCandlePollingIntervalMs = 2_000;
 const realMarketPollingIntervalMs = 2_000;
 const realMarketStaleAfterMs = 10_000;
 const realOrderFallbackPollingIntervalMs = 5_000;
+const realReconciliationPollingIntervalMs = 15_000;
+const realUserStreamMaxReconnectAttempts = 5;
 
 export function RealTradePage() {
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
@@ -100,10 +109,15 @@ export function RealTradePage() {
   const [chartMessage, setChartMessage] = useState("");
   const [latestCandle, setLatestCandle] = useState<RealCandle | null>(null);
   const [connectMessage, setConnectMessage] = useState("");
+  const [signerCleared, setSignerCleared] = useState(false);
   const [walletProvider, setWalletProvider] = useState<Eip1193Provider | null>(null);
   const [realtimeState, dispatchRealtime] = useReducer(realTradingRealtimeReducer, initialRealTradingRealtimeState);
   const [orderConnectionStatus, setOrderConnectionStatus] = useState<RealTradingConnectionStatus>("reconnecting");
+  const [userStreamConnectionStatus, setUserStreamConnectionStatus] = useState<RealTradingConnectionStatus>("disconnected");
   const [userStreamRetryKey, setUserStreamRetryKey] = useState(0);
+  const [reconciliationRecords, setReconciliationRecords] = useState<RealTradingReconciliationRecord[]>([]);
+  const [reconciliationLoading, setReconciliationLoading] = useState(true);
+  const [reconciliationError, setReconciliationError] = useState("");
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -122,10 +136,12 @@ export function RealTradePage() {
   )) ?? null;
   const isConnected = Boolean(walletAddress);
   const effectiveConnectionStatus = isConnected
-    ? combineConnectionStatuses(realtimeState.connectionStatus, orderConnectionStatus)
+    ? combineConnectionStatuses(realtimeState.connectionStatus, orderConnectionStatus, userStreamConnectionStatus)
     : realtimeState.connectionStatus;
   const marketReady = effectiveConnectionStatus === "connected";
   const pendingReconciliationOrders = realtimeState.orders.filter((order) => order.status === "pending_reconciliation");
+  const reconciliationAccess = resolveReconciliationAccess(reconciliationRecords, reconciliationError);
+  const reconciliationPending = reconciliationLoading || reconciliationAccess.blocksNewRisk || pendingReconciliationOrders.length > 0;
   const pendingOperationKeys = useMemo(
     () => [...new Set(pendingReconciliationOrders.flatMap((order) => order.operationKey ? [order.operationKey] : []))],
     [pendingReconciliationOrders],
@@ -328,10 +344,61 @@ export function RealTradePage() {
     void discoverInjectedEthereumProvider().then((provider) => {
       if (active) {
         setWalletProvider(provider);
+        if (provider?.request) {
+          void provider.request({ method: "eth_accounts" }).then((accounts) => {
+            if (!active) return;
+            const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
+            if (!address) return;
+            orderSequenceRef.current = null;
+            setWalletAddress(address);
+            setSignerCleared(true);
+            setConnectMessage("已恢复钱包只读连接；本地 signer 已清除，请重新授权 Agent 后再交易。");
+            void loadAccount(address, true);
+          }).catch(() => undefined);
+        }
       }
     });
     return () => {
       active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    let controller: AbortController | null = null;
+    let loading = false;
+    const refresh = async (initial = false) => {
+      if (!active || loading || document.visibilityState === "hidden") return;
+      loading = true;
+      controller?.abort();
+      controller = new AbortController();
+      if (initial) setReconciliationLoading(true);
+      setReconciliationError("");
+      try {
+        const response = await fetchRealTradingReconciliation(controller.signal);
+        if (!active) return;
+        setReconciliationRecords(response.records);
+        dispatchRealtime({
+          type: "reconciliation_synchronized",
+          orders: reconciliationRecordsToLifecycles(response.records),
+        });
+      } catch (error) {
+        if (!active || controller.signal.aborted) return;
+        const message = error instanceof Error ? error.message : "真实交易待对账状态加载失败。";
+        setReconciliationRecords([]);
+        setReconciliationError(message);
+        dispatchRealtime({ type: "reconciliation_synchronized", orders: [] });
+      } finally {
+        if (active) setReconciliationLoading(false);
+        loading = false;
+      }
+    };
+    void refresh(true);
+    const timer = window.setInterval(() => void refresh(), realReconciliationPollingIntervalMs);
+    return () => {
+      active = false;
+      controller?.abort();
+      window.clearInterval(timer);
     };
   }, []);
 
@@ -345,6 +412,7 @@ export function RealTradePage() {
       const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
       orderSequenceRef.current = null;
       setWalletAddress(address);
+      setSignerCleared(Boolean(address));
       setConnectMessage(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。");
       void loadAccount(address);
     };
@@ -381,6 +449,7 @@ export function RealTradePage() {
   useEffect(() => {
     if (!walletAddress) {
       userStreamSequenceRef.current = null;
+      setUserStreamConnectionStatus("disconnected");
       return;
     }
     let cancelled = false;
@@ -396,14 +465,19 @@ export function RealTradePage() {
 
     const scheduleReconnect = () => {
       if (cancelled || reconnectTimer !== null) return;
-      setOrderConnectionStatus("reconnecting");
+      const decision = decideUserStreamReconnect(reconnectAttempt, realUserStreamMaxReconnectAttempts);
+      if (decision.exhausted) {
+        setUserStreamConnectionStatus("disconnected");
+        setAccountError("真实交易用户流连续重连失败，已停止自动重试；可手动重新连接。安全退出仍可通过权威快照执行。");
+        return;
+      }
+      setUserStreamConnectionStatus("reconnecting");
       markAuthoritativeUserStateRecovering();
-      const delay = Math.min(30_000, 1_000 * 2 ** Math.min(reconnectAttempt, 5));
-      reconnectAttempt += 1;
+      reconnectAttempt = decision.nextAttempt;
       reconnectTimer = window.setTimeout(() => {
         reconnectTimer = null;
         void connect();
-      }, delay);
+      }, decision.delayMs);
     };
 
     const applyStreamEvent = (event: RealTradingUserStreamEvent) => {
@@ -418,7 +492,7 @@ export function RealTradePage() {
       }
       userStreamSequenceRef.current = event.sequence;
       const connectionStatus = normalizeRealTradingConnectionStatus(event.status) ?? "reconnecting";
-      setOrderConnectionStatus(connectionStatus);
+      setUserStreamConnectionStatus(connectionStatus);
       if (event.stale || event.reconnecting || connectionStatus !== "connected") {
         markAuthoritativeUserStateRecovering();
         return;
@@ -466,7 +540,7 @@ export function RealTradePage() {
 
     async function connect() {
       if (cancelled) return;
-      setOrderConnectionStatus("reconnecting");
+      setUserStreamConnectionStatus("reconnecting");
       try {
         const grant = await requestRealTradingRealtimeToken(walletAddress);
         if (cancelled) return;
@@ -506,6 +580,7 @@ export function RealTradePage() {
     }
 
     userStreamSequenceRef.current = null;
+    setUserStreamConnectionStatus("reconnecting");
     void connect();
     return () => {
       cancelled = true;
@@ -721,6 +796,7 @@ export function RealTradePage() {
       }
       orderSequenceRef.current = null;
       setWalletAddress(address);
+      setSignerCleared(false);
       await loadAccount(address);
       setConnectMessage("主账户地址已连接。");
     } catch (error) {
@@ -921,7 +997,7 @@ export function RealTradePage() {
 
           <RealRecords
             pendingOperationKeys={pendingOperationKeys}
-            riskIncreasingActionsBlocked={!marketReady}
+            riskIncreasingActionsBlocked={!marketReady || reconciliationPending}
             accountLoading={accountLoading}
             bestAsk={orderbook?.asks[0]?.price}
             bestBid={orderbook?.bids[0]?.price}
@@ -954,7 +1030,12 @@ export function RealTradePage() {
             onSubmitted={() => loadAccount(walletAddress)}
             openOrderCount={openOrders.length}
             pendingOperationKeys={pendingOperationKeys}
-            reconciliationPending={pendingReconciliationOrders.length > 0}
+            reconciliationError={reconciliationError}
+            reconciliationLoading={reconciliationLoading}
+            reconciliationMessage={reconciliationAccess.message}
+            reconciliationPending={reconciliationPending}
+            reconciliationRecords={reconciliationRecords}
+            signerCleared={signerCleared}
             position={selectedPosition}
             positionSize={selectedPosition ? Math.abs(selectedPosition.size) : 0}
             session={tradingSession}
@@ -1280,8 +1361,7 @@ function connectionStatusMessage(status: typeof initialRealTradingRealtimeState.
 }
 
 function combineConnectionStatuses(
-  market: RealTradingConnectionStatus,
-  orders: RealTradingConnectionStatus,
+  ...statuses: RealTradingConnectionStatus[]
 ): RealTradingConnectionStatus {
   const severity: Record<RealTradingConnectionStatus, number> = {
     connected: 0,
@@ -1289,7 +1369,10 @@ function combineConnectionStatuses(
     reconnecting: 2,
     disconnected: 3,
   };
-  return severity[market] >= severity[orders] ? market : orders;
+  return statuses.reduce<RealTradingConnectionStatus>(
+    (mostSevere, status) => severity[status] > severity[mostSevere] ? status : mostSevere,
+    "connected",
+  );
 }
 
 function realPositionNotional(position: RealPosition) {

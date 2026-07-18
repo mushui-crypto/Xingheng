@@ -1,6 +1,6 @@
 import type { CandleInterval } from "../types";
 import type { MarketSourceType, SymbolCategory, TradeStatus } from "../types/market";
-import { requestJson, userHeaders } from "./httpClient";
+import { adminHeaders, requestJson, userHeaders } from "./httpClient";
 
 export type RealTradingNetwork = "hyperliquid-testnet";
 export type RealTradingMarginMode = "cross" | "isolated";
@@ -279,6 +279,102 @@ export type RealTradingOrderAudit = {
   timestamp: number;
 };
 
+export type RealTradingReconciliationRecord = {
+  requestId: string;
+  actionType: string;
+  submittedAt: number | null;
+  clientOrderIds: string[];
+  autoRecoverable: boolean;
+  manualReview: boolean;
+  lastReconcileAttemptAt: number | null;
+  errorCategory: string | null;
+  blockingScope: "new_risk" | "manual_review";
+};
+
+export type RealTradingReconciliationResponse = {
+  network: RealTradingNetwork;
+  records: RealTradingReconciliationRecord[];
+};
+
+export type AdminRealTradingOperationsStatus = "ok" | "degraded" | "unavailable";
+export type AdminRealTradingMetric = number | "unavailable";
+
+export type AdminRealTradingOperations = {
+  network: RealTradingNetwork;
+  status: AdminRealTradingOperationsStatus;
+  generatedAt: number;
+  reconciliation: {
+    status?: AdminRealTradingOperationsStatus;
+    enabled?: boolean;
+    running?: boolean;
+    network?: RealTradingNetwork;
+    lastAttemptAt?: number | null;
+    lastSuccessAt?: number | null;
+    lastCompletedAt?: number | null;
+    lastRunReason?: string | null;
+    consecutiveFailures?: number;
+    lastError?: string | null;
+    lastScannedPending?: number;
+    lastRecoveredRequests?: number;
+    nextCheckAt?: number | null;
+    stale?: boolean;
+  };
+  userStreams: {
+    status?: AdminRealTradingOperationsStatus;
+    activeStreamCount?: number;
+    activeUserCount?: number;
+    maxStreamCount?: number;
+    streams?: Array<{
+      address: string;
+      status: string;
+      reconnecting: boolean;
+      stale: boolean;
+      userCount: number;
+      listenerCount: number;
+      sequence: number;
+      lastSnapshotAt: number | null;
+      lastEventAt: number | null;
+    }>;
+  };
+  risk: {
+    status?: AdminRealTradingOperationsStatus;
+    limits?: {
+      maxLeverage: number;
+      maxOrderNotionalEquityRatio: number;
+      maxTotalNotionalEquityRatio: number;
+      maxOpenOrders: number;
+      maxSnapshotAgeMs: number;
+    };
+    inFlightCount?: number;
+    inFlightNotional?: number;
+    inFlightByAddress?: Array<{
+      masterAddress: string;
+      count: number;
+      notional: number;
+    }>;
+  };
+  operations: {
+    pendingCount: AdminRealTradingMetric;
+    autoRecoverablePendingCount: AdminRealTradingMetric;
+    manualReviewPendingCount: AdminRealTradingMetric;
+    idempotencyPendingWithoutAuditCount?: AdminRealTradingMetric;
+    oldestPendingSubmittedAt: number | null;
+    oldestPendingAgeMs: number | null;
+    recentWindowMs?: number;
+    recentCounts: Array<{
+      actionType: string;
+      outcome: "accepted" | "rejected" | "partial" | "pending_reconciliation";
+      count: number;
+    }>;
+    auditCleanup: "unavailable" | {
+      retentionDays: number;
+      lastMaintenanceAt: number | null;
+      lastDeletedRows: number;
+    };
+  };
+  mainnetReadinessGaps?: string[];
+};
+
 export type RealTradingOrderSnapshot = {
   authoritative: true;
   fills: RealFill[];
@@ -445,6 +541,28 @@ export async function fetchRealTradingOrderAudit(requestId: string) {
     {
       init: { headers: realTradingHeaders() },
       userAuthFailure: true,
+    },
+  );
+}
+
+export async function fetchRealTradingReconciliation(signal?: AbortSignal) {
+  return requestJson<RealTradingReconciliationResponse>(
+    "/api/real-trading/orders/reconciliation",
+    "真实交易待对账状态加载失败。",
+    {
+      init: { headers: realTradingHeaders(), cache: "no-store", signal },
+      userAuthFailure: true,
+    },
+  );
+}
+
+export async function fetchAdminRealTradingOperations(signal?: AbortSignal) {
+  return requestJson<AdminRealTradingOperations>(
+    "/api/admin/real-trading/operations",
+    "真实交易运维状态加载失败。",
+    {
+      init: { headers: adminHeaders(), cache: "no-store", signal },
+      networkErrorMessage: "真实交易运维服务暂时不可用。",
     },
   );
 }

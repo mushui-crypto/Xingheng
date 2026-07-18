@@ -38,6 +38,9 @@ type AddressStream = {
   disconnected: boolean;
   seenProviderEvents: Set<string>;
   lastProviderTimestampByChannel: Map<string, number>;
+  lastSnapshotAt: number | null;
+  lastEventAt: number | null;
+  status: "connected" | "stale" | "reconnecting";
 };
 
 type UserStreamFactory = () => {
@@ -78,6 +81,9 @@ export class RealTradingUserStreamManager {
         disconnected: false,
         seenProviderEvents: new Set(),
         lastProviderTimestampByChannel: new Map(),
+        lastSnapshotAt: null,
+        lastEventAt: null,
+        status: "reconnecting",
       };
       this.streams.set(address, stream);
     }
@@ -111,6 +117,32 @@ export class RealTradingUserStreamManager {
     const stream = this.streams.get(address);
     if (stream) await this.stopStream(stream);
     this.activeAddressByUser.delete(userId);
+  }
+
+  getHealth(now = Date.now()) {
+    const streams = [...this.streams.values()].map((stream) => {
+      const stale = stream.status !== "connected"
+        || stream.disconnected
+        || Boolean(stream.reconnectTimer)
+        || (stream.lastSnapshotAt !== null && now - stream.lastSnapshotAt > 15 * 60_000);
+      return {
+        address: maskAddress(stream.address),
+        status: stale ? (stream.status === "connected" ? "stale" : stream.status) : stream.status,
+        reconnecting: stream.disconnected || Boolean(stream.reconnectTimer) || stream.starting,
+        stale,
+        userCount: stream.userRefs.size,
+        listenerCount: stream.listeners.size,
+        sequence: stream.sequence,
+        lastSnapshotAt: stream.lastSnapshotAt,
+        lastEventAt: stream.lastEventAt,
+      };
+    });
+    return {
+      activeStreamCount: streams.length,
+      activeUserCount: this.activeAddressByUser.size,
+      maxStreamCount: readMaxStreams(),
+      streams,
+    };
   }
 
   private async start(stream: AddressStream) {
@@ -241,6 +273,9 @@ export class RealTradingUserStreamManager {
       channel,
       data,
     };
+    stream.lastEventAt = event.timestamp;
+    stream.status = status;
+    if (mode === "snapshot") stream.lastSnapshotAt = event.timestamp;
     stream.listeners.forEach((listener) => listener(event));
   }
 
@@ -318,4 +353,9 @@ function readMaxStreams() {
 function createHyperliquidUserStream(): ReturnType<UserStreamFactory> {
   const transport = new WebSocketTransport({ isTestnet: true, resubscribe: true });
   return { client: new SubscriptionClient({ transport }), transport };
+}
+
+function maskAddress(address: string) {
+  const value = String(address);
+  return value.length > 12 ? `${value.slice(0, 6)}...${value.slice(-4)}` : "[address]";
 }

@@ -230,6 +230,18 @@ server/modules/api/realTradingRoutes.ts
 - 使用 Hyperliquid 官方 `orderStatus` 按 128-bit cloid 查询权威状态。
 - `unknownOid` 标准化为 `status=unknown, order=null`，只表示当前未找到，不得推断成拒绝或允许盲目重下。
 - 页面遇到 `pending_reconciliation` 时保留该状态并周期查询同一 cloid；查到订单后才用权威状态替换。等待期间暂停新的开仓，但保留 reduce-only 退出能力。
+- 服务端同时运行受控 pending reconciliation worker：启动后立即检查一次，之后按 `REAL_TRADING_RECONCILIATION_INTERVAL_MS`（默认 `60000ms`，范围 `30000..300000`）限频查询；每轮按 `REAL_TRADING_RECONCILIATION_BATCH_SIZE`（默认 `50` 个 request，范围 `1..500`）读取待恢复 request；只调用 Hyperliquid `orderStatus`，绝不重放原 order、cancel 或签名 payload。
+- worker 只在同一 request 的全部 cloid 都查到权威 `order` 时，将本地 `pending_reconciliation / processing` 转为 `accepted` 并写入脱敏标准回执；`unknownOid`、上游失败或部分不可确认时继续保持 pending，并暴露给运营核对。
+- worker 从 SQLite 按完整 request 分组读取 pending；即使设置 batch limit，也不得截断同一 request 的 cloid 集合后判定整请求成功。
+
+`GET /api/real-trading/orders/reconciliation`
+
+- 登录用户保护，禁用用户返回 `403`，`Cache-Control: no-store`。
+- 只返回当前登录用户仍需对账的本地 pending 记录；HTTP 请求本身不访问 Hyperliquid、不触发恢复、不重放订单。
+- 响应：`{ network:"hyperliquid-testnet", records:[{ requestId, actionType, submittedAt, clientOrderIds, autoRecoverable, manualReview, lastReconcileAttemptAt, errorCategory, blockingScope }] }`。
+- `autoRecoverable=true` 仅用于 order 且存在对应 cloid 幂等记录，后台 worker 会继续用 `orderStatus` 权威恢复；cancel / updateLeverage / approveAgent 等非 order pending 标记为 `manualReview=true`。
+- `blockingScope` 当前为 `"new_risk"` 或 `"manual_review"`，用于前端硬刷新后恢复页面锁、提示和审计轮询；空态固定返回 `records=[]`。
+- 不返回 master address、vault address、signature、nonce、私钥、助记词、原始 payload、provider 原文或内部堆栈。
 
 主实时链路使用 Hyperliquid Testnet user WebSocket，不把短轮询包装成完整实时：
 
@@ -245,6 +257,23 @@ server/modules/api/realTradingRoutes.ts
 - 只保存 `requestId / userId / network / masterAddress / actionType / cloid[] / outcome / errorCategory / providerStatus / HTTP status / 时间` 等不可重放元数据。
 - 禁止保存或记录 signature、nonce、私钥、助记词、seed、原始已签名 payload；审计 message 使用固定分类文案，不保存上游或请求原文。
 - `real_trading_order_idempotency` 只保存 cloid 唯一键、处理状态和脱敏标准回执，不保存签名请求；结果未知固定为 `pending_reconciliation`，等待权威订单/成交状态决定。
+- `real_trading_order_idempotency` 追加 `reconcileAttemptCount / lastReconcileAttemptAt / lastReconcileError`，用于运营核对恢复尝试；迁移只追加列，兼容旧 SQLite。
+
+### 4.7 后台运营健康状态
+
+`GET /api/admin/real-trading/operations`
+
+- 管理员登录保护，只读，`Cache-Control: no-store`。
+- 固定返回 `network=hyperliquid-testnet`；本接口不提供 Mainnet 切换开关。
+- 返回字段包括：
+  - `reconciliation`：enabled / running / lastAttemptAt / lastSuccessAt / lastCompletedAt / consecutiveFailures / lastError / lastScannedPending / lastRecoveredRequests / nextCheckAt。
+  - `userStreams`：活跃 stream 数、活跃用户数、maxStreamCount，以及每个脱敏地址的 status / reconnecting / stale / sequence / lastSnapshotAt / lastEventAt。
+  - `risk`：当前风控默认/环境变量配置、in-flight count/notional 与脱敏地址聚合。
+  - `operations`：pending 数量、最老 pending 时间与年龄、近 24 小时 accepted / rejected / partial / pending 计数、审计清理状态。
+  - `mainnetReadinessGaps`：Mainnet 准入前置缺口清单。
+- 顶层 `status` 为 `ok / degraded / unavailable`：无 active stream 属于 idle，不降级；reconciliation 连续失败或 stale、存在 manualReview pending、存在无审计的 idempotency pending、或 active stream stale/reconnecting 时返回 `degraded`；组件不可用时返回 `unavailable`。
+- pending 汇总以 `real_trading_exchange_audit.outcome=pending_reconciliation` 为准，不只看 order idempotency；同时拆分 `autoRecoverablePendingCount` 与 `manualReviewPendingCount`，避免 cancel / updateLeverage / approveAgent 的未知结果被误报为 0。
+- 字段无法可靠取得时返回 `unavailable` 或 `null`，不编造数据；不得返回 signature、nonce、私钥、助记词、原始已签名 payload、SMTP/环境变量 secret 或内部堆栈。
 
 ## 5. 前端签名边界
 

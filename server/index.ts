@@ -18,6 +18,7 @@ import { getHyperliquidRealTradingConfig } from "./modules/hyperliquid/hyperliqu
 import { HyperliquidInfoClient } from "./modules/hyperliquid/HyperliquidInfoClient";
 import { RealTradingOrderStateService } from "./modules/hyperliquid/RealTradingOrderStateService";
 import { RealTradingRealtimeTokenService } from "./modules/hyperliquid/RealTradingRealtimeTokenService";
+import { RealTradingReconciliationService } from "./modules/hyperliquid/RealTradingReconciliationService";
 import { RealTradingRiskGuard } from "./modules/hyperliquid/RealTradingRiskGuard";
 import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingUserStreamManager";
 import { KlineStore } from "./modules/kline/KlineStore";
@@ -101,6 +102,8 @@ const realTradingExchange = new HyperliquidExchangeProxy(
 const realTradingOrderState = new RealTradingOrderStateService(realTradingInfo);
 const realTradingRealtimeTokens = new RealTradingRealtimeTokenService();
 const realTradingUserStreams = new RealTradingUserStreamManager(realTradingInfo, realTradingOrderState);
+const realTradingReconciliation = new RealTradingReconciliationService(realTradingInfo, tradingStore);
+realTradingReconciliation.start();
 users.onStatusChange((userId, status) => {
   if (status !== "disabled") return;
   realTradingRealtimeTokens.revokeUser(userId);
@@ -119,6 +122,9 @@ registerRealTradingRoutes({
   orderState: realTradingOrderState,
   realtimeTokens: realTradingRealtimeTokens,
   auditStore: tradingStore,
+  risk: realTradingRisk,
+  userStreams: realTradingUserStreams,
+  reconciliation: realTradingReconciliation,
 });
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });
@@ -282,6 +288,7 @@ async function shutdown(signal: string) {
     martingaleGridPaperWorker.stop();
     fixedGridPaperWorker.stop();
     strategyRuntime.stop();
+    realTradingReconciliation.stop();
     await realTradingUserStreams.stop();
     await market.stop();
     for (const client of socketHub.clients) client.terminate();
