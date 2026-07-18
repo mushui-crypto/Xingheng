@@ -18,6 +18,22 @@ test("risk guard enforces the default leverage ceiling", async () => {
   await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 20 }));
 });
 
+test("risk guard allows legal leverage and margin mode changes without account or balance reads", async () => {
+  let reads = 0;
+  const info = {
+    async getAccountSummary() { reads += 1; throw new Error("account summary unavailable"); },
+    async getPositions() { reads += 1; throw new Error("positions unavailable"); },
+    async getOpenOrders() { reads += 1; throw new Error("open orders unavailable"); },
+    async getSymbols() { reads += 1; throw new Error("symbols unavailable"); },
+  } as unknown as HyperliquidInfoClient;
+  const guard = new RealTradingRiskGuard(info, limits);
+
+  await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 1 }));
+  await guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: false, leverage: 20 }));
+  await assert.rejects(() => guard.assertAllowed(request({ type: "updateLeverage", asset: 0, isCross: true, leverage: 21 })), /20x/);
+  assert.equal(reads, 0);
+});
+
 test("risk guard rejects oversized opening orders and aggregate exposure", async () => {
   const info = stubInfo({ equity: 100, positionNotional: 160, openOrders: 0 });
   const guard = new RealTradingRiskGuard(info, limits);

@@ -486,7 +486,52 @@ function sortValue(value: unknown): unknown {
 
 function safeLocalErrorMessage(error: unknown) {
   const message = error instanceof Error ? error.message : "真实交易请求校验失败。";
-  return sensitiveKeyPattern.test(message) ? "真实交易请求包含禁止的敏感字段。" : message.slice(0, 300);
+  if (message.includes("signatureChainId")) {
+    return "请使用 Hyperliquid Testnet 签名参数 signatureChainId=0x66eee 后重试。";
+  }
+  if (message.includes("签名账户与 masterAddress 不一致")) {
+    return "签名钱包与声明的主账户不一致，请切换到对应主钱包后重试。";
+  }
+  if (message.includes("尚未授权此 Hyperliquid API wallet")) {
+    return "当前账户尚未完成 Hyperliquid API wallet 授权，请先完成 Agent 授权。";
+  }
+  if (message.includes("不是当前用户已授权的 API wallet")) {
+    return "签名使用的 API wallet 与当前账户已授权 Agent 不一致，请重新授权或切换钱包。";
+  }
+  if (message.includes("signature 格式不正确") || message.includes("signature 缺失")) {
+    return "真实交易签名格式不正确，请重新签名后重试。";
+  }
+  if (containsSensitiveErrorMaterial(message)) {
+    return "真实交易请求校验失败，请重新授权或签名后重试。";
+  }
+  const redacted = redactErrorText(message).trim();
+  return redacted ? redacted.slice(0, 300) : "真实交易请求校验失败。";
+}
+
+function containsSensitiveErrorMaterial(value: string) {
+  const sensitiveExplicitAssignmentPattern = /["']?\b(?:r|s|v|signature|private(?:[_-]?key)?|mnemonic|seed|secret|raw[\s_-]?payload|signed[\s_-]?payload|payload|token|bearer|authorization)\b["']?\s*[:=]\s*["']?(?:bearer\s+)?[^"'\s<>},\]]+/i;
+  const sensitiveSpaceAssignmentPattern = /\b(?:r|s|v|private(?:[_-]?key)?|mnemonic|seed|secret|raw[\s_-]?payload|signed[\s_-]?payload|payload|token|bearer|authorization)\b\s+["']?[^"'\s<>},\]]+/i;
+  const authorizationBearerPattern = /["']?\bauthorization\b["']?\s*(?:[:=]|\s+)\s*["']?bearer\s+[^"'\s<>},\]]+/i;
+  return sensitiveExplicitAssignmentPattern.test(value)
+    || sensitiveSpaceAssignmentPattern.test(value)
+    || authorizationBearerPattern.test(value);
+}
+
+function redactErrorText(value: string) {
+  const sensitiveExplicitAssignmentPattern = /(["']?\b(?:r|s|v|signature|private(?:[_-]?key)?|mnemonic|seed|secret|raw[\s_-]?payload|signed[\s_-]?payload|payload|token)\b["']?\s*[:=]\s*)["']?[^"'\s<>},\]]+["']?/gi;
+  const sensitiveSpaceAssignmentPattern = /\b(r|s|v|private(?:[_-]?key)?|mnemonic|seed|secret|raw[\s_-]?payload|signed[\s_-]?payload|payload|token|bearer|authorization)\b\s+["']?[^"'\s<>},\]]+["']?/gi;
+  const authorizationBearerPattern = /(["']?\bauthorization\b["']?\s*(?:[:=]|\s+)\s*)["']?bearer\s+[^"'\s<>},\]]+["']?/gi;
+  const bearerCredentialPattern = /(["']?\bbearer\b["']?\s*(?:[:=]|\s+)\s*)["']?[^"'\s<>},\]]+["']?/gi;
+  return value
+    .replace(/https?:\/\/[^\s"'<>]+/gi, "[url]")
+    .replace(/file:\/\/\/?[^\s"'<>]+/gi, "[path]")
+    .replace(/(?:^|[\s"'(=])(?:\/|\.\/|\.\.\/)[^\s"'<>]+/g, (match) => match[0].trim() ? "[path]" : `${match[0]}[path]`)
+    .replace(/\b0x[a-fA-F0-9]{40}\b/g, "[address]")
+    .replace(/\b0x[a-fA-F0-9]{32,}\b/g, "[hex]")
+    .replace(authorizationBearerPattern, "$1[redacted]")
+    .replace(bearerCredentialPattern, "$1[redacted]")
+    .replace(sensitiveExplicitAssignmentPattern, "$1[redacted]")
+    .replace(sensitiveSpaceAssignmentPattern, "$1=[redacted]");
 }
 
 function publicCategoryMessage(category: string) {

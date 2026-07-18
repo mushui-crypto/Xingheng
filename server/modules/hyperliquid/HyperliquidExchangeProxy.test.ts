@@ -199,6 +199,101 @@ test("malformed HTTP 200 approveAgent response never creates a binding", async (
   assert.equal(store.binding, undefined);
 });
 
+test("local signature validation errors return actionable safe messages without sensitive-field false positives", async () => {
+  const cases = [
+    {
+      error: "approveAgent 仅允许 Hyperliquid Testnet signatureChainId。",
+      expected: "请使用 Hyperliquid Testnet 签名参数 signatureChainId=0x66eee 后重试。",
+    },
+    {
+      error: "approveAgent 签名账户与 masterAddress 不一致。",
+      expected: "签名钱包与声明的主账户不一致，请切换到对应主钱包后重试。",
+    },
+    {
+      error: "当前用户尚未授权此 Hyperliquid API wallet。",
+      expected: "当前账户尚未完成 Hyperliquid API wallet 授权，请先完成 Agent 授权。",
+    },
+    {
+      error: "exchange 签名不是当前用户已授权的 API wallet。",
+      expected: "签名使用的 API wallet 与当前账户已授权 Agent 不一致，请重新授权或切换钱包。",
+    },
+    {
+      error: "exchange signature 格式不正确。",
+      expected: "真实交易签名格式不正确，请重新签名后重试。",
+    },
+  ];
+  for (const item of cases) {
+    const verifier: RealTradingSignatureVerifier = { verify: () => { throw new Error(item.error); } };
+    await assert.rejects(
+      () => new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier).forward(approveAgentPayload(), context),
+      (error: unknown) => {
+        assert.ok(error instanceof RealTradingExchangeSubmissionError);
+        assert.equal(error.httpStatus, 400);
+        assert.equal(error.receipt.message, item.expected);
+        assert.doesNotMatch(error.receipt.message ?? "", /包含禁止的敏感字段/);
+        assert.doesNotMatch(JSON.stringify(error.receipt), /private.?key|mnemonic|raw.?payload/i);
+        return true;
+      },
+    );
+  }
+});
+
+test("unknown local signature errors are redacted before reaching receipts", async () => {
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => {
+      throw new Error("bad signature r=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa s=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb v=27 payload=/tmp/raw.json privateKey=abc mnemonic=seed https://example.test?token=secret");
+    },
+  };
+  await assert.rejects(
+    () => new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier).forward(approveAgentPayload(), context),
+    (error: unknown) => {
+      assert.ok(error instanceof RealTradingExchangeSubmissionError);
+      const message = error.receipt.message ?? "";
+      assert.equal(message, "真实交易请求校验失败，请重新授权或签名后重试。");
+      assert.doesNotMatch(message, /0xaaaaaaaa|0xbbbbbbbb|v=27|\/tmp\/raw\.json|privateKey=abc|mnemonic=seed|token=secret/);
+      assert.doesNotMatch(JSON.stringify(error.receipt), /privateKey=abc|mnemonic=seed|raw\.json/);
+      return true;
+    },
+  );
+});
+
+test("unknown local signature errors redact space-delimited sensitive fields", async () => {
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => {
+      throw new Error("signature failure v 27 privateKey abc mnemonic twelve_words token bearer-secret authorization BearerSecret payload raw-body r 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa s 0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+    },
+  };
+  await assert.rejects(
+    () => new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier).forward(approveAgentPayload(), context),
+    (error: unknown) => {
+      assert.ok(error instanceof RealTradingExchangeSubmissionError);
+      const message = error.receipt.message ?? "";
+      assert.equal(message, "真实交易请求校验失败，请重新授权或签名后重试。");
+      assert.doesNotMatch(message, /v 27|privateKey abc|mnemonic twelve_words|token bearer-secret|authorization BearerSecret|payload raw-body|0xaaaaaaaa|0xbbbbbbbb/);
+      assert.doesNotMatch(JSON.stringify(error.receipt), /v 27|privateKey abc|mnemonic twelve_words|token bearer-secret|authorization BearerSecret|payload raw-body/);
+      return true;
+    },
+  );
+});
+
+test("unknown local signature errors never expose authorization bearer or JSON secrets", async () => {
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => {
+      throw new Error('provider verifier failed Authorization: Bearer auth-secret bearer bearer-secret {"privateKey":"json-pk","mnemonic":"json-words","token":"json-token","v":27}');
+    },
+  };
+  await assert.rejects(
+    () => new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier).forward(approveAgentPayload(), context),
+    (error: unknown) => {
+      assert.ok(error instanceof RealTradingExchangeSubmissionError);
+      const message = error.receipt.message ?? "";
+      assert.equal(message, "真实交易请求校验失败，请重新授权或签名后重试。");
+      assert.doesNotMatch(JSON.stringify(error.receipt), /auth-secret|bearer-secret|json-pk|json-words|json-token|"v":27|Authorization|privateKey|mnemonic/i);
+      return true;
+    },
+  );
+});
+
 test("cancel item error is rejected instead of reported as accepted", async (t) => {
   const originalFetch = globalThis.fetch;
   t.after(() => { globalThis.fetch = originalFetch; });
@@ -291,6 +386,19 @@ function orderPayload(clientOrderIds: string[]) {
       type: "order",
       grouping: "na",
       orders: clientOrderIds.map((c) => ({ a: 0, b: true, p: "10", s: "1", r: false, c, t: { limit: { tif: "Gtc" } } })),
+    },
+  };
+}
+
+function approveAgentPayload() {
+  return {
+    ...validPayload(),
+    action: {
+      type: "approveAgent",
+      hyperliquidChain: "Testnet",
+      signatureChainId: "0x66eee",
+      agentAddress: "0x2222222222222222222222222222222222222222",
+      nonce: 1,
     },
   };
 }

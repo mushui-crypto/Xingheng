@@ -4,6 +4,7 @@ import { forwardSignedRealTradingExchange, type RealTradingExchangeResponse, typ
 import type { HyperliquidCloid } from "./hyperliquidCloid";
 
 const agentName = "StellaX Session";
+const hyperliquidTestnetSignatureChainId = "0x66eee" as const;
 
 export type HyperliquidLimitOrderInput = {
   asset: number;
@@ -102,7 +103,11 @@ export class HyperliquidSessionSigner {
     const transport = new BackendExchangeTransport(masterAddress);
     this.agentWallet = Wallet.createRandom();
     this.agentAddress = this.agentWallet.address;
-    this.masterExchange = new ExchangeClient({ transport, wallet: masterSigner });
+    this.masterExchange = new ExchangeClient({
+      transport,
+      wallet: masterSigner,
+      signatureChainId: hyperliquidTestnetSignatureChainId,
+    });
     this.agentExchange = new ExchangeClient({ transport, wallet: this.agentWallet });
   }
 
