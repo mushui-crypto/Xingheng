@@ -16,6 +16,7 @@ export function RealPositionsTable({
   bestAsk,
   bestBid,
   onCloseRequest,
+  onFeedback,
   onSelectSymbol,
   openOrders = [],
   onTpslRequest,
@@ -28,6 +29,7 @@ export function RealPositionsTable({
   bestAsk?: number | null;
   bestBid?: number | null;
   onCloseRequest?: (request: RealPositionCloseRequest) => Promise<void> | void;
+  onFeedback?: (message: string, tone: "error" | "warning") => void;
   onSelectSymbol?: (symbol: string) => void;
   openOrders?: RealOpenOrder[];
   onTpslRequest?: (request: RealPositionTpslRequest) => Promise<void> | void;
@@ -38,7 +40,6 @@ export function RealPositionsTable({
 }) {
   const [intent, setIntent] = useState<CloseIntent>(null);
   const [tpslIntent, setTpslIntent] = useState<RealPositionTpslRequest | null>(null);
-  const [status, setStatus] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const pendingOperations = new Set(pendingOperationKeys);
   const allClosePending = rows.some((position) => pendingOperations.has(positionOperationKey(position, "exposure")));
@@ -47,13 +48,11 @@ export function RealPositionsTable({
 
   function requestAllClose() {
     if (allClosePending) return;
-    setStatus("");
     setIntent({ cloid: createHyperliquidCloid(), mode: "market", positions: rows, scope: "all" });
   }
 
   function requestSingleClose(position: RealPosition, mode: RealPositionCloseRequest["mode"]) {
     if (pendingOperations.has(positionOperationKey(position, "exposure"))) return;
-    setStatus("");
     const counterpartyPrice = position.side === "long" ? bestBid : bestAsk;
     setIntent({
       cloid: createHyperliquidCloid(),
@@ -66,7 +65,6 @@ export function RealPositionsTable({
 
   function requestTpsl(position: RealPosition) {
     if (pendingOperations.has(positionOperationKey(position, "tpsl"))) return;
-    setStatus("");
     setTpslIntent({
       cloid: createHyperliquidCloid(),
       position,
@@ -78,17 +76,16 @@ export function RealPositionsTable({
   async function confirmClose() {
     if (!intent) return;
     if (!onCloseRequest) {
-      setStatus("平仓接口待接入");
+      onFeedback?.("平仓接口待接入。", "warning");
       setIntent(null);
       return;
     }
     setSubmitting(true);
     try {
       await onCloseRequest(intent);
-      setStatus(intent.scope === "all" ? "全部平仓请求已提交" : "平仓请求已提交");
       setIntent(null);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "平仓请求失败");
+      onFeedback?.(error instanceof Error ? error.message : "平仓请求失败。", "error");
     } finally {
       setSubmitting(false);
     }
@@ -97,17 +94,16 @@ export function RealPositionsTable({
   async function confirmTpsl() {
     if (!tpslIntent) return;
     if (!onTpslRequest) {
-      setStatus("止盈止损接口待接入");
+      onFeedback?.("止盈止损接口待接入。", "warning");
       setTpslIntent(null);
       return;
     }
     setSubmitting(true);
     try {
       await onTpslRequest(tpslIntent);
-      setStatus("止盈止损请求已提交");
       setTpslIntent(null);
     } catch (error) {
-      setStatus(error instanceof Error ? error.message : "止盈止损请求失败");
+      onFeedback?.(error instanceof Error ? error.message : "止盈止损请求失败。", "error");
     } finally {
       setSubmitting(false);
     }
@@ -171,8 +167,6 @@ export function RealPositionsTable({
           );
         })}
       </div>
-      {status ? <p className="xh-real-position-status" role="status">{status}</p> : null}
-
       <Modal
         open={intent !== null}
         title={intent?.scope === "all" ? "确认全部平仓" : closeTitle(intent?.mode)}

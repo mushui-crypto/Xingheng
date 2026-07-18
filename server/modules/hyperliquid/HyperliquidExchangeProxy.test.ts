@@ -160,6 +160,104 @@ test("accepted approveAgent binds the verified API wallet to the authenticated u
   assert.equal(store.binding?.agentAddress, "0x2222222222222222222222222222222222222222");
 });
 
+test("approveAgent rejects a missing Hyperliquid Testnet master account before forwarding", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ status: "ok", response: { type: "default" } }), { status: 200 });
+  };
+  const audit = new AuditSpy();
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => ({
+      kind: "master",
+      masterAddress: "0x1111111111111111111111111111111111111111",
+      signerAddress: "0x1111111111111111111111111111111111111111",
+      agentAddress: "0x2222222222222222222222222222222222222222",
+    }),
+  };
+  const roles = { getUserRole: async () => "missing" };
+  const proxy = new HyperliquidExchangeProxy("https://example.test", undefined, audit, verifier, roles);
+
+  await assert.rejects(
+    () => proxy.forward(approveAgentPayload(), context),
+    (error: unknown) => {
+      assert.ok(error instanceof RealTradingExchangeSubmissionError);
+      assert.equal(error.httpStatus, 409);
+      assert.equal(error.receipt.errorCode, "RT_ACCOUNT_NOT_ACTIVATED");
+      assert.equal(error.receipt.message, "该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。");
+      assert.equal(error.receipt.outcome, "rejected");
+      return true;
+    },
+  );
+  assert.equal(fetchCount, 0);
+  assert.equal(audit.records[0]?.errorCategory, "account_not_activated");
+  assert.equal(audit.records[0]?.message, "Hyperliquid Testnet 账户未激活。");
+  assert.doesNotMatch(JSON.stringify(audit.records[0]), /signature|privateKey|mnemonic|rawPayload/i);
+});
+
+test("approveAgent forwards normally when Hyperliquid Testnet userRole is active", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ status: "ok", response: { type: "default" } }), { status: 200 });
+  };
+  const store = new BindingAuditSpy();
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => ({
+      kind: "master",
+      masterAddress: "0x1111111111111111111111111111111111111111",
+      signerAddress: "0x1111111111111111111111111111111111111111",
+      agentAddress: "0x2222222222222222222222222222222222222222",
+    }),
+  };
+  const roles = { getUserRole: async () => "user" };
+  const receipt = await new HyperliquidExchangeProxy("https://example.test", undefined, store, verifier, roles)
+    .forward(approveAgentPayload(), context);
+
+  assert.equal(fetchCount, 1);
+  assert.equal(receipt.outcome, "accepted");
+  assert.equal(store.binding?.agentAddress, "0x2222222222222222222222222222222222222222");
+});
+
+test("approveAgent userRole network failure does not masquerade as a missing account", async (t) => {
+  const originalFetch = globalThis.fetch;
+  const originalWarn = console.warn;
+  t.after(() => {
+    globalThis.fetch = originalFetch;
+    console.warn = originalWarn;
+  });
+  const warnings: unknown[] = [];
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  let fetchCount = 0;
+  globalThis.fetch = async () => {
+    fetchCount += 1;
+    return new Response(JSON.stringify({ status: "err", response: { type: "error" } }), { status: 400 });
+  };
+  const verifier: RealTradingSignatureVerifier = {
+    verify: () => ({
+      kind: "master",
+      masterAddress: "0x1111111111111111111111111111111111111111",
+      signerAddress: "0x1111111111111111111111111111111111111111",
+      agentAddress: "0x2222222222222222222222222222222222222222",
+    }),
+  };
+  const roles = { getUserRole: async () => { throw new Error("ECONNRESET https://example.test/info privateKey=abc /tmp/userRole.json"); } };
+  const receipt = await new HyperliquidExchangeProxy("https://example.test", undefined, undefined, verifier, roles)
+    .forward(approveAgentPayload(), context);
+
+  assert.equal(fetchCount, 1);
+  assert.equal(receipt.outcome, "rejected");
+  assert.equal(receipt.errorCode, "RT_PROVIDER_REJECTED");
+  assert.equal(receipt.message, "Hyperliquid Testnet 拒绝了交易请求。");
+  const warningText = JSON.stringify(warnings);
+  assert.doesNotMatch(warningText, /privateKey|abc|\/tmp\/userRole\.json|https:\/\/example\.test/);
+  assert.match(warningText, /upstream_check_unavailable/);
+});
+
 test("vaultAddress is rejected locally and an ambiguous transport timeout is 504", async (t) => {
   const proxy = new HyperliquidExchangeProxy("https://example.test");
   await assert.rejects(

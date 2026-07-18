@@ -52,7 +52,10 @@ class BackendExchangeTransport implements IRequestTransport<"exchange"> {
       throw new HyperliquidPendingReconciliationError(response.message || "订单结果暂未确认，正在等待交易所对账。", response);
     }
     if (!response.ok) {
-      throw new Error(response.message || "Hyperliquid Testnet 拒绝了交易请求。");
+      const error = new Error(response.message || "Hyperliquid Testnet 拒绝了交易请求。") as Error & { code?: string; errorCategory?: string | null };
+      error.code = response.errorCode ?? response.code;
+      error.errorCategory = response.errorCategory;
+      throw error;
     }
     return { result: response.result, stellaxReceipt: response } as T;
   }
@@ -217,6 +220,11 @@ export function normalizeSdkError(error: unknown) {
   const message = getSafeSdkErrorMessage(error);
   const lower = messages.join(" ").toLowerCase();
   if (
+    codes.has("rt_account_not_activated")
+    || codes.has("account_not_activated")
+    || lower.includes("account_not_activated")
+  ) return "该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。";
+  if (
     codes.has("4001")
     || codes.has("action_rejected")
     || lower.includes("user rejected")
@@ -253,6 +261,8 @@ function collectSdkErrorSignals(error: unknown) {
     if (typeof record.code === "number" || typeof record.code === "string") {
       codes.add(String(record.code).toLowerCase());
     }
+    if (typeof record.errorCode === "string") codes.add(record.errorCode.toLowerCase());
+    if (typeof record.errorCategory === "string") codes.add(record.errorCategory.toLowerCase());
     if (typeof record.message === "string") messages.push(record.message.slice(0, 500));
     visit(record.cause, depth + 1);
     visit(record.error, depth + 1);

@@ -136,6 +136,14 @@ test("SDK errors distinguish rejection, chain mismatch, and generic signing fail
     normalizeSdkError(new Error("Failed to sign the typed data using the wallet")),
     "钱包签名失败，请重试。",
   );
+  assert.equal(
+    normalizeSdkError({ errorCode: "RT_ACCOUNT_NOT_ACTIVATED", message: "Hyperliquid Testnet 账户未激活。" }),
+    "该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。",
+  );
+  assert.equal(
+    normalizeSdkError({ code: "RT_ACCOUNT_NOT_ACTIVATED", message: "兼容旧字段。" }),
+    "该钱包尚未激活 Hyperliquid Testnet 交易账户，请先完成 Testnet 账户激活后再授权 Agent。",
+  );
 });
 
 type MockWalletProvider = {

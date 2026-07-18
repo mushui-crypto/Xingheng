@@ -236,6 +236,8 @@ export type SignedRealTradingExchangePayload = {
 };
 
 export type RealTradingExchangeResponse = {
+  code?: string;
+  errorCode?: string;
   ok: boolean;
   network: RealTradingNetwork;
   result?: unknown;

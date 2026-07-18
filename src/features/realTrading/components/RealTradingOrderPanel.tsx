@@ -27,7 +27,6 @@ import {
   realTradingOrderStatusLabel,
   type RealTradingOrderLifecycle,
 } from "../model/realtimeState";
-import { resolveRealTradingSessionPresentation } from "../model/sessionPresentation";
 
 const positionPercentSteps = [0, 25, 50, 75, 100] as const;
 const positionPercentSnapThreshold = 2;
@@ -36,7 +35,6 @@ export function RealTradingOrderPanel({
   assetId,
   availableMargin,
   connected,
-  connectionMessage,
   equity,
   fees,
   latestOrderLifecycle,
@@ -57,7 +55,6 @@ export function RealTradingOrderPanel({
   reconciliationMessage,
   reconciliationRecords,
   session,
-  signerCleared,
   supportedMarginModes,
   szDecimals,
   symbol,
@@ -66,7 +63,6 @@ export function RealTradingOrderPanel({
   assetId?: number;
   availableMargin?: number | null;
   connected: boolean;
-  connectionMessage?: string;
   equity?: number | null;
   fees?: RealTradingFees | null;
   latestOrderLifecycle?: RealTradingOrderLifecycle | null;
@@ -87,7 +83,6 @@ export function RealTradingOrderPanel({
   reconciliationMessage?: string;
   reconciliationRecords?: RealTradingReconciliationRecord[];
   session: HyperliquidSessionController;
-  signerCleared?: boolean;
   supportedMarginModes?: RealTradingMarginMode[];
   szDecimals?: number;
   symbol: string;
@@ -111,12 +106,7 @@ export function RealTradingOrderPanel({
   const [pendingSide, setPendingSide] = useState<"buy" | "sell">("buy");
   const [retryIntent, setRetryIntent] = useState<{ cloid: HyperliquidCloid; side: "buy" | "sell" } | null>(null);
   const [positionPercent, setPositionPercent] = useState(0);
-  const { authorized, busy, message } = session;
-  const sessionPresentation = resolveRealTradingSessionPresentation({
-    connected,
-    signerCleared: Boolean(signerCleared),
-    state: session.state,
-  });
+  const { authorized, busy } = session;
   const marginSelection = resolveMarginLeverageSelection({
     marginModeConstraint,
     maxLeverage,
@@ -428,11 +418,6 @@ export function RealTradingOrderPanel({
         <button className={!reduceOnly ? "is-active" : ""} onClick={() => setReduceOnly(false)} role="tab" type="button">开仓</button>
         <button className={reduceOnly ? "is-active" : ""} onClick={() => setReduceOnly(true)} role="tab" type="button">平仓</button>
       </div>
-      <div className={`xh-real-session-status is-${sessionPresentation.tone}`} role="status">
-        <StatusItem label="钱包" value={sessionPresentation.wallet} />
-        <StatusItem label="Agent" value={sessionPresentation.agent} />
-        <StatusItem label="Signer" value={sessionPresentation.signer} />
-      </div>
       <div className="xh-real-type-tabs" role="tablist" aria-label="订单类型">
         <button className={orderType === "market" ? "is-active" : ""} onClick={() => setOrderType("market")} role="tab" type="button">市价</button>
         <button className={orderType === "limit" ? "is-active" : ""} onClick={() => setOrderType("limit")} role="tab" type="button">限价</button>
@@ -500,7 +485,6 @@ export function RealTradingOrderPanel({
         {!connected ? (
           <button className="xh-real-connect-wallet" onClick={onConnect} type="button">连接钱包</button>
         ) : null}
-        {connectionMessage ? <p className="xh-real-connect-error" role={connected ? "status" : "alert"}>{connectionMessage}</p> : null}
         <div className="xh-real-order-checks">
           <Checkbox checked={reduceOnly} label="只减仓" onChange={(event) => setReduceOnly(event.target.checked)} />
           <Checkbox checked={tpslEnabled} disabled={reduceOnly} label="止盈/止损" onChange={(event) => setTpslEnabled(event.target.checked)} />
@@ -531,8 +515,6 @@ export function RealTradingOrderPanel({
             <ReconciliationItem key={record.requestId} record={record} />
           ))}
         </section>
-      ) : !reconciliationLoading && !reconciliationError ? (
-        <p className="xh-real-reconciliation-clear" role="status">待对账状态已同步 · 无待处理记录</p>
       ) : null}
 
       <div className="xh-real-order-metrics">
@@ -541,7 +523,6 @@ export function RealTradingOrderPanel({
         <PanelMetric label="所需保证金" value={estimateMargin(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, leverage)} />
         <PanelMetric label="费用" value={estimateFee(resolveOrderPrice(side === "sell" ? "sell" : "buy"), size, orderType === "market" ? fees?.takerRate : fees?.makerRate)} />
       </div>
-      {message ? <p className={`xh-real-order-message ${session.messageTone === "success" ? "is-success" : ""}`} role="status">{message}</p> : null}
       {latestOrderLifecycle ? (
         <div className={`xh-real-order-lifecycle is-${latestOrderLifecycle.status}`} role="status">
           <span>订单状态</span>
@@ -587,7 +568,6 @@ export function RealTradingOrderPanel({
       </Modal>
       <MarginLeverageModal
         connected={connected}
-        errorMessage={marginModalOpen && session.messageTone === "error" ? message : ""}
         onClose={() => {
           if (!marginSubmitting) setMarginModalOpen(false);
         }}
@@ -606,10 +586,6 @@ function ConfirmMetric({ label, tone, value }: { label: string; tone?: "buy" | "
 }
 
 function PanelMetric({ label, value }: { label: string; value: string }) {
-  return <div><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function StatusItem({ label, value }: { label: string; value: string }) {
   return <div><span>{label}</span><strong>{value}</strong></div>;
 }
 
