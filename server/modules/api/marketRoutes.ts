@@ -21,14 +21,14 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
   });
 
   app.get("/api/market/symbols", (_request, response) => {
-    response.json(getMarketSymbols().map((symbol) => withMarketIconUrl({ ...symbol, status: market.getStatus(symbol.symbol) })));
+    response.json(getMarketSymbols().map((symbol) => withMarketIconUrl({ ...symbol, status: getCatalogMarketStatus(market, symbol) })));
   });
 
   app.put("/api/admin/market/symbols/config", (request, response) => {
     try {
       response.json(updateMarketSymbolsConfig(request.body?.symbols, store).map((symbol) => withMarketIconUrl({
         ...symbol,
-        status: market.getStatus(symbol.symbol),
+        status: getCatalogMarketStatus(market, symbol),
       })));
     } catch (error) {
       response.status(400).json({ message: error instanceof Error ? error.message : "bad request" });
@@ -95,8 +95,8 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
       iconUrl: buildDemoMarketIconUrl(symbol.providerMarketId),
       displayName: symbol.displayName,
       tradeStatus: symbol.tradeStatus,
-      status: market.getStatus(symbol.symbol),
-      ticker: withConfiguredSpread(market.getTicker(symbol.symbol).tick ?? null, symbol),
+      status: getCatalogMarketStatus(market, symbol),
+      ticker: withConfiguredSpread(getCatalogMarketTick(market, symbol), symbol),
     })));
   });
 }
@@ -128,6 +128,7 @@ export function buildDemoMarketIconUrl(providerMarketId: unknown) {
 }
 
 function syncCatalog(market: HyperliquidMarketService, store?: TradingStore) {
+  editableMarketSymbols.clear();
   const persisted = new Map((store?.listMarketSymbols() ?? []).map((symbol) => [symbol.symbol, symbol]));
   const activeSymbols = new Set<string>();
   for (const provider of market.getMarketSymbols()) {
@@ -156,6 +157,20 @@ function syncCatalog(market: HyperliquidMarketService, store?: TradingStore) {
       store?.upsertMarketSymbol(disabled);
     }
   }
+}
+
+function isActiveCatalogSymbol(market: HyperliquidMarketService, symbol: MarketSymbol) {
+  return market.getMarketSymbols().some((provider) => provider.symbol === symbol.symbol);
+}
+
+function getCatalogMarketStatus(market: HyperliquidMarketService, symbol: MarketSymbol) {
+  if (!isActiveCatalogSymbol(market, symbol)) return "disconnected";
+  return market.getStatus(symbol.symbol);
+}
+
+function getCatalogMarketTick(market: HyperliquidMarketService, symbol: MarketSymbol) {
+  if (!isActiveCatalogSymbol(market, symbol)) return null;
+  return market.getTicker(symbol.symbol).tick ?? null;
 }
 
 function updateMarketSymbolsConfig(input: unknown, store?: TradingStore) {
