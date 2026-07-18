@@ -76,6 +76,7 @@ type RealTradingIdempotencyRow = {
   state: RealTradingIdempotencyState;
   submittedAt: number;
   receiptJson: string | null;
+  requestFingerprint: string;
 };
 type RealTradingAgentBindingRow = RealTradingAgentBinding;
 
@@ -156,6 +157,11 @@ export class TradingStore {
   updateUserStatus(id: string, status: User["status"]) {
     this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
     if (status === "disabled") {
+      this.db.prepare(
+        `INSERT OR REPLACE INTO revoked_auth_sessions (tokenHash, subjectId, role, reason, expiresAt, createdAt)
+         SELECT tokenHash, subjectId, role, 'disabled', expiresAt, ? FROM auth_sessions
+         WHERE subjectId = ? AND role = 'user'`,
+      ).run(Date.now(), id);
       this.deleteAuthSessionsForSubject(id, "user");
     }
   }
@@ -186,6 +192,17 @@ export class TradingStore {
 
   deleteAuthSession(tokenHash: string, role: SessionRole) {
     this.db.prepare("DELETE FROM auth_sessions WHERE tokenHash = ? AND role = ?").run(tokenHash, role);
+    this.db.prepare("DELETE FROM revoked_auth_sessions WHERE tokenHash = ? AND role = ?").run(tokenHash, role);
+  }
+
+  findDisabledRevokedSession(tokenHash: string) {
+    const row = this.db.prepare(
+      `SELECT subjectId, expiresAt FROM revoked_auth_sessions
+       WHERE tokenHash = ? AND role = 'user' AND reason = 'disabled'`,
+    ).get(tokenHash) as { subjectId: string; expiresAt: number } | undefined;
+    if (!row || row.expiresAt <= Date.now()) return undefined;
+    const user = this.findUserById(row.subjectId);
+    return user?.status === "disabled" ? user : undefined;
   }
 
   deleteAuthSessionsForSubject(subjectId: string, role: SessionRole) {
@@ -1051,6 +1068,24 @@ export class TradingStore {
     return rows.map(toRealTradingAuditRecord);
   }
 
+  findRealTradingAudit(userId: string, input: { requestId?: string | null; cloid?: string | null }) {
+    if (input.requestId) {
+      const row = this.db.prepare(
+        "SELECT * FROM real_trading_exchange_audit WHERE userId = ? AND requestId = ?",
+      ).get(userId, input.requestId) as RealTradingAuditRow | undefined;
+      return row ? toRealTradingAuditRecord(row) : undefined;
+    }
+    if (input.cloid) {
+      const row = this.db.prepare(
+        `SELECT audit.* FROM real_trading_exchange_audit audit
+         JOIN real_trading_order_idempotency idem ON idem.requestId = audit.requestId
+         WHERE audit.userId = ? AND idem.cloid = ?`,
+      ).get(userId, input.cloid.toLowerCase()) as RealTradingAuditRow | undefined;
+      return row ? toRealTradingAuditRecord(row) : undefined;
+    }
+    return undefined;
+  }
+
   findRealTradingAgentBinding(userId: string, masterAddress: string) {
     return this.db.prepare(
       `SELECT userId, masterAddress, agentAddress, approvedAt, updatedAt
@@ -1080,14 +1115,14 @@ export class TradingStore {
   reserveRealTradingOrderRequest(reservation: RealTradingIdempotencyReservation): RealTradingIdempotencyResult {
     return this.transaction(() => {
       const existing = reservation.clientOrderIds.map((cloid) => this.db.prepare(
-        `SELECT requestId, state, submittedAt, receiptJson FROM real_trading_order_idempotency
+        `SELECT requestId, state, submittedAt, receiptJson, requestFingerprint FROM real_trading_order_idempotency
          WHERE userId = ? AND masterAddress = ? AND network = ? AND cloid = ?`,
       ).get(reservation.userId, reservation.masterAddress, reservation.network, cloid) as RealTradingIdempotencyRow | undefined);
       const present = existing.filter((row): row is RealTradingIdempotencyRow => Boolean(row));
       if (present.length > 0) {
         const first = present[0];
         const exactExistingRequest = present.length === reservation.clientOrderIds.length
-          && present.every((row) => row.requestId === first.requestId);
+          && present.every((row) => row.requestId === first.requestId && row.requestFingerprint === reservation.requestFingerprint);
         return {
           kind: "existing",
           requestId: exactExistingRequest ? first.requestId : "conflict",
@@ -1098,8 +1133,8 @@ export class TradingStore {
       }
       const insert = this.db.prepare(
         `INSERT INTO real_trading_order_idempotency (
-           userId, masterAddress, network, cloid, requestId, actionType, state, receiptJson, submittedAt, completedAt
-         ) VALUES (?, ?, ?, ?, ?, ?, 'processing', NULL, ?, NULL)`,
+           userId, masterAddress, network, cloid, requestId, actionType, requestFingerprint, state, receiptJson, submittedAt, completedAt
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'processing', NULL, ?, NULL)`,
       );
       reservation.clientOrderIds.forEach((cloid) => insert.run(
         reservation.userId,
@@ -1108,6 +1143,7 @@ export class TradingStore {
         cloid,
         reservation.requestId,
         reservation.actionType,
+        reservation.requestFingerprint,
         reservation.submittedAt,
       ));
       return { kind: "reserved" };
@@ -1125,6 +1161,12 @@ export class TradingStore {
        SET state = ?, receiptJson = ?, completedAt = ?
        WHERE requestId = ?`,
     ).run(state, receiptJson, completedAt, requestId);
+  }
+
+  releaseRealTradingOrderRequest(requestId: string) {
+    this.db.prepare(
+      "DELETE FROM real_trading_order_idempotency WHERE requestId = ? AND state = 'processing'",
+    ).run(requestId);
   }
 
   purgeExpiredRealTradingAudit(now = Date.now()) {
@@ -1218,6 +1260,15 @@ export class TradingStore {
         createdAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS revoked_auth_sessions (
+        tokenHash TEXT PRIMARY KEY,
+        subjectId TEXT NOT NULL,
+        role TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        expiresAt INTEGER NOT NULL,
+        createdAt INTEGER NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS positions (
         id TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
@@ -1280,6 +1331,7 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_email_tokens_tokenHash ON email_tokens(tokenHash);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_subject ON auth_sessions(subjectId, role);
       CREATE INDEX IF NOT EXISTS idx_auth_sessions_expiresAt ON auth_sessions(expiresAt);
+      CREATE INDEX IF NOT EXISTS idx_revoked_auth_sessions_expiresAt ON revoked_auth_sessions(expiresAt);
 
       CREATE TABLE IF NOT EXISTS market_symbols (
         symbol TEXT PRIMARY KEY,
@@ -1475,6 +1527,7 @@ export class TradingStore {
         cloid TEXT NOT NULL,
         requestId TEXT NOT NULL,
         actionType TEXT NOT NULL,
+        requestFingerprint TEXT NOT NULL DEFAULT '',
         state TEXT NOT NULL,
         receiptJson TEXT,
         submittedAt INTEGER NOT NULL,
@@ -1536,6 +1589,7 @@ export class TradingStore {
     this.addColumnIfMissing("market_symbols", "sourceType", "TEXT NOT NULL DEFAULT 'main'");
     this.addColumnIfMissing("real_trading_exchange_audit", "clientOrderIds", "TEXT NOT NULL DEFAULT '[]'");
     this.addColumnIfMissing("real_trading_exchange_audit", "errorCategory", "TEXT");
+    this.addColumnIfMissing("real_trading_order_idempotency", "requestFingerprint", "TEXT NOT NULL DEFAULT ''");
     this.db.exec("CREATE INDEX IF NOT EXISTS idx_positions_accountId ON positions(accountId);");
     this.cleanupLegacyTradingData();
     this.db.prepare("UPDATE users SET emailVerifiedAt = createdAt WHERE emailVerifiedAt IS NULL").run();

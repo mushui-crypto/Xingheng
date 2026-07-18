@@ -227,7 +227,12 @@ export const userAuthenticatedApiPrefixes = [
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
   app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
-    const user = users.authenticate(getUserBearerToken(request));
+    const token = getUserBearerToken(request);
+    const isRealTradingRequest = request.originalUrl.startsWith("/api/real-trading")
+      || request.baseUrl.startsWith("/api/real-trading");
+    const user = isRealTradingRequest
+      ? users.authenticateIncludingDisabledRevocation(token)
+      : users.authenticate(token);
     if (!user) {
       response.status(401).json({ message: "用户未登录或登录已失效。" });
       return;

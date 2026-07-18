@@ -14,7 +14,7 @@ test("exchange receipt appends trace fields and audit excludes replayable materi
     forwardedBody = String(init?.body);
     return new Response(JSON.stringify({
       status: "ok",
-      response: { type: "default", privateKey: "SENTINEL", message: "mnemonic=SENTINEL" },
+      response: { type: "cancel", data: { statuses: ["success"] }, privateKey: "SENTINEL", message: "mnemonic=SENTINEL" },
       signature: "SENTINEL",
       rawPayload: "SENTINEL",
     }), { status: 200 });
@@ -158,6 +158,76 @@ test("accepted approveAgent binds the verified API wallet to the authenticated u
   await proxy.forward(payload, context);
   assert.equal(store.binding?.userId, context.userId);
   assert.equal(store.binding?.agentAddress, "0x2222222222222222222222222222222222222222");
+});
+
+test("vaultAddress is rejected locally and an ambiguous transport timeout is 504", async (t) => {
+  const proxy = new HyperliquidExchangeProxy("https://example.test");
+  await assert.rejects(
+    () => proxy.forward({ ...validPayload(), vaultAddress: "0x2222222222222222222222222222222222222222" }, context),
+    (error: unknown) => error instanceof RealTradingExchangeSubmissionError
+      && error.httpStatus === 403
+      && error.receipt.errorCode === "RT_ACTION_NOT_ALLOWED",
+  );
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => { throw new DOMException("timeout", "TimeoutError"); };
+  await assert.rejects(
+    () => new HyperliquidExchangeProxy("https://example.test").forward(validPayload(), context),
+    (error: unknown) => error instanceof RealTradingExchangeSubmissionError
+      && error.httpStatus === 504
+      && error.receipt.errorCode === "RT_UPSTREAM_TIMEOUT"
+      && error.receipt.reconcileRequired === true,
+  );
+});
+
+test("malformed HTTP 200 approveAgent response never creates a binding", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({}), { status: 200 });
+  const store = new BindingAuditSpy();
+  const verifier: RealTradingSignatureVerifier = { verify: () => ({
+    kind: "master",
+    masterAddress: "0x1111111111111111111111111111111111111111",
+    signerAddress: "0x1111111111111111111111111111111111111111",
+    agentAddress: "0x2222222222222222222222222222222222222222",
+  }) };
+  const receipt = await new HyperliquidExchangeProxy("https://example.test", undefined, store, verifier).forward({
+    ...validPayload(),
+    action: { type: "approveAgent", hyperliquidChain: "Testnet", agentAddress: "0x2222222222222222222222222222222222222222" },
+  }, context);
+  assert.equal(receipt.ok, false);
+  assert.equal(store.binding, undefined);
+});
+
+test("cancel item error is rejected instead of reported as accepted", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: "ok",
+    response: { type: "cancel", data: { statuses: [{ error: "order not found" }] } },
+  }), { status: 200 });
+  const receipt = await new HyperliquidExchangeProxy("https://example.test").forward({
+    ...validPayload(),
+    action: { type: "cancel", cancels: [{ a: 0, o: 42 }] },
+  }, context);
+  assert.equal(receipt.ok, false);
+  assert.equal(receipt.outcome, "rejected");
+  assert.equal(receipt.orderStatuses?.[0]?.status, "rejected");
+});
+
+test("cancel success requires a matching per-item provider status", async (t) => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = async () => new Response(JSON.stringify({
+    status: "ok",
+    response: { type: "cancel", data: { statuses: ["success"] } },
+  }), { status: 200 });
+  const receipt = await new HyperliquidExchangeProxy("https://example.test").forward({
+    ...validPayload(),
+    action: { type: "cancel", cancels: [{ a: 0, o: 42 }] },
+  }, context);
+  assert.equal(receipt.ok, true);
+  assert.equal(receipt.outcome, "accepted");
 });
 
 class AuditSpy {

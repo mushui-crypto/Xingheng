@@ -36,6 +36,12 @@ export class RealTradingRealtimeTokenService {
     return grant.expiresAt > Date.now() ? grant : null;
   }
 
+  revokeUser(userId: string) {
+    const tokenHash = this.tokensByUser.get(userId);
+    if (tokenHash) this.grants.delete(tokenHash);
+    this.tokensByUser.delete(userId);
+  }
+
   private purge() {
     const now = Date.now();
     for (const [hash, grant] of this.grants) {

@@ -104,6 +104,20 @@ test("pending reconciliation survives unrelated snapshots and resolves only when
   assert.equal(resolved.orders.find((order) => order.clientOrderId === cloid)?.status, "accepted");
 });
 
+test("a failed recovery snapshot keeps pending reconciliation but removes non-authoritative lifecycle rows", () => {
+  const pending = realTradingRealtimeReducer(initialRealTradingRealtimeState, {
+    type: "order_submitted",
+    order: { clientOrderId: "pending", operationKey: "order:BTCUSDT:entry", status: "pending_reconciliation", updatedAt: 100 },
+  });
+  const withAccepted = realTradingRealtimeReducer(pending, {
+    type: "order_submitted",
+    order: { clientOrderId: "accepted", status: "accepted", updatedAt: 101 },
+  });
+  const failed = realTradingRealtimeReducer(withAccepted, { type: "snapshot_failed", message: "offline" });
+  assert.deepEqual(failed.orders.map((order) => order.clientOrderId), ["pending"]);
+  assert.equal(failed.orders[0].operationKey, "order:BTCUSDT:entry");
+});
+
 test("extracts accepted, partial, filled and rejected statuses from exchange responses", () => {
   const fallback = { clientOrderId: "client-1", symbol: "BTCUSDT", updatedAt: 100 };
   const accepted = extractExchangeOrderUpdates({ response: { data: { statuses: [{ resting: { oid: 1 } }] } } }, fallback);
@@ -113,4 +127,45 @@ test("extracts accepted, partial, filled and rejected statuses from exchange res
 
   assert.deepEqual([accepted[0].status, partial[0].status, filled[0].status, rejected[0].status], ["accepted", "partial", "filled", "rejected"]);
   assert.equal(rejected[0].message, "risk limit");
+});
+
+test("frozen receipt fields drive lifecycle when raw provider statuses are absent", () => {
+  const cloid = "0x00112233445566778899aabbccddeeff";
+  const [update] = extractExchangeOrderUpdates({
+    result: { status: "ok" },
+    stellaxReceipt: { cloids: [cloid], orderState: "partial", requestId: "request-123", timestamp: 123 },
+  }, { clientOrderId: "fallback", symbol: "BTCUSDT", updatedAt: 100 });
+  assert.deepEqual(update, {
+    clientOrderId: cloid,
+    requestId: "request-123",
+    status: "partial",
+    symbol: "BTCUSDT",
+    updatedAt: 123_000,
+  });
+});
+
+test("newer authoritative terminal timestamp wins and older terminal events cannot overwrite it", () => {
+  const filled = realTradingRealtimeReducer(initialRealTradingRealtimeState, {
+    type: "snapshot_succeeded",
+    orders: [{ clientOrderId: "same", status: "filled", updatedAt: 200 }],
+  });
+  const older = realTradingRealtimeReducer(filled, {
+    type: "order_updated",
+    order: { clientOrderId: "same", status: "cancelled", updatedAt: 199 },
+  });
+  const newer = realTradingRealtimeReducer(filled, {
+    type: "order_updated",
+    order: { clientOrderId: "same", status: "cancelled", updatedAt: 201 },
+  });
+  assert.equal(older.orders[0].status, "filled");
+  assert.equal(newer.orders[0].status, "cancelled");
+
+  const snapshot = realTradingRealtimeReducer(initialRealTradingRealtimeState, {
+    type: "snapshot_succeeded",
+    orders: [
+      { clientOrderId: "same", status: "filled", updatedAt: 200 },
+      { clientOrderId: "same", status: "cancelled", updatedAt: 201 },
+    ],
+  });
+  assert.deepEqual(snapshot.orders.map((order) => order.status), ["cancelled"]);
 });

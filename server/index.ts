@@ -101,6 +101,11 @@ const realTradingExchange = new HyperliquidExchangeProxy(
 const realTradingOrderState = new RealTradingOrderStateService(realTradingInfo);
 const realTradingRealtimeTokens = new RealTradingRealtimeTokenService();
 const realTradingUserStreams = new RealTradingUserStreamManager(realTradingInfo, realTradingOrderState);
+users.onStatusChange((userId, status) => {
+  if (status !== "disabled") return;
+  realTradingRealtimeTokens.revokeUser(userId);
+  void realTradingUserStreams.revokeUser(userId);
+});
 registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore);
@@ -113,6 +118,7 @@ registerRealTradingRoutes({
   exchange: realTradingExchange,
   orderState: realTradingOrderState,
   realtimeTokens: realTradingRealtimeTokens,
+  auditStore: tradingStore,
 });
 registerUserTradingRoutes(app, trading);
 registerAdminTradingRoutes({ app, trading, users, wallet });

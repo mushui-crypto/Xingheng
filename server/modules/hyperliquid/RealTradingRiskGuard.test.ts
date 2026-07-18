@@ -25,14 +25,27 @@ test("risk guard rejects oversized opening orders and aggregate exposure", async
   await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "41", s: "1", r: false }])), /200%/);
 });
 
-test("risk guard limits opening-order count but never blocks reduce-only close orders", async () => {
+test("risk guard limits opening-order count but allows only a valid reduce-only close", async () => {
   let reads = 0;
-  const info = stubInfo({ equity: 100, positionNotional: 0, openOrders: 20 }, () => { reads += 1; });
+  const info = stubInfo({ equity: 100, positionNotional: 10, openOrders: 20 }, () => { reads += 1; });
   const guard = new RealTradingRiskGuard(info, limits);
   await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: false }])), /20/);
-  const readsAfterOpeningCheck = reads;
-  await guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: true }]));
-  assert.equal(reads, readsAfterOpeningCheck, "reduce-only actions bypass account risk reads");
+  await guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: true, b: false }]));
+  assert.ok(reads > 0, "reduce-only is checked against authoritative positions");
+  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "1", r: true, b: true }])), /方向/);
+  await assert.rejects(() => guard.assertAllowed(orderRequest([{ p: "1", s: "11", r: true, b: false }])), /超过可平持仓/);
+});
+
+test("risk guard atomically counts same-account in-flight exposure", async () => {
+  const guard = new RealTradingRiskGuard(stubInfo({ equity: 100, positionNotional: 130, openOrders: 0 }), limits);
+  const release = await guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }]));
+  await assert.rejects(
+    () => guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }])),
+    /200%/,
+  );
+  release();
+  const releaseAfter = await guard.reserveAllowed(orderRequest([{ p: "40", s: "1", r: false }]));
+  releaseAfter();
 });
 
 test("risk guard includes existing opening orders and rejects excessive existing leverage", async () => {
@@ -97,7 +110,13 @@ function stubInfo(
     },
     async getPositions() {
       onRead();
-      return values.positionNotional ? [{ positionValue: values.positionNotional, leverage: values.positionLeverage ?? 10 }] : [];
+      return values.positionNotional ? [{
+        symbol: "BTCUSDT",
+        side: "long",
+        size: values.positionNotional,
+        positionValue: values.positionNotional,
+        leverage: values.positionLeverage ?? 10,
+      }] : [];
     },
     async getOpenOrders() {
       onRead();

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hyperliquidTestnetNetwork } from "./hyperliquidConfig";
 import type {
   RealTradingAuditOutcome,
@@ -34,6 +35,7 @@ type ExchangeStore = {
     receiptJson: string,
     completedAt: number,
   ): void;
+  releaseRealTradingOrderRequest?(requestId: string): void;
 };
 
 type ExchangeForwardContext = { requestId: string; userId: string; submittedAt?: number };
@@ -59,6 +61,7 @@ export class HyperliquidExchangeProxy {
     let clientOrderIds: string[] = [];
     let providerRequestStarted = false;
     let idempotencyReserved = false;
+    let riskRelease: (() => void) | null = null;
     let verifiedSigner: VerifiedExchangeSigner | null = null;
     try {
       request = normalizeExchangeRequest(input);
@@ -69,8 +72,6 @@ export class HyperliquidExchangeProxy {
         bindings: toAgentBindingStore(this.store),
       }) ?? null;
       clientOrderIds = actionType === "order" ? extractClientOrderIds(request.action) : [];
-      await this.risk?.assertAllowed(request);
-
       if (actionType === "order") {
         if (!this.store?.reserveRealTradingOrderRequest) {
           throw new Error("真实订单幂等存储不可用，暂不允许下单。");
@@ -81,6 +82,7 @@ export class HyperliquidExchangeProxy {
           network: hyperliquidTestnetNetwork,
           masterAddress: request.masterAddress,
           clientOrderIds,
+          requestFingerprint: fingerprintAction(request.action),
           actionType: "order",
           submittedAt,
         });
@@ -112,6 +114,7 @@ export class HyperliquidExchangeProxy {
         }
         idempotencyReserved = true;
       }
+      riskRelease = this.risk ? await this.risk.reserveAllowed(request) : null;
 
       console.info("[real-trading] forwarding signed exchange action", {
         requestId: context.requestId,
@@ -136,7 +139,12 @@ export class HyperliquidExchangeProxy {
       });
       const rawResult = await response.json().catch(() => ({ status: "err" }));
       const result = redactSensitiveValue(rawResult);
-      const classification = classifyProviderResponse(response.ok, result);
+      const classification = classifyProviderResponse(
+        response.ok,
+        result,
+        actionType,
+        expectedProviderStatusCount(request.action),
+      );
       const timestamp = Date.now();
       const receipt: RealTradingExchangeReceipt = {
         ok: classification.outcome === "accepted",
@@ -153,6 +161,9 @@ export class HyperliquidExchangeProxy {
         rejected: classification.rejected,
         outcome: classification.outcome,
         needsReconciliation: classification.outcome === "partial",
+        errorCode: classification.outcome === "accepted" ? null : "RT_PROVIDER_REJECTED",
+        retryable: false,
+        reconcileRequired: classification.outcome === "partial",
         ...(classification.orderStatuses.length ? { orderStatuses: classification.orderStatuses } : {}),
       };
       if (classification.outcome === "accepted" && verifiedSigner?.kind === "master" && verifiedSigner.agentAddress) {
@@ -180,9 +191,14 @@ export class HyperliquidExchangeProxy {
       return receipt;
     } catch (error) {
       if (error instanceof RealTradingExchangeSubmissionError) throw error;
+      if (!providerRequestStarted && idempotencyReserved) {
+        this.store?.releaseRealTradingOrderRequest?.(context.requestId);
+        idempotencyReserved = false;
+      }
       const timestamp = Date.now();
       const outcome: RealTradingAuditOutcome = providerRequestStarted ? "pending_reconciliation" : "rejected";
-      const httpStatus = providerRequestStarted ? 502 : 400;
+      const local = classifyLocalFailure(error);
+      const httpStatus = providerRequestStarted ? 504 : local.httpStatus;
       const errorCategory = providerRequestStarted ? "provider_transport_unknown" : categorizeLocalError(error);
       const receipt: RealTradingExchangeReceipt = {
         ok: false,
@@ -199,6 +215,9 @@ export class HyperliquidExchangeProxy {
         rejected: !providerRequestStarted,
         outcome,
         needsReconciliation: providerRequestStarted,
+        errorCode: providerRequestStarted ? "RT_UPSTREAM_TIMEOUT" : local.code,
+        retryable: false,
+        reconcileRequired: providerRequestStarted,
       };
       this.completeIdempotency(context.requestId, outcome, receipt, timestamp, idempotencyReserved);
       this.writeAudit(auditRecord({
@@ -214,6 +233,8 @@ export class HyperliquidExchangeProxy {
         completedAt: timestamp,
       }));
       throw new RealTradingExchangeSubmissionError(httpStatus, receipt);
+    } finally {
+      riskRelease?.();
     }
   }
 
@@ -260,6 +281,7 @@ export function normalizeExchangeRequest(input: unknown): RealTradingExchangeReq
   if (!value.signature || typeof value.signature !== "object") throw new Error("exchange signature 缺失。");
   const vaultAddress = value.vaultAddress === undefined || value.vaultAddress === null || value.vaultAddress === ""
     ? null : normalizeAddress(value.vaultAddress);
+  if (vaultAddress !== null) throw new Error("当前产品不支持 vaultAddress 真实交易。");
   const expiresAfter = value.expiresAfter === undefined || value.expiresAfter === null || value.expiresAfter === ""
     ? null : Number(value.expiresAfter);
   if (expiresAfter !== null && (!Number.isSafeInteger(expiresAfter) || expiresAfter <= 0)) {
@@ -311,12 +333,23 @@ function extractClientOrderIds(action: Record<string, unknown>) {
   return ids;
 }
 
-function classifyProviderResponse(httpOk: boolean, result: any) {
-  const orderStatuses = normalizeOrderStatuses(result);
-  const acceptedCount = orderStatuses.filter((item) => item.status === "accepted").length;
-  const rejectedCount = orderStatuses.filter((item) => item.status === "rejected").length;
+function classifyProviderResponse(httpOk: boolean, result: any, actionType: string, expectedOrderCount: number) {
+  const orderStatuses = normalizeOrderStatuses(result, actionType);
+  const hasPerItemStatuses = actionType === "order" || actionType === "cancel";
+  const acceptedCount = hasPerItemStatuses ? orderStatuses.filter((item) => item.status === "accepted").length : 0;
+  const rejectedCount = hasPerItemStatuses ? orderStatuses.filter((item) => item.status === "rejected").length : 0;
   let outcome: "accepted" | "rejected" | "partial";
-  if (!httpOk || result?.status === "err" || result?.response?.type === "error") outcome = "rejected";
+  const strictShape = actionType === "order"
+    ? result?.status === "ok" && result?.response?.type === "order" && orderStatuses.length === expectedOrderCount
+    : actionType === "approveAgent" || actionType === "updateLeverage"
+      ? result?.status === "ok" && result?.response?.type === "default"
+      : actionType === "cancel"
+        ? result?.status === "ok"
+          && result?.response?.type === "cancel"
+          && Array.isArray(result?.response?.data?.statuses)
+          && orderStatuses.length === expectedOrderCount
+        : false;
+  if (!httpOk || !strictShape || result?.status === "err" || result?.response?.type === "error") outcome = "rejected";
   else if (acceptedCount > 0 && rejectedCount > 0) outcome = "partial";
   else if (rejectedCount > 0) outcome = "rejected";
   else outcome = "accepted";
@@ -331,18 +364,29 @@ function classifyProviderResponse(httpOk: boolean, result: any) {
   };
 }
 
-function normalizeOrderStatuses(result: any): NonNullable<RealTradingExchangeReceipt["orderStatuses"]> {
+function normalizeOrderStatuses(result: any, actionType: string): NonNullable<RealTradingExchangeReceipt["orderStatuses"]> {
   const statuses = result?.response?.data?.statuses;
   if (!Array.isArray(statuses)) return [];
   return statuses.map((value: any, index: number) => {
+    if (actionType === "cancel" && typeof value === "string" && value.trim().toLowerCase() === "success") {
+      return { index, status: "accepted", providerStatus: "unknown", oid: null, message: null } as const;
+    }
     if (value && typeof value === "object" && "error" in value) {
       return { index, status: "rejected", providerStatus: "error", oid: null, message: "provider_order_rejection" } as const;
     }
     const providerStatus = value && typeof value === "object" && "filled" in value
       ? "filled" : value && typeof value === "object" && "resting" in value ? "resting" : "unknown";
     const detail = value?.filled ?? value?.resting ?? {};
-    return { index, status: "accepted", providerStatus, oid: detail.oid ?? null, message: null } as const;
+    return providerStatus === "unknown"
+      ? { index, status: "rejected", providerStatus, oid: null, message: "provider_order_shape_invalid" } as const
+      : { index, status: "accepted", providerStatus, oid: detail.oid ?? null, message: null } as const;
   });
+}
+
+function expectedProviderStatusCount(action: Record<string, unknown>) {
+  if (action.type === "order" && Array.isArray(action.orders)) return action.orders.length;
+  if (action.type === "cancel" && Array.isArray(action.cancels)) return action.cancels.length;
+  return 0;
 }
 
 function extractProviderStatus(result: unknown) {
@@ -358,6 +402,9 @@ function pendingReceipt(input: Pick<RealTradingExchangeReceipt, "requestId" | "a
     rejected: false,
     outcome: "pending_reconciliation",
     needsReconciliation: true,
+    errorCode: "RT_IDEMPOTENCY_CONFLICT",
+    retryable: false,
+    reconcileRequired: true,
     ...input,
   };
 }
@@ -407,6 +454,34 @@ function categorizeLocalError(error: unknown) {
   if (message.includes("风险") || message.includes("权益") || message.includes("敞口") || message.includes("杠杆") || message.includes("委托")) return "risk_rejection";
   if (message.includes("签名") || message.includes("nonce") || message.includes("action") || message.includes("network")) return "validation_rejection";
   return "local_rejection";
+}
+
+function classifyLocalFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : "";
+  if (message.includes("暂不允许") || message.includes("不支持 vaultAddress") || message.includes("Mainnet")) {
+    return { code: "RT_ACTION_NOT_ALLOWED", httpStatus: 403 };
+  }
+  if (message.includes("cloid") || message.includes("幂等")) return { code: "RT_IDEMPOTENCY_CONFLICT", httpStatus: 409 };
+  if (message.includes("过期") || message.includes("stale") || message.includes("断开")) {
+    return { code: "RT_RISK_STALE_MARKET", httpStatus: 409 };
+  }
+  if (message.includes("权益") || message.includes("敞口") || message.includes("杠杆") || message.includes("委托") || message.includes("reduce-only") || message.includes("持仓")) {
+    return { code: "RT_RISK_LIMIT_EXCEEDED", httpStatus: 422 };
+  }
+  return { code: "RT_INVALID_REQUEST", httpStatus: 400 };
+}
+
+function fingerprintAction(action: Record<string, unknown>) {
+  return createHash("sha256").update(JSON.stringify(sortValue(action))).digest("hex");
+}
+
+function sortValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortValue);
+  if (!value || typeof value !== "object") return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>)
+    .filter(([, item]) => item !== undefined)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, item]) => [key, sortValue(item)]));
 }
 
 function safeLocalErrorMessage(error: unknown) {
