@@ -55,7 +55,7 @@ import {
   resolveRealTradingSourceType,
   resolveRealTradingSymbolForRecord,
 } from "../../features/realTrading/lib/realTradingMarket";
-import { useHyperliquidSessionSigner } from "../../features/realTrading/lib/useHyperliquidSessionSigner";
+import { useHyperliquidSessionSigner } from "../../features/realTrading/components/HyperliquidSessionProvider";
 import { getRealTradingDisplayPriceDecimals } from "../../features/realTrading/lib/realTradingDisplayPrecision";
 import { presentRealFill } from "../../features/realTrading/model/realFillPresentation";
 import { presentOrderLifecycleToast } from "../../features/realTrading/model/orderLifecycleToast";
@@ -104,7 +104,6 @@ export function RealTradePage() {
   const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get("symbol")?.toUpperCase() ?? "BTCUSDT");
   const [interval, setInterval] = useState<CandleInterval>("5m");
   const walletAddress = useWalletConnectionStore((state) => state.address);
-  const walletProvider = useWalletConnectionStore((state) => state.provider);
   const requestWalletConnection = useWalletConnectionStore((state) => state.connect);
   const [marketSummary, setMarketSummary] = useState<RealMarketSummary | null>(null);
   const [orderbook, setOrderbook] = useState<RealOrderbook | null>(null);
@@ -147,7 +146,7 @@ export function RealTradePage() {
   const previousWalletAddressRef = useRef<string | null>(null);
   const pageMountedAtRef = useRef(Date.now());
   const { dismissToast, showToast, toast } = useTradingToast();
-  const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
+  const tradingSession = useHyperliquidSessionSigner();
 
   const selectedConfig = symbols.find((item) => item.symbol === selectedSymbol) ?? null;
   const selectedPosition = positions.find((item) => (
@@ -239,7 +238,8 @@ export function RealTradePage() {
           ? "success"
           : "warning",
     );
-  }, [showToast, tradingSession.message, tradingSession.messageTone]);
+    tradingSession.setMessage("");
+  }, [showToast, tradingSession.message, tradingSession.messageTone, tradingSession.setMessage]);
 
   useEffect(() => {
     const order = realtimeState.orders[0];
