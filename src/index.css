@@ -1924,7 +1924,7 @@ textarea {
       minmax(82px, 0.8fr)
       minmax(62px, 0.6fr)
       minmax(62px, 0.6fr)
-      minmax(190px, 1.6fr);
+      minmax(184px, 1.4fr);
     column-gap: 12px;
     align-items: center;
     padding: 0 12px;
@@ -1959,7 +1959,7 @@ textarea {
   }
 
   .xh-real-position-head > :last-child {
-    justify-content: stretch;
+    justify-content: flex-start;
   }
 
   .xh-real-position-head > :nth-child(2),
@@ -1967,14 +1967,39 @@ textarea {
     padding-left: 12px;
   }
 
+  .xh-real-position-asset-cell {
+    margin-left: -12px;
+    padding-left: 20px;
+  }
+
   .xh-real-position-row.is-long > :first-child {
     border-left: 3px solid #29c78a;
-    padding-left: 8px;
   }
 
   .xh-real-position-row.is-short > :first-child {
     border-left: 3px solid #f43f5e;
-    padding-left: 8px;
+  }
+
+  .xh-real-position-asset-button {
+    border-top: 0;
+    border-right: 0;
+    border-bottom: 0;
+    color: #f5f5f5;
+    font: inherit;
+    font-weight: 500;
+    text-align: left;
+    cursor: pointer;
+    transition: color 160ms ease, background-color 160ms ease;
+  }
+
+  .xh-real-position-asset-button:hover {
+    color: #ffffff;
+    background: #12151a;
+  }
+
+  .xh-real-position-asset-button:focus-visible {
+    outline: 1px solid #ffffff;
+    outline-offset: -2px;
   }
 
   .xh-real-position-row {
@@ -1993,20 +2018,15 @@ textarea {
     @apply text-[#f43f5e];
   }
 
-  .xh-real-position-actions {
-    @apply grid h-full grid-cols-3 items-center gap-1.5 border-l border-[#25282f] pl-3;
+  .xh-real-position-row > .xh-real-position-actions {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    column-gap: 10px;
+    @apply h-full items-center;
   }
 
-  .xh-real-position-actions-head {
-    @apply grid-cols-[1fr_auto] gap-3;
-  }
-
-  .xh-real-position-actions-head > span {
-    @apply text-[12px] text-[#8f99a4];
-  }
-
-  .xh-real-position-actions-head > button {
-    @apply h-full border-0 bg-transparent px-0 text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
+  .xh-real-position-close-all {
+    @apply h-full border-0 bg-transparent px-0 text-left text-[14px] font-medium text-[#ff4d6d] transition-colors hover:text-[#ff8095] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-[-2px] focus-visible:outline-[#ff6b83] disabled:cursor-not-allowed disabled:opacity-35;
   }
 
   .xh-real-position-actions button {
@@ -2014,7 +2034,11 @@ textarea {
   }
 
   .xh-real-position-trigger-button {
-    @apply justify-self-start border-0 bg-transparent px-0 text-[12px] text-[#d8dde3] underline-offset-4 transition hover:text-white hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#f5f5f5];
+    @apply inline-flex items-center gap-1 justify-self-start border-0 bg-transparent px-0 text-[12px] text-[#d8dde3] underline-offset-4 transition hover:text-white hover:underline focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-[#f5f5f5];
+  }
+
+  .xh-real-position-trigger-button svg {
+    @apply shrink-0 text-[#7a8596];
   }
 
   .xh-real-position-empty {

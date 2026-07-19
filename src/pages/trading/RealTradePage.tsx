@@ -42,7 +42,11 @@ import { MarketDepthPanel } from "../../features/trading/components/MarketDepthP
 import { TradeStat } from "../../features/trading/components/TradeStat";
 import { Toast, useTradingToast } from "../../features/trading/components/TradingFeedback";
 import type { RealPositionCloseRequest, RealPositionTpslRequest } from "../../features/realTrading/model/types";
-import { enrichPositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
+import { enrichPositionMarks, preservePositionMarks } from "../../features/realTrading/lib/enrichPositionMarks";
+import {
+  transitionRealAccountRequestGeneration,
+  withRealAccountLoadTimeout,
+} from "../../features/realTrading/lib/accountLoad";
 import { resolveRealTradingCategory } from "../../features/realTrading/lib/marketCategory";
 import { resolvePositionSymbol, submitPositionCloseRequest, submitPositionTpslRequest } from "../../features/realTrading/lib/positionActions";
 import {
@@ -83,9 +87,9 @@ import {
 } from "../../features/realTrading/model/reconciliation";
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import { formatCompactMoney, formatFundingPercent, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
+import { useWalletConnectionStore } from "../../store/walletConnectionStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
-import { discoverInjectedEthereumProvider, type Eip1193Provider } from "../../shared/wallet/eip1193";
 
 const realCandlePollingIntervalMs = 2_000;
 const realMarketPollingIntervalMs = 2_000;
@@ -99,7 +103,9 @@ export function RealTradePage() {
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get("symbol")?.toUpperCase() ?? "BTCUSDT");
   const [interval, setInterval] = useState<CandleInterval>("5m");
-  const [walletAddress, setWalletAddress] = useState("");
+  const walletAddress = useWalletConnectionStore((state) => state.address);
+  const walletProvider = useWalletConnectionStore((state) => state.provider);
+  const requestWalletConnection = useWalletConnectionStore((state) => state.connect);
   const [marketSummary, setMarketSummary] = useState<RealMarketSummary | null>(null);
   const [orderbook, setOrderbook] = useState<RealOrderbook | null>(null);
   const [trades, setTrades] = useState<RealTrade[]>([]);
@@ -110,12 +116,15 @@ export function RealTradePage() {
   const [history, setHistory] = useState<RealOrderHistory | null>(null);
   const [marketLoading, setMarketLoading] = useState(true);
   const [accountLoading, setAccountLoading] = useState(false);
+  const [positionsLoading, setPositionsLoading] = useState(false);
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [chartLoading, setChartLoading] = useState(true);
   const [marketError, setMarketError] = useState("");
   const [accountError, setAccountError] = useState("");
+  const [positionsError, setPositionsError] = useState("");
+  const [ordersError, setOrdersError] = useState("");
   const [chartMessage, setChartMessage] = useState("");
   const [latestCandle, setLatestCandle] = useState<RealCandle | null>(null);
-  const [walletProvider, setWalletProvider] = useState<Eip1193Provider | null>(null);
   const [realtimeState, dispatchRealtime] = useReducer(realTradingRealtimeReducer, initialRealTradingRealtimeState);
   const [orderConnectionStatus, setOrderConnectionStatus] = useState<RealTradingConnectionStatus>("reconnecting");
   const [userStreamConnectionStatus, setUserStreamConnectionStatus] = useState<RealTradingConnectionStatus>("disconnected");
@@ -129,9 +138,13 @@ export function RealTradePage() {
   const orderSequenceRef = useRef<number | null>(null);
   const userStreamSequenceRef = useRef<number | null>(null);
   const accountRequestGenerationRef = useRef(0);
+  const realtimePositionGenerationRef = useRef(0);
+  const positionsRef = useRef<RealPosition[]>([]);
+  const positionMarkSummaryRequestsRef = useRef(new Map<string, { expiresAt: number; request: Promise<RealMarketSummary> }>());
   const marketRequestGenerationRef = useRef(0);
   const marketRequestInFlightRef = useRef(false);
   const lifecycleToastKeysRef = useRef(new Set<string>());
+  const previousWalletAddressRef = useRef<string | null>(null);
   const pageMountedAtRef = useRef(Date.now());
   const { dismissToast, showToast, toast } = useTradingToast();
   const tradingSession = useHyperliquidSessionSigner(walletProvider, walletAddress);
@@ -148,6 +161,36 @@ export function RealTradePage() {
     : realtimeState.connectionStatus;
   const marketReady = effectiveConnectionStatus === "connected";
   const pendingReconciliationOrders = realtimeState.orders.filter((order) => order.status === "pending_reconciliation");
+
+  function commitPositions(nextPositions: RealPosition[]) {
+    positionsRef.current = nextPositions;
+    setPositions(nextPositions);
+  }
+
+  function commitAccountPositions(nextPositions: RealPosition[]) {
+    realtimePositionGenerationRef.current += 1;
+    commitPositions(nextPositions);
+  }
+
+  function fetchPositionMarkSummary(symbol: string) {
+    const key = symbol.trim().toUpperCase();
+    const now = Date.now();
+    const cached = positionMarkSummaryRequestsRef.current.get(key);
+    if (cached && cached.expiresAt > now) return cached.request;
+    const request = fetchRealMarketSummary(key);
+    positionMarkSummaryRequestsRef.current.set(key, { expiresAt: now + 5_000, request });
+    return request;
+  }
+
+  function applyRealtimePositions(incoming: RealPosition[]) {
+    const generation = ++realtimePositionGenerationRef.current;
+    const preserved = preservePositionMarks(incoming, positionsRef.current);
+    commitPositions(preserved);
+    void enrichPositionMarks(preserved, fetchPositionMarkSummary).then((enriched) => {
+      if (generation !== realtimePositionGenerationRef.current) return;
+      commitPositions(preservePositionMarks(positionsRef.current, enriched));
+    });
+  }
   const reconciliationAccess = resolveReconciliationAccess(reconciliationRecords, reconciliationError);
   const reconciliationPending = reconciliationLoading || reconciliationAccess.blocksNewRisk || pendingReconciliationOrders.length > 0;
   const pendingOperationKeys = useMemo(
@@ -309,7 +352,11 @@ export function RealTradePage() {
   };
 
   const loadAccount = async (address = walletAddress, forceSnapshot = false) => {
-    const requestGeneration = ++accountRequestGenerationRef.current;
+    const requestGeneration = transitionRealAccountRequestGeneration(
+      accountRequestGenerationRef.current,
+      "request_started",
+    );
+    accountRequestGenerationRef.current = requestGeneration;
     if (forceSnapshot) orderSequenceRef.current = null;
     const needsSnapshot = orderSequenceRef.current === null;
     if (needsSnapshot) {
@@ -317,40 +364,78 @@ export function RealTradePage() {
       dispatchRealtime({ type: "snapshot_started" });
       setAccount(null);
       setFees(null);
-      setPositions([]);
+      commitAccountPositions([]);
       setOpenOrders([]);
       setHistory(null);
     }
     if (!address) {
+      setAccountLoading(false);
+      setPositionsLoading(false);
+      setOrdersLoading(false);
       setAccountError("");
+      setPositionsError("");
+      setOrdersError("");
       orderSequenceRef.current = null;
       setOrderConnectionStatus("connected");
       dispatchRealtime({ type: "snapshot_succeeded", orders: [] });
       return;
     }
     setAccountLoading(true);
+    setPositionsLoading(true);
+    setOrdersLoading(true);
     setAccountError("");
-    try {
-      const [nextAccount, nextFees, nextPositions, nextOrderState] = await Promise.all([
-        fetchRealAccountSummary(address),
-        fetchRealTradingFees(address),
-        fetchRealPositions(address),
-        fetchRealTradingOrderState(address, needsSnapshot ? null : orderSequenceRef.current),
-      ]);
-      const enrichedPositions = await enrichPositionMarks(nextPositions, fetchRealMarketSummary);
+    setPositionsError("");
+    setOrdersError("");
+    let failureRecorded = false;
+    const recordFailure = (error: unknown, setResourceError?: (message: string) => void) => {
       if (requestGeneration !== accountRequestGenerationRef.current) return;
-      setAccount(nextAccount);
-      setFees(nextFees);
-      setPositions(enrichedPositions);
-      applyOrderState(nextOrderState);
-    } catch (error) {
-      if (requestGeneration !== accountRequestGenerationRef.current) return;
-      const message = error instanceof Error ? error.message : "真实账户数据加载失败。";
+      const message = error instanceof Error ? error.message : "真实账户部分数据加载失败。";
+      setResourceError?.(message);
+      if (failureRecorded) return;
+      failureRecorded = true;
       setAccountError(message);
       setOrderConnectionStatus("stale");
       dispatchRealtime({ type: "snapshot_failed", message });
+    };
+    const loadResource = async <T,>(
+      request: Promise<T>,
+      resourceLabel: string,
+      commit: (value: T) => void,
+      setResourceError?: (message: string) => void,
+    ) => {
+      try {
+        const value = await withRealAccountLoadTimeout(request, resourceLabel);
+        if (requestGeneration === accountRequestGenerationRef.current) commit(value);
+      } catch (error) {
+        recordFailure(error, setResourceError);
+      }
+    };
+    try {
+      const accountTask = Promise.all([
+        loadResource(fetchRealAccountSummary(address), "真实账户", setAccount),
+        loadResource(fetchRealTradingFees(address), "真实交易费率", setFees),
+      ]).finally(() => {
+        if (requestGeneration === accountRequestGenerationRef.current) setAccountLoading(false);
+      });
+      const positionsTask = loadResource(fetchRealPositions(address), "真实持仓", applyRealtimePositions, setPositionsError)
+        .finally(() => {
+          if (requestGeneration === accountRequestGenerationRef.current) setPositionsLoading(false);
+        });
+      const ordersTask = loadResource(
+        fetchRealTradingOrderState(address, needsSnapshot ? null : orderSequenceRef.current),
+        "真实订单状态",
+        applyOrderState,
+        setOrdersError,
+      ).finally(() => {
+        if (requestGeneration === accountRequestGenerationRef.current) setOrdersLoading(false);
+      });
+      await Promise.all([accountTask, positionsTask, ordersTask]);
     } finally {
-      if (requestGeneration === accountRequestGenerationRef.current) setAccountLoading(false);
+      if (requestGeneration === accountRequestGenerationRef.current) {
+        setAccountLoading(false);
+        setPositionsLoading(false);
+        setOrdersLoading(false);
+      }
     }
   };
 
@@ -376,27 +461,39 @@ export function RealTradePage() {
   }, [selectedSymbol]);
 
   useEffect(() => {
-    let active = true;
-    void discoverInjectedEthereumProvider().then((provider) => {
-      if (active) {
-        setWalletProvider(provider);
-        if (provider?.request) {
-          void provider.request({ method: "eth_accounts" }).then((accounts) => {
-            if (!active) return;
-            const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
-            if (!address) return;
-            orderSequenceRef.current = null;
-            setWalletAddress(address);
-            showToast("已恢复钱包只读连接；本地 signer 已清除，请重新授权 Agent 后再交易。", "warning");
-            void loadAccount(address, true);
-          }).catch(() => undefined);
-        }
+    const previousAddress = previousWalletAddressRef.current;
+    previousWalletAddressRef.current = walletAddress;
+    orderSequenceRef.current = null;
+    if (walletAddress) {
+      if (previousAddress !== null && previousAddress !== walletAddress) {
+        showToast(previousAddress ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包连接已恢复，正在刷新只读账户数据。", "warning");
       }
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
+      void loadAccount(walletAddress, true);
+      return;
+    }
+    accountRequestGenerationRef.current = transitionRealAccountRequestGeneration(
+      accountRequestGenerationRef.current,
+      "wallet_session_changed",
+    );
+    realtimePositionGenerationRef.current += 1;
+    userStreamSequenceRef.current = null;
+    positionMarkSummaryRequestsRef.current.clear();
+    setAccount(null);
+    setFees(null);
+    setAccountLoading(false);
+    setPositionsLoading(false);
+    setOrdersLoading(false);
+    commitPositions([]);
+    setOpenOrders([]);
+    setHistory(null);
+    setAccountError("");
+    setPositionsError("");
+    setOrdersError("");
+    setOrderConnectionStatus("connected");
+    dispatchRealtime({ type: "snapshot_succeeded", orders: [] });
+    if (previousAddress) showToast("钱包已断开，真实账户数据已清空。", "warning");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [walletAddress]);
 
   useEffect(() => {
     let active = true;
@@ -438,25 +535,6 @@ export function RealTradePage() {
   }, []);
 
   useEffect(() => {
-    if (!walletProvider?.on) {
-      return;
-    }
-
-    const handleAccountsChanged = (...args: unknown[]) => {
-      const accounts = args[0];
-      const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
-      orderSequenceRef.current = null;
-      setWalletAddress(address);
-      showToast(address ? "主账户地址已切换，正在刷新只读账户数据。" : "钱包已断开，真实账户数据已清空。", "warning");
-      void loadAccount(address);
-    };
-
-    walletProvider.on("accountsChanged", handleAccountsChanged);
-    return () => walletProvider.removeListener?.("accountsChanged", handleAccountsChanged);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [walletProvider]);
-
-  useEffect(() => {
     if (!walletAddress) return;
     if (orderConnectionStatus === "connected") return;
     let cancelled = false;
@@ -492,7 +570,10 @@ export function RealTradePage() {
     let reconnectAttempt = 0;
 
     const markAuthoritativeUserStateRecovering = () => {
-      accountRequestGenerationRef.current += 1;
+      accountRequestGenerationRef.current = transitionRealAccountRequestGeneration(
+        accountRequestGenerationRef.current,
+        "realtime_recovering",
+      );
       orderSequenceRef.current = null;
       dispatchRealtime({ type: "snapshot_started" });
     };
@@ -534,7 +615,7 @@ export function RealTradePage() {
       setAccountError("");
       reconnectAttempt = 0;
       if (event.channel === "snapshot") {
-        if (!applyUserStreamSnapshot(event.data, applyOrderState, setAccount, setPositions)) {
+        if (!applyUserStreamSnapshot(event.data, applyOrderState, setAccount, applyRealtimePositions)) {
           setAccountError("真实交易实时快照格式异常，正在重新同步。");
           socket?.close();
         }
@@ -565,7 +646,7 @@ export function RealTradePage() {
         return;
       }
       if (event.channel === "account") {
-        if (!applyUserStreamAccount(event.data, setAccount, setPositions)) {
+        if (!applyUserStreamAccount(event.data, setAccount, applyRealtimePositions)) {
           setAccountError("真实交易账户增量格式异常，正在重新同步。");
           socket?.close();
         }
@@ -814,22 +895,8 @@ export function RealTradePage() {
   }, [interval, selectedSymbol]);
 
   const connectWallet = async () => {
-    const ethereum = walletProvider ?? await discoverInjectedEthereumProvider();
-    if (!ethereum?.request) {
-      showToast("未检测到浏览器钱包。请使用支持 EIP-1193 的钱包连接主账户地址。", "error");
-      return;
-    }
     try {
-      setWalletProvider(ethereum);
-      const accounts = await ethereum.request({ method: "eth_requestAccounts" });
-      const address = Array.isArray(accounts) && typeof accounts[0] === "string" ? accounts[0] : "";
-      if (!address) {
-        showToast("钱包未返回账户地址。", "error");
-        return;
-      }
-      orderSequenceRef.current = null;
-      setWalletAddress(address);
-      await loadAccount(address);
+      await requestWalletConnection();
       showToast("主账户地址已连接。", "success");
     } catch (error) {
       showToast(error instanceof Error ? error.message : "钱包连接失败。", "error");
@@ -1025,11 +1092,13 @@ export function RealTradePage() {
 
           <RealRecords
             pendingOperationKeys={pendingOperationKeys}
-            riskIncreasingActionsBlocked={!marketReady || reconciliationPending}
-            accountLoading={accountLoading}
+            riskIncreasingActionsBlocked={!marketReady || Boolean(accountError) || reconciliationPending}
+            ordersLoading={ordersLoading}
+            ordersError={ordersError}
+            positionsLoading={positionsLoading}
+            positionsError={positionsError}
             bestAsk={orderbook?.asks[0]?.price}
             bestBid={orderbook?.bids[0]?.price}
-            error={accountError}
             history={history}
             onCancelOrder={handleCancelOrder}
             onCloseRequest={handlePositionClose}
@@ -1052,7 +1121,7 @@ export function RealTradePage() {
             markPrice={marketSummary?.markPrice}
             fees={fees}
             marginModeConstraint={selectedConfig?.marginModeConstraint}
-            marketReady={marketReady}
+            marketReady={marketReady && !accountError}
             maxLeverage={selectedConfig?.maxLeverage}
             onConnect={connectWallet}
             onOrderLifecycle={(phase, order) => dispatchRealtime({ type: phase === "submitted" ? "order_submitted" : "order_updated", order })}
@@ -1119,10 +1188,8 @@ function ConnectionPanel({
 }
 
 function RealRecords({
-  accountLoading,
   bestAsk,
   bestBid,
-  error,
   history,
   onCancelOrder,
   onCloseRequest,
@@ -1130,15 +1197,17 @@ function RealRecords({
   onSelectSymbol,
   onTpslRequest,
   openOrders,
+  ordersLoading,
+  ordersError,
   positions,
+  positionsLoading,
+  positionsError,
   pendingOperationKeys,
   riskIncreasingActionsBlocked,
   symbols,
 }: {
-  accountLoading: boolean;
   bestAsk?: number | null;
   bestBid?: number | null;
-  error: string;
   history: RealOrderHistory | null;
   onCancelOrder: (order: RealOpenOrder) => Promise<void>;
   onCloseRequest: (request: RealPositionCloseRequest) => Promise<void>;
@@ -1146,13 +1215,21 @@ function RealRecords({
   onSelectSymbol: (symbol: string) => void;
   onTpslRequest: (request: RealPositionTpslRequest) => Promise<void>;
   openOrders: RealOpenOrder[];
+  ordersLoading: boolean;
+  ordersError: string;
   positions: RealPosition[];
+  positionsLoading: boolean;
+  positionsError: string;
   pendingOperationKeys: string[];
   riskIncreasingActionsBlocked: boolean;
   symbols: RealTradingSymbol[];
 }) {
   const [tab, setTab] = useState<"positions" | "open" | "orders" | "fills">("positions");
-  const hasRecoverableSnapshot = positions.length > 0 || openOrders.length > 0 || history !== null;
+  const positionsHaveSnapshot = positions.length > 0;
+  const ordersHaveSnapshot = openOrders.length > 0 || history !== null;
+  const activeLoading = tab === "positions" ? positionsLoading : ordersLoading;
+  const activeError = tab === "positions" ? positionsError : ordersError;
+  const hasRecoverableSnapshot = tab === "positions" ? positionsHaveSnapshot : ordersHaveSnapshot;
   const tabs = [
     { key: "positions", label: "持仓", count: positions.length },
     { key: "open", label: "当前委托", count: openOrders.length },
@@ -1169,14 +1246,14 @@ function RealRecords({
         ))}
       </div>
       <StatePanel
-        loading={accountLoading}
-        error={hasRecoverableSnapshot ? "" : error}
+        loading={activeLoading && !hasRecoverableSnapshot}
+        error={hasRecoverableSnapshot ? "" : activeError}
         empty={false}
         emptyText="-"
       >
-        {error && hasRecoverableSnapshot ? (
+        {activeError && hasRecoverableSnapshot ? (
           <p className="border-b border-line px-4 py-3 text-xs text-amber-200" role="alert">
-            {error} 当前显示上次快照；仅保留撤单和 Reduce-only 安全退出，反手及新增风险已禁用。
+            {activeError} 当前显示上次快照；仅保留撤单和 Reduce-only 安全退出，反手及新增风险已禁用。
           </p>
         ) : null}
         {tab === "positions" ? <RealPositionsTable bestAsk={bestAsk} bestBid={bestBid} onCloseRequest={onCloseRequest} onFeedback={onFeedback} onSelectSymbol={onSelectSymbol} onTpslRequest={onTpslRequest} openOrders={openOrders} pendingOperationKeys={pendingOperationKeys} riskIncreasingActionsBlocked={riskIncreasingActionsBlocked} rows={positions} symbols={symbols} /> : null}
@@ -1429,26 +1506,26 @@ function applyUserStreamSnapshot(
   value: unknown,
   applyOrderState: (state: RealTradingOrderState) => void,
   setAccount: StateSetter<RealAccountSummary | null>,
-  setPositions: StateSetter<RealPosition[]>,
+  applyPositions: (positions: RealPosition[]) => void,
 ) {
   if (!isRecord(value) || !isRealTradingOrderState(value.orders) || !isRecord(value.account) || !Array.isArray(value.positions)) {
     return false;
   }
   applyOrderState(normalizeRealTradingOrderState(value.orders));
   setAccount(value.account as RealAccountSummary);
-  setPositions(value.positions as RealPosition[]);
+  applyPositions(value.positions as RealPosition[]);
   return true;
 }
 
 function applyUserStreamAccount(
   value: unknown,
   setAccount: StateSetter<RealAccountSummary | null>,
-  setPositions: StateSetter<RealPosition[]>,
+  applyPositions: (positions: RealPosition[]) => void,
 ) {
   if (!isRecord(value) || !isRecord(value.account) || !Array.isArray(value.positions)) return false;
   const update = value.account as Partial<RealAccountSummary>;
   setAccount((current) => current ? { ...current, ...update } : update as RealAccountSummary);
-  setPositions(value.positions as RealPosition[]);
+  applyPositions(value.positions as RealPosition[]);
   return true;
 }
 

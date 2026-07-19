@@ -28,10 +28,31 @@ export async function enrichPositionMarks(
   });
 }
 
+export function preservePositionMarks(incoming: RealPosition[], previous: RealPosition[]) {
+  const previousBySymbol = new Map(
+    previous
+      .filter(hasValidMark)
+      .map((position) => [normalizeSymbol(position.symbol), position] as const)
+      .filter(([symbol]) => Boolean(symbol)),
+  );
+
+  return incoming.map((position) => {
+    if (hasValidMark(position)) return position;
+    const previousPosition = previousBySymbol.get(normalizeSymbol(position.symbol));
+    if (!previousPosition) return position;
+    const markPrice = isValidPrice(previousPosition.markPx) ? previousPosition.markPx : previousPosition.markPrice;
+    return isValidPrice(markPrice) ? { ...position, markPrice, markPx: markPrice } : position;
+  });
+}
+
 function hasValidMark(position: RealPosition) {
   return isValidPrice(position.markPx) || isValidPrice(position.markPrice);
 }
 
 function isValidPrice(value: number | null | undefined): value is number {
   return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+function normalizeSymbol(value?: string) {
+  return value?.trim().toUpperCase() ?? "";
 }

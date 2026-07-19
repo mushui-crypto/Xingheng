@@ -3,6 +3,7 @@ import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { USER_AUTH_FAILED_EVENT } from "../../api/session";
 import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
+import { useWalletConnectionStore } from "../../store/walletConnectionStore";
 
 type UserLayoutProps = {
   children: ReactNode;
@@ -14,11 +15,22 @@ export function UserLayout({ children }: UserLayoutProps) {
   const logout = useAuthStore((state) => state.logout);
   const expireSession = useAuthStore((state) => state.expireSession);
   const currentUser = useUserStore((state) => state.currentUser);
+  const walletAddress = useWalletConnectionStore((state) => state.address);
+  const walletBusy = useWalletConnectionStore((state) => state.busy);
+  const walletError = useWalletConnectionStore((state) => state.error);
+  const connectWallet = useWalletConnectionStore((state) => state.connect);
+  const disconnectWallet = useWalletConnectionStore((state) => state.disconnect);
+  const initializeWallet = useWalletConnectionStore((state) => state.initialize);
   const isAccountPage = location.pathname.startsWith("/app/account");
   const isTradingPage =
     location.pathname.startsWith("/app/trade") ||
     location.pathname.startsWith("/app/demo") ||
     location.pathname.startsWith("/app/trading");
+  const isRealTradingPage = location.pathname.startsWith("/app/trade");
+
+  useEffect(() => {
+    void initializeWallet();
+  }, [initializeWallet]);
 
   useEffect(() => {
     const handleAuthFailure = () => {
@@ -53,6 +65,23 @@ export function UserLayout({ children }: UserLayoutProps) {
             <div className="max-w-[260px] truncate border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5]">
               {currentUser ? currentUser.email.toUpperCase() : "LOADING"}
             </div>
+            {isRealTradingPage ? (
+              <button
+                aria-label={walletAddress ? "断开钱包连接" : "连接钱包"}
+                className={`group min-w-[104px] border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none transition hover:border-white/40 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-50 ${walletAddress ? "text-[#29c78a]" : "text-[#f5f5f5]"}`}
+                disabled={walletBusy}
+                onClick={() => void (walletAddress ? disconnectWallet() : connectWallet())}
+                title={walletError || (walletAddress ? walletAddress : "连接钱包")}
+                type="button"
+              >
+                {walletBusy ? "处理中" : walletAddress ? (
+                  <>
+                    <span className="group-hover:hidden group-focus-visible:hidden">钱包已连接</span>
+                    <span className="hidden text-[#ff6b83] group-hover:inline group-focus-visible:inline">断开连接</span>
+                  </>
+                ) : "连接钱包"}
+              </button>
+            ) : null}
             <button
               className="inline-flex items-center justify-center border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04]"
               onClick={handleLogout}
@@ -60,6 +89,22 @@ export function UserLayout({ children }: UserLayoutProps) {
               退出
             </button>
           </div>
+          {isRealTradingPage ? (
+            <button
+              aria-label={walletAddress ? "断开钱包连接" : "连接钱包"}
+              className={`inline-flex min-h-11 shrink-0 items-center justify-center gap-2 border border-[#2b2b2b] bg-black px-3 text-xs font-medium leading-none transition focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-50 md:hidden ${walletAddress ? "text-[#29c78a]" : "text-[#f5f5f5]"}`}
+              disabled={walletBusy}
+              onClick={() => void (walletAddress ? disconnectWallet() : connectWallet())}
+              title={walletError || (walletAddress ? walletAddress : "连接钱包")}
+              type="button"
+            >
+              <span
+                aria-hidden="true"
+                className={`h-2 w-2 shrink-0 rounded-full ${walletAddress ? "bg-[#29c78a]" : "border border-[#858585]"}`}
+              />
+              {walletBusy ? "处理中" : walletAddress ? "已连接" : "钱包"}
+            </button>
+          ) : null}
         </div>
       </header>
       <main className={isAccountPage || isTradingPage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>

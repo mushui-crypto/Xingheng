@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Pencil } from "lucide-react";
 import type { RealOpenOrder, RealPosition, RealTradingSymbol } from "../../../api/realTrading";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
@@ -124,10 +125,14 @@ export function RealPositionsTable({
           <span>资金费</span>
           <span>止盈</span>
           <span>止损</span>
-          <div className="xh-real-position-actions xh-real-position-actions-head">
-            <span>操作</span>
-            <button disabled={actionsBlocked || allClosePending} onClick={requestAllClose} type="button">全部平仓</button>
-          </div>
+          <button
+            className="xh-real-position-close-all"
+            disabled={actionsBlocked || allClosePending || rows.length === 0}
+            onClick={requestAllClose}
+            type="button"
+          >
+            全部平仓
+          </button>
         </div>
         {rows.length === 0 ? (
           <div className="xh-real-position-empty">暂无真实持仓</div>
@@ -139,18 +144,16 @@ export function RealPositionsTable({
           const rowSymbol = resolveRealTradingNavigationSymbol(row, symbols);
           return (
             <div className={`xh-real-position-row is-${row.side}`} key={`${row.coin}-${row.side}-${index}`}>
-              <strong>
-                {rowSymbol && onSelectSymbol ? (
-                  <button
-                    aria-label={`查看 ${rowSymbol} 行情`}
-                    className="xh-position-symbol-button"
-                    onClick={() => onSelectSymbol(rowSymbol)}
-                    type="button"
-                  >
-                    {row.coin}
-                  </button>
-                ) : row.coin}
-              </strong>
+              {rowSymbol && onSelectSymbol ? (
+                <button
+                  aria-label={`查看 ${rowSymbol} 行情`}
+                  className="xh-real-position-asset-cell xh-real-position-asset-button"
+                  onClick={() => onSelectSymbol(rowSymbol)}
+                  type="button"
+                >
+                  {row.coin}
+                </button>
+              ) : <strong className="xh-real-position-asset-cell">{row.coin}</strong>}
               <span className={sideTone}>{formatNumber(row.size)}</span>
               <span>{formatCurrency(positionValue(row))}</span>
               <span>{formatNumber(row.entryPx ?? row.entryPrice)}</span>
@@ -159,8 +162,14 @@ export function RealPositionsTable({
               <span>{formatNumber(row.liqPx ?? row.liquidationPrice)}</span>
               <span>{formatMargin(row)}</span>
               <span>{formatSignedMoney(row.fundingSinceOpen ?? row.cumFunding?.sinceOpen)}</span>
-              <button className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "tp")}</button>
-              <button className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">{formatTriggerPrice(openOrders, row, symbols, "sl")}</button>
+              <button aria-label={`编辑 ${row.coin} 止盈`} className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">
+                <span>{formatTriggerPrice(openOrders, row, symbols, "tp")}</span>
+                <Pencil aria-hidden="true" size={12} strokeWidth={1.5} />
+              </button>
+              <button aria-label={`编辑 ${row.coin} 止损`} className="xh-real-position-trigger-button" disabled={actionsBlocked || rowTpslPending} onClick={() => requestTpsl(row)} type="button">
+                <span>{formatTriggerPrice(openOrders, row, symbols, "sl")}</span>
+                <Pencil aria-hidden="true" size={12} strokeWidth={1.5} />
+              </button>
               <div className="xh-real-position-actions">
                 <button disabled={actionsBlocked || exposurePending} onClick={() => requestSingleClose(row, "limit")} type="button">限价</button>
                 <button disabled={actionsBlocked || exposurePending} onClick={() => requestSingleClose(row, "market")} type="button">市价</button>
@@ -269,7 +278,7 @@ function formatTriggerPrice(
   type: "tp" | "sl",
 ) {
   const value = triggerPrice(orders, position, symbols, type);
-  return value ? formatNumber(Number(value)) : "设置";
+  return value ? formatNumber(Number(value)) : "--";
 }
 
 function triggerPrice(
