@@ -8,6 +8,7 @@ import {
   WalletNetworkRequiredError,
   WalletNetworkSwitchRejectedError,
 } from "./walletNetwork";
+import { resolveHyperliquidSessionIdentityChange, type HyperliquidSessionIdentity } from "./sessionIdentity";
 
 export type HyperliquidSessionState = "idle" | "initializing" | "authorizing" | "authorized" | "submitting";
 export type HyperliquidSessionMessageTone = "error" | "success" | "";
@@ -45,22 +46,43 @@ export type HyperliquidNetworkGateState = {
   switching: boolean;
 };
 
-export function useHyperliquidSessionSigner(provider: Eip1193Provider | null, walletAddress: string): HyperliquidSessionController {
+export function useHyperliquidSessionSignerController(
+  provider: Eip1193Provider | null,
+  walletAddress: string,
+  userId: string | null,
+): HyperliquidSessionController {
   const [state, setState] = useState<HyperliquidSessionState>("idle");
   const [signer, setSigner] = useState<HyperliquidSessionSigner | null>(null);
   const [message, setMessageValue] = useState("");
   const [messageTone, setMessageTone] = useState<HyperliquidSessionMessageTone>("");
   const [networkGate, setNetworkGate] = useState<HyperliquidNetworkGateState>({ currentChainId: null, error: "", open: false, switching: false });
   const sessionGenerationRef = useRef(0);
+  const signerRef = useRef<HyperliquidSessionSigner | null>(null);
+  const stateRef = useRef<HyperliquidSessionState>("idle");
+  const sessionIdentityRef = useRef<HyperliquidSessionIdentity<Eip1193Provider>>({ provider, userId, walletAddress });
 
   useEffect(() => {
+    signerRef.current = signer;
+    stateRef.current = state;
+  }, [signer, state]);
+
+  useEffect(() => {
+    const currentIdentity = { provider, userId, walletAddress };
+    const identityChange = resolveHyperliquidSessionIdentityChange(
+      sessionIdentityRef.current,
+      currentIdentity,
+      signerRef.current !== null || stateRef.current !== "idle",
+    );
+    sessionIdentityRef.current = currentIdentity;
+    if (!identityChange.changed) return;
+
     sessionGenerationRef.current += 1;
     setSigner(null);
     setState("idle");
     setNetworkGate({ currentChainId: null, error: "", open: false, switching: false });
-    setMessageValue(walletAddress ? "钱包地址已变化，需要重新初始化会话签名器。" : "");
+    setMessageValue(identityChange.message);
     setMessageTone("");
-  }, [provider, walletAddress]);
+  }, [provider, userId, walletAddress]);
 
   useEffect(() => {
     if (!provider) return;

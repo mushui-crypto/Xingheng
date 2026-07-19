@@ -314,7 +314,7 @@ server/modules/api/realTradingRoutes.ts
 - 持仓形成后可从持仓表的止盈/止损列设置或替换触发单；替换时先撤销该品种现有 trigger orders，再提交新的 `positionTpsl`。
 - TP/SL 使用 market trigger；触发后的保护价按官方默认容差口径设置为触发价上下 10%。
 - 反手按“先 reduce-only 市价平掉原仓，再按同数量反向市价开仓”顺序执行。前一动作已成交而后一动作失败时不会自动回滚，验收需覆盖该部分完成状态。
-- 会话 agent wallet 仍只保存在页面运行内存中；刷新、切换 provider 或钱包地址变化后必须重新授权。
+- 会话 agent wallet 只保存在应用运行内存中，不写入浏览器持久化存储或后端；顶部页签切换保留当前会话，刷新页面、切换登录用户、provider 或钱包地址变化后必须重新授权。
 
 ## 6. 测试验收重点
 
