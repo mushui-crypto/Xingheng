@@ -22,6 +22,7 @@ export function UserLayout({ children }: UserLayoutProps) {
   const disconnectWallet = useWalletConnectionStore((state) => state.disconnect);
   const initializeWallet = useWalletConnectionStore((state) => state.initialize);
   const isAccountPage = location.pathname.startsWith("/app/account");
+  const isArbitragePage = location.pathname.startsWith("/app/arbitrage");
   const isTradingPage =
     location.pathname.startsWith("/app/trade") ||
     location.pathname.startsWith("/app/demo") ||
@@ -55,6 +56,7 @@ export function UserLayout({ children }: UserLayoutProps) {
             <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
               <TopLink to="/app/dashboard" label="首页" />
               <TopLink to="/app/markets" label="行情" />
+              <TopLink to="/app/arbitrage" label="套利看板" />
               <TopLink to="/app/trade" label="真实交易" />
               <TopLink to="/app/demo" label="模拟交易" />
               <TopLink to="/app/strategy" label="策略交易" />
@@ -107,7 +109,7 @@ export function UserLayout({ children }: UserLayoutProps) {
           ) : null}
         </div>
       </header>
-      <main className={isAccountPage || isTradingPage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
+      <main className={isAccountPage || isTradingPage || isArbitragePage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
     </div>
   );
 
