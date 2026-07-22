@@ -1,8 +1,9 @@
 import { ChevronDown, ChevronUp, ShieldAlert } from "lucide-react";
+import { memo } from "react";
 import type { ArbitrageOpportunity, ArbitrageYieldMetric } from "../model/types";
 import { equivalentNetYield, formatApr, formatBps, formatFundingRate, formatRatio, formatUsd } from "../lib/formatters";
 import { ArbitrageHelp } from "./ArbitrageHelp";
-import { FundingCountdown, useFundingClock } from "./FundingCountdown";
+import { FundingCountdown } from "./FundingCountdown";
 
 type ArbitrageOpportunityTableProps = {
   opportunities: ArbitrageOpportunity[];
@@ -12,12 +13,11 @@ type ArbitrageOpportunityTableProps = {
   onToggle: (id: string) => void;
 };
 
-export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMetric, expandedId, onToggle }: ArbitrageOpportunityTableProps) {
-  const now = useFundingClock();
+export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMetric, expandedId, onToggle }: ArbitrageOpportunityTableProps) {
   if (opportunities.length === 0) {
     return (
       <div className="border border-line bg-black px-5 py-14 text-center">
-        <p className="text-sm font-medium text-white">没有符合筛选条件的套利组合</p>
+        <p className="text-sm font-medium text-white">没有符合筛选条件的中性或套利组合</p>
         <p className="mt-2 text-xs text-muted">调整资产或交易所筛选条件后重试。</p>
       </div>
     );
@@ -30,7 +30,7 @@ export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMet
           <col className="w-[96px]" />
           <col className="w-[260px]" />
           <col className="w-[260px]" />
-          <col className="w-[120px]" />
+          <col className="w-[140px]" />
           <col className="w-[140px]" />
           <col className="w-[150px]" />
           <col className="w-[140px]" />
@@ -45,7 +45,7 @@ export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMet
             <th className="xh-th sticky left-0 z-10 bg-[#121212]"><HeaderLabel label="评分" help="综合等效净APR、持续性、标的匹配、流动性、成本和可靠性计算，满分100分。" align="left" /></th>
             <th className="xh-th">做多</th>
             <th className="xh-th">做空</th>
-            <th className="xh-th text-center"><HeaderLabel label="匹配" help="精确匹配为同一资产；同类黄金指数可能使用不同价格源；关联标的包含代币化黄金与黄金指数之间的跟踪差异。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="类型 / 匹配" help="同所中性仅包含同一交易所、同一资产的现货多头与永续空头；跨所套利沿用原跨交易所组合。精确匹配为同一资产，其他组合仍存在指数或代理标的风险。" /></th>
             <th className="xh-th text-center"><HeaderLabel label="当前费率差" help="按两腿最新资金费率折算的年化毛收益差，未扣除交易成本。" /></th>
             <th className="xh-th text-center"><HeaderLabel label="近90天费率差" help="两腿最近90天逐日对齐后的平均资金费率差，再按365天年化；未扣除交易成本。" /></th>
             <th className="xh-th text-center"><HeaderLabel label={`等效净 ${yieldMetric.toUpperCase()}`} help={yieldMetric === "apr" ? `近90天费率差扣除按${holdingDays}天持有期摊销的往返费用与1万美元档滑点后年化。` : `由等效净APR按${holdingDays}天为一个再投资周期复利换算；不代表实际可持续复投收益。`} /></th>
@@ -65,9 +65,8 @@ export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMet
                 opportunity={opportunity}
                 holdingDays={holdingDays}
                 yieldMetric={yieldMetric}
-                now={now}
                 expanded={expanded}
-                onToggle={() => onToggle(opportunity.id)}
+                onToggle={onToggle}
               />
             );
           })}
@@ -75,15 +74,14 @@ export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMet
       </table>
     </div>
   );
-}
+});
 
-function OpportunityRows({ opportunity, holdingDays, yieldMetric, now, expanded, onToggle }: {
+const OpportunityRows = memo(function OpportunityRows({ opportunity, holdingDays, yieldMetric, expanded, onToggle }: {
   opportunity: ArbitrageOpportunity;
   holdingDays: number;
   yieldMetric: ArbitrageYieldMetric;
-  now: number;
   expanded: boolean;
-  onToggle: () => void;
+  onToggle: (id: string) => void;
 }) {
   const displayedYield = equivalentNetYield(opportunity.netApr, holdingDays, yieldMetric);
   return (
@@ -92,8 +90,8 @@ function OpportunityRows({ opportunity, holdingDays, yieldMetric, now, expanded,
         <td className="sticky left-0 z-[1] bg-black px-5 py-4">
           <ScoreBadge score={opportunity.score} recommendation={opportunity.recommendation} />
         </td>
-        <td className="px-5 py-4"><Leg leg={opportunity.longLeg} side="long" now={now} /></td>
-        <td className="px-5 py-4"><Leg leg={opportunity.shortLeg} side="short" now={now} /></td>
+        <td className="px-5 py-4"><Leg leg={opportunity.longLeg} side="long" /></td>
+        <td className="px-5 py-4"><Leg leg={opportunity.shortLeg} side="short" /></td>
         <td className="px-5 py-4 text-center"><MatchBadge opportunity={opportunity} /></td>
         <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatApr(opportunity.currentGrossApr, true)}</td>
         <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatApr(opportunity.historicalGrossApr, true)}</td>
@@ -113,7 +111,7 @@ function OpportunityRows({ opportunity, holdingDays, yieldMetric, now, expanded,
             aria-expanded={expanded}
             aria-label={expanded ? "收起评分详情" : "展开评分详情"}
             title={expanded ? "收起详情" : "查看详情"}
-            onClick={onToggle}
+            onClick={() => onToggle(opportunity.id)}
           >
             {expanded ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
@@ -128,7 +126,7 @@ function OpportunityRows({ opportunity, holdingDays, yieldMetric, now, expanded,
       ) : null}
     </>
   );
-}
+});
 
 function OpportunityDetail({ opportunity }: { opportunity: ArbitrageOpportunity }) {
   const dimensions = [
@@ -157,6 +155,18 @@ function OpportunityDetail({ opportunity }: { opportunity: ArbitrageOpportunity 
       </div>
       <div className="border-t border-line pt-4 xl:border-l xl:border-t-0 xl:pl-6 xl:pt-0">
         <p className="flex items-center gap-2 text-xs font-semibold text-white"><ShieldAlert size={14} /> 风险与限制</p>
+        <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted">市场侧自动执行候选</span>
+          <span className={opportunity.automationEligible ? "text-emerald-300" : "text-amber-300"}>
+            {opportunity.automationEligible ? "符合" : "暂不符合"}
+          </span>
+          <ArbitrageHelp content="仅按公开行情、90天固定评估、基差和容量判断；不表示已连接账户、已授权API或会自动下单。" label="查看自动执行候选说明" />
+        </div>
+        {!opportunity.automationEligible && opportunity.automationDisqualifiers.length > 0 ? (
+          <ul className="mt-2 space-y-1 text-xs leading-5 text-dim">
+            {opportunity.automationDisqualifiers.map((message) => <li key={message}>• {message}</li>)}
+          </ul>
+        ) : null}
         {messages.length > 0 ? (
           <ul className="mt-3 space-y-2 text-xs leading-5 text-muted">
             {[...new Set(messages)].map((message) => <li key={message}>• {message}</li>)}
@@ -177,7 +187,7 @@ function HeaderLabel({ label, help, align = "center" }: { label: string; help: s
   );
 }
 
-function Leg({ leg, side, now }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short"; now: number }) {
+function Leg({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short" }) {
   return (
     <div className="min-w-0 overflow-hidden">
       <div className="flex items-center gap-2">
@@ -187,12 +197,12 @@ function Leg({ leg, side, now }: { leg: ArbitrageOpportunity["longLeg"]; side: "
       <p className="mt-1 truncate text-xs text-muted">
         {leg.venueLabel} · <span className="font-mono">{leg.symbol}</span> · {leg.kind === "spot" ? "现货" : "永续"}
       </p>
-      <LegFunding leg={leg} side={side} now={now} />
+      <LegFunding leg={leg} side={side} />
     </div>
   );
 }
 
-function LegFunding({ leg, side, now }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short"; now: number }) {
+function LegFunding({ leg, side }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short" }) {
   if (leg.kind === "spot") return <p className="mt-1.5 whitespace-nowrap text-xs font-normal text-dim">Funding 无</p>;
   return (
     <div className="mt-1.5 min-w-[210px] font-mono text-xs tabular-nums">
@@ -202,7 +212,7 @@ function LegFunding({ leg, side, now }: { leg: ArbitrageOpportunity["longLeg"]; 
         <span className="font-sans"> · {fundingDirection(leg.fundingRate, side)}</span>
       </p>
       <p className="mt-1.5 whitespace-nowrap font-normal">
-        <FundingCountdown nextFundingTime={leg.nextFundingTime} now={now} />
+        <FundingCountdown nextFundingTime={leg.nextFundingTime} />
       </p>
     </div>
   );
@@ -235,7 +245,15 @@ function MatchBadge({ opportunity }: { opportunity: ArbitrageOpportunity }) {
     : opportunity.matchQuality === "oracle"
       ? "border-sky-400/30 text-sky-200"
       : "border-amber-400/30 text-amber-200";
-  return <span className={`inline-flex whitespace-nowrap border px-2.5 py-1 text-xs ${className}`}>{opportunity.matchLabel}</span>;
+  const strategyClassName = opportunity.strategyType === "same_venue_neutral"
+    ? "border-violet-400/30 text-violet-200"
+    : "border-sky-400/30 text-sky-200";
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <span className={`inline-flex whitespace-nowrap border px-2.5 py-1 text-xs ${strategyClassName}`}>{opportunity.strategyLabel}</span>
+      <span className={`inline-flex whitespace-nowrap border px-2.5 py-1 text-xs ${className}`}>{opportunity.matchLabel}</span>
+    </div>
+  );
 }
 
 function RecommendationBadge({ recommendation }: { recommendation: ArbitrageOpportunity["recommendation"] }) {

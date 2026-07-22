@@ -1,7 +1,46 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateHistoricalFundingMetrics, scoreOpportunity } from "./arbitrageScoring";
-import type { ArbitrageAsset, InternalArbitrageMarket } from "./arbitrageTypes";
+import { buildArbitrageOpportunities, calculateHistoricalFundingMetrics, scoreOpportunity } from "./arbitrageScoring";
+import type { ArbitrageAsset, ArbitrageVenue, InternalArbitrageMarket } from "./arbitrageTypes";
+
+test("same-venue exact spot and perpetual pairs are included without admitting same-venue perp or proxy pairs", () => {
+  const markets = [
+    marketAtVenue("bybit-xaut-spot", "bybit", "XAUT", "spot", 0),
+    marketAtVenue("bybit-xaut-perp", "bybit", "XAUT", "perpetual", 0.0004),
+    marketAtVenue("bybit-paxg-perp", "bybit", "PAXG", "perpetual", 0.0005),
+    marketAtVenue("bybit-xau-perp", "bybit", "XAU", "perpetual", 0.0002),
+  ];
+
+  const opportunities = buildArbitrageOpportunities(markets, 90);
+
+  assert.deepEqual(opportunities.map((item) => item.id), ["bybit-xaut-spot--bybit-xaut-perp"]);
+  assert.equal(opportunities[0]?.strategyType, "same_venue_neutral");
+  assert.equal(opportunities[0]?.strategyLabel, "同所中性");
+  assert.equal(opportunities[0]?.automationEligible, true);
+});
+
+test("stock RWA opportunities require the same underlying while allowing same-venue and cross-venue hedges", () => {
+  const markets = [
+    {
+      ...marketAtVenue("bitget-mu-spot", "bitget", "MU", "spot", 0),
+      availableSince: Date.now() - 7 * 24 * 60 * 60 * 1000,
+    },
+    marketAtVenue("bitget-mu-perp", "bitget", "MU", "perpetual", 0.0004),
+    marketAtVenue("bybit-mu-perp", "bybit", "MU", "perpetual", 0.0005),
+    marketAtVenue("bitget-nvda-perp", "bitget", "NVDA", "perpetual", 0.0007),
+  ];
+  const opportunities = buildArbitrageOpportunities(markets, 90);
+  const ids = opportunities.map((item) => item.id);
+
+  assert.ok(ids.includes("bitget-mu-spot--bitget-mu-perp"));
+  assert.ok(ids.includes("bitget-mu-spot--bybit-mu-perp"));
+  assert.ok(ids.includes("bitget-mu-perp--bybit-mu-perp"));
+  assert.ok(!ids.some((id) => id.includes("nvda") && id.includes("mu")));
+  assert.ok(opportunities.find((item) => item.id === "bitget-mu-spot--bitget-mu-perp")?.warnings
+    .some((warning) => warning.includes("公司行动")));
+  assert.ok(opportunities.find((item) => item.id === "bitget-mu-spot--bitget-mu-perp")?.warnings
+    .some((warning) => warning.includes("历史数据覆盖不足")));
+});
 
 test("exact-asset opportunity can be recommended when persistent net carry covers costs", () => {
   const long = market("long", "XAUT", "spot", 0);
@@ -14,6 +53,9 @@ test("exact-asset opportunity can be recommended when persistent net carry cover
   assert.ok(opportunity.netApr > 0);
   assert.equal(opportunity.shortLeg.fundingRate, 0.0004);
   assert.equal(opportunity.shortLeg.fundingIntervalHours, 24);
+  assert.equal(opportunity.strategyType, "cross_venue_arbitrage");
+  assert.equal(opportunity.automationEligible, false);
+  assert.ok(opportunity.automationDisqualifiers.some((reason) => reason.includes("仅评估同所")));
 });
 
 test("proxy-asset opportunities can exceed 79 and become recommended", () => {
@@ -98,6 +140,20 @@ function market(id: string, asset: ArbitrageAsset, kind: "spot" | "perpetual", d
     warnings: [],
     fundingHistory: history,
   };
+}
+
+function marketAtVenue(
+  id: string,
+  venue: ArbitrageVenue,
+  asset: ArbitrageAsset,
+  kind: "spot" | "perpetual",
+  dailyRate: number,
+) {
+  return {
+    ...market(id, asset, kind, dailyRate),
+    venue,
+    venueLabel: venue === "bybit" ? "Bybit" : venue,
+  } satisfies InternalArbitrageMarket;
 }
 
 function dailyHistory(days: number, rate: number) {

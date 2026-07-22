@@ -8,6 +8,11 @@ import type {
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
 const recommendedScoreThreshold = 75;
 const watchScoreThreshold = 60;
+const automationAssessmentDays = 90;
+const automationMinimumNetApr = 6;
+const automationMinimumPersistence = 0.75;
+const automationMinimumCapacityUsd = 6_000;
+const automationMaximumAbsoluteBasisBps = 50;
 
 export function buildArbitrageOpportunities(
   markets: InternalArbitrageMarket[],
@@ -18,9 +23,13 @@ export function buildArbitrageOpportunities(
   for (const shortMarket of markets) {
     if (shortMarket.kind !== "perpetual") continue;
     for (const longMarket of markets) {
-      if (longMarket.venue === shortMarket.venue || longMarket.id === shortMarket.id) continue;
-      if (!isGoldAsset(longMarket.asset) || !isGoldAsset(shortMarket.asset)) continue;
-      if (longMarket.kind === "perpetual" && sameFundingProfile(longMarket, shortMarket)) continue;
+      if (longMarket.id === shortMarket.id) continue;
+      const sameAsset = longMarket.asset === shortMarket.asset;
+      const bothGoldAssets = isGoldAsset(longMarket.asset) && isGoldAsset(shortMarket.asset);
+      if (!sameAsset && !bothGoldAssets) continue;
+      const sameVenue = longMarket.venue === shortMarket.venue;
+      if (sameVenue && !isSameVenueNeutralPair(longMarket, shortMarket)) continue;
+      if (!sameVenue && longMarket.kind === "perpetual" && sameFundingProfile(longMarket, shortMarket)) continue;
       opportunities.push(scoreOpportunity(longMarket, shortMarket, holdingDays, lookbackDays));
     }
   }
@@ -33,6 +42,9 @@ export function scoreOpportunity(
   holdingDays: number,
   lookbackDays = 90,
 ): ArbitrageOpportunity {
+  const strategyType = longMarket.venue === shortMarket.venue
+    ? "same_venue_neutral"
+    : "cross_venue_arbitrage";
   const matchQuality = getMatchQuality(longMarket.asset, shortMarket.asset);
   const dailySpreads = buildDailyFundingSpreads(longMarket, shortMarket, lookbackDays);
   const historicalGrossApr = dailySpreads.length > 0
@@ -51,9 +63,24 @@ export function scoreOpportunity(
   const netApr = historicalGrossApr - annualizedTradingCostApr;
   const capacityUsd = minNullable(longMarket.depthUsd, shortMarket.depthUsd);
   const entryBasisBps = calculateEntryBasisBps(longMarket.ask, shortMarket.bid);
-  const coverageRatio = Math.min(longMarket.fundingCoverageRatio ?? 1, shortMarket.fundingCoverageRatio ?? 1);
+  const coverageRatio = Math.min(
+    marketCoverageRatio(longMarket, lookbackDays),
+    marketCoverageRatio(shortMarket, lookbackDays),
+  );
   const disqualifiers = buildDisqualifiers(longMarket, shortMarket, netApr, dailySpreads.length);
   const warnings = buildWarnings(longMarket, shortMarket, matchQuality, coverageRatio);
+  const automationDisqualifiers = buildAutomationDisqualifiers({
+    longMarket,
+    shortMarket,
+    strategyType,
+    matchQuality,
+    historicalGrossApr,
+    persistenceRatio,
+    roundTripCostBps,
+    entryBasisBps,
+    capacityUsd,
+    disqualifiers,
+  });
 
   const scoreBreakdown = {
     netApr: roundScore(clamp(netApr / 15, 0, 1) * 30),
@@ -77,6 +104,8 @@ export function scoreOpportunity(
     id: `${longMarket.id}--${shortMarket.id}`,
     longLeg: toLeg(longMarket),
     shortLeg: toLeg(shortMarket),
+    strategyType,
+    strategyLabel: strategyType === "same_venue_neutral" ? "同所中性" : "跨所套利",
     matchQuality,
     matchLabel: matchQuality === "exact" ? "精确匹配" : matchQuality === "oracle" ? "同类黄金指数" : "关联标的",
     currentGrossApr: roundMetric(currentGrossApr),
@@ -92,6 +121,8 @@ export function scoreOpportunity(
     scoreBreakdown,
     disqualifiers,
     warnings,
+    automationEligible: automationDisqualifiers.length === 0,
+    automationDisqualifiers,
   };
 }
 
@@ -117,7 +148,11 @@ export function calculateHistoricalFundingMetrics(history: Array<{ rate: number;
 }
 
 function buildDailyFundingSpreads(longMarket: InternalArbitrageMarket, shortMarket: InternalArbitrageMarket, horizonDays: number) {
-  const cutoff = Date.now() - horizonDays * millisecondsPerDay;
+  const cutoff = Math.max(
+    Date.now() - horizonDays * millisecondsPerDay,
+    longMarket.availableSince ?? 0,
+    shortMarket.availableSince ?? 0,
+  );
   const shortDaily = aggregateDailyFunding(shortMarket.fundingHistory.filter((point) => point.timestamp >= cutoff));
   if (shortDaily.size === 0) return [];
   if (longMarket.kind === "spot") return [...shortDaily.values()];
@@ -125,6 +160,13 @@ function buildDailyFundingSpreads(longMarket: InternalArbitrageMarket, shortMark
   return [...shortDaily.entries()]
     .filter(([day]) => longDaily.has(day))
     .map(([day, shortRate]) => shortRate - (longDaily.get(day) ?? 0));
+}
+
+function marketCoverageRatio(market: InternalArbitrageMarket, horizonDays: number) {
+  const fundingCoverage = market.fundingCoverageRatio ?? (market.kind === "spot" ? 1 : 0);
+  if (!market.availableSince) return fundingCoverage;
+  const availableDays = Math.max(0, (Date.now() - market.availableSince) / millisecondsPerDay);
+  return Math.min(fundingCoverage, clamp(availableDays / horizonDays, 0, 1));
 }
 
 function aggregateDailyFunding(history: Array<{ rate: number; timestamp: number }>) {
@@ -168,9 +210,51 @@ function buildWarnings(
   const warnings = [...longMarket.warnings, ...shortMarket.warnings];
   if (matchQuality === "proxy") warnings.push("两腿为关联标的，跟踪口径不同，存在发行人、赎回与脱锚风险");
   if (matchQuality === "oracle") warnings.push("两腿指数源可能不同，存在标记价格与交易时段基差");
+  if (!isGoldAsset(longMarket.asset) || !isGoldAsset(shortMarket.asset)) {
+    warnings.push("股票代币与指数永续不代表同一法律权益，仍存在发行人、价格源、公司行动与交易时段差异");
+  }
+  if (longMarket.venue === shortMarket.venue) warnings.push("同所组合降低执行复杂度，但资金与持仓集中承担单一交易所风险");
   if (longMarket.settlementAsset !== shortMarket.settlementAsset) warnings.push("两腿结算资产不同，需单独计量 USDC/USDT 风险");
   if (coverageRatio < 0.8) warnings.push("历史数据覆盖不足，评分可靠性已降低");
   return [...new Set(warnings)];
+}
+
+function buildAutomationDisqualifiers(input: {
+  longMarket: InternalArbitrageMarket;
+  shortMarket: InternalArbitrageMarket;
+  strategyType: ArbitrageOpportunity["strategyType"];
+  matchQuality: ArbitrageMatchQuality;
+  historicalGrossApr: number;
+  persistenceRatio: number;
+  roundTripCostBps: number;
+  entryBasisBps: number | null;
+  capacityUsd: number | null;
+  disqualifiers: string[];
+}) {
+  const reasons: string[] = [];
+  if (input.strategyType !== "same_venue_neutral") reasons.push("首版自动执行仅评估同所中性组合");
+  if (!isSameVenueNeutralPair(input.longMarket, input.shortMarket) || input.matchQuality !== "exact") {
+    reasons.push("首版仅允许同一资产的现货多头与永续空头");
+  }
+  if (input.disqualifiers.length > 0) reasons.push(...input.disqualifiers);
+  if (input.longMarket.status !== "connected" || input.shortMarket.status !== "connected") reasons.push("自动执行要求两腿行情状态正常");
+  if ((input.shortMarket.fundingRate ?? 0) <= 0) reasons.push("当前空头腿未处于收取 Funding 状态");
+  if (input.persistenceRatio < automationMinimumPersistence) reasons.push("近90天有利天数不足75%");
+  const fixedAssessmentNetApr = input.historicalGrossApr
+    - (input.roundTripCostBps / 100) * (365 / automationAssessmentDays);
+  if (fixedAssessmentNetApr < automationMinimumNetApr) reasons.push("按90天固定评估的等效净APR低于6%");
+  if (input.capacityUsd === null || input.capacityUsd < automationMinimumCapacityUsd) reasons.push("公开盘口容量不足6,000美元");
+  if (input.entryBasisBps === null || Math.abs(input.entryBasisBps) > automationMaximumAbsoluteBasisBps) {
+    reasons.push("入场基差绝对值超过50bps或暂不可计算");
+  }
+  return [...new Set(reasons)];
+}
+
+function isSameVenueNeutralPair(longMarket: InternalArbitrageMarket, shortMarket: InternalArbitrageMarket) {
+  return longMarket.venue === shortMarket.venue
+    && longMarket.kind === "spot"
+    && shortMarket.kind === "perpetual"
+    && longMarket.asset === shortMarket.asset;
 }
 
 function liquidityScore(capacityUsd: number | null) {

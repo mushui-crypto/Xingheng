@@ -1,12 +1,11 @@
 import { AlertTriangle, CheckCircle2, CircleOff } from "lucide-react";
+import { memo } from "react";
 import type { ArbitrageMarket } from "../model/types";
 import { formatApr, formatBps, formatFundingRate, formatPrice, formatRatio, formatUsd } from "../lib/formatters";
 import { ArbitrageHelp } from "./ArbitrageHelp";
-import { FundingCountdown, useFundingClock } from "./FundingCountdown";
+import { FundingCountdown } from "./FundingCountdown";
 
-export function ArbitrageMarketTable({ markets }: { markets: ArbitrageMarket[] }) {
-  const now = useFundingClock();
-
+export const ArbitrageMarketTable = memo(function ArbitrageMarketTable({ markets }: { markets: ArbitrageMarket[] }) {
   if (markets.length === 0) {
     return <EmptyRows />;
   }
@@ -31,56 +30,58 @@ export function ArbitrageMarketTable({ markets }: { markets: ArbitrageMarket[] }
           </tr>
         </thead>
         <tbody className="divide-y divide-line">
-          {markets.map((market) => {
-            return (
-              <tr key={market.id} className="hover:bg-white/[0.025]">
-                <td className="sticky left-0 z-[1] bg-black px-5 py-4">
-                  <div className="flex items-center gap-3">
-                    <span className="inline-flex h-8 min-w-12 items-center justify-center border border-white/15 bg-panel px-2 font-mono text-xs font-semibold text-white">
-                      {market.asset}
-                    </span>
-                    <div className="min-w-0">
-                      <p className="font-mono text-sm font-semibold text-white">{market.symbol}</p>
-                      <p className="mt-1 text-xs text-dim">{market.quoteAsset} 报价 · {market.settlementAsset} 结算</p>
-                    </div>
-                  </div>
-                </td>
-                <td className="px-5 py-4 font-medium text-white">{market.venueLabel}</td>
-                <td className="px-5 py-4">
-                  <ProductBadge kind={market.kind} />
-                </td>
-                <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
-                  <p>{formatPrice(market.bid)}</p>
-                  <p>{formatPrice(market.ask)}</p>
-                </td>
-                <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
-                  <p>{formatPrice(market.markPrice)}</p>
-                  <p>{formatPrice(market.indexPrice)}</p>
-                </td>
-                <td className="px-5 py-4 text-right">
-                  <MarketFunding market={market} now={now} />
-                </td>
-                <td className="px-5 py-4 text-right font-mono font-normal text-muted">
-                  {formatApr(market.historicalFundingApr, true)}
-                  <p className="mt-1 text-[11px] font-normal text-dim">覆盖 {formatRatio(market.fundingCoverageRatio)}</p>
-                </td>
-                <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatRatio(market.fundingPositiveRatio)}</td>
-                <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.spreadBps)}</td>
-                <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.slippageBps10k)}</td>
-                <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatUsd(market.depthUsd)}</td>
-                <td className="px-5 py-4">
-                  <MarketStatus market={market} />
-                </td>
-              </tr>
-            );
-          })}
+          {markets.map((market) => <MarketRow key={market.id} market={market} />)}
         </tbody>
       </table>
     </div>
   );
-}
+});
 
-function MarketFunding({ market, now }: { market: ArbitrageMarket; now: number }) {
+const MarketRow = memo(function MarketRow({ market }: { market: ArbitrageMarket }) {
+  return (
+    <tr className="hover:bg-white/[0.025]">
+      <td className="sticky left-0 z-[1] bg-black px-5 py-4">
+        <div className="flex items-center gap-3">
+          <span className="inline-flex h-8 min-w-12 items-center justify-center border border-white/15 bg-panel px-2 font-mono text-xs font-semibold text-white">
+            {market.asset}
+          </span>
+          <div className="min-w-0">
+            <p className="font-mono text-sm font-semibold text-white">{market.symbol}</p>
+            <p className="mt-1 text-xs text-dim">{market.quoteAsset} 报价 · {market.settlementAsset} 结算</p>
+          </div>
+        </div>
+      </td>
+      <td className="px-5 py-4 font-medium text-white">{market.venueLabel}</td>
+      <td className="px-5 py-4">
+        <ProductBadge kind={market.kind} />
+      </td>
+      <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
+        <p>{formatPrice(market.bid)}</p>
+        <p>{formatPrice(market.ask)}</p>
+      </td>
+      <td className="px-5 py-4 text-right font-mono text-xs font-normal leading-5 text-muted">
+        <p>{formatPrice(market.markPrice)}</p>
+        <p>{formatPrice(market.indexPrice)}</p>
+      </td>
+      <td className="px-5 py-4 text-right">
+        <MarketFunding market={market} />
+      </td>
+      <td className="px-5 py-4 text-right font-mono font-normal text-muted">
+        {formatApr(market.historicalFundingApr, true)}
+        <p className="mt-1 text-[11px] font-normal text-dim">覆盖 {formatRatio(market.fundingCoverageRatio)}</p>
+      </td>
+      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatRatio(market.fundingPositiveRatio)}</td>
+      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.spreadBps)}</td>
+      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(market.slippageBps10k)}</td>
+      <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatUsd(market.depthUsd)}</td>
+      <td className="px-5 py-4">
+        <MarketStatus market={market} />
+      </td>
+    </tr>
+  );
+});
+
+function MarketFunding({ market }: { market: ArbitrageMarket }) {
   if (market.kind === "spot") {
     return <span className="whitespace-nowrap text-xs font-normal text-dim">无资金费率</span>;
   }
@@ -91,7 +92,7 @@ function MarketFunding({ market, now }: { market: ArbitrageMarket; now: number }
         {market.fundingIntervalHours ? <span> / {formatInterval(market.fundingIntervalHours)}h</span> : null}
       </p>
       <p className="mt-1 whitespace-nowrap text-[11px] font-normal text-muted">APR {formatApr(market.currentFundingApr, true)}</p>
-      <p className="mt-1 text-[11px] font-normal"><FundingCountdown nextFundingTime={market.nextFundingTime} now={now} /></p>
+      <p className="mt-1 text-[11px] font-normal"><FundingCountdown nextFundingTime={market.nextFundingTime} /></p>
     </div>
   );
 }
