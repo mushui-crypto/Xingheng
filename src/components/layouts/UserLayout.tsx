@@ -29,6 +29,7 @@ export function UserLayout({ children }: UserLayoutProps) {
     location.pathname.startsWith("/app/trading");
   const isRealTradingPage = location.pathname.startsWith("/app/trade");
   const isAuthenticated = Boolean(currentUser);
+  const isDashboard = location.pathname === "/app/dashboard";
 
   useEffect(() => {
     if (!isAuthenticated) return;
@@ -119,7 +120,7 @@ export function UserLayout({ children }: UserLayoutProps) {
           ) : null}
         </div>
       </header>
-      <main className={isAccountPage || isTradingPage || isArbitragePage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
+      <main className={isDashboard || isAccountPage || isTradingPage || isArbitragePage ? "min-w-0 w-full bg-[#080808] p-0" : "mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8"}>{children}</main>
     </div>
   );
 
