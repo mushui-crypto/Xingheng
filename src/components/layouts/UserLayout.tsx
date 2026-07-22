@@ -28,23 +28,26 @@ export function UserLayout({ children }: UserLayoutProps) {
     location.pathname.startsWith("/app/demo") ||
     location.pathname.startsWith("/app/trading");
   const isRealTradingPage = location.pathname.startsWith("/app/trade");
+  const isAuthenticated = Boolean(currentUser);
 
   useEffect(() => {
+    if (!isAuthenticated) return;
     void initializeWallet();
-  }, [initializeWallet]);
+  }, [initializeWallet, isAuthenticated]);
 
   useEffect(() => {
     const handleAuthFailure = () => {
+      void disconnectWallet();
       expireSession();
-      navigate("/login", { replace: true });
     };
     window.addEventListener(USER_AUTH_FAILED_EVENT, handleAuthFailure);
     return () => window.removeEventListener(USER_AUTH_FAILED_EVENT, handleAuthFailure);
-  }, [expireSession, navigate]);
+  }, [disconnectWallet, expireSession]);
 
   const handleLogout = () => {
+    void disconnectWallet();
     logout();
-    navigate("/login", { replace: true });
+    navigate("/app/dashboard", { replace: true });
   };
 
   return (
@@ -63,35 +66,42 @@ export function UserLayout({ children }: UserLayoutProps) {
               <TopLink to="/app/account" label="账户总览" />
             </nav>
           </div>
-          <div className="hidden shrink-0 items-center gap-[18px] md:flex">
-            <div className="max-w-[260px] truncate border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5]">
-              {currentUser ? currentUser.email.toUpperCase() : "LOADING"}
-            </div>
-            {isRealTradingPage ? (
+          {isAuthenticated ? (
+            <div className="hidden shrink-0 items-center gap-[18px] md:flex">
+              <div className="max-w-[260px] truncate border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5]">
+                {currentUser?.email.toUpperCase()}
+              </div>
+              {isRealTradingPage ? (
+                <button
+                  aria-label={walletAddress ? "断开钱包连接" : "连接钱包"}
+                  className={`group min-w-[104px] border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none transition hover:border-white/40 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-50 ${walletAddress ? "text-[#29c78a]" : "text-[#f5f5f5]"}`}
+                  disabled={walletBusy}
+                  onClick={() => void (walletAddress ? disconnectWallet() : connectWallet())}
+                  title={walletError || (walletAddress ? walletAddress : "连接钱包")}
+                  type="button"
+                >
+                  {walletBusy ? "处理中" : walletAddress ? (
+                    <>
+                      <span className="group-hover:hidden group-focus-visible:hidden">钱包已连接</span>
+                      <span className="hidden text-[#ff6b83] group-hover:inline group-focus-visible:inline">断开连接</span>
+                    </>
+                  ) : "连接钱包"}
+                </button>
+              ) : null}
               <button
-                aria-label={walletAddress ? "断开钱包连接" : "连接钱包"}
-                className={`group min-w-[104px] border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none transition hover:border-white/40 hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-50 ${walletAddress ? "text-[#29c78a]" : "text-[#f5f5f5]"}`}
-                disabled={walletBusy}
-                onClick={() => void (walletAddress ? disconnectWallet() : connectWallet())}
-                title={walletError || (walletAddress ? walletAddress : "连接钱包")}
-                type="button"
+                className="inline-flex items-center justify-center border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04]"
+                onClick={handleLogout}
               >
-                {walletBusy ? "处理中" : walletAddress ? (
-                  <>
-                    <span className="group-hover:hidden group-focus-visible:hidden">钱包已连接</span>
-                    <span className="hidden text-[#ff6b83] group-hover:inline group-focus-visible:inline">断开连接</span>
-                  </>
-                ) : "连接钱包"}
+                退出
               </button>
-            ) : null}
-            <button
-              className="inline-flex items-center justify-center border border-[#2b2b2b] bg-black px-4 py-2.5 text-[13px] font-medium leading-none text-[#f5f5f5] transition hover:border-white/40 hover:bg-white/[0.04]"
-              onClick={handleLogout}
-            >
-              退出
-            </button>
-          </div>
-          {isRealTradingPage ? (
+            </div>
+          ) : (
+            <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
+              <NavLink className="inline-flex min-h-10 items-center justify-center border border-white/25 px-2.5 text-xs font-semibold text-white sm:px-4 sm:text-[13px]" to="/login">登录</NavLink>
+              <NavLink className="inline-flex min-h-10 items-center justify-center bg-white px-2.5 text-xs font-semibold text-black sm:px-4 sm:text-[13px]" to="/register">注册</NavLink>
+            </div>
+          )}
+          {isAuthenticated && isRealTradingPage ? (
             <button
               aria-label={walletAddress ? "断开钱包连接" : "连接钱包"}
               className={`inline-flex min-h-11 shrink-0 items-center justify-center gap-2 border border-[#2b2b2b] bg-black px-3 text-xs font-medium leading-none transition focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:cursor-not-allowed disabled:opacity-50 md:hidden ${walletAddress ? "text-[#29c78a]" : "text-[#f5f5f5]"}`}

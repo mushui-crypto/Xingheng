@@ -1,9 +1,11 @@
-import { lazy, Suspense, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, type ReactNode } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AdminLayout } from "./components/layouts/AdminLayout";
 import { UserLayout } from "./components/layouts/UserLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { HyperliquidSessionProvider } from "./features/realTrading/components/HyperliquidSessionProvider";
+import { useAuthStore } from "./store/authStore";
+import { useUserStore } from "./store/userStore";
 
 const AuthPage = lazy(() => import("./pages/auth/AuthPage").then((module) => ({ default: module.AuthPage })));
 const DashboardPage = lazy(() => import("./pages/app/DashboardPage").then((module) => ({ default: module.DashboardPage })));
@@ -25,7 +27,7 @@ export default function App() {
     <HyperliquidSessionProvider>
       <Suspense fallback={<RouteFallback />}>
         <Routes>
-          <Route path="/" element={<Navigate to="/login" replace />} />
+          <Route path="/" element={<Navigate to="/app/dashboard" replace />} />
           <Route path="/login" element={<AuthPage />} />
           <Route path="/register" element={<AuthPage />} />
           <Route path="/forgot-password" element={<AuthPage />} />
@@ -44,7 +46,7 @@ export default function App() {
           <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
           <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
           <Route path="/admin/real-trading" element={<AdminScreen><AdminRealTradingOperationsPage /></AdminScreen>} />
-          <Route path="*" element={<Navigate to="/login" replace />} />
+          <Route path="*" element={<Navigate to="/app/dashboard" replace />} />
         </Routes>
       </Suspense>
     </HyperliquidSessionProvider>
@@ -57,10 +59,24 @@ function DemoRedirect() {
 }
 
 function UserScreen({ children }: { children: ReactNode }) {
+  const isLoggedIn = useAuthStore((state) => state.isLoggedIn);
+  const isSessionReady = useAuthStore((state) => state.isSessionReady);
+  const syncSession = useAuthStore((state) => state.syncSession);
+  const expireSession = useAuthStore((state) => state.expireSession);
+  const currentUser = useUserStore((state) => state.currentUser);
+
+  useEffect(() => {
+    if (isLoggedIn && !isSessionReady) void syncSession();
+  }, [isLoggedIn, isSessionReady, syncSession]);
+
+  useEffect(() => {
+    if (isLoggedIn && isSessionReady && !currentUser) expireSession();
+  }, [currentUser, expireSession, isLoggedIn, isSessionReady]);
+
+  if (isLoggedIn && !isSessionReady) return <RouteFallback />;
+
   return (
-    <ProtectedRoute type="user">
-      <UserLayout>{children}</UserLayout>
-    </ProtectedRoute>
+    <UserLayout>{children}</UserLayout>
   );
 }
 

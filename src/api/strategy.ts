@@ -20,7 +20,6 @@ export function fetchStrategyForwardReport(signal?: AbortSignal) {
     {
       init: { signal },
       networkErrorMessage: "策略观察服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }
@@ -38,7 +37,6 @@ export function fetchStrategyHistoryReport(query: StrategyHistoryQuery, signal?:
     {
       init: { signal },
       networkErrorMessage: "历史回测服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }
@@ -56,7 +54,6 @@ export function fetchStrategyCandles(query: StrategyCandlesQuery, signal?: Abort
     {
       init: { signal },
       networkErrorMessage: "策略K线服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }
@@ -68,7 +65,6 @@ export function fetchMartingaleForwardReport(signal?: AbortSignal) {
     {
       init: { signal },
       networkErrorMessage: "马丁网格 Paper 服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }
@@ -80,7 +76,6 @@ export function fetchFixedGridForwardReport(signal?: AbortSignal) {
     {
       init: { signal },
       networkErrorMessage: "固定价差网格 Paper 服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }
@@ -99,7 +94,6 @@ export function fetchMartingaleCandles(query: MartingaleCandlesQuery, signal?: A
     {
       init: { signal },
       networkErrorMessage: "马丁网格策略K线服务暂时不可用。",
-      userAuthFailure: true,
     },
   );
 }

@@ -226,8 +226,23 @@ export const userAuthenticatedApiPrefixes = [
   "/api/strategy/martingale",
 ];
 
+export const publicReadOnlyApiPaths: ReadonlySet<string> = new Set([
+  "/api/arbitrage/dashboard",
+  "/api/strategy/ict/forward",
+  "/api/strategy/ict/history",
+  "/api/strategy/ict/candles",
+  "/api/strategy/martingale/candles",
+  "/api/strategy/martingale/forward",
+  "/api/strategy/martingale/fixed-grid/forward",
+]);
+
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
   app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
+    const requestPath = request.originalUrl.split("?", 1)[0];
+    if (request.method === "GET" && publicReadOnlyApiPaths.has(requestPath)) {
+      next();
+      return;
+    }
     const token = getUserBearerToken(request);
     const isRealTradingRequest = request.originalUrl.startsWith("/api/real-trading")
       || request.baseUrl.startsWith("/api/real-trading");

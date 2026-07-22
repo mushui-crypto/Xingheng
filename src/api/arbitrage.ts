@@ -7,6 +7,6 @@ export function fetchArbitrageDashboard(horizonDays: ArbitrageHorizon, forceRefr
   return requestJson<ArbitrageDashboardSnapshot>(
     `/api/arbitrage/dashboard?${params.toString()}`,
     "套利看板加载失败。",
-    { networkErrorMessage: "无法连接套利行情服务。", userAuthFailure: true },
+    { networkErrorMessage: "无法连接套利行情服务。" },
   );
 }

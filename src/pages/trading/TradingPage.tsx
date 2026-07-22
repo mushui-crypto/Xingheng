@@ -2,6 +2,7 @@ import { createChart, CandlestickSeries, type IChartApi, type ISeriesApi } from 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Card } from "../../components/ui/Card";
+import { GuestAccessPanel } from "../../components/auth/GuestAccessPanel";
 import { MarketSymbolPicker } from "../../components/trading/MarketSymbolPicker";
 import {
   closePosition,
@@ -41,8 +42,11 @@ import { formatCompactMoney, formatFundingPercent, formatMarketDayChange, market
 import { readCurrentSimulationAccountId, shortSimulationId } from "../../features/trading/lib/simulationAccount";
 import { mergeTradingSearchParams } from "../../features/trading/lib/tradingSearchParams";
 import { currentSimulationAccountKey } from "../../features/trading/model/constants";
+import { useUserStore } from "../../store/userStore";
 
 export function TradingPage() {
+  const currentUser = useUserStore((state) => state.currentUser);
+  const isAuthenticated = Boolean(currentUser);
   const themeColor = "#00C896";
   const currency = "USDT";
   const allSymbols = useSymbolStore((state) => state.symbols);
@@ -72,7 +76,7 @@ export function TradingPage() {
   const [positions, setPositions] = useState<PositionView[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [simulationAccounts, setSimulationAccounts] = useState<SimulationAccountView[]>([]);
-  const [simulationAccountsLoading, setSimulationAccountsLoading] = useState(true);
+  const [simulationAccountsLoading, setSimulationAccountsLoading] = useState(isAuthenticated);
   const [selectedSimulationAccountId, setSelectedSimulationAccountId] = useState(searchParams.get("simulationAccountId") ?? readCurrentSimulationAccountId());
   const [volume, setVolume] = useState(selectedConfig?.minLot ?? 0.01);
   const [message, setMessage] = useState("");
@@ -94,6 +98,7 @@ export function TradingPage() {
   const hasSimulationAccounts = simulationAccounts.length > 0;
   const needsSimulationAccount = !selectedSimulationAccountId || !selectedSimulationAccount;
   const orderDisabled =
+    !isAuthenticated ||
     simulationAccountsLoading ||
     needsSimulationAccount ||
     ticker.status !== "connected" ||
@@ -164,6 +169,15 @@ export function TradingPage() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!isAuthenticated) {
+      setSimulationAccounts([]);
+      setSelectedSimulationAccountId("");
+      setSimulationAccountsLoading(false);
+      setAccount(null);
+      setPositions([]);
+      setOrders([]);
+      return;
+    }
     setSimulationAccountsLoading(true);
     void fetchSimulationAccounts()
       .then((payload) => {
@@ -189,7 +203,7 @@ export function TradingPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (selectedSimulationAccountId) {
@@ -296,7 +310,7 @@ export function TradingPage() {
         }
       }
 
-      const shouldLoadTradingState = Boolean(selectedSimulationAccountId && selectedSimulationAccount && !simulationAccountsLoading);
+      const shouldLoadTradingState = Boolean(isAuthenticated && selectedSimulationAccountId && selectedSimulationAccount && !simulationAccountsLoading);
       const tradingStatePromise = shouldLoadTradingState
         ? Promise.all([
             fetchTradingAccount(selectedSimulationAccountId),
@@ -318,7 +332,7 @@ export function TradingPage() {
     return () => {
       cancelled = true;
     };
-  }, [interval, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, symbolConfigKey]);
+  }, [interval, isAuthenticated, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, symbolConfigKey]);
 
   useEffect(() => {
     const socket = new WebSocket(wsUrl);
@@ -337,7 +351,7 @@ export function TradingPage() {
       }
       if (payload.type === "ticker" && payload.symbol === symbol) {
         setTicker((current) => ({ ...current, ...payload }));
-        if (!simulationAccountsLoading && selectedSimulationAccount) {
+        if (isAuthenticated && !simulationAccountsLoading && selectedSimulationAccount) {
           void refreshTradingState();
         }
       }
@@ -353,10 +367,10 @@ export function TradingPage() {
     });
 
     return () => socket.close();
-  }, [interval, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, wsUrl]);
+  }, [interval, isAuthenticated, selectedSimulationAccount?.id, selectedSimulationAccountId, simulationAccountsLoading, symbol, wsUrl]);
 
   const refreshTradingState = async (simulationAccountId = selectedSimulationAccountId) => {
-    if (!simulationAccountId) {
+    if (!isAuthenticated || !simulationAccountId) {
       setAccount(null);
       setPositions([]);
       setOrders([]);
@@ -377,6 +391,10 @@ export function TradingPage() {
 
   const submitOrder = async (side: "buy" | "sell") => {
     setMessage("");
+    if (!isAuthenticated) {
+      setMessage("登录后可使用模拟账户下单。");
+      return;
+    }
     if (!selectedSimulationAccountId || !selectedSimulationAccount) {
       setMessage("请先选择模拟账户。");
       return;
@@ -392,6 +410,10 @@ export function TradingPage() {
   };
 
   const submitClose = async (positionId: string) => {
+    if (!isAuthenticated) {
+      setMessage("登录后可管理模拟持仓。");
+      return;
+    }
     if (closingPositionIdRef.current) {
       return;
     }
@@ -503,7 +525,7 @@ export function TradingPage() {
         </main>
 
         <aside className="xh-trade-order-rail">
-          <TradingOrderPanel
+          {isAuthenticated ? <><TradingOrderPanel
             account={account}
             message={message}
             needsSimulationAccount={needsSimulationAccount}
@@ -521,6 +543,13 @@ export function TradingPage() {
             currency={currency}
             simulationAccount={selectedSimulationAccount}
           />
+          </> : (
+            <GuestAccessPanel
+              className="min-h-[260px]"
+              description="公开行情、K 线与盘口可直接浏览；模拟账户、持仓和下单功能需要登录。"
+              title="登录后进行模拟交易"
+            />
+          )}
         </aside>
       </div>
     </div>

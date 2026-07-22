@@ -4,6 +4,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Button } from "../../components/ui/Button";
+import { GuestAccessPanel } from "../../components/auth/GuestAccessPanel";
 import { MarketSymbolPicker, type MarketPickerSymbol } from "../../components/trading/MarketSymbolPicker";
 import {
   fetchRealAccountSummary,
@@ -88,6 +89,7 @@ import {
 import { tradingIntervalLabels, tradingIntervals } from "../../features/trading/model/constants";
 import { formatCompactMoney, formatFundingPercent, marketNumberTone, multiplyFinite } from "../../features/trading/lib/marketSummary";
 import { useWalletConnectionStore } from "../../store/walletConnectionStore";
+import { useUserStore } from "../../store/userStore";
 import type { CandleInterval } from "../../types";
 import { formatPrice } from "../../utils/price";
 
@@ -99,11 +101,14 @@ const realReconciliationPollingIntervalMs = 15_000;
 const realUserStreamMaxReconnectAttempts = 5;
 
 export function RealTradePage() {
+  const currentUser = useUserStore((state) => state.currentUser);
+  const isAuthenticated = Boolean(currentUser);
   const [searchParams, setSearchParams] = useSearchParams();
   const [symbols, setSymbols] = useState<RealTradingSymbol[]>([]);
   const [selectedSymbol, setSelectedSymbol] = useState(() => searchParams.get("symbol")?.toUpperCase() ?? "BTCUSDT");
   const [interval, setInterval] = useState<CandleInterval>("5m");
-  const walletAddress = useWalletConnectionStore((state) => state.address);
+  const storedWalletAddress = useWalletConnectionStore((state) => state.address);
+  const walletAddress = isAuthenticated ? storedWalletAddress : null;
   const requestWalletConnection = useWalletConnectionStore((state) => state.connect);
   const [marketSummary, setMarketSummary] = useState<RealMarketSummary | null>(null);
   const [orderbook, setOrderbook] = useState<RealOrderbook | null>(null);
@@ -496,6 +501,13 @@ export function RealTradePage() {
   }, [walletAddress]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      setReconciliationRecords([]);
+      setReconciliationError("");
+      setReconciliationLoading(false);
+      dispatchRealtime({ type: "reconciliation_synchronized", orders: [] });
+      return;
+    }
     let active = true;
     let controller: AbortController | null = null;
     let loading = false;
@@ -532,7 +544,7 @@ export function RealTradePage() {
       controller?.abort();
       window.clearInterval(timer);
     };
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
     if (!walletAddress) return;
@@ -564,6 +576,7 @@ export function RealTradePage() {
       setUserStreamConnectionStatus("disconnected");
       return;
     }
+    const streamAddress = walletAddress;
     let cancelled = false;
     let socket: WebSocket | null = null;
     let reconnectTimer: number | null = null;
@@ -657,7 +670,7 @@ export function RealTradePage() {
       if (cancelled) return;
       setUserStreamConnectionStatus("reconnecting");
       try {
-        const grant = await requestRealTradingRealtimeToken(walletAddress);
+        const grant = await requestRealTradingRealtimeToken(streamAddress);
         if (cancelled) return;
         socket = new WebSocket(wsUrl);
         socket.addEventListener("open", () => {
@@ -672,7 +685,7 @@ export function RealTradePage() {
           } catch {
             return;
           }
-          const event = parseRealTradingUserStreamEvent(payload, walletAddress);
+          const event = parseRealTradingUserStreamEvent(payload, streamAddress);
           if (event) {
             applyStreamEvent(event);
             return;
@@ -895,6 +908,7 @@ export function RealTradePage() {
   }, [interval, selectedSymbol]);
 
   const connectWallet = async () => {
+    if (!isAuthenticated) return;
     try {
       await requestWalletConnection();
       showToast("主账户地址已连接。", "success");
@@ -1112,7 +1126,7 @@ export function RealTradePage() {
         </main>
 
         <aside className="xh-trade-order-rail">
-          <RealTradingOrderPanel
+          {isAuthenticated ? <><RealTradingOrderPanel
             assetId={selectedConfig?.assetId}
             availableMargin={account?.availableMargin ?? account?.withdrawable}
             bestAsk={orderbook?.asks[0]?.price}
@@ -1145,6 +1159,13 @@ export function RealTradePage() {
             accountLoading={accountLoading}
             positions={positions}
           />
+          </> : (
+            <GuestAccessPanel
+              className="min-h-[260px]"
+              description="Hyperliquid Testnet 公开行情可直接浏览；连接钱包、账户状态、授权和下单功能需要登录。"
+              title="登录后连接钱包交易"
+            />
+          )}
         </aside>
       </div>
     </div>
@@ -1353,7 +1374,7 @@ function StatePanel({
   if (empty) {
     return <div className="p-8 text-center text-sm text-muted">{emptyText}</div>;
   }
-  return <>{children}</>;
+  return children;
 }
 
 function Metric({ label, value }: { label: string; value: string }) {

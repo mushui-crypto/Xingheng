@@ -85,6 +85,7 @@ import type {
   TransferAccount,
 } from "../../features/account/model/types";
 import { useUserStore } from "../../store/userStore";
+import { GuestAccessPanel } from "../../components/auth/GuestAccessPanel";
 
 type AccountActionResult = {
   ok: boolean;
@@ -142,8 +143,13 @@ export function AccountPage() {
   };
 
   useEffect(() => {
+    if (!user) {
+      setIsLoading(false);
+      setLoadError("");
+      return;
+    }
     void loadAccount();
-  }, []);
+  }, [user?.id]);
 
   useEffect(() => {
     if (!toastMessage) {
@@ -464,6 +470,18 @@ export function AccountPage() {
       setToastMessage("复制失败，请手动复制。");
     }
   };
+
+  if (!user) {
+    return (
+      <div className="xh-account-workspace px-4 py-8 sm:px-6">
+        <GuestAccessPanel
+          className="mx-auto min-h-[220px] w-full max-w-2xl"
+          description="资金账户、Stella X 钱包、第三方钱包、模拟账户和交易记录仅向登录用户开放。"
+          title="登录后查看账户"
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="xh-account-workspace">

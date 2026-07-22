@@ -8,24 +8,28 @@ import { readStrategyCandles, type StrategyCandlesCache } from "./StrategyCandle
 
 const NOW = Date.parse("2026-07-15T12:09:00.000Z");
 
-test("strategy candles route rejects unauthenticated requests", async () => {
+test("strategy candles routes allow anonymous read-only requests", async () => {
+  const previousFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse([latestClosedKline()])) as typeof fetch;
   const app = express();
   registerStrategyRoutes(app, { getStatus: () => ({ ok: true }) } as any);
   const server = app.listen(0);
   try {
     const address = server.address();
     assert.equal(typeof address, "object");
-    const response = await fetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/ict/candles`);
-    assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), { message: "用户未登录或登录已失效。" });
-    const martingale = await fetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/martingale/candles?symbol=ETHUSDT`);
-    assert.equal(martingale.status, 401);
+    const response = await previousFetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/ict/candles`);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).symbol, "BTCUSDT");
+    const martingale = await previousFetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/martingale/candles?symbol=ETHUSDT`);
+    assert.equal(martingale.status, 200);
+    assert.equal((await martingale.json() as any).symbol, "ETHUSDT");
   } finally {
+    globalThis.fetch = previousFetch;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
-test("strategy candles route is covered by user auth middleware", async () => {
+test("strategy candles stay public through user auth middleware", async () => {
   const previousFetch = globalThis.fetch;
   globalThis.fetch = (async () => jsonResponse([latestClosedKline()])) as typeof fetch;
   const app = express();
@@ -51,8 +55,8 @@ test("strategy candles route is covered by user auth middleware", async () => {
     assert.deepEqual(await status.json(), { ok: true });
 
     const unauthenticated = await previousFetch(`${baseUrl}/api/strategy/ict/candles`);
-    assert.equal(unauthenticated.status, 401);
-    assert.deepEqual(await unauthenticated.json(), { message: "用户未登录或登录已失效。" });
+    assert.equal(unauthenticated.status, 200);
+    assert.equal((await unauthenticated.json() as any).status, "available");
 
     const authenticated = await previousFetch(`${baseUrl}/api/strategy/ict/candles?limit=1`, {
       headers: { authorization: "Bearer valid-token" },
@@ -71,8 +75,8 @@ test("strategy candles route is covered by user auth middleware", async () => {
     const disabled = await previousFetch(`${baseUrl}/api/strategy/ict/candles?limit=1`, {
       headers: { authorization: "Bearer disabled-token" },
     });
-    assert.equal(disabled.status, 403);
-    assert.deepEqual(await disabled.json(), { message: "账号已禁用，请联系管理员。" });
+    assert.equal(disabled.status, 200);
+    assert.equal((await disabled.json() as any).status, "available");
   } finally {
     globalThis.fetch = previousFetch;
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

@@ -30,14 +30,14 @@ test("fixed grid report service returns safe missing and damaged states", async 
   }
 });
 
-test("fixed grid forward route is login-protected", async () => {
+test("fixed grid forward route allows anonymous read-only requests", async () => {
   const app = express();
   registerStrategyRoutes(app, { getStatus: () => ({ ok: true }) } as any);
   const server = app.listen(0);
   try {
     const response = await fetch(`http://127.0.0.1:${(server.address() as AddressInfo).port}/api/strategy/martingale/fixed-grid/forward`);
-    assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), { message: "用户未登录或登录已失效。" });
+    assert.notEqual(response.status, 401);
+    assert.equal(typeof (await response.json() as any).status, "string");
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
