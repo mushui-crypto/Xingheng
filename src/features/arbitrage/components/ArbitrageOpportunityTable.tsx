@@ -25,21 +25,35 @@ export function ArbitrageOpportunityTable({ opportunities, holdingDays, yieldMet
 
   return (
     <div className="w-full min-w-0 max-w-full overflow-x-auto border border-line bg-black [contain:paint]">
-      <table className="xh-table min-w-[1600px]">
+      <table className="xh-table min-w-[1700px] table-fixed">
+        <colgroup>
+          <col className="w-[96px]" />
+          <col className="w-[260px]" />
+          <col className="w-[260px]" />
+          <col className="w-[120px]" />
+          <col className="w-[140px]" />
+          <col className="w-[150px]" />
+          <col className="w-[140px]" />
+          <col className="w-[115px]" />
+          <col className="w-[115px]" />
+          <col className="w-[120px]" />
+          <col className="w-[110px]" />
+          <col className="w-[74px]" />
+        </colgroup>
         <thead className="xh-thead">
           <tr>
-            <th className="xh-th sticky left-0 z-10 bg-[#121212]"><HeaderLabel label="评分" help="综合等效净APR、持续性、标的匹配、流动性、成本和可靠性计算，满分100分。" /></th>
+            <th className="xh-th sticky left-0 z-10 bg-[#121212]"><HeaderLabel label="评分" help="综合等效净APR、持续性、标的匹配、流动性、成本和可靠性计算，满分100分。" align="left" /></th>
             <th className="xh-th">做多</th>
             <th className="xh-th">做空</th>
-            <th className="xh-th"><HeaderLabel label="匹配" help="精确匹配为同一资产；同类黄金指数可能使用不同价格源；关联标的包含代币化黄金与黄金指数之间的跟踪差异。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="当前费率差" help="按两腿最新资金费率折算的年化毛收益差，未扣除交易成本。" align="right" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="近90天费率差" help="两腿最近90天逐日对齐后的平均资金费率差，再按365天年化；未扣除交易成本。" align="right" /></th>
-            <th className="xh-th text-right"><HeaderLabel label={`等效净 ${yieldMetric.toUpperCase()}`} help={yieldMetric === "apr" ? `近90天费率差扣除按${holdingDays}天持有期摊销的往返费用与1万美元档滑点后年化。` : `由等效净APR按${holdingDays}天为一个再投资周期复利换算；不代表实际可持续复投收益。`} align="right" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="往返成本" help="两腿开仓和平仓的Taker手续费，加上按1万美元订单簿深度估算的双向滑点。" align="right" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="入场基差" help="做空腿Bid与做多腿Ask之间的即时价格差，以两者中间价折算为bps；正值通常更有利。" align="right" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="容量" help="两腿订单簿可用美元深度的较小值，仅作流动性参考，不等于保证成交规模。" align="right" /></th>
-            <th className="xh-th"><HeaderLabel label="结论" help="75分及以上为优选，60–74分为关注，低于60分为观察；关联标的会因匹配风险少得分，但达到门槛后同样可以进入优选。硬性条件不满足时不可执行。" /></th>
-            <th className="xh-th"><span className="sr-only">详情</span></th>
+            <th className="xh-th text-center"><HeaderLabel label="匹配" help="精确匹配为同一资产；同类黄金指数可能使用不同价格源；关联标的包含代币化黄金与黄金指数之间的跟踪差异。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="当前费率差" help="按两腿最新资金费率折算的年化毛收益差，未扣除交易成本。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="近90天费率差" help="两腿最近90天逐日对齐后的平均资金费率差，再按365天年化；未扣除交易成本。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label={`等效净 ${yieldMetric.toUpperCase()}`} help={yieldMetric === "apr" ? `近90天费率差扣除按${holdingDays}天持有期摊销的往返费用与1万美元档滑点后年化。` : `由等效净APR按${holdingDays}天为一个再投资周期复利换算；不代表实际可持续复投收益。`} /></th>
+            <th className="xh-th text-center"><HeaderLabel label="往返成本" help="两腿开仓和平仓的Taker手续费，加上按1万美元订单簿深度估算的双向滑点。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="入场基差" help="做空腿Bid与做多腿Ask之间的即时价格差，以两者中间价折算为bps；正值通常更有利。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="容量" help="两腿订单簿可用美元深度的较小值，仅作流动性参考，不等于保证成交规模。" /></th>
+            <th className="xh-th text-center"><HeaderLabel label="结论" help="75分及以上为优选，60–74分为关注，低于60分为观察；关联标的会因匹配风险少得分，但达到门槛后同样可以进入优选。硬性条件不满足时不可执行。" /></th>
+            <th className="xh-th text-center"><span className="sr-only">详情</span></th>
           </tr>
         </thead>
         <tbody className="divide-y divide-line">
@@ -80,19 +94,19 @@ function OpportunityRows({ opportunity, holdingDays, yieldMetric, now, expanded,
         </td>
         <td className="px-5 py-4"><Leg leg={opportunity.longLeg} side="long" now={now} /></td>
         <td className="px-5 py-4"><Leg leg={opportunity.shortLeg} side="short" now={now} /></td>
-        <td className="px-5 py-4"><MatchBadge opportunity={opportunity} /></td>
-        <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatApr(opportunity.currentGrossApr, true)}</td>
-        <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatApr(opportunity.historicalGrossApr, true)}</td>
-        <td className={`px-5 py-4 text-right font-mono font-semibold ${(displayedYield ?? 0) > 0 ? "text-white" : "text-red-300"}`}>
+        <td className="px-5 py-4 text-center"><MatchBadge opportunity={opportunity} /></td>
+        <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatApr(opportunity.currentGrossApr, true)}</td>
+        <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatApr(opportunity.historicalGrossApr, true)}</td>
+        <td className={`px-5 py-4 text-center font-mono font-semibold ${(displayedYield ?? 0) > 0 ? "text-white" : "text-red-300"}`}>
           {formatApr(displayedYield, true)}
         </td>
-        <td className="px-5 py-4 text-right font-mono font-normal text-muted">
+        <td className="px-5 py-4 text-center font-mono font-normal text-muted">
           {formatBps(opportunity.roundTripCostBps)}
         </td>
-        <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatBps(opportunity.entryBasisBps, true)}</td>
-        <td className="px-5 py-4 text-right font-mono font-normal text-muted">{formatUsd(opportunity.capacityUsd)}</td>
-        <td className="px-5 py-4"><RecommendationBadge recommendation={opportunity.recommendation} /></td>
-        <td className="px-5 py-4 text-right">
+        <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatBps(opportunity.entryBasisBps, true)}</td>
+        <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatUsd(opportunity.capacityUsd)}</td>
+        <td className="px-5 py-4 text-center"><RecommendationBadge recommendation={opportunity.recommendation} /></td>
+        <td className="px-5 py-4 text-center">
           <button
             type="button"
             className="inline-flex h-9 w-9 items-center justify-center border border-white/15 text-muted transition hover:border-white/40 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
@@ -154,9 +168,9 @@ function OpportunityDetail({ opportunity }: { opportunity: ArbitrageOpportunity 
   );
 }
 
-function HeaderLabel({ label, help, align = "left" }: { label: string; help: string; align?: "left" | "right" }) {
+function HeaderLabel({ label, help, align = "center" }: { label: string; help: string; align?: "left" | "center" }) {
   return (
-    <span className={`flex items-center gap-1.5 ${align === "right" ? "justify-end" : "justify-start"}`}>
+    <span className={`flex items-center gap-1.5 ${align === "center" ? "justify-center" : "justify-start"}`}>
       <span>{label}</span>
       <ArbitrageHelp content={help} label={`查看${label}说明`} />
     </span>
@@ -165,12 +179,12 @@ function HeaderLabel({ label, help, align = "left" }: { label: string; help: str
 
 function Leg({ leg, side, now }: { leg: ArbitrageOpportunity["longLeg"]; side: "long" | "short"; now: number }) {
   return (
-    <div className="min-w-0">
+    <div className="min-w-0 overflow-hidden">
       <div className="flex items-center gap-2">
         <span className={`text-xs font-semibold ${side === "long" ? "text-emerald-300" : "text-red-300"}`}>{side === "long" ? "多" : "空"}</span>
         <span className="font-mono text-sm font-semibold text-white">{leg.asset}</span>
       </div>
-      <p className="mt-1 whitespace-nowrap text-xs text-muted">
+      <p className="mt-1 truncate text-xs text-muted">
         {leg.venueLabel} · <span className="font-mono">{leg.symbol}</span> · {leg.kind === "spot" ? "现货" : "永续"}
       </p>
       <LegFunding leg={leg} side={side} now={now} />
