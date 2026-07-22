@@ -12,6 +12,7 @@ const StrategyPage = lazy(() => import("./pages/app/StrategyPage").then((module)
 const TradingPage = lazy(() => import("./pages/trading/TradingPage").then((module) => ({ default: module.TradingPage })));
 const RealTradePage = lazy(() => import("./pages/trading/RealTradePage").then((module) => ({ default: module.RealTradePage })));
 const AccountPage = lazy(() => import("./pages/app/AccountPage").then((module) => ({ default: module.AccountPage })));
+const ArbitragePage = lazy(() => import("./pages/app/ArbitragePage").then((module) => ({ default: module.ArbitragePage })));
 const AdminLoginPage = lazy(() => import("./pages/admin/AdminLoginPage").then((module) => ({ default: module.AdminLoginPage })));
 const AdminDashboardPage = lazy(() => import("./pages/admin/AdminDashboardPage").then((module) => ({ default: module.AdminDashboardPage })));
 const AdminUsersPage = lazy(() => import("./pages/admin/AdminUsersPage").then((module) => ({ default: module.AdminUsersPage })));
@@ -31,6 +32,7 @@ export default function App() {
           <Route path="/reset-password" element={<AuthPage />} />
           <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
           <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
+          <Route path="/app/arbitrage" element={<UserScreen><ArbitragePage /></UserScreen>} />
           <Route path="/app/strategy" element={<UserScreen><StrategyPage /></UserScreen>} />
           <Route path="/app/trade" element={<UserScreen><RealTradePage /></UserScreen>} />
           <Route path="/app/demo" element={<UserScreen><TradingPage /></UserScreen>} />

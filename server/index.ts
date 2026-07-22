@@ -5,6 +5,7 @@ import { UserService } from "./auth/UserService";
 import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
+import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { registerRealTradingRoutes } from "./modules/api/realTradingRoutes";
@@ -23,6 +24,7 @@ import { RealTradingRiskGuard } from "./modules/hyperliquid/RealTradingRiskGuard
 import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingUserStreamManager";
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
+import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -115,6 +117,7 @@ registerAuthRoutes({ app, users, wallet, tradingStore, config });
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
+registerArbitrageRoutes(app, new ArbitrageDashboardService());
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({
   app,

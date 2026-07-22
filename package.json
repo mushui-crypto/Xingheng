@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "start:api": "node dist-server/index.js",
     "test:hyperliquid-precision": "tsx --test server/modules/hyperliquid/hyperliquidPrecision.test.ts",
+    "test:arbitrage": "node --import tsx --test server/modules/arbitrage/*.test.ts server/modules/api/arbitrageRoutes.test.ts",
     "test:strategy": "tsx --test server/modules/strategy/**/*.test.ts src/features/strategy/**/*.test.ts",
     "backtest:ict:btc": "tsx scripts/backtest-ict-btc.ts",
     "backtest:ict:binance": "tsx scripts/backtest-ict-binance.ts",

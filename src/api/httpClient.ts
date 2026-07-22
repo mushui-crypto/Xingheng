@@ -7,6 +7,18 @@ type JsonRequestOptions = {
   networkErrorMessage?: string;
 };
 
+export class HttpRequestError extends Error {
+  status: number;
+  retryAfter: string | null;
+
+  constructor(message: string, response: Response) {
+    super(message);
+    this.name = "HttpRequestError";
+    this.status = response.status;
+    this.retryAfter = response.headers.get("Retry-After");
+  }
+}
+
 export function userHeaders(_userId?: string | null): Record<string, string> {
   return {};
 }
@@ -33,7 +45,7 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
       handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
     }
     if (options.acceptErrorResponse) return payload as T;
-    throw new Error(payload?.message ?? fallbackMessage);
+    throw new HttpRequestError(payload?.message ?? fallbackMessage, response);
   }
 
   return payload as T;
