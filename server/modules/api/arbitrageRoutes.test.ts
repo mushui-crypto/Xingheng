@@ -5,22 +5,26 @@ import { registerUserAuthMiddleware } from "../auth/authRoutes";
 import { ArbitrageRefreshCooldownError } from "../arbitrage/ArbitrageDashboardService";
 import type { ArbitrageDashboardSnapshot } from "../arbitrage/arbitrageTypes";
 
-describe("arbitrage dashboard route auth", () => {
-  it("returns 401 when the user is not logged in", () => {
-    const { auth } = buildArbitrageRouteHarness({ tokenStatus: null });
+describe("arbitrage dashboard public access and refresh protection", () => {
+  it("allows anonymous GET requests", async () => {
+    const { auth, route } = buildArbitrageRouteHarness({ tokenStatus: null });
+    const request = createMockRequest();
     const response = createMockResponse();
 
-    auth(createMockRequest(), response as any, () => assert.fail("unauthenticated request should not continue"));
+    let continued = false;
+    auth(request as any, response as any, () => { continued = true; });
+    assert.equal(continued, true);
+    await route(request as any, response as any);
 
-    assert.equal(response.statusCode, 401);
-    assert.match(JSON.stringify(response.body), /用户未登录/);
+    assert.equal(response.statusCode, 200);
+    assert.equal((response.body as ArbitrageDashboardSnapshot).horizonDays, 90);
   });
 
-  it("returns 403 when the user is disabled", () => {
+  it("does not allow non-GET requests to bypass authentication", () => {
     const { auth } = buildArbitrageRouteHarness({ tokenStatus: "disabled" });
     const response = createMockResponse();
 
-    auth(createMockRequest({ authorization: "Bearer valid" }), response as any, () => assert.fail("disabled request should not continue"));
+    auth(createMockRequest({ authorization: "Bearer valid", method: "POST" }), response as any, () => assert.fail("disabled request should not continue"));
 
     assert.equal(response.statusCode, 403);
     assert.match(JSON.stringify(response.body), /账号已禁用/);
@@ -28,12 +32,12 @@ describe("arbitrage dashboard route auth", () => {
 
   it("returns 429 and Retry-After when refresh cooldown has no cached snapshot", async () => {
     const { auth, route } = buildArbitrageRouteHarness({
-      tokenStatus: "active",
+      tokenStatus: null,
       async getSnapshot() {
         throw new ArbitrageRefreshCooldownError(2_000);
       },
     });
-    const request = createMockRequest({ authorization: "Bearer valid", query: { refresh: "1" } });
+    const request = createMockRequest({ query: { refresh: "1" } });
     const response = createMockResponse();
 
     let authenticated = false;
@@ -79,8 +83,9 @@ function buildArbitrageRouteHarness(options: HarnessOptions) {
   return { auth, route };
 }
 
-function createMockRequest(input: { authorization?: string; query?: Record<string, string> } = {}) {
+function createMockRequest(input: { authorization?: string; query?: Record<string, string>; method?: string } = {}) {
   return {
+    method: input.method ?? "GET",
     headers: input.authorization ? { authorization: input.authorization } : {},
     query: input.query ?? {},
     originalUrl: "/api/arbitrage/dashboard",

@@ -64,7 +64,7 @@ test("returns a sanitized unavailable response for a damaged forward report", as
   }
 });
 
-test("strategy forward route rejects unauthenticated requests", async () => {
+test("strategy forward route allows anonymous read-only requests", async () => {
   const app = express();
   registerStrategyRoutes(app, { getStatus: () => ({ ok: true }) } as any);
   const server = app.listen(0);
@@ -72,14 +72,14 @@ test("strategy forward route rejects unauthenticated requests", async () => {
     const address = server.address();
     assert.equal(typeof address, "object");
     const response = await fetch(`http://127.0.0.1:${(address as AddressInfo).port}/api/strategy/ict/forward`);
-    assert.equal(response.status, 401);
-    assert.deepEqual(await response.json(), { message: "用户未登录或登录已失效。" });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as any).assumptions.automaticOrdersEnabled, false);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
-test("strategy forward route returns a normalized report for authenticated users", async () => {
+test("strategy forward route returns a normalized report for anonymous users", async () => {
   const directory = await mkdtemp(path.join(os.tmpdir(), "xingheng-forward-route-"));
   const previousPath = process.env.STRATEGY_FORWARD_REPORT_PATH;
   const file = path.join(directory, "report.json");
@@ -92,10 +92,6 @@ test("strategy forward route returns a normalized report for authenticated users
     diagnostics: { signals: 1, filledOrders: 1, expiredOrders: 0, costRejectedOrders: 0, byRegime: {} },
   }), "utf8");
   const app = express();
-  app.use((request, _response, next) => {
-    request.user = { id: "USR-test", email: "test@example.com", nickname: "Test", status: "active", createdAt: "2026-07-15T00:00:00.000Z", emailVerifiedAt: "2026-07-15T00:00:00.000Z" };
-    next();
-  });
   registerStrategyRoutes(app, { getStatus: () => ({ ok: true }) } as any);
   const server = app.listen(0);
   try {

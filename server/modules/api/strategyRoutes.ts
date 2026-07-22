@@ -22,11 +22,7 @@ export function registerStrategyRoutes(
     response.json(runtime.getStatus());
   });
 
-  app.get("/api/strategy/ict/forward", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
+  app.get("/api/strategy/ict/forward", async (_request, response) => {
     const result = await readForwardReport();
     response.status(result.ok ? 200 : result.statusCode).json({
       ...result.report,
@@ -35,37 +31,21 @@ export function registerStrategyRoutes(
   });
 
   app.get("/api/strategy/ict/history", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
     const result = await readHistoryReport(request.query);
     response.status(result.ok ? 200 : result.statusCode).json(result.report);
   });
 
   app.get("/api/strategy/ict/candles", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
     const result = await readStrategyCandles({ ...request.query, symbol: "BTCUSDT" });
     response.status(result.statusCode).json(result.report);
   });
 
   app.get("/api/strategy/martingale/candles", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
     const result = await readStrategyCandles(request.query);
     response.status(result.statusCode).json(result.report);
   });
 
-  app.get("/api/strategy/martingale/forward", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
+  app.get("/api/strategy/martingale/forward", async (_request, response) => {
     const result = await readMartingaleGridReport();
     response.status(result.ok ? 200 : result.statusCode).json({
       ...result.report,
@@ -73,11 +53,7 @@ export function registerStrategyRoutes(
     });
   });
 
-  app.get("/api/strategy/martingale/fixed-grid/forward", async (request, response) => {
-    if (!request.user) {
-      response.status(401).json({ message: "用户未登录或登录已失效。" });
-      return;
-    }
+  app.get("/api/strategy/martingale/fixed-grid/forward", async (_request, response) => {
     const result = await readFixedGridReport();
     response.status(result.ok ? 200 : result.statusCode).json({
       ...result.report,

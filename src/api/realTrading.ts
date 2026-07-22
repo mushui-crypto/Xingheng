@@ -441,30 +441,24 @@ export type RealTradingUserStreamEvent = {
 const realTradingHeaders = () => userHeaders();
 
 export async function fetchRealTradingSymbols() {
-  return requestJson<RealTradingSymbol[]>("/api/real-trading/market/symbols", "真实交易品种加载失败。", {
-    init: { headers: realTradingHeaders() },
-    userAuthFailure: true,
-  });
+  return requestJson<RealTradingSymbol[]>("/api/real-trading/market/symbols", "真实交易品种加载失败。");
 }
 
 export async function fetchRealMarketSummary(symbol: string) {
   return requestJson<RealMarketSummary>(`/api/real-trading/market/summary?symbol=${encodeURIComponent(symbol)}`, "真实行情摘要加载失败。", {
     init: { headers: realTradingHeaders() },
-    userAuthFailure: true,
   });
 }
 
 export async function fetchRealOrderbook(symbol: string) {
   return requestJson<RealOrderbook>(`/api/real-trading/market/orderbook?symbol=${encodeURIComponent(symbol)}`, "真实盘口加载失败。", {
     init: { headers: realTradingHeaders() },
-    userAuthFailure: true,
   });
 }
 
 export async function fetchRealTrades(symbol: string) {
   return requestJson<RealTrade[]>(`/api/real-trading/market/trades?symbol=${encodeURIComponent(symbol)}`, "真实成交加载失败。", {
     init: { headers: realTradingHeaders() },
-    userAuthFailure: true,
   });
 }
 
@@ -474,7 +468,6 @@ export async function fetchRealCandles(symbol: string, interval: CandleInterval,
     "真实 K 线加载失败。",
     {
       init: { headers: realTradingHeaders() },
-      userAuthFailure: true,
     },
   );
 }
