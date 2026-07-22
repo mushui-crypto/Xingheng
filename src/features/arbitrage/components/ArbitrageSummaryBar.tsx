@@ -25,8 +25,8 @@ export function ArbitrageSummaryBar({ snapshot, yieldMetric }: { snapshot: Arbit
     {
       label: "数据源",
       value: `${snapshot.summary.connectedVenueCount} / ${snapshot.summary.totalVenueCount}`,
-      meta: `${snapshot.summary.trackedMarketCount} 个黄金相关市场`,
-      help: "统计当前能够返回公开行情的交易所，以及纳入比较的黄金现货与永续市场。",
+      meta: `${snapshot.summary.trackedMarketCount} 个 RWA 市场`,
+      help: "统计当前能够返回公开行情的交易所，以及纳入比较的黄金、股票代币与股票永续市场。",
       icon: Radio,
     },
     {

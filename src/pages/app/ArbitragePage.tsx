@@ -22,13 +22,8 @@ type AssetFilter = "all" | ArbitrageAsset;
 type VenueFilter = "all" | ArbitrageVenue;
 
 const horizons: ArbitrageHorizon[] = [90, 365];
-const assets: Array<{ value: AssetFilter; label: string }> = [
-  { value: "all", label: "全部资产" },
-  { value: "XAU", label: "XAU" },
-  { value: "GOLD", label: "GOLD" },
-  { value: "XAUT", label: "XAUT" },
-  { value: "PAXG", label: "PAXG" },
-];
+const assetOrder: ArbitrageAsset[] = ["XAU", "GOLD", "XAUT", "PAXG", "MU", "NVDA", "GOOGL", "MSFT", "TSLA"];
+const assetRank = new Map(assetOrder.map((value, index) => [value, index]));
 const venues: Array<{ value: VenueFilter; label: string }> = [
   { value: "all", label: "全部交易所" },
   { value: "binance", label: "Binance" },
@@ -52,6 +47,14 @@ export function ArbitragePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+
+  const assetOptions = useMemo<Array<{ value: AssetFilter; label: string }>>(() => {
+    const available = new Set(snapshot?.markets.map((market) => market.asset) ?? assetOrder);
+    return [
+      { value: "all", label: "全部资产" },
+      ...assetOrder.filter((value) => available.has(value)).map((value) => ({ value, label: value })),
+    ];
+  }, [snapshot]);
 
   const load = useCallback(async (forceRefresh = false) => {
     forceRefresh ? setRefreshing(true) : setLoading(true);
@@ -77,12 +80,11 @@ export function ArbitragePage() {
 
   const filteredMarkets = useMemo(() => {
     if (!snapshot) return [];
-    const assetOrder = new Map(["XAU", "GOLD", "XAUT", "PAXG"].map((value, index) => [value, index]));
     return snapshot.markets
       .filter((market) => asset === "all" || market.asset === asset)
       .filter((market) => venue === "all" || market.venue === venue)
       .sort((left, right) =>
-        (assetOrder.get(left.asset) ?? 99) - (assetOrder.get(right.asset) ?? 99)
+        (assetRank.get(left.asset) ?? 99) - (assetRank.get(right.asset) ?? 99)
         || left.venueLabel.localeCompare(right.venueLabel)
         || left.kind.localeCompare(right.kind),
       );
@@ -90,22 +92,41 @@ export function ArbitragePage() {
 
   const filteredOpportunities = useMemo(() => {
     if (!snapshot) return [];
-    return snapshot.opportunities
+    const opportunities = snapshot.opportunities
       .filter((item) => asset === "all" || item.longLeg.asset === asset || item.shortLeg.asset === asset)
-      .filter((item) => venue === "all" || item.longLeg.venue === venue || item.shortLeg.venue === venue)
-      .sort((left, right) => sort === "score"
-        ? right.score - left.score || right.netApr - left.netApr
-        : (equivalentNetYield(right.netApr, horizonDays, yieldMetric) ?? Number.NEGATIVE_INFINITY)
-          - (equivalentNetYield(left.netApr, horizonDays, yieldMetric) ?? Number.NEGATIVE_INFINITY)
-          || right.score - left.score,
+      .filter((item) => venue === "all" || item.longLeg.venue === venue || item.shortLeg.venue === venue);
+
+    if (sort === "score") {
+      return opportunities.sort((left, right) =>
+        right.score - left.score || right.netApr - left.netApr,
       );
+    }
+
+    const displayedYields = new Map(opportunities.map((item) => [
+      item.id,
+      equivalentNetYield(item.netApr, horizonDays, yieldMetric) ?? Number.NEGATIVE_INFINITY,
+    ]));
+    return opportunities.sort((left, right) =>
+      (displayedYields.get(right.id) ?? Number.NEGATIVE_INFINITY)
+        - (displayedYields.get(left.id) ?? Number.NEGATIVE_INFINITY)
+        || right.score - left.score,
+    );
   }, [asset, horizonDays, snapshot, sort, venue, yieldMetric]);
 
   const opportunityPageCount = Math.max(1, Math.ceil(filteredOpportunities.length / opportunityPageSize));
-  const visibleOpportunities = filteredOpportunities.slice(
+  const visibleOpportunities = useMemo(() => filteredOpportunities.slice(
     (opportunityPage - 1) * opportunityPageSize,
     opportunityPage * opportunityPageSize,
-  );
+  ), [filteredOpportunities, opportunityPage]);
+
+  const toggleOpportunity = useCallback((id: string) => {
+    setExpandedId((current) => current === id ? null : id);
+  }, []);
+
+  const changeOpportunityPage = useCallback((page: number) => {
+    setExpandedId(null);
+    setOpportunityPage(page);
+  }, []);
 
   useEffect(() => {
     setOpportunityPage(1);
@@ -124,7 +145,7 @@ export function ArbitragePage() {
             <h1 className="xh-title">套利看板</h1>
             <span className="inline-flex border border-sky-400/30 bg-sky-400/[0.07] px-2.5 py-1 text-xs font-medium text-sky-200">只读 · 主网公开行情</span>
           </div>
-          <p className="xh-subtitle">跨所黄金市场数据与资金费率比较，推荐评分不代表收益承诺。</p>
+          <p className="xh-subtitle">RWA 同所中性与跨所套利机会比较，推荐评分不代表收益承诺。</p>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
@@ -169,7 +190,7 @@ export function ArbitragePage() {
             <DropdownSelect
               className="w-[132px]"
               value={asset}
-              options={assets}
+              options={assetOptions}
               onChange={setAsset}
               label="筛选资产"
             />
@@ -206,7 +227,7 @@ export function ArbitragePage() {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
-          <p>{view === "opportunities" ? `${filteredOpportunities.length} 个跨所组合` : `${filteredMarkets.length} 个市场`}</p>
+          <p>{view === "opportunities" ? `${filteredOpportunities.length} 个中性 / 套利组合` : `${filteredMarkets.length} 个市场`}</p>
           <div className="flex items-center gap-1.5">
             <span>近90天费率基准 · {horizonDays}天持有{horizonDays === 365 ? "情景" : ""}</span>
             <ArbitrageHelp content={`历史资金费率固定观察最近90天；${horizonDays}天仅用于持有期和往返成本摊销。按Taker成交，并分别计量USDT与USDC。`} label="查看测算口径" />
@@ -223,7 +244,7 @@ export function ArbitragePage() {
             holdingDays={horizonDays}
             yieldMetric={yieldMetric}
             expandedId={expandedId}
-            onToggle={(id) => setExpandedId((current) => current === id ? null : id)}
+            onToggle={toggleOpportunity}
           />
         )}
         {view === "opportunities" && filteredOpportunities.length > opportunityPageSize ? (
@@ -238,7 +259,7 @@ export function ArbitragePage() {
                 aria-label="上一页"
                 title="上一页"
                 disabled={opportunityPage <= 1}
-                onClick={() => setOpportunityPage((page) => Math.max(1, page - 1))}
+                onClick={() => changeOpportunityPage(Math.max(1, opportunityPage - 1))}
               >
                 <ChevronLeft size={16} />
               </button>
@@ -249,7 +270,7 @@ export function ArbitragePage() {
                 aria-label="下一页"
                 title="下一页"
                 disabled={opportunityPage >= opportunityPageCount}
-                onClick={() => setOpportunityPage((page) => Math.min(opportunityPageCount, page + 1))}
+                onClick={() => changeOpportunityPage(Math.min(opportunityPageCount, opportunityPage + 1))}
               >
                 <ChevronRight size={16} />
               </button>

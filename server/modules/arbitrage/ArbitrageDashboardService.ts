@@ -16,6 +16,7 @@ const forcedRefreshCooldownMs = 10_000;
 const fundingHistoryTtlMs = 15 * 60_000;
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
 const fundingLookbackDays = 90;
+const marketLoadConcurrency = 8;
 
 type InstrumentConfig = {
   id: string;
@@ -29,6 +30,7 @@ type InstrumentConfig = {
   takerFeeBps: number;
   sizeMultiplier?: number;
   fundingIntervalHours?: number;
+  availableSince?: number;
 };
 
 type CurrentMarketPayload = {
@@ -45,6 +47,19 @@ type CurrentMarketPayload = {
   bids: OrderbookLevel[];
   asks: OrderbookLevel[];
   warnings?: string[];
+};
+
+type CurrentMarketBatches = {
+  binanceSpotTickers: Promise<Map<string, any>>;
+  binancePerpetualTickers: Promise<Map<string, any>>;
+  binancePremiums: Promise<Map<string, any>>;
+  bybitSpotTickers: Promise<Map<string, any>>;
+  bybitPerpetualTickers: Promise<Map<string, any>>;
+  bitgetSpotTickers: Promise<Map<string, any>>;
+  bitgetPerpetualTickers: Promise<Map<string, any>>;
+  bitgetFunding: Promise<Map<string, any>>;
+  okxSpotTickers: Promise<Map<string, any>>;
+  okxPerpetualTickers: Promise<Map<string, any>>;
 };
 
 type ArbitrageDashboardServiceOptions = {
@@ -87,7 +102,43 @@ const instruments: InstrumentConfig[] = [
     settlementAsset: "USDC",
     fundingIntervalHours: 1,
   }),
+  ...stockRwaInstruments(),
 ];
+
+function stockRwaInstruments(): InstrumentConfig[] {
+  return [
+    instrument("bitget-mu-spot", "bitget", "Bitget", "RMUUSDT", "MU", "spot", 10, { availableSince: 1_780_322_400_000 }),
+    instrument("bitget-mu-perp", "bitget", "Bitget", "MUUSDT", "MU", "perpetual", 6, { fundingIntervalHours: 8 }),
+    instrument("binance-mu-perp", "binance", "Binance", "MUUSDT", "MU", "perpetual", 5, { fundingIntervalHours: 8 }),
+    instrument("bybit-mu-perp", "bybit", "Bybit", "MUUSDT", "MU", "perpetual", 5.5, { fundingIntervalHours: 8 }),
+    instrument("okx-mu-perp", "okx", "OKX", "MU-USDT-SWAP", "MU", "perpetual", 5, { fundingIntervalHours: 8 }),
+    ...stockRwaAsset("NVDA", "NVDABUSDT", 1_781_136_000_000, 1_776_914_552_903, "NVDAXUSDT"),
+    ...stockRwaAsset("GOOGL", "GOOGLBUSDT", 1_783_382_400_000, 1_780_322_400_000, "GOOGLXUSDT"),
+    ...stockRwaAsset("MSFT", "MSFTBUSDT", 1_782_777_600_000, 1_780_322_400_000),
+    ...stockRwaAsset("TSLA", "TSLABUSDT", 1_781_136_000_000, 1_780_323_652_017, "TSLAXUSDT"),
+  ];
+}
+
+function stockRwaAsset(
+  asset: Extract<ArbitrageAsset, "NVDA" | "GOOGL" | "MSFT" | "TSLA">,
+  binanceSpotSymbol: string,
+  binanceSpotAvailableSince: number,
+  bitgetSpotAvailableSince: number,
+  bybitSpotSymbol?: string,
+): InstrumentConfig[] {
+  const slug = asset.toLowerCase();
+  return [
+    instrument(`bitget-${slug}-spot`, "bitget", "Bitget", `R${asset}USDT`, asset, "spot", 10, { availableSince: bitgetSpotAvailableSince }),
+    instrument(`bitget-${slug}-perp`, "bitget", "Bitget", `${asset}USDT`, asset, "perpetual", 6, { fundingIntervalHours: 8 }),
+    instrument(`binance-${slug}-spot`, "binance", "Binance", binanceSpotSymbol, asset, "spot", 10, { availableSince: binanceSpotAvailableSince }),
+    instrument(`binance-${slug}-perp`, "binance", "Binance", `${asset}USDT`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
+    ...(bybitSpotSymbol
+      ? [instrument(`bybit-${slug}-spot`, "bybit", "Bybit", bybitSpotSymbol, asset, "spot", 10)]
+      : []),
+    instrument(`bybit-${slug}-perp`, "bybit", "Bybit", `${asset}USDT`, asset, "perpetual", 5.5, { fundingIntervalHours: 8 }),
+    instrument(`okx-${slug}-perp`, "okx", "OKX", `${asset}-USDT-SWAP`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
+  ];
+}
 
 export class ArbitrageDashboardService {
   private snapshots = new Map<number, { expiresAt: number; value: ArbitrageDashboardSnapshot }>();
@@ -151,8 +202,9 @@ export class ArbitrageDashboardService {
   }
 
   private async loadSnapshot(horizonDays: 90 | 365): Promise<ArbitrageDashboardSnapshot> {
+    const currentBatches = createCurrentMarketBatches();
     const [markets, stablecoin] = await Promise.all([
-      Promise.all(instruments.map((config) => this.loadMarket(config))),
+      mapWithConcurrency(instruments, marketLoadConcurrency, (config) => this.loadMarket(config, currentBatches)),
       this.loadStablecoinPrice(),
     ]);
     const opportunities = buildArbitrageOpportunities(markets, horizonDays, fundingLookbackDays);
@@ -182,10 +234,10 @@ export class ArbitrageDashboardService {
     return snapshot;
   }
 
-  private async loadMarket(config: InstrumentConfig): Promise<InternalArbitrageMarket> {
+  private async loadMarket(config: InstrumentConfig, currentBatches: CurrentMarketBatches): Promise<InternalArbitrageMarket> {
     try {
       const [current, fundingHistory] = await Promise.all([
-        loadCurrentMarket(config),
+        loadCurrentMarket(config, currentBatches),
         config.kind === "perpetual" ? this.loadFundingHistory(config) : Promise.resolve([]),
       ]);
       const intervalHours = current.fundingIntervalHours ?? inferFundingIntervalHours(fundingHistory) ?? config.fundingIntervalHours ?? null;
@@ -230,6 +282,7 @@ export class ArbitrageDashboardService {
         takerFeeBps: config.takerFeeBps,
         status: warnings.length > 0 ? "degraded" : "connected",
         fetchedAt: current.timestamp,
+        availableSince: config.availableSince ?? null,
         warnings: [...new Set(warnings)],
         fundingHistory,
       };
@@ -258,20 +311,92 @@ export class ArbitrageDashboardService {
   }
 }
 
-async function loadCurrentMarket(config: InstrumentConfig): Promise<CurrentMarketPayload> {
-  if (config.venue === "binance") return loadBinanceCurrent(config);
-  if (config.venue === "bybit") return loadBybitCurrent(config);
-  if (config.venue === "bitget") return loadBitgetCurrent(config);
-  if (config.venue === "okx") return loadOkxCurrent(config);
+function createCurrentMarketBatches(): CurrentMarketBatches {
+  const binanceSpotSymbols = configuredSymbols("binance", "spot");
+  const binancePerpetualSymbols = configuredSymbols("binance", "perpetual");
+  return {
+    binanceSpotTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://api.binance.com/api/v3/ticker/24hr", binanceSpotSymbols)), "symbol"),
+    binancePerpetualTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://fapi.binance.com/fapi/v1/ticker/24hr", binancePerpetualSymbols)), "symbol"),
+    binancePremiums: safeBatch(() => fetchJson("https://fapi.binance.com/fapi/v1/premiumIndex"), "symbol"),
+    bybitSpotTickers: safeBatch(
+      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=spot"))?.result?.list,
+      "symbol",
+    ),
+    bybitPerpetualTickers: safeBatch(
+      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=linear"))?.result?.list,
+      "symbol",
+    ),
+    bitgetSpotTickers: safeBatch(
+      async () => (await fetchJson("https://api.bitget.com/api/v2/spot/market/tickers"))?.data,
+      "symbol",
+    ),
+    bitgetPerpetualTickers: safeBatch(
+      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"))?.data,
+      "symbol",
+    ),
+    bitgetFunding: safeBatch(
+      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES"))?.data,
+      "symbol",
+    ),
+    okxSpotTickers: safeBatch(
+      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SPOT"))?.data,
+      "instId",
+    ),
+    okxPerpetualTickers: safeBatch(
+      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SWAP"))?.data,
+      "instId",
+    ),
+  };
+}
+
+function configuredSymbols(venue: ArbitrageVenue, kind: ArbitrageInstrumentKind) {
+  return [...new Set(instruments
+    .filter((config) => config.venue === venue && config.kind === kind)
+    .map((config) => config.symbol))];
+}
+
+function binanceSymbolsUrl(baseUrl: string, symbols: string[]) {
+  const url = new URL(baseUrl);
+  url.searchParams.set("symbols", JSON.stringify(symbols));
+  return url.toString();
+}
+
+async function safeBatch(load: () => Promise<unknown>, symbolKey: string) {
+  try {
+    const rows = await load();
+    if (!Array.isArray(rows)) return new Map<string, any>();
+    return new Map(rows
+      .filter((row: any) => typeof row?.[symbolKey] === "string")
+      .map((row: any) => [row[symbolKey], row]));
+  } catch {
+    return new Map<string, any>();
+  }
+}
+
+async function marketBatchValue(batch: Promise<Map<string, any>>, symbol: string, fallback: () => Promise<any>) {
+  return (await batch).get(symbol) ?? fallback();
+}
+
+async function loadCurrentMarket(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
+  if (config.venue === "binance") return loadBinanceCurrent(config, batches);
+  if (config.venue === "bybit") return loadBybitCurrent(config, batches);
+  if (config.venue === "bitget") return loadBitgetCurrent(config, batches);
+  if (config.venue === "okx") return loadOkxCurrent(config, batches);
   return loadTradeXyzCurrent(config);
 }
 
-async function loadBinanceCurrent(config: InstrumentConfig): Promise<CurrentMarketPayload> {
+async function loadBinanceCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
   const baseUrl = config.kind === "spot" ? "https://api.binance.com/api/v3" : "https://fapi.binance.com/fapi/v1";
   const [ticker, depth, premium] = await Promise.all([
-    fetchJson(`${baseUrl}/ticker/24hr?symbol=${config.symbol}`),
+    marketBatchValue(
+      config.kind === "spot" ? batches.binanceSpotTickers : batches.binancePerpetualTickers,
+      config.symbol,
+      () => fetchJson(`${baseUrl}/ticker/24hr?symbol=${config.symbol}`),
+    ),
     fetchJson(`${baseUrl}/depth?symbol=${config.symbol}&limit=100`),
-    config.kind === "perpetual" ? fetchJson(`${baseUrl}/premiumIndex?symbol=${config.symbol}`) : Promise.resolve(null),
+    config.kind === "perpetual"
+      ? marketBatchValue(batches.binancePremiums, config.symbol, () => fetchJson(`${baseUrl}/premiumIndex?symbol=${config.symbol}`))
+      : Promise.resolve(null),
   ]);
   return currentPayload({
     bid: ticker?.bidPrice,
@@ -289,13 +414,17 @@ async function loadBinanceCurrent(config: InstrumentConfig): Promise<CurrentMark
   });
 }
 
-async function loadBybitCurrent(config: InstrumentConfig): Promise<CurrentMarketPayload> {
+async function loadBybitCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
   const category = config.kind === "spot" ? "spot" : "linear";
   const [tickerPayload, depthPayload] = await Promise.all([
-    fetchJson(`https://api.bybit.com/v5/market/tickers?category=${category}&symbol=${config.symbol}`),
+    marketBatchValue(
+      config.kind === "spot" ? batches.bybitSpotTickers : batches.bybitPerpetualTickers,
+      config.symbol,
+      async () => (await fetchJson(`https://api.bybit.com/v5/market/tickers?category=${category}&symbol=${config.symbol}`))?.result?.list?.[0],
+    ),
     fetchJson(`https://api.bybit.com/v5/market/orderbook?category=${category}&symbol=${config.symbol}&limit=200`),
   ]);
-  const ticker = tickerPayload?.result?.list?.[0];
+  const ticker = tickerPayload;
   const depth = depthPayload?.result;
   if (!ticker) throw new Error("Bybit ticker returned no market");
   return currentPayload({
@@ -315,13 +444,17 @@ async function loadBybitCurrent(config: InstrumentConfig): Promise<CurrentMarket
   });
 }
 
-async function loadBitgetCurrent(config: InstrumentConfig): Promise<CurrentMarketPayload> {
+async function loadBitgetCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
   if (config.kind === "spot") {
     const [tickerPayload, depthPayload] = await Promise.all([
-      fetchJson(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${config.symbol}`),
+      marketBatchValue(
+        batches.bitgetSpotTickers,
+        config.symbol,
+        async () => (await fetchJson(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${config.symbol}`))?.data?.[0],
+      ),
       fetchJson(`https://api.bitget.com/api/v2/spot/market/orderbook?symbol=${config.symbol}&type=step0&limit=100`),
     ]);
-    const ticker = tickerPayload?.data?.[0];
+    const ticker = tickerPayload;
     const depth = depthPayload?.data;
     if (!ticker) throw new Error("Bitget spot ticker returned no market");
     return currentPayload({
@@ -336,13 +469,21 @@ async function loadBitgetCurrent(config: InstrumentConfig): Promise<CurrentMarke
     });
   }
   const [tickerPayload, depthPayload, fundingPayload] = await Promise.all([
-    fetchJson(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${config.symbol}&productType=USDT-FUTURES`),
+    marketBatchValue(
+      batches.bitgetPerpetualTickers,
+      config.symbol,
+      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${config.symbol}&productType=USDT-FUTURES`))?.data?.[0],
+    ),
     fetchJson(`https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${config.symbol}&productType=USDT-FUTURES&precision=scale0&limit=100`),
-    fetchJson(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES`),
+    marketBatchValue(
+      batches.bitgetFunding,
+      config.symbol,
+      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES`))?.data?.[0],
+    ),
   ]);
-  const ticker = tickerPayload?.data?.[0];
+  const ticker = tickerPayload;
   const depth = depthPayload?.data;
-  const funding = fundingPayload?.data?.[0];
+  const funding = fundingPayload;
   if (!ticker) throw new Error("Bitget futures ticker returned no market");
   return currentPayload({
     bid: ticker.bidPr,
@@ -360,15 +501,19 @@ async function loadBitgetCurrent(config: InstrumentConfig): Promise<CurrentMarke
   });
 }
 
-async function loadOkxCurrent(config: InstrumentConfig): Promise<CurrentMarketPayload> {
+async function loadOkxCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
   const [tickerPayload, depthPayload, fundingPayload] = await Promise.all([
-    fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${config.symbol}`),
+    marketBatchValue(
+      config.kind === "spot" ? batches.okxSpotTickers : batches.okxPerpetualTickers,
+      config.symbol,
+      async () => (await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${config.symbol}`))?.data?.[0],
+    ),
     fetchJson(`https://www.okx.com/api/v5/market/books?instId=${config.symbol}&sz=100`),
     config.kind === "perpetual"
       ? fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${config.symbol}`)
       : Promise.resolve(null),
   ]);
-  const ticker = tickerPayload?.data?.[0];
+  const ticker = tickerPayload;
   const depth = depthPayload?.data?.[0];
   const funding = fundingPayload?.data?.[0];
   if (!ticker) throw new Error("OKX ticker returned no market");
@@ -551,6 +696,7 @@ function disconnectedMarket(config: InstrumentConfig, error: unknown): InternalA
     takerFeeBps: config.takerFeeBps,
     status: "disconnected",
     fetchedAt: Date.now(),
+    availableSince: config.availableSince ?? null,
     warnings: [error instanceof Error ? error.message : "公开行情请求失败"],
     fundingHistory: [],
   };
@@ -564,7 +710,7 @@ function instrument(
   asset: ArbitrageAsset,
   kind: ArbitrageInstrumentKind,
   takerFeeBps: number,
-  overrides: Partial<Pick<InstrumentConfig, "quoteAsset" | "settlementAsset" | "sizeMultiplier" | "fundingIntervalHours">> = {},
+  overrides: Partial<Pick<InstrumentConfig, "quoteAsset" | "settlementAsset" | "sizeMultiplier" | "fundingIntervalHours" | "availableSince">> = {},
 ): InstrumentConfig {
   return {
     id,
@@ -612,15 +758,27 @@ function inferFundingIntervalHours(history: FundingPoint[]) {
 }
 
 async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
-  try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    if (!response.ok) throw new Error(`公开行情请求失败 (${response.status})`);
-    return await response.json();
-  } finally {
-    clearTimeout(timer);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+    let response: Response;
+    try {
+      response = await fetch(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (attempt === 1) throw error;
+      await delay(150);
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (response.ok) return await response.json();
+    if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
+      await delay(150);
+      continue;
+    }
+    throw new Error(`公开行情请求失败 (${response.status})`);
   }
+  throw new Error("公开行情请求失败");
 }
 
 function postHyperliquid(body: unknown) {
@@ -646,4 +804,26 @@ function round(value: number) {
 
 function nextWholeHour() {
   return Math.ceil(Date.now() / 3_600_000) * 3_600_000;
+}
+
+function delay(milliseconds: number) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+async function mapWithConcurrency<TInput, TOutput>(
+  inputs: TInput[],
+  concurrency: number,
+  load: (input: TInput) => Promise<TOutput>,
+) {
+  const output = new Array<TOutput>(inputs.length);
+  let nextIndex = 0;
+  const workers = Array.from({ length: Math.min(concurrency, inputs.length) }, async () => {
+    while (nextIndex < inputs.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      output[index] = await load(inputs[index]);
+    }
+  });
+  await Promise.all(workers);
+  return output;
 }

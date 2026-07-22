@@ -1,10 +1,20 @@
 export type ArbitrageVenue = "binance" | "bybit" | "bitget" | "okx" | "tradexyz";
-export type ArbitrageAsset = "XAU" | "GOLD" | "XAUT" | "PAXG";
+export type ArbitrageAsset =
+  | "XAU"
+  | "GOLD"
+  | "XAUT"
+  | "PAXG"
+  | "MU"
+  | "NVDA"
+  | "GOOGL"
+  | "MSFT"
+  | "TSLA";
 export type ArbitrageInstrumentKind = "spot" | "perpetual";
 export type ArbitrageQuoteAsset = "USDT" | "USDC";
 export type ArbitrageMarketStatus = "connected" | "degraded" | "disconnected";
 export type ArbitrageMatchQuality = "exact" | "oracle" | "proxy";
 export type ArbitrageRecommendation = "recommended" | "watch" | "neutral" | "blocked";
+export type ArbitrageStrategyType = "same_venue_neutral" | "cross_venue_arbitrage";
 
 export type FundingPoint = {
   rate: number;
@@ -45,6 +55,7 @@ export type ArbitrageMarket = {
   takerFeeBps: number;
   status: ArbitrageMarketStatus;
   fetchedAt: number;
+  availableSince?: number | null;
   warnings: string[];
 };
 
@@ -66,6 +77,8 @@ export type ArbitrageOpportunity = {
   id: string;
   longLeg: ArbitrageOpportunityLeg;
   shortLeg: ArbitrageOpportunityLeg;
+  strategyType: ArbitrageStrategyType;
+  strategyLabel: string;
   matchQuality: ArbitrageMatchQuality;
   matchLabel: string;
   currentGrossApr: number;
@@ -81,6 +94,8 @@ export type ArbitrageOpportunity = {
   scoreBreakdown: ArbitrageScoreBreakdown;
   disqualifiers: string[];
   warnings: string[];
+  automationEligible: boolean;
+  automationDisqualifiers: string[];
 };
 
 export type ArbitrageDashboardSnapshot = {
