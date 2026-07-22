@@ -21,6 +21,7 @@ const AdminUsersPage = lazy(() => import("./pages/admin/AdminUsersPage").then((m
 const AdminSymbolsPage = lazy(() => import("./pages/admin/AdminSymbolsPage").then((module) => ({ default: module.AdminSymbolsPage })));
 const AdminTradingPage = lazy(() => import("./pages/admin/AdminTradingPage").then((module) => ({ default: module.AdminTradingPage })));
 const AdminRealTradingOperationsPage = lazy(() => import("./pages/admin/AdminRealTradingOperationsPage").then((module) => ({ default: module.AdminRealTradingOperationsPage })));
+const AdminNeutralAutomationPage = lazy(() => import("./pages/admin/AdminNeutralAutomationPage").then((module) => ({ default: module.AdminNeutralAutomationPage })));
 
 export default function App() {
   return (
@@ -46,6 +47,7 @@ export default function App() {
           <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
           <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
           <Route path="/admin/real-trading" element={<AdminScreen><AdminRealTradingOperationsPage /></AdminScreen>} />
+          <Route path="/admin/arbitrage-automation" element={<AdminScreen><AdminNeutralAutomationPage /></AdminScreen>} />
           <Route path="*" element={<Navigate to="/app/dashboard" replace />} />
         </Routes>
       </Suspense>

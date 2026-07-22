@@ -25,6 +25,8 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
+import { RwaBybitReadOnlyConnector } from "./modules/arbitrage/automation/RwaBybitReadOnlyConnector";
+import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaNeutralAutomationService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -117,7 +119,11 @@ registerAuthRoutes({ app, users, wallet, tradingStore, config });
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
-registerArbitrageRoutes(app, new ArbitrageDashboardService());
+registerArbitrageRoutes(
+  app,
+  new ArbitrageDashboardService(),
+  new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
+);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({
   app,
