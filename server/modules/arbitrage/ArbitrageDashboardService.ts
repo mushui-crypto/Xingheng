@@ -103,6 +103,7 @@ const instruments: InstrumentConfig[] = [
     fundingIntervalHours: 1,
   }),
   ...stockRwaInstruments(),
+  ...mainstreamCryptoInstruments(),
 ];
 
 function stockRwaInstruments(): InstrumentConfig[] {
@@ -138,6 +139,29 @@ function stockRwaAsset(
     instrument(`bybit-${slug}-perp`, "bybit", "Bybit", `${asset}USDT`, asset, "perpetual", 5.5, { fundingIntervalHours: 8 }),
     instrument(`okx-${slug}-perp`, "okx", "OKX", `${asset}-USDT-SWAP`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
   ];
+}
+
+function mainstreamCryptoInstruments(): InstrumentConfig[] {
+  const assets: Array<Extract<ArbitrageAsset, "BTC" | "ETH" | "SOL" | "XRP" | "DOGE">> = [
+    "BTC",
+    "ETH",
+    "SOL",
+    "XRP",
+    "DOGE",
+  ];
+  return assets.flatMap((asset) => {
+    const slug = asset.toLowerCase();
+    return [
+      instrument(`binance-${slug}-spot`, "binance", "Binance", `${asset}USDT`, asset, "spot", 10),
+      instrument(`binance-${slug}-perp`, "binance", "Binance", `${asset}USDT`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
+      instrument(`bybit-${slug}-spot`, "bybit", "Bybit", `${asset}USDT`, asset, "spot", 10),
+      instrument(`bybit-${slug}-perp`, "bybit", "Bybit", `${asset}USDT`, asset, "perpetual", 5.5, { fundingIntervalHours: 8 }),
+      instrument(`bitget-${slug}-spot`, "bitget", "Bitget", `${asset}USDT`, asset, "spot", 10),
+      instrument(`bitget-${slug}-perp`, "bitget", "Bitget", `${asset}USDT`, asset, "perpetual", 6, { fundingIntervalHours: 8 }),
+      instrument(`okx-${slug}-spot`, "okx", "OKX", `${asset}-USDT`, asset, "spot", 10),
+      instrument(`okx-${slug}-perp`, "okx", "OKX", `${asset}-USDT-SWAP`, asset, "perpetual", 5, { fundingIntervalHours: 8 }),
+    ];
+  });
 }
 
 export class ArbitrageDashboardService {
@@ -249,6 +273,7 @@ export class ArbitrageDashboardService {
         ? ((current.ask - current.bid) / ((current.ask + current.bid) / 2)) * 10_000
         : null;
       const warnings = [...(current.warnings ?? [])];
+      if (current.bid === null || current.ask === null) warnings.push("缺少可执行买卖报价");
       if (config.kind === "perpetual" && fundingMetrics.coverageRatio < 0.8) warnings.push(`历史费率覆盖不足 ${Math.round(fundingMetrics.coverageRatio * 100)}%`);
       if (depth.slippageBps10k === null) warnings.push("订单簿不足以估算 1 万美元双向滑点");
       return {
@@ -398,9 +423,15 @@ async function loadBinanceCurrent(config: InstrumentConfig, batches: CurrentMark
       ? marketBatchValue(batches.binancePremiums, config.symbol, () => fetchJson(`${baseUrl}/premiumIndex?symbol=${config.symbol}`))
       : Promise.resolve(null),
   ]);
+  const bid = config.kind === "perpetual"
+    ? depth?.bids?.[0]?.[0] ?? ticker?.bidPrice
+    : ticker?.bidPrice;
+  const ask = config.kind === "perpetual"
+    ? depth?.asks?.[0]?.[0] ?? ticker?.askPrice
+    : ticker?.askPrice;
   return currentPayload({
-    bid: ticker?.bidPrice,
-    ask: ticker?.askPrice,
+    bid,
+    ask,
     markPrice: premium?.markPrice ?? ticker?.lastPrice,
     indexPrice: premium?.indexPrice ?? ticker?.lastPrice,
     fundingRate: premium?.lastFundingRate,

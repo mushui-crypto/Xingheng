@@ -1,7 +1,8 @@
 import { ChevronDown, ChevronUp, ShieldAlert } from "lucide-react";
 import { memo } from "react";
 import type { ArbitrageOpportunity, ArbitrageYieldMetric } from "../model/types";
-import { equivalentNetYield, formatApr, formatBps, formatFundingRate, formatRatio, formatUsd } from "../lib/formatters";
+import { equivalentNetYield, formatApr, formatBps, formatFundingRate, formatUsd } from "../lib/formatters";
+import { buildOpportunityFactors, type OpportunityFactor } from "../lib/opportunityFactors";
 import { ArbitrageHelp } from "./ArbitrageHelp";
 import { FundingCountdown } from "./FundingCountdown";
 
@@ -25,9 +26,9 @@ export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable
 
   return (
     <div className="w-full min-w-0 max-w-full overflow-x-auto border border-line bg-black [contain:paint]">
-      <table className="xh-table min-w-[1700px] table-fixed">
+      <table className="xh-table min-w-[1690px] table-fixed">
         <colgroup>
-          <col className="w-[96px]" />
+          <col className="w-[180px]" />
           <col className="w-[260px]" />
           <col className="w-[260px]" />
           <col className="w-[140px]" />
@@ -37,12 +38,11 @@ export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable
           <col className="w-[115px]" />
           <col className="w-[115px]" />
           <col className="w-[120px]" />
-          <col className="w-[110px]" />
           <col className="w-[74px]" />
         </colgroup>
         <thead className="xh-thead">
           <tr>
-            <th className="xh-th sticky left-0 z-10 bg-[#121212]"><HeaderLabel label="评分" help="综合等效净APR、持续性、标的匹配、流动性、成本和可靠性计算，满分100分。" align="left" /></th>
+            <th className="xh-th sticky left-0 z-10 bg-[#121212]"><HeaderLabel label="持有质量 / 当前入场" help="持有质量基于近90天费率、持续性、成本和标的匹配；当前入场只反映最新Funding、即时基差、报价和容量。两者互不替代。" align="left" /></th>
             <th className="xh-th">做多</th>
             <th className="xh-th">做空</th>
             <th className="xh-th text-center"><HeaderLabel label="类型 / 匹配" help="同所中性仅包含同一交易所、同一资产的现货多头与永续空头；跨所套利沿用原跨交易所组合。精确匹配为同一资产，其他组合仍存在指数或代理标的风险。" /></th>
@@ -52,7 +52,6 @@ export const ArbitrageOpportunityTable = memo(function ArbitrageOpportunityTable
             <th className="xh-th text-center"><HeaderLabel label="往返成本" help="两腿开仓和平仓的Taker手续费，加上按1万美元订单簿深度估算的双向滑点。" /></th>
             <th className="xh-th text-center"><HeaderLabel label="入场基差" help="做空腿Bid与做多腿Ask之间的即时价格差，以两者中间价折算为bps；正值通常更有利。" /></th>
             <th className="xh-th text-center"><HeaderLabel label="容量" help="两腿订单簿可用美元深度的较小值，仅作流动性参考，不等于保证成交规模。" /></th>
-            <th className="xh-th text-center"><HeaderLabel label="结论" help="75分及以上为优选，60–74分为关注，低于60分为观察；关联标的会因匹配风险少得分，但达到门槛后同样可以进入优选。硬性条件不满足时不可执行。" /></th>
             <th className="xh-th text-center"><span className="sr-only">详情</span></th>
           </tr>
         </thead>
@@ -88,7 +87,10 @@ const OpportunityRows = memo(function OpportunityRows({ opportunity, holdingDays
     <>
       <tr className="hover:bg-white/[0.025]">
         <td className="sticky left-0 z-[1] bg-black px-5 py-4">
-          <ScoreBadge score={opportunity.score} recommendation={opportunity.recommendation} />
+          <div className="flex flex-col items-start gap-1.5">
+            <RecommendationBadge recommendation={opportunity.recommendation} />
+            <EntryStatusBadge entryStatus={opportunity.entryStatus} />
+          </div>
         </td>
         <td className="px-5 py-4"><Leg leg={opportunity.longLeg} side="long" /></td>
         <td className="px-5 py-4"><Leg leg={opportunity.shortLeg} side="short" /></td>
@@ -103,13 +105,12 @@ const OpportunityRows = memo(function OpportunityRows({ opportunity, holdingDays
         </td>
         <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatBps(opportunity.entryBasisBps, true)}</td>
         <td className="px-5 py-4 text-center font-mono font-normal text-muted">{formatUsd(opportunity.capacityUsd)}</td>
-        <td className="px-5 py-4 text-center"><RecommendationBadge recommendation={opportunity.recommendation} /></td>
         <td className="px-5 py-4 text-center">
           <button
             type="button"
             className="inline-flex h-9 w-9 items-center justify-center border border-white/15 text-muted transition hover:border-white/40 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
             aria-expanded={expanded}
-            aria-label={expanded ? "收起评分详情" : "展开评分详情"}
+            aria-label={expanded ? "收起结论因子" : "展开结论因子"}
             title={expanded ? "收起详情" : "查看详情"}
             onClick={() => onToggle(opportunity.id)}
           >
@@ -119,7 +120,7 @@ const OpportunityRows = memo(function OpportunityRows({ opportunity, holdingDays
       </tr>
       {expanded ? (
         <tr>
-          <td colSpan={12} className="bg-[#0d0d0d] px-5 py-5">
+          <td colSpan={11} className="bg-[#0d0d0d] px-5 py-5">
             <OpportunityDetail opportunity={opportunity} />
           </td>
         </tr>
@@ -129,29 +130,18 @@ const OpportunityRows = memo(function OpportunityRows({ opportunity, holdingDays
 });
 
 function OpportunityDetail({ opportunity }: { opportunity: ArbitrageOpportunity }) {
-  const dimensions = [
-    ["等效净APR", opportunity.scoreBreakdown.netApr, 30],
-    ["持续性", opportunity.scoreBreakdown.persistence, 20],
-    ["标的匹配", opportunity.scoreBreakdown.matching, 15],
-    ["流动性", opportunity.scoreBreakdown.liquidity, 15],
-    ["成本", opportunity.scoreBreakdown.cost, 10],
-    ["可靠性", opportunity.scoreBreakdown.reliability, 10],
-  ] as const;
+  const factors = buildOpportunityFactors(opportunity);
   const messages = [...opportunity.disqualifiers, ...opportunity.warnings];
   return (
     <div className="grid gap-6 xl:grid-cols-[minmax(0,1.6fr)_minmax(300px,1fr)]">
-      <div className="grid gap-x-6 gap-y-4 sm:grid-cols-2 lg:grid-cols-3">
-        {dimensions.map(([label, value, maximum]) => (
-          <div key={label}>
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="text-muted">{label}</span>
-              <span className="font-mono font-normal text-muted">{value.toFixed(1)} / {maximum}</span>
-            </div>
-            <div className="mt-2 h-1.5 bg-white/10">
-              <div className="h-full bg-white" style={{ width: `${Math.min(100, (value / maximum) * 100)}%` }} />
-            </div>
-          </div>
-        ))}
+      <div>
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-line pb-3">
+          <p className="text-xs font-semibold text-white">持有质量与入场因子</p>
+          <span className="text-xs text-muted">{opportunity.opportunityDriverLabel}</span>
+        </div>
+        <div className="grid sm:grid-cols-2">
+          {factors.map((factor) => <OpportunityFactorRow factor={factor} key={factor.label} />)}
+        </div>
       </div>
       <div className="border-t border-line pt-4 xl:border-l xl:border-t-0 xl:pl-6 xl:pt-0">
         <p className="flex items-center gap-2 text-xs font-semibold text-white"><ShieldAlert size={14} /> 风险与限制</p>
@@ -172,8 +162,20 @@ function OpportunityDetail({ opportunity }: { opportunity: ArbitrageOpportunity 
             {[...new Set(messages)].map((message) => <li key={message}>• {message}</li>)}
           </ul>
         ) : <p className="mt-3 text-xs text-muted">当前没有额外限制。</p>}
-        <p className="mt-3 text-xs text-dim">历史有利天数占比 {formatRatio(opportunity.persistenceRatio)}</p>
       </div>
+    </div>
+  );
+}
+
+function OpportunityFactorRow({ factor }: { factor: OpportunityFactor }) {
+  const toneClass = factor.tone === "positive"
+    ? "text-emerald-300"
+    : factor.tone === "negative" ? "text-red-300" : "text-muted";
+  const toneLabel = factor.tone === "positive" ? "有利" : factor.tone === "negative" ? "不利" : "中性";
+  return (
+    <div className="flex min-w-0 items-start justify-between gap-4 border-b border-line py-3 odd:sm:pr-5 even:sm:border-l even:sm:pl-5">
+      <span className="shrink-0 text-xs text-dim">{factor.label}</span>
+      <span className={`min-w-0 text-right text-xs leading-5 ${toneClass}`} title={factor.value}><span className="mr-1.5 whitespace-nowrap">[{toneLabel}]</span>{factor.value}</span>
     </div>
   );
 }
@@ -228,17 +230,6 @@ function formatInterval(hours: number) {
   return Number.isInteger(hours) ? String(hours) : hours.toFixed(1);
 }
 
-function ScoreBadge({ score, recommendation }: Pick<ArbitrageOpportunity, "score" | "recommendation">) {
-  const className = recommendation === "recommended"
-    ? "border-emerald-400/40 bg-emerald-400/[0.1] text-white"
-    : recommendation === "watch"
-      ? "border-amber-400/40 bg-amber-400/[0.08] text-white"
-      : recommendation === "blocked"
-        ? "border-red-400/35 bg-red-400/[0.06] text-red-200"
-        : "border-white/20 bg-panel2 text-white";
-  return <span className={`inline-flex min-w-14 items-center justify-center border px-2.5 py-1.5 font-mono text-sm font-semibold ${className}`}>{score}</span>;
-}
-
 function MatchBadge({ opportunity }: { opportunity: ArbitrageOpportunity }) {
   const className = opportunity.matchQuality === "exact"
     ? "border-emerald-400/30 text-emerald-200"
@@ -257,7 +248,12 @@ function MatchBadge({ opportunity }: { opportunity: ArbitrageOpportunity }) {
 }
 
 function RecommendationBadge({ recommendation }: { recommendation: ArbitrageOpportunity["recommendation"] }) {
-  const labels = { recommended: "优选", watch: "关注", neutral: "观察", blocked: "不可执行" };
+  const labels = {
+    recommended: "持有逻辑较强",
+    watch: "值得持续关注",
+    neutral: "历史优势有限",
+    blocked: "无法安全评估",
+  };
   const className = recommendation === "recommended"
     ? "text-emerald-300"
     : recommendation === "watch"
@@ -265,5 +261,22 @@ function RecommendationBadge({ recommendation }: { recommendation: ArbitrageOppo
       : recommendation === "blocked"
         ? "text-red-300"
         : "text-muted";
-  return <span className={`whitespace-nowrap text-xs font-semibold ${className}`}>{labels[recommendation]}</span>;
+  return <span className={`inline-flex whitespace-nowrap text-xs font-semibold ${className}`}>{labels[recommendation]}</span>;
+}
+
+function EntryStatusBadge({ entryStatus }: { entryStatus: ArbitrageOpportunity["entryStatus"] }) {
+  const labels = {
+    favorable: "当前条件较好",
+    cautious: "谨慎评估入场",
+    waiting: "等待费率差转正",
+    blocked: "当前不可执行",
+  };
+  const className = entryStatus === "favorable"
+    ? "border-emerald-400/30 text-emerald-200"
+    : entryStatus === "cautious"
+      ? "border-amber-400/30 text-amber-200"
+      : entryStatus === "blocked"
+        ? "border-red-400/30 text-red-200"
+        : "border-white/15 text-muted";
+  return <span className={`inline-flex whitespace-nowrap border px-2 py-1 text-[11px] font-normal ${className}`}>{labels[entryStatus]}</span>;
 }

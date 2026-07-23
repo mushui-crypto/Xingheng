@@ -1,13 +1,15 @@
 import type {
+  ArbitrageConfidence,
   ArbitrageMatchQuality,
   ArbitrageOpportunity,
+  ArbitrageOpportunityDriver,
   ArbitrageOpportunityLeg,
   InternalArbitrageMarket,
 } from "./arbitrageTypes";
 
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
-const recommendedScoreThreshold = 75;
-const watchScoreThreshold = 60;
+const recommendedScoreThreshold = 80;
+const watchScoreThreshold = 65;
 const automationAssessmentDays = 90;
 const automationMinimumNetApr = 6;
 const automationMinimumPersistence = 0.75;
@@ -67,8 +69,26 @@ export function scoreOpportunity(
     marketCoverageRatio(longMarket, lookbackDays),
     marketCoverageRatio(shortMarket, lookbackDays),
   );
-  const disqualifiers = buildDisqualifiers(longMarket, shortMarket, netApr, dailySpreads.length);
-  const warnings = buildWarnings(longMarket, shortMarket, matchQuality, coverageRatio);
+  const disqualifiers = buildDisqualifiers(longMarket, shortMarket, dailySpreads.length);
+  const confidence = assessConfidence(longMarket, shortMarket, matchQuality, coverageRatio);
+  const conservativeFundingApr = calculateConservativeFundingApr(currentGrossApr, dailySpreads);
+  const conservativeFundingReturnBps = conservativeFundingApr * (holdingDays / 365) * 100;
+  const conservativeBasisReturnBps = Math.max(entryBasisBps ?? 0, 0) * 0.5;
+  const conservativeGrossReturnBps = conservativeFundingReturnBps + conservativeBasisReturnBps;
+  const conservativeNetReturnBps = conservativeGrossReturnBps - roundTripCostBps;
+  const conservativeNetApr = conservativeNetReturnBps * (365 / holdingDays) / 100;
+  const opportunityDriver = determineOpportunityDriver(
+    conservativeFundingReturnBps,
+    conservativeBasisReturnBps,
+  );
+  const warnings = buildWarnings({
+    longMarket,
+    shortMarket,
+    matchQuality,
+    coverageRatio,
+    netApr,
+    conservativeNetReturnBps,
+  });
   const automationDisqualifiers = buildAutomationDisqualifiers({
     longMarket,
     shortMarket,
@@ -83,22 +103,46 @@ export function scoreOpportunity(
   });
 
   const scoreBreakdown = {
-    netApr: roundScore(clamp(netApr / 15, 0, 1) * 30),
-    persistence: roundScore(clamp(persistenceRatio * coverageRatio, 0, 1) * 20),
-    matching: matchQuality === "exact" ? 15 : matchQuality === "oracle" ? 11 : 7,
-    liquidity: liquidityScore(capacityUsd),
-    cost: roundScore(clamp((100 - roundTripCostBps) / 80, 0, 1) * 10),
-    reliability: reliabilityScore(longMarket, shortMarket, coverageRatio),
+    conservativeNetReturn: roundScore(clamp(conservativeNetApr / 15, 0, 1) * 30),
+    driverStrength: driverStrengthScore(opportunityDriver, currentGrossApr, entryBasisBps),
+    persistence: roundScore(clamp(persistenceRatio * coverageRatio, 0, 1) * 15),
+    costEfficiency: costEfficiencyScore(conservativeGrossReturnBps, roundTripCostBps),
+    liquidity: currentLiquidityScore(capacityUsd),
+    confidence: confidenceScore(confidence),
   };
+  const historicalQualityScore = calculateHistoricalQualityScore({
+    netApr,
+    persistenceRatio,
+    coverageRatio,
+    matchQuality,
+    capacityUsd,
+    roundTripCostBps,
+    longMarket,
+    shortMarket,
+  });
   let score = Math.round(Object.values(scoreBreakdown).reduce((sum, value) => sum + value, 0));
-  if (disqualifiers.length > 0) score = Math.min(score, 49);
+  if (matchQuality === "proxy") score = Math.min(score, 79);
+  if (conservativeNetReturnBps <= 0) score = Math.min(score, 54);
+  if (confidence === "low") score = Math.min(score, 69);
+  if (opportunityDriver === "funding" && (shortMarket.fundingRate ?? 0) <= 0) {
+    score = Math.min(score, 49);
+  }
   const recommendation = disqualifiers.length > 0
     ? "blocked"
-    : score >= recommendedScoreThreshold
+    : historicalQualityScore >= recommendedScoreThreshold
       ? "recommended"
-      : score >= watchScoreThreshold
+      : historicalQualityScore >= watchScoreThreshold
         ? "watch"
         : "neutral";
+  const entryStatus = assessEntryStatus({
+    longMarket,
+    shortMarket,
+    disqualifiers,
+    currentGrossApr,
+    conservativeNetReturnBps,
+    entryBasisBps,
+    capacityUsd,
+  });
 
   return {
     id: `${longMarket.id}--${shortMarket.id}`,
@@ -117,7 +161,17 @@ export function scoreOpportunity(
     entryBasisBps: entryBasisBps === null ? null : roundMetric(entryBasisBps),
     capacityUsd: capacityUsd === null ? null : Math.round(capacityUsd),
     score,
+    historicalQualityScore,
+    confidence,
+    confidenceLabel: confidence === "high" ? "高" : confidence === "medium" ? "中" : "低",
+    opportunityDriver,
+    opportunityDriverLabel: opportunityDriver === "funding"
+      ? "资金费率驱动"
+      : opportunityDriver === "basis"
+        ? "基差回归驱动"
+        : "混合驱动",
     recommendation,
+    entryStatus,
     scoreBreakdown,
     disqualifiers,
     warnings,
@@ -189,33 +243,40 @@ function getMatchQuality(longAsset: string, shortAsset: string): ArbitrageMatchQ
 function buildDisqualifiers(
   longMarket: InternalArbitrageMarket,
   shortMarket: InternalArbitrageMarket,
-  netApr: number,
   spreadSampleDays: number,
 ) {
   const reasons: string[] = [];
   if (longMarket.status === "disconnected" || shortMarket.status === "disconnected") reasons.push("至少一个市场数据源不可用");
   if (longMarket.bid === null || longMarket.ask === null || shortMarket.bid === null || shortMarket.ask === null) reasons.push("缺少可执行报价");
+  if (shortMarket.fundingRate === null || (longMarket.kind === "perpetual" && longMarket.fundingRate === null)) {
+    reasons.push("缺少当前资金费率");
+  }
   if (shortMarket.fundingHistory.length === 0 || (longMarket.kind === "perpetual" && longMarket.fundingHistory.length === 0)) reasons.push("缺少历史资金费率");
   if (spreadSampleDays === 0) reasons.push("历史费率无法对齐");
-  if (netApr <= 0) reasons.push("预估收益无法覆盖往返成本");
   return [...new Set(reasons)];
 }
 
-function buildWarnings(
-  longMarket: InternalArbitrageMarket,
-  shortMarket: InternalArbitrageMarket,
-  matchQuality: ArbitrageMatchQuality,
-  coverageRatio: number,
-) {
+function buildWarnings(input: {
+  longMarket: InternalArbitrageMarket;
+  shortMarket: InternalArbitrageMarket;
+  matchQuality: ArbitrageMatchQuality;
+  coverageRatio: number;
+  netApr: number;
+  conservativeNetReturnBps: number;
+}) {
+  const { longMarket, shortMarket, matchQuality, coverageRatio } = input;
   const warnings = [...longMarket.warnings, ...shortMarket.warnings];
   if (matchQuality === "proxy") warnings.push("两腿为关联标的，跟踪口径不同，存在发行人、赎回与脱锚风险");
   if (matchQuality === "oracle") warnings.push("两腿指数源可能不同，存在标记价格与交易时段基差");
-  if (!isGoldAsset(longMarket.asset) || !isGoldAsset(shortMarket.asset)) {
+  if (isStockRwaAsset(longMarket.asset) || isStockRwaAsset(shortMarket.asset)) {
     warnings.push("股票代币与指数永续不代表同一法律权益，仍存在发行人、价格源、公司行动与交易时段差异");
   }
   if (longMarket.venue === shortMarket.venue) warnings.push("同所组合降低执行复杂度，但资金与持仓集中承担单一交易所风险");
   if (longMarket.settlementAsset !== shortMarket.settlementAsset) warnings.push("两腿结算资产不同，需单独计量 USDC/USDT 风险");
   if (coverageRatio < 0.8) warnings.push("历史数据覆盖不足，评分可靠性已降低");
+  if ((shortMarket.fundingRate ?? 0) <= 0) warnings.push("当前空头腿未处于收取 Funding 状态");
+  if (input.netApr <= 0) warnings.push("历史等效净收益无法覆盖往返成本");
+  if (input.conservativeNetReturnBps <= 0) warnings.push("当前保守预期净收益无法覆盖往返成本");
   return [...new Set(warnings)];
 }
 
@@ -257,13 +318,103 @@ function isSameVenueNeutralPair(longMarket: InternalArbitrageMarket, shortMarket
     && longMarket.asset === shortMarket.asset;
 }
 
-function liquidityScore(capacityUsd: number | null) {
+function assessEntryStatus(input: {
+  longMarket: InternalArbitrageMarket;
+  shortMarket: InternalArbitrageMarket;
+  disqualifiers: string[];
+  currentGrossApr: number;
+  conservativeNetReturnBps: number;
+  entryBasisBps: number | null;
+  capacityUsd: number | null;
+}): ArbitrageOpportunity["entryStatus"] {
+  if (input.disqualifiers.length > 0) return "blocked";
+  if (input.currentGrossApr <= 0) return "waiting";
+  const connected = input.longMarket.status === "connected" && input.shortMarket.status === "connected";
+  const basisWithinRange = input.entryBasisBps !== null
+    && Math.abs(input.entryBasisBps) <= automationMaximumAbsoluteBasisBps;
+  const sufficientCapacity = input.capacityUsd !== null
+    && input.capacityUsd >= automationMinimumCapacityUsd;
+  return connected && basisWithinRange && sufficientCapacity && input.conservativeNetReturnBps > 0
+    ? "favorable"
+    : "cautious";
+}
+
+function calculateConservativeFundingApr(currentGrossApr: number, dailySpreads: number[]) {
+  if (currentGrossApr <= 0 || dailySpreads.length === 0) return Math.min(currentGrossApr, 0);
+  const lowerQuartileApr = percentile(dailySpreads, 0.25) * 365 * 100;
+  return Math.min(currentGrossApr, lowerQuartileApr);
+}
+
+function determineOpportunityDriver(
+  conservativeFundingReturnBps: number,
+  conservativeBasisReturnBps: number,
+): ArbitrageOpportunityDriver {
+  const hasFunding = conservativeFundingReturnBps > 1;
+  const hasBasis = conservativeBasisReturnBps > 1;
+  if (hasFunding && hasBasis) return "mixed";
+  if (hasBasis) return "basis";
+  return "funding";
+}
+
+function driverStrengthScore(
+  driver: ArbitrageOpportunityDriver,
+  currentGrossApr: number,
+  entryBasisBps: number | null,
+) {
+  const fundingStrength = clamp(Math.max(currentGrossApr, 0) / 20, 0, 1) * 20;
+  const basisStrength = clamp(Math.max(entryBasisBps ?? 0, 0) / 100, 0, 1) * 20;
+  const score = driver === "funding"
+    ? fundingStrength
+    : driver === "basis"
+      ? basisStrength
+      : Math.max(fundingStrength, basisStrength) + Math.min(fundingStrength, basisStrength) * 0.35;
+  return roundScore(Math.min(20, score));
+}
+
+function costEfficiencyScore(conservativeGrossReturnBps: number, roundTripCostBps: number) {
+  if (conservativeGrossReturnBps <= 0) return 0;
+  if (roundTripCostBps <= 0) return 15;
+  return roundScore(clamp((conservativeGrossReturnBps - roundTripCostBps) / conservativeGrossReturnBps, 0, 1) * 15);
+}
+
+function currentLiquidityScore(capacityUsd: number | null) {
+  if (capacityUsd === null || capacityUsd < 10_000) return 0;
+  if (capacityUsd >= 100_000) return 10;
+  return roundScore(4 + ((capacityUsd - 10_000) / 90_000) * 6);
+}
+
+function historicalLiquidityScore(capacityUsd: number | null) {
   if (capacityUsd === null || capacityUsd < 10_000) return 0;
   if (capacityUsd >= 100_000) return 15;
   return roundScore(6 + ((capacityUsd - 10_000) / 90_000) * 9);
 }
 
-function reliabilityScore(
+function assessConfidence(
+  longMarket: InternalArbitrageMarket,
+  shortMarket: InternalArbitrageMarket,
+  matchQuality: ArbitrageMatchQuality,
+  coverageRatio: number,
+): ArbitrageConfidence {
+  if (
+    longMarket.status === "disconnected"
+    || shortMarket.status === "disconnected"
+    || coverageRatio < 0.5
+  ) return "low";
+  if (
+    longMarket.status !== "connected"
+    || shortMarket.status !== "connected"
+    || coverageRatio < 0.8
+    || matchQuality !== "exact"
+    || longMarket.settlementAsset !== shortMarket.settlementAsset
+  ) return "medium";
+  return "high";
+}
+
+function confidenceScore(confidence: ArbitrageConfidence) {
+  return confidence === "high" ? 10 : confidence === "medium" ? 6 : 2;
+}
+
+function historicalReliabilityScore(
   longMarket: InternalArbitrageMarket,
   shortMarket: InternalArbitrageMarket,
   coverageRatio: number,
@@ -271,6 +422,27 @@ function reliabilityScore(
   const statusFactor = longMarket.status === "connected" && shortMarket.status === "connected" ? 1 : 0.6;
   const settlementFactor = longMarket.settlementAsset === shortMarket.settlementAsset ? 1 : 0.8;
   return roundScore(10 * statusFactor * settlementFactor * clamp(coverageRatio, 0.25, 1));
+}
+
+function calculateHistoricalQualityScore(input: {
+  netApr: number;
+  persistenceRatio: number;
+  coverageRatio: number;
+  matchQuality: ArbitrageMatchQuality;
+  capacityUsd: number | null;
+  roundTripCostBps: number;
+  longMarket: InternalArbitrageMarket;
+  shortMarket: InternalArbitrageMarket;
+}) {
+  const score = Math.round(
+    roundScore(clamp(input.netApr / 15, 0, 1) * 30)
+    + roundScore(clamp(input.persistenceRatio * input.coverageRatio, 0, 1) * 20)
+    + (input.matchQuality === "exact" ? 15 : input.matchQuality === "oracle" ? 11 : 7)
+    + historicalLiquidityScore(input.capacityUsd)
+    + roundScore(clamp((100 - input.roundTripCostBps) / 80, 0, 1) * 10)
+    + historicalReliabilityScore(input.longMarket, input.shortMarket, input.coverageRatio),
+  );
+  return input.matchQuality === "proxy" ? Math.min(score, 79) : score;
 }
 
 function toLeg(market: InternalArbitrageMarket): ArbitrageOpportunityLeg {
@@ -312,8 +484,19 @@ function isGoldAsset(value: string) {
   return value === "XAU" || value === "GOLD" || value === "XAUT" || value === "PAXG";
 }
 
+function isStockRwaAsset(value: string) {
+  return value === "MU" || value === "NVDA" || value === "GOOGL" || value === "MSFT" || value === "TSLA";
+}
+
 function average(values: number[]) {
   return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
+}
+
+function percentile(values: number[], ratio: number) {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.floor((sorted.length - 1) * clamp(ratio, 0, 1));
+  return sorted[index] ?? 0;
 }
 
 function clamp(value: number, minimum: number, maximum: number) {

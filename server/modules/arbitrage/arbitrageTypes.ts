@@ -8,13 +8,21 @@ export type ArbitrageAsset =
   | "NVDA"
   | "GOOGL"
   | "MSFT"
-  | "TSLA";
+  | "TSLA"
+  | "BTC"
+  | "ETH"
+  | "SOL"
+  | "XRP"
+  | "DOGE";
 export type ArbitrageInstrumentKind = "spot" | "perpetual";
 export type ArbitrageQuoteAsset = "USDT" | "USDC";
 export type ArbitrageMarketStatus = "connected" | "degraded" | "disconnected";
 export type ArbitrageMatchQuality = "exact" | "oracle" | "proxy";
 export type ArbitrageRecommendation = "recommended" | "watch" | "neutral" | "blocked";
+export type ArbitrageEntryStatus = "favorable" | "cautious" | "waiting" | "blocked";
 export type ArbitrageStrategyType = "same_venue_neutral" | "cross_venue_arbitrage";
+export type ArbitrageConfidence = "high" | "medium" | "low";
+export type ArbitrageOpportunityDriver = "funding" | "basis" | "mixed";
 
 export type FundingPoint = {
   rate: number;
@@ -65,12 +73,12 @@ export type ArbitrageOpportunityLeg = Pick<
 >;
 
 export type ArbitrageScoreBreakdown = {
-  netApr: number;
+  conservativeNetReturn: number;
+  driverStrength: number;
   persistence: number;
-  matching: number;
+  costEfficiency: number;
   liquidity: number;
-  cost: number;
-  reliability: number;
+  confidence: number;
 };
 
 export type ArbitrageOpportunity = {
@@ -90,7 +98,13 @@ export type ArbitrageOpportunity = {
   entryBasisBps: number | null;
   capacityUsd: number | null;
   score: number;
+  historicalQualityScore: number;
+  confidence: ArbitrageConfidence;
+  confidenceLabel: string;
+  opportunityDriver: ArbitrageOpportunityDriver;
+  opportunityDriverLabel: string;
   recommendation: ArbitrageRecommendation;
+  entryStatus: ArbitrageEntryStatus;
   scoreBreakdown: ArbitrageScoreBreakdown;
   disqualifiers: string[];
   warnings: string[];

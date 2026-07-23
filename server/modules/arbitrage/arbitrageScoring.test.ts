@@ -49,6 +49,7 @@ test("exact-asset opportunity can be recommended when persistent net carry cover
 
   assert.equal(opportunity.matchQuality, "exact");
   assert.equal(opportunity.recommendation, "recommended");
+  assert.equal(opportunity.entryStatus, "favorable");
   assert.ok(opportunity.score >= 80);
   assert.ok(opportunity.netApr > 0);
   assert.equal(opportunity.shortLeg.fundingRate, 0.0004);
@@ -58,23 +59,76 @@ test("exact-asset opportunity can be recommended when persistent net carry cover
   assert.ok(opportunity.automationDisqualifiers.some((reason) => reason.includes("仅评估同所")));
 });
 
-test("proxy-asset opportunities can exceed 79 and become recommended", () => {
+test("proxy-asset opportunities are capped at 79 and cannot become recommended", () => {
   const long = market("long", "PAXG", "spot", 0);
   const short = market("short", "GOLD", "perpetual", 0.001);
   const opportunity = scoreOpportunity(long, short, 90);
 
   assert.equal(opportunity.matchQuality, "proxy");
-  assert.ok(opportunity.score > 79);
+  assert.equal(opportunity.score, 79);
+  assert.equal(opportunity.historicalQualityScore, 79);
+  assert.notEqual(opportunity.recommendation, "recommended");
+});
+
+test("current opportunity score exposes the new explainable breakdown and separate historical quality", () => {
+  const long = market("long", "XAUT", "spot", 0);
+  const short = market("short", "XAUT", "perpetual", 0.0004);
+  const opportunity = scoreOpportunity(long, short, 90);
+
+  assert.deepEqual(Object.keys(opportunity.scoreBreakdown), [
+    "conservativeNetReturn",
+    "driverStrength",
+    "persistence",
+    "costEfficiency",
+    "liquidity",
+    "confidence",
+  ]);
+  assert.equal(opportunity.opportunityDriver, "funding");
+  assert.equal(opportunity.opportunityDriverLabel, "资金费率驱动");
+  assert.equal(opportunity.confidence, "high");
+  assert.equal(opportunity.confidenceLabel, "高");
+  assert.ok(opportunity.historicalQualityScore >= 80);
+  assert.ok(opportunity.score >= 80);
   assert.equal(opportunity.recommendation, "recommended");
 });
 
-test("exact-asset opportunities become recommended at the relaxed 75-point threshold", () => {
-  const long = market("long", "XAUT", "spot", 0);
-  const short = market("short", "XAUT", "perpetual", 0.00007);
+test("negative expected return is a warning rather than a hard execution block", () => {
+  const long = { ...market("long", "XAUT", "spot", 0), takerFeeBps: 10, slippageBps10k: 10 };
+  const short = { ...market("short", "XAUT", "perpetual", 0.00001), takerFeeBps: 10, slippageBps10k: 10 };
   const opportunity = scoreOpportunity(long, short, 90);
 
-  assert.ok(opportunity.score >= 75 && opportunity.score < 80);
+  assert.ok(opportunity.netApr < 0);
+  assert.equal(opportunity.disqualifiers.length, 0);
+  assert.notEqual(opportunity.recommendation, "blocked");
+  assert.ok(opportunity.warnings.some((reason) => reason.includes("无法覆盖往返成本")));
+  assert.equal(opportunity.automationEligible, false);
+});
+
+test("zero current Funding changes entry timing without downgrading long-term carry quality", () => {
+  const long = market("long", "XAUT", "spot", 0);
+  const short = {
+    ...market("short", "XAUT", "perpetual", 0.001),
+    fundingRate: 0,
+    currentFundingApr: 0,
+  };
+  const opportunity = scoreOpportunity(long, short, 90);
+
   assert.equal(opportunity.recommendation, "recommended");
+  assert.equal(opportunity.entryStatus, "waiting");
+  assert.ok(opportunity.score <= 49);
+  assert.ok(opportunity.historicalQualityScore >= 80);
+  assert.equal(opportunity.disqualifiers.length, 0);
+  assert.ok(opportunity.warnings.some((reason) => reason.includes("未处于收取 Funding")));
+});
+
+test("cross-venue perpetual entry timing uses the net funding spread rather than the short leg alone", () => {
+  const long = market("long", "XAUT", "perpetual", -0.0005);
+  const short = market("short", "XAUT", "perpetual", -0.0001);
+  const opportunity = scoreOpportunity(long, short, 90);
+
+  assert.ok((opportunity.shortLeg.fundingRate ?? 0) < 0);
+  assert.ok(opportunity.currentGrossApr > 0);
+  assert.equal(opportunity.entryStatus, "favorable");
 });
 
 test("disconnected leg blocks recommendation even when carry is positive", () => {
@@ -83,6 +137,7 @@ test("disconnected leg blocks recommendation even when carry is positive", () =>
   const opportunity = scoreOpportunity(long, short, 90);
 
   assert.equal(opportunity.recommendation, "blocked");
+  assert.equal(opportunity.entryStatus, "blocked");
   assert.ok(opportunity.disqualifiers.some((reason) => reason.includes("数据源不可用")));
 });
 

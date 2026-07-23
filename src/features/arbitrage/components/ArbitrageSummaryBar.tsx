@@ -1,4 +1,4 @@
-import { CircleAlert, Radio, Scale, Trophy } from "lucide-react";
+import { CircleAlert, ListChecks, Radio, Scale } from "lucide-react";
 import type { ArbitrageDashboardSnapshot, ArbitrageYieldMetric } from "../model/types";
 import { equivalentNetYield, formatApr, formatBps } from "../lib/formatters";
 import { ArbitrageHelp } from "./ArbitrageHelp";
@@ -7,11 +7,11 @@ export function ArbitrageSummaryBar({ snapshot, yieldMetric }: { snapshot: Arbit
   const metricLabel = yieldMetric.toUpperCase();
   const items = [
     {
-      label: "最高评分",
-      value: snapshot.summary.bestScore === null ? "-" : `${snapshot.summary.bestScore} / 100`,
-      meta: `${snapshot.summary.eligibleOpportunityCount} 个优选或关注机会`,
-      help: "75分及以上为优选，60–74分为关注；评分综合等效净APR、费率持续性、标的匹配、流动性、成本和数据可靠性。关联标的会因匹配风险少得分，但不设人工封顶，评分不代表收益承诺。",
-      icon: Trophy,
+      label: "持有质量",
+      value: `${snapshot.summary.eligibleOpportunityCount} 个`,
+      meta: "逻辑较强或值得关注",
+      help: "基于近90天资金费率、持续性、成本覆盖、标的匹配和数据质量评估中长期持有逻辑，不受最新一期Funding单独决定。",
+      icon: ListChecks,
     },
     {
       label: `最高等效净 ${metricLabel}`,
@@ -25,8 +25,8 @@ export function ArbitrageSummaryBar({ snapshot, yieldMetric }: { snapshot: Arbit
     {
       label: "数据源",
       value: `${snapshot.summary.connectedVenueCount} / ${snapshot.summary.totalVenueCount}`,
-      meta: `${snapshot.summary.trackedMarketCount} 个 RWA 市场`,
-      help: "统计当前能够返回公开行情的交易所，以及纳入比较的黄金、股票代币与股票永续市场。",
+      meta: `${snapshot.summary.trackedMarketCount} 个公开市场`,
+      help: "统计当前能够返回公开行情的交易所，以及纳入比较的黄金、股票RWA与主流加密资产市场。",
       icon: Radio,
     },
     {

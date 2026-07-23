@@ -112,8 +112,18 @@ describe("ArbitrageDashboardService cache and refresh control", () => {
       const service = new ArbitrageDashboardService({ now: () => 1_800_000_000_000 });
       const snapshot = await service.getSnapshot(90);
 
-      assert.equal(snapshot.markets.length, 50);
-      assert.equal(snapshot.summary.trackedMarketCount, 50);
+      assert.equal(snapshot.markets.length, 90);
+      assert.equal(snapshot.summary.trackedMarketCount, 90);
+      for (const asset of ["BTC", "ETH", "SOL", "XRP", "DOGE"] as const) {
+        assert.equal(snapshot.markets.filter((market) => market.asset === asset).length, 8);
+        assert.equal(snapshot.opportunities.filter((opportunity) =>
+          opportunity.longLeg.asset === asset && opportunity.shortLeg.asset === asset).length, 28);
+      }
+      const binanceBtcPerpetual = snapshot.markets.find((market) => market.id === "binance-btc-perp");
+      assert.equal(binanceBtcPerpetual?.bid, 100);
+      assert.equal(binanceBtcPerpetual?.ask, 101);
+      assert.notEqual(binanceBtcPerpetual?.status, "disconnected");
+      assert.ok(!binanceBtcPerpetual?.warnings.includes("缺少可执行买卖报价"));
       assert.equal(countMatching(requestedUrls, "api.binance.com/api/v3/ticker/24hr?symbols="), 1);
       assert.equal(countMatching(requestedUrls, "fapi.binance.com/fapi/v1/ticker/24hr?symbols="), 1);
       assert.equal(countMatching(requestedUrls, "fapi.binance.com/fapi/v1/premiumIndex"), 1);
@@ -133,6 +143,29 @@ describe("ArbitrageDashboardService cache and refresh control", () => {
       assert.ok(countMatching(requestedUrls, "/depth?symbol=") > 0);
       assert.ok(countMatching(requestedUrls, "/orderbook?category=") > 0);
       assert.ok(countMatching(requestedUrls, "/market/books?instId=") > 0);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
+  it("degrades a market with a clear warning when executable quotes remain unavailable", async () => {
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      if (url.includes("fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT")) {
+        return jsonResponse({ bids: [], asks: [] });
+      }
+      return jsonResponse(mockArbitragePayload(url, init));
+    }) as typeof fetch;
+    try {
+      const service = new ArbitrageDashboardService({ now: () => 1_800_000_000_000 });
+      const snapshot = await service.getSnapshot(90);
+      const market = snapshot.markets.find((item) => item.id === "binance-btc-perp");
+
+      assert.equal(market?.bid, null);
+      assert.equal(market?.ask, null);
+      assert.equal(market?.status, "degraded");
+      assert.ok(market?.warnings.includes("缺少可执行买卖报价"));
     } finally {
       globalThis.fetch = originalFetch;
     }
@@ -178,7 +211,7 @@ function mockArbitragePayload(url: string, init?: RequestInit) {
   if (url.includes("api.hyperliquid.xyz/info")) return mockHyperliquidPayload(init);
   if (url.includes("bookTicker?symbol=USDCUSDT")) return { bidPrice: "0.9999", askPrice: "1.0001" };
   if (url.includes("api.binance.com/api/v3/ticker/24hr")) return binanceTickerRows(parsed);
-  if (url.includes("fapi.binance.com/fapi/v1/ticker/24hr")) return binanceTickerRows(parsed);
+  if (url.includes("fapi.binance.com/fapi/v1/ticker/24hr")) return binanceTickerRows(parsed, false);
   if (url.includes("fapi.binance.com/fapi/v1/premiumIndex")) return premiumRows();
   if (url.includes("/depth?")) return { bids: bookRows(), asks: bookRows("ask") };
   if (url.includes("fapi.binance.com/fapi/v1/fundingRate")) return fundingRows("fundingRate", "fundingTime");
@@ -201,12 +234,11 @@ function mockArbitragePayload(url: string, init?: RequestInit) {
   throw new Error(`Unhandled arbitrage mock URL: ${url} ${symbol}`);
 }
 
-function binanceTickerRows(parsed: URL) {
+function binanceTickerRows(parsed: URL, includeExecutableQuotes = true) {
   const symbols = JSON.parse(parsed.searchParams.get("symbols") ?? "[]") as string[];
   return symbols.map((symbol) => ({
     symbol,
-    bidPrice: "100",
-    askPrice: "101",
+    ...(includeExecutableQuotes ? { bidPrice: "100", askPrice: "101" } : {}),
     lastPrice: "100.5",
     quoteVolume: "1000000",
   }));
@@ -320,6 +352,11 @@ function allSymbols() {
     "RTSLAUSDT",
     "TSLAUSDT",
     "TSLAXUSDT",
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
   ])];
 }
 
@@ -337,5 +374,15 @@ function okxSymbols() {
     "GOOGL-USDT-SWAP",
     "MSFT-USDT-SWAP",
     "TSLA-USDT-SWAP",
+    "BTC-USDT",
+    "BTC-USDT-SWAP",
+    "ETH-USDT",
+    "ETH-USDT-SWAP",
+    "SOL-USDT",
+    "SOL-USDT-SWAP",
+    "XRP-USDT",
+    "XRP-USDT-SWAP",
+    "DOGE-USDT",
+    "DOGE-USDT-SWAP",
   ];
 }

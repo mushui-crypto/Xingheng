@@ -239,14 +239,19 @@ export const publicReadOnlyApiPaths: ReadonlySet<string> = new Set([
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
   app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
     const requestPath = request.originalUrl.split("?", 1)[0];
+    if (requestPath === "/api/arbitrage/automation" || requestPath.startsWith("/api/arbitrage/automation/")) {
+      response.setHeader("Cache-Control", "no-store");
+    }
     if (request.method === "GET" && publicReadOnlyApiPaths.has(requestPath)) {
       next();
       return;
     }
     const token = getUserBearerToken(request);
-    const isRealTradingRequest = request.originalUrl.startsWith("/api/real-trading")
-      || request.baseUrl.startsWith("/api/real-trading");
-    const user = isRealTradingRequest
+    const includeDisabledRevocation = request.originalUrl.startsWith("/api/real-trading")
+      || request.baseUrl.startsWith("/api/real-trading")
+      || request.originalUrl.startsWith("/api/arbitrage/automation")
+      || request.baseUrl.startsWith("/api/arbitrage/automation");
+    const user = includeDisabledRevocation
       ? users.authenticateIncludingDisabledRevocation(token)
       : users.authenticate(token);
     if (!user) {

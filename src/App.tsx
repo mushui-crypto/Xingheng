@@ -21,6 +21,7 @@ const AdminUsersPage = lazy(() => import("./pages/admin/AdminUsersPage").then((m
 const AdminSymbolsPage = lazy(() => import("./pages/admin/AdminSymbolsPage").then((module) => ({ default: module.AdminSymbolsPage })));
 const AdminTradingPage = lazy(() => import("./pages/admin/AdminTradingPage").then((module) => ({ default: module.AdminTradingPage })));
 const AdminRealTradingOperationsPage = lazy(() => import("./pages/admin/AdminRealTradingOperationsPage").then((module) => ({ default: module.AdminRealTradingOperationsPage })));
+const ArbitrageAutomationPage = lazy(() => import("./pages/app/ArbitrageAutomationPage").then((module) => ({ default: module.ArbitrageAutomationPage })));
 const AdminNeutralAutomationPage = lazy(() => import("./pages/admin/AdminNeutralAutomationPage").then((module) => ({ default: module.AdminNeutralAutomationPage })));
 
 export default function App() {
@@ -36,6 +37,7 @@ export default function App() {
           <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
           <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
           <Route path="/app/arbitrage" element={<UserScreen><ArbitragePage /></UserScreen>} />
+          <Route path="/app/my-arbitrage" element={<PrivateUserScreen><ArbitrageAutomationPage /></PrivateUserScreen>} />
           <Route path="/app/strategy" element={<UserScreen><StrategyPage /></UserScreen>} />
           <Route path="/app/trade" element={<UserScreen><RealTradePage /></UserScreen>} />
           <Route path="/app/demo" element={<UserScreen><TradingPage /></UserScreen>} />
@@ -86,6 +88,14 @@ function AdminScreen({ children }: { children: ReactNode }) {
   return (
     <ProtectedRoute type="admin">
       <AdminLayout>{children}</AdminLayout>
+    </ProtectedRoute>
+  );
+}
+
+function PrivateUserScreen({ children }: { children: ReactNode }) {
+  return (
+    <ProtectedRoute type="user">
+      <UserLayout>{children}</UserLayout>
     </ProtectedRoute>
   );
 }

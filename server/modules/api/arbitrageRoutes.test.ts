@@ -18,6 +18,7 @@ describe("arbitrage dashboard public access and refresh protection", () => {
 
     assert.equal(response.statusCode, 200);
     assert.equal((response.body as ArbitrageDashboardSnapshot).horizonDays, 90);
+    assert.notEqual(response.headers["Cache-Control"], "no-store");
   });
 
   it("does not allow non-GET requests to bypass authentication", () => {
