@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
+  CredentialStoreError,
   RwaAutomationPersistentStore,
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
@@ -71,7 +72,22 @@ export class RwaNeutralExecutionService {
       const state = await this.store.readState();
       const pending = state.executions.filter((item) => executionStates.has(item.state));
       if (!pending.length) return;
-      const client = await this.client();
+      let client: RwaBybitTradingClient;
+      try {
+        client = await this.client();
+      } catch {
+        for (const execution of pending) {
+          execution.state = "manual_intervention";
+          execution.errorCategory = "credential_key_provider_unavailable";
+          execution.message = "凭证无法解密，系统不能自动退出；请在交易所人工检查订单和仓位。";
+          execution.updatedAt = this.now();
+        }
+        state.config.killSwitchActive = true;
+        state.config.strategyEnabled = false;
+        state.config.globalExecutionEnabled = false;
+        await this.store.writeState(state);
+        return;
+      }
       for (const execution of pending) {
         try {
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
@@ -130,6 +146,25 @@ export class RwaNeutralExecutionService {
         updatedAt: null,
         message: this.store.masterKeyError,
         ipWhitelistConfigured: null,
+        warnings: [],
+      };
+    }
+    if (metadata.requiresRotation) {
+      return {
+        userId: this.store.ownerUserId,
+        accountId: metadata.accountId,
+        accountFingerprint: metadata.accountFingerprint,
+        stored: true,
+        masterKeyConfigured: this.store.masterKeyConfigured,
+        maskedApiKey: metadata.maskedApiKey,
+        connectionStatus: "unavailable",
+        lifecycleStatus: "rotation_required",
+        accountMode: metadata.accountMode,
+        permissions: metadata.permissions,
+        lastVerifiedAt: metadata.lastVerifiedAt,
+        updatedAt: metadata.updatedAt,
+        message: "检测到旧版凭证格式；必须删除旧凭证并重新授权。",
+        ipWhitelistConfigured: metadata.permissions.ipRestricted,
         warnings: [],
       };
     }
@@ -212,11 +247,17 @@ export class RwaNeutralExecutionService {
     const body = record(input);
     assertOnlyKeys(body, ["apiKey", "apiSecret"]);
     const credentials = normalizeCredentials(body);
-    if (!this.store.masterKeyConfigured) throw new RwaNeutralExecutionError(503, "master_key_unavailable", this.store.masterKeyError ?? "主密钥不可用。");
+    if (!this.store.masterKeyConfigured) throw keyProviderUnavailable(this.store.masterKeyError);
     this.credentialLifecycleOverride = "validating";
     try {
       await this.withLock(async () => {
         const previous = await this.store.readCredentialMetadata();
+        if (previous?.requiresRotation) {
+          throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请先删除旧凭证并重新授权。");
+        }
+        await this.store.assertKeyProviderHealthy("pending-credential-validation").catch((error) => {
+          throw credentialStoreExecutionError(error);
+        });
         let access;
         try {
           access = await this.clientFactory(credentials).validateAccess();
@@ -229,7 +270,9 @@ export class RwaNeutralExecutionService {
             "新凭证属于不同交易账户；请先确认旧账户无订单/仓位并安全删除旧凭证，再绑定新账户。");
         }
         const verifiedAt = this.now();
-        await this.store.saveCredentials(credentials, access.permissions, access, verifiedAt);
+        await this.store.saveCredentials(credentials, access.permissions, access, verifiedAt).catch((error) => {
+          throw credentialStoreExecutionError(error);
+        });
         const state = await this.store.readState();
         state.credentialLifecycle = "active";
         state.credentialAlert = null;
@@ -321,6 +364,11 @@ export class RwaNeutralExecutionService {
       const state = await this.store.readState();
       const metadata = await this.store.readCredentialMetadata();
       if (metadata) assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
+      if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
+        const activeMetadata = await this.requireCredentialMetadata();
+        const client = await this.clientForNewRisk(state, activeMetadata);
+        await this.validateActiveAccess(client, activeMetadata.accountId, true, state);
+      }
       const next = { ...state.config };
       for (const key of ["globalExecutionEnabled", "strategyEnabled"] as const) {
         if (key in body) {
@@ -346,6 +394,11 @@ export class RwaNeutralExecutionService {
       const state = await this.store.readState();
       const metadata = await this.store.readCredentialMetadata();
       if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
+      if (!active) {
+        const activeMetadata = await this.requireCredentialMetadata();
+        const client = await this.clientForNewRisk(state, activeMetadata);
+        await this.validateActiveAccess(client, activeMetadata.accountId, true, state);
+      }
       state.config.killSwitchActive = active;
       if (active) {
         state.challenges = [];
@@ -432,8 +485,8 @@ export class RwaNeutralExecutionService {
       }
       const state = await this.store.readState();
       this.assertEntrySwitches(state.config);
-      const client = await this.client();
       const metadata = await this.requireCredentialMetadata();
+      const client = await this.clientForNewRisk(state, metadata);
       assertAccountId(accountId, metadata.accountId);
       await this.validateActiveAccess(client, accountId, true, state);
       const snapshot = await client.readPreflightSnapshot().catch((error) => { throw providerError(error, "Bybit 实时 preflight 读取失败。"); });
@@ -489,8 +542,10 @@ export class RwaNeutralExecutionService {
       const execution = newExecution(this.store.ownerUserId, accountId, this.strategyOrderPrefix, scopedIdempotencyKey, challengeId, this.now());
       state.executions.push(execution);
       await this.store.writeState(state);
-      const client = await this.client();
+      let client: RwaBybitTradingClient | null = null;
       try {
+        const metadata = await this.requireCredentialMetadata();
+        client = await this.clientForNewRisk(state, metadata);
         await this.validateActiveAccess(client, accountId, true, state);
         const realtime = await client.readPreflightSnapshot();
         assertAccountId(realtime.accountId, accountId);
@@ -519,6 +574,7 @@ export class RwaNeutralExecutionService {
           execution.errorCategory = category(error);
           execution.message = sanitizeRwaAutomationError(error);
           try {
+            if (!client) throw new Error("credential client unavailable");
             execution.state = "compensating";
             await this.persistExecution(state, execution);
             await client.cancelStrategyOrders(execution.orderLinkPrefix);
@@ -573,19 +629,39 @@ export class RwaNeutralExecutionService {
   }
 
   private async client() {
-    if (!this.store.masterKeyConfigured) throw new RwaNeutralExecutionError(503, "master_key_unavailable", this.store.masterKeyError ?? "主密钥不可用。");
+    if (!this.store.masterKeyConfigured) throw keyProviderUnavailable(this.store.masterKeyError);
     let credentials: RwaBybitCredentials;
     try {
       credentials = await this.store.loadCredentials();
     } catch (error) {
-      throw new RwaNeutralExecutionError(503, "credentials_unavailable", sanitizeRwaAutomationError(error));
+      throw credentialStoreExecutionError(error);
     }
     return this.clientFactory(credentials);
+  }
+
+  private async clientForNewRisk(
+    state: RwaAutomationStateData,
+    metadata: NonNullable<Awaited<ReturnType<RwaAutomationPersistentStore["readCredentialMetadata"]>>>,
+  ) {
+    try {
+      return await this.client();
+    } catch (error) {
+      await this.setCredentialUnsafeState(
+        state,
+        credentialFailureLifecycle(error),
+        metadata,
+        "凭证密钥 provider 不可用或凭证无法解密；已激活急停。请在交易所人工检查订单和仓位。",
+      );
+      throw error;
+    }
   }
 
   private async requireCredentialMetadata() {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credentials_unconfigured", "该 venue 尚未配置执行账户凭证。");
+    if (metadata.requiresRotation) {
+      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请删除旧凭证并重新授权。");
+    }
     return metadata;
   }
 
@@ -824,11 +900,30 @@ function assertAccountId(actual: string, expected: string) {
 }
 
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {
+  if (error instanceof CredentialStoreError && error.category === "credential_rotation_required") return "rotation_required";
+  if (error instanceof RwaNeutralExecutionError && error.category === "credential_rotation_required") return "rotation_required";
   if (error instanceof RwaBybitProviderError) {
     if (error.category === "provider_credential_expired") return "expired";
     if (error.category === "provider_credential_revoked" || error.category === "provider_permission_error") return "revoked";
   }
   return "invalid";
+}
+
+function keyProviderUnavailable(message: string | null) {
+  return new RwaNeutralExecutionError(
+    503,
+    "credential_key_provider_unavailable",
+    message ?? "凭证密钥 provider 不可用；已拒绝凭证操作。",
+  );
+}
+
+function credentialStoreExecutionError(error: unknown) {
+  if (error instanceof RwaNeutralExecutionError) return error;
+  if (error instanceof CredentialStoreError) {
+    const statusCode = error.category === "credential_rotation_required" ? 409 : 503;
+    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+  }
+  return new RwaNeutralExecutionError(503, "credentials_unavailable", sanitizeRwaAutomationError(error));
 }
 
 function providerError(error: unknown, fallback: string) {
@@ -838,7 +933,8 @@ function providerError(error: unknown, fallback: string) {
 }
 
 function category(error: unknown) {
-  return error instanceof RwaBybitProviderError ? error.category : "execution_failed";
+  if (error instanceof RwaNeutralExecutionError || error instanceof RwaBybitProviderError) return error.category;
+  return "execution_failed";
 }
 
 function normalizeCredentials(body: Record<string, unknown>): RwaBybitCredentials {

@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { access, chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
@@ -14,8 +14,18 @@ import type {
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
 import { defaultRwaExecutionConfig } from "./RwaNeutralExecutionTypes";
+import {
+  CredentialKeyProviderError,
+  RWA_CREDENTIAL_AAD_SCHEMA,
+  RWA_CREDENTIAL_ENVELOPE_VERSION,
+  canonicalCredentialAad,
+  credentialEnvironment,
+  type CredentialKeyContext,
+  type CredentialKeyProvider,
+  type WrappedCredentialDataKey,
+} from "./CredentialKeyProvider";
 
-type CredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
+type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
   nonce: string;
   tag: string;
@@ -28,6 +38,46 @@ type CredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   lastVerifiedAt: number;
   updatedAt: number;
 };
+
+type CredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
+  version: typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
+  algorithm: "AES-256-GCM";
+  provider: WrappedCredentialDataKey["provider"];
+  keyName: string;
+  wrapReference: string;
+  wrappedDek: string;
+  wrapBindingTag: string;
+  ciphertext: string;
+  nonce: string;
+  tag: string;
+  aadSchema: typeof RWA_CREDENTIAL_AAD_SCHEMA;
+  createdAt: number;
+  updatedAt: number;
+  maskedApiKey: string;
+  accountId: string;
+  accountFingerprint: string;
+  accountMode: RwaVenueAccountIdentity["accountMode"];
+  permissions: TPermissions;
+  lastVerifiedAt: number;
+};
+
+export type RwaCredentialMetadata<TPermissions extends RwaVenuePermissions = RwaBybitPermissions> = {
+  version: 1 | typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
+  requiresRotation: boolean;
+  maskedApiKey: string;
+  accountId: string;
+  accountFingerprint: string;
+  accountMode: RwaVenueAccountIdentity["accountMode"];
+  permissions: TPermissions;
+  lastVerifiedAt: number;
+  updatedAt: number;
+};
+
+export class CredentialStoreError extends Error {
+  constructor(readonly category: string, message: string) {
+    super(message);
+  }
+}
 
 type StoredChallenge = {
   id: string;
@@ -75,13 +125,12 @@ export class RwaAutomationPersistentStore<
   readonly userDomain: string;
   readonly venue: "bybit" | "bitget" | "binance" | "okx";
   readonly ownerUserId: string;
-  private readonly key: Buffer | null;
-  private readonly keyError: string | null;
+  private readonly keyProvider: CredentialKeyProvider;
 
   constructor(options: {
     userId: string;
     venue?: "bybit" | "bitget" | "binance" | "okx";
-    masterKey?: string;
+    keyProvider: CredentialKeyProvider;
     credentialPath?: string;
     statePath?: string;
   }) {
@@ -96,28 +145,27 @@ export class RwaAutomationPersistentStore<
     this.statePath = options.statePath
       ? resolve(options.statePath)
       : resolve(dataDir, `${this.userDomain}-${this.venue}-state.json`);
-    const parsed = parseMasterKey(options.masterKey ?? process.env.RWA_AUTOMATION_MASTER_KEY ?? "");
-    this.key = parsed.key;
-    this.keyError = parsed.error;
+    this.keyProvider = options.keyProvider;
   }
 
   get masterKeyConfigured() {
-    return this.key !== null;
+    return this.keyProvider.configured;
   }
 
   get masterKeyError() {
-    return this.keyError;
+    return this.keyProvider.configurationError;
   }
 
   async hasCredentials() {
     return access(this.credentialPath).then(() => true).catch(() => false);
   }
 
-  async readCredentialMetadata(): Promise<Omit<CredentialEnvelope<TPermissions>, "ciphertext" | "nonce" | "tag"> | null> {
-    const envelope = await this.readCredentialEnvelope();
+  async readCredentialMetadata(): Promise<RwaCredentialMetadata<TPermissions> | null> {
+    const envelope = await this.readRawCredentialEnvelope();
     if (!envelope) return null;
     return {
       version: envelope.version,
+      requiresRotation: envelope.version === 1,
       maskedApiKey: envelope.maskedApiKey,
       accountId: envelope.accountId,
       accountFingerprint: envelope.accountFingerprint,
@@ -134,45 +182,126 @@ export class RwaAutomationPersistentStore<
     identity: RwaVenueAccountIdentity,
     verifiedAt: number,
   ) {
-    const key = this.requireKey();
+    await this.assertKeyProviderHealthy(identity.accountId);
+    const previous = await this.readRawCredentialEnvelope();
+    if (previous?.version === 1) {
+      throw new CredentialStoreError(
+        "credential_rotation_required",
+        "检测到旧版凭证格式；必须先删除旧凭证并重新授权，在线服务不会自动迁移。",
+      );
+    }
+    const context = this.credentialContext(identity.accountId);
+    const dataKey = await this.keyProvider.createDataKey(context).catch(asCredentialStoreError);
     const nonce = randomBytes(12);
-    const cipher = createCipheriv("aes-256-gcm", key, nonce);
+    const cipher = createCipheriv("aes-256-gcm", dataKey.plaintextDek, nonce);
     const plaintext = Buffer.from(JSON.stringify(credentials), "utf8");
-    cipher.setAAD(this.credentialAad(identity.accountId));
-    const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-    const envelope: CredentialEnvelope<TPermissions> = {
-      version: 1,
-      nonce: nonce.toString("base64url"),
-      tag: cipher.getAuthTag().toString("base64url"),
-      ciphertext: ciphertext.toString("base64url"),
-      maskedApiKey: maskApiKey(credentials.apiKey),
-      accountId: identity.accountId,
-      accountFingerprint: identity.accountFingerprint,
-      accountMode: identity.accountMode,
-      permissions,
-      lastVerifiedAt: verifiedAt,
-      updatedAt: verifiedAt,
-    };
-    await atomicWriteJson(this.credentialPath, envelope);
+    try {
+      cipher.setAAD(canonicalCredentialAad(context));
+      const ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+      const envelope: CredentialEnvelope<TPermissions> = {
+        version: RWA_CREDENTIAL_ENVELOPE_VERSION,
+        algorithm: "AES-256-GCM",
+        provider: dataKey.provider,
+        keyName: dataKey.keyName,
+        wrapReference: dataKey.wrapReference,
+        wrappedDek: dataKey.wrappedDek,
+        wrapBindingTag: "",
+        nonce: nonce.toString("base64url"),
+        tag: cipher.getAuthTag().toString("base64url"),
+        ciphertext: ciphertext.toString("base64url"),
+        aadSchema: RWA_CREDENTIAL_AAD_SCHEMA,
+        createdAt: previous?.createdAt ?? verifiedAt,
+        updatedAt: verifiedAt,
+        maskedApiKey: maskApiKey(credentials.apiKey),
+        accountId: identity.accountId,
+        accountFingerprint: identity.accountFingerprint,
+        accountMode: identity.accountMode,
+        permissions,
+        lastVerifiedAt: verifiedAt,
+      };
+      envelope.wrapBindingTag = createWrapBindingTag(dataKey.plaintextDek, envelope);
+      await atomicWriteJson(this.credentialPath, envelope);
+      ciphertext.fill(0);
+    } finally {
+      plaintext.fill(0);
+      dataKey.plaintextDek.fill(0);
+    }
   }
 
   async loadCredentials(): Promise<TCredentials> {
-    const key = this.requireKey();
-    const envelope = await this.readCredentialEnvelope();
+    const envelope = await this.readRawCredentialEnvelope();
     if (!envelope) throw new Error("交易所 API 凭证尚未配置。");
+    if (envelope.version === 1) {
+      throw new CredentialStoreError(
+        "credential_rotation_required",
+        "检测到旧版凭证格式；必须删除旧凭证并重新授权。",
+      );
+    }
+    const context = this.credentialContext(envelope.accountId);
+    const dataKey = await this.keyProvider.unwrapDataKey(wrappedDataKey(envelope), context).catch(asCredentialStoreError);
+    let plaintext: Buffer | null = null;
     try {
-      const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(envelope.nonce, "base64url"));
-      decipher.setAAD(this.credentialAad(envelope.accountId));
+      assertWrapBinding(dataKey, envelope);
+      const decipher = createDecipheriv("aes-256-gcm", dataKey, Buffer.from(envelope.nonce, "base64url"));
+      decipher.setAAD(canonicalCredentialAad(context));
       decipher.setAuthTag(Buffer.from(envelope.tag, "base64url"));
-      const plaintext = Buffer.concat([
+      plaintext = Buffer.concat([
         decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
         decipher.final(),
       ]);
       const value = JSON.parse(plaintext.toString("utf8")) as Partial<TCredentials>;
       if (!value.apiKey || !value.apiSecret) throw new Error("invalid credential payload");
       return value as TCredentials;
-    } catch {
-      throw new Error("交易所 API 凭证无法解密；已拒绝继续使用。");
+    } catch (error) {
+      if (error instanceof CredentialStoreError) throw error;
+      throw new CredentialStoreError("credential_decryption_failed", "交易所 API 凭证无法解密；已拒绝继续使用。");
+    } finally {
+      plaintext?.fill(0);
+      dataKey.fill(0);
+    }
+  }
+
+  async rewrapCredentials() {
+    const envelope = await this.readRawCredentialEnvelope();
+    if (!envelope) throw new CredentialStoreError("credentials_unconfigured", "交易所 API 凭证尚未配置。");
+    if (envelope.version === 1) {
+      throw new CredentialStoreError("credential_rotation_required", "旧版凭证不允许在线重包裹。");
+    }
+    await this.assertKeyProviderHealthy(envelope.accountId);
+    const context = this.credentialContext(envelope.accountId);
+    const dataKey = await this.keyProvider.unwrapDataKey(wrappedDataKey(envelope), context).catch(asCredentialStoreError);
+    try {
+      assertWrapBinding(dataKey, envelope);
+      const rewrapped = await this.keyProvider.rewrapDataKey(wrappedDataKey(envelope), context).catch(asCredentialStoreError);
+      const nextEnvelope: CredentialEnvelope<TPermissions> = {
+        ...envelope,
+        provider: rewrapped.provider,
+        keyName: rewrapped.keyName,
+        wrapReference: rewrapped.wrapReference,
+        wrappedDek: rewrapped.wrappedDek,
+        wrapBindingTag: "",
+        updatedAt: Date.now(),
+      };
+      nextEnvelope.wrapBindingTag = createWrapBindingTag(dataKey, nextEnvelope);
+      await atomicWriteJson(this.credentialPath, nextEnvelope);
+    } finally {
+      dataKey.fill(0);
+    }
+  }
+
+  async assertKeyProviderHealthy(accountId: string) {
+    if (!this.keyProvider.configured) {
+      throw new CredentialStoreError(
+        "credential_key_provider_unavailable",
+        this.keyProvider.configurationError ?? "凭证密钥 provider 未配置；已拒绝凭证操作。",
+      );
+    }
+    const health = await this.keyProvider.healthCheck(this.credentialContext(accountId));
+    if (!health.ok) {
+      throw new CredentialStoreError(
+        health.category ?? "credential_key_provider_unavailable",
+        health.message ?? "凭证密钥 provider 不可用；已拒绝凭证操作。",
+      );
     }
   }
 
@@ -207,22 +336,27 @@ export class RwaAutomationPersistentStore<
     await atomicWriteJson(this.statePath, state);
   }
 
-  private requireKey() {
-    if (!this.key) throw new Error(this.keyError ?? "RWA_AUTOMATION_MASTER_KEY 未配置；已拒绝凭证操作。");
-    return this.key;
+  private credentialContext(accountId: string): CredentialKeyContext {
+    return {
+      userId: this.ownerUserId,
+      venue: this.venue,
+      accountId,
+      environment: credentialEnvironment(),
+      schemaVersion: RWA_CREDENTIAL_ENVELOPE_VERSION,
+    };
   }
 
-  private credentialAad(accountId: string) {
-    return Buffer.from(`rwa-automation:v1:${this.ownerUserId}:${this.venue}:${accountId}`, "utf8");
-  }
-
-  private async readCredentialEnvelope(): Promise<CredentialEnvelope<TPermissions> | null> {
+  private async readRawCredentialEnvelope(): Promise<CredentialEnvelope<TPermissions> | LegacyCredentialEnvelope<TPermissions> | null> {
     try {
-      const parsed = JSON.parse(await readFile(this.credentialPath, "utf8")) as CredentialEnvelope<TPermissions>;
+      const parsed = JSON.parse(await readFile(this.credentialPath, "utf8")) as CredentialEnvelope<TPermissions> | LegacyCredentialEnvelope<TPermissions>;
+      if (parsed.version === 1 && validLegacyEnvelope(parsed)) return parsed;
       if (
-        parsed.version !== 1 || !parsed.nonce || !parsed.tag || !parsed.ciphertext ||
+        parsed.version !== RWA_CREDENTIAL_ENVELOPE_VERSION || parsed.algorithm !== "AES-256-GCM" ||
+        !parsed.provider || !parsed.keyName || !parsed.wrapReference || !parsed.wrappedDek ||
+        !parsed.wrapBindingTag || !parsed.nonce || !parsed.tag || !parsed.ciphertext ||
+        parsed.aadSchema !== RWA_CREDENTIAL_AAD_SCHEMA ||
         !parsed.maskedApiKey || !parsed.accountId || !parsed.accountFingerprint || !parsed.accountMode ||
-        !parsed.permissions || !Number.isFinite(parsed.updatedAt)
+        !parsed.permissions || !Number.isFinite(parsed.createdAt) || !Number.isFinite(parsed.updatedAt)
       ) {
         throw new Error("invalid envelope");
       }
@@ -257,19 +391,69 @@ async function atomicWriteJson(path: string, value: unknown) {
   }
 }
 
-function parseMasterKey(raw: string): { key: Buffer | null; error: string | null } {
-  if (!raw) return { key: null, error: "RWA_AUTOMATION_MASTER_KEY 未配置；已拒绝凭证操作。" };
-  let key: Buffer;
+function validLegacyEnvelope<TPermissions extends RwaVenuePermissions>(
+  value: LegacyCredentialEnvelope<TPermissions>,
+) {
+  return Boolean(
+    value.nonce && value.tag && value.ciphertext && value.maskedApiKey && value.accountId &&
+    value.accountFingerprint && value.accountMode && value.permissions && Number.isFinite(value.updatedAt),
+  );
+}
+
+function wrappedDataKey<TPermissions extends RwaVenuePermissions>(envelope: CredentialEnvelope<TPermissions>) {
+  return {
+    provider: envelope.provider,
+    keyName: envelope.keyName,
+    wrapReference: envelope.wrapReference,
+    wrappedDek: envelope.wrappedDek,
+  } satisfies WrappedCredentialDataKey;
+}
+
+function createWrapBindingTag<TPermissions extends RwaVenuePermissions>(
+  dataKey: Buffer,
+  envelope: CredentialEnvelope<TPermissions>,
+) {
+  return createHmac("sha256", dataKey).update(wrapBindingPayload(envelope)).digest("base64url");
+}
+
+function assertWrapBinding<TPermissions extends RwaVenuePermissions>(
+  dataKey: Buffer,
+  envelope: CredentialEnvelope<TPermissions>,
+) {
+  const expected = Buffer.from(createWrapBindingTag(dataKey, envelope), "base64url");
+  const actual = Buffer.from(envelope.wrapBindingTag, "base64url");
   try {
-    if (/^[a-f0-9]{64}$/i.test(raw)) key = Buffer.from(raw, "hex");
-    else if (/^[A-Za-z0-9+/_=-]+$/.test(raw)) key = Buffer.from(raw, "base64url");
-    else return { key: null, error: "RWA_AUTOMATION_MASTER_KEY 格式无效；必须是 32 字节 hex/base64。" };
-  } catch {
-    return { key: null, error: "RWA_AUTOMATION_MASTER_KEY 格式无效；必须是 32 字节 hex/base64。" };
+    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) {
+      throw new CredentialStoreError(
+        "credential_key_identity_mismatch",
+        "凭证数据密钥版本绑定无效；已拒绝解密。",
+      );
+    }
+  } finally {
+    expected.fill(0);
+    actual.fill(0);
   }
-  return key.length === 32
-    ? { key, error: null }
-    : { key: null, error: "RWA_AUTOMATION_MASTER_KEY 长度无效；必须是 32 字节。" };
+}
+
+function wrapBindingPayload<TPermissions extends RwaVenuePermissions>(
+  envelope: CredentialEnvelope<TPermissions>,
+) {
+  return Buffer.from(JSON.stringify({
+    version: envelope.version,
+    algorithm: envelope.algorithm,
+    provider: envelope.provider,
+    keyName: envelope.keyName,
+    wrapReference: envelope.wrapReference,
+    wrappedDek: envelope.wrappedDek,
+    aadSchema: envelope.aadSchema,
+    accountId: envelope.accountId,
+  }), "utf8");
+}
+
+function asCredentialStoreError(error: unknown): never {
+  if (error instanceof CredentialStoreError) throw error;
+  if (error instanceof CredentialKeyProviderError) throw new CredentialStoreError(error.category, error.message);
+  throw new CredentialStoreError("credential_key_provider_unavailable", "凭证密钥 provider 不可用；已拒绝凭证操作。");
 }
 
 function maskApiKey(apiKey: string) {

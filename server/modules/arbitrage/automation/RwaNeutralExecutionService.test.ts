@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./RwaNeutralExecutionService";
 import type {
   RwaBybitTradingClient,
@@ -167,7 +168,7 @@ test("credential validation rejects withdraw permission and never persists the s
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-execution-permission-"));
   const store = new RwaAutomationPersistentStore({
     userId: "user-a",
-    masterKey: Buffer.alloc(32, 3).toString("base64url"),
+    keyProvider: new FakeCredentialKeyProvider(),
     credentialPath: join(directory, "credentials.enc.json"),
     statePath: join(directory, "state.json"),
   });
@@ -213,6 +214,58 @@ test("preflight and execute revalidate the selected account permissions", async 
   }
 });
 
+test("credential key provider failure blocks new-risk controls and provider writes", async () => {
+  const harness = await createHarness();
+  const executeHarness = await createHarness();
+  try {
+    harness.keyProvider.failCategory = "credential_key_provider_unavailable";
+    await assert.rejects(
+      harness.service.updateConfig({ accountId, strategyEnabled: true }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_key_provider_unavailable",
+    );
+    let state = await harness.store.readState();
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+
+    await assert.rejects(
+      harness.service.setKillSwitch(false, accountId),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_key_provider_unavailable",
+    );
+
+    state = await harness.store.readState();
+    state.config.globalExecutionEnabled = true;
+    state.config.strategyEnabled = true;
+    state.config.killSwitchActive = false;
+    await harness.store.writeState(state);
+    await assert.rejects(
+      harness.service.preflight(opportunity(true), accountId),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_key_provider_unavailable",
+    );
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.leverageWrites, 0);
+
+    const challenge = await executeHarness.service.preflight(opportunity(true), accountId);
+    executeHarness.keyProvider.failCategory = "credential_key_provider_unavailable";
+    const execution = await executeHarness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:kms-failure",
+    }) as any;
+    assert.equal(execution.state, "manual_intervention");
+    assert.equal(execution.errorCategory, "credential_key_provider_unavailable");
+    assert.equal(executeHarness.client.requests.length, 0);
+    assert.equal(executeHarness.client.leverageWrites, 0);
+  } finally {
+    await harness.cleanup();
+    await executeHarness.cleanup();
+  }
+});
+
 test("credential deletion is blocked while strategy exposure exists and succeeds after close-all", async () => {
   const harness = await createHarness();
   try {
@@ -254,7 +307,7 @@ test("invalid credentials refuse unsafe deletion and return manual intervention 
 
 test("failed credential rotation keeps the previous encrypted credential active", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-rotation-"));
-  const store = new RwaAutomationPersistentStore({ userId: "user-a", masterKey: Buffer.alloc(32, 6).toString("base64url"),
+  const store = new RwaAutomationPersistentStore({ userId: "user-a", keyProvider: new FakeCredentialKeyProvider(),
     credentialPath: join(directory, "credentials.enc.json"), statePath: join(directory, "state.json") });
   const validClient = new FakeBybitClient();
   const service = new RwaNeutralExecutionService(store, (credentials) => {
@@ -296,9 +349,10 @@ async function createHarness(options: {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-execution-"));
   const credentialPath = join(directory, "credentials.enc.json");
   const statePath = join(directory, "state.json");
+  const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore({
     userId: "user-a",
-    masterKey: Buffer.alloc(32, 9).toString("base64url"),
+    keyProvider,
     credentialPath,
     statePath,
   });
@@ -311,6 +365,7 @@ async function createHarness(options: {
   return {
     service,
     client,
+    keyProvider,
     store,
     statePath,
     now,

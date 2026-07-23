@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaBinanceAutomationConnector } from "./RwaBinanceAutomationConnector";
 import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
 import type {
@@ -291,19 +292,61 @@ test("Binance rejects kill switches, account mismatch, unknown fields, and non-X
   }
 });
 
+test("Binance KMS failure blocks execute and restart recovery without provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-kms-failure-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflight(opportunity(), accountId, "manual_entry");
+    harness.keyProvider.failCategory = "credential_key_provider_unavailable";
+
+    const execution = await harness.current.execute(executeInput(accountId, challenge, "binance:kms-failure:1")) as any;
+    assert.equal(execution.state, "manual_intervention");
+    assert.equal(execution.errorCategory, "credential_key_provider_unavailable");
+    assert.equal(client.writeCount, 0);
+    let state = await harness.store.readState();
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+
+    harness.keyProvider.failCategory = null;
+    state.executions = [createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: "rwa-recovery-test",
+      idempotencyKey: "binance:recovery:kms-failure",
+      challengeId: "recovery-challenge",
+      now,
+    })];
+    await harness.store.writeState(state);
+    harness.keyProvider.failCategory = "credential_key_provider_permission_denied";
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+    state = await harness.store.readState();
+    assert.equal(state.executions[0]?.state, "manual_intervention");
+    assert.equal(state.executions[0]?.errorCategory, "credential_key_provider_unavailable");
+    assert.equal(state.config.killSwitchActive, true);
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
 }
 
 function serviceHarness(directory: string, userId: string, client: FakeBinanceClient) {
+  const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
     userId,
     venue: "binance",
-    masterKey,
+    keyProvider,
     credentialPath: join(directory, `${userId}-credentials.json`),
     statePath: join(directory, `${userId}-state.json`),
   });
-  return { current: new RwaBinanceAutomationService(store, () => client, () => now, () => false), store };
+  return { current: new RwaBinanceAutomationService(store, () => client, () => now, () => false), store, keyProvider };
 }
 
 async function activate(current: RwaBinanceAutomationService) {

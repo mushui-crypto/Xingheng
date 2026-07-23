@@ -1,4 +1,10 @@
 import { isAddress } from "ethers";
+import { RWA_GCP_KMS_KEY_NAME } from "../modules/arbitrage/automation/CredentialKeyProvider";
+import {
+  RWA_GCP_WIF_ADC_PATH,
+  isCanonicalGcpWifAudience,
+  validateGcpWifCredentialFiles,
+} from "../modules/arbitrage/automation/GcpWifCredentialConfig";
 
 export type RuntimeConfig = {
   port: number;
@@ -110,6 +116,10 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
     ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
     ["BSC_TESTNET_DEPOSIT_MNEMONIC", process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? ""],
+    ["RWA_CREDENTIAL_KEY_PROVIDER", process.env.RWA_CREDENTIAL_KEY_PROVIDER?.trim() ?? ""],
+    ["RWA_GCP_KMS_KEY_NAME", process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? ""],
+    ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
+    ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
@@ -182,4 +192,22 @@ function validateProductionConfig(config: RuntimeConfig) {
       throw new Error("STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例的告警收件邮箱。");
     }
   }
+  if (process.env.RWA_AUTOMATION_MASTER_KEY?.trim()) {
+    throw new Error("RWA_AUTOMATION_MASTER_KEY 已停用；生产环境禁止回退本地主密钥。");
+  }
+  if (process.env.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms") {
+    throw new Error("生产环境 RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。");
+  }
+  if (process.env.RWA_GCP_KMS_KEY_NAME !== RWA_GCP_KMS_KEY_NAME) {
+    throw new Error("生产环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey 完整资源名。");
+  }
+  const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
+  if (!isCanonicalGcpWifAudience(wifAudience)) {
+    throw new Error("生产环境 RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
+  }
+  const adcPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
+  if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
+    throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
+  }
+  validateGcpWifCredentialFiles({ adcPath, expectedAudience: wifAudience });
 }

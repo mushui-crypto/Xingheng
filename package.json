@@ -56,6 +56,7 @@
     "research:structure-breakout:1m": "tsx scripts/research-structure-breakout-1m-execution-v3.ts"
   },
   "dependencies": {
+    "@google-cloud/kms": "^5.7.0",
     "@nktkas/hyperliquid": "^0.33.1",
     "cors": "^2.8.6",
     "dotenv": "^17.4.2",

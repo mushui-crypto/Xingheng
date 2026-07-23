@@ -25,6 +25,10 @@ const baseEnvironment = {
   BSC_TESTNET_TOKEN_ADDRESS: "0x1111111111111111111111111111111111111111",
   STRATEGY_EMAIL_ALERTS_ENABLED: "false",
   STRATEGY_ALERT_EMAIL_TO: "ops@stellarx.test",
+  RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+  RWA_GCP_KMS_KEY_NAME: "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials",
+  RWA_GCP_WIF_AUDIENCE: "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/xingheng-rwa-prod/providers/vultr-x509",
+  GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp-wif/adc.json",
 };
 
 const cases = [
@@ -41,6 +45,11 @@ const cases = [
   ["placeholder token address", { BSC_TESTNET_TOKEN_ADDRESS: "REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS" }, "BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零"],
   ["zero token address", { BSC_TESTNET_TOKEN_ADDRESS: "0x0000000000000000000000000000000000000000" }, "BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零"],
   ["enabled strategy email alert without recipient", { STRATEGY_EMAIL_ALERTS_ENABLED: "true", STRATEGY_ALERT_EMAIL_TO: "ops@example.invalid" }, "STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例"],
+  ["local RWA master key", { RWA_AUTOMATION_MASTER_KEY: "11".repeat(32) }, "RWA_AUTOMATION_MASTER_KEY 已停用"],
+  ["fake credential provider", { RWA_CREDENTIAL_KEY_PROVIDER: "fake" }, "RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms"],
+  ["wrong GCP KMS key", { RWA_GCP_KMS_KEY_NAME: "projects/other/locations/global/keyRings/other/cryptoKeys/other" }, "RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey"],
+  ["untrusted WIF audience", { RWA_GCP_WIF_AUDIENCE: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/other/providers/other" }, "RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider"],
+  ["unsafe ADC path", { GOOGLE_APPLICATION_CREDENTIALS: "/app/service-account.json" }, "GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC"],
 ];
 
 for (const [name, overrides, expected] of cases) {

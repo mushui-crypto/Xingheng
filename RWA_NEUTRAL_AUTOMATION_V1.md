@@ -1,8 +1,8 @@
 # RWA 中性自动套利 V1 执行契约
 
-更新时间：2026-07-23
+更新时间：2026-07-24
 
-当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产仍未配置凭证或主加密密钥，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
+当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产仍未挂载 X.509 WIF/ADC 身份或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
 
@@ -47,7 +47,7 @@
 - 每个用户使用自己的交易所专用子账户；Bybit 优先使用 UTA 统一账户。永续侧不与其他交易共享保证金。
 - Phase A/B 使用独立只读 Key；受控下单阶段使用另一组仅含读取、现货交易和合约交易权限的 Key。
 - API Key 必须禁止提现。Binance 真实执行还必须启用固定 IP 白名单，且 Binance 返回的 `ipList` 必须与服务端 `RWA_BINANCE_ALLOWED_EGRESS_IPS` 完全一致；配置缺失、无限制、通配、CIDR、无法确认或集合不匹配时均不得 active/preflight/execute。Bybit 既有 IP 口径本轮不变。需要密钥轮换、权限核对和安全解绑流程。
-- 凭证仅放生产专用 secret store，或 root-only、只读挂载的生产 Secret 文件；不得进入 Git、SQLite、普通环境导出、日志、接口响应、浏览器、localStorage 或 IndexedDB。
+- 交易所凭证正文只允许写入 Envelope V2 密文文件；包裹 DEK 的 KMS 身份材料必须使用 root-owned `0400` 只读 secret mount。明文凭证、DEK、WIF 证书私钥不得进入 Git、SQLite、环境变量、镜像、日志、接口响应、浏览器、localStorage 或 IndexedDB。
 - 前端不得获取 secret，不得直接访问交易所私有 API，也不得绕过后端 execution gate。
 
 ## 4. 资金方案
@@ -357,10 +357,22 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 
 ### 凭证文件与环境变量
 
-- `RWA_AUTOMATION_MASTER_KEY`：32 字节 hex/base64 主密钥，只能来自生产 secret/env；缺失或格式错误时凭证读写 fail-closed。
-- `RWA_AUTOMATION_DATA_DIR`：按不可逆用户域 + venue 分隔的凭证/状态目录；凭证文件包含版本、nonce、tag、ciphertext，原子替换并强制 `0600`。
+- `RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms`：生产唯一允许的凭证密钥 provider；测试 fake provider 只能由测试代码显式注入，生产环境不可选择。
+- `RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials`：固定 Google Cloud KMS CryptoKey 完整资源名。生产身份只使用 X.509 Workload Identity Federation/ADC，不创建或接受长期 Service Account JSON Key。
+- `RWA_GCP_WIF_AUDIENCE`：服务端配置的唯一受信 X.509 WIF provider 完整 audience，必须与 ADC 精确一致。
+- `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；`adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 root-owned `0400`。
+- `RWA_AUTOMATION_MASTER_KEY` 已停用。生产若发现该变量、非 GCP provider、错误 CryptoKey 或不安全 ADC 路径，启动配置校验直接失败，不允许本地主密钥或明文降级。
+- `RWA_AUTOMATION_DATA_DIR`：按不可逆用户域 + venue 分隔的凭证/状态目录。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
 - `RWA_AUTOMATION_SERVER_KILL_SWITCH`：服务端全局急停，只有显式设为 `false` 才允许新增风险；用户级开关不能覆盖它。
 - `RWA_BINANCE_ALLOWED_EGRESS_IPS`：Binance 真实执行允许的服务端固定出口 IPv4，逗号分隔；必须与 Binance 返回的 API Key `ipList` 完全一致。缺失、非法、通配、CIDR 或集合不匹配均 fail-closed，具体 IP 不进入接口响应或凭证元数据。
+
+Envelope V2 的本地 AAD canonical 绑定 `userId + venue + accountId + environment + schemaVersion`；发送给 GCP KMS 的 additional authenticated data 只包含不可逆用户域和账户域，不发送邮箱或明文用户标识。读取、轮换、开启执行、解除急停、preflight 与 execute 均需重新解密或验证 provider，KMS 超时、权限撤销、key disabled、位置错误、ADC/证书失效或 AAD 不一致时全部 fail-closed。凭证正文与 DEK 只在单次调用内存中使用并尽力清零，不跨请求缓存。
+
+GCP KMS Encrypt 必须提交 plaintext 与 additional authenticated data 的 CRC32C，并验证两个服务端 verification flag、返回 ciphertext CRC32C 和合法 CryptoKeyVersion；Decrypt 必须提交 ciphertext 与 additional authenticated data 的 CRC32C，并验证返回 plaintext CRC32C。任一字段缺失、为 false 或不匹配均返回受控错误并拒绝使用结果。
+
+凭证轮换必须先验证候选凭证，再以新随机 DEK 原子替换旧 envelope；失败保留旧有效 envelope。KMS key version 迁移使用 DEK rewrap，只替换 `wrappedDek/wrapReference/wrapBindingTag`，不重新加密凭证正文。`wrapReference` 必须严格属于冻结 CryptoKey 的合法 version，并与 `wrappedDek` 一起受 DEK-HMAC 完整性绑定；篡改必须 fail-closed。旧 V1 本地主密钥文件只能被识别为 `rotation_required`，在线服务不解密、不迁移、不覆盖；当前无生产真实凭证，后续如发现 V1 只能走冻结的离线处置流程。
+
+当前 Compose 尚未为 `/app/rwa-automation-data` 配置独立持久卷，也未纳入凭证密文/状态文件的备份恢复流程；这是安全整改第 4 项的明确阻塞。在该项完成并独立验收前，不得把本实现作为生产真实执行已就绪的依据，也不得录入真实交易所凭证。
 
 生产或本地均不得在聊天、测试 fixture、日志或接口响应中填入真实 Secret。专项测试只允许假 provider，禁止触发 Mainnet 订单。
 

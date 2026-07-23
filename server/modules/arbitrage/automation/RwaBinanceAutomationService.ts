@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import {
+  CredentialStoreError,
   RwaAutomationPersistentStore,
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
@@ -67,7 +68,22 @@ export class RwaBinanceAutomationService {
       const state = await this.store.readState();
       const pending = state.executions.filter((item) => executionStates.has(item.state));
       if (!pending.length) return;
-      const client = await this.client();
+      let client: RwaBinanceClient;
+      try {
+        client = await this.client();
+      } catch {
+        for (const execution of pending) {
+          execution.state = "manual_intervention";
+          execution.errorCategory = "credential_key_provider_unavailable";
+          execution.message = "凭证无法解密，系统不能自动退出；请在 Binance 人工检查订单和仓位。";
+          execution.updatedAt = this.now();
+        }
+        state.config.killSwitchActive = true;
+        state.config.strategyEnabled = false;
+        state.config.globalExecutionEnabled = false;
+        await this.store.writeState(state);
+        return;
+      }
       for (const execution of pending) {
         try {
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
@@ -121,6 +137,16 @@ export class RwaBinanceAutomationService {
         message: this.store.masterKeyError,
       });
     }
+    if (metadata.requiresRotation) {
+      return this.status({
+        metadata,
+        stored: true,
+        connectionStatus: "unavailable",
+        lifecycleStatus: "rotation_required",
+        message: "检测到旧版凭证格式；必须删除旧凭证并重新授权。",
+        ipWhitelistConfigured: metadata.permissions.ipRestricted,
+      });
+    }
     if (!this.store.masterKeyConfigured) {
       return this.status({
         metadata,
@@ -171,11 +197,17 @@ export class RwaBinanceAutomationService {
 
   async putCredentials(input: RwaBinanceCredentials) {
     if (!this.store.masterKeyConfigured) {
-      throw new RwaNeutralExecutionError(503, "master_key_unavailable", this.store.masterKeyError ?? "主密钥不可用。");
+      throw keyProviderUnavailable(this.store.masterKeyError);
     }
     this.credentialLifecycleOverride = "validating";
     try {
       const previous = await this.store.readCredentialMetadata();
+      if (previous?.requiresRotation) {
+        throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请先删除旧凭证并重新授权。");
+      }
+      await this.store.assertKeyProviderHealthy("pending-credential-validation").catch((error) => {
+        throw credentialStoreExecutionError(error);
+      });
       const access = await this.clientFactory(input).validateAccess().catch((error) => {
         throw providerError(error, "Binance 凭证校验失败。");
       });
@@ -188,7 +220,9 @@ export class RwaBinanceAutomationService {
         );
       }
       const verifiedAt = this.now();
-      await this.store.saveCredentials(input, access.permissions, access, verifiedAt);
+      await this.store.saveCredentials(input, access.permissions, access, verifiedAt).catch((error) => {
+        throw credentialStoreExecutionError(error);
+      });
       const state = await this.store.readState();
       state.credentialLifecycle = "active";
       state.credentialAlert = null;
@@ -298,7 +332,7 @@ export class RwaBinanceAutomationService {
     if (metadata) assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
     if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
       const activeMetadata = await this.requireMetadata();
-      await this.validateActiveAccess(await this.client(), activeMetadata.accountId, state);
+      await this.validateActiveAccess(await this.clientForNewRisk(state, activeMetadata), activeMetadata.accountId, state);
     }
     const next = { ...state.config };
     if ("globalExecutionEnabled" in body) next.globalExecutionEnabled = booleanField(body.globalExecutionEnabled, "globalExecutionEnabled");
@@ -320,7 +354,7 @@ export class RwaBinanceAutomationService {
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
     if (!active) {
       const activeMetadata = await this.requireMetadata();
-      await this.validateActiveAccess(await this.client(), activeMetadata.accountId, state);
+      await this.validateActiveAccess(await this.clientForNewRisk(state, activeMetadata), activeMetadata.accountId, state);
     }
     state.config.killSwitchActive = active;
     if (active) {
@@ -421,7 +455,7 @@ export class RwaBinanceAutomationService {
           { productAvailability },
         );
       }
-      const client = await this.client();
+      const client = await this.clientForNewRisk(state, metadata);
       await this.validateActiveAccess(client, accountId, state);
       const snapshot = await client.readPreflightSnapshot()
         .catch((error) => { throw providerError(error, "Binance 实时 preflight 读取失败。"); });
@@ -495,7 +529,8 @@ export class RwaBinanceAutomationService {
       await this.store.writeState(state);
       let client: RwaBinanceClient | null = null;
       try {
-        client = await this.client();
+        const metadata = await this.requireMetadata();
+        client = await this.clientForNewRisk(state, metadata);
         await this.validateActiveAccess(client, accountId, state);
         const realtime = await client.readPreflightSnapshot();
         assertAccountId(realtime.accountId, accountId);
@@ -591,18 +626,35 @@ export class RwaBinanceAutomationService {
 
   private async client(): Promise<RwaBinanceClient> {
     if (!this.store.masterKeyConfigured) {
-      throw new RwaNeutralExecutionError(503, "master_key_unavailable", this.store.masterKeyError ?? "主密钥不可用。");
+      throw keyProviderUnavailable(this.store.masterKeyError);
     }
     try {
       return this.clientFactory(await this.store.loadCredentials());
-    } catch {
-      throw new RwaNeutralExecutionError(503, "credential_unavailable", "Binance API 凭证不可用；已拒绝私有请求。");
+    } catch (error) {
+      throw credentialStoreExecutionError(error);
+    }
+  }
+
+  private async clientForNewRisk(state: RwaAutomationStateData, metadata: BinanceCredentialMetadata) {
+    try {
+      return await this.client();
+    } catch (error) {
+      await this.freezeNewRisk(
+        state,
+        credentialFailureLifecycle(error),
+        metadata,
+        "凭证密钥 provider 不可用或凭证无法解密；已激活急停。请在 Binance 人工检查订单和仓位。",
+      );
+      throw error;
     }
   }
 
   private async requireMetadata() {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credential_not_configured", "Binance API 凭证尚未配置。");
+    if (metadata.requiresRotation) {
+      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请删除旧凭证并重新授权。");
+    }
     return metadata;
   }
 
@@ -865,10 +917,29 @@ function permissionsValid(value: RwaBinancePermissions) {
 }
 
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {
+  if (error instanceof CredentialStoreError && error.category === "credential_rotation_required") return "rotation_required";
+  if (error instanceof RwaNeutralExecutionError && error.category === "credential_rotation_required") return "rotation_required";
   if (error instanceof RwaBinanceProviderError && ["provider_credential_invalid", "provider_permission_error"].includes(error.category)) {
     return "revoked";
   }
   return "invalid";
+}
+
+function keyProviderUnavailable(message: string | null) {
+  return new RwaNeutralExecutionError(
+    503,
+    "credential_key_provider_unavailable",
+    message ?? "凭证密钥 provider 不可用；已拒绝凭证操作。",
+  );
+}
+
+function credentialStoreExecutionError(error: unknown) {
+  if (error instanceof RwaNeutralExecutionError) return error;
+  if (error instanceof CredentialStoreError) {
+    const statusCode = error.category === "credential_rotation_required" ? 409 : 503;
+    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+  }
+  return new RwaNeutralExecutionError(503, "credential_unavailable", "Binance API 凭证不可用；已拒绝私有请求。");
 }
 
 function providerError(error: unknown, fallback: string) {

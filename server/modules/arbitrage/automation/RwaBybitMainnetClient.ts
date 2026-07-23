@@ -317,7 +317,7 @@ export class RwaBybitProviderError extends Error {
 
 function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
   if (request.symbol !== RWA_SPOT_SYMBOL || !["spot", "linear"].includes(request.category)) {
-    throw new Error("真实执行只允许 Bybit XAUTUSDT 白名单双腿。");
+    throw new Error("真实执行只允许 Bybit XAUTUSDT 白名单现货与永续对冲组合。");
   }
   if (!(request.quantityXaut > 0 && request.quantityXaut <= 0.1) || !(request.limitPrice > 0)) {
     throw new Error("真实执行订单参数超出白名单。");

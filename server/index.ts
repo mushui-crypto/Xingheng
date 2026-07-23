@@ -28,6 +28,7 @@ import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboar
 import { RwaBybitReadOnlyConnector } from "./modules/arbitrage/automation/RwaBybitReadOnlyConnector";
 import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaNeutralAutomationService";
 import { RwaAutomationPersistentStore } from "./modules/arbitrage/automation/RwaAutomationPersistentStore";
+import { GcpKmsCredentialKeyProvider } from "./modules/arbitrage/automation/GcpKmsCredentialKeyProvider";
 import { RwaBybitMainnetClient } from "./modules/arbitrage/automation/RwaBybitMainnetClient";
 import { RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
 import { RwaBybitAutomationConnector } from "./modules/arbitrage/automation/RwaBybitAutomationConnector";
@@ -60,6 +61,7 @@ import type { MarketSymbol, MarketTick } from "./types";
 dotenv.config();
 
 const config = loadRuntimeConfig();
+const rwaCredentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const { port } = config;
 const app = express();
 if (process.env.TRUST_PROXY === "true") {
@@ -139,14 +141,18 @@ registerArbitrageRoutes(
   new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
   new RwaAutomationControlService(arbitrageDashboard, (userId) => {
     const rwaExecution = new RwaNeutralExecutionService(
-      new RwaAutomationPersistentStore({ userId, venue: "bybit" }),
+      new RwaAutomationPersistentStore({ userId, venue: "bybit", keyProvider: rwaCredentialKeyProvider }),
       (credentials) => new RwaBybitMainnetClient(credentials),
     );
     void rwaExecution.initialize().catch(() => {
       // Fail closed for this user's account without exposing provider details.
     });
     const binance = new RwaBinanceAutomationService(
-      new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({ userId, venue: "binance" }),
+      new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+        userId,
+        venue: "binance",
+        keyProvider: rwaCredentialKeyProvider,
+      }),
       (credentials) => new RwaBinanceMainnetClient(credentials),
     );
     void binance.initialize().catch(() => {

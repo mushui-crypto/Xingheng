@@ -29,6 +29,42 @@ Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由
 的路径回退到 `index.html`。Web 容器只接收 `DOMAIN`；管理员密码、私钥和助记词
 仅进入 API 容器。所有手工 Compose 命令都必须带 `--env-file .env.production`。
 
+## RWA 自动套利凭证 KMS
+
+RWA 交易所凭证使用 Google Cloud KMS Envelope V2。生产只接受以下 provider 与 CryptoKey；
+不得配置 `RWA_AUTOMATION_MASTER_KEY`，不得使用 Service Account JSON Key，也不得在 API
+同机配置可降级的本地主密钥：
+
+```bash
+RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms
+RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
+RWA_GCP_WIF_AUDIENCE=//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL/providers/PROVIDER
+GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json
+RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data
+```
+
+Vultr 主机通过 X.509 Workload Identity Federation 获取 ADC 短期身份。`adc.json`、证书配置、
+证书和对应私钥必须由宿主机 root 管理，以 `0400` 只读 secret mount 提供给 API；不得写入
+`.env.production`、Compose 配置正文、镜像或仓库。ADC 必须是 `external_account` 配置且不得
+内嵌 `private_key`。GCP IAM 仅授予该 workload identity 对上述单一 CryptoKey 的
+`roles/cloudkms.cryptoKeyEncrypterDecrypter`，不得授予项目级管理、密钥创建或销毁权限。
+
+ADC audience 必须与服务端 `RWA_GCP_WIF_AUDIENCE` 精确一致，subject token type 固定为 mTLS，
+token URL 固定为 Google STS。`adc.json`、`certificate_config.json`、证书、私钥和 trust chain
+均必须位于 `/run/secrets/gcp-wif` 的真实路径内；启动和每次 KMS 使用前都会执行
+`lstat + realpath + stat`，拒绝 symlink、非 regular file、非 root owner 或非 `0400` 权限。
+实际 project number、pool 与 provider 尚未写入示例，部署前必须由已创建的 WIF 资源补齐。
+
+KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不匹配时，凭证新增、读取、
+轮换和所有新增风险动作均 fail-closed；公开看板继续可用。若存在未完成执行且凭证无法解密，
+系统进入 `manual_intervention` 并要求用户在对应交易所人工核对订单和仓位，不得声称能够自动退出。
+
+当前 `compose.yaml` 尚未挂载上述 WIF secret，也未给 `/app/rwa-automation-data` 配置独立持久卷
+和备份恢复。二者属于后续安全整改，不在本次 KMS 代码实施范围；完成并独立验收前，禁止在
+生产录入真实交易所凭证或解除真实执行急停。API 镜像当前以非 root `node` 用户运行；后续部署
+必须设计 root 控制且仅向该进程授予读取能力的 secret handoff，不能把材料改成 `0444`，也不能
+让 API 改以 root 运行。不得为了临时启动把凭证目录放入容器可丢失层。
+
 ## Hyperliquid Testnet 真实交易运维
 
 `/app/trade` 第一阶段固定 Hyperliquid Testnet。平台后端不保存用户 API wallet 私钥、
