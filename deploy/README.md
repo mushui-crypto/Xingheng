@@ -44,26 +44,62 @@ RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data
 ```
 
 Vultr 主机通过 X.509 Workload Identity Federation 获取 ADC 短期身份。`adc.json`、证书配置、
-证书和对应私钥必须由宿主机 root 管理，以 `0400` 只读 secret mount 提供给 API；不得写入
-`.env.production`、Compose 配置正文、镜像或仓库。ADC 必须是 `external_account` 配置且不得
-内嵌 `private_key`。GCP IAM 仅授予该 workload identity 对上述单一 CryptoKey 的
+证书和对应私钥必须放在宿主机 tmpfs `/run/xingheng/gcp-wif`。API 与宿主文件固定使用专用
+UID/GID `20001:20001`；目录权限为 `0700`，所有身份文件权限为 `0400`。Compose 将整个目录
+只读 bind 到容器 `/run/secrets/gcp-wif`，不得写入 `.env.production`、Compose 配置正文、
+镜像或仓库。ADC 必须是 `external_account` 配置且不得内嵌 `private_key`。GCP IAM 仅授予
+该 workload identity 对上述单一 CryptoKey 的
 `roles/cloudkms.cryptoKeyEncrypterDecrypter`，不得授予项目级管理、密钥创建或销毁权限。
 
 ADC audience 必须与服务端 `RWA_GCP_WIF_AUDIENCE` 精确一致，subject token type 固定为 mTLS，
 token URL 固定为 Google STS。`adc.json`、`certificate_config.json`、证书、私钥和 trust chain
 均必须位于 `/run/secrets/gcp-wif` 的真实路径内；启动和每次 KMS 使用前都会执行
-`lstat + realpath + stat`，拒绝 symlink、非 regular file、非 root owner 或非 `0400` 权限。
+`lstat + realpath + stat`，拒绝 symlink、非 regular file、非 UID `20001` owner 或非 `0400`
+权限；根目录必须为 UID `20001` owner 且权限为 `0700`。API 固定以 `20001:20001` 非 root
+身份运行，并拒绝 rootless Docker、user namespace remap、非 tmpfs 来源、可写挂载和可写子挂载。
 实际 project number、pool 与 provider 尚未写入示例，部署前必须由已创建的 WIF 资源补齐。
 
 KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不匹配时，凭证新增、读取、
 轮换和所有新增风险动作均 fail-closed；公开看板继续可用。若存在未完成执行且凭证无法解密，
 系统进入 `manual_intervention` 并要求用户在对应交易所人工核对订单和仓位，不得声称能够自动退出。
 
-当前 `compose.yaml` 尚未挂载上述 WIF secret，也未给 `/app/rwa-automation-data` 配置独立持久卷
-和备份恢复。二者属于后续安全整改，不在本次 KMS 代码实施范围；完成并独立验收前，禁止在
-生产录入真实交易所凭证或解除真实执行急停。API 镜像当前以非 root `node` 用户运行；后续部署
-必须设计 root 控制且仅向该进程授予读取能力的 secret handoff，不能把材料改成 `0444`，也不能
-让 API 改以 root 运行。不得为了临时启动把凭证目录放入容器可丢失层。
+宿主机部署前必须先确认 `/run` 为 tmpfs，再由 root 创建并注入身份材料；Compose 不会自动创建
+宿主目录：
+
+```bash
+findmnt -T /run/xingheng/gcp-wif -o FSTYPE,TARGET
+install -d -o 20001 -g 20001 -m 0700 /run/xingheng/gcp-wif
+```
+
+身份文件先在受限临时位置完整生成并校验，再安装为 `20001:20001 / 0400`。日常叶证书轮换使用
+版本化 cert/key 文件：先写入并 `fsync` 新文件，再让新的 certificate config 同时指向它们，
+最后在同一目录原子替换 `certificate_config.json`。旧 cert/key 至少保留两个 access-token
+生命周期后再删除。ADC audience/provider 或 trust chain 变化使用受控 API 重启，不承诺单实例
+零中断。吊销后立即保持服务端急停，并删除 tmpfs 中对应材料；宿主重启会清空 `/run`，必须由
+受控部署流程重新注入后才能启动 API。Google Auth 会在 token 刷新时持续读取这些文件，不能在
+启动后撤掉挂载。
+
+WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利数据备份。当前 `compose.yaml` 已完成
+只读 WIF 目录挂载，但 `/app/rwa-automation-data` 尚未配置独立持久卷和备份恢复，仍是安全整改
+第 4 项阻塞。完成并独立验收前，禁止在生产录入真实交易所凭证或解除真实执行急停。
+
+首次从旧 UID `1000` 切换到 `20001` 时，现有 `sqlite_data`、`strategy_data` 和
+`sqlite_backups` 卷不会自动改 owner。部署窗口必须先用旧 API 完成在线备份并停止 API，
+再用新镜像执行一次受控的 root 运维容器迁移；生产 API 本身始终不以 root 运行：
+
+```bash
+./scripts/backup.sh
+docker compose --env-file .env.production build api strategy-history
+docker compose --env-file .env.production stop api
+docker compose --env-file .env.production run --rm --no-deps --user 0:0 --entrypoint sh api -c \
+  'chown -R 20001:20001 /app/data /app/strategy-data /backups'
+docker compose --env-file .env.production up -d api web
+./scripts/smoke.sh "https://你的域名"
+```
+
+若必须回滚到仍使用旧 `node` UID `1000` 的镜像，先停止 API，并以同样的受控运维容器将这
+三个卷恢复为 `1000:1000`，再启动旧镜像。任何 ownership 迁移前后都应核对 SQLite 备份
+完整性；不得通过放宽目录为全员可写来规避迁移。
 
 ## Hyperliquid Testnet 真实交易运维
 

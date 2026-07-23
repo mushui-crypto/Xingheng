@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { chmod, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, chown, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,11 @@ import {
   type CredentialKeyContext,
 } from "./CredentialKeyProvider";
 import { GcpKmsCredentialKeyProvider, crc32c } from "./GcpKmsCredentialKeyProvider";
+import {
+  RWA_AUTOMATION_RUNTIME_GID,
+  RWA_AUTOMATION_RUNTIME_UID,
+  validateGcpWifRuntimeBoundary,
+} from "./GcpWifCredentialConfig";
 
 const context: CredentialKeyContext = {
   userId: "user-a",
@@ -87,6 +92,7 @@ test("GCP KMS adapter rejects service-account JSON and local master-key fallback
       wifAudience: testWifAudience,
       secretRoot: "/not-read-root",
       expectedOwnerUid: process.getuid?.() ?? 0,
+      expectedOwnerGid: process.getgid?.() ?? 0,
       client: new FakeKmsClient() as never,
     });
     assert.equal(provider.configured, false);
@@ -107,6 +113,7 @@ test("GCP KMS adapter accepts only the frozen production CryptoKey name", () => 
       wifAudience: testWifAudience,
       secretRoot: "/not-read-root",
       expectedOwnerUid: process.getuid?.() ?? 0,
+      expectedOwnerGid: process.getgid?.() ?? 0,
       client: new FakeKmsClient() as never,
     });
     assert.equal(provider.configured, false);
@@ -221,6 +228,138 @@ test("GCP KMS adapter rejects symlinked or over-permissive WIF identity files", 
   }
 });
 
+test("GCP KMS adapter requires a private 0700 secret root", async () => {
+  const fixture = await createFixture();
+  try {
+    await chmod(fixture.secretRoot, 0o755);
+    await assert.rejects(
+      fixture.provider.createDataKey(context),
+      hasCategory("credential_key_provider_auth_rejected"),
+    );
+    assert.equal(fixture.client.encryptCalls, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("GCP KMS adapter rejects a mismatched group owner for the secret root and every identity file", async () => {
+  const wrongGid = alternateGroupId();
+  for (const pathName of [
+    "secretRoot",
+    "adcPath",
+    "certificateConfigPath",
+    "certPath",
+    "keyPath",
+    "trustChainPath",
+  ] as const) {
+    const fixture = await createFixture();
+    try {
+      await chown(fixture[pathName], process.getuid?.() ?? 0, wrongGid);
+      await assert.rejects(
+        fixture.provider.createDataKey(context),
+        (error: unknown) => error instanceof CredentialKeyProviderError
+          && error.category === "credential_key_provider_auth_rejected"
+          && !JSON.stringify(error).includes(String(wrongGid))
+          && !JSON.stringify(error).includes(fixture.secretRoot),
+      );
+      assert.equal(fixture.client.encryptCalls, 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("runtime boundary pins a non-root UID/GID, rejects remapping, and requires a read-only tmpfs mount", () => {
+  const uidMap = "0 0 4294967295\n";
+  const readOnlyTmpfs =
+    "36 25 0:32 / /run/secrets/gcp-wif ro,nosuid,nodev,noexec - tmpfs tmpfs rw\n";
+  assert.doesNotThrow(() => validateGcpWifRuntimeBoundary({
+    runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+    runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+    uidMap,
+    mountInfo: readOnlyTmpfs,
+  }));
+
+  for (const options of [
+    {
+      runtimeUid: 0,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap,
+      mountInfo: readOnlyTmpfs,
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: 0,
+      uidMap,
+      mountInfo: readOnlyTmpfs,
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap: "0 100000 65536\n",
+      mountInfo: readOnlyTmpfs,
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap: `${RWA_AUTOMATION_RUNTIME_UID} ${RWA_AUTOMATION_RUNTIME_UID} 1\n`,
+      mountInfo: readOnlyTmpfs,
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap,
+      mountInfo: "36 25 0:32 / /run/secrets/gcp-wif rw,nosuid,nodev - tmpfs tmpfs rw\n",
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap,
+      mountInfo: "36 25 8:1 / /run/secrets/gcp-wif ro,nosuid,nodev - ext4 /dev/vda1 rw\n",
+    },
+    {
+      runtimeUid: RWA_AUTOMATION_RUNTIME_UID,
+      runtimeGid: RWA_AUTOMATION_RUNTIME_GID,
+      uidMap,
+      mountInfo: `${readOnlyTmpfs}37 36 0:33 / /run/secrets/gcp-wif/override rw - tmpfs tmpfs rw\n`,
+    },
+  ]) {
+    assert.throws(
+      () => validateGcpWifRuntimeBoundary(options),
+      (error: unknown) => error instanceof Error && /身份|namespace|tmpfs|可写/.test(error.message),
+    );
+  }
+});
+
+test("versioned certificate files become active through an atomic certificate-config replacement", async () => {
+  const fixture = await createFixture();
+  try {
+    const nextCertPath = join(fixture.secretRoot, "client-cert-generation-2.pem");
+    const nextKeyPath = join(fixture.secretRoot, "client-key-generation-2.pem");
+    const stagedConfigPath = join(fixture.secretRoot, "certificate_config.next.json");
+    await Promise.all([
+      writeFile(nextCertPath, "test-only-certificate-generation-2", { mode: 0o400 }),
+      writeFile(nextKeyPath, "test-only-key-generation-2", { mode: 0o400 }),
+    ]);
+    await writeFile(stagedConfigPath, JSON.stringify({
+      cert_configs: {
+        workload: {
+          cert_path: nextCertPath,
+          key_path: nextKeyPath,
+        },
+      },
+    }), { mode: 0o400 });
+    await rename(stagedConfigPath, fixture.certificateConfigPath);
+
+    const created = await fixture.provider.createDataKey(context);
+    assert.equal(created.plaintextDek.length, 32);
+    assert.equal(fixture.client.encryptCalls > 0, true);
+    created.plaintextDek.fill(0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("GCP KMS adapter requires CRC32C request and response integrity", async () => {
   assert.equal(crc32c(Buffer.from("123456789")), 0xe3069283);
   for (const mode of ["missing_encrypt_flags", "bad_ciphertext_crc", "bad_plaintext_crc"] as const) {
@@ -316,6 +455,7 @@ async function createFixture(
     wifAudience: testWifAudience,
     secretRoot,
     expectedOwnerUid: process.getuid?.() ?? 0,
+    expectedOwnerGid: process.getgid?.() ?? 0,
     client: client as never,
   });
   return {
@@ -336,6 +476,14 @@ async function createFixture(
       await rm(directory, { recursive: true, force: true });
     },
   };
+}
+
+function alternateGroupId() {
+  const current = process.getgid?.() ?? 0;
+  const alternate = process.getgroups?.().find((gid) => gid !== current);
+  if (alternate !== undefined) return alternate;
+  if ((process.getuid?.() ?? 1) === 0) return current === 1 ? 2 : 1;
+  throw new Error("GID ownership test requires a secondary local group.");
 }
 
 function x509Adc(secretRoot: string) {

@@ -4,6 +4,7 @@ import {
   RWA_GCP_WIF_ADC_PATH,
   isCanonicalGcpWifAudience,
   validateGcpWifCredentialFiles,
+  validateGcpWifRuntimeBoundary,
 } from "../modules/arbitrage/automation/GcpWifCredentialConfig";
 
 export type RuntimeConfig = {
@@ -209,5 +210,6 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
     throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
   }
+  validateGcpWifRuntimeBoundary();
   validateGcpWifCredentialFiles({ adcPath, expectedAudience: wifAudience });
 }

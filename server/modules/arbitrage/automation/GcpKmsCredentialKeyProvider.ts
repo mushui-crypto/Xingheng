@@ -12,9 +12,12 @@ import {
 } from "./CredentialKeyProvider";
 import {
   GcpWifConfigurationError,
+  RWA_AUTOMATION_RUNTIME_GID,
+  RWA_AUTOMATION_RUNTIME_UID,
   RWA_GCP_WIF_SECRET_ROOT,
   isCanonicalGcpWifAudience,
   validateGcpWifCredentialFiles,
+  validateGcpWifRuntimeBoundary,
 } from "./GcpWifCredentialConfig";
 
 type KmsClient = Pick<KeyManagementServiceClient, "encrypt" | "decrypt">;
@@ -29,6 +32,7 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   private readonly wifAudience: string;
   private readonly secretRoot: string;
   private readonly expectedOwnerUid: number;
+  private readonly expectedOwnerGid: number;
   private client: KmsClient | null = null;
 
   constructor(options: {
@@ -37,11 +41,17 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     wifAudience?: string;
     secretRoot?: string;
     expectedOwnerUid?: number;
+    expectedOwnerGid?: number;
     client?: KmsClient;
   } = {}) {
     const testMode = process.env.NODE_ENV === "test";
     this.secretRoot = testMode && options.secretRoot ? options.secretRoot : RWA_GCP_WIF_SECRET_ROOT;
-    this.expectedOwnerUid = testMode && options.expectedOwnerUid !== undefined ? options.expectedOwnerUid : 0;
+    this.expectedOwnerUid = testMode && options.expectedOwnerUid !== undefined
+      ? options.expectedOwnerUid
+      : RWA_AUTOMATION_RUNTIME_UID;
+    this.expectedOwnerGid = testMode && options.expectedOwnerGid !== undefined
+      ? options.expectedOwnerGid
+      : RWA_AUTOMATION_RUNTIME_GID;
     this.keyName = options.keyName?.trim() ?? process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? "";
     this.adcPath = options.adcPath?.trim() ?? process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
     this.wifAudience = options.wifAudience?.trim() ?? process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
@@ -185,11 +195,13 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   private async validateAdcConfiguration() {
     this.requireConfigured();
     try {
+      if (process.env.NODE_ENV !== "test") validateGcpWifRuntimeBoundary();
       validateGcpWifCredentialFiles({
         adcPath: this.adcPath,
         expectedAudience: this.wifAudience,
         secretRoot: this.secretRoot,
         expectedOwnerUid: this.expectedOwnerUid,
+        expectedOwnerGid: this.expectedOwnerGid,
       });
     } catch (error) {
       if (error instanceof GcpWifConfigurationError) {

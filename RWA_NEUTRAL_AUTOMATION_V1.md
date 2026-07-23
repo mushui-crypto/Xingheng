@@ -2,7 +2,7 @@
 
 更新时间：2026-07-24
 
-当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产仍未挂载 X.509 WIF/ADC 身份或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
+当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产 Compose 的 X.509 WIF/ADC 只读挂载契约已实现，但尚未在服务器注入真实身份材料或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
 
@@ -47,7 +47,7 @@
 - 每个用户使用自己的交易所专用子账户；Bybit 优先使用 UTA 统一账户。永续侧不与其他交易共享保证金。
 - Phase A/B 使用独立只读 Key；受控下单阶段使用另一组仅含读取、现货交易和合约交易权限的 Key。
 - API Key 必须禁止提现。Binance 真实执行还必须启用固定 IP 白名单，且 Binance 返回的 `ipList` 必须与服务端 `RWA_BINANCE_ALLOWED_EGRESS_IPS` 完全一致；配置缺失、无限制、通配、CIDR、无法确认或集合不匹配时均不得 active/preflight/execute。Bybit 既有 IP 口径本轮不变。需要密钥轮换、权限核对和安全解绑流程。
-- 交易所凭证正文只允许写入 Envelope V2 密文文件；包裹 DEK 的 KMS 身份材料必须使用 root-owned `0400` 只读 secret mount。明文凭证、DEK、WIF 证书私钥不得进入 Git、SQLite、环境变量、镜像、日志、接口响应、浏览器、localStorage 或 IndexedDB。
+- 交易所凭证正文只允许写入 Envelope V2 密文文件；包裹 DEK 的 KMS 身份材料必须放在宿主 tmpfs，由固定专用 UID/GID `20001:20001` 持有，目录 `0700`、文件 `0400`，并以整个目录只读 bind mount 提供给同 UID 的非 root API。明文凭证、DEK、WIF 证书私钥不得进入 Git、SQLite、环境变量、镜像、日志、接口响应、浏览器、localStorage 或 IndexedDB。
 - 前端不得获取 secret，不得直接访问交易所私有 API，也不得绕过后端 execution gate。
 
 ## 4. 资金方案
@@ -360,7 +360,8 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 - `RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms`：生产唯一允许的凭证密钥 provider；测试 fake provider 只能由测试代码显式注入，生产环境不可选择。
 - `RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials`：固定 Google Cloud KMS CryptoKey 完整资源名。生产身份只使用 X.509 Workload Identity Federation/ADC，不创建或接受长期 Service Account JSON Key。
 - `RWA_GCP_WIF_AUDIENCE`：服务端配置的唯一受信 X.509 WIF provider 完整 audience，必须与 ADC 精确一致。
-- `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；`adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 root-owned `0400`。
+- `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；`adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 UID `20001` owner、`0400`。根目录要求 UID `20001` owner、`0700`。
+- 宿主 WIF 目录固定为 `/run/xingheng/gcp-wif`，不接受环境变量覆盖。Compose 将整个目录只读 bind 到 `/run/secrets/gcp-wif`，不自动创建目录。API 与共享 `strategy_data` 的策略工具固定以 `20001:20001` 非 root 身份运行；rootless Docker、user namespace remap、非 tmpfs 来源、可写挂载或可写子挂载均 fail-closed。旧 UID `1000` 的现有数据卷必须在停机备份后执行一次受控 owner 迁移，不能用宽权限替代。
 - `RWA_AUTOMATION_MASTER_KEY` 已停用。生产若发现该变量、非 GCP provider、错误 CryptoKey 或不安全 ADC 路径，启动配置校验直接失败，不允许本地主密钥或明文降级。
 - `RWA_AUTOMATION_DATA_DIR`：按不可逆用户域 + venue 分隔的凭证/状态目录。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
 - `RWA_AUTOMATION_SERVER_KILL_SWITCH`：服务端全局急停，只有显式设为 `false` 才允许新增风险；用户级开关不能覆盖它。
@@ -371,6 +372,8 @@ Envelope V2 的本地 AAD canonical 绑定 `userId + venue + accountId + environ
 GCP KMS Encrypt 必须提交 plaintext 与 additional authenticated data 的 CRC32C，并验证两个服务端 verification flag、返回 ciphertext CRC32C 和合法 CryptoKeyVersion；Decrypt 必须提交 ciphertext 与 additional authenticated data 的 CRC32C，并验证返回 plaintext CRC32C。任一字段缺失、为 false 或不匹配均返回受控错误并拒绝使用结果。
 
 凭证轮换必须先验证候选凭证，再以新随机 DEK 原子替换旧 envelope；失败保留旧有效 envelope。KMS key version 迁移使用 DEK rewrap，只替换 `wrappedDek/wrapReference/wrapBindingTag`，不重新加密凭证正文。`wrapReference` 必须严格属于冻结 CryptoKey 的合法 version，并与 `wrappedDek` 一起受 DEK-HMAC 完整性绑定；篡改必须 fail-closed。旧 V1 本地主密钥文件只能被识别为 `rotation_required`，在线服务不解密、不迁移、不覆盖；当前无生产真实凭证，后续如发现 V1 只能走冻结的离线处置流程。
+
+WIF 叶证书轮换采用版本化 cert/key 文件与同目录原子替换 `certificate_config.json`：先完整写入并同步新文件，再一次性切换配置，旧文件至少保留两个 token 生命周期。ADC audience/provider 或 trust chain 变化需要受控重启。宿主重启后 tmpfs 内容消失，部署流程必须重新注入身份材料；Google Auth 在 token 刷新时会持续读取文件，运行期间不得撤掉挂载。WIF 身份材料明确排除在项目备份和恢复之外。
 
 当前 Compose 尚未为 `/app/rwa-automation-data` 配置独立持久卷，也未纳入凭证密文/状态文件的备份恢复流程；这是安全整改第 4 项的明确阻塞。在该项完成并独立验收前，不得把本实现作为生产真实执行已就绪的依据，也不得录入真实交易所凭证。
 

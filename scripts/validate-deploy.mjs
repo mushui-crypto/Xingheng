@@ -14,7 +14,7 @@ const smoke = read("scripts/smoke.sh");
 const assertions = [
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
   [dockerfile.includes("npm ci --omit=dev") && dockerfile.includes('CMD [\"node\", \"dist-server/index.js\"]'), "API runtime must use production dependencies and compiled JS"],
-  [dockerfile.includes("USER node"), "API must run as a non-root user"],
+  [dockerfile.includes("USER 20001:20001"), "API must run as the pinned non-root user"],
   [compose.includes("condition: service_healthy"), "web must wait for a healthy API"],
   [compose.includes('test -n "$$DOMAIN"'), "web must reject a missing domain"],
   [(compose.match(/env_file:/g) ?? []).length === 1, "only API may receive the production secret env file"],
@@ -52,13 +52,32 @@ const assertions = [
     ].every((key) => env.includes(key)),
     "production env example is incomplete",
   ],
+  [
+    dockerfile.includes("useradd --uid 20001 --gid 20001")
+      && (dockerfile.match(/USER 20001:20001/g) ?? []).length === 2
+      && compose.includes('user: "20001:20001"'),
+    "API and strategy tools must use the pinned non-root RWA runtime UID",
+  ],
+  [
+    compose.includes("source: /run/xingheng/gcp-wif")
+      && compose.includes("target: /run/secrets/gcp-wif")
+      && compose.includes("read_only: true")
+      && compose.includes("create_host_path: false"),
+    "Compose must bind the WIF tmpfs directory read-only without creating it",
+  ],
   [server.includes("STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例"), "production config must validate strategy alert email when enabled"],
-  [server.includes("RWA_AUTOMATION_MASTER_KEY 已停用") && server.includes("RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms"), "production must reject local or fake credential key providers"],
+  [
+    server.includes("RWA_AUTOMATION_MASTER_KEY 已停用")
+      && server.includes("RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms")
+      && server.includes("validateGcpWifRuntimeBoundary"),
+    "production must reject local/fake key providers and unsafe WIF runtime boundaries",
+  ],
   [env.includes(".invalid") && env.includes("REPLACE_WITH_BSC_TESTNET_RPC_URL") && env.includes("REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS"), "production env example must use unmistakable rejected placeholders"],
   [server.includes('domain.endsWith(".invalid")') && server.includes("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零") && server.includes("SMTP 配置仍是示例占位值"), "production startup must reject placeholder identity and unsafe token configuration"],
   [wallet.includes('process.env.NODE_ENV !== "production"') && wallet.includes('process.env.NODE_ENV === "production"'), "production must not initialize or seed demo wallet data"],
   [restore.includes("trading-[0-9][0-9]") && !restore.includes("trading-*.sqlite"), "restore filename must use a strict timestamp allowlist"],
   [[backup, restore, smoke].every((script) => script.includes('--env-file')), "operational scripts must load the production Compose environment explicitly"],
+  [[backup, restore].every((script) => !script.includes("gcp-wif")), "WIF identity material must be excluded from project backup and restore scripts"],
 ];
 
 const failures = assertions.filter(([ok]) => !ok).map(([, message]) => message);

@@ -5,6 +5,7 @@ services:
     build:
       context: .
       target: api
+    user: "20001:20001"
     env_file:
       - .env.production
     environment:
@@ -28,6 +29,12 @@ services:
       - sqlite_data:/app/data
       - strategy_data:/app/strategy-data
       - sqlite_backups:/backups
+      - type: bind
+        source: /run/xingheng/gcp-wif
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
     healthcheck:
       test:
         - CMD
