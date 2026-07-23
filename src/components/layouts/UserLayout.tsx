@@ -61,6 +61,7 @@ export function UserLayout({ children }: UserLayoutProps) {
               <TopLink to="/app/dashboard" label="首页" />
               <TopLink to="/app/markets" label="行情" />
               <TopLink to="/app/arbitrage" label="套利看板" />
+              <TopLink to="/app/my-arbitrage" label="我的套利" />
               <TopLink to="/app/trade" label="真实交易" />
               <TopLink to="/app/demo" label="模拟交易" />
               <TopLink to="/app/strategy" label="策略交易" />

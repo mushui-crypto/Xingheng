@@ -1,19 +1,29 @@
 export type ArbitrageHorizon = 90 | 365;
 export type ArbitrageYieldMetric = "apr" | "apy";
-export type ArbitrageAsset =
-  | "XAU"
-  | "GOLD"
-  | "XAUT"
-  | "PAXG"
-  | "MU"
-  | "NVDA"
-  | "GOOGL"
-  | "MSFT"
-  | "TSLA";
+export const ARBITRAGE_ASSET_ORDER = [
+  "XAU",
+  "GOLD",
+  "XAUT",
+  "PAXG",
+  "BTC",
+  "ETH",
+  "SOL",
+  "XRP",
+  "DOGE",
+  "MU",
+  "NVDA",
+  "GOOGL",
+  "MSFT",
+  "TSLA",
+] as const;
+export type ArbitrageAsset = (typeof ARBITRAGE_ASSET_ORDER)[number];
 export type ArbitrageVenue = "binance" | "bybit" | "bitget" | "okx" | "tradexyz";
 export type ArbitrageMarketStatus = "connected" | "degraded" | "disconnected";
 export type ArbitrageRecommendation = "recommended" | "watch" | "neutral" | "blocked";
+export type ArbitrageEntryStatus = "favorable" | "cautious" | "waiting" | "blocked";
 export type ArbitrageStrategyType = "same_venue_neutral" | "cross_venue_arbitrage";
+export type ArbitrageConfidence = "high" | "medium" | "low";
+export type ArbitrageOpportunityDriver = "funding" | "basis" | "mixed";
 
 export type ArbitrageMarket = {
   id: string;
@@ -70,14 +80,19 @@ export type ArbitrageOpportunity = {
   entryBasisBps: number | null;
   capacityUsd: number | null;
   score: number;
+  historicalQualityScore: number;
+  confidence: ArbitrageConfidence;
+  opportunityDriver: ArbitrageOpportunityDriver;
+  opportunityDriverLabel: string;
   recommendation: ArbitrageRecommendation;
+  entryStatus: ArbitrageEntryStatus;
   scoreBreakdown: {
-    netApr: number;
+    conservativeNetReturn: number;
+    driverStrength: number;
     persistence: number;
-    matching: number;
+    costEfficiency: number;
     liquidity: number;
-    cost: number;
-    reliability: number;
+    confidence: number;
   };
   disqualifiers: string[];
   warnings: string[];

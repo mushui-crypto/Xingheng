@@ -2,6 +2,7 @@ import { handleUserAuthFailure } from "./session";
 
 type JsonRequestOptions = {
   acceptErrorResponse?: boolean;
+  mapErrorDetails?: (payload: unknown) => unknown;
   init?: RequestInit;
   userAuthFailure?: boolean;
   networkErrorMessage?: string;
@@ -10,12 +11,16 @@ type JsonRequestOptions = {
 export class HttpRequestError extends Error {
   status: number;
   retryAfter: string | null;
+  category: string | null;
+  details: unknown;
 
-  constructor(message: string, response: Response) {
+  constructor(message: string, response: Response, category: string | null = null, details: unknown = null) {
     super(message);
     this.name = "HttpRequestError";
     this.status = response.status;
     this.retryAfter = response.headers.get("Retry-After");
+    this.category = category;
+    this.details = details;
   }
 }
 
@@ -45,7 +50,12 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
       handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
     }
     if (options.acceptErrorResponse) return payload as T;
-    throw new HttpRequestError(payload?.message ?? fallbackMessage, response);
+    throw new HttpRequestError(
+      payload?.message ?? fallbackMessage,
+      response,
+      typeof payload?.category === "string" ? payload.category : null,
+      options.mapErrorDetails?.(payload) ?? null,
+    );
   }
 
   return payload as T;

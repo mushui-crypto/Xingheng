@@ -27,6 +27,19 @@ import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketServ
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
 import { RwaBybitReadOnlyConnector } from "./modules/arbitrage/automation/RwaBybitReadOnlyConnector";
 import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaNeutralAutomationService";
+import { RwaAutomationPersistentStore } from "./modules/arbitrage/automation/RwaAutomationPersistentStore";
+import { RwaBybitMainnetClient } from "./modules/arbitrage/automation/RwaBybitMainnetClient";
+import { RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
+import { RwaBybitAutomationConnector } from "./modules/arbitrage/automation/RwaBybitAutomationConnector";
+import { RwaBinanceAutomationConnector } from "./modules/arbitrage/automation/RwaBinanceAutomationConnector";
+import { RwaBinanceAutomationService } from "./modules/arbitrage/automation/RwaBinanceAutomationService";
+import { RwaBinanceMainnetClient } from "./modules/arbitrage/automation/RwaBinanceMainnetClient";
+import type {
+  RwaBinanceCredentials,
+  RwaBinancePermissions,
+} from "./modules/arbitrage/automation/RwaBinanceAutomationTypes";
+import { RwaAutomationConnectorRegistry } from "./modules/arbitrage/automation/RwaAutomationConnectorRegistry";
+import { RwaAutomationControlService } from "./modules/arbitrage/automation/RwaAutomationControlService";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -119,10 +132,28 @@ registerAuthRoutes({ app, users, wallet, tradingStore, config });
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
+const arbitrageDashboard = new ArbitrageDashboardService();
 registerArbitrageRoutes(
   app,
-  new ArbitrageDashboardService(),
+  arbitrageDashboard,
   new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
+  new RwaAutomationControlService(arbitrageDashboard, (userId) => {
+    const rwaExecution = new RwaNeutralExecutionService(
+      new RwaAutomationPersistentStore({ userId, venue: "bybit" }),
+      (credentials) => new RwaBybitMainnetClient(credentials),
+    );
+    void rwaExecution.initialize().catch(() => {
+      // Fail closed for this user's account without exposing provider details.
+    });
+    const binance = new RwaBinanceAutomationService(
+      new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({ userId, venue: "binance" }),
+      (credentials) => new RwaBinanceMainnetClient(credentials),
+    );
+    return new RwaAutomationConnectorRegistry([
+      new RwaBybitAutomationConnector(rwaExecution),
+      new RwaBinanceAutomationConnector(binance),
+    ]);
+  }),
 );
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({

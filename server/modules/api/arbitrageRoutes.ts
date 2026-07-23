@@ -4,6 +4,11 @@ import {
   type ArbitrageDashboardService,
 } from "../arbitrage/ArbitrageDashboardService";
 import type { RwaNeutralAutomationService } from "../arbitrage/automation/RwaNeutralAutomationService";
+import {
+  automationErrorResponse,
+  RwaAutomationControlError,
+  type RwaAutomationControlService,
+} from "../arbitrage/automation/RwaAutomationControlService";
 
 const supportedHorizons = new Set([90, 365]);
 
@@ -11,6 +16,7 @@ export function registerArbitrageRoutes(
   app: express.Express,
   service: ArbitrageDashboardService,
   neutralAutomation?: RwaNeutralAutomationService,
+  automationControl?: RwaAutomationControlService,
 ) {
   app.get("/api/arbitrage/dashboard", async (request, response) => {
     try {
@@ -38,4 +44,48 @@ export function registerArbitrageRoutes(
       }
     });
   }
+
+  if (automationControl) registerAutomationControlRoutes(app, automationControl);
+}
+
+function registerAutomationControlRoutes(app: express.Express, control: RwaAutomationControlService) {
+  const route = (handler: (request: express.Request) => Promise<unknown> | unknown) => async (request: express.Request, response: express.Response) => {
+    response.setHeader("Cache-Control", "no-store");
+    try {
+      response.json(await handler(request));
+    } catch (error) {
+      const result = automationErrorResponse(error);
+      response.status(result.statusCode).json(result.body);
+    }
+  };
+
+  app.get("/api/arbitrage/automation/venues", route((request) => control.listVenues(authenticatedUserId(request))));
+  app.get("/api/arbitrage/automation/venues/:venue/credentials", route(async (request) => ({
+    credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue))).credential,
+  })));
+  app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.get("/api/arbitrage/automation/venues/:venue/config", route((request) => control.getConfig(authenticatedUserId(request), singleParam(request.params.venue))));
+  app.put("/api/arbitrage/automation/venues/:venue/config", route((request) => control.updateConfig(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.post("/api/arbitrage/automation/venues/:venue/kill-switch", route((request) => control.setKillSwitch(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.get("/api/arbitrage/automation/venues/:venue/account", route((request) => control.getPrivateAccount(authenticatedUserId(request), singleParam(request.params.venue))));
+  app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request))));
+  app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body)));
+  app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), request.body)));
+  app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request))));
+  app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), singleParam(request.params.positionId), request.body)));
+  app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.get("/api/arbitrage/automation/pnl", route((request) => control.getPnl(authenticatedUserId(request))));
+  app.get("/api/arbitrage/automation/audit", route((request) => control.getAudit(authenticatedUserId(request))));
+}
+
+function authenticatedUserId(request: express.Request) {
+  if (!request.user?.id) {
+    throw new RwaAutomationControlError(401, "authentication_required", "用户未登录或登录已失效。");
+  }
+  return request.user.id;
+}
+
+function singleParam(value: string | string[]) {
+  return Array.isArray(value) ? value[0] ?? "" : value;
 }

@@ -971,7 +971,7 @@ textarea {
   }
 
   .xh-modal-shell {
-    @apply w-full max-w-[calc(100vw-24px)] border border-[#2b2b2b] bg-[#050505] md:max-w-[560px];
+    @apply flex max-h-[calc(100dvh-24px)] w-full max-w-[calc(100vw-24px)] flex-col border border-[#2b2b2b] bg-[#050505] md:max-w-[560px];
   }
 
   .xh-modal-header {
@@ -995,7 +995,7 @@ textarea {
   }
 
   .xh-modal-body {
-    @apply px-4 pb-5 pt-[18px] sm:px-6 sm:pb-6;
+    @apply min-h-0 overflow-y-auto px-4 pb-5 pt-[18px] sm:px-6 sm:pb-6;
   }
 
   .xh-market-trigger {

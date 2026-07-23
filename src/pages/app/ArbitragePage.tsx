@@ -8,29 +8,64 @@ import { ArbitrageOpportunityTable } from "../../features/arbitrage/components/A
 import { ArbitrageHelp } from "../../features/arbitrage/components/ArbitrageHelp";
 import { ArbitrageSummaryBar } from "../../features/arbitrage/components/ArbitrageSummaryBar";
 import { equivalentNetYield } from "../../features/arbitrage/lib/formatters";
+import {
+  matchesOpportunityEntryStatus,
+  matchesOpportunityRecommendation,
+  matchesOpportunityVenue,
+  opportunityLegVenues,
+} from "../../features/arbitrage/lib/opportunityFilters";
 import type {
   ArbitrageAsset,
   ArbitrageDashboardSnapshot,
+  ArbitrageEntryStatus,
   ArbitrageHorizon,
+  ArbitrageRecommendation,
   ArbitrageVenue,
   ArbitrageYieldMetric,
 } from "../../features/arbitrage/model/types";
+import { ARBITRAGE_ASSET_ORDER } from "../../features/arbitrage/model/types";
 
 type BoardView = "markets" | "opportunities";
 type OpportunitySort = "score" | "netApr";
 type AssetFilter = "all" | ArbitrageAsset;
 type VenueFilter = "all" | ArbitrageVenue;
+type RecommendationFilter = "all" | ArbitrageRecommendation;
+type EntryStatusFilter = "all" | ArbitrageEntryStatus;
 
 const horizons: ArbitrageHorizon[] = [90, 365];
-const assetOrder: ArbitrageAsset[] = ["XAU", "GOLD", "XAUT", "PAXG", "MU", "NVDA", "GOOGL", "MSFT", "TSLA"];
-const assetRank = new Map(assetOrder.map((value, index) => [value, index]));
-const venues: Array<{ value: VenueFilter; label: string }> = [
-  { value: "all", label: "全部交易所" },
+const assetRank = new Map(ARBITRAGE_ASSET_ORDER.map((value, index) => [value, index]));
+const venues: Array<{ value: ArbitrageVenue; label: string }> = [
   { value: "binance", label: "Binance" },
   { value: "bybit", label: "Bybit" },
   { value: "bitget", label: "Bitget" },
   { value: "okx", label: "OKX" },
   { value: "tradexyz", label: "tradeXYZ" },
+];
+const recommendationLabels: Record<ArbitrageRecommendation, string> = {
+  recommended: "持有逻辑较强",
+  watch: "值得持续关注",
+  neutral: "历史优势有限",
+  blocked: "无法安全评估",
+};
+const recommendationOptions: Array<{ value: RecommendationFilter; label: string }> = [
+  { value: "all", label: "持有质量-全部" },
+  ...Object.entries(recommendationLabels).map(([value, label]) => ({
+    value: value as ArbitrageRecommendation,
+    label,
+  })),
+];
+const entryStatusLabels: Record<ArbitrageEntryStatus, string> = {
+  favorable: "当前条件较好",
+  cautious: "谨慎评估入场",
+  waiting: "等待费率差转正",
+  blocked: "当前不可执行",
+};
+const entryStatusOptions: Array<{ value: EntryStatusFilter; label: string }> = [
+  { value: "all", label: "当前入场-全部" },
+  ...Object.entries(entryStatusLabels).map(([value, label]) => ({
+    value: value as ArbitrageEntryStatus,
+    label,
+  })),
 ];
 const opportunityPageSize = 25;
 
@@ -40,7 +75,11 @@ export function ArbitragePage() {
   const [view, setView] = useState<BoardView>("opportunities");
   const [sort, setSort] = useState<OpportunitySort>("score");
   const [asset, setAsset] = useState<AssetFilter>("all");
-  const [venue, setVenue] = useState<VenueFilter>("all");
+  const [recommendation, setRecommendation] = useState<RecommendationFilter>("all");
+  const [entryStatus, setEntryStatus] = useState<EntryStatusFilter>("all");
+  const [longVenue, setLongVenue] = useState<VenueFilter>("all");
+  const [shortVenue, setShortVenue] = useState<VenueFilter>("all");
+  const [marketVenue, setMarketVenue] = useState<VenueFilter>("all");
   const [snapshot, setSnapshot] = useState<ArbitrageDashboardSnapshot | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [opportunityPage, setOpportunityPage] = useState(1);
@@ -49,12 +88,27 @@ export function ArbitragePage() {
   const [error, setError] = useState("");
 
   const assetOptions = useMemo<Array<{ value: AssetFilter; label: string }>>(() => {
-    const available = new Set(snapshot?.markets.map((market) => market.asset) ?? assetOrder);
+    const available = new Set(snapshot?.markets.map((market) => market.asset) ?? ARBITRAGE_ASSET_ORDER);
     return [
       { value: "all", label: "全部资产" },
-      ...assetOrder.filter((value) => available.has(value)).map((value) => ({ value, label: value })),
+      ...ARBITRAGE_ASSET_ORDER.filter((value) => available.has(value)).map((value) => ({ value, label: value })),
     ];
   }, [snapshot]);
+
+  const longVenueOptions = useMemo(() => filterVenueOptions(
+    "做多-全部交易所",
+    snapshot ? opportunityLegVenues(snapshot.opportunities, "long") : null,
+    "做多",
+  ), [snapshot]);
+  const shortVenueOptions = useMemo(() => filterVenueOptions(
+    "做空-全部交易所",
+    snapshot ? opportunityLegVenues(snapshot.opportunities, "short") : null,
+    "做空",
+  ), [snapshot]);
+  const marketVenueOptions = useMemo(() => filterVenueOptions(
+    "全部交易所",
+    snapshot ? new Set(snapshot.markets.map((market) => market.venue)) : null,
+  ), [snapshot]);
 
   const load = useCallback(async (forceRefresh = false) => {
     forceRefresh ? setRefreshing(true) : setLoading(true);
@@ -82,23 +136,25 @@ export function ArbitragePage() {
     if (!snapshot) return [];
     return snapshot.markets
       .filter((market) => asset === "all" || market.asset === asset)
-      .filter((market) => venue === "all" || market.venue === venue)
+      .filter((market) => marketVenue === "all" || market.venue === marketVenue)
       .sort((left, right) =>
         (assetRank.get(left.asset) ?? 99) - (assetRank.get(right.asset) ?? 99)
         || left.venueLabel.localeCompare(right.venueLabel)
         || left.kind.localeCompare(right.kind),
       );
-  }, [asset, snapshot, venue]);
+  }, [asset, marketVenue, snapshot]);
 
   const filteredOpportunities = useMemo(() => {
     if (!snapshot) return [];
     const opportunities = snapshot.opportunities
       .filter((item) => asset === "all" || item.longLeg.asset === asset || item.shortLeg.asset === asset)
-      .filter((item) => venue === "all" || item.longLeg.venue === venue || item.shortLeg.venue === venue);
+      .filter((item) => matchesOpportunityRecommendation(item, recommendation))
+      .filter((item) => matchesOpportunityEntryStatus(item, entryStatus))
+      .filter((item) => matchesOpportunityVenue(item, longVenue, shortVenue));
 
     if (sort === "score") {
       return opportunities.sort((left, right) =>
-        right.score - left.score || right.netApr - left.netApr,
+        right.historicalQualityScore - left.historicalQualityScore || right.netApr - left.netApr,
       );
     }
 
@@ -111,7 +167,7 @@ export function ArbitragePage() {
         - (displayedYields.get(left.id) ?? Number.NEGATIVE_INFINITY)
         || right.score - left.score,
     );
-  }, [asset, horizonDays, snapshot, sort, venue, yieldMetric]);
+  }, [asset, entryStatus, horizonDays, longVenue, recommendation, shortVenue, snapshot, sort, yieldMetric]);
 
   const opportunityPageCount = Math.max(1, Math.ceil(filteredOpportunities.length / opportunityPageSize));
   const visibleOpportunities = useMemo(() => filteredOpportunities.slice(
@@ -131,7 +187,13 @@ export function ArbitragePage() {
   useEffect(() => {
     setOpportunityPage(1);
     setExpandedId(null);
-  }, [asset, horizonDays, sort, venue, yieldMetric]);
+  }, [asset, entryStatus, horizonDays, longVenue, marketVenue, recommendation, shortVenue, sort, yieldMetric]);
+
+  useEffect(() => {
+    if (!longVenueOptions.some((option) => option.value === longVenue)) setLongVenue("all");
+    if (!shortVenueOptions.some((option) => option.value === shortVenue)) setShortVenue("all");
+    if (!marketVenueOptions.some((option) => option.value === marketVenue)) setMarketVenue("all");
+  }, [longVenue, longVenueOptions, marketVenue, marketVenueOptions, shortVenue, shortVenueOptions]);
 
   useEffect(() => {
     if (opportunityPage > opportunityPageCount) setOpportunityPage(opportunityPageCount);
@@ -145,7 +207,7 @@ export function ArbitragePage() {
             <h1 className="xh-title">套利看板</h1>
             <span className="inline-flex border border-sky-400/30 bg-sky-400/[0.07] px-2.5 py-1 text-xs font-medium text-sky-200">只读 · 主网公开行情</span>
           </div>
-          <p className="xh-subtitle">RWA 同所中性与跨所套利机会比较，推荐评分不代表收益承诺。</p>
+          <p className="xh-subtitle">分别评估中长期持有质量与当前入场时机；结论仅辅助筛选，不代替用户决策。</p>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
@@ -194,19 +256,52 @@ export function ArbitragePage() {
               onChange={setAsset}
               label="筛选资产"
             />
-            <DropdownSelect
-              className="w-[148px]"
-              value={venue}
-              options={venues}
-              onChange={setVenue}
-              label="筛选交易所"
-            />
+            {view === "opportunities" ? (
+              <>
+                <DropdownSelect
+                  className="w-[172px]"
+                  value={recommendation}
+                  options={recommendationOptions}
+                  onChange={setRecommendation}
+                  label="筛选持有质量"
+                />
+                <DropdownSelect
+                  className="w-[166px]"
+                  value={entryStatus}
+                  options={entryStatusOptions}
+                  onChange={setEntryStatus}
+                  label="筛选当前入场状态"
+                />
+                <DropdownSelect
+                  className="w-[164px]"
+                  value={longVenue}
+                  options={longVenueOptions}
+                  onChange={setLongVenue}
+                  label="筛选做多交易所"
+                />
+                <DropdownSelect
+                  className="w-[164px]"
+                  value={shortVenue}
+                  options={shortVenueOptions}
+                  onChange={setShortVenue}
+                  label="筛选做空交易所"
+                />
+              </>
+            ) : (
+              <DropdownSelect
+                className="w-[148px]"
+                value={marketVenue}
+                options={marketVenueOptions}
+                onChange={setMarketVenue}
+                label="筛选市场交易所"
+              />
+            )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {view === "opportunities" ? (
               <SegmentedControl
                 value={sort}
-                options={[{ value: "score", label: "评分优先" }, { value: "netApr", label: `净${yieldMetric.toUpperCase()}优先` }]}
+                options={[{ value: "score", label: "持有质量优先" }, { value: "netApr", label: `净${yieldMetric.toUpperCase()}优先` }]}
                 onChange={(value) => setSort(value as OpportunitySort)}
                 label="机会排序"
               />
@@ -227,7 +322,9 @@ export function ArbitragePage() {
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
-          <p>{view === "opportunities" ? `${filteredOpportunities.length} 个中性 / 套利组合` : `${filteredMarkets.length} 个市场`}</p>
+          <p>{view === "opportunities"
+            ? opportunityCountLabel(filteredOpportunities.length, recommendation, entryStatus, longVenue, shortVenue)
+            : `${filteredMarkets.length} 个市场`}</p>
           <div className="flex items-center gap-1.5">
             <span>近90天费率基准 · {horizonDays}天持有{horizonDays === 365 ? "情景" : ""}</span>
             <ArbitrageHelp content={`历史资金费率固定观察最近90天；${horizonDays}天仅用于持有期和往返成本摊销。按Taker成交，并分别计量USDT与USDC。`} label="查看测算口径" />
@@ -299,6 +396,50 @@ function parseRetryAfterSeconds(value: string | null) {
   const timestamp = Date.parse(value);
   if (!Number.isFinite(timestamp)) return null;
   return Math.max(1, Math.ceil((timestamp - Date.now()) / 1000));
+}
+
+function filterVenueOptions(
+  allLabel: string,
+  available: Set<ArbitrageVenue> | null,
+  prefix?: "做多" | "做空",
+): Array<{ value: VenueFilter; label: string }> {
+  return [
+    { value: "all", label: allLabel },
+    ...venues
+      .filter((option) => !available || available.has(option.value))
+      .map((option) => ({
+        ...option,
+        label: prefix ? `${prefix}-${option.label}` : option.label,
+      })),
+  ];
+}
+
+function opportunityCountLabel(
+  count: number,
+  recommendation: RecommendationFilter,
+  entryStatus: EntryStatusFilter,
+  longVenue: VenueFilter,
+  shortVenue: VenueFilter,
+) {
+  const venueScope = longVenue === "all" && shortVenue === "all"
+    ? "中性 / 套利组合"
+    : venueFilterSummary(longVenue, shortVenue);
+  const recommendationScope = recommendation === "all" ? "" : ` · ${recommendationLabels[recommendation]}`;
+  const entryScope = entryStatus === "all" ? "" : ` · ${entryStatusLabels[entryStatus]}`;
+  return `${count} 个 ${venueScope}${recommendationScope}${entryScope}`;
+}
+
+function venueFilterSummary(longVenue: VenueFilter, shortVenue: VenueFilter) {
+  if (longVenue !== "all" && longVenue === shortVenue) {
+    return `${venueLabel(longVenue)} 同所组合`;
+  }
+  const longLabel = longVenue === "all" ? "全部交易所" : venueLabel(longVenue);
+  const shortLabel = shortVenue === "all" ? "全部交易所" : venueLabel(shortVenue);
+  return `${longLabel} 做多 / ${shortLabel} 做空组合`;
+}
+
+function venueLabel(venue: ArbitrageVenue) {
+  return venues.find((option) => option.value === venue)?.label ?? venue;
 }
 
 type SegmentedControlProps = {
