@@ -244,10 +244,10 @@ function candidate(item: ArbitrageOpportunity, adapterImplemented: boolean): Rwa
 function assessSafety(opportunity: ArbitrageOpportunity) {
   const reasons = [...opportunity.disqualifiers];
   if (opportunity.strategyType !== "same_venue_neutral") reasons.push("仅支持同所中性组合");
-  if (opportunity.longLeg.venue !== opportunity.shortLeg.venue) reasons.push("两腿必须位于同一交易所");
-  if (opportunity.longLeg.asset !== opportunity.shortLeg.asset) reasons.push("两腿必须为同一资产");
-  if (opportunity.longLeg.kind !== "spot") reasons.push("多头腿必须为现货");
-  if (opportunity.shortLeg.kind !== "perpetual") reasons.push("空头腿必须为永续");
+  if (opportunity.longLeg.venue !== opportunity.shortLeg.venue) reasons.push("现货侧与永续侧必须位于同一交易所");
+  if (opportunity.longLeg.asset !== opportunity.shortLeg.asset) reasons.push("现货侧与永续侧必须为同一资产");
+  if (opportunity.longLeg.kind !== "spot") reasons.push("做多侧必须为现货");
+  if (opportunity.shortLeg.kind !== "perpetual") reasons.push("做空侧必须为永续");
   const uniqueReasons = [...new Set(reasons)];
   return { eligible: uniqueReasons.length === 0, reasons: uniqueReasons };
 }

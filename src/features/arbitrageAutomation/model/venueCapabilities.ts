@@ -42,7 +42,7 @@ export function resolveVenueCapabilities(input: VenueCapabilityInput): VenueCapa
   }
 
   if (
-    input.venue === "bybit"
+    (input.venue === "bybit" || input.venue === "binance")
     && input.phase === "execution_capable"
     && input.providerWritesEnabled === true
   ) {

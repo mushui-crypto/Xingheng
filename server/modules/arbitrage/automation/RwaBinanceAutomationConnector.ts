@@ -5,7 +5,7 @@ import type { RwaBinanceAutomationService } from "./RwaBinanceAutomationService"
 export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   readonly venue = "binance" as const;
   readonly implemented = true as const;
-  readonly providerWritesEnabled = false;
+  readonly providerWritesEnabled = true;
 
   constructor(private readonly service: RwaBinanceAutomationService) {}
 
@@ -26,13 +26,23 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
       this.service.getCredentialStatus(),
       this.service.getConfig(),
       this.service.getProductAvailability(),
-    ]);
+    ]) as [
+      Awaited<ReturnType<RwaBinanceAutomationService["getCredentialStatus"]>>,
+      Awaited<ReturnType<RwaBinanceAutomationService["getConfig"]>>,
+      Awaited<ReturnType<RwaBinanceAutomationService["getProductAvailability"]>>,
+    ];
     return {
       venue: this.venue,
       implemented: true,
-      enabled: false,
-      phase: "phase_1_read_only_shadow",
-      providerWritesEnabled: false,
+      enabled: Boolean(
+        credential.lifecycleStatus === "active"
+        && config.globalExecutionEnabled
+        && config.strategyEnabled
+        && !config.killSwitchActive
+        && !config.serverGlobalKillSwitchActive
+      ),
+      phase: "execution_capable",
+      providerWritesEnabled: true,
       credential: { ...credential, permissions: credential.permissions ? { ...credential.permissions } : null },
       productAvailability,
       config,
@@ -54,6 +64,6 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode) {
     return this.service.preflight(opportunity, accountId, mode);
   }
-  execute() { return this.service.execute(); }
-  closeAll() { return this.service.closeAll(); }
+  execute(input: unknown) { return this.service.execute(input); }
+  closeAll(input: unknown) { return this.service.closeAll(input); }
 }

@@ -3,6 +3,7 @@ import {
   RWA_BINANCE_PERPETUAL_SYMBOL,
   RWA_BINANCE_PRODUCT_CACHE_TTL_MS,
   RWA_BINANCE_SPOT_SYMBOL,
+  RWA_BINANCE_STRATEGY_ID,
   type RwaBinanceAccountIdentity,
   type RwaBinanceClient,
   type RwaBinanceCredentials,
@@ -10,7 +11,12 @@ import {
   type RwaBinancePreflightSnapshot,
   type RwaBinanceProductAvailability,
 } from "./RwaBinanceAutomationTypes";
-import type { RwaInstrumentSpec } from "./RwaNeutralExecutionTypes";
+import type {
+  RwaInstrumentSpec,
+  RwaProviderOrder,
+  RwaProviderOrderRequest,
+  RwaStrategyPnlSnapshot,
+} from "./RwaNeutralExecutionTypes";
 
 const spotBaseUrl = "https://api.binance.com";
 const futuresBaseUrl = "https://fapi.binance.com";
@@ -83,7 +89,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   async readPreflightSnapshot(): Promise<RwaBinancePreflightSnapshot> {
     const products = await this.loadProducts();
     if (!products.availability.available) {
-      throw new RwaBinanceProviderError("provider_product_unavailable", products.availability.message ?? "Binance XAUT 双腿产品不可用。");
+      throw new RwaBinanceProviderError("provider_product_unavailable", products.availability.message ?? "Binance XAUT 现货与永续对冲组合不可用。");
     }
     const [
       access,
@@ -155,6 +161,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       productAvailability: products.availability,
       spotAvailableUsdt: positiveNumber(usdt?.free),
       futuresAvailableUsdt: positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
+      availableUsdt: positiveNumber(usdt?.free) + positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
       existingSpotQuantityXaut: number(xaut?.free) + number(xaut?.locked),
       existingPerpetualQuantityXaut: Math.abs(number(position?.positionAmt)),
       openSpotOrderCount: list(spotOrdersValue).length,
@@ -181,6 +188,166 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
         perpetualTakerBps: number(record(futuresFeeValue).takerCommissionRate) * 10_000,
       },
     };
+  }
+
+  async setPerpetualLeverage(leverage: 1) {
+    await this.signedRequest(
+      "futures",
+      "/fapi/v1/leverage",
+      { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, leverage: String(leverage) },
+      true,
+      "POST",
+    );
+  }
+
+  async placeOrder(request: RwaProviderOrderRequest) {
+    assertWhitelistedOrder(request);
+    const scope = request.category === "spot" ? "spot" : "futures";
+    const path = request.category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
+    const result = record(await this.signedRequest(scope, path, {
+      symbol: RWA_BINANCE_SPOT_SYMBOL,
+      side: request.side.toUpperCase(),
+      type: "LIMIT",
+      timeInForce: "IOC",
+      quantity: decimal(request.quantityXaut),
+      price: decimal(request.limitPrice),
+      newClientOrderId: request.orderLinkId,
+      ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
+    }, true, "POST"));
+    const orderId = String(result.orderId ?? "");
+    const orderLinkId = String(result.clientOrderId ?? request.orderLinkId);
+    if (!orderId || orderLinkId !== request.orderLinkId) {
+      throw new RwaBinanceProviderError("provider_rejected", "Binance 未返回可核对的策略订单标识。");
+    }
+    return { orderId, orderLinkId };
+  }
+
+  async awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder> {
+    while (this.now() < deadlineAt) {
+      const order = await this.readOrder(category, orderId);
+      if (["Filled", "Cancelled", "Rejected"].includes(order.status)) return order;
+      await delay(Math.min(250, Math.max(1, deadlineAt - this.now())));
+    }
+    return this.readOrder(category, orderId).catch(() => {
+      throw new RwaBinanceProviderError("provider_timeout", "Binance 订单权威状态确认超时。");
+    });
+  }
+
+  async cancelOrder(category: "spot" | "linear", orderId: string) {
+    await this.signedRequest(
+      category === "spot" ? "spot" : "futures",
+      category === "spot" ? "/api/v3/order" : "/fapi/v1/order",
+      { symbol: RWA_BINANCE_SPOT_SYMBOL, orderId },
+      true,
+      "DELETE",
+    );
+  }
+
+  async cancelStrategyOrders(orderLinkPrefix: string) {
+    for (const category of ["spot", "linear"] as const) {
+      const scope = category === "spot" ? "spot" : "futures";
+      const path = category === "spot" ? "/api/v3/openOrders" : "/fapi/v1/openOrders";
+      const orders = list(await this.signedRequest(scope, path, { symbol: RWA_BINANCE_SPOT_SYMBOL })).map(record);
+      for (const order of orders) {
+        if (!String(order.clientOrderId ?? "").startsWith(orderLinkPrefix)) continue;
+        const orderId = String(order.orderId ?? "");
+        if (orderId) await this.cancelOrder(category, orderId);
+      }
+    }
+  }
+
+  async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {
+    const startTime = since ?? this.now() - 7 * 24 * 60 * 60 * 1_000;
+    const [
+      access,
+      spotOrdersValue,
+      futuresOrdersValue,
+      spotTradesValue,
+      futuresTradesValue,
+      spotOpenValue,
+      futuresOpenValue,
+      fundingValue,
+      spotBookValue,
+      premiumValue,
+    ] = await Promise.all([
+      this.validateAccess(),
+      this.signedRequest("spot", "/api/v3/allOrders", { symbol: RWA_BINANCE_SPOT_SYMBOL, startTime: String(startTime), limit: "1000" }),
+      this.signedRequest("futures", "/fapi/v1/allOrders", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, startTime: String(startTime), limit: "1000" }),
+      this.signedRequest("spot", "/api/v3/myTrades", { symbol: RWA_BINANCE_SPOT_SYMBOL, startTime: String(startTime), limit: "1000" }),
+      this.signedRequest("futures", "/fapi/v1/userTrades", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, startTime: String(startTime), limit: "1000" }),
+      this.signedRequest("spot", "/api/v3/openOrders", { symbol: RWA_BINANCE_SPOT_SYMBOL }),
+      this.signedRequest("futures", "/fapi/v1/openOrders", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL }),
+      this.signedRequest("futures", "/fapi/v1/income", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, incomeType: "FUNDING_FEE", startTime: String(startTime), limit: "1000" }),
+      this.publicRequest("spot", "/api/v3/ticker/bookTicker", { symbol: RWA_BINANCE_SPOT_SYMBOL }),
+      this.publicRequest("futures", "/fapi/v1/premiumIndex", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL }),
+    ]);
+    const matches = (order: Record<string, unknown>) => !orderLinkPrefix
+      || String(order.clientOrderId ?? "").startsWith(orderLinkPrefix);
+    const spotOrders = list(spotOrdersValue).map(record).filter(matches);
+    const futuresOrders = list(futuresOrdersValue).map(record).filter(matches);
+    const spotOrderIds = new Set(spotOrders.map((order) => String(order.orderId ?? "")));
+    const futuresOrderIds = new Set(futuresOrders.map((order) => String(order.orderId ?? "")));
+    const spotTrades = list(spotTradesValue).map(record).filter((trade) => spotOrderIds.has(String(trade.orderId ?? "")));
+    const futuresTrades = list(futuresTradesValue).map(record).filter((trade) => futuresOrderIds.has(String(trade.orderId ?? "")));
+    const spotFills = spotTrades.map((trade) => ({
+      side: boolean(trade.isBuyer) ? "Buy" : "Sell",
+      quantity: positiveNumber(trade.qty),
+      price: positiveNumber(trade.price),
+      time: number(trade.time),
+    }));
+    const futuresFills = futuresTrades.map((trade) => ({
+      side: String(trade.side ?? "").toUpperCase() === "SELL" ? "Sell" : "Buy",
+      quantity: positiveNumber(trade.qty),
+      price: positiveNumber(trade.price),
+      time: number(trade.time),
+    }));
+    const spotLedger = calculateSideLedger(spotFills, "Buy", "Sell");
+    const perpetualLedger = calculateSideLedger(futuresFills, "Sell", "Buy");
+    const spotMark = positiveNumber(record(spotBookValue).bidPrice);
+    const perpetualMark = positiveNumber(record(premiumValue).markPrice);
+    const spotUnrealized = spotLedger.quantity * (spotMark - spotLedger.averageEntryPrice);
+    const perpetualUnrealized = perpetualLedger.quantity * (perpetualLedger.averageEntryPrice - perpetualMark);
+    const feesUsd = spotTrades.reduce((sum, trade) => sum + commissionUsd(trade), 0)
+      + futuresTrades.reduce((sum, trade) => sum + Math.abs(number(trade.commission)), 0);
+    const fundingPnlUsd = list(fundingValue).map(record)
+      .filter((item) => !orderLinkPrefix || futuresOrders.length > 0)
+      .reduce((sum, item) => sum + number(item.income), 0);
+    const openOrders = [
+      ...list(spotOpenValue).map((item) => toOrder(item, "spot")),
+      ...list(futuresOpenValue).map((item) => toOrder(item, "linear")),
+    ].filter((order) => !orderLinkPrefix || order.orderLinkId.startsWith(orderLinkPrefix));
+    const spotNotional = spotLedger.quantity * spotMark;
+    const perpetualNotional = perpetualLedger.quantity * perpetualMark;
+    const realizedPnlUsd = spotLedger.realizedPnl + perpetualLedger.realizedPnl;
+    const unrealizedPnlUsd = spotUnrealized + perpetualUnrealized;
+    return {
+      accountId: access.accountId,
+      accountFingerprint: access.accountFingerprint,
+      strategyId: RWA_BINANCE_STRATEGY_ID,
+      capturedAt: this.now(),
+      legs: {
+        spot: sideSnapshot("spot_long", spotLedger, spotMark, spotNotional, spotUnrealized),
+        perpetual: sideSnapshot("perpetual_short", perpetualLedger, perpetualMark, perpetualNotional, perpetualUnrealized),
+      },
+      netDeltaXaut: spotLedger.quantity - perpetualLedger.quantity,
+      netDeltaUsd: spotNotional - perpetualNotional,
+      entryBasisBps: basisBps(spotLedger.averageEntryPrice, perpetualLedger.averageEntryPrice),
+      currentBasisBps: basisBps(spotMark, perpetualMark),
+      realizedPnlUsd,
+      unrealizedPnlUsd,
+      fundingPnlUsd,
+      feesUsd,
+      slippageUsd: 0,
+      netPnlUsd: realizedPnlUsd + unrealizedPnlUsd + fundingPnlUsd - feesUsd,
+      openOrders,
+    };
+  }
+
+  private async readOrder(category: "spot" | "linear", orderId: string) {
+    const scope = category === "spot" ? "spot" : "futures";
+    const path = category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
+    const value = await this.signedRequest(scope, path, { symbol: RWA_BINANCE_SPOT_SYMBOL, orderId });
+    return toOrder(value, category);
   }
 
   private async loadProducts() {
@@ -236,6 +403,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     path: string,
     params: Record<string, string> = {},
     allowTimestampRetry = true,
+    method: "GET" | "POST" | "DELETE" = "GET",
   ): Promise<unknown> {
     const offset = await this.serverTimeOffset();
     const query = new URLSearchParams();
@@ -248,13 +416,14 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     url.search = query.toString();
     try {
       return await this.parseResponse(await this.fetchFn(url, {
+        method,
         headers: { Accept: "application/json", "X-MBX-APIKEY": this.credentials.apiKey },
         signal: AbortSignal.timeout(5_000),
       }));
     } catch (error) {
       if (allowTimestampRetry && error instanceof RwaBinanceProviderError && error.providerCode === -1021) {
         this.timeOffset = null;
-        return this.signedRequest(scope, path, params, false);
+        return this.signedRequest(scope, path, params, false, method);
       }
       throw error;
     }
@@ -310,6 +479,115 @@ export class RwaBinanceProviderError extends Error {
   constructor(readonly category: string, message: string, readonly providerCode: number | null = null) {
     super(message);
   }
+}
+
+function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
+  if (request.symbol !== RWA_BINANCE_SPOT_SYMBOL || !["spot", "linear"].includes(request.category)) {
+    throw new RwaBinanceProviderError("provider_order_rejected", "Binance 真实执行仅允许 XAUTUSDT 现货与 USD-M 永续对冲组合。");
+  }
+  if (!/^[A-Za-z0-9._:/-]{1,36}$/.test(request.orderLinkId)) {
+    throw new RwaBinanceProviderError("provider_order_rejected", "Binance 策略 clientOrderId 格式无效。");
+  }
+  if (!(request.quantityXaut > 0 && request.quantityXaut <= 0.1) || !(request.limitPrice > 0)) {
+    throw new RwaBinanceProviderError("provider_order_rejected", "Binance 策略订单参数超出白名单。");
+  }
+  if (request.category === "spot" && request.reduceOnly) {
+    throw new RwaBinanceProviderError("provider_order_rejected", "Binance 现货侧订单不允许 reduceOnly。");
+  }
+  if (request.category === "linear") {
+    const permitted = (request.side === "Sell" && !request.reduceOnly) || (request.side === "Buy" && request.reduceOnly);
+    if (!permitted) throw new RwaBinanceProviderError("provider_order_rejected", "Binance 永续侧订单方向不符合对冲组合白名单。");
+  }
+}
+
+function toOrder(value: unknown, category: "spot" | "linear"): RwaProviderOrder {
+  const row = record(value);
+  const requested = number(row.origQty);
+  const filled = number(row.executedQty);
+  const rawStatus = String(row.status ?? "").toUpperCase();
+  const status: RwaProviderOrder["status"] = rawStatus === "NEW"
+    ? "New"
+    : rawStatus === "PARTIALLY_FILLED"
+      ? "PartiallyFilled"
+      : rawStatus === "FILLED"
+        ? "Filled"
+        : ["CANCELED", "EXPIRED", "EXPIRED_IN_MATCH"].includes(rawStatus)
+          ? "Cancelled"
+          : rawStatus === "REJECTED" ? "Rejected" : "Unknown";
+  return {
+    orderId: String(row.orderId ?? ""),
+    orderLinkId: String(row.clientOrderId ?? ""),
+    status,
+    requestedQuantityXaut: requested,
+    filledQuantityXaut: filled,
+    averagePrice: positiveNumberOrNull(row.avgPrice ?? (filled > 0 ? number(row.cummulativeQuoteQty) / filled : 0)),
+    feeUsd: category === "linear" ? Math.abs(number(row.commission)) : 0,
+    updatedAt: number(row.updateTime ?? row.time ?? Date.now()),
+  };
+}
+
+function calculateSideLedger(
+  fills: Array<{ side: string; quantity: number; price: number; time: number }>,
+  openSide: "Buy" | "Sell",
+  closeSide: "Buy" | "Sell",
+) {
+  let quantity = 0;
+  let averageEntryPrice = 0;
+  let realizedPnl = 0;
+  for (const fill of [...fills].sort((left, right) => left.time - right.time)) {
+    if (!fill.quantity || !fill.price) continue;
+    if (fill.side === openSide) {
+      averageEntryPrice = (averageEntryPrice * quantity + fill.price * fill.quantity) / (quantity + fill.quantity);
+      quantity += fill.quantity;
+    } else if (fill.side === closeSide && quantity > 0) {
+      const closed = Math.min(quantity, fill.quantity);
+      realizedPnl += openSide === "Buy"
+        ? (fill.price - averageEntryPrice) * closed
+        : (averageEntryPrice - fill.price) * closed;
+      quantity -= closed;
+      if (quantity <= 1e-12) {
+        quantity = 0;
+        averageEntryPrice = 0;
+      }
+    }
+  }
+  return { quantity, averageEntryPrice, realizedPnl };
+}
+
+function sideSnapshot(
+  kind: "spot_long" | "perpetual_short",
+  ledger: { quantity: number; averageEntryPrice: number; realizedPnl: number },
+  markPrice: number,
+  notionalUsd: number,
+  unrealizedPnlUsd: number,
+) {
+  return {
+    kind,
+    quantityXaut: ledger.quantity,
+    averageEntryPrice: positiveNumberOrNull(ledger.averageEntryPrice),
+    markPrice: positiveNumberOrNull(markPrice),
+    notionalUsd,
+    realizedPnlUsd: ledger.realizedPnl,
+    unrealizedPnlUsd,
+  };
+}
+
+function commissionUsd(trade: Record<string, unknown>) {
+  const commission = Math.abs(number(trade.commission));
+  const asset = String(trade.commissionAsset ?? "");
+  return asset === "XAUT" ? commission * positiveNumber(trade.price) : commission;
+}
+
+function basisBps(spot: number, perpetual: number) {
+  return spot > 0 && perpetual > 0 ? (perpetual - spot) / spot * 10_000 : null;
+}
+
+function decimal(value: number) {
+  return value.toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec {

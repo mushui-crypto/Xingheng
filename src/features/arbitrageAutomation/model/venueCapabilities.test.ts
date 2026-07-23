@@ -2,45 +2,40 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { normalizeProductAvailability, resolveVenueCapabilities } from "./venueCapabilities";
 
-test("Binance phase 1 allows authorization and Shadow checks but no provider writes", () => {
+test("Binance execution capability requires the server to explicitly enable provider writes", () => {
   const capability = resolveVenueCapabilities({
     venue: "binance",
-    implemented: true,
-    enabled: false,
-    phase: "phase_1_read_only_shadow",
-    providerWritesEnabled: false,
-  });
-  assert.equal(capability.canAuthorize, true);
-  assert.equal(capability.canRunReadOnlyPreflight, true);
-  assert.equal(capability.canExecute, false);
-  assert.match(capability.phaseLabel, /Shadow/);
-});
-
-test("Bybit keeps execution capability only when the server explicitly enables writes", () => {
-  const enabled = resolveVenueCapabilities({
-    venue: "bybit",
     implemented: true,
     enabled: true,
     phase: "execution_capable",
     providerWritesEnabled: true,
   });
-  assert.equal(enabled.canAuthorize, true);
-  assert.equal(enabled.canExecute, true);
+  assert.equal(capability.canAuthorize, true);
+  assert.equal(capability.canRunReadOnlyPreflight, true);
+  assert.equal(capability.canExecute, true);
+  assert.match(capability.phaseLabel, /受控真实执行/);
+});
 
-  const disabled = resolveVenueCapabilities({
-    venue: "bybit",
-    implemented: true,
-    enabled: false,
-    phase: "execution_capable",
-    providerWritesEnabled: true,
-  });
-  assert.equal(disabled.canAuthorize, true);
-  assert.equal(disabled.canExecute, true);
+test("Bybit and Binance share explicit execution-capable mapping while account readiness stays separate", () => {
+  for (const venue of ["bybit", "binance"] as const) {
+    const capability = resolveVenueCapabilities({
+      venue,
+      implemented: true,
+      enabled: false,
+      phase: "execution_capable",
+      providerWritesEnabled: true,
+    });
+    assert.equal(capability.canAuthorize, true);
+    assert.equal(capability.canRunReadOnlyPreflight, true);
+    assert.equal(capability.canExecute, true);
+    assert.match(capability.phaseLabel, /执行已关闭/);
+  }
 });
 
 test("unknown or incomplete capability states fail closed", () => {
   for (const input of [
     { venue: "binance" as const, implemented: true, enabled: false, phase: "future_phase", providerWritesEnabled: false },
+    { venue: "binance" as const, implemented: true, enabled: true, phase: "execution_capable", providerWritesEnabled: false },
     { venue: "binance" as const, implemented: true, enabled: false },
     { venue: "bitget" as const, implemented: false, enabled: false },
     { venue: "okx" as const, implemented: true, enabled: true, phase: "execution_capable", providerWritesEnabled: true },

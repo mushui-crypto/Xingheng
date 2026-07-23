@@ -91,6 +91,141 @@ test("Binance permission and provider errors are fail-closed and never echo raw 
   );
 });
 
+test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders", async () => {
+  const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    executionFetch(calls),
+    () => 1_000,
+  );
+
+  await assert.rejects(
+    client.placeOrder({
+      category: "spot",
+      symbol: "BTCUSDT" as "XAUTUSDT",
+      side: "Buy",
+      quantityXaut: 0.002,
+      limitPrice: 4_130,
+      reduceOnly: false,
+      orderLinkId: "rwa-test-bad",
+    }),
+    (error: unknown) => error instanceof RwaBinanceProviderError && error.category === "provider_order_rejected",
+  );
+  assert.equal(calls.length, 0);
+
+  await client.setPerpetualLeverage(1);
+  const spot = await client.placeOrder({
+    category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.002,
+    limitPrice: 4_130, reduceOnly: false, orderLinkId: "rwa-test-spot-1",
+  });
+  const perpetual = await client.placeOrder({
+    category: "linear", symbol: "XAUTUSDT", side: "Sell", quantityXaut: 0.002,
+    limitPrice: 4_128, reduceOnly: false, orderLinkId: "rwa-test-perp-1",
+  });
+  assert.equal((await client.awaitOrder("spot", spot.orderId, 1_001)).status, "Filled");
+  assert.equal((await client.awaitOrder("linear", perpetual.orderId, 1_001)).status, "Filled");
+  await client.cancelOrder("spot", spot.orderId);
+
+  const leverage = calls.find((item) => item.path === "/fapi/v1/leverage");
+  assert.equal(leverage?.method, "POST");
+  assert.equal(leverage?.params.get("symbol"), "XAUTUSDT");
+  assert.equal(leverage?.params.get("leverage"), "1");
+  const spotCreate = calls.find((item) => item.path === "/api/v3/order" && item.method === "POST");
+  assert.equal(spotCreate?.params.get("type"), "LIMIT");
+  assert.equal(spotCreate?.params.get("timeInForce"), "IOC");
+  assert.equal(spotCreate?.params.get("side"), "BUY");
+  assert.equal(spotCreate?.params.get("newClientOrderId"), "rwa-test-spot-1");
+  const perpetualCreate = calls.find((item) => item.path === "/fapi/v1/order" && item.method === "POST");
+  assert.equal(perpetualCreate?.params.get("side"), "SELL");
+  assert.equal(perpetualCreate?.params.get("reduceOnly"), "false");
+  assert.equal(calls.some((item) => item.path === "/api/v3/order" && item.method === "DELETE"), true);
+});
+
+test("Binance strategy cancellation and PnL ignore non-strategy orders and fills", async () => {
+  const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    executionFetch(calls),
+    () => 1_000,
+  );
+
+  await client.cancelStrategyOrders("rwa-owned");
+  const deletes = calls.filter((item) => item.method === "DELETE");
+  assert.deepEqual(deletes.map((item) => item.params.get("orderId")).sort(), ["11", "21"]);
+
+  const pnl = await client.readStrategyPnl("rwa-owned", 1);
+  assert.equal(pnl.legs.spot.quantityXaut, 0.002);
+  assert.equal(pnl.legs.perpetual.quantityXaut, 0.002);
+  assert.equal(pnl.openOrders.length, 2);
+  assert.ok(pnl.openOrders.every((order) => order.orderLinkId.startsWith("rwa-owned")));
+  assert.equal(JSON.stringify(pnl).includes("manual-order"), false);
+});
+
+function executionFetch(calls: Array<{ path: string; method: string; params: URLSearchParams }>): typeof fetch {
+  return async (input, init) => {
+    const url = new URL(String(input));
+    const method = init?.method ?? "GET";
+    calls.push({ path: url.pathname, method, params: new URLSearchParams(url.searchParams) });
+    if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+    if (url.pathname === "/sapi/v1/account/apiRestrictions") return json({
+      enableReading: true, enableSpotAndMarginTrading: true, enableFutures: true, enableWithdrawals: false, ipRestrict: true,
+    });
+    if (url.pathname === "/api/v3/account") return json({ uid: 42, canTrade: true, balances: [] });
+    if (url.pathname === "/fapi/v2/account") return json({ canTrade: true, multiAssetsMargin: false, assets: [] });
+    if (url.pathname === "/fapi/v1/positionSide/dual") return json({ dualSidePosition: false });
+    if (url.pathname === "/fapi/v1/leverage") return json({ leverage: 1, symbol: "XAUTUSDT" });
+    if (url.pathname === "/api/v3/order" && method === "POST") {
+      return json({ orderId: 101, clientOrderId: url.searchParams.get("newClientOrderId") });
+    }
+    if (url.pathname === "/fapi/v1/order" && method === "POST") {
+      return json({ orderId: 201, clientOrderId: url.searchParams.get("newClientOrderId") });
+    }
+    if ((url.pathname === "/api/v3/order" || url.pathname === "/fapi/v1/order") && method === "DELETE") {
+      return json({ orderId: Number(url.searchParams.get("orderId")), status: "CANCELED" });
+    }
+    if (url.pathname === "/api/v3/order") return json({
+      orderId: 101, clientOrderId: "rwa-test-spot-1", status: "FILLED", origQty: "0.002", executedQty: "0.002",
+      cummulativeQuoteQty: "8.26", updateTime: 1_000,
+    });
+    if (url.pathname === "/fapi/v1/order") return json({
+      orderId: 201, clientOrderId: "rwa-test-perp-1", status: "FILLED", origQty: "0.002", executedQty: "0.002",
+      avgPrice: "4128", updateTime: 1_000,
+    });
+    if (url.pathname === "/api/v3/openOrders") return json([
+      orderRow(11, "rwa-owned-spot"),
+      orderRow(12, "manual-order-spot"),
+    ]);
+    if (url.pathname === "/fapi/v1/openOrders") return json([
+      orderRow(21, "rwa-owned-perp"),
+      orderRow(22, "manual-order-perp"),
+    ]);
+    if (url.pathname === "/api/v3/allOrders") return json([
+      orderRow(11, "rwa-owned-spot", "FILLED"),
+      orderRow(12, "manual-order-spot", "FILLED"),
+    ]);
+    if (url.pathname === "/fapi/v1/allOrders") return json([
+      orderRow(21, "rwa-owned-perp", "FILLED"),
+      orderRow(22, "manual-order-perp", "FILLED"),
+    ]);
+    if (url.pathname === "/api/v3/myTrades") return json([
+      { orderId: 11, isBuyer: true, qty: "0.002", price: "4130", commission: "0.001", commissionAsset: "USDT", time: 10 },
+      { orderId: 12, isBuyer: true, qty: "9", price: "4130", commission: "9", commissionAsset: "USDT", time: 11 },
+    ]);
+    if (url.pathname === "/fapi/v1/userTrades") return json([
+      { orderId: 21, side: "SELL", qty: "0.002", price: "4128", commission: "0.001", time: 10 },
+      { orderId: 22, side: "SELL", qty: "9", price: "4128", commission: "9", time: 11 },
+    ]);
+    if (url.pathname === "/fapi/v1/income") return json([{ income: "0.01" }]);
+    if (url.pathname === "/api/v3/ticker/bookTicker") return json({ bidPrice: "4131", askPrice: "4132" });
+    if (url.pathname === "/fapi/v1/premiumIndex") return json({ markPrice: "4127" });
+    return json({ code: -1 }, 404);
+  };
+}
+
+function orderRow(orderId: number, clientOrderId: string, status = "NEW") {
+  return { orderId, clientOrderId, status, origQty: "0.002", executedQty: status === "FILLED" ? "0.002" : "0", updateTime: 1_000 };
+}
+
 function fixtureFetch(options: {
   calls?: Array<{ path: string; signed: boolean; timestamp: string | null }>;
   missingSpot?: boolean;

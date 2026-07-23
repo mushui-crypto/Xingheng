@@ -14,6 +14,8 @@ import type {
   RwaBinancePreflightSnapshot,
 } from "./RwaBinanceAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
+import { createNeutralExecutionRecord } from "./RwaNeutralHedgeExecutionEngine";
+import type { RwaProviderOrder, RwaProviderOrderRequest, RwaStrategyPnlSnapshot } from "./RwaNeutralExecutionTypes";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -31,8 +33,8 @@ test("Binance credentials remain user-isolated, default disabled, and reject wit
     const secondStatus = await second.getCredentialStatus();
     assert.equal(firstStatus.implemented, true);
     assert.equal(firstStatus.enabled, false);
-    assert.equal(firstStatus.phase, "phase_1_read_only_shadow");
-    assert.equal(firstStatus.providerWritesEnabled, false);
+    assert.equal(firstStatus.phase, "execution_capable");
+    assert.equal(firstStatus.providerWritesEnabled, true);
     assert.equal((firstStatus.productAvailability as any).available, true);
     assert.equal(firstStatus.credential.lifecycleStatus, "active");
     assert.equal(firstStatus.credential.maskedApiKey?.includes("fake-secret-a"), false);
@@ -52,7 +54,7 @@ test("Binance credentials remain user-isolated, default disabled, and reject wit
   }
 });
 
-test("Binance Shadow preflight checks precision and freshness but never enables provider writes", async () => {
+test("Binance preflight remains read-only and execute establishes the whitelisted hedge combination", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-preflight-"));
   try {
     const client = new FakeBinanceClient();
@@ -61,23 +63,8 @@ test("Binance Shadow preflight checks precision and freshness but never enables 
     const accountId = (await current.getCredentialStatus()).accountId;
     assert.ok(accountId);
 
-    await assert.rejects(
-      current.preflight(opportunity(), accountId!, "manual_entry"),
-      (error: unknown) => {
-        assert.ok(error instanceof RwaNeutralExecutionError);
-        assert.equal(error.category, "binance_provider_writes_disabled");
-        assert.equal((error.details?.report as any).marketChecksPassed, true);
-        assert.equal((error.details?.report as any).providerWritesEnabled, false);
-        return true;
-      },
-    );
-    assert.equal(client.readCount > 0, true);
-    assert.equal(client.writeCount, 0);
-    assert.throws(() => current.execute(), (error: unknown) =>
-      error instanceof RwaNeutralExecutionError && error.category === "binance_provider_writes_disabled");
-    assert.throws(() => current.closeAll(), (error: unknown) =>
-      error instanceof RwaNeutralExecutionError && error.category === "binance_provider_writes_disabled");
-    assert.equal(client.writeCount, 0);
+    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.setKillSwitch(false, accountId!);
 
     client.snapshot.fetchedAt = 1;
     await assert.rejects(
@@ -95,6 +82,145 @@ test("Binance Shadow preflight checks precision and freshness but never enables 
         && error.category === "preflight_rejected"
         && (error.details?.report as any).checks.some((item: any) => item.name === "perpetual_minimum" && !item.passed),
     );
+    client.snapshot.perpetual.minOrderQty = 0.001;
+
+    const challenge = await current.preflight(opportunity(), accountId!, "manual_entry");
+    assert.equal(client.writeCount, 0);
+    assert.equal(challenge.report.providerWritesEnabled, true);
+    const execution = await current.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "binance:entry:1",
+    });
+    assert.equal(execution.state, "hedged");
+    assert.equal(client.writeCount, 3);
+    const repeated = await current.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "binance:entry:1",
+    });
+    assert.equal(repeated.executionId, execution.executionId);
+    assert.equal(client.writeCount, 3);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance partial spot fill sizes the perpetual side from authoritative fill quantity", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-partial-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: [0.5, 1] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:partial:1"));
+    assert.equal(execution.state, "hedged");
+    assert.equal(execution.hedgedQuantityXaut, 0.001);
+    assert.equal(client.placedRequests[1]?.category, "linear");
+    assert.equal(client.placedRequests[1]?.quantityXaut, 0.001);
+    assert.equal(client.cancelCount, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance perpetual-side failure exits the filled spot side and leaves no strategy exposure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-compensation-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: [1, "throw", 1] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:compensate:1"));
+    assert.equal(execution.state, "failed");
+    const pnl = await client.readStrategyPnl();
+    assert.equal(pnl.legs.spot.quantityXaut, 0);
+    assert.equal(pnl.legs.perpetual.quantityXaut, 0);
+    assert.equal(client.strategyCancelScopes.length > 0, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance authoritative order timeout cancels the order and never creates an unhedged position", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-timeout-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: ["new"] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:timeout:1"));
+    assert.equal(execution.state, "failed");
+    assert.equal(client.cancelCount > 0, true);
+    assert.equal((await client.readStrategyPnl()).netDeltaXaut, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance close-all retries partial exits and restart recovery disarms persisted execution", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-recovery-"));
+  try {
+    const client = new FakeBinanceClient();
+    const { current, store } = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(current);
+    client.seedStrategyExposure(0.002, 0.002);
+    client.fillPlan.push(0.5, 1, 1);
+    const closed = await current.closeAll({ accountId, idempotencyKey: "binance:close:1" });
+    assert.equal(closed.state, "closed");
+    assert.equal(client.cancelCount, 1);
+    assert.equal((await client.readStrategyPnl()).netDeltaXaut, 0);
+
+    client.seedStrategyExposure(0.002, 0.002);
+    const state = await store.readState();
+    state.executions.push(createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${store.userDomain}`,
+      idempotencyKey: `${store.userDomain}:restart-pending`,
+      challengeId: "restart-pending",
+      now,
+    }));
+    await store.writeState(state);
+    const restarted = new RwaBinanceAutomationService(store, () => client, () => now, () => false);
+    await restarted.initialize();
+    const restoredState = await store.readState();
+    assert.equal(restoredState.executions.at(-1)?.state, "closed");
+    assert.equal((await client.readStrategyPnl()).netDeltaXaut, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance rejects kill switches, account mismatch, unknown fields, and non-XAUT opportunities before writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-guards-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    await current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await current.getCredentialStatus()).accountId!;
+    await assert.rejects(
+      current.preflight(opportunity(), accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "global_execution_disabled",
+    );
+    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.setKillSwitch(false, accountId);
+    await assert.rejects(
+      current.preflight(opportunity(), "binance:other-account", "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "account_mismatch",
+    );
+    const unsupported = opportunity();
+    unsupported.longLeg.asset = "PAXG";
+    await assert.rejects(
+      current.preflight(unsupported, accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "adapter_opportunity_unsupported",
+    );
+    await assert.rejects(
+      current.execute({ accountId, challengeId: "x", challengeToken: "y", idempotencyKey: "valid-key", symbol: "BTCUSDT" }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "invalid_request",
+    );
     assert.equal(client.writeCount, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -102,6 +228,10 @@ test("Binance Shadow preflight checks precision and freshness but never enables 
 });
 
 function service(directory: string, userId: string, client: FakeBinanceClient) {
+  return serviceHarness(directory, userId, client).current;
+}
+
+function serviceHarness(directory: string, userId: string, client: FakeBinanceClient) {
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
     userId,
     venue: "binance",
@@ -109,7 +239,19 @@ function service(directory: string, userId: string, client: FakeBinanceClient) {
     credentialPath: join(directory, `${userId}-credentials.json`),
     statePath: join(directory, `${userId}-state.json`),
   });
-  return new RwaBinanceAutomationService(store, () => client, () => now, () => true);
+  return { current: new RwaBinanceAutomationService(store, () => client, () => now, () => false), store };
+}
+
+async function activate(current: RwaBinanceAutomationService) {
+  await current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+  const accountId = (await current.getCredentialStatus()).accountId!;
+  await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+  await current.setKillSwitch(false, accountId);
+  return accountId;
+}
+
+function executeInput(accountId: string, challenge: { challengeId: string; challengeToken: string }, idempotencyKey: string) {
+  return { accountId, challengeId: challenge.challengeId, challengeToken: challenge.challengeToken, idempotencyKey };
 }
 
 class FakeBinanceClient implements RwaBinanceClient {
@@ -117,8 +259,17 @@ class FakeBinanceClient implements RwaBinanceClient {
   writeCount = 0;
   readonly access;
   snapshot: RwaBinancePreflightSnapshot;
+  private orderSequence = 0;
+  private readonly requests = new Map<string, RwaProviderOrderRequest>();
+  private spotQuantity = 0;
+  private perpetualQuantity = 0;
+  readonly fillPlan: Array<number | "throw" | "new">;
+  readonly placedRequests: RwaProviderOrderRequest[] = [];
+  readonly strategyCancelScopes: string[] = [];
+  cancelCount = 0;
 
-  constructor(input: { permissions?: RwaBinancePermissions } = {}) {
+  constructor(input: { permissions?: RwaBinancePermissions; fillPlan?: Array<number | "throw" | "new"> } = {}) {
+    this.fillPlan = [...input.fillPlan ?? []];
     const currentPermissions = input.permissions ?? permissions();
     this.access = {
       accountId: "binance:test-account",
@@ -139,6 +290,7 @@ class FakeBinanceClient implements RwaBinanceClient {
       },
       spotAvailableUsdt: 20,
       futuresAvailableUsdt: 20,
+      availableUsdt: 40,
       existingSpotQuantityXaut: 0,
       existingPerpetualQuantityXaut: 0,
       openSpotOrderCount: 0,
@@ -186,6 +338,91 @@ class FakeBinanceClient implements RwaBinanceClient {
     this.readCount += 1;
     return this.snapshot.productAvailability;
   }
+
+  async setPerpetualLeverage() {
+    this.writeCount += 1;
+  }
+
+  async placeOrder(request: RwaProviderOrderRequest) {
+    this.writeCount += 1;
+    const orderId = String(++this.orderSequence);
+    this.requests.set(orderId, request);
+    this.placedRequests.push(request);
+    return { orderId, orderLinkId: request.orderLinkId };
+  }
+
+  async awaitOrder(_category: "spot" | "linear", orderId: string): Promise<RwaProviderOrder> {
+    const request = this.requests.get(orderId)!;
+    const behavior = this.fillPlan.shift() ?? 1;
+    if (behavior === "throw") throw new Error("fake provider rejected order");
+    const fillRatio = behavior === "new" ? 0 : behavior;
+    const filledQuantityXaut = request.quantityXaut * fillRatio;
+    if (request.category === "spot") {
+      this.spotQuantity += request.side === "Buy" ? filledQuantityXaut : -filledQuantityXaut;
+    } else {
+      this.perpetualQuantity += request.side === "Sell" ? filledQuantityXaut : -filledQuantityXaut;
+    }
+    return {
+      orderId,
+      orderLinkId: request.orderLinkId,
+      status: behavior === "new" ? "New" : fillRatio < 1 ? "PartiallyFilled" : "Filled",
+      requestedQuantityXaut: request.quantityXaut,
+      filledQuantityXaut,
+      averagePrice: request.limitPrice,
+      feeUsd: 0.001,
+      updatedAt: now,
+    };
+  }
+
+  async cancelOrder() {
+    this.writeCount += 1;
+    this.cancelCount += 1;
+  }
+
+  async cancelStrategyOrders(scope: string) {
+    this.strategyCancelScopes.push(scope);
+  }
+
+  seedStrategyExposure(spotQuantity: number, perpetualQuantity: number) {
+    this.spotQuantity = spotQuantity;
+    this.perpetualQuantity = perpetualQuantity;
+  }
+
+  async readStrategyPnl(): Promise<RwaStrategyPnlSnapshot> {
+    return {
+      accountId: this.access.accountId,
+      accountFingerprint: this.access.accountFingerprint,
+      strategyId: "binance-xaut-spot-perp-v1",
+      capturedAt: now,
+      legs: {
+        spot: side("spot_long", this.spotQuantity),
+        perpetual: side("perpetual_short", this.perpetualQuantity),
+      },
+      netDeltaXaut: this.spotQuantity - this.perpetualQuantity,
+      netDeltaUsd: 0,
+      entryBasisBps: null,
+      currentBasisBps: null,
+      realizedPnlUsd: 0,
+      unrealizedPnlUsd: 0,
+      fundingPnlUsd: 0,
+      feesUsd: 0,
+      slippageUsd: 0,
+      netPnlUsd: 0,
+      openOrders: [],
+    };
+  }
+}
+
+function side(kind: "spot_long" | "perpetual_short", quantityXaut: number) {
+  return {
+    kind,
+    quantityXaut: Math.max(0, quantityXaut),
+    averageEntryPrice: quantityXaut > 0 ? 4_130 : null,
+    markPrice: 4_130,
+    notionalUsd: Math.max(0, quantityXaut) * 4_130,
+    realizedPnlUsd: 0,
+    unrealizedPnlUsd: 0,
+  };
 }
 
 function permissions(overrides: Partial<RwaBinancePermissions> = {}): RwaBinancePermissions {

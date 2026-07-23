@@ -4,6 +4,7 @@ import type {
   AutomationConsoleClient,
   AutomationConsoleSnapshot,
   AutomationCredentialSummary,
+  AutomationExecutionResult,
   AutomationPreflight,
   AutomationPreflightMode,
   CredentialDraft,
@@ -13,9 +14,11 @@ import { AutomationConsoleContractError } from "./arbitrageAutomationConsole";
 
 export function createFakeAutomationConsoleClient(initialSnapshot: AutomationConsoleSnapshot = createAutomationConsoleFixture()): AutomationConsoleClient {
   let snapshot = structuredClone(initialSnapshot);
+  const challenges = new Map<string, AutomationPreflight>();
   return {
     async load(signal) {
       if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+      challenges.clear();
       return structuredClone({ ...snapshot, generatedAt: Date.now() });
     },
     async requestPreflight(candidateId, mode) {
@@ -28,11 +31,17 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       if (!account?.accountId) throw new AutomationConsoleContractError(409, "没有可用执行账户。", null, "credentials_unconfigured");
       if (!candidate.canRunReadOnlyPreflight) throw new AutomationConsoleContractError(501, "当前阶段不开放预检。", null, "venue_capability_unavailable");
       if (!candidate.canExecute) return fakeShadowCheck(candidate, account.accountId, mode);
-      return fakePreflight(candidate, account.accountId, mode);
+      if (!candidate.executionReady) throw new AutomationConsoleContractError(409, "执行开关或急停状态尚未就绪。", null, "global_execution_disabled");
+      const preflight = fakePreflight(candidate, { ...account, accountId: account.accountId }, mode);
+      challenges.set(preflight.challengeId, preflight);
+      return preflight;
     },
     async confirmExecution(challengeId) {
-      if (!challengeId) throw new AutomationConsoleContractError(409, "challenge 无效。", null, "challenge_invalid");
-      return receipt("Fake contract 已完成确认演练，未发送任何真实订单。");
+      const challenge = challenges.get(challengeId);
+      if (!challenge || challenge.expiresAt <= Date.now()) throw new AutomationConsoleContractError(409, "执行确认已失效。", null, "challenge_invalid");
+      challenges.delete(challengeId);
+      const execution = fakeExecution(challenge.venue, challenge.accountId, "hedged");
+      return receipt("Fake contract 已完成执行状态演练，未发送任何真实订单。", execution);
     },
     async validateCredential(draft) {
       validateDraft(draft);
@@ -47,15 +56,28 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       snapshot = { ...snapshot, globalExecutionEnabled: false, strategyEnabled: false, credentials: snapshot.credentials.map((item) => item.accountId === accountId ? { ...item, accountId: null, status: "unconfigured", maskedKey: null, uidFingerprint: null, enabled: false, defaultExecutionAccount: false } : item) };
       return receipt("Fake contract 已演练解绑。");
     },
-    async validateParameters(draft) {
-      const invalid = snapshot.parameters.find((parameter) => {
+    async validateParameters(venue, draft) {
+      const invalid = snapshot.parameters.find((parameter) => parameter.venue === venue && (() => {
         const value = draft[parameter.id];
         return !Number.isFinite(value) || value < parameter.min || value > parameter.max;
-      });
+      })());
       if (invalid) throw new AutomationConsoleContractError(422, `${invalid.label} 超出允许范围。`, null, "config_out_of_range");
       return receipt("Fake contract 已演练参数校验。");
     },
-    async performSafetyAction(action: SafetyAction) { return receipt(`Fake contract 已演练 ${action.type}。`); },
+    async performSafetyAction(action: SafetyAction) {
+      if (action.type === "close_all") return receipt("Fake contract 已演练退出对冲组合。", fakeExecution(action.venue, `${action.venue}-primary`, "closed"));
+      snapshot = {
+        ...snapshot,
+        venueControls: snapshot.venueControls.map((control) => {
+          if (control.venue !== action.venue) return control;
+          if (action.type === "toggle_global_execution") return { ...control, globalExecutionEnabled: action.enabled };
+          if (action.type === "toggle_strategy") return { ...control, strategyEnabled: action.enabled };
+          return { ...control, killSwitchActive: action.active };
+        }),
+      };
+      challenges.clear();
+      return receipt(`Fake contract 已演练 ${action.type}。`);
+    },
     async closePosition() { return receipt("Fake contract 已演练退出持仓。"); },
   };
 }
@@ -69,14 +91,14 @@ function credentialSummary(draft: CredentialDraft): AutomationCredentialSummary 
   const binance = draft.venue === "binance";
   return {
     accountId: draft.accountId ?? `${draft.venue}-fixture`, venue: draft.venue, implemented: true,
-    note: binance ? "BINANCE 只读验证账户" : `${draft.venue.toUpperCase()} 执行账户`,
+    note: `${draft.venue.toUpperCase()} 执行账户`,
     enabled: false,
-    phase: binance ? "phase_1_read_only_shadow" : "execution_capable",
-    providerWritesEnabled: !binance,
+    phase: "execution_capable",
+    providerWritesEnabled: true,
     canAuthorize: true,
     canRunReadOnlyPreflight: true,
-    canExecute: !binance,
-    phaseLabel: binance ? "只读验证 / Shadow" : "执行已关闭",
+    canExecute: true,
+    phaseLabel: "执行已关闭",
     status: "connected",
     maskedKey: `${draft.venue.slice(0, 3).toUpperCase()}••••${suffix}`, uidFingerprint: `${draft.venue.toUpperCase()}-UID-${suffix}`,
     permissions: {
@@ -92,6 +114,7 @@ function credentialSummary(draft: CredentialDraft): AutomationCredentialSummary 
     ipWhitelist: [], ipWhitelistConfigured: false, warnings: ["未绑定 IP 白名单。"], accountMode: binance ? "single_asset_one_way" : "uta", lastVerifiedAt: Date.now(),
     defaultExecutionAccount: true, assetStatisticsEnabled: true, activeOrderCount: 0, openPositionCount: 0,
     verificationChecks: checks(false),
+    accountSnapshot: null,
   };
 }
 
@@ -106,20 +129,28 @@ function checks(ip: boolean): AutomationCredentialSummary["verificationChecks"] 
   ];
 }
 
-function fakePreflight(candidate: AutomationConsoleSnapshot["candidates"][number], accountId: string, mode: AutomationPreflightMode): AutomationPreflight {
+function fakePreflight(candidate: AutomationConsoleSnapshot["candidates"][number], account: AutomationCredentialSummary & { accountId: string }, mode: AutomationPreflightMode): AutomationPreflight {
   const warnings = mode === "manual_entry"
     ? ["当前收益条件未达到自动策略要求", "Funding、基差与持续性需要用户自行判断"]
     : [];
-  const confirmations = ["已核对执行账户和两腿", "已理解 Mainnet 风险", "确认 challenge 为一次性短效凭证"];
+  const confirmations = ["已核对执行账户及现货侧与永续侧", "已理解 Mainnet 风险", "确认执行凭证为一次性短效凭证"];
   if (mode === "manual_entry") confirmations.push("已阅读并接受上述手动决策风险");
   return {
     challengeId: `fake-${candidate.id}`, challengeToken: "fake-token", idempotencyKey: "fake-idempotency", expiresAt: Date.now() + 60_000,
-    candidateId: candidate.id, accountId, mode, estimatedCapitalRequiredUsd: 25, totalBudgetUsd: 25,
+    candidateId: candidate.id, accountId: account.accountId, venue: candidate.venue, mode, estimatedCapitalRequiredUsd: 25, totalBudgetUsd: 25,
     exactLegs: [
       { venue: candidate.longLeg.venue, symbol: candidate.longLeg.symbol, side: "buy", quantity: 0.002, referencePrice: 3_360.2, estimatedFeeUsd: null },
       { venue: candidate.shortLeg.venue, symbol: candidate.shortLeg.symbol, side: "sell", quantity: 0.002, referencePrice: 3_361.1, estimatedFeeUsd: null },
     ],
-    estimatedTotalFeesUsd: null, estimatedSlippageUsd: null, maximumLossUsd: null, warnings, confirmations,
+    estimatedTotalFeesUsd: 0.04, estimatedSlippageUsd: 0.03, maximumLossUsd: 25, warnings, confirmations,
+    checks: [
+      { id: "permissions", passed: true, value: true, limit: true, message: "读取、现货与合约交易权限可用，提现权限关闭。" },
+      { id: "depth", passed: true, value: true, limit: true, message: "现货侧与永续侧盘口深度覆盖计划名义。" },
+    ],
+    accountSnapshot: account.accountSnapshot,
+    entryBasisBps: 2.68,
+    fundingRate: 0.0001,
+    estimatedNetAprPercent: 9.2,
   };
 }
 
@@ -145,13 +176,32 @@ function fakeShadowCheck(candidate: AutomationConsoleSnapshot["candidates"][numb
     estimatedNetAprPercent: 8.6,
     marketChecksPassed: true,
     checks: [
-      { id: "product_pair", passed: true, message: "Binance Mainnet 必须同时存在 XAUTUSDT 现货与 USD-M 永续。" },
-      { id: "position_mode", passed: true, message: "第一阶段只接受 one-way 持仓模式。" },
+      { id: "product_pair", passed: true, message: "Binance Mainnet 必须同时存在 XAUTUSDT 现货侧与 USD-M 永续侧。" },
+      { id: "position_mode", passed: true, message: "当前连接只接受 one-way 持仓模式。" },
     ],
     warnings: ["Binance API Key 未配置固定 IP 白名单；这是高风险配置。"],
     generatedAt: Date.now(),
-    message: "市场与账户只读检查通过，但 Binance 第一阶段不签发执行 challenge。",
+    message: "市场与账户只读检查通过。",
   };
 }
 
-function receipt(message: string): AutomationActionReceipt { return { ok: true, simulated: true, message }; }
+function fakeExecution(venue: AutomationExecutionResult["venue"], accountId: string, state: AutomationExecutionResult["state"]): AutomationExecutionResult {
+  const now = Date.now();
+  return {
+    venue,
+    accountId,
+    executionId: `fake-execution-${state}`,
+    state,
+    message: state === "closed" ? "现货与永续对冲组合已退出。" : "现货侧与永续侧已完成对冲。",
+    errorCategory: null,
+    hedgedQuantityXaut: state === "closed" ? 0 : 0.002,
+    unhedgedDurationMs: 1_250,
+    spotOrder: { orderId: "fake-spot", orderLinkId: "fake-spot-link", status: "Filled", requestedQuantityXaut: 0.002, filledQuantityXaut: 0.002, averagePrice: 3360.2, feeUsd: 0.01, updatedAt: now },
+    perpetualOrders: [{ orderId: "fake-perpetual", orderLinkId: "fake-perpetual-link", status: "Filled", requestedQuantityXaut: 0.002, filledQuantityXaut: 0.002, averagePrice: 3361.1, feeUsd: 0.01, updatedAt: now }],
+    compensationOrders: [],
+    createdAt: now - 1_250,
+    updatedAt: now,
+  };
+}
+
+function receipt(message: string, execution?: AutomationExecutionResult): AutomationActionReceipt { return { ok: true, simulated: true, message, execution }; }

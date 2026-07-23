@@ -149,6 +149,9 @@ registerArbitrageRoutes(
       new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({ userId, venue: "binance" }),
       (credentials) => new RwaBinanceMainnetClient(credentials),
     );
+    void binance.initialize().catch(() => {
+      // Fail closed for this user's Binance account without exposing provider details.
+    });
     return new RwaAutomationConnectorRegistry([
       new RwaBybitAutomationConnector(rwaExecution),
       new RwaBinanceAutomationConnector(binance),

@@ -46,6 +46,7 @@ export type AutomationCandidate = {
   adapterImplemented: boolean;
   canRunReadOnlyPreflight: boolean;
   canExecute: boolean;
+  executionReady: boolean;
   safetyEligible: boolean;
   safetyDisqualifiers: string[];
   automationEligible: boolean;
@@ -123,6 +124,38 @@ export type AutomationCredentialSummary = {
   }>;
   activeOrderCount: number;
   openPositionCount: number;
+  accountSnapshot: AutomationPrivateAccountSnapshot | null;
+};
+
+export type AutomationInstrumentSnapshot = {
+  status: string;
+  bid: number;
+  ask: number;
+  mark: number | null;
+  depthUsd: number | null;
+  minOrderQty: number;
+  qtyStep: number;
+  minNotionalUsd: number;
+  priceTick: number;
+  fundingRate: number | null;
+  fundingIntervalHours: number | null;
+  nextFundingTime: number | null;
+};
+
+export type AutomationPrivateAccountSnapshot = {
+  venue: AutomationVenue;
+  accountId: string;
+  fetchedAt: number;
+  spotAvailableUsdt: number;
+  futuresAvailableUsdt: number;
+  spotXaut: number;
+  perpetualXaut: number;
+  openSpotOrders: number;
+  openPerpetualOrders: number;
+  spot: AutomationInstrumentSnapshot | null;
+  perpetual: AutomationInstrumentSnapshot | null;
+  spotTakerBps: number | null;
+  perpetualTakerBps: number | null;
 };
 
 export type AutomationProductAvailability = {
@@ -145,6 +178,18 @@ export type AutomationParameter = {
   max: number;
   step: number;
   unit: "USDT" | "%" | "bps" | "seconds";
+  venue: AutomationVenue;
+};
+
+export type AutomationVenueControl = {
+  venue: AutomationVenue;
+  accountId: string | null;
+  globalExecutionEnabled: boolean;
+  strategyEnabled: boolean;
+  killSwitchActive: boolean;
+  serverGlobalKillSwitchActive: boolean;
+  enabled: boolean;
+  parameters: AutomationParameter[];
 };
 
 export type AutomationAlert = {
@@ -179,6 +224,7 @@ export type AutomationConsoleSnapshot = {
   positionGroups: AutomationPositionGroup[];
   pnlSeries: Array<{ timestamp: number; netPnl: number }>;
   parameters: AutomationParameter[];
+  venueControls: AutomationVenueControl[];
   alerts: AutomationAlert[];
   productionEgressIps: string[];
 };
@@ -191,6 +237,7 @@ export type AutomationPreflight = {
   challengeToken: string;
   idempotencyKey: string;
   mode: AutomationPreflightMode;
+  venue: AutomationVenue;
   exactLegs: Array<{
     venue: AutomationVenue;
     symbol: string;
@@ -206,6 +253,17 @@ export type AutomationPreflight = {
   maximumLossUsd: number | null;
   warnings: string[];
   confirmations: string[];
+  checks: Array<{
+    id: string;
+    passed: boolean;
+    value: number | string | boolean | null;
+    limit: number | string | boolean | null;
+    message: string;
+  }>;
+  accountSnapshot: AutomationPrivateAccountSnapshot | null;
+  entryBasisBps: number | null;
+  fundingRate: number | null;
+  estimatedNetAprPercent: number | null;
 };
 
 export type AutomationShadowCheck = {
@@ -238,12 +296,63 @@ export type AutomationShadowCheck = {
   message: string;
 };
 
-export type AutomationPreflightResult = AutomationPreflight | AutomationShadowCheck;
+export type AutomationPreflightFailure = {
+  kind: "preflight_rejected";
+  venue: AutomationVenue;
+  candidateId: string;
+  accountId: string;
+  mode: AutomationPreflightMode;
+  checks: AutomationPreflight["checks"];
+  warnings: string[];
+  message: string;
+  generatedAt: number | null;
+};
+
+export type AutomationPreflightResult = AutomationPreflight | AutomationShadowCheck | AutomationPreflightFailure;
 
 export type AutomationActionReceipt = {
   ok: boolean;
   simulated: boolean;
   message: string;
+  execution?: AutomationExecutionResult;
+};
+
+export type AutomationExecutionState =
+  | "accepted"
+  | "opening_spot"
+  | "opening_perpetual"
+  | "hedged"
+  | "compensating"
+  | "closed"
+  | "failed"
+  | "manual_intervention"
+  | "unknown";
+
+export type AutomationExecutionOrder = {
+  orderId: string;
+  orderLinkId: string;
+  status: string;
+  requestedQuantityXaut: number;
+  filledQuantityXaut: number;
+  averagePrice: number | null;
+  feeUsd: number;
+  updatedAt: number;
+};
+
+export type AutomationExecutionResult = {
+  venue: AutomationVenue;
+  accountId: string;
+  executionId: string;
+  state: AutomationExecutionState;
+  message: string;
+  errorCategory: string | null;
+  hedgedQuantityXaut: number;
+  unhedgedDurationMs: number | null;
+  spotOrder: AutomationExecutionOrder | null;
+  perpetualOrders: AutomationExecutionOrder[];
+  compensationOrders: AutomationExecutionOrder[];
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type CredentialDraft = {
@@ -261,10 +370,10 @@ export type CredentialDraft = {
 export type ParameterDraft = Record<string, number>;
 
 export type SafetyAction =
-  | { type: "toggle_global_execution"; enabled: boolean }
-  | { type: "toggle_strategy"; enabled: boolean }
-  | { type: "kill_switch" }
-  | { type: "close_all" };
+  | { type: "toggle_global_execution"; venue: AutomationVenue; enabled: boolean }
+  | { type: "toggle_strategy"; venue: AutomationVenue; enabled: boolean }
+  | { type: "set_kill_switch"; venue: AutomationVenue; active: boolean }
+  | { type: "close_all"; venue: AutomationVenue; idempotencyKey: string };
 
 export type AutomationConsoleClient = {
   load(signal?: AbortSignal): Promise<AutomationConsoleSnapshot>;
@@ -272,7 +381,7 @@ export type AutomationConsoleClient = {
   confirmExecution(challengeId: string): Promise<AutomationActionReceipt>;
   validateCredential(draft: CredentialDraft): Promise<AutomationCredentialSummary>;
   deleteCredential(accountId: string): Promise<AutomationActionReceipt>;
-  validateParameters(draft: ParameterDraft): Promise<AutomationActionReceipt>;
+  validateParameters(venue: AutomationVenue, draft: ParameterDraft): Promise<AutomationActionReceipt>;
   performSafetyAction(action: SafetyAction): Promise<AutomationActionReceipt>;
   closePosition(positionId: string): Promise<AutomationActionReceipt>;
 };

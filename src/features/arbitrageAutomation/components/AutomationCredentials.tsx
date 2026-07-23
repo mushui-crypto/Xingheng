@@ -116,7 +116,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
     <>
       <ConsoleSection
         title="API 账户"
-        description="V1 每个 venue 限制一个账户；Bybit 为受控执行，Binance 第一阶段仅开放凭证验证与只读 Shadow 检查。"
+        description="V1 每个交易所限制一个执行账户；Bybit 与 Binance 均受服务端开关、实时预检和二次确认约束。"
         actions={<Button onClick={() => openAuthorization()} type="button"><Plus size={15} />添加 API 授权</Button>}
       >
         <div className="border-b border-sky-400/20 bg-sky-400/[0.05] px-4 py-3 text-xs leading-5 text-sky-100 sm:px-5">浏览器不持久化；正式接入通过登录用户 HTTPS 会话提交；服务端使用 AES-GCM 加密保存；Secret 不回显；主密钥由生产 Secret 管理。</div>
@@ -127,7 +127,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
             const hasExposure = credential.activeOrderCount > 0 || credential.openPositionCount > 0;
             const requiresManualExchangeAction = hasExposure && (credential.status === "expired" || credential.status === "revoked");
             const configured = credential.accountId !== null && credential.status !== "unconfigured";
-            return <React.Fragment key={`${credential.venue}:${credential.accountId ?? "unconfigured"}`}><tr><td className={`${tableCellClass} font-semibold text-white`}>{venueLabel(credential.venue)}</td><td className={tableCellClass}><div className="space-y-1.5"><CredentialStatus status={credential.status} /><p className="text-xs text-muted">{credential.phaseLabel}</p>{credential.venue === "binance" ? <p className="text-xs text-amber-200">实盘执行未开放</p> : null}</div></td><td className={`${tableCellClass} font-mono`}>{credential.maskedKey ?? "-"}</td><td className={`${tableCellClass} font-mono`}>{credential.uidFingerprint ?? "-"}</td><td className={tableCellClass}>{configured ? <PermissionSummary credential={credential} /> : "-"}</td><td className={tableCellClass}><ProductAvailabilitySummary credential={credential} /></td><td className={tableCellClass}>{credential.ipWhitelistConfigured === true ? "已配置" : credential.ipWhitelistConfigured === false ? <span className="text-amber-200">未配置</span> : "-"}</td><td className={tableCellClass}>{credential.lastVerifiedAt ? formatDate(credential.lastVerifiedAt) : "-"}</td><td className={tableCellClass}>{credential.defaultExecutionAccount ? "默认执行" : configured ? credential.canExecute ? "执行账户" : "只读账户" : "-"}</td><td className={`${tableCellClass} text-right`}><div className="flex justify-end gap-2">{!credential.canAuthorize ? <Button className="min-h-9 px-3 py-2 text-xs" disabled type="button" variant="secondary">{credential.implemented ? "能力未知" : "暂未接入"}</Button> : <Button className="min-h-9 px-3 py-2 text-xs" onClick={() => credential.status === "unconfigured" ? openAuthorization(credential.venue) : setRotationTarget(credential)} type="button" variant="secondary">{credential.status === "unconfigured" ? <><KeyRound size={14} />配置</> : <><RotateCw size={14} />轮换</>}</Button>}{configured && credential.accountId ? hasExposure ? <Button className="min-h-9 px-3 py-2 text-xs" onClick={onGoToSafety} type="button" variant="danger">先退出仓位</Button> : <Button aria-label={`删除 ${venueLabel(credential.venue)} API 账户`} className="min-h-9 px-3 py-2 text-xs" onClick={() => { setDeleteTarget(credential); setDeletePhrase(""); }} type="button" variant="danger"><Trash2 size={14} /></Button> : null}</div></td></tr>{requiresManualExchangeAction ? <tr><td className="border-b border-red-400/20 bg-red-400/[0.055] px-4 py-3 text-sm text-red-100" colSpan={10}><AlertTriangle className="mr-2 inline" size={15} />凭证已失效且仍有风险敞口，自动退出不可用。请立即前往 {venueLabel(credential.venue)} 人工处理订单与仓位。</td></tr> : null}</React.Fragment>;
+            return <React.Fragment key={`${credential.venue}:${credential.accountId ?? "unconfigured"}`}><tr><td className={`${tableCellClass} font-semibold text-white`}>{venueLabel(credential.venue)}</td><td className={tableCellClass}><div className="space-y-1.5"><CredentialStatus status={credential.status} /><p className="text-xs text-muted">{credential.phaseLabel}</p>{credential.canExecute && !credential.enabled ? <p className="text-xs text-amber-200">执行门禁尚未全部就绪</p> : null}</div></td><td className={`${tableCellClass} font-mono`}>{credential.maskedKey ?? "-"}</td><td className={`${tableCellClass} font-mono`}>{credential.uidFingerprint ?? "-"}</td><td className={tableCellClass}>{configured ? <PermissionSummary credential={credential} /> : "-"}</td><td className={tableCellClass}><ProductAvailabilitySummary credential={credential} /></td><td className={tableCellClass}>{credential.ipWhitelistConfigured === true ? "已配置" : credential.ipWhitelistConfigured === false ? <span className="text-amber-200">未配置</span> : "-"}</td><td className={tableCellClass}>{credential.lastVerifiedAt ? formatDate(credential.lastVerifiedAt) : "-"}</td><td className={tableCellClass}>{credential.defaultExecutionAccount ? "默认执行" : configured ? credential.canExecute ? "执行账户" : "只读账户" : "-"}</td><td className={`${tableCellClass} text-right`}><div className="flex justify-end gap-2">{!credential.canAuthorize ? <Button className="min-h-9 px-3 py-2 text-xs" disabled type="button" variant="secondary">{credential.implemented ? "能力未知" : "暂未接入"}</Button> : <Button className="min-h-9 px-3 py-2 text-xs" onClick={() => credential.status === "unconfigured" ? openAuthorization(credential.venue) : setRotationTarget(credential)} type="button" variant="secondary">{credential.status === "unconfigured" ? <><KeyRound size={14} />配置</> : <><RotateCw size={14} />轮换</>}</Button>}{configured && credential.accountId ? hasExposure ? <Button className="min-h-9 px-3 py-2 text-xs" onClick={onGoToSafety} type="button" variant="danger">先退出仓位</Button> : <Button aria-label={`删除 ${venueLabel(credential.venue)} API 账户`} className="min-h-9 px-3 py-2 text-xs" onClick={() => { setDeleteTarget(credential); setDeletePhrase(""); }} type="button" variant="danger"><Trash2 size={14} /></Button> : null}</div></td></tr>{requiresManualExchangeAction ? <tr><td className="border-b border-red-400/20 bg-red-400/[0.055] px-4 py-3 text-sm text-red-100" colSpan={10}><AlertTriangle className="mr-2 inline" size={15} />凭证已失效且仍有风险敞口，自动退出不可用。请立即前往 {venueLabel(credential.venue)} 人工处理订单与仓位。</td></tr> : null}</React.Fragment>;
           })}</tbody>
         </ScrollTable>
       </ConsoleSection>
@@ -136,7 +136,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
         <div className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto border-b border-white/10 px-4 py-3 sm:px-5" role="tablist" aria-label="选择交易所">
           {venueOrder.map((venue) => {
             const credential = credentialMap.get(venue);
-            return <button aria-selected={selectedVenue === venue} className={`inline-flex min-h-11 shrink-0 items-center gap-2 border px-4 text-sm font-semibold transition ${selectedVenue === venue ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"}`} disabled={!credential?.canAuthorize} key={venue} onClick={() => switchVenue(venue)} role="tab" type="button">{venueLabel(venue)}{credential?.status === "connected" ? <span className={`h-2 w-2 rounded-full ${selectedVenue === venue ? "bg-emerald-600" : "bg-emerald-300"}`} aria-label="已连接" /> : null}{!credential?.canAuthorize ? <span className="text-[10px] opacity-65">{credential?.implemented ? "能力未知" : "暂未接入"}</span> : credential.venue === "binance" ? <span className="text-[10px] opacity-70">只读</span> : null}</button>;
+            return <button aria-selected={selectedVenue === venue} className={`inline-flex min-h-11 shrink-0 items-center gap-2 border px-4 text-sm font-semibold transition ${selectedVenue === venue ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"}`} disabled={!credential?.canAuthorize} key={venue} onClick={() => switchVenue(venue)} role="tab" type="button">{venueLabel(venue)}{credential?.status === "connected" ? <span className={`h-2 w-2 rounded-full ${selectedVenue === venue ? "bg-emerald-600" : "bg-emerald-300"}`} aria-label="已连接" /> : null}{!credential?.canAuthorize ? <span className="text-[10px] opacity-65">{credential?.implemented ? "能力未知" : "暂未接入"}</span> : credential.canExecute ? <span className="text-[10px] opacity-70">受控执行</span> : null}</button>;
           })}
           <button className="min-h-11 shrink-0 border border-white/10 px-4 text-sm text-dim" disabled type="button">更多 Connector · 待接入</button>
         </div>
@@ -201,14 +201,11 @@ function CredentialStatus({ status }: { status: AutomationCredentialSummary["sta
   return <StatusTag tone={tone}>{labels[status]}</StatusTag>;
 }
 function VenueStageNotice({ credential }: { credential: AutomationCredentialSummary }) {
-  if (credential.venue !== "binance") {
-    return <div className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">{credential.phaseLabel}。真实执行仍受账户、策略、preflight 和二次确认共同约束。</div>;
-  }
   return (
-    <div className="border border-amber-400/35 bg-amber-400/[0.06] p-3 text-xs leading-5 text-amber-100" role="status">
-      <strong className="font-semibold">凭证与账户只读验证已接入</strong>
-      <p className="mt-1 text-amber-100/80">实盘执行尚未开放。可保存并验证 Binance API，后续仅能查看 XAUT 双腿状态与触发 Shadow 条件检查，不会生成 challenge 或发送订单。</p>
-      <div className="mt-3"><ProductAvailabilitySummary credential={credential} /></div>
+    <div className="border border-white/15 bg-white/[0.025] p-3 text-xs leading-5 text-slate-200" role="status">
+      <strong className="font-semibold">{credential.phaseLabel}</strong>
+      <p className="mt-1 text-muted">授权成功不等于立即可执行；仍需用户执行开关、策略开关、用户急停、服务端全局急停、实时预检和二次确认共同放行。</p>
+      {credential.venue === "binance" ? <div className="mt-3"><ProductAvailabilitySummary credential={credential} /></div> : null}
     </div>
   );
 }
@@ -230,8 +227,8 @@ function ProductAvailabilitySummary({ credential }: { credential: AutomationCred
   const perpetualAvailable = availability.status === "available" || availability.status === "spot_unavailable";
   return (
     <div className="space-y-1 text-xs leading-5">
-      <p className={spotAvailable ? "text-emerald-200" : "text-red-200"}>现货腿 {availability.spotSymbol} · {spotAvailable ? "可用" : "不可用"}</p>
-      <p className={perpetualAvailable ? "text-emerald-200" : "text-red-200"}>USD-M 永续腿 {availability.perpetualSymbol} · {perpetualAvailable ? "可用" : "不可用"}</p>
+      <p className={spotAvailable ? "text-emerald-200" : "text-red-200"}>现货侧 {availability.spotSymbol} · {spotAvailable ? "可用" : "不可用"}</p>
+      <p className={perpetualAvailable ? "text-emerald-200" : "text-red-200"}>USD-M 永续侧 {availability.perpetualSymbol} · {perpetualAvailable ? "可用" : "不可用"}</p>
       {availability.message ? <p className="text-amber-100/75">{availability.message}</p> : null}
     </div>
   );

@@ -98,12 +98,14 @@ export type RwaInstrumentSpec = {
   priceTick: number;
 };
 
-export type RwaProviderPreflightSnapshot = {
+export type RwaProviderPreflightSnapshot<
+  TPermissions extends RwaVenuePermissions = RwaBybitPermissions,
+> = {
   accountId: string;
   accountFingerprint: string;
   fetchedAt: number;
-  accountMode: "uta" | "classic" | "unknown";
-  permissions: RwaBybitPermissions;
+  accountMode: RwaVenueAccountIdentity["accountMode"];
+  permissions: TPermissions;
   availableUsdt: number;
   existingSpotQuantityXaut: number;
   existingPerpetualQuantityXaut: number;
@@ -131,14 +133,14 @@ export type RwaPreflightReport = {
   userId: string;
   accountId: string;
   accountFingerprint: string;
-  strategyId: typeof RWA_STRATEGY_ID;
-  network: "bybit_mainnet";
+  strategyId: string;
+  network: "bybit_mainnet" | "binance_mainnet";
   action: RwaAutomationMode;
   mode: RwaAutomationMode;
   opportunityId: string;
-  venue: "bybit";
-  quantityXaut: typeof RWA_SMOKE_QUANTITY_XAUT;
-  totalBudgetUsd: typeof RWA_SMOKE_TOTAL_BUDGET_USD;
+  venue: "bybit" | "binance";
+  quantityXaut: number;
+  totalBudgetUsd: number;
   estimatedSpotNotionalUsd: number;
   estimatedPerpetualNotionalUsd: number;
   estimatedCapitalRequiredUsd: number;
@@ -195,7 +197,7 @@ export type RwaStrategyLeg = {
 export type RwaStrategyPnlSnapshot = {
   accountId: string;
   accountFingerprint: string;
-  strategyId: typeof RWA_STRATEGY_ID;
+  strategyId: string;
   capturedAt: number;
   legs: { spot: RwaStrategyLeg; perpetual: RwaStrategyLeg };
   netDeltaXaut: number;
@@ -240,9 +242,12 @@ export type RwaExecutionRecord = {
   updatedAt: number;
 };
 
-export type RwaBybitTradingClient = {
-  validateAccess(): Promise<{ permissions: RwaBybitPermissions } & RwaVenueAccountIdentity>;
-  readPreflightSnapshot(): Promise<RwaProviderPreflightSnapshot>;
+export type RwaNeutralTradingClient<
+  TPermissions extends RwaVenuePermissions = RwaVenuePermissions,
+  TSnapshot extends RwaProviderPreflightSnapshot<TPermissions> = RwaProviderPreflightSnapshot<TPermissions>,
+> = {
+  validateAccess(): Promise<{ permissions: TPermissions } & RwaVenueAccountIdentity>;
+  readPreflightSnapshot(): Promise<TSnapshot>;
   setPerpetualLeverage(leverage: 1): Promise<void>;
   placeOrder(request: RwaProviderOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
@@ -250,6 +255,11 @@ export type RwaBybitTradingClient = {
   cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot>;
 };
+
+export type RwaBybitTradingClient = RwaNeutralTradingClient<
+  RwaBybitPermissions,
+  RwaProviderPreflightSnapshot<RwaBybitPermissions>
+>;
 
 export type RwaBybitTradingClientFactory = (credentials: RwaBybitCredentials) => RwaBybitTradingClient;
 import type { RwaAutomationMode } from "./RwaAutomationTypes";

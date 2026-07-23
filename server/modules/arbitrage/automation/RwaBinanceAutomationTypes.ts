@@ -1,5 +1,7 @@
 import type {
   RwaInstrumentSpec,
+  RwaNeutralTradingClient,
+  RwaProviderPreflightSnapshot,
   RwaVenueAccountIdentity,
   RwaVenueCredentials,
   RwaVenuePermissions,
@@ -45,7 +47,7 @@ export type RwaBinanceInstrumentSnapshot = RwaInstrumentSpec & {
   depthUsd: number;
 };
 
-export type RwaBinancePreflightSnapshot = {
+export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinancePermissions> & {
   accountId: string;
   accountFingerprint: string;
   fetchedAt: number;
@@ -72,11 +74,8 @@ export type RwaBinancePreflightSnapshot = {
   };
 };
 
-export type RwaBinanceClient = {
-  validateAccess(): Promise<RwaBinanceAccountIdentity & { permissions: RwaBinancePermissions }>;
-  readPreflightSnapshot(): Promise<RwaBinancePreflightSnapshot>;
+export type RwaBinanceClient = RwaNeutralTradingClient<RwaBinancePermissions, RwaBinancePreflightSnapshot> & {
   readProductAvailability(): Promise<RwaBinanceProductAvailability>;
 };
 
 export type RwaBinanceClientFactory = (credentials: RwaBinanceCredentials) => RwaBinanceClient;
-

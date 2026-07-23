@@ -47,7 +47,7 @@ export function AutomationCandidates({ candidates, onPreflight }: { candidates: 
                   <Button className="min-h-9 whitespace-nowrap px-3 py-2 text-xs" disabled={!preflightEnabled} onClick={() => {
                     if (preflightEnabled) onPreflight(candidate, preflightMode);
                   }} type="button" variant="secondary">
-                    <FileCheck2 size={14} />{candidate.canExecute ? candidate.automationEligible ? "自动策略预检" : "手动风险预检" : "只读条件检查"}
+                    <FileCheck2 size={14} />{candidate.canExecute ? candidate.automationEligible ? "自动策略预检" : "手动风险预检" : "条件检查"}
                   </Button>
                 </td>
               </tr>
@@ -60,7 +60,10 @@ export function AutomationCandidates({ candidates, onPreflight }: { candidates: 
 }
 
 export function canPreflightCandidate(candidate: AutomationCandidate) {
-  return candidate.adapterImplemented && candidate.canRunReadOnlyPreflight && candidate.safetyEligible;
+  return candidate.adapterImplemented
+    && candidate.canRunReadOnlyPreflight
+    && candidate.safetyEligible
+    && (!candidate.canExecute || candidate.executionReady);
 }
 
 function CandidateConditions({ candidate }: { candidate: AutomationCandidate }) {
@@ -74,11 +77,14 @@ function CandidateConditions({ candidate }: { candidate: AutomationCandidate }) 
     const reasons = candidate.safetyDisqualifiers.join("；") || "未通过实时安全校验";
     return <div><StatusTag tone="danger">安全阻断</StatusTag><p className="mt-2 line-clamp-2 text-xs leading-5 text-red-200/80" title={reasons}>{reasons}</p></div>;
   }
+  if (candidate.canExecute && !candidate.executionReady) {
+    return <div><StatusTag tone="warning">执行未就绪</StatusTag><p className="mt-2 text-xs leading-5 text-amber-100/75">请先完成 API 授权、执行与策略开关，并确认用户急停和服务端全局急停均已解除。</p></div>;
+  }
   if (!candidate.automationEligible) {
     const reasons = candidate.automationDisqualifiers.join("；") || "当前条件不符合自动策略";
-    return <div className="space-y-2"><div className="flex flex-wrap gap-1.5"><StatusTag tone="success">安全条件通过</StatusTag><StatusTag tone="warning">{candidate.canExecute ? "未达到自动策略条件" : "只读 Shadow"}</StatusTag></div><p className="line-clamp-2 text-xs leading-5 text-amber-100/75" title={reasons}>{reasons}</p></div>;
+    return <div className="space-y-2"><div className="flex flex-wrap gap-1.5"><StatusTag tone="success">安全条件通过</StatusTag><StatusTag tone="warning">{candidate.canExecute ? "未达到自动策略条件" : "仅可检查"}</StatusTag></div><p className="line-clamp-2 text-xs leading-5 text-amber-100/75" title={reasons}>{reasons}</p></div>;
   }
-  return <div className="flex flex-wrap gap-1.5"><StatusTag tone="success">安全条件通过</StatusTag><StatusTag tone={candidate.canExecute ? "success" : "warning"}>{candidate.canExecute ? "自动策略条件通过" : "只读 Shadow"}</StatusTag></div>;
+  return <div className="flex flex-wrap gap-1.5"><StatusTag tone="success">安全条件通过</StatusTag><StatusTag tone={candidate.canExecute ? "success" : "warning"}>{candidate.canExecute ? "自动策略条件通过" : "仅可检查"}</StatusTag></div>;
 }
 
 function Leg({ candidate }: { candidate: AutomationCandidate["longLeg"] }) {

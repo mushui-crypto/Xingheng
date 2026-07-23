@@ -1,5 +1,9 @@
+import { createHash, randomBytes } from "node:crypto";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
-import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import {
+  RwaAutomationPersistentStore,
+  type RwaAutomationStateData,
+} from "./RwaAutomationPersistentStore";
 import {
   RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
   RWA_BINANCE_STRATEGY_ID,
@@ -11,6 +15,12 @@ import {
   type RwaBinancePreflightSnapshot,
 } from "./RwaBinanceAutomationTypes";
 import { RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
+import {
+  calculateNeutralExecutionSlippage,
+  createNeutralExecutionRecord,
+  RwaNeutralHedgeExecutionEngine,
+} from "./RwaNeutralHedgeExecutionEngine";
+import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import {
@@ -18,15 +28,22 @@ import {
   defaultRwaExecutionConfig,
   type RwaCredentialLifecycle,
   type RwaExecutionConfig,
+  type RwaExecutionRecord,
+  type RwaPreflightReport,
 } from "./RwaNeutralExecutionTypes";
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
+const challengeTtlMs = 60_000;
+const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating"]);
 type BinanceStore = RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>;
 type BinanceCredentialMetadata = NonNullable<Awaited<ReturnType<BinanceStore["readCredentialMetadata"]>>>;
 
 export class RwaBinanceAutomationService {
+  private lock = Promise.resolve();
+  private readonly armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
   private readonly publicClient: RwaBinanceClient;
+  private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
 
   constructor(
     private readonly store: RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>,
@@ -36,6 +53,37 @@ export class RwaBinanceAutomationService {
     publicClient?: RwaBinanceClient,
   ) {
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
+  }
+
+  private get strategyOrderPrefix() {
+    return `rwa${this.store.userDomain}`;
+  }
+
+  async initialize() {
+    this.armedChallengeIds.clear();
+    await this.withLock(async () => {
+      if (!(await this.store.hasCredentials()) || !this.store.masterKeyConfigured) return;
+      const state = await this.store.readState();
+      const pending = state.executions.filter((item) => executionStates.has(item.state));
+      if (!pending.length) return;
+      const client = await this.client();
+      for (const execution of pending) {
+        try {
+          await client.cancelStrategyOrders(execution.orderLinkPrefix);
+          await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
+          execution.state = "closed";
+          execution.message = "服务重启后已按 Binance 权威状态退出对冲组合。";
+        } catch (error) {
+          execution.state = "manual_intervention";
+          execution.errorCategory = errorCategory(error);
+          execution.message = "重启恢复无法自动退出对冲组合，需要当前用户在 Binance 人工处理。";
+          state.config.killSwitchActive = true;
+        }
+        execution.updatedAt = this.now();
+      }
+      await this.store.writeState(state);
+    });
   }
 
   async getProductAvailability() {
@@ -149,6 +197,7 @@ export class RwaBinanceAutomationService {
         killSwitchActive: true,
       };
       state.challenges = [];
+      this.armedChallengeIds.clear();
       state.credentialAudit.push({
         userId: this.store.ownerUserId,
         action: previous ? "rotated" : "activated",
@@ -219,6 +268,7 @@ export class RwaBinanceAutomationService {
     state.credentialAlert = null;
     await this.store.writeState(state);
     await this.store.deleteCredentials();
+    this.armedChallengeIds.clear();
     return { ok: true, credentials: await this.getCredentialStatus() };
   }
 
@@ -244,13 +294,6 @@ export class RwaBinanceAutomationService {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
-    if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
-      throw new RwaNeutralExecutionError(
-        409,
-        "binance_provider_writes_disabled",
-        "Binance 第一阶段仅开放私有只读与 Shadow/preflight，真实执行开关不可启用。",
-      );
-    }
     const next = { ...state.config };
     if ("globalExecutionEnabled" in body) next.globalExecutionEnabled = booleanField(body.globalExecutionEnabled, "globalExecutionEnabled");
     if ("strategyEnabled" in body) next.strategyEnabled = booleanField(body.strategyEnabled, "strategyEnabled");
@@ -270,7 +313,10 @@ export class RwaBinanceAutomationService {
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
     state.config.killSwitchActive = active;
-    state.challenges = [];
+    if (active) {
+      state.challenges = [];
+      this.armedChallengeIds.clear();
+    }
     await this.store.writeState(state);
     return {
       active,
@@ -287,8 +333,8 @@ export class RwaBinanceAutomationService {
     assertAccountId(snapshot.accountId, metadata.accountId);
     return {
       network: "binance_mainnet" as const,
-      phase: "phase_1_read_only_shadow" as const,
-      providerWritesEnabled: false,
+      phase: "execution_capable" as const,
+      providerWritesEnabled: true,
       userId: this.store.ownerUserId,
       accountId: snapshot.accountId,
       accountFingerprint: snapshot.accountFingerprint,
@@ -313,16 +359,29 @@ export class RwaBinanceAutomationService {
   }
 
   async getPnl() {
-    const metadata = await this.store.readCredentialMetadata();
+    const metadata = await this.requireMetadata();
+    const client = await this.client();
+    const state = await this.store.readState();
+    const firstExecutionAt = state.executions.length
+      ? Math.min(...state.executions.map((item) => item.createdAt))
+      : null;
+    const snapshot = await client.readStrategyPnl(this.strategyOrderPrefix, firstExecutionAt)
+      .catch((error) => { throw providerError(error, "Binance 策略盈亏读取失败。"); });
+    assertAccountId(snapshot.accountId, metadata.accountId);
+    snapshot.slippageUsd = calculateNeutralExecutionSlippage(state);
+    snapshot.netPnlUsd = snapshot.realizedPnlUsd + snapshot.unrealizedPnlUsd
+      + snapshot.fundingPnlUsd - snapshot.feesUsd - snapshot.slippageUsd;
+    state.pnlSeries.push(snapshot);
+    if (state.pnlSeries.length > 1_000) state.pnlSeries.splice(0, state.pnlSeries.length - 1_000);
+    await this.store.writeState(state);
     return {
       userId: this.store.ownerUserId,
-      accountId: metadata?.accountId ?? null,
-      current: null,
-      series: [],
-      history: [],
-      phase: "phase_1_read_only_shadow",
-      providerWritesEnabled: false,
-      message: "Binance 第一阶段未发送策略订单，因此不把账户已有余额或仓位冒充为策略 PnL。",
+      accountId: metadata.accountId,
+      current: snapshot,
+      series: state.pnlSeries.slice(-200),
+      history: state.executions.slice(-100).reverse().map(redactExecution),
+      phase: "execution_capable",
+      providerWritesEnabled: true,
     };
   }
 
@@ -331,53 +390,193 @@ export class RwaBinanceAutomationService {
     return {
       items: state.credentialAudit.slice(-200).reverse(),
       alert: state.credentialAlert,
-      phase: "phase_1_read_only_shadow",
-      providerWritesEnabled: false,
+      phase: "execution_capable",
+      providerWritesEnabled: true,
     };
   }
 
-  async preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode): Promise<never> {
+  async preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode) {
     assertSupportedOpportunity(opportunity, mode);
-    const metadata = await this.requireMetadata();
-    assertAccountId(accountId, metadata.accountId);
-    const productAvailability = await this.getProductAvailability();
-    if (!productAvailability.available) {
-      throw new RwaNeutralExecutionError(
-        409,
-        "binance_product_unavailable",
-        productAvailability.message ?? "Binance Mainnet 当前无法组成 XAUT 同所中性双腿。",
-        { productAvailability },
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      this.assertEntrySwitches(state.config);
+      const metadata = await this.requireMetadata();
+      assertAccountId(accountId, metadata.accountId);
+      const productAvailability = await this.getProductAvailability();
+      if (!productAvailability.available) {
+        throw new RwaNeutralExecutionError(
+          409,
+          "binance_product_unavailable",
+          productAvailability.message ?? "Binance Mainnet 当前无法组成 XAUT 现货与永续对冲组合。",
+          { productAvailability },
+        );
+      }
+      const client = await this.client();
+      await this.validateActiveAccess(client, accountId, state);
+      const snapshot = await client.readPreflightSnapshot()
+        .catch((error) => { throw providerError(error, "Binance 实时 preflight 读取失败。"); });
+      assertAccountId(snapshot.accountId, accountId);
+      const report = buildBinancePreflight(
+        this.store.ownerUserId,
+        opportunity.id,
+        snapshot,
+        state.config,
+        mode,
+        this.now(),
       );
+      if (!report.passed) {
+        throw new RwaNeutralExecutionError(409, "preflight_rejected", "Binance 实时 preflight 未通过，禁止建立对冲组合。", { report });
+      }
+      const challengeId = randomBytes(18).toString("base64url");
+      const challengeToken = randomBytes(32).toString("base64url");
+      state.challenges = state.challenges.filter((item) => item.expiresAt > this.now() && item.consumedAt === null);
+      state.challenges.push({
+        id: challengeId,
+        tokenHash: hash(challengeToken),
+        report,
+        expiresAt: report.expiresAt,
+        consumedAt: null,
+      });
+      await this.store.writeState(state);
+      this.armedChallengeIds.add(challengeId);
+      return { challengeId, challengeToken, expiresAt: report.expiresAt, report };
+    });
+  }
+
+  async execute(input: unknown) {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey"]);
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const challengeId = requiredString(body.challengeId, "challengeId", 100);
+    const challengeToken = requiredString(body.challengeToken, "challengeToken", 200);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 100);
+    if (!/^[A-Za-z0-9:_-]{8,100}$/.test(idempotencyKey)) {
+      throw new RwaNeutralExecutionError(400, "invalid_request", "idempotencyKey 格式无效。");
     }
-    const snapshot = await this.client().then((client) => client.readPreflightSnapshot())
-      .catch((error) => { throw providerError(error, "Binance 实时 preflight 读取失败。"); });
-    assertAccountId(snapshot.accountId, accountId);
-    const config = (await this.store.readState()).config;
-    const report = buildShadowPreflight(this.store.ownerUserId, opportunity, snapshot, config, mode, this.now());
-    throw new RwaNeutralExecutionError(
-      409,
-      report.marketChecksPassed ? "binance_provider_writes_disabled" : "preflight_rejected",
-      report.marketChecksPassed
-        ? "Binance 第一阶段只完成 Shadow/preflight，真实 provider 写调用保持关闭。"
-        : "Binance Shadow/preflight 未通过，禁止进入真实执行。",
-      { report },
-    );
+    const scopedIdempotencyKey = `${this.store.userDomain}:${idempotencyKey}`;
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const existing = state.executions.find((item) => item.idempotencyKey === scopedIdempotencyKey);
+      if (existing) {
+        if (existing.challengeId !== challengeId) throw new RwaNeutralExecutionError(409, "idempotency_conflict", "幂等键已用于其他执行请求。");
+        assertAccountId(accountId, existing.accountId);
+        return redactExecution(existing);
+      }
+      this.assertEntrySwitches(state.config);
+      const challenge = state.challenges.find((item) => item.id === challengeId);
+      if (!challenge || challenge.tokenHash !== hash(challengeToken) || challenge.expiresAt <= this.now() || challenge.consumedAt !== null) {
+        throw new RwaNeutralExecutionError(409, "challenge_invalid", "执行 challenge 无效、已过期或已使用。");
+      }
+      if (!this.armedChallengeIds.has(challengeId)) {
+        throw new RwaNeutralExecutionError(409, "restart_disarmed", "服务已重启，原 challenge 不再 armed，请重新 preflight。");
+      }
+      assertAccountId(accountId, challenge.report.accountId);
+      challenge.consumedAt = this.now();
+      this.armedChallengeIds.delete(challengeId);
+      const execution = createNeutralExecutionRecord({
+        userId: this.store.ownerUserId,
+        accountId,
+        userOrderPrefix: this.strategyOrderPrefix,
+        idempotencyKey: scopedIdempotencyKey,
+        challengeId,
+        now: this.now(),
+      });
+      state.executions.push(execution);
+      await this.store.writeState(state);
+      let client: RwaBinanceClient | null = null;
+      try {
+        client = await this.client();
+        await this.validateActiveAccess(client, accountId, state);
+        const realtime = await client.readPreflightSnapshot();
+        assertAccountId(realtime.accountId, accountId);
+        const mode = challenge.report.mode === "manual_entry" ? "manual_entry" : "arbitrage_entry";
+        const report = buildBinancePreflight(
+          this.store.ownerUserId,
+          challenge.report.opportunityId,
+          realtime,
+          state.config,
+          mode,
+          this.now(),
+        );
+        if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止建立对冲组合。");
+        await client.setPerpetualLeverage(1);
+        await this.hedgeEngine.open({
+          client,
+          execution,
+          snapshot: realtime,
+          config: state.config,
+          state,
+          quantityXaut: report.quantityXaut,
+          persist: (currentState, currentExecution) => this.persistExecution(currentState, currentExecution),
+        });
+      } catch (error) {
+        if (execution.state !== "hedged" && execution.state !== "closed") {
+          execution.errorCategory = errorCategory(error);
+          execution.message = sanitizeRwaAutomationError(error);
+          try {
+            if (!client) throw error;
+            execution.state = "compensating";
+            await this.persistExecution(state, execution);
+            await client.cancelStrategyOrders(execution.orderLinkPrefix);
+            await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
+            execution.state = "failed";
+            execution.message = "对冲未完成，已按 Binance 权威状态撤单并退出未对冲敞口。";
+          } catch {
+            execution.state = "manual_intervention";
+            execution.message = "自动建立或退出对冲组合未能闭环，需要当前用户在 Binance 人工处理。";
+            state.config.killSwitchActive = true;
+          }
+          execution.updatedAt = this.now();
+          await this.store.writeState(state);
+        }
+      }
+      return redactExecution(execution);
+    });
   }
 
-  execute(): never {
-    throw new RwaNeutralExecutionError(
-      501,
-      "binance_provider_writes_disabled",
-      "Binance 第一阶段未实现下单、撤单、补腿、杠杆或平仓写调用。",
-    );
-  }
-
-  closeAll(): never {
-    throw new RwaNeutralExecutionError(
-      501,
-      "binance_provider_writes_disabled",
-      "Binance 第一阶段没有平台代理退出能力；如账户已有风险，请直接在 Binance 人工处理。",
-    );
+  async closeAll(input: unknown) {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "idempotencyKey"]);
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 100);
+    if (!/^[A-Za-z0-9:_-]{8,100}$/.test(idempotencyKey)) {
+      throw new RwaNeutralExecutionError(400, "invalid_request", "idempotencyKey 格式无效。");
+    }
+    const scopedIdempotencyKey = `${this.store.userDomain}:${idempotencyKey}`;
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const existing = state.executions.find((item) => item.idempotencyKey === scopedIdempotencyKey);
+      if (existing) return redactExecution(existing);
+      const metadata = await this.requireMetadata();
+      assertAccountId(accountId, metadata.accountId);
+      const client = await this.client();
+      const execution = createNeutralExecutionRecord({
+        userId: this.store.ownerUserId,
+        accountId,
+        userOrderPrefix: this.strategyOrderPrefix,
+        idempotencyKey: scopedIdempotencyKey,
+        challengeId: "close-all",
+        now: this.now(),
+      });
+      execution.state = "compensating";
+      execution.message = "正在退出现货与永续对冲组合。";
+      state.executions.push(execution);
+      await this.store.writeState(state);
+      try {
+        await client.cancelStrategyOrders(this.strategyOrderPrefix);
+        await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
+        execution.state = "closed";
+        execution.message = "策略订单已撤销，现货与永续两侧仓位已退出并确认。";
+      } catch (error) {
+        execution.state = "manual_intervention";
+        execution.errorCategory = errorCategory(error);
+        execution.message = "自动退出对冲组合未能闭环，需要当前用户在 Binance 人工处理。";
+        state.config.killSwitchActive = true;
+      }
+      execution.updatedAt = this.now();
+      await this.store.writeState(state);
+      return redactExecution(execution);
+    });
   }
 
   private async client(): Promise<RwaBinanceClient> {
@@ -395,6 +594,76 @@ export class RwaBinanceAutomationService {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credential_not_configured", "Binance API 凭证尚未配置。");
     return metadata;
+  }
+
+  private async validateActiveAccess(client: RwaBinanceClient, accountId: string, state: RwaAutomationStateData) {
+    const metadata = await this.requireMetadata();
+    assertAccountId(accountId, metadata.accountId);
+    if (this.now() - metadata.updatedAt >= rotationAgeMs) {
+      await this.freezeNewRisk(state, "rotation_required", metadata, "Binance API Key 已达到轮换周期，完成轮换前禁止新增风险。");
+      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "Binance API Key 已达到轮换周期，请先完成安全轮换。");
+    }
+    try {
+      const access = await client.validateAccess();
+      assertPermissions(access.permissions);
+      assertAccountId(access.accountId, accountId);
+      return access;
+    } catch (error) {
+      const lifecycle = credentialFailureLifecycle(error);
+      await this.freezeNewRisk(state, lifecycle, metadata, "Binance 执行账户权限或连接校验失败，已禁止新增风险。");
+      throw providerError(error, "Binance 执行账户权限或连接校验失败。");
+    }
+  }
+
+  private async freezeNewRisk(
+    state: RwaAutomationStateData,
+    lifecycle: Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active">,
+    metadata: BinanceCredentialMetadata,
+    message: string,
+  ) {
+    state.credentialLifecycle = lifecycle;
+    state.credentialAlert = message;
+    state.config.killSwitchActive = true;
+    state.config.strategyEnabled = false;
+    state.config.globalExecutionEnabled = false;
+    state.challenges = [];
+    state.credentialAudit.push({
+      userId: this.store.ownerUserId,
+      action: "invalidated",
+      accountId: metadata.accountId,
+      accountFingerprint: metadata.accountFingerprint,
+      maskedApiKey: metadata.maskedApiKey,
+      occurredAt: this.now(),
+    });
+    if (state.credentialAudit.length > 200) state.credentialAudit.splice(0, state.credentialAudit.length - 200);
+    await this.store.writeState(state);
+    this.armedChallengeIds.clear();
+  }
+
+  private async persistExecution(state: RwaAutomationStateData, execution: RwaExecutionRecord) {
+    execution.updatedAt = this.now();
+    await this.store.writeState(state);
+  }
+
+  private assertEntrySwitches(config: RwaExecutionConfig) {
+    if (this.serverKillSwitchActive()) {
+      throw new RwaNeutralExecutionError(409, "server_kill_switch_active", "服务端全局急停已激活，禁止新增风险动作。");
+    }
+    if (!config.globalExecutionEnabled) throw new RwaNeutralExecutionError(409, "global_execution_disabled", "全局真实执行开关未启用。");
+    if (!config.strategyEnabled) throw new RwaNeutralExecutionError(409, "strategy_disabled", "Binance XAUT 对冲策略开关未启用。");
+    if (config.killSwitchActive) throw new RwaNeutralExecutionError(409, "kill_switch_active", "Kill switch 已激活，禁止新增风险动作。");
+  }
+
+  private async withLock<T>(operation: () => Promise<T>): Promise<T> {
+    const previous = this.lock;
+    let release!: () => void;
+    this.lock = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
   }
 
   private status(input: {
@@ -422,20 +691,26 @@ export class RwaBinanceAutomationService {
       message: input.message,
       ipWhitelistConfigured: permissions?.ipRestricted ?? null,
       warnings: permissions && !permissions.ipRestricted
-        ? ["API Key 未配置固定 IP 白名单；这是高风险配置，但 Binance 第一阶段不将其作为硬阻断。"]
+        ? ["API Key 未配置固定 IP 白名单；这是高风险配置，但不作为硬阻断。"]
         : [],
     };
   }
 }
 
-function buildShadowPreflight(
+function buildBinancePreflight(
   userId: string,
-  opportunity: ArbitrageOpportunity,
+  opportunityId: string,
   snapshot: RwaBinancePreflightSnapshot,
   config: RwaExecutionConfig,
   mode: RwaAutomationMode,
   now: number,
-) {
+): RwaPreflightReport & {
+  phase: "execution_capable";
+  providerWritesEnabled: true;
+  productAvailability: RwaBinancePreflightSnapshot["productAvailability"];
+  marketChecksPassed: boolean;
+  message: string;
+} {
   const commonStep = Math.max(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep);
   const budgetQuantity = commonStep > 0
     ? floorStep(RWA_BINANCE_TOTAL_BUDGET_USD * 0.95 / (snapshot.spot.ask + snapshot.perpetual.bid), commonStep)
@@ -455,21 +730,21 @@ function buildShadowPreflight(
   const estimatedNetAprPercent = snapshot.perpetual.fundingRate * fundingPeriodsPerYear * 100
     - (snapshot.fees.spotTakerBps + snapshot.fees.perpetualTakerBps + config.maxCombinedSlippageBps) / 100;
   const checks = [
-    check("product_pair", snapshot.productAvailability.available, true, "Binance Mainnet 必须同时存在 XAUTUSDT 现货与 USD-M 永续。"),
+    check("product_pair", snapshot.productAvailability.available, true, "Binance Mainnet 必须存在可执行的 XAUTUSDT 现货与 USD-M 永续对冲组合。"),
     check("permissions", permissionsValid(snapshot.permissions), true, "必须具备读取、现货交易和 USD-M Futures 交易权限，且提现权限关闭。"),
-    check("position_mode", snapshot.permissions.positionModeSupported, true, "第一阶段只接受 one-way 持仓模式；hedge mode 暂不放行。"),
+    check("position_mode", snapshot.permissions.positionModeSupported, true, "当前只接受 one-way 持仓模式；hedge mode 暂不放行。"),
     check("spot_trading", snapshot.spot.status === "Trading", "Trading", "XAUTUSDT 现货必须为 TRADING。"),
     check("perpetual_trading", snapshot.perpetual.status === "Trading", "Trading", "XAUTUSDT USD-M 永续必须为 TRADING。"),
-    check("quotes", snapshot.spot.bid > 0 && snapshot.spot.ask > 0 && snapshot.perpetual.bid > 0 && snapshot.perpetual.ask > 0, true, "两腿 Bid/Ask 必须完整。"),
+    check("quotes", snapshot.spot.bid > 0 && snapshot.spot.ask > 0 && snapshot.perpetual.bid > 0 && snapshot.perpetual.ask > 0, true, "现货侧与永续侧 Bid/Ask 必须完整。"),
     check("precision", quantityXaut > 0 && stepAligned(quantityXaut, snapshot.spot.qtyStep) && stepAligned(quantityXaut, snapshot.perpetual.qtyStep), true, "数量必须同时匹配现货和永续步长。"),
     check("spot_minimum", quantityXaut >= snapshot.spot.minOrderQty && spotNotional >= snapshot.spot.minNotionalUsd, true, "现货数量和名义必须达到实时最小值。"),
     check("perpetual_minimum", quantityXaut >= snapshot.perpetual.minOrderQty && perpetualNotional >= snapshot.perpetual.minNotionalUsd, true, "永续数量和名义必须达到实时最小值。"),
-    check("spot_balance", snapshot.spotAvailableUsdt >= spotNotional + feesUsd, spotNotional + feesUsd, "现货账户 USDT 必须独立覆盖现货腿。"),
-    check("futures_balance", snapshot.futuresAvailableUsdt >= perpetualNotional + feesUsd, perpetualNotional + feesUsd, "USD-M Futures 可用余额必须独立覆盖永续腿。"),
+    check("spot_balance", snapshot.spotAvailableUsdt >= spotNotional + feesUsd, spotNotional + feesUsd, "现货账户 USDT 必须独立覆盖现货侧。"),
+    check("futures_balance", snapshot.futuresAvailableUsdt >= perpetualNotional + feesUsd, perpetualNotional + feesUsd, "USD-M Futures 可用余额必须独立覆盖永续侧。"),
     check("no_existing_spot", snapshot.existingSpotQuantityXaut <= 1e-9 && snapshot.openSpotOrderCount === 0, 0, "专用账户不得已有 XAUT 现货或活动现货订单。"),
     check("no_existing_perpetual", snapshot.existingPerpetualQuantityXaut <= 1e-9 && snapshot.openPerpetualOrderCount === 0, 0, "专用账户不得已有 XAUT 永续仓位或活动合约订单。"),
-    check("depth", snapshot.spot.depthUsd >= spotNotional && snapshot.perpetual.depthUsd >= perpetualNotional, true, "两腿公开盘口深度必须覆盖计划名义。"),
-    check("total_budget", capitalRequired <= RWA_BINANCE_TOTAL_BUDGET_USD, RWA_BINANCE_TOTAL_BUDGET_USD, "两腿 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
+    check("depth", snapshot.spot.depthUsd >= spotNotional && snapshot.perpetual.depthUsd >= perpetualNotional, true, "现货侧与永续侧公开盘口深度必须覆盖计划名义。"),
+    check("total_budget", capitalRequired <= RWA_BINANCE_TOTAL_BUDGET_USD, RWA_BINANCE_TOTAL_BUDGET_USD, "现货与永续对冲组合的 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
     check("strategy_cap", capitalRequired <= config.maxStrategyCapitalUsd && config.maxStrategyCapitalUsd <= RWA_MAX_STRATEGY_CAPITAL_USD, config.maxStrategyCapitalUsd, "venue 资本上限不得超过 300 USDT。"),
     check("liquidation", snapshot.perpetual.liquidationDistancePercent === null
       || snapshot.perpetual.liquidationDistancePercent >= config.minLiquidationDistancePercent, config.minLiquidationDistancePercent, "已有仓位强平距离不得低于门限。"),
@@ -486,7 +761,7 @@ function buildShadowPreflight(
     ? []
     : ["Binance API Key 未配置固定 IP 白名单；这是高风险配置。"];
   if (mode === "manual_entry") {
-    if (snapshot.perpetual.fundingRate <= 0) warnings.push("当前空头腿未处于收取 Funding 状态。");
+    if (snapshot.perpetual.fundingRate <= 0) warnings.push("当前永续侧未处于收取 Funding 状态。");
     if (Math.abs(entryBasisBps) > config.maxEntryBasisBps) warnings.push("当前入场基差超过自动策略门限。");
     if (estimatedNetAprPercent < config.minNetAprPercent) warnings.push("当前估算净 APR 低于自动策略门限。");
   }
@@ -497,10 +772,11 @@ function buildShadowPreflight(
     accountFingerprint: snapshot.accountFingerprint,
     network: "binance_mainnet",
     venue: "binance",
-    phase: "phase_1_read_only_shadow",
-    providerWritesEnabled: false,
+    phase: "execution_capable",
+    providerWritesEnabled: true,
     strategyId: RWA_BINANCE_STRATEGY_ID,
-    opportunityId: opportunity.id,
+    action: mode,
+    opportunityId,
     mode,
     productAvailability: snapshot.productAvailability,
     quantityXaut,
@@ -516,11 +792,12 @@ function buildShadowPreflight(
     checks,
     warnings,
     marketChecksPassed,
-    passed: false,
+    passed: marketChecksPassed,
     generatedAt: now,
+    expiresAt: now + challengeTtlMs,
     message: marketChecksPassed
-      ? "市场与账户只读检查通过，但 Binance 第一阶段不签发执行 challenge。"
-      : "市场或账户只读检查未通过。",
+      ? "市场与账户检查通过，可签发一次性执行 challenge。"
+      : "市场或账户检查未通过，禁止建立对冲组合。",
   };
 }
 
@@ -540,7 +817,7 @@ function assertSupportedOpportunity(opportunity: ArbitrageOpportunity, mode: Rwa
     throw new RwaNeutralExecutionError(
       409,
       "adapter_opportunity_unsupported",
-      "Binance 第一阶段仅评估安全可执行的 XAUT 同所现货多头 + USD-M 永续空头机会。",
+      "Binance 仅支持安全可执行的 XAUT 同所现货侧买入 + USD-M 永续侧卖出对冲组合。",
     );
   }
 }
@@ -550,12 +827,12 @@ function publicConfig(userId: string, config: RwaExecutionConfig, accountId: str
     userId,
     accountId,
     ...config,
-    globalExecutionEnabled: false,
-    strategyEnabled: false,
     serverGlobalKillSwitchActive,
     venue: "binance",
-    phase: "phase_1_read_only_shadow",
-    providerWritesEnabled: false,
+    phase: "execution_capable",
+    providerWritesEnabled: true,
+    automaticExecutionEnabled: false,
+    armed: false,
   };
 }
 
@@ -590,6 +867,20 @@ function providerError(error: unknown, fallback: string) {
   if (error instanceof RwaNeutralExecutionError) return error;
   if (error instanceof RwaBinanceProviderError) return new RwaNeutralExecutionError(502, error.category, error.message);
   return new RwaNeutralExecutionError(502, "provider_unavailable", fallback);
+}
+
+function errorCategory(error: unknown) {
+  return error instanceof RwaNeutralExecutionError || error instanceof RwaBinanceProviderError
+    ? error.category
+    : "automation_execution_error";
+}
+
+function redactExecution(execution: RwaExecutionRecord) {
+  return { ...execution };
+}
+
+function hash(value: string) {
+  return createHash("sha256").update(value).digest("base64url");
 }
 
 function assertAccountId(actual: string, expected: string) {
@@ -631,7 +922,7 @@ function requiredString(value: unknown, field: string, maximum: number) {
 }
 
 function check(name: string, passed: boolean, limit: number | string | boolean, message: string) {
-  return { name, passed, limit, message };
+  return { name, passed, value: passed, limit, message };
 }
 
 function floorStep(value: number, step: number) {

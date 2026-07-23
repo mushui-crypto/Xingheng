@@ -2,7 +2,7 @@
 
 更新时间：2026-07-23
 
-当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 进入第一阶段私有只读/Shadow/preflight，Bitget/OKX 仍默认 disabled 且未实现。Binance 第一阶段不包含任何 provider 写调用，不签发可执行 challenge。生产仍未配置凭证或主加密密钥；自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全或私有账户门禁。
+当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产仍未配置凭证或主加密密钥，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
 
@@ -11,10 +11,10 @@
 - 开放给普通登录用户使用，每个用户只管理自己的交易所 API 与策略状态；不做统一资金池、Vault、申购赎回或代客资产管理。
 - 首发只做同交易所、同底层资产的“现货多头 + 永续空头”中性组合；跨交易所真实执行后置。
 - 默认验证方向为 Bybit `XAUT/USDT` 现货多头 + `XAUTUSDT` 线性永续空头。
-- Binance 第一阶段验证同一结构：`XAUTUSDT` 现货多头 + `XAUTUSDT` USD-M 永续空头，但只开放私有只读、Shadow 与 preflight，不开放下单、撤单、杠杆、补腿或平仓。
+- Binance 执行白名单固定为 `XAUTUSDT` 现货侧买入 + `XAUTUSDT` USD-M 永续侧卖出；不接受客户端自传 symbol、side、quantity 或 price。
 - 其他黄金或股票 RWA 只进入公开候选池，不自动进入真实执行白名单。
 - `/app/demo`、`/app/trade`、Hyperliquid Testnet、钱包和现有账户体系不属于本模块，不得被改写。
-- 开发前必须核对 Bybit 私有 API、账户模式、产品状态、精度、最小订单和可用环境。若 Testnet 缺少等价现货或永续，不得伪装完整双腿测试覆盖。
+- 开发前必须核对交易所私有 API、账户模式、产品状态、精度、最小订单和可用环境。若 Testnet 缺少等价现货或永续，不得伪装完整对冲组合测试覆盖。
 
 ## 2. 分阶段门禁
 
@@ -27,14 +27,14 @@
 ### Phase B：连续观察与故障演练
 
 - Shadow 连续运行至少 14 天，并覆盖至少 30 个完整 Funding 结算周期。
-- 至少完成行情 stale、API 超时/限频、部分成交模拟、第二腿失败、重启恢复、重复事件和人工急停 3 类故障演练。
-- 晋级要求：零重复订单、零未处理单腿暴露、重启恢复一致、审计记录完整；不满足时继续观察，不进入下单验证。
+- 至少完成行情 stale、API 超时/限频、部分成交模拟、永续侧失败、重启恢复、重复事件和人工急停 3 类故障演练。
+- 晋级要求：零重复订单、零未处理单侧暴露、重启恢复一致、审计记录完整；不满足时继续观察，不进入下单验证。
 
 ### Phase C：最小受控连通性验证
 
 - 优先使用具有等价现货与永续产品的测试环境；若不存在，明确记录环境缺口。
 - 任何 Mainnet 连通性烟测仍属于真实资金操作；只有用户明确选择 `connectivity_smoke` 才能执行，且不能记录为套利仓位或收益。
-- 建议资金为 25 USDT，仅用于验证最小双腿订单、撤单、补腿、平仓和审计闭环。
+- 建议资金为 25 USDT，仅用于验证最小对冲组合订单、撤单、补齐对冲、平仓和审计闭环。
 
 ### Phase D：用户 Mainnet 小额试运行
 
@@ -44,7 +44,7 @@
 
 ## 3. 账户与凭证
 
-- 每个用户使用自己的 Bybit 专用子账户，优先使用 UTA 统一账户；永续腿不与其他交易共享保证金。
+- 每个用户使用自己的交易所专用子账户；Bybit 优先使用 UTA 统一账户。永续侧不与其他交易共享保证金。
 - Phase A/B 使用独立只读 Key；受控下单阶段使用另一组仅含读取、现货交易和合约交易权限的 Key。
 - API Key 必须禁止提现；IP 白名单为强烈建议，无白名单或为 `*` 时返回高风险 warning，但不单独阻止 active/preflight/execute。需要密钥轮换、权限核对和安全解绑流程。
 - 凭证仅放生产专用 secret store，或 root-only、只读挂载的生产 Secret 文件；不得进入 Git、SQLite、普通环境导出、日志、接口响应、浏览器、localStorage 或 IndexedDB。
@@ -61,7 +61,7 @@
 | 小额试运行 | 50 USDT | `0.005 XAUT` 现货约 20.7U + 等量永续 1x 保证金约 20.7U + 约 8.6U 备用金 |
 | V1 硬上限 | 300 USDT | 不是默认投入额，也不得因余额更高自动扩大 |
 
-2026-07-23 的公开规格核对仅作为计划参考：现货最小订单金额 5 USDT；永续 `minOrderQty=0.001 XAUT`、`qtyStep=0.001`、最小名义 5 USDT。按当时约 4,131 USDT/XAUT 估算，等量双腿的实际起点约为 `0.002 XAUT`。每次真实下单前必须实时重新读取价格、产品状态、最小数量、数量步长、手续费、保证金和风险限额，静态数值不得直接驱动订单。
+2026-07-23 的公开规格核对仅作为计划参考：现货最小订单金额 5 USDT；永续 `minOrderQty=0.001 XAUT`、`qtyStep=0.001`、最小名义 5 USDT。按当时约 4,131 USDT/XAUT 估算，等量对冲组合的实际起点约为 `0.002 XAUT`。每次真实下单前必须实时重新读取价格、产品状态、最小数量、数量步长、手续费、保证金和风险限额，静态数值不得直接驱动订单。
 
 ## 5. 状态机与执行语义
 
@@ -70,8 +70,8 @@
 - `disabled`：全局或策略未启用，禁止真实动作。
 - `observing`：读取公开/私有数据并生成 Shadow 决策。
 - `armed`：门禁满足且已人工启用，允许等待入场条件。
-- `opening`：双腿分批建仓。
-- `hedged`：两腿已达到允许的净 Delta。
+- `opening`：正在建立现货与永续对冲组合。
+- `hedged`：现货侧与永续侧已达到允许的净 Delta。
 - `rebalancing`：对精度、成交或价格变化造成的偏差进行受限修正。
 - `closing`：按实际仓位逐批退出。
 - `fault`：检测到数据、交易所、成交或恢复异常，禁止新增风险。
@@ -79,14 +79,14 @@
 
 每个策略周期、批次和交易所请求必须有稳定幂等键。重启后先读取交易所权威订单、成交和仓位再恢复状态；不得只根据本地内存推断已成交或重新发送订单。
 
-## 6. 下单、部分成交与补腿
+## 6. 下单、部分成交与对冲补齐
 
 - 默认每批名义金额不超过 25 USDT。
-- 先以可成交限价/IOC 买入现货，再按现货实际成交数量建立永续空头；不按计划数量盲目补腿。
-- 第一腿未成交部分立即撤销；只对已成交数量执行第二腿。
-- 单腿暴露最长 10 秒。第二腿失败时停止新批次、撤销剩余委托，并按风控权限关闭第一腿或进入 `manual_intervention`。
-- Phase A/B 只模拟上述动作。Phase C/D 才可在再次确认后允许受限自动补腿、自动撤单、自动减仓和紧急退出。
-- 紧急市价退出只允许在 kill switch、单腿超时或强平风险触发时使用，并继续受最大滑点和实际持仓上限约束。
+- 先以可成交限价/IOC 买入现货，再按现货实际成交数量建立永续空头；不按计划数量盲目补齐永续侧。
+- 现货侧未成交部分立即撤销；只按现货侧已成交数量建立永续侧。
+- 单侧暴露最长 10 秒。永续侧失败时停止新批次、撤销剩余委托，并按风控权限退出现货侧或进入 `manual_intervention`。
+- Phase A/B 只模拟上述动作。Phase C/D 才可在再次确认后允许受限自动补齐对冲、自动撤单、自动减仓和紧急退出。
+- 紧急市价退出只允许在 kill switch、单侧暴露超时或强平风险触发时使用，并继续受最大滑点和实际持仓上限约束。
 
 ## 7. V1 风控阈值
 
@@ -94,9 +94,9 @@
 | --- | --- |
 | 公开市场候选 | 90 天等效净 APR `>= 6%`，入场基差绝对值 `<= 50 bps` |
 | 真实执行入场 | 等效净 APR `>= 8%`，入场基差绝对值 `<= 30 bps` |
-| 双腿预估总滑点 | `<= 20 bps` |
+| 对冲组合预估总滑点 | `<= 20 bps` |
 | 最大净 Delta | `<= 5 USDT` |
-| 最大单腿暴露 | `<= 10 秒`，单批 `<= 25 USDT` |
+| 最大单侧暴露 | `<= 10 秒`，单批 `<= 25 USDT` |
 | Funding 退出 | Funding 方向反转，或等效净 APR 连续两个结算周期低于 `2%` |
 | 基差风险 | 绝对值超过 `80 bps` 时停止加仓并进入退出评估 |
 | 日内最大损失 | `6 USDT` |
@@ -119,7 +119,7 @@
 
 ### `GET /api/admin/arbitrage/neutral-automation`
 
-用途：读取 owner-only RWA 中性自动套利 V1 Phase A 状态。当前只返回 Bybit XAUT 同所现货/永续的只读/Shadow 状态，不提供启停、下单、撤单、补腿、调仓或资金操作。
+用途：读取 owner-only RWA 中性自动套利 V1 Phase A 运维状态。该兼容接口不提供启停、下单、撤单、对冲补齐、调仓或资金操作。
 
 鉴权：
 
@@ -215,7 +215,7 @@ V1 先验证单所中性。未来增加交易所时，每个交易所作为独�
 3. 登录用户在统一授权窗口手工提交自己的 API Key/Secret；浏览器不得持久化，后端用 AES-GCM 加密保存，前端只显示脱敏 Key、连通性和权限核对结果。
 4. 先对单个 connector 完成只读账户核对，再单独运行 Shadow 和故障演练。
 5. 为每个“交易所 + 标的 + 策略”设置独立白名单、资金上限、阈值和 kill switch；新增交易所默认 disabled。
-6. 多所同时运行时，由统一控制面展示余额、两腿状态、净 Delta、告警和审计，但订单仍由各 connector 独立幂等执行。
+6. 多所同时运行时，由统一控制面展示余额、现货侧与永续侧状态、净 Delta、告警和审计，但订单仍由各 connector 独立幂等执行。
 7. 跨所套利要求两边提前备资；V1/V2 不自动跨交易所划转资金。余额不足时停止新开仓，由用户人工补充或再平衡。
 8. 启用顺序固定为：只读连通性 → Shadow → 故障演练 → 最小受控订单 → 小额运行；每家交易所分别验收，不能因 Bybit 已通过而自动放行其他交易所。
 9. 日常用户在私有控制台查看自己的状态、处理告警、逐策略 armed/disabled 和使用用户级急停；不需要逐笔手动下单。
@@ -250,7 +250,7 @@ V1 先验证单所中性。未来增加交易所时，每个交易所作为独�
 - `POST /api/arbitrage/automation/venues/:venue/kill-switch`
 - `GET /api/arbitrage/automation/venues/:venue/account`
 
-当前 venue 顺序固定为 `bybit -> bitget -> binance -> okx`。Bybit 为既有执行 adapter；Binance 为 `phase_1_read_only_shadow` adapter，固定 `enabled=false`、`providerWritesEnabled=false`；Bitget/OKX 返回 `501 venue_not_implemented`。各 venue 不得继承其他交易所的凭证、账户、开关或缓存。
+当前 venue 顺序固定为 `bybit -> bitget -> binance -> okx`。Bybit 与 Binance 为已实现的执行 adapter；Binance 返回 `phase=execution_capable`、`providerWritesEnabled=true`，但 `enabled` 仍由有效凭证、用户双开关、用户 kill switch 和服务端全局 kill switch 共同决定，默认不可写。Bitget/OKX 返回 `501 venue_not_implemented`。各 venue 不得继承其他交易所的凭证、账户、开关或缓存。
 
 Bybit 凭证写入请求：
 
@@ -309,14 +309,14 @@ Preflight 请求按入场方式显式选择 mode：
 
 安全判断失败时返回 `409 safety_opportunity_blocked`；自动策略不符合时返回 `409 automation_opportunity_blocked`。对应 adapter 未实现或默认禁用时返回 `501 opportunity_adapter_unavailable`。以上拒绝都发生在私有 provider 调用前。
 
-Bybit 首个 adapter 当前只支持安全可执行的 XAUT 现货多头 + XAUTUSDT 永续空头。真实入场数量固定 `0.002 XAUT`，25 USDT 是两腿 1x 名义、手续费、滑点准备金合计的总预算，不是每腿 25 USDT；V1 venue 资本硬上限为 300 USDT。
+Bybit 首个 adapter 当前只支持安全可执行的 XAUT 现货多头 + XAUTUSDT 永续空头。真实入场数量固定 `0.002 XAUT`，25 USDT 是现货与永续对冲组合的 1x 名义、手续费、滑点准备金合计总预算，不是每一侧各 25 USDT；V1 venue 资本硬上限为 300 USDT。
 
 Binance 第一阶段只识别 Binance `XAUTUSDT` 同所精确组合。服务端实时读取 Spot/USDM `exchangeInfo`，不得假定 symbol、替换成 PAXG 或其他黄金标的。2026-07-23 owner 实时核对结果为：
 
 - 现货 `XAUTUSDT`：`TRADING`，数量步长 `0.0001`，最小名义 `5 USDT`，价格步长 `0.01`
 - USD-M `XAUTUSDT` 永续：`TRADING`，数量步长/最小数量 `0.001`，最小名义 `5 USDT`，价格步长 `0.01`
 
-以上只记录核对时事实；每次 Shadow/preflight 仍必须重读缓存期内的产品目录、book ticker、盘口、mark、Funding 与下一结算时间。任一产品不存在时返回 `binance_product_unavailable` / `provider_product_unavailable`，不得伪造双腿。
+以上只记录核对时事实；每次 Shadow/preflight 仍必须重读缓存期内的产品目录、book ticker、盘口、mark、Funding 与下一结算时间。任一产品不存在时返回 `binance_product_unavailable` / `provider_product_unavailable`，不得伪造可执行的对冲组合。
 
 两种模式都会重新读取私有权限、余额、账户模式、实时价格、产品状态、数量/价格步长、最小名义、手续费和强平距离，并硬性校验：
 
@@ -327,20 +327,20 @@ Binance 第一阶段只识别 Binance `XAUTUSDT` 同所精确组合。服务端�
 
 `arbitrage_entry` 还会硬性要求 Funding `>0`、净 APR `>=8%`、基差不超限。`manual_entry` 将 Funding 不利、净 APR 不足和基差超过自动门槛转为必须展示和确认的 warning，不把它们伪装成系统推荐，也不放宽上述安全校验。
 
-Bybit preflight 通过后返回 60 秒一次性 `challengeId/challengeToken`；服务端只持久化 token 哈希。Execute 请求：
+Bybit 或 Binance preflight 通过后返回 60 秒一次性 `challengeId/challengeToken`；服务端只持久化 token 哈希。Execute 请求：
 
 ```json
 {
   "challengeId": "...",
   "challengeToken": "...",
-  "accountId": "bybit:...",
+  "accountId": "服务端返回的 venue 账户 ID",
   "idempotencyKey": "owner-generated-stable-key"
 }
 ```
 
-Challenge 报告显式绑定 `arbitrage_entry` 或 `manual_entry`。执行前按 challenge 中的原 mode 再次实时 preflight；旧 challenge 若没有 mode，保守按严格自动模式处理。随后先固定永续 1x。现货腿使用带滑点边界的 IOC，按现货实际成交量建立永续空头；部分成交最多补腿两次，剩余现货立即退出。Bybit create-order 只视为异步接收，必须再查 realtime/history 权威状态。幂等记录在任何 provider 写入前原子持久化；重启后 challenge 自动 disarm，未完成执行按 orderLinkId 从 provider 权威订单/成交恢复并撤单退出。
+Challenge 报告显式绑定 `arbitrage_entry` 或 `manual_entry`。执行前按 challenge 中的原 mode 再次实时 preflight；旧 challenge 若没有 mode，保守按严格自动模式处理。随后先固定永续 1x。现货侧使用带滑点边界的 IOC，按现货实际成交量建立永续侧；部分成交最多补齐永续侧两次，剩余现货立即退出。交易所 create-order 只视为异步接收，必须再查订单或成交的权威状态。幂等记录在任何 provider 写入前原子持久化；重启后 challenge 自动 disarm，未完成执行按策略 client order ID 从 provider 权威订单/成交恢复并撤单退出。
 
-Binance 第一阶段 preflight 会重读机会与私有账户，分别核对现货/期货可用 USDT、交易权限、提现关闭、账户/持仓模式、产品状态、数量/价格精度、最小名义、活动订单、已有 XAUT 敞口、公开盘口深度、stale、Funding、基差、净 APR、25 USDT 总预算和 300 USDT venue 硬上限。结果通过时仍返回 `409 binance_provider_writes_disabled` 并附带 `report.marketChecksPassed=true`，不会生成 `challengeId/challengeToken`；市场或账户检查失败返回 `409 preflight_rejected`。`POST /execute` 与 Binance `close-all` 固定返回 `501 binance_provider_writes_disabled`。
+Binance preflight 会重读机会与私有账户，分别核对现货/期货可用 USDT、读取/现货/Futures 交易权限、提现关闭、one-way 持仓模式、产品状态、数量/价格精度、最小名义、活动订单、已有 XAUT 敞口、公开盘口深度、stale、Funding、基差、净 APR、25 USDT 总预算和 300 USDT venue 硬上限。检查失败返回 `409 preflight_rejected`；全部通过才签发 60 秒一次性 challenge。Execute 会再次执行实时 preflight，设置 USD-M Futures 1x 杠杆，并只允许固定 `XAUTUSDT` 的现货侧 IOC Limit Buy 与永续侧 IOC Limit Sell。现货侧实际成交后才按成交数量建立永续侧；永续侧失败、订单状态超时或对冲未完成时，系统只撤销带本策略 client order ID 前缀的活动订单，并尝试补齐对冲或退出本策略仓位。两次退出仍无法闭环时进入 `manual_intervention` 并激活该用户的 Binance kill switch。
 
 25U `connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。
 
@@ -352,7 +352,7 @@ Binance 第一阶段 preflight 会重读机会与私有账户，分别核对现�
 - `POST /api/arbitrage/automation/positions/:positionId/close`
 - `POST /api/arbitrage/automation/venues/:venue/close-all`
 
-PnL 只按策略 orderLinkId/execution 与专用子账户交易日志归因，返回两腿数量、均价、mark、名义、净 Delta、入场/当前基差、realized/unrealized、Funding、fees、slippage、net PnL、时间序列和执行历史；不得使用账户总 PnL。Kill switch 阻止新增风险，但 close/close-all 不受策略 enabled 开关阻止。
+PnL 只按策略 client order ID、provider order ID、execution 与专用账户交易日志归因，返回现货侧与永续侧数量、均价、mark、名义、净 Delta、入场/当前基差、realized/unrealized、Funding、fees、slippage、net PnL、时间序列和执行历史；不得使用账户总 PnL。该归因依赖专用账户不混入同 symbol 的人工仓位。Kill switch 阻止新增风险，但 close/close-all 不受策略 enabled 开关阻止，且不得撤销或平掉非本策略订单和仓位。
 
 ### 凭证文件与环境变量
 
@@ -362,7 +362,7 @@ PnL 只按策略 orderLinkId/execution 与专用子账户交易日志归因，�
 
 生产或本地均不得在聊天、测试 fixture、日志或接口响应中填入真实 Secret。专项测试只允许假 provider，禁止触发 Mainnet 订单。
 
-## 14. Binance 第一阶段状态与错误契约
+## 14. Binance 执行状态与错误契约
 
 `GET /api/arbitrage/automation/venues` 中 Binance 项追加：
 
@@ -371,8 +371,8 @@ PnL 只按策略 orderLinkId/execution 与专用子账户交易日志归因，�
   "venue": "binance",
   "implemented": true,
   "enabled": false,
-  "phase": "phase_1_read_only_shadow",
-  "providerWritesEnabled": false,
+  "phase": "execution_capable",
+  "providerWritesEnabled": true,
   "productAvailability": {
     "available": true,
     "status": "available",
@@ -386,16 +386,18 @@ PnL 只按策略 orderLinkId/execution 与专用子账户交易日志归因，�
 
 `productAvailability.status` 只允许 `available / spot_unavailable / perpetual_unavailable / both_unavailable`。产品目录或网络不可核对时按 unavailable 返回，不延用旧成功值伪装当前可用。
 
-Binance 第一阶段稳定错误类别：
+Binance 稳定错误类别：
 
 - `permission_rejected`：读取/现货/Futures 权限不足、提现开启或持仓模式不支持
 - `provider_credential_invalid` / `provider_permission_error`：Binance 签名或私有权限拒绝
 - `provider_timestamp_error`：重新同步一次后仍无法通过时间戳校验
 - `provider_rate_limited` / `provider_unavailable`：限频或上游不可用
-- `provider_product_unavailable` / `binance_product_unavailable`：真实产品目录无法组成 XAUT 同所双腿
+- `provider_product_unavailable` / `binance_product_unavailable`：真实产品目录无法组成 XAUT 同所对冲组合
 - `preflight_rejected`：产品、精度、最小名义、余额、模式、stale、盘口或风险检查失败
-- `binance_provider_writes_disabled`：只读检查可以继续，但第一阶段禁止签发 challenge 或调用写接口
+- `execution_disabled` / `server_kill_switch_active` / `kill_switch_active`：执行开关或急停仍在阻止新增风险
+- `challenge_invalid` / `restart_disarmed`：一次性 challenge 无效、过期、已使用，或服务重启后已解除 armed
+- `provider_order_timeout` / `hedge_incomplete`：权威订单状态未在时限内确认，或对冲未完成
 - `credential_delete_blocked`：账户存在 XAUT 余额、永续仓位或活动订单
 - `credential_delete_manual_intervention`：凭证失效，系统无法确认账户敞口，必须在 Binance 人工处理
 
-Binance connector 只调用 GET；代码中没有 place/cancel/close/leverage provider 方法。若下一阶段需要真实写调用，必须单独回到来源任务确认、重新冻结 Binance 订单与故障恢复契约并完成独立安全验收。
+Binance connector 已实现严格白名单 provider 方法：设置 `XAUTUSDT` USD-M 1x 杠杆、现货侧/永续侧 IOC Limit 下单、按策略 client order ID 查询与撤单、策略成交归因和受控退出。所有写路径默认被配置与两层急停阻断；当前只使用 fake provider 完成 owner 自检，未配置真实凭证、未连接真实私有账户、未发送真实订单。进入生产启用前仍需独立安全验收和明确的运维放行。

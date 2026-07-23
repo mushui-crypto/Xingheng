@@ -4,6 +4,7 @@ import {
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
 import { RwaBybitProviderError } from "./RwaBybitMainnetClient";
+import { RwaNeutralHedgeExecutionEngine } from "./RwaNeutralHedgeExecutionEngine";
 import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
@@ -43,6 +44,7 @@ export class RwaNeutralExecutionService {
   private lock = Promise.resolve();
   private armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
+  private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
   private accessCache: {
     accountId: string;
     verifiedAt: number;
@@ -54,7 +56,9 @@ export class RwaNeutralExecutionService {
     private readonly clientFactory: RwaBybitTradingClientFactory,
     private readonly now: () => number = Date.now,
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
-  ) {}
+  ) {
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
+  }
 
   private get strategyOrderPrefix() {
     return `rwa${this.store.userDomain}`;
@@ -71,7 +75,7 @@ export class RwaNeutralExecutionService {
       for (const execution of pending) {
         try {
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
-          await this.closeAllInternal(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
+          await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
           execution.state = "closed";
           execution.message = "服务重启后已按 provider 权威状态完成安全退出。";
           execution.updatedAt = this.now();
@@ -501,7 +505,15 @@ export class RwaNeutralExecutionService {
         );
         if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止下单。");
         await client.setPerpetualLeverage(1);
-        await this.openHedgedPair(client, execution, realtime, state.config, state);
+        await this.hedgeEngine.open({
+          client,
+          execution,
+          snapshot: realtime,
+          config: state.config,
+          state,
+          quantityXaut: report.quantityXaut,
+          persist: (currentState, currentExecution) => this.persistExecution(currentState, currentExecution),
+        });
       } catch (error) {
         if (execution.state !== "hedged" && execution.state !== "closed") {
           execution.errorCategory = category(error);
@@ -510,12 +522,12 @@ export class RwaNeutralExecutionService {
             execution.state = "compensating";
             await this.persistExecution(state, execution);
             await client.cancelStrategyOrders(execution.orderLinkPrefix);
-            await this.closeAllInternal(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
+            await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
             execution.state = "failed";
-            execution.message = "双腿未能完成，已按 provider 权威状态撤单并退出暴露。";
+            execution.message = "对冲未完成，已按 provider 权威状态撤单并退出未对冲敞口。";
           } catch {
             execution.state = "manual_intervention";
-            execution.message = "自动补腿/退出未能闭环，需要当前用户在交易所人工处理。";
+            execution.message = "自动建立或退出对冲组合未能闭环，需要当前用户在交易所人工处理。";
             state.config.killSwitchActive = true;
           }
           execution.updatedAt = this.now();
@@ -545,9 +557,9 @@ export class RwaNeutralExecutionService {
       await this.store.writeState(state);
       try {
         await client.cancelStrategyOrders(this.strategyOrderPrefix);
-        await this.closeAllInternal(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
+        await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
         execution.state = "closed";
-        execution.message = "策略订单已撤销，两腿已按权威持仓提交退出并确认。";
+        execution.message = "策略订单已撤销，现货与永续两侧仓位已按权威状态退出并确认。";
       } catch (error) {
         execution.state = "manual_intervention";
         execution.errorCategory = category(error);
@@ -558,148 +570,6 @@ export class RwaNeutralExecutionService {
       await this.store.writeState(state);
       return redactExecution(execution);
     });
-  }
-
-  private async openHedgedPair(
-    client: RwaBybitTradingClient,
-    execution: RwaExecutionRecord,
-    snapshot: RwaProviderPreflightSnapshot,
-    config: RwaExecutionConfig,
-    state: RwaAutomationStateData,
-  ) {
-    const halfSlippage = config.maxCombinedSlippageBps / 2 / 10_000;
-    const deadline = this.now() + config.maxUnhedgedMs;
-    const hedgeDeadline = deadline - Math.min(3_000, Math.floor(config.maxUnhedgedMs / 3));
-    execution.state = "opening_spot";
-    await this.persistExecution(state, execution);
-    const spotAccepted = await client.placeOrder({
-      category: "spot",
-      symbol: "XAUTUSDT",
-      side: "Buy",
-      quantityXaut: RWA_SMOKE_QUANTITY_XAUT,
-      limitPrice: ceilStep(snapshot.spot.ask * (1 + halfSlippage), snapshot.spot.priceTick),
-      reduceOnly: false,
-      orderLinkId: `${execution.orderLinkPrefix}s1`,
-    });
-    const spot = await client.awaitOrder("spot", spotAccepted.orderId, Math.min(deadline, this.now() + 4_000));
-    const firstLegFilledAt = this.now();
-    execution.spotOrder = spot;
-    if (spot.status === "PartiallyFilled" || spot.status === "New") await client.cancelOrder("spot", spot.orderId);
-    if (spot.filledQuantityXaut < snapshot.perpetual.minOrderQty) throw new Error("现货第一腿没有形成可对冲的最小成交量。");
-    execution.state = "opening_perpetual";
-    await this.persistExecution(state, execution);
-    let remaining = floorStep(spot.filledQuantityXaut, snapshot.perpetual.qtyStep);
-    let attempt = 0;
-    while (remaining >= snapshot.perpetual.minOrderQty && attempt < 2 && this.now() < hedgeDeadline) {
-      attempt += 1;
-      const accepted = await client.placeOrder({
-        category: "linear",
-        symbol: "XAUTUSDT",
-        side: "Sell",
-        quantityXaut: remaining,
-        limitPrice: floorStep(snapshot.perpetual.bid * (1 - halfSlippage), snapshot.perpetual.priceTick),
-        reduceOnly: false,
-        orderLinkId: `${execution.orderLinkPrefix}p${attempt}`,
-      });
-      const order = await client.awaitOrder("linear", accepted.orderId, hedgeDeadline);
-      execution.perpetualOrders.push(order);
-      if (order.status === "PartiallyFilled" || order.status === "New") await client.cancelOrder("linear", order.orderId);
-      remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), snapshot.perpetual.qtyStep);
-      await this.persistExecution(state, execution);
-    }
-    const perpetualFilled = execution.perpetualOrders.reduce((sum, order) => sum + order.filledQuantityXaut, 0);
-    const excessSpot = floorStep(Math.max(0, spot.filledQuantityXaut - perpetualFilled), snapshot.spot.qtyStep);
-    if (excessSpot >= snapshot.spot.minOrderQty) {
-      execution.state = "compensating";
-      await this.persistExecution(state, execution);
-      const accepted = await client.placeOrder({
-        category: "spot",
-        symbol: "XAUTUSDT",
-        side: "Sell",
-        quantityXaut: excessSpot,
-        limitPrice: floorStep(snapshot.spot.bid * (1 - halfSlippage), snapshot.spot.priceTick),
-        reduceOnly: false,
-        orderLinkId: `${execution.orderLinkPrefix}x1`,
-      });
-      const compensation = await client.awaitOrder("spot", accepted.orderId, deadline);
-      execution.compensationOrders.push(compensation);
-      if (compensation.filledQuantityXaut + 1e-9 < excessSpot) throw new Error("单腿暴露未能在时限内退出。");
-    }
-    const paired = Math.min(spot.filledQuantityXaut, perpetualFilled);
-    if (paired < snapshot.perpetual.minOrderQty) throw new Error("双腿未形成最小中性仓位。");
-    execution.hedgedQuantityXaut = paired;
-    execution.unhedgedDurationMs = Math.max(0, this.now() - firstLegFilledAt);
-    if (execution.unhedgedDurationMs > config.maxUnhedgedMs) throw new Error("单腿暴露超过 10 秒硬上限。");
-    execution.state = "hedged";
-    execution.message = "合格 opportunity 已在 25 USDT 总预算内形成 XAUT 现货多头 + 永续空头中性仓位。";
-    execution.updatedAt = this.now();
-    await this.store.writeState(state);
-  }
-
-  private async closeAllInternal(client: RwaBybitTradingClient, scope: string, orderLinkPrefix: string) {
-    const pnl = await client.readStrategyPnl(scope, null);
-    const market = await client.readPreflightSnapshot();
-    const deadline = this.now() + defaultRwaExecutionConfig.maxUnhedgedMs;
-    await this.closeLeg(client, {
-      category: "linear",
-      side: "Buy",
-      quantity: pnl.legs.perpetual.quantityXaut,
-      qtyStep: market.perpetual.qtyStep,
-      minOrderQty: market.perpetual.minOrderQty,
-      limitPrice: ceilStep(market.perpetual.ask * 1.001, market.perpetual.priceTick),
-      reduceOnly: true,
-      orderLinkPrefix: `${orderLinkPrefix}cp`,
-      deadline,
-      failureMessage: "永续空头未完全退出。",
-    });
-    await this.closeLeg(client, {
-      category: "spot",
-      side: "Sell",
-      quantity: pnl.legs.spot.quantityXaut,
-      qtyStep: market.spot.qtyStep,
-      minOrderQty: market.spot.minOrderQty,
-      limitPrice: floorStep(market.spot.bid * 0.999, market.spot.priceTick),
-      reduceOnly: false,
-      orderLinkPrefix: `${orderLinkPrefix}cs`,
-      deadline,
-      failureMessage: "现货多头未完全退出。",
-    });
-    const confirmed = await client.readStrategyPnl(scope, null);
-    if (confirmed.openOrders.length || confirmed.legs.spot.quantityXaut > 1e-9 || confirmed.legs.perpetual.quantityXaut > 1e-9) {
-      throw new Error("交易所权威状态仍存在活动订单或未退出仓位。");
-    }
-  }
-
-  private async closeLeg(client: RwaBybitTradingClient, input: {
-    category: "spot" | "linear";
-    side: "Buy" | "Sell";
-    quantity: number;
-    qtyStep: number;
-    minOrderQty: number;
-    limitPrice: number;
-    reduceOnly: boolean;
-    orderLinkPrefix: string;
-    deadline: number;
-    failureMessage: string;
-  }) {
-    let remaining = floorStep(input.quantity, input.qtyStep);
-    let attempt = 0;
-    while (remaining >= input.minOrderQty && attempt < 2 && this.now() < input.deadline) {
-      attempt += 1;
-      const accepted = await client.placeOrder({
-        category: input.category,
-        symbol: "XAUTUSDT",
-        side: input.side,
-        quantityXaut: remaining,
-        limitPrice: input.limitPrice,
-        reduceOnly: input.reduceOnly,
-        orderLinkId: `${input.orderLinkPrefix}${attempt}`,
-      });
-      const order = await client.awaitOrder(input.category, accepted.orderId, input.deadline);
-      if (order.status === "PartiallyFilled" || order.status === "New") await client.cancelOrder(input.category, order.orderId);
-      remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), input.qtyStep);
-    }
-    if (remaining >= input.minOrderQty) throw new Error(input.failureMessage);
   }
 
   private async client() {
@@ -829,13 +699,13 @@ function buildPreflight(
     check("account_mode", snapshot.accountMode === "uta", "uta", "仅允许 UTA 专用子账户。"),
     check("spot_trading", snapshot.spot.status === "Trading", "Trading", "XAUTUSDT 现货必须处于 Trading。"),
     check("perpetual_trading", snapshot.perpetual.status === "Trading", "Trading", "XAUTUSDT 永续必须处于 Trading。"),
-    check("fixed_quantity", stepAligned(RWA_SMOKE_QUANTITY_XAUT, snapshot.spot.qtyStep) && stepAligned(RWA_SMOKE_QUANTITY_XAUT, snapshot.perpetual.qtyStep), true, "烟测数量固定为 0.002 XAUT，必须匹配两腿步长。"),
-    check("price_ticks", snapshot.spot.priceTick > 0 && snapshot.perpetual.priceTick > 0, true, "两腿实时价格步长必须可核对。"),
+    check("fixed_quantity", stepAligned(RWA_SMOKE_QUANTITY_XAUT, snapshot.spot.qtyStep) && stepAligned(RWA_SMOKE_QUANTITY_XAUT, snapshot.perpetual.qtyStep), true, "烟测数量固定为 0.002 XAUT，必须同时匹配现货侧与永续侧步长。"),
+    check("price_ticks", snapshot.spot.priceTick > 0 && snapshot.perpetual.priceTick > 0, true, "现货侧与永续侧实时价格步长必须可核对。"),
     check("spot_minimum", RWA_SMOKE_QUANTITY_XAUT >= snapshot.spot.minOrderQty && spotNotional >= snapshot.spot.minNotionalUsd, true, "现货数量和名义必须达到实时最小值。"),
     check("perpetual_minimum", RWA_SMOKE_QUANTITY_XAUT >= snapshot.perpetual.minOrderQty && perpetualNotional >= snapshot.perpetual.minNotionalUsd, true, "永续数量和名义必须达到实时最小值。"),
     check("no_existing_spot", snapshot.existingSpotQuantityXaut <= 1e-9, 0, "烟测前专用子账户不得已有 XAUT 现货。"),
     check("no_existing_perpetual", snapshot.existingPerpetualQuantityXaut <= 1e-9, 0, "烟测前专用子账户不得已有 XAUT 永续仓位。"),
-    check("total_budget", capitalRequired <= RWA_SMOKE_TOTAL_BUDGET_USD, RWA_SMOKE_TOTAL_BUDGET_USD, "两腿 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
+    check("total_budget", capitalRequired <= RWA_SMOKE_TOTAL_BUDGET_USD, RWA_SMOKE_TOTAL_BUDGET_USD, "现货与永续对冲组合的 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
     check("strategy_cap", capitalRequired <= config.maxStrategyCapitalUsd && config.maxStrategyCapitalUsd <= RWA_MAX_STRATEGY_CAPITAL_USD, config.maxStrategyCapitalUsd, "V1 策略资本不得超过 300 USDT。"),
     check("balance", snapshot.availableUsdt >= capitalRequired, capitalRequired, "可用 USDT 必须覆盖烟测总预算需求。"),
     check("liquidation", snapshot.perpetual.liquidationDistancePercent === null || snapshot.perpetual.liquidationDistancePercent >= config.minLiquidationDistancePercent, config.minLiquidationDistancePercent, "现有仓位强平距离不得低于门限；新仓固定先设 1x。"),
@@ -852,7 +722,7 @@ function buildPreflight(
     ? []
     : ["API Key 未配置固定 IP 白名单；这是高风险配置，但不作为本轮硬阻断。"];
   if (mode === "manual_entry") {
-    if (snapshot.perpetual.fundingRate <= 0) warnings.push("当前空头腿未处于收取 Funding 状态，请确认后自行决策。");
+    if (snapshot.perpetual.fundingRate <= 0) warnings.push("当前永续侧未处于收取 Funding 状态，请确认后自行决策。");
     if (Math.abs(entryBasisBps) > config.maxEntryBasisBps) warnings.push("当前入场基差超过自动策略门限，请确认后自行决策。");
     if (estimatedNetAprPercent < config.minNetAprPercent) warnings.push("当前估算净 APR 低于自动策略门限，请确认后自行决策。");
   }

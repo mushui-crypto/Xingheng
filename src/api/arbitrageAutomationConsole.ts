@@ -6,11 +6,16 @@ import type {
   AutomationCredentialStatus,
   AutomationCredentialSummary,
   AutomationParameter,
+  AutomationPrivateAccountSnapshot,
   AutomationPositionGroup,
   AutomationPreflight,
+  AutomationPreflightFailure,
   AutomationPreflightMode,
+  AutomationExecutionOrder,
+  AutomationExecutionResult,
   AutomationShadowCheck,
   AutomationVenue,
+  AutomationVenueControl,
   CredentialDraft,
   ParameterDraft,
   SafetyAction,
@@ -46,6 +51,7 @@ type VenueStatusDto = {
 };
 
 type ConfigDto = {
+  venue?: AutomationVenue;
   accountId: string | null;
   defaultAccountId: string | null;
   globalExecutionEnabled: boolean;
@@ -59,6 +65,8 @@ type ConfigDto = {
   minLiquidationDistancePercent: number;
   maxUnhedgedMs: number;
 };
+
+type PrivateAccountDto = Record<string, unknown>;
 
 type OpportunityDto = {
   id: string;
@@ -83,19 +91,24 @@ type ChallengeDto = {
 };
 
 type SafeShadowReport = Omit<AutomationShadowCheck, "kind" | "candidateId" | "accountId" | "mode">;
+type SafePreflightFailure = Omit<AutomationPreflightFailure, "kind" | "candidateId" | "accountId" | "mode">;
+type AutomationErrorDetails = {
+  shadowReport?: SafeShadowReport;
+  preflightFailure?: SafePreflightFailure;
+};
 
 export class AutomationConsoleContractError extends Error {
   status: number;
   retryAfterSeconds: number | null;
   category: string | null;
-  details: { shadowReport: SafeShadowReport } | null;
+  details: AutomationErrorDetails | null;
 
   constructor(
     status: number,
     message: string,
     retryAfterSeconds: number | null = null,
     category: string | null = null,
-    details: { shadowReport: SafeShadowReport } | null = null,
+    details: AutomationErrorDetails | null = null,
   ) {
     super(message);
     this.name = "AutomationConsoleContractError";
@@ -111,16 +124,33 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
   const challenges = new Map<string, AutomationPreflight>();
 
   const load = async (signal?: AbortSignal) => {
+    challenges.clear();
     const venues = await apiRequest<VenueStatusDto[]>(`${apiBase}/venues`, "API 账户状态加载失败。", { signal });
-    const bybitImplemented = venues.some((item) => item.venue === "bybit" && item.implemented);
-    const [opportunities, positions, pnl, audit, config] = await Promise.all([
+    const implemented = venues.filter((item) => item.implemented);
+    const [opportunities, positions, pnl, audit, configs, accounts] = await Promise.all([
       apiRequest<{ generatedAt: number; eligibleCount: number; items: OpportunityDto[] }>(`${apiBase}/opportunities`, "套利候选加载失败。", { signal }),
       apiRequest<{ items: unknown[] }>(`${apiBase}/positions`, "套利持仓加载失败。", { signal }),
       apiRequest<{ venues: unknown[] }>(`${apiBase}/pnl`, "策略盈亏加载失败。", { signal }),
       apiRequest<{ venues: unknown[] }>(`${apiBase}/audit`, "套利审计加载失败。", { signal }),
-      bybitImplemented ? apiRequest<ConfigDto>(`${apiBase}/venues/bybit/config`, "策略参数加载失败。", { signal }) : Promise.resolve(null),
+      Promise.all(implemented.map(async (item) => {
+        const config = await optionalApiRequest<ConfigDto>(`${apiBase}/venues/${item.venue}/config`, "策略参数加载失败。", { signal });
+        return config ? { ...config, venue: item.venue } : null;
+      })),
+      Promise.all(implemented.map(async (item) => {
+        if (!item.credential.stored || !item.credential.accountId) return null;
+        const account = await optionalApiRequest<PrivateAccountDto>(`${apiBase}/venues/${item.venue}/account`, "交易所账户状态加载失败。", { signal });
+        return account ? { venue: item.venue, account } : null;
+      })),
     ]);
-    latest = buildSnapshot(venues, opportunities, positions, pnl, audit, config);
+    latest = buildSnapshot(
+      venues,
+      opportunities,
+      positions,
+      pnl,
+      audit,
+      configs.filter((item): item is ConfigDto & { venue: AutomationVenue } => item !== null),
+      accounts.filter((item): item is { venue: AutomationVenue; account: PrivateAccountDto } => item !== null),
+    );
     return latest;
   };
 
@@ -138,6 +168,9 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       if (!credential.canRunReadOnlyPreflight) {
         throw new AutomationConsoleContractError(501, `${venueName(candidate.venue)} 当前阶段不开放预检。`, null, "venue_capability_unavailable");
       }
+      if (candidate.canExecute && !candidate.executionReady) {
+        throw new AutomationConsoleContractError(409, "API 授权、策略开关或急停状态尚未全部就绪。", null, "execution_not_ready");
+      }
       let response: ChallengeDto;
       try {
         response = await apiRequest<ChallengeDto>(`${apiBase}/preflight`, "执行预检失败。", {
@@ -148,28 +181,47 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
         if (
           error instanceof AutomationConsoleContractError
           && ["binance_provider_writes_disabled", "preflight_rejected"].includes(error.category ?? "")
-          && error.details?.shadowReport
         ) {
-          return {
-            kind: "shadow_check",
-            ...error.details.shadowReport,
-            candidateId: candidate.id,
-            accountId: credential.accountId,
-            mode,
-          };
+          if (error.details?.shadowReport) {
+            return {
+              kind: "shadow_check",
+              ...error.details.shadowReport,
+              candidateId: candidate.id,
+              accountId: credential.accountId,
+              mode,
+            };
+          }
+          if (error.details?.preflightFailure) {
+            return {
+              kind: "preflight_rejected",
+              ...error.details.preflightFailure,
+              candidateId: candidate.id,
+              accountId: credential.accountId,
+              mode,
+            };
+          }
         }
         throw error;
       }
       if (!credential.canExecute) {
         throw new AutomationConsoleContractError(409, `${venueName(candidate.venue)} 当前阶段不会签发执行 challenge。`, null, "provider_writes_disabled");
       }
-      const preflight = mapPreflight(response, candidate, credential.accountId, mode);
+      const preflight = mapPreflight(response, candidate, credential, mode);
       challenges.set(preflight.challengeId, preflight);
       return preflight;
     },
     async confirmExecution(challengeId) {
       const challenge = challenges.get(challengeId);
       if (!challenge) throw new AutomationConsoleContractError(409, "执行 challenge 不存在、已过期或已使用。", null, "challenge_invalid");
+      if (challenge.expiresAt <= Date.now()) {
+        challenges.delete(challengeId);
+        throw new AutomationConsoleContractError(409, "执行 challenge 已过期，请重新预检。", null, "challenge_invalid");
+      }
+      const currentAccount = requireCredential(requireLatest(latest), challenge.venue);
+      if (currentAccount.accountId !== challenge.accountId) {
+        challenges.delete(challengeId);
+        throw new AutomationConsoleContractError(409, "API 账户已变化，请重新预检。", null, "account_mismatch");
+      }
       try {
         const response = await apiRequest<Record<string, unknown>>(`${apiBase}/execute`, "真实执行请求失败。", {
           method: "POST",
@@ -181,9 +233,13 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
           },
         });
         challenges.delete(challengeId);
-        return realReceipt(stringValue(response.message) || "真实执行请求已提交，结果以交易所权威订单状态为准。");
+        const execution = mapExecution(response, challenge.venue, challenge.accountId);
+        return realReceipt(execution.message || "真实执行请求已提交，结果以交易所权威订单状态为准。", execution);
       } catch (error) {
-        if (error instanceof AutomationConsoleContractError && ["challenge_invalid", "challenge_disarmed", "restart_disarmed"].includes(error.category ?? "")) challenges.delete(challengeId);
+        if (
+          error instanceof AutomationConsoleContractError
+          && ["challenge_invalid", "challenge_disarmed", "restart_disarmed", "preflight_changed", "idempotency_conflict", "account_mismatch"].includes(error.category ?? "")
+        ) challenges.delete(challengeId);
         throw error;
       }
     },
@@ -202,33 +258,40 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       challenges.clear();
       return realReceipt(`${venueName(credential.venue)} API 账户已解绑。`);
     },
-    async validateParameters(draft) {
+    async validateParameters(venue, draft) {
       const snapshot = requireLatest(latest);
-      const credential = requireCredential(snapshot, "bybit");
+      const credential = requireCredential(snapshot, venue);
       const body: Record<string, number | string> = { accountId: credential.accountId };
       for (const key of parameterKeys) {
         if (!Number.isFinite(draft[key])) continue;
         body[key] = key === "maxUnhedgedMs" ? draft[key] * 1_000 : draft[key];
       }
-      await apiRequest(`${apiBase}/venues/bybit/config`, "策略参数保存失败。", { method: "PUT", body });
-      return realReceipt("当前账户策略参数已保存。" );
+      await apiRequest(`${apiBase}/venues/${venue}/config`, "策略参数保存失败。", { method: "PUT", body });
+      challenges.clear();
+      return realReceipt(`${venueName(venue)} 策略参数已保存。`);
     },
     async performSafetyAction(action) {
       const snapshot = requireLatest(latest);
-      const credential = requireCredential(snapshot, "bybit");
+      const credential = requireCredential(snapshot, action.venue);
       if (action.type === "toggle_global_execution" || action.type === "toggle_strategy") {
         const field = action.type === "toggle_global_execution" ? "globalExecutionEnabled" : "strategyEnabled";
-        await apiRequest(`${apiBase}/venues/bybit/config`, "执行开关更新失败。", { method: "PUT", body: { accountId: credential.accountId, [field]: action.enabled } });
-        return realReceipt("当前账户执行开关已更新。" );
-      }
-      if (action.type === "kill_switch") {
-        await apiRequest(`${apiBase}/venues/bybit/kill-switch`, "Kill switch 操作失败。", { method: "POST", body: { accountId: credential.accountId, active: true } });
+        await apiRequest(`${apiBase}/venues/${action.venue}/config`, "执行开关更新失败。", { method: "PUT", body: { accountId: credential.accountId, [field]: action.enabled } });
         challenges.clear();
-        return realReceipt("当前账户 Kill switch 已激活。" );
+        return realReceipt(`${venueName(action.venue)} 执行开关已更新。`);
+      }
+      if (action.type === "set_kill_switch") {
+        await apiRequest(`${apiBase}/venues/${action.venue}/kill-switch`, "Kill switch 操作失败。", { method: "POST", body: { accountId: credential.accountId, active: action.active } });
+        challenges.clear();
+        return realReceipt(`${venueName(action.venue)} Kill switch 已${action.active ? "激活" : "解除"}。`);
       }
       if (action.type === "close_all") {
-        await apiRequest(`${apiBase}/venues/bybit/close-all`, "全部退出请求失败。", { method: "POST", body: { accountId: credential.accountId, idempotencyKey: idempotencyKey("close-all") } });
-        return realReceipt("当前账户全部退出请求已提交。" );
+        const response = await apiRequest<Record<string, unknown>>(`${apiBase}/venues/${action.venue}/close-all`, "退出对冲组合请求失败。", {
+          method: "POST",
+          body: { accountId: credential.accountId, idempotencyKey: action.idempotencyKey },
+        });
+        challenges.clear();
+        const execution = mapExecution(response, action.venue, credential.accountId);
+        return realReceipt(execution.message || "退出对冲组合请求已提交。", execution);
       }
       throw new AutomationConsoleContractError(422, "服务端不支持独立 venue 开关。", null, "unsupported_config_field");
     },
@@ -244,7 +307,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
         method: "POST",
         body: { accountId: position.accountId, idempotencyKey: idempotencyKey(`close:${positionId}`) },
       });
-      return realReceipt("持仓退出请求已提交。" );
+      return realReceipt("退出对冲组合请求已提交。");
     },
   };
 }
@@ -255,12 +318,18 @@ export function presentAutomationConsoleError(error: unknown) {
   if (!(error instanceof AutomationConsoleContractError)) return { title: "控制台请求失败", message: error instanceof Error ? error.message : "请稍后重试。", retryable: true };
   if (error.status === 401) return { title: "登录已失效", message: error.message, retryable: false };
   if (error.status === 403) return { title: "当前账号无操作权限", message: error.message, retryable: false };
-  if (error.category === "binance_provider_writes_disabled") return { title: "Binance 实盘执行未开放", message: "当前仅支持凭证验证与只读 Shadow 检查，不会生成执行 challenge。", retryable: false };
-  if (error.category === "preflight_rejected") return { title: "只读检查未通过", message: error.message, retryable: true };
+  if (error.category === "binance_provider_writes_disabled") return { title: "Binance 执行能力未开放", message: "服务端未明确开放 provider 写调用，已拒绝执行。", retryable: false };
+  if (error.category === "preflight_rejected") return { title: "实时预检未通过", message: error.message, retryable: true };
   if (["permission_rejected", "provider_permission_error"].includes(error.category ?? "")) return { title: "API 权限不符合要求", message: "请开启读取、现货和合约交易权限，关闭提现权限，并确认账户模式符合当前阶段要求。", retryable: false };
   if (error.category === "provider_credential_invalid") return { title: "API 凭证无效", message: "交易所拒绝了当前 Key 或 Secret，请核对后重新提交。", retryable: false };
   if (error.category === "provider_timestamp_error") return { title: "交易所时间校验失败", message: "本机或服务端时间与交易所偏差过大，请稍后重试。", retryable: true };
-  if (["provider_product_unavailable", "binance_product_unavailable"].includes(error.category ?? "")) return { title: "XAUT 双腿当前不可用", message: error.message, retryable: true };
+  if (["provider_product_unavailable", "binance_product_unavailable"].includes(error.category ?? "")) return { title: "XAUT 对冲组合当前不可用", message: error.message, retryable: true };
+  if (["challenge_invalid", "challenge_disarmed", "restart_disarmed"].includes(error.category ?? "")) return { title: "执行确认已失效", message: "短效执行凭证已过期、已使用或因服务重启失效，请重新预检。", retryable: true };
+  if (error.category === "preflight_changed") return { title: "实时条件已经变化", message: "执行前复核未通过，未建立对冲组合，请刷新候选后重新预检。", retryable: true };
+  if (error.category === "idempotency_conflict") return { title: "请求标识冲突", message: "该幂等请求标识已用于其他执行，请刷新状态后重试。", retryable: true };
+  if (error.category === "manual_intervention") return { title: "需要人工处理", message: "自动安全处置未能闭环，请立即前往对应交易所核对订单与仓位。", retryable: false };
+  if (error.category === "compensating") return { title: "正在安全处置", message: "系统正在撤销订单并退出未对冲敞口，请等待状态刷新。", retryable: true };
+  if (error.category === "server_kill_switch_active") return { title: "服务端全局急停已开启", message: "当前用户无法绕过平台安全门禁，请等待运维解除后重新预检。", retryable: false };
   if (error.status === 409) return { title: "当前状态已变化", message: error.message, retryable: true };
   if (error.status === 422 || error.status === 400) return { title: "提交内容未通过校验", message: error.message, retryable: false };
   if (error.status === 429) return { title: "操作过于频繁", message: `${error.message} ${error.retryAfterSeconds ? `请在 ${error.retryAfterSeconds} 秒后重试。` : "请稍后重试。"}`, retryable: true };
@@ -303,13 +372,45 @@ async function apiRequest<T = unknown>(path: string, fallback: string, options: 
   }
 }
 
-function buildSnapshot(venues: VenueStatusDto[], opportunities: { generatedAt: number; eligibleCount: number; items: OpportunityDto[] }, positions: { items: unknown[] }, pnl: { venues: unknown[] }, audit: { venues: unknown[] }, config: ConfigDto | null): AutomationConsoleSnapshot {
+async function optionalApiRequest<T>(path: string, fallback: string, options: { signal?: AbortSignal } = {}) {
+  try {
+    return await apiRequest<T>(path, fallback, options);
+  } catch (error) {
+    if (error instanceof AutomationConsoleContractError && (error.status === 401 || error.status === 403)) throw error;
+    return null;
+  }
+}
+
+function buildSnapshot(
+  venues: VenueStatusDto[],
+  opportunities: { generatedAt: number; eligibleCount: number; items: OpportunityDto[] },
+  positions: { items: unknown[] },
+  pnl: { venues: unknown[] },
+  audit: { venues: unknown[] },
+  configs: Array<ConfigDto & { venue: AutomationVenue }>,
+  accounts: Array<{ venue: AutomationVenue; account: PrivateAccountDto }>,
+): AutomationConsoleSnapshot {
   const positionItems = positions.items.map(record);
   const pnlVenues = pnl.venues.map(record);
   const groups = positionItems.map((item) => mapPosition(item, pnlVenues)).filter((item): item is AutomationPositionGroup => item !== null);
   const credentials = venueOrder.map((venue) => {
     const raw = venues.find((item) => item.venue === venue) ?? unimplementedVenue(venue);
-    return mapCredential(raw, config, groups);
+    const config = configs.find((item) => item.venue === venue) ?? null;
+    const account = accounts.find((item) => item.venue === venue)?.account ?? null;
+    return mapCredential(raw, config, groups, account);
+  });
+  const venueControls = configs.map((config): AutomationVenueControl => {
+    const credential = credentials.find((item) => item.venue === config.venue);
+    return {
+      venue: config.venue,
+      accountId: config.accountId,
+      globalExecutionEnabled: config.globalExecutionEnabled,
+      strategyEnabled: config.strategyEnabled,
+      killSwitchActive: config.killSwitchActive,
+      serverGlobalKillSwitchActive: config.serverGlobalKillSwitchActive,
+      enabled: Boolean(credential?.enabled),
+      parameters: mapParameters(config, config.venue),
+    };
   });
   const candidates = opportunities.items.map(mapCandidate).filter((item): item is AutomationCandidate => item !== null).map((candidate) => {
     const capability = credentials.find((credential) => credential.venue === candidate.venue);
@@ -317,6 +418,7 @@ function buildSnapshot(venues: VenueStatusDto[], opportunities: { generatedAt: n
       ...candidate,
       canRunReadOnlyPreflight: candidate.adapterImplemented && Boolean(capability?.canRunReadOnlyPreflight),
       canExecute: candidate.adapterImplemented && Boolean(capability?.canExecute),
+      executionReady: candidate.adapterImplemented && Boolean(capability?.canExecute && capability.enabled),
     };
   });
   const pnlSeries = pnlVenues.flatMap((venue) => array(venue.series).map((item) => {
@@ -327,13 +429,16 @@ function buildSnapshot(venues: VenueStatusDto[], opportunities: { generatedAt: n
   const netPnl = currentPnls.reduce((sum, item) => sum + numberValue(item.netPnlUsd), 0);
   const dayPoints = pnlSeries.filter((point) => point.timestamp >= Date.now() - 86_400_000);
   const alerts = buildAlerts(venues, audit, opportunities.generatedAt);
-  const serverBlocked = config?.serverGlobalKillSwitchActive ?? true;
+  const serverBlocked = venueControls.some((item) => item.serverGlobalKillSwitchActive);
+  const anyExecutionEnabled = venueControls.some((item) => item.globalExecutionEnabled);
+  const anyStrategyEnabled = venueControls.some((item) => item.strategyEnabled);
+  const anyUserKillSwitch = venueControls.some((item) => item.killSwitchActive);
   return {
     source: "user_api", contractVersion: "user-api-v1", generatedAt: opportunities.generatedAt || Date.now(), mode: "controlled_live",
-    status: serverBlocked || (config?.killSwitchActive ?? true) ? "blocked" : "healthy",
-    globalExecutionEnabled: config?.globalExecutionEnabled ?? false,
-    killSwitchActive: (config?.killSwitchActive ?? true) || serverBlocked,
-    strategyEnabled: config?.strategyEnabled ?? false,
+    status: serverBlocked || anyUserKillSwitch ? "blocked" : "healthy",
+    globalExecutionEnabled: anyExecutionEnabled,
+    killSwitchActive: anyUserKillSwitch || serverBlocked,
+    strategyEnabled: anyStrategyEnabled,
     summary: {
       connectedVenueCount: credentials.filter((item) => item.status === "connected").length,
       totalVenueCount: credentials.length,
@@ -345,11 +450,18 @@ function buildSnapshot(venues: VenueStatusDto[], opportunities: { generatedAt: n
       fundingPnl: currentPnls.reduce((sum, item) => sum + numberValue(item.fundingPnlUsd), 0),
       fees: currentPnls.reduce((sum, item) => sum + numberValue(item.feesUsd), 0),
     },
-    credentials, candidates, positionGroups: groups, pnlSeries, parameters: mapParameters(config), alerts, productionEgressIps: [],
+    credentials,
+    candidates,
+    positionGroups: groups,
+    pnlSeries,
+    parameters: venueControls.flatMap((item) => item.parameters),
+    venueControls,
+    alerts,
+    productionEgressIps: [],
   };
 }
 
-function mapCredential(raw: VenueStatusDto, config: ConfigDto | null, groups: AutomationPositionGroup[]): AutomationCredentialSummary {
+function mapCredential(raw: VenueStatusDto, config: ConfigDto | null, groups: AutomationPositionGroup[], account: PrivateAccountDto | null = null): AutomationCredentialSummary {
   const credential = raw.credential;
   const permissions = credential.permissions ?? {};
   const accountId = credential.accountId;
@@ -359,7 +471,7 @@ function mapCredential(raw: VenueStatusDto, config: ConfigDto | null, groups: Au
     accountId,
     venue: raw.venue,
     implemented: raw.implemented,
-    note: raw.venue === "binance" ? "Binance 只读验证账户" : `${venueName(raw.venue)} 执行账户`,
+    note: `${venueName(raw.venue)} 执行账户`,
     enabled: raw.enabled,
     providerWritesEnabled: raw.providerWritesEnabled === true,
     ...capability,
@@ -377,8 +489,11 @@ function mapCredential(raw: VenueStatusDto, config: ConfigDto | null, groups: Au
     ipWhitelist: [], ipWhitelistConfigured: credential.ipWhitelistConfigured, warnings: credential.warnings ?? [], accountMode: credential.accountMode,
     lastVerifiedAt: credential.lastVerifiedAt, defaultExecutionAccount: Boolean(accountId && config?.defaultAccountId === accountId), assetStatisticsEnabled: false,
     verificationChecks: credentialChecks(raw),
-    activeOrderCount: venueGroups.reduce((sum, item) => sum + item.history.filter((event) => ["New", "PartiallyFilled"].includes(event.status)).length, 0),
+    activeOrderCount: account
+      ? numberValue(record(account.openOrders).spot) + numberValue(record(account.openOrders).perpetual)
+      : venueGroups.reduce((sum, item) => sum + item.history.filter((event) => ["New", "PartiallyFilled"].includes(event.status)).length, 0),
     openPositionCount: venueGroups.filter((item) => item.status !== "closed").length,
+    accountSnapshot: account ? mapPrivateAccount(raw.venue, account) : null,
   };
 }
 
@@ -429,10 +544,52 @@ function mapCandidate(raw: OpportunityDto): AutomationCandidate | null {
     adapterImplemented: raw.adapterImplemented,
     canRunReadOnlyPreflight: false,
     canExecute: false,
+    executionReady: false,
     safetyEligible: raw.safetyEligible,
     safetyDisqualifiers: [...(raw.safetyDisqualifiers ?? [])],
     automationEligible: raw.automationEligible,
     automationDisqualifiers: [...(raw.automationDisqualifiers ?? [])],
+  };
+}
+
+function mapPrivateAccount(venue: AutomationVenue, value: PrivateAccountDto): AutomationPrivateAccountSnapshot {
+  const balances = record(value.balances);
+  const openOrders = record(value.openOrders);
+  const instruments = record(value.instruments);
+  const fees = record(value.fees);
+  return {
+    venue,
+    accountId: stringValue(value.accountId),
+    fetchedAt: numberValue(value.fetchedAt),
+    spotAvailableUsdt: numberValue(balances.spotAvailableUsdt ?? value.availableUsdt),
+    futuresAvailableUsdt: numberValue(balances.futuresAvailableUsdt ?? value.availableUsdt),
+    spotXaut: numberValue(balances.spotXaut),
+    perpetualXaut: numberValue(balances.perpetualXaut),
+    openSpotOrders: numberValue(openOrders.spot),
+    openPerpetualOrders: numberValue(openOrders.perpetual),
+    spot: mapInstrument(instruments.spot),
+    perpetual: mapInstrument(instruments.perpetual),
+    spotTakerBps: nullableFiniteNumber(fees.spotTakerBps),
+    perpetualTakerBps: nullableFiniteNumber(fees.perpetualTakerBps),
+  };
+}
+
+function mapInstrument(value: unknown) {
+  const raw = record(value);
+  if (!Object.keys(raw).length) return null;
+  return {
+    status: safeText(raw.status, 40) || "Unknown",
+    bid: numberValue(raw.bid),
+    ask: numberValue(raw.ask),
+    mark: nullableFiniteNumber(raw.mark),
+    depthUsd: nullableFiniteNumber(raw.depthUsd),
+    minOrderQty: numberValue(raw.minOrderQty),
+    qtyStep: numberValue(raw.qtyStep),
+    minNotionalUsd: numberValue(raw.minNotionalUsd),
+    priceTick: numberValue(raw.priceTick),
+    fundingRate: nullableFiniteNumber(raw.fundingRate),
+    fundingIntervalHours: nullableFiniteNumber(raw.fundingIntervalHours),
+    nextFundingTime: nullableFiniteNumber(raw.nextFundingTime),
   };
 }
 
@@ -443,7 +600,9 @@ function mapPosition(raw: Record<string, unknown>, pnlVenues: Record<string, unk
   const spot = record(legs.spot);
   const perpetual = record(legs.perpetual);
   const venuePnl = pnlVenues.find((item) => item.venue === venue) ?? {};
-  const history = executionHistory(array(venuePnl.history), venue);
+  const rawExecutionHistory = array(venuePnl.history);
+  const history = executionHistory(rawExecutionHistory, venue);
+  const latestExecution = record(rawExecutionHistory[0]);
   const capturedAt = numberValue(current.capturedAt) || Date.now();
   const accountId = stringValue(current.accountId);
   if (!accountId) return null;
@@ -452,12 +611,20 @@ function mapPosition(raw: Record<string, unknown>, pnlVenues: Record<string, unk
     accountId,
     venue,
     strategyId: stringValue(raw.strategyId) || "unknown-strategy",
-    label: `${venueName(venue)} XAUT 同所中性`, mode: "live", status: "hedged", openedAt: history.at(-1)?.occurredAt ?? capturedAt,
+    label: `${venueName(venue)} XAUT 现货与永续对冲组合`, mode: "live", status: positionStatus(latestExecution.state), openedAt: history.at(-1)?.occurredAt ?? capturedAt,
     capitalUsedUsd: numberValue(spot.notionalUsd) + numberValue(perpetual.notionalUsd), netDeltaUsd: numberValue(current.netDeltaUsd), basisBps: nullableNumber(current.currentBasisBps),
     realizedPnl: numberValue(current.realizedPnlUsd), unrealizedPnl: numberValue(current.unrealizedPnlUsd), fundingPnl: numberValue(current.fundingPnlUsd), fees: numberValue(current.feesUsd), slippage: numberValue(current.slippageUsd), netPnl: numberValue(current.netPnlUsd),
     legs: [mapLeg(spot, venue, "spot", "long", current, false), mapLeg(perpetual, venue, "perpetual", "short", current, true)].filter((leg) => leg.quantity > 0),
     history,
   };
+}
+
+function positionStatus(value: unknown): AutomationPositionGroup["status"] {
+  if (value === "accepted" || value === "opening_spot" || value === "opening_perpetual") return "opening";
+  if (value === "compensating") return "closing";
+  if (value === "closed") return "closed";
+  if (value === "failed" || value === "manual_intervention") return "attention";
+  return "hedged";
 }
 
 function mapLeg(raw: Record<string, unknown>, venue: AutomationVenue, marketType: "spot" | "perpetual", side: "long" | "short", current: Record<string, unknown>, fundingLeg: boolean) {
@@ -480,20 +647,20 @@ function executionHistory(items: unknown[], venue: AutomationVenue): AutomationP
 }
 
 const parameterKeys = ["maxStrategyCapitalUsd", "maxEntryBasisBps", "maxCombinedSlippageBps", "minNetAprPercent", "minLiquidationDistancePercent", "maxUnhedgedMs"] as const;
-function mapParameters(config: ConfigDto | null): AutomationParameter[] {
-  if (!config) return [];
+function mapParameters(config: ConfigDto, venue: AutomationVenue): AutomationParameter[] {
+  const strategyName = `${venueName(venue)} XAUT`;
   return [
-    parameter("maxStrategyCapitalUsd", "策略资金上限", config.maxStrategyCapitalUsd, 25, 300, 25, "USDT", "当前用户 Bybit XAUT 中性策略资金硬上限。"),
-    parameter("maxEntryBasisBps", "最大入场基差", config.maxEntryBasisBps, 0, 80, 1, "bps", "入场基差绝对值上限。"),
-    parameter("maxCombinedSlippageBps", "两腿最大合计滑点", config.maxCombinedSlippageBps, 1, 20, 1, "bps", "两腿成交滑点合计上限。"),
-    parameter("minNetAprPercent", "最低净 APR", config.minNetAprPercent, 8, 100, 1, "%", "扣除费用与滑点后的最低净 APR。"),
-    parameter("minLiquidationDistancePercent", "最低强平距离", config.minLiquidationDistancePercent, 30, 100, 1, "%", "永续腿所需最低强平安全距离。"),
-    parameter("maxUnhedgedMs", "单腿暴露时限", config.maxUnhedgedMs / 1_000, 1, 10, 1, "seconds", "第一腿成交后允许的最长未对冲时间。"),
+    parameter(venue, "maxStrategyCapitalUsd", "策略资金上限", config.maxStrategyCapitalUsd, 25, 300, 25, "USDT", `${strategyName} 对冲策略资金硬上限。`),
+    parameter(venue, "maxEntryBasisBps", "最大入场基差", config.maxEntryBasisBps, 0, 80, 1, "bps", "入场基差绝对值上限。"),
+    parameter(venue, "maxCombinedSlippageBps", "两侧最大合计滑点", config.maxCombinedSlippageBps, 1, 20, 1, "bps", "现货侧与永续侧成交滑点合计上限。"),
+    parameter(venue, "minNetAprPercent", "最低净 APR", config.minNetAprPercent, 8, 100, 1, "%", "扣除费用与滑点后的最低净 APR。"),
+    parameter(venue, "minLiquidationDistancePercent", "最低强平距离", config.minLiquidationDistancePercent, 30, 100, 1, "%", "永续侧所需最低强平安全距离。"),
+    parameter(venue, "maxUnhedgedMs", "单侧暴露时限", config.maxUnhedgedMs / 1_000, 1, 10, 1, "seconds", "现货侧成交后允许的最长未对冲时间。"),
   ];
 }
 
-function parameter(id: string, label: string, value: number, min: number, max: number, step: number, unit: AutomationParameter["unit"], description: string): AutomationParameter {
-  return { id, label, value, min, max, step, unit, description, scope: id === "maxStrategyCapitalUsd" ? "global" : "strategy", scopeId: "bybit-xaut-spot-perp-v1" };
+function parameter(venue: AutomationVenue, id: string, label: string, value: number, min: number, max: number, step: number, unit: AutomationParameter["unit"], description: string): AutomationParameter {
+  return { id, label, value, min, max, step, unit, description, venue, scope: id === "maxStrategyCapitalUsd" ? "global" : "strategy", scopeId: `${venue}-xaut-spot-perp-v1` };
 }
 
 function buildAlerts(venues: VenueStatusDto[], audit: { venues: unknown[] }, occurredAt: number) {
@@ -506,21 +673,35 @@ function buildAlerts(venues: VenueStatusDto[], audit: { venues: unknown[] }, occ
   return alerts;
 }
 
-function mapPreflight(response: ChallengeDto, candidate: AutomationCandidate, accountId: string, mode: AutomationPreflightMode): AutomationPreflight {
+function mapPreflight(
+  response: ChallengeDto,
+  candidate: AutomationCandidate,
+  credential: AutomationCredentialSummary & { accountId: string },
+  mode: AutomationPreflightMode,
+): AutomationPreflight {
   const report = response.report;
   const quantity = numberValue(report.quantityXaut);
   const totalBudget = numberValue(report.totalBudgetUsd);
   const warnings = array(report.warnings).map(stringValue).filter(Boolean);
-  const confirmations = ["已核对执行账户、交易所、标的与两腿数量", "已核对总预算与服务端实时 preflight", "理解这是 Mainnet 真实执行且 challenge 仅可使用一次"];
+  const confirmations = ["已核对执行账户、交易所、标的及现货侧与永续侧数量", "已核对总预算与服务端实时预检", "理解这是 Mainnet 真实执行且确认凭证仅可使用一次"];
   if (mode === "manual_entry") confirmations.push("已阅读并接受上述手动决策风险");
   return {
     challengeId: response.challengeId, challengeToken: response.challengeToken, idempotencyKey: idempotencyKey(`execute:${candidate.id}`), expiresAt: response.expiresAt,
-    candidateId: candidate.id, accountId, mode, estimatedCapitalRequiredUsd: numberValue(report.estimatedCapitalRequiredUsd), totalBudgetUsd: totalBudget,
+    candidateId: candidate.id, accountId: credential.accountId, venue: candidate.venue, mode, estimatedCapitalRequiredUsd: numberValue(report.estimatedCapitalRequiredUsd), totalBudgetUsd: totalBudget,
     exactLegs: [
       { venue: candidate.venue, symbol: candidate.longLeg.symbol, side: "buy", quantity, referencePrice: numberValue(report.referenceSpotAsk), estimatedFeeUsd: null },
       { venue: candidate.venue, symbol: candidate.shortLeg.symbol, side: "sell", quantity, referencePrice: numberValue(report.referencePerpetualBid), estimatedFeeUsd: null },
     ],
-    estimatedTotalFeesUsd: null, estimatedSlippageUsd: null, maximumLossUsd: null, warnings, confirmations,
+    estimatedTotalFeesUsd: nullableFiniteNumber(report.estimatedFeesUsd),
+    estimatedSlippageUsd: nullableFiniteNumber(report.estimatedSlippageUsd),
+    maximumLossUsd: nullableFiniteNumber(report.maximumLossUsd),
+    warnings,
+    confirmations,
+    checks: mapPreflightChecks(report.checks),
+    accountSnapshot: credential.accountSnapshot,
+    entryBasisBps: nullableFiniteNumber(report.entryBasisBps),
+    fundingRate: nullableFiniteNumber(report.fundingRate),
+    estimatedNetAprPercent: nullableFiniteNumber(report.estimatedNetAprPercent),
   };
 }
 
@@ -538,6 +719,20 @@ function unimplementedVenue(venue: AutomationVenue): VenueStatusDto { return { v
 function extractAutomationErrorDetails(payload: unknown) {
   const body = record(payload);
   const report = record(body.report);
+  if (
+    report.venue === "binance"
+    && report.phase === "execution_capable"
+    && report.providerWritesEnabled === true
+  ) {
+    const preflightFailure: SafePreflightFailure = {
+      venue: "binance",
+      checks: mapPreflightChecks(report.checks),
+      warnings: array(report.warnings).map((value) => safeText(value, 240)).filter(Boolean).slice(0, 20),
+      message: safeText(report.message, 300) || "市场或账户实时检查未通过。",
+      generatedAt: nullableFiniteNumber(report.generatedAt),
+    };
+    return { preflightFailure };
+  }
   if (
     report.venue !== "binance"
     || report.phase !== "phase_1_read_only_shadow"
@@ -575,8 +770,9 @@ function extractAutomationErrorDetails(payload: unknown) {
   };
   return { shadowReport };
 }
-function isShadowErrorDetails(value: unknown): value is { shadowReport: SafeShadowReport } {
-  return record(value).shadowReport !== undefined;
+function isShadowErrorDetails(value: unknown): value is AutomationErrorDetails {
+  const details = record(value);
+  return details.shadowReport !== undefined || details.preflightFailure !== undefined;
 }
 function safeAutomationErrorMessage(category: string | null, message: string) {
   if (category === "provider_credential_invalid") return "交易所拒绝了当前 API 凭证。";
@@ -594,9 +790,66 @@ function binanceAccountModeLabel(value: string | null) {
   if (value === "portfolio_margin") return "Portfolio Margin";
   return "未知账户模式";
 }
+function mapPreflightChecks(value: unknown): AutomationPreflight["checks"] {
+  return array(value).slice(0, 50).flatMap((entry) => {
+    const raw = record(entry);
+    const id = safeText(raw.name ?? raw.id, 80);
+    const message = safeText(raw.message, 300);
+    if (!id || !message || typeof raw.passed !== "boolean") return [];
+    return [{
+      id,
+      passed: raw.passed,
+      value: safeCheckValue(raw.value ?? raw.actual),
+      limit: safeCheckValue(raw.limit ?? raw.expected),
+      message,
+    }];
+  });
+}
+function safeCheckValue(value: unknown): number | string | boolean | null {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") return value.slice(0, 120);
+  return null;
+}
+function mapExecution(value: unknown, venue: AutomationVenue, accountId: string): AutomationExecutionResult {
+  const raw = record(value);
+  const allowedStates = new Set<AutomationExecutionResult["state"]>([
+    "accepted", "opening_spot", "opening_perpetual", "hedged", "compensating", "closed", "failed", "manual_intervention",
+  ]);
+  const stateValue = safeText(raw.state, 40) as AutomationExecutionResult["state"];
+  return {
+    venue,
+    accountId,
+    executionId: safeText(raw.executionId, 120) || "pending",
+    state: allowedStates.has(stateValue) ? stateValue : "unknown",
+    message: safeText(raw.message, 500) || "执行状态已更新，请以交易所权威订单和仓位为准。",
+    errorCategory: safeText(raw.errorCategory, 100) || null,
+    hedgedQuantityXaut: numberValue(raw.hedgedQuantityXaut),
+    unhedgedDurationMs: nullableFiniteNumber(raw.unhedgedDurationMs),
+    spotOrder: mapExecutionOrder(raw.spotOrder),
+    perpetualOrders: array(raw.perpetualOrders).map(mapExecutionOrder).filter((item): item is AutomationExecutionOrder => item !== null),
+    compensationOrders: array(raw.compensationOrders).map(mapExecutionOrder).filter((item): item is AutomationExecutionOrder => item !== null),
+    createdAt: numberValue(raw.createdAt),
+    updatedAt: numberValue(raw.updatedAt),
+  };
+}
+function mapExecutionOrder(value: unknown): AutomationExecutionOrder | null {
+  const raw = record(value);
+  if (!Object.keys(raw).length) return null;
+  return {
+    orderId: safeText(raw.orderId, 120),
+    orderLinkId: safeText(raw.orderLinkId, 120),
+    status: safeText(raw.status, 60) || "Unknown",
+    requestedQuantityXaut: numberValue(raw.requestedQuantityXaut),
+    filledQuantityXaut: numberValue(raw.filledQuantityXaut),
+    averagePrice: nullableFiniteNumber(raw.averagePrice),
+    feeUsd: numberValue(raw.feeUsd),
+    updatedAt: numberValue(raw.updatedAt),
+  };
+}
 function retrySeconds(value: string | null) { if (!value) return null; const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null; }
 function idempotencyKey(scope: string) { return `${scope.replace(/[^A-Za-z0-9:_-]/g, "-")}:${crypto.randomUUID()}`.slice(0, 100); }
-function realReceipt(message: string): AutomationActionReceipt { return { ok: true, simulated: false, message }; }
+function realReceipt(message: string, execution?: AutomationExecutionResult): AutomationActionReceipt { return { ok: true, simulated: false, message, execution }; }
 function venueName(venue: AutomationVenue) { return ({ bybit: "Bybit", bitget: "Bitget", binance: "Binance", okx: "OKX" } as const)[venue]; }
 function isVenue(value: unknown): value is AutomationVenue { return typeof value === "string" && venueOrder.includes(value as AutomationVenue); }
 function record(value: unknown): Record<string, any> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}; }
