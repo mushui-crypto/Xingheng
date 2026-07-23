@@ -46,7 +46,7 @@
 
 - 每个用户使用自己的交易所专用子账户；Bybit 优先使用 UTA 统一账户。永续侧不与其他交易共享保证金。
 - Phase A/B 使用独立只读 Key；受控下单阶段使用另一组仅含读取、现货交易和合约交易权限的 Key。
-- API Key 必须禁止提现；IP 白名单为强烈建议，无白名单或为 `*` 时返回高风险 warning，但不单独阻止 active/preflight/execute。需要密钥轮换、权限核对和安全解绑流程。
+- API Key 必须禁止提现。Binance 真实执行还必须启用固定 IP 白名单，且 Binance 返回的 `ipList` 必须与服务端 `RWA_BINANCE_ALLOWED_EGRESS_IPS` 完全一致；配置缺失、无限制、通配、CIDR、无法确认或集合不匹配时均不得 active/preflight/execute。Bybit 既有 IP 口径本轮不变。需要密钥轮换、权限核对和安全解绑流程。
 - 凭证仅放生产专用 secret store，或 root-only、只读挂载的生产 Secret 文件；不得进入 Git、SQLite、普通环境导出、日志、接口响应、浏览器、localStorage 或 IndexedDB。
 - 前端不得获取 secret，不得直接访问交易所私有 API，也不得绕过后端 execution gate。
 
@@ -232,7 +232,7 @@ V1 先验证单所中性。未来增加交易所时，每个交易所作为独�
 ## 12. 当前未决的运行前置
 
 - Bybit 私有 API 对 XAUT 现货和永续的实际账户模式、权限、精度及 Testnet 覆盖需要 Phase A 实时核对。
-- 生产主加密密钥挂载、轮换操作和服务端全局急停解除仍需由运维验证；IP 白名单不再是硬门禁。
+- 生产主加密密钥挂载、轮换操作和服务端全局急停解除仍需由运维验证。Binance 固定出口 IPv4 集合必须由服务端配置并与 API Key 白名单完全一致，是新增风险动作的硬门禁。
 - 用户已授权本功能开发，但生产实际 Key、首次启用窗口、实时产品规格和最终资金数额仍未配置。
 
 ## 13. Mainnet 登录用户自动执行 API（后端可测契约）
@@ -273,7 +273,8 @@ Binance 凭证请求保持同一字段：
 - `enableFutures=true` 且 USD-M Futures 账户 `canTrade=true`
 - `enableWithdrawals=false`，提现权限是绝对硬阻断
 - 当前第一阶段只接受 one-way 持仓模式；hedge mode 返回权限/模式拒绝
-- IP 白名单仍是高风险 warning，不是单独硬阻断
+- Binance `ipRestrict=true` 且返回非空、无通配/无限制的固定 IPv4 `ipList`
+- `ipList` 必须与服务端 `RWA_BINANCE_ALLOWED_EGRESS_IPS` 完全一致；前端不得提交或覆盖该集合
 
 Binance `accountId` 由服务端返回的账户 UID 做不可逆指纹生成；Secret 仍只写不回显。凭证验证成功只表示 lifecycle 可进入 `active`，不表示真实执行已启用。
 
@@ -359,6 +360,7 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 - `RWA_AUTOMATION_MASTER_KEY`：32 字节 hex/base64 主密钥，只能来自生产 secret/env；缺失或格式错误时凭证读写 fail-closed。
 - `RWA_AUTOMATION_DATA_DIR`：按不可逆用户域 + venue 分隔的凭证/状态目录；凭证文件包含版本、nonce、tag、ciphertext，原子替换并强制 `0600`。
 - `RWA_AUTOMATION_SERVER_KILL_SWITCH`：服务端全局急停，只有显式设为 `false` 才允许新增风险；用户级开关不能覆盖它。
+- `RWA_BINANCE_ALLOWED_EGRESS_IPS`：Binance 真实执行允许的服务端固定出口 IPv4，逗号分隔；必须与 Binance 返回的 API Key `ipList` 完全一致。缺失、非法、通配、CIDR 或集合不匹配均 fail-closed，具体 IP 不进入接口响应或凭证元数据。
 
 生产或本地均不得在聊天、测试 fixture、日志或接口响应中填入真实 Secret。专项测试只允许假 provider，禁止触发 Mainnet 订单。
 
@@ -392,6 +394,9 @@ Binance 稳定错误类别：
 - `provider_credential_invalid` / `provider_permission_error`：Binance 签名或私有权限拒绝
 - `provider_timestamp_error`：重新同步一次后仍无法通过时间戳校验
 - `provider_rate_limited` / `provider_unavailable`：限频或上游不可用
+- `binance_egress_ip_config_missing`：服务端未配置有效的 Binance 固定出口 IPv4 集合
+- `binance_ip_whitelist_unconfirmed`：Binance 未启用固定白名单、返回通配/非法列表，或无法返回可核对的 `ipList`
+- `binance_ip_whitelist_mismatch`：Binance 返回的固定 IP 集合与服务端配置不完全一致
 - `provider_product_unavailable` / `binance_product_unavailable`：真实产品目录无法组成 XAUT 同所对冲组合
 - `preflight_rejected`：产品、精度、最小名义、余额、模式、stale、盘口或风险检查失败
 - `execution_disabled` / `server_kill_switch_active` / `kill_switch_active`：执行开关或急停仍在阻止新增风险

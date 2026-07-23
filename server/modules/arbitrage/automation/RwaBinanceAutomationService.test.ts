@@ -54,6 +54,70 @@ test("Binance credentials remain user-isolated, default disabled, and reject wit
   }
 });
 
+test("Binance fixed IP verification gates credential rotation and every new-risk control entry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-gates-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    await current.putCredentials({ apiKey: "original-key", apiSecret: "original-secret" });
+    const originalStatus = await current.getCredentialStatus();
+    const accountId = originalStatus.accountId!;
+
+    client.setPermissions({ ipRestricted: false });
+    await assert.rejects(
+      current.putCredentials({ apiKey: "replacement-key", apiSecret: "replacement-secret" }),
+      permissionRejectedWithoutSecret,
+    );
+    client.setPermissions({ ipRestricted: true });
+    const retained = await current.getCredentialStatus();
+    assert.equal(retained.lifecycleStatus, "active");
+    assert.equal(retained.maskedApiKey, originalStatus.maskedApiKey);
+
+    client.setPermissions({ ipRestricted: false });
+    await assert.rejects(
+      current.updateConfig({ accountId, globalExecutionEnabled: true }),
+      permissionRejectedWithoutSecret,
+    );
+    await assert.rejects(
+      current.setKillSwitch(false, accountId),
+      permissionRejectedWithoutSecret,
+    );
+    assert.equal((await current.getConfig()).globalExecutionEnabled, false);
+    assert.equal((await current.getConfig()).killSwitchActive, true);
+
+    client.setPermissions({ ipRestricted: true });
+    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.setKillSwitch(false, accountId);
+    client.setPermissions({ ipRestricted: false });
+    await assert.rejects(
+      current.preflight(opportunity(), accountId, "manual_entry"),
+      permissionRejectedWithoutSecret,
+    );
+    assert.equal(client.writeCount, 0);
+    assert.equal((await current.getConfig()).killSwitchActive, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance execute rechecks fixed IP verification after challenge issuance", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-execute-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    client.setPermissions({ ipRestricted: false });
+
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:ip-recheck:1"));
+    assert.notEqual(execution.state, "hedged");
+    assert.equal(client.writeCount, 0);
+    assert.equal((await current.getConfig()).killSwitchActive, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance preflight remains read-only and execute establishes the whitelisted hedge combination", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-preflight-"));
   try {
@@ -329,6 +393,10 @@ class FakeBinanceClient implements RwaBinanceClient {
     return this.access;
   }
 
+  setPermissions(overrides: Partial<RwaBinancePermissions>) {
+    Object.assign(this.access.permissions, overrides);
+  }
+
   async readPreflightSnapshot() {
     this.readCount += 1;
     return structuredClone(this.snapshot);
@@ -431,12 +499,18 @@ function permissions(overrides: Partial<RwaBinancePermissions> = {}): RwaBinance
     spotTrade: true,
     contractTrade: true,
     withdraw: false,
-    ipRestricted: false,
+    ipRestricted: true,
     spotAccount: true,
     futuresAccount: true,
     positionModeSupported: true,
     ...overrides,
   };
+}
+
+function permissionRejectedWithoutSecret(error: unknown) {
+  return error instanceof RwaNeutralExecutionError
+    && error.category === "permission_rejected"
+    && !error.message.includes("replacement-secret");
 }
 
 function opportunity(): ArbitrageOpportunity {

@@ -9,6 +9,7 @@ test("Binance client signs private reads with server-time offset and keeps spot/
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     fixtureFetch({ calls }),
     () => 1_000,
+    ["203.0.113.10"],
   );
 
   const access = await client.validateAccess();
@@ -46,6 +47,7 @@ test("Binance client reports missing real products without substituting another 
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     fixtureFetch({ missingSpot: true, calls }),
     () => 1_000,
+    ["203.0.113.10"],
   );
 
   const availability = await client.readProductAvailability();
@@ -67,6 +69,7 @@ test("Binance permission and provider errors are fail-closed and never echo raw 
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     fixtureFetch({ withdrawalsEnabled: true }),
     () => 1_000,
+    ["203.0.113.10"],
   );
   assert.equal((await withdrawalClient.validateAccess()).permissions.withdraw, true);
 
@@ -78,6 +81,7 @@ test("Binance permission and provider errors are fail-closed and never echo raw 
       return json({ code: -2015, msg: "never-echo-this https://private.invalid/path" }, 401);
     },
     () => 1_000,
+    ["203.0.113.10"],
   );
   await assert.rejects(
     failingClient.validateAccess(),
@@ -91,12 +95,58 @@ test("Binance permission and provider errors are fail-closed and never echo raw 
   );
 });
 
+test("Binance IP whitelist validation is fail-closed for missing, unrestricted, wildcard, failed, and mismatched data", async () => {
+  const missingConfigCalls: Array<{ path: string; signed: boolean; timestamp: string | null }> = [];
+  const missingConfig = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ calls: missingConfigCalls }),
+    () => 1_000,
+    null,
+  );
+  await assert.rejects(
+    missingConfig.validateAccess(),
+    providerError("binance_egress_ip_config_missing"),
+  );
+  assert.equal(missingConfigCalls.length, 0);
+
+  for (const options of [
+    { ipRestricted: false },
+    { ipList: ["*"] },
+    { ipList: [] },
+  ]) {
+    const client = new RwaBinanceMainnetClient(
+      { apiKey: "fake-key", apiSecret: "fake-secret" },
+      fixtureFetch(options),
+      () => 1_000,
+      ["203.0.113.10"],
+    );
+    await assert.rejects(client.validateAccess(), providerError("binance_ip_whitelist_unconfirmed"));
+  }
+
+  const mismatch = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ ipList: ["203.0.113.11"] }),
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(mismatch.validateAccess(), providerError("binance_ip_whitelist_mismatch"));
+
+  const failedQuery = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ restrictionsFailure: true }),
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(failedQuery.validateAccess(), providerError("provider_unavailable"));
+});
+
 test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders", async () => {
   const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     executionFetch(calls),
     () => 1_000,
+    ["203.0.113.10"],
   );
 
   await assert.rejects(
@@ -147,6 +197,7 @@ test("Binance strategy cancellation and PnL ignore non-strategy orders and fills
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     executionFetch(calls),
     () => 1_000,
+    ["203.0.113.10"],
   );
 
   await client.cancelStrategyOrders("rwa-owned");
@@ -168,7 +219,8 @@ function executionFetch(calls: Array<{ path: string; method: string; params: URL
     calls.push({ path: url.pathname, method, params: new URLSearchParams(url.searchParams) });
     if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
     if (url.pathname === "/sapi/v1/account/apiRestrictions") return json({
-      enableReading: true, enableSpotAndMarginTrading: true, enableFutures: true, enableWithdrawals: false, ipRestrict: true,
+      enableReading: true, enableSpotAndMarginTrading: true, enableFutures: true, enableWithdrawals: false,
+      ipRestrict: true, ipList: ["203.0.113.10"],
     });
     if (url.pathname === "/api/v3/account") return json({ uid: 42, canTrade: true, balances: [] });
     if (url.pathname === "/fapi/v2/account") return json({ canTrade: true, multiAssetsMargin: false, assets: [] });
@@ -230,6 +282,9 @@ function fixtureFetch(options: {
   calls?: Array<{ path: string; signed: boolean; timestamp: string | null }>;
   missingSpot?: boolean;
   withdrawalsEnabled?: boolean;
+  ipRestricted?: boolean;
+  ipList?: string[];
+  restrictionsFailure?: boolean;
 } = {}): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
@@ -247,12 +302,14 @@ function fixtureFetch(options: {
       case "/api/v3/time":
         return json({ serverTime: 2_000 });
       case "/sapi/v1/account/apiRestrictions":
+        if (options.restrictionsFailure) return json({ code: -1000 }, 503);
         return json({
           enableReading: true,
           enableSpotAndMarginTrading: true,
           enableFutures: true,
           enableWithdrawals: Boolean(options.withdrawalsEnabled),
-          ipRestrict: true,
+          ipRestrict: options.ipRestricted ?? true,
+          ipList: options.ipList ?? ["203.0.113.10"],
         });
       case "/api/v3/account":
         return json({
@@ -326,6 +383,10 @@ function fixtureFetch(options: {
         return json({ code: -1 }, 404);
     }
   };
+}
+
+function providerError(category: string) {
+  return (error: unknown) => error instanceof RwaBinanceProviderError && error.category === category;
 }
 
 function json(value: unknown, status = 200) {

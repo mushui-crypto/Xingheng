@@ -1,4 +1,5 @@
 import { createHash, createHmac } from "node:crypto";
+import { isIP } from "node:net";
 import {
   RWA_BINANCE_PERPETUAL_SYMBOL,
   RWA_BINANCE_PRODUCT_CACHE_TTL_MS,
@@ -38,9 +39,11 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     private readonly credentials: RwaBinanceCredentials,
     private readonly fetchFn: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
+    private readonly allowedEgressIps: readonly string[] | null = configuredBinanceEgressIps(),
   ) {}
 
   async validateAccess() {
+    const configuredEgressIps = requireConfiguredEgressIps(this.allowedEgressIps);
     const [restrictionsValue, spotAccountValue, futuresAccountValue, positionModeValue] = await Promise.all([
       this.signedRequest("spot", "/sapi/v1/account/apiRestrictions"),
       this.signedRequest("spot", "/api/v3/account", { omitZeroBalances: "true" }),
@@ -48,6 +51,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       this.signedRequest("futures", "/fapi/v1/positionSide/dual"),
     ]);
     const restrictions = record(restrictionsValue);
+    assertProviderIpWhitelist(restrictions, configuredEgressIps);
     const spotAccount = record(spotAccountValue);
     const futuresAccount = record(futuresAccountValue);
     const positionMode = record(positionModeValue);
@@ -65,7 +69,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       spotTrade: boolean(restrictions.enableSpotAndMarginTrading) && boolean(spotAccount.canTrade),
       contractTrade: boolean(restrictions.enableFutures) && boolean(futuresAccount.canTrade),
       withdraw: boolean(restrictions.enableWithdrawals),
-      ipRestricted: boolean(restrictions.ipRestrict),
+      ipRestricted: true,
       spotAccount: true,
       futuresAccount: true,
       positionModeSupported: !dualSidePosition,
@@ -479,6 +483,59 @@ export class RwaBinanceProviderError extends Error {
   constructor(readonly category: string, message: string, readonly providerCode: number | null = null) {
     super(message);
   }
+}
+
+function configuredBinanceEgressIps() {
+  const raw = process.env.RWA_BINANCE_ALLOWED_EGRESS_IPS?.trim();
+  return raw ? raw.split(",").map((value) => value.trim()) : null;
+}
+
+function requireConfiguredEgressIps(values: readonly string[] | null) {
+  const normalized = normalizeFixedIpv4Set(values);
+  if (!normalized) {
+    throw new RwaBinanceProviderError(
+      "binance_egress_ip_config_missing",
+      "服务端未配置有效的 Binance 固定出口 IPv4 白名单。",
+    );
+  }
+  return normalized;
+}
+
+function assertProviderIpWhitelist(restrictions: Record<string, unknown>, configuredEgressIps: ReadonlySet<string>) {
+  if (!boolean(restrictions.ipRestrict)) {
+    throw new RwaBinanceProviderError(
+      "binance_ip_whitelist_unconfirmed",
+      "Binance API Key 未启用固定 IP 白名单，已禁止真实执行。",
+    );
+  }
+  const providerIps = normalizeFixedIpv4Set(Array.isArray(restrictions.ipList) ? restrictions.ipList : null);
+  if (!providerIps) {
+    throw new RwaBinanceProviderError(
+      "binance_ip_whitelist_unconfirmed",
+      "Binance 未返回可核对的固定 IP 白名单，已禁止真实执行。",
+    );
+  }
+  if (!sameStringSet(providerIps, configuredEgressIps)) {
+    throw new RwaBinanceProviderError(
+      "binance_ip_whitelist_mismatch",
+      "Binance API Key 的固定 IP 白名单与服务端出口配置不匹配。",
+    );
+  }
+}
+
+function normalizeFixedIpv4Set(values: readonly unknown[] | null) {
+  if (!values?.length) return null;
+  const normalized = new Set<string>();
+  for (const value of values) {
+    const ip = typeof value === "string" ? value.trim() : "";
+    if (!ip || ip.includes("*") || ip.includes("/") || ip === "0.0.0.0" || isIP(ip) !== 4) return null;
+    normalized.add(ip);
+  }
+  return normalized.size ? normalized : null;
+}
+
+function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>) {
+  return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
 function assertWhitelistedOrder(request: RwaProviderOrderRequest) {

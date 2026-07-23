@@ -128,6 +128,7 @@ export class RwaBinanceAutomationService {
         connectionStatus: "unavailable",
         lifecycleStatus: "invalid",
         message: this.store.masterKeyError,
+        ipWhitelistConfigured: false,
       });
     }
     try {
@@ -159,6 +160,7 @@ export class RwaBinanceAutomationService {
         message: error instanceof RwaBinanceProviderError
           ? error.message
           : "Binance 凭证实时连接校验暂不可用。",
+        ipWhitelistConfigured: false,
       });
     }
   }
@@ -294,6 +296,10 @@ export class RwaBinanceAutomationService {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
+    if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
+      const activeMetadata = await this.requireMetadata();
+      await this.validateActiveAccess(await this.client(), activeMetadata.accountId, state);
+    }
     const next = { ...state.config };
     if ("globalExecutionEnabled" in body) next.globalExecutionEnabled = booleanField(body.globalExecutionEnabled, "globalExecutionEnabled");
     if ("strategyEnabled" in body) next.strategyEnabled = booleanField(body.strategyEnabled, "strategyEnabled");
@@ -312,6 +318,10 @@ export class RwaBinanceAutomationService {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
+    if (!active) {
+      const activeMetadata = await this.requireMetadata();
+      await this.validateActiveAccess(await this.client(), activeMetadata.accountId, state);
+    }
     state.config.killSwitchActive = active;
     if (active) {
       state.challenges = [];
@@ -672,6 +682,7 @@ export class RwaBinanceAutomationService {
     connectionStatus: "not_configured" | "verified" | "invalid" | "unavailable";
     lifecycleStatus: RwaCredentialLifecycle;
     message: string | null;
+    ipWhitelistConfigured?: boolean | null;
   }) {
     const metadata = input.metadata ?? null;
     const permissions = metadata?.permissions ?? null;
@@ -689,10 +700,8 @@ export class RwaBinanceAutomationService {
       lastVerifiedAt: metadata?.lastVerifiedAt ?? null,
       updatedAt: metadata?.updatedAt ?? null,
       message: input.message,
-      ipWhitelistConfigured: permissions?.ipRestricted ?? null,
-      warnings: permissions && !permissions.ipRestricted
-        ? ["API Key 未配置固定 IP 白名单；这是高风险配置，但不作为硬阻断。"]
-        : [],
+      ipWhitelistConfigured: input.ipWhitelistConfigured ?? permissions?.ipRestricted ?? null,
+      warnings: [],
     };
   }
 }
@@ -731,7 +740,7 @@ function buildBinancePreflight(
     - (snapshot.fees.spotTakerBps + snapshot.fees.perpetualTakerBps + config.maxCombinedSlippageBps) / 100;
   const checks = [
     check("product_pair", snapshot.productAvailability.available, true, "Binance Mainnet 必须存在可执行的 XAUTUSDT 现货与 USD-M 永续对冲组合。"),
-    check("permissions", permissionsValid(snapshot.permissions), true, "必须具备读取、现货交易和 USD-M Futures 交易权限，且提现权限关闭。"),
+    check("permissions", permissionsValid(snapshot.permissions), true, "必须具备读取、现货交易和 USD-M Futures 交易权限，关闭提现，并通过服务端固定出口 IP 白名单核对。"),
     check("position_mode", snapshot.permissions.positionModeSupported, true, "当前只接受 one-way 持仓模式；hedge mode 暂不放行。"),
     check("spot_trading", snapshot.spot.status === "Trading", "Trading", "XAUTUSDT 现货必须为 TRADING。"),
     check("perpetual_trading", snapshot.perpetual.status === "Trading", "Trading", "XAUTUSDT USD-M 永续必须为 TRADING。"),
@@ -757,9 +766,7 @@ function buildBinancePreflight(
       check("net_apr", estimatedNetAprPercent >= config.minNetAprPercent, config.minNetAprPercent, "估算净 APR 必须达到自动策略门限。"),
     );
   }
-  const warnings = snapshot.permissions.ipRestricted
-    ? []
-    : ["Binance API Key 未配置固定 IP 白名单；这是高风险配置。"];
+  const warnings: string[] = [];
   if (mode === "manual_entry") {
     if (snapshot.perpetual.fundingRate <= 0) warnings.push("当前永续侧未处于收取 Funding 状态。");
     if (Math.abs(entryBasisBps) > config.maxEntryBasisBps) warnings.push("当前入场基差超过自动策略门限。");
@@ -841,7 +848,7 @@ function assertPermissions(value: RwaBinancePermissions) {
     throw new RwaNeutralExecutionError(
       409,
       "permission_rejected",
-      "Binance Key 必须具备读取、现货交易与 USD-M Futures 交易权限，禁止提现，并使用当前支持的 one-way 持仓模式。",
+      "Binance Key 必须具备读取、现货交易与 USD-M Futures 交易权限，禁止提现，通过服务端固定出口 IP 白名单核对，并使用当前支持的 one-way 持仓模式。",
     );
   }
 }
@@ -851,6 +858,7 @@ function permissionsValid(value: RwaBinancePermissions) {
     && value.spotTrade
     && value.contractTrade
     && !value.withdraw
+    && value.ipRestricted
     && value.spotAccount
     && value.futuresAccount
     && value.positionModeSupported;
@@ -865,7 +873,14 @@ function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecy
 
 function providerError(error: unknown, fallback: string) {
   if (error instanceof RwaNeutralExecutionError) return error;
-  if (error instanceof RwaBinanceProviderError) return new RwaNeutralExecutionError(502, error.category, error.message);
+  if (error instanceof RwaBinanceProviderError) {
+    const statusCode = error.category === "binance_egress_ip_config_missing"
+      ? 503
+      : ["binance_ip_whitelist_unconfirmed", "binance_ip_whitelist_mismatch"].includes(error.category)
+        ? 409
+        : 502;
+    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+  }
   return new RwaNeutralExecutionError(502, "provider_unavailable", fallback);
 }
 
