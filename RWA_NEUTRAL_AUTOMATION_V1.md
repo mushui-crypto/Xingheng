@@ -594,3 +594,32 @@ manifest/final Compose 专项现为 `20/20`。第四轮固定安全复验确认�
 离线门禁通过、无新增代码阻塞。Docker daemon 真实镜像构建与转移、image ID/label/内置 revision
 检查、生产 manifest 安装、运行容器唯一性、activation 及 volume/mount/flock 仍未覆盖，因此本
 结论不表示已部署、步骤 0 现场已通过或可进入步骤 1–4。
+
+### 首次 legacy 到 verified release 桥接
+
+当前旧生产没有标准 release manifest/revision，不能直接作为正常 rollback baseline。新增一次性
+bridge 工具，冻结旧 API/Web 精确 image ID、各自 `docker save` 归档/hash、只引用旧 image ID
+与既有卷的恢复 Compose、SQLite `.backup` integrity/hash/size，以及五个原地保留卷的
+owner/mode/mount 映射。bridge manifest 采用精确 schema，拒绝未知字段、symlink/hardlink、可写
+产物和任何 env 值、WIF、Secret、token、IP 或 provider raw response。
+
+首次切换在任何 stop 或数据动作前必须复核 bridge 文件、仍运行的旧 runtime、SQLite recovery
+point、新 release 卷边界、release manifest/镜像/Compose 与 WIF/KMS preflight。新 activation
+或最终容器证据失败时，停止新 API/Web 后按冻结 image ID 恢复旧版；即使 stop 失败也继续尝试
+恢复。恢复前以旧 API 镜像在无网络、只读根和只读备份卷中复核 SQLite，恢复后核对 image ID、
+唯一容器、health、卷映射和 recovery point。首次桥接不删除、不恢复、不迁移 SQLite、strategy、
+Caddy 或既有卷。
+
+新 release 最终证据全部通过后才以安全 FD 写 `0444` 一次性 marker；从此 bridge 永久禁用，
+正常 activation/rollback 只接受标准 verified manifest。首次激活会先隔离初始化 automation
+data/backup/lock 新卷并验证 WIF/KMS；随后停止旧 API，对 owner 一致且无 symlink/hardlinked file
+的三个旧 API 数据卷事务式迁移到 `20001:20001`，失败时先恢复冻结 owner 再恢复旧镜像。当前实现
+仍待本轮重新固定安全复验；尚未执行生产 bridge、Docker restore、UID/卷迁移或 activation，
+不表示步骤 0 已通过。
+
+WIF 安装工具只接受服务器本地、仓库外、root-only 的完整五文件 source 和独立 audience 文件，
+固定 mTLS STS `https://sts.mtls.googleapis.com/v1/token`，在新 tmpfs staging 完整复制和校验后
+才 `mount --move` 到 `/run/xingheng/gcp-wif`。目录/文件固定 `20001:20001`、`0700/0400`；
+部分/额外文件、symlink/hardlink、越界路径、错误 mount/owner/mode 均 fail-closed。真实 leaf
+私钥只能在 Vultr 本机生成，离线 CA 私钥一次签发后销毁；provider 完成并返回完整 audience 前
+不得生成 ADC、发布五文件 bundle 或运行 KMS health。真实 WIF 当前仍待受控创建/注入。

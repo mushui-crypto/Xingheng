@@ -24,8 +24,17 @@ const deploymentRevisionVerifier = read("scripts/verify-deployment-revision.mjs"
 const runtimeRevisionVerifier = read("scripts/verify-runtime-revision.sh");
 const releaseImageBuilder = read("scripts/build-release-images.sh");
 const releaseActivator = read("scripts/activate-release.sh");
+const firstReleaseActivator = read("scripts/activate-first-verified-release.sh");
+const firstReleaseVolumeMigration = read("scripts/first-release-volume-migration.mjs");
 const releaseManifestLoader = read("scripts/load-release-manifest.sh");
 const productionCompose = read("scripts/production-compose.sh");
+const legacyBridge = read("scripts/legacyReleaseBridge.mjs");
+const legacyBridgeCli = read("scripts/legacy-release-bridge.mjs");
+const wifBundle = read("scripts/gcpWifBundle.mjs");
+const wifInstaller = read("scripts/install-gcp-wif.sh");
+const releaseVolumeVerifier = read("scripts/verify-release-volume-boundaries.mjs");
+const releaseVolumeBoundaries = read("scripts/releaseVolumeBoundaries.mjs");
+const activationPreflight = read("server/operations/RwaAutomationActivationPreflight.ts");
 const packageJson = read("package.json");
 
 const assertions = [
@@ -57,7 +66,11 @@ const assertions = [
   ],
   [compose.includes("condition: service_healthy"), "web must wait for a healthy API"],
   [compose.includes('test -n "$$DOMAIN"'), "web must reject a missing domain"],
-  [(compose.match(/env_file:/g) ?? []).length === 1, "only API may receive the production secret env file"],
+  [
+    (compose.match(/env_file:/g) ?? []).length === 1
+      && compose.includes('${COMPOSE_ENV_FILE:-.env.production}'),
+    "only API may receive the selected production secret env file",
+  ],
   [compose.includes('DOMAIN: "${DOMAIN:?'), "web must receive only the interpolated public domain"],
   [compose.includes("sqlite_data:/app/data"), "SQLite must use its named volume"],
   [compose.includes("strategy_data:/app/strategy-data"), "Strategy reports must use a dedicated named volume"],
@@ -206,6 +219,96 @@ const assertions = [
       && releaseActivator.includes('images "$release_manifest"')
       && releaseActivator.includes("verify_release_containers"),
     "release revision, image digests, and the final production Compose mapping must be verified around activation",
+  ],
+  [
+    packageJson.includes('"test:release-bridge"')
+      && packageJson.includes("rwa-activation-preflight.js")
+      && legacyBridge.includes("xingheng-legacy-release-bridge")
+      && legacyBridge.includes("assertNoSensitiveText")
+      && legacyBridge.includes("directory contains unknown or missing files")
+      && legacyBridge.includes("validateResolvedRecoveryCompose")
+      && legacyBridge.includes("verifyLegacyEnvironmentFile")
+      && legacyBridge.includes("readSync")
+      && legacyBridgeCli.includes('docker(["image", "save"')
+      && legacyBridgeCli.includes("verifyOfflineSqliteRecoveryPoint")
+      && legacyBridgeCli.includes("--network")
+      && legacyBridgeCli.includes("--read-only")
+      && legacyBridgeCli.includes("markEstablished")
+      && legacyBridgeCli.includes("verified release must use an independent environment file")
+      && legacyBridgeCli.includes("VERIFIED_RELEASE_MARKER")
+      && legacyBridgeCli.includes("O_EXCL")
+      && legacyBridgeCli.includes("O_NOFOLLOW"),
+    "the one-time legacy bridge must freeze recoverable images, SQLite evidence, and a one-way marker",
+  ],
+  [
+    firstReleaseActivator.indexOf('verify "$bridge_dir"')
+      < firstReleaseActivator.indexOf('verify-runtime "$bridge_dir"')
+      && firstReleaseActivator.indexOf('verify-runtime "$bridge_dir"')
+        < firstReleaseActivator.indexOf("verify-release-environment")
+      && firstReleaseActivator.indexOf("verify-release-environment")
+        < firstReleaseActivator.indexOf("verify_production_compose")
+      && firstReleaseActivator.indexOf("verify_production_compose")
+        < firstReleaseActivator.indexOf("first-release-volume-migration.mjs initialize")
+      && firstReleaseActivator.indexOf("first-release-volume-migration.mjs initialize")
+        < firstReleaseActivator.indexOf("rwa-activation-preflight.js")
+      && firstReleaseActivator.indexOf("rwa-activation-preflight.js")
+        < firstReleaseActivator.indexOf("production_compose stop api")
+      && firstReleaseActivator.indexOf("production_compose stop api")
+        < firstReleaseActivator.indexOf("first-release-volume-migration.mjs migrate")
+      && firstReleaseActivator.indexOf("first-release-volume-migration.mjs migrate")
+        < firstReleaseActivator.indexOf("verify-release-volume-boundaries.mjs migration")
+      && firstReleaseActivator.indexOf("verify-release-volume-boundaries.mjs migration")
+        < firstReleaseActivator.lastIndexOf("activated=true")
+      && firstReleaseActivator.indexOf("verify_release_containers")
+        < firstReleaseActivator.indexOf("verify-release-volume-boundaries.mjs runtime")
+      && firstReleaseActivator.includes("marker override is test-only")
+      && firstReleaseActivator.includes("stop_unverified_release || stop_status=$?")
+      && firstReleaseActivator.includes("first-release-volume-migration.mjs restore")
+      && firstReleaseActivator.includes("legacy-release-bridge.mjs restore")
+      && firstReleaseActivator.includes("legacy-release-bridge.mjs mark-established")
+      && !releaseActivator.includes("legacy-release-bridge"),
+    "first activation must preflight, migrate ownership transactionally, restore legacy on failure, and remain isolated from normal releases",
+  ],
+  [
+    wifBundle.includes("https://sts.mtls.googleapis.com/v1/token")
+      && wifBundle.includes("O_NOFOLLOW")
+      && wifBundle.includes("nlink !== 1")
+      && wifInstaller.includes("mount -t tmpfs")
+      && wifInstaller.includes("WIF target override is test-only")
+      && wifInstaller.includes('= /run ]')
+      && wifInstaller.includes('= tmpfs ]')
+      && wifInstaller.includes("uid=20001,gid=20001")
+      && wifInstaller.includes("mount --move")
+      && wifInstaller.includes('umount "$target"')
+      && wifInstaller.includes("verify-gcp-wif-bundle.mjs installed")
+      && activationPreflight.includes('serverKillSwitch() !== "true"')
+      && activationPreflight.includes("credential_key_provider_unavailable"),
+    "WIF installation and activation KMS health must use the frozen mTLS, tmpfs, ownership, and fail-closed boundaries",
+  ],
+  [
+    releaseVolumeVerifier.includes("RELEASE_VOLUME_BOUNDARIES")
+      && releaseVolumeVerifier.includes("findmnt")
+      && releaseVolumeVerifier.includes("inspected.Options")
+      && releaseVolumeVerifier.includes("validateReleaseComposeMounts")
+      && releaseVolumeVerifier.includes("validateReleaseRuntimeMounts")
+      && releaseVolumeVerifier.includes("validateReleaseVolumeMountCounts")
+      && releaseVolumeVerifier.includes("operation.lock")
+      && releaseVolumeBoundaries.includes("NETWORK_FILESYSTEM")
+      && releaseVolumeBoundaries.includes("EXPECTED_MOUNT_COUNTS"),
+    "first release activation must inspect every local named-volume boundary",
+  ],
+  [
+    firstReleaseVolumeMigration.includes("first release volume migration requires the controlled root operator")
+      && firstReleaseVolumeMigration.includes('"--network",')
+      && firstReleaseVolumeMigration.includes('"none",')
+      && firstReleaseVolumeMigration.includes('"--read-only",')
+      && firstReleaseVolumeMigration.includes('"no-new-privileges"')
+      && firstReleaseVolumeMigration.includes("assertApiStopped")
+      && firstReleaseVolumeMigration.includes("find \"$root\" -xdev -type l")
+      && firstReleaseVolumeMigration.includes("find \"$root\" -xdev -type f -links +1")
+      && firstReleaseVolumeMigration.includes("chown -R 20001:20001")
+      && firstReleaseVolumeMigration.includes('chown -R "$old_uid:$old_gid"'),
+    "first release owner migration must be root-controlled, volume-scoped, link-safe, and reversible",
   ],
   [env.includes(".invalid") && env.includes("REPLACE_WITH_BSC_TESTNET_RPC_URL") && env.includes("REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS"), "production env example must use unmistakable rejected placeholders"],
   [server.includes('domain.endsWith(".invalid")') && server.includes("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零") && server.includes("SMTP 配置仍是示例占位值"), "production startup must reject placeholder identity and unsafe token configuration"],

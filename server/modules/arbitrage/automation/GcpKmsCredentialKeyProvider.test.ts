@@ -491,7 +491,7 @@ function x509Adc(secretRoot: string) {
     type: "external_account",
     audience: testWifAudience,
     subject_token_type: "urn:ietf:params:oauth:token-type:mtls",
-    token_url: "https://sts.googleapis.com/v1/token",
+    token_url: "https://sts.mtls.googleapis.com/v1/token",
     credential_source: {
       certificate: {
         certificate_config_location: join(secretRoot, "certificate_config.json"),

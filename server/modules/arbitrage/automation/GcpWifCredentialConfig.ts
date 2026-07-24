@@ -6,7 +6,7 @@ export const RWA_GCP_WIF_ADC_PATH = `${RWA_GCP_WIF_SECRET_ROOT}/adc.json`;
 export const RWA_GCP_WIF_CERTIFICATE_CONFIG_PATH = `${RWA_GCP_WIF_SECRET_ROOT}/certificate_config.json`;
 export const RWA_GCP_WIF_TRUST_CHAIN_PATH = `${RWA_GCP_WIF_SECRET_ROOT}/trust-chain.pem`;
 export const RWA_GCP_WIF_MTLS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:mtls";
-export const RWA_GCP_STS_TOKEN_URL = "https://sts.googleapis.com/v1/token";
+export const RWA_GCP_STS_TOKEN_URL = "https://sts.mtls.googleapis.com/v1/token";
 export const RWA_AUTOMATION_RUNTIME_UID = 20001;
 export const RWA_AUTOMATION_RUNTIME_GID = 20001;
 

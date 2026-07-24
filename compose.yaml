@@ -6,7 +6,7 @@ services:
     pull_policy: never
     user: "20001:20001"
     env_file:
-      - .env.production
+      - "${COMPOSE_ENV_FILE:-.env.production}"
     environment:
       NODE_ENV: production
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"

@@ -100,6 +100,10 @@ challenge token，不得直接写日志或保存为证据；只提取上述白�
 
 ### 0. 冻结变更与角色
 
+本步骤的生产现场命令与通过/停止条件已压缩为
+[`STEP_0_PRODUCTION_CHECKLIST.md`](./STEP_0_PRODUCTION_CHECKLIST.md)；现场以该清单逐项勾选，
+本节作为详细安全口径，不替代清单中的硬停止条件。
+
 项目管理先给出已验收的完整、小写 40 字符 commit 和可信构建生成的 release manifest。生产不读取
 `.git`；先核对清单 revision 与 `.env.production`，再按清单中的三个不可变 digest 核对 API、Web、
 strategy tools/automation operations 的实际 image ID、OCI `org.opencontainers.image.revision`、
@@ -123,10 +127,32 @@ node scripts/verify-deployment-revision.mjs containers "$MANIFEST"
 `production_compose`；不得直接调用 `docker compose`。出现 `COMPOSE_FILE`、自动 override、
 最终配置中的 `build`、服务 image 与清单 digest 不一致时，必须在任何容器或数据动作前停止。
 
+若现场旧版本从未建立标准 manifest，步骤 0 只能先走一次性
+`legacy-release-bridge.mjs capture/verify/verify-runtime`。bridge 必须绑定旧 API/Web 精确 image
+ID、只读 image archive/hash、脱敏恢复 Compose、SQLite `.backup` integrity/hash/size 和五个既有
+volume 的 owner/mode/映射；不能包含 env 值、WIF、Secret、token、IP 或 provider 原始响应。旧
+环境文件只冻结 path/device/inode/owner/mode/nlink/size/hash，不复制内容；新 release 必须使用
+不同路径与 inode，整个窗口不得改写旧文件。恢复 Compose 的源文件和最终解析 JSON 都必须通过
+精确 schema，拒绝 privileged、host namespace、device/capability 和额外 bind。local volume
+必须无 driver options，并用宿主 mountinfo、Compose mount schema 与运行容器的 mount 数量、
+target、RW 属性共同证明不是网络卷或外部 bind。
+固定安全复验和现场执行授权完成前不得执行 capture、`docker save` 或停启容器。首次 activation
+失败必须停止未验证新容器并按 bridge 恢复旧 image ID，恢复后核对唯一容器、health、卷映射与
+SQLite recovery point。首次成功只允许写固定
+`/var/lib/xingheng/verified-release-established` 一次性 marker；生产禁止路径 override，部分写入
+按 inode 清理。marker 后永久禁止 bridge，后续只接受标准 manifest。
+首次激活在全部非破坏性预检通过后才停止旧 API，验证旧卷树 owner 一致且无 symlink/hardlinked
+file，再事务式迁移三个 API 数据卷 owner；失败时先恢复旧 owner，再恢复旧镜像。不会删除、恢复
+或覆盖 SQLite、strategy、Caddy 数据；自动套利新卷只初始化冻结的空状态、备份目录和锁文件。
+
 继续：两人均在线，人工交易所登录可用；期望 revision 与所有镜像、运维组件和运行容器完全一致。
 停止：任何负责人缺席；manifest 缺失/可写/结构非法，revision 缺失或非完整 commit，实际 digest、
 任一组件或运行时 env 不一致，存在生产直接 build 路径，或无法脱离生产 `.git` 独立核验。停止后
 不得进入步骤 1–4，必须由项目管理另行授权部署整改。
+
+当前状态：bridge/WIF 离线整改为 owner 可测、待固定安全复验；真实 bridge、UID/卷迁移、WIF 五
+文件发布、KMS health 和步骤 0 现场均未执行。证书侧只允许准备服务器本地 leaf 私钥与公开
+CSR/证书/trust store；完整 GCP provider audience 返回前不得生成或安装 ADC。
 
 ### 1. 建立恢复点
 

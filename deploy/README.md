@@ -74,6 +74,58 @@ digest 可由本机 `docker image inspect` 精确解析，并在激活前重新�
 `pull_policy` 与 runtime revision 精确匹配当前 release manifest。即使目录中存在自动 override，
 也不会进入生产文件选择。启动后的容器证据失败时脚本会停止 API/Web，不保留未验证容器。
 
+## 首次 legacy 到 verified release 桥接
+
+生产旧版本没有标准 release manifest 或可验证 revision 时，不得把旧 tag、容器 ID 或人工记录
+伪装成标准清单。只允许使用一次独立 bridge：
+
+生产现场优先按一页版
+[`STEP_0_PRODUCTION_CHECKLIST.md`](./STEP_0_PRODUCTION_CHECKLIST.md)
+逐项执行；本节保留完整设计约束与原理说明。
+
+```bash
+node scripts/legacy-release-bridge.mjs capture \
+  /受控桥接目录/legacy-bridge /opt/xingheng/.env.production
+node scripts/legacy-release-bridge.mjs verify /受控桥接目录/legacy-bridge
+node scripts/legacy-release-bridge.mjs verify-runtime /受控桥接目录/legacy-bridge
+./scripts/activate-first-verified-release.sh \
+  /受控桥接目录/legacy-bridge \
+  deploy/release-manifest.json \
+  /opt/xingheng/.env.verified-release
+```
+
+`capture` 在旧服务仍运行时冻结 API/Web 精确 image ID，生成只读 `docker save` 归档及 SHA-256、
+只引用旧 image ID 和五个既有 named volume 的恢复 Compose，并用 SQLite `.backup` 建立独立
+recovery point，记录 integrity/hash/size。bridge manifest 使用精确 schema，拒绝 Secret、env
+值、WIF、token、固定 IP、provider raw response、symlink、hardlink、可写文件和未知字段。旧环境
+文件不复制、不归档明文；manifest 只冻结绝对路径、device/inode、owner、mode、nlink、size 和
+SHA-256。每次 verify、restore 与实际 Compose up 前都会用 `O_NOFOLLOW` 重新核验同一文件，任何
+替换或内容变化都会 fail-closed。新 release 必须使用不同路径且不同 inode 的独立环境文件，整个
+bridge 窗口不得覆盖旧环境文件。
+
+首次 activation 在任何 stop/recreate 前依次复核 bridge 文件、仍运行的旧 API/Web、SQLite
+恢复点、新旧环境身份、卷 driver/options/mountinfo/owner/mode/实际挂载数、新 release Compose、
+三镜像和 WIF/KMS preflight。恢复 Compose 源文件和 Docker 最终解析 JSON 均使用精确递归契约，
+拒绝 privileged、host namespace、device/capability、额外 bind、命令、端口、health 或 mount
+扩展。local volume 必须没有 driver options，宿主文件系统必须是本地可写文件系统；NFS、CIFS、
+9p、Ceph、GlusterFS、FUSE 和 bind-backed local volume 均拒绝。新 activation 或
+post-start 证据失败时，即使停止新容器失败也继续恢复旧卷 owner 并按冻结 image ID 恢复旧
+API/Web。恢复前会以旧 API 镜像、无网络、只读根和只读备份卷再次检查 SQLite；恢复后核对旧
+image ID、唯一容器、health、卷映射和 recovery point。首次激活只在 release/WIF/KMS 与新卷
+初始化预检通过后停止旧 API，拒绝 symlink、hardlinked file 或混合 owner 的旧卷树，再把三个
+API 数据卷整体从冻结 owner 迁移到 `20001:20001`；任一后续失败会恢复冻结 owner。SQLite、
+strategy、Caddy 和既有数据均原地保留，不删除或覆盖。
+
+新容器的 API/Web 精确 mount 数量、target 与 RW 属性及全部证据最终通过后，才以安全 FD 写入
+固定 `/var/lib/xingheng/verified-release-established` 的 `0444` 一次性 marker。生产不接受
+marker 路径 override；写入或 fsync 失败会按创建 inode 安全清理。marker 存在后 bridge 永久禁用；
+后续升级和回滚只接受标准 verified manifest，普通 `activate-release.sh` 不包含 legacy 路径。
+自动套利 data/backup/lock 新卷只接受 release 镜像冻结的初始 schema，并在旧 API 停止前完成
+隔离初始化；不会复制 WIF、SQLite 或旧策略数据。
+
+当前 bridge/WIF 工具仅为 owner 可测、待固定安全复验；尚未在生产执行 capture、`docker save`、
+stop/start、activation、UID/卷迁移或 rollback，不能据此宣称已部署或步骤 0 已通过。
+
 ## RWA 自动套利凭证 KMS
 
 RWA 交易所凭证使用 Google Cloud KMS Envelope V2。生产只接受以下 provider 与 CryptoKey；
@@ -97,7 +149,8 @@ UID/GID `20001:20001`；目录权限为 `0700`，所有身份文件权限为 `04
 `roles/cloudkms.cryptoKeyEncrypterDecrypter`，不得授予项目级管理、密钥创建或销毁权限。
 
 ADC audience 必须与服务端 `RWA_GCP_WIF_AUDIENCE` 精确一致，subject token type 固定为 mTLS，
-token URL 固定为 Google STS。`adc.json`、`certificate_config.json`、证书、私钥和 trust chain
+token URL 固定为 `https://sts.mtls.googleapis.com/v1/token`。`adc.json`、
+`certificate_config.json`、证书、私钥和 trust chain
 均必须位于 `/run/secrets/gcp-wif` 的真实路径内；启动和每次 KMS 使用前都会执行
 `lstat + realpath + stat`，拒绝 symlink、非 regular file、非 UID `20001` owner 或非 `0400`
 权限；根目录必须为 UID `20001` owner 且权限为 `0700`。API 固定以 `20001:20001` 非 root
@@ -108,12 +161,18 @@ KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不
 轮换和所有新增风险动作均 fail-closed；公开看板继续可用。若存在未完成执行且凭证无法解密，
 系统进入 `manual_intervention` 并要求用户在对应交易所人工核对订单和仓位，不得声称能够自动退出。
 
-宿主机部署前必须先确认 `/run` 为 tmpfs，再由 root 创建并注入身份材料；Compose 不会自动创建
-宿主目录：
+完整五文件 bundle 必须先位于服务器本地、仓库外、root-only 的受控 source 目录，audience
+另存为 root-only 文件；不得通过 CLI 参数、环境变量、shell history 或聊天传入材料内容。
+`scripts/install-gcp-wif.sh` 先完整验证 source，再建立新的 tmpfs staging，复制为
+`20001:20001`、目录 `0700`、文件 `0400`，最后以 `mount --move` 一次性发布。部分 bundle、
+额外文件、symlink/hardlink、路径逃逸、非 mTLS ADC、错误 audience/STS、owner/mode 或最终 mount
+校验失败均不会保留可供 runtime 使用的目标。
+
+宿主机部署前必须先确认 `/run` 为 tmpfs，再由 root 注入身份材料；Compose 不会自动创建宿主目录：
 
 ```bash
 findmnt -T /run/xingheng/gcp-wif -o FSTYPE,TARGET
-install -d -o 20001 -g 20001 -m 0700 /run/xingheng/gcp-wif
+./scripts/install-gcp-wif.sh /服务器本地受控source /服务器本地受控audience文件
 ```
 
 身份文件先在受限临时位置完整生成并校验，再安装为 `20001:20001 / 0400`。日常叶证书轮换使用
@@ -128,6 +187,11 @@ WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利�
 只读 WIF 目录挂载和自动套利独立数据卷接线；第 4 项代码与静态契约已通过固定安全复验，但实际
 Docker named volume owner/mount、旧容器迁移及恢复演练尚未在真实 Docker 环境验证。完成真实
 部署演练前，禁止在生产录入真实交易所凭证或解除真实执行急停。
+
+当前真实 WIF 尚处于证书侧准备：leaf 私钥只允许在 Vultr 本机 staging 生成，离线 root CA
+私钥只用于一次签发后销毁；公开 CSR、leaf 证书、root trust store 和 fingerprint 可在受限路径
+传递。GCP provider 完成并返回完整 audience 前不得生成 `adc.json`，五文件 bundle 不得部分发布，
+不得运行 activation KMS health。真实 WIF 创建/注入和 KMS probe 仍待后续受控步骤。
 
 敏感操作 TOTP 状态与交易所凭证使用同一个 KMS provider，但采用独立 purpose/AAD/domain 和独立
 密文文件；TOTP secret、恢复码明文和一次性授权 token 不得写入环境变量。其密文位于
