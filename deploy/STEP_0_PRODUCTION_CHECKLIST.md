@@ -139,3 +139,30 @@ test ! -e /var/lib/xingheng/verified-release-established
   生产事故，由回滚负责人按冻结 bridge 单独执行恢复。
 - [ ] 成功后不再使用 legacy bridge；下一步是独立的备份/恢复/flock/容器重建现场演练。
   未完成这些演练前，不录入真实交易所凭证、不申请关闭总急停、不进入 Mainnet 资金验证。
+
+## G. 必须留存与必须销毁
+
+长期留存（服务器 root-only，禁止进入 Git、SQLite、应用备份或聊天）：
+
+- [ ] `/root/xingheng-wif-source/`：精确五文件 bundle；目录 `0700`、文件 `0400`。其中
+  `leaf.key` 是唯一长期私钥副本，不额外复制到项目备份；主机丢失时按新 trust root / Provider
+  重建身份，不从应用备份恢复。
+- [ ] `/root/xingheng-wif-audience`：完整 Provider audience，`0400`。
+- [ ] `/root/xingheng-wif-public/`：root CA 公钥证书、leaf 公钥证书、CSR、指纹和到期时间；
+  不含任何私钥。
+- [ ] `/opt/xingheng/.env.verified-release`：本次 release 的 root-only `0600` 环境文件；
+  不复制正文到证据或沟通文档。
+- [ ] `/opt/xingheng-release/code/deploy/release-manifest.json`：不可变 `0444` manifest；同步留存
+  完整 commit 与三个镜像 digest。
+- [ ] `$STEP0_BRIDGE`：legacy 镜像归档、SQLite recovery point 与恢复证据；保留到首个 verified
+  release 上线复验和回滚窗口结束，之后按独立销毁流程处理。
+- [ ] 仅留存脱敏证据：窗口时间、操作者/复核者、PASS/FAIL、commit、digest、证书指纹/到期时间、
+  KMS key/Pool/Provider 资源名、回滚点；不保存 token、env 正文、WIF 私钥或 provider 原始响应。
+
+必须销毁：
+
+- [ ] 一次性离线 root CA 私钥：Provider/IAM 建立且真实 STS/KMS health 通过后销毁，不长期保留。
+- [ ] CSR staging 中重复的 leaf 私钥与 Cloud Shell 临时 trust-store；只保留上述唯一 source
+  私钥副本和公共归档。
+- [ ] 证书轮换至少提前 60 天登记；当前 leaf 到期日前必须完成新证书、tmpfs 原子轮换与旧证书
+  延迟清理。
