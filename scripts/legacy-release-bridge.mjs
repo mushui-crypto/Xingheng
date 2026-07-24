@@ -220,6 +220,7 @@ function capture(bundleDirectory, environmentFile) {
       flag: "wx",
       mode: 0o444,
     });
+    chmodSync(manifestPath, 0o444);
     verifyLegacyBridgeFiles(temporary);
     renameSync(temporary, bundleDirectory);
     console.log("legacy bridge capture verified");

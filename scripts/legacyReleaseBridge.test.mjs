@@ -798,6 +798,26 @@ test("capture freezes image archives, SQLite recovery evidence, and cleans inter
   }
 });
 
+test("capture publishes exact read-only artifacts under the production umask", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-legacy-capture-umask-"));
+  const originalUmask = process.umask(0o077);
+  try {
+    const environmentFile = join(root, ".env.production");
+    const bundle = join(root, "bridge");
+    writeFileSync(environmentFile, "PUBLIC_TEST_VALUE=true\n", { mode: 0o600 });
+    const { result } = runBridgeCli(root, "capture", [bundle, environmentFile]);
+    assert.equal(result.status, 0, result.stderr);
+    const manifest = verifyLegacyBridgeFiles(bundle);
+    assert.equal(lstatSync(join(bundle, manifestFileName())).mode & 0o777, 0o444);
+    assert.equal(lstatSync(join(bundle, manifest.archives.api.file)).mode & 0o777, 0o400);
+    assert.equal(lstatSync(join(bundle, manifest.archives.web.file)).mode & 0o777, 0o400);
+    assert.equal(lstatSync(join(bundle, manifest.compose.file)).mode & 0o777, 0o444);
+  } finally {
+    process.umask(originalUmask);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restore loads missing images and verifies SQLite before starting legacy services", () => {
   const root = mkdtempSync(join(tmpdir(), "xingheng-legacy-restore-cli-"));
   try {
