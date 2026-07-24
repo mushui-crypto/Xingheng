@@ -515,3 +515,41 @@ armed 与 in-flight 状态均不跨重启恢复；持久幂等 tombstone 继续�
 完整套利 `33/33`，三套 TypeScript、完整 build、deploy/production safety `33+11`、Compose
 静态展开与 diff check 均通过。真实 Linux 容器内 flock/volume、双容器竞争、崩溃恢复和旧锁卷
 迁移现场项仍未覆盖，因此本结论不表示可部署、可录入真实凭证或可解除服务端总急停。
+
+## 第 7 项：25 USDT Mainnet 验证零资金准备
+
+本阶段只冻结未来受控窗口的前置条件、证据和停止规则，不授权真实连接或资金动作。完整操作口径见
+`deploy/RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md`。真实范围固定为 Binance Mainnet
+`XAUTUSDT` 现货买入与 USD-M 永续卖出、永续 1x、专用子账户，不允许替换品种、方向、数量或
+使用客户端自报 symbol。
+
+25 USDT 是一次组合的总资本预算：现货估算名义、永续 1x 估算名义、实时 taker fee 与滑点准备金
+合计必须 `<= 25`，不是两侧分别 25。数量由 `25 * 0.95 / (spotAsk + perpetualBid)` 按两产品共同
+步长向下取整；实时最小名义或精度无法满足时直接取消验证。300 USDT 服务端硬上限保持不变，但
+不构成本次提高预算的授权。25 USDT 也不是保证亏损上限，provider 不可用、跳空、部分成交和退出
+失败仍须按人工处理边界应对。
+
+受控窗口前必须完成 Vultr 单主机/单实例和真实 Docker volume/mount/owner/flock 现场验证、固定
+出口 IPv4 与 Binance 白名单精确匹配、专用子账户 read + Spot + Futures 且 withdraw=false、
+one-way/single-asset、XAUTUSDT 两产品实时 TRADING、两账户余额/仓位/活动订单核对、GCP KMS
+X.509 WIF、独立数据/备份/锁卷、TOTP、两层执行开关和两级急停核对。任一事实未知即停止。
+
+现有私有 API 已能分别提供 credential/config/account、preflight 预算、execution 订单、positions、
+策略归因 PnL 和脱敏 audit 证据。原始 preflight 含一次性 challenge token，不得直接落盘；证据只
+保留 account fingerprint、预算/数量/状态、策略 order ID/client order ID、成交/PnL 和稳定错误
+类别，不保存 Secret、IP、token、TOTP、WIF 或 provider raw response。
+
+新增 `npm run test:rwa-mainnet-readiness` 零资金 rehearsal：入口在发现 production、关闭服务端
+总急停、真实 ADC、本地主密钥、固定出口 IP 或常见 Binance credential 环境变量时拒绝启动，只
+运行 fake provider/KMS、临时目录和公开测试值。覆盖正向预算、首次 provider mutation 失败、
+永续侧失败补偿、部分成交、权威订单超时、退出失败、重启恢复、租约失效、KMS/IP/TOTP 失败、
+凭证隔离和灾备。该结果不得描述为 Mainnet 已验证。
+
+当前仍需项目管理在未来单独确认真实窗口，并由用户/运维在服务器和 Binance 私有 UI 提供或操作
+真实 WIF、固定出口 IP、专用子账户凭证、TOTP 和人工退出能力；任何 Secret 都不得通过聊天交付。
+本项零资金准备已通过固定安全复验，但真实 25 USDT Mainnet 验证尚未执行；当前未提交、未部署，
+服务端总急停未解除。独立验证为危险环境入口负向门禁 `7/7`、Binance service `12/12`、完整
+readiness rehearsal `125 passed + 1 Linux-only skipped`、security/auth/routes `21/21`、完整
+套利 `33/33`；三套 TypeScript、完整 build、deploy validation、production safety `33+11`、
+含 ops profile 的 Compose 静态展开和 `git diff --check` 均通过。该结论不表示 Mainnet、Vultr、
+真实 WIF/KMS、固定出口 IP、真实账户/产品/余额或 25 USDT 订单已经验证。

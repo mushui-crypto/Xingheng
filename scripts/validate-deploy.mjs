@@ -16,6 +16,9 @@ const rwaRollback = read("scripts/rwa-automation-rollback.sh");
 const rwaBackupService = read("server/modules/arbitrage/automation/RwaAutomationBackupService.ts");
 const rwaGovernance = read("server/modules/arbitrage/automation/RwaAutomationGovernance.ts");
 const rwaExecutionLease = read("server/modules/arbitrage/automation/RwaAutomationExecutionLease.ts");
+const rwaMainnetRunbook = read("deploy/RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md");
+const rwaReadinessRehearsal = read("scripts/rehearse-rwa-mainnet-readiness.mjs");
+const packageJson = read("package.json");
 
 const assertions = [
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
@@ -130,6 +133,16 @@ const assertions = [
       && server.includes("RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms")
       && server.includes("validateGcpWifRuntimeBoundary"),
     "production must reject local/fake key providers and unsafe WIF runtime boundaries",
+  ],
+  [
+    packageJson.includes('"test:rwa-mainnet-readiness"')
+      && rwaReadinessRehearsal.includes('process.env.NODE_ENV === "production"')
+      && rwaReadinessRehearsal.includes('process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH === "false"')
+      && rwaReadinessRehearsal.includes("GOOGLE_APPLICATION_CREDENTIALS")
+      && rwaReadinessRehearsal.includes("BINANCE_API_SECRET")
+      && rwaMainnetRunbook.includes("25 USDT 是一次建立现货与永续对冲组合的总预算")
+      && rwaMainnetRunbook.includes("不是 Mainnet 验证"),
+    "RWA Mainnet readiness rehearsal must remain offline and document the frozen total budget",
   ],
   [env.includes(".invalid") && env.includes("REPLACE_WITH_BSC_TESTNET_RPC_URL") && env.includes("REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS"), "production env example must use unmistakable rejected placeholders"],
   [server.includes('domain.endsWith(".invalid")') && server.includes("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零") && server.includes("SMTP 配置仍是示例占位值"), "production startup must reject placeholder identity and unsafe token configuration"],

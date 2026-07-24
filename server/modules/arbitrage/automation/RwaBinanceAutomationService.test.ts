@@ -152,6 +152,18 @@ test("Binance preflight remains read-only and execute establishes the whiteliste
     const challenge = await current.preflight(opportunity(), accountId!, "manual_entry");
     assert.equal(client.writeCount, 0);
     assert.equal(challenge.report.providerWritesEnabled, true);
+    assert.equal(challenge.report.totalBudgetUsd, 25);
+    assert.equal(challenge.report.estimatedCapitalRequiredUsd <= challenge.report.totalBudgetUsd, true);
+    assert.equal(
+      challenge.report.estimatedSpotNotionalUsd + challenge.report.estimatedPerpetualNotionalUsd
+        < challenge.report.totalBudgetUsd,
+      true,
+    );
+    assert.equal(
+      challenge.report.checks.some((item) =>
+        item.name === "strategy_cap" && item.limit === 300 && item.passed),
+      true,
+    );
     const execution = await current.execute({
       accountId,
       challengeId: challenge.challengeId,
@@ -168,6 +180,26 @@ test("Binance preflight remains read-only and execute establishes the whiteliste
     });
     assert.equal(repeated.executionId, execution.executionId);
     assert.equal(client.writeCount, 3);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance first provider mutation failure creates no orders or strategy exposure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-first-write-failure-"));
+  try {
+    const client = new FakeBinanceClient({ failLeverage: true });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:first-write-failure:1"));
+    assert.equal(execution.state, "failed");
+    assert.equal(client.writeCount, 1);
+    assert.equal(client.placedRequests.length, 0);
+    const pnl = await client.readStrategyPnl();
+    assert.equal(pnl.legs.spot.quantityXaut, 0);
+    assert.equal(pnl.legs.perpetual.quantityXaut, 0);
+    assert.equal(pnl.openOrders.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -204,6 +236,27 @@ test("Binance perpetual-side failure exits the filled spot side and leaves no st
     assert.equal(pnl.legs.spot.quantityXaut, 0);
     assert.equal(pnl.legs.perpetual.quantityXaut, 0);
     assert.equal(client.strategyCancelScopes.length > 0, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance exit failure enters manual intervention and activates the user kill switch", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-exit-failure-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: ["throw"] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    client.seedStrategyExposure(0.002, 0.002);
+    const execution = await current.closeAll({
+      accountId,
+      idempotencyKey: "binance:close-failure:1",
+    });
+    assert.equal(execution.state, "manual_intervention");
+    assert.equal((await current.getConfig()).killSwitchActive, true);
+    const pnl = await client.readStrategyPnl();
+    assert.equal(pnl.legs.spot.quantityXaut, 0.002);
+    assert.equal(pnl.legs.perpetual.quantityXaut, 0.002);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -371,12 +424,18 @@ class FakeBinanceClient implements RwaBinanceClient {
   private spotQuantity = 0;
   private perpetualQuantity = 0;
   readonly fillPlan: Array<number | "throw" | "new">;
+  readonly failLeverage: boolean;
   readonly placedRequests: RwaProviderOrderRequest[] = [];
   readonly strategyCancelScopes: string[] = [];
   cancelCount = 0;
 
-  constructor(input: { permissions?: RwaBinancePermissions; fillPlan?: Array<number | "throw" | "new"> } = {}) {
+  constructor(input: {
+    permissions?: RwaBinancePermissions;
+    fillPlan?: Array<number | "throw" | "new">;
+    failLeverage?: boolean;
+  } = {}) {
     this.fillPlan = [...input.fillPlan ?? []];
+    this.failLeverage = input.failLeverage ?? false;
     const currentPermissions = input.permissions ?? permissions();
     this.access = {
       accountId: "binance:test-account",
@@ -452,6 +511,7 @@ class FakeBinanceClient implements RwaBinanceClient {
 
   async setPerpetualLeverage() {
     this.writeCount += 1;
+    if (this.failLeverage) throw new Error("fake leverage mutation rejected");
   }
 
   async placeOrder(request: RwaProviderOrderRequest) {

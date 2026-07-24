@@ -409,6 +409,12 @@ SMTP_FROM="Stella X <no-reply@已验证域名>"
 
 ## 日常操作
 
+Binance XAUT 真实 25 USDT 验证不属于日常部署或 smoke。执行前必须阅读
+[`RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md`](./RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md)，
+先运行 `npm run test:rwa-mainnet-readiness` 完成零资金离线 rehearsal，再取得项目管理对真实窗口
+的单独确认。离线 rehearsal 会拒绝 production、真实 ADC/凭证相关环境和已关闭的服务端总急停；
+它不能替代 Vultr、真实 WIF、真实 Binance 账户、产品或资金验证。
+
 ```bash
 # 服务状态和最近日志
 docker compose --env-file .env.production ps
