@@ -180,6 +180,7 @@ export class UserService {
 
     this.store.transaction(() => {
       this.store.updateUserPassword(user.id, hashPassword(password));
+      this.store.invalidateStepUpEnrollment(user.id);
       this.store.markEmailTokenUsed(token.id);
       this.store.deleteAuthSessionsForSubject(user.id, "user");
     });
@@ -244,6 +245,19 @@ export class UserService {
 
   getCurrentUser(token: string | null | undefined) {
     return this.authenticate(token);
+  }
+
+  verifyCurrentPassword(userId: string, password: string) {
+    const user = this.store.findUserPasswordById(userId);
+    return Boolean(user && verifyPassword(String(password ?? ""), user.password));
+  }
+
+  findUserIdByEmail(emailInput: string) {
+    return this.store.findUserByEmail(normalizeEmail(emailInput))?.id ?? null;
+  }
+
+  getStepUpEnrollmentInvalidatedAt(userId: string) {
+    return this.store.getStepUpEnrollmentInvalidatedAt(userId);
   }
 
   listUsers() {

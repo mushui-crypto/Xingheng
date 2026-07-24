@@ -83,6 +83,12 @@ WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利�
 只读 WIF 目录挂载，但 `/app/rwa-automation-data` 尚未配置独立持久卷和备份恢复，仍是安全整改
 第 4 项阻塞。完成并独立验收前，禁止在生产录入真实交易所凭证或解除真实执行急停。
 
+敏感操作 TOTP 状态与交易所凭证使用同一个 KMS provider，但采用独立 purpose/AAD/domain 和独立
+密文文件；TOTP secret、恢复码明文和一次性授权 token 不得写入环境变量。其密文位于
+`RWA_AUTOMATION_DATA_DIR/step-up-security`，因此同样受第 4 项独立持久卷与备份恢复阻塞。
+密码重置只在 SQLite 保存非敏感 enrollment invalidation epoch，用于在 KMS 暂时不可用时仍持续
+拒绝旧 pending enrollment；该字段不包含 TOTP secret、验证码或恢复材料。
+
 首次从旧 UID `1000` 切换到 `20001` 时，现有 `sqlite_data`、`strategy_data` 和
 `sqlite_backups` 卷不会自动改 owner。部署窗口必须先用旧 API 完成在线备份并停止 API，
 再用新镜像执行一次受控的 root 运维容器迁移；生产 API 本身始终不以 root 运行：

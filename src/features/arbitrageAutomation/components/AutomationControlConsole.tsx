@@ -6,15 +6,29 @@ import {
   KeyRound,
   Settings2,
   ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
+  Eye,
+  EyeOff,
   XCircle,
 } from "lucide-react";
 import React, { useEffect, useState } from "react";
 import {
+  credentialDeleteStepUpIntent,
+  credentialStepUpIntent,
+  executionStepUpIntent,
   isAccountMismatchError,
   isCredentialActivationReady,
+  positionCloseStepUpIntent,
   presentAutomationConsoleError,
+  safetyActionStepUpIntent,
 } from "../../../api/arbitrageAutomationConsole";
+import {
+  isStepUpAuthFailure,
+  presentStepUpError,
+  stepUpSecurityClient,
+} from "../../../api/stepUpSecurity";
+import { USER_AUTH_FAILED_EVENT } from "../../../api/session";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 import { Toast, useTradingToast } from "../../trading/components/TradingFeedback";
@@ -34,12 +48,18 @@ import type {
   ParameterDraft,
   SafetyAction,
 } from "../model/controlConsoleTypes";
+import type {
+  StepUpIntent,
+  StepUpSecurityClient,
+  StepUpStatus,
+} from "../model/stepUpTypes";
 import { AutomationCandidates } from "./AutomationCandidates";
 import { AutomationCredentials } from "./AutomationCredentials";
 import { AutomationOverview } from "./AutomationOverview";
 import { AutomationParameters } from "./AutomationParameters";
 import { AutomationPositions } from "./AutomationPositions";
 import { AutomationSafety } from "./AutomationSafety";
+import { AutomationStepUpSecurity } from "./AutomationStepUpSecurity";
 import { StatusTag, formatDate, formatMoney, venueLabel } from "./AutomationConsoleShared";
 
 const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNode }> = [
@@ -51,15 +71,35 @@ const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNo
   { id: "safety", label: "安全操作", icon: <ShieldAlert size={15} /> },
 ];
 
-type PendingSafetyConfirmation = { action: SafetyAction; title: string; phrase: string };
+type PendingSafetyConfirmation =
+  | { kind: "safety"; action: SafetyAction; title: string; phrase: string }
+  | { kind: "position"; positionId: string; title: string; phrase: string };
+
+type PendingStepUp = {
+  id: string;
+  title: string;
+  description: string;
+  intent: StepUpIntent;
+  resolve: (token: string) => void;
+  reject: (error: Error) => void;
+};
+
+class StepUpCancelledError extends Error {
+  constructor() {
+    super("二次身份验证已取消。");
+    this.name = "StepUpCancelledError";
+  }
+}
 
 export function AutomationControlConsole({
   client,
   onReload,
+  securityClient = stepUpSecurityClient,
   snapshot,
 }: {
   client: AutomationConsoleClient;
   onReload: () => Promise<void>;
+  securityClient?: StepUpSecurityClient;
   snapshot: AutomationConsoleSnapshot;
 }) {
   const [activeTab, setActiveTab] = useState<AutomationConsoleTab>("overview");
@@ -71,6 +111,12 @@ export function AutomationControlConsole({
   const [preflightPhrase, setPreflightPhrase] = useState("");
   const [safetyConfirmation, setSafetyConfirmation] = useState<PendingSafetyConfirmation | null>(null);
   const [safetyPhrase, setSafetyPhrase] = useState("");
+  const [stepUpStatus, setStepUpStatus] = useState<StepUpStatus | null>(null);
+  const [stepUpPrompt, setStepUpPrompt] = useState<PendingStepUp | null>(null);
+  const [stepUpCode, setStepUpCode] = useState("");
+  const [stepUpError, setStepUpError] = useState("");
+  const [showStepUpCode, setShowStepUpCode] = useState(false);
+  const [stepUpBusy, setStepUpBusy] = useState(false);
   const [busy, setBusy] = useState(false);
   const { dismissToast, showToast, toast } = useTradingToast();
   const accountScope = snapshot.credentials
@@ -85,10 +131,97 @@ export function AutomationControlConsole({
     setPreflightPhrase("");
   }, [accountScope, snapshot.generatedAt]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    void securityClient.status(controller.signal)
+      .then(setStepUpStatus)
+      .catch(() => setStepUpStatus(null));
+    return () => controller.abort();
+  }, [securityClient]);
+
+  useEffect(() => {
+    if (!stepUpPrompt) return;
+    stepUpPrompt.reject(new StepUpCancelledError());
+    setStepUpPrompt(null);
+    setStepUpCode("");
+    setStepUpError("");
+    setShowStepUpCode(false);
+  }, [accountScope, snapshot.generatedAt]);
+
+  useEffect(() => {
+    const clearPending = () => cancelStepUp();
+    window.addEventListener(USER_AUTH_FAILED_EVENT, clearPending);
+    return () => window.removeEventListener(USER_AUTH_FAILED_EVENT, clearPending);
+  }, [stepUpPrompt]);
+
   const handleContractError = async (error: unknown) => {
+    if (error instanceof StepUpCancelledError) return;
     if (isAccountMismatchError(error)) await onReload();
     showContractError(error, showToast);
   };
+
+  const requestStepUp = (intent: StepUpIntent, title: string, description: string) => {
+    if (!stepUpStatus?.enrolled) {
+      setActiveTab("safety");
+      showToast("请先在“安全操作”中设置二次身份验证。", "warning");
+      return Promise.reject(new StepUpCancelledError());
+    }
+    if (stepUpPrompt) {
+      showToast("已有敏感操作正在等待二次验证。", "warning");
+      return Promise.reject(new StepUpCancelledError());
+    }
+    return new Promise<string>((resolve, reject) => {
+      setStepUpCode("");
+      setStepUpError("");
+      setShowStepUpCode(false);
+      setStepUpPrompt({
+        id: crypto.randomUUID(),
+        title,
+        description,
+        intent,
+        resolve,
+        reject,
+      });
+    });
+  };
+
+  const authorizeStepUp = async () => {
+    const pending = stepUpPrompt;
+    if (!pending || stepUpCode.length !== 6) return;
+    setStepUpBusy(true);
+    setStepUpError("");
+    const code = stepUpCode;
+    setStepUpCode("");
+    try {
+      const authorization = await securityClient.authorize({ code, intent: pending.intent });
+      setStepUpPrompt(null);
+      setShowStepUpCode(false);
+      pending.resolve(authorization.authorizationToken);
+    } catch (error) {
+      const message = presentStepUpError(error);
+      if (isStepUpAuthFailure(error)) {
+        pending.reject(new StepUpCancelledError());
+        setStepUpPrompt(null);
+        setShowStepUpCode(false);
+        setStepUpStatus(null);
+        setActiveTab("safety");
+        showToast(message, "error");
+      } else {
+        setStepUpError(message);
+      }
+    } finally {
+      setStepUpBusy(false);
+    }
+  };
+
+  function cancelStepUp() {
+    if (stepUpPrompt) stepUpPrompt.reject(new StepUpCancelledError());
+    setStepUpPrompt(null);
+    setStepUpCode("");
+    setStepUpError("");
+    setShowStepUpCode(false);
+    setStepUpBusy(false);
+  }
 
   const requestPreflight = async (candidate: AutomationCandidate, mode: AutomationPreflightMode) => {
     setBusy(true);
@@ -117,7 +250,13 @@ export function AutomationControlConsole({
     if (!preflight) return;
     setBusy(true);
     try {
-      const receipt = await client.confirmExecution(preflight.challengeId);
+      const intent = await executionStepUpIntent(preflight);
+      const token = await requestStepUp(
+        intent,
+        "建立现货与永续对冲组合",
+        `${venueLabel(preflight.venue)} · ${preflight.accountId} · XAUTUSDT · 预计所需资金 ${formatMoney(preflight.estimatedCapitalRequiredUsd)}`,
+      );
+      const receipt = await client.confirmExecution(preflight.challengeId, token);
       showToast(receipt.message, receipt.simulated ? "warning" : "success");
       setPreflight(null);
       if (receipt.execution) setExecution(receipt.execution);
@@ -131,7 +270,13 @@ export function AutomationControlConsole({
 
   const validateCredential = async (draft: CredentialDraft) => {
     try {
-      const credential = await client.validateCredential(draft);
+      const intent = await credentialStepUpIntent(draft);
+      const token = await requestStepUp(
+        intent,
+        draft.accountId ? `轮换 ${venueLabel(draft.venue)} API 凭证` : `新增 ${venueLabel(draft.venue)} API 凭证`,
+        "验证通过后服务端才会保存加密凭证；本次授权只适用于当前请求。",
+      );
+      const credential = await client.validateCredential(draft, token);
       if (!isCredentialActivationReady(credential)) {
         throw new Error("服务端签名、交易权限、提现关闭或账户模式验证未全部通过；旧连接保持不变。");
       }
@@ -145,7 +290,9 @@ export function AutomationControlConsole({
 
   const deleteCredential = async (accountId: string) => {
     try {
-      const receipt = await client.deleteCredential(accountId);
+      const intent = await credentialDeleteStepUpIntent(snapshot, accountId);
+      const token = await requestStepUp(intent, "解绑 API 账户", `${venueLabel(intent.venue)} · ${accountId}`);
+      const receipt = await client.deleteCredential(accountId, token);
       showToast(receipt.message, "warning");
       await onReload();
     } catch (error) {
@@ -168,7 +315,26 @@ export function AutomationControlConsole({
     if (!safetyConfirmation) return;
     setBusy(true);
     try {
-      const receipt = await client.performSafetyAction(safetyConfirmation.action);
+      let receipt;
+      if (safetyConfirmation.kind === "position") {
+        const prepared = await positionCloseStepUpIntent(snapshot, safetyConfirmation.positionId);
+        const token = await requestStepUp(
+          prepared.intent,
+          "退出现货与永续对冲组合",
+          `${venueLabel(prepared.intent.venue)} · ${prepared.intent.accountId}`,
+        );
+        receipt = await client.closePosition(
+          safetyConfirmation.positionId,
+          token,
+          prepared.idempotencyKey,
+        );
+      } else {
+        const intent = await safetyActionStepUpIntent(snapshot, safetyConfirmation.action);
+        const token = intent
+          ? await requestStepUp(intent, safetyConfirmation.title, `${venueLabel(intent.venue)} · ${intent.accountId}`)
+          : undefined;
+        receipt = await client.performSafetyAction(safetyConfirmation.action, token);
+      }
       showToast(receipt.message, "warning");
       if (receipt.execution) setExecution(receipt.execution);
       setSafetyConfirmation(null);
@@ -182,14 +348,15 @@ export function AutomationControlConsole({
   };
 
   const closePosition = async (positionId: string) => {
-    try {
-      const receipt = await client.closePosition(positionId);
-      showToast(receipt.message, "warning");
-      if (receipt.execution) setExecution(receipt.execution);
-      await onReload();
-    } catch (error) {
-      await handleContractError(error);
-    }
+    const position = snapshot.positionGroups.find((item) => item.id === positionId);
+    if (!position) return;
+    setSafetyConfirmation({
+      kind: "position",
+      positionId,
+      title: `退出 ${position.label}`,
+      phrase: "退出对冲组合",
+    });
+    setSafetyPhrase("");
   };
 
   const allPreflightChecks = preflight
@@ -275,13 +442,20 @@ export function AutomationControlConsole({
         />
       ) : null}
       {activeTab === "safety" ? (
-        <AutomationSafety
-          onAction={(action, title, phrase) => {
-            setSafetyConfirmation({ action, title, phrase });
-            setSafetyPhrase("");
-          }}
-          snapshot={snapshot}
-        />
+        <div className="space-y-4">
+          <AutomationStepUpSecurity
+            client={securityClient}
+            onFeedback={showToast}
+            onStatusChange={setStepUpStatus}
+          />
+          <AutomationSafety
+            onAction={(action, title, phrase) => {
+              setSafetyConfirmation({ kind: "safety", action, title, phrase });
+              setSafetyPhrase("");
+            }}
+            snapshot={snapshot}
+          />
+        </div>
       ) : null}
 
       <Modal
@@ -392,6 +566,51 @@ export function AutomationControlConsole({
               {busy ? "处理中" : "确认操作"}
             </Button>
           </div>
+        ) : null}
+      </Modal>
+
+      <Modal
+        closeDisabled={stepUpBusy}
+        description={stepUpPrompt?.description}
+        onClose={cancelStepUp}
+        open={stepUpPrompt !== null}
+        shellClassName="max-w-[520px]"
+        title={stepUpPrompt?.title ?? "敏感操作二次验证"}
+      >
+        {stepUpPrompt ? (
+          <form className="space-y-4" onSubmit={(event) => { event.preventDefault(); void authorizeStepUp(); }}>
+            <div className="flex items-start gap-3 border border-sky-400/30 bg-sky-400/[0.06] p-4 text-sm leading-6 text-sky-100">
+              <ShieldCheck className="mt-0.5 shrink-0" size={18} />
+              <p>输入身份验证器中的新 6 位动态验证码。本次授权只绑定当前账户、操作和请求内容，有效 120 秒且只能使用一次。</p>
+            </div>
+            <label className="xh-account-modal-field">
+              <span>6 位动态验证码</span>
+              <span className="relative block">
+                <input
+                  autoComplete="one-time-code"
+                  autoFocus
+                  className="xh-account-modal-control pr-12 font-mono"
+                  inputMode="numeric"
+                  maxLength={6}
+                  onChange={(event) => setStepUpCode(event.target.value.replace(/\D/gu, "").slice(0, 6))}
+                  type={showStepUpCode ? "text" : "password"}
+                  value={stepUpCode}
+                />
+                <button
+                  aria-label={showStepUpCode ? "隐藏动态验证码" : "显示动态验证码"}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-muted hover:text-white"
+                  onClick={() => setShowStepUpCode((current) => !current)}
+                  type="button"
+                >
+                  {showStepUpCode ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </span>
+            </label>
+            {stepUpError ? <p className="border border-red-400/35 bg-red-400/[0.06] p-3 text-sm text-red-200" role="alert">{stepUpError}</p> : null}
+            <Button className="w-full" disabled={stepUpBusy || stepUpCode.length !== 6} type="submit">
+              {stepUpBusy ? "验证中" : "验证并继续"}
+            </Button>
+          </form>
         ) : null}
       </Modal>
       <Toast onDismiss={dismissToast} toast={toast} />

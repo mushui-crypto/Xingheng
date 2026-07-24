@@ -4,6 +4,15 @@ import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationConnectorRegistry } from "./RwaAutomationConnectorRegistry";
 import { automationErrorResponse, RwaAutomationControlError, RwaAutomationControlService } from "./RwaAutomationControlService";
 import type { RwaAutomationConnector, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
+import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
+
+const sessionDomain = "session-domain-a";
+const stepUpToken = "step-up-token-a";
+const passThroughStepUp = {
+  consume: async () => undefined,
+  recordCredentialBinding: async () => undefined,
+  revokeAutomationScope: () => undefined,
+};
 
 test("arbitrage preflight re-reads the server opportunity and blocks ineligible candidates before private connector calls", async () => {
   let privatePreflightCalls = 0;
@@ -14,7 +23,7 @@ test("arbitrage preflight re-reads the server opportunity and blocks ineligible 
       return dashboardSnapshot(opportunity(false, ["Funding 方向不利", "持续性不足 75%"]));
     },
   };
-  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]));
+  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]), passThroughStepUp);
 
   await assert.rejects(
     service.preflight("user-a", { accountId: "bybit:test-account", opportunityId: "bybit-xaut-spot--bybit-xaut-perp", mode: "arbitrage_entry" }),
@@ -31,7 +40,7 @@ test("manual entry bypasses automatic quality gates but still reaches the implem
       return dashboardSnapshot(opportunity(false, ["Funding 方向不利", "持续性不足 75%"]));
     },
   };
-  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]));
+  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]), passThroughStepUp);
 
   const challenge = await service.preflight("user-a", {
     accountId: "bybit:test-account",
@@ -50,7 +59,7 @@ test("manual entry rejects safety disqualifiers before any private connector cal
   unsafe.disqualifiers = ["缺少可执行报价"];
   const service = new RwaAutomationControlService({
     async getSnapshot() { return dashboardSnapshot(unsafe); },
-  } as any, () => new RwaAutomationConnectorRegistry([connector]));
+  } as any, () => new RwaAutomationConnectorRegistry([connector]), passThroughStepUp);
 
   await assert.rejects(
     service.preflight("user-a", {
@@ -64,7 +73,7 @@ test("manual entry rejects safety disqualifiers before any private connector cal
 });
 
 test("connectivity smoke cannot be smuggled through arbitrage_entry and unimplemented venues stay disabled", async () => {
-  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([]));
+  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([]), passThroughStepUp);
   await assert.rejects(
     service.preflight("user-a", { accountId: "bybit:test-account", opportunityId: "anything", mode: "connectivity_smoke" }),
     (error: unknown) => error instanceof RwaAutomationControlError && error.category === "mode_invalid",
@@ -81,14 +90,14 @@ test("connectivity smoke cannot be smuggled through arbitrage_entry and unimplem
 test("challenge ownership prevents horizontal execution across users", async () => {
   const connector = fakeConnector(() => undefined);
   const dashboard = { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } };
-  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]));
+  const service = new RwaAutomationControlService(dashboard as any, () => new RwaAutomationConnectorRegistry([connector]), passThroughStepUp);
   const challenge = await service.preflight("user-a", {
     accountId: "bybit:test-account",
     opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
     mode: "arbitrage_entry",
   });
   await assert.rejects(
-    async () => service.execute("user-b", { accountId: "bybit:test-account", challengeId: challenge.challengeId }),
+    async () => service.execute("user-b", sessionDomain, { accountId: "bybit:test-account", challengeId: challenge.challengeId, stepUpToken }),
     (error: unknown) => error instanceof RwaAutomationControlError && error.category === "challenge_not_found",
   );
 });
@@ -96,7 +105,7 @@ test("challenge ownership prevents horizontal execution across users", async () 
 test("public opportunity projection contains no user credential or account ownership data", async () => {
   const connector = fakeConnector(() => undefined);
   const service = new RwaAutomationControlService({ async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
-    () => new RwaAutomationConnectorRegistry([connector]));
+    () => new RwaAutomationConnectorRegistry([connector]), passThroughStepUp);
   const projected = await service.listOpportunities("user-private-id");
   assert.doesNotMatch(JSON.stringify(projected), /user-private-id|accountId|maskedApiKey|permissions/);
   assert.equal(projected.items[0]?.safetyEligible, true);
@@ -113,12 +122,12 @@ test("credential fields are strict per venue and rejected values never reach the
   const bybit = fakeConnector(() => undefined, {
     onCredentials: (input) => received.set("bybit", [...received.get("bybit") ?? [], input]),
   });
-  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([bybit, binance]));
+  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([bybit, binance]), passThroughStepUp);
 
-  await service.putCredentials("user-a", "binance", { apiKey: "binance-key", apiSecret: "binance-secret" });
-  await service.putCredentials("user-a", "bybit", { apiKey: "bybit-key", apiSecret: "bybit-secret" });
-  assert.deepEqual(received.get("binance"), [{ apiKey: "binance-key", apiSecret: "binance-secret", passphrase: undefined }]);
-  assert.deepEqual(received.get("bybit"), [{ apiKey: "bybit-key", apiSecret: "bybit-secret", passphrase: undefined }]);
+  await service.putCredentials("user-a", sessionDomain, "binance", { apiKey: "binance-key", apiSecret: "binance-secret", stepUpToken });
+  await service.putCredentials("user-a", sessionDomain, "bybit", { apiKey: "bybit-key", apiSecret: "bybit-secret", stepUpToken });
+  assert.deepEqual(received.get("binance"), [{ apiKey: "binance-key", apiSecret: "binance-secret" }]);
+  assert.deepEqual(received.get("bybit"), [{ apiKey: "bybit-key", apiSecret: "bybit-secret" }]);
 
   for (const rejected of [
     { apiKey: "binance-key", apiSecret: "binance-secret", passphrase: "must-not-leak-passphrase" },
@@ -126,7 +135,7 @@ test("credential fields are strict per venue and rejected values never reach the
   ]) {
     let caught: unknown;
     try {
-      service.putCredentials("user-a", "binance", rejected);
+      await service.putCredentials("user-a", sessionDomain, "binance", { ...rejected, stepUpToken });
     } catch (error) {
       caught = error;
     }
@@ -150,14 +159,14 @@ test("Binance execute fails at the server capability gate before challenge looku
     });
     return new RwaAutomationConnectorRegistry([binance]);
   };
-  const service = new RwaAutomationControlService({} as any, factory);
+  const service = new RwaAutomationControlService({} as any, factory, passThroughStepUp);
 
   for (const input of [
     { accountId: "binance:user-a-account" },
     { accountId: "binance:user-a-account", challengeId: "forged-challenge" },
   ]) {
     await assert.rejects(
-      service.execute("user-a", input),
+      service.execute("user-a", sessionDomain, { ...input, stepUpToken }),
       (error: unknown) => error instanceof RwaAutomationControlError
         && error.statusCode === 501
         && error.category === "binance_provider_writes_disabled",
@@ -165,11 +174,11 @@ test("Binance execute fails at the server capability gate before challenge looku
   }
 
   await assert.rejects(
-    service.execute("user-a", { accountId: "binance:user-b-account", challengeId: "forged-challenge" }),
+    service.execute("user-a", sessionDomain, { accountId: "binance:user-b-account", challengeId: "forged-challenge", stepUpToken }),
     (error: unknown) => error instanceof RwaAutomationControlError && error.category === "challenge_disarmed",
   );
   await assert.rejects(
-    service.execute("user-b", { accountId: "binance:user-a-account", challengeId: "forged-challenge" }),
+    service.execute("user-b", sessionDomain, { accountId: "binance:user-a-account", challengeId: "forged-challenge", stepUpToken }),
     (error: unknown) => error instanceof RwaAutomationControlError && error.category === "challenge_disarmed",
   );
   assert.equal(executeCalls, 0);
@@ -181,6 +190,7 @@ test("Bybit execute retains challenge ownership and connector execution behavior
   const service = new RwaAutomationControlService(
     { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
     () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
   );
   const challenge = await service.preflight("user-a", {
     accountId: "bybit:test-account",
@@ -188,8 +198,114 @@ test("Bybit execute retains challenge ownership and connector execution behavior
     mode: "arbitrage_entry",
   });
 
-  await service.execute("user-a", { accountId: "bybit:test-account", challengeId: challenge.challengeId });
+  await service.execute("user-a", sessionDomain, { accountId: "bybit:test-account", challengeId: challenge.challengeId, stepUpToken });
   assert.equal(executeCalls, 1);
+});
+
+test("establishing a hedge requires both preflight challenge and step-up before provider write", async () => {
+  let executeCalls = 0;
+  let consumedIntent: unknown;
+  const connector = fakeConnector(() => undefined, {
+    onExecute: () => { executeCalls += 1; },
+  });
+  const requiredStepUp = {
+    consume: async (...args: unknown[]) => {
+      consumedIntent = args.at(-1);
+      throw new StepUpSecurityError(403, "step_up_required", "该敏感操作需要新的二次身份验证。");
+    },
+    recordCredentialBinding: async () => undefined,
+    revokeAutomationScope: () => undefined,
+  };
+  const service = new RwaAutomationControlService(
+    { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    requiredStepUp,
+  );
+  const challenge = await service.preflight("user-a", {
+    accountId: "bybit:test-account",
+    opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+    mode: "arbitrage_entry",
+  });
+
+  await assert.rejects(
+    service.execute("user-a", sessionDomain, {
+      accountId: "bybit:test-account",
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:missing-step-up",
+    }),
+    (error: unknown) => error instanceof StepUpSecurityError && error.category === "step_up_required",
+  );
+  assert.equal(executeCalls, 0);
+
+  await assert.rejects(
+    service.execute("user-a", sessionDomain, {
+      accountId: "bybit:test-account",
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:step-up-required",
+      stepUpToken,
+    }),
+    (error: unknown) => error instanceof StepUpSecurityError && error.category === "step_up_required",
+  );
+  assert.equal(executeCalls, 0);
+  assert.deepEqual(consumedIntent, {
+    operation: "hedge_execute",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    resourceId: challenge.challengeId,
+    requestDigest: canonicalRequestDigest({
+      accountId: "bybit:test-account",
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:step-up-required",
+    }),
+    notionalUsd: null,
+  });
+});
+
+test("risk-reducing switch actions remain immediate while enabling risk requires step-up", async () => {
+  let configCalls = 0;
+  let killSwitchCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    onConfig: () => { configCalls += 1; },
+    onKillSwitch: () => { killSwitchCalls += 1; },
+  });
+  const rejectingStepUp = {
+    consume: async () => { throw new StepUpSecurityError(403, "step_up_required", "该敏感操作需要新的二次身份验证。"); },
+    recordCredentialBinding: async () => undefined,
+    revokeAutomationScope: () => undefined,
+  };
+  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([connector]), rejectingStepUp);
+
+  await service.updateConfig("user-a", sessionDomain, "bybit", {
+    accountId: "bybit:test-account",
+    globalExecutionEnabled: false,
+    strategyEnabled: false,
+  });
+  await service.setKillSwitch("user-a", sessionDomain, "bybit", { accountId: "bybit:test-account", active: true });
+  assert.equal(configCalls, 1);
+  assert.equal(killSwitchCalls, 1);
+
+  await assert.rejects(
+    service.updateConfig("user-a", sessionDomain, "bybit", {
+      accountId: "bybit:test-account",
+      globalExecutionEnabled: true,
+      stepUpToken,
+    }),
+    (error: unknown) => error instanceof StepUpSecurityError && error.category === "step_up_required",
+  );
+  await assert.rejects(
+    service.setKillSwitch("user-a", sessionDomain, "bybit", {
+      accountId: "bybit:test-account",
+      active: false,
+      stepUpToken,
+    }),
+    (error: unknown) => error instanceof StepUpSecurityError && error.category === "step_up_required",
+  );
+  assert.equal(configCalls, 1);
+  assert.equal(killSwitchCalls, 1);
 });
 
 function fakeConnector(
@@ -200,6 +316,8 @@ function fakeConnector(
     accountId?: string | null;
     onCredentials?: (input: RwaVenueCredentialInput) => void;
     onExecute?: () => void;
+    onConfig?: () => void;
+    onKillSwitch?: () => void;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -222,7 +340,7 @@ function fakeConnector(
         implemented: true,
         enabled: false,
         credential: {
-          userId: "user-a", stored: true, accountId: options.accountId ?? null, accountFingerprint: null, masterKeyConfigured: true,
+          userId: "user-a", stored: true, accountId: options.accountId ?? `${venue}:test-account`, accountFingerprint: null, masterKeyConfigured: true,
           maskedApiKey: null, connectionStatus: "verified", lifecycleStatus: "active", accountMode: null,
           permissions: null, lastVerifiedAt: null, updatedAt: null, message: null, ipWhitelistConfigured: null, warnings: [],
         },
@@ -230,8 +348,8 @@ function fakeConnector(
     },
     deleteCredentials: async () => ({}),
     getConfig: async () => ({}),
-    updateConfig: async () => ({}),
-    setKillSwitch: async () => ({}),
+    updateConfig: async () => { options.onConfig?.(); return {}; },
+    setKillSwitch: async () => { options.onKillSwitch?.(); return {}; },
     getPrivateAccount: async () => ({}),
     getPnl: async () => ({}),
     getAudit: async () => ({}),

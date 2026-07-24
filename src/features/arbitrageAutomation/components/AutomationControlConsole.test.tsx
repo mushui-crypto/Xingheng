@@ -14,6 +14,9 @@ import { AutomationCredentials } from "./AutomationCredentials";
 import { AutomationParameters } from "./AutomationParameters";
 import { AutomationPositions } from "./AutomationPositions";
 import { AutomationSafety } from "./AutomationSafety";
+import { AutomationStepUpSecurity, StepUpSecurityStatusTag } from "./AutomationStepUpSecurity";
+import { TotpQrCode } from "./TotpQrCode";
+import type { StepUpSecurityClient } from "../model/stepUpTypes";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
@@ -204,6 +207,50 @@ test("credential lifecycle states and exposure safeguards remain explicit", () =
   }
   assert.match(html, /先退出仓位/);
   assert.match(html, /人工处理订单与仓位/);
+});
+
+test("step-up security surface stays task-focused and the QR fallback never embeds the setup URI", () => {
+  const client: StepUpSecurityClient = {
+    status: async () => ({ enrolled: false, pendingEnrollment: false, method: null, recoveryCodesRemaining: 0, enabledAt: null }),
+    beginEnrollment: async () => ({ enrollmentId: "fixture-enrollment", otpauthUri: "otpauth://fixture", expiresAt: Date.now() + 60_000 }),
+    confirmEnrollment: async () => ({ ok: true, recoveryCodes: ["fixture-recovery"] }),
+    authorize: async () => ({ authorizationToken: "fixture-token", expiresAt: Date.now() + 60_000 }),
+    regenerateRecoveryCodes: async () => ({ ok: true, recoveryCodes: ["fixture-recovery"] }),
+    disable: async () => ({ ok: true }),
+  };
+  const security = renderToStaticMarkup(
+    <AutomationStepUpSecurity client={client} onFeedback={() => undefined} />,
+  );
+  assert.match(security, /二次身份验证/);
+  assert.match(security, /120 秒/);
+  assert.match(security, /开始设置/);
+  assert.doesNotMatch(security, /fixture-enrollment|fixture-recovery|fixture-token|otpauth:/);
+
+  const uri = "otpauth://totp/Stella%20X:fixture?secret=FIXTURESECRET";
+  const fallback = renderToStaticMarkup(<TotpQrCode value={uri} />);
+  assert.match(fallback, /二维码暂不可用/);
+  assert.match(fallback, /手动设置值/);
+  assert.doesNotMatch(fallback, /otpauth:|FIXTURESECRET/);
+});
+
+test("step-up lifecycle status always has text in addition to color", () => {
+  const base = {
+    pendingEnrollment: false,
+    method: null,
+    recoveryCodesRemaining: 0,
+    enabledAt: null,
+  } as const;
+  const states = [
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={null} unavailable />),
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={null} unavailable={false} />),
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={{ ...base, enrolled: false }} unavailable={false} />),
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={{ ...base, enrolled: false, pendingEnrollment: true }} unavailable={false} />),
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={{ ...base, enrolled: true, method: "totp" }} unavailable={false} />),
+    renderToStaticMarkup(<StepUpSecurityStatusTag status={{ ...base, enrolled: true, method: "totp", recoveryCodesRemaining: 4 }} unavailable={false} />),
+  ].join(" ");
+  for (const label of ["不可用", "加载中", "未设置", "设置中", "需恢复", "已启用"]) {
+    assert.match(states, new RegExp(label));
+  }
 });
 
 test("all user-visible automation component markup avoids deprecated market-side wording", () => {

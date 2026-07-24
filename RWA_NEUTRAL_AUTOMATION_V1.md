@@ -4,6 +4,8 @@
 
 当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产 Compose 的 X.509 WIF/ADC 只读挂载契约已实现，但尚未在服务器注入真实身份材料或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
+安全整改第 3 项已完成前后端实现并通过固定安全复验：敏感操作新增 RFC 6238 TOTP 二次身份验证和一次性 step-up authorization。二维码作为后续体验优化延期，当前通过手动设置值完成 enrollment；本项尚未提交或部署，生产服务端总急停继续保持激活。
+
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
 
 ## 1. V1 范围
@@ -421,3 +423,36 @@ Binance 稳定错误类别：
 - `credential_delete_manual_intervention`：凭证失效，系统无法确认账户敞口，必须在 Binance 人工处理
 
 Binance connector 已实现严格白名单 provider 方法：设置 `XAUTUSDT` USD-M 1x 杠杆、现货侧/永续侧 IOC Limit 下单、按策略 client order ID 查询与撤单、策略成交归因和受控退出。所有写路径默认被配置与两层急停阻断；当前只使用 fake provider 完成 owner 自检，未配置真实凭证、未连接真实私有账户、未发送真实订单。进入生产启用前仍需独立安全验收和明确的运维放行。
+
+## 15. 敏感操作二次身份验证契约
+
+当前实现方法为 RFC 6238 TOTP（SHA-1、6 位、30 秒、允许前后各一个时间窗口）。服务类型保留未来 `webauthn` 方法枚举，但本轮不实现 WebAuthn、短信或邮件二次验证。未设置 TOTP 的普通用户可继续使用公开和私有只读接口，也可执行 preflight，但不得增加真实资金风险。
+
+TOTP secret 使用现有 provider-neutral `CredentialKeyProvider`，每次写入使用独立随机 32-byte DEK 和 AES-256-GCM；GCP KMS 只包裹 DEK。安全状态使用独立 purpose `step-up-security`、security domain `rwa-sensitive-operations` 和 AAD schema `step-up-security:v1:userId:purpose:environment`，不与交易所 credential envelope 混用。文件位于自动套利数据目录下的独立 `step-up-security` 子目录，目录 `0700`、文件 `0600`；生产 owner 固定为 `20001:20001`。TOTP secret、恢复码明文、step-up token 和 enrollment token 不进入 SQLite 明文字段、日志或审计。
+
+普通用户私有接口均要求现有 user session，并返回 `Cache-Control: no-store`：
+
+- `GET /api/auth/security/step-up/status`：返回 `enrolled`、`pendingEnrollment`、`method`、剩余恢复码数量和启用时间，不返回 secret、URI 或恢复码。
+- `POST /api/auth/security/step-up/enrollment/begin`：请求 `{ currentPassword, currentFactor? }`。首次设置只要求当前密码；重新设置还要求当前 TOTP 或恢复码。成功仅在本次响应返回 `{ enrollmentId, otpauthUri, expiresAt }`，pending 最长 10 分钟且每用户仅保留一个。
+- `POST /api/auth/security/step-up/enrollment/confirm`：请求 `{ enrollmentId, code }`。成功仅在本次响应返回 8 个恢复码；服务端只保存每个恢复码的独立 salt + scrypt 哈希。
+- `POST /api/auth/security/step-up/authorize`：请求 `{ code, intent }`，成功返回 `{ authorizationToken, expiresAt }`。token 为 opaque 随机值，服务端仅保存 SHA-256 哈希，TTL 120 秒，单进程内一次消费，服务重启自动失效。
+- `POST /api/auth/security/step-up/recovery-codes/regenerate`：请求 `{ currentPassword, factor: { method, code } }`，factor 允许当前 TOTP 或一个未使用恢复码；成功仅本次返回新恢复码并使旧恢复码全部失效。
+- `POST /api/auth/security/step-up/disable`：请求同上；成功删除 active/pending 状态并撤销当前用户所有未消费授权。
+
+`intent` 字段固定为 `{ operation, venue, accountId, resourceId, requestDigest }`。服务端从 session 获取 userId，重新核对当前用户的 venue/account ownership；首次新增凭证使用服务端认可的 `new-account` intent，凭证验证成功后再把实际 accountId 的不可逆 domain 写入加密审计。`requestDigest` 是对不含 `stepUpToken` 的实际敏感请求执行“对象键名按字典序递归排序、数组保序、JSON 原子值不变”后的 SHA-256 base64url（43 字符）。execute 的 intent 还由服务端绑定 preflight challenge 和预估名义金额，前端不能自报金额或 eligibility。
+
+以下操作必须提供独立 `stepUpToken`，且服务端在调用 connector/provider 前原子消费：
+
+- 新增或轮换交易所凭证：`credential_put`
+- 删除交易所凭证：`credential_delete`
+- 开启 global 或 strategy execution：`execution_enable`
+- 解除用户 kill switch：`kill_switch_disable`
+- 建立现货与永续对冲组合：`hedge_execute`，并继续要求原有 60 秒 preflight challenge 同时有效
+- 单个持仓退出：`position_close`
+- 当前 venue 全部退出：`close_all`
+
+激活 kill switch、关闭 global/strategy execution、只读查询和 preflight 不要求 step-up，且不能被本机制阻止。授权严格绑定 user、当前 session 的不可逆 domain、venue、account、operation、resource、请求摘要与名义金额；过期、重放、并发双消费、跨 session/用户/账户/操作/资源/金额均拒绝。稳定错误类别包括 `step_up_not_enrolled`、`step_up_required`、`step_up_invalid`、`step_up_expired`、`step_up_replayed`、`step_up_scope_mismatch`、`step_up_rate_limited`、`step_up_recovery_required`、`step_up_key_unavailable` 和 `step_up_storage_*`。
+
+密码重置会在 SQLite 写入非敏感 enrollment invalidation epoch，撤销所有内存授权和 pending enrollment，但保留已启用 TOTP；用户恢复登录后仍需重新验证 TOTP。logout 撤销当前 session 授权；用户 disabled、凭证删除/轮换、账户或执行开关、kill switch 变化撤销对应范围授权。验证码/恢复操作按 user + session 实施基础 5 次/5 分钟限制；自动套利专用限流仍属于后续安全整改第 5 项。
+
+本项前后端实现已通过固定安全复验：security `11/11`、auth/automation routes `6/6`、Modal + step-up + automation 前端 `40/40`、automation `66/66`、arbitrage `32/32`，合计 `155/155`；App/Server/Node TypeScript、完整构建、部署静态校验、production safety `18+5`、Compose 结构和 `git diff --check` 均通过。固定测试的独立浏览器 fixture 被客户端策略阻止，因此本轮未独立取得真实 DOM/响应式数据；owner 已完成 1440/430/390 运行态验证，该限制按既定口径记录为未覆盖项，不构成代码阻塞。本项尚未提交或部署。真实 Docker mount/UID/GID 集成、`/app/rwa-automation-data` 独立持久卷与备份恢复、multi-instance 原子授权存储及专用限流仍是后续阻塞；当前单 Node 拓扑下授权只存内存，禁止在该契约未升级前横向扩容。

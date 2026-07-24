@@ -378,10 +378,10 @@ export type SafetyAction =
 export type AutomationConsoleClient = {
   load(signal?: AbortSignal): Promise<AutomationConsoleSnapshot>;
   requestPreflight(candidateId: string, mode: AutomationPreflightMode): Promise<AutomationPreflightResult>;
-  confirmExecution(challengeId: string): Promise<AutomationActionReceipt>;
-  validateCredential(draft: CredentialDraft): Promise<AutomationCredentialSummary>;
-  deleteCredential(accountId: string): Promise<AutomationActionReceipt>;
+  confirmExecution(challengeId: string, stepUpToken: string): Promise<AutomationActionReceipt>;
+  validateCredential(draft: CredentialDraft, stepUpToken: string): Promise<AutomationCredentialSummary>;
+  deleteCredential(accountId: string, stepUpToken: string): Promise<AutomationActionReceipt>;
   validateParameters(venue: AutomationVenue, draft: ParameterDraft): Promise<AutomationActionReceipt>;
-  performSafetyAction(action: SafetyAction): Promise<AutomationActionReceipt>;
-  closePosition(positionId: string): Promise<AutomationActionReceipt>;
+  performSafetyAction(action: SafetyAction, stepUpToken?: string): Promise<AutomationActionReceipt>;
+  closePosition(positionId: string, stepUpToken: string, idempotencyKey: string): Promise<AutomationActionReceipt>;
 };

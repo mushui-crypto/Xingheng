@@ -4,7 +4,10 @@ type JsonRequestOptions = {
   acceptErrorResponse?: boolean;
   mapErrorDetails?: (payload: unknown) => unknown;
   init?: RequestInit;
-  userAuthFailure?: boolean;
+  userAuthFailure?: boolean | ((error: {
+    status: number;
+    category: string | null;
+  }) => boolean);
   networkErrorMessage?: string;
 };
 
@@ -46,14 +49,18 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
 
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
-    if (options.userAuthFailure && (response.status === 401 || response.status === 403)) {
+    const category = typeof payload?.category === "string" ? payload.category : null;
+    const shouldHandleAuthFailure = typeof options.userAuthFailure === "function"
+      ? options.userAuthFailure({ status: response.status, category })
+      : Boolean(options.userAuthFailure && (response.status === 401 || response.status === 403));
+    if (shouldHandleAuthFailure) {
       handleUserAuthFailure(payload?.message ?? "账号已禁用或登录已失效，请重新登录。");
     }
     if (options.acceptErrorResponse) return payload as T;
     throw new HttpRequestError(
       payload?.message ?? fallbackMessage,
       response,
-      typeof payload?.category === "string" ? payload.category : null,
+      category,
       options.mapErrorDetails?.(payload) ?? null,
     );
   }

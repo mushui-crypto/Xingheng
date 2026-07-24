@@ -7,14 +7,29 @@ import {
 } from "./RwaAutomationConnectorRegistry";
 import type { RwaAutomationCandidate, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
+import {
+  StepUpSecurityError,
+  canonicalRequestDigest,
+  validRequestDigest,
+  type StepUpIntent,
+  type StepUpOperation,
+  type StepUpSecurityService,
+} from "../../security/StepUpSecurityService";
+import { StepUpSecurityStoreError } from "../../security/StepUpSecurityStore";
 
 export class RwaAutomationControlService {
-  private challengeVenues = new Map<string, { userId: string; venue: RwaAutomationVenue; accountId: string }>();
+  private challengeVenues = new Map<string, {
+    userId: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    notionalUsd: number | null;
+  }>();
   private readonly registries = new Map<string, RwaAutomationConnectorRegistry>();
 
   constructor(
     private readonly dashboard: ArbitrageDashboardService,
     private readonly registryFactory: (userId: string) => RwaAutomationConnectorRegistry,
+    private readonly stepUpSecurity: Pick<StepUpSecurityService, "consume" | "recordCredentialBinding" | "revokeAutomationScope">,
   ) {}
 
   private registry(userId: string) {
@@ -36,30 +51,109 @@ export class RwaAutomationControlService {
     return this.registry(userId).requireImplemented(venue).getStatus();
   }
 
-  putCredentials(userId: string, venue: string, input: unknown) {
+  async putCredentials(userId: string, sessionDomain: string, venue: string, input: unknown) {
     const connector = this.registry(userId).requireImplemented(venue);
-    return connector.putCredentials(normalizeCredentialInput(connector.venue, input));
+    const body = record(input);
+    const supportsPassphrase = connector.venue === "bitget" || connector.venue === "okx";
+    assertOnlyKeys(body, supportsPassphrase
+      ? ["apiKey", "apiSecret", "passphrase", "stepUpToken"]
+      : ["apiKey", "apiSecret", "stepUpToken"]);
+    const credentials = normalizeCredentialInput(connector.venue, omitStepUp(body));
+    const existingAccountId = await connector.getConfiguredAccountId();
+    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+      operation: "credential_put",
+      venue: connector.venue,
+      accountId: existingAccountId ?? "new-account",
+      resourceId: null,
+      requestDigest: canonicalRequestDigest(credentials),
+      notionalUsd: null,
+    });
+    const result = await connector.putCredentials(credentials);
+    const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
+    if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
+      throw new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。");
+    }
+    await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
+    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
+    return result;
   }
 
-  deleteCredentials(userId: string, venue: string, input: unknown) {
-    return this.registry(userId).requireImplemented(venue).deleteCredentials(input);
+  async deleteCredentials(userId: string, sessionDomain: string, venue: string, input: unknown) {
+    const connector = this.registry(userId).requireImplemented(venue);
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "stepUpToken"]);
+    const sanitized = omitStepUp(body);
+    const accountId = requiredString(sanitized.accountId, "accountId", 100);
+    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+      operation: "credential_delete",
+      venue: connector.venue,
+      accountId,
+      resourceId: null,
+      requestDigest: canonicalRequestDigest(sanitized),
+      notionalUsd: null,
+    });
+    const result = await connector.deleteCredentials(sanitized);
+    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
+    return result;
   }
 
   getConfig(userId: string, venue: string) {
     return this.registry(userId).requireImplemented(venue).getConfig();
   }
 
-  updateConfig(userId: string, venue: string, input: unknown) {
-    return this.registry(userId).requireImplemented(venue).updateConfig(input);
+  async updateConfig(userId: string, sessionDomain: string, venue: string, input: unknown) {
+    const connector = this.registry(userId).requireImplemented(venue);
+    const body = record(input);
+    assertOnlyKeys(body, [
+      "globalExecutionEnabled", "strategyEnabled", "maxStrategyCapitalUsd", "maxEntryBasisBps",
+      "maxCombinedSlippageBps", "minNetAprPercent", "minLiquidationDistancePercent",
+      "maxUnhedgedMs", "accountId", "stepUpToken",
+    ]);
+    const sanitized = omitStepUp(body);
+    const enabling = sanitized.globalExecutionEnabled === true || sanitized.strategyEnabled === true;
+    if (enabling) {
+      const accountId = requiredString(sanitized.accountId, "accountId", 100);
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "execution_enable",
+        venue: connector.venue,
+        accountId,
+        resourceId: null,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: null,
+      });
+    } else if (body.stepUpToken !== undefined) {
+      throw new RwaAutomationControlError(400, "invalid_request", "关闭执行开关不接受 stepUpToken。");
+    }
+    const result = await connector.updateConfig(sanitized);
+    if ("globalExecutionEnabled" in sanitized || "strategyEnabled" in sanitized) {
+      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, typeof sanitized.accountId === "string" ? sanitized.accountId : undefined);
+    }
+    return result;
   }
 
-  setKillSwitch(userId: string, venue: string, input: unknown) {
+  async setKillSwitch(userId: string, sessionDomain: string, venue: string, input: unknown) {
     const body = record(input);
-    assertOnlyKeys(body, ["active", "accountId"]);
+    assertOnlyKeys(body, ["active", "accountId", "stepUpToken"]);
     const active = body.active;
     if (typeof active !== "boolean") throw new RwaAutomationControlError(400, "invalid_request", "active 必须是布尔值。");
     const accountId = requiredString(body.accountId, "accountId", 100);
-    return this.registry(userId).requireImplemented(venue).setKillSwitch(active, accountId);
+    const connector = this.registry(userId).requireImplemented(venue);
+    const sanitized = { active, accountId };
+    if (!active) {
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "kill_switch_disable",
+        venue: connector.venue,
+        accountId,
+        resourceId: null,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: null,
+      });
+    } else if (body.stepUpToken !== undefined) {
+      throw new RwaAutomationControlError(400, "invalid_request", "激活急停不接受 stepUpToken。");
+    }
+    const result = await connector.setKillSwitch(active, accountId);
+    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
+    return result;
   }
 
   getPrivateAccount(userId: string, venue: string) {
@@ -111,12 +205,18 @@ export class RwaAutomationControlService {
       throw new RwaAutomationControlError(501, "opportunity_adapter_unavailable", "该机会对应的 venue/标的 adapter 尚未实现或默认 disabled。");
     }
     const challenge = await connector.preflight(opportunity, accountId, mode);
-    this.challengeVenues.set(challenge.challengeId, { userId, venue: connector.venue, accountId });
+    this.challengeVenues.set(challenge.challengeId, {
+      userId,
+      venue: connector.venue,
+      accountId,
+      notionalUsd: reportNotional(challenge.report),
+    });
     return challenge;
   }
 
-  async execute(userId: string, input: unknown) {
+  async execute(userId: string, sessionDomain: string, input: unknown) {
     const body = record(input);
+    assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey", "stepUpToken"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
     const registry = this.registry(userId);
     const accountConnector = await registry.findByAccountId(accountId);
@@ -132,7 +232,16 @@ export class RwaAutomationControlService {
     if (!challenge) throw new RwaAutomationControlError(409, "challenge_disarmed", "challenge 不存在或服务重启后已解除 armed，请重新 preflight。");
     if (challenge.userId !== userId) throw new RwaAutomationControlError(404, "challenge_not_found", "challenge 不存在或不属于当前用户。");
     if (accountId !== challenge.accountId) throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 challenge 不匹配。");
-    return registry.requireImplemented(challenge.venue).execute(input);
+    const sanitized = omitStepUp(body);
+    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+      operation: "hedge_execute",
+      venue: challenge.venue,
+      accountId,
+      resourceId: challengeId,
+      requestDigest: canonicalRequestDigest(sanitized),
+      notionalUsd: challenge.notionalUsd,
+    });
+    return registry.requireImplemented(challenge.venue).execute(sanitized);
   }
 
   async getPositions(userId: string) {
@@ -188,14 +297,82 @@ export class RwaAutomationControlService {
     return { venues };
   }
 
-  closePosition(userId: string, positionId: string, input: unknown) {
+  async closePosition(userId: string, sessionDomain: string, positionId: string, input: unknown) {
     const [venue] = positionId.split(":", 1);
     if (!venue) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
-    return this.registry(userId).requireImplemented(normalizeVenue(venue)).closeAll(input);
+    const connector = this.registry(userId).requireImplemented(normalizeVenue(venue));
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "idempotencyKey", "stepUpToken"]);
+    const sanitized = omitStepUp(body);
+    const accountId = requiredString(sanitized.accountId, "accountId", 100);
+    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+      operation: "position_close",
+      venue: connector.venue,
+      accountId,
+      resourceId: positionId,
+      requestDigest: canonicalRequestDigest({ positionId, ...sanitized }),
+      notionalUsd: null,
+    });
+    return connector.closeAll(sanitized);
   }
 
-  closeAll(userId: string, venue: string, input: unknown) {
-    return this.registry(userId).requireImplemented(venue).closeAll(input);
+  async closeAll(userId: string, sessionDomain: string, venue: string, input: unknown) {
+    const connector = this.registry(userId).requireImplemented(venue);
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "idempotencyKey", "stepUpToken"]);
+    const sanitized = omitStepUp(body);
+    const accountId = requiredString(sanitized.accountId, "accountId", 100);
+    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+      operation: "close_all",
+      venue: connector.venue,
+      accountId,
+      resourceId: null,
+      requestDigest: canonicalRequestDigest(sanitized),
+      notionalUsd: null,
+    });
+    return connector.closeAll(sanitized);
+  }
+
+  async resolveStepUpIntent(userId: string, input: unknown): Promise<StepUpIntent> {
+    const body = record(input);
+    assertOnlyKeys(body, ["operation", "venue", "accountId", "resourceId", "requestDigest"]);
+    const operation = normalizeStepUpOperation(body.operation);
+    const venue = normalizeVenue(requiredString(body.venue, "venue", 20));
+    const connector = this.registry(userId).requireImplemented(venue);
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    if (operation === "credential_put") {
+      const expected = configuredAccountId ?? "new-account";
+      if (accountId !== expected) throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图与当前绑定状态不匹配。");
+    } else if (!configuredAccountId || configuredAccountId !== accountId) {
+      throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图不属于当前用户。");
+    }
+    if (!validRequestDigest(body.requestDigest)) throw new RwaAutomationControlError(400, "invalid_request", "requestDigest 格式无效。");
+    const resourceId = body.resourceId === null || body.resourceId === undefined
+      ? null
+      : requiredString(body.resourceId, "resourceId", 200);
+    let notionalUsd: number | null = null;
+    if (operation === "hedge_execute") {
+      if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
+      const challenge = this.challengeVenues.get(resourceId);
+      if (!challenge || challenge.userId !== userId || challenge.venue !== venue || challenge.accountId !== accountId) {
+        throw new RwaAutomationControlError(409, "challenge_disarmed", "preflight challenge 不存在或不属于当前会话范围。");
+      }
+      notionalUsd = challenge.notionalUsd;
+    } else if (operation === "position_close") {
+      if (!resourceId || !resourceId.startsWith(`${venue}:`)) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
+    } else if (resourceId !== null) {
+      throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受 resourceId。");
+    }
+    return { operation, venue, accountId, resourceId, requestDigest: body.requestDigest, notionalUsd };
+  }
+
+  private consumeStepUp(userId: string, sessionDomain: string, tokenValue: unknown, intent: StepUpIntent) {
+    if (typeof tokenValue !== "string" || !tokenValue.trim()) {
+      throw new StepUpSecurityError(403, "step_up_required", "该敏感操作需要新的二次身份验证。");
+    }
+    const stepUpToken = requiredString(tokenValue, "stepUpToken", 200);
+    return this.stepUpSecurity.consume(userId, sessionDomain, stepUpToken, intent);
   }
 }
 
@@ -206,9 +383,9 @@ export class RwaAutomationControlError extends Error {
 }
 
 export function automationErrorResponse(error: unknown) {
-  if (error instanceof RwaAutomationControlError || error instanceof RwaAutomationRegistryError || error instanceof RwaNeutralExecutionError) {
+  if (error instanceof RwaAutomationControlError || error instanceof RwaAutomationRegistryError || error instanceof RwaNeutralExecutionError || error instanceof StepUpSecurityError || error instanceof StepUpSecurityStoreError) {
     return {
-      statusCode: error.statusCode,
+      statusCode: error instanceof StepUpSecurityStoreError ? 503 : error.statusCode,
       body: {
         category: error.category,
         message: error.message,
@@ -217,6 +394,25 @@ export function automationErrorResponse(error: unknown) {
     };
   }
   return { statusCode: 500, body: { category: "automation_internal_error", message: "自动套利服务暂不可用。" } };
+}
+
+function omitStepUp(body: Record<string, any>) {
+  const { stepUpToken: _stepUpToken, ...sanitized } = body;
+  return sanitized;
+}
+
+function normalizeStepUpOperation(value: unknown): StepUpOperation {
+  const allowed: StepUpOperation[] = [
+    "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
+    "hedge_execute", "position_close", "close_all",
+  ];
+  if (!allowed.includes(value as StepUpOperation)) throw new RwaAutomationControlError(400, "invalid_request", "operation 不受支持。");
+  return value as StepUpOperation;
+}
+
+function reportNotional(report: unknown) {
+  const value = Number((report as { estimatedCapitalRequiredUsd?: unknown })?.estimatedCapitalRequiredUsd);
+  return Number.isFinite(value) && value >= 0 ? value : null;
 }
 
 function candidate(item: ArbitrageOpportunity, adapterImplemented: boolean): RwaAutomationCandidate {
@@ -259,7 +455,7 @@ function normalizeCredentialInput(venue: RwaAutomationVenue, input: unknown): Rw
   const apiKey = requiredString(body.apiKey, "apiKey", 128);
   const apiSecret = requiredString(body.apiSecret, "apiSecret", 256);
   const passphrase = body.passphrase === undefined ? undefined : requiredString(body.passphrase, "passphrase", 256);
-  return { apiKey, apiSecret, passphrase };
+  return passphrase === undefined ? { apiKey, apiSecret } : { apiKey, apiSecret, passphrase };
 }
 
 function venueLabel(venue: RwaAutomationVenue) {

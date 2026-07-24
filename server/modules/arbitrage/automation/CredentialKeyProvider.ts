@@ -2,18 +2,32 @@ import { createHash } from "node:crypto";
 
 export const RWA_CREDENTIAL_ENVELOPE_VERSION = 2 as const;
 export const RWA_CREDENTIAL_AAD_SCHEMA = "rwa-credential:v2:userId:venue:accountId:environment" as const;
+export const STEP_UP_SECURITY_AAD_SCHEMA = "step-up-security:v1:userId:purpose:environment" as const;
 export const RWA_GCP_KMS_KEY_NAME =
   "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials" as const;
 
 export type CredentialKeyProviderName = "gcp-kms" | "fake";
 
-export type CredentialKeyContext = {
+export type CredentialEnvironment = "production" | "development" | "test";
+
+export type ExchangeCredentialKeyContext = {
+  purpose?: "exchange-credential";
   userId: string;
   venue: "bybit" | "bitget" | "binance" | "okx";
   accountId: string;
-  environment: "production" | "development" | "test";
+  environment: CredentialEnvironment;
   schemaVersion: typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
 };
+
+export type StepUpSecurityKeyContext = {
+  purpose: "step-up-security";
+  userId: string;
+  securityDomain: "rwa-sensitive-operations";
+  environment: CredentialEnvironment;
+  schemaVersion: typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
+};
+
+export type CredentialKeyContext = ExchangeCredentialKeyContext | StepUpSecurityKeyContext;
 
 export type WrappedCredentialDataKey = {
   provider: CredentialKeyProviderName;
@@ -48,13 +62,23 @@ export class CredentialKeyProviderError extends Error {
   }
 }
 
-export function credentialEnvironment(): CredentialKeyContext["environment"] {
+export function credentialEnvironment(): CredentialEnvironment {
   if (process.env.NODE_ENV === "production") return "production";
   if (process.env.NODE_ENV === "test") return "test";
   return "development";
 }
 
 export function canonicalCredentialAad(context: CredentialKeyContext) {
+  if (context.purpose === "step-up-security") {
+    return Buffer.from(JSON.stringify({
+      schema: STEP_UP_SECURITY_AAD_SCHEMA,
+      purpose: context.purpose,
+      userId: context.userId,
+      securityDomain: context.securityDomain,
+      environment: context.environment,
+      schemaVersion: context.schemaVersion,
+    }), "utf8");
+  }
   return Buffer.from(JSON.stringify({
     schema: RWA_CREDENTIAL_AAD_SCHEMA,
     userId: context.userId,
@@ -66,6 +90,16 @@ export function canonicalCredentialAad(context: CredentialKeyContext) {
 }
 
 export function cloudCredentialAad(context: CredentialKeyContext) {
+  if (context.purpose === "step-up-security") {
+    return Buffer.from(JSON.stringify({
+      schema: STEP_UP_SECURITY_AAD_SCHEMA,
+      purpose: context.purpose,
+      userDomain: domainHash("step-up-user", context.userId),
+      securityDomain: domainHash("step-up-purpose", context.securityDomain),
+      environment: context.environment,
+      schemaVersion: context.schemaVersion,
+    }), "utf8");
+  }
   return Buffer.from(JSON.stringify({
     schema: RWA_CREDENTIAL_AAD_SCHEMA,
     userDomain: domainHash("user", context.userId),

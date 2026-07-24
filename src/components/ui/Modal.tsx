@@ -1,4 +1,4 @@
-import { useEffect, useId, type ReactNode } from "react";
+import { useEffect, useId, useRef, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Button } from "./Button";
@@ -9,6 +9,7 @@ type ModalProps = {
   description?: string;
   children: ReactNode;
   onClose: () => void;
+  focusKey?: string | number;
   closeDisabled?: boolean;
   shellClassName?: string;
   bodyClassName?: string;
@@ -17,6 +18,7 @@ type ModalProps = {
 let openModalCount = 0;
 let originalBodyOverflow = "";
 let originalBodyPaddingRight = "";
+const modalStack: symbol[] = [];
 
 function lockDocumentScroll() {
   const scrollbarWidth = window.innerWidth - document.documentElement.clientWidth;
@@ -49,33 +51,51 @@ export function Modal({
   description,
   children,
   onClose,
+  focusKey,
   closeDisabled = false,
   shellClassName = "",
   bodyClassName = "",
 }: ModalProps) {
   const titleId = useId();
+  const shellRef = useRef<HTMLElement>(null);
+  const modalId = useRef(Symbol("modal"));
 
   useEffect(() => {
     if (!open) return;
 
     const previouslyFocusedElement = document.activeElement;
     const releaseScrollLock = lockDocumentScroll();
+    const currentModalId = modalId.current;
+    const unregisterModal = registerModal(currentModalId);
+    queueMicrotask(() => {
+      const shell = shellRef.current;
+      if (!shell || shell.contains(document.activeElement)) return;
+      focusInitialElement(shell);
+    });
 
     return () => {
+      unregisterModal();
       releaseScrollLock();
-      if (previouslyFocusedElement instanceof HTMLElement) {
-        previouslyFocusedElement.focus();
-      }
+      restoreModalFocus(previouslyFocusedElement);
     };
   }, [open]);
+
+  useEffect(() => {
+    if (!open || focusKey === undefined) return;
+
+    const currentModalId = modalId.current;
+    queueMicrotask(() => {
+      if (!isTopModal(currentModalId)) return;
+      const shell = shellRef.current;
+      if (shell) focusInitialElement(shell);
+    });
+  }, [focusKey, open]);
 
   useEffect(() => {
     if (!open) return;
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape" && !closeDisabled) {
-        onClose();
-      }
+      handleModalKeyDown(event, modalId.current, shellRef.current, closeDisabled, onClose);
     };
 
     window.addEventListener("keydown", onKeyDown);
@@ -98,6 +118,8 @@ export function Modal({
         aria-labelledby={titleId}
         className={`xh-modal-shell ${shellClassName}`}
         onClick={(event) => event.stopPropagation()}
+        ref={shellRef}
+        tabIndex={-1}
       >
         <div className="xh-modal-header">
           <div>
@@ -116,4 +138,73 @@ export function Modal({
     </div>,
     document.body,
   );
+}
+
+function focusableElements(container: HTMLElement) {
+  return Array.from(container.querySelectorAll<HTMLElement>(
+    'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+  )).filter((element) => !element.hasAttribute("hidden") && element.getAttribute("aria-hidden") !== "true");
+}
+
+export function focusInitialElement(container: HTMLElement) {
+  const preferred = container.querySelector<HTMLElement>("[data-modal-initial-focus]");
+  (preferred ?? focusableElements(container)[0] ?? container).focus();
+}
+
+export function trapModalFocus(
+  event: Pick<KeyboardEvent, "preventDefault" | "shiftKey">,
+  container: HTMLElement,
+) {
+  const elements = focusableElements(container);
+  if (elements.length === 0) {
+    event.preventDefault();
+    container.focus();
+    return;
+  }
+  const first = elements[0];
+  const last = elements.at(-1)!;
+  if (!container.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+export function registerModal(modalId: symbol) {
+  modalStack.push(modalId);
+  return () => {
+    const stackIndex = modalStack.lastIndexOf(modalId);
+    if (stackIndex >= 0) modalStack.splice(stackIndex, 1);
+  };
+}
+
+export function isTopModal(modalId: symbol) {
+  return modalStack.at(-1) === modalId;
+}
+
+export function handleModalKeyDown(
+  event: Pick<KeyboardEvent, "key" | "preventDefault" | "shiftKey">,
+  modalId: symbol,
+  container: HTMLElement | null,
+  closeDisabled: boolean,
+  onClose: () => void,
+) {
+  if (!isTopModal(modalId)) return;
+  if (event.key === "Escape" && !closeDisabled) {
+    event.preventDefault();
+    onClose();
+    return;
+  }
+  if (event.key === "Tab" && container) {
+    trapModalFocus(event, container);
+  }
+}
+
+export function restoreModalFocus(element: Element | null) {
+  if (element instanceof HTMLElement) element.focus();
 }

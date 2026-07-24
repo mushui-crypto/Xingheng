@@ -58,7 +58,7 @@ type ChainScanCursorRow = ChainScanCursor;
 type FundingLedgerRow = FundingLedgerEntry;
 type WithdrawalRequestRow = WithdrawalRequest;
 type AccountTransferRow = AccountTransferRecord;
-type UserRow = User & { password: string };
+type UserRow = User & { password: string; stepUpEnrollmentInvalidatedAt?: number };
 type AuthSessionRow = {
   tokenHash: string;
   subjectId: string;
@@ -133,6 +133,21 @@ export class TradingStore {
     return this.db.prepare("SELECT id, email, nickname, status, createdAt, emailVerifiedAt FROM users WHERE id = ?").get(id) as User | undefined;
   }
 
+  findUserPasswordById(id: string) {
+    return this.db.prepare("SELECT id, password FROM users WHERE id = ?").get(id) as Pick<UserRow, "id" | "password"> | undefined;
+  }
+
+  getStepUpEnrollmentInvalidatedAt(id: string) {
+    const row = this.db.prepare("SELECT stepUpEnrollmentInvalidatedAt FROM users WHERE id = ?").get(id) as
+      | Pick<UserRow, "stepUpEnrollmentInvalidatedAt">
+      | undefined;
+    return Number(row?.stepUpEnrollmentInvalidatedAt ?? 0);
+  }
+
+  invalidateStepUpEnrollment(id: string, invalidatedAt = Date.now()) {
+    this.db.prepare("UPDATE users SET stepUpEnrollmentInvalidatedAt = ? WHERE id = ?").run(invalidatedAt, id);
+  }
+
   listUserPasswordRecords() {
     return this.db.prepare("SELECT id, password FROM users").all() as Array<Pick<UserRow, "id" | "password">>;
   }
@@ -168,6 +183,7 @@ export class TradingStore {
   updateUserStatus(id: string, status: User["status"]) {
     this.db.prepare("UPDATE users SET status = ? WHERE id = ?").run(status, id);
     if (status === "disabled") {
+      this.invalidateStepUpEnrollment(id);
       this.db.prepare(
         `INSERT OR REPLACE INTO revoked_auth_sessions (tokenHash, subjectId, role, reason, expiresAt, createdAt)
          SELECT tokenHash, subjectId, role, 'disabled', expiresAt, ? FROM auth_sessions
@@ -1444,7 +1460,8 @@ export class TradingStore {
         nickname TEXT,
         status TEXT NOT NULL,
         createdAt TEXT NOT NULL,
-        emailVerifiedAt TEXT
+        emailVerifiedAt TEXT,
+        stepUpEnrollmentInvalidatedAt INTEGER NOT NULL DEFAULT 0
       );
 
       CREATE TABLE IF NOT EXISTS email_tokens (
@@ -1793,6 +1810,7 @@ export class TradingStore {
     this.addColumnIfMissing("funding_ledger", "address", "TEXT");
     this.addColumnIfMissing("positions", "accountId", "TEXT");
     this.addColumnIfMissing("users", "emailVerifiedAt", "TEXT");
+    this.addColumnIfMissing("users", "stepUpEnrollmentInvalidatedAt", "INTEGER NOT NULL DEFAULT 0");
     this.addColumnIfMissing("market_symbols", "providerMarketId", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "providerCoin", "TEXT NOT NULL DEFAULT ''");
     this.addColumnIfMissing("market_symbols", "sourceDex", "TEXT NOT NULL DEFAULT 'main'");

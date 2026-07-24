@@ -7,11 +7,17 @@ import type {
 } from "../features/arbitrageAutomation/model/controlConsoleTypes";
 import {
   AutomationConsoleContractError,
+  credentialDeleteStepUpIntent,
+  credentialStepUpIntent,
   createUserAutomationConsoleClient,
+  executionStepUpIntent,
   isAccountMismatchError,
   isCredentialActivationReady,
+  positionCloseStepUpIntent,
   presentAutomationConsoleError,
+  safetyActionStepUpIntent,
 } from "./arbitrageAutomationConsole";
+import { canonicalRequestDigest } from "./stepUpSecurity";
 import { createFakeAutomationConsoleClient } from "./arbitrageAutomationConsole.fake";
 
 test("fake console is explicit test injection and performs no HTTP requests", async () => {
@@ -49,7 +55,7 @@ test("fake Binance flow covers authorization, configuration, kill switch, execut
     ipWhitelist: [],
     defaultExecutionAccount: true,
     assetStatisticsEnabled: true,
-  });
+  }, "fixture-step-up-token");
   assert.equal(credential.canExecute, true);
   assert.equal(credential.permissions.withdraw, false);
   assert.equal(JSON.stringify(credential).includes("fixture-binance-secret"), false);
@@ -60,15 +66,15 @@ test("fake Binance flow covers authorization, configuration, kill switch, execut
       .map((parameter) => [parameter.id, parameter.value]),
   );
   await client.validateParameters("binance", draft);
-  await client.performSafetyAction({ type: "toggle_global_execution", venue: "binance", enabled: true });
-  await client.performSafetyAction({ type: "toggle_strategy", venue: "binance", enabled: true });
-  await client.performSafetyAction({ type: "set_kill_switch", venue: "binance", active: false });
+  await client.performSafetyAction({ type: "toggle_global_execution", venue: "binance", enabled: true }, "fixture-step-up-token");
+  await client.performSafetyAction({ type: "toggle_strategy", venue: "binance", enabled: true }, "fixture-step-up-token");
+  await client.performSafetyAction({ type: "set_kill_switch", venue: "binance", active: false }, "fixture-step-up-token");
 
   const preflight = await client.requestPreflight(candidate.id, "arbitrage_entry");
   assertExecutionPreflight(preflight);
   assert.equal(preflight.expiresAt > Date.now(), true);
   assert.equal(preflight.exactLegs.length, 2);
-  const execution = await client.confirmExecution(preflight.challengeId);
+  const execution = await client.confirmExecution(preflight.challengeId, "fixture-step-up-token");
   assert.equal(execution.execution?.state, "hedged");
   assert.equal(execution.execution?.spotOrder?.status, "Filled");
   assert.equal(execution.execution?.perpetualOrders.length, 1);
@@ -79,7 +85,7 @@ test("fake Binance flow covers authorization, configuration, kill switch, execut
     type: "close_all",
     venue: "binance",
     idempotencyKey: "fixture-close-all",
-  });
+  }, "fixture-step-up-token");
   assert.equal(closed.execution?.state, "closed");
 });
 
@@ -127,7 +133,7 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
       ipWhitelist: ["192.0.2.10"],
       defaultExecutionAccount: true,
       assetStatisticsEnabled: true,
-    });
+    }, "fixture-step-up-token");
     assert.equal(JSON.stringify(credential).includes(secret), false);
     assert.equal("apiSecret" in credential, false);
 
@@ -141,24 +147,24 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
       type: "toggle_global_execution",
       venue: "binance",
       enabled: true,
-    });
+    }, "fixture-step-up-token");
     await client.performSafetyAction({
       type: "toggle_strategy",
       venue: "binance",
       enabled: true,
-    });
+    }, "fixture-step-up-token");
     await client.performSafetyAction({
       type: "set_kill_switch",
       venue: "binance",
       active: false,
-    });
+    }, "fixture-step-up-token");
 
     const preflight = await client.requestPreflight("opportunity-binance-xaut", "arbitrage_entry");
     assertExecutionPreflight(preflight);
     assert.equal(preflight.venue, "binance");
     assert.equal(preflight.accountSnapshot?.perpetual?.fundingRate, 0.0001);
     assert.equal(preflight.checks[0]?.id, "permissions");
-    const receipt = await client.confirmExecution(preflight.challengeId);
+    const receipt = await client.confirmExecution(preflight.challengeId, "fixture-step-up-token");
     assert.equal(receipt.execution?.state, "hedged");
     assert.equal(receipt.execution?.hedgedQuantityXaut, 0.002);
 
@@ -166,8 +172,21 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
       type: "close_all",
       venue: "binance",
       idempotencyKey: "close-all-fixture",
-    });
+    }, "fixture-step-up-token");
     assert.equal(closed.execution?.state, "closed");
+    const position = snapshot.positionGroups[0];
+    assert.ok(position);
+    await client.closePosition(position.id, "fixture-position-step-up-token", "close-position-fixture");
+    await client.performSafetyAction({
+      type: "toggle_global_execution",
+      venue: "binance",
+      enabled: false,
+    });
+    await client.performSafetyAction({
+      type: "set_kill_switch",
+      venue: "binance",
+      active: true,
+    });
   });
 
   for (const call of calls) {
@@ -176,7 +195,11 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
     assert.equal(JSON.stringify(call.body ?? {}).includes("userId"), false);
   }
   const credentialWrite = findWrite(calls, "/venues/binance/credentials");
-  assert.deepEqual(credentialWrite.body, { apiKey: "fixture-binance-key", apiSecret: secret });
+  assert.deepEqual(credentialWrite.body, {
+    apiKey: "fixture-binance-key",
+    apiSecret: secret,
+    stepUpToken: "fixture-step-up-token",
+  });
   assert.equal(JSON.stringify(credentialWrite.body).includes("passphrase"), false);
   assert.equal(JSON.stringify(credentialWrite.body).includes('"secret"'), false);
 
@@ -193,6 +216,7 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
     "challengeId",
     "challengeToken",
     "idempotencyKey",
+    "stepUpToken",
   ]);
   for (const forbidden of ["venue", "symbol", "side", "quantity", "price", "userId"]) {
     assert.equal(forbidden in (executeWrite.body ?? {}), false);
@@ -202,7 +226,113 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
   assert.deepEqual(closeAll.body, {
     accountId: "binance:fixture-account",
     idempotencyKey: "close-all-fixture",
+    stepUpToken: "fixture-step-up-token",
   });
+  const positionClose = calls.find((call) => call.method === "POST" && call.url.includes("/positions/") && call.url.endsWith("/close"));
+  assert.ok(positionClose);
+  assert.deepEqual(positionClose.body, {
+    accountId: "binance:fixture-account",
+    idempotencyKey: "close-position-fixture",
+    stepUpToken: "fixture-position-step-up-token",
+  });
+
+  const configWrites = calls.filter((call) => (
+    call.method === "PUT"
+    && call.url.endsWith("/venues/binance/config")
+    && ("globalExecutionEnabled" in (call.body ?? {}) || "strategyEnabled" in (call.body ?? {}))
+  ));
+  assert.equal(configWrites.length, 3);
+  assert.equal(configWrites[0]?.body?.stepUpToken, "fixture-step-up-token");
+  assert.equal(configWrites[1]?.body?.stepUpToken, "fixture-step-up-token");
+  assert.equal("stepUpToken" in (configWrites[2]?.body ?? {}), false);
+  const killSwitchWrites = calls.filter((call) => call.method === "POST" && call.url.endsWith("/venues/binance/kill-switch"));
+  assert.equal(killSwitchWrites.length, 2);
+  assert.equal(killSwitchWrites[0]?.body?.stepUpToken, "fixture-step-up-token");
+  assert.equal("stepUpToken" in (killSwitchWrites[1]?.body ?? {}), false);
+});
+
+test("step-up intents bind the exact request body, account, resource and changed parameters", async () => {
+  const snapshot = createAutomationConsoleFixture();
+  const credentialDraft = {
+    accountId: null,
+    venue: "binance" as const,
+    note: "not-sent",
+    apiKey: "fixture-binance-key",
+    secret: "fixture-binance-secret",
+    passphrase: "must-not-be-sent",
+    ipWhitelist: ["192.0.2.10"],
+    defaultExecutionAccount: true,
+    assetStatisticsEnabled: true,
+  };
+  const credentialIntent = await credentialStepUpIntent(credentialDraft);
+  assert.equal(credentialIntent.operation, "credential_put");
+  assert.equal(credentialIntent.accountId, "new-account");
+  assert.equal(credentialIntent.resourceId, null);
+  assert.equal(
+    credentialIntent.requestDigest,
+    await canonicalRequestDigest({
+      apiKey: "fixture-binance-key",
+      apiSecret: "fixture-binance-secret",
+    }),
+  );
+  assert.equal(JSON.stringify(credentialIntent).includes("fixture-binance-secret"), false);
+
+  const connected = snapshot.credentials.find((item) => item.venue === "binance" && item.accountId);
+  assert.ok(connected?.accountId);
+  const deleteIntent = await credentialDeleteStepUpIntent(snapshot, connected.accountId);
+  assert.equal(deleteIntent.operation, "credential_delete");
+  assert.equal(deleteIntent.accountId, connected.accountId);
+
+  const candidate = snapshot.candidates.find((item) => item.venue === "binance" && item.asset === "XAUT");
+  assert.ok(candidate);
+  candidate.executionReady = true;
+  const preflightClient = createFakeAutomationConsoleClient(snapshot);
+  const preflight = await preflightClient.requestPreflight(candidate.id, "manual_entry");
+  assertExecutionPreflight(preflight);
+  const executionIntent = await executionStepUpIntent(preflight);
+  assert.equal(executionIntent.operation, "hedge_execute");
+  assert.equal(executionIntent.resourceId, preflight.challengeId);
+  assert.equal(executionIntent.requestDigest.length, 43);
+  assert.notEqual(
+    executionIntent.requestDigest,
+    (await executionStepUpIntent({ ...preflight, challengeToken: `${preflight.challengeToken}-changed` })).requestDigest,
+  );
+
+  const enableIntent = await safetyActionStepUpIntent(snapshot, {
+    type: "toggle_global_execution",
+    venue: connected.venue,
+    enabled: true,
+  });
+  assert.equal(enableIntent?.operation, "execution_enable");
+  assert.equal(await safetyActionStepUpIntent(snapshot, {
+    type: "toggle_global_execution",
+    venue: connected.venue,
+    enabled: false,
+  }), null);
+  assert.equal(await safetyActionStepUpIntent(snapshot, {
+    type: "set_kill_switch",
+    venue: connected.venue,
+    active: true,
+  }), null);
+  assert.equal((await safetyActionStepUpIntent(snapshot, {
+    type: "set_kill_switch",
+    venue: connected.venue,
+    active: false,
+  }))?.operation, "kill_switch_disable");
+
+  const position = snapshot.positionGroups[0];
+  assert.ok(position);
+  const preparedClose = await positionCloseStepUpIntent(snapshot, position.id);
+  assert.equal(preparedClose.intent.operation, "position_close");
+  assert.equal(preparedClose.intent.resourceId, position.id);
+  assert.equal(
+    preparedClose.intent.requestDigest,
+    await canonicalRequestDigest({
+      positionId: position.id,
+      accountId: position.accountId,
+      idempotencyKey: preparedClose.idempotencyKey,
+    }),
+  );
 });
 
 test("Binance non-XAUT adapter-disabled candidate remains fail-closed with zero preflight requests", async () => {
@@ -260,7 +390,7 @@ test("preflight rejection exposes only whitelisted checks and never creates a ch
       assert.equal(JSON.stringify(result).includes("userId"), false);
     }
     await assert.rejects(
-      () => client.confirmExecution("not-issued"),
+      () => client.confirmExecution("not-issued", "fixture-step-up-token"),
       (error: unknown) => error instanceof AutomationConsoleContractError
         && error.category === "challenge_invalid",
     );
@@ -276,12 +406,12 @@ test("challenge expiry or server restart disarms local execution and repeated su
     const preflight = await client.requestPreflight("opportunity-binance-xaut", "arbitrage_entry");
     assertExecutionPreflight(preflight);
     await assert.rejects(
-      () => client.confirmExecution(preflight.challengeId),
+      () => client.confirmExecution(preflight.challengeId, "fixture-step-up-token"),
       (error: unknown) => error instanceof AutomationConsoleContractError
         && error.category === "restart_disarmed",
     );
     await assert.rejects(
-      () => client.confirmExecution(preflight.challengeId),
+      () => client.confirmExecution(preflight.challengeId, "fixture-step-up-token"),
       (error: unknown) => error instanceof AutomationConsoleContractError
         && error.category === "challenge_invalid",
     );
@@ -300,7 +430,7 @@ test("refresh clears every in-memory execution challenge", async () => {
     assertExecutionPreflight(preflight);
     await client.load();
     await assert.rejects(
-      () => client.confirmExecution(preflight.challengeId),
+      () => client.confirmExecution(preflight.challengeId, "fixture-step-up-token"),
       (error: unknown) => error instanceof AutomationConsoleContractError
         && error.category === "challenge_invalid",
     );
@@ -347,7 +477,7 @@ test("missing IP remains a warning while withdraw permission is a hard activatio
     ipWhitelist: [],
     defaultExecutionAccount: false,
     assetStatisticsEnabled: true,
-  });
+  }, "fixture-step-up-token");
   assert.equal(credential.verificationChecks.find((check) => check.id === "ip_bound")?.status, "warning");
   assert.equal(isCredentialActivationReady(credential), true);
   assert.equal(isCredentialActivationReady({

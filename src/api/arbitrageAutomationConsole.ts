@@ -20,8 +20,10 @@ import type {
   ParameterDraft,
   SafetyAction,
 } from "../features/arbitrageAutomation/model/controlConsoleTypes";
+import type { StepUpIntent } from "../features/arbitrageAutomation/model/stepUpTypes";
 import { normalizeProductAvailability, resolveVenueCapabilities } from "../features/arbitrageAutomation/model/venueCapabilities";
 import { HttpRequestError, requestJson } from "./httpClient";
+import { createStepUpIntent } from "./stepUpSecurity";
 
 const apiBase = "/api/arbitrage/automation";
 const venueOrder: AutomationVenue[] = ["bybit", "bitget", "binance", "okx"];
@@ -210,7 +212,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       challenges.set(preflight.challengeId, preflight);
       return preflight;
     },
-    async confirmExecution(challengeId) {
+    async confirmExecution(challengeId, stepUpToken) {
       const challenge = challenges.get(challengeId);
       if (!challenge) throw new AutomationConsoleContractError(409, "执行 challenge 不存在、已过期或已使用。", null, "challenge_invalid");
       if (challenge.expiresAt <= Date.now()) {
@@ -225,12 +227,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       try {
         const response = await apiRequest<Record<string, unknown>>(`${apiBase}/execute`, "真实执行请求失败。", {
           method: "POST",
-          body: {
-            challengeId: challenge.challengeId,
-            challengeToken: challenge.challengeToken,
-            accountId: challenge.accountId,
-            idempotencyKey: challenge.idempotencyKey,
-          },
+          body: { ...executionRequestBody(challenge), stepUpToken },
         });
         challenges.delete(challengeId);
         const execution = mapExecution(response, challenge.venue, challenge.accountId);
@@ -243,18 +240,22 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
         throw error;
       }
     },
-    async validateCredential(draft) {
+    async validateCredential(draft, stepUpToken) {
       const current = requireLatest(latest).credentials.find((item) => item.venue === draft.venue);
       if (!current?.canAuthorize) throw new AutomationConsoleContractError(501, `${venueName(draft.venue)} 当前阶段暂不开放 API 授权。`, null, "venue_not_implemented");
-      const body: Record<string, string> = { apiKey: draft.apiKey.trim(), apiSecret: draft.secret.trim() };
-      if ((draft.venue === "bitget" || draft.venue === "okx") && draft.passphrase?.trim()) body.passphrase = draft.passphrase.trim();
-      const response = await apiRequest<VenueStatusDto>(`${apiBase}/venues/${draft.venue}/credentials`, "API 凭证验证失败。", { method: "PUT", body });
+      const response = await apiRequest<VenueStatusDto>(`${apiBase}/venues/${draft.venue}/credentials`, "API 凭证验证失败。", {
+        method: "PUT",
+        body: { ...credentialRequestBody(draft), stepUpToken },
+      });
       return mapCredential(response, null, []);
     },
-    async deleteCredential(accountId) {
+    async deleteCredential(accountId, stepUpToken) {
       const credential = requireLatest(latest).credentials.find((item) => item.accountId === accountId);
       if (!credential) throw new AutomationConsoleContractError(422, "API 账户不存在或已解绑。", null, "credentials_unconfigured");
-      await apiRequest(`${apiBase}/venues/${credential.venue}/credentials`, "API 账户解绑失败。", { method: "DELETE", body: { accountId } });
+      await apiRequest(`${apiBase}/venues/${credential.venue}/credentials`, "API 账户解绑失败。", {
+        method: "DELETE",
+        body: { accountId, stepUpToken },
+      });
       challenges.clear();
       return realReceipt(`${venueName(credential.venue)} API 账户已解绑。`);
     },
@@ -270,24 +271,32 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       challenges.clear();
       return realReceipt(`${venueName(venue)} 策略参数已保存。`);
     },
-    async performSafetyAction(action) {
+    async performSafetyAction(action, stepUpToken) {
       const snapshot = requireLatest(latest);
       const credential = requireCredential(snapshot, action.venue);
       if (action.type === "toggle_global_execution" || action.type === "toggle_strategy") {
         const field = action.type === "toggle_global_execution" ? "globalExecutionEnabled" : "strategyEnabled";
-        await apiRequest(`${apiBase}/venues/${action.venue}/config`, "执行开关更新失败。", { method: "PUT", body: { accountId: credential.accountId, [field]: action.enabled } });
+        const body = { accountId: credential.accountId, [field]: action.enabled };
+        await apiRequest(`${apiBase}/venues/${action.venue}/config`, "执行开关更新失败。", {
+          method: "PUT",
+          body: action.enabled ? { ...body, stepUpToken } : body,
+        });
         challenges.clear();
         return realReceipt(`${venueName(action.venue)} 执行开关已更新。`);
       }
       if (action.type === "set_kill_switch") {
-        await apiRequest(`${apiBase}/venues/${action.venue}/kill-switch`, "Kill switch 操作失败。", { method: "POST", body: { accountId: credential.accountId, active: action.active } });
+        const body = { accountId: credential.accountId, active: action.active };
+        await apiRequest(`${apiBase}/venues/${action.venue}/kill-switch`, "Kill switch 操作失败。", {
+          method: "POST",
+          body: action.active ? body : { ...body, stepUpToken },
+        });
         challenges.clear();
         return realReceipt(`${venueName(action.venue)} Kill switch 已${action.active ? "激活" : "解除"}。`);
       }
       if (action.type === "close_all") {
         const response = await apiRequest<Record<string, unknown>>(`${apiBase}/venues/${action.venue}/close-all`, "退出对冲组合请求失败。", {
           method: "POST",
-          body: { accountId: credential.accountId, idempotencyKey: action.idempotencyKey },
+          body: { accountId: credential.accountId, idempotencyKey: action.idempotencyKey, stepUpToken },
         });
         challenges.clear();
         const execution = mapExecution(response, action.venue, credential.accountId);
@@ -295,7 +304,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       }
       throw new AutomationConsoleContractError(422, "服务端不支持独立 venue 开关。", null, "unsupported_config_field");
     },
-    async closePosition(positionId) {
+    async closePosition(positionId, stepUpToken, requestIdempotencyKey) {
       const snapshot = requireLatest(latest);
       const position = snapshot.positionGroups.find((item) => item.id === positionId);
       if (!position) throw new AutomationConsoleContractError(422, "持仓不存在或已退出。", null, "position_not_found");
@@ -303,9 +312,10 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       if (!credential?.canExecute) {
         throw new AutomationConsoleContractError(501, `${venueName(position.venue)} 当前阶段不开放持仓写操作。`, null, `${position.venue}_provider_writes_disabled`);
       }
+      const body = positionCloseRequestBody(position.accountId, requestIdempotencyKey);
       await apiRequest(`${apiBase}/positions/${encodeURIComponent(positionId)}/close`, "持仓退出请求失败。", {
         method: "POST",
-        body: { accountId: position.accountId, idempotencyKey: idempotencyKey(`close:${positionId}`) },
+        body: { ...body, stepUpToken },
       });
       return realReceipt("退出对冲组合请求已提交。");
     },
@@ -314,9 +324,113 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
 
 export const userAutomationConsoleClient = createUserAutomationConsoleClient();
 
+export async function credentialStepUpIntent(draft: CredentialDraft): Promise<StepUpIntent> {
+  return createStepUpIntent({
+    operation: "credential_put",
+    venue: draft.venue,
+    accountId: draft.accountId ?? "new-account",
+    resourceId: null,
+    requestBody: credentialRequestBody(draft),
+  });
+}
+
+export async function credentialDeleteStepUpIntent(
+  snapshot: AutomationConsoleSnapshot,
+  accountId: string,
+): Promise<StepUpIntent> {
+  const credential = snapshot.credentials.find((item) => item.accountId === accountId);
+  if (!credential) {
+    throw new AutomationConsoleContractError(422, "API 账户不存在或已解绑。", null, "credentials_unconfigured");
+  }
+  return createStepUpIntent({
+    operation: "credential_delete",
+    venue: credential.venue,
+    accountId,
+    resourceId: null,
+    requestBody: { accountId },
+  });
+}
+
+export async function executionStepUpIntent(preflight: AutomationPreflight): Promise<StepUpIntent> {
+  return createStepUpIntent({
+    operation: "hedge_execute",
+    venue: preflight.venue,
+    accountId: preflight.accountId,
+    resourceId: preflight.challengeId,
+    requestBody: executionRequestBody(preflight),
+  });
+}
+
+export async function safetyActionStepUpIntent(
+  snapshot: AutomationConsoleSnapshot,
+  action: SafetyAction,
+): Promise<StepUpIntent | null> {
+  const credential = requireCredential(snapshot, action.venue);
+  if (action.type === "toggle_global_execution" || action.type === "toggle_strategy") {
+    if (!action.enabled) return null;
+    const field = action.type === "toggle_global_execution" ? "globalExecutionEnabled" : "strategyEnabled";
+    return createStepUpIntent({
+      operation: "execution_enable",
+      venue: action.venue,
+      accountId: credential.accountId,
+      resourceId: null,
+      requestBody: { accountId: credential.accountId, [field]: true },
+    });
+  }
+  if (action.type === "set_kill_switch") {
+    if (action.active) return null;
+    return createStepUpIntent({
+      operation: "kill_switch_disable",
+      venue: action.venue,
+      accountId: credential.accountId,
+      resourceId: null,
+      requestBody: { accountId: credential.accountId, active: false },
+    });
+  }
+  return createStepUpIntent({
+    operation: "close_all",
+    venue: action.venue,
+    accountId: credential.accountId,
+    resourceId: null,
+    requestBody: { accountId: credential.accountId, idempotencyKey: action.idempotencyKey },
+  });
+}
+
+export async function positionCloseStepUpIntent(
+  snapshot: AutomationConsoleSnapshot,
+  positionId: string,
+): Promise<{ intent: StepUpIntent; idempotencyKey: string }> {
+  const position = snapshot.positionGroups.find((item) => item.id === positionId);
+  if (!position) {
+    throw new AutomationConsoleContractError(422, "持仓不存在或已退出。", null, "position_not_found");
+  }
+  const request = positionCloseRequestBody(position.accountId, idempotencyKey(`close:${positionId}`));
+  return {
+    intent: await createStepUpIntent({
+      operation: "position_close",
+      venue: position.venue,
+      accountId: position.accountId,
+      resourceId: positionId,
+      requestBody: { positionId, ...request },
+    }),
+    idempotencyKey: request.idempotencyKey,
+  };
+}
+
 export function presentAutomationConsoleError(error: unknown) {
   if (!(error instanceof AutomationConsoleContractError)) return { title: "控制台请求失败", message: error instanceof Error ? error.message : "请稍后重试。", retryable: true };
   if (error.status === 401) return { title: "登录已失效", message: error.message, retryable: false };
+  if (error.category === "step_up_not_enrolled") return { title: "尚未设置二次验证", message: "请先设置身份验证器，再执行该敏感操作。", retryable: false };
+  if (error.category === "step_up_required") return { title: "需要新的二次验证", message: "本次授权不存在或已被撤销，请重新验证。", retryable: true };
+  if (error.category === "step_up_invalid") return { title: "二次验证失败", message: "动态验证码无效或已过期，未提交敏感操作。", retryable: true };
+  if (error.category === "step_up_expired") return { title: "二次验证已过期", message: "短效授权已过期，未提交敏感操作，请重新验证。", retryable: true };
+  if (error.category === "step_up_replayed") return { title: "二次验证已使用", message: "该授权不能重复使用，请获取新的动态验证码。", retryable: true };
+  if (error.category === "step_up_scope_mismatch") return { title: "操作内容已经变化", message: "账户、参数或请求内容与授权不匹配，请重新确认。", retryable: true };
+  if (error.category === "step_up_recovery_required") return { title: "需要恢复验证", message: "请使用当前身份验证器或一个未使用的恢复码处理安全设置。", retryable: false };
+  if (error.category === "step_up_key_unavailable" || error.category?.startsWith("step_up_storage_")) {
+    return { title: "二次验证服务不可用", message: "安全密钥或存储暂不可用，敏感操作已阻止。", retryable: true };
+  }
+  if (error.category === "step_up_rate_limited") return { title: "二次验证过于频繁", message: error.message, retryable: true };
   if (error.status === 403) return { title: "当前账号无操作权限", message: error.message, retryable: false };
   if (error.category === "binance_provider_writes_disabled") return { title: "Binance 执行能力未开放", message: "服务端未明确开放 provider 写调用，已拒绝执行。", retryable: false };
   if (error.category === "preflight_rejected") return { title: "实时预检未通过", message: error.message, retryable: true };
@@ -349,7 +463,10 @@ export function isCredentialActivationReady(credential: AutomationCredentialSumm
 async function apiRequest<T = unknown>(path: string, fallback: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}) {
   try {
     return await requestJson<T>(path, fallback, {
-      userAuthFailure: true,
+      userAuthFailure: ({ status, category }) => (
+        status === 401
+        || (status === 403 && !category?.startsWith("step_up_"))
+      ),
       mapErrorDetails: extractAutomationErrorDetails,
       init: {
         method: options.method ?? "GET",
@@ -849,6 +966,33 @@ function mapExecutionOrder(value: unknown): AutomationExecutionOrder | null {
 }
 function retrySeconds(value: string | null) { if (!value) return null; const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null; }
 function idempotencyKey(scope: string) { return `${scope.replace(/[^A-Za-z0-9:_-]/g, "-")}:${crypto.randomUUID()}`.slice(0, 100); }
+
+function credentialRequestBody(draft: CredentialDraft) {
+  const body: Record<string, string> = {
+    apiKey: draft.apiKey.trim(),
+    apiSecret: draft.secret.trim(),
+  };
+  if ((draft.venue === "bitget" || draft.venue === "okx") && draft.passphrase?.trim()) {
+    body.passphrase = draft.passphrase.trim();
+  }
+  return body;
+}
+
+function executionRequestBody(challenge: Pick<AutomationPreflight, "accountId" | "challengeId" | "challengeToken" | "idempotencyKey">) {
+  return {
+    accountId: challenge.accountId,
+    challengeId: challenge.challengeId,
+    challengeToken: challenge.challengeToken,
+    idempotencyKey: challenge.idempotencyKey,
+  };
+}
+
+function positionCloseRequestBody(accountId: string, requestIdempotencyKey: string) {
+  return {
+    accountId,
+    idempotencyKey: requestIdempotencyKey,
+  };
+}
 function realReceipt(message: string, execution?: AutomationExecutionResult): AutomationActionReceipt { return { ok: true, simulated: false, message, execution }; }
 function venueName(venue: AutomationVenue) { return ({ bybit: "Bybit", bitget: "Bitget", binance: "Binance", okx: "OKX" } as const)[venue]; }
 function isVenue(value: unknown): value is AutomationVenue { return typeof value === "string" && venueOrder.includes(value as AutomationVenue); }

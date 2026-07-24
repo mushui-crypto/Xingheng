@@ -41,6 +41,9 @@ import type {
 } from "./modules/arbitrage/automation/RwaBinanceAutomationTypes";
 import { RwaAutomationConnectorRegistry } from "./modules/arbitrage/automation/RwaAutomationConnectorRegistry";
 import { RwaAutomationControlService } from "./modules/arbitrage/automation/RwaAutomationControlService";
+import { StepUpSecurityStore } from "./modules/security/StepUpSecurityStore";
+import { StepUpSecurityService } from "./modules/security/StepUpSecurityService";
+import { registerStepUpSecurityRoutes } from "./modules/security/stepUpSecurityRoutes";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -109,6 +112,11 @@ martingaleGridPaperWorker.start();
 const fixedGridPaperWorker = new FixedGridPaperWorker();
 fixedGridPaperWorker.start();
 const users = new UserService(tradingStore, email, config.appPublicUrl);
+const stepUpSecurity = new StepUpSecurityService({
+  storeFactory: (userId) => new StepUpSecurityStore(userId, rwaCredentialKeyProvider),
+  verifyPassword: (userId, password) => users.verifyCurrentPassword(userId, password),
+  getEnrollmentInvalidatedAt: (userId) => users.getStepUpEnrollmentInvalidatedAt(userId),
+});
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
 const realTradingRisk = new RealTradingRiskGuard(realTradingInfo);
@@ -128,41 +136,46 @@ users.onStatusChange((userId, status) => {
   if (status !== "disabled") return;
   realTradingRealtimeTokens.revokeUser(userId);
   void realTradingUserStreams.revokeUser(userId);
+  void stepUpSecurity.revokeDisabledUser(userId).catch(() => {
+    // Authentication revocation remains fail-closed even when encrypted state cleanup is unavailable.
+  });
 });
-registerAuthRoutes({ app, users, wallet, tradingStore, config });
+registerAuthRoutes({ app, users, wallet, tradingStore, config, stepUpSecurity });
 
 registerMarketRoutes(app, market, tradingStore);
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
+const automationControl = new RwaAutomationControlService(arbitrageDashboard, (userId) => {
+  const rwaExecution = new RwaNeutralExecutionService(
+    new RwaAutomationPersistentStore({ userId, venue: "bybit", keyProvider: rwaCredentialKeyProvider }),
+    (credentials) => new RwaBybitMainnetClient(credentials),
+  );
+  void rwaExecution.initialize().catch(() => {
+    // Fail closed for this user's account without exposing provider details.
+  });
+  const binance = new RwaBinanceAutomationService(
+    new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+      userId,
+      venue: "binance",
+      keyProvider: rwaCredentialKeyProvider,
+    }),
+    (credentials) => new RwaBinanceMainnetClient(credentials),
+  );
+  void binance.initialize().catch(() => {
+    // Fail closed for this user's Binance account without exposing provider details.
+  });
+  return new RwaAutomationConnectorRegistry([
+    new RwaBybitAutomationConnector(rwaExecution),
+    new RwaBinanceAutomationConnector(binance),
+  ]);
+}, stepUpSecurity);
+registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
 registerArbitrageRoutes(
   app,
   arbitrageDashboard,
   new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
-  new RwaAutomationControlService(arbitrageDashboard, (userId) => {
-    const rwaExecution = new RwaNeutralExecutionService(
-      new RwaAutomationPersistentStore({ userId, venue: "bybit", keyProvider: rwaCredentialKeyProvider }),
-      (credentials) => new RwaBybitMainnetClient(credentials),
-    );
-    void rwaExecution.initialize().catch(() => {
-      // Fail closed for this user's account without exposing provider details.
-    });
-    const binance = new RwaBinanceAutomationService(
-      new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
-        userId,
-        venue: "binance",
-        keyProvider: rwaCredentialKeyProvider,
-      }),
-      (credentials) => new RwaBinanceMainnetClient(credentials),
-    );
-    void binance.initialize().catch(() => {
-      // Fail closed for this user's Binance account without exposing provider details.
-    });
-    return new RwaAutomationConnectorRegistry([
-      new RwaBybitAutomationConnector(rwaExecution),
-      new RwaBinanceAutomationConnector(binance),
-    ]);
-  }),
+  automationControl,
 );
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({

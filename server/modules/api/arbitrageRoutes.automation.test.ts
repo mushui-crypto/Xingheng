@@ -71,6 +71,7 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   const failedResponse = mockResponse();
   await routes.get("PUT /api/arbitrage/automation/venues/:venue/credentials")({
     user: { id: "user-a" },
+    userSessionDomain: "session-domain-a",
     params: { venue: "bybit" },
     body: { apiKey: "key", apiSecret: "secret-value" },
   }, failedResponse);

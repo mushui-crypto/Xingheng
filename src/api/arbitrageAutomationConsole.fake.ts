@@ -36,20 +36,20 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       challenges.set(preflight.challengeId, preflight);
       return preflight;
     },
-    async confirmExecution(challengeId) {
+    async confirmExecution(challengeId, _stepUpToken) {
       const challenge = challenges.get(challengeId);
       if (!challenge || challenge.expiresAt <= Date.now()) throw new AutomationConsoleContractError(409, "执行确认已失效。", null, "challenge_invalid");
       challenges.delete(challengeId);
       const execution = fakeExecution(challenge.venue, challenge.accountId, "hedged");
       return receipt("Fake contract 已完成执行状态演练，未发送任何真实订单。", execution);
     },
-    async validateCredential(draft) {
+    async validateCredential(draft, _stepUpToken) {
       validateDraft(draft);
       const summary = credentialSummary(draft);
       snapshot = { ...snapshot, credentials: snapshot.credentials.map((item) => item.venue === draft.venue ? summary : item) };
       return structuredClone(summary);
     },
-    async deleteCredential(accountId) {
+    async deleteCredential(accountId, _stepUpToken) {
       const existing = snapshot.credentials.find((item) => item.accountId === accountId);
       if (!existing) throw new AutomationConsoleContractError(422, "API 账户不存在。");
       if (existing.activeOrderCount || existing.openPositionCount) throw new AutomationConsoleContractError(409, "请先退出仓位。", null, "credential_delete_blocked");
@@ -64,7 +64,7 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       if (invalid) throw new AutomationConsoleContractError(422, `${invalid.label} 超出允许范围。`, null, "config_out_of_range");
       return receipt("Fake contract 已演练参数校验。");
     },
-    async performSafetyAction(action: SafetyAction) {
+    async performSafetyAction(action: SafetyAction, _stepUpToken) {
       if (action.type === "close_all") return receipt("Fake contract 已演练退出对冲组合。", fakeExecution(action.venue, `${action.venue}-primary`, "closed"));
       snapshot = {
         ...snapshot,
@@ -78,7 +78,7 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       challenges.clear();
       return receipt(`Fake contract 已演练 ${action.type}。`);
     },
-    async closePosition() { return receipt("Fake contract 已演练退出持仓。"); },
+    async closePosition(_positionId, _stepUpToken, _idempotencyKey) { return receipt("Fake contract 已演练退出持仓。"); },
   };
 }
 

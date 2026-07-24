@@ -63,18 +63,18 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
   app.get("/api/arbitrage/automation/venues/:venue/credentials", route(async (request) => ({
     credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue))).credential,
   })));
-  app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
-  app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
+  app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
   app.get("/api/arbitrage/automation/venues/:venue/config", route((request) => control.getConfig(authenticatedUserId(request), singleParam(request.params.venue))));
-  app.put("/api/arbitrage/automation/venues/:venue/config", route((request) => control.updateConfig(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
-  app.post("/api/arbitrage/automation/venues/:venue/kill-switch", route((request) => control.setKillSwitch(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.put("/api/arbitrage/automation/venues/:venue/config", route((request) => control.updateConfig(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
+  app.post("/api/arbitrage/automation/venues/:venue/kill-switch", route((request) => control.setKillSwitch(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
   app.get("/api/arbitrage/automation/venues/:venue/account", route((request) => control.getPrivateAccount(authenticatedUserId(request), singleParam(request.params.venue))));
   app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request))));
   app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body)));
-  app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), request.body)));
+  app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), authenticatedSessionDomain(request), request.body)));
   app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request))));
-  app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), singleParam(request.params.positionId), request.body)));
-  app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), singleParam(request.params.venue), request.body)));
+  app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.positionId), request.body)));
+  app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
   app.get("/api/arbitrage/automation/pnl", route((request) => control.getPnl(authenticatedUserId(request))));
   app.get("/api/arbitrage/automation/audit", route((request) => control.getAudit(authenticatedUserId(request))));
 }
@@ -84,6 +84,13 @@ function authenticatedUserId(request: express.Request) {
     throw new RwaAutomationControlError(401, "authentication_required", "用户未登录或登录已失效。");
   }
   return request.user.id;
+}
+
+function authenticatedSessionDomain(request: express.Request) {
+  if (!request.userSessionDomain) {
+    throw new RwaAutomationControlError(401, "authentication_required", "用户登录会话已失效。");
+  }
+  return request.userSessionDomain;
 }
 
 function singleParam(value: string | string[]) {

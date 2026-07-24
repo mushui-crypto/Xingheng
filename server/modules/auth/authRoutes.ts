@@ -5,6 +5,7 @@ import type { RuntimeConfig } from "../../config/runtimeConfig";
 import type { TradingStore } from "../../storage/TradingStore";
 import type { User } from "../../types";
 import type { WalletService } from "../../wallet/WalletService";
+import type { StepUpSecurityService } from "../security/StepUpSecurityService";
 import { sendBadRequest } from "../api/httpResponses";
 import { createRateLimiter, isLocalDevelopmentRequest } from "../security/httpSecurity";
 import {
@@ -22,6 +23,7 @@ declare global {
   namespace Express {
     interface Request {
       user?: User;
+      userSessionDomain?: string;
     }
   }
 }
@@ -32,9 +34,10 @@ type AuthRouteDependencies = {
   wallet: WalletService;
   tradingStore: TradingStore;
   config: RuntimeConfig;
+  stepUpSecurity?: StepUpSecurityService;
 };
 
-export function registerAuthRoutes({ app, users, wallet, tradingStore, config }: AuthRouteDependencies) {
+export function registerAuthRoutes({ app, users, wallet, tradingStore, config, stepUpSecurity }: AuthRouteDependencies) {
   const authRateLimit = createRateLimiter({
     windowMs: 15 * 60 * 1000,
     max: Number(process.env.AUTH_RATE_LIMIT_MAX ?? 10),
@@ -78,8 +81,11 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config }:
     }
   });
 
-  app.post("/api/auth/logout", (request, response) => {
-    users.logout(getUserBearerToken(request));
+  app.post("/api/auth/logout", async (request, response) => {
+    const rawToken = getUserBearerToken(request);
+    const user = users.authenticate(rawToken);
+    if (user && rawToken) stepUpSecurity?.revokeSession(user.id, hashSessionToken(rawToken));
+    users.logout(rawToken);
     clearSessionCookie(response, userCookieName, config.isProduction);
     response.json({ ok: true });
   });
@@ -100,9 +106,12 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config }:
     }
   });
 
-  app.post("/api/auth/password-reset", authRateLimit, (request, response) => {
+  app.post("/api/auth/password-reset", authRateLimit, async (request, response) => {
     try {
-      response.json(users.resetPassword(request.body ?? {}));
+      const userId = users.findUserIdByEmail(request.body?.email);
+      const result = users.resetPassword(request.body ?? {});
+      if (userId) await stepUpSecurity?.revokeAfterPasswordReset(userId);
+      response.json(result);
     } catch (error) {
       sendBadRequest(response, error);
     }
@@ -212,6 +221,7 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
 }
 
 export const userAuthenticatedApiPrefixes = [
+  "/api/auth/security",
   "/api/arbitrage",
   "/api/trading",
   "/api/wallet",
@@ -239,7 +249,12 @@ export const publicReadOnlyApiPaths: ReadonlySet<string> = new Set([
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
   app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
     const requestPath = request.originalUrl.split("?", 1)[0];
-    if (requestPath === "/api/arbitrage/automation" || requestPath.startsWith("/api/arbitrage/automation/")) {
+    if (
+      requestPath === "/api/arbitrage/automation"
+      || requestPath.startsWith("/api/arbitrage/automation/")
+      || requestPath === "/api/auth/security"
+      || requestPath.startsWith("/api/auth/security/")
+    ) {
       response.setHeader("Cache-Control", "no-store");
     }
     if (request.method === "GET" && publicReadOnlyApiPaths.has(requestPath)) {
@@ -250,7 +265,9 @@ export function registerUserAuthMiddleware(app: express.Express, users: UserServ
     const includeDisabledRevocation = request.originalUrl.startsWith("/api/real-trading")
       || request.baseUrl.startsWith("/api/real-trading")
       || request.originalUrl.startsWith("/api/arbitrage/automation")
-      || request.baseUrl.startsWith("/api/arbitrage/automation");
+      || request.baseUrl.startsWith("/api/arbitrage/automation")
+      || request.originalUrl.startsWith("/api/auth/security")
+      || request.baseUrl.startsWith("/api/auth/security");
     const user = includeDisabledRevocation
       ? users.authenticateIncludingDisabledRevocation(token)
       : users.authenticate(token);
@@ -263,6 +280,7 @@ export function registerUserAuthMiddleware(app: express.Express, users: UserServ
       return;
     }
     request.user = user;
+    request.userSessionDomain = hashSessionToken(token!);
     next();
   });
 }
