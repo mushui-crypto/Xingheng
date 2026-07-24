@@ -222,18 +222,24 @@ export function validateReleaseRuntimeMounts(value) {
     if (!Array.isArray(byService[service]) || byService[service].length !== expected.length) {
       throw new Error("release runtime mount mapping is invalid");
     }
-    for (let index = 0; index < expected.length; index += 1) {
+    const actualMounts = [...byService[service]].sort(compareRuntimeMounts);
+    const expectedMounts = [...expected].sort(compareRuntimeMounts);
+    for (let index = 0; index < expectedMounts.length; index += 1) {
       const mount = exactObject(
-        byService[service][index],
+        actualMounts[index],
         ["destination", "name", "rw", "source", "type"],
         "release runtime mount",
       );
-      if (canonicalJson(mount) !== canonicalJson(expected[index])) {
+      if (canonicalJson(mount) !== canonicalJson(expectedMounts[index])) {
         throw new Error("release runtime mount mapping is invalid");
       }
     }
   }
   return true;
+}
+
+function compareRuntimeMounts(left, right) {
+  return String(left?.destination ?? "").localeCompare(String(right?.destination ?? ""));
 }
 
 export function validateReleaseVolumeMountCounts(mode, value) {

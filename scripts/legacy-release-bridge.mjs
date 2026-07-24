@@ -264,6 +264,7 @@ function verifyRuntime(bundleDirectory) {
 
 function verifyOfflineSqliteRecoveryPoint(manifest) {
   const backupPath = `/backups/${manifest.sqlite.backupName}`;
+  const immutableBackupUri = `file:${backupPath}?immutable=1`;
   const common = [
     "run",
     "--rm",
@@ -282,7 +283,7 @@ function verifyOfflineSqliteRecoveryPoint(manifest) {
     ...common,
     "sqlite3",
     manifest.images.api,
-    backupPath,
+    immutableBackupUri,
     "PRAGMA integrity_check;",
   ]);
   const hash = docker([

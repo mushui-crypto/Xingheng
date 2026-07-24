@@ -832,6 +832,11 @@ test("restore loads missing images and verifies SQLite before starting legacy se
     const sqliteIndex = events.findIndex((args) => args[0] === "run" && args.includes("sqlite3"));
     const composeIndex = events.findIndex((args) => args[0] === "compose" && args.includes("up"));
     assert.ok(loadIndex >= 0 && loadIndex < sqliteIndex && sqliteIndex < composeIndex);
+    const sqliteCommand = events[sqliteIndex];
+    assert.match(
+      sqliteCommand[sqliteCommand.indexOf(API_IMAGE) + 1],
+      /^file:\/backups\/trading-\d{8}T\d{6}Z\.sqlite\?immutable=1$/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -1111,6 +1116,10 @@ test("release Compose and running containers require exact mount mappings", () =
 
   const runtime = releaseRuntimeMounts();
   assert.equal(validateReleaseRuntimeMounts(runtime), true);
+  assert.equal(validateReleaseRuntimeMounts({
+    api: [...runtime.api].reverse(),
+    web: [...runtime.web].reverse(),
+  }), true);
   for (const mutate of [
     (value) => value.api.pop(),
     (value) => { value.api[0].rw = false; },
