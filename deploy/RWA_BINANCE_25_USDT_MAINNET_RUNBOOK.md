@@ -100,11 +100,33 @@ challenge token，不得直接写日志或保存为证据；只提取上述白�
 
 ### 0. 冻结变更与角色
 
-记录部署 commit/镜像、操作者、复核者、窗口起止和人工 Binance 退出负责人。禁止窗口内发布代码、
-迁移数据、轮换无关证书或修改产品范围。
+项目管理先给出已验收的完整、小写 40 字符 commit 和可信构建生成的 release manifest。生产不读取
+`.git`；先核对清单 revision 与 `.env.production`，再按清单中的三个不可变 digest 核对 API、Web、
+strategy tools/automation operations 的实际 image ID、OCI `org.opencontainers.image.revision`、
+镜像内 `/app/.build-revision`，以及 API/Web 运行容器的实际 image ID、label、内置 revision 和
+运行时交叉核对值：
 
-继续：两人均在线，人工交易所登录可用。
-停止：任何负责人缺席或版本不一致。
+```bash
+MANIFEST=deploy/release-manifest.json
+node scripts/verify-deployment-revision.mjs env "$MANIFEST" .env.production
+node scripts/verify-deployment-revision.mjs images "$MANIFEST"
+node scripts/verify-deployment-revision.mjs containers "$MANIFEST"
+```
+
+只记录完整 commit、清单中三个 digest、各组件 PASS/FAIL 和时间，不记录 env 全文。清单必须是
+单硬链接、非 symlink、`0444` 普通文件；生产 Compose 不得含 `build:`。容器 ID、
+可漂移 tag、同一 env 派生的自报字段、健康状态、失效 worktree或人工口述均不能证明版本。然后
+记录操作者、复核者、窗口起止和人工 Binance 退出负责人。禁止窗口内发布代码、迁移数据、轮换
+无关证书或修改产品范围。
+
+所有现场 Compose 命令必须先 `. scripts/load-release-manifest.sh`，再使用
+`production_compose`；不得直接调用 `docker compose`。出现 `COMPOSE_FILE`、自动 override、
+最终配置中的 `build`、服务 image 与清单 digest 不一致时，必须在任何容器或数据动作前停止。
+
+继续：两人均在线，人工交易所登录可用；期望 revision 与所有镜像、运维组件和运行容器完全一致。
+停止：任何负责人缺席；manifest 缺失/可写/结构非法，revision 缺失或非完整 commit，实际 digest、
+任一组件或运行时 env 不一致，存在生产直接 build 路径，或无法脱离生产 `.git` 独立核验。停止后
+不得进入步骤 1–4，必须由项目管理另行授权部署整改。
 
 ### 1. 建立恢复点
 

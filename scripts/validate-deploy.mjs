@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 const read = (path) => readFileSync(path, "utf8");
 const dockerfile = read("Dockerfile");
 const compose = read("compose.yaml");
+const composeBuild = read("compose.build.yaml");
 const caddy = read("deploy/Caddyfile");
 const env = read(".env.production.example");
 const server = [read("server/index.ts"), read("server/config/runtimeConfig.ts")].join("\n");
@@ -18,12 +19,42 @@ const rwaGovernance = read("server/modules/arbitrage/automation/RwaAutomationGov
 const rwaExecutionLease = read("server/modules/arbitrage/automation/RwaAutomationExecutionLease.ts");
 const rwaMainnetRunbook = read("deploy/RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md");
 const rwaReadinessRehearsal = read("scripts/rehearse-rwa-mainnet-readiness.mjs");
+const deploymentRevision = read("scripts/deploymentRevision.mjs");
+const deploymentRevisionVerifier = read("scripts/verify-deployment-revision.mjs");
+const runtimeRevisionVerifier = read("scripts/verify-runtime-revision.sh");
+const releaseImageBuilder = read("scripts/build-release-images.sh");
+const releaseActivator = read("scripts/activate-release.sh");
+const releaseManifestLoader = read("scripts/load-release-manifest.sh");
+const productionCompose = read("scripts/production-compose.sh");
 const packageJson = read("package.json");
 
 const assertions = [
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
   [dockerfile.includes("npm ci --omit=dev") && dockerfile.includes('CMD [\"node\", \"dist-server/index.js\"]'), "API runtime must use production dependencies and compiled JS"],
   [dockerfile.includes("USER 20001:20001"), "API must run as the pinned non-root user"],
+  [
+    dockerfile.includes("ARG XINGHENG_REVISION")
+      && (dockerfile.match(/org\.opencontainers\.image\.revision/g) ?? []).length === 3
+      && dockerfile.includes("/app/.build-revision")
+      && dockerfile.split('ENTRYPOINT ["/usr/local/bin/verify-runtime-revision"]').length - 1 === 3,
+    "all release image targets must embed and enforce the immutable build revision",
+  ],
+  [
+    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 5
+      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 3
+      && compose.includes("XINGHENG_WEB_IMAGE:?")
+      && compose.includes("XINGHENG_STRATEGY_TOOLS_IMAGE:?")
+      && (compose.match(/pull_policy: never/g) ?? []).length === 5
+      && !compose.includes("build:"),
+    "production Compose must consume only manifest-pinned immutable release images",
+  ],
+  [
+    (composeBuild.match(/build:/g) ?? []).length === 3
+      && composeBuild.includes("target: api")
+      && composeBuild.includes("target: web")
+      && composeBuild.includes("target: strategy-tools"),
+    "local image builds must remain isolated in the non-production Compose override",
+  ],
   [compose.includes("condition: service_healthy"), "web must wait for a healthy API"],
   [compose.includes('test -n "$$DOMAIN"'), "web must reject a missing domain"],
   [(compose.match(/env_file:/g) ?? []).length === 1, "only API may receive the production secret env file"],
@@ -61,7 +92,7 @@ const assertions = [
   ],
   [compose.includes("STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json"), "Compose must pin the forward strategy report path"],
   [compose.includes("STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json"), "Compose must pin the history strategy report path"],
-  [compose.includes("target: strategy-tools") && compose.includes("strategy-history:"), "Compose must provide a one-shot strategy history service"],
+  [composeBuild.includes("target: strategy-tools") && compose.includes("strategy-history:"), "Compose must provide a one-shot strategy history service"],
   [dockerfile.includes("AS strategy-tools") && dockerfile.includes("research:ict:history"), "Dockerfile must provide a strategy tools target"],
   [compose.includes('BSC_TESTNET_CHAIN_ID: \"97\"'), "BSC Testnet chain ID must be pinned"],
   [caddy.indexOf("reverse_proxy /api*") < caddy.indexOf("try_files"), "/api proxy must precede SPA fallback"],
@@ -69,6 +100,7 @@ const assertions = [
   [
     [
       "DOMAIN=",
+      "XINGHENG_REVISION=REPLACE_WITH_FULL_GIT_COMMIT",
       "APP_PUBLIC_URL=https://",
       "CORS_ALLOWED_ORIGINS=https://",
       "ADMIN_EMAIL=",
@@ -144,15 +176,63 @@ const assertions = [
       && rwaMainnetRunbook.includes("不是 Mainnet 验证"),
     "RWA Mainnet readiness rehearsal must remain offline and document the frozen total budget",
   ],
+  [
+    packageJson.includes('"test:deployment-revision"')
+      && deploymentRevision.includes("^[0-9a-f]{40}$")
+      && deploymentRevision.includes("^sha256:[0-9a-f]{64}$")
+      && deploymentRevision.includes("validateReleaseManifest")
+      && deploymentRevision.includes("validateProductionComposeConfig")
+      && deploymentRevision.includes("rwa-automation-backup")
+      && deploymentRevisionVerifier.includes("docker")
+      && deploymentRevisionVerifier.includes("image")
+      && deploymentRevisionVerifier.includes("container")
+      && deploymentRevisionVerifier.includes("manifestDigest")
+      && deploymentRevisionVerifier.includes("actualDigest")
+      && deploymentRevisionVerifier.includes("O_NOFOLLOW")
+      && runtimeRevisionVerifier.includes("/app/.build-revision")
+      && runtimeRevisionVerifier.includes("XINGHENG_EXPECTED_REVISION")
+      && releaseImageBuilder.includes("git status --porcelain")
+      && releaseImageBuilder.includes("git rev-parse --verify HEAD^{commit}")
+      && releaseImageBuilder.includes("git archive --format=tar")
+      && releaseImageBuilder.includes("write-manifest")
+      && releaseManifestLoader.includes("manifest-image")
+      && releaseManifestLoader.includes("verify_production_compose")
+      && productionCompose.includes("COMPOSE_FILE")
+      && productionCompose.includes("-f*|-p*")
+      && productionCompose.includes("config|up|run|exec|stop|ps|logs|down")
+      && productionCompose.includes('-f "$repo_root/compose.yaml"')
+      && productionCompose.includes("-p xingheng")
+      && deploymentRevisionVerifier.includes("production Compose release mapping verified")
+      && releaseActivator.includes('images "$release_manifest"')
+      && releaseActivator.includes("verify_release_containers"),
+    "release revision, image digests, and the final production Compose mapping must be verified around activation",
+  ],
   [env.includes(".invalid") && env.includes("REPLACE_WITH_BSC_TESTNET_RPC_URL") && env.includes("REPLACE_WITH_BSC_TESTNET_TOKEN_ADDRESS"), "production env example must use unmistakable rejected placeholders"],
   [server.includes('domain.endsWith(".invalid")') && server.includes("BSC_TESTNET_TOKEN_ADDRESS 必须是有效且非零") && server.includes("SMTP 配置仍是示例占位值"), "production startup must reject placeholder identity and unsafe token configuration"],
   [wallet.includes('process.env.NODE_ENV !== "production"') && wallet.includes('process.env.NODE_ENV === "production"'), "production must not initialize or seed demo wallet data"],
   [restore.includes("trading-[0-9][0-9]") && !restore.includes("trading-*.sqlite"), "restore filename must use a strict timestamp allowlist"],
-  [[backup, restore, smoke].every((script) => script.includes('--env-file')), "operational scripts must load the production Compose environment explicitly"],
+  [
+    [backup, restore, smoke, rwaBackup, rwaRestore, rwaRollback].every(
+      (script) => script.includes("production_compose") && !script.includes("docker compose"),
+    ),
+    "operational scripts must use only the pinned production Compose wrapper",
+  ],
+  [
+    [backup, restore, smoke, rwaBackup, rwaRestore, rwaRollback].every(
+      (script) =>
+        script.includes(". scripts/load-release-manifest.sh")
+        && script.includes("verify_production_compose")
+        && script.includes("production_compose"),
+    ),
+    "all deployment and recovery operations must load and verify the immutable release manifest",
+  ],
   [[backup, restore].every((script) => !script.includes("gcp-wif")), "WIF identity material must be excluded from project backup and restore scripts"],
   [
     [rwaBackup, rwaRestore, rwaRollback].every(
-      (script) => script.includes("--env-file") && script.includes("stop api") && script.includes("rwa-automation-ops"),
+      (script) =>
+        script.includes("verify_production_compose")
+        && script.includes("stop api")
+        && script.includes("rwa-automation-ops"),
     ),
     "RWA disaster recovery scripts must stop API and load the explicit Compose environment",
   ],

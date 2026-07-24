@@ -12,6 +12,8 @@ dist-server/
 .vite/
 coverage/
 .cache/
+deploy/release-manifest*.json
+deploy/releases/
 backtest-*.json
 research-*.json
 research-*.csv

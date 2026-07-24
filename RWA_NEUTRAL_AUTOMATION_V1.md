@@ -509,7 +509,7 @@ armed 与 in-flight 状态均不跨重启恢复；持久幂等 tombstone 继续�
 该租约只对同一主机、同一 local named volume 的进程提供互斥。把同一 Compose 栈复制到第二台
 主机无法由本地 `flock` 协调，因此属于明确禁止的部署拓扑；若未来需要多主机，必须另立任务引入
 共享原子存储、事务唯一约束和 fencing token，不能复用当前实现声称支持。本项代码与静态契约已
-通过固定安全复验，但尚未提交或部署。独立测试确认锁路径替换后旧 owner 立即失效，且首次 provider
+通过固定安全复验并由 `a486f74` 提交，但尚未部署。独立测试确认锁路径替换后旧 owner 立即失效，且首次 provider
 写后租约失效时不再发生后续下单、撤单或恢复写入；两项安全 harness `2/2`、租约与执行专项
 `47 passed + 1 Linux-only skipped`、自动套利全目录 `111 passed + 1 Linux-only skipped`、
 完整套利 `33/33`，三套 TypeScript、完整 build、deploy/production safety `33+11`、Compose
@@ -547,9 +547,50 @@ X.509 WIF、独立数据/备份/锁卷、TOTP、两层执行开关和两级急�
 
 当前仍需项目管理在未来单独确认真实窗口，并由用户/运维在服务器和 Binance 私有 UI 提供或操作
 真实 WIF、固定出口 IP、专用子账户凭证、TOTP 和人工退出能力；任何 Secret 都不得通过聊天交付。
-本项零资金准备已通过固定安全复验，但真实 25 USDT Mainnet 验证尚未执行；当前未提交、未部署，
-服务端总急停未解除。独立验证为危险环境入口负向门禁 `7/7`、Binance service `12/12`、完整
+本项零资金准备已通过固定安全复验并由 `78c277c` 提交，但真实 25 USDT Mainnet 验证尚未执行；
+当前未部署，服务端总急停未解除。独立验证为危险环境入口负向门禁 `7/7`、Binance service `12/12`、完整
 readiness rehearsal `125 passed + 1 Linux-only skipped`、security/auth/routes `21/21`、完整
 套利 `33/33`；三套 TypeScript、完整 build、deploy validation、production safety `33+11`、
 含 ops profile 的 Compose 静态展开和 `git diff --check` 均通过。该结论不表示 Mainnet、Vultr、
 真实 WIF/KMS、固定出口 IP、真实账户/产品/余额或 25 USDT 订单已经验证。
+
+### 步骤 0 发布 revision 阻塞整改
+
+首次真实窗口步骤 0 因生产无法独立证明已验收 commit 而按 fail-closed 停止，步骤 1–4 未执行。
+首轮整改仍保留生产 Compose 直接 `build:`，且 tag、label、内置文件与 runtime env 都由同一
+revision 参数派生，固定安全复验因此继续阻塞。当前修复把生产构建完全移出 `compose.yaml`；
+可信构建脚本从干净 Git checkout 对指定 commit 执行 `git archive`，构建三类镜像后输出严格
+release manifest，将完整 revision 与实际 API、Web、strategy tools 不可变 digest 绑定。
+automation backup/restore 复用同一 API digest。
+
+生产只接受清单中的 digest；清单要求严格 schema、单硬链接、非 symlink、只读普通文件。发布前
+核对实际 image ID、清单 digest、OCI label 和内置 revision，发布后再核对运行容器 image ID 与
+runtime env。`.env.production` revision 只作交叉核对，不能以 env、tag、容器 ID、健康状态、
+生产 `.git` 或人工口述单独证明版本。缺失、短 SHA、非法 digest、清单/组件错配、运行时 env 篡改
+或无唯一运行容器均 fail-closed。第四轮固定安全测试已确认本轮代码与离线门禁通过；当前尚未部署，
+也未重新进入真实窗口步骤 0。步骤 1–4、真实 WIF/KMS、Binance 私有读取、凭证录入、急停/执行
+开关变更、provider 写、订单和资金动作均未执行。
+
+本轮 owner 自检：release manifest/revision 专项 `20/20`，Mainnet readiness
+`125 passed + 1 Linux-only skipped`，automation 全目录 `113 passed + 1 Linux-only skipped`，
+完整套利 `33/33`；App/Server/Node TypeScript、完整 build、deploy validation、production safety
+`33+11`、五组件 Compose 静态展开、Shell/Node 语法和 `git diff --check` 均通过。Docker daemon
+不可用，因此可信构建的真实镜像 digest、镜像转移、运行容器 image ID 与生产清单安装仍未现场
+验证；该未覆盖项不允许描述为已部署或步骤 0 已通过。
+
+固定安全第二轮复验确认默认 Compose digest 映射正确，但定位到 `COMPOSE_FILE` 可重新引入
+`compose.build.yaml` 的 P1 旁路。当前修复新增唯一生产 wrapper，固定 `compose.yaml` 与项目名，
+拒绝 Compose 文件/项目 override；每个生产 `up/run/exec/stop` 前均解析最终 Compose JSON，严格
+检查五个服务无 `build`、image digest、`pull_policy` 和 revision 与同一 manifest 匹配。activation
+和恢复后的容器证据若失败，会立即停止 API/Web。相关负向用例覆盖 `COMPOSE_FILE` 在第一条 Docker
+调用前拒绝、错 image/build schema 拒绝，以及 post-start runtime mismatch 后执行 stop。第二轮
+指出的 Compose 文件选择旁路已在后续复验关闭，但不表示步骤 0 已通过。
+
+固定安全第三轮复验进一步定位连接式 Compose 全局短选项 `-fFILE`/`-pNAME` 未拒绝，同时原全局
+扫描会误伤 `logs -f`。wrapper 现只解析子命令前的全局参数：连接式与分离式 file/project override
+全部 fail-closed，进入 `logs` 等允许子命令后不再把其参数解释为拓扑覆盖。专项新增真实 CLI 语义
+回归，确认两种连接式覆盖在 Docker 调用前拒绝且 `logs -f api` 到达固定项目日志命令。revision/
+manifest/final Compose 专项现为 `20/20`。第四轮固定安全复验确认第三轮 P1/P2 均已关闭，代码与
+离线门禁通过、无新增代码阻塞。Docker daemon 真实镜像构建与转移、image ID/label/内置 revision
+检查、生产 manifest 安装、运行容器唯一性、activation 及 volume/mount/flock 仍未覆盖，因此本
+结论不表示已部署、步骤 0 现场已通过或可进入步骤 1–4。

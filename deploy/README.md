@@ -17,17 +17,62 @@ cp .env.production.example .env.production
 chmod 600 .env.production
 # 替换所有 replace-me / REPLACE_WITH 占位值；这些值刻意不可部署，API 会拒绝启动。
 # 核对 DOMAIN、APP_PUBLIC_URL、CORS_ALLOWED_ORIGINS、ADMIN_EMAIL、ADMIN_PASSWORD、SMTP、RPC 和测试网合约地址。
-docker compose --env-file .env.production config
-docker compose --env-file .env.production build
-docker compose --env-file .env.production up -d
-docker compose --env-file .env.production ps
+REVISION="$(git rev-parse --verify HEAD^{commit})"
+MANIFEST="/受控发布目录/xingheng-$REVISION.release.json"
+./scripts/build-release-images.sh "$REVISION" "$MANIFEST"
+# 通过受控镜像归档或 registry 交付清单中的三个精确 digest，并把清单以 0444
+# 普通文件安装为生产 deploy/release-manifest.json；不得改写清单内容或用 symlink 代替。
+# 在生产 .env.production 把 XINGHENG_REVISION 设置为同一个完整 commit 后：
+./scripts/activate-release.sh deploy/release-manifest.json
 ./scripts/smoke.sh "https://你的域名"
 ```
 
 Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由 Caddy 在 Compose
 内部网络访问。`/api/*` 和 `/ws` 会先反代到 API，其余路径由静态前端处理；不存在
-的路径回退到 `index.html`。Web 容器只接收 `DOMAIN`；管理员密码、私钥和助记词
-仅进入 API 容器。所有手工 Compose 命令都必须带 `--env-file .env.production`。
+的路径回退到 `index.html`。Web 容器只接收 `DOMAIN` 与非敏感 revision；管理员密码、
+私钥和助记词仅进入 API 容器。所有手工 Compose 命令都必须带
+`--env-file .env.production`，并先通过 `scripts/load-release-manifest.sh` 从已安装清单加载镜像
+digest，再调用该脚本提供的 `production_compose` 函数；生产 `compose.yaml` 不包含 `build:`。
+
+## 发布 revision 门禁
+
+生产镜像禁止在缺少可信 Git checkout 的服务器目录内直接构建。发布构建只能由
+`scripts/build-release-images.sh` 从干净 Git worktree 对指定 commit 执行 `git archive`，在一次性
+目录构建 API、Web、strategy tools 三类镜像。脚本把 revision 写入 OCI
+`org.opencontainers.image.revision` label 和镜像内 `/app/.build-revision`，取得实际 Docker image
+ID 后输出严格 release manifest，将完整 revision 与三个不可变 `sha256:<64 hex>` digest 绑定。
+自动套利 backup/restore 复用清单中的 API digest，不允许单独漂移。缺少 `.git`、dirty worktree、
+短 SHA、非法字符或调用者期望 revision 不一致时，构建在 Docker 前拒绝。
+
+生产主机只接收已构建镜像和随发布交付的清单。清单必须是单硬链接、非 symlink、只读 `0444`
+普通文件，并使用精确 schema；未知字段、非法 digest 或可写清单均拒绝。`.env.production` 的
+`XINGHENG_REVISION` 只能与清单交叉核对，不能单独证明版本。`scripts/activate-release.sh` 启动前
+按清单 digest 检查三个实际 image ID、OCI label 与镜像内 revision；启动后继续检查 API/Web
+容器的实际 image ID、label、内置 revision 和运行时 `XINGHENG_EXPECTED_REVISION`。任一证据缺失、
+非完整 commit、digest/组件不一致、运行时 env 被改写或容器数量不为 1，都会拒绝发布或现场继续。
+核验不读取生产 `.git`，也不输出 env 全文、Secret、证书、固定 IP、token 或 provider 原始响应。
+
+独立核验命令：
+
+```bash
+MANIFEST=deploy/release-manifest.json
+node scripts/verify-deployment-revision.mjs env "$MANIFEST" .env.production
+node scripts/verify-deployment-revision.mjs images "$MANIFEST"
+node scripts/verify-deployment-revision.mjs containers "$MANIFEST"
+```
+
+不得用容器 ID、可覆盖 tag、同一 env 派生的 label/file、健康状态或人工口述替代上述核验。生产
+`compose.yaml` 完全没有构建入口，只接受清单加载的不可变 digest，并固定 `pull_policy: never`。
+`compose.build.yaml` 仅是本地开发 override，禁止出现在生产激活命令。镜像转移后必须保持清单
+digest 可由本机 `docker image inspect` 精确解析，并在激活前重新运行 image verification。
+
+生产脚本和手工 runbook 不得直接调用 `docker compose`。`scripts/production-compose.sh` 固定
+`-f compose.yaml -p xingheng`，只在子命令前解析 Compose 全局参数，拒绝 `COMPOSE_FILE`、
+`-f FILE`/`-fFILE`、`-p NAME`/`-pNAME` 等 project/file override；进入已允许子命令后保留其
+合法参数，因此 `production_compose logs -f api` 可正常跟踪日志。`production_compose`
+会在每一条 `up/run/exec/stop` 前解析最终 JSON，确认五个服务都没有 `build`，且 image、
+`pull_policy` 与 runtime revision 精确匹配当前 release manifest。即使目录中存在自动 override，
+也不会进入生产文件选择。启动后的容器证据失败时脚本会停止 API/Web，不保留未验证容器。
 
 ## RWA 自动套利凭证 KMS
 
@@ -163,11 +208,12 @@ daemon、named volume 首次 owner `20001:20001`、只读/读写 mount、flock�
 
 ```bash
 ./scripts/backup.sh
-docker compose --env-file .env.production build api strategy-history
-docker compose --env-file .env.production stop api
-docker compose --env-file .env.production run --rm --no-deps --user 0:0 --entrypoint sh api -c \
+. scripts/load-release-manifest.sh
+node scripts/verify-deployment-revision.mjs images "$release_manifest"
+production_compose stop api
+production_compose run --rm --no-deps --user 0:0 --entrypoint sh api -c \
   'chown -R 20001:20001 /app/data /app/strategy-data /backups'
-docker compose --env-file .env.production up -d api web
+./scripts/activate-release.sh "$release_manifest"
 ./scripts/smoke.sh "https://你的域名"
 ```
 
@@ -342,9 +388,10 @@ STRATEGY_ALERT_COOLDOWN_MS=900000
 历史回测报告需要手工一次性生成，不在 Docker build、API 启动或 HTTP 请求中执行：
 
 ```bash
-docker compose --env-file .env.production --profile strategy-tools build strategy-history
-docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history
-docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
+. scripts/load-release-manifest.sh
+node scripts/verify-deployment-revision.mjs images "$release_manifest"
+production_compose --profile strategy-tools run --rm strategy-history
+production_compose --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
 ```
 
 生成脚本从 Binance Vision 下载官方历史归档、校验 checksum、拒绝 5m 缺口，并用临时文件
@@ -355,8 +402,9 @@ docker compose --env-file .env.production --profile strategy-tools run --rm stra
 部署或故障 smoke 建议：
 
 ```bash
-docker compose --env-file .env.production ps
-docker compose --env-file .env.production logs --tail=200 api
+. scripts/load-release-manifest.sh
+production_compose ps
+production_compose logs --tail=200 api
 curl -fsS "https://你的域名/api/health"
 curl -fsS "https://你的域名/app/demo" >/dev/null
 curl -fsS "https://你的域名/app/trade" >/dev/null
@@ -417,17 +465,21 @@ Binance XAUT 真实 25 USDT 验证不属于日常部署或 smoke。执行前必�
 
 ```bash
 # 服务状态和最近日志
-docker compose --env-file .env.production ps
-docker compose --env-file .env.production logs --tail=200 api web
-docker compose --env-file .env.production logs -f api
+. scripts/load-release-manifest.sh
+production_compose ps
+production_compose logs --tail=200 api web
+production_compose logs -f api
 
 # 一致性备份（默认保留 14 天）
 ./scripts/backup.sh
 
 # 升级：先备份，再构建并以健康检查顺序替换
 ./scripts/backup.sh
-docker compose --env-file .env.production build --pull
-docker compose --env-file .env.production up -d
+REVISION="$(git rev-parse --verify HEAD^{commit})"
+MANIFEST="/受控发布目录/xingheng-$REVISION.release.json"
+./scripts/build-release-images.sh "$REVISION" "$MANIFEST"
+# 受控交付清单中的镜像 digest 与清单，安装为 deploy/release-manifest.json，并更新交叉核对 revision：
+./scripts/activate-release.sh deploy/release-manifest.json
 ./scripts/smoke.sh "https://你的域名"
 ```
 
@@ -441,7 +493,8 @@ docker compose --env-file .env.production up -d
 先列出备份卷中的文件：
 
 ```bash
-docker compose --env-file .env.production exec -T api find /backups -maxdepth 1 -name 'trading-*.sqlite' -print
+. scripts/load-release-manifest.sh
+production_compose exec -T api find /backups -maxdepth 1 -name 'trading-*.sqlite' -print
 ./scripts/restore.sh trading-YYYYMMDDTHHMMSSZ.sqlite
 ./scripts/smoke.sh "https://你的域名"
 ```
@@ -453,13 +506,14 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
 
 ## 回滚
 
-1. 升级前记录当前 Git commit/镜像版本并运行备份。
-2. 若新版本 smoke 失败，切回上一个已验证 commit 或镜像标签。
-3. 执行 `docker compose --env-file .env.production build`，再执行
-   `docker compose --env-file .env.production up -d`。
+1. 升级前保存当前 `0444` release manifest 的受控副本并运行备份。
+2. 若新版本 smoke 失败，选择上一个已验证 manifest 绑定的三个精确镜像 digest。
+3. 原子安装上一个只读 manifest，把 `.env.production` 的 `XINGHENG_REVISION` 改回其中的完整
+   commit，并执行 `./scripts/activate-release.sh deploy/release-manifest.json`；不得在无可信 Git
+   checkout 的生产目录重建镜像，也不得手工重写 digest。
 4. 只有数据库迁移不向后兼容时，才用升级前备份执行恢复；不要因纯应用回滚覆盖新数据。
-5. 再运行 smoke，并检查
-   `docker compose --env-file .env.production logs --tail=200 api web`。
+5. 再运行 smoke，执行 `. scripts/load-release-manifest.sh` 后检查
+   `production_compose logs --tail=200 api web`。
 
 ## 故障边界
 
@@ -469,7 +523,7 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
   运维监控应直接检查 `https://域名/api/health`。
 - 证书、数据库、策略报告和备份分别使用 `caddy_data`、`sqlite_data`、`strategy_data`、`sqlite_backups`
   named volume。删除卷会删除对应持久数据，日常升级不得使用
-  `docker compose --env-file .env.production down -v`。
+  `production_compose down -v`。
 - 私钥、助记词和管理员密码只放权限受限的服务器 `.env.production` 或外部密钥系统，
   不进入 Git、镜像或日志。
 - 正式环境不会创建 `demo-user` 的演示钱包、资金账户或演示流水；若正式库中出现此类

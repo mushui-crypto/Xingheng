@@ -12,9 +12,12 @@ if [ "${RESTORE_VALIDATE_ONLY:-false}" = "true" ]; then
 fi
 
 compose_env="${COMPOSE_ENV_FILE:-.env.production}"
+. scripts/load-release-manifest.sh
+verify_production_compose >/dev/null
+node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null
 
-docker compose --env-file "$compose_env" stop api
-docker compose --env-file "$compose_env" run --rm --no-deps --entrypoint sh api -c '
+production_compose stop api
+production_compose run --rm --no-deps --entrypoint sh api -c '
   set -eu
   backup="/backups/$1"
   test -f "$backup"
@@ -27,5 +30,6 @@ docker compose --env-file "$compose_env" run --rm --no-deps --entrypoint sh api 
   rm -f "$TRADING_DB_PATH-wal" "$TRADING_DB_PATH-shm"
   mv /app/data/restore.sqlite "$TRADING_DB_PATH"
 ' sh "$backup_name"
-docker compose --env-file "$compose_env" up -d api
-docker compose --env-file "$compose_env" up -d web
+production_compose up -d api
+production_compose up -d web
+verify_release_containers

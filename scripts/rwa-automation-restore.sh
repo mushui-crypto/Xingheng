@@ -12,15 +12,19 @@ if [ "${RWA_AUTOMATION_RESTORE_VALIDATE_ONLY:-false}" = "true" ]; then
 fi
 
 compose_env="${COMPOSE_ENV_FILE:-.env.production}"
+. scripts/load-release-manifest.sh
+verify_production_compose >/dev/null
+node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null
 
 restart_api() {
-  docker compose --env-file "$compose_env" up -d api
-  docker compose --env-file "$compose_env" up -d web
+  production_compose up -d api
+  production_compose up -d web
+  verify_release_containers
 }
 
-docker compose --env-file "$compose_env" stop api
+production_compose stop api
 trap restart_api EXIT HUP INT TERM
-docker compose --env-file "$compose_env" --profile rwa-automation-ops run --rm --no-deps \
+production_compose --profile rwa-automation-ops run --rm --no-deps \
   -e RWA_AUTOMATION_RESTORE_FILE="$backup_name" rwa-automation-restore
 trap - EXIT HUP INT TERM
 restart_api

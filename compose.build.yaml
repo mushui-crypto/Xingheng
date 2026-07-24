@@ -1,0 +1,24 @@
+services:
+  api:
+    image: "xingheng-api:${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+    build:
+      context: .
+      target: api
+      args:
+        XINGHENG_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+
+  web:
+    image: "xingheng-web:${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+    build:
+      context: .
+      target: web
+      args:
+        XINGHENG_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+
+  strategy-history:
+    image: "xingheng-strategy-tools:${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+    build:
+      context: .
+      target: strategy-tools
+      args:
+        XINGHENG_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
