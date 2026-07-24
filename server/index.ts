@@ -41,6 +41,10 @@ import type {
 } from "./modules/arbitrage/automation/RwaBinanceAutomationTypes";
 import { RwaAutomationConnectorRegistry } from "./modules/arbitrage/automation/RwaAutomationConnectorRegistry";
 import { RwaAutomationControlService } from "./modules/arbitrage/automation/RwaAutomationControlService";
+import {
+  RwaAutomationGovernance,
+  loadRwaAutomationGovernanceConfig,
+} from "./modules/arbitrage/automation/RwaAutomationGovernance";
 import { StepUpSecurityStore } from "./modules/security/StepUpSecurityStore";
 import { StepUpSecurityService } from "./modules/security/StepUpSecurityService";
 import { registerStepUpSecurityRoutes } from "./modules/security/stepUpSecurityRoutes";
@@ -64,6 +68,8 @@ import type { MarketSymbol, MarketTick } from "./types";
 dotenv.config();
 
 const config = loadRuntimeConfig();
+const rwaAutomationGovernanceConfig = loadRwaAutomationGovernanceConfig();
+const rwaAutomationGovernance = new RwaAutomationGovernance(rwaAutomationGovernanceConfig);
 const rwaCredentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const { port } = config;
 const app = express();
@@ -116,6 +122,14 @@ const stepUpSecurity = new StepUpSecurityService({
   storeFactory: (userId) => new StepUpSecurityStore(userId, rwaCredentialKeyProvider),
   verifyPassword: (userId, password) => users.verifyCurrentPassword(userId, password),
   getEnrollmentInvalidatedAt: (userId) => users.getStepUpEnrollmentInvalidatedAt(userId),
+  capacity: {
+    maxAuthorizationsGlobal: rwaAutomationGovernanceConfig.maxStepUpAuthorizationsGlobal,
+    maxAuthorizationsPerUser: rwaAutomationGovernanceConfig.maxStepUpAuthorizationsPerUser,
+    maxAttempts: rwaAutomationGovernanceConfig.maxStepUpAttempts,
+    maxAttemptsPerUser: rwaAutomationGovernanceConfig.maxStepUpAttemptsPerUser,
+    maxStores: rwaAutomationGovernanceConfig.maxStepUpStores,
+    storeIdleTtlMs: rwaAutomationGovernanceConfig.registryIdleTtlMs,
+  },
 });
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
@@ -148,28 +162,28 @@ registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
 const automationControl = new RwaAutomationControlService(arbitrageDashboard, (userId) => {
   const rwaExecution = new RwaNeutralExecutionService(
-    new RwaAutomationPersistentStore({ userId, venue: "bybit", keyProvider: rwaCredentialKeyProvider }),
+    new RwaAutomationPersistentStore({
+      userId,
+      venue: "bybit",
+      keyProvider: rwaCredentialKeyProvider,
+      governanceConfig: rwaAutomationGovernanceConfig,
+    }),
     (credentials) => new RwaBybitMainnetClient(credentials),
   );
-  void rwaExecution.initialize().catch(() => {
-    // Fail closed for this user's account without exposing provider details.
-  });
   const binance = new RwaBinanceAutomationService(
     new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
       userId,
       venue: "binance",
       keyProvider: rwaCredentialKeyProvider,
+      governanceConfig: rwaAutomationGovernanceConfig,
     }),
     (credentials) => new RwaBinanceMainnetClient(credentials),
   );
-  void binance.initialize().catch(() => {
-    // Fail closed for this user's Binance account without exposing provider details.
-  });
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),
     new RwaBinanceAutomationConnector(binance),
   ]);
-}, stepUpSecurity);
+}, stepUpSecurity, rwaAutomationGovernance);
 registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
 registerArbitrageRoutes(
   app,

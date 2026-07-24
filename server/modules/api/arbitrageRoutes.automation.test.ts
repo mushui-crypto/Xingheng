@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { registerArbitrageRoutes } from "./arbitrageRoutes";
 import { registerUserAuthMiddleware } from "../auth/authRoutes";
+import { RwaAutomationGovernanceError } from "../arbitrage/automation/RwaAutomationGovernance";
 
 test("automation user API rejects anonymous and disabled users before handlers", () => {
   let auth: any;
@@ -78,6 +79,35 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   assert.equal(failedResponse.statusCode, 500);
   assert.equal(failedResponse.headers["Cache-Control"], "no-store");
   assert.doesNotMatch(JSON.stringify(failedResponse.body), /must-not-leak|private\.example|secret-value/i);
+});
+
+test("automation 429 responses are no-store and expose only stable retry metadata", async () => {
+  const routes = new Map<string, any>();
+  const app = {
+    get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
+    put() {},
+    post() {},
+    delete() {},
+  };
+  registerArbitrageRoutes(app as any, {} as any, undefined, {
+    listVenues: async () => {
+      throw new RwaAutomationGovernanceError(429, "automation_rate_limited", "自动套利请求过于频繁，请稍后再试。", 17);
+    },
+  } as any);
+  const response = mockResponse();
+  await routes.get("GET /api/arbitrage/automation/venues")({
+    user: { id: "user-a" },
+    ip: "203.0.113.10",
+    params: {},
+    body: {},
+  }, response);
+  assert.equal(response.statusCode, 429);
+  assert.equal(response.headers["Cache-Control"], "no-store");
+  assert.equal(response.headers["Retry-After"], "17");
+  assert.deepEqual(response.body, {
+    category: "automation_rate_limited",
+    message: "自动套利请求过于频繁，请稍后再试。",
+  });
 });
 
 function mockResponse() {

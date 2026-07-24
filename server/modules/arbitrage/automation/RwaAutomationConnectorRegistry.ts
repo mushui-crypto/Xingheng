@@ -10,6 +10,7 @@ const venuePriority: RwaAutomationVenue[] = ["bybit", "bitget", "binance", "okx"
 
 export class RwaAutomationConnectorRegistry {
   private readonly connectors = new Map<RwaAutomationVenue, RwaAutomationConnector>();
+  private initialization: Promise<void> | null = null;
 
   constructor(connectors: RwaAutomationConnector[]) {
     for (const connector of connectors) {
@@ -20,6 +21,15 @@ export class RwaAutomationConnectorRegistry {
 
   listVenues() {
     return [...venuePriority];
+  }
+
+  initialize() {
+    if (!this.initialization) {
+      this.initialization = Promise.allSettled(
+        [...this.connectors.values()].map((connector) => connector.initialize?.()),
+      ).then(() => undefined);
+    }
+    return this.initialization;
   }
 
   getImplemented(venue: string) {

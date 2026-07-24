@@ -3,6 +3,7 @@ import {
   RwaAutomationControlError,
   type RwaAutomationControlService,
 } from "../arbitrage/automation/RwaAutomationControlService";
+import { RwaAutomationGovernanceError } from "../arbitrage/automation/RwaAutomationGovernance";
 import {
   StepUpSecurityError,
   type FactorInput,
@@ -33,6 +34,11 @@ export function registerStepUpSecurityRoutes(
         response.status(error.statusCode).json({ category: error.category, message: error.message });
         return;
       }
+      if (error instanceof RwaAutomationGovernanceError) {
+        if (error.retryAfterSeconds !== undefined) response.setHeader("Retry-After", String(error.retryAfterSeconds));
+        response.status(error.statusCode).json({ category: error.category, message: error.message });
+        return;
+      }
       response.status(500).json({ category: "step_up_internal_error", message: "二次身份验证服务暂不可用。" });
     }
   };
@@ -58,7 +64,7 @@ export function registerStepUpSecurityRoutes(
 
   app.post("/api/auth/security/step-up/authorize", route(async (request) => {
     const body = strictRecord(request.body, ["code", "intent"]);
-    const intent = await automation.resolveStepUpIntent(userId(request), body.intent);
+    const intent = await automation.resolveStepUpIntent(userId(request), body.intent, sourceIp(request));
     return security.authorize(
       userId(request),
       sessionDomain(request),
@@ -92,6 +98,10 @@ function userId(request: express.Request) {
 function sessionDomain(request: express.Request) {
   if (!request.userSessionDomain) throw new StepUpSecurityError(401, "authentication_required", "用户登录会话已失效。");
   return request.userSessionDomain;
+}
+
+function sourceIp(request: express.Request) {
+  return request.ip || request.socket?.remoteAddress || "unknown";
 }
 
 function factor(value: unknown): FactorInput {

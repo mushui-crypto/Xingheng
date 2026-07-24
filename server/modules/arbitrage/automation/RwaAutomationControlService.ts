@@ -16,6 +16,12 @@ import {
   type StepUpSecurityService,
 } from "../../security/StepUpSecurityService";
 import { StepUpSecurityStoreError } from "../../security/StepUpSecurityStore";
+import {
+  RwaAutomationGovernance,
+  RwaAutomationGovernanceError,
+  type RwaAutomationGovernanceContext,
+  type RwaAutomationGovernedOperation,
+} from "./RwaAutomationGovernance";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -23,86 +29,138 @@ export class RwaAutomationControlService {
     venue: RwaAutomationVenue;
     accountId: string;
     notionalUsd: number | null;
+    expiresAt: number;
   }>();
-  private readonly registries = new Map<string, RwaAutomationConnectorRegistry>();
+  private readonly registries = new Map<string, { registry: RwaAutomationConnectorRegistry; lastUsedAt: number }>();
+  private readonly activeRegistryUsers = new Map<string, number>();
+  private readonly challengeReservations = new Map<string, number>();
 
   constructor(
     private readonly dashboard: ArbitrageDashboardService,
     private readonly registryFactory: (userId: string) => RwaAutomationConnectorRegistry,
     private readonly stepUpSecurity: Pick<StepUpSecurityService, "consume" | "recordCredentialBinding" | "revokeAutomationScope">,
+    private readonly governance = new RwaAutomationGovernance(),
+    private readonly now: () => number = () => Date.now(),
   ) {}
 
   private registry(userId: string) {
+    this.cleanupRegistries();
     const existing = this.registries.get(userId);
-    if (existing) return existing;
+    if (existing) {
+      existing.lastUsedAt = this.now();
+      return existing.registry;
+    }
+    if (this.registries.size >= this.governance.config.maxRegistries) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "自动套利用户状态容量已满；已拒绝新增风险操作。",
+      );
+    }
     const created = this.registryFactory(userId);
-    this.registries.set(userId, created);
+    this.registries.set(userId, { registry: created, lastUsedAt: this.now() });
     return created;
   }
 
-  async listVenues(userId: string) {
-    return (await this.registry(userId).statuses()).map((status) => ({
-      ...status,
-      credential: { ...status.credential, userId },
-    }));
+  async listVenues(userId: string, sourceIp = "unknown") {
+    this.admitRequest("private_read", sourceIp, userId, "multi");
+    return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      return (await registry.statuses()).map((status) => ({
+        ...status,
+        credential: { ...status.credential, userId },
+      }));
+    });
   }
 
-  getVenueStatus(userId: string, venue: string) {
-    return this.registry(userId).requireImplemented(venue).getStatus();
+  async getVenueStatus(userId: string, venue: string, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, connector.venue, accountId, async () => {
+      await registry.initialize();
+      return connector.getStatus();
+    });
   }
 
-  async putCredentials(userId: string, sessionDomain: string, venue: string, input: unknown) {
-    const connector = this.registry(userId).requireImplemented(venue);
+  async putCredentials(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
     const body = record(input);
-    const supportsPassphrase = connector.venue === "bitget" || connector.venue === "okx";
+    const supportsPassphrase = normalizedVenue === "bitget" || normalizedVenue === "okx";
     assertOnlyKeys(body, supportsPassphrase
       ? ["apiKey", "apiSecret", "passphrase", "stepUpToken"]
       : ["apiKey", "apiSecret", "stepUpToken"]);
-    const credentials = normalizeCredentialInput(connector.venue, omitStepUp(body));
+    const credentials = normalizeCredentialInput(normalizedVenue, omitStepUp(body));
+    this.admitRequest("credential", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
     const existingAccountId = await connector.getConfiguredAccountId();
-    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-      operation: "credential_put",
-      venue: connector.venue,
-      accountId: existingAccountId ?? "new-account",
-      resourceId: null,
-      requestDigest: canonicalRequestDigest(credentials),
-      notionalUsd: null,
+    return this.governed("credential", sourceIp, userId, connector.venue, existingAccountId ?? "new-account", async () => {
+      await registry.initialize();
+      await connector.assertRiskCapacity?.();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "credential_put",
+        venue: connector.venue,
+        accountId: existingAccountId ?? "new-account",
+        resourceId: null,
+        requestDigest: canonicalRequestDigest(credentials),
+        notionalUsd: null,
+      });
+      const result = await connector.putCredentials(credentials);
+      const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
+      if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
+        throw new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。");
+      }
+      await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
+      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
+      return result;
     });
-    const result = await connector.putCredentials(credentials);
-    const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
-    if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
-      throw new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。");
-    }
-    await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
-    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
-    return result;
   }
 
-  async deleteCredentials(userId: string, sessionDomain: string, venue: string, input: unknown) {
-    const connector = this.registry(userId).requireImplemented(venue);
+  async deleteCredentials(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "stepUpToken"]);
     const sanitized = omitStepUp(body);
     const accountId = requiredString(sanitized.accountId, "accountId", 100);
-    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-      operation: "credential_delete",
-      venue: connector.venue,
-      accountId,
-      resourceId: null,
-      requestDigest: canonicalRequestDigest(sanitized),
-      notionalUsd: null,
+    this.admitRequest("credential", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    const governedAccountId = configuredAccountId ?? "unconfigured";
+    return this.governed("credential", sourceIp, userId, connector.venue, governedAccountId, async () => {
+      await registry.initialize();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "credential_delete",
+        venue: connector.venue,
+        accountId,
+        resourceId: null,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: null,
+      });
+      const result = await connector.deleteCredentials(sanitized);
+      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
+      return result;
     });
-    const result = await connector.deleteCredentials(sanitized);
-    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
-    return result;
   }
 
-  getConfig(userId: string, venue: string) {
-    return this.registry(userId).requireImplemented(venue).getConfig();
+  async getConfig(userId: string, venue: string, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, connector.venue, accountId, async () => {
+      await registry.initialize();
+      return connector.getConfig();
+    });
   }
 
-  async updateConfig(userId: string, sessionDomain: string, venue: string, input: unknown) {
-    const connector = this.registry(userId).requireImplemented(venue);
+  async updateConfig(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
     const body = record(input);
     assertOnlyKeys(body, [
       "globalExecutionEnabled", "strategyEnabled", "maxStrategyCapitalUsd", "maxEntryBasisBps",
@@ -111,71 +169,107 @@ export class RwaAutomationControlService {
     ]);
     const sanitized = omitStepUp(body);
     const enabling = sanitized.globalExecutionEnabled === true || sanitized.strategyEnabled === true;
-    if (enabling) {
-      const accountId = requiredString(sanitized.accountId, "accountId", 100);
-      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-        operation: "execution_enable",
-        venue: connector.venue,
-        accountId,
-        resourceId: null,
-        requestDigest: canonicalRequestDigest(sanitized),
-        notionalUsd: null,
-      });
-    } else if (body.stepUpToken !== undefined) {
+    const disablingOnly = !enabling
+      && Object.keys(sanitized).every((key) => ["globalExecutionEnabled", "strategyEnabled", "accountId"].includes(key))
+      && (sanitized.globalExecutionEnabled === false || sanitized.strategyEnabled === false);
+    if (!enabling && body.stepUpToken !== undefined) {
       throw new RwaAutomationControlError(400, "invalid_request", "关闭执行开关不接受 stepUpToken。");
     }
-    const result = await connector.updateConfig(sanitized);
-    if ("globalExecutionEnabled" in sanitized || "strategyEnabled" in sanitized) {
-      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, typeof sanitized.accountId === "string" ? sanitized.accountId : undefined);
-    }
-    return result;
+    if (!disablingOnly) this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    const operation = async () => {
+      if (!disablingOnly) await registry.initialize();
+      if (enabling) {
+        await connector.assertRiskCapacity?.();
+        const accountId = requiredString(sanitized.accountId, "accountId", 100);
+        await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+          operation: "execution_enable",
+          venue: connector.venue,
+          accountId,
+          resourceId: null,
+          requestDigest: canonicalRequestDigest(sanitized),
+          notionalUsd: null,
+        });
+      }
+      const result = await connector.updateConfig(sanitized);
+      if ("globalExecutionEnabled" in sanitized || "strategyEnabled" in sanitized) {
+        this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, typeof sanitized.accountId === "string" ? sanitized.accountId : undefined);
+      }
+      return result;
+    };
+    return disablingOnly
+      ? operation()
+      : this.governed("risk_control", sourceIp, userId, connector.venue, configuredAccountId, operation);
   }
 
-  async setKillSwitch(userId: string, sessionDomain: string, venue: string, input: unknown) {
+  async setKillSwitch(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
     const body = record(input);
     assertOnlyKeys(body, ["active", "accountId", "stepUpToken"]);
     const active = body.active;
     if (typeof active !== "boolean") throw new RwaAutomationControlError(400, "invalid_request", "active 必须是布尔值。");
     const accountId = requiredString(body.accountId, "accountId", 100);
-    const connector = this.registry(userId).requireImplemented(venue);
+    const normalizedVenue = normalizeVenue(venue);
     const sanitized = { active, accountId };
-    if (!active) {
-      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-        operation: "kill_switch_disable",
-        venue: connector.venue,
-        accountId,
-        resourceId: null,
-        requestDigest: canonicalRequestDigest(sanitized),
-        notionalUsd: null,
-      });
-    } else if (body.stepUpToken !== undefined) {
+    if (active && body.stepUpToken !== undefined) {
       throw new RwaAutomationControlError(400, "invalid_request", "激活急停不接受 stepUpToken。");
     }
-    const result = await connector.setKillSwitch(active, accountId);
-    this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
-    return result;
-  }
-
-  getPrivateAccount(userId: string, venue: string) {
-    return this.registry(userId).requireImplemented(venue).getPrivateAccount();
-  }
-
-  async listOpportunities(userId: string) {
+    if (!active) this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
     const registry = this.registry(userId);
-    const snapshot = await this.dashboard.getSnapshot(90);
-    const items = snapshot.opportunities
-      .filter((item) => item.strategyType === "same_venue_neutral")
-      .map((item) => candidate(item, Boolean(registry.findForOpportunity(item))));
-    return {
-      generatedAt: snapshot.generatedAt,
-      mode: "arbitrage_entry" as const,
-      items,
-      eligibleCount: items.filter((item) => item.automationEligible && item.adapterImplemented).length,
-      noEligibleOpportunity: !items.some((item) => item.automationEligible && item.adapterImplemented),
+    const connector = registry.requireImplemented(normalizedVenue);
+    const operation = async () => {
+      if (!active) await registry.initialize();
+      if (!active) {
+        await connector.assertRiskCapacity?.();
+        await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+          operation: "kill_switch_disable",
+          venue: connector.venue,
+          accountId,
+          resourceId: null,
+          requestDigest: canonicalRequestDigest(sanitized),
+          notionalUsd: null,
+        });
+      }
+      const result = await connector.setKillSwitch(active, accountId);
+      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
+      return result;
     };
+    return active ? operation() : this.governed("risk_control", sourceIp, userId, connector.venue, accountId, operation);
   }
 
-  async preflight(userId: string, input: unknown) {
+  async getPrivateAccount(userId: string, venue: string, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, connector.venue, accountId, async () => {
+      await registry.initialize();
+      return connector.getPrivateAccount();
+    });
+  }
+
+  async listOpportunities(userId: string, sourceIp = "unknown") {
+    this.admitRequest("private_read", sourceIp, userId, "multi");
+    return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const snapshot = await this.dashboard.getSnapshot(90);
+      const items = snapshot.opportunities
+        .filter((item) => item.strategyType === "same_venue_neutral")
+        .map((item) => candidate(item, Boolean(registry.findForOpportunity(item))));
+      return {
+        generatedAt: snapshot.generatedAt,
+        mode: "arbitrage_entry" as const,
+        items,
+        eligibleCount: items.filter((item) => item.automationEligible && item.adapterImplemented).length,
+        noEligibleOpportunity: !items.some((item) => item.automationEligible && item.adapterImplemented),
+      };
+    });
+  }
+
+  async preflight(userId: string, input: unknown, sourceIp = "unknown") {
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "opportunityId", "mode"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
@@ -184,40 +278,65 @@ export class RwaAutomationControlService {
     if (mode !== "arbitrage_entry" && mode !== "manual_entry") {
       throw new RwaAutomationControlError(400, "mode_invalid", "mode 仅允许 arbitrage_entry 或 manual_entry；connectivity smoke 未开放。");
     }
-    const snapshot = await this.dashboard.getSnapshot(90, true);
-    const opportunity = snapshot.opportunities.find((item) => item.id === opportunityId);
-    if (!opportunity) throw new RwaAutomationControlError(404, "opportunity_not_found", "公开套利机会不存在或已失效。");
-    const safety = assessSafety(opportunity);
-    if (mode === "manual_entry" && !safety.eligible) {
-      throw new RwaAutomationControlError(409, "safety_opportunity_blocked", `当前机会无法安全执行：${safety.reasons.join("；")}。`);
-    }
-    if (mode === "arbitrage_entry" && (
-      !safety.eligible
-      || !opportunity.automationEligible
-    )) {
-      const reasons = opportunity.automationDisqualifiers.length
-        ? opportunity.automationDisqualifiers.join("；")
-        : safety.reasons.join("；") || "该机会不是已合格的同所中性组合";
-      throw new RwaAutomationControlError(409, "automation_opportunity_blocked", `当前机会不符合自动套利入场规则：${reasons}。`);
-    }
-    const connector = this.registry(userId).findForOpportunity(opportunity);
-    if (!connector) {
-      throw new RwaAutomationControlError(501, "opportunity_adapter_unavailable", "该机会对应的 venue/标的 adapter 尚未实现或默认 disabled。");
-    }
-    const challenge = await connector.preflight(opportunity, accountId, mode);
-    this.challengeVenues.set(challenge.challengeId, {
-      userId,
-      venue: connector.venue,
-      accountId,
-      notionalUsd: reportNotional(challenge.report),
+    this.admitRequest("preflight", sourceIp, userId, "unknown");
+    const registry = this.registry(userId);
+    const accountConnector = await registry.findByAccountId(accountId);
+    const governedVenue = accountConnector?.venue ?? "unknown";
+    return this.governed("preflight", sourceIp, userId, governedVenue, accountConnector ? accountId : "unconfigured", async () => {
+      await registry.initialize();
+      const snapshot = await this.dashboard.getSnapshot(90, true);
+      const opportunity = snapshot.opportunities.find((item) => item.id === opportunityId);
+      if (!opportunity) throw new RwaAutomationControlError(404, "opportunity_not_found", "公开套利机会不存在或已失效。");
+      const safety = assessSafety(opportunity);
+      if (mode === "manual_entry" && !safety.eligible) {
+        throw new RwaAutomationControlError(409, "safety_opportunity_blocked", `当前机会无法安全执行：${safety.reasons.join("；")}。`);
+      }
+      if (mode === "arbitrage_entry" && (
+        !safety.eligible
+        || !opportunity.automationEligible
+      )) {
+        const reasons = opportunity.automationDisqualifiers.length
+          ? opportunity.automationDisqualifiers.join("；")
+          : safety.reasons.join("；") || "该机会不是已合格的同所中性组合";
+        throw new RwaAutomationControlError(409, "automation_opportunity_blocked", `当前机会不符合自动套利入场规则：${reasons}。`);
+      }
+      const connector = registry.findForOpportunity(opportunity);
+      if (!connector) {
+        throw new RwaAutomationControlError(501, "opportunity_adapter_unavailable", "该机会对应的 venue/标的 adapter 尚未实现或默认 disabled。");
+      }
+      const configuredAccountId = await connector.getConfiguredAccountId();
+      if (
+        (accountConnector && accountConnector.venue !== connector.venue)
+        || (configuredAccountId && configuredAccountId !== accountId)
+      ) {
+        throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与套利机会所属交易所不匹配。");
+      }
+      await connector.assertRiskCapacity?.();
+      const releaseReservation = this.reserveChallenge(userId);
+      let challenge;
+      try {
+        challenge = await connector.preflight(opportunity, accountId, mode);
+      } finally {
+        releaseReservation();
+      }
+      this.cleanupChallenges();
+      this.assertChallengeCapacity(userId, 1);
+      this.challengeVenues.set(challenge.challengeId, {
+        userId,
+        venue: connector.venue,
+        accountId,
+        notionalUsd: reportNotional(challenge.report),
+        expiresAt: this.now() + this.governance.config.challengeTtlMs,
+      });
+      return challenge;
     });
-    return challenge;
   }
 
-  async execute(userId: string, sessionDomain: string, input: unknown) {
+  async execute(userId: string, sessionDomain: string, input: unknown, sourceIp = "unknown") {
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey", "stepUpToken"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
+    this.admitRequest("execute", sourceIp, userId, "unknown");
     const registry = this.registry(userId);
     const accountConnector = await registry.findByAccountId(accountId);
     if (accountConnector && !accountConnector.providerWritesEnabled) {
@@ -228,143 +347,178 @@ export class RwaAutomationControlService {
       );
     }
     const challengeId = requiredString(body.challengeId, "challengeId", 100);
+    this.cleanupChallenges();
     const challenge = this.challengeVenues.get(challengeId);
     if (!challenge) throw new RwaAutomationControlError(409, "challenge_disarmed", "challenge 不存在或服务重启后已解除 armed，请重新 preflight。");
     if (challenge.userId !== userId) throw new RwaAutomationControlError(404, "challenge_not_found", "challenge 不存在或不属于当前用户。");
     if (accountId !== challenge.accountId) throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 challenge 不匹配。");
-    const sanitized = omitStepUp(body);
-    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-      operation: "hedge_execute",
-      venue: challenge.venue,
-      accountId,
-      resourceId: challengeId,
-      requestDigest: canonicalRequestDigest(sanitized),
-      notionalUsd: challenge.notionalUsd,
+    return this.governed("execute", sourceIp, userId, challenge.venue, accountId, async () => {
+      await registry.initialize();
+      await accountConnector?.assertRiskCapacity?.();
+      const sanitized = omitStepUp(body);
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "hedge_execute",
+        venue: challenge.venue,
+        accountId,
+        resourceId: challengeId,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: challenge.notionalUsd,
+      });
+      return registry.requireImplemented(challenge.venue).execute(sanitized);
     });
-    return registry.requireImplemented(challenge.venue).execute(sanitized);
   }
 
-  async getPositions(userId: string) {
-    const registry = this.registry(userId);
-    const positions = [];
-    for (const venue of registry.listVenues()) {
-      const connector = registry.getImplemented(venue);
-      if (!connector) continue;
-      try {
-        const value = await connector.getPnl() as any;
-        const current = value?.current;
-        if (!current) continue;
-        const spotQuantity = Number(current.legs?.spot?.quantityXaut ?? 0);
-        const perpetualQuantity = Number(current.legs?.perpetual?.quantityXaut ?? 0);
-        if (spotQuantity <= 0 && perpetualQuantity <= 0) continue;
-        positions.push({
-          positionId: `${venue}:${String(current.accountFingerprint ?? "account")}:${String(current.strategyId ?? "strategy")}`,
-          venue,
-          strategyId: current.strategyId,
-          status: "open",
-          ...current,
-        });
-      } catch {
-        // A missing/disabled connector is represented by venue status, not a fabricated position.
+  async getPositions(userId: string, sourceIp = "unknown") {
+    this.admitRequest("private_read", sourceIp, userId, "multi");
+    return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const positions = [];
+      for (const venue of registry.listVenues()) {
+        const connector = registry.getImplemented(venue);
+        if (!connector) continue;
+        try {
+          const value = await connector.getPnl() as any;
+          const current = value?.current;
+          if (!current) continue;
+          const spotQuantity = Number(current.legs?.spot?.quantityXaut ?? 0);
+          const perpetualQuantity = Number(current.legs?.perpetual?.quantityXaut ?? 0);
+          if (spotQuantity <= 0 && perpetualQuantity <= 0) continue;
+          positions.push({
+            positionId: `${venue}:${String(current.accountFingerprint ?? "account")}:${String(current.strategyId ?? "strategy")}`,
+            venue,
+            strategyId: current.strategyId,
+            status: "open",
+            ...current,
+          });
+        } catch {
+          // A missing/disabled connector is represented by venue status, not a fabricated position.
+        }
       }
-    }
-    return { items: positions };
+      return { items: positions };
+    });
   }
 
-  async getPnl(userId: string) {
-    const registry = this.registry(userId);
-    const venues = [];
-    for (const venue of registry.listVenues()) {
-      const connector = registry.getImplemented(venue);
-      if (!connector) continue;
-      try {
-        venues.push({ venue, ...(await connector.getPnl() as Record<string, unknown>) });
-      } catch (error) {
-        venues.push({ venue, unavailable: true, message: safeMessage(error) });
+  async getPnl(userId: string, sourceIp = "unknown") {
+    this.admitRequest("private_read", sourceIp, userId, "multi");
+    return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const venues = [];
+      for (const venue of registry.listVenues()) {
+        const connector = registry.getImplemented(venue);
+        if (!connector) continue;
+        try {
+          venues.push({ venue, ...(await connector.getPnl() as Record<string, unknown>) });
+        } catch (error) {
+          venues.push({ venue, unavailable: true, message: safeMessage(error) });
+        }
       }
-    }
-    return { venues };
+      return { venues };
+    });
   }
 
-  async getAudit(userId: string) {
-    const registry = this.registry(userId);
-    const venues = [];
-    for (const venue of registry.listVenues()) {
-      const connector = registry.getImplemented(venue);
-      if (!connector) continue;
-      venues.push({ venue, ...(await connector.getAudit() as Record<string, unknown>) });
-    }
-    return { venues };
+  async getAudit(userId: string, sourceIp = "unknown") {
+    this.admitRequest("private_read", sourceIp, userId, "multi");
+    return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const venues = [];
+      for (const venue of registry.listVenues()) {
+        const connector = registry.getImplemented(venue);
+        if (!connector) continue;
+        venues.push({ venue, ...(await connector.getAudit() as Record<string, unknown>) });
+      }
+      return { venues, governance: this.governance.auditForUser(userId) };
+    });
   }
 
-  async closePosition(userId: string, sessionDomain: string, positionId: string, input: unknown) {
+  async closePosition(userId: string, sessionDomain: string, positionId: string, input: unknown, sourceIp = "unknown") {
     const [venue] = positionId.split(":", 1);
     if (!venue) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
-    const connector = this.registry(userId).requireImplemented(normalizeVenue(venue));
+    const normalizedVenue = normalizeVenue(venue);
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "idempotencyKey", "stepUpToken"]);
     const sanitized = omitStepUp(body);
     const accountId = requiredString(sanitized.accountId, "accountId", 100);
-    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-      operation: "position_close",
-      venue: connector.venue,
-      accountId,
-      resourceId: positionId,
-      requestDigest: canonicalRequestDigest({ positionId, ...sanitized }),
-      notionalUsd: null,
+    this.admitRequest("position_close", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    return this.governed("position_close", sourceIp, userId, connector.venue, configuredAccountId ?? "unconfigured", async () => {
+      await registry.initialize();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "position_close",
+        venue: connector.venue,
+        accountId,
+        resourceId: positionId,
+        requestDigest: canonicalRequestDigest({ positionId, ...sanitized }),
+        notionalUsd: null,
+      });
+      return connector.closeAll(sanitized);
     });
-    return connector.closeAll(sanitized);
   }
 
-  async closeAll(userId: string, sessionDomain: string, venue: string, input: unknown) {
-    const connector = this.registry(userId).requireImplemented(venue);
+  async closeAll(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "idempotencyKey", "stepUpToken"]);
     const sanitized = omitStepUp(body);
     const accountId = requiredString(sanitized.accountId, "accountId", 100);
-    await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-      operation: "close_all",
-      venue: connector.venue,
-      accountId,
-      resourceId: null,
-      requestDigest: canonicalRequestDigest(sanitized),
-      notionalUsd: null,
+    this.admitRequest("close_all", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    return this.governed("close_all", sourceIp, userId, connector.venue, configuredAccountId ?? "unconfigured", async () => {
+      await registry.initialize();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "close_all",
+        venue: connector.venue,
+        accountId,
+        resourceId: null,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: null,
+      });
+      return connector.closeAll(sanitized);
     });
-    return connector.closeAll(sanitized);
   }
 
-  async resolveStepUpIntent(userId: string, input: unknown): Promise<StepUpIntent> {
+  async resolveStepUpIntent(userId: string, input: unknown, sourceIp = "unknown"): Promise<StepUpIntent> {
     const body = record(input);
     assertOnlyKeys(body, ["operation", "venue", "accountId", "resourceId", "requestDigest"]);
     const operation = normalizeStepUpOperation(body.operation);
     const venue = normalizeVenue(requiredString(body.venue, "venue", 20));
+    this.admitRequest("private_read", sourceIp, userId, venue);
     const connector = this.registry(userId).requireImplemented(venue);
     const configuredAccountId = await connector.getConfiguredAccountId();
-    const accountId = requiredString(body.accountId, "accountId", 100);
-    if (operation === "credential_put") {
-      const expected = configuredAccountId ?? "new-account";
-      if (accountId !== expected) throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图与当前绑定状态不匹配。");
-    } else if (!configuredAccountId || configuredAccountId !== accountId) {
-      throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图不属于当前用户。");
-    }
-    if (!validRequestDigest(body.requestDigest)) throw new RwaAutomationControlError(400, "invalid_request", "requestDigest 格式无效。");
-    const resourceId = body.resourceId === null || body.resourceId === undefined
-      ? null
-      : requiredString(body.resourceId, "resourceId", 200);
-    let notionalUsd: number | null = null;
-    if (operation === "hedge_execute") {
-      if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
-      const challenge = this.challengeVenues.get(resourceId);
-      if (!challenge || challenge.userId !== userId || challenge.venue !== venue || challenge.accountId !== accountId) {
-        throw new RwaAutomationControlError(409, "challenge_disarmed", "preflight challenge 不存在或不属于当前会话范围。");
+    return this.governed("private_read", sourceIp, userId, venue, configuredAccountId ?? "unconfigured", async () => {
+      const accountId = requiredString(body.accountId, "accountId", 100);
+      if (operation === "credential_put") {
+        const expected = configuredAccountId ?? "new-account";
+        if (accountId !== expected) throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图与当前绑定状态不匹配。");
+      } else if (!configuredAccountId || configuredAccountId !== accountId) {
+        throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图不属于当前用户。");
       }
-      notionalUsd = challenge.notionalUsd;
-    } else if (operation === "position_close") {
-      if (!resourceId || !resourceId.startsWith(`${venue}:`)) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
-    } else if (resourceId !== null) {
-      throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受 resourceId。");
-    }
-    return { operation, venue, accountId, resourceId, requestDigest: body.requestDigest, notionalUsd };
+      if (!validRequestDigest(body.requestDigest)) throw new RwaAutomationControlError(400, "invalid_request", "requestDigest 格式无效。");
+      const resourceId = body.resourceId === null || body.resourceId === undefined
+        ? null
+        : requiredString(body.resourceId, "resourceId", 200);
+      let notionalUsd: number | null = null;
+      if (operation === "hedge_execute") {
+        if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
+        this.cleanupChallenges();
+        const challenge = this.challengeVenues.get(resourceId);
+        if (!challenge || challenge.userId !== userId || challenge.venue !== venue || challenge.accountId !== accountId) {
+          throw new RwaAutomationControlError(409, "challenge_disarmed", "preflight challenge 不存在或不属于当前会话范围。");
+        }
+        notionalUsd = challenge.notionalUsd;
+      } else if (operation === "position_close") {
+        if (!resourceId || !resourceId.startsWith(`${venue}:`)) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
+      } else if (resourceId !== null) {
+        throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受 resourceId。");
+      }
+      return { operation, venue, accountId, resourceId, requestDigest: body.requestDigest, notionalUsd };
+    });
   }
 
   private consumeStepUp(userId: string, sessionDomain: string, tokenValue: unknown, intent: StepUpIntent) {
@@ -373,6 +527,81 @@ export class RwaAutomationControlService {
     }
     const stepUpToken = requiredString(tokenValue, "stepUpToken", 200);
     return this.stepUpSecurity.consume(userId, sessionDomain, stepUpToken, intent);
+  }
+
+  private admitRequest(
+    operation: RwaAutomationGovernedOperation,
+    sourceIp: string,
+    userId: string,
+    venue: RwaAutomationGovernanceContext["venue"],
+  ) {
+    this.governance.admitRequest({ operation, sourceIp, userId, venue });
+  }
+
+  private async governed<T>(
+    operation: RwaAutomationGovernedOperation,
+    sourceIp: string,
+    userId: string,
+    venue: RwaAutomationGovernanceContext["venue"],
+    accountId: string,
+    action: () => Promise<T>,
+  ) {
+    const admission = this.governance.enter({ operation, sourceIp, userId, venue, accountId });
+    this.activeRegistryUsers.set(userId, (this.activeRegistryUsers.get(userId) ?? 0) + 1);
+    try {
+      return await action();
+    } finally {
+      admission.release();
+      const active = this.activeRegistryUsers.get(userId) ?? 0;
+      if (active <= 1) this.activeRegistryUsers.delete(userId);
+      else this.activeRegistryUsers.set(userId, active - 1);
+    }
+  }
+
+  private cleanupRegistries() {
+    const cutoff = this.now() - this.governance.config.registryIdleTtlMs;
+    this.cleanupChallenges();
+    for (const [userId, entry] of this.registries) {
+      if (
+        entry.lastUsedAt > cutoff
+        || this.activeRegistryUsers.has(userId)
+        || [...this.challengeVenues.values()].some((challenge) => challenge.userId === userId)
+      ) continue;
+      this.registries.delete(userId);
+    }
+  }
+
+  private cleanupChallenges() {
+    const now = this.now();
+    for (const [id, challenge] of this.challengeVenues) {
+      if (challenge.expiresAt <= now) this.challengeVenues.delete(id);
+    }
+  }
+
+  private assertChallengeCapacity(userId: string, pending = 0) {
+    this.cleanupChallenges();
+    const userCount = [...this.challengeVenues.values()].filter((item) => item.userId === userId).length;
+    const reservedForUser = this.challengeReservations.get(userId) ?? 0;
+    const totalReserved = [...this.challengeReservations.values()].reduce((sum, value) => sum + value, 0);
+    if (
+      this.challengeVenues.size + totalReserved + pending > this.governance.config.maxChallengesGlobal
+      || userCount + reservedForUser + pending > this.governance.config.maxChallengesPerUser
+    ) {
+      throw new RwaAutomationGovernanceError(503, "automation_capacity_exceeded", "自动套利 challenge 容量已满；已拒绝新增风险操作。");
+    }
+  }
+
+  private reserveChallenge(userId: string) {
+    this.assertChallengeCapacity(userId, 1);
+    this.challengeReservations.set(userId, (this.challengeReservations.get(userId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.challengeReservations.get(userId) ?? 0;
+      if (current <= 1) this.challengeReservations.delete(userId);
+      else this.challengeReservations.set(userId, current - 1);
+    };
   }
 }
 
@@ -383,9 +612,10 @@ export class RwaAutomationControlError extends Error {
 }
 
 export function automationErrorResponse(error: unknown) {
-  if (error instanceof RwaAutomationControlError || error instanceof RwaAutomationRegistryError || error instanceof RwaNeutralExecutionError || error instanceof StepUpSecurityError || error instanceof StepUpSecurityStoreError) {
+  if (error instanceof RwaAutomationControlError || error instanceof RwaAutomationRegistryError || error instanceof RwaNeutralExecutionError || error instanceof StepUpSecurityError || error instanceof StepUpSecurityStoreError || error instanceof RwaAutomationGovernanceError) {
     return {
       statusCode: error instanceof StepUpSecurityStoreError ? 503 : error.statusCode,
+      retryAfterSeconds: "retryAfterSeconds" in error ? error.retryAfterSeconds : undefined,
       body: {
         category: error.category,
         message: error.message,

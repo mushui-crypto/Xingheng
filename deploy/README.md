@@ -175,6 +175,31 @@ docker compose --env-file .env.production up -d api web
 三个卷恢复为 `1000:1000`，再启动旧镜像。任何 ownership 迁移前后都应核对 SQLite 备份
 完整性；不得通过放宽目录为全员可写来规避迁移。
 
+## 自动套利限流与容量
+
+生产 API 只能运行一个 Node 实例；第 5 项限流、challenge、step-up authorization、in-flight
+互斥与用户 registry 都依赖单进程同步原子状态。不得增加 API replicas、并行启动第二个 API
+容器或用多进程 cluster/PM2 绕过这一约束。多实例唯一约束与分布式锁属于第 6 项，完成前部署
+校验和运维评审必须把横向扩容视为 fail-closed 条件。
+
+`.env.production.example` 固定了完整安全默认值。关键门禁为：credential `4/10min`，
+preflight `4/10s + 30/10min`，execute `2/60s + 6/1h` 且同账户并发 1，退出共享
+`12/60s`、reserve `3/1h` 且同账户并发 1。状态默认保留 30 天幂等记录，完成执行
+soft/hard `2000/2200`，状态文件 soft/hard `8/10 MiB`。所有值必须是安全范围内的正整数；
+0、负数、unlimited、极大值、hard 小于 soft、持续窗口不长于 burst 窗口或幂等保留短于
+30 天都会使生产启动失败。
+
+429 响应带 `Cache-Control: no-store` 和整数 `Retry-After`。限流审计不得包含源 IP、内部 hash、
+账户 domain、bucket key、Secret 或 provider 原始响应。激活急停、关闭执行开关不使用新增风险
+预算；受控退出有独立预算与有界 reserve。容量达到 soft 上限时只拒绝新增风险，hard reserve
+留给退出、恢复与安全状态持久化。若 hard 上限也无法维持，API 保持 fail-closed并提示在交易所
+人工处理，不得删除开放仓位、manual_intervention 或保留窗口内的幂等记录。
+
+Request admission 必须先于 request-driven registry 创建；非敏感账户元数据只在第一
+阶段通过后读取，KMS/provider 恢复初始化只在账户级第二阶段也通过后执行。step-up authorize
+解析自动套利 intent 时同样携带服务端来源 IP 并先走两阶段门禁；authorization 使用全局及每
+用户原子 reservation，跨用户并发不能突破配置硬上限。
+
 ## Hyperliquid Testnet 真实交易运维
 
 `/app/trade` 第一阶段固定 Hyperliquid Testnet。平台后端不保存用户 API wallet 私钥、

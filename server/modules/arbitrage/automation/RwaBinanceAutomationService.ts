@@ -53,6 +53,7 @@ export class RwaBinanceAutomationService {
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     publicClient?: RwaBinanceClient,
   ) {
+    this.store.setClock(now);
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
     this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
   }
@@ -193,6 +194,10 @@ export class RwaBinanceAutomationService {
 
   async getConfiguredAccountId() {
     return (await this.store.readCredentialMetadata())?.accountId ?? null;
+  }
+
+  assertRiskCapacity() {
+    return this.store.assertRiskCapacity();
   }
 
   async putCredentials(input: RwaBinanceCredentials) {
@@ -482,6 +487,11 @@ export class RwaBinanceAutomationService {
         consumedAt: null,
       });
       await this.store.writeState(state);
+      while (this.armedChallengeIds.size >= this.store.maxInMemoryChallenges) {
+        const oldest = this.armedChallengeIds.values().next().value;
+        if (!oldest) break;
+        this.armedChallengeIds.delete(oldest);
+      }
       this.armedChallengeIds.add(challengeId);
       return { challengeId, challengeToken, expiresAt: report.expiresAt, report };
     });

@@ -64,8 +64,11 @@ export class StepUpSecurityError extends Error {
 
 export class StepUpSecurityService {
   private readonly stores = new Map<string, StepUpSecurityStore>();
+  private readonly storeLastUsedAt = new Map<string, number>();
   private readonly authorizations = new Map<string, Authorization>();
-  private readonly attempts = new Map<string, { count: number; resetAt: number }>();
+  private authorizationReservations = 0;
+  private readonly authorizationReservationsByUser = new Map<string, number>();
+  private readonly attempts = new Map<string, { userDomain: string; count: number; resetAt: number }>();
   private readonly locks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: {
@@ -73,6 +76,14 @@ export class StepUpSecurityService {
     verifyPassword: (userId: string, password: string) => boolean;
     getEnrollmentInvalidatedAt?: (userId: string) => number;
     now?: () => number;
+    capacity?: {
+      maxAuthorizationsGlobal: number;
+      maxAuthorizationsPerUser: number;
+      maxAttempts: number;
+      maxAttemptsPerUser?: number;
+      maxStores: number;
+      storeIdleTtlMs: number;
+    };
   }) {}
 
   async status(userId: string) {
@@ -101,7 +112,7 @@ export class StepUpSecurityService {
       let factorVerified = false;
       if (state.active) {
         if (!input.currentFactor) throw new StepUpSecurityError(403, "step_up_recovery_required", "重新设置二次验证需要当前验证器或恢复码。");
-        this.hitLimit(limitKey);
+        this.hitLimit(limitKey, userId);
         await this.verifyLifecycleFactor(state, input.currentFactor, this.now());
         factorVerified = true;
       }
@@ -127,7 +138,7 @@ export class StepUpSecurityService {
 
   async confirmEnrollment(userId: string, sessionDomain: string, input: { enrollmentId: string; code: string }) {
     const limitKey = verificationLimitKey(userId, sessionDomain);
-    this.hitLimit(limitKey);
+    this.hitLimit(limitKey, userId);
     return this.withUserLock(userId, async () => {
       const state = await this.readAndClean(userId);
       const pending = state.pending;
@@ -155,41 +166,47 @@ export class StepUpSecurityService {
 
   async authorize(userId: string, sessionDomain: string, code: string, intent: StepUpIntent) {
     const limitKey = verificationLimitKey(userId, sessionDomain);
-    this.hitLimit(limitKey);
-    return this.withUserLock(userId, async () => {
-      const state = await this.readAndClean(userId);
-      if (!state.active) throw new StepUpSecurityError(403, "step_up_not_enrolled", "请先设置身份验证器，才能执行敏感操作。");
-      const now = this.now();
-      const counter = verifyTotp(state.active.secret, code, now);
-      if (counter === null) {
-        appendAudit(state, userId, intent.accountId, intent.operation, "rejected", "step_up_invalid", now);
+    this.hitLimit(limitKey, userId);
+    this.purgeAuthorizations(this.now());
+    const releaseReservation = this.reserveAuthorization(userId);
+    try {
+      return await this.withUserLock(userId, async () => {
+        const state = await this.readAndClean(userId);
+        if (!state.active) throw new StepUpSecurityError(403, "step_up_not_enrolled", "请先设置身份验证器，才能执行敏感操作。");
+        const now = this.now();
+        const counter = verifyTotp(state.active.secret, code, now);
+        if (counter === null) {
+          appendAudit(state, userId, intent.accountId, intent.operation, "rejected", "step_up_invalid", now);
+          await this.store(userId).write(state);
+          throw invalidFactor("step_up_invalid", "验证码无效或已过期。");
+        }
+        if (state.active.lastAcceptedCounter !== null && counter <= state.active.lastAcceptedCounter) {
+          appendAudit(state, userId, intent.accountId, intent.operation, "rejected", "step_up_replayed", now);
+          await this.store(userId).write(state);
+          throw new StepUpSecurityError(409, "step_up_replayed", "该验证码已使用，请等待新的验证码。");
+        }
+        state.active.lastAcceptedCounter = counter;
+        appendAudit(state, userId, intent.accountId, intent.operation, "success", "authorized", now);
         await this.store(userId).write(state);
-        throw invalidFactor("step_up_invalid", "验证码无效或已过期。");
-      }
-      if (state.active.lastAcceptedCounter !== null && counter <= state.active.lastAcceptedCounter) {
-        appendAudit(state, userId, intent.accountId, intent.operation, "rejected", "step_up_replayed", now);
-        await this.store(userId).write(state);
-        throw new StepUpSecurityError(409, "step_up_replayed", "该验证码已使用，请等待新的验证码。");
-      }
-      state.active.lastAcceptedCounter = counter;
-      appendAudit(state, userId, intent.accountId, intent.operation, "success", "authorized", now);
-      await this.store(userId).write(state);
-      const rawToken = token();
-      const authorization: Authorization = {
-        ...intent,
-        tokenHash: digest(rawToken),
-        userId,
-        sessionDomain,
-        nonce: token(),
-        issuedAt: now,
-        expiresAt: now + authorizationTtlMs,
-        consumedAt: null,
-      };
-      this.authorizations.set(authorization.tokenHash, authorization);
-      this.clearLimit(limitKey);
-      this.purgeAuthorizations(now);
-      return { authorizationToken: rawToken, expiresAt: authorization.expiresAt };
-    });
+        const rawToken = token();
+        const authorization: Authorization = {
+          ...intent,
+          tokenHash: digest(rawToken),
+          userId,
+          sessionDomain,
+          nonce: token(),
+          issuedAt: now,
+          expiresAt: now + authorizationTtlMs,
+          consumedAt: null,
+        };
+        this.authorizations.set(authorization.tokenHash, authorization);
+        this.clearLimit(limitKey);
+        this.purgeAuthorizations(now);
+        return { authorizationToken: rawToken, expiresAt: authorization.expiresAt };
+      });
+    } finally {
+      releaseReservation();
+    }
   }
 
   async consume(userId: string, sessionDomain: string, rawToken: string, expected: StepUpIntent) {
@@ -215,7 +232,7 @@ export class StepUpSecurityService {
 
   async regenerateRecoveryCodes(userId: string, sessionDomain: string, input: { currentPassword: string; factor: FactorInput }) {
     const limitKey = verificationLimitKey(userId, sessionDomain);
-    this.hitLimit(limitKey);
+    this.hitLimit(limitKey, userId);
     if (!this.options.verifyPassword(userId, input.currentPassword)) throw invalidFactor("current_password_invalid", "当前密码或二次验证信息无效。");
     return this.withUserLock(userId, async () => {
       const state = await this.readAndClean(userId);
@@ -233,7 +250,7 @@ export class StepUpSecurityService {
 
   async disable(userId: string, sessionDomain: string, input: { currentPassword: string; factor: FactorInput }) {
     const limitKey = verificationLimitKey(userId, sessionDomain);
-    this.hitLimit(limitKey);
+    this.hitLimit(limitKey, userId);
     if (!this.options.verifyPassword(userId, input.currentPassword)) throw invalidFactor("current_password_invalid", "当前密码或二次验证信息无效。");
     return this.withUserLock(userId, async () => {
       const state = await this.readAndClean(userId);
@@ -318,17 +335,38 @@ export class StepUpSecurityService {
   }
 
   private store(userId: string) {
+    this.cleanupStores();
     const existing = this.stores.get(userId);
-    if (existing) return existing;
+    if (existing) {
+      this.storeLastUsedAt.set(userId, this.now());
+      return existing;
+    }
+    if (this.stores.size >= this.capacity.maxStores) throw capacityError();
     const created = this.options.storeFactory(userId);
     this.stores.set(userId, created);
+    this.storeLastUsedAt.set(userId, this.now());
     return created;
   }
 
-  private hitLimit(key: string) {
+  private hitLimit(key: string, userId: string) {
     const now = this.now();
+    for (const [attemptKey, attempt] of this.attempts) {
+      if (attempt.resetAt <= now) this.attempts.delete(attemptKey);
+    }
     const current = this.attempts.get(key);
-    const entry = !current || current.resetAt <= now ? { count: 0, resetAt: now + verifyWindowMs } : current;
+    const attemptUserDomain = userDomain(userId);
+    const entry = !current || current.resetAt <= now
+      ? { userDomain: attemptUserDomain, count: 0, resetAt: now + verifyWindowMs }
+      : current;
+    const attemptsForUser = [...this.attempts.values()]
+      .filter((attempt) => attempt.userDomain === attemptUserDomain).length;
+    if (
+      !current
+      && (
+        this.attempts.size >= this.capacity.maxAttempts
+        || attemptsForUser >= (this.capacity.maxAttemptsPerUser ?? 100)
+      )
+    ) throw capacityError();
     entry.count += 1;
     this.attempts.set(key, entry);
     if (entry.count > verifyAttemptLimit) {
@@ -352,11 +390,53 @@ export class StepUpSecurityService {
     }
   }
 
+  private reserveAuthorization(userId: string) {
+    const userCount = [...this.authorizations.values()]
+      .filter((authorization) => authorization.userId === userId).length;
+    const userReservations = this.authorizationReservationsByUser.get(userId) ?? 0;
+    if (
+      this.authorizations.size + this.authorizationReservations >= this.capacity.maxAuthorizationsGlobal
+      || userCount + userReservations >= this.capacity.maxAuthorizationsPerUser
+    ) throw capacityError();
+    this.authorizationReservations += 1;
+    this.authorizationReservationsByUser.set(userId, userReservations + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.authorizationReservations -= 1;
+      const current = this.authorizationReservationsByUser.get(userId) ?? 0;
+      if (current <= 1) this.authorizationReservationsByUser.delete(userId);
+      else this.authorizationReservationsByUser.set(userId, current - 1);
+    };
+  }
+
+  private cleanupStores() {
+    const cutoff = this.now() - this.capacity.storeIdleTtlMs;
+    for (const [userId, lastUsedAt] of this.storeLastUsedAt) {
+      if (lastUsedAt > cutoff || this.locks.has(userId)) continue;
+      this.storeLastUsedAt.delete(userId);
+      this.stores.delete(userId);
+    }
+  }
+
+  private get capacity() {
+    return this.options.capacity ?? {
+      maxAuthorizationsGlobal: 10_000,
+      maxAuthorizationsPerUser: 20,
+      maxAttempts: 20_000,
+      maxAttemptsPerUser: 100,
+      maxStores: 1_000,
+      storeIdleTtlMs: 30 * 60_000,
+    };
+  }
+
   private now() {
     return this.options.now?.() ?? Date.now();
   }
 
   private async withUserLock<T>(userId: string, operation: () => Promise<T>): Promise<T> {
+    if (!this.locks.has(userId) && this.locks.size >= this.capacity.maxStores) throw capacityError();
     const previous = this.locks.get(userId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
@@ -370,6 +450,14 @@ export class StepUpSecurityService {
       if (this.locks.get(userId) === queued) this.locks.delete(userId);
     }
   }
+}
+
+function capacityError() {
+  return new StepUpSecurityError(
+    503,
+    "step_up_capacity_exceeded",
+    "二次验证安全状态容量已满；已拒绝敏感操作。",
+  );
 }
 
 export function canonicalRequestDigest(value: unknown) {

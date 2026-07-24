@@ -30,6 +30,7 @@ const baseEnvironment = {
   RWA_GCP_WIF_AUDIENCE: "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/xingheng-rwa-prod/providers/vultr-x509",
   GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp-wif/adc.json",
   RWA_AUTOMATION_DATA_DIR: "/app/rwa-automation-data",
+  RWA_AUTOMATION_INSTANCE_COUNT: "1",
   RWA_AUTOMATION_BACKUP_DIR: "/app/rwa-automation-backups",
   RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "30",
   RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "1073741824",
@@ -60,6 +61,16 @@ const cases = [
   ["invalid RWA retention", { RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "0" }, "自动套利备份保留或容量配置无效"],
   ["invalid RWA total capacity", { RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "unlimited" }, "自动套利备份保留或容量配置无效"],
   ["invalid RWA snapshot capacity", { RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "999999999999" }, "自动套利备份保留或容量配置无效"],
+  ["disabled automation limiter", { RWA_AUTOMATION_EXECUTE_BURST_MAX: "0" }, "自动套利限流或状态容量配置无效"],
+  ["oversized automation limiter", { RWA_AUTOMATION_PREFLIGHT_SUSTAINED_MAX: "999999999" }, "自动套利限流或状态容量配置无效"],
+  ["invalid automation retention", { RWA_AUTOMATION_IDEMPOTENCY_RETENTION_SECONDS: "-1" }, "自动套利限流或状态容量配置无效"],
+  ["short automation retention", { RWA_AUTOMATION_IDEMPOTENCY_RETENTION_SECONDS: String(29 * 86_400) }, "自动套利限流或状态容量配置无效"],
+  ["inverted automation state capacity", {
+    RWA_AUTOMATION_STATE_MAX_BYTES: "10485760",
+    RWA_AUTOMATION_STATE_MAX_BYTES_HARD: "1048576",
+  }, "自动套利限流或状态容量配置无效"],
+  ["multiple automation instances", { RWA_AUTOMATION_INSTANCE_COUNT: "2" }, "当前只允许单 Node API 实例"],
+  ["node worker expansion", { WEB_CONCURRENCY: "2" }, "当前只允许单 Node API 实例"],
 ];
 
 for (const [name, overrides, expected] of cases) {

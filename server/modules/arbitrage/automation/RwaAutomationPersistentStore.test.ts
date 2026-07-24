@@ -6,6 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { CredentialStoreError, RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import {
+  RwaAutomationGovernanceError,
+  loadRwaAutomationGovernanceConfig,
+} from "./RwaAutomationGovernance";
+import { defaultRwaExecutionConfig, type RwaExecutionRecord } from "./RwaNeutralExecutionTypes";
 
 const permissions = {
   read: true,
@@ -185,6 +190,179 @@ test("fake key provider is unavailable in production", () => {
   }
 });
 
+test("persistent governance deterministically expires challenges and old tombstones without deleting protected recovery state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-gc-"));
+  const now = Date.now();
+  const governanceConfig = {
+    ...loadRwaAutomationGovernanceConfig({}),
+    maxChallengesPerUser: 1,
+    stateCompletedExecutionRetentionMs: 30_000,
+    stateMaxPnlPoints: 1,
+    stateMaxCredentialAuditEntries: 1,
+  };
+  const current = new RwaAutomationPersistentStore({
+    userId: "user-a",
+    venue: "bybit",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath: join(directory, "state.json"),
+    governanceConfig,
+  });
+  try {
+    await writeFile(current.statePath, JSON.stringify({
+      version: 1,
+      config: defaultRwaExecutionConfig,
+      challenges: [
+        challenge("expired", now - 1),
+        challenge("future-a", now + 30_000),
+        challenge("future-b", now + 40_000),
+      ],
+      executions: [
+        execution("old-closed", "closed", now - 60_000),
+        execution("recent-failed", "failed", now - 1_000),
+        execution("manual", "manual_intervention", now - 60_000),
+        execution("open", "hedged", now - 60_000),
+      ],
+      pnlSeries: [{ capturedAt: 1 }, { capturedAt: 2 }],
+      credentialLifecycle: "active",
+      credentialAlert: null,
+      credentialAudit: [
+        { userId: "user-a", action: "activated", accountId: "a", accountFingerprint: "a", maskedApiKey: null, occurredAt: 1 },
+        { userId: "user-a", action: "rotated", accountId: "a", accountFingerprint: "a", maskedApiKey: null, occurredAt: 2 },
+      ],
+    }), { mode: 0o600 });
+    const state = await current.readState();
+    assert.deepEqual(state.challenges.map((item) => item.id), ["future-b"]);
+    assert.deepEqual(state.executions.map((item) => item.executionId), ["manual", "open", "recent-failed"]);
+    assert.deepEqual(state.pnlSeries.map((item) => item.capturedAt), [2]);
+    assert.deepEqual(state.credentialAudit.map((item) => item.occurredAt), [2]);
+    assert.doesNotMatch(await readFile(current.statePath, "utf8"), /old-closed|expired|future-a/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("risk capacity preserves the idempotency retention window and hard reserve fails closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-capacity-"));
+  const governanceConfig = {
+    ...loadRwaAutomationGovernanceConfig({}),
+    stateCompletedExecutionRetentionMs: 30 * 24 * 60 * 60_000,
+    stateMaxCompletedExecutions: 1,
+    stateMaxCompletedExecutionsHard: 2,
+    stateMaxActiveExecutions: 2,
+    stateMaxBytes: 8 * 1024 * 1024,
+    stateMaxBytesHard: 10 * 1024 * 1024,
+  };
+  const current = new RwaAutomationPersistentStore({
+    userId: "user-a",
+    venue: "bybit",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath: join(directory, "state.json"),
+    governanceConfig,
+  });
+  try {
+    const state = await current.readState();
+    state.executions.push(execution("recent-failed", "failed", Date.now()));
+    await current.writeState(state);
+    await assert.rejects(
+      current.assertRiskCapacity(),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_capacity_exceeded",
+    );
+
+    const restarted = new RwaAutomationPersistentStore({
+      userId: "user-a",
+      venue: "bybit",
+      keyProvider: new FakeCredentialKeyProvider(),
+      credentialPath: current.credentialPath,
+      statePath: current.statePath,
+      governanceConfig,
+    });
+    assert.equal((await restarted.readState()).executions[0]?.idempotencyKey, "idempotency:recent-failed");
+
+    state.executions.push(
+      execution("second", "closed", Date.now()),
+      execution("third", "closed", Date.now()),
+    );
+    await assert.rejects(
+      current.writeState(state),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_capacity_exceeded",
+    );
+    assert.equal((await restarted.readState()).executions.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("a restart retains completed execution tombstones for the full 30-day retry window", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-restart-retention-"));
+  const now = 1_800_000_000_000;
+  const governanceConfig = loadRwaAutomationGovernanceConfig({
+    RWA_AUTOMATION_IDEMPOTENCY_RETENTION_SECONDS: String(30 * 86_400),
+  });
+  const paths = {
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath: join(directory, "state.json"),
+  };
+  const createStore = () => {
+    const store = new RwaAutomationPersistentStore({
+      userId: "user-a",
+      venue: "bybit",
+      keyProvider: new FakeCredentialKeyProvider(),
+      ...paths,
+      governanceConfig,
+    });
+    store.setClock(() => now);
+    return store;
+  };
+  try {
+    const current = createStore();
+    const state = await current.readState();
+    state.executions.push(
+      execution("retained-29-days", "closed", now - (29 * 86_400_000)),
+      execution("expired-30-days", "failed", now - (30 * 86_400_000) - 1),
+    );
+    await current.writeState(state);
+
+    const restarted = createStore();
+    const executionIds = (await restarted.readState()).executions.map((item) => item.executionId);
+    assert.deepEqual(executionIds, ["retained-29-days"]);
+    assert.match(await readFile(paths.statePath, "utf8"), /idempotency:retained-29-days/);
+    assert.doesNotMatch(await readFile(paths.statePath, "utf8"), /idempotency:expired-30-days/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("oversized persistent state is rejected before JSON parsing", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-oversized-"));
+  const governanceConfig = {
+    ...loadRwaAutomationGovernanceConfig({}),
+    stateMaxBytes: 512,
+    stateMaxBytesHard: 1_024,
+  };
+  const current = new RwaAutomationPersistentStore({
+    userId: "user-a",
+    venue: "bybit",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath: join(directory, "state.json"),
+    governanceConfig,
+  });
+  try {
+    await writeFile(current.statePath, "not-json".repeat(300), { mode: 0o600 });
+    await assert.rejects(
+      current.readState(),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_capacity_exceeded",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 async function createFixture(userId: string, venue: "bybit" | "binance") {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-v2-"));
   const provider = new FakeCredentialKeyProvider();
@@ -219,4 +397,35 @@ function digest(value: string | Buffer) {
 
 function hasCategory(category: string) {
   return (error: unknown) => error instanceof CredentialStoreError && error.category === category;
+}
+
+function challenge(id: string, expiresAt: number) {
+  return {
+    id,
+    tokenHash: `hash:${id}`,
+    report: {},
+    expiresAt,
+    consumedAt: null,
+  };
+}
+
+function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: number): RwaExecutionRecord {
+  return {
+    userId: "user-a",
+    accountId: "bybit:test-account",
+    executionId: id,
+    idempotencyKey: `idempotency:${id}`,
+    challengeId: `challenge:${id}`,
+    state,
+    orderLinkPrefix: `order:${id}`,
+    spotOrder: null,
+    perpetualOrders: [],
+    compensationOrders: [],
+    hedgedQuantityXaut: 0,
+    unhedgedDurationMs: null,
+    errorCategory: null,
+    message: "test",
+    createdAt: updatedAt,
+    updatedAt,
+  };
 }

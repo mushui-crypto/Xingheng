@@ -9,6 +9,8 @@ export class RwaBybitAutomationConnector implements RwaAutomationConnector {
 
   constructor(private readonly service: RwaNeutralExecutionService) {}
 
+  initialize() { return this.service.initialize(); }
+
   supports(opportunity: ArbitrageOpportunity) {
     return opportunity.strategyType === "same_venue_neutral"
       && opportunity.longLeg.venue === "bybit"
@@ -19,6 +21,7 @@ export class RwaBybitAutomationConnector implements RwaAutomationConnector {
       && opportunity.shortLeg.asset === "XAUT";
   }
 
+  assertRiskCapacity() { return this.service.assertRiskCapacity(); }
   getConfiguredAccountId() { return this.service.getConfiguredAccountId(); }
 
   async getStatus(): Promise<RwaAutomationVenueStatus> {

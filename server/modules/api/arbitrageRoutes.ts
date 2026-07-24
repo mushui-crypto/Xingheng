@@ -55,28 +55,31 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
       response.json(await handler(request));
     } catch (error) {
       const result = automationErrorResponse(error);
+      if (result.retryAfterSeconds !== undefined) {
+        response.setHeader("Retry-After", String(result.retryAfterSeconds));
+      }
       response.status(result.statusCode).json(result.body);
     }
   };
 
-  app.get("/api/arbitrage/automation/venues", route((request) => control.listVenues(authenticatedUserId(request))));
+  app.get("/api/arbitrage/automation/venues", route((request) => control.listVenues(authenticatedUserId(request), sourceIp(request))));
   app.get("/api/arbitrage/automation/venues/:venue/credentials", route(async (request) => ({
-    credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue))).credential,
+    credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue), sourceIp(request))).credential,
   })));
-  app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
-  app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
-  app.get("/api/arbitrage/automation/venues/:venue/config", route((request) => control.getConfig(authenticatedUserId(request), singleParam(request.params.venue))));
-  app.put("/api/arbitrage/automation/venues/:venue/config", route((request) => control.updateConfig(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
-  app.post("/api/arbitrage/automation/venues/:venue/kill-switch", route((request) => control.setKillSwitch(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
-  app.get("/api/arbitrage/automation/venues/:venue/account", route((request) => control.getPrivateAccount(authenticatedUserId(request), singleParam(request.params.venue))));
-  app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request))));
-  app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body)));
-  app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), authenticatedSessionDomain(request), request.body)));
-  app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request))));
-  app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.positionId), request.body)));
-  app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body)));
-  app.get("/api/arbitrage/automation/pnl", route((request) => control.getPnl(authenticatedUserId(request))));
-  app.get("/api/arbitrage/automation/audit", route((request) => control.getAudit(authenticatedUserId(request))));
+  app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/venues/:venue/config", route((request) => control.getConfig(authenticatedUserId(request), singleParam(request.params.venue), sourceIp(request))));
+  app.put("/api/arbitrage/automation/venues/:venue/config", route((request) => control.updateConfig(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/venues/:venue/kill-switch", route((request) => control.setKillSwitch(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/venues/:venue/account", route((request) => control.getPrivateAccount(authenticatedUserId(request), singleParam(request.params.venue), sourceIp(request))));
+  app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request), sourceIp(request))));
+  app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), authenticatedSessionDomain(request), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request), sourceIp(request))));
+  app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.positionId), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/pnl", route((request) => control.getPnl(authenticatedUserId(request), sourceIp(request))));
+  app.get("/api/arbitrage/automation/audit", route((request) => control.getAudit(authenticatedUserId(request), sourceIp(request))));
 }
 
 function authenticatedUserId(request: express.Request) {
@@ -95,4 +98,8 @@ function authenticatedSessionDomain(request: express.Request) {
 
 function singleParam(value: string | string[]) {
   return Array.isArray(value) ? value[0] ?? "" : value;
+}
+
+function sourceIp(request: express.Request) {
+  return request.ip || request.socket?.remoteAddress || "unknown";
 }

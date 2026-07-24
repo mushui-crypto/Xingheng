@@ -5,6 +5,11 @@ import { RwaAutomationConnectorRegistry } from "./RwaAutomationConnectorRegistry
 import { automationErrorResponse, RwaAutomationControlError, RwaAutomationControlService } from "./RwaAutomationControlService";
 import type { RwaAutomationConnector, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
 import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
+import {
+  RwaAutomationGovernance,
+  RwaAutomationGovernanceError,
+  loadRwaAutomationGovernanceConfig,
+} from "./RwaAutomationGovernance";
 
 const sessionDomain = "session-domain-a";
 const stepUpToken = "step-up-token-a";
@@ -159,7 +164,16 @@ test("Binance execute fails at the server capability gate before challenge looku
     });
     return new RwaAutomationConnectorRegistry([binance]);
   };
-  const service = new RwaAutomationControlService({} as any, factory, passThroughStepUp);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    factory,
+    passThroughStepUp,
+    new RwaAutomationGovernance({
+      ...loadRwaAutomationGovernanceConfig({}),
+      executeBurstMax: 5,
+      executeSustainedMax: 10,
+    }),
+  );
 
   for (const input of [
     { accountId: "binance:user-a-account" },
@@ -267,10 +281,12 @@ test("establishing a hedge requires both preflight challenge and step-up before 
 test("risk-reducing switch actions remain immediate while enabling risk requires step-up", async () => {
   let configCalls = 0;
   let killSwitchCalls = 0;
+  let initializeCalls = 0;
   const connector = fakeConnector(() => undefined, {
     accountId: "bybit:test-account",
     onConfig: () => { configCalls += 1; },
     onKillSwitch: () => { killSwitchCalls += 1; },
+    onInitialize: () => { initializeCalls += 1; },
   });
   const rejectingStepUp = {
     consume: async () => { throw new StepUpSecurityError(403, "step_up_required", "该敏感操作需要新的二次身份验证。"); },
@@ -287,6 +303,7 @@ test("risk-reducing switch actions remain immediate while enabling risk requires
   await service.setKillSwitch("user-a", sessionDomain, "bybit", { accountId: "bybit:test-account", active: true });
   assert.equal(configCalls, 1);
   assert.equal(killSwitchCalls, 1);
+  assert.equal(initializeCalls, 0, "risk-reducing controls must not wait for recovery initialization");
 
   await assert.rejects(
     service.updateConfig("user-a", sessionDomain, "bybit", {
@@ -306,6 +323,93 @@ test("risk-reducing switch actions remain immediate while enabling risk requires
   );
   assert.equal(configCalls, 1);
   assert.equal(killSwitchCalls, 1);
+  assert.equal(initializeCalls, 1);
+});
+
+test("credential admission is atomic before step-up and private provider work", async () => {
+  let stepUpCalls = 0;
+  let providerCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    onCredentials: () => { providerCalls += 1; },
+  });
+  const governor = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig({}),
+    credentialMax: 1,
+  }, () => 10_000);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    {
+      consume: async () => { stepUpCalls += 1; },
+      recordCredentialBinding: async () => undefined,
+      revokeAutomationScope: () => undefined,
+    },
+    governor,
+    () => 10_000,
+  );
+  const payload = { apiKey: "key-value", apiSecret: "secret-value", stepUpToken };
+  await service.putCredentials("user-a", sessionDomain, "bybit", payload, "203.0.113.10");
+  await assert.rejects(
+    service.putCredentials("user-a", sessionDomain, "bybit", payload, "203.0.113.10"),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited"
+      && !JSON.stringify(error).includes("secret-value"),
+  );
+  assert.equal(stepUpCalls, 1);
+  assert.equal(providerCalls, 1);
+});
+
+test("request admission rejects before recreating an idle registry or reading account metadata", async () => {
+  let now = 10_000;
+  let registryCreations = 0;
+  let accountMetadataReads = 0;
+  let initializeCalls = 0;
+  const governor = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig({}),
+    privateReadMax: 1,
+    registryIdleTtlMs: 1,
+  }, () => now);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([fakeConnector(() => undefined, {
+        accountId: "bybit:test-account",
+        onAccountMetadata: () => { accountMetadataReads += 1; },
+        onInitialize: () => { initializeCalls += 1; },
+      })]);
+    },
+    passThroughStepUp,
+    governor,
+    () => now,
+  );
+
+  await service.getVenueStatus("user-a", "bybit", "203.0.113.10");
+  now += 2;
+  await assert.rejects(
+    service.getVenueStatus("user-a", "bybit", "203.0.113.10"),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, 1);
+  assert.equal(accountMetadataReads, 1);
+  assert.equal(initializeCalls, 1);
+
+  await assert.rejects(
+    service.resolveStepUpIntent("user-a", {
+      operation: "credential_put",
+      venue: "bybit",
+      accountId: "bybit:test-account",
+      resourceId: null,
+      requestDigest: "a".repeat(43),
+    }, "203.0.113.10"),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, 1);
+  assert.equal(accountMetadataReads, 1);
+  assert.equal(initializeCalls, 1);
 });
 
 function fakeConnector(
@@ -318,6 +422,8 @@ function fakeConnector(
     onExecute?: () => void;
     onConfig?: () => void;
     onKillSwitch?: () => void;
+    onAccountMetadata?: () => void;
+    onInitialize?: () => void;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -325,8 +431,12 @@ function fakeConnector(
     venue,
     implemented: true,
     providerWritesEnabled: options.providerWritesEnabled ?? true,
+    initialize: async () => { options.onInitialize?.(); },
     supports: () => true,
-    getConfiguredAccountId: async () => options.accountId ?? null,
+    getConfiguredAccountId: async () => {
+      options.onAccountMetadata?.();
+      return options.accountId ?? null;
+    },
     getStatus: async () => ({ venue, implemented: true, enabled: false, credential: {
       userId: "user-a", stored: Boolean(options.accountId), accountId: options.accountId ?? null, accountFingerprint: null, masterKeyConfigured: true, maskedApiKey: null, connectionStatus: "not_configured",
       lifecycleStatus: "unconfigured", accountMode: null,

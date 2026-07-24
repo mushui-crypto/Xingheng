@@ -51,7 +51,9 @@ export type RwaAutomationConnector = {
   venue: RwaAutomationVenue;
   implemented: true;
   providerWritesEnabled: boolean;
+  initialize?(): Promise<void>;
   supports(opportunity: ArbitrageOpportunity): boolean;
+  assertRiskCapacity?(): Promise<void>;
   getConfiguredAccountId(): Promise<string | null>;
   getStatus(): Promise<RwaAutomationVenueStatus>;
   putCredentials(input: RwaVenueCredentialInput): Promise<RwaAutomationVenueStatus>;

@@ -8,6 +8,7 @@ import { UserService } from "../../auth/UserService";
 import { TradingStore } from "../../storage/TradingStore";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "../auth/authRoutes";
 import { RwaAutomationControlError } from "../arbitrage/automation/RwaAutomationControlService";
+import { RwaAutomationGovernanceError } from "../arbitrage/automation/RwaAutomationGovernance";
 import type { EmailService } from "../email/EmailService";
 import { FakeCredentialKeyProvider } from "../arbitrage/automation/FakeCredentialKeyProvider";
 import { StepUpSecurityService } from "./StepUpSecurityService";
@@ -49,8 +50,17 @@ test("step-up routes are user-only, no-store, disabled-aware, and reject client 
   });
   registerUserAuthMiddleware(app, users);
   registerStepUpSecurityRoutes(app, security, {
-    resolveStepUpIntent: async (userId: string) => {
+    resolveStepUpIntent: async (userId: string, input: unknown, sourceIp: string) => {
       assert.equal(userId, user.id);
+      assert.match(sourceIp, /127\.0\.0\.1/);
+      if ((input as { rateLimited?: unknown })?.rateLimited === true) {
+        throw new RwaAutomationGovernanceError(
+          429,
+          "automation_rate_limited",
+          "自动套利请求过于频繁，请稍后再试。",
+          17,
+        );
+      }
       throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图不属于当前用户。");
     },
   } as any);
@@ -87,6 +97,19 @@ test("step-up routes are user-only, no-store, disabled-aware, and reject client 
     });
     assert.equal(ownershipMismatch.status, 409);
     assert.equal((await ownershipMismatch.json() as { category: string }).category, "account_mismatch");
+
+    const rateLimitedIntent = await fetch(`${base}/api/auth/security/step-up/authorize`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ code: "123456", intent: { rateLimited: true } }),
+    });
+    assert.equal(rateLimitedIntent.status, 429);
+    assert.equal(rateLimitedIntent.headers.get("cache-control"), "no-store");
+    assert.equal(rateLimitedIntent.headers.get("retry-after"), "17");
+    assert.deepEqual(await rateLimitedIntent.json(), {
+      category: "automation_rate_limited",
+      message: "自动套利请求过于频繁，请稍后再试。",
+    });
 
     const adminLogin = await fetch(`${base}/api/admin/login`, {
       method: "POST",

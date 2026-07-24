@@ -9,6 +9,8 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
 
   constructor(private readonly service: RwaBinanceAutomationService) {}
 
+  initialize() { return this.service.initialize(); }
+
   supports(opportunity: ArbitrageOpportunity) {
     return opportunity.strategyType === "same_venue_neutral"
       && opportunity.longLeg.venue === "binance"
@@ -19,6 +21,7 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
       && opportunity.shortLeg.asset === "XAUT";
   }
 
+  assertRiskCapacity() { return this.service.assertRiskCapacity(); }
   getConfiguredAccountId() { return this.service.getConfiguredAccountId(); }
 
   async getStatus(): Promise<RwaAutomationVenueStatus> {

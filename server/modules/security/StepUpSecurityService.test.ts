@@ -346,6 +346,80 @@ test("security envelopes isolate the AAD domain and reject replacement, tamperin
   }
 });
 
+test("step-up store and authorization capacity are bounded and recover after idle TTL", async () => {
+  const fixture = await createFixture({
+    maxAuthorizationsGlobal: 1,
+    maxAuthorizationsPerUser: 1,
+    maxAttempts: 100,
+    maxStores: 1,
+    storeIdleTtlMs: 60_000,
+  });
+  try {
+    await fixture.service.status("user-a");
+    await assert.rejects(
+      fixture.service.status("user-b"),
+      hasCategory("step_up_capacity_exceeded"),
+    );
+    fixture.advance(60_001);
+    await fixture.service.status("user-b");
+
+    await enroll(fixture, "user-b");
+    fixture.advance(30_000);
+    await fixture.service.authorize(
+      "user-b",
+      "session-a",
+      totpCode(fixture.secret("user-b"), Math.floor(fixture.now() / 30_000)),
+      makeIntent(),
+    );
+    fixture.advance(30_000);
+    await assert.rejects(
+      fixture.service.authorize(
+        "user-b",
+        "session-a",
+        totpCode(fixture.secret("user-b"), Math.floor(fixture.now() / 30_000)),
+        makeIntent(),
+      ),
+      hasCategory("step_up_capacity_exceeded"),
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("global authorization capacity is reserved atomically across users", async () => {
+  const fixture = await createFixture({
+    maxAuthorizationsGlobal: 1,
+    maxAuthorizationsPerUser: 1,
+    maxAttempts: 100,
+    maxStores: 2,
+    storeIdleTtlMs: 60_000,
+  });
+  try {
+    await enroll(fixture, "user-a");
+    await enroll(fixture, "user-b");
+    fixture.advance(30_000);
+    const results = await Promise.allSettled([
+      fixture.service.authorize(
+        "user-a",
+        "session-a",
+        totpCode(fixture.secret("user-a"), Math.floor(fixture.now() / 30_000)),
+        makeIntent(),
+      ),
+      fixture.service.authorize(
+        "user-b",
+        "session-b",
+        totpCode(fixture.secret("user-b"), Math.floor(fixture.now() / 30_000)),
+        { ...makeIntent(), accountId: "bybit:user-b-account" },
+      ),
+    ]);
+    assert.equal(results.filter((result) => result.status === "fulfilled").length, 1);
+    const rejected = results.find((result) => result.status === "rejected") as PromiseRejectedResult;
+    assert.ok(hasCategory("step_up_capacity_exceeded")(rejected.reason));
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 function makeIntent(): StepUpIntent {
   return {
     operation: "hedge_execute",
@@ -367,7 +441,13 @@ async function enroll(fixture: Awaited<ReturnType<typeof createFixture>>, userId
   });
 }
 
-async function createFixture() {
+async function createFixture(capacity?: {
+  maxAuthorizationsGlobal: number;
+  maxAuthorizationsPerUser: number;
+  maxAttempts: number;
+  maxStores: number;
+  storeIdleTtlMs: number;
+}) {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-step-up-"));
   const provider = new FakeCredentialKeyProvider();
   const secrets = new Map<string, string>();
@@ -380,6 +460,7 @@ async function createFixture() {
     verifyPassword: (_userId, password) => password === "correct-password",
     getEnrollmentInvalidatedAt: (userId) => invalidated.get(userId) ?? 0,
     now: () => currentNow,
+    capacity,
   });
   let service = createService();
   return {

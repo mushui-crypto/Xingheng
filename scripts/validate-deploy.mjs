@@ -14,6 +14,7 @@ const rwaBackup = read("scripts/rwa-automation-backup.sh");
 const rwaRestore = read("scripts/rwa-automation-restore.sh");
 const rwaRollback = read("scripts/rwa-automation-rollback.sh");
 const rwaBackupService = read("server/modules/arbitrage/automation/RwaAutomationBackupService.ts");
+const rwaGovernance = read("server/modules/arbitrage/automation/RwaAutomationGovernance.ts");
 
 const assertions = [
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
@@ -74,10 +75,15 @@ const assertions = [
       "RWA_GCP_WIF_AUDIENCE=//iam.googleapis.com/projects/REPLACE_WITH_PROJECT_NUMBER/locations/global/workloadIdentityPools/REPLACE_WITH_POOL/providers/REPLACE_WITH_PROVIDER",
       "GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json",
       "RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data",
+      "RWA_AUTOMATION_INSTANCE_COUNT=1",
       "RWA_AUTOMATION_BACKUP_DIR=/app/rwa-automation-backups",
       "RWA_AUTOMATION_BACKUP_RETENTION_DAYS=30",
       "RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES=1073741824",
       "RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES=104857600",
+      "RWA_AUTOMATION_EXECUTE_BURST_MAX=2",
+      "RWA_AUTOMATION_EXECUTE_CONCURRENCY=1",
+      "RWA_AUTOMATION_IDEMPOTENCY_RETENTION_SECONDS=2592000",
+      "RWA_AUTOMATION_STATE_MAX_BYTES_HARD=10485760",
     ].every((key) => env.includes(key)),
     "production env example is incomplete",
   ],
@@ -95,6 +101,14 @@ const assertions = [
     "Compose must bind the WIF tmpfs directory read-only without creating it",
   ],
   [server.includes("STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例"), "production config must validate strategy alert email when enabled"],
+  [
+    server.includes("loadRwaAutomationGovernanceConfig")
+      && rwaGovernance.includes("automation_capacity_exceeded")
+      && rwaGovernance.includes("executeConcurrencyPerAccount: count")
+      && server.includes("当前只允许单 Node API 实例")
+      && !compose.includes("replicas:"),
+    "production must validate bounded automation rate and capacity governance",
+  ],
   [
     server.includes("RWA_AUTOMATION_MASTER_KEY 已停用")
       && server.includes("RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms")

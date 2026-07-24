@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { access, chmod, mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
   RwaBybitCredentials,
@@ -25,6 +25,11 @@ import {
   type WrappedCredentialDataKey,
 } from "./CredentialKeyProvider";
 import { resolveRwaAutomationActiveDataDir } from "./RwaAutomationDataLayout";
+import {
+  RwaAutomationGovernanceError,
+  loadRwaAutomationGovernanceConfig,
+  type RwaAutomationGovernanceConfig,
+} from "./RwaAutomationGovernance";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -127,6 +132,8 @@ export class RwaAutomationPersistentStore<
   readonly venue: "bybit" | "bitget" | "binance" | "okx";
   readonly ownerUserId: string;
   private readonly keyProvider: CredentialKeyProvider;
+  private readonly governanceConfig: RwaAutomationGovernanceConfig;
+  private clock: () => number;
 
   constructor(options: {
     userId: string;
@@ -134,6 +141,8 @@ export class RwaAutomationPersistentStore<
     keyProvider: CredentialKeyProvider;
     credentialPath?: string;
     statePath?: string;
+    governanceConfig?: RwaAutomationGovernanceConfig;
+    now?: () => number;
   }) {
     if (!options.userId.trim()) throw new Error("RWA automation store requires authenticated user ownership.");
     this.ownerUserId = options.userId;
@@ -147,6 +156,8 @@ export class RwaAutomationPersistentStore<
       ? resolve(options.statePath)
       : resolve(dataDir, `${this.userDomain}-${this.venue}-state.json`);
     this.keyProvider = options.keyProvider;
+    this.governanceConfig = options.governanceConfig ?? loadRwaAutomationGovernanceConfig();
+    this.clock = options.now ?? Date.now;
   }
 
   get masterKeyConfigured() {
@@ -155,6 +166,14 @@ export class RwaAutomationPersistentStore<
 
   get masterKeyError() {
     return this.keyProvider.configurationError;
+  }
+
+  get maxInMemoryChallenges() {
+    return this.governanceConfig.maxChallengesPerUser;
+  }
+
+  setClock(now: () => number) {
+    this.clock = now;
   }
 
   async hasCredentials() {
@@ -312,11 +331,37 @@ export class RwaAutomationPersistentStore<
     });
   }
 
+  async assertRiskCapacity() {
+    const state = await this.readState();
+    const completed = state.executions.filter(isCompletedExecution).length;
+    const active = state.executions.length - completed;
+    const encodedBytes = Buffer.byteLength(JSON.stringify(state), "utf8");
+    if (
+      completed >= this.governanceConfig.stateMaxCompletedExecutions
+      || active >= this.governanceConfig.stateMaxActiveExecutions
+      || encodedBytes >= this.governanceConfig.stateMaxBytes
+    ) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "自动套利持久状态容量已满；已拒绝新增风险操作，急停与受控退出仍可用。",
+      );
+    }
+  }
+
   async readState() {
     try {
+      const metadata = await stat(this.statePath);
+      if (metadata.size > this.governanceConfig.stateMaxBytesHard) {
+        throw new RwaAutomationGovernanceError(
+          503,
+          "automation_capacity_exceeded",
+          "自动套利持久状态超过安全硬上限；已保持 fail-closed。",
+        );
+      }
       const parsed = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<AutomationState>;
       if (parsed.version !== 1) return emptyState();
-      return {
+      const normalized = {
         ...emptyState(),
         ...parsed,
         config: { ...defaultRwaExecutionConfig, ...(parsed.config ?? {}) },
@@ -327,14 +372,35 @@ export class RwaAutomationPersistentStore<
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
         credentialAudit: Array.isArray(parsed.credentialAudit) ? parsed.credentialAudit : [],
       } as AutomationState;
+      const compacted = compactState(normalized, this.governanceConfig, this.clock());
+      if (JSON.stringify(compacted) !== JSON.stringify(normalized)) {
+        await this.writeState(compacted);
+      }
+      return compacted;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return emptyState();
+      if (error instanceof RwaAutomationGovernanceError) throw error;
       throw new Error("RWA 自动执行状态文件不可读；已 fail-closed。");
     }
   }
 
   async writeState(state: AutomationState) {
-    await atomicWriteJson(this.statePath, state);
+    const compacted = compactState(state, this.governanceConfig, this.clock());
+    const completed = compacted.executions.filter(isCompletedExecution).length;
+    const active = compacted.executions.length - completed;
+    const encodedBytes = Buffer.byteLength(JSON.stringify(compacted), "utf8");
+    if (
+      completed > this.governanceConfig.stateMaxCompletedExecutionsHard
+      || active > this.governanceConfig.stateMaxActiveExecutions
+      || encodedBytes > this.governanceConfig.stateMaxBytesHard
+    ) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "自动套利持久状态超过安全硬上限；已保持 fail-closed。",
+      );
+    }
+    await atomicWriteJson(this.statePath, compacted);
   }
 
   private credentialContext(accountId: string): CredentialKeyContext {
@@ -371,6 +437,35 @@ export class RwaAutomationPersistentStore<
 
 export type RwaAutomationStateData = AutomationState;
 export type RwaStoredChallenge = StoredChallenge;
+
+function compactState(
+  state: AutomationState,
+  config: RwaAutomationGovernanceConfig,
+  now: number,
+): AutomationState {
+  const retainedExecutions = state.executions.filter((execution) =>
+    !isCompletedExecution(execution)
+    || execution.updatedAt + config.stateCompletedExecutionRetentionMs > now);
+  return {
+    ...state,
+    challenges: state.challenges
+      .filter((challenge) => challenge.consumedAt === null && challenge.expiresAt > now)
+      .sort((left, right) => left.expiresAt - right.expiresAt)
+      .slice(-config.maxChallengesPerUser),
+    executions: retainedExecutions.sort((left, right) =>
+      left.createdAt - right.createdAt || left.executionId.localeCompare(right.executionId)),
+    pnlSeries: state.pnlSeries
+      .sort((left, right) => left.capturedAt - right.capturedAt)
+      .slice(-config.stateMaxPnlPoints),
+    credentialAudit: state.credentialAudit
+      .sort((left, right) => left.occurredAt - right.occurredAt)
+      .slice(-config.stateMaxCredentialAuditEntries),
+  };
+}
+
+function isCompletedExecution(execution: RwaExecutionRecord) {
+  return execution.state === "closed" || execution.state === "failed";
+}
 
 async function atomicWriteJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });

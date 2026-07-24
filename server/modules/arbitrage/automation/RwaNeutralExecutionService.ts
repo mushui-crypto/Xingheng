@@ -58,6 +58,7 @@ export class RwaNeutralExecutionService {
     private readonly now: () => number = Date.now,
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
   ) {
+    this.store.setClock(now);
     this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
   }
 
@@ -241,6 +242,10 @@ export class RwaNeutralExecutionService {
 
   async getConfiguredAccountId() {
     return (await this.store.readCredentialMetadata())?.accountId ?? null;
+  }
+
+  assertRiskCapacity() {
+    return this.store.assertRiskCapacity();
   }
 
   async putCredentials(input: unknown) {
@@ -506,6 +511,11 @@ export class RwaNeutralExecutionService {
         consumedAt: null,
       });
       await this.store.writeState(state);
+      while (this.armedChallengeIds.size >= this.store.maxInMemoryChallenges) {
+        const oldest = this.armedChallengeIds.values().next().value;
+        if (!oldest) break;
+        this.armedChallengeIds.delete(oldest);
+      }
       this.armedChallengeIds.add(challengeId);
       return { challengeId, challengeToken, expiresAt: report.expiresAt, report };
     });

@@ -14,6 +14,7 @@ import {
   RWA_AUTOMATION_DATA_ROOT,
   validateRwaAutomationDataLayout,
 } from "../modules/arbitrage/automation/RwaAutomationDataLayout";
+import { loadRwaAutomationGovernanceConfig } from "../modules/arbitrage/automation/RwaAutomationGovernance";
 
 export type RuntimeConfig = {
   port: number;
@@ -130,6 +131,7 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
     ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
     ["RWA_AUTOMATION_DATA_DIR", process.env.RWA_AUTOMATION_DATA_DIR?.trim() ?? ""],
+    ["RWA_AUTOMATION_INSTANCE_COUNT", process.env.RWA_AUTOMATION_INSTANCE_COUNT?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
@@ -214,6 +216,12 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (process.env.RWA_AUTOMATION_DATA_DIR !== RWA_AUTOMATION_DATA_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径。");
   }
+  if (
+    process.env.RWA_AUTOMATION_INSTANCE_COUNT !== "1"
+    || (process.env.WEB_CONCURRENCY && process.env.WEB_CONCURRENCY !== "1")
+  ) {
+    throw new Error("自动套利容量治理当前只允许单 Node API 实例，禁止横向扩容。");
+  }
   if (process.env.RWA_AUTOMATION_BACKUP_DIR && process.env.RWA_AUTOMATION_BACKUP_DIR !== RWA_AUTOMATION_BACKUP_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径。");
   }
@@ -221,6 +229,11 @@ function validateProductionConfig(config: RuntimeConfig) {
     loadRwaAutomationBackupLimits();
   } catch {
     throw new Error("生产环境自动套利备份保留或容量配置无效。");
+  }
+  try {
+    loadRwaAutomationGovernanceConfig();
+  } catch {
+    throw new Error("生产环境自动套利限流或状态容量配置无效。");
   }
   const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
   if (!isCanonicalGcpWifAudience(wifAudience)) {

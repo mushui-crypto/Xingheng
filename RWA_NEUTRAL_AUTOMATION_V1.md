@@ -459,6 +459,18 @@ TOTP secret 使用现有 provider-neutral `CredentialKeyProvider`，每次写入
 
 激活 kill switch、关闭 global/strategy execution、只读查询和 preflight 不要求 step-up，且不能被本机制阻止。授权严格绑定 user、当前 session 的不可逆 domain、venue、account、operation、resource、请求摘要与名义金额；过期、重放、并发双消费、跨 session/用户/账户/操作/资源/金额均拒绝。稳定错误类别包括 `step_up_not_enrolled`、`step_up_required`、`step_up_invalid`、`step_up_expired`、`step_up_replayed`、`step_up_scope_mismatch`、`step_up_rate_limited`、`step_up_recovery_required`、`step_up_key_unavailable` 和 `step_up_storage_*`。
 
-密码重置会在 SQLite 写入非敏感 enrollment invalidation epoch，撤销所有内存授权和 pending enrollment，但保留已启用 TOTP；用户恢复登录后仍需重新验证 TOTP。logout 撤销当前 session 授权；用户 disabled、凭证删除/轮换、账户或执行开关、kill switch 变化撤销对应范围授权。验证码/恢复操作按 user + session 实施基础 5 次/5 分钟限制；自动套利专用限流仍属于后续安全整改第 5 项。
+密码重置会在 SQLite 写入非敏感 enrollment invalidation epoch，撤销所有内存授权和 pending enrollment，但保留已启用 TOTP；用户恢复登录后仍需重新验证 TOTP。logout 撤销当前 session 授权；用户 disabled、凭证删除/轮换、账户或执行开关、kill switch 变化撤销对应范围授权。验证码/恢复操作按 user + session 实施基础 5 次/5 分钟限制；自动套利入口还必须通过下述专用限流。
 
-本项前后端实现已通过固定安全复验：security `11/11`、auth/automation routes `6/6`、Modal + step-up + automation 前端 `40/40`、automation `66/66`、arbitrage `32/32`，合计 `155/155`；App/Server/Node TypeScript、完整构建、部署静态校验、production safety `18+5`、Compose 结构和 `git diff --check` 均通过。固定测试的独立浏览器 fixture 被客户端策略阻止，因此本轮未独立取得真实 DOM/响应式数据；owner 已完成 1440/430/390 运行态验证，该限制按既定口径记录为未覆盖项，不构成代码阻塞。本项已由 `b02e367` 提交但尚未部署。真实 Docker mount/UID/GID 集成、`/app/rwa-automation-data` 独立持久卷与备份恢复、multi-instance 原子授权存储及专用限流仍是后续阻塞；当前单 Node 拓扑下授权只存内存，禁止在该契约未升级前横向扩容。
+本项前后端实现已通过固定安全复验：security `11/11`、auth/automation routes `6/6`、Modal + step-up + automation 前端 `40/40`、automation `66/66`、arbitrage `32/32`，合计 `155/155`；App/Server/Node TypeScript、完整构建、部署静态校验、production safety `18+5`、Compose 结构和 `git diff --check` 均通过。固定测试的独立浏览器 fixture 被客户端策略阻止，因此本轮未独立取得真实 DOM/响应式数据；owner 已完成 1440/430/390 运行态验证，该限制按既定口径记录为未覆盖项，不构成代码阻塞。本项已由 `b02e367` 提交但尚未部署。真实 Docker mount/UID/GID 集成和 multi-instance 原子授权存储仍是后续阻塞；当前单 Node 拓扑下授权只存内存，禁止横向扩容。
+
+## 自动套利专用限流与状态容量
+
+第 5 项 owner 实现把普通用户私有 automation API 分为 credential、risk control、preflight、execute、单仓退出、close-all 和 private read 七类策略。每个窗口同时使用不可逆 IP domain、认证 user domain、venue 与服务端确认的 accountId；首次凭证使用固定 `new-account` intent，未知账户使用固定共享域，绝不按 body/query 的 userId 或任意 accountId 拆桶。credential 首次验证/轮换/删除共享 `4/10min`；preflight 为 `4/10s + 30/10min`；execute 为 `2/60s + 6/1h` 且同账户并发 1；单仓退出与 close-all 各有 `8/60s`、共享 `12/60s`，另有 `3/1h` 的受控退出 reserve 且同账户退出并发 1；private read 为 `120/60s`。429 固定 `Cache-Control: no-store`、稳定 category 和 `Retry-After`，不返回 IP、内部 domain、bucket key 或 provider raw response。
+
+限流采用两阶段同步原子门禁：第一阶段只使用不可逆 IP/user domain 与服务端路由 venue，在任何 request-driven registry factory、账户元数据读取、KMS 或 provider 动作前 admission；step-up authorize 的自动套利 intent 解析也必须先通过该门禁。通过后才读取非敏感 credential envelope 元数据，并以服务端确认 accountId 进入第二阶段账户桶和并发门禁。Registry 的恢复初始化只在两阶段均通过后执行，被限流请求不得触发 KMS、provider 私有读取/写入或恢复动作。激活用户急停、关闭 global/strategy execution 和服务端总急停不进入新增风险桶，也不等待恢复初始化；退出使用独立预算，entry/credential/preflight 桶耗尽不会阻断退出。退出预算耗尽只允许使用有界 reserve，并返回人工交易所处理提示，不会静默放开。认证前 401、禁用用户 403 和公开 dashboard 缓存语义不变。
+
+内存安全状态有全局及每用户硬上限：固定窗口 bucket `20000/200`、in-flight `1000/10`、challenge `5000/20` 且 TTL 60 秒、用户 registry 1000、step-up authorization `10000/20`、factor attempt `20000/100`、step-up store 1000；step-up authorization 在任何加密状态读取前原子预留全局及用户容量，成功写入或失败退出都会释放 reservation，跨用户并发不能超发。过期 bucket、challenge、authorization 和空闲 store 定期清理，重启继续清空 challenge、一次性 token、armed 与 in-flight。治理 audit 只保存操作、venue、稳定结果类别和时间，默认全局 5000、每用户 100。
+
+持久状态保留已完成执行/幂等 tombstone 至少 30 天；`hedged`、未完成补偿、recovery/manual_intervention 与开放仓位关联执行不参与 GC。完成执行 soft/hard 为 `2000/2200`，活动执行上限 100，PnL 点 1000，credential audit 500，状态文件 soft/hard 为 `8/10 MiB`。过期 challenge、超过保留期的完成执行、旧 PnL 和 audit 按时间与 ID 确定性清理并原子写回；soft 上限阻断新增风险，hard reserve 保留给急停、退出和恢复。无法安全清理时 fail-closed，不缩短 30 天幂等重试窗口。
+
+全部参数使用有上下界的整数配置；0、负数、无限/超大值、持续窗口短于 burst 窗口、hard 小于 soft 或幂等保留短于 30 天均拒绝生产启动。测试所需短周期只能通过显式依赖注入，不能来自生产 env。当前实现只保证单 Node 进程内原子性，部署继续禁止横向扩容；第 6 项才处理多实例唯一约束、事务与分布式锁。本项代码与静态契约已通过固定安全复验，但尚未部署，不表示可以录入真实凭证或解除服务端总急停。
