@@ -31,6 +31,10 @@ const baseEnvironment = {
   GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp-wif/adc.json",
   RWA_AUTOMATION_DATA_DIR: "/app/rwa-automation-data",
   RWA_AUTOMATION_INSTANCE_COUNT: "1",
+  WEB_CONCURRENCY: "1",
+  RWA_AUTOMATION_EXECUTION_MODE: "single-host",
+  RWA_AUTOMATION_LOCK_DIR: "/app/rwa-automation-lock",
+  RWA_AUTOMATION_LOCK_PATH: "/app/rwa-automation-lock/operation.lock",
   RWA_AUTOMATION_BACKUP_DIR: "/app/rwa-automation-backups",
   RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "30",
   RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "1073741824",
@@ -71,6 +75,9 @@ const cases = [
   }, "自动套利限流或状态容量配置无效"],
   ["multiple automation instances", { RWA_AUTOMATION_INSTANCE_COUNT: "2" }, "当前只允许单 Node API 实例"],
   ["node worker expansion", { WEB_CONCURRENCY: "2" }, "当前只允许单 Node API 实例"],
+  ["wrong automation execution mode", { RWA_AUTOMATION_EXECUTION_MODE: "multi-host" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
+  ["wrong automation lock root", { RWA_AUTOMATION_LOCK_DIR: "/app/data" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
+  ["wrong automation lock path", { RWA_AUTOMATION_LOCK_PATH: "/app/rwa-automation-lock/other.lock" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
 ];
 
 for (const [name, overrides, expected] of cases) {

@@ -45,6 +45,7 @@ import {
   RwaAutomationGovernance,
   loadRwaAutomationGovernanceConfig,
 } from "./modules/arbitrage/automation/RwaAutomationGovernance";
+import { RwaAutomationExecutionLease } from "./modules/arbitrage/automation/RwaAutomationExecutionLease";
 import { StepUpSecurityStore } from "./modules/security/StepUpSecurityStore";
 import { StepUpSecurityService } from "./modules/security/StepUpSecurityService";
 import { registerStepUpSecurityRoutes } from "./modules/security/stepUpSecurityRoutes";
@@ -68,6 +69,9 @@ import type { MarketSymbol, MarketTick } from "./types";
 dotenv.config();
 
 const config = loadRuntimeConfig();
+const rwaAutomationExecutionLease = config.isProduction
+  ? await RwaAutomationExecutionLease.acquire()
+  : null;
 const rwaAutomationGovernanceConfig = loadRwaAutomationGovernanceConfig();
 const rwaAutomationGovernance = new RwaAutomationGovernance(rwaAutomationGovernanceConfig);
 const rwaCredentialKeyProvider = new GcpKmsCredentialKeyProvider();
@@ -169,6 +173,9 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
       governanceConfig: rwaAutomationGovernanceConfig,
     }),
     (credentials) => new RwaBybitMainnetClient(credentials),
+    Date.now,
+    () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
+    () => rwaAutomationExecutionLease?.assertHeld(),
   );
   const binance = new RwaBinanceAutomationService(
     new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
@@ -178,12 +185,16 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
       governanceConfig: rwaAutomationGovernanceConfig,
     }),
     (credentials) => new RwaBinanceMainnetClient(credentials),
+    Date.now,
+    () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
+    undefined,
+    () => rwaAutomationExecutionLease?.assertHeld(),
   );
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),
     new RwaBinanceAutomationConnector(binance),
   ]);
-}, stepUpSecurity, rwaAutomationGovernance);
+}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld());
 registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
 registerArbitrageRoutes(
   app,
@@ -213,6 +224,17 @@ const server = app.listen(port, "0.0.0.0", () => {
 });
 
 const socketHub = registerSocketHub(server, market, realTradingRealtimeTokens, realTradingUserStreams);
+const rwaAutomationLeaseMonitor = rwaAutomationExecutionLease
+  ? setInterval(() => {
+      try {
+        rwaAutomationExecutionLease.assertHeld();
+      } catch {
+        console.error("[api] automation execution lease lost; terminating");
+        process.exit(1);
+      }
+    }, 1_000)
+  : null;
+rwaAutomationLeaseMonitor?.unref();
 
 function registerSocketHub(
   httpServer: typeof server,
@@ -382,6 +404,8 @@ async function shutdown(signal: string) {
       });
     });
     tradingStore.close();
+    if (rwaAutomationLeaseMonitor) clearInterval(rwaAutomationLeaseMonitor);
+    rwaAutomationExecutionLease?.release();
     clearTimeout(forceExit);
     process.exit(0);
   } catch (error) {

@@ -15,6 +15,11 @@ import {
   validateRwaAutomationDataLayout,
 } from "../modules/arbitrage/automation/RwaAutomationDataLayout";
 import { loadRwaAutomationGovernanceConfig } from "../modules/arbitrage/automation/RwaAutomationGovernance";
+import {
+  RWA_AUTOMATION_EXECUTION_MODE,
+  RWA_AUTOMATION_LOCK_PATH,
+  RWA_AUTOMATION_LOCK_ROOT,
+} from "../modules/arbitrage/automation/RwaAutomationExecutionLease";
 
 export type RuntimeConfig = {
   port: number;
@@ -132,6 +137,10 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
     ["RWA_AUTOMATION_DATA_DIR", process.env.RWA_AUTOMATION_DATA_DIR?.trim() ?? ""],
     ["RWA_AUTOMATION_INSTANCE_COUNT", process.env.RWA_AUTOMATION_INSTANCE_COUNT?.trim() ?? ""],
+    ["WEB_CONCURRENCY", process.env.WEB_CONCURRENCY?.trim() ?? ""],
+    ["RWA_AUTOMATION_EXECUTION_MODE", process.env.RWA_AUTOMATION_EXECUTION_MODE?.trim() ?? ""],
+    ["RWA_AUTOMATION_LOCK_DIR", process.env.RWA_AUTOMATION_LOCK_DIR?.trim() ?? ""],
+    ["RWA_AUTOMATION_LOCK_PATH", process.env.RWA_AUTOMATION_LOCK_PATH?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
@@ -218,9 +227,16 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   if (
     process.env.RWA_AUTOMATION_INSTANCE_COUNT !== "1"
-    || (process.env.WEB_CONCURRENCY && process.env.WEB_CONCURRENCY !== "1")
+    || process.env.WEB_CONCURRENCY !== "1"
   ) {
     throw new Error("自动套利容量治理当前只允许单 Node API 实例，禁止横向扩容。");
+  }
+  if (
+    process.env.RWA_AUTOMATION_EXECUTION_MODE !== RWA_AUTOMATION_EXECUTION_MODE
+    || process.env.RWA_AUTOMATION_LOCK_DIR !== RWA_AUTOMATION_LOCK_ROOT
+    || process.env.RWA_AUTOMATION_LOCK_PATH !== RWA_AUTOMATION_LOCK_PATH
+  ) {
+    throw new Error("自动套利执行拓扑必须使用冻结的单主机独占租约配置。");
   }
   if (process.env.RWA_AUTOMATION_BACKUP_DIR && process.env.RWA_AUTOMATION_BACKUP_DIR !== RWA_AUTOMATION_BACKUP_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径。");

@@ -32,7 +32,12 @@ RUN mkdir -p /app/data /app/strategy-data /app/rwa-automation-data/generation-in
     /app/rwa-automation-backups /app/rwa-automation-lock \
   && chmod 0600 /app/rwa-automation-data/current.json \
   && chown -R 20001:20001 /app/data /app/strategy-data /app/rwa-automation-data \
-    /app/rwa-automation-backups /app/rwa-automation-lock /backups
+    /app/rwa-automation-backups /app/rwa-automation-lock /backups \
+  && touch /app/rwa-automation-lock/operation.lock \
+  && chown 20001:20001 /app/rwa-automation-lock/operation.lock \
+  && chmod 0600 /app/rwa-automation-lock/operation.lock \
+  && chown 0:0 /app/rwa-automation-lock \
+  && chmod 0555 /app/rwa-automation-lock
 USER 20001:20001
 EXPOSE 8787
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \

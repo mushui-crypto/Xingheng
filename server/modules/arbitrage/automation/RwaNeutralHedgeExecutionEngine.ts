@@ -11,7 +11,10 @@ import type {
 type PersistExecution = (state: RwaAutomationStateData, execution: RwaExecutionRecord) => Promise<void>;
 
 export class RwaNeutralHedgeExecutionEngine {
-  constructor(private readonly now: () => number = Date.now) {}
+  constructor(
+    private readonly now: () => number = Date.now,
+    private readonly assertExecutionLeaseHeld: () => void = () => {},
+  ) {}
 
   async open<TPermissions extends RwaVenuePermissions>(input: {
     client: RwaNeutralTradingClient<TPermissions, RwaProviderPreflightSnapshot<TPermissions>>;
@@ -23,11 +26,13 @@ export class RwaNeutralHedgeExecutionEngine {
     persist: PersistExecution;
   }) {
     const { client, execution, snapshot, config, state, persist } = input;
+    this.assertExecutionLeaseHeld();
     const halfSlippage = config.maxCombinedSlippageBps / 2 / 10_000;
     const deadline = this.now() + config.maxUnhedgedMs;
     const hedgeDeadline = deadline - Math.min(3_000, Math.floor(config.maxUnhedgedMs / 3));
     execution.state = "opening_spot";
     await persist(state, execution);
+    this.assertExecutionLeaseHeld();
     const spotAccepted = await client.placeOrder({
       category: "spot",
       symbol: "XAUTUSDT",
@@ -37,10 +42,14 @@ export class RwaNeutralHedgeExecutionEngine {
       reduceOnly: false,
       orderLinkId: `${execution.orderLinkPrefix}s1`,
     });
+    this.assertExecutionLeaseHeld();
     const spot = await client.awaitOrder("spot", spotAccepted.orderId, Math.min(deadline, this.now() + 4_000));
     const firstSideFilledAt = this.now();
     execution.spotOrder = spot;
-    if (spot.status === "PartiallyFilled" || spot.status === "New") await client.cancelOrder("spot", spot.orderId);
+    if (spot.status === "PartiallyFilled" || spot.status === "New") {
+      this.assertExecutionLeaseHeld();
+      await client.cancelOrder("spot", spot.orderId);
+    }
     if (spot.filledQuantityXaut < snapshot.perpetual.minOrderQty) throw new Error("现货侧未形成可对冲的最小成交量。");
 
     execution.state = "opening_perpetual";
@@ -49,6 +58,7 @@ export class RwaNeutralHedgeExecutionEngine {
     let attempt = 0;
     while (remaining >= snapshot.perpetual.minOrderQty && attempt < 2 && this.now() < hedgeDeadline) {
       attempt += 1;
+      this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: "linear",
         symbol: "XAUTUSDT",
@@ -58,9 +68,13 @@ export class RwaNeutralHedgeExecutionEngine {
         reduceOnly: false,
         orderLinkId: `${execution.orderLinkPrefix}p${attempt}`,
       });
+      this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder("linear", accepted.orderId, hedgeDeadline);
       execution.perpetualOrders.push(order);
-      if (order.status === "PartiallyFilled" || order.status === "New") await client.cancelOrder("linear", order.orderId);
+      if (order.status === "PartiallyFilled" || order.status === "New") {
+        this.assertExecutionLeaseHeld();
+        await client.cancelOrder("linear", order.orderId);
+      }
       remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), snapshot.perpetual.qtyStep);
       await persist(state, execution);
     }
@@ -70,6 +84,7 @@ export class RwaNeutralHedgeExecutionEngine {
     if (excessSpot >= snapshot.spot.minOrderQty) {
       execution.state = "compensating";
       await persist(state, execution);
+      this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: "spot",
         symbol: "XAUTUSDT",
@@ -79,6 +94,7 @@ export class RwaNeutralHedgeExecutionEngine {
         reduceOnly: false,
         orderLinkId: `${execution.orderLinkPrefix}x1`,
       });
+      this.assertExecutionLeaseHeld();
       const compensation = await client.awaitOrder("spot", accepted.orderId, deadline);
       execution.compensationOrders.push(compensation);
       if (compensation.filledQuantityXaut + 1e-9 < excessSpot) throw new Error("未对冲敞口未能在时限内退出。");
@@ -100,7 +116,9 @@ export class RwaNeutralHedgeExecutionEngine {
     scope: string,
     orderLinkPrefix: string,
   ) {
+    this.assertExecutionLeaseHeld();
     const pnl = await client.readStrategyPnl(scope, null);
+    this.assertExecutionLeaseHeld();
     const market = await client.readPreflightSnapshot();
     const deadline = this.now() + 10_000;
     await this.closeSide(client, {
@@ -127,6 +145,7 @@ export class RwaNeutralHedgeExecutionEngine {
       deadline,
       failureMessage: "现货侧仓位未完全退出。",
     });
+    this.assertExecutionLeaseHeld();
     const confirmed = await client.readStrategyPnl(scope, null);
     if (confirmed.openOrders.length || confirmed.legs.spot.quantityXaut > 1e-9 || confirmed.legs.perpetual.quantityXaut > 1e-9) {
       throw new Error("交易所权威状态仍存在策略活动订单或未退出的两侧仓位。");
@@ -152,6 +171,7 @@ export class RwaNeutralHedgeExecutionEngine {
     let attempt = 0;
     while (remaining >= input.minOrderQty && attempt < 2 && this.now() < input.deadline) {
       attempt += 1;
+      this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: input.category,
         symbol: "XAUTUSDT",
@@ -161,8 +181,12 @@ export class RwaNeutralHedgeExecutionEngine {
         reduceOnly: input.reduceOnly,
         orderLinkId: `${input.orderLinkPrefix}${attempt}`,
       });
+      this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder(input.category, accepted.orderId, input.deadline);
-      if (order.status === "PartiallyFilled" || order.status === "New") await client.cancelOrder(input.category, order.orderId);
+      if (order.status === "PartiallyFilled" || order.status === "New") {
+        this.assertExecutionLeaseHeld();
+        await client.cancelOrder(input.category, order.orderId);
+      }
       remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), input.qtyStep);
     }
     if (remaining >= input.minOrderQty) throw new Error(input.failureMessage);

@@ -10,9 +10,14 @@ services:
       - .env.production
     environment:
       NODE_ENV: production
+      WEB_CONCURRENCY: "1"
       API_PORT: "8787"
       TRADING_DB_PATH: /app/data/trading.sqlite
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
+      RWA_AUTOMATION_EXECUTION_MODE: single-host
+      RWA_AUTOMATION_INSTANCE_COUNT: "1"
+      RWA_AUTOMATION_LOCK_DIR: /app/rwa-automation-lock
+      RWA_AUTOMATION_LOCK_PATH: /app/rwa-automation-lock/operation.lock
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
       STRATEGY_FORWARD_WORKER_POLL_MS: "300000"
@@ -39,10 +44,6 @@ services:
         bind:
           create_host_path: false
     command:
-      - flock
-      - -n
-      - -x
-      - /app/rwa-automation-lock/operation.lock
       - node
       - dist-server/index.js
     healthcheck:

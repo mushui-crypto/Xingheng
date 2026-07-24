@@ -473,4 +473,45 @@ TOTP secret 使用现有 provider-neutral `CredentialKeyProvider`，每次写入
 
 持久状态保留已完成执行/幂等 tombstone 至少 30 天；`hedged`、未完成补偿、recovery/manual_intervention 与开放仓位关联执行不参与 GC。完成执行 soft/hard 为 `2000/2200`，活动执行上限 100，PnL 点 1000，credential audit 500，状态文件 soft/hard 为 `8/10 MiB`。过期 challenge、超过保留期的完成执行、旧 PnL 和 audit 按时间与 ID 确定性清理并原子写回；soft 上限阻断新增风险，hard reserve 保留给急停、退出和恢复。无法安全清理时 fail-closed，不缩短 30 天幂等重试窗口。
 
-全部参数使用有上下界的整数配置；0、负数、无限/超大值、持续窗口短于 burst 窗口、hard 小于 soft 或幂等保留短于 30 天均拒绝生产启动。测试所需短周期只能通过显式依赖注入，不能来自生产 env。当前实现只保证单 Node 进程内原子性，部署继续禁止横向扩容；第 6 项才处理多实例唯一约束、事务与分布式锁。本项代码与静态契约已通过固定安全复验，但尚未部署，不表示可以录入真实凭证或解除服务端总急停。
+全部参数使用有上下界的整数配置；0、负数、无限/超大值、持续窗口短于 burst 窗口、hard 小于 soft 或幂等保留短于 30 天均拒绝生产启动。测试所需短周期只能通过显式依赖注入，不能来自生产 env。本项代码与静态契约已通过固定安全复验，但尚未部署，不表示可以录入真实凭证或解除服务端总急停。
+
+## 单执行实例与跨进程租约
+
+当前冻结能力是单主机、单 Node 执行实例，不宣称支持多主机或横向扩容。生产固定
+`RWA_AUTOMATION_EXECUTION_MODE=single-host`、`RWA_AUTOMATION_INSTANCE_COUNT=1`、
+`WEB_CONCURRENCY=1`，锁目录和文件固定为 `/app/rwa-automation-lock` 与
+`/app/rwa-automation-lock/operation.lock`；其他值拒绝启动。Compose 不配置 replicas，
+并使用仅当前主机可见的 `rwa_automation_lock` local named volume。NFS、CIFS、9p、Ceph、
+GlusterFS 与 FUSE 等网络或用户态文件系统不具备本契约要求的锁语义，运行时一律拒绝。
+
+API 在构造 KMS provider、step-up store、自动套利 registry 或执行 connector 之前取得租约。
+锁目录由镜像预置为 `root:root 0555`，锁文件为 `20001:20001 0600`；生产不创建缺失锁文件。
+启动执行 `lstat + realpath + stat`，要求锁目录为独立可写本地 mount，并用
+`O_RDWR|O_NOFOLLOW` 打开锁文件，再以同一 FD 执行 non-blocking exclusive `flock`。`fstat`
+固定 regular file、`nlink=1`、owner/mode 与 inode；目录不可由 API UID 改写，避免删除锁文件后
+以新 inode 绕过。锁内容不保存 PID、token 或 Secret，旧锁文件不会形成 stale owner；进程退出或
+崩溃关闭 FD 后由内核释放租约。
+
+第二实例在租约竞争失败时直接拒绝启动，不创建 registry，不读取账户元数据，不执行 KMS 解密、
+provider 私有读取、恢复、撤单或下单。租约 guard 同时注入 ControlService、Bybit 与 Binance
+执行服务，在 request-driven registry 创建、凭证操作、preflight、execute、close-all、恢复及
+provider 写前复核 FD；周期监控发现 FD/inode 失效后立即退出。持锁实例的激活急停、关闭执行开关
+和受控退出仍沿用既有独立安全路径，不受新增风险限流阻断；无租约实例不得以“安全退出”为由并发
+写 provider。
+
+execute 在任何 provider 写前已原子持久化 challenge 消费和 execution reservation；close-all
+同样先持久化 compensating execution。崩溃发生在 reservation 后、provider 写前时，重启只恢复
+该记录，不重新建立对冲组合；发生在 provider 写后、最终状态持久化前时，新 owner 按策略
+client order ID/order ID 查询权威状态，仅撤销策略订单并退出策略两侧仓位。无法证明闭环时进入
+`manual_intervention`、激活用户急停并要求人工核对。60 秒 challenge、step-up authorization、
+armed 与 in-flight 状态均不跨重启恢复；持久幂等 tombstone 继续至少保留 30 天。
+
+该租约只对同一主机、同一 local named volume 的进程提供互斥。把同一 Compose 栈复制到第二台
+主机无法由本地 `flock` 协调，因此属于明确禁止的部署拓扑；若未来需要多主机，必须另立任务引入
+共享原子存储、事务唯一约束和 fencing token，不能复用当前实现声称支持。本项代码与静态契约已
+通过固定安全复验，但尚未提交或部署。独立测试确认锁路径替换后旧 owner 立即失效，且首次 provider
+写后租约失效时不再发生后续下单、撤单或恢复写入；两项安全 harness `2/2`、租约与执行专项
+`47 passed + 1 Linux-only skipped`、自动套利全目录 `111 passed + 1 Linux-only skipped`、
+完整套利 `33/33`，三套 TypeScript、完整 build、deploy/production safety `33+11`、Compose
+静态展开与 diff check 均通过。真实 Linux 容器内 flock/volume、双容器竞争、崩溃恢复和旧锁卷
+迁移现场项仍未覆盖，因此本结论不表示可部署、可录入真实凭证或可解除服务端总急停。

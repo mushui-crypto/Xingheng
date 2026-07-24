@@ -57,9 +57,10 @@ export class RwaNeutralExecutionService {
     private readonly clientFactory: RwaBybitTradingClientFactory,
     private readonly now: () => number = Date.now,
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
+    private readonly assertExecutionLeaseHeld: () => void = () => {},
   ) {
     this.store.setClock(now);
-    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now, assertExecutionLeaseHeld);
   }
 
   private get strategyOrderPrefix() {
@@ -67,6 +68,7 @@ export class RwaNeutralExecutionService {
   }
 
   async initialize() {
+    this.assertExecutionLeaseHeld();
     this.armedChallengeIds.clear();
     await this.withLock(async () => {
       if (!(await this.store.hasCredentials()) || !this.store.masterKeyConfigured) return;
@@ -91,6 +93,7 @@ export class RwaNeutralExecutionService {
       }
       for (const execution of pending) {
         try {
+          this.assertExecutionLeaseHeld();
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
           await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
           execution.state = "closed";
@@ -249,6 +252,7 @@ export class RwaNeutralExecutionService {
   }
 
   async putCredentials(input: unknown) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["apiKey", "apiSecret"]);
     const credentials = normalizeCredentials(body);
@@ -304,6 +308,7 @@ export class RwaNeutralExecutionService {
   }
 
   async deleteCredentials(input: unknown = {}) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId"]);
     await this.withLock(async () => {
@@ -474,6 +479,7 @@ export class RwaNeutralExecutionService {
     accountId: string,
     mode: RwaAutomationMode = "arbitrage_entry",
   ): Promise<RwaPreflightChallenge> {
+    this.assertExecutionLeaseHeld();
     return this.withLock(async () => {
       if (mode !== "arbitrage_entry" && mode !== "manual_entry") {
         throw new RwaNeutralExecutionError(400, "mode_invalid", "mode 仅允许 arbitrage_entry 或 manual_entry。");
@@ -522,6 +528,7 @@ export class RwaNeutralExecutionService {
   }
 
   async execute(input: unknown) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
@@ -552,6 +559,7 @@ export class RwaNeutralExecutionService {
       const execution = newExecution(this.store.ownerUserId, accountId, this.strategyOrderPrefix, scopedIdempotencyKey, challengeId, this.now());
       state.executions.push(execution);
       await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
       let client: RwaBybitTradingClient | null = null;
       try {
         const metadata = await this.requireCredentialMetadata();
@@ -569,6 +577,7 @@ export class RwaNeutralExecutionService {
           challengeMode,
         );
         if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止下单。");
+        this.assertExecutionLeaseHeld();
         await client.setPerpetualLeverage(1);
         await this.hedgeEngine.open({
           client,
@@ -585,8 +594,10 @@ export class RwaNeutralExecutionService {
           execution.message = sanitizeRwaAutomationError(error);
           try {
             if (!client) throw new Error("credential client unavailable");
+            this.assertExecutionLeaseHeld();
             execution.state = "compensating";
             await this.persistExecution(state, execution);
+            this.assertExecutionLeaseHeld();
             await client.cancelStrategyOrders(execution.orderLinkPrefix);
             await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
             execution.state = "failed";
@@ -605,6 +616,7 @@ export class RwaNeutralExecutionService {
   }
 
   async closeAll(input: unknown) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "idempotencyKey"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
@@ -621,7 +633,9 @@ export class RwaNeutralExecutionService {
       execution.state = "compensating";
       state.executions.push(execution);
       await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
       try {
+        this.assertExecutionLeaseHeld();
         await client.cancelStrategyOrders(this.strategyOrderPrefix);
         await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
         execution.state = "closed";
@@ -639,6 +653,7 @@ export class RwaNeutralExecutionService {
   }
 
   private async client() {
+    this.assertExecutionLeaseHeld();
     if (!this.store.masterKeyConfigured) throw keyProviderUnavailable(this.store.masterKeyError);
     let credentials: RwaBybitCredentials;
     try {

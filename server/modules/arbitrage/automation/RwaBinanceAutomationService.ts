@@ -52,10 +52,11 @@ export class RwaBinanceAutomationService {
     private readonly now: () => number = Date.now,
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     publicClient?: RwaBinanceClient,
+    private readonly assertExecutionLeaseHeld: () => void = () => {},
   ) {
     this.store.setClock(now);
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
-    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now);
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now, assertExecutionLeaseHeld);
   }
 
   private get strategyOrderPrefix() {
@@ -63,6 +64,7 @@ export class RwaBinanceAutomationService {
   }
 
   async initialize() {
+    this.assertExecutionLeaseHeld();
     this.armedChallengeIds.clear();
     await this.withLock(async () => {
       if (!(await this.store.hasCredentials()) || !this.store.masterKeyConfigured) return;
@@ -87,6 +89,7 @@ export class RwaBinanceAutomationService {
       }
       for (const execution of pending) {
         try {
+          this.assertExecutionLeaseHeld();
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
           await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
           execution.state = "closed";
@@ -201,6 +204,7 @@ export class RwaBinanceAutomationService {
   }
 
   async putCredentials(input: RwaBinanceCredentials) {
+    this.assertExecutionLeaseHeld();
     if (!this.store.masterKeyConfigured) {
       throw keyProviderUnavailable(this.store.masterKeyError);
     }
@@ -255,6 +259,7 @@ export class RwaBinanceAutomationService {
   }
 
   async deleteCredentials(input: unknown = {}) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId"]);
     const metadata = await this.store.readCredentialMetadata();
@@ -445,6 +450,7 @@ export class RwaBinanceAutomationService {
   }
 
   async preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode) {
+    this.assertExecutionLeaseHeld();
     assertSupportedOpportunity(opportunity, mode);
     return this.withLock(async () => {
       const state = await this.store.readState();
@@ -498,6 +504,7 @@ export class RwaBinanceAutomationService {
   }
 
   async execute(input: unknown) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
@@ -537,6 +544,7 @@ export class RwaBinanceAutomationService {
       });
       state.executions.push(execution);
       await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
       let client: RwaBinanceClient | null = null;
       try {
         const metadata = await this.requireMetadata();
@@ -554,6 +562,7 @@ export class RwaBinanceAutomationService {
           this.now(),
         );
         if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止建立对冲组合。");
+        this.assertExecutionLeaseHeld();
         await client.setPerpetualLeverage(1);
         await this.hedgeEngine.open({
           client,
@@ -570,8 +579,10 @@ export class RwaBinanceAutomationService {
           execution.message = sanitizeRwaAutomationError(error);
           try {
             if (!client) throw error;
+            this.assertExecutionLeaseHeld();
             execution.state = "compensating";
             await this.persistExecution(state, execution);
+            this.assertExecutionLeaseHeld();
             await client.cancelStrategyOrders(execution.orderLinkPrefix);
             await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
             execution.state = "failed";
@@ -590,6 +601,7 @@ export class RwaBinanceAutomationService {
   }
 
   async closeAll(input: unknown) {
+    this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId", "idempotencyKey"]);
     const accountId = requiredString(body.accountId, "accountId", 100);
@@ -617,7 +629,9 @@ export class RwaBinanceAutomationService {
       execution.message = "正在退出现货与永续对冲组合。";
       state.executions.push(execution);
       await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
       try {
+        this.assertExecutionLeaseHeld();
         await client.cancelStrategyOrders(this.strategyOrderPrefix);
         await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
         execution.state = "closed";
@@ -635,6 +649,7 @@ export class RwaBinanceAutomationService {
   }
 
   private async client(): Promise<RwaBinanceClient> {
+    this.assertExecutionLeaseHeld();
     if (!this.store.masterKeyConfigured) {
       throw keyProviderUnavailable(this.store.masterKeyError);
     }

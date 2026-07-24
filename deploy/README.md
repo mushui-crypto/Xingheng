@@ -99,8 +99,8 @@ Docker named volume owner/mount、旧容器迁移及恢复演练尚未在真实 
   策略归因/PnL 与审计。
 - `rwa_automation_backups` 只挂载到一次性备份/恢复工具的 `/app/rwa-automation-backups`；API
   不可见该卷。
-- `rwa_automation_lock` 只保存本机 `flock` 协调文件。API 运行期持有独占锁；备份、恢复和回滚
-  取得同一锁后才能执行，避免 API 未停止时生成跨文件不一致快照。
+- `rwa_automation_lock` 只保存本机 `flock` 协调文件。API 在 Node 进程内以安全 FD 持有独占锁；
+  备份、恢复和回滚取得同一锁后才能执行，避免 API 未停止时生成跨文件不一致快照。
 
 SQLite 继续只使用 `sqlite_data/sqlite_backups` 与 `scripts/backup.sh/restore.sh`；策略报告继续只
 使用 `strategy_data`。WIF `/run/secrets/gcp-wif`、SQLite、策略报告、临时文件、lock、preflight
@@ -175,12 +175,45 @@ docker compose --env-file .env.production up -d api web
 三个卷恢复为 `1000:1000`，再启动旧镜像。任何 ownership 迁移前后都应核对 SQLite 备份
 完整性；不得通过放宽目录为全员可写来规避迁移。
 
+## 自动套利单执行实例租约
+
+生产只支持一台主机和一个 Node 执行实例。固定配置如下，缺失或改变任一项都会拒绝启动：
+
+```bash
+RWA_AUTOMATION_EXECUTION_MODE=single-host
+RWA_AUTOMATION_INSTANCE_COUNT=1
+RWA_AUTOMATION_LOCK_DIR=/app/rwa-automation-lock
+RWA_AUTOMATION_LOCK_PATH=/app/rwa-automation-lock/operation.lock
+```
+
+API 不再依赖 Compose command 外层锁；应用在构造 GCP KMS provider 和自动套利服务前安全打开
+锁文件 FD，并以 util-linux `flock` 竞争 non-blocking exclusive 租约。第二实例竞争失败会在任何
+registry 初始化、KMS 解密或 provider 私有读写前退出。锁目录必须是当前主机的独立可写 local
+named volume mount，禁止 NFS/CIFS/9p/Ceph/GlusterFS/FUSE。Compose 不允许 replicas，
+cluster/PM2 和第二套 API 容器均不受支持；同一配置复制到另一台主机也被明确禁止，因为本地锁无法
+跨主机提供 fencing。
+
+镜像预置锁目录 `root:root 0555` 和锁文件 `20001:20001 0600`。API UID 可打开锁文件但不能删除或
+替换目录项；生产缺文件、owner/mode 不符、symlink、hardlink、非独立 mount、只读 mount 或网络
+文件系统均 fail-closed。已有第 4 项锁卷若仍是整体 `20001:20001 0700`，升级前必须停止 API 和
+运维 one-shot，在受控 root 运维容器中核对卷只含 `operation.lock` 后改为上述 owner/mode；不得
+删除数据卷、备份卷或 WIF mount，也不得以 `0777` 绕过。
+
+进程崩溃会由内核随 FD 关闭自动释放锁，锁文件本身不是 PID/stale owner。新进程取得租约后按已
+持久化 execution reservation 和策略订单 ID 恢复，只允许权威查询、撤销策略订单、退出策略两侧
+仓位或进入 `manual_intervention`，不会重放建立对冲组合。锁丢失监控会立即终止旧进程；无租约
+实例不得执行 provider 写，包括退出。正常持锁实例的激活急停、关闭执行开关与受控退出保持可用。
+
+第 6 项代码与静态契约已通过固定安全复验。独立测试确认当前锁路径被替换时旧 owner 立即失效，
+且租约在首次 provider 写后失效时不会继续执行后续下单、撤单、补偿或恢复写入。真实 Linux
+容器内 `flock`、named volume owner/mode、双容器竞争、崩溃重启与旧锁卷迁移仍需部署现场演练；
+完成前不得录入真实交易所凭证、解除服务端总急停或把当前能力描述为多主机支持。
+
 ## 自动套利限流与容量
 
-生产 API 只能运行一个 Node 实例；第 5 项限流、challenge、step-up authorization、in-flight
-互斥与用户 registry 都依赖单进程同步原子状态。不得增加 API replicas、并行启动第二个 API
-容器或用多进程 cluster/PM2 绕过这一约束。多实例唯一约束与分布式锁属于第 6 项，完成前部署
-校验和运维评审必须把横向扩容视为 fail-closed 条件。
+第 5 项限流、challenge、step-up authorization、in-flight 互斥与用户 registry 仍依赖单进程同步
+原子状态；第 6 项通过上述本机租约保证只有一个此类进程存活。不得增加 API replicas、并行启动
+第二个 API 容器或用多进程 cluster/PM2 绕过该约束。
 
 `.env.production.example` 固定了完整安全默认值。关键门禁为：credential `4/10min`，
 preflight `4/10s + 30/10min`，execute `2/60s + 6/1h` 且同账户并发 1，退出共享

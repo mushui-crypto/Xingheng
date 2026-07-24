@@ -15,6 +15,7 @@ const rwaRestore = read("scripts/rwa-automation-restore.sh");
 const rwaRollback = read("scripts/rwa-automation-rollback.sh");
 const rwaBackupService = read("server/modules/arbitrage/automation/RwaAutomationBackupService.ts");
 const rwaGovernance = read("server/modules/arbitrage/automation/RwaAutomationGovernance.ts");
+const rwaExecutionLease = read("server/modules/arbitrage/automation/RwaAutomationExecutionLease.ts");
 
 const assertions = [
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
@@ -42,9 +43,18 @@ const assertions = [
   ],
   [
     (compose.match(/\/app\/rwa-automation-lock\/operation\.lock/g) ?? []).length === 3
-      && compose.includes("- flock")
+      && (compose.match(/- flock/g) ?? []).length === 2
+      && compose.includes("RWA_AUTOMATION_EXECUTION_MODE: single-host")
+      && compose.includes("RWA_AUTOMATION_INSTANCE_COUNT: \"1\"")
+      && compose.includes("- dist-server/index.js")
+      && rwaExecutionLease.includes("O_NOFOLLOW")
+      && rwaExecutionLease.includes("fstatSync")
+      && rwaExecutionLease.includes("acquireWithFlock")
+      && dockerfile.includes("chown 0:0 /app/rwa-automation-lock")
+      && dockerfile.includes("chmod 0555 /app/rwa-automation-lock")
+      && dockerfile.includes("chmod 0600 /app/rwa-automation-lock/operation.lock")
       && dockerfile.includes("util-linux"),
-    "API, RWA backup, and RWA restore must share an exclusive local operation lock",
+    "API must hold the in-process FD/flock lease while backup and restore share the same local lock",
   ],
   [compose.includes("STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json"), "Compose must pin the forward strategy report path"],
   [compose.includes("STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json"), "Compose must pin the history strategy report path"],
@@ -76,6 +86,10 @@ const assertions = [
       "GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json",
       "RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data",
       "RWA_AUTOMATION_INSTANCE_COUNT=1",
+      "WEB_CONCURRENCY=1",
+      "RWA_AUTOMATION_EXECUTION_MODE=single-host",
+      "RWA_AUTOMATION_LOCK_DIR=/app/rwa-automation-lock",
+      "RWA_AUTOMATION_LOCK_PATH=/app/rwa-automation-lock/operation.lock",
       "RWA_AUTOMATION_BACKUP_DIR=/app/rwa-automation-backups",
       "RWA_AUTOMATION_BACKUP_RETENTION_DAYS=30",
       "RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES=1073741824",
@@ -106,6 +120,8 @@ const assertions = [
       && rwaGovernance.includes("automation_capacity_exceeded")
       && rwaGovernance.includes("executeConcurrencyPerAccount: count")
       && server.includes("当前只允许单 Node API 实例")
+      && server.includes("自动套利执行拓扑必须使用冻结的单主机独占租约配置")
+      && compose.includes('WEB_CONCURRENCY: "1"')
       && !compose.includes("replicas:"),
     "production must validate bounded automation rate and capacity governance",
   ],

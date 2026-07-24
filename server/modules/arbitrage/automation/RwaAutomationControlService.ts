@@ -41,9 +41,11 @@ export class RwaAutomationControlService {
     private readonly stepUpSecurity: Pick<StepUpSecurityService, "consume" | "recordCredentialBinding" | "revokeAutomationScope">,
     private readonly governance = new RwaAutomationGovernance(),
     private readonly now: () => number = () => Date.now(),
+    private readonly assertExecutionLeaseHeld: () => void = () => {},
   ) {}
 
   private registry(userId: string) {
+    this.assertExecutionLeaseHeld();
     this.cleanupRegistries();
     const existing = this.registries.get(userId);
     if (existing) {

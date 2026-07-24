@@ -7,6 +7,7 @@ import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./RwaNeutralExecutionService";
+import { createNeutralExecutionRecord } from "./RwaNeutralHedgeExecutionEngine";
 import type {
   RwaBybitTradingClient,
   RwaProviderOrder,
@@ -159,6 +160,185 @@ test("restart disarms an unused challenge and never reaches provider writes", as
       (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "restart_disarmed",
     );
     assert.equal(harness.client.requests.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss after execution reservation performs zero provider writes and leaves restart-safe recovery state", async () => {
+  let guardCalls = 0;
+  let failAt = Number.POSITIVE_INFINITY;
+  const harness = await createHarness({
+    leaseGuard: () => {
+      guardCalls += 1;
+      if (guardCalls >= failAt) throw new Error("lease unavailable");
+    },
+  });
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    guardCalls = 0;
+    failAt = 2;
+    await assert.rejects(harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:lease-loss:1",
+    }), /lease unavailable/);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.leverageWrites, 0);
+    const state = await harness.store.readState();
+    const execution = state.executions.find((item) => item.idempotencyKey.endsWith("entry:lease-loss:1"));
+    assert.equal(execution?.state, "accepted");
+    assert.equal(state.challenges.some((item) =>
+      item.id === challenge.challengeId && item.consumedAt === null), false);
+    assert.equal(state.config.killSwitchActive, false);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss after the first spot mutation prevents perpetual and compensation writes", async () => {
+  let leaseHeld = true;
+  const harness = await createHarness({
+    leaseGuard: () => {
+      if (!leaseHeld) throw new Error("lease unavailable");
+    },
+  });
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    harness.client.mutationHook = (kind, request) => {
+      if (kind === "place" && request?.category === "spot" && request.side === "Buy") leaseHeld = false;
+    };
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:lease-loss-after-spot",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.deepEqual(harness.client.requests.map((item) => [item.category, item.side]), [["spot", "Buy"]]);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss after the leverage mutation prevents all order writes", async () => {
+  let leaseHeld = true;
+  const harness = await createHarness({
+    leaseGuard: () => {
+      if (!leaseHeld) throw new Error("lease unavailable");
+    },
+  });
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    harness.client.mutationHook = (kind) => {
+      if (kind === "leverage") leaseHeld = false;
+    };
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:lease-loss-after-leverage",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(harness.client.leverageWrites, 1);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss during a failed perpetual mutation prevents compensation provider writes", async () => {
+  let leaseHeld = true;
+  const harness = await createHarness({
+    failSecondLeg: true,
+    leaseGuard: () => {
+      if (!leaseHeld) throw new Error("lease unavailable");
+    },
+  });
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    harness.client.mutationHook = (kind, request) => {
+      if (kind === "place" && request?.category === "linear" && request.side === "Sell") leaseHeld = false;
+    };
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:lease-loss-compensation",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.deepEqual(harness.client.requests.map((item) => [item.category, item.side]), [
+      ["spot", "Buy"],
+      ["linear", "Sell"],
+    ]);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss after close-all cancellation prevents subsequent exit mutations", async () => {
+  let leaseHeld = true;
+  const harness = await createHarness({
+    leaseGuard: () => {
+      if (!leaseHeld) throw new Error("lease unavailable");
+    },
+  });
+  try {
+    harness.client.spotQuantity = 0.002;
+    harness.client.perpetualQuantity = 0.002;
+    harness.client.mutationHook = (kind) => {
+      if (kind === "cancel_strategy") leaseHeld = false;
+    };
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:lease-loss-after-cancel",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(harness.client.cancelScopes.length, 1);
+    assert.equal(harness.client.requests.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("lease loss after recovery cancellation prevents subsequent recovery exit mutations", async () => {
+  let leaseHeld = true;
+  const harness = await createHarness();
+  try {
+    const state = await harness.store.readState();
+    state.executions.push(createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${harness.store.userDomain}`,
+      idempotencyKey: `${harness.store.userDomain}:recovery-lease-loss`,
+      challengeId: "recovery-lease-loss",
+      now: harness.now,
+    }));
+    await harness.store.writeState(state);
+    harness.client.spotQuantity = 0.002;
+    harness.client.perpetualQuantity = 0.002;
+    harness.client.mutationHook = (kind) => {
+      if (kind === "cancel_strategy") leaseHeld = false;
+    };
+    const restarted = new RwaNeutralExecutionService(
+      harness.store,
+      () => harness.client,
+      () => harness.now,
+      () => false,
+      () => {
+        if (!leaseHeld) throw new Error("lease unavailable");
+      },
+    );
+    await restarted.initialize();
+    const recovered = await harness.store.readState();
+    assert.equal(recovered.executions.at(-1)?.state, "manual_intervention");
+    assert.equal(harness.client.cancelScopes.length, 1);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(recovered.config.killSwitchActive, true);
   } finally {
     await harness.cleanup();
   }
@@ -345,6 +525,7 @@ async function createHarness(options: {
   ipRestricted?: boolean;
   partialClose?: boolean;
   availableUsdt?: number;
+  leaseGuard?: () => void;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-execution-"));
   const credentialPath = join(directory, "credentials.enc.json");
@@ -358,7 +539,13 @@ async function createHarness(options: {
   });
   const now = 1_800_000_000_000;
   const client = new FakeBybitClient({ ...options, now });
-  const service = new RwaNeutralExecutionService(store, () => client, () => now, () => false);
+  const service = new RwaNeutralExecutionService(
+    store,
+    () => client,
+    () => now,
+    () => false,
+    options.leaseGuard,
+  );
   await service.putCredentials({ apiKey: "owner-api-key-123", apiSecret: "owner-secret-value-123" });
   await service.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
   await service.setKillSwitch(false, accountId);
@@ -381,6 +568,10 @@ class FakeBybitClient implements RwaBybitTradingClient {
   leverageWrites = 0;
   validateCalls = 0;
   accessUnavailable = false;
+  mutationHook: (
+    kind: "leverage" | "place" | "cancel_order" | "cancel_strategy",
+    request?: RwaProviderOrderRequest,
+  ) => void = () => {};
   readonly closeFillAttempts = { spot: 0, linear: 0 };
   private orderCounter = 0;
   private readonly orders = new Map<string, RwaProviderOrderRequest>();
@@ -446,10 +637,12 @@ class FakeBybitClient implements RwaBybitTradingClient {
 
   async setPerpetualLeverage(_leverage: 1) {
     this.leverageWrites += 1;
+    this.mutationHook("leverage");
   }
 
   async placeOrder(request: RwaProviderOrderRequest) {
     this.requests.push(request);
+    this.mutationHook("place", request);
     if (this.failSecondLeg && request.category === "linear" && request.side === "Sell") {
       throw new Error("simulated second-leg failure secret=must-not-leak");
     }
@@ -475,10 +668,13 @@ class FakeBybitClient implements RwaBybitTradingClient {
       filledQuantityXaut: filledQuantity };
   }
 
-  async cancelOrder() {}
+  async cancelOrder() {
+    this.mutationHook("cancel_order");
+  }
 
   async cancelStrategyOrders(scope: string) {
     this.cancelScopes.push(scope);
+    this.mutationHook("cancel_strategy");
   }
 
   async readStrategyPnl(): Promise<RwaStrategyPnlSnapshot> {
