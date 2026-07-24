@@ -167,6 +167,9 @@ KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不
 `20001:20001`、目录 `0700`、文件 `0400`，最后以 `mount --move` 一次性发布。部分 bundle、
 额外文件、symlink/hardlink、路径逃逸、非 mTLS ADC、错误 audience/STS、owner/mode 或最终 mount
 校验失败均不会保留可供 runtime 使用的目标。
+若宿主 `/run` 使用 shared mount propagation，安装器会先把 `/run/xingheng` 建成独立的
+private self-bind 边界，再在其中执行 staging tmpfs 的原子 `mount --move`；不会修改整个
+`/run` 的传播属性，也不会退化为磁盘文件或非原子复制。
 
 宿主机部署前必须先确认 `/run` 为 tmpfs，再由 root 注入身份材料；Compose 不会自动创建宿主目录：
 
@@ -188,10 +191,12 @@ WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利�
 Docker named volume owner/mount、旧容器迁移及恢复演练尚未在真实 Docker 环境验证。完成真实
 部署演练前，禁止在生产录入真实交易所凭证或解除真实执行急停。
 
-当前真实 WIF 尚处于证书侧准备：leaf 私钥只允许在 Vultr 本机 staging 生成，离线 root CA
-私钥只用于一次签发后销毁；公开 CSR、leaf 证书、root trust store 和 fingerprint 可在受限路径
-传递。GCP provider 完成并返回完整 audience 前不得生成 `adc.json`，五文件 bundle 不得部分发布，
-不得运行 activation KMS health。真实 WIF 创建/注入和 KMS probe 仍待后续受控步骤。
+生产 WIF 当前资源口径固定为 project `xingheng-production`、project number
+`1056262324418`、Pool `xingheng-rwa-prod`、Provider `vultr-x509`。leaf 私钥只允许在 Vultr
+本机 root-only source 保存；离线 root CA 私钥只用于一次签发，并在 Provider/IAM 与真实
+STS/KMS health 完成后销毁。公开 CSR、leaf 证书、root trust store 和 fingerprint 可在受限路径
+归档。当前五文件 bundle 已完成 source 与 tmpfs 安装校验；仍需在同一 release 的 activation
+preflight 中证明真实 STS/KMS health，未通过前不得进入 legacy capture 或 release activation。
 
 敏感操作 TOTP 状态与交易所凭证使用同一个 KMS provider，但采用独立 purpose/AAD/domain 和独立
 密文文件；TOTP secret、恢复码明文和一次性授权 token 不得写入环境变量。其密文位于

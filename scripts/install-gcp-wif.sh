@@ -43,9 +43,9 @@ if [ "${NODE_ENV:-}" != test ]; then
     exit 78
   }
 fi
-stage="$parent/.gcp-wif-stage-$$"
 mounted=false
 published=false
+parent_mount_created=false
 cleanup() {
   if [ "$mounted" = true ]; then
     umount "$stage" >/dev/null 2>&1 || true
@@ -56,6 +56,9 @@ cleanup() {
   rmdir "$stage" >/dev/null 2>&1 || true
   if [ -d "$target" ] && ! mountpoint -q "$target"; then
     rmdir "$target" >/dev/null 2>&1 || true
+  fi
+  if [ "$parent_mount_created" = true ]; then
+    umount "$parent" >/dev/null 2>&1 || true
   fi
 }
 trap cleanup EXIT HUP INT TERM
@@ -70,12 +73,23 @@ if [ "${NODE_ENV:-}" != test ]; then
     echo "WIF target parent boundary is invalid" >&2
     exit 78
   }
-  [ "$(findmnt -n -o TARGET -T "$parent")" = /run ] \
-    && [ "$(findmnt -n -o FSTYPE -T "$parent")" = tmpfs ] || {
+  [ "$(findmnt -n -o FSTYPE -T "$parent")" = tmpfs ] || {
     echo "WIF target parent has an unexpected mount boundary" >&2
     exit 78
   }
+  if [ "$(findmnt -n -o TARGET -T "$parent")" = /run ]; then
+    mount --bind "$parent" "$parent"
+    parent_mount_created=true
+    mount --make-private "$parent"
+  fi
+  [ "$(findmnt -n -o TARGET -T "$parent")" = "$parent" ] \
+    && [ "$(findmnt -n -o FSTYPE -T "$parent")" = tmpfs ] \
+    && [ "$(findmnt -n -o PROPAGATION -T "$parent")" = private ] || {
+    echo "WIF target parent is not an isolated private tmpfs boundary" >&2
+    exit 78
+  }
 fi
+stage="$parent/.gcp-wif-stage-$$"
 install -d -o 0 -g 0 -m 0700 "$stage"
 mount -t tmpfs -o rw,nosuid,nodev,noexec,mode=0700,uid=20001,gid=20001,size=4m \
   tmpfs "$stage"
@@ -96,6 +110,7 @@ published=true
 }
 node scripts/verify-gcp-wif-bundle.mjs installed "$target" "$audience_file"
 published=false
+parent_mount_created=false
 trap - EXIT HUP INT TERM
 rmdir "$stage" >/dev/null 2>&1 || true
 printf 'WIF tmpfs installation verified\n'
