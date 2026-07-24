@@ -12,6 +12,7 @@ services:
       NODE_ENV: production
       API_PORT: "8787"
       TRADING_DB_PATH: /app/data/trading.sqlite
+      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
       STRATEGY_FORWARD_WORKER_POLL_MS: "300000"
@@ -29,12 +30,21 @@ services:
       - sqlite_data:/app/data
       - strategy_data:/app/strategy-data
       - sqlite_backups:/backups
+      - rwa_automation_data:/app/rwa-automation-data
+      - rwa_automation_lock:/app/rwa-automation-lock
       - type: bind
         source: /run/xingheng/gcp-wif
         target: /run/secrets/gcp-wif
         read_only: true
         bind:
           create_host_path: false
+    command:
+      - flock
+      - -n
+      - -x
+      - /app/rwa-automation-lock/operation.lock
+      - node
+      - dist-server/index.js
     healthcheck:
       test:
         - CMD
@@ -89,9 +99,88 @@ services:
       - run
       - research:ict:history
 
+  rwa-automation-backup:
+    profiles:
+      - rwa-automation-ops
+    build:
+      context: .
+      target: api
+    user: "20001:20001"
+    environment:
+      NODE_ENV: production
+      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
+      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
+      RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "${RWA_AUTOMATION_BACKUP_RETENTION_DAYS:-30}"
+      RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
+      RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
+      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
+      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
+    volumes:
+      - rwa_automation_data:/app/rwa-automation-data:ro
+      - rwa_automation_backups:/app/rwa-automation-backups
+      - rwa_automation_lock:/app/rwa-automation-lock
+      - type: bind
+        source: /run/xingheng/gcp-wif
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "no"
+    command:
+      - flock
+      - -n
+      - -x
+      - /app/rwa-automation-lock/operation.lock
+      - node
+      - dist-server/operations/rwa-automation-backup.js
+      - create
+
+  rwa-automation-restore:
+    profiles:
+      - rwa-automation-ops
+    build:
+      context: .
+      target: api
+    user: "20001:20001"
+    environment:
+      NODE_ENV: production
+      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
+      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
+      RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "${RWA_AUTOMATION_BACKUP_RETENTION_DAYS:-30}"
+      RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
+      RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
+      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
+      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
+    volumes:
+      - rwa_automation_data:/app/rwa-automation-data
+      - rwa_automation_backups:/app/rwa-automation-backups:ro
+      - rwa_automation_lock:/app/rwa-automation-lock
+      - type: bind
+        source: /run/xingheng/gcp-wif
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
+    restart: "no"
+    command:
+      - flock
+      - -n
+      - -x
+      - /app/rwa-automation-lock/operation.lock
+      - node
+      - dist-server/operations/rwa-automation-backup.js
+      - restore
+
 volumes:
   sqlite_data:
   strategy_data:
   sqlite_backups:
+  rwa_automation_data:
+  rwa_automation_backups:
+  rwa_automation_lock:
   caddy_data:
   caddy_config:

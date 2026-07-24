@@ -12,19 +12,27 @@ RUN groupadd --gid 20001 xingheng \
 ENV NODE_ENV=production \
     API_PORT=8787 \
     TRADING_DB_PATH=/app/data/trading.sqlite \
+    RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data \
+    RWA_AUTOMATION_BACKUP_DIR=/app/rwa-automation-backups \
     STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json \
     STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json \
     MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 WORKDIR /app
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends sqlite3 unzip \
+  && apt-get install -y --no-install-recommends sqlite3 unzip util-linux \
   && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist-server ./dist-server
 COPY scripts ./scripts
-RUN mkdir -p /app/data /app/strategy-data /app/rwa-automation-data /backups \
-  && chown -R 20001:20001 /app/data /app/strategy-data /app/rwa-automation-data /backups
+COPY deploy/rwa-automation-current.json /app/rwa-automation-data/current.json
+RUN mkdir -p /app/data /app/strategy-data /app/rwa-automation-data/generation-initial \
+    /app/rwa-automation-backups /app/rwa-automation-lock /backups \
+  && chmod 0700 /app/rwa-automation-data /app/rwa-automation-data/generation-initial \
+    /app/rwa-automation-backups /app/rwa-automation-lock \
+  && chmod 0600 /app/rwa-automation-data/current.json \
+  && chown -R 20001:20001 /app/data /app/strategy-data /app/rwa-automation-data \
+    /app/rwa-automation-backups /app/rwa-automation-lock /backups
 USER 20001:20001
 EXPOSE 8787
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \

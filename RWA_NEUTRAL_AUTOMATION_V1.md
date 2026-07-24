@@ -4,7 +4,7 @@
 
 当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产 Compose 的 X.509 WIF/ADC 只读挂载契约已实现，但尚未在服务器注入真实身份材料或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
-安全整改第 3 项已完成前后端实现并通过固定安全复验：敏感操作新增 RFC 6238 TOTP 二次身份验证和一次性 step-up authorization。二维码作为后续体验优化延期，当前通过手动设置值完成 enrollment；本项尚未提交或部署，生产服务端总急停继续保持激活。
+安全整改第 3 项已完成前后端实现并通过固定安全复验：敏感操作新增 RFC 6238 TOTP 二次身份验证和一次性 step-up authorization。二维码作为后续体验优化延期，当前通过手动设置值完成 enrollment；本项已由 `b02e367` 提交但尚未部署，生产服务端总急停继续保持激活。
 
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
 
@@ -365,7 +365,7 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 - `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；`adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 UID `20001` owner、`0400`。根目录要求 UID `20001` owner、`0700`。
 - 宿主 WIF 目录固定为 `/run/xingheng/gcp-wif`，不接受环境变量覆盖。Compose 将整个目录只读 bind 到 `/run/secrets/gcp-wif`，不自动创建目录。API 与共享 `strategy_data` 的策略工具固定以 `20001:20001` 非 root 身份运行；rootless Docker、user namespace remap、非 tmpfs 来源、可写挂载或可写子挂载均 fail-closed。旧 UID `1000` 的现有数据卷必须在停机备份后执行一次受控 owner 迁移，不能用宽权限替代。
 - `RWA_AUTOMATION_MASTER_KEY` 已停用。生产若发现该变量、非 GCP provider、错误 CryptoKey 或不安全 ADC 路径，启动配置校验直接失败，不允许本地主密钥或明文降级。
-- `RWA_AUTOMATION_DATA_DIR`：按不可逆用户域 + venue 分隔的凭证/状态目录。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
+- `RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data`：生产固定为独立 named volume 根目录。`current.json` 以原子指针选择只读冻结的 generation，generation 内按不可逆用户域 + venue 分隔凭证/状态。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
 - `RWA_AUTOMATION_SERVER_KILL_SWITCH`：服务端全局急停，只有显式设为 `false` 才允许新增风险；用户级开关不能覆盖它。
 - `RWA_BINANCE_ALLOWED_EGRESS_IPS`：Binance 真实执行允许的服务端固定出口 IPv4，逗号分隔；必须与 Binance 返回的 API Key `ipList` 完全一致。缺失、非法、通配、CIDR 或集合不匹配均 fail-closed，具体 IP 不进入接口响应或凭证元数据。
 
@@ -377,7 +377,13 @@ GCP KMS Encrypt 必须提交 plaintext 与 additional authenticated data 的 CRC
 
 WIF 叶证书轮换采用版本化 cert/key 文件与同目录原子替换 `certificate_config.json`：先完整写入并同步新文件，再一次性切换配置，旧文件至少保留两个 token 生命周期。ADC audience/provider 或 trust chain 变化需要受控重启。宿主重启后 tmpfs 内容消失，部署流程必须重新注入身份材料；Google Auth 在 token 刷新时会持续读取文件，运行期间不得撤掉挂载。WIF 身份材料明确排除在项目备份和恢复之外。
 
-当前 Compose 尚未为 `/app/rwa-automation-data` 配置独立持久卷，也未纳入凭证密文/状态文件的备份恢复流程；这是安全整改第 4 项的明确阻塞。在该项完成并独立验收前，不得把本实现作为生产真实执行已就绪的依据，也不得录入真实交易所凭证。
+安全整改第 4 项 owner 实现已增加互相隔离的 `rwa_automation_data`、`rwa_automation_backups` 与 `rwa_automation_lock` volumes。API 只挂载数据卷和锁卷；备份 one-shot 以只读方式挂载数据卷，恢复 one-shot 以只读方式挂载备份卷。API 与运维工具使用同一 `flock`，脚本默认先停止 API，保证所有原子单文件写停止后再枚举一致快照。SQLite、策略报告与 WIF mount 不与上述 volumes 或脚本混用。
+
+自动套利备份使用 provider-neutral `CredentialKeyProvider` 的独立 `automation-backup` purpose、`rwa-automation-backup:v1:backupId:environment` AAD 和 `rwa-automation-disaster-recovery` domain。每份归档使用新随机 DEK 整体 AES-256-GCM 加密 manifest 和文件正文，KMS 只包裹 DEK。manifest 严格记录 schema、时间、环境、allowlist 路径、大小和 SHA-256；只允许当前 credential envelope、automation state 与 `step-up-security` envelope。三类文件在备份发布前均按冻结 schema 递归校验精确字段和类型，未知字段、嵌套授权 token、cache/armed 或 provider raw response 均 fail-closed，不能因外层归档已加密而原样保留。WIF、SQLite、策略报告、临时文件、lock、challenge、一次性 step-up token、内存 cache/armed 状态与 provider raw response明确排除。
+
+恢复只接受严格 UTC 文件名，并在读取/JSON 解析/KMS 前基于同一文件描述符执行 `O_NOFOLLOW`、owner/mode、密文归档上界和备份卷总容量校验；超限返回稳定容量错误且不改变当前 pointer。随后在新 generation 中完成 KMS unwrap、AAD/tag/wrap binding、manifest、hash、schema、路径、symlink/hard link、owner/mode 与全文件语义校验后原子切换 `current.json`；同一个 pointer 同时保存 current 与 rollback generation。失败或切换前中断不改变原数据，切换后原 generation 仍可回滚。恢复出的 automation state 固定清空 challenge、关闭 global/strategy execution并激活用户 kill switch；服务端总急停不受备份控制，重启不恢复 armed，也不重放建立对冲组合，未完成执行只进入既有 recovery/manual_intervention 或退出流程。
+
+保留期默认 30 天、总容量默认 1 GiB、单快照默认 100 MiB；删除只匹配严格自动套利备份名。密文归档需另行复制到独立主机或对象存储并定期在隔离卷演练恢复，WIF 不得随备份复制。第 4 项代码、离线 harness 与静态部署契约已通过固定安全复验；尚未在真实 Docker daemon 验证 named volume owner/mount、flock、容器重建、旧数据迁移、异机副本或恢复回滚，这些现场项完成前不得宣称可部署或录入真实凭证。
 
 生产或本地均不得在聊天、测试 fixture、日志或接口响应中填入真实 Secret。专项测试只允许假 provider，禁止触发 Mainnet 订单。
 
@@ -455,4 +461,4 @@ TOTP secret 使用现有 provider-neutral `CredentialKeyProvider`，每次写入
 
 密码重置会在 SQLite 写入非敏感 enrollment invalidation epoch，撤销所有内存授权和 pending enrollment，但保留已启用 TOTP；用户恢复登录后仍需重新验证 TOTP。logout 撤销当前 session 授权；用户 disabled、凭证删除/轮换、账户或执行开关、kill switch 变化撤销对应范围授权。验证码/恢复操作按 user + session 实施基础 5 次/5 分钟限制；自动套利专用限流仍属于后续安全整改第 5 项。
 
-本项前后端实现已通过固定安全复验：security `11/11`、auth/automation routes `6/6`、Modal + step-up + automation 前端 `40/40`、automation `66/66`、arbitrage `32/32`，合计 `155/155`；App/Server/Node TypeScript、完整构建、部署静态校验、production safety `18+5`、Compose 结构和 `git diff --check` 均通过。固定测试的独立浏览器 fixture 被客户端策略阻止，因此本轮未独立取得真实 DOM/响应式数据；owner 已完成 1440/430/390 运行态验证，该限制按既定口径记录为未覆盖项，不构成代码阻塞。本项尚未提交或部署。真实 Docker mount/UID/GID 集成、`/app/rwa-automation-data` 独立持久卷与备份恢复、multi-instance 原子授权存储及专用限流仍是后续阻塞；当前单 Node 拓扑下授权只存内存，禁止在该契约未升级前横向扩容。
+本项前后端实现已通过固定安全复验：security `11/11`、auth/automation routes `6/6`、Modal + step-up + automation 前端 `40/40`、automation `66/66`、arbitrage `32/32`，合计 `155/155`；App/Server/Node TypeScript、完整构建、部署静态校验、production safety `18+5`、Compose 结构和 `git diff --check` 均通过。固定测试的独立浏览器 fixture 被客户端策略阻止，因此本轮未独立取得真实 DOM/响应式数据；owner 已完成 1440/430/390 运行态验证，该限制按既定口径记录为未覆盖项，不构成代码阻塞。本项已由 `b02e367` 提交但尚未部署。真实 Docker mount/UID/GID 集成、`/app/rwa-automation-data` 独立持久卷与备份恢复、multi-instance 原子授权存储及专用限流仍是后续阻塞；当前单 Node 拓扑下授权只存内存，禁止在该契约未升级前横向扩容。

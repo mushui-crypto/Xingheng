@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 export const RWA_CREDENTIAL_ENVELOPE_VERSION = 2 as const;
 export const RWA_CREDENTIAL_AAD_SCHEMA = "rwa-credential:v2:userId:venue:accountId:environment" as const;
 export const STEP_UP_SECURITY_AAD_SCHEMA = "step-up-security:v1:userId:purpose:environment" as const;
+export const RWA_AUTOMATION_BACKUP_AAD_SCHEMA = "rwa-automation-backup:v1:backupId:environment" as const;
 export const RWA_GCP_KMS_KEY_NAME =
   "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials" as const;
 
@@ -27,7 +28,18 @@ export type StepUpSecurityKeyContext = {
   schemaVersion: typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
 };
 
-export type CredentialKeyContext = ExchangeCredentialKeyContext | StepUpSecurityKeyContext;
+export type AutomationBackupKeyContext = {
+  purpose: "automation-backup";
+  backupId: string;
+  backupDomain: "rwa-automation-disaster-recovery";
+  environment: CredentialEnvironment;
+  schemaVersion: typeof RWA_CREDENTIAL_ENVELOPE_VERSION;
+};
+
+export type CredentialKeyContext =
+  | ExchangeCredentialKeyContext
+  | StepUpSecurityKeyContext
+  | AutomationBackupKeyContext;
 
 export type WrappedCredentialDataKey = {
   provider: CredentialKeyProviderName;
@@ -69,6 +81,16 @@ export function credentialEnvironment(): CredentialEnvironment {
 }
 
 export function canonicalCredentialAad(context: CredentialKeyContext) {
+  if (context.purpose === "automation-backup") {
+    return Buffer.from(JSON.stringify({
+      schema: RWA_AUTOMATION_BACKUP_AAD_SCHEMA,
+      purpose: context.purpose,
+      backupId: context.backupId,
+      backupDomain: context.backupDomain,
+      environment: context.environment,
+      schemaVersion: context.schemaVersion,
+    }), "utf8");
+  }
   if (context.purpose === "step-up-security") {
     return Buffer.from(JSON.stringify({
       schema: STEP_UP_SECURITY_AAD_SCHEMA,
@@ -90,6 +112,16 @@ export function canonicalCredentialAad(context: CredentialKeyContext) {
 }
 
 export function cloudCredentialAad(context: CredentialKeyContext) {
+  if (context.purpose === "automation-backup") {
+    return Buffer.from(JSON.stringify({
+      schema: RWA_AUTOMATION_BACKUP_AAD_SCHEMA,
+      purpose: context.purpose,
+      backupDomain: domainHash("backup-purpose", context.backupDomain),
+      backupId: domainHash("backup-id", context.backupId),
+      environment: context.environment,
+      schemaVersion: context.schemaVersion,
+    }), "utf8");
+  }
   if (context.purpose === "step-up-security") {
     return Buffer.from(JSON.stringify({
       schema: STEP_UP_SECURITY_AAD_SCHEMA,

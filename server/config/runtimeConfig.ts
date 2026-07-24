@@ -6,6 +6,14 @@ import {
   validateGcpWifCredentialFiles,
   validateGcpWifRuntimeBoundary,
 } from "../modules/arbitrage/automation/GcpWifCredentialConfig";
+import {
+  RWA_AUTOMATION_BACKUP_ROOT,
+  loadRwaAutomationBackupLimits,
+} from "../modules/arbitrage/automation/RwaAutomationBackupService";
+import {
+  RWA_AUTOMATION_DATA_ROOT,
+  validateRwaAutomationDataLayout,
+} from "../modules/arbitrage/automation/RwaAutomationDataLayout";
 
 export type RuntimeConfig = {
   port: number;
@@ -121,6 +129,7 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["RWA_GCP_KMS_KEY_NAME", process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? ""],
     ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
     ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
+    ["RWA_AUTOMATION_DATA_DIR", process.env.RWA_AUTOMATION_DATA_DIR?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
@@ -202,6 +211,17 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (process.env.RWA_GCP_KMS_KEY_NAME !== RWA_GCP_KMS_KEY_NAME) {
     throw new Error("生产环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey 完整资源名。");
   }
+  if (process.env.RWA_AUTOMATION_DATA_DIR !== RWA_AUTOMATION_DATA_ROOT) {
+    throw new Error("生产环境 RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径。");
+  }
+  if (process.env.RWA_AUTOMATION_BACKUP_DIR && process.env.RWA_AUTOMATION_BACKUP_DIR !== RWA_AUTOMATION_BACKUP_ROOT) {
+    throw new Error("生产环境 RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径。");
+  }
+  try {
+    loadRwaAutomationBackupLimits();
+  } catch {
+    throw new Error("生产环境自动套利备份保留或容量配置无效。");
+  }
   const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
   if (!isCanonicalGcpWifAudience(wifAudience)) {
     throw new Error("生产环境 RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
@@ -212,4 +232,5 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   validateGcpWifRuntimeBoundary();
   validateGcpWifCredentialFiles({ adcPath, expectedAudience: wifAudience });
+  validateRwaAutomationDataLayout({ root: RWA_AUTOMATION_DATA_ROOT, production: true });
 }

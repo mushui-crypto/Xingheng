@@ -29,6 +29,11 @@ const baseEnvironment = {
   RWA_GCP_KMS_KEY_NAME: "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials",
   RWA_GCP_WIF_AUDIENCE: "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/xingheng-rwa-prod/providers/vultr-x509",
   GOOGLE_APPLICATION_CREDENTIALS: "/run/secrets/gcp-wif/adc.json",
+  RWA_AUTOMATION_DATA_DIR: "/app/rwa-automation-data",
+  RWA_AUTOMATION_BACKUP_DIR: "/app/rwa-automation-backups",
+  RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "30",
+  RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "1073741824",
+  RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "104857600",
 };
 
 const cases = [
@@ -50,6 +55,11 @@ const cases = [
   ["wrong GCP KMS key", { RWA_GCP_KMS_KEY_NAME: "projects/other/locations/global/keyRings/other/cryptoKeys/other" }, "RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey"],
   ["untrusted WIF audience", { RWA_GCP_WIF_AUDIENCE: "//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/other/providers/other" }, "RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider"],
   ["unsafe ADC path", { GOOGLE_APPLICATION_CREDENTIALS: "/app/service-account.json" }, "GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC"],
+  ["wrong RWA data path", { RWA_AUTOMATION_DATA_DIR: "/app/data" }, "RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径"],
+  ["mixed RWA backup path", { RWA_AUTOMATION_BACKUP_DIR: "/backups" }, "RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径"],
+  ["invalid RWA retention", { RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "0" }, "自动套利备份保留或容量配置无效"],
+  ["invalid RWA total capacity", { RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "unlimited" }, "自动套利备份保留或容量配置无效"],
+  ["invalid RWA snapshot capacity", { RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "999999999999" }, "自动套利备份保留或容量配置无效"],
 ];
 
 for (const [name, overrides, expected] of cases) {

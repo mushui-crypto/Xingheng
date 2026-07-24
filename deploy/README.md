@@ -79,15 +79,83 @@ install -d -o 20001 -g 20001 -m 0700 /run/xingheng/gcp-wif
 受控部署流程重新注入后才能启动 API。Google Auth 会在 token 刷新时持续读取这些文件，不能在
 启动后撤掉挂载。
 
-WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利数据备份。当前 `compose.yaml` 已完成
-只读 WIF 目录挂载，但 `/app/rwa-automation-data` 尚未配置独立持久卷和备份恢复，仍是安全整改
-第 4 项阻塞。完成并独立验收前，禁止在生产录入真实交易所凭证或解除真实执行急停。
+WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利数据备份。`compose.yaml` 已完成
+只读 WIF 目录挂载和自动套利独立数据卷接线；第 4 项代码与静态契约已通过固定安全复验，但实际
+Docker named volume owner/mount、旧容器迁移及恢复演练尚未在真实 Docker 环境验证。完成真实
+部署演练前，禁止在生产录入真实交易所凭证或解除真实执行急停。
 
 敏感操作 TOTP 状态与交易所凭证使用同一个 KMS provider，但采用独立 purpose/AAD/domain 和独立
 密文文件；TOTP secret、恢复码明文和一次性授权 token 不得写入环境变量。其密文位于
-`RWA_AUTOMATION_DATA_DIR/step-up-security`，因此同样受第 4 项独立持久卷与备份恢复阻塞。
+`RWA_AUTOMATION_DATA_DIR` 当前 generation 下的 `step-up-security`，由自动套利专用加密备份覆盖。
 密码重置只在 SQLite 保存非敏感 enrollment invalidation epoch，用于在 KMS 暂时不可用时仍持续
 拒绝旧 pending enrollment；该字段不包含 TOTP secret、验证码或恢复材料。
+
+## RWA 自动套利数据备份与恢复
+
+生产使用三个互不复用的 named volume：
+
+- `rwa_automation_data` 只挂载到 API 的 `/app/rwa-automation-data`，保存 generation 指针、
+  交易所 credential envelope、TOTP security envelope、账户配置、用户/策略急停、执行恢复记录、
+  策略归因/PnL 与审计。
+- `rwa_automation_backups` 只挂载到一次性备份/恢复工具的 `/app/rwa-automation-backups`；API
+  不可见该卷。
+- `rwa_automation_lock` 只保存本机 `flock` 协调文件。API 运行期持有独占锁；备份、恢复和回滚
+  取得同一锁后才能执行，避免 API 未停止时生成跨文件不一致快照。
+
+SQLite 继续只使用 `sqlite_data/sqlite_backups` 与 `scripts/backup.sh/restore.sh`；策略报告继续只
+使用 `strategy_data`。WIF `/run/secrets/gcp-wif`、SQLite、策略报告、临时文件、lock、preflight
+challenge、一次性 step-up token、内存 cache/armed 状态和 provider raw response 均不进入自动
+套利归档。
+
+自动套利备份采用独立 `purpose=automation-backup`、AAD schema
+`rwa-automation-backup:v1:backupId:environment` 和 domain
+`rwa-automation-disaster-recovery`。每份备份生成随机 32-byte DEK，以 AES-256-GCM 整体加密
+manifest 与全部文件，再由现有 provider-neutral GCP KMS 包裹 DEK；归档不包含明文 DEK、
+凭证、TOTP secret、恢复码或 WIF 身份材料。manifest 固定记录 schema、UTC 创建时间、环境、
+严格相对路径、文件大小和 SHA-256。任何未知文件、symlink、hard link、路径逃逸、错误 owner/mode、
+未知 schema、hash/AAD/tag/wrap reference 不一致或 KMS 不可用均 fail-closed。
+
+备份与恢复命令：
+
+```bash
+# 停止 API、取得独占锁、创建整体加密备份，再重启 API/web。
+./scripts/rwa-automation-backup.sh
+
+# 只接受精确文件名；停止 API，在新 generation 全量校验后原子切换 current.json。
+./scripts/rwa-automation-restore.sh rwa-automation-YYYYMMDDTHHMMSSZ.rwa.enc.json
+
+# 恢复后验证不通过时，停止 API 并把 current.json 切回上一 generation。
+./scripts/rwa-automation-rollback.sh rollback
+```
+
+恢复不会覆盖原 generation：工具先在同一数据卷的全新 generation 解密、写入并复核所有文件，
+通过后原子替换 `current.json`；该单一 pointer 同时记录 current 与 rollback generation。中断发生在切换前时
+原数据完全不变；切换后新 generation 已完整，原 generation 仍可回滚。恢复出的 automation state
+会清除全部 challenge，并强制 `globalExecutionEnabled=false`、`strategyEnabled=false`、
+`killSwitchActive=true`；服务端总急停来自运行配置，不受备份控制。服务重启只允许既有
+recovery/manual_intervention 与退出流程，不会自动重放建立对冲组合。
+
+生产保留配置：
+
+```bash
+RWA_AUTOMATION_BACKUP_RETENTION_DAYS=30
+RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES=1073741824
+RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES=104857600
+```
+
+保留期允许 `1..365` 天，总容量允许 `1 MiB..10 GiB`，单快照允许 `1 KiB..500 MiB` 且不得超过
+总容量；非法值拒绝启动/执行。清理仅匹配
+`rwa-automation-YYYYMMDDTHHMMSSZ.rwa.enc.json`，未知文件或 symlink 会让操作失败，不会被删除。
+至少每日备份，并把生成的密文文件复制到独立主机或对象存储；异机副本只复制 `.rwa.enc.json`，
+不得复制 WIF。至少每月在隔离卷执行一次恢复演练并验证 credential/TOTP 可解密、急停开启、
+未完成执行进入恢复或人工处理。GCP CryptoKey/WIF 权限不可用时备份与恢复均失败；仅有密文副本
+不能绕过 KMS 解密。
+
+当前没有生产真实自动套利凭证，旧容器层或手工目录不得自动迁移。若部署前发现旧数据，必须停止
+API，逐文件核对既有不可逆用户域、venue 与 accountId 的已知归属，先复制到隔离位置并完成 fake/
+离线结构验证，再由明确的迁移任务写入新 generation；不能根据文件名猜测用户或账户。真实 Docker
+daemon、named volume 首次 owner `20001:20001`、只读/读写 mount、flock、容器重建、异机副本和
+恢复/回滚演练仍属于部署前现场验证项。
 
 首次从旧 UID `1000` 切换到 `20001` 时，现有 `sqlite_data`、`strategy_data` 和
 `sqlite_backups` 卷不会自动改 owner。部署窗口必须先用旧 API 完成在线备份并停止 API，

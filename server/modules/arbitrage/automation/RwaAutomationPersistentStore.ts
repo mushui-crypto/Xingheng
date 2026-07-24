@@ -24,6 +24,7 @@ import {
   type CredentialKeyProvider,
   type WrappedCredentialDataKey,
 } from "./CredentialKeyProvider";
+import { resolveRwaAutomationActiveDataDir } from "./RwaAutomationDataLayout";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -138,7 +139,7 @@ export class RwaAutomationPersistentStore<
     this.ownerUserId = options.userId;
     this.venue = options.venue ?? "bybit";
     this.userDomain = createHash("sha256").update(`rwa-user:${this.ownerUserId}`).digest("hex").slice(0, 16);
-    const dataDir = resolve(process.env.RWA_AUTOMATION_DATA_DIR ?? "server/data/rwa-automation");
+    const dataDir = resolveRwaAutomationActiveDataDir();
     this.credentialPath = options.credentialPath
       ? resolve(options.credentialPath)
       : resolve(dataDir, `${this.userDomain}-${this.venue}-credentials.enc.json`);

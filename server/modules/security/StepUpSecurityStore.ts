@@ -19,6 +19,7 @@ import {
   type WrappedCredentialDataKey,
 } from "../arbitrage/automation/CredentialKeyProvider";
 import { RWA_AUTOMATION_RUNTIME_GID, RWA_AUTOMATION_RUNTIME_UID } from "../arbitrage/automation/GcpWifCredentialConfig";
+import { resolveRwaAutomationActiveDataDir } from "../arbitrage/automation/RwaAutomationDataLayout";
 
 export type RecoveryCodeRecord = { salt: string; hash: string; usedAt: number | null };
 
@@ -78,7 +79,7 @@ export class StepUpSecurityStore {
   ) {
     if (!userId.trim()) throw new Error("step-up security store requires user ownership");
     const userDomain = domain("file-user", userId).slice(0, 24);
-    const root = resolve(process.env.RWA_AUTOMATION_DATA_DIR ?? "server/data/rwa-automation", "step-up-security");
+    const root = resolve(resolveRwaAutomationActiveDataDir(), "step-up-security");
     const production = process.env.NODE_ENV === "production";
     this.statePath = production
       ? resolve(root, `${userDomain}.enc.json`)
