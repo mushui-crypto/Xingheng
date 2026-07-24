@@ -11,6 +11,11 @@ actual="$(git rev-parse --verify HEAD^{commit} 2>/dev/null)" || {
   echo "release build requires a trusted Git checkout" >&2
   exit 2
 }
+platform="${XINGHENG_RELEASE_PLATFORM:-linux/amd64}"
+[ "$platform" = linux/amd64 ] || {
+  echo "release build platform must be linux/amd64" >&2
+  exit 2
+}
 
 node scripts/verify-deployment-revision.mjs validate "$expected" >/dev/null
 node scripts/verify-deployment-revision.mjs validate "$actual" >/dev/null
@@ -29,15 +34,25 @@ git archive --format=tar "$actual" | tar -xf - -C "$build_context"
 
 export XINGHENG_REVISION="$actual"
 docker build --build-arg "XINGHENG_REVISION=$actual" --target api \
-  --tag "xingheng-api:$actual" "$build_context"
+  --platform "$platform" --tag "xingheng-api:$actual" "$build_context"
 docker build --build-arg "XINGHENG_REVISION=$actual" --target web \
-  --tag "xingheng-web:$actual" "$build_context"
+  --platform "$platform" --tag "xingheng-web:$actual" "$build_context"
 docker build --build-arg "XINGHENG_REVISION=$actual" --target strategy-tools \
-  --tag "xingheng-strategy-tools:$actual" "$build_context"
+  --platform "$platform" --tag "xingheng-strategy-tools:$actual" "$build_context"
 
 api_digest="$(docker image inspect --format '{{.Id}}' "xingheng-api:$actual")"
 web_digest="$(docker image inspect --format '{{.Id}}' "xingheng-web:$actual")"
 strategy_digest="$(docker image inspect --format '{{.Id}}' "xingheng-strategy-tools:$actual")"
+for image in \
+  "xingheng-api:$actual" \
+  "xingheng-web:$actual" \
+  "xingheng-strategy-tools:$actual"
+do
+  [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "$platform" ] || {
+    echo "release image platform mismatch" >&2
+    exit 1
+  }
+done
 node scripts/verify-deployment-revision.mjs write-manifest \
   "$manifest_path" "$actual" "$api_digest" "$web_digest" "$strategy_digest" >/dev/null
 node scripts/verify-deployment-revision.mjs images "$manifest_path"

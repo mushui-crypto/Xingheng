@@ -41,6 +41,9 @@ digest，再调用该脚本提供的 `production_compose` 函数；生产 `compo
 目录构建 API、Web、strategy tools 三类镜像。脚本把 revision 写入 OCI
 `org.opencontainers.image.revision` label 和镜像内 `/app/.build-revision`，取得实际 Docker image
 ID 后输出严格 release manifest，将完整 revision 与三个不可变 `sha256:<64 hex>` digest 绑定。
+生产目标架构固定为 `linux/amd64`；即使在 Apple Silicon/ARM 构建机上也必须显式跨架构构建，
+并在写 manifest 前用镜像 metadata 复核 OS/Architecture，禁止把构建机默认架构镜像交付到
+x86_64 生产主机。
 自动套利 backup/restore 复用清单中的 API digest，不允许单独漂移。缺少 `.git`、dirty worktree、
 短 SHA、非法字符或调用者期望 revision 不一致时，构建在 Docker 前拒绝。
 
