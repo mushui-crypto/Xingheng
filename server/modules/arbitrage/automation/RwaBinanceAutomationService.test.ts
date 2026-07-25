@@ -55,6 +55,41 @@ test("Binance credentials remain user-isolated, default disabled, and reject wit
   }
 });
 
+test("Binance credential validation wraps synchronous client construction failures without leaking secrets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-client-factory-failure-"));
+  try {
+    const keyProvider = new FakeCredentialKeyProvider();
+    const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+      userId: "user-a",
+      venue: "binance",
+      keyProvider,
+      credentialPath: join(directory, "credentials.json"),
+      statePath: join(directory, "state.json"),
+    });
+    const service = new RwaBinanceAutomationService(
+      store,
+      (credentials) => {
+        if (credentials.apiKey) {
+          throw new Error("Authorization: Bearer sync-secret file:///tmp/binance.json apiKey leaked-key");
+        }
+        return new FakeBinanceClient();
+      },
+      () => now,
+      () => false,
+    );
+
+    await assert.rejects(
+      service.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "provider_unavailable"
+        && error.message === "Binance 凭证校验失败。",
+    );
+    assert.equal((await service.getCredentialStatus()).stored, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance fixed IP verification gates credential rotation and every new-risk control entry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-gates-"));
   try {

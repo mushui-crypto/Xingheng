@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { access, chmod, mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
+import { access, chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
   RwaBybitCredentials,
@@ -84,6 +84,11 @@ export class CredentialStoreError extends Error {
     super(message);
   }
 }
+
+export type RwaCredentialMutationSnapshot = {
+  credentialFile: string | null;
+  stateFile: string | null;
+};
 
 type StoredChallenge = {
   id: string;
@@ -331,6 +336,21 @@ export class RwaAutomationPersistentStore<
     });
   }
 
+  async captureCredentialMutationSnapshot(): Promise<RwaCredentialMutationSnapshot> {
+    const [credentialFile, stateFile] = await Promise.all([
+      readOptionalUtf8(this.credentialPath),
+      readOptionalUtf8(this.statePath),
+    ]);
+    return { credentialFile, stateFile };
+  }
+
+  async restoreCredentialMutationSnapshot(snapshot: RwaCredentialMutationSnapshot) {
+    await Promise.all([
+      restoreOptionalUtf8(this.credentialPath, snapshot.credentialFile),
+      restoreOptionalUtf8(this.statePath, snapshot.stateFile),
+    ]);
+  }
+
   async assertRiskCapacity() {
     const state = await this.readState();
     const completed = state.executions.filter(isCompletedExecution).length;
@@ -482,6 +502,35 @@ async function atomicWriteJson(path: string, value: unknown) {
     await chmod(path, 0o600);
   } catch (error) {
     await handle?.close().catch(() => undefined);
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function readOptionalUtf8(path: string) {
+  try {
+    return await readFile(path, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function restoreOptionalUtf8(path: string, value: string | null) {
+  if (value === null) {
+    await unlink(path).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+    });
+    return;
+  }
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+  try {
+    await writeFile(temporaryPath, value, { encoding: "utf8", mode: 0o600, flag: "wx" });
+    await chmod(temporaryPath, 0o600);
+    await rename(temporaryPath, path);
+    await chmod(path, 0o600);
+  } catch (error) {
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
   }

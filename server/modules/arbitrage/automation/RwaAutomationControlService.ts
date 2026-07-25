@@ -1,12 +1,15 @@
 import type { ArbitrageDashboardService } from "../ArbitrageDashboardService";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
+import { CredentialStoreError } from "./RwaAutomationPersistentStore";
 import {
   RwaAutomationConnectorRegistry,
   RwaAutomationRegistryError,
   normalizeVenue,
 } from "./RwaAutomationConnectorRegistry";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
 import type { RwaAutomationCandidate, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
+import { categoryFromRwaAutomationError, stableHash } from "./RwaNeutralAutomationSecurity";
 import {
   StepUpSecurityError,
   canonicalRequestDigest,
@@ -22,6 +25,7 @@ import {
   type RwaAutomationGovernanceContext,
   type RwaAutomationGovernedOperation,
 } from "./RwaAutomationGovernance";
+import { CredentialKeyProviderError } from "./CredentialKeyProvider";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -103,6 +107,7 @@ export class RwaAutomationControlService {
     return this.governed("credential", sourceIp, userId, connector.venue, existingAccountId ?? "new-account", async () => {
       await registry.initialize();
       await connector.assertRiskCapacity?.();
+      const credentialMutationSnapshot = await connector.captureCredentialMutationSnapshot?.();
       await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
         operation: "credential_put",
         venue: connector.venue,
@@ -111,12 +116,23 @@ export class RwaAutomationControlService {
         requestDigest: canonicalRequestDigest(credentials),
         notionalUsd: null,
       });
-      const result = await connector.putCredentials(credentials);
+      let result;
+      try {
+        result = await connector.putCredentials(credentials);
+      } catch (error) {
+        throw normalizeCredentialPutError(error, "validation", connector.venue, userId);
+      }
       const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
       if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
+        await rollbackCredentialMutation(connector, credentialMutationSnapshot, "identity", userId);
         throw new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。");
       }
-      await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
+      try {
+        await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
+      } catch (error) {
+        await rollbackCredentialMutation(connector, credentialMutationSnapshot, "binding", userId);
+        throw normalizeCredentialPutError(error, "binding", connector.venue, userId);
+      }
       this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
       return result;
     });
@@ -614,9 +630,25 @@ export class RwaAutomationControlError extends Error {
 }
 
 export function automationErrorResponse(error: unknown) {
-  if (error instanceof RwaAutomationControlError || error instanceof RwaAutomationRegistryError || error instanceof RwaNeutralExecutionError || error instanceof StepUpSecurityError || error instanceof StepUpSecurityStoreError || error instanceof RwaAutomationGovernanceError) {
+  if (
+    error instanceof RwaAutomationControlError
+    || error instanceof RwaAutomationRegistryError
+    || error instanceof RwaNeutralExecutionError
+    || error instanceof StepUpSecurityError
+    || error instanceof StepUpSecurityStoreError
+    || error instanceof RwaAutomationGovernanceError
+    || error instanceof RwaAutomationExecutionLeaseError
+    || error instanceof CredentialStoreError
+    || error instanceof CredentialKeyProviderError
+  ) {
     return {
-      statusCode: error instanceof StepUpSecurityStoreError ? 503 : error.statusCode,
+      statusCode:
+        error instanceof StepUpSecurityStoreError
+        || error instanceof RwaAutomationExecutionLeaseError
+        || error instanceof CredentialStoreError
+        || error instanceof CredentialKeyProviderError
+          ? 503
+          : error.statusCode,
       retryAfterSeconds: "retryAfterSeconds" in error ? error.retryAfterSeconds : undefined,
       body: {
         category: error.category,
@@ -715,3 +747,75 @@ function safeMessage(error: unknown) {
     ? error.message
     : "该 venue 私有数据暂不可用。";
 }
+
+type CredentialPutStage = "validation" | "binding" | "identity_rollback" | "binding_rollback";
+
+function normalizeCredentialPutError(
+  error: unknown,
+  stage: CredentialPutStage,
+  venue: RwaAutomationVenue,
+  userId: string,
+) {
+  if (
+    error instanceof RwaAutomationControlError
+    || error instanceof RwaAutomationRegistryError
+    || error instanceof RwaNeutralExecutionError
+    || error instanceof StepUpSecurityError
+    || error instanceof StepUpSecurityStoreError
+    || error instanceof RwaAutomationGovernanceError
+    || error instanceof RwaAutomationExecutionLeaseError
+    || error instanceof CredentialStoreError
+    || error instanceof CredentialKeyProviderError
+  ) {
+    return error;
+  }
+  const category = stage === "binding" ? "credential_binding_unavailable" : "credential_validation_unavailable";
+  logCredentialPutDiagnostic(stage, venue, userId, error, category);
+  return new RwaAutomationControlError(
+    503,
+    category,
+    stage === "binding"
+      ? "交易所账户绑定记录暂不可用，请稍后重试。"
+      : `${venueLabel(venue)} 凭证校验暂不可用，请稍后重试。`,
+  );
+}
+
+function logCredentialPutDiagnostic(
+  stage: CredentialPutStage,
+  venue: RwaAutomationVenue,
+  userId: string,
+  error: unknown,
+  responseCategory: string,
+) {
+  console.error(JSON.stringify({
+    event: "rwa_automation_credential_put_failed",
+    stage,
+    venue,
+    responseCategory,
+    errorCategory: categoryFromRwaAutomationError(error),
+    errorClass: error instanceof Error ? error.constructor.name : typeof error,
+    userRef: stableHash(userId),
+  }));
+}
+
+async function rollbackCredentialMutation(
+  connector: Pick<NonNullable<RwaAutomationConnectorLike>, "restoreCredentialMutationSnapshot" | "venue">,
+  snapshot: unknown,
+  stage: "identity" | "binding",
+  userId: string,
+) {
+  if (snapshot === undefined || !connector.restoreCredentialMutationSnapshot) {
+    return;
+  }
+  try {
+    await connector.restoreCredentialMutationSnapshot(snapshot);
+  } catch (error) {
+    logCredentialPutDiagnostic(stage === "identity" ? "identity_rollback" : "binding_rollback", connector.venue, userId, error, "credential_binding_rollback_failed");
+    throw new RwaAutomationControlError(503, "credential_binding_rollback_failed", "交易所账户绑定回滚失败；系统已保持执行关闭，请稍后重试。");
+  }
+}
+
+type RwaAutomationConnectorLike = {
+  venue: RwaAutomationVenue;
+  restoreCredentialMutationSnapshot?: (snapshot: unknown) => Promise<void>;
+};

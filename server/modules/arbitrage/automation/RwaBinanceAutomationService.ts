@@ -3,6 +3,7 @@ import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import {
   CredentialStoreError,
   RwaAutomationPersistentStore,
+  type RwaCredentialMutationSnapshot,
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
 import {
@@ -203,6 +204,14 @@ export class RwaBinanceAutomationService {
     return this.store.assertRiskCapacity();
   }
 
+  captureCredentialMutationSnapshot() {
+    return this.store.captureCredentialMutationSnapshot();
+  }
+
+  restoreCredentialMutationSnapshot(snapshot: RwaCredentialMutationSnapshot) {
+    return this.store.restoreCredentialMutationSnapshot(snapshot);
+  }
+
   async putCredentials(input: RwaBinanceCredentials) {
     this.assertExecutionLeaseHeld();
     if (!this.store.masterKeyConfigured) {
@@ -217,9 +226,12 @@ export class RwaBinanceAutomationService {
       await this.store.assertKeyProviderHealthy("pending-credential-validation").catch((error) => {
         throw credentialStoreExecutionError(error);
       });
-      const access = await this.clientFactory(input).validateAccess().catch((error) => {
+      let access;
+      try {
+        access = await this.clientFactory(input).validateAccess();
+      } catch (error) {
         throw providerError(error, "Binance 凭证校验失败。");
-      });
+      }
       assertPermissions(access.permissions);
       if (previous && previous.accountId !== access.accountId) {
         throw new RwaNeutralExecutionError(

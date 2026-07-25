@@ -22,6 +22,10 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   }
 
   assertRiskCapacity() { return this.service.assertRiskCapacity(); }
+  captureCredentialMutationSnapshot() { return this.service.captureCredentialMutationSnapshot(); }
+  restoreCredentialMutationSnapshot(snapshot: Parameters<RwaBinanceAutomationService["restoreCredentialMutationSnapshot"]>[0]) {
+    return this.service.restoreCredentialMutationSnapshot(snapshot);
+  }
   getConfiguredAccountId() { return this.service.getConfiguredAccountId(); }
 
   async getStatus(): Promise<RwaAutomationVenueStatus> {

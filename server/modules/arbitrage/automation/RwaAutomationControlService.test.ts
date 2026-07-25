@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
+import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
 import { RwaAutomationConnectorRegistry } from "./RwaAutomationConnectorRegistry";
+import { CredentialKeyProviderError } from "./CredentialKeyProvider";
 import { automationErrorResponse, RwaAutomationControlError, RwaAutomationControlService } from "./RwaAutomationControlService";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
 import type { RwaAutomationConnector, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
+import type { RwaBinanceCredentials, RwaBinancePermissions } from "./RwaBinanceAutomationTypes";
+import { RwaBinanceAutomationConnector } from "./RwaBinanceAutomationConnector";
+import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
+import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
+import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
 import {
   RwaAutomationGovernance,
@@ -151,6 +162,146 @@ test("credential fields are strict per venue and rejected values never reach the
     assert.doesNotMatch(JSON.stringify(response), /must-not-leak|binance-secret/);
   }
   assert.equal(received.get("binance")?.length, 1);
+});
+
+test("credential put unknown connector failures are stage-mapped and sanitized", async () => {
+  const diagnostics: string[] = [];
+  const originalConsoleError = console.error;
+  console.error = (value?: unknown, ...rest: unknown[]) => {
+    diagnostics.push([value, ...rest].map((item) => String(item)).join(" "));
+  };
+  try {
+    const failingConnector = fakeConnector(() => undefined, {
+      venue: "binance",
+    });
+    failingConnector.putCredentials = async () => {
+      throw new Error("Authorization: Bearer very-secret file:///tmp/secret.json apiKey leaked-key");
+    };
+    const service = new RwaAutomationControlService(
+      {} as any,
+      () => new RwaAutomationConnectorRegistry([failingConnector]),
+      passThroughStepUp,
+    );
+
+    await assert.rejects(
+      service.putCredentials("user-a", sessionDomain, "binance", {
+        apiKey: "binance-key",
+        apiSecret: "binance-secret",
+        stepUpToken,
+      }),
+      (error: unknown) => error instanceof RwaAutomationControlError
+        && error.statusCode === 503
+        && error.category === "credential_validation_unavailable"
+        && error.message === "Binance 凭证校验暂不可用，请稍后重试。",
+    );
+    assert.equal(diagnostics.length, 1);
+    assert.match(diagnostics[0] ?? "", /rwa_automation_credential_put_failed/);
+    assert.match(diagnostics[0] ?? "", /credential_validation_unavailable/);
+    assert.match(diagnostics[0] ?? "", /"stage":"validation"/);
+    assert.doesNotMatch(diagnostics[0] ?? "", /very-secret|leaked-key|file:\/\/\/tmp\/secret\.json/);
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test("automation error response maps lease and key-provider failures to stable 503 categories", () => {
+  const lease = automationErrorResponse(new RwaAutomationExecutionLeaseError(
+    "automation_execution_lease_lost",
+    "自动套利执行实例租约已失效；已拒绝继续。",
+  ));
+  assert.equal(lease.statusCode, 503);
+  assert.deepEqual(lease.body, {
+    category: "automation_execution_lease_lost",
+    message: "自动套利执行实例租约已失效；已拒绝继续。",
+  });
+
+  const keyProvider = automationErrorResponse(new CredentialKeyProviderError(
+    "credential_key_provider_unavailable",
+    "凭证密钥 provider 不可用；已拒绝凭证操作。",
+  ));
+  assert.equal(keyProvider.statusCode, 503);
+  assert.deepEqual(keyProvider.body, {
+    category: "credential_key_provider_unavailable",
+    message: "凭证密钥 provider 不可用；已拒绝凭证操作。",
+  });
+});
+
+test("first Binance credential binding failure restores pre-submit empty state", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-binding-first-"));
+  try {
+    const harness = createBinanceCredentialHarness(directory, {
+      recordCredentialBinding: async () => {
+        throw new Error("apiKey binance-key apiSecret binance-secret stepUpToken step-up-token-a otp 123456");
+      },
+    });
+
+    await assert.rejects(
+      harness.control.putCredentials("user-a", sessionDomain, "binance", {
+        apiKey: "binance-key",
+        apiSecret: "binance-secret",
+        stepUpToken,
+      }),
+      (error: unknown) => error instanceof RwaAutomationControlError
+        && error.category === "credential_binding_unavailable",
+    );
+
+    const status = await harness.service.getCredentialStatus();
+    assert.equal(status.stored, false);
+    assert.equal(await readOptional(harness.store.credentialPath), null);
+    const state = await harness.store.readState();
+    assert.equal(state.credentialLifecycle, "unconfigured");
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+    assert.equal(state.credentialAudit.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("rotating Binance credentials restores previous encrypted state when binding fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-binding-rotate-"));
+  try {
+    const harness = createBinanceCredentialHarness(directory);
+    await harness.control.putCredentials("user-a", sessionDomain, "binance", {
+      apiKey: "old-key",
+      apiSecret: "old-secret",
+      stepUpToken,
+    });
+    const initialStatus = await harness.service.getCredentialStatus();
+    await harness.service.updateConfig({
+      accountId: initialStatus.accountId!,
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+    });
+    await harness.service.setKillSwitch(false, initialStatus.accountId!);
+    const expectedCredentialFile = await readFile(harness.store.credentialPath, "utf8");
+    const expectedState = await harness.store.readState();
+
+    harness.stepUp.recordCredentialBinding = async () => {
+      throw new Error("Authorization: Bearer should-not-log stepUpToken step-up-token-a path /tmp/secret");
+    };
+
+    await assert.rejects(
+      harness.control.putCredentials("user-a", sessionDomain, "binance", {
+        apiKey: "new-key",
+        apiSecret: "new-secret",
+        stepUpToken,
+      }),
+      (error: unknown) => error instanceof RwaAutomationControlError
+        && error.category === "credential_binding_unavailable",
+    );
+
+    const restoredStatus = await harness.service.getCredentialStatus();
+    assert.equal(restoredStatus.accountId, initialStatus.accountId);
+    assert.equal(await readFile(harness.store.credentialPath, "utf8"), expectedCredentialFile);
+    const restoredState = await harness.store.readState();
+    assert.deepEqual(restoredState.config, expectedState.config);
+    assert.equal(restoredState.credentialLifecycle, expectedState.credentialLifecycle);
+    assert.deepEqual(restoredState.credentialAudit, expectedState.credentialAudit);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Binance execute fails at the server capability gate before challenge lookup or provider writes", async () => {
@@ -547,4 +698,74 @@ function dashboardSnapshot(item: ArbitrageOpportunity) {
     },
     warnings: [],
   };
+}
+
+function createBinanceCredentialHarness(
+  directory: string,
+  stepUpOverrides: Partial<typeof passThroughStepUp> = {},
+) {
+  const client = new TestBinanceClient();
+  const keyProvider = new FakeCredentialKeyProvider();
+  const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+    userId: "user-a",
+    venue: "binance",
+    keyProvider,
+    credentialPath: join(directory, "credentials.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  const service = new RwaBinanceAutomationService(store, () => client as any, () => Date.now(), () => false);
+  const connector = new RwaBinanceAutomationConnector(service);
+  const stepUp = {
+    consume: async () => undefined,
+    recordCredentialBinding: async () => undefined,
+    revokeAutomationScope: () => undefined,
+    ...stepUpOverrides,
+  };
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    stepUp as any,
+  );
+  return { client, keyProvider, store, service, connector, control, stepUp };
+}
+
+async function readOptional(path: string) {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+class TestBinanceClient {
+  access = {
+    accountId: "binance:test-account",
+    accountFingerprint: "test-account",
+    accountMode: "single_asset_one_way" as const,
+    permissions: {
+      read: true,
+      spotTrade: true,
+      contractTrade: true,
+      withdraw: false,
+      ipRestricted: true,
+      spotAccount: true,
+      futuresAccount: true,
+      positionModeSupported: true,
+    },
+  };
+
+  async validateAccess() {
+    return this.access;
+  }
+
+  async readProductAvailability() {
+    return {
+      available: true,
+      status: "available" as const,
+      spotSymbol: "XAUTUSDT" as const,
+      perpetualSymbol: "XAUTUSDT" as const,
+      checkedAt: Date.now(),
+      message: null,
+    };
+  }
 }
