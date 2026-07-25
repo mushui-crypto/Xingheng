@@ -51,7 +51,6 @@ export function ArbitrageAutomationPage() {
       </header>
 
       {loading && !snapshot ? <ConsoleState icon={<RefreshCw className="animate-spin" size={18} />} title="正在加载我的套利账户" description="正在读取用户隔离的 API 账户、配置、候选、持仓与策略盈亏。" /> : null}
-      {loading && snapshot ? <p className="text-xs text-muted" role="status">正在刷新控制台快照</p> : null}
       {error ? <ConsoleState icon={error.retryable ? <AlertTriangle size={18} /> : <ShieldAlert size={18} />} title={error.title} description={error.message} action={error.retryable ? <Button onClick={() => void load()} type="button" variant="secondary">重新加载</Button> : undefined} error /> : null}
       {snapshot ? <AutomationControlConsole client={userAutomationConsoleClient} onReload={load} snapshot={snapshot} /> : null}
     </div>

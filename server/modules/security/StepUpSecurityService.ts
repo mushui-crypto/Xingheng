@@ -20,7 +20,8 @@ export type StepUpOperation =
   | "kill_switch_disable"
   | "hedge_execute"
   | "position_close"
-  | "close_all";
+  | "close_all"
+  | "reconciliation_finalize";
 
 export type StepUpEnrollmentMethod = "totp" | "webauthn";
 

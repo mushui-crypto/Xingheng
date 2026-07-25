@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, CircleOff, PlugZap } from "lucide-react";
+import { AlertTriangle, CheckCircle2, PlugZap } from "lucide-react";
 import React from "react";
 import type { AutomationConsoleSnapshot } from "../model/controlConsoleTypes";
 import {
@@ -16,21 +16,33 @@ import {
 } from "./AutomationConsoleShared";
 
 export function AutomationOverview({ snapshot }: { snapshot: AutomationConsoleSnapshot }) {
+  const authorityIncomplete = snapshot.summary.positionAuthorityIncompleteCount > 0;
   return (
     <div className="space-y-4">
-      {snapshot.summary.eligibleCandidateCount === 0 ? (
-        <div className="flex items-start gap-3 border border-amber-400/35 bg-amber-400/[0.06] px-4 py-3 text-sm text-amber-100" role="status">
-          <CircleOff className="mt-0.5 shrink-0" size={17} />
-          <div><strong className="font-semibold">当前无自动策略候选</strong><p className="mt-1 text-xs leading-5 text-amber-100/80">安全条件通过的机会仍可发起手动风险预检；安全阻断不能由前端绕过。</p></div>
-        </div>
-      ) : null}
-
       <section className="grid overflow-hidden border-l border-t border-white/10 bg-[#101010] sm:grid-cols-2 xl:grid-cols-4" aria-label="套利自动化摘要">
         <SummaryMetric label="连接状态" value={`${snapshot.summary.connectedVenueCount} / ${snapshot.summary.totalVenueCount}`} detail="Bybit、Bitget、Binance、OKX" tone={snapshot.summary.connectedVenueCount === snapshot.summary.totalVenueCount ? "positive" : "warning"} />
         <SummaryMetric label="执行模式" value={snapshot.mode === "shadow" ? "Shadow" : "受控真实"} detail={snapshot.globalExecutionEnabled ? "我的执行已启用" : "我的执行关闭"} />
-        <SummaryMetric label="自动策略候选" value={String(snapshot.summary.eligibleCandidateCount)} detail={`${snapshot.candidates.length} 个候选已评估`} tone={snapshot.summary.eligibleCandidateCount > 0 ? "positive" : "warning"} />
-        <SummaryMetric label="总资金占用" value={formatMoney(snapshot.summary.totalCapitalUsedUsd)} detail="仅策略组合资金占用" />
-        <SummaryMetric label="净 Delta" value={formatMoney(snapshot.summary.netDeltaUsd, true)} detail="当前用户全部策略组合" tone={pnlTone(-Math.abs(snapshot.summary.netDeltaUsd))} />
+        <SummaryMetric
+          label="自动策略候选"
+          value={String(snapshot.summary.eligibleCandidateCount)}
+          detail={`${snapshot.candidates.length} 个候选已评估`}
+          help={snapshot.summary.eligibleCandidateCount === 0 ? "当前没有达到自动策略条件的候选。安全条件通过的机会仍可发起手动风险预检；安全阻断不能由前端绕过。" : "已同时通过安全门槛与自动策略条件的候选数量。"}
+          tone={snapshot.summary.eligibleCandidateCount > 0 ? "positive" : "warning"}
+        />
+        <SummaryMetric
+          label="总资金占用"
+          value={authorityIncomplete ? "-" : formatMoney(snapshot.summary.totalCapitalUsedUsd)}
+          detail={authorityIncomplete ? "等待交易所权威对账" : "仅策略组合资金占用"}
+          help={authorityIncomplete ? `${snapshot.summary.positionAuthorityIncompleteCount} 个组合缺少可用权威快照；旧策略记录不会作为当前真实持仓。` : undefined}
+          tone={authorityIncomplete ? "warning" : undefined}
+        />
+        <SummaryMetric
+          label="净 Delta"
+          value={authorityIncomplete ? "-" : formatMoney(snapshot.summary.netDeltaUsd, true)}
+          detail={authorityIncomplete ? "旧策略记录不计入当前值" : "当前用户全部策略组合"}
+          help={authorityIncomplete ? "等待交易所权威对账完成后再展示当前净 Delta，避免旧策略记录造成误导。" : undefined}
+          tone={authorityIncomplete ? "warning" : pnlTone(-Math.abs(snapshot.summary.netDeltaUsd))}
+        />
         <SummaryMetric label="累计净 PnL" value={formatMoney(snapshot.summary.cumulativeNetPnl, true)} detail="策略级口径" tone={pnlTone(snapshot.summary.cumulativeNetPnl)} />
         <SummaryMetric label="今日净 PnL" value={formatMoney(snapshot.summary.todayNetPnl, true)} detail="Funding、费用、滑点后" tone={pnlTone(snapshot.summary.todayNetPnl)} />
         <SummaryMetric label="Funding / 手续费" value={`${formatMoney(snapshot.summary.fundingPnl, true)} / ${formatMoney(-snapshot.summary.fees)}`} detail="策略归属，不使用账户总 PnL" />

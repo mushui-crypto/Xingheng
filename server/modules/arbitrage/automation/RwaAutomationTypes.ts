@@ -66,7 +66,9 @@ export type RwaAutomationConnector = {
   getPrivateAccount(): Promise<unknown>;
   getPnl(): Promise<unknown>;
   getAudit(): Promise<unknown>;
+  getReconciliation(input?: unknown): Promise<unknown>;
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode): Promise<{ challengeId: string; challengeToken: string; expiresAt: number; report: unknown }>;
   execute(input: unknown): Promise<unknown>;
   closeAll(input: unknown): Promise<unknown>;
+  finalizeReconciliation(input: unknown): Promise<unknown>;
 };

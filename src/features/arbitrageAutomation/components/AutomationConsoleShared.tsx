@@ -1,4 +1,5 @@
 import React, { type ReactNode } from "react";
+import { ArbitrageHelp } from "../../arbitrage/components/ArbitrageHelp";
 import type { AutomationStatus, AutomationVenue } from "../model/controlConsoleTypes";
 
 export function ConsoleSection({ actions, children, description, title }: {
@@ -32,11 +33,14 @@ export function StatusTag({ children, tone = "neutral" }: { children: ReactNode;
   return <span className={`inline-flex w-fit items-center whitespace-nowrap border px-2 py-1 text-xs font-medium ${classes[tone]}`}>{children}</span>;
 }
 
-export function SummaryMetric({ label, value, detail, tone = "default" }: { label: string; value: string; detail?: string; tone?: "default" | "positive" | "negative" | "warning" }) {
+export function SummaryMetric({ label, value, detail, help, tone = "default" }: { label: string; value: string; detail?: string; help?: string; tone?: "default" | "positive" | "negative" | "warning" }) {
   const valueClass = tone === "positive" ? "text-emerald-300" : tone === "negative" ? "text-red-300" : tone === "warning" ? "text-amber-200" : "text-white";
   return (
     <div className="min-w-0 border-b border-r border-white/10 px-4 py-4 last:border-r-0 sm:px-5">
-      <p className="text-xs text-muted">{label}</p>
+      <div className="flex items-center gap-1.5 text-xs text-muted">
+        <span>{label}</span>
+        {help ? <ArbitrageHelp content={help} label={`查看${label}说明`} /> : null}
+      </div>
       <p className={`mt-2 truncate font-mono text-xl font-semibold tabular-nums ${valueClass}`}>{value}</p>
       {detail ? <p className="mt-1 truncate text-xs text-dim">{detail}</p> : null}
     </div>
@@ -46,14 +50,16 @@ export function SummaryMetric({ label, value, detail, tone = "default" }: { labe
 export function ScrollTable({ children, minWidth = 980 }: { children: ReactNode; minWidth?: number }) {
   return (
     <div className="w-full min-w-0 max-w-full overflow-x-auto">
-      <table className="w-full table-fixed text-left text-sm" style={{ minWidth }}>{children}</table>
+      <table className="w-full table-fixed text-left text-sm [&_td]:align-middle [&_th]:align-middle" style={{ minWidth }}>{children}</table>
     </div>
   );
 }
 
 export const tableHeadClass = "border-b border-white/10 bg-white/[0.025] text-xs text-muted";
-export const tableHeaderCellClass = "px-4 py-3 font-medium";
-export const tableCellClass = "border-b border-white/[0.07] px-4 py-3 align-top text-sm text-slate-200";
+export const tableHeaderCellClass = "px-4 py-3 align-middle font-medium";
+export const tableCellClass = "border-b border-white/[0.07] px-4 py-3 align-middle text-sm text-slate-200";
+export const stickyActionHeaderClass = "sticky right-0 z-20 border-l border-white/10 bg-[#141414]";
+export const stickyActionCellClass = "sticky right-0 z-10 border-l border-white/10 bg-[#101010]";
 
 export function venueLabel(venue: AutomationVenue) {
   return ({ binance: "Binance", bybit: "Bybit", bitget: "Bitget", okx: "OKX" } as const)[venue];

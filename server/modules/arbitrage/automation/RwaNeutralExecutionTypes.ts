@@ -218,11 +218,80 @@ export type RwaExecutionState =
   | "accepted"
   | "opening_spot"
   | "opening_perpetual"
+  | "partial_closed"
   | "hedged"
   | "compensating"
+  | "reconciled"
   | "closed"
   | "failed"
   | "manual_intervention";
+
+export type RwaResidualAssessment = {
+  quantityXaut: number;
+  notionalUsd: number;
+  minOrderQty: number;
+  minNotionalUsd: number;
+  qtyStep: number;
+  tradable: boolean;
+  reason: "tradable" | "below_min_qty" | "below_min_notional" | "zero";
+};
+
+export type RwaAuthoritativeLegState = {
+  quantityXaut: number;
+  freeQuantityXaut: number | null;
+  markPrice: number | null;
+  minOrderQty: number;
+  minNotionalUsd: number;
+  qtyStep: number;
+};
+
+export type RwaExecutionReconciliationPreview = {
+  reconciliationId: string;
+  strategyId: string;
+  recordedState: RwaExecutionState;
+  authoritativeState: {
+    snapshotAt: number;
+    status: "ok" | "stale";
+    stale: boolean;
+    openOrders: {
+      spot: number;
+      perpetual: number;
+      total: number;
+    };
+    legs: {
+      spot: RwaAuthoritativeLegState;
+      perpetual: RwaAuthoritativeLegState;
+    };
+  };
+  legDiffs: {
+    spotQuantityXaut: number;
+    perpetualQuantityXaut: number;
+  };
+  tradableResidual: {
+    spot: RwaResidualAssessment | null;
+    perpetual: RwaResidualAssessment | null;
+  };
+  dustResidual: {
+    spot: RwaResidualAssessment | null;
+    perpetual: RwaResidualAssessment | null;
+  };
+  recommendedAction:
+    | "none"
+    | "retry_close"
+    | "manual_close_spot"
+    | "manual_close_perpetual"
+    | "manual_close_both"
+    | "manual_finalize";
+  canFinalize: boolean;
+  blockingReasons: string[];
+};
+
+export type RwaExecutionFinalizeIdempotency = {
+  scopedKey: string;
+  requestFingerprint: string;
+  resultState: "reconciled" | "closed";
+  completedAt: number;
+};
 
 export type RwaExecutionRecord = {
   userId: string;
@@ -239,6 +308,8 @@ export type RwaExecutionRecord = {
   unhedgedDurationMs: number | null;
   errorCategory: string | null;
   message: string;
+  reconciliation: RwaExecutionReconciliationPreview | null;
+  finalizeIdempotency: RwaExecutionFinalizeIdempotency | null;
   createdAt: number;
   updatedAt: number;
 };

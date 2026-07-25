@@ -22,6 +22,7 @@ import {
   isCredentialActivationReady,
   positionCloseStepUpIntent,
   presentAutomationConsoleError,
+  reconciliationFinalizeStepUpIntent,
   safetyActionStepUpIntent,
 } from "../../../api/arbitrageAutomationConsole";
 import {
@@ -32,6 +33,7 @@ import {
 import { USER_AUTH_FAILED_EVENT } from "../../../api/session";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
+import { ArbitrageHelp } from "../../arbitrage/components/ArbitrageHelp";
 import { Toast, useTradingToast } from "../../trading/components/TradingFeedback";
 import type {
   AutomationCandidate,
@@ -39,16 +41,25 @@ import type {
   AutomationConsoleSnapshot,
   AutomationConsoleTab,
   AutomationExecutionOrder,
+  AutomationExecutionReconciliationPreview,
   AutomationExecutionResult,
   AutomationPreflight,
   AutomationPreflightFailure,
   AutomationPreflightMode,
   AutomationShadowCheck,
   AutomationVenue,
+  AutomationPositionGroup,
   CredentialDraft,
   ParameterDraft,
   SafetyAction,
 } from "../model/controlConsoleTypes";
+import {
+  canStartManualReconciliation,
+  createManualReconciliationState,
+  manualReconciliationReducer,
+  type ManualReconciliationAction,
+  type ManualReconciliationState,
+} from "../model/manualReconciliationState";
 import type {
   StepUpIntent,
   StepUpSecurityClient,
@@ -74,7 +85,14 @@ const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNo
 
 type PendingSafetyConfirmation =
   | { kind: "safety"; action: SafetyAction; title: string; phrase: string }
-  | { kind: "position"; positionId: string; title: string; phrase: string };
+  | { kind: "position"; positionId: string; title: string; phrase: string }
+  | {
+      kind: "reconciliation";
+      group: AutomationPositionGroup;
+      report: AutomationExecutionReconciliationPreview;
+      title: string;
+      phrase: string;
+    };
 
 type PendingStepUp = {
   id: string;
@@ -123,11 +141,16 @@ export function AutomationControlConsole({
   const [showStepUpCode, setShowStepUpCode] = useState(false);
   const [stepUpBusy, setStepUpBusy] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [reconciliationStates, setReconciliationStates] = useState<Record<
+    string,
+    ManualReconciliationState<AutomationExecutionReconciliationPreview>
+  >>({});
   const { dismissToast, showToast, toast } = useTradingToast();
   const accountScope = snapshot.credentials
     .map((credential) => `${credential.venue}:${credential.accountId ?? "-"}`)
     .join("|");
   const stepUpAccountScopeRef = useRef(accountScope);
+  const reconciliationInFlightRef = useRef(new Set<string>());
 
   useEffect(() => {
     setPreflight(null);
@@ -324,10 +347,165 @@ export function AutomationControlConsole({
     }
   };
 
+  const updateReconciliationState = (
+    group: AutomationPositionGroup,
+    action: ManualReconciliationAction<AutomationExecutionReconciliationPreview>,
+  ) => {
+    const scope = reconciliationScope(group);
+    setReconciliationStates((current) => {
+      const previous = current[group.id]?.scope === scope
+        ? current[group.id]
+        : createManualReconciliationState<AutomationExecutionReconciliationPreview>(scope);
+      return {
+        ...current,
+        [group.id]: manualReconciliationReducer(previous, action),
+      };
+    });
+  };
+
+  const reconcilePosition = async (group: AutomationPositionGroup) => {
+    const reconciliationId = group.reconciliationId ?? group.reconciliation?.reconciliationId;
+    if (!reconciliationId) {
+      showToast("该策略记录尚未提供可对账的执行标识。", "warning");
+      return;
+    }
+    const scope = reconciliationScope(group);
+    if (reconciliationInFlightRef.current.has(scope)) return;
+    const current = reconciliationStates[group.id]
+      ?? createManualReconciliationState<AutomationExecutionReconciliationPreview>(scope);
+    if (!canStartManualReconciliation(current.phase)) return;
+    reconciliationInFlightRef.current.add(scope);
+    const requestId = crypto.randomUUID();
+    updateReconciliationState(group, {
+      type: "request_started",
+      scope,
+      requestId,
+    });
+    try {
+      const report = await client.reconcilePosition({
+        venue: group.venue,
+        accountId: group.accountId,
+        reconciliationId,
+      });
+      if (!report) {
+        updateReconciliationState(group, {
+          type: "request_failed",
+          scope,
+          requestId,
+          error: "服务端未找到属于当前账户的待对账执行记录。",
+        });
+        return;
+      }
+      updateReconciliationState(group, {
+        type: "request_succeeded",
+        scope,
+        requestId,
+        report,
+      });
+      showToast(
+        report.canFinalize
+          ? "权威对账完成；当前结果允许申请人工结案。"
+          : "权威对账完成；仍有阻塞项需要处理。",
+        report.canFinalize ? "success" : "warning",
+      );
+    } catch (error) {
+      const presentation = presentAutomationConsoleError(error);
+      updateReconciliationState(group, {
+        type: "request_failed",
+        scope,
+        requestId,
+        error: `${presentation.title}：${presentation.message}`,
+      });
+      await handleContractError(error);
+    } finally {
+      reconciliationInFlightRef.current.delete(scope);
+    }
+  };
+
+  const requestFinalizeReconciliation = (
+    group: AutomationPositionGroup,
+    report: AutomationExecutionReconciliationPreview,
+  ) => {
+    if (!report.canFinalize) {
+      showToast("当前权威对账仍有阻塞项，不能人工结案。", "warning");
+      return;
+    }
+    setSafetyConfirmation({
+      kind: "reconciliation",
+      group,
+      report,
+      title: `确认 ${group.label} 人工处理完成`,
+      phrase: "确认人工处理完成",
+    });
+    setSafetyPhrase("");
+  };
+
   const performSafetyAction = async () => {
     if (!safetyConfirmation) return;
+    const reconciliationOperationScope = safetyConfirmation.kind === "reconciliation"
+      ? reconciliationScope(safetyConfirmation.group)
+      : null;
+    if (
+      reconciliationOperationScope
+      && reconciliationInFlightRef.current.has(reconciliationOperationScope)
+    ) return;
+    if (reconciliationOperationScope) {
+      reconciliationInFlightRef.current.add(reconciliationOperationScope);
+    }
     setBusy(true);
+    let finalizeRequest: {
+      group: AutomationPositionGroup;
+      requestId: string;
+      scope: string;
+    } | null = null;
     try {
+      if (safetyConfirmation.kind === "reconciliation") {
+        const { group, report } = safetyConfirmation;
+        const scope = reconciliationScope(group);
+        const requestId = crypto.randomUUID();
+        finalizeRequest = { group, requestId, scope };
+        updateReconciliationState(group, {
+          type: "finalize_started",
+          scope,
+          requestId,
+        });
+        const prepared = await reconciliationFinalizeStepUpIntent({
+          venue: group.venue,
+          accountId: group.accountId,
+          reconciliationId: report.reconciliationId,
+        });
+        const token = await requestStepUp(
+          prepared.intent,
+          "确认人工处理完成",
+          `${venueLabel(group.venue)} · 服务端将再次读取交易所权威状态，不会发送订单`,
+        );
+        const result = await client.finalizeReconciliation({
+          venue: group.venue,
+          accountId: group.accountId,
+          reconciliationId: report.reconciliationId,
+          idempotencyKey: prepared.idempotencyKey,
+        }, token);
+        if (!result.reconciliation) {
+          throw new AutomationConsoleContractError(
+            503,
+            "服务端未返回结案后的权威对账结果。",
+            null,
+            "reconciliation_result_unavailable",
+          );
+        }
+        updateReconciliationState(group, {
+          type: "finalize_succeeded",
+          scope,
+          requestId,
+          report: result.reconciliation,
+        });
+        setExecution(result);
+        showToast(result.message || "人工结案已由服务端确认。", "success");
+        setSafetyConfirmation(null);
+        setSafetyPhrase("");
+        await onReload();
+        return;
+      }
       let receipt;
       if (safetyConfirmation.kind === "position") {
         const prepared = await positionCloseStepUpIntent(snapshot, safetyConfirmation.positionId);
@@ -354,8 +532,22 @@ export function AutomationControlConsole({
       setSafetyPhrase("");
       await onReload();
     } catch (error) {
+      if (finalizeRequest) {
+        const presentation = error instanceof StepUpCancelledError
+          ? { title: "已取消人工结案", message: "未提交 TOTP 授权，策略记录和交易所状态均未改变。" }
+          : presentAutomationConsoleError(error);
+        updateReconciliationState(finalizeRequest.group, {
+          type: "finalize_failed",
+          scope: finalizeRequest.scope,
+          requestId: finalizeRequest.requestId,
+          error: `${presentation.title}：${presentation.message}`,
+        });
+      }
       await handleContractError(error);
     } finally {
+      if (reconciliationOperationScope) {
+        reconciliationInFlightRef.current.delete(reconciliationOperationScope);
+      }
       setBusy(false);
     }
   };
@@ -378,48 +570,35 @@ export function AutomationControlConsole({
 
   return (
     <div className="space-y-4">
-      <section
-        aria-label="Mainnet 真实执行边界"
-        className="flex flex-col gap-3 border border-red-400/25 bg-red-400/[0.045] px-4 py-3 text-xs text-red-100 sm:flex-row sm:items-center sm:justify-between sm:px-5"
-      >
-        <div className="flex items-start gap-2">
-          <ShieldAlert className="mt-0.5 shrink-0" size={15} />
-          <p className="leading-5">
-            <strong className="font-semibold">Mainnet 能力边界</strong>
-            <span className="ml-2 text-red-100/75">
-              Binance 与 Bybit 仅在服务端全部门禁就绪后提供受控真实执行；每次建立对冲组合都需要实时预检和用户二次确认。
-            </span>
-          </p>
+      <div className="flex min-w-0 items-center border-b border-white/15">
+        <nav
+          aria-label="套利自动化控制台"
+          className="no-scrollbar flex min-w-0 flex-1 gap-2 overflow-x-auto"
+        >
+          {tabs.map((tab) => (
+            <button
+              aria-current={activeTab === tab.id ? "page" : undefined}
+              className={`inline-flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 text-sm font-semibold transition ${
+                activeTab === tab.id
+                  ? "border-white text-white"
+                  : "border-transparent text-muted hover:border-white/30 hover:text-white"
+              }`}
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)}
+              type="button"
+            >
+              {tab.icon}
+              {tab.label}
+            </button>
+          ))}
+        </nav>
+        <div className="shrink-0 px-2">
+          <ArbitrageHelp
+            content={`Mainnet 真实执行仅在服务端全部门禁就绪后开放；每次建立对冲组合都需要实时预检和用户二次确认。当前急停状态：${snapshot.killSwitchActive ? "已开启" : "待命"}。`}
+            label="查看 Mainnet 执行边界"
+          />
         </div>
-        <div className="flex shrink-0 flex-wrap gap-2">
-          <StatusTag tone="warning">受控真实</StatusTag>
-          <StatusTag tone={snapshot.killSwitchActive ? "danger" : "success"}>
-            {snapshot.killSwitchActive ? "急停开启" : "急停待命"}
-          </StatusTag>
-        </div>
-      </section>
-
-      <nav
-        aria-label="套利自动化控制台"
-        className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto border-b border-white/15"
-      >
-        {tabs.map((tab) => (
-          <button
-            aria-current={activeTab === tab.id ? "page" : undefined}
-            className={`inline-flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 text-sm font-semibold transition ${
-              activeTab === tab.id
-                ? "border-white text-white"
-                : "border-transparent text-muted hover:border-white/30 hover:text-white"
-            }`}
-            key={tab.id}
-            onClick={() => setActiveTab(tab.id)}
-            type="button"
-          >
-            {tab.icon}
-            {tab.label}
-          </button>
-        ))}
-      </nav>
+      </div>
 
       {activeTab === "overview" ? <AutomationOverview snapshot={snapshot} /> : null}
       {activeTab === "candidates" ? (
@@ -432,6 +611,9 @@ export function AutomationControlConsole({
         <AutomationPositions
           groups={snapshot.positionGroups}
           onClose={closePosition}
+          onFinalizeReconciliation={requestFinalizeReconciliation}
+          onReconcile={(group) => void reconcilePosition(group)}
+          reconciliationStates={reconciliationStates}
           writableVenues={snapshot.credentials
             .filter((credential) => credential.canExecute)
             .map((credential) => credential.venue)}
@@ -549,7 +731,9 @@ export function AutomationControlConsole({
 
       <Modal
         closeDisabled={busy}
-        description="该操作只影响当前用户在所选交易所的自动套利账户；服务端仍会校验 accountId、幂等标识与实时状态。"
+        description={safetyConfirmation?.kind === "reconciliation"
+          ? "该操作只结案策略记录；服务端会再次读取交易所权威状态，不会发送订单或修改交易所仓位。"
+          : "该操作只影响当前用户在所选交易所的自动套利账户；服务端仍会校验 accountId、幂等标识与实时状态。"}
         onClose={() => setSafetyConfirmation(null)}
         open={safetyConfirmation !== null}
         title={safetyConfirmation?.title ?? "确认安全操作"}
@@ -557,7 +741,9 @@ export function AutomationControlConsole({
         {safetyConfirmation ? (
           <div className="space-y-4">
             <div className="border border-red-400/30 bg-red-400/[0.06] p-4 text-sm leading-6 text-red-100">
-              执行前请核对当前持仓、在途订单、策略状态和退出风险。退出操作会处理当前账户的现货与永续对冲组合。
+              {safetyConfirmation.kind === "reconciliation"
+                ? "仅在已于交易所完成人工处理后继续。确认后仍需 TOTP，服务端会二次对账；若仍有可交易残余、当前委托、过期快照或账户不匹配，将拒绝结案。"
+                : "执行前请核对当前持仓、在途订单、策略状态和退出风险。退出操作会处理当前账户的现货与永续对冲组合。"}
             </div>
             <label className="xh-account-modal-field">
               <span>输入“{safetyConfirmation.phrase}”确认</span>
@@ -673,7 +859,7 @@ function PreflightConfirmation({
       {account ? <AccountSnapshot account={account} /> : null}
 
       <div className="min-w-0 overflow-x-auto border border-white/10">
-        <table className="w-full min-w-[720px] text-left text-sm">
+        <table className="w-full min-w-[720px] text-left text-sm [&_td]:align-middle [&_th]:align-middle">
           <thead className="border-b border-white/10 bg-white/[0.025] text-xs text-muted">
             <tr>
               <th className="px-3 py-2">市场侧</th>
@@ -893,7 +1079,7 @@ function ExecutionOrders({
   }
   return (
     <div className="min-w-0 overflow-x-auto border border-white/10">
-      <table className="w-full min-w-[780px] text-left text-sm">
+      <table className="w-full min-w-[780px] text-left text-sm [&_td]:align-middle [&_th]:align-middle">
         <thead className="border-b border-white/10 bg-white/[0.025] text-xs text-muted">
           <tr>
             <th className="px-3 py-2">市场侧</th>
@@ -989,13 +1175,19 @@ function executionStateLabel(state: AutomationExecutionResult["state"]) {
     accepted: "执行请求已接受",
     opening_spot: "正在建立现货侧仓位",
     opening_perpetual: "正在建立永续侧仓位",
+    partial_closed: "已部分退出，等待人工核对",
     hedged: "两侧仓位已对冲",
     compensating: "正在执行安全补偿",
+    reconciled: "已按权威状态完成人工结案",
     closed: "对冲组合已退出",
     failed: "执行失败",
     manual_intervention: "需要人工处理",
     unknown: "执行状态未知",
   } as const)[state];
+}
+
+function reconciliationScope(group: AutomationPositionGroup) {
+  return `${group.venue}:${group.accountId}:${group.reconciliationId ?? group.id}`;
 }
 
 function isPreflightFailure(

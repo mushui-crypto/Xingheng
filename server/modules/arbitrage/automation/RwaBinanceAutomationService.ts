@@ -18,9 +18,11 @@ import {
 } from "./RwaBinanceAutomationTypes";
 import { RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
 import {
+  assessResidual,
   calculateNeutralExecutionSlippage,
   createNeutralExecutionRecord,
   RwaNeutralHedgeExecutionEngine,
+  spotClosableQuantity,
 } from "./RwaNeutralHedgeExecutionEngine";
 import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
@@ -28,6 +30,7 @@ import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import {
   RWA_MAX_STRATEGY_CAPITAL_USD,
   defaultRwaExecutionConfig,
+  type RwaExecutionReconciliationPreview,
   type RwaCredentialLifecycle,
   type RwaExecutionConfig,
   type RwaExecutionRecord,
@@ -36,7 +39,7 @@ import {
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
-const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating"]);
+const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating", "partial_closed"]);
 type BinanceStore = RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>;
 type BinanceCredentialMetadata = NonNullable<Awaited<ReturnType<BinanceStore["readCredentialMetadata"]>>>;
 
@@ -94,9 +97,13 @@ export class RwaBinanceAutomationService {
           await client.cancelStrategyOrders(execution.orderLinkPrefix);
           await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
           execution.state = "closed";
+          execution.reconciliation = await this.buildReconciliationPreview(client, execution);
           execution.message = "服务重启后已按 Binance 权威状态退出对冲组合。";
         } catch (error) {
-          execution.state = "manual_intervention";
+          execution.reconciliation = await this.safeReconciliationPreview(client, execution);
+          execution.state = execution.reconciliation && hasPartialClose(execution.reconciliation)
+            ? "partial_closed"
+            : "manual_intervention";
           execution.errorCategory = errorCategory(error);
           execution.message = "重启恢复无法自动退出对冲组合，需要当前用户在 Binance 人工处理。";
           state.config.killSwitchActive = true;
@@ -452,6 +459,90 @@ export class RwaBinanceAutomationService {
     };
   }
 
+  async getReconciliation(input: unknown = {}) {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "reconciliationId"]);
+    const metadata = await this.requireMetadata();
+    const accountId = requiredString(body.accountId ?? metadata.accountId, "accountId", 100);
+    assertAccountId(accountId, metadata.accountId);
+    const state = await this.store.readState();
+    const execution = selectReconciliationExecution(state.executions, body.reconciliationId);
+    if (!execution) {
+      return {
+        accountId: metadata.accountId,
+        items: [],
+        phase: "execution_capable",
+        providerWritesEnabled: true,
+      };
+    }
+    const client = await this.client();
+    const preview = await this.buildReconciliationPreview(client, execution);
+    execution.reconciliation = preview;
+    await this.store.writeState(state);
+    return {
+      accountId: metadata.accountId,
+      items: [preview],
+      phase: "execution_capable",
+      providerWritesEnabled: true,
+    };
+  }
+
+  async finalizeReconciliation(input: unknown) {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "reconciliationId", "idempotencyKey"]);
+    const metadata = await this.requireMetadata();
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const reconciliationId = requiredString(body.reconciliationId, "reconciliationId", 100);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 100);
+    if (!/^[A-Za-z0-9:_-]{8,100}$/.test(idempotencyKey)) {
+      throw new RwaNeutralExecutionError(400, "invalid_request", "idempotencyKey 格式无效。");
+    }
+    assertAccountId(accountId, metadata.accountId);
+    const scopedIdempotencyKey = `${this.store.userDomain}:binance:${accountId}:${reconciliationId}:${idempotencyKey}`;
+    const requestFingerprint = hash(JSON.stringify({
+      accountId,
+      reconciliationId,
+      idempotencyKey,
+      venue: "binance",
+      userDomain: this.store.userDomain,
+    }));
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const execution = state.executions.find((item) => item.executionId === reconciliationId && item.accountId === accountId);
+      if (!execution) throw new RwaNeutralExecutionError(404, "reconciliation_not_found", "对账记录不存在或不属于当前账户。");
+      if (execution.finalizeIdempotency?.scopedKey === scopedIdempotencyKey) {
+        if (execution.finalizeIdempotency.requestFingerprint !== requestFingerprint) {
+          throw new RwaNeutralExecutionError(409, "idempotency_conflict", "相同幂等键与既有人工结案请求不一致。");
+        }
+        return redactExecution(execution);
+      }
+      if (execution.finalizeIdempotency) {
+        throw new RwaNeutralExecutionError(409, "reconciliation_already_finalized", "该对账记录已人工结案；如需复核请使用既有幂等键结果。");
+      }
+      const client = await this.client();
+      const preview = await this.buildReconciliationPreview(client, execution);
+      if (!preview.canFinalize) {
+        throw new RwaNeutralExecutionError(409, "reconciliation_blocked", "当前对账结果仍不允许人工结案。", { blockingReasons: preview.blockingReasons });
+      }
+      const resultState = preview.dustResidual.spot || preview.dustResidual.perpetual ? "reconciled" : "closed";
+      execution.state = resultState;
+      execution.reconciliation = preview;
+      execution.finalizeIdempotency = {
+        scopedKey: scopedIdempotencyKey,
+        requestFingerprint,
+        resultState,
+        completedAt: this.now(),
+      };
+      execution.message = preview.dustResidual.spot || preview.dustResidual.perpetual
+        ? "交易所权威对账确认仅剩不可交易残余，已按人工结案完成记录。"
+        : "交易所权威对账确认双腿已关闭，已完成人工结案。";
+      execution.errorCategory = null;
+      execution.updatedAt = this.now();
+      await this.store.writeState(state);
+      return redactExecution(execution);
+    });
+  }
+
   async getAudit() {
     const state = await this.store.readState();
     return {
@@ -648,9 +739,13 @@ export class RwaBinanceAutomationService {
         await client.cancelStrategyOrders(this.strategyOrderPrefix);
         await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
         execution.state = "closed";
+        execution.reconciliation = await this.buildReconciliationPreview(client, execution);
         execution.message = "策略订单已撤销，现货与永续两侧仓位已退出并确认。";
       } catch (error) {
-        execution.state = "manual_intervention";
+        execution.reconciliation = await this.safeReconciliationPreview(client, execution);
+        execution.state = execution.reconciliation && hasPartialClose(execution.reconciliation)
+          ? "partial_closed"
+          : "manual_intervention";
         execution.errorCategory = errorCategory(error);
         execution.message = "自动退出对冲组合未能闭环，需要当前用户在 Binance 人工处理。";
         state.config.killSwitchActive = true;
@@ -743,6 +838,103 @@ export class RwaBinanceAutomationService {
   private async persistExecution(state: RwaAutomationStateData, execution: RwaExecutionRecord) {
     execution.updatedAt = this.now();
     await this.store.writeState(state);
+  }
+
+  private async safeReconciliationPreview(client: RwaBinanceClient | null, execution: RwaExecutionRecord) {
+    if (!client) return null;
+    try {
+      return await this.buildReconciliationPreview(client, execution);
+    } catch {
+      return null;
+    }
+  }
+
+  private async buildReconciliationPreview(client: RwaBinanceClient, execution: RwaExecutionRecord): Promise<RwaExecutionReconciliationPreview> {
+    const [pnl, snapshot] = await Promise.all([
+      client.readStrategyPnl(this.strategyOrderPrefix, execution.createdAt),
+      client.readPreflightSnapshot(),
+    ]);
+    const spotResidual = assessResidual(
+      spotClosableQuantity(snapshot),
+      snapshot.spot.bid || snapshot.spot.ask || snapshot.spot.minNotionalUsd,
+      snapshot.spot.qtyStep,
+      snapshot.spot.minOrderQty,
+      snapshot.spot.minNotionalUsd,
+    );
+    const perpetualResidual = assessResidual(
+      snapshot.existingPerpetualQuantityXaut,
+      snapshot.perpetual.bid || snapshot.perpetual.ask || snapshot.perpetual.minNotionalUsd,
+      snapshot.perpetual.qtyStep,
+      snapshot.perpetual.minOrderQty,
+      snapshot.perpetual.minNotionalUsd,
+    );
+    const stale = this.now() - snapshot.fetchedAt > RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS;
+    const blockingReasons: string[] = [];
+    if (stale) blockingReasons.push("交易所权威快照已过期，请稍后重试对账。");
+    if (pnl.openOrders.length || snapshot.openSpotOrderCount > 0 || snapshot.openPerpetualOrderCount > 0) {
+      blockingReasons.push("当前仍存在活动委托，不能人工结案。");
+    }
+    if (perpetualResidual.tradable) blockingReasons.push("永续侧仍存在可交易仓位，需先人工平仓。");
+    if (spotResidual.tradable) blockingReasons.push("现货侧仍存在可交易余额，需先人工卖出。");
+    const accountMismatch = execution.accountId !== snapshot.accountId;
+    if (accountMismatch) blockingReasons.push("交易所账户与当前策略记录不匹配，禁止结案。");
+    const recommendedAction = stale
+      ? "retry_close"
+      : perpetualResidual.tradable && spotResidual.tradable
+        ? "manual_close_both"
+        : perpetualResidual.tradable
+          ? "manual_close_perpetual"
+          : spotResidual.tradable
+            ? "manual_close_spot"
+            : "manual_finalize";
+    return {
+      reconciliationId: execution.executionId,
+      strategyId: RWA_BINANCE_STRATEGY_ID,
+      recordedState: execution.state,
+      authoritativeState: {
+        snapshotAt: snapshot.fetchedAt,
+        status: stale ? "stale" : "ok",
+        stale,
+        openOrders: {
+          spot: snapshot.openSpotOrderCount,
+          perpetual: snapshot.openPerpetualOrderCount,
+          total: snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount,
+        },
+        legs: {
+          spot: {
+            quantityXaut: snapshot.existingSpotQuantityXaut,
+            freeQuantityXaut: snapshot.spotFreeXaut,
+            markPrice: snapshot.spot.bid || snapshot.spot.ask || null,
+            minOrderQty: snapshot.spot.minOrderQty,
+            minNotionalUsd: snapshot.spot.minNotionalUsd,
+            qtyStep: snapshot.spot.qtyStep,
+          },
+          perpetual: {
+            quantityXaut: snapshot.existingPerpetualQuantityXaut,
+            freeQuantityXaut: null,
+            markPrice: snapshot.perpetual.mark || snapshot.perpetual.bid || null,
+            minOrderQty: snapshot.perpetual.minOrderQty,
+            minNotionalUsd: snapshot.perpetual.minNotionalUsd,
+            qtyStep: snapshot.perpetual.qtyStep,
+          },
+        },
+      },
+      legDiffs: {
+        spotQuantityXaut: roundResidual(snapshot.existingSpotQuantityXaut - pnl.legs.spot.quantityXaut),
+        perpetualQuantityXaut: roundResidual(snapshot.existingPerpetualQuantityXaut - pnl.legs.perpetual.quantityXaut),
+      },
+      tradableResidual: {
+        spot: spotResidual.tradable ? spotResidual : null,
+        perpetual: perpetualResidual.tradable ? perpetualResidual : null,
+      },
+      dustResidual: {
+        spot: !spotResidual.tradable && spotResidual.reason !== "zero" ? spotResidual : null,
+        perpetual: !perpetualResidual.tradable && perpetualResidual.reason !== "zero" ? perpetualResidual : null,
+      },
+      recommendedAction,
+      canFinalize: !blockingReasons.length,
+      blockingReasons,
+    };
   }
 
   private assertEntrySwitches(config: RwaExecutionConfig) {
@@ -1016,6 +1208,26 @@ function errorCategory(error: unknown) {
   return error instanceof RwaNeutralExecutionError || error instanceof RwaBinanceProviderError
     ? error.category
     : "automation_execution_error";
+}
+
+function roundResidual(value: number) {
+  return Math.round(value * 1_000_000_000) / 1_000_000_000;
+}
+
+function hasPartialClose(preview: RwaExecutionReconciliationPreview) {
+  return Boolean(
+    (preview.authoritativeState.legs.spot.quantityXaut > 1e-9 && preview.authoritativeState.legs.perpetual.quantityXaut <= 1e-9)
+    || (preview.authoritativeState.legs.perpetual.quantityXaut > 1e-9 && preview.authoritativeState.legs.spot.quantityXaut <= 1e-9),
+  );
+}
+
+function selectReconciliationExecution(executions: RwaExecutionRecord[], requestedId: unknown) {
+  if (typeof requestedId === "string" && requestedId.trim()) {
+    return executions.find((item) => item.executionId === requestedId.trim()) ?? null;
+  }
+  return [...executions]
+    .filter((item) => item.state === "manual_intervention" || item.state === "partial_closed" || item.state === "compensating")
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null;
 }
 
 function redactExecution(execution: RwaExecutionRecord) {

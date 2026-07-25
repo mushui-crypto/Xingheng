@@ -483,6 +483,20 @@ export class RwaAutomationControlService {
     });
   }
 
+  async getReconciliation(userId: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "reconciliationId"]);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, connector.venue, configuredAccountId, async () => {
+      await registry.initialize();
+      return connector.getReconciliation(body);
+    });
+  }
+
   async closePosition(userId: string, sessionDomain: string, positionId: string, input: unknown, sourceIp = "unknown") {
     const [venue] = positionId.split(":", 1);
     if (!venue) throw new RwaAutomationControlError(400, "position_id_invalid", "positionId 格式无效。");
@@ -530,6 +544,30 @@ export class RwaAutomationControlService {
         notionalUsd: null,
       });
       return connector.closeAll(sanitized);
+    });
+  }
+
+  async finalizeReconciliation(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "reconciliationId", "idempotencyKey", "stepUpToken"]);
+    const sanitized = omitStepUp(body);
+    const accountId = requiredString(sanitized.accountId, "accountId", 100);
+    this.admitRequest("close_all", sourceIp, userId, normalizedVenue);
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented(normalizedVenue);
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    return this.governed("close_all", sourceIp, userId, connector.venue, configuredAccountId ?? "unconfigured", async () => {
+      await registry.initialize();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "reconciliation_finalize",
+        venue: connector.venue,
+        accountId,
+        resourceId: typeof sanitized.reconciliationId === "string" ? sanitized.reconciliationId : null,
+        requestDigest: canonicalRequestDigest(sanitized),
+        notionalUsd: null,
+      });
+      return connector.finalizeReconciliation(sanitized);
     });
   }
 
@@ -706,7 +744,7 @@ function omitStepUp(body: Record<string, any>) {
 function normalizeStepUpOperation(value: unknown): StepUpOperation {
   const allowed: StepUpOperation[] = [
     "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
-    "hedge_execute", "position_close", "close_all",
+    "hedge_execute", "position_close", "close_all", "reconciliation_finalize",
   ];
   if (!allowed.includes(value as StepUpOperation)) throw new RwaAutomationControlError(400, "invalid_request", "operation 不受支持。");
   return value as StepUpOperation;

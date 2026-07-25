@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { RwaAutomationStateData } from "./RwaAutomationPersistentStore";
 import type {
+  RwaResidualAssessment,
   RwaExecutionConfig,
   RwaExecutionRecord,
   RwaNeutralTradingClient,
@@ -117,14 +118,27 @@ export class RwaNeutralHedgeExecutionEngine {
     orderLinkPrefix: string,
   ) {
     this.assertExecutionLeaseHeld();
-    const pnl = await client.readStrategyPnl(scope, null);
-    this.assertExecutionLeaseHeld();
     const market = await client.readPreflightSnapshot();
+    const pnl = await client.readStrategyPnl(scope, null);
     const deadline = this.now() + 10_000;
-    await this.closeSide(client, {
+    const perpetualResidual = assessResidual(
+      market.existingPerpetualQuantityXaut,
+      market.perpetual.bid || market.perpetual.ask || market.perpetual.minNotionalUsd,
+      market.perpetual.qtyStep,
+      market.perpetual.minOrderQty,
+      market.perpetual.minNotionalUsd,
+    );
+    const spotResidual = assessResidual(
+      spotClosableQuantity(market),
+      market.spot.bid || market.spot.ask || market.spot.minNotionalUsd,
+      market.spot.qtyStep,
+      market.spot.minOrderQty,
+      market.spot.minNotionalUsd,
+    );
+    if (perpetualResidual.tradable) await this.closeSide(client, {
       category: "linear",
       side: "Buy",
-      quantity: pnl.legs.perpetual.quantityXaut,
+      quantity: perpetualResidual.quantityXaut,
       qtyStep: market.perpetual.qtyStep,
       minOrderQty: market.perpetual.minOrderQty,
       limitPrice: ceilStep(market.perpetual.ask * 1.001, market.perpetual.priceTick),
@@ -133,10 +147,10 @@ export class RwaNeutralHedgeExecutionEngine {
       deadline,
       failureMessage: "永续侧仓位未完全退出。",
     });
-    await this.closeSide(client, {
+    if (spotResidual.tradable) await this.closeSide(client, {
       category: "spot",
       side: "Sell",
-      quantity: pnl.legs.spot.quantityXaut,
+      quantity: spotResidual.quantityXaut,
       qtyStep: market.spot.qtyStep,
       minOrderQty: market.spot.minOrderQty,
       limitPrice: floorStep(market.spot.bid * 0.999, market.spot.priceTick),
@@ -146,10 +160,26 @@ export class RwaNeutralHedgeExecutionEngine {
       failureMessage: "现货侧仓位未完全退出。",
     });
     this.assertExecutionLeaseHeld();
-    const confirmed = await client.readStrategyPnl(scope, null);
-    if (confirmed.openOrders.length || confirmed.legs.spot.quantityXaut > 1e-9 || confirmed.legs.perpetual.quantityXaut > 1e-9) {
+    const confirmedPnl = await client.readStrategyPnl(scope, null);
+    const confirmedMarket = await client.readPreflightSnapshot();
+    const confirmedSpot = assessResidual(
+      spotClosableQuantity(confirmedMarket),
+      confirmedMarket.spot.bid || confirmedMarket.spot.ask || confirmedMarket.spot.minNotionalUsd,
+      confirmedMarket.spot.qtyStep,
+      confirmedMarket.spot.minOrderQty,
+      confirmedMarket.spot.minNotionalUsd,
+    );
+    const confirmedPerpetual = assessResidual(
+      confirmedMarket.existingPerpetualQuantityXaut,
+      confirmedMarket.perpetual.bid || confirmedMarket.perpetual.ask || confirmedMarket.perpetual.minNotionalUsd,
+      confirmedMarket.perpetual.qtyStep,
+      confirmedMarket.perpetual.minOrderQty,
+      confirmedMarket.perpetual.minNotionalUsd,
+    );
+    if (confirmedPnl.openOrders.length || confirmedSpot.tradable || confirmedPerpetual.tradable) {
       throw new Error("交易所权威状态仍存在策略活动订单或未退出的两侧仓位。");
     }
+    return { spot: confirmedSpot, perpetual: confirmedPerpetual };
   }
 
   private async closeSide<TPermissions extends RwaVenuePermissions>(
@@ -217,6 +247,8 @@ export function createNeutralExecutionRecord(input: {
     unhedgedDurationMs: null,
     errorCategory: null,
     message: "执行请求已接受，等待建立现货与永续对冲组合。",
+    reconciliation: null,
+    finalizeIdempotency: null,
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -244,4 +276,39 @@ function floorStep(value: number, step: number) {
 
 function ceilStep(value: number, step: number) {
   return step > 0 ? Math.ceil((value - 1e-12) / step) * step : 0;
+}
+
+export function spotClosableQuantity<TPermissions extends RwaVenuePermissions>(market: RwaProviderPreflightSnapshot<TPermissions>) {
+  const explicitFree = (market as { spotFreeXaut?: unknown }).spotFreeXaut;
+  const free = typeof explicitFree === "number" && Number.isFinite(explicitFree)
+    ? explicitFree
+    : market.existingSpotQuantityXaut;
+  return Math.max(0, free);
+}
+
+export function assessResidual(
+  quantity: number,
+  referencePrice: number,
+  qtyStep: number,
+  minOrderQty: number,
+  minNotionalUsd: number,
+): RwaResidualAssessment {
+  const rawQuantity = Math.max(0, quantity);
+  const alignedQuantity = floorStep(rawQuantity, qtyStep);
+  const rawNotionalUsd = rawQuantity * Math.max(0, referencePrice);
+  const alignedNotionalUsd = alignedQuantity * Math.max(0, referencePrice);
+  if (!(rawQuantity > 0)) {
+    return { quantityXaut: 0, notionalUsd: 0, minOrderQty, minNotionalUsd, qtyStep, tradable: false, reason: "zero" };
+  }
+  if (alignedQuantity + 1e-12 < minOrderQty) {
+    return { quantityXaut: normalizeResidualNumber(rawQuantity), notionalUsd: normalizeResidualNumber(rawNotionalUsd), minOrderQty, minNotionalUsd, qtyStep, tradable: false, reason: "below_min_qty" };
+  }
+  if (alignedNotionalUsd + 1e-9 < minNotionalUsd) {
+    return { quantityXaut: normalizeResidualNumber(rawQuantity), notionalUsd: normalizeResidualNumber(rawNotionalUsd), minOrderQty, minNotionalUsd, qtyStep, tradable: false, reason: "below_min_notional" };
+  }
+  return { quantityXaut: normalizeResidualNumber(alignedQuantity), notionalUsd: normalizeResidualNumber(alignedNotionalUsd), minOrderQty, minNotionalUsd, qtyStep, tradable: true, reason: "tradable" };
+}
+
+function normalizeResidualNumber(value: number) {
+  return Math.round(value * 1_000_000_000) / 1_000_000_000;
 }

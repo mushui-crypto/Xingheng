@@ -49,9 +49,11 @@ export class RwaBybitAutomationConnector implements RwaAutomationConnector {
   getPrivateAccount() { return this.service.getPrivateAccount(); }
   getPnl() { return this.service.getPnl(); }
   getAudit() { return this.service.getAudit(); }
+  async getReconciliation() { throw new Error("bybit reconciliation unavailable"); }
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode) {
     return this.service.preflight(opportunity, accountId, mode);
   }
   execute(input: unknown) { return this.service.execute(input); }
   closeAll(input: unknown) { return this.service.closeAll(input); }
+  async finalizeReconciliation() { throw new Error("bybit reconciliation unavailable"); }
 }

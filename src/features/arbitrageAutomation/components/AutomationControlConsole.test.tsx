@@ -14,6 +14,10 @@ import {
 import { AutomationCredentials, resolveCredentialVerificationPanel } from "./AutomationCredentials";
 import { AutomationParameters } from "./AutomationParameters";
 import { AutomationPositions } from "./AutomationPositions";
+import {
+  ManualInterventionReconciliation,
+  authoritativeSummary,
+} from "./ManualInterventionReconciliation";
 import { AutomationSafety } from "./AutomationSafety";
 import { AutomationStepUpSecurity, StepUpSecurityStatusTag } from "./AutomationStepUpSecurity";
 import { TotpQrCode } from "./TotpQrCode";
@@ -23,7 +27,7 @@ import type { StepUpSecurityClient } from "../model/stepUpTypes";
 
 const snapshot = createAutomationConsoleFixture();
 
-test("console overview exposes controlled Mainnet boundaries without sensitive values", () => {
+test("console overview keeps controlled Mainnet boundaries in compact help without persistent callouts", () => {
   const html = renderToStaticMarkup(
     <AutomationControlConsole
       client={createFakeAutomationConsoleClient(snapshot)}
@@ -31,10 +35,10 @@ test("console overview exposes controlled Mainnet boundaries without sensitive v
       snapshot={snapshot}
     />,
   );
-  assert.match(html, /Mainnet 能力边界/);
-  assert.match(html, /Binance 与 Bybit/);
+  assert.match(html, /查看 Mainnet 执行边界/);
   assert.match(html, /受控真实执行/);
-  assert.match(html, /当前无自动策略候选/);
+  assert.doesNotMatch(html, />Mainnet 能力边界</);
+  assert.doesNotMatch(html, />当前无自动策略候选</);
   assert.match(html, /策略级口径/);
   assert.match(html, /候选与执行/);
   assert.match(html, /安全操作/);
@@ -57,6 +61,8 @@ test("candidate table separates manual, safety-blocked and adapter-unavailable s
   assert.match(html, /Adapter 未接入/);
   assert.match(html, /disabled=""/);
   assert.match(html, /单侧盘口滑点超限/);
+  assert.match(html, /align-middle/);
+  assert.doesNotMatch(html, /align-top/);
 });
 
 test("candidate preflight intersects venue capability, execution readiness and candidate adapter support", () => {
@@ -128,6 +134,122 @@ test("Binance execution-capable position exposes the controlled exit action", ()
   assert.doesNotMatch(html, /当前阶段无平台代理退出/);
 });
 
+test("manual intervention separates strategy records from a fresh authoritative snapshot", () => {
+  const base = snapshot.positionGroups[0];
+  assert.ok(base);
+  const report = {
+    reconciliationId: "execution-manual-1",
+    strategyId: base.strategyId,
+    recordedState: "manual_intervention" as const,
+    authoritativeState: {
+      snapshotAt: Date.now(),
+      status: "ok" as const,
+      stale: false,
+      openOrders: { spot: 0, perpetual: 0, total: 0 },
+      legs: {
+        spot: {
+          quantityXaut: 0.0003,
+          freeQuantityXaut: 0.0003,
+          markPrice: 3_360,
+          minOrderQty: 0.0001,
+          minNotionalUsd: 5,
+          qtyStep: 0.0001,
+        },
+        perpetual: {
+          quantityXaut: 0,
+          freeQuantityXaut: null,
+          markPrice: 3_361,
+          minOrderQty: 0.001,
+          minNotionalUsd: 5,
+          qtyStep: 0.001,
+        },
+      },
+    },
+    legDiffs: { spotQuantityXaut: -7.1397, perpetualQuantityXaut: -7.1 },
+    tradableResidual: { spot: null, perpetual: null },
+    dustResidual: {
+      spot: {
+        quantityXaut: 0.0003,
+        notionalUsd: 1.008,
+        minOrderQty: 0.0001,
+        minNotionalUsd: 5,
+        qtyStep: 0.0001,
+        tradable: false,
+        reason: "below_min_notional" as const,
+      },
+      perpetual: null,
+    },
+    recommendedAction: "manual_finalize" as const,
+    canFinalize: true,
+    blockingReasons: [],
+  };
+  const group = {
+    ...base,
+    mode: "live" as const,
+    status: "attention" as const,
+    executionState: "manual_intervention" as const,
+    reconciliationId: report.reconciliationId,
+    reconciliation: report,
+    capitalUsedUsd: 8.11,
+  };
+  const state = {
+    scope: `binance:${group.accountId}:${report.reconciliationId}`,
+    phase: "success" as const,
+    requestId: "request-1",
+    report,
+    error: null,
+  };
+  const html = renderToStaticMarkup(
+    <ManualInterventionReconciliation
+      group={group}
+      onFinalize={() => undefined}
+      onReconcile={() => undefined}
+      state={state}
+    />,
+  );
+
+  assert.match(html, /策略记录待核对/);
+  assert.match(html, /交易所权威状态/);
+  assert.match(html, /不可交易小额余额/);
+  assert.match(html, /minQty/);
+  assert.match(html, /minNotional/);
+  assert.match(html, /stepSize/);
+  assert.match(html, /服务端允许申请人工结案/);
+  assert.equal(authoritativeSummary(report)?.capitalUsedUsd, 1.008);
+  assert.equal(authoritativeSummary({
+    ...report,
+    authoritativeState: { ...report.authoritativeState, status: "stale", stale: true },
+  }), null);
+});
+
+test("manual intervention error state withdraws every old authoritative detail", () => {
+  const group = {
+    ...snapshot.positionGroups[0]!,
+    mode: "live" as const,
+    status: "attention" as const,
+    executionState: "manual_intervention" as const,
+    reconciliationId: "execution-manual-error",
+    reconciliation: null,
+  };
+  const html = renderToStaticMarkup(
+    <ManualInterventionReconciliation
+      group={group}
+      onFinalize={() => undefined}
+      onReconcile={() => undefined}
+      state={{
+        scope: `binance:${group.accountId}:execution-manual-error`,
+        phase: "error",
+        requestId: "request-2",
+        report: null,
+        error: "交易所权威状态对账失败。",
+      }}
+    />,
+  );
+  assert.match(html, /对账结果不可用/);
+  assert.match(html, /交易所权威状态对账失败/);
+  assert.doesNotMatch(html, /权威资金占用|服务端允许申请人工结案|minNotional/);
+});
+
 test("preflight warnings render every server risk without score language", () => {
   const html = renderToStaticMarkup(
     <PreflightWarnings warnings={["当前 Funding 不利", "当前净收益未达到自动策略条件", "基差超过自动策略范围"]} />,
@@ -166,8 +288,10 @@ test("credential, parameter and safety surfaces expose current execution control
   assert.match(credentials, /受控真实执行/);
   assert.match(credentials, /XAUTUSDT/);
   assert.doesNotMatch(credentials, /type="password"|实盘执行未开放/);
-  assert.match(parameters, /服务端范围/);
+  assert.match(parameters, /范围 25–300 USDT/);
   assert.match(parameters, /Binance 策略参数/);
+  assert.match(parameters, /未修改/);
+  assert.doesNotMatch(parameters, /草稿未保存|交易所限制/);
   assert.match(safety, /Kill switch/);
   assert.match(safety, /退出全部对冲组合/);
   assert.match(safety, /服务端全局急停/);

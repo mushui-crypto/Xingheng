@@ -872,6 +872,8 @@ function newExecution(userId: string, accountId: string, userOrderPrefix: string
     unhedgedDurationMs: null,
     errorCategory: null,
     message: "执行请求已接受。",
+    reconciliation: null,
+    finalizeIdempotency: null,
     createdAt: now,
     updatedAt: now,
   };

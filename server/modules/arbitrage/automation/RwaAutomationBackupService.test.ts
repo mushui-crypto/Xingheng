@@ -23,6 +23,7 @@ import {
   RWA_AUTOMATION_BACKUP_AAD_SCHEMA,
   RWA_CREDENTIAL_ENVELOPE_VERSION,
   canonicalCredentialAad,
+  credentialEnvironment,
   type AutomationBackupKeyContext,
 } from "./CredentialKeyProvider";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
@@ -207,6 +208,35 @@ test("credential, step-up, and automation state schemas reject unknown nested pe
       assert.deepEqual(await readdir(fixture.backupRoot), []);
       await writeSecure(item.path, original);
     }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("backup accepts legacy executions without reconciliation fields but rejects malformed finalize idempotency", async () => {
+  const fixture = await createFixture();
+  try {
+    const statePath = join(fixture.active, stateFileName);
+    const original = JSON.parse(await readFile(statePath, "utf8"));
+    delete original.executions[0].reconciliation;
+    delete original.executions[0].finalizeIdempotency;
+    await writeSecure(statePath, JSON.stringify(original));
+    const created = await fixture.service.createBackup();
+    assert.match(created.fileName, /^rwa-automation-/);
+
+    original.executions[0].reconciliation = null;
+    original.executions[0].finalizeIdempotency = {
+      scopedKey: "scoped:key",
+      requestFingerprint: "fingerprint",
+      resultState: "manual_intervention",
+      completedAt: 1,
+    };
+    await writeSecure(statePath, JSON.stringify(original));
+    const rejectingService = new RwaAutomationBackupService(fixture.provider, {
+      ...fixture.options,
+      now: () => new Date("2026-07-24T10:20:31.000Z"),
+    });
+    await assert.rejects(rejectingService.createBackup(), hasCategory("backup_manifest_invalid"));
   } finally {
     await fixture.cleanup();
   }
@@ -615,7 +645,7 @@ function backupContext(backupId: string): AutomationBackupKeyContext {
     purpose: "automation-backup",
     backupId,
     backupDomain: RWA_AUTOMATION_BACKUP_DOMAIN,
-    environment: "test",
+    environment: credentialEnvironment(),
     schemaVersion: RWA_CREDENTIAL_ENVELOPE_VERSION,
   };
 }

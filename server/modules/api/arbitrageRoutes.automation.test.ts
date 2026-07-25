@@ -52,11 +52,12 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
     undefined,
     {
       listVenues: async (userId: string) => [{ venue: "bybit", owner: userId }],
+      getReconciliation: async () => ({ items: [] }),
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 16);
+  assert.equal(automationRoutes.length, 18);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
 
   const okResponse = mockResponse();
@@ -68,6 +69,16 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   const anonymousResponse = mockResponse();
   await routes.get("GET /api/arbitrage/automation/venues")({ params: {}, body: {} }, anonymousResponse);
   assert.equal(anonymousResponse.statusCode, 401);
+
+  const reconciliationResponse = mockResponse();
+  await routes.get("GET /api/arbitrage/automation/venues/:venue/reconciliation")({
+    user: { id: "user-a" },
+    params: { venue: "bybit" },
+    query: { accountId: "acct-1" },
+    body: {},
+  }, reconciliationResponse);
+  assert.equal(reconciliationResponse.statusCode, 200);
+  assert.equal(reconciliationResponse.headers["Cache-Control"], "no-store");
 
   const failedResponse = mockResponse();
   await routes.get("PUT /api/arbitrage/automation/venues/:venue/credentials")({

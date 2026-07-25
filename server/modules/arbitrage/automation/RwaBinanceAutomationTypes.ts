@@ -57,6 +57,8 @@ export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinanc
   productAvailability: RwaBinanceProductAvailability;
   spotAvailableUsdt: number;
   futuresAvailableUsdt: number;
+  spotFreeXaut: number;
+  spotLockedXaut: number;
   existingSpotQuantityXaut: number;
   existingPerpetualQuantityXaut: number;
   openSpotOrderCount: number;

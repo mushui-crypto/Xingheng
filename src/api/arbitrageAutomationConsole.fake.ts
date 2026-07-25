@@ -79,6 +79,17 @@ export function createFakeAutomationConsoleClient(initialSnapshot: AutomationCon
       return receipt(`Fake contract 已演练 ${action.type}。`);
     },
     async closePosition(_positionId, _stepUpToken, _idempotencyKey) { return receipt("Fake contract 已演练退出持仓。"); },
+    async reconcilePosition(input, signal) {
+      if (signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+      return snapshot.positionGroups.find((group) => (
+        group.venue === input.venue
+        && group.accountId === input.accountId
+        && group.reconciliationId === input.reconciliationId
+      ))?.reconciliation ?? null;
+    },
+    async finalizeReconciliation(input, _stepUpToken) {
+      return fakeExecution(input.venue, input.accountId, "closed");
+    },
   };
 }
 
@@ -199,6 +210,7 @@ function fakeExecution(venue: AutomationExecutionResult["venue"], accountId: str
     spotOrder: { orderId: "fake-spot", orderLinkId: "fake-spot-link", status: "Filled", requestedQuantityXaut: 0.002, filledQuantityXaut: 0.002, averagePrice: 3360.2, feeUsd: 0.01, updatedAt: now },
     perpetualOrders: [{ orderId: "fake-perpetual", orderLinkId: "fake-perpetual-link", status: "Filled", requestedQuantityXaut: 0.002, filledQuantityXaut: 0.002, averagePrice: 3361.1, feeUsd: 0.01, updatedAt: now }],
     compensationOrders: [],
+    reconciliation: null,
     createdAt: now - 1_250,
     updatedAt: now,
   };

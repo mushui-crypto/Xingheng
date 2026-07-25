@@ -68,9 +68,11 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   getPrivateAccount() { return this.service.getPrivateAccount(); }
   getPnl() { return this.service.getPnl(); }
   getAudit() { return this.service.getAudit(); }
+  getReconciliation(input?: unknown) { return this.service.getReconciliation(input); }
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode) {
     return this.service.preflight(opportunity, accountId, mode);
   }
   execute(input: unknown) { return this.service.execute(input); }
   closeAll(input: unknown) { return this.service.closeAll(input); }
+  finalizeReconciliation(input: unknown) { return this.service.finalizeReconciliation(input); }
 }

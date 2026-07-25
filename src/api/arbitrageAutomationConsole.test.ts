@@ -16,6 +16,7 @@ import {
   positionCloseStepUpIntent,
   presentAutomationConsoleError,
   presentCredentialAuthorizationError,
+  reconciliationFinalizeStepUpIntent,
   safetyActionStepUpIntent,
 } from "./arbitrageAutomationConsole";
 import { canonicalRequestDigest } from "./stepUpSecurity";
@@ -334,6 +335,164 @@ test("step-up intents bind the exact request body, account, resource and changed
       idempotencyKey: preparedClose.idempotencyKey,
     }),
   );
+
+  const preparedFinalize = await reconciliationFinalizeStepUpIntent({
+    venue: "binance",
+    accountId: "binance:fixture-account",
+    reconciliationId: "execution-history",
+  });
+  assert.equal(preparedFinalize.intent.operation, "reconciliation_finalize");
+  assert.equal(preparedFinalize.intent.resourceId, "execution-history");
+  assert.equal(
+    preparedFinalize.intent.requestDigest,
+    await canonicalRequestDigest({
+      accountId: "binance:fixture-account",
+      reconciliationId: "execution-history",
+      idempotencyKey: preparedFinalize.idempotencyKey,
+    }),
+  );
+});
+
+test("manual reconciliation reads authority without writes and finalize stays account scoped", async () => {
+  const calls: CapturedRequest[] = [];
+  await withAutomationFetch(calls, async () => {
+    const client = createUserAutomationConsoleClient();
+    const snapshot = await client.load();
+    const position = snapshot.positionGroups[0];
+    assert.ok(position);
+    assert.equal(position.reconciliationId, "execution-history");
+    const report = await client.reconcilePosition({
+      venue: "binance",
+      accountId: "binance:fixture-account",
+      reconciliationId: "execution-history",
+    });
+    assert.ok(report);
+    assert.equal(report.authoritativeState.status, "ok");
+    assert.equal(report.authoritativeState.legs.spot.quantityXaut, 0.0003);
+    assert.equal(report.dustResidual.spot?.reason, "below_min_notional");
+    assert.equal(report.canFinalize, true);
+
+    const result = await client.finalizeReconciliation({
+      venue: "binance",
+      accountId: "binance:fixture-account",
+      reconciliationId: report.reconciliationId,
+      idempotencyKey: "reconciliation-finalize-fixture",
+    }, "fixture-step-up-token");
+    assert.equal(result.state, "reconciled");
+    assert.equal(result.reconciliation?.reconciliationId, "execution-history");
+  });
+
+  const reconcile = calls.find((call) => (
+    call.method === "GET"
+    && call.url.includes("/venues/binance/reconciliation?")
+  ));
+  assert.ok(reconcile);
+  assert.match(reconcile.url, /accountId=binance%3Afixture-account/);
+  assert.match(reconcile.url, /reconciliationId=execution-history/);
+  const finalize = findWrite(calls, "/venues/binance/reconciliation/finalize");
+  assert.deepEqual(finalize.body, {
+    accountId: "binance:fixture-account",
+    reconciliationId: "execution-history",
+    idempotencyKey: "reconciliation-finalize-fixture",
+    stepUpToken: "fixture-step-up-token",
+  });
+});
+
+test("manual intervention history remains visible after provider positions are empty without reusing recorded capital", async () => {
+  const manualExecution = {
+    executionId: "execution-manual-history",
+    accountId: "binance:fixture-account",
+    state: "manual_intervention",
+    createdAt: Date.now() - 60_000,
+    updatedAt: Date.now(),
+    spotOrder: executionOrder("spot-manual-history"),
+    perpetualOrders: [executionOrder("perpetual-manual-history")],
+    compensationOrders: [],
+    reconciliation: null,
+  };
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    const snapshot = await client.load();
+    const group = snapshot.positionGroups.find((item) => item.reconciliationId === manualExecution.executionId);
+    assert.ok(group);
+    assert.equal(group.executionState, "manual_intervention");
+    assert.equal(group.status, "attention");
+    assert.equal(group.legs.length, 2);
+    assert.equal(snapshot.summary.positionAuthorityIncompleteCount, 1);
+    assert.equal(snapshot.summary.totalCapitalUsedUsd, 0);
+    assert.equal(snapshot.summary.netDeltaUsd, 0);
+  }, {
+    positionItems: [],
+    pnlHistory: [manualExecution],
+  });
+});
+
+test("fresh reconciliation from execution history replaces recorded capital in the current summary", async () => {
+  const report = reconciliationFixture();
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    const snapshot = await client.load();
+    const group = snapshot.positionGroups.find((item) => item.reconciliationId === report.reconciliationId);
+    assert.ok(group);
+    assert.equal(group.reconciliation?.authoritativeState.stale, false);
+    assert.equal(snapshot.summary.positionAuthorityIncompleteCount, 0);
+    assert.equal(snapshot.summary.totalCapitalUsedUsd, 1.008);
+    assert.equal(snapshot.summary.netDeltaUsd, 1.008);
+  }, {
+    positionItems: [],
+    pnlHistory: [{
+      executionId: report.reconciliationId,
+      accountId: "binance:fixture-account",
+      state: "manual_intervention",
+      createdAt: Date.now() - 60_000,
+      updatedAt: Date.now(),
+      spotOrder: executionOrder("spot-reconciled-history"),
+      perpetualOrders: [executionOrder("perpetual-reconciled-history")],
+      compensationOrders: [],
+      reconciliation: report,
+    }],
+  });
+});
+
+test("finalize keeps backend reconciliation blockers actionable without exposing provider raw data", async () => {
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    await assert.rejects(
+      () => client.finalizeReconciliation({
+        venue: "binance",
+        accountId: "binance:fixture-account",
+        reconciliationId: "execution-history",
+        idempotencyKey: "reconciliation-blocked-fixture",
+      }, "fixture-step-up-token"),
+      (error: unknown) => {
+        assert.ok(error instanceof AutomationConsoleContractError);
+        assert.equal(error.category, "reconciliation_blocked");
+        assert.deepEqual(error.details?.blockingReasons, [
+          "当前仍存在活动委托，不能人工结案。",
+          "现货侧仍存在可交易余额，需先人工卖出。",
+        ]);
+        const presentation = presentAutomationConsoleError(error);
+        assert.equal(presentation.title, "仍不能人工结案");
+        assert.match(presentation.message, /活动委托/);
+        assert.match(presentation.message, /现货侧仍存在可交易余额/);
+        assert.doesNotMatch(presentation.message, /apiKey|signature|raw payload/i);
+        return true;
+      },
+    );
+  }, {
+    finalizeError: {
+      status: 409,
+      body: {
+        category: "reconciliation_blocked",
+        message: "当前对账结果仍不允许人工结案。",
+        blockingReasons: [
+          "当前仍存在活动委托，不能人工结案。",
+          "现货侧仍存在可交易余额，需先人工卖出。",
+        ],
+      },
+    },
+  });
 });
 
 test("Binance non-XAUT adapter-disabled candidate remains fail-closed with zero preflight requests", async () => {
@@ -683,6 +842,9 @@ type FetchFixtureOptions = {
   opportunity?: ReturnType<typeof binanceOpportunity>;
   binanceEnabled?: boolean;
   credentialPut?: (attempt: number) => Response | Promise<Response>;
+  finalizeError?: { status: number; body: unknown };
+  pnlHistory?: unknown[];
+  positionItems?: unknown[];
   venueStatuses?: (attempt: number) => ReturnType<typeof venueStatuses>;
   preflightExpiresAt?: number;
   preflightError?: { status: number; body: unknown };
@@ -717,6 +879,13 @@ async function withAutomationFetch(
     if (url.endsWith("/preflight") && method === "POST" && options.preflightError) {
       return jsonResponse(options.preflightError.body, options.preflightError.status);
     }
+    if (
+      url.endsWith("/venues/binance/reconciliation/finalize")
+      && method === "POST"
+      && options.finalizeError
+    ) {
+      return jsonResponse(options.finalizeError.body, options.finalizeError.status);
+    }
     if (url.endsWith("/execute") && method === "POST") {
       options.onExecute?.();
       if (options.executeError) {
@@ -732,6 +901,8 @@ async function withAutomationFetch(
       options.opportunity ?? binanceOpportunity(),
       options.binanceEnabled ?? true,
       options.preflightExpiresAt,
+      options.positionItems,
+      options.pnlHistory,
     );
   };
   try {
@@ -747,6 +918,15 @@ function automationResponse(
   opportunity: ReturnType<typeof binanceOpportunity>,
   binanceEnabled: boolean,
   preflightExpiresAt?: number,
+  positionItems: unknown[] = [fixturePosition()],
+  pnlHistory: unknown[] = [{
+    executionId: "execution-history",
+    state: "hedged",
+    updatedAt: Date.now(),
+    spotOrder: executionOrder("spot-history"),
+    perpetualOrders: [executionOrder("perpetual-history")],
+    compensationOrders: [],
+  }],
 ) {
   if (url.endsWith("/venues")) return jsonResponse(venueStatuses(binanceEnabled));
   if (url.endsWith("/opportunities")) {
@@ -756,7 +936,7 @@ function automationResponse(
       items: [opportunity],
     });
   }
-  if (url.endsWith("/positions")) return jsonResponse({ items: [fixturePosition()] });
+  if (url.endsWith("/positions")) return jsonResponse({ items: positionItems });
   if (url.endsWith("/pnl")) {
     return jsonResponse({
       venues: [{
@@ -766,14 +946,7 @@ function automationResponse(
           { capturedAt: Date.now() - 60_000, netPnlUsd: 0.01 },
           { capturedAt: Date.now(), netPnlUsd: 0.02 },
         ],
-        history: [{
-          executionId: "execution-history",
-          state: "hedged",
-          updatedAt: Date.now(),
-          spotOrder: executionOrder("spot-history"),
-          perpetualOrders: [executionOrder("perpetual-history")],
-          compensationOrders: [],
-        }],
+        history: pnlHistory,
       }],
     });
   }
@@ -827,7 +1000,74 @@ function automationResponse(
   if (url.endsWith("/venues/binance/close-all") && method === "POST") {
     return jsonResponse(executionResponse("closed"));
   }
+  if (url.includes("/venues/binance/reconciliation?") && method === "GET") {
+    return jsonResponse({
+      accountId: "binance:fixture-account",
+      items: [reconciliationFixture()],
+      phase: "execution_capable",
+      providerWritesEnabled: true,
+    });
+  }
+  if (url.endsWith("/venues/binance/reconciliation/finalize") && method === "POST") {
+    return jsonResponse({
+      ...executionResponse("reconciled"),
+      reconciliation: reconciliationFixture(),
+      message: "交易所权威对账确认仅剩不可交易残余，已按人工结案完成记录。",
+    });
+  }
   return jsonResponse({ ok: true, message: "fixture accepted" });
+}
+
+function reconciliationFixture() {
+  return {
+    reconciliationId: "execution-history",
+    strategyId: "binance-xaut-spot-perp-v1",
+    recordedState: "manual_intervention",
+    authoritativeState: {
+      snapshotAt: Date.now(),
+      status: "ok",
+      stale: false,
+      openOrders: { spot: 0, perpetual: 0, total: 0 },
+      legs: {
+        spot: {
+          quantityXaut: 0.0003,
+          freeQuantityXaut: 0.0003,
+          markPrice: 3_360,
+          minOrderQty: 0.0001,
+          minNotionalUsd: 5,
+          qtyStep: 0.0001,
+        },
+        perpetual: {
+          quantityXaut: 0,
+          freeQuantityXaut: null,
+          markPrice: 3_361,
+          minOrderQty: 0.001,
+          minNotionalUsd: 5,
+          qtyStep: 0.001,
+        },
+      },
+    },
+    legDiffs: {
+      spotQuantityXaut: -0.0017,
+      perpetualQuantityXaut: -0.002,
+    },
+    tradableResidual: { spot: null, perpetual: null },
+    dustResidual: {
+      spot: {
+        quantityXaut: 0.0003,
+        notionalUsd: 1.008,
+        minOrderQty: 0.0001,
+        minNotionalUsd: 5,
+        qtyStep: 0.0001,
+        tradable: false,
+        reason: "below_min_notional",
+      },
+      perpetual: null,
+    },
+    recommendedAction: "manual_finalize",
+    canFinalize: true,
+    blockingReasons: [],
+  };
 }
 
 function venueStatuses(binanceEnabled: boolean) {
@@ -1049,7 +1289,7 @@ function executionOrder(orderId: string) {
   };
 }
 
-function executionResponse(state: "hedged" | "closed") {
+function executionResponse(state: "hedged" | "reconciled" | "closed") {
   return {
     executionId: `execution-${state}`,
     state,

@@ -78,6 +78,8 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
   app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request), sourceIp(request))));
   app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.positionId), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/venues/:venue/reconciliation", route((request) => control.getReconciliation(authenticatedUserId(request), singleParam(request.params.venue), request.query, sourceIp(request))));
+  app.post("/api/arbitrage/automation/venues/:venue/reconciliation/finalize", route((request) => control.finalizeReconciliation(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
   app.get("/api/arbitrage/automation/pnl", route((request) => control.getPnl(authenticatedUserId(request), sourceIp(request))));
   app.get("/api/arbitrage/automation/audit", route((request) => control.getAudit(authenticatedUserId(request), sourceIp(request))));
 }

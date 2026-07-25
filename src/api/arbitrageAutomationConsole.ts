@@ -12,6 +12,8 @@ import type {
   AutomationPreflightFailure,
   AutomationPreflightMode,
   AutomationExecutionOrder,
+  AutomationExecutionReconciliationPreview,
+  AutomationExecutionState,
   AutomationExecutionResult,
   AutomationShadowCheck,
   AutomationVenue,
@@ -97,6 +99,7 @@ type SafePreflightFailure = Omit<AutomationPreflightFailure, "kind" | "candidate
 type AutomationErrorDetails = {
   shadowReport?: SafeShadowReport;
   preflightFailure?: SafePreflightFailure;
+  blockingReasons?: string[];
 };
 
 export class AutomationConsoleContractError extends Error {
@@ -332,6 +335,35 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       });
       return realReceipt("退出对冲组合请求已提交。");
     },
+    async reconcilePosition(input, signal) {
+      const params = new URLSearchParams({
+        accountId: input.accountId,
+        reconciliationId: input.reconciliationId,
+      });
+      const response = await apiRequest<{ items?: unknown[] }>(
+        `${apiBase}/venues/${input.venue}/reconciliation?${params.toString()}`,
+        "交易所权威状态对账失败。",
+        { signal },
+      );
+      const item = array(response.items)[0];
+      return item === undefined ? null : mapExecutionReconciliation(item);
+    },
+    async finalizeReconciliation(input, stepUpToken) {
+      const response = await apiRequest<Record<string, unknown>>(
+        `${apiBase}/venues/${input.venue}/reconciliation/finalize`,
+        "人工处理结案失败。",
+        {
+          method: "POST",
+          body: {
+            accountId: input.accountId,
+            reconciliationId: input.reconciliationId,
+            idempotencyKey: input.idempotencyKey,
+            stepUpToken,
+          },
+        },
+      );
+      return mapExecution(response, input.venue, input.accountId);
+    },
   };
 }
 
@@ -430,6 +462,28 @@ export async function positionCloseStepUpIntent(
   };
 }
 
+export async function reconciliationFinalizeStepUpIntent(input: {
+  venue: AutomationVenue;
+  accountId: string;
+  reconciliationId: string;
+}): Promise<{ intent: StepUpIntent; idempotencyKey: string }> {
+  const request = {
+    accountId: input.accountId,
+    reconciliationId: input.reconciliationId,
+    idempotencyKey: idempotencyKey(`reconciliation-finalize:${input.reconciliationId}`),
+  };
+  return {
+    intent: await createStepUpIntent({
+      operation: "reconciliation_finalize",
+      venue: input.venue,
+      accountId: input.accountId,
+      resourceId: input.reconciliationId,
+      requestBody: request,
+    }),
+    idempotencyKey: request.idempotencyKey,
+  };
+}
+
 export function presentAutomationConsoleError(error: unknown) {
   if (!(error instanceof AutomationConsoleContractError)) return { title: "控制台请求失败", message: error instanceof Error ? error.message : "请稍后重试。", retryable: true };
   if (error.status === 401) return { title: "登录已失效", message: error.message, retryable: false };
@@ -456,6 +510,17 @@ export function presentAutomationConsoleError(error: unknown) {
   if (error.category === "idempotency_conflict") return { title: "请求标识冲突", message: "该幂等请求标识已用于其他执行，请刷新状态后重试。", retryable: true };
   if (error.category === "manual_intervention") return { title: "需要人工处理", message: "自动安全处置未能闭环，请立即前往对应交易所核对订单与仓位。", retryable: false };
   if (error.category === "compensating") return { title: "正在安全处置", message: "系统正在撤销订单并退出未对冲敞口，请等待状态刷新。", retryable: true };
+  if (error.category === "reconciliation_blocked") {
+    const reasons = error.details?.blockingReasons ?? [];
+    return {
+      title: "仍不能人工结案",
+      message: [error.message, ...reasons].filter(Boolean).join("；"),
+      retryable: true,
+    };
+  }
+  if (error.category === "reconciliation_not_found") {
+    return { title: "对账记录不存在", message: "该人工处理记录已变化或不属于当前账户，请刷新后重新核对。", retryable: true };
+  }
   if (error.category === "server_kill_switch_active") return { title: "服务端全局急停已开启", message: "当前用户无法绕过平台安全门禁，请等待运维解除后重新预检。", retryable: false };
   if (error.status === 409) return { title: "当前状态已变化", message: error.message, retryable: true };
   if (error.status === 422 || error.status === 400) return { title: "提交内容未通过校验", message: error.message, retryable: false };
@@ -720,7 +785,19 @@ function buildSnapshot(
 ): AutomationConsoleSnapshot {
   const positionItems = positions.items.map(record);
   const pnlVenues = pnl.venues.map(record);
-  const groups = positionItems.map((item) => mapPosition(item, pnlVenues)).filter((item): item is AutomationPositionGroup => item !== null);
+  const currentGroups = positionItems
+    .map((item) => mapPosition(item, pnlVenues))
+    .filter((item): item is AutomationPositionGroup => item !== null);
+  const historicalReconciliations = pnlVenues.flatMap(mapReconciliationHistoryGroups);
+  const currentReconciliationIds = new Set(
+    currentGroups.map((group) => group.reconciliationId).filter(Boolean),
+  );
+  const groups = [
+    ...currentGroups,
+    ...historicalReconciliations.filter((group) => (
+      !group.reconciliationId || !currentReconciliationIds.has(group.reconciliationId)
+    )),
+  ];
   const credentials = venueOrder.map((venue) => {
     const raw = venues.find((item) => item.venue === venue) ?? unimplementedVenue(venue);
     const config = configs.find((item) => item.venue === venue) ?? null;
@@ -761,6 +838,7 @@ function buildSnapshot(
   const anyExecutionEnabled = venueControls.some((item) => item.globalExecutionEnabled);
   const anyStrategyEnabled = venueControls.some((item) => item.strategyEnabled);
   const anyUserKillSwitch = venueControls.some((item) => item.killSwitchActive);
+  const positionSummaries = groups.map(positionAuthoritySummary);
   return {
     source: "user_api", contractVersion: "user-api-v1", generatedAt: opportunities.generatedAt || Date.now(), mode: "controlled_live",
     status: serverBlocked || anyUserKillSwitch ? "blocked" : "healthy",
@@ -771,8 +849,9 @@ function buildSnapshot(
       connectedVenueCount: credentials.filter((item) => item.status === "connected").length,
       totalVenueCount: credentials.length,
       eligibleCandidateCount: candidates.filter((item) => item.canExecute && item.safetyEligible && item.automationEligible).length,
-      totalCapitalUsedUsd: groups.reduce((sum, item) => sum + item.capitalUsedUsd, 0),
-      netDeltaUsd: groups.reduce((sum, item) => sum + item.netDeltaUsd, 0),
+      totalCapitalUsedUsd: positionSummaries.reduce((sum, item) => sum + (item?.capitalUsedUsd ?? 0), 0),
+      netDeltaUsd: positionSummaries.reduce((sum, item) => sum + (item?.netDeltaUsd ?? 0), 0),
+      positionAuthorityIncompleteCount: positionSummaries.filter((item) => item === null).length,
       cumulativeNetPnl: netPnl,
       todayNetPnl: dayPoints.length > 1 ? dayPoints.at(-1)!.netPnl - dayPoints[0].netPnl : 0,
       fundingPnl: currentPnls.reduce((sum, item) => sum + numberValue(item.fundingPnlUsd), 0),
@@ -931,28 +1010,261 @@ function mapPosition(raw: Record<string, unknown>, pnlVenues: Record<string, unk
   const rawExecutionHistory = array(venuePnl.history);
   const history = executionHistory(rawExecutionHistory, venue);
   const latestExecution = record(rawExecutionHistory[0]);
+  const executionState = mapExecutionState(latestExecution.state);
   const capturedAt = numberValue(current.capturedAt) || Date.now();
   const accountId = stringValue(current.accountId);
   if (!accountId) return null;
   return {
     id: stringValue(raw.positionId) || `${venue}:${stringValue(raw.strategyId)}`,
+    reconciliationId: safeText(latestExecution.executionId, 160) || null,
     accountId,
     venue,
     strategyId: stringValue(raw.strategyId) || "unknown-strategy",
-    label: `${venueName(venue)} XAUT 现货与永续对冲组合`, mode: "live", status: positionStatus(latestExecution.state), openedAt: history.at(-1)?.occurredAt ?? capturedAt,
+    label: `${venueName(venue)} XAUT 现货与永续对冲组合`, mode: "live", status: positionStatus(executionState), executionState, openedAt: history.at(-1)?.occurredAt ?? capturedAt,
     capitalUsedUsd: numberValue(spot.notionalUsd) + numberValue(perpetual.notionalUsd), netDeltaUsd: numberValue(current.netDeltaUsd), basisBps: nullableNumber(current.currentBasisBps),
     realizedPnl: numberValue(current.realizedPnlUsd), unrealizedPnl: numberValue(current.unrealizedPnlUsd), fundingPnl: numberValue(current.fundingPnlUsd), fees: numberValue(current.feesUsd), slippage: numberValue(current.slippageUsd), netPnl: numberValue(current.netPnlUsd),
     legs: [mapLeg(spot, venue, "spot", "long", current, false), mapLeg(perpetual, venue, "perpetual", "short", current, true)].filter((leg) => leg.quantity > 0),
+    reconciliation: mapExecutionReconciliation(current.reconciliation ?? latestExecution.reconciliation),
     history,
+  };
+}
+
+function mapReconciliationHistoryGroups(venuePnl: Record<string, unknown>): AutomationPositionGroup[] {
+  if (!isVenue(venuePnl.venue)) return [];
+  const venue = venuePnl.venue;
+  const fallbackAccountId = safeText(venuePnl.accountId, 160);
+  return array(venuePnl.history).flatMap((value) => {
+    const execution = record(value);
+    const executionId = safeText(execution.executionId, 160);
+    const executionState = mapExecutionState(execution.state);
+    const reconciliation = mapExecutionReconciliation(execution.reconciliation);
+    const shouldRestore = executionState === "manual_intervention"
+      || executionState === "partial_closed"
+      || executionState === "reconciled"
+      || (executionState === "closed" && reconciliation !== null);
+    if (!executionId || !shouldRestore) return [];
+    const accountId = safeText(execution.accountId, 160) || fallbackAccountId;
+    if (!accountId) return [];
+    const legs = recordedExecutionLegs(execution, venue);
+    const recordedSpot = legs.find((leg) => leg.marketType === "spot")?.notionalUsd ?? 0;
+    const recordedPerpetual = legs.find((leg) => leg.marketType === "perpetual")?.notionalUsd ?? 0;
+    const createdAt = numberValue(execution.createdAt) || numberValue(execution.updatedAt) || Date.now();
+    return [{
+      id: `history:${venue}:${executionId}`,
+      reconciliationId: executionId,
+      accountId,
+      venue,
+      strategyId: reconciliation?.strategyId
+        || safeText(record(venuePnl.current).strategyId, 160)
+        || `${venue}-xaut-spot-perp`,
+      label: `${venueName(venue)} XAUT 现货与永续对冲组合`,
+      mode: "live" as const,
+      status: positionStatus(executionState),
+      executionState,
+      openedAt: createdAt,
+      capitalUsedUsd: recordedSpot + recordedPerpetual,
+      netDeltaUsd: recordedSpot - recordedPerpetual,
+      basisBps: null,
+      realizedPnl: 0,
+      unrealizedPnl: 0,
+      fundingPnl: 0,
+      fees: legs.reduce((sum, leg) => sum + leg.fees, 0),
+      slippage: 0,
+      netPnl: 0,
+      legs,
+      reconciliation,
+      history: executionHistory([execution], venue),
+    }];
+  });
+}
+
+function recordedExecutionLegs(
+  execution: Record<string, unknown>,
+  venue: AutomationVenue,
+): AutomationPositionGroup["legs"] {
+  const spot = recordedOrderLeg([execution.spotOrder], venue, "spot", "long");
+  const perpetual = recordedOrderLeg(
+    array(execution.perpetualOrders),
+    venue,
+    "perpetual",
+    "short",
+  );
+  return [spot, perpetual].filter((leg): leg is AutomationPositionGroup["legs"][number] => leg !== null);
+}
+
+function recordedOrderLeg(
+  values: unknown[],
+  venue: AutomationVenue,
+  marketType: "spot" | "perpetual",
+  side: "long" | "short",
+): AutomationPositionGroup["legs"][number] | null {
+  const orders = values.map(record);
+  const quantity = orders.reduce((sum, order) => sum + Math.max(0, numberValue(order.filledQuantityXaut)), 0);
+  if (quantity <= 0) return null;
+  const pricedNotional = orders.reduce((sum, order) => {
+    const filled = Math.max(0, numberValue(order.filledQuantityXaut));
+    const price = Math.max(0, numberValue(order.averagePrice));
+    return sum + filled * price;
+  }, 0);
+  const entryPrice = pricedNotional > 0 ? pricedNotional / quantity : 0;
+  return {
+    venue,
+    symbol: "XAUTUSDT",
+    marketType,
+    side,
+    quantity,
+    entryPrice,
+    markPrice: entryPrice,
+    notionalUsd: pricedNotional,
+    unrealizedPnl: 0,
+    realizedPnl: 0,
+    fundingPnl: 0,
+    fees: orders.reduce((sum, order) => sum + Math.max(0, numberValue(order.feeUsd)), 0),
+    slippage: 0,
+    liquidationDistancePercent: null,
+  };
+}
+
+function positionAuthoritySummary(group: AutomationPositionGroup) {
+  if (group.executionState === "closed" || group.executionState === "reconciled") {
+    return { capitalUsedUsd: 0, netDeltaUsd: 0 };
+  }
+  if (group.executionState !== "manual_intervention" && group.executionState !== "partial_closed") {
+    return {
+      capitalUsedUsd: group.capitalUsedUsd,
+      netDeltaUsd: group.netDeltaUsd,
+    };
+  }
+  const report = group.reconciliation;
+  if (
+    !report
+    || report.authoritativeState.stale
+    || report.authoritativeState.status !== "ok"
+  ) return null;
+  const { perpetual, spot } = report.authoritativeState.legs;
+  if (
+    (spot.quantityXaut > 0 && spot.markPrice === null)
+    || (perpetual.quantityXaut > 0 && perpetual.markPrice === null)
+  ) return null;
+  const spotNotional = spot.quantityXaut * (spot.markPrice ?? 0);
+  const perpetualNotional = perpetual.quantityXaut * (perpetual.markPrice ?? 0);
+  return {
+    capitalUsedUsd: spotNotional + perpetualNotional,
+    netDeltaUsd: spotNotional - perpetualNotional,
   };
 }
 
 function positionStatus(value: unknown): AutomationPositionGroup["status"] {
   if (value === "accepted" || value === "opening_spot" || value === "opening_perpetual") return "opening";
   if (value === "compensating") return "closing";
-  if (value === "closed") return "closed";
-  if (value === "failed" || value === "manual_intervention") return "attention";
+  if (value === "closed" || value === "reconciled") return "closed";
+  if (value === "failed" || value === "manual_intervention" || value === "partial_closed") return "attention";
   return "hedged";
+}
+
+function mapExecutionState(value: unknown): AutomationExecutionState {
+  const state = safeText(value, 40) as AutomationExecutionState;
+  return new Set<AutomationExecutionState>([
+    "accepted",
+    "opening_spot",
+    "opening_perpetual",
+    "partial_closed",
+    "hedged",
+    "compensating",
+    "reconciled",
+    "closed",
+    "failed",
+    "manual_intervention",
+  ]).has(state) ? state : "unknown";
+}
+
+function mapExecutionReconciliation(value: unknown): AutomationExecutionReconciliationPreview | null {
+  const raw = record(value);
+  const reconciliationId = safeText(raw.reconciliationId, 160);
+  if (!reconciliationId) return null;
+  const authoritative = record(raw.authoritativeState);
+  const orders = record(authoritative.openOrders);
+  const legs = record(authoritative.legs);
+  const legDiffs = record(raw.legDiffs);
+  const tradable = record(raw.tradableResidual);
+  const dust = record(raw.dustResidual);
+  const recommended = safeText(raw.recommendedAction, 60);
+  const recommendedActions = new Set<AutomationExecutionReconciliationPreview["recommendedAction"]>([
+    "none",
+    "retry_close",
+    "manual_close_spot",
+    "manual_close_perpetual",
+    "manual_close_both",
+    "manual_finalize",
+  ]);
+  const status = authoritative.status === "ok" ? "ok" : "stale";
+  return {
+    reconciliationId,
+    strategyId: safeText(raw.strategyId, 160) || "unknown-strategy",
+    recordedState: mapExecutionState(raw.recordedState),
+    authoritativeState: {
+      snapshotAt: numberValue(authoritative.snapshotAt),
+      status,
+      stale: authoritative.stale !== false || status !== "ok",
+      openOrders: {
+        spot: Math.max(0, numberValue(orders.spot)),
+        perpetual: Math.max(0, numberValue(orders.perpetual)),
+        total: Math.max(0, numberValue(orders.total)),
+      },
+      legs: {
+        spot: mapAuthoritativeLeg(legs.spot),
+        perpetual: mapAuthoritativeLeg(legs.perpetual),
+      },
+    },
+    legDiffs: {
+      spotQuantityXaut: numberValue(legDiffs.spotQuantityXaut),
+      perpetualQuantityXaut: numberValue(legDiffs.perpetualQuantityXaut),
+    },
+    tradableResidual: {
+      spot: mapResidualAssessment(tradable.spot),
+      perpetual: mapResidualAssessment(tradable.perpetual),
+    },
+    dustResidual: {
+      spot: mapResidualAssessment(dust.spot),
+      perpetual: mapResidualAssessment(dust.perpetual),
+    },
+    recommendedAction: recommendedActions.has(recommended as AutomationExecutionReconciliationPreview["recommendedAction"])
+      ? recommended as AutomationExecutionReconciliationPreview["recommendedAction"]
+      : "none",
+    canFinalize: raw.canFinalize === true,
+    blockingReasons: array(raw.blockingReasons)
+      .map((reason) => safeText(reason, 300))
+      .filter(Boolean)
+      .slice(0, 20),
+  };
+}
+
+function mapAuthoritativeLeg(value: unknown) {
+  const raw = record(value);
+  return {
+    quantityXaut: Math.max(0, numberValue(raw.quantityXaut)),
+    freeQuantityXaut: nullableFiniteNumber(raw.freeQuantityXaut),
+    markPrice: nullableFiniteNumber(raw.markPrice),
+    minOrderQty: Math.max(0, numberValue(raw.minOrderQty)),
+    minNotionalUsd: Math.max(0, numberValue(raw.minNotionalUsd)),
+    qtyStep: Math.max(0, numberValue(raw.qtyStep)),
+  };
+}
+
+function mapResidualAssessment(value: unknown) {
+  const raw = record(value);
+  if (!Object.keys(raw).length) return null;
+  const reason = safeText(raw.reason, 40);
+  if (!["tradable", "below_min_qty", "below_min_notional", "zero"].includes(reason)) return null;
+  return {
+    quantityXaut: Math.max(0, numberValue(raw.quantityXaut)),
+    notionalUsd: Math.max(0, numberValue(raw.notionalUsd)),
+    minOrderQty: Math.max(0, numberValue(raw.minOrderQty)),
+    minNotionalUsd: Math.max(0, numberValue(raw.minNotionalUsd)),
+    qtyStep: Math.max(0, numberValue(raw.qtyStep)),
+    tradable: raw.tradable === true,
+    reason: reason as "tradable" | "below_min_qty" | "below_min_notional" | "zero",
+  };
 }
 
 function mapLeg(raw: Record<string, unknown>, venue: AutomationVenue, marketType: "spot" | "perpetual", side: "long" | "short", current: Record<string, unknown>, fundingLeg: boolean) {
@@ -1053,6 +1365,10 @@ function requireCredential(snapshot: AutomationConsoleSnapshot, venue: Automatio
 function unimplementedVenue(venue: AutomationVenue): VenueStatusDto { return { venue, implemented: false, enabled: false, credential: { stored: false, accountId: null, accountFingerprint: null, masterKeyConfigured: false, maskedApiKey: null, connectionStatus: "not_implemented", lifecycleStatus: "not_implemented", accountMode: null, permissions: null, lastVerifiedAt: null, message: "该交易所 adapter 暂未接入。", ipWhitelistConfigured: null, warnings: [] } }; }
 function extractAutomationErrorDetails(payload: unknown) {
   const body = record(payload);
+  const blockingReasons = array(body.blockingReasons)
+    .map((value) => safeText(value, 300))
+    .filter(Boolean)
+    .slice(0, 20);
   const report = record(body.report);
   if (
     report.venue === "binance"
@@ -1066,13 +1382,13 @@ function extractAutomationErrorDetails(payload: unknown) {
       message: safeText(report.message, 300) || "市场或账户实时检查未通过。",
       generatedAt: nullableFiniteNumber(report.generatedAt),
     };
-    return { preflightFailure };
+    return { preflightFailure, ...(blockingReasons.length ? { blockingReasons } : {}) };
   }
   if (
     report.venue !== "binance"
     || report.phase !== "phase_1_read_only_shadow"
     || report.providerWritesEnabled !== false
-  ) return null;
+  ) return blockingReasons.length ? { blockingReasons } : null;
   const checks = array(report.checks).slice(0, 40).flatMap((value) => {
     const item = record(value);
     const id = safeText(item.id, 80);
@@ -1103,11 +1419,13 @@ function extractAutomationErrorDetails(payload: unknown) {
       ? "市场与账户只读检查通过，但 Binance 第一阶段不签发执行 challenge。"
       : "市场或账户只读检查未通过。"),
   };
-  return { shadowReport };
+  return { shadowReport, ...(blockingReasons.length ? { blockingReasons } : {}) };
 }
 function isShadowErrorDetails(value: unknown): value is AutomationErrorDetails {
   const details = record(value);
-  return details.shadowReport !== undefined || details.preflightFailure !== undefined;
+  return details.shadowReport !== undefined
+    || details.preflightFailure !== undefined
+    || details.blockingReasons !== undefined;
 }
 function safeAutomationErrorMessage(category: string | null, message: string) {
   if (category === "provider_credential_invalid") return "交易所拒绝了当前 API 凭证。";
@@ -1148,15 +1466,11 @@ function safeCheckValue(value: unknown): number | string | boolean | null {
 }
 function mapExecution(value: unknown, venue: AutomationVenue, accountId: string): AutomationExecutionResult {
   const raw = record(value);
-  const allowedStates = new Set<AutomationExecutionResult["state"]>([
-    "accepted", "opening_spot", "opening_perpetual", "hedged", "compensating", "closed", "failed", "manual_intervention",
-  ]);
-  const stateValue = safeText(raw.state, 40) as AutomationExecutionResult["state"];
   return {
     venue,
     accountId,
     executionId: safeText(raw.executionId, 120) || "pending",
-    state: allowedStates.has(stateValue) ? stateValue : "unknown",
+    state: mapExecutionState(raw.state),
     message: safeText(raw.message, 500) || "执行状态已更新，请以交易所权威订单和仓位为准。",
     errorCategory: safeText(raw.errorCategory, 100) || null,
     hedgedQuantityXaut: numberValue(raw.hedgedQuantityXaut),
@@ -1164,6 +1478,7 @@ function mapExecution(value: unknown, venue: AutomationVenue, accountId: string)
     spotOrder: mapExecutionOrder(raw.spotOrder),
     perpetualOrders: array(raw.perpetualOrders).map(mapExecutionOrder).filter((item): item is AutomationExecutionOrder => item !== null),
     compensationOrders: array(raw.compensationOrders).map(mapExecutionOrder).filter((item): item is AutomationExecutionOrder => item !== null),
+    reconciliation: mapExecutionReconciliation(raw.reconciliation),
     createdAt: numberValue(raw.createdAt),
     updatedAt: numberValue(raw.updatedAt),
   };

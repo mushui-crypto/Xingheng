@@ -336,6 +336,54 @@ test("a restart retains completed execution tombstones for the full 30-day retry
   }
 });
 
+test("legacy execution schema is migrated with null reconciliation fields and persisted atomically", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-legacy-execution-"));
+  const current = new RwaAutomationPersistentStore({
+    userId: "user-a",
+    venue: "bybit",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  try {
+    await writeFile(current.statePath, JSON.stringify({
+      version: 1,
+      config: defaultRwaExecutionConfig,
+      challenges: [],
+      executions: [{
+        userId: "user-a",
+        accountId: "bybit:test-account",
+        executionId: "legacy-execution",
+        idempotencyKey: "idempotency:legacy",
+        challengeId: "challenge:legacy",
+        state: "manual_intervention",
+        orderLinkPrefix: "order:legacy",
+        spotOrder: null,
+        perpetualOrders: [],
+        compensationOrders: [],
+        hedgedQuantityXaut: 0,
+        unhedgedDurationMs: null,
+        errorCategory: null,
+        message: "legacy",
+        createdAt: 1,
+        updatedAt: 1,
+      }],
+      pnlSeries: [],
+      credentialLifecycle: "active",
+      credentialAlert: null,
+      credentialAudit: [],
+    }), { mode: 0o600 });
+    const state = await current.readState();
+    assert.equal(state.executions[0]?.reconciliation, null);
+    assert.equal(state.executions[0]?.finalizeIdempotency, null);
+    const persisted = JSON.parse(await readFile(current.statePath, "utf8"));
+    assert.equal(persisted.executions[0]?.reconciliation, null);
+    assert.equal(persisted.executions[0]?.finalizeIdempotency, null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("oversized persistent state is rejected before JSON parsing", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-oversized-"));
   const governanceConfig = {
@@ -425,6 +473,8 @@ function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: nu
     unhedgedDurationMs: null,
     errorCategory: null,
     message: "test",
+    reconciliation: null,
+    finalizeIdempotency: null,
     createdAt: updatedAt,
     updatedAt,
   };

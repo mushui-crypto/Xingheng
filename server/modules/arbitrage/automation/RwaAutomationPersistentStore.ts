@@ -7,6 +7,8 @@ import type {
   RwaCredentialLifecycle,
   RwaExecutionConfig,
   RwaExecutionRecord,
+  RwaExecutionFinalizeIdempotency,
+  RwaExecutionReconciliationPreview,
   RwaPreflightReport,
   RwaStrategyPnlSnapshot,
   RwaVenueCredentials,
@@ -386,14 +388,17 @@ export class RwaAutomationPersistentStore<
         ...parsed,
         config: { ...defaultRwaExecutionConfig, ...(parsed.config ?? {}) },
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
-        executions: Array.isArray(parsed.executions) ? parsed.executions : [],
+        executions: Array.isArray(parsed.executions) ? parsed.executions.map(normalizeExecutionRecord) : [],
         pnlSeries: Array.isArray(parsed.pnlSeries) ? parsed.pnlSeries : [],
         credentialLifecycle: validCredentialLifecycle(parsed.credentialLifecycle) ? parsed.credentialLifecycle : "unconfigured",
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
         credentialAudit: Array.isArray(parsed.credentialAudit) ? parsed.credentialAudit : [],
       } as AutomationState;
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
-      if (JSON.stringify(compacted) !== JSON.stringify(normalized)) {
+      const rawComparable = JSON.stringify(parsed);
+      const normalizedComparable = JSON.stringify(normalized);
+      const compactedComparable = JSON.stringify(compacted);
+      if (compactedComparable !== normalizedComparable || normalizedComparable !== rawComparable) {
         await this.writeState(compacted);
       }
       return compacted;
@@ -484,7 +489,7 @@ function compactState(
 }
 
 function isCompletedExecution(execution: RwaExecutionRecord) {
-  return execution.state === "closed" || execution.state === "failed";
+  return execution.state === "closed" || execution.state === "reconciled" || execution.state === "failed";
 }
 
 async function atomicWriteJson(path: string, value: unknown) {
@@ -609,4 +614,47 @@ function maskApiKey(apiKey: string) {
 
 function validCredentialLifecycle(value: unknown): value is RwaCredentialLifecycle {
   return ["unconfigured", "validating", "active", "invalid", "expired", "revoked", "rotation_required"].includes(String(value));
+}
+
+function normalizeExecutionRecord(value: unknown): RwaExecutionRecord {
+  const execution = value && typeof value === "object" && !Array.isArray(value)
+    ? { ...(value as Record<string, unknown>) }
+    : {};
+  const rawSpotOrder = execution.spotOrder;
+  return {
+    userId: String(execution.userId ?? ""),
+    accountId: String(execution.accountId ?? ""),
+    executionId: String(execution.executionId ?? ""),
+    idempotencyKey: String(execution.idempotencyKey ?? ""),
+    challengeId: String(execution.challengeId ?? ""),
+    state: String(execution.state ?? "failed") as RwaExecutionRecord["state"],
+    orderLinkPrefix: String(execution.orderLinkPrefix ?? ""),
+    spotOrder: rawSpotOrder && typeof rawSpotOrder === "object" && !Array.isArray(rawSpotOrder)
+      ? rawSpotOrder as RwaExecutionRecord["spotOrder"]
+      : null,
+    perpetualOrders: Array.isArray(execution.perpetualOrders) ? execution.perpetualOrders as RwaExecutionRecord["perpetualOrders"] : [],
+    compensationOrders: Array.isArray(execution.compensationOrders) ? execution.compensationOrders as RwaExecutionRecord["compensationOrders"] : [],
+    hedgedQuantityXaut: typeof execution.hedgedQuantityXaut === "number" ? execution.hedgedQuantityXaut : Number(execution.hedgedQuantityXaut ?? 0),
+    unhedgedDurationMs: execution.unhedgedDurationMs === null || execution.unhedgedDurationMs === undefined
+      ? null
+      : Number(execution.unhedgedDurationMs),
+    errorCategory: typeof execution.errorCategory === "string" ? execution.errorCategory : null,
+    message: typeof execution.message === "string" ? execution.message : "",
+    reconciliation: normalizeReconciliationPreview(execution.reconciliation),
+    finalizeIdempotency: normalizeFinalizeIdempotency(execution.finalizeIdempotency),
+    createdAt: typeof execution.createdAt === "number" ? execution.createdAt : Number(execution.createdAt ?? 0),
+    updatedAt: typeof execution.updatedAt === "number" ? execution.updatedAt : Number(execution.updatedAt ?? 0),
+  };
+}
+
+function normalizeReconciliationPreview(value: unknown): RwaExecutionReconciliationPreview | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as RwaExecutionReconciliationPreview
+    : null;
+}
+
+function normalizeFinalizeIdempotency(value: unknown): RwaExecutionFinalizeIdempotency | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as RwaExecutionFinalizeIdempotency
+    : null;
 }

@@ -18,6 +18,7 @@ export function createAutomationConsoleFixture(): AutomationConsoleSnapshot {
       eligibleCandidateCount: 0,
       totalCapitalUsedUsd: 48_000,
       netDeltaUsd: 126.4,
+      positionAuthorityIncompleteCount: 0,
       cumulativeNetPnl: 742.36,
       todayNetPnl: 31.72,
       fundingPnl: 814.2,
@@ -129,12 +130,14 @@ export function createAutomationConsoleFixture(): AutomationConsoleSnapshot {
     positionGroups: [
       {
         id: "shadow-batch-024",
+        reconciliationId: null,
         accountId: "bybit-primary",
         venue: "bybit",
         strategyId: "same-venue-gold-neutral-v1",
         label: "XAUT 现货与永续对冲组合 · 演练 #024",
         mode: "shadow",
         status: "hedged",
+        executionState: "hedged",
         openedAt: baseTime - 9_300_000,
         capitalUsedUsd: 48_000,
         netDeltaUsd: 126.4,
@@ -157,6 +160,7 @@ export function createAutomationConsoleFixture(): AutomationConsoleSnapshot {
             realizedPnl: 0, fundingPnl: 62.44, fees: 4.68, slippage: 2.26, liquidationDistancePercent: 37.2,
           },
         ],
+        reconciliation: null,
         history: [
           { id: "order-shadow-24-a", type: "order", venue: "bybit", symbol: "XAUTUSDT", status: "shadow_accepted", quantity: 7.14, price: 3_360.2, occurredAt: baseTime - 9_300_000 },
           { id: "fill-shadow-24-a", type: "fill", venue: "bybit", symbol: "XAUTUSDT", status: "shadow_filled", quantity: 7.14, price: 3_360.2, occurredAt: baseTime - 9_298_000 },
@@ -165,12 +169,14 @@ export function createAutomationConsoleFixture(): AutomationConsoleSnapshot {
       },
       {
         id: "live-batch-007",
+        reconciliationId: null,
         accountId: "bitget-primary",
         venue: "bitget",
         strategyId: "same-venue-gold-neutral-v1",
         label: "PAXG 同所中性 · 真实 #007",
         mode: "live",
         status: "closed",
+        executionState: "closed",
         openedAt: baseTime - 172_800_000,
         capitalUsedUsd: 0,
         netDeltaUsd: 0,
@@ -182,6 +188,7 @@ export function createAutomationConsoleFixture(): AutomationConsoleSnapshot {
         slippage: 8.16,
         netPnl: 118.42,
         legs: [],
+        reconciliation: null,
         history: [
           { id: "close-live-007", type: "close", venue: "bitget", symbol: "PAXGUSDT", status: "closed", quantity: 4.2, price: 3_351.4, occurredAt: baseTime - 86_400_000 },
         ],

@@ -141,6 +141,8 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const spotBalances = list(spotAccount.balances).map(record);
     const usdt = spotBalances.find((item) => item.asset === "USDT");
     const xaut = spotBalances.find((item) => item.asset === "XAUT");
+    const spotFreeXaut = number(xaut?.free);
+    const spotLockedXaut = number(xaut?.locked);
     const futuresUsdt = list(futuresAccount.assets).map(record).find((item) => item.asset === "USDT");
     const fundingInfo = list(fundingInfoValue).map(record).find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL);
     const spotBid = positiveNumber(spotBook.bidPrice);
@@ -166,8 +168,10 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       productAvailability: products.availability,
       spotAvailableUsdt: positiveNumber(usdt?.free),
       futuresAvailableUsdt: positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
+      spotFreeXaut,
+      spotLockedXaut,
       availableUsdt: positiveNumber(usdt?.free) + positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
-      existingSpotQuantityXaut: number(xaut?.free) + number(xaut?.locked),
+      existingSpotQuantityXaut: spotFreeXaut + spotLockedXaut,
       existingPerpetualQuantityXaut: Math.abs(number(position?.positionAmt)),
       openSpotOrderCount: list(spotOrdersValue).length,
       openPerpetualOrderCount: list(futuresOrdersValue).length,

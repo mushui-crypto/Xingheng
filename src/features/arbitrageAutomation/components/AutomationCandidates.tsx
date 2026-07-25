@@ -8,6 +8,8 @@ import {
   StatusTag,
   formatMoney,
   formatPercent,
+  stickyActionCellClass,
+  stickyActionHeaderClass,
   tableCellClass,
   tableHeadClass,
   tableHeaderCellClass,
@@ -26,9 +28,9 @@ export function AutomationCandidates({ candidates, onPreflight }: { candidates: 
       {candidates.length === 0 ? (
         <div className="flex min-h-52 flex-col items-center justify-center px-5 text-center"><CircleOff className="text-muted" size={24} /><p className="mt-3 text-sm font-medium text-white">暂无套利候选</p><p className="mt-2 max-w-lg text-xs leading-5 text-muted">等待公开行情与服务端门禁生成候选，本页不会伪造可执行机会。</p></div>
       ) : (
-        <ScrollTable minWidth={1420}>
-          <colgroup><col className="w-[100px]" /><col className="w-[110px]" /><col className="w-[220px]" /><col className="w-[220px]" /><col className="w-[110px]" /><col className="w-[110px]" /><col className="w-[100px]" /><col className="w-[130px]" /><col className="w-[250px]" /><col className="w-[130px]" /></colgroup>
-          <thead className={tableHeadClass}><tr><th className={tableHeaderCellClass}>交易所</th><th className={tableHeaderCellClass}>资产</th><th className={tableHeaderCellClass}>做多</th><th className={tableHeaderCellClass}>做空</th><th className={`${tableHeaderCellClass} text-center`}>净 APR</th><th className={`${tableHeaderCellClass} text-center`}>有利天数</th><th className={`${tableHeaderCellClass} text-center`}>基差</th><th className={`${tableHeaderCellClass} text-center`}>容量</th><th className={tableHeaderCellClass}>执行条件</th><th className={`${tableHeaderCellClass} text-right`}>操作</th></tr></thead>
+        <ScrollTable minWidth={1120}>
+          <colgroup><col className="w-[78px]" /><col className="w-[64px]" /><col className="w-[135px]" /><col className="w-[135px]" /><col className="w-[80px]" /><col className="w-[84px]" /><col className="w-[82px]" /><col className="w-[92px]" /><col className="w-[220px]" /><col className="w-[150px]" /></colgroup>
+          <thead className={tableHeadClass}><tr><th className={tableHeaderCellClass}>交易所</th><th className={tableHeaderCellClass}>资产</th><th className={tableHeaderCellClass}>做多</th><th className={tableHeaderCellClass}>做空</th><th className={`${tableHeaderCellClass} text-center`}>净 APR</th><th className={`${tableHeaderCellClass} text-center`}>有利天数</th><th className={`${tableHeaderCellClass} text-center`}>基差</th><th className={`${tableHeaderCellClass} text-center`}>容量</th><th className={tableHeaderCellClass}>执行条件</th><th className={`${tableHeaderCellClass} ${stickyActionHeaderClass} text-center`}>操作</th></tr></thead>
           <tbody>{candidates.map((candidate) => {
             const preflightMode = candidate.automationEligible ? "arbitrage_entry" : "manual_entry";
             const preflightEnabled = canPreflightCandidate(candidate);
@@ -43,11 +45,14 @@ export function AutomationCandidates({ candidates, onPreflight }: { candidates: 
                 <td className={`${tableCellClass} text-center font-mono`}>{candidate.basisBps === null ? "-" : `${candidate.basisBps.toFixed(2)} bps`}</td>
                 <td className={`${tableCellClass} text-center font-mono`}>{candidate.capacityUsd === null ? "-" : formatMoney(candidate.capacityUsd)}</td>
                 <td className={tableCellClass}><CandidateConditions candidate={candidate} /></td>
-                <td className={`${tableCellClass} text-right`}>
-                  <Button className="min-h-9 whitespace-nowrap px-3 py-2 text-xs" disabled={!preflightEnabled} onClick={() => {
+                <td className={`${tableCellClass} ${stickyActionCellClass} text-center`}>
+                  <Button className="min-h-9 w-[132px] gap-0 whitespace-nowrap px-3 py-2 text-xs" disabled={!preflightEnabled} onClick={() => {
                     if (preflightEnabled) onPreflight(candidate, preflightMode);
                   }} type="button" variant="secondary">
-                    <FileCheck2 size={14} />{candidate.canExecute ? candidate.automationEligible ? "自动策略预检" : "手动风险预检" : "条件检查"}
+                    <FileCheck2 className="shrink-0" size={14} />
+                    <span className="min-w-0 flex-1 text-center">
+                      {candidate.canExecute ? candidate.automationEligible ? "自动策略预检" : "手动风险预检" : "条件检查"}
+                    </span>
                   </Button>
                 </td>
               </tr>

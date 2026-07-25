@@ -55,12 +55,14 @@ export type AutomationCandidate = {
 
 export type AutomationPositionGroup = {
   id: string;
+  reconciliationId: string | null;
   accountId: string;
   venue: AutomationVenue;
   strategyId: string;
   label: string;
   mode: AutomationPositionMode;
   status: "opening" | "hedged" | "closing" | "closed" | "attention";
+  executionState: AutomationExecutionState;
   openedAt: number;
   capitalUsedUsd: number;
   netDeltaUsd: number;
@@ -72,6 +74,7 @@ export type AutomationPositionGroup = {
   slippage: number;
   netPnl: number;
   legs: AutomationLeg[];
+  reconciliation: AutomationExecutionReconciliationPreview | null;
   history: Array<{
     id: string;
     type: "order" | "fill" | "funding" | "close";
@@ -214,6 +217,7 @@ export type AutomationConsoleSnapshot = {
     eligibleCandidateCount: number;
     totalCapitalUsedUsd: number;
     netDeltaUsd: number;
+    positionAuthorityIncompleteCount: number;
     cumulativeNetPnl: number;
     todayNetPnl: number;
     fundingPnl: number;
@@ -321,12 +325,74 @@ export type AutomationExecutionState =
   | "accepted"
   | "opening_spot"
   | "opening_perpetual"
+  | "partial_closed"
   | "hedged"
   | "compensating"
+  | "reconciled"
   | "closed"
   | "failed"
   | "manual_intervention"
   | "unknown";
+
+export type AutomationResidualAssessment = {
+  quantityXaut: number;
+  notionalUsd: number;
+  minOrderQty: number;
+  minNotionalUsd: number;
+  qtyStep: number;
+  tradable: boolean;
+  reason: "tradable" | "below_min_qty" | "below_min_notional" | "zero";
+};
+
+export type AutomationAuthoritativeLegState = {
+  quantityXaut: number;
+  freeQuantityXaut: number | null;
+  markPrice: number | null;
+  minOrderQty: number;
+  minNotionalUsd: number;
+  qtyStep: number;
+};
+
+export type AutomationExecutionReconciliationPreview = {
+  reconciliationId: string;
+  strategyId: string;
+  recordedState: AutomationExecutionState;
+  authoritativeState: {
+    snapshotAt: number;
+    status: "ok" | "stale";
+    stale: boolean;
+    openOrders: {
+      spot: number;
+      perpetual: number;
+      total: number;
+    };
+    legs: {
+      spot: AutomationAuthoritativeLegState;
+      perpetual: AutomationAuthoritativeLegState;
+    };
+  };
+  legDiffs: {
+    spotQuantityXaut: number;
+    perpetualQuantityXaut: number;
+  };
+  tradableResidual: {
+    spot: AutomationResidualAssessment | null;
+    perpetual: AutomationResidualAssessment | null;
+  };
+  dustResidual: {
+    spot: AutomationResidualAssessment | null;
+    perpetual: AutomationResidualAssessment | null;
+  };
+  recommendedAction:
+    | "none"
+    | "retry_close"
+    | "manual_close_spot"
+    | "manual_close_perpetual"
+    | "manual_close_both"
+    | "manual_finalize";
+  canFinalize: boolean;
+  blockingReasons: string[];
+};
 
 export type AutomationExecutionOrder = {
   orderId: string;
@@ -351,6 +417,7 @@ export type AutomationExecutionResult = {
   spotOrder: AutomationExecutionOrder | null;
   perpetualOrders: AutomationExecutionOrder[];
   compensationOrders: AutomationExecutionOrder[];
+  reconciliation: AutomationExecutionReconciliationPreview | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -384,4 +451,15 @@ export type AutomationConsoleClient = {
   validateParameters(venue: AutomationVenue, draft: ParameterDraft): Promise<AutomationActionReceipt>;
   performSafetyAction(action: SafetyAction, stepUpToken?: string): Promise<AutomationActionReceipt>;
   closePosition(positionId: string, stepUpToken: string, idempotencyKey: string): Promise<AutomationActionReceipt>;
+  reconcilePosition(input: {
+    venue: AutomationVenue;
+    accountId: string;
+    reconciliationId: string;
+  }, signal?: AbortSignal): Promise<AutomationExecutionReconciliationPreview | null>;
+  finalizeReconciliation(input: {
+    venue: AutomationVenue;
+    accountId: string;
+    reconciliationId: string;
+    idempotencyKey: string;
+  }, stepUpToken: string): Promise<AutomationExecutionResult>;
 };

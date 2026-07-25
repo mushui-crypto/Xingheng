@@ -680,26 +680,53 @@ function validatePreflightReport(value: unknown) {
 
 function validateExecutionRecord(value: unknown) {
   const execution = assertObject(value);
-  if (!hasExactKeys(execution, [
+  const legacyKeys = [
     "accountId", "challengeId", "compensationOrders", "createdAt", "errorCategory", "executionId",
     "hedgedQuantityXaut", "idempotencyKey", "message", "orderLinkPrefix", "perpetualOrders", "spotOrder", "state",
     "unhedgedDurationMs", "updatedAt", "userId",
-  ])) throw invalidSnapshot();
+  ];
+  const currentKeys = [
+    "accountId", "challengeId", "compensationOrders", "createdAt", "errorCategory", "executionId",
+    "finalizeIdempotency", "hedgedQuantityXaut", "idempotencyKey", "message", "orderLinkPrefix", "perpetualOrders", "reconciliation", "spotOrder", "state",
+    "unhedgedDurationMs", "updatedAt", "userId",
+  ];
+  if (!hasExactKeys(execution, currentKeys) && !hasExactKeys(execution, legacyKeys)) throw invalidSnapshot();
   for (const key of ["userId", "accountId", "executionId", "idempotencyKey", "challengeId", "orderLinkPrefix"]) {
     if (!isNonEmptyString(execution[key])) throw invalidSnapshot();
   }
   if (![
-    "accepted", "opening_spot", "opening_perpetual", "hedged", "compensating", "closed", "failed", "manual_intervention",
+    "accepted", "opening_spot", "opening_perpetual", "partial_closed", "hedged", "compensating", "reconciled", "closed", "failed", "manual_intervention",
   ].includes(String(execution.state))
     || !(execution.errorCategory === null || typeof execution.errorCategory === "string")
     || typeof execution.message !== "string"
+    || !(execution.reconciliation === undefined || execution.reconciliation === null || typeof execution.reconciliation === "object")
+    || !(execution.finalizeIdempotency === undefined || execution.finalizeIdempotency === null || typeof execution.finalizeIdempotency === "object")
     || !isFiniteNumber(execution.hedgedQuantityXaut)
     || !isNullableFiniteNumber(execution.unhedgedDurationMs)
     || !isTimestamp(execution.createdAt) || !isTimestamp(execution.updatedAt)
     || !Array.isArray(execution.perpetualOrders) || !Array.isArray(execution.compensationOrders)) throw invalidSnapshot();
+  if (execution.reconciliation !== undefined && execution.reconciliation !== null) validateReconciliationPreview(execution.reconciliation);
+  if (execution.finalizeIdempotency !== undefined && execution.finalizeIdempotency !== null) validateFinalizeIdempotency(execution.finalizeIdempotency);
   if (execution.spotOrder !== null) validateProviderOrder(execution.spotOrder);
   execution.perpetualOrders.forEach(validateProviderOrder);
   execution.compensationOrders.forEach(validateProviderOrder);
+}
+
+function validateReconciliationPreview(value: unknown) {
+  const preview = assertObject(value);
+  if (!hasExactKeys(preview, [
+    "authoritativeState", "blockingReasons", "canFinalize", "dustResidual", "legDiffs",
+    "reconciliationId", "recommendedAction", "recordedState", "strategyId", "tradableResidual",
+  ])) throw invalidSnapshot();
+}
+
+function validateFinalizeIdempotency(value: unknown) {
+  const item = assertObject(value);
+  if (!hasExactKeys(item, ["completedAt", "requestFingerprint", "resultState", "scopedKey"])) throw invalidSnapshot();
+  if (!isNonEmptyString(item.scopedKey) || !isNonEmptyString(item.requestFingerprint) || !isTimestamp(item.completedAt)) {
+    throw invalidSnapshot();
+  }
+  if (!["reconciled", "closed"].includes(String(item.resultState))) throw invalidSnapshot();
 }
 
 function validateProviderOrder(value: unknown) {

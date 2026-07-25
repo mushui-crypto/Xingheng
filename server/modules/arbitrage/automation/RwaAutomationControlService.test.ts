@@ -668,12 +668,14 @@ function fakeConnector(
     getPrivateAccount: async () => ({}),
     getPnl: async () => ({}),
     getAudit: async () => ({}),
+    getReconciliation: async () => ({ items: [] }),
     preflight: async (_opportunity, _accountId, mode) => {
       onPreflight(mode);
       return { challengeId: "challenge", challengeToken: "token", expiresAt: 1, report: { mode } };
     },
     execute: async () => { options.onExecute?.(); return {}; },
     closeAll: async () => ({}),
+    finalizeReconciliation: async () => ({}),
   };
 }
 
