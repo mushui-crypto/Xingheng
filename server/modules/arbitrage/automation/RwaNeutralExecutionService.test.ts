@@ -14,6 +14,7 @@ import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./RwaNeutr
 import { createNeutralExecutionRecord } from "./RwaNeutralHedgeExecutionEngine";
 import type {
   RwaBybitTradingClient,
+  RwaBybitPermissions,
   RwaProviderOrder,
   RwaProviderOrderRequest,
   RwaProviderPreflightSnapshot,
@@ -27,6 +28,10 @@ import {
   RWA_PERPETUAL_ACTIVITY_SOURCES,
 } from "./RwaProviderActivityContinuity";
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
+import {
+  createRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverProviderSnapshot,
+} from "./RwaAssetTakeover";
 
 const accountId = "bybit:test-account";
 const accountFingerprint = "test-account";
@@ -85,6 +90,147 @@ test("Bybit authorization rejects a preview changed by balance or order activity
     );
     assert.equal(providerMutationCount(harness.client), writesBefore);
     assert.deepEqual((await harness.store.readState()).assetAuthorizations, []);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("Bybit takeover reuses the authorized account state and only adds the missing perpetual short", async () => {
+  const harness = await createHarness({ availableUsdt: 2_000, unrelatedSpotQuantity: 0.1 });
+  try {
+    const authorizationPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+    await harness.service.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.service.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 1_000,
+      leverage: 2,
+    });
+    const result = await harness.service.startAssetTakeover({
+      assetId: "xaut",
+      preview,
+      idempotencyKey: "takeover:bybit:0001",
+    }) as any;
+    assert.equal(result.state, "managed");
+    assert.deepEqual(harness.client.requests.slice(-1).map((item) => [item.category, item.side]), [
+      ["linear", "Sell"],
+    ]);
+    assert.equal(Math.abs(result.finalPerpetualQuantity - 0.1) < 1e-12, true);
+    const writesBeforeSecondStart = providerMutationCount(harness.client);
+    await assert.rejects(
+      harness.service.startAssetTakeover({
+        assetId: "xaut",
+        preview,
+        idempotencyKey: "takeover:bybit:0002",
+      }),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "asset_takeover_risk_rejected",
+    );
+    assert.equal(providerMutationCount(harness.client), writesBeforeSecondStart);
+    await assert.rejects(
+      harness.service.revokeAccountAssetAuthorization("xaut"),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "asset_authorization_invalid",
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("Bybit takeover preserves a pending 1500U execution reserve when checking a 1000U takeover", async () => {
+  const harness = await createHarness({ availableUsdt: 2_000 });
+  try {
+    const authorizationPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+    await harness.service.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.service.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 1_000,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const pending = createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${harness.store.userDomain}`,
+      idempotencyKey: `${harness.store.userDomain}:pending-capital`,
+      challengeId: "pending-capital",
+      now: harness.now,
+    });
+    pending.reservedCapitalUsd = 1_500;
+    state.executions.push(pending);
+    await harness.store.writeState(state);
+    const writesBefore = providerMutationCount(harness.client);
+    await assert.rejects(
+      harness.service.startAssetTakeover({
+        assetId: "xaut",
+        preview,
+        idempotencyKey: "takeover:pending-capital",
+      }),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "asset_takeover_risk_rejected",
+    );
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+    assert.equal((await harness.store.readState()).assetTakeovers.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("Bybit takeover recovery propagates lease loss after provider snapshot without a state write", async () => {
+  const harness = await createHarness({ availableUsdt: 2_000, unrelatedSpotQuantity: 0.1 });
+  try {
+    const authorizationPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+    await harness.service.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.service.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    state.assetTakeovers.push(createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId,
+      preview,
+      idempotencyKey: "takeover:recovery-lease-loss",
+      orderLinkPrefix: "takeover-recovery-lease-loss",
+      now: harness.now,
+    }));
+    await harness.store.writeState(state);
+
+    let leaseHeld = true;
+    harness.client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let writesAfterLeaseSetup = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (next) => {
+      writesAfterLeaseSetup += 1;
+      return originalWriteState(next);
+    };
+    const restarted = new RwaNeutralExecutionService(
+      harness.store,
+      () => harness.client,
+      () => harness.now,
+      () => false,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated takeover recovery lease loss",
+          );
+        }
+      },
+    );
+    const writesBefore = providerMutationCount(harness.client);
+    await assert.rejects(
+      restarted.initialize(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+    assert.equal(writesAfterLeaseSetup, 0);
+    assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "planned");
   } finally {
     await harness.cleanup();
   }
@@ -1140,6 +1286,7 @@ class FakeBybitClient implements RwaBybitTradingClient {
   openSpotOrderCount = 0;
   openPerpetualOrderCount = 0;
   assetOpenOrders: RwaAssetOrderReference[] = [];
+  takeoverSnapshotHook: () => void = () => {};
 
   constructor(options: {
     fundingRate?: number;
@@ -1199,6 +1346,30 @@ class FakeBybitClient implements RwaBybitTradingClient {
       },
       fees: { spotTakerBps: 1, perpetualTakerBps: 1 },
     };
+  }
+
+  async readAssetTakeoverSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBybitPermissions>> {
+    const account = await this.readPreflightSnapshot();
+    if (account.existingPerpetualQuantityXaut > 0) {
+      account.perpetual.liquidationDistancePercent = 50;
+    }
+    const snapshot = {
+      account,
+      orders: structuredClone(this.assetOpenOrders),
+      spotAskDepth: [{ price: account.spot.ask, quantityBase: 10 }],
+      perpetualBidDepth: [{ price: account.perpetual.bid, quantityBase: 10 }],
+      fundingRates30d: [0.0001, 0.0002, 0.0003],
+      perpetualInitialMarginUsd: account.existingPerpetualQuantityXaut * account.perpetual.mark / 2,
+      perpetualLeverage: account.existingPerpetualQuantityXaut > 0 ? 2 : null,
+      spotAvailableUsdt: account.availableUsdt,
+      perpetualAvailableUsdt: account.availableUsdt,
+    };
+    this.takeoverSnapshotHook();
+    return snapshot;
+  }
+
+  async findOrderByClientOrderId() {
+    return null;
   }
 
   async setPerpetualLeverage(_leverage: 1) {

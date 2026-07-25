@@ -12,7 +12,13 @@ import {
   normalizeVenue,
 } from "./RwaAutomationConnectorRegistry";
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
-import type { RwaAutomationCandidate, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
+import type {
+  RwaAutomationCandidate,
+  RwaAutomationConnector,
+  RwaAutomationMode,
+  RwaAutomationVenue,
+  RwaVenueCredentialInput,
+} from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import { categoryFromRwaAutomationError, sanitizeRwaAutomationError, stableHash } from "./RwaNeutralAutomationSecurity";
 import {
@@ -43,6 +49,13 @@ import {
   rwaAutomationProfileId,
   RwaAutomationAssetProfileError,
 } from "./RwaAutomationAssetProfile";
+import {
+  assertRwaAssetTakeoverPreview,
+  RWA_ASSET_TAKEOVER_PREVIEW_TTL_MS,
+  RwaAssetTakeoverError,
+  validateRwaAssetTakeoverPreview,
+  type RwaAssetTakeoverPreview,
+} from "./RwaAssetTakeover";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -73,6 +86,22 @@ export class RwaAutomationControlService {
     claimed: boolean;
   }>();
   private readonly assetAuthorizationPreviewReservations = new Map<string, number>();
+  private readonly assetTakeoverPreviews = new Map<string, {
+    userId: string;
+    userDomain: string;
+    sessionDomain: string;
+    venue: Extract<RwaAutomationVenue, "binance" | "bybit">;
+    accountId: string;
+    assetId: string;
+    takeoverId: string | null;
+    mode: "start" | "reconfirm";
+    preview: RwaAssetTakeoverPreview;
+    requestDigest: string;
+    intentResolvedAt: number | null;
+    claimed: boolean;
+    expiresAt: number;
+  }>();
+  private readonly assetTakeoverPreviewReservations = new Map<string, number>();
   private readonly registries = new Map<string, { registry: RwaAutomationConnectorRegistry; lastUsedAt: number }>();
   private readonly activeRegistryUsers = new Map<string, number>();
   private readonly challengeReservations = new Map<string, number>();
@@ -107,6 +136,8 @@ export class RwaAutomationControlService {
     this.registries.clear();
     this.assetAuthorizationPreviews.clear();
     this.assetAuthorizationPreviewReservations.clear();
+    this.assetTakeoverPreviews.clear();
+    this.assetTakeoverPreviewReservations.clear();
   }
 
   private registry(userId: string) {
@@ -392,6 +423,185 @@ export class RwaAutomationControlService {
       this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
       return result;
     });
+  }
+
+  async previewAssetTakeover(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["leverage", "newCapitalUsd"]);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    const newCapitalUsd = positiveNumber(body.newCapitalUsd, "newCapitalUsd");
+    const leverage = takeoverLeverage(body.leverage);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverConnector(connector);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    const release = this.reserveAssetTakeoverPreview(userId);
+    try {
+      return await this.governed("private_read", sourceIp, userId, normalizedVenue, accountId, async () => {
+        const preview = await capability.previewAssetTakeover({
+          assetId: normalizedAssetId,
+          newCapitalUsd,
+          leverage,
+        });
+        return this.issueAssetTakeoverPreview({
+          userId,
+          sessionDomain,
+          venue: normalizedVenue,
+          accountId,
+          assetId: normalizedAssetId,
+          takeoverId: null,
+          mode: "start",
+          preview,
+        });
+      });
+    } finally {
+      release();
+    }
+  }
+
+  async startAssetTakeover(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["idempotencyKey", "preview", "stepUpToken"]);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    const preview = validateRwaAssetTakeoverPreview(body.preview);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 128);
+    this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverConnector(connector);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    let claimed = false;
+    try {
+      return await this.governed("risk_control", sourceIp, userId, normalizedVenue, accountId, async () => {
+        const issuance = this.claimAssetTakeoverPreview({
+          userId,
+          sessionDomain,
+          venue: normalizedVenue,
+          accountId,
+          assetId: normalizedAssetId,
+          takeoverId: null,
+          mode: "start",
+          preview,
+        });
+        claimed = true;
+        await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+          operation: "asset_takeover_start",
+          venue: normalizedVenue,
+          accountId,
+          resourceId: normalizedAssetId,
+          requestDigest: issuance.requestDigest,
+          notionalUsd: preview.totalManagedCapitalUsd,
+        });
+        const result = await capability.startAssetTakeover({
+          assetId: normalizedAssetId,
+          preview: issuance.preview,
+          idempotencyKey,
+        });
+        return this.issueReconfirmationFromResult({
+          userId,
+          sessionDomain,
+          venue: normalizedVenue,
+          accountId,
+          assetId: normalizedAssetId,
+          result,
+        });
+      });
+    } finally {
+      if (claimed) this.assetTakeoverPreviews.delete(preview.previewId);
+    }
+  }
+
+  async reconfirmAssetTakeover(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    takeoverId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["preview"]);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    const normalizedTakeoverId = requiredString(takeoverId, "takeoverId", 100);
+    const preview = validateRwaAssetTakeoverPreview(body.preview);
+    this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverConnector(connector);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    let claimed = false;
+    try {
+      return await this.governed("risk_control", sourceIp, userId, normalizedVenue, accountId, async () => {
+        this.claimAssetTakeoverPreview({
+          userId,
+          sessionDomain,
+          venue: normalizedVenue,
+          accountId,
+          assetId: normalizedAssetId,
+          takeoverId: normalizedTakeoverId,
+          mode: "reconfirm",
+          preview,
+        });
+        claimed = true;
+        const result = await capability.reconfirmAssetTakeover({
+          takeoverId: normalizedTakeoverId,
+          preview,
+        });
+        return this.issueReconfirmationFromResult({
+          userId,
+          sessionDomain,
+          venue: normalizedVenue,
+          accountId,
+          assetId: normalizedAssetId,
+          result,
+        });
+      });
+    } finally {
+      if (claimed) this.assetTakeoverPreviews.delete(preview.previewId);
+    }
+  }
+
+  async getAssetTakeoverStatus(
+    userId: string,
+    venue: string,
+    assetId: string,
+    takeoverId: string,
+    sourceIp = "unknown",
+  ) {
+    const normalizedVenue = normalizeVenue(venue);
+    enabledAssetId(assetId, normalizedVenue);
+    const normalizedTakeoverId = requiredString(takeoverId, "takeoverId", 100);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverConnector(connector);
+    const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, normalizedVenue, accountId, () =>
+      capability.getAssetTakeoverStatus(normalizedTakeoverId));
   }
 
   async getConfig(userId: string, venue: string, sourceIp = "unknown") {
@@ -782,6 +992,7 @@ export class RwaAutomationControlService {
       "resourceId",
       "requestDigest",
       "authorizationPreview",
+      "takeoverPreview",
     ]);
     const operation = normalizeStepUpOperation(body.operation);
     const venue = normalizeVenue(requiredString(body.venue, "venue", 20));
@@ -791,10 +1002,11 @@ export class RwaAutomationControlService {
     return this.governed("private_read", sourceIp, userId, venue, configuredAccountId ?? "unconfigured", async () => {
       const authorizationOperation = operation === "asset_authorization_create"
         || operation === "asset_authorization_revoke";
-      if (authorizationOperation && body.accountId !== undefined) {
-        throw new RwaAutomationControlError(400, "invalid_request", "资产授权操作不接受客户端账户标识。");
+      const serverBoundOperation = authorizationOperation || operation === "asset_takeover_start";
+      if (serverBoundOperation && body.accountId !== undefined) {
+        throw new RwaAutomationControlError(400, "invalid_request", "资产授权或接管操作不接受客户端账户标识。");
       }
-      const accountId = authorizationOperation
+      const accountId = serverBoundOperation
         ? configuredAccountId
         : requiredString(body.accountId, "accountId", 100);
       if (!accountId) {
@@ -856,7 +1068,42 @@ export class RwaAutomationControlService {
             );
           }
         }
-      } else if (body.authorizationPreview !== undefined) {
+      } else if (operation === "asset_takeover_start") {
+        if (!resourceId) {
+          throw new RwaAutomationControlError(400, "invalid_request", "资产接管需要绑定 assetId。");
+        }
+        if (body.authorizationPreview !== undefined) {
+          throw new RwaAutomationControlError(400, "invalid_request", "资产接管不接受授权预览。");
+        }
+        const assetId = enabledAssetId(resourceId, venue);
+        const preview = validateRwaAssetTakeoverPreview(body.takeoverPreview);
+        const issuance = this.requireAssetTakeoverPreview({
+          userId,
+          sessionDomain: requiredString(sessionDomain, "sessionDomain", 200),
+          venue,
+          accountId,
+          assetId,
+          takeoverId: null,
+          mode: "start",
+          preview,
+        });
+        const capability = requireTakeoverConnector(connector);
+        const current = await capability.previewAssetTakeover({
+          assetId,
+          newCapitalUsd: preview.newCapitalUsd,
+          leverage: preview.selectedLeverage,
+        });
+        assertRwaAssetTakeoverPreview({ provided: issuance.preview, current, now: this.now() });
+        if (body.requestDigest !== issuance.requestDigest) {
+          throw new RwaAutomationControlError(
+            409,
+            "request_digest_mismatch",
+            "二次验证请求与当前资产接管预览不匹配。",
+          );
+        }
+        issuance.intentResolvedAt = this.now();
+        notionalUsd = preview.totalManagedCapitalUsd;
+      } else if (body.authorizationPreview !== undefined || body.takeoverPreview !== undefined) {
         throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受资产授权预览。");
       } else if (operation === "hedge_execute") {
         if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
@@ -881,6 +1128,176 @@ export class RwaAutomationControlService {
     }
     const stepUpToken = requiredString(tokenValue, "stepUpToken", 200);
     return this.stepUpSecurity.consume(userId, sessionDomain, stepUpToken, intent);
+  }
+
+  private issueAssetTakeoverPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    takeoverId: string | null;
+    mode: "start" | "reconfirm";
+    preview: RwaAssetTakeoverPreview;
+  }) {
+    const preview = validateRwaAssetTakeoverPreview(input.preview);
+    const now = this.now();
+    if (
+      preview.venue !== input.venue
+      || preview.assetId !== input.assetId
+      || preview.generatedAt > now
+      || preview.expiresAt <= now
+      || preview.expiresAt !== preview.generatedAt + RWA_ASSET_TAKEOVER_PREVIEW_TTL_MS
+      || this.assetTakeoverPreviews.has(preview.previewId)
+    ) throw invalidIssuedAssetTakeoverPreview();
+    const requestDigest = assetTakeoverStartDigest(input.assetId, preview);
+    this.assetTakeoverPreviews.set(preview.previewId, {
+      userId: input.userId,
+      userDomain: rwaAutomationUserDomain(input.userId),
+      sessionDomain: input.sessionDomain,
+      venue: input.venue as Extract<RwaAutomationVenue, "binance" | "bybit">,
+      accountId: input.accountId,
+      assetId: input.assetId,
+      takeoverId: input.takeoverId,
+      mode: input.mode,
+      preview: { ...preview },
+      requestDigest,
+      intentResolvedAt: null,
+      claimed: false,
+      expiresAt: preview.expiresAt,
+    });
+    return { ...preview };
+  }
+
+  private requireAssetTakeoverPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    takeoverId: string | null;
+    mode: "start" | "reconfirm";
+    preview: RwaAssetTakeoverPreview;
+  }) {
+    this.cleanupAssetTakeoverPreviews();
+    const provided = validateRwaAssetTakeoverPreview(input.preview);
+    const record = this.assetTakeoverPreviews.get(provided.previewId);
+    if (
+      !record
+      || record.claimed
+      || record.userId !== input.userId
+      || record.userDomain !== rwaAutomationUserDomain(input.userId)
+      || record.sessionDomain !== input.sessionDomain
+      || record.venue !== input.venue
+      || record.accountId !== input.accountId
+      || record.assetId !== input.assetId
+      || record.takeoverId !== input.takeoverId
+      || record.mode !== input.mode
+      || record.expiresAt <= this.now()
+      || record.requestDigest !== assetTakeoverStartDigest(input.assetId, provided)
+      || canonicalRequestDigest(record.preview) !== canonicalRequestDigest(provided)
+    ) throw invalidIssuedAssetTakeoverPreview();
+    return record;
+  }
+
+  private claimAssetTakeoverPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    takeoverId: string | null;
+    mode: "start" | "reconfirm";
+    preview: RwaAssetTakeoverPreview;
+  }) {
+    const record = this.requireAssetTakeoverPreview(input);
+    if (input.mode === "start" && record.intentResolvedAt === null) {
+      throw invalidIssuedAssetTakeoverPreview();
+    }
+    record.claimed = true;
+    return record;
+  }
+
+  private cleanupAssetTakeoverPreviews() {
+    const now = this.now();
+    for (const [id, preview] of this.assetTakeoverPreviews) {
+      if (preview.expiresAt <= now) this.assetTakeoverPreviews.delete(id);
+    }
+  }
+
+  private reserveAssetTakeoverPreview(userId: string) {
+    this.cleanupChallenges();
+    this.cleanupAssetAuthorizationPreviews();
+    this.cleanupAssetTakeoverPreviews();
+    const userCount =
+      [...this.challengeVenues.values()].filter((item) => item.userId === userId).length
+      + [...this.assetAuthorizationPreviews.values()].filter((item) => item.userId === userId).length
+      + [...this.assetTakeoverPreviews.values()].filter((item) => item.userId === userId).length;
+    const totalReservations =
+      [...this.challengeReservations.values()].reduce((sum, value) => sum + value, 0)
+      + [...this.assetAuthorizationPreviewReservations.values()].reduce((sum, value) => sum + value, 0)
+      + [...this.assetTakeoverPreviewReservations.values()].reduce((sum, value) => sum + value, 0);
+    const userReservations =
+      (this.challengeReservations.get(userId) ?? 0)
+      + (this.assetAuthorizationPreviewReservations.get(userId) ?? 0)
+      + (this.assetTakeoverPreviewReservations.get(userId) ?? 0);
+    if (
+      this.challengeVenues.size
+        + this.assetAuthorizationPreviews.size
+        + this.assetTakeoverPreviews.size
+        + totalReservations + 1 > this.governance.config.maxChallengesGlobal
+      || userCount + userReservations + 1 > this.governance.config.maxChallengesPerUser
+    ) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "资产接管预览容量已满；已拒绝继续。",
+      );
+    }
+    this.assetTakeoverPreviewReservations.set(
+      userId,
+      (this.assetTakeoverPreviewReservations.get(userId) ?? 0) + 1,
+    );
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.assetTakeoverPreviewReservations.get(userId) ?? 0;
+      if (current <= 1) this.assetTakeoverPreviewReservations.delete(userId);
+      else this.assetTakeoverPreviewReservations.set(userId, current - 1);
+    };
+  }
+
+  private issueReconfirmationFromResult(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    result: unknown;
+  }) {
+    const result = record(input.result);
+    if (result.reconfirmationPreview === undefined) return input.result;
+    const takeoverId = requiredString(result.takeoverId, "takeoverId", 100);
+    const preview = validateRwaAssetTakeoverPreview(result.reconfirmationPreview);
+    const release = this.reserveAssetTakeoverPreview(input.userId);
+    try {
+      return {
+        ...result,
+        reconfirmationPreview: this.issueAssetTakeoverPreview({
+          userId: input.userId,
+          sessionDomain: input.sessionDomain,
+          venue: input.venue,
+          accountId: input.accountId,
+          assetId: input.assetId,
+          takeoverId,
+          mode: "reconfirm",
+          preview,
+        }),
+      };
+    } finally {
+      release();
+    }
   }
 
   private issueAssetAuthorizationPreview(input: {
@@ -994,11 +1411,17 @@ export class RwaAutomationControlService {
         this.assetAuthorizationPreviews.delete(id);
       }
     }
+    for (const [id, preview] of this.assetTakeoverPreviews) {
+      if (preview.userId === userId && preview.venue === venue) {
+        this.assetTakeoverPreviews.delete(id);
+      }
+    }
   }
 
   private reserveAssetAuthorizationPreview(userId: string) {
     this.cleanupChallenges();
     this.cleanupAssetAuthorizationPreviews();
+    this.cleanupAssetTakeoverPreviews();
     const userPreviewCount = [...this.assetAuthorizationPreviews.values()]
       .filter((item) => item.userId === userId).length;
     const userChallengeCount = [...this.challengeVenues.values()]
@@ -1008,15 +1431,24 @@ export class RwaAutomationControlService {
       .reduce((sum, value) => sum + value, 0);
     const totalChallengeReserved = [...this.challengeReservations.values()]
       .reduce((sum, value) => sum + value, 0);
+    const userTakeoverPreviewCount = [...this.assetTakeoverPreviews.values()]
+      .filter((item) => item.userId === userId).length;
+    const takeoverReservedForUser = this.assetTakeoverPreviewReservations.get(userId) ?? 0;
+    const totalTakeoverReserved = [...this.assetTakeoverPreviewReservations.values()]
+      .reduce((sum, value) => sum + value, 0);
     if (
       this.assetAuthorizationPreviews.size
+        + this.assetTakeoverPreviews.size
         + this.challengeVenues.size
         + totalPreviewReserved
+        + totalTakeoverReserved
         + totalChallengeReserved
         + 1 > this.governance.config.maxChallengesGlobal
       || userPreviewCount
+        + userTakeoverPreviewCount
         + userChallengeCount
         + reservedForUser
+        + takeoverReservedForUser
         + (this.challengeReservations.get(userId) ?? 0)
         + 1 > this.governance.config.maxChallengesPerUser
     ) {
@@ -1070,6 +1502,7 @@ export class RwaAutomationControlService {
     const cutoff = this.now() - this.governance.config.registryIdleTtlMs;
     this.cleanupChallenges();
     this.cleanupAssetAuthorizationPreviews();
+    this.cleanupAssetTakeoverPreviews();
     for (const [userId, entry] of this.registries) {
       if (
         entry.lastUsedAt > cutoff
@@ -1077,6 +1510,7 @@ export class RwaAutomationControlService {
         || entry.registry.hasActivityMonitor()
         || [...this.challengeVenues.values()].some((challenge) => challenge.userId === userId)
         || [...this.assetAuthorizationPreviews.values()].some((preview) => preview.userId === userId)
+        || [...this.assetTakeoverPreviews.values()].some((preview) => preview.userId === userId)
       ) continue;
       entry.registry.dispose();
       this.registries.delete(userId);
@@ -1093,24 +1527,34 @@ export class RwaAutomationControlService {
   private assertChallengeCapacity(userId: string, pending = 0) {
     this.cleanupChallenges();
     this.cleanupAssetAuthorizationPreviews();
+    this.cleanupAssetTakeoverPreviews();
     const userCount = [...this.challengeVenues.values()].filter((item) => item.userId === userId).length;
     const userPreviewCount = [...this.assetAuthorizationPreviews.values()]
+      .filter((item) => item.userId === userId).length;
+    const userTakeoverPreviewCount = [...this.assetTakeoverPreviews.values()]
       .filter((item) => item.userId === userId).length;
     const reservedForUser = this.challengeReservations.get(userId) ?? 0;
     const totalReserved = [...this.challengeReservations.values()].reduce((sum, value) => sum + value, 0);
     const previewReservedForUser = this.assetAuthorizationPreviewReservations.get(userId) ?? 0;
     const totalPreviewReserved = [...this.assetAuthorizationPreviewReservations.values()]
       .reduce((sum, value) => sum + value, 0);
+    const takeoverReservedForUser = this.assetTakeoverPreviewReservations.get(userId) ?? 0;
+    const totalTakeoverReserved = [...this.assetTakeoverPreviewReservations.values()]
+      .reduce((sum, value) => sum + value, 0);
     if (
       this.challengeVenues.size
         + this.assetAuthorizationPreviews.size
+        + this.assetTakeoverPreviews.size
         + totalReserved
         + totalPreviewReserved
+        + totalTakeoverReserved
         + pending > this.governance.config.maxChallengesGlobal
       || userCount
         + userPreviewCount
+        + userTakeoverPreviewCount
         + reservedForUser
         + previewReservedForUser
+        + takeoverReservedForUser
         + pending > this.governance.config.maxChallengesPerUser
     ) {
       throw new RwaAutomationGovernanceError(503, "automation_capacity_exceeded", "自动套利 challenge 容量已满；已拒绝新增风险操作。");
@@ -1154,6 +1598,7 @@ export function automationErrorResponse(error: unknown) {
     || error instanceof CredentialStoreError
     || error instanceof CredentialKeyProviderError
     || error instanceof RwaAccountAssetAuthorizationError
+    || error instanceof RwaAssetTakeoverError
   ) {
     return {
       statusCode:
@@ -1184,7 +1629,7 @@ function normalizeStepUpOperation(value: unknown): StepUpOperation {
   const allowed: StepUpOperation[] = [
     "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
     "hedge_execute", "position_close", "close_all", "reconciliation_finalize",
-    "asset_authorization_create", "asset_authorization_revoke",
+    "asset_authorization_create", "asset_authorization_revoke", "asset_takeover_start",
   ];
   if (!allowed.includes(value as StepUpOperation)) throw new RwaAutomationControlError(400, "invalid_request", "operation 不受支持。");
   return value as StepUpOperation;
@@ -1210,6 +1655,48 @@ function assetAuthorizationCreateDigest(
 
 function assetAuthorizationRevokeDigest(assetId: string) {
   return canonicalRequestDigest({ assetId });
+}
+
+function assetTakeoverStartDigest(
+  assetId: string,
+  preview: ReturnType<typeof validateRwaAssetTakeoverPreview>,
+) {
+  return canonicalRequestDigest({ assetId, preview });
+}
+
+function invalidIssuedAssetTakeoverPreview() {
+  return new RwaAssetTakeoverError(
+    409,
+    "asset_takeover_preview_invalid",
+    "资产接管预览不存在、已过期或已使用，请重新获取。",
+  );
+}
+
+function takeoverLeverage(value: unknown): 1 | 2 | 3 {
+  if (value === 1 || value === 2 || value === 3) return value;
+  throw new RwaAutomationControlError(400, "invalid_request", "leverage 仅支持 1、2 或 3。");
+}
+
+function positiveNumber(value: unknown, name: string) {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    throw new RwaAutomationControlError(400, "invalid_request", `${name} 必须是有限正数。`);
+  }
+  return value;
+}
+
+function requireTakeoverConnector(connector: RwaAutomationConnector) {
+  if (
+    !connector.previewAssetTakeover
+    || !connector.startAssetTakeover
+    || !connector.reconfirmAssetTakeover
+    || !connector.getAssetTakeoverStatus
+  ) {
+    throw new RwaAutomationControlError(501, "asset_takeover_unavailable", "该 venue 尚未实现资产接管。");
+  }
+  return connector as RwaAutomationConnector & Required<Pick<
+    RwaAutomationConnector,
+    "previewAssetTakeover" | "startAssetTakeover" | "reconfirmAssetTakeover" | "getAssetTakeoverStatus"
+  >>;
 }
 
 function invalidIssuedAssetAuthorizationPreview() {

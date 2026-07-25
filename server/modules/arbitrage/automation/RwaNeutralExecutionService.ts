@@ -17,6 +17,11 @@ import {
   type RwaAutomationCapitalExposure,
 } from "./RwaAutomationAssetProfile";
 import { calculateMinimumCommonBaseQuantity } from "./RwaAutomationMinimumOrder";
+import { RwaAssetTakeoverCoordinator } from "./RwaAssetTakeoverCoordinator";
+import type {
+  RwaAssetTakeoverLeverage,
+  RwaAssetTakeoverPreview,
+} from "./RwaAssetTakeover";
 import {
   assertAccountAssetAuthorizationPreview,
   createAccountAssetAuthorization as createStoredAccountAssetAuthorization,
@@ -80,6 +85,7 @@ export class RwaNeutralExecutionService {
   private armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
   private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
+  private readonly takeoverCoordinator: RwaAssetTakeoverCoordinator<RwaBybitPermissions>;
   private accessCache: {
     accountId: string;
     verifiedAt: number;
@@ -100,6 +106,15 @@ export class RwaNeutralExecutionService {
       assertExecutionLeaseHeld,
       XAUT_BYBIT_PROFILE,
     );
+    this.takeoverCoordinator = new RwaAssetTakeoverCoordinator({
+      venue: "bybit",
+      store,
+      client: () => this.client(),
+      credentialBinding: () => this.requireCredentialMetadata(),
+      assertExecutionLeaseHeld,
+      serverKillSwitchActive,
+      now,
+    });
   }
 
   private get strategyOrderPrefix() {
@@ -159,6 +174,7 @@ export class RwaNeutralExecutionService {
       }
       await this.store.writeState(state);
     });
+    await this.withLock(() => this.takeoverCoordinator.recoverPending());
     await this.startActivityMonitoring();
   }
 
@@ -459,11 +475,48 @@ export class RwaNeutralExecutionService {
         && authorization.accountFingerprint === metadata.accountFingerprint
         && authorization.revokedAt === null);
       if (active.length !== 1) throw invalidAccountAssetAuthorization();
+      if (state.assetTakeovers.some((takeover) =>
+        takeover.authorizationId === active[0]!.authorizationId
+        && takeover.state !== "failed"
+        && takeover.reservedCapitalUsd > 0)) {
+        throw new RwaAccountAssetAuthorizationError(
+          409,
+          "asset_authorization_invalid",
+          "该授权仍绑定已接管的 XAUT 仓位，不能静默撤销；请先完成人工处置。",
+        );
+      }
       active[0]!.revokedAt = this.now();
       await this.store.writeState(state);
       this.assertExecutionLeaseHeld();
       return publicAccountAssetAuthorization(active[0]!);
     });
+  }
+
+  previewAssetTakeover(input: {
+    assetId: string;
+    newCapitalUsd: number;
+    leverage: RwaAssetTakeoverLeverage;
+  }) {
+    return this.withLock(() => this.takeoverCoordinator.preview(input));
+  }
+
+  startAssetTakeover(input: {
+    assetId: string;
+    preview: RwaAssetTakeoverPreview;
+    idempotencyKey: string;
+  }) {
+    return this.withLock(() => this.takeoverCoordinator.start(input));
+  }
+
+  reconfirmAssetTakeover(input: {
+    takeoverId: string;
+    preview: RwaAssetTakeoverPreview;
+  }) {
+    return this.withLock(() => this.takeoverCoordinator.reconfirm(input));
+  }
+
+  getAssetTakeoverStatus(takeoverId: string) {
+    return this.takeoverCoordinator.status(takeoverId);
   }
 
   async putCredentials(input: unknown) {

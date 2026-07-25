@@ -19,6 +19,11 @@ import type {
   RwaStrategyPnlSnapshot,
   RwaStrategyActivityContinuity,
 } from "./RwaNeutralExecutionTypes";
+import { RWA_MAX_STRATEGY_CAPITAL_USD } from "./RwaNeutralExecutionTypes";
+import {
+  validateRwaTakeoverFundingWindow,
+  type RwaAssetTakeoverProviderSnapshot,
+} from "./RwaAssetTakeover";
 import { scanBinancePositionAttribution } from "./RwaProviderActivityScanner";
 import {
   buildPositionAttributionSnapshot,
@@ -219,7 +224,84 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     };
   }
 
-  async setPerpetualLeverage(leverage: 1) {
+  async readAssetTakeoverSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBinancePermissions>> {
+    const endTime = this.now();
+    const startTime = endTime - 30 * 24 * 60 * 60_000;
+    const [account, orders, spotDepthValue, perpetualDepthValue, fundingValue, positionRiskValue] =
+      await Promise.all([
+        this.readPreflightSnapshot(),
+        this.listAssetOpenOrders(),
+        this.publicRequest("spot", "/api/v3/depth", {
+          symbol: RWA_BINANCE_SPOT_SYMBOL,
+          limit: "500",
+        }),
+        this.publicRequest("futures", "/fapi/v1/depth", {
+          symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+          limit: "500",
+        }),
+        this.publicRequest("futures", "/fapi/v1/fundingRate", {
+          symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+          startTime: String(startTime),
+          endTime: String(endTime),
+          limit: "1000",
+        }),
+        this.signedRequest("futures", "/fapi/v2/positionRisk", {
+          symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+        }),
+      ]);
+    const position = list(positionRiskValue).map(record)
+      .find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL);
+    let fundingRates30d: number[];
+    try {
+      fundingRates30d = validateRwaTakeoverFundingWindow(
+        list(fundingValue).map(record),
+        startTime,
+        endTime,
+        account.perpetual.fundingIntervalHours * 60 * 60_000,
+        (item) => Number(item.fundingTime),
+        (item) => Number(item.fundingRate),
+      );
+    } catch {
+      throw new RwaBinanceProviderError(
+        "provider_snapshot_invalid",
+        "Binance XAUT 30 日 Funding 历史不完整或结构无效。",
+      );
+    }
+    return {
+      account,
+      orders,
+      spotAskDepth: depthLevels(spotDepthValue, "asks"),
+      perpetualBidDepth: depthLevels(perpetualDepthValue, "bids"),
+      fundingRates30d,
+      perpetualInitialMarginUsd: position
+        ? snapshotNonNegativeNumber(position.initialMargin ?? position.positionInitialMargin, "永续初始保证金")
+        : 0,
+      perpetualLeverage: account.existingPerpetualQuantityXaut > 0
+        ? positiveNumber(position?.leverage) || null
+        : null,
+      spotAvailableUsdt: account.spotAvailableUsdt,
+      perpetualAvailableUsdt: account.futuresAvailableUsdt,
+    };
+  }
+
+  async findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string) {
+    const scope = category === "spot" ? "spot" : "futures";
+    const path = category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
+    const symbol = category === "spot"
+      ? RWA_BINANCE_SPOT_SYMBOL
+      : RWA_BINANCE_PERPETUAL_SYMBOL;
+    try {
+      return toOrder(await this.signedRequest(scope, path, {
+        symbol,
+        origClientOrderId: orderLinkId,
+      }), category);
+    } catch (error) {
+      if (error instanceof RwaBinanceProviderError && error.providerCode === -2013) return null;
+      throw error;
+    }
+  }
+
+  async setPerpetualLeverage(leverage: 1 | 2 | 3) {
     await this.signedRequest(
       "futures",
       "/fapi/v1/leverage",
@@ -234,7 +316,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const scope = request.category === "spot" ? "spot" : "futures";
     const path = request.category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
     const result = record(await this.signedRequest(scope, path, {
-      symbol: RWA_BINANCE_SPOT_SYMBOL,
+      symbol: request.symbol,
       side: request.side.toUpperCase(),
       type: "LIMIT",
       timeInForce: "IOC",
@@ -263,10 +345,13 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   }
 
   async cancelOrder(category: "spot" | "linear", orderId: string) {
+    const symbol = category === "spot"
+      ? RWA_BINANCE_SPOT_SYMBOL
+      : RWA_BINANCE_PERPETUAL_SYMBOL;
     await this.signedRequest(
       category === "spot" ? "spot" : "futures",
       category === "spot" ? "/api/v3/order" : "/fapi/v1/order",
-      { symbol: RWA_BINANCE_SPOT_SYMBOL, orderId },
+      { symbol, orderId },
       true,
       "DELETE",
     );
@@ -669,7 +754,11 @@ function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
   if (!/^[A-Za-z0-9._:/-]{1,36}$/.test(request.orderLinkId)) {
     throw new RwaBinanceProviderError("provider_order_rejected", "Binance 策略 clientOrderId 格式无效。");
   }
-  if (!(request.quantityXaut > 0 && request.quantityXaut <= 0.1) || !(request.limitPrice > 0)) {
+  if (
+    !(request.quantityXaut > 0)
+    || !(request.limitPrice > 0)
+    || request.quantityXaut * request.limitPrice > RWA_MAX_STRATEGY_CAPITAL_USD * 1.002
+  ) {
     throw new RwaBinanceProviderError("provider_order_rejected", "Binance 策略订单参数超出白名单。");
   }
   if (request.category === "spot" && request.reduceOnly) {
@@ -813,6 +902,31 @@ function depthUsd(value: unknown) {
     return sum + positiveNumber(price) * positiveNumber(quantity);
   }, 0);
   return Math.min(side(root.bids), side(root.asks));
+}
+
+function depthLevels(value: unknown, key: "asks" | "bids") {
+  const rows = list(record(value)[key]);
+  const levels = rows.map((item) => {
+    if (!Array.isArray(item) || item.length < 2) {
+      throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance XAUT 盘口结构无效。");
+    }
+    return {
+      price: snapshotPositiveNumber(item[0], "盘口价格"),
+      quantityBase: snapshotPositiveNumber(item[1], "盘口数量"),
+    };
+  });
+  if (!levels.length) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance XAUT 盘口为空。");
+  }
+  return levels;
+}
+
+function snapshotPositiveNumber(value: unknown, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return parsed;
 }
 
 function nullableTimestamp(value: unknown) {

@@ -57,6 +57,7 @@ import {
   rwaAutomationProfileId,
 } from "./RwaAutomationAssetProfile";
 import { validateAccountAssetAuthorization } from "./RwaAccountAssetAuthorization";
+import { validateRwaAssetTakeoverRecord } from "./RwaAssetTakeover";
 
 export const RWA_AUTOMATION_BACKUP_ROOT = "/app/rwa-automation-backups";
 export const RWA_AUTOMATION_BACKUP_SCHEMA_VERSION = 1 as const;
@@ -557,6 +558,18 @@ function sanitizeAutomationState(
     || (
       !hasExactKeys(parsed, [
         "assetAuthorizations",
+        "assetTakeovers",
+        "challenges",
+        "config",
+        "credentialAlert",
+        "credentialAudit",
+        "credentialLifecycle",
+        "executions",
+        "pnlSeries",
+        "version",
+      ])
+      && !hasExactKeys(parsed, [
+        "assetAuthorizations",
         "challenges",
         "config",
         "credentialAlert",
@@ -585,10 +598,42 @@ function sanitizeAutomationState(
     ? []
     : parsed.assetAuthorizations;
   if (!Array.isArray(assetAuthorizations)) throw invalidSnapshot();
-  assetAuthorizations.forEach((value) => {
+  const validatedAuthorizations = assetAuthorizations.map((value) => {
     const authorization = validateAccountAssetAuthorization(value);
     if (authorization.userDomain !== userDomain || authorization.venue !== venue) throw invalidSnapshot();
+    return authorization;
   });
+  const assetTakeovers = parsed.assetTakeovers === undefined ? [] : parsed.assetTakeovers;
+  if (!Array.isArray(assetTakeovers)) throw invalidSnapshot();
+  const validatedTakeovers = assetTakeovers.map((value) => {
+    try {
+      const takeover = validateRwaAssetTakeoverRecord(value);
+      if (takeover.userDomain !== userDomain || takeover.venue !== venue) throw invalidSnapshot();
+      const authorizationMatches = validatedAuthorizations.filter((authorization) =>
+        authorization.authorizationId === takeover.authorizationId
+        && authorization.createdAt === takeover.authorizationCreatedAt
+        && authorization.accountId === takeover.accountId
+        && authorization.accountFingerprint === takeover.accountFingerprint
+        && authorization.assetId === takeover.assetId
+        && authorization.profileId === takeover.profileId
+        && authorization.policyVersion === takeover.policyVersion
+        && authorization.policyDigest === takeover.policyDigest);
+      if (authorizationMatches.length !== 1) throw invalidSnapshot();
+      return takeover;
+    } catch {
+      throw invalidSnapshot();
+    }
+  });
+  for (const key of ["takeoverId", "idempotencyKey", "orderLinkPrefix"] as const) {
+    const values = validatedTakeovers.map((item) => item[key]);
+    if (new Set(values).size !== values.length) throw invalidSnapshot();
+  }
+  const capitalHoldingAuthorizations = validatedTakeovers
+    .filter((takeover) => takeover.state !== "failed")
+    .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
+  if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
+    throw invalidSnapshot();
+  }
   validateExecutionConfig(parsed.config);
   if (!Array.isArray(parsed.challenges)) throw invalidSnapshot();
   parsed.challenges.forEach(validateStoredChallenge);
@@ -602,6 +647,7 @@ function sanitizeAutomationState(
   const value = {
     ...parsed,
     assetAuthorizations,
+    assetTakeovers,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,

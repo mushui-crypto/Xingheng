@@ -443,6 +443,38 @@ test("Binance IP whitelist validation is fail-closed for missing, unrestricted, 
   await assert.rejects(failedQuery.validateAccess(), providerError("provider_unavailable"));
 });
 
+test("Binance takeover snapshot proves a complete provider window and rejects funding or depth gaps", async () => {
+  const now = 1_800_000_000_000;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ spotXautFree: "0.1", positionAmount: "-0.1" }),
+    () => now,
+    ["203.0.113.10"],
+  );
+  const snapshot = await client.readAssetTakeoverSnapshot();
+  assert.equal(snapshot.account.existingSpotQuantityXaut, 0.1);
+  assert.equal(snapshot.account.existingPerpetualQuantityXaut, 0.1);
+  assert.equal(snapshot.account.perpetualPositionSide, "short");
+  assert.equal(snapshot.fundingRates30d.length, 181);
+  assert.equal(snapshot.perpetualInitialMarginUsd, 200);
+  assert.equal(snapshot.perpetualLeverage, 2);
+  assert.deepEqual(snapshot.spotAskDepth[0], { price: 4_130, quantityBase: 0.5 });
+  assert.deepEqual(snapshot.perpetualBidDepth[0], { price: 4_128, quantityBase: 0.5 });
+
+  for (const options of [{ fundingGap: true }, { invalidTakeoverDepth: true }]) {
+    const invalid = new RwaBinanceMainnetClient(
+      { apiKey: "fake-key", apiSecret: "fake-secret" },
+      fixtureFetch({ spotXautFree: "0.1", positionAmount: "-0.1", ...options }),
+      () => now,
+      ["203.0.113.10"],
+    );
+    await assert.rejects(
+      invalid.readAssetTakeoverSnapshot(),
+      providerError("provider_snapshot_invalid"),
+    );
+  }
+});
+
 test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders", async () => {
   const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
   const client = new RwaBinanceMainnetClient(
@@ -475,10 +507,23 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
     category: "linear", symbol: "XAUTUSDT", side: "Sell", quantityXaut: 0.002,
     limitPrice: 4_128, reduceOnly: false, orderLinkId: "rwa-test-perp-1",
   });
+  const largerThanLegacySmoke = await client.placeOrder({
+    category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.2,
+    limitPrice: 4_130, reduceOnly: false, orderLinkId: "rwa-test-spot-large",
+  });
+  assert.equal(largerThanLegacySmoke.orderId, "101");
+  const beforeOverLimit = calls.length;
+  await assert.rejects(client.placeOrder({
+    category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.5,
+    limitPrice: 4_130, reduceOnly: false, orderLinkId: "rwa-test-over-limit",
+  }), providerError("provider_order_rejected"));
+  assert.equal(calls.length, beforeOverLimit);
   const spotOrder = await client.awaitOrder("spot", spot.orderId, 1_001);
   assert.equal(spotOrder.status, "Filled");
   assert.equal(spotOrder.positionQuantityXaut, 0.001998);
   assert.equal((await client.awaitOrder("linear", perpetual.orderId, 1_001)).status, "Filled");
+  const recovered = await client.findOrderByClientOrderId("linear", "rwa-test-perp-1");
+  assert.equal(recovered?.orderLinkId, "rwa-test-perp-1");
   await client.cancelOrder("spot", spot.orderId);
 
   const leverage = calls.find((item) => item.path === "/fapi/v1/leverage");
@@ -493,6 +538,11 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
   const perpetualCreate = calls.find((item) => item.path === "/fapi/v1/order" && item.method === "POST");
   assert.equal(perpetualCreate?.params.get("side"), "SELL");
   assert.equal(perpetualCreate?.params.get("reduceOnly"), "false");
+  const recoveredPerpetual = calls.find((item) =>
+    item.path === "/fapi/v1/order"
+    && item.method === "GET"
+    && item.params.get("origClientOrderId") === "rwa-test-perp-1");
+  assert.equal(recoveredPerpetual?.params.get("symbol"), "XAUTUSDT");
   assert.equal(calls.some((item) => item.path === "/api/v3/order" && item.method === "DELETE"), true);
 });
 
@@ -604,6 +654,8 @@ function fixtureFetch(options: {
   restrictionsFailure?: boolean;
   spotXautFree?: string;
   positionAmount?: string;
+  fundingGap?: boolean;
+  invalidTakeoverDepth?: boolean;
 } = {}): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
@@ -686,7 +738,9 @@ function fixtureFetch(options: {
         return json(options.positionAmount === undefined ? [] : [{
           symbol: "XAUTUSDT",
           positionAmt: options.positionAmount,
-          liquidationPrice: "0",
+          liquidationPrice: "6000",
+          initialMargin: "200",
+          leverage: "2",
         }]);
       case "/api/v3/openOrders":
       case "/fapi/v1/openOrders":
@@ -700,9 +754,25 @@ function fixtureFetch(options: {
       case "/fapi/v1/fundingInfo":
         return json([{ symbol: "XAUTUSDT", fundingIntervalHours: 4 }]);
       case "/api/v3/depth":
-        return json({ bids: [["4129", "0.01"]], asks: [["4130", "0.01"]] });
+        if (options.invalidTakeoverDepth && url.searchParams.get("limit") === "500") {
+          return json({ bids: [], asks: [] });
+        }
+        return json({ bids: [["4129", "0.5"]], asks: [["4130", "0.5"]] });
       case "/fapi/v1/depth":
-        return json({ bids: [["4128", "0.01"]], asks: [["4129", "0.01"]] });
+        return json({ bids: [["4128", "0.5"]], asks: [["4129", "0.5"]] });
+      case "/fapi/v1/fundingRate": {
+        const start = Number(url.searchParams.get("startTime"));
+        const end = Number(url.searchParams.get("endTime"));
+        const interval = 4 * 60 * 60_000;
+        const rows = Array.from(
+          { length: Math.floor((end - start) / interval) + 1 },
+          (_, index) => ({
+            fundingTime: start + index * interval,
+            fundingRate: "0.0001",
+          }),
+        );
+        return json(options.fundingGap ? rows.filter((_, index) => index !== 80) : rows);
+      }
       default:
         return json({ code: -1 }, 404);
     }

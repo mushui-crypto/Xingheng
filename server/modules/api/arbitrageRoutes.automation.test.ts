@@ -41,6 +41,7 @@ test("automation user API rejects anonymous and disabled users before handlers",
 test("automation user routes derive ownership from auth, are no-store, and sanitize unknown failures", async () => {
   const routes = new Map<string, any>();
   let authorizationOwner: string | undefined;
+  let takeoverOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
@@ -58,12 +59,24 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
         authorizationOwner = userId;
         return { assetId: "XAUT", accountFingerprint: "fingerprint" };
       },
+      previewAssetTakeover: async (userId: string) => {
+        takeoverOwner = userId;
+        return { previewId: "opaque-preview" };
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 22);
+  assert.equal(automationRoutes.length, 26);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
+  for (const route of [
+    "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",
+    "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/start",
+    "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/reconfirm",
+    "GET /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/status",
+  ]) {
+    assert.equal(routes.has(route), true);
+  }
 
   const okResponse = mockResponse();
   await routes.get("GET /api/arbitrage/automation/venues")({ user: { id: "user-a" }, params: {}, body: {} }, okResponse);
@@ -94,6 +107,17 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   assert.equal(authorizationOwner, "user-a");
   assert.equal(authorizationResponse.statusCode, 200);
   assert.equal(authorizationResponse.headers["Cache-Control"], "no-store");
+
+  const takeoverResponse = mockResponse();
+  await routes.get("POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview")({
+    user: { id: "user-a" },
+    userSessionDomain: "session-domain-a",
+    params: { venue: "bybit", assetId: "XAUT" },
+    body: { userId: "user-b", newCapitalUsd: 1_000, leverage: 2 },
+  }, takeoverResponse);
+  assert.equal(takeoverOwner, "user-a");
+  assert.equal(takeoverResponse.statusCode, 200);
+  assert.equal(takeoverResponse.headers["Cache-Control"], "no-store");
 
   const failedResponse = mockResponse();
   await routes.get("PUT /api/arbitrage/automation/venues/:venue/credentials")({

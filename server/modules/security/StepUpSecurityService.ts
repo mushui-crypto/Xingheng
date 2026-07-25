@@ -23,7 +23,8 @@ export type StepUpOperation =
   | "close_all"
   | "reconciliation_finalize"
   | "asset_authorization_create"
-  | "asset_authorization_revoke";
+  | "asset_authorization_revoke"
+  | "asset_takeover_start";
 
 export type StepUpEnrollmentMethod = "totp" | "webauthn";
 

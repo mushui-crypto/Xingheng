@@ -4,6 +4,10 @@ import type {
   RwaPublicAccountAssetAuthorization,
 } from "./RwaAccountAssetAuthorization";
 import type { RwaVenueAccountIdentity } from "./RwaNeutralExecutionTypes";
+import type {
+  RwaAssetTakeoverLeverage,
+  RwaAssetTakeoverPreview,
+} from "./RwaAssetTakeover";
 
 export type RwaAutomationVenue = Extract<ArbitrageVenue, "bybit" | "bitget" | "binance" | "okx">;
 export type RwaAutomationMode = "arbitrage_entry" | "manual_entry";
@@ -74,6 +78,21 @@ export type RwaAutomationConnector = {
     preview: RwaAccountAssetAuthorizationPreview,
   ): Promise<RwaPublicAccountAssetAuthorization>;
   revokeAccountAssetAuthorization(assetId: string): Promise<RwaPublicAccountAssetAuthorization>;
+  previewAssetTakeover?(input: {
+    assetId: string;
+    newCapitalUsd: number;
+    leverage: RwaAssetTakeoverLeverage;
+  }): Promise<RwaAssetTakeoverPreview>;
+  startAssetTakeover?(input: {
+    assetId: string;
+    preview: RwaAssetTakeoverPreview;
+    idempotencyKey: string;
+  }): Promise<unknown>;
+  reconfirmAssetTakeover?(input: {
+    takeoverId: string;
+    preview: RwaAssetTakeoverPreview;
+  }): Promise<unknown>;
+  getAssetTakeoverStatus?(takeoverId: string): Promise<unknown>;
   getConfig(): Promise<unknown>;
   updateConfig(input: unknown): Promise<unknown>;
   setKillSwitch(active: boolean, accountId?: string): Promise<unknown>;

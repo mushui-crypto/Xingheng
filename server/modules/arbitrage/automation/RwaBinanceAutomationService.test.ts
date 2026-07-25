@@ -25,6 +25,10 @@ import {
   RWA_PERPETUAL_ACTIVITY_SOURCES,
 } from "./RwaProviderActivityContinuity";
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
+import {
+  createRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverProviderSnapshot,
+} from "./RwaAssetTakeover";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -70,6 +74,107 @@ test("Binance asset authorization only reads XAUT state and local authorization 
     await harness.current.putCredentials({ apiKey: "rotated-key", apiSecret: "rotated-secret" });
     assert.equal(await harness.current.getAccountAssetAuthorization("xaut"), null);
     assert.equal(client.writeCount, writesBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance takeover persists an already strict hedge with zero new provider write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    client.setAuthoritativeExposure({
+      spotFreeXaut: 0.1,
+      perpetualQuantityXaut: 0.1,
+    });
+    client.snapshot.perpetual.liquidationDistancePercent = 50;
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 1_000,
+      leverage: 2,
+    });
+    const writesBefore = client.writeCount;
+    const result = await harness.current.startAssetTakeover({
+      assetId: "xaut",
+      preview,
+      idempotencyKey: "takeover:binance:0001",
+    }) as any;
+    assert.equal(result.state, "managed");
+    assert.equal(result.totalManagedCapitalUsd > 1_400, true);
+    assert.equal(client.writeCount, writesBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance takeover recovery propagates lease loss after provider snapshot without a state write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-lease-loss-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    client.setAuthoritativeExposure({ spotFreeXaut: 0.1 });
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    state.assetTakeovers.push(createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:recovery-lease",
+      orderLinkPrefix: "takeover-binance-recovery-lease",
+      now,
+    }));
+    await harness.store.writeState(state);
+
+    let leaseHeld = true;
+    client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let writesAfterLeaseSetup = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (next) => {
+      writesAfterLeaseSetup += 1;
+      return originalWriteState(next);
+    };
+    const restarted = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now,
+      () => false,
+      undefined,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated takeover recovery lease loss",
+          );
+        }
+      },
+    );
+    const writesBefore = client.writeCount;
+    await assert.rejects(
+      restarted.initialize(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(client.writeCount, writesBefore);
+    assert.equal(writesAfterLeaseSetup, 0);
+    assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "planned");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -932,6 +1037,7 @@ class FakeBinanceClient implements RwaBinanceClient {
   externalPositionActivity = false;
   attributionHook: () => void = () => {};
   assetOpenOrders: RwaAssetOrderReference[] = [];
+  takeoverSnapshotHook: () => void = () => {};
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
@@ -1017,6 +1123,28 @@ class FakeBinanceClient implements RwaBinanceClient {
   async readPreflightSnapshot() {
     this.readCount += 1;
     return structuredClone(this.snapshot);
+  }
+
+  async readAssetTakeoverSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBinancePermissions>> {
+    this.readCount += 1;
+    const snapshot = {
+      account: structuredClone(this.snapshot),
+      orders: structuredClone(this.assetOpenOrders),
+      spotAskDepth: [{ price: this.snapshot.spot.ask, quantityBase: 10 }],
+      perpetualBidDepth: [{ price: this.snapshot.perpetual.bid, quantityBase: 10 }],
+      fundingRates30d: [0.0001, 0.0002, 0.0003],
+      perpetualInitialMarginUsd:
+        this.snapshot.existingPerpetualQuantityXaut * this.snapshot.perpetual.mark / 2,
+      perpetualLeverage: this.snapshot.existingPerpetualQuantityXaut > 0 ? 2 : null,
+      spotAvailableUsdt: this.snapshot.spotAvailableUsdt,
+      perpetualAvailableUsdt: this.snapshot.futuresAvailableUsdt,
+    };
+    this.takeoverSnapshotHook();
+    return snapshot;
+  }
+
+  async findOrderByClientOrderId() {
+    return null;
   }
 
   async readProductAvailability() {

@@ -32,6 +32,11 @@ import {
   type RwaPublicAccountAssetAuthorization,
 } from "./RwaAccountAssetAuthorization";
 import { requireRwaAutomationExecutionProfile } from "./RwaAutomationAssetProfile";
+import {
+  createRwaAssetTakeoverPreview,
+  type RwaAssetTakeoverPreview,
+  type RwaAssetTakeoverProviderSnapshot,
+} from "./RwaAssetTakeover";
 
 const sessionDomain = "session-domain-a";
 const stepUpToken = "step-up-token-a";
@@ -617,7 +622,8 @@ test("request admission rejects before recreating an idle registry or reading ac
   now += 2;
   await assert.rejects(
     service.getVenueStatus("user-a", "bybit", "203.0.113.10"),
-    (error: unknown) => error instanceof RwaAutomationGovernanceError
+    (error: unknown) => error instanceof Error
+      && "category" in error
       && error.category === "automation_rate_limited",
   );
   assert.equal(registryCreations, 1);
@@ -632,7 +638,8 @@ test("request admission rejects before recreating an idle registry or reading ac
       resourceId: null,
       requestDigest: "a".repeat(43),
     }, "203.0.113.10"),
-    (error: unknown) => error instanceof RwaAutomationGovernanceError
+    (error: unknown) => error instanceof Error
+      && "category" in error
       && error.category === "automation_rate_limited",
   );
   assert.equal(registryCreations, 1);
@@ -790,6 +797,211 @@ test("asset authorization revoke admission rejects before registry metadata or c
   assert.equal(registryCreations, 0);
   assert.equal(accountMetadataReads, 0);
   assert.equal(authorizationRevokes, 0);
+});
+
+test("asset takeover start admission preserves the 30-second issuance and later consumes it once", async () => {
+  let currentTime = 1_800_000_000_001;
+  let registryCreations = 0;
+  let metadataReads = 0;
+  let starts = 0;
+  const sourceIp = "203.0.113.29";
+  const takeoverPreview = controlTakeoverPreview(currentTime);
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    takeoverPreview,
+    onAccountMetadata: () => { metadataReads += 1; },
+    onTakeoverStart: () => { starts += 1; },
+  });
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    riskControlMax: 1,
+    riskControlWindowMs: 10,
+  }, () => currentTime);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([connector]);
+    },
+    passThroughStepUp,
+    governance,
+    () => currentTime,
+  );
+  const issued = await service.previewAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { newCapitalUsd: 1_000, leverage: 2 },
+    sourceIp,
+  );
+  const requestDigest = canonicalRequestDigest({ assetId: "xaut", preview: issued });
+  await service.resolveStepUpIntent("user-a", {
+    operation: "asset_takeover_start",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest,
+    takeoverPreview: issued,
+  }, sourceIp, sessionDomain);
+  const registryBaseline = registryCreations;
+  const metadataBaseline = metadataReads;
+  governance.admitRequest({
+    operation: "risk_control",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+  await assert.rejects(
+    service.startAssetTakeover(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: issued, idempotencyKey: "takeover:control:0001", stepUpToken },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof Error
+      && "category" in error
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, registryBaseline);
+  assert.equal(metadataReads, metadataBaseline);
+  assert.equal(starts, 0);
+
+  currentTime += 11;
+  const result = await service.startAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: issued, idempotencyKey: "takeover:control:0001", stepUpToken },
+    sourceIp,
+  ) as any;
+  assert.equal(result.state, "managed");
+  assert.equal(starts, 1);
+  currentTime += 11;
+  await assert.rejects(
+    service.startAssetTakeover(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: issued, idempotencyKey: "takeover:control:0001", stepUpToken },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof Error
+      && "category" in error
+      && error.category === "asset_takeover_preview_invalid",
+  );
+});
+
+test("asset takeover preview is session-bound, expires at 30 seconds, and has one concurrent winner", async () => {
+  let currentTime = 1_800_000_000_001;
+  let starts = 0;
+  const sourceIp = "203.0.113.30";
+  const takeoverPreview = controlTakeoverPreview(currentTime);
+  const startEntered = deferred<void>();
+  const allowStart = deferred<void>();
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    takeoverPreview,
+    takeoverStartFactory: async () => {
+      starts += 1;
+      startEntered.resolve();
+      await allowStart.promise;
+      return { takeoverId: "takeover-control", state: "managed" };
+    },
+  });
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => currentTime,
+  );
+  const issued = await service.previewAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { newCapitalUsd: 1_000, leverage: 2 },
+    sourceIp,
+  );
+  const requestDigest = canonicalRequestDigest({ assetId: "xaut", preview: issued });
+  await service.resolveStepUpIntent("user-a", {
+    operation: "asset_takeover_start",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest,
+    takeoverPreview: issued,
+  }, sourceIp, sessionDomain);
+  await assert.rejects(service.startAssetTakeover(
+    "user-a",
+    `${sessionDomain}:other`,
+    "bybit",
+    "xaut",
+    { preview: issued, idempotencyKey: "takeover:session:0001", stepUpToken },
+    sourceIp,
+  ));
+  assert.equal(starts, 0);
+
+  const first = service.startAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: issued, idempotencyKey: "takeover:concurrent:0001", stepUpToken },
+    sourceIp,
+  );
+  await startEntered.promise;
+  await assert.rejects(service.startAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: issued, idempotencyKey: "takeover:concurrent:0001", stepUpToken },
+    sourceIp,
+  ));
+  assert.equal(starts, 1);
+  allowStart.resolve();
+  assert.equal((await first as any).state, "managed");
+
+  const expiringService = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([fakeConnector(() => undefined, {
+      accountId: "bybit:test-account",
+      takeoverPreview: controlTakeoverPreview(currentTime),
+      onTakeoverStart: () => { starts += 1; },
+    })]),
+    passThroughStepUp,
+    undefined,
+    () => currentTime,
+  );
+  const expiring = await expiringService.previewAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { newCapitalUsd: 1_000, leverage: 2 },
+    sourceIp,
+  );
+  await expiringService.resolveStepUpIntent("user-a", {
+    operation: "asset_takeover_start",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: canonicalRequestDigest({ assetId: "xaut", preview: expiring }),
+    takeoverPreview: expiring,
+  }, sourceIp, sessionDomain);
+  currentTime += 30_001;
+  await assert.rejects(expiringService.startAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: expiring, idempotencyKey: "takeover:expired:0001", stepUpToken },
+    sourceIp,
+  ));
+  assert.equal(starts, 1);
 });
 
 test("asset authorization step-up is server-account-bound, one-action scoped, and provider-mutation free", async () => {
@@ -1261,6 +1473,105 @@ function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnap
   });
 }
 
+function controlTakeoverPreview(generatedAt: number) {
+  const authorizationPreview = controlAuthorizationPreview({
+    fetchedAt: generatedAt,
+    perpetual: {
+      status: "Trading",
+      minOrderQty: 0.001,
+      qtyStep: 0.001,
+      minNotionalUsd: 5,
+      priceTick: 0.1,
+      bid: 1_000,
+      ask: 1_001,
+      mark: 1_000,
+      fundingRate: 0.0001,
+      fundingIntervalHours: 8,
+      liquidationDistancePercent: 50,
+    },
+    spot: {
+      status: "Trading",
+      minOrderQty: 0.00001,
+      qtyStep: 0.00001,
+      minNotionalUsd: 5,
+      priceTick: 0.01,
+      bid: 999,
+      ask: 1_000,
+    },
+  });
+  const authorization = createAccountAssetAuthorization({
+    userDomain: "0123456789abcdef",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    accountFingerprint: "test-account",
+    assetId: "xaut",
+    preview: authorizationPreview,
+    now: generatedAt,
+  });
+  const provider: RwaAssetTakeoverProviderSnapshot = {
+    account: {
+      accountId: "bybit:test-account",
+      accountFingerprint: "test-account",
+      fetchedAt: generatedAt,
+      accountMode: "uta",
+      permissions: {
+        read: true,
+        spotTrade: true,
+        contractTrade: true,
+        withdraw: false,
+        ipRestricted: true,
+      },
+      availableUsdt: 3_000,
+      existingSpotQuantityXaut: 0.1,
+      spotAvailableQuantityXaut: 0.1,
+      spotLockedQuantityXaut: 0,
+      existingPerpetualQuantityXaut: 0.1,
+      perpetualPositionSide: "short",
+      openSpotOrderCount: 0,
+      openPerpetualOrderCount: 0,
+      spot: {
+        status: "Trading",
+        minOrderQty: 0.00001,
+        qtyStep: 0.00001,
+        minNotionalUsd: 5,
+        priceTick: 0.01,
+        bid: 999,
+        ask: 1_000,
+      },
+      perpetual: {
+        status: "Trading",
+        minOrderQty: 0.001,
+        qtyStep: 0.001,
+        minNotionalUsd: 5,
+        priceTick: 0.1,
+        bid: 1_000,
+        ask: 1_001,
+        mark: 1_000,
+        fundingRate: 0.0001,
+        fundingIntervalHours: 8,
+        liquidationDistancePercent: 50,
+      },
+      fees: { spotTakerBps: 10, perpetualTakerBps: 10 },
+    },
+    orders: [],
+    spotAskDepth: [{ price: 1_000, quantityBase: 10 }],
+    perpetualBidDepth: [{ price: 1_000, quantityBase: 10 }],
+    fundingRates30d: [0.0001, 0.0002, 0.0003],
+    perpetualInitialMarginUsd: 50,
+    perpetualLeverage: 2,
+    spotAvailableUsdt: 2_000,
+    perpetualAvailableUsdt: 2_000,
+  };
+  return createRwaAssetTakeoverPreview({
+    profile: requireRwaAutomationExecutionProfile("xaut", "bybit"),
+    authorization,
+    provider,
+    newCapitalUsd: 1_000,
+    selectedLeverage: 2,
+    now: generatedAt,
+  });
+}
+
 function recomputePreviewDigest(
   preview: RwaAccountAssetAuthorizationPreview,
 ): RwaAccountAssetAuthorizationPreview {
@@ -1308,6 +1619,9 @@ function fakeConnector(
     authorization?: RwaPublicAccountAssetAuthorization | null;
     onAuthorizationCreate?: () => void;
     onAuthorizationRevoke?: () => void;
+    takeoverPreview?: RwaAssetTakeoverPreview;
+    onTakeoverStart?: () => void;
+    takeoverStartFactory?: () => Promise<unknown>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -1357,6 +1671,17 @@ function fakeConnector(
       if (!options.authorization) throw new Error("asset authorization unavailable");
       return { ...options.authorization, revokedAt: 1 };
     },
+    previewAssetTakeover: async () => {
+      if (!options.takeoverPreview) throw new Error("takeover preview unavailable");
+      return options.takeoverPreview;
+    },
+    startAssetTakeover: async () => {
+      if (options.takeoverStartFactory) return options.takeoverStartFactory();
+      options.onTakeoverStart?.();
+      return { takeoverId: "takeover-control", state: "managed" };
+    },
+    reconfirmAssetTakeover: async () => ({ takeoverId: "takeover-control", state: "managed" }),
+    getAssetTakeoverStatus: async () => ({ takeoverId: "takeover-control", state: "managed" }),
     getConfig: async () => ({}),
     updateConfig: async () => { options.onConfig?.(); return {}; },
     setKillSwitch: async () => { options.onKillSwitch?.(); return {}; },

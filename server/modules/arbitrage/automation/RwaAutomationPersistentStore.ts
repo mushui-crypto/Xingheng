@@ -44,6 +44,11 @@ import {
   validateAccountAssetAuthorization,
   type RwaAccountAssetAuthorization,
 } from "./RwaAccountAssetAuthorization";
+import {
+  RWA_MAX_ASSET_TAKEOVERS_PER_STATE,
+  validateRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverRecord,
+} from "./RwaAssetTakeover";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -116,6 +121,7 @@ type AutomationState = {
   version: 1;
   config: RwaExecutionConfig;
   assetAuthorizations: RwaAccountAssetAuthorization[];
+  assetTakeovers: RwaAssetTakeoverRecord[];
   challenges: StoredChallenge[];
   executions: RwaExecutionRecord[];
   pnlSeries: RwaStrategyPnlSnapshot[];
@@ -135,6 +141,7 @@ const emptyState = (): AutomationState => ({
   version: 1,
   config: { ...defaultRwaExecutionConfig },
   assetAuthorizations: [],
+  assetTakeovers: [],
   challenges: [],
   executions: [],
   pnlSeries: [],
@@ -407,6 +414,12 @@ export class RwaAutomationPersistentStore<
           : parsed.assetAuthorizations === undefined
             ? []
             : (() => { throw invalidRiskState(); })(),
+        assetTakeovers: Array.isArray(parsed.assetTakeovers)
+          ? parsed.assetTakeovers.map((takeover) =>
+            validateAssetTakeoverForStore(takeover, this.ownerUserId, this.userDomain, this.venue))
+          : parsed.assetTakeovers === undefined
+            ? []
+            : (() => { throw invalidRiskState(); })(),
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
         executions: Array.isArray(parsed.executions)
           ? parsed.executions.map((execution) => normalizeExecutionRecord(execution, this.venue))
@@ -416,6 +429,7 @@ export class RwaAutomationPersistentStore<
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
         credentialAudit: Array.isArray(parsed.credentialAudit) ? parsed.credentialAudit : [],
       } as AutomationState;
+      assertTakeoverCollection(normalized.assetTakeovers, normalized.assetAuthorizations);
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
       const rawComparable = JSON.stringify(parsed);
       const normalizedComparable = JSON.stringify(normalized);
@@ -439,9 +453,20 @@ export class RwaAutomationPersistentStore<
         "账户资产授权状态超过安全容量上限；已拒绝继续。",
       );
     }
+    if (state.assetTakeovers.length > RWA_MAX_ASSET_TAKEOVERS_PER_STATE) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "资产接管状态超过安全容量上限；已拒绝继续。",
+      );
+    }
     for (const authorization of state.assetAuthorizations) {
       validateAccountAssetAuthorizationForStore(authorization, this.userDomain, this.venue);
     }
+    for (const takeover of state.assetTakeovers) {
+      validateAssetTakeoverForStore(takeover, this.ownerUserId, this.userDomain, this.venue);
+    }
+    assertTakeoverCollection(state.assetTakeovers, state.assetAuthorizations);
     for (const execution of state.executions) {
       assertProfiledExecutionFields(execution, this.venue);
     }
@@ -515,6 +540,7 @@ export async function discoverAutomationUsersWithExposure() {
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const executions = (parsed as { executions?: unknown }).executions;
+    const assetTakeovers = (parsed as { assetTakeovers?: unknown }).assetTakeovers;
     if (!Array.isArray(executions)) continue;
     for (const value of executions) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
@@ -529,6 +555,17 @@ export async function discoverAutomationUsersWithExposure() {
           .slice(0, 16);
         if (!entry.name.startsWith(`${expectedDomain}-`)) continue;
         users.add(execution.userId);
+      }
+    }
+    if (assetTakeovers !== undefined && !Array.isArray(assetTakeovers)) continue;
+    for (const value of assetTakeovers ?? []) {
+      try {
+        const takeover = validateRwaAssetTakeoverRecord(value);
+        const hasExposure = takeover.state !== "failed"
+          && (takeover.finalSpotQuantity > 1e-12 || takeover.finalPerpetualQuantity > 1e-12);
+        if (hasExposure && takeover.userDomain === entry.name.slice(0, 16)) users.add(takeover.userId);
+      } catch {
+        continue;
       }
     }
   }
@@ -554,6 +591,12 @@ function compactState(
       .slice(-config.maxChallengesPerUser),
     executions: retainedExecutions.sort((left, right) =>
       left.createdAt - right.createdAt || left.executionId.localeCompare(right.executionId)),
+    assetTakeovers: state.assetTakeovers
+      .filter((takeover) =>
+        takeover.state !== "failed"
+        || takeover.updatedAt + config.stateCompletedExecutionRetentionMs > now)
+      .sort((left, right) =>
+        left.createdAt - right.createdAt || left.takeoverId.localeCompare(right.takeoverId)),
     pnlSeries: state.pnlSeries
       .sort((left, right) => left.capturedAt - right.capturedAt)
       .slice(-config.stateMaxPnlPoints),
@@ -768,6 +811,23 @@ export function automationCapitalExposuresFromExecutions(
   });
 }
 
+export function automationCapitalExposuresFromTakeovers(
+  takeovers: readonly RwaAssetTakeoverRecord[],
+): RwaAutomationCapitalExposure[] {
+  return takeovers.flatMap((value) => {
+    const takeover = validateRwaAssetTakeoverRecord(value);
+    if (takeover.state === "failed" || !(takeover.reservedCapitalUsd > 0)) return [];
+    return [{
+      executionId: `takeover:${takeover.takeoverId}`,
+      userId: takeover.userId,
+      accountId: takeover.accountId,
+      assetId: takeover.assetId,
+      profileId: takeover.profileId,
+      capitalUsd: takeover.reservedCapitalUsd,
+    }];
+  });
+}
+
 function legacyExecutionProfile(
   venue: "bybit" | "bitget" | "binance" | "okx",
 ): Pick<RwaExecutionRecord, "asset" | "profileId" | "reservedCapitalUsd"> {
@@ -827,6 +887,50 @@ function validateAccountAssetAuthorizationForStore(
   return authorization;
 }
 
+function validateAssetTakeoverForStore(
+  value: unknown,
+  userId: string,
+  userDomain: string,
+  venue: "bybit" | "bitget" | "binance" | "okx",
+) {
+  const takeover = validateRwaAssetTakeoverRecord(value);
+  if (
+    takeover.userId !== userId
+    || takeover.userDomain !== userDomain
+    || takeover.venue !== venue
+  ) throw invalidRiskState();
+  return takeover;
+}
+
+function assertTakeoverCollection(
+  takeovers: readonly RwaAssetTakeoverRecord[],
+  authorizations: readonly RwaAccountAssetAuthorization[],
+) {
+  for (const key of ["takeoverId", "idempotencyKey", "orderLinkPrefix"] as const) {
+    if (new Set(takeovers.map((item) => item[key])).size !== takeovers.length) {
+      throw invalidRiskState();
+    }
+  }
+  for (const takeover of takeovers) {
+    const matches = authorizations.filter((authorization) =>
+      authorization.authorizationId === takeover.authorizationId
+      && authorization.createdAt === takeover.authorizationCreatedAt
+      && authorization.accountId === takeover.accountId
+      && authorization.accountFingerprint === takeover.accountFingerprint
+      && authorization.assetId === takeover.assetId
+      && authorization.profileId === takeover.profileId
+      && authorization.policyVersion === takeover.policyVersion
+      && authorization.policyDigest === takeover.policyDigest);
+    if (matches.length !== 1) throw invalidRiskState();
+  }
+  const capitalHoldingAuthorizations = takeovers
+    .filter((takeover) => takeover.state !== "failed")
+    .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
+  if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
+    throw invalidRiskState();
+  }
+}
+
 export async function readRwaAutomationCapitalExposures() {
   const dataDir = resolveRwaAutomationActiveDataDir();
   const entries = await readdir(dataDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
@@ -859,7 +963,11 @@ export async function readRwaAutomationCapitalExposures() {
       );
     }
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
-      || !Array.isArray((parsed as { executions?: unknown }).executions)) {
+      || !Array.isArray((parsed as { executions?: unknown }).executions)
+      || !(
+        (parsed as { assetTakeovers?: unknown }).assetTakeovers === undefined
+        || Array.isArray((parsed as { assetTakeovers?: unknown }).assetTakeovers)
+      )) {
       throw new RwaAutomationGovernanceError(
         503,
         "automation_risk_state_invalid",
@@ -869,6 +977,8 @@ export async function readRwaAutomationCapitalExposures() {
     const venue = match[2] as "bybit" | "binance";
     const normalized = (parsed as { executions: unknown[] }).executions
       .map((execution) => normalizeExecutionRecord(execution, venue));
+    const takeovers = ((parsed as { assetTakeovers?: unknown[] }).assetTakeovers ?? [])
+      .map((takeover) => validateRwaAssetTakeoverRecord(takeover));
     const expectedProfileId = rwaAutomationProfileId(requireRwaAutomationExecutionProfile("xaut", venue));
     for (const execution of normalized) {
       const expectedDomain = createHash("sha256")
@@ -887,7 +997,22 @@ export async function readRwaAutomationCapitalExposures() {
         );
       }
     }
+    for (const takeover of takeovers) {
+      if (
+        takeover.userDomain !== match[1]
+        || takeover.venue !== venue
+        || takeover.assetId !== "xaut"
+        || takeover.profileId !== expectedProfileId
+      ) {
+        throw new RwaAutomationGovernanceError(
+          503,
+          "automation_risk_state_invalid",
+          "自动套利接管状态的用户、venue 或资产 profile 绑定无效；已拒绝新增风险。",
+        );
+      }
+    }
     exposures.push(...automationCapitalExposuresFromExecutions(normalized));
+    exposures.push(...automationCapitalExposuresFromTakeovers(takeovers));
   }
   return exposures;
 }

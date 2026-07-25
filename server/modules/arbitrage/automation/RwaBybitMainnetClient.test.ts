@@ -301,6 +301,103 @@ test("Bybit adapter classifies expired and revoked credentials without exposing 
   }
 });
 
+test("Bybit takeover snapshot proves a complete provider window and rejects funding or depth gaps", async () => {
+  const now = 1_800_000_000_000;
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "api-key-value", apiSecret: "api-secret-value" },
+    bybitPreflightFetch(
+      { spot: "0.1", perpetual: "0.1" },
+      { takeover: true },
+    ),
+    () => now,
+  );
+  const snapshot = await client.readAssetTakeoverSnapshot();
+  assert.equal(snapshot.account.existingSpotQuantityXaut, 0.1);
+  assert.equal(snapshot.account.existingPerpetualQuantityXaut, 0.1);
+  assert.equal(snapshot.account.perpetualPositionSide, "short");
+  assert.equal(snapshot.fundingRates30d.length, 181);
+  assert.equal(snapshot.perpetualInitialMarginUsd, 200);
+  assert.equal(snapshot.perpetualLeverage, 2);
+  assert.deepEqual(snapshot.spotAskDepth[0], { price: 4_130, quantityBase: 0.5 });
+  assert.deepEqual(snapshot.perpetualBidDepth[0], { price: 4_128, quantityBase: 0.5 });
+
+  for (const options of [{ fundingGap: true }, { invalidDepth: true }]) {
+    const invalid = new RwaBybitMainnetClient(
+      { apiKey: "api-key-value", apiSecret: "api-secret-value" },
+      bybitPreflightFetch(
+        { spot: "0.1", perpetual: "0.1" },
+        { takeover: true, ...options },
+      ),
+      () => now,
+    );
+    await assert.rejects(
+      invalid.readAssetTakeoverSnapshot(),
+      (error: unknown) =>
+        error instanceof RwaBybitProviderError
+        && error.category === "provider_snapshot_invalid",
+    );
+  }
+});
+
+test("Bybit takeover recovery uses the frozen leg symbol and no obsolete 0.1 XAUT cap", async () => {
+  const calls: URL[] = [];
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "api-key-value", apiSecret: "api-secret-value" },
+    (async (input) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      calls.push(url);
+      if (url.pathname === "/v5/order/create") {
+        return jsonResponse({
+          retCode: 0,
+          result: { orderId: "order-large", orderLinkId: "rwaxaut-large" },
+        });
+      }
+      return jsonResponse({
+        retCode: 0,
+        result: { list: [{
+          symbol: "XAUTUSDT",
+          orderId: "order-linear",
+          orderLinkId: "rwaxaut-linear",
+          orderStatus: "Filled",
+          qty: "0.2",
+          cumExecQty: "0.2",
+          avgPrice: "4130",
+          cumExecFee: "0.1",
+          updatedTime: "1800000000000",
+        }] },
+      });
+    }) as typeof fetch,
+    () => 1_800_000_000_000,
+  );
+  assert.equal((await client.placeOrder({
+    category: "spot",
+    symbol: "XAUTUSDT",
+    side: "Buy",
+    quantityXaut: 0.2,
+    limitPrice: 4_130,
+    reduceOnly: false,
+    orderLinkId: "rwaxaut-large",
+  })).orderId, "order-large");
+  const callsBeforeLimit = calls.length;
+  await assert.rejects(client.placeOrder({
+    category: "spot",
+    symbol: "XAUTUSDT",
+    side: "Buy",
+    quantityXaut: 0.5,
+    limitPrice: 4_130,
+    reduceOnly: false,
+    orderLinkId: "rwaxaut-over-limit",
+  }));
+  assert.equal(calls.length, callsBeforeLimit);
+  const recovered = await client.findOrderByClientOrderId("linear", "rwaxaut-linear");
+  assert.equal(recovered?.orderId, "order-linear");
+  const recoveryCall = calls.find((url) =>
+    url.pathname === "/v5/order/realtime"
+    && url.searchParams.get("orderLinkId") === "rwaxaut-linear");
+  assert.equal(recoveryCall?.searchParams.get("category"), "linear");
+  assert.equal(recoveryCall?.searchParams.get("symbol"), "XAUTUSDT");
+});
+
 test("Bybit order creation is treated as acceptance only and authoritative order status is queried afterwards", async () => {
   const paths: string[] = [];
   const client = new RwaBybitMainnetClient(
@@ -411,7 +508,10 @@ test("Bybit preflight rejects malformed authoritative position quantities", asyn
   }
 });
 
-function bybitPreflightFetch(invalid: { spot: string; perpetual: string }): typeof fetch {
+function bybitPreflightFetch(
+  invalid: { spot: string; perpetual: string },
+  options: { takeover?: boolean; fundingGap?: boolean; invalidDepth?: boolean } = {},
+): typeof fetch {
   return (async (input) => {
     const url = new URL(input instanceof Request ? input.url : String(input));
     const category = url.searchParams.get("category");
@@ -431,7 +531,7 @@ function bybitPreflightFetch(invalid: { spot: string; perpetual: string }): type
         totalAvailableBalance: "25",
         coin: [
           { coin: "USDT", availableToWithdraw: "25" },
-          { coin: "XAUT", walletBalance: invalid.spot },
+          { coin: "XAUT", walletBalance: invalid.spot, locked: "0" },
         ],
       }] } });
     }
@@ -459,8 +559,34 @@ function bybitPreflightFetch(invalid: { spot: string; perpetual: string }): type
       return jsonResponse({ retCode: 0, result: { list: [{
         symbol: "XAUTUSDT",
         size: invalid.perpetual,
-        liqPrice: "0",
+        side: Number(invalid.perpetual) > 0 ? "Sell" : "",
+        liqPrice: Number(invalid.perpetual) > 0 ? "6000" : "0",
+        positionIM: "200",
+        leverage: "2",
       }] } });
+    }
+    if (url.pathname === "/v5/market/orderbook" && options.takeover) {
+      const levels = options.invalidDepth ? [] : [[category === "spot" ? "4130" : "4128", "0.5"]];
+      return jsonResponse({
+        retCode: 0,
+        result: category === "spot" ? { a: levels, b: [["4129", "0.5"]] } : { a: [["4129", "0.5"]], b: levels },
+      });
+    }
+    if (url.pathname === "/v5/market/funding/history" && options.takeover) {
+      const start = Number(url.searchParams.get("startTime"));
+      const end = Number(url.searchParams.get("endTime"));
+      const interval = 4 * 60 * 60_000;
+      const rows = Array.from(
+        { length: Math.floor((end - start) / interval) + 1 },
+        (_, index) => ({
+          fundingRateTimestamp: String(start + index * interval),
+          fundingRate: "0.0001",
+        }),
+      );
+      return jsonResponse({
+        retCode: 0,
+        result: { list: options.fundingGap ? rows.filter((_, index) => index !== 80) : rows },
+      });
     }
     if (url.pathname === "/v5/order/realtime") {
       return jsonResponse({ retCode: 0, result: { list: [] } });

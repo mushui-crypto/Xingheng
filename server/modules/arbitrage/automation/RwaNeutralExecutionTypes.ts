@@ -3,6 +3,7 @@ import {
   type RwaAutomationBaseAsset,
 } from "./RwaAutomationAssetProfile";
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
+import type { RwaAssetTakeoverProviderSnapshot } from "./RwaAssetTakeover";
 
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -425,12 +426,17 @@ export type RwaNeutralTradingClient<
 > = {
   validateAccess(): Promise<{ permissions: TPermissions } & RwaVenueAccountIdentity>;
   readPreflightSnapshot(): Promise<TSnapshot>;
-  setPerpetualLeverage(leverage: 1): Promise<void>;
+  setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
   placeOrder(request: RwaProviderOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
   cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
   cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
   listAssetOpenOrders?(): Promise<RwaAssetOrderReference[]>;
+  readAssetTakeoverSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;
+  findOrderByClientOrderId?(
+    category: "spot" | "linear",
+    orderLinkId: string,
+  ): Promise<RwaProviderOrder | null>;
   readPositionAttribution(input: {
     strategyOrderPrefix: string;
     strategyOrderPrefixes: string[];

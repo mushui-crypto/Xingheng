@@ -1,6 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import {
   RWA_PERP_SYMBOL,
+  RWA_MAX_STRATEGY_CAPITAL_USD,
   RWA_SPOT_SYMBOL,
   RWA_STRATEGY_ID,
   type RwaBybitCredentials,
@@ -13,6 +14,10 @@ import {
   type RwaStrategyPnlSnapshot,
   type RwaStrategyActivityContinuity,
 } from "./RwaNeutralExecutionTypes";
+import {
+  validateRwaTakeoverFundingWindow,
+  type RwaAssetTakeoverProviderSnapshot,
+} from "./RwaAssetTakeover";
 import { scanBybitPositionAttribution } from "./RwaProviderActivityScanner";
 import {
   buildPositionAttributionSnapshot,
@@ -155,7 +160,90 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
     };
   }
 
-  async setPerpetualLeverage(leverage: 1) {
+  async readAssetTakeoverSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBybitPermissions>> {
+    const endTime = this.now();
+    const startTime = endTime - 30 * 24 * 60 * 60_000;
+    const [account, orders, spotDepthValue, perpetualDepthValue, fundingValue, positionsValue] =
+      await Promise.all([
+        this.readPreflightSnapshot(),
+        this.listAssetOpenOrders(),
+        this.publicRequest("/v5/market/orderbook", {
+          category: "spot",
+          symbol: RWA_SPOT_SYMBOL,
+          limit: "200",
+        }),
+        this.publicRequest("/v5/market/orderbook", {
+          category: "linear",
+          symbol: RWA_PERP_SYMBOL,
+          limit: "200",
+        }),
+        this.publicRequest("/v5/market/funding/history", {
+          category: "linear",
+          symbol: RWA_PERP_SYMBOL,
+          startTime: String(startTime),
+          endTime: String(endTime),
+          limit: "200",
+        }),
+        this.privateRequest("GET", "/v5/position/list", {
+          category: "linear",
+          symbol: RWA_PERP_SYMBOL,
+        }),
+      ]);
+    const position = list(record(positionsValue).list).map(record)
+      .find((item) => item.symbol === RWA_PERP_SYMBOL && positiveNumber(item.size) > 0);
+    let fundingRates30d: number[];
+    try {
+      fundingRates30d = validateRwaTakeoverFundingWindow(
+        list(record(fundingValue).list).map(record),
+        startTime,
+        endTime,
+        account.perpetual.fundingIntervalHours * 60 * 60_000,
+        (item) => Number(item.fundingRateTimestamp),
+        (item) => Number(item.fundingRate),
+      );
+    } catch {
+      throw new RwaBybitProviderError(
+        "provider_snapshot_invalid",
+        "Bybit XAUT 30 日 Funding 历史不完整或结构无效。",
+      );
+    }
+    const available = account.availableUsdt;
+    return {
+      account,
+      orders,
+      spotAskDepth: bybitDepthLevels(spotDepthValue, "a"),
+      perpetualBidDepth: bybitDepthLevels(perpetualDepthValue, "b"),
+      fundingRates30d,
+      perpetualInitialMarginUsd: position
+        ? snapshotNonNegativeNumber(
+          position.positionIM ?? position.positionIMByMp ?? position.positionBalance,
+          "永续初始保证金",
+        )
+        : 0,
+      perpetualLeverage: account.existingPerpetualQuantityXaut > 0
+        ? positiveNumber(position?.leverage) || null
+        : null,
+      spotAvailableUsdt: available,
+      perpetualAvailableUsdt: available,
+    };
+  }
+
+  async findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string) {
+    const symbol = category === "spot" ? RWA_SPOT_SYMBOL : RWA_PERP_SYMBOL;
+    for (const endpoint of ["/v5/order/realtime", "/v5/order/history"] as const) {
+      const result = await this.privateRequest("GET", endpoint, {
+        category,
+        symbol,
+        orderLinkId,
+        limit: "1",
+      }, 2_000);
+      const item = firstListItemOrNull(result);
+      if (item) return toOrder(item);
+    }
+    return null;
+  }
+
+  async setPerpetualLeverage(leverage: 1 | 2 | 3) {
     try {
       await this.privateRequest("POST", "/v5/position/set-leverage", {
         category: "linear",
@@ -198,7 +286,11 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
   }
 
   async cancelOrder(category: "spot" | "linear", orderId: string) {
-    await this.privateRequest("POST", "/v5/order/cancel", { category, symbol: RWA_SPOT_SYMBOL, orderId }, 2_000);
+    await this.privateRequest("POST", "/v5/order/cancel", {
+      category,
+      symbol: category === "spot" ? RWA_SPOT_SYMBOL : RWA_PERP_SYMBOL,
+      orderId,
+    }, 2_000);
   }
 
   async cancelStrategyOrders(orderLinkPrefix: string) {
@@ -443,7 +535,11 @@ function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
   if (request.symbol !== RWA_SPOT_SYMBOL || !["spot", "linear"].includes(request.category)) {
     throw new Error("真实执行只允许 Bybit XAUTUSDT 白名单现货与永续对冲组合。");
   }
-  if (!(request.quantityXaut > 0 && request.quantityXaut <= 0.1) || !(request.limitPrice > 0)) {
+  if (
+    !(request.quantityXaut > 0)
+    || !(request.limitPrice > 0)
+    || request.quantityXaut * request.limitPrice > RWA_MAX_STRATEGY_CAPITAL_USD * 1.002
+  ) {
     throw new Error("真实执行订单参数超出白名单。");
   }
   if (request.category === "spot" && request.reduceOnly) throw new Error("现货订单不允许 reduceOnly。");
@@ -533,6 +629,31 @@ function toOrder(value: unknown): RwaProviderOrder {
 
 function firstListItem(value: unknown) {
   return firstListItemOrNull(value) ?? {};
+}
+
+function bybitDepthLevels(value: unknown, key: "a" | "b") {
+  const rows = list(record(value)[key]);
+  const levels = rows.map((item) => {
+    if (!Array.isArray(item) || item.length < 2) {
+      throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 盘口结构无效。");
+    }
+    return {
+      price: snapshotPositiveNumber(item[0], "盘口价格"),
+      quantityBase: snapshotPositiveNumber(item[1], "盘口数量"),
+    };
+  });
+  if (!levels.length) {
+    throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 盘口为空。");
+  }
+  return levels;
+}
+
+function snapshotPositiveNumber(value: unknown, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new RwaBybitProviderError("provider_snapshot_invalid", `Bybit ${label}无效。`);
+  }
+  return parsed;
 }
 
 function firstListItemOrNull(value: unknown) {

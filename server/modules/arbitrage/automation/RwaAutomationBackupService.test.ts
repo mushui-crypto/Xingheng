@@ -75,6 +75,9 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
     assert.equal(state.assetAuthorizations[0].assetId, "xaut");
     assert.equal(state.assetAuthorizations[0].accountId, "binance:test");
     assert.equal(state.assetAuthorizations[0].revokedAt, null);
+    assert.equal(state.assetTakeovers[0].takeoverId, "takeover-1");
+    assert.equal(state.assetTakeovers[0].authorizationId, "authorization-1");
+    assert.equal(state.assetTakeovers[0].state, "planned");
     const restoredCredential = JSON.parse(await readFile(join(active, credentialFileName), "utf8"));
     assert.equal(Buffer.from(restoredCredential.ciphertext, "base64url").toString("utf8"), credentialMarker);
     const restoredStepUp = JSON.parse(await readFile(join(active, "step-up-security", stepUpFileName), "utf8"));
@@ -187,6 +190,51 @@ test("snapshot rejects symlinks, unsafe modes, unknown SQLite/WIF-style entries,
     assert.deepEqual(await readdir(fixture.backupRoot), []);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("takeover backup schema accepts legacy absence and rejects malformed, orphaned, or duplicate records", async () => {
+  const legacy = await createFixture();
+  try {
+    const state = baseState() as any;
+    delete state.assetTakeovers;
+    await writeSecure(join(legacy.active, stateFileName), JSON.stringify(state));
+    await legacy.service.createBackup();
+  } finally {
+    await legacy.cleanup();
+  }
+
+  const invalidStates = [
+    (state: any) => { state.assetTakeovers[0].unknown = true; },
+    (state: any) => { state.assetTakeovers[0].authorizationId = "missing-authorization"; },
+    (state: any) => {
+      state.assetTakeovers.push({
+        ...state.assetTakeovers[0],
+        takeoverId: "takeover-2",
+      });
+    },
+    (state: any) => {
+      state.assetTakeovers.push({
+        ...state.assetTakeovers[0],
+        takeoverId: "takeover-2",
+        idempotencyKey: "takeover-backup-second",
+        orderLinkPrefix: "takeoverbackupsecond",
+      });
+    },
+  ];
+  for (const mutate of invalidStates) {
+    const fixture = await createFixture();
+    try {
+      const state = baseState() as any;
+      mutate(state);
+      await writeSecure(join(fixture.active, stateFileName), JSON.stringify(state));
+      await assert.rejects(
+        fixture.service.createBackup(),
+        hasCategory("backup_manifest_invalid"),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 
@@ -532,6 +580,41 @@ function baseState() {
       previewedAt: baseNow.getTime(),
       createdAt: baseNow.getTime() + 1,
       revokedAt: null,
+    }],
+    assetTakeovers: [{
+      takeoverId: "takeover-1",
+      userId: "user-1",
+      userDomain: "a".repeat(16),
+      venue: "binance",
+      accountId: "binance:test",
+      accountFingerprint: "fingerprint",
+      assetId: "xaut",
+      profileId: rwaAutomationProfileId(profile),
+      authorizationId: "authorization-1",
+      authorizationCreatedAt: baseNow.getTime() + 1,
+      policyVersion: profile.asset.authorizationPolicy.version,
+      policyDigest: profile.asset.authorizationPolicy.digest,
+      idempotencyKey: "takeover:idempotency:1",
+      previewDigest: "3".repeat(64),
+      newCapitalUsd: 100,
+      totalManagedCapitalUsd: 200,
+      reservedCapitalUsd: 200,
+      leverage: 2,
+      state: "planned",
+      orderLinkPrefix: "takeover-order",
+      plannedMutation: null,
+      acceptedOrders: [],
+      cancelledOrders: [],
+      spotOrders: [],
+      perpetualOrders: [],
+      targetHedgedQuantity: 0.05,
+      finalSpotQuantity: 0.05,
+      finalPerpetualQuantity: 0.05,
+      residualQuantity: 0,
+      errorCategory: null,
+      message: "接管计划已保存。",
+      createdAt: baseNow.getTime() + 2,
+      updatedAt: baseNow.getTime() + 2,
     }],
     challenges: [{
       id: "challenge-secret-marker",
