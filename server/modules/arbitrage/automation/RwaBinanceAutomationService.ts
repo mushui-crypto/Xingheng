@@ -180,6 +180,7 @@ export class RwaBinanceAutomationService {
         message: !valid
           ? "Binance Key 当前权限、账户身份或持仓模式不符合只读预检安全门禁。"
           : rotationRequired ? "API Key 已达到轮换周期，完成轮换前禁止新增风险。" : null,
+        warnings: ipWhitelistWarnings(access.ipWhitelistVerificationMode),
       });
     } catch (error) {
       const lifecycleStatus = credentialFailureLifecycle(error);
@@ -772,6 +773,7 @@ export class RwaBinanceAutomationService {
     lifecycleStatus: RwaCredentialLifecycle;
     message: string | null;
     ipWhitelistConfigured?: boolean | null;
+    warnings?: string[];
   }) {
     const metadata = input.metadata ?? null;
     const permissions = metadata?.permissions ?? null;
@@ -790,9 +792,15 @@ export class RwaBinanceAutomationService {
       updatedAt: metadata?.updatedAt ?? null,
       message: input.message,
       ipWhitelistConfigured: input.ipWhitelistConfigured ?? permissions?.ipRestricted ?? null,
-      warnings: [],
+      warnings: input.warnings ?? [],
     };
   }
+}
+
+function ipWhitelistWarnings(mode: "provider_list_exact" | "provider_restriction_only" | undefined) {
+  return mode === "provider_restriction_only"
+    ? ["Binance 已确认该 API Key 启用固定 IP 限制，但未返回完整 ipList；当前仅基于服务端固定出口配置与私有签名请求成功兼容通过。"]
+    : [];
 }
 
 function buildBinancePreflight(

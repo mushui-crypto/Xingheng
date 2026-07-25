@@ -51,7 +51,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       this.signedRequest("futures", "/fapi/v1/positionSide/dual"),
     ]);
     const restrictions = record(restrictionsValue);
-    assertProviderIpWhitelist(restrictions, configuredEgressIps);
+    const ipWhitelistVerificationMode = assertProviderIpWhitelist(restrictions, configuredEgressIps);
     const spotAccount = record(spotAccountValue);
     const futuresAccount = record(futuresAccountValue);
     const positionMode = record(positionModeValue);
@@ -82,6 +82,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       accountId: `binance:${accountFingerprint}`,
       accountFingerprint,
       accountMode,
+      ipWhitelistVerificationMode,
       permissions,
     };
   }
@@ -503,14 +504,21 @@ function requireConfiguredEgressIps(values: readonly string[] | null) {
   return normalized;
 }
 
-function assertProviderIpWhitelist(restrictions: Record<string, unknown>, configuredEgressIps: ReadonlySet<string>) {
+function assertProviderIpWhitelist(
+  restrictions: Record<string, unknown>,
+  configuredEgressIps: ReadonlySet<string>,
+): "provider_list_exact" | "provider_restriction_only" {
   if (!boolean(restrictions.ipRestrict)) {
     throw new RwaBinanceProviderError(
       "binance_ip_whitelist_unconfirmed",
       "Binance API Key 未启用固定 IP 白名单，已禁止真实执行。",
     );
   }
-  const providerIps = normalizeFixedIpv4Set(Array.isArray(restrictions.ipList) ? restrictions.ipList : null);
+  if (!Object.prototype.hasOwnProperty.call(restrictions, "ipList")) {
+    return "provider_restriction_only";
+  }
+  const rawIpList = Array.isArray(restrictions.ipList) ? restrictions.ipList : null;
+  const providerIps = normalizeFixedIpv4Set(rawIpList);
   if (!providerIps) {
     throw new RwaBinanceProviderError(
       "binance_ip_whitelist_unconfirmed",
@@ -523,6 +531,7 @@ function assertProviderIpWhitelist(restrictions: Record<string, unknown>, config
       "Binance API Key 的固定 IP 白名单与服务端出口配置不匹配。",
     );
   }
+  return "provider_list_exact";
 }
 
 function normalizeFixedIpv4Set(values: readonly unknown[] | null) {

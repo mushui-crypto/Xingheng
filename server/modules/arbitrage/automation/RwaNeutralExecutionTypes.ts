@@ -70,6 +70,7 @@ export type RwaVenueAccountIdentity = {
     | "multi_assets_hedge"
     | "portfolio_margin"
     | "unknown";
+  ipWhitelistVerificationMode?: "provider_list_exact" | "provider_restriction_only";
 };
 
 export type RwaCredentialStatus = {

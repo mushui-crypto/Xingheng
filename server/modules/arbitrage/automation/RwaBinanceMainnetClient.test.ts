@@ -177,6 +177,16 @@ test("Binance IP whitelist validation is fail-closed for missing, unrestricted, 
   );
   assert.equal(missingConfigCalls.length, 0);
 
+  const missingProviderList = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ omitIpList: true }),
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  const compatibleAccess = await missingProviderList.validateAccess();
+  assert.equal(compatibleAccess.permissions.ipRestricted, true);
+  assert.equal(compatibleAccess.ipWhitelistVerificationMode, "provider_restriction_only");
+
   for (const options of [
     { ipRestricted: false },
     { ipList: ["*"] },
@@ -352,6 +362,7 @@ function fixtureFetch(options: {
   withdrawalsEnabled?: boolean;
   ipRestricted?: boolean;
   ipList?: string[];
+  omitIpList?: boolean;
   restrictionsFailure?: boolean;
 } = {}): typeof fetch {
   return async (input, init) => {
@@ -377,7 +388,7 @@ function fixtureFetch(options: {
           enableFutures: true,
           enableWithdrawals: Boolean(options.withdrawalsEnabled),
           ipRestrict: options.ipRestricted ?? true,
-          ipList: options.ipList ?? ["203.0.113.10"],
+          ...(options.omitIpList ? {} : { ipList: options.ipList ?? ["203.0.113.10"] }),
         });
       case "/api/v3/account":
         return json({

@@ -154,6 +154,21 @@ test("Binance execute rechecks fixed IP verification after challenge issuance", 
   }
 });
 
+test("Binance credential status warns when provider enables IP restriction but does not return ipList", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-warning-"));
+  try {
+    const client = new FakeBinanceClient();
+    client.setIpWhitelistVerificationMode("provider_restriction_only");
+    const current = service(directory, "user-a", client);
+    await current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const status = await current.getCredentialStatus();
+    assert.equal(status.ipWhitelistConfigured, true);
+    assert.match(status.warnings.join(" "), /未返回完整 ipList/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance preflight remains read-only and execute establishes the whitelisted hedge combination", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-preflight-"));
   try {
@@ -452,7 +467,13 @@ function executeInput(accountId: string, challenge: { challengeId: string; chall
 class FakeBinanceClient implements RwaBinanceClient {
   readCount = 0;
   writeCount = 0;
-  readonly access;
+  readonly access: {
+    accountId: string;
+    accountFingerprint: string;
+    accountMode: "single_asset_one_way";
+    permissions: RwaBinancePermissions;
+    ipWhitelistVerificationMode?: "provider_list_exact" | "provider_restriction_only";
+  };
   snapshot: RwaBinancePreflightSnapshot;
   private orderSequence = 0;
   private readonly requests = new Map<string, RwaProviderOrderRequest>();
@@ -528,6 +549,10 @@ class FakeBinanceClient implements RwaBinanceClient {
   async validateAccess() {
     this.readCount += 1;
     return this.access;
+  }
+
+  setIpWhitelistVerificationMode(mode: "provider_list_exact" | "provider_restriction_only") {
+    this.access.ipWhitelistVerificationMode = mode;
   }
 
   setPermissions(overrides: Partial<RwaBinancePermissions>) {
