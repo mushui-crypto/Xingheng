@@ -357,6 +357,19 @@ Binance preflight 会重读机会与私有账户，分别核对现货/期货可�
 
 PnL 只按策略 client order ID、provider order ID、execution 与专用账户交易日志归因，返回现货侧与永续侧数量、均价、mark、名义、净 Delta、入场/当前基差、realized/unrealized、Funding、fees、slippage、net PnL、时间序列和执行历史；不得使用账户总 PnL。该归因依赖专用账户不混入同 symbol 的人工仓位。Kill switch 阻止新增风险，但 close/close-all 不受策略 enabled 开关阻止，且不得撤销或平掉非本策略订单和仓位。
 
+`close-all` 的仓位所有权不得从 PnL 展示窗口或有限分页成交历史推断。每条 execution 持久化
+`strategyPosition.coverage + spotRemainingXaut + perpetualRemainingXaut`，每次权威成交先更新
+并原子写盘，之后才允许下一次 provider mutation。旧活动记录缺少该字段时只能迁移为
+`ambiguous`；不得按 `hedgedQuantityXaut` 或近期成交补猜。自动退出前和确认时，provider 账户
+总量必须与完整策略账本精确一致；同时必须从持久 execution 的最早 `createdAt` 覆盖点开始，
+对策略订单前缀之外的全部持仓影响活动取得连续、完整且不晚于权威快照的 provider 证明，并在
+首次撤单前及撤单后、首次平仓前各复核一次。额外库存、同额卖出后补入、额外永续仓位、人工成交、
+转入转出、分页/游标不完整、非法数值或任何无法唯一归属的差异均进入 `manual_intervention`，
+自动 provider 写为 0。当前 Binance/Bybit 真实连接器尚不能证明成交、转换、转账和余额调整的
+全量连续覆盖，因此明确返回 `incomplete` 并禁止自动退出；测试 fake 的完整覆盖能力不代表生产
+已支持自动退出。低于交易所
+`minQty/minNotional` 的残余仍保留在策略账本，不能静默归零或标记 closed。
+
 ### 凭证文件与环境变量
 
 - `RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms`：生产唯一允许的凭证密钥 provider；测试 fake provider 只能由测试代码显式注入，生产环境不可选择。

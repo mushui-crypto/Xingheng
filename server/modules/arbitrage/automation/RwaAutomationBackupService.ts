@@ -690,7 +690,10 @@ function validateExecutionRecord(value: unknown) {
     "finalizeIdempotency", "hedgedQuantityXaut", "idempotencyKey", "message", "orderLinkPrefix", "perpetualOrders", "reconciliation", "spotOrder", "state",
     "unhedgedDurationMs", "updatedAt", "userId",
   ];
-  if (!hasExactKeys(execution, currentKeys) && !hasExactKeys(execution, legacyKeys)) throw invalidSnapshot();
+  const strategyPositionKeys = [...currentKeys, "strategyPosition"];
+  if (!hasExactKeys(execution, strategyPositionKeys)
+    && !hasExactKeys(execution, currentKeys)
+    && !hasExactKeys(execution, legacyKeys)) throw invalidSnapshot();
   for (const key of ["userId", "accountId", "executionId", "idempotencyKey", "challengeId", "orderLinkPrefix"]) {
     if (!isNonEmptyString(execution[key])) throw invalidSnapshot();
   }
@@ -707,9 +710,21 @@ function validateExecutionRecord(value: unknown) {
     || !Array.isArray(execution.perpetualOrders) || !Array.isArray(execution.compensationOrders)) throw invalidSnapshot();
   if (execution.reconciliation !== undefined && execution.reconciliation !== null) validateReconciliationPreview(execution.reconciliation);
   if (execution.finalizeIdempotency !== undefined && execution.finalizeIdempotency !== null) validateFinalizeIdempotency(execution.finalizeIdempotency);
+  if (execution.strategyPosition !== undefined) validateStrategyPosition(execution.strategyPosition);
   if (execution.spotOrder !== null) validateProviderOrder(execution.spotOrder);
   execution.perpetualOrders.forEach(validateProviderOrder);
   execution.compensationOrders.forEach(validateProviderOrder);
+}
+
+function validateStrategyPosition(value: unknown) {
+  const position = assertObject(value);
+  if (!hasExactKeys(position, ["coverage", "perpetualRemainingXaut", "spotRemainingXaut", "updatedAt"])
+    || !["complete", "ambiguous"].includes(String(position.coverage))
+    || !isFiniteNumber(position.spotRemainingXaut) || Number(position.spotRemainingXaut) < 0
+    || !isFiniteNumber(position.perpetualRemainingXaut) || Number(position.perpetualRemainingXaut) < 0
+    || !isTimestamp(position.updatedAt)) {
+    throw invalidSnapshot();
+  }
 }
 
 function validateReconciliationPreview(value: unknown) {
@@ -731,11 +746,16 @@ function validateFinalizeIdempotency(value: unknown) {
 
 function validateProviderOrder(value: unknown) {
   const order = assertObject(value);
-  if (!hasExactKeys(order, [
+  const legacyKeys = [
     "averagePrice", "feeUsd", "filledQuantityXaut", "orderId", "orderLinkId", "requestedQuantityXaut", "status", "updatedAt",
-  ]) || !isNonEmptyString(order.orderId) || !isNonEmptyString(order.orderLinkId)
+  ];
+  const currentKeys = [...legacyKeys, "positionQuantityXaut"];
+  if ((!hasExactKeys(order, legacyKeys) && !hasExactKeys(order, currentKeys))
+    || !isNonEmptyString(order.orderId) || !isNonEmptyString(order.orderLinkId)
     || !["New", "PartiallyFilled", "Filled", "Cancelled", "Rejected", "Unknown"].includes(String(order.status))
     || !isFiniteNumber(order.requestedQuantityXaut) || !isFiniteNumber(order.filledQuantityXaut)
+    || !(order.positionQuantityXaut === undefined
+      || (isFiniteNumber(order.positionQuantityXaut) && Number(order.positionQuantityXaut) >= 0))
     || !isNullableFiniteNumber(order.averagePrice) || !isFiniteNumber(order.feeUsd) || !isTimestamp(order.updatedAt)) {
     throw invalidSnapshot();
   }

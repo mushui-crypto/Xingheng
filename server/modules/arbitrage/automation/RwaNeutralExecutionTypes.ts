@@ -180,6 +180,7 @@ export type RwaProviderOrder = {
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Unknown";
   requestedQuantityXaut: number;
   filledQuantityXaut: number;
+  positionQuantityXaut?: number;
   averagePrice: number | null;
   feeUsd: number;
   updatedAt: number;
@@ -293,6 +294,13 @@ export type RwaExecutionFinalizeIdempotency = {
   completedAt: number;
 };
 
+export type RwaStrategyPosition = {
+  coverage: "complete" | "ambiguous";
+  spotRemainingXaut: number;
+  perpetualRemainingXaut: number;
+  updatedAt: number;
+};
+
 export type RwaExecutionRecord = {
   userId: string;
   accountId: string;
@@ -310,9 +318,32 @@ export type RwaExecutionRecord = {
   message: string;
   reconciliation: RwaExecutionReconciliationPreview | null;
   finalizeIdempotency: RwaExecutionFinalizeIdempotency | null;
+  strategyPosition: RwaStrategyPosition;
   createdAt: number;
   updatedAt: number;
 };
+
+export type RwaTrackedStrategyExposure = {
+  complete: boolean;
+  spotQuantityXaut: number;
+  perpetualQuantityXaut: number;
+  sourceExecutionIds: string[];
+  strategyOrderPrefixes: string[];
+  attributionSince: number;
+};
+
+export type RwaPositionAttributionSnapshot = {
+  coverage: "complete" | "incomplete";
+  externalPositionActivity: boolean;
+  checkedFrom: number;
+  checkedThrough: number;
+};
+
+export class RwaExecutionSafetyError extends Error {
+  constructor(readonly category: "provider_snapshot_invalid" | "strategy_ownership_ambiguous", message: string) {
+    super(message);
+  }
+}
 
 export type RwaNeutralTradingClient<
   TPermissions extends RwaVenuePermissions = RwaVenuePermissions,
@@ -325,6 +356,11 @@ export type RwaNeutralTradingClient<
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
   cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
   cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
+  readPositionAttribution(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }): Promise<RwaPositionAttributionSnapshot>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot>;
 };
 

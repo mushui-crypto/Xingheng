@@ -376,9 +376,16 @@ test("legacy execution schema is migrated with null reconciliation fields and pe
     const state = await current.readState();
     assert.equal(state.executions[0]?.reconciliation, null);
     assert.equal(state.executions[0]?.finalizeIdempotency, null);
+    assert.deepEqual(state.executions[0]?.strategyPosition, {
+      coverage: "ambiguous",
+      spotRemainingXaut: 0,
+      perpetualRemainingXaut: 0,
+      updatedAt: 1,
+    });
     const persisted = JSON.parse(await readFile(current.statePath, "utf8"));
     assert.equal(persisted.executions[0]?.reconciliation, null);
     assert.equal(persisted.executions[0]?.finalizeIdempotency, null);
+    assert.equal(persisted.executions[0]?.strategyPosition?.coverage, "ambiguous");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -475,6 +482,12 @@ function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: nu
     message: "test",
     reconciliation: null,
     finalizeIdempotency: null,
+    strategyPosition: {
+      coverage: "complete",
+      spotRemainingXaut: 0,
+      perpetualRemainingXaut: 0,
+      updatedAt,
+    },
     createdAt: updatedAt,
     updatedAt,
   };

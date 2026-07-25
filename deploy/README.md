@@ -589,6 +589,13 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
 
 ## 故障边界
 
+- 自动套利 `close-all` 只使用持久化 `strategyPosition` 作为策略所有权记录，不以近期 PnL
+  或账户总余额代替。账户数量与策略剩余数量不一致、旧记录 coverage 不完整或 provider 快照
+  非有限/负数时会在退出写操作前 fail-closed。即使最终数量相同，也必须证明从持久 execution
+  最早创建时间起的全部持仓影响活动连续、完整且不存在非策略成交、转账、转换或余额调整；证明
+  不完整或水位早于权威快照同样返回 `strategy_ownership_ambiguous`，且不得先撤单。当前生产
+  Binance/Bybit 连接器明确返回活动覆盖不完整，自动退出保持禁用并进入人工核对；运维应保持用户
+  与服务端急停，不得通过修改状态文件、缩小数量或删除幂等记录强制重试。
 - API 收到 SIGTERM 后停止行情、关闭 WebSocket/HTTP，再关闭 SQLite；Compose
   提供 20 秒退出窗口。
 - API 健康检查失败时 Web 不会首次启动，但已运行的 Caddy 不等同于业务健康；

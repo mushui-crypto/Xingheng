@@ -75,8 +75,14 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
     const spotTickerRow = firstListItem(spotTicker);
     const perpTickerRow = firstListItem(perpTicker);
     const walletAccount = firstListItem(wallet);
-    const usdt = list(walletAccount.coin).map(record).find((coin) => coin.coin === "USDT");
-    const position = list(record(positions).list).map(record).find((item) => item.symbol === RWA_PERP_SYMBOL && number(item.size) > 0);
+    const coins = list(walletAccount.coin).map(record);
+    const usdt = coins.find((coin) => coin.coin === "USDT");
+    const xaut = coins.find((coin) => coin.coin === "XAUT");
+    const positionRow = list(record(positions).list).map(record).find((item) => item.symbol === RWA_PERP_SYMBOL);
+    const positionSize = positionRow
+      ? snapshotNonNegativeNumber(positionRow.size, "永续仓位数量")
+      : 0;
+    const position = positionSize > 0 ? positionRow : undefined;
     const mark = positiveNumber(perpTickerRow.markPrice);
     const liquidationPrice = positiveNumberOrNull(position?.liqPrice);
     const liquidationDistancePercent = liquidationPrice && mark
@@ -89,8 +95,8 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       accountMode: access.accountMode,
       permissions: access.permissions,
       availableUsdt: positiveNumber(usdt?.availableToWithdraw) || positiveNumber(walletAccount.totalAvailableBalance),
-      existingSpotQuantityXaut: number(list(walletAccount.coin).map(record).find((coin) => coin.coin === "XAUT")?.walletBalance),
-      existingPerpetualQuantityXaut: number(position?.size),
+      existingSpotQuantityXaut: xaut ? snapshotNonNegativeNumber(xaut.walletBalance, "现货余额") : 0,
+      existingPerpetualQuantityXaut: positionSize,
       spot: {
         ...spotSpec(spotInstrumentRow),
         bid: positiveNumber(spotTickerRow.bid1Price),
@@ -167,6 +173,19 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
         if (orderId) await this.cancelOrder(category, orderId);
       }
     }
+  }
+
+  async readPositionAttribution(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }) {
+    return {
+      coverage: "incomplete" as const,
+      externalPositionActivity: false,
+      checkedFrom: input.since,
+      checkedThrough: this.now(),
+    };
   }
 
   async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {
@@ -351,6 +370,14 @@ function perpetualSpec(row: Record<string, unknown>): RwaInstrumentSpec {
 
 function normalizeStatus(value: unknown): RwaInstrumentSpec["status"] {
   return value === "Trading" ? "Trading" : value === "Paused" ? "Paused" : "Unknown";
+}
+
+function snapshotNonNegativeNumber(value: unknown, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new RwaBybitProviderError("provider_snapshot_invalid", `Bybit ${label}无效。`);
+  }
+  return parsed;
 }
 
 function calculateLegLedger(fills: Record<string, unknown>[], openSide: "Buy" | "Sell", closeSide: "Buy" | "Sell") {

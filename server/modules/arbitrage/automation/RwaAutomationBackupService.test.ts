@@ -197,6 +197,10 @@ test("credential, step-up, and automation state schemas reject unknown nested pe
       path: join(fixture.active, stateFileName),
       mutate: (value: any) => { value.executions[0].armed = true; },
     },
+    {
+      path: join(fixture.active, stateFileName),
+      mutate: (value: any) => { value.executions[0].strategyPosition.cache = {}; },
+    },
   ];
   try {
     for (const item of cases) {
@@ -220,11 +224,18 @@ test("backup accepts legacy executions without reconciliation fields but rejects
     const original = JSON.parse(await readFile(statePath, "utf8"));
     delete original.executions[0].reconciliation;
     delete original.executions[0].finalizeIdempotency;
+    delete original.executions[0].strategyPosition;
     await writeSecure(statePath, JSON.stringify(original));
     const created = await fixture.service.createBackup();
     assert.match(created.fileName, /^rwa-automation-/);
 
     original.executions[0].reconciliation = null;
+    original.executions[0].strategyPosition = {
+      coverage: "complete",
+      spotRemainingXaut: 0,
+      perpetualRemainingXaut: 0,
+      updatedAt: 1,
+    };
     original.executions[0].finalizeIdempotency = {
       scopedKey: "scoped:key",
       requestFingerprint: "fingerprint",
@@ -482,13 +493,31 @@ function baseState() {
       challengeId: "challenge-secret-marker",
       state: "opening_perpetual",
       orderLinkPrefix: "strategy-order",
-      spotOrder: null,
+      spotOrder: {
+        orderId: "spot-order-1",
+        orderLinkId: "strategy-order-s1",
+        status: "Filled",
+        requestedQuantityXaut: 0.002,
+        filledQuantityXaut: 0.002,
+        positionQuantityXaut: 0.001999,
+        averagePrice: 4_000,
+        feeUsd: 0.001,
+        updatedAt: baseNow.getTime(),
+      },
       perpetualOrders: [],
       compensationOrders: [],
       hedgedQuantityXaut: 0,
       unhedgedDurationMs: 10,
       errorCategory: null,
       message: "正在建立现货与永续对冲组合。",
+      reconciliation: null,
+      finalizeIdempotency: null,
+      strategyPosition: {
+        coverage: "complete",
+        spotRemainingXaut: 0.001999,
+        perpetualRemainingXaut: 0,
+        updatedAt: baseNow.getTime(),
+      },
       createdAt: baseNow.getTime(),
       updatedAt: baseNow.getTime(),
     }],

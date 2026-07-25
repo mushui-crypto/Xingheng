@@ -621,6 +621,7 @@ function normalizeExecutionRecord(value: unknown): RwaExecutionRecord {
     ? { ...(value as Record<string, unknown>) }
     : {};
   const rawSpotOrder = execution.spotOrder;
+  const strategyPosition = normalizeStrategyPosition(execution.strategyPosition, execution.state, execution.updatedAt);
   return {
     userId: String(execution.userId ?? ""),
     accountId: String(execution.accountId ?? ""),
@@ -642,8 +643,37 @@ function normalizeExecutionRecord(value: unknown): RwaExecutionRecord {
     message: typeof execution.message === "string" ? execution.message : "",
     reconciliation: normalizeReconciliationPreview(execution.reconciliation),
     finalizeIdempotency: normalizeFinalizeIdempotency(execution.finalizeIdempotency),
+    strategyPosition,
     createdAt: typeof execution.createdAt === "number" ? execution.createdAt : Number(execution.createdAt ?? 0),
     updatedAt: typeof execution.updatedAt === "number" ? execution.updatedAt : Number(execution.updatedAt ?? 0),
+  };
+}
+
+function normalizeStrategyPosition(
+  value: unknown,
+  executionState: unknown,
+  fallbackUpdatedAt: unknown,
+): RwaExecutionRecord["strategyPosition"] {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    const position = value as Record<string, unknown>;
+    const coverage = position.coverage === "complete" ? "complete" : "ambiguous";
+    const spotRemainingXaut = Number(position.spotRemainingXaut);
+    const perpetualRemainingXaut = Number(position.perpetualRemainingXaut);
+    const updatedAt = Number(position.updatedAt);
+    if (
+      Number.isFinite(spotRemainingXaut) && spotRemainingXaut >= 0
+      && Number.isFinite(perpetualRemainingXaut) && perpetualRemainingXaut >= 0
+      && Number.isFinite(updatedAt) && updatedAt >= 0
+    ) {
+      return { coverage, spotRemainingXaut, perpetualRemainingXaut, updatedAt };
+    }
+  }
+  const completed = executionState === "closed" || executionState === "reconciled";
+  return {
+    coverage: completed ? "complete" : "ambiguous",
+    spotRemainingXaut: 0,
+    perpetualRemainingXaut: 0,
+    updatedAt: Number.isFinite(Number(fallbackUpdatedAt)) ? Number(fallbackUpdatedAt) : 0,
   };
 }
 

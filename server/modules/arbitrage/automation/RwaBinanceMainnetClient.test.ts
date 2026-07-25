@@ -3,6 +3,30 @@ import { createHmac } from "node:crypto";
 import test from "node:test";
 import { RwaBinanceMainnetClient, RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
 
+test("Binance attribution is fail-closed until all position-affecting activity has complete coverage", async () => {
+  let calls = 0;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async () => {
+      calls += 1;
+      throw new Error("unexpected network call");
+    }) as typeof fetch,
+    () => 2_000,
+    ["203.0.113.10"],
+  );
+  assert.deepEqual(await client.readPositionAttribution({
+    strategyOrderPrefix: "rwa-scope",
+    strategyOrderPrefixes: ["rwa-order"],
+    since: 1_000,
+  }), {
+    coverage: "incomplete",
+    externalPositionActivity: false,
+    checkedFrom: 1_000,
+    checkedThrough: 2_000,
+  });
+  assert.equal(calls, 0);
+});
+
 test("Binance client signs private reads with server-time offset and keeps spot/futures balances isolated", async () => {
   const calls: Array<{ path: string; signed: boolean; timestamp: string | null }> = [];
   const client = new RwaBinanceMainnetClient(
@@ -62,6 +86,24 @@ test("Binance client reports missing real products without substituting another 
   });
   assert.equal(calls.filter((item) => item.path === "/api/v3/exchangeInfo").length, 1);
   assert.equal(calls.filter((item) => item.path === "/fapi/v1/exchangeInfo").length, 1);
+});
+
+test("Binance preflight rejects malformed authoritative position quantities", async () => {
+  for (const options of [
+    { spotXautFree: "NaN" },
+    { positionAmount: "Infinity" },
+  ]) {
+    const client = new RwaBinanceMainnetClient(
+      { apiKey: "fake-key", apiSecret: "fake-secret" },
+      fixtureFetch(options),
+      () => 1_000,
+      ["203.0.113.10"],
+    );
+    await assert.rejects(
+      client.readPreflightSnapshot(),
+      providerError("provider_snapshot_invalid"),
+    );
+  }
 });
 
 test("Binance permission and provider errors are fail-closed and never echo raw secrets", async () => {
@@ -250,7 +292,9 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
     category: "linear", symbol: "XAUTUSDT", side: "Sell", quantityXaut: 0.002,
     limitPrice: 4_128, reduceOnly: false, orderLinkId: "rwa-test-perp-1",
   });
-  assert.equal((await client.awaitOrder("spot", spot.orderId, 1_001)).status, "Filled");
+  const spotOrder = await client.awaitOrder("spot", spot.orderId, 1_001);
+  assert.equal(spotOrder.status, "Filled");
+  assert.equal(spotOrder.positionQuantityXaut, 0.001998);
   assert.equal((await client.awaitOrder("linear", perpetual.orderId, 1_001)).status, "Filled");
   await client.cancelOrder("spot", spot.orderId);
 
@@ -315,7 +359,7 @@ function executionFetch(calls: Array<{ path: string; method: string; params: URL
     }
     if (url.pathname === "/api/v3/order") return json({
       orderId: 101, clientOrderId: "rwa-test-spot-1", status: "FILLED", origQty: "0.002", executedQty: "0.002",
-      cummulativeQuoteQty: "8.26", updateTime: 1_000,
+      cummulativeQuoteQty: "8.26", side: "BUY", updateTime: 1_000,
     });
     if (url.pathname === "/fapi/v1/order") return json({
       orderId: 201, clientOrderId: "rwa-test-perp-1", status: "FILLED", origQty: "0.002", executedQty: "0.002",
@@ -336,6 +380,9 @@ function executionFetch(calls: Array<{ path: string; method: string; params: URL
     if (url.pathname === "/fapi/v1/allOrders") return json([
       orderRow(21, "rwa-owned-perp", "FILLED"),
       orderRow(22, "manual-order-perp", "FILLED"),
+    ]);
+    if (url.pathname === "/api/v3/myTrades" && url.searchParams.get("orderId") === "101") return json([
+      { orderId: 101, isBuyer: true, qty: "0.002", price: "4130", commission: "0.000002", commissionAsset: "XAUT", time: 10 },
     ]);
     if (url.pathname === "/api/v3/myTrades") return json([
       { orderId: 11, isBuyer: true, qty: "0.002", price: "4130", commission: "0.001", commissionAsset: "USDT", time: 10 },
@@ -364,6 +411,8 @@ function fixtureFetch(options: {
   ipList?: string[];
   omitIpList?: boolean;
   restrictionsFailure?: boolean;
+  spotXautFree?: string;
+  positionAmount?: string;
 } = {}): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
@@ -396,7 +445,7 @@ function fixtureFetch(options: {
           canTrade: true,
           balances: [
             { asset: "USDT", free: "18", locked: "0" },
-            { asset: "XAUT", free: "0", locked: "0" },
+            { asset: "XAUT", free: options.spotXautFree ?? "0", locked: "0" },
           ],
         });
       case "/fapi/v2/account":
@@ -443,6 +492,11 @@ function fixtureFetch(options: {
       case "/fapi/v1/commissionRate":
         return json({ symbol: "XAUTUSDT", takerCommissionRate: "0.0005" });
       case "/fapi/v2/positionRisk":
+        return json(options.positionAmount === undefined ? [] : [{
+          symbol: "XAUTUSDT",
+          positionAmt: options.positionAmount,
+          liquidationPrice: "0",
+        }]);
       case "/api/v3/openOrders":
       case "/fapi/v1/openOrders":
         return json([]);

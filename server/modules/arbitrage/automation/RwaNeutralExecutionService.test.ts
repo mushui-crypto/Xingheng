@@ -288,6 +288,7 @@ test("lease loss after close-all cancellation prevents subsequent exit mutations
     },
   });
   try {
+    await seedTrackedHedge(harness, 0.002);
     harness.client.spotQuantity = 0.002;
     harness.client.perpetualQuantity = 0.002;
     harness.client.mutationHook = (kind) => {
@@ -305,7 +306,7 @@ test("lease loss after close-all cancellation prevents subsequent exit mutations
   }
 });
 
-test("lease loss after recovery cancellation prevents subsequent recovery exit mutations", async () => {
+test("recovery rejects untracked provider exposure before cancellation or exit mutations", async () => {
   let leaseHeld = true;
   const harness = await createHarness();
   try {
@@ -336,7 +337,7 @@ test("lease loss after recovery cancellation prevents subsequent recovery exit m
     await restarted.initialize();
     const recovered = await harness.store.readState();
     assert.equal(recovered.executions.at(-1)?.state, "manual_intervention");
-    assert.equal(harness.client.cancelScopes.length, 1);
+    assert.equal(harness.client.cancelScopes.length, 0);
     assert.equal(harness.client.requests.length, 0);
     assert.equal(recovered.config.killSwitchActive, true);
   } finally {
@@ -519,12 +520,255 @@ test("close-all retries partial exits and confirms provider exposure is zero", a
   }
 });
 
+test("close-all refuses ambiguous extra spot inventory without selling", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:unrelated-spot",
+    });
+    harness.client.unrelatedSpotQuantity = 0.01;
+    const closed = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:unrelated-spot",
+    }) as any;
+    assert.equal(closed.state, "manual_intervention");
+    assert.equal(harness.client.spotQuantity, 0.002);
+    assert.equal(harness.client.unrelatedSpotQuantity, 0.01);
+    assert.equal(
+      harness.client.requests
+        .filter((request) => request.category === "spot" && request.side === "Sell")
+        .reduce((total, request) => total + request.quantityXaut, 0),
+      0,
+    );
+    assert.equal((await harness.store.readState()).config.killSwitchActive, true);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all uses durable hedged executions when the recent provider ledger is empty", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:older-than-ledger-window",
+    });
+    harness.client.strategyPnlQuantityOverride = { spot: 0, perpetual: 0 };
+    const closed = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:older-than-ledger-window",
+    }) as any;
+    assert.equal(closed.state, "closed");
+    assert.equal(harness.client.spotQuantity, 0);
+    assert.equal(harness.client.perpetualQuantity, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all blocks external partial spot sale mixed with unrelated inventory", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:external-mixed",
+    });
+    harness.client.spotQuantity = 0.001;
+    harness.client.unrelatedSpotQuantity = 0.01;
+    const writesBefore = harness.client.requests.length;
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:external-mixed",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "strategy_ownership_ambiguous");
+    assert.equal(harness.client.requests.length, writesBefore);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all blocks same-net external inventory replacement before provider mutations", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:external-same-net",
+    });
+    harness.client.spotQuantity -= 0.001;
+    harness.client.unrelatedSpotQuantity += 0.001;
+    harness.client.externalPositionActivity = true;
+    const writesBefore = harness.client.requests.length;
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:external-same-net",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "strategy_ownership_ambiguous");
+    assert.equal(harness.client.requests.length, writesBefore);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all blocks incomplete provider activity coverage before provider mutations", async () => {
+  const harness = await createHarness();
+  try {
+    await seedTrackedHedge(harness, 0.002);
+    harness.client.spotQuantity = 0.002;
+    harness.client.perpetualQuantity = 0.002;
+    harness.client.attributionCoverage = "incomplete";
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:incomplete-attribution",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "strategy_ownership_ambiguous");
+    assert.equal(harness.client.cancelScopes.length, 0);
+    assert.equal(harness.client.requests.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all blocks an activity coverage gap or stale provider watermark before mutations", async () => {
+  for (const mode of ["gap", "stale"] as const) {
+    const harness = await createHarness();
+    try {
+      await seedTrackedHedge(harness, 0.002);
+      harness.client.spotQuantity = 0.002;
+      harness.client.perpetualQuantity = 0.002;
+      if (mode === "gap") harness.client.attributionCheckedFrom = harness.now + 1;
+      else harness.client.attributionCheckedThrough = harness.now - 1;
+      const result = await harness.service.closeAll({
+        accountId,
+        idempotencyKey: `close:attribution-${mode}`,
+      }) as any;
+      assert.equal(result.state, "manual_intervention");
+      assert.equal(result.errorCategory, "strategy_ownership_ambiguous");
+      assert.equal(harness.client.cancelScopes.length, 0);
+      assert.equal(harness.client.requests.length, 0);
+    } finally {
+      await harness.cleanup();
+    }
+  }
+});
+
+test("malformed provider position quantity is rejected before ledger persistence or a second order", async () => {
+  const harness = await createHarness();
+  try {
+    harness.client.invalidPositionQuantity = true;
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:invalid-position-quantity",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "provider_snapshot_invalid");
+    assert.equal(harness.client.requests.length, 1);
+    const state = await harness.store.readState();
+    const persisted = state.executions.find((item) => item.executionId === result.executionId);
+    assert.equal(persisted?.spotOrder, null);
+    assert.deepEqual(persisted?.perpetualOrders, []);
+    assert.equal(persisted?.strategyPosition.spotRemainingXaut, 0);
+    assert.equal(persisted?.strategyPosition.perpetualRemainingXaut, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all rejects invalid authoritative quantities before provider mutations", async () => {
+  const harness = await createHarness();
+  try {
+    await seedTrackedHedge(harness, 0.002);
+    harness.client.spotQuantity = Number.NaN;
+    harness.client.perpetualQuantity = 0.002;
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:invalid-authority",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "provider_snapshot_invalid");
+    assert.equal(harness.client.cancelScopes.length, 0);
+    assert.equal(harness.client.requests.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("close-all refuses an unrelated perpetual position without provider mutations", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:extra-perpetual",
+    });
+    harness.client.unrelatedPerpetualQuantity = 0.01;
+    const writesBefore = harness.client.requests.length;
+    const result = await harness.service.closeAll({
+      accountId,
+      idempotencyKey: "close:extra-perpetual",
+    }) as any;
+    assert.equal(result.state, "manual_intervention");
+    assert.equal(result.errorCategory, "strategy_ownership_ambiguous");
+    assert.equal(harness.client.requests.length, writesBefore);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+async function seedTrackedHedge(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  quantityXaut: number,
+) {
+  const state = await harness.store.readState();
+  const execution = createNeutralExecutionRecord({
+    userId: "user-a",
+    accountId,
+    userOrderPrefix: `rwa${harness.store.userDomain}`,
+    idempotencyKey: `${harness.store.userDomain}:seed:${state.executions.length}`,
+    challengeId: `seed:${state.executions.length}`,
+    now: harness.now,
+  });
+  execution.state = "hedged";
+  execution.hedgedQuantityXaut = quantityXaut;
+  execution.strategyPosition = {
+    coverage: "complete",
+    spotRemainingXaut: quantityXaut,
+    perpetualRemainingXaut: quantityXaut,
+    updatedAt: harness.now,
+  };
+  state.executions.push(execution);
+  await harness.store.writeState(state);
+}
+
 async function createHarness(options: {
   fundingRate?: number;
   failSecondLeg?: boolean;
   ipRestricted?: boolean;
   partialClose?: boolean;
   availableUsdt?: number;
+  unrelatedSpotQuantity?: number;
   leaseGuard?: () => void;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-execution-"));
@@ -582,6 +826,14 @@ class FakeBybitClient implements RwaBybitTradingClient {
   private readonly partialClose: boolean;
   private readonly availableUsdt: number;
   private readonly now: number;
+  unrelatedSpotQuantity: number;
+  unrelatedPerpetualQuantity = 0;
+  strategyPnlQuantityOverride: { spot: number; perpetual: number } | null = null;
+  attributionCoverage: "complete" | "incomplete" = "complete";
+  externalPositionActivity = false;
+  attributionCheckedFrom: number | null = null;
+  attributionCheckedThrough: number | null = null;
+  invalidPositionQuantity = false;
 
   constructor(options: {
     fundingRate?: number;
@@ -590,6 +842,7 @@ class FakeBybitClient implements RwaBybitTradingClient {
     ipRestricted?: boolean;
     partialClose?: boolean;
     availableUsdt?: number;
+    unrelatedSpotQuantity?: number;
     now?: number;
   } = {}) {
     this.fundingRate = options.fundingRate ?? 0.0002;
@@ -598,6 +851,7 @@ class FakeBybitClient implements RwaBybitTradingClient {
     this.ipRestricted = options.ipRestricted ?? true;
     this.partialClose = options.partialClose ?? false;
     this.availableUsdt = options.availableUsdt ?? 25;
+    this.unrelatedSpotQuantity = options.unrelatedSpotQuantity ?? 0;
     this.now = options.now ?? 1_800_000_000_000;
   }
 
@@ -615,8 +869,8 @@ class FakeBybitClient implements RwaBybitTradingClient {
       accountMode: "uta",
       permissions: permissions(this.withdraw, this.ipRestricted),
       availableUsdt: this.availableUsdt,
-      existingSpotQuantityXaut: 0,
-      existingPerpetualQuantityXaut: 0,
+      existingSpotQuantityXaut: Math.max(0, this.spotQuantity + this.unrelatedSpotQuantity),
+      existingPerpetualQuantityXaut: Math.max(0, this.perpetualQuantity + this.unrelatedPerpetualQuantity),
       spot: { status: "Trading", minOrderQty: 0.00001, qtyStep: 0.00001, minNotionalUsd: 5, priceTick: 0.01, bid: 4129, ask: 4130 },
       perpetual: {
         status: "Trading",
@@ -664,8 +918,12 @@ class FakeBybitClient implements RwaBybitTradingClient {
     } else {
       this.perpetualQuantity += request.side === "Sell" ? filledQuantity : -filledQuantity;
     }
-    return { ...order(orderId, request, this.now), status: filledQuantity < request.quantityXaut ? "PartiallyFilled" as const : "Filled" as const,
-      filledQuantityXaut: filledQuantity };
+    return {
+      ...order(orderId, request, this.now),
+      status: filledQuantity < request.quantityXaut ? "PartiallyFilled" as const : "Filled" as const,
+      filledQuantityXaut: filledQuantity,
+      ...(this.invalidPositionQuantity ? { positionQuantityXaut: Number.NaN } : {}),
+    };
   }
 
   async cancelOrder() {
@@ -677,20 +935,35 @@ class FakeBybitClient implements RwaBybitTradingClient {
     this.mutationHook("cancel_strategy");
   }
 
+  async readPositionAttribution(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }) {
+    return {
+      coverage: this.attributionCoverage,
+      externalPositionActivity: this.externalPositionActivity,
+      checkedFrom: this.attributionCheckedFrom ?? input.since,
+      checkedThrough: this.attributionCheckedThrough ?? this.now,
+    };
+  }
+
   async readStrategyPnl(): Promise<RwaStrategyPnlSnapshot> {
     const spotMark = 4130;
     const perpMark = 4128;
+    const strategySpotQuantity = this.strategyPnlQuantityOverride?.spot ?? this.spotQuantity;
+    const strategyPerpetualQuantity = this.strategyPnlQuantityOverride?.perpetual ?? this.perpetualQuantity;
     return {
       accountId,
       accountFingerprint,
       strategyId: "bybit-xaut-spot-perp-v1",
       capturedAt: this.now,
       legs: {
-        spot: { kind: "spot_long", quantityXaut: Math.max(0, this.spotQuantity), averageEntryPrice: 4130, markPrice: spotMark, notionalUsd: Math.max(0, this.spotQuantity) * spotMark, realizedPnlUsd: 0, unrealizedPnlUsd: 0 },
-        perpetual: { kind: "perpetual_short", quantityXaut: Math.max(0, this.perpetualQuantity), averageEntryPrice: 4128, markPrice: perpMark, notionalUsd: Math.max(0, this.perpetualQuantity) * perpMark, realizedPnlUsd: 0, unrealizedPnlUsd: 0 },
+        spot: { kind: "spot_long", quantityXaut: Math.max(0, strategySpotQuantity), averageEntryPrice: 4130, markPrice: spotMark, notionalUsd: Math.max(0, strategySpotQuantity) * spotMark, realizedPnlUsd: 0, unrealizedPnlUsd: 0 },
+        perpetual: { kind: "perpetual_short", quantityXaut: Math.max(0, strategyPerpetualQuantity), averageEntryPrice: 4128, markPrice: perpMark, notionalUsd: Math.max(0, strategyPerpetualQuantity) * perpMark, realizedPnlUsd: 0, unrealizedPnlUsd: 0 },
       },
-      netDeltaXaut: this.spotQuantity - this.perpetualQuantity,
-      netDeltaUsd: this.spotQuantity * spotMark - this.perpetualQuantity * perpMark,
+      netDeltaXaut: strategySpotQuantity - strategyPerpetualQuantity,
+      netDeltaUsd: strategySpotQuantity * spotMark - strategyPerpetualQuantity * perpMark,
       entryBasisBps: -4.8,
       currentBasisBps: -4.8,
       realizedPnlUsd: 0,

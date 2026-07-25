@@ -1,15 +1,20 @@
 import { randomUUID } from "node:crypto";
 import type { RwaAutomationStateData } from "./RwaAutomationPersistentStore";
+import { RwaExecutionSafetyError } from "./RwaNeutralExecutionTypes";
 import type {
   RwaResidualAssessment,
   RwaExecutionConfig,
   RwaExecutionRecord,
   RwaNeutralTradingClient,
+  RwaPositionAttributionSnapshot,
+  RwaProviderOrder,
   RwaProviderPreflightSnapshot,
+  RwaTrackedStrategyExposure,
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
 
 type PersistExecution = (state: RwaAutomationStateData, execution: RwaExecutionRecord) => Promise<void>;
+type PersistCloseFill = (category: "spot" | "linear", order: RwaProviderOrder) => Promise<void>;
 
 export class RwaNeutralHedgeExecutionEngine {
   constructor(
@@ -46,7 +51,11 @@ export class RwaNeutralHedgeExecutionEngine {
     this.assertExecutionLeaseHeld();
     const spot = await client.awaitOrder("spot", spotAccepted.orderId, Math.min(deadline, this.now() + 4_000));
     const firstSideFilledAt = this.now();
+    const spotPositionQuantity = positionQuantity(spot);
     execution.spotOrder = spot;
+    execution.strategyPosition.spotRemainingXaut = spotPositionQuantity;
+    execution.strategyPosition.updatedAt = this.now();
+    await persist(state, execution);
     if (spot.status === "PartiallyFilled" || spot.status === "New") {
       this.assertExecutionLeaseHeld();
       await client.cancelOrder("spot", spot.orderId);
@@ -71,13 +80,16 @@ export class RwaNeutralHedgeExecutionEngine {
       });
       this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder("linear", accepted.orderId, hedgeDeadline);
+      const perpetualPositionQuantity = positionQuantity(order);
       execution.perpetualOrders.push(order);
+      execution.strategyPosition.perpetualRemainingXaut += perpetualPositionQuantity;
+      execution.strategyPosition.updatedAt = this.now();
+      await persist(state, execution);
       if (order.status === "PartiallyFilled" || order.status === "New") {
         this.assertExecutionLeaseHeld();
         await client.cancelOrder("linear", order.orderId);
       }
       remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), snapshot.perpetual.qtyStep);
-      await persist(state, execution);
     }
 
     const perpetualFilled = execution.perpetualOrders.reduce((sum, order) => sum + order.filledQuantityXaut, 0);
@@ -97,7 +109,14 @@ export class RwaNeutralHedgeExecutionEngine {
       });
       this.assertExecutionLeaseHeld();
       const compensation = await client.awaitOrder("spot", accepted.orderId, deadline);
+      const compensationPositionQuantity = positionQuantity(compensation);
       execution.compensationOrders.push(compensation);
+      execution.strategyPosition.spotRemainingXaut = Math.max(
+        0,
+        execution.strategyPosition.spotRemainingXaut - compensationPositionQuantity,
+      );
+      execution.strategyPosition.updatedAt = this.now();
+      await persist(state, execution);
       if (compensation.filledQuantityXaut + 1e-9 < excessSpot) throw new Error("未对冲敞口未能在时限内退出。");
     }
 
@@ -116,61 +135,99 @@ export class RwaNeutralHedgeExecutionEngine {
     client: RwaNeutralTradingClient<TPermissions, RwaProviderPreflightSnapshot<TPermissions>>,
     scope: string,
     orderLinkPrefix: string,
+    trackedExposure: RwaTrackedStrategyExposure,
+    persistCloseFill: PersistCloseFill,
   ) {
     this.assertExecutionLeaseHeld();
+    assertTrackedExposure(trackedExposure);
     const market = await client.readPreflightSnapshot();
-    const pnl = await client.readStrategyPnl(scope, null);
+    assertValidProviderSnapshot(market);
+    assertOwnershipMatches(trackedExposure, market);
+    const attribution = await client.readPositionAttribution({
+      strategyOrderPrefix: scope,
+      strategyOrderPrefixes: trackedExposure.strategyOrderPrefixes,
+      since: trackedExposure.attributionSince,
+    });
+    assertPositionAttribution(attribution, trackedExposure, market.fetchedAt);
+    this.assertExecutionLeaseHeld();
+    await client.cancelStrategyOrders(scope);
+    this.assertExecutionLeaseHeld();
+    const closableMarket = await client.readPreflightSnapshot();
+    assertValidProviderSnapshot(closableMarket);
+    assertOwnershipMatches(trackedExposure, closableMarket);
+    const closableAttribution = await client.readPositionAttribution({
+      strategyOrderPrefix: scope,
+      strategyOrderPrefixes: trackedExposure.strategyOrderPrefixes,
+      since: trackedExposure.attributionSince,
+    });
+    assertPositionAttribution(closableAttribution, trackedExposure, closableMarket.fetchedAt);
     const deadline = this.now() + 10_000;
     const perpetualResidual = assessResidual(
-      market.existingPerpetualQuantityXaut,
-      market.perpetual.bid || market.perpetual.ask || market.perpetual.minNotionalUsd,
-      market.perpetual.qtyStep,
-      market.perpetual.minOrderQty,
-      market.perpetual.minNotionalUsd,
+      trackedExposure.perpetualQuantityXaut,
+      closableMarket.perpetual.bid || closableMarket.perpetual.ask || closableMarket.perpetual.minNotionalUsd,
+      closableMarket.perpetual.qtyStep,
+      closableMarket.perpetual.minOrderQty,
+      closableMarket.perpetual.minNotionalUsd,
     );
     const spotResidual = assessResidual(
-      spotClosableQuantity(market),
-      market.spot.bid || market.spot.ask || market.spot.minNotionalUsd,
-      market.spot.qtyStep,
-      market.spot.minOrderQty,
-      market.spot.minNotionalUsd,
+      trackedExposure.spotQuantityXaut,
+      closableMarket.spot.bid || closableMarket.spot.ask || closableMarket.spot.minNotionalUsd,
+      closableMarket.spot.qtyStep,
+      closableMarket.spot.minOrderQty,
+      closableMarket.spot.minNotionalUsd,
     );
+    let remainingPerpetual = trackedExposure.perpetualQuantityXaut;
+    let remainingSpot = trackedExposure.spotQuantityXaut;
     if (perpetualResidual.tradable) await this.closeSide(client, {
       category: "linear",
       side: "Buy",
       quantity: perpetualResidual.quantityXaut,
-      qtyStep: market.perpetual.qtyStep,
-      minOrderQty: market.perpetual.minOrderQty,
-      limitPrice: ceilStep(market.perpetual.ask * 1.001, market.perpetual.priceTick),
+      qtyStep: closableMarket.perpetual.qtyStep,
+      minOrderQty: closableMarket.perpetual.minOrderQty,
+      limitPrice: ceilStep(closableMarket.perpetual.ask * 1.001, closableMarket.perpetual.priceTick),
       reduceOnly: true,
       orderLinkPrefix: `${orderLinkPrefix}cp`,
       deadline,
       failureMessage: "永续侧仓位未完全退出。",
+      persistFill: async (order) => {
+        await persistCloseFill("linear", order);
+        remainingPerpetual = Math.max(0, remainingPerpetual - positionQuantity(order));
+      },
     });
     if (spotResidual.tradable) await this.closeSide(client, {
       category: "spot",
       side: "Sell",
       quantity: spotResidual.quantityXaut,
-      qtyStep: market.spot.qtyStep,
-      minOrderQty: market.spot.minOrderQty,
-      limitPrice: floorStep(market.spot.bid * 0.999, market.spot.priceTick),
+      qtyStep: closableMarket.spot.qtyStep,
+      minOrderQty: closableMarket.spot.minOrderQty,
+      limitPrice: floorStep(closableMarket.spot.bid * 0.999, closableMarket.spot.priceTick),
       reduceOnly: false,
       orderLinkPrefix: `${orderLinkPrefix}cs`,
       deadline,
       failureMessage: "现货侧仓位未完全退出。",
+      persistFill: async (order) => {
+        await persistCloseFill("spot", order);
+        remainingSpot = Math.max(0, remainingSpot - positionQuantity(order));
+      },
     });
     this.assertExecutionLeaseHeld();
     const confirmedPnl = await client.readStrategyPnl(scope, null);
     const confirmedMarket = await client.readPreflightSnapshot();
+    assertValidProviderSnapshot(confirmedMarket);
+    assertOwnershipMatches({
+      ...trackedExposure,
+      spotQuantityXaut: remainingSpot,
+      perpetualQuantityXaut: remainingPerpetual,
+    }, confirmedMarket);
     const confirmedSpot = assessResidual(
-      spotClosableQuantity(confirmedMarket),
+      remainingSpot,
       confirmedMarket.spot.bid || confirmedMarket.spot.ask || confirmedMarket.spot.minNotionalUsd,
       confirmedMarket.spot.qtyStep,
       confirmedMarket.spot.minOrderQty,
       confirmedMarket.spot.minNotionalUsd,
     );
     const confirmedPerpetual = assessResidual(
-      confirmedMarket.existingPerpetualQuantityXaut,
+      remainingPerpetual,
       confirmedMarket.perpetual.bid || confirmedMarket.perpetual.ask || confirmedMarket.perpetual.minNotionalUsd,
       confirmedMarket.perpetual.qtyStep,
       confirmedMarket.perpetual.minOrderQty,
@@ -195,6 +252,7 @@ export class RwaNeutralHedgeExecutionEngine {
     orderLinkPrefix: string;
     deadline: number;
     failureMessage: string;
+    persistFill: (order: RwaProviderOrder) => Promise<void>;
     },
   ) {
     let remaining = floorStep(input.quantity, input.qtyStep);
@@ -213,11 +271,13 @@ export class RwaNeutralHedgeExecutionEngine {
       });
       this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder(input.category, accepted.orderId, input.deadline);
+      const filledPositionQuantity = positionQuantity(order);
+      if (order.filledQuantityXaut > 0) await input.persistFill(order);
       if (order.status === "PartiallyFilled" || order.status === "New") {
         this.assertExecutionLeaseHeld();
         await client.cancelOrder(input.category, order.orderId);
       }
-      remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), input.qtyStep);
+      remaining = floorStep(Math.max(0, remaining - filledPositionQuantity), input.qtyStep);
     }
     if (remaining >= input.minOrderQty) throw new Error(input.failureMessage);
   }
@@ -249,6 +309,12 @@ export function createNeutralExecutionRecord(input: {
     message: "执行请求已接受，等待建立现货与永续对冲组合。",
     reconciliation: null,
     finalizeIdempotency: null,
+    strategyPosition: {
+      coverage: "complete",
+      spotRemainingXaut: 0,
+      perpetualRemainingXaut: 0,
+      updatedAt: input.now,
+    },
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -284,6 +350,152 @@ export function spotClosableQuantity<TPermissions extends RwaVenuePermissions>(m
     ? explicitFree
     : market.existingSpotQuantityXaut;
   return Math.max(0, free);
+}
+
+export function trackedExposureFromExecution(execution: RwaExecutionRecord): RwaTrackedStrategyExposure {
+  return {
+    complete: execution.strategyPosition.coverage === "complete",
+    spotQuantityXaut: execution.strategyPosition.spotRemainingXaut,
+    perpetualQuantityXaut: execution.strategyPosition.perpetualRemainingXaut,
+    sourceExecutionIds: [execution.executionId],
+    strategyOrderPrefixes: [execution.orderLinkPrefix],
+    attributionSince: execution.createdAt,
+  };
+}
+
+export function trackedExposureFromState(executions: RwaExecutionRecord[]): RwaTrackedStrategyExposure {
+  const strategyExecutions = executions.filter((execution) => execution.challengeId !== "close-all");
+  const sources = strategyExecutions.filter((execution) =>
+    execution.strategyPosition.spotRemainingXaut > 0 || execution.strategyPosition.perpetualRemainingXaut > 0);
+  const ambiguous = strategyExecutions.some((execution) => execution.strategyPosition.coverage !== "complete");
+  return {
+    complete: !ambiguous,
+    spotQuantityXaut: sources.reduce((total, execution) => total + execution.strategyPosition.spotRemainingXaut, 0),
+    perpetualQuantityXaut: sources.reduce((total, execution) => total + execution.strategyPosition.perpetualRemainingXaut, 0),
+    sourceExecutionIds: sources.map((execution) => execution.executionId),
+    strategyOrderPrefixes: strategyExecutions.map((execution) => execution.orderLinkPrefix),
+    attributionSince: strategyExecutions.reduce(
+      (earliest, execution) => Math.min(earliest, execution.createdAt),
+      Number.POSITIVE_INFINITY,
+    ),
+  };
+}
+
+function assertTrackedExposure(exposure: RwaTrackedStrategyExposure) {
+  if (
+    !exposure.complete
+    || !Number.isFinite(exposure.spotQuantityXaut)
+    || !Number.isFinite(exposure.perpetualQuantityXaut)
+    || exposure.spotQuantityXaut < 0
+    || exposure.perpetualQuantityXaut < 0
+    || !Number.isFinite(exposure.attributionSince)
+    || exposure.attributionSince < 0
+    || exposure.strategyOrderPrefixes.length === 0
+    || exposure.strategyOrderPrefixes.some((prefix) => !prefix)
+  ) {
+    throw new RwaExecutionSafetyError(
+      "strategy_ownership_ambiguous",
+      "策略持仓归属记录不完整，已拒绝自动退出并要求人工核对。",
+    );
+  }
+}
+
+function assertPositionAttribution(
+  attribution: RwaPositionAttributionSnapshot,
+  exposure: RwaTrackedStrategyExposure,
+  snapshotFetchedAt: number,
+) {
+  if (
+    attribution.coverage !== "complete"
+    || attribution.externalPositionActivity
+    || !Number.isFinite(attribution.checkedFrom)
+    || !Number.isFinite(attribution.checkedThrough)
+    || attribution.checkedFrom > exposure.attributionSince
+    || attribution.checkedThrough < snapshotFetchedAt
+    || attribution.checkedThrough < attribution.checkedFrom
+  ) {
+    throw new RwaExecutionSafetyError(
+      "strategy_ownership_ambiguous",
+      "交易所活动连续性无法完整证明策略持仓归属，已拒绝自动退出并要求人工核对。",
+    );
+  }
+}
+
+function assertValidProviderSnapshot<TPermissions extends RwaVenuePermissions>(
+  market: RwaProviderPreflightSnapshot<TPermissions>,
+) {
+  const requiredNonNegative = [
+    market.fetchedAt,
+    market.availableUsdt,
+    market.existingSpotQuantityXaut,
+    market.existingPerpetualQuantityXaut,
+    market.spot.minOrderQty,
+    market.spot.qtyStep,
+    market.spot.minNotionalUsd,
+    market.spot.priceTick,
+    market.spot.bid,
+    market.spot.ask,
+    market.perpetual.minOrderQty,
+    market.perpetual.qtyStep,
+    market.perpetual.minNotionalUsd,
+    market.perpetual.priceTick,
+    market.perpetual.bid,
+    market.perpetual.ask,
+  ];
+  const optionalNonNegative = [
+    (market as { spotFreeXaut?: unknown }).spotFreeXaut,
+    (market as { spotLockedXaut?: unknown }).spotLockedXaut,
+  ].filter((value) => value !== undefined);
+  if (
+    !market.accountId
+    || requiredNonNegative.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    || optionalNonNegative.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    || !(market.spot.qtyStep > 0 && market.spot.minOrderQty > 0 && market.spot.priceTick > 0)
+    || !(market.perpetual.qtyStep > 0 && market.perpetual.minOrderQty > 0 && market.perpetual.priceTick > 0)
+    || !(market.spot.bid > 0 && market.spot.ask > 0 && market.perpetual.bid > 0 && market.perpetual.ask > 0)
+  ) {
+    throw new RwaExecutionSafetyError(
+      "provider_snapshot_invalid",
+      "交易所权威快照字段无效，已拒绝自动执行。",
+    );
+  }
+}
+
+function assertOwnershipMatches<TPermissions extends RwaVenuePermissions>(
+  exposure: RwaTrackedStrategyExposure,
+  market: RwaProviderPreflightSnapshot<TPermissions>,
+) {
+  const spotTolerance = Math.max(market.spot.qtyStep * 1e-6, 1e-9);
+  const perpetualTolerance = Math.max(market.perpetual.qtyStep * 1e-6, 1e-9);
+  if (
+    Math.abs(market.existingSpotQuantityXaut - exposure.spotQuantityXaut) > spotTolerance + 1e-12
+    || Math.abs(market.existingPerpetualQuantityXaut - exposure.perpetualQuantityXaut) > perpetualTolerance + 1e-12
+  ) {
+    throw new RwaExecutionSafetyError(
+      "strategy_ownership_ambiguous",
+      "交易所权威仓位与持久策略归属不一致，已拒绝自动退出并要求人工核对。",
+    );
+  }
+}
+
+function positionQuantity(order: RwaProviderOrder) {
+  const quantity = order.positionQuantityXaut ?? order.filledQuantityXaut;
+  if (
+    !Number.isFinite(order.requestedQuantityXaut)
+    || order.requestedQuantityXaut <= 0
+    || !Number.isFinite(order.filledQuantityXaut)
+    || order.filledQuantityXaut < 0
+    || order.filledQuantityXaut > order.requestedQuantityXaut * 1.01 + 1e-12
+    || !Number.isFinite(quantity)
+    || quantity < 0
+    || quantity > Math.max(order.requestedQuantityXaut, order.filledQuantityXaut) * 1.01 + 1e-12
+  ) {
+    throw new RwaExecutionSafetyError(
+      "provider_snapshot_invalid",
+      "交易所订单持仓变化数量无效，已停止自动执行。",
+    );
+  }
+  return quantity;
 }
 
 export function assessResidual(

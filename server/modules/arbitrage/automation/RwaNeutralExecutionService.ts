@@ -5,7 +5,11 @@ import {
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
 import { RwaBybitProviderError } from "./RwaBybitMainnetClient";
-import { RwaNeutralHedgeExecutionEngine } from "./RwaNeutralHedgeExecutionEngine";
+import {
+  RwaNeutralHedgeExecutionEngine,
+  trackedExposureFromExecution,
+  trackedExposureFromState,
+} from "./RwaNeutralHedgeExecutionEngine";
 import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
@@ -23,6 +27,7 @@ import {
   type RwaCredentialLifecycle,
   type RwaExecutionConfig,
   type RwaExecutionRecord,
+  RwaExecutionSafetyError,
   type RwaPreflightCheck,
   type RwaPreflightChallenge,
   type RwaPreflightReport,
@@ -94,10 +99,19 @@ export class RwaNeutralExecutionService {
       for (const execution of pending) {
         try {
           this.assertExecutionLeaseHeld();
-          await client.cancelStrategyOrders(execution.orderLinkPrefix);
-          await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}r`);
-          execution.state = "closed";
-          execution.message = "服务重启后已按 provider 权威状态完成安全退出。";
+          await this.hedgeEngine.closeAll(
+            client,
+            execution.orderLinkPrefix,
+            `${execution.orderLinkPrefix}r`,
+            trackedExposureFromExecution(execution),
+            (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+          );
+          const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
+          execution.state = fullyClosed ? "closed" : "partial_closed";
+          execution.message = fullyClosed
+            ? "服务重启后已按 provider 权威状态完成安全退出。"
+            : "服务重启后仍存在不可交易的策略残余，需要人工核对。";
+          if (!fullyClosed) state.config.killSwitchActive = true;
           execution.updatedAt = this.now();
         } catch (error) {
           execution.state = "manual_intervention";
@@ -597,11 +611,19 @@ export class RwaNeutralExecutionService {
             this.assertExecutionLeaseHeld();
             execution.state = "compensating";
             await this.persistExecution(state, execution);
-            this.assertExecutionLeaseHeld();
-            await client.cancelStrategyOrders(execution.orderLinkPrefix);
-            await this.hedgeEngine.closeAll(client, execution.orderLinkPrefix, `${execution.orderLinkPrefix}x`);
-            execution.state = "failed";
-            execution.message = "对冲未完成，已按 provider 权威状态撤单并退出未对冲敞口。";
+            await this.hedgeEngine.closeAll(
+              client,
+              execution.orderLinkPrefix,
+              `${execution.orderLinkPrefix}x`,
+              trackedExposureFromExecution(execution),
+              (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+            );
+            const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
+            execution.state = fullyClosed ? "failed" : "partial_closed";
+            execution.message = fullyClosed
+              ? "对冲未完成，已按 provider 权威状态撤单并退出未对冲敞口。"
+              : "对冲未完成且仍存在不可交易的策略残余，需要人工核对。";
+            if (!fullyClosed) state.config.killSwitchActive = true;
           } catch {
             execution.state = "manual_intervention";
             execution.message = "自动建立或退出对冲组合未能闭环，需要当前用户在交易所人工处理。";
@@ -629,17 +651,26 @@ export class RwaNeutralExecutionService {
       const client = await this.client();
       const metadata = await this.requireCredentialMetadata();
       assertAccountId(accountId, metadata.accountId);
+      const trackedExposure = trackedExposureFromState(state.executions);
       const execution = newExecution(this.store.ownerUserId, accountId, this.strategyOrderPrefix, scopedIdempotencyKey, "close-all", this.now());
       execution.state = "compensating";
       state.executions.push(execution);
       await this.store.writeState(state);
       this.assertExecutionLeaseHeld();
       try {
-        this.assertExecutionLeaseHeld();
-        await client.cancelStrategyOrders(this.strategyOrderPrefix);
-        await this.hedgeEngine.closeAll(client, this.strategyOrderPrefix, execution.orderLinkPrefix);
-        execution.state = "closed";
-        execution.message = "策略订单已撤销，现货与永续两侧仓位已按权威状态退出并确认。";
+        await this.hedgeEngine.closeAll(
+          client,
+          this.strategyOrderPrefix,
+          execution.orderLinkPrefix,
+          trackedExposure,
+          (side, order) => this.persistCloseFill(state, trackedExposure.sourceExecutionIds, side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+        );
+        const fullyClosed = finalizeTrackedExecutions(state, trackedExposure.sourceExecutionIds, this.now());
+        execution.state = fullyClosed ? "closed" : "partial_closed";
+        execution.message = fullyClosed
+          ? "策略订单已撤销，现货与永续两侧仓位已按权威状态退出并确认。"
+          : "策略订单已撤销，但仍存在不可交易的策略残余，需要人工核对。";
+        if (!fullyClosed) state.config.killSwitchActive = true;
       } catch (error) {
         execution.state = "manual_intervention";
         execution.errorCategory = category(error);
@@ -754,6 +785,16 @@ export class RwaNeutralExecutionService {
 
   private async persistExecution(state: RwaAutomationStateData, execution: RwaExecutionRecord) {
     execution.updatedAt = this.now();
+    await this.store.writeState(state);
+  }
+
+  private async persistCloseFill(
+    state: RwaAutomationStateData,
+    executionIds: string[],
+    side: "spot" | "linear",
+    filledQuantityXaut: number,
+  ) {
+    applyTrackedCloseFill(state, executionIds, side, filledQuantityXaut, this.now());
     await this.store.writeState(state);
   }
 
@@ -874,6 +915,12 @@ function newExecution(userId: string, accountId: string, userOrderPrefix: string
     message: "执行请求已接受。",
     reconciliation: null,
     finalizeIdempotency: null,
+    strategyPosition: {
+      coverage: "complete",
+      spotRemainingXaut: 0,
+      perpetualRemainingXaut: 0,
+      updatedAt: now,
+    },
     createdAt: now,
     updatedAt: now,
   };
@@ -960,8 +1007,64 @@ function providerError(error: unknown, fallback: string) {
 }
 
 function category(error: unknown) {
-  if (error instanceof RwaNeutralExecutionError || error instanceof RwaBybitProviderError) return error.category;
+  if (
+    error instanceof RwaNeutralExecutionError
+    || error instanceof RwaBybitProviderError
+    || error instanceof RwaExecutionSafetyError
+  ) return error.category;
   return "execution_failed";
+}
+
+function finalizeTrackedExecutions(state: RwaAutomationStateData, executionIds: string[], now: number) {
+  const ids = new Set(executionIds);
+  let fullyClosed = true;
+  for (const execution of state.executions) {
+    if (!ids.has(execution.executionId)) continue;
+    execution.strategyPosition.coverage = "complete";
+    execution.strategyPosition.updatedAt = now;
+    const hasResidual = execution.strategyPosition.spotRemainingXaut > 1e-12
+      || execution.strategyPosition.perpetualRemainingXaut > 1e-12;
+    fullyClosed = fullyClosed && !hasResidual;
+    execution.state = hasResidual ? "partial_closed" : "closed";
+    execution.message = hasResidual
+      ? "策略持久归属仍有不可交易残余，需要人工核对。"
+      : "策略持久归属仓位已由 close-all 权威确认退出。";
+    execution.updatedAt = now;
+  }
+  return fullyClosed;
+}
+
+function applyTrackedCloseFill(
+  state: RwaAutomationStateData,
+  executionIds: string[],
+  side: "spot" | "linear",
+  filledQuantityXaut: number,
+  now: number,
+) {
+  if (!Number.isFinite(filledQuantityXaut) || filledQuantityXaut < 0) {
+    throw new RwaExecutionSafetyError("provider_snapshot_invalid", "交易所成交数量无效，已停止自动退出。");
+  }
+  let remaining = filledQuantityXaut;
+  const ids = new Set(executionIds);
+  for (const execution of state.executions) {
+    if (!ids.has(execution.executionId) || remaining <= 1e-12) continue;
+    if (execution.strategyPosition.coverage !== "complete") {
+      throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "策略持仓归属记录不完整，已停止自动退出。");
+    }
+    const key = side === "spot" ? "spotRemainingXaut" : "perpetualRemainingXaut";
+    const applied = Math.min(execution.strategyPosition[key], remaining);
+    execution.strategyPosition[key] = normalizeStrategyQuantity(execution.strategyPosition[key] - applied);
+    execution.strategyPosition.updatedAt = now;
+    execution.updatedAt = now;
+    remaining -= applied;
+  }
+  if (remaining > 1e-9) {
+    throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "成交数量超过持久策略归属，已停止自动退出。");
+  }
+}
+
+function normalizeStrategyQuantity(value: number) {
+  return Math.max(0, Math.round(value * 1_000_000_000_000) / 1_000_000_000_000);
 }
 
 function normalizeCredentials(body: Record<string, unknown>): RwaBybitCredentials {

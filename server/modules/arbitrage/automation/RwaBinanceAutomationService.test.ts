@@ -335,6 +335,7 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
     const { current, store } = serviceHarness(directory, "user-a", client);
     const accountId = await activate(current);
     client.seedStrategyExposure(0.002, 0.002);
+    await seedTrackedHedge(store, accountId, 0.002);
     client.fillPlan.push(0.5, 1, 1);
     const closed = await current.closeAll({ accountId, idempotencyKey: "binance:close:1" });
     assert.equal(closed.state, "closed");
@@ -343,14 +344,24 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
 
     client.seedStrategyExposure(0.002, 0.002);
     const state = await store.readState();
-    state.executions.push(createNeutralExecutionRecord({
+    const pending = createNeutralExecutionRecord({
       userId: "user-a",
       accountId,
       userOrderPrefix: `rwa${store.userDomain}`,
       idempotencyKey: `${store.userDomain}:restart-pending`,
       challengeId: "restart-pending",
       now,
-    }));
+    });
+    pending.state = "compensating";
+    pending.spotOrder = providerOrder("restart-spot", `${pending.orderLinkPrefix}s1`, 0.002);
+    pending.perpetualOrders.push(providerOrder("restart-perp", `${pending.orderLinkPrefix}p1`, 0.002));
+    pending.strategyPosition = {
+      coverage: "complete",
+      spotRemainingXaut: 0.002,
+      perpetualRemainingXaut: 0.002,
+      updatedAt: now,
+    };
+    state.executions.push(pending);
     await store.writeState(state);
     const restarted = new RwaBinanceAutomationService(store, () => client, () => now, () => false);
     await restarted.initialize();
@@ -362,24 +373,123 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
   }
 });
 
-test("Binance close-all sizes spot exit from authoritative free balance and tolerates dust below filters", async () => {
+test("Binance close-all refuses an unexplained authoritative spot delta, including dust", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-close-dust-"));
   try {
     const client = new FakeBinanceClient();
-    const current = service(directory, "user-a", client);
+    const { current, store } = serviceHarness(directory, "user-a", client);
     const accountId = await activate(current);
     client.seedStrategyExposure(0.002, 0.002);
+    await seedTrackedHedge(store, accountId, 0.002);
     client.setAuthoritativeExposure({ spotFreeXaut: 0.001998, perpetualQuantityXaut: 0.002 });
+    const writesBefore = client.placedRequests.length;
     const closed = await current.closeAll({ accountId, idempotencyKey: "binance:close:dust:1" }) as any;
-    assert.equal(closed.state, "closed");
-    assert.equal(client.placedRequests.at(-1)?.category, "spot");
-    assert.equal(client.placedRequests.at(-1)?.quantityXaut, 0.0019);
-    assert.equal(closed.reconciliation?.dustResidual?.spot?.quantityXaut, 0.000098);
-    assert.equal(closed.reconciliation?.tradableResidual?.spot, null);
+    assert.equal(closed.state, "manual_intervention");
+    assert.equal(closed.errorCategory, "strategy_ownership_ambiguous");
+    assert.equal(client.placedRequests.length, writesBefore);
+    assert.equal(client.strategyCancelScopes.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("Binance close-all blocks same-net external activity and incomplete attribution before writes", async () => {
+  for (const mode of ["external", "incomplete"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-binance-attribution-${mode}-`));
+    try {
+      const client = new FakeBinanceClient();
+      const { current, store } = serviceHarness(directory, "user-a", client);
+      const accountId = await activate(current);
+      client.seedStrategyExposure(0.002, 0.002);
+      await seedTrackedHedge(store, accountId, 0.002);
+      if (mode === "external") client.externalPositionActivity = true;
+      else client.attributionCoverage = "incomplete";
+      const closed = await current.closeAll({
+        accountId,
+        idempotencyKey: `binance:close:attribution:${mode}`,
+      }) as any;
+      assert.equal(closed.state, "manual_intervention");
+      assert.equal(closed.errorCategory, "strategy_ownership_ambiguous");
+      assert.equal(client.placedRequests.length, 0);
+      assert.equal(client.strategyCancelScopes.length, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Binance persists base-asset fees and automatically exits the exact net spot position", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-net-position-"));
+  try {
+    const client = new FakeBinanceClient({ spotBuyBaseFeeXaut: 0.000002 });
+    const { current, store } = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const opened = await current.execute(executeInput(accountId, challenge, "binance:net-position:open")) as any;
+    assert.equal(opened.state, "hedged");
+    const openedState = await store.readState();
+    assert.equal(openedState.executions.at(-1)?.strategyPosition.spotRemainingXaut, 0.001998);
+    assert.equal(openedState.executions.at(-1)?.strategyPosition.perpetualRemainingXaut, 0.002);
+
+    const closed = await current.closeAll({
+      accountId,
+      idempotencyKey: "binance:net-position:close",
+    }) as any;
+    assert.equal(closed.state, "partial_closed");
+    assert.equal(
+      client.placedRequests.filter((request) => request.category === "spot" && request.side === "Sell").at(-1)?.quantityXaut,
+      0.0019,
+    );
+    assert.equal(closed.reconciliation?.dustResidual?.spot?.quantityXaut, 0.000098);
+    const closedState = await store.readState();
+    const sourceExecution = closedState.executions.find((item) => item.executionId === opened.executionId);
+    assert.equal(sourceExecution?.strategyPosition.spotRemainingXaut, 0.000098);
+    assert.equal(sourceExecution?.strategyPosition.perpetualRemainingXaut, 0);
+    assert.equal(sourceExecution?.state, "partial_closed");
+    assert.equal(closedState.config.killSwitchActive, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+async function seedTrackedHedge(
+  store: RwaAutomationPersistentStore<any, any>,
+  accountId: string,
+  quantityXaut: number,
+) {
+  const state = await store.readState();
+  const execution = createNeutralExecutionRecord({
+    userId: "user-a",
+    accountId,
+    userOrderPrefix: `rwa${store.userDomain}`,
+    idempotencyKey: `${store.userDomain}:seed:${state.executions.length}`,
+    challengeId: `seed:${state.executions.length}`,
+    now,
+  });
+  execution.state = "hedged";
+  execution.hedgedQuantityXaut = quantityXaut;
+  execution.strategyPosition = {
+    coverage: "complete",
+    spotRemainingXaut: quantityXaut,
+    perpetualRemainingXaut: quantityXaut,
+    updatedAt: now,
+  };
+  state.executions.push(execution);
+  await store.writeState(state);
+}
+
+function providerOrder(orderId: string, orderLinkId: string, quantityXaut: number): RwaProviderOrder {
+  return {
+    orderId,
+    orderLinkId,
+    status: "Filled",
+    requestedQuantityXaut: quantityXaut,
+    filledQuantityXaut: quantityXaut,
+    averagePrice: 4_000,
+    feeUsd: 0,
+    updatedAt: now,
+  };
+}
 
 test("Binance reconciliation detects external manual fill and finalize closes manual intervention safely", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-reconcile-"));
@@ -584,14 +694,19 @@ class FakeBinanceClient implements RwaBinanceClient {
   readonly placedRequests: RwaProviderOrderRequest[] = [];
   readonly strategyCancelScopes: string[] = [];
   cancelCount = 0;
+  private readonly spotBuyBaseFeeXaut: number;
+  attributionCoverage: "complete" | "incomplete" = "complete";
+  externalPositionActivity = false;
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
     fillPlan?: Array<number | "throw" | "new">;
     failLeverage?: boolean;
+    spotBuyBaseFeeXaut?: number;
   } = {}) {
     this.fillPlan = [...input.fillPlan ?? []];
     this.failLeverage = input.failLeverage ?? false;
+    this.spotBuyBaseFeeXaut = input.spotBuyBaseFeeXaut ?? 0;
     const currentPermissions = input.permissions ?? permissions();
     this.access = {
       accountId: "binance:test-account",
@@ -690,9 +805,12 @@ class FakeBinanceClient implements RwaBinanceClient {
     if (behavior === "throw") throw new Error("fake provider rejected order");
     const fillRatio = behavior === "new" ? 0 : behavior;
     const filledQuantityXaut = request.quantityXaut * fillRatio;
+    const positionQuantityXaut = request.category === "spot" && request.side === "Buy"
+      ? Math.max(0, filledQuantityXaut - this.spotBuyBaseFeeXaut)
+      : filledQuantityXaut;
     if (request.category === "spot") {
-      this.spotQuantity += request.side === "Buy" ? filledQuantityXaut : -filledQuantityXaut;
-      this.snapshot.spotFreeXaut = Math.max(0, this.snapshot.spotFreeXaut + (request.side === "Buy" ? filledQuantityXaut : -filledQuantityXaut));
+      this.spotQuantity += request.side === "Buy" ? positionQuantityXaut : -positionQuantityXaut;
+      this.snapshot.spotFreeXaut = Math.max(0, this.snapshot.spotFreeXaut + (request.side === "Buy" ? positionQuantityXaut : -positionQuantityXaut));
       this.snapshot.existingSpotQuantityXaut = Math.max(0, this.snapshot.spotFreeXaut + this.snapshot.spotLockedXaut);
     } else {
       this.perpetualQuantity += request.side === "Sell" ? filledQuantityXaut : -filledQuantityXaut;
@@ -704,6 +822,7 @@ class FakeBinanceClient implements RwaBinanceClient {
       status: behavior === "new" ? "New" : fillRatio < 1 ? "PartiallyFilled" : "Filled",
       requestedQuantityXaut: request.quantityXaut,
       filledQuantityXaut,
+      positionQuantityXaut,
       averagePrice: request.limitPrice,
       feeUsd: 0.001,
       updatedAt: now,
@@ -717,6 +836,19 @@ class FakeBinanceClient implements RwaBinanceClient {
 
   async cancelStrategyOrders(scope: string) {
     this.strategyCancelScopes.push(scope);
+  }
+
+  async readPositionAttribution(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }) {
+    return {
+      coverage: this.attributionCoverage,
+      externalPositionActivity: this.externalPositionActivity,
+      checkedFrom: input.since,
+      checkedThrough: now,
+    };
   }
 
   seedStrategyExposure(spotQuantity: number, perpetualQuantity: number) {

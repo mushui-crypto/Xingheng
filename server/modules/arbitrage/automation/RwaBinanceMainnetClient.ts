@@ -135,14 +135,18 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const spotBook = record(spotBookValue);
     const futuresBook = record(futuresBookValue);
     const premium = record(premiumValue);
-    const position = list(positionRiskValue)
+    const positionRow = list(positionRiskValue)
       .map(record)
-      .find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL && Math.abs(number(item.positionAmt)) > 0);
+      .find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL);
+    const positionAmount = positionRow
+      ? snapshotFiniteNumber(positionRow.positionAmt, "永续仓位数量")
+      : 0;
+    const position = Math.abs(positionAmount) > 0 ? positionRow : undefined;
     const spotBalances = list(spotAccount.balances).map(record);
     const usdt = spotBalances.find((item) => item.asset === "USDT");
     const xaut = spotBalances.find((item) => item.asset === "XAUT");
-    const spotFreeXaut = number(xaut?.free);
-    const spotLockedXaut = number(xaut?.locked);
+    const spotFreeXaut = xaut ? snapshotNonNegativeNumber(xaut.free, "现货可用数量") : 0;
+    const spotLockedXaut = xaut ? snapshotNonNegativeNumber(xaut.locked, "现货锁定数量") : 0;
     const futuresUsdt = list(futuresAccount.assets).map(record).find((item) => item.asset === "USDT");
     const fundingInfo = list(fundingInfoValue).map(record).find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL);
     const spotBid = positiveNumber(spotBook.bidPrice);
@@ -172,7 +176,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       spotLockedXaut,
       availableUsdt: positiveNumber(usdt?.free) + positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
       existingSpotQuantityXaut: spotFreeXaut + spotLockedXaut,
-      existingPerpetualQuantityXaut: Math.abs(number(position?.positionAmt)),
+      existingPerpetualQuantityXaut: Math.abs(positionAmount),
       openSpotOrderCount: list(spotOrdersValue).length,
       openPerpetualOrderCount: list(futuresOrdersValue).length,
       spot: {
@@ -263,6 +267,19 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
         if (orderId) await this.cancelOrder(category, orderId);
       }
     }
+  }
+
+  async readPositionAttribution(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }) {
+    return {
+      coverage: "incomplete" as const,
+      externalPositionActivity: false,
+      checkedFrom: input.since,
+      checkedThrough: this.now(),
+    };
   }
 
   async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {
@@ -356,7 +373,25 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const scope = category === "spot" ? "spot" : "futures";
     const path = category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
     const value = await this.signedRequest(scope, path, { symbol: RWA_BINANCE_SPOT_SYMBOL, orderId });
-    return toOrder(value, category);
+    if (category === "linear") return toOrder(value, category);
+    const row = record(value);
+    const filled = snapshotNonNegativeNumber(row.executedQty, "现货成交数量");
+    if (!(filled > 0)) return toOrder(value, category, 0);
+    const side = String(row.side ?? "").toUpperCase();
+    if (!["BUY", "SELL"].includes(side)) {
+      throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance 现货订单方向无效。");
+    }
+    const trades = list(await this.signedRequest("spot", "/api/v3/myTrades", {
+      symbol: RWA_BINANCE_SPOT_SYMBOL,
+      orderId,
+    })).map(record);
+    const baseFee = trades
+      .filter((trade) => String(trade.orderId ?? "") === orderId && trade.commissionAsset === "XAUT")
+      .reduce((total, trade) => total + snapshotNonNegativeNumber(trade.commission, "现货基础资产手续费"), 0);
+    const positionQuantityXaut = side === "BUY"
+      ? Math.max(0, filled - baseFee)
+      : filled + baseFee;
+    return toOrder(value, category, positionQuantityXaut);
   }
 
   private async loadProducts() {
@@ -572,7 +607,11 @@ function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
   }
 }
 
-function toOrder(value: unknown, category: "spot" | "linear"): RwaProviderOrder {
+function toOrder(
+  value: unknown,
+  category: "spot" | "linear",
+  positionQuantityXaut?: number,
+): RwaProviderOrder {
   const row = record(value);
   const requested = number(row.origQty);
   const filled = number(row.executedQty);
@@ -592,6 +631,7 @@ function toOrder(value: unknown, category: "spot" | "linear"): RwaProviderOrder 
     status,
     requestedQuantityXaut: requested,
     filledQuantityXaut: filled,
+    ...(positionQuantityXaut === undefined ? {} : { positionQuantityXaut }),
     averagePrice: positiveNumberOrNull(row.avgPrice ?? (filled > 0 ? number(row.cummulativeQuoteQty) / filled : 0)),
     feeUsd: category === "linear" ? Math.abs(number(row.commission)) : 0,
     updatedAt: number(row.updateTime ?? row.time ?? Date.now()),
@@ -719,6 +759,22 @@ function positiveNumber(value: unknown) {
 function number(value: unknown) {
   const parsed = Number(value ?? 0);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function snapshotFiniteNumber(value: unknown, label: string) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return parsed;
+}
+
+function snapshotNonNegativeNumber(value: unknown, label: string) {
+  const parsed = snapshotFiniteNumber(value, label);
+  if (parsed < 0) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return parsed;
 }
 
 function boolean(value: unknown) {
