@@ -10,7 +10,7 @@ import {
   PreflightModeNotice,
   PreflightWarnings,
 } from "./AutomationControlConsole";
-import { AutomationCredentials } from "./AutomationCredentials";
+import { AutomationCredentials, resolveCredentialVerificationPanel } from "./AutomationCredentials";
 import { AutomationParameters } from "./AutomationParameters";
 import { AutomationPositions } from "./AutomationPositions";
 import { AutomationSafety } from "./AutomationSafety";
@@ -207,6 +207,54 @@ test("credential lifecycle states and exposure safeguards remain explicit", () =
   }
   assert.match(html, /先退出仓位/);
   assert.match(html, /人工处理订单与仓位/);
+});
+
+test("credential verification panel separates requirements, progress, failures and restored active state", () => {
+  const active = snapshot.credentials.find((credential) => credential.venue === "binance");
+  assert.ok(active);
+  const unconfigured = {
+    ...active,
+    accountId: null,
+    maskedKey: null,
+    lastVerifiedAt: null,
+    status: "unconfigured" as const,
+    verificationChecks: active.verificationChecks.map((check) => ({
+      ...check,
+      status: "pending" as const,
+    })),
+  };
+  const failure = {
+    action: "请等待服务恢复后重新提交。",
+    category: "automation_internal_error",
+    detail: "自动套利服务暂不可用。",
+    summary: "验证未通过，凭证未保存，账户仍未配置。",
+  };
+
+  const requirements = resolveCredentialVerificationPanel(unconfigured, false, undefined, "binance");
+  assert.equal(requirements.mode, "requirements");
+  assert.match(requirements.title, /尚未验证/);
+  assert.match(requirements.description, /不代表已经通过/);
+
+  const validating = resolveCredentialVerificationPanel(unconfigured, true, undefined, "binance");
+  assert.equal(validating.mode, "validating");
+  assert.match(validating.description, /返回成功前仍视为未配置/);
+
+  const failed = resolveCredentialVerificationPanel(unconfigured, false, failure, "binance");
+  assert.equal(failed.mode, "failed");
+  assert.match(failed.description, /凭证未保存，账户仍未配置/);
+
+  const restored = resolveCredentialVerificationPanel(active, false, undefined, "binance");
+  assert.equal(restored.mode, "verified");
+  assert.match(restored.title, /验证通过/);
+
+  const incomplete = resolveCredentialVerificationPanel({
+    ...active,
+    verificationChecks: active.verificationChecks.map((check, index) => (
+      index === 1 ? { ...check, status: "failed" as const } : check
+    )),
+  }, false, undefined, "binance");
+  assert.equal(incomplete.mode, "incomplete");
+  assert.match(incomplete.description, /不能视为已授权/);
 });
 
 test("step-up security surface stays task-focused and the QR fallback never embeds the setup URI", () => {

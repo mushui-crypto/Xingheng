@@ -451,6 +451,98 @@ export function presentAutomationConsoleError(error: unknown) {
   return { title: "套利自动化服务暂不可用", message: error.message, retryable: true };
 }
 
+export type CredentialAuthorizationFailure = {
+  action: string;
+  category: string;
+  detail: string;
+  summary: string;
+};
+
+export function presentCredentialAuthorizationError(
+  error: unknown,
+  hadConfiguredCredential: boolean,
+): CredentialAuthorizationFailure {
+  const summary = hadConfiguredCredential
+    ? "新凭证验证未通过，未保存；原 API 账户配置保持不变。"
+    : "验证未通过，凭证未保存，账户仍未配置。";
+
+  if (!(error instanceof AutomationConsoleContractError)) {
+    return {
+      action: "请检查网络连接，待服务恢复后重新提交。",
+      category: "network_or_client_error",
+      detail: "未取得服务端有效验证结果。",
+      summary,
+    };
+  }
+
+  const category = error.category ?? "unknown";
+  const detail = safeAutomationErrorMessage(error.category, error.message);
+  if (category === "provider_credential_invalid") {
+    return { action: "请核对 Binance API Key 与 Secret 后重新提交。", category, detail, summary };
+  }
+  if (["permission_rejected", "provider_permission_error"].includes(category)) {
+    return {
+      action: "请开启读取、现货与 USD-M Futures 权限，关闭提现权限，并确认使用 one-way 持仓模式后重试。",
+      category,
+      detail,
+      summary,
+    };
+  }
+  if (
+    category === "credential_unavailable"
+    || category === "credentials_unavailable"
+    || category === "credential_key_provider_unavailable"
+    || category.startsWith("credential_key_")
+  ) {
+    return {
+      action: "凭证加密服务当前不可用，请等待服务恢复后重试；无需在 Binance 重新创建 Key。",
+      category,
+      detail,
+      summary,
+    };
+  }
+  if (category === "binance_egress_ip_config_missing") {
+    return {
+      action: "请等待运维补齐 Binance 固定出口 IP 配置后再提交。",
+      category,
+      detail,
+      summary,
+    };
+  }
+  if (["binance_ip_whitelist_unconfirmed", "binance_ip_whitelist_mismatch"].includes(category)) {
+    return {
+      action: "请按页面公布的生产出口 IP 修正 Binance API Key 白名单后重试。",
+      category,
+      detail,
+      summary,
+    };
+  }
+  if (category === "provider_timestamp_error") {
+    return { action: "请等待服务端时间同步后重试。", category, detail, summary };
+  }
+  if (category === "provider_rate_limited") {
+    return { action: "请稍后重试，避免连续重复提交。", category, detail, summary };
+  }
+  if (["provider_unavailable", "provider_invalid_response"].includes(category)) {
+    return { action: "Binance 私有接口暂不可用，请稍后重试。", category, detail, summary };
+  }
+  if (category === "automation_internal_error") {
+    return {
+      action: "服务端内部异常尚未修复，请等待服务恢复后重新提交。",
+      category,
+      detail,
+      summary,
+    };
+  }
+
+  return {
+    action: "请根据服务端反馈修正后重试；不要连续重复提交。",
+    category,
+    detail,
+    summary,
+  };
+}
+
 export function isAccountMismatchError(error: unknown) {
   return error instanceof AutomationConsoleContractError && ["account_mismatch", "credential_account_mismatch"].includes(error.category ?? "");
 }

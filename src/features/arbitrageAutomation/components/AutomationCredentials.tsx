@@ -1,5 +1,9 @@
 import { AlertTriangle, CheckCircle2, Clipboard, Clock3, ExternalLink, Eye, EyeOff, KeyRound, Plus, RotateCw, Trash2, XCircle } from "lucide-react";
 import React, { useMemo, useState } from "react";
+import {
+  presentCredentialAuthorizationError,
+  type CredentialAuthorizationFailure,
+} from "../../../api/arbitrageAutomationConsole";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 import type { AutomationCredentialSummary, AutomationVenue, CredentialDraft } from "../model/controlConsoleTypes";
@@ -27,7 +31,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
   const [open, setOpen] = useState(false);
   const [selectedVenue, setSelectedVenue] = useState<AutomationVenue>("bybit");
   const [drafts, setDrafts] = useState<Record<AutomationVenue, VenueDraft>>(() => createDrafts(credentials));
-  const [errors, setErrors] = useState<Partial<Record<AutomationVenue, string>>>({});
+  const [errors, setErrors] = useState<Partial<Record<AutomationVenue, CredentialAuthorizationFailure>>>({});
   const [savingVenue, setSavingVenue] = useState<AutomationVenue | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
@@ -79,7 +83,13 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
       await onValidate({ ...draft, venue: selectedVenue });
       closeAuthorization();
     } catch (error) {
-      setErrors((current) => ({ ...current, [selectedVenue]: error instanceof Error ? error.message : "授权验证失败。" }));
+      setErrors((current) => ({
+        ...current,
+        [selectedVenue]: presentCredentialAuthorizationError(
+          error,
+          Boolean(selectedCredential?.accountId && selectedCredential.status !== "unconfigured"),
+        ),
+      }));
       setDrafts((current) => ({ ...current, [selectedVenue]: clearSensitiveDraft(current[selectedVenue]) }));
     } finally {
       setSavingVenue(null);
@@ -142,14 +152,14 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
         </div>
 
         <div className="grid min-w-0 lg:grid-cols-[minmax(0,1.05fr)_minmax(360px,0.95fr)]">
-          <form className="min-w-0 space-y-4 p-4 sm:p-5" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
+          <form aria-busy={savingVenue === selectedVenue} className="min-w-0 space-y-4 p-4 sm:p-5" onSubmit={(event) => { event.preventDefault(); void submit(); }}>
             <div className="flex items-center justify-between gap-3"><div><h3 className="text-sm font-semibold text-white">{venueLabel(selectedVenue)} 授权表单</h3><p className="mt-1 text-xs text-muted">{needsPassphrase ? "API Key + Secret + Passphrase" : "API Key + Secret"}</p></div><CredentialStatus status={selectedCredential?.status ?? "unconfigured"} /></div>
             {selectedCredential ? <VenueStageNotice credential={selectedCredential} /> : null}
             <Field label="API Key"><SensitiveInput onChange={(value) => updateDraft("apiKey", value)} show={false} toggle={null} value={draft.apiKey} /></Field>
             <Field label="Secret"><SensitiveInput onChange={(value) => updateDraft("secret", value)} onToggle={() => setShowSecret((current) => !current)} show={showSecret} value={draft.secret} /></Field>
             {needsPassphrase ? <Field label="Passphrase"><SensitiveInput onChange={(value) => updateDraft("passphrase", value)} onToggle={() => setShowPassphrase((current) => !current)} show={showPassphrase} value={draft.passphrase ?? ""} /></Field> : null}
             {selectedCredential?.ipWhitelistConfigured === false || selectedCredential?.ipWhitelistConfigured === null ? <div className="flex items-start gap-2 border border-amber-400/40 bg-amber-400/[0.07] p-3 text-xs leading-5 text-amber-100" role="status"><AlertTriangle className="mt-0.5 shrink-0" size={15} /><span><strong className="font-semibold">IP 白名单未确认</strong><br />仍可继续验证和保存，但 API 凭证暴露后的风险更高，强烈建议先在交易所绑定生产出口 IP。</span></div> : null}
-            {errors[selectedVenue] ? <p className="border border-red-400/35 bg-red-400/[0.06] p-3 text-sm text-red-200" role="alert">{errors[selectedVenue]}</p> : null}
+            {errors[selectedVenue] ? <CredentialFailureNotice failure={errors[selectedVenue]} /> : null}
             <div className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">浏览器不持久化。API Key 与 apiSecret 仅通过当前登录用户 HTTPS 会话提交；服务端验证失败不会覆盖旧连接，Secret 永不回显。</div>
             <Button className="w-full" disabled={savingVenue !== null || !draft.apiKey.trim() || !draft.secret.trim() || (needsPassphrase && !(draft.passphrase ?? "").trim())} type="submit">{savingVenue === selectedVenue ? "验证并保存中" : "验证并保存授权"}</Button>
           </form>
@@ -161,7 +171,12 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
 
             <div className="mt-6 border-t border-white/10 pt-5"><h3 className="text-sm font-semibold text-white">权限配置步骤</h3><ol className="mt-3 space-y-3 text-xs leading-5 text-muted"><li><strong className="mr-2 text-white">1.</strong>在官方 API 管理创建系统生成型 API，并设置独立备注。</li><li><strong className="mr-2 text-white">2.</strong>强烈建议绑定全部生产出口 IP，降低凭证泄漏风险。</li><li><strong className="mr-2 text-white">3.</strong>{selectedVenue === "binance" ? "开启读取、现货交易与 USD-M Futures 交易权限，并使用 one-way 持仓模式。" : "开启读取、现货交易与合约交易权限。"}</li><li><strong className="mr-2 text-white">4.</strong>确认提现权限关闭，再复制 Key、Secret{needsPassphrase ? " 与 Passphrase" : ""}。</li><li><strong className="mr-2 text-white">5.</strong>提交后等待服务端逐项验证，不以静态勾选代替验证。</li></ol></div>
 
-            <div className="mt-6 border-t border-white/10 pt-5"><h3 className="text-sm font-semibold text-white">服务端验证结果</h3><div className="mt-3 space-y-2">{(selectedCredential?.verificationChecks ?? pendingChecks()).map((check) => <div className="flex items-start gap-2" key={check.id}>{check.status === "passed" ? <CheckCircle2 className="mt-0.5 shrink-0 text-emerald-300" size={15} /> : check.status === "warning" ? <AlertTriangle className="mt-0.5 shrink-0 text-amber-200" size={15} /> : check.status === "failed" ? <XCircle className="mt-0.5 shrink-0 text-red-300" size={15} /> : <Clock3 className="mt-0.5 shrink-0 text-muted" size={15} />}<div><p className="text-xs font-medium text-slate-200">{check.label}</p><p className="mt-0.5 text-xs leading-5 text-dim">{check.message}</p></div></div>)}</div></div>
+            <CredentialVerificationPanel
+              credential={selectedCredential}
+              failure={errors[selectedVenue]}
+              validating={savingVenue === selectedVenue}
+              venue={selectedVenue}
+            />
           </aside>
         </div>
       </Modal>
@@ -195,6 +210,137 @@ function createDrafts(credentials: AutomationCredentialSummary[]): Record<Automa
 }
 
 function clearSensitiveDraft(draft: VenueDraft): VenueDraft { return { ...draft, apiKey: "", secret: "", passphrase: "" }; }
+
+type CredentialVerificationMode = "failed" | "incomplete" | "requirements" | "validating" | "verified";
+
+export function resolveCredentialVerificationPanel(
+  credential: AutomationCredentialSummary | undefined,
+  validating: boolean,
+  failure: CredentialAuthorizationFailure | undefined,
+  venue: AutomationVenue,
+) {
+  if (validating || credential?.status === "validating") {
+    return {
+      checks: verificationRequirements(venue),
+      description: "正在由服务端连接交易所、核对权限并确认加密保存；返回成功前仍视为未配置。",
+      mode: "validating" as CredentialVerificationMode,
+      title: "正在验证",
+    };
+  }
+  if (failure) {
+    return {
+      checks: verificationRequirements(venue),
+      description: failure.summary,
+      mode: "failed" as CredentialVerificationMode,
+      title: "验证未通过",
+    };
+  }
+  const checks = credential?.verificationChecks ?? [];
+  const verified = credential?.status === "connected"
+    && checks.length > 0
+    && checks.every((check) => check.status === "passed");
+  if (verified) {
+    return {
+      checks,
+      description: "服务端已完成连接、权限与账户模式检查。",
+      mode: "verified" as CredentialVerificationMode,
+      title: "验证通过",
+    };
+  }
+  const hasServerResult = credential?.status !== undefined
+    && !["unconfigured", "validating"].includes(credential.status)
+    && checks.some((check) => check.status !== "pending");
+  if (hasServerResult) {
+    return {
+      checks,
+      description: "服务端已返回检查结果，但尚未全部通过，不能视为已授权。",
+      mode: "incomplete" as CredentialVerificationMode,
+      title: "验证未完整通过",
+    };
+  }
+  return {
+    checks: verificationRequirements(venue),
+    description: "尚未提交服务端验证。以下为授权必须满足的检查要求，不代表已经通过。",
+    mode: "requirements" as CredentialVerificationMode,
+    title: "验证要求 · 尚未验证",
+  };
+}
+
+function CredentialFailureNotice({ failure }: { failure: CredentialAuthorizationFailure }) {
+  return (
+    <div className="border border-red-400/35 bg-red-400/[0.06] p-3 text-sm text-red-100" role="alert">
+      <p className="font-semibold">{failure.summary}</p>
+      <p className="mt-1 leading-6">{failure.action}</p>
+      <p className="mt-2 text-xs leading-5 text-red-100/75">服务端反馈：{failure.detail}</p>
+      <p className="mt-1 break-all font-mono text-[11px] text-red-100/55">错误类别：{failure.category}</p>
+    </div>
+  );
+}
+
+function CredentialVerificationPanel({
+  credential,
+  failure,
+  validating,
+  venue,
+}: {
+  credential: AutomationCredentialSummary | undefined;
+  failure: CredentialAuthorizationFailure | undefined;
+  validating: boolean;
+  venue: AutomationVenue;
+}) {
+  const panel = resolveCredentialVerificationPanel(credential, validating, failure, venue);
+  const statusTone = panel.mode === "verified"
+    ? "success"
+    : panel.mode === "failed" || panel.mode === "incomplete"
+      ? "danger"
+      : panel.mode === "validating"
+        ? "info"
+        : "neutral";
+  return (
+    <div className="mt-6 border-t border-white/10 pt-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-white">{panel.title}</h3>
+        <StatusTag tone={statusTone}>
+          {panel.mode === "verified" ? "已验证" : panel.mode === "validating" ? "验证中" : panel.mode === "requirements" ? "尚未验证" : "未通过"}
+        </StatusTag>
+      </div>
+      <p className="mt-2 text-xs leading-5 text-muted">{panel.description}</p>
+      {panel.mode === "validating" ? (
+        <div className="mt-3 grid gap-2 text-xs text-slate-200 sm:grid-cols-3" role="status" aria-live="polite">
+          <span className="border border-sky-400/25 bg-sky-400/[0.05] px-3 py-2">1. 安全提交</span>
+          <span className="border border-sky-400/25 bg-sky-400/[0.05] px-3 py-2">2. 连接与权限核对</span>
+          <span className="border border-sky-400/25 bg-sky-400/[0.05] px-3 py-2">3. 加密保存确认</span>
+        </div>
+      ) : null}
+      {panel.mode === "verified" && credential ? (
+        <dl className="mt-3 grid gap-2 border border-emerald-400/20 bg-emerald-400/[0.04] p-3 text-xs sm:grid-cols-2">
+          <div><dt className="text-muted">Masked Key</dt><dd className="mt-1 font-mono text-white">{credential.maskedKey ?? "-"}</dd></div>
+          <div><dt className="text-muted">最近验证</dt><dd className="mt-1 text-white">{credential.lastVerifiedAt ? formatDate(credential.lastVerifiedAt) : "-"}</dd></div>
+        </dl>
+      ) : null}
+      <div className="mt-3 space-y-2">
+        {panel.checks.map((check) => (
+          <div className="flex items-start gap-2" key={check.id}>
+            {panel.mode === "requirements" || panel.mode === "validating" || panel.mode === "failed"
+              ? <Clock3 className={`mt-0.5 shrink-0 ${panel.mode === "validating" ? "text-sky-300" : "text-muted"}`} size={15} />
+              : check.status === "passed"
+                ? <CheckCircle2 className="mt-0.5 shrink-0 text-emerald-300" size={15} />
+                : check.status === "warning"
+                  ? <AlertTriangle className="mt-0.5 shrink-0 text-amber-200" size={15} />
+                  : check.status === "failed"
+                    ? <XCircle className="mt-0.5 shrink-0 text-red-300" size={15} />
+                    : <Clock3 className="mt-0.5 shrink-0 text-muted" size={15} />}
+            <div>
+              <p className="text-xs font-medium text-slate-200">{check.label}</p>
+              <p className="mt-0.5 text-xs leading-5 text-dim">{check.message}</p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function CredentialStatus({ status }: { status: AutomationCredentialSummary["status"] }) {
   const labels: Record<AutomationCredentialSummary["status"], string> = { unconfigured: "未配置", validating: "校验中", connected: "已连接", permission_incomplete: "权限不完整", ip_unbound: "IP 未绑定", expired: "已失效", revoked: "已撤销", rotation_required: "需轮换", not_implemented: "暂未接入" };
   const tone = status === "connected" ? "success" : status === "validating" ? "info" : status === "unconfigured" || status === "not_implemented" ? "neutral" : status === "rotation_required" ? "warning" : "danger";
@@ -241,11 +387,14 @@ function accountModeLabel(value: string) {
 }
 function Field({ children, label }: { children: React.ReactNode; label: string }) { return <label className="xh-account-modal-field"><span>{label}</span>{children}</label>; }
 function SensitiveInput({ onChange, onToggle, show, toggle, value }: { onChange: (value: string) => void; onToggle?: () => void; show: boolean; toggle?: null; value: string }) { return <span className="relative block"><input autoCapitalize="none" autoComplete="off" className="xh-account-modal-control pr-12" onChange={(event) => onChange(event.target.value)} spellCheck={false} type={show ? "text" : "password"} value={value} />{toggle === null ? null : <button aria-label={show ? "隐藏敏感字段" : "显示敏感字段"} className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-muted hover:text-white" onClick={onToggle} type="button">{show ? <EyeOff size={16} /> : <Eye size={16} />}</button>}</span>; }
-function pendingChecks(): AutomationCredentialSummary["verificationChecks"] { return [
-  { id: "ip_bound", label: "生产出口 IP 已绑定", status: "pending", message: "等待提交后由服务端验证。" },
-  { id: "read", label: "读取权限", status: "pending", message: "等待提交后由服务端验证。" },
-  { id: "spot_trade", label: "现货交易权限", status: "pending", message: "等待提交后由服务端验证。" },
-  { id: "contract_trade", label: "合约交易权限", status: "pending", message: "等待提交后由服务端验证。" },
-  { id: "withdraw_disabled", label: "提现权限关闭", status: "pending", message: "必须由服务端确认 withdraw=false。" },
-  { id: "account_mode", label: "账户模式满足要求", status: "pending", message: "等待服务端读取账户模式。" },
-]; }
+function verificationRequirements(venue: AutomationVenue): AutomationCredentialSummary["verificationChecks"] {
+  const binance = venue === "binance";
+  return [
+    { id: "ip_bound", label: "生产出口 IP 已绑定", status: "pending", message: binance ? "Binance Key 的固定 IP 白名单需与服务端出口 IP 一致。" : "建议将交易所 API Key 绑定生产出口 IP。" },
+    { id: "read", label: "读取权限", status: "pending", message: "服务端需确认账户读取权限可用。" },
+    { id: "spot_trade", label: binance ? "现货账户与交易权限" : "现货交易权限", status: "pending", message: "服务端需确认现货账户及交易权限可用。" },
+    { id: "contract_trade", label: binance ? "USD-M Futures 权限" : "合约交易权限", status: "pending", message: binance ? "服务端需确认 USD-M Futures 账户与交易权限可用。" : "服务端需确认合约交易权限可用。" },
+    { id: "withdraw_disabled", label: "提现权限关闭", status: "pending", message: "服务端必须确认 withdraw=false。" },
+    { id: "account_mode", label: binance ? "单向持仓模式" : "账户模式满足要求", status: "pending", message: binance ? "服务端需确认账户使用当前支持的 one-way 持仓模式。" : "服务端需确认账户模式满足当前阶段要求。" },
+  ];
+}

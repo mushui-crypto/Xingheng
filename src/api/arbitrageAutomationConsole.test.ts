@@ -15,6 +15,7 @@ import {
   isCredentialActivationReady,
   positionCloseStepUpIntent,
   presentAutomationConsoleError,
+  presentCredentialAuthorizationError,
   safetyActionStepUpIntent,
 } from "./arbitrageAutomationConsole";
 import { canonicalRequestDigest } from "./stepUpSecurity";
@@ -465,6 +466,43 @@ test("execution and credential errors are stable, category-specific and secret-s
     ),
   );
   assert.doesNotMatch(secretError.message, /fixture-binance-secret|raw provider/i);
+});
+
+test("credential authorization failures keep unconfigured state explicit and actionable", () => {
+  const provider = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(502, "Binance unavailable", null, "provider_unavailable"),
+    false,
+  );
+  assert.match(provider.summary, /凭证未保存，账户仍未配置/);
+  assert.match(provider.action, /稍后重试/);
+  assert.equal(provider.category, "provider_unavailable");
+
+  const permission = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(409, "permission", null, "permission_rejected"),
+    false,
+  );
+  assert.match(permission.action, /读取、现货与 USD-M Futures/);
+
+  const kms = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(503, "kms", null, "credential_key_provider_unavailable"),
+    false,
+  );
+  assert.match(kms.action, /凭证加密服务/);
+  assert.match(kms.action, /无需在 Binance 重新创建 Key/);
+
+  const unknown = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(500, "自动套利服务暂不可用。", null, "automation_internal_error"),
+    false,
+  );
+  assert.match(unknown.action, /服务端内部异常/);
+  assert.equal(unknown.category, "automation_internal_error");
+
+  const rotation = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(502, "down", null, "provider_unavailable"),
+    true,
+  );
+  assert.match(rotation.summary, /原 API 账户配置保持不变/);
+  assert.doesNotMatch(JSON.stringify([provider, permission, kms, unknown, rotation]), /fixture-binance-secret/i);
 });
 
 test("missing IP remains a warning while withdraw permission is a hard activation block", async () => {
