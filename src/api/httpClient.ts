@@ -2,6 +2,7 @@ import { handleUserAuthFailure } from "./session";
 
 type JsonRequestOptions = {
   acceptErrorResponse?: boolean;
+  clientRequestId?: string;
   mapErrorDetails?: (payload: unknown) => unknown;
   init?: RequestInit;
   userAuthFailure?: boolean | ((error: {
@@ -16,14 +17,25 @@ export class HttpRequestError extends Error {
   retryAfter: string | null;
   category: string | null;
   details: unknown;
+  requestId: string | null;
+  responseFormat: "json" | "non_json";
 
-  constructor(message: string, response: Response, category: string | null = null, details: unknown = null) {
+  constructor(
+    message: string,
+    response: Response,
+    category: string | null = null,
+    details: unknown = null,
+    requestId: string | null = null,
+    responseFormat: "json" | "non_json" = "json",
+  ) {
     super(message);
     this.name = "HttpRequestError";
     this.status = response.status;
     this.retryAfter = response.headers.get("Retry-After");
     this.category = category;
     this.details = details;
+    this.requestId = requestId;
+    this.responseFormat = responseFormat;
   }
 }
 
@@ -47,7 +59,11 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
     throw error;
   }
 
-  const payload = await response.json().catch(() => null);
+  let responseFormat: "json" | "non_json" = "json";
+  const payload = await response.json().catch(() => {
+    responseFormat = "non_json";
+    return null;
+  });
   if (!response.ok) {
     const category = typeof payload?.category === "string" ? payload.category : null;
     const shouldHandleAuthFailure = typeof options.userAuthFailure === "function"
@@ -62,6 +78,11 @@ export async function requestJson<T>(input: RequestInfo | URL, fallbackMessage: 
       response,
       category,
       options.mapErrorDetails?.(payload) ?? null,
+      response.headers.get("x-request-id")
+        ?? response.headers.get("x-correlation-id")
+        ?? options.clientRequestId
+        ?? null,
+      responseFormat,
     );
   }
 

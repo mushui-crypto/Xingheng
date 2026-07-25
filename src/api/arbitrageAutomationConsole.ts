@@ -104,6 +104,7 @@ export class AutomationConsoleContractError extends Error {
   retryAfterSeconds: number | null;
   category: string | null;
   details: AutomationErrorDetails | null;
+  requestId: string | null;
 
   constructor(
     status: number,
@@ -111,6 +112,7 @@ export class AutomationConsoleContractError extends Error {
     retryAfterSeconds: number | null = null,
     category: string | null = null,
     details: AutomationErrorDetails | null = null,
+    requestId: string | null = null,
   ) {
     super(message);
     this.name = "AutomationConsoleContractError";
@@ -118,6 +120,7 @@ export class AutomationConsoleContractError extends Error {
     this.retryAfterSeconds = retryAfterSeconds;
     this.category = category;
     this.details = details;
+    this.requestId = requestId;
   }
 }
 
@@ -455,6 +458,7 @@ export type CredentialAuthorizationFailure = {
   action: string;
   category: string;
   detail: string;
+  requestId: string | null;
   summary: string;
 };
 
@@ -467,24 +471,36 @@ export function presentCredentialAuthorizationError(
     : "验证未通过，凭证未保存，账户仍未配置。";
 
   if (!(error instanceof AutomationConsoleContractError)) {
+    if (error instanceof Error && error.name === "StepUpCancelledError") {
+      return {
+        action: "二次身份验证已取消；如需继续，请重新提交授权。",
+        category: "step_up_cancelled",
+        detail: "凭证验证请求尚未发送。",
+        requestId: null,
+        summary,
+      };
+    }
     return {
       action: "请检查网络连接，待服务恢复后重新提交。",
       category: "network_or_client_error",
       detail: "未取得服务端有效验证结果。",
+      requestId: null,
       summary,
     };
   }
 
   const category = error.category ?? "unknown";
   const detail = safeAutomationErrorMessage(error.category, error.message);
+  const requestId = error.requestId;
   if (category === "provider_credential_invalid") {
-    return { action: "请核对 Binance API Key 与 Secret 后重新提交。", category, detail, summary };
+    return { action: "请核对 Binance API Key 与 Secret 后重新提交。", category, detail, requestId, summary };
   }
   if (["permission_rejected", "provider_permission_error"].includes(category)) {
     return {
       action: "请开启读取、现货与 USD-M Futures 权限，关闭提现权限，并确认使用 one-way 持仓模式后重试。",
       category,
       detail,
+      requestId,
       summary,
     };
   }
@@ -498,6 +514,7 @@ export function presentCredentialAuthorizationError(
       action: "凭证加密服务当前不可用，请等待服务恢复后重试；无需在 Binance 重新创建 Key。",
       category,
       detail,
+      requestId,
       summary,
     };
   }
@@ -506,6 +523,7 @@ export function presentCredentialAuthorizationError(
       action: "请等待运维补齐 Binance 固定出口 IP 配置后再提交。",
       category,
       detail,
+      requestId,
       summary,
     };
   }
@@ -514,23 +532,88 @@ export function presentCredentialAuthorizationError(
       action: "请按页面公布的生产出口 IP 修正 Binance API Key 白名单后重试。",
       category,
       detail,
+      requestId,
       summary,
     };
   }
   if (category === "provider_timestamp_error") {
-    return { action: "请等待服务端时间同步后重试。", category, detail, summary };
+    return { action: "请等待服务端时间同步后重试。", category, detail, requestId, summary };
   }
   if (category === "provider_rate_limited") {
-    return { action: "请稍后重试，避免连续重复提交。", category, detail, summary };
+    return { action: "请稍后重试，避免连续重复提交。", category, detail, requestId, summary };
   }
   if (["provider_unavailable", "provider_invalid_response"].includes(category)) {
-    return { action: "Binance 私有接口暂不可用，请稍后重试。", category, detail, summary };
+    return { action: "Binance 私有接口暂不可用，请稍后重试。", category, detail, requestId, summary };
+  }
+  if (category === "credential_validation_unavailable") {
+    return {
+      action: "Binance 凭证验证服务暂不可用，请等待后端恢复后重新提交。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (category === "credential_binding_unavailable") {
+    return {
+      action: "账户绑定未完成，请等待后端恢复后重试；本次凭证未保存。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (category === "credential_binding_rollback_failed") {
+    return {
+      action: "账户绑定补偿未完成，系统已保持关闭；请联系运维核对后再操作。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (category === "request_aborted") {
+    return {
+      action: "本次浏览器请求已中止，未取得服务端验证结果；请保持页面开启后重试。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (category === "network_request_failed") {
+    return {
+      action: "浏览器未收到服务端响应，请检查网络后重试。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (/^http_\d+_non_json$/u.test(category)) {
+    return {
+      action: "上游返回了非 JSON 错误响应，请凭请求标识联系运维核对。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
+  }
+  if (/^http_\d+_uncategorized$/u.test(category)) {
+    return {
+      action: "服务端返回了未分类错误，请凭请求标识联系运维核对。",
+      category,
+      detail,
+      requestId,
+      summary,
+    };
   }
   if (category === "automation_internal_error") {
     return {
       action: "服务端内部异常尚未修复，请等待服务恢复后重新提交。",
       category,
       detail,
+      requestId,
       summary,
     };
   }
@@ -539,6 +622,7 @@ export function presentCredentialAuthorizationError(
     action: "请根据服务端反馈修正后重试；不要连续重复提交。",
     category,
     detail,
+    requestId,
     summary,
   };
 }
@@ -553,8 +637,10 @@ export function isCredentialActivationReady(credential: AutomationCredentialSumm
 }
 
 async function apiRequest<T = unknown>(path: string, fallback: string, options: { method?: string; body?: unknown; signal?: AbortSignal } = {}) {
+  const requestId = crypto.randomUUID();
   try {
     return await requestJson<T>(path, fallback, {
+      clientRequestId: requestId,
       userAuthFailure: ({ status, category }) => (
         status === 401
         || (status === 403 && !category?.startsWith("step_up_"))
@@ -563,21 +649,44 @@ async function apiRequest<T = unknown>(path: string, fallback: string, options: 
       init: {
         method: options.method ?? "GET",
         signal: options.signal,
-        headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+        headers: {
+          "X-Client-Request-Id": requestId,
+          ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       },
     });
   } catch (error) {
     if (error instanceof HttpRequestError) {
+      const category = error.category
+        ?? `http_${error.status}_${error.responseFormat === "json" ? "uncategorized" : "non_json"}`;
       throw new AutomationConsoleContractError(
         error.status,
-        safeAutomationErrorMessage(error.category, error.message),
+        safeAutomationErrorMessage(category, error.message),
         retrySeconds(error.retryAfter),
-        error.category,
+        category,
         isShadowErrorDetails(error.details) ? error.details : null,
+        error.requestId ?? requestId,
       );
     }
-    throw error;
+    if (isAbortError(error)) {
+      throw new AutomationConsoleContractError(
+        0,
+        "浏览器请求已中止，未取得服务端验证结果。",
+        null,
+        "request_aborted",
+        null,
+        requestId,
+      );
+    }
+    throw new AutomationConsoleContractError(
+      0,
+      "浏览器未收到服务端响应。",
+      null,
+      "network_request_failed",
+      null,
+      requestId,
+    );
   }
 }
 
@@ -1057,6 +1166,11 @@ function mapExecutionOrder(value: unknown): AutomationExecutionOrder | null {
   };
 }
 function retrySeconds(value: string | null) { if (!value) return null; const numeric = Number(value); return Number.isFinite(numeric) ? numeric : null; }
+function isAbortError(error: unknown) {
+  return error instanceof DOMException
+    ? error.name === "AbortError"
+    : error instanceof Error && error.name === "AbortError";
+}
 function idempotencyKey(scope: string) { return `${scope.replace(/[^A-Za-z0-9:_-]/g, "-")}:${crypto.randomUUID()}`.slice(0, 100); }
 
 function credentialRequestBody(draft: CredentialDraft) {

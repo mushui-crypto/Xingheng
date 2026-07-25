@@ -502,7 +502,20 @@ test("credential authorization failures keep unconfigured state explicit and act
     true,
   );
   assert.match(rotation.summary, /原 API 账户配置保持不变/);
-  assert.doesNotMatch(JSON.stringify([provider, permission, kms, unknown, rotation]), /fixture-binance-secret/i);
+  const tracked = presentCredentialAuthorizationError(
+    new AutomationConsoleContractError(
+      503,
+      "API 凭证验证失败。",
+      null,
+      "http_503_non_json",
+      null,
+      "edge-request-503",
+    ),
+    false,
+  );
+  assert.equal(tracked.requestId, "edge-request-503");
+  assert.match(tracked.action, /非 JSON/);
+  assert.doesNotMatch(JSON.stringify([provider, permission, kms, unknown, rotation, tracked]), /fixture-binance-secret/i);
 });
 
 test("missing IP remains a warning while withdraw permission is a hard activation block", async () => {
@@ -533,6 +546,91 @@ test("account mismatch remains recognizable so the UI can reload venue state", (
   );
 });
 
+test("credential PUT preserves route JSON category and request id", async () => {
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    await assert.rejects(
+      () => client.validateCredential(binanceCredentialDraft(), "fixture-step-up-token"),
+      (error: unknown) => error instanceof AutomationConsoleContractError
+        && error.status === 502
+        && error.category === "provider_credential_invalid"
+        && error.requestId === "route-request-1",
+    );
+  }, {
+    credentialPut: () => jsonResponse({
+      category: "provider_credential_invalid",
+      message: "交易所拒绝了当前 API 凭证。",
+    }, 502, { "X-Request-Id": "route-request-1" }),
+  });
+});
+
+test("credential PUT classifies non-JSON 502 and 503 without exposing the response body", async () => {
+  for (const status of [502, 503]) {
+    await withAutomationFetch([], async () => {
+      const client = createUserAutomationConsoleClient();
+      await client.load();
+      await assert.rejects(
+        () => client.validateCredential(binanceCredentialDraft(), "fixture-step-up-token"),
+        (error: unknown) => {
+          assert.ok(error instanceof AutomationConsoleContractError);
+          assert.equal(error.status, status);
+          assert.equal(error.category, `http_${status}_non_json`);
+          assert.equal(error.requestId, `edge-${status}`);
+          assert.doesNotMatch(error.message, /gateway raw body/i);
+          return true;
+        },
+      );
+    }, {
+      credentialPut: () => new Response("gateway raw body", {
+        status,
+        headers: { "Content-Type": "text/html", "X-Correlation-Id": `edge-${status}` },
+      }),
+    });
+  }
+});
+
+test("credential PUT classifies AbortError before the route without losing a client request id", async () => {
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    await assert.rejects(
+      () => client.validateCredential(binanceCredentialDraft(), "fixture-step-up-token"),
+      (error: unknown) => error instanceof AutomationConsoleContractError
+        && error.status === 0
+        && error.category === "request_aborted"
+        && Boolean(error.requestId),
+    );
+  }, {
+    credentialPut: () => {
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      throw error;
+    },
+  });
+});
+
+test("a successful credential response followed by a network failure never reuses the old success", async () => {
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    const active = await client.validateCredential(binanceCredentialDraft(), "fixture-step-up-token");
+    assert.equal(active.status, "connected");
+    await assert.rejects(
+      () => client.validateCredential(binanceCredentialDraft(), "fixture-step-up-token"),
+      (error: unknown) => error instanceof AutomationConsoleContractError
+        && error.status === 0
+        && error.category === "network_request_failed"
+        && Boolean(error.requestId),
+    );
+  }, {
+    credentialPut: (attempt) => {
+      if (attempt === 1) return jsonResponse(venueStatuses(true)[2]);
+      throw new TypeError("Failed to fetch");
+    },
+  });
+});
+
 type CapturedRequest = {
   url: string;
   method: string;
@@ -542,6 +640,7 @@ type CapturedRequest = {
 type FetchFixtureOptions = {
   opportunity?: ReturnType<typeof binanceOpportunity>;
   binanceEnabled?: boolean;
+  credentialPut?: (attempt: number) => Response | Promise<Response>;
   preflightError?: { status: number; body: unknown };
   executeError?: { status: number; category: string; message: string };
   onExecute?: () => void;
@@ -553,6 +652,7 @@ async function withAutomationFetch(
   options: FetchFixtureOptions = {},
 ) {
   const originalFetch = globalThis.fetch;
+  let credentialPutAttempts = 0;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -561,6 +661,10 @@ async function withAutomationFetch(
       : null;
     calls.push({ url, method, body });
 
+    if (url.endsWith("/venues/binance/credentials") && method === "PUT" && options.credentialPut) {
+      credentialPutAttempts += 1;
+      return options.credentialPut(credentialPutAttempts);
+    }
     if (url.endsWith("/preflight") && method === "POST" && options.preflightError) {
       return jsonResponse(options.preflightError.body, options.preflightError.status);
     }
@@ -924,9 +1028,22 @@ function assertExecutionPreflight(
   assert.equal("kind" in result, false, "expected an execution challenge");
 }
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...headers },
   });
+}
+
+function binanceCredentialDraft() {
+  return {
+    accountId: "binance:fixture-account",
+    venue: "binance" as const,
+    note: "",
+    apiKey: "fixture-binance-key",
+    secret: "fixture-binance-secret",
+    ipWhitelist: [],
+    defaultExecutionAccount: false,
+    assetStatisticsEnabled: false,
+  };
 }

@@ -1,5 +1,6 @@
 import type { ArbitrageDashboardService } from "../ArbitrageDashboardService";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
+import { randomUUID } from "node:crypto";
 import { CredentialStoreError } from "./RwaAutomationPersistentStore";
 import {
   RwaAutomationConnectorRegistry,
@@ -9,7 +10,7 @@ import {
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
 import type { RwaAutomationCandidate, RwaAutomationMode, RwaAutomationVenue, RwaVenueCredentialInput } from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
-import { categoryFromRwaAutomationError, stableHash } from "./RwaNeutralAutomationSecurity";
+import { categoryFromRwaAutomationError, sanitizeRwaAutomationError, stableHash } from "./RwaNeutralAutomationSecurity";
 import {
   StepUpSecurityError,
   canonicalRequestDigest,
@@ -100,42 +101,73 @@ export class RwaAutomationControlService {
       ? ["apiKey", "apiSecret", "passphrase", "stepUpToken"]
       : ["apiKey", "apiSecret", "stepUpToken"]);
     const credentials = normalizeCredentialInput(normalizedVenue, omitStepUp(body));
+    const requestId = randomUUID();
+    const diagnosticContext: CredentialPutDiagnosticContext = {
+      requestId,
+      venue: normalizedVenue,
+      userId,
+      sensitiveValues: [
+        credentials.apiKey,
+        credentials.apiSecret,
+        credentials.passphrase,
+        typeof body.stepUpToken === "string" ? body.stepUpToken : null,
+      ],
+    };
+    logCredentialPutEvent("route_received", diagnosticContext);
     this.admitRequest("credential", sourceIp, userId, normalizedVenue);
     const registry = this.registry(userId);
     const connector = registry.requireImplemented(normalizedVenue);
     const existingAccountId = await connector.getConfiguredAccountId();
-    return this.governed("credential", sourceIp, userId, connector.venue, existingAccountId ?? "new-account", async () => {
-      await registry.initialize();
-      await connector.assertRiskCapacity?.();
-      const credentialMutationSnapshot = await connector.captureCredentialMutationSnapshot?.();
-      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
-        operation: "credential_put",
-        venue: connector.venue,
-        accountId: existingAccountId ?? "new-account",
-        resourceId: null,
-        requestDigest: canonicalRequestDigest(credentials),
-        notionalUsd: null,
+    try {
+      const result = await this.governed("credential", sourceIp, userId, connector.venue, existingAccountId ?? "new-account", async () => {
+        await registry.initialize();
+        await connector.assertRiskCapacity?.();
+        const credentialMutationSnapshot = await connector.captureCredentialMutationSnapshot?.();
+        await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+          operation: "credential_put",
+          venue: connector.venue,
+          accountId: existingAccountId ?? "new-account",
+          resourceId: null,
+          requestDigest: canonicalRequestDigest(credentials),
+          notionalUsd: null,
+        });
+        logCredentialPutEvent("step_up_consumed", diagnosticContext);
+        logCredentialPutEvent("provider_validation_started", diagnosticContext);
+        let result;
+        try {
+          result = await connector.putCredentials(credentials);
+        } catch (error) {
+          throw normalizeCredentialPutError(error, "validation", diagnosticContext);
+        }
+        const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
+        if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
+          await rollbackCredentialMutation(connector, credentialMutationSnapshot, "identity", diagnosticContext);
+          throw withCredentialPutDetails(
+            new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。"),
+            diagnosticContext,
+            "binding",
+          );
+        }
+        try {
+          await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
+        } catch (error) {
+          await rollbackCredentialMutation(connector, credentialMutationSnapshot, "binding", diagnosticContext);
+          throw normalizeCredentialPutError(error, "binding", diagnosticContext);
+        }
+        this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
+        return result;
       });
-      let result;
-      try {
-        result = await connector.putCredentials(credentials);
-      } catch (error) {
-        throw normalizeCredentialPutError(error, "validation", connector.venue, userId);
-      }
-      const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
-      if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
-        await rollbackCredentialMutation(connector, credentialMutationSnapshot, "identity", userId);
-        throw new RwaAutomationControlError(503, "credential_identity_unavailable", "交易所账户身份未确认；已保持执行关闭。");
-      }
-      try {
-        await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
-      } catch (error) {
-        await rollbackCredentialMutation(connector, credentialMutationSnapshot, "binding", userId);
-        throw normalizeCredentialPutError(error, "binding", connector.venue, userId);
-      }
-      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue);
+      logCredentialPutEvent("response", diagnosticContext, { category: "success", statusCode: 200 });
       return result;
-    });
+    } catch (error) {
+      const augmented = augmentCredentialPutError(error, diagnosticContext);
+      logCredentialPutEvent("response", diagnosticContext, {
+        category: categoryOfCredentialPutError(augmented),
+        error: augmented,
+        statusCode: statusCodeOfCredentialPutError(augmented),
+      });
+      throw augmented;
+    }
   }
 
   async deleteCredentials(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
@@ -624,7 +656,12 @@ export class RwaAutomationControlService {
 }
 
 export class RwaAutomationControlError extends Error {
-  constructor(readonly statusCode: number, readonly category: string, message: string) {
+  constructor(
+    readonly statusCode: number,
+    readonly category: string,
+    message: string,
+    readonly details?: Record<string, unknown>,
+  ) {
     super(message);
   }
 }
@@ -653,6 +690,7 @@ export function automationErrorResponse(error: unknown) {
       body: {
         category: error.category,
         message: error.message,
+        ...(error instanceof RwaAutomationControlError && error.details ? error.details : {}),
         ...(error instanceof RwaNeutralExecutionError && error.details ? error.details : {}),
       },
     };
@@ -750,12 +788,26 @@ function safeMessage(error: unknown) {
 
 type CredentialPutStage = "validation" | "binding" | "identity_rollback" | "binding_rollback";
 
+type CredentialPutDiagnosticContext = {
+  requestId: string;
+  venue: RwaAutomationVenue;
+  userId: string;
+  sensitiveValues: Array<unknown>;
+};
+
 function normalizeCredentialPutError(
   error: unknown,
   stage: CredentialPutStage,
-  venue: RwaAutomationVenue,
-  userId: string,
+  context: CredentialPutDiagnosticContext,
 ) {
+  if (stage === "validation") {
+    logCredentialPutEvent("provider_validation_failed", context, {
+      category: categoryOfCredentialPutError(error),
+      error,
+      stage,
+      statusCode: statusCodeOfCredentialPutError(error),
+    });
+  }
   if (
     error instanceof RwaAutomationControlError
     || error instanceof RwaAutomationRegistryError
@@ -767,42 +819,54 @@ function normalizeCredentialPutError(
     || error instanceof CredentialStoreError
     || error instanceof CredentialKeyProviderError
   ) {
-    return error;
+    return withCredentialPutDetails(error, context, stage);
   }
   const category = stage === "binding" ? "credential_binding_unavailable" : "credential_validation_unavailable";
-  logCredentialPutDiagnostic(stage, venue, userId, error, category);
-  return new RwaAutomationControlError(
+  return withCredentialPutDetails(new RwaAutomationControlError(
     503,
     category,
     stage === "binding"
       ? "交易所账户绑定记录暂不可用，请稍后重试。"
-      : `${venueLabel(venue)} 凭证校验暂不可用，请稍后重试。`,
-  );
+      : `${venueLabel(context.venue)} 凭证校验暂不可用，请稍后重试。`,
+  ), context, stage, error);
 }
 
-function logCredentialPutDiagnostic(
-  stage: CredentialPutStage,
-  venue: RwaAutomationVenue,
-  userId: string,
-  error: unknown,
-  responseCategory: string,
+function logCredentialPutEvent(
+  event: "route_received" | "step_up_consumed" | "provider_validation_started" | "provider_validation_failed" | "response",
+  context: CredentialPutDiagnosticContext,
+  options: {
+    category?: string;
+    error?: unknown;
+    stage?: CredentialPutStage;
+    statusCode?: number;
+  } = {},
 ) {
-  console.error(JSON.stringify({
-    event: "rwa_automation_credential_put_failed",
-    stage,
-    venue,
-    responseCategory,
-    errorCategory: categoryFromRwaAutomationError(error),
-    errorClass: error instanceof Error ? error.constructor.name : typeof error,
-    userRef: stableHash(userId),
-  }));
+  const payload: Record<string, unknown> = {
+    event: "rwa_automation_credential_put",
+    stage: event,
+    requestId: context.requestId,
+    venue: context.venue,
+    userRef: stableHash(context.userId),
+  };
+  if (options.stage) payload.failureStage = options.stage;
+  if (options.category) payload.responseCategory = options.category;
+  if (options.statusCode !== undefined) payload.statusCode = options.statusCode;
+  if (options.error !== undefined) {
+    const providerCode = providerCodeFromError(options.error);
+    payload.errorCategory = categoryFromRwaAutomationError(options.error);
+    payload.errorClass = options.error instanceof Error ? options.error.constructor.name : typeof options.error;
+    if (providerCode !== null) payload.providerCode = providerCode;
+    payload.safeMessage = sanitizeCredentialPutDiagnosticMessage(options.error, context.sensitiveValues);
+  }
+  const writer = event === "provider_validation_failed" ? console.warn : console.info;
+  writer(JSON.stringify(payload));
 }
 
 async function rollbackCredentialMutation(
   connector: Pick<NonNullable<RwaAutomationConnectorLike>, "restoreCredentialMutationSnapshot" | "venue">,
   snapshot: unknown,
   stage: "identity" | "binding",
-  userId: string,
+  context: CredentialPutDiagnosticContext,
 ) {
   if (snapshot === undefined || !connector.restoreCredentialMutationSnapshot) {
     return;
@@ -810,8 +874,18 @@ async function rollbackCredentialMutation(
   try {
     await connector.restoreCredentialMutationSnapshot(snapshot);
   } catch (error) {
-    logCredentialPutDiagnostic(stage === "identity" ? "identity_rollback" : "binding_rollback", connector.venue, userId, error, "credential_binding_rollback_failed");
-    throw new RwaAutomationControlError(503, "credential_binding_rollback_failed", "交易所账户绑定回滚失败；系统已保持执行关闭，请稍后重试。");
+    logCredentialPutEvent("response", context, {
+      category: "credential_binding_rollback_failed",
+      error,
+      stage: stage === "identity" ? "identity_rollback" : "binding_rollback",
+      statusCode: 503,
+    });
+    throw withCredentialPutDetails(
+      new RwaAutomationControlError(503, "credential_binding_rollback_failed", "交易所账户绑定回滚失败；系统已保持执行关闭，请稍后重试。"),
+      context,
+      stage === "identity" ? "identity_rollback" : "binding_rollback",
+      error,
+    );
   }
 }
 
@@ -819,3 +893,92 @@ type RwaAutomationConnectorLike = {
   venue: RwaAutomationVenue;
   restoreCredentialMutationSnapshot?: (snapshot: unknown) => Promise<void>;
 };
+
+function augmentCredentialPutError(error: unknown, context: CredentialPutDiagnosticContext) {
+  return withCredentialPutDetails(error, context, "validation");
+}
+
+function withCredentialPutDetails(
+  error: unknown,
+  context: CredentialPutDiagnosticContext,
+  stage: CredentialPutStage,
+  sourceError?: unknown,
+) {
+  const existingStage = (
+    error instanceof RwaNeutralExecutionError
+      ? error.details?.stage
+      : error instanceof RwaAutomationControlError
+        ? error.details?.stage
+        : null
+  );
+  const details = {
+    requestId: context.requestId,
+    stage: typeof existingStage === "string" ? existingStage : stage,
+    ...(providerCodeFromError(sourceError ?? error) !== null
+      ? { providerCode: providerCodeFromError(sourceError ?? error) }
+      : {}),
+  };
+  if (error instanceof RwaNeutralExecutionError) {
+    return new RwaNeutralExecutionError(error.statusCode, error.category, error.message, {
+      ...error.details,
+      ...details,
+    });
+  }
+  if (error instanceof RwaAutomationControlError) {
+    return new RwaAutomationControlError(error.statusCode, error.category, error.message, {
+      ...error.details,
+      ...details,
+    });
+  }
+  return error;
+}
+
+function statusCodeOfCredentialPutError(error: unknown) {
+  if (
+    error instanceof RwaAutomationControlError
+    || error instanceof RwaAutomationRegistryError
+    || error instanceof RwaNeutralExecutionError
+    || error instanceof StepUpSecurityError
+    || error instanceof RwaAutomationGovernanceError
+  ) return error.statusCode;
+  if (
+    error instanceof StepUpSecurityStoreError
+    || error instanceof RwaAutomationExecutionLeaseError
+    || error instanceof CredentialStoreError
+    || error instanceof CredentialKeyProviderError
+  ) return 503;
+  return 500;
+}
+
+function categoryOfCredentialPutError(error: unknown) {
+  if (
+    error instanceof RwaAutomationControlError
+    || error instanceof RwaAutomationRegistryError
+    || error instanceof RwaNeutralExecutionError
+    || error instanceof StepUpSecurityError
+    || error instanceof StepUpSecurityStoreError
+    || error instanceof RwaAutomationGovernanceError
+    || error instanceof RwaAutomationExecutionLeaseError
+    || error instanceof CredentialStoreError
+    || error instanceof CredentialKeyProviderError
+  ) return error.category;
+  return "automation_internal_error";
+}
+
+function providerCodeFromError(error: unknown) {
+  const value = error instanceof RwaNeutralExecutionError
+    ? error.details?.providerCode
+    : error instanceof RwaAutomationControlError
+      ? error.details?.providerCode
+      : null;
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function sanitizeCredentialPutDiagnosticMessage(error: unknown, sensitiveValues: Array<unknown>) {
+  let message = sanitizeRwaAutomationError(error);
+  for (const value of sensitiveValues) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    message = message.split(value).join("[secret]");
+  }
+  return message;
+}

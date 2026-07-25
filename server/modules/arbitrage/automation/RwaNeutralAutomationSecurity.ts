@@ -15,6 +15,14 @@ export function sanitizeRwaAutomationError(error: unknown) {
 }
 
 export function categoryFromRwaAutomationError(error: unknown) {
+  if (
+    error
+    && typeof error === "object"
+    && "category" in error
+    && typeof (error as { category?: unknown }).category === "string"
+  ) {
+    return (error as { category: string }).category;
+  }
   const text = error instanceof Error ? error.message : String(error ?? "");
   if (/timeout|abort/i.test(text)) return "provider_timeout";
   if (/429|rate.?limit/i.test(text)) return "provider_rate_limited";

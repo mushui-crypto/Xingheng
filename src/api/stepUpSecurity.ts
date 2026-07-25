@@ -16,6 +16,7 @@ export class StepUpSecurityContractError extends Error {
     readonly category: string | null,
     message: string,
     readonly retryAfterSeconds: number | null = null,
+    readonly requestId: string | null = null,
   ) {
     super(message);
     this.name = "StepUpSecurityContractError";
@@ -115,10 +116,10 @@ export function presentStepUpError(error: unknown) {
     step_up_recovery_required: "此操作需要当前动态验证码或一个未使用的恢复码。",
     step_up_key_unavailable: "二次验证密钥服务暂不可用，请勿继续敏感操作。",
   };
-  if (error.category?.startsWith("step_up_storage_")) {
-    return "二次验证安全存储暂不可用，请勿继续敏感操作。";
-  }
-  return (error.category && messages[error.category]) || error.message;
+  const message = error.category?.startsWith("step_up_storage_")
+    ? "二次验证安全存储暂不可用，请勿继续敏感操作。"
+    : (error.category && messages[error.category]) || error.message;
+  return error.requestId ? `${message} 请求标识：${error.requestId}` : message;
 }
 
 export function isStepUpAuthFailure(error: unknown) {
@@ -137,8 +138,10 @@ async function stepUpRequest<T>(
   fallback: string,
   options: { method?: string; body?: unknown; signal?: AbortSignal } = {},
 ) {
+  const requestId = crypto.randomUUID();
   try {
     return await requestJson<T>(path, fallback, {
+      clientRequestId: requestId,
       userAuthFailure: ({ status, category }) => (
         status === 401
         || (status === 403 && !category?.startsWith("step_up_"))
@@ -146,20 +149,33 @@ async function stepUpRequest<T>(
       init: {
         method: options.method ?? "GET",
         signal: options.signal,
-        headers: options.body === undefined ? undefined : { "Content-Type": "application/json" },
+        headers: {
+          "X-Client-Request-Id": requestId,
+          ...(options.body === undefined ? {} : { "Content-Type": "application/json" }),
+        },
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       },
     });
   } catch (error) {
     if (error instanceof HttpRequestError) {
+      const category = error.category
+        ?? `http_${error.status}_${error.responseFormat === "json" ? "uncategorized" : "non_json"}`;
       throw new StepUpSecurityContractError(
         error.status,
-        error.category,
-        safeStepUpMessage(error.category, error.message),
+        category,
+        safeStepUpMessage(category, error.message),
         retrySeconds(error.retryAfter),
+        error.requestId ?? requestId,
       );
     }
-    throw error;
+    const aborted = error instanceof Error && error.name === "AbortError";
+    throw new StepUpSecurityContractError(
+      0,
+      aborted ? "request_aborted" : "network_request_failed",
+      aborted ? "二次身份验证请求已中止。" : "二次身份验证服务暂时无法连接。",
+      null,
+      requestId,
+    );
   }
 }
 

@@ -12,8 +12,9 @@ import {
   EyeOff,
   XCircle,
 } from "lucide-react";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
+  AutomationConsoleContractError,
   credentialDeleteStepUpIntent,
   credentialStepUpIntent,
   executionStepUpIntent,
@@ -91,6 +92,10 @@ class StepUpCancelledError extends Error {
   }
 }
 
+export function shouldCancelStepUpForAccountScope(previousScope: string, nextScope: string) {
+  return previousScope !== nextScope;
+}
+
 export function AutomationControlConsole({
   client,
   onReload,
@@ -122,6 +127,7 @@ export function AutomationControlConsole({
   const accountScope = snapshot.credentials
     .map((credential) => `${credential.venue}:${credential.accountId ?? "-"}`)
     .join("|");
+  const stepUpAccountScopeRef = useRef(accountScope);
 
   useEffect(() => {
     setPreflight(null);
@@ -140,13 +146,15 @@ export function AutomationControlConsole({
   }, [securityClient]);
 
   useEffect(() => {
-    if (!stepUpPrompt) return;
+    const previousScope = stepUpAccountScopeRef.current;
+    stepUpAccountScopeRef.current = accountScope;
+    if (!stepUpPrompt || !shouldCancelStepUpForAccountScope(previousScope, accountScope)) return;
     stepUpPrompt.reject(new StepUpCancelledError());
     setStepUpPrompt(null);
     setStepUpCode("");
     setStepUpError("");
     setShowStepUpCode(false);
-  }, [accountScope, snapshot.generatedAt]);
+  }, [accountScope]);
 
   useEffect(() => {
     const clearPending = () => cancelStepUp();
@@ -278,7 +286,12 @@ export function AutomationControlConsole({
       );
       const credential = await client.validateCredential(draft, token);
       if (!isCredentialActivationReady(credential)) {
-        throw new Error("服务端签名、交易权限、提现关闭或账户模式验证未全部通过；旧连接保持不变。");
+        throw new AutomationConsoleContractError(
+          409,
+          "服务端签名、交易权限、提现关闭或账户模式验证未全部通过；旧连接保持不变。",
+          null,
+          "credential_verification_incomplete",
+        );
       }
       showToast(`${venueLabel(draft.venue)} API 授权已通过服务端验证；Secret 已从表单清空。`, "success");
       await onReload();

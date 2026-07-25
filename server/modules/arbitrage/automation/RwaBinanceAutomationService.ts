@@ -986,8 +986,20 @@ function providerError(error: unknown, fallback: string) {
       ? 503
       : ["binance_ip_whitelist_unconfirmed", "binance_ip_whitelist_mismatch"].includes(error.category)
         ? 409
+        : ["provider_credential_invalid", "provider_request_invalid"].includes(error.category)
+          ? 400
+          : error.category === "provider_region_restricted"
+            ? 451
+            : error.category === "provider_permission_error"
+              ? 403
+              : error.category === "provider_rate_limited"
+                ? 429
+                : error.category === "provider_timeout"
+                  ? 504
         : 502;
-    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+    return new RwaNeutralExecutionError(statusCode, error.category, error.message, {
+      providerCode: error.providerCode,
+    });
   }
   return new RwaNeutralExecutionError(502, "provider_unavailable", fallback);
 }

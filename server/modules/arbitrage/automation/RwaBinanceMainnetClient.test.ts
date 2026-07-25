@@ -95,6 +95,74 @@ test("Binance permission and provider errors are fail-closed and never echo raw 
   );
 });
 
+test("Binance client classifies provider credential, request, regional, timeout and non-json failures", async () => {
+  const requestInvalid = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      return json({ code: -1130, msg: "bad parameter apiKey=fake-key" }, 400);
+    },
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(requestInvalid.validateAccess(), (error: unknown) => {
+    assert.ok(error instanceof RwaBinanceProviderError);
+    assert.equal(error.category, "provider_request_invalid");
+    assert.equal(error.providerCode, -1130);
+    assert.doesNotMatch(error.message, /fake-key/);
+    return true;
+  });
+
+  const invalidKey = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      return json({ code: -2008, msg: "Invalid Api-Key ID." }, 400);
+    },
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(invalidKey.validateAccess(), providerError("provider_credential_invalid"));
+
+  const regionBlocked = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      return new Response("<html>blocked</html>", { status: 451, headers: { "Content-Type": "text/html" } });
+    },
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(regionBlocked.validateAccess(), providerError("provider_region_restricted"));
+
+  const timedOut = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    async () => {
+      const error = new Error("request timeout");
+      error.name = "AbortError";
+      throw error;
+    },
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(timedOut.validateAccess(), providerError("provider_timeout"));
+
+  const nonJson = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      return new Response("upstream unavailable", { status: 502, headers: { "Content-Type": "text/plain" } });
+    },
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  await assert.rejects(nonJson.validateAccess(), providerError("provider_unavailable"));
+});
+
 test("Binance IP whitelist validation is fail-closed for missing, unrestricted, wildcard, failed, and mismatched data", async () => {
   const missingConfigCalls: Array<{ path: string; signed: boolean; timestamp: string | null }> = [];
   const missingConfig = new RwaBinanceMainnetClient(

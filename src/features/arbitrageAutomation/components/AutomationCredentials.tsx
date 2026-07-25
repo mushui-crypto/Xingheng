@@ -273,6 +273,7 @@ function CredentialFailureNotice({ failure }: { failure: CredentialAuthorization
       <p className="mt-1 leading-6">{failure.action}</p>
       <p className="mt-2 text-xs leading-5 text-red-100/75">服务端反馈：{failure.detail}</p>
       <p className="mt-1 break-all font-mono text-[11px] text-red-100/55">错误类别：{failure.category}</p>
+      {failure.requestId ? <p className="mt-1 break-all font-mono text-[11px] text-red-100/55">请求标识：{failure.requestId}</p> : null}
     </div>
   );
 }

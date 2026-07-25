@@ -166,8 +166,12 @@ test("credential fields are strict per venue and rejected values never reach the
 
 test("credential put unknown connector failures are stage-mapped and sanitized", async () => {
   const diagnostics: string[] = [];
-  const originalConsoleError = console.error;
-  console.error = (value?: unknown, ...rest: unknown[]) => {
+  const originalConsoleInfo = console.info;
+  const originalConsoleWarn = console.warn;
+  console.info = (value?: unknown, ...rest: unknown[]) => {
+    diagnostics.push([value, ...rest].map((item) => String(item)).join(" "));
+  };
+  console.warn = (value?: unknown, ...rest: unknown[]) => {
     diagnostics.push([value, ...rest].map((item) => String(item)).join(" "));
   };
   try {
@@ -192,15 +196,20 @@ test("credential put unknown connector failures are stage-mapped and sanitized",
       (error: unknown) => error instanceof RwaAutomationControlError
         && error.statusCode === 503
         && error.category === "credential_validation_unavailable"
-        && error.message === "Binance 凭证校验暂不可用，请稍后重试。",
+        && error.message === "Binance 凭证校验暂不可用，请稍后重试。"
+        && typeof error.details?.requestId === "string"
+        && error.details.stage === "validation",
     );
-    assert.equal(diagnostics.length, 1);
-    assert.match(diagnostics[0] ?? "", /rwa_automation_credential_put_failed/);
-    assert.match(diagnostics[0] ?? "", /credential_validation_unavailable/);
-    assert.match(diagnostics[0] ?? "", /"stage":"validation"/);
-    assert.doesNotMatch(diagnostics[0] ?? "", /very-secret|leaked-key|file:\/\/\/tmp\/secret\.json/);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"stage\":\"route_received\"")), true);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"stage\":\"step_up_consumed\"")), true);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"stage\":\"provider_validation_started\"")), true);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"stage\":\"provider_validation_failed\"")), true);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"stage\":\"response\"")), true);
+    assert.equal(diagnostics.some((entry) => entry.includes("\"responseCategory\":\"credential_validation_unavailable\"")), true);
+    assert.doesNotMatch(diagnostics.join("\n"), /very-secret|leaked-key|file:\/\/\/tmp\/secret\.json|binance-key|binance-secret|step-up-token-a/);
   } finally {
-    console.error = originalConsoleError;
+    console.info = originalConsoleInfo;
+    console.warn = originalConsoleWarn;
   }
 });
 
@@ -301,6 +310,51 @@ test("rotating Binance credentials restores previous encrypted state when bindin
     assert.deepEqual(restoredState.credentialAudit, expectedState.credentialAudit);
   } finally {
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("credential put preserves the most specific failure stage when outer catch augments details", async () => {
+  const diagnostics: string[] = [];
+  const originalConsoleInfo = console.info;
+  console.info = (value?: unknown, ...rest: unknown[]) => {
+    diagnostics.push([value, ...rest].map((item) => String(item)).join(" "));
+  };
+  try {
+    const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-binding-stage-"));
+    try {
+      const harness = createBinanceCredentialHarness(directory, {
+        recordCredentialBinding: async () => {
+          throw new Error("Authorization: Bearer should-not-log stepUpToken step-up-token-a path /tmp/secret");
+        },
+      });
+
+      await assert.rejects(
+        harness.control.putCredentials("user-a", sessionDomain, "binance", {
+          apiKey: "stage-key",
+          apiSecret: "stage-secret",
+          stepUpToken,
+        }),
+        (error: unknown) => {
+          assert.ok(error instanceof RwaAutomationControlError);
+          assert.equal(error.category, "credential_binding_unavailable");
+          assert.equal(error.details?.stage, "binding");
+          assert.equal(typeof error.details?.requestId, "string");
+          const response = automationErrorResponse(error);
+          assert.equal(response.body.category, "credential_binding_unavailable");
+          assert.equal((response.body as Record<string, unknown>).stage, "binding");
+          return true;
+        },
+      );
+
+      const responseLog = diagnostics.find((entry) => entry.includes("\"stage\":\"response\"") && entry.includes("\"responseCategory\":\"credential_binding_unavailable\""));
+      assert.ok(responseLog);
+      assert.match(responseLog, /"requestId":"[^"]+"/);
+      assert.doesNotMatch(responseLog, /stage-key|stage-secret|step-up-token-a|\/tmp\/secret/);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  } finally {
+    console.info = originalConsoleInfo;
   }
 });
 

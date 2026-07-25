@@ -9,6 +9,7 @@ import {
   AutomationControlConsole,
   PreflightModeNotice,
   PreflightWarnings,
+  shouldCancelStepUpForAccountScope,
 } from "./AutomationControlConsole";
 import { AutomationCredentials, resolveCredentialVerificationPanel } from "./AutomationCredentials";
 import { AutomationParameters } from "./AutomationParameters";
@@ -227,6 +228,7 @@ test("credential verification panel separates requirements, progress, failures a
     action: "请等待服务恢复后重新提交。",
     category: "automation_internal_error",
     detail: "自动套利服务暂不可用。",
+    requestId: "fixture-request",
     summary: "验证未通过，凭证未保存，账户仍未配置。",
   };
 
@@ -255,6 +257,15 @@ test("credential verification panel separates requirements, progress, failures a
   }, false, undefined, "binance");
   assert.equal(incomplete.mode, "incomplete");
   assert.match(incomplete.description, /不能视为已授权/);
+});
+
+test("snapshot refresh does not cancel TOTP while an actual account-scope change does", () => {
+  const unchanged = "bybit:bybit-primary|binance:-";
+  assert.equal(shouldCancelStepUpForAccountScope(unchanged, unchanged), false);
+  assert.equal(
+    shouldCancelStepUpForAccountScope(unchanged, "bybit:bybit-primary|binance:binance-primary"),
+    true,
+  );
 });
 
 test("step-up security surface stays task-focused and the QR fallback never embeds the setup URI", () => {

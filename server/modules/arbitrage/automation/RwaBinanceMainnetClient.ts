@@ -419,7 +419,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const url = new URL(path, scope === "spot" ? spotBaseUrl : futuresBaseUrl);
     url.search = query.toString();
     try {
-      return await this.parseResponse(await this.fetchFn(url, {
+      return await this.parseResponse(await this.fetchResponse(url, {
         method,
         headers: { Accept: "application/json", "X-MBX-APIKEY": this.credentials.apiKey },
         signal: AbortSignal.timeout(5_000),
@@ -448,34 +448,36 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   private async publicRequest(scope: "spot" | "futures", path: string, params: Record<string, string> = {}) {
     const url = new URL(path, scope === "spot" ? spotBaseUrl : futuresBaseUrl);
     for (const [key, value] of Object.entries(params)) url.searchParams.set(key, value);
-    return this.parseResponse(await this.fetchFn(url, {
+    return this.parseResponse(await this.fetchResponse(url, {
       headers: { Accept: "application/json" },
       signal: AbortSignal.timeout(5_000),
     }));
   }
 
-  private async parseResponse(response: Response) {
-    let payload: unknown;
+  private async fetchResponse(url: URL, init: RequestInit) {
     try {
-      payload = await response.json();
+      return await this.fetchFn(url, init);
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new RwaBinanceProviderError("provider_timeout", "Binance 私有接口响应超时。");
+      }
+      throw new RwaBinanceProviderError("provider_transport_error", "Binance 私有接口连接失败。");
+    }
+  }
+
+  private async parseResponse(response: Response) {
+    const rawBody = await response.text().catch(() => "");
+    let payload: unknown = null;
+    try {
+      payload = rawBody ? JSON.parse(rawBody) : null;
     } catch {
-      throw new RwaBinanceProviderError("provider_invalid_response", "Binance 返回了无法解析的响应。");
+      throw new RwaBinanceProviderError(categoryFromHttpStatus(response.status, "provider_invalid_response"), httpFailureMessage(response.status), null);
     }
     const root = record(payload);
     const code = Number(root.code ?? response.status);
     if (response.ok && !(Number.isFinite(code) && code < 0)) return payload;
-    const category = response.status === 429 || code === -1003
-      ? "provider_rate_limited"
-      : code === -1021
-        ? "provider_timestamp_error"
-        : [-2014, -2015].includes(code)
-          ? "provider_credential_invalid"
-          : [-2010, -2011, -2018, -2019].includes(code)
-            ? "provider_rejected"
-            : response.status === 401 || response.status === 403
-              ? "provider_permission_error"
-              : "provider_unavailable";
-    throw new RwaBinanceProviderError(category, `Binance 请求失败（code=${Number.isFinite(code) ? code : "unknown"}）。`, code);
+    const category = categoryFromBinanceFailure(response.status, code);
+    throw new RwaBinanceProviderError(category, humanMessageForBinanceFailure(category, code), Number.isFinite(code) ? code : null);
   }
 }
 
@@ -716,4 +718,48 @@ function list(value: unknown): unknown[] {
 
 function record(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function isAbortError(error: unknown) {
+  if (!error || typeof error !== "object") return false;
+  const name = "name" in error ? String((error as { name?: unknown }).name ?? "") : "";
+  return /abort|timeout/i.test(name);
+}
+
+function categoryFromHttpStatus(status: number, fallback: string) {
+  if (status === 429) return "provider_rate_limited";
+  if (status === 451) return "provider_region_restricted";
+  if (status === 401 || status === 403) return "provider_permission_error";
+  if (status >= 500) return "provider_unavailable";
+  return fallback;
+}
+
+function categoryFromBinanceFailure(status: number, code: number) {
+  if (status === 429 || code === -1003) return "provider_rate_limited";
+  if (code === -1021) return "provider_timestamp_error";
+  if (code === -1130) return "provider_request_invalid";
+  if (code === -2008 || code === -2014 || code === -2015) return "provider_credential_invalid";
+  if (code === -2010 || code === -2011 || code === -2018 || code === -2019) return "provider_rejected";
+  if (status === 451) return "provider_region_restricted";
+  if (status === 401 || status === 403) return "provider_permission_error";
+  if (status >= 500) return "provider_unavailable";
+  return "provider_unavailable";
+}
+
+function humanMessageForBinanceFailure(category: string, code: number) {
+  const suffix = Number.isFinite(code) ? `（code=${code}）` : "";
+  if (category === "provider_credential_invalid") return `Binance 未接受当前 API 凭证。${suffix}`;
+  if (category === "provider_request_invalid") return `Binance 拒绝了当前凭证请求格式。${suffix}`;
+  if (category === "provider_permission_error") return `Binance 账户权限或访问限制不满足要求。${suffix}`;
+  if (category === "provider_timestamp_error") return `Binance 时间校验失败。${suffix}`;
+  if (category === "provider_rate_limited") return `Binance 请求过于频繁。${suffix}`;
+  if (category === "provider_region_restricted") return `Binance 当前拒绝了该地区或网络访问。${suffix}`;
+  if (category === "provider_rejected") return `Binance 拒绝了本次请求。${suffix}`;
+  return httpFailureMessage(0, suffix);
+}
+
+function httpFailureMessage(status: number, suffix = "") {
+  if (status === 451) return `Binance 当前拒绝了该地区或网络访问。${suffix}`;
+  if (status >= 500) return `Binance 私有接口暂不可用。${suffix}`;
+  return `Binance 返回了无效或不可解析的响应。${suffix}`;
 }
