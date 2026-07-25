@@ -129,7 +129,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
   const challenges = new Map<string, AutomationPreflight>();
 
   const load = async (signal?: AbortSignal) => {
-    challenges.clear();
+    const previousAccountScope = latest ? executionAccountScope(latest.credentials) : null;
     const venues = await apiRequest<VenueStatusDto[]>(`${apiBase}/venues`, "API 账户状态加载失败。", { signal });
     const implemented = venues.filter((item) => item.implemented);
     const [opportunities, positions, pnl, audit, configs, accounts] = await Promise.all([
@@ -147,7 +147,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
         return account ? { venue: item.venue, account } : null;
       })),
     ]);
-    latest = buildSnapshot(
+    const next = buildSnapshot(
       venues,
       opportunities,
       positions,
@@ -156,6 +156,16 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       configs.filter((item): item is ConfigDto & { venue: AutomationVenue } => item !== null),
       accounts.filter((item): item is { venue: AutomationVenue; account: PrivateAccountDto } => item !== null),
     );
+    const nextAccountScope = executionAccountScope(next.credentials);
+    if (previousAccountScope !== null && previousAccountScope !== nextAccountScope) {
+      challenges.clear();
+    } else {
+      const now = Date.now();
+      for (const [challengeId, challenge] of challenges) {
+        if (challenge.expiresAt <= now) challenges.delete(challengeId);
+      }
+    }
+    latest = next;
     return latest;
   };
 
@@ -1026,6 +1036,13 @@ function mapPreflight(
 function requireLatest(snapshot: AutomationConsoleSnapshot | null) {
   if (!snapshot) throw new AutomationConsoleContractError(409, "账户状态尚未加载，请刷新后重试。", null, "snapshot_unavailable");
   return snapshot;
+}
+function executionAccountScope(credentials: AutomationCredentialSummary[]) {
+  return credentials
+    .filter((credential) => credential.implemented)
+    .map((credential) => `${credential.venue}:${credential.accountId ?? "-"}`)
+    .sort()
+    .join("|");
 }
 function requireCredential(snapshot: AutomationConsoleSnapshot, venue: AutomationVenue) {
   const credential = snapshot.credentials.find((item) => item.venue === venue);

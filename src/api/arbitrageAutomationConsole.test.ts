@@ -423,7 +423,21 @@ test("challenge expiry or server restart disarms local execution and repeated su
   assert.equal(executeCalls, 1);
 });
 
-test("refresh clears every in-memory execution challenge", async () => {
+test("same-account snapshot refresh preserves an unexpired execution challenge", async () => {
+  let executeCalls = 0;
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    const preflight = await client.requestPreflight("opportunity-binance-xaut", "arbitrage_entry");
+    assertExecutionPreflight(preflight);
+    await client.load();
+    const receipt = await client.confirmExecution(preflight.challengeId, "fixture-step-up-token");
+    assert.equal(receipt.execution?.state, "hedged");
+  }, { onExecute: () => { executeCalls += 1; } });
+  assert.equal(executeCalls, 1);
+});
+
+test("execution-account change still clears every in-memory challenge", async () => {
   await withAutomationFetch([], async () => {
     const client = createUserAutomationConsoleClient();
     await client.load();
@@ -435,7 +449,35 @@ test("refresh clears every in-memory execution challenge", async () => {
       (error: unknown) => error instanceof AutomationConsoleContractError
         && error.category === "challenge_invalid",
     );
+  }, {
+    venueStatuses: (attempt) => {
+      const statuses = venueStatuses(true);
+      if (attempt > 1 && statuses[2]?.credential) {
+        statuses[2].credential.accountId = "binance:other-account";
+      }
+      return statuses;
+    },
   });
+});
+
+test("snapshot refresh removes an expired execution challenge without sending execute", async () => {
+  let executeCalls = 0;
+  await withAutomationFetch([], async () => {
+    const client = createUserAutomationConsoleClient();
+    await client.load();
+    const preflight = await client.requestPreflight("opportunity-binance-xaut", "arbitrage_entry");
+    assertExecutionPreflight(preflight);
+    await client.load();
+    await assert.rejects(
+      () => client.confirmExecution(preflight.challengeId, "fixture-step-up-token"),
+      (error: unknown) => error instanceof AutomationConsoleContractError
+        && error.category === "challenge_invalid",
+    );
+  }, {
+    preflightExpiresAt: Date.now() - 1,
+    onExecute: () => { executeCalls += 1; },
+  });
+  assert.equal(executeCalls, 0);
 });
 
 test("execution and credential errors are stable, category-specific and secret-safe", () => {
@@ -641,6 +683,8 @@ type FetchFixtureOptions = {
   opportunity?: ReturnType<typeof binanceOpportunity>;
   binanceEnabled?: boolean;
   credentialPut?: (attempt: number) => Response | Promise<Response>;
+  venueStatuses?: (attempt: number) => ReturnType<typeof venueStatuses>;
+  preflightExpiresAt?: number;
   preflightError?: { status: number; body: unknown };
   executeError?: { status: number; category: string; message: string };
   onExecute?: () => void;
@@ -653,6 +697,7 @@ async function withAutomationFetch(
 ) {
   const originalFetch = globalThis.fetch;
   let credentialPutAttempts = 0;
+  let venueStatusAttempts = 0;
   globalThis.fetch = async (input, init) => {
     const url = String(input);
     const method = init?.method ?? "GET";
@@ -661,6 +706,10 @@ async function withAutomationFetch(
       : null;
     calls.push({ url, method, body });
 
+    if (url.endsWith("/venues") && method === "GET" && options.venueStatuses) {
+      venueStatusAttempts += 1;
+      return jsonResponse(options.venueStatuses(venueStatusAttempts));
+    }
     if (url.endsWith("/venues/binance/credentials") && method === "PUT" && options.credentialPut) {
       credentialPutAttempts += 1;
       return options.credentialPut(credentialPutAttempts);
@@ -682,6 +731,7 @@ async function withAutomationFetch(
       method,
       options.opportunity ?? binanceOpportunity(),
       options.binanceEnabled ?? true,
+      options.preflightExpiresAt,
     );
   };
   try {
@@ -696,6 +746,7 @@ function automationResponse(
   method: string,
   opportunity: ReturnType<typeof binanceOpportunity>,
   binanceEnabled: boolean,
+  preflightExpiresAt?: number,
 ) {
   if (url.endsWith("/venues")) return jsonResponse(venueStatuses(binanceEnabled));
   if (url.endsWith("/opportunities")) {
@@ -749,7 +800,7 @@ function automationResponse(
     return jsonResponse({
       challengeId: "challenge-fixture",
       challengeToken: "one-time-fixture-token",
-      expiresAt: Date.now() + 60_000,
+      expiresAt: preflightExpiresAt ?? Date.now() + 60_000,
       report: {
         quantityXaut: 0.002,
         totalBudgetUsd: 25,
