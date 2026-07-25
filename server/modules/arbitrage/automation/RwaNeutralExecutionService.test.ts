@@ -5,6 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import { RwaAutomationConnectorRegistry } from "./RwaAutomationConnectorRegistry";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
+import { RwaAutomationGovernanceError } from "./RwaAutomationGovernance";
+import { RwaBybitAutomationConnector } from "./RwaBybitAutomationConnector";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./RwaNeutralExecutionService";
 import { createNeutralExecutionRecord } from "./RwaNeutralHedgeExecutionEngine";
@@ -15,6 +19,13 @@ import type {
   RwaProviderPreflightSnapshot,
   RwaStrategyPnlSnapshot,
 } from "./RwaNeutralExecutionTypes";
+import {
+  createMonitoredActivityContinuity,
+  createUnmonitoredActivityContinuity,
+  RWA_ACTIVITY_MAX_GAP_MS,
+  RWA_SPOT_ACTIVITY_SOURCES,
+  RWA_PERPETUAL_ACTIVITY_SOURCES,
+} from "./RwaProviderActivityContinuity";
 
 const accountId = "bybit:test-account";
 const accountFingerprint = "test-account";
@@ -46,6 +57,52 @@ test("eligible opportunity executes a two-leg hedge once and idempotent retry se
     assert.doesNotMatch(stateRaw, new RegExp(challenge.challengeToken.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
     await harness.cleanup();
+  }
+});
+
+test("Neutral execute rejects invalid runtime profile fields before provider mutations", async () => {
+  const invalidCases: Array<[string, (execution: any) => void]> = [
+    ["unknown-asset", (execution) => { execution.asset = "DOGE"; }],
+    ["partial-profile", (execution) => { delete execution.profileId; }],
+    ["negative-capital", (execution) => { execution.reservedCapitalUsd = -1; }],
+    ["nan-capital", (execution) => { execution.reservedCapitalUsd = Number.NaN; }],
+    ["infinite-capital", (execution) => { execution.reservedCapitalUsd = Number.POSITIVE_INFINITY; }],
+  ];
+  for (const [label, corrupt] of invalidCases) {
+    const harness = await createHarness();
+    try {
+      const challenge = await harness.service.preflight(opportunity(true), accountId);
+      const state = await harness.store.readState();
+      const invalid = createNeutralExecutionRecord({
+        userId: "user-a",
+        accountId,
+        userOrderPrefix: `rwa${harness.store.userDomain}`,
+        idempotencyKey: `${harness.store.userDomain}:invalid:${label}`,
+        challengeId: `invalid:${label}`,
+        now: harness.now,
+      });
+      invalid.state = "manual_intervention";
+      invalid.reservedCapitalUsd = 25;
+      corrupt(invalid);
+      state.executions.push(invalid);
+      harness.store.readState = async () => state;
+
+      await assert.rejects(
+        harness.service.execute({
+          accountId,
+          challengeId: challenge.challengeId,
+          challengeToken: challenge.challengeToken,
+          idempotencyKey: `entry:invalid:${label}`,
+        }),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+      assert.equal(harness.client.leverageWrites, 0);
+      assert.equal(harness.client.requests.length, 0);
+      assert.equal(harness.client.cancelScopes.length, 0);
+    } finally {
+      await harness.cleanup();
+    }
   }
 });
 
@@ -218,6 +275,10 @@ test("lease loss after the first spot mutation prevents perpetual and compensati
     assert.equal(result.state, "manual_intervention");
     assert.deepEqual(harness.client.requests.map((item) => [item.category, item.side]), [["spot", "Buy"]]);
     assert.equal(harness.client.cancelScopes.length, 0);
+    const persisted = await harness.store.readState();
+    const execution = persisted.executions.find((item) => item.executionId === result.executionId)!;
+    assert.deepEqual(execution.activityContinuity.spot.providerOrderIds, ["order-1"]);
+    assert.deepEqual(execution.activityContinuity.perpetual.providerOrderIds, []);
   } finally {
     await harness.cleanup();
   }
@@ -245,6 +306,178 @@ test("lease loss after the leverage mutation prevents all order writes", async (
     assert.equal(harness.client.leverageWrites, 1);
     assert.equal(harness.client.requests.length, 0);
     assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("incomplete activity baseline blocks leverage and order mutations", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    harness.client.attributionCoverage = "incomplete";
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:incomplete-activity-baseline",
+    }) as any;
+    assert.equal(result.state, "failed");
+    assert.equal(harness.client.leverageWrites, 0);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("existing XAUT activity orders block monitoring before any provider mutation", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    harness.client.openSpotOrderCount = 1;
+    const result = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:existing-open-order",
+    }) as any;
+    assert.equal(result.state, "failed");
+    assert.equal(harness.client.leverageWrites, 0);
+    assert.equal(harness.client.requests.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("activity monitor source failure permanently disarms exposure without provider mutations", async () => {
+  const harness = await createHarness();
+  try {
+    const challenge = await harness.service.preflight(opportunity(true), accountId);
+    const opened = await harness.service.execute({
+      accountId,
+      challengeId: challenge.challengeId,
+      challengeToken: challenge.challengeToken,
+      idempotencyKey: "entry:monitor-source-failure",
+    }) as any;
+    assert.equal(opened.state, "hedged");
+    const writesBefore = harness.client.leverageWrites + harness.client.requests.length
+      + harness.client.cancelScopes.length;
+    harness.client.attributionCoverage = "incomplete";
+    assert.equal(await harness.service.refreshActivityContinuity(), false);
+    const state = await harness.store.readState();
+    const execution = state.executions.find((item) => item.executionId === opened.executionId)!;
+    assert.equal(execution.state, "manual_intervention");
+    assert.equal(execution.activityContinuity.spot.coverage, "ambiguous");
+    assert.equal(execution.activityContinuity.perpetual.coverage, "ambiguous");
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+    assert.equal(
+      harness.client.leverageWrites + harness.client.requests.length + harness.client.cancelScopes.length,
+      writesBefore,
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("activity monitor propagates lease loss after a scan so control startup cannot continue", async () => {
+  let loseLease = false;
+  const harness = await createHarness({
+    activityMonitoringEnabled: () => true,
+    leaseGuard: () => {
+      if (loseLease) {
+        throw new RwaAutomationExecutionLeaseError(
+          "automation_execution_lease_lost",
+          "simulated lease loss",
+        );
+      }
+    },
+  });
+  try {
+    await seedTrackedHedge(harness, 0.002);
+    harness.client.spotQuantity = 0.002;
+    harness.client.perpetualQuantity = 0.002;
+    harness.client.attributionHook = () => { loseLease = true; };
+
+    await assert.rejects(
+      harness.service.refreshActivityContinuity(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(harness.client.attributionReads, 1);
+    assert.equal(harness.client.leverageWrites, 0);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.cancelScopes.length, 0);
+
+    loseLease = false;
+    const registry = new RwaAutomationConnectorRegistry([
+      new RwaBybitAutomationConnector(harness.service),
+    ]);
+    await assert.rejects(
+      registry.startActivityMonitoring(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("restart disarms an unmonitored legacy exposure before any provider read or mutation", async () => {
+  const harness = await createHarness();
+  try {
+    await seedTrackedHedge(harness, 0.002);
+    const state = await harness.store.readState();
+    const execution = state.executions[0]!;
+    execution.activityContinuity = createUnmonitoredActivityContinuity(execution.createdAt);
+    state.config.globalExecutionEnabled = true;
+    state.config.strategyEnabled = true;
+    state.config.killSwitchActive = false;
+    await harness.store.writeState(state);
+
+    assert.equal(await harness.service.refreshActivityContinuity(), false);
+    const recovered = await harness.store.readState();
+    assert.equal(recovered.executions[0]?.state, "manual_intervention");
+    assert.equal(recovered.executions[0]?.activityContinuity.spot.coverage, "ambiguous");
+    assert.equal(recovered.executions[0]?.activityContinuity.perpetual.coverage, "ambiguous");
+    assert.equal(recovered.config.globalExecutionEnabled, false);
+    assert.equal(recovered.config.strategyEnabled, false);
+    assert.equal(recovered.config.killSwitchActive, true);
+    assert.equal(harness.client.preflightReads, 0);
+    assert.equal(harness.client.attributionReads, 0);
+    assert.equal(harness.client.leverageWrites, 0);
+    assert.equal(harness.client.requests.length, 0);
+    assert.equal(harness.client.cancelScopes.length, 0);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("restart gap beyond 24 hours enters manual intervention before cancellation or exit writes", async () => {
+  const harness = await createHarness();
+  try {
+    await seedTrackedHedge(harness, 0.002);
+    const state = await harness.store.readState();
+    const execution = state.executions[0]!;
+    const staleAt = harness.now - RWA_ACTIVITY_MAX_GAP_MS - 1;
+    execution.createdAt = staleAt;
+    execution.updatedAt = staleAt;
+    execution.strategyPosition.updatedAt = staleAt;
+    execution.activityContinuity = createMonitoredActivityContinuity(staleAt, execution.orderLinkPrefix);
+    await harness.store.writeState(state);
+    harness.client.spotQuantity = 0.002;
+    harness.client.perpetualQuantity = 0.002;
+    harness.client.attributionCheckedFrom = staleAt;
+    harness.client.attributionCheckedThrough = harness.now;
+    await harness.service.initialize();
+    assert.equal(await harness.service.refreshActivityContinuity(), false);
+    const recovered = await harness.store.readState();
+    assert.equal(recovered.executions[0]?.state, "manual_intervention");
+    assert.equal(recovered.config.killSwitchActive, true);
+    assert.equal(harness.client.cancelScopes.length, 0);
+    assert.equal(harness.client.requests.length, 0);
   } finally {
     await harness.cleanup();
   }
@@ -758,6 +991,7 @@ async function seedTrackedHedge(
     perpetualRemainingXaut: quantityXaut,
     updatedAt: harness.now,
   };
+  execution.activityContinuity = createMonitoredActivityContinuity(harness.now, execution.orderLinkPrefix);
   state.executions.push(execution);
   await harness.store.writeState(state);
 }
@@ -770,6 +1004,7 @@ async function createHarness(options: {
   availableUsdt?: number;
   unrelatedSpotQuantity?: number;
   leaseGuard?: () => void;
+  activityMonitoringEnabled?: () => boolean;
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-execution-"));
   const credentialPath = join(directory, "credentials.enc.json");
@@ -789,6 +1024,7 @@ async function createHarness(options: {
     () => now,
     () => false,
     options.leaseGuard,
+    options.activityMonitoringEnabled,
   );
   await service.putCredentials({ apiKey: "owner-api-key-123", apiSecret: "owner-secret-value-123" });
   await service.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
@@ -810,6 +1046,8 @@ class FakeBybitClient implements RwaBybitTradingClient {
   spotQuantity = 0;
   perpetualQuantity = 0;
   leverageWrites = 0;
+  preflightReads = 0;
+  attributionReads = 0;
   validateCalls = 0;
   accessUnavailable = false;
   mutationHook: (
@@ -833,7 +1071,10 @@ class FakeBybitClient implements RwaBybitTradingClient {
   externalPositionActivity = false;
   attributionCheckedFrom: number | null = null;
   attributionCheckedThrough: number | null = null;
+  attributionHook: () => void = () => {};
   invalidPositionQuantity = false;
+  openSpotOrderCount = 0;
+  openPerpetualOrderCount = 0;
 
   constructor(options: {
     fundingRate?: number;
@@ -862,6 +1103,7 @@ class FakeBybitClient implements RwaBybitTradingClient {
   }
 
   async readPreflightSnapshot(): Promise<RwaProviderPreflightSnapshot> {
+    this.preflightReads += 1;
     return {
       accountId,
       accountFingerprint,
@@ -871,6 +1113,11 @@ class FakeBybitClient implements RwaBybitTradingClient {
       availableUsdt: this.availableUsdt,
       existingSpotQuantityXaut: Math.max(0, this.spotQuantity + this.unrelatedSpotQuantity),
       existingPerpetualQuantityXaut: Math.max(0, this.perpetualQuantity + this.unrelatedPerpetualQuantity),
+      spotAvailableQuantityXaut: Math.max(0, this.spotQuantity + this.unrelatedSpotQuantity),
+      spotLockedQuantityXaut: 0,
+      perpetualPositionSide: this.perpetualQuantity + this.unrelatedPerpetualQuantity > 0 ? "short" : "flat",
+      openSpotOrderCount: this.openSpotOrderCount,
+      openPerpetualOrderCount: this.openPerpetualOrderCount,
       spot: { status: "Trading", minOrderQty: 0.00001, qtyStep: 0.00001, minNotionalUsd: 5, priceTick: 0.01, bid: 4129, ask: 4130 },
       perpetual: {
         status: "Trading",
@@ -940,11 +1187,25 @@ class FakeBybitClient implements RwaBybitTradingClient {
     strategyOrderPrefixes: string[];
     since: number;
   }) {
+    this.attributionReads += 1;
+    this.attributionHook();
+    const checkedFrom = this.attributionCheckedFrom ?? input.since;
+    const checkedThrough = this.attributionCheckedThrough ?? this.now;
     return {
       coverage: this.attributionCoverage,
       externalPositionActivity: this.externalPositionActivity,
-      checkedFrom: this.attributionCheckedFrom ?? input.since,
-      checkedThrough: this.attributionCheckedThrough ?? this.now,
+      checkedFrom,
+      checkedThrough,
+      sources: [...new Set([...RWA_SPOT_ACTIVITY_SOURCES, ...RWA_PERPETUAL_ACTIVITY_SOURCES])].map((source) => ({
+        source,
+        coverage: this.attributionCoverage,
+        checkedFrom,
+        checkedThrough,
+        cursor: null,
+        eventIds: [],
+        externalActivity: this.externalPositionActivity,
+      })),
+      providerOrderIds: { spot: [], perpetual: [] },
     };
   }
 

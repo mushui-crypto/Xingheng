@@ -78,6 +78,9 @@ const cases = [
   ["wrong automation execution mode", { RWA_AUTOMATION_EXECUTION_MODE: "multi-host" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
   ["wrong automation lock root", { RWA_AUTOMATION_LOCK_DIR: "/app/data" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
   ["wrong automation lock path", { RWA_AUTOMATION_LOCK_PATH: "/app/rwa-automation-lock/other.lock" }, "自动套利执行拓扑必须使用冻结的单主机独占租约配置"],
+  ["short monitored Binance account", { RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS: "binance:0123456789abcdef,binance:0123" }, "必须只包含精确的 Binance 专用账户内部指纹"],
+  ["mixed-case monitored Binance account", { RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS: "binance:0123456789abcdeF" }, "必须只包含精确的 Binance 专用账户内部指纹"],
+  ["empty monitored Binance account segment", { RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS: "binance:0123456789abcdef," }, "必须只包含精确的 Binance 专用账户内部指纹"],
 ];
 
 for (const [name, overrides, expected] of cases) {

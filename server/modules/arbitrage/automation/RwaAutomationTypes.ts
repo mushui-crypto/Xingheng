@@ -52,6 +52,9 @@ export type RwaAutomationConnector = {
   implemented: true;
   providerWritesEnabled: boolean;
   initialize?(): Promise<void>;
+  startActivityMonitoring?(): Promise<void>;
+  hasActivityMonitor?(): boolean;
+  dispose?(): void;
   captureCredentialMutationSnapshot?(): Promise<unknown>;
   restoreCredentialMutationSnapshot?(snapshot: unknown): Promise<void>;
   supports(opportunity: ArbitrageOpportunity): boolean;

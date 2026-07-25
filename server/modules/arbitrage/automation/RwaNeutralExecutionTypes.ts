@@ -1,9 +1,16 @@
+import {
+  XAUT_AUTOMATION_ASSET_PROFILE,
+  type RwaAutomationBaseAsset,
+} from "./RwaAutomationAssetProfile";
+
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
 export const RWA_PERP_SYMBOL = "XAUTUSDT" as const;
 export const RWA_SMOKE_QUANTITY_XAUT = 0.002;
-export const RWA_SMOKE_TOTAL_BUDGET_USD = 25;
-export const RWA_MAX_STRATEGY_CAPITAL_USD = 300;
+export const RWA_SMOKE_TOTAL_BUDGET_USD =
+  XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits!.maxOrderNotionalUsd;
+export const RWA_MAX_STRATEGY_CAPITAL_USD =
+  XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits!.maxAssetCapitalUsd;
 
 export type RwaExecutionConfig = {
   globalExecutionEnabled: boolean;
@@ -109,7 +116,12 @@ export type RwaProviderPreflightSnapshot<
   permissions: TPermissions;
   availableUsdt: number;
   existingSpotQuantityXaut: number;
+  spotAvailableQuantityXaut: number;
+  spotLockedQuantityXaut: number;
   existingPerpetualQuantityXaut: number;
+  perpetualPositionSide: "long" | "short" | "flat";
+  openSpotOrderCount: number;
+  openPerpetualOrderCount: number;
   spot: RwaInstrumentSpec & { bid: number; ask: number };
   perpetual: RwaInstrumentSpec & {
     bid: number;
@@ -166,7 +178,7 @@ export type RwaPreflightChallenge = {
 
 export type RwaProviderOrderRequest = {
   category: "spot" | "linear";
-  symbol: typeof RWA_SPOT_SYMBOL;
+  symbol: string;
   side: "Buy" | "Sell";
   quantityXaut: number;
   limitPrice: number;
@@ -301,9 +313,56 @@ export type RwaStrategyPosition = {
   updatedAt: number;
 };
 
+export type RwaProviderActivitySource =
+  | "spot_orders"
+  | "spot_trades"
+  | "perpetual_orders"
+  | "perpetual_trades"
+  | "account_transactions"
+  | "internal_transfers"
+  | "universal_transfers"
+  | "deposits"
+  | "internal_deposits"
+  | "withdrawals"
+  | "convert"
+  | "dust"
+  | "balance_adjustments";
+
+export type RwaProviderActivityWatermark = {
+  source: RwaProviderActivitySource;
+  coverage: "complete" | "incomplete";
+  immutableStartAt: number;
+  checkedThrough: number;
+  cursor: string | null;
+  recentEventIds: string[];
+  eventDigest: string;
+  updatedAt: number;
+};
+
+export type RwaStrategyActivityLegState = {
+  coverage: "unmonitored" | "monitored" | "ambiguous";
+  immutableStartAt: number;
+  checkedThrough: number;
+  providerOrderIds: string[];
+  clientOrderPrefixes: string[];
+  sources: RwaProviderActivityWatermark[];
+  updatedAt: number;
+};
+
+export type RwaStrategyActivityContinuity = {
+  version: 1;
+  maxGapMs: number;
+  pollIntervalMs: number;
+  spot: RwaStrategyActivityLegState;
+  perpetual: RwaStrategyActivityLegState;
+};
+
 export type RwaExecutionRecord = {
   userId: string;
   accountId: string;
+  asset: RwaAutomationBaseAsset;
+  profileId: string;
+  reservedCapitalUsd: number;
   executionId: string;
   idempotencyKey: string;
   challengeId: string;
@@ -319,6 +378,7 @@ export type RwaExecutionRecord = {
   reconciliation: RwaExecutionReconciliationPreview | null;
   finalizeIdempotency: RwaExecutionFinalizeIdempotency | null;
   strategyPosition: RwaStrategyPosition;
+  activityContinuity: RwaStrategyActivityContinuity;
   createdAt: number;
   updatedAt: number;
 };
@@ -330,6 +390,17 @@ export type RwaTrackedStrategyExposure = {
   sourceExecutionIds: string[];
   strategyOrderPrefixes: string[];
   attributionSince: number;
+  activityContinuity: RwaStrategyActivityContinuity;
+};
+
+export type RwaProviderActivitySourceSnapshot = {
+  source: RwaProviderActivitySource;
+  coverage: "complete" | "incomplete";
+  checkedFrom: number;
+  checkedThrough: number;
+  cursor: string | null;
+  eventIds: string[];
+  externalActivity: boolean;
 };
 
 export type RwaPositionAttributionSnapshot = {
@@ -337,6 +408,11 @@ export type RwaPositionAttributionSnapshot = {
   externalPositionActivity: boolean;
   checkedFrom: number;
   checkedThrough: number;
+  sources: RwaProviderActivitySourceSnapshot[];
+  providerOrderIds: {
+    spot: string[];
+    perpetual: string[];
+  };
 };
 
 export class RwaExecutionSafetyError extends Error {
@@ -360,6 +436,7 @@ export type RwaNeutralTradingClient<
     strategyOrderPrefix: string;
     strategyOrderPrefixes: string[];
     since: number;
+    continuity: RwaStrategyActivityContinuity;
   }): Promise<RwaPositionAttributionSnapshot>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot>;
 };

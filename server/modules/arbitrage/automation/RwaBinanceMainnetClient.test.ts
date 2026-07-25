@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import test from "node:test";
 import { RwaBinanceMainnetClient, RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
+import { createUnmonitoredActivityContinuity } from "./RwaProviderActivityContinuity";
+import {
+  createNeutralExecutionRecord,
+  RwaNeutralHedgeExecutionEngine,
+} from "./RwaNeutralHedgeExecutionEngine";
+import {
+  defaultRwaExecutionConfig,
+  RwaExecutionSafetyError,
+} from "./RwaNeutralExecutionTypes";
 
-test("Binance attribution is fail-closed until all position-affecting activity has complete coverage", async () => {
+test("Binance attribution performs private source reads and is fail-closed when any source is unavailable", async () => {
   let calls = 0;
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
@@ -14,17 +23,191 @@ test("Binance attribution is fail-closed until all position-affecting activity h
     () => 2_000,
     ["203.0.113.10"],
   );
-  assert.deepEqual(await client.readPositionAttribution({
+  const result = await client.readPositionAttribution({
     strategyOrderPrefix: "rwa-scope",
     strategyOrderPrefixes: ["rwa-order"],
     since: 1_000,
-  }), {
-    coverage: "incomplete",
-    externalPositionActivity: false,
-    checkedFrom: 1_000,
-    checkedThrough: 2_000,
+    continuity: createUnmonitoredActivityContinuity(1_000),
   });
-  assert.equal(calls, 0);
+  assert.equal(result.coverage, "incomplete");
+  assert.equal(result.externalPositionActivity, false);
+  assert.equal(result.checkedFrom, 1_000);
+  assert.equal(result.checkedThrough, 1_000);
+  assert.equal(result.sources.length, 0);
+  assert.ok(calls > 0);
+});
+
+test("Binance scans the frozen signed endpoints but cannot certify a non-atomic mutation window", async () => {
+  const paths: string[] = [];
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input) => {
+      const url = new URL(String(input));
+      paths.push(url.pathname);
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      if (url.pathname === "/api/v3/account") return json({ uid: 123456 });
+      if (["/sapi/v1/asset/transfer", "/sapi/v1/asset/assetDividend"].includes(url.pathname)) {
+        return json({ rows: [], total: 0 });
+      }
+      if (url.pathname === "/sapi/v1/convert/tradeFlow") return json({ list: [] });
+      if (url.pathname === "/sapi/v1/asset/dribblet") return json({ userAssetDribblets: [] });
+      return json([]);
+    }) as typeof fetch,
+    () => 2_000,
+    ["203.0.113.10"],
+    [monitoredAccountId],
+  );
+  const result = await client.readPositionAttribution({
+    strategyOrderPrefix: "rwa-scope",
+    strategyOrderPrefixes: ["rwa-order"],
+    since: 1_000,
+    continuity: createUnmonitoredActivityContinuity(1_000),
+  });
+  assert.equal(result.coverage, "incomplete");
+  assert.equal(result.checkedThrough, 1_000);
+  assert.equal(paths.filter((path) => path === "/api/v3/time").length, 1);
+  assert.ok(paths.includes("/api/v3/myTrades"));
+  assert.ok(paths.includes("/fapi/v1/userTrades"));
+  assert.ok(paths.includes("/sapi/v1/asset/transfer"));
+  assert.ok(paths.includes("/sapi/v1/capital/deposit/hisrec"));
+  assert.ok(paths.includes("/sapi/v1/capital/withdraw/history"));
+});
+
+test("Binance remains incomplete when a concurrent event is correctly excluded by endTime", async () => {
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  let concurrentEventCreated = false;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      if (url.pathname === "/api/v3/account") return json({ uid: 123456 });
+      if (url.pathname === "/api/v3/allOrders") {
+        concurrentEventCreated = true;
+        return json([]);
+      }
+      if (url.pathname === "/api/v3/myTrades") {
+        const event = { id: 9, orderId: 9009, symbol: "XAUTUSDT", time: 2_001 };
+        return json(event.time <= Number(url.searchParams.get("endTime")) ? [event] : []);
+      }
+      if (["/sapi/v1/asset/transfer", "/sapi/v1/asset/assetDividend"].includes(url.pathname)) {
+        return json({ rows: [], total: 0 });
+      }
+      if (url.pathname === "/sapi/v1/convert/tradeFlow") return json({ list: [] });
+      if (url.pathname === "/sapi/v1/asset/dribblet") return json({ userAssetDribblets: [] });
+      return json([]);
+    }) as typeof fetch,
+    () => 2_000,
+    ["203.0.113.10"],
+    [monitoredAccountId],
+  );
+  const result = await client.readPositionAttribution({
+    strategyOrderPrefix: "rwa-scope",
+    strategyOrderPrefixes: ["rwa-order"],
+    since: 1_000,
+    continuity: createUnmonitoredActivityContinuity(1_000),
+  });
+  assert.equal(concurrentEventCreated, true);
+  assert.equal(result.coverage, "incomplete");
+  assert.equal(result.externalPositionActivity, false);
+  assert.equal(result.checkedThrough, 1_000);
+});
+
+test("a strict cutoff race reaches zero leverage or order mutations in the real Binance adapter", async () => {
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  const mutationMethods: string[] = [];
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input, init) => {
+      const url = new URL(String(input));
+      if (init?.method && init.method !== "GET") mutationMethods.push(`${init.method}:${url.pathname}`);
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 2_000 });
+      if (url.pathname === "/api/v3/account") return json({ uid: 123456 });
+      if (url.pathname === "/api/v3/myTrades") {
+        const event = { id: 9, orderId: 9009, symbol: "XAUTUSDT", time: 2_001 };
+        return json(event.time <= Number(url.searchParams.get("endTime")) ? [event] : []);
+      }
+      if (["/sapi/v1/asset/transfer", "/sapi/v1/asset/assetDividend"].includes(url.pathname)) {
+        return json({ rows: [], total: 0 });
+      }
+      if (url.pathname === "/sapi/v1/convert/tradeFlow") return json({ list: [] });
+      if (url.pathname === "/sapi/v1/asset/dribblet") return json({ userAssetDribblets: [] });
+      return json([]);
+    }) as typeof fetch,
+    () => 2_000,
+    ["203.0.113.10"],
+    [monitoredAccountId],
+  );
+  const execution = createNeutralExecutionRecord({
+    userId: "user-a",
+    accountId: monitoredAccountId,
+    userOrderPrefix: "rwa-owner",
+    idempotencyKey: "entry:strict-cutoff-race",
+    challengeId: "challenge",
+    now: 2_000,
+  });
+  const engine = new RwaNeutralHedgeExecutionEngine(() => 2_000);
+  await assert.rejects(
+    engine.open({
+      client,
+      execution,
+      snapshot: {
+        accountId: monitoredAccountId,
+        accountFingerprint: monitoredAccountId.slice("binance:".length),
+        fetchedAt: 2_000,
+        accountMode: "single_asset_one_way",
+        permissions: {
+          read: true,
+          spotTrade: true,
+          contractTrade: true,
+          withdraw: false,
+          ipRestricted: true,
+          spotAccount: true,
+          futuresAccount: true,
+          positionModeSupported: true,
+        },
+        availableUsdt: 25,
+        existingSpotQuantityXaut: 0,
+        existingPerpetualQuantityXaut: 0,
+        spotAvailableQuantityXaut: 0,
+        spotLockedQuantityXaut: 0,
+        perpetualPositionSide: "flat",
+        openSpotOrderCount: 0,
+        openPerpetualOrderCount: 0,
+        spot: {
+          status: "Trading",
+          minOrderQty: 0.0001,
+          qtyStep: 0.0001,
+          minNotionalUsd: 5,
+          priceTick: 0.01,
+          bid: 4_000,
+          ask: 4_001,
+        },
+        perpetual: {
+          status: "Trading",
+          minOrderQty: 0.001,
+          qtyStep: 0.001,
+          minNotionalUsd: 5,
+          priceTick: 0.1,
+          bid: 4_000,
+          ask: 4_001,
+          mark: 4_000.5,
+          fundingRate: 0.0001,
+          fundingIntervalHours: 8,
+          liquidationDistancePercent: null,
+        },
+        fees: { spotTakerBps: 10, perpetualTakerBps: 5 },
+      },
+      config: defaultRwaExecutionConfig,
+      state: {} as never,
+      quantityXaut: 0.002,
+      persist: async () => undefined,
+    }),
+    (error: unknown) => error instanceof RwaExecutionSafetyError
+      && error.category === "strategy_ownership_ambiguous",
+  );
+  assert.deepEqual(mutationMethods, []);
 });
 
 test("Binance client signs private reads with server-time offset and keeps spot/futures balances isolated", async () => {

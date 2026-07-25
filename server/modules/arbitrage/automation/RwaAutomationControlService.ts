@@ -1,7 +1,7 @@
 import type { ArbitrageDashboardService } from "../ArbitrageDashboardService";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { randomUUID } from "node:crypto";
-import { CredentialStoreError } from "./RwaAutomationPersistentStore";
+import { CredentialStoreError, discoverAutomationUsersWithExposure } from "./RwaAutomationPersistentStore";
 import {
   RwaAutomationConnectorRegistry,
   RwaAutomationRegistryError,
@@ -48,6 +48,27 @@ export class RwaAutomationControlService {
     private readonly now: () => number = () => Date.now(),
     private readonly assertExecutionLeaseHeld: () => void = () => {},
   ) {}
+
+  async startPersistedActivityMonitoring() {
+    this.assertExecutionLeaseHeld();
+    const users = await discoverAutomationUsersWithExposure();
+    if (users.length > this.governance.config.maxRegistries) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "持仓活动监控用户数超过 registry 安全上限；已拒绝启动自动执行。",
+      );
+    }
+    for (const userId of users) {
+      const registry = this.registry(userId);
+      await registry.startActivityMonitoring();
+    }
+  }
+
+  dispose() {
+    for (const entry of this.registries.values()) entry.registry.dispose();
+    this.registries.clear();
+  }
 
   private registry(userId: string) {
     this.assertExecutionLeaseHeld();
@@ -653,8 +674,10 @@ export class RwaAutomationControlService {
       if (
         entry.lastUsedAt > cutoff
         || this.activeRegistryUsers.has(userId)
+        || entry.registry.hasActivityMonitor()
         || [...this.challengeVenues.values()].some((challenge) => challenge.userId === userId)
       ) continue;
+      entry.registry.dispose();
       this.registries.delete(userId);
     }
   }

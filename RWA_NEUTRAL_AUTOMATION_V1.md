@@ -1,12 +1,40 @@
 # RWA 中性自动套利 V1 执行契约
 
-更新时间：2026-07-24
+更新时间：2026-07-26
 
 当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产 Compose 的 X.509 WIF/ADC 只读挂载契约已实现，但尚未在服务器注入真实身份材料或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。
 
 安全整改第 3 项已完成前后端实现并通过固定安全复验：敏感操作新增 RFC 6238 TOTP 二次身份验证和一次性 step-up authorization。二维码作为后续体验优化延期，当前通过手动设置值完成 enrollment；本项已由 `b02e367` 提交但尚未部署，生产服务端总急停继续保持激活。
 
 本文档是 RWA 自动套利 V1 的执行事实基线。公开行情、后台评定与只读看板口径继续以 `RWA_GOLD_ARBITRAGE_DASHBOARD.md` 为准；本文只定义私有账户、Shadow、状态机、风控和执行门禁，不表示真实交易已经上线。
+
+## 0. 通用资产 profile
+
+自动执行的资产差异统一由服务端 `RwaAutomationAssetProfile` 提供，客户端不得提交或覆盖：
+
+- 基础/报价资产、venue、现货/永续 symbol 和 strategy ID。
+- 数量步长、价格步长、最小数量、最小金额、线性合约基础资产乘数和 taker fee 上限。
+- 现货/永续持仓变化语义、必须完整覆盖的账户活动来源、允许方向和对冲容差。
+- 当前阶段的单笔、单资产、单账户和全部自动策略总额上限。
+
+XAUT 是当前唯一 `enabled` profile。BTC、ETH、SOL 仅为 `reserved`，用于冻结数据结构和隔离测试；
+`executionRequired` 解析必须拒绝它们，不包含 provider 写实现。现有 XAUT API 字段继续兼容，
+执行记录内部追加 `asset`、canonical `profileId` 与 `reservedCapitalUsd`；旧记录缺少这些字段时
+按 state 文件 venue additive migration，旧备份仍可恢复，新状态必须通过 exact schema。
+
+300 USDT 是 XAUT V1 profile 的当前测试阶段配置，不是长期产品常量。提高额度必须修改受控
+profile、经过代码审查/固定安全验收并由 release revision 留下审计证据，不能由客户端参数、
+运行时 symbol 或交易引擎分支绕过。既有 `maxStrategyCapitalUsd` 只允许在 profile 单资产上限内
+进一步收紧。
+
+新增风险在 preflight 与 provider 写前二次核对四层额度。执行请求先持久化资本预留，再汇总当前
+持久状态；未知资产、profile 错配、状态不可读、资本值非法或旧持仓无法估值时拒绝新增风险。
+退出、减仓、异常补偿和急停不受入场额度阻止。普通/专用账户的资产归属和授权政策尚未最终冻结，
+不得在通用 profile 中默认任何一种口径。
+
+该 profile 层继续复用现有 execution engine、venue clients、KMS/credential、TOTP、kill switch、
+rate limit、lease/idempotency、persistent store、backup/restore 和错误映射，不建立第二套执行
+状态机。真实 Binance/Bybit 活动连续性目前仍为 `incomplete`，所以本节不表示自动退出已可用。
 
 ## 1. V1 范围
 
@@ -365,10 +393,35 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 对策略订单前缀之外的全部持仓影响活动取得连续、完整且不晚于权威快照的 provider 证明，并在
 首次撤单前及撤单后、首次平仓前各复核一次。额外库存、同额卖出后补入、额外永续仓位、人工成交、
 转入转出、分页/游标不完整、非法数值或任何无法唯一归属的差异均进入 `manual_intervention`，
-自动 provider 写为 0。当前 Binance/Bybit 真实连接器尚不能证明成交、转换、转账和余额调整的
-全量连续覆盖，因此明确返回 `incomplete` 并禁止自动退出；测试 fake 的完整覆盖能力不代表生产
-已支持自动退出。低于交易所
-`minQty/minNotional` 的残余仍保留在策略账本，不能静默归零或标记 closed。
+自动 provider 写为 0。低于交易所 `minQty/minNotional` 的残余仍保留在策略账本，不能静默
+归零或标记 closed。
+
+活动连续性候选方案只接受专用子账户。Binance 还要求服务端从账户 UID 生成的内部指纹精确位于
+`RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS`；该 allowlist 默认空。Bybit 必须证明 UTA 子账户
+且不是 master account。候选监控要求两侧 XAUT 仓位和活动订单从零开始，对冻结的全部活动来源
+扫描，并以 15 分钟间隔、5 分钟重叠窗口、每来源独立水位补扫；起点不可后移，最大断档 24 小时。
+
+离线 scanner 已实现 Binance 32 个来源请求加一次账户证明，其中 21 个请求覆盖官方要求显式
+`type` 的资产划转类型；Bybit 为 13 个来源请求加一次账户证明。每来源最多 20 页、并发 4，瞬时
+限流、超时和传输错误只按 100ms、500ms 重试两次；理论单轮上限分别为 1921 和 781 次 provider
+尝试。每来源最多保存 32 个最近事件 ID，每侧最多保存 64 个 provider order ID 和 256 个策略
+client order prefix；沿用每用户 100 条 active execution、状态文件 8/10 MiB soft/hard 上限
+及 exact-schema 加密灾备。
+
+但是 Binance/Bybit 这些 REST 端点没有跨全部活动来源的原子序列或可锁定后置水位。各端点按
+扫描前 cutoff 查询时，扫描期间发生的活动会被 `endTime/createTimeTo` 正确排除；再补一轮只能
+产生新的截止窗口，不能证明扫描结束到首次 provider mutation 之间没有人工活动。因此真实
+Binance/Bybit adapter 会把即使协议扫描成功的结果强制降级为 `incomplete`，不推进可用于写入的
+水位，建立仓位的首次 leverage/order 和退出的 cancel/place 均为 0。离线 scanner 的 complete
+只表示给定冻结时间窗已遍历，不能作为真实 mutation 证书；测试 fake 的 complete 仅验证引擎在
+未来获得原子 provider 水位后的行为。
+
+服务启动或恢复时，provider/coverage 首轮失败会先原子把 exposure 置为
+`manual_intervention`，关闭 global/strategy execution、激活用户急停并清除 challenge，然后
+允许 HTTP 以只读、不可执行状态启动，便于用户查看和人工处置；这不表示监控成功。状态文件、
+执行租约或 disarm 落盘失败属于无法证明安全状态，会向上抛出并阻止监听。本实现尚未连接真实
+Binance/Bybit、未发布生产，也未授权新的 Mainnet 资金窗口；生产现有 release 仍按上一版
+fail-closed 行为运行。
 
 ### 凭证文件与环境变量
 
@@ -381,6 +434,7 @@ PnL 只按策略 client order ID、provider order ID、execution 与专用账户
 - `RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data`：生产固定为独立 named volume 根目录。`current.json` 以原子指针选择只读冻结的 generation，generation 内按不可逆用户域 + venue 分隔凭证/状态。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
 - `RWA_AUTOMATION_SERVER_KILL_SWITCH`：服务端全局急停，只有显式设为 `false` 才允许新增风险；用户级开关不能覆盖它。
 - `RWA_BINANCE_ALLOWED_EGRESS_IPS`：Binance 真实执行允许的服务端固定出口 IPv4，逗号分隔；必须与 Binance 返回的 API Key `ipList` 完全一致。缺失、非法、通配、CIDR 或集合不匹配均 fail-closed，具体 IP 不进入接口响应或凭证元数据。
+- `RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS`：允许建立活动连续性的 Binance 专用子账户内部指纹，逗号分隔，格式严格为 `binance:` 加 16 位小写十六进制。默认空并保持 `incomplete`；不得填写 provider UID、API Key 或其他凭证。
 
 Envelope V2 的本地 AAD canonical 绑定 `userId + venue + accountId + environment + schemaVersion`；发送给 GCP KMS 的 additional authenticated data 只包含不可逆用户域和账户域，不发送邮箱或明文用户标识。读取、轮换、开启执行、解除急停、preflight 与 execute 均需重新解密或验证 provider，KMS 超时、权限撤销、key disabled、位置错误、ADC/证书失效或 AAD 不一致时全部 fail-closed。凭证正文与 DEK 只在单次调用内存中使用并尽力清零，不跨请求缓存。
 

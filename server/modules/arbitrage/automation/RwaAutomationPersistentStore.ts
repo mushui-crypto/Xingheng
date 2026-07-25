@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { access, chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { access, chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import type {
   RwaBybitCredentials,
@@ -32,6 +32,13 @@ import {
   loadRwaAutomationGovernanceConfig,
   type RwaAutomationGovernanceConfig,
 } from "./RwaAutomationGovernance";
+import { normalizeActivityContinuity } from "./RwaProviderActivityContinuity";
+import {
+  getRwaAutomationAssetProfile,
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+  type RwaAutomationCapitalExposure,
+} from "./RwaAutomationAssetProfile";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -388,7 +395,9 @@ export class RwaAutomationPersistentStore<
         ...parsed,
         config: { ...defaultRwaExecutionConfig, ...(parsed.config ?? {}) },
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
-        executions: Array.isArray(parsed.executions) ? parsed.executions.map(normalizeExecutionRecord) : [],
+        executions: Array.isArray(parsed.executions)
+          ? parsed.executions.map((execution) => normalizeExecutionRecord(execution, this.venue))
+          : [],
         pnlSeries: Array.isArray(parsed.pnlSeries) ? parsed.pnlSeries : [],
         credentialLifecycle: validCredentialLifecycle(parsed.credentialLifecycle) ? parsed.credentialLifecycle : "unconfigured",
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
@@ -410,6 +419,9 @@ export class RwaAutomationPersistentStore<
   }
 
   async writeState(state: AutomationState) {
+    for (const execution of state.executions) {
+      assertProfiledExecutionFields(execution, this.venue);
+    }
     const compacted = compactState(state, this.governanceConfig, this.clock());
     const completed = compacted.executions.filter(isCompletedExecution).length;
     const active = compacted.executions.length - completed;
@@ -458,6 +470,46 @@ export class RwaAutomationPersistentStore<
       throw new Error("交易所 API 凭证文件格式无效；已拒绝继续使用。");
     }
   }
+}
+
+export async function discoverAutomationUsersWithExposure() {
+  const dataDir = resolveRwaAutomationActiveDataDir();
+  const entries = await readdir(dataDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const users = new Set<string>();
+  for (const entry of entries) {
+    if (!entry.isFile() || !/^[a-f0-9]{16}-(?:bybit|binance)-state\.json$/.test(entry.name)) continue;
+    const path = resolve(dataDir, entry.name);
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size > 10 * 1024 * 1024) continue;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8"));
+    } catch {
+      continue;
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+    const executions = (parsed as { executions?: unknown }).executions;
+    if (!Array.isArray(executions)) continue;
+    for (const value of executions) {
+      if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+      const execution = value as Record<string, any>;
+      const position = execution.strategyPosition as Record<string, any> | undefined;
+      const hasExposure = Number(position?.spotRemainingXaut) > 1e-12
+        || Number(position?.perpetualRemainingXaut) > 1e-12;
+      if (hasExposure && typeof execution.userId === "string" && execution.userId.trim()) {
+        const expectedDomain = createHash("sha256")
+          .update(`rwa-user:${execution.userId}`)
+          .digest("hex")
+          .slice(0, 16);
+        if (!entry.name.startsWith(`${expectedDomain}-`)) continue;
+        users.add(execution.userId);
+      }
+    }
+  }
+  return [...users].sort();
 }
 
 export type RwaAutomationStateData = AutomationState;
@@ -616,15 +668,26 @@ function validCredentialLifecycle(value: unknown): value is RwaCredentialLifecyc
   return ["unconfigured", "validating", "active", "invalid", "expired", "revoked", "rotation_required"].includes(String(value));
 }
 
-function normalizeExecutionRecord(value: unknown): RwaExecutionRecord {
-  const execution = value && typeof value === "object" && !Array.isArray(value)
-    ? { ...(value as Record<string, unknown>) }
-    : {};
+function normalizeExecutionRecord(
+  value: unknown,
+  venue: "bybit" | "bitget" | "binance" | "okx",
+): RwaExecutionRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidRiskState();
+  const execution = { ...(value as Record<string, unknown>) };
   const rawSpotOrder = execution.spotOrder;
   const strategyPosition = normalizeStrategyPosition(execution.strategyPosition, execution.state, execution.updatedAt);
+  const profileFieldCount = ["asset", "profileId", "reservedCapitalUsd"]
+    .filter((field) => Object.prototype.hasOwnProperty.call(execution, field)).length;
+  if (profileFieldCount !== 0 && profileFieldCount !== 3) throw invalidRiskState();
+  const profiled = profileFieldCount === 0
+    ? legacyExecutionProfile(venue)
+    : assertProfiledExecutionFields(execution, venue);
   return {
     userId: String(execution.userId ?? ""),
     accountId: String(execution.accountId ?? ""),
+    asset: profiled.asset,
+    profileId: profiled.profileId,
+    reservedCapitalUsd: profiled.reservedCapitalUsd,
     executionId: String(execution.executionId ?? ""),
     idempotencyKey: String(execution.idempotencyKey ?? ""),
     challengeId: String(execution.challengeId ?? ""),
@@ -644,9 +707,169 @@ function normalizeExecutionRecord(value: unknown): RwaExecutionRecord {
     reconciliation: normalizeReconciliationPreview(execution.reconciliation),
     finalizeIdempotency: normalizeFinalizeIdempotency(execution.finalizeIdempotency),
     strategyPosition,
+    activityContinuity: normalizeActivityContinuity(execution.activityContinuity, Number(execution.createdAt ?? 0)),
     createdAt: typeof execution.createdAt === "number" ? execution.createdAt : Number(execution.createdAt ?? 0),
     updatedAt: typeof execution.updatedAt === "number" ? execution.updatedAt : Number(execution.updatedAt ?? 0),
   };
+}
+
+export function automationCapitalExposuresFromExecutions(
+  executions: readonly RwaExecutionRecord[],
+): RwaAutomationCapitalExposure[] {
+  return executions.flatMap((execution) => {
+    assertProfiledExecutionFields(execution);
+    const positionCapital = executionPositionCapitalUsd(execution);
+    const hasLiveState = !["closed", "reconciled", "failed"].includes(execution.state)
+      || positionCapital > 0;
+    const capitalUsd = Math.max(positionCapital, hasLiveState ? execution.reservedCapitalUsd : 0);
+    if (!(capitalUsd > 0)) return [];
+    const assetId = execution.asset.toLowerCase();
+    const asset = getRwaAutomationAssetProfile(assetId);
+    const validProfileIds = asset?.venues.map((venue) =>
+      rwaAutomationProfileId({ asset, venue })) ?? [];
+    if (!asset || !validProfileIds.includes(execution.profileId)) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_risk_state_invalid",
+        "自动套利持久状态包含未知或错配的资产 profile；已拒绝新增风险。",
+      );
+    }
+    return [{
+      executionId: execution.executionId,
+      userId: execution.userId,
+      accountId: execution.accountId,
+      assetId: assetId as RwaAutomationCapitalExposure["assetId"],
+      profileId: execution.profileId,
+      capitalUsd,
+    }];
+  });
+}
+
+function legacyExecutionProfile(
+  venue: "bybit" | "bitget" | "binance" | "okx",
+): Pick<RwaExecutionRecord, "asset" | "profileId" | "reservedCapitalUsd"> {
+  const profileId = venue === "bybit" || venue === "binance"
+    ? rwaAutomationProfileId(requireRwaAutomationExecutionProfile("xaut", venue))
+    : "legacy:XAUT";
+  return { asset: "XAUT", profileId, reservedCapitalUsd: 0 };
+}
+
+function assertProfiledExecutionFields(
+  execution: Record<string, unknown> | RwaExecutionRecord,
+  venue?: "bybit" | "bitget" | "binance" | "okx",
+): Pick<RwaExecutionRecord, "asset" | "profileId" | "reservedCapitalUsd"> {
+  const asset = typeof execution.asset === "string"
+    ? getRwaAutomationAssetProfile(execution.asset.toLowerCase())
+    : null;
+  const venueProfiles = asset?.executionStatus === "enabled"
+    ? asset.venues.filter((profile) => venue === undefined || profile.venue === venue)
+    : [];
+  const validProfileIds = venueProfiles.map((profile) => rwaAutomationProfileId({ asset: asset!, venue: profile }));
+  if (
+    !asset
+    || execution.asset !== asset.baseAsset
+    || validProfileIds.length === 0
+    || typeof execution.profileId !== "string"
+    || !validProfileIds.includes(execution.profileId)
+    || typeof execution.reservedCapitalUsd !== "number"
+    || !Number.isFinite(execution.reservedCapitalUsd)
+    || execution.reservedCapitalUsd < 0
+  ) throw invalidRiskState();
+  return {
+    asset: asset.baseAsset,
+    profileId: execution.profileId,
+    reservedCapitalUsd: execution.reservedCapitalUsd,
+  };
+}
+
+function invalidRiskState() {
+  return new RwaAutomationGovernanceError(
+    503,
+    "automation_risk_state_invalid",
+    "自动套利持久风险状态的资产 profile 字段无效；已拒绝新增风险。",
+  );
+}
+
+export async function readRwaAutomationCapitalExposures() {
+  const dataDir = resolveRwaAutomationActiveDataDir();
+  const entries = await readdir(dataDir, { withFileTypes: true }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  });
+  const exposures: RwaAutomationCapitalExposure[] = [];
+  for (const entry of entries) {
+    const match = /^([a-f0-9]{16})-(bybit|binance)-state\.json$/.exec(entry.name);
+    if (!entry.isFile() || !match) continue;
+    const path = resolve(dataDir, entry.name);
+    const metadata = await lstat(path);
+    if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1
+      || (metadata.mode & 0o777) !== 0o600
+      || metadata.size > 10 * 1024 * 1024) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_risk_state_invalid",
+        "自动套利风险状态文件边界无效；已拒绝新增风险。",
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(path, "utf8"));
+    } catch {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_risk_state_invalid",
+        "自动套利风险状态不可读；已拒绝新增风险。",
+      );
+    }
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)
+      || !Array.isArray((parsed as { executions?: unknown }).executions)) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_risk_state_invalid",
+        "自动套利风险状态结构无效；已拒绝新增风险。",
+      );
+    }
+    const venue = match[2] as "bybit" | "binance";
+    const normalized = (parsed as { executions: unknown[] }).executions
+      .map((execution) => normalizeExecutionRecord(execution, venue));
+    const expectedProfileId = rwaAutomationProfileId(requireRwaAutomationExecutionProfile("xaut", venue));
+    for (const execution of normalized) {
+      const expectedDomain = createHash("sha256")
+        .update(`rwa-user:${execution.userId}`)
+        .digest("hex")
+        .slice(0, 16);
+      if (
+        expectedDomain !== match[1]
+        || execution.asset !== "XAUT"
+        || execution.profileId !== expectedProfileId
+      ) {
+        throw new RwaAutomationGovernanceError(
+          503,
+          "automation_risk_state_invalid",
+          "自动套利风险状态的用户、venue 或资产 profile 绑定无效；已拒绝新增风险。",
+        );
+      }
+    }
+    exposures.push(...automationCapitalExposuresFromExecutions(normalized));
+  }
+  return exposures;
+}
+
+function executionPositionCapitalUsd(execution: RwaExecutionRecord) {
+  const spotQuantity = execution.strategyPosition.spotRemainingXaut;
+  const perpetualQuantity = execution.strategyPosition.perpetualRemainingXaut;
+  if (!(spotQuantity > 0 || perpetualQuantity > 0)) return 0;
+  const spotPrice = execution.spotOrder?.averagePrice ?? 0;
+  const perpetualPrice = Number([...execution.perpetualOrders].reverse()
+    .find((order) => Number(order.averagePrice) > 0)?.averagePrice ?? 0);
+  if ((spotQuantity > 0 && !(spotPrice > 0)) || (perpetualQuantity > 0 && !(perpetualPrice > 0))) {
+    throw new RwaAutomationGovernanceError(
+      503,
+      "automation_risk_state_invalid",
+      "自动套利持仓缺少可验证价格；已拒绝新增风险。",
+    );
+  }
+  return spotQuantity * spotPrice + perpetualQuantity * perpetualPrice;
 }
 
 function normalizeStrategyPosition(

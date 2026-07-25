@@ -3,13 +3,23 @@ import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import {
   CredentialStoreError,
   RwaAutomationPersistentStore,
+  automationCapitalExposuresFromExecutions,
+  readRwaAutomationCapitalExposures,
   type RwaCredentialMutationSnapshot,
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
+import {
+  assertRwaAutomationNewRisk,
+  calculateRwaAutomationNewRiskUsage,
+  mergeRwaAutomationCapitalExposures,
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+  type RwaAutomationCapitalExposure,
+} from "./RwaAutomationAssetProfile";
 import {
   RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
   RWA_BINANCE_STRATEGY_ID,
-  RWA_BINANCE_TOTAL_BUDGET_USD,
   type RwaBinanceClient,
   type RwaBinanceClientFactory,
   type RwaBinanceCredentials,
@@ -30,7 +40,6 @@ import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import {
-  RWA_MAX_STRATEGY_CAPITAL_USD,
   defaultRwaExecutionConfig,
   type RwaExecutionReconciliationPreview,
   type RwaCredentialLifecycle,
@@ -38,16 +47,24 @@ import {
   type RwaExecutionRecord,
   RwaExecutionSafetyError,
   type RwaPreflightReport,
+  type RwaPositionAttributionSnapshot,
 } from "./RwaNeutralExecutionTypes";
+import {
+  mergeActivitySnapshot,
+  recordStrategyProviderOrder,
+  RWA_ACTIVITY_POLL_INTERVAL_MS,
+} from "./RwaProviderActivityContinuity";
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
 const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating", "partial_closed"]);
+const XAUT_BINANCE_PROFILE = requireRwaAutomationExecutionProfile("xaut", "binance");
 type BinanceStore = RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>;
 type BinanceCredentialMetadata = NonNullable<Awaited<ReturnType<BinanceStore["readCredentialMetadata"]>>>;
 
 export class RwaBinanceAutomationService {
   private lock = Promise.resolve();
+  private activityMonitor: ReturnType<typeof setInterval> | null = null;
   private readonly armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
   private readonly publicClient: RwaBinanceClient;
@@ -60,10 +77,15 @@ export class RwaBinanceAutomationService {
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     publicClient?: RwaBinanceClient,
     private readonly assertExecutionLeaseHeld: () => void = () => {},
+    private readonly activityMonitoringEnabled: () => boolean = () => process.env.NODE_ENV !== "test",
   ) {
     this.store.setClock(now);
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
-    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now, assertExecutionLeaseHeld);
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(
+      now,
+      assertExecutionLeaseHeld,
+      XAUT_BINANCE_PROFILE,
+    );
   }
 
   private get strategyOrderPrefix() {
@@ -103,6 +125,8 @@ export class RwaBinanceAutomationService {
             `${execution.orderLinkPrefix}r`,
             trackedExposureFromExecution(execution),
             (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+            (snapshot) => this.persistActivitySnapshot(state, [execution.executionId], snapshot),
+            (side, orderId) => this.persistProviderOrder(state, [execution.executionId], side, orderId),
           );
           const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
           execution.state = fullyClosed ? "closed" : "partial_closed";
@@ -123,6 +147,81 @@ export class RwaBinanceAutomationService {
         execution.updatedAt = this.now();
       }
       await this.store.writeState(state);
+    });
+    await this.startActivityMonitoring();
+  }
+
+  async startActivityMonitoring() {
+    if (!this.activityMonitoringEnabled()) return;
+    if (this.activityMonitor) return;
+    const active = await this.refreshActivityContinuity();
+    if (!active) return;
+    this.activityMonitor = setInterval(() => {
+      void this.refreshActivityContinuity().then((keep) => {
+        if (!keep) this.stopActivityMonitor();
+      });
+    }, RWA_ACTIVITY_POLL_INTERVAL_MS);
+    this.activityMonitor.unref();
+  }
+
+  hasActivityMonitor() {
+    return this.activityMonitor !== null;
+  }
+
+  dispose() {
+    this.stopActivityMonitor();
+  }
+
+  private stopActivityMonitor() {
+    if (!this.activityMonitor) return;
+    clearInterval(this.activityMonitor);
+    this.activityMonitor = null;
+  }
+
+  refreshActivityContinuity() {
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const active = strategyExposureExecutions(state.executions)
+        .filter((execution) => execution.profileId === rwaAutomationProfileId(XAUT_BINANCE_PROFILE));
+      if (!active.length) return false;
+      this.assertExecutionLeaseHeld();
+      if (active.some((execution) =>
+        execution.activityContinuity.spot.coverage !== "monitored"
+        || execution.activityContinuity.perpetual.coverage !== "monitored")) {
+        markExecutionsActivityAmbiguous(state, active, this.now());
+        await this.store.writeState(state);
+        this.assertExecutionLeaseHeld();
+        return false;
+      }
+      try {
+        const client = await this.client();
+        const market = await client.readPreflightSnapshot();
+        const tracked = trackedExposureFromState(active, rwaAutomationProfileId(XAUT_BINANCE_PROFILE));
+        if (
+          Math.abs(market.existingSpotQuantityXaut - tracked.spotQuantityXaut) > 1e-9
+          || Math.abs(market.existingPerpetualQuantityXaut - tracked.perpetualQuantityXaut) > 1e-9
+        ) throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "账户数量与策略归属数量不一致。");
+        const snapshot = await client.readPositionAttribution({
+          strategyOrderPrefix: this.strategyOrderPrefix,
+          strategyOrderPrefixes: tracked.strategyOrderPrefixes,
+          since: tracked.attributionSince,
+          continuity: tracked.activityContinuity,
+        });
+        this.assertExecutionLeaseHeld();
+        await this.persistActivitySnapshot(state, tracked.sourceExecutionIds, snapshot);
+        this.assertExecutionLeaseHeld();
+        if (
+          active.some((execution) => execution.activityContinuity.spot.coverage === "ambiguous"
+            || execution.activityContinuity.perpetual.coverage === "ambiguous")
+        ) throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "交易所活动连续性不完整。");
+        return true;
+      } catch (error) {
+        if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+        markExecutionsActivityAmbiguous(state, active, this.now());
+        await this.store.writeState(state);
+        this.assertExecutionLeaseHeld();
+        return false;
+      }
     });
   }
 
@@ -379,7 +478,13 @@ export class RwaBinanceAutomationService {
     const next = { ...state.config };
     if ("globalExecutionEnabled" in body) next.globalExecutionEnabled = booleanField(body.globalExecutionEnabled, "globalExecutionEnabled");
     if ("strategyEnabled" in body) next.strategyEnabled = booleanField(body.strategyEnabled, "strategyEnabled");
-    assignRange(next, body, "maxStrategyCapitalUsd", 25, RWA_MAX_STRATEGY_CAPITAL_USD);
+    assignRange(
+      next,
+      body,
+      "maxStrategyCapitalUsd",
+      XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!.maxOrderNotionalUsd,
+      XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!.maxAssetCapitalUsd,
+    );
     assignRange(next, body, "maxEntryBasisBps", 0, 80);
     assignRange(next, body, "maxCombinedSlippageBps", 1, 20);
     assignRange(next, body, "minNetAprPercent", 8, 100);
@@ -594,6 +699,7 @@ export class RwaBinanceAutomationService {
         state.config,
         mode,
         this.now(),
+        await this.riskExposures(state),
       );
       if (!report.passed) {
         throw new RwaNeutralExecutionError(409, "preflight_rejected", "Binance 实时 preflight 未通过，禁止建立对冲组合。", { report });
@@ -657,9 +763,22 @@ export class RwaBinanceAutomationService {
         idempotencyKey: scopedIdempotencyKey,
         challengeId,
         now: this.now(),
+        venue: "binance",
+        reservedCapitalUsd: challenge.report.estimatedCapitalRequiredUsd,
       });
       state.executions.push(execution);
       await this.store.writeState(state);
+      try {
+        await this.assertReservedRiskCapacity(state, execution);
+      } catch (error) {
+        execution.state = "failed";
+        execution.errorCategory = errorCategory(error);
+        execution.message = sanitizeRwaAutomationError(error);
+        execution.reservedCapitalUsd = 0;
+        execution.updatedAt = this.now();
+        await this.store.writeState(state);
+        throw error;
+      }
       this.assertExecutionLeaseHeld();
       let client: RwaBinanceClient | null = null;
       try {
@@ -676,10 +795,13 @@ export class RwaBinanceAutomationService {
           state.config,
           mode,
           this.now(),
+          await this.riskExposures(state),
         );
         if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止建立对冲组合。");
-        this.assertExecutionLeaseHeld();
-        await client.setPerpetualLeverage(1);
+        execution.reservedCapitalUsd = report.estimatedCapitalRequiredUsd;
+        execution.updatedAt = this.now();
+        await this.store.writeState(state);
+        await this.assertReservedRiskCapacity(state, execution);
         await this.hedgeEngine.open({
           client,
           execution,
@@ -693,6 +815,18 @@ export class RwaBinanceAutomationService {
         if (execution.state !== "hedged" && execution.state !== "closed") {
           execution.errorCategory = errorCategory(error);
           execution.message = sanitizeRwaAutomationError(error);
+          if (client && hasNoStrategyExposureOrOrders(execution)) {
+            try {
+              this.assertExecutionLeaseHeld();
+              execution.state = "failed";
+              execution.reservedCapitalUsd = 0;
+              execution.updatedAt = this.now();
+              await this.store.writeState(state);
+              return redactExecution(execution);
+            } catch {
+              // Lease or persistence uncertainty keeps the recovery path fail-closed.
+            }
+          }
           try {
             if (!client) throw error;
             this.assertExecutionLeaseHeld();
@@ -704,6 +838,8 @@ export class RwaBinanceAutomationService {
               `${execution.orderLinkPrefix}x`,
               trackedExposureFromExecution(execution),
               (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+              (snapshot) => this.persistActivitySnapshot(state, [execution.executionId], snapshot),
+              (side, orderId) => this.persistProviderOrder(state, [execution.executionId], side, orderId),
             );
             const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
             execution.state = fullyClosed ? "failed" : "partial_closed";
@@ -720,6 +856,7 @@ export class RwaBinanceAutomationService {
           await this.store.writeState(state);
         }
       }
+      if (execution.state === "hedged") void this.startActivityMonitoring();
       return redactExecution(execution);
     });
   }
@@ -741,7 +878,10 @@ export class RwaBinanceAutomationService {
       const metadata = await this.requireMetadata();
       assertAccountId(accountId, metadata.accountId);
       const client = await this.client();
-      const trackedExposure = trackedExposureFromState(state.executions);
+      const trackedExposure = trackedExposureFromState(
+        state.executions,
+        rwaAutomationProfileId(XAUT_BINANCE_PROFILE),
+      );
       const execution = createNeutralExecutionRecord({
         userId: this.store.ownerUserId,
         accountId,
@@ -749,6 +889,7 @@ export class RwaBinanceAutomationService {
         idempotencyKey: scopedIdempotencyKey,
         challengeId: "close-all",
         now: this.now(),
+        venue: "binance",
       });
       execution.state = "compensating";
       execution.message = "正在退出现货与永续对冲组合。";
@@ -762,6 +903,8 @@ export class RwaBinanceAutomationService {
           execution.orderLinkPrefix,
           trackedExposure,
           (side, order) => this.persistCloseFill(state, trackedExposure.sourceExecutionIds, side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+          (snapshot) => this.persistActivitySnapshot(state, trackedExposure.sourceExecutionIds, snapshot),
+          (side, orderId) => this.persistProviderOrder(state, trackedExposure.sourceExecutionIds, side, orderId),
         );
         const fullyClosed = finalizeTrackedExecutions(state, trackedExposure.sourceExecutionIds, this.now());
         execution.state = fullyClosed ? "closed" : "partial_closed";
@@ -879,6 +1022,53 @@ export class RwaBinanceAutomationService {
     await this.store.writeState(state);
   }
 
+  private async persistActivitySnapshot(
+    state: RwaAutomationStateData,
+    executionIds: string[],
+    snapshot: RwaPositionAttributionSnapshot,
+  ) {
+    const ids = new Set(executionIds);
+    for (const execution of state.executions) {
+      if (!ids.has(execution.executionId)) continue;
+      execution.activityContinuity = mergeActivitySnapshot(
+        execution.activityContinuity,
+        snapshot,
+        [execution.orderLinkPrefix],
+        this.now(),
+      );
+      execution.updatedAt = this.now();
+      if (
+        execution.activityContinuity.spot.coverage === "ambiguous"
+        || execution.activityContinuity.perpetual.coverage === "ambiguous"
+      ) {
+        state.config.killSwitchActive = true;
+        state.config.strategyEnabled = false;
+        state.config.globalExecutionEnabled = false;
+      }
+    }
+    await this.store.writeState(state);
+  }
+
+  private async persistProviderOrder(
+    state: RwaAutomationStateData,
+    executionIds: string[],
+    side: "spot" | "linear",
+    orderId: string,
+  ) {
+    const ids = new Set(executionIds);
+    for (const execution of state.executions) {
+      if (!ids.has(execution.executionId)) continue;
+      execution.activityContinuity = recordStrategyProviderOrder(
+        execution.activityContinuity,
+        side,
+        orderId,
+        this.now(),
+      );
+      execution.updatedAt = this.now();
+    }
+    await this.store.writeState(state);
+  }
+
   private async safeReconciliationPreview(client: RwaBinanceClient | null, execution: RwaExecutionRecord) {
     if (!client) return null;
     try {
@@ -985,6 +1175,33 @@ export class RwaBinanceAutomationService {
     if (config.killSwitchActive) throw new RwaNeutralExecutionError(409, "kill_switch_active", "Kill switch 已激活，禁止新增风险动作。");
   }
 
+  private async riskExposures(state: RwaAutomationStateData) {
+    return mergeRwaAutomationCapitalExposures(
+      await readRwaAutomationCapitalExposures(),
+      automationCapitalExposuresFromExecutions(state.executions),
+    );
+  }
+
+  private async assertReservedRiskCapacity(state: RwaAutomationStateData, execution: RwaExecutionRecord) {
+    const limits = XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!;
+    const usage = calculateRwaAutomationNewRiskUsage({
+      exposures: await this.riskExposures(state),
+      profile: XAUT_BINANCE_PROFILE,
+      userId: execution.userId,
+      accountId: execution.accountId,
+      orderNotionalUsd: execution.reservedCapitalUsd,
+      proposedCapitalUsd: 0,
+    });
+    try {
+      assertRwaAutomationNewRisk({ limits, ...usage });
+    } catch {
+      throw new RwaNeutralExecutionError(409, "risk_limit_exceeded", "当前新增风险超过服务端资产 profile 的分层上限。");
+    }
+    if (usage.assetNotionalUsd > state.config.maxStrategyCapitalUsd) {
+      throw new RwaNeutralExecutionError(409, "strategy_cap_exceeded", "当前资产新增风险超过受控策略资本配置。");
+    }
+  }
+
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
     const previous = this.lock;
     let release!: () => void;
@@ -1041,6 +1258,7 @@ function buildBinancePreflight(
   config: RwaExecutionConfig,
   mode: RwaAutomationMode,
   now: number,
+  exposures: readonly RwaAutomationCapitalExposure[],
 ): RwaPreflightReport & {
   phase: "execution_capable";
   providerWritesEnabled: true;
@@ -1048,9 +1266,10 @@ function buildBinancePreflight(
   marketChecksPassed: boolean;
   message: string;
 } {
+  const limits = XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!;
   const commonStep = Math.max(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep);
   const budgetQuantity = commonStep > 0
-    ? floorStep(RWA_BINANCE_TOTAL_BUDGET_USD * 0.95 / (snapshot.spot.ask + snapshot.perpetual.bid), commonStep)
+    ? floorStep(limits.maxOrderNotionalUsd * 0.95 / (snapshot.spot.ask + snapshot.perpetual.bid), commonStep)
     : 0;
   const quantityXaut = budgetQuantity;
   const spotNotional = quantityXaut * snapshot.spot.ask;
@@ -1066,6 +1285,14 @@ function buildBinancePreflight(
     : 0;
   const estimatedNetAprPercent = snapshot.perpetual.fundingRate * fundingPeriodsPerYear * 100
     - (snapshot.fees.spotTakerBps + snapshot.fees.perpetualTakerBps + config.maxCombinedSlippageBps) / 100;
+  const riskUsage = calculateRwaAutomationNewRiskUsage({
+    exposures,
+    profile: XAUT_BINANCE_PROFILE,
+    userId,
+    accountId: snapshot.accountId,
+    orderNotionalUsd: capitalRequired,
+    proposedCapitalUsd: capitalRequired,
+  });
   const checks = [
     check("product_pair", snapshot.productAvailability.available, true, "Binance Mainnet 必须存在可执行的 XAUTUSDT 现货与 USD-M 永续对冲组合。"),
     check("permissions", permissionsValid(snapshot.permissions), true, "必须具备读取、现货交易和 USD-M Futures 交易权限，关闭提现，并通过服务端固定出口 IP 白名单核对。"),
@@ -1081,8 +1308,11 @@ function buildBinancePreflight(
     check("no_existing_spot", snapshot.existingSpotQuantityXaut <= 1e-9 && snapshot.openSpotOrderCount === 0, 0, "专用账户不得已有 XAUT 现货或活动现货订单。"),
     check("no_existing_perpetual", snapshot.existingPerpetualQuantityXaut <= 1e-9 && snapshot.openPerpetualOrderCount === 0, 0, "专用账户不得已有 XAUT 永续仓位或活动合约订单。"),
     check("depth", snapshot.spot.depthUsd >= spotNotional && snapshot.perpetual.depthUsd >= perpetualNotional, true, "现货侧与永续侧公开盘口深度必须覆盖计划名义。"),
-    check("total_budget", capitalRequired <= RWA_BINANCE_TOTAL_BUDGET_USD, RWA_BINANCE_TOTAL_BUDGET_USD, "现货与永续对冲组合的 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
-    check("strategy_cap", capitalRequired <= config.maxStrategyCapitalUsd && config.maxStrategyCapitalUsd <= RWA_MAX_STRATEGY_CAPITAL_USD, config.maxStrategyCapitalUsd, "venue 资本上限不得超过 300 USDT。"),
+    check("order_cap", riskUsage.orderNotionalUsd <= limits.maxOrderNotionalUsd, limits.maxOrderNotionalUsd, "本次新增风险必须在当前 profile 单笔上限内。"),
+    check("asset_cap", riskUsage.assetNotionalUsd <= Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), "资产累计新增风险必须在受控上限内。"),
+    check("strategy_cap", riskUsage.assetNotionalUsd <= Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), "兼容字段：当前资产累计新增风险必须在受控策略资本上限内。"),
+    check("account_cap", riskUsage.accountNotionalUsd <= limits.maxAccountCapitalUsd, limits.maxAccountCapitalUsd, "账户内自动策略累计新增风险必须在受控上限内。"),
+    check("global_cap", riskUsage.globalNotionalUsd <= limits.maxGlobalCapitalUsd, limits.maxGlobalCapitalUsd, "全部自动策略累计新增风险必须在当前阶段上限内。"),
     check("liquidation", snapshot.perpetual.liquidationDistancePercent === null
       || snapshot.perpetual.liquidationDistancePercent >= config.minLiquidationDistancePercent, config.minLiquidationDistancePercent, "已有仓位强平距离不得低于门限。"),
     check("freshness", now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS, RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS, "私有账户与市场快照必须新鲜。"),
@@ -1115,7 +1345,7 @@ function buildBinancePreflight(
     mode,
     productAvailability: snapshot.productAvailability,
     quantityXaut,
-    totalBudgetUsd: RWA_BINANCE_TOTAL_BUDGET_USD,
+    totalBudgetUsd: limits.maxOrderNotionalUsd,
     estimatedSpotNotionalUsd: spotNotional,
     estimatedPerpetualNotionalUsd: perpetualNotional,
     estimatedCapitalRequiredUsd: capitalRequired,
@@ -1260,6 +1490,7 @@ function finalizeTrackedExecutions(state: RwaAutomationStateData, executionIds: 
     execution.strategyPosition.updatedAt = now;
     const hasResidual = execution.strategyPosition.spotRemainingXaut > 1e-12
       || execution.strategyPosition.perpetualRemainingXaut > 1e-12;
+    if (!hasResidual) execution.reservedCapitalUsd = 0;
     fullyClosed = fullyClosed && !hasResidual;
     execution.state = hasResidual ? "partial_closed" : "closed";
     execution.message = hasResidual
@@ -1301,6 +1532,43 @@ function applyTrackedCloseFill(
 
 function normalizeStrategyQuantity(value: number) {
   return Math.max(0, Math.round(value * 1_000_000_000_000) / 1_000_000_000_000);
+}
+
+function hasNoStrategyExposureOrOrders(execution: RwaExecutionRecord) {
+  return execution.strategyPosition.spotRemainingXaut <= 1e-12
+    && execution.strategyPosition.perpetualRemainingXaut <= 1e-12
+    && execution.activityContinuity.spot.providerOrderIds.length === 0
+    && execution.activityContinuity.perpetual.providerOrderIds.length === 0;
+}
+
+function strategyExposureExecutions(executions: RwaExecutionRecord[]) {
+  return executions.filter((execution) =>
+    execution.challengeId !== "close-all"
+    && (execution.strategyPosition.spotRemainingXaut > 1e-12
+      || execution.strategyPosition.perpetualRemainingXaut > 1e-12));
+}
+
+function markExecutionsActivityAmbiguous(
+  state: RwaAutomationStateData,
+  executions: RwaExecutionRecord[],
+  now: number,
+) {
+  const ids = new Set(executions.map((execution) => execution.executionId));
+  for (const execution of state.executions) {
+    if (!ids.has(execution.executionId)) continue;
+    execution.activityContinuity.spot.coverage = "ambiguous";
+    execution.activityContinuity.perpetual.coverage = "ambiguous";
+    execution.activityContinuity.spot.updatedAt = now;
+    execution.activityContinuity.perpetual.updatedAt = now;
+    execution.state = "manual_intervention";
+    execution.errorCategory = "strategy_ownership_ambiguous";
+    execution.message = "交易所活动连续性无法完整证明，已关闭自动退出并要求人工核对。";
+    execution.updatedAt = now;
+  }
+  state.config.killSwitchActive = true;
+  state.config.strategyEnabled = false;
+  state.config.globalExecutionEnabled = false;
+  state.challenges = [];
 }
 
 function roundResidual(value: number) {

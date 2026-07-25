@@ -2,8 +2,19 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   CredentialStoreError,
   RwaAutomationPersistentStore,
+  automationCapitalExposuresFromExecutions,
+  readRwaAutomationCapitalExposures,
   type RwaAutomationStateData,
 } from "./RwaAutomationPersistentStore";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
+import {
+  assertRwaAutomationNewRisk,
+  calculateRwaAutomationNewRiskUsage,
+  mergeRwaAutomationCapitalExposures,
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+  type RwaAutomationCapitalExposure,
+} from "./RwaAutomationAssetProfile";
 import { RwaBybitProviderError } from "./RwaBybitMainnetClient";
 import {
   RwaNeutralHedgeExecutionEngine,
@@ -11,12 +22,16 @@ import {
   trackedExposureFromState,
 } from "./RwaNeutralHedgeExecutionEngine";
 import { sanitizeRwaAutomationError } from "./RwaNeutralAutomationSecurity";
+import {
+  createUnmonitoredActivityContinuity,
+  mergeActivitySnapshot,
+  recordStrategyProviderOrder,
+  RWA_ACTIVITY_POLL_INTERVAL_MS,
+} from "./RwaProviderActivityContinuity";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import type { RwaAutomationMode } from "./RwaAutomationTypes";
 import {
-  RWA_MAX_STRATEGY_CAPITAL_USD,
   RWA_SMOKE_QUANTITY_XAUT,
-  RWA_SMOKE_TOTAL_BUDGET_USD,
   RWA_STRATEGY_ID,
   defaultRwaExecutionConfig,
   type RwaBybitCredentials,
@@ -33,12 +48,14 @@ import {
   type RwaPreflightReport,
   type RwaProviderOrder,
   type RwaProviderPreflightSnapshot,
+  type RwaPositionAttributionSnapshot,
 } from "./RwaNeutralExecutionTypes";
 
 const challengeTtlMs = 60_000;
 const credentialPermissionTtlMs = 10_000;
 const credentialRotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating"]);
+const XAUT_BYBIT_PROFILE = requireRwaAutomationExecutionProfile("xaut", "bybit");
 
 export class RwaNeutralExecutionError extends Error {
   constructor(readonly statusCode: number, readonly category: string, message: string, readonly details?: Record<string, unknown>) {
@@ -48,6 +65,7 @@ export class RwaNeutralExecutionError extends Error {
 
 export class RwaNeutralExecutionService {
   private lock = Promise.resolve();
+  private activityMonitor: ReturnType<typeof setInterval> | null = null;
   private armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
   private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
@@ -63,9 +81,14 @@ export class RwaNeutralExecutionService {
     private readonly now: () => number = Date.now,
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     private readonly assertExecutionLeaseHeld: () => void = () => {},
+    private readonly activityMonitoringEnabled: () => boolean = () => process.env.NODE_ENV !== "test",
   ) {
     this.store.setClock(now);
-    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(now, assertExecutionLeaseHeld);
+    this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(
+      now,
+      assertExecutionLeaseHeld,
+      XAUT_BYBIT_PROFILE,
+    );
   }
 
   private get strategyOrderPrefix() {
@@ -105,6 +128,8 @@ export class RwaNeutralExecutionService {
             `${execution.orderLinkPrefix}r`,
             trackedExposureFromExecution(execution),
             (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+            (snapshot) => this.persistActivitySnapshot(state, [execution.executionId], snapshot),
+            (side, orderId) => this.persistProviderOrder(state, [execution.executionId], side, orderId),
           );
           const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
           execution.state = fullyClosed ? "closed" : "partial_closed";
@@ -122,6 +147,81 @@ export class RwaNeutralExecutionService {
         }
       }
       await this.store.writeState(state);
+    });
+    await this.startActivityMonitoring();
+  }
+
+  async startActivityMonitoring() {
+    if (!this.activityMonitoringEnabled()) return;
+    if (this.activityMonitor) return;
+    const active = await this.refreshActivityContinuity();
+    if (!active) return;
+    this.activityMonitor = setInterval(() => {
+      void this.refreshActivityContinuity().then((keep) => {
+        if (!keep) this.stopActivityMonitor();
+      });
+    }, RWA_ACTIVITY_POLL_INTERVAL_MS);
+    this.activityMonitor.unref();
+  }
+
+  hasActivityMonitor() {
+    return this.activityMonitor !== null;
+  }
+
+  dispose() {
+    this.stopActivityMonitor();
+  }
+
+  private stopActivityMonitor() {
+    if (!this.activityMonitor) return;
+    clearInterval(this.activityMonitor);
+    this.activityMonitor = null;
+  }
+
+  refreshActivityContinuity() {
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const active = strategyExposureExecutions(state.executions)
+        .filter((execution) => execution.profileId === rwaAutomationProfileId(XAUT_BYBIT_PROFILE));
+      if (!active.length) return false;
+      this.assertExecutionLeaseHeld();
+      if (active.some((execution) =>
+        execution.activityContinuity.spot.coverage !== "monitored"
+        || execution.activityContinuity.perpetual.coverage !== "monitored")) {
+        markExecutionsActivityAmbiguous(state, active, this.now());
+        await this.store.writeState(state);
+        this.assertExecutionLeaseHeld();
+        return false;
+      }
+      try {
+        const client = await this.client();
+        const market = await client.readPreflightSnapshot();
+        const tracked = trackedExposureFromState(active, rwaAutomationProfileId(XAUT_BYBIT_PROFILE));
+        if (
+          Math.abs(market.existingSpotQuantityXaut - tracked.spotQuantityXaut) > 1e-9
+          || Math.abs(market.existingPerpetualQuantityXaut - tracked.perpetualQuantityXaut) > 1e-9
+        ) throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "账户数量与策略归属数量不一致。");
+        const snapshot = await client.readPositionAttribution({
+          strategyOrderPrefix: this.strategyOrderPrefix,
+          strategyOrderPrefixes: tracked.strategyOrderPrefixes,
+          since: tracked.attributionSince,
+          continuity: tracked.activityContinuity,
+        });
+        this.assertExecutionLeaseHeld();
+        await this.persistActivitySnapshot(state, tracked.sourceExecutionIds, snapshot);
+        this.assertExecutionLeaseHeld();
+        if (
+          active.some((execution) => execution.activityContinuity.spot.coverage === "ambiguous"
+            || execution.activityContinuity.perpetual.coverage === "ambiguous")
+        ) throw new RwaExecutionSafetyError("strategy_ownership_ambiguous", "交易所活动连续性不完整。");
+        return true;
+      } catch (error) {
+        if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+        markExecutionsActivityAmbiguous(state, active, this.now());
+        await this.store.writeState(state);
+        this.assertExecutionLeaseHeld();
+        return false;
+      }
     });
   }
 
@@ -400,7 +500,13 @@ export class RwaNeutralExecutionService {
           next[key] = body[key];
         }
       }
-      assignRange(next, body, "maxStrategyCapitalUsd", 25, RWA_MAX_STRATEGY_CAPITAL_USD);
+      assignRange(
+        next,
+        body,
+        "maxStrategyCapitalUsd",
+        XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!.maxOrderNotionalUsd,
+        XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!.maxAssetCapitalUsd,
+      );
       assignRange(next, body, "maxEntryBasisBps", 0, 80);
       assignRange(next, body, "maxCombinedSlippageBps", 1, 20);
       assignRange(next, body, "minNetAprPercent", 8, 100);
@@ -516,7 +622,15 @@ export class RwaNeutralExecutionService {
       await this.validateActiveAccess(client, accountId, true, state);
       const snapshot = await client.readPreflightSnapshot().catch((error) => { throw providerError(error, "Bybit 实时 preflight 读取失败。"); });
       assertAccountId(snapshot.accountId, accountId);
-      const report = buildPreflight(this.store.ownerUserId, snapshot, state.config, this.now(), opportunity.id, mode);
+      const report = buildPreflight(
+        this.store.ownerUserId,
+        snapshot,
+        state.config,
+        this.now(),
+        opportunity.id,
+        mode,
+        await this.riskExposures(state),
+      );
       if (!report.passed) {
         throw new RwaNeutralExecutionError(409, "preflight_rejected", "实时 preflight 未通过，禁止真实下单。", { report });
       }
@@ -570,9 +684,28 @@ export class RwaNeutralExecutionService {
       assertAccountId(accountId, challenge.report.accountId);
       challenge.consumedAt = this.now();
       this.armedChallengeIds.delete(challengeId);
-      const execution = newExecution(this.store.ownerUserId, accountId, this.strategyOrderPrefix, scopedIdempotencyKey, challengeId, this.now());
+      const execution = newExecution(
+        this.store.ownerUserId,
+        accountId,
+        this.strategyOrderPrefix,
+        scopedIdempotencyKey,
+        challengeId,
+        this.now(),
+        challenge.report.estimatedCapitalRequiredUsd,
+      );
       state.executions.push(execution);
       await this.store.writeState(state);
+      try {
+        await this.assertReservedRiskCapacity(state, execution);
+      } catch (error) {
+        execution.state = "failed";
+        execution.errorCategory = category(error);
+        execution.message = sanitizeRwaAutomationError(error);
+        execution.reservedCapitalUsd = 0;
+        execution.updatedAt = this.now();
+        await this.store.writeState(state);
+        throw error;
+      }
       this.assertExecutionLeaseHeld();
       let client: RwaBybitTradingClient | null = null;
       try {
@@ -589,10 +722,13 @@ export class RwaNeutralExecutionService {
           this.now(),
           challenge.report.opportunityId,
           challengeMode,
+          await this.riskExposures(state),
         );
         if (!report.passed) throw new RwaNeutralExecutionError(409, "preflight_changed", "执行前实时条件已变化，禁止下单。");
-        this.assertExecutionLeaseHeld();
-        await client.setPerpetualLeverage(1);
+        execution.reservedCapitalUsd = report.estimatedCapitalRequiredUsd;
+        execution.updatedAt = this.now();
+        await this.store.writeState(state);
+        await this.assertReservedRiskCapacity(state, execution);
         await this.hedgeEngine.open({
           client,
           execution,
@@ -606,6 +742,18 @@ export class RwaNeutralExecutionService {
         if (execution.state !== "hedged" && execution.state !== "closed") {
           execution.errorCategory = category(error);
           execution.message = sanitizeRwaAutomationError(error);
+          if (client && hasNoStrategyExposureOrOrders(execution)) {
+            try {
+              this.assertExecutionLeaseHeld();
+              execution.state = "failed";
+              execution.reservedCapitalUsd = 0;
+              execution.updatedAt = this.now();
+              await this.store.writeState(state);
+              return redactExecution(execution);
+            } catch {
+              // Lease or persistence uncertainty keeps the recovery path fail-closed.
+            }
+          }
           try {
             if (!client) throw new Error("credential client unavailable");
             this.assertExecutionLeaseHeld();
@@ -617,6 +765,8 @@ export class RwaNeutralExecutionService {
               `${execution.orderLinkPrefix}x`,
               trackedExposureFromExecution(execution),
               (side, order) => this.persistCloseFill(state, [execution.executionId], side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+              (snapshot) => this.persistActivitySnapshot(state, [execution.executionId], snapshot),
+              (side, orderId) => this.persistProviderOrder(state, [execution.executionId], side, orderId),
             );
             const fullyClosed = finalizeTrackedExecutions(state, [execution.executionId], this.now());
             execution.state = fullyClosed ? "failed" : "partial_closed";
@@ -633,6 +783,7 @@ export class RwaNeutralExecutionService {
           await this.store.writeState(state);
         }
       }
+      if (execution.state === "hedged") void this.startActivityMonitoring();
       return redactExecution(execution);
     });
   }
@@ -651,7 +802,10 @@ export class RwaNeutralExecutionService {
       const client = await this.client();
       const metadata = await this.requireCredentialMetadata();
       assertAccountId(accountId, metadata.accountId);
-      const trackedExposure = trackedExposureFromState(state.executions);
+      const trackedExposure = trackedExposureFromState(
+        state.executions,
+        rwaAutomationProfileId(XAUT_BYBIT_PROFILE),
+      );
       const execution = newExecution(this.store.ownerUserId, accountId, this.strategyOrderPrefix, scopedIdempotencyKey, "close-all", this.now());
       execution.state = "compensating";
       state.executions.push(execution);
@@ -664,6 +818,8 @@ export class RwaNeutralExecutionService {
           execution.orderLinkPrefix,
           trackedExposure,
           (side, order) => this.persistCloseFill(state, trackedExposure.sourceExecutionIds, side, order.positionQuantityXaut ?? order.filledQuantityXaut),
+          (snapshot) => this.persistActivitySnapshot(state, trackedExposure.sourceExecutionIds, snapshot),
+          (side, orderId) => this.persistProviderOrder(state, trackedExposure.sourceExecutionIds, side, orderId),
         );
         const fullyClosed = finalizeTrackedExecutions(state, trackedExposure.sourceExecutionIds, this.now());
         execution.state = fullyClosed ? "closed" : "partial_closed";
@@ -798,11 +954,85 @@ export class RwaNeutralExecutionService {
     await this.store.writeState(state);
   }
 
+  private async persistActivitySnapshot(
+    state: RwaAutomationStateData,
+    executionIds: string[],
+    snapshot: RwaPositionAttributionSnapshot,
+  ) {
+    const ids = new Set(executionIds);
+    for (const execution of state.executions) {
+      if (!ids.has(execution.executionId)) continue;
+      execution.activityContinuity = mergeActivitySnapshot(
+        execution.activityContinuity,
+        snapshot,
+        [execution.orderLinkPrefix],
+        this.now(),
+      );
+      execution.updatedAt = this.now();
+      if (
+        execution.activityContinuity.spot.coverage === "ambiguous"
+        || execution.activityContinuity.perpetual.coverage === "ambiguous"
+      ) {
+        state.config.killSwitchActive = true;
+        state.config.strategyEnabled = false;
+        state.config.globalExecutionEnabled = false;
+      }
+    }
+    await this.store.writeState(state);
+  }
+
+  private async persistProviderOrder(
+    state: RwaAutomationStateData,
+    executionIds: string[],
+    side: "spot" | "linear",
+    orderId: string,
+  ) {
+    const ids = new Set(executionIds);
+    for (const execution of state.executions) {
+      if (!ids.has(execution.executionId)) continue;
+      execution.activityContinuity = recordStrategyProviderOrder(
+        execution.activityContinuity,
+        side,
+        orderId,
+        this.now(),
+      );
+      execution.updatedAt = this.now();
+    }
+    await this.store.writeState(state);
+  }
+
   private assertEntrySwitches(config: RwaExecutionConfig) {
     if (this.serverKillSwitchActive()) {
       throw new RwaNeutralExecutionError(409, "server_kill_switch_active", "服务端全局急停已激活，禁止新增风险动作。");
     }
     assertEntrySwitches(config);
+  }
+
+  private async riskExposures(state: RwaAutomationStateData) {
+    return mergeRwaAutomationCapitalExposures(
+      await readRwaAutomationCapitalExposures(),
+      automationCapitalExposuresFromExecutions(state.executions),
+    );
+  }
+
+  private async assertReservedRiskCapacity(state: RwaAutomationStateData, execution: RwaExecutionRecord) {
+    const limits = XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!;
+    const usage = calculateRwaAutomationNewRiskUsage({
+      exposures: await this.riskExposures(state),
+      profile: XAUT_BYBIT_PROFILE,
+      userId: execution.userId,
+      accountId: execution.accountId,
+      orderNotionalUsd: execution.reservedCapitalUsd,
+      proposedCapitalUsd: 0,
+    });
+    try {
+      assertRwaAutomationNewRisk({ limits, ...usage });
+    } catch {
+      throw new RwaNeutralExecutionError(409, "risk_limit_exceeded", "当前新增风险超过服务端资产 profile 的分层上限。");
+    }
+    if (usage.assetNotionalUsd > state.config.maxStrategyCapitalUsd) {
+      throw new RwaNeutralExecutionError(409, "strategy_cap_exceeded", "当前资产新增风险超过受控策略资本配置。");
+    }
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -825,6 +1055,7 @@ function buildPreflight(
   now: number,
   opportunityId: string,
   mode: RwaAutomationMode,
+  exposures: readonly RwaAutomationCapitalExposure[],
 ): RwaPreflightReport {
   const spotNotional = RWA_SMOKE_QUANTITY_XAUT * snapshot.spot.ask;
   const perpetualNotional = RWA_SMOKE_QUANTITY_XAUT * snapshot.perpetual.bid;
@@ -836,6 +1067,15 @@ function buildPreflight(
   const fundingAprPercent = snapshot.perpetual.fundingRate * fundingPeriodsPerYear * 100;
   const costAprPercent = (snapshot.fees.spotTakerBps + snapshot.fees.perpetualTakerBps + config.maxCombinedSlippageBps) / 100;
   const estimatedNetAprPercent = fundingAprPercent - costAprPercent;
+  const limits = XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!;
+  const riskUsage = calculateRwaAutomationNewRiskUsage({
+    exposures,
+    profile: XAUT_BYBIT_PROFILE,
+    userId,
+    accountId: snapshot.accountId,
+    orderNotionalUsd: capitalRequired,
+    proposedCapitalUsd: capitalRequired,
+  });
   const checks: RwaPreflightCheck[] = [
     check("permissions", permissionsValid(snapshot.permissions), true, "必须具备 read + spot trade + contract trade，且禁止提现、启用 UTA 并使用专用子账户。"),
     check("account_mode", snapshot.accountMode === "uta", "uta", "仅允许 UTA 专用子账户。"),
@@ -847,8 +1087,11 @@ function buildPreflight(
     check("perpetual_minimum", RWA_SMOKE_QUANTITY_XAUT >= snapshot.perpetual.minOrderQty && perpetualNotional >= snapshot.perpetual.minNotionalUsd, true, "永续数量和名义必须达到实时最小值。"),
     check("no_existing_spot", snapshot.existingSpotQuantityXaut <= 1e-9, 0, "烟测前专用子账户不得已有 XAUT 现货。"),
     check("no_existing_perpetual", snapshot.existingPerpetualQuantityXaut <= 1e-9, 0, "烟测前专用子账户不得已有 XAUT 永续仓位。"),
-    check("total_budget", capitalRequired <= RWA_SMOKE_TOTAL_BUDGET_USD, RWA_SMOKE_TOTAL_BUDGET_USD, "现货与永续对冲组合的 1x 名义、手续费和滑点准备金必须在 25 USDT 总预算内。"),
-    check("strategy_cap", capitalRequired <= config.maxStrategyCapitalUsd && config.maxStrategyCapitalUsd <= RWA_MAX_STRATEGY_CAPITAL_USD, config.maxStrategyCapitalUsd, "V1 策略资本不得超过 300 USDT。"),
+    check("order_cap", riskUsage.orderNotionalUsd <= limits.maxOrderNotionalUsd, limits.maxOrderNotionalUsd, "本次新增风险必须在当前 profile 单笔上限内。"),
+    check("asset_cap", riskUsage.assetNotionalUsd <= Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), "资产累计新增风险必须在受控上限内。"),
+    check("strategy_cap", riskUsage.assetNotionalUsd <= Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), Math.min(limits.maxAssetCapitalUsd, config.maxStrategyCapitalUsd), "兼容字段：当前资产累计新增风险必须在受控策略资本上限内。"),
+    check("account_cap", riskUsage.accountNotionalUsd <= limits.maxAccountCapitalUsd, limits.maxAccountCapitalUsd, "账户内自动策略累计新增风险必须在受控上限内。"),
+    check("global_cap", riskUsage.globalNotionalUsd <= limits.maxGlobalCapitalUsd, limits.maxGlobalCapitalUsd, "全部自动策略累计新增风险必须在当前阶段上限内。"),
     check("balance", snapshot.availableUsdt >= capitalRequired, capitalRequired, "可用 USDT 必须覆盖烟测总预算需求。"),
     check("liquidation", snapshot.perpetual.liquidationDistancePercent === null || snapshot.perpetual.liquidationDistancePercent >= config.minLiquidationDistancePercent, config.minLiquidationDistancePercent, "现有仓位强平距离不得低于门限；新仓固定先设 1x。"),
     check("freshness", now - snapshot.fetchedAt <= 5_000, 5_000, "preflight 私有与市场数据必须在 5 秒内。"),
@@ -879,7 +1122,7 @@ function buildPreflight(
     opportunityId,
     venue: "bybit",
     quantityXaut: RWA_SMOKE_QUANTITY_XAUT,
-    totalBudgetUsd: RWA_SMOKE_TOTAL_BUDGET_USD,
+    totalBudgetUsd: limits.maxOrderNotionalUsd,
     estimatedSpotNotionalUsd: spotNotional,
     estimatedPerpetualNotionalUsd: perpetualNotional,
     estimatedCapitalRequiredUsd: capitalRequired,
@@ -896,11 +1139,22 @@ function buildPreflight(
   };
 }
 
-function newExecution(userId: string, accountId: string, userOrderPrefix: string, idempotencyKey: string, challengeId: string, now: number): RwaExecutionRecord {
+function newExecution(
+  userId: string,
+  accountId: string,
+  userOrderPrefix: string,
+  idempotencyKey: string,
+  challengeId: string,
+  now: number,
+  reservedCapitalUsd = 0,
+): RwaExecutionRecord {
   const executionId = randomUUID();
   return {
     userId,
     accountId,
+    asset: "XAUT",
+    profileId: rwaAutomationProfileId(XAUT_BYBIT_PROFILE),
+    reservedCapitalUsd,
     executionId,
     idempotencyKey,
     challengeId,
@@ -921,6 +1175,7 @@ function newExecution(userId: string, accountId: string, userOrderPrefix: string
       perpetualRemainingXaut: 0,
       updatedAt: now,
     },
+    activityContinuity: createUnmonitoredActivityContinuity(now),
     createdAt: now,
     updatedAt: now,
   };
@@ -937,8 +1192,8 @@ function publicConfig(userId: string, config: RwaExecutionConfig, accountId: str
     automaticExecutionEnabled: false,
     armed: false,
     smokeQuantityXaut: RWA_SMOKE_QUANTITY_XAUT,
-    smokeTotalBudgetUsd: RWA_SMOKE_TOTAL_BUDGET_USD,
-    hardCapitalLimitUsd: RWA_MAX_STRATEGY_CAPITAL_USD,
+    smokeTotalBudgetUsd: XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!.maxOrderNotionalUsd,
+    hardCapitalLimitUsd: XAUT_BYBIT_PROFILE.asset.currentStageRiskLimits!.maxAssetCapitalUsd,
     serverGlobalKillSwitchActive,
   };
 }
@@ -1024,6 +1279,7 @@ function finalizeTrackedExecutions(state: RwaAutomationStateData, executionIds: 
     execution.strategyPosition.updatedAt = now;
     const hasResidual = execution.strategyPosition.spotRemainingXaut > 1e-12
       || execution.strategyPosition.perpetualRemainingXaut > 1e-12;
+    if (!hasResidual) execution.reservedCapitalUsd = 0;
     fullyClosed = fullyClosed && !hasResidual;
     execution.state = hasResidual ? "partial_closed" : "closed";
     execution.message = hasResidual
@@ -1065,6 +1321,43 @@ function applyTrackedCloseFill(
 
 function normalizeStrategyQuantity(value: number) {
   return Math.max(0, Math.round(value * 1_000_000_000_000) / 1_000_000_000_000);
+}
+
+function hasNoStrategyExposureOrOrders(execution: RwaExecutionRecord) {
+  return execution.strategyPosition.spotRemainingXaut <= 1e-12
+    && execution.strategyPosition.perpetualRemainingXaut <= 1e-12
+    && execution.activityContinuity.spot.providerOrderIds.length === 0
+    && execution.activityContinuity.perpetual.providerOrderIds.length === 0;
+}
+
+function strategyExposureExecutions(executions: RwaExecutionRecord[]) {
+  return executions.filter((execution) =>
+    execution.challengeId !== "close-all"
+    && (execution.strategyPosition.spotRemainingXaut > 1e-12
+      || execution.strategyPosition.perpetualRemainingXaut > 1e-12));
+}
+
+function markExecutionsActivityAmbiguous(
+  state: RwaAutomationStateData,
+  executions: RwaExecutionRecord[],
+  now: number,
+) {
+  const ids = new Set(executions.map((execution) => execution.executionId));
+  for (const execution of state.executions) {
+    if (!ids.has(execution.executionId)) continue;
+    execution.activityContinuity.spot.coverage = "ambiguous";
+    execution.activityContinuity.perpetual.coverage = "ambiguous";
+    execution.activityContinuity.spot.updatedAt = now;
+    execution.activityContinuity.perpetual.updatedAt = now;
+    execution.state = "manual_intervention";
+    execution.errorCategory = "strategy_ownership_ambiguous";
+    execution.message = "交易所活动连续性无法完整证明，已关闭自动退出并要求人工核对。";
+    execution.updatedAt = now;
+  }
+  state.config.killSwitchActive = true;
+  state.config.strategyEnabled = false;
+  state.config.globalExecutionEnabled = false;
+  state.challenges = [];
 }
 
 function normalizeCredentials(body: Record<string, unknown>): RwaBybitCredentials {

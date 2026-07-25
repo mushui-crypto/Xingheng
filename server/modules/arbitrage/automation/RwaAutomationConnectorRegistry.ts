@@ -32,6 +32,20 @@ export class RwaAutomationConnectorRegistry {
     return this.initialization;
   }
 
+  startActivityMonitoring() {
+    return Promise.all(
+      [...this.connectors.values()].map((connector) => connector.startActivityMonitoring?.()),
+    ).then(() => undefined);
+  }
+
+  hasActivityMonitor() {
+    return [...this.connectors.values()].some((connector) => connector.hasActivityMonitor?.());
+  }
+
+  dispose() {
+    for (const connector of this.connectors.values()) connector.dispose?.();
+  }
+
   getImplemented(venue: string) {
     return this.connectors.get(normalizeVenue(venue));
   }

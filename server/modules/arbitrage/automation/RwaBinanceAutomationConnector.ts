@@ -10,6 +10,9 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   constructor(private readonly service: RwaBinanceAutomationService) {}
 
   initialize() { return this.service.initialize(); }
+  startActivityMonitoring() { return this.service.startActivityMonitoring(); }
+  hasActivityMonitor() { return this.service.hasActivityMonitor(); }
+  dispose() { this.service.dispose(); }
 
   supports(opportunity: ArbitrageOpportunity) {
     return opportunity.strategyType === "same_venue_neutral"

@@ -17,7 +17,13 @@ import type {
   RwaProviderOrder,
   RwaProviderOrderRequest,
   RwaStrategyPnlSnapshot,
+  RwaStrategyActivityContinuity,
 } from "./RwaNeutralExecutionTypes";
+import { scanBinancePositionAttribution } from "./RwaProviderActivityScanner";
+import {
+  buildPositionAttributionSnapshot,
+  rejectNonAtomicAttribution,
+} from "./RwaProviderActivityContinuity";
 
 const spotBaseUrl = "https://api.binance.com";
 const futuresBaseUrl = "https://fapi.binance.com";
@@ -32,6 +38,7 @@ type ProductCache = {
 
 export class RwaBinanceMainnetClient implements RwaBinanceClient {
   private timeOffset: { value: number; expiresAt: number } | null = null;
+  private timeOffsetInFlight: Promise<number> | null = null;
   private productCache: { value: ProductCache; expiresAt: number } | null = null;
   private productInFlight: Promise<ProductCache> | null = null;
 
@@ -40,6 +47,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     private readonly fetchFn: typeof fetch = fetch,
     private readonly now: () => number = Date.now,
     private readonly allowedEgressIps: readonly string[] | null = configuredBinanceEgressIps(),
+    private readonly monitoredAccountIds: readonly string[] = configuredMonitoredBinanceAccountIds(),
   ) {}
 
   async validateAccess() {
@@ -147,6 +155,11 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const xaut = spotBalances.find((item) => item.asset === "XAUT");
     const spotFreeXaut = xaut ? snapshotNonNegativeNumber(xaut.free, "现货可用数量") : 0;
     const spotLockedXaut = xaut ? snapshotNonNegativeNumber(xaut.locked, "现货锁定数量") : 0;
+    const perpetualPositionSide = positionAmount > 0
+      ? "long" as const
+      : positionAmount < 0
+        ? "short" as const
+        : "flat" as const;
     const futuresUsdt = list(futuresAccount.assets).map(record).find((item) => item.asset === "USDT");
     const fundingInfo = list(fundingInfoValue).map(record).find((item) => item.symbol === RWA_BINANCE_PERPETUAL_SYMBOL);
     const spotBid = positiveNumber(spotBook.bidPrice);
@@ -176,7 +189,10 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       spotLockedXaut,
       availableUsdt: positiveNumber(usdt?.free) + positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
       existingSpotQuantityXaut: spotFreeXaut + spotLockedXaut,
+      spotAvailableQuantityXaut: spotFreeXaut,
+      spotLockedQuantityXaut: spotLockedXaut,
       existingPerpetualQuantityXaut: Math.abs(positionAmount),
+      perpetualPositionSide,
       openSpotOrderCount: list(spotOrdersValue).length,
       openPerpetualOrderCount: list(futuresOrdersValue).length,
       spot: {
@@ -273,13 +289,35 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     strategyOrderPrefix: string;
     strategyOrderPrefixes: string[];
     since: number;
+    continuity: RwaStrategyActivityContinuity;
   }) {
-    return {
-      coverage: "incomplete" as const,
-      externalPositionActivity: false,
-      checkedFrom: input.since,
-      checkedThrough: this.now(),
-    };
+    const checkedThrough = this.now();
+    try {
+      const account = record(await this.signedRequest("spot", "/api/v3/account"));
+      const uid = String(account.uid ?? "").trim();
+      const fingerprint = uid
+        ? createHash("sha256").update(`binance:${uid}`).digest("hex").slice(0, 16)
+        : "";
+      if (!fingerprint || !this.monitoredAccountIds.includes(`binance:${fingerprint}`)) {
+        return buildPositionAttributionSnapshot({
+          since: input.since,
+          checkedThrough,
+          sources: [],
+        });
+      }
+    } catch {
+      return buildPositionAttributionSnapshot({
+        since: input.since,
+        checkedThrough,
+        sources: [],
+      });
+    }
+    const scanned = await scanBinancePositionAttribution(
+      (path, params) => this.signedRequest("spot", path, params),
+      (path, params) => this.signedRequest("futures", path, params),
+      { ...input, checkedThrough },
+    );
+    return rejectNonAtomicAttribution(scanned);
   }
 
   async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {
@@ -475,14 +513,21 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
 
   private async serverTimeOffset() {
     if (this.timeOffset && this.timeOffset.expiresAt > this.now()) return this.timeOffset.value;
-    const before = this.now();
-    const payload = record(await this.publicRequest("spot", "/api/v3/time"));
-    const after = this.now();
-    const serverTime = number(payload.serverTime);
-    if (!serverTime) throw new RwaBinanceProviderError("provider_time_unavailable", "Binance 未返回有效服务端时间。");
-    const value = serverTime - Math.floor((before + after) / 2);
-    this.timeOffset = { value, expiresAt: after + timeOffsetTtlMs };
-    return value;
+    if (!this.timeOffsetInFlight) {
+      this.timeOffsetInFlight = (async () => {
+        const before = this.now();
+        const payload = record(await this.publicRequest("spot", "/api/v3/time"));
+        const after = this.now();
+        const serverTime = number(payload.serverTime);
+        if (!serverTime) throw new RwaBinanceProviderError("provider_time_unavailable", "Binance 未返回有效服务端时间。");
+        const value = serverTime - Math.floor((before + after) / 2);
+        this.timeOffset = { value, expiresAt: after + timeOffsetTtlMs };
+        return value;
+      })().finally(() => {
+        this.timeOffsetInFlight = null;
+      });
+    }
+    return this.timeOffsetInFlight;
   }
 
   private async publicRequest(scope: "spot" | "futures", path: string, params: Record<string, string> = {}) {
@@ -519,6 +564,15 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const category = categoryFromBinanceFailure(response.status, code);
     throw new RwaBinanceProviderError(category, humanMessageForBinanceFailure(category, code), Number.isFinite(code) ? code : null);
   }
+}
+
+function configuredMonitoredBinanceAccountIds() {
+  const value = process.env.RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS?.trim();
+  if (!value) return [];
+  const accounts = value.split(",").map((item) => item.trim()).filter(Boolean);
+  return accounts.every((item) => /^binance:[a-f0-9]{16}$/.test(item))
+    ? [...new Set(accounts)]
+    : [];
 }
 
 export class RwaBinanceProviderError extends Error {

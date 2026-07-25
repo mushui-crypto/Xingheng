@@ -1,16 +1,26 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { copyFile, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, link, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
-import { CredentialStoreError, RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import {
+  CredentialStoreError,
+  RwaAutomationPersistentStore,
+  automationCapitalExposuresFromExecutions,
+  discoverAutomationUsersWithExposure,
+  readRwaAutomationCapitalExposures,
+} from "./RwaAutomationPersistentStore";
 import {
   RwaAutomationGovernanceError,
   loadRwaAutomationGovernanceConfig,
 } from "./RwaAutomationGovernance";
 import { defaultRwaExecutionConfig, type RwaExecutionRecord } from "./RwaNeutralExecutionTypes";
+import {
+  createMonitoredActivityContinuity,
+  createUnmonitoredActivityContinuity,
+} from "./RwaProviderActivityContinuity";
 
 const permissions = {
   read: true,
@@ -376,6 +386,9 @@ test("legacy execution schema is migrated with null reconciliation fields and pe
     const state = await current.readState();
     assert.equal(state.executions[0]?.reconciliation, null);
     assert.equal(state.executions[0]?.finalizeIdempotency, null);
+    assert.equal(state.executions[0]?.asset, "XAUT");
+    assert.equal(state.executions[0]?.profileId, "xaut:bybit-xaut-spot-perp-v1");
+    assert.equal(state.executions[0]?.reservedCapitalUsd, 0);
     assert.deepEqual(state.executions[0]?.strategyPosition, {
       coverage: "ambiguous",
       spotRemainingXaut: 0,
@@ -385,8 +398,107 @@ test("legacy execution schema is migrated with null reconciliation fields and pe
     const persisted = JSON.parse(await readFile(current.statePath, "utf8"));
     assert.equal(persisted.executions[0]?.reconciliation, null);
     assert.equal(persisted.executions[0]?.finalizeIdempotency, null);
+    assert.equal(persisted.executions[0]?.asset, "XAUT");
+    assert.equal(persisted.executions[0]?.profileId, "xaut:bybit-xaut-spot-perp-v1");
+    assert.equal(persisted.executions[0]?.reservedCapitalUsd, 0);
     assert.equal(persisted.executions[0]?.strategyPosition?.coverage, "ambiguous");
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("runtime execution profile fields reject partial, unknown, and invalid capital without washing evidence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-state-profile-schema-"));
+  const statePath = join(directory, "state.json");
+  const current = new RwaAutomationPersistentStore({
+    userId: "user-a",
+    venue: "bybit",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credential.enc.json"),
+    statePath,
+  });
+  const validExecution = execution("profile-schema", "manual_intervention", 1);
+  const fileState = (item: unknown) => ({
+    version: 1,
+    config: defaultRwaExecutionConfig,
+    challenges: [],
+    executions: [item],
+    pnlSeries: [],
+    credentialLifecycle: "active",
+    credentialAlert: null,
+    credentialAudit: [],
+  });
+  const invalidPersisted = [
+    { ...structuredClone(validExecution), asset: "DOGE" },
+    omit(structuredClone(validExecution), "profileId"),
+    { ...structuredClone(validExecution), reservedCapitalUsd: -1 },
+    { ...structuredClone(validExecution), reservedCapitalUsd: null },
+  ];
+  try {
+    for (const item of invalidPersisted) {
+      await writeFile(statePath, JSON.stringify(fileState(item)), { mode: 0o600 });
+      await assert.rejects(
+        current.readState(),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+    }
+
+    const validState = fileState(validExecution);
+    await writeFile(statePath, JSON.stringify(validState), { mode: 0o600 });
+    const inMemory = await current.readState();
+    for (const invalidCapital of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      inMemory.executions[0]!.reservedCapitalUsd = invalidCapital;
+      await assert.rejects(
+        current.writeState(inMemory),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("capital exposure rejects cross-asset profile substitution", () => {
+  const current = execution("risk-profile", "hedged", 1);
+  current.reservedCapitalUsd = 25;
+  current.profileId = "btc:binance-btc-spot-perp-v1";
+  assert.throws(
+    () => automationCapitalExposuresFromExecutions([current]),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_risk_state_invalid",
+  );
+});
+
+test("global capital scan rejects invalid profiled execution fields before aggregation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-global-risk-schema-"));
+  const previousDataDir = process.env.RWA_AUTOMATION_DATA_DIR;
+  process.env.RWA_AUTOMATION_DATA_DIR = directory;
+  const userId = "user-global-risk";
+  const domain = createHash("sha256").update(`rwa-user:${userId}`).digest("hex").slice(0, 16);
+  const statePath = join(directory, `${domain}-bybit-state.json`);
+  const current = execution("global-risk", "manual_intervention", 1);
+  current.userId = userId;
+  current.reservedCapitalUsd = 25;
+  const invalid = [
+    { ...structuredClone(current), asset: "DOGE" },
+    omit(structuredClone(current), "reservedCapitalUsd"),
+    { ...structuredClone(current), reservedCapitalUsd: -1 },
+    { ...structuredClone(current), reservedCapitalUsd: null },
+  ];
+  try {
+    for (const item of invalid) {
+      await writeFile(statePath, JSON.stringify({ executions: [item] }), { mode: 0o600 });
+      await assert.rejects(
+        readRwaAutomationCapitalExposures(),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+    }
+  } finally {
+    if (previousDataDir === undefined) delete process.env.RWA_AUTOMATION_DATA_DIR;
+    else process.env.RWA_AUTOMATION_DATA_DIR = previousDataDir;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -414,6 +526,45 @@ test("oversized persistent state is rejected before JSON parsing", async () => {
         && error.category === "automation_capacity_exceeded",
     );
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("exposure discovery includes unmonitored recovery state but only accepts domain-bound regular files", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-rwa-monitor-discovery-"));
+  const previousDataDir = process.env.RWA_AUTOMATION_DATA_DIR;
+  process.env.RWA_AUTOMATION_DATA_DIR = directory;
+  const exposureState = (userId: string, monitored = true) => {
+    const item = execution("monitored", "hedged", 1_000);
+    item.userId = userId;
+    item.strategyPosition.spotRemainingXaut = 0.002;
+    item.strategyPosition.perpetualRemainingXaut = 0.002;
+    item.activityContinuity = monitored
+      ? createMonitoredActivityContinuity(1_000, item.orderLinkPrefix)
+      : createUnmonitoredActivityContinuity(1_000);
+    return JSON.stringify({ executions: [item] });
+  };
+  const stateName = (userId: string) => {
+    const domain = createHash("sha256").update(`rwa-user:${userId}`).digest("hex").slice(0, 16);
+    return `${domain}-bybit-state.json`;
+  };
+  try {
+    const validPath = join(directory, stateName("user-a"));
+    await writeFile(validPath, exposureState("user-a"), { mode: 0o600 });
+    await writeFile(join(directory, stateName("user-b")), exposureState("wrong-domain-user"), { mode: 0o600 });
+    await writeFile(join(directory, stateName("user-c")), "{malformed", { mode: 0o600 });
+    await writeFile(join(directory, stateName("user-d")), "x".repeat(10 * 1024 * 1024 + 1), { mode: 0o600 });
+    const symlinkSource = join(directory, "symlink-source.json");
+    await writeFile(symlinkSource, exposureState("user-e"), { mode: 0o600 });
+    await symlink(symlinkSource, join(directory, stateName("user-e")));
+    await writeFile(join(directory, stateName("user-f")), exposureState("user-f", false), { mode: 0o600 });
+    assert.deepEqual(await discoverAutomationUsersWithExposure(), ["user-a", "user-f"]);
+
+    await link(validPath, join(directory, "hardlink-copy.json"));
+    assert.deepEqual(await discoverAutomationUsersWithExposure(), ["user-f"]);
+  } finally {
+    if (previousDataDir === undefined) delete process.env.RWA_AUTOMATION_DATA_DIR;
+    else process.env.RWA_AUTOMATION_DATA_DIR = previousDataDir;
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -468,6 +619,9 @@ function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: nu
   return {
     userId: "user-a",
     accountId: "bybit:test-account",
+    asset: "XAUT",
+    profileId: "xaut:bybit-xaut-spot-perp-v1",
+    reservedCapitalUsd: 0,
     executionId: id,
     idempotencyKey: `idempotency:${id}`,
     challengeId: `challenge:${id}`,
@@ -488,7 +642,13 @@ function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: nu
       perpetualRemainingXaut: 0,
       updatedAt,
     },
+    activityContinuity: createUnmonitoredActivityContinuity(updatedAt),
     createdAt: updatedAt,
     updatedAt,
   };
+}
+
+function omit<T extends Record<string, unknown>, K extends keyof T>(value: T, key: K): Omit<T, K> {
+  delete value[key];
+  return value;
 }

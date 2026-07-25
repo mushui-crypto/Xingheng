@@ -38,6 +38,7 @@ import {
   RWA_AUTOMATION_INITIAL_GENERATION,
   readGenerationPointer,
 } from "./RwaAutomationDataLayout";
+import { createMonitoredActivityContinuity } from "./RwaProviderActivityContinuity";
 
 const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
@@ -201,6 +202,22 @@ test("credential, step-up, and automation state schemas reject unknown nested pe
       path: join(fixture.active, stateFileName),
       mutate: (value: any) => { value.executions[0].strategyPosition.cache = {}; },
     },
+    {
+      path: join(fixture.active, stateFileName),
+      mutate: (value: any) => { value.executions[0].activityContinuity.spot.unknownWatermark = {}; },
+    },
+    {
+      path: join(fixture.active, stateFileName),
+      mutate: (value: any) => { value.executions[0].activityContinuity.spot.sources[0].unknownCursor = "unsafe"; },
+    },
+    {
+      path: join(fixture.active, stateFileName),
+      mutate: (value: any) => { value.executions[0].activityContinuity.spot.sources[0].eventDigest = "0".repeat(64); },
+    },
+    {
+      path: join(fixture.active, stateFileName),
+      mutate: (value: any) => { value.executions[0].activityContinuity.spot.sources.pop(); },
+    },
   ];
   try {
     for (const item of cases) {
@@ -225,6 +242,10 @@ test("backup accepts legacy executions without reconciliation fields but rejects
     delete original.executions[0].reconciliation;
     delete original.executions[0].finalizeIdempotency;
     delete original.executions[0].strategyPosition;
+    delete original.executions[0].activityContinuity;
+    delete original.executions[0].asset;
+    delete original.executions[0].profileId;
+    delete original.executions[0].reservedCapitalUsd;
     await writeSecure(statePath, JSON.stringify(original));
     const created = await fixture.service.createBackup();
     assert.match(created.fileName, /^rwa-automation-/);
@@ -488,6 +509,9 @@ function baseState() {
     executions: [{
       userId: "user-1",
       accountId: "binance:test",
+      asset: "XAUT",
+      profileId: "xaut:binance-xaut-spot-perp-v1",
+      reservedCapitalUsd: 25,
       executionId: "execution-1",
       idempotencyKey: "idempotency-1",
       challengeId: "challenge-secret-marker",
@@ -518,6 +542,7 @@ function baseState() {
         perpetualRemainingXaut: 0,
         updatedAt: baseNow.getTime(),
       },
+      activityContinuity: createMonitoredActivityContinuity(baseNow.getTime(), "strategy-order"),
       createdAt: baseNow.getTime(),
       updatedAt: baseNow.getTime(),
     }],

@@ -11,7 +11,13 @@ import {
   type RwaProviderOrderRequest,
   type RwaProviderPreflightSnapshot,
   type RwaStrategyPnlSnapshot,
+  type RwaStrategyActivityContinuity,
 } from "./RwaNeutralExecutionTypes";
+import { scanBybitPositionAttribution } from "./RwaProviderActivityScanner";
+import {
+  buildPositionAttributionSnapshot,
+  rejectNonAtomicAttribution,
+} from "./RwaProviderActivityContinuity";
 
 const bybitMainnetBaseUrl = "https://api.bybit.com";
 const receiveWindow = "5000";
@@ -59,7 +65,19 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
   }
 
   async readPreflightSnapshot(): Promise<RwaProviderPreflightSnapshot> {
-    const [access, wallet, spotFee, perpFee, spotInstrument, perpInstrument, spotTicker, perpTicker, positions] = await Promise.all([
+    const [
+      access,
+      wallet,
+      spotFee,
+      perpFee,
+      spotInstrument,
+      perpInstrument,
+      spotTicker,
+      perpTicker,
+      positions,
+      spotOrders,
+      perpetualOrders,
+    ] = await Promise.all([
       this.validateAccess(),
       this.privateRequest("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED", coin: "USDT,XAUT" }),
       this.privateRequest("GET", "/v5/account/fee-rate", { category: "spot", symbol: RWA_SPOT_SYMBOL }),
@@ -69,6 +87,8 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       this.publicRequest("/v5/market/tickers", { category: "spot", symbol: RWA_SPOT_SYMBOL }),
       this.publicRequest("/v5/market/tickers", { category: "linear", symbol: RWA_PERP_SYMBOL }),
       this.privateRequest("GET", "/v5/position/list", { category: "linear", symbol: RWA_PERP_SYMBOL }),
+      this.privateRequest("GET", "/v5/order/realtime", { category: "spot", symbol: RWA_SPOT_SYMBOL, openOnly: "0" }),
+      this.privateRequest("GET", "/v5/order/realtime", { category: "linear", symbol: RWA_PERP_SYMBOL, openOnly: "0" }),
     ]);
     const spotInstrumentRow = firstListItem(spotInstrument);
     const perpInstrumentRow = firstListItem(perpInstrument);
@@ -78,11 +98,25 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
     const coins = list(walletAccount.coin).map(record);
     const usdt = coins.find((coin) => coin.coin === "USDT");
     const xaut = coins.find((coin) => coin.coin === "XAUT");
+    const spotTotalXaut = xaut ? snapshotNonNegativeNumber(xaut.walletBalance, "现货余额") : 0;
+    const spotLockedXaut = xaut ? snapshotNonNegativeNumber(xaut.locked, "现货锁定数量") : 0;
+    if (spotLockedXaut > spotTotalXaut + 1e-12) {
+      throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 锁定数量超过总余额。");
+    }
+    const spotAvailableXaut = Math.max(0, spotTotalXaut - spotLockedXaut);
     const positionRow = list(record(positions).list).map(record).find((item) => item.symbol === RWA_PERP_SYMBOL);
     const positionSize = positionRow
       ? snapshotNonNegativeNumber(positionRow.size, "永续仓位数量")
       : 0;
     const position = positionSize > 0 ? positionRow : undefined;
+    const positionSideValue = String(positionRow?.side ?? "");
+    const perpetualPositionSide = positionSize <= 1e-12
+      ? "flat" as const
+      : positionSideValue === "Sell"
+        ? "short" as const
+        : positionSideValue === "Buy"
+          ? "long" as const
+          : (() => { throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 永续方向无效。"); })();
     const mark = positiveNumber(perpTickerRow.markPrice);
     const liquidationPrice = positiveNumberOrNull(position?.liqPrice);
     const liquidationDistancePercent = liquidationPrice && mark
@@ -95,8 +129,13 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       accountMode: access.accountMode,
       permissions: access.permissions,
       availableUsdt: positiveNumber(usdt?.availableToWithdraw) || positiveNumber(walletAccount.totalAvailableBalance),
-      existingSpotQuantityXaut: xaut ? snapshotNonNegativeNumber(xaut.walletBalance, "现货余额") : 0,
+      existingSpotQuantityXaut: spotTotalXaut,
+      spotAvailableQuantityXaut: spotAvailableXaut,
+      spotLockedQuantityXaut: spotLockedXaut,
       existingPerpetualQuantityXaut: positionSize,
+      perpetualPositionSide,
+      openSpotOrderCount: list(record(spotOrders).list).length,
+      openPerpetualOrderCount: list(record(perpetualOrders).list).length,
       spot: {
         ...spotSpec(spotInstrumentRow),
         bid: positiveNumber(spotTickerRow.bid1Price),
@@ -179,13 +218,30 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
     strategyOrderPrefix: string;
     strategyOrderPrefixes: string[];
     since: number;
+    continuity: RwaStrategyActivityContinuity;
   }) {
-    return {
-      coverage: "incomplete" as const,
-      externalPositionActivity: false,
-      checkedFrom: input.since,
-      checkedThrough: this.now(),
-    };
+    const checkedThrough = this.now();
+    try {
+      const api = record(await this.privateRequest("GET", "/v5/user/query-api"));
+      if (Number(api.uta) !== 1 || Number(api.isMaster) !== 0 || Number(api.parentUid) <= 0) {
+        return buildPositionAttributionSnapshot({
+          since: input.since,
+          checkedThrough,
+          sources: [],
+        });
+      }
+    } catch {
+      return buildPositionAttributionSnapshot({
+        since: input.since,
+        checkedThrough,
+        sources: [],
+      });
+    }
+    const scanned = await scanBybitPositionAttribution(
+      (path, params) => this.privateRequest("GET", path, params),
+      { ...input, checkedThrough },
+    );
+    return rejectNonAtomicAttribution(scanned);
   }
 
   async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {

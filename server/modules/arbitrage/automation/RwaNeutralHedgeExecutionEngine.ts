@@ -12,6 +12,19 @@ import type {
   RwaTrackedStrategyExposure,
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
+import {
+  combineActivityContinuities,
+  createUnmonitoredActivityContinuity,
+  mergeActivitySnapshot,
+  recordStrategyProviderOrder,
+  RWA_ACTIVITY_MAX_GAP_MS,
+} from "./RwaProviderActivityContinuity";
+import {
+  assertRwaAutomationInstrumentRules,
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+  type RwaAutomationResolvedAssetProfile,
+} from "./RwaAutomationAssetProfile";
 
 type PersistExecution = (state: RwaAutomationStateData, execution: RwaExecutionRecord) => Promise<void>;
 type PersistCloseFill = (category: "spot" | "linear", order: RwaProviderOrder) => Promise<void>;
@@ -20,6 +33,8 @@ export class RwaNeutralHedgeExecutionEngine {
   constructor(
     private readonly now: () => number = Date.now,
     private readonly assertExecutionLeaseHeld: () => void = () => {},
+    private readonly marketProfile: RwaAutomationResolvedAssetProfile =
+      requireRwaAutomationExecutionProfile("xaut", "bybit"),
   ) {}
 
   async open<TPermissions extends RwaVenuePermissions>(input: {
@@ -32,6 +47,52 @@ export class RwaNeutralHedgeExecutionEngine {
     persist: PersistExecution;
   }) {
     const { client, execution, snapshot, config, state, persist } = input;
+    if (
+      execution.asset !== this.marketProfile.asset.baseAsset
+      || execution.profileId !== rwaAutomationProfileId(this.marketProfile)
+    ) {
+      throw new RwaExecutionSafetyError(
+        "strategy_ownership_ambiguous",
+        "执行记录与服务端资产 profile 不匹配，已拒绝新增风险。",
+      );
+    }
+    this.assertSnapshotMatchesProfile(snapshot);
+    this.assertExecutionLeaseHeld();
+    if (
+      snapshot.existingSpotQuantityXaut > 1e-12
+      || snapshot.existingPerpetualQuantityXaut > 1e-12
+      || snapshot.openSpotOrderCount !== 0
+      || snapshot.openPerpetualOrderCount !== 0
+    ) {
+      throw new RwaExecutionSafetyError(
+        "strategy_ownership_ambiguous",
+        "建立活动监控前账户已有 XAUT 仓位或活动订单，已拒绝新增风险。",
+      );
+    }
+    const baseline = await client.readPositionAttribution({
+      strategyOrderPrefix: execution.orderLinkPrefix,
+      strategyOrderPrefixes: [execution.orderLinkPrefix],
+      since: snapshot.fetchedAt,
+      continuity: execution.activityContinuity,
+    });
+    execution.activityContinuity = mergeActivitySnapshot(
+      execution.activityContinuity,
+      baseline,
+      [execution.orderLinkPrefix],
+      this.now(),
+    );
+    assertPositionAttribution(baseline, {
+      complete: true,
+      spotQuantityXaut: 0,
+      perpetualQuantityXaut: 0,
+      sourceExecutionIds: [execution.executionId],
+      strategyOrderPrefixes: [execution.orderLinkPrefix],
+      attributionSince: snapshot.fetchedAt,
+      activityContinuity: execution.activityContinuity,
+    }, snapshot.fetchedAt);
+    await persist(state, execution);
+    this.assertExecutionLeaseHeld();
+    await client.setPerpetualLeverage(1);
     this.assertExecutionLeaseHeld();
     const halfSlippage = config.maxCombinedSlippageBps / 2 / 10_000;
     const deadline = this.now() + config.maxUnhedgedMs;
@@ -41,13 +102,20 @@ export class RwaNeutralHedgeExecutionEngine {
     this.assertExecutionLeaseHeld();
     const spotAccepted = await client.placeOrder({
       category: "spot",
-      symbol: "XAUTUSDT",
+      symbol: this.marketProfile.venue.spotSymbol,
       side: "Buy",
       quantityXaut: input.quantityXaut,
       limitPrice: ceilStep(snapshot.spot.ask * (1 + halfSlippage), snapshot.spot.priceTick),
       reduceOnly: false,
       orderLinkId: `${execution.orderLinkPrefix}s1`,
     });
+    execution.activityContinuity = recordStrategyProviderOrder(
+      execution.activityContinuity,
+      "spot",
+      spotAccepted.orderId,
+      this.now(),
+    );
+    await persist(state, execution);
     this.assertExecutionLeaseHeld();
     const spot = await client.awaitOrder("spot", spotAccepted.orderId, Math.min(deadline, this.now() + 4_000));
     const firstSideFilledAt = this.now();
@@ -71,13 +139,20 @@ export class RwaNeutralHedgeExecutionEngine {
       this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: "linear",
-        symbol: "XAUTUSDT",
+        symbol: this.marketProfile.venue.perpetualSymbol,
         side: "Sell",
         quantityXaut: remaining,
         limitPrice: floorStep(snapshot.perpetual.bid * (1 - halfSlippage), snapshot.perpetual.priceTick),
         reduceOnly: false,
         orderLinkId: `${execution.orderLinkPrefix}p${attempt}`,
       });
+      execution.activityContinuity = recordStrategyProviderOrder(
+        execution.activityContinuity,
+        "linear",
+        accepted.orderId,
+        this.now(),
+      );
+      await persist(state, execution);
       this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder("linear", accepted.orderId, hedgeDeadline);
       const perpetualPositionQuantity = positionQuantity(order);
@@ -100,13 +175,20 @@ export class RwaNeutralHedgeExecutionEngine {
       this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: "spot",
-        symbol: "XAUTUSDT",
+        symbol: this.marketProfile.venue.spotSymbol,
         side: "Sell",
         quantityXaut: excessSpot,
         limitPrice: floorStep(snapshot.spot.bid * (1 - halfSlippage), snapshot.spot.priceTick),
         reduceOnly: false,
         orderLinkId: `${execution.orderLinkPrefix}x1`,
       });
+      execution.activityContinuity = recordStrategyProviderOrder(
+        execution.activityContinuity,
+        "spot",
+        accepted.orderId,
+        this.now(),
+      );
+      await persist(state, execution);
       this.assertExecutionLeaseHeld();
       const compensation = await client.awaitOrder("spot", accepted.orderId, deadline);
       const compensationPositionQuantity = positionQuantity(compensation);
@@ -126,7 +208,7 @@ export class RwaNeutralHedgeExecutionEngine {
     execution.unhedgedDurationMs = Math.max(0, this.now() - firstSideFilledAt);
     if (execution.unhedgedDurationMs > config.maxUnhedgedMs) throw new Error("未对冲敞口超过配置时限。");
     execution.state = "hedged";
-    execution.message = "已在 25 USDT 总预算内建立 XAUT 现货与永续对冲组合。";
+    execution.message = `已在服务端资产 profile 的受控预算内建立 ${this.marketProfile.asset.displayName} 现货与永续对冲组合。`;
     execution.updatedAt = this.now();
     await persist(state, execution);
   }
@@ -137,29 +219,37 @@ export class RwaNeutralHedgeExecutionEngine {
     orderLinkPrefix: string,
     trackedExposure: RwaTrackedStrategyExposure,
     persistCloseFill: PersistCloseFill,
+    persistActivitySnapshot?: (snapshot: RwaPositionAttributionSnapshot) => Promise<void>,
+    persistProviderOrder?: (category: "spot" | "linear", orderId: string) => Promise<void>,
   ) {
     this.assertExecutionLeaseHeld();
     assertTrackedExposure(trackedExposure);
     const market = await client.readPreflightSnapshot();
     assertValidProviderSnapshot(market);
+    this.assertSnapshotMatchesProfile(market);
     assertOwnershipMatches(trackedExposure, market);
     const attribution = await client.readPositionAttribution({
       strategyOrderPrefix: scope,
       strategyOrderPrefixes: trackedExposure.strategyOrderPrefixes,
       since: trackedExposure.attributionSince,
+      continuity: trackedExposure.activityContinuity,
     });
+    await persistActivitySnapshot?.(attribution);
     assertPositionAttribution(attribution, trackedExposure, market.fetchedAt);
     this.assertExecutionLeaseHeld();
     await client.cancelStrategyOrders(scope);
     this.assertExecutionLeaseHeld();
     const closableMarket = await client.readPreflightSnapshot();
     assertValidProviderSnapshot(closableMarket);
+    this.assertSnapshotMatchesProfile(closableMarket);
     assertOwnershipMatches(trackedExposure, closableMarket);
     const closableAttribution = await client.readPositionAttribution({
       strategyOrderPrefix: scope,
       strategyOrderPrefixes: trackedExposure.strategyOrderPrefixes,
       since: trackedExposure.attributionSince,
+      continuity: trackedExposure.activityContinuity,
     });
+    await persistActivitySnapshot?.(closableAttribution);
     assertPositionAttribution(closableAttribution, trackedExposure, closableMarket.fetchedAt);
     const deadline = this.now() + 10_000;
     const perpetualResidual = assessResidual(
@@ -180,6 +270,7 @@ export class RwaNeutralHedgeExecutionEngine {
     let remainingSpot = trackedExposure.spotQuantityXaut;
     if (perpetualResidual.tradable) await this.closeSide(client, {
       category: "linear",
+      symbol: this.marketProfile.venue.perpetualSymbol,
       side: "Buy",
       quantity: perpetualResidual.quantityXaut,
       qtyStep: closableMarket.perpetual.qtyStep,
@@ -193,9 +284,11 @@ export class RwaNeutralHedgeExecutionEngine {
         await persistCloseFill("linear", order);
         remainingPerpetual = Math.max(0, remainingPerpetual - positionQuantity(order));
       },
+      persistAcceptedOrder: persistProviderOrder,
     });
     if (spotResidual.tradable) await this.closeSide(client, {
       category: "spot",
+      symbol: this.marketProfile.venue.spotSymbol,
       side: "Sell",
       quantity: spotResidual.quantityXaut,
       qtyStep: closableMarket.spot.qtyStep,
@@ -209,11 +302,13 @@ export class RwaNeutralHedgeExecutionEngine {
         await persistCloseFill("spot", order);
         remainingSpot = Math.max(0, remainingSpot - positionQuantity(order));
       },
+      persistAcceptedOrder: persistProviderOrder,
     });
     this.assertExecutionLeaseHeld();
     const confirmedPnl = await client.readStrategyPnl(scope, null);
     const confirmedMarket = await client.readPreflightSnapshot();
     assertValidProviderSnapshot(confirmedMarket);
+    this.assertSnapshotMatchesProfile(confirmedMarket);
     assertOwnershipMatches({
       ...trackedExposure,
       spotQuantityXaut: remainingSpot,
@@ -243,6 +338,7 @@ export class RwaNeutralHedgeExecutionEngine {
     client: RwaNeutralTradingClient<TPermissions, RwaProviderPreflightSnapshot<TPermissions>>,
     input: {
     category: "spot" | "linear";
+    symbol: string;
     side: "Buy" | "Sell";
     quantity: number;
     qtyStep: number;
@@ -253,6 +349,7 @@ export class RwaNeutralHedgeExecutionEngine {
     deadline: number;
     failureMessage: string;
     persistFill: (order: RwaProviderOrder) => Promise<void>;
+    persistAcceptedOrder?: (category: "spot" | "linear", orderId: string) => Promise<void>;
     },
   ) {
     let remaining = floorStep(input.quantity, input.qtyStep);
@@ -262,13 +359,14 @@ export class RwaNeutralHedgeExecutionEngine {
       this.assertExecutionLeaseHeld();
       const accepted = await client.placeOrder({
         category: input.category,
-        symbol: "XAUTUSDT",
+        symbol: input.symbol,
         side: input.side,
         quantityXaut: remaining,
         limitPrice: input.limitPrice,
         reduceOnly: input.reduceOnly,
         orderLinkId: `${input.orderLinkPrefix}${attempt}`,
       });
+      await input.persistAcceptedOrder?.(input.category, accepted.orderId);
       this.assertExecutionLeaseHeld();
       const order = await client.awaitOrder(input.category, accepted.orderId, input.deadline);
       const filledPositionQuantity = positionQuantity(order);
@@ -281,6 +379,23 @@ export class RwaNeutralHedgeExecutionEngine {
     }
     if (remaining >= input.minOrderQty) throw new Error(input.failureMessage);
   }
+
+  private assertSnapshotMatchesProfile<TPermissions extends RwaVenuePermissions>(
+    snapshot: RwaProviderPreflightSnapshot<TPermissions>,
+  ) {
+    assertRwaAutomationInstrumentRules(this.marketProfile, "spot", snapshot.spot);
+    assertRwaAutomationInstrumentRules(this.marketProfile, "perpetual", snapshot.perpetual);
+    if (
+      snapshot.fees.spotTakerBps > this.marketProfile.venue.spotRules.maxTakerFeeBps
+      || snapshot.fees.perpetualTakerBps > this.marketProfile.venue.perpetualRules.maxTakerFeeBps
+    ) {
+      throw new RwaExecutionSafetyError(
+        "provider_snapshot_invalid",
+        "交易所费率超过服务端资产 profile 上限，已拒绝自动执行。",
+      );
+    }
+  }
+
 }
 
 export function createNeutralExecutionRecord(input: {
@@ -290,11 +405,17 @@ export function createNeutralExecutionRecord(input: {
   idempotencyKey: string;
   challengeId: string;
   now: number;
+  venue?: "bybit" | "binance";
+  reservedCapitalUsd?: number;
 }): RwaExecutionRecord {
   const executionId = randomUUID();
+  const profile = requireRwaAutomationExecutionProfile("xaut", input.venue ?? "bybit");
   return {
     userId: input.userId,
     accountId: input.accountId,
+    asset: "XAUT",
+    profileId: rwaAutomationProfileId(profile),
+    reservedCapitalUsd: input.reservedCapitalUsd ?? 0,
     executionId,
     idempotencyKey: input.idempotencyKey,
     challengeId: input.challengeId,
@@ -315,6 +436,7 @@ export function createNeutralExecutionRecord(input: {
       perpetualRemainingXaut: 0,
       updatedAt: input.now,
     },
+    activityContinuity: createUnmonitoredActivityContinuity(input.now),
     createdAt: input.now,
     updatedAt: input.now,
   };
@@ -360,23 +482,34 @@ export function trackedExposureFromExecution(execution: RwaExecutionRecord): Rwa
     sourceExecutionIds: [execution.executionId],
     strategyOrderPrefixes: [execution.orderLinkPrefix],
     attributionSince: execution.createdAt,
+    activityContinuity: execution.activityContinuity,
   };
 }
 
-export function trackedExposureFromState(executions: RwaExecutionRecord[]): RwaTrackedStrategyExposure {
-  const strategyExecutions = executions.filter((execution) => execution.challengeId !== "close-all");
+export function trackedExposureFromState(
+  executions: RwaExecutionRecord[],
+  profileId?: string,
+): RwaTrackedStrategyExposure {
+  const strategyExecutions = executions.filter((execution) =>
+    execution.challengeId !== "close-all"
+    && (profileId === undefined || execution.profileId === profileId));
   const sources = strategyExecutions.filter((execution) =>
     execution.strategyPosition.spotRemainingXaut > 0 || execution.strategyPosition.perpetualRemainingXaut > 0);
   const ambiguous = strategyExecutions.some((execution) => execution.strategyPosition.coverage !== "complete");
+  const attributionSince = sources.reduce(
+    (earliest, execution) => Math.min(earliest, execution.createdAt),
+    Number.POSITIVE_INFINITY,
+  );
   return {
     complete: !ambiguous,
     spotQuantityXaut: sources.reduce((total, execution) => total + execution.strategyPosition.spotRemainingXaut, 0),
     perpetualQuantityXaut: sources.reduce((total, execution) => total + execution.strategyPosition.perpetualRemainingXaut, 0),
     sourceExecutionIds: sources.map((execution) => execution.executionId),
     strategyOrderPrefixes: strategyExecutions.map((execution) => execution.orderLinkPrefix),
-    attributionSince: strategyExecutions.reduce(
-      (earliest, execution) => Math.min(earliest, execution.createdAt),
-      Number.POSITIVE_INFINITY,
+    attributionSince,
+    activityContinuity: combineActivityContinuities(
+      sources.map((execution) => execution.activityContinuity),
+      attributionSince,
     ),
   };
 }
@@ -392,6 +525,8 @@ function assertTrackedExposure(exposure: RwaTrackedStrategyExposure) {
     || exposure.attributionSince < 0
     || exposure.strategyOrderPrefixes.length === 0
     || exposure.strategyOrderPrefixes.some((prefix) => !prefix)
+    || exposure.activityContinuity.spot.coverage !== "monitored"
+    || exposure.activityContinuity.perpetual.coverage !== "monitored"
   ) {
     throw new RwaExecutionSafetyError(
       "strategy_ownership_ambiguous",
@@ -405,12 +540,22 @@ function assertPositionAttribution(
   exposure: RwaTrackedStrategyExposure,
   snapshotFetchedAt: number,
 ) {
+  const continuityStart = Math.min(
+    exposure.activityContinuity.spot.immutableStartAt,
+    exposure.activityContinuity.perpetual.immutableStartAt,
+  );
+  const previousCheckedThrough = Math.min(
+    exposure.activityContinuity.spot.checkedThrough,
+    exposure.activityContinuity.perpetual.checkedThrough,
+  );
   if (
     attribution.coverage !== "complete"
     || attribution.externalPositionActivity
     || !Number.isFinite(attribution.checkedFrom)
     || !Number.isFinite(attribution.checkedThrough)
-    || attribution.checkedFrom > exposure.attributionSince
+    || continuityStart > exposure.attributionSince
+    || attribution.checkedFrom > previousCheckedThrough
+    || attribution.checkedThrough - previousCheckedThrough > RWA_ACTIVITY_MAX_GAP_MS
     || attribution.checkedThrough < snapshotFetchedAt
     || attribution.checkedThrough < attribution.checkedFrom
   ) {
@@ -428,6 +573,8 @@ function assertValidProviderSnapshot<TPermissions extends RwaVenuePermissions>(
     market.fetchedAt,
     market.availableUsdt,
     market.existingSpotQuantityXaut,
+    market.spotAvailableQuantityXaut,
+    market.spotLockedQuantityXaut,
     market.existingPerpetualQuantityXaut,
     market.spot.minOrderQty,
     market.spot.qtyStep,
@@ -450,6 +597,15 @@ function assertValidProviderSnapshot<TPermissions extends RwaVenuePermissions>(
     !market.accountId
     || requiredNonNegative.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)
     || optionalNonNegative.some((value) => typeof value !== "number" || !Number.isFinite(value) || value < 0)
+    || !Number.isSafeInteger(market.openSpotOrderCount) || market.openSpotOrderCount < 0
+    || !Number.isSafeInteger(market.openPerpetualOrderCount) || market.openPerpetualOrderCount < 0
+    || !["long", "short", "flat"].includes(market.perpetualPositionSide)
+    || Math.abs(
+      market.existingSpotQuantityXaut
+      - market.spotAvailableQuantityXaut
+      - market.spotLockedQuantityXaut
+    ) > 1e-9
+    || (market.existingPerpetualQuantityXaut <= 1e-12) !== (market.perpetualPositionSide === "flat")
     || !(market.spot.qtyStep > 0 && market.spot.minOrderQty > 0 && market.spot.priceTick > 0)
     || !(market.perpetual.qtyStep > 0 && market.perpetual.minOrderQty > 0 && market.perpetual.priceTick > 0)
     || !(market.spot.bid > 0 && market.spot.ask > 0 && market.perpetual.bid > 0 && market.perpetual.ask > 0)

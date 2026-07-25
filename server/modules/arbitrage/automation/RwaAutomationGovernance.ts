@@ -139,7 +139,8 @@ const defaultConfig: RwaAutomationGovernanceConfig = {
 export class RwaAutomationGovernanceError extends Error {
   constructor(
     readonly statusCode: 429 | 503,
-    readonly category: "automation_rate_limited" | "automation_concurrency_limited" | "automation_capacity_exceeded",
+    readonly category: "automation_rate_limited" | "automation_concurrency_limited"
+      | "automation_capacity_exceeded" | "automation_risk_state_invalid",
     message: string,
     readonly retryAfterSeconds?: number,
   ) {

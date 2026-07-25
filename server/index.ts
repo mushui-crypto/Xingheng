@@ -219,6 +219,10 @@ registerAdminTradingRoutes({ app, trading, users, wallet });
 registerUserWalletRoutes(app, wallet);
 registerAdminWalletRoutes(app, wallet);
 
+if (config.isProduction) {
+  await automationControl.startPersistedActivityMonitoring();
+}
+
 const server = app.listen(port, "0.0.0.0", () => {
   console.log(`[api] listening on http://127.0.0.1:${port}`);
 });
@@ -387,6 +391,7 @@ async function shutdown(signal: string) {
     martingaleGridPaperWorker.stop();
     fixedGridPaperWorker.stop();
     strategyRuntime.stop();
+    automationControl.dispose();
     realTradingReconciliation.stop();
     await realTradingUserStreams.stop();
     await market.stop();

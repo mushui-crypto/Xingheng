@@ -238,6 +238,13 @@ function validateProductionConfig(config: RuntimeConfig) {
   ) {
     throw new Error("自动套利执行拓扑必须使用冻结的单主机独占租约配置。");
   }
+  const monitoredBinanceAccounts = process.env.RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS?.trim() ?? "";
+  if (
+    monitoredBinanceAccounts
+    && monitoredBinanceAccounts.split(",").some((value) => !/^binance:[a-f0-9]{16}$/.test(value.trim()))
+  ) {
+    throw new Error("RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS 必须只包含精确的 Binance 专用账户内部指纹。");
+  }
   if (process.env.RWA_AUTOMATION_BACKUP_DIR && process.env.RWA_AUTOMATION_BACKUP_DIR !== RWA_AUTOMATION_BACKUP_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径。");
   }

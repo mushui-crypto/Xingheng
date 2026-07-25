@@ -6,11 +6,13 @@ import type {
   RwaVenueCredentials,
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
+import { XAUT_AUTOMATION_ASSET_PROFILE } from "./RwaAutomationAssetProfile";
 
 export const RWA_BINANCE_STRATEGY_ID = "binance-xaut-spot-perp-v1" as const;
 export const RWA_BINANCE_SPOT_SYMBOL = "XAUTUSDT" as const;
 export const RWA_BINANCE_PERPETUAL_SYMBOL = "XAUTUSDT" as const;
-export const RWA_BINANCE_TOTAL_BUDGET_USD = 25;
+export const RWA_BINANCE_TOTAL_BUDGET_USD =
+  XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits!.maxOrderNotionalUsd;
 export const RWA_BINANCE_PRODUCT_CACHE_TTL_MS = 30_000;
 export const RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS = 10_000;
 

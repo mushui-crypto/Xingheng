@@ -5,6 +5,8 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
+import { RwaAutomationGovernanceError } from "./RwaAutomationGovernance";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaBinanceAutomationConnector } from "./RwaBinanceAutomationConnector";
 import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
@@ -17,6 +19,11 @@ import type {
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import { createNeutralExecutionRecord } from "./RwaNeutralHedgeExecutionEngine";
 import type { RwaProviderOrder, RwaProviderOrderRequest, RwaStrategyPnlSnapshot } from "./RwaNeutralExecutionTypes";
+import {
+  createMonitoredActivityContinuity,
+  RWA_SPOT_ACTIVITY_SOURCES,
+  RWA_PERPETUAL_ACTIVITY_SOURCES,
+} from "./RwaProviderActivityContinuity";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -235,6 +242,120 @@ test("Binance preflight remains read-only and execute establishes the whiteliste
   }
 });
 
+test("Binance preflight aggregates reserved capital and rejects new risk at the asset tier", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-profile-risk-"));
+  try {
+    const client = new FakeBinanceClient();
+    const { current, store } = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(current);
+    const state = await store.readState();
+    const reserved = createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${store.userDomain}`,
+      idempotencyKey: `${store.userDomain}:risk-reserved`,
+      challengeId: "risk-reserved",
+      now,
+      venue: "binance",
+      reservedCapitalUsd: 290,
+    });
+    reserved.state = "manual_intervention";
+    state.executions.push(reserved);
+    await store.writeState(state);
+
+    await assert.rejects(
+      current.preflight(opportunity(), accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "preflight_rejected"
+        && (error.details?.report as any)?.checks.some((item: any) =>
+          item.name === "asset_cap" && item.passed === false),
+    );
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance execute rejects invalid runtime profile fields before provider mutations", async () => {
+  const invalidCases: Array<[string, (execution: any) => void]> = [
+    ["unknown-asset", (execution) => { execution.asset = "DOGE"; }],
+    ["partial-profile", (execution) => { delete execution.profileId; }],
+    ["negative-capital", (execution) => { execution.reservedCapitalUsd = -1; }],
+    ["nan-capital", (execution) => { execution.reservedCapitalUsd = Number.NaN; }],
+    ["infinite-capital", (execution) => { execution.reservedCapitalUsd = Number.POSITIVE_INFINITY; }],
+  ];
+  for (const [label, corrupt] of invalidCases) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-binance-invalid-profile-${label}-`));
+    try {
+      const client = new FakeBinanceClient();
+      const { current, store } = serviceHarness(directory, "user-a", client);
+      const accountId = await activate(current);
+      const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+      const state = await store.readState();
+      const invalid = createNeutralExecutionRecord({
+        userId: "user-a",
+        accountId,
+        userOrderPrefix: `rwa${store.userDomain}`,
+        idempotencyKey: `${store.userDomain}:invalid:${label}`,
+        challengeId: `invalid:${label}`,
+        now,
+        venue: "binance",
+        reservedCapitalUsd: 25,
+      });
+      invalid.state = "manual_intervention";
+      corrupt(invalid);
+      state.executions.push(invalid);
+      store.readState = async () => state;
+
+      await assert.rejects(
+        current.execute(executeInput(accountId, challenge, `binance:invalid:${label}`)),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+      assert.equal(client.writeCount, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Binance execute rechecks aggregate risk before provider writes and clears a rejected reservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-risk-race-"));
+  try {
+    const client = new FakeBinanceClient();
+    const { current, store } = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    const state = await store.readState();
+    const concurrent = createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${store.userDomain}`,
+      idempotencyKey: `${store.userDomain}:concurrent-risk`,
+      challengeId: "concurrent-risk",
+      now,
+      venue: "binance",
+      reservedCapitalUsd: 290,
+    });
+    concurrent.state = "manual_intervention";
+    state.executions.push(concurrent);
+    await store.writeState(state);
+
+    await assert.rejects(
+      current.execute(executeInput(accountId, challenge, "binance:risk-race:1")),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "risk_limit_exceeded",
+    );
+    assert.equal(client.writeCount, 0);
+    const persisted = await store.readState();
+    const rejected = persisted.executions.find((item) => item.challengeId === challenge.challengeId);
+    assert.equal(rejected?.state, "failed");
+    assert.equal(rejected?.reservedCapitalUsd, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance first provider mutation failure creates no orders or strategy exposure", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-first-write-failure-"));
   try {
@@ -328,7 +449,7 @@ test("Binance authoritative order timeout cancels the order and never creates an
   }
 });
 
-test("Binance close-all retries partial exits and restart recovery disarms persisted execution", async () => {
+test("Binance close-all ignores entry caps, retries partial exits, and restart recovery disarms persisted execution", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-recovery-"));
   try {
     const client = new FakeBinanceClient();
@@ -336,6 +457,9 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
     const accountId = await activate(current);
     client.seedStrategyExposure(0.002, 0.002);
     await seedTrackedHedge(store, accountId, 0.002);
+    const overEntryCap = await store.readState();
+    overEntryCap.executions[0]!.reservedCapitalUsd = 301;
+    await store.writeState(overEntryCap);
     client.fillPlan.push(0.5, 1, 1);
     const closed = await current.closeAll({ accountId, idempotencyKey: "binance:close:1" });
     assert.equal(closed.state, "closed");
@@ -351,6 +475,7 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
       idempotencyKey: `${store.userDomain}:restart-pending`,
       challengeId: "restart-pending",
       now,
+      venue: "binance",
     });
     pending.state = "compensating";
     pending.spotOrder = providerOrder("restart-spot", `${pending.orderLinkPrefix}s1`, 0.002);
@@ -361,6 +486,7 @@ test("Binance close-all retries partial exits and restart recovery disarms persi
       perpetualRemainingXaut: 0.002,
       updatedAt: now,
     };
+    pending.activityContinuity = createMonitoredActivityContinuity(now, pending.orderLinkPrefix);
     state.executions.push(pending);
     await store.writeState(state);
     const restarted = new RwaBinanceAutomationService(store, () => client, () => now, () => false);
@@ -418,6 +544,50 @@ test("Binance close-all blocks same-net external activity and incomplete attribu
   }
 });
 
+test("Binance activity monitor propagates lease loss after a scan and blocks startup", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-monitor-lease-loss-"));
+  let loseLease = false;
+  try {
+    const client = new FakeBinanceClient();
+    const { current, store } = serviceHarness(
+      directory,
+      "user-a",
+      client,
+      () => {
+        if (loseLease) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated lease loss",
+          );
+        }
+      },
+      () => true,
+    );
+    const accountId = await activate(current);
+    client.seedStrategyExposure(0.002, 0.002);
+    await seedTrackedHedge(store, accountId, 0.002);
+    client.attributionHook = () => { loseLease = true; };
+
+    await assert.rejects(
+      current.refreshActivityContinuity(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(client.placedRequests.length, 0);
+    assert.equal(client.strategyCancelScopes.length, 0);
+    assert.equal(client.writeCount, 0);
+
+    loseLease = false;
+    await assert.rejects(
+      current.startActivityMonitoring(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance persists base-asset fees and automatically exits the exact net spot position", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-net-position-"));
   try {
@@ -465,6 +635,7 @@ async function seedTrackedHedge(
     idempotencyKey: `${store.userDomain}:seed:${state.executions.length}`,
     challengeId: `seed:${state.executions.length}`,
     now,
+    venue: "binance",
   });
   execution.state = "hedged";
   execution.hedgedQuantityXaut = quantityXaut;
@@ -474,6 +645,7 @@ async function seedTrackedHedge(
     perpetualRemainingXaut: quantityXaut,
     updatedAt: now,
   };
+  execution.activityContinuity = createMonitoredActivityContinuity(now, execution.orderLinkPrefix);
   state.executions.push(execution);
   await store.writeState(state);
 }
@@ -631,6 +803,7 @@ test("Binance KMS failure blocks execute and restart recovery without provider w
       idempotencyKey: "binance:recovery:kms-failure",
       challengeId: "recovery-challenge",
       now,
+      venue: "binance",
     })];
     await harness.store.writeState(state);
     harness.keyProvider.failCategory = "credential_key_provider_permission_denied";
@@ -650,7 +823,13 @@ function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
 }
 
-function serviceHarness(directory: string, userId: string, client: FakeBinanceClient) {
+function serviceHarness(
+  directory: string,
+  userId: string,
+  client: FakeBinanceClient,
+  leaseGuard: () => void = () => {},
+  activityMonitoringEnabled?: () => boolean,
+) {
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
     userId,
@@ -659,7 +838,19 @@ function serviceHarness(directory: string, userId: string, client: FakeBinanceCl
     credentialPath: join(directory, `${userId}-credentials.json`),
     statePath: join(directory, `${userId}-state.json`),
   });
-  return { current: new RwaBinanceAutomationService(store, () => client, () => now, () => false), store, keyProvider };
+  return {
+    current: new RwaBinanceAutomationService(
+      store,
+      () => client,
+      () => now,
+      () => false,
+      undefined,
+      leaseGuard,
+      activityMonitoringEnabled,
+    ),
+    store,
+    keyProvider,
+  };
 }
 
 async function activate(current: RwaBinanceAutomationService) {
@@ -697,6 +888,7 @@ class FakeBinanceClient implements RwaBinanceClient {
   private readonly spotBuyBaseFeeXaut: number;
   attributionCoverage: "complete" | "incomplete" = "complete";
   externalPositionActivity = false;
+  attributionHook: () => void = () => {};
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
@@ -732,6 +924,9 @@ class FakeBinanceClient implements RwaBinanceClient {
       availableUsdt: 40,
       existingSpotQuantityXaut: 0,
       existingPerpetualQuantityXaut: 0,
+      spotAvailableQuantityXaut: 0,
+      spotLockedQuantityXaut: 0,
+      perpetualPositionSide: "flat",
       openSpotOrderCount: 0,
       openPerpetualOrderCount: 0,
       spot: {
@@ -812,9 +1007,12 @@ class FakeBinanceClient implements RwaBinanceClient {
       this.spotQuantity += request.side === "Buy" ? positionQuantityXaut : -positionQuantityXaut;
       this.snapshot.spotFreeXaut = Math.max(0, this.snapshot.spotFreeXaut + (request.side === "Buy" ? positionQuantityXaut : -positionQuantityXaut));
       this.snapshot.existingSpotQuantityXaut = Math.max(0, this.snapshot.spotFreeXaut + this.snapshot.spotLockedXaut);
+      this.snapshot.spotAvailableQuantityXaut = this.snapshot.spotFreeXaut;
+      this.snapshot.spotLockedQuantityXaut = this.snapshot.spotLockedXaut;
     } else {
       this.perpetualQuantity += request.side === "Sell" ? filledQuantityXaut : -filledQuantityXaut;
       this.snapshot.existingPerpetualQuantityXaut = Math.max(0, this.perpetualQuantity);
+      this.snapshot.perpetualPositionSide = this.snapshot.existingPerpetualQuantityXaut > 0 ? "short" : "flat";
     }
     return {
       orderId,
@@ -843,11 +1041,22 @@ class FakeBinanceClient implements RwaBinanceClient {
     strategyOrderPrefixes: string[];
     since: number;
   }) {
+    this.attributionHook();
     return {
       coverage: this.attributionCoverage,
       externalPositionActivity: this.externalPositionActivity,
       checkedFrom: input.since,
       checkedThrough: now,
+      sources: [...new Set([...RWA_SPOT_ACTIVITY_SOURCES, ...RWA_PERPETUAL_ACTIVITY_SOURCES])].map((source) => ({
+        source,
+        coverage: this.attributionCoverage,
+        checkedFrom: input.since,
+        checkedThrough: now,
+        cursor: null,
+        eventIds: [],
+        externalActivity: this.externalPositionActivity,
+      })),
+      providerOrderIds: { spot: [], perpetual: [] },
     };
   }
 
@@ -857,7 +1066,10 @@ class FakeBinanceClient implements RwaBinanceClient {
     this.snapshot.spotFreeXaut = Math.max(0, spotQuantity);
     this.snapshot.spotLockedXaut = 0;
     this.snapshot.existingSpotQuantityXaut = Math.max(0, spotQuantity);
+    this.snapshot.spotAvailableQuantityXaut = Math.max(0, spotQuantity);
+    this.snapshot.spotLockedQuantityXaut = 0;
     this.snapshot.existingPerpetualQuantityXaut = Math.max(0, perpetualQuantity);
+    this.snapshot.perpetualPositionSide = perpetualQuantity > 0 ? "short" : "flat";
   }
 
   setAuthoritativeExposure(input: {
@@ -870,9 +1082,12 @@ class FakeBinanceClient implements RwaBinanceClient {
     if (input.spotFreeXaut !== undefined) this.snapshot.spotFreeXaut = input.spotFreeXaut;
     if (input.spotLockedXaut !== undefined) this.snapshot.spotLockedXaut = input.spotLockedXaut;
     this.snapshot.existingSpotQuantityXaut = this.snapshot.spotFreeXaut + this.snapshot.spotLockedXaut;
+    this.snapshot.spotAvailableQuantityXaut = this.snapshot.spotFreeXaut;
+    this.snapshot.spotLockedQuantityXaut = this.snapshot.spotLockedXaut;
     if (input.perpetualQuantityXaut !== undefined) {
       this.snapshot.existingPerpetualQuantityXaut = input.perpetualQuantityXaut;
       this.perpetualQuantity = input.perpetualQuantityXaut;
+      this.snapshot.perpetualPositionSide = input.perpetualQuantityXaut > 0 ? "short" : "flat";
     }
     if (input.openSpotOrderCount !== undefined) this.snapshot.openSpotOrderCount = input.openSpotOrderCount;
     if (input.openPerpetualOrderCount !== undefined) this.snapshot.openPerpetualOrderCount = input.openPerpetualOrderCount;

@@ -30,6 +30,18 @@ const passThroughStepUp = {
   revokeAutomationScope: () => undefined,
 };
 
+test("registry propagates unrecoverable monitor startup failures so state or lease errors block listen", async () => {
+  const connector = fakeConnector(() => undefined);
+  connector.startActivityMonitoring = async () => {
+    throw new Error("offline monitor startup failure");
+  };
+  const registry = new RwaAutomationConnectorRegistry([connector]);
+  await assert.rejects(
+    registry.startActivityMonitoring(),
+    /offline monitor startup failure/,
+  );
+});
+
 test("arbitrage preflight re-reads the server opportunity and blocks ineligible candidates before private connector calls", async () => {
   let privatePreflightCalls = 0;
   const connector = fakeConnector(() => { privatePreflightCalls += 1; });

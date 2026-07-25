@@ -351,6 +351,30 @@ Request admission 必须先于 request-driven registry 创建；非敏感账户�
 解析自动套利 intent 时同样携带服务端来源 IP 并先走两阶段门禁；authorization 使用全局及每
 用户原子 reservation，跨用户并发不能突破配置硬上限。
 
+## 自动退出活动连续性
+
+活动连续性候选方案只接受专用子账户。Binance 生产环境必须显式配置
+`RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS`，值为服务端派生的 `binance:<16位小写hex>`
+内部指纹列表；默认空。不得把 provider UID、API Key、固定 IP 或其他凭证填入该变量。Bybit
+只接受已证明为非 master 的 UTA 专用子账户。
+
+候选监控要求 XAUT 现货、永续仓位和两侧活动订单从零开始，15 分钟补扫，5 分钟重叠，最大断档
+24 小时。离线 scanner 覆盖 Binance 32 个来源请求加一次账户证明、Bybit 13 个来源请求加一次
+账户证明；每来源最多 20 页，并发 4，瞬时错误只按 100ms、500ms 重试。理论最坏单轮 provider
+尝试上限分别为 1921 和 781；状态继续受每来源 32 个事件 ID、每侧 64 个 provider order ID、
+256 个策略订单前缀、每用户 100 条 active execution 与 8/10 MiB soft/hard 上限约束。
+
+当前真实 Binance/Bybit REST API 没有跨这些来源的原子活动水位。扫描前 cutoff 之后发生的事件
+会被端点的 `endTime/createTimeTo` 排除，任何有限次数的补扫仍会留下“最后扫描结束到首次写”
+窗口。因此真实 adapter 即使完成上述只读遍历也固定把结果降级为 `incomplete`，不会建立 monitored
+coverage，自动 leverage/cancel/place 均不可用。scanner 的 complete 只证明一个冻结时间窗内的
+离线协议遍历，不得用环境变量、专用账户口述或缩小数量把它提升为真实执行许可。
+
+启动/恢复首轮 provider 或 coverage 失败时，服务先原子进入 `manual_intervention`、关闭
+global/strategy execution、激活用户急停并清除 challenge，然后可以只读方式监听，供查看与人工
+处置；状态/租约读取或 disarm 落盘失败则阻止监听。两种结果必须分别记录，不能把“只读启动成功”
+写成“活动监控通过”。
+
 ## Hyperliquid Testnet 真实交易运维
 
 `/app/trade` 第一阶段固定 Hyperliquid Testnet。平台后端不保存用户 API wallet 私钥、
@@ -593,9 +617,10 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
   或账户总余额代替。账户数量与策略剩余数量不一致、旧记录 coverage 不完整或 provider 快照
   非有限/负数时会在退出写操作前 fail-closed。即使最终数量相同，也必须证明从持久 execution
   最早创建时间起的全部持仓影响活动连续、完整且不存在非策略成交、转账、转换或余额调整；证明
-  不完整或水位早于权威快照同样返回 `strategy_ownership_ambiguous`，且不得先撤单。当前生产
-  Binance/Bybit 连接器明确返回活动覆盖不完整，自动退出保持禁用并进入人工核对；运维应保持用户
-  与服务端急停，不得通过修改状态文件、缩小数量或删除幂等记录强制重试。
+  不完整或水位早于权威快照同样返回 `strategy_ownership_ambiguous`，且不得先撤单。当前真实
+  Binance/Bybit adapter 因 REST 扫描期间活动窗口无法原子封闭，固定返回 `incomplete`；专用
+  子账户和离线扫描成功也不能启用自动退出。运维应保持用户与服务端急停，不得通过修改状态文件、
+  缩小数量或删除幂等记录强制重试。
 - API 收到 SIGTERM 后停止行情、关闭 WebSocket/HTTP，再关闭 SQLite；Compose
   提供 20 秒退出窗口。
 - API 健康检查失败时 Web 不会首次启动，但已运行的 Caddy 不等同于业务健康；
@@ -607,3 +632,21 @@ dot-command 路径注入；随后停止 API、对备份和恢复结果分别执�
   不进入 Git、镜像或日志。
 - 正式环境不会创建 `demo-user` 的演示钱包、资金账户或演示流水；若正式库中出现此类
   数据，应视为历史数据或错误导入并单独审计，不能依赖启动流程清理。
+## 自动套利资产 profile 发布门禁
+
+自动套利市场差异由服务端
+`server/modules/arbitrage/automation/RwaAutomationAssetProfile.ts` 冻结。当前只有 XAUT 为
+`enabled`；BTC、ETH、SOL 为 `reserved`，生产不得通过环境变量、Compose、客户端请求或手工
+symbol 替换将其提升为可执行。部署验证必须确认：
+
+- API 构建来自同一 verified revision，profile 注册表与 execution engine 未发生版本漂移。
+- 旧 XAUT execution 缺少 `asset/profileId/reservedCapitalUsd` 时只走 additive migration；
+  新写入和新备份要求 exact schema，未知/错配 profile 必须 fail-closed。
+- XAUT V1 的 300 USDT 是 profile 当前阶段配置。单笔、单资产、单账户和全局额度只阻止新增风险；
+  close-all、减仓、补偿和急停不能因超过入场额度而被阻止。
+- profile 或持久风险状态无法完整读取时，不得通过 tag、运行时 env 或手工修改状态绕过 admission。
+- 真实 Binance/Bybit attribution 仍为 `incomplete`；本 profile 发布不授权自动退出、Mainnet
+  资金窗口或 BTC/ETH/SOL provider 写。
+
+账户是否必须专用及账户内同资产授权范围尚未冻结，不属于本次 profile 发布门禁。生产继续沿用
+既有 fail-closed 基线，待产品口径、后端契约和前端 TOTP 文案另行验收。

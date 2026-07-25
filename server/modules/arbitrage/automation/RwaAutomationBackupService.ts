@@ -45,6 +45,17 @@ import {
   writeGenerationState,
   type RwaAutomationDataLayoutOptions,
 } from "./RwaAutomationDataLayout";
+import {
+  RWA_ACTIVITY_MAX_PROVIDER_ORDER_IDS,
+  RWA_ACTIVITY_MAX_RECENT_EVENT_IDS,
+  RWA_PERPETUAL_ACTIVITY_SOURCES,
+  RWA_SPOT_ACTIVITY_SOURCES,
+  activityEventDigest,
+} from "./RwaProviderActivityContinuity";
+import {
+  getRwaAutomationAssetProfile,
+  rwaAutomationProfileId,
+} from "./RwaAutomationAssetProfile";
 
 export const RWA_AUTOMATION_BACKUP_ROOT = "/app/rwa-automation-backups";
 export const RWA_AUTOMATION_BACKUP_SCHEMA_VERSION = 1 as const;
@@ -691,7 +702,11 @@ function validateExecutionRecord(value: unknown) {
     "unhedgedDurationMs", "updatedAt", "userId",
   ];
   const strategyPositionKeys = [...currentKeys, "strategyPosition"];
-  if (!hasExactKeys(execution, strategyPositionKeys)
+  const activityContinuityKeys = [...strategyPositionKeys, "activityContinuity"];
+  const profiledKeys = [...activityContinuityKeys, "asset", "profileId", "reservedCapitalUsd"];
+  if (!hasExactKeys(execution, profiledKeys)
+    && !hasExactKeys(execution, activityContinuityKeys)
+    && !hasExactKeys(execution, strategyPositionKeys)
     && !hasExactKeys(execution, currentKeys)
     && !hasExactKeys(execution, legacyKeys)) throw invalidSnapshot();
   for (const key of ["userId", "accountId", "executionId", "idempotencyKey", "challengeId", "orderLinkPrefix"]) {
@@ -708,9 +723,23 @@ function validateExecutionRecord(value: unknown) {
     || !isNullableFiniteNumber(execution.unhedgedDurationMs)
     || !isTimestamp(execution.createdAt) || !isTimestamp(execution.updatedAt)
     || !Array.isArray(execution.perpetualOrders) || !Array.isArray(execution.compensationOrders)) throw invalidSnapshot();
+  if (execution.asset !== undefined || execution.profileId !== undefined || execution.reservedCapitalUsd !== undefined) {
+    const asset = typeof execution.asset === "string"
+      ? getRwaAutomationAssetProfile(execution.asset.toLowerCase())
+      : null;
+    const profileIds = asset?.venues.map((venue) => rwaAutomationProfileId({ asset, venue })) ?? [];
+    if (
+      !asset
+      || !isNonEmptyString(execution.profileId)
+      || !profileIds.includes(String(execution.profileId))
+      || !isFiniteNumber(execution.reservedCapitalUsd)
+      || Number(execution.reservedCapitalUsd) < 0
+    ) throw invalidSnapshot();
+  }
   if (execution.reconciliation !== undefined && execution.reconciliation !== null) validateReconciliationPreview(execution.reconciliation);
   if (execution.finalizeIdempotency !== undefined && execution.finalizeIdempotency !== null) validateFinalizeIdempotency(execution.finalizeIdempotency);
   if (execution.strategyPosition !== undefined) validateStrategyPosition(execution.strategyPosition);
+  if (execution.activityContinuity !== undefined) validateActivityContinuity(execution.activityContinuity);
   if (execution.spotOrder !== null) validateProviderOrder(execution.spotOrder);
   execution.perpetualOrders.forEach(validateProviderOrder);
   execution.compensationOrders.forEach(validateProviderOrder);
@@ -723,6 +752,58 @@ function validateStrategyPosition(value: unknown) {
     || !isFiniteNumber(position.spotRemainingXaut) || Number(position.spotRemainingXaut) < 0
     || !isFiniteNumber(position.perpetualRemainingXaut) || Number(position.perpetualRemainingXaut) < 0
     || !isTimestamp(position.updatedAt)) {
+    throw invalidSnapshot();
+  }
+}
+
+function validateActivityContinuity(value: unknown) {
+  const continuity = assertObject(value);
+  if (!hasExactKeys(continuity, ["maxGapMs", "perpetual", "pollIntervalMs", "spot", "version"])
+    || continuity.version !== 1
+    || continuity.maxGapMs !== 24 * 60 * 60_000
+    || continuity.pollIntervalMs !== 15 * 60_000) throw invalidSnapshot();
+  validateActivityLeg(continuity.spot, RWA_SPOT_ACTIVITY_SOURCES);
+  validateActivityLeg(continuity.perpetual, RWA_PERPETUAL_ACTIVITY_SOURCES);
+}
+
+function validateActivityLeg(value: unknown, requiredSources: readonly string[]) {
+  const leg = assertObject(value);
+  if (!hasExactKeys(leg, [
+    "checkedThrough", "clientOrderPrefixes", "coverage", "immutableStartAt",
+    "providerOrderIds", "sources", "updatedAt",
+  ])
+    || !["unmonitored", "monitored", "ambiguous"].includes(String(leg.coverage))
+    || !isTimestamp(leg.immutableStartAt) || !isTimestamp(leg.checkedThrough) || !isTimestamp(leg.updatedAt)
+    || !Array.isArray(leg.providerOrderIds) || !leg.providerOrderIds.every(isNonEmptyString)
+    || !Array.isArray(leg.clientOrderPrefixes) || !leg.clientOrderPrefixes.every(isNonEmptyString)
+    || leg.providerOrderIds.length > RWA_ACTIVITY_MAX_PROVIDER_ORDER_IDS
+    || leg.clientOrderPrefixes.length > 256
+    || new Set(leg.providerOrderIds).size !== leg.providerOrderIds.length
+    || new Set(leg.clientOrderPrefixes).size !== leg.clientOrderPrefixes.length
+    || !Array.isArray(leg.sources)
+    || leg.sources.length !== requiredSources.length) throw invalidSnapshot();
+  const sourceNames = leg.sources.map((source) => assertObject(source).source);
+  if (
+    new Set(sourceNames).size !== sourceNames.length
+    || requiredSources.some((source) => !sourceNames.includes(source))
+  ) throw invalidSnapshot();
+  leg.sources.forEach(validateActivityWatermark);
+}
+
+function validateActivityWatermark(value: unknown) {
+  const source = assertObject(value);
+  if (!hasExactKeys(source, [
+    "checkedThrough", "coverage", "cursor", "eventDigest", "immutableStartAt",
+    "recentEventIds", "source", "updatedAt",
+  ])
+    || !isNonEmptyString(source.source)
+    || !["complete", "incomplete"].includes(String(source.coverage))
+    || !isTimestamp(source.immutableStartAt) || !isTimestamp(source.checkedThrough) || !isTimestamp(source.updatedAt)
+    || !(source.cursor === null || typeof source.cursor === "string")
+    || !Array.isArray(source.recentEventIds) || !source.recentEventIds.every(isNonEmptyString)
+    || source.recentEventIds.length > RWA_ACTIVITY_MAX_RECENT_EVENT_IDS
+    || new Set(source.recentEventIds).size !== source.recentEventIds.length
+    || source.eventDigest !== activityEventDigest(source.recentEventIds)) {
     throw invalidSnapshot();
   }
 }
