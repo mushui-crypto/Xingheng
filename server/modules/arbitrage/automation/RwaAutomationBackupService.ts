@@ -56,13 +56,14 @@ import {
   getRwaAutomationAssetProfile,
   rwaAutomationProfileId,
 } from "./RwaAutomationAssetProfile";
+import { validateAccountAssetAuthorization } from "./RwaAccountAssetAuthorization";
 
 export const RWA_AUTOMATION_BACKUP_ROOT = "/app/rwa-automation-backups";
 export const RWA_AUTOMATION_BACKUP_SCHEMA_VERSION = 1 as const;
 export const RWA_AUTOMATION_BACKUP_DOMAIN = "rwa-automation-disaster-recovery" as const;
 
 const backupFilePattern = /^rwa-automation-([0-9]{8}T[0-9]{6}Z)\.rwa\.enc\.json$/;
-const rootStatePattern = /^[a-f0-9]{16}-(bybit|bitget|binance|okx)-(credentials\.enc|state)\.json$/;
+const rootStatePattern = /^([a-f0-9]{16})-(bybit|bitget|binance|okx)-(credentials\.enc|state)\.json$/;
 const stepUpStatePattern = /^[A-Za-z0-9_-]{24}\.enc\.json$/;
 const maxManifestFiles = 100_000;
 
@@ -390,11 +391,17 @@ export class RwaAutomationBackupService {
       const rootMatch = rootStatePattern.exec(entry.name);
       if (!rootMatch) throw invalidSnapshot();
       if (entry.name.endsWith("-credentials.enc.json")) {
-        validateCredentialEnvelope(source, rootMatch[1] as "bybit" | "bitget" | "binance" | "okx");
+        validateCredentialEnvelope(source, rootMatch[2] as "bybit" | "bitget" | "binance" | "okx");
       }
       result.push({
         path: entry.name,
-        data: entry.name.endsWith("-state.json") ? sanitizeAutomationState(source) : source,
+        data: entry.name.endsWith("-state.json")
+          ? sanitizeAutomationState(
+            source,
+            rootMatch[1]!,
+            rootMatch[2] as "bybit" | "bitget" | "binance" | "okx",
+          )
+          : source,
       });
     }
     result.sort((left, right) => left.path.localeCompare(right.path));
@@ -534,7 +541,11 @@ function backupContext(backupId: string): AutomationBackupKeyContext {
   };
 }
 
-function sanitizeAutomationState(source: Buffer) {
+function sanitizeAutomationState(
+  source: Buffer,
+  userDomain: string,
+  venue: "bybit" | "bitget" | "binance" | "okx",
+) {
   let parsed: Record<string, unknown>;
   try {
     parsed = JSON.parse(source.toString("utf8")) as Record<string, unknown>;
@@ -543,7 +554,19 @@ function sanitizeAutomationState(source: Buffer) {
   }
   if (
     parsed.version !== 1
-    || !hasExactKeys(parsed, [
+    || (
+      !hasExactKeys(parsed, [
+        "assetAuthorizations",
+        "challenges",
+        "config",
+        "credentialAlert",
+        "credentialAudit",
+        "credentialLifecycle",
+        "executions",
+        "pnlSeries",
+        "version",
+      ])
+      && !hasExactKeys(parsed, [
       "challenges",
       "config",
       "credentialAlert",
@@ -552,11 +575,20 @@ function sanitizeAutomationState(source: Buffer) {
       "executions",
       "pnlSeries",
       "version",
-    ])
+      ])
+    )
     || !Array.isArray(parsed.executions)
     || !Array.isArray(parsed.pnlSeries)
     || !Array.isArray(parsed.credentialAudit)
   ) throw invalidSnapshot();
+  const assetAuthorizations = parsed.assetAuthorizations === undefined
+    ? []
+    : parsed.assetAuthorizations;
+  if (!Array.isArray(assetAuthorizations)) throw invalidSnapshot();
+  assetAuthorizations.forEach((value) => {
+    const authorization = validateAccountAssetAuthorization(value);
+    if (authorization.userDomain !== userDomain || authorization.venue !== venue) throw invalidSnapshot();
+  });
   validateExecutionConfig(parsed.config);
   if (!Array.isArray(parsed.challenges)) throw invalidSnapshot();
   parsed.challenges.forEach(validateStoredChallenge);
@@ -569,6 +601,7 @@ function sanitizeAutomationState(source: Buffer) {
   if (!(parsed.credentialAlert === null || typeof parsed.credentialAlert === "string")) throw invalidSnapshot();
   const value = {
     ...parsed,
+    assetAuthorizations,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,

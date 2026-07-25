@@ -21,7 +21,9 @@ export type StepUpOperation =
   | "hedge_execute"
   | "position_close"
   | "close_all"
-  | "reconciliation_finalize";
+  | "reconciliation_finalize"
+  | "asset_authorization_create"
+  | "asset_authorization_revoke";
 
 export type StepUpEnrollmentMethod = "totp" | "webauthn";
 

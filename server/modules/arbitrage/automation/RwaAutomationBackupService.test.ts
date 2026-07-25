@@ -39,6 +39,10 @@ import {
   readGenerationPointer,
 } from "./RwaAutomationDataLayout";
 import { createMonitoredActivityContinuity } from "./RwaProviderActivityContinuity";
+import {
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+} from "./RwaAutomationAssetProfile";
 
 const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
@@ -68,6 +72,9 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
     assert.equal(state.executions[0].state, "opening_perpetual");
     assert.equal(state.pnlSeries[0].netPnlUsd, 1.25);
     assert.equal(state.credentialAudit[0].action, "activated");
+    assert.equal(state.assetAuthorizations[0].assetId, "xaut");
+    assert.equal(state.assetAuthorizations[0].accountId, "binance:test");
+    assert.equal(state.assetAuthorizations[0].revokedAt, null);
     const restoredCredential = JSON.parse(await readFile(join(active, credentialFileName), "utf8"));
     assert.equal(Buffer.from(restoredCredential.ciphertext, "base64url").toString("utf8"), credentialMarker);
     const restoredStepUp = JSON.parse(await readFile(join(active, "step-up-security", stepUpFileName), "utf8"));
@@ -486,6 +493,7 @@ async function createFixture(overrides: { now?: () => Date; retentionDays?: numb
 }
 
 function baseState() {
+  const profile = requireRwaAutomationExecutionProfile("xaut", "binance");
   return {
     version: 1,
     config: {
@@ -499,6 +507,32 @@ function baseState() {
       minLiquidationDistancePercent: 30,
       maxUnhedgedMs: 10_000,
     },
+    assetAuthorizations: [{
+      authorizationId: "authorization-1",
+      userDomain: "a".repeat(16),
+      venue: "binance",
+      accountId: "binance:test",
+      accountFingerprint: "fingerprint",
+      assetId: "xaut",
+      profileId: rwaAutomationProfileId(profile),
+      policyVersion: profile.asset.authorizationPolicy.version,
+      policyDigest: profile.asset.authorizationPolicy.digest,
+      previewDigest: "1".repeat(64),
+      spotQuantity: 0.2,
+      spotAvailableQuantity: 0.1,
+      spotLockedQuantity: 0.1,
+      perpetualQuantity: 0.2,
+      perpetualSide: "short",
+      spotOrderCount: 1,
+      perpetualOrderCount: 1,
+      ordersDigest: "2".repeat(64),
+      maxManagedSpotQuantity: 0.2,
+      maxManagedPerpetualQuantity: 0.2,
+      maxManagedNotionalUsd: 1_600,
+      previewedAt: baseNow.getTime(),
+      createdAt: baseNow.getTime() + 1,
+      revokedAt: null,
+    }],
     challenges: [{
       id: "challenge-secret-marker",
       tokenHash: "challenge-token-hash",

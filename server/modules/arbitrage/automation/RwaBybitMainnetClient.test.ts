@@ -342,6 +342,60 @@ test("Bybit order creation is treated as acceptance only and authoritative order
   assert.deepEqual(paths, ["/v5/order/create", "/v5/order/realtime"]);
 });
 
+test("Bybit asset order preview follows every open-order cursor for both XAUT legs", async () => {
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "api-key-value", apiSecret: "api-secret-value" },
+    (async (input) => {
+      const url = new URL(String(input));
+      assert.equal(url.pathname, "/v5/order/realtime");
+      assert.equal(url.searchParams.get("limit"), "50");
+      const category = url.searchParams.get("category");
+      const cursor = url.searchParams.get("cursor");
+      const list = category === "spot"
+        ? cursor === "spot-next"
+          ? [{ symbol: "XAUTUSDT", orderId: "spot-2", orderLinkId: "manual-spot-2" }]
+          : [{ symbol: "XAUTUSDT", orderId: "spot-1", orderLinkId: "manual-spot-1" }]
+        : [{ symbol: "XAUTUSDT", orderId: "linear-1", orderLinkId: "manual-linear-1" }];
+      return jsonResponse({
+        retCode: 0,
+        result: {
+          list,
+          nextPageCursor: category === "spot" && !cursor ? "spot-next" : "",
+        },
+      });
+    }) as typeof fetch,
+  );
+  const orders = await client.listAssetOpenOrders();
+  assert.deepEqual(orders.map(({ category, orderId }) => ({ category, orderId })), [
+    { category: "spot", orderId: "spot-1" },
+    { category: "spot", orderId: "spot-2" },
+    { category: "linear", orderId: "linear-1" },
+  ]);
+});
+
+test("Bybit asset order preview rejects duplicate cursors before claiming a complete preview", async () => {
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "api-key-value", apiSecret: "api-secret-value" },
+    (async (input) => {
+      const url = new URL(String(input));
+      const cursor = url.searchParams.get("cursor");
+      return jsonResponse({
+        retCode: 0,
+        result: {
+          list: [{
+            symbol: "XAUTUSDT",
+            orderId: `${url.searchParams.get("category")}-${cursor ?? "first"}`,
+            orderLinkId: "",
+          }],
+          nextPageCursor: "same",
+        },
+      });
+    }) as typeof fetch,
+  );
+  await assert.rejects(client.listAssetOpenOrders(), (error: unknown) =>
+    error instanceof RwaBybitProviderError && error.category === "provider_snapshot_invalid");
+});
+
 test("Bybit preflight rejects malformed authoritative position quantities", async () => {
   for (const invalid of [
     { spot: "NaN", perpetual: "0" },

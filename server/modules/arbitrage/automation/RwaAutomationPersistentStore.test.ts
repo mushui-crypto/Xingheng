@@ -21,6 +21,14 @@ import {
   createMonitoredActivityContinuity,
   createUnmonitoredActivityContinuity,
 } from "./RwaProviderActivityContinuity";
+import {
+  RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE,
+  type RwaAccountAssetAuthorization,
+} from "./RwaAccountAssetAuthorization";
+import {
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+} from "./RwaAutomationAssetProfile";
 
 const permissions = {
   read: true,
@@ -135,6 +143,70 @@ test("wrap reference tampering is rejected before credential plaintext is used",
       fixture.store.loadCredentials(),
       hasCategory("credential_key_identity_mismatch"),
     );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("legacy state defaults to no asset authorization while new exact state persists it", async () => {
+  const fixture = await createFixture("user-a", "bybit");
+  try {
+    const legacy = await fixture.store.readState();
+    const { assetAuthorizations: _assetAuthorizations, ...legacyWithoutAuthorization } = legacy;
+    await writeFile(fixture.store.statePath, JSON.stringify(legacyWithoutAuthorization), { mode: 0o600 });
+    assert.deepEqual((await fixture.store.readState()).assetAuthorizations, []);
+
+    const state = await fixture.store.readState();
+    state.assetAuthorizations.push(authorizationRecord(fixture.store.userDomain, "bybit"));
+    await fixture.store.writeState(state);
+    assert.deepEqual(
+      (await fixture.store.readState()).assetAuthorizations,
+      state.assetAuthorizations,
+    );
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("partial or cross-domain authorization schema and capacity overflow fail closed", async () => {
+  const fixture = await createFixture("user-a", "bybit");
+  try {
+    const state = await fixture.store.readState();
+    const valid = authorizationRecord(fixture.store.userDomain, "bybit");
+    state.assetAuthorizations = [{ ...valid, userDomain: "ffffffffffffffff" }];
+    await assert.rejects(
+      fixture.store.writeState(state),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_risk_state_invalid",
+    );
+
+    const partial = { ...valid } as Record<string, unknown>;
+    delete partial.policyDigest;
+    await writeFile(fixture.store.statePath, JSON.stringify({
+      ...(await fixture.store.readState()),
+      assetAuthorizations: [partial],
+    }), { mode: 0o600 });
+    await assert.rejects(fixture.store.readState(), /fail-closed/);
+
+    const clean = await createFixture("user-b", "bybit");
+    try {
+      const capacity = await clean.store.readState();
+      capacity.assetAuthorizations = Array.from(
+        { length: RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE + 1 },
+        (_, index) => ({
+          ...authorizationRecord(clean.store.userDomain, "bybit"),
+          authorizationId: `authorization-${index}`,
+          revokedAt: 2_000 + index,
+        }),
+      );
+      await assert.rejects(
+        clean.store.writeState(capacity),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_capacity_exceeded",
+      );
+    } finally {
+      await clean.cleanup();
+    }
   } finally {
     await fixture.cleanup();
   }
@@ -645,6 +717,39 @@ function execution(id: string, state: RwaExecutionRecord["state"], updatedAt: nu
     activityContinuity: createUnmonitoredActivityContinuity(updatedAt),
     createdAt: updatedAt,
     updatedAt,
+  };
+}
+
+function authorizationRecord(
+  userDomain: string,
+  venue: "bybit" | "binance",
+): RwaAccountAssetAuthorization {
+  const profile = requireRwaAutomationExecutionProfile("xaut", venue);
+  return {
+    authorizationId: "authorization-1",
+    userDomain,
+    venue,
+    accountId: `${venue}:test-account`,
+    accountFingerprint: "test-account",
+    assetId: "xaut",
+    profileId: rwaAutomationProfileId(profile),
+    policyVersion: profile.asset.authorizationPolicy.version,
+    policyDigest: profile.asset.authorizationPolicy.digest,
+    previewDigest: "1".repeat(64),
+    spotQuantity: 0.2,
+    spotAvailableQuantity: 0.1,
+    spotLockedQuantity: 0.1,
+    perpetualQuantity: 0.2,
+    perpetualSide: "short",
+    spotOrderCount: 1,
+    perpetualOrderCount: 1,
+    ordersDigest: "2".repeat(64),
+    maxManagedSpotQuantity: 0.2,
+    maxManagedPerpetualQuantity: 0.2,
+    maxManagedNotionalUsd: 1_700,
+    previewedAt: 1_000,
+    createdAt: 1_001,
+    revokedAt: null,
   };
 }
 

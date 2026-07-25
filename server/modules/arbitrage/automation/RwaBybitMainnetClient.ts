@@ -75,8 +75,7 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       spotTicker,
       perpTicker,
       positions,
-      spotOrders,
-      perpetualOrders,
+      assetOrders,
     ] = await Promise.all([
       this.validateAccess(),
       this.privateRequest("GET", "/v5/account/wallet-balance", { accountType: "UNIFIED", coin: "USDT,XAUT" }),
@@ -87,8 +86,7 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       this.publicRequest("/v5/market/tickers", { category: "spot", symbol: RWA_SPOT_SYMBOL }),
       this.publicRequest("/v5/market/tickers", { category: "linear", symbol: RWA_PERP_SYMBOL }),
       this.privateRequest("GET", "/v5/position/list", { category: "linear", symbol: RWA_PERP_SYMBOL }),
-      this.privateRequest("GET", "/v5/order/realtime", { category: "spot", symbol: RWA_SPOT_SYMBOL, openOnly: "0" }),
-      this.privateRequest("GET", "/v5/order/realtime", { category: "linear", symbol: RWA_PERP_SYMBOL, openOnly: "0" }),
+      this.listAssetOpenOrders(),
     ]);
     const spotInstrumentRow = firstListItem(spotInstrument);
     const perpInstrumentRow = firstListItem(perpInstrument);
@@ -134,8 +132,8 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       spotLockedQuantityXaut: spotLockedXaut,
       existingPerpetualQuantityXaut: positionSize,
       perpetualPositionSide,
-      openSpotOrderCount: list(record(spotOrders).list).length,
-      openPerpetualOrderCount: list(record(perpetualOrders).list).length,
+      openSpotOrderCount: assetOrders.filter((order) => order.category === "spot").length,
+      openPerpetualOrderCount: assetOrders.filter((order) => order.category === "linear").length,
       spot: {
         ...spotSpec(spotInstrumentRow),
         bid: positiveNumber(spotTickerRow.bid1Price),
@@ -204,14 +202,65 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
   }
 
   async cancelStrategyOrders(orderLinkPrefix: string) {
-    for (const category of ["spot", "linear"] as const) {
-      const result = await this.privateRequest("GET", "/v5/order/realtime", { category, symbol: RWA_SPOT_SYMBOL, openOnly: "0" });
-      for (const item of list(record(result).list).map(record)) {
-        if (!String(item.orderLinkId ?? "").startsWith(orderLinkPrefix)) continue;
-        const orderId = String(item.orderId ?? "");
-        if (orderId) await this.cancelOrder(category, orderId);
-      }
+    for (const order of await this.listAssetOpenOrders()) {
+      if (!order.clientOrderId.startsWith(orderLinkPrefix)) continue;
+      await this.cancelOrder(order.category, order.orderId);
     }
+  }
+
+  async listAssetOpenOrders() {
+    const [spot, linear] = await Promise.all([
+      this.listOpenOrders("spot", RWA_SPOT_SYMBOL),
+      this.listOpenOrders("linear", RWA_PERP_SYMBOL),
+    ]);
+    return [...spot, ...linear];
+  }
+
+  private async listOpenOrders(category: "spot" | "linear", expectedSymbol: string) {
+    const orders: Array<{
+      category: "spot" | "linear";
+      orderId: string;
+      clientOrderId: string;
+      symbol: string;
+    }> = [];
+    const seenOrderIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor = "";
+    for (let page = 0; page < 100; page += 1) {
+      const result = record(await this.privateRequest("GET", "/v5/order/realtime", {
+        category,
+        symbol: expectedSymbol,
+        openOnly: "0",
+        limit: "50",
+        ...(cursor ? { cursor } : {}),
+      }));
+      const rows = list(result.list).map(record);
+      const nextCursor = String(result.nextPageCursor ?? "");
+      if (rows.length === 0 && nextCursor) {
+        throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 活动订单分页结构无效。");
+      }
+      for (const value of rows) {
+      const symbol = String(value.symbol ?? "");
+      const orderId = String(value.orderId ?? "");
+        if (!orderId || symbol !== expectedSymbol || seenOrderIds.has(orderId)) {
+        throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 活动订单结构无效。");
+      }
+        seenOrderIds.add(orderId);
+        orders.push({
+          category,
+          orderId,
+          clientOrderId: String(value.orderLinkId ?? ""),
+          symbol,
+        });
+      }
+      if (!nextCursor) return orders;
+      if (seenCursors.has(nextCursor)) {
+        throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 活动订单分页游标无效。");
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+    throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit XAUT 活动订单分页超过安全上限。");
   }
 
   async readPositionAttribution(input: {

@@ -1,7 +1,11 @@
 import type { ArbitrageDashboardService } from "../ArbitrageDashboardService";
 import type { ArbitrageOpportunity } from "../arbitrageTypes";
 import { randomUUID } from "node:crypto";
-import { CredentialStoreError, discoverAutomationUsersWithExposure } from "./RwaAutomationPersistentStore";
+import {
+  CredentialStoreError,
+  discoverAutomationUsersWithExposure,
+  rwaAutomationUserDomain,
+} from "./RwaAutomationPersistentStore";
 import {
   RwaAutomationConnectorRegistry,
   RwaAutomationRegistryError,
@@ -27,6 +31,18 @@ import {
   type RwaAutomationGovernedOperation,
 } from "./RwaAutomationGovernance";
 import { CredentialKeyProviderError } from "./CredentialKeyProvider";
+import {
+  assertAccountAssetAuthorizationPreview,
+  RWA_ASSET_AUTHORIZATION_PREVIEW_TTL_MS,
+  RwaAccountAssetAuthorizationError,
+  validateAccountAssetAuthorizationPreview,
+  type RwaAccountAssetAuthorizationPreview,
+} from "./RwaAccountAssetAuthorization";
+import {
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+  RwaAutomationAssetProfileError,
+} from "./RwaAutomationAssetProfile";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -36,6 +52,27 @@ export class RwaAutomationControlService {
     notionalUsd: number | null;
     expiresAt: number;
   }>();
+  private readonly assetAuthorizationPreviews = new Map<string, {
+    userId: string;
+    userDomain: string;
+    sessionDomain: string;
+    venue: Extract<RwaAutomationVenue, "binance" | "bybit">;
+    accountId: string;
+    accountFingerprint: string;
+    assetId: string;
+    profileId: string;
+    policyVersion: string;
+    policyDigest: string;
+    stateDigest: string;
+    ordersDigest: string;
+    generatedAt: number;
+    expiresAt: number;
+    requestDigest: string;
+    preview: RwaAccountAssetAuthorizationPreview;
+    intentResolvedAt: number | null;
+    claimed: boolean;
+  }>();
+  private readonly assetAuthorizationPreviewReservations = new Map<string, number>();
   private readonly registries = new Map<string, { registry: RwaAutomationConnectorRegistry; lastUsedAt: number }>();
   private readonly activeRegistryUsers = new Map<string, number>();
   private readonly challengeReservations = new Map<string, number>();
@@ -68,6 +105,8 @@ export class RwaAutomationControlService {
   dispose() {
     for (const entry of this.registries.values()) entry.registry.dispose();
     this.registries.clear();
+    this.assetAuthorizationPreviews.clear();
+    this.assetAuthorizationPreviewReservations.clear();
   }
 
   private registry(userId: string) {
@@ -153,6 +192,7 @@ export class RwaAutomationControlService {
           notionalUsd: null,
         });
         logCredentialPutEvent("step_up_consumed", diagnosticContext);
+        this.invalidateAssetAuthorizationPreviews(userId, connector.venue);
         logCredentialPutEvent("provider_validation_started", diagnosticContext);
         let result;
         try {
@@ -212,7 +252,143 @@ export class RwaAutomationControlService {
         requestDigest: canonicalRequestDigest(sanitized),
         notionalUsd: null,
       });
+      this.invalidateAssetAuthorizationPreviews(userId, connector.venue);
       const result = await connector.deleteCredentials(sanitized);
+      this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
+      return result;
+    });
+  }
+
+  async getAccountAssetAuthorization(
+    userId: string,
+    venue: string,
+    assetId: string,
+    sourceIp = "unknown",
+  ) {
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
+    return this.governed("private_read", sourceIp, userId, connector.venue, accountId, () =>
+      connector.getAccountAssetAuthorization(normalizedAssetId));
+  }
+
+  async previewAccountAssetAuthorization(
+    userId: string,
+    venue: string,
+    assetId: string,
+    input: unknown,
+    sourceIp = "unknown",
+    sessionDomain?: string,
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, []);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    const boundSessionDomain = requiredString(sessionDomain, "sessionDomain", 200);
+    const releaseReservation = this.reserveAssetAuthorizationPreview(userId);
+    try {
+      return await this.governed("private_read", sourceIp, userId, connector.venue, accountId, async () => {
+        const preview = await connector.previewAccountAssetAuthorization(normalizedAssetId);
+        return this.issueAssetAuthorizationPreview({
+          userId,
+          sessionDomain: boundSessionDomain,
+          venue: connector.venue,
+          accountId,
+          assetId: normalizedAssetId,
+          preview,
+        });
+      });
+    } finally {
+      releaseReservation();
+    }
+  }
+
+  async createAccountAssetAuthorization(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["preview", "stepUpToken"]);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    const preview = validateAccountAssetAuthorizationPreview(body.preview);
+    this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    const issuance = this.claimAssetAuthorizationPreview({
+      userId,
+      sessionDomain,
+      venue: connector.venue,
+      accountId,
+      assetId: normalizedAssetId,
+      preview,
+    });
+    try {
+      return await this.governed("risk_control", sourceIp, userId, connector.venue, accountId, async () => {
+        const current = await connector.previewAccountAssetAuthorization(normalizedAssetId);
+        assertAccountAssetAuthorizationPreview({
+          provided: issuance.preview,
+          current,
+          now: this.now(),
+        });
+        await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+          operation: "asset_authorization_create",
+          venue: connector.venue,
+          accountId,
+          resourceId: normalizedAssetId,
+          requestDigest: issuance.requestDigest,
+          notionalUsd: issuance.preview.maxManagedNotionalUsd,
+        });
+        return connector.createAccountAssetAuthorization(normalizedAssetId, issuance.preview);
+      });
+    } finally {
+      this.assetAuthorizationPreviews.delete(preview.previewId);
+    }
+  }
+
+  async revokeAccountAssetAuthorization(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["stepUpToken"]);
+    const normalizedVenue = normalizeVenue(venue);
+    const normalizedAssetId = enabledAssetId(assetId, normalizedVenue);
+    this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    return this.governed("risk_control", sourceIp, userId, connector.venue, accountId, async () => {
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "asset_authorization_revoke",
+        venue: connector.venue,
+        accountId,
+        resourceId: normalizedAssetId,
+        requestDigest: assetAuthorizationRevokeDigest(normalizedAssetId),
+        notionalUsd: null,
+      });
+      const result = await connector.revokeAccountAssetAuthorization(normalizedAssetId);
       this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
       return result;
     });
@@ -592,16 +768,38 @@ export class RwaAutomationControlService {
     });
   }
 
-  async resolveStepUpIntent(userId: string, input: unknown, sourceIp = "unknown"): Promise<StepUpIntent> {
+  async resolveStepUpIntent(
+    userId: string,
+    input: unknown,
+    sourceIp = "unknown",
+    sessionDomain?: string,
+  ): Promise<StepUpIntent> {
     const body = record(input);
-    assertOnlyKeys(body, ["operation", "venue", "accountId", "resourceId", "requestDigest"]);
+    assertOnlyKeys(body, [
+      "operation",
+      "venue",
+      "accountId",
+      "resourceId",
+      "requestDigest",
+      "authorizationPreview",
+    ]);
     const operation = normalizeStepUpOperation(body.operation);
     const venue = normalizeVenue(requiredString(body.venue, "venue", 20));
     this.admitRequest("private_read", sourceIp, userId, venue);
     const connector = this.registry(userId).requireImplemented(venue);
     const configuredAccountId = await connector.getConfiguredAccountId();
     return this.governed("private_read", sourceIp, userId, venue, configuredAccountId ?? "unconfigured", async () => {
-      const accountId = requiredString(body.accountId, "accountId", 100);
+      const authorizationOperation = operation === "asset_authorization_create"
+        || operation === "asset_authorization_revoke";
+      if (authorizationOperation && body.accountId !== undefined) {
+        throw new RwaAutomationControlError(400, "invalid_request", "资产授权操作不接受客户端账户标识。");
+      }
+      const accountId = authorizationOperation
+        ? configuredAccountId
+        : requiredString(body.accountId, "accountId", 100);
+      if (!accountId) {
+        throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+      }
       if (operation === "credential_put") {
         const expected = configuredAccountId ?? "new-account";
         if (accountId !== expected) throw new RwaAutomationControlError(409, "account_mismatch", "二次验证账户意图与当前绑定状态不匹配。");
@@ -613,7 +811,54 @@ export class RwaAutomationControlService {
         ? null
         : requiredString(body.resourceId, "resourceId", 200);
       let notionalUsd: number | null = null;
-      if (operation === "hedge_execute") {
+      if (authorizationOperation) {
+        if (!resourceId) {
+          throw new RwaAutomationControlError(400, "invalid_request", "资产授权操作需要绑定 assetId。");
+        }
+        const assetId = enabledAssetId(resourceId, venue);
+        if (operation === "asset_authorization_create") {
+          const preview = validateAccountAssetAuthorizationPreview(body.authorizationPreview);
+          const issuance = this.requireAssetAuthorizationPreview({
+            userId,
+            sessionDomain: requiredString(sessionDomain, "sessionDomain", 200),
+            venue,
+            accountId,
+            assetId,
+            preview,
+          });
+          const current = await connector.previewAccountAssetAuthorization(assetId);
+          assertAccountAssetAuthorizationPreview({ provided: issuance.preview, current, now: this.now() });
+          if (body.requestDigest !== issuance.requestDigest) {
+            throw new RwaAutomationControlError(
+              409,
+              "request_digest_mismatch",
+              "二次验证请求与当前资产授权预览不匹配。",
+            );
+          }
+          issuance.intentResolvedAt = this.now();
+          notionalUsd = issuance.preview.maxManagedNotionalUsd;
+        } else {
+          if (body.authorizationPreview !== undefined) {
+            throw new RwaAutomationControlError(400, "invalid_request", "撤销资产授权不接受授权预览。");
+          }
+          if (!(await connector.getAccountAssetAuthorization(assetId))) {
+            throw new RwaAccountAssetAuthorizationError(
+              409,
+              "asset_authorization_required",
+              "当前账户资产尚未启用管理授权。",
+            );
+          }
+          if (body.requestDigest !== assetAuthorizationRevokeDigest(assetId)) {
+            throw new RwaAutomationControlError(
+              409,
+              "request_digest_mismatch",
+              "二次验证请求与当前资产授权撤销操作不匹配。",
+            );
+          }
+        }
+      } else if (body.authorizationPreview !== undefined) {
+        throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受资产授权预览。");
+      } else if (operation === "hedge_execute") {
         if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
         this.cleanupChallenges();
         const challenge = this.challengeVenues.get(resourceId);
@@ -636,6 +881,160 @@ export class RwaAutomationControlService {
     }
     const stepUpToken = requiredString(tokenValue, "stepUpToken", 200);
     return this.stepUpSecurity.consume(userId, sessionDomain, stepUpToken, intent);
+  }
+
+  private issueAssetAuthorizationPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    preview: RwaAccountAssetAuthorizationPreview;
+  }) {
+    const preview = validateAccountAssetAuthorizationPreview(input.preview);
+    const profile = requireRwaAutomationExecutionProfile(input.assetId, input.venue);
+    const now = this.now();
+    if (
+      preview.venue !== input.venue
+      || preview.assetId !== profile.asset.assetId
+      || preview.profileId !== rwaAutomationProfileId(profile)
+      || preview.policyVersion !== profile.asset.authorizationPolicy.version
+      || preview.policyDigest !== profile.asset.authorizationPolicy.digest
+      || preview.generatedAt > now
+      || preview.expiresAt <= now
+      || preview.expiresAt !== preview.generatedAt + RWA_ASSET_AUTHORIZATION_PREVIEW_TTL_MS
+      || this.assetAuthorizationPreviews.has(preview.previewId)
+    ) throw invalidIssuedAssetAuthorizationPreview();
+    const requestDigest = assetAuthorizationCreateDigest(profile.asset.assetId, preview);
+    const record = {
+      userId: input.userId,
+      userDomain: rwaAutomationUserDomain(input.userId),
+      sessionDomain: input.sessionDomain,
+      venue: input.venue as Extract<RwaAutomationVenue, "binance" | "bybit">,
+      accountId: input.accountId,
+      accountFingerprint: preview.accountFingerprint,
+      assetId: profile.asset.assetId,
+      profileId: preview.profileId,
+      policyVersion: preview.policyVersion,
+      policyDigest: preview.policyDigest,
+      stateDigest: preview.stateDigest,
+      ordersDigest: preview.ordersDigest,
+      generatedAt: preview.generatedAt,
+      expiresAt: preview.expiresAt,
+      requestDigest,
+      preview: { ...preview },
+      intentResolvedAt: null,
+      claimed: false,
+    };
+    this.assetAuthorizationPreviews.set(preview.previewId, record);
+    return { ...preview };
+  }
+
+  private requireAssetAuthorizationPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    preview: RwaAccountAssetAuthorizationPreview;
+  }) {
+    this.cleanupAssetAuthorizationPreviews();
+    const provided = validateAccountAssetAuthorizationPreview(input.preview);
+    const record = this.assetAuthorizationPreviews.get(provided.previewId);
+    const now = this.now();
+    if (
+      !record
+      || record.claimed
+      || record.userId !== input.userId
+      || record.userDomain !== rwaAutomationUserDomain(input.userId)
+      || record.sessionDomain !== input.sessionDomain
+      || record.venue !== input.venue
+      || record.accountId !== input.accountId
+      || record.accountFingerprint !== provided.accountFingerprint
+      || record.assetId !== input.assetId
+      || record.profileId !== provided.profileId
+      || record.policyVersion !== provided.policyVersion
+      || record.policyDigest !== provided.policyDigest
+      || record.stateDigest !== provided.stateDigest
+      || record.ordersDigest !== provided.ordersDigest
+      || record.generatedAt !== provided.generatedAt
+      || record.expiresAt !== provided.expiresAt
+      || record.expiresAt !== record.generatedAt + RWA_ASSET_AUTHORIZATION_PREVIEW_TTL_MS
+      || record.expiresAt <= now
+      || record.requestDigest !== assetAuthorizationCreateDigest(input.assetId, provided)
+      || canonicalRequestDigest(record.preview) !== canonicalRequestDigest(provided)
+    ) throw invalidIssuedAssetAuthorizationPreview();
+    return record;
+  }
+
+  private claimAssetAuthorizationPreview(input: {
+    userId: string;
+    sessionDomain: string;
+    venue: RwaAutomationVenue;
+    accountId: string;
+    assetId: string;
+    preview: RwaAccountAssetAuthorizationPreview;
+  }) {
+    const record = this.requireAssetAuthorizationPreview(input);
+    if (record.intentResolvedAt === null) throw invalidIssuedAssetAuthorizationPreview();
+    record.claimed = true;
+    return record;
+  }
+
+  private cleanupAssetAuthorizationPreviews() {
+    const now = this.now();
+    for (const [id, preview] of this.assetAuthorizationPreviews) {
+      if (preview.expiresAt <= now) this.assetAuthorizationPreviews.delete(id);
+    }
+  }
+
+  private invalidateAssetAuthorizationPreviews(userId: string, venue: RwaAutomationVenue) {
+    for (const [id, preview] of this.assetAuthorizationPreviews) {
+      if (preview.userId === userId && preview.venue === venue) {
+        this.assetAuthorizationPreviews.delete(id);
+      }
+    }
+  }
+
+  private reserveAssetAuthorizationPreview(userId: string) {
+    this.cleanupChallenges();
+    this.cleanupAssetAuthorizationPreviews();
+    const userPreviewCount = [...this.assetAuthorizationPreviews.values()]
+      .filter((item) => item.userId === userId).length;
+    const userChallengeCount = [...this.challengeVenues.values()]
+      .filter((item) => item.userId === userId).length;
+    const reservedForUser = this.assetAuthorizationPreviewReservations.get(userId) ?? 0;
+    const totalPreviewReserved = [...this.assetAuthorizationPreviewReservations.values()]
+      .reduce((sum, value) => sum + value, 0);
+    const totalChallengeReserved = [...this.challengeReservations.values()]
+      .reduce((sum, value) => sum + value, 0);
+    if (
+      this.assetAuthorizationPreviews.size
+        + this.challengeVenues.size
+        + totalPreviewReserved
+        + totalChallengeReserved
+        + 1 > this.governance.config.maxChallengesGlobal
+      || userPreviewCount
+        + userChallengeCount
+        + reservedForUser
+        + (this.challengeReservations.get(userId) ?? 0)
+        + 1 > this.governance.config.maxChallengesPerUser
+    ) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "账户资产授权预览容量已满；已拒绝继续。",
+      );
+    }
+    this.assetAuthorizationPreviewReservations.set(userId, reservedForUser + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const current = this.assetAuthorizationPreviewReservations.get(userId) ?? 0;
+      if (current <= 1) this.assetAuthorizationPreviewReservations.delete(userId);
+      else this.assetAuthorizationPreviewReservations.set(userId, current - 1);
+    };
   }
 
   private admitRequest(
@@ -670,12 +1069,14 @@ export class RwaAutomationControlService {
   private cleanupRegistries() {
     const cutoff = this.now() - this.governance.config.registryIdleTtlMs;
     this.cleanupChallenges();
+    this.cleanupAssetAuthorizationPreviews();
     for (const [userId, entry] of this.registries) {
       if (
         entry.lastUsedAt > cutoff
         || this.activeRegistryUsers.has(userId)
         || entry.registry.hasActivityMonitor()
         || [...this.challengeVenues.values()].some((challenge) => challenge.userId === userId)
+        || [...this.assetAuthorizationPreviews.values()].some((preview) => preview.userId === userId)
       ) continue;
       entry.registry.dispose();
       this.registries.delete(userId);
@@ -691,12 +1092,26 @@ export class RwaAutomationControlService {
 
   private assertChallengeCapacity(userId: string, pending = 0) {
     this.cleanupChallenges();
+    this.cleanupAssetAuthorizationPreviews();
     const userCount = [...this.challengeVenues.values()].filter((item) => item.userId === userId).length;
+    const userPreviewCount = [...this.assetAuthorizationPreviews.values()]
+      .filter((item) => item.userId === userId).length;
     const reservedForUser = this.challengeReservations.get(userId) ?? 0;
     const totalReserved = [...this.challengeReservations.values()].reduce((sum, value) => sum + value, 0);
+    const previewReservedForUser = this.assetAuthorizationPreviewReservations.get(userId) ?? 0;
+    const totalPreviewReserved = [...this.assetAuthorizationPreviewReservations.values()]
+      .reduce((sum, value) => sum + value, 0);
     if (
-      this.challengeVenues.size + totalReserved + pending > this.governance.config.maxChallengesGlobal
-      || userCount + reservedForUser + pending > this.governance.config.maxChallengesPerUser
+      this.challengeVenues.size
+        + this.assetAuthorizationPreviews.size
+        + totalReserved
+        + totalPreviewReserved
+        + pending > this.governance.config.maxChallengesGlobal
+      || userCount
+        + userPreviewCount
+        + reservedForUser
+        + previewReservedForUser
+        + pending > this.governance.config.maxChallengesPerUser
     ) {
       throw new RwaAutomationGovernanceError(503, "automation_capacity_exceeded", "自动套利 challenge 容量已满；已拒绝新增风险操作。");
     }
@@ -738,6 +1153,7 @@ export function automationErrorResponse(error: unknown) {
     || error instanceof RwaAutomationExecutionLeaseError
     || error instanceof CredentialStoreError
     || error instanceof CredentialKeyProviderError
+    || error instanceof RwaAccountAssetAuthorizationError
   ) {
     return {
       statusCode:
@@ -768,9 +1184,40 @@ function normalizeStepUpOperation(value: unknown): StepUpOperation {
   const allowed: StepUpOperation[] = [
     "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
     "hedge_execute", "position_close", "close_all", "reconciliation_finalize",
+    "asset_authorization_create", "asset_authorization_revoke",
   ];
   if (!allowed.includes(value as StepUpOperation)) throw new RwaAutomationControlError(400, "invalid_request", "operation 不受支持。");
   return value as StepUpOperation;
+}
+
+function enabledAssetId(assetId: string, venue: string) {
+  try {
+    return requireRwaAutomationExecutionProfile(assetId, venue).asset.assetId;
+  } catch (error) {
+    if (error instanceof RwaAutomationAssetProfileError) {
+      throw new RwaAutomationControlError(409, error.category, "该资产尚未开放自动套利授权。");
+    }
+    throw error;
+  }
+}
+
+function assetAuthorizationCreateDigest(
+  assetId: string,
+  preview: ReturnType<typeof validateAccountAssetAuthorizationPreview>,
+) {
+  return canonicalRequestDigest({ assetId, preview });
+}
+
+function assetAuthorizationRevokeDigest(assetId: string) {
+  return canonicalRequestDigest({ assetId });
+}
+
+function invalidIssuedAssetAuthorizationPreview() {
+  return new RwaAccountAssetAuthorizationError(
+    409,
+    "asset_authorization_preview_invalid",
+    "账户资产授权预览不存在、已过期或已使用，请重新获取。",
+  );
 }
 
 function reportNotional(report: unknown) {

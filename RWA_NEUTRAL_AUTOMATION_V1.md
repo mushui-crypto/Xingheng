@@ -22,15 +22,44 @@ XAUT 是当前唯一 `enabled` profile。BTC、ETH、SOL 仅为 `reserved`，用
 执行记录内部追加 `asset`、canonical `profileId` 与 `reservedCapitalUsd`；旧记录缺少这些字段时
 按 state 文件 venue additive migration，旧备份仍可恢复，新状态必须通过 exact schema。
 
-300 USDT 是 XAUT V1 profile 的当前测试阶段配置，不是长期产品常量。提高额度必须修改受控
+2000 USDT 是 XAUT profile 的当前阶段配置；单笔、单资产、单账户和全部自动策略四层当前均为
+2000 USDT，不再另设 25 USDT 的正式单次请求上限。提高额度必须修改受控
 profile、经过代码审查/固定安全验收并由 release revision 留下审计证据，不能由客户端参数、
 运行时 symbol 或交易引擎分支绕过。既有 `maxStrategyCapitalUsd` 只允许在 profile 单资产上限内
 进一步收紧。
 
 新增风险在 preflight 与 provider 写前二次核对四层额度。执行请求先持久化资本预留，再汇总当前
 持久状态；未知资产、profile 错配、状态不可读、资本值非法或旧持仓无法估值时拒绝新增风险。
-退出、减仓、异常补偿和急停不受入场额度阻止。普通/专用账户的资产归属和授权政策尚未最终冻结，
-不得在通用 profile 中默认任何一种口径。
+退出、减仓、异常补偿和急停不受入场额度阻止。
+
+## 0.1 账户资产全量管理授权
+
+当前第二阶段只建立授权，不执行接管、撤单、下单或退出。授权按认证用户、venue、服务端核对的
+account ID/fingerprint、enabled asset 和 canonical profile 隔离；XAUT 是唯一可授权资产，
+BTC/ETH/SOL 继续拒绝。授权前通过私有只读接口重读 XAUT 现货总量、可用/锁定数量、永续方向与
+数量、全部 XAUT 活动订单，生成 120 秒 exact-schema 预览和摘要。公开 SHA 摘要只用于完整性
+核对，不作为发行证明；ControlService 同时保存有界、仅服务端可用的短期 opaque 发行记录，绑定
+用户域、登录会话、venue、服务端 account ID/fingerprint、asset/profile/policy、状态与订单摘要，
+并要求 `expiresAt = generatedAt + 120000`。进程重启、记录缺失、过期、状态变化或已消费均
+fail-closed。
+
+服务端冻结提示明确说明：未来启用资产接管时，系统可能撤销该账户全部 XAUT 活动订单，并买入、
+卖出或平掉该账户全部 XAUT 现货与永续仓位，包括手工买入、转入或手工开仓部分；其他资产不在
+授权范围。本次确认本身不会立即触发上述动作。用户必须用现有 TOTP step-up 对预览 digest 单独
+确认；step-up intent 和最终创建必须核对同一服务端发行记录，最终创建会一次性消费记录。创建授权
+的 token 不能用于撤销，撤销需要新的 TOTP step-up。
+
+授权记录保存 policy version/digest、账户绑定、预览数量、订单摘要、名义金额上界和创建/撤销
+时间，进入原有状态容量门禁和加密灾备。旧状态默认无授权；凭证轮换或删除使授权失效。以下 API
+均为 additive 且返回 `Cache-Control: no-store`，响应不包含 raw account ID 或 provider payload：
+
+- `GET /api/arbitrage/automation/venues/:venue/assets/:assetId/authorization`
+- `POST /api/arbitrage/automation/venues/:venue/assets/:assetId/authorization/preview`
+- `PUT /api/arbitrage/automation/venues/:venue/assets/:assetId/authorization`
+- `DELETE /api/arbitrage/automation/venues/:venue/assets/:assetId/authorization`
+
+本阶段四个操作全部为 provider mutation 0；授权成功不表示资产已接管、自动退出可用或真实资金
+窗口已开放。后续接管行为尚未冻结，本文件不预留其动作语义。
 
 该 profile 层继续复用现有 execution engine、venue clients、KMS/credential、TOTP、kill switch、
 rate limit、lease/idempotency、persistent store、backup/restore 和错误映射，不建立第二套执行
@@ -64,11 +93,12 @@ rate limit、lease/idempotency、persistent store、backup/restore 和错误映�
 
 - 优先使用具有等价现货与永续产品的测试环境；若不存在，明确记录环境缺口。
 - 任何 Mainnet 连通性烟测仍属于真实资金操作；只有用户明确选择 `connectivity_smoke` 才能执行，且不能记录为套利仓位或收益。
-- 建议资金为 25 USDT，仅用于验证最小对冲组合订单、撤单、补齐对冲、平仓和审计闭环。
+- 烟测数量必须按两侧实时价格、数量步长、最小数量和最小名义动态计算共同最小可执行数量；历史
+  `25 USDT / 0.002 XAUT` 仅是一次已完成烟测的事实，不是长期业务常量。
 
 ### Phase D：用户 Mainnet 小额试运行
 
-- 建议先以 50 USDT 运行；V1 总资金硬上限为 300 USDT，不是最低资金要求。
+- 当前四层 profile 上限为 2000 USDT，不是默认投入额，也不表示删除风险上限。
 - 进入 Phase D 前必须再次确认交易所、子账户、标的、API 权限、资金上限、启用窗口、告警和退出方案，并通过固定测试任务的独立安全验收。
 - 默认全局执行开关、策略开关和每个交易所开关均为关闭；服务重启后不得自动提升为 armed。
 
@@ -87,9 +117,9 @@ rate limit、lease/idempotency、persistent store、backup/restore 和错误映�
 | 阶段 | 资金 | 建议分配 |
 | --- | ---: | --- |
 | Shadow/Paper | 0 USDT | 不发送订单，不占用真实资金 |
-| Mainnet 连通性烟测 | 25 USDT | `0.002 XAUT` 现货约 8.3U + 等量永续 1x 保证金约 8.3U + 约 8.4U 备用金 |
+| Mainnet 连通性烟测 | 动态最小值 | 按现货/永续实时共同步长、最小数量、最小名义和价格计算 |
 | 小额试运行 | 50 USDT | `0.005 XAUT` 现货约 20.7U + 等量永续 1x 保证金约 20.7U + 约 8.6U 备用金 |
-| V1 硬上限 | 300 USDT | 不是默认投入额，也不得因余额更高自动扩大 |
+| 当前 profile 四层上限 | 2000 USDT | 不是默认投入额；客户端不能覆盖，用户配置可进一步收紧 |
 
 2026-07-23 的公开规格核对仅作为计划参考：现货最小订单金额 5 USDT；永续 `minOrderQty=0.001 XAUT`、`qtyStep=0.001`、最小名义 5 USDT。按当时约 4,131 USDT/XAUT 估算，等量对冲组合的实际起点约为 `0.002 XAUT`。每次真实下单前必须实时重新读取价格、产品状态、最小数量、数量步长、手续费、保证金和风险限额，静态数值不得直接驱动订单。
 
@@ -111,7 +141,8 @@ rate limit、lease/idempotency、persistent store、backup/restore 和错误映�
 
 ## 6. 下单、部分成交与对冲补齐
 
-- 默认每批名义金额不超过 25 USDT。
+- 正式单次请求没有低于 profile 的固定 25 USDT 上限；当前仍受单笔、单资产、单账户和全局四层
+  2000 USDT 上限及用户 `maxStrategyCapitalUsd` 共同约束。
 - 先以可成交限价/IOC 买入现货，再按现货实际成交数量建立永续空头；不按计划数量盲目补齐永续侧。
 - 现货侧未成交部分立即撤销；只按现货侧已成交数量建立永续侧。
 - 单侧暴露最长 10 秒。永续侧失败时停止新批次、撤销剩余委托，并按风控权限退出现货侧或进入 `manual_intervention`。
@@ -126,7 +157,7 @@ rate limit、lease/idempotency、persistent store、backup/restore 和错误映�
 | 真实执行入场 | 等效净 APR `>= 8%`，入场基差绝对值 `<= 30 bps` |
 | 对冲组合预估总滑点 | `<= 20 bps` |
 | 最大净 Delta | `<= 5 USDT` |
-| 最大单侧暴露 | `<= 10 秒`，单批 `<= 25 USDT` |
+| 最大单侧暴露 | `<= 10 秒`；新增风险金额受四层 profile 与用户收紧配置约束 |
 | Funding 退出 | Funding 方向反转，或等效净 APR 连续两个结算周期低于 `2%` |
 | 基差风险 | 绝对值超过 `80 bps` 时停止加仓并进入退出评估 |
 | 日内最大损失 | `6 USDT` |
@@ -340,7 +371,9 @@ Preflight 请求按入场方式显式选择 mode：
 
 安全判断失败时返回 `409 safety_opportunity_blocked`；自动策略不符合时返回 `409 automation_opportunity_blocked`。对应 adapter 未实现或默认禁用时返回 `501 opportunity_adapter_unavailable`。以上拒绝都发生在私有 provider 调用前。
 
-Bybit 首个 adapter 当前只支持安全可执行的 XAUT 现货多头 + XAUTUSDT 永续空头。真实入场数量固定 `0.002 XAUT`，25 USDT 是现货与永续对冲组合的 1x 名义、手续费、滑点准备金合计总预算，不是每一侧各 25 USDT；V1 venue 资本硬上限为 300 USDT。
+Bybit 首个 adapter 当前只支持安全可执行的 XAUT 现货多头 + XAUTUSDT 永续空头。预检数量按两侧
+实时规则计算共同最小可执行数量，不再把 `0.002 XAUT / 25 USDT` 当作长期执行常量；当前四层
+profile 上限均为 2000 USDT。
 
 Binance 第一阶段只识别 Binance `XAUTUSDT` 同所精确组合。服务端实时读取 Spot/USDM `exchangeInfo`，不得假定 symbol、替换成 PAXG 或其他黄金标的。2026-07-23 owner 实时核对结果为：
 
@@ -353,7 +386,7 @@ Binance 第一阶段只识别 Binance `XAUTUSDT` 同所精确组合。服务端�
 
 - API 权限、UTA 专用子账户、产品 Trading 状态。
 - 数量与价格精度、最小订单、已有冲突仓位。
-- 25 USDT 总预算、300 USDT 资本上限与可用余额。
+- 动态最小可执行预算、2000 USDT 四层 profile 上限、用户收紧配置与可用余额。
 - 强平距离、数据新鲜度和下单滑点边界。
 
 `arbitrage_entry` 还会硬性要求 Funding `>0`、净 APR `>=8%`、基差不超限。`manual_entry` 将 Funding 不利、净 APR 不足和基差超过自动门槛转为必须展示和确认的 warning，不把它们伪装成系统推荐，也不放宽上述安全校验。
@@ -371,9 +404,10 @@ Bybit 或 Binance preflight 通过后返回 60 秒一次性 `challengeId/challen
 
 Challenge 报告显式绑定 `arbitrage_entry` 或 `manual_entry`。执行前按 challenge 中的原 mode 再次实时 preflight；旧 challenge 若没有 mode，保守按严格自动模式处理。随后先固定永续 1x。现货侧使用带滑点边界的 IOC，按现货实际成交量建立永续侧；部分成交最多补齐永续侧两次，剩余现货立即退出。交易所 create-order 只视为异步接收，必须再查订单或成交的权威状态。幂等记录在任何 provider 写入前原子持久化；重启后 challenge 自动 disarm，未完成执行按策略 client order ID 从 provider 权威订单/成交恢复并撤单退出。
 
-Binance preflight 会重读机会与私有账户，分别核对现货/期货可用 USDT、读取/现货/Futures 交易权限、提现关闭、one-way 持仓模式、产品状态、数量/价格精度、最小名义、活动订单、已有 XAUT 敞口、公开盘口深度、stale、Funding、基差、净 APR、25 USDT 总预算和 300 USDT venue 硬上限。检查失败返回 `409 preflight_rejected`；全部通过才签发 60 秒一次性 challenge。Execute 会再次执行实时 preflight，设置 USD-M Futures 1x 杠杆，并只允许固定 `XAUTUSDT` 的现货侧 IOC Limit Buy 与永续侧 IOC Limit Sell。现货侧实际成交后才按成交数量建立永续侧；永续侧失败、订单状态超时或对冲未完成时，系统只撤销带本策略 client order ID 前缀的活动订单，并尝试补齐对冲或退出本策略仓位。两次退出仍无法闭环时进入 `manual_intervention` 并激活该用户的 Binance kill switch。
+Binance preflight 会重读机会与私有账户，分别核对现货/期货可用 USDT、读取/现货/Futures 交易权限、提现关闭、one-way 持仓模式、产品状态、数量/价格精度、最小名义、活动订单、已有 XAUT 敞口、公开盘口深度、stale、Funding、基差、净 APR、动态最小共同数量和 2000 USDT 四层 profile 上限。检查失败返回 `409 preflight_rejected`；全部通过才签发 60 秒一次性 challenge。Execute 会再次执行实时 preflight，设置 USD-M Futures 1x 杠杆，并只允许固定 `XAUTUSDT` 的现货侧 IOC Limit Buy 与永续侧 IOC Limit Sell。现货侧实际成交后才按成交数量建立永续侧；永续侧失败、订单状态超时或对冲未完成时，系统只撤销带本策略 client order ID 前缀的活动订单，并尝试补齐对冲或退出本策略仓位。两次退出仍无法闭环时进入 `manual_intervention` 并激活该用户的 Binance kill switch。
 
-25U `connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。
+`connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，
+不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。未来烟测预算按动态最小共同数量计算。
 
 ### 持仓、PnL 与退出
 

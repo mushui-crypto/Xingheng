@@ -10,6 +10,7 @@ import {
 } from "./RwaAutomationPersistentStore";
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
 import {
+  assertRwaAutomationInstrumentRules,
   assertRwaAutomationNewRisk,
   calculateRwaAutomationNewRiskUsage,
   mergeRwaAutomationCapitalExposures,
@@ -17,6 +18,16 @@ import {
   rwaAutomationProfileId,
   type RwaAutomationCapitalExposure,
 } from "./RwaAutomationAssetProfile";
+import {
+  assertAccountAssetAuthorizationPreview,
+  createAccountAssetAuthorization as createStoredAccountAssetAuthorization,
+  createAccountAssetAuthorizationPreview,
+  invalidateAccountAssetAuthorizations,
+  publicAccountAssetAuthorization,
+  RwaAccountAssetAuthorizationError,
+  validateAccountAssetAuthorizationPreview,
+  type RwaAccountAssetAuthorizationPreview,
+} from "./RwaAccountAssetAuthorization";
 import {
   RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
   RWA_BINANCE_STRATEGY_ID,
@@ -54,6 +65,7 @@ import {
   recordStrategyProviderOrder,
   RWA_ACTIVITY_POLL_INTERVAL_MS,
 } from "./RwaProviderActivityContinuity";
+import { calculateMinimumCommonBaseQuantity } from "./RwaAutomationMinimumOrder";
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
@@ -323,6 +335,96 @@ export class RwaBinanceAutomationService {
     return this.store.assertRiskCapacity();
   }
 
+  async getAccountAssetAuthorization(assetId: string) {
+    const profile = requireRwaAutomationExecutionProfile(assetId, "binance");
+    const metadata = await this.store.readCredentialMetadata();
+    if (!metadata) return null;
+    const state = await this.store.readState();
+    const active = state.assetAuthorizations.filter((authorization) =>
+      authorization.assetId === profile.asset.assetId
+      && authorization.profileId === rwaAutomationProfileId(profile)
+      && authorization.revokedAt === null);
+    if (active.length > 1) throw invalidAccountAssetAuthorization();
+    const authorization = active[0];
+    if (!authorization) return null;
+    if (
+      authorization.accountId !== metadata.accountId
+      || authorization.accountFingerprint !== metadata.accountFingerprint
+    ) throw invalidAccountAssetAuthorization();
+    return publicAccountAssetAuthorization(authorization);
+  }
+
+  async previewAccountAssetAuthorization(assetId: string) {
+    return this.withLock(async () => {
+      const profile = requireRwaAutomationExecutionProfile(assetId, "binance");
+      const metadata = await this.requireMetadata();
+      return this.buildAccountAssetAuthorizationPreview(profile, metadata);
+    });
+  }
+
+  async createAccountAssetAuthorization(
+    assetId: string,
+    providedPreview: RwaAccountAssetAuthorizationPreview,
+  ) {
+    return this.withLock(async () => {
+      this.assertExecutionLeaseHeld();
+      const profile = requireRwaAutomationExecutionProfile(assetId, "binance");
+      const metadata = await this.requireMetadata();
+      const provided = validateAccountAssetAuthorizationPreview(providedPreview);
+      const current = await this.buildAccountAssetAuthorizationPreview(profile, metadata);
+      assertAccountAssetAuthorizationPreview({ provided, current, now: this.now() });
+      const state = await this.store.readState();
+      if (state.assetAuthorizations.some((authorization) =>
+        authorization.assetId === profile.asset.assetId
+        && authorization.accountId === metadata.accountId
+        && authorization.revokedAt === null)) {
+        throw new RwaAccountAssetAuthorizationError(
+          409,
+          "asset_authorization_invalid",
+          "该账户资产授权已启用；如需重新确认，请先撤销现有授权。",
+        );
+      }
+      const latestMetadata = await this.requireMetadata();
+      if (
+        latestMetadata.accountId !== metadata.accountId
+        || latestMetadata.accountFingerprint !== metadata.accountFingerprint
+        || latestMetadata.updatedAt !== metadata.updatedAt
+      ) throw invalidAccountAssetAuthorization();
+      const authorization = createStoredAccountAssetAuthorization({
+        userDomain: this.store.userDomain,
+        venue: "binance",
+        accountId: metadata.accountId,
+        accountFingerprint: metadata.accountFingerprint,
+        assetId: profile.asset.assetId,
+        preview: provided,
+        now: this.now(),
+      });
+      state.assetAuthorizations.push(authorization);
+      await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
+      return publicAccountAssetAuthorization(authorization);
+    });
+  }
+
+  async revokeAccountAssetAuthorization(assetId: string) {
+    return this.withLock(async () => {
+      this.assertExecutionLeaseHeld();
+      const profile = requireRwaAutomationExecutionProfile(assetId, "binance");
+      const metadata = await this.requireMetadata();
+      const state = await this.store.readState();
+      const active = state.assetAuthorizations.filter((authorization) =>
+        authorization.assetId === profile.asset.assetId
+        && authorization.accountId === metadata.accountId
+        && authorization.accountFingerprint === metadata.accountFingerprint
+        && authorization.revokedAt === null);
+      if (active.length !== 1) throw invalidAccountAssetAuthorization();
+      active[0]!.revokedAt = this.now();
+      await this.store.writeState(state);
+      this.assertExecutionLeaseHeld();
+      return publicAccountAssetAuthorization(active[0]!);
+    });
+  }
+
   captureCredentialMutationSnapshot() {
     return this.store.captureCredentialMutationSnapshot();
   }
@@ -364,6 +466,7 @@ export class RwaBinanceAutomationService {
         throw credentialStoreExecutionError(error);
       });
       const state = await this.store.readState();
+      if (previous) invalidateAccountAssetAuthorizations(state.assetAuthorizations, verifiedAt);
       state.credentialLifecycle = "active";
       state.credentialAlert = null;
       state.config = {
@@ -443,6 +546,7 @@ export class RwaBinanceAutomationService {
     state.challenges = [];
     state.credentialLifecycle = "unconfigured";
     state.credentialAlert = null;
+    invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
     await this.store.writeState(state);
     await this.store.deleteCredentials();
     this.armedChallengeIds.clear();
@@ -482,7 +586,7 @@ export class RwaBinanceAutomationService {
       next,
       body,
       "maxStrategyCapitalUsd",
-      XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!.maxOrderNotionalUsd,
+      1,
       XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!.maxAssetCapitalUsd,
     );
     assignRange(next, body, "maxEntryBasisBps", 0, 80);
@@ -940,6 +1044,34 @@ export class RwaBinanceAutomationService {
     }
   }
 
+  private async buildAccountAssetAuthorizationPreview(
+    profile: typeof XAUT_BINANCE_PROFILE,
+    metadata: BinanceCredentialMetadata,
+  ) {
+    const client = await this.client();
+    if (!client.listAssetOpenOrders) {
+      throw new RwaAccountAssetAuthorizationError(
+        503,
+        "asset_authorization_preview_invalid",
+        "交易所活动订单只读接口不可用，无法生成资产授权预览。",
+      );
+    }
+    const [snapshot, orders] = await Promise.all([
+      client.readPreflightSnapshot(),
+      client.listAssetOpenOrders(),
+    ]);
+    if (
+      snapshot.accountId !== metadata.accountId
+      || snapshot.accountFingerprint !== metadata.accountFingerprint
+    ) throw invalidAccountAssetAuthorization();
+    return createAccountAssetAuthorizationPreview({
+      profile,
+      snapshot,
+      orders,
+      now: this.now(),
+    });
+  }
+
   private async clientForNewRisk(state: RwaAutomationStateData, metadata: BinanceCredentialMetadata) {
     try {
       return await this.client();
@@ -1267,11 +1399,10 @@ function buildBinancePreflight(
   message: string;
 } {
   const limits = XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!;
-  const commonStep = Math.max(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep);
-  const budgetQuantity = commonStep > 0
-    ? floorStep(limits.maxOrderNotionalUsd * 0.95 / (snapshot.spot.ask + snapshot.perpetual.bid), commonStep)
-    : 0;
-  const quantityXaut = budgetQuantity;
+  const quantityXaut = calculateMinimumCommonBaseQuantity({
+    spot: snapshot.spot,
+    perpetual: snapshot.perpetual,
+  }).quantity;
   const spotNotional = quantityXaut * snapshot.spot.ask;
   const perpetualNotional = quantityXaut * snapshot.perpetual.bid;
   const feesUsd = (spotNotional * snapshot.fees.spotTakerBps + perpetualNotional * snapshot.fees.perpetualTakerBps) / 10_000;
@@ -1299,6 +1430,8 @@ function buildBinancePreflight(
     check("position_mode", snapshot.permissions.positionModeSupported, true, "当前只接受 one-way 持仓模式；hedge mode 暂不放行。"),
     check("spot_trading", snapshot.spot.status === "Trading", "Trading", "XAUTUSDT 现货必须为 TRADING。"),
     check("perpetual_trading", snapshot.perpetual.status === "Trading", "Trading", "XAUTUSDT USD-M 永续必须为 TRADING。"),
+    check("spot_profile_rules", instrumentRulesMatch(XAUT_BINANCE_PROFILE, "spot", snapshot.spot), true, "现货精度与最小量必须匹配服务端冻结 profile。"),
+    check("perpetual_profile_rules", instrumentRulesMatch(XAUT_BINANCE_PROFILE, "perpetual", snapshot.perpetual), true, "永续精度与最小量必须匹配服务端冻结 profile。"),
     check("quotes", snapshot.spot.bid > 0 && snapshot.spot.ask > 0 && snapshot.perpetual.bid > 0 && snapshot.perpetual.ask > 0, true, "现货侧与永续侧 Bid/Ask 必须完整。"),
     check("precision", quantityXaut > 0 && stepAligned(quantityXaut, snapshot.spot.qtyStep) && stepAligned(quantityXaut, snapshot.perpetual.qtyStep), true, "数量必须同时匹配现货和永续步长。"),
     check("spot_minimum", quantityXaut >= snapshot.spot.minOrderQty && spotNotional >= snapshot.spot.minNotionalUsd, true, "现货数量和名义必须达到实时最小值。"),
@@ -1345,7 +1478,7 @@ function buildBinancePreflight(
     mode,
     productAvailability: snapshot.productAvailability,
     quantityXaut,
-    totalBudgetUsd: limits.maxOrderNotionalUsd,
+    totalBudgetUsd: capitalRequired,
     estimatedSpotNotionalUsd: spotNotional,
     estimatedPerpetualNotionalUsd: perpetualNotional,
     estimatedCapitalRequiredUsd: capitalRequired,
@@ -1364,6 +1497,19 @@ function buildBinancePreflight(
       ? "市场与账户检查通过，可签发一次性执行 challenge。"
       : "市场或账户检查未通过，禁止建立对冲组合。",
   };
+}
+
+function instrumentRulesMatch(
+  profile: typeof XAUT_BINANCE_PROFILE,
+  category: "spot" | "perpetual",
+  instrument: RwaBinancePreflightSnapshot["spot"] | RwaBinancePreflightSnapshot["perpetual"],
+) {
+  try {
+    assertRwaAutomationInstrumentRules(profile, category, instrument);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function assertSupportedOpportunity(opportunity: ArbitrageOpportunity, mode: RwaAutomationMode) {
@@ -1399,6 +1545,14 @@ function publicConfig(userId: string, config: RwaExecutionConfig, accountId: str
     automaticExecutionEnabled: false,
     armed: false,
   };
+}
+
+function invalidAccountAssetAuthorization() {
+  return new RwaAccountAssetAuthorizationError(
+    409,
+    "asset_authorization_invalid",
+    "账户资产授权与当前交易账户绑定不一致；已保持 fail-closed。",
+  );
 }
 
 function assertPermissions(value: RwaBinancePermissions) {

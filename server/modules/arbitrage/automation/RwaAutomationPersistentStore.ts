@@ -39,6 +39,11 @@ import {
   rwaAutomationProfileId,
   type RwaAutomationCapitalExposure,
 } from "./RwaAutomationAssetProfile";
+import {
+  RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE,
+  validateAccountAssetAuthorization,
+  type RwaAccountAssetAuthorization,
+} from "./RwaAccountAssetAuthorization";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -110,6 +115,7 @@ type StoredChallenge = {
 type AutomationState = {
   version: 1;
   config: RwaExecutionConfig;
+  assetAuthorizations: RwaAccountAssetAuthorization[];
   challenges: StoredChallenge[];
   executions: RwaExecutionRecord[];
   pnlSeries: RwaStrategyPnlSnapshot[];
@@ -128,6 +134,7 @@ type AutomationState = {
 const emptyState = (): AutomationState => ({
   version: 1,
   config: { ...defaultRwaExecutionConfig },
+  assetAuthorizations: [],
   challenges: [],
   executions: [],
   pnlSeries: [],
@@ -161,7 +168,7 @@ export class RwaAutomationPersistentStore<
     if (!options.userId.trim()) throw new Error("RWA automation store requires authenticated user ownership.");
     this.ownerUserId = options.userId;
     this.venue = options.venue ?? "bybit";
-    this.userDomain = createHash("sha256").update(`rwa-user:${this.ownerUserId}`).digest("hex").slice(0, 16);
+    this.userDomain = rwaAutomationUserDomain(this.ownerUserId);
     const dataDir = resolveRwaAutomationActiveDataDir();
     this.credentialPath = options.credentialPath
       ? resolve(options.credentialPath)
@@ -394,6 +401,12 @@ export class RwaAutomationPersistentStore<
         ...emptyState(),
         ...parsed,
         config: { ...defaultRwaExecutionConfig, ...(parsed.config ?? {}) },
+        assetAuthorizations: Array.isArray(parsed.assetAuthorizations)
+          ? parsed.assetAuthorizations.map((authorization) =>
+            validateAccountAssetAuthorizationForStore(authorization, this.userDomain, this.venue))
+          : parsed.assetAuthorizations === undefined
+            ? []
+            : (() => { throw invalidRiskState(); })(),
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
         executions: Array.isArray(parsed.executions)
           ? parsed.executions.map((execution) => normalizeExecutionRecord(execution, this.venue))
@@ -419,6 +432,16 @@ export class RwaAutomationPersistentStore<
   }
 
   async writeState(state: AutomationState) {
+    if (state.assetAuthorizations.length > RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "automation_capacity_exceeded",
+        "账户资产授权状态超过安全容量上限；已拒绝继续。",
+      );
+    }
+    for (const authorization of state.assetAuthorizations) {
+      validateAccountAssetAuthorizationForStore(authorization, this.userDomain, this.venue);
+    }
     for (const execution of state.executions) {
       assertProfiledExecutionFields(execution, this.venue);
     }
@@ -788,6 +811,20 @@ function invalidRiskState() {
     "automation_risk_state_invalid",
     "自动套利持久风险状态的资产 profile 字段无效；已拒绝新增风险。",
   );
+}
+
+export function rwaAutomationUserDomain(userId: string) {
+  return createHash("sha256").update(`rwa-user:${userId}`).digest("hex").slice(0, 16);
+}
+
+function validateAccountAssetAuthorizationForStore(
+  value: unknown,
+  userDomain: string,
+  venue: "bybit" | "bitget" | "binance" | "okx",
+) {
+  const authorization = validateAccountAssetAuthorization(value);
+  if (authorization.userDomain !== userDomain || authorization.venue !== venue) throw invalidRiskState();
+  return authorization;
 }
 
 export async function readRwaAutomationCapitalExposures() {

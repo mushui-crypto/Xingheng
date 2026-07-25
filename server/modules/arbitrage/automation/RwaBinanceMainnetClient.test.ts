@@ -583,7 +583,15 @@ function executionFetch(calls: Array<{ path: string; method: string; params: URL
 }
 
 function orderRow(orderId: number, clientOrderId: string, status = "NEW") {
-  return { orderId, clientOrderId, status, origQty: "0.002", executedQty: status === "FILLED" ? "0.002" : "0", updateTime: 1_000 };
+  return {
+    orderId,
+    clientOrderId,
+    symbol: "XAUTUSDT",
+    status,
+    origQty: "0.002",
+    executedQty: status === "FILLED" ? "0.002" : "0",
+    updateTime: 1_000,
+  };
 }
 
 function fixtureFetch(options: {

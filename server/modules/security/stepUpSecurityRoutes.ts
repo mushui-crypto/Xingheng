@@ -4,6 +4,7 @@ import {
   type RwaAutomationControlService,
 } from "../arbitrage/automation/RwaAutomationControlService";
 import { RwaAutomationGovernanceError } from "../arbitrage/automation/RwaAutomationGovernance";
+import { RwaAccountAssetAuthorizationError } from "../arbitrage/automation/RwaAccountAssetAuthorization";
 import {
   StepUpSecurityError,
   type FactorInput,
@@ -31,6 +32,10 @@ export function registerStepUpSecurityRoutes(
         return;
       }
       if (error instanceof RwaAutomationControlError) {
+        response.status(error.statusCode).json({ category: error.category, message: error.message });
+        return;
+      }
+      if (error instanceof RwaAccountAssetAuthorizationError) {
         response.status(error.statusCode).json({ category: error.category, message: error.message });
         return;
       }
@@ -64,7 +69,12 @@ export function registerStepUpSecurityRoutes(
 
   app.post("/api/auth/security/step-up/authorize", route(async (request) => {
     const body = strictRecord(request.body, ["code", "intent"]);
-    const intent = await automation.resolveStepUpIntent(userId(request), body.intent, sourceIp(request));
+    const intent = await automation.resolveStepUpIntent(
+      userId(request),
+      body.intent,
+      sourceIp(request),
+      sessionDomain(request),
+    );
     return security.authorize(
       userId(request),
       sessionDomain(request),

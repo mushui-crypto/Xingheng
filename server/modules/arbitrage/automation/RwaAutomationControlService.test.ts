@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,12 +16,22 @@ import { RwaBinanceAutomationConnector } from "./RwaBinanceAutomationConnector";
 import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
+import type { RwaProviderPreflightSnapshot } from "./RwaNeutralExecutionTypes";
 import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
 import {
   RwaAutomationGovernance,
   RwaAutomationGovernanceError,
   loadRwaAutomationGovernanceConfig,
 } from "./RwaAutomationGovernance";
+import {
+  createAccountAssetAuthorization,
+  createAccountAssetAuthorizationPreview,
+  publicAccountAssetAuthorization,
+  RwaAccountAssetAuthorizationError,
+  type RwaAccountAssetAuthorizationPreview,
+  type RwaPublicAccountAssetAuthorization,
+} from "./RwaAccountAssetAuthorization";
+import { requireRwaAutomationExecutionProfile } from "./RwaAutomationAssetProfile";
 
 const sessionDomain = "session-domain-a";
 const stepUpToken = "step-up-token-a";
@@ -629,8 +640,659 @@ test("request admission rejects before recreating an idle registry or reading ac
   assert.equal(initializeCalls, 1);
 });
 
+test("asset authorization create admission rejects before registry metadata or preview claim", async () => {
+  let now = 1_800_000_000_001;
+  let registryCreations = 0;
+  let accountMetadataReads = 0;
+  let authorizationCreates = 0;
+  const sourceIp = "203.0.113.20";
+  const preview = controlAuthorizationPreview();
+  const authorization = publicAccountAssetAuthorization(createAccountAssetAuthorization({
+    userDomain: "0123456789abcdef",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    accountFingerprint: preview.accountFingerprint,
+    assetId: "xaut",
+    preview,
+    now,
+  }));
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    authorizationPreview: preview,
+    authorization,
+    onAccountMetadata: () => { accountMetadataReads += 1; },
+    onAuthorizationCreate: () => { authorizationCreates += 1; },
+  });
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    riskControlMax: 1,
+    riskControlWindowMs: 10,
+  }, () => now);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([connector]);
+    },
+    passThroughStepUp,
+    governance,
+    () => now,
+  );
+  const issued = await service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    sourceIp,
+    sessionDomain,
+  );
+  await service.resolveStepUpIntent("user-a", {
+    operation: "asset_authorization_create",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: canonicalRequestDigest({ assetId: "xaut", preview: issued }),
+    authorizationPreview: issued,
+  }, sourceIp, sessionDomain);
+  const registryBaseline = registryCreations;
+  const metadataBaseline = accountMetadataReads;
+  governance.admitRequest({
+    operation: "risk_control",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+
+  await assert.rejects(
+    service.createAccountAssetAuthorization(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: issued, stepUpToken },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, registryBaseline);
+  assert.equal(accountMetadataReads, metadataBaseline);
+  assert.equal(authorizationCreates, 0);
+
+  now += 11;
+  const created = await service.createAccountAssetAuthorization(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: issued, stepUpToken },
+    sourceIp,
+  );
+  assert.equal(created.authorizationId, authorization.authorizationId);
+  assert.equal(authorizationCreates, 1, "the rejected admission must leave the issued preview reusable");
+});
+
+test("asset authorization revoke admission rejects before registry metadata or connector work", async () => {
+  let now = 1_800_000_000_001;
+  let registryCreations = 0;
+  let accountMetadataReads = 0;
+  let authorizationRevokes = 0;
+  const sourceIp = "203.0.113.21";
+  const preview = controlAuthorizationPreview();
+  const authorization = publicAccountAssetAuthorization(createAccountAssetAuthorization({
+    userDomain: "0123456789abcdef",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    accountFingerprint: preview.accountFingerprint,
+    assetId: "xaut",
+    preview,
+    now,
+  }));
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    authorization,
+    onAccountMetadata: () => { accountMetadataReads += 1; },
+    onAuthorizationRevoke: () => { authorizationRevokes += 1; },
+  });
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    riskControlMax: 1,
+    riskControlWindowMs: 10,
+  }, () => now);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([connector]);
+    },
+    passThroughStepUp,
+    governance,
+    () => now,
+  );
+  governance.admitRequest({
+    operation: "risk_control",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+
+  await assert.rejects(
+    service.revokeAccountAssetAuthorization(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { stepUpToken },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, 0);
+  assert.equal(accountMetadataReads, 0);
+  assert.equal(authorizationRevokes, 0);
+});
+
+test("asset authorization step-up is server-account-bound, one-action scoped, and provider-mutation free", async () => {
+  const preview = controlAuthorizationPreview();
+  const authorization = publicAccountAssetAuthorization(createAccountAssetAuthorization({
+    userDomain: "0123456789abcdef",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    accountFingerprint: preview.accountFingerprint,
+    assetId: "xaut",
+    preview,
+    now: preview.generatedAt + 1,
+  }));
+  let created = 0;
+  let revoked = 0;
+  const consumed: any[] = [];
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    authorizationPreview: preview,
+    authorization,
+    onAuthorizationCreate: () => { created += 1; },
+    onAuthorizationRevoke: () => { revoked += 1; },
+  });
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    {
+      ...passThroughStepUp,
+      consume: async (...args: any[]) => { consumed.push(args); },
+    },
+    undefined,
+    () => preview.generatedAt + 1,
+  );
+  const issuedPreview = await service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.10",
+    sessionDomain,
+  );
+  const createDigest = canonicalRequestDigest({ assetId: "xaut", preview: issuedPreview });
+  const createIntent = await service.resolveStepUpIntent("user-a", {
+    operation: "asset_authorization_create",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: createDigest,
+    authorizationPreview: issuedPreview,
+  }, "203.0.113.10", sessionDomain);
+  assert.deepEqual(createIntent, {
+    operation: "asset_authorization_create",
+    venue: "bybit",
+    accountId: "bybit:test-account",
+    resourceId: "xaut",
+    requestDigest: createDigest,
+    notionalUsd: preview.maxManagedNotionalUsd,
+  });
+  const createdValue = await service.createAccountAssetAuthorization(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { preview: issuedPreview, stepUpToken },
+  );
+  assert.equal(createdValue.authorizationId, authorization.authorizationId);
+  assert.equal(created, 1);
+  assert.equal(consumed[0]?.[3]?.operation, "asset_authorization_create");
+  assert.equal(consumed[0]?.[3]?.accountId, "bybit:test-account");
+  await assert.rejects(
+    service.createAccountAssetAuthorization(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: issuedPreview, stepUpToken: "another-token" },
+    ),
+    (error: unknown) => error instanceof RwaAccountAssetAuthorizationError
+      && error.category === "asset_authorization_preview_invalid",
+  );
+
+  const revokeDigest = canonicalRequestDigest({ assetId: "xaut" });
+  const revokeIntent = await service.resolveStepUpIntent("user-a", {
+    operation: "asset_authorization_revoke",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: revokeDigest,
+  }, "203.0.113.10", sessionDomain);
+  assert.equal(revokeIntent.operation, "asset_authorization_revoke");
+  await service.revokeAccountAssetAuthorization(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    { stepUpToken: "different-one-time-token" },
+  );
+  assert.equal(revoked, 1);
+  assert.equal(consumed[1]?.[3]?.operation, "asset_authorization_revoke");
+
+  await assert.rejects(
+    service.resolveStepUpIntent("user-a", {
+      operation: "asset_authorization_create",
+      venue: "bybit",
+      accountId: "client-supplied-account",
+      resourceId: "xaut",
+      requestDigest: createDigest,
+      authorizationPreview: issuedPreview,
+    }, "203.0.113.10", sessionDomain),
+    (error: unknown) => error instanceof RwaAutomationControlError
+      && error.category === "invalid_request",
+  );
+  await assert.rejects(
+    service.previewAccountAssetAuthorization("user-a", "bybit", "btc", {}),
+    (error: unknown) => error instanceof RwaAutomationControlError
+      && error.category === "asset_profile_disabled",
+  );
+  assert.equal(created, 1);
+  assert.equal(revoked, 1);
+});
+
+test("asset authorization preview rejects recomputed time extension, restart, expiry, and state changes", async () => {
+  let clock = 1_800_000_000_001;
+  let created = 0;
+  const options: Parameters<typeof fakeConnector>[1] = {
+    accountId: "bybit:test-account",
+    authorizationPreview: controlAuthorizationPreview(),
+    onAuthorizationCreate: () => { created += 1; },
+  };
+  const connector = fakeConnector(() => undefined, options);
+  const createService = () => new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => clock,
+  );
+  const service = createService();
+  const issued = await service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.10",
+    sessionDomain,
+  );
+  const forged = recomputePreviewDigest({
+    ...issued,
+    generatedAt: issued.generatedAt + 60 * 60_000,
+    expiresAt: issued.expiresAt + 60 * 60_000,
+  });
+  const forgedDigest = canonicalRequestDigest({ assetId: "xaut", preview: forged });
+  await assert.rejects(
+    service.resolveStepUpIntent("user-a", {
+      operation: "asset_authorization_create",
+      venue: "bybit",
+      resourceId: "xaut",
+      requestDigest: forgedDigest,
+      authorizationPreview: forged,
+    }, "203.0.113.10", sessionDomain),
+    authorizationPreviewInvalid,
+  );
+  await assert.rejects(
+    service.resolveStepUpIntent("user-a", {
+      operation: "asset_authorization_create",
+      venue: "bybit",
+      resourceId: "xaut",
+      requestDigest: canonicalRequestDigest({ assetId: "xaut", preview: issued }),
+      authorizationPreview: issued,
+    }, "203.0.113.10", "other-session"),
+    authorizationPreviewInvalid,
+  );
+
+  const legitimateDigest = canonicalRequestDigest({ assetId: "xaut", preview: issued });
+  await service.resolveStepUpIntent("user-a", {
+    operation: "asset_authorization_create",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: legitimateDigest,
+    authorizationPreview: issued,
+  }, "203.0.113.10", sessionDomain);
+  await assert.rejects(
+    service.createAccountAssetAuthorization(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: forged, stepUpToken },
+    ),
+    authorizationPreviewInvalid,
+  );
+  assert.equal(created, 0);
+
+  await assert.rejects(
+    createService().resolveStepUpIntent("user-a", {
+      operation: "asset_authorization_create",
+      venue: "bybit",
+      resourceId: "xaut",
+      requestDigest: legitimateDigest,
+      authorizationPreview: issued,
+    }, "203.0.113.10", sessionDomain),
+    authorizationPreviewInvalid,
+  );
+
+  const expiringService = createService();
+  options.authorizationPreview = controlAuthorizationPreview();
+  const expiring = await expiringService.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.10",
+    sessionDomain,
+  );
+  clock = expiring.expiresAt;
+  await assert.rejects(
+    expiringService.resolveStepUpIntent("user-a", {
+      operation: "asset_authorization_create",
+      venue: "bybit",
+      resourceId: "xaut",
+      requestDigest: canonicalRequestDigest({ assetId: "xaut", preview: expiring }),
+      authorizationPreview: expiring,
+    }, "203.0.113.10", sessionDomain),
+    authorizationPreviewInvalid,
+  );
+
+  clock = 1_800_000_000_001;
+  options.authorizationPreview = controlAuthorizationPreview();
+  const changedService = createService();
+  const beforeChange = await changedService.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.10",
+    sessionDomain,
+  );
+  await changedService.resolveStepUpIntent("user-a", {
+    operation: "asset_authorization_create",
+    venue: "bybit",
+    resourceId: "xaut",
+    requestDigest: canonicalRequestDigest({ assetId: "xaut", preview: beforeChange }),
+    authorizationPreview: beforeChange,
+  }, "203.0.113.10", sessionDomain);
+  options.authorizationPreview = controlAuthorizationPreview({
+    existingSpotQuantityXaut: 0.2,
+    spotAvailableQuantityXaut: 0.2,
+  });
+  await assert.rejects(
+    changedService.createAccountAssetAuthorization(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      { preview: beforeChange, stepUpToken },
+    ),
+    (error: unknown) => error instanceof RwaAccountAssetAuthorizationError
+      && error.category === "asset_authorization_preview_changed",
+  );
+  assert.equal(created, 0);
+});
+
+test("asset authorization preview uses the bounded shared challenge capacity", async () => {
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    maxChallengesPerUser: 1,
+  });
+  const options: Parameters<typeof fakeConnector>[1] = {
+    accountId: "bybit:test-account",
+    authorizationPreview: controlAuthorizationPreview(),
+  };
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([fakeConnector(() => undefined, options)]),
+    passThroughStepUp,
+    governance,
+    () => 1_800_000_000_001,
+  );
+  await service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.10",
+    sessionDomain,
+  );
+  options.authorizationPreview = controlAuthorizationPreview();
+  await assert.rejects(
+    service.previewAccountAssetAuthorization(
+      "user-a",
+      "bybit",
+      "xaut",
+      {},
+      "203.0.113.10",
+      sessionDomain,
+    ),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_capacity_exceeded",
+  );
+});
+
+test("pending preview atomically blocks challenge capacity and releases it after failure", async () => {
+  const previewGate = deferred<ReturnType<typeof createAccountAssetAuthorizationPreview>>();
+  const previewStarted = deferred<void>();
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    maxChallengesPerUser: 1,
+  });
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    authorizationPreviewFactory: () => {
+      previewStarted.resolve();
+      return previewGate.promise;
+    },
+  });
+  const service = new RwaAutomationControlService(
+    { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    governance,
+    () => 1_800_000_000_001,
+  );
+  const pendingPreview = service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.22",
+    sessionDomain,
+  );
+  await previewStarted.promise;
+  await assert.rejects(
+    service.preflight("user-a", {
+      accountId: "bybit:test-account",
+      opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+      mode: "arbitrage_entry",
+    }, "203.0.113.23"),
+    capacityExceeded,
+  );
+  previewGate.reject(new Error("offline preview failure"));
+  await assert.rejects(pendingPreview, /offline preview failure/);
+
+  await service.preflight("user-a", {
+    accountId: "bybit:test-account",
+    opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+    mode: "arbitrage_entry",
+  }, "203.0.113.23");
+  await assert.rejects(
+    service.previewAccountAssetAuthorization(
+      "user-a",
+      "bybit",
+      "xaut",
+      {},
+      "203.0.113.24",
+      sessionDomain,
+    ),
+    capacityExceeded,
+  );
+});
+
+test("pending challenge atomically blocks preview capacity and releases it after failure", async () => {
+  const challengeGate = deferred<void>();
+  const challengeStarted = deferred<void>();
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    maxChallengesPerUser: 1,
+  });
+  const connector = fakeConnector(async () => {
+    challengeStarted.resolve();
+    return challengeGate.promise;
+  }, {
+    accountId: "bybit:test-account",
+    authorizationPreview: controlAuthorizationPreview(),
+  });
+  const service = new RwaAutomationControlService(
+    { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    governance,
+    () => 1_800_000_000_001,
+  );
+  const pendingChallenge = service.preflight("user-a", {
+    accountId: "bybit:test-account",
+    opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+    mode: "arbitrage_entry",
+  }, "203.0.113.25");
+  await challengeStarted.promise;
+  await assert.rejects(
+    service.previewAccountAssetAuthorization(
+      "user-a",
+      "bybit",
+      "xaut",
+      {},
+      "203.0.113.26",
+      sessionDomain,
+    ),
+    capacityExceeded,
+  );
+  challengeGate.reject(new Error("offline preflight failure"));
+  await assert.rejects(pendingChallenge, /offline preflight failure/);
+
+  await service.previewAccountAssetAuthorization(
+    "user-a",
+    "bybit",
+    "xaut",
+    {},
+    "203.0.113.26",
+    sessionDomain,
+  );
+  await assert.rejects(
+    service.preflight("user-a", {
+      accountId: "bybit:test-account",
+      opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+      mode: "arbitrage_entry",
+    }, "203.0.113.27"),
+    capacityExceeded,
+  );
+});
+
+function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnapshot> = {}) {
+  const generatedAt = 1_800_000_000_000;
+  return createAccountAssetAuthorizationPreview({
+    profile: requireRwaAutomationExecutionProfile("xaut", "bybit"),
+    now: generatedAt,
+    orders: [],
+    snapshot: {
+      accountId: "bybit:test-account",
+      accountFingerprint: "test-account",
+      fetchedAt: generatedAt,
+      accountMode: "uta",
+      permissions: {
+        read: true,
+        spotTrade: true,
+        contractTrade: true,
+        withdraw: false,
+        ipRestricted: true,
+      },
+      availableUsdt: 2_000,
+      existingSpotQuantityXaut: 0.1,
+      spotAvailableQuantityXaut: 0.1,
+      spotLockedQuantityXaut: 0,
+      existingPerpetualQuantityXaut: 0.1,
+      perpetualPositionSide: "short",
+      openSpotOrderCount: 0,
+      openPerpetualOrderCount: 0,
+      spot: {
+        status: "Trading",
+        minOrderQty: 0.00001,
+        qtyStep: 0.00001,
+        minNotionalUsd: 5,
+        priceTick: 0.01,
+        bid: 4_099,
+        ask: 4_100,
+      },
+      perpetual: {
+        status: "Trading",
+        minOrderQty: 0.001,
+        qtyStep: 0.001,
+        minNotionalUsd: 5,
+        priceTick: 0.1,
+        bid: 4_098,
+        ask: 4_099,
+        mark: 4_098.5,
+        fundingRate: 0.0001,
+        fundingIntervalHours: 8,
+        liquidationDistancePercent: null,
+      },
+      fees: { spotTakerBps: 10, perpetualTakerBps: 10 },
+      ...overrides,
+    },
+  });
+}
+
+function recomputePreviewDigest(
+  preview: RwaAccountAssetAuthorizationPreview,
+): RwaAccountAssetAuthorizationPreview {
+  const { previewDigest: _previewDigest, ...payload } = preview;
+  return {
+    ...preview,
+    previewDigest: createHash("sha256").update(JSON.stringify(payload)).digest("hex"),
+  };
+}
+
+function authorizationPreviewInvalid(error: unknown) {
+  return error instanceof RwaAccountAssetAuthorizationError
+    && error.category === "asset_authorization_preview_invalid";
+}
+
+function capacityExceeded(error: unknown) {
+  return error instanceof RwaAutomationGovernanceError
+    && error.category === "automation_capacity_exceeded";
+}
+
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 function fakeConnector(
-  onPreflight: (mode: RwaAutomationMode) => void,
+  onPreflight: (mode: RwaAutomationMode) => void | Promise<void>,
   options: {
     venue?: RwaAutomationVenue;
     providerWritesEnabled?: boolean;
@@ -641,6 +1303,11 @@ function fakeConnector(
     onKillSwitch?: () => void;
     onAccountMetadata?: () => void;
     onInitialize?: () => void;
+    authorizationPreview?: ReturnType<typeof createAccountAssetAuthorizationPreview>;
+    authorizationPreviewFactory?: () => Promise<ReturnType<typeof createAccountAssetAuthorizationPreview>>;
+    authorization?: RwaPublicAccountAssetAuthorization | null;
+    onAuthorizationCreate?: () => void;
+    onAuthorizationRevoke?: () => void;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -674,6 +1341,22 @@ function fakeConnector(
       };
     },
     deleteCredentials: async () => ({}),
+    getAccountAssetAuthorization: async () => options.authorization ?? null,
+    previewAccountAssetAuthorization: async () => {
+      if (options.authorizationPreviewFactory) return options.authorizationPreviewFactory();
+      if (!options.authorizationPreview) throw new Error("asset authorization preview unavailable");
+      return options.authorizationPreview;
+    },
+    createAccountAssetAuthorization: async () => {
+      options.onAuthorizationCreate?.();
+      if (!options.authorization) throw new Error("asset authorization unavailable");
+      return options.authorization;
+    },
+    revokeAccountAssetAuthorization: async () => {
+      options.onAuthorizationRevoke?.();
+      if (!options.authorization) throw new Error("asset authorization unavailable");
+      return { ...options.authorization, revokedAt: 1 };
+    },
     getConfig: async () => ({}),
     updateConfig: async () => { options.onConfig?.(); return {}; },
     setKillSwitch: async () => { options.onKillSwitch?.(); return {}; },
@@ -682,7 +1365,7 @@ function fakeConnector(
     getAudit: async () => ({}),
     getReconciliation: async () => ({ items: [] }),
     preflight: async (_opportunity, _accountId, mode) => {
-      onPreflight(mode);
+      await onPreflight(mode);
       return { challengeId: "challenge", challengeToken: "token", expiresAt: 1, report: { mode } };
     },
     execute: async () => { options.onExecute?.(); return {}; },

@@ -2,13 +2,11 @@ import {
   XAUT_AUTOMATION_ASSET_PROFILE,
   type RwaAutomationBaseAsset,
 } from "./RwaAutomationAssetProfile";
+import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
 export const RWA_PERP_SYMBOL = "XAUTUSDT" as const;
-export const RWA_SMOKE_QUANTITY_XAUT = 0.002;
-export const RWA_SMOKE_TOTAL_BUDGET_USD =
-  XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits!.maxOrderNotionalUsd;
 export const RWA_MAX_STRATEGY_CAPITAL_USD =
   XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits!.maxAssetCapitalUsd;
 
@@ -432,6 +430,7 @@ export type RwaNeutralTradingClient<
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
   cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
   cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
+  listAssetOpenOrders?(): Promise<RwaAssetOrderReference[]>;
   readPositionAttribution(input: {
     strategyOrderPrefix: string;
     strategyOrderPrefixes: string[];

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { RwaAutomationVenue } from "./RwaAutomationTypes";
 import type { RwaProviderActivitySource } from "./RwaNeutralExecutionTypes";
 
@@ -53,6 +54,11 @@ export type RwaAutomationAssetProfile = {
   };
   currentStageRiskLimits: RwaAutomationRiskLimits | null;
   hedgeToleranceBase: number;
+  authorizationPolicy: {
+    version: "account-asset-full-management-v1";
+    notice: string;
+    digest: string;
+  };
   venues: readonly RwaAutomationVenueAssetProfile[];
 };
 
@@ -94,10 +100,10 @@ const ALL_ACTIVITY_SOURCES = [
 ] as const satisfies readonly RwaProviderActivitySource[];
 
 const XAUT_V1_RISK_LIMITS: RwaAutomationRiskLimits = {
-  maxOrderNotionalUsd: 25,
-  maxAssetCapitalUsd: 300,
-  maxAccountCapitalUsd: 300,
-  maxGlobalCapitalUsd: 300,
+  maxOrderNotionalUsd: 2_000,
+  maxAssetCapitalUsd: 2_000,
+  maxAccountCapitalUsd: 2_000,
+  maxGlobalCapitalUsd: 2_000,
 };
 
 const PROFILE_REGISTRY = new Map<RwaAutomationAssetId, RwaAutomationAssetProfile>([
@@ -207,6 +213,12 @@ export function validateRwaAutomationAssetProfile(value: RwaAutomationAssetProfi
     || value.hedge.baseQuantityRatio !== 1
     || value.hedge.residualMode !== "exchange_constraints"
     || !positiveFinite(value.hedgeToleranceBase)
+    || value.authorizationPolicy.version !== "account-asset-full-management-v1"
+    || value.authorizationPolicy.notice !== authorizationNotice(value.baseAsset)
+    || value.authorizationPolicy.digest !== authorizationPolicyDigest(
+      value.authorizationPolicy.version,
+      value.authorizationPolicy.notice,
+    )
     || value.venues.length === 0
   ) throw invalidProfile();
   if (value.executionStatus === "enabled") validateRiskLimits(value.currentStageRiskLimits);
@@ -280,6 +292,14 @@ function profile(
     hedge: { spotSide: "long", perpetualSide: "short", baseQuantityRatio: 1, residualMode: "exchange_constraints" },
     currentStageRiskLimits: executionStatus === "enabled" ? { ...XAUT_V1_RISK_LIMITS } : null,
     hedgeToleranceBase: baseAsset === "XAUT" ? 0.000001 : 0.00000001,
+    authorizationPolicy: {
+      version: "account-asset-full-management-v1",
+      notice: authorizationNotice(baseAsset),
+      digest: authorizationPolicyDigest(
+        "account-asset-full-management-v1",
+        authorizationNotice(baseAsset),
+      ),
+    },
     venues: [venueProfile("binance", baseAsset), venueProfile("bybit", baseAsset)],
   };
 }
@@ -345,6 +365,12 @@ function sumCapital(exposures: readonly RwaAutomationCapitalExposure[]) {
 }
 function invalidProfile() {
   return new RwaAutomationAssetProfileError("asset_profile_invalid", "The automation asset profile is invalid.");
+}
+function authorizationNotice(asset: RwaAutomationBaseAsset) {
+  return `确认后，未来启用资产接管时，系统可能撤销该交易所账户中的全部 ${asset} 活动订单，并买入、卖出或平掉该账户的全部 ${asset} 现货与永续仓位；包括手工买入、转入或手工开仓的 ${asset}。其他资产不在授权范围内。本次确认只建立授权，不会立即下单、撤单或接管。`;
+}
+function authorizationPolicyDigest(version: string, notice: string) {
+  return createHash("sha256").update(JSON.stringify({ version, notice })).digest("hex");
 }
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {

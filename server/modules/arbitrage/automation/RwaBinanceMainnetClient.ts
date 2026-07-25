@@ -273,16 +273,36 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   }
 
   async cancelStrategyOrders(orderLinkPrefix: string) {
-    for (const category of ["spot", "linear"] as const) {
-      const scope = category === "spot" ? "spot" : "futures";
-      const path = category === "spot" ? "/api/v3/openOrders" : "/fapi/v1/openOrders";
-      const orders = list(await this.signedRequest(scope, path, { symbol: RWA_BINANCE_SPOT_SYMBOL })).map(record);
-      for (const order of orders) {
-        if (!String(order.clientOrderId ?? "").startsWith(orderLinkPrefix)) continue;
-        const orderId = String(order.orderId ?? "");
-        if (orderId) await this.cancelOrder(category, orderId);
-      }
+    for (const order of await this.listAssetOpenOrders()) {
+      if (!order.clientOrderId.startsWith(orderLinkPrefix)) continue;
+      await this.cancelOrder(order.category, order.orderId);
     }
+  }
+
+  async listAssetOpenOrders() {
+    const [spot, linear] = await Promise.all([
+      this.signedRequest("spot", "/api/v3/openOrders", { symbol: RWA_BINANCE_SPOT_SYMBOL }),
+      this.signedRequest("futures", "/fapi/v1/openOrders", { symbol: RWA_BINANCE_PERPETUAL_SYMBOL }),
+    ]);
+    return ([
+      ...list(spot).map((value) => ({ category: "spot" as const, value: record(value) })),
+      ...list(linear).map((value) => ({ category: "linear" as const, value: record(value) })),
+    ]).map(({ category, value }) => {
+      const symbol = String(value.symbol ?? "");
+      const orderId = String(value.orderId ?? "");
+      if (
+        !orderId
+        || symbol !== (category === "spot" ? RWA_BINANCE_SPOT_SYMBOL : RWA_BINANCE_PERPETUAL_SYMBOL)
+      ) {
+        throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance XAUT 活动订单结构无效。");
+      }
+      return {
+        category,
+        orderId,
+        clientOrderId: String(value.clientOrderId ?? ""),
+        symbol,
+      };
+    });
   }
 
   async readPositionAttribution(input: {

@@ -46,6 +46,15 @@ export class RwaBybitAutomationConnector implements RwaAutomationConnector {
   }
 
   deleteCredentials(input?: unknown) { return this.service.deleteCredentials(input); }
+  getAccountAssetAuthorization(assetId: string) { return this.service.getAccountAssetAuthorization(assetId); }
+  previewAccountAssetAuthorization(assetId: string) { return this.service.previewAccountAssetAuthorization(assetId); }
+  createAccountAssetAuthorization(
+    assetId: string,
+    preview: Parameters<RwaNeutralExecutionService["createAccountAssetAuthorization"]>[1],
+  ) {
+    return this.service.createAccountAssetAuthorization(assetId, preview);
+  }
+  revokeAccountAssetAuthorization(assetId: string) { return this.service.revokeAccountAssetAuthorization(assetId); }
   getConfig() { return this.service.getConfig(); }
   updateConfig(input: unknown) { return this.service.updateConfig(input); }
   setKillSwitch(active: boolean, accountId?: string) { return this.service.setKillSwitch(active, accountId); }

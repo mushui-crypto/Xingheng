@@ -40,6 +40,7 @@ test("automation user API rejects anonymous and disabled users before handlers",
 
 test("automation user routes derive ownership from auth, are no-store, and sanitize unknown failures", async () => {
   const routes = new Map<string, any>();
+  let authorizationOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
@@ -53,11 +54,15 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
     {
       listVenues: async (userId: string) => [{ venue: "bybit", owner: userId }],
       getReconciliation: async () => ({ items: [] }),
+      getAccountAssetAuthorization: async (userId: string) => {
+        authorizationOwner = userId;
+        return { assetId: "XAUT", accountFingerprint: "fingerprint" };
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 18);
+  assert.equal(automationRoutes.length, 22);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
 
   const okResponse = mockResponse();
@@ -79,6 +84,16 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   }, reconciliationResponse);
   assert.equal(reconciliationResponse.statusCode, 200);
   assert.equal(reconciliationResponse.headers["Cache-Control"], "no-store");
+
+  const authorizationResponse = mockResponse();
+  await routes.get("GET /api/arbitrage/automation/venues/:venue/assets/:assetId/authorization")({
+    user: { id: "user-a" },
+    params: { venue: "bybit", assetId: "XAUT" },
+    body: { userId: "user-b" },
+  }, authorizationResponse);
+  assert.equal(authorizationOwner, "user-a");
+  assert.equal(authorizationResponse.statusCode, 200);
+  assert.equal(authorizationResponse.headers["Cache-Control"], "no-store");
 
   const failedResponse = mockResponse();
   await routes.get("PUT /api/arbitrage/automation/venues/:venue/credentials")({

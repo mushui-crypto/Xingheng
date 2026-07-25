@@ -24,9 +24,56 @@ import {
   RWA_SPOT_ACTIVITY_SOURCES,
   RWA_PERPETUAL_ACTIVITY_SOURCES,
 } from "./RwaProviderActivityContinuity";
+import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
+
+test("Binance asset authorization only reads XAUT state and local authorization persistence", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-asset-authorization-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.setAuthoritativeExposure({
+      spotFreeXaut: 0.2,
+      spotLockedXaut: 0.1,
+      perpetualQuantityXaut: 0.25,
+      openSpotOrderCount: 1,
+      openPerpetualOrderCount: 1,
+    });
+    client.assetOpenOrders = [
+      { category: "spot", orderId: "manual-spot", clientOrderId: "manual-spot", symbol: "XAUTUSDT" },
+      { category: "linear", orderId: "manual-perp", clientOrderId: "manual-perp", symbol: "XAUTUSDT" },
+    ];
+    const writesBefore = client.writeCount;
+    const preview = await harness.current.previewAccountAssetAuthorization("xaut");
+    assert.equal(Math.abs(preview.spotQuantity - 0.3) < 1e-12, true);
+    assert.equal(preview.spotLockedQuantity, 0.1);
+    assert.equal(preview.perpetualQuantity, 0.25);
+    assert.equal(preview.spotOrderCount, 1);
+    assert.equal(preview.perpetualOrderCount, 1);
+
+    const created = await harness.current.createAccountAssetAuthorization("xaut", preview);
+    assert.equal(created.revokedAt, null);
+    assert.equal("accountId" in created, false);
+    assert.equal((await harness.current.getAccountAssetAuthorization("xaut"))?.authorizationId, created.authorizationId);
+    assert.equal(client.writeCount, writesBefore);
+
+    const revoked = await harness.current.revokeAccountAssetAuthorization("xaut");
+    assert.equal(revoked.revokedAt, now);
+    assert.equal(await harness.current.getAccountAssetAuthorization("xaut"), null);
+    assert.equal(client.writeCount, writesBefore);
+
+    const nextPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", nextPreview);
+    await harness.current.putCredentials({ apiKey: "rotated-key", apiSecret: "rotated-secret" });
+    assert.equal(await harness.current.getAccountAssetAuthorization("xaut"), null);
+    assert.equal(client.writeCount, writesBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("Binance credentials remain user-isolated, default disabled, and reject withdrawal permission", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-automation-"));
@@ -202,23 +249,18 @@ test("Binance preflight remains read-only and execute establishes the whiteliste
       current.preflight(opportunity(), accountId!, "manual_entry"),
       (error: unknown) => error instanceof RwaNeutralExecutionError
         && error.category === "preflight_rejected"
-        && (error.details?.report as any).checks.some((item: any) => item.name === "perpetual_minimum" && !item.passed),
+        && (error.details?.report as any).checks.some((item: any) => item.name === "perpetual_profile_rules" && !item.passed),
     );
     client.snapshot.perpetual.minOrderQty = 0.001;
 
     const challenge = await current.preflight(opportunity(), accountId!, "manual_entry");
     assert.equal(client.writeCount, 0);
     assert.equal(challenge.report.providerWritesEnabled, true);
-    assert.equal(challenge.report.totalBudgetUsd, 25);
-    assert.equal(challenge.report.estimatedCapitalRequiredUsd <= challenge.report.totalBudgetUsd, true);
-    assert.equal(
-      challenge.report.estimatedSpotNotionalUsd + challenge.report.estimatedPerpetualNotionalUsd
-        < challenge.report.totalBudgetUsd,
-      true,
-    );
+    assert.equal(challenge.report.totalBudgetUsd, challenge.report.estimatedCapitalRequiredUsd);
+    assert.equal(challenge.report.quantityXaut, 0.002);
     assert.equal(
       challenge.report.checks.some((item) =>
-        item.name === "strategy_cap" && item.limit === 300 && item.passed),
+        item.name === "strategy_cap" && item.limit === 2_000 && item.passed),
       true,
     );
     const execution = await current.execute({
@@ -257,7 +299,7 @@ test("Binance preflight aggregates reserved capital and rejects new risk at the 
       challengeId: "risk-reserved",
       now,
       venue: "binance",
-      reservedCapitalUsd: 290,
+      reservedCapitalUsd: 1_990,
     });
     reserved.state = "manual_intervention";
     state.executions.push(reserved);
@@ -335,7 +377,7 @@ test("Binance execute rechecks aggregate risk before provider writes and clears 
       challengeId: "concurrent-risk",
       now,
       venue: "binance",
-      reservedCapitalUsd: 290,
+      reservedCapitalUsd: 1_990,
     });
     concurrent.state = "manual_intervention";
     state.executions.push(concurrent);
@@ -889,6 +931,7 @@ class FakeBinanceClient implements RwaBinanceClient {
   attributionCoverage: "complete" | "incomplete" = "complete";
   externalPositionActivity = false;
   attributionHook: () => void = () => {};
+  assetOpenOrders: RwaAssetOrderReference[] = [];
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
@@ -979,6 +1022,11 @@ class FakeBinanceClient implements RwaBinanceClient {
   async readProductAvailability() {
     this.readCount += 1;
     return this.snapshot.productAvailability;
+  }
+
+  async listAssetOpenOrders() {
+    this.readCount += 1;
+    return structuredClone(this.assetOpenOrders);
   }
 
   async setPerpetualLeverage() {

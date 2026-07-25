@@ -1,4 +1,8 @@
 import type { ArbitrageOpportunity, ArbitrageVenue } from "../arbitrageTypes";
+import type {
+  RwaAccountAssetAuthorizationPreview,
+  RwaPublicAccountAssetAuthorization,
+} from "./RwaAccountAssetAuthorization";
 import type { RwaVenueAccountIdentity } from "./RwaNeutralExecutionTypes";
 
 export type RwaAutomationVenue = Extract<ArbitrageVenue, "bybit" | "bitget" | "binance" | "okx">;
@@ -63,6 +67,13 @@ export type RwaAutomationConnector = {
   getStatus(): Promise<RwaAutomationVenueStatus>;
   putCredentials(input: RwaVenueCredentialInput): Promise<RwaAutomationVenueStatus>;
   deleteCredentials(input?: unknown): Promise<unknown>;
+  getAccountAssetAuthorization(assetId: string): Promise<RwaPublicAccountAssetAuthorization | null>;
+  previewAccountAssetAuthorization(assetId: string): Promise<RwaAccountAssetAuthorizationPreview>;
+  createAccountAssetAuthorization(
+    assetId: string,
+    preview: RwaAccountAssetAuthorizationPreview,
+  ): Promise<RwaPublicAccountAssetAuthorization>;
+  revokeAccountAssetAuthorization(assetId: string): Promise<RwaPublicAccountAssetAuthorization>;
   getConfig(): Promise<unknown>;
   updateConfig(input: unknown): Promise<unknown>;
   setKillSwitch(active: boolean, accountId?: string): Promise<unknown>;

@@ -19,11 +19,14 @@ test("XAUT is the only enabled profile and V1 limits are layered configuration",
   assert.deepEqual(profiles.map((value) => value.assetId), ["xaut", "btc", "eth", "sol"]);
   assert.deepEqual(profiles.filter((value) => value.executionStatus === "enabled").map((value) => value.assetId), ["xaut"]);
   assert.deepEqual(XAUT_AUTOMATION_ASSET_PROFILE.currentStageRiskLimits, {
-    maxOrderNotionalUsd: 25,
-    maxAssetCapitalUsd: 300,
-    maxAccountCapitalUsd: 300,
-    maxGlobalCapitalUsd: 300,
+    maxOrderNotionalUsd: 2_000,
+    maxAssetCapitalUsd: 2_000,
+    maxAccountCapitalUsd: 2_000,
+    maxGlobalCapitalUsd: 2_000,
   });
+  assert.match(XAUT_AUTOMATION_ASSET_PROFILE.authorizationPolicy.notice, /全部 XAUT/);
+  assert.match(XAUT_AUTOMATION_ASSET_PROFILE.authorizationPolicy.notice, /其他资产不在授权范围/);
+  assert.match(XAUT_AUTOMATION_ASSET_PROFILE.authorizationPolicy.digest, /^[a-f0-9]{64}$/);
 });
 
 test("reserved assets and unknown venue fail closed for execution", () => {
@@ -40,6 +43,7 @@ test("reserved assets and unknown venue fail closed for execution", () => {
 test("profiles are deeply frozen", () => {
   assert.equal(Object.isFrozen(XAUT_AUTOMATION_ASSET_PROFILE), true);
   assert.equal(Object.isFrozen(XAUT_AUTOMATION_ASSET_PROFILE.venues[0]?.spotRules), true);
+  assert.equal(Object.isFrozen(XAUT_AUTOMATION_ASSET_PROFILE.authorizationPolicy), true);
 });
 
 test("profile rejects symbol, contract, activity, precision, and inverted risk limits", () => {
@@ -49,7 +53,8 @@ test("profile rejects symbol, contract, activity, precision, and inverted risk l
     { ...structuredClone(valid), venues: [{ ...structuredClone(valid.venues[0]!), perpetualContract: { kind: "linear" as const, baseQuantityMultiplier: 0 } }] },
     { ...structuredClone(valid), venues: [{ ...structuredClone(valid.venues[0]!), activitySources: [] }] },
     { ...structuredClone(valid), venues: [{ ...structuredClone(valid.venues[0]!), spotRules: { ...structuredClone(valid.venues[0]!.spotRules), contractUnitBase: 0 } }] },
-    { ...structuredClone(valid), currentStageRiskLimits: { maxOrderNotionalUsd: 301, maxAssetCapitalUsd: 300, maxAccountCapitalUsd: 300, maxGlobalCapitalUsd: 300 } },
+    { ...structuredClone(valid), currentStageRiskLimits: { maxOrderNotionalUsd: 2_000.01, maxAssetCapitalUsd: 2_000, maxAccountCapitalUsd: 2_000, maxGlobalCapitalUsd: 2_000 } },
+    { ...structuredClone(valid), authorizationPolicy: { ...structuredClone(valid.authorizationPolicy), notice: `${valid.authorizationPolicy.notice}tampered` } },
   ];
   invalid.forEach((value) => assert.throws(() => validateRwaAutomationAssetProfile(value)));
 });
@@ -73,11 +78,18 @@ test("server profile rejects precision mismatch and each new-risk aggregation ti
     qtyStep: 0.0001, priceTick: 0.01, minOrderQty: 0.00005, minNotionalUsd: 5,
   }));
   const limits = profile.asset.currentStageRiskLimits!;
+  assert.doesNotThrow(() => assertRwaAutomationNewRisk({
+    limits,
+    orderNotionalUsd: 2_000,
+    assetNotionalUsd: 2_000,
+    accountNotionalUsd: 2_000,
+    globalNotionalUsd: 2_000,
+  }));
   for (const values of [
-    [26, 26, 26, 26],
-    [25, 301, 301, 301],
-    [25, 300, 301, 301],
-    [25, 300, 300, 301],
+    [2_000.01, 2_000.01, 2_000.01, 2_000.01],
+    [1, 2_001, 2_001, 2_001],
+    [1, 2_000, 2_001, 2_001],
+    [1, 2_000, 2_000, 2_001],
   ]) {
     assert.throws(() => assertRwaAutomationNewRisk({
       limits,

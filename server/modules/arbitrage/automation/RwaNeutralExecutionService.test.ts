@@ -26,9 +26,69 @@ import {
   RWA_SPOT_ACTIVITY_SOURCES,
   RWA_PERPETUAL_ACTIVITY_SOURCES,
 } from "./RwaProviderActivityContinuity";
+import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 
 const accountId = "bybit:test-account";
 const accountFingerprint = "test-account";
+
+test("Bybit asset authorization preview create revoke and rotation remain provider-mutation free", async () => {
+  const harness = await createHarness();
+  try {
+    harness.client.unrelatedSpotQuantity = 0.3;
+    harness.client.unrelatedPerpetualQuantity = 0.25;
+    harness.client.assetOpenOrders = [
+      { category: "spot", orderId: "manual-spot", clientOrderId: "manual-spot", symbol: "XAUTUSDT" },
+      { category: "linear", orderId: "manual-perp", clientOrderId: "manual-perp", symbol: "XAUTUSDT" },
+    ];
+    harness.client.openSpotOrderCount = 1;
+    harness.client.openPerpetualOrderCount = 1;
+    const writesBefore = providerMutationCount(harness.client);
+    const preview = await harness.service.previewAccountAssetAuthorization("xaut");
+    assert.equal(preview.spotQuantity, 0.3);
+    assert.equal(preview.perpetualQuantity, 0.25);
+    assert.equal(preview.spotOrderCount, 1);
+    assert.equal(preview.perpetualOrderCount, 1);
+    assert.equal("accountId" in preview, false);
+
+    const created = await harness.service.createAccountAssetAuthorization("xaut", preview);
+    assert.equal(created.revokedAt, null);
+    assert.equal("accountId" in created, false);
+    assert.equal((await harness.service.getAccountAssetAuthorization("xaut"))?.authorizationId, created.authorizationId);
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+
+    const revoked = await harness.service.revokeAccountAssetAuthorization("xaut");
+    assert.equal(revoked.revokedAt, harness.now);
+    assert.equal(await harness.service.getAccountAssetAuthorization("xaut"), null);
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+
+    const nextPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+    await harness.service.createAccountAssetAuthorization("xaut", nextPreview);
+    await harness.service.putCredentials({ apiKey: "rotated-api-key-123", apiSecret: "rotated-secret-123" });
+    assert.equal(await harness.service.getAccountAssetAuthorization("xaut"), null);
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+  } finally {
+    await harness.cleanup();
+  }
+});
+
+test("Bybit authorization rejects a preview changed by balance or order activity without provider mutation", async () => {
+  const harness = await createHarness();
+  try {
+    const preview = await harness.service.previewAccountAssetAuthorization("xaut");
+    const writesBefore = providerMutationCount(harness.client);
+    harness.client.unrelatedSpotQuantity = 0.01;
+    await assert.rejects(
+      harness.service.createAccountAssetAuthorization("xaut", preview),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "asset_authorization_preview_changed",
+    );
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+    assert.deepEqual((await harness.store.readState()).assetAuthorizations, []);
+  } finally {
+    await harness.cleanup();
+  }
+});
 
 test("eligible opportunity executes a two-leg hedge once and idempotent retry sends no duplicate orders", async () => {
   const harness = await createHarness();
@@ -996,6 +1056,10 @@ async function seedTrackedHedge(
   await harness.store.writeState(state);
 }
 
+function providerMutationCount(client: FakeBybitClient) {
+  return client.leverageWrites + client.requests.length + client.cancelScopes.length;
+}
+
 async function createHarness(options: {
   fundingRate?: number;
   failSecondLeg?: boolean;
@@ -1075,6 +1139,7 @@ class FakeBybitClient implements RwaBybitTradingClient {
   invalidPositionQuantity = false;
   openSpotOrderCount = 0;
   openPerpetualOrderCount = 0;
+  assetOpenOrders: RwaAssetOrderReference[] = [];
 
   constructor(options: {
     fundingRate?: number;
@@ -1139,6 +1204,10 @@ class FakeBybitClient implements RwaBybitTradingClient {
   async setPerpetualLeverage(_leverage: 1) {
     this.leverageWrites += 1;
     this.mutationHook("leverage");
+  }
+
+  async listAssetOpenOrders() {
+    return structuredClone(this.assetOpenOrders);
   }
 
   async placeOrder(request: RwaProviderOrderRequest) {
