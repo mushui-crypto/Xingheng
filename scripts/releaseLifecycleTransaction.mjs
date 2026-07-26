@@ -124,12 +124,30 @@ export class ReleaseLifecycleTransactionStore {
       sequence: 0,
       updatedAt: now.toISOString(),
       incidentCategory: null,
+      failureStage: null,
+      failureExitCode: null,
     }, this.uid, this.gid, true);
     return intent;
   }
 
-  markIncident(operationId, category, now = new Date()) {
+  markIncident(
+    operationId,
+    category,
+    failureStage = null,
+    failureExitCode = null,
+    now = new Date(),
+  ) {
     if (!INCIDENT.test(category)) throw new Error("release lifecycle incident category is invalid");
+    if (
+      (failureStage === null) !== (failureExitCode === null)
+      || (failureStage !== null && !/^[a-z][a-z0-9_]{0,63}$/u.test(failureStage))
+      || (failureExitCode !== null
+        && (!Number.isSafeInteger(failureExitCode)
+          || failureExitCode < 1
+          || failureExitCode > 255))
+    ) {
+      throw new Error("release lifecycle incident failure evidence is invalid");
+    }
     const { intent, journal, directory } = this.readOperation(operationId);
     if (journal.phase === "active" || journal.phase === "rolled_back") {
       throw new Error("completed release lifecycle cannot become an incident");
@@ -140,6 +158,8 @@ export class ReleaseLifecycleTransactionStore {
       sequence: journal.sequence + 1,
       updatedAt: now.toISOString(),
       incidentCategory: category,
+      failureStage,
+      failureExitCode,
     };
     writeReplaceJson(join(directory, "journal.json"), next, this.uid, this.gid);
     return { intent, journal: next };
@@ -611,13 +631,19 @@ function validateDaemon(value) {
 }
 
 function validateJournal(value) {
+  const keys = Object.keys(value ?? {}).sort().join(",");
+  const legacyKeys = [
+    "incidentCategory", "operationId", "phase", "schemaVersion", "sequence", "updatedAt",
+  ].sort().join(",");
+  const evidenceKeys = [
+    "failureExitCode", "failureStage", "incidentCategory", "operationId", "phase",
+    "schemaVersion", "sequence", "updatedAt",
+  ].sort().join(",");
   if (
     !value
     || typeof value !== "object"
     || Array.isArray(value)
-    || Object.keys(value).sort().join(",") !== [
-      "incidentCategory", "operationId", "phase", "schemaVersion", "sequence", "updatedAt",
-    ].sort().join(",")
+    || (keys !== legacyKeys && keys !== evidenceKeys)
     || value.schemaVersion !== 1
     || !OPERATION_ID.test(value.operationId ?? "")
     || !JOURNAL_PHASES.has(value.phase)
@@ -625,6 +651,15 @@ function validateJournal(value) {
     || value.sequence < 0
     || !validDate(value.updatedAt)
     || (value.incidentCategory !== null && !INCIDENT.test(value.incidentCategory ?? ""))
+    || (keys === evidenceKeys && (
+      (value.failureStage === null) !== (value.failureExitCode === null)
+      || (value.failureStage !== null
+        && !/^[a-z][a-z0-9_]{0,63}$/u.test(value.failureStage))
+      || (value.failureExitCode !== null
+        && (!Number.isSafeInteger(value.failureExitCode)
+          || value.failureExitCode < 1
+          || value.failureExitCode > 255))
+    ))
   ) throw new Error("release lifecycle journal schema is invalid");
 }
 
@@ -845,8 +880,10 @@ async function main() {
     console.log(pointer.revision);
     return;
   }
-  if (command === "incident" && args.length === 2) {
-    store.markIncident(args[0], args[1]);
+  if (command === "incident" && (args.length === 2 || args.length === 4)) {
+    const failureStage = args.length === 4 ? args[2] : null;
+    const failureExitCode = args.length === 4 ? Number(args[3]) : null;
+    store.markIncident(args[0], args[1], failureStage, failureExitCode);
     console.log("incident_stopped");
     return;
   }

@@ -62,7 +62,15 @@ test("failed upgrade remains stopped until the same operation rolls back", () =>
   withFixture(({ store, first, second }) => {
     store.establish(first.manifest, first.environment, DAEMON);
     const intent = store.prepare(second.manifest, second.environment, DAEMON);
-    store.markIncident(intent.operationId, "runtime_verification_failed");
+    store.markIncident(
+      intent.operationId,
+      "runtime_verification_failed",
+      "verify_release_containers",
+      78,
+    );
+    const incident = store.readOperation(intent.operationId).journal;
+    assert.equal(incident.failureStage, "verify_release_containers");
+    assert.equal(incident.failureExitCode, 78);
     const rollback = store.rollbackValues(intent.operationId);
     assert.equal(rollback.revision, FIRST_REVISION);
     assert.equal(rollback.images.api, image("1"));
@@ -140,6 +148,14 @@ test("symlinked manifest and non-canonical journal transitions are rejected", ()
     assert.throws(
       () => store.markIncident(intent.operationId, "INVALID"),
       /category is invalid/u,
+    );
+    assert.throws(
+      () => store.markIncident(intent.operationId, "activation_failed", "bad-stage", 1),
+      /failure evidence is invalid/u,
+    );
+    assert.throws(
+      () => store.markIncident(intent.operationId, "activation_failed", "compose_up", 0),
+      /failure evidence is invalid/u,
     );
   });
 });

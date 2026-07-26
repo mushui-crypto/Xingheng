@@ -21,6 +21,7 @@ node scripts/verify-deployment-revision.mjs images "$release_manifest"
 
 lifecycle_operation=""
 lifecycle_prepared=false
+activation_stage=preflight
 if [ "$(/usr/bin/id -u)" -eq 0 ] \
   && [ "${XINGHENG_FIRST_VERIFIED_ACTIVATION:-false}" != true ]; then
   [ -f /var/lib/xingheng/verified-release-established ] || {
@@ -40,7 +41,7 @@ activation_exit() {
   if [ "$status" -ne 0 ] && [ "$lifecycle_prepared" = true ]; then
     stop_unverified_release || true
     if ! node scripts/releaseLifecycleTransaction.mjs incident \
-      "$lifecycle_operation" activation_failed >/dev/null; then
+      "$lifecycle_operation" activation_failed "$activation_stage" "$status" >/dev/null; then
       status=1
     fi
   fi
@@ -48,9 +49,12 @@ activation_exit() {
 }
 trap activation_exit EXIT HUP INT TERM
 
+activation_stage=compose_up
 production_compose up -d api web
+activation_stage=verify_release_containers
 verify_release_containers
 if [ "$lifecycle_prepared" = true ]; then
+  activation_stage=lifecycle_complete
   node scripts/releaseLifecycleTransaction.mjs complete \
     "$lifecycle_operation" "$release_manifest" "$compose_env" >/dev/null
   lifecycle_prepared=false
