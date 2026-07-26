@@ -4,6 +4,8 @@ import { AdminLayout } from "./components/layouts/AdminLayout";
 import { UserLayout } from "./components/layouts/UserLayout";
 import { ProtectedRoute } from "./components/ProtectedRoute";
 import { HyperliquidSessionProvider } from "./features/realTrading/components/HyperliquidSessionProvider";
+import { RuntimeEnvironmentProvider } from "./features/runtimeEnvironment/RuntimeEnvironmentProvider";
+import { SensitiveEnvironmentGate } from "./features/runtimeEnvironment/RuntimeEnvironmentUi";
 import { useAuthStore } from "./store/authStore";
 import { useUserStore } from "./store/userStore";
 
@@ -26,34 +28,36 @@ const AdminNeutralAutomationPage = lazy(() => import("./pages/admin/AdminNeutral
 
 export default function App() {
   return (
-    <HyperliquidSessionProvider>
-      <Suspense fallback={<RouteFallback />}>
-        <Routes>
-          <Route path="/" element={<Navigate to="/app/dashboard" replace />} />
-          <Route path="/login" element={<AuthPage />} />
-          <Route path="/register" element={<AuthPage />} />
-          <Route path="/forgot-password" element={<AuthPage />} />
-          <Route path="/reset-password" element={<AuthPage />} />
-          <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
-          <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
-          <Route path="/app/arbitrage" element={<UserScreen><ArbitragePage /></UserScreen>} />
-          <Route path="/app/my-arbitrage" element={<PrivateUserScreen><ArbitrageAutomationPage /></PrivateUserScreen>} />
-          <Route path="/app/strategy" element={<UserScreen><StrategyPage /></UserScreen>} />
-          <Route path="/app/trade" element={<UserScreen><RealTradePage /></UserScreen>} />
-          <Route path="/app/demo" element={<UserScreen><TradingPage /></UserScreen>} />
-          <Route path="/app/trading" element={<DemoRedirect />} />
-          <Route path="/app/account" element={<UserScreen><AccountPage /></UserScreen>} />
-          <Route path="/admin/login" element={<AdminLoginPage />} />
-          <Route path="/admin/dashboard" element={<AdminScreen><AdminDashboardPage /></AdminScreen>} />
-          <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
-          <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
-          <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
-          <Route path="/admin/real-trading" element={<AdminScreen><AdminRealTradingOperationsPage /></AdminScreen>} />
-          <Route path="/admin/arbitrage-automation" element={<AdminScreen><AdminNeutralAutomationPage /></AdminScreen>} />
-          <Route path="*" element={<Navigate to="/app/dashboard" replace />} />
-        </Routes>
-      </Suspense>
-    </HyperliquidSessionProvider>
+    <RuntimeEnvironmentProvider>
+      <HyperliquidSessionProvider>
+        <Suspense fallback={<RouteFallback />}>
+          <Routes>
+            <Route path="/" element={<Navigate to="/app/dashboard" replace />} />
+            <Route path="/login" element={<AuthPage />} />
+            <Route path="/register" element={<AuthPage />} />
+            <Route path="/forgot-password" element={<AuthPage />} />
+            <Route path="/reset-password" element={<AuthPage />} />
+            <Route path="/app/dashboard" element={<UserScreen><DashboardPage /></UserScreen>} />
+            <Route path="/app/markets" element={<UserScreen><MarketsPage /></UserScreen>} />
+            <Route path="/app/arbitrage" element={<UserScreen><ArbitragePage /></UserScreen>} />
+            <Route path="/app/my-arbitrage" element={<PrivateUserScreen><ArbitrageAutomationPage /></PrivateUserScreen>} />
+            <Route path="/app/strategy" element={<UserScreen><StrategyPage /></UserScreen>} />
+            <Route path="/app/trade" element={<UserScreen sensitive><RealTradePage /></UserScreen>} />
+            <Route path="/app/demo" element={<UserScreen sensitive><TradingPage /></UserScreen>} />
+            <Route path="/app/trading" element={<DemoRedirect />} />
+            <Route path="/app/account" element={<UserScreen sensitive><AccountPage /></UserScreen>} />
+            <Route path="/admin/login" element={<AdminLoginPage />} />
+            <Route path="/admin/dashboard" element={<AdminScreen><AdminDashboardPage /></AdminScreen>} />
+            <Route path="/admin/users" element={<AdminScreen><AdminUsersPage /></AdminScreen>} />
+            <Route path="/admin/symbols" element={<AdminScreen><AdminSymbolsPage /></AdminScreen>} />
+            <Route path="/admin/trading" element={<AdminScreen><AdminTradingPage /></AdminScreen>} />
+            <Route path="/admin/real-trading" element={<AdminScreen><AdminRealTradingOperationsPage /></AdminScreen>} />
+            <Route path="/admin/arbitrage-automation" element={<AdminScreen><AdminNeutralAutomationPage /></AdminScreen>} />
+            <Route path="*" element={<Navigate to="/app/dashboard" replace />} />
+          </Routes>
+        </Suspense>
+      </HyperliquidSessionProvider>
+    </RuntimeEnvironmentProvider>
   );
 }
 
@@ -62,7 +66,7 @@ function DemoRedirect() {
   return <Navigate to={`/app/demo${location.search}`} replace />;
 }
 
-function UserScreen({ children }: { children: ReactNode }) {
+function UserScreen({ children, sensitive = false }: { children: ReactNode; sensitive?: boolean }) {
   const isLoggedIn = useAuthStore((state) => state.isLoggedIn);
   const isSessionReady = useAuthStore((state) => state.isSessionReady);
   const syncSession = useAuthStore((state) => state.syncSession);
@@ -80,14 +84,14 @@ function UserScreen({ children }: { children: ReactNode }) {
   if (isLoggedIn && !isSessionReady) return <RouteFallback />;
 
   return (
-    <UserLayout>{children}</UserLayout>
+    <UserLayout>{sensitive ? <SensitiveEnvironmentGate>{children}</SensitiveEnvironmentGate> : children}</UserLayout>
   );
 }
 
 function AdminScreen({ children }: { children: ReactNode }) {
   return (
     <ProtectedRoute type="admin">
-      <AdminLayout>{children}</AdminLayout>
+      <AdminLayout><SensitiveEnvironmentGate>{children}</SensitiveEnvironmentGate></AdminLayout>
     </ProtectedRoute>
   );
 }
@@ -95,7 +99,7 @@ function AdminScreen({ children }: { children: ReactNode }) {
 function PrivateUserScreen({ children }: { children: ReactNode }) {
   return (
     <ProtectedRoute type="user">
-      <UserLayout>{children}</UserLayout>
+      <UserLayout><SensitiveEnvironmentGate>{children}</SensitiveEnvironmentGate></UserLayout>
     </ProtectedRoute>
   );
 }

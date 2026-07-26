@@ -301,6 +301,38 @@ test("Binance client signs private reads with server-time offset and keeps spot/
   assert.equal(snapshot.perpetual.depthUsd > 8, true);
 });
 
+test("Binance client binds the authoritative UID to the frozen monitored account", async () => {
+  const expected = `binance:${createHash("sha256")
+    .update("binance:42")
+    .digest("hex")
+    .slice(0, 16)}`;
+  const accepted = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch(),
+    () => 1_000,
+    ["203.0.113.10"],
+    [expected],
+  );
+  assert.equal((await accepted.validateAccess()).accountId, expected);
+
+  for (const monitored of [
+    ["binance:1111111111111111"],
+    ["binance:1111111111111111", "binance:2222222222222222"],
+  ]) {
+    const mismatched = new RwaBinanceMainnetClient(
+      { apiKey: "fake-key", apiSecret: "fake-secret" },
+      fixtureFetch(),
+      () => 1_000,
+      ["203.0.113.10"],
+      monitored,
+    );
+    await assert.rejects(
+      mismatched.validateAccess(),
+      providerError("provider_identity_mismatch"),
+    );
+  }
+});
+
 test("Binance client reports missing real products without substituting another symbol", async () => {
   const calls: Array<{ path: string; signed: boolean; timestamp: string | null }> = [];
   const client = new RwaBinanceMainnetClient(

@@ -10,6 +10,14 @@ export const RELEASE_VOLUME_BOUNDARIES = Object.freeze({
   xingheng_caddy_data: Object.freeze({ owner: "preserved", private: false }),
   xingheng_caddy_config: Object.freeze({ owner: "preserved", private: false }),
 });
+export const REAL_TEST_VOLUME_BOUNDARIES = Object.freeze(
+  Object.fromEntries(
+    Object.entries(RELEASE_VOLUME_BOUNDARIES).map(([name, contract]) => [
+      name.replace(/^xingheng_/u, "xingheng-real-test_"),
+      contract,
+    ]),
+  ),
+);
 
 const RELEASE_COMPOSE_MOUNTS = Object.freeze({
   api: Object.freeze([
@@ -55,6 +63,20 @@ const RELEASE_RUNTIME_MOUNTS = Object.freeze({
     runtimeVolume("xingheng_caddy_config", "/config"),
   ]),
 });
+const REAL_TEST_RUNTIME_MOUNTS = Object.freeze({
+  api: Object.freeze([
+    runtimeVolume("xingheng-real-test_sqlite_data", "/app/data"),
+    runtimeVolume("xingheng-real-test_strategy_data", "/app/strategy-data"),
+    runtimeVolume("xingheng-real-test_sqlite_backups", "/backups"),
+    runtimeVolume("xingheng-real-test_rwa_automation_data", "/app/rwa-automation-data"),
+    runtimeVolume("xingheng-real-test_rwa_automation_lock", "/app/rwa-automation-lock"),
+    runtimeBind("/run/xingheng-real-test/gcp-wif", "/run/secrets/gcp-wif"),
+  ]),
+  web: Object.freeze([
+    runtimeVolume("xingheng-real-test_caddy_data", "/data"),
+    runtimeVolume("xingheng-real-test_caddy_config", "/config"),
+  ]),
+});
 
 const LOCAL_FILESYSTEM_TYPES = new Set(["ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs"]);
 const NETWORK_FILESYSTEM = /^(?:nfs|nfs4|cifs|smb3|fuse\.sshfs|9p|ceph|glusterfs)$/u;
@@ -90,9 +112,40 @@ const EXPECTED_MOUNT_COUNTS = Object.freeze({
     xingheng_caddy_config: 1,
   }),
 });
+const REAL_TEST_EXPECTED_MOUNT_COUNTS = Object.freeze(
+  Object.fromEntries(
+    Object.entries(EXPECTED_MOUNT_COUNTS).map(([mode, counts]) => [
+      mode,
+      Object.freeze(Object.fromEntries(
+        Object.entries(counts).map(([name, count]) => [
+          name.replace(/^xingheng_/u, "xingheng-real-test_"),
+          count,
+        ]),
+      )),
+    ]),
+  ),
+);
 
 export function validateReleaseVolumeMetadata(name, metadata, lockFileMetadata) {
-  const contract = RELEASE_VOLUME_BOUNDARIES[name];
+  return validateVolumeMetadata(
+    RELEASE_VOLUME_BOUNDARIES,
+    name,
+    metadata,
+    lockFileMetadata,
+  );
+}
+
+export function validateRealTestVolumeMetadata(name, metadata, lockFileMetadata) {
+  return validateVolumeMetadata(
+    REAL_TEST_VOLUME_BOUNDARIES,
+    name,
+    metadata,
+    lockFileMetadata,
+  );
+}
+
+function validateVolumeMetadata(boundaries, name, metadata, lockFileMetadata) {
+  const contract = boundaries[name];
   if (!contract) throw new Error("release volume is not allowlisted");
   const value = exactObject(metadata, [
     "dockerRoot",
@@ -163,7 +216,7 @@ export function validateReleaseVolumeMetadata(name, metadata, lockFileMetadata) 
   if (contract.private && mode !== 0o700) {
     throw new Error("release private volume mode is invalid");
   }
-  if (name === "xingheng_rwa_automation_lock") {
+  if (name.endsWith("_rwa_automation_lock")) {
     const lock = exactObject(lockFileMetadata, [
       "gid",
       "mode",
@@ -217,8 +270,16 @@ export function validateReleaseComposeMounts(config) {
 }
 
 export function validateReleaseRuntimeMounts(value) {
-  const byService = exactObject(value, Object.keys(RELEASE_RUNTIME_MOUNTS), "release runtime services");
-  for (const [service, expected] of Object.entries(RELEASE_RUNTIME_MOUNTS)) {
+  return validateRuntimeMounts(RELEASE_RUNTIME_MOUNTS, value);
+}
+
+export function validateRealTestRuntimeMounts(value) {
+  return validateRuntimeMounts(REAL_TEST_RUNTIME_MOUNTS, value);
+}
+
+function validateRuntimeMounts(expectedByService, value) {
+  const byService = exactObject(value, Object.keys(expectedByService), "release runtime services");
+  for (const [service, expected] of Object.entries(expectedByService)) {
     if (!Array.isArray(byService[service]) || byService[service].length !== expected.length) {
       throw new Error("release runtime mount mapping is invalid");
     }
@@ -243,7 +304,15 @@ function compareRuntimeMounts(left, right) {
 }
 
 export function validateReleaseVolumeMountCounts(mode, value) {
-  const expected = EXPECTED_MOUNT_COUNTS[mode];
+  return validateVolumeMountCounts(EXPECTED_MOUNT_COUNTS, mode, value);
+}
+
+export function validateRealTestVolumeMountCounts(mode, value) {
+  return validateVolumeMountCounts(REAL_TEST_EXPECTED_MOUNT_COUNTS, mode, value);
+}
+
+function validateVolumeMountCounts(expectedByMode, mode, value) {
+  const expected = expectedByMode[mode];
   if (!expected) throw new Error("release volume verification mode is invalid");
   const counts = exactObject(value, Object.keys(expected), "release volume mount counts");
   for (const [name, count] of Object.entries(expected)) {

@@ -247,6 +247,54 @@ export class RwaAutomationBackupService {
     }
   }
 
+  async verifyBackup(fileName: string) {
+    try {
+      const match = assertBackupFileName(fileName);
+      const backupStorageBytes = await this.assertBackupRoot();
+      if (backupStorageBytes > this.limits.maxTotalBytes) throw capacityExceeded();
+      const source = resolve(this.backupRoot, fileName);
+      assertContained(this.backupRoot, source);
+      const encoded = await readBoundedSecureFile(
+        source,
+        maxEncryptedBackupBytes(this.limits.maxSnapshotBytes),
+        this.layoutOptions,
+      );
+      let envelope: BackupEnvelope;
+      try {
+        envelope = validateEnvelope(JSON.parse(encoded.toString("utf8")), match[1]!);
+      } finally {
+        encoded.fill(0);
+      }
+      const context = backupContext(envelope.backupId);
+      await this.assertKeyProviderHealthy(context);
+      const dataKey = await this.keyProvider.unwrapDataKey(envelope, context).catch(throwBackupError);
+      let plaintext: Buffer | null = null;
+      try {
+        assertBackupWrapBinding(dataKey, envelope);
+        const decipher = createDecipheriv("aes-256-gcm", dataKey, Buffer.from(envelope.nonce, "base64url"));
+        decipher.setAAD(canonicalCredentialAad(context));
+        decipher.setAuthTag(Buffer.from(envelope.tag, "base64url"));
+        plaintext = Buffer.concat([
+          decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
+          decipher.final(),
+        ]);
+        if (plaintext.length > this.limits.maxSnapshotBytes) throw capacityExceeded();
+        const snapshot = validatePlaintext(JSON.parse(plaintext.toString("utf8")), envelope);
+        return {
+          fileName,
+          backupId: envelope.backupId,
+          fileCount: snapshot.manifest.files.length,
+          plaintextBytes: snapshot.manifest.totalBytes,
+        };
+      } finally {
+        plaintext?.fill(0);
+        dataKey.fill(0);
+      }
+    } catch (error) {
+      throw safeRestoreError(error);
+    }
+  }
+
   private async restoreBackupUnsafe(fileName: string) {
     const match = assertBackupFileName(fileName);
     const { active } = validateRwaAutomationDataLayout(this.layoutOptions);

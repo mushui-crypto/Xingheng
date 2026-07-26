@@ -15,7 +15,8 @@ release，并证明旧版本可恢复、WIF/KMS 可用、生产容器与本地�
 - [ ] 已填好以下服务器本地绝对路径，材料内容未进入聊天、命令行参数、日志或 shell history：
 
 ```bash
-STEP0_MANIFEST=/opt/xingheng-release/deploy/release-manifest.json
+cd /opt/xingheng-release/code
+STEP0_MANIFEST=/opt/xingheng-release/code/deploy/release-manifest.json
 STEP0_OLD_ENV=/opt/xingheng/.env.production
 STEP0_NEW_ENV=/opt/xingheng/.env.verified-release
 STEP0_BRIDGE=/var/lib/xingheng/legacy-bridge-bundle/legacy-bridge
@@ -41,13 +42,16 @@ umask 077
 ```bash
 test "$(id -u)" -eq 0
 test ! -e /var/lib/xingheng/verified-release-established
-docker info >/dev/null
-docker compose version
 findmnt -n -o FSTYPE,TARGET -T /run
 
-node scripts/verify-deployment-revision.mjs env "$STEP0_MANIFEST" "$STEP0_NEW_ENV"
-node scripts/verify-deployment-revision.mjs images "$STEP0_MANIFEST"
-node scripts/verify-gcp-wif-bundle.mjs source \
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node scripts/install-trusted-operations.mjs install
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node scripts/verify-deployment-revision.mjs env "$STEP0_MANIFEST" "$STEP0_NEW_ENV"
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node scripts/verify-deployment-revision.mjs images "$STEP0_MANIFEST"
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs source \
   "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
 ```
 
@@ -63,11 +67,7 @@ node scripts/verify-gcp-wif-bundle.mjs source \
 
 ```bash
 install -d -o root -g root -m 0700 "$(dirname "$STEP0_BRIDGE")"
-node scripts/legacy-release-bridge.mjs capture "$STEP0_BRIDGE" "$STEP0_OLD_ENV"
-node scripts/legacy-release-bridge.mjs verify "$STEP0_BRIDGE"
-node scripts/legacy-release-bridge.mjs verify-runtime "$STEP0_BRIDGE"
-node scripts/legacy-release-bridge.mjs verify-release-environment \
-  "$STEP0_BRIDGE" "$STEP0_NEW_ENV"
+sudo scripts/legacy-release-bridge.sh capture "$STEP0_BRIDGE" "$STEP0_OLD_ENV"
 ```
 
 - [ ] bridge 冻结了旧 API/Web 精确 image ID、只读 image archives/hash、恢复 Compose、SQLite
@@ -79,36 +79,25 @@ node scripts/legacy-release-bridge.mjs verify-release-environment \
 
 ```bash
 test ! -e /run/xingheng/gcp-wif
-./scripts/install-gcp-wif.sh "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
-node scripts/verify-gcp-wif-bundle.mjs installed \
+sudo ./scripts/install-gcp-wif.sh "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs installed \
   /run/xingheng/gcp-wif "$STEP0_WIF_AUDIENCE_FILE"
-
-RELEASE_MANIFEST_FILE="$STEP0_MANIFEST"
-COMPOSE_ENV_FILE="$STEP0_NEW_ENV"
-export RELEASE_MANIFEST_FILE COMPOSE_ENV_FILE
-. scripts/load-release-manifest.sh
-verify_production_compose
-node scripts/first-release-volume-migration.mjs initialize "$XINGHENG_API_IMAGE"
-production_compose run --rm --no-deps --entrypoint node api \
-  dist-server/operations/rwa-activation-preflight.js
 ```
 
 - [ ] WIF 目标是独立 tmpfs；目录 `20001:20001/0700`，五文件 `20001:20001/0400`，Compose
   挂载为只读。
-- [ ] Compose 无 `build`、无 override、无漂移 tag；镜像/revision 与 manifest 完全一致。
-- [ ] 所有 volume 为允许的本机 local filesystem；owner/mode/mount count 与 lock file 契约通过。
-- [ ] activation preflight 输出 `activation WIF and KMS health verified`；服务端总急停仍为 `true`。
-- [ ] 到此为止旧 API/Web 和三个既有业务卷尚未改变；新自动套利卷只含冻结的初始结构。
+- [ ] 到此为止旧 API/Web、既有业务卷和新自动套利卷均未改变。
+- [ ] 下一步 activation 会在停止旧 API 前安装固定 env，并在同一 production lock 内完成
+  Compose、镜像、volume、WIF/KMS preflight；不得提前直接调用内部 migration CLI。
 
 ## E. 一次性激活与上线核验
 
 ```bash
-./scripts/activate-first-verified-release.sh \
+sudo ./scripts/activate-first-verified-release.sh \
   "$STEP0_BRIDGE" "$STEP0_MANIFEST" "$STEP0_NEW_ENV"
 
-node scripts/verify-deployment-revision.mjs containers "$STEP0_MANIFEST"
-node scripts/verify-release-volume-boundaries.mjs runtime
-./scripts/smoke.sh "$STEP0_PUBLIC_URL"
+sudo ./scripts/smoke.sh "$STEP0_PUBLIC_URL"
 test -f /var/lib/xingheng/verified-release-established
 ```
 
@@ -130,8 +119,6 @@ test -f /var/lib/xingheng/verified-release-established
   随后只做验证：
 
 ```bash
-node scripts/legacy-release-bridge.mjs verify "$STEP0_BRIDGE"
-node scripts/legacy-release-bridge.mjs verify-runtime "$STEP0_BRIDGE"
 test ! -e /var/lib/xingheng/verified-release-established
 ```
 

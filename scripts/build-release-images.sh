@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 expected="${1:-}"
 manifest_path="${2:-}"
@@ -33,22 +34,27 @@ trap 'rm -rf "$build_context"' EXIT HUP INT TERM
 git archive --format=tar "$actual" | tar -xf - -C "$build_context"
 
 export XINGHENG_REVISION="$actual"
-docker build --build-arg "XINGHENG_REVISION=$actual" --target api \
+XINGHENG_TRUSTED_DOCKER_PURPOSE=release-build
+export XINGHENG_TRUSTED_DOCKER_PURPOSE
+trusted_docker() {
+  node scripts/trusted-docker.mjs "$@"
+}
+trusted_docker build --build-arg "XINGHENG_REVISION=$actual" --target api \
   --platform "$platform" --tag "xingheng-api:$actual" "$build_context"
-docker build --build-arg "XINGHENG_REVISION=$actual" --target web \
+trusted_docker build --build-arg "XINGHENG_REVISION=$actual" --target web \
   --platform "$platform" --tag "xingheng-web:$actual" "$build_context"
-docker build --build-arg "XINGHENG_REVISION=$actual" --target strategy-tools \
+trusted_docker build --build-arg "XINGHENG_REVISION=$actual" --target strategy-tools \
   --platform "$platform" --tag "xingheng-strategy-tools:$actual" "$build_context"
 
-api_digest="$(docker image inspect --format '{{.Id}}' "xingheng-api:$actual")"
-web_digest="$(docker image inspect --format '{{.Id}}' "xingheng-web:$actual")"
-strategy_digest="$(docker image inspect --format '{{.Id}}' "xingheng-strategy-tools:$actual")"
+api_digest="$(trusted_docker image inspect --format '{{.Id}}' "xingheng-api:$actual")"
+web_digest="$(trusted_docker image inspect --format '{{.Id}}' "xingheng-web:$actual")"
+strategy_digest="$(trusted_docker image inspect --format '{{.Id}}' "xingheng-strategy-tools:$actual")"
 for image in \
   "xingheng-api:$actual" \
   "xingheng-web:$actual" \
   "xingheng-strategy-tools:$actual"
 do
-  [ "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "$platform" ] || {
+  [ "$(trusted_docker image inspect --format '{{.Os}}/{{.Architecture}}' "$image")" = "$platform" ] || {
     echo "release image platform mismatch" >&2
     exit 1
   }

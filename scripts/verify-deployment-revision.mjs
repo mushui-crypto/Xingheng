@@ -9,14 +9,19 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
+import { resolve } from "node:path";
 import {
   REVISION_LABEL,
   assertFullRevision,
   parseRevisionEnv,
   validateProductionComposeConfig,
+  validateRealTestComposeConfig,
   validateReleaseManifest,
   verifyRevisionEvidence,
 } from "./deploymentRevision.mjs";
+import { validateDualEnvironmentTopology } from "./dualEnvironmentTopology.mjs";
+import { execTrustedDockerSync } from "./trustedDockerRuntime.mjs";
+import { assertTrustedReleaseRoot } from "./trustedDockerRuntime.mjs";
 
 const IMAGE_COMPONENTS = Object.freeze([
   ["api", "api"],
@@ -24,6 +29,10 @@ const IMAGE_COMPONENTS = Object.freeze([
   ["strategy-tools", "strategyTools"],
   ["rwa-automation-backup", "api"],
   ["rwa-automation-restore", "api"],
+  ["sqlite-restore", "api"],
+  ["sqlite-verify", "api"],
+  ["provider-identity-preflight", "api"],
+  ["rwa-automation-verify", "api"],
 ]);
 
 const RUNNING_COMPONENTS = Object.freeze([
@@ -33,8 +42,18 @@ const RUNNING_COMPONENTS = Object.freeze([
 const MANIFEST_MAX_BYTES = 16 * 1024;
 const SAFE_MANIFEST_MODE = 0o444;
 const PRODUCTION_COMPOSE = new URL("./production-compose.sh", import.meta.url).pathname;
+const REAL_TEST_COMPOSE = new URL("./real-test-compose.sh", import.meta.url).pathname;
+const FIXED_PRODUCTION_ENV = new URL("../.env.production", import.meta.url).pathname;
+const FIXED_REAL_TEST_ENV = new URL("../.env.real-test", import.meta.url).pathname;
 
 function run(command, args) {
+  if (command === "docker") {
+    return execTrustedDockerSync(args, {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
+    }).trim();
+  }
   return execFileSync(command, args, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
@@ -43,11 +62,19 @@ function run(command, args) {
 }
 
 function readReleaseManifest(path) {
+  if (process.getuid?.() === 0) {
+    const root = assertTrustedReleaseRoot(new URL("../", import.meta.url).pathname);
+    if (resolve(path) !== resolve(root, "deploy/release-manifest.json")) {
+      throw new Error("release manifest path is not canonical");
+    }
+  }
   const before = lstatSync(path);
+  const expectedUid = process.getuid?.() === 0 ? 0 : before.uid;
   if (
     !before.isFile()
     || before.isSymbolicLink()
     || before.nlink !== 1
+    || before.uid !== expectedUid
     || (before.mode & 0o777) !== SAFE_MANIFEST_MODE
     || before.size < 2
     || before.size > MANIFEST_MAX_BYTES
@@ -67,7 +94,18 @@ function readReleaseManifest(path) {
     ) {
       throw new Error("release manifest file boundary is invalid");
     }
-    return validateReleaseManifest(JSON.parse(readFileSync(fd, "utf8")));
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    if (
+      after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs
+    ) {
+      throw new Error("release manifest changed while being read");
+    }
+    return validateReleaseManifest(JSON.parse(bytes.toString("utf8")));
   } finally {
     closeSync(fd);
   }
@@ -114,11 +152,11 @@ function inspectImage(digest, expectedRevision) {
   return { actualDigest, imageRevision, builtRevision };
 }
 
-function inspectRunningService(service, manifestDigest) {
+function inspectRunningService(service, manifestDigest, project) {
   const ids = run("docker", [
     "ps",
     "--filter",
-    "label=com.docker.compose.project=xingheng",
+    `label=com.docker.compose.project=${project}`,
     "--filter",
     `label=com.docker.compose.service=${service}`,
     "--format",
@@ -170,11 +208,11 @@ function verifyImages(manifest) {
   });
 }
 
-function verifyContainers(manifest) {
+function verifyContainers(manifest, project = "xingheng") {
   const running = new Map(
     RUNNING_COMPONENTS.map(([name, manifestKey]) => [
       name,
-      inspectRunningService(name, manifest.images[manifestKey]),
+      inspectRunningService(name, manifest.images[manifestKey], project),
     ]),
   );
   const components = inspectReleaseImages(manifest).map((component) => ({
@@ -199,16 +237,19 @@ function verifyContainers(manifest) {
 }
 
 function verifyProductionCompose(manifest, envFile) {
-  if (parseRevisionEnv(readFileSync(envFile, "utf8")) !== manifest.revision) {
+  if (resolve(envFile) !== FIXED_PRODUCTION_ENV) {
+    throw new Error("production Compose environment path is not fixed");
+  }
+  if (readSecureEnvironmentRevision(envFile) !== manifest.revision) {
     throw new Error("deployment environment revision mismatch");
   }
   const source = run(PRODUCTION_COMPOSE, [
-    "--env-file",
-    envFile,
     "--profile",
     "strategy-tools",
     "--profile",
     "rwa-automation-ops",
+    "--profile",
+    "provider-identity-preflight",
     "config",
     "--format",
     "json",
@@ -216,9 +257,116 @@ function verifyProductionCompose(manifest, envFile) {
   validateProductionComposeConfig(manifest, JSON.parse(source));
 }
 
+function verifyRealTestCompose(manifest, envFile) {
+  if (resolve(envFile) !== FIXED_REAL_TEST_ENV) {
+    throw new Error("real-test Compose environment path is not fixed");
+  }
+  if (readSecureEnvironmentRevision(envFile) !== manifest.revision) {
+    throw new Error("deployment environment revision mismatch");
+  }
+  const source = run(REAL_TEST_COMPOSE, [
+    "--profile",
+    "strategy-tools",
+    "--profile",
+    "real-test-cleanup",
+    "--profile",
+    "rwa-automation-ops",
+    "--profile",
+    "provider-identity-preflight",
+    "config",
+    "--format",
+    "json",
+  ]);
+  validateRealTestComposeConfig(manifest, JSON.parse(source));
+}
+
+function resolvedCompose(command, profiles) {
+  return JSON.parse(run(command, [
+    ...profiles.flatMap((profile) => ["--profile", profile]),
+    "config",
+    "--format",
+    "json",
+  ]));
+}
+
+function verifyDualCompose(manifest, productionEnvFile, realTestEnvFile) {
+  if (
+    resolve(productionEnvFile) !== FIXED_PRODUCTION_ENV
+    || resolve(realTestEnvFile) !== FIXED_REAL_TEST_ENV
+  ) {
+    throw new Error("dual-environment Compose paths are not fixed");
+  }
+  if (
+    readSecureEnvironmentRevision(productionEnvFile) !== manifest.revision
+    || readSecureEnvironmentRevision(realTestEnvFile) !== manifest.revision
+  ) {
+    throw new Error("dual-environment revision mismatch");
+  }
+  const production = resolvedCompose(PRODUCTION_COMPOSE, [
+    "strategy-tools",
+    "rwa-automation-ops",
+    "provider-identity-preflight",
+  ]);
+  const realTest = resolvedCompose(REAL_TEST_COMPOSE, [
+    "strategy-tools",
+    "real-test-cleanup",
+    "rwa-automation-ops",
+    "provider-identity-preflight",
+  ]);
+  validateDualEnvironmentTopology(manifest, production, realTest);
+}
+
+function readSecureEnvironmentRevision(path) {
+  const before = lstatSync(path);
+  const expectedUid = process.getuid?.() === 0 ? 0 : before.uid;
+  if (
+    !before.isFile()
+    || before.isSymbolicLink()
+    || before.nlink !== 1
+    || before.uid !== expectedUid
+    || (before.mode & 0o777) !== 0o600
+    || before.size < 1
+    || before.size > 1024 * 1024
+  ) {
+    throw new Error("deployment environment file boundary is invalid");
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (
+      !opened.isFile()
+      || opened.nlink !== 1
+      || opened.dev !== before.dev
+      || opened.ino !== before.ino
+      || opened.size !== before.size
+      || opened.uid !== before.uid
+      || opened.gid !== before.gid
+      || opened.mtimeMs !== before.mtimeMs
+      || opened.ctimeMs !== before.ctimeMs
+      || (opened.mode & 0o777) !== 0o600
+    ) {
+      throw new Error("deployment environment file changed while opening");
+    }
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    if (
+      after.dev !== opened.dev
+      || after.ino !== opened.ino
+      || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs
+      || after.ctimeMs !== opened.ctimeMs
+    ) {
+      throw new Error("deployment environment file changed while being read");
+    }
+    return parseRevisionEnv(bytes.toString("utf8"));
+  } finally {
+    closeSync(fd);
+  }
+}
+
 function usage() {
   throw new Error(
-    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | images MANIFEST | containers MANIFEST",
+    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
   );
 }
 
@@ -232,6 +380,17 @@ try {
   } else if (command === "write-manifest" && args.length === 5) {
     const manifest = writeReleaseManifest(args[0], args[1], args[2], args[3], args[4]);
     console.log(manifest.revision);
+  } else if (command === "manifest-values" && args.length === 2) {
+    const manifest = readReleaseManifest(args[0]);
+    if (readSecureEnvironmentRevision(args[1]) !== manifest.revision) {
+      throw new Error("deployment environment revision mismatch");
+    }
+    console.log([
+      manifest.revision,
+      manifest.images.api,
+      manifest.images.web,
+      manifest.images.strategyTools,
+    ].join("\n"));
   } else if (command === "manifest-revision" && args.length === 1) {
     console.log(readReleaseManifest(args[0]).revision);
   } else if (command === "manifest-image" && args.length === 2) {
@@ -248,6 +407,14 @@ try {
     const manifest = readReleaseManifest(args[0]);
     verifyProductionCompose(manifest, args[1]);
     console.log("production Compose release mapping verified");
+  } else if (command === "compose-real-test" && args.length === 2) {
+    const manifest = readReleaseManifest(args[0]);
+    verifyRealTestCompose(manifest, args[1]);
+    console.log("real-test Compose release mapping verified");
+  } else if (command === "dual-compose" && args.length === 3) {
+    const manifest = readReleaseManifest(args[0]);
+    verifyDualCompose(manifest, args[1], args[2]);
+    console.log("dual-environment Compose topology verified");
   } else if (command === "images" && args.length === 1) {
     const manifest = readReleaseManifest(args[0]);
     verifyImages(manifest);
@@ -256,6 +423,10 @@ try {
     const manifest = readReleaseManifest(args[0]);
     verifyContainers(manifest);
     console.log("deployment container revisions and digests verified");
+  } else if (command === "containers-real-test" && args.length === 1) {
+    const manifest = readReleaseManifest(args[0]);
+    verifyContainers(manifest, "xingheng-real-test");
+    console.log("real-test container revisions and digests verified");
   } else {
     usage();
   }

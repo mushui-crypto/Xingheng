@@ -73,7 +73,7 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config, s
   app.post("/api/auth/login", authRateLimit, (request, response) => {
     try {
       const result = users.login(request.body?.email, request.body?.password);
-      setSessionCookie(response, userCookieName, result.token, getUserSessionTtlMs(), config.isProduction);
+      setSessionCookie(response, userCookieName(), result.token, getUserSessionTtlMs(), config.isProduction);
       response.setHeader("Cache-Control", "no-store");
       response.json({ user: result.user });
     } catch (error) {
@@ -86,7 +86,7 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config, s
     const user = users.authenticate(rawToken);
     if (user && rawToken) stepUpSecurity?.revokeSession(user.id, hashSessionToken(rawToken));
     users.logout(rawToken);
-    clearSessionCookie(response, userCookieName, config.isProduction);
+    clearSessionCookie(response, userCookieName(), config.isProduction);
     response.json({ ok: true });
   });
 
@@ -148,7 +148,7 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config, s
       expiresAt: now + ttlMs,
       createdAt: now,
     });
-    setSessionCookie(response, adminCookieName, token, ttlMs, config.isProduction);
+    setSessionCookie(response, adminCookieName(), token, ttlMs, config.isProduction);
     response.setHeader("Cache-Control", "no-store");
     response.json({ ok: true });
   });
@@ -158,7 +158,7 @@ export function registerAuthRoutes({ app, users, wallet, tradingStore, config, s
     if (token) {
       tradingStore.deleteAuthSession(hashSessionToken(token), "admin");
     }
-    clearSessionCookie(response, adminCookieName, config.isProduction);
+    clearSessionCookie(response, adminCookieName(), config.isProduction);
     response.json({ ok: true });
   });
 

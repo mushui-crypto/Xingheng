@@ -9,7 +9,7 @@ export const RWA_GCP_KMS_KEY_NAME =
 
 export type CredentialKeyProviderName = "gcp-kms" | "fake";
 
-export type CredentialEnvironment = "production" | "development" | "test";
+export type CredentialEnvironment = "production" | "real-test" | "development" | "test";
 
 export type ExchangeCredentialKeyContext = {
   purpose?: "exchange-credential";
@@ -75,7 +75,14 @@ export class CredentialKeyProviderError extends Error {
 }
 
 export function credentialEnvironment(): CredentialEnvironment {
-  if (process.env.NODE_ENV === "production") return "production";
+  if (process.env.NODE_ENV === "production") {
+    const environment = process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT;
+    if (environment === "production" || environment === "real-test") return environment;
+    throw new CredentialKeyProviderError(
+      "credential_environment_unconfigured",
+      "生产安全模式缺少精确部署环境身份；已拒绝凭证操作。",
+    );
+  }
   if (process.env.NODE_ENV === "test") return "test";
   return "development";
 }

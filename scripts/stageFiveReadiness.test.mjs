@@ -908,7 +908,11 @@ function releaseEvidence() {
   const service = (image) => ({
     image,
     pull_policy: "never",
-    environment: { XINGHENG_EXPECTED_REVISION: REVISION },
+    environment: {
+      XINGHENG_EXPECTED_REVISION: REVISION,
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+      XINGHENG_COMPOSE_PROJECT: "xingheng",
+    },
   });
   return {
     revision: REVISION,
@@ -919,6 +923,8 @@ function releaseEvidence() {
         api: service(API_IMAGE),
         web: service(WEB_IMAGE),
         "strategy-history": service(STRATEGY_IMAGE),
+        "sqlite-restore": service(API_IMAGE),
+        "provider-identity-preflight": service(API_IMAGE),
         "rwa-automation-backup": service(API_IMAGE),
         "rwa-automation-restore": service(API_IMAGE),
       },

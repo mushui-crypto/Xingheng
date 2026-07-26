@@ -4,6 +4,11 @@
 副本；SQLite 数据卷只能由这一实例写入。行情和成交仍是 Hyperliquid 公开行情驱动的
 内部模拟交易，链上能力固定为 BSC Testnet。
 
+同机运行固定隔离的真实测试环境时，必须同时遵守
+[`PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md`](./PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md)。
+正式项目名仍固定为 `xingheng`；真实测试固定使用 `xingheng-real-test`、`.env.real-test` 和独立
+WIF/KMS/provider account 身份，不能把 production wrapper 泛化成调用方可变项目。
+
 ## 首次部署
 
 要求：安装 Docker Engine 与 Docker Compose plugin；域名 A/AAAA 记录已指向服务器，
@@ -30,8 +35,9 @@ MANIFEST="/受控发布目录/xingheng-$REVISION.release.json"
 Caddy 自动申请和续期 HTTPS 证书。API 不发布宿主机端口，仅由 Caddy 在 Compose
 内部网络访问。`/api/*` 和 `/ws` 会先反代到 API，其余路径由静态前端处理；不存在
 的路径回退到 `index.html`。Web 容器只接收 `DOMAIN` 与非敏感 revision；管理员密码、
-私钥和助记词仅进入 API 容器。所有手工 Compose 命令都必须带
-`--env-file .env.production`，并先通过 `scripts/load-release-manifest.sh` 从已安装清单加载镜像
+私钥和助记词仅进入 API 容器。所有手工 Compose 命令都不得传入 `--env-file` 或设置
+`COMPOSE_*`；`scripts/production-compose.sh` 只接受仓库根目录固定的 `.env.production`，
+并先通过 `scripts/load-release-manifest.sh` 从已安装清单加载镜像
 digest，再调用该脚本提供的 `production_compose` 函数；生产 `compose.yaml` 不包含 `build:`。
 
 ## 发布 revision 门禁
@@ -71,7 +77,9 @@ digest 可由本机 `docker image inspect` 精确解析，并在激活前重新�
 
 生产脚本和手工 runbook 不得直接调用 `docker compose`。`scripts/production-compose.sh` 固定
 `-f compose.yaml -p xingheng`，只在子命令前解析 Compose 全局参数，拒绝 `COMPOSE_FILE`、
-`-f FILE`/`-fFILE`、`-p NAME`/`-pNAME` 等 project/file override；进入已允许子命令后保留其
+`--env-file`、全部 ambient `COMPOSE_*`、`-f FILE`/`-fFILE`、`-p NAME`/`-pNAME` 等
+project/file override；固定 env 在 Docker 前须通过 regular/O_NOFOLLOW/nlink/0600/owner/inode
+验证。进入已允许子命令后保留其
 合法参数，因此 `production_compose logs -f api` 可正常跟踪日志。`production_compose`
 会在每一条 `up/run/exec/stop` 前解析最终 JSON，确认五个服务都没有 `build`，且 image、
 `pull_policy` 与 runtime revision 精确匹配当前 release manifest。即使目录中存在自动 override，
@@ -82,12 +90,16 @@ digest 可由本机 `docker image inspect` 精确解析，并在激活前重新�
 生产旧版本没有标准 release manifest 或可验证 revision 时，不得把旧 tag、容器 ID 或人工记录
 伪装成标准清单。只允许使用一次独立 bridge：
 
+首次 bridge 接受已由 bridge verifier 冻结的独立 release env 文件；activation 通过安全 FD 校验后
+以 `O_EXCL/0600` 原子安装到候选仓库固定 `.env.production`。任一后续 preflight 或 activation
+失败时只按安装 receipt 的 inode/SHA 精确撤销，成功后 Compose 仍只读取固定路径。
+
 生产现场优先按一页版
 [`STEP_0_PRODUCTION_CHECKLIST.md`](./STEP_0_PRODUCTION_CHECKLIST.md)
 逐项执行；本节保留完整设计约束与原理说明。
 
 ```bash
-node scripts/legacy-release-bridge.mjs capture \
+sudo scripts/legacy-release-bridge.sh capture \
   /受控桥接目录/legacy-bridge /opt/xingheng/.env.production
 node scripts/legacy-release-bridge.mjs verify /受控桥接目录/legacy-bridge
 node scripts/legacy-release-bridge.mjs verify-runtime /受控桥接目录/legacy-bridge
@@ -275,23 +287,19 @@ daemon、named volume 首次 owner `20001:20001`、只读/读写 mount、flock�
 恢复/回滚演练仍属于部署前现场验证项。
 
 首次从旧 UID `1000` 切换到 `20001` 时，现有 `sqlite_data`、`strategy_data` 和
-`sqlite_backups` 卷不会自动改 owner。部署窗口必须先用旧 API 完成在线备份并停止 API，
-再用新镜像执行一次受控的 root 运维容器迁移；生产 API 本身始终不以 root 运行：
+`sqlite_backups` 卷不会自动改 owner。该迁移只允许由首次 verified activation 在
+production transaction lock 内调用固定 migration CLI；公开 Compose wrapper 会拒绝调用者
+扩展的 `--user`、`--entrypoint` 和任意 shell：
 
 ```bash
-./scripts/backup.sh
-. scripts/load-release-manifest.sh
-node scripts/verify-deployment-revision.mjs images "$release_manifest"
-production_compose stop api
-production_compose run --rm --no-deps --user 0:0 --entrypoint sh api -c \
-  'chown -R 20001:20001 /app/data /app/strategy-data /backups'
-./scripts/activate-release.sh "$release_manifest"
-./scripts/smoke.sh "https://你的域名"
+sudo ./scripts/activate-first-verified-release.sh \
+  /受控桥接目录/legacy-bridge \
+  /opt/xingheng-release/code/deploy/release-manifest.json \
+  /opt/xingheng/.env.verified-release
 ```
 
-若必须回滚到仍使用旧 `node` UID `1000` 的镜像，先停止 API，并以同样的受控运维容器将这
-三个卷恢复为 `1000:1000`，再启动旧镜像。任何 ownership 迁移前后都应核对 SQLite 备份
-完整性；不得通过放宽目录为全员可写来规避迁移。
+首次 activation 会在失败时恢复冻结 owner 和 legacy runtime。不得手工重放 ownership
+迁移，也不得通过放宽目录为全员可写来规避迁移。
 
 ## 自动套利单执行实例租约
 
@@ -588,13 +596,11 @@ MANIFEST="/受控发布目录/xingheng-$REVISION.release.json"
 
 ## 恢复
 
-先列出备份卷中的文件：
+恢复只接受由备份命令输出和审计冻结的精确文件名，不提供任意容器 `exec/find` 入口：
 
 ```bash
-. scripts/load-release-manifest.sh
-production_compose exec -T api find /backups -maxdepth 1 -name 'trading-*.sqlite' -print
-./scripts/restore.sh trading-YYYYMMDDTHHMMSSZ.sqlite
-./scripts/smoke.sh "https://你的域名"
+sudo ./scripts/restore.sh trading-YYYYMMDDTHHMMSSZ.sqlite
+sudo ./scripts/smoke.sh "https://你的域名"
 ```
 
 恢复脚本只接受严格的 `trading-YYYYMMDDTHHMMSSZ.sqlite` 文件名，避免 SQLite

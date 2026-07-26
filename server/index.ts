@@ -160,7 +160,11 @@ users.onStatusChange((userId, status) => {
 });
 registerAuthRoutes({ app, users, wallet, tradingStore, config, stepUpSecurity });
 
-registerMarketRoutes(app, market, tradingStore);
+registerMarketRoutes(app, market, tradingStore, {
+  environment: config.deploymentEnvironment,
+  composeProject: config.composeProject,
+  revision: process.env.XINGHENG_EXPECTED_REVISION ?? "development",
+});
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();

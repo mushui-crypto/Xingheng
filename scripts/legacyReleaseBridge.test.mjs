@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
   existsSync,
@@ -13,9 +14,10 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import {
   LEGACY_BRIDGE_KIND,
   createRecoveryCompose,
@@ -36,8 +38,21 @@ const API_IMAGE = `sha256:${"1".repeat(64)}`;
 const WEB_IMAGE = `sha256:${"2".repeat(64)}`;
 const REPO_ROOT = new URL("../", import.meta.url).pathname;
 const ACTIVATOR = new URL("./activate-first-verified-release.sh", import.meta.url).pathname;
+const ENVIRONMENT_INSTALLER = new URL("./install-production-environment.mjs", import.meta.url).pathname;
 const BRIDGE_CLI = new URL("./legacy-release-bridge.mjs", import.meta.url).pathname;
 const VOLUME_MIGRATION_CLI = new URL("./first-release-volume-migration.mjs", import.meta.url).pathname;
+const TRUST_FIXTURE_ROOT = mkdtempSync(join(tmpdir(), "xingheng-legacy-trust-"));
+const TRUST_FIXTURE_SOCKET = join(TRUST_FIXTURE_ROOT, "docker.sock");
+const trustFixtureServer = createServer();
+await new Promise((resolvePromise, reject) => {
+  trustFixtureServer.once("error", reject);
+  trustFixtureServer.listen(TRUST_FIXTURE_SOCKET, resolvePromise);
+});
+chmodSync(TRUST_FIXTURE_SOCKET, 0o660);
+after(async () => {
+  await new Promise((resolvePromise) => trustFixtureServer.close(resolvePromise));
+  rmSync(TRUST_FIXTURE_ROOT, { recursive: true, force: true });
+});
 
 function writeBridge(directory) {
   mkdirSync(directory, { mode: 0o700 });
@@ -133,7 +148,7 @@ test("accepts one strict legacy recovery bundle without sensitive values", () =>
 test("first release volume initializer is scoped to three local volumes and a hardened helper container", () => {
   const root = mkdtempSync(join(tmpdir(), "xingheng-volume-initialize-"));
   try {
-    const { bin, log } = writeVolumeMigrationDocker(root);
+    const { bin, log, docker, compose } = writeVolumeMigrationDocker(root);
     const result = spawnSync(process.execPath, [
       VOLUME_MIGRATION_CLI,
       "initialize",
@@ -143,7 +158,7 @@ test("first release volume initializer is scoped to three local volumes and a ha
       encoding: "utf8",
       env: {
         ...process.env,
-        NODE_ENV: "test",
+        ...trustedDockerFixtureEnvironment(docker, compose),
         PATH: `${bin}:${process.env.PATH}`,
         FAKE_DOCKER_LOG: log,
       },
@@ -174,10 +189,10 @@ test("first release owner migration is reversible and refuses a running API", ()
   const bundle = join(root, "bridge");
   try {
     writeBridge(bundle);
-    const { bin, log } = writeVolumeMigrationDocker(root);
+    const { bin, log, docker, compose } = writeVolumeMigrationDocker(root);
     const baseEnvironment = {
       ...process.env,
-      NODE_ENV: "test",
+      ...trustedDockerFixtureEnvironment(docker, compose),
       PATH: `${bin}:${process.env.PATH}`,
       FAKE_DOCKER_LOG: log,
     };
@@ -347,11 +362,11 @@ test("restore refuses an expanded final Compose before starting legacy services"
       encoding: "utf8",
       env: {
         ...process.env,
+        ...trustedDockerFixtureEnvironment(fixture.docker, fixture.compose),
         PATH: `${fixture.bin}:${process.env.PATH}`,
         FAKE_DOCKER_LOG: log,
         FAKE_DOCKER_STATE: state,
         FAKE_RESOLVED_COMPOSE_PATH: fixture.resolvedComposePath,
-        NODE_ENV: "test",
       },
     });
     assert.notEqual(result.status, 0);
@@ -370,6 +385,17 @@ function writeActivationFixture(directory) {
   mkdirSync(scripts, { recursive: true });
   writeFileSync(join(scripts, "activate-first-verified-release.sh"), readFileSync(ACTIVATOR), {
     mode: 0o755,
+  });
+  writeFileSync(
+    join(scripts, "trusted-operation-preamble.sh"),
+    readFileSync(new URL("./trusted-operation-preamble.sh", import.meta.url)),
+    { mode: 0o755 },
+  );
+  writeFileSync(join(scripts, "install-production-environment.mjs"), readFileSync(ENVIRONMENT_INSTALLER), {
+    mode: 0o755,
+  });
+  writeFileSync(join(directory, "release.env"), `XINGHENG_REVISION=${"a".repeat(40)}\n`, {
+    mode: 0o600,
   });
   writeFileSync(join(scripts, "load-release-manifest.sh"), `#!/bin/sh
 XINGHENG_REVISION="${"a".repeat(40)}"
@@ -441,10 +467,19 @@ if [ "\${FAKE_ACTIVATION_FAIL:-false}" = true ]; then exit 1; fi
   *"verify-deployment-revision.mjs images"*)
     echo preflight:new-images >> "$FAKE_EVENT_LOG"
     ;;
-	  *"verify-deployment-revision.mjs containers"*)
+		  *"verify-deployment-revision.mjs containers"*)
 	    echo verify:new-runtime >> "$FAKE_EVENT_LOG"
-	    [ "\${FAKE_RUNTIME_VERIFY_FAIL:-false}" != true ]
-	    ;;
+    [ "\${FAKE_RUNTIME_VERIFY_FAIL:-false}" != true ]
+    ;;
+  *"releaseLifecycleTransaction.mjs establish"*)
+    echo lifecycle:establish >> "$FAKE_EVENT_LOG"
+    ;;
+  *"releaseLifecycleTransaction.mjs unestablish"*)
+    echo lifecycle:unestablish >> "$FAKE_EVENT_LOG"
+    ;;
+  *"install-production-environment.mjs"*)
+    exec "${process.execPath}" "$@"
+    ;;
   *) exit 2 ;;
 esac
 `, { mode: 0o755 });
@@ -455,7 +490,7 @@ function writeVolumeMigrationDocker(directory) {
   const bin = join(directory, "migration-bin");
   mkdirSync(bin);
   const log = join(directory, "migration-docker.log");
-  writeFileSync(join(bin, "docker"), `#!/bin/sh
+  const source = `#!/bin/sh
 printf '%s\\n' "$*" >> "$FAKE_DOCKER_LOG"
 case "$1 $2" in
   "image inspect") printf '[{"Id":"%s"}]\\n' "${API_IMAGE}" ;;
@@ -470,8 +505,12 @@ case "$1 $2" in
   "run --rm") ;;
   *) exit 2 ;;
 esac
-`, { mode: 0o755 });
-  return { bin, log };
+`;
+  const docker = join(bin, "docker");
+  const compose = join(bin, "docker-compose");
+  writeFileSync(docker, source, { mode: 0o755 });
+  writeFileSync(compose, source, { mode: 0o755 });
+  return { bin, log, docker, compose };
 }
 
 function resolvedRecoveryCompose() {
@@ -737,13 +776,17 @@ if (args[0] === "ps") {
   writeFileSync(docker, `#!/bin/sh
 exec "${process.execPath}" -- "${runner}" "$@"
 `, { mode: 0o755 });
-  return { bin, resolvedComposePath };
+  const compose = join(bin, "docker-compose");
+  writeFileSync(compose, `#!/bin/sh
+exec "${process.execPath}" -- "${runner}" "$@"
+`, { mode: 0o755 });
+  return { bin, resolvedComposePath, docker, compose };
 }
 
 function runBridgeCli(root, command, args, environment = {}) {
   const log = join(root, "docker.log");
   const state = join(root, "docker-state");
-  const { bin, resolvedComposePath } = writeFakeDocker(root);
+  const { bin, resolvedComposePath, docker, compose } = writeFakeDocker(root);
   return {
     log,
     state,
@@ -752,11 +795,11 @@ function runBridgeCli(root, command, args, environment = {}) {
       encoding: "utf8",
       env: {
         ...process.env,
+        ...trustedDockerFixtureEnvironment(docker, compose),
         PATH: `${bin}:${process.env.PATH}`,
         FAKE_DOCKER_LOG: log,
         FAKE_DOCKER_STATE: state,
         FAKE_RESOLVED_COMPOSE_PATH: resolvedComposePath,
-        NODE_ENV: "test",
         ...environment,
       },
     }),
@@ -765,6 +808,21 @@ function runBridgeCli(root, command, args, environment = {}) {
 
 function dockerEvents(path) {
   return readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+}
+
+function trustedDockerFixtureEnvironment(docker, compose) {
+  return {
+    NODE_ENV: "test",
+    XINGHENG_TEST_DOCKER_CLI_PATH: docker,
+    XINGHENG_TEST_DOCKER_CLI_SHA256: createHash("sha256")
+      .update(readFileSync(docker))
+      .digest("hex"),
+    XINGHENG_TEST_COMPOSE_PLUGIN_PATH: compose,
+    XINGHENG_TEST_COMPOSE_PLUGIN_SHA256: createHash("sha256")
+      .update(readFileSync(compose))
+      .digest("hex"),
+    XINGHENG_TEST_DOCKER_SOCKET_PATH: TRUST_FIXTURE_SOCKET,
+  };
 }
 
 test("capture freezes image archives, SQLite recovery evidence, and cleans interrupted snapshots", () => {
@@ -917,6 +975,45 @@ test("restore rejects a same-content legacy environment inode replacement", () =
   }
 });
 
+test("verified release environment installs once at the fixed path and rollback is receipt-bound", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-fixed-release-environment-"));
+  const scripts = join(root, "scripts");
+  try {
+    mkdirSync(scripts);
+    const helper = join(scripts, "install-production-environment.mjs");
+    writeFileSync(helper, readFileSync(ENVIRONMENT_INSTALLER), { mode: 0o755 });
+    const source = join(root, "release.env");
+    const target = join(root, ".env.production");
+    writeFileSync(source, `XINGHENG_REVISION=${"a".repeat(40)}\n`, { mode: 0o600 });
+    const installed = spawnSync(process.execPath, [helper, "install", source, target], {
+      encoding: "utf8",
+    });
+    assert.equal(installed.status, 0, installed.stderr);
+    assert.equal(lstatSync(target).mode & 0o777, 0o600);
+    const duplicate = spawnSync(process.execPath, [helper, "install", source, target], {
+      encoding: "utf8",
+    });
+    assert.notEqual(duplicate.status, 0);
+    const wrongReceipt = installed.stdout.trim().replace(/[a-f0-9]{64}$/u, "0".repeat(64));
+    const rejected = spawnSync(
+      process.execPath,
+      [helper, "uninstall", "-", target, wrongReceipt],
+      { encoding: "utf8" },
+    );
+    assert.notEqual(rejected.status, 0);
+    assert.equal(existsSync(target), true);
+    const removed = spawnSync(
+      process.execPath,
+      [helper, "uninstall", "-", target, installed.stdout.trim()],
+      { encoding: "utf8" },
+    );
+    assert.equal(removed.status, 0, removed.stderr);
+    assert.equal(existsSync(target), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("first activation rejects before production action when legacy preflight fails", () => {
   const root = mkdtempSync(join(tmpdir(), "xingheng-legacy-activation-preflight-"));
   try {
@@ -926,7 +1023,7 @@ test("first activation rejects before production action when legacy preflight fa
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -958,7 +1055,7 @@ test("failed new activation stops it and restores the frozen legacy runtime", ()
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1182,7 +1279,7 @@ test("new automation volume initialization failure rejects before WIF/KMS or leg
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1218,7 +1315,7 @@ test("owner migration failure restores volume owners and the frozen legacy runti
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1253,7 +1350,7 @@ test("legacy restore failure remains a blocking activation failure", () => {
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1284,7 +1381,7 @@ test("rollback still attempts legacy restore when stopping the unverified releas
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1320,7 +1417,7 @@ test("post-start verification failure restores legacy and leaves bridge marker a
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1364,7 +1461,7 @@ test("successful bridge writes a one-way marker and rejects a second bridge", ()
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], { cwd: root, encoding: "utf8", env });
     assert.equal(first.status, 0, first.stderr);
     assert.equal((readFileSync(state, "utf8").trim()), "a".repeat(40));
@@ -1372,7 +1469,7 @@ test("successful bridge writes a one-way marker and rejects a second bridge", ()
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], { cwd: root, encoding: "utf8", env });
     assert.equal(second.status, 78);
     assert.match(second.stderr, /permanently disabled/u);
@@ -1389,7 +1486,7 @@ test("production marker path cannot be overridden", () => {
       "scripts/activate-first-verified-release.sh",
       "/bridge",
       "/release.json",
-      "/release.env",
+      join(root, "release.env"),
     ], {
       cwd: root,
       encoding: "utf8",
@@ -1425,11 +1522,71 @@ test("marker CLI rejects a production alternate path without creating it", () =>
       env: environment,
     });
     assert.notEqual(result.status, 0);
-    assert.match(result.stderr, /marker boundary is invalid/u);
+    assert.match(result.stderr, /trusted production operation lock|marker boundary is invalid/u);
     assert.equal(existsSync(marker), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("direct production mutation CLIs reject a missing trusted operation lock", () => {
+  const environment = { ...process.env };
+  delete environment.NODE_ENV;
+  delete environment.NODE_TEST_CONTEXT;
+  delete environment.XINGHENG_OPERATION_LOCK_CONTEXT;
+  delete environment.XINGHENG_TRUSTED_DOCKER_PURPOSE;
+
+  for (const invocation of [
+    [BRIDGE_CLI, "capture", "/tmp/xingheng-bridge-fixture", "/tmp/xingheng-env-fixture"],
+    [
+      join(REPO_ROOT, "scripts/first-release-volume-migration.mjs"),
+      "initialize",
+      `sha256:${"1".repeat(64)}`,
+    ],
+    [
+      join(REPO_ROOT, "scripts/releaseLifecycleTransaction.mjs"),
+      "incident",
+      "00000000-0000-4000-8000-000000000000",
+      "fixture_failure",
+    ],
+    [
+      join(REPO_ROOT, "scripts/trusted-docker.mjs"),
+      "image",
+      "inspect",
+      "--format",
+      "{{.Id}}",
+      `xingheng-api:${"1".repeat(40)}`,
+    ],
+  ]) {
+    const result = spawnSync(process.execPath, invocation, {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: environment,
+    });
+    assert.notEqual(result.status, 0);
+    assert.match(
+      result.stderr,
+      /trusted production operation lock|controlled root operator|internal to the locked release build/u,
+    );
+  }
+});
+
+test("internal trusted Docker rejects arguments outside the release-build allowlist", () => {
+  const result = spawnSync(process.execPath, [
+    join(REPO_ROOT, "scripts/trusted-docker.mjs"),
+    "volume",
+    "rm",
+    "xingheng_sqlite_data",
+  ], {
+    cwd: REPO_ROOT,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      NODE_ENV: "test",
+    },
+  });
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /arguments are not allowlisted/u);
 });
 
 test("partial marker write is removed only when its inode is still owned", () => {

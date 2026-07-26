@@ -1,22 +1,28 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
+  linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import {
   REQUIRED_IMAGE_COMPONENTS,
   assertFullRevision,
   assertImageDigest,
   parseRevisionEnv,
   validateProductionComposeConfig,
+  validateRealTestComposeConfig,
   validateReleaseManifest,
   verifyRevisionEvidence,
 } from "./deploymentRevision.mjs";
@@ -37,6 +43,18 @@ const COMPONENT_DIGESTS = Object.freeze({
 const VERIFIER = new URL("./verify-deployment-revision.mjs", import.meta.url).pathname;
 const REPO_ROOT = new URL("../", import.meta.url).pathname;
 const PRODUCTION_COMPOSE = new URL("./production-compose.sh", import.meta.url).pathname;
+const DOCKER_FIXTURE_DIRECTORY = mkdtempSync(join(tmpdir(), "xingheng-docker-socket-"));
+const DOCKER_FIXTURE_SOCKET = join(DOCKER_FIXTURE_DIRECTORY, "docker.sock");
+const dockerFixtureServer = createServer();
+await new Promise((resolvePromise, reject) => {
+  dockerFixtureServer.once("error", reject);
+  dockerFixtureServer.listen(DOCKER_FIXTURE_SOCKET, resolvePromise);
+});
+chmodSync(DOCKER_FIXTURE_SOCKET, 0o660);
+after(async () => {
+  await new Promise((resolvePromise) => dockerFixtureServer.close(resolvePromise));
+  rmSync(DOCKER_FIXTURE_DIRECTORY, { recursive: true, force: true });
+});
 
 function manifestValue() {
   return {
@@ -50,20 +68,37 @@ function manifestValue() {
   };
 }
 
-function composeConfig(overrides = {}) {
+function composeConfig(overrides = {}, options = {}) {
+  const project = options.project ?? "xingheng";
+  const environment = options.environment ?? "production";
   const service = (image) => ({
     image,
     pull_policy: "never",
-    environment: { XINGHENG_EXPECTED_REVISION: REVISION },
+    environment: {
+      XINGHENG_EXPECTED_REVISION: REVISION,
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: environment,
+      XINGHENG_COMPOSE_PROJECT: project,
+    },
   });
   return {
-    name: "xingheng",
+    name: project,
     services: {
       api: service(API_DIGEST),
       web: service(WEB_DIGEST),
       "strategy-history": service(STRATEGY_DIGEST),
+      "sqlite-restore": service(API_DIGEST),
+      "provider-identity-preflight": service(API_DIGEST),
+      ...(environment === "real-test" ? {
+        "sqlite-backup": service(API_DIGEST),
+        "sqlite-verify": service(API_DIGEST),
+        "strategy-backup": service(API_DIGEST),
+        "strategy-restore": service(API_DIGEST),
+        "strategy-verify": service(API_DIGEST),
+        "volume-initialize": service(API_DIGEST),
+      } : {}),
       "rwa-automation-backup": service(API_DIGEST),
       "rwa-automation-restore": service(API_DIGEST),
+      ...(environment === "real-test" ? { "rwa-automation-verify": service(API_DIGEST) } : {}),
       ...overrides,
     },
   };
@@ -102,7 +137,7 @@ function writeManifest(directory) {
 
 function writeFakeDocker(directory) {
   const path = join(directory, "docker");
-  writeFileSync(path, `#!/usr/bin/env node
+  const source = `#!${process.execPath}
 const { appendFileSync } = require("node:fs");
 const args = process.argv.slice(2);
 const revision = ${JSON.stringify(REVISION)};
@@ -116,9 +151,20 @@ const log = (value) => {
 const service = (image) => ({
   image,
   pull_policy: "never",
-  environment: { XINGHENG_EXPECTED_REVISION: revision },
+  environment: {
+    XINGHENG_EXPECTED_REVISION: revision,
+    XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+    XINGHENG_COMPOSE_PROJECT: "xingheng",
+  },
 });
-if (args[0] === "compose") {
+if (args[0] === "docker-cli-plugin-metadata") {
+  process.stdout.write(JSON.stringify({
+    SchemaVersion: "0.1.0",
+    Vendor: "Xingheng test fixture",
+    Version: "v0.0.0",
+    ShortDescription: "Docker Compose",
+  }));
+} else if (args[0] === "compose" || process.argv[1].endsWith("docker-compose")) {
   const command = args.find((arg) =>
     ["config", "up", "stop", "run", "exec", "ps", "logs", "down"].includes(arg));
   log("compose:" + command);
@@ -129,6 +175,8 @@ if (args[0] === "compose") {
         api: service(process.env.FAKE_COMPOSE_API_IMAGE || api),
         web: service(web),
         "strategy-history": service(strategy),
+        "sqlite-restore": service(api),
+        "provider-identity-preflight": service(api),
         "rwa-automation-backup": service(api),
         "rwa-automation-restore": service(api),
       },
@@ -149,6 +197,13 @@ if (args[0] === "compose") {
   process.stdout.write(revision + "\\n");
 } else if (args[0] === "ps") {
   log("container:ps");
+  const project = args.find((arg) => arg.startsWith("label=com.docker.compose.project="))
+    ?.split("=")
+    .at(-1);
+  if (process.env.FAKE_EXPECT_PROJECT && project !== process.env.FAKE_EXPECT_PROJECT) {
+    process.stderr.write("unexpected project filter\\n");
+    process.exit(2);
+  }
   const service = args.find((arg) => arg.startsWith("label=com.docker.compose.service="))
     ?.split("=")
     .at(-1);
@@ -171,8 +226,29 @@ if (args[0] === "compose") {
   process.stderr.write("unexpected fake docker command\\n");
   process.exit(2);
 }
-`, { mode: 0o755 });
+`;
+  writeFileSync(path, source, { mode: 0o755 });
+  const pluginDirectory = join(directory, ".docker", "cli-plugins");
+  mkdirSync(pluginDirectory, { recursive: true });
+  writeFileSync(join(pluginDirectory, "docker-compose"), source, { mode: 0o755 });
   return path;
+}
+
+function trustedDockerFixtureEnvironment(directory) {
+  const dockerCliPath = join(directory, "docker");
+  const composePluginPath = join(directory, ".docker", "cli-plugins", "docker-compose");
+  return {
+    NODE_ENV: "test",
+    XINGHENG_TEST_DOCKER_CLI_PATH: dockerCliPath,
+    XINGHENG_TEST_DOCKER_CLI_SHA256: sha256File(dockerCliPath),
+    XINGHENG_TEST_COMPOSE_PLUGIN_PATH: composePluginPath,
+    XINGHENG_TEST_COMPOSE_PLUGIN_SHA256: sha256File(composePluginPath),
+    XINGHENG_TEST_DOCKER_SOCKET_PATH: DOCKER_FIXTURE_SOCKET,
+  };
+}
+
+function sha256File(path) {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
 }
 
 test("accepts one exact full revision across every component", () => {
@@ -256,6 +332,37 @@ test("production Compose accepts only the exact manifest service mapping", () =>
       { ...composeConfig(), services: { ...composeConfig().services, extra: {} } },
     ),
     /topology is invalid/u,
+  );
+});
+
+test("real-test Compose accepts only its fixed project and manifest mapping", () => {
+  const config = composeConfig({}, {
+    project: "xingheng-real-test",
+    environment: "real-test",
+  });
+  assert.equal(validateRealTestComposeConfig(manifestValue(), config), REVISION);
+  assert.throws(
+    () => validateRealTestComposeConfig(manifestValue(), {
+      ...config,
+      name: "caller-controlled",
+    }),
+    /topology is invalid/u,
+  );
+  assert.throws(
+    () => validateRealTestComposeConfig(manifestValue(), {
+      ...config,
+      services: {
+        ...config.services,
+        api: {
+          ...config.services.api,
+          environment: {
+            ...config.services.api.environment,
+            XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+          },
+        },
+      },
+    }),
+    /release mapping is invalid/u,
   );
 });
 
@@ -476,7 +583,11 @@ test("image verification binds the manifest to the actual immutable image IDs", 
   try {
     const manifestPath = writeManifest(directory);
     writeFakeDocker(directory);
-    const env = { ...process.env, PATH: `${directory}:${process.env.PATH}` };
+    const env = {
+      ...process.env,
+      ...trustedDockerFixtureEnvironment(directory),
+      PATH: `${directory}:${process.env.PATH}`,
+    };
 
     const accepted = spawnSync(
       process.execPath,
@@ -512,6 +623,7 @@ test("container verification rejects a tampered runtime revision", () => {
         encoding: "utf8",
         env: {
           ...process.env,
+          ...trustedDockerFixtureEnvironment(directory),
           PATH: `${directory}:${process.env.PATH}`,
           FAKE_RUNTIME_REVISION: OTHER_REVISION,
         },
@@ -519,6 +631,30 @@ test("container verification rejects a tampered runtime revision", () => {
     );
     assert.notEqual(result.status, 0);
     assert.match(result.stderr, /runtime revision mismatch/u);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real-test container verification uses only the fixed real-test project", () => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-real-test-containers-"));
+  try {
+    const manifestPath = writeManifest(directory);
+    writeFakeDocker(directory);
+    const result = spawnSync(
+      process.execPath,
+      [VERIFIER, "containers-real-test", manifestPath],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ...trustedDockerFixtureEnvironment(directory),
+          PATH: `${directory}:${process.env.PATH}`,
+          FAKE_EXPECT_PROJECT: "xingheng-real-test",
+        },
+      },
+    );
+    assert.equal(result.status, 0, result.stderr);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -534,6 +670,7 @@ test("COMPOSE_FILE overrides fail before activation or restore reaches Docker", 
     writeFakeDocker(directory);
     const env = {
       ...process.env,
+      ...trustedDockerFixtureEnvironment(directory),
       PATH: `${directory}:${process.env.PATH}`,
       COMPOSE_ENV_FILE: envPath,
       COMPOSE_FILE: "compose.yaml:compose.build.yaml",
@@ -567,6 +704,7 @@ test("compact global overrides are rejected while logs follow remains available"
     writeFakeDocker(directory);
     const env = {
       ...process.env,
+      ...trustedDockerFixtureEnvironment(directory),
       PATH: `${directory}:${process.env.PATH}`,
       FAKE_DOCKER_LOG: logPath,
     };
@@ -582,14 +720,64 @@ test("compact global overrides are rejected while logs follow remains available"
     }
     assert.throws(() => readFileSync(logPath, "utf8"), /ENOENT/u);
 
-    const accepted = spawnSync("sh", [PRODUCTION_COMPOSE, "logs", "-f", "api"], {
-      cwd: REPO_ROOT,
-      encoding: "utf8",
-      env,
-    });
-    assert.equal(accepted.status, 0);
-    assert.equal(readFileSync(logPath, "utf8").trim(), "compose:logs");
+    const fixedEnv = join(REPO_ROOT, ".env.production");
+    assert.equal(existsSync(fixedEnv), false);
+    writeFileSync(
+      fixedEnv,
+      `XINGHENG_REVISION=${REVISION}\nDOMAIN=production.fixture.invalid\n`
+        + "REAL_TEST_DOMAIN=real-test.fixture.invalid\n",
+      { mode: 0o600, flag: "wx" },
+    );
+    try {
+      const accepted = spawnSync("sh", [PRODUCTION_COMPOSE, "logs", "-f", "api"], {
+        cwd: directory,
+        encoding: "utf8",
+        env,
+      });
+      assert.equal(accepted.status, 0, accepted.stderr);
+      assert.equal(readFileSync(logPath, "utf8").trim(), "compose:logs");
+    } finally {
+      rmSync(fixedEnv, { force: true });
+    }
   } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("fixed Compose environment rejects symlink, hardlink, and permissive mode before Docker", () => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-compose-env-boundary-"));
+  const fixedEnv = join(REPO_ROOT, ".env.production");
+  const source = join(directory, "source.env");
+  const logPath = join(directory, "docker.log");
+  try {
+    assert.equal(existsSync(fixedEnv), false);
+    writeFileSync(source, `XINGHENG_REVISION=${REVISION}\n`, { mode: 0o600 });
+    writeFakeDocker(directory);
+    const invoke = () => spawnSync("sh", [PRODUCTION_COMPOSE, "config"], {
+      cwd: directory,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ...trustedDockerFixtureEnvironment(directory),
+        PATH: `${directory}:${process.env.PATH}`,
+        FAKE_DOCKER_LOG: logPath,
+      },
+    });
+
+    symlinkSync(source, fixedEnv);
+    assert.match(invoke().stderr, /boundary is invalid/u);
+    rmSync(fixedEnv);
+
+    linkSync(source, fixedEnv);
+    assert.match(invoke().stderr, /boundary is invalid/u);
+    rmSync(fixedEnv);
+    rmSync(source);
+
+    writeFileSync(fixedEnv, `XINGHENG_REVISION=${REVISION}\n`, { mode: 0o644, flag: "wx" });
+    assert.match(invoke().stderr, /boundary is invalid/u);
+    assert.equal(existsSync(logPath), false);
+  } finally {
+    rmSync(fixedEnv, { force: true });
     rmSync(directory, { recursive: true, force: true });
   }
 });
@@ -598,26 +786,34 @@ test("a post-start runtime mismatch stops the unverified release", () => {
   const directory = mkdtempSync(join(tmpdir(), "xingheng-compose-runtime-"));
   try {
     const manifestPath = writeManifest(directory);
-    const envPath = join(directory, "production.env");
+    const envPath = join(REPO_ROOT, ".env.production");
     const logPath = join(directory, "docker.log");
-    writeFileSync(envPath, `XINGHENG_REVISION=${REVISION}\n`, { mode: 0o600 });
+    assert.equal(existsSync(envPath), false);
+    writeFileSync(
+      envPath,
+      `XINGHENG_REVISION=${REVISION}\nDOMAIN=production.fixture.invalid\n`
+        + "REAL_TEST_DOMAIN=real-test.fixture.invalid\n",
+      { mode: 0o600, flag: "wx" },
+    );
     writeFakeDocker(directory);
     const result = spawnSync("sh", ["scripts/activate-release.sh", manifestPath], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
         ...process.env,
+        ...trustedDockerFixtureEnvironment(directory),
         PATH: `${directory}:${process.env.PATH}`,
-        COMPOSE_ENV_FILE: envPath,
         FAKE_DOCKER_LOG: logPath,
         FAKE_RUNTIME_REVISION: OTHER_REVISION,
       },
     });
     assert.notEqual(result.status, 0);
+    assert.equal(existsSync(logPath), true, result.stderr);
     const events = readFileSync(logPath, "utf8").trim().split("\n");
-    assert.ok(events.includes("compose:up"));
+    assert.ok(events.includes("compose:up"), `${result.stderr}\n${events.join(",")}`);
     assert.equal(events.at(-1), "compose:stop");
   } finally {
+    rmSync(join(REPO_ROOT, ".env.production"), { force: true });
     rmSync(directory, { recursive: true, force: true });
   }
 });

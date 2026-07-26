@@ -35,10 +35,12 @@ COPY --from=build /app/.build-revision /app/.build-revision
 COPY --from=build /app/dist-server ./dist-server
 COPY scripts ./scripts
 COPY scripts/verify-runtime-revision.sh /usr/local/bin/verify-runtime-revision
+COPY deploy/rwa-automation-current.json /app/rwa-automation-current.json
 COPY deploy/rwa-automation-current.json /app/rwa-automation-data/current.json
 RUN mkdir -p /app/data /app/strategy-data /app/rwa-automation-data/generation-initial \
     /app/rwa-automation-backups /app/rwa-automation-lock /backups \
   && chmod 0555 /usr/local/bin/verify-runtime-revision \
+  && chmod 0444 /app/rwa-automation-current.json \
   && chmod 0700 /app/rwa-automation-data /app/rwa-automation-data/generation-initial \
     /app/rwa-automation-backups /app/rwa-automation-lock \
   && chmod 0600 /app/rwa-automation-data/current.json \
@@ -82,6 +84,7 @@ LABEL org.opencontainers.image.revision="$XINGHENG_REVISION"
 COPY --from=build /app/.build-revision /app/.build-revision
 COPY scripts/verify-runtime-revision.sh /usr/local/bin/verify-runtime-revision
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
+COPY deploy/Caddyfile.real-test /etc/caddy/Caddyfile.real-test
 COPY --from=build /app/dist /srv
 RUN chmod 0555 /usr/local/bin/verify-runtime-revision
 ENTRYPOINT ["/usr/local/bin/verify-runtime-revision"]

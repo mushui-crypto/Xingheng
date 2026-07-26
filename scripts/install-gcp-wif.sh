@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 source_dir="${1:-}"
 audience_file="${2:-}"

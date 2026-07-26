@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 [ "${1:-}" = "rollback" ] || { echo "usage: $0 rollback" >&2; exit 2; }
-compose_env="${COMPOSE_ENV_FILE:-.env.production}"
 . scripts/load-release-manifest.sh
 verify_production_compose >/dev/null
 node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null

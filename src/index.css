@@ -114,14 +114,27 @@ textarea {
       "Segoe UI", sans-serif;
   }
 
+  .xh-shell-with-environment-bar .xh-account-workspace {
+    min-height: calc(100vh - 100px);
+  }
+
   .xh-account-layout {
     @apply grid min-h-[calc(100vh-60px)] min-w-0 gap-0 items-stretch;
     grid-template-columns: 300px minmax(0, 1fr);
   }
 
+  .xh-shell-with-environment-bar .xh-account-layout {
+    min-height: calc(100vh - 100px);
+  }
+
   .xh-account-sidebar {
     @apply min-w-0 border-r border-[#2b2b2b] bg-black px-4 py-8;
     min-height: calc(100vh - 60px);
+  }
+
+  .xh-shell-with-environment-bar .xh-account-sidebar {
+    top: 100px;
+    min-height: calc(100vh - 100px);
   }
 
   .xh-account-content {

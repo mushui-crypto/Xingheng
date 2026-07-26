@@ -1,12 +1,16 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 release_manifest="${1:-}"
-compose_env="${COMPOSE_ENV_FILE:-.env.production}"
 [ -n "$release_manifest" ] || {
   echo "usage: $0 RELEASE_MANIFEST_PATH" >&2
   exit 2
 }
+if [ "$(/usr/bin/id -u)" -eq 0 ] && [ "$release_manifest" != deploy/release-manifest.json ]; then
+  echo "standard activation requires the canonical release manifest" >&2
+  exit 78
+fi
 RELEASE_MANIFEST_FILE="$release_manifest"
 export RELEASE_MANIFEST_FILE
 
@@ -14,5 +18,41 @@ export RELEASE_MANIFEST_FILE
 
 verify_production_compose
 node scripts/verify-deployment-revision.mjs images "$release_manifest"
+
+lifecycle_operation=""
+lifecycle_prepared=false
+if [ "$(/usr/bin/id -u)" -eq 0 ] \
+  && [ "${XINGHENG_FIRST_VERIFIED_ACTIVATION:-false}" != true ]; then
+  [ -f /var/lib/xingheng/verified-release-established ] || {
+    echo "standard activation requires the one-way verified release marker" >&2
+    exit 78
+  }
+  lifecycle_operation="$(
+    node scripts/releaseLifecycleTransaction.mjs prepare \
+      "$release_manifest" "$compose_env"
+  )"
+  lifecycle_prepared=true
+fi
+
+activation_exit() {
+  status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$status" -ne 0 ] && [ "$lifecycle_prepared" = true ]; then
+    stop_unverified_release || true
+    if ! node scripts/releaseLifecycleTransaction.mjs incident \
+      "$lifecycle_operation" activation_failed >/dev/null; then
+      status=1
+    fi
+  fi
+  exit "$status"
+}
+trap activation_exit EXIT HUP INT TERM
+
 production_compose up -d api web
 verify_release_containers
+if [ "$lifecycle_prepared" = true ]; then
+  node scripts/releaseLifecycleTransaction.mjs complete \
+    "$lifecycle_operation" "$release_manifest" "$compose_env" >/dev/null
+  lifecycle_prepared=false
+fi
+trap - EXIT HUP INT TERM

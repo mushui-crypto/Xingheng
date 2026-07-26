@@ -1,9 +1,16 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 base_url="${1:-https://${DOMAIN:-}}"
 [ -n "$base_url" ] || { echo "usage: $0 https://trade.example.com" >&2; exit 2; }
-compose_env="${COMPOSE_ENV_FILE:-.env.production}"
+case "$base_url" in
+  https://[A-Za-z0-9]*.[A-Za-z0-9.-]*) ;;
+  *) echo "smoke URL must be a fixed HTTPS origin without credentials or path" >&2; exit 78 ;;
+esac
+case "${base_url#https://}" in
+  *[:/@?#]*|*..*|.*|*.) echo "smoke URL is invalid" >&2; exit 78 ;;
+esac
 . scripts/load-release-manifest.sh
 verify_production_compose >/dev/null
 node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null

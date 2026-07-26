@@ -32,6 +32,7 @@ import {
   validateResolvedRecoveryCompose,
   verifyLegacyBridgeFiles,
 } from "./legacyReleaseBridge.mjs";
+import { execTrustedDockerSync } from "./trustedDockerRuntime.mjs";
 
 const VERIFIED_RELEASE_MARKER = "/var/lib/xingheng/verified-release-established";
 
@@ -46,7 +47,13 @@ function run(command, args, options = {}) {
 }
 
 function docker(args, options) {
-  return run("docker", args, options);
+  const output = execTrustedDockerSync(args, {
+    encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  });
+  return typeof output === "string" ? output.trim() : "";
 }
 
 function runningContainer(service) {
@@ -458,6 +465,13 @@ function usage() {
 
 try {
   const [command, ...args] = process.argv.slice(2);
+  if (
+    process.env.NODE_ENV !== "test"
+    && ["capture", "restore", "mark-established"].includes(command)
+    && process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+  ) {
+    throw new Error("legacy bridge mutation requires the trusted production operation lock");
+  }
   if (command === "capture" && args.length === 2) {
     capture(args[0], args[1]);
   } else if (command === "verify" && args.length === 1) {

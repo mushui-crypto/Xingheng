@@ -20,10 +20,17 @@ import {
   RWA_AUTOMATION_LOCK_PATH,
   RWA_AUTOMATION_LOCK_ROOT,
 } from "../modules/arbitrage/automation/RwaAutomationExecutionLease";
+import {
+  loadDeploymentIdentity,
+  type DeploymentEnvironment,
+} from "./deploymentEnvironment";
 
 export type RuntimeConfig = {
   port: number;
   isProduction: boolean;
+  deploymentEnvironment: DeploymentEnvironment;
+  composeProject: string;
+  publicDomain: string;
   appPublicUrl: string;
   adminEmail: string;
   adminPassword: string;
@@ -50,9 +57,13 @@ export function loadRuntimeConfig(): RuntimeConfig {
   const configuredAppPublicUrl = process.env.APP_PUBLIC_URL?.trim() ?? "";
   const appPublicUrl = normalizeAppPublicUrl(configuredAppPublicUrl || (!isProduction && domain ? `https://${domain}` : "http://localhost:5173"));
   const smtp = loadSmtpConfig();
+  const deployment = loadDeploymentIdentity();
   const config = {
     port,
     isProduction,
+    deploymentEnvironment: deployment.environment,
+    composeProject: deployment.composeProject,
+    publicDomain: deployment.publicDomain,
     appPublicUrl,
     adminEmail,
     adminPassword,
@@ -146,7 +157,7 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (missing.length) {
     throw new Error(`生产环境缺少必填配置：${missing.join("、")}。`);
   }
-  const domain = process.env.DOMAIN!.trim();
+  const domain = config.publicDomain;
   if (
     domain.includes("://") ||
     domain.includes("/") ||
@@ -219,8 +230,18 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (process.env.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms") {
     throw new Error("生产环境 RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。");
   }
-  if (process.env.RWA_GCP_KMS_KEY_NAME !== RWA_GCP_KMS_KEY_NAME) {
-    throw new Error("生产环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey 完整资源名。");
+  const kmsKeyName = process.env.RWA_GCP_KMS_KEY_NAME ?? "";
+  if (config.deploymentEnvironment === "production" && kmsKeyName !== RWA_GCP_KMS_KEY_NAME) {
+    throw new Error("正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey 完整资源名。");
+  }
+  if (
+    config.deploymentEnvironment === "real-test"
+    && (
+      kmsKeyName === RWA_GCP_KMS_KEY_NAME
+      || !/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z0-9-]+\/keyRings\/[a-zA-Z0-9_-]{1,63}\/cryptoKeys\/[a-zA-Z0-9_-]{1,63}$/u.test(kmsKeyName)
+    )
+  ) {
+    throw new Error("真实测试环境必须使用独立且有效的 GCP KMS CryptoKey。");
   }
   if (process.env.RWA_AUTOMATION_DATA_DIR !== RWA_AUTOMATION_DATA_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径。");

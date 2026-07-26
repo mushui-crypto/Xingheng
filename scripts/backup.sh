@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
-compose_env="${COMPOSE_ENV_FILE:-.env.production}"
 . scripts/load-release-manifest.sh
 verify_production_compose >/dev/null
 verify_release_containers

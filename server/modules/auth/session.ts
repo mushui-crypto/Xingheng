@@ -1,14 +1,20 @@
 import type express from "express";
+import { loadDeploymentIdentity } from "../../config/deploymentEnvironment";
 
-export const userCookieName = "xh_user_session";
-export const adminCookieName = "xh_admin_session";
+export function userCookieName() {
+  return loadDeploymentIdentity().userCookieName;
+}
+
+export function adminCookieName() {
+  return loadDeploymentIdentity().adminCookieName;
+}
 
 export function getUserBearerToken(request: express.Request) {
-  return getRequestToken(request, userCookieName);
+  return getRequestToken(request, userCookieName());
 }
 
 export function getAdminBearerToken(request: express.Request) {
-  return getRequestToken(request, adminCookieName);
+  return getRequestToken(request, adminCookieName());
 }
 
 export function setSessionCookie(

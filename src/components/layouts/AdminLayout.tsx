@@ -1,6 +1,7 @@
 import { BarChart3, Eye, ListChecks, ListTree, LogOut, RadioTower, UsersRound } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
+import { RuntimeEnvironmentStatusBar } from "../../features/runtimeEnvironment/RuntimeEnvironmentUi";
 import { useAdminAuthStore } from "../../store/adminAuthStore";
 
 type AdminLayoutProps = {
@@ -27,50 +28,53 @@ export function AdminLayout({ children }: AdminLayoutProps) {
 
   return (
     <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
-      <header className="sticky top-0 z-30 border-b border-white/15 bg-black/92 backdrop-blur">
-        <div className="flex w-full min-w-0 flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
-          <div className="flex items-center justify-between gap-4">
-            <div className="flex items-center gap-3">
-              <img
-                alt="星衡 logo"
-                className="h-9 w-9 border border-white/20 object-contain"
-                src="/assets/xingheng-logo@2x.png"
-              />
-              <div>
-                <p className="text-sm font-semibold uppercase tracking-[0.26em]">星衡</p>
-                <p className="text-[11px] uppercase tracking-[0.16em] text-muted">Admin control</p>
+      <div className="sticky top-0 z-30">
+        <RuntimeEnvironmentStatusBar />
+        <header className="border-b border-white/15 bg-black/92 backdrop-blur">
+          <div className="flex w-full min-w-0 flex-col gap-3 px-4 py-3 md:px-8 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex items-center gap-3">
+                <img
+                  alt="星衡 logo"
+                  className="h-9 w-9 border border-white/20 object-contain"
+                  src="/assets/xingheng-logo@2x.png"
+                />
+                <div>
+                  <p className="text-sm font-semibold uppercase tracking-[0.26em]">星衡</p>
+                  <p className="text-[11px] uppercase tracking-[0.16em] text-muted">Admin control</p>
+                </div>
               </div>
+              <button
+                className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black lg:hidden"
+                onClick={handleLogout}
+              >
+                <LogOut size={15} />
+                退出
+              </button>
             </div>
-            <button
-              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black lg:hidden"
-              onClick={handleLogout}
-            >
-              <LogOut size={15} />
-              退出
-            </button>
+            <nav className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
+              <TopLink to="/admin/dashboard" icon={<BarChart3 size={16} />} label="数据概览" />
+              <TopLink to="/admin/users" icon={<UsersRound size={16} />} label="用户管理" />
+              <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
+              <TopLink to="/admin/trading" icon={<ListChecks size={16} />} label="交易查询" />
+              <TopLink to="/admin/real-trading" icon={<RadioTower size={16} />} label="真实交易运维" />
+              <TopLink to="/admin/arbitrage-automation" icon={<Eye size={16} />} label="套利 Shadow" />
+            </nav>
+            <div className="hidden items-center gap-4 lg:flex">
+              <p className="text-xs uppercase tracking-[0.16em] text-muted">
+                ROLE <span className="text-white">管理员</span>
+              </p>
+              <button
+                className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black"
+                onClick={handleLogout}
+              >
+                <LogOut size={15} />
+                退出
+              </button>
+            </div>
           </div>
-          <nav className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto pb-1 lg:justify-center lg:pb-0">
-            <TopLink to="/admin/dashboard" icon={<BarChart3 size={16} />} label="数据概览" />
-            <TopLink to="/admin/users" icon={<UsersRound size={16} />} label="用户管理" />
-            <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
-            <TopLink to="/admin/trading" icon={<ListChecks size={16} />} label="交易查询" />
-            <TopLink to="/admin/real-trading" icon={<RadioTower size={16} />} label="真实交易运维" />
-            <TopLink to="/admin/arbitrage-automation" icon={<Eye size={16} />} label="套利 Shadow" />
-          </nav>
-          <div className="hidden items-center gap-4 lg:flex">
-            <p className="text-xs uppercase tracking-[0.16em] text-muted">
-              ROLE <span className="text-white">管理员</span>
-            </p>
-            <button
-              className="inline-flex items-center gap-2 border border-white/30 px-3 py-2 text-xs font-semibold uppercase tracking-[0.18em] text-white transition hover:bg-white hover:text-black"
-              onClick={handleLogout}
-            >
-              <LogOut size={15} />
-              退出
-            </button>
-          </div>
-        </div>
-      </header>
+        </header>
+      </div>
       <main className="mx-auto min-w-0 max-w-[1480px] px-4 py-5 md:px-8 md:py-8">{children}</main>
     </div>
   );

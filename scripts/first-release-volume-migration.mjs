@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import { verifyLegacyBridgeFiles } from "./legacyReleaseBridge.mjs";
+import { execTrustedDockerSync } from "./trustedDockerRuntime.mjs";
 
 const IMAGE_PATTERN = /^sha256:[0-9a-f]{64}$/u;
 const PROJECT = "xingheng";
@@ -27,12 +28,23 @@ function run(command, args, options = {}) {
 }
 
 function docker(args, options) {
-  return run("docker", args, options);
+  return execTrustedDockerSync(args, {
+    encoding: "utf8",
+    maxBuffer: 8 * 1024 * 1024,
+    stdio: ["ignore", "pipe", "pipe"],
+    ...options,
+  }).trim();
 }
 
 function requireControlledRoot() {
   if (process.env.NODE_ENV !== "test" && process.getuid?.() !== 0) {
     throw new Error("first release volume migration requires the controlled root operator");
+  }
+  if (
+    process.env.NODE_ENV !== "test"
+    && process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+  ) {
+    throw new Error("first release volume migration requires the trusted production operation lock");
   }
 }
 

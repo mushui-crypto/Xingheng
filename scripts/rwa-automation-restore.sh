@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+. "${0%/*}/trusted-operation-preamble.sh"
 
 backup_name="${1:-}"
 case "$backup_name" in
@@ -11,7 +12,6 @@ if [ "${RWA_AUTOMATION_RESTORE_VALIDATE_ONLY:-false}" = "true" ]; then
   exit 0
 fi
 
-compose_env="${COMPOSE_ENV_FILE:-.env.production}"
 . scripts/load-release-manifest.sh
 verify_production_compose >/dev/null
 node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null

@@ -6,9 +6,12 @@ services:
     pull_policy: never
     user: "20001:20001"
     env_file:
-      - "${COMPOSE_ENV_FILE:-.env.production}"
+      - "${XINGHENG_COMPOSE_ENV_FD:?fixed Compose env descriptor is required}"
     environment:
       NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       WEB_CONCURRENCY: "1"
       API_PORT: "8787"
@@ -51,7 +54,7 @@ services:
         - CMD
         - node
         - -e
-        - fetch('http://127.0.0.1:8787/api/health').then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))
+        - fetch('http://127.0.0.1:8787/api/health',{cache:'no-store'}).then(async r=>{const v=await r.json();if(!r.ok||r.headers.get('cache-control')!=='no-store'||v.deploymentEnvironment!=='production'||v.composeProject!=='xingheng'||v.revision!==process.env.XINGHENG_EXPECTED_REVISION)throw Error('identity')}).catch(()=>process.exit(1))
       interval: 15s
       timeout: 5s
       start_period: 30s
@@ -61,7 +64,10 @@ services:
     image: "${XINGHENG_WEB_IMAGE:?XINGHENG_WEB_IMAGE must come from the release manifest}"
     pull_policy: never
     environment:
-      DOMAIN: "${DOMAIN:?DOMAIN is required; use --env-file .env.production}"
+      DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
+      REAL_TEST_DOMAIN: "${REAL_TEST_DOMAIN:?REAL_TEST_DOMAIN is required for isolated real-test routing}"
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
     command:
       - /bin/sh
@@ -71,6 +77,16 @@ services:
       api:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -qO- --header "Host: $$DOMAIN" http://127.0.0.1/api/health |
+          grep -q '"production"'
+      interval: 15s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
     ports:
       - "80:80"
       - "443:443"
@@ -78,6 +94,11 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
+    networks:
+      default:
+      public_ingress:
+        aliases:
+          - production-web
 
   strategy-history:
     profiles:
@@ -86,6 +107,8 @@ services:
     pull_policy: never
     environment:
       NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
@@ -99,6 +122,69 @@ services:
       - run
       - research:ict:history
 
+  sqlite-restore:
+    profiles:
+      - sqlite-ops
+    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
+    pull_policy: never
+    user: "20001:20001"
+    environment:
+      NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+      TRADING_DB_PATH: /app/data/trading.sqlite
+    volumes:
+      - sqlite_data:/app/data
+      - sqlite_backups:/backups:ro
+    network_mode: none
+    read_only: true
+    cap_drop:
+      - ALL
+    restart: "no"
+    entrypoint:
+      - /app/scripts/sqlite-restore-production.sh
+
+  provider-identity-preflight:
+    profiles:
+      - provider-identity-preflight
+    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
+    pull_policy: never
+    user: "20001:20001"
+    env_file:
+      - "${XINGHENG_COMPOSE_ENV_FD:?fixed Compose env descriptor is required}"
+    environment:
+      NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
+      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
+      RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
+      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
+      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
+    volumes:
+      - rwa_automation_data:/app/rwa-automation-data:ro
+      - type: bind
+        source: /run/xingheng/gcp-wif
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=0700,uid=20001,gid=20001
+    restart: "no"
+    command:
+      - node
+      - dist-server/operations/rwa-provider-identity-preflight.js
+
   rwa-automation-backup:
     profiles:
       - rwa-automation-ops
@@ -107,6 +193,9 @@ services:
     user: "20001:20001"
     environment:
       NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
       RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
@@ -145,6 +234,9 @@ services:
     user: "20001:20001"
     environment:
       NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
       RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
@@ -184,3 +276,7 @@ volumes:
   rwa_automation_lock:
   caddy_data:
   caddy_config:
+
+networks:
+  public_ingress:
+    name: xingheng-public-ingress

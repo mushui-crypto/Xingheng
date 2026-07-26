@@ -30,8 +30,29 @@ const firstReleaseActivator = read("scripts/activate-first-verified-release.sh")
 const firstReleaseVolumeMigration = read("scripts/first-release-volume-migration.mjs");
 const releaseManifestLoader = read("scripts/load-release-manifest.sh");
 const productionCompose = read("scripts/production-compose.sh");
+const realTestCompose = read("scripts/real-test-compose.sh");
+const composeEnvironmentVerifier = read("scripts/verify-compose-environment-file.mjs");
+const trustedDockerRuntime = read("scripts/trustedDockerRuntime.mjs");
+const trustedOperationLauncher = read("scripts/trusted-operation-launcher.mjs");
+const trustedOperationPreamble = read("scripts/trusted-operation-preamble.sh");
+const trustedDockerCli = read("scripts/trusted-docker.mjs");
+const realTestCleanup = read("scripts/realTestCleanup.mjs");
+const cleanupTransactionStore = read("scripts/cleanupTransactionStore.mjs");
+const realTestCleanupWrapper = read("scripts/real-test-cleanup.sh");
+const realTestComposeConfig = read("compose.real-test.yaml");
+const realTestCaddy = read("deploy/Caddyfile.real-test");
+const dualEnvironmentTopology = read("scripts/dualEnvironmentTopology.mjs");
+const dualEnvironmentRunbook = read("deploy/PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md");
+const deploymentReadme = read("deploy/README.md");
+const stepZeroChecklist = read("deploy/STEP_0_PRODUCTION_CHECKLIST.md");
+const releaseLifecycle = read("scripts/releaseLifecycleTransaction.mjs");
+const releaseRollback = read("scripts/rollback-release.sh");
+const providerIdentityPreflight = read("server/operations/RwaProviderIdentityPreflight.ts");
+const providerIdentityPreflightCli = read("server/operations/rwaProviderIdentityPreflightCli.ts");
+const providerIdentityReceipts = read("scripts/providerIdentityReceipts.mjs");
 const legacyBridge = read("scripts/legacyReleaseBridge.mjs");
 const legacyBridgeCli = read("scripts/legacy-release-bridge.mjs");
+const legacyBridgeWrapper = read("scripts/legacy-release-bridge.sh");
 const wifBundle = read("scripts/gcpWifBundle.mjs");
 const wifInstaller = read("scripts/install-gcp-wif.sh");
 const releaseVolumeVerifier = read("scripts/verify-release-volume-boundaries.mjs");
@@ -51,11 +72,11 @@ const assertions = [
     "all release image targets must embed and enforce the immutable build revision",
   ],
   [
-    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 5
-      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 3
+    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 7
+      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 5
       && compose.includes("XINGHENG_WEB_IMAGE:?")
       && compose.includes("XINGHENG_STRATEGY_TOOLS_IMAGE:?")
-      && (compose.match(/pull_policy: never/g) ?? []).length === 5
+      && (compose.match(/pull_policy: never/g) ?? []).length === 7
       && !compose.includes("build:"),
     "production Compose must consume only manifest-pinned immutable release images",
   ],
@@ -69,9 +90,50 @@ const assertions = [
   [compose.includes("condition: service_healthy"), "web must wait for a healthy API"],
   [compose.includes('test -n "$$DOMAIN"'), "web must reject a missing domain"],
   [
-    (compose.match(/env_file:/g) ?? []).length === 1
-      && compose.includes('${COMPOSE_ENV_FILE:-.env.production}'),
-    "only API may receive the selected production secret env file",
+    (compose.match(/env_file:/g) ?? []).length === 2
+      && compose.includes("XINGHENG_COMPOSE_ENV_FD")
+      && composeEnvironmentVerifier.includes('"/proc/self/fd"')
+      && composeEnvironmentVerifier.includes("interpolationFdPath")
+      && composeEnvironmentVerifier.includes("serviceFdPath")
+      && composeEnvironmentVerifier.includes("sha256Descriptor"),
+    "only API and the read-only identity preflight may receive the same verified production environment file object",
+  ],
+  [
+    trustedDockerRuntime.includes('"/usr/bin/docker"')
+      && trustedDockerRuntime.includes('"/usr/libexec/docker/cli-plugins/docker-compose"')
+      && trustedDockerRuntime.includes('"/var/run/docker.sock"')
+      && trustedDockerRuntime.includes("O_NOFOLLOW")
+      && trustedDockerRuntime.includes("executableDescriptorPath")
+      && trustedDockerRuntime.includes("DOCKER_HOST")
+      && trustedDockerRuntime.includes("startsWith(\"DOCKER_\")")
+      && composeEnvironmentVerifier.includes("openTrustedDockerRuntime"),
+    "Docker and Compose must use one root-owned descriptor-bound local runtime",
+  ],
+  [
+    trustedOperationLauncher.includes("assertNoDockerControlEnvironment")
+      && trustedOperationLauncher.includes("assertTrustedReleaseRoot")
+      && trustedOperationLauncher.includes("acquireOperationLocks")
+      && trustedOperationLauncher.includes('HOME: "/root"')
+      && trustedOperationLauncher.includes('PATH: "/usr/sbin:/usr/bin:/sbin:/bin"')
+      && trustedOperationPreamble.includes("/usr/bin/env -i")
+      && trustedOperationPreamble.includes("NODE_TEST_CONTEXT")
+      && trustedOperationPreamble.includes("XINGHENG_TEST_")
+      && trustedDockerCli.includes("XINGHENG_TRUSTED_DOCKER_PURPOSE")
+      && trustedDockerCli.includes("validateReleaseBuildArguments")
+      && trustedDockerCli.includes("arguments are not allowlisted"),
+    "all root operations must enter through the minimal trusted launcher and the build Docker shim must remain internal",
+  ],
+  [
+    stepZeroChecklist.includes("cd /opt/xingheng-release/code")
+      && stepZeroChecklist.includes("/opt/xingheng-release/code/deploy/release-manifest.json")
+      && stepZeroChecklist.includes("/usr/bin/node scripts/install-trusted-operations.mjs install")
+      && stepZeroChecklist.includes("sudo ./scripts/activate-first-verified-release.sh")
+      && !stepZeroChecklist.includes("docker info")
+      && !stepZeroChecklist.includes("docker compose")
+      && !stepZeroChecklist.includes("first-release-volume-migration.mjs initialize")
+      && !deploymentReadme.includes("production_compose run --rm --no-deps --user")
+      && !deploymentReadme.includes("production_compose exec -T"),
+    "production runbooks must use only the trusted fixed operation entries",
   ],
   [compose.includes('DOMAIN: "${DOMAIN:?'), "web must receive only the interpolated public domain"],
   [compose.includes("sqlite_data:/app/data"), "SQLite must use its named volume"],
@@ -239,17 +301,102 @@ const assertions = [
       && releaseImageBuilder.includes('--platform "$platform"')
       && releaseImageBuilder.includes("{{.Os}}/{{.Architecture}}")
       && releaseImageBuilder.includes("write-manifest")
-      && releaseManifestLoader.includes("manifest-image")
+      && releaseManifestLoader.includes("manifest-values")
       && releaseManifestLoader.includes("verify_production_compose")
-      && productionCompose.includes("COMPOSE_FILE")
+      && productionCompose.includes("grep -Eq '^(COMPOSE_|DOCKER_")
       && productionCompose.includes("-f*|-p*")
       && productionCompose.includes("config|up|run|exec|stop|ps|logs|down")
-      && productionCompose.includes('-f "$repo_root/compose.yaml"')
-      && productionCompose.includes("-p xingheng")
+      && productionCompose.includes("verify-compose-environment-file.mjs")
+      && productionCompose.includes('production "$@"')
+      && composeEnvironmentVerifier.includes('"compose.yaml"')
+      && composeEnvironmentVerifier.includes('"xingheng"')
       && deploymentRevisionVerifier.includes("production Compose release mapping verified")
       && releaseActivator.includes('images "$release_manifest"')
       && releaseActivator.includes("verify_release_containers"),
     "release revision, image digests, and the final production Compose mapping must be verified around activation",
+  ],
+  [
+    realTestComposeConfig.includes("name: xingheng-real-test")
+      && productionCompose.includes('production "$@"')
+      && realTestCompose.includes('real-test "$@"')
+      && composeEnvironmentVerifier.includes('"xingheng-real-test"')
+      && composeEnvironmentVerifier.includes('"compose.real-test.yaml"')
+      && realTestCompose.includes("real-test Compose env file override is not allowed")
+      && !realTestComposeConfig.includes("\n    ports:")
+      && caddy.includes("real-test-web:80")
+      && realTestCaddy.includes("http://{$REAL_TEST_DOMAIN}")
+      && realTestCaddy.includes("reverse_proxy /api* api:8787"),
+    "production and real-test Compose identities and ingress routing must remain fixed",
+  ],
+  [
+    deploymentRevision.includes("validateRealTestComposeConfig")
+      && deploymentRevisionVerifier.includes("dual-compose")
+      && deploymentRevisionVerifier.includes("containers-real-test")
+      && dualEnvironmentTopology.includes("provider account fingerprint is shared")
+      && dualEnvironmentTopology.includes("deployment service mount mapping is invalid")
+      && realTestComposeConfig.includes('RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"')
+      && realTestComposeConfig.includes("/run/xingheng-real-test/gcp-wif")
+      && compose.includes("/run/xingheng/gcp-wif"),
+    "dual-environment topology must reject domain, account, mount, and execution-gate crossings",
+  ],
+  [
+    releaseVolumeBoundaries.includes("REAL_TEST_VOLUME_BOUNDARIES")
+      && releaseVolumeBoundaries.includes("validateRealTestRuntimeMounts")
+      && releaseVolumeVerifier.includes('first === "real-test"')
+      && dualEnvironmentRunbook.includes("real-test runtime"),
+    "real-test live volumes must reuse the strict owner, filesystem, mount, and lock verifier",
+  ],
+  [
+    realTestCleanup.includes("REAL_TEST_RESET_VOLUMES")
+      && realTestCleanup.includes("PRODUCTION_PROTECTED_VOLUMES")
+      && realTestCleanup.includes("production evidence changed")
+      && realTestCleanup.includes("sqlite-backup")
+      && realTestCleanup.includes("rwa-automation-backup")
+      && realTestCleanup.includes('"down", "--remove-orphans"')
+      && realTestCleanup.includes('"ps", "-aq"')
+      && realTestCleanup.includes("restoreRealTest")
+      && realTestCleanup.includes("incident_restore_failed")
+      && realTestCleanup.includes("productionContainers")
+      && realTestCleanup.includes("trading.sqlite-wal")
+      && realTestCleanup.includes("treeEntries")
+      && realTestComposeConfig.includes("sqlite-verify:")
+      && realTestComposeConfig.includes("rwa-automation-verify:")
+      && realTestCleanup.includes("constants.O_NOFOLLOW")
+      && cleanupTransactionStore.includes("constants.O_EXCL")
+      && realTestCleanup.includes("fstatSync")
+      && cleanupTransactionStore.includes("fchmodSync")
+      && realTestCleanup.includes("strategy-backup")
+      && realTestCleanup.includes("publishRecoveryAudit")
+      && realTestCleanupWrapper.includes("trusted-operation-launcher.mjs")
+      && dualEnvironmentRunbook.includes("DELETE-XINGHENG-REAL-TEST-DATA")
+      && packageJson.includes('"test:dual-environment"'),
+    "real-test cleanup must be allowlisted, backed up, audited, and production-preserving",
+  ],
+  [
+    packageJson.includes("rwa-provider-identity-preflight.js")
+      && compose.includes("provider-identity-preflight:")
+      && realTestComposeConfig.includes("provider-identity-preflight:")
+      && providerIdentityPreflight.includes("validateAccess()")
+      && providerIdentityPreflight.includes("provider_identity_mismatch")
+      && providerIdentityPreflight.includes('serverKillSwitch !== "true"')
+      && providerIdentityPreflightCli.includes("providerIdentityPreflightErrorCategory")
+      && providerIdentityReceipts.includes("same authoritative provider account")
+      && dualEnvironmentRunbook.includes("field-pending"),
+    "provider identity isolation must use two read-only authoritative receipts and remain field-pending until现场 verification",
+  ],
+  [
+    releaseActivator.includes("releaseLifecycleTransaction.mjs prepare")
+      && releaseActivator.includes("releaseLifecycleTransaction.mjs complete")
+      && releaseActivator.includes("releaseLifecycleTransaction.mjs incident")
+      && firstReleaseActivator.includes("releaseLifecycleTransaction.mjs establish")
+      && releaseRollback.includes("releaseLifecycleTransaction.mjs rollback-values")
+      && releaseRollback.includes("releaseLifecycleTransaction.mjs restore-environment")
+      && releaseRollback.includes("releaseLifecycleTransaction.mjs verify-rollback-runtime")
+      && releaseRollback.includes("releaseLifecycleTransaction.mjs rolled-back")
+      && releaseLifecycle.includes("release lifecycle has an unresolved operation")
+      && releaseLifecycle.includes("release lifecycle mutation requires the trusted production operation lock")
+      && trustedOperationLauncher.includes('"rollback-release.sh"'),
+    "verified first release, upgrade failure, and fixed rollback must share one durable locked lifecycle",
   ],
   [
     packageJson.includes('"test:release-bridge"')
@@ -268,7 +415,10 @@ const assertions = [
       && legacyBridgeCli.includes("verified release must use an independent environment file")
       && legacyBridgeCli.includes("VERIFIED_RELEASE_MARKER")
       && legacyBridgeCli.includes("O_EXCL")
-      && legacyBridgeCli.includes("O_NOFOLLOW"),
+      && legacyBridgeCli.includes("O_NOFOLLOW")
+      && legacyBridgeCli.includes("legacy bridge mutation requires the trusted production operation lock")
+      && legacyBridgeWrapper.includes("trusted-operation-preamble.sh")
+      && trustedOperationLauncher.includes('"legacy-release-bridge.sh"'),
     "the one-time legacy bridge must freeze recoverable images, SQLite evidence, and a one-way marker",
   ],
   [
@@ -315,6 +465,8 @@ const assertions = [
       && wifInstaller.includes("mount --move")
       && wifInstaller.includes('umount "$target"')
       && wifInstaller.includes("verify-gcp-wif-bundle.mjs installed")
+      && wifInstaller.includes("trusted-operation-preamble.sh")
+      && trustedOperationLauncher.includes('"install-gcp-wif.sh"')
       && activationPreflight.includes('serverKillSwitch() !== "true"')
       && activationPreflight.includes("credential_key_provider_unavailable"),
     "WIF installation and activation KMS health must use the frozen mTLS, tmpfs, ownership, and fail-closed boundaries",

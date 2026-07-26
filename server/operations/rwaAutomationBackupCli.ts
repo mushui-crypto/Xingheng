@@ -24,6 +24,11 @@ try {
     assertBackupFileName(fileName);
     const result = await service.restoreBackup(fileName);
     process.stdout.write(`restored ${result.backupId}\n`);
+  } else if (operation === "verify") {
+    const fileName = process.env.RWA_AUTOMATION_RESTORE_FILE ?? "";
+    assertBackupFileName(fileName);
+    const result = await service.verifyBackup(fileName);
+    process.stdout.write(`verified ${result.backupId} ${result.fileCount} ${result.plaintextBytes}\n`);
   } else if (operation === "rollback") {
     service.rollbackRestore();
     process.stdout.write("rollback complete\n");

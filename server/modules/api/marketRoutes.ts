@@ -3,13 +3,24 @@ import type { MarketSymbol, MarketTick } from "../../types";
 import type { TradingStore } from "../../storage/TradingStore";
 import type { HyperliquidMarketService } from "../market/HyperliquidMarketService";
 import { normalizeInterval, normalizeLimit, normalizeSymbol, supportedIntervals } from "../market/marketConfig";
+import type { DeploymentEnvironment } from "../../config/deploymentEnvironment";
 
 const editableMarketSymbols = new Map<string, MarketSymbol>();
 
-export function registerMarketRoutes(app: express.Express, market: HyperliquidMarketService, store?: TradingStore) {
+export function registerMarketRoutes(
+  app: express.Express,
+  market: HyperliquidMarketService,
+  store?: TradingStore,
+  deployment?: {
+    environment: DeploymentEnvironment;
+    composeProject: string;
+    revision: string;
+  },
+) {
   syncCatalog(market, store);
 
   app.get("/api/health", (_request, response) => {
+    response.setHeader("Cache-Control", "no-store");
     response.json({
       ok: true,
       source: "hyperliquid",
@@ -17,6 +28,9 @@ export function registerMarketRoutes(app: express.Express, market: HyperliquidMa
       symbolCount: getMarketSymbols().length,
       intervals: supportedIntervals,
       storage: "memory",
+      deploymentEnvironment: deployment?.environment ?? "development",
+      composeProject: deployment?.composeProject ?? "development",
+      revision: deployment?.revision ?? "development",
     });
   });
 

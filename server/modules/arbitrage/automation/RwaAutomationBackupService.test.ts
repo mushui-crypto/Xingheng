@@ -60,6 +60,17 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
     assert.doesNotMatch(rawBackup, new RegExp(recoveryMarker));
     assert.doesNotMatch(rawBackup, /challenge-secret-marker/);
     assert.equal((await stat(join(fixture.backupRoot, result.fileName))).mode & 0o777, 0o600);
+    const pointerBeforeVerify = await readFile(
+      join(fixture.dataRoot, RWA_AUTOMATION_CURRENT_POINTER),
+      "utf8",
+    );
+    const verified = await fixture.service.verifyBackup(result.fileName);
+    assert.equal(verified.backupId, result.backupId);
+    assert.equal(verified.fileCount, result.fileCount);
+    assert.equal(
+      await readFile(join(fixture.dataRoot, RWA_AUTOMATION_CURRENT_POINTER), "utf8"),
+      pointerBeforeVerify,
+    );
 
     await overwriteCurrentState(fixture, { marker: "newer-state-that-will-be-rollback" });
     const restored = await fixture.service.restoreBackup(result.fileName);
