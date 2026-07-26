@@ -3,9 +3,11 @@ import {
   openTrustedDockerRuntime,
   trustedDockerReceipt,
   trustedExecutableInvocation,
+  validateTrustedReleaseBuildDockerArguments,
   verifyTrustedDockerRuntime,
 } from "./trustedDockerRuntime.mjs";
 import { spawnSync } from "node:child_process";
+import { inheritedOperationLocks } from "./operationLocks.mjs";
 
 const args = process.argv.slice(2);
 if (args.length === 0) {
@@ -14,16 +16,20 @@ if (args.length === 0) {
 }
 
 try {
+  const testInvocation = process.getuid?.() !== 0
+    && process.env.NODE_ENV === "test"
+    && process.env.NODE_TEST_CONTEXT === "child-v8";
   if (
-    process.env.NODE_ENV !== "test"
+    !testInvocation
     && (
-      process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+      process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "release-build"
       || process.env.XINGHENG_TRUSTED_DOCKER_PURPOSE !== "release-build"
     )
   ) {
     throw new Error("trusted Docker command is internal to the locked release build");
   }
-  validateReleaseBuildArguments(args);
+  if (!testInvocation) inheritedOperationLocks("release-build");
+  validateTrustedReleaseBuildDockerArguments(args, process.env);
   const runtime = openTrustedDockerRuntime("docker", process.env);
   try {
     console.error(trustedDockerReceipt(runtime, "docker", "validated"));
@@ -41,29 +47,4 @@ try {
 } catch (error) {
   console.error(error instanceof Error ? error.message : "trusted Docker command failed");
   process.exit(1);
-}
-
-function validateReleaseBuildArguments(values) {
-  if (
-    values[0] === "build"
-    && values.length === 10
-    && values[1] === "--build-arg"
-    && /^XINGHENG_REVISION=[a-f0-9]{40}$/u.test(values[2])
-    && values[3] === "--target"
-    && ["api", "web", "strategy-tools"].includes(values[4])
-    && values[5] === "--platform"
-    && values[6] === "linux/amd64"
-    && values[7] === "--tag"
-    && new RegExp(`^xingheng-${values[4]}:[a-f0-9]{40}$`, "u").test(values[8])
-    && values[9].startsWith("/tmp/xingheng-release.")
-  ) return;
-  if (
-    values.length === 5
-    && values[0] === "image"
-    && values[1] === "inspect"
-    && values[2] === "--format"
-    && ["{{.Id}}", "{{.Os}}/{{.Architecture}}"].includes(values[3])
-    && /^xingheng-(?:api|web|strategy-tools):[a-f0-9]{40}$/u.test(values[4])
-  ) return;
-  throw new Error("trusted Docker release-build arguments are not allowlisted");
 }

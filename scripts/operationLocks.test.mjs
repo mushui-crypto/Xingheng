@@ -29,11 +29,21 @@ test("operation locks enforce global then environment exclusion", (t) => {
         () => acquireOperationLocks("real-test", { testMode: true, lockRoot: root }),
         /already held/u,
       );
+      assert.throws(
+        () => acquireOperationLocks("release-build", { testMode: true, lockRoot: root }),
+        /already held/u,
+      );
     } finally {
       first.close();
     }
     const second = acquireOperationLocks("production", { testMode: true, lockRoot: root });
     second.close();
+    const build = acquireOperationLocks("release-build", { testMode: true, lockRoot: root });
+    assert.deepEqual(build.receipts.map((item) => item.path.split("/").at(-1)), [
+      "release-global.lock",
+      "release-build.lock",
+    ]);
+    build.close();
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

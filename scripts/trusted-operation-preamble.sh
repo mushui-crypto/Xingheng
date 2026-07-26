@@ -18,13 +18,29 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
     echo "trusted production operation environment is not allowed" >&2
     exit 78
   fi
+  case "$xingheng_entry_repo_root" in
+    /opt/xingheng-release/candidates/*/code)
+      xingheng_expected_operation=release-build
+      [ "${0##*/}" = build-release-images.sh ] || {
+        echo "trusted candidate operation entry is invalid" >&2
+        exit 78
+      }
+      ;;
+    /opt/xingheng-release/code)
+      xingheng_expected_operation=production
+      ;;
+    *)
+      echo "trusted operation root is invalid" >&2
+      exit 78
+      ;;
+  esac
   case "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" in
-    production) ;;
+    "$xingheng_expected_operation") ;;
     "")
       exec /usr/bin/env -i \
         HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
         /usr/bin/node "$xingheng_entry_script_dir/trusted-operation-launcher.mjs" \
-        production "scripts/${0##*/}" "$@"
+        "$xingheng_expected_operation" "scripts/${0##*/}" "$@"
       ;;
     *)
       echo "trusted production operation lock context is invalid" >&2

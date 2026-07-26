@@ -10,7 +10,7 @@ import {
   readSync,
   realpathSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import {
   acquireOperationLocks,
 } from "./operationLocks.mjs";
@@ -21,31 +21,46 @@ import {
   trustedExecutableInvocation,
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
+import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
 
-const environment = process.argv[2];
+const operation = process.argv[2];
 const entryArgument = process.argv[3];
 const args = process.argv.slice(4);
 
 try {
-  if (!["production", "real-test"].includes(environment) || !entryArgument) usage();
+  if (!["production", "real-test", "release-build"].includes(operation) || !entryArgument) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
   }
   assertNoDockerControlEnvironment(process.env);
-  if (process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== undefined) {
+  if (
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== undefined
+    || process.env.XINGHENG_RELEASE_CANDIDATE_REVISION !== undefined
+    || process.env.XINGHENG_TRUSTED_DOCKER_PURPOSE !== undefined
+  ) {
     throw new Error("nested trusted operation launcher is not allowed");
   }
-  const root = assertTrustedReleaseRoot(new URL("../", import.meta.url).pathname);
+  const currentRoot = new URL("../", import.meta.url).pathname;
+  const candidateRevision = operation === "release-build"
+    ? basename(dirname(resolve(currentRoot)))
+    : null;
+  const root = operation === "release-build"
+    ? assertTrustedReleaseCandidateRoot(currentRoot, candidateRevision).root
+    : assertTrustedReleaseRoot(currentRoot);
+  if (candidateRevision !== null) {
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = "release-build";
+    process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+  }
   const entry = realpathSync(resolve(root, entryArgument));
-  if (
-    !entry.startsWith(`${root}/scripts/`)
-    || ![
+  const entryName = entry.slice(`${root}/scripts/`.length);
+  const allowedEntries = operation === "release-build"
+    ? ["build-release-images.sh"]
+    : [
       "production-compose.sh",
       "real-test-compose.sh",
       "real-test-cleanup.sh",
       "activate-release.sh",
       "activate-first-verified-release.sh",
-      "build-release-images.sh",
       "install-gcp-wif.sh",
       "legacy-release-bridge.sh",
       "backup.sh",
@@ -55,12 +70,15 @@ try {
       "rwa-automation-rollback.sh",
       "rollback-release.sh",
       "smoke.sh",
-    ].includes(entry.slice(`${root}/scripts/`.length))
+    ];
+  if (
+    !entry.startsWith(`${root}/scripts/`)
+    || !allowedEntries.includes(entryName)
   ) throw new Error("trusted operation entry is not allowlisted");
 
   const openedEntry = openTrustedEntry(entry);
   try {
-    const locks = acquireOperationLocks(environment);
+    const locks = acquireOperationLocks(operation);
     try {
       const shell = openTrustedHostTool("sh", process.env);
       try {
@@ -70,16 +88,20 @@ try {
           LANG: "C.UTF-8",
           LC_ALL: "C.UTF-8",
           TZ: "UTC",
-          XINGHENG_OPERATION_LOCK_CONTEXT: environment,
+          XINGHENG_OPERATION_LOCK_CONTEXT: operation,
         };
-        for (const key of [
-          "XINGHENG_REVISION",
-          "XINGHENG_API_IMAGE",
-          "XINGHENG_WEB_IMAGE",
-          "XINGHENG_STRATEGY_TOOLS_IMAGE",
-          "RELEASE_MANIFEST_FILE",
-        ]) {
-          if (process.env[key] !== undefined) childEnvironment[key] = process.env[key];
+        if (operation === "release-build") {
+          childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+        } else {
+          for (const key of [
+            "XINGHENG_REVISION",
+            "XINGHENG_API_IMAGE",
+            "XINGHENG_WEB_IMAGE",
+            "XINGHENG_STRATEGY_TOOLS_IMAGE",
+            "RELEASE_MANIFEST_FILE",
+          ]) {
+            if (process.env[key] !== undefined) childEnvironment[key] = process.env[key];
+          }
         }
         const result = spawnSync(
           trustedExecutableInvocation(shell, 5),
@@ -95,7 +117,11 @@ try {
         );
         verifyTrustedEntry(openedEntry);
         verifyTrustedHostTool(shell);
-        assertTrustedReleaseRoot(root, process.env);
+        if (operation === "release-build") {
+          assertTrustedReleaseCandidateRoot(root, candidateRevision);
+        } else {
+          assertTrustedReleaseRoot(root, process.env);
+        }
         if (result.error) throw result.error;
         if (result.signal) {
           process.kill(process.pid, result.signal);
@@ -118,7 +144,7 @@ try {
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|real-test scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|real-test|release-build scripts/ENTRY ARGS...",
   );
 }
 

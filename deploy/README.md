@@ -50,8 +50,63 @@ ID 后输出严格 release manifest，将完整 revision 与三个不可变 `sha
 生产目标架构固定为 `linux/amd64`；即使在 Apple Silicon/ARM 构建机上也必须显式跨架构构建，
 并在写 manifest 前用镜像 metadata 复核 OS/Architecture，禁止把构建机默认架构镜像交付到
 x86_64 生产主机。
-自动套利 backup/restore 复用清单中的 API digest，不允许单独漂移。缺少 `.git`、dirty worktree、
-短 SHA、非法字符或调用者期望 revision 不一致时，构建在 Docker 前拒绝。
+
+### 与运行目录隔离的可信候选构建
+
+生产主机不得为了构建下一版本而替换当前 `/opt/xingheng-release/code`。候选源码固定安装为
+`/opt/xingheng-release/candidates/FULL_REVISION/code`，其父目录、源码归档和独立
+`candidate-build-receipt.json` 不属于 canonical 运行收据。候选安装器只接受固定
+`.incoming-FULL_REVISION.tar`，验证本地冻结的 SHA-256 与 Git archive 内置完整 commit 后，
+原子安装 root-only 候选目录；收据绑定源码 exact tree、archive inode/SHA、本机工具和 Docker
+daemon 身份。
+
+```bash
+# 可信操作者先在 clean worktree 生成并冻结：
+REVISION="$(git rev-parse --verify HEAD^{commit})"
+git archive --format=tar --output="xingheng-$REVISION.tar" "$REVISION"
+ARCHIVE_SHA256="$(sha256sum "xingheng-$REVISION.tar" | awk '{print $1}')"
+
+# 上传后只安装到固定 incoming/candidate 路径；bootstrap 两个文件必须从同一已校验 archive 提取。
+install -d -o root -g root -m 0700 /opt/xingheng-release/candidates
+install -o root -g root -m 0400 "xingheng-$REVISION.tar" \
+  "/opt/xingheng-release/candidates/.incoming-$REVISION.tar"
+printf '%s  %s\n' "$ARCHIVE_SHA256" \
+  "/opt/xingheng-release/candidates/.incoming-$REVISION.tar" | /usr/bin/sha256sum -c -
+test "$(/usr/bin/git get-tar-commit-id \
+  < "/opt/xingheng-release/candidates/.incoming-$REVISION.tar")" = "$REVISION"
+BOOTSTRAP="/opt/xingheng-release/candidates/.bootstrap-$REVISION"
+cleanup_candidate_bootstrap() {
+  rm -rf -- "$BOOTSTRAP"
+}
+trap cleanup_candidate_bootstrap EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+install -d -o root -g root -m 0700 "$BOOTSTRAP/scripts"
+tar -xf "/opt/xingheng-release/candidates/.incoming-$REVISION.tar" \
+  -C "$BOOTSTRAP" \
+  scripts/install-trusted-release-candidate.mjs scripts/trustedReleaseCandidate.mjs
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node "$BOOTSTRAP/scripts/install-trusted-release-candidate.mjs" \
+  install "$REVISION" "$ARCHIVE_SHA256"
+cleanup_candidate_bootstrap
+trap - EXIT HUP INT TERM
+
+CANDIDATE="/opt/xingheng-release/candidates/$REVISION"
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node "$CANDIDATE/code/scripts/trusted-operation-launcher.mjs" \
+  release-build scripts/build-release-images.sh \
+  "$REVISION" "$CANDIDATE/release-manifest.json"
+```
+
+`release-build` 只允许上述候选根内的 `build-release-images.sh`，Docker 参数只允许三个
+`linux/amd64` build 和 image inspect；manifest 与 `RELEASE_SHA256SUMS` 只能写入同一候选目录。
+它不接受 Compose、activation、env、container、volume 或 provider 操作，也不能读取或替换
+canonical release tree/receipt。候选构建成功不等于安装或部署；后续 activation 仍需另行批准，
+再走既有 canonical release lifecycle。
+自动套利 backup/restore 复用清单中的 API digest，不允许单独漂移。候选构建不读取 `.git`，
+而是消费收据绑定的 Git archive；普通 worktree 构建仍要求 `.git` 和 clean worktree。短 SHA、
+非法字符或调用者期望 revision 不一致时，构建在 Docker 前拒绝。
 
 生产主机只接收已构建镜像和随发布交付的清单。清单必须是单硬链接、非 symlink、只读 `0444`
 普通文件，并使用精确 schema；未知字段、非法 digest 或可写清单均拒绝。`.env.production` 的

@@ -498,6 +498,7 @@ test("real Docker Compose config keeps fixed production and real-test env files 
       "real-test-compose.sh",
       "operationLocks.mjs",
       "trustedDockerRuntime.mjs",
+      "trustedReleaseCandidate.mjs",
       "trustedReleaseTree.mjs",
       "verify-compose-environment-file.mjs",
     ]) {

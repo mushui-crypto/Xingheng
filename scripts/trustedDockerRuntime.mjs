@@ -11,11 +11,15 @@ import {
   realpathSync,
   statSync,
 } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   assertTrustedReleaseTree,
   validateTrustedReleaseTreeReceipt,
 } from "./trustedReleaseTree.mjs";
+import {
+  assertTrustedReleaseCandidateRoot,
+  readTrustedReleaseCandidateReceipt,
+} from "./trustedReleaseCandidate.mjs";
 
 const PRODUCTION_DOCKER_CLI = "/usr/bin/docker";
 const PRODUCTION_COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
@@ -60,11 +64,17 @@ export function trustedReleaseRoot(source = process.env) {
     }
     return realpathSync(value);
   }
-  return readProductionTrustReceipt().releaseRoot;
+  return activeTrustReceipt(source).releaseRoot;
 }
 
 export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   if (process.getuid?.() !== 0) return realpathSync(currentRoot);
+  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+    return assertTrustedReleaseCandidateRoot(
+      currentRoot,
+      source.XINGHENG_RELEASE_CANDIDATE_REVISION,
+    ).root;
+  }
   const expected = trustedReleaseRoot(source);
   const actual = realpathSync(currentRoot);
   if (actual !== expected) throw new Error("operational release root identity mismatch");
@@ -81,7 +91,7 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
   }
   assertNoDockerControlEnvironment(source);
   const fixture = testFixture(source);
-  const trustReceipt = fixture === null ? readProductionTrustReceipt() : null;
+  const trustReceipt = fixture === null ? activeTrustReceipt(source) : null;
   if (fixture === null && process.getuid?.() !== 0) {
     throw new Error("trusted Docker runtime requires the controlled root operator");
   }
@@ -123,7 +133,7 @@ export function openTrustedHostTool(name, source = process.env) {
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || testFixture(source) !== null) {
     throw new Error("trusted host tool requires the controlled root operator");
   }
-  const receipt = readProductionTrustReceipt();
+  const receipt = activeTrustReceipt(source);
   const opened = openTrustedExecutable(
     receipt.binaries[name].path,
     receipt.binaries[name].sha256,
@@ -179,7 +189,7 @@ export function verifyTrustedDockerRuntime(runtime) {
     throw new Error("trusted local Docker socket identity changed while in use");
   }
   if (runtime.expectedDaemon !== null) {
-    const receipt = readProductionTrustReceipt();
+    const receipt = activeTrustReceipt(process.env);
     const current = inspectDaemonIdentity(receipt, runtime.environment);
     if (canonicalJson(current) !== canonicalJson(runtime.daemon)) {
       throw new Error("trusted local Docker daemon identity changed while in use");
@@ -205,6 +215,9 @@ export function trustedDockerReceipt(runtime, kind, phase) {
 }
 
 export function execTrustedDockerSync(args, options = {}) {
+  if (process.env.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+    validateTrustedReleaseBuildDockerArguments(args);
+  }
   const runtime = openTrustedDockerRuntime("docker", process.env);
   try {
     process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
@@ -223,6 +236,54 @@ export function execTrustedDockerSync(args, options = {}) {
   } finally {
     runtime.close();
   }
+}
+
+export function validateTrustedReleaseBuildDockerArguments(values, source = process.env) {
+  const expectedRevision = source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build"
+    ? source.XINGHENG_RELEASE_CANDIDATE_REVISION
+    : null;
+  if (expectedRevision !== null && !/^[a-f0-9]{40}$/u.test(expectedRevision ?? "")) {
+    throw new Error("trusted Docker release-build candidate revision is invalid");
+  }
+  const buildRevision = /^XINGHENG_REVISION=([a-f0-9]{40})$/u.exec(values[2] ?? "")?.[1];
+  const tag = /^xingheng-(api|web|strategy-tools):([a-f0-9]{40})$/u
+    .exec(values[8] ?? "");
+  if (
+    values[0] === "build"
+    && values.length === 10
+    && values[1] === "--build-arg"
+    && buildRevision !== undefined
+    && values[3] === "--target"
+    && ["api", "web", "strategy-tools"].includes(values[4])
+    && values[5] === "--platform"
+    && values[6] === "linux/amd64"
+    && values[7] === "--tag"
+    && tag?.[1] === values[4]
+    && tag?.[2] === buildRevision
+    && (expectedRevision === null || buildRevision === expectedRevision)
+    && /^\/tmp\/xingheng-release\.[A-Za-z0-9]{6}$/u.test(values[9] ?? "")
+    && resolve(values[9]) === values[9]
+  ) return;
+  if (
+    values.length === 5
+    && values[0] === "image"
+    && values[1] === "inspect"
+    && values[2] === "--format"
+    && ["{{.Id}}", "{{.Os}}/{{.Architecture}}", "{{json .}}"].includes(values[3])
+  ) {
+    const imageTag = /^xingheng-(?:api|web|strategy-tools):([a-f0-9]{40})$/u
+      .exec(values[4] ?? "");
+    const digest = /^sha256:[a-f0-9]{64}$/u.test(values[4] ?? "");
+    if (
+      (
+        imageTag !== null
+        && values[3] !== "{{json .}}"
+        && (expectedRevision === null || imageTag[1] === expectedRevision)
+      )
+      || (digest && values[3] === "{{json .}}")
+    ) return;
+  }
+  throw new Error("trusted Docker release-build arguments are not allowlisted");
 }
 
 export function executableDescriptorPath(fdNumber) {
@@ -445,6 +506,20 @@ function readProductionTrustReceipt() {
   }
 }
 
+function activeTrustReceipt(source) {
+  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+    const receipt = readTrustedReleaseCandidateReceipt(
+      source.XINGHENG_RELEASE_CANDIDATE_REVISION,
+    );
+    validateCommonTrustReceipt(receipt);
+    return {
+      ...receipt,
+      releaseRoot: receipt.codeRoot,
+    };
+  }
+  return readProductionTrustReceipt();
+}
+
 function validateTrustReceipt(value) {
   if (
     !value
@@ -459,6 +534,10 @@ function validateTrustReceipt(value) {
   }
   validateTrustedReleaseTreeReceipt(value.releaseTree);
   assertTrustedReleaseTree(value.releaseRoot, value.releaseTree);
+  return validateCommonTrustReceipt(value);
+}
+
+function validateCommonTrustReceipt(value) {
   const binaryKeys = Object.keys(REQUIRED_TOOLS).sort();
   if (
     !value.binaries

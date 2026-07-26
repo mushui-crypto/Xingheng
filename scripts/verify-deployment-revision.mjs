@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   closeSync,
   constants,
   fstatSync,
@@ -9,7 +10,7 @@ import {
   readFileSync,
   writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import {
   REVISION_LABEL,
   assertFullRevision,
@@ -64,7 +65,10 @@ function run(command, args) {
 function readReleaseManifest(path) {
   if (process.getuid?.() === 0) {
     const root = assertTrustedReleaseRoot(new URL("../", import.meta.url).pathname);
-    if (resolve(path) !== resolve(root, "deploy/release-manifest.json")) {
+    const expectedPath = process.env.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build"
+      ? resolve(dirname(root), "release-manifest.json")
+      : resolve(root, "deploy/release-manifest.json");
+    if (resolve(path) !== expectedPath) {
       throw new Error("release manifest path is not canonical");
     }
   }
@@ -127,6 +131,7 @@ function writeReleaseManifest(path, revision, apiDigest, webDigest, strategyDige
     flag: "wx",
     mode: SAFE_MANIFEST_MODE,
   });
+  chmodSync(path, SAFE_MANIFEST_MODE);
   return readReleaseManifest(path);
 }
 
@@ -206,6 +211,32 @@ function verifyImages(manifest) {
     expectedRevision: manifest.revision,
     components: inspectReleaseImages(manifest),
   });
+}
+
+function verifyCandidateImages(manifest) {
+  if (
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "release-build"
+    || process.env.XINGHENG_RELEASE_CANDIDATE_REVISION !== manifest.revision
+  ) {
+    throw new Error("candidate image verification is outside the trusted release build");
+  }
+  for (const digest of Object.values(manifest.images)) {
+    const inspected = JSON.parse(run("docker", [
+      "image",
+      "inspect",
+      "--format",
+      "{{json .}}",
+      digest,
+    ]));
+    if (
+      inspected?.Id !== digest
+      || inspected?.Os !== "linux"
+      || inspected?.Architecture !== "amd64"
+      || inspected?.Config?.Labels?.[REVISION_LABEL] !== manifest.revision
+    ) {
+      throw new Error("candidate image revision, digest or platform mismatch");
+    }
+  }
 }
 
 function verifyContainers(manifest, project = "xingheng") {
@@ -366,7 +397,7 @@ function readSecureEnvironmentRevision(path) {
 
 function usage() {
   throw new Error(
-    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
+    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | candidate-images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
   );
 }
 
@@ -419,6 +450,10 @@ try {
     const manifest = readReleaseManifest(args[0]);
     verifyImages(manifest);
     console.log("deployment image revisions and digests verified");
+  } else if (command === "candidate-images" && args.length === 1) {
+    const manifest = readReleaseManifest(args[0]);
+    verifyCandidateImages(manifest);
+    console.log("candidate image revisions, digests and platforms verified");
   } else if (command === "containers" && args.length === 1) {
     const manifest = readReleaseManifest(args[0]);
     verifyContainers(manifest);

@@ -36,6 +36,8 @@ const trustedDockerRuntime = read("scripts/trustedDockerRuntime.mjs");
 const trustedOperationLauncher = read("scripts/trusted-operation-launcher.mjs");
 const trustedOperationPreamble = read("scripts/trusted-operation-preamble.sh");
 const trustedDockerCli = read("scripts/trusted-docker.mjs");
+const trustedReleaseCandidate = read("scripts/trustedReleaseCandidate.mjs");
+const trustedReleaseCandidateInstaller = read("scripts/install-trusted-release-candidate.mjs");
 const realTestCleanup = read("scripts/realTestCleanup.mjs");
 const cleanupTransactionStore = read("scripts/cleanupTransactionStore.mjs");
 const realTestCleanupWrapper = read("scripts/real-test-cleanup.sh");
@@ -119,8 +121,13 @@ const assertions = [
       && trustedOperationPreamble.includes("NODE_TEST_CONTEXT")
       && trustedOperationPreamble.includes("XINGHENG_TEST_")
       && trustedDockerCli.includes("XINGHENG_TRUSTED_DOCKER_PURPOSE")
-      && trustedDockerCli.includes("validateReleaseBuildArguments")
-      && trustedDockerCli.includes("arguments are not allowlisted"),
+      && trustedDockerCli.includes("validateTrustedReleaseBuildDockerArguments")
+      && trustedDockerRuntime.includes("arguments are not allowlisted")
+      && trustedOperationLauncher.includes('"release-build"')
+      && trustedReleaseCandidate.includes("/opt/xingheng-release/candidates")
+      && trustedReleaseCandidateInstaller.includes("get-tar-commit-id")
+      && deploymentReadme.includes("candidate-build-receipt.json")
+      && deploymentReadme.includes("release-build scripts/build-release-images.sh"),
     "all root operations must enter through the minimal trusted launcher and the build Docker shim must remain internal",
   ],
   [
