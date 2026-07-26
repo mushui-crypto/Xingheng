@@ -12,6 +12,10 @@ import {
   type RwaBinancePreflightSnapshot,
   type RwaBinanceProductAvailability,
 } from "./RwaBinanceAutomationTypes";
+import {
+  aggregateRwaAssetFundingCycles,
+  type RwaAssetFundingSettlement,
+} from "./RwaAssetTakeoverRuntime";
 import type {
   RwaInstrumentSpec,
   RwaProviderOrder,
@@ -271,7 +275,9 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       account,
       orders,
       spotAskDepth: depthLevels(spotDepthValue, "asks"),
+      spotBidDepth: depthLevels(spotDepthValue, "bids"),
       perpetualBidDepth: depthLevels(perpetualDepthValue, "bids"),
+      perpetualAskDepth: depthLevels(perpetualDepthValue, "asks"),
       fundingRates30d,
       perpetualInitialMarginUsd: position
         ? snapshotNonNegativeNumber(position.initialMargin ?? position.positionInitialMargin, "永续初始保证金")
@@ -282,6 +288,116 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       spotAvailableUsdt: account.spotAvailableUsdt,
       perpetualAvailableUsdt: account.futuresAvailableUsdt,
     };
+  }
+
+  async readManagedAssetSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBinancePermissions>> {
+    const [account, orders, spotDepthValue, perpetualDepthValue] = await Promise.all([
+      this.readPreflightSnapshot(),
+      this.listAssetOpenOrders(),
+      this.publicRequest("spot", "/api/v3/depth", {
+        symbol: RWA_BINANCE_SPOT_SYMBOL,
+        limit: "500",
+      }),
+      this.publicRequest("futures", "/fapi/v1/depth", {
+        symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+        limit: "500",
+      }),
+    ]);
+    return {
+      account,
+      orders,
+      spotAskDepth: depthLevels(spotDepthValue, "asks"),
+      spotBidDepth: depthLevels(spotDepthValue, "bids"),
+      perpetualBidDepth: depthLevels(perpetualDepthValue, "bids"),
+      perpetualAskDepth: depthLevels(perpetualDepthValue, "asks"),
+      fundingRates30d: [account.perpetual.fundingRate],
+      perpetualInitialMarginUsd: 0,
+      perpetualLeverage: null,
+      spotAvailableUsdt: account.spotAvailableUsdt,
+      perpetualAvailableUsdt: account.futuresAvailableUsdt,
+    };
+  }
+
+  async readManagedAssetPublicMark() {
+    const value = record(await this.publicRequest("futures", "/fapi/v1/premiumIndex", {
+      symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+    }));
+    const perpetualMark = positiveNumber(value.markPrice);
+    if (!(perpetualMark > 0)) {
+      throw new RwaBinanceProviderError(
+        "provider_snapshot_invalid",
+        "Binance XAUT 永续公开标记价格无效。",
+      );
+    }
+    return { capturedAt: this.now(), perpetualMark };
+  }
+
+  async readAssetFundingSettlements(input: {
+    after: number;
+    through: number;
+  }): Promise<RwaAssetFundingSettlement[]> {
+    if (
+      !Number.isSafeInteger(input.after)
+      || !Number.isSafeInteger(input.through)
+      || input.after < 0
+      || input.through < input.after
+    ) {
+      throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance Funding 结算窗口无效。");
+    }
+    const settlements: RwaAssetFundingSettlement[] = [];
+    const seen = new Set<string>();
+    let startTime = input.after + 1;
+    for (let page = 0; page < 100 && startTime <= input.through; page += 1) {
+      const rows = list(await this.signedRequest("futures", "/fapi/v1/income", {
+        symbol: RWA_BINANCE_PERPETUAL_SYMBOL,
+        incomeType: "FUNDING_FEE",
+        startTime: String(startTime),
+        endTime: String(input.through),
+        limit: "1000",
+      })).map(record);
+      if (rows.length === 0) return aggregateRwaAssetFundingCycles(settlements);
+      let lastTime = startTime - 1;
+      for (const row of rows) {
+        const symbol = String(row.symbol ?? "");
+        const incomeType = String(row.incomeType ?? "");
+        const settledAt = Number(row.time);
+        const transactionId = String(row.tranId ?? "");
+        const netFundingUsd = Number(row.income);
+        const settlementId = `${settledAt}:${transactionId}`;
+        if (
+          symbol !== RWA_BINANCE_PERPETUAL_SYMBOL
+          || incomeType !== "FUNDING_FEE"
+          || !Number.isSafeInteger(settledAt)
+          || settledAt <= input.after
+          || settledAt > input.through
+          || !transactionId
+          || !Number.isFinite(netFundingUsd)
+        ) {
+          throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance Funding 结算结构无效。");
+        }
+        if (seen.has(settlementId)) {
+          throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance Funding 结算分页重复。");
+        }
+        seen.add(settlementId);
+        settlements.push({
+          cycleId: `binance:${RWA_BINANCE_PERPETUAL_SYMBOL}:${settledAt}`,
+          settlementId,
+          settledAt,
+          netFundingUsd,
+          fundingRate: null,
+        });
+        lastTime = Math.max(lastTime, settledAt);
+      }
+      if (rows.length < 1000) return aggregateRwaAssetFundingCycles(settlements);
+      if (lastTime < startTime) {
+        throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance Funding 结算分页未推进。");
+      }
+      startTime = lastTime + 1;
+    }
+    if (startTime <= input.through) {
+      throw new RwaBinanceProviderError("provider_snapshot_invalid", "Binance Funding 结算分页超过安全上限。");
+    }
+    return aggregateRwaAssetFundingCycles(settlements);
   }
 
   async findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string) {
@@ -863,6 +979,10 @@ function decimal(value: number) {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fundingSettlementOrder(left: RwaAssetFundingSettlement, right: RwaAssetFundingSettlement) {
+  return left.settledAt - right.settledAt || left.settlementId.localeCompare(right.settlementId);
 }
 
 function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec {

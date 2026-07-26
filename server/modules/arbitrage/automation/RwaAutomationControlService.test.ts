@@ -31,12 +31,19 @@ import {
   type RwaAccountAssetAuthorizationPreview,
   type RwaPublicAccountAssetAuthorization,
 } from "./RwaAccountAssetAuthorization";
-import { requireRwaAutomationExecutionProfile } from "./RwaAutomationAssetProfile";
+import {
+  requireRwaAutomationExecutionProfile,
+  rwaAutomationProfileId,
+} from "./RwaAutomationAssetProfile";
 import {
   createRwaAssetTakeoverPreview,
   type RwaAssetTakeoverPreview,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
+import {
+  createRwaAssetTakeoverExitPreview,
+  type RwaAssetTakeoverExitPreview,
+} from "./RwaAssetTakeoverRuntime";
 
 const sessionDomain = "session-domain-a";
 const stepUpToken = "step-up-token-a";
@@ -1004,6 +1011,171 @@ test("asset takeover preview is session-bound, expires at 30 seconds, and has on
   assert.equal(starts, 1);
 });
 
+test("asset takeover exit admission preserves its opaque confirmation and does not consume step-up", async () => {
+  let currentTime = 1_800_000_000_001;
+  let registryCreations = 0;
+  let metadataReads = 0;
+  let confirms = 0;
+  let stepUpConsumes = 0;
+  const sourceIp = "203.0.113.31";
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    takeoverExitPreview: controlTakeoverExitPreview(currentTime),
+    onAccountMetadata: () => { metadataReads += 1; },
+    onTakeoverExitConfirm: () => { confirms += 1; },
+  });
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    exitOperationMax: 1,
+    exitOperationWindowMs: 10,
+    exitReserveMax: 1,
+    exitReserveWindowMs: 10,
+  }, () => currentTime);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([connector]);
+    },
+    {
+      ...passThroughStepUp,
+      consume: async () => { stepUpConsumes += 1; },
+    },
+    governance,
+    () => currentTime,
+  );
+  const issued = await service.previewAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    {},
+    sourceIp,
+  );
+  const registryBaseline = registryCreations;
+  const metadataBaseline = metadataReads;
+  governance.admitRequest({
+    operation: "asset_takeover_exit",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+  governance.admitRequest({
+    operation: "asset_takeover_exit",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+
+  await assert.rejects(
+    service.confirmAssetTakeoverExit(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      "takeover-control",
+      { preview: issued, idempotencyKey: "takeover-exit:control:0001" },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, registryBaseline);
+  assert.equal(metadataReads, metadataBaseline);
+  assert.equal(confirms, 0);
+
+  currentTime += 11;
+  await service.confirmAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    { preview: issued, idempotencyKey: "takeover-exit:control:0001" },
+    sourceIp,
+  );
+  assert.equal(confirms, 1, "the rejected first-stage admission must not consume the confirmation");
+  assert.equal(stepUpConsumes, 0, "authorized takeover exit uses ordinary confirmation, not TOTP");
+});
+
+test("asset takeover exit confirmation is session-bound and has one concurrent winner", async () => {
+  const currentTime = 1_800_000_000_001;
+  let confirms = 0;
+  const confirmEntered = deferred<void>();
+  const allowConfirm = deferred<void>();
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    takeoverExitPreview: controlTakeoverExitPreview(currentTime),
+    takeoverExitConfirmFactory: async () => {
+      confirms += 1;
+      confirmEntered.resolve();
+      await allowConfirm.promise;
+      return { takeoverId: "takeover-control", phase: "exited" };
+    },
+  });
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => currentTime,
+  );
+  const issued = await service.previewAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    {},
+    "203.0.113.32",
+  );
+
+  await assert.rejects(service.confirmAssetTakeoverExit(
+    "user-a",
+    `${sessionDomain}:other`,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    { preview: issued, idempotencyKey: "takeover-exit:session:0001" },
+    "203.0.113.32",
+  ));
+  assert.equal(confirms, 0);
+
+  const first = service.confirmAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    { preview: issued, idempotencyKey: "takeover-exit:concurrent:0001" },
+    "203.0.113.32",
+  );
+  await confirmEntered.promise;
+  await assert.rejects(service.confirmAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    { preview: issued, idempotencyKey: "takeover-exit:concurrent:0001" },
+    "203.0.113.32",
+  ));
+  assert.equal(confirms, 1);
+  allowConfirm.resolve();
+  await first;
+  await assert.rejects(service.confirmAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    { preview: issued, idempotencyKey: "takeover-exit:concurrent:0001" },
+    "203.0.113.32",
+  ));
+  assert.equal(confirms, 1);
+});
+
 test("asset authorization step-up is server-account-bound, one-action scoped, and provider-mutation free", async () => {
   const preview = controlAuthorizationPreview();
   const authorization = publicAccountAssetAuthorization(createAccountAssetAuthorization({
@@ -1419,6 +1591,68 @@ test("pending challenge atomically blocks preview capacity and releases it after
   );
 });
 
+test("takeover exit confirmations share challenge capacity atomically in both directions", async () => {
+  const exitPreviewGate = deferred<RwaAssetTakeoverExitPreview>();
+  const exitPreviewStarted = deferred<void>();
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    maxChallengesPerUser: 1,
+  });
+  const options: Parameters<typeof fakeConnector>[1] = {
+    accountId: "bybit:test-account",
+    takeoverExitPreviewFactory: async () => {
+      exitPreviewStarted.resolve();
+      return exitPreviewGate.promise;
+    },
+  };
+  const service = new RwaAutomationControlService(
+    { async getSnapshot() { return dashboardSnapshot(opportunity(true)); } } as any,
+    () => new RwaAutomationConnectorRegistry([fakeConnector(() => undefined, options)]),
+    passThroughStepUp,
+    governance,
+    () => 1_800_000_000_001,
+  );
+  const pendingExitPreview = service.previewAssetTakeoverExit(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    {},
+    "203.0.113.33",
+  );
+  await exitPreviewStarted.promise;
+  await assert.rejects(
+    service.preflight("user-a", {
+      accountId: "bybit:test-account",
+      opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+      mode: "arbitrage_entry",
+    }, "203.0.113.34"),
+    capacityExceeded,
+  );
+  exitPreviewGate.reject(new Error("offline exit preview failure"));
+  await assert.rejects(pendingExitPreview, /offline exit preview failure/);
+
+  await service.preflight("user-a", {
+    accountId: "bybit:test-account",
+    opportunityId: "bybit-xaut-spot--bybit-xaut-perp",
+    mode: "arbitrage_entry",
+  }, "203.0.113.34");
+  options.takeoverExitPreviewFactory = async () => controlTakeoverExitPreview(1_800_000_000_001);
+  await assert.rejects(
+    service.previewAssetTakeoverExit(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      "takeover-control",
+      {},
+      "203.0.113.33",
+    ),
+    capacityExceeded,
+  );
+});
+
 function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnapshot> = {}) {
   const generatedAt = 1_800_000_000_000;
   return createAccountAssetAuthorizationPreview({
@@ -1555,7 +1789,9 @@ function controlTakeoverPreview(generatedAt: number) {
     },
     orders: [],
     spotAskDepth: [{ price: 1_000, quantityBase: 10 }],
+    spotBidDepth: [{ price: 999, quantityBase: 10 }],
     perpetualBidDepth: [{ price: 1_000, quantityBase: 10 }],
+    perpetualAskDepth: [{ price: 1_001, quantityBase: 10 }],
     fundingRates30d: [0.0001, 0.0002, 0.0003],
     perpetualInitialMarginUsd: 50,
     perpetualLeverage: 2,
@@ -1568,6 +1804,35 @@ function controlTakeoverPreview(generatedAt: number) {
     provider,
     newCapitalUsd: 1_000,
     selectedLeverage: 2,
+    now: generatedAt,
+  });
+}
+
+function controlTakeoverExitPreview(generatedAt: number) {
+  return createRwaAssetTakeoverExitPreview({
+    takeoverId: "takeover-control",
+    venue: "bybit",
+    assetId: "xaut",
+    profileId: rwaAutomationProfileId(requireRwaAutomationExecutionProfile("xaut", "bybit")),
+    authorizationId: "authorization-control",
+    authorizationCreatedAt: generatedAt - 1_000,
+    snapshot: {
+      capturedAt: generatedAt,
+      ordersDigest: createHash("sha256").update("takeover-exit-orders").digest("hex"),
+      providerStateDigest: createHash("sha256").update("takeover-exit-provider").digest("hex"),
+      spotQuantity: 1,
+      spotAvailableQuantity: 1,
+      spotLockedQuantity: 0,
+      spotBid: 999,
+      perpetualQuantity: 1,
+      perpetualSide: "short",
+      perpetualAsk: 1_001,
+      perpetualMark: 1_000,
+      currentFundingRate: 0.0001,
+      liquidationDistancePercent: 40,
+      reserveUsd: 250,
+      managedCapitalUsd: 1_000,
+    },
     now: generatedAt,
   });
 }
@@ -1622,6 +1887,10 @@ function fakeConnector(
     takeoverPreview?: RwaAssetTakeoverPreview;
     onTakeoverStart?: () => void;
     takeoverStartFactory?: () => Promise<unknown>;
+    takeoverExitPreview?: RwaAssetTakeoverExitPreview;
+    takeoverExitPreviewFactory?: () => Promise<RwaAssetTakeoverExitPreview>;
+    onTakeoverExitConfirm?: () => void;
+    takeoverExitConfirmFactory?: () => Promise<unknown>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -1682,6 +1951,17 @@ function fakeConnector(
     },
     reconfirmAssetTakeover: async () => ({ takeoverId: "takeover-control", state: "managed" }),
     getAssetTakeoverStatus: async () => ({ takeoverId: "takeover-control", state: "managed" }),
+    previewAssetTakeoverExit: async () => {
+      if (options.takeoverExitPreviewFactory) return options.takeoverExitPreviewFactory();
+      if (!options.takeoverExitPreview) throw new Error("takeover exit preview unavailable");
+      return options.takeoverExitPreview;
+    },
+    confirmAssetTakeoverExit: async () => {
+      if (options.takeoverExitConfirmFactory) return options.takeoverExitConfirmFactory();
+      options.onTakeoverExitConfirm?.();
+      return { takeoverId: "takeover-control", phase: "exited" };
+    },
+    getAssetTakeoverExitStatus: async () => ({ takeoverId: "takeover-control", phase: "monitoring" }),
     getConfig: async () => ({}),
     updateConfig: async () => { options.onConfig?.(); return {}; },
     setKillSwitch: async () => { options.onKillSwitch?.(); return {}; },

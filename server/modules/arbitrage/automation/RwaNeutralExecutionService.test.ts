@@ -30,8 +30,10 @@ import {
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import {
   createRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverRecord,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
+import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
 
 const accountId = "bybit:test-account";
 const accountFingerprint = "test-account";
@@ -232,6 +234,71 @@ test("Bybit takeover recovery propagates lease loss after provider snapshot with
     assert.equal(writesAfterLeaseSetup, 0);
     assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "planned");
   } finally {
+    await harness.cleanup();
+  }
+});
+
+test("Bybit managed takeover monitor startup propagates lease loss without state or provider writes", async () => {
+  const harness = await createHarness({ availableUsdt: 2_000, unrelatedSpotQuantity: 0.1 });
+  let restarted: RwaNeutralExecutionService | null = null;
+  try {
+    harness.client.unrelatedPerpetualQuantity = 0.1;
+    const authorizationPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+    await harness.service.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.service.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const record: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId,
+      preview,
+      idempotencyKey: "takeover:managed-monitor-lease-loss",
+      orderLinkPrefix: "takeover-managed-monitor-lease-loss",
+      now: harness.now,
+    });
+    record.state = "managed";
+    record.runtime = createRwaAssetTakeoverRuntimeRecovery(harness.now);
+    state.assetTakeovers.push(record);
+    await harness.store.writeState(state);
+
+    let leaseHeld = true;
+    harness.client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let writesAfterLeaseSetup = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (next) => {
+      writesAfterLeaseSetup += 1;
+      return originalWriteState(next);
+    };
+    restarted = new RwaNeutralExecutionService(
+      harness.store,
+      () => harness.client,
+      () => harness.now,
+      () => false,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated managed takeover monitor lease loss",
+          );
+        }
+      },
+      () => true,
+    );
+    const writesBefore = providerMutationCount(harness.client);
+    await assert.rejects(
+      restarted.initialize(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+    assert.equal(writesAfterLeaseSetup, 0);
+    assert.equal(restarted.hasActivityMonitor(), false);
+  } finally {
+    restarted?.dispose();
     await harness.cleanup();
   }
 });
@@ -1357,7 +1424,9 @@ class FakeBybitClient implements RwaBybitTradingClient {
       account,
       orders: structuredClone(this.assetOpenOrders),
       spotAskDepth: [{ price: account.spot.ask, quantityBase: 10 }],
+      spotBidDepth: [{ price: account.spot.bid, quantityBase: 10 }],
       perpetualBidDepth: [{ price: account.perpetual.bid, quantityBase: 10 }],
+      perpetualAskDepth: [{ price: account.perpetual.ask, quantityBase: 10 }],
       fundingRates30d: [0.0001, 0.0002, 0.0003],
       perpetualInitialMarginUsd: account.existingPerpetualQuantityXaut * account.perpetual.mark / 2,
       perpetualLeverage: account.existingPerpetualQuantityXaut > 0 ? 2 : null,
@@ -1366,6 +1435,10 @@ class FakeBybitClient implements RwaBybitTradingClient {
     };
     this.takeoverSnapshotHook();
     return snapshot;
+  }
+
+  async readManagedAssetSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBybitPermissions>> {
+    return this.readAssetTakeoverSnapshot();
   }
 
   async findOrderByClientOrderId() {

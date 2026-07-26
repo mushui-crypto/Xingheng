@@ -35,6 +35,69 @@ test("Bybit attribution performs private source reads and is fail-closed when an
   assert.ok(calls > 0);
 });
 
+test("Bybit managed public risk reads only the XAUT linear mark without credentials", async () => {
+  let calls = 0;
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input, init) => {
+      calls += 1;
+      const url = new URL(String(input));
+      assert.equal(url.origin, "https://api.bybit.com");
+      assert.equal(url.pathname, "/v5/market/tickers");
+      assert.equal(url.searchParams.get("category"), "linear");
+      assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
+      assert.equal(new Headers(init?.headers).has("X-BAPI-API-KEY"), false);
+      return jsonResponse({
+        retCode: 0,
+        result: { list: [{ markPrice: "4128.5" }] },
+      });
+    }) as typeof fetch,
+    () => 2_000,
+  );
+  assert.deepEqual(await client.readManagedAssetPublicMark(), {
+    capturedAt: 2_000,
+    perpetualMark: 4_128.5,
+  });
+  assert.equal(calls, 1);
+});
+
+test("Bybit funding settlements use exact settlement rows and reject unrelated transaction types", async () => {
+  const client = new RwaBybitMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async () => jsonResponse({
+      retCode: 0,
+      retMsg: "OK",
+      result: {
+        list: [
+          {
+            id: "funding-1",
+            transactionTime: "2000",
+            type: "SETTLEMENT",
+            symbol: "XAUTUSDT",
+            cashFlow: "-0.25",
+          },
+          {
+            id: "trade-1",
+            transactionTime: "2100",
+            type: "TRADE",
+            symbol: "XAUTUSDT",
+            cashFlow: "-5",
+          },
+        ],
+        nextPageCursor: "",
+      },
+    })) as typeof fetch,
+    () => 3_000,
+  );
+  const settlements = await client.readAssetFundingSettlements({ after: 1_000, through: 3_000 });
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0]?.cycleId, "bybit:XAUTUSDT:2000");
+  assert.match(settlements[0]?.settlementId ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(settlements[0]?.settledAt, 2_000);
+  assert.equal(settlements[0]?.netFundingUsd, -0.25);
+  assert.equal(settlements[0]?.fundingRate, null);
+});
+
 test("Bybit scans cursor-capable V5 endpoints but cannot certify a non-atomic mutation window", async () => {
   const paths: string[] = [];
   const client = new RwaBybitMainnetClient(

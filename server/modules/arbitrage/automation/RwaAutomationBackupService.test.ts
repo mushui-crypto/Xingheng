@@ -43,6 +43,7 @@ import {
   requireRwaAutomationExecutionProfile,
   rwaAutomationProfileId,
 } from "./RwaAutomationAssetProfile";
+import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
 
 const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
@@ -78,6 +79,7 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
     assert.equal(state.assetTakeovers[0].takeoverId, "takeover-1");
     assert.equal(state.assetTakeovers[0].authorizationId, "authorization-1");
     assert.equal(state.assetTakeovers[0].state, "planned");
+    assert.equal(state.assetTakeovers[0].runtime, null);
     const restoredCredential = JSON.parse(await readFile(join(active, credentialFileName), "utf8"));
     assert.equal(Buffer.from(restoredCredential.ciphertext, "base64url").toString("utf8"), credentialMarker);
     const restoredStepUp = JSON.parse(await readFile(join(active, "step-up-security", stepUpFileName), "utf8"));
@@ -204,8 +206,36 @@ test("takeover backup schema accepts legacy absence and rejects malformed, orpha
     await legacy.cleanup();
   }
 
+  const legacyManaged = await createFixture();
+  try {
+    const state = baseState() as any;
+    state.assetTakeovers[0].state = "managed";
+    await writeSecure(join(legacyManaged.active, stateFileName), JSON.stringify(state));
+    const backup = await legacyManaged.service.createBackup();
+    const restored = await legacyManaged.service.restoreBackup(backup.fileName);
+    const restoredState = JSON.parse(await readFile(
+      join(legacyManaged.dataRoot, restored.restoredGeneration, stateFileName),
+      "utf8",
+    ));
+    assert.equal(restoredState.assetTakeovers[0].runtime.phase, "recovery_required");
+    assert.equal(restoredState.assetTakeovers[0].runtime.authoritativeSnapshot, null);
+  } finally {
+    await legacyManaged.cleanup();
+  }
+
   const invalidStates = [
     (state: any) => { state.assetTakeovers[0].unknown = true; },
+    (state: any) => {
+      state.assetTakeovers[0].state = "managed";
+      state.assetTakeovers[0].runtime = { schemaVersion: 1 };
+    },
+    (state: any) => {
+      state.assetTakeovers[0].state = "managed";
+      state.assetTakeovers[0].runtime = {
+        ...createRwaAssetTakeoverRuntimeRecovery(state.assetTakeovers[0].updatedAt),
+        unknown: true,
+      };
+    },
     (state: any) => { state.assetTakeovers[0].authorizationId = "missing-authorization"; },
     (state: any) => {
       state.assetTakeovers.push({
@@ -220,6 +250,12 @@ test("takeover backup schema accepts legacy absence and rejects malformed, orpha
         idempotencyKey: "takeover-backup-second",
         orderLinkPrefix: "takeoverbackupsecond",
       });
+    },
+    (state: any) => {
+      state.assetTakeovers = Array.from({ length: 101 }, (_, index) => ({
+        ...state.assetTakeovers[0],
+        takeoverId: `takeover-capacity-${index}`,
+      }));
     },
   ];
   for (const mutate of invalidStates) {

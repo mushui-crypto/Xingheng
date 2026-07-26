@@ -176,6 +176,8 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
     Date.now,
     () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     () => rwaAutomationExecutionLease?.assertHeld(),
+    undefined,
+    new RwaBybitMainnetClient({ apiKey: "", apiSecret: "" }),
   );
   const binance = new RwaBinanceAutomationService(
     new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({

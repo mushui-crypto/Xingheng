@@ -17,6 +17,12 @@ import type {
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
 import type { RwaAutomationVenue } from "./RwaAutomationTypes";
+import {
+  createRwaAssetTakeoverRuntimeRecovery,
+  publicRwaAssetTakeoverRuntime,
+  validateRwaAssetTakeoverRuntime,
+  type RwaAssetTakeoverRuntimeState,
+} from "./RwaAssetTakeoverRuntime";
 
 export const RWA_ASSET_TAKEOVER_PREVIEW_TTL_MS = 30_000;
 export const RWA_ASSET_TAKEOVER_MAX_SLIPPAGE_BPS = 15 as const;
@@ -37,7 +43,9 @@ export type RwaAssetTakeoverProviderSnapshot<
   account: RwaProviderPreflightSnapshot<TPermissions>;
   orders: RwaAssetOrderReference[];
   spotAskDepth: RwaAssetTakeoverDepthLevel[];
+  spotBidDepth: RwaAssetTakeoverDepthLevel[];
   perpetualBidDepth: RwaAssetTakeoverDepthLevel[];
+  perpetualAskDepth: RwaAssetTakeoverDepthLevel[];
   fundingRates30d: number[];
   perpetualInitialMarginUsd: number;
   perpetualLeverage: number | null;
@@ -118,6 +126,7 @@ export type RwaAssetTakeoverState =
   | "opening_perpetual"
   | "managed"
   | "manual_intervention"
+  | "exited"
   | "failed";
 
 export type RwaAssetTakeoverRecord = {
@@ -164,6 +173,7 @@ export type RwaAssetTakeoverRecord = {
   finalSpotQuantity: number;
   finalPerpetualQuantity: number;
   residualQuantity: number;
+  runtime: RwaAssetTakeoverRuntimeState | null;
   errorCategory: string | null;
   message: string;
   createdAt: number;
@@ -172,13 +182,15 @@ export type RwaAssetTakeoverRecord = {
 
 export type RwaPublicAssetTakeoverRecord = Omit<
   RwaAssetTakeoverRecord,
-  "accountId" | "userDomain" | "plannedMutation" | "acceptedOrders"
-  | "cancelledOrders" | "spotOrders" | "perpetualOrders"
+  "accountId" | "accountFingerprint" | "userDomain" | "orderLinkPrefix"
+  | "plannedMutation" | "acceptedOrders"
+  | "cancelledOrders" | "spotOrders" | "perpetualOrders" | "runtime"
 > & {
   providerAcceptedOrderCount: number;
   cancelledOrderCount: number;
   spotOrderCount: number;
   perpetualOrderCount: number;
+  runtime: ReturnType<typeof publicRwaAssetTakeoverRuntime>;
 };
 
 export class RwaAssetTakeoverError extends Error {
@@ -208,7 +220,7 @@ export function createRwaAssetTakeoverPreview<TPermissions extends RwaVenuePermi
 }) {
   const { profile, provider } = input;
   const authorization = validateAccountAssetAuthorization(input.authorization);
-  assertTakeoverProviderSnapshot(profile, provider);
+  assertRwaAssetTakeoverProviderSnapshot(profile, provider);
   assertTakeoverAuthorization(profile, authorization, provider.account);
   if (!positiveFinite(input.newCapitalUsd) || !isLeverage(input.selectedLeverage)) throw invalidPreview();
   if (provider.account.perpetualPositionSide === "long") {
@@ -301,7 +313,7 @@ export function createRwaAssetTakeoverPreview<TPermissions extends RwaVenuePermi
       "当前余额、备用资金或强平距离不能满足所选方案，已停止接管。",
     );
   }
-  const ordersDigest = digestOrders(provider.orders);
+  const ordersDigest = digestRwaAssetOrders(provider.orders);
   const state = {
     venue: profile.venue.venue,
     assetId: profile.asset.assetId,
@@ -472,6 +484,7 @@ export function createRwaAssetTakeoverRecord(input: {
     finalSpotQuantity: preview.spotQuantity,
     finalPerpetualQuantity: preview.perpetualQuantity,
     residualQuantity: preview.residualQuantity,
+    runtime: null,
     errorCategory: null,
     message: "接管计划已保存，尚未发送交易所写请求。",
     createdAt: input.now,
@@ -480,7 +493,19 @@ export function createRwaAssetTakeoverRecord(input: {
 }
 
 export function validateRwaAssetTakeoverRecord(value: unknown): RwaAssetTakeoverRecord {
-  const record = exactTakeoverRecord(value, takeoverRecordKeys);
+  const raw = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  if (!raw) throw invalidRecord();
+  const hasRuntime = Object.prototype.hasOwnProperty.call(raw, "runtime");
+  const record = hasRuntime
+    ? exactTakeoverRecord(raw, takeoverRecordKeys)
+    : {
+      ...exactTakeoverRecord(raw, legacyTakeoverRecordKeys),
+      runtime: raw.state === "managed"
+        ? createRwaAssetTakeoverRuntimeRecovery(Number(raw.updatedAt))
+        : null,
+    };
   if (
     typeof record.takeoverId !== "string" || !record.takeoverId
     || typeof record.userId !== "string" || !record.userId
@@ -516,7 +541,7 @@ export function validateRwaAssetTakeoverRecord(value: unknown): RwaAssetTakeover
     !positiveFinite(record.newCapitalUsd)
     || !positiveFinite(record.totalManagedCapitalUsd)
     || (
-      record.state === "failed"
+      record.state === "failed" || record.state === "exited"
         ? record.reservedCapitalUsd !== 0
         : record.reservedCapitalUsd !== record.totalManagedCapitalUsd
           || !positiveFinite(record.reservedCapitalUsd)
@@ -528,6 +553,39 @@ export function validateRwaAssetTakeoverRecord(value: unknown): RwaAssetTakeover
     || record.policyVersion !== profile.asset.authorizationPolicy.version
     || record.policyDigest !== profile.asset.authorizationPolicy.digest
   ) throw invalidRecord();
+  if (record.runtime === null) {
+    if (["managed", "manual_intervention", "exited"].includes(String(record.state))) throw invalidRecord();
+  } else {
+    let runtime: RwaAssetTakeoverRuntimeState;
+    try {
+      runtime = validateRwaAssetTakeoverRuntime(record.runtime, profile);
+      record.runtime = runtime;
+    } catch {
+      throw invalidRecord();
+    }
+    if (
+      runtime.updatedAt > record.updatedAt
+      || (record.state === "managed"
+        && !["recovery_required", "monitoring", "paused", "reducing", "exiting"]
+          .includes(runtime.phase))
+      || (record.state === "manual_intervention" && runtime.phase !== "manual_intervention")
+      || (record.state === "exited" && runtime.phase !== "exited")
+    ) throw invalidRecord();
+    if (
+      record.state === "exited"
+      && (
+        runtime.plannedMutation !== null
+        || runtime.authoritativeSnapshot === null
+        || record.finalPerpetualQuantity !== 0
+        || runtime.residualPerpetualQuantity !== 0
+        || record.finalSpotQuantity !== runtime.residualSpotQuantity
+        || record.residualQuantity !== runtime.residualSpotQuantity
+        || runtime.authoritativeSnapshot.spotQuantity !== record.finalSpotQuantity
+        || runtime.authoritativeSnapshot.perpetualQuantity !== 0
+        || runtime.authoritativeSnapshot.perpetualSide !== "flat"
+      )
+    ) throw invalidRecord();
+  }
   record.cancelledOrders.forEach((item) => {
     const order = exactTakeoverRecord(item, ["category", "orderId", "symbol"]);
     if (!["spot", "linear"].includes(String(order.category))
@@ -576,12 +634,15 @@ export function publicRwaAssetTakeoverRecord(value: RwaAssetTakeoverRecord): Rwa
   const record = validateRwaAssetTakeoverRecord(value);
   const {
     accountId: _accountId,
+    accountFingerprint: _accountFingerprint,
     userDomain: _userDomain,
+    orderLinkPrefix: _orderLinkPrefix,
     plannedMutation: _plannedMutation,
     acceptedOrders,
     cancelledOrders,
     spotOrders,
     perpetualOrders,
+    runtime,
     ...safe
   } = record;
   return {
@@ -590,6 +651,7 @@ export function publicRwaAssetTakeoverRecord(value: RwaAssetTakeoverRecord): Rwa
     cancelledOrderCount: cancelledOrders.length,
     spotOrderCount: spotOrders.length,
     perpetualOrderCount: perpetualOrders.length,
+    runtime: publicRwaAssetTakeoverRuntime(runtime),
   };
 }
 
@@ -737,7 +799,7 @@ function leveragePlan(input: {
   };
 }
 
-function assertTakeoverProviderSnapshot(
+export function assertRwaAssetTakeoverProviderSnapshot(
   profile: RwaAutomationResolvedAssetProfile,
   provider: RwaAssetTakeoverProviderSnapshot,
 ) {
@@ -772,7 +834,9 @@ function assertTakeoverProviderSnapshot(
     || provider.fundingRates30d.length > 1_000
     || provider.fundingRates30d.some((rate) => !Number.isFinite(rate))
     || !validDepth(provider.spotAskDepth, "ask")
+    || !validDepth(provider.spotBidDepth, "bid")
     || !validDepth(provider.perpetualBidDepth, "bid")
+    || !validDepth(provider.perpetualAskDepth, "ask")
     || provider.orders.some((order) =>
       !["spot", "linear"].includes(order.category)
       || !order.orderId || !order.clientOrderId
@@ -848,7 +912,7 @@ function assertExecutableTopUp(
   }
 }
 
-function digestOrders(orders: readonly RwaAssetOrderReference[]) {
+export function digestRwaAssetOrders(orders: readonly RwaAssetOrderReference[]) {
   return digest([...orders]
     .map((order) => ({
       category: order.category,
@@ -1004,7 +1068,7 @@ function depthRejected() {
 
 const takeoverStates: RwaAssetTakeoverState[] = [
   "planned", "cancelling_orders", "awaiting_reconfirm", "setting_leverage",
-  "opening_spot", "opening_perpetual", "managed", "manual_intervention", "failed",
+  "opening_spot", "opening_perpetual", "managed", "manual_intervention", "exited", "failed",
 ];
 
 const leveragePlanKeys = [
@@ -1050,9 +1114,10 @@ const takeoverRecordKeys = [
   "cancelledOrders", "createdAt", "errorCategory", "finalPerpetualQuantity", "finalSpotQuantity",
   "idempotencyKey", "leverage", "message", "newCapitalUsd", "orderLinkPrefix", "perpetualOrders",
   "plannedMutation", "policyDigest", "policyVersion", "previewDigest", "profileId", "reservedCapitalUsd",
-  "residualQuantity", "spotOrders", "state", "takeoverId", "targetHedgedQuantity",
+  "residualQuantity", "runtime", "spotOrders", "state", "takeoverId", "targetHedgedQuantity",
   "totalManagedCapitalUsd", "updatedAt", "userDomain", "userId", "venue",
 ] as const;
+const legacyTakeoverRecordKeys = takeoverRecordKeys.filter((key) => key !== "runtime");
 
 const takeoverRecordNumberKeys = [
   "authorizationCreatedAt", "createdAt", "finalPerpetualQuantity", "finalSpotQuantity", "newCapitalUsd",

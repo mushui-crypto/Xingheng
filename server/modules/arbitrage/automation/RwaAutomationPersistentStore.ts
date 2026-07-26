@@ -403,7 +403,7 @@ export class RwaAutomationPersistentStore<
         );
       }
       const parsed = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<AutomationState>;
-      if (parsed.version !== 1) return emptyState();
+      if (parsed.version !== 1) throw invalidRiskState();
       const normalized = {
         ...emptyState(),
         ...parsed,
@@ -429,6 +429,7 @@ export class RwaAutomationPersistentStore<
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
         credentialAudit: Array.isArray(parsed.credentialAudit) ? parsed.credentialAudit : [],
       } as AutomationState;
+      assertAccountAssetStateCapacity(normalized);
       assertTakeoverCollection(normalized.assetTakeovers, normalized.assetAuthorizations);
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
       const rawComparable = JSON.stringify(parsed);
@@ -446,20 +447,7 @@ export class RwaAutomationPersistentStore<
   }
 
   async writeState(state: AutomationState) {
-    if (state.assetAuthorizations.length > RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE) {
-      throw new RwaAutomationGovernanceError(
-        503,
-        "automation_capacity_exceeded",
-        "账户资产授权状态超过安全容量上限；已拒绝继续。",
-      );
-    }
-    if (state.assetTakeovers.length > RWA_MAX_ASSET_TAKEOVERS_PER_STATE) {
-      throw new RwaAutomationGovernanceError(
-        503,
-        "automation_capacity_exceeded",
-        "资产接管状态超过安全容量上限；已拒绝继续。",
-      );
-    }
+    assertAccountAssetStateCapacity(state);
     for (const authorization of state.assetAuthorizations) {
       validateAccountAssetAuthorizationForStore(authorization, this.userDomain, this.venue);
     }
@@ -561,11 +549,11 @@ export async function discoverAutomationUsersWithExposure() {
     for (const value of assetTakeovers ?? []) {
       try {
         const takeover = validateRwaAssetTakeoverRecord(value);
-        const hasExposure = takeover.state !== "failed"
+        const hasExposure = !["failed", "exited"].includes(takeover.state)
           && (takeover.finalSpotQuantity > 1e-12 || takeover.finalPerpetualQuantity > 1e-12);
         if (hasExposure && takeover.userDomain === entry.name.slice(0, 16)) users.add(takeover.userId);
       } catch {
-        continue;
+        throw invalidRiskState();
       }
     }
   }
@@ -593,7 +581,7 @@ function compactState(
       left.createdAt - right.createdAt || left.executionId.localeCompare(right.executionId)),
     assetTakeovers: state.assetTakeovers
       .filter((takeover) =>
-        takeover.state !== "failed"
+        !["failed", "exited"].includes(takeover.state)
         || takeover.updatedAt + config.stateCompletedExecutionRetentionMs > now)
       .sort((left, right) =>
         left.createdAt - right.createdAt || left.takeoverId.localeCompare(right.takeoverId)),
@@ -816,7 +804,7 @@ export function automationCapitalExposuresFromTakeovers(
 ): RwaAutomationCapitalExposure[] {
   return takeovers.flatMap((value) => {
     const takeover = validateRwaAssetTakeoverRecord(value);
-    if (takeover.state === "failed" || !(takeover.reservedCapitalUsd > 0)) return [];
+    if (["failed", "exited"].includes(takeover.state) || !(takeover.reservedCapitalUsd > 0)) return [];
     return [{
       executionId: `takeover:${takeover.takeoverId}`,
       userId: takeover.userId,
@@ -924,10 +912,29 @@ function assertTakeoverCollection(
     if (matches.length !== 1) throw invalidRiskState();
   }
   const capitalHoldingAuthorizations = takeovers
-    .filter((takeover) => takeover.state !== "failed")
+    .filter((takeover) => !["failed", "exited"].includes(takeover.state))
     .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
   if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
     throw invalidRiskState();
+  }
+}
+
+function assertAccountAssetStateCapacity(
+  state: Pick<AutomationState, "assetAuthorizations" | "assetTakeovers">,
+) {
+  if (state.assetAuthorizations.length > RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE) {
+    throw new RwaAutomationGovernanceError(
+      503,
+      "automation_capacity_exceeded",
+      "账户资产授权状态超过安全容量上限；已拒绝继续。",
+    );
+  }
+  if (state.assetTakeovers.length > RWA_MAX_ASSET_TAKEOVERS_PER_STATE) {
+    throw new RwaAutomationGovernanceError(
+      503,
+      "automation_capacity_exceeded",
+      "资产接管状态超过安全容量上限；已拒绝继续。",
+    );
   }
 }
 

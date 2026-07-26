@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,14 +11,21 @@ import { requireRwaAutomationExecutionProfile } from "./RwaAutomationAssetProfil
 import {
   createRwaAssetTakeoverPreview,
   createRwaAssetTakeoverRecord,
+  RWA_MAX_ASSET_TAKEOVERS_PER_STATE,
   RwaAssetTakeoverError,
+  validateRwaAssetTakeoverRecord,
   validateRwaTakeoverFundingWindow,
   type RwaAssetTakeoverProviderSnapshot,
   type RwaAssetTakeoverRecord,
 } from "./RwaAssetTakeover";
 import { RwaAssetTakeoverExecutionEngine } from "./RwaAssetTakeoverExecutionEngine";
+import { createRwaAssetTakeoverRuntime } from "./RwaAssetTakeoverRuntime";
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
-import { RwaAutomationPersistentStore } from "./RwaAutomationPersistentStore";
+import { RwaAutomationGovernanceError } from "./RwaAutomationGovernance";
+import {
+  RwaAutomationPersistentStore,
+  discoverAutomationUsersWithExposure,
+} from "./RwaAutomationPersistentStore";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import type {
   RwaNeutralTradingClient,
@@ -396,6 +403,7 @@ test("persistent takeover state is exact, authorization-linked, capacity bounded
       keyProvider: new FakeCredentialKeyProvider(),
       credentialPath: join(directory, "credentials.json"),
       statePath: join(directory, "state.json"),
+      now: () => now + 31 * 24 * 60 * 60_000,
     });
     const fixture = takeoverFixture({ spot: 0.1, perpetual: 0.1 });
     const preview = createRwaAssetTakeoverPreview({
@@ -437,12 +445,184 @@ test("persistent takeover state is exact, authorization-linked, capacity bounded
     });
     await assert.rejects(store.writeState(restored));
     restored.assetTakeovers.pop();
+
+    const exited = exitedTakeoverRecord(record);
+    restored.assetTakeovers.push(exited);
+    await store.writeState(restored);
+    assert.deepEqual(
+      (await store.readState()).assetTakeovers.map((item) => item.takeoverId),
+      [record.takeoverId],
+    );
+    restored.assetTakeovers.pop();
+
     restored.assetAuthorizations = [];
     await assert.rejects(store.writeState(restored));
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("legacy managed takeover migrates to recovery while partial runtime and unsafe exited state fail closed", () => {
+  const fixture = takeoverFixture({ spot: 0.1, perpetual: 0.1 });
+  const { record } = takeoverRecord(fixture, 500);
+  const legacyManaged = structuredClone(record) as any;
+  legacyManaged.state = "managed";
+  delete legacyManaged.runtime;
+
+  const migrated = validateRwaAssetTakeoverRecord(legacyManaged);
+  assert.equal(migrated.runtime?.phase, "recovery_required");
+  assert.equal(migrated.runtime?.authoritativeSnapshot, null);
+  assert.equal(migrated.runtime?.updatedAt, record.updatedAt);
+
+  assert.throws(
+    () => validateRwaAssetTakeoverRecord({ ...legacyManaged, runtime: { schemaVersion: 1 } }),
+    (error: unknown) => error instanceof RwaAssetTakeoverError
+      && error.category === "asset_takeover_invalid",
+  );
+
+  const exited = exitedTakeoverRecord(record);
+  assert.equal(validateRwaAssetTakeoverRecord(exited).state, "exited");
+  assert.throws(
+    () => validateRwaAssetTakeoverRecord({
+      ...exited,
+      runtime: {
+        ...exited.runtime!,
+        plannedMutation: { kind: "cancel", category: "spot", orderId: "unsafe-after-exit" },
+      },
+    }),
+    (error: unknown) => error instanceof RwaAssetTakeoverError
+      && error.category === "asset_takeover_invalid",
+  );
+});
+
+test("startup discovery rejects a corrupted managed runtime instead of skipping its exposure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-takeover-runtime-discovery-"));
+  const previousDataDir = process.env.RWA_AUTOMATION_DATA_DIR;
+  process.env.RWA_AUTOMATION_DATA_DIR = directory;
+  try {
+    const fixture = takeoverFixture({ spot: 0.1, perpetual: 0.1 });
+    const { record } = takeoverRecord(fixture, 500);
+    const userId = "user-a";
+    const store = new RwaAutomationPersistentStore({
+      userId,
+      venue: "binance",
+      keyProvider: new FakeCredentialKeyProvider(),
+      credentialPath: join(directory, "unused-credentials.json"),
+      statePath: join(directory, "unused-state.json"),
+    });
+    await writeFile(
+      join(directory, `${store.userDomain}-binance-state.json`),
+      JSON.stringify({
+        executions: [],
+        assetTakeovers: [{
+          ...record,
+          userId,
+          userDomain: store.userDomain,
+          state: "managed",
+          runtime: { schemaVersion: 1 },
+        }],
+      }),
+      { mode: 0o600 },
+    );
+    await assert.rejects(discoverAutomationUsersWithExposure());
+  } finally {
+    if (previousDataDir === undefined) delete process.env.RWA_AUTOMATION_DATA_DIR;
+    else process.env.RWA_AUTOMATION_DATA_DIR = previousDataDir;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("live state read rejects takeover capacity overflow before collection normalization", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-takeover-runtime-capacity-"));
+  try {
+    const fixture = takeoverFixture({ spot: 0.1, perpetual: 0.1 });
+    const store = new RwaAutomationPersistentStore({
+      userId: "user-a",
+      venue: "binance",
+      keyProvider: new FakeCredentialKeyProvider(),
+      credentialPath: join(directory, "credentials.json"),
+      statePath: join(directory, "state.json"),
+    });
+    const preview = createRwaAssetTakeoverPreview({
+      profile,
+      authorization: fixture.authorization,
+      provider: fixture.provider,
+      newCapitalUsd: 500,
+      selectedLeverage: 2,
+      now,
+    });
+    const record = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: store.userDomain,
+      accountId: fixture.provider.account.accountId,
+      preview,
+      idempotencyKey: "takeover:capacity:0001",
+      orderLinkPrefix: "takeover-capacity",
+      now,
+    });
+    const state = await store.readState();
+    state.assetAuthorizations.push({
+      ...fixture.authorization,
+      userDomain: store.userDomain,
+    });
+    state.assetTakeovers = Array.from(
+      { length: RWA_MAX_ASSET_TAKEOVERS_PER_STATE + 1 },
+      (_, index) => ({
+        ...record,
+        takeoverId: `takeover-capacity-${index}`,
+        idempotencyKey: `takeover:capacity:${index}`,
+        orderLinkPrefix: `takeover-capacity-${index}`,
+      }),
+    );
+    await writeFile(store.statePath, JSON.stringify(state), { mode: 0o600 });
+    await assert.rejects(
+      store.readState(),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_capacity_exceeded",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+function exitedTakeoverRecord(record: RwaAssetTakeoverRecord): RwaAssetTakeoverRecord {
+  const residualSpotQuantity = 0.0001;
+  const runtime = createRwaAssetTakeoverRuntime({
+    capturedAt: now,
+    ordersDigest: "0".repeat(64),
+    providerStateDigest: "0".repeat(64),
+    spotQuantity: residualSpotQuantity,
+    spotAvailableQuantity: residualSpotQuantity,
+    spotLockedQuantity: 0,
+    spotBid: 999,
+    perpetualQuantity: 0,
+    perpetualSide: "flat",
+    perpetualAsk: 1_001,
+    perpetualMark: 1_000,
+    currentFundingRate: 0.0001,
+    liquidationDistancePercent: null,
+    reserveUsd: 100,
+    managedCapitalUsd: residualSpotQuantity * 999,
+  });
+  runtime.phase = "exited";
+  runtime.exitStartedAt = now;
+  runtime.exitCompletedAt = now;
+  runtime.residualSpotQuantity = residualSpotQuantity;
+  runtime.updatedAt = now;
+  return {
+    ...structuredClone(record),
+    takeoverId: `${record.takeoverId}-exited`,
+    idempotencyKey: `${record.idempotencyKey}:exited`,
+    orderLinkPrefix: `${record.orderLinkPrefix}-exited`,
+    state: "exited",
+    reservedCapitalUsd: 0,
+    finalSpotQuantity: residualSpotQuantity,
+    finalPerpetualQuantity: 0,
+    residualQuantity: residualSpotQuantity,
+    runtime,
+    updatedAt: now,
+  };
+}
 
 function takeoverFixture(input: {
   spot: number;
@@ -501,7 +681,9 @@ function takeoverFixture(input: {
     },
     orders: input.orders ?? [],
     spotAskDepth: [{ price: 1_000, quantityBase: 10 }],
+    spotBidDepth: [{ price: 999, quantityBase: 10 }],
     perpetualBidDepth: [{ price: 1_000, quantityBase: 10 }],
+    perpetualAskDepth: [{ price: 1_001, quantityBase: 10 }],
     fundingRates30d: [0.00008, 0.0001, 0.00012],
     perpetualInitialMarginUsd: input.perpetual * 500,
     perpetualLeverage: input.perpetual > 0 ? 2 : null,

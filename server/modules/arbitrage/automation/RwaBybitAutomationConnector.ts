@@ -65,6 +65,15 @@ export class RwaBybitAutomationConnector implements RwaAutomationConnector {
     return this.service.reconfirmAssetTakeover(input);
   }
   getAssetTakeoverStatus(takeoverId: string) { return this.service.getAssetTakeoverStatus(takeoverId); }
+  previewAssetTakeoverExit(input: Parameters<RwaNeutralExecutionService["previewAssetTakeoverExit"]>[0]) {
+    return this.service.previewAssetTakeoverExit(input);
+  }
+  confirmAssetTakeoverExit(input: Parameters<RwaNeutralExecutionService["confirmAssetTakeoverExit"]>[0]) {
+    return this.service.confirmAssetTakeoverExit(input);
+  }
+  getAssetTakeoverExitStatus(takeoverId: string) {
+    return this.service.getAssetTakeoverExitStatus(takeoverId);
+  }
   getConfig() { return this.service.getConfig(); }
   updateConfig(input: unknown) { return this.service.updateConfig(input); }
   setKillSwitch(active: boolean, accountId?: string) { return this.service.setKillSwitch(active, accountId); }

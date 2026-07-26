@@ -8,6 +8,7 @@ export type RwaAutomationGovernedOperation =
   | "execute"
   | "position_close"
   | "close_all"
+  | "asset_takeover_exit"
   | "private_read";
 
 export type RwaAutomationGovernanceContext = {
@@ -514,5 +515,7 @@ function domain(purpose: string, value: string) {
 }
 
 function isExitOperation(operation: RwaAutomationGovernedOperation) {
-  return operation === "position_close" || operation === "close_all";
+  return operation === "position_close"
+    || operation === "close_all"
+    || operation === "asset_takeover_exit";
 }

@@ -20,6 +20,7 @@ import {
   createRwaAssetTakeoverRecord,
   publicRwaAssetTakeoverRecord,
   requireActiveTakeoverAuthorization,
+  RWA_ASSET_TAKEOVER_MIN_LIQUIDATION_DISTANCE_PERCENT,
   RwaAssetTakeoverError,
   validateRwaAssetTakeoverPreview,
   type RwaAssetTakeoverLeverage,
@@ -27,6 +28,19 @@ import {
   type RwaAssetTakeoverRecord,
 } from "./RwaAssetTakeover";
 import { RwaAssetTakeoverExecutionEngine } from "./RwaAssetTakeoverExecutionEngine";
+import {
+  RWA_ASSET_RUNTIME_POLL_INTERVAL_MS,
+  assertRwaAssetTakeoverExitPreview,
+  createRwaAssetTakeoverRuntimeManual,
+  createRwaAssetTakeoverExitPreview,
+  validateRwaAssetTakeoverExitPreview,
+  type RwaAssetTakeoverExitPreview,
+  type RwaAssetTakeoverRuntimeReason,
+} from "./RwaAssetTakeoverRuntime";
+import {
+  RwaAssetTakeoverRuntimeEngine,
+  RwaAssetTakeoverRuntimeError,
+} from "./RwaAssetTakeoverRuntimeEngine";
 import type {
   RwaNeutralTradingClient,
   RwaVenueAccountIdentity,
@@ -39,11 +53,13 @@ type CredentialBinding = Pick<RwaVenueAccountIdentity, "accountId" | "accountFin
 
 export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermissions> {
   private readonly engine: RwaAssetTakeoverExecutionEngine;
+  private readonly runtimeEngine: RwaAssetTakeoverRuntimeEngine;
 
   constructor(private readonly options: {
     venue: "binance" | "bybit";
     store: RwaAutomationPersistentStore<any, TPermissions>;
     client: () => Promise<RwaNeutralTradingClient<TPermissions>>;
+    publicMark: () => Promise<{ capturedAt: number; perpetualMark: number }>;
     credentialBinding: () => Promise<CredentialBinding>;
     assertExecutionLeaseHeld: () => void;
     serverKillSwitchActive: () => boolean;
@@ -52,6 +68,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     this.profile = requireRwaAutomationExecutionProfile("xaut", options.venue);
     this.now = options.now ?? Date.now;
     this.engine = new RwaAssetTakeoverExecutionEngine(this.profile, this.now);
+    this.runtimeEngine = new RwaAssetTakeoverRuntimeEngine(this.profile, this.now);
   }
 
   private readonly profile: RwaAutomationResolvedAssetProfile;
@@ -181,8 +198,8 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     });
     const client = await this.options.client();
     this.options.assertExecutionLeaseHeld();
-    if (!client.readAssetTakeoverSnapshot) throw unavailable();
-    const provider = await client.readAssetTakeoverSnapshot();
+    if (!client.readManagedAssetSnapshot) throw unavailable();
+    const provider = await client.readManagedAssetSnapshot();
     this.options.assertExecutionLeaseHeld();
     this.assertProviderBinding(provider.account, metadata);
     const current = createRwaAssetTakeoverPreview({
@@ -225,6 +242,215 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     return publicRwaAssetTakeoverRecord(record);
   }
 
+  async pollManaged() {
+    this.options.assertExecutionLeaseHeld();
+    const state = await this.options.store.readState();
+    this.options.assertExecutionLeaseHeld();
+    const managed = state.assetTakeovers.filter((item) => item.state === "managed");
+    if (!managed.length) return false;
+    let metadata: CredentialBinding;
+    let client: RwaNeutralTradingClient<TPermissions>;
+    try {
+      metadata = await this.options.credentialBinding();
+      this.options.assertExecutionLeaseHeld();
+      client = await this.options.client();
+      this.options.assertExecutionLeaseHeld();
+    } catch (error) {
+      if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+      for (const record of managed) {
+        if (!record.runtime) continue;
+        await this.runtimeHooks(state, record).disarm(
+          record,
+          "account_changed",
+          "自动运行无法核对当前账户凭证，已急停并要求人工处理。",
+        );
+      }
+      return false;
+    }
+    for (const record of managed) {
+      try {
+        this.assertProviderBinding(record, metadata);
+        const authorization = requireActiveTakeoverAuthorization({
+          authorizations: state.assetAuthorizations,
+          profile: this.profile,
+          accountId: metadata.accountId,
+          accountFingerprint: metadata.accountFingerprint,
+          authorizationId: record.authorizationId,
+        });
+        await this.runtimeEngine.recover({
+          client,
+          record,
+          hooks: this.runtimeHooks(state, record),
+        });
+        if (record.state !== "managed") continue;
+        await this.runtimeEngine.poll({
+          client,
+          authorization,
+          record,
+          hooks: this.runtimeHooks(state, record),
+          userKillSwitchActive: state.config.killSwitchActive,
+          serverKillSwitchActive: this.options.serverKillSwitchActive(),
+        });
+      } catch (error) {
+        if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+        if (
+          error instanceof RwaAssetTakeoverRuntimeError
+          && [
+            "asset_takeover_runtime_paused",
+            "asset_takeover_runtime_manual_intervention",
+            "asset_takeover_exit_incomplete",
+          ]
+            .includes(error.category)
+        ) continue;
+        throw error;
+      }
+    }
+    return state.assetTakeovers.some((item) => item.state === "managed");
+  }
+
+  async pollManagedPublicRisk() {
+    this.options.assertExecutionLeaseHeld();
+    const state = await this.options.store.readState();
+    this.options.assertExecutionLeaseHeld();
+    const managed = state.assetTakeovers.filter((item) =>
+      item.state === "managed" && item.runtime !== null);
+    if (!managed.length) return false;
+    if (
+      state.config.killSwitchActive
+      || this.options.serverKillSwitchActive()
+      || managed.some((item) =>
+        item.runtime!.lastSuccessfulCheckAt === null
+        || this.now() - item.runtime!.lastSuccessfulCheckAt! >= RWA_ASSET_RUNTIME_POLL_INTERVAL_MS)
+    ) return this.pollManaged();
+
+    try {
+      const mark = await this.options.publicMark();
+      this.options.assertExecutionLeaseHeld();
+      if (
+        !Number.isSafeInteger(mark.capturedAt)
+        || mark.capturedAt <= 0
+        || mark.capturedAt > this.now() + 5_000
+        || !Number.isFinite(mark.perpetualMark)
+        || mark.perpetualMark <= 0
+      ) return this.pollManaged();
+      for (const record of managed) {
+        const snapshot = record.runtime!.authoritativeSnapshot;
+        if (!snapshot || snapshot.perpetualQuantity <= 0) continue;
+        if (snapshot.liquidationDistancePercent === null) return this.pollManaged();
+        const liquidationPrice = snapshot.perpetualMark
+          * (1 + snapshot.liquidationDistancePercent / 100);
+        const currentDistance = (liquidationPrice - mark.perpetualMark)
+          / mark.perpetualMark * 100;
+        if (
+          !Number.isFinite(currentDistance)
+          || currentDistance < RWA_ASSET_TAKEOVER_MIN_LIQUIDATION_DISTANCE_PERCENT
+        ) return this.pollManaged();
+      }
+      return true;
+    } catch (error) {
+      if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+      return this.pollManaged();
+    }
+  }
+
+  async previewExit(input: { takeoverId: string }) {
+    this.options.assertExecutionLeaseHeld();
+    const metadata = await this.options.credentialBinding();
+    this.options.assertExecutionLeaseHeld();
+    const state = await this.options.store.readState();
+    this.options.assertExecutionLeaseHeld();
+    const record = this.requireManagedTakeover(state, input.takeoverId, metadata);
+    const client = await this.options.client();
+    this.options.assertExecutionLeaseHeld();
+    if (!client.readManagedAssetSnapshot) throw unavailable();
+    const provider = await client.readManagedAssetSnapshot();
+    this.options.assertExecutionLeaseHeld();
+    this.assertProviderBinding(provider.account, metadata);
+    const snapshot = this.runtimeEngine.snapshotForPreview(provider, record);
+    if (
+      Math.abs(snapshot.spotQuantity - snapshot.perpetualQuantity)
+        > this.profile.asset.hedgeToleranceBase
+      || snapshot.spotLockedQuantity > this.profile.asset.hedgeToleranceBase
+    ) throw invalidExitPreview();
+    return createRwaAssetTakeoverExitPreview({
+      takeoverId: record.takeoverId,
+      venue: record.venue,
+      assetId: "xaut",
+      profileId: record.profileId,
+      authorizationId: record.authorizationId,
+      authorizationCreatedAt: record.authorizationCreatedAt,
+      snapshot,
+      now: this.now(),
+    });
+  }
+
+  async confirmExit(input: {
+    takeoverId: string;
+    preview: RwaAssetTakeoverExitPreview;
+    idempotencyKey: string;
+  }) {
+    this.options.assertExecutionLeaseHeld();
+    if (!validIdempotencyKey(input.idempotencyKey)) throw invalidExitPreview();
+    const provided = validateRwaAssetTakeoverExitPreview(input.preview);
+    const metadata = await this.options.credentialBinding();
+    this.options.assertExecutionLeaseHeld();
+    const state = await this.options.store.readState();
+    this.options.assertExecutionLeaseHeld();
+    const record = this.requireManagedTakeover(state, input.takeoverId, metadata);
+    if (record.runtime?.exitIdempotencyKey) {
+      if (record.runtime.exitIdempotencyKey !== input.idempotencyKey) throw invalidExitPreview();
+      return publicRwaAssetTakeoverRecord(record);
+    }
+    const client = await this.options.client();
+    this.options.assertExecutionLeaseHeld();
+    if (!client.readAssetTakeoverSnapshot) throw unavailable();
+    const provider = await client.readAssetTakeoverSnapshot();
+    this.options.assertExecutionLeaseHeld();
+    this.assertProviderBinding(provider.account, metadata);
+    const snapshot = this.runtimeEngine.snapshotForPreview(provider, record);
+    const current = createRwaAssetTakeoverExitPreview({
+      takeoverId: record.takeoverId,
+      venue: record.venue,
+      assetId: "xaut",
+      profileId: record.profileId,
+      authorizationId: record.authorizationId,
+      authorizationCreatedAt: record.authorizationCreatedAt,
+      snapshot,
+      now: this.now(),
+    });
+    try {
+      assertRwaAssetTakeoverExitPreview({ provided, current, now: this.now() });
+    } catch {
+      throw invalidExitPreview();
+    }
+    record.runtime!.exitIdempotencyKey = input.idempotencyKey;
+    record.runtime!.updatedAt = this.now();
+    record.updatedAt = this.now();
+    await this.writeStateWithLease(state);
+    const authorization = requireActiveTakeoverAuthorization({
+      authorizations: state.assetAuthorizations,
+      profile: this.profile,
+      accountId: metadata.accountId,
+      accountFingerprint: metadata.accountFingerprint,
+      authorizationId: record.authorizationId,
+    });
+    void authorization;
+    await this.runtimeEngine.exit({
+      client,
+      record,
+      hooks: this.runtimeHooks(state, record),
+      reason: "user_exit",
+      emergency: false,
+      idempotencyKey: input.idempotencyKey,
+      initialProvider: provider,
+    });
+    return publicRwaAssetTakeoverRecord(record);
+  }
+
+  async exitStatus(takeoverId: string) {
+    return this.status(takeoverId);
+  }
+
   async recoverPending() {
     this.options.assertExecutionLeaseHeld();
     const state = await this.options.store.readState();
@@ -244,6 +470,11 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
       this.options.assertExecutionLeaseHeld();
       for (const record of pending) {
         record.state = "manual_intervention";
+        record.runtime = createRwaAssetTakeoverRuntimeManual(
+          this.now(),
+          "account_changed",
+          "服务重启后无法读取权威账户状态，已停止接管并要求人工处理。",
+        );
         record.errorCategory = "asset_takeover_manual_intervention";
         record.message = "服务重启后无法读取权威账户状态，已停止接管并要求人工处理。";
         record.updatedAt = this.now();
@@ -290,6 +521,11 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
         if (error instanceof RwaAutomationExecutionLeaseError) throw error;
         this.options.assertExecutionLeaseHeld();
         record.state = "manual_intervention";
+        record.runtime = createRwaAssetTakeoverRuntimeManual(
+          this.now(),
+          "persistent_state_invalid",
+          "服务重启恢复未能形成严格对冲，已停止并要求人工处理。",
+        );
         record.errorCategory = "asset_takeover_manual_intervention";
         record.message = "服务重启恢复未能形成严格对冲，已停止并要求人工处理。";
         record.updatedAt = this.now();
@@ -337,10 +573,104 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
         state.config.strategyEnabled = false;
         state.config.killSwitchActive = true;
         record.state = "manual_intervention";
+        if (!record.runtime) {
+          record.runtime = createRwaAssetTakeoverRuntimeManual(
+            this.now(),
+            "persistent_state_invalid",
+            "接管未能形成严格对冲，已停止后续写入并要求人工处理。",
+          );
+        } else {
+          record.runtime.phase = "manual_intervention";
+          record.runtime.reason = "persistent_state_invalid";
+          record.runtime.message = "接管未能形成严格对冲，已停止后续写入并要求人工处理。";
+          record.runtime.updatedAt = this.now();
+        }
         record.updatedAt = this.now();
         await this.writeStateWithLease(state);
       },
     };
+  }
+
+  private runtimeHooks(state: RwaAutomationStateData, record: RwaAssetTakeoverRecord) {
+    return {
+      assertLeaseHeld: () => this.options.assertExecutionLeaseHeld(),
+      assertMutationAllowed: async () => {
+        this.options.assertExecutionLeaseHeld();
+        const [latest, metadata] = await Promise.all([
+          this.options.store.readState(),
+          this.options.credentialBinding(),
+        ]);
+        this.options.assertExecutionLeaseHeld();
+        const persisted = latest.assetTakeovers.find((item) => item.takeoverId === record.takeoverId);
+        if (
+          !persisted
+          || persisted.state !== "managed"
+          || persisted.idempotencyKey !== record.idempotencyKey
+          || persisted.accountId !== metadata.accountId
+          || persisted.accountFingerprint !== metadata.accountFingerprint
+          || persisted.profileId !== record.profileId
+          || persisted.authorizationId !== record.authorizationId
+          || persisted.runtime?.exitIdempotencyKey !== record.runtime?.exitIdempotencyKey
+        ) throw invalidRequest();
+        requireActiveTakeoverAuthorization({
+          authorizations: latest.assetAuthorizations,
+          profile: this.profile,
+          accountId: metadata.accountId,
+          accountFingerprint: metadata.accountFingerprint,
+          authorizationId: record.authorizationId,
+        });
+      },
+      persist: async () => {
+        record.updatedAt = this.now();
+        await this.writeStateWithLease(state);
+      },
+      disarm: async (
+        _target: RwaAssetTakeoverRecord,
+        reason: RwaAssetTakeoverRuntimeReason,
+        message: string,
+      ) => {
+        this.options.assertExecutionLeaseHeld();
+        state.config.globalExecutionEnabled = false;
+        state.config.strategyEnabled = false;
+        state.config.killSwitchActive = true;
+        record.state = "manual_intervention";
+        record.errorCategory = "asset_takeover_runtime_manual_intervention";
+        record.message = message;
+        if (record.runtime) {
+          record.runtime.phase = "manual_intervention";
+          record.runtime.reason = reason;
+          record.runtime.message = message;
+          record.runtime.updatedAt = this.now();
+        }
+        record.updatedAt = this.now();
+        await this.writeStateWithLease(state);
+      },
+    };
+  }
+
+  private requireManagedTakeover(
+    state: RwaAutomationStateData,
+    takeoverId: string,
+    metadata: CredentialBinding,
+  ) {
+    const record = state.assetTakeovers.find((item) => item.takeoverId === takeoverId);
+    if (
+      !record
+      || record.state !== "managed"
+      || !record.runtime
+      || record.accountId !== metadata.accountId
+      || record.accountFingerprint !== metadata.accountFingerprint
+      || record.assetId !== this.profile.asset.assetId
+      || record.profileId !== `${this.profile.asset.assetId}:${this.profile.venue.strategyId}`
+    ) throw invalidExitPreview();
+    requireActiveTakeoverAuthorization({
+      authorizations: state.assetAuthorizations,
+      profile: this.profile,
+      accountId: metadata.accountId,
+      accountFingerprint: metadata.accountFingerprint,
+      authorizationId: record.authorizationId,
+    });
+    return record;
   }
 
   private async assertCapitalCapacity(
@@ -420,7 +750,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     if (state.assetTakeovers.some((item) =>
       item.authorizationId === authorizationId
       && item.takeoverId !== currentTakeoverId
-      && item.state !== "failed")) {
+      && !["failed", "exited"].includes(item.state))) {
       throw new RwaAssetTakeoverError(
         409,
         "asset_takeover_risk_rejected",
@@ -453,5 +783,13 @@ function unavailable() {
     503,
     "asset_takeover_risk_rejected",
     "交易所未提供接管所需的权威只读接口，已停止接管。",
+  );
+}
+
+function invalidExitPreview() {
+  return new RwaAssetTakeoverRuntimeError(
+    409,
+    "asset_takeover_exit_preview_invalid",
+    "退出确认不存在、已过期，或 XAUT 数量和订单已经变化，请重新确认。",
   );
 }

@@ -23,6 +23,10 @@ import type {
   RwaAssetTakeoverPreview,
 } from "./RwaAssetTakeover";
 import {
+  RWA_ASSET_RUNTIME_PUBLIC_POLL_INTERVAL_MS,
+  type RwaAssetTakeoverExitPreview,
+} from "./RwaAssetTakeoverRuntime";
+import {
   assertAccountAssetAuthorizationPreview,
   createAccountAssetAuthorization as createStoredAccountAssetAuthorization,
   createAccountAssetAuthorizationPreview,
@@ -82,8 +86,10 @@ export class RwaNeutralExecutionError extends Error {
 export class RwaNeutralExecutionService {
   private lock = Promise.resolve();
   private activityMonitor: ReturnType<typeof setInterval> | null = null;
+  private takeoverMonitor: ReturnType<typeof setInterval> | null = null;
   private armedChallengeIds = new Set<string>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
+  private readonly publicClient: RwaBybitTradingClient | null;
   private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
   private readonly takeoverCoordinator: RwaAssetTakeoverCoordinator<RwaBybitPermissions>;
   private accessCache: {
@@ -99,8 +105,10 @@ export class RwaNeutralExecutionService {
     private readonly serverKillSwitchActive: () => boolean = () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     private readonly assertExecutionLeaseHeld: () => void = () => {},
     private readonly activityMonitoringEnabled: () => boolean = () => process.env.NODE_ENV !== "test",
+    publicClient?: RwaBybitTradingClient,
   ) {
     this.store.setClock(now);
+    this.publicClient = publicClient ?? null;
     this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(
       now,
       assertExecutionLeaseHeld,
@@ -110,6 +118,12 @@ export class RwaNeutralExecutionService {
       venue: "bybit",
       store,
       client: () => this.client(),
+      publicMark: () => {
+        if (!this.publicClient?.readManagedAssetPublicMark) {
+          throw new Error("Bybit 公开标记价格接口不可用。");
+        }
+        return this.publicClient.readManagedAssetPublicMark();
+      },
       credentialBinding: () => this.requireCredentialMetadata(),
       assertExecutionLeaseHeld,
       serverKillSwitchActive,
@@ -180,6 +194,12 @@ export class RwaNeutralExecutionService {
 
   async startActivityMonitoring() {
     if (!this.activityMonitoringEnabled()) return;
+    await this.startTakeoverMonitoring();
+    await this.startStrategyActivityMonitoring();
+  }
+
+  private async startStrategyActivityMonitoring() {
+    if (!this.activityMonitoringEnabled()) return;
     if (this.activityMonitor) return;
     const active = await this.refreshActivityContinuity();
     if (!active) return;
@@ -192,17 +212,38 @@ export class RwaNeutralExecutionService {
   }
 
   hasActivityMonitor() {
-    return this.activityMonitor !== null;
+    return this.activityMonitor !== null || this.takeoverMonitor !== null;
   }
 
   dispose() {
     this.stopActivityMonitor();
+    this.stopTakeoverMonitor();
   }
 
   private stopActivityMonitor() {
     if (!this.activityMonitor) return;
     clearInterval(this.activityMonitor);
     this.activityMonitor = null;
+  }
+
+  private async startTakeoverMonitoring() {
+    if (!this.activityMonitoringEnabled()) return;
+    this.assertExecutionLeaseHeld();
+    if (this.takeoverMonitor) return;
+    const active = await this.withLock(() => this.takeoverCoordinator.pollManaged());
+    if (!active) return;
+    this.takeoverMonitor = setInterval(() => {
+      void this.withLock(() => this.takeoverCoordinator.pollManagedPublicRisk()).then((keep) => {
+        if (!keep) this.stopTakeoverMonitor();
+      });
+    }, RWA_ASSET_RUNTIME_PUBLIC_POLL_INTERVAL_MS);
+    this.takeoverMonitor.unref();
+  }
+
+  private stopTakeoverMonitor() {
+    if (!this.takeoverMonitor) return;
+    clearInterval(this.takeoverMonitor);
+    this.takeoverMonitor = null;
   }
 
   refreshActivityContinuity() {
@@ -500,23 +541,43 @@ export class RwaNeutralExecutionService {
     return this.withLock(() => this.takeoverCoordinator.preview(input));
   }
 
-  startAssetTakeover(input: {
+  async startAssetTakeover(input: {
     assetId: string;
     preview: RwaAssetTakeoverPreview;
     idempotencyKey: string;
   }) {
-    return this.withLock(() => this.takeoverCoordinator.start(input));
+    const result = await this.withLock(() => this.takeoverCoordinator.start(input));
+    await this.startTakeoverMonitoring();
+    return result;
   }
 
-  reconfirmAssetTakeover(input: {
+  async reconfirmAssetTakeover(input: {
     takeoverId: string;
     preview: RwaAssetTakeoverPreview;
   }) {
-    return this.withLock(() => this.takeoverCoordinator.reconfirm(input));
+    const result = await this.withLock(() => this.takeoverCoordinator.reconfirm(input));
+    await this.startTakeoverMonitoring();
+    return result;
   }
 
   getAssetTakeoverStatus(takeoverId: string) {
     return this.takeoverCoordinator.status(takeoverId);
+  }
+
+  previewAssetTakeoverExit(input: { takeoverId: string }) {
+    return this.withLock(() => this.takeoverCoordinator.previewExit(input));
+  }
+
+  confirmAssetTakeoverExit(input: {
+    takeoverId: string;
+    preview: RwaAssetTakeoverExitPreview;
+    idempotencyKey: string;
+  }) {
+    return this.withLock(() => this.takeoverCoordinator.confirmExit(input));
+  }
+
+  getAssetTakeoverExitStatus(takeoverId: string) {
+    return this.takeoverCoordinator.exitStatus(takeoverId);
   }
 
   async putCredentials(input: unknown) {
@@ -939,7 +1000,7 @@ export class RwaNeutralExecutionService {
           await this.store.writeState(state);
         }
       }
-      if (execution.state === "hedged") void this.startActivityMonitoring();
+      if (execution.state === "hedged") void this.startStrategyActivityMonitoring();
       return redactExecution(execution);
     });
   }

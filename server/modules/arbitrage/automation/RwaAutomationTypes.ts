@@ -8,6 +8,7 @@ import type {
   RwaAssetTakeoverLeverage,
   RwaAssetTakeoverPreview,
 } from "./RwaAssetTakeover";
+import type { RwaAssetTakeoverExitPreview } from "./RwaAssetTakeoverRuntime";
 
 export type RwaAutomationVenue = Extract<ArbitrageVenue, "bybit" | "bitget" | "binance" | "okx">;
 export type RwaAutomationMode = "arbitrage_entry" | "manual_entry";
@@ -93,6 +94,15 @@ export type RwaAutomationConnector = {
     preview: RwaAssetTakeoverPreview;
   }): Promise<unknown>;
   getAssetTakeoverStatus?(takeoverId: string): Promise<unknown>;
+  previewAssetTakeoverExit?(input: {
+    takeoverId: string;
+  }): Promise<RwaAssetTakeoverExitPreview>;
+  confirmAssetTakeoverExit?(input: {
+    takeoverId: string;
+    preview: RwaAssetTakeoverExitPreview;
+    idempotencyKey: string;
+  }): Promise<unknown>;
+  getAssetTakeoverExitStatus?(takeoverId: string): Promise<unknown>;
   getConfig(): Promise<unknown>;
   updateConfig(input: unknown): Promise<unknown>;
   setKillSwitch(active: boolean, accountId?: string): Promise<unknown>;

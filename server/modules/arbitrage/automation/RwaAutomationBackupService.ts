@@ -56,8 +56,14 @@ import {
   getRwaAutomationAssetProfile,
   rwaAutomationProfileId,
 } from "./RwaAutomationAssetProfile";
-import { validateAccountAssetAuthorization } from "./RwaAccountAssetAuthorization";
-import { validateRwaAssetTakeoverRecord } from "./RwaAssetTakeover";
+import {
+  RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE,
+  validateAccountAssetAuthorization,
+} from "./RwaAccountAssetAuthorization";
+import {
+  RWA_MAX_ASSET_TAKEOVERS_PER_STATE,
+  validateRwaAssetTakeoverRecord,
+} from "./RwaAssetTakeover";
 
 export const RWA_AUTOMATION_BACKUP_ROOT = "/app/rwa-automation-backups";
 export const RWA_AUTOMATION_BACKUP_SCHEMA_VERSION = 1 as const;
@@ -597,14 +603,20 @@ function sanitizeAutomationState(
   const assetAuthorizations = parsed.assetAuthorizations === undefined
     ? []
     : parsed.assetAuthorizations;
-  if (!Array.isArray(assetAuthorizations)) throw invalidSnapshot();
+  if (
+    !Array.isArray(assetAuthorizations)
+    || assetAuthorizations.length > RWA_MAX_ASSET_AUTHORIZATIONS_PER_STATE
+  ) throw invalidSnapshot();
   const validatedAuthorizations = assetAuthorizations.map((value) => {
     const authorization = validateAccountAssetAuthorization(value);
     if (authorization.userDomain !== userDomain || authorization.venue !== venue) throw invalidSnapshot();
     return authorization;
   });
   const assetTakeovers = parsed.assetTakeovers === undefined ? [] : parsed.assetTakeovers;
-  if (!Array.isArray(assetTakeovers)) throw invalidSnapshot();
+  if (
+    !Array.isArray(assetTakeovers)
+    || assetTakeovers.length > RWA_MAX_ASSET_TAKEOVERS_PER_STATE
+  ) throw invalidSnapshot();
   const validatedTakeovers = assetTakeovers.map((value) => {
     try {
       const takeover = validateRwaAssetTakeoverRecord(value);
@@ -629,7 +641,7 @@ function sanitizeAutomationState(
     if (new Set(values).size !== values.length) throw invalidSnapshot();
   }
   const capitalHoldingAuthorizations = validatedTakeovers
-    .filter((takeover) => takeover.state !== "failed")
+    .filter((takeover) => !["failed", "exited"].includes(takeover.state))
     .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
   if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
     throw invalidSnapshot();
@@ -646,8 +658,8 @@ function sanitizeAutomationState(
   if (!(parsed.credentialAlert === null || typeof parsed.credentialAlert === "string")) throw invalidSnapshot();
   const value = {
     ...parsed,
-    assetAuthorizations,
-    assetTakeovers,
+    assetAuthorizations: validatedAuthorizations,
+    assetTakeovers: validatedTakeovers,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,

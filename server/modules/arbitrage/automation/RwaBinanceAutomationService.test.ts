@@ -27,8 +27,10 @@ import {
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import {
   createRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverRecord,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
+import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -176,6 +178,82 @@ test("Binance takeover recovery propagates lease loss after provider snapshot wi
     assert.equal(writesAfterLeaseSetup, 0);
     assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "planned");
   } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance managed takeover monitor startup propagates lease loss without state or provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-managed-monitor-lease-loss-"));
+  let restarted: RwaBinanceAutomationService | null = null;
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    client.setAuthoritativeExposure({
+      spotFreeXaut: 0.1,
+      perpetualQuantityXaut: 0.1,
+    });
+    client.snapshot.perpetual.liquidationDistancePercent = 50;
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const record: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:managed-monitor-lease",
+      orderLinkPrefix: "takeover-binance-managed-monitor-lease",
+      now,
+    });
+    record.state = "managed";
+    record.runtime = createRwaAssetTakeoverRuntimeRecovery(now);
+    state.assetTakeovers.push(record);
+    await harness.store.writeState(state);
+
+    let leaseHeld = true;
+    client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let writesAfterLeaseSetup = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (next) => {
+      writesAfterLeaseSetup += 1;
+      return originalWriteState(next);
+    };
+    restarted = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now,
+      () => false,
+      undefined,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated managed takeover monitor lease loss",
+          );
+        }
+      },
+      () => true,
+    );
+    const writesBefore = client.writeCount;
+    await assert.rejects(
+      restarted.initialize(),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError
+        && error.category === "automation_execution_lease_lost",
+    );
+    assert.equal(client.writeCount, writesBefore);
+    assert.equal(writesAfterLeaseSetup, 0);
+    assert.equal(restarted.hasActivityMonitor(), false);
+  } finally {
+    restarted?.dispose();
     await rm(directory, { recursive: true, force: true });
   }
 });
@@ -1131,7 +1209,9 @@ class FakeBinanceClient implements RwaBinanceClient {
       account: structuredClone(this.snapshot),
       orders: structuredClone(this.assetOpenOrders),
       spotAskDepth: [{ price: this.snapshot.spot.ask, quantityBase: 10 }],
+      spotBidDepth: [{ price: this.snapshot.spot.bid, quantityBase: 10 }],
       perpetualBidDepth: [{ price: this.snapshot.perpetual.bid, quantityBase: 10 }],
+      perpetualAskDepth: [{ price: this.snapshot.perpetual.ask, quantityBase: 10 }],
       fundingRates30d: [0.0001, 0.0002, 0.0003],
       perpetualInitialMarginUsd:
         this.snapshot.existingPerpetualQuantityXaut * this.snapshot.perpetual.mark / 2,
@@ -1141,6 +1221,10 @@ class FakeBinanceClient implements RwaBinanceClient {
     };
     this.takeoverSnapshotHook();
     return snapshot;
+  }
+
+  async readManagedAssetSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBinancePermissions>> {
+    return this.readAssetTakeoverSnapshot();
   }
 
   async findOrderByClientOrderId() {

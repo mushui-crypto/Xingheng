@@ -1,6 +1,7 @@
 import type { RwaAccountAssetAuthorization, RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import type { RwaAutomationResolvedAssetProfile } from "./RwaAutomationAssetProfile";
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
+import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
 import {
   createRwaAssetTakeoverPreview,
   RWA_ASSET_TAKEOVER_MAX_SLIPPAGE_BPS,
@@ -342,6 +343,7 @@ export class RwaAssetTakeoverExecutionEngine {
     record.finalSpotQuantity = preview.spotQuantity;
     record.finalPerpetualQuantity = preview.perpetualQuantity;
     record.residualQuantity = Math.abs(preview.spotQuantity - preview.perpetualQuantity);
+    record.runtime = createRwaAssetTakeoverRuntimeRecovery(this.now());
     record.errorCategory = null;
     record.message = record.residualQuantity > this.profile.asset.hedgeToleranceBase
       ? "XAUT 已接管；剩余差额低于交易所最小可交易量，已记录为 residual/dust。"

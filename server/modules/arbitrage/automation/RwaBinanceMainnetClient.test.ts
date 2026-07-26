@@ -37,6 +37,59 @@ test("Binance attribution performs private source reads and is fail-closed when 
   assert.ok(calls > 0);
 });
 
+test("Binance managed public risk reads only the XAUT perpetual mark without credentials", async () => {
+  let calls = 0;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input, init) => {
+      calls += 1;
+      const url = new URL(String(input));
+      assert.equal(url.origin, "https://fapi.binance.com");
+      assert.equal(url.pathname, "/fapi/v1/premiumIndex");
+      assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
+      assert.equal(url.searchParams.has("signature"), false);
+      assert.equal(new Headers(init?.headers).has("X-MBX-APIKEY"), false);
+      return json({ markPrice: "4128.5" });
+    }) as typeof fetch,
+    () => 2_000,
+    ["203.0.113.10"],
+  );
+  assert.deepEqual(await client.readManagedAssetPublicMark(), {
+    capturedAt: 2_000,
+    perpetualMark: 4_128.5,
+  });
+  assert.equal(calls, 1);
+});
+
+test("Binance funding settlements use stable provider ids and reject duplicate pagination evidence", async () => {
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 3_000 });
+      if (url.pathname === "/fapi/v1/income") {
+        return json([{
+          symbol: "XAUTUSDT",
+          incomeType: "FUNDING_FEE",
+          time: 2_000,
+          tranId: "funding-1",
+          income: "-0.25",
+        }]);
+      }
+      throw new Error(`unexpected ${url.pathname}`);
+    }) as typeof fetch,
+    () => 3_000,
+    ["203.0.113.10"],
+  );
+  const settlements = await client.readAssetFundingSettlements({ after: 1_000, through: 3_000 });
+  assert.equal(settlements.length, 1);
+  assert.equal(settlements[0]?.cycleId, "binance:XAUTUSDT:2000");
+  assert.match(settlements[0]?.settlementId ?? "", /^[0-9a-f]{64}$/);
+  assert.equal(settlements[0]?.settledAt, 2_000);
+  assert.equal(settlements[0]?.netFundingUsd, -0.25);
+  assert.equal(settlements[0]?.fundingRate, null);
+});
+
 test("Binance scans the frozen signed endpoints but cannot certify a non-atomic mutation window", async () => {
   const paths: string[] = [];
   const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;

@@ -18,6 +18,10 @@ import {
   validateRwaTakeoverFundingWindow,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
+import {
+  aggregateRwaAssetFundingCycles,
+  type RwaAssetFundingSettlement,
+} from "./RwaAssetTakeoverRuntime";
 import { scanBybitPositionAttribution } from "./RwaProviderActivityScanner";
 import {
   buildPositionAttributionSnapshot,
@@ -212,7 +216,9 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       account,
       orders,
       spotAskDepth: bybitDepthLevels(spotDepthValue, "a"),
+      spotBidDepth: bybitDepthLevels(spotDepthValue, "b"),
       perpetualBidDepth: bybitDepthLevels(perpetualDepthValue, "b"),
+      perpetualAskDepth: bybitDepthLevels(perpetualDepthValue, "a"),
       fundingRates30d,
       perpetualInitialMarginUsd: position
         ? snapshotNonNegativeNumber(
@@ -226,6 +232,119 @@ export class RwaBybitMainnetClient implements RwaBybitTradingClient {
       spotAvailableUsdt: available,
       perpetualAvailableUsdt: available,
     };
+  }
+
+  async readManagedAssetSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBybitPermissions>> {
+    const [account, orders, spotDepthValue, perpetualDepthValue] = await Promise.all([
+      this.readPreflightSnapshot(),
+      this.listAssetOpenOrders(),
+      this.publicRequest("/v5/market/orderbook", {
+        category: "spot",
+        symbol: RWA_SPOT_SYMBOL,
+        limit: "200",
+      }),
+      this.publicRequest("/v5/market/orderbook", {
+        category: "linear",
+        symbol: RWA_PERP_SYMBOL,
+        limit: "200",
+      }),
+    ]);
+    return {
+      account,
+      orders,
+      spotAskDepth: bybitDepthLevels(spotDepthValue, "a"),
+      spotBidDepth: bybitDepthLevels(spotDepthValue, "b"),
+      perpetualBidDepth: bybitDepthLevels(perpetualDepthValue, "b"),
+      perpetualAskDepth: bybitDepthLevels(perpetualDepthValue, "a"),
+      fundingRates30d: [account.perpetual.fundingRate],
+      perpetualInitialMarginUsd: 0,
+      perpetualLeverage: null,
+      spotAvailableUsdt: account.availableUsdt,
+      perpetualAvailableUsdt: account.availableUsdt,
+    };
+  }
+
+  async readManagedAssetPublicMark() {
+    const value = firstListItem(await this.publicRequest("/v5/market/tickers", {
+      category: "linear",
+      symbol: RWA_PERP_SYMBOL,
+    }));
+    const perpetualMark = positiveNumber(value.markPrice);
+    if (!(perpetualMark > 0)) {
+      throw new RwaBybitProviderError(
+        "provider_snapshot_invalid",
+        "Bybit XAUT 永续公开标记价格无效。",
+      );
+    }
+    return { capturedAt: this.now(), perpetualMark };
+  }
+
+  async readAssetFundingSettlements(input: {
+    after: number;
+    through: number;
+  }): Promise<RwaAssetFundingSettlement[]> {
+    if (
+      !Number.isSafeInteger(input.after)
+      || !Number.isSafeInteger(input.through)
+      || input.after < 0
+      || input.through < input.after
+    ) {
+      throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit Funding 结算窗口无效。");
+    }
+    const settlements: RwaAssetFundingSettlement[] = [];
+    const seenIds = new Set<string>();
+    const seenCursors = new Set<string>();
+    let cursor = "";
+    for (let page = 0; page < 100; page += 1) {
+      const result = record(await this.privateRequest("GET", "/v5/account/transaction-log", {
+        accountType: "UNIFIED",
+        category: "linear",
+        currency: "USDT",
+        startTime: String(input.after + 1),
+        endTime: String(input.through),
+        limit: "50",
+        ...(cursor ? { cursor } : {}),
+      }));
+      const rows = list(result.list).map(record);
+      const nextCursor = String(result.nextPageCursor ?? "");
+      if (rows.length === 0 && nextCursor) {
+        throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit Funding 结算分页结构无效。");
+      }
+      for (const row of rows) {
+        if (String(row.type ?? "").toUpperCase() !== "SETTLEMENT") continue;
+        const symbol = String(row.symbol ?? "");
+        const settledAt = Number(row.transactionTime ?? row.updatedTime ?? row.createdTime);
+        const transactionId = String(row.id ?? row.transactionId ?? row.tradeId ?? "");
+        const netFundingUsd = Number(row.cashFlow ?? row.change);
+        const settlementId = `${settledAt}:${transactionId}`;
+        if (
+          symbol !== RWA_PERP_SYMBOL
+          || !Number.isSafeInteger(settledAt)
+          || settledAt <= input.after
+          || settledAt > input.through
+          || !transactionId
+          || !Number.isFinite(netFundingUsd)
+          || seenIds.has(settlementId)
+        ) {
+          throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit Funding 结算结构无效。");
+        }
+        seenIds.add(settlementId);
+        settlements.push({
+          cycleId: `bybit:${RWA_PERP_SYMBOL}:${settledAt}`,
+          settlementId,
+          settledAt,
+          netFundingUsd,
+          fundingRate: null,
+        });
+      }
+      if (!nextCursor) return aggregateRwaAssetFundingCycles(settlements);
+      if (seenCursors.has(nextCursor)) {
+        throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit Funding 结算分页游标无效。");
+      }
+      seenCursors.add(nextCursor);
+      cursor = nextCursor;
+    }
+    throw new RwaBybitProviderError("provider_snapshot_invalid", "Bybit Funding 结算分页超过安全上限。");
   }
 
   async findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string) {
@@ -535,6 +654,9 @@ function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
   if (request.symbol !== RWA_SPOT_SYMBOL || !["spot", "linear"].includes(request.category)) {
     throw new Error("真实执行只允许 Bybit XAUTUSDT 白名单现货与永续对冲组合。");
   }
+  if (!/^[A-Za-z0-9_-]{1,36}$/.test(request.orderLinkId)) {
+    throw new Error("Bybit 策略 orderLinkId 格式无效。");
+  }
   if (
     !(request.quantityXaut > 0)
     || !(request.limitPrice > 0)
@@ -543,6 +665,11 @@ function assertWhitelistedOrder(request: RwaProviderOrderRequest) {
     throw new Error("真实执行订单参数超出白名单。");
   }
   if (request.category === "spot" && request.reduceOnly) throw new Error("现货订单不允许 reduceOnly。");
+  if (request.category === "linear") {
+    const permitted = (request.side === "Sell" && !request.reduceOnly)
+      || (request.side === "Buy" && request.reduceOnly);
+    if (!permitted) throw new Error("Bybit 永续侧订单方向不符合对冲组合白名单。");
+  }
 }
 
 function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec {
@@ -706,4 +833,8 @@ function record(value: unknown): Record<string, any> {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function fundingSettlementOrder(left: RwaAssetFundingSettlement, right: RwaAssetFundingSettlement) {
+  return left.settledAt - right.settledAt || left.settlementId.localeCompare(right.settlementId);
 }

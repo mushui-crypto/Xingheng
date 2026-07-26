@@ -4,6 +4,7 @@ import {
 } from "./RwaAutomationAssetProfile";
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import type { RwaAssetTakeoverProviderSnapshot } from "./RwaAssetTakeover";
+import type { RwaAssetFundingSettlement } from "./RwaAssetTakeoverRuntime";
 
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -433,6 +434,15 @@ export type RwaNeutralTradingClient<
   cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
   listAssetOpenOrders?(): Promise<RwaAssetOrderReference[]>;
   readAssetTakeoverSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;
+  readManagedAssetSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;
+  readManagedAssetPublicMark?(): Promise<{
+    capturedAt: number;
+    perpetualMark: number;
+  }>;
+  readAssetFundingSettlements?(input: {
+    after: number;
+    through: number;
+  }): Promise<RwaAssetFundingSettlement[]>;
   findOrderByClientOrderId?(
     category: "spot" | "linear",
     orderLinkId: string,
