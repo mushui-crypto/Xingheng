@@ -55,10 +55,14 @@ function run(command, args) {
       stdio: ["ignore", "pipe", "pipe"],
     }).trim();
   }
+  const inheritedLocks = process.getuid?.() === 0
+    && ["production", "real-test"].includes(process.env.XINGHENG_OPERATION_LOCK_CONTEXT)
+    ? [3, 4]
+    : [];
   return execFileSync(command, args, {
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["ignore", "pipe", "pipe", ...inheritedLocks],
   }).trim();
 }
 
@@ -278,6 +282,8 @@ function verifyProductionCompose(manifest, envFile) {
     "--profile",
     "strategy-tools",
     "--profile",
+    "sqlite-ops",
+    "--profile",
     "rwa-automation-ops",
     "--profile",
     "provider-identity-preflight",
@@ -335,6 +341,7 @@ function verifyDualCompose(manifest, productionEnvFile, realTestEnvFile) {
   }
   const production = resolvedCompose(PRODUCTION_COMPOSE, [
     "strategy-tools",
+    "sqlite-ops",
     "rwa-automation-ops",
     "provider-identity-preflight",
   ]);

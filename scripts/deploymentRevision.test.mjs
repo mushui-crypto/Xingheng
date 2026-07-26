@@ -697,6 +697,18 @@ test("COMPOSE_FILE overrides fail before activation or restore reaches Docker", 
   }
 });
 
+test("root Compose verification preserves transaction locks and expands sqlite operations", () => {
+  const source = readFileSync(VERIFIER, "utf8");
+  assert.match(
+    source,
+    /stdio: \["ignore", "pipe", "pipe", \.\.\.inheritedLocks\]/u,
+  );
+  assert.match(
+    source,
+    /"strategy-tools",\s+"sqlite-ops",\s+"rwa-automation-ops"/u,
+  );
+});
+
 test("compact global overrides are rejected while logs follow remains available", () => {
   const directory = mkdtempSync(join(tmpdir(), "xingheng-compose-global-options-"));
   try {
