@@ -18,6 +18,7 @@ import {
   assertRwaAssetTakeoverPreview,
   createRwaAssetTakeoverPreview,
   createRwaAssetTakeoverRecord,
+  publicRwaAssetTakeoverDiscovery,
   publicRwaAssetTakeoverRecord,
   requireActiveTakeoverAuthorization,
   RWA_ASSET_TAKEOVER_MIN_LIQUIDATION_DISTANCE_PERCENT,
@@ -242,6 +243,50 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     return publicRwaAssetTakeoverRecord(record);
   }
 
+  async current() {
+    const metadata = await this.options.credentialBinding();
+    const state = await this.options.store.readState();
+    const matches = state.assetTakeovers.filter((record) =>
+      !["failed", "exited"].includes(record.state)
+      && record.userId === this.options.store.ownerUserId
+      && record.userDomain === this.options.store.userDomain
+      && record.venue === this.options.venue
+      && record.accountId === metadata.accountId
+      && record.accountFingerprint === metadata.accountFingerprint
+      && record.assetId === this.profile.asset.assetId
+      && record.profileId === `${this.profile.asset.assetId}:${this.profile.venue.strategyId}`);
+    if (matches.length > 1) throw invalidRequest();
+    return matches[0] ? publicRwaAssetTakeoverDiscovery(matches[0]) : null;
+  }
+
+  async abortAwaiting(input: { takeoverId: string }) {
+    this.options.assertExecutionLeaseHeld();
+    const state = await this.options.store.readState();
+    this.options.assertExecutionLeaseHeld();
+    const record = this.requireAwaitingRecord(state, input.takeoverId);
+    try {
+      const metadata = await this.options.credentialBinding();
+      this.options.assertExecutionLeaseHeld();
+      const client = await this.options.client();
+      this.options.assertExecutionLeaseHeld();
+      await this.abortAwaitingRecord(state, record, metadata, client);
+    } catch (error) {
+      if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+      await this.manualizeAwaitingAbort(
+        state,
+        record,
+        "当前账户凭证或权威只读客户端不可用；接管确认已终止并进入人工处理。",
+      );
+    }
+    return publicRwaAssetTakeoverDiscovery(record);
+  }
+
+  async abortContext(input: { takeoverId: string }) {
+    const state = await this.options.store.readState();
+    const record = this.requireAwaitingRecord(state, input.takeoverId);
+    return Object.freeze({ accountId: record.accountId });
+  }
+
   async pollManaged() {
     this.options.assertExecutionLeaseHeld();
     const state = await this.options.store.readState();
@@ -456,7 +501,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     const state = await this.options.store.readState();
     this.options.assertExecutionLeaseHeld();
     const pending = state.assetTakeovers.filter((item) =>
-      !["managed", "manual_intervention", "failed", "awaiting_reconfirm"].includes(item.state));
+      !["managed", "manual_intervention", "failed", "exited"].includes(item.state));
     if (!pending.length) return;
     let metadata: CredentialBinding;
     let client: RwaNeutralTradingClient<TPermissions>;
@@ -489,6 +534,10 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     for (const record of pending) {
       try {
         this.options.assertExecutionLeaseHeld();
+        if (record.state === "awaiting_reconfirm") {
+          await this.abortAwaitingRecord(state, record, metadata, client);
+          continue;
+        }
         this.assertExecutionEnabled(state);
         this.assertOnlyTakeoverForAuthorization(state, record.authorizationId, record.takeoverId);
         const authorization = requireActiveTakeoverAuthorization({
@@ -589,6 +638,90 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
         await this.writeStateWithLease(state);
       },
     };
+  }
+
+  private async abortAwaitingRecord(
+    state: RwaAutomationStateData,
+    record: RwaAssetTakeoverRecord,
+    metadata: CredentialBinding,
+    client: RwaNeutralTradingClient<TPermissions>,
+  ) {
+    this.options.assertExecutionLeaseHeld();
+    state.config.globalExecutionEnabled = false;
+    state.config.strategyEnabled = false;
+    state.config.killSwitchActive = true;
+    let safeToRelease = false;
+    try {
+      this.assertOnlyTakeoverForAuthorization(state, record.authorizationId, record.takeoverId);
+      const authorization = requireActiveTakeoverAuthorization({
+        authorizations: state.assetAuthorizations,
+        profile: this.profile,
+        accountId: metadata.accountId,
+        accountFingerprint: metadata.accountFingerprint,
+        authorizationId: record.authorizationId,
+      });
+      if (!client.readAssetTakeoverSnapshot) throw unavailable();
+      const provider = await client.readAssetTakeoverSnapshot();
+      this.options.assertExecutionLeaseHeld();
+      this.assertProviderBinding(provider.account, metadata);
+      const snapshot = createRwaAssetTakeoverPreview({
+        profile: this.profile,
+        authorization,
+        provider,
+        newCapitalUsd: record.newCapitalUsd,
+        selectedLeverage: record.leverage,
+        now: this.now(),
+      });
+      safeToRelease = snapshot.spotQuantity <= this.profile.asset.hedgeToleranceBase
+        && snapshot.perpetualQuantity <= this.profile.asset.hedgeToleranceBase
+        && snapshot.spotLockedQuantity <= this.profile.asset.hedgeToleranceBase
+        && snapshot.spotOrderCount === 0
+        && snapshot.perpetualOrderCount === 0;
+    } catch (error) {
+      if (error instanceof RwaAutomationExecutionLeaseError) throw error;
+      safeToRelease = false;
+    }
+    if (safeToRelease) {
+      record.state = "failed";
+      record.reservedCapitalUsd = 0;
+      record.runtime = null;
+      record.errorCategory = "asset_takeover_aborted";
+      record.message = "接管已在权威空仓复核后安全终止；如需继续，请重新发起接管。";
+    } else {
+      record.state = "manual_intervention";
+      record.runtime = createRwaAssetTakeoverRuntimeManual(
+        this.now(),
+        "persistent_state_invalid",
+        "接管确认已终止，但账户仍有仓位、订单或无法唯一核对的状态；已急停并要求人工处理。",
+      );
+      record.errorCategory = "asset_takeover_manual_intervention";
+      record.message = "接管确认已终止，但账户仍有仓位、订单或无法唯一核对的状态；已急停并要求人工处理。";
+    }
+    record.plannedMutation = null;
+    record.updatedAt = this.now();
+    await this.writeStateWithLease(state);
+  }
+
+  private async manualizeAwaitingAbort(
+    state: RwaAutomationStateData,
+    record: RwaAssetTakeoverRecord,
+    message: string,
+  ) {
+    this.options.assertExecutionLeaseHeld();
+    state.config.globalExecutionEnabled = false;
+    state.config.strategyEnabled = false;
+    state.config.killSwitchActive = true;
+    record.state = "manual_intervention";
+    record.runtime = createRwaAssetTakeoverRuntimeManual(
+      this.now(),
+      "account_changed",
+      message,
+    );
+    record.plannedMutation = null;
+    record.errorCategory = "asset_takeover_manual_intervention";
+    record.message = message;
+    record.updatedAt = this.now();
+    await this.writeStateWithLease(state);
   }
 
   private runtimeHooks(state: RwaAutomationStateData, record: RwaAssetTakeoverRecord) {
@@ -757,6 +890,23 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
         "当前账户资产授权已有接管记录，不能并行创建第二条接管任务。",
       );
     }
+  }
+
+  private requireAwaitingRecord(
+    state: RwaAutomationStateData,
+    takeoverId: string,
+  ) {
+    const record = state.assetTakeovers.find((item) => item.takeoverId === takeoverId);
+    if (
+      !record
+      || record.state !== "awaiting_reconfirm"
+      || record.userId !== this.options.store.ownerUserId
+      || record.userDomain !== this.options.store.userDomain
+      || record.venue !== this.options.venue
+      || record.assetId !== this.profile.asset.assetId
+      || record.profileId !== `${this.profile.asset.assetId}:${this.profile.venue.strategyId}`
+    ) throw invalidRequest();
+    return record;
   }
 
   private async writeStateWithLease(state: RwaAutomationStateData) {

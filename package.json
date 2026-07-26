@@ -13,6 +13,7 @@
     "deploy:validate": "node scripts/validate-deploy.mjs",
     "test:deployment-revision": "node --test scripts/deploymentRevision.test.mjs",
     "test:release-bridge": "node --test scripts/legacyReleaseBridge.test.mjs scripts/gcpWifBundle.test.mjs && node --import tsx --test server/operations/RwaAutomationActivationPreflight.test.ts",
+    "test:stage-five-readiness": "node --import tsx --test scripts/stageFiveReadiness.test.mjs",
     "verify:production-safety": "tsx scripts/verify-production-wallet.ts && node scripts/verify-production-config.mjs && node scripts/verify-restore.mjs",
     "preview": "vite preview",
     "start:api": "node dist-server/index.js",

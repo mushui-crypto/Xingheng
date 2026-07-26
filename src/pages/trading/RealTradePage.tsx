@@ -596,7 +596,7 @@ export function RealTradePage() {
       const decision = decideUserStreamReconnect(reconnectAttempt, realUserStreamMaxReconnectAttempts);
       if (decision.exhausted) {
         setUserStreamConnectionStatus("disconnected");
-        setAccountError("真实交易用户流连续重连失败，已停止自动重试；可手动重新连接。安全退出仍可通过权威快照执行。");
+        setAccountError("真实交易用户流连续重连失败，已停止自动重试；可手动重新连接。安全退出仍可通过交易所最新数据执行。");
         return;
       }
       setUserStreamConnectionStatus("reconnecting");
@@ -612,7 +612,7 @@ export function RealTradePage() {
       const sequenceDecision = decideRealTradingUserStreamSequence(userStreamSequenceRef.current, event);
       if (sequenceDecision === "ignore") return;
       if (sequenceDecision === "gap") {
-        setAccountError("真实交易实时序列不连续，正在恢复权威快照。");
+        setAccountError("真实交易实时序列不连续，正在恢复交易所最新数据。");
         userStreamSequenceRef.current = null;
         socket?.close();
         scheduleReconnect();
@@ -945,7 +945,7 @@ export function RealTradePage() {
   const handlePositionClose = async (request: RealPositionCloseRequest) => {
     const operationKeys = request.positions.map((position) => positionOperationKey(position, "exposure"));
     if (operationKeys.some((key) => pendingOperationSet.has(key))) {
-      throw new Error("该持仓已有结果未知的平仓或反手请求，权威对账完成前不会重复提交。");
+      throw new Error("该持仓已有结果未知的平仓或反手请求，重新核对交易所账户完成前不会重复提交。");
     }
     await runTrackedPositionAction(
       request.cloid,
@@ -972,7 +972,7 @@ export function RealTradePage() {
   const handlePositionTpsl = async (request: RealPositionTpslRequest) => {
     const operationKey = positionOperationKey(request.position, "tpsl");
     if (pendingOperationSet.has(operationKey)) {
-      throw new Error("该持仓已有结果未知的止盈止损请求，权威对账完成前不会重复提交。");
+      throw new Error("该持仓已有结果未知的止盈止损请求，重新核对交易所账户完成前不会重复提交。");
     }
     const config = resolvePositionSymbol(request.position, symbols);
     const currentTriggers = openOrders.filter((order) => (

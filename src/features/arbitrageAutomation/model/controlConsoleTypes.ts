@@ -1,6 +1,6 @@
 export type AutomationVenue = "binance" | "bybit" | "bitget" | "okx";
 export type AutomationVenuePhase = "execution_capable" | "phase_1_read_only_shadow" | "unknown";
-export type AutomationConsoleTab = "overview" | "candidates" | "positions" | "credentials" | "parameters" | "safety";
+export type AutomationConsoleTab = "overview" | "candidates" | "positions" | "assets" | "credentials" | "parameters" | "safety";
 export type AutomationRunMode = "shadow" | "controlled_live";
 export type AutomationPreflightMode = "manual_entry" | "arbitrage_entry";
 export type AutomationStatus = "healthy" | "degraded" | "blocked" | "disabled";

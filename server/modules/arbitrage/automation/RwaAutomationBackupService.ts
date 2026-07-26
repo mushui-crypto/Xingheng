@@ -520,6 +520,19 @@ export function assertBackupFileName(fileName: string) {
   return match;
 }
 
+export function validateRwaAutomationBackupEnvelopeForReadiness(
+  value: unknown,
+  fileName: string,
+) {
+  const backupId = assertBackupFileName(fileName)[1]!;
+  const envelope = validateEnvelope(value, backupId);
+  return Object.freeze({
+    backupId: envelope.backupId,
+    createdAt: envelope.createdAt,
+    environment: envelope.environment,
+  });
+}
+
 function backupIdFromDate(value: Date) {
   return value.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
 }

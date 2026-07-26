@@ -180,6 +180,92 @@ test("Bybit takeover preserves a pending 1500U execution reserve when checking a
   }
 });
 
+test("Bybit abort persists manual intervention for metadata, fingerprint, and client failures", async () => {
+  for (const failure of ["metadata_null", "metadata_throw", "fingerprint_rotation", "client_factory"] as const) {
+    const harness = await createHarness({ availableUsdt: 2_000 });
+    try {
+      const awaiting = await seedBybitAwaiting(harness, `takeover:bybit:${failure}`);
+      let target = harness.service;
+      if (failure === "metadata_null") {
+        (target as any).requireCredentialMetadata = async () => null;
+      } else if (failure === "metadata_throw") {
+        (target as any).requireCredentialMetadata = async () => {
+          throw new Error("simulated metadata failure");
+        };
+      } else if (failure === "fingerprint_rotation") {
+        const metadata = await harness.store.readCredentialMetadata();
+        (target as any).requireCredentialMetadata = async () => ({
+          ...metadata,
+          accountFingerprint: "rotated-account-fingerprint",
+        });
+      } else {
+        target = new RwaNeutralExecutionService(
+          harness.store,
+          () => {
+            throw new Error("simulated client factory failure");
+          },
+          () => harness.now,
+          () => false,
+        );
+      }
+      const writesBefore = providerMutationCount(harness.client);
+      const result = await target.abortAssetTakeover({
+        takeoverId: awaiting.takeoverId,
+      }) as any;
+      assert.equal(result.state, "manual_intervention");
+      assert.equal(result.reservedCapitalUsd, awaiting.reservedCapitalUsd);
+      assert.equal(providerMutationCount(harness.client), writesBefore);
+      const persisted = await harness.store.readState();
+      assert.equal(persisted.config.killSwitchActive, true);
+      assert.equal(persisted.config.globalExecutionEnabled, false);
+      assert.equal(persisted.config.strategyEnabled, false);
+      assert.equal(persisted.assetTakeovers[0]?.state, "manual_intervention");
+      target.dispose();
+    } finally {
+      await harness.cleanup();
+    }
+  }
+});
+
+test("Bybit abort propagates lease loss after snapshot with no state write", async () => {
+  const harness = await createHarness({ availableUsdt: 2_000 });
+  try {
+    const awaiting = await seedBybitAwaiting(harness, "takeover:bybit:abort-lease");
+    let leaseHeld = true;
+    harness.client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let stateWrites = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (state) => {
+      stateWrites += 1;
+      return originalWriteState(state);
+    };
+    const target = new RwaNeutralExecutionService(
+      harness.store,
+      () => harness.client,
+      () => harness.now,
+      () => false,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated abort lease loss",
+          );
+        }
+      },
+    );
+    const writesBefore = providerMutationCount(harness.client);
+    await assert.rejects(
+      target.abortAssetTakeover({ takeoverId: awaiting.takeoverId }),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError,
+    );
+    assert.equal(providerMutationCount(harness.client), writesBefore);
+    assert.equal(stateWrites, 0);
+    assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "awaiting_reconfirm");
+  } finally {
+    await harness.cleanup();
+  }
+});
+
 test("Bybit takeover recovery propagates lease loss after provider snapshot without a state write", async () => {
   const harness = await createHarness({ availableUsdt: 2_000, unrelatedSpotQuantity: 0.1 });
   try {
@@ -1271,6 +1357,33 @@ async function seedTrackedHedge(
 
 function providerMutationCount(client: FakeBybitClient) {
   return client.leverageWrites + client.requests.length + client.cancelScopes.length;
+}
+
+async function seedBybitAwaiting(
+  harness: Awaited<ReturnType<typeof createHarness>>,
+  idempotencyKey: string,
+) {
+  const authorizationPreview = await harness.service.previewAccountAssetAuthorization("xaut");
+  await harness.service.createAccountAssetAuthorization("xaut", authorizationPreview);
+  const preview = await harness.service.previewAssetTakeover({
+    assetId: "xaut",
+    newCapitalUsd: 500,
+    leverage: 2,
+  });
+  const state = await harness.store.readState();
+  const awaiting: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+    userId: "user-a",
+    userDomain: harness.store.userDomain,
+    accountId,
+    preview,
+    idempotencyKey,
+    orderLinkPrefix: idempotencyKey.replaceAll(":", "-"),
+    now: harness.now,
+  });
+  awaiting.state = "awaiting_reconfirm";
+  state.assetTakeovers.push(awaiting);
+  await harness.store.writeState(state);
+  return awaiting;
 }
 
 async function createHarness(options: {

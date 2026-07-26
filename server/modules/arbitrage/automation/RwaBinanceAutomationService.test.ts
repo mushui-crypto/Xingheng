@@ -30,7 +30,11 @@ import {
   type RwaAssetTakeoverRecord,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
-import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
+import {
+  createRwaAssetTakeoverRuntime,
+  createRwaAssetTakeoverRuntimeManual,
+  createRwaAssetTakeoverRuntimeRecovery,
+} from "./RwaAssetTakeoverRuntime";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -111,6 +115,342 @@ test("Binance takeover persists an already strict hedge with zero new provider w
     assert.equal(result.state, "managed");
     assert.equal(result.totalManagedCapitalUsd > 1_400, true);
     assert.equal(client.writeCount, writesBefore);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance current takeover discovery is scoped and flat awaiting reconfirm can abort and release single-active", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-abort-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const awaiting: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:awaiting-abort",
+      orderLinkPrefix: "takeover-binance-awaiting-abort",
+      now,
+    });
+    awaiting.state = "awaiting_reconfirm";
+    state.assetTakeovers.push(awaiting);
+    await harness.store.writeState(state);
+
+    const refreshed = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now + 30_001,
+      () => false,
+    );
+    const current = await refreshed.getCurrentAssetTakeover() as any;
+    assert.equal(current.takeoverId, awaiting.takeoverId);
+    assert.equal(current.requiresReconfirmation, true);
+    assert.equal("accountId" in current, false);
+    assert.equal("accountFingerprint" in current, false);
+    assert.equal("userId" in current, false);
+    assert.equal("userDomain" in current, false);
+
+    const writesBefore = client.writeCount;
+    const aborted = await refreshed.abortAssetTakeover({ takeoverId: awaiting.takeoverId }) as any;
+    assert.equal(aborted.state, "failed");
+    assert.equal(aborted.reservedCapitalUsd, 0);
+    assert.equal(client.writeCount, writesBefore);
+    const abortedState = await harness.store.readState();
+    assert.equal(abortedState.config.killSwitchActive, true);
+    assert.equal(abortedState.config.globalExecutionEnabled, false);
+    assert.equal(abortedState.config.strategyEnabled, false);
+
+    const next = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:after-safe-abort",
+      orderLinkPrefix: "takeover-binance-after-safe-abort",
+      now: now + 1,
+    });
+    abortedState.assetTakeovers.push(next);
+    await harness.store.writeState(abortedState);
+    assert.equal((await harness.store.readState()).assetTakeovers.length, 2);
+    refreshed.dispose();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance current takeover discovery survives hard refresh for managed, exiting, and manual states", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-discovery-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const record: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:discovery",
+      orderLinkPrefix: "takeover-binance-discovery",
+      now,
+    });
+    const runtimeSnapshot = {
+      capturedAt: now,
+      ordersDigest: "0".repeat(64),
+      providerStateDigest: "1".repeat(64),
+      spotQuantity: 0.002,
+      spotAvailableQuantity: 0.002,
+      spotLockedQuantity: 0,
+      spotBid: 4_100,
+      perpetualQuantity: 0.002,
+      perpetualSide: "short" as const,
+      perpetualAsk: 4_101,
+      perpetualMark: 4_100,
+      currentFundingRate: 0.0001,
+      liquidationDistancePercent: 50,
+      reserveUsd: 100,
+      managedCapitalUsd: 8.2,
+    };
+    record.state = "managed";
+    record.runtime = createRwaAssetTakeoverRuntime(runtimeSnapshot);
+    state.assetTakeovers.push(record);
+    await harness.store.writeState(state);
+    assert.equal((await harness.current.getCurrentAssetTakeover() as any).state, "managed");
+
+    record.runtime.phase = "exiting";
+    record.runtime.reason = "user_exit";
+    record.runtime.exitStartedAt = now;
+    record.runtime.exitIdempotencyKey = "exit:discovery:0001";
+    await harness.store.writeState(state);
+    const exiting = await harness.current.getCurrentAssetTakeover() as any;
+    assert.equal(exiting.state, "managed");
+    assert.equal(exiting.runtime.phase, "exiting");
+
+    record.state = "manual_intervention";
+    record.runtime = createRwaAssetTakeoverRuntimeManual(now, "persistent_state_invalid");
+    await harness.store.writeState(state);
+    const manual = await harness.current.getCurrentAssetTakeover() as any;
+    assert.equal(manual.state, "manual_intervention");
+    assert.equal(manual.runtime.phase, "manual_intervention");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance awaiting reconfirm abort with exposure is provider-write-free manual intervention", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-manual-abort-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    client.setAuthoritativeExposure({ spotFreeXaut: 0.1 });
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const awaiting: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:manual-abort",
+      orderLinkPrefix: "takeover-binance-manual-abort",
+      now,
+    });
+    awaiting.state = "awaiting_reconfirm";
+    state.assetTakeovers.push(awaiting);
+    await harness.store.writeState(state);
+
+    const writesBefore = client.writeCount;
+    const aborted = await harness.current.abortAssetTakeover({ takeoverId: awaiting.takeoverId }) as any;
+    assert.equal(aborted.state, "manual_intervention");
+    assert.equal(aborted.reservedCapitalUsd, preview.totalManagedCapitalUsd);
+    assert.equal(client.writeCount, writesBefore);
+    await assert.rejects(
+      harness.current.abortAssetTakeover({ takeoverId: awaiting.takeoverId }),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "asset_takeover_invalid",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance abort persists manual intervention for metadata, fingerprint, and client failures", async () => {
+  for (const failure of ["metadata_null", "metadata_throw", "fingerprint_rotation", "client_factory"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-binance-abort-${failure}-`));
+    try {
+      const client = new FakeBinanceClient();
+      const harness = serviceHarness(directory, "user-a", client);
+      await activate(harness.current);
+      const awaiting = await seedAwaitingTakeover(
+        harness,
+        client,
+        `takeover:binance:${failure}`,
+      );
+      let target = harness.current;
+      if (failure === "metadata_null") {
+        (target as any).requireMetadata = async () => null;
+      } else if (failure === "metadata_throw") {
+        (target as any).requireMetadata = async () => {
+          throw new Error("simulated metadata failure");
+        };
+      } else if (failure === "fingerprint_rotation") {
+        const metadata = await harness.store.readCredentialMetadata();
+        (target as any).requireMetadata = async () => ({
+          ...metadata,
+          accountFingerprint: "rotated-account-fingerprint",
+        });
+      } else {
+        target = new RwaBinanceAutomationService(
+          harness.store,
+          () => {
+            throw new Error("simulated client factory failure");
+          },
+          () => now,
+          () => false,
+          client,
+        );
+      }
+      const writesBefore = client.writeCount;
+      const result = await target.abortAssetTakeover({
+        takeoverId: awaiting.takeoverId,
+      }) as any;
+      assert.equal(result.state, "manual_intervention");
+      assert.equal(result.reservedCapitalUsd, awaiting.reservedCapitalUsd);
+      assert.equal(client.writeCount, writesBefore);
+      const persisted = await harness.store.readState();
+      assert.equal(persisted.config.killSwitchActive, true);
+      assert.equal(persisted.config.globalExecutionEnabled, false);
+      assert.equal(persisted.config.strategyEnabled, false);
+      assert.equal(persisted.assetTakeovers[0]?.state, "manual_intervention");
+      target.dispose();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Binance abort propagates lease loss after snapshot with no state write", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-abort-lease-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    const awaiting = await seedAwaitingTakeover(
+      harness,
+      client,
+      "takeover:binance:abort-lease",
+    );
+    let leaseHeld = true;
+    client.takeoverSnapshotHook = () => { leaseHeld = false; };
+    let stateWrites = 0;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (state) => {
+      stateWrites += 1;
+      return originalWriteState(state);
+    };
+    const target = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now,
+      () => false,
+      undefined,
+      () => {
+        if (!leaseHeld) {
+          throw new RwaAutomationExecutionLeaseError(
+            "automation_execution_lease_lost",
+            "simulated abort lease loss",
+          );
+        }
+      },
+    );
+    const writesBefore = client.writeCount;
+    await assert.rejects(
+      target.abortAssetTakeover({ takeoverId: awaiting.takeoverId }),
+      (error: unknown) => error instanceof RwaAutomationExecutionLeaseError,
+    );
+    assert.equal(client.writeCount, writesBefore);
+    assert.equal(stateWrites, 0);
+    assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "awaiting_reconfirm");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance startup recovers an orphaned awaiting reconfirm into a persisted safe terminal", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-takeover-restart-abort-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await activate(harness.current);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const preview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 500,
+      leverage: 2,
+    });
+    const state = await harness.store.readState();
+    const awaiting: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+      userId: "user-a",
+      userDomain: harness.store.userDomain,
+      accountId: client.access.accountId,
+      preview,
+      idempotencyKey: "takeover:binance:restart-abort",
+      orderLinkPrefix: "takeover-binance-restart-abort",
+      now,
+    });
+    awaiting.state = "awaiting_reconfirm";
+    state.assetTakeovers.push(awaiting);
+    await harness.store.writeState(state);
+    const restarted = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now + 1,
+      () => false,
+    );
+    const writesBefore = client.writeCount;
+    await restarted.initialize();
+    assert.equal(client.writeCount, writesBefore);
+    assert.equal((await harness.store.readState()).assetTakeovers[0]?.state, "failed");
+    assert.equal(await restarted.getCurrentAssetTakeover(), null);
+    restarted.dispose();
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1084,6 +1424,37 @@ async function activate(current: RwaBinanceAutomationService) {
   await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
   await current.setKillSwitch(false, accountId);
   return accountId;
+}
+
+async function seedAwaitingTakeover(
+  harness: ReturnType<typeof serviceHarness>,
+  client: FakeBinanceClient,
+  idempotencyKey: string,
+) {
+  client.snapshot.spotAvailableUsdt = 2_000;
+  client.snapshot.futuresAvailableUsdt = 2_000;
+  client.snapshot.availableUsdt = 4_000;
+  const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+  await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+  const preview = await harness.current.previewAssetTakeover({
+    assetId: "xaut",
+    newCapitalUsd: 500,
+    leverage: 2,
+  });
+  const state = await harness.store.readState();
+  const awaiting: RwaAssetTakeoverRecord = createRwaAssetTakeoverRecord({
+    userId: "user-a",
+    userDomain: harness.store.userDomain,
+    accountId: client.access.accountId,
+    preview,
+    idempotencyKey,
+    orderLinkPrefix: idempotencyKey.replaceAll(":", "-"),
+    now,
+  });
+  awaiting.state = "awaiting_reconfirm";
+  state.assetTakeovers.push(awaiting);
+  await harness.store.writeState(state);
+  return awaiting;
 }
 
 function executeInput(accountId: string, challenge: { challengeId: string; challengeToken: string }, idempotencyKey: string) {

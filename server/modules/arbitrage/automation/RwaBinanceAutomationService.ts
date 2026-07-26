@@ -520,6 +520,18 @@ export class RwaBinanceAutomationService {
     return this.takeoverCoordinator.status(takeoverId);
   }
 
+  getCurrentAssetTakeover() {
+    return this.takeoverCoordinator.current();
+  }
+
+  getAssetTakeoverAbortContext(input: { takeoverId: string }) {
+    return this.takeoverCoordinator.abortContext(input);
+  }
+
+  abortAssetTakeover(input: { takeoverId: string }) {
+    return this.withLock(() => this.takeoverCoordinator.abortAwaiting(input));
+  }
+
   previewAssetTakeoverExit(input: { takeoverId: string }) {
     return this.withLock(() => this.takeoverCoordinator.previewExit(input));
   }

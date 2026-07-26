@@ -93,6 +93,9 @@ export type RwaAutomationConnector = {
     takeoverId: string;
     preview: RwaAssetTakeoverPreview;
   }): Promise<unknown>;
+  getCurrentAssetTakeover?(): Promise<unknown>;
+  getAssetTakeoverAbortContext?(input: { takeoverId: string }): Promise<{ accountId: string }>;
+  abortAssetTakeover?(input: { takeoverId: string }): Promise<unknown>;
   getAssetTakeoverStatus?(takeoverId: string): Promise<unknown>;
   previewAssetTakeoverExit?(input: {
     takeoverId: string;

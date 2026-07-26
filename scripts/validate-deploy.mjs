@@ -18,7 +18,9 @@ const rwaBackupService = read("server/modules/arbitrage/automation/RwaAutomation
 const rwaGovernance = read("server/modules/arbitrage/automation/RwaAutomationGovernance.ts");
 const rwaExecutionLease = read("server/modules/arbitrage/automation/RwaAutomationExecutionLease.ts");
 const rwaMainnetRunbook = read("deploy/RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md");
+const rwaXautMvpRunbook = read("deploy/RWA_XAUT_MVP_CONTROLLED_VALIDATION_RUNBOOK.md");
 const rwaReadinessRehearsal = read("scripts/rehearse-rwa-mainnet-readiness.mjs");
+const stageFiveReadiness = read("scripts/stageFiveReadiness.ts");
 const deploymentRevision = read("scripts/deploymentRevision.mjs");
 const deploymentRevisionVerifier = read("scripts/verify-deployment-revision.mjs");
 const runtimeRevisionVerifier = read("scripts/verify-runtime-revision.sh");
@@ -187,7 +189,33 @@ const assertions = [
       && rwaReadinessRehearsal.includes("BINANCE_API_SECRET")
       && rwaMainnetRunbook.includes("25 USDT 是一次建立现货与永续对冲组合的总预算")
       && rwaMainnetRunbook.includes("不是 Mainnet 验证"),
-    "RWA Mainnet readiness rehearsal must remain offline and document the frozen total budget",
+    "historical RWA Mainnet readiness evidence must remain offline and unchanged",
+  ],
+  [
+    packageJson.includes('"test:stage-five-readiness"')
+      && rwaReadinessRehearsal.includes("stageFiveReadiness.test.mjs")
+      && stageFiveReadiness.includes("gate_1_external_approval_required")
+      && stageFiveReadiness.includes("gate_2_external_approval_required")
+      && stageFiveReadiness.includes("calculateMinimumCommonBaseQuantity")
+      && stageFiveReadiness.includes("validateAuthoritativeMarket")
+      && stageFiveReadiness.includes("readArtifact")
+      && stageFiveReadiness.includes("assessResidual")
+      && stageFiveReadiness.includes("validateProviderActivity")
+      && stageFiveReadiness.includes("scanBinancePositionAttribution")
+      && stageFiveReadiness.includes("RWA_SPOT_ACTIVITY_SOURCES")
+      && stageFiveReadiness.includes("parseBinanceActivityResponseForReadiness")
+      && stageFiveReadiness.includes("validateSqliteBackup")
+      && stageFiveReadiness.includes("validateRwaAutomationBackupEnvelopeForReadiness")
+      && stageFiveReadiness.includes("causal_timeline_invalid")
+      && rwaXautMvpRunbook.includes("Gate 1：统一生产发布")
+      && rwaXautMvpRunbook.includes("Gate 2：真实资金窗口")
+      && rwaXautMvpRunbook.includes("至少 10 分钟")
+      && rwaXautMvpRunbook.includes("至少三次私有权威核对")
+      && rwaXautMvpRunbook.includes("RwaProviderActivityContinuity")
+      && rwaXautMvpRunbook.includes("requested/accepted quantity")
+      && rwaXautMvpRunbook.includes("人工卖出现货不能作为通过证据")
+      && rwaXautMvpRunbook.includes("只保留为历史证据"),
+    "stage-five preparation must preserve two external stops and the dynamic Binance XAUT evidence contract",
   ],
   [
     packageJson.includes('"test:deployment-revision"')

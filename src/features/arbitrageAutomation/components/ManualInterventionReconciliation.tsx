@@ -40,12 +40,12 @@ export function ManualInterventionReconciliation({
             <StatusTag tone="warning">策略记录待核对</StatusTag>
             {report ? (
               <StatusTag tone={report.authoritativeState.stale ? "danger" : "success"}>
-                {report.authoritativeState.stale ? "权威快照已过期" : "权威快照已读取"}
+                {report.authoritativeState.stale ? "交易所最新数据已过期" : "交易所最新数据已读取"}
               </StatusTag>
             ) : null}
           </div>
           <p className="mt-2 max-w-3xl text-xs leading-5 text-muted">
-            策略记录只保留执行历史，不代表交易所当前持仓。资金占用与净 Delta 仅在本次权威对账成功且快照未过期后计算。
+            策略记录只保留执行历史，不代表交易所当前持仓。资金占用与净 Delta 仅在本次重新核对交易所账户成功且数据未过期后计算。
           </p>
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
@@ -71,28 +71,28 @@ export function ManualInterventionReconciliation({
 
       {state.phase === "idle" ? (
         <ReconciliationState
-          description="尚未取得本次交易所权威快照。旧策略数量不会作为当前真实持仓展示。"
+          description="尚未取得本次交易所最新数据。旧策略数量不会作为当前真实持仓展示。"
           icon={<ShieldAlert size={18} />}
           title="等待重新对账"
         />
       ) : null}
       {state.phase === "loading" ? (
         <ReconciliationState
-          description="正在读取交易所现货、永续、当前委托和产品最小交易约束；旧权威结果已撤下。"
+          description="正在读取交易所现货、永续、当前委托和产品最小交易约束；旧结果已撤下。"
           icon={<RefreshCw className="animate-spin" size={18} />}
-          title="正在读取权威状态"
+          title="正在获取最新状态"
         />
       ) : null}
       {state.phase === "finalizing" ? (
         <ReconciliationState
-          description="服务端正在执行第二次权威对账。前端不会直接关闭策略记录，也不会发送交易所订单。"
+          description="服务端正在第二次核对交易所账户。前端不会直接关闭策略记录，也不会发送交易所订单。"
           icon={<RefreshCw className="animate-spin" size={18} />}
           title="正在确认人工结案"
         />
       ) : null}
       {state.phase === "error" ? (
         <ReconciliationState
-          description={state.error ?? "未取得交易所权威状态，请稍后重新对账。"}
+          description={state.error ?? "未取得交易所最新状态，请稍后重新核对。"}
           error
           icon={<AlertTriangle size={18} />}
           title="对账结果不可用"
@@ -117,15 +117,15 @@ function ReconciliationReport({
       <div className="grid gap-px bg-white/10 sm:grid-cols-2 xl:grid-cols-4">
         <ReconciliationMetric label="记录状态" value={executionStateLabel(report.recordedState)} />
         <ReconciliationMetric
-          label="权威快照"
+          label="交易所最新数据"
           value={authoritative.stale ? "已过期，不可用于当前摘要" : formatDate(authoritative.snapshotAt)}
         />
         <ReconciliationMetric
-          label="权威资金占用"
+          label="实际资金占用"
           value={summary ? formatMoney(summary.capitalUsedUsd) : "-"}
         />
         <ReconciliationMetric
-          label="权威净 Delta"
+          label="当前净 Delta"
           value={summary ? formatMoney(summary.netDeltaUsd, true) : "-"}
         />
       </div>
@@ -133,7 +133,7 @@ function ReconciliationReport({
       <div className="grid min-w-0 border-t border-white/10 lg:grid-cols-2">
         <section className="min-w-0 border-b border-white/10 p-4 lg:border-b-0 lg:border-r lg:p-5">
           <h4 className="text-sm font-semibold text-white">策略记录</h4>
-          <p className="mt-1 text-xs leading-5 text-muted">历史执行记录，等待权威状态核对；不作为当前真实持仓。</p>
+          <p className="mt-1 text-xs leading-5 text-muted">历史执行记录，等待核对交易所最新状态；不作为当前真实持仓。</p>
           <div className="mt-3 space-y-2">
             {group.legs.length ? group.legs.map((leg) => (
               <div className="flex items-center justify-between gap-4 text-xs" key={`${leg.marketType}:${leg.symbol}`}>
@@ -144,7 +144,7 @@ function ReconciliationReport({
           </div>
         </section>
         <section className="min-w-0 p-4 lg:p-5">
-          <h4 className="text-sm font-semibold text-white">交易所权威状态</h4>
+          <h4 className="text-sm font-semibold text-white">交易所最新状态</h4>
           <p className="mt-1 text-xs leading-5 text-muted">
             当前委托 {authoritative.openOrders.total} 笔（现货 {authoritative.openOrders.spot} · 永续 {authoritative.openOrders.perpetual}）
           </p>
@@ -158,7 +158,7 @@ function ReconciliationReport({
       <ScrollTable minWidth={920}>
         <thead className={tableHeadClass}>
           <tr>
-            {["市场侧", "权威数量", "可用数量", "Mark", "与记录差异", "可交易残余", "不可交易小额余额"].map((header) => (
+            {["市场侧", "实际数量", "可用数量", "Mark", "与记录差异", "可交易残余", "不可交易小额余额"].map((header) => (
               <th className={tableHeaderCellClass} key={header}>{header}</th>
             ))}
           </tr>

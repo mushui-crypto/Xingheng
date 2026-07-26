@@ -46,7 +46,7 @@ export function resolveReconciliationAccess(
   if (records.length > 0) {
     return {
       blocksNewRisk: true,
-      message: "系统正在按 Hyperliquid 权威 orderStatus 自动核对，完成前暂停新增风险动作。",
+      message: "系统正在按 Hyperliquid 返回的最新订单状态自动核对，完成前暂停新增风险动作。",
     };
   }
   return { blocksNewRisk: false, message: "" };
@@ -57,7 +57,7 @@ export function reconciliationRecordMessage(record: RealTradingReconciliationRec
     return "需要人工核对，禁止盲目重试。";
   }
   if (record.autoRecoverable) {
-    return "系统正在按权威 orderStatus 自动核对。";
+    return "系统正在按交易所返回的最新订单状态自动核对。";
   }
   return "交易结果待核对。";
 }

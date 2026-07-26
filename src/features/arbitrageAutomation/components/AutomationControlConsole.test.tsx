@@ -3,8 +3,18 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { createFakeAutomationConsoleClient } from "../../../api/arbitrageAutomationConsole.fake";
+import { createFakeAssetManagementClient } from "../../../api/arbitrageAssetManagement.fake";
 import { createAutomationConsoleFixture } from "../model/controlConsoleFixture";
 import { AutomationCandidates, canPreflightCandidate } from "./AutomationCandidates";
+import {
+  AutomationAssetManagement,
+  TakeoverMonitor,
+  assetAuthorityGate,
+  authorizationForAssetScope,
+  createAssetScopeGuard,
+  takeoverDisplayAfterAbort,
+  takeoverDisplayAfterAbortFailure,
+} from "./AutomationAssetManagement";
 import {
   AutomationControlConsole,
   PreflightModeNotice,
@@ -43,6 +53,318 @@ test("console overview keeps controlled Mainnet boundaries in compact help witho
   assert.match(html, /候选与执行/);
   assert.match(html, /安全操作/);
   assert.doesNotMatch(html, /fixture-secret|apiSecret/);
+});
+
+test("asset management is a single XAUT-only task surface without account internals", () => {
+  const html = renderToStaticMarkup(
+    <AutomationAssetManagement
+      client={createFakeAssetManagementClient()}
+      credentials={snapshot.credentials}
+      onFeedback={() => undefined}
+      requestStepUp={async () => "fixture-step-up"}
+    />,
+  );
+  assert.match(html, /XAUT 资产管理/);
+  assert.match(html, /资产授权/);
+  assert.match(html, /接管计算器/);
+  assert.match(html, /Binance/);
+  assert.match(html, /Bybit/);
+  assert.doesNotMatch(html, /BTC|ETH|SOL|accountId|fingerprint|provider payload|userDomain/);
+  assert.doesNotMatch(html, new RegExp(`\\u${"817f"}`, "u"));
+  assert.match(html, /min-h-11 min-w-24/);
+  assert.match(html, /杠杆（1–3x）/);
+  assert.match(html, /max="3" min="1"/);
+  assert.match(html, /h-11 min-h-11/);
+  assert.doesNotMatch(html, /\bh-9\b/);
+});
+
+test("asset scope generation rejects stale async results after venue or account changes", async () => {
+  const guard = createAssetScopeGuard("binance:account-a:verified-a");
+  const staleSnapshot = guard.capture();
+  let staleCommit = false;
+  const staleResponse = Promise.resolve().then(() => {
+    if (guard.isCurrent(staleSnapshot)) staleCommit = true;
+  });
+
+  guard.sync("bybit:account-b:verified-b");
+  await staleResponse;
+  assert.equal(staleCommit, false);
+  assert.equal(guard.isCurrent(staleSnapshot), false);
+
+  const currentSnapshot = guard.capture();
+  assert.equal(guard.isCurrent(currentSnapshot), true);
+});
+
+test("first current failure settles with retry while account actions remain fail-closed", () => {
+  const scope = "binance:account-a:verified-a";
+  const initial = assetAuthorityGate({
+    accountScope: scope,
+    authorizationError: null,
+    authorizationLoading: false,
+    lifecycleError: null,
+    lifecycleLoading: false,
+    resolvedAuthorizationScope: scope,
+    resolvedLifecycleScope: null,
+  });
+  assert.equal(initial.pending, true);
+  assert.equal(initial.actionsReady, false);
+  assert.equal(initial.canRetry, false);
+
+  const rejected = assetAuthorityGate({
+    accountScope: scope,
+    authorizationError: null,
+    authorizationLoading: false,
+    lifecycleError: "服务暂不可用",
+    lifecycleLoading: false,
+    resolvedAuthorizationScope: scope,
+    resolvedLifecycleScope: null,
+  });
+  assert.equal(rejected.pending, false);
+  assert.equal(rejected.actionsReady, false);
+  assert.equal(rejected.canRetry, true);
+
+  const retrying = assetAuthorityGate({
+    accountScope: scope,
+    authorizationError: null,
+    authorizationLoading: false,
+    lifecycleError: null,
+    lifecycleLoading: true,
+    resolvedAuthorizationScope: scope,
+    resolvedLifecycleScope: null,
+  });
+  assert.equal(retrying.pending, true);
+  assert.equal(retrying.actionsReady, false);
+
+  const resolved = assetAuthorityGate({
+    accountScope: scope,
+    authorizationError: null,
+    authorizationLoading: false,
+    lifecycleError: null,
+    lifecycleLoading: false,
+    resolvedAuthorizationScope: scope,
+    resolvedLifecycleScope: scope,
+  });
+  assert.equal(resolved.pending, false);
+  assert.equal(resolved.actionsReady, true);
+  assert.equal(resolved.canRetry, false);
+});
+
+test("authorization is hidden and every account action stays disabled across scope changes", () => {
+  const authorization = {
+    active: true,
+    assetId: "xaut" as const,
+    venue: "binance" as const,
+    spotQuantity: 0.02,
+    spotAvailableQuantity: 0.02,
+    spotLockedQuantity: 0,
+    perpetualQuantity: 0.02,
+    perpetualSide: "short" as const,
+    spotOrderCount: 1,
+    perpetualOrderCount: 1,
+    maxManagedSpotQuantity: 0.02,
+    maxManagedPerpetualQuantity: 0.02,
+    maxManagedNotionalUsd: 200,
+    createdAt: 1,
+    revokedAt: null,
+  };
+  const oldScope = "binance:account-a:verified-a";
+  const nextScope = "bybit:account-b:verified-b";
+  assert.equal(authorizationForAssetScope(authorization, oldScope, oldScope), authorization);
+  assert.equal(authorizationForAssetScope(authorization, oldScope, nextScope), null);
+
+  const delayed = assetAuthorityGate({
+    accountScope: nextScope,
+    authorizationError: null,
+    authorizationLoading: true,
+    lifecycleError: null,
+    lifecycleLoading: true,
+    resolvedAuthorizationScope: oldScope,
+    resolvedLifecycleScope: oldScope,
+  });
+  assert.equal(delayed.actionsReady, false);
+  assert.equal(delayed.pending, true);
+
+  const currentFailure = assetAuthorityGate({
+    accountScope: nextScope,
+    authorizationError: null,
+    authorizationLoading: false,
+    lifecycleError: "当前接管读取失败",
+    lifecycleLoading: false,
+    resolvedAuthorizationScope: nextScope,
+    resolvedLifecycleScope: null,
+  });
+  assert.equal(currentFailure.actionsReady, false);
+  assert.equal(currentFailure.canRetry, true);
+});
+
+test("discovered awaiting-reconfirm takeover stays visible with safe abort and no TOTP action", () => {
+  const html = renderToStaticMarkup(
+    <TakeoverMonitor
+      busy={false}
+      onAbort={() => undefined}
+      onExit={() => undefined}
+      onRefresh={() => undefined}
+      takeover={{
+        takeoverId: "takeover-discovered",
+        assetId: "xaut",
+        venue: "binance",
+        newCapitalUsd: 100,
+        totalManagedCapitalUsd: 200,
+        reservedCapitalUsd: 200,
+        leverage: 2,
+        state: "awaiting_reconfirm",
+        targetHedgedQuantity: 0.02,
+        finalSpotQuantity: 0.02,
+        finalPerpetualQuantity: 0.02,
+        residualQuantity: 0,
+        errorCategory: null,
+        message: "等待最新状态确认。",
+        createdAt: 1,
+        updatedAt: 1,
+        runtime: null,
+        requiresReconfirmation: true,
+      }}
+    />,
+  );
+  assert.match(html, /等待确认/);
+  assert.match(html, /安全终止接管/);
+  assert.match(html, /等待详情/);
+  assert.doesNotMatch(html, /TOTP|全部退出/);
+});
+
+test("discovered manual-intervention takeover remains visible without unsafe actions", () => {
+  const html = renderToStaticMarkup(
+    <TakeoverMonitor
+      busy={false}
+      onAbort={() => undefined}
+      onExit={() => undefined}
+      onRefresh={() => undefined}
+      takeover={{
+        takeoverId: "takeover-manual",
+        assetId: "xaut",
+        venue: "binance",
+        newCapitalUsd: 100,
+        totalManagedCapitalUsd: 200,
+        reservedCapitalUsd: 200,
+        leverage: 2,
+        state: "manual_intervention",
+        targetHedgedQuantity: 0.02,
+        finalSpotQuantity: 0.02,
+        finalPerpetualQuantity: 0.01,
+        residualQuantity: 0.01,
+        errorCategory: "asset_takeover_manual_intervention",
+        message: "账户仍有 XAUT 仓位，需要人工处理。",
+        createdAt: 1,
+        updatedAt: 2,
+        runtime: null,
+        requiresReconfirmation: false,
+      }}
+    />,
+  );
+  assert.match(html, /需要人工处理/);
+  assert.match(html, /账户仍有 XAUT 仓位/);
+  assert.match(html, /刷新状态/);
+  assert.doesNotMatch(html, /安全终止接管|全部退出|TOTP/);
+});
+
+test("discovered managed takeover restores exiting runtime without exposing a second exit action", () => {
+  const html = renderToStaticMarkup(
+    <TakeoverMonitor
+      busy={false}
+      onAbort={() => undefined}
+      onExit={() => undefined}
+      onRefresh={() => undefined}
+      takeover={{
+        takeoverId: "takeover-exiting",
+        assetId: "xaut",
+        venue: "binance",
+        newCapitalUsd: 100,
+        totalManagedCapitalUsd: 200,
+        reservedCapitalUsd: 50,
+        leverage: 2,
+        state: "managed",
+        targetHedgedQuantity: 0.02,
+        finalSpotQuantity: 0.02,
+        finalPerpetualQuantity: 0.02,
+        residualQuantity: 0,
+        errorCategory: null,
+        message: "正在退出对冲组合。",
+        createdAt: 1,
+        updatedAt: 2,
+        requiresReconfirmation: false,
+        runtime: {
+          phase: "exiting",
+          reason: "user_exit",
+          message: "正在退出对冲组合。",
+          lastSuccessfulCheckAt: 2,
+          exitStartedAt: 2,
+          exitCompletedAt: null,
+          residualSpotQuantity: 0.02,
+          residualPerpetualQuantity: 0.02,
+          acceptedOrderCount: 0,
+          providerResultCount: 0,
+          cancelledOrderCount: 1,
+          fundingSettlementCount: 0,
+          lastFundingSettlementAt: null,
+          snapshot: null,
+        },
+      }}
+    />,
+  );
+  assert.match(html, /退出中/);
+  assert.match(html, /正在退出对冲组合/);
+  assert.doesNotMatch(html, />全部退出</);
+  assert.doesNotMatch(html, /安全终止接管|TOTP/);
+});
+
+test("safe abort releases only failed takeover and preserves manual intervention", () => {
+  const failed = takeoverDisplayAfterAbort({
+    takeoverId: "takeover-failed",
+    assetId: "xaut",
+    venue: "binance",
+    newCapitalUsd: 100,
+    totalManagedCapitalUsd: 200,
+    reservedCapitalUsd: 0,
+    leverage: 2,
+    state: "failed",
+    targetHedgedQuantity: 0.02,
+    finalSpotQuantity: 0,
+    finalPerpetualQuantity: 0,
+    residualQuantity: 0,
+    errorCategory: null,
+    message: "安全终止。",
+    createdAt: 1,
+    updatedAt: 2,
+    runtime: null,
+    requiresReconfirmation: false,
+  });
+  assert.equal(failed, null);
+
+  const manual = takeoverDisplayAfterAbort({
+    takeoverId: "takeover-manual",
+    assetId: "xaut",
+    venue: "binance",
+    newCapitalUsd: 100,
+    totalManagedCapitalUsd: 200,
+    reservedCapitalUsd: 200,
+    leverage: 2,
+    state: "manual_intervention",
+    targetHedgedQuantity: 0.02,
+    finalSpotQuantity: 0.02,
+    finalPerpetualQuantity: 0.01,
+    residualQuantity: 0.01,
+    errorCategory: "asset_takeover_manual_intervention",
+    message: "需要人工处理。",
+    createdAt: 1,
+    updatedAt: 2,
+    runtime: null,
+    requiresReconfirmation: false,
+  });
+  assert.equal(manual?.state, "manual_intervention");
+  assert.equal(manual?.reservedCapitalUsd, 200);
+  assert.ok(manual && "requiresReconfirmation" in manual);
+  assert.equal(takeoverDisplayAfterAbortFailure(manual, null), manual);
+  assert.equal(takeoverDisplayAfterAbortFailure(manual, manual), manual);
 });
 
 test("candidate table separates manual, safety-blocked and adapter-unavailable states", () => {
@@ -209,7 +531,7 @@ test("manual intervention separates strategy records from a fresh authoritative 
   );
 
   assert.match(html, /策略记录待核对/);
-  assert.match(html, /交易所权威状态/);
+  assert.match(html, /交易所最新状态/);
   assert.match(html, /不可交易小额余额/);
   assert.match(html, /minQty/);
   assert.match(html, /minNotional/);
@@ -241,13 +563,13 @@ test("manual intervention error state withdraws every old authoritative detail",
         phase: "error",
         requestId: "request-2",
         report: null,
-        error: "交易所权威状态对账失败。",
+        error: "交易所最新状态核对失败。",
       }}
     />,
   );
   assert.match(html, /对账结果不可用/);
-  assert.match(html, /交易所权威状态对账失败/);
-  assert.doesNotMatch(html, /权威资金占用|服务端允许申请人工结案|minNotional/);
+  assert.match(html, /交易所最新状态核对失败/);
+  assert.doesNotMatch(html, /实际资金占用|服务端允许申请人工结案|minNotional/);
 });
 
 test("preflight warnings render every server risk without score language", () => {

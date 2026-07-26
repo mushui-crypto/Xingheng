@@ -32,15 +32,15 @@ export function AutomationOverview({ snapshot }: { snapshot: AutomationConsoleSn
         <SummaryMetric
           label="总资金占用"
           value={authorityIncomplete ? "-" : formatMoney(snapshot.summary.totalCapitalUsedUsd)}
-          detail={authorityIncomplete ? "等待交易所权威对账" : "仅策略组合资金占用"}
-          help={authorityIncomplete ? `${snapshot.summary.positionAuthorityIncompleteCount} 个组合缺少可用权威快照；旧策略记录不会作为当前真实持仓。` : undefined}
+          detail={authorityIncomplete ? "等待重新核对交易所账户" : "仅策略组合资金占用"}
+          help={authorityIncomplete ? `${snapshot.summary.positionAuthorityIncompleteCount} 个组合缺少可用的交易所最新数据；旧策略记录不会作为当前真实持仓。` : undefined}
           tone={authorityIncomplete ? "warning" : undefined}
         />
         <SummaryMetric
           label="净 Delta"
           value={authorityIncomplete ? "-" : formatMoney(snapshot.summary.netDeltaUsd, true)}
           detail={authorityIncomplete ? "旧策略记录不计入当前值" : "当前用户全部策略组合"}
-          help={authorityIncomplete ? "等待交易所权威对账完成后再展示当前净 Delta，避免旧策略记录造成误导。" : undefined}
+          help={authorityIncomplete ? "等待重新核对交易所账户后再展示当前净 Delta，避免旧策略记录造成误导。" : undefined}
           tone={authorityIncomplete ? "warning" : pnlTone(-Math.abs(snapshot.summary.netDeltaUsd))}
         />
         <SummaryMetric label="累计净 PnL" value={formatMoney(snapshot.summary.cumulativeNetPnl, true)} detail="策略级口径" tone={pnlTone(snapshot.summary.cumulativeNetPnl)} />

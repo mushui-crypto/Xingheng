@@ -300,6 +300,64 @@ export async function scanBybitPositionAttribution(
   return finalizeSources(input, sources, providerOrderIds);
 }
 
+export function parseBinanceActivityResponseForReadiness(
+  source: RwaProviderActivitySource,
+  value: unknown,
+) {
+  const [rawRows, parse] = source === "spot_orders" || source === "perpetual_orders"
+    ? [arrayRows(value), binanceOrder]
+    : source === "spot_trades" || source === "perpetual_trades"
+      ? [arrayRows(value), binanceTrade]
+      : source === "account_transactions"
+        ? [arrayRows(value), binanceIncome]
+        : source === "internal_transfers" || source === "universal_transfers"
+          ? [rowsRows(value), binanceTransfer]
+          : source === "deposits"
+            ? [arrayRows(value), binanceDeposit]
+            : source === "internal_deposits"
+              ? [arrayRows(value), binanceInternalDeposit]
+              : source === "withdrawals"
+                ? [arrayRows(value), binanceWithdrawal]
+                : source === "convert"
+                  ? [listRows(value), binanceConvert]
+                  : source === "dust"
+                    ? [dustRows(value), binanceDust]
+                    : source === "balance_adjustments"
+                      ? [rowsRows(value), binanceDividend]
+                      : (() => {
+                          throw new Error("provider schema invalid");
+                        })();
+  return rawRows.map((raw) => {
+    const event = parse(raw);
+    const row = expectRecord(raw);
+    const orderOrTrade = [
+      "spot_orders",
+      "perpetual_orders",
+      "spot_trades",
+      "perpetual_trades",
+    ].includes(source);
+    let quantityBase: number | null = null;
+    if (orderOrTrade) {
+      const parsedQuantity = Number(source.endsWith("_orders") ? row.origQty : row.qty);
+      if (!Number.isFinite(parsedQuantity) || parsedQuantity <= 0) {
+        throw new Error("provider schema invalid");
+      }
+      quantityBase = parsedQuantity;
+    }
+    const orderStatus: string | null = source.endsWith("_orders")
+      ? String(row.status ?? "").toUpperCase()
+      : null;
+    const canceled = orderStatus !== null
+      && ["CANCELED", "CANCELLED"].includes(orderStatus);
+    return Object.freeze({
+      ...event,
+      occurredAt: canceled ? Number(row.updateTime) : event.occurredAt,
+      orderStatus,
+      quantityBase,
+    });
+  });
+}
+
 async function runBounded(tasks: Array<() => Promise<void>>, concurrency: number) {
   let next = 0;
   const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, async () => {

@@ -42,6 +42,8 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   const routes = new Map<string, any>();
   let authorizationOwner: string | undefined;
   let takeoverOwner: string | undefined;
+  let currentTakeoverOwner: string | undefined;
+  let abortedTakeoverOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
@@ -63,16 +65,26 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
         takeoverOwner = userId;
         return { previewId: "opaque-preview" };
       },
+      getCurrentAssetTakeover: async (userId: string) => {
+        currentTakeoverOwner = userId;
+        return { takeoverId: "takeover-current", state: "awaiting_reconfirm" };
+      },
+      abortAssetTakeover: async (userId: string) => {
+        abortedTakeoverOwner = userId;
+        return { takeoverId: "takeover-current", state: "failed" };
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 29);
+  assert.equal(automationRoutes.length, 31);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
   for (const route of [
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/start",
+    "GET /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/current",
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/reconfirm",
+    "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/abort",
     "GET /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/status",
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/exit/preview",
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/exit/confirm",
@@ -121,6 +133,28 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   assert.equal(takeoverOwner, "user-a");
   assert.equal(takeoverResponse.statusCode, 200);
   assert.equal(takeoverResponse.headers["Cache-Control"], "no-store");
+
+  const currentResponse = mockResponse();
+  await routes.get("GET /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/current")({
+    user: { id: "user-a" },
+    userSessionDomain: "session-a",
+    params: { venue: "binance", assetId: "xaut" },
+    body: {},
+  }, currentResponse);
+  assert.equal(currentTakeoverOwner, "user-a");
+  assert.equal(currentResponse.statusCode, 200);
+  assert.equal(currentResponse.headers["Cache-Control"], "no-store");
+
+  const abortResponse = mockResponse();
+  await routes.get("POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/:takeoverId/abort")({
+    user: { id: "user-a" },
+    userSessionDomain: "session-a",
+    params: { venue: "binance", assetId: "xaut", takeoverId: "takeover-current" },
+    body: {},
+  }, abortResponse);
+  assert.equal(abortedTakeoverOwner, "user-a");
+  assert.equal(abortResponse.statusCode, 200);
+  assert.equal(abortResponse.headers["Cache-Control"], "no-store");
 
   const failedResponse = mockResponse();
   await routes.get("PUT /api/arbitrage/automation/venues/:venue/credentials")({

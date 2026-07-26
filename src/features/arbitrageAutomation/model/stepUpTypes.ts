@@ -8,14 +8,19 @@ export type StepUpOperation =
   | "hedge_execute"
   | "position_close"
   | "close_all"
-  | "reconciliation_finalize";
+  | "reconciliation_finalize"
+  | "asset_authorization_create"
+  | "asset_authorization_revoke"
+  | "asset_takeover_start";
 
 export type StepUpIntent = {
   operation: StepUpOperation;
   venue: AutomationVenue;
-  accountId: string;
+  accountId?: string;
   resourceId: string | null;
   requestDigest: string;
+  authorizationPreview?: Readonly<Record<string, unknown>>;
+  takeoverPreview?: Readonly<Record<string, unknown>>;
 };
 
 export type StepUpFactor = {

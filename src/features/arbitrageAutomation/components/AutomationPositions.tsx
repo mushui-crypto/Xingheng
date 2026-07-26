@@ -105,13 +105,13 @@ function PositionGroup({
     >
       <section className="grid overflow-hidden border-b border-white/10 sm:grid-cols-2 xl:grid-cols-4" aria-label={`${group.label} 摘要`}>
         <SummaryMetric
-          detail={authoritativeRequired ? "仅使用未过期的交易所权威快照" : undefined}
-          label={authoritativeRequired ? "权威资金占用" : "资金占用"}
+          detail={authoritativeRequired ? "仅使用未过期的交易所最新数据" : undefined}
+          label={authoritativeRequired ? "实际资金占用" : "资金占用"}
           value={authoritativeRequired ? (currentSummary ? formatMoney(currentSummary.capitalUsedUsd) : "-") : formatMoney(group.capitalUsedUsd)}
         />
         <SummaryMetric
           detail={authoritativeRequired ? "策略记录不会冒充当前真实持仓" : undefined}
-          label={authoritativeRequired ? "权威净 Delta" : "净 Delta"}
+          label={authoritativeRequired ? "当前净 Delta" : "净 Delta"}
           value={authoritativeRequired ? (currentSummary ? formatMoney(currentSummary.netDeltaUsd, true) : "-") : formatMoney(group.netDeltaUsd, true)}
           tone={authoritativeRequired
             ? (currentSummary ? pnlTone(-Math.abs(currentSummary.netDeltaUsd)) : undefined)

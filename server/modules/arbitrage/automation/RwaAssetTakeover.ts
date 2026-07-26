@@ -193,6 +193,31 @@ export type RwaPublicAssetTakeoverRecord = Omit<
   runtime: ReturnType<typeof publicRwaAssetTakeoverRuntime>;
 };
 
+export type RwaAssetTakeoverDiscovery = Pick<
+  RwaPublicAssetTakeoverRecord,
+  | "takeoverId"
+  | "venue"
+  | "assetId"
+  | "profileId"
+  | "authorizationId"
+  | "state"
+  | "newCapitalUsd"
+  | "totalManagedCapitalUsd"
+  | "reservedCapitalUsd"
+  | "leverage"
+  | "targetHedgedQuantity"
+  | "finalSpotQuantity"
+  | "finalPerpetualQuantity"
+  | "residualQuantity"
+  | "errorCategory"
+  | "message"
+  | "createdAt"
+  | "updatedAt"
+  | "runtime"
+> & {
+  requiresReconfirmation: boolean;
+};
+
 export class RwaAssetTakeoverError extends Error {
   constructor(
     readonly statusCode: number,
@@ -652,6 +677,34 @@ export function publicRwaAssetTakeoverRecord(value: RwaAssetTakeoverRecord): Rwa
     spotOrderCount: spotOrders.length,
     perpetualOrderCount: perpetualOrders.length,
     runtime: publicRwaAssetTakeoverRuntime(runtime),
+  };
+}
+
+export function publicRwaAssetTakeoverDiscovery(
+  value: RwaAssetTakeoverRecord,
+): RwaAssetTakeoverDiscovery {
+  const record = publicRwaAssetTakeoverRecord(value);
+  return {
+    takeoverId: record.takeoverId,
+    venue: record.venue,
+    assetId: record.assetId,
+    profileId: record.profileId,
+    authorizationId: record.authorizationId,
+    state: record.state,
+    newCapitalUsd: record.newCapitalUsd,
+    totalManagedCapitalUsd: record.totalManagedCapitalUsd,
+    reservedCapitalUsd: record.reservedCapitalUsd,
+    leverage: record.leverage,
+    targetHedgedQuantity: record.targetHedgedQuantity,
+    finalSpotQuantity: record.finalSpotQuantity,
+    finalPerpetualQuantity: record.finalPerpetualQuantity,
+    residualQuantity: record.residualQuantity,
+    errorCategory: record.errorCategory,
+    message: record.message,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+    runtime: record.runtime,
+    requiresReconfirmation: record.state === "awaiting_reconfirm",
   };
 }
 

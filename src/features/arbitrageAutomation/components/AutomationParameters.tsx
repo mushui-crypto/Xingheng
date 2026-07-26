@@ -48,7 +48,7 @@ function VenueParameterForm({ control, controls, parameters, onValidate, onVenue
     .filter((group) => group.parameters.length > 0);
   const submit = async () => { setSaving(true); try { await onValidate(control.venue, draft); } finally { setSaving(false); } };
   return (
-    <ConsoleSection title={`${venueLabel(control.venue)} 策略参数`} description="当前用户的资金与策略边界；保存后由服务端重新校验并作为权威配置。" actions={<div className="flex flex-wrap gap-2"><StatusTag tone={control.enabled ? "success" : "neutral"}>{control.enabled ? "执行已就绪" : "执行未就绪"}</StatusTag><StatusTag tone={invalidIds.length > 0 ? "danger" : isDirty ? "warning" : "neutral"}>{invalidIds.length > 0 ? `${invalidIds.length} 项超出范围` : isDirty ? "待保存" : "未修改"}</StatusTag></div>}>
+    <ConsoleSection title={`${venueLabel(control.venue)} 策略参数`} description="当前用户的资金与策略边界；保存后由服务端重新校验并作为当前配置。" actions={<div className="flex flex-wrap gap-2"><StatusTag tone={control.enabled ? "success" : "neutral"}>{control.enabled ? "执行已就绪" : "执行未就绪"}</StatusTag><StatusTag tone={invalidIds.length > 0 ? "danger" : isDirty ? "warning" : "neutral"}>{invalidIds.length > 0 ? `${invalidIds.length} 项超出范围` : isDirty ? "待保存" : "未修改"}</StatusTag></div>}>
       <div className="flex min-w-0 flex-col gap-3 border-b border-white/10 px-4 py-3 sm:flex-row sm:items-center sm:px-5">
         <span className="shrink-0 text-xs font-medium text-muted">交易所</span>
         <div className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto" role="tablist" aria-label="参数交易所">

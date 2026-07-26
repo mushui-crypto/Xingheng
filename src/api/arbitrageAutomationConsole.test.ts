@@ -1012,7 +1012,7 @@ function automationResponse(
     return jsonResponse({
       ...executionResponse("reconciled"),
       reconciliation: reconciliationFixture(),
-      message: "交易所权威对账确认仅剩不可交易残余，已按人工结案完成记录。",
+      message: "交易所账户核对确认仅剩不可交易残余，已按人工结案完成记录。",
     });
   }
   return jsonResponse({ ok: true, message: "fixture accepted" });

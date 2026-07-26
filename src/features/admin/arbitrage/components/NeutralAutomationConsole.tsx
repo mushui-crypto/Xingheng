@@ -164,7 +164,7 @@ export function NeutralAutomationConsole({ report }: ReportProps) {
         <Card className="xh-neutral-card">
           <SectionHeading title="恢复与审计" status={report.status} />
           <MetricList rows={[
-            ["恢复来源", report.recovery.source === "provider_snapshot" ? "Provider 权威快照" : report.recovery.source],
+            ["恢复来源", report.recovery.source === "provider_snapshot" ? "Provider 最新快照" : report.recovery.source],
             ["快照恢复", yesNo(report.recovery.restoredFromSnapshot)],
             ["最近快照", dateTime(report.recovery.lastSnapshotAt)],
             ["审计事件", String(report.audit.latest.length)],

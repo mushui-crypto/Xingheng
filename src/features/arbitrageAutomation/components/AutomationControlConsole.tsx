@@ -4,6 +4,7 @@ import {
   CheckCircle2,
   CircleAlert,
   KeyRound,
+  PackageCheck,
   Settings2,
   ShieldAlert,
   ShieldCheck,
@@ -36,6 +37,9 @@ import { Modal } from "../../../components/ui/Modal";
 import { ArbitrageHelp } from "../../arbitrage/components/ArbitrageHelp";
 import { Toast, useTradingToast } from "../../trading/components/TradingFeedback";
 import type {
+  AssetManagementClient,
+} from "../model/assetManagementTypes";
+import type {
   AutomationCandidate,
   AutomationConsoleClient,
   AutomationConsoleSnapshot,
@@ -66,6 +70,7 @@ import type {
   StepUpStatus,
 } from "../model/stepUpTypes";
 import { AutomationCandidates } from "./AutomationCandidates";
+import { AutomationAssetManagement } from "./AutomationAssetManagement";
 import { AutomationCredentials } from "./AutomationCredentials";
 import { AutomationOverview } from "./AutomationOverview";
 import { AutomationParameters } from "./AutomationParameters";
@@ -78,6 +83,7 @@ const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNo
   { id: "overview", label: "总览", icon: <Activity size={15} /> },
   { id: "candidates", label: "候选与执行", icon: <CandlestickChart size={15} /> },
   { id: "positions", label: "持仓与盈亏", icon: <SlidersHorizontal size={15} /> },
+  { id: "assets", label: "资产管理", icon: <PackageCheck size={15} /> },
   { id: "credentials", label: "API 账户", icon: <KeyRound size={15} /> },
   { id: "parameters", label: "参数", icon: <Settings2 size={15} /> },
   { id: "safety", label: "安全操作", icon: <ShieldAlert size={15} /> },
@@ -118,11 +124,13 @@ export function AutomationControlConsole({
   client,
   onReload,
   securityClient = stepUpSecurityClient,
+  assetClient,
   snapshot,
 }: {
   client: AutomationConsoleClient;
   onReload: () => Promise<void>;
   securityClient?: StepUpSecurityClient;
+  assetClient?: AssetManagementClient;
   snapshot: AutomationConsoleSnapshot;
 }) {
   const [activeTab, setActiveTab] = useState<AutomationConsoleTab>("overview");
@@ -404,8 +412,8 @@ export function AutomationControlConsole({
       });
       showToast(
         report.canFinalize
-          ? "权威对账完成；当前结果允许申请人工结案。"
-          : "权威对账完成；仍有阻塞项需要处理。",
+          ? "交易所账户核对完成；当前结果允许申请人工结案。"
+          : "交易所账户核对完成；仍有阻塞项需要处理。",
         report.canFinalize ? "success" : "warning",
       );
     } catch (error) {
@@ -427,7 +435,7 @@ export function AutomationControlConsole({
     report: AutomationExecutionReconciliationPreview,
   ) => {
     if (!report.canFinalize) {
-      showToast("当前权威对账仍有阻塞项，不能人工结案。", "warning");
+      showToast("当前交易所账户核对仍有阻塞项，不能人工结案。", "warning");
       return;
     }
     setSafetyConfirmation({
@@ -477,7 +485,7 @@ export function AutomationControlConsole({
         const token = await requestStepUp(
           prepared.intent,
           "确认人工处理完成",
-          `${venueLabel(group.venue)} · 服务端将再次读取交易所权威状态，不会发送订单`,
+          `${venueLabel(group.venue)} · 服务端将再次读取交易所最新状态，不会发送订单`,
         );
         const result = await client.finalizeReconciliation({
           venue: group.venue,
@@ -488,7 +496,7 @@ export function AutomationControlConsole({
         if (!result.reconciliation) {
           throw new AutomationConsoleContractError(
             503,
-            "服务端未返回结案后的权威对账结果。",
+            "服务端未返回结案后的交易所账户核对结果。",
             null,
             "reconciliation_result_unavailable",
           );
@@ -512,7 +520,7 @@ export function AutomationControlConsole({
         const token = await requestStepUp(
           prepared.intent,
           "退出现货与永续对冲组合",
-          `${venueLabel(prepared.intent.venue)} · ${prepared.intent.accountId}`,
+          `${venueLabel(prepared.intent.venue)} · ${prepared.intent.accountId ?? "当前账户"}`,
         );
         receipt = await client.closePosition(
           safetyConfirmation.positionId,
@@ -522,7 +530,7 @@ export function AutomationControlConsole({
       } else {
         const intent = await safetyActionStepUpIntent(snapshot, safetyConfirmation.action);
         const token = intent
-          ? await requestStepUp(intent, safetyConfirmation.title, `${venueLabel(intent.venue)} · ${intent.accountId}`)
+          ? await requestStepUp(intent, safetyConfirmation.title, `${venueLabel(intent.venue)} · ${intent.accountId ?? "当前账户"}`)
           : undefined;
         receipt = await client.performSafetyAction(safetyConfirmation.action, token);
       }
@@ -617,6 +625,14 @@ export function AutomationControlConsole({
           writableVenues={snapshot.credentials
             .filter((credential) => credential.canExecute)
             .map((credential) => credential.venue)}
+        />
+      ) : null}
+      {activeTab === "assets" ? (
+        <AutomationAssetManagement
+          client={assetClient}
+          credentials={snapshot.credentials}
+          onFeedback={showToast}
+          requestStepUp={requestStepUp}
         />
       ) : null}
       {activeTab === "credentials" ? (
@@ -724,7 +740,7 @@ export function AutomationControlConsole({
         open={execution !== null}
         shellClassName="max-w-[900px]"
         title="执行状态"
-        description="状态来自服务端执行记录；订单与仓位最终以交易所权威数据为准。"
+        description="状态来自服务端执行记录；订单与仓位最终以交易所最新数据为准。"
       >
         {execution ? <ExecutionResult execution={execution} /> : null}
       </Modal>
@@ -732,7 +748,7 @@ export function AutomationControlConsole({
       <Modal
         closeDisabled={busy}
         description={safetyConfirmation?.kind === "reconciliation"
-          ? "该操作只结案策略记录；服务端会再次读取交易所权威状态，不会发送订单或修改交易所仓位。"
+          ? "该操作只结案策略记录；服务端会再次读取交易所最新状态，不会发送订单或修改交易所仓位。"
           : "该操作只影响当前用户在所选交易所的自动套利账户；服务端仍会校验 accountId、幂等标识与实时状态。"}
         onClose={() => setSafetyConfirmation(null)}
         open={safetyConfirmation !== null}
@@ -1178,7 +1194,7 @@ function executionStateLabel(state: AutomationExecutionResult["state"]) {
     partial_closed: "已部分退出，等待人工核对",
     hedged: "两侧仓位已对冲",
     compensating: "正在执行安全补偿",
-    reconciled: "已按权威状态完成人工结案",
+    reconciled: "已按交易所最新状态完成人工结案",
     closed: "对冲组合已退出",
     failed: "执行失败",
     manual_intervention: "需要人工处理",

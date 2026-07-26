@@ -83,6 +83,13 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   reconfirmAssetTakeover(input: Parameters<RwaBinanceAutomationService["reconfirmAssetTakeover"]>[0]) {
     return this.service.reconfirmAssetTakeover(input);
   }
+  getCurrentAssetTakeover() { return this.service.getCurrentAssetTakeover(); }
+  getAssetTakeoverAbortContext(input: Parameters<RwaBinanceAutomationService["getAssetTakeoverAbortContext"]>[0]) {
+    return this.service.getAssetTakeoverAbortContext(input);
+  }
+  abortAssetTakeover(input: Parameters<RwaBinanceAutomationService["abortAssetTakeover"]>[0]) {
+    return this.service.abortAssetTakeover(input);
+  }
   getAssetTakeoverStatus(takeoverId: string) { return this.service.getAssetTakeoverStatus(takeoverId); }
   previewAssetTakeoverExit(input: Parameters<RwaBinanceAutomationService["previewAssetTakeoverExit"]>[0]) {
     return this.service.previewAssetTakeoverExit(input);

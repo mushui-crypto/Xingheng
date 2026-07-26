@@ -247,7 +247,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
         });
         challenges.delete(challengeId);
         const execution = mapExecution(response, challenge.venue, challenge.accountId);
-        return realReceipt(execution.message || "真实执行请求已提交，结果以交易所权威订单状态为准。", execution);
+        return realReceipt(execution.message || "真实执行请求已提交，结果以交易所返回的最新订单状态为准。", execution);
       } catch (error) {
         if (
           error instanceof AutomationConsoleContractError
@@ -342,7 +342,7 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
       });
       const response = await apiRequest<{ items?: unknown[] }>(
         `${apiBase}/venues/${input.venue}/reconciliation?${params.toString()}`,
-        "交易所权威状态对账失败。",
+        "交易所最新状态核对失败。",
         { signal },
       );
       const item = array(response.items)[0];
@@ -1471,7 +1471,7 @@ function mapExecution(value: unknown, venue: AutomationVenue, accountId: string)
     accountId,
     executionId: safeText(raw.executionId, 120) || "pending",
     state: mapExecutionState(raw.state),
-    message: safeText(raw.message, 500) || "执行状态已更新，请以交易所权威订单和仓位为准。",
+    message: safeText(raw.message, 500) || "执行状态已更新，请以交易所返回的最新订单和仓位为准。",
     errorCategory: safeText(raw.errorCategory, 100) || null,
     hedgedQuantityXaut: numberValue(raw.hedgedQuantityXaut),
     unhedgedDurationMs: nullableFiniteNumber(raw.unhedgedDurationMs),

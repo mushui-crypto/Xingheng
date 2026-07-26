@@ -28,10 +28,28 @@ const securityTests = [
   resolve("server/modules/security/StepUpSecurityService.test.ts"),
   resolve("server/modules/security/Totp.test.ts"),
 ];
+const operationsTests = [
+  resolve("scripts/stageFiveReadiness.test.mjs"),
+];
 
 const environment = { ...process.env, NODE_ENV: "test" };
 for (const name of forbiddenEnvironment) delete environment[name];
 delete environment.RWA_AUTOMATION_SERVER_KILL_SWITCH;
+
+const operationsResult = spawnSync(
+  process.execPath,
+  ["--import", "tsx", "--test", ...operationsTests],
+  {
+    cwd: process.cwd(),
+    env: environment,
+    stdio: "inherit",
+  },
+);
+if (operationsResult.error) {
+  console.error("offline operations rehearsal could not start");
+  process.exit(1);
+}
+if (operationsResult.status !== 0) process.exit(operationsResult.status ?? 1);
 
 const result = spawnSync(
   process.execPath,

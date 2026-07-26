@@ -627,6 +627,53 @@ export class RwaAutomationControlService {
       capability.getAssetTakeoverStatus(normalizedTakeoverId));
   }
 
+  async getCurrentAssetTakeover(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    sourceIp = "unknown",
+  ) {
+    requiredString(sessionDomain, "sessionDomain", 200);
+    const normalizedVenue = normalizeVenue(venue);
+    enabledAssetId(assetId, normalizedVenue);
+    this.admitRequest("private_read", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverLifecycleConnector(connector);
+    const accountId = await connector.getConfiguredAccountId();
+    if (!accountId) {
+      throw new RwaAutomationControlError(409, "credential_not_configured", "该 venue 尚未配置执行账户凭证。");
+    }
+    return this.governed("private_read", sourceIp, userId, normalizedVenue, accountId, () =>
+      capability.getCurrentAssetTakeover());
+  }
+
+  async abortAssetTakeover(
+    userId: string,
+    sessionDomain: string,
+    venue: string,
+    assetId: string,
+    takeoverId: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, []);
+    requiredString(sessionDomain, "sessionDomain", 200);
+    const normalizedVenue = normalizeVenue(venue);
+    enabledAssetId(assetId, normalizedVenue);
+    const normalizedTakeoverId = requiredString(takeoverId, "takeoverId", 100);
+    this.admitRequest("risk_control", sourceIp, userId, normalizedVenue);
+    const connector = this.registry(userId).requireImplemented(normalizedVenue);
+    const capability = requireTakeoverLifecycleConnector(connector);
+    const context = await capability.getAssetTakeoverAbortContext({
+      takeoverId: normalizedTakeoverId,
+    });
+    const accountId = requiredString(context.accountId, "accountId", 200);
+    return this.governed("risk_control", sourceIp, userId, normalizedVenue, accountId, () =>
+      capability.abortAssetTakeover({ takeoverId: normalizedTakeoverId }));
+  }
+
   async previewAssetTakeoverExit(
     userId: string,
     sessionDomain: string,
@@ -2026,6 +2073,20 @@ function requireTakeoverConnector(connector: RwaAutomationConnector) {
   return connector as RwaAutomationConnector & Required<Pick<
     RwaAutomationConnector,
     "previewAssetTakeover" | "startAssetTakeover" | "reconfirmAssetTakeover" | "getAssetTakeoverStatus"
+  >>;
+}
+
+function requireTakeoverLifecycleConnector(connector: RwaAutomationConnector) {
+  if (
+    !connector.getCurrentAssetTakeover
+    || !connector.getAssetTakeoverAbortContext
+    || !connector.abortAssetTakeover
+  ) {
+    throw new RwaAutomationControlError(501, "asset_takeover_unavailable", "该 venue 尚未实现资产接管恢复。");
+  }
+  return connector as RwaAutomationConnector & Required<Pick<
+    RwaAutomationConnector,
+    "getCurrentAssetTakeover" | "getAssetTakeoverAbortContext" | "abortAssetTakeover"
   >>;
 }
 

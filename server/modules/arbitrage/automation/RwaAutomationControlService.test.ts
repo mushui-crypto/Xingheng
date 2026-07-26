@@ -1011,6 +1011,118 @@ test("asset takeover preview is session-bound, expires at 30 seconds, and has on
   assert.equal(starts, 1);
 });
 
+test("current takeover discovery and abort are session-authenticated, server-account scoped, and admission first", async () => {
+  let registryCreations = 0;
+  let metadataReads = 0;
+  let aborts = 0;
+  const sourceIp = "203.0.113.35";
+  const currentTakeover = {
+    takeoverId: "takeover-control",
+    state: "awaiting_reconfirm",
+    requiresReconfirmation: true,
+  };
+  const connector = fakeConnector(() => undefined, {
+    accountId: "bybit:test-account",
+    currentTakeover,
+    onAccountMetadata: () => { metadataReads += 1; },
+    onTakeoverAbort: () => { aborts += 1; },
+  });
+  const governance = new RwaAutomationGovernance({
+    ...loadRwaAutomationGovernanceConfig(),
+    riskControlMax: 1,
+    riskControlWindowMs: 10,
+  }, () => 1_800_000_000_001);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => {
+      registryCreations += 1;
+      return new RwaAutomationConnectorRegistry([connector]);
+    },
+    passThroughStepUp,
+    governance,
+    () => 1_800_000_000_001,
+  );
+
+  assert.deepEqual(
+    await service.getCurrentAssetTakeover(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      sourceIp,
+    ),
+    currentTakeover,
+  );
+  assert.equal(registryCreations, 1);
+  assert.equal(metadataReads, 1);
+
+  governance.admitRequest({
+    operation: "risk_control",
+    sourceIp,
+    userId: "user-a",
+    venue: "bybit",
+  });
+  const registryBaseline = registryCreations;
+  const metadataBaseline = metadataReads;
+  await assert.rejects(
+    service.abortAssetTakeover(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      "takeover-control",
+      {},
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof RwaAutomationGovernanceError
+      && error.category === "automation_rate_limited",
+  );
+  assert.equal(registryCreations, registryBaseline);
+  assert.equal(metadataReads, metadataBaseline);
+  assert.equal(aborts, 0);
+  await assert.rejects(
+    service.abortAssetTakeover(
+      "user-a",
+      sessionDomain,
+      "bybit",
+      "xaut",
+      "takeover-control",
+      { accountId: "client-account" },
+      sourceIp,
+    ),
+    (error: unknown) => error instanceof Error
+      && "category" in error
+      && error.category === "invalid_request",
+  );
+});
+
+test("takeover abort uses the persisted account governance domain when configured metadata is absent", async () => {
+  let metadataReads = 0;
+  let aborts = 0;
+  const connector = fakeConnector(() => undefined, {
+    accountId: null,
+    onAccountMetadata: () => { metadataReads += 1; },
+    onTakeoverAbort: () => { aborts += 1; },
+  });
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+  );
+  const result = await service.abortAssetTakeover(
+    "user-a",
+    sessionDomain,
+    "bybit",
+    "xaut",
+    "takeover-control",
+    {},
+    "203.0.113.36",
+  ) as any;
+  assert.equal(result.state, "failed");
+  assert.equal(aborts, 1);
+  assert.equal(metadataReads, 0);
+});
+
 test("asset takeover exit admission preserves its opaque confirmation and does not consume step-up", async () => {
   let currentTime = 1_800_000_000_001;
   let registryCreations = 0;
@@ -1887,6 +1999,8 @@ function fakeConnector(
     takeoverPreview?: RwaAssetTakeoverPreview;
     onTakeoverStart?: () => void;
     takeoverStartFactory?: () => Promise<unknown>;
+    currentTakeover?: unknown;
+    onTakeoverAbort?: () => void;
     takeoverExitPreview?: RwaAssetTakeoverExitPreview;
     takeoverExitPreviewFactory?: () => Promise<RwaAssetTakeoverExitPreview>;
     onTakeoverExitConfirm?: () => void;
@@ -1950,6 +2064,14 @@ function fakeConnector(
       return { takeoverId: "takeover-control", state: "managed" };
     },
     reconfirmAssetTakeover: async () => ({ takeoverId: "takeover-control", state: "managed" }),
+    getCurrentAssetTakeover: async () => options.currentTakeover ?? null,
+    getAssetTakeoverAbortContext: async () => ({
+      accountId: options.accountId ?? `${venue}:persisted-account`,
+    }),
+    abortAssetTakeover: async () => {
+      options.onTakeoverAbort?.();
+      return { takeoverId: "takeover-control", state: "failed", requiresReconfirmation: false };
+    },
     getAssetTakeoverStatus: async () => ({ takeoverId: "takeover-control", state: "managed" }),
     previewAssetTakeoverExit: async () => {
       if (options.takeoverExitPreviewFactory) return options.takeoverExitPreviewFactory();

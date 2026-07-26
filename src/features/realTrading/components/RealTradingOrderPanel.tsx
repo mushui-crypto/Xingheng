@@ -585,7 +585,7 @@ function ReconciliationItem({ record }: { record: RealTradingReconciliationRecor
         </div>
         <div><dt>最近核对</dt><dd>{formatLifecycleTime(record.lastReconcileAttemptAt)}</dd></div>
       </dl>
-      <p>{record.manualReview ? "需要人工核对，禁止盲目重试。" : "系统正在按权威 orderStatus 自动核对。"}</p>
+      <p>{record.manualReview ? "需要人工核对，禁止盲目重试。" : "系统正在按交易所返回的最新订单状态自动核对。"}</p>
       {record.errorCategory ? <small>错误类别：{record.errorCategory}</small> : null}
     </article>
   );

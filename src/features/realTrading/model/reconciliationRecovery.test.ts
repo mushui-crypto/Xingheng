@@ -22,7 +22,7 @@ test("reconciliation records restore pending lifecycle metadata", () => {
   assert.equal(lifecycle.requestId, "request-1");
   assert.deepEqual(lifecycle.clientOrderIds, automaticRecord.clientOrderIds);
   assert.equal(lifecycle.autoRecoverable, true);
-  assert.match(lifecycle.message ?? "", /权威 orderStatus/);
+  assert.match(lifecycle.message ?? "", /交易所返回的最新订单状态/);
 });
 
 test("authoritative reconciliation sync removes records that have cleared", () => {
