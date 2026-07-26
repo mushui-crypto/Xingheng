@@ -1,5 +1,8 @@
 import { isAddress } from "ethers";
-import { RWA_GCP_KMS_KEY_NAME } from "../modules/arbitrage/automation/CredentialKeyProvider";
+import {
+  RWA_GCP_KMS_KEY_NAME,
+  RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+} from "../modules/arbitrage/automation/CredentialKeyProvider";
 import {
   RWA_GCP_WIF_ADC_PATH,
   isCanonicalGcpWifAudience,
@@ -236,12 +239,9 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   if (
     config.deploymentEnvironment === "real-test"
-    && (
-      kmsKeyName === RWA_GCP_KMS_KEY_NAME
-      || !/^projects\/[a-z][a-z0-9-]{4,28}[a-z0-9]\/locations\/[a-z0-9-]+\/keyRings\/[a-zA-Z0-9_-]{1,63}\/cryptoKeys\/[a-zA-Z0-9_-]{1,63}$/u.test(kmsKeyName)
-    )
+    && kmsKeyName !== RWA_REAL_TEST_GCP_KMS_KEY_NAME
   ) {
-    throw new Error("真实测试环境必须使用独立且有效的 GCP KMS CryptoKey。");
+    throw new Error("真实测试环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的独立 CryptoKey 完整资源名。");
   }
   if (process.env.RWA_AUTOMATION_DATA_DIR !== RWA_AUTOMATION_DATA_ROOT) {
     throw new Error("生产环境 RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径。");

@@ -3,6 +3,7 @@ import { KeyManagementServiceClient } from "@google-cloud/kms";
 import {
   CredentialKeyProviderError,
   RWA_GCP_KMS_KEY_NAME,
+  RWA_REAL_TEST_GCP_KMS_KEY_NAME,
   cloudCredentialAad,
   type CreatedCredentialDataKey,
   type CredentialKeyContext,
@@ -10,6 +11,7 @@ import {
   type CredentialKeyProviderHealth,
   type WrappedCredentialDataKey,
 } from "./CredentialKeyProvider";
+import { loadDeploymentIdentity } from "../../../config/deploymentEnvironment";
 import {
   GcpWifConfigurationError,
   RWA_AUTOMATION_RUNTIME_GID,
@@ -227,8 +229,21 @@ function validateConfiguration(keyName: string, adcPath: string, wifAudience: st
   if (process.env.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms") {
     return "RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。";
   }
-  if (keyName !== RWA_GCP_KMS_KEY_NAME) {
-    return "RWA_GCP_KMS_KEY_NAME 必须是已冻结的生产 CryptoKey 完整资源名。";
+  let deploymentEnvironment;
+  try {
+    deploymentEnvironment = loadDeploymentIdentity().environment;
+  } catch (error) {
+    return error instanceof Error
+      ? error.message
+      : "部署环境身份无效；已拒绝 GCP KMS 配置。";
+  }
+  const expectedKeyName = deploymentEnvironment === "real-test"
+    ? RWA_REAL_TEST_GCP_KMS_KEY_NAME
+    : RWA_GCP_KMS_KEY_NAME;
+  if (keyName !== expectedKeyName) {
+    return deploymentEnvironment === "real-test"
+      ? "真实测试环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的独立 CryptoKey 完整资源名。"
+      : "正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的生产 CryptoKey 完整资源名。";
   }
   if (adcPath !== `${secretRoot}/adc.json`) {
     return "GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。";

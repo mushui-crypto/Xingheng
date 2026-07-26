@@ -6,6 +6,8 @@ export const STEP_UP_SECURITY_AAD_SCHEMA = "step-up-security:v1:userId:purpose:e
 export const RWA_AUTOMATION_BACKUP_AAD_SCHEMA = "rwa-automation-backup:v1:backupId:environment" as const;
 export const RWA_GCP_KMS_KEY_NAME =
   "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials" as const;
+export const RWA_REAL_TEST_GCP_KMS_KEY_NAME =
+  "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-real-test-sg/cryptoKeys/exchange-credentials" as const;
 
 export type CredentialKeyProviderName = "gcp-kms" | "fake";
 

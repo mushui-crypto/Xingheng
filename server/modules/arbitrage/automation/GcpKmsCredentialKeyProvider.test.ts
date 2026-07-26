@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   CredentialKeyProviderError,
   RWA_GCP_KMS_KEY_NAME,
+  RWA_REAL_TEST_GCP_KMS_KEY_NAME,
   type CredentialKeyContext,
 } from "./CredentialKeyProvider";
 import { GcpKmsCredentialKeyProvider, crc32c } from "./GcpKmsCredentialKeyProvider";
@@ -103,24 +104,58 @@ test("GCP KMS adapter rejects service-account JSON and local master-key fallback
   }
 });
 
-test("GCP KMS adapter accepts only the frozen production CryptoKey name", () => {
-  const previous = process.env.RWA_CREDENTIAL_KEY_PROVIDER;
-  process.env.RWA_CREDENTIAL_KEY_PROVIDER = "gcp-kms";
-  try {
-    const provider = new GcpKmsCredentialKeyProvider({
-      keyName: "projects/other/locations/global/keyRings/other/cryptoKeys/other",
-      adcPath: "/not-read",
-      wifAudience: testWifAudience,
-      secretRoot: "/not-read-root",
-      expectedOwnerUid: process.getuid?.() ?? 0,
-      expectedOwnerGid: process.getgid?.() ?? 0,
-      client: new FakeKmsClient() as never,
+test("GCP KMS adapter binds production and real-test to their frozen CryptoKeys", () => {
+  const productionEnvironment = {
+    NODE_ENV: "production",
+    XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+    XINGHENG_COMPOSE_PROJECT: "xingheng",
+    XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+    DOMAIN: "app.example.com",
+    REAL_TEST_DOMAIN: "test.example.com",
+    RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+    RWA_AUTOMATION_MASTER_KEY: undefined,
+  };
+  const realTestEnvironment = {
+    ...productionEnvironment,
+    XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
+    XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
+    XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
+    DOMAIN: "test.example.com",
+  };
+
+  for (const [environment, acceptedKey, rejectedKey] of [
+    [productionEnvironment, RWA_GCP_KMS_KEY_NAME, RWA_REAL_TEST_GCP_KMS_KEY_NAME],
+    [realTestEnvironment, RWA_REAL_TEST_GCP_KMS_KEY_NAME, RWA_GCP_KMS_KEY_NAME],
+  ] as const) {
+    withEnvironment(environment, () => {
+      assert.equal(createConfigurationProbe(acceptedKey).configured, true);
+      const crossed = createConfigurationProbe(rejectedKey);
+      assert.equal(crossed.configured, false);
+      assert.match(crossed.configurationError ?? "", /CryptoKey/);
+
+      const missing = createConfigurationProbe("");
+      assert.equal(missing.configured, false);
+      assert.match(missing.configurationError ?? "", /CryptoKey/);
     });
-    assert.equal(provider.configured, false);
-    assert.match(provider.configurationError ?? "", /CryptoKey/);
-  } finally {
-    if (previous === undefined) delete process.env.RWA_CREDENTIAL_KEY_PROVIDER;
-    else process.env.RWA_CREDENTIAL_KEY_PROVIDER = previous;
+  }
+});
+
+test("GCP KMS adapter rejects missing or unknown production deployment identity", () => {
+  for (const deploymentEnvironment of [undefined, "staging"] as const) {
+    withEnvironment({
+      NODE_ENV: "production",
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
+      XINGHENG_COMPOSE_PROJECT: "xingheng",
+      XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+      DOMAIN: "app.example.com",
+      REAL_TEST_DOMAIN: "test.example.com",
+      RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+      RWA_AUTOMATION_MASTER_KEY: undefined,
+    }, () => {
+      const provider = createConfigurationProbe(RWA_GCP_KMS_KEY_NAME);
+      assert.equal(provider.configured, false);
+      assert.match(provider.configurationError ?? "", /production 或 real-test/);
+    });
   }
 });
 
@@ -413,6 +448,33 @@ test("GCP KMS adapter validates CryptoKeyVersion responses and wrap references",
     await fixture.cleanup();
   }
 });
+
+function createConfigurationProbe(keyName: string) {
+  return new GcpKmsCredentialKeyProvider({
+    keyName,
+    adcPath: "/run/secrets/gcp-wif/adc.json",
+    wifAudience: testWifAudience,
+    client: new FakeKmsClient({ versionName: `${keyName}/cryptoKeyVersions/1` }) as never,
+  });
+}
+
+function withEnvironment(values: Record<string, string | undefined>, run: () => void) {
+  const before = Object.fromEntries(
+    Object.keys(values).map((key) => [key, process.env[key]]),
+  );
+  try {
+    for (const [key, value] of Object.entries(values)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+    run();
+  } finally {
+    for (const [key, value] of Object.entries(before)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  }
+}
 
 async function createFixture(
   adc: unknown | ((secretRoot: string) => unknown) = x509Adc,
