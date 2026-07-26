@@ -17,6 +17,9 @@ import {
   assertTrustedReleaseCandidateRoot,
   releaseCandidatePaths,
 } from "./trustedReleaseCandidate.mjs";
+import {
+  trustedContainerSnapshotDigest,
+} from "./trustedContainerSnapshot.mjs";
 
 const REVISION = process.env.XINGHENG_LINUX_CANDIDATE_REVISION ?? "";
 const CANONICAL_ROOT = "/opt/xingheng-release/code";
@@ -157,21 +160,7 @@ function immutableHostSnapshot(receipt) {
   ]).split(/\s+/u).filter(Boolean).sort();
   const containers = containerIds.length === 0
     ? []
-    : JSON.parse(docker(receipt, ["container", "inspect", ...containerIds]))
-      .map((item) => ({
-        id: item.Id,
-        image: item.Image,
-        labels: item.Config?.Labels ?? {},
-        mounts: item.Mounts ?? [],
-        name: item.Name,
-        networkMode: item.HostConfig?.NetworkMode,
-        networks: item.NetworkSettings?.Networks ?? {},
-        restartCount: item.RestartCount,
-        running: item.State?.Running,
-        status: item.State?.Status,
-        health: item.State?.Health?.Status ?? null,
-      }))
-      .sort((left, right) => left.id.localeCompare(right.id));
+    : JSON.parse(docker(receipt, ["container", "inspect", ...containerIds]));
   const volumeNames = docker(receipt, [
     "volume",
     "ls",
@@ -196,7 +185,7 @@ function immutableHostSnapshot(receipt) {
   return {
     canonicalRoot: snapshotTree(CANONICAL_ROOT),
     canonicalReceipt: snapshotTree(CANONICAL_RECEIPT),
-    containers: sha256Json(containers),
+    containers: trustedContainerSnapshotDigest(containers),
     volumes: sha256Json(volumes),
   };
 }
