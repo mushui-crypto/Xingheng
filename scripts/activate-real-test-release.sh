@@ -76,7 +76,7 @@ trap stop_on_failure EXIT HUP INT TERM
 
 "$compose_entry" up -d api web
 node scripts/verify-deployment-revision.mjs \
-  containers-real-test "$release_manifest"
+  containers-real-test "$release_manifest" "$mode"
 node scripts/verify-release-volume-boundaries.mjs real-test runtime
 activated=true
 trap - EXIT HUP INT TERM

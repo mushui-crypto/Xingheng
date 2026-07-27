@@ -34,6 +34,7 @@ const realTestCompose = read("scripts/real-test-compose.sh");
 const standaloneRealTestCompose = read("scripts/real-test-standalone-compose.sh");
 const standaloneRealTestComposeConfig = read("compose.real-test-standalone.yaml");
 const realTestActivator = read("scripts/activate-real-test-release.sh");
+const realTestWebHealth = read("scripts/verify-real-test-web-health.sh");
 const composeEnvironmentVerifier = read("scripts/verify-compose-environment-file.mjs");
 const trustedDockerRuntime = read("scripts/trustedDockerRuntime.mjs");
 const trustedOperationLauncher = read("scripts/trusted-operation-launcher.mjs");
@@ -347,12 +348,19 @@ const assertions = [
       && standaloneRealTestComposeConfig.includes('"443:443/udp"')
       && standaloneRealTestComposeConfig.includes("!reset null")
       && standaloneRealTestComposeConfig.includes("Caddyfile.real-test-standalone")
-      && standaloneRealTestComposeConfig.includes("https://127.0.0.1/api/health")
+      && standaloneRealTestComposeConfig.includes("/usr/local/bin/verify-real-test-web-health")
       && standaloneRealTestCaddy.includes("{$REAL_TEST_DOMAIN}")
       && !standaloneRealTestCaddy.includes("http://")
       && standaloneRealTestCaddy.includes("Strict-Transport-Security")
       && dockerfile.includes("Caddyfile.real-test-standalone")
+      && dockerfile.includes("verify-real-test-web-health.sh")
+      && realTestWebHealth.includes("Cache-Control:")
+      && realTestWebHealth.includes('"deploymentEnvironment":"real-test"')
+      && realTestWebHealth.includes('"composeProject":"xingheng-real-test"')
       && deploymentRevisionVerifier.includes("compose-real-test-standalone")
+      && deploymentRevisionVerifier.includes("healthStatus")
+      && deploymentRevisionVerifier.includes("runtime topology label mismatch")
+      && deploymentRevisionVerifier.includes("health status is starting")
       && dualEnvironmentTopology.includes("validateStandaloneRealTestTopology")
       && realTestActivator.includes("shared|standalone")
       && realTestActivator.includes("containers-real-test")

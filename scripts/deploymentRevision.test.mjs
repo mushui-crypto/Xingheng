@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   linkSync,
   mkdirSync,
@@ -41,6 +42,8 @@ const COMPONENT_DIGESTS = Object.freeze({
   "rwa-automation-restore": API_DIGEST,
 });
 const VERIFIER = new URL("./verify-deployment-revision.mjs", import.meta.url).pathname;
+const REAL_TEST_WEB_HEALTH =
+  new URL("./verify-real-test-web-health.sh", import.meta.url).pathname;
 const REPO_ROOT = new URL("../", import.meta.url).pathname;
 const PRODUCTION_COMPOSE = new URL("./production-compose.sh", import.meta.url).pathname;
 const DOCKER_FIXTURE_DIRECTORY = mkdtempSync(join(tmpdir(), "xingheng-docker-socket-"));
@@ -211,11 +214,49 @@ if (args[0] === "docker-cli-plugin-metadata") {
 } else if (args[0] === "container" && args[1] === "inspect") {
   log("container:inspect");
   const isApi = args[2] === "api-id";
+  const mode = process.env.FAKE_REAL_TEST_MODE || "shared";
+  const health = isApi
+    ? (process.env.FAKE_API_HEALTH || "healthy")
+    : (process.env.FAKE_WEB_HEALTH || "healthy");
+  let resolvedHealth = health;
+  if (process.env.FAKE_HEALTH_TRANSITION_FILE) {
+    const { existsSync, writeFileSync } = require("node:fs");
+    if (!existsSync(process.env.FAKE_HEALTH_TRANSITION_FILE)) {
+      writeFileSync(process.env.FAKE_HEALTH_TRANSITION_FILE, "starting");
+      resolvedHealth = "starting";
+    }
+  }
+  const topology = process.env.FAKE_TOPOLOGY_LABEL || mode;
+  const networks = isApi
+    ? { "xingheng-real-test_default": {} }
+    : mode === "standalone"
+      ? { "xingheng-real-test_default": {} }
+      : { "xingheng-real-test_default": {}, "xingheng-public-ingress": {} };
+  const portBindings = !isApi && mode === "standalone"
+    ? {
+        "80/tcp": [{ HostIp: "", HostPort: "80" }],
+        "443/tcp": [{ HostIp: "", HostPort: "443" }],
+        "443/udp": [{ HostIp: "", HostPort: "443" }],
+      }
+    : {};
   process.stdout.write(JSON.stringify([{
     Image: isApi ? api : web,
-    State: { Running: true },
+    State: { Running: true, Health: { Status: resolvedHealth } },
+    HostConfig: {
+      PortBindings: !isApi && process.env.FAKE_BAD_PORTS
+        ? { "8443/tcp": [{ HostIp: "", HostPort: "8443" }] }
+        : portBindings,
+    },
+    NetworkSettings: {
+      Networks: process.env.FAKE_BAD_NETWORK
+        ? { "unexpected-network": {} }
+        : networks,
+    },
     Config: {
-      Labels: { [label]: revision },
+      Labels: {
+        [label]: revision,
+        ...(!isApi ? { "com.xingheng.real-test.topology": topology } : {}),
+      },
       Env: ["XINGHENG_EXPECTED_REVISION=" + (process.env.FAKE_RUNTIME_REVISION || revision)],
     },
   }]));
@@ -643,7 +684,7 @@ test("real-test container verification uses only the fixed real-test project", (
     writeFakeDocker(directory);
     const result = spawnSync(
       process.execPath,
-      [VERIFIER, "containers-real-test", manifestPath],
+      [VERIFIER, "containers-real-test", manifestPath, "shared"],
       {
         encoding: "utf8",
         env: {
@@ -655,6 +696,216 @@ test("real-test container verification uses only the fixed real-test project", (
       },
     );
     assert.equal(result.status, 0, result.stderr);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real-test runtime requires healthy containers and the selected exact topology", () => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-real-test-runtime-gates-"));
+  try {
+    const manifestPath = writeManifest(directory);
+    writeFakeDocker(directory);
+    const baseEnvironment = {
+      ...process.env,
+      ...trustedDockerFixtureEnvironment(directory),
+      PATH: `${directory}:${process.env.PATH}`,
+      FAKE_EXPECT_PROJECT: "xingheng-real-test",
+    };
+    for (const [mode, mutation, expected] of [
+      ["shared", { FAKE_API_HEALTH: "unhealthy" }, /api container health status is unhealthy/u],
+      ["shared", { FAKE_WEB_HEALTH: "unhealthy" }, /web container health status is unhealthy/u],
+      ["shared", { FAKE_TOPOLOGY_LABEL: "standalone" }, /topology label mismatch/u],
+      ["shared", { FAKE_BAD_NETWORK: "1" }, /runtime topology mismatch/u],
+      ["shared", { FAKE_BAD_PORTS: "1" }, /must not publish host ports/u],
+      ["standalone", { FAKE_REAL_TEST_MODE: "standalone", FAKE_BAD_PORTS: "1" }, /port set mismatch/u],
+      ["standalone", { FAKE_REAL_TEST_MODE: "standalone", FAKE_BAD_NETWORK: "1" }, /runtime topology mismatch/u],
+      ["standalone", {
+        FAKE_REAL_TEST_MODE: "standalone",
+        FAKE_RUNTIME_REVISION: OTHER_REVISION,
+      }, /runtime revision mismatch/u],
+    ]) {
+      const result = spawnSync(
+        process.execPath,
+        [VERIFIER, "containers-real-test", manifestPath, mode],
+        {
+          encoding: "utf8",
+          env: { ...baseEnvironment, ...mutation },
+        },
+      );
+      assert.notEqual(result.status, 0, `${mode} ${JSON.stringify(mutation)}`);
+      assert.match(result.stderr, expected);
+    }
+
+    const standalone = spawnSync(
+      process.execPath,
+      [VERIFIER, "containers-real-test", manifestPath, "standalone"],
+      {
+        encoding: "utf8",
+        env: {
+          ...baseEnvironment,
+          FAKE_REAL_TEST_MODE: "standalone",
+        },
+      },
+    );
+    assert.equal(standalone.status, 0, standalone.stderr);
+
+    const transitionFile = join(directory, "health-transition");
+    const waitsForHealthy = spawnSync(
+      process.execPath,
+      [VERIFIER, "containers-real-test", manifestPath, "shared"],
+      {
+        encoding: "utf8",
+        env: {
+          ...baseEnvironment,
+          FAKE_HEALTH_TRANSITION_FILE: transitionFile,
+        },
+      },
+    );
+    assert.equal(waitsForHealthy.status, 0, waitsForHealthy.stderr);
+    assert.equal(existsSync(transitionFile), true);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real-test Web health requires exact identity, revision and no-store", () => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-real-test-web-health-"));
+  const wget = join(directory, "wget");
+  writeFileSync(wget, `#!${process.execPath}
+const { writeFileSync } = require("node:fs");
+const args = process.argv.slice(2);
+if (process.env.FAKE_WGET_FAIL === "1") process.exit(1);
+const output = args[args.indexOf("-qO") + 1];
+writeFileSync(output, process.env.FAKE_HEALTH_BODY || "");
+process.stderr.write(process.env.FAKE_HEALTH_HEADERS || "");
+`, { mode: 0o755 });
+  try {
+    const body = JSON.stringify({
+      ok: true,
+      deploymentEnvironment: "real-test",
+      composeProject: "xingheng-real-test",
+      revision: REVISION,
+    });
+    const baseEnvironment = {
+      ...process.env,
+      PATH: `${directory}:${process.env.PATH}`,
+      FAKE_HEALTH_BODY: body,
+      FAKE_HEALTH_HEADERS: "  HTTP/1.1 200 OK\n  Cache-Control: no-store\n",
+    };
+    for (const protocol of ["http", "https"]) {
+      const valid = spawnSync(
+        "sh",
+        [REAL_TEST_WEB_HEALTH, protocol, "real-test.fixture.invalid", REVISION],
+        { encoding: "utf8", env: baseEnvironment },
+      );
+      assert.equal(valid.status, 0, valid.stderr);
+    }
+    for (const mutation of [
+      { FAKE_HEALTH_BODY: body.replace('"real-test"', '"production"') },
+      { FAKE_HEALTH_BODY: body.replace('"xingheng-real-test"', '"xingheng"') },
+      { FAKE_HEALTH_BODY: body.replace(REVISION, OTHER_REVISION) },
+      { FAKE_HEALTH_HEADERS: "  HTTP/1.1 200 OK\n  Cache-Control: public\n" },
+      { FAKE_WGET_FAIL: "1" },
+    ]) {
+      const invalid = spawnSync(
+        "sh",
+        [REAL_TEST_WEB_HEALTH, "https", "real-test.fixture.invalid", REVISION],
+        {
+          encoding: "utf8",
+          env: { ...baseEnvironment, ...mutation },
+        },
+      );
+      assert.notEqual(invalid.status, 0, JSON.stringify(mutation));
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("real-test activation stops both services for every post-up runtime gate failure", () => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-real-test-activation-"));
+  const scripts = join(directory, "scripts");
+  const bin = join(directory, "bin");
+  const log = join(directory, "events.log");
+  mkdirSync(scripts);
+  mkdirSync(bin);
+  copyFileSync(
+    new URL("./activate-real-test-release.sh", import.meta.url),
+    join(scripts, "activate-real-test-release.sh"),
+  );
+  chmodSync(join(scripts, "activate-real-test-release.sh"), 0o755);
+  const wrapper = `#!/bin/sh
+echo "$*" >> "$FAKE_ACTIVATION_LOG"
+exit 0
+`;
+  for (const name of ["real-test-compose.sh", "real-test-standalone-compose.sh"]) {
+    writeFileSync(join(scripts, name), wrapper, { mode: 0o755 });
+  }
+  writeFileSync(join(bin, "node"), `#!/bin/sh
+case "$*" in
+  *"manifest-values"*)
+    printf '%s\\n%s\\n%s\\n%s\\n' \
+      "${REVISION}" "${API_DIGEST}" "${WEB_DIGEST}" "${STRATEGY_DIGEST}"
+    ;;
+  *"containers-real-test"*)
+    [ -z "\${FAKE_RUNTIME_GATE_FAILURE:-}" ] || exit 1
+    ;;
+esac
+exit 0
+`, { mode: 0o755 });
+  mkdirSync(join(directory, "deploy"));
+  writeFileSync(join(directory, ".env.real-test"), `XINGHENG_REVISION=${REVISION}\n`, {
+    mode: 0o600,
+  });
+  writeFileSync(join(directory, "deploy", "release-manifest.json"), "{}\n", { mode: 0o444 });
+  try {
+    for (const [mode, failure] of [
+      ["shared", "api-unhealthy"],
+      ["shared", "web-unhealthy"],
+      ["shared", "identity-revision"],
+      ["shared", "topology"],
+      ["standalone", "tls-health"],
+    ]) {
+      rmSync(log, { force: true });
+      const result = spawnSync(
+        "sh",
+        [join(scripts, "activate-real-test-release.sh"), mode],
+        {
+          cwd: directory,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            FAKE_ACTIVATION_LOG: log,
+            FAKE_RUNTIME_GATE_FAILURE: failure,
+          },
+        },
+      );
+      assert.notEqual(result.status, 0, `${mode}:${failure}`);
+      assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), [
+        "up -d api web",
+        "stop api web",
+      ]);
+    }
+
+    rmSync(log, { force: true });
+    const success = spawnSync(
+      "sh",
+      [join(scripts, "activate-real-test-release.sh"), "standalone"],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          FAKE_ACTIVATION_LOG: log,
+        },
+      },
+    );
+    assert.equal(success.status, 0, success.stderr);
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["up -d api web"]);
+    assert.match(success.stdout, /verified standalone real-test release activated/u);
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }

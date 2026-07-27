@@ -112,6 +112,7 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   assertHealthcheck(realTestApi, "real-test", "xingheng-real-test", false);
   assertHealthcheck(productionWeb, "production", "xingheng", true);
   assertHealthcheck(realTestWeb, "real-test", "xingheng-real-test", true);
+  assertRealTestWebHealthcheck(realTestWeb, "http");
 
   assertVolumes(production, PRODUCTION_PROJECT);
   assertVolumes(realTest, REAL_TEST_PROJECT);
@@ -206,41 +207,60 @@ function assertStandaloneIngress(config, web) {
     throw new Error("standalone real-test Web network set is invalid");
   }
   const command = Array.isArray(web.command) ? web.command.at(-1) : "";
-  const healthCommand = Array.isArray(web.healthcheck?.test)
-    ? web.healthcheck.test.at(-1)
-    : "";
   if (
     typeof command !== "string"
     || !command.includes("Caddyfile.real-test-standalone")
     || !command.includes("REAL_TEST_DOMAIN")
-    || typeof healthCommand !== "string"
-    || !healthCommand.includes("https://127.0.0.1/api/health")
-    || !healthCommand.includes("REAL_TEST_DOMAIN")
   ) {
     throw new Error("standalone real-test HTTPS entry is invalid");
   }
+  assertRealTestWebHealthcheck(web, "https");
 }
 
 function assertHealthcheck(serviceValue, environment, project, web) {
   const health = serviceValue.healthcheck;
   const command = health?.test;
+  const webCommandValid = environment === "real-test"
+    ? Array.isArray(command)
+      && command.length === 5
+      && command[0] === "CMD"
+      && command[1] === "/usr/local/bin/verify-real-test-web-health"
+    : Array.isArray(command)
+      && command.length === 2
+      && command[0] === "CMD-SHELL"
+      && typeof command[1] === "string"
+      && command[1].includes(environment)
+      && command[1].includes("127.0.0.1/api/health");
   if (
     !Array.isArray(command)
-    || command.length !== (web ? 2 : 4)
-    || command[0] !== (web ? "CMD-SHELL" : "CMD")
-    || typeof command.at(-1) !== "string"
-    || !command.at(-1).includes(environment)
+    || (web && !webCommandValid)
     || (!web && (
-      !command.at(-1).includes(project)
+      command.length !== 4
+      || command[0] !== "CMD"
+      || typeof command.at(-1) !== "string"
+      || !command.at(-1).includes(environment)
+      || !command.at(-1).includes(project)
       || !command.at(-1).includes("cache-control")
       || !command.at(-1).includes("XINGHENG_EXPECTED_REVISION")
     ))
-    || (web && !command.at(-1).includes("127.0.0.1/api/health"))
     || health.interval !== "15s"
     || health.timeout !== "5s"
     || health.start_period !== "30s"
     || health.retries !== 5
   ) throw new Error("deployment health identity contract is invalid");
+}
+
+function assertRealTestWebHealthcheck(web, protocol) {
+  const command = web.healthcheck?.test;
+  if (
+    !Array.isArray(command)
+    || command[2] !== protocol
+    || typeof command[3] !== "string"
+    || command[3].length < 1
+    || !/^[0-9a-f]{40}$/u.test(command[4])
+  ) {
+    throw new Error("real-test Web health identity contract is invalid");
+  }
 }
 
 function assertServiceMounts(config, wifSource) {

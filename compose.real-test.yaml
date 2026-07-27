@@ -83,10 +83,11 @@ services:
     restart: unless-stopped
     healthcheck:
       test:
-        - CMD-SHELL
-        - >-
-          wget -qO- --header "Host: $$REAL_TEST_DOMAIN" http://127.0.0.1/api/health |
-          grep -q '"real-test"'
+        - CMD
+        - /usr/local/bin/verify-real-test-web-health
+        - http
+        - "${REAL_TEST_DOMAIN:?REAL_TEST_DOMAIN is required}"
+        - "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       interval: 15s
       timeout: 5s
       start_period: 30s

@@ -140,7 +140,15 @@ function compose(project, environment, domain, realTestDomain) {
     },
   };
   web.healthcheck = {
-    test: ["CMD-SHELL", `127.0.0.1/api/health ${environment}`],
+    test: environment === "real-test"
+      ? [
+        "CMD",
+        "/usr/local/bin/verify-real-test-web-health",
+        "http",
+        realTestDomain,
+        REVISION,
+      ]
+      : ["CMD-SHELL", `127.0.0.1/api/health ${environment}`],
     interval: "15s",
     timeout: "5s",
     start_period: "30s",
@@ -291,8 +299,7 @@ test("accepts only a fixed standalone real-test HTTPS topology", () => {
     "test -n \"$REAL_TEST_DOMAIN\"; caddy run --config /etc/caddy/Caddyfile.real-test-standalone",
   ];
   value.services.web.labels["com.xingheng.real-test.topology"] = "standalone";
-  value.services.web.healthcheck.test[1] =
-    "https://127.0.0.1/api/health REAL_TEST_DOMAIN real-test";
+  value.services.web.healthcheck.test[2] = "https";
   value.services.web.networks = { default: {} };
   value.networks = { default: { name: "xingheng-real-test_default" } };
   assert.equal(validateStandaloneRealTestTopology(manifest, value), true);

@@ -12,11 +12,11 @@ services:
       - "443:443/udp"
     healthcheck:
       test:
-        - CMD-SHELL
-        - >-
-          wget -qO- --no-check-certificate --header "Host: $$REAL_TEST_DOMAIN"
-          https://127.0.0.1/api/health |
-          grep -q '"real-test"'
+        - CMD
+        - /usr/local/bin/verify-real-test-web-health
+        - https
+        - "${REAL_TEST_DOMAIN:?REAL_TEST_DOMAIN is required}"
+        - "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
     networks:
       default:
       public_ingress: !reset null

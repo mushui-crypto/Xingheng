@@ -41,11 +41,15 @@ sudo scripts/activate-real-test-release.sh standalone
 node scripts/verify-deployment-revision.mjs \
   compose-real-test-standalone deploy/release-manifest.json .env.real-test
 node scripts/verify-deployment-revision.mjs \
-  containers-real-test deploy/release-manifest.json
+  containers-real-test deploy/release-manifest.json standalone
 node scripts/verify-release-volume-boundaries.mjs real-test runtime
 ```
 
 激活在 Compose、镜像、revision、容器或 volume 验证失败时会停止 real-test API/Web。
+成功前还会有界等待 API/Web Docker Health 进入 `healthy`，并精确核对所选 topology label、
+宿主端口、网络集合，以及内部 `/api/health` 的 `deploymentEnvironment=real-test`、
+`composeProject=xingheng-real-test`、当前完整 revision 和 `Cache-Control: no-store`。
+这些仅是容器内部运行态证据，不能替代公网 DNS、ACME 或证书链现场收据。
 版本回滚必须先通过既有受信候选安装流程恢复上一份完整 canonical release tree、manifest 与
 `.env.real-test`，再执行同一 `standalone` 激活；不得手工改写 manifest、env、镜像 tag 或
 直接调用 Docker Compose。当前 production 的 `rollback-release.sh` 只属于 production

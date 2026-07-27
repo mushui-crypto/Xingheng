@@ -197,6 +197,10 @@ function inspectRunningService(service, manifestDigest, project) {
     imageRevision,
     builtRevision,
     runtimeRevision,
+    healthStatus: inspected?.State?.Health?.Status,
+    labels: inspected?.Config?.Labels,
+    portBindings: inspected?.HostConfig?.PortBindings,
+    networks: inspected?.NetworkSettings?.Networks,
   };
 }
 
@@ -248,7 +252,7 @@ function verifyCandidateImages(manifest) {
   }
 }
 
-function verifyContainers(manifest, project = "xingheng") {
+function verifyContainers(manifest, project = "xingheng", realTestMode = null) {
   const running = new Map(
     RUNNING_COMPONENTS.map(([name, manifestKey]) => [
       name,
@@ -269,11 +273,87 @@ function verifyContainers(manifest, project = "xingheng") {
       throw new Error("deployment runtime revision mismatch");
     }
   }
+  if (realTestMode !== null) {
+    verifyRealTestRuntime(running, realTestMode);
+  }
   verifyRevisionEvidence({
     expectedRevision: manifest.revision,
     components,
     requireRuntimeEvidence: true,
   });
+}
+
+function verifyRealTestRuntime(running, mode) {
+  if (!["shared", "standalone"].includes(mode)) {
+    throw new Error("real-test runtime topology mode is invalid");
+  }
+  for (const name of ["api", "web"]) {
+    const status = running.get(name)?.healthStatus;
+    if (status !== "healthy") {
+      throw new Error(`real-test ${name} container health status is ${status ?? "missing"}`);
+    }
+  }
+  const api = running.get("api");
+  if (
+    Object.keys(api.networks ?? {}).join("\n") !== "xingheng-real-test_default"
+    || Object.keys(api.portBindings ?? {}).length !== 0
+  ) {
+    throw new Error("real-test API runtime topology mismatch");
+  }
+  const web = running.get("web");
+  if (web.labels?.["com.xingheng.real-test.topology"] !== mode) {
+    throw new Error("real-test runtime topology label mismatch");
+  }
+  const networkNames = Object.keys(web.networks ?? {}).sort();
+  const expectedNetworks = mode === "shared"
+    ? ["xingheng-public-ingress", "xingheng-real-test_default"]
+    : ["xingheng-real-test_default"];
+  if (networkNames.join("\n") !== expectedNetworks.sort().join("\n")) {
+    throw new Error("real-test runtime network topology mismatch");
+  }
+  const bindings = web.portBindings ?? {};
+  if (mode === "shared") {
+    if (Object.keys(bindings).length !== 0) {
+      throw new Error("shared real-test runtime must not publish host ports");
+    }
+    return;
+  }
+  const expectedPorts = Object.freeze({
+    "80/tcp": "80",
+    "443/tcp": "443",
+    "443/udp": "443",
+  });
+  if (Object.keys(bindings).sort().join("\n") !== Object.keys(expectedPorts).sort().join("\n")) {
+    throw new Error("standalone real-test runtime port set mismatch");
+  }
+  for (const [containerPort, hostPort] of Object.entries(expectedPorts)) {
+    const entries = bindings[containerPort];
+    if (
+      !Array.isArray(entries)
+      || entries.length < 1
+      || entries.some((entry) =>
+        entry?.HostPort !== hostPort
+        || !["", "0.0.0.0", "::"].includes(entry?.HostIp ?? ""))
+    ) {
+      throw new Error("standalone real-test runtime port binding mismatch");
+    }
+  }
+}
+
+function verifyRealTestContainers(manifest, mode) {
+  const testMode = process.env.NODE_ENV === "test";
+  const attempts = testMode ? 3 : 19;
+  const delayMs = testMode ? 1 : 5_000;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      verifyContainers(manifest, "xingheng-real-test", mode);
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      if (!message.endsWith("health status is starting") || attempt === attempts) throw error;
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
+    }
+  }
 }
 
 function verifyProductionCompose(manifest, envFile) {
@@ -425,7 +505,7 @@ function readSecureEnvironmentRevision(path) {
 
 function usage() {
   throw new Error(
-    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | compose-real-test-standalone MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | candidate-images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
+    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | compose-real-test-standalone MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | candidate-images MANIFEST | containers MANIFEST | containers-real-test MANIFEST shared|standalone",
   );
 }
 
@@ -490,9 +570,13 @@ try {
     const manifest = readReleaseManifest(args[0]);
     verifyContainers(manifest);
     console.log("deployment container revisions and digests verified");
-  } else if (command === "containers-real-test" && args.length === 1) {
+  } else if (
+    command === "containers-real-test"
+    && args.length === 2
+    && ["shared", "standalone"].includes(args[1])
+  ) {
     const manifest = readReleaseManifest(args[0]);
-    verifyContainers(manifest, "xingheng-real-test");
+    verifyRealTestContainers(manifest, args[1]);
     console.log("real-test container revisions and digests verified");
   } else {
     usage();
