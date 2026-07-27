@@ -417,10 +417,11 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       ? RWA_BINANCE_SPOT_SYMBOL
       : RWA_BINANCE_PERPETUAL_SYMBOL;
     try {
-      return toOrder(await this.signedRequest(scope, path, {
+      const found = toOrder(await this.signedRequest(scope, path, {
         symbol,
         origClientOrderId: orderLinkId,
       }), category);
+      return this.readOrder(category, found.orderId);
     } catch (error) {
       if (error instanceof RwaBinanceProviderError && error.providerCode === -2013) return null;
       throw error;
@@ -549,6 +550,28 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       { ...input, checkedThrough },
     );
     return rejectNonAtomicAttribution(scanned);
+  }
+
+  async readConnectivitySmokeActivity(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+  }) {
+    const checkedThrough = this.now();
+    const scanned = await scanBinancePositionAttribution(
+      (path, params) => this.signedRequest("spot", path, params),
+      (path, params) => this.signedRequest("futures", path, params),
+      { ...input, checkedThrough },
+    );
+    const protocolComplete = scanned.coverage === "complete"
+      && scanned.sources.every((source) => source.coverage === "complete");
+    return {
+      attribution: rejectNonAtomicAttribution(scanned),
+      protocolComplete,
+      nonAtomic: true as const,
+      scannedThrough: checkedThrough,
+    };
   }
 
   async readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot> {

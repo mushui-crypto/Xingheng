@@ -17,6 +17,10 @@ import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import type { RwaProviderPreflightSnapshot } from "./RwaNeutralExecutionTypes";
+import {
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+} from "./RwaConnectivitySmoke";
 import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
 import {
   RwaAutomationGovernance,
@@ -52,6 +56,90 @@ const passThroughStepUp = {
   recordCredentialBinding: async () => undefined,
   revokeAutomationScope: () => undefined,
 };
+
+test("connectivity smoke Control retry returns the exact persisted result before replaying step-up", async () => {
+  let stepUpConsumes = 0;
+  let persisted: { lookup: any; result: any } | null = null;
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: "binance:smoke-account",
+    smokePreflight: async () => ({
+      challengeId: "smoke-challenge",
+      challengeToken: "smoke-token",
+      expiresAt: Date.now() + 60_000,
+      report: { budget: { totalCapitalUsd: 24.5 } },
+    }),
+    smokeIdempotent: async (lookup) => {
+      if (!persisted) return null;
+      if (
+        lookup.accountId === persisted.lookup.accountId
+        && lookup.challengeId === persisted.lookup.challengeId
+        && lookup.idempotencyKey === persisted.lookup.idempotencyKey
+        && lookup.requestDigest === persisted.lookup.requestDigest
+      ) return persisted.result;
+      if (lookup.idempotencyKey === persisted.lookup.idempotencyKey) {
+        throw new RwaAutomationControlError(409, "idempotency_conflict", "smoke idempotency 冲突。");
+      }
+      return null;
+    },
+    smokeExecute: async (input) => {
+      const result = { smokeId: "smoke-1", stage: "flat" };
+      persisted = {
+        lookup: {
+          accountId: input.accountId,
+          challengeId: input.challengeId,
+          idempotencyKey: input.idempotencyKey,
+          requestDigest: input.requestDigest,
+        },
+        result,
+      };
+      return result;
+    },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    {
+      ...passThroughStepUp,
+      consume: async () => { stepUpConsumes += 1; },
+    } as any,
+    new RwaAutomationGovernance({
+      ...loadRwaAutomationGovernanceConfig(),
+      executeBurstMax: 10,
+      executeSustainedMax: 10,
+    }),
+  );
+  const acceptance = {
+    version: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+    digest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  };
+  await control.preflightConnectivitySmoke("user-a", {
+    accountId: "binance:smoke-account",
+    mode: "connectivity_smoke",
+    policyAcceptance: acceptance,
+  });
+  const body = {
+    accountId: "binance:smoke-account",
+    challengeId: "smoke-challenge",
+    challengeToken: "smoke-token",
+    idempotencyKey: "smoke:control:0001",
+    stepUpToken,
+    policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+    policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  };
+  const first = await control.executeConnectivitySmoke("user-a", sessionDomain, body);
+  const replay = await control.executeConnectivitySmoke("user-a", sessionDomain, body);
+  assert.deepEqual(replay, first);
+  assert.equal(stepUpConsumes, 1);
+  await assert.rejects(
+    control.executeConnectivitySmoke("user-a", sessionDomain, { ...body, policyDigest: "conflicting-digest" }),
+    (error: unknown) => error instanceof RwaAutomationControlError && error.category === "idempotency_conflict",
+  );
+  assert.equal(stepUpConsumes, 1);
+});
 
 test("registry propagates unrecoverable monitor startup failures so state or lease errors block listen", async () => {
   const connector = fakeConnector(() => undefined);
@@ -2005,6 +2093,9 @@ function fakeConnector(
     takeoverExitPreviewFactory?: () => Promise<RwaAssetTakeoverExitPreview>;
     onTakeoverExitConfirm?: () => void;
     takeoverExitConfirmFactory?: () => Promise<unknown>;
+    smokePreflight?: () => Promise<any>;
+    smokeExecute?: (input: any) => Promise<any>;
+    smokeIdempotent?: (input: any) => Promise<any>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -2095,6 +2186,9 @@ function fakeConnector(
       await onPreflight(mode);
       return { challengeId: "challenge", challengeToken: "token", expiresAt: 1, report: { mode } };
     },
+    preflightConnectivitySmoke: options.smokePreflight,
+    executeConnectivitySmoke: options.smokeExecute,
+    findConnectivitySmokeIdempotent: options.smokeIdempotent,
     execute: async () => { options.onExecute?.(); return {}; },
     closeAll: async () => ({}),
     finalizeReconciliation: async () => ({}),

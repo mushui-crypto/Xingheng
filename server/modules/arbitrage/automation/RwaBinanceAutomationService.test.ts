@@ -35,6 +35,10 @@ import {
   createRwaAssetTakeoverRuntimeManual,
   createRwaAssetTakeoverRuntimeRecovery,
 } from "./RwaAssetTakeoverRuntime";
+import {
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+} from "./RwaConnectivitySmoke";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -1384,6 +1388,568 @@ test("Binance KMS failure blocks execute and restart recovery without provider w
   }
 });
 
+test("Binance connectivity smoke opens, authoritatively hedges, immediately exits futures then spot, and returns an isolated receipt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:normal:0001"),
+    ) as any;
+    assert.equal(result.purpose, "connectivity_smoke");
+    assert.equal(result.stage, "flat");
+    assert.equal(result.receipt.providerFlatConfirmed, true);
+    assert.equal(result.budget.limitUsd, 25);
+    assert.ok(result.budget.totalCapitalUsd <= 25);
+    assert.deepEqual(
+      client.placedRequests.map((item) => [item.category, item.side, item.reduceOnly]),
+      [
+        ["spot", "Buy", false],
+        ["linear", "Sell", false],
+        ["linear", "Buy", true],
+        ["spot", "Sell", false],
+      ],
+    );
+    const state = await harness.store.readState();
+    assert.equal(state.executions.length, 0);
+    assert.equal(state.pnlSeries.length, 0);
+    assert.equal(state.connectivitySmokes[0]?.receipt?.providerFlatConfirmed, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke performs zero provider writes when balance cannot satisfy the four-action budget", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-budget-"));
+  try {
+    const client = new FakeBinanceClient();
+    client.snapshot.spotAvailableUsdt = 1;
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    await assert.rejects(
+      current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "connectivity_smoke_preflight_rejected",
+    );
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke futures failure only exits filled spot and duplicate execute cannot reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-futures-fail-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: [1, "throw", 1] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const input = smokeExecuteInput(accountId, challenge, "smoke:futures:fail");
+    const first = await current.executeConnectivitySmoke(input) as any;
+    assert.equal(first.stage, "flat");
+    assert.equal(first.openedFuturesQuantityXaut, 0);
+    const writes = client.writeCount;
+    const duplicate = await current.executeConnectivitySmoke(input) as any;
+    assert.equal(duplicate.smokeId, first.smokeId);
+    assert.equal(client.writeCount, writes);
+    assert.equal(client.placedRequests.filter((item) => item.side === "Sell" && item.category === "linear").length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  { name: "Spot open New", fillPlan: ["new"], cancelSuffix: "s1", expectedStage: "failed" },
+  { name: "Spot open Partial", fillPlan: [0.5, 1, 1, 1], cancelSuffix: "s1", expectedStage: "flat" },
+  { name: "Futures open New", fillPlan: [1, "new", 1], cancelSuffix: "p1", expectedStage: "flat" },
+  { name: "Futures open Partial", fillPlan: [1, 0.5, 1, 1], cancelSuffix: "p1", expectedStage: "flat" },
+  { name: "Futures close New", fillPlan: [1, 1, "new"], cancelSuffix: "c1", expectedStage: "manual_intervention" },
+  { name: "Futures close Partial", fillPlan: [1, 1, 0.5], cancelSuffix: "c1", expectedStage: "manual_intervention" },
+  { name: "Spot close New", fillPlan: [1, 1, 1, "new"], cancelSuffix: "c2", expectedStage: "manual_intervention" },
+  { name: "Spot close Partial", fillPlan: [1, 1, 1, 0.5], cancelSuffix: "c2", expectedStage: "manual_intervention" },
+] as const) {
+  test(`Binance connectivity smoke cancels its exact ${scenario.name} with a real provider open-order count`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-active-ioc-"));
+    try {
+      const client = new FakeBinanceClient({ fillPlan: [...scenario.fillPlan] });
+      const current = service(directory, "user-a", client);
+      const accountId = await activate(current);
+      const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+      const result = await current.executeConnectivitySmoke(
+        smokeExecuteInput(accountId, challenge, `smoke:active:${scenario.cancelSuffix}:${scenario.name.includes("Partial") ? "p" : "n"}`),
+      ) as any;
+      assert.equal(result.stage, scenario.expectedStage);
+      const cancelled = client.placedRequests.find((item) => item.orderLinkId.endsWith(scenario.cancelSuffix));
+      assert.ok(cancelled);
+      assert.equal(client.cancelCount, 1);
+      assert.equal(
+        client.placedRequests.filter((item) => item.orderLinkId === cancelled.orderLinkId).length,
+        1,
+      );
+      if (scenario.cancelSuffix === "p1") {
+        assert.equal(
+          client.placedRequests.filter((item) => item.category === "linear" && item.side === "Sell").length,
+          1,
+          "Futures open cancel must never supplement or resend entry risk",
+        );
+      }
+      if (scenario.cancelSuffix === "c1" && result.stage === "manual_intervention") {
+        assert.equal(
+          client.placedRequests.some((item) => item.category === "spot" && item.side === "Sell"),
+          false,
+          "Spot must not exit before Futures is authoritatively flat",
+        );
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Binance connectivity smoke refuses cancel when an exact rwacs active IOC coexists with an unknown order", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-extra-open-order-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: ["new"] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.extraUnknownOpenOrderAfterPlace = true;
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:active:unknown"),
+    ) as any;
+    assert.equal(result.stage, "manual_intervention");
+    assert.equal(client.cancelCount, 0);
+    assert.equal(client.placedRequests.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const [scenarioIndex, scenario] of ([
+  { name: "Spot open", fillPlan: ["throw_after_fill", 1] },
+  { name: "Futures open", fillPlan: [1, "throw_after_fill", 1, 1] },
+  { name: "Futures close", fillPlan: [1, 1, "throw_after_fill", 1] },
+  { name: "Spot close", fillPlan: [1, 1, 1, "throw_after_fill"] },
+] as const).entries()) {
+  test(`Binance connectivity smoke recovers ${scenario.name} accepted-before-persist by client ID without duplicate order`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-uncertain-"));
+    try {
+      const client = new FakeBinanceClient({ fillPlan: [...scenario.fillPlan] });
+      const current = service(directory, "user-a", client);
+      const accountId = await activate(current);
+      const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+      const result = await current.executeConnectivitySmoke(
+        smokeExecuteInput(accountId, challenge, `smoke:uncertain:${scenarioIndex}`),
+      ) as any;
+      assert.ok(["flat", "manual_intervention"].includes(result.stage));
+      const ids = client.placedRequests.map((item) => item.orderLinkId);
+      assert.equal(new Set(ids).size, ids.length, "deterministic client ID must be queried, never blindly resent");
+      assert.equal(client.snapshot.existingSpotQuantityXaut, 0);
+      assert.equal(client.snapshot.existingPerpetualQuantityXaut, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Binance connectivity smoke restart before first mutation tombstones without reopening", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-restart-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const budget = challenge.report.budget;
+    const state = await harness.store.readState();
+    state.connectivitySmokes.push({
+      smokeId: "smoke-reserved",
+      userId: "user-a",
+      accountId,
+      accountFingerprint: client.access.accountFingerprint,
+      purpose: "connectivity_smoke",
+      mode: "connectivity_smoke",
+      idempotencyKey: `${harness.store.userDomain}:smoke:restart`,
+      challengeId: challenge.challengeId,
+      requestDigest: "test-request-digest",
+      policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+      policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+      orderLinkPrefix: "rwacsrestart",
+      stage: "reserved",
+      budget,
+      authorization: {
+        operation: "connectivity_smoke_execute",
+        consumedBeforeProviderMutation: true,
+        exitAuthorized: true,
+        reservedAt: now,
+      },
+      spotOpenOrder: null,
+      futuresOpenOrder: null,
+      openedSpotQuantityXaut: 0,
+      openedFuturesQuantityXaut: 0,
+      exit: {
+        futuresCloseOrder: null,
+        spotCloseOrder: null,
+        futuresFlatConfirmed: false,
+        spotFlatConfirmed: false,
+      },
+      receipt: null,
+      noReopen: true,
+      providerMutationCount: 0,
+      errorCategory: null,
+      message: "reserved",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await harness.store.writeState(state);
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+    const restored = await harness.store.readState();
+    assert.equal(restored.connectivitySmokes[0]?.stage, "failed");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const scenario of [
+  { stage: "spot_opening", behavior: "new", expectedFuturesEntryCount: 0 },
+  { stage: "spot_opening", behavior: 0.5, expectedFuturesEntryCount: 0 },
+  { stage: "futures_opening", behavior: "new", expectedFuturesEntryCount: 1 },
+  { stage: "futures_opening", behavior: 0.5, expectedFuturesEntryCount: 1 },
+] as const) {
+  test(`Binance connectivity smoke restart recovers ${scenario.stage} ${scenario.behavior} by fixed ID and only reduces risk`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-opening-restart-"));
+    try {
+      const client = new FakeBinanceClient({
+        fillPlan: scenario.stage === "spot_opening"
+          ? [scenario.behavior]
+          : [1, scenario.behavior],
+      });
+      const harness = serviceHarness(directory, "user-a", client);
+      const accountId = await activate(harness.current);
+      const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+      const prefix = `rwacsrestart${scenario.stage === "spot_opening" ? "s" : "p"}${scenario.behavior === "new" ? "n" : "p"}`;
+      let spotOrder: RwaProviderOrder | null = null;
+      if (scenario.stage === "futures_opening") {
+        const acceptedSpot = await client.placeOrder(smokeProviderRequest("spot", "Buy", `${prefix}s1`, false));
+        spotOrder = await client.awaitOrder("spot", acceptedSpot.orderId);
+      }
+      const category = scenario.stage === "spot_opening" ? "spot" : "linear";
+      const acceptedOpening = await client.placeOrder(smokeProviderRequest(
+        category,
+        category === "spot" ? "Buy" : "Sell",
+        `${prefix}${category === "spot" ? "s1" : "p1"}`,
+        false,
+      ));
+      await client.awaitOrder(category, acceptedOpening.orderId);
+      const state = await harness.store.readState();
+      state.connectivitySmokes.push(smokeOpeningRecord({
+        accountId,
+        challenge,
+        prefix,
+        stage: scenario.stage,
+        spotOrder,
+      }));
+      await harness.store.writeState(state);
+      const writesBeforeRestart = client.writeCount;
+      const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+      await restarted.initialize();
+      const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+      assert.ok(["flat", "failed"].includes(restored.stage));
+      assert.equal(client.cancelCount, 1);
+      assert.equal(
+        client.placedRequests.filter((item) => item.orderLinkId === `${prefix}${category === "spot" ? "s1" : "p1"}`).length,
+        1,
+      );
+      assert.equal(
+        client.placedRequests.filter((item) => item.category === "linear" && item.side === "Sell").length,
+        scenario.expectedFuturesEntryCount,
+        "restart must never create or supplement a Futures entry",
+      );
+      assert.ok(client.writeCount > writesBeforeRestart);
+      assert.equal(client.snapshot.existingSpotQuantityXaut, 0);
+      assert.equal(client.snapshot.existingPerpetualQuantityXaut, 0);
+      if (scenario.stage === "futures_opening" && scenario.behavior !== "new") {
+        const close = client.placedRequests.find((item) => item.orderLinkId === `${prefix}c1`);
+        assert.ok(close?.reduceOnly);
+        assert.equal(close.quantityXaut, restored.openedFuturesQuantityXaut);
+        const futuresCloseIndex = client.placedRequests.findIndex((item) => item.orderLinkId === `${prefix}c1`);
+        const spotCloseIndex = client.placedRequests.findIndex((item) => item.orderLinkId === `${prefix}c2`);
+        assert.ok(futuresCloseIndex >= 0 && spotCloseIndex > futuresCloseIndex);
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const stage of ["spot_opening", "futures_opening"] as const) {
+  test(`Binance connectivity smoke restart rebuilds terminal ${stage} order and never resends entry`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-opening-terminal-"));
+    try {
+      const client = new FakeBinanceClient();
+      const harness = serviceHarness(directory, "user-a", client);
+      const accountId = await activate(harness.current);
+      const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+      const prefix = `rwacsterminal${stage === "spot_opening" ? "s" : "p"}`;
+      let spotOrder: RwaProviderOrder | null = null;
+      if (stage === "futures_opening") {
+        const acceptedSpot = await client.placeOrder(smokeProviderRequest("spot", "Buy", `${prefix}s1`, false));
+        spotOrder = await client.awaitOrder("spot", acceptedSpot.orderId);
+      }
+      const category = stage === "spot_opening" ? "spot" : "linear";
+      const openingId = `${prefix}${category === "spot" ? "s1" : "p1"}`;
+      const accepted = await client.placeOrder(smokeProviderRequest(
+        category,
+        category === "spot" ? "Buy" : "Sell",
+        openingId,
+        false,
+      ));
+      await client.awaitOrder(category, accepted.orderId);
+      const state = await harness.store.readState();
+      state.connectivitySmokes.push(smokeOpeningRecord({ accountId, challenge, prefix, stage, spotOrder }));
+      await harness.store.writeState(state);
+      const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+      await restarted.initialize();
+      const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+      assert.equal(restored.stage, "flat");
+      assert.equal(client.cancelCount, 0);
+      assert.equal(client.placedRequests.filter((item) => item.orderLinkId === openingId).length, 1);
+      assert.equal(
+        client.placedRequests.filter((item) => item.category === "linear" && item.side === "Sell").length,
+        stage === "futures_opening" ? 1 : 0,
+      );
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Binance connectivity smoke restart tombstones missing s1 with authoritative blank state and zero writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-opening-missing-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const state = await harness.store.readState();
+    state.connectivitySmokes.push(smokeOpeningRecord({
+      accountId,
+      challenge,
+      prefix: "rwacsmissings",
+      stage: "spot_opening",
+      spotOrder: null,
+    }));
+    await harness.store.writeState(state);
+    const writes = client.writeCount;
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+    const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+    assert.equal(restored.stage, "failed");
+    assert.equal(restored.noReopen, true);
+    assert.equal(client.writeCount, writes);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke restart with missing p1 and authoritative Spot only submits c2 risk reduction", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-missing-p1-spot-only-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const prefix = "rwacsmissingp1spot";
+    const acceptedSpot = await client.placeOrder(
+      smokeProviderRequest("spot", "Buy", `${prefix}s1`, false),
+    );
+    const spotOrder = await client.awaitOrder("spot", acceptedSpot.orderId);
+    const authoritativeSpotQuantity = client.snapshot.existingSpotQuantityXaut;
+    const state = await harness.store.readState();
+    state.connectivitySmokes.push(smokeOpeningRecord({
+      accountId,
+      challenge,
+      prefix,
+      stage: "futures_opening",
+      spotOrder,
+    }));
+    await harness.store.writeState(state);
+
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+
+    const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+    const p1Orders = client.placedRequests.filter((item) => item.orderLinkId === `${prefix}p1`);
+    const c1Orders = client.placedRequests.filter((item) => item.orderLinkId === `${prefix}c1`);
+    const c2Orders = client.placedRequests.filter((item) => item.orderLinkId === `${prefix}c2`);
+    assert.equal(p1Orders.length, 0, "missing p1 must never be interpreted as permission to build Futures");
+    assert.equal(c1Orders.length, 0, "Spot-only recovery must not submit a Futures close");
+    assert.equal(c2Orders.length, 1);
+    assert.equal(c2Orders[0]?.category, "spot");
+    assert.equal(c2Orders[0]?.side, "Sell");
+    assert.equal(c2Orders[0]?.reduceOnly, false);
+    assert.ok((c2Orders[0]?.quantityXaut ?? Infinity) <= authoritativeSpotQuantity + 1e-12);
+    assert.equal(restored.noReopen, true);
+    assert.ok(["flat", "manual_intervention"].includes(restored.stage));
+    assert.equal(
+      client.placedRequests.filter((item) => item.category === "linear").length,
+      0,
+      "recovery must remain provider-write-free on the Futures side",
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke restart will not cancel active s1 when an unknown order also exists", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-opening-extra-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: ["new"] });
+    client.extraUnknownOpenOrderAfterPlace = true;
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const prefix = "rwacsrestartunknown";
+    const accepted = await client.placeOrder(smokeProviderRequest("spot", "Buy", `${prefix}s1`, false));
+    await client.awaitOrder("spot", accepted.orderId);
+    const state = await harness.store.readState();
+    state.connectivitySmokes.push(smokeOpeningRecord({
+      accountId,
+      challenge,
+      prefix,
+      stage: "spot_opening",
+      spotOrder: null,
+    }));
+    await harness.store.writeState(state);
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+    const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+    assert.equal(restored.stage, "manual_intervention");
+    assert.equal(client.cancelCount, 0);
+    assert.equal(client.placedRequests.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+for (const failure of ["unknown_order", "scanner_incomplete", "provider_unreadable"] as const) {
+  test(`Binance connectivity smoke opening recovery fails closed for ${failure} without resend`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-opening-failclosed-"));
+    try {
+      const client = new FakeBinanceClient({ fillPlan: ["new"] });
+      const harness = serviceHarness(directory, "user-a", client);
+      const accountId = await activate(harness.current);
+      const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+      const prefix = `rwacsfail${failure.replaceAll("_", "")}`;
+      const orderLinkId = `${prefix}s1`;
+      const accepted = await client.placeOrder(smokeProviderRequest("spot", "Buy", orderLinkId, false));
+      await client.awaitOrder("spot", accepted.orderId);
+      if (failure === "unknown_order") client.setOrderStatus(orderLinkId, "Unknown");
+      if (failure === "scanner_incomplete") client.smokeActivityProtocolComplete = false;
+      if (failure === "provider_unreadable") client.findOrderFailure = true;
+      const state = await harness.store.readState();
+      state.connectivitySmokes.push(smokeOpeningRecord({
+        accountId,
+        challenge,
+        prefix,
+        stage: "spot_opening",
+        spotOrder: null,
+      }));
+      await harness.store.writeState(state);
+      const writes = client.writeCount;
+      const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+      await restarted.initialize();
+      const restored = (await harness.store.readState()).connectivitySmokes[0]!;
+      assert.equal(restored.stage, "manual_intervention");
+      assert.equal(client.cancelCount, 0);
+      assert.equal(client.writeCount, writes);
+      assert.equal(client.placedRequests.filter((item) => item.orderLinkId === orderLinkId).length, 1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
+test("Binance connectivity smoke external XAUT activity fails closed with no provider mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-external-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshot.spotFreeXaut = 0.001;
+    client.snapshot.spotAvailableQuantityXaut = 0.001;
+    client.snapshot.existingSpotQuantityXaut = 0.001;
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:external:activity"),
+    ) as any;
+    assert.equal(result.stage, "manual_intervention");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke detects a REST-visible same-net external round trip and performs no mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-external-roundtrip-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.externalPositionActivity = true;
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:external:roundtrip"),
+    ) as any;
+    assert.equal(result.stage, "manual_intervention");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke rejects incomplete scanner source coverage before its first provider mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-scanner-incomplete-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.smokeActivityProtocolComplete = false;
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:scanner:incomplete"),
+    ) as any;
+    assert.equal(result.stage, "manual_intervention");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke untradeable futures exit becomes manual intervention and never sells spot first", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-exit-fail-"));
+  try {
+    const client = new FakeBinanceClient({ fillPlan: [1, 0.25] });
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:exit:failure"),
+    ) as any;
+    assert.equal(result.stage, "manual_intervention");
+    assert.ok(result.openedFuturesQuantityXaut > 0);
+    assert.equal(
+      client.placedRequests.some((item) => item.category === "spot" && item.side === "Sell"),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
 }
@@ -1461,6 +2027,91 @@ function executeInput(accountId: string, challenge: { challengeId: string; chall
   return { accountId, challengeId: challenge.challengeId, challengeToken: challenge.challengeToken, idempotencyKey };
 }
 
+function smokeExecuteInput(accountId: string, challenge: { challengeId: string; challengeToken: string }, idempotencyKey: string) {
+  return {
+    accountId,
+    challengeId: challenge.challengeId,
+    challengeToken: challenge.challengeToken,
+    idempotencyKey,
+    policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+    policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+    requestDigest: "test-request-digest",
+  };
+}
+
+function smokeProviderRequest(
+  category: "spot" | "linear",
+  side: "Buy" | "Sell",
+  orderLinkId: string,
+  reduceOnly: boolean,
+): RwaProviderOrderRequest {
+  return {
+    category,
+    symbol: "XAUTUSDT",
+    side,
+    quantityXaut: 0.002,
+    limitPrice: side === "Buy" ? 4_140 : 4_100,
+    reduceOnly,
+    orderLinkId,
+  };
+}
+
+function smokeOpeningRecord(input: {
+  accountId: string;
+  challenge: any;
+  prefix: string;
+  stage: "spot_opening" | "futures_opening";
+  spotOrder: RwaProviderOrder | null;
+}) {
+  return {
+    smokeId: `smoke-${input.prefix}`,
+    userId: "user-a",
+    accountId: input.accountId,
+    accountFingerprint: "test-account",
+    purpose: "connectivity_smoke" as const,
+    mode: "connectivity_smoke" as const,
+    idempotencyKey: `smoke:restart:${input.prefix}`,
+    challengeId: input.challenge.challengeId,
+    requestDigest: "test-request-digest",
+    policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+    policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+    orderLinkPrefix: input.prefix,
+    stage: input.stage,
+    budget: input.challenge.report.budget,
+    authorization: {
+      operation: "connectivity_smoke_execute" as const,
+      consumedBeforeProviderMutation: true as const,
+      exitAuthorized: true as const,
+      reservedAt: now,
+    },
+    spotOpenOrder: input.spotOrder,
+    futuresOpenOrder: null,
+    openedSpotQuantityXaut: input.spotOrder ? input.spotOrder.positionQuantityXaut ?? input.spotOrder.filledQuantityXaut : 0,
+    openedFuturesQuantityXaut: 0,
+    exit: {
+      futuresCloseOrder: null,
+      spotCloseOrder: null,
+      futuresFlatConfirmed: false,
+      spotFlatConfirmed: false,
+    },
+    receipt: null,
+    noReopen: true as const,
+    providerMutationCount: input.stage === "spot_opening" ? 1 : 2,
+    errorCategory: null,
+    message: "opening crash fixture",
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+const smokePolicyAcceptance = {
+  version: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+  digest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  exclusiveWindowConfirmed: true,
+  manualRecoveryConfirmed: true,
+  nonAtomicRiskAccepted: true,
+} as const;
+
 class FakeBinanceClient implements RwaBinanceClient {
   readCount = 0;
   writeCount = 0;
@@ -1474,9 +2125,10 @@ class FakeBinanceClient implements RwaBinanceClient {
   snapshot: RwaBinancePreflightSnapshot;
   private orderSequence = 0;
   private readonly requests = new Map<string, RwaProviderOrderRequest>();
+  private readonly orders = new Map<string, RwaProviderOrder>();
   private spotQuantity = 0;
   private perpetualQuantity = 0;
-  readonly fillPlan: Array<number | "throw" | "new">;
+  readonly fillPlan: Array<number | "throw" | "throw_after_fill" | "new">;
   readonly failLeverage: boolean;
   readonly placedRequests: RwaProviderOrderRequest[] = [];
   readonly strategyCancelScopes: string[] = [];
@@ -1484,13 +2136,17 @@ class FakeBinanceClient implements RwaBinanceClient {
   private readonly spotBuyBaseFeeXaut: number;
   attributionCoverage: "complete" | "incomplete" = "complete";
   externalPositionActivity = false;
+  smokeActivityProtocolComplete = true;
+  findOrderFailure = false;
+  extraUnknownOpenOrderAfterPlace = false;
+  private providerMutationStarted = false;
   attributionHook: () => void = () => {};
   assetOpenOrders: RwaAssetOrderReference[] = [];
   takeoverSnapshotHook: () => void = () => {};
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
-    fillPlan?: Array<number | "throw" | "new">;
+    fillPlan?: Array<number | "throw" | "throw_after_fill" | "new">;
     failLeverage?: boolean;
     spotBuyBaseFeeXaut?: number;
   } = {}) {
@@ -1598,8 +2254,15 @@ class FakeBinanceClient implements RwaBinanceClient {
     return this.readAssetTakeoverSnapshot();
   }
 
-  async findOrderByClientOrderId() {
-    return null;
+  async findOrderByClientOrderId(_category: "spot" | "linear", orderLinkId: string) {
+    if (this.findOrderFailure) throw new Error("fake provider order lookup unavailable");
+    return structuredClone([...this.orders.values()].find((item) => item.orderLinkId === orderLinkId) ?? null);
+  }
+
+  setOrderStatus(orderLinkId: string, status: RwaProviderOrder["status"]) {
+    const order = [...this.orders.values()].find((item) => item.orderLinkId === orderLinkId);
+    if (order) order.status = status;
+    this.syncOpenOrderCounts();
   }
 
   async readProductAvailability() {
@@ -1619,17 +2282,34 @@ class FakeBinanceClient implements RwaBinanceClient {
 
   async placeOrder(request: RwaProviderOrderRequest) {
     this.writeCount += 1;
+    this.providerMutationStarted = true;
     const orderId = String(++this.orderSequence);
     this.requests.set(orderId, request);
     this.placedRequests.push(request);
+    this.orders.set(orderId, {
+      orderId,
+      orderLinkId: request.orderLinkId,
+      status: "New",
+      requestedQuantityXaut: request.quantityXaut,
+      filledQuantityXaut: 0,
+      positionQuantityXaut: 0,
+      averagePrice: 0,
+      feeUsd: 0,
+      updatedAt: now,
+    });
+    this.syncOpenOrderCounts();
     return { orderId, orderLinkId: request.orderLinkId };
   }
 
   async awaitOrder(_category: "spot" | "linear", orderId: string): Promise<RwaProviderOrder> {
     const request = this.requests.get(orderId)!;
     const behavior = this.fillPlan.shift() ?? 1;
-    if (behavior === "throw") throw new Error("fake provider rejected order");
-    const fillRatio = behavior === "new" ? 0 : behavior;
+    if (behavior === "throw") {
+      this.orders.delete(orderId);
+      this.syncOpenOrderCounts();
+      throw new Error("fake provider rejected order");
+    }
+    const fillRatio = behavior === "new" ? 0 : behavior === "throw_after_fill" ? 1 : behavior;
     const filledQuantityXaut = request.quantityXaut * fillRatio;
     const positionQuantityXaut = request.category === "spot" && request.side === "Buy"
       ? Math.max(0, filledQuantityXaut - this.spotBuyBaseFeeXaut)
@@ -1645,7 +2325,7 @@ class FakeBinanceClient implements RwaBinanceClient {
       this.snapshot.existingPerpetualQuantityXaut = Math.max(0, this.perpetualQuantity);
       this.snapshot.perpetualPositionSide = this.snapshot.existingPerpetualQuantityXaut > 0 ? "short" : "flat";
     }
-    return {
+    const order: RwaProviderOrder = {
       orderId,
       orderLinkId: request.orderLinkId,
       status: behavior === "new" ? "New" : fillRatio < 1 ? "PartiallyFilled" : "Filled",
@@ -1656,11 +2336,35 @@ class FakeBinanceClient implements RwaBinanceClient {
       feeUsd: 0.001,
       updatedAt: now,
     };
+    this.orders.set(orderId, order);
+    this.syncOpenOrderCounts();
+    if (behavior === "throw_after_fill") throw new Error("fake transport uncertainty after provider fill");
+    return structuredClone(order);
   }
 
-  async cancelOrder() {
+  async cancelOrder(_category: "spot" | "linear", orderId: string) {
     this.writeCount += 1;
     this.cancelCount += 1;
+    const order = this.orders.get(orderId);
+    if (order) order.status = "Cancelled";
+    this.syncOpenOrderCounts();
+  }
+
+  private syncOpenOrderCounts() {
+    let spot = 0;
+    let linear = 0;
+    for (const [orderId, order] of this.orders) {
+      if (order.status !== "New" && order.status !== "PartiallyFilled") continue;
+      const request = this.requests.get(orderId);
+      if (request?.category === "spot") spot += 1;
+      if (request?.category === "linear") linear += 1;
+    }
+    this.snapshot.openSpotOrderCount = spot;
+    this.snapshot.openPerpetualOrderCount = linear;
+    if (this.extraUnknownOpenOrderAfterPlace && this.providerMutationStarted) {
+      if (spot > 0) this.snapshot.openSpotOrderCount += 1;
+      else if (linear > 0) this.snapshot.openPerpetualOrderCount += 1;
+    }
   }
 
   async cancelStrategyOrders(scope: string) {
@@ -1688,6 +2392,20 @@ class FakeBinanceClient implements RwaBinanceClient {
         externalActivity: this.externalPositionActivity,
       })),
       providerOrderIds: { spot: [], perpetual: [] },
+    };
+  }
+
+  async readConnectivitySmokeActivity(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+  }) {
+    const attribution = await this.readPositionAttribution(input as any);
+    return {
+      attribution: { ...attribution, coverage: "incomplete" as const },
+      protocolComplete: this.smokeActivityProtocolComplete,
+      nonAtomic: true as const,
+      scannedThrough: now,
     };
   }
 

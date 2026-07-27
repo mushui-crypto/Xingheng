@@ -70,6 +70,7 @@ export class RwaAutomationControlService {
     accountId: string;
     notionalUsd: number | null;
     expiresAt: number;
+    purpose: "hedge_execute" | "connectivity_smoke_execute";
   }>();
   private readonly assetAuthorizationPreviews = new Map<string, {
     userId: string;
@@ -969,6 +970,7 @@ export class RwaAutomationControlService {
         accountId,
         notionalUsd: reportNotional(challenge.report),
         expiresAt: this.now() + this.governance.config.challengeTtlMs,
+        purpose: "hedge_execute",
       });
       return challenge;
     });
@@ -992,6 +994,7 @@ export class RwaAutomationControlService {
     this.cleanupChallenges();
     const challenge = this.challengeVenues.get(challengeId);
     if (!challenge) throw new RwaAutomationControlError(409, "challenge_disarmed", "challenge 不存在或服务重启后已解除 armed，请重新 preflight。");
+    if (challenge.purpose !== "hedge_execute") throw new RwaAutomationControlError(409, "challenge_scope_mismatch", "challenge 不属于套利建仓操作。");
     if (challenge.userId !== userId) throw new RwaAutomationControlError(404, "challenge_not_found", "challenge 不存在或不属于当前用户。");
     if (accountId !== challenge.accountId) throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 challenge 不匹配。");
     return this.governed("execute", sourceIp, userId, challenge.venue, accountId, async () => {
@@ -1007,6 +1010,130 @@ export class RwaAutomationControlService {
         notionalUsd: challenge.notionalUsd,
       });
       return registry.requireImplemented(challenge.venue).execute(sanitized);
+    });
+  }
+
+  async preflightConnectivitySmoke(userId: string, input: unknown, sourceIp = "unknown") {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "mode", "policyAcceptance"]);
+    if (body.mode !== "connectivity_smoke") {
+      throw new RwaAutomationControlError(400, "mode_invalid", "mode 必须为 connectivity_smoke。");
+    }
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    this.admitRequest("preflight", sourceIp, userId, "binance");
+    const registry = this.registry(userId);
+    const connector = await registry.findByAccountId(accountId);
+    if (!connector || connector.venue !== "binance" || !connector.preflightConnectivitySmoke) {
+      throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 Binance 烟测账户不匹配。");
+    }
+    return this.governed("preflight", sourceIp, userId, "binance", accountId, async () => {
+      await registry.initialize();
+      await connector.assertRiskCapacity?.();
+      const challenge = await connector.preflightConnectivitySmoke!(accountId, body.policyAcceptance) as any;
+      this.cleanupChallenges();
+      this.assertChallengeCapacity(userId, 1);
+      this.challengeVenues.set(challenge.challengeId, {
+        userId,
+        venue: "binance",
+        accountId,
+        notionalUsd: Number(challenge.report?.budget?.totalCapitalUsd ?? 25),
+        expiresAt: challenge.expiresAt,
+        purpose: "connectivity_smoke_execute",
+      });
+      return challenge;
+    });
+  }
+
+  async executeConnectivitySmoke(
+    userId: string,
+    sessionDomain: string,
+    input: unknown,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, [
+      "accountId", "challengeId", "challengeToken", "idempotencyKey", "stepUpToken",
+      "policyVersion", "policyDigest",
+    ]);
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const challengeId = requiredString(body.challengeId, "challengeId", 100);
+    this.admitRequest("execute", sourceIp, userId, "binance");
+    const sanitized = omitStepUp(body);
+    const requestDigest = canonicalRequestDigest(sanitized);
+    const registry = this.registry(userId);
+    const accountConnector = await registry.findByAccountId(accountId);
+    if (!accountConnector || accountConnector.venue !== "binance") {
+      throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 Binance 烟测账户不匹配。");
+    }
+    return this.governed("execute", sourceIp, userId, "binance", accountId, async () => {
+      await registry.initialize();
+      if (accountConnector.findConnectivitySmokeIdempotent) {
+        const idempotent = await accountConnector.findConnectivitySmokeIdempotent({
+          accountId,
+          challengeId,
+          idempotencyKey: requiredString(body.idempotencyKey, "idempotencyKey", 100),
+          requestDigest,
+        });
+        if (idempotent) return idempotent;
+      }
+      this.cleanupChallenges();
+      const challenge = this.challengeVenues.get(challengeId);
+      if (!challenge || challenge.userId !== userId || challenge.venue !== "binance") {
+        throw new RwaAutomationControlError(409, "challenge_disarmed", "smoke challenge 不存在或已解除 armed。");
+      }
+      if (challenge.purpose !== "connectivity_smoke_execute") {
+        throw new RwaAutomationControlError(409, "challenge_scope_mismatch", "challenge 不属于 connectivity smoke。");
+      }
+      if (challenge.accountId !== accountId) {
+        throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 smoke challenge 不匹配。");
+      }
+      if (!accountConnector.executeConnectivitySmoke) {
+        throw new RwaAutomationControlError(501, "venue_not_implemented", "Binance smoke adapter 尚未实现。");
+      }
+      await accountConnector.assertRiskCapacity?.();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "connectivity_smoke_execute",
+        venue: "binance",
+        accountId,
+        resourceId: challengeId,
+        requestDigest,
+        notionalUsd: challenge.notionalUsd,
+      });
+      return accountConnector.executeConnectivitySmoke({ ...sanitized, requestDigest });
+    });
+  }
+
+  async getConnectivitySmokeStatus(userId: string, input: unknown, sourceIp = "unknown") {
+    const query = record(input);
+    assertOnlyKeys(query, ["accountId", "smokeId"]);
+    const accountId = requiredString(query.accountId, "accountId", 100);
+    this.admitRequest("private_read", sourceIp, userId, "binance");
+    return this.governed("private_read", sourceIp, userId, "binance", accountId, async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const connector = await registry.findByAccountId(accountId);
+      if (!connector || connector.venue !== "binance" || !connector.getConnectivitySmokeStatus) {
+        throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 Binance 烟测账户不匹配。");
+      }
+      return connector.getConnectivitySmokeStatus(
+        typeof query.smokeId === "string" && query.smokeId ? query.smokeId : undefined,
+      );
+    });
+  }
+
+  async getConnectivitySmokeReceipt(userId: string, smokeId: string, input: unknown, sourceIp = "unknown") {
+    const query = record(input);
+    assertOnlyKeys(query, ["accountId"]);
+    const accountId = requiredString(query.accountId, "accountId", 100);
+    this.admitRequest("private_read", sourceIp, userId, "binance");
+    return this.governed("private_read", sourceIp, userId, "binance", accountId, async () => {
+      const registry = this.registry(userId);
+      await registry.initialize();
+      const connector = await registry.findByAccountId(accountId);
+      if (!connector || connector.venue !== "binance" || !connector.getConnectivitySmokeReceipt) {
+        throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 Binance 烟测账户不匹配。");
+      }
+      return connector.getConnectivitySmokeReceipt(requiredString(smokeId, "smokeId", 100));
     });
   }
 
@@ -1290,12 +1417,15 @@ export class RwaAutomationControlService {
         notionalUsd = preview.totalManagedCapitalUsd;
       } else if (body.authorizationPreview !== undefined || body.takeoverPreview !== undefined) {
         throw new RwaAutomationControlError(400, "invalid_request", "当前操作不接受资产授权预览。");
-      } else if (operation === "hedge_execute") {
-        if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "建立对冲组合需要绑定 preflight challenge。");
+      } else if (operation === "hedge_execute" || operation === "connectivity_smoke_execute") {
+        if (!resourceId) throw new RwaAutomationControlError(400, "invalid_request", "执行操作需要绑定 preflight challenge。");
         this.cleanupChallenges();
         const challenge = this.challengeVenues.get(resourceId);
         if (!challenge || challenge.userId !== userId || challenge.venue !== venue || challenge.accountId !== accountId) {
           throw new RwaAutomationControlError(409, "challenge_disarmed", "preflight challenge 不存在或不属于当前会话范围。");
+        }
+        if (challenge.purpose !== operation) {
+          throw new RwaAutomationControlError(409, "challenge_scope_mismatch", "preflight challenge 与二次验证操作不匹配。");
         }
         notionalUsd = challenge.notionalUsd;
       } else if (operation === "position_close") {
@@ -1981,7 +2111,7 @@ function omitStepUp(body: Record<string, any>) {
 function normalizeStepUpOperation(value: unknown): StepUpOperation {
   const allowed: StepUpOperation[] = [
     "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
-    "hedge_execute", "position_close", "close_all", "reconciliation_finalize",
+    "hedge_execute", "connectivity_smoke_execute", "position_close", "close_all", "reconciliation_finalize",
     "asset_authorization_create", "asset_authorization_revoke", "asset_takeover_start",
   ];
   if (!allowed.includes(value as StepUpOperation)) throw new RwaAutomationControlError(400, "invalid_request", "operation 不受支持。");

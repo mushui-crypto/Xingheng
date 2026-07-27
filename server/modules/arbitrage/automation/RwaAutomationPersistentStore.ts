@@ -49,6 +49,13 @@ import {
   validateRwaAssetTakeoverRecord,
   type RwaAssetTakeoverRecord,
 } from "./RwaAssetTakeover";
+import {
+  isActiveConnectivitySmoke,
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+  RWA_CONNECTIVITY_SMOKE_MAX_RECORDS,
+  type RwaConnectivitySmokeRecord,
+} from "./RwaConnectivitySmoke";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -122,6 +129,7 @@ type AutomationState = {
   config: RwaExecutionConfig;
   assetAuthorizations: RwaAccountAssetAuthorization[];
   assetTakeovers: RwaAssetTakeoverRecord[];
+  connectivitySmokes: RwaConnectivitySmokeRecord[];
   challenges: StoredChallenge[];
   executions: RwaExecutionRecord[];
   pnlSeries: RwaStrategyPnlSnapshot[];
@@ -142,6 +150,7 @@ const emptyState = (): AutomationState => ({
   config: { ...defaultRwaExecutionConfig },
   assetAuthorizations: [],
   assetTakeovers: [],
+  connectivitySmokes: [],
   challenges: [],
   executions: [],
   pnlSeries: [],
@@ -382,6 +391,7 @@ export class RwaAutomationPersistentStore<
     if (
       completed >= this.governanceConfig.stateMaxCompletedExecutions
       || active >= this.governanceConfig.stateMaxActiveExecutions
+      || state.connectivitySmokes.length >= RWA_CONNECTIVITY_SMOKE_MAX_RECORDS
       || encodedBytes >= this.governanceConfig.stateMaxBytes
     ) {
       throw new RwaAutomationGovernanceError(
@@ -420,6 +430,12 @@ export class RwaAutomationPersistentStore<
           : parsed.assetTakeovers === undefined
             ? []
             : (() => { throw invalidRiskState(); })(),
+        connectivitySmokes: Array.isArray(parsed.connectivitySmokes)
+          ? parsed.connectivitySmokes.map((smoke) =>
+            validateConnectivitySmokeForStore(smoke, this.ownerUserId, this.venue))
+          : parsed.connectivitySmokes === undefined
+            ? []
+            : (() => { throw invalidRiskState(); })(),
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
         executions: Array.isArray(parsed.executions)
           ? parsed.executions.map((execution) => normalizeExecutionRecord(execution, this.venue))
@@ -431,6 +447,7 @@ export class RwaAutomationPersistentStore<
       } as AutomationState;
       assertAccountAssetStateCapacity(normalized);
       assertTakeoverCollection(normalized.assetTakeovers, normalized.assetAuthorizations);
+      assertConnectivitySmokeCollection(normalized.connectivitySmokes);
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
       const rawComparable = JSON.stringify(parsed);
       const normalizedComparable = JSON.stringify(normalized);
@@ -455,6 +472,10 @@ export class RwaAutomationPersistentStore<
       validateAssetTakeoverForStore(takeover, this.ownerUserId, this.userDomain, this.venue);
     }
     assertTakeoverCollection(state.assetTakeovers, state.assetAuthorizations);
+    for (const smoke of state.connectivitySmokes) {
+      validateConnectivitySmokeForStore(smoke, this.ownerUserId, this.venue);
+    }
+    assertConnectivitySmokeCollection(state.connectivitySmokes);
     for (const execution of state.executions) {
       assertProfiledExecutionFields(execution, this.venue);
     }
@@ -529,6 +550,7 @@ export async function discoverAutomationUsersWithExposure() {
     if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
     const executions = (parsed as { executions?: unknown }).executions;
     const assetTakeovers = (parsed as { assetTakeovers?: unknown }).assetTakeovers;
+    const connectivitySmokes = (parsed as { connectivitySmokes?: unknown }).connectivitySmokes;
     if (!Array.isArray(executions)) continue;
     for (const value of executions) {
       if (!value || typeof value !== "object" || Array.isArray(value)) continue;
@@ -552,6 +574,22 @@ export async function discoverAutomationUsersWithExposure() {
         const hasExposure = !["failed", "exited"].includes(takeover.state)
           && (takeover.finalSpotQuantity > 1e-12 || takeover.finalPerpetualQuantity > 1e-12);
         if (hasExposure && takeover.userDomain === entry.name.slice(0, 16)) users.add(takeover.userId);
+      } catch {
+        throw invalidRiskState();
+      }
+    }
+    if (connectivitySmokes !== undefined && !Array.isArray(connectivitySmokes)) continue;
+    for (const value of connectivitySmokes ?? []) {
+      try {
+        const smoke = validateConnectivitySmokeForStore(
+          value,
+          String((value as Record<string, unknown>)?.userId ?? ""),
+          entry.name.includes("-binance-") ? "binance" : "bybit",
+        );
+        const expectedDomain = rwaAutomationUserDomain(smoke.userId);
+        if (isActiveConnectivitySmoke(smoke) && entry.name.startsWith(`${expectedDomain}-binance-`)) {
+          users.add(smoke.userId);
+        }
       } catch {
         throw invalidRiskState();
       }
@@ -585,6 +623,12 @@ function compactState(
         || takeover.updatedAt + config.stateCompletedExecutionRetentionMs > now)
       .sort((left, right) =>
         left.createdAt - right.createdAt || left.takeoverId.localeCompare(right.takeoverId)),
+    connectivitySmokes: state.connectivitySmokes
+      .filter((smoke) =>
+        isActiveConnectivitySmoke(smoke)
+        || smoke.updatedAt + config.stateCompletedExecutionRetentionMs > now)
+      .sort((left, right) =>
+        left.createdAt - right.createdAt || left.smokeId.localeCompare(right.smokeId)),
     pnlSeries: state.pnlSeries
       .sort((left, right) => left.capturedAt - right.capturedAt)
       .slice(-config.stateMaxPnlPoints),
@@ -888,6 +932,105 @@ function validateAssetTakeoverForStore(
     || takeover.venue !== venue
   ) throw invalidRiskState();
   return takeover;
+}
+
+function validateConnectivitySmokeForStore(
+  value: unknown,
+  userId: string,
+  venue: "bybit" | "bitget" | "binance" | "okx",
+): RwaConnectivitySmokeRecord {
+  if (venue !== "binance" || !value || typeof value !== "object" || Array.isArray(value)) throw invalidRiskState();
+  const smoke = value as RwaConnectivitySmokeRecord;
+  const stages = [
+    "reserved", "spot_opening", "spot_open", "futures_opening", "hedged",
+    "futures_closing", "spot_closing", "flat", "failed", "manual_intervention",
+  ];
+  const authorization = smoke.authorization;
+  const budget = smoke.budget;
+  const prices = budget?.prices;
+  const exit = smoke.exit;
+  const receipt = smoke.receipt;
+  if (
+    !hasExactObjectKeys(smoke, [
+      "accountFingerprint", "accountId", "authorization", "budget", "challengeId", "createdAt",
+      "errorCategory", "exit", "futuresOpenOrder", "idempotencyKey", "message", "mode", "noReopen",
+      "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "orderLinkPrefix", "policyDigest",
+      "policyVersion", "providerMutationCount", "purpose", "receipt", "requestDigest", "smokeId",
+      "spotOpenOrder", "stage", "updatedAt", "userId",
+    ])
+    ||
+    smoke.userId !== userId
+    || smoke.purpose !== "connectivity_smoke"
+    || smoke.mode !== "connectivity_smoke"
+    || !stages.includes(smoke.stage)
+    || smoke.noReopen !== true
+    || !authorization || !hasExactObjectKeys(authorization, [
+      "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+    ])
+    || authorization.operation !== "connectivity_smoke_execute"
+    || authorization.consumedBeforeProviderMutation !== true
+    || authorization.exitAuthorized !== true
+    || !Number.isFinite(authorization.reservedAt)
+    || smoke.policyVersion !== RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
+    || smoke.policyDigest !== RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST
+    || !smoke.requestDigest
+    || !smoke.smokeId || !smoke.accountId || !smoke.accountFingerprint
+    || !smoke.idempotencyKey || !smoke.challengeId || !smoke.orderLinkPrefix
+    || !Number.isFinite(smoke.providerMutationCount) || smoke.providerMutationCount < 0
+    || !Number.isFinite(smoke.createdAt) || !Number.isFinite(smoke.updatedAt)
+    || !Number.isFinite(smoke.openedSpotQuantityXaut) || smoke.openedSpotQuantityXaut < 0
+    || !Number.isFinite(smoke.openedFuturesQuantityXaut) || smoke.openedFuturesQuantityXaut < 0
+    || !budget || !hasExactObjectKeys(budget, [
+      "commonQtyStep", "futuresFeesUsd", "futuresMarginUsd", "futuresSlippageReserveUsd", "limitUsd",
+      "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
+      "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
+    ])
+    || budget.limitUsd !== 25
+    || Object.entries(budget).some(([key, item]) =>
+      key !== "limitUsd" && key !== "prices" && (!Number.isFinite(item) || Number(item) < 0))
+    || budget.totalCapitalUsd > 25 + 1e-9
+    || !prices || !hasExactObjectKeys(prices, [
+      "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
+    ])
+    || Object.values(prices).some((item) => !Number.isFinite(item) || Number(item) <= 0)
+    || !exit || !hasExactObjectKeys(exit, [
+      "futuresCloseOrder", "futuresFlatConfirmed", "spotCloseOrder", "spotFlatConfirmed",
+    ])
+    || typeof exit.futuresFlatConfirmed !== "boolean"
+    || typeof exit.spotFlatConfirmed !== "boolean"
+    || (receipt !== null && (
+      !hasExactObjectKeys(receipt, [
+        "accountFingerprint", "budget", "completedAt", "finalFuturesQuantityXaut", "finalSpotQuantityXaut",
+        "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "providerFlatConfirmed", "purpose",
+        "policyDigest", "policyVersion", "receiptId", "smokeId", "symbol", "venue",
+      ])
+      || receipt.purpose !== "connectivity_smoke"
+      || receipt.venue !== "binance"
+      || receipt.symbol !== "XAUTUSDT"
+      || receipt.providerFlatConfirmed !== true
+      || receipt.policyVersion !== RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
+      || receipt.policyDigest !== RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST
+      || !Number.isFinite(receipt.completedAt)
+    ))
+    || typeof smoke.message !== "string"
+  ) throw invalidRiskState();
+  return smoke;
+}
+
+function hasExactObjectKeys(value: object, expected: readonly string[]) {
+  const actual = Object.keys(value).sort();
+  const keys = [...expected].sort();
+  return actual.length === keys.length && actual.every((key, index) => key === keys[index]);
+}
+
+function assertConnectivitySmokeCollection(smokes: readonly RwaConnectivitySmokeRecord[]) {
+  if (
+    smokes.length > RWA_CONNECTIVITY_SMOKE_MAX_RECORDS
+    || smokes.filter(isActiveConnectivitySmoke).length > 1
+    || new Set(smokes.map((item) => item.smokeId)).size !== smokes.length
+    || new Set(smokes.map((item) => item.idempotencyKey)).size !== smokes.length
+    || new Set(smokes.map((item) => item.orderLinkPrefix)).size !== smokes.length
+  ) throw invalidRiskState();
 }
 
 function assertTakeoverCollection(

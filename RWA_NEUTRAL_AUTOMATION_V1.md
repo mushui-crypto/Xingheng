@@ -409,6 +409,68 @@ Binance preflight 会重读机会与私有账户，分别核对现货/期货可�
 `connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，
 不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。未来烟测预算按动态最小共同数量计算。
 
+### 独立 connectivity smoke 契约
+
+Binance Mainnet `XAUTUSDT` 连通性烟测使用独立 `connectivity_smoke` mode、execution purpose、
+`rwacs` client order ID 前缀、持久状态和只读 receipt；不依赖公开 opportunity、Funding、APR、
+基差或 `automationEligible`，也不进入套利 execution、positions、PnL、Funding 或绩效。
+
+新增 additive API：
+
+- `POST /api/arbitrage/automation/connectivity-smoke/preflight`
+- `POST /api/arbitrage/automation/connectivity-smoke/execute`
+- `GET /api/arbitrage/automation/connectivity-smoke/status`
+- `GET /api/arbitrage/automation/connectivity-smoke/:smokeId/receipt`
+
+Preflight 请求固定为（policy version/digest 是稳定契约，不保存 TOTP 或凭证）：
+
+```json
+{
+  "accountId": "服务端返回的 Binance 账户 ID",
+  "mode": "connectivity_smoke",
+  "policyAcceptance": {
+    "version": "connectivity-smoke-non-atomic-v1",
+    "digest": "服务端公布的 policy SHA-256 base64url digest",
+    "exclusiveWindowConfirmed": true,
+    "manualRecoveryConfirmed": true,
+    "nonAtomicRiskAccepted": true
+  }
+}
+```
+
+Execute 请求沿用 challenge、幂等和 step-up 字段；step-up operation 固定为
+`connectivity_smoke_execute`，并携带与 preflight 相同的 `policyVersion`、`policyDigest`，绑定
+user/account fingerprint、Binance XAUTUSDT、25U 上限、单 execution、立即退出、短 TTL、人工
+恢复能力和非原子风险确认的完整复合动作。用户明确承诺该窗口内不使用 Binance UI、其他 API Key、
+转账或其他系统操作 XAUT。首次 provider mutation 前必须
+持久化 reservation、`noReopen=true` 和授权退出事实。单账户同时只允许一个 active smoke；同一
+幂等键在 user/account/challenge/request digest 完全相同时只读返回原记录，不再次消费 step-up；
+任一字段冲突均拒绝，不能重新开仓。
+
+25 USDT 是 Spot 名义 + Futures 1x 保证金 + Spot 买卖两次 taker fee + Futures 开平两次 taker
+fee + 四动作保守滑点 + 取整准备的总硬预算。数量按两侧实时最小数量、最小名义和共同步长动态
+计算；Spot/Futures 余额分别核对。任一侧不足或规则不满足时 provider 写调用为 0。
+
+状态阶段固定为 `reserved / spot_opening / spot_open / futures_opening / hedged /
+futures_closing / spot_closing / flat / failed / manual_intervention`。开始窗口要求 Spot
+total/free/locked、Futures position 和两侧 open orders 全部为 0。每次 mutation 后以 provider
+权威订单终态、成交、仓位、余额和 open orders 核对；任何外部 XAUT 活动、未知归属或数量超过
+smoke 账本都进入 `manual_intervention`。每次 provider mutation 前后均复核执行租约、账户快照、
+四个固定 `rwacs` client ID 的订单/成交，以及真实 provider scanner 可获得的订单、成交、
+position/income、充值提现、内部及子账户划转来源；来源失败、分页不完整、非法值或 REST 可见的
+非 `rwacs` XAUT 活动均停止后续自动写。scanner 证据始终标记 `nonAtomic/incomplete`：这只是
+“用户承诺的独占运维窗口；截至扫描 cutoff 未发现 REST 可见外部活动”，不表示账户锁定、原子隔离
+或完全排他，也不得用于套利或普通退出。退出顺序固定为 Futures reduce-only Buy 后 Spot Sell。
+
+恢复只允许风险降低：零 mutation reservation 直接 `failed`；Spot 成交后仅撤余量/卖 Spot；
+Futures 成交后不补仓，只先平 Futures 再卖 Spot；退出中先按固定 client order ID 查询既有退出
+订单。provider 已 flat 但本地未完成时只补 `flat` 和 receipt。provider、租约或 KMS 无法确认时
+进入 `manual_intervention` 并激活用户急停。receipt 只返回脱敏账户指纹、预算、两侧开仓数量、
+最终 flat 数量、阶段时间、policy version/digest 和 provider flat 确认，不返回 secret、token、IP
+或 raw provider 数据。已接受残余风险包括 scan cutoff 到 mutation 的竞态、历史接口延迟、人工
+同净额往返可能不可见、资产可替代导致经济归属无法数学证明，以及 25U 仅为计划资本上限而非最大
+损失保证。
+
 ### 持仓、PnL 与退出
 
 - `GET /api/arbitrage/automation/positions`

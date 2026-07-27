@@ -627,6 +627,19 @@ function sanitizeAutomationState(
         "assetAuthorizations",
         "assetTakeovers",
         "challenges",
+        "connectivitySmokes",
+        "config",
+        "credentialAlert",
+        "credentialAudit",
+        "credentialLifecycle",
+        "executions",
+        "pnlSeries",
+        "version",
+      ])
+      && !hasExactKeys(parsed, [
+        "assetAuthorizations",
+        "assetTakeovers",
+        "challenges",
         "config",
         "credentialAlert",
         "credentialAudit",
@@ -701,6 +714,13 @@ function sanitizeAutomationState(
     const values = validatedTakeovers.map((item) => item[key]);
     if (new Set(values).size !== values.length) throw invalidSnapshot();
   }
+  const connectivitySmokes = parsed.connectivitySmokes === undefined ? [] : parsed.connectivitySmokes;
+  if (!Array.isArray(connectivitySmokes) || connectivitySmokes.length > 100) throw invalidSnapshot();
+  connectivitySmokes.forEach(validateConnectivitySmoke);
+  if (
+    connectivitySmokes.filter((item) =>
+      !["flat", "failed", "manual_intervention"].includes(String((item as Record<string, unknown>).stage))).length > 1
+  ) throw invalidSnapshot();
   const capitalHoldingAuthorizations = validatedTakeovers
     .filter((takeover) => !["failed", "exited"].includes(takeover.state))
     .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
@@ -721,6 +741,7 @@ function sanitizeAutomationState(
     ...parsed,
     assetAuthorizations: validatedAuthorizations,
     assetTakeovers: validatedTakeovers,
+    connectivitySmokes,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,
@@ -895,6 +916,74 @@ function validateExecutionRecord(value: unknown) {
   if (execution.spotOrder !== null) validateProviderOrder(execution.spotOrder);
   execution.perpetualOrders.forEach(validateProviderOrder);
   execution.compensationOrders.forEach(validateProviderOrder);
+}
+
+function validateConnectivitySmoke(value: unknown) {
+  const smoke = assertObject(value);
+  if (!hasExactKeys(smoke, [
+    "accountFingerprint", "accountId", "authorization", "budget", "challengeId", "createdAt",
+    "errorCategory", "exit", "futuresOpenOrder", "idempotencyKey", "message", "mode", "noReopen",
+    "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "orderLinkPrefix", "policyDigest",
+    "policyVersion", "providerMutationCount", "purpose", "receipt", "requestDigest", "smokeId",
+    "spotOpenOrder", "stage", "updatedAt", "userId",
+  ])) throw invalidSnapshot();
+  for (const key of [
+    "smokeId", "userId", "accountId", "accountFingerprint", "idempotencyKey", "challengeId",
+    "orderLinkPrefix", "requestDigest", "policyVersion", "policyDigest",
+  ]) if (!isNonEmptyString(smoke[key])) throw invalidSnapshot();
+  if (
+    smoke.purpose !== "connectivity_smoke"
+    || smoke.mode !== "connectivity_smoke"
+    || smoke.noReopen !== true
+    || ![
+      "reserved", "spot_opening", "spot_open", "futures_opening", "hedged",
+      "futures_closing", "spot_closing", "flat", "failed", "manual_intervention",
+    ].includes(String(smoke.stage))
+    || !isFiniteNumber(smoke.openedSpotQuantityXaut)
+    || !isFiniteNumber(smoke.openedFuturesQuantityXaut)
+    || !isFiniteNumber(smoke.providerMutationCount)
+    || !isTimestamp(smoke.createdAt) || !isTimestamp(smoke.updatedAt)
+    || !(smoke.errorCategory === null || typeof smoke.errorCategory === "string")
+    || typeof smoke.message !== "string"
+  ) throw invalidSnapshot();
+  const authorization = assertObject(smoke.authorization);
+  if (!hasExactKeys(authorization, [
+    "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+  ]) || authorization.operation !== "connectivity_smoke_execute"
+    || authorization.consumedBeforeProviderMutation !== true
+    || authorization.exitAuthorized !== true
+    || !isTimestamp(authorization.reservedAt)) throw invalidSnapshot();
+  const budget = assertObject(smoke.budget);
+  if (!hasExactKeys(budget, [
+    "commonQtyStep", "futuresFeesUsd", "futuresMarginUsd", "futuresSlippageReserveUsd", "limitUsd",
+    "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
+    "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
+  ]) || budget.limitUsd !== 25 || Object.entries(budget).some(([key, item]) =>
+    key !== "limitUsd" && key !== "prices" && (!isFiniteNumber(item) || Number(item) < 0))
+    || Number(budget.totalCapitalUsd) > 25 + 1e-9) throw invalidSnapshot();
+  const prices = assertObject(budget.prices);
+  if (!hasExactKeys(prices, [
+    "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
+  ]) || Object.values(prices).some((item) => !isFiniteNumber(item) || Number(item) <= 0)) throw invalidSnapshot();
+  const exit = assertObject(smoke.exit);
+  if (!hasExactKeys(exit, [
+    "futuresCloseOrder", "futuresFlatConfirmed", "spotCloseOrder", "spotFlatConfirmed",
+  ]) || typeof exit.futuresFlatConfirmed !== "boolean" || typeof exit.spotFlatConfirmed !== "boolean") {
+    throw invalidSnapshot();
+  }
+  for (const order of [smoke.spotOpenOrder, smoke.futuresOpenOrder, exit.futuresCloseOrder, exit.spotCloseOrder]) {
+    if (order !== null) validateProviderOrder(order);
+  }
+  if (smoke.receipt !== null) {
+    const receipt = assertObject(smoke.receipt);
+    if (!hasExactKeys(receipt, [
+      "accountFingerprint", "budget", "completedAt", "finalFuturesQuantityXaut", "finalSpotQuantityXaut",
+      "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "providerFlatConfirmed", "purpose",
+      "policyDigest", "policyVersion", "receiptId", "smokeId", "symbol", "venue",
+    ]) || receipt.purpose !== "connectivity_smoke" || receipt.venue !== "binance"
+      || receipt.symbol !== "XAUTUSDT" || receipt.providerFlatConfirmed !== true
+      || !isTimestamp(receipt.completedAt)) throw invalidSnapshot();
+  }
 }
 
 function validateStrategyPosition(value: unknown) {

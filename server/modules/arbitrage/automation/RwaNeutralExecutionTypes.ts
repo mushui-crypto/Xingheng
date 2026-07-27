@@ -453,6 +453,17 @@ export type RwaNeutralTradingClient<
     since: number;
     continuity: RwaStrategyActivityContinuity;
   }): Promise<RwaPositionAttributionSnapshot>;
+  readConnectivitySmokeActivity?(input: {
+    strategyOrderPrefix: string;
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+  }): Promise<{
+    attribution: RwaPositionAttributionSnapshot;
+    protocolComplete: boolean;
+    nonAtomic: true;
+    scannedThrough: number;
+  }>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<RwaStrategyPnlSnapshot>;
 };
 
