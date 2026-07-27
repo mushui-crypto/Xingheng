@@ -85,6 +85,7 @@ COPY --from=build /app/.build-revision /app/.build-revision
 COPY scripts/verify-runtime-revision.sh /usr/local/bin/verify-runtime-revision
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/Caddyfile.real-test /etc/caddy/Caddyfile.real-test
+COPY deploy/Caddyfile.real-test-standalone /etc/caddy/Caddyfile.real-test-standalone
 COPY --from=build /app/dist /srv
 RUN chmod 0555 /usr/local/bin/verify-runtime-revision
 ENTRYPOINT ["/usr/local/bin/verify-runtime-revision"]

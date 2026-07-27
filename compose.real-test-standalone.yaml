@@ -1,0 +1,25 @@
+services:
+  web:
+    labels:
+      com.xingheng.real-test.topology: standalone
+    command:
+      - /bin/sh
+      - -c
+      - test -n "$$REAL_TEST_DOMAIN" || { echo "REAL_TEST_DOMAIN is required" >&2; exit 1; }; exec caddy run --config /etc/caddy/Caddyfile.real-test-standalone --adapter caddyfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -qO- --no-check-certificate --header "Host: $$REAL_TEST_DOMAIN"
+          https://127.0.0.1/api/health |
+          grep -q '"real-test"'
+    networks:
+      default:
+      public_ingress: !reset null
+
+networks:
+  public_ingress: !reset null

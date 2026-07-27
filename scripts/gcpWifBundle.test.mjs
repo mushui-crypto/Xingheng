@@ -175,7 +175,7 @@ test("WIF installer performs no mount when source validation fails", () => {
   try {
     const bin = writeFakeInstallerCommands(root);
     const log = join(root, "events.log");
-    const result = spawnSync("sh", [INSTALLER, "/source", "/audience"], {
+    const result = spawnSync("sh", [INSTALLER, "production", "/source", "/audience"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
@@ -199,7 +199,7 @@ test("WIF installer rejects a production target override before mounting", () =>
   try {
     const bin = writeFakeInstallerCommands(root);
     const log = join(root, "events.log");
-    const result = spawnSync("sh", [INSTALLER, "/source", "/audience"], {
+    const result = spawnSync("sh", [INSTALLER, "production", "/source", "/audience"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
@@ -222,7 +222,7 @@ test("WIF installer moves the tmpfs only after complete copy validation", () => 
   try {
     const bin = writeFakeInstallerCommands(root);
     const log = join(root, "events.log");
-    const result = spawnSync("sh", [INSTALLER, "/source", "/audience"], {
+    const result = spawnSync("sh", [INSTALLER, "production", "/source", "/audience"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
@@ -252,7 +252,7 @@ test("WIF installer unmounts a published target when final validation fails", ()
     const bin = writeFakeInstallerCommands(root);
     const log = join(root, "events.log");
     const target = join(root, "host", "gcp-wif");
-    const result = spawnSync("sh", [INSTALLER, "/source", "/audience"], {
+    const result = spawnSync("sh", [INSTALLER, "production", "/source", "/audience"], {
       cwd: REPO_ROOT,
       encoding: "utf8",
       env: {
@@ -269,6 +269,40 @@ test("WIF installer unmounts a published target when final validation fails", ()
     const moveIndex = events.findIndex((entry) => entry.startsWith("mount:--move"));
     const unmountIndex = events.findIndex((entry) => entry === `umount:${target}`);
     assert.ok(moveIndex >= 0 && unmountIndex > moveIndex);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIF installer accepts only frozen production and real-test targets", () => {
+  const source = readFileSync(INSTALLER, "utf8");
+  assert.ok(source.includes('production) target="/run/xingheng/gcp-wif"'));
+  assert.ok(source.includes('real-test) target="/run/xingheng-real-test/gcp-wif"'));
+  assert.ok(source.includes('[ "${NODE_ENV:-}" = test ]'));
+
+  const root = mkdtempSync(join(tmpdir(), "xingheng-wif-installer-environment-"));
+  try {
+    const bin = writeFakeInstallerCommands(root);
+    for (const environment of ["staging", "/run/other", "real-test/../xingheng"]) {
+      const log = join(root, `${environment.replaceAll("/", "_")}.log`);
+      const result = spawnSync(
+        "sh",
+        [INSTALLER, environment, "/source", "/audience"],
+        {
+          cwd: REPO_ROOT,
+          encoding: "utf8",
+          env: {
+            ...process.env,
+            NODE_ENV: "test",
+            PATH: `${bin}:${process.env.PATH}`,
+            FAKE_EVENT_LOG: log,
+            WIF_HOST_ROOT: join(root, "host", "gcp-wif"),
+          },
+        },
+      );
+      assert.equal(result.status, 2);
+      assert.equal(existsSync(log), false);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

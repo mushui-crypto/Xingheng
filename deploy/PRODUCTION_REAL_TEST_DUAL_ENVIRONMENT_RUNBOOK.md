@@ -4,6 +4,53 @@
 真实资金窗口、交易所授权或订单批准。两套环境均以 `NODE_ENV=production` 运行，全部自动执行门禁
 默认关闭；真实测试环境不得降低租约、KMS、幂等、风控或审计要求。
 
+## 独立 real-test 主机模式
+
+全新独立 real-test 单 VM 仍固定使用 `real-test / xingheng-real-test / .env.real-test` 身份，
+但必须改用 `scripts/real-test-standalone-compose.sh` 和
+`compose.real-test-standalone.yaml`。该 override 只增加独立主机所需的固定
+`80/tcp`、`443/tcp`、`443/udp`，移除同机共享 ingress，并让 Web 使用
+`deploy/Caddyfile.real-test-standalone` 直接基于 `REAL_TEST_DOMAIN` 获取和续期 TLS 证书。
+API `8787`、SQLite 和 Docker socket 均不发布。
+
+同机模式与独立模式互斥：
+
+- production 同机运行时只允许 `scripts/real-test-compose.sh`，测试 Web 不发布宿主端口；
+- 独立 VM 只允许 `scripts/real-test-standalone-compose.sh`，主机不得同时运行 production
+  项目或共享 ingress 模式；
+- 两个入口都拒绝调用方 `-f`、`-p`、`--env-file`、扩容、构建和任意端口覆盖；
+- 不得对同一 `xingheng-real-test` 项目交替调用两个 wrapper。切换拓扑必须先停止并取得独立
+  变更批准，不能把普通版本回滚当作拓扑切换。
+
+独立 VM 的 release tree、manifest、`.env.real-test`、Docker socket、WIF/KMS 和运维收据
+仍必须由既有受信安装链建立。WIF 使用：
+
+```bash
+sudo scripts/install-gcp-wif.sh real-test \
+  /服务器本地受控source /服务器本地受控audience文件
+```
+
+安装目标只能是 `/run/xingheng-real-test/gcp-wif`。production 仍必须显式使用
+`install-gcp-wif.sh production` 并落到 `/run/xingheng/gcp-wif`；安装器不接受任意目标路径。
+
+独立模式激活前先验证 DNS 已指向该 VM、仅开放公网 80/443，并确认没有进程占用固定端口。
+没有真实 DNS 时不得用自签名证书或 HTTP 冒充通过。使用 canonical manifest 激活：
+
+```bash
+sudo scripts/activate-real-test-release.sh standalone
+node scripts/verify-deployment-revision.mjs \
+  compose-real-test-standalone deploy/release-manifest.json .env.real-test
+node scripts/verify-deployment-revision.mjs \
+  containers-real-test deploy/release-manifest.json
+node scripts/verify-release-volume-boundaries.mjs real-test runtime
+```
+
+激活在 Compose、镜像、revision、容器或 volume 验证失败时会停止 real-test API/Web。
+版本回滚必须先通过既有受信候选安装流程恢复上一份完整 canonical release tree、manifest 与
+`.env.real-test`，再执行同一 `standalone` 激活；不得手工改写 manifest、env、镜像 tag 或
+直接调用 Docker Compose。当前 production 的 `rollback-release.sh` 只属于 production
+release lifecycle，禁止用于 real-test。
+
 ## 固定身份
 
 | 环境 | Compose 项目 | env 文件 | 域名 | WIF 宿主路径 | cookie namespace |

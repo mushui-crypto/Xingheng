@@ -20,7 +20,10 @@ import {
   validateReleaseManifest,
   verifyRevisionEvidence,
 } from "./deploymentRevision.mjs";
-import { validateDualEnvironmentTopology } from "./dualEnvironmentTopology.mjs";
+import {
+  validateDualEnvironmentTopology,
+  validateStandaloneRealTestTopology,
+} from "./dualEnvironmentTopology.mjs";
 import { execTrustedDockerSync } from "./trustedDockerRuntime.mjs";
 import { assertTrustedReleaseRoot } from "./trustedDockerRuntime.mjs";
 
@@ -44,6 +47,8 @@ const MANIFEST_MAX_BYTES = 16 * 1024;
 const SAFE_MANIFEST_MODE = 0o444;
 const PRODUCTION_COMPOSE = new URL("./production-compose.sh", import.meta.url).pathname;
 const REAL_TEST_COMPOSE = new URL("./real-test-compose.sh", import.meta.url).pathname;
+const REAL_TEST_STANDALONE_COMPOSE =
+  new URL("./real-test-standalone-compose.sh", import.meta.url).pathname;
 const FIXED_PRODUCTION_ENV = new URL("../.env.production", import.meta.url).pathname;
 const FIXED_REAL_TEST_ENV = new URL("../.env.real-test", import.meta.url).pathname;
 
@@ -317,6 +322,22 @@ function verifyRealTestCompose(manifest, envFile) {
   validateRealTestComposeConfig(manifest, JSON.parse(source));
 }
 
+function verifyStandaloneRealTestCompose(manifest, envFile) {
+  if (resolve(envFile) !== FIXED_REAL_TEST_ENV) {
+    throw new Error("real-test Compose environment path is not fixed");
+  }
+  if (readSecureEnvironmentRevision(envFile) !== manifest.revision) {
+    throw new Error("deployment environment revision mismatch");
+  }
+  const source = resolvedCompose(REAL_TEST_STANDALONE_COMPOSE, [
+    "strategy-tools",
+    "real-test-cleanup",
+    "rwa-automation-ops",
+    "provider-identity-preflight",
+  ]);
+  validateStandaloneRealTestTopology(manifest, source);
+}
+
 function resolvedCompose(command, profiles) {
   return JSON.parse(run(command, [
     ...profiles.flatMap((profile) => ["--profile", profile]),
@@ -404,7 +425,7 @@ function readSecureEnvironmentRevision(path) {
 
 function usage() {
   throw new Error(
-    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | candidate-images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
+    "usage: verify-deployment-revision.mjs validate REVISION | read-env ENV_FILE | write-manifest PATH REVISION API_DIGEST WEB_DIGEST STRATEGY_DIGEST | manifest-values PATH ENV_FILE | manifest-revision PATH | manifest-image PATH api|web|strategyTools | env MANIFEST ENV_FILE | compose MANIFEST ENV_FILE | compose-real-test MANIFEST ENV_FILE | compose-real-test-standalone MANIFEST ENV_FILE | dual-compose MANIFEST PRODUCTION_ENV REAL_TEST_ENV | images MANIFEST | candidate-images MANIFEST | containers MANIFEST | containers-real-test MANIFEST",
   );
 }
 
@@ -449,6 +470,10 @@ try {
     const manifest = readReleaseManifest(args[0]);
     verifyRealTestCompose(manifest, args[1]);
     console.log("real-test Compose release mapping verified");
+  } else if (command === "compose-real-test-standalone" && args.length === 2) {
+    const manifest = readReleaseManifest(args[0]);
+    verifyStandaloneRealTestCompose(manifest, args[1]);
+    console.log("standalone real-test Compose release mapping verified");
   } else if (command === "dual-compose" && args.length === 3) {
     const manifest = readReleaseManifest(args[0]);
     verifyDualCompose(manifest, args[1], args[2]);

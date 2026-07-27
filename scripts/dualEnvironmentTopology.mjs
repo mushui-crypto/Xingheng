@@ -104,6 +104,9 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   if (Array.isArray(realTestWeb.ports) && realTestWeb.ports.length > 0) {
     throw new Error("real-test Web must not publish host ports");
   }
+  if (realTestWeb.labels?.["com.xingheng.real-test.topology"] !== "shared") {
+    throw new Error("shared real-test topology identity is invalid");
+  }
   assertProductionIngressPorts(productionWeb);
   assertHealthcheck(productionApi, "production", "xingheng", false);
   assertHealthcheck(realTestApi, "real-test", "xingheng-real-test", false);
@@ -158,12 +161,63 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   return true;
 }
 
+export function validateStandaloneRealTestTopology(manifest, realTest) {
+  validateRealTestComposeConfig(manifest, realTest);
+  const api = service(realTest, "api");
+  const web = service(realTest, "web");
+  assertHealthcheck(api, "real-test", "xingheng-real-test", false);
+  assertHealthcheck(web, "real-test", "xingheng-real-test", true);
+  assertVolumes(realTest, REAL_TEST_PROJECT);
+  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
+  assertWifMount(api, "/run/xingheng-real-test/gcp-wif");
+  assertStandaloneIngress(realTest, web);
+  if (api.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
+    throw new Error("real-test execution gate must remain closed");
+  }
+  return true;
+}
+
 function assertProductionIngressPorts(web) {
   const ports = Array.isArray(web.ports) ? web.ports : [];
   const normalized = ports.map((port) =>
     `${String(port?.published)}:${String(port?.target)}/${port?.protocol ?? "tcp"}`).sort();
   if (normalized.join(",") !== ["443:443/tcp", "443:443/udp", "80:80/tcp"].sort().join(",")) {
     throw new Error("production ingress port set is invalid");
+  }
+}
+
+function assertStandaloneIngress(config, web) {
+  assertProductionIngressPorts(web);
+  if (web.labels?.["com.xingheng.real-test.topology"] !== "standalone") {
+    throw new Error("standalone real-test topology identity is invalid");
+  }
+  const networks = record(config.networks, "Compose networks");
+  if (
+    Object.hasOwn(networks, "public_ingress")
+    || Object.keys(networks).some((name) => name !== "default")
+  ) {
+    throw new Error("standalone real-test ingress network set is invalid");
+  }
+  const serviceNetworks = record(web.networks, "Web networks");
+  if (
+    Object.hasOwn(serviceNetworks, "public_ingress")
+    || Object.keys(serviceNetworks).some((name) => name !== "default")
+  ) {
+    throw new Error("standalone real-test Web network set is invalid");
+  }
+  const command = Array.isArray(web.command) ? web.command.at(-1) : "";
+  const healthCommand = Array.isArray(web.healthcheck?.test)
+    ? web.healthcheck.test.at(-1)
+    : "";
+  if (
+    typeof command !== "string"
+    || !command.includes("Caddyfile.real-test-standalone")
+    || !command.includes("REAL_TEST_DOMAIN")
+    || typeof healthCommand !== "string"
+    || !healthCommand.includes("https://127.0.0.1/api/health")
+    || !healthCommand.includes("REAL_TEST_DOMAIN")
+  ) {
+    throw new Error("standalone real-test HTTPS entry is invalid");
   }
 }
 

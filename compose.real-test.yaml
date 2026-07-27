@@ -66,6 +66,8 @@ services:
   web:
     image: "${XINGHENG_WEB_IMAGE:?XINGHENG_WEB_IMAGE must come from the release manifest}"
     pull_policy: never
+    labels:
+      com.xingheng.real-test.topology: shared
     environment:
       REAL_TEST_DOMAIN: "${REAL_TEST_DOMAIN:?REAL_TEST_DOMAIN is required}"
       XINGHENG_DEPLOYMENT_ENVIRONMENT: real-test

@@ -2,9 +2,14 @@
 set -eu
 . "${0%/*}/trusted-operation-preamble.sh"
 
-source_dir="${1:-}"
-audience_file="${2:-}"
-target="/run/xingheng/gcp-wif"
+environment="${1:-}"
+source_dir="${2:-}"
+audience_file="${3:-}"
+case "$environment" in
+  production) target="/run/xingheng/gcp-wif" ;;
+  real-test) target="/run/xingheng-real-test/gcp-wif" ;;
+  *) echo "WIF installation environment must be production or real-test" >&2; exit 2 ;;
+esac
 if [ -n "${WIF_HOST_ROOT:-}" ]; then
   [ "${NODE_ENV:-}" = test ] || {
     echo "WIF target override is test-only" >&2
@@ -13,8 +18,8 @@ if [ -n "${WIF_HOST_ROOT:-}" ]; then
   target="$WIF_HOST_ROOT"
 fi
 
-[ -n "$source_dir" ] && [ -n "$audience_file" ] || {
-  echo "usage: $0 ROOT_ONLY_SOURCE_DIR ROOT_ONLY_AUDIENCE_FILE" >&2
+[ -n "$source_dir" ] && [ -n "$audience_file" ] && [ "$#" -eq 3 ] || {
+  echo "usage: $0 production|real-test ROOT_ONLY_SOURCE_DIR ROOT_ONLY_AUDIENCE_FILE" >&2
   exit 2
 }
 [ "$(id -u)" = 0 ] || {
@@ -34,7 +39,9 @@ node scripts/verify-gcp-wif-bundle.mjs source "$source_dir" "$audience_file"
 
 parent="$(dirname "$target")"
 if [ "${NODE_ENV:-}" != test ]; then
-  [ "$parent" = /run/xingheng ] || {
+  expected_parent="/run/xingheng"
+  [ "$environment" = real-test ] && expected_parent="/run/xingheng-real-test"
+  [ "$parent" = "$expected_parent" ] || {
     echo "WIF target parent is invalid" >&2
     exit 78
   }
