@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
-import type {
-  RwaBinancePreflightSnapshot,
+import {
+  RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
+  type RwaBinancePreflightSnapshot,
 } from "./RwaBinanceAutomationTypes";
 import type { RwaProviderOrder } from "./RwaNeutralExecutionTypes";
 
@@ -175,6 +176,21 @@ export type RwaConnectivitySmokeProviderState = {
   reason: string;
 };
 
+const VERIFIED_PROVIDER_STATE_REASONS = new Set([
+  "verified_non_atomic_rest_snapshot",
+  "provider_flat_confirmed",
+]);
+const AMBIGUOUS_PROVIDER_STATE_REASONS = new Set([
+  "activity_evidence_incomplete",
+  "provider_ledger_mismatch",
+]);
+const UNAVAILABLE_PROVIDER_STATE_REASONS = new Set([
+  "not_yet_observed",
+  "provider_snapshot_unavailable",
+  "provider_snapshot_time_invalid",
+  "legacy_provider_state_unavailable",
+]);
+
 export type RwaConnectivitySmokeTimelineEvent = {
   stage: RwaConnectivitySmokeStage;
   at: number;
@@ -331,13 +347,15 @@ export function migrateLegacyConnectivitySmokeRecord(value: unknown): unknown {
   const hasProviderState = Object.hasOwn(record, "providerState");
   const hasTimeline = Object.hasOwn(record, "timeline");
   if (hasProviderState || hasTimeline) return value;
-  if (!hasExactKeys(record, LEGACY_CONNECTIVITY_SMOKE_RECORD_KEYS)
-    || !isConnectivitySmokeStage(record.stage)
-    || !Number.isFinite(record.createdAt) || Number(record.createdAt) < 0
-    || !Number.isFinite(record.updatedAt) || Number(record.updatedAt) < Number(record.createdAt)) {
+  if (!hasExactKeys(record, LEGACY_CONNECTIVITY_SMOKE_RECORD_KEYS)) {
     return value;
   }
-  const stage = record.stage;
+  try {
+    validateConnectivitySmokeParentFacts(record as unknown as RwaConnectivitySmokeRecord);
+  } catch {
+    return value;
+  }
+  const stage = record.stage as RwaConnectivitySmokeStage;
   const createdAt = Number(record.createdAt);
   const updatedAt = Number(record.updatedAt);
   const timeline: RwaConnectivitySmokeTimelineEvent[] = [{
@@ -372,6 +390,77 @@ export function migrateLegacyConnectivitySmokeRecord(value: unknown): unknown {
 }
 
 export function validateConnectivitySmokeFacts(smoke: RwaConnectivitySmokeRecord) {
+  validateConnectivitySmokeParentFacts(smoke);
+  validateConnectivitySmokeTimeline(smoke);
+  validateProviderStateFacts(smoke.providerState, smoke.updatedAt);
+  if (smoke.receipt === null) return;
+  const receipt = smoke.receipt;
+  const lastEvent = smoke.timeline.at(-1)!;
+  if (
+    smoke.providerState.verificationStatus !== "verified"
+    || smoke.providerState.residualSpotQuantityXaut !== 0
+    || smoke.providerState.residualFuturesQuantityXaut !== 0
+    || smoke.providerState.activeSpotOrderCount !== 0
+    || smoke.providerState.activeFuturesOrderCount !== 0
+    || smoke.providerState.activeTotalOrderCount !== 0
+    || smoke.providerState.providerFlatConfirmed !== true
+    || receipt.completedAt < lastEvent.at
+  ) {
+    throw new Error("connectivity smoke receipt provider facts are inconsistent");
+  }
+}
+
+function validateConnectivitySmokeParentFacts(smoke: RwaConnectivitySmokeRecord) {
+  if (
+    !isConnectivitySmokeStage(smoke.stage)
+    || smoke.purpose !== "connectivity_smoke"
+    || smoke.mode !== "connectivity_smoke"
+    || smoke.noReopen !== true
+    || !nonEmptyString(smoke.smokeId)
+    || !nonEmptyString(smoke.userId)
+    || !nonEmptyString(smoke.accountId)
+    || !nonEmptyString(smoke.accountFingerprint)
+    || !nonEmptyString(smoke.idempotencyKey)
+    || !nonEmptyString(smoke.challengeId)
+    || !nonEmptyString(smoke.requestDigest)
+    || !nonEmptyString(smoke.policyVersion)
+    || !nonEmptyString(smoke.policyDigest)
+    || !nonEmptyString(smoke.orderLinkPrefix)
+    || !finiteNonNegative(smoke.createdAt)
+    || !finiteNonNegative(smoke.updatedAt)
+    || smoke.updatedAt < smoke.createdAt
+    || !Number.isInteger(smoke.providerMutationCount)
+    || smoke.providerMutationCount < 0
+    || !finiteNonNegative(smoke.openedSpotQuantityXaut)
+    || !finiteNonNegative(smoke.openedFuturesQuantityXaut)
+    || !(smoke.errorCategory === null || typeof smoke.errorCategory === "string")
+    || typeof smoke.message !== "string"
+  ) {
+    throw new Error("connectivity smoke parent record fields are invalid");
+  }
+  const authorization = smoke.authorization;
+  if (!authorization || typeof authorization !== "object" || Array.isArray(authorization)
+    || !hasExactKeys(authorization, [
+      "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+    ])
+    || authorization.operation !== "connectivity_smoke_execute"
+    || authorization.consumedBeforeProviderMutation !== true
+    || authorization.exitAuthorized !== true
+    || !finiteNonNegative(authorization.reservedAt)
+    || authorization.reservedAt < smoke.createdAt
+    || authorization.reservedAt > smoke.updatedAt) {
+    throw new Error("connectivity smoke parent authorization is invalid");
+  }
+  validateConnectivitySmokeBudget(smoke.budget);
+  const exit = smoke.exit;
+  if (!exit || typeof exit !== "object" || Array.isArray(exit)
+    || !hasExactKeys(exit, [
+      "futuresCloseOrder", "futuresFlatConfirmed", "spotCloseOrder", "spotFlatConfirmed",
+    ])
+    || typeof exit.futuresFlatConfirmed !== "boolean"
+    || typeof exit.spotFlatConfirmed !== "boolean") {
+    throw new Error("connectivity smoke parent exit is invalid");
+  }
   validateConnectivitySmokeOrder(
     smoke.spotOpenOrder,
     smoke.orderLinkPrefix,
@@ -392,6 +481,18 @@ export function validateConnectivitySmokeFacts(smoke: RwaConnectivitySmokeRecord
     smoke.orderLinkPrefix,
     RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.spotClose.suffix,
   );
+  for (const order of [
+    smoke.spotOpenOrder,
+    smoke.futuresOpenOrder,
+    smoke.exit.futuresCloseOrder,
+    smoke.exit.spotCloseOrder,
+  ]) {
+    if (order !== null && (
+      order.updatedAt < smoke.createdAt || order.updatedAt > smoke.updatedAt
+    )) {
+      throw new Error("connectivity smoke parent order time is invalid");
+    }
+  }
   if (
     (smoke.spotOpenOrder !== null
       && smoke.openedSpotQuantityXaut !== smokeOrderPositionQuantity(smoke.spotOpenOrder))
@@ -403,23 +504,19 @@ export function validateConnectivitySmokeFacts(smoke: RwaConnectivitySmokeRecord
   ) {
     throw new Error("connectivity smoke order slots do not match the stage ledger");
   }
-  validateConnectivitySmokeTimeline(smoke);
-  validateProviderStateFacts(smoke.providerState);
   if (smoke.receipt === null) return;
   const receipt = smoke.receipt;
-  const lastEvent = smoke.timeline.at(-1)!;
-  if (
+  if (!receipt || typeof receipt !== "object" || Array.isArray(receipt)
+    || !hasExactKeys(receipt, [
+      "accountFingerprint", "budget", "completedAt", "finalFuturesQuantityXaut", "finalSpotQuantityXaut",
+      "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "providerFlatConfirmed", "purpose",
+      "policyDigest", "policyVersion", "receiptId", "smokeId", "symbol", "venue",
+    ])
+    ||
     smoke.stage !== "flat"
     || smoke.exit.futuresFlatConfirmed !== true
     || smoke.exit.spotFlatConfirmed !== true
-    || smoke.providerState.verificationStatus !== "verified"
-    || smoke.providerState.residualSpotQuantityXaut !== 0
-    || smoke.providerState.residualFuturesQuantityXaut !== 0
-    || smoke.providerState.activeSpotOrderCount !== 0
-    || smoke.providerState.activeFuturesOrderCount !== 0
-    || smoke.providerState.activeTotalOrderCount !== 0
-    || smoke.providerState.providerFlatConfirmed !== true
-    || receipt.receiptId.length === 0
+    || !nonEmptyString(receipt.receiptId)
     || receipt.smokeId !== smoke.smokeId
     || receipt.purpose !== smoke.purpose
     || receipt.venue !== "binance"
@@ -435,10 +532,32 @@ export function validateConnectivitySmokeFacts(smoke: RwaConnectivitySmokeRecord
     || receipt.providerFlatConfirmed !== true
     || (smoke.openedSpotQuantityXaut > 0 && smoke.exit.spotCloseOrder === null)
     || (smoke.openedFuturesQuantityXaut > 0 && smoke.exit.futuresCloseOrder === null)
-    || !Number.isFinite(receipt.completedAt)
-    || receipt.completedAt < lastEvent.at
+    || !finiteNonNegative(receipt.completedAt)
+    || receipt.completedAt < smoke.createdAt
+    || receipt.completedAt > smoke.updatedAt
   ) {
-    throw new Error("connectivity smoke receipt facts are inconsistent");
+    throw new Error("connectivity smoke parent receipt facts are inconsistent");
+  }
+}
+
+function validateConnectivitySmokeBudget(budget: RwaConnectivitySmokeBudget) {
+  if (!budget || typeof budget !== "object" || Array.isArray(budget)
+    || !hasExactKeys(budget, [
+      "commonQtyStep", "futuresFeesUsd", "futuresMarginUsd", "futuresSlippageReserveUsd", "limitUsd",
+      "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
+      "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
+    ])
+    || budget.limitUsd !== 25
+    || Object.entries(budget).some(([key, value]) =>
+      key !== "prices" && !finiteNonNegative(value))
+    || budget.totalCapitalUsd > 25 + 1e-9
+    || !budget.prices || typeof budget.prices !== "object" || Array.isArray(budget.prices)
+    || !hasExactKeys(budget.prices, [
+      "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
+    ])
+    || Object.values(budget.prices).some((value) =>
+      typeof value !== "number" || !Number.isFinite(value) || value <= 0)) {
+    throw new Error("connectivity smoke parent budget is invalid");
   }
 }
 
@@ -474,32 +593,72 @@ function validateConnectivitySmokeOrder(
   }
 }
 
-function validateProviderStateFacts(state: RwaConnectivitySmokeProviderState) {
-  const quantities = [
-    state.residualSpotQuantityXaut,
-    state.residualFuturesQuantityXaut,
-    state.activeSpotOrderCount,
-    state.activeFuturesOrderCount,
-    state.activeTotalOrderCount,
-  ];
+function validateProviderStateFacts(
+  state: RwaConnectivitySmokeProviderState,
+  recordUpdatedAt: number,
+) {
+  if (state.verificationStatus === "unavailable") {
+    if (
+      !UNAVAILABLE_PROVIDER_STATE_REASONS.has(state.reason)
+      || state.observedAt !== null
+      || state.residualSpotQuantityXaut !== null
+      || state.residualFuturesQuantityXaut !== null
+      || state.activeSpotOrderCount !== null
+      || state.activeFuturesOrderCount !== null
+      || state.activeTotalOrderCount !== null
+      || state.providerFlatConfirmed !== null
+    ) {
+      throw new Error("connectivity smoke unavailable provider state is invalid");
+    }
+    return;
+  }
   if (
-    !["verified", "stale", "unavailable", "ambiguous"].includes(state.verificationStatus)
-    || !(state.observedAt === null || (Number.isFinite(state.observedAt) && state.observedAt >= 0))
-    || quantities.some((value) => !(value === null || finiteNonNegative(value)))
-    || [state.activeSpotOrderCount, state.activeFuturesOrderCount, state.activeTotalOrderCount]
-      .some((value) => value !== null && !Number.isInteger(value))
-    || typeof state.reason !== "string" || state.reason.length === 0
-    || (state.activeSpotOrderCount !== null
-      && state.activeFuturesOrderCount !== null
-      && state.activeTotalOrderCount !== state.activeSpotOrderCount + state.activeFuturesOrderCount)
-    || (state.verificationStatus !== "verified" && state.providerFlatConfirmed !== null)
-    || (state.providerFlatConfirmed === true && (
-      state.residualSpotQuantityXaut !== 0
-      || state.residualFuturesQuantityXaut !== 0
-      || state.activeTotalOrderCount !== 0
-    ))
+    !finiteNonNegative(state.observedAt)
+    || state.observedAt > recordUpdatedAt
+    || !finiteNonNegative(state.residualSpotQuantityXaut)
+    || !finiteNonNegative(state.residualFuturesQuantityXaut)
+    || !finiteNonNegative(state.activeSpotOrderCount)
+    || !finiteNonNegative(state.activeFuturesOrderCount)
+    || !finiteNonNegative(state.activeTotalOrderCount)
+    || !Number.isInteger(state.activeSpotOrderCount)
+    || !Number.isInteger(state.activeFuturesOrderCount)
+    || !Number.isInteger(state.activeTotalOrderCount)
+    || state.activeTotalOrderCount !== state.activeSpotOrderCount + state.activeFuturesOrderCount
   ) {
-    throw new Error("connectivity smoke provider state facts are invalid");
+    throw new Error("connectivity smoke provider snapshot facts are incomplete");
+  }
+  if (state.verificationStatus === "stale") {
+    if (
+      state.reason !== "provider_snapshot_stale"
+      || state.providerFlatConfirmed !== null
+      || recordUpdatedAt - state.observedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS
+    ) {
+      throw new Error("connectivity smoke stale provider state is invalid");
+    }
+    return;
+  }
+  if (state.verificationStatus === "ambiguous") {
+    if (
+      !AMBIGUOUS_PROVIDER_STATE_REASONS.has(state.reason)
+      || state.providerFlatConfirmed !== null
+      || recordUpdatedAt - state.observedAt > RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS
+    ) {
+      throw new Error("connectivity smoke ambiguous provider state is invalid");
+    }
+    return;
+  }
+  const exactlyFlat = state.residualSpotQuantityXaut === 0
+    && state.residualFuturesQuantityXaut === 0
+    && state.activeSpotOrderCount === 0
+    && state.activeFuturesOrderCount === 0;
+  if (
+    state.verificationStatus !== "verified"
+    || !VERIFIED_PROVIDER_STATE_REASONS.has(state.reason)
+    || typeof state.providerFlatConfirmed !== "boolean"
+    || state.providerFlatConfirmed !== exactlyFlat
+    || recordUpdatedAt - state.observedAt > RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS
+  ) {
+    throw new Error("connectivity smoke verified provider state is invalid");
   }
 }
 
@@ -516,6 +675,10 @@ function isConnectivitySmokeStage(value: unknown): value is RwaConnectivitySmoke
 
 function finiteNonNegative(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function nonEmptyString(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function hasExactKeys(

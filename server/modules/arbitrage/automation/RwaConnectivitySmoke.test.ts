@@ -12,7 +12,10 @@ import {
   validateConnectivitySmokeFacts,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
-import type { RwaBinancePreflightSnapshot } from "./RwaBinanceAutomationTypes";
+import {
+  RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
+  type RwaBinancePreflightSnapshot,
+} from "./RwaBinanceAutomationTypes";
 
 test("connectivity smoke policy discovery is the canonical display and acceptance source", () => {
   const discovery = connectivitySmokePolicyDiscovery("binance:test");
@@ -181,6 +184,67 @@ test("connectivity smoke exact facts reject malformed order slots and contradict
   }
 });
 
+test("connectivity smoke provider states require status-complete facts and bounded observation time", () => {
+  const mutations: Array<(record: any) => void> = [
+    (record) => {
+      record.providerState.observedAt = null;
+      record.providerState.residualSpotQuantityXaut = null;
+      record.providerState.residualFuturesQuantityXaut = null;
+      record.providerState.activeSpotOrderCount = null;
+      record.providerState.activeFuturesOrderCount = null;
+      record.providerState.activeTotalOrderCount = null;
+      record.providerState.providerFlatConfirmed = null;
+    },
+    (record) => { record.providerState.providerFlatConfirmed = false; },
+    (record) => {
+      record.providerState.residualSpotQuantityXaut = 0.1;
+      record.providerState.providerFlatConfirmed = true;
+    },
+    (record) => {
+      record.providerState.verificationStatus = "stale";
+      record.providerState.reason = "provider_snapshot_stale";
+      record.providerState.providerFlatConfirmed = null;
+      record.providerState.activeSpotOrderCount = null;
+    },
+    (record) => {
+      record.providerState.verificationStatus = "ambiguous";
+      record.providerState.reason = "provider_ledger_mismatch";
+      record.providerState.providerFlatConfirmed = null;
+      record.providerState.residualFuturesQuantityXaut = null;
+    },
+    (record) => {
+      record.providerState.verificationStatus = "unavailable";
+      record.providerState.reason = "provider_snapshot_unavailable";
+      record.providerState.providerFlatConfirmed = null;
+    },
+    (record) => { record.providerState.activeTotalOrderCount = 1; },
+    (record) => { record.providerState.observedAt = record.updatedAt + 1; },
+    (record) => { record.providerState.reason = "unfrozen_reason"; },
+  ];
+  for (const mutate of mutations) {
+    const record = validFlatSmoke() as any;
+    record.receipt = null;
+    mutate(record);
+    assert.throws(() => validateConnectivitySmokeFacts(record));
+  }
+
+  const stale = validFlatSmoke() as any;
+  stale.receipt = null;
+  stale.updatedAt = RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS + 1;
+  stale.providerState.verificationStatus = "stale";
+  stale.providerState.observedAt = 0;
+  stale.providerState.reason = "provider_snapshot_stale";
+  stale.providerState.providerFlatConfirmed = null;
+  assert.doesNotThrow(() => validateConnectivitySmokeFacts(stale));
+
+  const ambiguous = validFlatSmoke() as any;
+  ambiguous.receipt = null;
+  ambiguous.providerState.verificationStatus = "ambiguous";
+  ambiguous.providerState.reason = "activity_evidence_incomplete";
+  ambiguous.providerState.providerFlatConfirmed = null;
+  assert.doesNotThrow(() => validateConnectivitySmokeFacts(ambiguous));
+});
+
 test("connectivity smoke timeline enforces the frozen transition graph and generator codes", () => {
   const valid = validFlatSmoke();
   assert.doesNotThrow(() => validateConnectivitySmokeFacts(valid));
@@ -241,6 +305,30 @@ test("legacy connectivity smoke migration is exact, additive, and never fabricat
   assert.equal(migrateLegacyConnectivitySmokeRecord(partial), partial);
   const malformed = { ...legacy, unknown: true };
   assert.equal(migrateLegacyConnectivitySmokeRecord(malformed), malformed);
+
+  const malformedNested: Array<(record: any) => void> = [
+    (record) => { record.receipt.unknown = true; },
+    (record) => { record.receipt.smokeId = "other"; },
+    (record) => { record.receipt.completedAt = record.updatedAt + 1; },
+    (record) => {
+      record.receipt.budget = {
+        ...record.receipt.budget,
+        quantityXaut: record.receipt.budget.quantityXaut + 0.001,
+      };
+    },
+    (record) => { record.spotOpenOrder.feeUsd = -1; },
+    (record) => { record.spotOpenOrder.orderLinkId = `${record.orderLinkPrefix}p1`; },
+    (record) => { record.budget.totalCapitalUsd = 26; },
+    (record) => { record.exit.futuresFlatConfirmed = "yes"; },
+    (record) => { record.authorization.exitAuthorized = false; },
+  ];
+  for (const mutate of malformedNested) {
+    const candidate = validFlatSmoke() as any;
+    delete candidate.providerState;
+    delete candidate.timeline;
+    mutate(candidate);
+    assert.equal(migrateLegacyConnectivitySmokeRecord(candidate), candidate);
+  }
 });
 
 function validFlatSmoke(): RwaConnectivitySmokeRecord {

@@ -537,9 +537,25 @@ updatedAt`；`orderLinkId` 必须是该 smoke 的固定 `s1/p1/c1/c2`。`provide
 不明确时数量可为 `null`，并以稳定 reason 告知前端人工登录 Binance，不允许前端自行推算。
 所有 `verified` 及成功 flat receipt 使用同一私有快照 freshness 边界
 `RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS`：刚好等于阈值仍有效；超龄、future 或非法
-`fetchedAt` 均持久化为 `stale / provider_snapshot_stale`，保留合法 observedAt 和快照数值，
-但 `providerFlatConfirmed=null`，不能继续依赖 current verified 证据的 mutation，也不能形成
-成功 receipt。
+`fetchedAt` 均不能作为 current 事实。超龄但合法且不晚于 record `updatedAt` 的时间持久化为
+`stale / provider_snapshot_stale`，保留完整 snapshot facts；future、NaN、Infinity 或负时间
+降级为 `unavailable / provider_snapshot_time_invalid`，`observedAt` 及所有 snapshot facts 均为
+`null`，不能公开 future provider 时间。两者都要求 `providerFlatConfirmed=null`，不能继续依赖
+current verified 证据的 mutation，也不能形成成功 receipt。
+
+`providerState` 的状态事实为 exact 判别式：
+
+- `verified`：observedAt 必须有效且不晚于 record updatedAt；Spot/Futures residual、两侧及 total
+  active-order count 必须完整、有限、非负，count 为整数且 total 等于两侧之和；
+  `providerFlatConfirmed` 必须为 boolean，并且仅在 residual 0/0、两侧 count 0/0 时为 true，
+  其他 verified snapshot 必须为 false。reason 仅允许冻结的 verified 类别。
+- `stale`：同样保留完整 snapshot facts，reason 固定 `provider_snapshot_stale`，
+  `providerFlatConfirmed=null`。
+- `ambiguous`：保留完整 snapshot facts，reason 仅允许 scanner/activity evidence incomplete 或
+  provider-ledger mismatch 冻结类别，`providerFlatConfirmed=null`。
+- `unavailable`：observedAt、所有 residual/count 和 providerFlatConfirmed 必须全部为 null，
+  reason 仅允许 not-yet-observed、provider read unavailable、invalid provider time 或 legacy
+  migration 冻结类别。
 
 持久化与备份复用同一 smoke 事实校验。四个订单槽位严格绑定当前 `orderLinkPrefix` 的
 `s1/p1/c1/c2`；槽位分别决定 Spot Buy、Futures Sell、Futures reduce-only Buy、Spot Sell 的
@@ -563,11 +579,15 @@ futures_closing -> spot_closing | flat | failed | manual_intervention
 spot_closing -> flat | failed | manual_intervention
 ```
 
-父版本中恰好缺少 `providerState` 与 `timeline`、且其余字段完全符合旧 exact schema 的记录，会在
-Store 读取或 Backup 验证/恢复时原子 additive 迁移：providerState 降级为
+父版本迁移严格按“候选识别 → 完整父 schema 验证 → 降级转换 → 新 schema 验证”执行。只有恰好
+缺少 `providerState` 与 `timeline`、顶层 key 完全匹配父版本，并且 authorization、budget/prices、
+四个固定订单槽位、opened ledger、exit、stage、IDs、policy、数量、record/order timestamps 和
+旧 receipt 的 exact keys/identity/budget/opened/final/completedAt 全部合法的记录，才会在 Store
+读取或 Backup 验证/恢复时原子 additive 迁移。随后 providerState 降级为
 `unavailable / legacy_provider_state_unavailable`，所有 residual/count 为 `null`；timeline 仅记录
 `legacy_migration_reserved` 和当前持久 stage 的 `legacy_migration_current_stage`，不补造中间阶段。
 旧成功 receipt 因未持久新契约要求的权威快照而清空为 unavailable，绝不迁成 verified 成功。
+旧 receipt、订单、预算、退出或时间任一畸形都必须在清空旧 receipt 之前被拒绝，不能借迁移洗白。
 只缺一个新字段、含 unknown 字段或其他畸形记录不适用迁移并 fail-closed。Active 旧记录在任何
 provider mutation 前仍必须重新取得 fresh 权威证据；terminal 旧记录保持只读。
 

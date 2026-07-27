@@ -1509,6 +1509,33 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
       (smoke: any) => { smoke.futuresOpenOrder.filledQuantityXaut = smoke.futuresOpenOrder.requestedQuantityXaut + 1; },
       (smoke: any) => { smoke.exit.futuresCloseOrder.feeUsd = -1; },
       (smoke: any) => { smoke.providerState.verificationStatus = "stale"; smoke.providerState.providerFlatConfirmed = null; },
+      (smoke: any) => {
+        smoke.providerState.observedAt = null;
+        smoke.providerState.residualSpotQuantityXaut = null;
+        smoke.providerState.residualFuturesQuantityXaut = null;
+        smoke.providerState.activeSpotOrderCount = null;
+        smoke.providerState.activeFuturesOrderCount = null;
+        smoke.providerState.activeTotalOrderCount = null;
+        smoke.providerState.providerFlatConfirmed = null;
+      },
+      (smoke: any) => {
+        smoke.providerState.verificationStatus = "stale";
+        smoke.providerState.reason = "provider_snapshot_stale";
+        smoke.providerState.providerFlatConfirmed = null;
+        smoke.providerState.activeFuturesOrderCount = null;
+      },
+      (smoke: any) => {
+        smoke.providerState.verificationStatus = "ambiguous";
+        smoke.providerState.reason = "activity_evidence_incomplete";
+        smoke.providerState.providerFlatConfirmed = null;
+        smoke.providerState.residualSpotQuantityXaut = null;
+      },
+      (smoke: any) => {
+        smoke.providerState.verificationStatus = "unavailable";
+        smoke.providerState.reason = "provider_snapshot_unavailable";
+        smoke.providerState.providerFlatConfirmed = null;
+      },
+      (smoke: any) => { smoke.providerState.observedAt = smoke.updatedAt + 1; },
       (smoke: any) => { smoke.receipt.finalSpotQuantityXaut = 0.1; },
       (smoke: any) => { smoke.timeline.at(-1).code = "invalid"; },
     ]) {
@@ -1526,6 +1553,29 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(historicalReceipt.disclosureAvailability, "unavailable_for_historical_digest");
     assert.equal(historicalReceipt.disclosure, null);
     assert.equal(historicalReceipt.disclosureReason, "historical_policy_digest_not_available");
+    for (const mutate of [
+      (smoke: any) => { smoke.receipt.unknown = true; },
+      (smoke: any) => { smoke.receipt.smokeId = "other"; },
+      (smoke: any) => { smoke.receipt.completedAt = smoke.updatedAt + 1; },
+      (smoke: any) => {
+        smoke.receipt.budget = {
+          ...smoke.receipt.budget,
+          quantityXaut: smoke.receipt.budget.quantityXaut + 0.001,
+        };
+      },
+      (smoke: any) => { smoke.spotOpenOrder.feeUsd = -1; },
+      (smoke: any) => { smoke.spotOpenOrder.orderLinkId = `${smoke.orderLinkPrefix}p1`; },
+      (smoke: any) => { smoke.budget.totalCapitalUsd = 26; },
+      (smoke: any) => { smoke.exit.spotFlatConfirmed = "yes"; },
+    ]) {
+      const invalidLegacy = structuredClone(state) as any;
+      const invalidSmoke = invalidLegacy.connectivitySmokes[0];
+      delete invalidSmoke.providerState;
+      delete invalidSmoke.timeline;
+      mutate(invalidSmoke);
+      await writeFile((harness.store as any).statePath, JSON.stringify(invalidLegacy), { mode: 0o600 });
+      await assert.rejects(harness.store.readState());
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1548,6 +1598,37 @@ test("Binance connectivity smoke window verification persists stale evidence and
     assert.equal(result.providerState.verificationStatus, "stale");
     assert.equal(result.providerState.providerFlatConfirmed, null);
     assert.equal(result.providerState.reason, "provider_snapshot_stale");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke maps a future provider snapshot time to unavailable without exposing it", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-future-window-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshotReadCount = 0;
+    client.snapshotFetchedAtOverrides.set(1, now + 1);
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:future:window"),
+    ) as any;
+    assert.equal(result.stage, "failed");
+    assert.equal(result.receipt, null);
+    assert.deepEqual(result.providerState, {
+      verificationStatus: "unavailable",
+      observedAt: null,
+      residualSpotQuantityXaut: null,
+      residualFuturesQuantityXaut: null,
+      activeSpotOrderCount: null,
+      activeFuturesOrderCount: null,
+      activeTotalOrderCount: null,
+      providerFlatConfirmed: null,
+      reason: "provider_snapshot_time_invalid",
+    });
     assert.equal(client.writeCount, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -2358,7 +2439,7 @@ function testUnavailableSmokeProviderState() {
     activeFuturesOrderCount: null,
     activeTotalOrderCount: null,
     providerFlatConfirmed: null,
-    reason: "test_not_observed",
+    reason: "not_yet_observed",
   };
 }
 
@@ -2374,6 +2455,7 @@ class FakeBinanceClient implements RwaBinanceClient {
   readCount = 0;
   snapshotReadCount = 0;
   readonly staleSnapshotReads = new Set<number>();
+  readonly snapshotFetchedAtOverrides = new Map<number, number>();
   writeCount = 0;
   readonly access: {
     accountId: string;
@@ -2489,6 +2571,8 @@ class FakeBinanceClient implements RwaBinanceClient {
     this.readCount += 1;
     this.snapshotReadCount += 1;
     const result = structuredClone(this.snapshot);
+    const fetchedAtOverride = this.snapshotFetchedAtOverrides.get(this.snapshotReadCount);
+    if (fetchedAtOverride !== undefined) result.fetchedAt = fetchedAtOverride;
     if (this.staleSnapshotReads.has(this.snapshotReadCount)) {
       result.fetchedAt = now - RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS - 1;
     }

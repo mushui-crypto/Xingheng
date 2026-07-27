@@ -324,11 +324,69 @@ test("connectivity smoke backup migrates exact parent records and rejects malfor
     await legacyFixture.cleanup();
   }
 
+  const malformedLegacyMutations: Array<(smoke: any) => void> = [
+    (smoke) => { smoke.receipt.unknown = true; },
+    (smoke) => { smoke.receipt.accountFingerprint = "other"; },
+    (smoke) => { smoke.receipt.completedAt = smoke.updatedAt + 1; },
+    (smoke) => {
+      smoke.receipt.budget = {
+        ...smoke.receipt.budget,
+        quantityXaut: smoke.receipt.budget.quantityXaut + 0.001,
+      };
+    },
+    (smoke) => { smoke.spotOpenOrder.feeUsd = -1; },
+    (smoke) => { smoke.spotOpenOrder.orderLinkId = `${smoke.orderLinkPrefix}p1`; },
+    (smoke) => { smoke.budget.totalCapitalUsd = 26; },
+    (smoke) => { smoke.exit.futuresFlatConfirmed = "yes"; },
+  ];
+  for (const mutate of malformedLegacyMutations) {
+    const fixture = await createFixture();
+    try {
+      const state = baseState() as any;
+      const smoke = backupSmoke("flat", "legacy-invalid");
+      delete smoke.providerState;
+      delete smoke.timeline;
+      mutate(smoke);
+      state.connectivitySmokes = [smoke];
+      await writeSecure(join(fixture.active, stateFileName), JSON.stringify(state));
+      await assert.rejects(fixture.service.createBackup(), hasCategory("backup_manifest_invalid"));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
   const mutations: Array<(smoke: any) => void> = [
     (smoke) => { smoke.spotOpenOrder.orderLinkId = `${smoke.orderLinkPrefix}p1`; },
     (smoke) => { smoke.futuresOpenOrder.filledQuantityXaut = 2; },
     (smoke) => { smoke.exit.spotCloseOrder.status = "Pending"; },
     (smoke) => { smoke.providerState.activeTotalOrderCount = 1; },
+    (smoke) => {
+      smoke.providerState.observedAt = null;
+      smoke.providerState.residualSpotQuantityXaut = null;
+      smoke.providerState.residualFuturesQuantityXaut = null;
+      smoke.providerState.activeSpotOrderCount = null;
+      smoke.providerState.activeFuturesOrderCount = null;
+      smoke.providerState.activeTotalOrderCount = null;
+      smoke.providerState.providerFlatConfirmed = null;
+    },
+    (smoke) => {
+      smoke.providerState.verificationStatus = "stale";
+      smoke.providerState.reason = "provider_snapshot_stale";
+      smoke.providerState.providerFlatConfirmed = null;
+      smoke.providerState.activeSpotOrderCount = null;
+    },
+    (smoke) => {
+      smoke.providerState.verificationStatus = "ambiguous";
+      smoke.providerState.reason = "provider_ledger_mismatch";
+      smoke.providerState.providerFlatConfirmed = null;
+      smoke.providerState.residualSpotQuantityXaut = null;
+    },
+    (smoke) => {
+      smoke.providerState.verificationStatus = "unavailable";
+      smoke.providerState.reason = "provider_snapshot_unavailable";
+      smoke.providerState.providerFlatConfirmed = null;
+    },
+    (smoke) => { smoke.providerState.observedAt = smoke.updatedAt + 1; },
     (smoke) => { smoke.receipt.accountFingerprint = "other"; },
     (smoke) => { smoke.timeline.at(-1).code = "invalid"; },
   ];

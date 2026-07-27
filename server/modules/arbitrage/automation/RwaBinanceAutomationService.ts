@@ -1660,7 +1660,12 @@ export class RwaBinanceAutomationService {
   ) {
     const final = await client.readPreflightSnapshot();
     if (!isFreshConnectivitySmokeSnapshot(final, this.now())) {
-      smoke.providerState = providerStateFromSnapshot(final, "stale", "provider_snapshot_stale");
+      smoke.providerState = providerStateFromSnapshot(
+        final,
+        "stale",
+        "provider_snapshot_stale",
+        this.now(),
+      );
       await this.persistConnectivitySmoke(state, smoke);
       throw new RwaNeutralExecutionError(
         409,
@@ -1669,7 +1674,12 @@ export class RwaBinanceAutomationService {
       );
     }
     assertSmokeSnapshot(final, smoke, "flat");
-    smoke.providerState = providerStateFromSnapshot(final, "verified", "provider_flat_confirmed");
+    smoke.providerState = providerStateFromSnapshot(
+      final,
+      "verified",
+      "provider_flat_confirmed",
+      this.now(),
+    );
     smoke.exit.futuresFlatConfirmed = true;
     smoke.exit.spotFlatConfirmed = true;
     smoke.stage = stage;
@@ -1836,7 +1846,12 @@ export class RwaBinanceAutomationService {
       throw error;
     }
     if (!isFreshConnectivitySmokeSnapshot(snapshot, this.now())) {
-      smoke.providerState = providerStateFromSnapshot(snapshot, "stale", "provider_snapshot_stale");
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "stale",
+        "provider_snapshot_stale",
+        this.now(),
+      );
       await this.persistConnectivitySmoke(state, smoke);
       throw new RwaNeutralExecutionError(
         409,
@@ -1872,7 +1887,12 @@ export class RwaBinanceAutomationService {
       || activity.attribution.externalPositionActivity
       || activity.attribution.sources.some((source) => source.externalActivity)
     ) {
-      smoke.providerState = providerStateFromSnapshot(snapshot, "ambiguous", "activity_evidence_incomplete");
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "ambiguous",
+        "activity_evidence_incomplete",
+        this.now(),
+      );
       throw new RwaNeutralExecutionError(
         409,
         "connectivity_smoke_activity_incomplete",
@@ -1881,9 +1901,19 @@ export class RwaBinanceAutomationService {
     }
     try {
       assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder);
-      smoke.providerState = providerStateFromSnapshot(snapshot, "verified", "verified_non_atomic_rest_snapshot");
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "verified",
+        "verified_non_atomic_rest_snapshot",
+        this.now(),
+      );
     } catch (error) {
-      smoke.providerState = providerStateFromSnapshot(snapshot, "ambiguous", "provider_ledger_mismatch");
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "ambiguous",
+        "provider_ledger_mismatch",
+        this.now(),
+      );
       throw error;
     }
     smoke.message = "用户承诺的独占运维窗口；截至扫描 cutoff 未发现 REST 可见外部活动。";
@@ -2977,22 +3007,25 @@ function providerStateFromSnapshot(
   snapshot: RwaBinancePreflightSnapshot,
   verificationStatus: "verified" | "stale" | "ambiguous",
   reason: string,
+  now: number,
 ) {
+  if (!Number.isFinite(snapshot.fetchedAt) || snapshot.fetchedAt < 0 || snapshot.fetchedAt > now) {
+    return unavailableSmokeProviderState("provider_snapshot_time_invalid");
+  }
   const activeTotalOrderCount = snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount;
   return {
     verificationStatus,
-    observedAt: Number.isFinite(snapshot.fetchedAt) && snapshot.fetchedAt >= 0
-      ? snapshot.fetchedAt
-      : null,
+    observedAt: snapshot.fetchedAt,
     residualSpotQuantityXaut: snapshot.existingSpotQuantityXaut,
     residualFuturesQuantityXaut: snapshot.existingPerpetualQuantityXaut,
     activeSpotOrderCount: snapshot.openSpotOrderCount,
     activeFuturesOrderCount: snapshot.openPerpetualOrderCount,
     activeTotalOrderCount,
     providerFlatConfirmed: verificationStatus === "verified"
-      ? snapshot.existingSpotQuantityXaut <= 1e-12
-        && snapshot.existingPerpetualQuantityXaut <= 1e-12
-        && activeTotalOrderCount === 0
+      ? snapshot.existingSpotQuantityXaut === 0
+        && snapshot.existingPerpetualQuantityXaut === 0
+        && snapshot.openSpotOrderCount === 0
+        && snapshot.openPerpetualOrderCount === 0
       : null,
     reason,
   };
