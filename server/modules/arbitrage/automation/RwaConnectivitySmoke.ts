@@ -10,7 +10,7 @@ export const RWA_CONNECTIVITY_SMOKE_MODE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MAX_RECORDS = 100;
 export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-non-atomic-v1" as const;
 export const RWA_CONNECTIVITY_SMOKE_SLIPPAGE_FLOOR_BPS = 10;
-export const RWA_CONNECTIVITY_SMOKE_POLICY = Object.freeze({
+export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
   version: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
   venue: "binance",
   symbol: "XAUTUSDT",
@@ -101,6 +101,12 @@ export function connectivitySmokePolicyDiscovery(
       digest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
     },
   };
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+  for (const nested of Object.values(value)) deepFreeze(nested);
+  return Object.freeze(value);
 }
 
 export type RwaConnectivitySmokePolicyAcceptance = {

@@ -61,6 +61,39 @@ test("connectivity smoke policy discovery is the canonical display and acceptanc
   }));
 });
 
+test("connectivity smoke canonical policy remains digest-consistent after runtime mutation attempts", () => {
+  const first = connectivitySmokePolicyDiscovery("binance:test");
+  const originalPolicy = JSON.stringify(first.policy);
+  const originalDigest = first.policy.digest;
+  const mutable = first.policy as any;
+  for (const mutation of [
+    () => mutable.requiredConfirmations.push("bypass"),
+    () => mutable.exclusiveWindowRules.splice(0, 1),
+    () => { mutable.manualRecoveryRequirements[0] = { code: "bypass", message: "bypass" }; },
+    () => { mutable.residualRisks[0].message = "mutated"; },
+    () => { mutable.exclusiveWindowRules[0].code = "mutated"; },
+  ]) {
+    assert.throws(mutation, TypeError);
+  }
+  const second = connectivitySmokePolicyDiscovery("binance:test");
+  assert.equal(JSON.stringify(second.policy), originalPolicy);
+  assert.equal(second.policy.digest, originalDigest);
+  assert.doesNotThrow(() => assertConnectivitySmokePolicyAcceptance({
+    version: second.policy.version,
+    digest: second.policy.digest,
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  }));
+  assert.throws(() => assertConnectivitySmokePolicyAcceptance({
+    version: second.policy.version,
+    digest: "mutated",
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  }));
+});
+
 test("connectivity smoke budget uses the common step and reserves all four action fees and slippage", () => {
   const result = calculateConnectivitySmokeBudget(snapshot(), 20);
   assert.equal(result.quantityXaut, 0.002);
