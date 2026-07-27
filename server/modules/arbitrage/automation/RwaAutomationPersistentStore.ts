@@ -403,6 +403,14 @@ export class RwaAutomationPersistentStore<
   }
 
   async readState() {
+    return this.readStateInternal(true);
+  }
+
+  async readStateView() {
+    return this.readStateInternal(false);
+  }
+
+  private async readStateInternal(persistMaintenance: boolean) {
     try {
       const metadata = await stat(this.statePath);
       if (metadata.size > this.governanceConfig.stateMaxBytesHard) {
@@ -456,7 +464,10 @@ export class RwaAutomationPersistentStore<
       const rawComparable = JSON.stringify(parsed);
       const normalizedComparable = JSON.stringify(normalized);
       const compactedComparable = JSON.stringify(compacted);
-      if (compactedComparable !== normalizedComparable || normalizedComparable !== rawComparable) {
+      if (
+        persistMaintenance
+        && (compactedComparable !== normalizedComparable || normalizedComparable !== rawComparable)
+      ) {
         await this.writeState(compacted);
       }
       return compacted;

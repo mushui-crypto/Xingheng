@@ -1225,7 +1225,7 @@ export class RwaBinanceAutomationService {
     challengeId: string;
     idempotencyKey: string;
   }) {
-    const state = await this.store.readState();
+    const state = await this.store.readStateView();
     const scopedKey = `${this.store.userDomain}:smoke:${input.idempotencyKey}`;
     const smoke = state.connectivitySmokes.find((item) => item.idempotencyKey === scopedKey);
     if (

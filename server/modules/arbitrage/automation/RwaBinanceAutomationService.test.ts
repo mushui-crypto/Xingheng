@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1427,6 +1427,13 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     ) as any;
     const providerReadsBeforeLookup = client.readCount;
     const providerWritesBeforeLookup = client.writeCount;
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    let persistentWriteCalls = 0;
+    harness.store.writeState = async (state) => {
+      persistentWriteCalls += 1;
+      return originalWriteState(state);
+    };
+    const normalFileBefore = await stateFileIdentity(harness.store.statePath);
     assert.deepEqual(
       await harness.current.lookupConnectivitySmokeExecution({
         accountId,
@@ -1453,6 +1460,31 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     );
     assert.equal(client.readCount, providerReadsBeforeLookup);
     assert.equal(client.writeCount, providerWritesBeforeLookup);
+    assert.equal(persistentWriteCalls, 0);
+    assert.deepEqual(await stateFileIdentity(harness.store.statePath), normalFileBefore);
+
+    const compactable = await harness.store.readStateView();
+    compactable.credentialAudit = Array.from({ length: 501 }, (_, index) => ({
+      userId: "user-a",
+      action: "rotated" as const,
+      accountId,
+      accountFingerprint: "test-account",
+      maskedApiKey: null,
+      occurredAt: index,
+    }));
+    await writeFile(harness.store.statePath, JSON.stringify(compactable), { mode: 0o600 });
+    const compactableFileBefore = await stateFileIdentity(harness.store.statePath);
+    assert.deepEqual(
+      await harness.current.lookupConnectivitySmokeExecution({
+        accountId,
+        challengeId: challenge.challengeId,
+        idempotencyKey: "smoke:normal:0001",
+      }),
+      result,
+    );
+    assert.equal(persistentWriteCalls, 0);
+    assert.deepEqual(await stateFileIdentity(harness.store.statePath), compactableFileBefore);
+    assert.equal((await harness.store.readStateView()).credentialAudit.length, 500);
     assert.equal(result.purpose, "connectivity_smoke");
     assert.equal(result.stage, "flat");
     assert.equal(result.receipt.providerFlatConfirmed, true);
@@ -1917,8 +1949,28 @@ test("Binance connectivity smoke parent state migrates active and terminal recor
       delete smoke.timeline;
       smoke.receipt = smoke.stage === "failed" ? null : smoke.receipt;
     }
-    await writeFile((harness.store as any).statePath, JSON.stringify(legacy), { mode: 0o600 });
+    active.idempotencyKey = `${harness.store.userDomain}:smoke:legacy-r2`;
+    legacy.connectivitySmokes[0].idempotencyKey = active.idempotencyKey;
+    await writeFile(harness.store.statePath, JSON.stringify(legacy), { mode: 0o600 });
+    const legacyFileBefore = await stateFileIdentity(harness.store.statePath);
+    const originalWriteState = harness.store.writeState.bind(harness.store);
+    let persistentWriteCalls = 0;
+    harness.store.writeState = async (nextState) => {
+      persistentWriteCalls += 1;
+      return originalWriteState(nextState);
+    };
+    const found = await harness.current.lookupConnectivitySmokeExecution({
+      accountId,
+      challengeId: challenge.challengeId,
+      idempotencyKey: "legacy-r2",
+    }) as any;
+    assert.equal(found.smokeId, active.smokeId);
+    assert.equal(found.providerState.verificationStatus, "unavailable");
+    assert.equal(found.timeline.at(-1)?.code, "legacy_migration_current_stage");
+    assert.equal(persistentWriteCalls, 0);
+    assert.deepEqual(await stateFileIdentity(harness.store.statePath), legacyFileBefore);
     const migrated = await harness.store.readState();
+    assert.equal(persistentWriteCalls, 1);
     assert.deepEqual(
       migrated.connectivitySmokes.map((smoke) => [
         smoke.stage,
@@ -2293,6 +2345,20 @@ test("Binance connectivity smoke untradeable futures exit becomes manual interve
 
 function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
+}
+
+async function stateFileIdentity(path: string) {
+  const [bytes, metadata] = await Promise.all([
+    readFile(path),
+    stat(path, { bigint: true }),
+  ]);
+  return {
+    bytes: bytes.toString("base64"),
+    inode: metadata.ino,
+    size: metadata.size,
+    modifiedAtNs: metadata.mtimeNs,
+    changedAtNs: metadata.ctimeNs,
+  };
 }
 
 function serviceHarness(
