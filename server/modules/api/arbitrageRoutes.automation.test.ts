@@ -45,6 +45,7 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   let currentTakeoverOwner: string | undefined;
   let abortedTakeoverOwner: string | undefined;
   let policyOwner: string | undefined;
+  let smokeLookupOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
@@ -84,11 +85,17 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
           policy: { version: "v1", digest: "digest" },
         };
       },
+      lookupConnectivitySmokeExecution: async (userId: string, body: unknown) => {
+        smokeLookupOwner = userId;
+        return (body as any).challengeId === "challenge-r2"
+          ? { smokeId: "smoke-r2", stage: "spot_opening" }
+          : null;
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 36);
+  assert.equal(automationRoutes.length, 37);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
   for (const route of [
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",
@@ -127,6 +134,22 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
     executionAuthorized: false,
     policy: { version: "v1", digest: "digest" },
   });
+
+  const lookupResponse = mockResponse();
+  await routes.get("POST /api/arbitrage/automation/connectivity-smoke/lookup")({
+    user: { id: "user-a" },
+    query: {},
+    params: {},
+    body: {
+      accountId: "binance:policy-account",
+      challengeId: "challenge-r2",
+      idempotencyKey: "smoke:lookup:r2",
+    },
+  }, lookupResponse);
+  assert.equal(smokeLookupOwner, "user-a");
+  assert.equal(lookupResponse.statusCode, 200);
+  assert.equal(lookupResponse.headers["Cache-Control"], "no-store");
+  assert.deepEqual(lookupResponse.body, { smokeId: "smoke-r2", stage: "spot_opening" });
 
   const anonymousResponse = mockResponse();
   await routes.get("GET /api/arbitrage/automation/venues")({ params: {}, body: {} }, anonymousResponse);

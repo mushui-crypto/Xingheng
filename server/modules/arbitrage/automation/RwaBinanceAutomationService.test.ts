@@ -1425,6 +1425,34 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     const result = await harness.current.executeConnectivitySmoke(
       smokeExecuteInput(accountId, challenge, "smoke:normal:0001"),
     ) as any;
+    const providerReadsBeforeLookup = client.readCount;
+    const providerWritesBeforeLookup = client.writeCount;
+    assert.deepEqual(
+      await harness.current.lookupConnectivitySmokeExecution({
+        accountId,
+        challengeId: challenge.challengeId,
+        idempotencyKey: "smoke:normal:0001",
+      }),
+      result,
+    );
+    assert.equal(
+      await harness.current.lookupConnectivitySmokeExecution({
+        accountId,
+        challengeId: "different-challenge",
+        idempotencyKey: "smoke:normal:0001",
+      }),
+      null,
+    );
+    assert.equal(
+      await harness.current.lookupConnectivitySmokeExecution({
+        accountId,
+        challengeId: challenge.challengeId,
+        idempotencyKey: "smoke:normal:missing",
+      }),
+      null,
+    );
+    assert.equal(client.readCount, providerReadsBeforeLookup);
+    assert.equal(client.writeCount, providerWritesBeforeLookup);
     assert.equal(result.purpose, "connectivity_smoke");
     assert.equal(result.stage, "flat");
     assert.equal(result.receipt.providerFlatConfirmed, true);

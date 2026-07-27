@@ -124,6 +124,11 @@ export type RwaAutomationConnector = {
     idempotencyKey: string;
     requestDigest: string;
   }): Promise<unknown | null>;
+  lookupConnectivitySmokeExecution?(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+  }): Promise<unknown | null>;
   getConnectivitySmokeStatus?(smokeId?: string): Promise<unknown>;
   getConnectivitySmokeReceipt?(smokeId: string): Promise<unknown>;
   closeAll(input: unknown): Promise<unknown>;

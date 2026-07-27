@@ -181,6 +181,67 @@ test("connectivity smoke Control retry returns the exact persisted result before
   assert.equal(stepUpConsumes, 1);
 });
 
+test("connectivity smoke lost-response lookup returns only the exact accepted execution without initialization", async () => {
+  let initializeCalls = 0;
+  let lookupCalls = 0;
+  const oldExecution = { smokeId: "smoke-r1", stage: "flat" };
+  const acceptedExecution = { smokeId: "smoke-r2", stage: "spot_opening" };
+  const persisted = new Map([
+    ["smoke:lookup:r1", {
+      accountId: "binance:smoke-account",
+      challengeId: "challenge-r1",
+      result: oldExecution,
+    }],
+  ]);
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: "binance:smoke-account",
+    onInitialize: () => { initializeCalls += 1; },
+    smokeLookup: async (lookup) => {
+      lookupCalls += 1;
+      assert.deepEqual(lookup, {
+        accountId: "binance:smoke-account",
+        challengeId: "challenge-r2",
+        idempotencyKey: "smoke:lookup:r2",
+      });
+      const record = persisted.get(lookup.idempotencyKey);
+      return record?.accountId === lookup.accountId && record.challengeId === lookup.challengeId
+        ? record.result
+        : null;
+    },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+  );
+  const query = {
+    accountId: "binance:smoke-account",
+    challengeId: "challenge-r2",
+    idempotencyKey: "smoke:lookup:r2",
+  };
+  assert.equal(await control.lookupConnectivitySmokeExecution("user-a", query), null);
+  persisted.set("smoke:lookup:r2", {
+    accountId: "binance:smoke-account",
+    challengeId: "challenge-r2",
+    result: acceptedExecution,
+  });
+  assert.deepEqual(
+    await control.lookupConnectivitySmokeExecution("user-a", query),
+    acceptedExecution,
+  );
+  assert.equal(lookupCalls, 2);
+  assert.equal(initializeCalls, 0);
+  await assert.rejects(
+    control.lookupConnectivitySmokeExecution("user-a", { ...query, smokeId: "smoke-r1" }),
+    (error: unknown) => error instanceof RwaAutomationControlError && error.category === "invalid_request",
+  );
+  await assert.rejects(
+    control.lookupConnectivitySmokeExecution("user-a", { ...query, accountId: "binance:other" }),
+    (error: unknown) => error instanceof RwaAutomationControlError && error.category === "account_mismatch",
+  );
+});
+
 test("registry propagates unrecoverable monitor startup failures so state or lease errors block listen", async () => {
   const connector = fakeConnector(() => undefined);
   connector.startActivityMonitoring = async () => {
@@ -2137,6 +2198,7 @@ function fakeConnector(
     smokePolicy?: (accountId: string) => Promise<any> | any;
     smokeExecute?: (input: any) => Promise<any>;
     smokeIdempotent?: (input: any) => Promise<any>;
+    smokeLookup?: (input: any) => Promise<any>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -2231,6 +2293,7 @@ function fakeConnector(
     getConnectivitySmokePolicy: options.smokePolicy,
     executeConnectivitySmoke: options.smokeExecute,
     findConnectivitySmokeIdempotent: options.smokeIdempotent,
+    lookupConnectivitySmokeExecution: options.smokeLookup,
     execute: async () => { options.onExecute?.(); return {}; },
     closeAll: async () => ({}),
     finalizeReconciliation: async () => ({}),

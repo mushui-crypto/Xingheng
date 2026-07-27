@@ -1220,6 +1220,22 @@ export class RwaBinanceAutomationService {
     return publicConnectivitySmoke(smoke);
   }
 
+  async lookupConnectivitySmokeExecution(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+  }) {
+    const state = await this.store.readState();
+    const scopedKey = `${this.store.userDomain}:smoke:${input.idempotencyKey}`;
+    const smoke = state.connectivitySmokes.find((item) => item.idempotencyKey === scopedKey);
+    if (
+      !smoke
+      || smoke.accountId !== input.accountId
+      || smoke.challengeId !== input.challengeId
+    ) return null;
+    return publicConnectivitySmoke(smoke);
+  }
+
   async execute(input: unknown) {
     this.assertExecutionLeaseHeld();
     const body = record(input);

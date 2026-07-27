@@ -1144,6 +1144,25 @@ export class RwaAutomationControlService {
     });
   }
 
+  async lookupConnectivitySmokeExecution(userId: string, input: unknown, sourceIp = "unknown") {
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "challengeId", "idempotencyKey"]);
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const challengeId = requiredString(body.challengeId, "challengeId", 100);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 100);
+    if (!/^[A-Za-z0-9:_-]{8,100}$/.test(idempotencyKey)) {
+      throw new RwaAutomationControlError(400, "invalid_request", "idempotencyKey 格式无效。");
+    }
+    this.admitRequest("private_read", sourceIp, userId, "binance");
+    const registry = this.registry(userId);
+    const connector = await registry.findByAccountId(accountId);
+    if (!connector || connector.venue !== "binance" || !connector.lookupConnectivitySmokeExecution) {
+      throw new RwaAutomationControlError(409, "account_mismatch", "accountId 与 Binance 烟测账户不匹配。");
+    }
+    return this.governed("private_read", sourceIp, userId, "binance", accountId, async () =>
+      connector.lookupConnectivitySmokeExecution!({ accountId, challengeId, idempotencyKey }));
+  }
+
   async getConnectivitySmokeReceipt(userId: string, smokeId: string, input: unknown, sourceIp = "unknown") {
     const query = record(input);
     assertOnlyKeys(query, ["accountId"]);

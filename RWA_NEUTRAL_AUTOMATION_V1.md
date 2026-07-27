@@ -420,8 +420,27 @@ Binance Mainnet `XAUTUSDT` 连通性烟测使用独立 `connectivity_smoke` mode
 - `GET /api/arbitrage/automation/connectivity-smoke/policy?accountId=<server-issued-account-id>`
 - `POST /api/arbitrage/automation/connectivity-smoke/preflight`
 - `POST /api/arbitrage/automation/connectivity-smoke/execute`
+- `POST /api/arbitrage/automation/connectivity-smoke/lookup`
 - `GET /api/arbitrage/automation/connectivity-smoke/status`
 - `GET /api/arbitrage/automation/connectivity-smoke/:smokeId/receipt`
+
+`lookup` 是 execute 响应未知时使用的 authenticated、`Cache-Control: no-store`、纯只读精确关联：
+
+```json
+{
+  "accountId": "服务端已绑定的 Binance 账户 ID",
+  "challengeId": "本次 execute 使用的 challenge ID",
+  "idempotencyKey": "本次 execute 使用的幂等键"
+}
+```
+
+响应为精确匹配的 public connectivity smoke status 或 `null`。服务端在当前用户持久域中以
+幂等键唯一定位记录，再精确核对 `accountId`、`challengeId` 及已通过持久 exact schema 验证的
+`requestDigest` 绑定事实；任一不匹配都返回 `null`，绝不回退到账户 latest status。该路径使用
+automation `private_read` admission 和账户归属核验，不初始化 connector、不读取 KMS/provider、
+不消费 challenge/step-up、不创建或更新 smoke/receipt/timeline，也不触发 execute 或任何
+provider mutation。`null` 仅表示截至查询时不能确认服务端已受理，客户端不得据此自动重放
+execute；只能保留未知状态提示，或由用户重新开始一轮明确授权。
 
 Policy discovery 必须在首次 preflight 前可调用。它要求已登录 active 用户及当前用户已绑定的
 Binance `accountId`，使用 automation `private_read` 限流并返回 `Cache-Control: no-store`；
