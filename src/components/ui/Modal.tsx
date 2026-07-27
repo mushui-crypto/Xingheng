@@ -129,7 +129,7 @@ export function Modal({
             {description ? <p className="xh-modal-description">{description}</p> : null}
           </div>
           <Button type="button" className="xh-modal-close" variant="ghost" aria-label="关闭" disabled={closeDisabled} onClick={onClose}>
-            <X size={18} aria-hidden="true" />
+            <X className="shrink-0" size={18} strokeWidth={2} aria-hidden="true" />
           </Button>
         </div>
         <div className="xh-modal-divider" />
