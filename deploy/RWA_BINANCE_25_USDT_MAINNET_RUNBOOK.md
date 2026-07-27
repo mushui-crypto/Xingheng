@@ -7,6 +7,11 @@
 “受控窗口”部分。Secret、TOTP code、恢复码、session token、challenge token、WIF 证书或私钥
 不得发送到聊天、工单、日志或审计导出。
 
+`connectivity_smoke` 的零资金现场准备、只读 UI 环境结论、scanner cutoff、每次 mutation 前后
+观察、`manual_intervention`、最终 flat 双确认和事故恢复门禁，统一使用
+[`CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md`](./CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md)。
+该清单不构成真实窗口授权。
+
 验证范围固定为 Binance Mainnet 专用子账户的 `XAUTUSDT` Spot Buy 与 USD-M Perpetual Sell，
 永续杠杆固定 1x。不得改成 PAXG、BTC、其他 symbol、其他方向或客户端自报数量。
 
