@@ -137,10 +137,16 @@ PASS/FAIL 与时间；任一未知、超时或人员离线立即停止。
   账本，记录新的 scanner cutoff。
 - [ ] 后：只声明“截至该 cutoff 未发现 REST 可见外部活动”；不得声明原子隔离、完全排他或账户
   锁定。任何异常立即停止后续写、激活用户急停并进入人工核对。
+- [ ] 自有 IOC 为 `New` 或 `PartiallyFilled` 时，撤销余量同样属于 provider mutation。撤销前必须
+  用固定 client ID 与 provider order ID 查询并证明它是当前 smoke 唯一自有活动单，再执行与下单
+  相同的 lease、snapshot、scanner 和账本前后门禁；不得撤销未知、外部或归属不完整的订单。
+- [ ] 撤销后必须取得该订单的 provider 权威终态，并确认 Spot/Futures 两侧 open orders 均恢复为
+  0；任一事实不可确认即进入 `manual_intervention`，不得继续下一订单提交或退出提交。
 
-固定 mutation 顺序仅可为：Spot IOC Buy → Futures IOC Sell → Futures reduce-only Buy →
-Spot Sell。退出授权必须在首次 mutation 前与 reservation、`noReopen=true` 一并持久化；恢复只允许
-降低风险，不得补仓或重新开仓。
+固定四个订单提交顺序仅可为：Spot IOC Buy → Futures IOC Sell → Futures reduce-only Buy →
+Spot Sell；过程中对自有 New/PartiallyFilled IOC 的撤余量是额外的 provider mutation，不改变四个
+订单槽位或顺序，也不降低任何 mutation 门禁。退出授权必须在首次 mutation 前与 reservation、
+`noReopen=true` 一并持久化；恢复只允许降低风险，不得补仓或重新开仓。
 
 ### 3. `manual_intervention` 与人工接管
 
@@ -148,8 +154,15 @@ Spot Sell。退出授权必须在首次 mutation 前与 reservation、`noReopen=
   激活用户急停并保持 global/strategy 关闭。
 - [ ] 不重放 execute、不换幂等键、不删除 execution/credential/审计、不恢复旧业务数据，也不以
   代码回滚或清卷替代退出。
-- [ ] 人工退出负责人在 Binance UI 核对并按风险降低原则先平 Futures、再卖 Spot；只处理本次
-  专用空白子账户的 XAUT，不推断未知订单归属。
+- [ ] 给出任何人工数量前，必须按固定 `s1/p1/c1/c2` client ID 与 provider order ID 查询权威订单
+  和成交，并结合最后可信 snapshot 重建 Spot/Futures 每侧 `gross open`、`gross close` 与
+  `remaining`；本地 smoke 账本、provider 事实和固定槽位必须可交叉一致。
+- [ ] 撤销、Futures reduce-only Buy 或 Spot Sell 的人工处置数量，均不得超过 provider 权威证据
+  可证明属于本次 smoke 的对应侧 `remaining`。人工退出负责人只可按风险降低顺序先平 Futures、
+  再卖 Spot，不能把人工接管解释为自动 close 或普遍交易授权。
+- [ ] 禁止使用 `min(provider, ledger)`、账户净额或净 Delta 猜测数量；禁止把专用空白子账户中的
+  全部 XAUT 视为 smoke 归属；禁止调用普通套利 `close-all`。归属未知或证据不一致时保持
+  `manual_intervention` 并升级 Binance 人工核对，不提供猜测数量的交易指令。
 - [ ] 保留稳定错误类别、最后 verified snapshot/cutoff、四个 smoke order 槽位和人工动作时间；
   不保存敏感标识或原始 provider response。
 
@@ -157,6 +170,10 @@ Spot Sell。退出授权必须在首次 mutation 前与 reservation、`noReopen=
 
 - [ ] 系统只读 status/receipt fresh verified：Spot/Futures residual 均为 0，两侧及 total open
   orders 均为 0，`providerFlatConfirmed=true`。
+- [ ] 逐槽核对 `s1/p1/c1/c2`：每个实际发生槽位必须按固定 client ID 查询 provider 权威终态；
+  未发生槽位必须与持久 stage、timeline 和 smoke 账本一致为 `null`，不得用账户净额为 0 代替。
+- [ ] 每个发生槽位的 status、requested/filled quantity、fee、provider order ID 与终态必须和
+  status/receipt/smoke 账本交叉一致；任何活动、未知、缺失或矛盾槽位都禁止签署 flat。
 - [ ] Binance UI 独立确认 Spot XAUT total/free/locked 为 0、Futures XAUT position 为 0、两侧
   XAUT open orders 为 0；系统证据与 UI 证据必须由两人分别确认。
 - [ ] 若数量低于交易最小精度但不为绝对 0，不得签发成功 flat 结论；保持人工处置与窗口未关闭。

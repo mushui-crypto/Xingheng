@@ -12,6 +12,11 @@
 [`CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md`](./CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md)。
 该清单不构成真实窗口授权。
 
+`connectivity_smoke` 禁止使用本文后续普通套利步骤 5–10，也禁止使用普通 opportunity、
+`/preflight`、`/execute`、`/positions`、`/pnl` 或 `close-all` 路径。未来 smoke 真实窗口只能按上述
+专用清单、`connectivity-smoke` 专用 API 与一次完整复合 step-up 的冻结顺序执行，不得与普通套利
+流程混用。
+
 验证范围固定为 Binance Mainnet 专用子账户的 `XAUTUSDT` Spot Buy 与 USD-M Perpetual Sell，
 永续杠杆固定 1x。不得改成 PAXG、BTC、其他 symbol、其他方向或客户端自报数量。
 
@@ -101,7 +106,11 @@ challenge token，不得直接写日志或保存为证据；只提取上述白�
 
 敏感操作必须通过普通用户会话和现有 UI 完成 step-up；不得把 token 放入 shell history。
 
-## 受控窗口步骤
+## 普通套利受控窗口步骤（禁止用于 `connectivity_smoke`）
+
+本节步骤 0–4 的通用部署与身份门禁可作为 smoke 前置证据来源，但步骤 5–10 的开关、普通
+preflight/execute、positions/PnL 和 close-all 语义全部仅属于普通套利，不得用于
+`connectivity_smoke`。
 
 ### 0. 冻结变更与角色
 
