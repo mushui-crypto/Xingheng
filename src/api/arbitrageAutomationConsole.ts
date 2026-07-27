@@ -22,6 +22,16 @@ import type {
   ParameterDraft,
   SafetyAction,
 } from "../features/arbitrageAutomation/model/controlConsoleTypes";
+import type {
+  ConnectivitySmokeAcceptance,
+  ConnectivitySmokeClient,
+  ConnectivitySmokeExecutionRequest,
+  ConnectivitySmokePolicy,
+  ConnectivitySmokePreflight,
+  ConnectivitySmokeReceipt,
+  ConnectivitySmokeStatus,
+  ConnectivitySmokeStepUpRequest,
+} from "../features/arbitrageAutomation/model/connectivitySmokeTypes";
 import type { StepUpIntent } from "../features/arbitrageAutomation/model/stepUpTypes";
 import { normalizeProductAvailability, resolveVenueCapabilities } from "../features/arbitrageAutomation/model/venueCapabilities";
 import { HttpRequestError, requestJson } from "./httpClient";
@@ -368,6 +378,96 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
 }
 
 export const userAutomationConsoleClient = createUserAutomationConsoleClient();
+
+export function createConnectivitySmokeClient(): ConnectivitySmokeClient {
+  return {
+    policy: (accountId, signal) => apiRequest<ConnectivitySmokePolicy>(
+      `${apiBase}/connectivity-smoke/policy?${new URLSearchParams({ accountId })}`,
+      "连通性验证 policy 加载失败。",
+      { signal },
+    ),
+    preflight: async (accountId, policy, acceptance) => {
+      const response = await apiRequest<Omit<ConnectivitySmokePreflight, "idempotencyKey">>(
+        `${apiBase}/connectivity-smoke/preflight`,
+        "连通性验证预检失败。",
+        {
+          method: "POST",
+          body: {
+            accountId,
+            mode: "connectivity_smoke",
+            policyAcceptance: {
+              version: policy.policy.version,
+              digest: policy.policy.digest,
+              ...acceptance,
+            },
+          },
+        },
+      );
+      return {
+        ...response,
+        idempotencyKey: idempotencyKey(`connectivity-smoke:${accountId}`),
+      };
+    },
+    execute: async (request, stepUpToken) => {
+      try {
+        return await apiRequest<ConnectivitySmokeStatus>(
+          `${apiBase}/connectivity-smoke/execute`,
+          "连通性验证执行请求失败。",
+          { method: "POST", body: { ...request, stepUpToken } },
+        );
+      } catch (error) {
+        if (
+          error instanceof AutomationConsoleContractError
+          && ["network_request_failed", "request_aborted"].includes(error.category ?? "")
+        ) {
+          return apiRequest<ConnectivitySmokeStatus | null>(
+            `${apiBase}/connectivity-smoke/status?${new URLSearchParams({ accountId: request.accountId })}`,
+            "执行响应未知，连通性验证状态恢复失败。",
+          );
+        }
+        throw error;
+      }
+    },
+    status: (accountId, smokeId, signal) => apiRequest<ConnectivitySmokeStatus | null>(
+      `${apiBase}/connectivity-smoke/status?${new URLSearchParams({
+        accountId,
+        ...(smokeId ? { smokeId } : {}),
+      })}`,
+      "连通性验证状态加载失败。",
+      { signal },
+    ),
+    receipt: (accountId, smokeId, signal) => apiRequest<ConnectivitySmokeReceipt>(
+      `${apiBase}/connectivity-smoke/${encodeURIComponent(smokeId)}/receipt?${new URLSearchParams({ accountId })}`,
+      "连通性验证凭据加载失败。",
+      { signal },
+    ),
+  };
+}
+
+export const connectivitySmokeClient = createConnectivitySmokeClient();
+
+export async function connectivitySmokeStepUpRequest(
+  preflight: ConnectivitySmokePreflight,
+): Promise<ConnectivitySmokeStepUpRequest> {
+  const request: ConnectivitySmokeExecutionRequest = {
+    accountId: preflight.report.accountId,
+    challengeId: preflight.challengeId,
+    challengeToken: preflight.challengeToken,
+    idempotencyKey: preflight.idempotencyKey,
+    policyVersion: preflight.report.policy.version,
+    policyDigest: preflight.report.policy.digest,
+  };
+  return {
+    request,
+    intent: await createStepUpIntent({
+      operation: "connectivity_smoke_execute",
+      venue: "binance",
+      accountId: request.accountId,
+      resourceId: request.challengeId,
+      requestBody: request,
+    }),
+  };
+}
 
 export async function credentialStepUpIntent(draft: CredentialDraft): Promise<StepUpIntent> {
   return createStepUpIntent({

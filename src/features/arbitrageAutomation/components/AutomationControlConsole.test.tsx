@@ -51,8 +51,26 @@ test("console overview keeps controlled Mainnet boundaries in compact help witho
   assert.doesNotMatch(html, />当前无自动策略候选</);
   assert.match(html, /策略级口径/);
   assert.match(html, /候选与执行/);
+  assert.match(html, /连通性验证/);
   assert.match(html, /安全操作/);
   assert.doesNotMatch(html, /fixture-secret|apiSecret/);
+});
+
+test("connectivity smoke entry is hidden when Binance capability is unavailable", () => {
+  const unavailable = {
+    ...snapshot,
+    credentials: snapshot.credentials.map((credential) => credential.venue === "binance"
+      ? { ...credential, canExecute: false, providerWritesEnabled: false }
+      : credential),
+  };
+  const html = renderToStaticMarkup(
+    <AutomationControlConsole
+      client={createFakeAutomationConsoleClient(unavailable)}
+      onReload={async () => undefined}
+      snapshot={unavailable}
+    />,
+  );
+  assert.doesNotMatch(html, /连通性验证/);
 });
 
 test("asset management is a single XAUT-only task surface without account internals", () => {
