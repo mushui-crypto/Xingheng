@@ -14,10 +14,15 @@ import {
   StatusPanel,
   UnknownExecutionPanel,
   allConfirmed,
+  beginConnectivitySmokeBusy,
   createConnectivitySmokeScope,
+  finishConnectivitySmokeBusy,
+  idleConnectivitySmokeBusy,
   isConnectivitySmokeScopeCurrent,
+  isConnectivitySmokeBusyForScope,
   nextConnectivitySmokeScope,
   providerStateLabel,
+  resetConnectivitySmokeBusyForScope,
   stageLabel,
   statusBlocksNewRun,
 } from "./ConnectivitySmokeConsole";
@@ -125,6 +130,41 @@ test("account generation rejects every deferred A response after switching to B"
   assert.equal(isConnectivitySmokeScopeCurrent(current, createConnectivitySmokeScope("account-b")), false);
   assert.equal(current.accountId, "account-b");
   assert.equal(current.generation, 1);
+});
+
+test("pending A busy resets for B and remains reset across A to B to A", () => {
+  const scopeA0 = createConnectivitySmokeScope("account-a");
+  const pendingA = beginConnectivitySmokeBusy(scopeA0, 1);
+  assert.equal(isConnectivitySmokeBusyForScope(pendingA, scopeA0), true);
+
+  const scopeB1 = nextConnectivitySmokeScope(scopeA0, "account-b");
+  assert.equal(isConnectivitySmokeBusyForScope(pendingA, scopeB1), false);
+  const idleB = resetConnectivitySmokeBusyForScope(pendingA, scopeB1);
+  assert.deepEqual(idleB, idleConnectivitySmokeBusy(scopeB1));
+  assert.equal(isConnectivitySmokeBusyForScope(idleB, scopeB1), false);
+
+  const scopeA2 = nextConnectivitySmokeScope(scopeB1, "account-a");
+  const idleA2 = resetConnectivitySmokeBusyForScope(idleB, scopeA2);
+  assert.deepEqual(idleA2, idleConnectivitySmokeBusy(scopeA2));
+  assert.equal(isConnectivitySmokeBusyForScope(idleA2, scopeA2), false);
+});
+
+test("late A finally cannot clear B busy and old B1 finally cannot clear B2", () => {
+  const scopeA = createConnectivitySmokeScope("account-a");
+  const scopeB = nextConnectivitySmokeScope(scopeA, "account-b");
+  const busyB1 = beginConnectivitySmokeBusy(scopeB, 2);
+
+  const afterLateA = finishConnectivitySmokeBusy(busyB1, scopeA, 1);
+  assert.deepEqual(afterLateA, busyB1);
+  assert.equal(isConnectivitySmokeBusyForScope(afterLateA, scopeB), true);
+
+  const busyB2 = beginConnectivitySmokeBusy(scopeB, 3);
+  const afterLateB1 = finishConnectivitySmokeBusy(busyB2, scopeB, 2);
+  assert.deepEqual(afterLateB1, busyB2);
+  assert.equal(isConnectivitySmokeBusyForScope(afterLateB1, scopeB), true);
+
+  const afterB2 = finishConnectivitySmokeBusy(afterLateB1, scopeB, 3);
+  assert.equal(isConnectivitySmokeBusyForScope(afterB2, scopeB), false);
 });
 
 test("unknown execution UI preserves exact correlation and offers lookup without execute replay", () => {

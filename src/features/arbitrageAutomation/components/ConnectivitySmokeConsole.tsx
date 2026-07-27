@@ -50,6 +50,11 @@ export function ConnectivitySmokeConsole({
   onFeedback: (message: string, tone?: "error" | "info" | "success" | "warning") => void;
   requestStepUp: (intent: StepUpIntent, title: string, description: string) => Promise<string>;
 }) {
+  const scopeRef = useRef(createConnectivitySmokeScope(accountId));
+  if (scopeRef.current.accountId !== accountId) {
+    scopeRef.current = nextConnectivitySmokeScope(scopeRef.current, accountId);
+  }
+  const busyOperationRef = useRef(0);
   const [policy, setPolicy] = useState<ConnectivitySmokePolicy | null>(null);
   const [preflight, setPreflight] = useState<ConnectivitySmokePreflight | null>(null);
   const [status, setStatus] = useState<ConnectivitySmokeStatus | null>(null);
@@ -57,12 +62,9 @@ export function ConnectivitySmokeConsole({
   const [unknownRequest, setUnknownRequest] = useState<ConnectivitySmokeExecutionRequest | null>(null);
   const [confirmations, setConfirmations] = useState(initialConfirmations);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const [busyState, setBusyState] = useState(() => idleConnectivitySmokeBusy(scopeRef.current));
   const [error, setError] = useState("");
-  const scopeRef = useRef(createConnectivitySmokeScope(accountId));
-  if (scopeRef.current.accountId !== accountId) {
-    scopeRef.current = nextConnectivitySmokeScope(scopeRef.current, accountId);
-  }
+  const busy = isConnectivitySmokeBusyForScope(busyState, scopeRef.current);
 
   const loadReadOnly = useCallback(async (signal?: AbortSignal) => {
     const scope = scopeRef.current;
@@ -103,6 +105,8 @@ export function ConnectivitySmokeConsole({
   }, [accountId, client, expectedAccountFingerprint]);
 
   useEffect(() => {
+    const scope = scopeRef.current;
+    setBusyState((current) => resetConnectivitySmokeBusyForScope(current, scope));
     setPolicy(null);
     setPreflight(null);
     setStatus(null);
@@ -152,7 +156,8 @@ export function ConnectivitySmokeConsole({
       || statusBlocksNewRun(status)
     ) return;
     const scope = scopeRef.current;
-    setBusy(true);
+    const operationId = ++busyOperationRef.current;
+    setBusyState(beginConnectivitySmokeBusy(scope, operationId));
     setError("");
     try {
       const next = await client.preflight(accountId, policy, confirmations as ConnectivitySmokeAcceptance);
@@ -168,7 +173,7 @@ export function ConnectivitySmokeConsole({
     } catch (preflightError) {
       if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setError(errorMessage(preflightError));
     } finally {
-      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
+      setBusyState((current) => finishConnectivitySmokeBusy(current, scope, operationId));
     }
   };
 
@@ -176,7 +181,8 @@ export function ConnectivitySmokeConsole({
     if (!preflight || unknownRequest || statusBlocksNewRun(status)) return;
     const scope = scopeRef.current;
     let preparedRequest: ConnectivitySmokeExecutionRequest | null = null;
-    setBusy(true);
+    const operationId = ++busyOperationRef.current;
+    setBusyState(beginConnectivitySmokeBusy(scope, operationId));
     setError("");
     try {
       const prepared = await connectivitySmokeStepUpRequest(preflight);
@@ -231,7 +237,7 @@ export function ConnectivitySmokeConsole({
       }
       setError(errorMessage(executeError));
     } finally {
-      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
+      setBusyState((current) => finishConnectivitySmokeBusy(current, scope, operationId));
     }
   };
 
@@ -239,7 +245,8 @@ export function ConnectivitySmokeConsole({
     if (!unknownRequest || unknownRequest.accountId !== accountId) return;
     const scope = scopeRef.current;
     const request = unknownRequest;
-    setBusy(true);
+    const operationId = ++busyOperationRef.current;
+    setBusyState(beginConnectivitySmokeBusy(scope, operationId));
     setError("");
     try {
       const next = await client.lookup(request);
@@ -257,7 +264,7 @@ export function ConnectivitySmokeConsole({
     } catch (lookupError) {
       if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setError(errorMessage(lookupError));
     } finally {
-      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
+      setBusyState((current) => finishConnectivitySmokeBusy(current, scope, operationId));
     }
   };
 
@@ -616,6 +623,52 @@ export function isConnectivitySmokeScopeCurrent(
   captured: ConnectivitySmokeScope,
 ) {
   return current.accountId === captured.accountId && current.generation === captured.generation;
+}
+
+export type ConnectivitySmokeBusyState = {
+  generation: number;
+  operationId: number;
+  active: boolean;
+};
+
+export function idleConnectivitySmokeBusy(
+  scope: ConnectivitySmokeScope,
+): ConnectivitySmokeBusyState {
+  return { generation: scope.generation, operationId: 0, active: false };
+}
+
+export function beginConnectivitySmokeBusy(
+  scope: ConnectivitySmokeScope,
+  operationId: number,
+): ConnectivitySmokeBusyState {
+  return { generation: scope.generation, operationId, active: true };
+}
+
+export function resetConnectivitySmokeBusyForScope(
+  current: ConnectivitySmokeBusyState,
+  scope: ConnectivitySmokeScope,
+) {
+  return current.generation === scope.generation
+    ? current
+    : idleConnectivitySmokeBusy(scope);
+}
+
+export function finishConnectivitySmokeBusy(
+  current: ConnectivitySmokeBusyState,
+  scope: ConnectivitySmokeScope,
+  operationId: number,
+) {
+  return current.generation === scope.generation
+    && current.operationId === operationId
+    ? { ...current, active: false }
+    : current;
+}
+
+export function isConnectivitySmokeBusyForScope(
+  current: ConnectivitySmokeBusyState,
+  scope: ConnectivitySmokeScope,
+) {
+  return current.generation === scope.generation && current.active;
 }
 
 function assertConnectivitySmokeStatusScope(
