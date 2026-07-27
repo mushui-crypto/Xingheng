@@ -409,6 +409,226 @@ Binance preflight 会重读机会与私有账户，分别核对现货/期货可�
 `connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，
 不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。未来烟测预算按动态最小共同数量计算。
 
+### 独立 connectivity smoke 契约
+
+Binance Mainnet `XAUTUSDT` 连通性烟测使用独立 `connectivity_smoke` mode、execution purpose、
+`rwacs` client order ID 前缀、持久状态和只读 receipt；不依赖公开 opportunity、Funding、APR、
+基差或 `automationEligible`，也不进入套利 execution、positions、PnL、Funding 或绩效。
+
+新增 additive API：
+
+- `GET /api/arbitrage/automation/connectivity-smoke/policy?accountId=<server-issued-account-id>`
+- `POST /api/arbitrage/automation/connectivity-smoke/preflight`
+- `POST /api/arbitrage/automation/connectivity-smoke/execute`
+- `POST /api/arbitrage/automation/connectivity-smoke/lookup`
+- `GET /api/arbitrage/automation/connectivity-smoke/status`
+- `GET /api/arbitrage/automation/connectivity-smoke/:smokeId/receipt`
+
+`lookup` 是 execute 响应未知时使用的 authenticated、`Cache-Control: no-store`、纯只读精确关联：
+
+```json
+{
+  "accountId": "服务端已绑定的 Binance 账户 ID",
+  "challengeId": "本次 execute 使用的 challenge ID",
+  "idempotencyKey": "本次 execute 使用的幂等键"
+}
+```
+
+响应为精确匹配的 public connectivity smoke status 或 `null`。服务端在当前用户持久域中以
+幂等键唯一定位记录，再精确核对 `accountId`、`challengeId` 及已通过持久 exact schema 验证的
+`requestDigest` 绑定事实；任一不匹配都返回 `null`，绝不回退到账户 latest status。该路径使用
+automation `private_read` admission 和账户归属核验，不初始化 connector、不读取 KMS/provider、
+不消费 challenge/step-up、不创建或更新 smoke/receipt/timeline，也不触发 execute 或任何
+provider mutation；遇到合法 legacy migration 或 compaction 候选时只生成内存逻辑视图，
+不得执行维护性持久回写。`null` 仅表示截至查询时不能确认服务端已受理，客户端不得据此自动重放
+execute；只能保留未知状态提示，或由用户重新开始一轮明确授权。
+
+Policy discovery 必须在首次 preflight 前可调用。它要求已登录 active 用户及当前用户已绑定的
+Binance `accountId`，使用 automation `private_read` 限流并返回 `Cache-Control: no-store`；
+只读取本地非敏感账户 metadata 和服务端 canonical policy，不初始化 connector、不读取 KMS
+明文或 provider 私有状态，也不产生 provider 写。响应 exact contract 为：
+
+```json
+{
+  "mode": "connectivity_smoke",
+  "venue": "binance",
+  "accountId": "服务端已绑定账户 ID",
+  "executionAuthorized": false,
+  "message": "此响应仅用于展示并确认当前服务端 policy，不表示 preflight 通过、执行开关开启或真实窗口已授权。",
+  "policy": {
+    "version": "connectivity-smoke-non-atomic-v1",
+    "venue": "binance",
+    "symbol": "XAUTUSDT",
+    "maxPlannedCapitalUsd": 25,
+    "dedicatedBlankSubaccount": true,
+    "singleExecution": true,
+    "immediateExit": true,
+    "challengeTtlMs": 60000,
+    "continuity": "non_atomic_incomplete",
+    "requiredConfirmations": ["exclusive_window", "manual_recovery", "non_atomic_risk"],
+    "exclusiveWindowRules": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "manualRecoveryRequirements": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "residualRisks": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "digest": "canonical policy 的 SHA-256 base64url"
+  }
+}
+```
+
+`policy`（不含 `digest`）是 version/digest/preflight validator 的唯一事实源。前端必须完整展示
+服务端返回的 code/message，并将返回的 version/digest 原样用于 `policyAcceptance`；不得硬编码
+digest。policy 内容更新会生成新 digest，旧 acceptance 继续由 preflight exact-match fail-closed。
+Discovery 不表示凭证 active、preflight 已通过、执行开关开启或真实 Mainnet 窗口已授权。
+
+Preflight 请求固定为（policy version/digest 是稳定契约，不保存 TOTP 或凭证）：
+
+```json
+{
+  "accountId": "服务端返回的 Binance 账户 ID",
+  "mode": "connectivity_smoke",
+  "policyAcceptance": {
+    "version": "connectivity-smoke-non-atomic-v1",
+    "digest": "服务端公布的 policy SHA-256 base64url digest",
+    "exclusiveWindowConfirmed": true,
+    "manualRecoveryConfirmed": true,
+    "nonAtomicRiskAccepted": true
+  }
+}
+```
+
+Execute 请求沿用 challenge、幂等和 step-up 字段；step-up operation 固定为
+`connectivity_smoke_execute`，并携带与 preflight 相同的 `policyVersion`、`policyDigest`，绑定
+user/account fingerprint、Binance XAUTUSDT、25U 上限、单 execution、立即退出、短 TTL、人工
+恢复能力和非原子风险确认的完整复合动作。用户明确承诺该窗口内不使用 Binance UI、其他 API Key、
+转账或其他系统操作 XAUT。首次 provider mutation 前必须
+持久化 reservation、`noReopen=true` 和授权退出事实。单账户同时只允许一个 active smoke；同一
+幂等键在 user/account/challenge/request digest 完全相同时只读返回原记录，不再次消费 step-up；
+任一字段冲突均拒绝，不能重新开仓。
+
+25 USDT 是 Spot 名义 + Futures 1x 保证金 + Spot 买卖两次 taker fee + Futures 开平两次 taker
+fee + 四动作保守滑点 + 取整准备的总硬预算。数量按两侧实时最小数量、最小名义和共同步长动态
+计算；Spot/Futures 余额分别核对。任一侧不足或规则不满足时 provider 写调用为 0。
+
+状态阶段固定为 `reserved / spot_opening / spot_open / futures_opening / hedged /
+futures_closing / spot_closing / flat / failed / manual_intervention`。开始窗口要求 Spot
+total/free/locked、Futures position 和两侧 open orders 全部为 0。每次 mutation 后以 provider
+权威订单终态、成交、仓位、余额和 open orders 核对；任何外部 XAUT 活动、未知归属或数量超过
+smoke 账本都进入 `manual_intervention`。每次 provider mutation 前后均复核执行租约、账户快照、
+四个固定 `rwacs` client ID 的订单/成交，以及真实 provider scanner 可获得的订单、成交、
+position/income、充值提现、内部及子账户划转来源；来源失败、分页不完整、非法值或 REST 可见的
+非 `rwacs` XAUT 活动均停止后续自动写。scanner 证据始终标记 `nonAtomic/incomplete`：这只是
+“用户承诺的独占运维窗口；截至扫描 cutoff 未发现 REST 可见外部活动”，不表示账户锁定、原子隔离
+或完全排他，也不得用于套利或普通退出。退出顺序固定为 Futures reduce-only Buy 后 Spot Sell。
+
+恢复只允许风险降低：零 mutation reservation 直接 `failed`；Spot 成交后仅撤余量/卖 Spot；
+Futures 成交后不补仓，只先平 Futures 再卖 Spot；退出中先按固定 client order ID 查询既有退出
+订单。provider 已 flat 但本地未完成时只补 `flat` 和 receipt。provider、租约或 KMS 无法确认时
+进入 `manual_intervention` 并激活用户急停。Status 和 receipt 是 `no-store` 的用户/账户隔离只读
+响应，只公开本次 smoke 的安全摘要，不返回 secret、token、IP、challenge/step-up token、凭证、
+非 smoke 订单或 raw provider 数据。Status 在所有执行阶段返回持久化的 `policyVersion /
+policyDigest`、四个固定订单槽位、最近一次 provider 核验状态和实际发生的阶段时间线：
+
+```json
+{
+  "orders": {
+    "spotOpen": null,
+    "futuresOpen": null,
+    "futuresClose": null,
+    "spotClose": null
+  },
+  "providerState": {
+    "verificationStatus": "verified|stale|unavailable|ambiguous",
+    "observedAt": null,
+    "residualSpotQuantityXaut": null,
+    "residualFuturesQuantityXaut": null,
+    "activeSpotOrderCount": null,
+    "activeFuturesOrderCount": null,
+    "activeTotalOrderCount": null,
+    "providerFlatConfirmed": null,
+    "reason": "stable_code"
+  },
+  "timeline": [{ "stage": "reserved", "at": 0, "code": "reserved" }]
+}
+```
+
+非空订单槽位只包含 `orderId / orderLinkId / category / side / status /
+requestedQuantityXaut / filledQuantityXaut / averagePriceUsd / feeUsd / reduceOnly /
+updatedAt`；`orderLinkId` 必须是该 smoke 的固定 `s1/p1/c1/c2`。`providerState` 只表示
+`observedAt` 时 REST 可见、仍为 non-atomic/incomplete 的核验结果；不可读、证据不完整或归属
+不明确时数量可为 `null`，并以稳定 reason 告知前端人工登录 Binance，不允许前端自行推算。
+所有 `verified` 及成功 flat receipt 使用同一私有快照 freshness 边界
+`RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS`：刚好等于阈值仍有效；超龄、future 或非法
+`fetchedAt` 均不能作为 current 事实。超龄但合法且不晚于 record `updatedAt` 的时间持久化为
+`stale / provider_snapshot_stale`，保留完整 snapshot facts；future、NaN、Infinity 或负时间
+降级为 `unavailable / provider_snapshot_time_invalid`，`observedAt` 及所有 snapshot facts 均为
+`null`，不能公开 future provider 时间。两者都要求 `providerFlatConfirmed=null`，不能继续依赖
+current verified 证据的 mutation，也不能形成成功 receipt。
+
+`providerState` 的状态事实为 exact 判别式：
+
+- `verified`：observedAt 必须有效且不晚于 record updatedAt；Spot/Futures residual、两侧及 total
+  active-order count 必须完整、有限、非负，count 为整数且 total 等于两侧之和；
+  `providerFlatConfirmed` 必须为 boolean，并且仅在 residual 0/0、两侧 count 0/0 时为 true，
+  其他 verified snapshot 必须为 false。reason 仅允许冻结的 verified 类别。
+- `stale`：同样保留完整 snapshot facts，reason 固定 `provider_snapshot_stale`，
+  `providerFlatConfirmed=null`。
+- `ambiguous`：保留完整 snapshot facts，reason 仅允许 scanner/activity evidence incomplete 或
+  provider-ledger mismatch 冻结类别，`providerFlatConfirmed=null`。
+- `unavailable`：observedAt、所有 residual/count 和 providerFlatConfirmed 必须全部为 null，
+  reason 仅允许 not-yet-observed、provider read unavailable、invalid provider time 或 legacy
+  migration 冻结类别。
+
+持久化与备份复用同一 smoke 事实校验。四个订单槽位严格绑定当前 `orderLinkPrefix` 的
+`s1/p1/c1/c2`；槽位分别决定 Spot Buy、Futures Sell、Futures reduce-only Buy、Spot Sell 的
+公开 metadata。非空订单必须具有合法 provider status、非负有限 requested/filled/position/fee、
+`filled <= requested`、合法均价/时间，并与 opened ledger 一致。成功 receipt 只允许出现在
+`stage=flat` 且两侧 exit confirmed、最近 providerState 为 fresh verified、Spot/Futures residual
+和两侧 open-order count 全为 0、total count 等于两侧之和且为 0 时；receipt 的 smoke/account/
+policy/budget/opened quantities/final quantities/completedAt 必须与持久记录及时间线一致。
+
+时间线只追加实际持久化的 stage 变化，不补造未发生阶段，备份恢复保持一致。首事件固定
+`reserved/reserved`，普通事件 code 固定为 `stage_<stage>`，时间非递减且位于 record 生命周期，
+末事件必须等于当前 stage。合法图为：
+
+```text
+reserved -> spot_opening | failed | manual_intervention
+spot_opening -> spot_open | spot_closing | flat | failed | manual_intervention
+spot_open -> futures_opening | spot_closing | failed | manual_intervention
+futures_opening -> hedged | futures_closing | spot_closing | flat | failed | manual_intervention
+hedged -> futures_closing | spot_closing | flat | failed | manual_intervention
+futures_closing -> spot_closing | flat | failed | manual_intervention
+spot_closing -> flat | failed | manual_intervention
+```
+
+父版本迁移严格按“候选识别 → 完整父 schema 验证 → 降级转换 → 新 schema 验证”执行。只有恰好
+缺少 `providerState` 与 `timeline`、顶层 key 完全匹配父版本，并且 authorization、budget/prices、
+四个固定订单槽位、opened ledger、exit、stage、IDs、policy、数量、record/order timestamps 和
+旧 receipt 的 exact keys/identity/budget/opened/final/completedAt 全部合法的记录，才会在 Store
+读取或 Backup 验证/恢复时原子 additive 迁移。随后 providerState 降级为
+`unavailable / legacy_provider_state_unavailable`，所有 residual/count 为 `null`；timeline 仅记录
+`legacy_migration_reserved` 和当前持久 stage 的 `legacy_migration_current_stage`，不补造中间阶段。
+旧成功 receipt 因未持久新契约要求的权威快照而清空为 unavailable，绝不迁成 verified 成功。
+旧 receipt、订单、预算、退出或时间任一畸形都必须在清空旧 receipt 之前被拒绝，不能借迁移洗白。
+只缺一个新字段、含 unknown 字段或其他畸形记录不适用迁移并 fail-closed。Active 旧记录在任何
+provider mutation 前仍必须重新取得 fresh 权威证据；terminal 旧记录保持只读。
+
+Flat receipt 复用四单摘要和时间线，并要求 `finalProviderState` 权威确认 Spot/Futures 残余及
+两侧活动订单均为 0。它返回 policy 接受确认事实；只有历史 version/digest 与当前 canonical
+policy 完全一致时才联结当前披露全文，否则返回
+`disclosureAvailability="unavailable_for_historical_digest"`，不得用当前文案冒充历史 policy。
+实际指标采用统一 `{ availability, value, reason }`：
+
+- `actualFeesUsd` 仅在四单权威 fee 全部存在且有效时求和，否则
+  `unavailable / authoritative_fee_inputs_incomplete`。
+- 当前未持久化无歧义的逐动作 reference price，因此 `actualSlippageUsd` 返回
+  `unavailable / authoritative_reference_prices_not_persisted`。
+- 当前未持久化可完整证明 smoke 实际收益的全部权威输入，因此 `actualRealizedPnlUsd` 返回
+  `unavailable / authoritative_pnl_inputs_not_persisted`。
+
+预算和 fee/slippage reserve 始终是 `planned` 风险上界，不能填入上述 actual 指标；smoke 仍不
+进入普通 positions/PnL/Funding/绩效。已接受残余风险包括 scan cutoff 到 mutation 的竞态、历史接口延迟、人工
+同净额往返可能不可见、资产可替代导致经济归属无法数学证明，以及 25U 仅为计划资本上限而非最大
+损失保证。
+
 ### 持仓、PnL 与退出
 
 - `GET /api/arbitrage/automation/positions`

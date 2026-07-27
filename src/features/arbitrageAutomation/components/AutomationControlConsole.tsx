@@ -16,6 +16,7 @@ import {
 import React, { useEffect, useRef, useState } from "react";
 import {
   AutomationConsoleContractError,
+  connectivitySmokeClient,
   credentialDeleteStepUpIntent,
   credentialStepUpIntent,
   executionStepUpIntent,
@@ -39,6 +40,7 @@ import { Toast, useTradingToast } from "../../trading/components/TradingFeedback
 import type {
   AssetManagementClient,
 } from "../model/assetManagementTypes";
+import type { ConnectivitySmokeClient } from "../model/connectivitySmokeTypes";
 import type {
   AutomationCandidate,
   AutomationConsoleClient,
@@ -77,6 +79,7 @@ import { AutomationParameters } from "./AutomationParameters";
 import { AutomationPositions } from "./AutomationPositions";
 import { AutomationSafety } from "./AutomationSafety";
 import { AutomationStepUpSecurity } from "./AutomationStepUpSecurity";
+import { ConnectivitySmokeConsole } from "./ConnectivitySmokeConsole";
 import { StatusTag, formatDate, formatMoney, venueLabel } from "./AutomationConsoleShared";
 
 const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNode }> = [
@@ -86,6 +89,7 @@ const tabs: Array<{ id: AutomationConsoleTab; label: string; icon: React.ReactNo
   { id: "assets", label: "资产管理", icon: <PackageCheck size={15} /> },
   { id: "credentials", label: "API 账户", icon: <KeyRound size={15} /> },
   { id: "parameters", label: "参数", icon: <Settings2 size={15} /> },
+  { id: "connectivity", label: "连通性验证", icon: <ShieldCheck size={15} /> },
   { id: "safety", label: "安全操作", icon: <ShieldAlert size={15} /> },
 ];
 
@@ -124,12 +128,14 @@ export function AutomationControlConsole({
   client,
   onReload,
   securityClient = stepUpSecurityClient,
+  smokeClient = connectivitySmokeClient,
   assetClient,
   snapshot,
 }: {
   client: AutomationConsoleClient;
   onReload: () => Promise<void>;
   securityClient?: StepUpSecurityClient;
+  smokeClient?: ConnectivitySmokeClient;
   assetClient?: AssetManagementClient;
   snapshot: AutomationConsoleSnapshot;
 }) {
@@ -159,6 +165,15 @@ export function AutomationControlConsole({
     .join("|");
   const stepUpAccountScopeRef = useRef(accountScope);
   const reconciliationInFlightRef = useRef(new Set<string>());
+  const connectivityCredential = snapshot.credentials.find((credential) => (
+    credential.venue === "binance"
+    && credential.accountId
+    && credential.canExecute
+    && credential.providerWritesEnabled
+  ));
+  const visibleTabs = connectivityCredential
+    ? tabs
+    : tabs.filter((tab) => tab.id !== "connectivity");
 
   useEffect(() => {
     setPreflight(null);
@@ -167,6 +182,10 @@ export function AutomationControlConsole({
     setPreflightChecks({});
     setPreflightPhrase("");
   }, [accountScope, snapshot.generatedAt]);
+
+  useEffect(() => {
+    if (activeTab === "connectivity" && !connectivityCredential) setActiveTab("overview");
+  }, [activeTab, connectivityCredential]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -583,7 +602,7 @@ export function AutomationControlConsole({
           aria-label="套利自动化控制台"
           className="no-scrollbar flex min-w-0 flex-1 gap-2 overflow-x-auto"
         >
-          {tabs.map((tab) => (
+          {visibleTabs.map((tab) => (
             <button
               aria-current={activeTab === tab.id ? "page" : undefined}
               className={`inline-flex min-h-11 shrink-0 items-center gap-2 border-b-2 px-3 text-sm font-semibold transition ${
@@ -650,6 +669,15 @@ export function AutomationControlConsole({
           controls={snapshot.venueControls}
           onValidate={validateParameters}
           parameters={snapshot.parameters}
+        />
+      ) : null}
+      {activeTab === "connectivity" && connectivityCredential?.accountId ? (
+        <ConnectivitySmokeConsole
+          accountId={connectivityCredential.accountId}
+          client={smokeClient}
+          expectedAccountFingerprint={connectivityCredential.uidFingerprint}
+          onFeedback={showToast}
+          requestStepUp={requestStepUp}
         />
       ) : null}
       {activeTab === "safety" ? (

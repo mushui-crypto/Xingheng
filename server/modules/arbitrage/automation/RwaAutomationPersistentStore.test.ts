@@ -168,6 +168,44 @@ test("legacy state defaults to no asset authorization while new exact state pers
   }
 });
 
+test("readStateView validates and normalizes in memory without persisting maintenance", async () => {
+  const fixture = await createFixture("user-a", "bybit");
+  try {
+    const state = await fixture.store.readState();
+    await fixture.store.writeState(state);
+    const persisted = JSON.parse(await readFile(fixture.store.statePath, "utf8"));
+    delete persisted.assetAuthorizations;
+    persisted.credentialAudit = Array.from({ length: 501 }, (_, index) => ({
+      userId: "user-a",
+      action: "rotated",
+      accountId: "bybit:test-account",
+      accountFingerprint: "test-account",
+      maskedApiKey: null,
+      occurredAt: index,
+    }));
+    await writeFile(fixture.store.statePath, JSON.stringify(persisted), { mode: 0o600 });
+    const before = await fileIdentity(fixture.store.statePath);
+    const originalWriteState = fixture.store.writeState.bind(fixture.store);
+    let writes = 0;
+    fixture.store.writeState = async (nextState) => {
+      writes += 1;
+      return originalWriteState(nextState);
+    };
+
+    const view = await fixture.store.readStateView();
+    assert.deepEqual(view.assetAuthorizations, []);
+    assert.equal(view.credentialAudit.length, 500);
+    assert.equal(writes, 0);
+    assert.deepEqual(await fileIdentity(fixture.store.statePath), before);
+
+    await fixture.store.readState();
+    assert.equal(writes, 1);
+    assert.notDeepEqual(await fileIdentity(fixture.store.statePath), before);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("partial or cross-domain authorization schema and capacity overflow fail closed", async () => {
   const fixture = await createFixture("user-a", "bybit");
   try {
@@ -756,4 +794,18 @@ function authorizationRecord(
 function omit<T extends Record<string, unknown>, K extends keyof T>(value: T, key: K): Omit<T, K> {
   delete value[key];
   return value;
+}
+
+async function fileIdentity(path: string) {
+  const [bytes, metadata] = await Promise.all([
+    readFile(path),
+    stat(path, { bigint: true }),
+  ]);
+  return {
+    bytes: bytes.toString("base64"),
+    inode: metadata.ino,
+    size: metadata.size,
+    modifiedAtNs: metadata.mtimeNs,
+    changedAtNs: metadata.ctimeNs,
+  };
 }

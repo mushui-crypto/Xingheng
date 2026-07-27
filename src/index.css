@@ -1003,6 +1003,10 @@ textarea {
     @apply h-9 w-9 shrink-0 border border-[#2b2b2b] px-0 text-[#f5f5f5] hover:border-white/40 hover:bg-white/[0.04] hover:text-white;
   }
 
+  .xh-modal-close svg {
+    @apply block h-[18px] w-[18px] shrink-0;
+  }
+
   .xh-modal-divider {
     @apply mx-4 h-px bg-[#2b2b2b] sm:mx-6;
   }

@@ -6,6 +6,7 @@ export type StepUpOperation =
   | "execution_enable"
   | "kill_switch_disable"
   | "hedge_execute"
+  | "connectivity_smoke_execute"
   | "position_close"
   | "close_all"
   | "reconciliation_finalize"

@@ -115,6 +115,22 @@ export type RwaAutomationConnector = {
   getReconciliation(input?: unknown): Promise<unknown>;
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode): Promise<{ challengeId: string; challengeToken: string; expiresAt: number; report: unknown }>;
   execute(input: unknown): Promise<unknown>;
+  preflightConnectivitySmoke?(accountId: string, policyAcceptance: unknown): Promise<unknown>;
+  getConnectivitySmokePolicy?(accountId: string): Promise<unknown> | unknown;
+  executeConnectivitySmoke?(input: unknown): Promise<unknown>;
+  findConnectivitySmokeIdempotent?(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+    requestDigest: string;
+  }): Promise<unknown | null>;
+  lookupConnectivitySmokeExecution?(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+  }): Promise<unknown | null>;
+  getConnectivitySmokeStatus?(smokeId?: string): Promise<unknown>;
+  getConnectivitySmokeReceipt?(smokeId: string): Promise<unknown>;
   closeAll(input: unknown): Promise<unknown>;
   finalizeReconciliation(input: unknown): Promise<unknown>;
 };

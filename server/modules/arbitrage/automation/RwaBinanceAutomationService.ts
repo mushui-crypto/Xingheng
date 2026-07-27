@@ -59,8 +59,10 @@ import {
   RwaExecutionSafetyError,
   type RwaPreflightReport,
   type RwaPositionAttributionSnapshot,
+  type RwaProviderOrder,
 } from "./RwaNeutralExecutionTypes";
 import {
+  createUnmonitoredActivityContinuity,
   mergeActivitySnapshot,
   recordStrategyProviderOrder,
   RWA_ACTIVITY_POLL_INTERVAL_MS,
@@ -75,6 +77,22 @@ import {
   RWA_ASSET_RUNTIME_PUBLIC_POLL_INTERVAL_MS,
   type RwaAssetTakeoverExitPreview,
 } from "./RwaAssetTakeoverRuntime";
+import {
+  appendConnectivitySmokeTimeline,
+  calculateConnectivitySmokeBudget,
+  assertConnectivitySmokePolicyAcceptance,
+  connectivitySmokePolicyDiscovery,
+  isActiveConnectivitySmoke,
+  newSmokeOrderPrefix,
+  RWA_CONNECTIVITY_SMOKE_PURPOSE,
+  RWA_CONNECTIVITY_SMOKE_POLICY,
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+  RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS,
+  type RwaConnectivitySmokePolicyAcceptance,
+  type RwaConnectivitySmokeChallengeReport,
+  type RwaConnectivitySmokeRecord,
+} from "./RwaConnectivitySmoke";
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
@@ -88,6 +106,10 @@ export class RwaBinanceAutomationService {
   private activityMonitor: ReturnType<typeof setInterval> | null = null;
   private takeoverMonitor: ReturnType<typeof setInterval> | null = null;
   private readonly armedChallengeIds = new Set<string>();
+  private readonly armedSmokeChallenges = new Map<string, {
+    tokenHash: string;
+    report: RwaConnectivitySmokeChallengeReport;
+  }>();
   private credentialLifecycleOverride: RwaCredentialLifecycle | null = null;
   private readonly publicClient: RwaBinanceClient;
   private readonly hedgeEngine: RwaNeutralHedgeExecutionEngine;
@@ -133,9 +155,11 @@ export class RwaBinanceAutomationService {
   async initialize() {
     this.assertExecutionLeaseHeld();
     this.armedChallengeIds.clear();
+    this.armedSmokeChallenges.clear();
     await this.withLock(async () => {
       if (!(await this.store.hasCredentials()) || !this.store.masterKeyConfigured) return;
       const state = await this.store.readState();
+      await this.recoverConnectivitySmoke(state);
       const pending = state.executions.filter((item) => executionStates.has(item.state));
       if (!pending.length) return;
       let client: RwaBinanceClient;
@@ -383,6 +407,10 @@ export class RwaBinanceAutomationService {
 
   async getConfiguredAccountId() {
     return (await this.store.readCredentialMetadata())?.accountId ?? null;
+  }
+
+  getConnectivitySmokePolicy(accountId: string) {
+    return connectivitySmokePolicyDiscovery(accountId);
   }
 
   assertRiskCapacity() {
@@ -891,6 +919,17 @@ export class RwaBinanceAutomationService {
     const state = await this.store.readState();
     return {
       items: state.credentialAudit.slice(-200).reverse(),
+      connectivitySmoke: state.connectivitySmokes.slice(-100).reverse().map((smoke) => ({
+        smokeId: smoke.smokeId,
+        purpose: smoke.purpose,
+        accountFingerprint: smoke.accountFingerprint,
+        stage: smoke.stage,
+        budgetUsd: smoke.budget.totalCapitalUsd,
+        providerMutationCount: smoke.providerMutationCount,
+        errorCategory: smoke.errorCategory,
+        createdAt: smoke.createdAt,
+        updatedAt: smoke.updatedAt,
+      })),
       alert: state.credentialAlert,
       phase: "execution_capable",
       providerWritesEnabled: true,
@@ -950,6 +989,251 @@ export class RwaBinanceAutomationService {
       this.armedChallengeIds.add(challengeId);
       return { challengeId, challengeToken, expiresAt: report.expiresAt, report };
     });
+  }
+
+  async preflightConnectivitySmoke(
+    accountId: string,
+    policyAcceptance: RwaConnectivitySmokePolicyAcceptance,
+  ) {
+    this.assertExecutionLeaseHeld();
+    try {
+      assertConnectivitySmokePolicyAcceptance(policyAcceptance);
+    } catch {
+      throw new RwaNeutralExecutionError(400, "connectivity_smoke_policy_invalid", "connectivity smoke 运维窗口承诺无效或已过期。");
+    }
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      this.assertEntrySwitches(state.config);
+      if (state.connectivitySmokes.some(isActiveConnectivitySmoke)) {
+        throw new RwaNeutralExecutionError(409, "connectivity_smoke_active", "当前账户已有进行中的连通性烟测。");
+      }
+      if (
+        state.executions.some((item) => !["closed", "reconciled", "failed"].includes(item.state))
+        || state.assetTakeovers.some((item) => !["failed", "exited"].includes(item.state))
+      ) {
+        throw new RwaNeutralExecutionError(
+          409,
+          "connectivity_smoke_account_not_exclusive",
+          "当前账户存在其他自动执行或资产接管状态，禁止开启独占烟测窗口。",
+        );
+      }
+      const metadata = await this.requireMetadata();
+      assertAccountId(accountId, metadata.accountId);
+      const client = await this.clientForNewRisk(state, metadata);
+      await this.validateActiveAccess(client, accountId, state);
+      const snapshot = await client.readPreflightSnapshot()
+        .catch((error) => { throw providerError(error, "Binance smoke preflight 读取失败。"); });
+      assertAccountId(snapshot.accountId, accountId);
+      const budget = calculateConnectivitySmokeBudget(snapshot, state.config.maxCombinedSlippageBps);
+      const checks = smokePreflightChecks(snapshot, budget, this.now());
+      const generatedAt = this.now();
+      const report: RwaConnectivitySmokeChallengeReport = {
+        purpose: RWA_CONNECTIVITY_SMOKE_PURPOSE,
+        mode: "connectivity_smoke",
+        venue: "binance",
+        network: "binance_mainnet",
+        accountId,
+        accountFingerprint: snapshot.accountFingerprint,
+        symbol: "XAUTUSDT",
+        policy: {
+          version: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+          digest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+          accepted: true,
+          continuity: "nonAtomic/incomplete",
+        },
+        budget,
+        checks,
+        passed: checks.every((item) => item.passed),
+        generatedAt,
+        expiresAt: generatedAt + challengeTtlMs,
+      };
+      if (!report.passed) {
+        throw new RwaNeutralExecutionError(
+          409,
+          "connectivity_smoke_preflight_rejected",
+          "Binance 连通性烟测 preflight 未通过，provider 写调用保持为 0。",
+          { report },
+        );
+      }
+      const challengeId = randomBytes(18).toString("base64url");
+      const challengeToken = randomBytes(32).toString("base64url");
+      this.armedSmokeChallenges.set(challengeId, { tokenHash: hash(challengeToken), report });
+      return { challengeId, challengeToken, expiresAt: report.expiresAt, report };
+    });
+  }
+
+  async executeConnectivitySmoke(input: unknown) {
+    this.assertExecutionLeaseHeld();
+    const body = record(input);
+    assertOnlyKeys(body, ["accountId", "challengeId", "challengeToken", "idempotencyKey", "requestDigest", "policyVersion", "policyDigest"]);
+    const accountId = requiredString(body.accountId, "accountId", 100);
+    const challengeId = requiredString(body.challengeId, "challengeId", 100);
+    const challengeToken = requiredString(body.challengeToken, "challengeToken", 200);
+    const idempotencyKey = requiredString(body.idempotencyKey, "idempotencyKey", 100);
+    const requestDigest = requiredString(body.requestDigest, "requestDigest", 100);
+    if (body.policyVersion !== RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
+      || body.policyDigest !== RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST) {
+      throw new RwaNeutralExecutionError(409, "connectivity_smoke_policy_mismatch", "smoke policy 与 preflight 不匹配。");
+    }
+    if (!/^[A-Za-z0-9:_-]{8,100}$/.test(idempotencyKey)) {
+      throw new RwaNeutralExecutionError(400, "invalid_request", "idempotencyKey 格式无效。");
+    }
+    const scopedKey = `${this.store.userDomain}:smoke:${idempotencyKey}`;
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      const existing = state.connectivitySmokes.find((item) => item.idempotencyKey === scopedKey);
+      if (existing) {
+        if (existing.challengeId !== challengeId || existing.accountId !== accountId
+          || existing.requestDigest !== requestDigest) {
+          throw new RwaNeutralExecutionError(409, "idempotency_conflict", "幂等键已用于其他烟测。");
+        }
+        return publicConnectivitySmoke(existing);
+      }
+      if (state.connectivitySmokes.some(isActiveConnectivitySmoke)) {
+        throw new RwaNeutralExecutionError(409, "connectivity_smoke_active", "当前账户已有进行中的连通性烟测。");
+      }
+      this.assertEntrySwitches(state.config);
+      const armed = this.armedSmokeChallenges.get(challengeId);
+      if (!armed || armed.tokenHash !== hash(challengeToken) || armed.report.expiresAt <= this.now()) {
+        throw new RwaNeutralExecutionError(409, "challenge_invalid", "烟测 challenge 无效、已过期或已使用。");
+      }
+      assertAccountId(accountId, armed.report.accountId);
+      this.armedSmokeChallenges.delete(challengeId);
+      const now = this.now();
+      const smoke: RwaConnectivitySmokeRecord = {
+        smokeId: randomBytes(18).toString("base64url"),
+        userId: this.store.ownerUserId,
+        accountId,
+        accountFingerprint: armed.report.accountFingerprint,
+        purpose: RWA_CONNECTIVITY_SMOKE_PURPOSE,
+        mode: "connectivity_smoke",
+        idempotencyKey: scopedKey,
+        challengeId,
+        requestDigest,
+        policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+        policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+        orderLinkPrefix: newSmokeOrderPrefix(this.store.userDomain),
+        stage: "reserved",
+        budget: armed.report.budget,
+        authorization: {
+          operation: "connectivity_smoke_execute",
+          consumedBeforeProviderMutation: true,
+          exitAuthorized: true,
+          reservedAt: now,
+        },
+        spotOpenOrder: null,
+        futuresOpenOrder: null,
+        openedSpotQuantityXaut: 0,
+        openedFuturesQuantityXaut: 0,
+        exit: {
+          futuresCloseOrder: null,
+          spotCloseOrder: null,
+          futuresFlatConfirmed: false,
+          spotFlatConfirmed: false,
+        },
+        providerState: unavailableSmokeProviderState("not_yet_observed"),
+        timeline: [{ stage: "reserved", at: now, code: "reserved" }],
+        receipt: null,
+        noReopen: true,
+        providerMutationCount: 0,
+        errorCategory: null,
+        message: "连通性烟测已预留；失败或重启后禁止重新开仓。",
+        createdAt: now,
+        updatedAt: now,
+      };
+      state.connectivitySmokes.push(smoke);
+      await this.store.writeState(state);
+      let client: RwaBinanceClient | null = null;
+      try {
+        const metadata = await this.requireMetadata();
+        client = await this.clientForNewRisk(state, metadata);
+        await this.validateActiveAccess(client, accountId, state);
+        const snapshot = await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+        const budget = calculateConnectivitySmokeBudget(snapshot, state.config.maxCombinedSlippageBps);
+        if (!sameSmokeBudget(budget, smoke.budget) || !smokePreflightChecks(snapshot, budget, this.now()).every((item) => item.passed)) {
+          throw new RwaNeutralExecutionError(409, "connectivity_smoke_preflight_changed", "烟测执行前规则、余额或价格已变化。");
+        }
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+        await client.setPerpetualLeverage(1);
+        smoke.providerMutationCount += 1;
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+        await this.openAndImmediatelyCloseConnectivitySmoke(client, state, smoke, snapshot);
+      } catch (error) {
+        smoke.errorCategory = errorCategory(error);
+        smoke.message = sanitizeRwaAutomationError(error);
+        if (client && (
+          smoke.providerMutationCount > 0
+          || smoke.errorCategory !== "connectivity_smoke_provider_snapshot_stale"
+        )) {
+          try {
+            await this.reduceConnectivitySmokeRisk(client, state, smoke);
+          } catch (recoveryError) {
+            smoke.stage = "manual_intervention";
+            smoke.errorCategory = errorCategory(recoveryError);
+            smoke.message = "烟测状态无法由 provider 权威确认或退出，必须在 Binance 人工处理。";
+            state.config.killSwitchActive = true;
+          }
+        } else if (!client) {
+          smoke.stage = "manual_intervention";
+          state.config.killSwitchActive = true;
+        }
+        if (smoke.stage === "reserved" && smoke.providerMutationCount === 0) smoke.stage = "failed";
+        appendConnectivitySmokeTimeline(smoke, this.now());
+        smoke.updatedAt = this.now();
+        await this.store.writeState(state);
+      }
+      return publicConnectivitySmoke(smoke);
+    });
+  }
+
+  async getConnectivitySmokeStatus(smokeId?: string) {
+    const state = await this.store.readState();
+    const smoke = smokeId
+      ? state.connectivitySmokes.find((item) => item.smokeId === smokeId)
+      : state.connectivitySmokes.at(-1);
+    return smoke ? publicConnectivitySmoke(smoke) : null;
+  }
+
+  async getConnectivitySmokeReceipt(smokeId: string) {
+    const state = await this.store.readState();
+    const smoke = state.connectivitySmokes.find((item) => item.smokeId === smokeId);
+    if (!smoke) throw new RwaNeutralExecutionError(404, "connectivity_smoke_not_found", "连通性烟测记录不存在。");
+    if (!smoke.receipt) throw new RwaNeutralExecutionError(409, "connectivity_smoke_incomplete", "连通性烟测尚未形成 flat receipt。");
+    return publicConnectivitySmokeReceipt(smoke);
+  }
+
+  async findConnectivitySmokeIdempotent(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+    requestDigest: string;
+  }) {
+    const state = await this.store.readState();
+    const scopedKey = `${this.store.userDomain}:smoke:${input.idempotencyKey}`;
+    const smoke = state.connectivitySmokes.find((item) => item.idempotencyKey === scopedKey);
+    if (!smoke) return null;
+    if (
+      smoke.accountId !== input.accountId
+      || smoke.challengeId !== input.challengeId
+      || smoke.requestDigest !== input.requestDigest
+    ) throw new RwaNeutralExecutionError(409, "idempotency_conflict", "smoke 幂等键与持久请求范围冲突。");
+    return publicConnectivitySmoke(smoke);
+  }
+
+  async lookupConnectivitySmokeExecution(input: {
+    accountId: string;
+    challengeId: string;
+    idempotencyKey: string;
+  }) {
+    const state = await this.store.readStateView();
+    const scopedKey = `${this.store.userDomain}:smoke:${input.idempotencyKey}`;
+    const smoke = state.connectivitySmokes.find((item) => item.idempotencyKey === scopedKey);
+    if (
+      !smoke
+      || smoke.accountId !== input.accountId
+      || smoke.challengeId !== input.challengeId
+    ) return null;
+    return publicConnectivitySmoke(smoke);
   }
 
   async execute(input: unknown) {
@@ -1153,6 +1437,535 @@ export class RwaBinanceAutomationService {
       await this.store.writeState(state);
       return redactExecution(execution);
     });
+  }
+
+  private async openAndImmediatelyCloseConnectivitySmoke(
+    client: RwaBinanceClient,
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+    snapshot: RwaBinancePreflightSnapshot,
+  ) {
+    smoke.stage = "spot_opening";
+    await this.persistConnectivitySmoke(state, smoke);
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+    this.assertExecutionLeaseHeld();
+    const acceptedSpot = await client.placeOrder({
+      category: "spot",
+      symbol: "XAUTUSDT",
+      side: "Buy",
+      quantityXaut: smoke.budget.quantityXaut,
+      limitPrice: smoke.budget.prices.spotOpenLimit,
+      reduceOnly: false,
+      orderLinkId: `${smoke.orderLinkPrefix}s1`,
+    });
+    smoke.providerMutationCount += 1;
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+      category: "spot",
+      orderLinkId: `${smoke.orderLinkPrefix}s1`,
+      providerOrderId: acceptedSpot.orderId,
+    });
+    const spot = await client.awaitOrder("spot", acceptedSpot.orderId, this.now() + 4_000);
+    smoke.spotOpenOrder = spot;
+    smoke.openedSpotQuantityXaut = orderPositionQuantity(spot);
+    smoke.stage = "spot_open";
+    await this.persistConnectivitySmoke(state, smoke);
+    if (spot.status === "New" || spot.status === "PartiallyFilled") {
+      this.assertExecutionLeaseHeld();
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only", {
+        category: "spot",
+        orderLinkId: `${smoke.orderLinkPrefix}s1`,
+        providerOrderId: spot.orderId,
+      });
+      await client.cancelOrder("spot", spot.orderId);
+      smoke.providerMutationCount += 1;
+      const terminal = await client.findOrderByClientOrderId?.("spot", spot.orderLinkId);
+      if (!terminal || terminal.status === "New" || terminal.status === "PartiallyFilled" || terminal.status === "Unknown") {
+        throw new RwaNeutralExecutionError(409, "connectivity_smoke_provider_state_unknown", "Spot IOC 撤余量后无法确认订单终态。");
+      }
+      smoke.spotOpenOrder = terminal;
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only");
+    }
+    if (smoke.openedSpotQuantityXaut <= 1e-12) {
+      await this.confirmConnectivitySmokeFlat(client, state, smoke, "failed", "现货 IOC 零成交，烟测未建立风险。");
+      return;
+    }
+    const afterSpot = await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only");
+    const futuresQuantity = floorStep(smoke.openedSpotQuantityXaut, afterSpot.perpetual.qtyStep);
+    if (
+      futuresQuantity < afterSpot.perpetual.minOrderQty
+      || futuresQuantity * afterSpot.perpetual.bid < afterSpot.perpetual.minNotionalUsd
+    ) {
+      await this.reduceConnectivitySmokeRisk(client, state, smoke);
+      return;
+    }
+    smoke.stage = "futures_opening";
+    await this.persistConnectivitySmoke(state, smoke);
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only");
+    this.assertExecutionLeaseHeld();
+    const acceptedFutures = await client.placeOrder({
+      category: "linear",
+      symbol: "XAUTUSDT",
+      side: "Sell",
+      quantityXaut: futuresQuantity,
+      limitPrice: smoke.budget.prices.futuresOpenLimit,
+      reduceOnly: false,
+      orderLinkId: `${smoke.orderLinkPrefix}p1`,
+    });
+    smoke.providerMutationCount += 1;
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+      category: "linear",
+      orderLinkId: `${smoke.orderLinkPrefix}p1`,
+      providerOrderId: acceptedFutures.orderId,
+    });
+    const futures = await client.awaitOrder("linear", acceptedFutures.orderId, this.now() + 4_000);
+    smoke.futuresOpenOrder = futures;
+    smoke.openedFuturesQuantityXaut = orderPositionQuantity(futures);
+    await this.persistConnectivitySmoke(state, smoke);
+    if (futures.status === "New" || futures.status === "PartiallyFilled") {
+      this.assertExecutionLeaseHeld();
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "hedged", {
+        category: "linear",
+        orderLinkId: `${smoke.orderLinkPrefix}p1`,
+        providerOrderId: futures.orderId,
+      });
+      await client.cancelOrder("linear", futures.orderId);
+      smoke.providerMutationCount += 1;
+      const terminal = await client.findOrderByClientOrderId?.("linear", futures.orderLinkId);
+      if (!terminal || terminal.status === "New" || terminal.status === "PartiallyFilled" || terminal.status === "Unknown") {
+        throw new RwaNeutralExecutionError(409, "connectivity_smoke_provider_state_unknown", "Futures IOC 撤余量后无法确认订单终态。");
+      }
+      smoke.futuresOpenOrder = terminal;
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "hedged");
+    }
+    const hedged = await this.verifyConnectivitySmokeWindow(client, state, smoke, "hedged");
+    const netDeltaUsd = Math.abs(smoke.openedSpotQuantityXaut - smoke.openedFuturesQuantityXaut)
+      * Math.max(hedged.spot.bid, hedged.perpetual.ask);
+    if (smoke.openedFuturesQuantityXaut <= 1e-12 || netDeltaUsd > 5) {
+      throw new RwaNeutralExecutionError(409, "connectivity_smoke_hedge_incomplete", "provider 未权威确认 smoke 已形成允许的 hedge。");
+    }
+    smoke.stage = "hedged";
+    smoke.message = "provider 已权威确认 hedged；立即进入风险降低退出。";
+    await this.persistConnectivitySmoke(state, smoke);
+    await this.reduceConnectivitySmokeRisk(client, state, smoke);
+  }
+
+  private async reduceConnectivitySmokeRisk(
+    client: RwaBinanceClient,
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+  ) {
+    const current = await this.verifyConnectivitySmokeWindow(
+      client,
+      state,
+      smoke,
+      "within_ledger",
+      recoveryAllowedSmokeOpenOrder(smoke),
+    );
+    const deadline = this.now() + 8_000;
+    if (current.existingPerpetualQuantityXaut > 1e-12) {
+      smoke.stage = "futures_closing";
+      await this.persistConnectivitySmoke(state, smoke);
+      const quantity = floorStep(current.existingPerpetualQuantityXaut, current.perpetual.qtyStep);
+      if (quantity < current.perpetual.minOrderQty) throw new Error("永续残余低于可退出数量，需人工处理。");
+      const existing = await client.findOrderByClientOrderId?.("linear", `${smoke.orderLinkPrefix}c1`);
+      const order = existing ?? await (async () => {
+        this.assertExecutionLeaseHeld();
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger");
+        const accepted = await client.placeOrder({
+          category: "linear",
+          symbol: "XAUTUSDT",
+          side: "Buy",
+          quantityXaut: quantity,
+          limitPrice: smoke.budget.prices.futuresCloseLimit,
+          reduceOnly: true,
+          orderLinkId: `${smoke.orderLinkPrefix}c1`,
+        });
+        smoke.providerMutationCount += 1;
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+          category: "linear",
+          orderLinkId: `${smoke.orderLinkPrefix}c1`,
+          providerOrderId: accepted.orderId,
+        });
+        return client.awaitOrder("linear", accepted.orderId, deadline);
+      })();
+      smoke.exit.futuresCloseOrder = order;
+      await this.persistConnectivitySmoke(state, smoke);
+      if (order.status === "New" || order.status === "PartiallyFilled") {
+        this.assertExecutionLeaseHeld();
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+          category: "linear",
+          orderLinkId: `${smoke.orderLinkPrefix}c1`,
+          providerOrderId: order.orderId,
+        });
+        await client.cancelOrder("linear", order.orderId);
+        smoke.providerMutationCount += 1;
+        const terminal = await client.findOrderByClientOrderId?.("linear", order.orderLinkId);
+        if (!terminal || terminal.status === "New" || terminal.status === "PartiallyFilled" || terminal.status === "Unknown") {
+          throw new RwaNeutralExecutionError(409, "connectivity_smoke_provider_state_unknown", "Futures 退出订单终态无法确认。");
+        }
+        smoke.exit.futuresCloseOrder = terminal;
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "futures_flat");
+      }
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "futures_flat");
+      smoke.exit.futuresFlatConfirmed = true;
+      await this.persistConnectivitySmoke(state, smoke);
+    } else {
+      smoke.exit.futuresFlatConfirmed = true;
+    }
+    const beforeSpot = await this.verifyConnectivitySmokeWindow(
+      client,
+      state,
+      smoke,
+      "futures_flat",
+      recoveryAllowedSmokeOpenOrder(smoke),
+    );
+    if (beforeSpot.existingSpotQuantityXaut > 1e-12) {
+      smoke.stage = "spot_closing";
+      await this.persistConnectivitySmoke(state, smoke);
+      const quantity = floorStep(beforeSpot.spotAvailableQuantityXaut, beforeSpot.spot.qtyStep);
+      if (quantity < beforeSpot.spot.minOrderQty) throw new Error("现货残余低于可退出数量，需人工处理。");
+      const existing = await client.findOrderByClientOrderId?.("spot", `${smoke.orderLinkPrefix}c2`);
+      const order = existing ?? await (async () => {
+        this.assertExecutionLeaseHeld();
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "futures_flat");
+        const accepted = await client.placeOrder({
+          category: "spot",
+          symbol: "XAUTUSDT",
+          side: "Sell",
+          quantityXaut: quantity,
+          limitPrice: smoke.budget.prices.spotCloseLimit,
+          reduceOnly: false,
+          orderLinkId: `${smoke.orderLinkPrefix}c2`,
+        });
+        smoke.providerMutationCount += 1;
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+          category: "spot",
+          orderLinkId: `${smoke.orderLinkPrefix}c2`,
+          providerOrderId: accepted.orderId,
+        });
+        return client.awaitOrder("spot", accepted.orderId, deadline);
+      })();
+      smoke.exit.spotCloseOrder = order;
+      await this.persistConnectivitySmoke(state, smoke);
+      if (order.status === "New" || order.status === "PartiallyFilled") {
+        this.assertExecutionLeaseHeld();
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", {
+          category: "spot",
+          orderLinkId: `${smoke.orderLinkPrefix}c2`,
+          providerOrderId: order.orderId,
+        });
+        await client.cancelOrder("spot", order.orderId);
+        smoke.providerMutationCount += 1;
+        const terminal = await client.findOrderByClientOrderId?.("spot", order.orderLinkId);
+        if (!terminal || terminal.status === "New" || terminal.status === "PartiallyFilled" || terminal.status === "Unknown") {
+          throw new RwaNeutralExecutionError(409, "connectivity_smoke_provider_state_unknown", "Spot 退出订单终态无法确认。");
+        }
+        smoke.exit.spotCloseOrder = terminal;
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "flat");
+      }
+    }
+    await this.confirmConnectivitySmokeFlat(client, state, smoke, "flat", "provider 已权威确认两侧 flat。");
+  }
+
+  private async confirmConnectivitySmokeFlat(
+    client: RwaBinanceClient,
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+    stage: "flat" | "failed",
+    message: string,
+  ) {
+    const final = await client.readPreflightSnapshot();
+    if (!isFreshConnectivitySmokeSnapshot(final, this.now())) {
+      smoke.providerState = providerStateFromSnapshot(
+        final,
+        "stale",
+        "provider_snapshot_stale",
+        this.now(),
+      );
+      await this.persistConnectivitySmoke(state, smoke);
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_provider_snapshot_stale",
+        "provider 私有快照已过期或时间无效，不能形成成功 receipt。",
+      );
+    }
+    assertSmokeSnapshot(final, smoke, "flat");
+    smoke.providerState = providerStateFromSnapshot(
+      final,
+      "verified",
+      "provider_flat_confirmed",
+      this.now(),
+    );
+    smoke.exit.futuresFlatConfirmed = true;
+    smoke.exit.spotFlatConfirmed = true;
+    smoke.stage = stage;
+    smoke.message = message;
+    smoke.receipt = stage === "flat" ? {
+      receiptId: randomBytes(18).toString("base64url"),
+      smokeId: smoke.smokeId,
+          purpose: RWA_CONNECTIVITY_SMOKE_PURPOSE,
+      venue: "binance",
+      symbol: "XAUTUSDT",
+          accountFingerprint: smoke.accountFingerprint,
+          policyVersion: smoke.policyVersion,
+          policyDigest: smoke.policyDigest,
+      budget: smoke.budget,
+      openedSpotQuantityXaut: smoke.openedSpotQuantityXaut,
+      openedFuturesQuantityXaut: smoke.openedFuturesQuantityXaut,
+      finalSpotQuantityXaut: final.existingSpotQuantityXaut,
+      finalFuturesQuantityXaut: final.existingPerpetualQuantityXaut,
+      providerFlatConfirmed: true,
+      completedAt: this.now(),
+    } : null;
+    await this.persistConnectivitySmoke(state, smoke);
+  }
+
+  private async recoverConnectivitySmoke(state: RwaAutomationStateData) {
+    const active = state.connectivitySmokes.find(isActiveConnectivitySmoke);
+    if (!active) return;
+    if (active.stage === "reserved" && active.providerMutationCount === 0) {
+      active.stage = "failed";
+      active.message = "服务重启发生在首次 provider mutation 前；烟测已终止且禁止重开。";
+      active.updatedAt = this.now();
+      appendConnectivitySmokeTimeline(active, this.now());
+      await this.store.writeState(state);
+      return;
+    }
+    try {
+      const client = await this.client();
+      if (active.stage === "spot_opening" || active.stage === "futures_opening") {
+        const shouldContinue = await this.recoverConnectivitySmokeOpeningOrder(client, state, active);
+        if (!shouldContinue) return;
+      }
+      await this.reduceConnectivitySmokeRisk(client, state, active);
+    } catch (error) {
+      active.stage = "manual_intervention";
+      active.errorCategory = errorCategory(error);
+      active.message = "服务重启后无法证明 smoke 风险降低退出已闭环，请在 Binance 人工处理。";
+      active.updatedAt = this.now();
+      appendConnectivitySmokeTimeline(active, this.now());
+      state.config.killSwitchActive = true;
+      state.config.strategyEnabled = false;
+      state.config.globalExecutionEnabled = false;
+      await this.store.writeState(state);
+    }
+  }
+
+  private async recoverConnectivitySmokeOpeningOrder(
+    client: RwaBinanceClient,
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+  ) {
+    const isSpot = smoke.stage === "spot_opening";
+    const category = isSpot ? "spot" : "linear";
+    const orderLinkId = `${smoke.orderLinkPrefix}${isSpot ? "s1" : "p1"}`;
+    const order = await client.findOrderByClientOrderId?.(category, orderLinkId);
+    if (!order) {
+      const snapshot = await this.verifyConnectivitySmokeWindow(
+        client,
+        state,
+        smoke,
+        isSpot ? "blank" : "within_ledger",
+      );
+      if (
+        snapshot.existingSpotQuantityXaut <= 1e-12
+        && snapshot.existingPerpetualQuantityXaut <= 1e-12
+      ) {
+        await this.confirmConnectivitySmokeFlat(
+          client,
+          state,
+          smoke,
+          "failed",
+          "重启恢复未发现固定开仓订单或任何权威敞口；烟测已终止且禁止重开。",
+        );
+        return false;
+      }
+      return true;
+    }
+    if (order.orderLinkId !== orderLinkId || order.status === "Unknown") {
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_provider_state_unknown",
+        "重启恢复无法确认固定 smoke 开仓订单状态。",
+      );
+    }
+    if (isSpot) {
+      smoke.spotOpenOrder = order;
+      smoke.openedSpotQuantityXaut = orderPositionQuantity(order);
+    } else {
+      smoke.futuresOpenOrder = order;
+      smoke.openedFuturesQuantityXaut = orderPositionQuantity(order);
+    }
+    await this.persistConnectivitySmoke(state, smoke);
+    if (order.status === "New" || order.status === "PartiallyFilled") {
+      const allowed = {
+        category,
+        orderLinkId,
+        providerOrderId: order.orderId,
+      } satisfies SmokeAllowedOpenOrder;
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger", allowed);
+      this.assertExecutionLeaseHeld();
+      await client.cancelOrder(category, order.orderId);
+      smoke.providerMutationCount += 1;
+      const terminal = await client.findOrderByClientOrderId?.(category, orderLinkId);
+      if (
+        !terminal
+        || terminal.orderLinkId !== orderLinkId
+        || terminal.status === "New"
+        || terminal.status === "PartiallyFilled"
+        || terminal.status === "Unknown"
+      ) {
+        throw new RwaNeutralExecutionError(
+          409,
+          "connectivity_smoke_provider_state_unknown",
+          "重启撤销 smoke 开仓余量后无法确认订单终态。",
+        );
+      }
+      if (isSpot) {
+        smoke.spotOpenOrder = terminal;
+        smoke.openedSpotQuantityXaut = orderPositionQuantity(terminal);
+      } else {
+        smoke.futuresOpenOrder = terminal;
+        smoke.openedFuturesQuantityXaut = orderPositionQuantity(terminal);
+      }
+      await this.persistConnectivitySmoke(state, smoke);
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger");
+    } else {
+      await this.verifyConnectivitySmokeWindow(client, state, smoke, "within_ledger");
+    }
+    return true;
+  }
+
+  private async persistConnectivitySmoke(
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+  ) {
+    appendConnectivitySmokeTimeline(smoke, this.now());
+    smoke.updatedAt = this.now();
+    await this.store.writeState(state);
+  }
+
+  private async verifyConnectivitySmokeWindow(
+    client: RwaBinanceClient,
+    state: RwaAutomationStateData,
+    smoke: RwaConnectivitySmokeRecord,
+    expected: "blank" | "spot_only" | "hedged" | "within_ledger" | "futures_flat" | "flat",
+    allowedOpenOrder: SmokeAllowedOpenOrder | null = null,
+  ) {
+    this.assertExecutionLeaseHeld();
+    await this.reconcileConnectivitySmokeOrders(client, smoke);
+    let snapshot: RwaBinancePreflightSnapshot;
+    try {
+      snapshot = await client.readPreflightSnapshot();
+    } catch (error) {
+      smoke.providerState = unavailableSmokeProviderState("provider_snapshot_unavailable");
+      throw error;
+    }
+    if (!isFreshConnectivitySmokeSnapshot(snapshot, this.now())) {
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "stale",
+        "provider_snapshot_stale",
+        this.now(),
+      );
+      await this.persistConnectivitySmoke(state, smoke);
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_provider_snapshot_stale",
+        "provider 私有快照已过期或时间无效，已停止使用该证据继续写入。",
+      );
+    }
+    if (!client.readConnectivitySmokeActivity) {
+      throw new RwaNeutralExecutionError(409, "connectivity_smoke_activity_incomplete", "provider 不支持 smoke REST 活动扫描。");
+    }
+    let continuity = createUnmonitoredActivityContinuity(smoke.createdAt);
+    for (const order of [
+      smoke.spotOpenOrder, smoke.futuresOpenOrder,
+      smoke.exit.futuresCloseOrder, smoke.exit.spotCloseOrder,
+    ]) {
+      if (!order) continue;
+      continuity = recordStrategyProviderOrder(
+        continuity,
+        order === smoke.spotOpenOrder || order === smoke.exit.spotCloseOrder ? "spot" : "linear",
+        order.orderId,
+        this.now(),
+      );
+    }
+    const activity = await client.readConnectivitySmokeActivity({
+      strategyOrderPrefix: smoke.orderLinkPrefix,
+      strategyOrderPrefixes: [smoke.orderLinkPrefix],
+      since: smoke.createdAt,
+      continuity,
+    });
+    if (
+      activity.nonAtomic !== true
+      || !activity.protocolComplete
+      || activity.attribution.externalPositionActivity
+      || activity.attribution.sources.some((source) => source.externalActivity)
+    ) {
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "ambiguous",
+        "activity_evidence_incomplete",
+        this.now(),
+      );
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_activity_incomplete",
+        "截至扫描 cutoff 无法证明 REST 可见 XAUT 活动仅属于当前 smoke。",
+      );
+    }
+    try {
+      assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder);
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "verified",
+        "verified_non_atomic_rest_snapshot",
+        this.now(),
+      );
+    } catch (error) {
+      smoke.providerState = providerStateFromSnapshot(
+        snapshot,
+        "ambiguous",
+        "provider_ledger_mismatch",
+        this.now(),
+      );
+      throw error;
+    }
+    smoke.message = "用户承诺的独占运维窗口；截至扫描 cutoff 未发现 REST 可见外部活动。";
+    await this.persistConnectivitySmoke(state, smoke);
+    return snapshot;
+  }
+
+  private async reconcileConnectivitySmokeOrders(
+    client: RwaBinanceClient,
+    smoke: RwaConnectivitySmokeRecord,
+  ) {
+    const ids = smokeOrderIds(smoke);
+    const [spotOpen, futuresOpen, futuresClose, spotClose] = await Promise.all([
+      client.findOrderByClientOrderId?.("spot", ids.spotOpen),
+      client.findOrderByClientOrderId?.("linear", ids.futuresOpen),
+      client.findOrderByClientOrderId?.("linear", ids.futuresClose),
+      client.findOrderByClientOrderId?.("spot", ids.spotClose),
+    ]);
+    for (const [order, expectedId] of [
+      [spotOpen, ids.spotOpen], [futuresOpen, ids.futuresOpen],
+      [futuresClose, ids.futuresClose], [spotClose, ids.spotClose],
+    ] as const) {
+      if (order && order.orderLinkId !== expectedId) {
+        throw new RwaNeutralExecutionError(409, "connectivity_smoke_order_unknown", "provider 返回未知 smoke 订单。");
+      }
+    }
+    if (spotOpen) {
+      smoke.spotOpenOrder = spotOpen;
+      smoke.openedSpotQuantityXaut = orderPositionQuantity(spotOpen);
+    }
+    if (futuresOpen) {
+      smoke.futuresOpenOrder = futuresOpen;
+      smoke.openedFuturesQuantityXaut = orderPositionQuantity(futuresOpen);
+    }
+    if (futuresClose) smoke.exit.futuresCloseOrder = futuresClose;
+    if (spotClose) smoke.exit.spotCloseOrder = spotClose;
   }
 
   private async client(): Promise<RwaBinanceClient> {
@@ -1920,6 +2733,328 @@ function check(name: string, passed: boolean, limit: number | string | boolean, 
 
 function floorStep(value: number, step: number) {
   return step > 0 ? Math.floor((value + 1e-12) / step) * step : 0;
+}
+
+function ceilStep(value: number, step: number) {
+  return step > 0 ? Math.ceil((value - 1e-12) / step) * step : 0;
+}
+
+function orderPositionQuantity(order: { positionQuantityXaut?: number; filledQuantityXaut: number }) {
+  const value = order.positionQuantityXaut ?? order.filledQuantityXaut;
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+type SmokeAllowedOpenOrder = {
+  category: "spot" | "linear";
+  orderLinkId: string;
+  providerOrderId: string;
+};
+
+function recoveryAllowedSmokeOpenOrder(
+  smoke: RwaConnectivitySmokeRecord,
+): SmokeAllowedOpenOrder | null {
+  const order = smoke.stage === "futures_closing"
+    ? smoke.exit.futuresCloseOrder
+    : smoke.stage === "spot_closing"
+      ? smoke.exit.spotCloseOrder
+      : null;
+  if (!order || (order.status !== "New" && order.status !== "PartiallyFilled")) return null;
+  return {
+    category: smoke.stage === "futures_closing" ? "linear" : "spot",
+    orderLinkId: smoke.stage === "futures_closing"
+      ? `${smoke.orderLinkPrefix}c1`
+      : `${smoke.orderLinkPrefix}c2`,
+    providerOrderId: order.orderId,
+  };
+}
+
+function smokePreflightChecks(
+  snapshot: RwaBinancePreflightSnapshot,
+  budget: ReturnType<typeof calculateConnectivitySmokeBudget>,
+  now: number,
+) {
+  const spotRequired = budget.spotNotionalUsd + budget.spotFeesUsd + budget.spotSlippageReserveUsd
+    + budget.roundingReserveUsd;
+  const futuresRequired = budget.futuresMarginUsd + budget.futuresFeesUsd + budget.futuresSlippageReserveUsd;
+  return [
+    { name: "product_status", passed: snapshot.productAvailability.available
+      && snapshot.spot.status === "Trading" && snapshot.perpetual.status === "Trading", message: "两侧产品必须实时为 TRADING。" },
+    { name: "permissions", passed: snapshot.permissions.read && snapshot.permissions.spotTrade
+      && snapshot.permissions.contractTrade && snapshot.permissions.withdraw === false
+      && snapshot.permissions.positionModeSupported, message: "必须具备 read/Spot/Futures、withdraw=false 且 one-way。" },
+    { name: "blank_spot", passed: snapshot.existingSpotQuantityXaut <= 1e-12
+      && snapshot.spotFreeXaut <= 1e-12 && snapshot.spotLockedXaut <= 1e-12, message: "专用子账户 Spot total/free/locked 必须为 0。" },
+    { name: "blank_futures", passed: snapshot.existingPerpetualQuantityXaut <= 1e-12
+      && snapshot.perpetualPositionSide === "flat", message: "专用子账户 Futures position 必须为 0。" },
+    { name: "blank_orders", passed: snapshot.openSpotOrderCount === 0
+      && snapshot.openPerpetualOrderCount === 0, message: "两侧 XAUT 活动订单必须为 0。" },
+    { name: "dynamic_quantity", passed: budget.quantityXaut > 0
+      && budget.totalCapitalUsd <= 25 + 1e-9, message: "共同最小数量必须满足实时规则和 25 USDT 总预算。" },
+    { name: "spot_balance", passed: snapshot.spotAvailableUsdt + 1e-9 >= spotRequired, message: "Spot USDT 余额必须独立覆盖本侧预算。" },
+    { name: "futures_balance", passed: snapshot.futuresAvailableUsdt + 1e-9 >= futuresRequired, message: "Futures USDT 余额必须独立覆盖 1x 保证金及本侧准备金。" },
+    { name: "snapshot_fresh", passed: now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
+      message: "provider 私有快照必须新鲜。" },
+  ];
+}
+
+function assertSmokeSnapshot(
+  snapshot: RwaBinancePreflightSnapshot,
+  smoke: RwaConnectivitySmokeRecord,
+  expected: "blank" | "spot_only" | "hedged" | "within_ledger" | "futures_flat" | "flat",
+  allowedOpenOrder: SmokeAllowedOpenOrder | null = null,
+) {
+  const allowedProviderOrder = allowedOpenOrder
+    ? [
+      smoke.spotOpenOrder,
+      smoke.futuresOpenOrder,
+      smoke.exit.futuresCloseOrder,
+      smoke.exit.spotCloseOrder,
+    ].find((order) =>
+      order?.orderId === allowedOpenOrder.providerOrderId
+      && order.orderLinkId === allowedOpenOrder.orderLinkId)
+    : null;
+  const allowedOrderIsExactAndActive = Boolean(allowedProviderOrder && (
+    allowedProviderOrder.status === "New" || allowedProviderOrder.status === "PartiallyFilled"
+  ) && (
+    allowedOpenOrder?.category === "spot"
+      ? snapshot.openSpotOrderCount === 1 && snapshot.openPerpetualOrderCount === 0
+      : snapshot.openSpotOrderCount === 0 && snapshot.openPerpetualOrderCount === 1
+  ));
+  const allowedOrderBecameTerminal = Boolean(
+    allowedProviderOrder
+    && allowedProviderOrder.status !== "New"
+    && allowedProviderOrder.status !== "PartiallyFilled"
+    && allowedProviderOrder.status !== "Unknown"
+    && snapshot.openSpotOrderCount === 0
+    && snapshot.openPerpetualOrderCount === 0,
+  );
+  const openOrdersMatch = allowedOpenOrder
+    ? allowedOrderIsExactAndActive || allowedOrderBecameTerminal
+    : snapshot.openSpotOrderCount === 0 && snapshot.openPerpetualOrderCount === 0;
+  if (
+    snapshot.accountId !== smoke.accountId
+    || snapshot.accountFingerprint !== smoke.accountFingerprint
+    || !openOrdersMatch
+    || Math.abs(snapshot.existingSpotQuantityXaut - snapshot.spotFreeXaut - snapshot.spotLockedXaut) > 1e-9
+    || snapshot.existingSpotQuantityXaut > smoke.openedSpotQuantityXaut + 1e-9
+    || snapshot.existingPerpetualQuantityXaut > smoke.openedFuturesQuantityXaut + 1e-9
+  ) {
+    throw new RwaNeutralExecutionError(
+      409,
+      "connectivity_smoke_external_activity",
+      "检测到外部 XAUT 活动、归属不明或数量超过 smoke 账本。",
+    );
+  }
+  const ledger = smokeCurrentLedger(smoke);
+  const spot = snapshot.existingSpotQuantityXaut;
+  const futures = snapshot.existingPerpetualQuantityXaut;
+  const matches = expected === "blank" || expected === "flat"
+    ? spot <= 1e-12 && futures <= 1e-12
+    : expected === "spot_only"
+      ? approximately(spot, ledger.spot) && futures <= 1e-12
+      : expected === "hedged"
+        ? approximately(spot, ledger.spot)
+          && approximately(futures, ledger.futures)
+        : expected === "futures_flat"
+          ? futures <= 1e-12 && approximately(spot, ledger.spot)
+          : expected === "within_ledger"
+            ? approximately(spot, ledger.spot) && approximately(futures, ledger.futures)
+            : true;
+  if (!matches) {
+    throw new RwaNeutralExecutionError(
+      409,
+      "connectivity_smoke_provider_state_unknown",
+      "provider 权威数量与 smoke 当前阶段账本不一致。",
+    );
+  }
+}
+
+function smokeOrderIds(smoke: RwaConnectivitySmokeRecord) {
+  return {
+    spotOpen: `${smoke.orderLinkPrefix}s1`,
+    futuresOpen: `${smoke.orderLinkPrefix}p1`,
+    futuresClose: `${smoke.orderLinkPrefix}c1`,
+    spotClose: `${smoke.orderLinkPrefix}c2`,
+  };
+}
+
+function smokeCurrentLedger(smoke: RwaConnectivitySmokeRecord) {
+  return {
+    spot: Math.max(0, smoke.openedSpotQuantityXaut
+      - orderPositionQuantity(smoke.exit.spotCloseOrder ?? { filledQuantityXaut: 0 })),
+    futures: Math.max(0, smoke.openedFuturesQuantityXaut
+      - orderPositionQuantity(smoke.exit.futuresCloseOrder ?? { filledQuantityXaut: 0 })),
+  };
+}
+
+function sameSmokeBudget(
+  current: ReturnType<typeof calculateConnectivitySmokeBudget>,
+  reserved: ReturnType<typeof calculateConnectivitySmokeBudget>,
+) {
+  return current.quantityXaut === reserved.quantityXaut
+    && current.commonQtyStep === reserved.commonQtyStep
+    && current.totalCapitalUsd <= 25 + 1e-9;
+}
+
+function approximately(left: number, right: number) {
+  return Math.abs(left - right) <= 1e-9;
+}
+
+function publicConnectivitySmoke(smoke: RwaConnectivitySmokeRecord) {
+  const orders = publicConnectivitySmokeOrders(smoke);
+  return {
+    smokeId: smoke.smokeId,
+    purpose: smoke.purpose,
+    mode: smoke.mode,
+    venue: "binance" as const,
+    accountFingerprint: smoke.accountFingerprint,
+    stage: smoke.stage,
+    policyVersion: smoke.policyVersion,
+    policyDigest: smoke.policyDigest,
+    budget: smoke.budget,
+    openedSpotQuantityXaut: smoke.openedSpotQuantityXaut,
+    openedFuturesQuantityXaut: smoke.openedFuturesQuantityXaut,
+    orders,
+    providerState: smoke.providerState,
+    timeline: smoke.timeline,
+    receipt: smoke.receipt ? publicConnectivitySmokeReceipt(smoke) : null,
+    noReopen: smoke.noReopen,
+    providerMutationCount: smoke.providerMutationCount,
+    errorCategory: smoke.errorCategory,
+    message: smoke.message,
+    createdAt: smoke.createdAt,
+    updatedAt: smoke.updatedAt,
+  };
+}
+
+function publicConnectivitySmokeReceipt(smoke: RwaConnectivitySmokeRecord) {
+  const receipt = smoke.receipt!;
+  const orders = publicConnectivitySmokeOrders(smoke);
+  const feeOrders = [
+    smoke.spotOpenOrder,
+    smoke.futuresOpenOrder,
+    smoke.exit.futuresCloseOrder,
+    smoke.exit.spotCloseOrder,
+  ];
+  const feesAvailable = feeOrders.every((order) =>
+    order !== null && Number.isFinite(order.feeUsd) && order.feeUsd >= 0);
+  const disclosureMatches = smoke.policyVersion === RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
+    && smoke.policyDigest === RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST;
+  return {
+    ...receipt,
+    acceptedConfirmations: {
+      exclusiveWindowConfirmed: true,
+      manualRecoveryConfirmed: true,
+      nonAtomicRiskAccepted: true,
+    },
+    disclosureAvailability: disclosureMatches ? "available" as const : "unavailable_for_historical_digest" as const,
+    disclosure: disclosureMatches ? {
+      continuity: RWA_CONNECTIVITY_SMOKE_POLICY.continuity,
+      exclusiveWindowRules: RWA_CONNECTIVITY_SMOKE_POLICY.exclusiveWindowRules,
+      manualRecoveryRequirements: RWA_CONNECTIVITY_SMOKE_POLICY.manualRecoveryRequirements,
+      residualRisks: RWA_CONNECTIVITY_SMOKE_POLICY.residualRisks,
+    } : null,
+    disclosureReason: disclosureMatches ? null : "historical_policy_digest_not_available",
+    orders,
+    finalProviderState: smoke.providerState,
+    timeline: smoke.timeline,
+    metrics: {
+      actualFeesUsd: feesAvailable ? {
+        availability: "available" as const,
+        value: feeOrders.reduce((sum, order) => sum + order!.feeUsd, 0),
+        reason: null,
+      } : unavailableActualMetric("authoritative_fee_inputs_incomplete"),
+      actualSlippageUsd: unavailableActualMetric("authoritative_reference_prices_not_persisted"),
+      actualRealizedPnlUsd: unavailableActualMetric("authoritative_pnl_inputs_not_persisted"),
+    },
+  };
+}
+
+function publicConnectivitySmokeOrders(smoke: RwaConnectivitySmokeRecord) {
+  return {
+    spotOpen: publicSmokeOrder(smoke.spotOpenOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.spotOpen),
+    futuresOpen: publicSmokeOrder(smoke.futuresOpenOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.futuresOpen),
+    futuresClose: publicSmokeOrder(smoke.exit.futuresCloseOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.futuresClose),
+    spotClose: publicSmokeOrder(smoke.exit.spotCloseOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.spotClose),
+  };
+}
+
+function publicSmokeOrder(
+  order: RwaProviderOrder | null,
+  prefix: string,
+  slot: typeof RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS[keyof typeof RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS],
+) {
+  const expectedOrderLinkId = `${prefix}${slot.suffix}`;
+  if (!order || order.orderLinkId !== expectedOrderLinkId) return null;
+  return {
+    orderId: order.orderId,
+    orderLinkId: order.orderLinkId,
+    category: slot.category,
+    side: slot.side,
+    status: order.status,
+    requestedQuantityXaut: order.requestedQuantityXaut,
+    filledQuantityXaut: order.filledQuantityXaut,
+    averagePriceUsd: Number.isFinite(order.averagePrice) ? order.averagePrice : null,
+    feeUsd: Number.isFinite(order.feeUsd) ? order.feeUsd : null,
+    reduceOnly: slot.reduceOnly,
+    updatedAt: order.updatedAt,
+  };
+}
+
+function unavailableActualMetric(reason: string) {
+  return { availability: "unavailable" as const, value: null, reason };
+}
+
+function unavailableSmokeProviderState(reason: string) {
+  return {
+    verificationStatus: "unavailable" as const,
+    observedAt: null,
+    residualSpotQuantityXaut: null,
+    residualFuturesQuantityXaut: null,
+    activeSpotOrderCount: null,
+    activeFuturesOrderCount: null,
+    activeTotalOrderCount: null,
+    providerFlatConfirmed: null,
+    reason,
+  };
+}
+
+function providerStateFromSnapshot(
+  snapshot: RwaBinancePreflightSnapshot,
+  verificationStatus: "verified" | "stale" | "ambiguous",
+  reason: string,
+  now: number,
+) {
+  if (!Number.isFinite(snapshot.fetchedAt) || snapshot.fetchedAt < 0 || snapshot.fetchedAt > now) {
+    return unavailableSmokeProviderState("provider_snapshot_time_invalid");
+  }
+  const activeTotalOrderCount = snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount;
+  return {
+    verificationStatus,
+    observedAt: snapshot.fetchedAt,
+    residualSpotQuantityXaut: snapshot.existingSpotQuantityXaut,
+    residualFuturesQuantityXaut: snapshot.existingPerpetualQuantityXaut,
+    activeSpotOrderCount: snapshot.openSpotOrderCount,
+    activeFuturesOrderCount: snapshot.openPerpetualOrderCount,
+    activeTotalOrderCount,
+    providerFlatConfirmed: verificationStatus === "verified"
+      ? snapshot.existingSpotQuantityXaut === 0
+        && snapshot.existingPerpetualQuantityXaut === 0
+        && snapshot.openSpotOrderCount === 0
+        && snapshot.openPerpetualOrderCount === 0
+      : null,
+    reason,
+  };
+}
+
+export function isFreshConnectivitySmokeSnapshot(
+  snapshot: RwaBinancePreflightSnapshot,
+  now: number,
+) {
+  return Number.isFinite(snapshot.fetchedAt)
+    && snapshot.fetchedAt >= 0
+    && snapshot.fetchedAt <= now
+    && now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS;
 }
 
 function stepAligned(value: number, step: number) {

@@ -88,6 +88,12 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
   app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request), sourceIp(request))));
   app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), authenticatedSessionDomain(request), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/connectivity-smoke/policy", route((request) => control.getConnectivitySmokePolicy(authenticatedUserId(request), request.query, sourceIp(request))));
+  app.post("/api/arbitrage/automation/connectivity-smoke/preflight", route((request) => control.preflightConnectivitySmoke(authenticatedUserId(request), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/connectivity-smoke/execute", route((request) => control.executeConnectivitySmoke(authenticatedUserId(request), authenticatedSessionDomain(request), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/connectivity-smoke/lookup", route((request) => control.lookupConnectivitySmokeExecution(authenticatedUserId(request), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/connectivity-smoke/status", route((request) => control.getConnectivitySmokeStatus(authenticatedUserId(request), request.query, sourceIp(request))));
+  app.get("/api/arbitrage/automation/connectivity-smoke/:smokeId/receipt", route((request) => control.getConnectivitySmokeReceipt(authenticatedUserId(request), singleParam(request.params.smokeId), request.query, sourceIp(request))));
   app.get("/api/arbitrage/automation/positions", route((request) => control.getPositions(authenticatedUserId(request), sourceIp(request))));
   app.post("/api/arbitrage/automation/positions/:positionId/close", route((request) => control.closePosition(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.positionId), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/venues/:venue/close-all", route((request) => control.closeAll(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
