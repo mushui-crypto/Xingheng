@@ -210,6 +210,7 @@ export type ConnectivitySmokeClient = {
   policy(accountId: string, signal?: AbortSignal): Promise<ConnectivitySmokePolicy>;
   preflight(accountId: string, policy: ConnectivitySmokePolicy, acceptance: ConnectivitySmokeAcceptance): Promise<ConnectivitySmokePreflight>;
   execute(request: ConnectivitySmokeExecutionRequest, stepUpToken: string): Promise<ConnectivitySmokeStatus | null>;
+  lookup(request: Pick<ConnectivitySmokeExecutionRequest, "accountId" | "challengeId" | "idempotencyKey">, signal?: AbortSignal): Promise<ConnectivitySmokeStatus | null>;
   status(accountId: string, smokeId?: string, signal?: AbortSignal): Promise<ConnectivitySmokeStatus | null>;
   receipt(accountId: string, smokeId: string, signal?: AbortSignal): Promise<ConnectivitySmokeReceipt>;
 };

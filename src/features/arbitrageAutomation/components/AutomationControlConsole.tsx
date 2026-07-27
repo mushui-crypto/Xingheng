@@ -675,6 +675,7 @@ export function AutomationControlConsole({
         <ConnectivitySmokeConsole
           accountId={connectivityCredential.accountId}
           client={smokeClient}
+          expectedAccountFingerprint={connectivityCredential.uidFingerprint}
           onFeedback={showToast}
           requestStepUp={requestStepUp}
         />

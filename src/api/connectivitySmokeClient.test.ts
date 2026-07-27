@@ -115,12 +115,15 @@ test("step-up intent binds the exact stable execute request and excludes the TOT
   assert.equal("totp" in first.request, false);
 });
 
-test("lost execute response queries status and never creates a new execute request", async () => {
+test("lost execute response uses exact lookup and never reads account-latest or replays execute", async () => {
   const originalFetch = globalThis.fetch;
-  const paths: string[] = [];
-  globalThis.fetch = (async (input) => {
-    paths.push(String(input));
-    if (paths.length === 1) throw new TypeError("connection lost");
+  const requests: Array<{ path: string; body: unknown }> = [];
+  globalThis.fetch = (async (input, init) => {
+    requests.push({
+      path: String(input),
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    if (requests.length === 1) throw new TypeError("connection lost");
     return jsonResponse(null);
   }) as typeof fetch;
   try {
@@ -134,8 +137,44 @@ test("lost execute response queries status and never creates a new execute reque
       policyDigest: policy.policy.digest,
     }, "memory-step-up-token");
     assert.equal(result, null);
-    assert.equal(paths.filter((path) => path.endsWith("/connectivity-smoke/execute")).length, 1);
-    assert.equal(paths.filter((path) => path.includes("/connectivity-smoke/status?")).length, 1);
+    assert.equal(requests.filter(({ path }) => path.endsWith("/connectivity-smoke/execute")).length, 1);
+    assert.equal(requests.filter(({ path }) => path.endsWith("/connectivity-smoke/lookup")).length, 1);
+    assert.equal(requests.some(({ path }) => path.includes("/connectivity-smoke/status?")), false);
+    assert.deepEqual(requests[1]?.body, {
+      accountId: policy.accountId,
+      challengeId: "challenge-1",
+      idempotencyKey: "stable-idempotency-key",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("exact lookup null remains R2 unknown even when account-latest R1 could exist", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ path: string; body: unknown }> = [];
+  globalThis.fetch = (async (input, init) => {
+    requests.push({
+      path: String(input),
+      body: init?.body ? JSON.parse(String(init.body)) : null,
+    });
+    return jsonResponse(null);
+  }) as typeof fetch;
+  try {
+    const client = createConnectivitySmokeClient();
+    const result = await client.lookup({
+      accountId: policy.accountId,
+      challengeId: "challenge-r2",
+      idempotencyKey: "idempotency-r2",
+    });
+    assert.equal(result, null);
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0]?.path.endsWith("/connectivity-smoke/lookup"), true);
+    assert.deepEqual(requests[0]?.body, {
+      accountId: policy.accountId,
+      challengeId: "challenge-r2",
+      idempotencyKey: "idempotency-r2",
+    });
   } finally {
     globalThis.fetch = originalFetch;
   }

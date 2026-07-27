@@ -380,6 +380,19 @@ export function createUserAutomationConsoleClient(): AutomationConsoleClient {
 export const userAutomationConsoleClient = createUserAutomationConsoleClient();
 
 export function createConnectivitySmokeClient(): ConnectivitySmokeClient {
+  const lookup: ConnectivitySmokeClient["lookup"] = (request, signal) => apiRequest<ConnectivitySmokeStatus | null>(
+    `${apiBase}/connectivity-smoke/lookup`,
+    "连通性验证精确受理状态查询失败。",
+    {
+      method: "POST",
+      body: {
+        accountId: request.accountId,
+        challengeId: request.challengeId,
+        idempotencyKey: request.idempotencyKey,
+      },
+      signal,
+    },
+  );
   return {
     policy: (accountId, signal) => apiRequest<ConnectivitySmokePolicy>(
       `${apiBase}/connectivity-smoke/policy?${new URLSearchParams({ accountId })}`,
@@ -420,14 +433,12 @@ export function createConnectivitySmokeClient(): ConnectivitySmokeClient {
           error instanceof AutomationConsoleContractError
           && ["network_request_failed", "request_aborted"].includes(error.category ?? "")
         ) {
-          return apiRequest<ConnectivitySmokeStatus | null>(
-            `${apiBase}/connectivity-smoke/status?${new URLSearchParams({ accountId: request.accountId })}`,
-            "执行响应未知，连通性验证状态恢复失败。",
-          );
+          return lookup(request);
         }
         throw error;
       }
     },
+    lookup,
     status: (accountId, smokeId, signal) => apiRequest<ConnectivitySmokeStatus | null>(
       `${apiBase}/connectivity-smoke/status?${new URLSearchParams({
         accountId,

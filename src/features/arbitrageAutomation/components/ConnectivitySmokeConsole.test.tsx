@@ -12,7 +12,11 @@ import {
   PolicyDisclosure,
   ReceiptPanel,
   StatusPanel,
+  UnknownExecutionPanel,
   allConfirmed,
+  createConnectivitySmokeScope,
+  isConnectivitySmokeScopeCurrent,
+  nextConnectivitySmokeScope,
   providerStateLabel,
   stageLabel,
   statusBlocksNewRun,
@@ -96,6 +100,53 @@ test("three independent confirmations are required and manual intervention alway
   }), true);
   assert.equal(statusBlocksNewRun({ ...status, stage: "manual_intervention" }), true);
   assert.equal(statusBlocksNewRun({ ...status, stage: "flat" }), false);
+});
+
+test("account generation rejects every deferred A response after switching to B", async () => {
+  let current = createConnectivitySmokeScope("account-a");
+  const capturedPolicy = current;
+  const capturedPreflight = current;
+  const capturedExecute = current;
+  const capturedLookup = current;
+  const capturedStatus = current;
+  const capturedReceipt = current;
+  const deferred = Promise.resolve().then(() => {
+    current = nextConnectivitySmokeScope(current, "account-b");
+    return [
+      capturedPolicy,
+      capturedPreflight,
+      capturedExecute,
+      capturedLookup,
+      capturedStatus,
+      capturedReceipt,
+    ].map((captured) => isConnectivitySmokeScopeCurrent(current, captured));
+  });
+  assert.deepEqual(await deferred, [false, false, false, false, false, false]);
+  assert.equal(isConnectivitySmokeScopeCurrent(current, createConnectivitySmokeScope("account-b")), false);
+  assert.equal(current.accountId, "account-b");
+  assert.equal(current.generation, 1);
+});
+
+test("unknown execution UI preserves exact correlation and offers lookup without execute replay", () => {
+  const html = renderToStaticMarkup(
+    <UnknownExecutionPanel
+      busy={false}
+      onLookup={() => undefined}
+      request={{
+        accountId: "account-r2",
+        challengeId: "challenge-r2",
+        challengeToken: "must-not-render",
+        idempotencyKey: "idempotency-r2",
+        policyVersion: "policy-r2",
+        policyDigest: "digest-r2",
+      }}
+    />,
+  );
+  assert.match(html, /受理状态未知/);
+  assert.match(html, /challenge-r2/);
+  assert.match(html, /继续查询本次请求/);
+  assert.match(html, /请勿重复开始/);
+  assert.doesNotMatch(html, /must-not-render|idempotency-r2|TOTP 验证|提交服务端实时预检/);
 });
 
 test("all server stages and provider verification states have explicit non-color labels", () => {

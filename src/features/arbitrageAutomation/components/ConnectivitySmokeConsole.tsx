@@ -9,6 +9,7 @@ import { Button } from "../../../components/ui/Button";
 import type {
   ConnectivitySmokeAcceptance,
   ConnectivitySmokeClient,
+  ConnectivitySmokeExecutionRequest,
   ConnectivitySmokeMetric,
   ConnectivitySmokeOrder,
   ConnectivitySmokePolicy,
@@ -39,11 +40,13 @@ const initialConfirmations: ConfirmationState = {
 export function ConnectivitySmokeConsole({
   accountId,
   client,
+  expectedAccountFingerprint,
   onFeedback,
   requestStepUp,
 }: {
   accountId: string;
   client: ConnectivitySmokeClient;
+  expectedAccountFingerprint: string | null;
   onFeedback: (message: string, tone?: "error" | "info" | "success" | "warning") => void;
   requestStepUp: (intent: StepUpIntent, title: string, description: string) => Promise<string>;
 }) {
@@ -51,13 +54,18 @@ export function ConnectivitySmokeConsole({
   const [preflight, setPreflight] = useState<ConnectivitySmokePreflight | null>(null);
   const [status, setStatus] = useState<ConnectivitySmokeStatus | null>(null);
   const [receipt, setReceipt] = useState<ConnectivitySmokeReceipt | null>(null);
+  const [unknownRequest, setUnknownRequest] = useState<ConnectivitySmokeExecutionRequest | null>(null);
   const [confirmations, setConfirmations] = useState(initialConfirmations);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const accountRef = useRef(accountId);
+  const scopeRef = useRef(createConnectivitySmokeScope(accountId));
+  if (scopeRef.current.accountId !== accountId) {
+    scopeRef.current = nextConnectivitySmokeScope(scopeRef.current, accountId);
+  }
 
   const loadReadOnly = useCallback(async (signal?: AbortSignal) => {
+    const scope = scopeRef.current;
     setLoading(true);
     setError("");
     try {
@@ -65,31 +73,43 @@ export function ConnectivitySmokeConsole({
         client.policy(accountId, signal),
         client.status(accountId, undefined, signal),
       ]);
+      if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
       if (nextPolicy.accountId !== accountId || nextPolicy.venue !== "binance") {
         throw new AutomationConsoleContractError(409, "Policy 与当前 Binance 账户不匹配。", null, "account_mismatch");
       }
+      assertConnectivitySmokeStatusScope(nextStatus, expectedAccountFingerprint);
       setPolicy(nextPolicy);
       setStatus(nextStatus);
       setPreflight(null);
+      setUnknownRequest(null);
       setConfirmations(initialConfirmations);
       if (nextStatus?.stage === "flat") {
-        setReceipt(await client.receipt(accountId, nextStatus.smokeId, signal));
+        const nextReceipt = await client.receipt(accountId, nextStatus.smokeId, signal);
+        if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+        assertConnectivitySmokeReceiptScope(nextReceipt, expectedAccountFingerprint);
+        setReceipt(nextReceipt);
       } else {
         setReceipt(null);
       }
     } catch (loadError) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || !isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
       setPolicy(null);
       setStatus(null);
       setReceipt(null);
       setError(errorMessage(loadError));
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted && isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setLoading(false);
     }
-  }, [accountId, client]);
+  }, [accountId, client, expectedAccountFingerprint]);
 
   useEffect(() => {
-    accountRef.current = accountId;
+    setPolicy(null);
+    setPreflight(null);
+    setStatus(null);
+    setReceipt(null);
+    setUnknownRequest(null);
+    setConfirmations(initialConfirmations);
+    setError("");
     const controller = new AbortController();
     void loadReadOnly(controller.signal);
     return () => controller.abort();
@@ -99,28 +119,44 @@ export function ConnectivitySmokeConsole({
     if (!status || terminalStages.has(status.stage)) return;
     const controller = new AbortController();
     const timer = window.setInterval(() => {
+      const scope = scopeRef.current;
       void client.status(accountId, status.smokeId, controller.signal)
         .then(async (next) => {
-          if (!next || accountRef.current !== accountId) return;
+          if (!next || !isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+          assertConnectivitySmokeStatusScope(next, expectedAccountFingerprint);
           setStatus(next);
-          if (next.stage === "flat") setReceipt(await client.receipt(accountId, next.smokeId, controller.signal));
+          if (next.stage === "flat") {
+            const nextReceipt = await client.receipt(accountId, next.smokeId, controller.signal);
+            if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+            assertConnectivitySmokeReceiptScope(nextReceipt, expectedAccountFingerprint);
+            setReceipt(nextReceipt);
+          }
         })
         .catch((pollError) => {
-          if (!controller.signal.aborted) setError(errorMessage(pollError));
+          if (!controller.signal.aborted && isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) {
+            setError(errorMessage(pollError));
+          }
         });
     }, pollIntervalMs);
     return () => {
       window.clearInterval(timer);
       controller.abort();
     };
-  }, [accountId, client, status]);
+  }, [accountId, client, expectedAccountFingerprint, status]);
 
   const requestPreflight = async () => {
-    if (!policy || !allConfirmed(confirmations) || statusBlocksNewRun(status)) return;
+    if (
+      !policy
+      || policy.accountId !== accountId
+      || !allConfirmed(confirmations)
+      || statusBlocksNewRun(status)
+    ) return;
+    const scope = scopeRef.current;
     setBusy(true);
     setError("");
     try {
       const next = await client.preflight(accountId, policy, confirmations as ConnectivitySmokeAcceptance);
+      if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
       if (
         next.report.accountId !== accountId
         || next.report.policy.version !== policy.policy.version
@@ -130,45 +166,108 @@ export function ConnectivitySmokeConsole({
       }
       setPreflight(next);
     } catch (preflightError) {
-      setError(errorMessage(preflightError));
+      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setError(errorMessage(preflightError));
     } finally {
-      setBusy(false);
+      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
     }
   };
 
   const execute = async () => {
-    if (!preflight || statusBlocksNewRun(status)) return;
+    if (!preflight || unknownRequest || statusBlocksNewRun(status)) return;
+    const scope = scopeRef.current;
+    let preparedRequest: ConnectivitySmokeExecutionRequest | null = null;
     setBusy(true);
     setError("");
     try {
       const prepared = await connectivitySmokeStepUpRequest(preflight);
+      preparedRequest = prepared.request;
+      if (
+        !isConnectivitySmokeScopeCurrent(scopeRef.current, scope)
+        || prepared.request.accountId !== scope.accountId
+      ) {
+        if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) {
+          setPreflight(null);
+          setError("账户范围已变化，旧预检已失效；未申请 TOTP。");
+        }
+        return;
+      }
       const token = await requestStepUp(
         prepared.intent,
         "执行 25 USDT 闭环连通性验证",
-        `Binance · ${accountId} · 单次执行并立即退出 · 计划资本 ${formatMoney(preflight.report.budget.totalCapitalUsd)}`,
+        `Binance · ${prepared.request.accountId} · 单次执行并立即退出 · 计划资本 ${formatMoney(preflight.report.budget.totalCapitalUsd)}`,
       );
+      if (
+        !isConnectivitySmokeScopeCurrent(scopeRef.current, scope)
+        || prepared.request.accountId !== scopeRef.current.accountId
+      ) return;
       const next = await client.execute(prepared.request, token);
+      if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
       if (!next) {
-        throw new AutomationConsoleContractError(
-          503,
-          "服务端尚未返回可恢复的执行记录；请保留当前页面并重新查询状态，不要生成新的验证请求。",
-          null,
-          "connectivity_smoke_status_unknown",
-        );
+        setUnknownRequest(prepared.request);
+        setPreflight(null);
+        setConfirmations(initialConfirmations);
+        setError("");
+        return;
       }
+      assertConnectivitySmokeStatusScope(next, expectedAccountFingerprint);
       setStatus(next);
       setPreflight(null);
       setConfirmations(initialConfirmations);
-      if (next.stage === "flat") setReceipt(await client.receipt(accountId, next.smokeId));
+      if (next.stage === "flat") {
+        const nextReceipt = await client.receipt(prepared.request.accountId, next.smokeId);
+        if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+        assertConnectivitySmokeReceiptScope(nextReceipt, expectedAccountFingerprint);
+        setReceipt(nextReceipt);
+      }
       onFeedback("闭环连通性验证已提交，后续状态仅从服务端记录读取。", "success");
     } catch (executeError) {
+      if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+      if (isConnectivitySmokeTransportUnknown(executeError)) {
+        if (preparedRequest && isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) {
+          setUnknownRequest(preparedRequest);
+          setPreflight(null);
+          setConfirmations(initialConfirmations);
+        }
+      }
       setError(errorMessage(executeError));
     } finally {
-      setBusy(false);
+      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
     }
   };
 
-  const canPreflight = Boolean(policy && allConfirmed(confirmations) && !statusBlocksNewRun(status));
+  const continueExactLookup = async () => {
+    if (!unknownRequest || unknownRequest.accountId !== accountId) return;
+    const scope = scopeRef.current;
+    const request = unknownRequest;
+    setBusy(true);
+    setError("");
+    try {
+      const next = await client.lookup(request);
+      if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+      if (!next) return;
+      assertConnectivitySmokeStatusScope(next, expectedAccountFingerprint);
+      setStatus(next);
+      setUnknownRequest(null);
+      if (next.stage === "flat") {
+        const nextReceipt = await client.receipt(request.accountId, next.smokeId);
+        if (!isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) return;
+        assertConnectivitySmokeReceiptScope(nextReceipt, expectedAccountFingerprint);
+        setReceipt(nextReceipt);
+      }
+    } catch (lookupError) {
+      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setError(errorMessage(lookupError));
+    } finally {
+      if (isConnectivitySmokeScopeCurrent(scopeRef.current, scope)) setBusy(false);
+    }
+  };
+
+  const canPreflight = Boolean(
+    policy
+    && policy.accountId === accountId
+    && !unknownRequest
+    && allConfirmed(confirmations)
+    && !statusBlocksNewRun(status),
+  );
   const active = status && !terminalStages.has(status.stage);
 
   return (
@@ -185,7 +284,7 @@ export function ConnectivitySmokeConsole({
             <>
               <InlineMessage icon={<ShieldAlert size={17} />} text={policy.message} />
               <PolicyDisclosure policy={policy} />
-              {!statusBlocksNewRun(status) ? (
+              {!unknownRequest && !statusBlocksNewRun(status) ? (
                 <div className="space-y-3 border-t border-white/10 pt-4">
                   <Confirmation
                     checked={confirmations.exclusiveWindowConfirmed}
@@ -213,6 +312,7 @@ export function ConnectivitySmokeConsole({
       </ConsoleSection>
 
       {preflight ? <PreflightPanel busy={busy} onExecute={() => void execute()} preflight={preflight} /> : null}
+      {unknownRequest ? <UnknownExecutionPanel busy={busy} onLookup={() => void continueExactLookup()} request={unknownRequest} /> : null}
       {status ? <StatusPanel active={Boolean(active)} status={status} /> : null}
       {status?.stage === "flat" && receipt ? <ReceiptPanel receipt={receipt} /> : null}
     </div>
@@ -277,6 +377,36 @@ function PreflightPanel({ busy, onExecute, preflight }: { busy: boolean; onExecu
         </ul>
         <Button className="w-full" disabled={busy || !preflight.report.passed || preflight.expiresAt <= Date.now()} onClick={onExecute} type="button">
           {busy ? "等待二次验证" : "TOTP 验证并执行一次"}
+        </Button>
+      </div>
+    </ConsoleSection>
+  );
+}
+
+export function UnknownExecutionPanel({
+  busy,
+  onLookup,
+  request,
+}: {
+  busy: boolean;
+  onLookup: () => void;
+  request: ConnectivitySmokeExecutionRequest;
+}) {
+  return (
+    <ConsoleSection
+      actions={<StatusTag tone="warning">受理状态未知</StatusTag>}
+      description="只允许使用原 accountId、challengeId 与 idempotencyKey 继续精确查询。"
+      title="本次执行响应尚未确认"
+    >
+      <div className="space-y-4 p-4 sm:p-5">
+        <InlineMessage
+          danger
+          icon={<AlertTriangle size={17} />}
+          text="截至本次查询尚未确认服务端是否已持久受理；传输中的 execute 仍可能稍后到达。请勿重复开始，也不会自动重放 execute。"
+        />
+        <p className="break-all text-xs leading-5 text-muted">关联 challenge：{request.challengeId}</p>
+        <Button disabled={busy} onClick={onLookup} type="button" variant="secondary">
+          {busy ? "精确查询中" : "继续查询本次请求"}
         </Button>
       </div>
     </ConsoleSection>
@@ -461,6 +591,71 @@ export function allConfirmed(confirmations: ConfirmationState) {
 
 export function statusBlocksNewRun(status: ConnectivitySmokeStatus | null) {
   return Boolean(status && (!terminalStages.has(status.stage) || status.stage === "manual_intervention"));
+}
+
+export type ConnectivitySmokeScope = {
+  accountId: string;
+  generation: number;
+};
+
+export function createConnectivitySmokeScope(accountId: string): ConnectivitySmokeScope {
+  return { accountId, generation: 0 };
+}
+
+export function nextConnectivitySmokeScope(
+  current: ConnectivitySmokeScope,
+  accountId: string,
+): ConnectivitySmokeScope {
+  return accountId === current.accountId
+    ? current
+    : { accountId, generation: current.generation + 1 };
+}
+
+export function isConnectivitySmokeScopeCurrent(
+  current: ConnectivitySmokeScope,
+  captured: ConnectivitySmokeScope,
+) {
+  return current.accountId === captured.accountId && current.generation === captured.generation;
+}
+
+function assertConnectivitySmokeStatusScope(
+  status: ConnectivitySmokeStatus | null,
+  expectedAccountFingerprint: string | null,
+) {
+  if (
+    status
+    && expectedAccountFingerprint
+    && status.accountFingerprint !== expectedAccountFingerprint
+  ) {
+    throw new AutomationConsoleContractError(
+      409,
+      "服务端 smoke 状态与当前 Binance 账户指纹不匹配。",
+      null,
+      "account_mismatch",
+    );
+  }
+}
+
+function assertConnectivitySmokeReceiptScope(
+  receipt: ConnectivitySmokeReceipt,
+  expectedAccountFingerprint: string | null,
+) {
+  if (
+    expectedAccountFingerprint
+    && receipt.accountFingerprint !== expectedAccountFingerprint
+  ) {
+    throw new AutomationConsoleContractError(
+      409,
+      "服务端 smoke 凭据与当前 Binance 账户指纹不匹配。",
+      null,
+      "account_mismatch",
+    );
+  }
+}
+
+function isConnectivitySmokeTransportUnknown(error: unknown) {
+  return error instanceof AutomationConsoleContractError
+    && ["network_request_failed", "request_aborted"].includes(error.category ?? "");
 }
 
 function nullableValue(value: number | null, suffix = "") {
