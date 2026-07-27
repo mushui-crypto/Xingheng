@@ -417,10 +417,47 @@ Binance Mainnet `XAUTUSDT` 连通性烟测使用独立 `connectivity_smoke` mode
 
 新增 additive API：
 
+- `GET /api/arbitrage/automation/connectivity-smoke/policy?accountId=<server-issued-account-id>`
 - `POST /api/arbitrage/automation/connectivity-smoke/preflight`
 - `POST /api/arbitrage/automation/connectivity-smoke/execute`
 - `GET /api/arbitrage/automation/connectivity-smoke/status`
 - `GET /api/arbitrage/automation/connectivity-smoke/:smokeId/receipt`
+
+Policy discovery 必须在首次 preflight 前可调用。它要求已登录 active 用户及当前用户已绑定的
+Binance `accountId`，使用 automation `private_read` 限流并返回 `Cache-Control: no-store`；
+只读取本地非敏感账户 metadata 和服务端 canonical policy，不初始化 connector、不读取 KMS
+明文或 provider 私有状态，也不产生 provider 写。响应 exact contract 为：
+
+```json
+{
+  "mode": "connectivity_smoke",
+  "venue": "binance",
+  "accountId": "服务端已绑定账户 ID",
+  "executionAuthorized": false,
+  "message": "此响应仅用于展示并确认当前服务端 policy，不表示 preflight 通过、执行开关开启或真实窗口已授权。",
+  "policy": {
+    "version": "connectivity-smoke-non-atomic-v1",
+    "venue": "binance",
+    "symbol": "XAUTUSDT",
+    "maxPlannedCapitalUsd": 25,
+    "dedicatedBlankSubaccount": true,
+    "singleExecution": true,
+    "immediateExit": true,
+    "challengeTtlMs": 60000,
+    "continuity": "non_atomic_incomplete",
+    "requiredConfirmations": ["exclusive_window", "manual_recovery", "non_atomic_risk"],
+    "exclusiveWindowRules": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "manualRecoveryRequirements": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "residualRisks": [{ "code": "stable_code", "message": "服务端展示文案" }],
+    "digest": "canonical policy 的 SHA-256 base64url"
+  }
+}
+```
+
+`policy`（不含 `digest`）是 version/digest/preflight validator 的唯一事实源。前端必须完整展示
+服务端返回的 code/message，并将返回的 version/digest 原样用于 `policyAcceptance`；不得硬编码
+digest。policy 内容更新会生成新 digest，旧 acceptance 继续由 preflight exact-match fail-closed。
+Discovery 不表示凭证 active、preflight 已通过、执行开关开启或真实 Mainnet 窗口已授权。
 
 Preflight 请求固定为（policy version/digest 是稳定契约，不保存 TOTP 或凭证）：
 

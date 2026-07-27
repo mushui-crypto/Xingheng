@@ -116,6 +116,7 @@ export type RwaAutomationConnector = {
   preflight(opportunity: ArbitrageOpportunity, accountId: string, mode: RwaAutomationMode): Promise<{ challengeId: string; challengeToken: string; expiresAt: number; report: unknown }>;
   execute(input: unknown): Promise<unknown>;
   preflightConnectivitySmoke?(accountId: string, policyAcceptance: unknown): Promise<unknown>;
+  getConnectivitySmokePolicy?(accountId: string): Promise<unknown> | unknown;
   executeConnectivitySmoke?(input: unknown): Promise<unknown>;
   findConnectivitySmokeIdempotent?(input: {
     accountId: string;

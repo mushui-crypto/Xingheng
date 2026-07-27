@@ -114,6 +114,9 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   preflightConnectivitySmoke(accountId: string, policyAcceptance: Parameters<RwaBinanceAutomationService["preflightConnectivitySmoke"]>[1]) {
     return this.service.preflightConnectivitySmoke(accountId, policyAcceptance);
   }
+  getConnectivitySmokePolicy(accountId: string) {
+    return this.service.getConnectivitySmokePolicy(accountId);
+  }
   executeConnectivitySmoke(input: unknown) { return this.service.executeConnectivitySmoke(input); }
   findConnectivitySmokeIdempotent(input: Parameters<RwaBinanceAutomationService["findConnectivitySmokeIdempotent"]>[0]) {
     return this.service.findConnectivitySmokeIdempotent(input);

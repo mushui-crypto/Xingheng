@@ -15,24 +15,93 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = Object.freeze({
   venue: "binance",
   symbol: "XAUTUSDT",
   maxPlannedCapitalUsd: 25,
+  dedicatedBlankSubaccount: true,
   singleExecution: true,
   immediateExit: true,
   challengeTtlMs: 60_000,
-  userPromisesExclusiveWindow: true,
-  userPromisesNoBinanceUiOtherApiKeyTransferOrSystemXautActivity: true,
-  userConfirmsManualCancelAndCloseCapability: true,
-  continuity: "nonAtomic/incomplete",
+  continuity: "non_atomic_incomplete",
+  requiredConfirmations: [
+    "exclusive_window",
+    "manual_recovery",
+    "non_atomic_risk",
+  ],
+  exclusiveWindowRules: [
+    {
+      code: "dedicated_blank_subaccount",
+      message: "必须使用专用空白 Binance 子账户，开始时 XAUT 余额、仓位和活动订单均为零。",
+    },
+    {
+      code: "single_execution_immediate_exit",
+      message: "仅授权一次 connectivity smoke，并在建仓后立即退出；总计划资本不超过 25 USDT。",
+    },
+    {
+      code: "no_other_xaut_activity",
+      message: "窗口内不得通过 Binance UI、其他 API Key、转账或其他系统操作 XAUT。",
+    },
+  ],
+  manualRecoveryRequirements: [
+    {
+      code: "manual_cancel_capability",
+      message: "用户必须具备在 Binance 人工识别并撤销 smoke 相关活动订单的能力。",
+    },
+    {
+      code: "manual_close_capability",
+      message: "用户必须具备在自动恢复停止后人工平 Futures 并卖出归属 Spot 的能力。",
+    },
+  ],
   residualRisks: [
-    "scan_cutoff_to_mutation_race",
-    "rest_history_visibility_delay",
-    "same_net_round_trip_may_not_be_detected",
-    "asset_fungibility_prevents_mathematical_ownership_proof",
-    "budget_is_not_a_maximum_loss_guarantee",
+    {
+      code: "scan_cutoff_to_mutation_race",
+      message: "REST 扫描截止点到 provider mutation 之间存在非原子竞态窗口。",
+    },
+    {
+      code: "rest_history_visibility_delay",
+      message: "Binance 历史订单、成交或划转接口可能延迟显示活动。",
+    },
+    {
+      code: "same_net_round_trip_may_not_be_detected",
+      message: "人工同净额往返若未在 REST 历史中及时可见，系统可能无法识别。",
+    },
+    {
+      code: "asset_fungibility_prevents_mathematical_ownership_proof",
+      message: "XAUT 可替代性使经济归属无法由余额变化获得数学证明。",
+    },
+    {
+      code: "budget_is_not_a_maximum_loss_guarantee",
+      message: "25 USDT 是总计划资本硬预算，不是最大损失保证。",
+    },
   ],
 } as const);
 export const RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST = createHash("sha256")
   .update(JSON.stringify(RWA_CONNECTIVITY_SMOKE_POLICY))
   .digest("base64url");
+
+export type RwaConnectivitySmokePolicyDiscovery = {
+  mode: typeof RWA_CONNECTIVITY_SMOKE_MODE;
+  venue: "binance";
+  accountId: string;
+  executionAuthorized: false;
+  message: string;
+  policy: typeof RWA_CONNECTIVITY_SMOKE_POLICY & {
+    digest: typeof RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST;
+  };
+};
+
+export function connectivitySmokePolicyDiscovery(
+  accountId: string,
+): RwaConnectivitySmokePolicyDiscovery {
+  return {
+    mode: RWA_CONNECTIVITY_SMOKE_MODE,
+    venue: "binance",
+    accountId,
+    executionAuthorized: false,
+    message: "此响应仅用于展示并确认当前服务端 policy，不表示 preflight 通过、执行开关开启或真实窗口已授权。",
+    policy: {
+      ...RWA_CONNECTIVITY_SMOKE_POLICY,
+      digest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+    },
+  };
+}
 
 export type RwaConnectivitySmokePolicyAcceptance = {
   version: typeof RWA_CONNECTIVITY_SMOKE_POLICY_VERSION;

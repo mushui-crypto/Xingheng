@@ -44,6 +44,7 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   let takeoverOwner: string | undefined;
   let currentTakeoverOwner: string | undefined;
   let abortedTakeoverOwner: string | undefined;
+  let policyOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
@@ -73,11 +74,21 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
         abortedTakeoverOwner = userId;
         return { takeoverId: "takeover-current", state: "failed" };
       },
+      getConnectivitySmokePolicy: async (userId: string, query: unknown) => {
+        policyOwner = userId;
+        return {
+          mode: "connectivity_smoke",
+          venue: "binance",
+          accountId: (query as any).accountId,
+          executionAuthorized: false,
+          policy: { version: "v1", digest: "digest" },
+        };
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 35);
+  assert.equal(automationRoutes.length, 36);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
   for (const route of [
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",
@@ -98,6 +109,24 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   assert.equal(okResponse.statusCode, 200);
   assert.equal(okResponse.headers["Cache-Control"], "no-store");
   assert.match(JSON.stringify(okResponse.body), /user-a/);
+
+  const policyResponse = mockResponse();
+  await routes.get("GET /api/arbitrage/automation/connectivity-smoke/policy")({
+    user: { id: "user-a" },
+    query: { accountId: "binance:policy-account" },
+    params: {},
+    body: {},
+  }, policyResponse);
+  assert.equal(policyOwner, "user-a");
+  assert.equal(policyResponse.statusCode, 200);
+  assert.equal(policyResponse.headers["Cache-Control"], "no-store");
+  assert.deepEqual(policyResponse.body, {
+    mode: "connectivity_smoke",
+    venue: "binance",
+    accountId: "binance:policy-account",
+    executionAuthorized: false,
+    policy: { version: "v1", digest: "digest" },
+  });
 
   const anonymousResponse = mockResponse();
   await routes.get("GET /api/arbitrage/automation/venues")({ params: {}, body: {} }, anonymousResponse);

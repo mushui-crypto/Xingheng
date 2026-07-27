@@ -88,6 +88,7 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
   app.get("/api/arbitrage/automation/opportunities", route((request) => control.listOpportunities(authenticatedUserId(request), sourceIp(request))));
   app.post("/api/arbitrage/automation/preflight", route((request) => control.preflight(authenticatedUserId(request), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/execute", route((request) => control.execute(authenticatedUserId(request), authenticatedSessionDomain(request), request.body, sourceIp(request))));
+  app.get("/api/arbitrage/automation/connectivity-smoke/policy", route((request) => control.getConnectivitySmokePolicy(authenticatedUserId(request), request.query, sourceIp(request))));
   app.post("/api/arbitrage/automation/connectivity-smoke/preflight", route((request) => control.preflightConnectivitySmoke(authenticatedUserId(request), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/connectivity-smoke/execute", route((request) => control.executeConnectivitySmoke(authenticatedUserId(request), authenticatedSessionDomain(request), request.body, sourceIp(request))));
   app.get("/api/arbitrage/automation/connectivity-smoke/status", route((request) => control.getConnectivitySmokeStatus(authenticatedUserId(request), request.query, sourceIp(request))));

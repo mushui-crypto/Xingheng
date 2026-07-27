@@ -1,10 +1,65 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  assertConnectivitySmokePolicyAcceptance,
   calculateConnectivitySmokeBudget,
+  connectivitySmokePolicyDiscovery,
   RWA_CONNECTIVITY_SMOKE_BUDGET_USD,
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
 import type { RwaBinancePreflightSnapshot } from "./RwaBinanceAutomationTypes";
+
+test("connectivity smoke policy discovery is the canonical display and acceptance source", () => {
+  const discovery = connectivitySmokePolicyDiscovery("binance:test");
+  assert.equal(discovery.executionAuthorized, false);
+  assert.equal(discovery.policy.version, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
+  assert.equal(discovery.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+  assert.deepEqual(discovery.policy.requiredConfirmations, [
+    "exclusive_window", "manual_recovery", "non_atomic_risk",
+  ]);
+  assert.deepEqual(
+    discovery.policy.exclusiveWindowRules.map((item) => item.code),
+    ["dedicated_blank_subaccount", "single_execution_immediate_exit", "no_other_xaut_activity"],
+  );
+  assert.deepEqual(
+    discovery.policy.manualRecoveryRequirements.map((item) => item.code),
+    ["manual_cancel_capability", "manual_close_capability"],
+  );
+  assert.deepEqual(
+    discovery.policy.residualRisks.map((item) => item.code),
+    [
+      "scan_cutoff_to_mutation_race",
+      "rest_history_visibility_delay",
+      "same_net_round_trip_may_not_be_detected",
+      "asset_fungibility_prevents_mathematical_ownership_proof",
+      "budget_is_not_a_maximum_loss_guarantee",
+    ],
+  );
+  assert.ok([
+    ...discovery.policy.exclusiveWindowRules,
+    ...discovery.policy.manualRecoveryRequirements,
+    ...discovery.policy.residualRisks,
+  ].every((item) => item.message.length > 0));
+  assert.doesNotMatch(
+    JSON.stringify(discovery),
+    /apiSecret|credential|totp|token|wif|ipAddress|providerRaw/i,
+  );
+  assert.doesNotThrow(() => assertConnectivitySmokePolicyAcceptance({
+    version: discovery.policy.version,
+    digest: discovery.policy.digest,
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  }));
+  assert.throws(() => assertConnectivitySmokePolicyAcceptance({
+    version: discovery.policy.version,
+    digest: `${discovery.policy.digest}-old`,
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  }));
+});
 
 test("connectivity smoke budget uses the common step and reserves all four action fees and slippage", () => {
   const result = calculateConnectivitySmokeBudget(snapshot(), 20);

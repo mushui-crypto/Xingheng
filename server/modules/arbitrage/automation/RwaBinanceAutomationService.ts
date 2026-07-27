@@ -79,6 +79,7 @@ import {
 import {
   calculateConnectivitySmokeBudget,
   assertConnectivitySmokePolicyAcceptance,
+  connectivitySmokePolicyDiscovery,
   isActiveConnectivitySmoke,
   newSmokeOrderPrefix,
   RWA_CONNECTIVITY_SMOKE_PURPOSE,
@@ -402,6 +403,10 @@ export class RwaBinanceAutomationService {
 
   async getConfiguredAccountId() {
     return (await this.store.readCredentialMetadata())?.accountId ?? null;
+  }
+
+  getConnectivitySmokePolicy(accountId: string) {
+    return connectivitySmokePolicyDiscovery(accountId);
   }
 
   assertRiskCapacity() {

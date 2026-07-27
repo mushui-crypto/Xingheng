@@ -43,6 +43,17 @@ import {
 const masterKey = "11".repeat(32);
 const now = 20_000;
 
+test("Binance connectivity smoke policy discovery is static and performs no provider or KMS read", () => {
+  const client = new FakeBinanceClient();
+  const current = service("/tmp/not-read-policy-discovery", "user-a", client);
+  const before = client.readCount;
+  const policy = current.getConnectivitySmokePolicy("binance:test-account");
+  assert.equal(policy.accountId, "binance:test-account");
+  assert.equal(policy.executionAuthorized, false);
+  assert.equal(policy.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+  assert.equal(client.readCount, before);
+});
+
 test("Binance asset authorization only reads XAUT state and local authorization persistence", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-asset-authorization-"));
   try {

@@ -1044,6 +1044,29 @@ export class RwaAutomationControlService {
     });
   }
 
+  async getConnectivitySmokePolicy(userId: string, input: unknown, sourceIp = "unknown") {
+    const query = record(input);
+    assertOnlyKeys(query, ["accountId"]);
+    const accountId = requiredString(query.accountId, "accountId", 100);
+    this.admitRequest("private_read", sourceIp, userId, "binance");
+    const registry = this.registry(userId);
+    const connector = registry.requireImplemented("binance");
+    const configuredAccountId = await connector.getConfiguredAccountId();
+    if (
+      !configuredAccountId
+      || configuredAccountId !== accountId
+      || !connector.getConnectivitySmokePolicy
+    ) {
+      throw new RwaAutomationControlError(
+        409,
+        "account_mismatch",
+        "accountId 与当前用户已绑定的 Binance smoke 账户不匹配。",
+      );
+    }
+    return this.governed("private_read", sourceIp, userId, "binance", accountId, async () =>
+      connector.getConnectivitySmokePolicy!(accountId));
+  }
+
   async executeConnectivitySmoke(
     userId: string,
     sessionDomain: string,

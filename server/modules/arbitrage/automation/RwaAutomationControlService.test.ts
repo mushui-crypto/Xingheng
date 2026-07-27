@@ -18,6 +18,7 @@ import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaNeutralExecutionError } from "./RwaNeutralExecutionService";
 import type { RwaProviderPreflightSnapshot } from "./RwaNeutralExecutionTypes";
 import {
+  connectivitySmokePolicyDiscovery,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
@@ -56,6 +57,45 @@ const passThroughStepUp = {
   recordCredentialBinding: async () => undefined,
   revokeAutomationScope: () => undefined,
 };
+
+test("connectivity smoke policy discovery validates the bound Binance account without provider initialization", async () => {
+  let initializeCalls = 0;
+  let policyCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: "binance:policy-account",
+    onInitialize: () => { initializeCalls += 1; },
+    smokePolicy: (accountId) => {
+      policyCalls += 1;
+      return connectivitySmokePolicyDiscovery(accountId);
+    },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+  );
+  const policy = await control.getConnectivitySmokePolicy("user-a", {
+    accountId: "binance:policy-account",
+  }) as any;
+  assert.equal(policy.accountId, "binance:policy-account");
+  assert.equal(policy.executionAuthorized, false);
+  assert.equal(policy.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+  assert.equal(initializeCalls, 0);
+  assert.equal(policyCalls, 1);
+  await assert.rejects(
+    control.getConnectivitySmokePolicy("user-a", { accountId: "binance:other-account" }),
+    (error: unknown) => error instanceof RwaAutomationControlError && error.category === "account_mismatch",
+  );
+  await assert.rejects(
+    control.getConnectivitySmokePolicy("user-a", {
+      accountId: "binance:policy-account",
+      venue: "binance",
+    }),
+    (error: unknown) => error instanceof RwaAutomationControlError && error.category === "invalid_request",
+  );
+  assert.equal(policyCalls, 1);
+});
 
 test("connectivity smoke Control retry returns the exact persisted result before replaying step-up", async () => {
   let stepUpConsumes = 0;
@@ -2094,6 +2134,7 @@ function fakeConnector(
     onTakeoverExitConfirm?: () => void;
     takeoverExitConfirmFactory?: () => Promise<unknown>;
     smokePreflight?: () => Promise<any>;
+    smokePolicy?: (accountId: string) => Promise<any> | any;
     smokeExecute?: (input: any) => Promise<any>;
     smokeIdempotent?: (input: any) => Promise<any>;
   } = {},
@@ -2187,6 +2228,7 @@ function fakeConnector(
       return { challengeId: "challenge", challengeToken: "token", expiresAt: 1, report: { mode } };
     },
     preflightConnectivitySmoke: options.smokePreflight,
+    getConnectivitySmokePolicy: options.smokePolicy,
     executeConnectivitySmoke: options.smokeExecute,
     findConnectivitySmokeIdempotent: options.smokeIdempotent,
     execute: async () => { options.onExecute?.(); return {}; },
