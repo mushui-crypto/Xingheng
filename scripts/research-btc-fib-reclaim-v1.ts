@@ -41,7 +41,7 @@ const report = {
   generatedAt: new Date().toISOString(),
   researchOnly: true,
   automaticOrdersEnabled: false,
-  preRegistration: { document: "STRATEGY_BTC_FIB_RECLAIM_V1.md", config: btcFibonacciReclaimV1Config,
+  preRegistration: { document: "docs/strategy/archive/STRATEGY_BTC_FIB_RECLAIM_V1.md", config: btcFibonacciReclaimV1Config,
     combinedMaxConcurrentPositions: 2, sameSideOnly: true, singleConfiguration: true },
   frozenReferences: { routeBChanged: false, productionPaperReportsChanged: false, forwardDataUsed: false },
   dataQuality: { source: "binance_vision_usdm", market: "BTCUSDT", interval: "5m",

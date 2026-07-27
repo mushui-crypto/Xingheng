@@ -163,9 +163,9 @@ GET /api/strategy/martingale/forward
 
 马丁页签K线使用 `GET /api/strategy/martingale/candles`，要求登录且只允许 `BTCUSDT / ETHUSDT`；接口复用内部标准化K线契约、缓存、已收盘过滤和安全错误响应，不允许前端直连交易所。
 
-独立历史复算已按预注册完成，评价区间为2021-01-01至2026-07-15，BTC/ETH各591,264根5分钟K线、checksum通过、重复0、缺口0。组合1,622组、净收益160.53、PF 1.304、平均0.0049R、标记最大回撤0.91%；BTC PF 1.093，ETH PF 1.546。双倍手续费与滑点后净亏损411.63、PF 0.378。由于平均R与双倍成本门槛失败，状态固定为 `rejected_historical_qualification`；完整结果见 `STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md`。自动Paper可继续记录，但不得解释为历史合格候选。
+独立历史复算已按预注册完成，评价区间为2021-01-01至2026-07-15，BTC/ETH各591,264根5分钟K线、checksum通过、重复0、缺口0。组合1,622组、净收益160.53、PF 1.304、平均0.0049R、标记最大回撤0.91%；BTC PF 1.093，ETH PF 1.546。双倍手续费与滑点后净亏损411.63、PF 0.378。由于平均R与双倍成本门槛失败，状态固定为 `rejected_historical_qualification`；完整结果见 `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md`。自动Paper可继续记录，但不得解释为历史合格候选。
 
-15分钟入场 V2 已按独立预注册完成受控复算：只把 RSI/ATR 信号从5分钟改为已完成15分钟，下一根5分钟开盘执行，其余 V1 参数冻结。2021-01-01至2026-07-15 的 BTC/ETH 各591,264根K线中，两标的合格信号和完成组均为0；15分钟极值回撤与同周期15分钟顺势过滤没有同时满足。两次运行哈希一致，路线固定为 `rejected_historical_qualification`，不修改当前自动Paper。详见 `STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2_RESULT.md`。
+15分钟入场 V2 已按独立预注册完成受控复算：只把 RSI/ATR 信号从5分钟改为已完成15分钟，下一根5分钟开盘执行，其余 V1 参数冻结。2021-01-01至2026-07-15 的 BTC/ETH 各591,264根K线中，两标的合格信号和完成组均为0；15分钟极值回撤与同周期15分钟顺势过滤没有同时满足。两次运行哈希一致，路线固定为 `rejected_historical_qualification`，不修改当前自动Paper。详见 `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2_RESULT.md`。
 
 策略图表 K 线只读接口：
 
@@ -216,7 +216,7 @@ V1 的预设验证门槛要求 `PF >= 1.15` 且 `平均 R >= 0.10`。验证集�
 
 止损消融结论：移除盘中硬止损会放大尾部风险；开发集无止损版本出现约 `-14.18R` 单笔亏损，结果显著弱于硬止损版本，因此冻结候选保留硬止损。
 
-已拒绝的增频方案：ETHUSDT 跨资产扩展在 2024、2025、2026H1 全部亏损；MSS/FVG 延续 setup 没有形成稳定优势；把波动阈值降至 `1.18` 虽能增加 2024–2025 机会，但截至 2026-07-13 的 PF 降至 `1.036`，因此未进入当前影子候选。Route A 预注册的独立趋势回撤 V7 虽把2024–2025组合交易数从159笔增至278笔，但组合PF降至1.107、最大回撤升至5.03%，2025组合转亏；V7独立多空两侧均亏损，已按 `STRATEGY_ROUTE_A_RESEARCH.md` 否决，不修改V5或Route B。V3 的强制时段平仓结果仍保留为历史基线，不覆盖为 V5 结果。
+已拒绝的增频方案：ETHUSDT 跨资产扩展在 2024、2025、2026H1 全部亏损；MSS/FVG 延续 setup 没有形成稳定优势；把波动阈值降至 `1.18` 虽能增加 2024–2025 机会，但截至 2026-07-13 的 PF 降至 `1.036`，因此未进入当前影子候选。Route A 预注册的独立趋势回撤 V7 虽把2024–2025组合交易数从159笔增至278笔，但组合PF降至1.107、最大回撤升至5.03%，2025组合转亏；V7独立多空两侧均亏损，已按 `docs/strategy/archive/STRATEGY_ROUTE_A_RESEARCH.md` 否决，不修改V5或Route B。V3 的强制时段平仓结果仍保留为历史基线，不覆盖为 V5 结果。
 
 ## 明确边界
 

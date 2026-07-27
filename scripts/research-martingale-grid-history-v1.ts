@@ -143,8 +143,8 @@ const report = {
   researchOnly: true,
   automaticOrdersEnabled: false,
   preRegistration: {
-    document: is15mEntryV2 ? "STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2.md" : "STRATEGY_MARTINGALE_GRID_HISTORY_V1.md",
-    strategyDocument: "STRATEGY_MARTINGALE_GRID_PAPER_V1.md",
+    document: is15mEntryV2 ? "docs/strategy/archive/STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2.md" : "docs/strategy/archive/STRATEGY_MARTINGALE_GRID_HISTORY_V1.md",
+    strategyDocument: "docs/strategy/STRATEGY_MARTINGALE_GRID_PAPER_V1.md",
     noParameterSearch: true,
     warmupRange: { from: "2020-12-01", to: "2020-12-31" },
     evaluationRange: { from: "2021-01-01", to: "2026-07-15" },

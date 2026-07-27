@@ -49,4 +49,4 @@ V3的主要问题不是交易频率，而是平均实际名义敞口过低、止
 
 未通过2025验证时，本轮整体否决；不得改用2026挑选、删除BTC、删除空头或降低门槛。
 
-首次结果见 `STRATEGY_MARTINGALE_GRID_20X_V4_RESULT.md`。本轮没有形成可替换V3的20x参数候选。
+首次结果见 `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_20X_V4_RESULT.md`。本轮没有形成可替换V3的20x参数候选。

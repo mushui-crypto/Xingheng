@@ -77,7 +77,7 @@ const report = {
     fundingIgnored: true,
     markPriceAndDynamicLiquidationIgnored: true,
     automaticOrdersEnabled: false,
-    parametersFrozenFrom: "STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3.md",
+    parametersFrozenFrom: "docs/strategy/STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3.md",
   },
   dataQuality: qualityBySymbol,
   base,

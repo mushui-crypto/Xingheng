@@ -144,7 +144,7 @@ if (weekendEntryCount !== 0) {
 const report = {
   study: "ETHUSDT SMC/ICT 4h-1h trend, 15m direction, 5m sweep-FVG-OB V4 preregistered baseline",
   generatedAt: new Date().toISOString(),
-  frozenRuleDocument: "STRATEGY_ETH_SMC_ICT_V4.md",
+  frozenRuleDocument: "docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V4.md",
   candidateVersion: "smc-ict-eth-multi-timeframe-v4",
   routes: routes.map((route) => ({
     routeId: route.routeId,
@@ -236,7 +236,7 @@ const report = {
 };
 
 const jsonOutput = path.resolve(`research-ict-eth-smc-v4-baseline-through-${dailyEnd}.json`);
-const markdownOutput = path.resolve("STRATEGY_ETH_SMC_ICT_V4_RESULT.md");
+const markdownOutput = path.resolve("docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V4_RESULT.md");
 await Promise.all([
   writeFile(jsonOutput, `${JSON.stringify(report, null, 2)}\n`, "utf8"),
   writeFile(markdownOutput, renderMarkdownReport(report), "utf8"),

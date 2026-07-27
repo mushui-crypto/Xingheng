@@ -67,4 +67,4 @@ Short 的止盈方向为加权均价下方0.6%。安全单价差按几何方式�
 - 2024和2025分别为正；
 - 不使用2026-07-16之后数据调参。
 
-本次规则未达到门槛，结论见 `STRATEGY_EXCHANGE_STYLE_DIRECTIONAL_MARTINGALE_V1_RESULT.md`。
+本次规则未达到门槛，结论见 `docs/strategy/archive/STRATEGY_EXCHANGE_STYLE_DIRECTIONAL_MARTINGALE_V1_RESULT.md`。

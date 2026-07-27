@@ -52,7 +52,7 @@ const report = {
   researchOnly: true,
   automaticOrdersEnabled: false,
   preRegistration: {
-    document: "STRATEGY_BTC_ENTRY_CAPACITY_V1.md",
+    document: "docs/strategy/archive/STRATEGY_BTC_ENTRY_CAPACITY_V1.md",
     base: "ict-btc-v5-2026-07-15",
     addonEntry: { fraction: 0.25, expiryBars: 6, sameSideOnly: true },
     maximumConcurrentPositions: 2,

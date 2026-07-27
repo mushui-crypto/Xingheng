@@ -36,7 +36,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--features-csv", default="research-ict-xau-entry-engine-v2-features.csv")
     p.add_argument("--variants-csv", default="research-ict-xau-entry-engine-v2-entry-variants.csv")
     p.add_argument("--json", default="research-ict-xau-entry-engine-v2.json")
-    p.add_argument("--report", default="XAU_SMC_ICT_ENTRY_ENGINE_V2_REPORT.md")
+    p.add_argument("--report", default="docs/strategy/XAU_SMC_ICT_ENTRY_ENGINE_V2_REPORT.md")
     return p.parse_args()
 
 

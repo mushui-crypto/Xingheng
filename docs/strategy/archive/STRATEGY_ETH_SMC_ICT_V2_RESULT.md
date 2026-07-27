@@ -2,7 +2,7 @@
 
 结论日期：2026-07-16
 冻结规则：[`STRATEGY_ETH_SMC_ICT_V2.md`](./STRATEGY_ETH_SMC_ICT_V2.md)
-机器可读报告：[`research-ict-eth-smc-v2-baseline-through-2026-07-14.json`](./research-ict-eth-smc-v2-baseline-through-2026-07-14.json)
+机器可读报告：`research-ict-eth-smc-v2-baseline-through-2026-07-14.json`（生成产物，不纳入 Git）
 
 ## 决策摘要
 

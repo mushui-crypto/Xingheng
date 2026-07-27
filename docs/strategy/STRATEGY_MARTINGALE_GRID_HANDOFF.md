@@ -419,8 +419,8 @@ git diff --check
 | 前端请求 | `src/api/strategy.ts` |
 | 页面 | `src/features/strategy/components/MartingaleStrategyView.tsx` |
 | V1规则 | `STRATEGY_MARTINGALE_GRID_PAPER_V1.md` |
-| V1预注册与结果 | `STRATEGY_MARTINGALE_GRID_HISTORY_V1.md`、`STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md` |
-| V2预注册与结果 | `STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2.md`、`STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2_RESULT.md` |
+| V1预注册与结果 | `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_HISTORY_V1.md`、`docs/strategy/archive/STRATEGY_MARTINGALE_GRID_HISTORY_V1_RESULT.md` |
+| V2预注册与结果 | `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2.md`、`docs/strategy/archive/STRATEGY_MARTINGALE_GRID_15M_ENTRY_V2_RESULT.md` |
 
 ## 11. 风险与解释限制
 

@@ -157,7 +157,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--samples", type=int, default=SAMPLE_SIZE)
     parser.add_argument("--csv", default="research-ict-xau-300-setups.csv")
     parser.add_argument("--json", default="research-ict-xau-300-setups.json")
-    parser.add_argument("--report", default="XAU_SMC_ICT_300_SETUP_ANALYSIS.md")
+    parser.add_argument("--report", default="docs/strategy/XAU_SMC_ICT_300_SETUP_ANALYSIS.md")
     return parser.parse_args()
 
 

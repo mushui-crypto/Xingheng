@@ -48,4 +48,4 @@
 
 若4组均失败，不事后增加RSI阈值、ATR倍数、持仓时间或删除亏损方向；保留否决记录。
 
-结果见 `STRATEGY_RSI_CONTEXT_1M_EXECUTION_V1_RESULT.md`。4组全部未通过形成期，未进入候选或Paper。
+结果见 `docs/strategy/archive/STRATEGY_RSI_CONTEXT_1M_EXECUTION_V1_RESULT.md`。4组全部未通过形成期，未进入候选或Paper。

@@ -50,7 +50,7 @@ const report = {
   researchOnly: true,
   automaticOrdersEnabled: false,
   preRegistration: {
-    document: "STRATEGY_BTC_MULTI_POSITION_V1.md",
+    document: "docs/strategy/archive/STRATEGY_BTC_MULTI_POSITION_V1.md",
     base: "ict-btc-v5-2026-07-15",
     maxConcurrentPositions: 2,
     concurrentPositionMode: "same_side",

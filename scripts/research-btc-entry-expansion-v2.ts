@@ -61,7 +61,7 @@ const report = {
     latestResearchCandle: "2026-07-13T23:55:00Z",
   },
   preRegistration: {
-    document: "STRATEGY_BTC_ENTRY_EXPANSION_V2.md",
+    document: "docs/strategy/archive/STRATEGY_BTC_ENTRY_EXPANSION_V2.md",
     fixedCandidate: ictRouteAConfirmedPullbackV2Config,
     singleConfiguration: true,
     v5PriorityOnExactConflict: true,

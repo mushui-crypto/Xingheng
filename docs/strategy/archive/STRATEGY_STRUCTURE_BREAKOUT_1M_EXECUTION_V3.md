@@ -34,4 +34,4 @@ V2证明普通趋势内EMA回撤虽然能产生20笔以上日均交易，但不�
 
 4组均失败时保留否决记录，不在同一轮事后修改突破长度、EMA、实体、回踩、时段或退出阈值。
 
-结果见 `STRATEGY_STRUCTURE_BREAKOUT_1M_EXECUTION_V3_RESULT.md`。4组在形成、验证和2026诊断中均为负期望，未进入候选或Paper。
+结果见 `docs/strategy/archive/STRATEGY_STRUCTURE_BREAKOUT_1M_EXECUTION_V3_RESULT.md`。4组在形成、验证和2026诊断中均为负期望，未进入候选或Paper。

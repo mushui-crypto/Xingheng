@@ -145,7 +145,10 @@ const report = {
 };
 
 const output = path.resolve(`research-ict-xau-smc-q1-${outputTag}.json`);
-const markdown = path.resolve(`STRATEGY_XAU_SMC_ICT_Q1_${outputTag.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_RESULT.md`);
+const markdown = path.resolve(
+  "docs/strategy/archive",
+  `STRATEGY_XAU_SMC_ICT_Q1_${outputTag.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}_RESULT.md`,
+);
 await Promise.all([
   writeFile(output, `${JSON.stringify(report, null, 2)}\n`, "utf8"),
   writeFile(markdown, renderMarkdown(report), "utf8"),

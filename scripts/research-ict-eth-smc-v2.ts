@@ -118,7 +118,7 @@ for (const route of routes) {
 const report = {
   study: "ETHUSDT SMC/ICT liquidity-sweep Fibonacci-FVG-order-block V2 preregistered baseline",
   generatedAt: new Date().toISOString(),
-  frozenRuleDocument: "STRATEGY_ETH_SMC_ICT_V2.md",
+  frozenRuleDocument: "docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V2.md",
   candidateVersion: "smc-ict-liquidity-sweep-fib-fvg-ob-v2",
   routes: routes.map((route) => ({ routeId: route.routeId, exitMode: route.exitMode })),
   symbol,

@@ -57,7 +57,7 @@ const report = {
     latestResearchCandle: "2026-07-13T23:55:00Z",
   },
   preRegistration: {
-    document: "STRATEGY_ROUTE_A_RESEARCH.md",
+    document: "docs/strategy/archive/STRATEGY_ROUTE_A_RESEARCH.md",
     fixedCandidate: ictRouteATrendPullbackV1Config,
     v5PriorityOnExactConflict: true,
     thresholds: {
