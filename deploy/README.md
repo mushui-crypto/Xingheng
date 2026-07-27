@@ -237,16 +237,31 @@ KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不
 `20001:20001`、目录 `0700`、文件 `0400`，最后以 `mount --move` 一次性发布。部分 bundle、
 额外文件、symlink/hardlink、路径逃逸、非 mTLS ADC、错误 audience/STS、owner/mode 或最终 mount
 校验失败均不会保留可供 runtime 使用的目标。
-若宿主 `/run` 使用 shared mount propagation，安装器会先把 `/run/xingheng` 建成独立的
-private self-bind 边界，再在其中执行 staging tmpfs 的原子 `mount --move`；不会修改整个
+安装器首参数必须严格为 `production` 或 `real-test`，并分别映射到
+`/run/xingheng/gcp-wif` 与 `/run/xingheng-real-test/gcp-wif`；不接受调用方目标路径。
+若宿主 `/run` 使用 shared mount propagation，安装器会先把对应环境的
+`/run/xingheng` 或 `/run/xingheng-real-test` 建成独立的 private self-bind 边界，再在其中执行
+staging tmpfs 的原子 `mount --move`；不会修改整个
 `/run` 的传播属性，也不会退化为磁盘文件或非原子复制。
 
 宿主机部署前必须先确认 `/run` 为 tmpfs，再由 root 注入身份材料；Compose 不会自动创建宿主目录：
 
 ```bash
 findmnt -T /run/xingheng/gcp-wif -o FSTYPE,TARGET
-./scripts/install-gcp-wif.sh /服务器本地受控source /服务器本地受控audience文件
+./scripts/install-gcp-wif.sh production \
+  /服务器本地受控source /服务器本地受控audience文件
 ```
+
+独立真实测试主机使用同一安装器但必须明确选择 `real-test`：
+
+```bash
+findmnt -T /run/xingheng-real-test/gcp-wif -o FSTYPE,TARGET
+./scripts/install-gcp-wif.sh real-test \
+  /服务器本地受控source /服务器本地受控audience文件
+```
+
+两个目标均保持 tmpfs、`20001:20001`、目录 `0700`、文件 `0400` 和原子发布边界；
+不得把 production bundle 安装到 real-test 路径，反之亦然。
 
 身份文件先在受限临时位置完整生成并校验，再安装为 `20001:20001 / 0400`。日常叶证书轮换使用
 版本化 cert/key 文件：先写入并 `fsync` 新文件，再让新的 certificate config 同时指向它们，

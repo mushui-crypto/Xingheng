@@ -18,6 +18,7 @@ const ENABLED = process.platform === "linux"
 const ROOT = "/opt/xingheng-release/code";
 const PRODUCTION_WRAPPER = `${ROOT}/scripts/production-compose.sh`;
 const REAL_TEST_WRAPPER = `${ROOT}/scripts/real-test-compose.sh`;
+const STANDALONE_REAL_TEST_WRAPPER = `${ROOT}/scripts/real-test-standalone-compose.sh`;
 const PRODUCTION_ENV = `${ROOT}/.env.production`;
 const COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
 const FROZEN_LOADER = `${ROOT}/scripts/load-release-manifest.sh`;
@@ -38,7 +39,11 @@ test("trusted Linux root launcher consumes Compose and environment descriptors",
   skip: !ENABLED && "requires the explicit isolated Linux trust fixture",
   timeout: 30_000,
 }, () => {
-  for (const wrapper of [PRODUCTION_WRAPPER, REAL_TEST_WRAPPER]) {
+  for (const wrapper of [
+    PRODUCTION_WRAPPER,
+    REAL_TEST_WRAPPER,
+    STANDALONE_REAL_TEST_WRAPPER,
+  ]) {
     const result = invoke(wrapper);
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stderr, /trusted-docker-receipt phase=validated/u);

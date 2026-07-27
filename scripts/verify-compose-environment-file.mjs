@@ -23,16 +23,23 @@ import { inheritedOperationLocks } from "./operationLocks.mjs";
 
 const environment = process.argv[2];
 const composeArgs = process.argv.slice(3);
-if (!["production", "real-test"].includes(environment) || composeArgs.length < 1) {
-  console.error("usage: verify-compose-environment-file.mjs production|real-test COMPOSE_ARGS...");
+if (!["production", "real-test", "real-test-standalone"].includes(environment) || composeArgs.length < 1) {
+  console.error(
+    "usage: verify-compose-environment-file.mjs"
+    + " production|real-test|real-test-standalone COMPOSE_ARGS...",
+  );
   process.exit(2);
 }
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+const targetEnvironment = environment === "production" ? "production" : "real-test";
 const composeFile = resolve(
   repoRoot,
   environment === "production" ? "compose.yaml" : "compose.real-test.yaml",
 );
+const standaloneComposeFile = environment === "real-test-standalone"
+  ? resolve(repoRoot, "compose.real-test-standalone.yaml")
+  : null;
 const project = environment === "production" ? "xingheng" : "xingheng-real-test";
 const expectedPath = resolve(
   repoRoot,
@@ -41,19 +48,22 @@ const expectedPath = resolve(
 
 try {
   if (process.getuid?.() === 0) {
-    if (inheritedOperationLocks(environment, process.env) === null) {
+    if (inheritedOperationLocks(targetEnvironment, process.env) === null) {
       throw new Error("root Compose operation requires inherited transaction locks");
     }
   }
   assertTrustedReleaseRoot(repoRoot, process.env);
   const composeDescriptor = openSecureReleaseFile(composeFile);
+  const standaloneComposeDescriptor = standaloneComposeFile === null
+    ? null
+    : openSecureReleaseFile(standaloneComposeFile);
   const frozenReleaseFiles = [
     secureReleaseFileReceipt(fileURLToPath(import.meta.url)),
     secureReleaseFileReceipt(resolve(repoRoot, "scripts/trustedDockerRuntime.mjs")),
     secureReleaseFileReceipt(resolve(repoRoot, "scripts/operationLocks.mjs")),
   ];
   try {
-  validateComposeArguments(composeArgs, environment);
+  validateComposeArguments(composeArgs, targetEnvironment);
   assertNoDockerControlEnvironment(process.env);
   if (process.env.XINGHENG_COMPOSE_ENV_FD !== undefined) {
     throw new Error(`${environment} Compose control environment is not allowed`);
@@ -140,7 +150,7 @@ try {
           offset += count;
         }
         environmentEntries = parseEnvironmentEntries(bytes);
-        validateEnvironmentIdentity(environment, environmentEntries);
+        validateEnvironmentIdentity(targetEnvironment, environmentEntries);
         sha256 = createHash("sha256").update(bytes).digest("hex");
         const after = fstatSync(fd);
         if (
@@ -167,17 +177,21 @@ try {
       const interpolationFdPath = `${descriptorRoot}/3`;
       const serviceFdPath = `${descriptorRoot}/4`;
       const composeFdPath = `${descriptorRoot}/6`;
+      const standaloneComposeFdPath = `${descriptorRoot}/7`;
       inheritedEnvironment.XINGHENG_COMPOSE_ENV_FD = serviceFdPath;
       console.error(
         `compose-env-receipt phase=validated environment=${environment}`
         + " interpolationFd=3 serviceFd=4"
         + ` dev=${opened.dev} ino=${opened.ino} size=${opened.size} sha256=${sha256}`,
       );
+      const composeFiles = standaloneComposeDescriptor === null
+        ? ["-f", composeFdPath]
+        : ["-f", composeFdPath, "-f", standaloneComposeFdPath];
       const result = spawnSync(
         trustedExecutableInvocation(trustedCompose, 5),
         [
           "--env-file", interpolationFdPath,
-          "-f", composeFdPath,
+          ...composeFiles,
           "-p", project,
           ...composeArgs,
         ],
@@ -186,10 +200,14 @@ try {
           stdio: [
             "inherit", "inherit", "inherit",
             fd, serviceFd, trustedCompose.fd, composeDescriptor.fd,
+            ...(standaloneComposeDescriptor === null ? [] : [standaloneComposeDescriptor.fd]),
           ],
         },
       );
       assertOpenReleaseFileUnchanged(composeDescriptor);
+      if (standaloneComposeDescriptor !== null) {
+        assertOpenReleaseFileUnchanged(standaloneComposeDescriptor);
+      }
       for (const receipt of frozenReleaseFiles) {
         assertReleaseFileReceiptUnchanged(receipt, secureReleaseFileReceipt(receipt.path));
       }
@@ -241,6 +259,7 @@ try {
   }
   } finally {
     closeSync(composeDescriptor.fd);
+    if (standaloneComposeDescriptor !== null) closeSync(standaloneComposeDescriptor.fd);
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : "Compose environment file verification failed");

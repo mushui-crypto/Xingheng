@@ -27,7 +27,14 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
       }
       ;;
     /opt/xingheng-release/code)
-      xingheng_expected_operation=production
+      if [ "${0##*/}" = install-gcp-wif.sh ]; then
+        case "${1:-}" in
+          production|real-test) xingheng_expected_operation="$1" ;;
+          *) echo "WIF installation environment is invalid" >&2; exit 78 ;;
+        esac
+      else
+        xingheng_expected_operation=production
+      fi
       ;;
     *)
       echo "trusted operation root is invalid" >&2

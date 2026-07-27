@@ -79,7 +79,8 @@ sudo scripts/legacy-release-bridge.sh capture "$STEP0_BRIDGE" "$STEP0_OLD_ENV"
 
 ```bash
 test ! -e /run/xingheng/gcp-wif
-sudo ./scripts/install-gcp-wif.sh "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
+sudo ./scripts/install-gcp-wif.sh production \
+  "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
   /usr/bin/node scripts/verify-gcp-wif-bundle.mjs installed \
   /run/xingheng/gcp-wif "$STEP0_WIF_AUDIENCE_FILE"

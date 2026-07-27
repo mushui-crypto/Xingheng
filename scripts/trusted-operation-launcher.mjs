@@ -58,8 +58,10 @@ try {
     : [
       "production-compose.sh",
       "real-test-compose.sh",
+      "real-test-standalone-compose.sh",
       "real-test-cleanup.sh",
       "activate-release.sh",
+      "activate-real-test-release.sh",
       "activate-first-verified-release.sh",
       "install-gcp-wif.sh",
       "legacy-release-bridge.sh",

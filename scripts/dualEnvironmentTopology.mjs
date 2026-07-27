@@ -104,11 +104,15 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   if (Array.isArray(realTestWeb.ports) && realTestWeb.ports.length > 0) {
     throw new Error("real-test Web must not publish host ports");
   }
+  if (realTestWeb.labels?.["com.xingheng.real-test.topology"] !== "shared") {
+    throw new Error("shared real-test topology identity is invalid");
+  }
   assertProductionIngressPorts(productionWeb);
   assertHealthcheck(productionApi, "production", "xingheng", false);
   assertHealthcheck(realTestApi, "real-test", "xingheng-real-test", false);
   assertHealthcheck(productionWeb, "production", "xingheng", true);
   assertHealthcheck(realTestWeb, "real-test", "xingheng-real-test", true);
+  assertRealTestWebHealthcheck(realTestWeb, "http");
 
   assertVolumes(production, PRODUCTION_PROJECT);
   assertVolumes(realTest, REAL_TEST_PROJECT);
@@ -158,6 +162,22 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   return true;
 }
 
+export function validateStandaloneRealTestTopology(manifest, realTest) {
+  validateRealTestComposeConfig(manifest, realTest);
+  const api = service(realTest, "api");
+  const web = service(realTest, "web");
+  assertHealthcheck(api, "real-test", "xingheng-real-test", false);
+  assertHealthcheck(web, "real-test", "xingheng-real-test", true);
+  assertVolumes(realTest, REAL_TEST_PROJECT);
+  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
+  assertWifMount(api, "/run/xingheng-real-test/gcp-wif");
+  assertStandaloneIngress(realTest, web);
+  if (api.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
+    throw new Error("real-test execution gate must remain closed");
+  }
+  return true;
+}
+
 function assertProductionIngressPorts(web) {
   const ports = Array.isArray(web.ports) ? web.ports : [];
   const normalized = ports.map((port) =>
@@ -167,26 +187,80 @@ function assertProductionIngressPorts(web) {
   }
 }
 
+function assertStandaloneIngress(config, web) {
+  assertProductionIngressPorts(web);
+  if (web.labels?.["com.xingheng.real-test.topology"] !== "standalone") {
+    throw new Error("standalone real-test topology identity is invalid");
+  }
+  const networks = record(config.networks, "Compose networks");
+  if (
+    Object.hasOwn(networks, "public_ingress")
+    || Object.keys(networks).some((name) => name !== "default")
+  ) {
+    throw new Error("standalone real-test ingress network set is invalid");
+  }
+  const serviceNetworks = record(web.networks, "Web networks");
+  if (
+    Object.hasOwn(serviceNetworks, "public_ingress")
+    || Object.keys(serviceNetworks).some((name) => name !== "default")
+  ) {
+    throw new Error("standalone real-test Web network set is invalid");
+  }
+  const command = Array.isArray(web.command) ? web.command.at(-1) : "";
+  if (
+    typeof command !== "string"
+    || !command.includes("Caddyfile.real-test-standalone")
+    || !command.includes("REAL_TEST_DOMAIN")
+  ) {
+    throw new Error("standalone real-test HTTPS entry is invalid");
+  }
+  assertRealTestWebHealthcheck(web, "https");
+}
+
 function assertHealthcheck(serviceValue, environment, project, web) {
   const health = serviceValue.healthcheck;
   const command = health?.test;
+  const webCommandValid = environment === "real-test"
+    ? Array.isArray(command)
+      && command.length === 5
+      && command[0] === "CMD"
+      && command[1] === "/usr/local/bin/verify-real-test-web-health"
+    : Array.isArray(command)
+      && command.length === 2
+      && command[0] === "CMD-SHELL"
+      && typeof command[1] === "string"
+      && command[1].includes(environment)
+      && command[1].includes("127.0.0.1/api/health");
   if (
     !Array.isArray(command)
-    || command.length !== (web ? 2 : 4)
-    || command[0] !== (web ? "CMD-SHELL" : "CMD")
-    || typeof command.at(-1) !== "string"
-    || !command.at(-1).includes(environment)
+    || (web && !webCommandValid)
     || (!web && (
-      !command.at(-1).includes(project)
+      command.length !== 4
+      || command[0] !== "CMD"
+      || typeof command.at(-1) !== "string"
+      || !command.at(-1).includes(environment)
+      || !command.at(-1).includes(project)
       || !command.at(-1).includes("cache-control")
       || !command.at(-1).includes("XINGHENG_EXPECTED_REVISION")
     ))
-    || (web && !command.at(-1).includes("127.0.0.1/api/health"))
     || health.interval !== "15s"
     || health.timeout !== "5s"
     || health.start_period !== "30s"
     || health.retries !== 5
   ) throw new Error("deployment health identity contract is invalid");
+}
+
+function assertRealTestWebHealthcheck(web, protocol) {
+  const command = web.healthcheck?.test;
+  if (
+    !Array.isArray(command)
+    || command[2] !== protocol
+    || typeof command[3] !== "string"
+    || command[3].length < 1
+    || !/^[0-9a-f]{40}$/u.test(command[4])
+  ) {
+    throw new Error("real-test Web health identity contract is invalid");
+  }
 }
 
 function assertServiceMounts(config, wifSource) {

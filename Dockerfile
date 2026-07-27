@@ -83,8 +83,11 @@ ARG XINGHENG_REVISION
 LABEL org.opencontainers.image.revision="$XINGHENG_REVISION"
 COPY --from=build /app/.build-revision /app/.build-revision
 COPY scripts/verify-runtime-revision.sh /usr/local/bin/verify-runtime-revision
+COPY scripts/verify-real-test-web-health.sh /usr/local/bin/verify-real-test-web-health
 COPY deploy/Caddyfile /etc/caddy/Caddyfile
 COPY deploy/Caddyfile.real-test /etc/caddy/Caddyfile.real-test
+COPY deploy/Caddyfile.real-test-standalone /etc/caddy/Caddyfile.real-test-standalone
 COPY --from=build /app/dist /srv
-RUN chmod 0555 /usr/local/bin/verify-runtime-revision
+RUN chmod 0555 /usr/local/bin/verify-runtime-revision \
+  /usr/local/bin/verify-real-test-web-health
 ENTRYPOINT ["/usr/local/bin/verify-runtime-revision"]

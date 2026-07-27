@@ -31,6 +31,10 @@ const firstReleaseVolumeMigration = read("scripts/first-release-volume-migration
 const releaseManifestLoader = read("scripts/load-release-manifest.sh");
 const productionCompose = read("scripts/production-compose.sh");
 const realTestCompose = read("scripts/real-test-compose.sh");
+const standaloneRealTestCompose = read("scripts/real-test-standalone-compose.sh");
+const standaloneRealTestComposeConfig = read("compose.real-test-standalone.yaml");
+const realTestActivator = read("scripts/activate-real-test-release.sh");
+const realTestWebHealth = read("scripts/verify-real-test-web-health.sh");
 const composeEnvironmentVerifier = read("scripts/verify-compose-environment-file.mjs");
 const trustedDockerRuntime = read("scripts/trustedDockerRuntime.mjs");
 const trustedOperationLauncher = read("scripts/trusted-operation-launcher.mjs");
@@ -43,6 +47,7 @@ const cleanupTransactionStore = read("scripts/cleanupTransactionStore.mjs");
 const realTestCleanupWrapper = read("scripts/real-test-cleanup.sh");
 const realTestComposeConfig = read("compose.real-test.yaml");
 const realTestCaddy = read("deploy/Caddyfile.real-test");
+const standaloneRealTestCaddy = read("deploy/Caddyfile.real-test-standalone");
 const dualEnvironmentTopology = read("scripts/dualEnvironmentTopology.mjs");
 const dualEnvironmentRunbook = read("deploy/PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md");
 const deploymentReadme = read("deploy/README.md");
@@ -336,6 +341,33 @@ const assertions = [
     "production and real-test Compose identities and ingress routing must remain fixed",
   ],
   [
+    standaloneRealTestCompose.includes("real-test-standalone")
+      && standaloneRealTestCompose.includes("trusted-operation-launcher.mjs")
+      && standaloneRealTestComposeConfig.includes('"80:80"')
+      && standaloneRealTestComposeConfig.includes('"443:443"')
+      && standaloneRealTestComposeConfig.includes('"443:443/udp"')
+      && standaloneRealTestComposeConfig.includes("!reset null")
+      && standaloneRealTestComposeConfig.includes("Caddyfile.real-test-standalone")
+      && standaloneRealTestComposeConfig.includes("/usr/local/bin/verify-real-test-web-health")
+      && standaloneRealTestCaddy.includes("{$REAL_TEST_DOMAIN}")
+      && !standaloneRealTestCaddy.includes("http://")
+      && standaloneRealTestCaddy.includes("Strict-Transport-Security")
+      && dockerfile.includes("Caddyfile.real-test-standalone")
+      && dockerfile.includes("verify-real-test-web-health.sh")
+      && realTestWebHealth.includes("Cache-Control:")
+      && realTestWebHealth.includes('"deploymentEnvironment":"real-test"')
+      && realTestWebHealth.includes('"composeProject":"xingheng-real-test"')
+      && deploymentRevisionVerifier.includes("compose-real-test-standalone")
+      && deploymentRevisionVerifier.includes("healthStatus")
+      && deploymentRevisionVerifier.includes("runtime topology label mismatch")
+      && deploymentRevisionVerifier.includes("health status is starting")
+      && dualEnvironmentTopology.includes("validateStandaloneRealTestTopology")
+      && realTestActivator.includes("shared|standalone")
+      && realTestActivator.includes("containers-real-test")
+      && realTestActivator.includes("stop api web"),
+    "standalone real-test must use the trusted release chain and exclusive HTTPS ingress",
+  ],
+  [
     deploymentRevision.includes("validateRealTestComposeConfig")
       && deploymentRevisionVerifier.includes("dual-compose")
       && deploymentRevisionVerifier.includes("containers-real-test")
@@ -474,6 +506,9 @@ const assertions = [
       && wifInstaller.includes("verify-gcp-wif-bundle.mjs installed")
       && wifInstaller.includes("trusted-operation-preamble.sh")
       && trustedOperationLauncher.includes('"install-gcp-wif.sh"')
+      && wifInstaller.includes('production) target="/run/xingheng/gcp-wif"')
+      && wifInstaller.includes('real-test) target="/run/xingheng-real-test/gcp-wif"')
+      && wifInstaller.includes("production|real-test")
       && activationPreflight.includes('serverKillSwitch() !== "true"')
       && activationPreflight.includes("credential_key_provider_unavailable"),
     "WIF installation and activation KMS health must use the frozen mTLS, tmpfs, ownership, and fail-closed boundaries",

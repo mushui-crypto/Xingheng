@@ -15,7 +15,10 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
-import { validateDualEnvironmentTopology } from "./dualEnvironmentTopology.mjs";
+import {
+  validateDualEnvironmentTopology,
+  validateStandaloneRealTestTopology,
+} from "./dualEnvironmentTopology.mjs";
 import {
   validateRealTestRuntimeMounts,
   validateRealTestVolumeMountCounts,
@@ -123,6 +126,9 @@ function compose(project, environment, domain, realTestDomain) {
     DOMAIN: domain,
     REAL_TEST_DOMAIN: realTestDomain,
   });
+  web.labels = {
+    "com.xingheng.real-test.topology": environment === "real-test" ? "shared" : "production",
+  };
   web.volumes = mounts([
     ["volume", "caddy_data", "/data", false],
     ["volume", "caddy_config", "/config", false],
@@ -134,7 +140,15 @@ function compose(project, environment, domain, realTestDomain) {
     },
   };
   web.healthcheck = {
-    test: ["CMD-SHELL", `127.0.0.1/api/health ${environment}`],
+    test: environment === "real-test"
+      ? [
+        "CMD",
+        "/usr/local/bin/verify-real-test-web-health",
+        "http",
+        realTestDomain,
+        REVISION,
+      ]
+      : ["CMD-SHELL", `127.0.0.1/api/health ${environment}`],
     interval: "15s",
     timeout: "5s",
     start_period: "30s",
@@ -272,6 +286,36 @@ test("accepts the fixed simultaneous production and real-test topology", () => {
   );
 });
 
+test("accepts only a fixed standalone real-test HTTPS topology", () => {
+  const value = fixture().realTest;
+  value.services.web.ports = [
+    { target: 80, published: "80", protocol: "tcp" },
+    { target: 443, published: "443", protocol: "tcp" },
+    { target: 443, published: "443", protocol: "udp" },
+  ];
+  value.services.web.command = [
+    "/bin/sh",
+    "-c",
+    "test -n \"$REAL_TEST_DOMAIN\"; caddy run --config /etc/caddy/Caddyfile.real-test-standalone",
+  ];
+  value.services.web.labels["com.xingheng.real-test.topology"] = "standalone";
+  value.services.web.healthcheck.test[2] = "https";
+  value.services.web.networks = { default: {} };
+  value.networks = { default: { name: "xingheng-real-test_default" } };
+  assert.equal(validateStandaloneRealTestTopology(manifest, value), true);
+
+  for (const mutate of [
+    (config) => { config.services.web.ports[0].published = "8080"; },
+    (config) => { config.services.web.networks.public_ingress = { aliases: ["real-test-web"] }; },
+    (config) => { config.networks.public_ingress = { name: "xingheng-public-ingress" }; },
+    (config) => { config.services.web.command[2] = "caddy run --config /etc/caddy/Caddyfile.real-test"; },
+  ]) {
+    const invalid = structuredClone(value);
+    mutate(invalid);
+    assert.throws(() => validateStandaloneRealTestTopology(manifest, invalid));
+  }
+});
+
 test("rejects domain, WIF, volume, network, identity, and provider fingerprint crossings", () => {
   const mutations = [
     (value) => {
@@ -379,7 +423,9 @@ test("real-test live mount names and counts are fixed independently from product
 test("Compose wrappers reject env overrides and never resolve a caller-cwd env file", () => {
   const production = new URL("./production-compose.sh", import.meta.url).pathname;
   const realTest = new URL("./real-test-compose.sh", import.meta.url).pathname;
-  for (const wrapper of [production, realTest]) {
+  const standaloneRealTest =
+    new URL("./real-test-standalone-compose.sh", import.meta.url).pathname;
+  for (const wrapper of [production, realTest, standaloneRealTest]) {
     const cliOverride = spawnSync("sh", [wrapper, "--env-file", "/tmp/crossed.env", "config"], {
       encoding: "utf8",
       env: { ...process.env, ...TRUSTED_DOCKER_FIXTURE_ENVIRONMENT },
@@ -472,6 +518,9 @@ test("Compose wrappers reject every caller-expanded lifecycle or write operation
     [realTest, ["down", "-v"]],
     [realTest, ["run", "--entrypoint", "sh", "api"]],
     [realTest, ["exec", "api", "rm", "-rf", "/app/data"]],
+    [new URL("./real-test-standalone-compose.sh", import.meta.url).pathname, [
+      "up", "-d", "--scale", "api=2", "api",
+    ]],
   ];
   for (const [wrapper, args] of cases) {
     const result = spawnSync("sh", [wrapper, ...args], {
@@ -496,6 +545,7 @@ test("real Docker Compose config keeps fixed production and real-test env files 
     for (const file of [
       "production-compose.sh",
       "real-test-compose.sh",
+      "real-test-standalone-compose.sh",
       "operationLocks.mjs",
       "trustedDockerRuntime.mjs",
       "trustedReleaseCandidate.mjs",
@@ -506,6 +556,10 @@ test("real Docker Compose config keeps fixed production and real-test env files 
     }
     copyFileSync(new URL("../compose.yaml", import.meta.url), join(directory, "compose.yaml"));
     copyFileSync(new URL("../compose.real-test.yaml", import.meta.url), join(directory, "compose.real-test.yaml"));
+    copyFileSync(
+      new URL("../compose.real-test-standalone.yaml", import.meta.url),
+      join(directory, "compose.real-test-standalone.yaml"),
+    );
     const common = [
       `XINGHENG_REVISION=${REVISION}`,
       `XINGHENG_API_IMAGE=${API}`,
@@ -543,10 +597,24 @@ test("real Docker Compose config keeps fixed production and real-test env files 
         encoding: "utf8",
         env: { ...process.env, ...TRUSTED_DOCKER_FIXTURE_ENVIRONMENT },
       });
+      const standaloneRealTest = spawnSync("sh", [
+        join(scripts, "real-test-standalone-compose.sh"),
+        "--profile", "strategy-tools",
+        "--profile", "real-test-cleanup",
+        "--profile", "rwa-automation-ops",
+        "--profile", "provider-identity-preflight",
+        "config", "--format", "json",
+      ], {
+        cwd: callerCwd,
+        encoding: "utf8",
+        env: { ...process.env, ...TRUSTED_DOCKER_FIXTURE_ENVIRONMENT },
+      });
       assert.equal(production.status, 0, production.stderr);
       assert.equal(realTest.status, 0, realTest.stderr);
+      assert.equal(standaloneRealTest.status, 0, standaloneRealTest.stderr);
       const productionConfig = JSON.parse(production.stdout);
       const realTestConfig = JSON.parse(realTest.stdout);
+      const standaloneRealTestConfig = JSON.parse(standaloneRealTest.stdout);
       assert.equal(productionConfig.name, "xingheng");
       assert.equal(realTestConfig.name, "xingheng-real-test");
       assert.equal(productionConfig.services.api.environment.DOMAIN, "production.fixture.invalid");
@@ -565,6 +633,12 @@ test("real Docker Compose config keeps fixed production and real-test env files 
         productionConfig.services.api.environment.DOMAIN,
         realTestConfig.services.api.environment.DOMAIN,
       );
+      assert.equal(
+        validateStandaloneRealTestTopology(manifest, standaloneRealTestConfig),
+        true,
+      );
+      assert.equal(realTestConfig.services.web.ports, undefined);
+      assert.equal(realTestConfig.networks.public_ingress.external, true);
 
       const productionPath = join(directory, ".env.production");
       const realTestBytes = readFileSync(join(directory, ".env.real-test"));
