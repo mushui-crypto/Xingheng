@@ -64,6 +64,11 @@ import {
   RWA_MAX_ASSET_TAKEOVERS_PER_STATE,
   validateRwaAssetTakeoverRecord,
 } from "./RwaAssetTakeover";
+import {
+  migrateLegacyConnectivitySmokeRecord,
+  validateConnectivitySmokeFacts,
+  type RwaConnectivitySmokeRecord,
+} from "./RwaConnectivitySmoke";
 
 export const RWA_AUTOMATION_BACKUP_ROOT = "/app/rwa-automation-backups";
 export const RWA_AUTOMATION_BACKUP_SCHEMA_VERSION = 1 as const;
@@ -714,9 +719,10 @@ function sanitizeAutomationState(
     const values = validatedTakeovers.map((item) => item[key]);
     if (new Set(values).size !== values.length) throw invalidSnapshot();
   }
-  const connectivitySmokes = parsed.connectivitySmokes === undefined ? [] : parsed.connectivitySmokes;
-  if (!Array.isArray(connectivitySmokes) || connectivitySmokes.length > 100) throw invalidSnapshot();
-  connectivitySmokes.forEach(validateConnectivitySmoke);
+  const rawConnectivitySmokes = parsed.connectivitySmokes === undefined ? [] : parsed.connectivitySmokes;
+  if (!Array.isArray(rawConnectivitySmokes) || rawConnectivitySmokes.length > 100) throw invalidSnapshot();
+  const connectivitySmokes = rawConnectivitySmokes.map((smoke) =>
+    validateConnectivitySmoke(migrateLegacyConnectivitySmokeRecord(smoke)));
   if (
     connectivitySmokes.filter((item) =>
       !["flat", "failed", "manual_intervention"].includes(String((item as Record<string, unknown>).stage))).length > 1
@@ -985,20 +991,12 @@ function validateConnectivitySmoke(value: unknown) {
       || !isTimestamp(receipt.completedAt)) throw invalidSnapshot();
   }
   validateConnectivitySmokeProviderState(smoke.providerState);
-  const timeline = smoke.timeline;
-  if (!Array.isArray(timeline) || timeline.length === 0 || timeline.length > 64) throw invalidSnapshot();
-  let previousAt = -Infinity;
-  for (const item of timeline) {
-    const event = assertObject(item);
-    if (!hasExactKeys(event, ["at", "code", "stage"])
-      || ![
-        "reserved", "spot_opening", "spot_open", "futures_opening", "hedged",
-        "futures_closing", "spot_closing", "flat", "failed", "manual_intervention",
-      ].includes(String(event.stage))
-      || !isTimestamp(event.at) || Number(event.at) < previousAt
-      || !isNonEmptyString(event.code)) throw invalidSnapshot();
-    previousAt = Number(event.at);
+  try {
+    validateConnectivitySmokeFacts(smoke as unknown as RwaConnectivitySmokeRecord);
+  } catch {
+    throw invalidSnapshot();
   }
+  return smoke;
 }
 
 function validateConnectivitySmokeProviderState(value: unknown) {

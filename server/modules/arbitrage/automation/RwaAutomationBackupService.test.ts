@@ -44,6 +44,10 @@ import {
   rwaAutomationProfileId,
 } from "./RwaAutomationAssetProfile";
 import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
+import {
+  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+} from "./RwaConnectivitySmoke";
 
 const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
@@ -282,6 +286,76 @@ test("takeover backup schema accepts legacy absence and rejects malformed, orpha
     } finally {
       await fixture.cleanup();
     }
+  }
+});
+
+test("connectivity smoke backup migrates exact parent records and rejects malformed or contradictory facts", async () => {
+  const legacyFixture = await createFixture();
+  try {
+    const state = baseState() as any;
+    const active = backupSmoke("spot_opening", "active");
+    const terminal = backupSmoke("flat", "terminal");
+    for (const smoke of [active, terminal]) {
+      delete smoke.providerState;
+      delete smoke.timeline;
+    }
+    state.connectivitySmokes = [active, terminal];
+    await writeSecure(join(legacyFixture.active, stateFileName), JSON.stringify(state));
+    const backup = await legacyFixture.service.createBackup();
+    const restored = await legacyFixture.service.restoreBackup(backup.fileName);
+    const restoredState = JSON.parse(await readFile(
+      join(legacyFixture.dataRoot, restored.restoredGeneration, stateFileName),
+      "utf8",
+    ));
+    assert.deepEqual(
+      restoredState.connectivitySmokes.map((smoke: any) => [
+        smoke.stage,
+        smoke.providerState.verificationStatus,
+        smoke.providerState.reason,
+        smoke.receipt,
+        smoke.timeline.at(-1).code,
+      ]),
+      [
+        ["spot_opening", "unavailable", "legacy_provider_state_unavailable", null, "legacy_migration_current_stage"],
+        ["flat", "unavailable", "legacy_provider_state_unavailable", null, "legacy_migration_current_stage"],
+      ],
+    );
+  } finally {
+    await legacyFixture.cleanup();
+  }
+
+  const mutations: Array<(smoke: any) => void> = [
+    (smoke) => { smoke.spotOpenOrder.orderLinkId = `${smoke.orderLinkPrefix}p1`; },
+    (smoke) => { smoke.futuresOpenOrder.filledQuantityXaut = 2; },
+    (smoke) => { smoke.exit.spotCloseOrder.status = "Pending"; },
+    (smoke) => { smoke.providerState.activeTotalOrderCount = 1; },
+    (smoke) => { smoke.receipt.accountFingerprint = "other"; },
+    (smoke) => { smoke.timeline.at(-1).code = "invalid"; },
+  ];
+  for (const mutate of mutations) {
+    const fixture = await createFixture();
+    try {
+      const state = baseState() as any;
+      const smoke = backupSmoke("flat", "invalid");
+      mutate(smoke);
+      state.connectivitySmokes = [smoke];
+      await writeSecure(join(fixture.active, stateFileName), JSON.stringify(state));
+      await assert.rejects(fixture.service.createBackup(), hasCategory("backup_manifest_invalid"));
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  const partialFixture = await createFixture();
+  try {
+    const state = baseState() as any;
+    const smoke = backupSmoke("flat", "partial");
+    delete smoke.timeline;
+    state.connectivitySmokes = [smoke];
+    await writeSecure(join(partialFixture.active, stateFileName), JSON.stringify(state));
+    await assert.rejects(partialFixture.service.createBackup(), hasCategory("backup_manifest_invalid"));
+  } finally {
+    await partialFixture.cleanup();
   }
 });
 
@@ -741,6 +815,138 @@ function baseState() {
       maskedApiKey: "****",
       occurredAt: baseNow.getTime(),
     }],
+  };
+}
+
+function backupSmoke(stage: "spot_opening" | "flat", suffix: string): any {
+  const prefix = `rwacsbackup${suffix}`;
+  const budget = {
+    limitUsd: 25,
+    quantityXaut: 0.002,
+    commonQtyStep: 0.001,
+    slippageBpsPerAction: 10,
+    prices: {
+      spotOpenLimit: 4_101,
+      futuresOpenLimit: 4_099,
+      futuresCloseLimit: 4_101,
+      spotCloseLimit: 4_099,
+    },
+    spotNotionalUsd: 8.2,
+    futuresMarginUsd: 8.2,
+    spotFeesUsd: 0.01,
+    futuresFeesUsd: 0.01,
+    spotSlippageReserveUsd: 0.01,
+    futuresSlippageReserveUsd: 0.01,
+    roundingReserveUsd: 0.01,
+    totalCapitalUsd: 16.45,
+  };
+  const order = (orderSuffix: string) => ({
+    orderId: `order-${suffix}-${orderSuffix}`,
+    orderLinkId: `${prefix}${orderSuffix}`,
+    status: "Filled",
+    requestedQuantityXaut: 0.002,
+    filledQuantityXaut: 0.002,
+    positionQuantityXaut: 0.002,
+    averagePrice: 4_100,
+    feeUsd: 0.001,
+    updatedAt: baseNow.getTime() + 7,
+  });
+  const timeline = stage === "flat"
+    ? [
+      ["reserved", "reserved"],
+      ["spot_opening", "stage_spot_opening"],
+      ["spot_open", "stage_spot_open"],
+      ["futures_opening", "stage_futures_opening"],
+      ["hedged", "stage_hedged"],
+      ["futures_closing", "stage_futures_closing"],
+      ["spot_closing", "stage_spot_closing"],
+      ["flat", "stage_flat"],
+    ].map(([eventStage, code], index) => ({
+      stage: eventStage,
+      code,
+      at: baseNow.getTime() + index,
+    }))
+    : [
+      { stage: "reserved", code: "reserved", at: baseNow.getTime() },
+      { stage: "spot_opening", code: "stage_spot_opening", at: baseNow.getTime() + 1 },
+    ];
+  const flat = stage === "flat";
+  return {
+    smokeId: `smoke-backup-${suffix}`,
+    userId: "user-1",
+    accountId: "binance:test",
+    accountFingerprint: "fingerprint",
+    purpose: "connectivity_smoke",
+    mode: "connectivity_smoke",
+    idempotencyKey: `smoke:backup:${suffix}`,
+    challengeId: `challenge-${suffix}`,
+    requestDigest: `request-${suffix}`,
+    policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+    policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+    orderLinkPrefix: prefix,
+    stage,
+    budget,
+    authorization: {
+      operation: "connectivity_smoke_execute",
+      consumedBeforeProviderMutation: true,
+      exitAuthorized: true,
+      reservedAt: baseNow.getTime(),
+    },
+    spotOpenOrder: flat ? order("s1") : null,
+    futuresOpenOrder: flat ? order("p1") : null,
+    openedSpotQuantityXaut: flat ? 0.002 : 0,
+    openedFuturesQuantityXaut: flat ? 0.002 : 0,
+    exit: {
+      futuresCloseOrder: flat ? order("c1") : null,
+      spotCloseOrder: flat ? order("c2") : null,
+      futuresFlatConfirmed: flat,
+      spotFlatConfirmed: flat,
+    },
+    providerState: flat ? {
+      verificationStatus: "verified",
+      observedAt: baseNow.getTime() + 7,
+      residualSpotQuantityXaut: 0,
+      residualFuturesQuantityXaut: 0,
+      activeSpotOrderCount: 0,
+      activeFuturesOrderCount: 0,
+      activeTotalOrderCount: 0,
+      providerFlatConfirmed: true,
+      reason: "provider_flat_confirmed",
+    } : {
+      verificationStatus: "unavailable",
+      observedAt: null,
+      residualSpotQuantityXaut: null,
+      residualFuturesQuantityXaut: null,
+      activeSpotOrderCount: null,
+      activeFuturesOrderCount: null,
+      activeTotalOrderCount: null,
+      providerFlatConfirmed: null,
+      reason: "not_yet_observed",
+    },
+    timeline,
+    receipt: flat ? {
+      receiptId: `receipt-${suffix}`,
+      smokeId: `smoke-backup-${suffix}`,
+      purpose: "connectivity_smoke",
+      venue: "binance",
+      symbol: "XAUTUSDT",
+      accountFingerprint: "fingerprint",
+      policyVersion: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+      policyDigest: RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
+      budget,
+      openedSpotQuantityXaut: 0.002,
+      openedFuturesQuantityXaut: 0.002,
+      finalSpotQuantityXaut: 0,
+      finalFuturesQuantityXaut: 0,
+      providerFlatConfirmed: true,
+      completedAt: baseNow.getTime() + 7,
+    } : null,
+    noReopen: true,
+    providerMutationCount: flat ? 5 : 1,
+    errorCategory: null,
+    message: stage,
+    createdAt: baseNow.getTime(),
+    updatedAt: baseNow.getTime() + timeline.length - 1,
   };
 }
 

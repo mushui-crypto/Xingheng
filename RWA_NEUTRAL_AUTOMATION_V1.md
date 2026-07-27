@@ -535,7 +535,41 @@ requestedQuantityXaut / filledQuantityXaut / averagePriceUsd / feeUsd / reduceOn
 updatedAt`；`orderLinkId` 必须是该 smoke 的固定 `s1/p1/c1/c2`。`providerState` 只表示
 `observedAt` 时 REST 可见、仍为 non-atomic/incomplete 的核验结果；不可读、证据不完整或归属
 不明确时数量可为 `null`，并以稳定 reason 告知前端人工登录 Binance，不允许前端自行推算。
-时间线只追加实际持久化的 stage 变化，不补造未发生阶段，备份恢复保持一致。
+所有 `verified` 及成功 flat receipt 使用同一私有快照 freshness 边界
+`RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS`：刚好等于阈值仍有效；超龄、future 或非法
+`fetchedAt` 均持久化为 `stale / provider_snapshot_stale`，保留合法 observedAt 和快照数值，
+但 `providerFlatConfirmed=null`，不能继续依赖 current verified 证据的 mutation，也不能形成
+成功 receipt。
+
+持久化与备份复用同一 smoke 事实校验。四个订单槽位严格绑定当前 `orderLinkPrefix` 的
+`s1/p1/c1/c2`；槽位分别决定 Spot Buy、Futures Sell、Futures reduce-only Buy、Spot Sell 的
+公开 metadata。非空订单必须具有合法 provider status、非负有限 requested/filled/position/fee、
+`filled <= requested`、合法均价/时间，并与 opened ledger 一致。成功 receipt 只允许出现在
+`stage=flat` 且两侧 exit confirmed、最近 providerState 为 fresh verified、Spot/Futures residual
+和两侧 open-order count 全为 0、total count 等于两侧之和且为 0 时；receipt 的 smoke/account/
+policy/budget/opened quantities/final quantities/completedAt 必须与持久记录及时间线一致。
+
+时间线只追加实际持久化的 stage 变化，不补造未发生阶段，备份恢复保持一致。首事件固定
+`reserved/reserved`，普通事件 code 固定为 `stage_<stage>`，时间非递减且位于 record 生命周期，
+末事件必须等于当前 stage。合法图为：
+
+```text
+reserved -> spot_opening | failed | manual_intervention
+spot_opening -> spot_open | spot_closing | flat | failed | manual_intervention
+spot_open -> futures_opening | spot_closing | failed | manual_intervention
+futures_opening -> hedged | futures_closing | spot_closing | flat | failed | manual_intervention
+hedged -> futures_closing | spot_closing | flat | failed | manual_intervention
+futures_closing -> spot_closing | flat | failed | manual_intervention
+spot_closing -> flat | failed | manual_intervention
+```
+
+父版本中恰好缺少 `providerState` 与 `timeline`、且其余字段完全符合旧 exact schema 的记录，会在
+Store 读取或 Backup 验证/恢复时原子 additive 迁移：providerState 降级为
+`unavailable / legacy_provider_state_unavailable`，所有 residual/count 为 `null`；timeline 仅记录
+`legacy_migration_reserved` 和当前持久 stage 的 `legacy_migration_current_stage`，不补造中间阶段。
+旧成功 receipt 因未持久新契约要求的权威快照而清空为 unavailable，绝不迁成 verified 成功。
+只缺一个新字段、含 unknown 字段或其他畸形记录不适用迁移并 fail-closed。Active 旧记录在任何
+provider mutation 前仍必须重新取得 fresh 权威证据；terminal 旧记录保持只读。
 
 Flat receipt 复用四单摘要和时间线，并要求 `finalProviderState` 权威确认 Spot/Futures 残余及
 两侧活动订单均为 0。它返回 policy 接受确认事实；只有历史 version/digest 与当前 canonical

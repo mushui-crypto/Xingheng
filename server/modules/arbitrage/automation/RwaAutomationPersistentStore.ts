@@ -51,7 +51,9 @@ import {
 } from "./RwaAssetTakeover";
 import {
   isActiveConnectivitySmoke,
+  migrateLegacyConnectivitySmokeRecord,
   RWA_CONNECTIVITY_SMOKE_MAX_RECORDS,
+  validateConnectivitySmokeFacts,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
 
@@ -430,7 +432,11 @@ export class RwaAutomationPersistentStore<
             : (() => { throw invalidRiskState(); })(),
         connectivitySmokes: Array.isArray(parsed.connectivitySmokes)
           ? parsed.connectivitySmokes.map((smoke) =>
-            validateConnectivitySmokeForStore(smoke, this.ownerUserId, this.venue))
+            validateConnectivitySmokeForStore(
+              migrateLegacyConnectivitySmokeRecord(smoke),
+              this.ownerUserId,
+              this.venue,
+            ))
           : parsed.connectivitySmokes === undefined
             ? []
             : (() => { throw invalidRiskState(); })(),
@@ -1013,7 +1019,11 @@ function validateConnectivitySmokeForStore(
     || typeof smoke.message !== "string"
   ) throw invalidRiskState();
   validateSmokeProviderState(smoke.providerState);
-  validateSmokeTimeline(smoke.timeline, stages);
+  try {
+    validateConnectivitySmokeFacts(smoke);
+  } catch {
+    throw invalidRiskState();
+  }
   return smoke;
 }
 
@@ -1036,22 +1046,6 @@ function validateSmokeProviderState(value: unknown) {
     "residualFuturesQuantityXaut", "residualSpotQuantityXaut",
   ]) {
     if (!(state[key] === null || (Number.isFinite(state[key]) && Number(state[key]) >= 0))) throw invalidRiskState();
-  }
-}
-
-function validateSmokeTimeline(value: unknown, stages: readonly string[]) {
-  if (!Array.isArray(value) || value.length === 0 || value.length > 64) throw invalidRiskState();
-  let previousAt = -Infinity;
-  for (const item of value) {
-    if (!item || typeof item !== "object" || Array.isArray(item)) throw invalidRiskState();
-    const event = item as Record<string, unknown>;
-    if (!hasExactObjectKeys(event, ["at", "code", "stage"])
-      || !stages.includes(String(event.stage))
-      || !Number.isFinite(event.at)
-      || Number(event.at) < previousAt
-      || typeof event.code !== "string"
-      || !event.code) throw invalidRiskState();
-    previousAt = Number(event.at);
   }
 }
 

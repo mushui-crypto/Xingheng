@@ -78,6 +78,7 @@ import {
   type RwaAssetTakeoverExitPreview,
 } from "./RwaAssetTakeoverRuntime";
 import {
+  appendConnectivitySmokeTimeline,
   calculateConnectivitySmokeBudget,
   assertConnectivitySmokePolicyAcceptance,
   connectivitySmokePolicyDiscovery,
@@ -87,6 +88,7 @@ import {
   RWA_CONNECTIVITY_SMOKE_POLICY,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
+  RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS,
   type RwaConnectivitySmokePolicyAcceptance,
   type RwaConnectivitySmokeChallengeReport,
   type RwaConnectivitySmokeRecord,
@@ -1159,7 +1161,10 @@ export class RwaBinanceAutomationService {
       } catch (error) {
         smoke.errorCategory = errorCategory(error);
         smoke.message = sanitizeRwaAutomationError(error);
-        if (client) {
+        if (client && (
+          smoke.providerMutationCount > 0
+          || smoke.errorCategory !== "connectivity_smoke_provider_snapshot_stale"
+        )) {
           try {
             await this.reduceConnectivitySmokeRisk(client, state, smoke);
           } catch (recoveryError) {
@@ -1168,12 +1173,12 @@ export class RwaBinanceAutomationService {
             smoke.message = "烟测状态无法由 provider 权威确认或退出，必须在 Binance 人工处理。";
             state.config.killSwitchActive = true;
           }
-        } else {
+        } else if (!client) {
           smoke.stage = "manual_intervention";
           state.config.killSwitchActive = true;
         }
         if (smoke.stage === "reserved" && smoke.providerMutationCount === 0) smoke.stage = "failed";
-        appendSmokeTimeline(smoke, this.now());
+        appendConnectivitySmokeTimeline(smoke, this.now());
         smoke.updatedAt = this.now();
         await this.store.writeState(state);
       }
@@ -1654,6 +1659,15 @@ export class RwaBinanceAutomationService {
     message: string,
   ) {
     const final = await client.readPreflightSnapshot();
+    if (!isFreshConnectivitySmokeSnapshot(final, this.now())) {
+      smoke.providerState = providerStateFromSnapshot(final, "stale", "provider_snapshot_stale");
+      await this.persistConnectivitySmoke(state, smoke);
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_provider_snapshot_stale",
+        "provider 私有快照已过期或时间无效，不能形成成功 receipt。",
+      );
+    }
     assertSmokeSnapshot(final, smoke, "flat");
     smoke.providerState = providerStateFromSnapshot(final, "verified", "provider_flat_confirmed");
     smoke.exit.futuresFlatConfirmed = true;
@@ -1687,7 +1701,7 @@ export class RwaBinanceAutomationService {
       active.stage = "failed";
       active.message = "服务重启发生在首次 provider mutation 前；烟测已终止且禁止重开。";
       active.updatedAt = this.now();
-      appendSmokeTimeline(active, this.now());
+      appendConnectivitySmokeTimeline(active, this.now());
       await this.store.writeState(state);
       return;
     }
@@ -1703,7 +1717,7 @@ export class RwaBinanceAutomationService {
       active.errorCategory = errorCategory(error);
       active.message = "服务重启后无法证明 smoke 风险降低退出已闭环，请在 Binance 人工处理。";
       active.updatedAt = this.now();
-      appendSmokeTimeline(active, this.now());
+      appendConnectivitySmokeTimeline(active, this.now());
       state.config.killSwitchActive = true;
       state.config.strategyEnabled = false;
       state.config.globalExecutionEnabled = false;
@@ -1800,7 +1814,7 @@ export class RwaBinanceAutomationService {
     state: RwaAutomationStateData,
     smoke: RwaConnectivitySmokeRecord,
   ) {
-    appendSmokeTimeline(smoke, this.now());
+    appendConnectivitySmokeTimeline(smoke, this.now());
     smoke.updatedAt = this.now();
     await this.store.writeState(state);
   }
@@ -1820,6 +1834,15 @@ export class RwaBinanceAutomationService {
     } catch (error) {
       smoke.providerState = unavailableSmokeProviderState("provider_snapshot_unavailable");
       throw error;
+    }
+    if (!isFreshConnectivitySmokeSnapshot(snapshot, this.now())) {
+      smoke.providerState = providerStateFromSnapshot(snapshot, "stale", "provider_snapshot_stale");
+      await this.persistConnectivitySmoke(state, smoke);
+      throw new RwaNeutralExecutionError(
+        409,
+        "connectivity_smoke_provider_snapshot_stale",
+        "provider 私有快照已过期或时间无效，已停止使用该证据继续写入。",
+      );
     }
     if (!client.readConnectivitySmokeActivity) {
       throw new RwaNeutralExecutionError(409, "connectivity_smoke_activity_incomplete", "provider 不支持 smoke REST 活动扫描。");
@@ -2903,45 +2926,37 @@ function publicConnectivitySmokeReceipt(smoke: RwaConnectivitySmokeRecord) {
 
 function publicConnectivitySmokeOrders(smoke: RwaConnectivitySmokeRecord) {
   return {
-    spotOpen: publicSmokeOrder(smoke.spotOpenOrder, `${smoke.orderLinkPrefix}s1`, "spot", "Buy", false),
-    futuresOpen: publicSmokeOrder(smoke.futuresOpenOrder, `${smoke.orderLinkPrefix}p1`, "linear", "Sell", false),
-    futuresClose: publicSmokeOrder(smoke.exit.futuresCloseOrder, `${smoke.orderLinkPrefix}c1`, "linear", "Buy", true),
-    spotClose: publicSmokeOrder(smoke.exit.spotCloseOrder, `${smoke.orderLinkPrefix}c2`, "spot", "Sell", false),
+    spotOpen: publicSmokeOrder(smoke.spotOpenOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.spotOpen),
+    futuresOpen: publicSmokeOrder(smoke.futuresOpenOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.futuresOpen),
+    futuresClose: publicSmokeOrder(smoke.exit.futuresCloseOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.futuresClose),
+    spotClose: publicSmokeOrder(smoke.exit.spotCloseOrder, smoke.orderLinkPrefix, RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS.spotClose),
   };
 }
 
 function publicSmokeOrder(
   order: RwaProviderOrder | null,
-  expectedOrderLinkId: string,
-  category: "spot" | "linear",
-  side: "Buy" | "Sell",
-  reduceOnly: boolean,
+  prefix: string,
+  slot: typeof RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS[keyof typeof RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS],
 ) {
+  const expectedOrderLinkId = `${prefix}${slot.suffix}`;
   if (!order || order.orderLinkId !== expectedOrderLinkId) return null;
   return {
     orderId: order.orderId,
     orderLinkId: order.orderLinkId,
-    category,
-    side,
+    category: slot.category,
+    side: slot.side,
     status: order.status,
     requestedQuantityXaut: order.requestedQuantityXaut,
     filledQuantityXaut: order.filledQuantityXaut,
     averagePriceUsd: Number.isFinite(order.averagePrice) ? order.averagePrice : null,
     feeUsd: Number.isFinite(order.feeUsd) ? order.feeUsd : null,
-    reduceOnly,
+    reduceOnly: slot.reduceOnly,
     updatedAt: order.updatedAt,
   };
 }
 
 function unavailableActualMetric(reason: string) {
   return { availability: "unavailable" as const, value: null, reason };
-}
-
-function appendSmokeTimeline(smoke: RwaConnectivitySmokeRecord, at: number) {
-  const last = smoke.timeline.at(-1);
-  if (!last || last.stage !== smoke.stage) {
-    smoke.timeline.push({ stage: smoke.stage, at, code: `stage_${smoke.stage}` });
-  }
 }
 
 function unavailableSmokeProviderState(reason: string) {
@@ -2960,13 +2975,15 @@ function unavailableSmokeProviderState(reason: string) {
 
 function providerStateFromSnapshot(
   snapshot: RwaBinancePreflightSnapshot,
-  verificationStatus: "verified" | "ambiguous",
+  verificationStatus: "verified" | "stale" | "ambiguous",
   reason: string,
 ) {
   const activeTotalOrderCount = snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount;
   return {
     verificationStatus,
-    observedAt: snapshot.fetchedAt,
+    observedAt: Number.isFinite(snapshot.fetchedAt) && snapshot.fetchedAt >= 0
+      ? snapshot.fetchedAt
+      : null,
     residualSpotQuantityXaut: snapshot.existingSpotQuantityXaut,
     residualFuturesQuantityXaut: snapshot.existingPerpetualQuantityXaut,
     activeSpotOrderCount: snapshot.openSpotOrderCount,
@@ -2979,6 +2996,16 @@ function providerStateFromSnapshot(
       : null,
     reason,
   };
+}
+
+export function isFreshConnectivitySmokeSnapshot(
+  snapshot: RwaBinancePreflightSnapshot,
+  now: number,
+) {
+  return Number.isFinite(snapshot.fetchedAt)
+    && snapshot.fetchedAt >= 0
+    && snapshot.fetchedAt <= now
+    && now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS;
 }
 
 function stepAligned(value: number, step: number) {

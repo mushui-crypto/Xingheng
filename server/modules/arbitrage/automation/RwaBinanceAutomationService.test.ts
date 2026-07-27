@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -9,7 +9,11 @@ import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease"
 import { RwaAutomationGovernanceError } from "./RwaAutomationGovernance";
 import { FakeCredentialKeyProvider } from "./FakeCredentialKeyProvider";
 import { RwaBinanceAutomationConnector } from "./RwaBinanceAutomationConnector";
-import { RwaBinanceAutomationService } from "./RwaBinanceAutomationService";
+import {
+  isFreshConnectivitySmokeSnapshot,
+  RwaBinanceAutomationService,
+} from "./RwaBinanceAutomationService";
+import { RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS } from "./RwaBinanceAutomationTypes";
 import type {
   RwaBinanceClient,
   RwaBinanceCredentials,
@@ -52,6 +56,18 @@ test("Binance connectivity smoke policy discovery is static and performs no prov
   assert.equal(policy.executionAuthorized, false);
   assert.equal(policy.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
   assert.equal(client.readCount, before);
+});
+
+test("Binance connectivity smoke snapshot freshness accepts the exact boundary and rejects future or invalid time", () => {
+  const value = new FakeBinanceClient().snapshot;
+  value.fetchedAt = now - RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS;
+  assert.equal(isFreshConnectivitySmokeSnapshot(value, now), true);
+  value.fetchedAt -= 1;
+  assert.equal(isFreshConnectivitySmokeSnapshot(value, now), false);
+  value.fetchedAt = now + 1;
+  assert.equal(isFreshConnectivitySmokeSnapshot(value, now), false);
+  value.fetchedAt = Number.NaN;
+  assert.equal(isFreshConnectivitySmokeSnapshot(value, now), false);
 });
 
 test("Binance asset authorization only reads XAUT state and local authorization persistence", async () => {
@@ -1488,6 +1504,18 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(state.executions.length, 0);
     assert.equal(state.pnlSeries.length, 0);
     assert.equal(state.connectivitySmokes[0]?.receipt?.providerFlatConfirmed, true);
+    for (const mutate of [
+      (smoke: any) => { smoke.spotOpenOrder.orderLinkId = `${smoke.orderLinkPrefix}p1`; },
+      (smoke: any) => { smoke.futuresOpenOrder.filledQuantityXaut = smoke.futuresOpenOrder.requestedQuantityXaut + 1; },
+      (smoke: any) => { smoke.exit.futuresCloseOrder.feeUsd = -1; },
+      (smoke: any) => { smoke.providerState.verificationStatus = "stale"; smoke.providerState.providerFlatConfirmed = null; },
+      (smoke: any) => { smoke.receipt.finalSpotQuantityXaut = 0.1; },
+      (smoke: any) => { smoke.timeline.at(-1).code = "invalid"; },
+    ]) {
+      const invalid = structuredClone(state);
+      mutate(invalid.connectivitySmokes[0]);
+      await assert.rejects(harness.store.writeState(invalid));
+    }
     const historical = state.connectivitySmokes[0] as any;
     historical.policyVersion = "connectivity-smoke-historical-v0";
     historical.policyDigest = "historical-policy-digest";
@@ -1498,6 +1526,51 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(historicalReceipt.disclosureAvailability, "unavailable_for_historical_digest");
     assert.equal(historicalReceipt.disclosure, null);
     assert.equal(historicalReceipt.disclosureReason, "historical_policy_digest_not_available");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke window verification persists stale evidence and performs no provider mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-stale-window-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshotReadCount = 0;
+    client.staleSnapshotReads.add(1);
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:stale:window"),
+    ) as any;
+    assert.equal(result.stage, "failed");
+    assert.equal(result.receipt, null);
+    assert.equal(result.providerState.verificationStatus, "stale");
+    assert.equal(result.providerState.providerFlatConfirmed, null);
+    assert.equal(result.providerState.reason, "provider_snapshot_stale");
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke final flat confirmation refuses stale snapshots and does not issue a success receipt", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-stale-final-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshotReadCount = 0;
+    for (let index = 16; index <= 40; index += 1) client.staleSnapshotReads.add(index);
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:stale:final"),
+    ) as any;
+    assert.equal(client.placedRequests.length, 4);
+    assert.equal(result.stage, "manual_intervention");
+    assert.equal(result.receipt, null);
+    assert.equal(result.providerState.verificationStatus, "stale");
+    assert.equal(result.providerState.providerFlatConfirmed, null);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1697,6 +1770,72 @@ test("Binance connectivity smoke restart before first mutation tombstones withou
     const restored = await harness.store.readState();
     assert.equal(restored.connectivitySmokes[0]?.stage, "failed");
     assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke parent state migrates active and terminal records without fabricating authority", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-legacy-state-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const active = smokeOpeningRecord({
+      accountId,
+      challenge,
+      prefix: "rwacslegacyactive",
+      stage: "spot_opening",
+      spotOrder: null,
+    }) as any;
+    const terminal = smokeOpeningRecord({
+      accountId,
+      challenge,
+      prefix: "rwacslegacyterminal",
+      stage: "spot_opening",
+      spotOrder: null,
+    }) as any;
+    terminal.stage = "failed";
+    terminal.idempotencyKey = "smoke:legacy:terminal";
+    terminal.timeline.push({ stage: "failed", at: now, code: "stage_failed" });
+    const state = await harness.store.readState();
+    state.connectivitySmokes.push(active, terminal);
+    await harness.store.writeState(state);
+    const legacy = structuredClone(state) as any;
+    for (const smoke of legacy.connectivitySmokes) {
+      delete smoke.providerState;
+      delete smoke.timeline;
+      smoke.receipt = smoke.stage === "failed" ? null : smoke.receipt;
+    }
+    await writeFile((harness.store as any).statePath, JSON.stringify(legacy), { mode: 0o600 });
+    const migrated = await harness.store.readState();
+    assert.deepEqual(
+      migrated.connectivitySmokes.map((smoke) => [
+        smoke.stage,
+        smoke.providerState.verificationStatus,
+        smoke.providerState.reason,
+        smoke.receipt,
+        smoke.timeline.at(-1)?.code,
+      ]),
+      [
+        ["spot_opening", "unavailable", "legacy_provider_state_unavailable", null, "legacy_migration_current_stage"],
+        ["failed", "unavailable", "legacy_provider_state_unavailable", null, "legacy_migration_current_stage"],
+      ],
+    );
+    const readsBeforeRecovery = client.readCount;
+    const restarted = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => false);
+    await restarted.initialize();
+    const recovered = await harness.store.readState();
+    assert.equal(recovered.connectivitySmokes[0]?.stage, "failed");
+    assert.equal(recovered.connectivitySmokes[0]?.providerState.verificationStatus, "verified");
+    assert.ok(client.readCount > readsBeforeRecovery);
+    assert.equal(client.writeCount, 0);
+
+    const partial = structuredClone(recovered) as any;
+    delete partial.connectivitySmokes[0].timeline;
+    await writeFile((harness.store as any).statePath, JSON.stringify(partial), { mode: 0o600 });
+    await assert.rejects(harness.store.readState());
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2188,7 +2327,17 @@ function smokeOpeningRecord(input: {
       spotFlatConfirmed: false,
     },
     providerState: testUnavailableSmokeProviderState(),
-    timeline: [{ stage: "reserved" as const, at: now, code: "reserved" }],
+    timeline: input.stage === "spot_opening"
+      ? [
+        { stage: "reserved" as const, at: now, code: "reserved" },
+        { stage: "spot_opening" as const, at: now, code: "stage_spot_opening" },
+      ]
+      : [
+        { stage: "reserved" as const, at: now, code: "reserved" },
+        { stage: "spot_opening" as const, at: now, code: "stage_spot_opening" },
+        { stage: "spot_open" as const, at: now, code: "stage_spot_open" },
+        { stage: "futures_opening" as const, at: now, code: "stage_futures_opening" },
+      ],
     receipt: null,
     noReopen: true as const,
     providerMutationCount: input.stage === "spot_opening" ? 1 : 2,
@@ -2223,6 +2372,8 @@ const smokePolicyAcceptance = {
 
 class FakeBinanceClient implements RwaBinanceClient {
   readCount = 0;
+  snapshotReadCount = 0;
+  readonly staleSnapshotReads = new Set<number>();
   writeCount = 0;
   readonly access: {
     accountId: string;
@@ -2336,7 +2487,12 @@ class FakeBinanceClient implements RwaBinanceClient {
 
   async readPreflightSnapshot() {
     this.readCount += 1;
-    return structuredClone(this.snapshot);
+    this.snapshotReadCount += 1;
+    const result = structuredClone(this.snapshot);
+    if (this.staleSnapshotReads.has(this.snapshotReadCount)) {
+      result.fetchedAt = now - RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS - 1;
+    }
+    return result;
   }
 
   async readAssetTakeoverSnapshot(): Promise<RwaAssetTakeoverProviderSnapshot<RwaBinancePermissions>> {
