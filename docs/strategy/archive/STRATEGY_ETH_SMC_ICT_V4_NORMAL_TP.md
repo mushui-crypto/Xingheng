@@ -2,7 +2,7 @@
 
 冻结日期：2026-07-16
 
-本文件在 V4 正常止盈路线首次历史运行之前冻结。原 `STRATEGY_ETH_SMC_ICT_V4.md`、原 V4 分批止盈代码与 `STRATEGY_ETH_SMC_ICT_V4_RESULT.md` 保持不变；本路线只替换退出方法，不根据原 V4 结果修改入场、方向、时段、止损、杠杆或仓位规则。本路线只做 Binance USD-M `ETHUSDT` perpetual 历史研究，不连接 Binance 下单 API，不自动交易。
+本文件在 V4 正常止盈路线首次历史运行之前冻结。原 `docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V4.md`、原 V4 分批止盈代码与 `docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V4_RESULT.md` 保持不变；本路线只替换退出方法，不根据原 V4 结果修改入场、方向、时段、止损、杠杆或仓位规则。本路线只做 Binance USD-M `ETHUSDT` perpetual 历史研究，不连接 Binance 下单 API，不自动交易。
 
 ## 1. 独立路线与正常止盈
 

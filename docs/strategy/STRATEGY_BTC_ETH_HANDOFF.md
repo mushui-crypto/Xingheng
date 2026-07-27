@@ -362,12 +362,12 @@ MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 | --- | --- |
 | BTC V5冻结规则 | `STRATEGY_V5_ARCHIVE.md` |
 | 总研究记录 | `STRATEGY_RESEARCH.md` |
-| Route A趋势回撤 | `STRATEGY_ROUTE_A_RESEARCH.md` |
-| BTC入场容量/增频/双仓 | `STRATEGY_BTC_ENTRY_CAPACITY_V1.md`、`STRATEGY_BTC_ENTRY_EXPANSION_V2.md`、`STRATEGY_BTC_MULTI_POSITION_V1.md` |
-| BTC高频/Fibonacci | `STRATEGY_BTC_SESSION_SWEEP_V1.md`、`STRATEGY_BTC_ORDERFLOW_V1.md`、`STRATEGY_BTC_FIB_RECLAIM_V1.md` |
-| BTC+ETH统一入场 | `STRATEGY_BTC_ETH_ENTRY_ROUTE_V1.md` |
-| ETH累计总结 | `STRATEGY_ETH_FACTOR_RESEARCH_SUMMARY.md` |
-| ETH最近因子与保本 | `STRATEGY_ETH_FACTOR_ROUTE_V5.md`、`STRATEGY_ETH_BREAK_EVEN_ROUTE_V1.md` |
+| Route A趋势回撤 | `docs/strategy/archive/STRATEGY_ROUTE_A_RESEARCH.md` |
+| BTC入场容量/增频/双仓 | `docs/strategy/archive/STRATEGY_BTC_ENTRY_CAPACITY_V1.md`、`docs/strategy/archive/STRATEGY_BTC_ENTRY_EXPANSION_V2.md`、`docs/strategy/archive/STRATEGY_BTC_MULTI_POSITION_V1.md` |
+| BTC高频/Fibonacci | `docs/strategy/archive/STRATEGY_BTC_SESSION_SWEEP_V1.md`、`docs/strategy/archive/STRATEGY_BTC_ORDERFLOW_V1.md`、`docs/strategy/archive/STRATEGY_BTC_FIB_RECLAIM_V1.md` |
+| BTC+ETH统一入场 | `docs/strategy/archive/STRATEGY_BTC_ETH_ENTRY_ROUTE_V1.md` |
+| ETH累计总结 | `docs/strategy/archive/STRATEGY_ETH_FACTOR_RESEARCH_SUMMARY.md` |
+| ETH最近因子与保本 | `docs/strategy/archive/STRATEGY_ETH_FACTOR_ROUTE_V5.md`、`docs/strategy/archive/STRATEGY_ETH_BREAK_EVEN_ROUTE_V1.md` |
 | 马丁专题 | `STRATEGY_MARTINGALE_GRID_HANDOFF.md` |
 | 固定价差12层马丁V3 | `STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3.md` |
 | 历史数据源 | `server/modules/strategy/backtest/BinanceVisionHistoricalDataSource.ts` |

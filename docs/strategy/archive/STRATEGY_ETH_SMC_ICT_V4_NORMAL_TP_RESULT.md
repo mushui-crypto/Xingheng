@@ -1,7 +1,7 @@
 # ETHUSDT SMC + ICT V4 正常止盈首次冻结回测结果
 
 - 生成时间：2026-07-16T01:51:23.857Z
-- 冻结规则：`STRATEGY_ETH_SMC_ICT_V4_NORMAL_TP.md`
+- 冻结规则：`docs/strategy/archive/STRATEGY_ETH_SMC_ICT_V4_NORMAL_TP.md`
 - 数据：Binance Vision `ETHUSDT` USD-M / U 本位永续 5m
 - 区间：2024-01 至 2026-07-14
 - 校验：官方 SHA256=通过；缺失 5m K 线=0

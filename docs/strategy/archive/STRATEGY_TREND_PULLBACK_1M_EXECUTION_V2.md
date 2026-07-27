@@ -33,4 +33,4 @@ V1因15分钟超买超卖事件过少且1分钟止损过窄而失败。V2不再�
 
 4组均失败时保留否决记录，不在同一轮事后修改阈值、时段、方向或退出规则。
 
-结果见 `STRATEGY_TREND_PULLBACK_1M_EXECUTION_V2_RESULT.md`。频率目标显著超过，但4组全部为负期望并在形成期接近耗尽权益，未进入候选或Paper。
+结果见 `docs/strategy/archive/STRATEGY_TREND_PULLBACK_1M_EXECUTION_V2_RESULT.md`。频率目标显著超过，但4组全部为负期望并在形成期接近耗尽权益，未进入候选或Paper。

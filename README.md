@@ -1,154 +1,211 @@
-# Xing Heng TradeSim Pro
+# 星衡项目
 
-星衡 TradeSim Pro 是一个基于 Hyperliquid 主 DEX 活跃永续公开行情的模拟交易系统。当前阶段只做：
+## 项目简介
 
-- 公共行情接入
-- K 线生成与查询
-- 模拟账户
-- 模拟下单 / 平仓
-- 资金账户与交易账户划转
-- 测试网链上充值提现方案准备
+星衡是一个自动交易套利平台。
 
-当前不做：
+项目目标：
 
-- 真实交易所下单
-- 真实资金托管
-- 清算与真实结算
-- KYC / AML / 合规流程
+-   提供自动化套利交易能力；
+-   支持用户绑定自己的交易所 API Key；
+-   构建可扩展的多交易所、多策略套利基础设施。
 
-## 仓库定位
+当前核心方向：
 
-- 当前实际 Git 仓库目录：`/Users/dq/Documents/StellarX/xingheng`
-- 长期 `main` worktree：`/Users/dq/Documents/StellarX/xingheng-main`
-- 上层 `StellarX` 目录目前只是本地工作区容器，不是当前仓库名
-- Codex 内的持久工作树应单独通过 Codex worktree 线程维护，不等同于本地 `git worktree` 目录
+-   资金费率套利；
+-   RWA/XAUT 套利方向；
+-   后续扩展更多交易所、DeFi、钱包能力以及 AI 策略能力。
 
-仓库与 worktree 规则见：
+------------------------------------------------------------------------
 
-- [`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)
+# 当前阶段
 
-## 主要文档
+项目不是从零开发阶段。
 
-- 产品需求与边界：[`PRD.md`](./PRD.md)
-- 版本变更记录：[`CHANGELOG.md`](./CHANGELOG.md)
-- 行情与交易数据说明：[`MARKET_DATA.md`](./MARKET_DATA.md)
-- Agent 协作约定：[`AGENTS.md`](./AGENTS.md)
-- Git / worktree 规则：[`REPO_WORKFLOW.md`](./REPO_WORKFLOW.md)
-- V0.4 任务文档：[`tasks/V0.4-onchain-testnet-wallet.md`](./tasks/V0.4-onchain-testnet-wallet.md)
+当前状态：
 
-## 运行要求
+> 已完成交易基础设施建设，正在进行自动套利安全收口与真实运行验证。
 
-- Node.js：建议使用支持当前项目依赖的较新版本
-- npm
+当前重点：
 
-## 快速启动
+-   保持已有交易能力稳定；
+-   完善自动套利闭环；
+-   提升系统安全性和可维护性；
+-   为未来更多策略扩展建立基础。
 
-安装依赖：
+------------------------------------------------------------------------
 
-```bash
-npm install
-```
+# 技术架构概览
 
-同时启动前端和后端开发环境：
+## 前端
 
-```bash
-npm run dev
-```
+技术：
 
-只启动后端开发环境：
+-   React 19
+-   TypeScript 5.8
+-   Vite 8
+-   Tailwind CSS 3
+-   React Router 7
+-   Zustand
+-   Lightweight Charts
+-   Ethers 6
 
-```bash
-npm run dev:api
-```
+## 后端
 
-构建：
+技术：
 
-```bash
-npm run build
-```
+-   Node.js 22
+-   TypeScript
+-   Express 5
+-   WebSocket
+-   esbuild
 
-`npm run start:api` 用于运行已经由构建生成的 `dist-server/index.js`，不依赖
-开发期的 `tsx`。
+## 数据存储
 
-## 生产部署
+当前：
 
-生产基线使用单台服务器的 Docker Compose：Caddy 自动 HTTPS 并托管前端静态文件，
-单个非 root Node API 进程负责接口与 WebSocket，SQLite 保存到 named volume。
+-   SQLite
 
-```bash
-cp .env.production.example .env.production
-chmod 600 .env.production
-# 填写域名、管理员账号与安全密钥后：
-docker compose --env-file .env.production config
-docker compose --env-file .env.production build
-docker compose --env-file .env.production up -d
-./scripts/smoke.sh "https://你的域名"
-```
+存储：
 
-完整的部署、升级、日志、SQLite 一致性备份、恢复和回滚步骤见
-[`deploy/README.md`](./deploy/README.md)。生产环境不得启动多个 API 实例，也不得
-直接复制正在写入的 SQLite/WAL 文件。
+-   用户
+-   账户
+-   订单
+-   持仓
+-   流水
+-   审计数据
 
-## 环境变量
+------------------------------------------------------------------------
 
-项目使用本地 `.env` 文件。示例见：
+# 部署环境
 
-- [`.env.example`](./.env.example)
+当前：
 
-当前 `.env` 已被忽略，不会提交到仓库。
+-   Docker
+-   Docker Compose
+-   Caddy
+-   Cloudflare
+-   Vultr Linux
 
-生产环境必须显式配置 `NODE_ENV=production`、`ADMIN_EMAIL`、至少 12 位的
-`ADMIN_PASSWORD`、`TRADING_DB_PATH` 和反向代理对应的
-`CORS_ALLOWED_ORIGINS`。如果 API 位于一层可信反向代理后，再设置
-`TRUST_PROXY=true`。生产会话使用 `Secure`、`HttpOnly`、`SameSite=Strict`
-Cookie，因此必须通过 HTTPS 访问。
+环境：
 
-演示用户仅在非生产环境默认启用；生产环境不会自动创建演示用户。私钥、助记词
-和管理员密码不得写入仓库、前端构建产物或部署镜像。
+正式环境：
 
-## 目录结构
+    xingheng
 
-```text
-xingheng/
-├─ public/                 静态资源
-├─ src/                    前端应用
-├─ server/                 后端 API、行情、交易、存储
-├─ tasks/                  任务文档
-├─ PRD.md                  产品需求文档
-├─ CHANGELOG.md            版本记录
-├─ MARKET_DATA.md          行情/交易数据说明
-├─ AGENTS.md               协作约定
-├─ REPO_WORKFLOW.md        Git/worktree 规则
-└─ README.md               仓库入口说明
-```
+真实测试环境：
 
-## 工程约定
+    xingheng-real-test
 
-- 主线分支：`main`
-- 当前开发目录适合承载功能分支
-- 长期主线目录固定为 `xingheng-main`
-- Codex 中如需长期并行上下文，优先创建独立 worktree 线程，而不是在同一线程里混合多阶段任务
-- 涉及行情、交易、资金逻辑的变更后，至少执行：
+要求：
 
-```bash
-npm run build
-```
+-   环境隔离；
+-   数据隔离；
+-   凭证隔离。
 
-## 当前阶段重点
+------------------------------------------------------------------------
 
-当前已完成：
+# 项目文档入口
 
-- Hyperliquid 公共行情接入
-- 模拟交易闭环
-- SQLite 持久化
-- 资金账户 / 交易账户体系
-- 用户与管理员服务端鉴权
+新成员或新 AI Agent 建议按照以下顺序阅读：
 
-当前下一阶段：
+    AGENTS.md
 
-- `BNB Chain Testnet` 测试网链上充值提现
+    ↓
 
-详见：
+    AI_CONTEXT_PRIORITY.md
 
-- [`CHANGELOG.md`](./CHANGELOG.md)
-- [`tasks/V0.4-onchain-testnet-wallet.md`](./tasks/V0.4-onchain-testnet-wallet.md)
+    ↓
+
+    PROJECT_CONTEXT.md
+
+    ↓
+
+    ARCHITECTURE.md
+
+    ↓
+
+    PROJECT_ONBOARDING.md
+
+    ↓
+
+    项目沟通规则.md
+
+历史信息按需从 PROJECT_HISTORY.md 进入，不作为默认当前上下文。
+
+文档职责：
+
+  文件                     用途
+  ------------------------ -----------------
+  AGENTS.md                AI 工作规则
+  AI_CONTEXT_PRIORITY.md   AI 信息读取规则
+  PROJECT_CONTEXT.md       当前项目事实
+  ARCHITECTURE.md          架构边界
+  PROJECT_ONBOARDING.md    项目快速理解
+  PROJECT_HISTORY.md       项目历史索引
+  项目沟通规则.md          协作流程
+
+------------------------------------------------------------------------
+
+# AI 开发原则
+
+本项目为已有项目。
+
+开发时必须遵守：
+
+1.  不按新项目重新设计。
+2.  不主动重构已有架构。
+3.  不为了最佳实践增加复杂度。
+4.  不将历史方案视为当前需求。
+5.  不将未来规划视为当前任务。
+6.  涉及交易、安全、资金逻辑时优先确认。
+
+------------------------------------------------------------------------
+
+# 目录说明
+
+    /
+    ├── AGENTS.md
+    ├── AI_CONTEXT_PRIORITY.md
+    ├── PROJECT_CONTEXT.md
+    ├── ARCHITECTURE.md
+    ├── PROJECT_ONBOARDING.md
+    ├── PROJECT_HISTORY.md
+    ├── 项目沟通规则.md
+    │
+    ├── ai-team/
+    │   └── roles/
+    │
+    ├── docs/
+    │   ├── decisions/
+    │   └── history/
+    │
+    └── src/
+
+------------------------------------------------------------------------
+
+# 注意事项
+
+README 仅用于项目入口说明。
+
+当前事实以：
+
+    PROJECT_CONTEXT.md
+
+为准。
+
+架构设计以：
+
+    ARCHITECTURE.md
+
+为准。
+
+历史信息请查看：
+
+    PROJECT_HISTORY.md
+
+------------------------------------------------------------------------
+
+# 一句话介绍
+
+星衡是一个面向真实交易场景的自动交易套利系统，目前正在从功能可用阶段进入安全验证和长期稳定运行阶段。

@@ -45,7 +45,7 @@ const report = {
   researchOnly: true,
   automaticOrdersEnabled: false,
   preRegistration: {
-    document: "STRATEGY_BTC_SESSION_SWEEP_V1.md",
+    document: "docs/strategy/archive/STRATEGY_BTC_SESSION_SWEEP_V1.md",
     setup: btcSessionRangeSweepV1Config,
     combinedMaxConcurrentPositions: 2,
     concurrentPositionMode: "same_side",

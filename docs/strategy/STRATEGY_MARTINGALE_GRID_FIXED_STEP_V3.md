@@ -107,7 +107,7 @@ Paper Route ID：`binance-usdm-martingale-grid-fixed-step-htf-v3-paper`
 
 历史运行通过也只能进入独立Paper，不得覆盖当前马丁V1报告。
 
-首次历史运行结果见 `STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3_RESULT.md`。基础成本下组合虽然录得微弱正收益，但 2024、2025 不稳定，BTC 单品种亏损，双倍成本测试转为显著负收益，因此不得称为正收益候选；当前自动 Paper 仅用于继续观察执行与数据链路。
+首次历史运行结果见 `docs/strategy/archive/STRATEGY_MARTINGALE_GRID_FIXED_STEP_V3_RESULT.md`。基础成本下组合虽然录得微弱正收益，但 2024、2025 不稳定，BTC 单品种亏损，双倍成本测试转为显著负收益，因此不得称为正收益候选；当前自动 Paper 仅用于继续观察执行与数据链路。
 
 ## 自动 Paper 与前端实现
 

@@ -42,7 +42,7 @@ const report = {
   researchOnly: true,
   automaticOrdersEnabled: false,
   preRegistration: {
-    document: "STRATEGY_BTC_ORDERFLOW_V1.md",
+    document: "docs/strategy/archive/STRATEGY_BTC_ORDERFLOW_V1.md",
     family: "taker_imbalance_continuation",
     threshold: 0.75,
     structureLookbackBars: 6,
