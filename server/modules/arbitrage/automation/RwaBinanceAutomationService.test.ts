@@ -1414,6 +1414,67 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(result.receipt.providerFlatConfirmed, true);
     assert.equal(result.budget.limitUsd, 25);
     assert.ok(result.budget.totalCapitalUsd <= 25);
+    assert.equal(result.policyVersion, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
+    assert.equal(result.policyDigest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+    assert.deepEqual(
+      result.timeline.map((event: { stage: string }) => event.stage),
+      [
+        "reserved", "spot_opening", "spot_open", "futures_opening", "hedged",
+        "futures_closing", "spot_closing", "flat",
+      ],
+    );
+    assert.deepEqual(
+      Object.keys(result.orders.spotOpen).sort(),
+      [
+        "averagePriceUsd", "category", "feeUsd", "filledQuantityXaut", "orderId", "orderLinkId",
+        "reduceOnly", "requestedQuantityXaut", "side", "status", "updatedAt",
+      ].sort(),
+    );
+    assert.deepEqual(
+      [
+        [result.orders.spotOpen.category, result.orders.spotOpen.side, result.orders.spotOpen.reduceOnly,
+          result.orders.spotOpen.orderLinkId.endsWith("s1")],
+        [result.orders.futuresOpen.category, result.orders.futuresOpen.side, result.orders.futuresOpen.reduceOnly,
+          result.orders.futuresOpen.orderLinkId.endsWith("p1")],
+        [result.orders.futuresClose.category, result.orders.futuresClose.side, result.orders.futuresClose.reduceOnly,
+          result.orders.futuresClose.orderLinkId.endsWith("c1")],
+        [result.orders.spotClose.category, result.orders.spotClose.side, result.orders.spotClose.reduceOnly,
+          result.orders.spotClose.orderLinkId.endsWith("c2")],
+      ],
+      [
+        ["spot", "Buy", false, true],
+        ["linear", "Sell", false, true],
+        ["linear", "Buy", true, true],
+        ["spot", "Sell", false, true],
+      ],
+    );
+    assert.deepEqual(result.providerState, {
+      verificationStatus: "verified",
+      observedAt: now,
+      residualSpotQuantityXaut: 0,
+      residualFuturesQuantityXaut: 0,
+      activeSpotOrderCount: 0,
+      activeFuturesOrderCount: 0,
+      activeTotalOrderCount: 0,
+      providerFlatConfirmed: true,
+      reason: "provider_flat_confirmed",
+    });
+    assert.deepEqual(result.receipt.finalProviderState, result.providerState);
+    assert.equal(result.receipt.metrics.actualFeesUsd.availability, "available");
+    assert.equal(result.receipt.metrics.actualFeesUsd.value, 0.004);
+    assert.deepEqual(result.receipt.metrics.actualSlippageUsd, {
+      availability: "unavailable",
+      value: null,
+      reason: "authoritative_reference_prices_not_persisted",
+    });
+    assert.deepEqual(result.receipt.metrics.actualRealizedPnlUsd, {
+      availability: "unavailable",
+      value: null,
+      reason: "authoritative_pnl_inputs_not_persisted",
+    });
+    assert.equal(result.receipt.disclosureAvailability, "available");
+    assert.equal(JSON.stringify(result).includes("challengeToken"), false);
+    assert.equal(JSON.stringify(result).includes("credential"), false);
     assert.deepEqual(
       client.placedRequests.map((item) => [item.category, item.side, item.reduceOnly]),
       [
@@ -1427,6 +1488,16 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(state.executions.length, 0);
     assert.equal(state.pnlSeries.length, 0);
     assert.equal(state.connectivitySmokes[0]?.receipt?.providerFlatConfirmed, true);
+    const historical = state.connectivitySmokes[0] as any;
+    historical.policyVersion = "connectivity-smoke-historical-v0";
+    historical.policyDigest = "historical-policy-digest";
+    historical.receipt.policyVersion = historical.policyVersion;
+    historical.receipt.policyDigest = historical.policyDigest;
+    await harness.store.writeState(state);
+    const historicalReceipt = await harness.current.getConnectivitySmokeReceipt(result.smokeId) as any;
+    assert.equal(historicalReceipt.disclosureAvailability, "unavailable_for_historical_digest");
+    assert.equal(historicalReceipt.disclosure, null);
+    assert.equal(historicalReceipt.disclosureReason, "historical_policy_digest_not_available");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1461,6 +1532,11 @@ test("Binance connectivity smoke futures failure only exits filled spot and dupl
     const first = await current.executeConnectivitySmoke(input) as any;
     assert.equal(first.stage, "flat");
     assert.equal(first.openedFuturesQuantityXaut, 0);
+    assert.deepEqual(first.receipt.metrics.actualFeesUsd, {
+      availability: "unavailable",
+      value: null,
+      reason: "authoritative_fee_inputs_incomplete",
+    });
     const writes = client.writeCount;
     const duplicate = await current.executeConnectivitySmoke(input) as any;
     assert.equal(duplicate.smokeId, first.smokeId);
@@ -1605,6 +1681,8 @@ test("Binance connectivity smoke restart before first mutation tombstones withou
         futuresFlatConfirmed: false,
         spotFlatConfirmed: false,
       },
+      providerState: testUnavailableSmokeProviderState(),
+      timeline: [{ stage: "reserved", at: now, code: "reserved" }],
       receipt: null,
       noReopen: true,
       providerMutationCount: 0,
@@ -1875,6 +1953,10 @@ for (const failure of ["unknown_order", "scanner_incomplete", "provider_unreadab
       await restarted.initialize();
       const restored = (await harness.store.readState()).connectivitySmokes[0]!;
       assert.equal(restored.stage, "manual_intervention");
+      assert.equal(
+        restored.providerState.verificationStatus,
+        failure === "scanner_incomplete" ? "ambiguous" : "unavailable",
+      );
       assert.equal(client.cancelCount, 0);
       assert.equal(client.writeCount, writes);
       assert.equal(client.placedRequests.filter((item) => item.orderLinkId === orderLinkId).length, 1);
@@ -2105,6 +2187,8 @@ function smokeOpeningRecord(input: {
       futuresFlatConfirmed: false,
       spotFlatConfirmed: false,
     },
+    providerState: testUnavailableSmokeProviderState(),
+    timeline: [{ stage: "reserved" as const, at: now, code: "reserved" }],
     receipt: null,
     noReopen: true as const,
     providerMutationCount: input.stage === "spot_opening" ? 1 : 2,
@@ -2112,6 +2196,20 @@ function smokeOpeningRecord(input: {
     message: "opening crash fixture",
     createdAt: now,
     updatedAt: now,
+  };
+}
+
+function testUnavailableSmokeProviderState() {
+  return {
+    verificationStatus: "unavailable" as const,
+    observedAt: null,
+    residualSpotQuantityXaut: null,
+    residualFuturesQuantityXaut: null,
+    activeSpotOrderCount: null,
+    activeFuturesOrderCount: null,
+    activeTotalOrderCount: null,
+    providerFlatConfirmed: null,
+    reason: "test_not_observed",
   };
 }
 

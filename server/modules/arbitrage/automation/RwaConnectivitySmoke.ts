@@ -157,6 +157,24 @@ export type RwaConnectivitySmokeExitProgress = {
   spotFlatConfirmed: boolean;
 };
 
+export type RwaConnectivitySmokeProviderState = {
+  verificationStatus: "verified" | "stale" | "unavailable" | "ambiguous";
+  observedAt: number | null;
+  residualSpotQuantityXaut: number | null;
+  residualFuturesQuantityXaut: number | null;
+  activeSpotOrderCount: number | null;
+  activeFuturesOrderCount: number | null;
+  activeTotalOrderCount: number | null;
+  providerFlatConfirmed: boolean | null;
+  reason: string;
+};
+
+export type RwaConnectivitySmokeTimelineEvent = {
+  stage: RwaConnectivitySmokeStage;
+  at: number;
+  code: string;
+};
+
 export type RwaConnectivitySmokeReceipt = {
   receiptId: string;
   smokeId: string;
@@ -201,6 +219,8 @@ export type RwaConnectivitySmokeRecord = {
   openedSpotQuantityXaut: number;
   openedFuturesQuantityXaut: number;
   exit: RwaConnectivitySmokeExitProgress;
+  providerState: RwaConnectivitySmokeProviderState;
+  timeline: RwaConnectivitySmokeTimelineEvent[];
   receipt: RwaConnectivitySmokeReceipt | null;
   noReopen: true;
   providerMutationCount: number;

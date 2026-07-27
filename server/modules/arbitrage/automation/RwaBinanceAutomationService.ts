@@ -59,6 +59,7 @@ import {
   RwaExecutionSafetyError,
   type RwaPreflightReport,
   type RwaPositionAttributionSnapshot,
+  type RwaProviderOrder,
 } from "./RwaNeutralExecutionTypes";
 import {
   createUnmonitoredActivityContinuity,
@@ -83,6 +84,7 @@ import {
   isActiveConnectivitySmoke,
   newSmokeOrderPrefix,
   RWA_CONNECTIVITY_SMOKE_PURPOSE,
+  RWA_CONNECTIVITY_SMOKE_POLICY,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
   type RwaConnectivitySmokePolicyAcceptance,
@@ -1127,6 +1129,8 @@ export class RwaBinanceAutomationService {
           futuresFlatConfirmed: false,
           spotFlatConfirmed: false,
         },
+        providerState: unavailableSmokeProviderState("not_yet_observed"),
+        timeline: [{ stage: "reserved", at: now, code: "reserved" }],
         receipt: null,
         noReopen: true,
         providerMutationCount: 0,
@@ -1169,6 +1173,7 @@ export class RwaBinanceAutomationService {
           state.config.killSwitchActive = true;
         }
         if (smoke.stage === "reserved" && smoke.providerMutationCount === 0) smoke.stage = "failed";
+        appendSmokeTimeline(smoke, this.now());
         smoke.updatedAt = this.now();
         await this.store.writeState(state);
       }
@@ -1189,7 +1194,7 @@ export class RwaBinanceAutomationService {
     const smoke = state.connectivitySmokes.find((item) => item.smokeId === smokeId);
     if (!smoke) throw new RwaNeutralExecutionError(404, "connectivity_smoke_not_found", "连通性烟测记录不存在。");
     if (!smoke.receipt) throw new RwaNeutralExecutionError(409, "connectivity_smoke_incomplete", "连通性烟测尚未形成 flat receipt。");
-    return smoke.receipt;
+    return publicConnectivitySmokeReceipt(smoke);
   }
 
   async findConnectivitySmokeIdempotent(input: {
@@ -1650,6 +1655,7 @@ export class RwaBinanceAutomationService {
   ) {
     const final = await client.readPreflightSnapshot();
     assertSmokeSnapshot(final, smoke, "flat");
+    smoke.providerState = providerStateFromSnapshot(final, "verified", "provider_flat_confirmed");
     smoke.exit.futuresFlatConfirmed = true;
     smoke.exit.spotFlatConfirmed = true;
     smoke.stage = stage;
@@ -1681,6 +1687,7 @@ export class RwaBinanceAutomationService {
       active.stage = "failed";
       active.message = "服务重启发生在首次 provider mutation 前；烟测已终止且禁止重开。";
       active.updatedAt = this.now();
+      appendSmokeTimeline(active, this.now());
       await this.store.writeState(state);
       return;
     }
@@ -1696,6 +1703,7 @@ export class RwaBinanceAutomationService {
       active.errorCategory = errorCategory(error);
       active.message = "服务重启后无法证明 smoke 风险降低退出已闭环，请在 Binance 人工处理。";
       active.updatedAt = this.now();
+      appendSmokeTimeline(active, this.now());
       state.config.killSwitchActive = true;
       state.config.strategyEnabled = false;
       state.config.globalExecutionEnabled = false;
@@ -1792,6 +1800,7 @@ export class RwaBinanceAutomationService {
     state: RwaAutomationStateData,
     smoke: RwaConnectivitySmokeRecord,
   ) {
+    appendSmokeTimeline(smoke, this.now());
     smoke.updatedAt = this.now();
     await this.store.writeState(state);
   }
@@ -1805,7 +1814,13 @@ export class RwaBinanceAutomationService {
   ) {
     this.assertExecutionLeaseHeld();
     await this.reconcileConnectivitySmokeOrders(client, smoke);
-    const snapshot = await client.readPreflightSnapshot();
+    let snapshot: RwaBinancePreflightSnapshot;
+    try {
+      snapshot = await client.readPreflightSnapshot();
+    } catch (error) {
+      smoke.providerState = unavailableSmokeProviderState("provider_snapshot_unavailable");
+      throw error;
+    }
     if (!client.readConnectivitySmokeActivity) {
       throw new RwaNeutralExecutionError(409, "connectivity_smoke_activity_incomplete", "provider 不支持 smoke REST 活动扫描。");
     }
@@ -1834,13 +1849,20 @@ export class RwaBinanceAutomationService {
       || activity.attribution.externalPositionActivity
       || activity.attribution.sources.some((source) => source.externalActivity)
     ) {
+      smoke.providerState = providerStateFromSnapshot(snapshot, "ambiguous", "activity_evidence_incomplete");
       throw new RwaNeutralExecutionError(
         409,
         "connectivity_smoke_activity_incomplete",
         "截至扫描 cutoff 无法证明 REST 可见 XAUT 活动仅属于当前 smoke。",
       );
     }
-    assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder);
+    try {
+      assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder);
+      smoke.providerState = providerStateFromSnapshot(snapshot, "verified", "verified_non_atomic_rest_snapshot");
+    } catch (error) {
+      smoke.providerState = providerStateFromSnapshot(snapshot, "ambiguous", "provider_ledger_mismatch");
+      throw error;
+    }
     smoke.message = "用户承诺的独占运维窗口；截至扫描 cutoff 未发现 REST 可见外部活动。";
     await this.persistConnectivitySmoke(state, smoke);
     return snapshot;
@@ -2810,6 +2832,7 @@ function approximately(left: number, right: number) {
 }
 
 function publicConnectivitySmoke(smoke: RwaConnectivitySmokeRecord) {
+  const orders = publicConnectivitySmokeOrders(smoke);
   return {
     smokeId: smoke.smokeId,
     purpose: smoke.purpose,
@@ -2817,17 +2840,144 @@ function publicConnectivitySmoke(smoke: RwaConnectivitySmokeRecord) {
     venue: "binance" as const,
     accountFingerprint: smoke.accountFingerprint,
     stage: smoke.stage,
+    policyVersion: smoke.policyVersion,
+    policyDigest: smoke.policyDigest,
     budget: smoke.budget,
     openedSpotQuantityXaut: smoke.openedSpotQuantityXaut,
     openedFuturesQuantityXaut: smoke.openedFuturesQuantityXaut,
-    exit: smoke.exit,
-    receipt: smoke.receipt,
+    orders,
+    providerState: smoke.providerState,
+    timeline: smoke.timeline,
+    receipt: smoke.receipt ? publicConnectivitySmokeReceipt(smoke) : null,
     noReopen: smoke.noReopen,
     providerMutationCount: smoke.providerMutationCount,
     errorCategory: smoke.errorCategory,
     message: smoke.message,
     createdAt: smoke.createdAt,
     updatedAt: smoke.updatedAt,
+  };
+}
+
+function publicConnectivitySmokeReceipt(smoke: RwaConnectivitySmokeRecord) {
+  const receipt = smoke.receipt!;
+  const orders = publicConnectivitySmokeOrders(smoke);
+  const feeOrders = [
+    smoke.spotOpenOrder,
+    smoke.futuresOpenOrder,
+    smoke.exit.futuresCloseOrder,
+    smoke.exit.spotCloseOrder,
+  ];
+  const feesAvailable = feeOrders.every((order) =>
+    order !== null && Number.isFinite(order.feeUsd) && order.feeUsd >= 0);
+  const disclosureMatches = smoke.policyVersion === RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
+    && smoke.policyDigest === RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST;
+  return {
+    ...receipt,
+    acceptedConfirmations: {
+      exclusiveWindowConfirmed: true,
+      manualRecoveryConfirmed: true,
+      nonAtomicRiskAccepted: true,
+    },
+    disclosureAvailability: disclosureMatches ? "available" as const : "unavailable_for_historical_digest" as const,
+    disclosure: disclosureMatches ? {
+      continuity: RWA_CONNECTIVITY_SMOKE_POLICY.continuity,
+      exclusiveWindowRules: RWA_CONNECTIVITY_SMOKE_POLICY.exclusiveWindowRules,
+      manualRecoveryRequirements: RWA_CONNECTIVITY_SMOKE_POLICY.manualRecoveryRequirements,
+      residualRisks: RWA_CONNECTIVITY_SMOKE_POLICY.residualRisks,
+    } : null,
+    disclosureReason: disclosureMatches ? null : "historical_policy_digest_not_available",
+    orders,
+    finalProviderState: smoke.providerState,
+    timeline: smoke.timeline,
+    metrics: {
+      actualFeesUsd: feesAvailable ? {
+        availability: "available" as const,
+        value: feeOrders.reduce((sum, order) => sum + order!.feeUsd, 0),
+        reason: null,
+      } : unavailableActualMetric("authoritative_fee_inputs_incomplete"),
+      actualSlippageUsd: unavailableActualMetric("authoritative_reference_prices_not_persisted"),
+      actualRealizedPnlUsd: unavailableActualMetric("authoritative_pnl_inputs_not_persisted"),
+    },
+  };
+}
+
+function publicConnectivitySmokeOrders(smoke: RwaConnectivitySmokeRecord) {
+  return {
+    spotOpen: publicSmokeOrder(smoke.spotOpenOrder, `${smoke.orderLinkPrefix}s1`, "spot", "Buy", false),
+    futuresOpen: publicSmokeOrder(smoke.futuresOpenOrder, `${smoke.orderLinkPrefix}p1`, "linear", "Sell", false),
+    futuresClose: publicSmokeOrder(smoke.exit.futuresCloseOrder, `${smoke.orderLinkPrefix}c1`, "linear", "Buy", true),
+    spotClose: publicSmokeOrder(smoke.exit.spotCloseOrder, `${smoke.orderLinkPrefix}c2`, "spot", "Sell", false),
+  };
+}
+
+function publicSmokeOrder(
+  order: RwaProviderOrder | null,
+  expectedOrderLinkId: string,
+  category: "spot" | "linear",
+  side: "Buy" | "Sell",
+  reduceOnly: boolean,
+) {
+  if (!order || order.orderLinkId !== expectedOrderLinkId) return null;
+  return {
+    orderId: order.orderId,
+    orderLinkId: order.orderLinkId,
+    category,
+    side,
+    status: order.status,
+    requestedQuantityXaut: order.requestedQuantityXaut,
+    filledQuantityXaut: order.filledQuantityXaut,
+    averagePriceUsd: Number.isFinite(order.averagePrice) ? order.averagePrice : null,
+    feeUsd: Number.isFinite(order.feeUsd) ? order.feeUsd : null,
+    reduceOnly,
+    updatedAt: order.updatedAt,
+  };
+}
+
+function unavailableActualMetric(reason: string) {
+  return { availability: "unavailable" as const, value: null, reason };
+}
+
+function appendSmokeTimeline(smoke: RwaConnectivitySmokeRecord, at: number) {
+  const last = smoke.timeline.at(-1);
+  if (!last || last.stage !== smoke.stage) {
+    smoke.timeline.push({ stage: smoke.stage, at, code: `stage_${smoke.stage}` });
+  }
+}
+
+function unavailableSmokeProviderState(reason: string) {
+  return {
+    verificationStatus: "unavailable" as const,
+    observedAt: null,
+    residualSpotQuantityXaut: null,
+    residualFuturesQuantityXaut: null,
+    activeSpotOrderCount: null,
+    activeFuturesOrderCount: null,
+    activeTotalOrderCount: null,
+    providerFlatConfirmed: null,
+    reason,
+  };
+}
+
+function providerStateFromSnapshot(
+  snapshot: RwaBinancePreflightSnapshot,
+  verificationStatus: "verified" | "ambiguous",
+  reason: string,
+) {
+  const activeTotalOrderCount = snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount;
+  return {
+    verificationStatus,
+    observedAt: snapshot.fetchedAt,
+    residualSpotQuantityXaut: snapshot.existingSpotQuantityXaut,
+    residualFuturesQuantityXaut: snapshot.existingPerpetualQuantityXaut,
+    activeSpotOrderCount: snapshot.openSpotOrderCount,
+    activeFuturesOrderCount: snapshot.openPerpetualOrderCount,
+    activeTotalOrderCount,
+    providerFlatConfirmed: verificationStatus === "verified"
+      ? snapshot.existingSpotQuantityXaut <= 1e-12
+        && snapshot.existingPerpetualQuantityXaut <= 1e-12
+        && activeTotalOrderCount === 0
+      : null,
+    reason,
   };
 }
 

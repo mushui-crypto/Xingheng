@@ -502,9 +502,56 @@ position/income、充值提现、内部及子账户划转来源；来源失败�
 恢复只允许风险降低：零 mutation reservation 直接 `failed`；Spot 成交后仅撤余量/卖 Spot；
 Futures 成交后不补仓，只先平 Futures 再卖 Spot；退出中先按固定 client order ID 查询既有退出
 订单。provider 已 flat 但本地未完成时只补 `flat` 和 receipt。provider、租约或 KMS 无法确认时
-进入 `manual_intervention` 并激活用户急停。receipt 只返回脱敏账户指纹、预算、两侧开仓数量、
-最终 flat 数量、阶段时间、policy version/digest 和 provider flat 确认，不返回 secret、token、IP
-或 raw provider 数据。已接受残余风险包括 scan cutoff 到 mutation 的竞态、历史接口延迟、人工
+进入 `manual_intervention` 并激活用户急停。Status 和 receipt 是 `no-store` 的用户/账户隔离只读
+响应，只公开本次 smoke 的安全摘要，不返回 secret、token、IP、challenge/step-up token、凭证、
+非 smoke 订单或 raw provider 数据。Status 在所有执行阶段返回持久化的 `policyVersion /
+policyDigest`、四个固定订单槽位、最近一次 provider 核验状态和实际发生的阶段时间线：
+
+```json
+{
+  "orders": {
+    "spotOpen": null,
+    "futuresOpen": null,
+    "futuresClose": null,
+    "spotClose": null
+  },
+  "providerState": {
+    "verificationStatus": "verified|stale|unavailable|ambiguous",
+    "observedAt": null,
+    "residualSpotQuantityXaut": null,
+    "residualFuturesQuantityXaut": null,
+    "activeSpotOrderCount": null,
+    "activeFuturesOrderCount": null,
+    "activeTotalOrderCount": null,
+    "providerFlatConfirmed": null,
+    "reason": "stable_code"
+  },
+  "timeline": [{ "stage": "reserved", "at": 0, "code": "reserved" }]
+}
+```
+
+非空订单槽位只包含 `orderId / orderLinkId / category / side / status /
+requestedQuantityXaut / filledQuantityXaut / averagePriceUsd / feeUsd / reduceOnly /
+updatedAt`；`orderLinkId` 必须是该 smoke 的固定 `s1/p1/c1/c2`。`providerState` 只表示
+`observedAt` 时 REST 可见、仍为 non-atomic/incomplete 的核验结果；不可读、证据不完整或归属
+不明确时数量可为 `null`，并以稳定 reason 告知前端人工登录 Binance，不允许前端自行推算。
+时间线只追加实际持久化的 stage 变化，不补造未发生阶段，备份恢复保持一致。
+
+Flat receipt 复用四单摘要和时间线，并要求 `finalProviderState` 权威确认 Spot/Futures 残余及
+两侧活动订单均为 0。它返回 policy 接受确认事实；只有历史 version/digest 与当前 canonical
+policy 完全一致时才联结当前披露全文，否则返回
+`disclosureAvailability="unavailable_for_historical_digest"`，不得用当前文案冒充历史 policy。
+实际指标采用统一 `{ availability, value, reason }`：
+
+- `actualFeesUsd` 仅在四单权威 fee 全部存在且有效时求和，否则
+  `unavailable / authoritative_fee_inputs_incomplete`。
+- 当前未持久化无歧义的逐动作 reference price，因此 `actualSlippageUsd` 返回
+  `unavailable / authoritative_reference_prices_not_persisted`。
+- 当前未持久化可完整证明 smoke 实际收益的全部权威输入，因此 `actualRealizedPnlUsd` 返回
+  `unavailable / authoritative_pnl_inputs_not_persisted`。
+
+预算和 fee/slippage reserve 始终是 `planned` 风险上界，不能填入上述 actual 指标；smoke 仍不
+进入普通 positions/PnL/Funding/绩效。已接受残余风险包括 scan cutoff 到 mutation 的竞态、历史接口延迟、人工
 同净额往返可能不可见、资产可替代导致经济归属无法数学证明，以及 25U 仅为计划资本上限而非最大
 损失保证。
 

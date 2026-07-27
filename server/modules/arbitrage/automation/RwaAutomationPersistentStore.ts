@@ -51,8 +51,6 @@ import {
 } from "./RwaAssetTakeover";
 import {
   isActiveConnectivitySmoke,
-  RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
-  RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
   RWA_CONNECTIVITY_SMOKE_MAX_RECORDS,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
@@ -955,8 +953,8 @@ function validateConnectivitySmokeForStore(
       "accountFingerprint", "accountId", "authorization", "budget", "challengeId", "createdAt",
       "errorCategory", "exit", "futuresOpenOrder", "idempotencyKey", "message", "mode", "noReopen",
       "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "orderLinkPrefix", "policyDigest",
-      "policyVersion", "providerMutationCount", "purpose", "receipt", "requestDigest", "smokeId",
-      "spotOpenOrder", "stage", "updatedAt", "userId",
+      "policyVersion", "providerMutationCount", "providerState", "purpose", "receipt", "requestDigest",
+      "smokeId", "spotOpenOrder", "stage", "timeline", "updatedAt", "userId",
     ])
     ||
     smoke.userId !== userId
@@ -971,8 +969,8 @@ function validateConnectivitySmokeForStore(
     || authorization.consumedBeforeProviderMutation !== true
     || authorization.exitAuthorized !== true
     || !Number.isFinite(authorization.reservedAt)
-    || smoke.policyVersion !== RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
-    || smoke.policyDigest !== RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST
+    || typeof smoke.policyVersion !== "string" || smoke.policyVersion.length === 0
+    || typeof smoke.policyDigest !== "string" || smoke.policyDigest.length === 0
     || !smoke.requestDigest
     || !smoke.smokeId || !smoke.accountId || !smoke.accountFingerprint
     || !smoke.idempotencyKey || !smoke.challengeId || !smoke.orderLinkPrefix
@@ -1008,13 +1006,53 @@ function validateConnectivitySmokeForStore(
       || receipt.venue !== "binance"
       || receipt.symbol !== "XAUTUSDT"
       || receipt.providerFlatConfirmed !== true
-      || receipt.policyVersion !== RWA_CONNECTIVITY_SMOKE_POLICY_VERSION
-      || receipt.policyDigest !== RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST
+      || receipt.policyVersion !== smoke.policyVersion
+      || receipt.policyDigest !== smoke.policyDigest
       || !Number.isFinite(receipt.completedAt)
     ))
     || typeof smoke.message !== "string"
   ) throw invalidRiskState();
+  validateSmokeProviderState(smoke.providerState);
+  validateSmokeTimeline(smoke.timeline, stages);
   return smoke;
+}
+
+function validateSmokeProviderState(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidRiskState();
+  const state = value as Record<string, unknown>;
+  if (!hasExactObjectKeys(state, [
+    "activeFuturesOrderCount", "activeSpotOrderCount", "activeTotalOrderCount", "observedAt",
+    "providerFlatConfirmed", "reason", "residualFuturesQuantityXaut", "residualSpotQuantityXaut",
+    "verificationStatus",
+  ])
+    || !["verified", "stale", "unavailable", "ambiguous"].includes(String(state.verificationStatus))
+    || !(state.observedAt === null || Number.isFinite(state.observedAt))
+    || typeof state.reason !== "string"
+    || !(state.providerFlatConfirmed === null || typeof state.providerFlatConfirmed === "boolean")) {
+    throw invalidRiskState();
+  }
+  for (const key of [
+    "activeFuturesOrderCount", "activeSpotOrderCount", "activeTotalOrderCount",
+    "residualFuturesQuantityXaut", "residualSpotQuantityXaut",
+  ]) {
+    if (!(state[key] === null || (Number.isFinite(state[key]) && Number(state[key]) >= 0))) throw invalidRiskState();
+  }
+}
+
+function validateSmokeTimeline(value: unknown, stages: readonly string[]) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 64) throw invalidRiskState();
+  let previousAt = -Infinity;
+  for (const item of value) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw invalidRiskState();
+    const event = item as Record<string, unknown>;
+    if (!hasExactObjectKeys(event, ["at", "code", "stage"])
+      || !stages.includes(String(event.stage))
+      || !Number.isFinite(event.at)
+      || Number(event.at) < previousAt
+      || typeof event.code !== "string"
+      || !event.code) throw invalidRiskState();
+    previousAt = Number(event.at);
+  }
 }
 
 function hasExactObjectKeys(value: object, expected: readonly string[]) {

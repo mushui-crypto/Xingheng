@@ -924,8 +924,8 @@ function validateConnectivitySmoke(value: unknown) {
     "accountFingerprint", "accountId", "authorization", "budget", "challengeId", "createdAt",
     "errorCategory", "exit", "futuresOpenOrder", "idempotencyKey", "message", "mode", "noReopen",
     "openedFuturesQuantityXaut", "openedSpotQuantityXaut", "orderLinkPrefix", "policyDigest",
-    "policyVersion", "providerMutationCount", "purpose", "receipt", "requestDigest", "smokeId",
-    "spotOpenOrder", "stage", "updatedAt", "userId",
+    "policyVersion", "providerMutationCount", "providerState", "purpose", "receipt", "requestDigest",
+    "smokeId", "spotOpenOrder", "stage", "timeline", "updatedAt", "userId",
   ])) throw invalidSnapshot();
   for (const key of [
     "smokeId", "userId", "accountId", "accountFingerprint", "idempotencyKey", "challengeId",
@@ -983,6 +983,42 @@ function validateConnectivitySmoke(value: unknown) {
     ]) || receipt.purpose !== "connectivity_smoke" || receipt.venue !== "binance"
       || receipt.symbol !== "XAUTUSDT" || receipt.providerFlatConfirmed !== true
       || !isTimestamp(receipt.completedAt)) throw invalidSnapshot();
+  }
+  validateConnectivitySmokeProviderState(smoke.providerState);
+  const timeline = smoke.timeline;
+  if (!Array.isArray(timeline) || timeline.length === 0 || timeline.length > 64) throw invalidSnapshot();
+  let previousAt = -Infinity;
+  for (const item of timeline) {
+    const event = assertObject(item);
+    if (!hasExactKeys(event, ["at", "code", "stage"])
+      || ![
+        "reserved", "spot_opening", "spot_open", "futures_opening", "hedged",
+        "futures_closing", "spot_closing", "flat", "failed", "manual_intervention",
+      ].includes(String(event.stage))
+      || !isTimestamp(event.at) || Number(event.at) < previousAt
+      || !isNonEmptyString(event.code)) throw invalidSnapshot();
+    previousAt = Number(event.at);
+  }
+}
+
+function validateConnectivitySmokeProviderState(value: unknown) {
+  const state = assertObject(value);
+  if (!hasExactKeys(state, [
+    "activeFuturesOrderCount", "activeSpotOrderCount", "activeTotalOrderCount", "observedAt",
+    "providerFlatConfirmed", "reason", "residualFuturesQuantityXaut", "residualSpotQuantityXaut",
+    "verificationStatus",
+  ])
+    || !["verified", "stale", "unavailable", "ambiguous"].includes(String(state.verificationStatus))
+    || !(state.observedAt === null || isTimestamp(state.observedAt))
+    || !(state.providerFlatConfirmed === null || typeof state.providerFlatConfirmed === "boolean")
+    || !isNonEmptyString(state.reason)) throw invalidSnapshot();
+  for (const key of [
+    "activeFuturesOrderCount", "activeSpotOrderCount", "activeTotalOrderCount",
+    "residualFuturesQuantityXaut", "residualSpotQuantityXaut",
+  ]) {
+    if (!(state[key] === null || (isFiniteNumber(state[key]) && Number(state[key]) >= 0))) {
+      throw invalidSnapshot();
+    }
   }
 }
 
