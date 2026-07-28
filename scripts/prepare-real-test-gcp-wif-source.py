@@ -14,6 +14,19 @@ import sys
 from dataclasses import dataclass
 from typing import Callable
 
+sys.dont_write_bytecode = True
+
+SCRIPT_DIRECTORY = os.path.dirname(os.path.realpath(__file__))
+if SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, SCRIPT_DIRECTORY)
+
+from gcp_sdk_boundary import (
+    BoundaryError,
+    ManifestSnapshot,
+    normalize_manifest,
+    scan_sdk_boundary,
+)
+
 
 VERSION = "20260728T062225Z"
 PROVIDER = (
@@ -162,6 +175,8 @@ class ToolchainBaseline:
     sdk_root_mode: int
     sdk_cache_count: int
     sdk_cache_set_sha256: str
+    sdk_boundary_count: int
+    sdk_boundary_set_sha256: str
 
 
 @dataclass(frozen=True)
@@ -535,65 +550,46 @@ def _read_receipt_file(
     return content, {os.fsdecode(line) for line in lines if line}
 
 
+def _sdk_manifest(
+    config: PrepareConfig,
+    manifest_content: bytes,
+) -> ManifestSnapshot:
+    try:
+        return normalize_manifest(manifest_content, config.sdk_root)
+    except BoundaryError as error:
+        raise PreparationError(
+            f"SDK manifest boundary is invalid ({error.reason.value})"
+        ) from error
+
+
 def _sdk_cache_baseline(
     config: PrepareConfig,
-    manifest_paths: set[str],
-) -> tuple[int, str]:
-    sdk_actual = config.actual(config.sdk_root)
-    _validate_parent_chain(config, config.sdk_root)
-    _validate_directory(
-        os.lstat(sdk_actual),
-        config.owner_uid,
-        config.owner_gid,
+    manifest: ManifestSnapshot,
+) -> tuple[int, str, int, str]:
+    try:
+        boundary = scan_sdk_boundary(
+            config.filesystem_root,
+            manifest,
+            owner_uid=config.owner_uid,
+            owner_gid=config.owner_gid,
+        )
+    except (BoundaryError, OSError) as error:
+        reason = (
+            error.reason.value
+            if isinstance(error, BoundaryError)
+            else "sdk-boundary-open-failed"
+        )
+        raise PreparationError(f"SDK boundary validation failed ({reason})") from error
+    if boundary.unsafe.count:
+        first = boundary.first_unsafe
+        reason = first.reason.value if first is not None else "sdk-boundary-unsafe"
+        raise PreparationError(f"SDK boundary contains an unsafe object ({reason})")
+    return (
+        boundary.allowed.count,
+        boundary.allowed.sha256,
+        boundary.all_entries.count,
+        boundary.all_entries.sha256,
     )
-    allowed_cache_paths: list[str] = []
-    stack = [sdk_actual]
-    while stack:
-        parent = stack.pop()
-        with os.scandir(parent) as entries:
-            for entry in entries:
-                entry_path = entry.path
-                relative = os.path.relpath(entry_path, config.filesystem_root)
-                logical = "/" + relative
-                metadata = entry.stat(follow_symlinks=False)
-                if (
-                    metadata.st_uid != config.owner_uid
-                    or metadata.st_gid != config.owner_gid
-                    or metadata.st_mode & 0o022
-                ):
-                    raise PreparationError("SDK object ownership or mode is unsafe")
-                if stat.S_ISLNK(metadata.st_mode):
-                    resolved = os.path.realpath(entry_path)
-                    if (
-                        not os.path.exists(resolved)
-                        or os.path.commonpath([sdk_actual, resolved]) != sdk_actual
-                    ):
-                        raise PreparationError("SDK symlink escapes or is broken")
-                elif stat.S_ISDIR(metadata.st_mode):
-                    stack.append(entry_path)
-                elif not stat.S_ISREG(metadata.st_mode):
-                    raise PreparationError("SDK contains a special object")
-                if logical in manifest_paths:
-                    continue
-                components = logical.split("/")
-                under_pycache = "__pycache__" in components
-                allowed = (
-                    stat.S_ISDIR(metadata.st_mode)
-                    and os.path.basename(logical) == "__pycache__"
-                ) or (
-                    stat.S_ISREG(metadata.st_mode)
-                    and under_pycache
-                    and logical.endswith(".pyc")
-                    and not metadata.st_mode & 0o111
-                )
-                if not allowed:
-                    raise PreparationError("SDK contains an unmanifested object")
-                allowed_cache_paths.append(logical)
-    allowed_cache_paths.sort()
-    digest = hashlib.sha256(
-        b"\0".join(path.encode("utf-8") for path in allowed_cache_paths)
-    ).hexdigest()
-    return len(allowed_cache_paths), digest
 
 
 def _validate_package(
@@ -668,12 +664,13 @@ def _validate_toolchain(
     )
     _validate_package(config, config.gcloud_package, "google-cloud-cli")
     _validate_package(config, config.dash_package, "dash")
-    _, manifest_paths = _read_receipt_file(
+    manifest_content, _ = _read_receipt_file(
         config,
         config.package_list_path,
         config.package_list_lines,
         config.package_list_sha256,
     )
+    manifest = _sdk_manifest(config, manifest_content)
     _read_receipt_file(
         config,
         config.package_md5sums_path,
@@ -687,7 +684,10 @@ def _validate_toolchain(
     )
     if verified.returncode != 0 or verified.stdout or verified.stderr:
         raise PreparationError("google-cloud-cli package verification failed")
-    cache_count, cache_hash = _sdk_cache_baseline(config, manifest_paths)
+    cache_count, cache_hash, boundary_count, boundary_hash = _sdk_cache_baseline(
+        config,
+        manifest,
+    )
     sdk_root = os.lstat(config.actual(config.sdk_root))
     baseline = ToolchainBaseline(
         gcloud,
@@ -700,6 +700,8 @@ def _validate_toolchain(
         stat.S_IMODE(sdk_root.st_mode),
         cache_count,
         cache_hash,
+        boundary_count,
+        boundary_hash,
     )
     if prior is not None and baseline != prior:
         raise PreparationError("trusted toolchain baseline changed")
@@ -788,7 +790,7 @@ def _cleanup_isolation(
 
 def _probe_python_runtime(
     config: PrepareConfig,
-    manifest_paths: set[str],
+    manifest_paths: frozenset[str],
 ) -> dict[str, str]:
     code = (
         "import importlib,importlib.util,json,os,site,sys;"
@@ -822,7 +824,10 @@ def _probe_python_runtime(
     cache = value.get("cache")
     usersite_path = value.get("usersite_path")
     logical_source = (
-        "/" + os.path.relpath(source, os.path.realpath(config.filesystem_root))
+        os.path.relpath(
+            source,
+            os.path.realpath(config.actual(config.sdk_root)),
+        ).replace(os.sep, "/")
         if isinstance(source, str)
         else ""
     )
@@ -1354,13 +1359,14 @@ def prepare_source(
             config,
             isolation_receipts,
         )
-        _, manifest_paths = _read_receipt_file(
+        manifest_content, _ = _read_receipt_file(
             config,
             config.package_list_path,
             config.package_list_lines,
             config.package_list_sha256,
         )
-        python_probe = _probe_python_runtime(config, manifest_paths)
+        manifest = _sdk_manifest(config, manifest_content)
+        python_probe = _probe_python_runtime(config, manifest.relative_paths)
         _validate_empty_directory(root_fd, pycache_fd, pycache_receipt)
         _validate_empty_directory(root_fd, gcloud_config_fd, gcloud_config_receipt)
         version_json = _validate_gcloud_version(config)
@@ -1753,6 +1759,10 @@ def prepare_source(
                 "root_mode": f"{toolchain.sdk_root_mode:04o}",
                 "count": toolchain.sdk_cache_count,
                 "sorted_set_sha256": toolchain.sdk_cache_set_sha256,
+            },
+            "sdk_boundary": {
+                "count": toolchain.sdk_boundary_count,
+                "sorted_set_sha256": toolchain.sdk_boundary_set_sha256,
             },
             "isolation_cleanup": {
                 config.gcloud_config_path: "missing",

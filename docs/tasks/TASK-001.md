@@ -16,14 +16,14 @@
 
 当前 Owner：Product-Technical Lead
 
-角色：D2B0-R2-R1-P1 代码层审查收口与受信 revision 准备
+角色：D2B0-R3-R1 代码层审查收口与受信 revision 准备
 
-下一 Owner：Product-Technical Lead（等待 commit/push 与工具行为验证授权）
+下一 Owner：Product-Technical Lead（等待 commit/push 与现场 diagnose 授权）
 
 交接状态：
 
--   D2B0-R2-R1-P1 代码层限定复审通过，无 P0-P3；真实 576.0.0 工具行为验证尚未授权，
-    现场 P1 仍保持阻断。D2B1 两次 PREWRITE 均 fail-closed，helper attempts=0，D2B2/E 未授权
+-   D2B0-R3-R1 限定复审通过，无 P0-P3，代码层 P1 已关闭；现场 `diagnose` 尚未授权。
+    behavior attempts=0、D2B1 helper attempts=0、validation root MISSING，D2B2/E 未授权
 
 ------------------------------------------------------------------------
 
@@ -98,6 +98,9 @@ real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 -   `scripts/activate-real-test-release.sh`
 -   `scripts/prepare-real-test-gcp-wif-source.py`
 -   `scripts/prepare-real-test-gcp-wif-source.test.mjs`
+-   `scripts/gcp_sdk_boundary.py`
+-   `scripts/gcp_sdk_boundary.test.py`
+-   `scripts/verify-real-test-gcloud-toolchain.py`
 -   `scripts/install-gcp-wif.sh`
 -   `scripts/verify-deployment-revision.mjs`
 -   `scripts/verify-real-test-web-health.sh`
@@ -108,15 +111,15 @@ real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 
 # 当前状态
 
-状态：D2B0-R2-R1-P1 代码层 Review 通过；待受信 revision 与真实工具行为验证独立授权；
-D2B1 attempts=0，D2B2/E 未授权
+状态：D2B0-R3-R1 代码层复审通过，无 P0-P3；待 commit/push 与现场 `diagnose` 独立授权；
+behavior attempts=0、D2B1 attempts=0，D2B2/E 未授权
 
 Git 状态：
 
 -   当前分支：`develop`
 -   当前 HEAD / `origin/develop`：
-    `46198065a142af70d2dd3de9ec36692bc10629bf`
-    （`fix(deploy): support direct-root real-test WIF`，D2B0-R1 受信 revision）
+    `d2cfd084ece9fc786e1a7b3e3b3631ac4dee8d98`
+    （`fix(deploy): harden real-test gcloud tooling`，D2B0-R2 受信 revision）
 -   `origin/main`：`623d5d1fa888ad0dbbbe56ce6ee9754a72bfc0db`
 -   `8b6dc687f5f75d99ec189e2ba48b8dab2b701fa0` 已完成 Code Review，并与任务记录提交
     `de84309f78e26836def1896aa8015cd2bbb95fdb` 一并通过 merge commit
@@ -380,7 +383,7 @@ Git 状态：
 
 【任务名称】
 
-TASK-001 D2B0-R2：canonical gcloud 工具链与 pycache/config 隔离实现
+TASK-001 D2B0-R3-R1：唯一 SDK 分类核心与受信 toolchain diagnose
 
 【当前 Owner】
 
@@ -388,77 +391,71 @@ Product-Technical Lead
 
 【下一 Owner】
 
-Code Reviewer（D2B0-R2 独立审查）
+Product-Technical Lead（等待 commit/push 与现场 diagnose 授权）
 
 【任务目标】
 
-对 canonical gcloud、dash、bundled Python、dpkg/SDK baseline、空环境和两个固定隔离目录的
-本地实现进行独立 Code Review。D2B1 虽已获批，但因两次 PREWRITE fail-closed 仍为 attempts=0；
-R2 未形成新受信 revision并完成独立真实工具行为验证前不得继续 D2B1。
+将 SDK manifest 规范化、no-follow 对象分类、稳定身份摘要和并发漂移判断收敛到唯一共享核心，
+由 prepare helper 与受信 toolchain verifier 复用。`diagnose` 必须纯只读、零 gcloud；
+`behavior` 当前保持 fail-closed。R3 未形成受信 revision、现场 diagnose 和后续 behavior 验证
+完成前不得继续 D2B1。
 
 【当前状态】
 
-D2B0-R1 已在受信 revision `46198065a142af70d2dd3de9ec36692bc10629bf`。D2B0-R2 按
-Architecture Reviewer 已批准裁定完成本地代码、测试和文档修改；首轮 Review 的文件日志 P1 已
-完成最小修复并由同一 Code Reviewer 确认代码层无 P0-P3。当前仍未提交、未 push，且真实 576.0.0
-工具行为验证未授权。真实 ADC/source/audience 未生成，KEY 未复制，未安装、mount、probe、访问
-VM/云或进入 D2B2/E。
+当前受信 revision 为 `d2cfd084ece9fc786e1a7b3e3b3631ac4dee8d98`。D2B0-R3-R1 七文件
+本地实现、测试和文档已由同一 Code Reviewer 限定复审通过，无 P0-P3；尚未 commit/push。
+现场 `diagnose`、behavior、D2B1/D2B2/E 均未授权或执行。behavior attempts=0、D2B1 helper
+attempts=0、validation root 与 SOURCE/AUDIENCE/runtime 继续 MISSING。
 
 【已完成内容】
 
 见“执行记录 / 已完成”。本批重点是：
 
--   helper 不再执行 `/usr/bin/gcloud`；固定通过 `/usr/bin/dash` 执行 canonical gcloud，并冻结
-    gcloud/dash/bundled Python 的 metadata/SHA、package、manifest、verify 和 component exact-set。
--   子进程从空环境构造 allowlist；两个固定隔离目录使用排他 mkdir、同 inode/empty 门禁和
-    receipt rmdir。prefix/user-site probe 与 SDK 动态安全 pycache baseline 先于 STAGE/KEY。
--   helper 保留 D1/D2A inode/hash/owner/mode/nlink、验证 FD 分块复制、direct-root JSON、
-    no-follow/no-replace/fsync 与敏感字段拒绝契约。
--   source/audience 使用 `O_EXCL|O_NOFOLLOW`、0400、fsync、
-    `renameat2(RENAME_NOREPLACE)` 和 final reopen；失败只按本批 inode 收据清理。
--   聚焦测试只用临时 fixture/fake SDK，覆盖 prefix 控制组、ambient env/PATH、package/component/
-    SDK drift、隔离 inode/nonempty/cleanup、version/create/version 漂移及原四文件负例；不读取真实
-    KEY。
--   runbook、Decision Log 与任务记录同步 R2 工具链和“现场未执行”边界。
+-   新增唯一 `gcp_sdk_boundary.py`，统一 manifest 路径、manifest/symlink/pycache 分类、
+    `dev/ino/uid/gid/mode/nlink/size/ctime_ns` 身份摘要和稳定 reason enum。
+-   新增 `verify-real-test-gcloud-toolchain.py`；`diagnose` 在同进程、同 manifest snapshot 下做
+    双扫描并输出脱敏差异/漂移收据，且禁止写入与 gcloud；`behavior` 当前固定拒绝。
+-   prepare helper 删除重复分类逻辑并复用共享核心，同时保留 direct-root 四文件、KEY、
+    config/pycache 隔离、no-follow/no-replace/fsync 和 receipt-only cleanup 契约。
+-   verifier 在 baseline、reference 后、current 后和返回前重验 SDK root、工具、package、
+    list/md5 receipts 与 `dpkg --verify`；任一漂移统一 fail-closed 并记录 `drift_phase`。
+-   聚焦测试覆盖路径规范化、manifest 对象、relative/external/broken symlink、严格 pycache 例外、
+    owner/write/hardlink/special、摘要稳定性、同长度 inode 替换、三个收据窗口、零写入/零 gcloud。
+-   runbook、Decision Log 与任务记录同步 R3 受信入口和“现场未执行”边界。
 
 【未完成内容】
 
-D2B0-R2 首轮独立 Code Review 发现 1 个 P1：真实 gcloud 可能默认在隔离 config 目录初始化文件
-日志，而 fake 成功路径没有覆盖该行为。Architecture Reviewer 已批准固定
-`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`，同一 Reviewer 已确认代码层无 P0-P3；但受信 revision
-和另行授权的真实 576.0.0 version/create/version 工具行为验证均完成前，不得关闭现场 P1 或恢复
-D2B1；D2B2/E 仍须独立授权。
+D2B0-R3-R1 七文件尚未 commit/push，不能作为现场受信 revision。现场纯只读 `diagnose` 需要
+用户另行授权；只有诊断证明两套分类一致、OTHER/external/broken=0 且无 concurrent drift，才能
+申请后续 behavior 写验证。behavior 通过前不得关闭现场 P1 或恢复 D2B1；D2B2/E 仍须独立授权。
 
 【涉及文件/模块】
 
+-   `scripts/gcp_sdk_boundary.py`
+-   `scripts/gcp_sdk_boundary.test.py`
+-   `scripts/verify-real-test-gcloud-toolchain.py`
 -   `scripts/prepare-real-test-gcp-wif-source.py`
--   `scripts/prepare-real-test-gcp-wif-source.test.mjs`
 -   `deploy/PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md`
 -   `docs/tasks/TASK-001.md`
--   `deploy/README.md`
--   `RWA_NEUTRAL_AUTOMATION_V1.md`
 -   `docs/decisions/DECISION_LOG.md`
--   `PROJECT_CONTEXT.md`（仅记录代码支持、现场未执行）
 
 严禁触碰、暂存、覆盖或回退用户既有 `TASK_TEMPLATE.md`、`项目沟通规则.md` 修改。
 
 【关键决策】
 
-production 保持五文件与 trust chain；real-test 的叶证书由 Provider 已配置 Root 直接签发且
-无 intermediate，因此必须使用不含 `trust_chain_path`/`trust-chain.pem` 的四文件。shared
-installer/verifier 只能通过显式 environment 选择 profile，不得自动推断。D2B1 只准备离线
-source/audience；D2B2 才安装 tmpfs，两个批次必须分别授权。
+SDK 分类必须只有一个受信实现；prepare、diagnose 和未来 behavior 不得各自复制语义。现场顺序
+固定为：R3 commit/push - 独立授权纯只读 diagnose - 根据诊断收据决定修复或申请 behavior 写验证
+- behavior 与现场 P1 关闭后重新确认 D2B1。临时 Cloud Shell runner 永久不得作为受信证据。
 
 【风险事项】
 
 -   IAM 与 leaf 已建立，但 ADC、real-test 四文件、安装和 probe 尚未建立；不得把 Provider `ACTIVE`、
     CryptoKey IAM 或 STAGE 中存在 leaf/KEY 解释为可执行运行身份。
--   helper 将在 D2B1 增加一份 root-only KEY 副本；R2 代码层虽已 Review，但尚未形成受信
-    revision且真实工具行为验证未完成，当前不得恢复现场执行。
--   当前本地测试不能证明 VM canonical gcloud/dash/bundled Python、dpkg/SDK dynamic baseline、
-    Linux `renameat2`、真实文件系统或 gcloud 文件日志行为已通过。新 revision 后还须另行授权
-    D2B0-R2-R1 工具行为验证，用公开 fixture 执行 version/create/version 并证明 config/pycache
-    始终为空；该批次不得读取 D1 材料或创建 SOURCE/AUDIENCE。
+-   R3 本地 fixture 不能证明 VM SDK 实际分类一致；现场 `diagnose` 未授权前不得推断 OTHER=0 或
+    无 concurrent drift。
+-   `diagnose` 通过后仍需独立 behavior 写验证，证明真实 576.0.0 version/create/version 不写
+    config/pycache 且完整清理；不得把只读诊断当成 behavior 通过。
+-   helper 将在未来 D2B1 增加一份 root-only KEY 副本；现场 P1 未关闭前不得恢复执行。
 -   `deploy/STEP_0_PRODUCTION_CHECKLIST.md` 的 verifier CLI 已补入显式 `production` profile并通过
     Review，但必须随 D2B0 受信 revision 提交后才可执行。
 -   DEVOPS leaf 无法单独 revoke；当前补偿控制只对单 workload、零资金 real-test 有效，不得外推。
@@ -468,11 +465,12 @@ source/audience；D2B2 才安装 tmpfs，两个批次必须分别授权。
 
 【待确认事项】
 
-1. 用户是否批准将已通过代码层 Review 的限定五文件 commit/push 为新受信 revision。
-2. 新受信 revision 形成后，用户是否单独授权 D2B0-R2-R1 真实 576.0.0 工具行为验证；该批次
-   通过前不得重新交接 D2B1。
-3. 工具行为验证通过后，Product-Technical Lead 是否重新交接已批准的 D2B1；D2B2 仍须再次批准。
-4. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
+1. 用户是否批准将已通过代码层 Review 的限定七文件 commit/push 为新受信 revision。
+2. 新受信 revision 形成后，用户是否单独授权 D2B0-R3-DIAG 纯只读现场诊断；不得执行 gcloud、
+   创建验证根或进入 behavior。
+3. diagnose 通过后，用户是否另行批准仓库受信 behavior 写验证；该批次通过前不得重新交接 D2B1。
+4. behavior 与现场 P1 关闭后，Product-Technical Lead 是否重新申请/确认 D2B1；D2B2 仍须再次批准。
+5. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
 
 ------------------------------------------------------------------------
 
@@ -615,6 +613,47 @@ Reviewer：Code Reviewer
 version/create 前统一断言，config/pycache 空目录门禁未放宽。真实 576.0.0 工具行为验证尚未
 授权或执行，因此现场 P1 仍保持阻断，不构成 D2B1/D2B2/E 授权。
 
+Reviewer：Architecture Reviewer
+
+时间：2026-07-29
+
+结果：批准 D2B0-R3 单一 SDK 分类核心、只读 toolchain diagnose、本地 fixture 测试和文档实现；
+不授权现场 diagnose、behavior、D2B1/D2B2/E。
+
+问题：D2B0-R2-R1 临时 runner 在任何验证根创建和首次 gcloud 调用前因 `unsafe SDK object`
+fail-closed，缺少稳定分类和双扫描差异收据。R3 必须让 prepare helper 与 verifier 复用唯一
+`gcp_sdk_boundary.py`，按 no-follow metadata、规范 manifest membership 和严格 pycache 例外
+分类；`diagnose` 必须保持 writes=0、gcloud subprocesses=0。该 runner 的
+behavior attempts=0、D2B1 helper attempts=0，固定 validation root 仍为 MISSING。
+未来 D2B1 必须从同一受信 revision 冻结并验证 helper 与共享核心两个 artifact，禁止缺少核心时
+现场复制旧分类逻辑。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-29
+
+结果：D2B0-R3 首轮 Review 不通过；发现 1 个 P1，无其他 P0/P2/P3。
+
+问题：`BoundaryEntry` 稳定摘要未包含 `dev/ino/size/ctime_ns`。同路径文件可通过同长度内容的
+原子 inode 替换保持原摘要，导致 `concurrent_drift=false` 且无 first difference；同时
+`dpkg --verify` 只在扫描前执行，未覆盖 verify 到 reference 及 current 到返回窗口。
+
+修复：D2B0-R3-R1 将完整对象身份纳入唯一共享指纹；diagnose 在 reference 后、current 后和
+返回前重验 SDK root、manifest source receipt、package/list/md5/version/verify，并把任一漂移
+结构化标记为 `concurrent_drift`。已增加 Reviewer 原子替换复现、post-verify/pre-reference、
+post-current 和 pre-return 漂移测试。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-29
+
+结果：D2B0-R3-R1 限定复审通过，无 P0-P3；R3 代码层 P1 关闭。
+
+问题：完整对象指纹现可识别同路径、同大小、不同 inode 的原子替换；verifier 在 baseline、
+reference 后、current 后及返回前重验完整静态工具链，后置绑定失败统一 fail-closed 并记录
+`drift_phase`。`diagnose` 保持零写入、零 gcloud，`behavior` 继续阻断。该结论不授权现场
+`diagnose`、behavior、D2B1/D2B2/E。
+
 ------------------------------------------------------------------------
 
 # 文档同步
@@ -628,8 +667,9 @@ version/create 前统一断言，config/pycache 空目录门禁未放宽。真�
 -   CHANGELOG.md：KMS 项目隔离修复与 real-test 正式部署完成后更新。
 -   docs/decisions/：若冻结新的 WIF Provider mapping、证书生命周期或 KMS rotation 决策则记录。
 
-同步状态：D2B0-R2-R1-P1 已更新 helper、聚焦测试、TASK-001、real-test runbook 与 Decision Log，
-加入 Cloud SDK 文件日志禁用变量并冻结独立真实工具行为验证边界；同一 Reviewer 已确认代码层
-无 P0-P3，当前等待 commit/push 授权与后续真实工具行为验证独立授权。
+同步状态：D2B0-R3-R1 已把完整对象身份和三段后置收据绑定加入唯一 SDK boundary/verifier，
+prepare helper 同步保存完整 boundary baseline；TASK-001、real-test runbook 与 Decision Log
+已同步。同一 Code Reviewer 已确认代码层无 P0-P3；`diagnose` 尚未现场执行，`behavior` 保持
+fail-closed 占位。当前等待 commit/push 授权与后续现场 `diagnose` 独立授权。
 `PROJECT_CONTEXT.md` 已有“D2B1/D2B2 现场未执行”边界且无冲突，本批不改；
 `ARCHITECTURE.md`、`CHANGELOG.md` 本批不改。

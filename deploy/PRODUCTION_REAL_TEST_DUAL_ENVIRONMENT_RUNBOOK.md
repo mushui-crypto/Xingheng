@@ -137,12 +137,35 @@ user site 关闭、prefix 生效、SDK module source 由 dpkg manifest 覆盖；
 作为调用前后 baseline，禁止硬编码现场缓存数量。成功与失败均只在两个隔离目录仍为空且 inode
 匹配时 `rmdir` 并 fsync `/root`；非空或 inode 异常不得宽清理，也不得保留可用 SOURCE/AUDIENCE。
 
-上述是 D2B0-R2 本地代码契约，不表示 VM 工具链或隔离目录已经现场通过。恢复 D2B1 前还必须
-另行授权并通过 D2B0-R2-R1 真实工具行为验证：仅在独立 root-only 临时根中使用公开测试
-cert/key fixture，以冻结 576.0.0 链执行 version/create/version，证明 config/pycache 始终为空，
-随后按 path+dev+ino 收据清除全部临时对象；该批次不得读取 D1 材料、创建 SOURCE/AUDIENCE、
-访问 Provider/IAM/KMS 或执行 STS/KMS。D2B1 和后续 D2B2 必须分别取得独立用户授权；未来
-D2B2 的固定 installer 入口为：
+上述是 D2B0-R2 本地代码契约，不表示 VM 工具链或隔离目录已经现场通过。D2B0-R2-R1 临时
+behavior runner 已在任何验证根创建和首次 gcloud 调用前因 `unsafe SDK object` fail-closed；
+`behavior_attempts=0`、D2B1 helper attempts=0，固定验证根
+`/root/.xingheng-real-test-gcloud-behavior-d2b0-r2-r1` 保持不存在。
+
+D2B0-R3 将 SDK package boundary 归一化、分类、摘要和双扫描比较集中到唯一
+`scripts/gcp_sdk_boundary.py`；prepare helper 与只读工具链诊断器
+`scripts/verify-real-test-gcloud-toolchain.py diagnose` 复用该核心。manifest membership 仅使用
+SDK root 下规范 POSIX 相对路径；manifest 对象和唯一允许的未 manifest `__pycache__`/direct
+`.pyc` 例外均按 no-follow metadata 分类。稳定对象身份摘要必须包含
+`dev/ino/uid/gid/mode/nlink/size/ctime_ns`、type、reason、membership 和 symlink raw target；
+禁止为此读取并 hash 整棵 SDK 文件正文。`diagnose` 在同一进程内使用同一内存 manifest snapshot
+连续执行 reference/current 扫描，并在 reference 后、current 后和返回前重新绑定 SDK root、
+工具、package version、list/md5 receipts 与 `dpkg --verify`。任一对象身份或后置收据漂移必须
+返回 `concurrent_drift=true`、首个差异或 drift phase 并 fail-closed。诊断只输出 count/hash、
+首个 unsafe 和结构化漂移收据；它不 mkdir、不 open-write，也不调用 gcloud。`behavior` 子命令
+当前明确 fail-closed，尚未实现或授权现场执行。
+
+R3 仅是本地实现，`diagnose` 尚未在 VM 执行；任何现场 diagnose 或后续 behavior 验证都需要
+独立授权。恢复 D2B1 前仍须完成 Architecture Review、同一 Code Reviewer 复审及受信 revision，
+并从同一受信 revision 冻结、验证和传输 prepare helper 与 `gcp_sdk_boundary.py` 两个 artifact；
+缺少共享核心或任一 bytes/mode 收据不一致必须 fail-closed，不得回退到复制分类逻辑。不得把
+本地 fixture 结果解释为现场工具链通过。D2B1 和后续 D2B2 必须分别取得独立用户授权。
+
+D2B0-R3 首轮 Code Review 发现 1 个 P1：原摘要未绑定 inode/ctime 等对象身份，且 package
+verify 到扫描及 current 到返回存在未重新绑定窗口。D2B0-R3-R1 已按上述规则完成最小本地修复
+和精确复现测试；当前仅表示待同一 Reviewer 复审，不表示 P1 已由 Reviewer 关闭。
+
+未来 D2B2 的固定 installer 入口为：
 
 ```bash
 sudo scripts/install-gcp-wif.sh real-test \
