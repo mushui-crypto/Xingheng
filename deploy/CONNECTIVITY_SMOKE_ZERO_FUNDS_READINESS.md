@@ -65,6 +65,11 @@ envelope、TOTP、WIF 内容或 provider 原始响应。
 
 - [ ] 正式和真实测试分别使用独立 WIF audience/certificate bundle 与独立 KMS CryptoKey；不使用
   Service Account JSON key、本地主密钥或明文降级。
+- [ ] real-test Provider exact-set 仅为 ACTIVE、未禁用的 `rwa-api-x509`；完整资源名固定为
+  `projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509`。
+  `.env.real-test`、ADC 与 root-only audience 文件必须精确使用
+  `//iam.googleapis.com/projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509`；
+  历史失败 ID `gcp-vm-x509` 不得作为当前配置。
 - [ ] WIF 位于各自 `/run/.../gcp-wif` tmpfs，容器内只读挂载；目录及五文件的 UID/GID/mode、
   regular/non-symlink、audience、证书有效期和 KMS health 均通过现场验证。
 - [ ] 固定出口只在服务器受限配置与 Binance 私有 UI/API 内核对；两端精确 IPv4 集合相同，无
