@@ -16,13 +16,14 @@
 
 当前 Owner：Product-Technical Lead
 
-角色：D2B0 Review 收口、提交审批与后续批次协调
+角色：D2B0-R2-R1-P1 代码层审查收口与受信 revision 准备
 
-下一 Owner：Security DevOps Engineer（D2B1，待用户独立授权）
+下一 Owner：Product-Technical Lead（等待 commit/push 与工具行为验证授权）
 
 交接状态：
 
--   D2B0-R1 复审通过，无 P0-P3；当前未提交、未 push，D2B1/D2B2/E 未授权
+-   D2B0-R2-R1-P1 代码层限定复审通过，无 P0-P3；真实 576.0.0 工具行为验证尚未授权，
+    现场 P1 仍保持阻断。D2B1 两次 PREWRITE 均 fail-closed，helper attempts=0，D2B2/E 未授权
 
 ------------------------------------------------------------------------
 
@@ -107,13 +108,15 @@ real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 
 # 当前状态
 
-状态：D2B0-R1 复审通过，无 P0-P3；待提交审批，D2B1/D2B2/E 未授权
+状态：D2B0-R2-R1-P1 代码层 Review 通过；待受信 revision 与真实工具行为验证独立授权；
+D2B1 attempts=0，D2B2/E 未授权
 
 Git 状态：
 
 -   当前分支：`develop`
 -   当前 HEAD / `origin/develop`：
-    `9b9e603ca6d8d4f7b349f3eac53e256de1a598b1`（B4 Provider/audience 一致性提交）
+    `46198065a142af70d2dd3de9ec36692bc10629bf`
+    （`fix(deploy): support direct-root real-test WIF`，D2B0-R1 受信 revision）
 -   `origin/main`：`623d5d1fa888ad0dbbbe56ce6ee9754a72bfc0db`
 -   `8b6dc687f5f75d99ec189e2ba48b8dab2b701fa0` 已完成 Code Review，并与任务记录提交
     `de84309f78e26836def1896aa8015cd2bbb95fdb` 一并通过 merge commit
@@ -266,16 +269,26 @@ Git 状态：
       `trust_chain_path`，source 不得出现 `trust-chain.pem`。
 -   D2B0 Security DevOps 独占实现已新增
     `scripts/prepare-real-test-gcp-wif-source.py` 及聚焦本地测试。helper 固定
-    `real-test`、冻结路径/inode/hash、`/usr/bin/gcloud` 576.0.0 和 direct-root argv，
+    `real-test`、冻结路径/inode/hash、canonical gcloud 576.0.0 和 direct-root argv，
     使用 no-follow FD、`O_EXCL`、fsync、`RENAME_NOREPLACE` 与本批 inode 收据清理。
     该代码只准备未来 D2B1 离线 source/audience，不 install、不 mount、不 probe。
+-   D2B1 已两次在 PREWRITE 门禁停止：第一次确认 `/usr/bin/gcloud` 是 symlink，与旧 helper
+    “regular file”假设冲突；第二次确认 SDK 既有 `__pycache__` 需要 package manifest 加动态
+    baseline，而不能按固定数量或零缓存判断。两次 helper attempts 均为 0，未打开/复制 KEY/cert，
+    未创建 SOURCE/AUDIENCE 或 runtime target。
+-   D2B0-R2 本地实现固定
+    `/usr/bin/dash /usr/lib/google-cloud-sdk/bin/gcloud`、Cloud SDK bundled Python、
+    dpkg package/manifest/verify 与 component exact-set；所有 gcloud 调用使用空环境 allowlist 和
+    两个固定 root-only config/pycache 隔离目录。工具链、Python prefix/user-site、SDK 动态缓存
+    baseline 与第一次 version 门禁全部在接触 STAGE 前完成。
 
 ## 未完成
 
-1. D2B0 Security DevOps 与 Backend 双 profile diff 已完成独立 Code Review 和 P1 限定复审，
-   无 P0-P3；当前仍未提交、未 push，不能作为 D2B1 现场受信 revision。
-2. D2B1 尚未授权或执行。尚未生成 root-only audience、`adc.json`、
-   `certificate_config.json` 和最终 real-test 四文件 source，真实 KEY 未被复制。
+1. D2B0-R2-R1-P1 canonical 工具链与 config/pycache 隔离 diff 已由同一 Code Reviewer 确认
+   无 P0-P3，但尚未 commit/push，不能作为新的 D2B1 现场受信 revision。
+2. D2B1 已获批但尚未执行 helper；两次 PREWRITE 均在写入前停止，attempts=0。尚未生成
+   root-only audience、`adc.json`、`certificate_config.json` 和最终 real-test 四文件 source，
+   真实 KEY 未被复制。
 3. D2B2 尚未授权或执行。尚未安装 `/run/xingheng-real-test/gcp-wif` tmpfs bundle。
 4. 批次 E 尚未授权或执行。尚未执行真实 STS token exchange 或仅限目标 CryptoKey 的 KMS
    health probe。
@@ -298,6 +311,9 @@ Git 状态：
 
 -   D2B0 只增加本地代码、测试和文档能力；不能把本地测试解释为 D2B1/D2B2/E、Audit Logs、
     安装、probe 或部署授权。
+-   `/usr/bin/gcloud` 只作为发行包 symlink 现场事实，不是 helper 执行入口。D2B1 必须固定执行
+    canonical gcloud，并在每批动态冻结 package-manifest 之外允许的安全 pycache exact baseline；
+    任何工具、package、component、SDK module、隔离目录或 baseline 漂移都在 KEY copy 前停止。
 -   real-test direct-root source 必须是四文件；production 继续是五文件。两个 profile 必须由
     installer/verifier 的显式 environment 参数选择，禁止按文件存在性自动推断或跨环境安装。
 -   Provider ID/full resource/audience 已冻结为 `rwa-api-x509` 契约；历史失败 ID
@@ -346,6 +362,10 @@ Git 状态：
 14. WIF source 使用显式双 profile：production 保持含 trust chain 的五文件；real-test
     direct-root 使用不含 `trust_chain_path`/`trust-chain.pem` 的四文件。D2B1 只能通过固定
     `scripts/prepare-real-test-gcp-wif-source.py real-test` 入口准备，D2B2 再独立批准安装。
+15. D2B1 gcloud 调用固定为 `/usr/bin/dash` 加 canonical
+    `/usr/lib/google-cloud-sdk/bin/gcloud`，并固定 bundled Python、空环境 allowlist、独立
+    config/pycache 目录和 dpkg/SDK/component/dynamic-cache baseline；所有门禁必须先于 STAGE/KEY
+    访问。
 
 影响：
 
@@ -360,7 +380,7 @@ Git 状态：
 
 【任务名称】
 
-TASK-001 D2B0-SD：real-test root-only source 安全生成 helper、测试与文档实现
+TASK-001 D2B0-R2：canonical gcloud 工具链与 pycache/config 隔离实现
 
 【当前 Owner】
 
@@ -368,45 +388,46 @@ Product-Technical Lead
 
 【下一 Owner】
 
-Security DevOps Engineer（D2B1，待用户独立授权）
+Code Reviewer（D2B0-R2 独立审查）
 
 【任务目标】
 
-在 D2B0 获得用户明确提交/push 授权并形成受信 revision 后，由 Product-Technical Lead 单独申请
-D2B1 用户授权。D2B1 只准备离线 root-only source/audience，不安装、不 probe；本交接本身不
-构成 D2B1/D2B2/E 授权。
+对 canonical gcloud、dash、bundled Python、dpkg/SDK baseline、空环境和两个固定隔离目录的
+本地实现进行独立 Code Review。D2B1 虽已获批，但因两次 PREWRITE fail-closed 仍为 attempts=0；
+R2 未形成新受信 revision并完成独立真实工具行为验证前不得继续 D2B1。
 
 【当前状态】
 
-D2B0 Security DevOps helper 与 Backend 双 profile 实现已汇合，并经独立 Code Review 初审、
-Architecture Reviewer P1 裁定及同一 Reviewer 限定复审通过，无 P0-P3。当前全部变更仍未提交、
-未 push。真实
-ADC/source/audience 未生成，
-KEY 未复制，未安装、mount、probe、访问 VM/云或进入 D2B1/D2B2/E。
+D2B0-R1 已在受信 revision `46198065a142af70d2dd3de9ec36692bc10629bf`。D2B0-R2 按
+Architecture Reviewer 已批准裁定完成本地代码、测试和文档修改；首轮 Review 的文件日志 P1 已
+完成最小修复并由同一 Code Reviewer 确认代码层无 P0-P3。当前仍未提交、未 push，且真实 576.0.0
+工具行为验证未授权。真实 ADC/source/audience 未生成，KEY 未复制，未安装、mount、probe、访问
+VM/云或进入 D2B2/E。
 
 【已完成内容】
 
 见“执行记录 / 已完成”。本批重点是：
 
--   新增固定 `real-test` CLI 的 Python helper；生产入口不能接受任意环境、路径或 gcloud 参数。
--   helper 固定 D1/D2A inode/hash/owner/mode/nlink，使用验证 FD 分块复制 cert/KEY，固定校验
-    gcloud 576.0.0/binary/argv，结构化拒绝 trust chain、impersonation、未知 credential source
-    和嵌入身份材料。
+-   helper 不再执行 `/usr/bin/gcloud`；固定通过 `/usr/bin/dash` 执行 canonical gcloud，并冻结
+    gcloud/dash/bundled Python 的 metadata/SHA、package、manifest、verify 和 component exact-set。
+-   子进程从空环境构造 allowlist；两个固定隔离目录使用排他 mkdir、同 inode/empty 门禁和
+    receipt rmdir。prefix/user-site probe 与 SDK 动态安全 pycache baseline 先于 STAGE/KEY。
+-   helper 保留 D1/D2A inode/hash/owner/mode/nlink、验证 FD 分块复制、direct-root JSON、
+    no-follow/no-replace/fsync 与敏感字段拒绝契约。
 -   source/audience 使用 `O_EXCL|O_NOFOLLOW`、0400、fsync、
     `renameat2(RENAME_NOREPLACE)` 和 final reopen；失败只按本批 inode 收据清理。
--   聚焦测试仅使用临时 fixture 与 fake gcloud，覆盖成功、路径攻击、输入漂移、gcloud 污染、
-    no-replace 冲突与失败清理；不读取真实 KEY。
--   最终联合验证：helper 与 bundle/installer `35/35`、服务端 WIF/KMS `21/21`、release bridge
-    `52/52`；TypeScript、build、`npm run deploy:validate`、Python parse 与限定 diff check 均通过。
--   runbook、README、RWA neutral automation、Decision Log 与任务记录同步 direct-root
-    四文件和显式双 profile。
+-   聚焦测试只用临时 fixture/fake SDK，覆盖 prefix 控制组、ambient env/PATH、package/component/
+    SDK drift、隔离 inode/nonempty/cleanup、version/create/version 漂移及原四文件负例；不读取真实
+    KEY。
+-   runbook、Decision Log 与任务记录同步 R2 工具链和“现场未执行”边界。
 
 【未完成内容】
 
-D2B0 已通过独立 Code Review，但尚未取得提交/push 授权或形成受信 revision。D2B1/D2B2 必须在
-D2B0 提交后分别取得用户明确授权；不得提前执行 helper 正例或 installer。
-`deploy/STEP_0_PRODUCTION_CHECKLIST.md` 的两处 `verify-gcp-wif-bundle.mjs` 示例已补入显式
-`production` profile并通过同一 Review。
+D2B0-R2 首轮独立 Code Review 发现 1 个 P1：真实 gcloud 可能默认在隔离 config 目录初始化文件
+日志，而 fake 成功路径没有覆盖该行为。Architecture Reviewer 已批准固定
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`，同一 Reviewer 已确认代码层无 P0-P3；但受信 revision
+和另行授权的真实 576.0.0 version/create/version 工具行为验证均完成前，不得关闭现场 P1 或恢复
+D2B1；D2B2/E 仍须独立授权。
 
 【涉及文件/模块】
 
@@ -432,9 +453,12 @@ source/audience；D2B2 才安装 tmpfs，两个批次必须分别授权。
 
 -   IAM 与 leaf 已建立，但 ADC、real-test 四文件、安装和 probe 尚未建立；不得把 Provider `ACTIVE`、
     CryptoKey IAM 或 STAGE 中存在 leaf/KEY 解释为可执行运行身份。
--   helper 将在 D2B1 增加一份 root-only KEY 副本；这一敏感扩大尚未授权。
--   当前本地测试不能证明 VM `/usr/bin/gcloud` 576.0.0、Linux `renameat2` 或真实文件系统现场
-    已通过，必须在 D2B1 再做执行前硬门禁。
+-   helper 将在 D2B1 增加一份 root-only KEY 副本；R2 代码层虽已 Review，但尚未形成受信
+    revision且真实工具行为验证未完成，当前不得恢复现场执行。
+-   当前本地测试不能证明 VM canonical gcloud/dash/bundled Python、dpkg/SDK dynamic baseline、
+    Linux `renameat2`、真实文件系统或 gcloud 文件日志行为已通过。新 revision 后还须另行授权
+    D2B0-R2-R1 工具行为验证，用公开 fixture 执行 version/create/version 并证明 config/pycache
+    始终为空；该批次不得读取 D1 材料或创建 SOURCE/AUDIENCE。
 -   `deploy/STEP_0_PRODUCTION_CHECKLIST.md` 的 verifier CLI 已补入显式 `production` profile并通过
     Review，但必须随 D2B0 受信 revision 提交后才可执行。
 -   DEVOPS leaf 无法单独 revoke；当前补偿控制只对单 workload、零资金 real-test 有效，不得外推。
@@ -444,9 +468,11 @@ source/audience；D2B2 才安装 tmpfs，两个批次必须分别授权。
 
 【待确认事项】
 
-1. 用户是否批准提交并 push D2B0 全部受审变更。
-2. 形成受信 revision 后，Product-Technical Lead 是否单独申请 D2B1；D2B2 仍须再次批准。
-3. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
+1. 用户是否批准将已通过代码层 Review 的限定五文件 commit/push 为新受信 revision。
+2. 新受信 revision 形成后，用户是否单独授权 D2B0-R2-R1 真实 576.0.0 工具行为验证；该批次
+   通过前不得重新交接 D2B1。
+3. 工具行为验证通过后，Product-Technical Lead 是否重新交接已批准的 D2B1；D2B2 仍须再次批准。
+4. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
 
 ------------------------------------------------------------------------
 
@@ -547,6 +573,48 @@ Reviewer：Code Reviewer
 外，active 配置不得引用其路径。当前不具备 production 无中断或原子整体轮换能力，D2B1/D2B2/E
 和 production rotation 现场操作均未授权。
 
+Reviewer：Architecture Reviewer
+
+时间：2026-07-28
+
+结果：批准 D2B0-R2 本地实现与独立 Code Review。D2B1 两次 PREWRITE 均在 helper 调用前
+fail-closed，attempts=0；修复固定 canonical gcloud、dash、bundled Python、dpkg/SDK/component
+收据、空环境及两个 root-only config/pycache 隔离目录。
+
+问题：SDK 既有未 manifest 对象只允许安全 `__pycache__`/`.pyc`，每批动态 baseline 必须在所有
+gcloud 调用前后不漂移；任何工具或隔离门禁失败都必须保持 KEY/cert copy=0 和
+SOURCE/AUDIENCE=0。D2B0-R2 不能自判 Review 通过，也不授权 D2B1/D2B2/E 现场写入。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-28
+
+结果：D2B0-R2 首轮独立 Review 不通过；发现 1 个 P1，无其他 P0-P3。
+
+问题：helper 要求隔离 `CLOUDSDK_CONFIG` 在每次调用后为空，但未关闭真实 Cloud SDK 默认文件
+日志；fake gcloud 成功路径未覆盖该副作用。必须加入并精确测试
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`，保持 config 非空即 fail-closed。
+
+Reviewer：Architecture Reviewer
+
+时间：2026-07-28
+
+结果：批准上述 P1 最小本地修复与同一 Reviewer 复审，但不批准恢复 D2B1。
+
+问题：代码复审和受信 revision 后，还须另行授权真实 576.0.0 工具行为验证批次，以公开 fixture
+执行 version/create/version 并证明 config/pycache 始终为空；该批次不得接触 D1 材料、
+SOURCE/AUDIENCE、Provider/IAM/KMS 或 STS。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-28
+
+结果：D2B0-R2-R1-P1 限定复审通过，无 P0-P3；代码层 P1 关闭。
+
+问题：`CLOUDSDK_CORE_DISABLE_FILE_LOGGING` 已精确固定为字符串 `true`，fake gcloud 在
+version/create 前统一断言，config/pycache 空目录门禁未放宽。真实 576.0.0 工具行为验证尚未
+授权或执行，因此现场 P1 仍保持阻断，不构成 D2B1/D2B2/E 授权。
+
 ------------------------------------------------------------------------
 
 # 文档同步
@@ -560,8 +628,8 @@ Reviewer：Code Reviewer
 -   CHANGELOG.md：KMS 项目隔离修复与 real-test 正式部署完成后更新。
 -   docs/decisions/：若冻结新的 WIF Provider mapping、证书生命周期或 KMS rotation 决策则记录。
 
-同步状态：D2B0 已更新 TASK-001、real-test runbook、deploy README、RWA neutral automation、
-Decision Log 与 PROJECT_CONTEXT，明确 production 五文件、real-test direct-root 四文件以及
-D2B1/D2B2 现场未执行。`ARCHITECTURE.md` 没有相反的逐证书 revoke 保证，本批不改；
-`CHANGELOG.md` 待正式部署完成后再更新。D2B0-R1 Code Review 已通过，无 P0-P3；当前尚未提交、
-未 push。
+同步状态：D2B0-R2-R1-P1 已更新 helper、聚焦测试、TASK-001、real-test runbook 与 Decision Log，
+加入 Cloud SDK 文件日志禁用变量并冻结独立真实工具行为验证边界；同一 Reviewer 已确认代码层
+无 P0-P3，当前等待 commit/push 授权与后续真实工具行为验证独立授权。
+`PROJECT_CONTEXT.md` 已有“D2B1/D2B2 现场未执行”边界且无冲突，本批不改；
+`ARCHITECTURE.md`、`CHANGELOG.md` 本批不改。

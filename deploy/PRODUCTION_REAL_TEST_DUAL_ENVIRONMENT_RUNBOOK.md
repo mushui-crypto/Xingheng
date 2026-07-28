@@ -88,13 +88,20 @@ D2B0 仅提供下列受控 helper；这段命令是未来 D2B1 的固定入口�
 
 ```bash
 sudo env -i \
-  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  HOME=/root PATH=/usr/bin:/bin \
   LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
   /usr/bin/python3 scripts/prepare-real-test-gcp-wif-source.py real-test
 ```
 
 helper 仅接受唯一参数 `real-test`，固定读取 D1/D2A STAGE 的冻结 inode/hash，固定调用
-root-owned `/usr/bin/gcloud` 576.0.0，且 `create-cred-config` argv 不包含
+`/usr/bin/dash /usr/lib/google-cloud-sdk/bin/gcloud`，不执行 `/usr/bin/gcloud`，也不依赖
+`PATH` 或 shebang 选择解释器。canonical gcloud 必须为 root:root `0755`、`nlink=1`、
+size=5962、SHA-256=`8628b9f971d07c5e52fd2c6d469ee4a0940c75eb51820d628c3dd068981bd260`，
+首行为 exact `#!/bin/sh\n`；`dash` 与 SDK bundled Python 也必须逐级 no-follow、root-owned、
+不可组/全局写，并分别匹配冻结 size/SHA/package/version 收据。Google Cloud SDK 及
+component exact-set 必须为冻结的 576.0.0 收据，`dpkg --verify google-cloud-cli` 必须为空。
+任一工具、package、component、SDK parent/module 或收据漂移都必须在打开 STAGE 和复制 KEY/cert
+之前 fail-closed。`create-cred-config` argv 不包含
 `--credential-cert-trust-chain-path`、`--service-account` 或任意调用方路径。它只准备：
 
 - `/root/xingheng-real-test-wif-source`：新建 root:root `0700`；
@@ -110,8 +117,32 @@ cert/key 路径必须统一指向 `/run/secrets/gcp-wif` 下的冻结版本化�
 helper 通过逐级 `dir_fd`/`O_NOFOLLOW`、`O_EXCL` 临时文件、fsync 和
 `renameat2(RENAME_NOREPLACE)` 发布，只输出 path/dev/ino/mode/nlink/hash 与 schema 摘要。
 失败时只按本批 path+dev+ino 收据清理；inode 不匹配立即停止清理。它不 install、不 mount、
-不 probe，也不触碰 D1 STAGE。D2B1 和后续 D2B2 必须分别取得独立用户授权；未来 D2B2 的固定
-installer 入口为：
+不 probe，也不触碰 D1 STAGE。
+
+所有 gcloud 子进程从空环境构造固定 allowlist，`PATH=/usr/bin:/bin`，并将
+`CLOUDSDK_PYTHON` 固定为
+`/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3.14`。每批排他创建：
+
+- `/root/.xingheng-real-test-gcloud-pycache-d2b1`
+- `/root/.xingheng-real-test-gcloud-config-d2b1`
+
+两目录必须执行前不存在，root:root `0700`，调用前后保持同一 inode 且为空；helper 固定设置
+`PYTHONNOUSERSITE=1`、`PYTHONDONTWRITEBYTECODE=1`、`PYTHONPYCACHEPREFIX`、
+`CLOUDSDK_CONFIG`、`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true` 和关闭 prompt/usage/update
+的 Cloud SDK 变量，不继承 proxy、loader、`ENV`/`BASH_ENV`、XDG、Python 或 Cloud SDK
+ambient 变量。禁用文件日志不放宽空目录门禁：version/create/version 任一调用在 config 或
+pycache 目录产生任何对象都必须 fail-closed。bundled Python probe 必须证明
+user site 关闭、prefix 生效、SDK module source 由 dpkg manifest 覆盖；SDK 中未被 manifest
+覆盖的对象只允许安全的 `__pycache__` 目录及其 `.pyc`，并以每批动态 count+sorted-set hash
+作为调用前后 baseline，禁止硬编码现场缓存数量。成功与失败均只在两个隔离目录仍为空且 inode
+匹配时 `rmdir` 并 fsync `/root`；非空或 inode 异常不得宽清理，也不得保留可用 SOURCE/AUDIENCE。
+
+上述是 D2B0-R2 本地代码契约，不表示 VM 工具链或隔离目录已经现场通过。恢复 D2B1 前还必须
+另行授权并通过 D2B0-R2-R1 真实工具行为验证：仅在独立 root-only 临时根中使用公开测试
+cert/key fixture，以冻结 576.0.0 链执行 version/create/version，证明 config/pycache 始终为空，
+随后按 path+dev+ino 收据清除全部临时对象；该批次不得读取 D1 材料、创建 SOURCE/AUDIENCE、
+访问 Provider/IAM/KMS 或执行 STS/KMS。D2B1 和后续 D2B2 必须分别取得独立用户授权；未来
+D2B2 的固定 installer 入口为：
 
 ```bash
 sudo scripts/install-gcp-wif.sh real-test \

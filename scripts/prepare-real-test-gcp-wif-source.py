@@ -27,7 +27,37 @@ SOURCE = "/root/xingheng-real-test-wif-source"
 AUDIENCE_FILE = "/root/xingheng-real-test-wif-audience"
 CERT_NAME = f"leaf-{VERSION}.cert.pem"
 KEY_NAME = f"leaf-{VERSION}.key.pem"
-GCloud_VERSION = "576.0.0"
+GCLOUD_VERSION = "576.0.0"
+GCLOUD_COMPONENTS = {
+    "Google Cloud SDK": "576.0.0",
+    "alpha": "2026.07.10",
+    "beta": "2026.07.10",
+    "bq": "2.1.34",
+    "bundled-python3-unix": "3.14.6",
+    "core": "2026.07.10",
+    "gcloud-crc32c": "1.0.0",
+    "gsutil": "5.37",
+    "preview": "2026.07.10",
+}
+GCLOUD_PATH = "/usr/lib/google-cloud-sdk/bin/gcloud"
+DASH_PATH = "/usr/bin/dash"
+BUNDLED_PYTHON_PATH = (
+    "/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3.14"
+)
+SDK_ROOT = "/usr/lib/google-cloud-sdk"
+PYTHON_CACHE_PATH = "/root/.xingheng-real-test-gcloud-pycache-d2b1"
+GCLOUD_CONFIG_PATH = "/root/.xingheng-real-test-gcloud-config-d2b1"
+GCLOUD_PACKAGE = "google-cloud-cli|576.0.0-0|amd64|ii"
+DASH_PACKAGE = "dash|0.5.12-2|amd64|ii"
+GCLOUD_LIST_LINES = 38256
+GCLOUD_LIST_SHA256 = (
+    "89a9ad89d55616b6e50230d09fda21dbbb841a2e084e75ed0f2eaf5881ca69c6"
+)
+GCLOUD_MD5SUMS_LINES = 31498
+GCLOUD_MD5SUMS_SHA256 = (
+    "1b50bcaa236e3602aeed8aeed59f376a5976f610e36470d4aa75edb058006f37"
+)
+GCLOUD_SHEBANG = b"#!/bin/sh\n"
 SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:mtls"
 TOKEN_URL = "https://sts.mtls.googleapis.com/v1/token"
 EXPECTED_PUBLIC_KEY_SHA256 = (
@@ -55,7 +85,28 @@ class FrozenFile:
 class PrepareConfig:
     filesystem_root: str
     gcloud_path: str
+    dash_path: str
+    bundled_python_path: str
+    sdk_root: str
+    pycache_path: str
+    gcloud_config_path: str
+    dpkg_query_path: str
+    dpkg_path: str
+    package_list_path: str
+    package_md5sums_path: str
     gcloud_uid: int
+    gcloud: FrozenFile
+    dash: FrozenFile
+    bundled_python: FrozenFile
+    gcloud_package: str
+    dash_package: str
+    package_list_lines: int
+    package_list_sha256: str
+    package_md5sums_lines: int
+    package_md5sums_sha256: str
+    python_version: str
+    sdk_probe_module: str
+    gcloud_components: dict[str, str]
     openssl_path: str
     openssl_uid: int
     owner_uid: int
@@ -70,7 +121,7 @@ class PrepareConfig:
     key: FrozenFile
     cert: FrozenFile
     public_key_sha256: str
-    gcloud_version: str = GCloud_VERSION
+    gcloud_version: str = GCLOUD_VERSION
 
     def actual(self, absolute_path: str) -> str:
         if not absolute_path.startswith("/"):
@@ -89,14 +140,85 @@ class CreatedObject:
     sha256: str | None
 
 
+@dataclass(frozen=True)
+class FileSnapshot:
+    path: str
+    dev: int
+    ino: int
+    size: int
+    mode: int
+    sha256: str
+
+
+@dataclass(frozen=True)
+class ToolchainBaseline:
+    gcloud: FileSnapshot
+    dash: FileSnapshot
+    bundled_python: FileSnapshot
+    dpkg_query: FileSnapshot
+    dpkg: FileSnapshot
+    sdk_root_dev: int
+    sdk_root_ino: int
+    sdk_root_mode: int
+    sdk_cache_count: int
+    sdk_cache_set_sha256: str
+
+
+@dataclass(frozen=True)
+class DirectoryReceipt:
+    parent: str
+    name: str
+    dev: int
+    ino: int
+
+
 RenameNoReplace = Callable[[int, str, str], None]
 
 
 def production_config() -> PrepareConfig:
     return PrepareConfig(
         filesystem_root="/",
-        gcloud_path="/usr/bin/gcloud",
+        gcloud_path=GCLOUD_PATH,
+        dash_path=DASH_PATH,
+        bundled_python_path=BUNDLED_PYTHON_PATH,
+        sdk_root=SDK_ROOT,
+        pycache_path=PYTHON_CACHE_PATH,
+        gcloud_config_path=GCLOUD_CONFIG_PATH,
+        dpkg_query_path="/usr/bin/dpkg-query",
+        dpkg_path="/usr/bin/dpkg",
+        package_list_path="/var/lib/dpkg/info/google-cloud-cli.list",
+        package_md5sums_path="/var/lib/dpkg/info/google-cloud-cli.md5sums",
         gcloud_uid=0,
+        gcloud=FrozenFile(
+            dev=0,
+            ino=0,
+            size=5962,
+            sha256="8628b9f971d07c5e52fd2c6d469ee4a0940c75eb51820d628c3dd068981bd260",
+            mode=0o755,
+        ),
+        dash=FrozenFile(
+            dev=0,
+            ino=0,
+            size=125640,
+            sha256="f5adb8bf0100ed0f8c7782ca5f92814e9229525a4b4e0d401cf3bea09ac960a6",
+            mode=0o755,
+        ),
+        bundled_python=FrozenFile(
+            dev=0,
+            ino=0,
+            size=19234856,
+            sha256="6fd816d7f83818698781299628960c28abbdd869da5b19bc6d6bf2ce1d965bd4",
+            mode=0o755,
+        ),
+        gcloud_package=GCLOUD_PACKAGE,
+        dash_package=DASH_PACKAGE,
+        package_list_lines=GCLOUD_LIST_LINES,
+        package_list_sha256=GCLOUD_LIST_SHA256,
+        package_md5sums_lines=GCLOUD_MD5SUMS_LINES,
+        package_md5sums_sha256=GCLOUD_MD5SUMS_SHA256,
+        python_version="3.14.6",
+        sdk_probe_module="googlecloudsdk.core.config",
+        gcloud_components=GCLOUD_COMPONENTS,
         openssl_path="/usr/bin/openssl",
         openssl_uid=0,
         owner_uid=0,
@@ -239,27 +361,73 @@ def _open_frozen_file(
         raise
 
 
-def _validate_tool(path: str, uid: int) -> str:
+def _validate_parent_chain(config: PrepareConfig, absolute_path: str) -> None:
+    if not absolute_path.startswith("/"):
+        raise PreparationError("toolchain path is not absolute")
+    current = config.filesystem_root
+    _validate_directory(
+        os.lstat(current),
+        config.owner_uid,
+        config.owner_gid,
+    )
+    for component in [part for part in os.path.dirname(absolute_path).split("/") if part]:
+        current = os.path.join(current, component)
+        boundary = os.lstat(current)
+        _validate_directory(boundary, config.owner_uid, config.owner_gid)
+
+
+def _validate_regular(
+    config: PrepareConfig,
+    absolute_path: str,
+    uid: int,
+    expected: FrozenFile | None = None,
+    *,
+    executable: bool,
+) -> FileSnapshot:
+    _validate_parent_chain(config, absolute_path)
+    path = config.actual(absolute_path)
     tool = os.lstat(path)
     if (
         not stat.S_ISREG(tool.st_mode)
         or stat.S_ISLNK(tool.st_mode)
         or tool.st_uid != uid
+        or tool.st_gid != config.owner_gid
         or tool.st_nlink != 1
         or tool.st_mode & 0o022
-        or not tool.st_mode & 0o100
+        or (executable and not tool.st_mode & 0o100)
     ):
         raise PreparationError("tool binary boundary is invalid")
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
     try:
-        return _hash_fd(fd)
+        opened = os.fstat(fd)
+        digest = _hash_fd(fd)
     finally:
         os.close(fd)
+    if (opened.st_dev, opened.st_ino) != (tool.st_dev, tool.st_ino):
+        raise PreparationError("tool changed while opening")
+    if expected is not None and (
+        (expected.dev not in {0, opened.st_dev})
+        or (expected.ino not in {0, opened.st_ino})
+        or opened.st_size != expected.size
+        or stat.S_IMODE(opened.st_mode) != expected.mode
+        or opened.st_nlink != expected.nlink
+        or digest != expected.sha256
+    ):
+        raise PreparationError("frozen tool receipt changed")
+    return FileSnapshot(
+        absolute_path,
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        stat.S_IMODE(opened.st_mode),
+        digest,
+    )
 
 
-def _run_tool(
+def _run_process(
     argv: list[str],
     *,
+    env: dict[str, str],
     input_bytes: bytes | None = None,
     pass_fds: tuple[int, ...] = (),
     timeout: int = 60,
@@ -269,13 +437,7 @@ def _run_tool(
         input=input_bytes,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={
-            "HOME": "/root",
-            "PATH": "/usr/sbin:/usr/bin:/sbin:/bin",
-            "LANG": "C.UTF-8",
-            "LC_ALL": "C.UTF-8",
-            "TZ": "UTC",
-        },
+        env=env,
         pass_fds=pass_fds,
         check=False,
         timeout=timeout,
@@ -285,6 +447,422 @@ def _run_tool(
     return result
 
 
+def _base_env() -> dict[str, str]:
+    return {
+        "HOME": "/root",
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TZ": "UTC",
+    }
+
+
+def _openssl_env() -> dict[str, str]:
+    return {
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+        "TZ": "UTC",
+    }
+
+
+def _gcloud_env(config: PrepareConfig) -> dict[str, str]:
+    return {
+        **_base_env(),
+        "CLOUDSDK_PYTHON": config.actual(config.bundled_python_path),
+        "CLOUDSDK_CONFIG": config.actual(config.gcloud_config_path),
+        "CLOUDSDK_CORE_DISABLE_FILE_LOGGING": "true",
+        "CLOUDSDK_CORE_DISABLE_PROMPTS": "1",
+        "CLOUDSDK_CORE_DISABLE_USAGE_REPORTING": "true",
+        "CLOUDSDK_COMPONENT_MANAGER_DISABLE_UPDATE_CHECK": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPYCACHEPREFIX": config.actual(config.pycache_path),
+    }
+
+
+def _run_gcloud(
+    config: PrepareConfig,
+    arguments: list[str],
+    *,
+    timeout: int = 60,
+) -> subprocess.CompletedProcess[bytes]:
+    return _run_process(
+        [
+            config.actual(config.dash_path),
+            config.actual(config.gcloud_path),
+            *arguments,
+        ],
+        env=_gcloud_env(config),
+        timeout=timeout,
+    )
+
+
+def _read_receipt_file(
+    config: PrepareConfig,
+    absolute_path: str,
+    expected_lines: int,
+    expected_sha256: str,
+) -> tuple[bytes, set[str]]:
+    snapshot = _validate_regular(
+        config,
+        absolute_path,
+        config.owner_uid,
+        executable=False,
+    )
+    if snapshot.sha256 != expected_sha256:
+        raise PreparationError("package manifest receipt changed")
+    path = config.actual(absolute_path)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        opened = os.fstat(fd)
+        if (opened.st_dev, opened.st_ino) != (snapshot.dev, snapshot.ino):
+            raise PreparationError("package manifest changed while opening")
+        content = bytearray()
+        while True:
+            chunk = os.read(fd, 64 * 1024)
+            if not chunk:
+                break
+            content.extend(chunk)
+    finally:
+        os.close(fd)
+    content = bytes(content)
+    if hashlib.sha256(content).hexdigest() != expected_sha256:
+        raise PreparationError("package manifest changed while reading")
+    lines = content.splitlines()
+    if len(lines) != expected_lines:
+        raise PreparationError("package manifest line count changed")
+    return content, {os.fsdecode(line) for line in lines if line}
+
+
+def _sdk_cache_baseline(
+    config: PrepareConfig,
+    manifest_paths: set[str],
+) -> tuple[int, str]:
+    sdk_actual = config.actual(config.sdk_root)
+    _validate_parent_chain(config, config.sdk_root)
+    _validate_directory(
+        os.lstat(sdk_actual),
+        config.owner_uid,
+        config.owner_gid,
+    )
+    allowed_cache_paths: list[str] = []
+    stack = [sdk_actual]
+    while stack:
+        parent = stack.pop()
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                entry_path = entry.path
+                relative = os.path.relpath(entry_path, config.filesystem_root)
+                logical = "/" + relative
+                metadata = entry.stat(follow_symlinks=False)
+                if (
+                    metadata.st_uid != config.owner_uid
+                    or metadata.st_gid != config.owner_gid
+                    or metadata.st_mode & 0o022
+                ):
+                    raise PreparationError("SDK object ownership or mode is unsafe")
+                if stat.S_ISLNK(metadata.st_mode):
+                    resolved = os.path.realpath(entry_path)
+                    if (
+                        not os.path.exists(resolved)
+                        or os.path.commonpath([sdk_actual, resolved]) != sdk_actual
+                    ):
+                        raise PreparationError("SDK symlink escapes or is broken")
+                elif stat.S_ISDIR(metadata.st_mode):
+                    stack.append(entry_path)
+                elif not stat.S_ISREG(metadata.st_mode):
+                    raise PreparationError("SDK contains a special object")
+                if logical in manifest_paths:
+                    continue
+                components = logical.split("/")
+                under_pycache = "__pycache__" in components
+                allowed = (
+                    stat.S_ISDIR(metadata.st_mode)
+                    and os.path.basename(logical) == "__pycache__"
+                ) or (
+                    stat.S_ISREG(metadata.st_mode)
+                    and under_pycache
+                    and logical.endswith(".pyc")
+                    and not metadata.st_mode & 0o111
+                )
+                if not allowed:
+                    raise PreparationError("SDK contains an unmanifested object")
+                allowed_cache_paths.append(logical)
+    allowed_cache_paths.sort()
+    digest = hashlib.sha256(
+        b"\0".join(path.encode("utf-8") for path in allowed_cache_paths)
+    ).hexdigest()
+    return len(allowed_cache_paths), digest
+
+
+def _validate_package(
+    config: PrepareConfig,
+    package: str,
+    name: str,
+) -> None:
+    result = _run_process(
+        [
+            config.actual(config.dpkg_query_path),
+            "-W",
+            "-f=${Package}|${Version}|${Architecture}|${db:Status-Abbrev}",
+            name,
+        ],
+        env=_base_env(),
+        timeout=20,
+    )
+    if result.returncode != 0 or result.stdout.decode("ascii").strip() != package:
+        raise PreparationError("package receipt changed")
+
+
+def _validate_toolchain(
+    config: PrepareConfig,
+    prior: ToolchainBaseline | None = None,
+) -> ToolchainBaseline:
+    gcloud = _validate_regular(
+        config,
+        config.gcloud_path,
+        config.gcloud_uid,
+        config.gcloud,
+        executable=True,
+    )
+    gcloud_fd = os.open(
+        config.actual(config.gcloud_path),
+        os.O_RDONLY | os.O_NOFOLLOW,
+    )
+    try:
+        opened = os.fstat(gcloud_fd)
+        shebang = os.read(gcloud_fd, len(GCLOUD_SHEBANG))
+    finally:
+        os.close(gcloud_fd)
+    if (
+        (opened.st_dev, opened.st_ino) != (gcloud.dev, gcloud.ino)
+        or shebang != GCLOUD_SHEBANG
+    ):
+        raise PreparationError("canonical gcloud shebang changed")
+    dash = _validate_regular(
+        config,
+        config.dash_path,
+        config.owner_uid,
+        config.dash,
+        executable=True,
+    )
+    bundled_python = _validate_regular(
+        config,
+        config.bundled_python_path,
+        config.owner_uid,
+        config.bundled_python,
+        executable=True,
+    )
+    dpkg_query = _validate_regular(
+        config,
+        config.dpkg_query_path,
+        config.owner_uid,
+        executable=True,
+    )
+    dpkg = _validate_regular(
+        config,
+        config.dpkg_path,
+        config.owner_uid,
+        executable=True,
+    )
+    _validate_package(config, config.gcloud_package, "google-cloud-cli")
+    _validate_package(config, config.dash_package, "dash")
+    _, manifest_paths = _read_receipt_file(
+        config,
+        config.package_list_path,
+        config.package_list_lines,
+        config.package_list_sha256,
+    )
+    _read_receipt_file(
+        config,
+        config.package_md5sums_path,
+        config.package_md5sums_lines,
+        config.package_md5sums_sha256,
+    )
+    verified = _run_process(
+        [config.actual(config.dpkg_path), "--verify", "google-cloud-cli"],
+        env=_base_env(),
+        timeout=60,
+    )
+    if verified.returncode != 0 or verified.stdout or verified.stderr:
+        raise PreparationError("google-cloud-cli package verification failed")
+    cache_count, cache_hash = _sdk_cache_baseline(config, manifest_paths)
+    sdk_root = os.lstat(config.actual(config.sdk_root))
+    baseline = ToolchainBaseline(
+        gcloud,
+        dash,
+        bundled_python,
+        dpkg_query,
+        dpkg,
+        sdk_root.st_dev,
+        sdk_root.st_ino,
+        stat.S_IMODE(sdk_root.st_mode),
+        cache_count,
+        cache_hash,
+    )
+    if prior is not None and baseline != prior:
+        raise PreparationError("trusted toolchain baseline changed")
+    return baseline
+
+
+def _create_isolation_directory(
+    root_fd: int,
+    absolute_path: str,
+    config: PrepareConfig,
+    receipts: list[DirectoryReceipt],
+) -> tuple[int, DirectoryReceipt]:
+    name = os.path.basename(absolute_path)
+    _ensure_missing(root_fd, name)
+    os.mkdir(name, 0o700, dir_fd=root_fd)
+    os.fsync(root_fd)
+    metadata = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    receipt = DirectoryReceipt("root", name, metadata.st_dev, metadata.st_ino)
+    receipts.append(receipt)
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=root_fd)
+    try:
+        opened = os.fstat(fd)
+        _validate_directory(opened, config.owner_uid, config.owner_gid, mode=0o700)
+        if (opened.st_dev, opened.st_ino) != (receipt.dev, receipt.ino):
+            raise PreparationError("isolation directory changed while opening")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, receipt
+
+
+def _validate_empty_directory(
+    root_fd: int,
+    fd: int,
+    receipt: DirectoryReceipt,
+) -> None:
+    opened = os.fstat(fd)
+    current = os.stat(receipt.name, dir_fd=root_fd, follow_symlinks=False)
+    if (
+        (opened.st_dev, opened.st_ino) != (receipt.dev, receipt.ino)
+        or (current.st_dev, current.st_ino) != (receipt.dev, receipt.ino)
+        or stat.S_IMODE(opened.st_mode) != 0o700
+        or stat.S_IMODE(current.st_mode) != 0o700
+        or os.listdir(fd)
+    ):
+        raise PreparationError("isolation directory changed or is not empty")
+
+
+def _cleanup_isolation(
+    root_fd: int | None,
+    directory_fd: int | None,
+    receipt: DirectoryReceipt | None,
+) -> bool:
+    if receipt is None:
+        return True
+    try:
+        if root_fd is None:
+            return False
+        opened_here = directory_fd is None
+        if directory_fd is None:
+            directory_fd = os.open(
+                receipt.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                dir_fd=root_fd,
+            )
+        _validate_empty_directory(root_fd, directory_fd, receipt)
+        current = os.stat(receipt.name, dir_fd=root_fd, follow_symlinks=False)
+        if (current.st_dev, current.st_ino) != (receipt.dev, receipt.ino):
+            return False
+        os.close(directory_fd)
+        os.rmdir(receipt.name, dir_fd=root_fd)
+        os.fsync(root_fd)
+        try:
+            os.stat(receipt.name, dir_fd=root_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return True
+        return False
+    except (OSError, PreparationError):
+        if "opened_here" in locals() and opened_here and directory_fd is not None:
+            try:
+                os.close(directory_fd)
+            except OSError:
+                pass
+        return False
+
+
+def _probe_python_runtime(
+    config: PrepareConfig,
+    manifest_paths: set[str],
+) -> dict[str, str]:
+    code = (
+        "import importlib,importlib.util,json,os,site,sys;"
+        f"sys.path.insert(0,{config.actual(config.sdk_root + '/lib')!r});"
+        "m=importlib.import_module(sys.argv[1]);"
+        "s=os.path.realpath(m.__file__);"
+        "c=importlib.util.cache_from_source(s);"
+        "print(json.dumps({'prefix':sys.pycache_prefix,"
+        "'dontwrite':sys.dont_write_bytecode,'usersite':site.ENABLE_USER_SITE,"
+        "'usersite_path':site.getusersitepackages(),'sys_path':sys.path,"
+        "'source':s,'cache':c,'version':'.'.join(map(str,sys.version_info[:3]))}))"
+    )
+    result = _run_process(
+        [
+            config.actual(config.bundled_python_path),
+            "-c",
+            code,
+            config.sdk_probe_module,
+        ],
+        env=_gcloud_env(config),
+        timeout=30,
+    )
+    if result.returncode != 0:
+        raise PreparationError("bundled Python isolation probe failed")
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PreparationError("bundled Python isolation probe is invalid") from error
+    expected_prefix = config.actual(config.pycache_path)
+    source = value.get("source")
+    cache = value.get("cache")
+    usersite_path = value.get("usersite_path")
+    logical_source = (
+        "/" + os.path.relpath(source, os.path.realpath(config.filesystem_root))
+        if isinstance(source, str)
+        else ""
+    )
+    checks = {
+        "prefix": value.get("prefix") == expected_prefix,
+        "dontwrite": value.get("dontwrite") is True,
+        "usersite": value.get("usersite") is False,
+        "usersite-path": usersite_path not in value.get("sys_path", []),
+        "version": value.get("version") == config.python_version,
+        "module-manifest": logical_source in manifest_paths,
+        "cache-path": (
+            isinstance(cache, str)
+            and os.path.commonpath([expected_prefix, cache]) == expected_prefix
+        ),
+    }
+    failed = [name for name, passed in checks.items() if not passed]
+    if failed:
+        raise PreparationError(
+            f"bundled Python isolation semantics changed: {','.join(failed)}"
+        )
+    return {"source": logical_source, "cache": cache}
+
+
+def _validate_gcloud_version(
+    config: PrepareConfig,
+) -> dict[str, str]:
+    result = _run_gcloud(config, ["version", "--format=json"], timeout=20)
+    if result.returncode != 0:
+        raise PreparationError(
+            f"gcloud version validation failed (exit={result.returncode})"
+        )
+    try:
+        value = json.loads(result.stdout)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PreparationError("gcloud version output is invalid") from error
+    if value != config.gcloud_components:
+        raise PreparationError("gcloud component exact-set is not frozen")
+    return value
+
+
 def _fd_path(fd: int) -> str:
     if os.path.isdir("/proc/self/fd"):
         return f"/proc/self/fd/{fd}"
@@ -292,9 +870,9 @@ def _fd_path(fd: int) -> str:
 
 
 def _public_key_sha256(config: PrepareConfig, key_fd: int, cert_fd: int) -> str:
-    key_result = _run_tool(
+    key_result = _run_process(
         [
-            config.openssl_path,
+            config.actual(config.openssl_path),
             "pkey",
             "-in",
             _fd_path(key_fd),
@@ -302,25 +880,28 @@ def _public_key_sha256(config: PrepareConfig, key_fd: int, cert_fd: int) -> str:
             "-outform",
             "DER",
         ],
+        env=_openssl_env(),
         pass_fds=(key_fd,),
     )
     if key_result.returncode != 0:
         raise PreparationError("private key public component validation failed")
-    cert_result = _run_tool(
+    cert_result = _run_process(
         [
-            config.openssl_path,
+            config.actual(config.openssl_path),
             "x509",
             "-in",
             _fd_path(cert_fd),
             "-pubkey",
             "-noout",
         ],
+        env=_openssl_env(),
         pass_fds=(cert_fd,),
     )
     if cert_result.returncode != 0:
         raise PreparationError("certificate public component validation failed")
-    cert_der = _run_tool(
-        [config.openssl_path, "pkey", "-pubin", "-outform", "DER"],
+    cert_der = _run_process(
+        [config.actual(config.openssl_path), "pkey", "-pubin", "-outform", "DER"],
+        env=_openssl_env(),
         input_bytes=cert_result.stdout,
     )
     if cert_der.returncode != 0:
@@ -732,7 +1313,12 @@ def prepare_source(
     cert_fd: int | None = None
     root_fd: int | None = None
     source_fd: int | None = None
+    pycache_fd: int | None = None
+    gcloud_config_fd: int | None = None
     source_receipt: tuple[int, int] | None = None
+    pycache_receipt: DirectoryReceipt | None = None
+    gcloud_config_receipt: DirectoryReceipt | None = None
+    isolation_receipts: list[DirectoryReceipt] = []
     created: list[CreatedObject] = []
     source_path = config.actual(config.source)
     generated_names = [
@@ -741,8 +1327,47 @@ def prepare_source(
     ]
 
     try:
-        gcloud_sha256 = _validate_tool(config.gcloud_path, config.gcloud_uid)
-        openssl_sha256 = _validate_tool(config.openssl_path, config.openssl_uid)
+        toolchain = _validate_toolchain(config)
+        openssl = _validate_regular(
+            config,
+            config.openssl_path,
+            config.openssl_uid,
+            executable=True,
+        )
+        root_fd = _open_directory_chain(config, "/root", final_mode=0o700)
+        source_name = os.path.basename(config.source)
+        audience_name = os.path.basename(config.audience_file)
+        _ensure_missing(root_fd, source_name)
+        _ensure_missing(root_fd, audience_name)
+        _ensure_missing(root_fd, os.path.basename(config.pycache_path))
+        _ensure_missing(root_fd, os.path.basename(config.gcloud_config_path))
+
+        pycache_fd, pycache_receipt = _create_isolation_directory(
+            root_fd,
+            config.pycache_path,
+            config,
+            isolation_receipts,
+        )
+        gcloud_config_fd, gcloud_config_receipt = _create_isolation_directory(
+            root_fd,
+            config.gcloud_config_path,
+            config,
+            isolation_receipts,
+        )
+        _, manifest_paths = _read_receipt_file(
+            config,
+            config.package_list_path,
+            config.package_list_lines,
+            config.package_list_sha256,
+        )
+        python_probe = _probe_python_runtime(config, manifest_paths)
+        _validate_empty_directory(root_fd, pycache_fd, pycache_receipt)
+        _validate_empty_directory(root_fd, gcloud_config_fd, gcloud_config_receipt)
+        version_json = _validate_gcloud_version(config)
+        _validate_empty_directory(root_fd, pycache_fd, pycache_receipt)
+        _validate_empty_directory(root_fd, gcloud_config_fd, gcloud_config_receipt)
+        _validate_toolchain(config, toolchain)
+
         stage_fd = _open_directory_chain(
             config,
             config.stage,
@@ -764,11 +1389,18 @@ def prepare_source(
             config.owner_uid,
             config.owner_gid,
         )
+        if (
+            _validate_regular(
+                config,
+                config.openssl_path,
+                config.openssl_uid,
+                executable=True,
+            )
+            != openssl
+        ):
+            raise PreparationError("OpenSSL tool receipt changed")
         public_key_sha256 = _public_key_sha256(config, key_fd, cert_fd)
 
-        root_fd = _open_directory_chain(config, "/root", final_mode=0o700)
-        source_name = os.path.basename(config.source)
-        audience_name = os.path.basename(config.audience_file)
         _ensure_missing(root_fd, source_name)
         _ensure_missing(root_fd, audience_name)
         os.mkdir(source_name, 0o700, dir_fd=root_fd)
@@ -831,30 +1463,11 @@ def prepare_source(
         os.close(cert_fd)
         cert_fd = None
 
-        version = _run_tool(
-            [config.gcloud_path, "version", "--format=json"],
-            timeout=20,
-        )
-        if version.returncode != 0:
-            raise PreparationError("gcloud version validation failed")
-        try:
-            version_json = json.loads(version.stdout)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise PreparationError("gcloud version output is invalid") from error
-        if (
-            not isinstance(version_json, dict)
-            or version_json.get("Google Cloud SDK") != config.gcloud_version
-        ):
-            raise PreparationError("gcloud version is not frozen")
-        if _validate_tool(config.gcloud_path, config.gcloud_uid) != gcloud_sha256:
-            raise PreparationError("gcloud binary changed after version validation")
-
         for generated_name in generated_names:
             _ensure_missing(source_fd, generated_name)
         generated_adc_path = os.path.join(source_path, generated_names[0])
         generated_config_path = os.path.join(source_path, generated_names[1])
-        create_argv = [
-            config.gcloud_path,
+        create_arguments = [
             "iam",
             "workload-identity-pools",
             "create-cred-config",
@@ -868,17 +1481,29 @@ def prepare_source(
         if any(
             argument.startswith("--credential-cert-trust-chain-path")
             or argument.startswith("--service-account")
-            for argument in create_argv
+            for argument in create_arguments
         ):
             raise PreparationError("gcloud identity argv is not direct-root")
+        create_argv = [
+            config.actual(config.dash_path),
+            config.actual(config.gcloud_path),
+            *create_arguments,
+        ]
         create_argv_sha256 = hashlib.sha256(
             b"\0".join(argument.encode("utf-8") for argument in create_argv)
         ).hexdigest()
-        generated = _run_tool(create_argv)
+        generated = _run_gcloud(config, create_arguments)
         for generated_name in generated_names:
             _capture_generated(source_fd, generated_name, created)
         if generated.returncode != 0:
             raise PreparationError("gcloud create-cred-config failed")
+        _validate_empty_directory(root_fd, pycache_fd, pycache_receipt)
+        _validate_empty_directory(root_fd, gcloud_config_fd, gcloud_config_receipt)
+        _validate_toolchain(config, toolchain)
+        _validate_gcloud_version(config)
+        _validate_empty_directory(root_fd, pycache_fd, pycache_receipt)
+        _validate_empty_directory(root_fd, gcloud_config_fd, gcloud_config_receipt)
+        _validate_toolchain(config, toolchain)
         if set(os.listdir(source_fd)) != {
             config.key_name,
             config.cert_name,
@@ -1037,9 +1662,19 @@ def prepare_source(
             raise PreparationError("final JSON schema changed")
         os.fsync(source_fd)
         os.fsync(root_fd)
-        if _validate_tool(config.gcloud_path, config.gcloud_uid) != gcloud_sha256:
-            raise PreparationError("gcloud binary changed during preparation")
-        return {
+        if not _cleanup_isolation(
+            root_fd,
+            gcloud_config_fd,
+            gcloud_config_receipt,
+        ):
+            raise PreparationError("gcloud config isolation cleanup failed")
+        gcloud_config_fd = None
+        gcloud_config_receipt = None
+        if not _cleanup_isolation(root_fd, pycache_fd, pycache_receipt):
+            raise PreparationError("Python cache isolation cleanup failed")
+        pycache_fd = None
+        pycache_receipt = None
+        receipt = {
             "status": "prepared-not-installed",
             "environment": "real-test",
             "version": VERSION,
@@ -1065,15 +1700,89 @@ def prepare_source(
             "gcloud": {
                 "path": config.gcloud_path,
                 "version": config.gcloud_version,
-                "sha256": gcloud_sha256,
+                "components": version_json,
+                "dev": toolchain.gcloud.dev,
+                "ino": toolchain.gcloud.ino,
+                "size": toolchain.gcloud.size,
+                "mode": f"{toolchain.gcloud.mode:04o}",
+                "sha256": toolchain.gcloud.sha256,
+                "dash_path": config.dash_path,
+                "dash_dev": toolchain.dash.dev,
+                "dash_ino": toolchain.dash.ino,
+                "dash_size": toolchain.dash.size,
+                "dash_mode": f"{toolchain.dash.mode:04o}",
+                "dash_sha256": toolchain.dash.sha256,
+                "bundled_python_path": config.bundled_python_path,
+                "bundled_python_dev": toolchain.bundled_python.dev,
+                "bundled_python_ino": toolchain.bundled_python.ino,
+                "bundled_python_size": toolchain.bundled_python.size,
+                "bundled_python_mode": f"{toolchain.bundled_python.mode:04o}",
+                "bundled_python_sha256": toolchain.bundled_python.sha256,
+                "python_probe_source": python_probe["source"],
                 "create_argv_sha256": create_argv_sha256,
             },
-            "openssl_sha256": openssl_sha256,
+            "packages": {
+                "google_cloud_cli": config.gcloud_package,
+                "dash": config.dash_package,
+                "list_lines": config.package_list_lines,
+                "list_sha256": config.package_list_sha256,
+                "md5sums_lines": config.package_md5sums_lines,
+                "md5sums_sha256": config.package_md5sums_sha256,
+                "dpkg_verify": "clean",
+                "dpkg_query": {
+                    "path": toolchain.dpkg_query.path,
+                    "dev": toolchain.dpkg_query.dev,
+                    "ino": toolchain.dpkg_query.ino,
+                    "size": toolchain.dpkg_query.size,
+                    "mode": f"{toolchain.dpkg_query.mode:04o}",
+                    "sha256": toolchain.dpkg_query.sha256,
+                },
+                "dpkg": {
+                    "path": toolchain.dpkg.path,
+                    "dev": toolchain.dpkg.dev,
+                    "ino": toolchain.dpkg.ino,
+                    "size": toolchain.dpkg.size,
+                    "mode": f"{toolchain.dpkg.mode:04o}",
+                    "sha256": toolchain.dpkg.sha256,
+                },
+            },
+            "sdk_unmanifested_cache": {
+                "root": config.sdk_root,
+                "root_dev": toolchain.sdk_root_dev,
+                "root_ino": toolchain.sdk_root_ino,
+                "root_mode": f"{toolchain.sdk_root_mode:04o}",
+                "count": toolchain.sdk_cache_count,
+                "sorted_set_sha256": toolchain.sdk_cache_set_sha256,
+            },
+            "isolation_cleanup": {
+                config.gcloud_config_path: "missing",
+                config.pycache_path: "missing",
+            },
+            "openssl_sha256": openssl.sha256,
             "trust_chain": "omitted-direct-root",
             "installed": False,
             "probed": False,
         }
+        return receipt
     except BaseException as error:
+        if pycache_receipt is None:
+            pycache_receipt = next(
+                (
+                    item
+                    for item in isolation_receipts
+                    if item.name == os.path.basename(config.pycache_path)
+                ),
+                None,
+            )
+        if gcloud_config_receipt is None:
+            gcloud_config_receipt = next(
+                (
+                    item
+                    for item in isolation_receipts
+                    if item.name == os.path.basename(config.gcloud_config_path)
+                ),
+                None,
+            )
         if source_fd is not None:
             for generated_name in generated_names:
                 try:
@@ -1086,6 +1795,22 @@ def prepare_source(
             source_receipt,
             created,
         )
+        gcloud_config_cleanup = _cleanup_isolation(
+            root_fd,
+            gcloud_config_fd,
+            gcloud_config_receipt,
+        )
+        if gcloud_config_cleanup:
+            gcloud_config_fd = None
+            gcloud_config_receipt = None
+        pycache_cleanup = _cleanup_isolation(
+            root_fd,
+            pycache_fd,
+            pycache_receipt,
+        )
+        if pycache_cleanup:
+            pycache_fd = None
+            pycache_receipt = None
         if isinstance(error, PreparationError):
             message = str(error)
         elif isinstance(error, FileExistsError) or (
@@ -1096,11 +1821,19 @@ def prepare_source(
             message = "trusted tool timed out"
         else:
             message = "unexpected preparation failure"
-        if not cleanup_complete:
+        if not cleanup_complete or not gcloud_config_cleanup or not pycache_cleanup:
             message += "; cleanup stopped at receipt mismatch"
         raise PreparationError(message) from error
     finally:
-        for fd in [key_fd, cert_fd, stage_fd, source_fd, root_fd]:
+        for fd in [
+            key_fd,
+            cert_fd,
+            stage_fd,
+            source_fd,
+            pycache_fd,
+            gcloud_config_fd,
+            root_fd,
+        ]:
             if fd is not None:
                 try:
                     os.close(fd)

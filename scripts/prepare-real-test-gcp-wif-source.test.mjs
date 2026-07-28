@@ -27,7 +27,18 @@ const KEY_NAME = `leaf-${VERSION}.key.pem`;
 const SOURCE = "root/xingheng-real-test-wif-source";
 const AUDIENCE_FILE = "root/xingheng-real-test-wif-audience";
 const AUDIENCE = "//iam.googleapis.com/projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509";
-const OPENSSL = "/usr/bin/openssl";
+const HOST_OPENSSL = "/usr/bin/openssl";
+const COMPONENTS = {
+  "Google Cloud SDK": "576.0.0",
+  alpha: "2026.07.10",
+  beta: "2026.07.10",
+  bq: "2.1.34",
+  "bundled-python3-unix": "3.14.6",
+  core: "2026.07.10",
+  "gcloud-crc32c": "1.0.0",
+  gsutil: "5.37",
+  preview: "2026.07.10",
+};
 
 const PYTHON_HARNESS = String.raw`
 import hashlib
@@ -61,18 +72,64 @@ def sha(path):
             digest.update(chunk)
     return digest.hexdigest()
 
-openssl = os.environ["OPENSSL"]
+def frozen(path, sha_override=None):
+    metadata = os.lstat(path)
+    return module.FrozenFile(
+        dev=metadata.st_dev,
+        ino=metadata.st_ino,
+        size=metadata.st_size,
+        sha256=sha_override or sha(path),
+        mode=stat.S_IMODE(metadata.st_mode),
+        nlink=metadata.st_nlink,
+    )
+
+openssl = "/usr/bin/openssl"
 public_der = subprocess.check_output(
     [openssl, "pkey", "-in", key_actual, "-pubout", "-outform", "DER"]
 )
-key_ino = key_stat.st_ino + int(os.environ.get("KEY_INO_OFFSET", "0"))
-key_sha = os.environ.get("KEY_SHA_OVERRIDE", sha(key_actual))
+list_path = os.path.join(root, "var/lib/dpkg/info/google-cloud-cli.list")
+md5_path = os.path.join(root, "var/lib/dpkg/info/google-cloud-cli.md5sums")
+list_content = open(list_path, "rb").read()
+md5_content = open(md5_path, "rb").read()
+gcloud_actual = os.path.join(root, "usr/lib/google-cloud-sdk/bin/gcloud")
+dash_actual = os.path.join(root, "usr/bin/dash")
+python_actual = os.path.join(
+    root, "usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3"
+)
 config = module.PrepareConfig(
     filesystem_root=root,
-    gcloud_path=os.path.join(root, "usr/bin/gcloud"),
+    gcloud_path="/usr/lib/google-cloud-sdk/bin/gcloud",
+    dash_path="/usr/bin/dash",
+    bundled_python_path="/usr/lib/google-cloud-sdk/platform/bundledpythonunix/bin/python3",
+    sdk_root="/usr/lib/google-cloud-sdk",
+    pycache_path="/root/.xingheng-real-test-gcloud-pycache-d2b1",
+    gcloud_config_path="/root/.xingheng-real-test-gcloud-config-d2b1",
+    dpkg_query_path="/usr/bin/dpkg-query",
+    dpkg_path="/usr/bin/dpkg",
+    package_list_path="/var/lib/dpkg/info/google-cloud-cli.list",
+    package_md5sums_path="/var/lib/dpkg/info/google-cloud-cli.md5sums",
     gcloud_uid=os.geteuid(),
-    openssl_path=openssl,
-    openssl_uid=os.lstat(openssl).st_uid,
+    gcloud=frozen(gcloud_actual, os.environ.get("GCLOUD_SHA_OVERRIDE")),
+    dash=frozen(dash_actual, os.environ.get("DASH_SHA_OVERRIDE")),
+    bundled_python=frozen(python_actual, os.environ.get("PYTHON_SHA_OVERRIDE")),
+    gcloud_package=os.environ.get(
+        "GCLOUD_PACKAGE_OVERRIDE",
+        "google-cloud-cli|576.0.0-test|fixture|ii",
+    ),
+    dash_package=os.environ.get("DASH_PACKAGE_OVERRIDE", "dash|0.5.12-test|fixture|ii"),
+    package_list_lines=len(list_content.splitlines()),
+    package_list_sha256=os.environ.get(
+        "LIST_SHA_OVERRIDE", hashlib.sha256(list_content).hexdigest()
+    ),
+    package_md5sums_lines=len(md5_content.splitlines()),
+    package_md5sums_sha256=os.environ.get(
+        "MD5_SHA_OVERRIDE", hashlib.sha256(md5_content).hexdigest()
+    ),
+    python_version=os.environ["FIXTURE_PYTHON_VERSION"],
+    sdk_probe_module="googlecloudsdk.core.config",
+    gcloud_components=module.GCLOUD_COMPONENTS,
+    openssl_path="/usr/bin/openssl",
+    openssl_uid=os.lstat(os.path.join(root, "usr/bin/openssl")).st_uid,
     owner_uid=os.geteuid(),
     owner_gid=os.getegid(),
     stage=module.STAGE,
@@ -84,9 +141,9 @@ config = module.PrepareConfig(
     stage_ino=stage_stat.st_ino,
     key=module.FrozenFile(
         dev=key_stat.st_dev,
-        ino=key_ino,
+        ino=key_stat.st_ino + int(os.environ.get("KEY_INO_OFFSET", "0")),
         size=key_stat.st_size,
-        sha256=key_sha,
+        sha256=os.environ.get("KEY_SHA_OVERRIDE", sha(key_actual)),
     ),
     cert=module.FrozenFile(
         dev=cert_stat.st_dev,
@@ -128,37 +185,52 @@ except module.PreparationError as error:
     raise SystemExit(1)
 `;
 
+function hostPython() {
+  const result = spawnSync("python3", [
+    "-c",
+    "import json,sys;print(json.dumps({'path':sys.executable,'version':'.'.join(map(str,sys.version_info[:3]))}))",
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 0, result.stderr);
+  return JSON.parse(result.stdout);
+}
+
 function makeFixture() {
   const root = mkdtempSync(join(tmpdir(), "xingheng-real-test-wif-helper-"));
   chmodSync(root, 0o700);
   const stage = join(root, "var/lib/xingheng-real-test/gcp-wif-build", VERSION);
   const rootHome = join(root, "root");
   const fakeBin = join(root, "usr/bin");
-  mkdirSync(stage, { recursive: true, mode: 0o700 });
-  mkdirSync(rootHome, { recursive: true, mode: 0o700 });
-  mkdirSync(fakeBin, { recursive: true, mode: 0o700 });
+  const sdkRoot = join(root, "usr/lib/google-cloud-sdk");
+  const sdkBin = join(sdkRoot, "bin");
+  const sdkLib = join(sdkRoot, "lib/googlecloudsdk/core");
+  const bundledPythonBin = join(sdkRoot, "platform/bundledpythonunix/bin");
+  const dpkgInfo = join(root, "var/lib/dpkg/info");
+  const state = join(root, "fixture-state");
+  for (const directory of [
+    stage,
+    rootHome,
+    fakeBin,
+    sdkBin,
+    sdkLib,
+    bundledPythonBin,
+    dpkgInfo,
+    state,
+  ]) {
+    mkdirSync(directory, { recursive: true, mode: 0o755 });
+  }
   chmodSync(stage, 0o700);
   chmodSync(rootHome, 0o700);
+  chmodSync(state, 0o700);
 
   const key = join(stage, KEY_NAME);
   const cert = join(stage, CERT_NAME);
   const generated = spawnSync(
-    OPENSSL,
+    HOST_OPENSSL,
     [
-      "req",
-      "-x509",
-      "-newkey",
-      "rsa:2048",
-      "-nodes",
-      "-keyout",
-      key,
-      "-out",
-      cert,
-      "-subj",
-      "/CN=xingheng-test-fixture",
-      "-days",
-      "1",
-      "-sha256",
+      "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+      "-keyout", key, "-out", cert,
+      "-subj", "/CN=xingheng-test-fixture",
+      "-days", "1", "-sha256",
     ],
     { encoding: "utf8" },
   );
@@ -166,21 +238,77 @@ function makeFixture() {
   chmodSync(key, 0o400);
   chmodSync(cert, 0o400);
 
-  const fakeGcloud = join(fakeBin, "gcloud");
-  const fakeMode = join(fakeBin, "fake-mode");
+  const python = hostPython();
+  const fixturePython = join(bundledPythonBin, "python3");
+  const fakeMode = join(state, "fake-mode");
   writeFileSync(fakeMode, "success\n", { mode: 0o600 });
   writeFileSync(
+    fixturePython,
+    `#!/bin/sh
+mode="$(/bin/cat ${JSON.stringify(fakeMode)})"
+case "$mode" in
+  prefix-bad) unset PYTHONPYCACHEPREFIX ;;
+  isolation-wrong-mode) /bin/chmod 0755 "$PYTHONPYCACHEPREFIX" ;;
+  isolation-nonempty) printf x > "$PYTHONPYCACHEPREFIX/foreign.pyc" ;;
+  isolation-inode-drift)
+    /bin/mv "$PYTHONPYCACHEPREFIX" "$PYTHONPYCACHEPREFIX.old"
+    /bin/mkdir -m 0700 "$PYTHONPYCACHEPREFIX"
+    ;;
+esac
+exec ${JSON.stringify(python.path)} "$@"
+`,
+    { mode: 0o755 },
+  );
+  const fixtureDash = join(fakeBin, "dash");
+  writeFileSync(fixtureDash, "#!/bin/sh\nexec /bin/sh \"$@\"\n", { mode: 0o755 });
+  writeFileSync(
+    join(fakeBin, "openssl"),
+    `#!/bin/sh\nexec ${JSON.stringify(HOST_OPENSSL)} "$@"\n`,
+    { mode: 0o755 },
+  );
+
+  writeFileSync(join(sdkRoot, "lib/googlecloudsdk/__init__.py"), "", { mode: 0o644 });
+  writeFileSync(join(sdkRoot, "lib/googlecloudsdk/core/__init__.py"), "", { mode: 0o644 });
+  writeFileSync(join(sdkLib, "config.py"), "VALUE = 'fixture-safe-source'\n", { mode: 0o644 });
+
+  const fakeProgram = join(state, "fake-gcloud.cjs");
+  const fakeGcloud = join(sdkBin, "gcloud");
+  const callCount = join(state, "call-count");
+  writeFileSync(callCount, "0\n", { mode: 0o600 });
+  writeFileSync(
     fakeGcloud,
-    `#!${process.execPath}
+    `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} ${JSON.stringify(fakeProgram)} "$@"\n`,
+    { mode: 0o755 },
+  );
+  writeFileSync(
+    fakeProgram,
+    `
 const fs = require("node:fs");
 const path = require("node:path");
-const mode = fs.readFileSync(path.join(path.dirname(process.argv[1]), "fake-mode"), "utf8").trim();
+const state = ${JSON.stringify(state)};
+const sdkRoot = ${JSON.stringify(sdkRoot)};
+const mode = fs.readFileSync(path.join(state, "fake-mode"), "utf8").trim();
+let calls = Number(fs.readFileSync(path.join(state, "call-count"), "utf8").trim()) + 1;
+fs.writeFileSync(path.join(state, "call-count"), String(calls) + "\\n");
 const args = process.argv.slice(2);
+if (process.env.AMBIENT_SENTINEL || process.env.HTTP_PROXY || process.env.PYTHONPATH) process.exit(91);
+if (process.env.PATH !== "/usr/bin:/bin") process.exit(92);
+if (process.env.CLOUDSDK_CORE_DISABLE_FILE_LOGGING !== "true") process.exit(93);
 if (args[0] === "version") {
   if (args.length !== 2 || args[1] !== "--format=json") process.exit(89);
-  process.stdout.write(JSON.stringify({
-    "Google Cloud SDK": mode === "version-mismatch" ? "575.0.0" : "576.0.0",
-  }));
+  const components = ${JSON.stringify(COMPONENTS)};
+  if (mode === "version-mismatch" || (mode === "second-version-mismatch" && calls >= 3)) {
+    components["Google Cloud SDK"] = "575.0.0";
+  }
+  if (mode === "component-extra") components.extra = "1";
+  if (mode === "write-config") fs.writeFileSync(path.join(process.env.CLOUDSDK_CONFIG, "config"), "x");
+  if (mode === "write-pycache") fs.writeFileSync(path.join(process.env.PYTHONPYCACHEPREFIX, "cache.pyc"), "x");
+  if (mode === "sdk-baseline-drift") {
+    const cache = path.join(sdkRoot, "lib/googlecloudsdk/core/__pycache__");
+    fs.mkdirSync(cache, {recursive: true, mode: 0o755});
+    fs.writeFileSync(path.join(cache, "drift.pyc"), "x", {mode: 0o644});
+  }
+  process.stdout.write(JSON.stringify(components));
   process.exit(0);
 }
 const expectedPrefix = [
@@ -226,22 +354,60 @@ if (mode === "bad-json") {
 } else {
   fs.writeFileSync(adcPath, JSON.stringify(adc), {mode: 0o600});
 }
-if (mode !== "partial") {
-  fs.writeFileSync(configPath, JSON.stringify(config), {mode: 0o600});
-}
+if (mode !== "partial") fs.writeFileSync(configPath, JSON.stringify(config), {mode: 0o600});
+if (mode === "tool-drift-create") fs.appendFileSync(${JSON.stringify(fakeGcloud)}, "\\n# drift\\n");
 if (mode === "gcloud-failure") process.exit(1);
+`,
+    { mode: 0o644 },
+  );
+
+  writeFileSync(
+    join(fakeBin, "dpkg-query"),
+    `#!/bin/sh
+case "$*" in
+  *google-cloud-cli) printf '%s' 'google-cloud-cli|576.0.0-test|fixture|ii' ;;
+  *dash) printf '%s' 'dash|0.5.12-test|fixture|ii' ;;
+  *) exit 1 ;;
+esac
 `,
     { mode: 0o755 },
   );
-  chmodSync(fakeGcloud, 0o755);
+  writeFileSync(join(fakeBin, "dpkg"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+
+  const sdkObjects = [];
+  function collect(directory) {
+    for (const name of readdirSync(directory)) {
+      const path = join(directory, name);
+      sdkObjects.push(`/${path.slice(root.length + 1)}`);
+      if (lstatSync(path).isDirectory()) collect(path);
+    }
+  }
+  collect(sdkRoot);
+  writeFileSync(
+    join(dpkgInfo, "google-cloud-cli.list"),
+    `${sdkObjects.sort().join("\n")}\n`,
+    { mode: 0o644 },
+  );
+  writeFileSync(
+    join(dpkgInfo, "google-cloud-cli.md5sums"),
+    "fixture-md5-receipt\n",
+    { mode: 0o644 },
+  );
+
   return {
     root,
     stage,
     key,
     cert,
     fakeMode,
+    callCount,
+    sdkRoot,
+    fixturePython,
+    pythonVersion: python.version,
     source: join(root, SOURCE),
     audienceFile: join(root, AUDIENCE_FILE),
+    pycache: join(root, "root/.xingheng-real-test-gcloud-pycache-d2b1"),
+    gcloudConfig: join(root, "root/.xingheng-real-test-gcloud-config-d2b1"),
   };
 }
 
@@ -252,7 +418,10 @@ function runHarness(fixture, extraEnv = {}) {
       ...process.env,
       HELPER,
       FIXTURE_ROOT: fixture.root,
-      OPENSSL,
+      FIXTURE_PYTHON_VERSION: fixture.pythonVersion,
+      AMBIENT_SENTINEL: "must-not-be-inherited",
+      HTTP_PROXY: "http://127.0.0.1:9",
+      PYTHONPATH: "/forbidden",
       ...extraEnv,
     },
   });
@@ -268,7 +437,11 @@ function assertNoPreparedOutput(fixture) {
   assert.equal(existsSync(fixture.audienceFile), false);
 }
 
-test("prepares one exact four-file direct-root source without material output", () => {
+function setMode(fixture, mode) {
+  writeFileSync(fixture.fakeMode, `${mode}\n`, { mode: 0o600 });
+}
+
+test("prepares exact four-file direct-root source with isolated canonical tools", () => {
   const fixture = makeFixture();
   try {
     const result = runHarness(fixture);
@@ -282,13 +455,8 @@ test("prepares one exact four-file direct-root source without material output", 
       KEY_NAME,
     ].sort());
     assert.equal(readFileSync(fixture.audienceFile, "utf8"), `${AUDIENCE}\n`);
-    const sourceMetadata = lstatSync(fixture.source);
-    assert.equal(sourceMetadata.isDirectory(), true);
-    assert.equal(sourceMetadata.mode & 0o777, 0o700);
-    const audienceMetadata = lstatSync(fixture.audienceFile);
-    assert.equal(audienceMetadata.isFile(), true);
-    assert.equal(audienceMetadata.nlink, 1);
-    assert.equal(audienceMetadata.mode & 0o777, 0o400);
+    assert.equal(existsSync(fixture.pycache), false);
+    assert.equal(existsSync(fixture.gcloudConfig), false);
     for (const name of readdirSync(fixture.source)) {
       const metadata = lstatSync(join(fixture.source, name));
       assert.equal(metadata.isFile(), true);
@@ -302,52 +470,44 @@ test("prepares one exact four-file direct-root source without material output", 
     });
     assert.equal("service_account_impersonation_url" in adc, false);
     assert.equal(existsSync(join(fixture.source, "trust-chain.pem")), false);
-    assert.equal(readdirSync(fixture.source).some((name) => name.startsWith(".")), false);
     const verified = spawnSync(
       process.execPath,
       [VERIFIER, "source", "real-test", fixture.source, fixture.audienceFile],
       { encoding: "utf8" },
     );
     assert.equal(verified.status, 0, verified.stderr);
-    assert.match(verified.stdout, /WIF source bundle verified/u);
-    const receipt = outputJson(result);
-    assert.equal(receipt.ok, true);
-    assert.equal(receipt.receipt.trust_chain, "omitted-direct-root");
-    assert.equal(receipt.receipt.installed, false);
-    assert.equal(receipt.receipt.probed, false);
+    const receipt = outputJson(result).receipt;
+    assert.equal(receipt.gcloud.path, "/usr/lib/google-cloud-sdk/bin/gcloud");
+    assert.equal(receipt.gcloud.dash_path, "/usr/bin/dash");
+    assert.deepEqual(receipt.gcloud.components, COMPONENTS);
+    assert.deepEqual(receipt.isolation_cleanup, {
+      "/root/.xingheng-real-test-gcloud-config-d2b1": "missing",
+      "/root/.xingheng-real-test-gcloud-pycache-d2b1": "missing",
+    });
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
 });
 
-test("rejects existing regular, symlinked, and hardlinked output paths without overwrite", async (t) => {
+test("rejects preexisting isolation and output boundaries without overwrite", async (t) => {
   const cases = [
-    ["regular source", (fixture) => writeFileSync(fixture.source, "existing", { mode: 0o400 })],
-    ["symlink source", (fixture) => {
-      const target = join(fixture.root, "source-target");
-      writeFileSync(target, "sentinel", { mode: 0o400 });
-      symlinkSync(target, fixture.source);
-    }],
-    ["hardlinked audience", (fixture) => {
-      const target = join(fixture.root, "audience-target");
-      writeFileSync(target, "sentinel", { mode: 0o400 });
-      linkSync(target, fixture.audienceFile);
-    }],
+    ["regular source", (f) => writeFileSync(f.source, "existing", { mode: 0o400 })],
+    ["symlink source", (f) => symlinkSync(f.stage, f.source)],
+    ["hardlinked audience", (f) => linkSync(f.key, f.audienceFile)],
+    ["regular pycache", (f) => writeFileSync(f.pycache, "existing", { mode: 0o400 })],
+    ["symlink config", (f) => symlinkSync(f.stage, f.gcloudConfig)],
+    ["directory pycache", (f) => mkdirSync(f.pycache, { mode: 0o700 })],
   ];
   for (const [name, mutate] of cases) {
     await t.test(name, () => {
       const fixture = makeFixture();
       try {
         mutate(fixture);
-        const before = lstatSync(
-          existsSync(fixture.source) ? fixture.source : fixture.audienceFile,
-        );
         const result = runHarness(fixture);
         assert.notEqual(result.status, 0);
-        const after = lstatSync(
-          existsSync(fixture.source) ? fixture.source : fixture.audienceFile,
-        );
-        assert.equal(after.ino, before.ino);
+        if (!name.includes("source") && !name.includes("audience")) {
+          assertNoPreparedOutput(fixture);
+        }
       } finally {
         rmSync(fixture.root, { recursive: true, force: true });
       }
@@ -355,19 +515,21 @@ test("rejects existing regular, symlinked, and hardlinked output paths without o
   }
 });
 
-test("rejects frozen input inode, hash, and hardlink drift", async (t) => {
-  const cases = [
-    ["inode", { KEY_INO_OFFSET: "1" }, null],
-    ["hash", { KEY_SHA_OVERRIDE: "0".repeat(64) }, null],
-    ["hardlink", {}, (fixture) => linkSync(fixture.key, `${fixture.key}.copy`)],
-  ];
-  for (const [name, env, mutate] of cases) {
-    await t.test(name, () => {
+test("isolation semantics fail closed before source creation", async (t) => {
+  for (const mode of [
+    "prefix-bad",
+    "isolation-wrong-mode",
+    "isolation-nonempty",
+    "isolation-inode-drift",
+    "write-config",
+    "write-pycache",
+  ]) {
+    await t.test(mode, () => {
       const fixture = makeFixture();
       try {
-        mutate?.(fixture);
-        const result = runHarness(fixture, env);
-        assert.notEqual(result.status, 0);
+        setMode(fixture, mode);
+        const result = runHarness(fixture);
+        assert.notEqual(result.status, 0, result.stdout);
         assertNoPreparedOutput(fixture);
       } finally {
         rmSync(fixture.root, { recursive: true, force: true });
@@ -376,24 +538,107 @@ test("rejects frozen input inode, hash, and hardlink drift", async (t) => {
   }
 });
 
-test("rejects failed, partial, expanded, impersonating, and invalid gcloud output", async (t) => {
-  for (const mode of [
-    "gcloud-failure",
-    "partial",
-    "unknown",
-    "impersonation",
-    "client-email",
-    "private-key",
-    "unknown-source",
-    "trust-chain",
-    "bad-json",
-    "version-mismatch",
-  ]) {
-    await t.test(mode, () => {
+test("tool, package, component, and SDK drift stop before key copy", async (t) => {
+  const cases = [
+    ["gcloud receipt", { GCLOUD_SHA_OVERRIDE: "0".repeat(64) }, null],
+    ["dash receipt", { DASH_SHA_OVERRIDE: "0".repeat(64) }, null],
+    ["python receipt", { PYTHON_SHA_OVERRIDE: "0".repeat(64) }, null],
+    ["package", { GCLOUD_PACKAGE_OVERRIDE: "wrong" }, null],
+    ["manifest", { LIST_SHA_OVERRIDE: "0".repeat(64) }, null],
+    ["version", {}, (f) => setMode(f, "version-mismatch")],
+    ["component exact-set", {}, (f) => setMode(f, "component-extra")],
+    ["SDK OTHER", {}, (f) => writeFileSync(join(f.sdkRoot, "foreign.py"), "x")],
+    ["SDK unsafe cache", {}, (f) => {
+      const cache = join(f.sdkRoot, "lib/__pycache__");
+      mkdirSync(cache, { mode: 0o755 });
+      writeFileSync(join(cache, "x.pyc"), "x", { mode: 0o666 });
+      chmodSync(join(cache, "x.pyc"), 0o666);
+    }],
+    ["SDK external symlink", {}, (f) => symlinkSync("/tmp", join(f.sdkRoot, "escape"))],
+    ["SDK baseline", {}, (f) => setMode(f, "sdk-baseline-drift")],
+  ];
+  for (const [name, env, mutate] of cases) {
+    await t.test(name, () => {
       const fixture = makeFixture();
       try {
-        writeFileSync(fixture.fakeMode, `${mode}\n`, { mode: 0o600 });
-        const result = runHarness(fixture);
+        mutate?.(fixture);
+        const result = runHarness(fixture, env);
+        assert.notEqual(result.status, 0, result.stdout);
+        assertNoPreparedOutput(fixture);
+      } finally {
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("prefix control loads malicious pyc while isolated prefix loads safe source", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-pycache-prefix-"));
+  try {
+    const source = join(root, "safe.py");
+    const compile = join(root, "compile.py");
+    const cache = join(root, "__pycache__");
+    writeFileSync(source, "VALUE = 'safe'\n");
+    writeFileSync(
+      compile,
+      "import py_compile,sys;py_compile.compile(sys.argv[1], cfile=sys.argv[2], dfile=sys.argv[1], invalidation_mode=py_compile.PycInvalidationMode.UNCHECKED_HASH)\n",
+    );
+    mkdirSync(cache);
+    const tag = spawnSync("python3", ["-c", "import sys;print(sys.implementation.cache_tag)"], {
+      encoding: "utf8",
+    }).stdout.trim();
+    const pyc = join(cache, `safe.${tag}.pyc`);
+    writeFileSync(source, "VALUE = 'malicious'\n");
+    const compiled = spawnSync("python3", [compile, source, pyc], { encoding: "utf8" });
+    assert.equal(compiled.status, 0, compiled.stderr);
+    writeFileSync(source, "VALUE = 'safe'\n");
+    const control = spawnSync("python3", ["-c", `import sys;sys.path.insert(0,${JSON.stringify(root)});import safe;print(safe.VALUE)`], {
+      encoding: "utf8",
+    });
+    assert.equal(control.status, 0, control.stderr);
+    assert.equal(control.stdout.trim(), "malicious");
+    const prefix = join(root, "prefix");
+    mkdirSync(prefix);
+    const isolated = spawnSync("python3", ["-c", `import sys;sys.path.insert(0,${JSON.stringify(root)});import safe;print(safe.VALUE);print(sys.pycache_prefix)`], {
+      encoding: "utf8",
+      env: {
+        PATH: "/usr/bin:/bin",
+        PYTHONNOUSERSITE: "1",
+        PYTHONDONTWRITEBYTECODE: "1",
+        PYTHONPYCACHEPREFIX: prefix,
+      },
+    });
+    assert.equal(isolated.status, 0, isolated.stderr);
+    assert.deepEqual(isolated.stdout.trim().split("\n"), ["safe", prefix]);
+    assert.deepEqual(readdirSync(prefix), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("rejects frozen input and gcloud output drift with receipt cleanup", async (t) => {
+  const cases = [
+    ["input inode", { KEY_INO_OFFSET: "1" }, null],
+    ["input hash", { KEY_SHA_OVERRIDE: "0".repeat(64) }, null],
+    ["input hardlink", {}, (f) => linkSync(f.key, `${f.key}.copy`)],
+    ["gcloud failure", {}, (f) => setMode(f, "gcloud-failure")],
+    ["partial", {}, (f) => setMode(f, "partial")],
+    ["unknown", {}, (f) => setMode(f, "unknown")],
+    ["impersonation", {}, (f) => setMode(f, "impersonation")],
+    ["client email", {}, (f) => setMode(f, "client-email")],
+    ["private key", {}, (f) => setMode(f, "private-key")],
+    ["unknown source", {}, (f) => setMode(f, "unknown-source")],
+    ["trust chain", {}, (f) => setMode(f, "trust-chain")],
+    ["bad JSON", {}, (f) => setMode(f, "bad-json")],
+    ["second version", {}, (f) => setMode(f, "second-version-mismatch")],
+    ["tool drift after create", {}, (f) => setMode(f, "tool-drift-create")],
+  ];
+  for (const [name, env, mutate] of cases) {
+    await t.test(name, () => {
+      const fixture = makeFixture();
+      try {
+        mutate?.(fixture);
+        const result = runHarness(fixture, env);
         assert.notEqual(result.status, 0, result.stdout);
         assertNoPreparedOutput(fixture);
         assert.doesNotMatch(result.stdout + result.stderr, /BEGIN (?:RSA )?PRIVATE KEY/u);
@@ -404,7 +649,7 @@ test("rejects failed, partial, expanded, impersonating, and invalid gcloud outpu
   }
 });
 
-test("no-replace collision preserves the foreign inode and stops cleanup", () => {
+test("no-replace collision preserves foreign inode and stops cleanup", () => {
   const fixture = makeFixture();
   try {
     const result = runHarness(fixture, { RENAME_MODE: "conflict" });

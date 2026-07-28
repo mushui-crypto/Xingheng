@@ -85,3 +85,40 @@ D2B0 Code Review 发现 P1：文档允许在 active WIF 目录中同时保留旧
 
 - 本裁定仅修正文档不变量，不新增轮换能力，不授权 production 现场操作。
 - D2B0-R1 文档修复必须交同一 Code Reviewer 复审；D2B1/D2B2/E 仍须独立授权。
+
+------------------------------------------------------------------------
+
+## ADR-003：D2B1 固定 canonical gcloud 工具链并隔离 config/pycache
+
+日期：2026-07-28
+
+问题：
+
+D2B1 首次执行前门禁发现 `/usr/bin/gcloud` 是到 Cloud SDK 的 symlink，既有 helper 却要求它是
+regular file；第二次前门禁进一步确认 Cloud SDK 自带 Python 的既有 `__pycache__` 不能用静态
+“零额外文件”规则判断。两次都在任何 helper 调用和 KEY/cert 复制前停止，attempts=0。
+
+最终决定：
+
+- 不执行 `/usr/bin/gcloud`。所有 gcloud 调用固定为
+  `/usr/bin/dash /usr/lib/google-cloud-sdk/bin/gcloud ...`，并冻结 canonical gcloud、dash、
+  bundled Python、SDK root、dpkg package/manifest/verify 和 component exact-set 收据。
+- 子进程从空环境构造 exact allowlist，固定 bundled Python；OpenSSL 使用独立更小环境。
+- exact allowlist 固定 `CLOUDSDK_CORE_DISABLE_FILE_LOGGING=true`；它只关闭 Cloud SDK 文件日志，
+  不放宽 config 空目录门禁，version/create/version 后出现任何对象仍必须 fail-closed。
+- 每批在 `/root` 下排他创建固定 config/pycache 隔离目录，要求调用前后同 inode、`0700` 且为空，
+  成功或失败仅在 receipt 匹配时 rmdir。
+- SDK 未被 package manifest 覆盖的对象只允许安全 `__pycache__`/`.pyc`；每批动态记录允许集合的
+  count 和 sorted-set SHA-256，并要求所有 gcloud 调用后不漂移。
+- 全部工具链、Python prefix/user-site 和首次 version/component 门禁必须在打开 STAGE、复制
+  KEY/cert 或创建 SOURCE/AUDIENCE 之前完成。
+
+影响：
+
+- D2B0-R2 仅实现和测试上述本地门禁，必须经独立 Code Review；不得表述为 VM 现场已通过。
+- 真实 576.0.0 行为必须在另行授权的 D2B0-R2-R1 批次验证：使用独立 root-only 临时根和公开
+  cert/key fixture 执行 version/create/version，要求 config/pycache 始终为空并按 inode 收据
+  清理；该批次不得接触 D1 材料、SOURCE/AUDIENCE、Provider、IAM、KMS 或 STS。
+- D2B1 仍保持 attempts=0，SOURCE/AUDIENCE/runtime target 仍不存在；D2B2/E 未授权。
+- Cloud SDK/package/component 或允许 pycache baseline 任一漂移均 fail-closed，升级后必须重新取得
+  只读现场收据、Architecture Review 和代码冻结。
