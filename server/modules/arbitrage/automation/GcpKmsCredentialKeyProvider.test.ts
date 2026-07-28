@@ -105,6 +105,10 @@ test("GCP KMS adapter rejects service-account JSON and local master-key fallback
 });
 
 test("GCP KMS adapter binds production and real-test to their frozen CryptoKeys", () => {
+  assert.equal(
+    RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+    "projects/xingheng-real-test/locations/asia-southeast1/keyRings/xingheng-rwa-real-test-sg/cryptoKeys/exchange-credentials",
+  );
   const productionEnvironment = {
     NODE_ENV: "production",
     XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",

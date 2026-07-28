@@ -115,7 +115,10 @@ provider preflight 还必须由 Binance `UID` 独立计算权威 fingerprint，�
 冻结的 monitored account；UID 缺失、读取失败或不匹配均拒绝上线。因此，即便两套 env 自报不同
 fingerprint，同一真实 Binance 账户也无法同时通过。真实测试必须使用
 独立 KMS CryptoKey、WIF audience/certificate bundle 和 Binance API key，推荐绑定独立
-sub-account。应用 volume 隔离不能替代 provider account 隔离。
+sub-account。real-test CryptoKey 完整资源名冻结为
+`projects/xingheng-real-test/locations/asia-southeast1/keyRings/xingheng-rwa-real-test-sg/cryptoKeys/exchange-credentials`；
+不得引用 production 项目或其他 location/keyRing/CryptoKey。应用 volume 隔离不能替代
+provider account 隔离。
 
 现场 provider 身份门禁只允许以下固定 operations service。它不监听、不取得 execution lease、
 不扫描活动、不写 state，也不包含 provider mutation：
