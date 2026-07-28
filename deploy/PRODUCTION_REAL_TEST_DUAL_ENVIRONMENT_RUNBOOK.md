@@ -41,162 +41,86 @@ real-test X.509 WIF 身份参数固定为：
 - ADC、`.env.real-test` 和 root-only audience 文件使用的完整 audience：
   `//iam.googleapis.com/projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509`
 
+### DEVOPS CA tier 契约
+
+real-test CA Pool `xingheng-real-test-wif` 固定为 DEVOPS tier。该 tier 不存储且不支持
+list、describe 或 revoke 单张证书；`gcloud privateca certificates describe` 返回 `NOT_FOUND`
+和按 Pool/location list 为空属于 tier 预期，不能作为签发失败证据。`CERT_ID` 仅是本地请求和
+证据关联逻辑值，不得表述为可 describe 的持久 Certificate resource，也不得从返回证书反推
+CLI exit code 或服务端 Certificate exact-set。
+
+DEVOPS 签发成功必须以 CA 返回的 PEM chain 为权威输入，并同时满足：
+
+- chain exact 2 blocks，顺序为 leaf + 当前冻结 Root，无 intermediate；
+- leaf 公钥精确匹配本批冻结 CSR 和始终留在 VM 的 root-only KEY；
+- subject、issuer、唯一 URI SAN、critical CA:false、critical Key Usage、EKU 仅 clientAuth、
+  RSA2048、SHA256/RSA、serial、validity、leaf/Root fingerprint 及 leaf/chain SHA 全部精确；
+- Root raw-byte SHA 必须直接对 chain 中原始、未修改的 Root PEM block 计算；禁止补删尾随 LF、
+  规范化或重编码后再与 raw SHA 比较；
+- leaf 必须由冻结 Root 验证通过。上述任一项不精确即 fail-closed，不得安装、probe 或重签降级。
+
+当前接受 DEVOPS 固有残余风险只适用于 P30D、T-7d 轮换、单 workload、单 Provider、
+单 CryptoKey、零资金且交易门禁关闭的 real-test。证书与 KEY 同时泄露时不能执行 CA 单证书
+revoke；事件处置只能表述为：清除或隔离 runtime bundle、移除该 subject 的目标 CryptoKey IAM、
+disable 单 workload Provider、停止 API/Web，并等待证书自然到期。不得声称已 CA revoke。
+Provider 未来若服务多个独立主体，或需要长期身份、逐证书撤销、证书库存或合规级生命周期管理，
+必须重新 Architecture Review 并评估 Enterprise 新 Pool/CA。
+
+`privateca.googleapis.com` 的 `DATA_WRITE` Data Access Audit Logs 不阻断现有公开 leaf/chain 的
+隔离传输或离线 source 准备，但必须在下一次签发或续期前以独立批准批次启用并验收，建议同时在任何
+真实交易启用前完成。该批次必须保留 project IAM etag 和既有 bindings，只增加所需 service/log
+type、不得配置 exempted member，也不得用未保护的 `set-iam-policy` 覆盖策略；必须记录日志费用、
+传播延迟，并在新签发前通过只读读取确认配置已生效。未开启期间的历史签发无法事后补记。
+
 `create-cred-config` 的位置参数必须使用不带 `//iam.googleapis.com/` 前缀的 Provider 完整资源名；
 生成的 ADC、服务端 `RWA_GCP_WIF_AUDIENCE` 和独立 audience 文件必须使用带该前缀的完整
 audience。该 workload identity 直接在单一 CryptoKey 资源层级授权，禁止给命令增加
 `--service-account` 或改成 VM 服务账号 impersonation。版本化证书和私钥文件名必须由已批准的
-证书批次冻结；以下命令仅冻结参数与逻辑路径，不授权生成 ADC、证书或私钥：
+证书批次冻结。当前 D2A 已冻结 `VERSION=20260728T062225Z`，公开 leaf 和 issued chain 仅在 VM
+root-only STAGE 隔离保存，KEY 未离开 VM；这不构成 ADC、source、安装或 probe 已获批。
+
+real-test leaf 由 Provider trust store 中已冻结的 Root 直接签发，证书链没有 intermediate。
+因此 real-test ADC 必须省略 `trust_chain_path`，source 不得创建 `trust-chain.pem`，Root 和
+issued chain 继续只作为 D1/D2A STAGE evidence 保存。不得把 production 的五文件 profile
+套用到 real-test，也不得把 Root-only 或 leaf+Root 文件伪装为 real-test trust chain。
+
+D2B0 仅提供下列受控 helper；这段命令是未来 D2B1 的固定入口预览，不授权现在执行：
 
 ```bash
-SOURCE=/root/xingheng-real-test-wif-source
-AUDIENCE_FILE=/root/xingheng-real-test-wif-audience
-CERT_NAME=REPLACE_WITH_VERSIONED_CERT
-KEY_NAME=REPLACE_WITH_VERSIONED_KEY
-
-umask 077
-test -d "$SOURCE"
-test ! -e "$SOURCE/adc.json"
-test ! -e "$SOURCE/certificate_config.json"
-
-gcloud iam workload-identity-pools create-cred-config \
-  projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509 \
-  --credential-cert-path="$SOURCE/$CERT_NAME" \
-  --credential-cert-private-key-path="$SOURCE/$KEY_NAME" \
-  --credential-cert-configuration-output-file="$SOURCE/certificate_config.generated.json" \
-  --credential-cert-trust-chain-path="$SOURCE/trust-chain.pem" \
-  --output-file="$SOURCE/adc.generated.json"
-
-jq --arg config /run/secrets/gcp-wif/certificate_config.json \
-   --arg trust /run/secrets/gcp-wif/trust-chain.pem \
-   '.credential_source.certificate.certificate_config_location = $config
-    | .credential_source.certificate.trust_chain_path = $trust' \
-   "$SOURCE/adc.generated.json" > "$SOURCE/adc.json.tmp"
-jq --arg cert "/run/secrets/gcp-wif/$CERT_NAME" \
-   --arg key "/run/secrets/gcp-wif/$KEY_NAME" \
-   '.cert_configs.workload.cert_path = $cert
-    | .cert_configs.workload.key_path = $key' \
-   "$SOURCE/certificate_config.generated.json" > "$SOURCE/certificate_config.json.tmp"
-
-chmod 0400 "$SOURCE/adc.json.tmp" "$SOURCE/certificate_config.json.tmp"
-sync -f "$SOURCE/adc.json.tmp"
-sync -f "$SOURCE/certificate_config.json.tmp"
-mv "$SOURCE/adc.json.tmp" "$SOURCE/adc.json"
-mv "$SOURCE/certificate_config.json.tmp" "$SOURCE/certificate_config.json"
-rm "$SOURCE/adc.generated.json" "$SOURCE/certificate_config.generated.json"
-
-if ! AUDIENCE_FILE="$AUDIENCE_FILE" python3 - <<'PY'
-import os
-import stat
-
-path = os.environ["AUDIENCE_FILE"]
-expected = (
-    b"//iam.googleapis.com/projects/185789474550/locations/global/"
-    b"workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509\n"
-)
-parent = os.path.dirname(path)
-name = os.path.basename(path)
-parent_fd = None
-write_fd = None
-created = None
-
-try:
-    if os.geteuid() != 0 or not os.path.isabs(path) or name in ("", ".", ".."):
-        raise RuntimeError("audience path requires a root-owned absolute target")
-    if not hasattr(os, "O_NOFOLLOW") or not hasattr(os, "O_DIRECTORY"):
-        raise RuntimeError("required no-follow filesystem flags are unavailable")
-
-    parent_fd = os.open(
-        parent,
-        os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
-    )
-    parent_stat = os.fstat(parent_fd)
-    if (
-        not stat.S_ISDIR(parent_stat.st_mode)
-        or parent_stat.st_uid != 0
-        or parent_stat.st_gid != 0
-        or stat.S_IMODE(parent_stat.st_mode) != 0o700
-    ):
-        raise RuntimeError("audience parent must be root:root mode 0700")
-
-    write_fd = os.open(
-        name,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
-        0o400,
-        dir_fd=parent_fd,
-    )
-    created = os.fstat(write_fd)
-    os.fchmod(write_fd, 0o400)
-    remaining = memoryview(expected)
-    while remaining:
-        written = os.write(write_fd, remaining)
-        if written <= 0:
-            raise RuntimeError("audience write did not make progress")
-        remaining = remaining[written:]
-    os.fsync(write_fd)
-    os.close(write_fd)
-    write_fd = None
-
-    read_fd = os.open(
-        name,
-        os.O_RDONLY | os.O_NOFOLLOW,
-        dir_fd=parent_fd,
-    )
-    try:
-        final_stat = os.fstat(read_fd)
-        chunks = []
-        while True:
-            chunk = os.read(read_fd, 4096)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    finally:
-        os.close(read_fd)
-
-    if (
-        final_stat.st_dev != created.st_dev
-        or final_stat.st_ino != created.st_ino
-        or not stat.S_ISREG(final_stat.st_mode)
-        or final_stat.st_uid != 0
-        or final_stat.st_gid != 0
-        or stat.S_IMODE(final_stat.st_mode) != 0o400
-        or final_stat.st_nlink != 1
-        or b"".join(chunks) != expected
-    ):
-        raise RuntimeError("audience file contract verification failed")
-    os.fsync(parent_fd)
-except BaseException:
-    if write_fd is not None:
-        os.close(write_fd)
-    if created is not None and parent_fd is not None:
-        try:
-            current = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            if current.st_dev == created.st_dev and current.st_ino == created.st_ino:
-                os.unlink(name, dir_fd=parent_fd)
-                os.fsync(parent_fd)
-        except FileNotFoundError:
-            pass
-    raise
-finally:
-    if parent_fd is not None:
-        os.close(parent_fd)
-PY
-then
-  exit 1
-fi
-
-sync -f "$SOURCE"
-sync -f "$AUDIENCE_FILE"
-
-node scripts/verify-gcp-wif-bundle.mjs source "$SOURCE" "$AUDIENCE_FILE"
+sudo env -i \
+  HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+  LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/python3 scripts/prepare-real-test-gcp-wif-source.py real-test
 ```
 
-source 必须最终精确包含 `adc.json`、`certificate_config.json`、`trust-chain.pem`、配置引用的
-版本化证书和版本化私钥五个文件。`certificate_config.json` 内的 cert/key 路径以及 ADC 内的
-certificate config/trust chain 路径必须统一指向容器逻辑根 `/run/secrets/gcp-wif`；安装前必须由
-source verifier 通过。现场批次必须确认 source 为新建且 root-owned `0700`，五文件均为
-root-owned regular/non-symlink、
-`nlink=1`、`0400` 且无额外文件。历史失败 ID `gcp-vm-x509` 使用 Google 保留的 `gcp-` 前缀，
-禁止作为当前配置、audience 或 credential config 输入。
+helper 仅接受唯一参数 `real-test`，固定读取 D1/D2A STAGE 的冻结 inode/hash，固定调用
+root-owned `/usr/bin/gcloud` 576.0.0，且 `create-cred-config` argv 不包含
+`--credential-cert-trust-chain-path`、`--service-account` 或任意调用方路径。它只准备：
+
+- `/root/xingheng-real-test-wif-source`：新建 root:root `0700`；
+- `/root/xingheng-real-test-wif-audience`：exact audience + 单个 LF，root:root `0400`；
+- source 四文件 exact-set：`adc.json`、`certificate_config.json`、
+  `leaf-20260728T062225Z.cert.pem`、`leaf-20260728T062225Z.key.pem`。
+
+四文件必须是 root-owned regular/non-symlink、`nlink=1`、`0400`。ADC certificate source
+exact keys 只有 `certificate_config_location=/run/secrets/gcp-wif/certificate_config.json`；
+不得含 `trust_chain_path`、impersonation、`client_email` 或嵌入私钥。certificate config 的
+cert/key 路径必须统一指向 `/run/secrets/gcp-wif` 下的冻结版本化文件名。
+
+helper 通过逐级 `dir_fd`/`O_NOFOLLOW`、`O_EXCL` 临时文件、fsync 和
+`renameat2(RENAME_NOREPLACE)` 发布，只输出 path/dev/ino/mode/nlink/hash 与 schema 摘要。
+失败时只按本批 path+dev+ino 收据清理；inode 不匹配立即停止清理。它不 install、不 mount、
+不 probe，也不触碰 D1 STAGE。D2B1 和后续 D2B2 必须分别取得独立用户授权；未来 D2B2 的固定
+installer 入口为：
+
+```bash
+sudo scripts/install-gcp-wif.sh real-test \
+  /root/xingheng-real-test-wif-source \
+  /root/xingheng-real-test-wif-audience
+```
+
+历史失败 ID `gcp-vm-x509` 使用 Google 保留的 `gcp-` 前缀，禁止作为当前配置、audience 或
+credential config 输入。
 
 独立模式激活前先验证 DNS 已指向该 VM、仅开放公网 80/443，并确认没有进程占用固定端口。
 没有真实 DNS 时不得用自签名证书或 HTTP 冒充通过。使用 canonical manifest 激活：

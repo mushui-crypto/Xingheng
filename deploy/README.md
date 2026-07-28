@@ -210,8 +210,9 @@ GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json
 RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data
 ```
 
-Vultr 主机通过 X.509 Workload Identity Federation 获取 ADC 短期身份。`adc.json`、证书配置、
-证书和对应私钥必须放在宿主机 tmpfs `/run/xingheng/gcp-wif`。API 与宿主文件固定使用专用
+Vultr 主机通过 X.509 Workload Identity Federation 获取 ADC 短期身份。production 的
+`adc.json`、证书配置、证书、对应私钥和 trust chain 必须放在宿主机 tmpfs
+`/run/xingheng/gcp-wif`。API 与宿主文件固定使用专用
 UID/GID `20001:20001`；目录权限为 `0700`，所有身份文件权限为 `0400`。Compose 将整个目录
 只读 bind 到容器 `/run/secrets/gcp-wif`，不得写入 `.env.production`、Compose 配置正文、
 镜像或仓库。ADC 必须是 `external_account` 配置且不得内嵌 `private_key`。GCP IAM 仅授予
@@ -219,9 +220,9 @@ UID/GID `20001:20001`；目录权限为 `0700`，所有身份文件权限为 `04
 `roles/cloudkms.cryptoKeyEncrypterDecrypter`，不得授予项目级管理、密钥创建或销毁权限。
 
 ADC audience 必须与服务端 `RWA_GCP_WIF_AUDIENCE` 精确一致，subject token type 固定为 mTLS，
-token URL 固定为 `https://sts.mtls.googleapis.com/v1/token`。`adc.json`、
-`certificate_config.json`、证书、私钥和 trust chain
-均必须位于 `/run/secrets/gcp-wif` 的真实路径内；启动和每次 KMS 使用前都会执行
+token URL 固定为 `https://sts.mtls.googleapis.com/v1/token`。production profile 的
+`adc.json`、`certificate_config.json`、证书、私钥和 trust chain 均必须位于
+`/run/secrets/gcp-wif` 的真实路径内；启动和每次 KMS 使用前都会执行
 `lstat + realpath + stat`，拒绝 symlink、非 regular file、非 UID `20001` owner 或非 `0400`
 权限；根目录必须为 UID `20001` owner 且权限为 `0700`。API 固定以 `20001:20001` 非 root
 身份运行，并拒绝 rootless Docker、user namespace remap、非 tmpfs 来源、可写挂载和可写子挂载。
@@ -231,13 +232,21 @@ KMS/ADC 不可用、证书过期、权限撤销、CryptoKey disabled 或 AAD 不
 轮换和所有新增风险动作均 fail-closed；公开看板继续可用。若存在未完成执行且凭证无法解密，
 系统进入 `manual_intervention` 并要求用户在对应交易所人工核对订单和仓位，不得声称能够自动退出。
 
-完整五文件 bundle 必须先位于服务器本地、仓库外、root-only 的受控 source 目录，audience
-另存为 root-only 文件；不得通过 CLI 参数、环境变量、shell history 或聊天传入材料内容。
+WIF source 必须先位于服务器本地、仓库外、root-only 的受控目录，audience 另存为 root-only
+文件；不得通过 CLI 参数、环境变量、shell history 或聊天传入材料内容。profile 必须由安装器
+首参数显式选择，禁止按文件存在性自动推断：
+
+- `production`：五文件 exact-set，包含 ADC、certificate config、证书、私钥和 trust chain；
+- `real-test`：Root 直签、无 intermediate 的四文件 exact-set，仅包含 ADC、
+  certificate config、冻结证书和冻结私钥；ADC 不含 `trust_chain_path`，目录不得出现
+  `trust-chain.pem`。
+
 `scripts/install-gcp-wif.sh` 先完整验证 source，再建立新的 tmpfs staging，复制为
 `20001:20001`、目录 `0700`、文件 `0400`，最后以 `mount --move` 一次性发布。部分 bundle、
 额外文件、symlink/hardlink、路径逃逸、非 mTLS ADC、错误 audience/STS、owner/mode 或最终 mount
 校验失败均不会保留可供 runtime 使用的目标。
-安装器首参数必须严格为 `production` 或 `real-test`，并分别映射到
+共享安装器的首参数必须严格为 `production` 或 `real-test`，并同时选择上述 source profile，
+分别映射到
 `/run/xingheng/gcp-wif` 与 `/run/xingheng-real-test/gcp-wif`；不接受调用方目标路径。
 若宿主 `/run` 使用 shared mount propagation，安装器会先把对应环境的
 `/run/xingheng` 或 `/run/xingheng-real-test` 建成独立的 private self-bind 边界，再在其中执行
@@ -261,15 +270,16 @@ findmnt -T /run/xingheng-real-test/gcp-wif -o FSTYPE,TARGET
 ```
 
 两个目标均保持 tmpfs、`20001:20001`、目录 `0700`、文件 `0400` 和原子发布边界；
-不得把 production bundle 安装到 real-test 路径，反之亦然。
+不得把 production 五文件 bundle 安装到 real-test 路径，也不得把 real-test 四文件 bundle
+安装到 production 路径。
 
-身份文件先在受限临时位置完整生成并校验，再安装为 `20001:20001 / 0400`。日常叶证书轮换使用
-版本化 cert/key 文件：先写入并 `fsync` 新文件，再让新的 certificate config 同时指向它们，
-最后在同一目录原子替换 `certificate_config.json`。旧 cert/key 至少保留两个 access-token
-生命周期后再删除。ADC audience/provider 或 trust chain 变化使用受控 API 重启，不承诺单实例
-零中断。吊销后立即保持服务端急停，并删除 tmpfs 中对应材料；宿主重启会清空 `/run`，必须由
-受控部署流程重新注入后才能启动 API。Google Auth 会在 token 刷新时持续读取这些文件，不能在
-启动后撤掉挂载。
+production active source/runtime 永远只能包含单一 generation 的五文件 exact-set；active 内
+old+new cert/key 并存必须 fail-closed。candidate 只能在 active 外准备。旧 generation 如需
+保留，只能进入容器不可见、active validator 不扫描且备份排除的 root-only retired 边界，用于
+rollback/evidence；已签发 access token 不依赖旧文件，retired 不用于维持 token。当前没有经过
+设计或现场验证的 production 证书无中断/原子整体轮换能力；candidate/retired 绝对路径、锁、
+mount 切换、drain/restart、rollback 与销毁必须留待未来独立 Level 3 任务。宿主重启会清空
+`/run`，必须由受控部署流程重新注入身份材料后才能启动 API。
 
 WIF 身份材料不得进入项目备份/恢复、SQLite 备份或自动套利数据备份。`compose.yaml` 已完成
 只读 WIF 目录挂载和自动套利独立数据卷接线；第 4 项代码与静态契约已通过固定安全复验，但实际

@@ -51,7 +51,7 @@ env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
   /usr/bin/node scripts/verify-deployment-revision.mjs images "$STEP0_MANIFEST"
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs source \
+  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs source production \
   "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
 ```
 
@@ -82,7 +82,7 @@ test ! -e /run/xingheng/gcp-wif
 sudo ./scripts/install-gcp-wif.sh production \
   "$STEP0_WIF_SOURCE" "$STEP0_WIF_AUDIENCE_FILE"
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
-  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs installed \
+  /usr/bin/node scripts/verify-gcp-wif-bundle.mjs installed production \
   /run/xingheng/gcp-wif "$STEP0_WIF_AUDIENCE_FILE"
 ```
 
@@ -152,5 +152,6 @@ test ! -e /var/lib/xingheng/verified-release-established
 - [ ] 一次性离线 root CA 私钥：Provider/IAM 建立且真实 STS/KMS health 通过后销毁，不长期保留。
 - [ ] CSR staging 中重复的 leaf 私钥与 Cloud Shell 临时 trust-store；只保留上述唯一 source
   私钥副本和公共归档。
-- [ ] 证书轮换至少提前 60 天登记；当前 leaf 到期日前必须完成新证书、tmpfs 原子轮换与旧证书
-  延迟清理。
+- [ ] 证书轮换至少提前 60 天登记；当前 leaf 到期日前必须通过未来独立 Level 3 任务完成受控
+  整体 bundle 轮换。active 永远保持单 generation 五文件 exact-set；旧 generation 只能在
+  active 外的 root-only retired 边界延迟清理。当前 checklist 不代表该轮换能力已实现。

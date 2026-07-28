@@ -20,6 +20,7 @@ import {
   isCanonicalGcpWifAudience,
   validateGcpWifCredentialFiles,
   validateGcpWifRuntimeBoundary,
+  type GcpWifDeploymentEnvironment,
 } from "./GcpWifCredentialConfig";
 
 type KmsClient = Pick<KeyManagementServiceClient, "encrypt" | "decrypt">;
@@ -35,6 +36,8 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   private readonly secretRoot: string;
   private readonly expectedOwnerUid: number;
   private readonly expectedOwnerGid: number;
+  private readonly deploymentEnvironment: GcpWifDeploymentEnvironment | null;
+  private readonly validateRuntimeBoundary: boolean;
   private client: KmsClient | null = null;
 
   constructor(options: {
@@ -44,9 +47,11 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     secretRoot?: string;
     expectedOwnerUid?: number;
     expectedOwnerGid?: number;
+    deploymentEnvironment?: GcpWifDeploymentEnvironment;
     client?: KmsClient;
   } = {}) {
     const testMode = process.env.NODE_ENV === "test";
+    this.validateRuntimeBoundary = !testMode;
     this.secretRoot = testMode && options.secretRoot ? options.secretRoot : RWA_GCP_WIF_SECRET_ROOT;
     this.expectedOwnerUid = testMode && options.expectedOwnerUid !== undefined
       ? options.expectedOwnerUid
@@ -58,12 +63,15 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     this.adcPath = options.adcPath?.trim() ?? process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
     this.wifAudience = options.wifAudience?.trim() ?? process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
     this.client = options.client ?? null;
-    this.configurationError = validateConfiguration(
+    const configuration = validateConfiguration(
       this.keyName,
       this.adcPath,
       this.wifAudience,
       this.secretRoot,
+      testMode ? options.deploymentEnvironment : undefined,
     );
+    this.configurationError = configuration.error;
+    this.deploymentEnvironment = configuration.deploymentEnvironment;
     this.configured = this.configurationError === null;
   }
 
@@ -197,13 +205,14 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   private async validateAdcConfiguration() {
     this.requireConfigured();
     try {
-      if (process.env.NODE_ENV !== "test") validateGcpWifRuntimeBoundary();
+      if (this.validateRuntimeBoundary) validateGcpWifRuntimeBoundary();
       validateGcpWifCredentialFiles({
         adcPath: this.adcPath,
         expectedAudience: this.wifAudience,
         secretRoot: this.secretRoot,
         expectedOwnerUid: this.expectedOwnerUid,
         expectedOwnerGid: this.expectedOwnerGid,
+        deploymentEnvironment: this.deploymentEnvironment!,
       });
     } catch (error) {
       if (error instanceof GcpWifConfigurationError) {
@@ -222,36 +231,49 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   }
 }
 
-function validateConfiguration(keyName: string, adcPath: string, wifAudience: string, secretRoot: string) {
+function validateConfiguration(
+  keyName: string,
+  adcPath: string,
+  wifAudience: string,
+  secretRoot: string,
+  testDeploymentEnvironment?: GcpWifDeploymentEnvironment,
+) {
   if (process.env.RWA_AUTOMATION_MASTER_KEY?.trim()) {
-    return "RWA_AUTOMATION_MASTER_KEY 已停用；生产环境禁止回退本地主密钥。";
+    return invalidConfiguration("RWA_AUTOMATION_MASTER_KEY 已停用；生产环境禁止回退本地主密钥。");
   }
   if (process.env.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms") {
-    return "RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。";
+    return invalidConfiguration("RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。");
   }
   let deploymentEnvironment;
   try {
-    deploymentEnvironment = loadDeploymentIdentity().environment;
+    deploymentEnvironment = testDeploymentEnvironment ?? loadDeploymentIdentity().environment;
   } catch (error) {
-    return error instanceof Error
+    return invalidConfiguration(error instanceof Error
       ? error.message
-      : "部署环境身份无效；已拒绝 GCP KMS 配置。";
+      : "部署环境身份无效；已拒绝 GCP KMS 配置。");
+  }
+  if (deploymentEnvironment !== "production" && deploymentEnvironment !== "real-test") {
+    return invalidConfiguration("WIF 部署环境必须精确为 production 或 real-test。");
   }
   const expectedKeyName = deploymentEnvironment === "real-test"
     ? RWA_REAL_TEST_GCP_KMS_KEY_NAME
     : RWA_GCP_KMS_KEY_NAME;
   if (keyName !== expectedKeyName) {
-    return deploymentEnvironment === "real-test"
+    return invalidConfiguration(deploymentEnvironment === "real-test"
       ? "真实测试环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的独立 CryptoKey 完整资源名。"
-      : "正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的生产 CryptoKey 完整资源名。";
+      : "正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的生产 CryptoKey 完整资源名。");
   }
   if (adcPath !== `${secretRoot}/adc.json`) {
-    return "GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。";
+    return invalidConfiguration("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
   }
   if (!isCanonicalGcpWifAudience(wifAudience)) {
-    return "RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。";
+    return invalidConfiguration("RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
   }
-  return null;
+  return { error: null, deploymentEnvironment };
+}
+
+function invalidConfiguration(error: string) {
+  return { error, deploymentEnvironment: null };
 }
 
 function bufferFromUnknown(value: Uint8Array | Buffer | string | null | undefined) {

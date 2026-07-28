@@ -682,7 +682,7 @@ fail-closed 行为运行。
 - `RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms`：生产唯一允许的凭证密钥 provider；测试 fake provider 只能由测试代码显式注入，生产环境不可选择。
 - `RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials`：固定 Google Cloud KMS CryptoKey 完整资源名。生产身份只使用 X.509 Workload Identity Federation/ADC，不创建或接受长期 Service Account JSON Key。
 - `RWA_GCP_WIF_AUDIENCE`：服务端配置的唯一受信 X.509 WIF provider 完整 audience，必须与 ADC 精确一致。
-- `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；`adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 UID `20001` owner、`0400`。根目录要求 UID `20001` owner、`0700`。
+- `GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json`：只读挂载的 external-account ADC 配置。ADC 只接受冻结的 audience、mTLS subject token type、Google STS URL 与 certificate source 结构，不得内嵌 `private_key`；production profile 的 `adc.json`、certificate config、证书、对应私钥和 trust chain 必须全部是 `/run/secrets/gcp-wif` 内的 regular file，拒绝 symlink 和目录逃逸，并要求 UID `20001` owner、`0400`。根目录要求 UID `20001` owner、`0700`。
 - 宿主 WIF 目录固定为 `/run/xingheng/gcp-wif`，不接受环境变量覆盖。Compose 将整个目录只读 bind 到 `/run/secrets/gcp-wif`，不自动创建目录。API 与共享 `strategy_data` 的策略工具固定以 `20001:20001` 非 root 身份运行；rootless Docker、user namespace remap、非 tmpfs 来源、可写挂载或可写子挂载均 fail-closed。旧 UID `1000` 的现有数据卷必须在停机备份后执行一次受控 owner 迁移，不能用宽权限替代。
 - `RWA_AUTOMATION_MASTER_KEY` 已停用。生产若发现该变量、非 GCP provider、错误 CryptoKey 或不安全 ADC 路径，启动配置校验直接失败，不允许本地主密钥或明文降级。
 - `RWA_AUTOMATION_DATA_DIR=/app/rwa-automation-data`：生产固定为独立 named volume 根目录。`current.json` 以原子指针选择只读冻结的 generation，generation 内按不可逆用户域 + venue 分隔凭证/状态。Envelope V2 为每个 `userId + venue + accountId` 生成独立随机 32-byte DEK，本地使用 AES-256-GCM 加密凭证正文，再由 GCP KMS 包裹 DEK；文件保存 `version/algorithm/provider/keyName/wrapReference/wrappedDek/wrapBindingTag/ciphertext/nonce/tag/aadSchema/createdAt/updatedAt`，原子替换并强制 `0600`，不保存明文凭证或 DEK。
@@ -696,7 +696,7 @@ GCP KMS Encrypt 必须提交 plaintext 与 additional authenticated data 的 CRC
 
 凭证轮换必须先验证候选凭证，再以新随机 DEK 原子替换旧 envelope；失败保留旧有效 envelope。KMS key version 迁移使用 DEK rewrap，只替换 `wrappedDek/wrapReference/wrapBindingTag`，不重新加密凭证正文。`wrapReference` 必须严格属于冻结 CryptoKey 的合法 version，并与 `wrappedDek` 一起受 DEK-HMAC 完整性绑定；篡改必须 fail-closed。旧 V1 本地主密钥文件只能被识别为 `rotation_required`，在线服务不解密、不迁移、不覆盖；当前无生产真实凭证，后续如发现 V1 只能走冻结的离线处置流程。
 
-WIF 叶证书轮换采用版本化 cert/key 文件与同目录原子替换 `certificate_config.json`：先完整写入并同步新文件，再一次性切换配置，旧文件至少保留两个 token 生命周期。ADC audience/provider 或 trust chain 变化需要受控重启。宿主重启后 tmpfs 内容消失，部署流程必须重新注入身份材料；Google Auth 在 token 刷新时会持续读取文件，运行期间不得撤掉挂载。WIF 身份材料明确排除在项目备份和恢复之外。
+production active WIF source/runtime 永远是单一 generation 的五文件 exact-set；active 内 old+new cert/key 并存必须 fail-closed。candidate 只能在 active 外准备。旧 generation 如需保留，只能进入容器不可见、active validator 不扫描且备份排除的 root-only retired 边界，用于 rollback/evidence；已签发 access token 不依赖旧文件，retired 不用于维持 token。当前没有经过设计或现场验证的 production 证书无中断/原子整体轮换能力；candidate/retired 绝对路径、锁、mount 切换、drain/restart、rollback 与销毁留待未来独立 Level 3 任务。宿主重启后 tmpfs 内容消失，部署流程必须重新注入身份材料；WIF 身份材料明确排除在项目备份和恢复之外。
 
 安全整改第 4 项 owner 实现已增加互相隔离的 `rwa_automation_data`、`rwa_automation_backups` 与 `rwa_automation_lock` volumes。API 只挂载数据卷和锁卷；备份 one-shot 以只读方式挂载数据卷，恢复 one-shot 以只读方式挂载备份卷。API 与运维工具使用同一 `flock`，脚本默认先停止 API，保证所有原子单文件写停止后再枚举一致快照。SQLite、策略报告与 WIF mount 不与上述 volumes 或脚本混用。
 
@@ -944,3 +944,9 @@ WIF 安装工具只接受服务器本地、仓库外、root-only 的完整五文
 部分/额外文件、symlink/hardlink、越界路径、错误 mount/owner/mode 均 fail-closed。真实 leaf
 私钥只能在 Vultr 本机生成，离线 CA 私钥一次签发后销毁；provider 完成并返回完整 audience 前
 不得生成 ADC、发布五文件 bundle 或运行 KMS health。真实 WIF 当前仍待受控创建/注入。
+
+上述五文件契约只属于 `production`。共享 installer/verifier 必须由显式 environment 参数选择
+profile，禁止自动推断：`production` 保持五文件和 trust chain；独立 real-test 在 Provider
+已配置 Root、叶证书由该 Root 直签且无 intermediate 时使用四文件 source，ADC 不含
+`trust_chain_path` 且不得创建 `trust-chain.pem`。real-test profile 不改变 production
+资源名、文件集合或现有安全门禁。

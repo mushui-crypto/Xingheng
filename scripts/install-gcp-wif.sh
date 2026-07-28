@@ -35,7 +35,7 @@ esac
   exit 78
 }
 
-node scripts/verify-gcp-wif-bundle.mjs source "$source_dir" "$audience_file"
+node scripts/verify-gcp-wif-bundle.mjs source "$environment" "$source_dir" "$audience_file"
 
 parent="$(dirname "$target")"
 if [ "${NODE_ENV:-}" != test ]; then
@@ -106,7 +106,7 @@ mounted=true
   echo "WIF staging mount is not tmpfs" >&2
   exit 1
 }
-node scripts/verify-gcp-wif-bundle.mjs copy "$source_dir" "$stage" "$audience_file"
+node scripts/verify-gcp-wif-bundle.mjs copy "$environment" "$source_dir" "$stage" "$audience_file"
 
 install -d -o 20001 -g 20001 -m 0700 "$target"
 mount --move "$stage" "$target"
@@ -116,7 +116,7 @@ published=true
   echo "WIF target mount is not tmpfs" >&2
   exit 1
 }
-node scripts/verify-gcp-wif-bundle.mjs installed "$target" "$audience_file"
+node scripts/verify-gcp-wif-bundle.mjs installed "$environment" "$target" "$audience_file"
 published=false
 parent_mount_created=false
 trap - EXIT HUP INT TERM

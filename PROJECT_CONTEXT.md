@@ -229,6 +229,11 @@ SQLite。
 
 环境变更、发布、真实资金相关操作必须遵守项目沟通规则。
 
+代码已支持通过显式 environment profile 区分 WIF source：production 保持含 trust chain 的
+五文件，direct-root、无 intermediate 的 real-test 使用不含 `trust-chain.pem` 的四文件。
+当前仅完成 D2B0 本地代码、测试与文档支持；D2B1 真实 source/audience 生成和 D2B2 tmpfs
+安装均未执行，不能视为 real-test 运行身份已建立。
+
 ------------------------------------------------------------------------
 
 # 7. 当前开发原则

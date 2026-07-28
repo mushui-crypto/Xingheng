@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
-import { chmod, chown, mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, chown, link, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -47,6 +47,91 @@ test("GCP KMS adapter accepts X.509 external-account ADC and wraps isolated data
     assert.ok(fixture.client.decryptCalls >= 3);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("GCP KMS adapter accepts both frozen WIF profiles and keeps the profile identity frozen", async () => {
+  for (const deploymentEnvironment of ["production", "real-test"] as const) {
+    const fixture = await createFixture(
+      x509Adc,
+      new FakeKmsClient({
+        versionName: `${deploymentEnvironment === "production"
+          ? RWA_GCP_KMS_KEY_NAME
+          : RWA_REAL_TEST_GCP_KMS_KEY_NAME}/cryptoKeyVersions/1`,
+      }),
+      deploymentEnvironment,
+    );
+    try {
+      const previous = process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT;
+      process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT =
+        deploymentEnvironment === "production" ? "real-test" : "production";
+      try {
+        const created = await fixture.provider.createDataKey(context);
+        assert.equal(
+          created.keyName,
+          deploymentEnvironment === "production"
+            ? RWA_GCP_KMS_KEY_NAME
+            : RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+        );
+        created.plaintextDek.fill(0);
+      } finally {
+        if (previous === undefined) delete process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT;
+        else process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT = previous;
+      }
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("GCP KMS adapter rejects crossed profiles, extra fields, and extra files before KMS", async () => {
+  const cases = [
+    {
+      deploymentEnvironment: "production" as const,
+      adc: (root: string) => x509Adc(root, "real-test"),
+      mutate: undefined,
+    },
+    {
+      deploymentEnvironment: "real-test" as const,
+      adc: (root: string) => x509Adc(root, "production"),
+      mutate: undefined,
+    },
+    {
+      deploymentEnvironment: "real-test" as const,
+      adc: (root: string) => ({
+        ...x509Adc(root, "real-test"),
+        credential_source: {
+          certificate: {
+            certificate_config_location: join(root, "certificate_config.json"),
+            trust_chain_path: join(root, "trust-chain.pem"),
+          },
+        },
+      }),
+      mutate: undefined,
+    },
+    {
+      deploymentEnvironment: "real-test" as const,
+      adc: x509Adc,
+      mutate: (root: string) =>
+        writeFile(join(root, "trust-chain.pem"), "unexpected", { mode: 0o400 }),
+    },
+  ];
+  for (const entry of cases) {
+    const fixture = await createFixture(
+      entry.adc,
+      new FakeKmsClient(),
+      entry.deploymentEnvironment,
+    );
+    try {
+      await entry.mutate?.(fixture.secretRoot);
+      await assert.rejects(
+        fixture.provider.createDataKey(context),
+        hasCategory("credential_key_provider_auth_rejected"),
+      );
+      assert.equal(fixture.client.encryptCalls, 0);
+    } finally {
+      await fixture.cleanup();
+    }
   }
 });
 
@@ -267,6 +352,46 @@ test("GCP KMS adapter rejects symlinked or over-permissive WIF identity files", 
   }
 });
 
+test("GCP KMS adapter rejects hardlinked identity files before KMS", async () => {
+  const fixture = await createFixture();
+  try {
+    const outside = join(fixture.directory, "outside-hardlink-certificate.pem");
+    await writeFile(outside, "test-only-certificate", { mode: 0o400 });
+    await rm(fixture.certPath);
+    await link(outside, fixture.certPath);
+    await assert.rejects(
+      fixture.provider.createDataKey(context),
+      hasCategory("credential_key_provider_auth_rejected"),
+    );
+    assert.equal(fixture.client.encryptCalls, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("GCP KMS adapter rejects certificate-config path escape before KMS", async () => {
+  const fixture = await createFixture();
+  try {
+    await chmod(fixture.certificateConfigPath, 0o600);
+    await writeFile(fixture.certificateConfigPath, JSON.stringify({
+      cert_configs: {
+        workload: {
+          cert_path: join(fixture.secretRoot, "..", "escaped-cert.pem"),
+          key_path: fixture.keyPath,
+        },
+      },
+    }));
+    await chmod(fixture.certificateConfigPath, 0o400);
+    await assert.rejects(
+      fixture.provider.createDataKey(context),
+      hasCategory("credential_key_provider_auth_rejected"),
+    );
+    assert.equal(fixture.client.encryptCalls, 0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("GCP KMS adapter requires a private 0700 secret root", async () => {
   const fixture = await createFixture();
   try {
@@ -370,29 +495,97 @@ test("runtime boundary pins a non-root UID/GID, rejects remapping, and requires 
   }
 });
 
-test("versioned certificate files become active through an atomic certificate-config replacement", async () => {
+test("production active WIF rejects candidate, staged-config, and unknown extra files before KMS", async () => {
+  const additions = [
+    async (fixture: Awaited<ReturnType<typeof createFixture>>) => {
+      await Promise.all([
+        writeFile(join(fixture.secretRoot, "client-cert-generation-next.pem"), "candidate-cert", { mode: 0o400 }),
+        writeFile(join(fixture.secretRoot, "client-key-generation-next.pem"), "candidate-key", { mode: 0o400 }),
+      ]);
+    },
+    (fixture: Awaited<ReturnType<typeof createFixture>>) =>
+      writeFile(
+        join(fixture.secretRoot, "certificate_config.next.json"),
+        JSON.stringify({ cert_configs: { workload: {} } }),
+        { mode: 0o400 },
+      ),
+    (fixture: Awaited<ReturnType<typeof createFixture>>) =>
+      writeFile(join(fixture.secretRoot, "unexpected.txt"), "unexpected", { mode: 0o400 }),
+  ];
+
+  for (const addFiles of additions) {
+    const fixture = await createFixture();
+    try {
+      await addFiles(fixture);
+      await assert.rejects(
+        fixture.provider.createDataKey(context),
+        hasCategory("credential_key_provider_auth_rejected"),
+      );
+      assert.equal(fixture.client.encryptCalls, 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("production active WIF validates after its single-generation exact set is restored", async () => {
+  const fixture = await createFixture();
+  const extraPath = join(fixture.secretRoot, "candidate-cert.pem");
+  try {
+    await writeFile(extraPath, "candidate-cert", { mode: 0o400 });
+    await assert.rejects(
+      fixture.provider.createDataKey(context),
+      hasCategory("credential_key_provider_auth_rejected"),
+    );
+    assert.equal(fixture.client.encryptCalls, 0);
+
+    await rm(extraPath);
+    const created = await fixture.provider.createDataKey(context);
+    assert.equal(created.plaintextDek.length, 32);
+    assert.equal(fixture.client.encryptCalls, 1);
+    created.plaintextDek.fill(0);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
+test("production active WIF rejects certificate config references into sibling lifecycle directories", async () => {
+  for (const siblingName of ["active", "candidate", "retired"]) {
+    const fixture = await createFixture();
+    try {
+      const siblingRoot = join(fixture.directory, siblingName);
+      const siblingCert = join(siblingRoot, "client-cert.pem");
+      const siblingKey = join(siblingRoot, "client-key.pem");
+      await mkdir(siblingRoot, { mode: 0o700 });
+      await Promise.all([
+        writeFile(siblingCert, "sibling-cert", { mode: 0o400 }),
+        writeFile(siblingKey, "sibling-key", { mode: 0o400 }),
+      ]);
+      await rewriteCertificateConfig(fixture, siblingCert, siblingKey);
+
+      await assert.rejects(
+        fixture.provider.createDataKey(context),
+        hasCategory("credential_key_provider_auth_rejected"),
+      );
+      assert.equal(fixture.client.encryptCalls, 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+});
+
+test("production active WIF ignores root-external candidate and retired sibling directories", async () => {
   const fixture = await createFixture();
   try {
-    const nextCertPath = join(fixture.secretRoot, "client-cert-generation-2.pem");
-    const nextKeyPath = join(fixture.secretRoot, "client-key-generation-2.pem");
-    const stagedConfigPath = join(fixture.secretRoot, "certificate_config.next.json");
-    await Promise.all([
-      writeFile(nextCertPath, "test-only-certificate-generation-2", { mode: 0o400 }),
-      writeFile(nextKeyPath, "test-only-key-generation-2", { mode: 0o400 }),
-    ]);
-    await writeFile(stagedConfigPath, JSON.stringify({
-      cert_configs: {
-        workload: {
-          cert_path: nextCertPath,
-          key_path: nextKeyPath,
-        },
-      },
-    }), { mode: 0o400 });
-    await rename(stagedConfigPath, fixture.certificateConfigPath);
+    for (const siblingName of ["candidate", "retired"]) {
+      const siblingRoot = join(fixture.directory, siblingName);
+      await mkdir(siblingRoot, { mode: 0o700 });
+      await writeFile(join(siblingRoot, "untrusted.pem"), "outside-active-root", { mode: 0o400 });
+    }
 
     const created = await fixture.provider.createDataKey(context);
     assert.equal(created.plaintextDek.length, 32);
-    assert.equal(fixture.client.encryptCalls > 0, true);
+    assert.equal(fixture.client.encryptCalls, 1);
     created.plaintextDek.fill(0);
   } finally {
     await fixture.cleanup();
@@ -480,9 +673,30 @@ function withEnvironment(values: Record<string, string | undefined>, run: () => 
   }
 }
 
+async function rewriteCertificateConfig(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  certPath: string,
+  keyPath: string,
+) {
+  await chmod(fixture.certificateConfigPath, 0o600);
+  await writeFile(fixture.certificateConfigPath, JSON.stringify({
+    cert_configs: {
+      workload: {
+        cert_path: certPath,
+        key_path: keyPath,
+      },
+    },
+  }));
+  await chmod(fixture.certificateConfigPath, 0o400);
+}
+
 async function createFixture(
-  adc: unknown | ((secretRoot: string) => unknown) = x509Adc,
+  adc: unknown | ((
+    secretRoot: string,
+    deploymentEnvironment: "production" | "real-test",
+  ) => unknown) = x509Adc,
   client = new FakeKmsClient(),
+  deploymentEnvironment: "production" | "real-test" = "production",
 ) {
   const directory = await realpath(await mkdtemp(join(tmpdir(), "xingheng-gcp-kms-")));
   const secretRoot = join(directory, "gcp-wif");
@@ -507,23 +721,34 @@ async function createFixture(
     ),
     writeFile(certPath, "test-only-certificate", { mode: 0o400 }),
     writeFile(keyPath, "test-only-private-key-reference", { mode: 0o400 }),
-    writeFile(trustChainPath, "test-only-trust-chain", { mode: 0o400 }),
+    ...(deploymentEnvironment === "production"
+      ? [writeFile(trustChainPath, "test-only-trust-chain", { mode: 0o400 })]
+      : []),
   ]);
-  const adcValue = typeof adc === "function" ? adc(secretRoot) : adc;
+  const adcValue = typeof adc === "function"
+    ? adc(secretRoot, deploymentEnvironment)
+    : adc;
   await writeFile(adcPath, JSON.stringify(adcValue), { mode: 0o400 });
   const previousProvider = process.env.RWA_CREDENTIAL_KEY_PROVIDER;
   const previousMasterKey = process.env.RWA_AUTOMATION_MASTER_KEY;
   process.env.RWA_CREDENTIAL_KEY_PROVIDER = "gcp-kms";
   delete process.env.RWA_AUTOMATION_MASTER_KEY;
+  const previousNodeEnvironment = process.env.NODE_ENV;
+  process.env.NODE_ENV = "test";
   const provider = new GcpKmsCredentialKeyProvider({
-    keyName: RWA_GCP_KMS_KEY_NAME,
+    keyName: deploymentEnvironment === "production"
+      ? RWA_GCP_KMS_KEY_NAME
+      : RWA_REAL_TEST_GCP_KMS_KEY_NAME,
     adcPath,
     wifAudience: testWifAudience,
     secretRoot,
     expectedOwnerUid: process.getuid?.() ?? 0,
     expectedOwnerGid: process.getgid?.() ?? 0,
+    deploymentEnvironment,
     client: client as never,
   });
+  if (previousNodeEnvironment === undefined) delete process.env.NODE_ENV;
+  else process.env.NODE_ENV = previousNodeEnvironment;
   return {
     provider,
     client,
@@ -552,7 +777,10 @@ function alternateGroupId() {
   throw new Error("GID ownership test requires a secondary local group.");
 }
 
-function x509Adc(secretRoot: string) {
+function x509Adc(
+  secretRoot: string,
+  deploymentEnvironment: "production" | "real-test" = "production",
+) {
   return {
     type: "external_account",
     audience: testWifAudience,
@@ -561,7 +789,9 @@ function x509Adc(secretRoot: string) {
     credential_source: {
       certificate: {
         certificate_config_location: join(secretRoot, "certificate_config.json"),
-        trust_chain_path: join(secretRoot, "trust-chain.pem"),
+        ...(deploymentEnvironment === "production"
+          ? { trust_chain_path: join(secretRoot, "trust-chain.pem") }
+          : {}),
       },
     },
   };

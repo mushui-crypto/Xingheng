@@ -21,6 +21,7 @@ const TRUST_CHAIN_NAME = "trust-chain.pem";
 const SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:mtls";
 const STS_URL = "https://sts.mtls.googleapis.com/v1/token";
 const AUDIENCE_PATTERN = /^\/\/iam\.googleapis\.com\/projects\/[1-9]\d{5,19}\/locations\/global\/workloadIdentityPools\/[a-z][a-z0-9-]{3,31}\/providers\/[a-z][a-z0-9-]{3,31}$/u;
+const WIF_PROFILES = new Set(["production", "real-test"]);
 
 export function readExpectedAudience(path, expectedUid = process.getuid?.(), expectedGid = process.getgid?.()) {
   const value = readStrictFile(path, expectedUid, expectedGid, 0o400, 4096).trim();
@@ -31,12 +32,14 @@ export function readExpectedAudience(path, expectedUid = process.getuid?.(), exp
 export function validateWifBundle(
   root,
   expectedAudience,
+  profile,
   {
     expectedUid = process.getuid?.(),
     expectedGid = process.getgid?.(),
     logicalRoot = WIF_LOGICAL_ROOT,
   } = {},
 ) {
+  assertWifProfile(profile);
   if (!AUDIENCE_PATTERN.test(expectedAudience)) throw new Error("WIF expected audience is invalid");
   const absoluteRoot = resolve(root);
   const rootMetadata = lstatSync(absoluteRoot);
@@ -67,13 +70,17 @@ export function validateWifBundle(
   const source = record(adc.credential_source, "WIF credential source");
   exactKeys(source, ["certificate"], "WIF credential source");
   const certificate = record(source.certificate, "WIF certificate source");
-  exactKeys(certificate, ["certificate_config_location", "trust_chain_path"], "WIF certificate source");
-  if (
-    certificate.certificate_config_location !== `${logicalRoot}/${CERTIFICATE_CONFIG_NAME}`
-    || certificate.trust_chain_path !== `${logicalRoot}/${TRUST_CHAIN_NAME}`
-  ) {
+  const certificateKeys = profile === "production"
+    ? ["certificate_config_location", "trust_chain_path"]
+    : ["certificate_config_location"];
+  exactKeys(certificate, certificateKeys, "WIF certificate source");
+  if (certificate.certificate_config_location !== `${logicalRoot}/${CERTIFICATE_CONFIG_NAME}`) {
     throw new Error("WIF certificate source boundary is invalid");
   }
+  if (
+    profile === "production"
+    && certificate.trust_chain_path !== `${logicalRoot}/${TRUST_CHAIN_NAME}`
+  ) throw new Error("WIF certificate source boundary is invalid");
 
   const certificateConfig = jsonObject(
     readStrictFile(
@@ -92,7 +99,13 @@ export function validateWifBundle(
   exactKeys(workload, ["cert_path", "key_path"], "WIF workload config");
   const certificateName = logicalFileName(workload.cert_path, logicalRoot, "WIF certificate");
   const keyName = logicalFileName(workload.key_path, logicalRoot, "WIF private key");
-  const fileNames = [ADC_NAME, CERTIFICATE_CONFIG_NAME, TRUST_CHAIN_NAME, certificateName, keyName];
+  const fileNames = [
+    ADC_NAME,
+    CERTIFICATE_CONFIG_NAME,
+    ...(profile === "production" ? [TRUST_CHAIN_NAME] : []),
+    certificateName,
+    keyName,
+  ];
   if (new Set(fileNames).size !== fileNames.length) throw new Error("WIF bundle file mapping is invalid");
   for (const name of fileNames) {
     readStrictFile(join(absoluteRoot, name), expectedUid, expectedGid, 0o400, 1024 * 1024);
@@ -105,10 +118,10 @@ export function validateWifBundle(
   return Object.freeze({ fileNames: Object.freeze(fileNames) });
 }
 
-export function copyWifBundle(sourceRoot, destinationRoot, expectedAudience) {
+export function copyWifBundle(sourceRoot, destinationRoot, expectedAudience, profile) {
   const sourceUid = process.getuid?.();
   const sourceGid = process.getgid?.();
-  const bundle = validateWifBundle(sourceRoot, expectedAudience, {
+  const bundle = validateWifBundle(sourceRoot, expectedAudience, profile, {
     expectedUid: sourceUid,
     expectedGid: sourceGid,
   });
@@ -140,10 +153,16 @@ export function copyWifBundle(sourceRoot, destinationRoot, expectedAudience) {
       content.fill(0);
     }
   }
-  return validateWifBundle(destinationRoot, expectedAudience, {
+  return validateWifBundle(destinationRoot, expectedAudience, profile, {
     expectedUid: WIF_RUNTIME_UID,
     expectedGid: WIF_RUNTIME_GID,
   });
+}
+
+function assertWifProfile(profile) {
+  if (!WIF_PROFILES.has(profile)) {
+    throw new Error("WIF profile must be production or real-test");
+  }
 }
 
 function readStrictFile(path, expectedUid, expectedGid, expectedMode, maxBytes) {

@@ -1,4 +1,4 @@
-import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { relative, resolve, sep } from "node:path";
 
 export const RWA_GCP_WIF_SECRET_ROOT = "/run/secrets/gcp-wif";
@@ -9,10 +9,12 @@ export const RWA_GCP_WIF_MTLS_SUBJECT_TOKEN_TYPE = "urn:ietf:params:oauth:token-
 export const RWA_GCP_STS_TOKEN_URL = "https://sts.mtls.googleapis.com/v1/token";
 export const RWA_AUTOMATION_RUNTIME_UID = 20001;
 export const RWA_AUTOMATION_RUNTIME_GID = 20001;
+export type GcpWifDeploymentEnvironment = "production" | "real-test";
 
 type WifValidationOptions = {
   adcPath: string;
   expectedAudience: string;
+  deploymentEnvironment: GcpWifDeploymentEnvironment;
   secretRoot?: string;
   expectedOwnerUid?: number;
   expectedOwnerGid?: number;
@@ -67,20 +69,24 @@ export function validateGcpWifCredentialFiles(options: WifValidationOptions) {
   const source = object(adc.credential_source, "ADC credential_source");
   assertExactKeys(source, ["certificate"], "ADC credential_source");
   const certificate = object(source.certificate, "ADC certificate source");
+  const certificateKeys = options.deploymentEnvironment === "production"
+    ? ["certificate_config_location", "trust_chain_path"]
+    : ["certificate_config_location"];
   assertExactKeys(
     certificate,
-    ["certificate_config_location", "trust_chain_path"],
+    certificateKeys,
     "ADC certificate source",
   );
 
   const expectedCertificateConfigPath = resolve(secretRoot, "certificate_config.json");
   const expectedTrustChainPath = resolve(secretRoot, "trust-chain.pem");
-  if (
-    certificate.certificate_config_location !== expectedCertificateConfigPath
-    || certificate.trust_chain_path !== expectedTrustChainPath
-  ) {
+  if (certificate.certificate_config_location !== expectedCertificateConfigPath) {
     throw rejected("X.509 WIF certificate source 路径不符合冻结配置。");
   }
+  if (
+    options.deploymentEnvironment === "production"
+    && certificate.trust_chain_path !== expectedTrustChainPath
+  ) throw rejected("X.509 WIF certificate source 路径不符合冻结配置。");
 
   const certificateConfigPath = secureFile(
     certificate.certificate_config_location,
@@ -89,13 +95,15 @@ export function validateGcpWifCredentialFiles(options: WifValidationOptions) {
     expectedOwnerGid,
     "certificate config",
   );
-  secureFile(
-    certificate.trust_chain_path,
-    secretRoot,
-    expectedOwnerUid,
-    expectedOwnerGid,
-    "trust chain",
-  );
+  if (options.deploymentEnvironment === "production") {
+    secureFile(
+      certificate.trust_chain_path,
+      secretRoot,
+      expectedOwnerUid,
+      expectedOwnerGid,
+      "trust chain",
+    );
+  }
 
   const certificateConfig = jsonObject(certificateConfigPath, "certificate config");
   assertExactKeys(certificateConfig, ["cert_configs"], "certificate config");
@@ -106,8 +114,28 @@ export function validateGcpWifCredentialFiles(options: WifValidationOptions) {
   if (typeof workload.cert_path !== "string" || typeof workload.key_path !== "string") {
     throw rejected("X.509 WIF certificate config 字段无效。");
   }
-  secureFile(workload.cert_path, secretRoot, expectedOwnerUid, expectedOwnerGid, "certificate");
-  secureFile(workload.key_path, secretRoot, expectedOwnerUid, expectedOwnerGid, "private key");
+  const certPath = secureFile(workload.cert_path, secretRoot, expectedOwnerUid, expectedOwnerGid, "certificate");
+  const keyPath = secureFile(workload.key_path, secretRoot, expectedOwnerUid, expectedOwnerGid, "private key");
+  const expectedFiles = [
+    "adc.json",
+    "certificate_config.json",
+    ...(options.deploymentEnvironment === "production" ? ["trust-chain.pem"] : []),
+    certPath.slice(secretRoot.length + 1),
+    keyPath.slice(secretRoot.length + 1),
+  ].sort();
+  if (new Set(expectedFiles).size !== expectedFiles.length) {
+    throw rejected("X.509 WIF 文件映射不符合冻结配置。");
+  }
+  let actualFiles: string[];
+  try {
+    actualFiles = readdirSync(secretRoot).sort();
+  } catch {
+    throw unavailable("WIF secret 根目录不可用。");
+  }
+  if (
+    actualFiles.length !== expectedFiles.length
+    || actualFiles.some((name, index) => name !== expectedFiles[index])
+  ) throw rejected("X.509 WIF secret 目录包含未知或缺失文件。");
 }
 
 export function validateGcpWifRuntimeBoundary(options: RuntimeBoundaryOptions = {}) {
@@ -184,6 +212,7 @@ function secureFile(
     }
     if (
       !metadata.isFile()
+      || metadata.nlink !== 1
       || metadata.uid !== expectedOwnerUid
       || metadata.gid !== expectedOwnerGid
       || (metadata.mode & 0o777) !== 0o400

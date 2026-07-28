@@ -16,13 +16,13 @@
 
 当前 Owner：Product-Technical Lead
 
-角色：任务协调、审批与 Owner 交接负责人
+角色：D2B0 Review 收口、提交审批与后续批次协调
 
-下一 Owner：Security DevOps Engineer（批次 C，待用户独立授权）
+下一 Owner：Security DevOps Engineer（D2B1，待用户独立授权）
 
 交接状态：
 
--   B4-R1 复审通过回传已接收；批次 C 尚未授权或交接
+-   D2B0-R1 复审通过，无 P0-P3；当前未提交、未 push，D2B1/D2B2/E 未授权
 
 ------------------------------------------------------------------------
 
@@ -34,7 +34,8 @@ StellaX 需要在独立 GCP 项目 `xingheng-real-test` 中建立单 VM real-tes
 零交易所凭证、零 Mainnet private API 和零 provider mutation 的部署与 UI 验收。独立公网入口、
 real-test WIF 安装路径、激活成功门禁和 KMS 项目隔离修复已完成开发、Review 与主分支集成。
 GCP 基础设施、real-test KMS、Workload Identity Pool 和架构复核后的 X.509 Provider 已创建；
-IAM、叶证书、五文件、STS/KMS probe、DNS/TLS 和部署仍未执行。
+单一 CryptoKey 最小 IAM、root-only 私钥/CSR、P30D 叶证书签发及公开 leaf/chain 隔离发布已完成。
+ADC、real-test 四文件 source、tmpfs 安装、STS/KMS probe、DNS/TLS 和部署仍未执行。
 
 ## 目标
 
@@ -67,7 +68,9 @@ Level：Level 3（架构审查）
 
 架构状态：Architecture Reviewer 已批准独立 GCP 单 VM real-test 拓扑，并在批次 B2 失败后
 唯一冻结 X.509 Provider ID `rwa-api-x509`。独立入口、WIF 安装路径和 KMS 项目隔离修复均已完成
-Level 3 Code Review 并进入 `origin/main`。批次 B3 Provider 已按冻结身份模型创建并验收。
+Level 3 Code Review 并进入 `origin/main`。批次 B3 Provider、批次 C 最小 IAM、D1 私钥/CSR 和
+D2A 叶证书已按冻结身份模型完成；Architecture Reviewer 已有条件接受当前隔离、短期、单 workload
+real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 
 ------------------------------------------------------------------------
 
@@ -92,6 +95,8 @@ Level 3 Code Review 并进入 `origin/main`。批次 B3 Provider 已按冻结身
 -   `deploy/CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md`
 -   `scripts/real-test-standalone-compose.sh`
 -   `scripts/activate-real-test-release.sh`
+-   `scripts/prepare-real-test-gcp-wif-source.py`
+-   `scripts/prepare-real-test-gcp-wif-source.test.mjs`
 -   `scripts/install-gcp-wif.sh`
 -   `scripts/verify-deployment-revision.mjs`
 -   `scripts/verify-real-test-web-health.sh`
@@ -102,12 +107,13 @@ Level 3 Code Review 并进入 `origin/main`。批次 B3 Provider 已按冻结身
 
 # 当前状态
 
-状态：批次 B4-R1 复审通过，无 P0-P3；批次 C 待独立授权
+状态：D2B0-R1 复审通过，无 P0-P3；待提交审批，D2B1/D2B2/E 未授权
 
 Git 状态：
 
 -   当前分支：`develop`
--   B4 提交前 HEAD / `origin/develop`：`de84309f78e26836def189e2ba48b8dab2b701fa0`
+-   当前 HEAD / `origin/develop`：
+    `9b9e603ca6d8d4f7b349f3eac53e256de1a598b1`（B4 Provider/audience 一致性提交）
 -   `origin/main`：`623d5d1fa888ad0dbbbe56ce6ee9754a72bfc0db`
 -   `8b6dc687f5f75d99ec189e2ba48b8dab2b701fa0` 已完成 Code Review，并与任务记录提交
     `de84309f78e26836def1896aa8015cd2bbb95fdb` 一并通过 merge commit
@@ -203,38 +209,105 @@ Git 状态：
       `AA:B8:C0:C0:47:66:1F:1E:D2:B8:98:5B:6E:46:25:D3:F7:F1:2B:CA:85:D9:B9:21:51:B1:C4:C7:3A:44:F0:5F`。
     - 当前 audience 为
       `//iam.googleapis.com/projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509`。
-    - Pool/Provider/KeyRing/CryptoKey IAM 均为空；VM 服务账号在 project/KeyRing/CryptoKey
-      均无 KMS binding。批次 C 未执行。
+    - 批次 C 前 Pool、KeyRing、CryptoKey 和 project KMS IAM 均为空；Provider 无独立 policy
+      surface。批次 C 仅在目标 CryptoKey 添加一个冻结 workload subject 的
+      `roles/cloudkms.cryptoKeyEncrypterDecrypter` binding。
+    - 批次 C 后 Pool/KeyRing/project KMS IAM 仍为空，CryptoKey IAM exact-set 仅含上述唯一
+      subject/role、无 condition；VM 服务账号在 project/KeyRing/CryptoKey 及可见上级仍无 KMS
+      binding。
+-   批次 D1 已生成并验收唯一 root-only 私钥与 CSR：
+    - `VERSION=20260728T062225Z`。
+    - STAGE 为
+      `/var/lib/xingheng-real-test/gcp-wif-build/20260728T062225Z`，root:root `0700`。
+    - 私钥为 STAGE 内 `leaf-20260728T062225Z.key.pem`，root:root `0400`、`nlink=1`，
+      SHA-256=`b995347dc21a46b7f1adec98564eb71109b6c6ea07c88a22fd57222c844a22a8`。
+    - CSR 为
+      `/var/lib/xingheng-real-test/gcp-wif-csr/leaf-20260728T062225Z.csr.pem`，
+      root:root `0400`、`nlink=1`，
+      SHA-256=`f9c01a7916de7c482e59a439fb17b855c066c03e286bd89434933d08ca0e4792`。
+    - KEY/CSR public-key DER SHA-256 均为
+      `764d265a2b83f0d2eccd5c46a81bb03a6596e16e8973b128b8295297ad3aaf17`；KEY 未离开 VM。
+    - 单次 CA `--validate-only` 返回成功且 DEVOPS Pool 未出现持久 Certificate resource；
+      未实际签发。
+-   批次 D2A 仅实际签发一次 P30D clientAuth 叶证书。DEVOPS tier 不存储、不支持
+    list/describe/revoke 单张证书，因此逻辑
+    `CERT_ID=xingheng-rwa-api-real-test-20260728T062225Z` 只用于本地请求和证据关联，不表述为
+    可 describe 的持久 Certificate resource。
+    - 返回 chain exact 2 blocks，顺序为 leaf + 冻结 Root；chain SHA-256=
+      `3af05da0f58d62852f99d97c173a185d25195448d6fe066378653f86dcfc2218`。
+    - leaf SHA-256=`b0c4ad3a5b72d2294abd6fcf91bf474408b50b91de7393470c6c980de0d6ac35`；
+      fingerprint=`F2:B1:D8:CD:84:2B:26:65:E8:54:44:4B:8E:22:4D:72:CD:74:9E:24:26:CC:E6:13:F0:1A:9A:50:CD:9A:CF:23`。
+    - Root 原始 PEM bytes SHA-256=
+      `b26409d853c515516d2a713dfcf3323c0a6ccd5050688145f840beaac95e25a3`，
+      指纹仍为冻结值；验证时禁止规范化、补删结尾 LF 或重编码后再比较 raw SHA。
+    - serial=`CD15E10F8E62C527ABC4E1502D686DC7A65102`；
+      validity=`2026-07-28T06:58:56Z` 至 `2026-08-27T06:58:55Z`，共 2,591,999 秒。
+    - subject、issuer、唯一 URI SAN、critical CA:false、critical KU、EKU 仅 clientAuth、
+      RSA2048、SHA256/RSA、Root 验证与 D1 public-key hash 均精确通过。
+-   D2A-R1 因错误地为 Root raw bytes 补 LF 后比较原始 SHA，在任何发布前 fail-closed；
+    D2A-R2 修正 raw-byte 门禁后完成临时与 final 验收，但因错误依赖 `os.listdir` 排序而
+    fail-closed。两批均按本批 inode/hash 收据清理临时/最终公开文件，D1 KEY/CSR 无漂移，
+    未再次签发。
+-   D2A-R3 仅将最终 STAGE 断言修正为 `len(items) == 3` 与无序 exact-set，其他安全门禁不变；
+    leaf/chain 已用 `O_EXCL|O_NOFOLLOW`、同目录临时文件、fsync 和
+    `renameat2(RENAME_NOREPLACE)` 排他发布：
+    - `leaf-20260728T062225Z.cert.pem`：dev/ino=`2049/946305`、root:root `0400`、
+      `nlink=1`、size=1879，SHA-256 为上述 leaf 冻结值。
+    - `issued-chain-20260728T062225Z.pem`：dev/ino=`2049/946306`、root:root `0400`、
+      `nlink=1`、size=3752，SHA-256 为上述 chain 冻结值。
+    - STAGE exact-set 仅为 D1 KEY、leaf cert 与 issued chain；D1 KEY/CSR inode/hash 未漂移。
+      Cloud Shell public evidence 已按 exact path/dev/ino/size/SHA 清理并证明目录不存在。
+    - 未生成 ADC、certificate config、audience 或 real-test 四文件 source；未安装、probe 或
+      进入 D2B/E。
+-   D2B 前置只读核验确认 direct-root、无 intermediate；Architecture Reviewer 有条件批准
+    D2B0 使用显式双 profile：
+    - production 保持 ADC、certificate config、证书、私钥、trust chain 五文件。
+    - real-test 使用 ADC、certificate config、冻结 leaf、冻结 KEY 四文件；ADC 不含
+      `trust_chain_path`，source 不得出现 `trust-chain.pem`。
+-   D2B0 Security DevOps 独占实现已新增
+    `scripts/prepare-real-test-gcp-wif-source.py` 及聚焦本地测试。helper 固定
+    `real-test`、冻结路径/inode/hash、`/usr/bin/gcloud` 576.0.0 和 direct-root argv，
+    使用 no-follow FD、`O_EXCL`、fsync、`RENAME_NOREPLACE` 与本批 inode 收据清理。
+    该代码只准备未来 D2B1 离线 source/audience，不 install、不 mount、不 probe。
 
 ## 未完成
 
-1. 批次 C 尚未授权或执行。Pool/Provider/KeyRing/CryptoKey IAM 仍为空；必须另批仅在单一
-   CryptoKey 资源层级向冻结的 workload identity principal 授予唯一
-   `roles/cloudkms.cryptoKeyEncrypterDecrypter`，VM 服务账号继续不得获得 KMS 权限。
-2. 批次 D 尚未授权或执行。尚未在 VM 的 root-only 路径生成 leaf 私钥/CSR；尚未签发
-   P30D clientAuth 叶证书、
-   导出 root trust chain、生成 `adc.json`/`certificate_config.json` 或安装五文件 tmpfs bundle。
-3. 批次 E 尚未授权或执行。尚未执行真实 STS token exchange 或仅限目标 CryptoKey 的 KMS
+1. D2B0 Security DevOps 与 Backend 双 profile diff 已完成独立 Code Review 和 P1 限定复审，
+   无 P0-P3；当前仍未提交、未 push，不能作为 D2B1 现场受信 revision。
+2. D2B1 尚未授权或执行。尚未生成 root-only audience、`adc.json`、
+   `certificate_config.json` 和最终 real-test 四文件 source，真实 KEY 未被复制。
+3. D2B2 尚未授权或执行。尚未安装 `/run/xingheng-real-test/gcp-wif` tmpfs bundle。
+4. 批次 E 尚未授权或执行。尚未执行真实 STS token exchange 或仅限目标 CryptoKey 的 KMS
    health probe。
-4. 批次 F 尚未授权或执行。受信 operation launcher、canonical release tree/manifest/env、
+5. 批次 F 尚未授权或执行。受信 operation launcher、canonical release tree/manifest/env、
    named volumes、flock/lease、备份恢复与回滚尚未在 VM 安装或验证。
-5. 批次 G 尚未授权或执行。Cloudflare DNS、ACME、公网证书链、HTTPS
+6. 批次 G 尚未授权或执行。Cloudflare DNS、ACME、公网证书链、HTTPS
    health/revision/no-store 尚未验证。
-6. 批次 H 尚未授权或执行。real-test 尚未部署，浏览器登录、环境标签、导航及
+7. 批次 H 尚未授权或执行。real-test 尚未部署，浏览器登录、环境标签、导航及
    空态/不可执行态验收尚未执行。
-7. 日志脱敏、VM/container/HTTPS/disk/OOM/backup/WIF/KMS 告警与恢复收据尚未完成。
-8. `.env.real-test`、root-only audience、ADC、certificate config 和任何 secret 文件均尚未创建；
+8. `privateca.googleapis.com` 的 `DATA_WRITE` Data Access Audit Logs 尚未启用；它不阻断
+   当前公开材料或离线 D2B 准备，但必须在下一次签发/续期前以独立授权批次启用并验收，
+   建议同时在任何真实交易启用前完成。
+9. 日志脱敏、VM/container/HTTPS/disk/OOM/backup/WIF/KMS 告警与恢复收据尚未完成。
+10. `.env.real-test`、root-only audience、ADC 和 certificate config 均尚未创建；
    不得在聊天或仓库记录其敏感内容。
-9. 所有交易门禁继续关闭：服务端总急停开启，global/strategy execution 关闭，用户急停保持；
+11. 所有交易门禁继续关闭：服务端总急停开启，global/strategy execution 关闭，用户急停保持；
     不录入真实交易凭证，不调用 Mainnet private API，不执行 provider mutation 或资金动作。
 
 ## 当前问题
 
--   B4 初审发现 audience 最终路径使用普通重定向，可能在 verifier 拒绝前覆盖既有链接目标；
-    B4-R1 已改为排他、no-follow 创建并执行结构化文件契约核验，同一 Code Reviewer 复审通过，
-    无 P0-P3。批次 C 仍须用户独立授权，不能把文档更新解释为 IAM 授权。
+-   D2B0 只增加本地代码、测试和文档能力；不能把本地测试解释为 D2B1/D2B2/E、Audit Logs、
+    安装、probe 或部署授权。
+-   real-test direct-root source 必须是四文件；production 继续是五文件。两个 profile 必须由
+    installer/verifier 的显式 environment 参数选择，禁止按文件存在性自动推断或跨环境安装。
 -   Provider ID/full resource/audience 已冻结为 `rwa-api-x509` 契约；历史失败 ID
     `gcp-vm-x509` 只能保留在明确标注的失败记录中，不得作为当前配置。
+-   DEVOPS tier 的 `describe=NOT_FOUND` 与区域 list 为空是预期，不得据此判定签发失败；
+    同样不得把返回的有效证书链写成 CLI exit=0、持久 Certificate resource 或服务端 exact-set
+    的证据。
+-   DEVOPS tier 无单证书 revoke。当前短期、单 workload、零资金 real-test 仅以 Provider disable、
+    CryptoKey IAM 移除、runtime bundle 清理、API/Web 停止和等待 P30D 到期作为补偿控制；
+    不得把这些操作表述为 CA revoke。
 -   VM 正在运行并持续计费；CA Pool/Root CA、静态 IP、磁盘、日志等资源也可能产生持续费用。
 
 ------------------------------------------------------------------------
@@ -258,14 +331,28 @@ Git 状态：
    `projects/185789474550/locations/global/workloadIdentityPools/xingheng-rwa-real-test/providers/rwa-api-x509`，
    对应 audience 仅在前方增加 `//iam.googleapis.com/`。`create-cred-config` 使用无该前缀的
    Provider 完整资源名；ADC、服务端 env 和 root-only audience 文件使用带前缀的完整 audience。
-10. 批次 B3 只创建 Provider，不自动进入 IAM。批次 C/D/E/F/G/H 均须独立批准，任一阶段
-    证据不完整即停止。
+10. 批次 B3 只创建 Provider，不自动进入 IAM；批次 C 只建立目标 CryptoKey 的单一
+    subject/role binding；D1、D2A、D2B、E、F、G、H 均为独立批次，任一阶段证据不完整即停止。
+11. DEVOPS tier 对当前 P30D、T-7d 轮换、单 workload、单 Provider、单 CryptoKey、零资金
+    real-test 有条件可接受。它不存储、不支持 list/describe/revoke 单张证书；逻辑 CERT_ID 只作
+    本地证据关联，不能表述为持久 Certificate resource。
+12. 证书泄露事件不得声称 CA revoke；补偿控制固定为清除/隔离 runtime 凭证、移除目标
+    CryptoKey IAM、disable 单 workload Provider、停止 API/Web 并等待证书到期。若未来需要
+    逐证书撤销、长期身份、证书库存、多主体共享 Provider 或合规级生命周期管理，必须重新进行
+    Architecture Review 并评估 Enterprise 新 Pool/CA。
+13. `privateca.googleapis.com` 的 `DATA_WRITE` Data Access Audit Logs 必须在下一次证书
+    签发/续期前启用并验收；当前历史签发无法事后补记。该 IAM `auditConfigs` 写操作必须单独授权，
+    保留现有 etag/bindings、不得以宽泛 `set-iam-policy` 覆盖策略，并记录费用与传播延迟。
+14. WIF source 使用显式双 profile：production 保持含 trust chain 的五文件；real-test
+    direct-root 使用不含 `trust_chain_path`/`trust-chain.pem` 的四文件。D2B1 只能通过固定
+    `scripts/prepare-real-test-gcp-wif-source.py real-test` 入口准备，D2B2 再独立批准安装。
 
 影响：
 
 -   旧的 production 项目 real-test KMS 路径在修复合并后会被明确拒绝。
 -   real-test 部署只能在 WIF/KMS、受信 release、volume/lease、DNS/TLS 和回滚证据全部通过后激活。
 -   任一身份、权限、证书、KMS、provider、lease 或恢复证据不完整均停止，不允许以手工降级绕过。
+-   当前 leaf/chain 仅在 VM root-only STAGE 隔离保存，尚未形成 ADC/real-test 四文件或运行身份能力。
 
 ------------------------------------------------------------------------
 
@@ -273,7 +360,7 @@ Git 状态：
 
 【任务名称】
 
-独立 real-test 零资金基础设施、WIF/KMS 与部署接续
+TASK-001 D2B0-SD：real-test root-only source 安全生成 helper、测试与文档实现
 
 【当前 Owner】
 
@@ -281,63 +368,85 @@ Product-Technical Lead
 
 【下一 Owner】
 
-Security DevOps Engineer（批次 C，待用户独立授权）
+Security DevOps Engineer（D2B1，待用户独立授权）
 
 【任务目标】
 
-审查 `.env.real-test.example`、real-test runbook/readiness 和本任务记录是否与已创建的
-`rwa-api-x509` Provider 及 exact audience 一致，确认未修改 production 常量、脚本逻辑、实际 env
-或云资源。Review 通过后交回 Product-Technical Lead，再单独申请批次 C。
+在 D2B0 获得用户明确提交/push 授权并形成受信 revision 后，由 Product-Technical Lead 单独申请
+D2B1 用户授权。D2B1 只准备离线 root-only source/audience，不安装、不 probe；本交接本身不
+构成 D2B1/D2B2/E 授权。
 
 【当前状态】
 
-批次 B4-R1 已经同一 Code Reviewer 复审通过，无 P0-P3。独立入口、健康门禁和 KMS
-项目隔离修复已进入 `origin/main`；
-KMS、Workload Identity Pool 与 `rwa-api-x509` Provider 已创建并验收。IAM 仍为空，
-叶证书/五文件、probe、release、DNS/TLS 和部署均未执行。
+D2B0 Security DevOps helper 与 Backend 双 profile 实现已汇合，并经独立 Code Review 初审、
+Architecture Reviewer P1 裁定及同一 Reviewer 限定复审通过，无 P0-P3。当前全部变更仍未提交、
+未 push。真实
+ADC/source/audience 未生成，
+KEY 未复制，未安装、mount、probe、访问 VM/云或进入 D2B1/D2B2/E。
 
 【已完成内容】
 
-见“执行记录 / 已完成”。本批次重点是：
+见“执行记录 / 已完成”。本批重点是：
 
--   `.env.real-test.example` 已冻结 exact audience。
--   real-test runbook 已区分 Provider full resource 与带前缀 audience，并冻结
-    `create-cred-config`/五文件逻辑路径。
--   readiness 已加入 `rwa-api-x509` exact-set 和 audience 门禁。
--   本任务记录保留 B/B1/B2 失败历史，并追加 Architecture Review、B3 成功、IAM 为空和后续批次状态。
+-   新增固定 `real-test` CLI 的 Python helper；生产入口不能接受任意环境、路径或 gcloud 参数。
+-   helper 固定 D1/D2A inode/hash/owner/mode/nlink，使用验证 FD 分块复制 cert/KEY，固定校验
+    gcloud 576.0.0/binary/argv，结构化拒绝 trust chain、impersonation、未知 credential source
+    和嵌入身份材料。
+-   source/audience 使用 `O_EXCL|O_NOFOLLOW`、0400、fsync、
+    `renameat2(RENAME_NOREPLACE)` 和 final reopen；失败只按本批 inode 收据清理。
+-   聚焦测试仅使用临时 fixture 与 fake gcloud，覆盖成功、路径攻击、输入漂移、gcloud 污染、
+    no-replace 冲突与失败清理；不读取真实 KEY。
+-   最终联合验证：helper 与 bundle/installer `35/35`、服务端 WIF/KMS `21/21`、release bridge
+    `52/52`；TypeScript、build、`npm run deploy:validate`、Python parse 与限定 diff check 均通过。
+-   runbook、README、RWA neutral automation、Decision Log 与任务记录同步 direct-root
+    四文件和显式双 profile。
 
 【未完成内容】
 
-见“执行记录 / 未完成”。当前第一步是由 Product-Technical Lead 取得批次 C 的独立用户授权；
-不得把 B4 Review 通过解释为 IAM 写操作获批。
+D2B0 已通过独立 Code Review，但尚未取得提交/push 授权或形成受信 revision。D2B1/D2B2 必须在
+D2B0 提交后分别取得用户明确授权；不得提前执行 helper 正例或 installer。
+`deploy/STEP_0_PRODUCTION_CHECKLIST.md` 的两处 `verify-gcp-wif-bundle.mjs` 示例已补入显式
+`production` profile并通过同一 Review。
 
 【涉及文件/模块】
 
--   `.env.real-test.example`
+-   `scripts/prepare-real-test-gcp-wif-source.py`
+-   `scripts/prepare-real-test-gcp-wif-source.test.mjs`
 -   `deploy/PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md`
--   `deploy/CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md`
 -   `docs/tasks/TASK-001.md`
+-   `deploy/README.md`
+-   `RWA_NEUTRAL_AUTOMATION_V1.md`
+-   `docs/decisions/DECISION_LOG.md`
+-   `PROJECT_CONTEXT.md`（仅记录代码支持、现场未执行）
 
 严禁触碰、暂存、覆盖或回退用户既有 `TASK_TEMPLATE.md`、`项目沟通规则.md` 修改。
 
 【关键决策】
 
-Provider ID 唯一为 `rwa-api-x509`；`create-cred-config` 使用无 `//iam.googleapis.com/` 前缀的
-Provider full resource，ADC/env/audience 文件使用带前缀 audience。历史 `gcp-vm-x509`
-仅作为失败记录。IAM 与后续批次不因本地一致性更新自动获批。
+production 保持五文件与 trust chain；real-test 的叶证书由 Provider 已配置 Root 直接签发且
+无 intermediate，因此必须使用不含 `trust_chain_path`/`trust-chain.pem` 的四文件。shared
+installer/verifier 只能通过显式 environment 选择 profile，不得自动推断。D2B1 只准备离线
+source/audience；D2B2 才安装 tmpfs，两个批次必须分别授权。
 
 【风险事项】
 
--   Provider 已存在，但 IAM、证书、ADC 和 probe 尚未建立；不得把 `ACTIVE` 解释为可执行。
--   文档中的 credential-config 命令仍是未来受控批次预览，版本化 cert/key 名必须在批次 D 冻结。
+-   IAM 与 leaf 已建立，但 ADC、real-test 四文件、安装和 probe 尚未建立；不得把 Provider `ACTIVE`、
+    CryptoKey IAM 或 STAGE 中存在 leaf/KEY 解释为可执行运行身份。
+-   helper 将在 D2B1 增加一份 root-only KEY 副本；这一敏感扩大尚未授权。
+-   当前本地测试不能证明 VM `/usr/bin/gcloud` 576.0.0、Linux `renameat2` 或真实文件系统现场
+    已通过，必须在 D2B1 再做执行前硬门禁。
+-   `deploy/STEP_0_PRODUCTION_CHECKLIST.md` 的 verifier CLI 已补入显式 `production` profile并通过
+    Review，但必须随 D2B0 受信 revision 提交后才可执行。
+-   DEVOPS leaf 无法单独 revoke；当前补偿控制只对单 workload、零资金 real-test 有效，不得外推。
+-   本次历史签发未被 Data Access Logs 覆盖且无法补记。
 -   DNS/ACME/TLS、release、volume、备份恢复、回滚和告警仍为 `field-pending`。
 -   所有交易门禁保持关闭；任何真实凭证、急停解除、执行开关或资金窗口均未授权。
 
 【待确认事项】
 
-1. 由 Product-Technical Lead 是否发起独立批次 C IAM 审批。
-2. 批次 D 的版本化 cert/key ID、签发与五文件现场命令仍须按既定 P30D/T-7d 方案冻结。
-3. Cloudflare A-only、DNS-only、TTL=300 的后续执行批次和 DNS/ACME 顺序仍须单独批准。
+1. 用户是否批准提交并 push D2B0 全部受审变更。
+2. 形成受信 revision 后，Product-Technical Lead 是否单独申请 D2B1；D2B2 仍须再次批准。
+3. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
 
 ------------------------------------------------------------------------
 
@@ -391,6 +500,53 @@ verifier 拒绝前跟随既有 symlink/hardlink 并发生覆盖。其他项无 P
 regular、root:root、`0400`、`nlink=1`、同一 inode 和 exact audience 单换行；失败只清理本次
 新建且 inode 匹配的文件，不覆盖旧路径。同一 Code Reviewer 复审通过，无 P0-P3。
 
+Reviewer：Architecture Reviewer
+
+时间：2026-07-28
+
+结果：有条件接受 DEVOPS tier 用于当前 P30D、T-7d、单 workload、单 Provider、单 CryptoKey、
+零资金 real-test；将 D2A 成功标准修正为 returned chain 与 D1 KEY/CSR/Root 的 exact
+密码学验收。DEVOPS 的 list 为空和 describe NOT_FOUND 属于 tier 预期，逻辑 CERT_ID 不得表述为
+持久资源。
+
+问题：DEVOPS 不存储、不支持 list/describe/revoke 单张证书。本次历史签发无 Data Access Audit
+Log 且无法补记；下一次签发/续期前必须另批启用 `privateca.googleapis.com` 的 `DATA_WRITE`
+Data Access Logs。当前事件补偿控制仅限 Provider disable、目标 CryptoKey IAM 移除、runtime
+clear、服务停止和等待 P30D 到期，不得声称 CA revoke。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-28
+
+结果：D2A 本地一致性更新独立审查通过，无 P0-P3。DEVOPS tier、逻辑 CERT_ID、returned chain
+验收、C/D1/D2A/R1/R2/R3 历史、Data Access Logs 门禁、事件补偿控制和 D2B/E 未授权边界均与
+冻结事实一致；未要求修改 `ARCHITECTURE.md`。
+
+问题：现场事实和哈希仅按任务收据完成本地一致性审查，本轮未重新连接云端或 VM。DEVOPS 无单证书
+撤销、历史签发无 Data Access Log、D2B/E 与运行身份链未执行的残余风险继续有效。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-28
+
+结果：D2B0 初审发现 1 个 P1：文档允许在 production active WIF 目录内保留 old+new cert/key，
+与单 generation 五文件 exact-set 冲突，并误述当前已具备原子轮换能力。
+
+问题：Architecture Reviewer 已冻结 production active source/runtime 永远为单 generation
+五文件 exact-set；candidate 仅在 active 外准备，retired 仅用于 rollback/evidence 且不得被
+容器、active validator 或备份看到。已签发 token 不依赖旧文件。D2B0-R1-P1 已按该裁定完成
+五文件内最小文档修复；具体轮换机制留待未来独立 Level 3 任务。
+
+Reviewer：Code Reviewer
+
+时间：2026-07-28
+
+结果：D2B0-R1 限定复审通过，无 P0-P3；原 production active old+new 重叠 P1 已关闭。
+
+问题：production active 始终为单 generation 五文件 exact-set；candidate/retired 只能位于 active
+外，active 配置不得引用其路径。当前不具备 production 无中断或原子整体轮换能力，D2B1/D2B2/E
+和 production rotation 现场操作均未授权。
+
 ------------------------------------------------------------------------
 
 # 文档同步
@@ -404,6 +560,8 @@ regular、root:root、`0400`、`nlink=1`、同一 inode 和 exact audience 单�
 -   CHANGELOG.md：KMS 项目隔离修复与 real-test 正式部署完成后更新。
 -   docs/decisions/：若冻结新的 WIF Provider mapping、证书生命周期或 KMS rotation 决策则记录。
 
-同步状态：批次 B4-R1 已修复 runbook audience 创建 P2，并经同一 Code Reviewer 复审通过，
-无 P0-P3；
-`PROJECT_CONTEXT.md`、`ARCHITECTURE.md`、`CHANGELOG.md` 和 `docs/decisions/` 本批不修改。
+同步状态：D2B0 已更新 TASK-001、real-test runbook、deploy README、RWA neutral automation、
+Decision Log 与 PROJECT_CONTEXT，明确 production 五文件、real-test direct-root 四文件以及
+D2B1/D2B2 现场未执行。`ARCHITECTURE.md` 没有相反的逐证书 revoke 保证，本批不改；
+`CHANGELOG.md` 待正式部署完成后再更新。D2B0-R1 Code Review 已通过，无 P0-P3；当前尚未提交、
+未 push。

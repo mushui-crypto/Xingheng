@@ -19,7 +19,7 @@ import { readExpectedAudience, validateWifBundle } from "./gcpWifBundle.mjs";
 const AUDIENCE = "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/xingheng-prod/providers/vultr-mtls";
 const INSTALLER = new URL("./install-gcp-wif.sh", import.meta.url).pathname;
 
-function writeWifFixture(directory) {
+function writeWifFixture(directory, profile = "production") {
   mkdirSync(directory, { mode: 0o700 });
   const files = {
     "adc.json": JSON.stringify({
@@ -42,10 +42,25 @@ function writeWifFixture(directory) {
         },
       },
     }),
-    "trust-chain.pem": "test-only-trust-chain",
     "client-cert.pem": "test-only-certificate",
     "client-key.pem": "test-only-private-key-reference",
   };
+  if (profile === "production") {
+    files["trust-chain.pem"] = "test-only-trust-chain";
+  } else {
+    delete files["adc.json"];
+    files["adc.json"] = JSON.stringify({
+      type: "external_account",
+      audience: AUDIENCE,
+      subject_token_type: "urn:ietf:params:oauth:token-type:mtls",
+      token_url: "https://sts.mtls.googleapis.com/v1/token",
+      credential_source: {
+        certificate: {
+          certificate_config_location: "/run/secrets/gcp-wif/certificate_config.json",
+        },
+      },
+    });
+  }
   for (const [name, value] of Object.entries(files)) {
     writeFileSync(join(directory, name), value, { mode: 0o400 });
   }
@@ -60,7 +75,7 @@ test("accepts one exact root-only WIF source bundle without printing material", 
   try {
     const { audienceFile } = writeWifFixture(source);
     const expected = readExpectedAudience(audienceFile);
-    const result = validateWifBundle(source, expected);
+    const result = validateWifBundle(source, expected, "production");
     assert.deepEqual([...result.fileNames].sort(), [
       "adc.json",
       "certificate_config.json",
@@ -68,6 +83,69 @@ test("accepts one exact root-only WIF source bundle without printing material", 
       "client-key.pem",
       "trust-chain.pem",
     ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("accepts exact production and real-test profiles and rejects crossed bundles", () => {
+  for (const profile of ["production", "real-test"]) {
+    const root = mkdtempSync(join(tmpdir(), `xingheng-wif-${profile}-`));
+    const source = join(root, "source");
+    try {
+      const { audienceFile } = writeWifFixture(source, profile);
+      const expected = readExpectedAudience(audienceFile);
+      const result = validateWifBundle(source, expected, profile);
+      assert.equal(result.fileNames.includes("trust-chain.pem"), profile === "production");
+      assert.throws(
+        () => validateWifBundle(
+          source,
+          expected,
+          profile === "production" ? "real-test" : "production",
+        ),
+        /schema|boundary|unknown|missing/u,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("rejects missing, illegal, and structurally expanded WIF profiles", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-wif-profile-negative-"));
+  const source = join(root, "source");
+  try {
+    const { audienceFile } = writeWifFixture(source, "real-test");
+    const expected = readExpectedAudience(audienceFile);
+    for (const profile of [undefined, "", "staging"]) {
+      assert.throws(() => validateWifBundle(source, expected, profile), /profile/u);
+    }
+
+    const adcPath = join(source, "adc.json");
+    const adc = JSON.parse(readFileSync(adcPath, "utf8"));
+    chmodSync(adcPath, 0o600);
+    writeFileSync(adcPath, JSON.stringify({
+      ...adc,
+      credential_source: {
+        certificate: {
+          ...adc.credential_source.certificate,
+          trust_chain_path: "/run/secrets/gcp-wif/trust-chain.pem",
+        },
+      },
+    }));
+    chmodSync(adcPath, 0o400);
+    assert.throws(
+      () => validateWifBundle(source, expected, "real-test"),
+      /schema/u,
+    );
+    chmodSync(adcPath, 0o600);
+    writeFileSync(adcPath, JSON.stringify(adc));
+    chmodSync(adcPath, 0o400);
+    writeFileSync(join(source, "trust-chain.pem"), "unexpected", { mode: 0o400 });
+    assert.throws(
+      () => validateWifBundle(source, expected, "real-test"),
+      /unknown|missing/u,
+    );
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -94,7 +172,7 @@ test("rejects partial, extra, symlinked, hardlinked, and permissive WIF bundles"
       const { audienceFile } = writeWifFixture(source);
       mutate(source);
       assert.throws(
-        () => validateWifBundle(source, readExpectedAudience(audienceFile)),
+        () => validateWifBundle(source, readExpectedAudience(audienceFile), "production"),
         /boundary|unknown|missing/u,
       );
     } finally {
@@ -134,7 +212,7 @@ test("rejects untrusted audience, STS URL, source shape, and path escape", () =>
     for (const [path, value] of cases) {
       rewrite(path, value);
       assert.throws(
-        () => validateWifBundle(source, readExpectedAudience(audienceFile)),
+        () => validateWifBundle(source, readExpectedAudience(audienceFile), "production"),
         /boundary|invalid/u,
       );
       rewrite(adcPath, originalAdc);
@@ -151,7 +229,8 @@ function writeFakeInstallerCommands(directory) {
   writeFileSync(join(bin, "id"), "#!/bin/sh\necho 0\n", { mode: 0o755 });
   writeFileSync(join(bin, "node"), `#!/bin/sh
 command="$2"
-echo "node:$command" >> "$FAKE_EVENT_LOG"
+profile="$3"
+echo "node:$command:$profile" >> "$FAKE_EVENT_LOG"
 if [ "\${FAKE_NODE_FAIL:-}" = "$command" ]; then exit 1; fi
 `, { mode: 0o755 });
   writeFileSync(join(bin, "install"), `#!/bin/sh
@@ -188,7 +267,7 @@ test("WIF installer performs no mount when source validation fails", () => {
       },
     });
     assert.notEqual(result.status, 0);
-    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["node:source"]);
+    assert.deepEqual(readFileSync(log, "utf8").trim().split("\n"), ["node:source:production"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -235,12 +314,68 @@ test("WIF installer moves the tmpfs only after complete copy validation", () => 
     });
     assert.equal(result.status, 0, result.stderr);
     const events = readFileSync(log, "utf8").trim().split("\n");
-    const sourceIndex = events.indexOf("node:source");
-    const copyIndex = events.indexOf("node:copy");
+    const sourceIndex = events.indexOf("node:source:production");
+    const copyIndex = events.indexOf("node:copy:production");
     const moveIndex = events.findIndex((entry) => entry.startsWith("mount:--move"));
-    const installedIndex = events.indexOf("node:installed");
+    const installedIndex = events.indexOf("node:installed:production");
     assert.ok(sourceIndex >= 0 && sourceIndex < copyIndex);
     assert.ok(copyIndex < moveIndex && moveIndex < installedIndex);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIF installer passes the same explicit profile through all verifier stages", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-wif-installer-profile-"));
+  try {
+    const bin = writeFakeInstallerCommands(root);
+    const log = join(root, "events.log");
+    const result = spawnSync("sh", [INSTALLER, "real-test", "/source", "/audience"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        PATH: `${bin}:${process.env.PATH}`,
+        FAKE_EVENT_LOG: log,
+        WIF_HOST_ROOT: join(root, "host", "gcp-wif"),
+      },
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const verifierEvents = readFileSync(log, "utf8")
+      .trim()
+      .split("\n")
+      .filter((entry) => entry.startsWith("node:"));
+    assert.deepEqual(verifierEvents, [
+      "node:source:real-test",
+      "node:copy:real-test",
+      "node:installed:real-test",
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("WIF installer does not publish when copy validation fails", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-wif-installer-copy-failure-"));
+  try {
+    const bin = writeFakeInstallerCommands(root);
+    const log = join(root, "events.log");
+    const result = spawnSync("sh", [INSTALLER, "real-test", "/source", "/audience"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        NODE_ENV: "test",
+        PATH: `${bin}:${process.env.PATH}`,
+        FAKE_EVENT_LOG: log,
+        FAKE_NODE_FAIL: "copy",
+        WIF_HOST_ROOT: join(root, "host", "gcp-wif"),
+      },
+    });
+    assert.notEqual(result.status, 0);
+    const events = readFileSync(log, "utf8").trim().split("\n");
+    assert.equal(events.some((entry) => entry.startsWith("mount:--move")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

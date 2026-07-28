@@ -287,7 +287,17 @@ function validateProductionConfig(config: RuntimeConfig) {
   if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
     throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
   }
+  if (
+    config.deploymentEnvironment !== "production"
+    && config.deploymentEnvironment !== "real-test"
+  ) {
+    throw new Error("WIF 部署环境必须精确为 production 或 real-test。");
+  }
   validateGcpWifRuntimeBoundary();
-  validateGcpWifCredentialFiles({ adcPath, expectedAudience: wifAudience });
+  validateGcpWifCredentialFiles({
+    adcPath,
+    expectedAudience: wifAudience,
+    deploymentEnvironment: config.deploymentEnvironment,
+  });
   validateRwaAutomationDataLayout({ root: RWA_AUTOMATION_DATA_ROOT, production: true });
 }
