@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { validateRwaKmsAuthenticationRuntime } from "./runtimeConfig";
+import {
+  validateDeploymentTradingCredentialBoundary,
+  validateRwaKmsAuthenticationRuntime,
+} from "./runtimeConfig";
 
 const expectedServiceAccount =
   "rwa-real-test-vm@xingheng-real-test.iam.gserviceaccount.com";
@@ -73,6 +76,60 @@ test("production runtime and non-deployment environments reject metadata mode", 
       /禁止配置 real-test GCE/,
     );
   });
+});
+
+test("production keeps the deposit mnemonic requirement", () => {
+  withEnvironment({ BSC_TESTNET_DEPOSIT_MNEMONIC: undefined }, () => {
+    assert.equal(validateDeploymentTradingCredentialBoundary("production"), "");
+  });
+  withEnvironment({ BSC_TESTNET_DEPOSIT_MNEMONIC: "test mnemonic" }, () => {
+    assert.equal(
+      validateDeploymentTradingCredentialBoundary("production"),
+      "test mnemonic",
+    );
+  });
+});
+
+test("credentialless real-test requires the exact kill switch and absent BSC secrets", () => {
+  withEnvironment({
+    RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
+    BSC_TESTNET_DEPOSIT_MNEMONIC: undefined,
+    BSC_TESTNET_PRIVATE_KEY: undefined,
+  }, () => {
+    assert.equal(validateDeploymentTradingCredentialBoundary("real-test"), null);
+  });
+
+  for (const killSwitch of [undefined, "false", "TRUE", " true", "true "]) {
+    withEnvironment({
+      RWA_AUTOMATION_SERVER_KILL_SWITCH: killSwitch,
+      BSC_TESTNET_DEPOSIT_MNEMONIC: undefined,
+      BSC_TESTNET_PRIVATE_KEY: undefined,
+    }, () => {
+      assert.throws(
+        () => validateDeploymentTradingCredentialBoundary("real-test"),
+        /保持 kill switch 且禁止 BSC 交易凭证/,
+      );
+    });
+  }
+
+  for (const name of [
+    "BSC_TESTNET_DEPOSIT_MNEMONIC",
+    "BSC_TESTNET_PRIVATE_KEY",
+  ]) {
+    for (const value of ["secret", "", "   "]) {
+      withEnvironment({
+        RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
+        BSC_TESTNET_DEPOSIT_MNEMONIC: undefined,
+        BSC_TESTNET_PRIVATE_KEY: undefined,
+        [name]: value,
+      }, () => {
+        assert.throws(
+          () => validateDeploymentTradingCredentialBoundary("real-test"),
+          /保持 kill switch 且禁止 BSC 交易凭证/,
+        );
+      });
+    }
+  }
 });
 
 function metadataEnvironment() {

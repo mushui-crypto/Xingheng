@@ -150,7 +150,6 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["CORS_ALLOWED_ORIGINS", process.env.CORS_ALLOWED_ORIGINS?.trim() ?? ""],
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
     ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
-    ["BSC_TESTNET_DEPOSIT_MNEMONIC", process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? ""],
     ["RWA_CREDENTIAL_KEY_PROVIDER", process.env.RWA_CREDENTIAL_KEY_PROVIDER?.trim() ?? ""],
     ["RWA_GCP_KMS_KEY_NAME", process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? ""],
     ["RWA_GCP_KMS_AUTH_MODE", process.env.RWA_GCP_KMS_AUTH_MODE?.trim() ?? ""],
@@ -163,10 +162,15 @@ function validateProductionConfig(config: RuntimeConfig) {
   ];
   if (config.deploymentEnvironment === "production") {
     required.push(
+      [
+        "BSC_TESTNET_DEPOSIT_MNEMONIC",
+        validateDeploymentTradingCredentialBoundary("production") ?? "",
+      ],
       ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
       ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
     );
   } else if (config.deploymentEnvironment === "real-test") {
+    validateDeploymentTradingCredentialBoundary("real-test");
     required.push([
       "RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL",
       process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL?.trim() ?? "",
@@ -303,6 +307,25 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   validateRwaKmsAuthenticationRuntime(config.deploymentEnvironment);
   validateRwaAutomationDataLayout({ root: RWA_AUTOMATION_DATA_ROOT, production: true });
+}
+
+export function validateDeploymentTradingCredentialBoundary(
+  deploymentEnvironment: DeploymentEnvironment,
+) {
+  if (deploymentEnvironment === "production") {
+    return process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "";
+  }
+  if (deploymentEnvironment === "real-test") {
+    if (
+      process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
+      || process.env.BSC_TESTNET_DEPOSIT_MNEMONIC !== undefined
+      || process.env.BSC_TESTNET_PRIVATE_KEY !== undefined
+    ) {
+      throw new Error("真实测试环境必须保持 kill switch 且禁止 BSC 交易凭证。");
+    }
+    return null;
+  }
+  return null;
 }
 
 export function validateRwaKmsAuthenticationRuntime(

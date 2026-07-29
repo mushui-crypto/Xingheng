@@ -63,10 +63,27 @@ export class WalletService {
     private trading: TradingService,
     private onchain: OnchainWalletService,
   ) {
-    this.depositMnemonic = normalizeRequiredValue(
-      process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "",
-      "BSC_TESTNET_DEPOSIT_MNEMONIC",
-    );
+    const credentiallessRealTest =
+      process.env.NODE_ENV === "production"
+      && process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT === "real-test"
+      && process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH === "true"
+      && process.env.BSC_TESTNET_DEPOSIT_MNEMONIC === undefined
+      && process.env.BSC_TESTNET_PRIVATE_KEY === undefined;
+    if (
+      process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT === "real-test"
+      && (
+        process.env.BSC_TESTNET_DEPOSIT_MNEMONIC !== undefined
+        || process.env.BSC_TESTNET_PRIVATE_KEY !== undefined
+      )
+    ) {
+      throw new Error("真实测试环境禁止 BSC 交易凭证。");
+    }
+    this.depositMnemonic = credentiallessRealTest
+      ? ""
+      : normalizeRequiredValue(
+        process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? "",
+        "BSC_TESTNET_DEPOSIT_MNEMONIC",
+      );
     this.depositDerivationPath = process.env.BSC_TESTNET_DERIVATION_PATH?.trim() || "m/44'/60'/0'/0";
     if (process.env.NODE_ENV !== "production") {
       this.ensureFundingAccount(defaultUserId);
@@ -1598,6 +1615,10 @@ export class WalletService {
   }
 
   private getOrCreateDepositAddress(userId: string): DepositAddress {
+    const mnemonic = normalizeRequiredValue(
+      this.depositMnemonic,
+      "BSC_TESTNET_DEPOSIT_MNEMONIC",
+    );
     const existing = this.store.getDepositAddressByUserId(userId);
     if (existing) {
       return existing;
@@ -1605,7 +1626,7 @@ export class WalletService {
 
     const derivationIndex = (this.store.getMaxDepositDerivationIndex() ?? -1) + 1;
     const path = `${this.depositDerivationPath}/${derivationIndex}`;
-    const wallet = HDNodeWallet.fromPhrase(normalizeRequiredValue(this.depositMnemonic, "BSC_TESTNET_DEPOSIT_MNEMONIC"), undefined, path);
+    const wallet = HDNodeWallet.fromPhrase(mnemonic, undefined, path);
     const now = Date.now();
     const address: DepositAddress = {
       id: `ADDR-${userId}`,
