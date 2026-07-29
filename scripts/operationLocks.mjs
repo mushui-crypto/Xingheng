@@ -26,7 +26,13 @@ export const OPERATION_LOCK_ORDER = Object.freeze([
 const PRODUCTION_LOCK_ROOT = "/run/lock/xingheng";
 
 export function acquireOperationLocks(environment, options = {}) {
-  if (!["production", "real-test", "release-build"].includes(environment)) {
+  if (![
+    "production",
+    "real-test",
+    "real-test-runtime",
+    "real-test-runtime-install",
+    "release-build",
+  ].includes(environment)) {
     throw new Error("operation lock environment is invalid");
   }
   const testMode = options.testMode === true;
@@ -39,7 +45,11 @@ export function acquireOperationLocks(environment, options = {}) {
     OPERATION_LOCK_ORDER[0],
     environment === "production"
       ? OPERATION_LOCK_ORDER[1]
-      : environment === "real-test"
+      : [
+        "real-test",
+        "real-test-runtime",
+        "real-test-runtime-install",
+      ].includes(environment)
         ? OPERATION_LOCK_ORDER[2]
         : OPERATION_LOCK_ORDER[3],
   ];
@@ -72,7 +82,11 @@ export function inheritedOperationLocks(environment, source = process.env) {
     OPERATION_LOCK_ORDER[0],
     environment === "production"
       ? OPERATION_LOCK_ORDER[1]
-      : environment === "real-test"
+      : [
+        "real-test",
+        "real-test-runtime",
+        "real-test-runtime-install",
+      ].includes(environment)
         ? OPERATION_LOCK_ORDER[2]
         : OPERATION_LOCK_ORDER[3],
   ];

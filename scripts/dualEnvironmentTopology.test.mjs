@@ -635,6 +635,7 @@ test("real Docker Compose config keeps fixed production and real-test env files 
       "real-test-compose.sh",
       "real-test-standalone-compose.sh",
       "operationLocks.mjs",
+      "realTestRuntimeReceipt.mjs",
       "trustedDockerRuntime.mjs",
       "trustedReleaseCandidate.mjs",
       "trustedReleaseTree.mjs",

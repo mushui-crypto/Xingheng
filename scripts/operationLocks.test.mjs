@@ -44,6 +44,14 @@ test("operation locks enforce global then environment exclusion", (t) => {
       "release-build.lock",
     ]);
     build.close();
+    for (const environment of ["real-test-runtime-install", "real-test-runtime"]) {
+      const runtime = acquireOperationLocks(environment, {
+        testMode: true,
+        lockRoot: root,
+      });
+      assert.equal(runtime.receipts[1].path, join(root, "real-test.lock"));
+      runtime.close();
+    }
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }

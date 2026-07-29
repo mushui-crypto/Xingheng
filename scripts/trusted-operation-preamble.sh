@@ -28,12 +28,17 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
       }
       ;;
     /opt/xingheng-real-test-release/candidates/*/code)
-      xingheng_expected_operation=release-build
       xingheng_candidate_environment=real-test
-      [ "${0##*/}" = build-release-images.sh ] || {
-        echo "trusted candidate operation entry is invalid" >&2
-        exit 78
-      }
+      case "${0##*/}" in
+        build-release-images.sh) xingheng_expected_operation=release-build ;;
+        install-real-test-runtime.sh)
+          xingheng_expected_operation=real-test-runtime-install
+          ;;
+        activate-first-real-test-api.sh|stop-real-test-api.sh)
+          xingheng_expected_operation=real-test-runtime
+          ;;
+        *) echo "trusted candidate operation entry is invalid" >&2; exit 78 ;;
+      esac
       ;;
     /opt/xingheng-release/code)
       if [ "${0##*/}" = install-gcp-wif.sh ]; then

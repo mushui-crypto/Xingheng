@@ -43,6 +43,12 @@ const trustedOperationPreamble = read("scripts/trusted-operation-preamble.sh");
 const trustedDockerCli = read("scripts/trusted-docker.mjs");
 const trustedReleaseCandidate = read("scripts/trustedReleaseCandidate.mjs");
 const trustedReleaseCandidateInstaller = read("scripts/install-trusted-release-candidate.mjs");
+const realTestRuntimeReceipt = read("scripts/realTestRuntimeReceipt.mjs");
+const realTestRuntimeInstaller = read("scripts/installRealTestRuntime.mjs");
+const realTestRuntimeOperation = read("scripts/realTestRuntimeOperation.mjs");
+const realTestRuntimeInstallEntry = read("scripts/install-real-test-runtime.sh");
+const realTestRuntimeActivateEntry = read("scripts/activate-first-real-test-api.sh");
+const realTestRuntimeStopEntry = read("scripts/stop-real-test-api.sh");
 const realTestCleanup = read("scripts/realTestCleanup.mjs");
 const cleanupTransactionStore = read("scripts/cleanupTransactionStore.mjs");
 const realTestCleanupWrapper = read("scripts/real-test-cleanup.sh");
@@ -142,6 +148,30 @@ const assertions = [
         "trusted-operation-launcher.mjs release-build real-test scripts/build-release-images.sh",
       ),
     "all root operations must enter through the minimal trusted launcher and the build Docker shim must remain internal",
+  ],
+  [
+    realTestRuntimeReceipt.includes(
+      '"/etc/xingheng-real-test/runtime-release.json"',
+    )
+      && realTestRuntimeReceipt.includes('"/etc/xingheng-real-test/runtime.env"')
+      && realTestRuntimeReceipt.includes("candidateReceiptSha256")
+      && realTestRuntimeReceipt.includes("candidateTreeSha256")
+      && realTestRuntimeReceipt.includes("sourceArchiveSha256")
+      && realTestRuntimeInstaller.includes("O_EXCL")
+      && realTestRuntimeInstaller.includes("O_NOFOLLOW")
+      && realTestRuntimeOperation.includes('"kms-health-preflight"')
+      && realTestRuntimeOperation.includes('["up", "-d", "api"]')
+      && realTestRuntimeOperation.includes('["stop", "api"]')
+      && trustedOperationLauncher.includes('"real-test-runtime-install"')
+      && trustedOperationLauncher.includes('"real-test-runtime"')
+      && trustedOperationPreamble.includes("install-real-test-runtime.sh")
+      && trustedOperationPreamble.includes("activate-first-real-test-api.sh")
+      && trustedOperationPreamble.includes("stop-real-test-api.sh")
+      && realTestRuntimeInstallEntry.includes("real-test-runtime-install")
+      && realTestRuntimeActivateEntry.includes("real-test-runtime")
+      && realTestRuntimeStopEntry.includes("real-test-runtime")
+      && deploymentReadme.includes("real-test 单 revision API runtime"),
+    "real-test runtime must bind one candidate revision to fixed install, KMS health, API activation and stop operations",
   ],
   [
     stepZeroChecklist.includes("cd /opt/xingheng-release/code")

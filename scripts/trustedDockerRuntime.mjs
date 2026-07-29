@@ -20,6 +20,10 @@ import {
   assertTrustedReleaseCandidateRoot,
   readTrustedReleaseCandidateReceipt,
 } from "./trustedReleaseCandidate.mjs";
+import {
+  closeRealTestRuntimeContext,
+  readRealTestRuntimeContext,
+} from "./realTestRuntimeReceipt.mjs";
 
 const PRODUCTION_DOCKER_CLI = "/usr/bin/docker";
 const PRODUCTION_COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
@@ -70,7 +74,11 @@ export function trustedReleaseRoot(source = process.env) {
 
 export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   if (process.getuid?.() !== 0) return realpathSync(currentRoot);
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if ([
+    "release-build",
+    "real-test-runtime",
+    "real-test-runtime-install",
+  ].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     return assertTrustedReleaseCandidateRoot(
       currentRoot,
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
@@ -219,6 +227,11 @@ export function trustedDockerReceipt(runtime, kind, phase) {
 export function execTrustedDockerSync(args, options = {}) {
   if (process.env.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
     validateTrustedReleaseBuildDockerArguments(args);
+  } else if ([
+    "real-test-runtime",
+    "real-test-runtime-install",
+  ].includes(process.env.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+    validateRealTestRuntimeDockerArguments(args);
   }
   const runtime = openTrustedDockerRuntime("docker", process.env);
   try {
@@ -238,6 +251,39 @@ export function execTrustedDockerSync(args, options = {}) {
   } finally {
     runtime.close();
   }
+}
+
+export function validateRealTestRuntimeDockerArguments(values) {
+  if (
+    values.length === 5
+    && values[0] === "image"
+    && values[1] === "inspect"
+    && values[2] === "--format"
+    && values[3] === "{{json .}}"
+    && /^sha256:[a-f0-9]{64}$/u.test(values[4] ?? "")
+  ) return;
+  if (
+    values.length === 5
+    && values[0] === "ps"
+    && values[1] === "--filter"
+    && values[2] === "label=com.docker.compose.project=xingheng-real-test"
+    && values[3] === "--format"
+    && values[4] === "{{.ID}} {{.Label \"com.docker.compose.service\"}}"
+  ) return;
+  if (
+    values.length === 3
+    && values[0] === "container"
+    && values[1] === "inspect"
+    && /^[a-f0-9]{12,64}$/u.test(values[2] ?? "")
+  ) return;
+  if (
+    values.length === 4
+    && values[0] === "exec"
+    && /^[a-f0-9]{12,64}$/u.test(values[1] ?? "")
+    && values[2] === "cat"
+    && values[3] === "/app/.build-revision"
+  ) return;
+  throw new Error("real-test runtime Docker arguments are not allowlisted");
 }
 
 export function validateTrustedReleaseBuildDockerArguments(values, source = process.env) {
@@ -517,7 +563,28 @@ function readProductionTrustReceipt() {
 }
 
 function activeTrustReceipt(source) {
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "real-test-runtime") {
+    const controlRoot = new URL("../", import.meta.url).pathname;
+    const context = readRealTestRuntimeContext(controlRoot);
+    try {
+      validateCommonTrustReceipt(
+        readTrustedReleaseCandidateReceipt(
+          context.selector.revision,
+          "real-test",
+        ),
+      );
+      return {
+        ...context.selector,
+        releaseRoot: context.selector.codeRoot,
+      };
+    } finally {
+      closeRealTestRuntimeContext(context);
+    }
+  }
+  if ([
+    "release-build",
+    "real-test-runtime-install",
+  ].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
       source.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT,

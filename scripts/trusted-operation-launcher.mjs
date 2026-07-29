@@ -24,19 +24,36 @@ import {
 import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
 
 const operation = process.argv[2];
-const candidateEnvironment = operation === "release-build" ? process.argv[3] : null;
-const entryArgument = process.argv[operation === "release-build" ? 4 : 3];
-const args = process.argv.slice(operation === "release-build" ? 5 : 4);
+const candidateOperation = [
+  "release-build",
+  "real-test-runtime",
+  "real-test-runtime-install",
+].includes(operation);
+const candidateEnvironment = candidateOperation ? process.argv[3] : null;
+const entryArgument = process.argv[candidateOperation ? 4 : 3];
+const args = process.argv.slice(candidateOperation ? 5 : 4);
 
 try {
   if (
-    !["production", "real-test", "release-build"].includes(operation)
+    ![
+      "production",
+      "real-test",
+      "real-test-runtime",
+      "real-test-runtime-install",
+      "release-build",
+    ].includes(operation)
     || !entryArgument
     || (
-      operation === "release-build"
-      && candidateEnvironment !== "production"
-      && candidateEnvironment !== "real-test"
+      candidateOperation
+      && (
+        !["production", "real-test"].includes(candidateEnvironment)
+        || (
+          operation !== "release-build"
+          && candidateEnvironment !== "real-test"
+        )
+      )
     )
+    || (operation.startsWith("real-test-runtime") && args.length !== 0)
   ) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
@@ -51,10 +68,10 @@ try {
     throw new Error("nested trusted operation launcher is not allowed");
   }
   const currentRoot = new URL("../", import.meta.url).pathname;
-  const candidateRevision = operation === "release-build"
+  const candidateRevision = candidateOperation
     ? basename(dirname(resolve(currentRoot)))
     : null;
-  const root = operation === "release-build"
+  const root = candidateOperation
     ? assertTrustedReleaseCandidateRoot(
       currentRoot,
       candidateRevision,
@@ -62,14 +79,20 @@ try {
     ).root
     : assertTrustedReleaseRoot(currentRoot);
   if (candidateRevision !== null) {
-    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = "release-build";
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = operation;
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
     process.env.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT = candidateEnvironment;
   }
   const entry = realpathSync(resolve(root, entryArgument));
   const entryName = entry.slice(`${root}/scripts/`.length);
-  const allowedEntries = operation === "release-build"
-    ? ["build-release-images.sh"]
+  const allowedEntries = candidateOperation
+    ? (
+      operation === "release-build"
+        ? ["build-release-images.sh"]
+        : operation === "real-test-runtime-install"
+          ? ["install-real-test-runtime.sh"]
+          : ["activate-first-real-test-api.sh", "stop-real-test-api.sh"]
+    )
     : [
       "production-compose.sh",
       "real-test-compose.sh",
@@ -107,7 +130,7 @@ try {
           TZ: "UTC",
           XINGHENG_OPERATION_LOCK_CONTEXT: operation,
         };
-        if (operation === "release-build") {
+        if (candidateOperation) {
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT = candidateEnvironment;
         } else {
@@ -135,7 +158,7 @@ try {
         );
         verifyTrustedEntry(openedEntry);
         verifyTrustedHostTool(shell);
-        if (operation === "release-build") {
+        if (candidateOperation) {
           assertTrustedReleaseCandidateRoot(root, candidateRevision, candidateEnvironment);
         } else {
           assertTrustedReleaseRoot(root, process.env);
@@ -162,7 +185,11 @@ try {
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|real-test scripts/ENTRY ARGS... | release-build production|real-test scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|real-test scripts/ENTRY ARGS..."
+      + " | release-build production|real-test scripts/ENTRY ARGS..."
+      + " | real-test-runtime-install real-test scripts/install-real-test-runtime.sh"
+      + " | real-test-runtime real-test scripts/activate-first-real-test-api.sh"
+      + "|scripts/stop-real-test-api.sh",
   );
 }
 

@@ -116,6 +116,38 @@ real-test 候选发布使用独立且不可覆盖的 canonical root：
 部署身份缺失、未知或与当前 root 交叉时均在读取候选收据及 Docker 操作前拒绝。该隔离不改变
 production 的 `/opt/xingheng-release/candidates/FULL_REVISION/code` 生命周期。
 
+### real-test 单 revision API runtime
+
+real-test host-control、应用镜像、OCI revision、manifest、API health 与 runtime selector 必须来自同一
+个新 full revision；不得复用或混入旧 `05c5f729b4ddfd521176cf81d58bd2153528c31d` 的镜像
+digest。完成候选安装和三镜像 trusted build 后，root 操作者准备一份符合
+`.env.real-test.example` allowlist、且不含交易凭证、provider write、ADC JSON、WIF、
+impersonation、`DOCKER_*` 或 `COMPOSE_*` 的输入文件，然后通过固定入口首次安装：
+
+```sh
+CONTROL="/opt/xingheng-real-test-release/candidates/FULL_REVISION/code"
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node "$CONTROL/scripts/trusted-operation-launcher.mjs" \
+  real-test-runtime-install real-test scripts/install-real-test-runtime.sh \
+  < /root/prepared-real-test-runtime.env
+```
+
+安装器只在 `/etc/xingheng-real-test` 为 root:root `0700`、且
+`runtime-release.json`/`runtime.env` 均为 MISSING 时，以 `O_EXCL`/`O_NOFOLLOW`、`0400`、
+fsync 和 inode 绑定回滚首次发布。输入文件路径不进入 selector；selector 也不保存 env hash、
+服务账号或 KMS 原始值。安装后仅允许以下两个无参数入口：
+
+```sh
+"$CONTROL/scripts/activate-first-real-test-api.sh"
+"$CONTROL/scripts/stop-real-test-api.sh"
+```
+
+activation 固定执行一次 `kms-health-preflight`，成功后只执行 `up -d api`；随后要求唯一
+real-test API 容器的 image digest、OCI/build/runtime revision、环境、project、kill switch、
+healthy/no-store health 证据完全一致。失败或状态未知只执行 `stop api`，不会启动 Web/Caddy/
+strategy、删除 volume/image/candidate/selector/env 或 prune。上述代码提交本身不构成现场授权；
+每个新 revision 仍需独立 Review 后重新生成 archive、candidate、manifest/checksums 与三镜像。
+
 生产主机只接收已构建镜像和随发布交付的清单。清单必须是单硬链接、非 symlink、只读 `0444`
 普通文件，并使用精确 schema；未知字段、非法 digest 或可写清单均拒绝。`.env.production` 的
 `XINGHENG_REVISION` 只能与清单交叉核对，不能单独证明版本。`scripts/activate-release.sh` 启动前
