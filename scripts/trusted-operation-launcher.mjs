@@ -24,11 +24,20 @@ import {
 import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
 
 const operation = process.argv[2];
-const entryArgument = process.argv[3];
-const args = process.argv.slice(4);
+const candidateEnvironment = operation === "release-build" ? process.argv[3] : null;
+const entryArgument = process.argv[operation === "release-build" ? 4 : 3];
+const args = process.argv.slice(operation === "release-build" ? 5 : 4);
 
 try {
-  if (!["production", "real-test", "release-build"].includes(operation) || !entryArgument) usage();
+  if (
+    !["production", "real-test", "release-build"].includes(operation)
+    || !entryArgument
+    || (
+      operation === "release-build"
+      && candidateEnvironment !== "production"
+      && candidateEnvironment !== "real-test"
+    )
+  ) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
   }
@@ -36,6 +45,7 @@ try {
   if (
     process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== undefined
     || process.env.XINGHENG_RELEASE_CANDIDATE_REVISION !== undefined
+    || process.env.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT !== undefined
     || process.env.XINGHENG_TRUSTED_DOCKER_PURPOSE !== undefined
   ) {
     throw new Error("nested trusted operation launcher is not allowed");
@@ -45,11 +55,16 @@ try {
     ? basename(dirname(resolve(currentRoot)))
     : null;
   const root = operation === "release-build"
-    ? assertTrustedReleaseCandidateRoot(currentRoot, candidateRevision).root
+    ? assertTrustedReleaseCandidateRoot(
+      currentRoot,
+      candidateRevision,
+      candidateEnvironment,
+    ).root
     : assertTrustedReleaseRoot(currentRoot);
   if (candidateRevision !== null) {
     process.env.XINGHENG_OPERATION_LOCK_CONTEXT = "release-build";
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+    process.env.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT = candidateEnvironment;
   }
   const entry = realpathSync(resolve(root, entryArgument));
   const entryName = entry.slice(`${root}/scripts/`.length);
@@ -94,6 +109,7 @@ try {
         };
         if (operation === "release-build") {
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+          childEnvironment.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT = candidateEnvironment;
         } else {
           for (const key of [
             "XINGHENG_REVISION",
@@ -120,7 +136,7 @@ try {
         verifyTrustedEntry(openedEntry);
         verifyTrustedHostTool(shell);
         if (operation === "release-build") {
-          assertTrustedReleaseCandidateRoot(root, candidateRevision);
+          assertTrustedReleaseCandidateRoot(root, candidateRevision, candidateEnvironment);
         } else {
           assertTrustedReleaseRoot(root, process.env);
         }
@@ -146,7 +162,7 @@ try {
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|real-test|release-build scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|real-test scripts/ENTRY ARGS... | release-build production|real-test scripts/ENTRY ARGS...",
   );
 }
 

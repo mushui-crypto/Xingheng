@@ -132,9 +132,15 @@ const assertions = [
       && trustedDockerRuntime.includes("arguments are not allowlisted")
       && trustedOperationLauncher.includes('"release-build"')
       && trustedReleaseCandidate.includes("/opt/xingheng-release/candidates")
+      && trustedReleaseCandidate.includes("/opt/xingheng-real-test-release/candidates")
+      && trustedOperationLauncher.includes("XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT")
+      && trustedOperationPreamble.includes("/opt/xingheng-real-test-release/candidates/*/code")
       && trustedReleaseCandidateInstaller.includes("get-tar-commit-id")
       && deploymentReadme.includes("candidate-build-receipt.json")
-      && deploymentReadme.includes("release-build scripts/build-release-images.sh"),
+      && deploymentReadme.includes("release-build production scripts/build-release-images.sh")
+      && deploymentReadme.includes(
+        "trusted-operation-launcher.mjs release-build real-test scripts/build-release-images.sh",
+      ),
     "all root operations must enter through the minimal trusted launcher and the build Docker shim must remain internal",
   ],
   [

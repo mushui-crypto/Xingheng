@@ -34,6 +34,7 @@ const SAFE_CHILD_KEYS = Object.freeze([
   "XINGHENG_WEB_IMAGE",
   "XINGHENG_STRATEGY_TOOLS_IMAGE",
   "XINGHENG_COMPOSE_ENV_FD",
+  "XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT",
 ]);
 const REQUIRED_TOOLS = Object.freeze({
   node: "/usr/bin/node",
@@ -73,6 +74,7 @@ export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
     return assertTrustedReleaseCandidateRoot(
       currentRoot,
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
+      source.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT,
     ).root;
   }
   const expected = trustedReleaseRoot(source);
@@ -244,6 +246,14 @@ export function validateTrustedReleaseBuildDockerArguments(values, source = proc
     : null;
   if (expectedRevision !== null && !/^[a-f0-9]{40}$/u.test(expectedRevision ?? "")) {
     throw new Error("trusted Docker release-build candidate revision is invalid");
+  }
+  if (
+    expectedRevision !== null
+    && !["production", "real-test"].includes(
+      source.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT,
+    )
+  ) {
+    throw new Error("trusted Docker release-build deployment environment is invalid");
   }
   const buildRevision = /^XINGHENG_REVISION=([a-f0-9]{40})$/u.exec(values[2] ?? "")?.[1];
   const tag = /^xingheng-(api|web|strategy-tools):([a-f0-9]{40})$/u
@@ -510,6 +520,7 @@ function activeTrustReceipt(source) {
   if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
+      source.XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT,
     );
     validateCommonTrustReceipt(receipt);
     return {

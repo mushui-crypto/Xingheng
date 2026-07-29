@@ -88,14 +88,14 @@ tar -xf "/opt/xingheng-release/candidates/.incoming-$REVISION.tar" \
   scripts/install-trusted-release-candidate.mjs scripts/trustedReleaseCandidate.mjs
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
   /usr/bin/node "$BOOTSTRAP/scripts/install-trusted-release-candidate.mjs" \
-  install "$REVISION" "$ARCHIVE_SHA256"
+  install production "$REVISION" "$ARCHIVE_SHA256"
 cleanup_candidate_bootstrap
 trap - EXIT HUP INT TERM
 
 CANDIDATE="/opt/xingheng-release/candidates/$REVISION"
 env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
   /usr/bin/node "$CANDIDATE/code/scripts/trusted-operation-launcher.mjs" \
-  release-build scripts/build-release-images.sh \
+  release-build production scripts/build-release-images.sh \
   "$REVISION" "$CANDIDATE/release-manifest.json"
 ```
 
@@ -107,6 +107,14 @@ canonical release tree/receipt。候选构建成功不等于安装或部署；�
 自动套利 backup/restore 复用清单中的 API digest，不允许单独漂移。候选构建不读取 `.git`，
 而是消费收据绑定的 Git archive；普通 worktree 构建仍要求 `.git` 和 clean worktree。短 SHA、
 非法字符或调用者期望 revision 不一致时，构建在 Docker 前拒绝。
+
+real-test 候选发布使用独立且不可覆盖的 canonical root：
+`/opt/xingheng-real-test-release/candidates/FULL_REVISION/code`，incoming 归档固定为
+`/opt/xingheng-real-test-release/candidates/.incoming-FULL_REVISION.tar`。安装器必须显式传入
+`real-test`，候选构建必须从该 root 调用
+`trusted-operation-launcher.mjs release-build real-test scripts/build-release-images.sh ...`；
+部署身份缺失、未知或与当前 root 交叉时均在读取候选收据及 Docker 操作前拒绝。该隔离不改变
+production 的 `/opt/xingheng-release/candidates/FULL_REVISION/code` 生命周期。
 
 生产主机只接收已构建镜像和随发布交付的清单。清单必须是单硬链接、非 symlink、只读 `0444`
 普通文件，并使用精确 schema；未知字段、非法 digest 或可写清单均拒绝。`.env.production` 的

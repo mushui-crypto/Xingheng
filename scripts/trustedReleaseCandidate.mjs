@@ -11,7 +11,9 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 
-export const RELEASE_CANDIDATES_ROOT = "/opt/xingheng-release/candidates";
+export const PRODUCTION_RELEASE_CANDIDATES_ROOT = "/opt/xingheng-release/candidates";
+export const REAL_TEST_RELEASE_CANDIDATES_ROOT =
+  "/opt/xingheng-real-test-release/candidates";
 export const CANDIDATE_RECEIPT_NAME = "candidate-build-receipt.json";
 export const CANDIDATE_ARCHIVE_NAME = "code.tar";
 export const CANDIDATE_MANIFEST_NAME = "release-manifest.json";
@@ -23,9 +25,9 @@ const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_SOURCE_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_TREE_ENTRIES = 100_000;
 
-export function releaseCandidatePaths(revision, options = {}) {
+export function releaseCandidatePaths(revision, deploymentEnvironment, options = {}) {
   assertRevision(revision);
-  const candidatesRoot = options.candidatesRoot ?? RELEASE_CANDIDATES_ROOT;
+  const candidatesRoot = trustedReleaseCandidatesRoot(deploymentEnvironment, options);
   const candidateRoot = join(candidatesRoot, revision);
   return Object.freeze({
     candidatesRoot,
@@ -37,6 +39,26 @@ export function releaseCandidatePaths(revision, options = {}) {
     checksums: join(candidateRoot, CANDIDATE_CHECKSUMS_NAME),
     incomingArchive: join(candidatesRoot, `.incoming-${revision}.tar`),
   });
+}
+
+export function trustedReleaseCandidatesRoot(deploymentEnvironment, options = {}) {
+  if (deploymentEnvironment !== "production" && deploymentEnvironment !== "real-test") {
+    throw new Error("trusted candidate deployment environment is invalid");
+  }
+  if (options.candidatesRoot !== undefined) {
+    if (
+      process.env.NODE_TEST_CONTEXT === undefined
+      || options.testOnlyCandidatesRoot !== true
+      || typeof options.candidatesRoot !== "string"
+      || !options.candidatesRoot.startsWith("/")
+    ) {
+      throw new Error("trusted candidate root override is not allowed");
+    }
+    return options.candidatesRoot;
+  }
+  return deploymentEnvironment === "production"
+    ? PRODUCTION_RELEASE_CANDIDATES_ROOT
+    : REAL_TEST_RELEASE_CANDIDATES_ROOT;
 }
 
 export function captureTrustedCandidateTree(root, options = {}) {
@@ -67,8 +89,8 @@ export function captureTrustedCandidateTree(root, options = {}) {
   });
 }
 
-export function readTrustedReleaseCandidateReceipt(revision, options = {}) {
-  const paths = releaseCandidatePaths(revision, options);
+export function readTrustedReleaseCandidateReceipt(revision, deploymentEnvironment, options = {}) {
+  const paths = releaseCandidatePaths(revision, deploymentEnvironment, options);
   validateCandidateDirectoryBoundary(paths, options);
   const receipt = readSecureFile(paths.receipt, 0o400, options);
   if (receipt.bytes.length < 2 || receipt.bytes.length > MAX_RECEIPT_BYTES) {
@@ -94,13 +116,18 @@ export function readTrustedReleaseCandidateReceipt(revision, options = {}) {
   });
 }
 
-export function assertTrustedReleaseCandidateRoot(currentRoot, revision, options = {}) {
-  const paths = releaseCandidatePaths(revision, options);
+export function assertTrustedReleaseCandidateRoot(
+  currentRoot,
+  revision,
+  deploymentEnvironment,
+  options = {},
+) {
+  const paths = releaseCandidatePaths(revision, deploymentEnvironment, options);
   const actual = resolve(currentRoot);
   if (actual !== paths.codeRoot || basename(dirname(actual)) !== revision) {
     throw new Error("trusted candidate release root identity mismatch");
   }
-  const receipt = readTrustedReleaseCandidateReceipt(revision, options);
+  const receipt = readTrustedReleaseCandidateReceipt(revision, deploymentEnvironment, options);
   if (receipt.codeRoot !== actual) {
     throw new Error("trusted candidate release root receipt mismatch");
   }

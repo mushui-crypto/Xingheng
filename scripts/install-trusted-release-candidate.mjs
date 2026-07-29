@@ -49,18 +49,20 @@ try {
   if (polluted) throw new Error("trusted release candidate installation environment is polluted");
   process.umask(0o077);
   if (
-    process.argv.length !== 5
+    process.argv.length !== 6
     || process.argv[2] !== "install"
-    || !/^[a-f0-9]{40}$/u.test(process.argv[3])
-    || !SHA256.test(process.argv[4])
+    || !["production", "real-test"].includes(process.argv[3])
+    || !/^[a-f0-9]{40}$/u.test(process.argv[4])
+    || !SHA256.test(process.argv[5])
   ) {
     throw new Error(
-      "usage: install-trusted-release-candidate.mjs install FULL_REVISION ARCHIVE_SHA256",
+      "usage: install-trusted-release-candidate.mjs install production|real-test FULL_REVISION ARCHIVE_SHA256",
     );
   }
-  const revision = process.argv[3];
-  const expectedArchiveSha256 = process.argv[4];
-  const paths = releaseCandidatePaths(revision);
+  const deploymentEnvironment = process.argv[3];
+  const revision = process.argv[4];
+  const expectedArchiveSha256 = process.argv[5];
+  const paths = releaseCandidatePaths(revision, deploymentEnvironment);
   ensureSecureDirectory(paths.candidatesRoot, 0o700);
   if (exists(paths.candidateRoot)) {
     throw new Error("trusted release candidate already exists");
@@ -154,7 +156,7 @@ try {
     renameSync(stagingRoot, paths.candidateRoot);
     published = true;
     fsyncDirectory(paths.candidatesRoot);
-    const verified = readTrustedReleaseCandidateReceipt(revision);
+    const verified = readTrustedReleaseCandidateReceipt(revision, deploymentEnvironment);
     installed = true;
     console.log(JSON.stringify({
       ok: true,

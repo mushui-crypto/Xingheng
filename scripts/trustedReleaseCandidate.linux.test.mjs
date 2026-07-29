@@ -33,8 +33,8 @@ test("real Linux trusted candidate reaches the final release build entry only", 
   skip: !ENABLED && "requires an installed root-owned Linux release candidate",
   timeout: 30 * 60_000,
 }, () => {
-  const paths = releaseCandidatePaths(REVISION);
-  const trusted = assertTrustedReleaseCandidateRoot(paths.codeRoot, REVISION);
+  const paths = releaseCandidatePaths(REVISION, "production");
+  const trusted = assertTrustedReleaseCandidateRoot(paths.codeRoot, REVISION, "production");
   assert.equal(trusted.receipt.revision, REVISION);
 
   const randomRoot = mkdtempSync(join(tmpdir(), "xingheng-random-release-root-"));
@@ -46,6 +46,7 @@ test("real Linux trusted candidate reaches the final release build entry only", 
       [
         `${randomCode}/scripts/trusted-operation-launcher.mjs`,
         "release-build",
+        "production",
         "scripts/build-release-images.sh",
         REVISION,
         join(randomRoot, "release-manifest.json"),
@@ -89,13 +90,13 @@ test("real Linux trusted candidate reaches the final release build entry only", 
   assert.match(checksums, /code\.tar/u);
   assert.match(checksums, /candidate-build-receipt\.json/u);
   assert.match(checksums, /release-manifest\.json/u);
-  assertTrustedReleaseCandidateRoot(paths.codeRoot, REVISION);
+  assertTrustedReleaseCandidateRoot(paths.codeRoot, REVISION, "production");
 });
 
 test("root cannot enable the trusted Docker test seam through ambient NODE_ENV", {
   skip: !ENABLED && "requires an installed root-owned Linux release candidate",
 }, () => {
-  const paths = releaseCandidatePaths(REVISION);
+  const paths = releaseCandidatePaths(REVISION, "production");
   const result = spawnSync("/usr/bin/node", [
     `${paths.codeRoot}/scripts/trusted-docker.mjs`,
     "image",

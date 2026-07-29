@@ -12,6 +12,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  PRODUCTION_RELEASE_CANDIDATES_ROOT,
+  REAL_TEST_RELEASE_CANDIDATES_ROOT,
   assertTrustedReleaseCandidateRoot,
   captureTrustedCandidateTree,
   readTrustedReleaseCandidateReceipt,
@@ -23,14 +25,72 @@ import { validateTrustedReleaseBuildDockerArguments } from "./trustedDockerRunti
 const REVISION = "a".repeat(40);
 const OTHER_REVISION = "b".repeat(40);
 
+test("deployment identity selects only the two canonical candidate roots", () => {
+  assert.equal(
+    releaseCandidatePaths(REVISION, "production").candidatesRoot,
+    PRODUCTION_RELEASE_CANDIDATES_ROOT,
+  );
+  assert.equal(
+    releaseCandidatePaths(REVISION, "real-test").candidatesRoot,
+    REAL_TEST_RELEASE_CANDIDATES_ROOT,
+  );
+  assert.equal(
+    releaseCandidatePaths(REVISION, "real-test").incomingArchive,
+    `${REAL_TEST_RELEASE_CANDIDATES_ROOT}/.incoming-${REVISION}.tar`,
+  );
+  for (const environment of [undefined, "", "test", "PRODUCTION"]) {
+    assert.throws(
+      () => releaseCandidatePaths(REVISION, environment),
+      /deployment environment is invalid/u,
+    );
+  }
+  assert.throws(
+    () => releaseCandidatePaths(REVISION, "real-test", {
+      candidatesRoot: "/tmp/arbitrary",
+    }),
+    /root override is not allowed/u,
+  );
+  assert.throws(
+    () => releaseCandidatePaths("a".repeat(7), "real-test"),
+    /full lowercase Git commit/u,
+  );
+  const production = releaseCandidatePaths(REVISION, "production");
+  const realTest = releaseCandidatePaths(REVISION, "real-test");
+  assert.throws(
+    () => assertTrustedReleaseCandidateRoot(
+      production.codeRoot,
+      REVISION,
+      "real-test",
+    ),
+    /root identity mismatch/u,
+  );
+  assert.throws(
+    () => assertTrustedReleaseCandidateRoot(
+      realTest.codeRoot,
+      REVISION,
+      "production",
+    ),
+    /root identity mismatch/u,
+  );
+});
+
 test("candidate receipt binds one fixed revision root, archive and exact source tree", () => {
-  withCandidate(({ paths, options }) => {
-    const result = assertTrustedReleaseCandidateRoot(paths.codeRoot, REVISION, options);
-    assert.equal(result.receipt.revision, REVISION);
-    assert.equal(result.paths.manifest, join(paths.candidateRoot, "release-manifest.json"));
-    assert.equal(result.paths.checksums, join(paths.candidateRoot, "RELEASE_SHA256SUMS"));
-    assert.equal(result.receipt.candidateTree.fileCount, 24);
-  });
+  for (const deploymentEnvironment of ["production", "real-test"]) {
+    withCandidate(({ paths, options }) => {
+      const result = assertTrustedReleaseCandidateRoot(
+        paths.codeRoot,
+        REVISION,
+        deploymentEnvironment,
+        options,
+      );
+      assert.equal(result.receipt.revision, REVISION);
+      assert.equal(result.receipt.candidateRoot, paths.candidateRoot);
+      assert.equal(result.receipt.codeRoot, paths.codeRoot);
+      assert.equal(result.paths.manifest, join(paths.candidateRoot, "release-manifest.json"));
+      assert.equal(result.paths.checksums, join(paths.candidateRoot, "RELEASE_SHA256SUMS"));
+      assert.equal(result.receipt.candidateTree.fileCount, 24);
+    }, deploymentEnvironment);
+  }
 });
 
 test("random roots and revision/path substitutions are rejected", () => {
@@ -38,11 +98,16 @@ test("random roots and revision/path substitutions are rejected", () => {
     const random = join(root, "random", "code");
     mkdirSync(random, { recursive: true, mode: 0o700 });
     assert.throws(
-      () => assertTrustedReleaseCandidateRoot(random, REVISION, options),
+      () => assertTrustedReleaseCandidateRoot(random, REVISION, "production", options),
       /root identity mismatch/u,
     );
     assert.throws(
-      () => assertTrustedReleaseCandidateRoot(paths.codeRoot, OTHER_REVISION, options),
+      () => assertTrustedReleaseCandidateRoot(
+        paths.codeRoot,
+        OTHER_REVISION,
+        "production",
+        options,
+      ),
       /root identity mismatch|ENOENT/u,
     );
   });
@@ -67,6 +132,20 @@ test("candidate content, inode and receipt hash replacement fail closed", () => 
       chmodSync(paths.receipt, 0o400);
     },
     ({ paths }) => {
+      const source = JSON.parse(readFileSync(paths.receipt, "utf8"));
+      source.candidateRoot = `${paths.candidateRoot}-mixed`;
+      chmodSync(paths.receipt, 0o600);
+      writeFileSync(paths.receipt, `${JSON.stringify(source)}\n`, { mode: 0o400 });
+      chmodSync(paths.receipt, 0o400);
+    },
+    ({ paths }) => {
+      const source = JSON.parse(readFileSync(paths.receipt, "utf8"));
+      source.codeRoot = `${paths.codeRoot}-mixed`;
+      chmodSync(paths.receipt, 0o600);
+      writeFileSync(paths.receipt, `${JSON.stringify(source)}\n`, { mode: 0o400 });
+      chmodSync(paths.receipt, 0o400);
+    },
+    ({ paths }) => {
       chmodSync(paths.archive, 0o600);
       writeFileSync(paths.archive, "changed-archive\n");
       chmodSync(paths.archive, 0o400);
@@ -81,8 +160,8 @@ test("candidate content, inode and receipt hash replacement fail closed", () => 
     withCandidate(({ paths, options }) => {
       mutate({ paths });
       assert.throws(
-        () => readTrustedReleaseCandidateReceipt(REVISION, options),
-        /identity mismatch|boundary is invalid/u,
+        () => readTrustedReleaseCandidateReceipt(REVISION, "production", options),
+        /identity mismatch|boundary is invalid|receipt schema is invalid/u,
       );
     });
   }
@@ -92,6 +171,7 @@ test("release-build Docker allowlist excludes containers, volumes and runtime mu
   const source = {
     XINGHENG_OPERATION_LOCK_CONTEXT: "release-build",
     XINGHENG_RELEASE_CANDIDATE_REVISION: REVISION,
+    XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT: "production",
   };
   assert.doesNotThrow(() => validateTrustedReleaseBuildDockerArguments([
     "build",
@@ -160,20 +240,36 @@ test("release-build Docker allowlist excludes containers, volumes and runtime mu
       /not allowlisted/u,
     );
   }
+  for (const deploymentEnvironment of [undefined, "", "staging", "Production"]) {
+    assert.throws(
+      () => validateTrustedReleaseBuildDockerArguments([
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        `xingheng-api:${REVISION}`,
+      ], {
+        ...source,
+        XINGHENG_RELEASE_CANDIDATE_ENVIRONMENT: deploymentEnvironment,
+      }),
+      /deployment environment is invalid/u,
+    );
+  }
 });
 
-function withCandidate(callback) {
+function withCandidate(callback, deploymentEnvironment = "production") {
   const root = mkdtempSync(join(tmpdir(), "xingheng-candidate-"));
   try {
     chmodSync(root, 0o700);
     const candidatesRoot = join(root, "candidates");
     const options = {
       candidatesRoot,
+      testOnlyCandidatesRoot: true,
       expectedUid: process.getuid(),
       expectedGid: process.getgid(),
       skipParentChain: true,
     };
-    const paths = releaseCandidatePaths(REVISION, options);
+    const paths = releaseCandidatePaths(REVISION, deploymentEnvironment, options);
     mkdirSync(paths.codeRoot, { recursive: true, mode: 0o700 });
     chmodSync(paths.candidatesRoot, 0o700);
     chmodSync(paths.candidateRoot, 0o700);

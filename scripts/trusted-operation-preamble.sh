@@ -21,6 +21,15 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
   case "$xingheng_entry_repo_root" in
     /opt/xingheng-release/candidates/*/code)
       xingheng_expected_operation=release-build
+      xingheng_candidate_environment=production
+      [ "${0##*/}" = build-release-images.sh ] || {
+        echo "trusted candidate operation entry is invalid" >&2
+        exit 78
+      }
+      ;;
+    /opt/xingheng-real-test-release/candidates/*/code)
+      xingheng_expected_operation=release-build
+      xingheng_candidate_environment=real-test
       [ "${0##*/}" = build-release-images.sh ] || {
         echo "trusted candidate operation entry is invalid" >&2
         exit 78
@@ -47,7 +56,9 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
       exec /usr/bin/env -i \
         HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
         /usr/bin/node "$xingheng_entry_script_dir/trusted-operation-launcher.mjs" \
-        "$xingheng_expected_operation" "scripts/${0##*/}" "$@"
+        "$xingheng_expected_operation" \
+        ${xingheng_candidate_environment:+"$xingheng_candidate_environment"} \
+        "scripts/${0##*/}" "$@"
       ;;
     *)
       echo "trusted production operation lock context is invalid" >&2
