@@ -219,8 +219,25 @@ export function parseRealTestRuntimeEnvironment(source, revision) {
 
 export function assertRuntimeFileUnchanged(receipt) {
   const current = fstatSync(receipt.fd);
+  let canonical;
+  try {
+    canonical = lstatSync(receipt.path);
+  } catch {
+    throw new Error("real-test runtime canonical file changed while in use");
+  }
   if (
-    current.dev !== receipt.dev
+    !canonical.isFile()
+    || canonical.isSymbolicLink()
+    || canonical.dev !== current.dev
+    || canonical.ino !== current.ino
+    || canonical.size !== current.size
+    || canonical.uid !== current.uid
+    || canonical.gid !== current.gid
+    || canonical.nlink !== 1
+    || canonical.mtimeMs !== current.mtimeMs
+    || canonical.ctimeMs !== current.ctimeMs
+    || (canonical.mode & 0o777) !== (current.mode & 0o777)
+    || current.dev !== receipt.dev
     || current.ino !== receipt.ino
     || current.size !== receipt.size
     || current.uid !== receipt.uid

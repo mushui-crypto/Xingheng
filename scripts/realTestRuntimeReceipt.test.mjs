@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  fstatSync,
   lstatSync,
   mkdtempSync,
+  openSync,
   readFileSync,
+  renameSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -14,6 +18,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   REAL_TEST_RUNTIME_ENV_KEYS,
+  assertRuntimeFileUnchanged,
   parseRealTestRuntimeEnvironment,
   readRealTestRuntimeContext,
   validateRealTestRuntimeChecksums,
@@ -76,6 +81,41 @@ test("runtime environment rejects unknown, provider-write and credential control
       () => parseRealTestRuntimeEnvironment(changed, REVISION),
       /schema is invalid|forbidden key|identity is invalid/u,
     );
+  }
+});
+
+test("runtime file rejects a same-content canonical pathname replacement", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-runtime-path-drift-"));
+  const path = join(root, "runtime.env");
+  const replacement = join(root, "replacement");
+  let fd;
+  try {
+    writeFileSync(path, "trusted\n", { mode: 0o400 });
+    fd = openSync(path, "r");
+    const opened = fstatSync(fd);
+    const receipt = {
+      path,
+      fd,
+      size: opened.size,
+      dev: opened.dev,
+      ino: opened.ino,
+      uid: opened.uid,
+      gid: opened.gid,
+      mode: opened.mode & 0o777,
+      mtimeMs: opened.mtimeMs,
+      ctimeMs: opened.ctimeMs,
+      sha256: createHash("sha256").update("trusted\n").digest("hex"),
+    };
+    assert.doesNotThrow(() => assertRuntimeFileUnchanged(receipt));
+    writeFileSync(replacement, "trusted\n", { mode: 0o400 });
+    renameSync(replacement, path);
+    assert.throws(
+      () => assertRuntimeFileUnchanged(receipt),
+      /runtime file changed/u,
+    );
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

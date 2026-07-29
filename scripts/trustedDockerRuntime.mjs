@@ -567,12 +567,16 @@ function activeTrustReceipt(source) {
     const controlRoot = new URL("../", import.meta.url).pathname;
     const context = readRealTestRuntimeContext(controlRoot);
     try {
-      validateCommonTrustReceipt(
-        readTrustedReleaseCandidateReceipt(
-          context.selector.revision,
-          "real-test",
-        ),
+      const candidate = readTrustedReleaseCandidateReceipt(
+        context.selector.revision,
+        "real-test",
       );
+      validateCommonTrustReceipt(candidate);
+      if (
+        context.selector.environment !== "real-test"
+        || context.selector.revision !== candidate.revision
+        || resolve(context.selector.codeRoot) !== resolve(controlRoot)
+      ) throw new Error("real-test runtime active trust identity mismatch");
       return {
         ...context.selector,
         releaseRoot: context.selector.codeRoot,

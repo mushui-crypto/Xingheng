@@ -25,6 +25,8 @@ const KMS = Object.freeze([
 ]);
 const UP = Object.freeze(["up", "-d", "api"]);
 const STOP = Object.freeze(["stop", "api"]);
+const API_HEALTH_ATTEMPTS = 19;
+const API_HEALTH_POLL_INTERVAL_MS = 5_000;
 
 export function runRealTestRuntimeOperation(operation, controlRoot, dependencies = {}) {
   if (!["activate", "stop"].includes(operation)) {
@@ -41,26 +43,42 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
   const compose = dependencies.compose ?? ((args) => runCompose(context, args));
   const inspectImage = dependencies.inspectImage ?? (() => verifyApiImage(context));
   const inspectApi = dependencies.inspectApi ?? (() => verifyRunningApi(context));
+  const assertContext = dependencies.assertContext ?? (() => {
+    assertRuntimeFileUnchanged(context.selectorFile);
+    assertRuntimeFileUnchanged(context.environmentFile);
+  });
+  const wait = dependencies.wait ?? waitForHealthPoll;
   try {
     if (
       context.selector.revision !== revision
       || context.environment.XINGHENG_REVISION !== revision
     ) throw new Error("real-test runtime revision identity mismatch");
+    assertContext();
     inspectImage();
     if (operation === "stop") {
+      assertContext();
       compose(STOP);
+      assertContext();
       return context.selector;
     }
+    assertContext();
     try {
       compose(KMS);
-      compose(UP);
-      inspectApi();
     } catch (error) {
-      try {
-        compose(STOP);
-      } catch {
-        // Preserve the original stable failure.
-      }
+      attemptRiskReducingStop(compose, assertContext);
+      throw error;
+    }
+    assertContext();
+    let upAttempted = false;
+    try {
+      assertContext();
+      upAttempted = true;
+      compose(UP);
+      assertContext();
+      verifyApiHealthUntilReady(inspectApi, assertContext, wait, dependencies);
+      assertContext();
+    } catch (error) {
+      if (upAttempted) attemptRiskReducingStop(compose, assertContext);
       throw error;
     }
     return context.selector;
@@ -68,6 +86,46 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
     if (dependencies.closeContext) dependencies.closeContext(context);
     else if (!dependencies.readContext) closeRealTestRuntimeContext(context);
   }
+}
+
+function attemptRiskReducingStop(compose, assertContext) {
+  try {
+    assertContext();
+  } catch {
+    // A canonical-path failure must not prevent stopping the exact API.
+  }
+  try {
+    compose(STOP);
+  } catch {
+    // Preserve the original stable failure.
+  }
+  try {
+    assertContext();
+  } catch {
+    // The original failure remains authoritative after the risk-reducing stop.
+  }
+}
+
+function verifyApiHealthUntilReady(inspectApi, assertContext, wait, dependencies) {
+  const attempts = dependencies.healthAttempts ?? API_HEALTH_ATTEMPTS;
+  const intervalMs = dependencies.healthPollIntervalMs ?? API_HEALTH_POLL_INTERVAL_MS;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    assertContext();
+    const status = inspectApi();
+    assertContext();
+    if (status === "healthy") return;
+    if (status !== "starting") {
+      throw new Error("real-test runtime API health status is invalid");
+    }
+    if (attempt === attempts) {
+      throw new Error("real-test runtime API health starting timeout");
+    }
+    wait(intervalMs);
+  }
+}
+
+function waitForHealthPoll(delayMs) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 }
 
 function runCompose(context, args) {
@@ -185,7 +243,6 @@ function verifyRunningApi(context) {
   const environment = new Set(value?.Config?.Env ?? []);
   if (
     value?.State?.Running !== true
-    || value?.State?.Health?.Status !== "healthy"
     || value?.Image !== context.selector.images.api
     || value?.Config?.Labels?.["org.opencontainers.image.revision"]
       !== context.selector.revision
@@ -200,6 +257,11 @@ function verifyRunningApi(context) {
     || !JSON.stringify(value?.Config?.Healthcheck?.Test ?? []).includes("no-store")
     || Object.keys(value?.HostConfig?.PortBindings ?? {}).length !== 0
   ) throw new Error("real-test runtime API identity, health or no-store check failed");
+  const health = value?.State?.Health?.Status;
+  if (!["healthy", "starting"].includes(health)) {
+    throw new Error("real-test runtime API health status is invalid");
+  }
+  return health;
 }
 
 function openComposeFile(path) {
