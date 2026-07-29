@@ -18,6 +18,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   REAL_TEST_RUNTIME_ENV_KEYS,
+  assertCapturedRuntimeFileDescriptor,
   assertRuntimeFileUnchanged,
   parseRealTestRuntimeEnvironment,
   readRealTestRuntimeContext,
@@ -112,6 +113,40 @@ test("runtime file rejects a same-content canonical pathname replacement", () =>
     assert.throws(
       () => assertRuntimeFileUnchanged(receipt),
       /runtime file changed/u,
+    );
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("captured runtime descriptor still rejects content drift", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-runtime-fd-drift-"));
+  const path = join(root, "runtime.env");
+  let fd;
+  try {
+    writeFileSync(path, "trusted\n", { mode: 0o400 });
+    fd = openSync(path, "r");
+    const opened = fstatSync(fd);
+    const receipt = {
+      path,
+      fd,
+      size: opened.size,
+      dev: opened.dev,
+      ino: opened.ino,
+      uid: opened.uid,
+      gid: opened.gid,
+      mode: opened.mode & 0o777,
+      mtimeMs: opened.mtimeMs,
+      ctimeMs: opened.ctimeMs,
+      sha256: createHash("sha256").update("trusted\n").digest("hex"),
+    };
+    assert.doesNotThrow(() => assertCapturedRuntimeFileDescriptor(receipt));
+    chmodSync(path, 0o600);
+    writeFileSync(path, "changed\n", { mode: 0o400 });
+    assert.throws(
+      () => assertCapturedRuntimeFileDescriptor(receipt),
+      /captured real-test runtime file descriptor changed/u,
     );
   } finally {
     if (fd !== undefined) closeSync(fd);

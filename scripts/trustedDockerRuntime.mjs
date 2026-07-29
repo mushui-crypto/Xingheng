@@ -120,6 +120,7 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
       socketPath,
       socket,
       expectedDaemon: trustReceipt?.daemon ?? null,
+      expectedDockerBinary: trustReceipt?.binaries.docker ?? null,
       environment: trustedDockerEnvironment(source, socketPath, fixture !== null),
       close() {
         closeSync(executable.fd);
@@ -175,6 +176,16 @@ export function verifyTrustedHostTool(tool) {
 }
 
 export function verifyTrustedDockerRuntime(runtime) {
+  verifyCapturedTrustedDockerRuntime(runtime);
+  if (runtime.expectedDaemon !== null) {
+    const receipt = activeTrustReceipt(process.env);
+    if (canonicalJson(receipt.daemon) !== canonicalJson(runtime.expectedDaemon)) {
+      throw new Error("trusted local Docker daemon receipt changed while in use");
+    }
+  }
+}
+
+export function verifyCapturedTrustedDockerRuntime(runtime) {
   const current = fstatSync(runtime.fd);
   if (
     current.dev !== runtime.dev
@@ -199,8 +210,10 @@ export function verifyTrustedDockerRuntime(runtime) {
     throw new Error("trusted local Docker socket identity changed while in use");
   }
   if (runtime.expectedDaemon !== null) {
-    const receipt = activeTrustReceipt(process.env);
-    const current = inspectDaemonIdentity(receipt, runtime.environment);
+    const current = inspectDaemonIdentity({
+      binaries: { docker: runtime.expectedDockerBinary },
+      daemon: runtime.expectedDaemon,
+    }, runtime.environment);
     if (canonicalJson(current) !== canonicalJson(runtime.daemon)) {
       throw new Error("trusted local Docker daemon identity changed while in use");
     }

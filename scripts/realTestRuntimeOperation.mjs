@@ -7,6 +7,8 @@ import {
   openSync,
 } from "node:fs";
 import {
+  assertCapturedRuntimeFileDescriptor,
+  assertRuntimeFileDescriptorUnchanged,
   assertRuntimeFileUnchanged,
   closeRealTestRuntimeContext,
   readRealTestRuntimeContext,
@@ -15,7 +17,7 @@ import {
   execTrustedDockerSync,
   openTrustedDockerRuntime,
   trustedExecutableInvocation,
-  verifyTrustedDockerRuntime,
+  verifyCapturedTrustedDockerRuntime,
 } from "./trustedDockerRuntime.mjs";
 
 const PROJECT = "xingheng-real-test";
@@ -40,7 +42,6 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
   ) throw new Error("real-test runtime operation context is invalid");
   const readContext = dependencies.readContext ?? readRealTestRuntimeContext;
   const context = readContext(controlRoot, dependencies.contextOptions);
-  const compose = dependencies.compose ?? ((args) => runCompose(context, args));
   const inspectImage = dependencies.inspectImage ?? (() => verifyApiImage(context));
   const inspectApi = dependencies.inspectApi ?? (() => verifyRunningApi(context));
   const assertContext = dependencies.assertContext ?? (() => {
@@ -48,24 +49,43 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
     assertRuntimeFileUnchanged(context.environmentFile);
   });
   const wait = dependencies.wait ?? waitForHealthPoll;
+  let composeCapability;
   try {
     if (
       context.selector.revision !== revision
       || context.environment.XINGHENG_REVISION !== revision
     ) throw new Error("real-test runtime revision identity mismatch");
     assertContext();
+    composeCapability = dependencies.openComposeCapability
+      ? dependencies.openComposeCapability(context)
+      : dependencies.compose
+        ? mockComposeCapability(dependencies.compose)
+        : openRealTestRuntimeComposeCapability(
+          context,
+          dependencies.composeCapabilityOptions,
+        );
+    assertContext();
     inspectImage();
     if (operation === "stop") {
-      assertContext();
-      compose(STOP);
-      assertContext();
+      try {
+        assertContext();
+      } catch (error) {
+        attemptRiskReducingStop(composeCapability);
+        throw error;
+      }
+      composeCapability.execute(STOP);
+      try {
+        assertContext();
+      } catch (error) {
+        throw error;
+      }
       return context.selector;
     }
     assertContext();
     try {
-      compose(KMS);
+      composeCapability.execute(KMS);
     } catch (error) {
-      attemptRiskReducingStop(compose, assertContext);
+      attemptRiskReducingStop(composeCapability);
       throw error;
     }
     assertContext();
@@ -73,36 +93,30 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
     try {
       assertContext();
       upAttempted = true;
-      compose(UP);
+      composeCapability.execute(UP);
       assertContext();
       verifyApiHealthUntilReady(inspectApi, assertContext, wait, dependencies);
       assertContext();
     } catch (error) {
-      if (upAttempted) attemptRiskReducingStop(compose, assertContext);
+      if (upAttempted) attemptRiskReducingStop(composeCapability);
       throw error;
     }
     return context.selector;
   } finally {
-    if (dependencies.closeContext) dependencies.closeContext(context);
-    else if (!dependencies.readContext) closeRealTestRuntimeContext(context);
+    try {
+      composeCapability?.close();
+    } finally {
+      if (dependencies.closeContext) dependencies.closeContext(context);
+      else if (!dependencies.readContext) closeRealTestRuntimeContext(context);
+    }
   }
 }
 
-function attemptRiskReducingStop(compose, assertContext) {
+function attemptRiskReducingStop(composeCapability) {
   try {
-    assertContext();
-  } catch {
-    // A canonical-path failure must not prevent stopping the exact API.
-  }
-  try {
-    compose(STOP);
+    composeCapability.execute(STOP);
   } catch {
     // Preserve the original stable failure.
-  }
-  try {
-    assertContext();
-  } catch {
-    // The original failure remains authoritative after the risk-reducing stop.
   }
 }
 
@@ -128,71 +142,93 @@ function waitForHealthPoll(delayMs) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delayMs);
 }
 
-function runCompose(context, args) {
+export function openRealTestRuntimeComposeCapability(context, options = {}) {
+  let composeFile;
+  let runtime;
+  try {
+    assertRuntimeFileDescriptorUnchanged(context.selectorFile);
+    assertRuntimeFileDescriptorUnchanged(context.environmentFile);
+    composeFile = openComposeFile(
+      `${context.paths.codeRoot}/compose.real-test.yaml`,
+      options,
+    );
+    runtime = openTrustedDockerRuntime("compose", process.env);
+    verifyCapturedTrustedDockerRuntime(runtime);
+    let closed = false;
+    return {
+      execute(args) {
+        runCapturedCompose(context, composeFile, runtime, args);
+      },
+      close() {
+        if (closed) return;
+        closed = true;
+        try {
+          runtime.close();
+        } finally {
+          closeSync(composeFile.fd);
+        }
+      },
+    };
+  } catch (error) {
+    runtime?.close();
+    if (composeFile !== undefined) closeSync(composeFile.fd);
+    throw error;
+  }
+}
+
+function runCapturedCompose(context, composeFile, runtime, args) {
   if (!sameArgs(args, KMS) && !sameArgs(args, UP) && !sameArgs(args, STOP)) {
     throw new Error("real-test runtime Compose operation is not allowed");
   }
-  let composeFile;
-  let serviceEnvFd;
-  let runtime;
-  try {
-    composeFile = openComposeFile(`${context.paths.codeRoot}/compose.real-test.yaml`);
-    serviceEnvFd = openSync(
-      context.environmentFile.path,
-      constants.O_RDONLY | constants.O_NOFOLLOW,
-    );
-    const serviceEnv = fstatSync(serviceEnvFd);
-    if (
-      serviceEnv.dev !== context.environmentFile.dev
-      || serviceEnv.ino !== context.environmentFile.ino
-      || serviceEnv.size !== context.environmentFile.size
-      || serviceEnv.uid !== context.environmentFile.uid
-      || serviceEnv.gid !== context.environmentFile.gid
-      || serviceEnv.nlink !== 1
-      || (serviceEnv.mode & 0o777) !== 0o400
-    ) throw new Error("real-test runtime environment descriptor mismatch");
-    runtime = openTrustedDockerRuntime("compose", process.env);
-    const result = spawnSync(
-      trustedExecutableInvocation(runtime, 5),
-      [
-        "--env-file", "/proc/self/fd/3",
-        "-f", "/proc/self/fd/6",
-        "-p", PROJECT,
-        ...args,
-      ],
-      {
-        encoding: "utf8",
-        env: {
-          ...runtime.environment,
-          ...context.environment,
-          XINGHENG_REVISION: context.selector.revision,
-          XINGHENG_API_IMAGE: context.selector.images.api,
-          XINGHENG_WEB_IMAGE: context.selector.images.web,
-          XINGHENG_STRATEGY_TOOLS_IMAGE: context.selector.images.strategyTools,
-          XINGHENG_COMPOSE_ENV_FD: "/proc/self/fd/4",
-        },
-        stdio: [
-          "ignore", "pipe", "pipe",
-          context.environmentFile.fd,
-          serviceEnvFd,
-          runtime.fd,
-          composeFile.fd,
-        ],
-        maxBuffer: 4 * 1024 * 1024,
+  assertCapturedRuntimeFileDescriptor(context.selectorFile);
+  assertCapturedRuntimeFileDescriptor(context.environmentFile);
+  assertComposeUnchanged(composeFile);
+  verifyCapturedTrustedDockerRuntime(runtime);
+  const result = spawnSync(
+    trustedExecutableInvocation(runtime, 5),
+    [
+      "--env-file", "/proc/self/fd/3",
+      "-f", "/proc/self/fd/6",
+      "-p", PROJECT,
+      ...args,
+    ],
+    {
+      encoding: "utf8",
+      env: {
+        ...runtime.environment,
+        ...context.environment,
+        XINGHENG_REVISION: context.selector.revision,
+        XINGHENG_API_IMAGE: context.selector.images.api,
+        XINGHENG_WEB_IMAGE: context.selector.images.web,
+        XINGHENG_STRATEGY_TOOLS_IMAGE: context.selector.images.strategyTools,
+        XINGHENG_COMPOSE_ENV_FD: "/proc/self/fd/3",
       },
-    );
-    assertRuntimeFileUnchanged(context.selectorFile);
-    assertRuntimeFileUnchanged(context.environmentFile);
-    assertComposeUnchanged(composeFile);
-    verifyTrustedDockerRuntime(runtime);
-    if (result.status !== 0 || result.signal || result.error) {
-      throw new Error("real-test runtime Compose operation failed");
-    }
-  } finally {
-    runtime?.close();
-    if (serviceEnvFd !== undefined) closeSync(serviceEnvFd);
-    if (composeFile !== undefined) closeSync(composeFile.fd);
+      stdio: [
+        "ignore", "pipe", "pipe",
+        context.environmentFile.fd,
+        "ignore",
+        runtime.fd,
+        composeFile.fd,
+      ],
+      maxBuffer: 4 * 1024 * 1024,
+    },
+  );
+  assertCapturedRuntimeFileDescriptor(context.selectorFile);
+  assertCapturedRuntimeFileDescriptor(context.environmentFile);
+  assertComposeUnchanged(composeFile);
+  verifyCapturedTrustedDockerRuntime(runtime);
+  if (result.status !== 0 || result.signal || result.error) {
+    throw new Error("real-test runtime Compose operation failed");
   }
+}
+
+function mockComposeCapability(compose) {
+  return {
+    execute(args) {
+      compose(args);
+    },
+    close() {},
+  };
 }
 
 function verifyApiImage(context) {
@@ -264,14 +300,16 @@ function verifyRunningApi(context) {
   return health;
 }
 
-function openComposeFile(path) {
+function openComposeFile(path, options = {}) {
   const before = lstatSync(path);
+  const expectedUid = options.expectedUid ?? 0;
+  const expectedGid = options.expectedGid ?? 0;
   if (
     !before.isFile()
     || before.isSymbolicLink()
     || before.nlink !== 1
-    || before.uid !== 0
-    || before.gid !== 0
+    || before.uid !== expectedUid
+    || before.gid !== expectedGid
     || (before.mode & 0o777) !== 0o444
     || before.size < 2
     || before.size > 1024 * 1024
@@ -282,8 +320,8 @@ function openComposeFile(path) {
     value.dev !== before.dev
     || value.ino !== before.ino
     || value.size !== before.size
-    || value.uid !== 0
-    || value.gid !== 0
+    || value.uid !== expectedUid
+    || value.gid !== expectedGid
     || value.nlink !== 1
     || (value.mode & 0o777) !== 0o444
   ) {

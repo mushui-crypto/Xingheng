@@ -218,7 +218,7 @@ export function parseRealTestRuntimeEnvironment(source, revision) {
 }
 
 export function assertRuntimeFileUnchanged(receipt) {
-  const current = fstatSync(receipt.fd);
+  const current = assertRuntimeFileDescriptorUnchanged(receipt);
   let canonical;
   try {
     canonical = lstatSync(receipt.path);
@@ -237,7 +237,13 @@ export function assertRuntimeFileUnchanged(receipt) {
     || canonical.mtimeMs !== current.mtimeMs
     || canonical.ctimeMs !== current.ctimeMs
     || (canonical.mode & 0o777) !== (current.mode & 0o777)
-    || current.dev !== receipt.dev
+  ) throw new Error("real-test runtime file changed while in use");
+}
+
+export function assertRuntimeFileDescriptorUnchanged(receipt) {
+  const current = fstatSync(receipt.fd);
+  if (
+    current.dev !== receipt.dev
     || current.ino !== receipt.ino
     || current.size !== receipt.size
     || current.uid !== receipt.uid
@@ -248,6 +254,23 @@ export function assertRuntimeFileUnchanged(receipt) {
     || (current.mode & 0o777) !== receipt.mode
     || sha256Fd(receipt.fd, receipt.size) !== receipt.sha256
   ) throw new Error("real-test runtime file changed while in use");
+  return current;
+}
+
+export function assertCapturedRuntimeFileDescriptor(receipt) {
+  const current = fstatSync(receipt.fd);
+  if (
+    current.dev !== receipt.dev
+    || current.ino !== receipt.ino
+    || current.size !== receipt.size
+    || current.uid !== receipt.uid
+    || current.gid !== receipt.gid
+    || ![0, 1].includes(current.nlink)
+    || current.mtimeMs !== receipt.mtimeMs
+    || (current.mode & 0o777) !== receipt.mode
+    || sha256Fd(receipt.fd, receipt.size) !== receipt.sha256
+  ) throw new Error("captured real-test runtime file descriptor changed");
+  return current;
 }
 
 export function closeRealTestRuntimeContext(context) {
