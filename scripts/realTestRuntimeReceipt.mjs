@@ -257,8 +257,33 @@ export function assertRuntimeFileDescriptorUnchanged(receipt) {
   return current;
 }
 
-export function assertCapturedRuntimeFileDescriptor(receipt) {
+export function captureRiskReducingRuntimeFile(receipt) {
   const current = fstatSync(receipt.fd);
+  assertRiskReducingDescriptorFacts(receipt, current);
+  if (current.nlink === 1) {
+    assertRuntimeFileUnchanged(receipt);
+    return Object.freeze({ ctimeMs: receipt.ctimeMs, linked: true });
+  }
+  if (current.nlink !== 0 || canonicalPathStillNamesReceipt(receipt)) {
+    throw new Error("risk-reducing runtime file unlink boundary is invalid");
+  }
+  return Object.freeze({ ctimeMs: current.ctimeMs, linked: false });
+}
+
+export function assertRiskReducingRuntimeFile(receipt, baseline) {
+  const current = fstatSync(receipt.fd);
+  assertRiskReducingDescriptorFacts(receipt, current);
+  if (
+    current.ctimeMs !== baseline.ctimeMs
+    || (baseline.linked
+      ? current.nlink !== 1
+        || canonicalPathStillNamesReceipt(receipt) !== true
+      : current.nlink !== 0
+        || canonicalPathStillNamesReceipt(receipt) !== false)
+  ) throw new Error("risk-reducing runtime file changed");
+}
+
+function assertRiskReducingDescriptorFacts(receipt, current) {
   if (
     current.dev !== receipt.dev
     || current.ino !== receipt.ino
@@ -269,8 +294,19 @@ export function assertCapturedRuntimeFileDescriptor(receipt) {
     || current.mtimeMs !== receipt.mtimeMs
     || (current.mode & 0o777) !== receipt.mode
     || sha256Fd(receipt.fd, receipt.size) !== receipt.sha256
-  ) throw new Error("captured real-test runtime file descriptor changed");
-  return current;
+  ) throw new Error("risk-reducing runtime file descriptor changed");
+}
+
+function canonicalPathStillNamesReceipt(receipt) {
+  try {
+    const canonical = lstatSync(receipt.path);
+    return canonical.isFile()
+      && !canonical.isSymbolicLink()
+      && canonical.dev === receipt.dev
+      && canonical.ino === receipt.ino;
+  } catch {
+    return false;
+  }
 }
 
 export function closeRealTestRuntimeContext(context) {

@@ -17,6 +17,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { after } from "node:test";
 import {
+  openRealTestRuntimeComposeCapability,
   runRealTestRuntimeOperation,
 } from "./realTestRuntimeOperation.mjs";
 import { validateRealTestRuntimeDockerArguments } from "./trustedDockerRuntime.mjs";
@@ -37,7 +38,9 @@ writeFileSync(
   `#!/bin/sh\nprintf '%s\\n' "$*" >> "${CAPABILITY_LOG}"\n`
     + "case \"$*\" in *\" up -d api\") "
     + "if [ -n \"$FAKE_REPLACE_PATH\" ]; then "
-    + "mv \"$FAKE_REPLACEMENT_PATH\" \"$FAKE_REPLACE_PATH\"; fi;; esac\n",
+    + "mv \"$FAKE_REPLACEMENT_PATH\" \"$FAKE_REPLACE_PATH\"; fi;; "
+    + "*\" stop api\") if [ \"$FAKE_MUTATE_STOP_FD\" = \"true\" ]; then "
+    + "chmod 600 /dev/fd/3; chmod 400 /dev/fd/3; fi;; esac\n",
   { mode: 0o555 },
 );
 after(async () => {
@@ -353,6 +356,153 @@ test("explicit stop uses captured capability after canonical replacement", () =>
   });
 });
 
+test("critical-window replacement blocks KMS or up before actual spawn", () => {
+  withRuntimeContext(() => {
+    for (const blocked of ["kms", "up"]) {
+      const fixture = fileBackedContext(true);
+      writeFileSync(CAPABILITY_LOG, "");
+      setTrustedDockerFixture();
+      let replaced = false;
+      try {
+        assert.throws(
+          () => runRealTestRuntimeOperation("activate", "/candidate/code", {
+            readContext: () => fixture,
+            closeContext: () => {},
+            inspectImage: () => {},
+            inspectApi: () => "healthy",
+            composeCapabilityOptions: {
+              expectedUid: process.getuid(),
+              expectedGid: process.getgid(),
+              beforeLinkedSpawn: (operation) => {
+                if (!replaced && operation === blocked) {
+                  replaced = true;
+                  replaceCanonical(fixture.selectorFile);
+                }
+              },
+            },
+          }),
+          /runtime file changed/u,
+        );
+        const calls = readFileSync(CAPABILITY_LOG, "utf8").trim().split("\n");
+        assert.equal(
+          calls.some((line) => line.includes(" up -d api")),
+          false,
+        );
+        assert.equal(
+          calls.filter((line) => line.includes(" --profile ")).length,
+          blocked === "up" ? 1 : 0,
+        );
+        assert.equal(calls.filter((line) => line.includes(" stop api")).length, 1);
+      } finally {
+        closeSync(fixture.selectorFile.fd);
+        closeSync(fixture.environmentFile.fd);
+        rmSync(fixture.root, { recursive: true, force: true });
+        clearTrustedDockerFixture();
+      }
+    }
+  });
+});
+
+test("risk stop detects post-spawn ctime drift and never retries", () => {
+  withRuntimeContext(() => {
+    const fixture = fileBackedContext(true);
+    writeFileSync(CAPABILITY_LOG, "");
+    setTrustedDockerFixture();
+    process.env.FAKE_MUTATE_STOP_FD = "true";
+    try {
+      assert.throws(
+        () => runRealTestRuntimeOperation("stop", "/candidate/code", {
+          readContext: () => fixture,
+          closeContext: () => {},
+          inspectImage: () => replaceCanonical(fixture.selectorFile),
+          composeCapabilityOptions: {
+            expectedUid: process.getuid(),
+            expectedGid: process.getgid(),
+          },
+        }),
+        /runtime file changed/u,
+      );
+      const calls = readFileSync(CAPABILITY_LOG, "utf8").trim().split("\n");
+      assert.equal(calls.filter((line) => line.includes(" stop api")).length, 1);
+    } finally {
+      closeSync(fixture.selectorFile.fd);
+      closeSync(fixture.environmentFile.fd);
+      rmSync(fixture.root, { recursive: true, force: true });
+      clearTrustedDockerFixture();
+    }
+  });
+});
+
+test("captured capability exposes no args API and rejects risk-stop reuse or use after close", () => {
+  withRuntimeContext(() => {
+    const fixture = fileBackedContext(true);
+    writeFileSync(CAPABILITY_LOG, "");
+    setTrustedDockerFixture();
+    const capability = openRealTestRuntimeComposeCapability(fixture, {
+      expectedUid: process.getuid(),
+      expectedGid: process.getgid(),
+    });
+    try {
+      assert.equal(capability.execute, undefined);
+      replaceCanonical(fixture.selectorFile);
+      assert.throws(
+        () => capability.stopApi(),
+        /runtime file changed/u,
+      );
+      capability.riskReducingStop();
+      assert.throws(
+        () => capability.riskReducingStop(),
+        /already used/u,
+      );
+      capability.close();
+      capability.close();
+      assert.throws(
+        () => capability.runKms(),
+        /capability is unavailable/u,
+      );
+      const calls = readFileSync(CAPABILITY_LOG, "utf8").trim().split("\n");
+      assert.equal(calls.filter((line) => line.includes(" stop api")).length, 1);
+    } finally {
+      capability.close();
+      closeSync(fixture.selectorFile.fd);
+      closeSync(fixture.environmentFile.fd);
+      rmSync(fixture.root, { recursive: true, force: true });
+      clearTrustedDockerFixture();
+    }
+  });
+});
+
+test("captured capability rejects a reentrant concurrent call", () => {
+  withRuntimeContext(() => {
+    const fixture = fileBackedContext(true);
+    writeFileSync(CAPABILITY_LOG, "");
+    setTrustedDockerFixture();
+    let capability;
+    capability = openRealTestRuntimeComposeCapability(fixture, {
+      expectedUid: process.getuid(),
+      expectedGid: process.getgid(),
+      beforeLinkedSpawn: () => {
+        assert.throws(
+          () => capability.upApi(),
+          /capability is unavailable/u,
+        );
+      },
+    });
+    try {
+      capability.runKms();
+      const calls = readFileSync(CAPABILITY_LOG, "utf8").trim().split("\n");
+      assert.equal(calls.filter((line) => line.includes(" --profile ")).length, 1);
+      assert.equal(calls.some((line) => line.includes(" up -d api")), false);
+    } finally {
+      capability.close();
+      closeSync(fixture.selectorFile.fd);
+      closeSync(fixture.environmentFile.fd);
+      rmSync(fixture.root, { recursive: true, force: true });
+      clearTrustedDockerFixture();
+    }
+  });
+});
+
 test("Docker runtime allowlist excludes Web, volumes, prune and mutation", () => {
   const digest = `sha256:${"1".repeat(64)}`;
   for (const args of [
@@ -435,6 +585,7 @@ function clearTrustedDockerFixture() {
     "XINGHENG_TEST_DOCKER_SOCKET_PATH",
     "FAKE_REPLACE_PATH",
     "FAKE_REPLACEMENT_PATH",
+    "FAKE_MUTATE_STOP_FD",
   ]) delete process.env[key];
 }
 

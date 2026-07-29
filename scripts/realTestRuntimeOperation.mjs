@@ -7,9 +7,10 @@ import {
   openSync,
 } from "node:fs";
 import {
-  assertCapturedRuntimeFileDescriptor,
+  assertRiskReducingRuntimeFile,
   assertRuntimeFileDescriptorUnchanged,
   assertRuntimeFileUnchanged,
+  captureRiskReducingRuntimeFile,
   closeRealTestRuntimeContext,
   readRealTestRuntimeContext,
 } from "./realTestRuntimeReceipt.mjs";
@@ -73,7 +74,7 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
         attemptRiskReducingStop(composeCapability);
         throw error;
       }
-      composeCapability.execute(STOP);
+      composeCapability.stopApi();
       try {
         assertContext();
       } catch (error) {
@@ -83,7 +84,7 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
     }
     assertContext();
     try {
-      composeCapability.execute(KMS);
+      composeCapability.runKms();
     } catch (error) {
       attemptRiskReducingStop(composeCapability);
       throw error;
@@ -93,7 +94,7 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
     try {
       assertContext();
       upAttempted = true;
-      composeCapability.execute(UP);
+      composeCapability.upApi();
       assertContext();
       verifyApiHealthUntilReady(inspectApi, assertContext, wait, dependencies);
       assertContext();
@@ -114,7 +115,7 @@ export function runRealTestRuntimeOperation(operation, controlRoot, dependencies
 
 function attemptRiskReducingStop(composeCapability) {
   try {
-    composeCapability.execute(STOP);
+    composeCapability.riskReducingStop();
   } catch {
     // Preserve the original stable failure.
   }
@@ -143,6 +144,10 @@ function waitForHealthPoll(delayMs) {
 }
 
 export function openRealTestRuntimeComposeCapability(context, options = {}) {
+  if (
+    Object.keys(options).length > 0
+    && process.env.NODE_TEST_CONTEXT === undefined
+  ) throw new Error("real-test runtime capability options are test-only");
   let composeFile;
   let runtime;
   try {
@@ -155,9 +160,43 @@ export function openRealTestRuntimeComposeCapability(context, options = {}) {
     runtime = openTrustedDockerRuntime("compose", process.env);
     verifyCapturedTrustedDockerRuntime(runtime);
     let closed = false;
+    let busy = false;
+    let riskStopUsed = false;
+    const invoke = (callback) => {
+      if (closed || busy) {
+        throw new Error("real-test runtime Compose capability is unavailable");
+      }
+      busy = true;
+      try {
+        return callback();
+      } finally {
+        busy = false;
+      }
+    };
     return {
-      execute(args) {
-        runCapturedCompose(context, composeFile, runtime, args);
+      runKms() {
+        return invoke(() => runLinkedCompose(
+          context, composeFile, runtime, KMS, "kms", options,
+        ));
+      },
+      upApi() {
+        return invoke(() => runLinkedCompose(
+          context, composeFile, runtime, UP, "up", options,
+        ));
+      },
+      stopApi() {
+        return invoke(() => runLinkedCompose(
+          context, composeFile, runtime, STOP, "stop", options,
+        ));
+      },
+      riskReducingStop() {
+        return invoke(() => {
+          if (riskStopUsed) {
+            throw new Error("real-test runtime risk-reducing stop was already used");
+          }
+          riskStopUsed = true;
+          return runRiskReducingStop(context, composeFile, runtime);
+        });
       },
       close() {
         if (closed) return;
@@ -176,15 +215,38 @@ export function openRealTestRuntimeComposeCapability(context, options = {}) {
   }
 }
 
-function runCapturedCompose(context, composeFile, runtime, args) {
-  if (!sameArgs(args, KMS) && !sameArgs(args, UP) && !sameArgs(args, STOP)) {
-    throw new Error("real-test runtime Compose operation is not allowed");
-  }
-  assertCapturedRuntimeFileDescriptor(context.selectorFile);
-  assertCapturedRuntimeFileDescriptor(context.environmentFile);
+function runLinkedCompose(context, composeFile, runtime, args, operation, options) {
+  options.beforeLinkedSpawn?.(operation);
+  assertRuntimeFileUnchanged(context.selectorFile);
+  assertRuntimeFileUnchanged(context.environmentFile);
   assertComposeUnchanged(composeFile);
   verifyCapturedTrustedDockerRuntime(runtime);
-  const result = spawnSync(
+  const result = spawnCapturedCompose(context, composeFile, runtime, args);
+  assertRuntimeFileUnchanged(context.selectorFile);
+  assertRuntimeFileUnchanged(context.environmentFile);
+  assertComposeUnchanged(composeFile);
+  verifyCapturedTrustedDockerRuntime(runtime);
+  assertComposeResult(result);
+}
+
+function runRiskReducingStop(context, composeFile, runtime) {
+  assertComposeUnchanged(composeFile);
+  verifyCapturedTrustedDockerRuntime(runtime);
+  const selectorBaseline = captureRiskReducingRuntimeFile(context.selectorFile);
+  const environmentBaseline =
+    captureRiskReducingRuntimeFile(context.environmentFile);
+  assertRiskReducingRuntimeFile(context.selectorFile, selectorBaseline);
+  assertRiskReducingRuntimeFile(context.environmentFile, environmentBaseline);
+  const result = spawnCapturedCompose(context, composeFile, runtime, STOP);
+  assertRiskReducingRuntimeFile(context.selectorFile, selectorBaseline);
+  assertRiskReducingRuntimeFile(context.environmentFile, environmentBaseline);
+  assertComposeUnchanged(composeFile);
+  verifyCapturedTrustedDockerRuntime(runtime);
+  assertComposeResult(result);
+}
+
+function spawnCapturedCompose(context, composeFile, runtime, args) {
+  return spawnSync(
     trustedExecutableInvocation(runtime, 5),
     [
       "--env-file", "/proc/self/fd/3",
@@ -213,19 +275,30 @@ function runCapturedCompose(context, composeFile, runtime, args) {
       maxBuffer: 4 * 1024 * 1024,
     },
   );
-  assertCapturedRuntimeFileDescriptor(context.selectorFile);
-  assertCapturedRuntimeFileDescriptor(context.environmentFile);
-  assertComposeUnchanged(composeFile);
-  verifyCapturedTrustedDockerRuntime(runtime);
+}
+
+function assertComposeResult(result) {
   if (result.status !== 0 || result.signal || result.error) {
     throw new Error("real-test runtime Compose operation failed");
   }
 }
 
 function mockComposeCapability(compose) {
+  let riskStopUsed = false;
   return {
-    execute(args) {
-      compose(args);
+    runKms() {
+      return compose(KMS);
+    },
+    upApi() {
+      return compose(UP);
+    },
+    stopApi() {
+      return compose(STOP);
+    },
+    riskReducingStop() {
+      if (riskStopUsed) throw new Error("risk-reducing stop was already used");
+      riskStopUsed = true;
+      return compose(STOP);
     },
     close() {},
   };
@@ -354,9 +427,4 @@ function assertComposeUnchanged(receipt) {
     || value.ctimeMs !== receipt.ctimeMs
     || (value.mode & 0o777) !== receipt.mode
   ) throw new Error("real-test runtime Compose file changed");
-}
-
-function sameArgs(actual, expected) {
-  return actual.length === expected.length
-    && actual.every((value, index) => value === expected[index]);
 }

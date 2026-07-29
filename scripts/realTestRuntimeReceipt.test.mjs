@@ -18,7 +18,8 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   REAL_TEST_RUNTIME_ENV_KEYS,
-  assertCapturedRuntimeFileDescriptor,
+  assertRiskReducingRuntimeFile,
+  captureRiskReducingRuntimeFile,
   assertRuntimeFileUnchanged,
   parseRealTestRuntimeEnvironment,
   readRealTestRuntimeContext,
@@ -141,12 +142,47 @@ test("captured runtime descriptor still rejects content drift", () => {
       ctimeMs: opened.ctimeMs,
       sha256: createHash("sha256").update("trusted\n").digest("hex"),
     };
-    assert.doesNotThrow(() => assertCapturedRuntimeFileDescriptor(receipt));
+    const baseline = captureRiskReducingRuntimeFile(receipt);
+    assert.doesNotThrow(() => assertRiskReducingRuntimeFile(receipt, baseline));
     chmodSync(path, 0o600);
     writeFileSync(path, "changed\n", { mode: 0o400 });
     assert.throws(
-      () => assertCapturedRuntimeFileDescriptor(receipt),
-      /captured real-test runtime file descriptor changed/u,
+      () => assertRiskReducingRuntimeFile(receipt, baseline),
+      /risk-reducing runtime file/u,
+    );
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("linked runtime ctime drift is rejected before a risk-stop baseline", () => {
+  const root = mkdtempSync(join(tmpdir(), "xingheng-runtime-ctime-drift-"));
+  const path = join(root, "runtime.env");
+  let fd;
+  try {
+    writeFileSync(path, "trusted\n", { mode: 0o400 });
+    fd = openSync(path, "r");
+    const opened = fstatSync(fd);
+    const receipt = {
+      path,
+      fd,
+      size: opened.size,
+      dev: opened.dev,
+      ino: opened.ino,
+      uid: opened.uid,
+      gid: opened.gid,
+      mode: opened.mode & 0o777,
+      mtimeMs: opened.mtimeMs,
+      ctimeMs: opened.ctimeMs,
+      sha256: createHash("sha256").update("trusted\n").digest("hex"),
+    };
+    chmodSync(path, 0o600);
+    writeFileSync(path, "trusted\n");
+    chmodSync(path, 0o400);
+    assert.throws(
+      () => captureRiskReducingRuntimeFile(receipt),
+      /runtime file/u,
     );
   } finally {
     if (fd !== undefined) closeSync(fd);
