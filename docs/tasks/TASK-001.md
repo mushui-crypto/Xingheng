@@ -16,17 +16,16 @@
 
 当前 Owner：Product-Technical Lead
 
-角色：D2B0-R4-R1 威胁模型收口与同一 Code Reviewer 复审
+角色：受控小额 real-test 架构收口与资金参数冻结
 
-下一 Owner：Code Reviewer（限定复审）
+下一 Owner：Security DevOps Engineer（artifact delivery / D2B1，须另行授权）
 
 交接状态：
 
--   presence gate 已证明 `/opt/xingheng-release/code` 真实 `ENOENT`，分类为
-    `MISSING/R4_REQUIRED`；R4-R1 本地实现和测试已完成，等待同一 Code Reviewer 按已批准
-    威胁模型复审。
--   R4-R1 现场启动链 probe 已耗尽两次连接上限，`probe_attempt=1`、writes=0；
-    diagnose/behavior/D2B1 attempts=0，D2B1/D2B2/E 未授权。
+-   用户已将目标正式调整为“无真实用户、仅项目自有小额资金的受控验证”。standalone DIAG、
+    Git bundle/GitHub凭据和对象级供应链证明不再是 D2B1 前置条件。
+-   受信基线为 `1cec1cfee8f81a5ee338b9612f107378f1a3f2db`；D2B1/D2B2/E/F 均未授权，
+    交易资金、品种、订单和损失参数尚待用户冻结。
 
 ------------------------------------------------------------------------
 
@@ -114,16 +113,16 @@ real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 
 # 当前状态
 
-状态：D2B0-R4-R1 启动链自拒绝最小实现中，待同一 Code Reviewer；现场
-`connection_attempts=2`、`probe_attempt=1`、writes=0，diagnose/behavior/D2B1
-attempts=0，D2B1/D2B2/E 未授权
+状态：Architecture Reset 已通过，转入受控小额 real-test 路线；旧 R3/R4 现场诊断路线停止且
+不再阻断 D2B1。artifact delivery、D2B1、D2B2、E 和交易批次 F 均须独立授权；F 在资金与
+订单参数完整冻结前保持阻断。
 
 Git 状态：
 
 -   当前分支：`develop`
 -   当前 HEAD / `origin/develop`：
-    `be83c732aa574bca7898fd31cf200024804ac049`
-    （`fix(deploy): unify gcloud SDK boundary checks`，D2B0-R3 受信 revision）
+    `1cec1cfee8f81a5ee338b9612f107378f1a3f2db`
+    （`fix(deploy): harden standalone gcloud diagnostics`，当前受信 revision）
 -   `origin/main`：`623d5d1fa888ad0dbbbe56ce6ee9754a72bfc0db`
 -   `8b6dc687f5f75d99ec189e2ba48b8dab2b701fa0` 已完成 Code Review，并与任务记录提交
     `de84309f78e26836def1896aa8015cd2bbb95fdb` 一并通过 merge commit
@@ -291,11 +290,9 @@ Git 状态：
 
 ## 未完成
 
-1. D2B0-R3-R1 已形成受信 revision
-   `be83c732aa574bca7898fd31cf200024804ac049`；presence gate 因冻结 release path 真实
-   `ENOENT` 分类为 `MISSING/R4_REQUIRED`。R4 standalone 本地实现仍待同一 Code Reviewer，
-   未形成获批的新 revision/standalone OID，也未执行现场 diagnose。
-2. D2B1 已获批但尚未执行 helper；两次 PREWRITE 均在写入前停止，attempts=0。尚未生成
+1. 需从当前受信 commit 的 exact helper/core blobs 生成并交付两文件非秘密 archive；artifact
+   generation、上传与 D2B1 尚未授权。standalone、transport bundle 与 GitHub 凭据路线已取消。
+2. D2B1 尚未执行 helper；此前 PREWRITE 均在写入前停止，attempts=0。尚未生成
    root-only audience、`adc.json`、`certificate_config.json` 和最终 real-test 四文件 source，
    真实 KEY 未被复制。
 3. D2B2 尚未授权或执行。尚未安装 `/run/xingheng-real-test/gcp-wif` tmpfs bundle。
@@ -484,6 +481,9 @@ SDK 分类必须只有一个受信实现；prepare、diagnose 和未来 behavior
 
 # D2B0-R4 当前交接
 
+> 历史记录：2026-07-29 Architecture Reset 后，本节 standalone/DIAG 交付模型不再是 D2B1
+> 前置条件，也不得继续执行 Git bundle、GitHub 凭据或 Cloud Shell Git provenance 路线。
+
 【任务名称】
 
 TASK-001 D2B0-R4-R1：受信 stdin 启动链自拒绝本地实现
@@ -552,6 +552,29 @@ D2B2/E 仍未授权。
 R4-R1 首次复审发现 runtime-import TOCTOU P1；Architecture Review 说明该场景属于并发 root
 compromise 威胁模型，用户已明确排除该模型并接受上述残余风险。现须由同一 Code Reviewer
 按此边界限定复审。测试通过不能自判 Review 通过；不得 stage/commit/push 或转入现场执行。
+
+------------------------------------------------------------------------
+
+# 受控小额 real-test Architecture Reset
+
+当前目标限定为：无真实用户、仅项目自有且可承受全部损失的小额资金、独立 real-test 环境，
+Exchange API 与应用双层禁止提现和转账。安全模型从生产级对象供应链证明收敛为隔离、最小权限、
+硬资金上限、单次动作和可快速撤销；不对抗同 VM 并发 root compromise。
+
+继续保留：环境/账号/VM 身份，D1 root-only KEY/cert 收据，WIF Provider/audience/subject，
+CryptoKey 最小 IAM，受信 helper/core blob/SHA，固定路径/no-follow/root-only 文件操作，无敏感输出，
+交易门禁默认关闭及 kill switch。
+
+明确取消为前置条件：standalone stdin DIAG、Git/transport bundle、GitHub credential bootstrap、
+Cloud Shell Git provenance、Python/SDK/pycache 对象级证明、零持久写 stdin 和跨批累计连接上限。
+`1cec1cf...` 保留为受信硬化基线；R4 standalone 仅为非阻断诊断资产。
+
+执行顺序固定为：两文件 helper archive delivery + D2B1 source 准备；独立 D2B2 runtime 安装；
+独立 E 的一次 WIF/STS 与固定测试 payload KMS round-trip；最后才可申请 F 的一次极小额 entry 和
+一次完整 exit。F 必须先冻结唯一交易所账户、symbol、余额/notional/损失上限、订单类型、滑点、
+超时、最大持仓、杠杆和 kill-switch Owner。任何参数缺失都阻断交易，不阻断 D2B1/D2B2/E。
+
+本 reset 不授权 artifact、VM 写入、D2B1/D2B2/E/F、IAM 或 Provider 修改。
 
 ------------------------------------------------------------------------
 

@@ -229,3 +229,34 @@ R4-R1 runtime-import 威胁模型决策（2026-07-29）：
   diagnostic core，或提供内核强制不可变执行边界；该 R5 级工作不属于 R4-R1。
 - 当前仅允许按上述威胁模型交同一 Code Reviewer 限定复审；不授权 stage/commit/push、
   VM/云、现场 standalone/diagnose、behavior 或 D2B1。
+
+## ADR-005：real-test 收敛为无真实用户的项目自有小额资金验证
+
+日期：2026-07-29
+
+状态：已批准架构重置；现场批次仍需逐项授权
+
+决定：
+
+- real-test 无真实用户和用户资产，只允许项目自有、可承受全部损失的小额资金；环境、账户、
+  身份、数据库和凭据均与 production 隔离，Exchange API 与应用双层禁止提现和转账。
+- 安全模型改为隔离、最小权限、硬资金上限、单次动作和快速撤销。不对抗同 VM 并发 root
+  compromise；该场景下 root-only KEY、运行时和本机验证均可能失效。
+- standalone stdin DIAG、Git/transport bundle、GitHub credential bootstrap、Cloud Shell Git
+  provenance、Python/SDK/pycache 对象级证明和零持久写 stdin 不再是 D2B1 前置条件，相关历史
+  收据保留但路线停止。
+- `1cec1cfee8f81a5ee338b9612f107378f1a3f2db` 保留为受信硬化基线。prepare helper 与 shared
+  core 继续按 commit blob/SHA 使用；R4 standalone 仅为非阻断诊断资产。
+- artifact 最小交付为从 Git blobs 生成、只含 prepare helper 与 shared core 的非秘密 archive；
+  固定member/mode/SHA，上传和解包采用固定 MISSING 路径、root-only 权限、receipt 清理。
+- 现场顺序为 D2B1 source、D2B2 runtime、E 的一次 WIF/STS + KMS round-trip，最后才可另批批准
+  F 的一次极小额 entry 和一次 exit。交易门禁在其余时间保持关闭。
+- F 前必须由用户冻结账户、symbol、预充值、notional、最大损失、日亏损、杠杆、订单/滑点、
+  超时、最大持仓和 kill switch Owner；任一缺失即阻断交易。
+
+风险接受：
+
+- 不再证明 Cloud Shell/Git/stdlib/pycache 的逐对象来源，也不对抗并发 root compromise。
+- 应用 bug、交易所异常、滑点、网络中断、退出失败或凭据泄露仍可能导致独立测试账户全部项目
+  自有资金损失；验收结果不构成 production、规模化或真实用户上线批准。
+- 本决策不授权 artifact 生成/上传、D2B1/D2B2/E/F、交易或 IAM/Provider 写操作。

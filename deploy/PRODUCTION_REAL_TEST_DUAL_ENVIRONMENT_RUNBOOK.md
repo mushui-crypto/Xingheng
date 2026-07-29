@@ -155,9 +155,14 @@ SDK root 下规范 POSIX 相对路径；manifest 对象和唯一允许的未 man
 首个 unsafe 和结构化漂移收据；它不 mkdir、不 open-write，也不调用 gcloud。`behavior` 子命令
 当前明确 fail-closed，尚未实现或授权现场执行。
 
-R3 已形成受信 revision `be83c732aa574bca7898fd31cf200024804ac049`，但 `diagnose` 尚未在
-VM 执行；任何现场 diagnose 或后续 behavior 验证都需要独立授权。恢复 D2B1 前仍须完成受信
-现场诊断与后续行为验证，并从同一受信 revision 冻结、验证和传输 prepare helper 与
+> **当前覆盖规则（2026-07-29 Architecture Reset）**：real-test 目标已收敛为无真实用户、
+> 仅项目自有小额资金的受控验证。下述 R3/R4 standalone、Git provenance、Python/SDK 对象级
+> 诊断保留为历史硬化说明，但不再是 D2B1 前置条件，不得继续推进 Git bundle、GitHub 凭据或
+> zero-write stdin 交付。当前现场顺序改为 exact helper/core archive delivery、D2B1、D2B2、
+> 一次 WIF/KMS probe，最后在资金参数和 kill switch 完整冻结后另批批准极小额交易。
+
+R3 已形成受信 revision `be83c732aa574bca7898fd31cf200024804ac049`。该 revision 的历史
+`diagnose`/behavior 门禁已由上述 Reset 取消为 D2B1 前置；仍须从当前受信 revision 冻结、验证和传输 prepare helper 与
 `gcp_sdk_boundary.py` 两个 artifact；缺少共享核心或任一 bytes/mode 收据不一致必须
 fail-closed，不得回退到复制分类逻辑。不得把本地 fixture 结果解释为现场工具链通过。D2B1
 和后续 D2B2 必须分别取得独立用户授权。
