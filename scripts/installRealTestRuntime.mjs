@@ -54,9 +54,10 @@ export function installRealTestRuntime(
     || receipt.envPath !== REAL_TEST_RUNTIME_ENV
   ) throw new Error("real-test runtime install identity mismatch");
 
-  const parent = ensureParent(options);
-  const selectorPath = pathFor(options.selectorPath, REAL_TEST_RUNTIME_SELECTOR, options);
-  const envPath = pathFor(options.envPath, REAL_TEST_RUNTIME_ENV, options);
+  const paths = resolveRealTestRuntimeInstallPaths(options);
+  const parent = ensureParent(paths.parentPath, options);
+  const selectorPath = paths.selectorPath;
+  const envPath = paths.envPath;
   if (exists(selectorPath) || exists(envPath)) {
     throw new Error("real-test runtime final state is not MISSING");
   }
@@ -161,8 +162,15 @@ function inspectRuntimeImages(receipt) {
   }
 }
 
-function ensureParent(options) {
-  const parent = pathFor(options.parentPath, REAL_TEST_RUNTIME_PARENT, options);
+export function resolveRealTestRuntimeInstallPaths(options = {}) {
+  return Object.freeze({
+    parentPath: pathFor(options.parentPath, REAL_TEST_RUNTIME_PARENT, options),
+    selectorPath: pathFor(options.selectorPath, REAL_TEST_RUNTIME_SELECTOR, options),
+    envPath: pathFor(options.envPath, REAL_TEST_RUNTIME_ENV, options),
+  });
+}
+
+function ensureParent(parent, options) {
   try {
     mkdirSync(parent, { mode: 0o700, recursive: false });
   } catch (error) {
@@ -259,6 +267,7 @@ function exists(path) {
 
 function pathFor(value, expected, options) {
   if (value === undefined) return expected;
+  if (value === expected) return expected;
   if (
     process.env.NODE_TEST_CONTEXT === undefined
     || options.testOnlyPaths !== true

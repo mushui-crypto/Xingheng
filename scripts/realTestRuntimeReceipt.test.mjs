@@ -17,7 +17,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  REAL_TEST_RUNTIME_ENV,
   REAL_TEST_RUNTIME_ENV_KEYS,
+  REAL_TEST_RUNTIME_PARENT,
+  REAL_TEST_RUNTIME_SELECTOR,
   assertRiskReducingRuntimeFile,
   captureRiskReducingRuntimeFile,
   assertRuntimeFileUnchanged,
@@ -27,9 +30,81 @@ import {
   validateRealTestRuntimeManifest,
   validateRealTestRuntimeReceipt,
 } from "./realTestRuntimeReceipt.mjs";
-import { installRealTestRuntime } from "./installRealTestRuntime.mjs";
+import {
+  installRealTestRuntime,
+  resolveRealTestRuntimeInstallPaths,
+} from "./installRealTestRuntime.mjs";
 
 const REVISION = "a".repeat(40);
+
+test("production runtime path resolution accepts only exact canonical paths", () => {
+  const originalContext = process.env.NODE_TEST_CONTEXT;
+  try {
+    delete process.env.NODE_TEST_CONTEXT;
+    const implicit = resolveRealTestRuntimeInstallPaths();
+    const explicit = resolveRealTestRuntimeInstallPaths({
+      parentPath: REAL_TEST_RUNTIME_PARENT,
+      selectorPath: REAL_TEST_RUNTIME_SELECTOR,
+      envPath: REAL_TEST_RUNTIME_ENV,
+    });
+    assert.deepEqual(explicit, implicit);
+    assert.deepEqual(explicit, {
+      parentPath: REAL_TEST_RUNTIME_PARENT,
+      selectorPath: REAL_TEST_RUNTIME_SELECTOR,
+      envPath: REAL_TEST_RUNTIME_ENV,
+    });
+
+    for (const value of [
+      `${REAL_TEST_RUNTIME_PARENT}/`,
+      `${REAL_TEST_RUNTIME_PARENT}/../xingheng-real-test`,
+      "/etc//xingheng-real-test",
+      `${REAL_TEST_RUNTIME_PARENT}-other`,
+      "/tmp/xingheng-real-test",
+    ]) {
+      assert.throws(
+        () => resolveRealTestRuntimeInstallPaths({
+          parentPath: value,
+          testOnlyPaths: true,
+        }),
+        /path override is not allowed/u,
+      );
+    }
+  } finally {
+    if (originalContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = originalContext;
+  }
+});
+
+test("runtime path overrides require both node:test and the explicit test seam", () => {
+  const originalContext = process.env.NODE_TEST_CONTEXT;
+  const root = "/tmp/xingheng-runtime-test-path";
+  try {
+    delete process.env.NODE_TEST_CONTEXT;
+    assert.throws(
+      () => resolveRealTestRuntimeInstallPaths({
+        parentPath: root,
+        testOnlyPaths: true,
+      }),
+      /path override is not allowed/u,
+    );
+
+    process.env.NODE_TEST_CONTEXT = originalContext ?? "child-v8";
+    assert.throws(
+      () => resolveRealTestRuntimeInstallPaths({ parentPath: root }),
+      /path override is not allowed/u,
+    );
+    assert.equal(
+      resolveRealTestRuntimeInstallPaths({
+        parentPath: root,
+        testOnlyPaths: true,
+      }).parentPath,
+      root,
+    );
+  } finally {
+    if (originalContext === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = originalContext;
+  }
+});
 
 test("single-revision runtime receipt is exact and contains no secret identity", () => {
   const receipt = receiptFixture();

@@ -438,6 +438,7 @@ function validateHostIdentity(value) {
 
 function fixedPath(value, expected, options) {
   if (value === undefined) return expected;
+  if (value === expected) return expected;
   if (
     process.env.NODE_TEST_CONTEXT === undefined
     || options.testOnlyPaths !== true
