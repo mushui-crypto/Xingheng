@@ -66,6 +66,7 @@ const wifInstaller = read("scripts/install-gcp-wif.sh");
 const releaseVolumeVerifier = read("scripts/verify-release-volume-boundaries.mjs");
 const releaseVolumeBoundaries = read("scripts/releaseVolumeBoundaries.mjs");
 const activationPreflight = read("server/operations/RwaAutomationActivationPreflight.ts");
+const activationPreflightCli = read("server/operations/rwaAutomationActivationPreflightCli.ts");
 const packageJson = read("package.json");
 
 const assertions = [
@@ -432,6 +433,17 @@ const assertions = [
       && providerIdentityReceipts.includes("same authoritative provider account")
       && dualEnvironmentRunbook.includes("field-pending"),
     "provider identity isolation must use two read-only authoritative receipts and remain field-pending until现场 verification",
+  ],
+  [
+    realTestComposeConfig.includes("kms-health-preflight:")
+      && realTestComposeConfig.includes("dist-server/operations/rwa-activation-preflight.js")
+      && dualEnvironmentTopology.includes("real-test KMS health preflight boundary is invalid")
+      && deploymentRevisionVerifier.includes('"kms-health-preflight"')
+      && activationPreflight.includes("config.deploymentEnvironment")
+      && activationPreflight.includes("activation_preflight_deployment_invalid")
+      && activationPreflightCli.includes("ACTIVATION_KMS_HEALTH_RECEIPT")
+      && !activationPreflightCli.includes("activation WIF"),
+    "real-test activation KMS health must use the reviewed image, verified deployment identity, and auth-neutral receipt",
   ],
   [
     releaseActivator.includes("releaseLifecycleTransaction.mjs prepare")

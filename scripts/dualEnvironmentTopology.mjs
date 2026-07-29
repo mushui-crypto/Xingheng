@@ -64,6 +64,7 @@ const SERVICE_MOUNTS = Object.freeze({
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
     ["bind", "wif", "/run/secrets/gcp-wif", true],
   ]),
+  "kms-health-preflight": Object.freeze([]),
   "rwa-automation-backup": Object.freeze([
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
     ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", false],
@@ -140,6 +141,7 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
     "production",
     "xingheng",
   );
+  assertKmsHealthPreflight(realTest, realTestApi);
   assertProviderIdentityPreflight(
     realTest,
     realTestApi,
@@ -186,6 +188,7 @@ export function validateStandaloneRealTestTopology(manifest, realTest) {
   assertVolumes(realTest, REAL_TEST_PROJECT);
   assertServiceMounts(realTest, null);
   assertKmsServiceAuthentication(realTest, "real-test");
+  assertKmsHealthPreflight(realTest, api);
   assertStandaloneIngress(realTest, web);
   if (api.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
     throw new Error("real-test execution gate must remain closed");
@@ -323,7 +326,14 @@ function assertGceMetadataIdentity(serviceValue) {
 function assertKmsServiceAuthentication(config, environment) {
   const serviceNames = environment === "production"
     ? ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore"]
-    : ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore", "rwa-automation-verify"];
+    : [
+      "api",
+      "provider-identity-preflight",
+      "kms-health-preflight",
+      "rwa-automation-backup",
+      "rwa-automation-restore",
+      "rwa-automation-verify",
+    ];
   for (const name of serviceNames) {
     const value = service(config, name);
     if (environment === "real-test") {
@@ -337,6 +347,48 @@ function assertKmsServiceAuthentication(config, environment) {
       throw new Error("production X.509 WIF authentication boundary is invalid");
     }
   }
+}
+
+function assertKmsHealthPreflight(config, api) {
+  const preflight = service(config, "kms-health-preflight");
+  const providerIdentityPreflight = service(config, "provider-identity-preflight");
+  const environment = preflight.environment ?? {};
+  const networks = record(preflight.networks, "KMS health preflight networks");
+  if (
+    preflight.image !== api.image
+    || JSON.stringify(preflight.profiles) !== JSON.stringify(["kms-health-preflight"])
+    || preflight.pull_policy !== "never"
+    || preflight.user !== "20001:20001"
+    || environment.NODE_ENV !== "production"
+    || environment.XINGHENG_DEPLOYMENT_ENVIRONMENT !== "real-test"
+    || environment.XINGHENG_COMPOSE_PROJECT !== "xingheng-real-test"
+    || environment.XINGHENG_EXPECTED_REVISION !== api.environment?.XINGHENG_EXPECTED_REVISION
+    || environment.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
+    || environment.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms"
+    || environment.RWA_GCP_KMS_AUTH_MODE
+      !== providerIdentityPreflight.environment?.RWA_GCP_KMS_AUTH_MODE
+    || environment.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL
+      !== providerIdentityPreflight.environment?.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL
+    || environment.RWA_GCP_KMS_KEY_NAME
+      !== providerIdentityPreflight.environment?.RWA_GCP_KMS_KEY_NAME
+    || preflight.read_only !== true
+    || JSON.stringify(preflight.cap_drop) !== JSON.stringify(["ALL"])
+    || !Array.isArray(preflight.security_opt)
+    || !preflight.security_opt.includes("no-new-privileges:true")
+    || JSON.stringify(preflight.tmpfs)
+      !== JSON.stringify(["/tmp:size=16m,mode=0700,uid=20001,gid=20001"])
+    || preflight.restart !== "no"
+    || JSON.stringify(preflight.command)
+      !== JSON.stringify(["node", "dist-server/operations/rwa-activation-preflight.js"])
+    || preflight.entrypoint !== null
+    || (Array.isArray(preflight.ports) && preflight.ports.length > 0)
+    || preflight.network_mode !== undefined
+    || Object.keys(networks).join(",") !== "default"
+    || (Array.isArray(preflight.volumes) && preflight.volumes.length > 0)
+  ) {
+    throw new Error("real-test KMS health preflight boundary is invalid");
+  }
+  assertGceMetadataIdentity(preflight);
 }
 
 function assertVolumes(config, project) {

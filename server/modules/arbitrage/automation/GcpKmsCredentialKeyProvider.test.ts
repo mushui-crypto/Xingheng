@@ -58,6 +58,18 @@ test("GCP KMS adapter accepts X.509 external-account ADC and wraps isolated data
   }
 });
 
+test("GCP KMS health performs exactly one encrypt and one decrypt", async () => {
+  const fixture = await createFixture();
+  try {
+    const health = await fixture.provider.healthCheck(context);
+    assert.equal(health.ok, true);
+    assert.equal(fixture.client.encryptCalls, 1);
+    assert.equal(fixture.client.decryptCalls, 1);
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("GCP KMS adapter keeps production on X.509 WIF and rejects metadata mode", async () => {
   const fixture = await createFixture();
   try {

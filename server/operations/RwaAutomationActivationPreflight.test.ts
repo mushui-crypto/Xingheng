@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  ACTIVATION_KMS_HEALTH_RECEIPT,
   activationPreflightErrorCategory,
   runRwaAutomationActivationPreflight,
 } from "./RwaAutomationActivationPreflight";
@@ -24,7 +25,7 @@ test("runtime validation failure and disabled server kill switch perform zero KM
   );
   await assert.rejects(
     runRwaAutomationActivationPreflight({
-      loadConfig: () => undefined,
+      loadConfig: () => ({ deploymentEnvironment: "production" }),
       serverKillSwitch: () => "false",
       createProvider,
     }),
@@ -33,28 +34,34 @@ test("runtime validation failure and disabled server kill switch perform zero KM
   assert.equal(providerCreations, 0);
 });
 
-test("successful activation preflight performs one non-sensitive KMS health probe", async () => {
-  const contexts: unknown[] = [];
-  await runRwaAutomationActivationPreflight({
-    loadConfig: () => undefined,
-    serverKillSwitch: () => "true",
-    createProbeId: () => "public-test-probe",
-    createProvider: () => ({
-      healthCheck: async (context) => {
-        contexts.push(context);
-        return { ok: true };
+test("successful activation preflight binds the exact verified deployment to one health probe", async () => {
+  for (const deploymentEnvironment of ["production", "real-test"] as const) {
+    const contexts: unknown[] = [];
+    let providerCreations = 0;
+    await runRwaAutomationActivationPreflight({
+      loadConfig: () => ({ deploymentEnvironment }),
+      serverKillSwitch: () => "true",
+      createProbeId: () => "public-test-probe",
+      createProvider: () => {
+        providerCreations += 1;
+        return {
+          healthCheck: async (context) => {
+            contexts.push(context);
+            return { ok: true };
+          },
+        };
       },
-    }),
-  });
-  assert.equal(contexts.length, 1);
-  assert.deepEqual(contexts[0], {
-    purpose: "automation-backup",
-    backupId: "activation-health-public-test-probe",
-    backupDomain: "rwa-automation-disaster-recovery",
-    environment: "production",
-    schemaVersion: 2,
-  });
-  assert.doesNotMatch(JSON.stringify(contexts), /ciphertext|audience|private|secret|token|path/iu);
+    });
+    assert.equal(providerCreations, 1);
+    assert.deepEqual(contexts, [{
+      purpose: "automation-backup",
+      backupId: "activation-health-public-test-probe",
+      backupDomain: "rwa-automation-disaster-recovery",
+      environment: deploymentEnvironment,
+      schemaVersion: 2,
+    }]);
+    assert.doesNotMatch(JSON.stringify(contexts), /ciphertext|audience|private|secret|token|path/iu);
+  }
 });
 
 test("provider failure exposes only a stable category", async () => {
@@ -64,7 +71,7 @@ test("provider failure exposes only a stable category", async () => {
   ]) {
     await assert.rejects(
       runRwaAutomationActivationPreflight({
-        loadConfig: () => undefined,
+        loadConfig: () => ({ deploymentEnvironment: "production" }),
         serverKillSwitch: () => "true",
         createProbeId: () => "public-test-probe",
         createProvider: () => ({
@@ -74,4 +81,45 @@ test("provider failure exposes only a stable category", async () => {
       (error) => activationPreflightErrorCategory(error) === expected,
     );
   }
+});
+
+test("missing or invalid deployment identity and every non-true kill switch perform zero provider work", async () => {
+  for (const loadConfig of [
+    () => {
+      throw new Error("runtime identity unavailable");
+    },
+    () => ({ deploymentEnvironment: undefined as never }),
+    () => ({ deploymentEnvironment: "test" as never }),
+  ]) {
+    let providerCreations = 0;
+    await assert.rejects(runRwaAutomationActivationPreflight({
+      loadConfig,
+      serverKillSwitch: () => "true",
+      createProvider: () => {
+        providerCreations += 1;
+        return { healthCheck: async () => ({ ok: true }) };
+      },
+    }));
+    assert.equal(providerCreations, 0);
+  }
+  for (const value of [undefined, "", "false", "TRUE", "1"]) {
+    let providerCreations = 0;
+    await assert.rejects(runRwaAutomationActivationPreflight({
+      loadConfig: () => ({ deploymentEnvironment: "real-test" }),
+      serverKillSwitch: () => value,
+      createProvider: () => {
+        providerCreations += 1;
+        return { healthCheck: async () => ({ ok: true }) };
+      },
+    }), (error) => activationPreflightErrorCategory(error) === "server_kill_switch_required");
+    assert.equal(providerCreations, 0);
+  }
+});
+
+test("activation CLI success receipt is authentication-neutral and non-sensitive", () => {
+  assert.equal(ACTIVATION_KMS_HEALTH_RECEIPT, "activation KMS health verified");
+  assert.doesNotMatch(
+    ACTIVATION_KMS_HEALTH_RECEIPT,
+    /wif|metadata|token|payload|ciphertext|service.?account|private|secret/iu,
+  );
 });

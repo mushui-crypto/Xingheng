@@ -1,11 +1,12 @@
 import {
+  ACTIVATION_KMS_HEALTH_RECEIPT,
   activationPreflightErrorCategory,
   runRwaAutomationActivationPreflight,
 } from "./RwaAutomationActivationPreflight";
 
 async function main() {
   await runRwaAutomationActivationPreflight();
-  console.log("activation WIF and KMS health verified");
+  console.log(ACTIVATION_KMS_HEALTH_RECEIPT);
 }
 
 main().catch((error) => {

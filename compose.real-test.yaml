@@ -302,6 +302,38 @@ services:
       - node
       - dist-server/operations/rwa-provider-identity-preflight.js
 
+  kms-health-preflight:
+    profiles:
+      - kms-health-preflight
+    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
+    pull_policy: never
+    user: "20001:20001"
+    env_file:
+      - "${XINGHENG_COMPOSE_ENV_FD:?fixed Compose env descriptor is required}"
+    environment:
+      NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: real-test
+      XINGHENG_COMPOSE_PROJECT: xingheng-real-test
+      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+      RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
+      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_KEY_NAME: "${RWA_GCP_KMS_KEY_NAME:?real-test KMS key is required}"
+      RWA_GCP_KMS_AUTH_MODE: gce_attached_service_account
+      RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL: "${RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL:?real-test attached VM service account is required}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=0700,uid=20001,gid=20001
+    networks:
+      - default
+    restart: "no"
+    command:
+      - node
+      - dist-server/operations/rwa-activation-preflight.js
+
   rwa-automation-backup:
     profiles:
       - rwa-automation-ops

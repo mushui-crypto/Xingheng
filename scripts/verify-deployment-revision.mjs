@@ -395,6 +395,8 @@ function verifyRealTestCompose(manifest, envFile) {
     "rwa-automation-ops",
     "--profile",
     "provider-identity-preflight",
+    "--profile",
+    "kms-health-preflight",
     "config",
     "--format",
     "json",
@@ -414,6 +416,7 @@ function verifyStandaloneRealTestCompose(manifest, envFile) {
     "real-test-cleanup",
     "rwa-automation-ops",
     "provider-identity-preflight",
+    "kms-health-preflight",
   ]);
   validateStandaloneRealTestTopology(manifest, source);
 }
@@ -451,6 +454,7 @@ function verifyDualCompose(manifest, productionEnvFile, realTestEnvFile) {
     "real-test-cleanup",
     "rwa-automation-ops",
     "provider-identity-preflight",
+    "kms-health-preflight",
   ]);
   validateDualEnvironmentTopology(manifest, production, realTest);
 }

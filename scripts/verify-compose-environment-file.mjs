@@ -469,7 +469,13 @@ function validateComposeArguments(args, targetEnvironment) {
   }
   const allowedProfiles = targetEnvironment === "production"
     ? new Set(["strategy-tools", "rwa-automation-ops", "sqlite-ops", "provider-identity-preflight"])
-    : new Set(["strategy-tools", "rwa-automation-ops", "real-test-cleanup", "provider-identity-preflight"]);
+    : new Set([
+      "strategy-tools",
+      "rwa-automation-ops",
+      "real-test-cleanup",
+      "provider-identity-preflight",
+      "kms-health-preflight",
+    ]);
   if (
     profiles.some((profile) => !allowedProfiles.has(profile))
     || new Set(profiles).size !== profiles.length
@@ -506,6 +512,14 @@ function isAllowedComposeOperation(args, environment, profiles) {
     && profiles.size === 1
     && sameArgs(args, [
       "run", "--rm", "--no-deps", "provider-identity-preflight",
+    ])
+  ) return true;
+  if (
+    environment === "real-test"
+    && profiles.has("kms-health-preflight")
+    && profiles.size === 1
+    && sameArgs(args, [
+      "run", "--rm", "--no-deps", "kms-health-preflight",
     ])
   ) return true;
   if (

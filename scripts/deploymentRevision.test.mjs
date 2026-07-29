@@ -92,6 +92,7 @@ function composeConfig(overrides = {}, options = {}) {
       "sqlite-restore": service(API_DIGEST),
       "provider-identity-preflight": service(API_DIGEST),
       ...(environment === "real-test" ? {
+        "kms-health-preflight": service(API_DIGEST),
         "sqlite-backup": service(API_DIGEST),
         "sqlite-verify": service(API_DIGEST),
         "strategy-backup": service(API_DIGEST),

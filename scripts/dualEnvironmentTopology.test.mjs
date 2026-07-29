@@ -249,6 +249,29 @@ function compose(project, environment, domain, realTestDomain) {
   providerIdentityPreflight.read_only = true;
   providerIdentityPreflight.cap_drop = ["ALL"];
   providerIdentityPreflight.security_opt = ["no-new-privileges:true"];
+  const kmsHealthPreflight = service(API);
+  kmsHealthPreflight.environment = {
+    ...kmsHealthPreflight.environment,
+    NODE_ENV: "production",
+    RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
+    RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+    RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
+    ...kmsIdentity,
+  };
+  kmsHealthPreflight.volumes = [];
+  kmsHealthPreflight.profiles = ["kms-health-preflight"];
+  kmsHealthPreflight.entrypoint = null;
+  kmsHealthPreflight.user = "20001:20001";
+  kmsHealthPreflight.read_only = true;
+  kmsHealthPreflight.cap_drop = ["ALL"];
+  kmsHealthPreflight.security_opt = ["no-new-privileges:true"];
+  kmsHealthPreflight.tmpfs = ["/tmp:size=16m,mode=0700,uid=20001,gid=20001"];
+  kmsHealthPreflight.networks = { default: {} };
+  kmsHealthPreflight.restart = "no";
+  kmsHealthPreflight.command = [
+    "node",
+    "dist-server/operations/rwa-activation-preflight.js",
+  ];
   return {
     name: project,
     services: {
@@ -258,6 +281,7 @@ function compose(project, environment, domain, realTestDomain) {
       "sqlite-restore": sqliteRestore,
       "provider-identity-preflight": providerIdentityPreflight,
       ...(environment === "real-test" ? {
+        "kms-health-preflight": kmsHealthPreflight,
         "sqlite-backup": sqliteBackup,
         "sqlite-verify": sqliteVerify,
         "strategy-backup": strategyBackup,
@@ -391,6 +415,41 @@ test("rejects domain, WIF, volume, network, identity, and provider fingerprint c
     },
     (value) => {
       value.realTest.services["provider-identity-preflight"].read_only = false;
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].command =
+        ["node", "dist-server/index.js"];
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].environment.RWA_GCP_KMS_AUTH_MODE =
+        "x509_wif";
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].environment.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL =
+        "other-vm@xingheng-real-test.iam.gserviceaccount.com";
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].environment.GOOGLE_APPLICATION_CREDENTIALS =
+        "";
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].volumes = [
+        mounts([["volume", "rwa_automation_data", "/app/rwa-automation-data", false]])[0],
+      ];
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].ports = [
+        { target: 8787, published: "8787" },
+      ];
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].cap_drop = [];
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].profiles = ["rwa-automation-ops"];
+    },
+    (value) => {
+      value.realTest.services["kms-health-preflight"].entrypoint = ["sh"];
     },
   ];
   for (const mutate of mutations) {
@@ -538,6 +597,14 @@ test("Compose wrappers reject every caller-expanded lifecycle or write operation
     [production, ["up", "-d", "--pull", "always", "api"]],
     [realTest, ["down", "-v"]],
     [realTest, ["run", "--entrypoint", "sh", "api"]],
+    [realTest, [
+      "--profile", "kms-health-preflight",
+      "run", "--rm", "--no-deps", "kms-health-preflight", "node", "-e", "process.exit(0)",
+    ]],
+    [realTest, [
+      "--profile", "kms-health-preflight",
+      "run", "--rm", "--no-deps", "--entrypoint", "sh", "kms-health-preflight",
+    ]],
     [realTest, ["exec", "api", "rm", "-rf", "/app/data"]],
     [new URL("./real-test-standalone-compose.sh", import.meta.url).pathname, [
       "up", "-d", "--scale", "api=2", "api",
@@ -637,6 +704,7 @@ test("real Docker Compose config keeps fixed production and real-test env files 
         "--profile", "real-test-cleanup",
         "--profile", "rwa-automation-ops",
         "--profile", "provider-identity-preflight",
+        "--profile", "kms-health-preflight",
         "config", "--format", "json",
       ], {
         cwd: callerCwd,
@@ -670,7 +738,7 @@ test("real Docker Compose config keeps fixed production and real-test env files 
           false,
         );
       }
-      for (const name of ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore", "rwa-automation-verify"]) {
+      for (const name of ["api", "provider-identity-preflight", "kms-health-preflight", "rwa-automation-backup", "rwa-automation-restore", "rwa-automation-verify"]) {
         const environment = standaloneRealTestConfig.services[name].environment;
         assert.equal(environment.RWA_GCP_KMS_AUTH_MODE, "gce_attached_service_account");
         for (const forbidden of [
@@ -700,6 +768,20 @@ test("real Docker Compose config keeps fixed production and real-test env files 
       assert.notEqual(
         productionConfig.services.api.environment.DOMAIN,
         realTestConfig.services.api.environment.DOMAIN,
+      );
+      const resolvedKmsHealth = standaloneRealTestConfig.services["kms-health-preflight"];
+      assert.equal(resolvedKmsHealth.user, "20001:20001");
+      assert.deepEqual(resolvedKmsHealth.tmpfs, [
+        "/tmp:size=16m,mode=0700,uid=20001,gid=20001",
+      ]);
+      assert.deepEqual(Object.keys(resolvedKmsHealth.networks), ["default"]);
+      assert.equal(
+        resolvedKmsHealth.environment.RWA_GCP_KMS_KEY_NAME,
+        standaloneRealTestConfig.services["provider-identity-preflight"].environment.RWA_GCP_KMS_KEY_NAME,
+      );
+      assert.equal(
+        resolvedKmsHealth.environment.XINGHENG_EXPECTED_REVISION,
+        standaloneRealTestConfig.services.api.environment.XINGHENG_EXPECTED_REVISION,
       );
       assert.equal(
         validateStandaloneRealTestTopology(manifest, standaloneRealTestConfig),

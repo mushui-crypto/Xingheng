@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { loadRuntimeConfig } from "../config/runtimeConfig";
+import { loadRuntimeConfig, type RuntimeConfig } from "../config/runtimeConfig";
 import {
   RWA_CREDENTIAL_ENVELOPE_VERSION,
   type CredentialKeyContext,
@@ -16,7 +16,7 @@ type HealthProvider = {
 };
 
 type ActivationPreflightDependencies = {
-  loadConfig?: () => unknown;
+  loadConfig?: () => Pick<RuntimeConfig, "deploymentEnvironment">;
   serverKillSwitch?: () => string | undefined;
   createProvider?: () => HealthProvider;
   createProbeId?: () => string;
@@ -32,7 +32,13 @@ export async function runRwaAutomationActivationPreflight(
     ?? (() => new GcpKmsCredentialKeyProvider());
   const createProbeId = dependencies.createProbeId ?? randomUUID;
 
-  loadConfig();
+  const config = loadConfig();
+  if (
+    config.deploymentEnvironment !== "production"
+    && config.deploymentEnvironment !== "real-test"
+  ) {
+    throw new ActivationPreflightError("activation_preflight_deployment_invalid");
+  }
   if (serverKillSwitch() !== "true") {
     throw new ActivationPreflightError("server_kill_switch_required");
   }
@@ -42,13 +48,15 @@ export async function runRwaAutomationActivationPreflight(
     purpose: "automation-backup",
     backupId: `activation-health-${createProbeId()}`,
     backupDomain: "rwa-automation-disaster-recovery",
-    environment: "production",
+    environment: config.deploymentEnvironment,
     schemaVersion: RWA_CREDENTIAL_ENVELOPE_VERSION,
   });
   if (!health.ok) {
     throw new ActivationPreflightError(stableCategory(health.category));
   }
 }
+
+export const ACTIVATION_KMS_HEALTH_RECEIPT = "activation KMS health verified";
 
 export function activationPreflightErrorCategory(error: unknown) {
   if (error instanceof ActivationPreflightError) return error.category;

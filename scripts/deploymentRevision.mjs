@@ -31,6 +31,7 @@ const REAL_TEST_SERVICE_IMAGES = Object.freeze({
   "strategy-verify": "api",
   "volume-initialize": "api",
   "provider-identity-preflight": "api",
+  "kms-health-preflight": "api",
   "rwa-automation-backup": "api",
   "rwa-automation-restore": "api",
   "rwa-automation-verify": "api",
