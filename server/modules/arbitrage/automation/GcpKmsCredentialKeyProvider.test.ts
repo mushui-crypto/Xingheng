@@ -85,6 +85,127 @@ test("GCP KMS adapter keeps production on X.509 WIF and rejects metadata mode", 
   });
 });
 
+test("invalid metadata profiles never construct Compute, KMS, or metadata I/O", async () => {
+  const cases: Array<{
+    name: string;
+    options: ConstructorParameters<typeof GcpKmsCredentialKeyProvider>[0];
+    environment?: Record<string, string | undefined>;
+  }> = [
+    {
+      name: "production crossed to metadata",
+      options: {
+        keyName: RWA_GCP_KMS_KEY_NAME,
+        authMode: RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+        expectedGceServiceAccountEmail,
+        deploymentEnvironment: "production",
+      },
+    },
+    {
+      name: "missing deployment identity",
+      options: {
+        keyName: RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+        authMode: RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+        expectedGceServiceAccountEmail,
+      },
+      environment: {
+        XINGHENG_DEPLOYMENT_ENVIRONMENT: undefined,
+        XINGHENG_COMPOSE_PROJECT: undefined,
+      },
+    },
+    {
+      name: "unknown deployment identity",
+      options: {
+        keyName: RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+        authMode: RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+        expectedGceServiceAccountEmail,
+        deploymentEnvironment: "unknown" as never,
+      },
+    },
+    {
+      name: "real-test missing expected service account",
+      options: {
+        keyName: RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+        authMode: RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+        expectedGceServiceAccountEmail: "",
+        deploymentEnvironment: "real-test",
+      },
+    },
+    {
+      name: "real-test forbidden empty credential environment",
+      options: {
+        keyName: RWA_REAL_TEST_GCP_KMS_KEY_NAME,
+        authMode: RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+        expectedGceServiceAccountEmail,
+        deploymentEnvironment: "real-test",
+      },
+      environment: {
+        GOOGLE_APPLICATION_CREDENTIALS: "",
+      },
+    },
+  ];
+  for (const entry of cases) {
+    let computeFactoryCalls = 0;
+    let kmsFactoryCalls = 0;
+    let metadataFetchCalls = 0;
+    let provider!: GcpKmsCredentialKeyProvider;
+    withEnvironment({
+      NODE_ENV: "test",
+      RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+      RWA_AUTOMATION_MASTER_KEY: undefined,
+      GOOGLE_APPLICATION_CREDENTIALS: undefined,
+      RWA_GCP_WIF_AUDIENCE: undefined,
+      XINGHENG_WIF_HOST_PATH: undefined,
+      ...entry.environment,
+    }, () => {
+      provider = new GcpKmsCredentialKeyProvider({
+        ...entry.options,
+        computeAuthClientFactory: () => {
+          computeFactoryCalls += 1;
+          return {} as never;
+        },
+        kmsClientFactory: () => {
+          kmsFactoryCalls += 1;
+          return new FakeKmsClient() as never;
+        },
+        metadataFetch: async () => {
+          metadataFetchCalls += 1;
+          return new Response();
+        },
+      });
+    });
+    assert.equal(provider.configured, false, entry.name);
+    await assert.rejects(provider.createDataKey(context), hasCategory("credential_key_provider_unconfigured"));
+    assert.equal(computeFactoryCalls, 0, entry.name);
+    assert.equal(kmsFactoryCalls, 0, entry.name);
+    assert.equal(metadataFetchCalls, 0, entry.name);
+  }
+});
+
+test("valid production configuration never constructs Compute", () => {
+  let computeFactoryCalls = 0;
+  withEnvironment({
+    NODE_ENV: "test",
+    RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
+    RWA_AUTOMATION_MASTER_KEY: undefined,
+    RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL: undefined,
+  }, () => {
+    const provider = new GcpKmsCredentialKeyProvider({
+      keyName: RWA_GCP_KMS_KEY_NAME,
+      authMode: RWA_GCP_KMS_AUTH_MODE_X509_WIF,
+      adcPath: "/run/secrets/gcp-wif/adc.json",
+      wifAudience: testWifAudience,
+      deploymentEnvironment: "production",
+      computeAuthClientFactory: () => {
+        computeFactoryCalls += 1;
+        return {} as never;
+      },
+      client: new FakeKmsClient() as never,
+    });
+    assert.equal(provider.configured, true);
+  });
+  assert.equal(computeFactoryCalls, 0);
+});
+
 test("GCP KMS adapter accepts real-test GCE attached service account metadata identity", async () => {
   const client = new FakeKmsClient({
     versionName: `${RWA_REAL_TEST_GCP_KMS_KEY_NAME}/cryptoKeyVersions/1`,

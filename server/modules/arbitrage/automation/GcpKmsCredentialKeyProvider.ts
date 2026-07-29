@@ -108,12 +108,6 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     const computeAuthClientFactory = testMode && options.computeAuthClientFactory
       ? options.computeAuthClientFactory
       : (computeOptions: ComputeOptions) => new Compute(computeOptions);
-    this.computeAuthClient = this.authMode === RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT
-      ? computeAuthClientFactory({
-        serviceAccountEmail: this.expectedGceServiceAccountEmail,
-        scopes: [CLOUD_PLATFORM_SCOPE],
-      })
-      : null;
     this.kmsClientFactory = testMode && options.kmsClientFactory
       ? options.kmsClientFactory
       : (authClient?: Compute) => new KeyManagementServiceClient(authClient ? { authClient } : {});
@@ -130,6 +124,14 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     this.configurationError = configuration.error;
     this.deploymentEnvironment = configuration.deploymentEnvironment;
     this.configured = this.configurationError === null;
+    this.computeAuthClient = this.configured
+      && this.deploymentEnvironment === "real-test"
+      && this.authMode === RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT
+      ? computeAuthClientFactory({
+        serviceAccountEmail: this.expectedGceServiceAccountEmail,
+        scopes: [CLOUD_PLATFORM_SCOPE],
+      })
+      : null;
   }
 
   async createDataKey(context: CredentialKeyContext): Promise<CreatedCredentialDataKey> {
