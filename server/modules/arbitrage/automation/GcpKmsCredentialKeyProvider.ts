@@ -1,5 +1,15 @@
 import { randomBytes } from "node:crypto";
 import { KeyManagementServiceClient } from "@google-cloud/kms";
+import { Compute, type ComputeOptions } from "google-auth-library";
+import {
+  RWA_GCE_FORBIDDEN_CREDENTIAL_ENVIRONMENT,
+  RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+  RWA_GCP_KMS_AUTH_MODE_X509_WIF,
+  RWA_REAL_TEST_GCE_PROJECT_ID,
+  isRwaGcpKmsAuthMode,
+  isValidRealTestGceServiceAccountEmail,
+  type RwaGcpKmsAuthMode,
+} from "./GcpKmsAuthConfig";
 import {
   CredentialKeyProviderError,
   RWA_GCP_KMS_KEY_NAME,
@@ -24,7 +34,19 @@ import {
 } from "./GcpWifCredentialConfig";
 
 type KmsClient = Pick<KeyManagementServiceClient, "encrypt" | "decrypt">;
+type GceMetadataIdentity = {
+  projectId: string;
+  serviceAccountEmail: string;
+  serviceAccounts: string[];
+};
+type GceMetadataIdentityLoader = () => Promise<GceMetadataIdentity>;
+type ComputeAuthClientFactory = (options: ComputeOptions) => Compute;
+type KmsClientFactory = (authClient?: Compute) => KmsClient;
 const crc32cTable = createCrc32cTable();
+const GCE_METADATA_ORIGIN = "http://metadata.google.internal";
+const GCE_METADATA_TIMEOUT_MS = 1_000;
+const GCE_METADATA_MAX_RESPONSE_BYTES = 1_024;
+const CLOUD_PLATFORM_SCOPE = "https://www.googleapis.com/auth/cloud-platform";
 
 export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   readonly name = "gcp-kms" as const;
@@ -37,6 +59,11 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
   private readonly expectedOwnerUid: number;
   private readonly expectedOwnerGid: number;
   private readonly deploymentEnvironment: GcpWifDeploymentEnvironment | null;
+  private readonly authMode: RwaGcpKmsAuthMode | null;
+  private readonly expectedGceServiceAccountEmail: string;
+  private readonly metadataIdentityLoader: GceMetadataIdentityLoader;
+  private readonly computeAuthClient: Compute | null;
+  private readonly kmsClientFactory: KmsClientFactory;
   private readonly validateRuntimeBoundary: boolean;
   private client: KmsClient | null = null;
 
@@ -48,6 +75,12 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     expectedOwnerUid?: number;
     expectedOwnerGid?: number;
     deploymentEnvironment?: GcpWifDeploymentEnvironment;
+    authMode?: string;
+    expectedGceServiceAccountEmail?: string;
+    metadataIdentityLoader?: GceMetadataIdentityLoader;
+    metadataFetch?: typeof fetch;
+    computeAuthClientFactory?: ComputeAuthClientFactory;
+    kmsClientFactory?: KmsClientFactory;
     client?: KmsClient;
   } = {}) {
     const testMode = process.env.NODE_ENV === "test";
@@ -62,12 +95,36 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     this.keyName = options.keyName?.trim() ?? process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? "";
     this.adcPath = options.adcPath?.trim() ?? process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
     this.wifAudience = options.wifAudience?.trim() ?? process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
+    const configuredAuthMode = options.authMode?.trim()
+      ?? process.env.RWA_GCP_KMS_AUTH_MODE?.trim()
+      ?? "";
+    this.authMode = isRwaGcpKmsAuthMode(configuredAuthMode) ? configuredAuthMode : null;
+    this.expectedGceServiceAccountEmail = options.expectedGceServiceAccountEmail?.trim()
+      ?? process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL?.trim()
+      ?? "";
+    this.metadataIdentityLoader = testMode && options.metadataIdentityLoader
+      ? options.metadataIdentityLoader
+      : () => loadGceMetadataIdentity(testMode ? options.metadataFetch : undefined);
+    const computeAuthClientFactory = testMode && options.computeAuthClientFactory
+      ? options.computeAuthClientFactory
+      : (computeOptions: ComputeOptions) => new Compute(computeOptions);
+    this.computeAuthClient = this.authMode === RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT
+      ? computeAuthClientFactory({
+        serviceAccountEmail: this.expectedGceServiceAccountEmail,
+        scopes: [CLOUD_PLATFORM_SCOPE],
+      })
+      : null;
+    this.kmsClientFactory = testMode && options.kmsClientFactory
+      ? options.kmsClientFactory
+      : (authClient?: Compute) => new KeyManagementServiceClient(authClient ? { authClient } : {});
     this.client = options.client ?? null;
     const configuration = validateConfiguration(
       this.keyName,
       this.adcPath,
       this.wifAudience,
       this.secretRoot,
+      configuredAuthMode,
+      this.expectedGceServiceAccountEmail,
       testMode ? options.deploymentEnvironment : undefined,
     );
     this.configurationError = configuration.error;
@@ -204,6 +261,10 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
 
   private async validateAdcConfiguration() {
     this.requireConfigured();
+    if (this.authMode === RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT) {
+      await this.validateGceMetadataIdentity();
+      return;
+    }
     try {
       if (this.validateRuntimeBoundary) validateGcpWifRuntimeBoundary();
       validateGcpWifCredentialFiles({
@@ -225,8 +286,37 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
     }
   }
 
+  private async validateGceMetadataIdentity() {
+    try {
+      const identity = await this.metadataIdentityLoader();
+      const expectedEntries = new Set([
+        "default/",
+        `${this.expectedGceServiceAccountEmail}/`,
+      ]);
+      const actualEntries = new Set(identity.serviceAccounts);
+      if (
+        identity.projectId !== RWA_REAL_TEST_GCE_PROJECT_ID
+        || identity.serviceAccountEmail !== this.expectedGceServiceAccountEmail
+        || identity.serviceAccounts.length !== expectedEntries.size
+        || actualEntries.size !== expectedEntries.size
+        || [...actualEntries].some((entry) => !expectedEntries.has(entry))
+      ) {
+        throw new CredentialKeyProviderError(
+          "credential_key_provider_auth_rejected",
+          "GCE metadata 项目或附加服务账号身份不匹配；已拒绝 KMS 操作。",
+        );
+      }
+    } catch (error) {
+      if (error instanceof CredentialKeyProviderError) throw error;
+      throw new CredentialKeyProviderError(
+        "credential_key_provider_auth_unavailable",
+        "GCE metadata 身份不可用或响应无效；已拒绝 KMS 操作。",
+      );
+    }
+  }
+
   private getClient() {
-    this.client ??= new KeyManagementServiceClient();
+    this.client ??= this.kmsClientFactory(this.computeAuthClient ?? undefined);
     return this.client;
   }
 }
@@ -236,6 +326,8 @@ function validateConfiguration(
   adcPath: string,
   wifAudience: string,
   secretRoot: string,
+  authMode: string,
+  expectedGceServiceAccountEmail: string,
   testDeploymentEnvironment?: GcpWifDeploymentEnvironment,
 ) {
   if (process.env.RWA_AUTOMATION_MASTER_KEY?.trim()) {
@@ -255,6 +347,21 @@ function validateConfiguration(
   if (deploymentEnvironment !== "production" && deploymentEnvironment !== "real-test") {
     return invalidConfiguration("WIF 部署环境必须精确为 production 或 real-test。");
   }
+  if (!isRwaGcpKmsAuthMode(authMode)) {
+    return invalidConfiguration("RWA_GCP_KMS_AUTH_MODE 必须是受支持的显式认证模式。");
+  }
+  if (
+    deploymentEnvironment === "production"
+    && authMode !== RWA_GCP_KMS_AUTH_MODE_X509_WIF
+  ) {
+    return invalidConfiguration("正式环境只允许 x509_wif KMS 认证模式。");
+  }
+  if (
+    deploymentEnvironment === "real-test"
+    && authMode !== RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT
+  ) {
+    return invalidConfiguration("真实测试环境只允许 gce_attached_service_account KMS 认证模式。");
+  }
   const expectedKeyName = deploymentEnvironment === "real-test"
     ? RWA_REAL_TEST_GCP_KMS_KEY_NAME
     : RWA_GCP_KMS_KEY_NAME;
@@ -263,11 +370,39 @@ function validateConfiguration(
       ? "真实测试环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的独立 CryptoKey 完整资源名。"
       : "正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的生产 CryptoKey 完整资源名。");
   }
-  if (adcPath !== `${secretRoot}/adc.json`) {
-    return invalidConfiguration("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
-  }
-  if (!isCanonicalGcpWifAudience(wifAudience)) {
-    return invalidConfiguration("RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
+  if (authMode === RWA_GCP_KMS_AUTH_MODE_X509_WIF) {
+    if (
+      expectedGceServiceAccountEmail
+      || process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL !== undefined
+    ) {
+      return invalidConfiguration("正式环境禁止配置 real-test GCE 附加服务账号身份。");
+    }
+    if (adcPath !== `${secretRoot}/adc.json`) {
+      return invalidConfiguration("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
+    }
+    if (!isCanonicalGcpWifAudience(wifAudience)) {
+      return invalidConfiguration("RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
+    }
+  } else {
+    if (
+      adcPath
+      || wifAudience
+      || process.env.RWA_GCP_WIF_AUDIENCE !== undefined
+      || process.env.GOOGLE_APPLICATION_CREDENTIALS !== undefined
+      || process.env.XINGHENG_WIF_HOST_PATH !== undefined
+      || process.env.RWA_AUTOMATION_MASTER_KEY !== undefined
+    ) {
+      return invalidConfiguration("真实测试 GCE metadata 模式禁止配置 WIF audience、ADC 或 WIF host path。");
+    }
+    const forbiddenEnvironment = RWA_GCE_FORBIDDEN_CREDENTIAL_ENVIRONMENT.find(
+      (name) => process.env[name] !== undefined,
+    );
+    if (forbiddenEnvironment) {
+      return invalidConfiguration("真实测试 GCE metadata 模式禁止文件凭证、Cloud SDK 覆盖或服务账号模拟。");
+    }
+    if (!isValidRealTestGceServiceAccountEmail(expectedGceServiceAccountEmail)) {
+      return invalidConfiguration("RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL 必须是冻结的 real-test VM 服务账号邮箱。");
+    }
   }
   return { error: null, deploymentEnvironment };
 }
@@ -318,6 +453,73 @@ function validCryptoKeyVersionReference(value: string | null | undefined, keyNam
   const prefix = `${keyName}/cryptoKeyVersions/`;
   if (!value.startsWith(prefix)) return false;
   return /^[1-9]\d*$/.test(value.slice(prefix.length));
+}
+
+async function loadGceMetadataIdentity(metadataFetch: typeof fetch = fetch): Promise<GceMetadataIdentity> {
+  const [projectId, serviceAccountEmail, serviceAccountsRaw] = await Promise.all([
+    readGceMetadata("computeMetadata/v1/project/project-id", metadataFetch),
+    readGceMetadata("computeMetadata/v1/instance/service-accounts/default/email", metadataFetch),
+    readGceMetadata("computeMetadata/v1/instance/service-accounts/", metadataFetch),
+  ]);
+  const serviceAccounts = serviceAccountsRaw.endsWith("\n")
+    ? serviceAccountsRaw.slice(0, -1).split("\n")
+    : serviceAccountsRaw.split("\n");
+  if (
+    projectId !== projectId.trim()
+    || serviceAccountEmail !== serviceAccountEmail.trim()
+    || !projectId
+    || !serviceAccountEmail
+    || serviceAccounts.length !== 2
+    || serviceAccounts.some((entry) =>
+      entry !== entry.trim()
+      || !/^(?:default|[a-z][a-z0-9-]{4,28}[a-z0-9]@xingheng-real-test\.iam\.gserviceaccount\.com)\/$/.test(entry))
+  ) {
+    throw new Error("invalid metadata identity");
+  }
+  return { projectId, serviceAccountEmail, serviceAccounts };
+}
+
+async function readGceMetadata(path: string, metadataFetch: typeof fetch) {
+  const response = await metadataFetch(`${GCE_METADATA_ORIGIN}/${path}`, {
+    headers: { "Metadata-Flavor": "Google" },
+    redirect: "error",
+    signal: AbortSignal.timeout(GCE_METADATA_TIMEOUT_MS),
+  });
+  const rawContentLength = response.headers.get("content-length");
+  const contentLength = rawContentLength === null ? null : Number(rawContentLength);
+  if (
+    !response.ok
+    || response.headers.get("metadata-flavor") !== "Google"
+    || (contentLength !== null && (
+      !Number.isSafeInteger(contentLength)
+      || contentLength < 0
+      || contentLength > GCE_METADATA_MAX_RESPONSE_BYTES
+    ))
+    || !response.body
+  ) {
+    throw new Error("invalid metadata response");
+  }
+  const reader = response.body.getReader();
+  const chunks: Buffer[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const result = await reader.read();
+      if (result.done) break;
+      totalBytes += result.value.byteLength;
+      if (totalBytes > GCE_METADATA_MAX_RESPONSE_BYTES) {
+        await reader.cancel();
+        throw new Error("metadata response too large");
+      }
+      chunks.push(Buffer.from(result.value));
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  if (contentLength !== null && contentLength !== totalBytes) {
+    throw new Error("metadata content length mismatch");
+  }
+  return Buffer.concat(chunks, totalBytes).toString("utf8");
 }
 
 function safeKmsError(error: unknown) {

@@ -88,11 +88,23 @@ function compose(project, environment, domain, realTestDomain) {
   });
   const wif = environment === "production"
     ? "/run/xingheng/gcp-wif"
-    : "/run/xingheng-real-test/gcp-wif";
+    : null;
+  const kmsIdentity = environment === "production"
+    ? {
+      XINGHENG_WIF_HOST_PATH: wif,
+      RWA_GCP_KMS_AUTH_MODE: "x509_wif",
+      RWA_GCP_WIF_AUDIENCE:
+        "//iam.googleapis.com/projects/111111/locations/global/workloadIdentityPools/production/providers/vultr",
+    }
+    : {
+      RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
+      RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL:
+        "rwa-real-test-vm@xingheng-real-test.iam.gserviceaccount.com",
+    };
   const api = service(API, {
     DOMAIN: domain,
     REAL_TEST_DOMAIN: realTestDomain,
-    XINGHENG_WIF_HOST_PATH: wif,
+    ...kmsIdentity,
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS: environment === "production"
       ? "binance:1111111111111111"
@@ -100,9 +112,6 @@ function compose(project, environment, domain, realTestDomain) {
     RWA_GCP_KMS_KEY_NAME: environment === "production"
       ? "projects/xingheng-production/locations/asia/keyRings/production/cryptoKeys/credentials"
       : "projects/xingheng-real-test/locations/asia/keyRings/real-test/cryptoKeys/credentials",
-    RWA_GCP_WIF_AUDIENCE: environment === "production"
-      ? "//iam.googleapis.com/projects/111111/locations/global/workloadIdentityPools/production/providers/vultr"
-      : "//iam.googleapis.com/projects/222222/locations/global/workloadIdentityPools/real-test/providers/vultr",
   });
   api.volumes = mounts([
     ["volume", "sqlite_data", "/app/data", false],
@@ -110,7 +119,7 @@ function compose(project, environment, domain, realTestDomain) {
     ["volume", "sqlite_backups", "/backups", false],
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
-    ["bind", wif, "/run/secrets/gcp-wif", true],
+    ...(wif ? [["bind", wif, "/run/secrets/gcp-wif", true]] : []),
   ]);
   api.healthcheck = {
     test: [
@@ -167,18 +176,20 @@ function compose(project, environment, domain, realTestDomain) {
     ["volume", "strategy_data", "/app/strategy-data", false],
   ]);
   const rwaBackup = service(API);
+  rwaBackup.environment = { ...rwaBackup.environment, ...kmsIdentity };
   rwaBackup.volumes = mounts([
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
     ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", false],
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
-    ["bind", wif, "/run/secrets/gcp-wif", true],
+    ...(wif ? [["bind", wif, "/run/secrets/gcp-wif", true]] : []),
   ]);
   const rwaRestore = service(API);
+  rwaRestore.environment = { ...rwaRestore.environment, ...kmsIdentity };
   rwaRestore.volumes = mounts([
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
     ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", true],
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
-    ["bind", wif, "/run/secrets/gcp-wif", true],
+    ...(wif ? [["bind", wif, "/run/secrets/gcp-wif", true]] : []),
   ]);
   const sqliteBackup = service(API);
   sqliteBackup.volumes = mounts([
@@ -215,20 +226,21 @@ function compose(project, environment, domain, realTestDomain) {
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
   ]);
   const rwaVerify = service(API);
+  rwaVerify.environment = { ...rwaVerify.environment, ...kmsIdentity };
   rwaVerify.volumes = mounts([
     ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", true],
-    ["bind", wif, "/run/secrets/gcp-wif", true],
+    ...(wif ? [["bind", wif, "/run/secrets/gcp-wif", true]] : []),
   ]);
   const providerIdentityPreflight = service(API);
   providerIdentityPreflight.environment = {
     ...providerIdentityPreflight.environment,
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
-    RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
+    ...kmsIdentity,
   };
   providerIdentityPreflight.volumes = mounts([
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
-    ["bind", wif, "/run/secrets/gcp-wif", true],
+    ...(wif ? [["bind", wif, "/run/secrets/gcp-wif", true]] : []),
   ]);
   providerIdentityPreflight.command = [
     "node",
@@ -353,6 +365,15 @@ test("rejects domain, WIF, volume, network, identity, and provider fingerprint c
     (value) => {
       value.realTest.services.api.environment.RWA_GCP_WIF_AUDIENCE =
         value.production.services.api.environment.RWA_GCP_WIF_AUDIENCE;
+    },
+    (value) => {
+      value.realTest.services["rwa-automation-backup"].environment.GOOGLE_APPLICATION_CREDENTIALS = "";
+    },
+    (value) => {
+      delete value.production.services["rwa-automation-restore"].environment.RWA_GCP_KMS_AUTH_MODE;
+    },
+    (value) => {
+      value.production.services.api.environment.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL = "";
     },
     (value) => {
       value.production.services.web.healthcheck.test = ["CMD-SHELL", "true production"];
@@ -568,16 +589,19 @@ test("real Docker Compose config keeps fixed production and real-test env files 
       "RWA_AUTOMATION_BACKUP_RETENTION_DAYS=30",
       "RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES=1073741824",
       "RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES=104857600",
-      "RWA_GCP_WIF_AUDIENCE=//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
     ];
     writeFileSync(join(directory, ".env.production"), [
       ...common,
+      "RWA_GCP_KMS_AUTH_MODE=x509_wif",
+      "RWA_GCP_WIF_AUDIENCE=//iam.googleapis.com/projects/1/locations/global/workloadIdentityPools/p/providers/v",
       "DOMAIN=production.fixture.invalid",
       "REAL_TEST_DOMAIN=real-test.fixture.invalid",
     ].join("\n"), { mode: 0o600 });
     writeFileSync(join(directory, ".env.real-test"), [
       ...common,
       "REAL_TEST_DOMAIN=real-test.fixture.invalid",
+      "RWA_GCP_KMS_AUTH_MODE=gce_attached_service_account",
+      "RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL=rwa-real-test-vm@xingheng-real-test.iam.gserviceaccount.com",
       "RWA_GCP_KMS_KEY_NAME=projects/test/locations/global/keyRings/test/cryptoKeys/test",
     ].join("\n"), { mode: 0o600 });
 
@@ -597,6 +621,16 @@ test("real Docker Compose config keeps fixed production and real-test env files 
         encoding: "utf8",
         env: { ...process.env, ...TRUSTED_DOCKER_FIXTURE_ENVIRONMENT },
       });
+      const productionOperations = spawnSync("sh", [
+        join(scripts, "production-compose.sh"),
+        "--profile", "rwa-automation-ops",
+        "--profile", "provider-identity-preflight",
+        "config", "--format", "json",
+      ], {
+        cwd: callerCwd,
+        encoding: "utf8",
+        env: { ...process.env, ...TRUSTED_DOCKER_FIXTURE_ENVIRONMENT },
+      });
       const standaloneRealTest = spawnSync("sh", [
         join(scripts, "real-test-standalone-compose.sh"),
         "--profile", "strategy-tools",
@@ -611,9 +645,11 @@ test("real Docker Compose config keeps fixed production and real-test env files 
       });
       assert.equal(production.status, 0, production.stderr);
       assert.equal(realTest.status, 0, realTest.stderr);
+      assert.equal(productionOperations.status, 0, productionOperations.stderr);
       assert.equal(standaloneRealTest.status, 0, standaloneRealTest.stderr);
       const productionConfig = JSON.parse(production.stdout);
       const realTestConfig = JSON.parse(realTest.stdout);
+      const productionOperationsConfig = JSON.parse(productionOperations.stdout);
       const standaloneRealTestConfig = JSON.parse(standaloneRealTest.stdout);
       assert.equal(productionConfig.name, "xingheng");
       assert.equal(realTestConfig.name, "xingheng-real-test");
@@ -627,6 +663,38 @@ test("real Docker Compose config keeps fixed production and real-test env files 
         realTestConfig.services.api.environment.RWA_GCP_KMS_KEY_NAME,
         "projects/test/locations/global/keyRings/test/cryptoKeys/test",
       );
+      for (const name of ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore"]) {
+        assert.equal(productionOperationsConfig.services[name].environment.RWA_GCP_KMS_AUTH_MODE, "x509_wif");
+        assert.equal(
+          Object.hasOwn(productionOperationsConfig.services[name].environment, "RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL"),
+          false,
+        );
+      }
+      for (const name of ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore", "rwa-automation-verify"]) {
+        const environment = standaloneRealTestConfig.services[name].environment;
+        assert.equal(environment.RWA_GCP_KMS_AUTH_MODE, "gce_attached_service_account");
+        for (const forbidden of [
+          "XINGHENG_WIF_HOST_PATH",
+          "RWA_GCP_WIF_AUDIENCE",
+          "GOOGLE_APPLICATION_CREDENTIALS",
+          "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+          "CLOUDSDK_CONFIG",
+          "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
+          "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+          "GCE_METADATA_HOST",
+          "GCE_METADATA_IP",
+          "NO_GCE_CHECK",
+          "RWA_AUTOMATION_MASTER_KEY",
+        ]) {
+          assert.equal(Object.hasOwn(environment, forbidden), false);
+        }
+        assert.equal(
+          (standaloneRealTestConfig.services[name].volumes ?? []).some(
+            (mount) => mount.target === "/run/secrets/gcp-wif",
+          ),
+          false,
+        );
+      }
       assertComposeEnvironmentReceipt(production.stderr, "production");
       assertComposeEnvironmentReceipt(realTest.stderr, "real-test");
       assert.notEqual(

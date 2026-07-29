@@ -1,5 +1,11 @@
 import { isAddress } from "ethers";
 import {
+  RWA_GCE_FORBIDDEN_CREDENTIAL_ENVIRONMENT,
+  RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+  RWA_GCP_KMS_AUTH_MODE_X509_WIF,
+  isValidRealTestGceServiceAccountEmail,
+} from "../modules/arbitrage/automation/GcpKmsAuthConfig";
+import {
   RWA_GCP_KMS_KEY_NAME,
   RWA_REAL_TEST_GCP_KMS_KEY_NAME,
 } from "../modules/arbitrage/automation/CredentialKeyProvider";
@@ -130,7 +136,7 @@ function validateProductionConfig(config: RuntimeConfig) {
   }
   if (!config.isProduction) return;
 
-  const required = [
+  const required: Array<readonly [string, string]> = [
     ["DOMAIN", process.env.DOMAIN?.trim() ?? ""],
     ["ADMIN_EMAIL", config.adminEmail],
     ["ADMIN_PASSWORD（至少 12 位）", config.adminPassword.length >= 12 ? config.adminPassword : ""],
@@ -147,15 +153,25 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["BSC_TESTNET_DEPOSIT_MNEMONIC", process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? ""],
     ["RWA_CREDENTIAL_KEY_PROVIDER", process.env.RWA_CREDENTIAL_KEY_PROVIDER?.trim() ?? ""],
     ["RWA_GCP_KMS_KEY_NAME", process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? ""],
-    ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
-    ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
+    ["RWA_GCP_KMS_AUTH_MODE", process.env.RWA_GCP_KMS_AUTH_MODE?.trim() ?? ""],
     ["RWA_AUTOMATION_DATA_DIR", process.env.RWA_AUTOMATION_DATA_DIR?.trim() ?? ""],
     ["RWA_AUTOMATION_INSTANCE_COUNT", process.env.RWA_AUTOMATION_INSTANCE_COUNT?.trim() ?? ""],
     ["WEB_CONCURRENCY", process.env.WEB_CONCURRENCY?.trim() ?? ""],
     ["RWA_AUTOMATION_EXECUTION_MODE", process.env.RWA_AUTOMATION_EXECUTION_MODE?.trim() ?? ""],
     ["RWA_AUTOMATION_LOCK_DIR", process.env.RWA_AUTOMATION_LOCK_DIR?.trim() ?? ""],
     ["RWA_AUTOMATION_LOCK_PATH", process.env.RWA_AUTOMATION_LOCK_PATH?.trim() ?? ""],
-  ] as const;
+  ];
+  if (config.deploymentEnvironment === "production") {
+    required.push(
+      ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
+      ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
+    );
+  } else if (config.deploymentEnvironment === "real-test") {
+    required.push([
+      "RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL",
+      process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL?.trim() ?? "",
+    ]);
+  }
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
     throw new Error(`生产环境缺少必填配置：${missing.join("、")}。`);
@@ -279,25 +295,60 @@ function validateProductionConfig(config: RuntimeConfig) {
   } catch {
     throw new Error("生产环境自动套利限流或状态容量配置无效。");
   }
-  const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
-  if (!isCanonicalGcpWifAudience(wifAudience)) {
-    throw new Error("生产环境 RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
-  }
-  const adcPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
-  if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
-    throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
-  }
   if (
     config.deploymentEnvironment !== "production"
     && config.deploymentEnvironment !== "real-test"
   ) {
-    throw new Error("WIF 部署环境必须精确为 production 或 real-test。");
+    throw new Error("KMS 部署环境必须精确为 production 或 real-test。");
   }
-  validateGcpWifRuntimeBoundary();
-  validateGcpWifCredentialFiles({
-    adcPath,
-    expectedAudience: wifAudience,
-    deploymentEnvironment: config.deploymentEnvironment,
-  });
+  validateRwaKmsAuthenticationRuntime(config.deploymentEnvironment);
   validateRwaAutomationDataLayout({ root: RWA_AUTOMATION_DATA_ROOT, production: true });
+}
+
+export function validateRwaKmsAuthenticationRuntime(
+  deploymentEnvironment: DeploymentEnvironment,
+) {
+  const authMode = process.env.RWA_GCP_KMS_AUTH_MODE?.trim() ?? "";
+  if (deploymentEnvironment === "real-test") {
+    if (authMode !== RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT) {
+      throw new Error("真实测试环境只允许 gce_attached_service_account KMS 认证模式。");
+    }
+    if (
+      process.env.RWA_GCP_WIF_AUDIENCE !== undefined
+      || process.env.GOOGLE_APPLICATION_CREDENTIALS !== undefined
+      || process.env.XINGHENG_WIF_HOST_PATH !== undefined
+      || process.env.RWA_AUTOMATION_MASTER_KEY !== undefined
+      || RWA_GCE_FORBIDDEN_CREDENTIAL_ENVIRONMENT.some((name) => process.env[name] !== undefined)
+    ) {
+      throw new Error("真实测试 GCE metadata 模式禁止 WIF、文件凭证、Cloud SDK 覆盖或服务账号模拟。");
+    }
+    if (!isValidRealTestGceServiceAccountEmail(
+      process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL?.trim() ?? "",
+    )) {
+      throw new Error("RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL 必须是冻结的 real-test VM 服务账号邮箱。");
+    }
+  } else if (deploymentEnvironment === "production") {
+    if (authMode !== RWA_GCP_KMS_AUTH_MODE_X509_WIF) {
+      throw new Error("正式环境只允许 x509_wif KMS 认证模式。");
+    }
+    if (process.env.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL !== undefined) {
+      throw new Error("正式环境禁止配置 real-test GCE 附加服务账号身份。");
+    }
+    const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
+    if (!isCanonicalGcpWifAudience(wifAudience)) {
+      throw new Error("生产环境 RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
+    }
+    const adcPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
+    if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
+      throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
+    }
+    validateGcpWifRuntimeBoundary();
+    validateGcpWifCredentialFiles({
+      adcPath,
+      expectedAudience: wifAudience,
+      deploymentEnvironment,
+    });
+  } else {
+    throw new Error("KMS 运行时认证只允许 production 或 real-test 部署环境。");
+  }
 }

@@ -10,6 +10,7 @@ test("production identity preserves the established project and cookie namespace
     XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
     XINGHENG_COMPOSE_PROJECT: "xingheng",
     XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+    RWA_GCP_KMS_AUTH_MODE: "x509_wif",
     DOMAIN: "app.example.com",
     REAL_TEST_DOMAIN: "test.example.com",
   }, () => {
@@ -28,7 +29,8 @@ test("real-test identity uses a distinct project, domain, cookie namespace, and 
     NODE_ENV: "production",
     XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
     XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
-    XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
+    XINGHENG_WIF_HOST_PATH: undefined,
+    RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
     DOMAIN: "test.example.com",
     REAL_TEST_DOMAIN: "test.example.com",
   }, () => {
@@ -48,21 +50,31 @@ test("production safety mode rejects missing or crossed deployment identity fiel
       XINGHENG_DEPLOYMENT_ENVIRONMENT: undefined,
       XINGHENG_COMPOSE_PROJECT: "xingheng",
       XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+      RWA_GCP_KMS_AUTH_MODE: "x509_wif",
     },
     {
       XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
       XINGHENG_COMPOSE_PROJECT: "xingheng",
       XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
+      RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
     },
     {
       XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
       XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
       XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+      RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
     },
     {
       XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
       XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
-      XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
+      XINGHENG_WIF_HOST_PATH: "",
+      RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
+    },
+    {
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
+      XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
+      XINGHENG_WIF_HOST_PATH: undefined,
+      RWA_GCP_KMS_AUTH_MODE: "gce_attached_service_account",
       DOMAIN: "app.example.com",
     },
   ];

@@ -31,6 +31,7 @@ services:
       FIXED_GRID_PAPER_WORKER_POLL_MS: "300000"
       TRUST_PROXY: "true"
       BSC_TESTNET_CHAIN_ID: "97"
+      RWA_GCP_KMS_AUTH_MODE: x509_wif
     init: true
     restart: unless-stopped
     stop_grace_period: 20s
@@ -162,6 +163,7 @@ services:
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
       RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
       RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_AUTH_MODE: x509_wif
       RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
       RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
@@ -203,6 +205,7 @@ services:
       RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
       RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
       RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_AUTH_MODE: x509_wif
       RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
       RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
@@ -244,6 +247,7 @@ services:
       RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
       RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
       RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_AUTH_MODE: x509_wif
       RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
       RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json

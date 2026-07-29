@@ -81,6 +81,19 @@ const SERVICE_MOUNTS = Object.freeze({
     ["bind", "wif", "/run/secrets/gcp-wif", true],
   ]),
 });
+const REAL_TEST_FORBIDDEN_AUTH_ENVIRONMENT = Object.freeze([
+  "XINGHENG_WIF_HOST_PATH",
+  "RWA_GCP_WIF_AUDIENCE",
+  "GOOGLE_APPLICATION_CREDENTIALS",
+  "CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE",
+  "CLOUDSDK_CONFIG",
+  "GOOGLE_IMPERSONATE_SERVICE_ACCOUNT",
+  "CLOUDSDK_AUTH_IMPERSONATE_SERVICE_ACCOUNT",
+  "GCE_METADATA_HOST",
+  "GCE_METADATA_IP",
+  "NO_GCE_CHECK",
+  "RWA_AUTOMATION_MASTER_KEY",
+]);
 
 export function validateDualEnvironmentTopology(manifest, production, realTest) {
   validateProductionComposeConfig(manifest, production);
@@ -117,9 +130,10 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   assertVolumes(production, PRODUCTION_PROJECT);
   assertVolumes(realTest, REAL_TEST_PROJECT);
   assertServiceMounts(production, "/run/xingheng/gcp-wif");
-  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
+  assertServiceMounts(realTest, null);
   assertWifMount(productionApi, "/run/xingheng/gcp-wif");
-  assertWifMount(realTestApi, "/run/xingheng-real-test/gcp-wif");
+  assertKmsServiceAuthentication(production, "production");
+  assertKmsServiceAuthentication(realTest, "real-test");
   assertProviderIdentityPreflight(
     production,
     productionApi,
@@ -145,12 +159,13 @@ export function validateDualEnvironmentTopology(manifest, production, realTest) 
   if (realTestApi.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
     throw new Error("real-test execution gate must remain closed");
   }
-  for (const field of ["RWA_GCP_KMS_KEY_NAME", "RWA_GCP_WIF_AUDIENCE"]) {
-    const productionValue = requiredString(productionApi.environment?.[field]);
-    const realTestValue = requiredString(realTestApi.environment?.[field]);
-    if (productionValue === realTestValue) {
-      throw new Error("cloud credential identity is shared across deployment environments");
-    }
+  if (
+    productionApi.environment?.RWA_GCP_KMS_AUTH_MODE !== "x509_wif"
+    || realTestApi.environment?.RWA_GCP_KMS_AUTH_MODE !== "gce_attached_service_account"
+    || requiredString(productionApi.environment?.RWA_GCP_KMS_KEY_NAME)
+      === requiredString(realTestApi.environment?.RWA_GCP_KMS_KEY_NAME)
+  ) {
+    throw new Error("cloud credential identity is shared across deployment environments");
   }
 
   const productionResources = new Set(resourceIdentities(production));
@@ -169,8 +184,8 @@ export function validateStandaloneRealTestTopology(manifest, realTest) {
   assertHealthcheck(api, "real-test", "xingheng-real-test", false);
   assertHealthcheck(web, "real-test", "xingheng-real-test", true);
   assertVolumes(realTest, REAL_TEST_PROJECT);
-  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
-  assertWifMount(api, "/run/xingheng-real-test/gcp-wif");
+  assertServiceMounts(realTest, null);
+  assertKmsServiceAuthentication(realTest, "real-test");
   assertStandaloneIngress(realTest, web);
   if (api.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
     throw new Error("real-test execution gate must remain closed");
@@ -265,7 +280,7 @@ function assertRealTestWebHealthcheck(web, protocol) {
 
 function assertServiceMounts(config, wifSource) {
   for (const [name, value] of Object.entries(record(config.services, "Compose services"))) {
-    const expected = SERVICE_MOUNTS[name];
+    const expected = SERVICE_MOUNTS[name]?.filter(([type]) => type !== "bind" || wifSource !== null);
     if (!expected) throw new Error("deployment service mount contract is missing");
     const actual = Array.isArray(value?.volumes) ? value.volumes : [];
     if (actual.length !== expected.length) {
@@ -287,6 +302,39 @@ function assertServiceMounts(config, wifSource) {
       ) {
         throw new Error("deployment service mount mapping is invalid");
       }
+    }
+  }
+}
+
+function assertGceMetadataIdentity(serviceValue) {
+  const mounts = Array.isArray(serviceValue.volumes) ? serviceValue.volumes : [];
+  const environment = serviceValue.environment ?? {};
+  if (
+    environment.RWA_GCP_KMS_AUTH_MODE !== "gce_attached_service_account"
+    || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]@xingheng-real-test\.iam\.gserviceaccount\.com$/u
+      .test(environment.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL ?? "")
+    || REAL_TEST_FORBIDDEN_AUTH_ENVIRONMENT.some((name) => name in environment)
+    || mounts.some((mount) => mount?.target === "/run/secrets/gcp-wif")
+  ) {
+    throw new Error("real-test GCE attached service account boundary is invalid");
+  }
+}
+
+function assertKmsServiceAuthentication(config, environment) {
+  const serviceNames = environment === "production"
+    ? ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore"]
+    : ["api", "provider-identity-preflight", "rwa-automation-backup", "rwa-automation-restore", "rwa-automation-verify"];
+  for (const name of serviceNames) {
+    const value = service(config, name);
+    if (environment === "real-test") {
+      assertGceMetadataIdentity(value);
+      continue;
+    }
+    if (
+      value.environment?.RWA_GCP_KMS_AUTH_MODE !== "x509_wif"
+      || "RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL" in (value.environment ?? {})
+    ) {
+      throw new Error("production X.509 WIF authentication boundary is invalid");
     }
   }
 }
@@ -356,7 +404,13 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
     || preflight.environment?.XINGHENG_COMPOSE_PROJECT !== project
     || preflight.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
     || preflight.environment?.RWA_GCP_KMS_KEY_NAME !== api.environment?.RWA_GCP_KMS_KEY_NAME
-    || preflight.environment?.RWA_GCP_WIF_AUDIENCE !== api.environment?.RWA_GCP_WIF_AUDIENCE
+    || preflight.environment?.RWA_GCP_KMS_AUTH_MODE !== api.environment?.RWA_GCP_KMS_AUTH_MODE
+    || (
+      environment === "production"
+        ? preflight.environment?.RWA_GCP_WIF_AUDIENCE !== api.environment?.RWA_GCP_WIF_AUDIENCE
+        : preflight.environment?.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL
+          !== api.environment?.RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL
+    )
     || JSON.stringify(preflight.command) !== JSON.stringify(expectedCommand)
     || preflight.read_only !== true
     || JSON.stringify(preflight.cap_drop) !== JSON.stringify(["ALL"])
@@ -366,6 +420,7 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
   ) {
     throw new Error("provider identity preflight boundary is invalid");
   }
+  if (environment === "real-test") assertGceMetadataIdentity(preflight);
 }
 
 function resourceIdentities(config) {

@@ -6,6 +6,7 @@ const compose = read("compose.yaml");
 const composeBuild = read("compose.build.yaml");
 const caddy = read("deploy/Caddyfile");
 const env = read(".env.production.example");
+const realTestEnv = read(".env.real-test.example");
 const server = [read("server/index.ts"), read("server/config/runtimeConfig.ts")].join("\n");
 const wallet = read("server/wallet/WalletService.ts");
 const restore = read("scripts/restore.sh");
@@ -205,6 +206,7 @@ const assertions = [
       "STRATEGY_EMAIL_ALERTS_ENABLED=false",
       "STRATEGY_ALERT_EMAIL_TO=",
       "RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms",
+      "RWA_GCP_KMS_AUTH_MODE=x509_wif",
       "RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials",
       "RWA_GCP_WIF_AUDIENCE=//iam.googleapis.com/projects/REPLACE_WITH_PROJECT_NUMBER/locations/global/workloadIdentityPools/REPLACE_WITH_POOL/providers/REPLACE_WITH_PROVIDER",
       "GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json",
@@ -374,7 +376,15 @@ const assertions = [
       && dualEnvironmentTopology.includes("provider account fingerprint is shared")
       && dualEnvironmentTopology.includes("deployment service mount mapping is invalid")
       && realTestComposeConfig.includes('RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"')
-      && realTestComposeConfig.includes("/run/xingheng-real-test/gcp-wif")
+      && realTestComposeConfig.includes("RWA_GCP_KMS_AUTH_MODE: gce_attached_service_account")
+      && realTestComposeConfig.includes("RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL:")
+      && !realTestComposeConfig.includes("/run/xingheng-real-test/gcp-wif")
+      && !realTestComposeConfig.includes("GOOGLE_APPLICATION_CREDENTIALS")
+      && !realTestComposeConfig.includes("RWA_GCP_WIF_AUDIENCE")
+      && realTestEnv.includes("RWA_GCP_KMS_AUTH_MODE=gce_attached_service_account")
+      && realTestEnv.includes("RWA_GCE_EXPECTED_SERVICE_ACCOUNT_EMAIL=")
+      && !realTestEnv.includes("GOOGLE_APPLICATION_CREDENTIALS")
+      && !realTestEnv.includes("RWA_GCP_WIF_AUDIENCE")
       && compose.includes("/run/xingheng/gcp-wif"),
     "dual-environment topology must reject domain, account, mount, and execution-gate crossings",
   ],

@@ -45,11 +45,19 @@ export function loadDeploymentIdentity(): DeploymentIdentity {
     throw new Error("真实测试 API 的 DOMAIN 必须精确绑定 REAL_TEST_DOMAIN。");
   }
 
-  const expectedWifHostPath = environment === "production"
-    ? "/run/xingheng/gcp-wif"
-    : "/run/xingheng-real-test/gcp-wif";
-  if (process.env.XINGHENG_WIF_HOST_PATH !== expectedWifHostPath) {
-    throw new Error("部署环境 WIF 挂载身份不一致。");
+  const authMode = process.env.RWA_GCP_KMS_AUTH_MODE?.trim() ?? "";
+  if (environment === "production") {
+    if (
+      authMode !== RWA_GCP_KMS_AUTH_MODE_X509_WIF
+      || process.env.XINGHENG_WIF_HOST_PATH !== "/run/xingheng/gcp-wif"
+    ) {
+      throw new Error("正式部署必须使用冻结的 X.509 WIF 身份与挂载。");
+    }
+  } else if (
+    authMode !== RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT
+    || process.env.XINGHENG_WIF_HOST_PATH !== undefined
+  ) {
+    throw new Error("真实测试部署必须使用 GCE 附加服务账号且禁止 WIF 挂载。");
   }
 
   return {
@@ -72,3 +80,7 @@ function isDomain(value: string) {
     && !value.includes(":")
     && /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(value);
 }
+import {
+  RWA_GCP_KMS_AUTH_MODE_GCE_ATTACHED_SERVICE_ACCOUNT,
+  RWA_GCP_KMS_AUTH_MODE_X509_WIF,
+} from "../modules/arbitrage/automation/GcpKmsAuthConfig";
