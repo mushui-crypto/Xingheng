@@ -503,6 +503,57 @@ test("captured capability rejects a reentrant concurrent call", () => {
   });
 });
 
+test("capability options require the exact Node test identity tuple", () => {
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalTestContext = process.env.NODE_TEST_CONTEXT;
+  try {
+    for (const [nodeEnv, testContext] of [
+      [undefined, undefined],
+      ["", ""],
+      ["production", "production-pollution"],
+      ["test", undefined],
+      [undefined, "child-v8"],
+      ["production", "child-v8"],
+      ["test", "worker"],
+      ["test", "arbitrary"],
+    ]) {
+      setOptionalEnvironment("NODE_ENV", nodeEnv);
+      setOptionalEnvironment("NODE_TEST_CONTEXT", testContext);
+      assert.throws(
+        () => openRealTestRuntimeComposeCapability({}, {
+          expectedUid: process.getuid(),
+          expectedGid: process.getgid(),
+          beforeLinkedSpawn: () => {},
+        }),
+        /capability options are test-only/u,
+      );
+    }
+
+    process.env.NODE_ENV = "test";
+    process.env.NODE_TEST_CONTEXT = "child-v8";
+    const fixture = fileBackedContext(true);
+    writeFileSync(CAPABILITY_LOG, "");
+    setTrustedDockerFixture();
+    const capability = openRealTestRuntimeComposeCapability(fixture, {
+      expectedUid: process.getuid(),
+      expectedGid: process.getgid(),
+      beforeLinkedSpawn: () => {},
+    });
+    try {
+      assert.equal(typeof capability.runKms, "function");
+    } finally {
+      capability.close();
+      closeSync(fixture.selectorFile.fd);
+      closeSync(fixture.environmentFile.fd);
+      rmSync(fixture.root, { recursive: true, force: true });
+      clearTrustedDockerFixture();
+    }
+  } finally {
+    setOptionalEnvironment("NODE_ENV", originalNodeEnv);
+    setOptionalEnvironment("NODE_TEST_CONTEXT", originalTestContext);
+  }
+});
+
 test("Docker runtime allowlist excludes Web, volumes, prune and mutation", () => {
   const digest = `sha256:${"1".repeat(64)}`;
   for (const args of [
@@ -587,6 +638,11 @@ function clearTrustedDockerFixture() {
     "FAKE_REPLACEMENT_PATH",
     "FAKE_MUTATE_STOP_FD",
   ]) delete process.env[key];
+}
+
+function setOptionalEnvironment(name, value) {
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
 }
 
 function openReceipt(path, source) {

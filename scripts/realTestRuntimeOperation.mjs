@@ -146,7 +146,10 @@ function waitForHealthPoll(delayMs) {
 export function openRealTestRuntimeComposeCapability(context, options = {}) {
   if (
     Object.keys(options).length > 0
-    && process.env.NODE_TEST_CONTEXT === undefined
+    && (
+      process.env.NODE_ENV !== "test"
+      || process.env.NODE_TEST_CONTEXT !== "child-v8"
+    )
   ) throw new Error("real-test runtime capability options are test-only");
   let composeFile;
   let runtime;
