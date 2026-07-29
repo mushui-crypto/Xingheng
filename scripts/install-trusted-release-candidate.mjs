@@ -25,6 +25,9 @@ import {
   releaseCandidatePaths,
   secureArtifactReceipt,
 } from "./trustedReleaseCandidate.mjs";
+import {
+  normalizeInstalledRealTestCompose,
+} from "./realTestComposeInstallBoundary.mjs";
 
 const BINARIES = Object.freeze({
   node: "/usr/bin/node",
@@ -131,6 +134,7 @@ try {
       throw new Error("trusted release candidate archive extraction failed");
     }
     chmodSync(stagingCode, 0o700);
+    normalizeInstalledRealTestCompose(deploymentEnvironment, stagingCode);
     assertSecureExtractedTree(stagingCode);
     const candidateTree = captureTrustedCandidateTree(stagingCode);
     const sourceArchive = secureArtifactReceipt(stagingArchive, 0o400);

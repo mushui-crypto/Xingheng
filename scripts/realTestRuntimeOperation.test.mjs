@@ -4,12 +4,14 @@ import {
   chmodSync,
   closeSync,
   fstatSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
   renameSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { createServer } from "node:net";
@@ -20,6 +22,9 @@ import {
   openRealTestRuntimeComposeCapability,
   runRealTestRuntimeOperation,
 } from "./realTestRuntimeOperation.mjs";
+import {
+  normalizeInstalledRealTestCompose,
+} from "./realTestComposeInstallBoundary.mjs";
 import { validateRealTestRuntimeDockerArguments } from "./trustedDockerRuntime.mjs";
 
 const REVISION = "a".repeat(40);
@@ -472,6 +477,78 @@ test("captured capability exposes no args API and rejects risk-stop reuse or use
   });
 });
 
+test("installer-normalized Compose opens a capability without running KMS or API", () => {
+  withRuntimeContext(() => {
+    const fixture = fileBackedContext("installer");
+    writeFileSync(CAPABILITY_LOG, "");
+    setTrustedDockerFixture();
+    const capability = openRealTestRuntimeComposeCapability(fixture, {
+      expectedUid: process.getuid(),
+      expectedGid: process.getgid(),
+    });
+    try {
+      assert.equal(readFileSync(CAPABILITY_LOG, "utf8"), "");
+      assert.equal(fixture.composeBefore.mode & 0o777, 0o600);
+      assert.equal(fixture.composeAfter.mode & 0o777, 0o444);
+      assert.equal(fixture.composeAfter.dev, fixture.composeBefore.dev);
+      assert.equal(fixture.composeAfter.ino, fixture.composeBefore.ino);
+    } finally {
+      capability.close();
+      closeSync(fixture.selectorFile.fd);
+      closeSync(fixture.environmentFile.fd);
+      rmSync(fixture.root, { recursive: true, force: true });
+      clearTrustedDockerFixture();
+    }
+  });
+});
+
+test("activation still rejects writable modes and symlink Compose paths", () => {
+  withRuntimeContext(() => {
+    setTrustedDockerFixture();
+    try {
+      for (const mode of [0o600, 0o644]) {
+        const fixture = fileBackedContext(true);
+        chmodSync(join(fixture.paths.codeRoot, "compose.real-test.yaml"), mode);
+        try {
+          assert.throws(
+            () => openRealTestRuntimeComposeCapability(fixture, {
+              expectedUid: process.getuid(),
+              expectedGid: process.getgid(),
+            }),
+            /Compose file boundary is invalid/u,
+          );
+        } finally {
+          closeSync(fixture.selectorFile.fd);
+          closeSync(fixture.environmentFile.fd);
+          rmSync(fixture.root, { recursive: true, force: true });
+        }
+      }
+
+      const fixture = fileBackedContext(false);
+      mkdirSync(fixture.paths.codeRoot);
+      symlinkSync(
+        join(fixture.root, "runtime.env"),
+        join(fixture.paths.codeRoot, "compose.real-test.yaml"),
+      );
+      try {
+        assert.throws(
+          () => openRealTestRuntimeComposeCapability(fixture, {
+            expectedUid: process.getuid(),
+            expectedGid: process.getgid(),
+          }),
+          /Compose file boundary is invalid/u,
+        );
+      } finally {
+        closeSync(fixture.selectorFile.fd);
+        closeSync(fixture.environmentFile.fd);
+        rmSync(fixture.root, { recursive: true, force: true });
+      }
+    } finally {
+      clearTrustedDockerFixture();
+    }
+  });
+});
+
 test("captured capability rejects a reentrant concurrent call", () => {
   withRuntimeContext(() => {
     const fixture = fileBackedContext(true);
@@ -597,19 +674,31 @@ function context() {
 function fileBackedContext(withCompose = false) {
   const root = mkdtempSync(join(tmpdir(), "xingheng-runtime-operation-drift-"));
   const codeRoot = join(root, "code");
+  let composeBefore;
+  let composeAfter;
   if (withCompose) {
     mkdirSync(codeRoot);
     writeFileSync(
       join(codeRoot, "compose.real-test.yaml"),
       "services:\n  api:\n    image: fixed\n",
-      { mode: 0o444 },
+      { mode: withCompose === "installer" ? 0o600 : 0o444 },
     );
+    if (withCompose === "installer") {
+      composeBefore = lstatSync(join(codeRoot, "compose.real-test.yaml"));
+      normalizeInstalledRealTestCompose("real-test", codeRoot, {
+        expectedUid: process.getuid(),
+        expectedGid: process.getgid(),
+      });
+      composeAfter = lstatSync(join(codeRoot, "compose.real-test.yaml"));
+    }
   }
   const selectorFile = openReceipt(join(root, "runtime-release.json"), "{}\n");
   const environmentFile = openReceipt(join(root, "runtime.env"), "X=1\n");
   return {
     ...context(),
     root,
+    composeBefore,
+    composeAfter,
     selectorFile,
     environmentFile,
     paths: { codeRoot },

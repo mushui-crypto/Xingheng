@@ -156,6 +156,7 @@ test("candidate content, inode and receipt hash replacement fail closed", () => 
       chmodSync(pending, 0o400);
       renameSync(pending, paths.archive);
     },
+    ({ paths }) => chmodSync(join(paths.codeRoot, "compose.real-test.yaml"), 0o600),
   ]) {
     withCandidate(({ paths, options }) => {
       mutate({ paths });
@@ -274,7 +275,12 @@ function withCandidate(callback, deploymentEnvironment = "production") {
     chmodSync(paths.candidatesRoot, 0o700);
     chmodSync(paths.candidateRoot, 0o700);
     chmodSync(paths.codeRoot, 0o700);
-    for (let index = 0; index < 24; index += 1) {
+    writeFileSync(
+      join(paths.codeRoot, "compose.real-test.yaml"),
+      "services:\n  api:\n    image: fixed\n",
+      { mode: 0o444 },
+    );
+    for (let index = 0; index < 23; index += 1) {
       writeFileSync(
         join(paths.codeRoot, `source-${String(index).padStart(2, "0")}.txt`),
         `source-${String(index).padStart(2, "0")}\n`,
