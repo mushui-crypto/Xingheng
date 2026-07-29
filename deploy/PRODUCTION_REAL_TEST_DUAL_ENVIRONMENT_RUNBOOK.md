@@ -155,15 +155,56 @@ SDK root 下规范 POSIX 相对路径；manifest 对象和唯一允许的未 man
 首个 unsafe 和结构化漂移收据；它不 mkdir、不 open-write，也不调用 gcloud。`behavior` 子命令
 当前明确 fail-closed，尚未实现或授权现场执行。
 
-R3 仅是本地实现，`diagnose` 尚未在 VM 执行；任何现场 diagnose 或后续 behavior 验证都需要
-独立授权。恢复 D2B1 前仍须完成 Architecture Review、同一 Code Reviewer 复审及受信 revision，
-并从同一受信 revision 冻结、验证和传输 prepare helper 与 `gcp_sdk_boundary.py` 两个 artifact；
-缺少共享核心或任一 bytes/mode 收据不一致必须 fail-closed，不得回退到复制分类逻辑。不得把
-本地 fixture 结果解释为现场工具链通过。D2B1 和后续 D2B2 必须分别取得独立用户授权。
+R3 已形成受信 revision `be83c732aa574bca7898fd31cf200024804ac049`，但 `diagnose` 尚未在
+VM 执行；任何现场 diagnose 或后续 behavior 验证都需要独立授权。恢复 D2B1 前仍须完成受信
+现场诊断与后续行为验证，并从同一受信 revision 冻结、验证和传输 prepare helper 与
+`gcp_sdk_boundary.py` 两个 artifact；缺少共享核心或任一 bytes/mode 收据不一致必须
+fail-closed，不得回退到复制分类逻辑。不得把本地 fixture 结果解释为现场工具链通过。D2B1
+和后续 D2B2 必须分别取得独立用户授权。
 
 D2B0-R3 首轮 Code Review 发现 1 个 P1：原摘要未绑定 inode/ctime 等对象身份，且 package
-verify 到扫描及 current 到返回存在未重新绑定窗口。D2B0-R3-R1 已按上述规则完成最小本地修复
-和精确复现测试；当前仅表示待同一 Reviewer 复审，不表示 P1 已由 Reviewer 关闭。
+verify 到扫描及 current 到返回存在未重新绑定窗口。D2B0-R3-R1 已按上述规则完成最小修复和
+精确复现测试；同一 Reviewer 已确认该代码层 P1 关闭。
+
+现场 presence/identity gate 随后证明冻结路径 `/opt/xingheng-release/code` 为真实
+`ENOENT`，因此不能从 VM 持久文件执行 commit-exact verifier/core，分类固定为
+`MISSING/R4_REQUIRED`。后续 R4-R1 只读启动链 probe 的两次连接上限已经耗尽：第一次在
+remote exec 前 `Broken pipe`，第二次执行唯一 probe；`connection_attempts=2`、
+`probe_attempt=1`、writes=0，diagnose、behavior 和 D2B1 attempts 仍均为 0。
+
+D2B0-R4 的本地实现提供单一 stdin artifact
+`scripts/verify-real-test-gcloud-toolchain-standalone.py`。它内嵌 revision
+`be83c732aa574bca7898fd31cf200024804ac049` 的 verifier/core 原始 Git blob bytes，在
+compile 前逐项验证 size、SHA-256 和 Git blob OID，以固定 synthetic module metadata 将 core
+注册为内存模块后再执行 verifier；core 不从 ambient 路径 fallback import，但 verifier 运行期
+仍从下述冻结 stdlib/dynload 边界加载 Python 标准库，只接受唯一 `diagnose` 参数，固定
+`sys.dont_write_bytecode=True`，不提供 behavior、prepare 或 gcloud 调用路径。
+`scripts/build-real-test-gcloud-toolchain-standalone.py` 只在可信本地侧从固定 commit blobs
+确定性生成该 artifact。
+
+R4-R1 冻结启动链必须精确为 `/usr/bin/env -i LC_ALL=C LANG=C TZ=UTC` 加 canonical
+bundled Python 的 `-I -S -B - diagnose`。artifact 自身必须拒绝 argv、flags、environment、
+prefix 或 ordered `sys.path` 漂移。初始 `sys.path` exact-set 且有序为
+`python314.zip`、`python3.14`、`python3.14/lib-dynload`；其中 `python314.zip` 是现场
+Python 3.14.6 的标准缺失 zip 搜索槽。唯一允许的 missing 例外必须同时满足冻结 absolute
+path、父链逐级 no-follow 安全、leaf 恰为 `ENOENT`；leaf 若存在为任何类型或返回其他 errno
+一律拒绝。随后必须从 `sys.path` 和 importer cache 删除该槽，只保留有序的 stdlib/dynload
+两项，并证明两项目录属于受信 `google-cloud-cli` manifest、root-owned 且不可
+group/world write。inner load 前、load 后和退出前必须重新绑定完整启动与文件系统收据。
+
+本批明确排除“攻击者已取得并可并发使用 root 权限原地改写解释器、stdlib 或进程”的威胁模型；
+该权限域同时能够读取 root-only KEY 或替换解释器，不能由同一可变 VM 上的 Python 用户态
+verifier 自举消除。运维前提固定为：无并发 root 管理会话，解释器/stdlib/SDK 均为 root-owned、
+不可 group/world write、package/version/manifest exact 且调用前后收据不漂移。标准库文件在
+检查与默认 loader 执行之间遭同权限原地改写的 TOCTOU 作为明确残余风险保留，不得描述为已被
+三阶段复核消除。若未来要求对抗并发 root compromise，必须另案采用无 filesystem runtime
+imports 的专用诊断器或内核强制不可变执行边界，不得在本批静默扩大实现范围。
+
+未来现场传递必须先形成并批准包含 standalone 的新受信 revision，再由可信侧执行
+`git cat-file blob <standalone-OID>`，将原始 blob bytes 直接经 SSH stdin 送入 VM 固定
+canonical 启动链。禁止 heredoc、base64、命令替换、网络下载、第二路模块或现场重组源码。
+R4-R1 当前仅完成本地实现；新 revision、standalone OID、现场 diagnose、behavior 和 D2B1
+均须后续独立确认，本文不构成执行授权。既有连接上限不得解释为新现场重试授权。
 
 未来 D2B2 的固定 installer 入口为：
 

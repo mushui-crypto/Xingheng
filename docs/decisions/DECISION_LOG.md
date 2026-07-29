@@ -174,3 +174,58 @@ R1 补充裁定（2026-07-29）：
 - prepare 的动态 baseline 同时保留未 manifest cache 摘要和完整 SDK boundary 身份摘要；原
   四文件、KEY、no-follow/no-replace、隔离与清理契约不变。
 - R1 本地修复须交同一 Code Reviewer 复审；不得据此执行现场 diagnose、behavior 或 D2B1。
+
+R4 补充裁定（2026-07-29）：
+
+- presence/identity gate 已证明 `/opt/xingheng-release/code` 为真实 `ENOENT`，不能从 VM 持久
+  release tree 执行 commit-exact verifier/core；分类固定为 `MISSING/R4_REQUIRED`。该门禁
+  writes=0，diagnose、behavior 和 D2B1 attempts 均为 0。
+- 新增单一文本 stdin artifact，内嵌 revision
+  `be83c732aa574bca7898fd31cf200024804ac049` 的 verifier/core 原始 blob bytes。artifact 必须
+  在 compile 前验证每份 inner source 的 size、SHA-256 和 Git blob OID，然后以固定 synthetic
+  metadata 把唯一 `gcp_sdk_boundary` 注册到 `sys.modules`，再 compile/exec verifier。
+- artifact 只允许精确 `diagnose` argv，固定 `sys.dont_write_bytecode=True`，不得从
+  ambient `sys.path` fallback import embedded core；verifier 运行期仍仅从后续冻结的
+  stdlib/dynload 边界加载标准库。不得暴露 behavior、prepare 或 gcloud 调用路径；loader
+  失败只输出无源码、无 traceback 的结构化脱敏收据。
+- builder 只能在可信本地侧从固定 Git commit blobs 确定性生成 artifact；inner bytes 与受信
+  blobs 必须逐字节一致，任一 source 或 metadata 漂移均 fail-closed。
+- 未来现场模型固定为：先批准包含 standalone 的新受信 revision 和 standalone OID，再由可信侧
+  `git cat-file blob <standalone-OID>` 将原始 bytes 经 SSH stdin 直接送入固定 canonical
+  `/usr/bin/env -i LC_ALL=C LANG=C TZ=UTC` 加 bundled Python 的 `-I -S -B - diagnose`。
+  禁止 heredoc、base64、命令替换、网络下载、第二路模块和现场拼装。
+- R4 当前只授权本地代码、测试和文档；新 revision、standalone OID、现场 diagnose、behavior、
+  D2B1/D2B2/E 均未获授权。实现必须交同一 Code Reviewer，不能以本地测试自判通过。
+
+R4-R1 P1 补充裁定（2026-07-29）：
+
+- 现场只读启动链 probe 已耗尽两次连接上限：第一次在 remote exec 前 `Broken pipe`，第二次
+  执行唯一 probe；`connection_attempts=2`、`probe_attempt=1`、writes=0，diagnose、
+  behavior、D2B1 attempts 仍为 0。该收据不授权第三次连接或任何现场执行。
+- standalone 的唯一启动形态固定为 `/usr/bin/env -i LC_ALL=C LANG=C TZ=UTC` 加 canonical
+  bundled Python 的 `-I -S -B - diagnose`；artifact 必须自拒绝 flags、argv、environment、
+  prefix 和 ordered `sys.path` 的任何漂移。
+- 初始 `sys.path` 固定为有序三项：缺失 `python314.zip` 搜索槽、stdlib、dynload。唯一 missing
+  例外仅适用于该冻结 absolute zip path，且其父链必须逐级 no-follow 安全、leaf 必须返回 exact
+  `ENOENT`；leaf 存在为任何类型或返回其他 errno 均 fail-closed。
+- zip 槽在任何 embedded import 前必须同时从 `sys.path` 和 importer cache 移除。active
+  `sys.path` 只允许有序 stdlib/dynload 两项；两者必须绑定受信 parent metadata 和
+  `google-cloud-cli` manifest membership。启动/文件系统绑定在 embedded load 前、load 后和
+  退出前复核，任一漂移不得返回 PASS。
+- R4-R1 仅授权本地 builder、generated standalone、聚焦测试和三份文档的最小修改；不改变
+  core/verifier/prepare 语义，不授权 VM/云、现场 standalone/diagnose、behavior 或 D2B1。
+
+R4-R1 runtime-import 威胁模型决策（2026-07-29）：
+
+- 同一 Code Reviewer 指出：目录/manifest 绑定不能消除默认 loader 执行 stdlib 文件前遭同
+  inode 原地改写的 TOCTOU。该 finding 在“攻击者已取得且可并发使用 root 权限”模型下成立。
+- 用户明确批准排除并发 root compromise。该权限域同时可以读取 root-only KEY、替换解释器或
+  修改 verifier 进程，不能由同一可变 VM 上的 Python 用户态 verifier 自举消除。
+- 本批固定运维前提为无并发 root 管理会话；解释器、stdlib 和 SDK 必须 root-owned、不可
+  group/world write，并满足 package/version/manifest exact 与调用前后收据不漂移。
+- 标准库文件在检查与默认 loader 执行之间遭同权限原地改写的 TOCTOU 保留为明确残余风险；
+  不得将目录、manifest 或三阶段复核描述为已消除此风险。
+- 若未来需要对抗并发 root compromise，必须另案选择无 filesystem runtime imports 的专用
+  diagnostic core，或提供内核强制不可变执行边界；该 R5 级工作不属于 R4-R1。
+- 当前仅允许按上述威胁模型交同一 Code Reviewer 限定复审；不授权 stage/commit/push、
+  VM/云、现场 standalone/diagnose、behavior 或 D2B1。

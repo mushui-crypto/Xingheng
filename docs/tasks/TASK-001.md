@@ -16,14 +16,17 @@
 
 当前 Owner：Product-Technical Lead
 
-角色：D2B0-R3-R1 代码层审查收口与受信 revision 准备
+角色：D2B0-R4-R1 威胁模型收口与同一 Code Reviewer 复审
 
-下一 Owner：Product-Technical Lead（等待 commit/push 与现场 diagnose 授权）
+下一 Owner：Code Reviewer（限定复审）
 
 交接状态：
 
--   D2B0-R3-R1 限定复审通过，无 P0-P3，代码层 P1 已关闭；现场 `diagnose` 尚未授权。
-    behavior attempts=0、D2B1 helper attempts=0、validation root MISSING，D2B2/E 未授权
+-   presence gate 已证明 `/opt/xingheng-release/code` 真实 `ENOENT`，分类为
+    `MISSING/R4_REQUIRED`；R4-R1 本地实现和测试已完成，等待同一 Code Reviewer 按已批准
+    威胁模型复审。
+-   R4-R1 现场启动链 probe 已耗尽两次连接上限，`probe_attempt=1`、writes=0；
+    diagnose/behavior/D2B1 attempts=0，D2B1/D2B2/E 未授权。
 
 ------------------------------------------------------------------------
 
@@ -111,15 +114,16 @@ real-test 使用 DEVOPS tier 及其不可单证书撤销的残余风险。
 
 # 当前状态
 
-状态：D2B0-R3-R1 代码层复审通过，无 P0-P3；待 commit/push 与现场 `diagnose` 独立授权；
-behavior attempts=0、D2B1 attempts=0，D2B2/E 未授权
+状态：D2B0-R4-R1 启动链自拒绝最小实现中，待同一 Code Reviewer；现场
+`connection_attempts=2`、`probe_attempt=1`、writes=0，diagnose/behavior/D2B1
+attempts=0，D2B1/D2B2/E 未授权
 
 Git 状态：
 
 -   当前分支：`develop`
 -   当前 HEAD / `origin/develop`：
-    `d2cfd084ece9fc786e1a7b3e3b3631ac4dee8d98`
-    （`fix(deploy): harden real-test gcloud tooling`，D2B0-R2 受信 revision）
+    `be83c732aa574bca7898fd31cf200024804ac049`
+    （`fix(deploy): unify gcloud SDK boundary checks`，D2B0-R3 受信 revision）
 -   `origin/main`：`623d5d1fa888ad0dbbbe56ce6ee9754a72bfc0db`
 -   `8b6dc687f5f75d99ec189e2ba48b8dab2b701fa0` 已完成 Code Review，并与任务记录提交
     `de84309f78e26836def1896aa8015cd2bbb95fdb` 一并通过 merge commit
@@ -287,8 +291,10 @@ Git 状态：
 
 ## 未完成
 
-1. D2B0-R2-R1-P1 canonical 工具链与 config/pycache 隔离 diff 已由同一 Code Reviewer 确认
-   无 P0-P3，但尚未 commit/push，不能作为新的 D2B1 现场受信 revision。
+1. D2B0-R3-R1 已形成受信 revision
+   `be83c732aa574bca7898fd31cf200024804ac049`；presence gate 因冻结 release path 真实
+   `ENOENT` 分类为 `MISSING/R4_REQUIRED`。R4 standalone 本地实现仍待同一 Code Reviewer，
+   未形成获批的新 revision/standalone OID，也未执行现场 diagnose。
 2. D2B1 已获批但尚未执行 helper；两次 PREWRITE 均在写入前停止，attempts=0。尚未生成
    root-only audience、`adc.json`、`certificate_config.json` 和最终 real-test 四文件 source，
    真实 KEY 未被复制。
@@ -379,7 +385,7 @@ Git 状态：
 
 ------------------------------------------------------------------------
 
-# Agent 交接信息
+# 历史 Agent 交接：D2B0-R3-R1
 
 【任务名称】
 
@@ -391,21 +397,22 @@ Product-Technical Lead
 
 【下一 Owner】
 
-Product-Technical Lead（等待 commit/push 与现场 diagnose 授权）
+Product-Technical Lead（该历史交接已由 R4 当前交接取代）
 
 【任务目标】
 
 将 SDK manifest 规范化、no-follow 对象分类、稳定身份摘要和并发漂移判断收敛到唯一共享核心，
 由 prepare helper 与受信 toolchain verifier 复用。`diagnose` 必须纯只读、零 gcloud；
-`behavior` 当前保持 fail-closed。R3 未形成受信 revision、现场 diagnose 和后续 behavior 验证
+`behavior` 当前保持 fail-closed。R3 受信 revision、现场 diagnose 和后续 behavior 验证
 完成前不得继续 D2B1。
 
 【当前状态】
 
-当前受信 revision 为 `d2cfd084ece9fc786e1a7b3e3b3631ac4dee8d98`。D2B0-R3-R1 七文件
-本地实现、测试和文档已由同一 Code Reviewer 限定复审通过，无 P0-P3；尚未 commit/push。
-现场 `diagnose`、behavior、D2B1/D2B2/E 均未授权或执行。behavior attempts=0、D2B1 helper
-attempts=0、validation root 与 SOURCE/AUDIENCE/runtime 继续 MISSING。
+该历史批次随后形成受信 revision
+`be83c732aa574bca7898fd31cf200024804ac049`。D2B0-R3-R1 七文件本地实现、测试和文档已由
+同一 Code Reviewer 限定复审通过，无 P0-P3。现场 `diagnose`、behavior、D2B1/D2B2/E
+均未执行。behavior attempts=0、D2B1 helper attempts=0、validation root 与
+SOURCE/AUDIENCE/runtime 继续 MISSING。
 
 【已完成内容】
 
@@ -425,9 +432,10 @@ attempts=0、validation root 与 SOURCE/AUDIENCE/runtime 继续 MISSING。
 
 【未完成内容】
 
-D2B0-R3-R1 七文件尚未 commit/push，不能作为现场受信 revision。现场纯只读 `diagnose` 需要
-用户另行授权；只有诊断证明两套分类一致、OTHER/external/broken=0 且无 concurrent drift，才能
-申请后续 behavior 写验证。behavior 通过前不得关闭现场 P1 或恢复 D2B1；D2B2/E 仍须独立授权。
+R3 commit/push 已完成，但 presence gate 证明冻结 release path 为真实 `ENOENT`，因此转入
+R4_REQUIRED。现场纯只读 `diagnose` 仍需用户另行授权；只有诊断证明两套分类一致、
+OTHER/external/broken=0 且无 concurrent drift，才能申请后续 behavior 写验证。behavior
+通过前不得恢复 D2B1；D2B2/E 仍须独立授权。
 
 【涉及文件/模块】
 
@@ -471,6 +479,79 @@ SDK 分类必须只有一个受信实现；prepare、diagnose 和未来 behavior
 3. diagnose 通过后，用户是否另行批准仓库受信 behavior 写验证；该批次通过前不得重新交接 D2B1。
 4. behavior 与现场 P1 关闭后，Product-Technical Lead 是否重新申请/确认 D2B1；D2B2 仍须再次批准。
 5. Data Access Logs 必须另批启用并在下一次签发/续期前验收，不与 D2B 隐式捆绑。
+
+------------------------------------------------------------------------
+
+# D2B0-R4 当前交接
+
+【任务名称】
+
+TASK-001 D2B0-R4-R1：受信 stdin 启动链自拒绝本地实现
+
+【当前 Owner】
+
+Security DevOps Engineer（本地实现）
+
+【下一 Owner】
+
+Product-Technical Lead（随后交同一 Code Reviewer）
+
+【现场前提】
+
+presence/identity gate 已证明冻结路径 `/opt/xingheng-release/code` 为真实 `ENOENT`，分类为
+`MISSING/R4_REQUIRED`。R4-R1 后续只读启动链 probe 的连接上限 exact=2 已耗尽：
+第一次 remote exec 前 `Broken pipe`，第二次执行唯一 probe，`probe_attempt=1`。后验
+writes=0；diagnose、behavior、D2B1 attempts=0，validation root、SOURCE/AUDIENCE/runtime
+继续 MISSING。本地实现批次未访问 Chrome、Cloud Shell、VM 或云，也不授权第三次连接。
+
+【本地实现】
+
+-   新增 `scripts/verify-real-test-gcloud-toolchain-standalone.py`，内嵌受信 revision
+    `be83c732aa574bca7898fd31cf200024804ac049` 的 core/verifier 原始 Git blob bytes。
+-   standalone 在 compile 前验证 inner size、SHA-256 和 Git blob OID；以固定 synthetic
+    filename/package/spec 创建内存 `gcp_sdk_boundary`，先注册 `sys.modules` 再执行 verifier，
+    core 不从 ambient `sys.path` fallback import；verifier 运行期只从冻结的 stdlib/dynload
+    边界加载标准库。
+-   standalone 固定 `sys.dont_write_bytecode=True` 且只接受唯一 `diagnose` argv；behavior、
+    prepare、额外 argv 和 loader 漂移均以无源码、无 traceback 的结构化收据拒绝，不调用 gcloud。
+-   standalone 自校验精确 `env -i` 三键环境、canonical Python 的 `-I -S -B - diagnose`
+    flags/argv/prefix，以及有序三项初始 `sys.path`。现场标准 `python314.zip` 槽只允许在冻结
+    absolute path、no-follow 安全父链下返回 exact `ENOENT`；任何存在类型或其他 errno 均拒绝。
+-   缺失 zip 槽在 inner import 前同时从 `sys.path` 和 importer cache 删除；active
+    `sys.path` 只保留有序 stdlib/dynload 两项，并绑定 root-only metadata 与
+    `google-cloud-cli` manifest membership。完整绑定在 inner load 前、load 后、退出前复核。
+-   新增 `scripts/build-real-test-gcloud-toolchain-standalone.py`，仅从固定 commit blobs
+    确定性生成 artifact；Git 子进程使用固定绝对 binary、净化环境、禁用 replace objects、
+    全局/系统 config、可选锁和终端提示。
+-   聚焦测试覆盖 inner identity、metadata/bit 篡改、flags/env/prefix/argv/sys.path、
+    exact ENOENT 与其他 errno/type、父链 symlink、manifest/owner/write/hardlink、
+    importer cache、post-load/pre-exit 漂移、恶意 `sitecustomize` 控制/隔离、零 pycache、
+    普通/standalone diagnose 语义等价和确定性重生成。共享 core/verifier/prepare 语义未修改。
+
+【威胁模型决策】
+
+用户已明确批准将“攻击者已取得并可并发使用 root 权限原地改写解释器、stdlib 或进程”排除出
+本任务威胁模型。该权限域同时可读取 root-only KEY、替换解释器或修改 verifier 进程，不能由
+同一可变 VM 上的 Python 用户态程序自举证明安全。本批运维前提为无并发 root 管理会话，
+解释器/stdlib/SDK root-owned、不可 group/world write，且 package/version/manifest exact。
+默认 loader 读取标准库文件前的同权限原地改写 TOCTOU 是明确残余风险，不宣称由目录、manifest
+或三阶段复核消除。若未来要求覆盖并发 root compromise，必须另案评审无 filesystem runtime
+imports 的专用诊断器或内核强制不可变执行边界；不属于 R4-R1。
+
+【现场模型与未授权项】
+
+未来只能在新 revision 和 standalone OID 获批后，由可信侧
+`git cat-file blob <standalone-OID>` 将原始 blob bytes 经 SSH stdin 送入固定 canonical
+`/usr/bin/env -i ... Python -I -S -B - diagnose`。禁止 heredoc、base64、命令替换、
+网络下载、第二路模块或现场拼装。
+当前未形成获批的新 revision/standalone OID，未执行现场 diagnose、behavior 或 D2B1；
+D2B2/E 仍未授权。
+
+【审查状态】
+
+R4-R1 首次复审发现 runtime-import TOCTOU P1；Architecture Review 说明该场景属于并发 root
+compromise 威胁模型，用户已明确排除该模型并接受上述残余风险。现须由同一 Code Reviewer
+按此边界限定复审。测试通过不能自判 Review 通过；不得 stage/commit/push 或转入现场执行。
 
 ------------------------------------------------------------------------
 
@@ -668,8 +749,9 @@ reference 后、current 后及返回前重验完整静态工具链，后置绑�
 -   docs/decisions/：若冻结新的 WIF Provider mapping、证书生命周期或 KMS rotation 决策则记录。
 
 同步状态：D2B0-R3-R1 已把完整对象身份和三段后置收据绑定加入唯一 SDK boundary/verifier，
-prepare helper 同步保存完整 boundary baseline；TASK-001、real-test runbook 与 Decision Log
-已同步。同一 Code Reviewer 已确认代码层无 P0-P3；`diagnose` 尚未现场执行，`behavior` 保持
-fail-closed 占位。当前等待 commit/push 授权与后续现场 `diagnose` 独立授权。
+并形成受信 revision `be83c732aa574bca7898fd31cf200024804ac049`。presence gate 已证明
+冻结 release path 真实 `ENOENT`，分类为 `MISSING/R4_REQUIRED`；R4-R1 standalone/builder、
+TASK-001、real-test runbook 与 Decision Log 已完成启动链最小同步，等待同一 Code Reviewer。
+新 revision/standalone OID、现场 `diagnose`、behavior 和 D2B1 均未获授权。
 `PROJECT_CONTEXT.md` 已有“D2B1/D2B2 现场未执行”边界且无冲突，本批不改；
 `ARCHITECTURE.md`、`CHANGELOG.md` 本批不改。
