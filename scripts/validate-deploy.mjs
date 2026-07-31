@@ -66,11 +66,11 @@ const assertions = [
     "all release image targets must embed and enforce the immutable build revision",
   ],
   [
-    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 7
-      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 5
+    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 8
+      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 6
       && compose.includes("XINGHENG_WEB_IMAGE:?")
       && compose.includes("XINGHENG_STRATEGY_TOOLS_IMAGE:?")
-      && (compose.match(/pull_policy: never/g) ?? []).length === 7
+      && (compose.match(/pull_policy: never/g) ?? []).length === 8
       && !compose.includes("build:"),
     "production Compose must consume only manifest-pinned immutable release images",
   ],

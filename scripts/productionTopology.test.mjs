@@ -46,6 +46,7 @@ test("rejects mutable, missing or crossed release image mappings", () => {
     (config) => { config.services.api.pull_policy = "always"; },
     (config) => { config.services.api.build = "."; },
     (config) => { delete config.services["strategy-history"]; },
+    (config) => { delete config.services["rwa-automation-verify"]; },
     (config) => { config.services.web.environment.XINGHENG_EXPECTED_REVISION = "b".repeat(40); },
   ];
 
