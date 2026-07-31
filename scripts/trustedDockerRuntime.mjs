@@ -71,7 +71,7 @@ export function trustedReleaseRoot(source = process.env) {
 
 export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   if (process.getuid?.() !== 0) return realpathSync(currentRoot);
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if (["release-build", "candidate-verify"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     return assertTrustedReleaseCandidateRoot(
       currentRoot,
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
@@ -85,6 +85,21 @@ export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
     assertTrustedReleaseTree(actual, readProductionTrustReceipt().releaseTree);
   }
   return actual;
+}
+
+export function assertTrustedProductionReleaseRoot(currentRoot = PRODUCTION_RELEASE_ROOT) {
+  const receipt = readProductionTrustReceipt();
+  const actual = realpathSync(currentRoot);
+  if (actual !== receipt.releaseRoot) {
+    throw new Error("production release root identity mismatch");
+  }
+  validateDirectoryChain(actual, false);
+  assertTrustedReleaseTree(actual, receipt.releaseTree);
+  return Object.freeze({
+    releaseRoot: actual,
+    releaseTree: receipt.releaseTree,
+    receiptSha256: receipt.receiptSha256,
+  });
 }
 
 export function openTrustedDockerRuntime(kind, source = process.env) {
@@ -238,6 +253,104 @@ export function execTrustedDockerSync(args, options = {}) {
   } finally {
     runtime.close();
   }
+}
+
+export function candidateRwaVerifyDockerArguments(contract) {
+  validateCandidateRwaVerifyContract(contract);
+  return Object.freeze([
+    "run",
+    "--pull", "never",
+    "--rm",
+    "--network", "bridge",
+    "--read-only",
+    "--user", "20001:20001",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--tmpfs", "/tmp:size=16m,mode=0700,uid=20001,gid=20001",
+    "--mount", "type=volume,src=xingheng_rwa_automation_backups,dst=/app/rwa-automation-backups,readonly",
+    "--mount", "type=bind,src=/run/xingheng/gcp-wif,dst=/run/secrets/gcp-wif,readonly,bind-propagation=rprivate",
+    "-e", "NODE_ENV=production",
+    "-e", "XINGHENG_DEPLOYMENT_ENVIRONMENT=production",
+    "-e", "XINGHENG_COMPOSE_PROJECT=xingheng",
+    "-e", `DOMAIN=${contract.domain}`,
+    "-e", "XINGHENG_WIF_HOST_PATH=/run/xingheng/gcp-wif",
+    "-e", `XINGHENG_EXPECTED_REVISION=${contract.candidateRevision}`,
+    "-e", "RWA_AUTOMATION_BACKUP_DIR=/app/rwa-automation-backups",
+    "-e", `RWA_AUTOMATION_VERIFY_FILE=${contract.backupName}`,
+    "-e", "RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms",
+    "-e", "RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials",
+    "-e", `RWA_GCP_WIF_AUDIENCE=${contract.wifAudience}`,
+    "-e", "GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json",
+    contract.apiDigest,
+    "node", "dist-server/operations/rwa-automation-backup-verify.js",
+  ]);
+}
+
+export function validateCandidateRwaVerifyDockerArguments(values, contract, source = process.env) {
+  validateCandidateRwaVerifyContract(contract);
+  if (
+    source.XINGHENG_OPERATION_LOCK_CONTEXT !== "candidate-verify"
+    || source.XINGHENG_RELEASE_CANDIDATE_REVISION !== contract.candidateRevision
+  ) throw new Error("candidate verify Docker context is invalid");
+  const inspect = ["image", "inspect", "--format", "{{json .}}", contract.apiDigest];
+  const run = candidateRwaVerifyDockerArguments(contract);
+  if (sameArguments(values, inspect) || sameArguments(values, run)) return;
+  throw new Error("candidate verify Docker arguments are not allowlisted");
+}
+
+export function execCandidateRwaVerifyDockerSync(args, contract, options = {}) {
+  validateCandidateRwaVerifyDockerArguments(args, contract);
+  const runtime = openTrustedDockerRuntime("docker", process.env);
+  try {
+    const result = spawnSync(trustedExecutableInvocation(runtime, 3), args, {
+      encoding: "utf8",
+      maxBuffer: options.maxBuffer ?? 1024 * 1024,
+      env: runtime.environment,
+      stdio: ["ignore", "pipe", "pipe", runtime.fd],
+    });
+    verifyTrustedDockerRuntime(runtime);
+    if (result.error || result.signal || result.status !== 0) {
+      throw new Error("candidate verify Docker command failed");
+    }
+    return result.stdout;
+  } finally {
+    runtime.close();
+  }
+}
+
+function validateCandidateRwaVerifyContract(contract) {
+  if (
+    !contract
+    || typeof contract !== "object"
+    || Array.isArray(contract)
+    || Object.keys(contract).sort().join(",") !== [
+      "apiDigest", "backupName", "candidateRevision", "domain", "wifAudience",
+    ].sort().join(",")
+    || !/^[a-f0-9]{40}$/u.test(contract.candidateRevision ?? "")
+    || !/^sha256:[a-f0-9]{64}$/u.test(contract.apiDigest ?? "")
+    || !/^rwa-automation-[0-9]{8}T[0-9]{6}Z\.rwa\.enc\.json$/u.test(contract.backupName ?? "")
+    || !validProductionDomain(contract.domain)
+    || !/^\/\/iam\.googleapis\.com\/projects\/[1-9][0-9]{5,19}\/locations\/global\/workloadIdentityPools\/[a-z][a-z0-9-]{3,31}\/providers\/[a-z][a-z0-9-]{3,31}$/u
+      .test(contract.wifAudience ?? "")
+  ) throw new Error("candidate verify Docker contract is invalid");
+}
+
+function validProductionDomain(value) {
+  return typeof value === "string"
+    && !value.includes("://")
+    && !value.includes("/")
+    && !value.includes(":")
+    && !value.includes("@")
+    && !value.includes("*")
+    && value !== "localhost"
+    && !/^[0-9.]+$/u.test(value)
+    && /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(value);
+}
+
+function sameArguments(left, right) {
+  return Array.isArray(left)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
 }
 
 export function validateTrustedReleaseBuildDockerArguments(values, source = process.env) {
@@ -502,14 +615,17 @@ function readProductionTrustReceipt() {
     ) {
       throw new Error("trusted operations receipt changed while being read");
     }
-    return validateTrustReceipt(JSON.parse(bytes.toString("utf8")));
+    return Object.freeze({
+      ...validateTrustReceipt(JSON.parse(bytes.toString("utf8"))),
+      receiptSha256: createHash("sha256").update(bytes).digest("hex"),
+    });
   } finally {
     closeSync(fd);
   }
 }
 
 function activeTrustReceipt(source) {
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if (["release-build", "candidate-verify"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     );

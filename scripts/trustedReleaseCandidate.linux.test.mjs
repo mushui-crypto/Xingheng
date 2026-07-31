@@ -117,6 +117,26 @@ test("root cannot enable the trusted Docker test seam through ambient NODE_ENV",
   assert.doesNotMatch(result.stderr, /trusted-docker-receipt phase=validated/u);
 });
 
+test("real Linux candidate verify launcher rejects non-basename and extra input before Docker", {
+  skip: !ENABLED && "requires an installed root-owned Linux release candidate",
+}, () => {
+  const paths = releaseCandidatePaths(REVISION);
+  for (const args of [
+    [],
+    ["../rwa-automation-20260801T120000Z.rwa.enc.json"],
+    ["rwa-automation-20260801T120000Z.rwa.enc.json", "extra"],
+  ]) {
+    const result = spawnSync(
+      `${paths.codeRoot}/scripts/candidate-rwa-automation-verify.sh`,
+      args,
+      { cwd: paths.codeRoot, encoding: "utf8", env: fixedEnvironment() },
+    );
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /input_invalid|candidate verify input is invalid/u);
+    assert.doesNotMatch(result.stderr, /trusted-docker-receipt/u);
+  }
+});
+
 function invoke(paths, revision) {
   return spawnSync(
     `${paths.codeRoot}/scripts/build-release-images.sh`,
