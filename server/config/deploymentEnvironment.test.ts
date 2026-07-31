@@ -11,7 +11,6 @@ test("production identity preserves the established project and cookie namespace
     XINGHENG_COMPOSE_PROJECT: "xingheng",
     XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
     DOMAIN: "app.example.com",
-    REAL_TEST_DOMAIN: "test.example.com",
   }, () => {
     const identity = loadDeploymentIdentity();
     assert.equal(identity.environment, "production");
@@ -23,26 +22,7 @@ test("production identity preserves the established project and cookie namespace
   });
 });
 
-test("real-test identity uses a distinct project, domain, cookie namespace, and AAD domain", () => {
-  withEnvironment({
-    NODE_ENV: "production",
-    XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
-    XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
-    XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
-    DOMAIN: "test.example.com",
-    REAL_TEST_DOMAIN: "test.example.com",
-  }, () => {
-    const identity = loadDeploymentIdentity();
-    assert.equal(identity.environment, "real-test");
-    assert.equal(identity.composeProject, "xingheng-real-test");
-    assert.equal(identity.publicDomain, "test.example.com");
-    assert.equal(userCookieName(), "xh_real_test_user_session");
-    assert.equal(adminCookieName(), "xh_real_test_admin_session");
-    assert.equal(credentialEnvironment(), "real-test");
-  });
-});
-
-test("production safety mode rejects missing or crossed deployment identity fields", () => {
+test("production safety mode rejects missing, unknown or crossed deployment identity fields", () => {
   const cases = [
     {
       XINGHENG_DEPLOYMENT_ENVIRONMENT: undefined,
@@ -50,27 +30,31 @@ test("production safety mode rejects missing or crossed deployment identity fiel
       XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
     },
     {
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "staging",
       XINGHENG_COMPOSE_PROJECT: "xingheng",
-      XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
-    },
-    {
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
-      XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
       XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
     },
     {
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
-      XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
-      XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
-      DOMAIN: "app.example.com",
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+      XINGHENG_COMPOSE_PROJECT: "other-project",
+      XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+    },
+    {
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+      XINGHENG_COMPOSE_PROJECT: "xingheng",
+      XINGHENG_WIF_HOST_PATH: "/run/other/gcp-wif",
+    },
+    {
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
+      XINGHENG_COMPOSE_PROJECT: "xingheng",
+      XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
+      DOMAIN: "invalid",
     },
   ];
   for (const values of cases) {
     withEnvironment({
       NODE_ENV: "production",
-      DOMAIN: "test.example.com",
-      REAL_TEST_DOMAIN: "test.example.com",
+      DOMAIN: "app.example.com",
       ...values,
     }, () => assert.throws(() => loadDeploymentIdentity()));
   }

@@ -274,16 +274,15 @@ test("WIF installer unmounts a published target when final validation fails", ()
   }
 });
 
-test("WIF installer accepts only frozen production and real-test targets", () => {
+test("WIF installer accepts only the frozen production target", () => {
   const source = readFileSync(INSTALLER, "utf8");
   assert.ok(source.includes('production) target="/run/xingheng/gcp-wif"'));
-  assert.ok(source.includes('real-test) target="/run/xingheng-real-test/gcp-wif"'));
   assert.ok(source.includes('[ "${NODE_ENV:-}" = test ]'));
 
   const root = mkdtempSync(join(tmpdir(), "xingheng-wif-installer-environment-"));
   try {
     const bin = writeFakeInstallerCommands(root);
-    for (const environment of ["staging", "/run/other", "real-test/../xingheng"]) {
+    for (const environment of ["staging", "/run/other", "production/../xingheng"]) {
       const log = join(root, `${environment.replaceAll("/", "_")}.log`);
       const result = spawnSync(
         "sh",

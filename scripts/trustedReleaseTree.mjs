@@ -13,11 +13,9 @@ import { dirname, join, relative, resolve } from "node:path";
 const ROOT_FILES = Object.freeze([
   "Dockerfile",
   "compose.yaml",
-  "compose.real-test.yaml",
   "package.json",
   "package-lock.json",
   "deploy/Caddyfile",
-  "deploy/Caddyfile.real-test",
   "deploy/release-manifest.json",
   "deploy/rwa-automation-current.json",
 ]);
@@ -77,7 +75,7 @@ export function validateTrustedReleaseTreeReceipt(value) {
         "ctimeMs", "dev", "gid", "ino", "mode", "mtimeMs", "nlink",
         "path", "sha256", "size", "uid",
       ].sort().join(",")
-      || !/^(?:Dockerfile|package(?:-lock)?\.json|compose(?:\.real-test)?\.yaml|deploy\/[A-Za-z0-9._-]+|scripts\/[A-Za-z0-9._-]+\.(?:mjs|sh))$/u
+      || !/^(?:Dockerfile|package(?:-lock)?\.json|compose\.yaml|deploy\/[A-Za-z0-9._-]+|scripts\/[A-Za-z0-9._-]+\.(?:mjs|sh))$/u
         .test(item.path ?? "")
       || paths.has(item.path)
       || !Number.isSafeInteger(item.dev)

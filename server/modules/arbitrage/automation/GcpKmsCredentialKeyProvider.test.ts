@@ -7,7 +7,6 @@ import test from "node:test";
 import {
   CredentialKeyProviderError,
   RWA_GCP_KMS_KEY_NAME,
-  RWA_REAL_TEST_GCP_KMS_KEY_NAME,
   type CredentialKeyContext,
 } from "./CredentialKeyProvider";
 import { GcpKmsCredentialKeyProvider, crc32c } from "./GcpKmsCredentialKeyProvider";
@@ -104,44 +103,28 @@ test("GCP KMS adapter rejects service-account JSON and local master-key fallback
   }
 });
 
-test("GCP KMS adapter binds production and real-test to their frozen CryptoKeys", () => {
-  assert.equal(
-    RWA_REAL_TEST_GCP_KMS_KEY_NAME,
-    "projects/xingheng-real-test/locations/asia-southeast1/keyRings/xingheng-rwa-real-test-sg/cryptoKeys/exchange-credentials",
-  );
+test("GCP KMS adapter binds production to the frozen CryptoKey", () => {
   const productionEnvironment = {
     NODE_ENV: "production",
     XINGHENG_DEPLOYMENT_ENVIRONMENT: "production",
     XINGHENG_COMPOSE_PROJECT: "xingheng",
     XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
     DOMAIN: "app.example.com",
-    REAL_TEST_DOMAIN: "test.example.com",
     RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
     RWA_AUTOMATION_MASTER_KEY: undefined,
   };
-  const realTestEnvironment = {
-    ...productionEnvironment,
-    XINGHENG_DEPLOYMENT_ENVIRONMENT: "real-test",
-    XINGHENG_COMPOSE_PROJECT: "xingheng-real-test",
-    XINGHENG_WIF_HOST_PATH: "/run/xingheng-real-test/gcp-wif",
-    DOMAIN: "test.example.com",
-  };
+  withEnvironment(productionEnvironment, () => {
+    assert.equal(createConfigurationProbe(RWA_GCP_KMS_KEY_NAME).configured, true);
+    const crossed = createConfigurationProbe(
+      "projects/other/locations/asia/keyRings/other/cryptoKeys/other",
+    );
+    assert.equal(crossed.configured, false);
+    assert.match(crossed.configurationError ?? "", /CryptoKey/);
 
-  for (const [environment, acceptedKey, rejectedKey] of [
-    [productionEnvironment, RWA_GCP_KMS_KEY_NAME, RWA_REAL_TEST_GCP_KMS_KEY_NAME],
-    [realTestEnvironment, RWA_REAL_TEST_GCP_KMS_KEY_NAME, RWA_GCP_KMS_KEY_NAME],
-  ] as const) {
-    withEnvironment(environment, () => {
-      assert.equal(createConfigurationProbe(acceptedKey).configured, true);
-      const crossed = createConfigurationProbe(rejectedKey);
-      assert.equal(crossed.configured, false);
-      assert.match(crossed.configurationError ?? "", /CryptoKey/);
-
-      const missing = createConfigurationProbe("");
-      assert.equal(missing.configured, false);
-      assert.match(missing.configurationError ?? "", /CryptoKey/);
-    });
-  }
+    const missing = createConfigurationProbe("");
+    assert.equal(missing.configured, false);
+    assert.match(missing.configurationError ?? "", /CryptoKey/);
+  });
 });
 
 test("GCP KMS adapter rejects missing or unknown production deployment identity", () => {
@@ -152,13 +135,12 @@ test("GCP KMS adapter rejects missing or unknown production deployment identity"
       XINGHENG_COMPOSE_PROJECT: "xingheng",
       XINGHENG_WIF_HOST_PATH: "/run/xingheng/gcp-wif",
       DOMAIN: "app.example.com",
-      REAL_TEST_DOMAIN: "test.example.com",
       RWA_CREDENTIAL_KEY_PROVIDER: "gcp-kms",
       RWA_AUTOMATION_MASTER_KEY: undefined,
     }, () => {
       const provider = createConfigurationProbe(RWA_GCP_KMS_KEY_NAME);
       assert.equal(provider.configured, false);
-      assert.match(provider.configurationError ?? "", /production 或 real-test/);
+      assert.match(provider.configurationError ?? "", /production/);
     });
   }
 });

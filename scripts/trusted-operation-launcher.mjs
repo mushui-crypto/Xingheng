@@ -28,7 +28,7 @@ const entryArgument = process.argv[3];
 const args = process.argv.slice(4);
 
 try {
-  if (!["production", "real-test", "release-build"].includes(operation) || !entryArgument) usage();
+  if (!["production", "release-build"].includes(operation) || !entryArgument) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
   }
@@ -57,11 +57,7 @@ try {
     ? ["build-release-images.sh"]
     : [
       "production-compose.sh",
-      "real-test-compose.sh",
-      "real-test-standalone-compose.sh",
-      "real-test-cleanup.sh",
       "activate-release.sh",
-      "activate-real-test-release.sh",
       "activate-first-verified-release.sh",
       "install-gcp-wif.sh",
       "legacy-release-bridge.sh",
@@ -146,7 +142,7 @@ try {
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|real-test|release-build scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|release-build scripts/ENTRY ARGS...",
   );
 }
 

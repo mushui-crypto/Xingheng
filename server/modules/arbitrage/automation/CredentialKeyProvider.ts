@@ -6,12 +6,10 @@ export const STEP_UP_SECURITY_AAD_SCHEMA = "step-up-security:v1:userId:purpose:e
 export const RWA_AUTOMATION_BACKUP_AAD_SCHEMA = "rwa-automation-backup:v1:backupId:environment" as const;
 export const RWA_GCP_KMS_KEY_NAME =
   "projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials" as const;
-export const RWA_REAL_TEST_GCP_KMS_KEY_NAME =
-  "projects/xingheng-real-test/locations/asia-southeast1/keyRings/xingheng-rwa-real-test-sg/cryptoKeys/exchange-credentials" as const;
 
 export type CredentialKeyProviderName = "gcp-kms" | "fake";
 
-export type CredentialEnvironment = "production" | "real-test" | "development" | "test";
+export type CredentialEnvironment = "production" | "development" | "test";
 
 export type ExchangeCredentialKeyContext = {
   purpose?: "exchange-credential";
@@ -79,7 +77,7 @@ export class CredentialKeyProviderError extends Error {
 export function credentialEnvironment(): CredentialEnvironment {
   if (process.env.NODE_ENV === "production") {
     const environment = process.env.XINGHENG_DEPLOYMENT_ENVIRONMENT;
-    if (environment === "production" || environment === "real-test") return environment;
+    if (environment === "production") return environment;
     throw new CredentialKeyProviderError(
       "credential_environment_unconfigured",
       "生产安全模式缺少精确部署环境身份；已拒绝凭证操作。",

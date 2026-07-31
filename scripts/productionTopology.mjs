@@ -1,10 +1,6 @@
-import {
-  validateProductionComposeConfig,
-  validateRealTestComposeConfig,
-} from "./deploymentRevision.mjs";
+import { validateProductionComposeConfig } from "./deploymentRevision.mjs";
 
 export const PRODUCTION_PROJECT = "xingheng";
-export const REAL_TEST_PROJECT = "xingheng-real-test";
 export const SHARED_INGRESS_NETWORK = "xingheng-public-ingress";
 
 const LOGICAL_VOLUMES = Object.freeze([
@@ -82,99 +78,30 @@ const SERVICE_MOUNTS = Object.freeze({
   ]),
 });
 
-export function validateDualEnvironmentTopology(manifest, production, realTest) {
+export function validateProductionTopology(manifest, production) {
   validateProductionComposeConfig(manifest, production);
-  validateRealTestComposeConfig(manifest, realTest);
 
   const productionApi = service(production, "api");
-  const realTestApi = service(realTest, "api");
   const productionWeb = service(production, "web");
-  const realTestWeb = service(realTest, "web");
 
   const productionDomain = requiredString(productionWeb.environment?.DOMAIN);
-  const realTestDomain = requiredString(realTestWeb.environment?.REAL_TEST_DOMAIN);
-  if (
-    productionDomain === realTestDomain
-    || productionWeb.environment?.REAL_TEST_DOMAIN !== realTestDomain
-    || realTestApi.environment?.DOMAIN !== realTestDomain
-    || realTestApi.environment?.REAL_TEST_DOMAIN !== realTestDomain
-  ) {
-    throw new Error("dual-environment domain boundary is invalid");
-  }
-  if (Array.isArray(realTestWeb.ports) && realTestWeb.ports.length > 0) {
-    throw new Error("real-test Web must not publish host ports");
-  }
-  if (realTestWeb.labels?.["com.xingheng.real-test.topology"] !== "shared") {
-    throw new Error("shared real-test topology identity is invalid");
+  if (productionApi.environment?.DOMAIN !== productionDomain) {
+    throw new Error("production domain boundary is invalid");
   }
   assertProductionIngressPorts(productionWeb);
   assertHealthcheck(productionApi, "production", "xingheng", false);
-  assertHealthcheck(realTestApi, "real-test", "xingheng-real-test", false);
   assertHealthcheck(productionWeb, "production", "xingheng", true);
-  assertHealthcheck(realTestWeb, "real-test", "xingheng-real-test", true);
-  assertRealTestWebHealthcheck(realTestWeb, "http");
 
   assertVolumes(production, PRODUCTION_PROJECT);
-  assertVolumes(realTest, REAL_TEST_PROJECT);
   assertServiceMounts(production, "/run/xingheng/gcp-wif");
-  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
   assertWifMount(productionApi, "/run/xingheng/gcp-wif");
-  assertWifMount(realTestApi, "/run/xingheng-real-test/gcp-wif");
   assertProviderIdentityPreflight(
     production,
     productionApi,
     "production",
     "xingheng",
   );
-  assertProviderIdentityPreflight(
-    realTest,
-    realTestApi,
-    "real-test",
-    "xingheng-real-test",
-  );
   assertIngress(production, productionWeb, "production-web");
-  assertIngress(realTest, realTestWeb, "real-test-web");
-
-  const productionFingerprints = monitoredFingerprints(productionApi);
-  const realTestFingerprints = monitoredFingerprints(realTestApi);
-  for (const fingerprint of productionFingerprints) {
-    if (realTestFingerprints.has(fingerprint)) {
-      throw new Error("provider account fingerprint is shared across deployment environments");
-    }
-  }
-  if (realTestApi.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
-    throw new Error("real-test execution gate must remain closed");
-  }
-  for (const field of ["RWA_GCP_KMS_KEY_NAME", "RWA_GCP_WIF_AUDIENCE"]) {
-    const productionValue = requiredString(productionApi.environment?.[field]);
-    const realTestValue = requiredString(realTestApi.environment?.[field]);
-    if (productionValue === realTestValue) {
-      throw new Error("cloud credential identity is shared across deployment environments");
-    }
-  }
-
-  const productionResources = new Set(resourceIdentities(production));
-  for (const identity of resourceIdentities(realTest)) {
-    if (productionResources.has(identity)) {
-      throw new Error("deployment resource identity is shared");
-    }
-  }
-  return true;
-}
-
-export function validateStandaloneRealTestTopology(manifest, realTest) {
-  validateRealTestComposeConfig(manifest, realTest);
-  const api = service(realTest, "api");
-  const web = service(realTest, "web");
-  assertHealthcheck(api, "real-test", "xingheng-real-test", false);
-  assertHealthcheck(web, "real-test", "xingheng-real-test", true);
-  assertVolumes(realTest, REAL_TEST_PROJECT);
-  assertServiceMounts(realTest, "/run/xingheng-real-test/gcp-wif");
-  assertWifMount(api, "/run/xingheng-real-test/gcp-wif");
-  assertStandaloneIngress(realTest, web);
-  if (api.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
-    throw new Error("real-test execution gate must remain closed");
-  }
   return true;
 }
 
@@ -187,50 +114,15 @@ function assertProductionIngressPorts(web) {
   }
 }
 
-function assertStandaloneIngress(config, web) {
-  assertProductionIngressPorts(web);
-  if (web.labels?.["com.xingheng.real-test.topology"] !== "standalone") {
-    throw new Error("standalone real-test topology identity is invalid");
-  }
-  const networks = record(config.networks, "Compose networks");
-  if (
-    Object.hasOwn(networks, "public_ingress")
-    || Object.keys(networks).some((name) => name !== "default")
-  ) {
-    throw new Error("standalone real-test ingress network set is invalid");
-  }
-  const serviceNetworks = record(web.networks, "Web networks");
-  if (
-    Object.hasOwn(serviceNetworks, "public_ingress")
-    || Object.keys(serviceNetworks).some((name) => name !== "default")
-  ) {
-    throw new Error("standalone real-test Web network set is invalid");
-  }
-  const command = Array.isArray(web.command) ? web.command.at(-1) : "";
-  if (
-    typeof command !== "string"
-    || !command.includes("Caddyfile.real-test-standalone")
-    || !command.includes("REAL_TEST_DOMAIN")
-  ) {
-    throw new Error("standalone real-test HTTPS entry is invalid");
-  }
-  assertRealTestWebHealthcheck(web, "https");
-}
-
 function assertHealthcheck(serviceValue, environment, project, web) {
   const health = serviceValue.healthcheck;
   const command = health?.test;
-  const webCommandValid = environment === "real-test"
-    ? Array.isArray(command)
-      && command.length === 5
-      && command[0] === "CMD"
-      && command[1] === "/usr/local/bin/verify-real-test-web-health"
-    : Array.isArray(command)
-      && command.length === 2
-      && command[0] === "CMD-SHELL"
-      && typeof command[1] === "string"
-      && command[1].includes(environment)
-      && command[1].includes("127.0.0.1/api/health");
+  const webCommandValid = Array.isArray(command)
+    && command.length === 2
+    && command[0] === "CMD-SHELL"
+    && typeof command[1] === "string"
+    && command[1].includes(environment)
+    && command[1].includes("127.0.0.1/api/health");
   if (
     !Array.isArray(command)
     || (web && !webCommandValid)
@@ -248,19 +140,6 @@ function assertHealthcheck(serviceValue, environment, project, web) {
     || health.start_period !== "30s"
     || health.retries !== 5
   ) throw new Error("deployment health identity contract is invalid");
-}
-
-function assertRealTestWebHealthcheck(web, protocol) {
-  const command = web.healthcheck?.test;
-  if (
-    !Array.isArray(command)
-    || command[2] !== protocol
-    || typeof command[3] !== "string"
-    || command[3].length < 1
-    || !/^[0-9a-f]{40}$/u.test(command[4])
-  ) {
-    throw new Error("real-test Web health identity contract is invalid");
-  }
 }
 
 function assertServiceMounts(config, wifSource) {
@@ -331,20 +210,6 @@ function assertIngress(config, web, alias) {
   }
 }
 
-function monitoredFingerprints(api) {
-  const value = api.environment?.RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS;
-  if (value === undefined || value === null || value === "") return new Set();
-  if (typeof value !== "string") throw new Error("provider account fingerprint set is invalid");
-  const entries = value.split(",").map((entry) => entry.trim());
-  if (
-    entries.some((entry) => !/^binance:[a-f0-9]{16}$/u.test(entry))
-    || new Set(entries).size !== entries.length
-  ) {
-    throw new Error("provider account fingerprint set is invalid");
-  }
-  return new Set(entries);
-}
-
 function assertProviderIdentityPreflight(config, api, environment, project) {
   const preflight = service(config, "provider-identity-preflight");
   const expectedCommand = [
@@ -366,17 +231,6 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
   ) {
     throw new Error("provider identity preflight boundary is invalid");
   }
-}
-
-function resourceIdentities(config) {
-  const values = Object.values(record(config.volumes, "Compose volumes"))
-    .map((volume) => volume?.name);
-  for (const serviceValue of Object.values(record(config.services, "Compose services"))) {
-    for (const mount of Array.isArray(serviceValue?.volumes) ? serviceValue.volumes : []) {
-      if (mount?.type === "bind") values.push(mount.source);
-    }
-  }
-  return values.filter((value) => typeof value === "string");
 }
 
 function service(config, name) {

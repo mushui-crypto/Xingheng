@@ -63,15 +63,8 @@
 
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
-- 截至 2026-07-27 的 verified release：`45cbcea5a191b2b866131efcfecc8776daad16c8`
+- 当前只保留这一套部署环境；开始发布前必须重新核对 verified release。
 - 策略邮件通知关闭；登录、安全和账户类邮件路径不受影响。
-
-## 真实测试环境
-
-- 入口：`https://test.stellaxtrade.com`
-- Compose project：`xingheng-real-test`
-- 与正式环境保持域名、cookie、网络、数据卷、WIF/KMS 和运行身份隔离。
-- 截至 2026-07-27 运行同一 verified release，服务端总急停保持开启。
 
 运行哈希只是归档时点基线。开始发布或运维任务前，必须重新核对当前 Git、manifest、镜像 digest 和运行环境，不能仅依赖本文件。
 

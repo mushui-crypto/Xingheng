@@ -7,11 +7,6 @@
 “受控窗口”部分。Secret、TOTP code、恢复码、session token、challenge token、WIF 证书或私钥
 不得发送到聊天、工单、日志或审计导出。
 
-`connectivity_smoke` 的零资金现场准备、只读 UI 环境结论、scanner cutoff、每次 mutation 前后
-观察、`manual_intervention`、最终 flat 双确认和事故恢复门禁，统一使用
-[`CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md`](./CONNECTIVITY_SMOKE_ZERO_FUNDS_READINESS.md)。
-该清单不构成真实窗口授权。
-
 `connectivity_smoke` 禁止使用本文后续普通套利步骤 5–10，也禁止使用普通 opportunity、
 `/preflight`、`/execute`、`/positions`、`/pnl` 或 `close-all` 路径。未来 smoke 真实窗口只能按上述
 专用清单、`connectivity-smoke` 专用 API 与一次完整复合 step-up 的冻结顺序执行，不得与普通套利

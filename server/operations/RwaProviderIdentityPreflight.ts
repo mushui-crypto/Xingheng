@@ -11,8 +11,8 @@ import { RwaBinanceMainnetClient } from "../modules/arbitrage/automation/RwaBina
 export type ProviderIdentityReceipt = {
   schemaVersion: 1;
   provider: "binance";
-  deploymentEnvironment: "production" | "real-test";
-  composeProject: "xingheng" | "xingheng-real-test";
+  deploymentEnvironment: "production";
+  composeProject: "xingheng";
   revision: string;
   accountIdentitySha256: string;
   credentialBindingSha256: string;
@@ -39,8 +39,8 @@ type Client = {
 
 type Dependencies = {
   loadConfig?: () => {
-    deploymentEnvironment: "production" | "real-test";
-    composeProject: "xingheng" | "xingheng-real-test";
+    deploymentEnvironment: "production";
+    composeProject: "xingheng";
   };
   serverKillSwitch?: () => string | undefined;
   expectedRevision?: () => string | undefined;
@@ -56,15 +56,7 @@ export async function runRwaProviderIdentityPreflight(
   const config = (dependencies.loadConfig ?? loadRuntimeConfig)();
   const deploymentEnvironment = config.deploymentEnvironment;
   const composeProject = config.composeProject;
-  if (
-    !(
-      (deploymentEnvironment === "production" && composeProject === "xingheng")
-      || (
-        deploymentEnvironment === "real-test"
-        && composeProject === "xingheng-real-test"
-      )
-    )
-  ) {
+  if (deploymentEnvironment !== "production" || composeProject !== "xingheng") {
     throw new ProviderIdentityPreflightError("deployment_identity_invalid");
   }
   const serverKillSwitch = (dependencies.serverKillSwitch

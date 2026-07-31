@@ -20,22 +20,22 @@ export const initialRuntimeEnvironmentState: RuntimeEnvironmentState = {
 };
 
 export function beginRuntimeEnvironmentCheck(
-  previous: RuntimeEnvironmentState,
+  _previous: RuntimeEnvironmentState,
 ): RuntimeEnvironmentState {
   return {
     status: "checking",
-    identity: retainVisibleIdentity(previous.identity),
+    identity: null,
     message: null,
   };
 }
 
 export function failRuntimeEnvironmentCheck(
-  previous: RuntimeEnvironmentState,
+  _previous: RuntimeEnvironmentState,
   message: string,
 ): RuntimeEnvironmentState {
   return {
     status: "error",
-    identity: retainVisibleIdentity(previous.identity),
+    identity: null,
     message,
   };
 }
@@ -63,8 +63,4 @@ export function runtimeEnvironmentAllowsSensitiveOperations(
   state: RuntimeEnvironmentState,
 ) {
   return state.status === "verified";
-}
-
-function retainVisibleIdentity(identity: RuntimeEnvironmentIdentity | null) {
-  return identity?.deploymentEnvironment === "real-test" ? identity : null;
 }

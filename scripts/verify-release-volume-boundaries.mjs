@@ -1,41 +1,23 @@
 #!/usr/bin/env node
 import { execFileSync } from "node:child_process";
-import {
-  closeSync,
-  constants,
-  fstatSync,
-  lstatSync,
-  openSync,
-  readFileSync,
-} from "node:fs";
+import { lstatSync } from "node:fs";
 import { join } from "node:path";
 import {
   RELEASE_VOLUME_BOUNDARIES,
-  REAL_TEST_VOLUME_BOUNDARIES,
   validateReleaseComposeMounts,
   validateReleaseRuntimeMounts,
   validateReleaseVolumeMetadata,
   validateReleaseVolumeMountCounts,
-  validateRealTestRuntimeMounts,
-  validateRealTestVolumeMetadata,
-  validateRealTestVolumeMountCounts,
 } from "./releaseVolumeBoundaries.mjs";
 import { execTrustedDockerSync } from "./trustedDockerRuntime.mjs";
 
-const first = process.argv[2] ?? "preflight";
-const environment = first === "real-test" ? "real-test" : "production";
-const mode = environment === "real-test" ? process.argv[3] ?? "" : first;
-if (
-  !["preflight", "migration", "runtime"].includes(mode)
-  || (environment === "real-test" && mode === "migration")
-) {
-  console.error("usage: verify-release-volume-boundaries.mjs preflight|migration|runtime | real-test preflight|runtime");
+const mode = process.argv[2] ?? "preflight";
+if (!["preflight", "migration", "runtime"].includes(mode)) {
+  console.error("usage: verify-release-volume-boundaries.mjs preflight|migration|runtime");
   process.exit(2);
 }
-const boundaries = environment === "production"
-  ? RELEASE_VOLUME_BOUNDARIES
-  : REAL_TEST_VOLUME_BOUNDARIES;
-const project = environment === "production" ? "xingheng" : "xingheng-real-test";
+const boundaries = RELEASE_VOLUME_BOUNDARIES;
+const project = "xingheng";
 
 function run(command, args) {
   if (command === "docker") {
@@ -99,15 +81,11 @@ function volumeMountCounts(containers) {
 }
 
 function resolvedCompose() {
-  const wrapper = environment === "production"
-    ? "scripts/production-compose.sh"
-    : "scripts/real-test-compose.sh";
-  return JSON.parse(run(wrapper, [
+  return JSON.parse(run("scripts/production-compose.sh", [
     "--profile",
     "strategy-tools",
     "--profile",
     "rwa-automation-ops",
-    ...(environment === "real-test" ? ["--profile", "real-test-cleanup"] : []),
     "config",
     "--format",
     "json",
@@ -136,14 +114,10 @@ function filesystemEvidence(mountpoint) {
 
 try {
   const compose = resolvedCompose();
-  if (environment === "production") validateReleaseComposeMounts(compose);
+  validateReleaseComposeMounts(compose);
   const containers = inspectRunningContainers();
   const mountCounts = volumeMountCounts(containers);
-  if (environment === "production") {
-    validateReleaseVolumeMountCounts(mode, mountCounts);
-  } else {
-    validateRealTestVolumeMountCounts(mode, mountCounts);
-  }
+  validateReleaseVolumeMountCounts(mode, mountCounts);
   const dockerRoot = JSON.parse(docker(["info", "--format", "{{json .DockerRootDir}}"]));
   if (typeof dockerRoot !== "string" || !dockerRoot.startsWith("/")) {
     throw new Error("Docker root boundary is invalid");
@@ -193,84 +167,14 @@ try {
         mode: entry.mode,
       };
     }
-    if (environment === "production") {
-      validateReleaseVolumeMetadata(name, root, lock);
-    } else {
-      validateRealTestVolumeMetadata(name, root, lock);
-      verifyRealTestVolumeIdentity(name, inspected.Mountpoint);
-    }
+    validateReleaseVolumeMetadata(name, root, lock);
   }
 
   if (mode === "runtime") {
-    if (environment === "production") {
-      validateReleaseRuntimeMounts(releaseRuntimeMounts(containers));
-    } else {
-      validateRealTestRuntimeMounts(releaseRuntimeMounts(containers));
-    }
+    validateReleaseRuntimeMounts(releaseRuntimeMounts(containers));
   }
-  console.log(`release volume boundaries verified (${environment}:${mode})`);
+  console.log(`release volume boundaries verified (production:${mode})`);
 } catch (error) {
   console.error(error instanceof Error ? error.message : "release volume verification failed");
   process.exit(1);
-}
-
-function verifyRealTestVolumeIdentity(name, mountpoint) {
-  const match = /^xingheng-real-test_(sqlite_data|strategy_data|rwa_automation_data)$/u.exec(name);
-  if (!match) return;
-  const path = join(mountpoint, ".xingheng-volume-identity.json");
-  const before = lstatSync(path);
-  if (
-    !before.isFile()
-    || before.isSymbolicLink()
-    || before.nlink !== 1
-    || before.uid !== 0
-    || before.gid !== 0
-    || (before.mode & 0o777) !== 0o400
-    || before.size < 40
-    || before.size > 256
-  ) {
-    throw new Error("real-test volume identity boundary is invalid");
-  }
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const opened = fstatSync(fd);
-    if (
-      opened.dev !== before.dev
-      || opened.ino !== before.ino
-      || opened.size !== before.size
-      || opened.mtimeMs !== before.mtimeMs
-      || opened.ctimeMs !== before.ctimeMs
-      || opened.uid !== 0
-      || opened.gid !== 0
-      || opened.nlink !== 1
-      || (opened.mode & 0o777) !== 0o400
-    ) {
-      throw new Error("real-test volume identity changed while opening");
-    }
-    const bytes = readFileSync(fd);
-    const after = fstatSync(fd);
-    if (
-      after.dev !== opened.dev
-      || after.ino !== opened.ino
-      || after.size !== opened.size
-      || after.mtimeMs !== opened.mtimeMs
-      || after.ctimeMs !== opened.ctimeMs
-    ) {
-      throw new Error("real-test volume identity changed while reading");
-    }
-    const value = JSON.parse(bytes.toString("utf8"));
-    if (
-      !value
-      || typeof value !== "object"
-      || Array.isArray(value)
-      || Object.keys(value).sort().join(",") !== "environment,schemaVersion,volume"
-      || value.environment !== "real-test"
-      || value.schemaVersion !== 1
-      || value.volume !== match[1]
-    ) {
-      throw new Error("real-test volume identity is invalid");
-    }
-  } finally {
-    closeSync(fd);
-  }
 }

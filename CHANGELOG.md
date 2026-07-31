@@ -2,6 +2,20 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Unreleased - Production-only 部署收敛
+
+日期：2026-07-31
+
+状态：待发布
+
+### 已完成
+
+- 删除独立真实测试部署环境的 Compose、Caddy、环境模板、运行入口、清理、备份、恢复与验证能力。
+- 部署环境、WIF、KMS、受信操作、运行身份、拓扑和卷边界收敛为 production-only。
+- 保留 Demo、Hyperliquid Testnet、普通单元/集成测试及生产发布、回滚、备份能力。
+- 不改变生产 Compose project `xingheng`、WIF 路径 `/run/xingheng/gcp-wif` 或生产 KMS key。
+- 本次变更不启用资金、凭证或交易开关。
+
 ## 0.3.0 - Hyperliquid 行情源切换
 
 日期：2026-07-06

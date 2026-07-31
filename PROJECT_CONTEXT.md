@@ -224,8 +224,15 @@ SQLite。
 
 -   Docker
 -   Docker Compose
--   独立环境配置
+-   production-only 部署配置
 -   自动化部署和验证流程
+
+当前唯一部署环境为 production：
+
+-   Compose project 固定为 `xingheng`。
+-   WIF 路径固定为 `/run/xingheng/gcp-wif`。
+-   不保留独立真实测试部署环境、测试域名、测试 Compose、测试凭证域或测试数据卷。
+-   Demo、Hyperliquid Testnet 和普通自动化测试能力不属于部署环境，继续保留。
 
 环境变更、发布、真实资金相关操作必须遵守项目沟通规则。
 
