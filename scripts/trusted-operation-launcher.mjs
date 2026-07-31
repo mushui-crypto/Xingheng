@@ -66,6 +66,8 @@ try {
       "rwa-automation-backup.sh",
       "rwa-automation-restore.sh",
       "rwa-automation-rollback.sh",
+      "rwa-automation-verify.sh",
+      "provider-gate1-preflight.sh",
       "rollback-release.sh",
       "smoke.sh",
     ];

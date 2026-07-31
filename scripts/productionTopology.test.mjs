@@ -29,6 +29,8 @@ test("rejects crossed production identity, domain, WIF, ingress and volume bound
     (config) => { config.networks.public_ingress.name = "other-ingress"; },
     (config) => { config.volumes.sqlite_data.name = "other_sqlite_data"; },
     (config) => { config.services["provider-identity-preflight"].read_only = false; },
+    (config) => { config.services["rwa-automation-verify"].volumes[0].read_only = false; },
+    (config) => { config.services["rwa-automation-verify"].command.push("restore"); },
   ];
 
   for (const mutate of mutations) {
@@ -111,6 +113,7 @@ function fixture() {
   ]);
 
   const preflight = service(API, {
+    RWA_PROVIDER_PREFLIGHT_USER_ID: "",
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
     RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
@@ -141,6 +144,21 @@ function fixture() {
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
     ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
   ]);
+  const automationVerify = service(API, {
+    RWA_AUTOMATION_VERIFY_FILE: "",
+    RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
+    RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
+  });
+  automationVerify.volumes = mounts([
+    ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", true],
+    ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
+  ]);
+  Object.assign(automationVerify, {
+    command: ["node", "dist-server/operations/rwa-automation-backup-verify.js"],
+    read_only: true,
+    cap_drop: ["ALL"],
+    security_opt: ["no-new-privileges:true"],
+  });
 
   return {
     name: "xingheng",
@@ -152,6 +170,7 @@ function fixture() {
       "provider-identity-preflight": preflight,
       "rwa-automation-backup": automationBackup,
       "rwa-automation-restore": automationRestore,
+      "rwa-automation-verify": automationVerify,
     },
     networks: {
       default: {},

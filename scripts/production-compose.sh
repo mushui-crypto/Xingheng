@@ -74,6 +74,8 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
       XINGHENG_API_IMAGE="${XINGHENG_API_IMAGE:-}" \
       XINGHENG_WEB_IMAGE="${XINGHENG_WEB_IMAGE:-}" \
       XINGHENG_STRATEGY_TOOLS_IMAGE="${XINGHENG_STRATEGY_TOOLS_IMAGE:-}" \
+      RWA_PROVIDER_PREFLIGHT_USER_ID="${RWA_PROVIDER_PREFLIGHT_USER_ID:-}" \
+      RWA_AUTOMATION_VERIFY_FILE="${RWA_AUTOMATION_VERIFY_FILE:-}" \
       /usr/bin/node "$script_dir/trusted-operation-launcher.mjs" \
       production scripts/production-compose.sh "$@"
   fi
@@ -84,6 +86,8 @@ if [ "$(/usr/bin/id -u)" -eq 0 ]; then
     XINGHENG_API_IMAGE="${XINGHENG_API_IMAGE:-}" \
     XINGHENG_WEB_IMAGE="${XINGHENG_WEB_IMAGE:-}" \
     XINGHENG_STRATEGY_TOOLS_IMAGE="${XINGHENG_STRATEGY_TOOLS_IMAGE:-}" \
+    RWA_PROVIDER_PREFLIGHT_USER_ID="${RWA_PROVIDER_PREFLIGHT_USER_ID:-}" \
+    RWA_AUTOMATION_VERIFY_FILE="${RWA_AUTOMATION_VERIFY_FILE:-}" \
     /usr/bin/node "$script_dir/verify-compose-environment-file.mjs" production "$@"
 fi
 exec node "$script_dir/verify-compose-environment-file.mjs" production "$@"

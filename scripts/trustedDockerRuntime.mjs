@@ -34,6 +34,8 @@ const SAFE_CHILD_KEYS = Object.freeze([
   "XINGHENG_WEB_IMAGE",
   "XINGHENG_STRATEGY_TOOLS_IMAGE",
   "XINGHENG_COMPOSE_ENV_FD",
+  "RWA_PROVIDER_PREFLIGHT_USER_ID",
+  "RWA_AUTOMATION_VERIFY_FILE",
 ]);
 const REQUIRED_TOOLS = Object.freeze({
   node: "/usr/bin/node",

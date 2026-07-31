@@ -35,6 +35,7 @@ const COMPONENT_DIGESTS = Object.freeze({
   "strategy-tools": STRATEGY_DIGEST,
   "rwa-automation-backup": API_DIGEST,
   "rwa-automation-restore": API_DIGEST,
+  "rwa-automation-verify": API_DIGEST,
 });
 
 test("accepts one exact full revision across every release component", () => {
@@ -238,6 +239,7 @@ function composeConfig() {
       "strategy-history": service(STRATEGY_DIGEST),
       "sqlite-restore": service(API_DIGEST),
       "provider-identity-preflight": service(API_DIGEST),
+      "rwa-automation-verify": service(API_DIGEST),
       "rwa-automation-backup": service(API_DIGEST),
       "rwa-automation-restore": service(API_DIGEST),
     },

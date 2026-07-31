@@ -444,6 +444,7 @@ function validateComposeArguments(args, targetEnvironment) {
     "rwa-automation-ops",
     "sqlite-ops",
     "provider-identity-preflight",
+    "rwa-automation-verify",
   ]);
   if (
     profiles.some((profile) => !allowedProfiles.has(profile))
@@ -477,6 +478,11 @@ function isAllowedComposeOperation(args, profiles) {
     && sameArgs(args, [
       "run", "--rm", "--no-deps", "provider-identity-preflight",
     ])
+  ) return true;
+  if (
+    profiles.has("rwa-automation-verify")
+    && profiles.size === 1
+    && sameArgs(args, ["run", "--rm", "--no-deps", "rwa-automation-verify"])
   ) return true;
   if (
     profiles.has("sqlite-ops")
