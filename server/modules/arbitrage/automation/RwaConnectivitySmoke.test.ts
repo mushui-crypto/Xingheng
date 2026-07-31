@@ -6,7 +6,6 @@ import {
   calculateConnectivitySmokeBudget,
   connectivitySmokePolicyDiscovery,
   migrateLegacyConnectivitySmokeRecord,
-  RWA_CONNECTIVITY_SMOKE_BUDGET_USD,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
   validateConnectivitySmokeFacts,
@@ -17,17 +16,21 @@ import {
   type RwaBinancePreflightSnapshot,
 } from "./RwaBinanceAutomationTypes";
 
+const approvedCapitalUsd = 30;
+
 test("connectivity smoke policy discovery is the canonical display and acceptance source", () => {
   const discovery = connectivitySmokePolicyDiscovery("binance:test");
   assert.equal(discovery.executionAuthorized, false);
   assert.equal(discovery.policy.version, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
   assert.equal(discovery.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+  assert.equal(discovery.policy.serverPermitBoundExclusiveBlankAccount, true);
+  assert.equal("dedicatedBlankSubaccount" in discovery.policy, false);
   assert.deepEqual(discovery.policy.requiredConfirmations, [
     "exclusive_window", "manual_recovery", "non_atomic_risk",
   ]);
   assert.deepEqual(
     discovery.policy.exclusiveWindowRules.map((item) => item.code),
-    ["dedicated_blank_subaccount", "single_execution_immediate_exit", "no_other_xaut_activity"],
+    ["server_permit_bound_exclusive_blank_account", "single_execution_immediate_exit", "no_other_xaut_activity"],
   );
   assert.deepEqual(
     discovery.policy.manualRecoveryRequirements.map((item) => item.code),
@@ -102,23 +105,23 @@ test("connectivity smoke canonical policy remains digest-consistent after runtim
 });
 
 test("connectivity smoke budget uses the common step and reserves all four action fees and slippage", () => {
-  const result = calculateConnectivitySmokeBudget(snapshot(), 20);
+  const result = calculateConnectivitySmokeBudget(snapshot(), 20, approvedCapitalUsd);
   assert.equal(result.quantityXaut, 0.002);
   assert.equal(result.commonQtyStep, 0.001);
   assert.ok(result.spotFeesUsd > 0);
   assert.ok(result.futuresFeesUsd > 0);
   assert.ok(result.spotSlippageReserveUsd > 0);
   assert.ok(result.futuresSlippageReserveUsd > 0);
-  assert.ok(result.totalCapitalUsd <= RWA_CONNECTIVITY_SMOKE_BUDGET_USD);
+  assert.ok(result.totalCapitalUsd <= approvedCapitalUsd);
 });
 
-test("connectivity smoke budget returns zero provider quantity when the dynamic minimum exceeds 25 USDT", () => {
+test("connectivity smoke budget returns zero provider quantity when the dynamic minimum exceeds the approval", () => {
   const expensive = snapshot();
   expensive.spot.ask = 7_000;
   expensive.perpetual.bid = 7_000;
   expensive.spot.minNotionalUsd = 15;
   expensive.perpetual.minNotionalUsd = 15;
-  const result = calculateConnectivitySmokeBudget(expensive, 20);
+  const result = calculateConnectivitySmokeBudget(expensive, 20, 10);
   assert.equal(result.quantityXaut, 0);
   assert.equal(result.totalCapitalUsd, 0);
 });
@@ -129,19 +132,19 @@ test("connectivity smoke budget rounds a finer spot step to the futures common s
   value.perpetual.qtyStep = 0.001;
   value.spot.minOrderQty = 0.0001;
   value.perpetual.minOrderQty = 0.001;
-  const result = calculateConnectivitySmokeBudget(value, 20);
+  const result = calculateConnectivitySmokeBudget(value, 20, approvedCapitalUsd);
   assert.equal(result.commonQtyStep, 0.001);
   assert.equal(result.quantityXaut % 0.001, 0);
 });
 
 test("connectivity smoke budget never under-reserves the frozen order bounds when config requests one bps", () => {
-  const result = calculateConnectivitySmokeBudget(snapshot(), 1);
+  const result = calculateConnectivitySmokeBudget(snapshot(), 1, approvedCapitalUsd);
   assert.equal(result.slippageBpsPerAction, 10);
   assert.ok(result.prices.spotOpenLimit >= 4_104.1);
   assert.ok(result.prices.futuresOpenLimit <= 4_095.9);
   assert.ok(result.prices.futuresCloseLimit >= 4_105.11);
   assert.ok(result.prices.spotCloseLimit <= 4_094.9);
-  assert.ok(result.totalCapitalUsd <= RWA_CONNECTIVITY_SMOKE_BUDGET_USD);
+  assert.ok(result.totalCapitalUsd <= approvedCapitalUsd);
 });
 
 test("connectivity smoke budget includes adverse price-tick rounding and fails closed at the cap edge", () => {
@@ -150,7 +153,7 @@ test("connectivity smoke budget includes adverse price-tick rounding and fails c
   value.perpetual.priceTick = 1;
   value.spot.minNotionalUsd = 12.49;
   value.perpetual.minNotionalUsd = 12.49;
-  const result = calculateConnectivitySmokeBudget(value, 1);
+  const result = calculateConnectivitySmokeBudget(value, 1, 20);
   assert.equal(result.quantityXaut, 0);
   assert.equal(result.totalCapitalUsd, 0);
 });
@@ -318,7 +321,7 @@ test("legacy connectivity smoke migration is exact, additive, and never fabricat
     },
     (record) => { record.spotOpenOrder.feeUsd = -1; },
     (record) => { record.spotOpenOrder.orderLinkId = `${record.orderLinkPrefix}p1`; },
-    (record) => { record.budget.totalCapitalUsd = 26; },
+    (record) => { record.budget.totalCapitalUsd = record.budget.limitUsd + 1; },
     (record) => { record.exit.futuresFlatConfirmed = "yes"; },
     (record) => { record.authorization.exitAuthorized = false; },
   ];
@@ -332,7 +335,7 @@ test("legacy connectivity smoke migration is exact, additive, and never fabricat
 });
 
 function validFlatSmoke(): RwaConnectivitySmokeRecord {
-  const budget = calculateConnectivitySmokeBudget(snapshot(), 20);
+  const budget = calculateConnectivitySmokeBudget(snapshot(), 20, approvedCapitalUsd);
   const prefix = "rwacstest";
   const order = (suffix: string) => ({
     orderId: `order-${suffix}`,

@@ -56,6 +56,7 @@ import {
   validateConnectivitySmokeFacts,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
+import { validProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -457,6 +458,12 @@ export class RwaAutomationPersistentStore<
         credentialAlert: typeof parsed.credentialAlert === "string" ? parsed.credentialAlert : null,
         credentialAudit: Array.isArray(parsed.credentialAudit) ? parsed.credentialAudit : [],
       } as AutomationState;
+      if (
+        normalized.config.productionSelfTestPermitConfirmation !== null
+        && !validProductionSelfTestPermitConfirmation(
+          normalized.config.productionSelfTestPermitConfirmation,
+        )
+      ) throw invalidRiskState();
       assertAccountAssetStateCapacity(normalized);
       assertTakeoverCollection(normalized.assetTakeovers, normalized.assetAuthorizations);
       assertConnectivitySmokeCollection(normalized.connectivitySmokes);
@@ -479,6 +486,12 @@ export class RwaAutomationPersistentStore<
   }
 
   async writeState(state: AutomationState) {
+    if (
+      state.config.productionSelfTestPermitConfirmation !== null
+      && !validProductionSelfTestPermitConfirmation(
+        state.config.productionSelfTestPermitConfirmation,
+      )
+    ) throw invalidRiskState();
     assertAccountAssetStateCapacity(state);
     for (const authorization of state.assetAuthorizations) {
       validateAccountAssetAuthorizationForStore(authorization, this.userDomain, this.venue);
@@ -1000,10 +1013,10 @@ function validateConnectivitySmokeForStore(
       "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
       "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
     ])
-    || budget.limitUsd !== 25
+    || !Number.isFinite(budget.limitUsd) || budget.limitUsd <= 0
     || Object.entries(budget).some(([key, item]) =>
       key !== "limitUsd" && key !== "prices" && (!Number.isFinite(item) || Number(item) < 0))
-    || budget.totalCapitalUsd > 25 + 1e-9
+    || budget.totalCapitalUsd > budget.limitUsd + 1e-9
     || !prices || !hasExactObjectKeys(prices, [
       "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
     ])

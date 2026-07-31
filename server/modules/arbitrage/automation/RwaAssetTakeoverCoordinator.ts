@@ -109,7 +109,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
     assetId: string;
     preview: RwaAssetTakeoverPreview;
     idempotencyKey: string;
-  }) {
+  }, beforeCurrentMutation?: (preview: RwaAssetTakeoverPreview) => Promise<void>) {
     this.requireAsset(input.assetId);
     const provided = validateRwaAssetTakeoverPreview(input.preview);
     if (!validIdempotencyKey(input.idempotencyKey)) throw invalidRequest();
@@ -147,6 +147,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
       now: this.now(),
     });
     assertRwaAssetTakeoverPreview({ provided, current, now: this.now() });
+    await beforeCurrentMutation?.(current);
     await this.assertCapitalCapacity(state, current, metadata);
     const record = createRwaAssetTakeoverRecord({
       userId: this.options.store.ownerUserId,
@@ -177,7 +178,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
   async reconfirm(input: {
     takeoverId: string;
     preview: RwaAssetTakeoverPreview;
-  }) {
+  }, beforeCurrentMutation?: (preview: RwaAssetTakeoverPreview) => Promise<void>) {
     this.options.assertExecutionLeaseHeld();
     const provided = validateRwaAssetTakeoverPreview(input.preview);
     const metadata = await this.options.credentialBinding();
@@ -217,6 +218,7 @@ export class RwaAssetTakeoverCoordinator<TPermissions extends RwaVenuePermission
       now: this.now(),
       allowOrderChanges: true,
     });
+    await beforeCurrentMutation?.(current);
     await this.assertCapitalCapacity(state, current, metadata, record.takeoverId);
     const result = await this.engine.execute({
       client,

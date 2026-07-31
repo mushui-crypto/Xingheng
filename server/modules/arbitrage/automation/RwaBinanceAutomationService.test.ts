@@ -44,6 +44,11 @@ import {
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
+import {
+  binanceAccountBindingSha256,
+  productionSelfTestPermitDigest,
+  type RwaBinanceProductionSelfTestPermit,
+} from "./RwaBinanceProductionSelfTestPermit";
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
@@ -106,6 +111,254 @@ test("Binance development exclusive account cannot disable the real-client activ
     });
     await current.previewAccountAssetAuthorization("xaut");
     assert.ok(guards.at(-1), "private real-client construction must always receive an activity guard");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production development account requires an exact permit confirmation and expiry blocks new risk", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-self-test-permit-"));
+  try {
+    const client = new FakeBinanceClient();
+    const userId = "USR-MOSS1";
+    const binding = binanceAccountBindingSha256(
+      client.access.accountId,
+      client.access.accountFingerprint,
+    );
+    const permitInput = {
+      permitId: "a".repeat(32),
+      ownerUserId: userId,
+      accountBindingSha256: binding,
+      approvedCapitalUsd: 30,
+      expiresAt: now + 1_000,
+      revision: "b".repeat(40),
+    };
+    const permit: RwaBinanceProductionSelfTestPermit = {
+      ...permitInput,
+      digest: productionSelfTestPermitDigest(permitInput),
+    };
+    const harness = serviceHarness(
+      directory,
+      userId,
+      client,
+      () => {},
+      () => false,
+      () => permit,
+      () => true,
+    );
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    await assert.rejects(
+      harness.current.updateConfig({
+        accountId,
+        accountIsolationMode: "development_exclusive_account",
+        productionSelfTestPermitId: permit.permitId,
+      }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "invalid_request",
+    );
+    await harness.current.updateConfig({
+      accountId,
+      accountIsolationMode: "development_exclusive_account",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+    });
+    const confirmed = (await harness.store.readState()).config.productionSelfTestPermitConfirmation;
+    assert.equal(confirmed?.digest, permit.digest);
+    assert.equal(confirmed?.ownerUserId, userId);
+    await harness.current.setKillSwitch(false, accountId);
+    assert.equal(client.writeCount, 0);
+
+    const expired = new RwaBinanceAutomationService(
+      harness.store,
+      () => client,
+      () => now + 1_000,
+      () => false,
+      undefined,
+      () => {},
+      () => false,
+      () => permit,
+      () => true,
+    );
+    await assert.rejects(
+      expired.preflight(opportunity(), accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "account_isolation_unconfirmed",
+    );
+    await assert.rejects(
+      expired.previewAssetTakeover({ assetId: "xaut", newCapitalUsd: 1, leverage: 2 }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "account_isolation_unconfirmed",
+    );
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production self-test rechecks permit expiry before each new-risk mutation", async () => {
+  for (const expiryPoint of ["before_first_mutation", "after_leverage"] as const) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-binance-permit-mutation-${expiryPoint}-`));
+    try {
+      let clock = now;
+      const client = new FakeBinanceClient();
+      const userId = "USR-MOSS3";
+      const permitInput = {
+        permitId: "e".repeat(32),
+        ownerUserId: userId,
+        accountBindingSha256: binanceAccountBindingSha256(
+          client.access.accountId,
+          client.access.accountFingerprint,
+        ),
+        approvedCapitalUsd: 30,
+        expiresAt: now + 1_000,
+        revision: "f".repeat(40),
+      };
+      const permit: RwaBinanceProductionSelfTestPermit = {
+        ...permitInput,
+        digest: productionSelfTestPermitDigest(permitInput),
+      };
+      const harness = serviceHarness(
+        directory,
+        userId,
+        client,
+        () => {},
+        () => false,
+        () => permit,
+        () => true,
+        () => clock,
+      );
+      await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+      const accountId = (await harness.current.getCredentialStatus()).accountId!;
+      await harness.current.updateConfig({
+        accountId,
+        accountIsolationMode: "development_exclusive_account",
+        globalExecutionEnabled: true,
+        strategyEnabled: true,
+      });
+      await harness.current.setKillSwitch(false, accountId);
+      const challenge = await harness.current.preflight(opportunity(), accountId, "manual_entry");
+      if (expiryPoint === "before_first_mutation") {
+        client.snapshotHook = () => { clock = permit.expiresAt; };
+      } else {
+        client.leverageHook = () => { clock = permit.expiresAt; };
+      }
+
+      const result = await harness.current.execute(
+        executeInput(accountId, challenge, `binance:permit-mutation:${expiryPoint}`),
+      );
+      assert.ok(result.state === "failed" || result.state === "manual_intervention");
+      assert.equal(client.writeCount, expiryPoint === "before_first_mutation" ? 0 : 1);
+      assert.equal(client.placedRequests.length, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Binance production self-test preserves generic takeover and aggregate capital caps", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-self-test-takeover-cap-"));
+  try {
+    const client = new FakeBinanceClient();
+    const userId = "USR-MOSS2";
+    const permitInput = {
+      permitId: "c".repeat(32),
+      ownerUserId: userId,
+      accountBindingSha256: binanceAccountBindingSha256(
+        client.access.accountId,
+        client.access.accountFingerprint,
+      ),
+      approvedCapitalUsd: 200,
+      expiresAt: now + 10_000,
+      revision: "d".repeat(40),
+    };
+    const permit: RwaBinanceProductionSelfTestPermit = {
+      ...permitInput,
+      digest: productionSelfTestPermitDigest(permitInput),
+    };
+    const harness = serviceHarness(
+      directory,
+      userId,
+      client,
+      () => {},
+      () => false,
+      () => permit,
+      () => true,
+    );
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    await harness.current.updateConfig({
+      accountId,
+      accountIsolationMode: "dedicated_subaccount",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+      maxStrategyCapitalUsd: 200,
+    });
+    await harness.current.setKillSwitch(false, accountId);
+    client.snapshot.spotAvailableUsdt = 2_000;
+    client.snapshot.futuresAvailableUsdt = 2_000;
+    client.snapshot.availableUsdt = 4_000;
+    client.snapshot.perpetual.liquidationDistancePercent = 50;
+    client.setAuthoritativeExposure({ spotFreeXaut: 0.002 });
+    const authorizationPreview = await harness.current.previewAccountAssetAuthorization("xaut");
+    await harness.current.createAccountAssetAuthorization("xaut", authorizationPreview);
+    const activePreview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 10,
+      leverage: 2,
+    });
+    assert.ok(activePreview.totalManagedCapitalUsd < 200);
+    const state = await harness.store.readState();
+    state.assetTakeovers.push(createRwaAssetTakeoverRecord({
+      userId,
+      userDomain: harness.store.userDomain,
+      accountId,
+      preview: activePreview,
+      idempotencyKey: "selftest-active-takeover",
+      orderLinkPrefix: "selftestactive",
+      now,
+    }));
+    await harness.store.writeState(state);
+    client.setAuthoritativeExposure({ spotFreeXaut: 0.01 });
+    const overCapPreview = await harness.current.previewAssetTakeover({
+      assetId: "xaut",
+      newCapitalUsd: 100,
+      leverage: 2,
+    });
+    assert.ok(overCapPreview.totalManagedCapitalUsd < 200);
+    await harness.current.updateConfig({
+      accountId,
+      accountIsolationMode: "development_exclusive_account",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+      maxStrategyCapitalUsd: 20,
+    });
+    const writesBefore = client.writeCount;
+    await assert.rejects(
+      harness.current.preflight(opportunity(), accountId, "manual_entry"),
+      (error: unknown) => {
+        if (!(error instanceof RwaNeutralExecutionError)
+          || error.category !== "preflight_rejected") return false;
+        const checks = (error.details as { report?: { checks?: Array<{ name: string; passed: boolean }> } })
+          ?.report?.checks ?? [];
+        return checks.some((check) => check.name === "asset_cap" && !check.passed);
+      },
+    );
+    await assert.rejects(
+      harness.current.previewAssetTakeover({ assetId: "xaut", newCapitalUsd: 100, leverage: 2 }),
+      (error: unknown) => (error as { category?: string }).category
+        === "asset_takeover_risk_rejected",
+    );
+    await assert.rejects(
+      harness.current.startAssetTakeover({
+        assetId: "xaut",
+        preview: overCapPreview,
+        idempotencyKey: "selftest-takeover-over-cap",
+      }),
+      (error: unknown) => (error as { category?: string }).category
+        === "asset_takeover_risk_rejected",
+    );
+    assert.equal(client.writeCount, writesBefore);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1569,8 +1822,8 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(result.purpose, "connectivity_smoke");
     assert.equal(result.stage, "flat");
     assert.equal(result.receipt.providerFlatConfirmed, true);
-    assert.equal(result.budget.limitUsd, 25);
-    assert.ok(result.budget.totalCapitalUsd <= 25);
+    assert.equal(result.budget.limitUsd, 2_000);
+    assert.ok(result.budget.totalCapitalUsd <= 2_000);
     assert.equal(result.policyVersion, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
     assert.equal(result.policyDigest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
     assert.deepEqual(
@@ -1717,6 +1970,61 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
       await writeFile((harness.store as any).statePath, JSON.stringify(invalidLegacy), { mode: 0o600 });
       await assert.rejects(harness.store.readState());
     }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production smoke accepts a permit above 25 within generic caps and balances", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-approved-capital-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30);
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(harness.accountId, challenge, "smoke:approved-capital:1"),
+    ) as any;
+    assert.equal(result.stage, "flat");
+    assert.equal(result.budget.limitUsd, 30);
+    assert.ok(result.budget.totalCapitalUsd <= 30);
+    assert.equal(harness.client.writeCount, 5);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke rejects changed canonical budget facts before provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-budget-change-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    const accountId = await activate(harness.current);
+    const challenge = await harness.current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshot.fees.spotTakerBps += 1;
+    await assert.rejects(harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:budget-change:1"),
+    ));
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production smoke rejects an old challenge when the permit limit changes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-permit-change-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30);
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    harness.setApprovedCapitalUsd(31);
+    await assert.rejects(harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(harness.accountId, challenge, "smoke:permit-change:1"),
+    ));
+    assert.equal(harness.client.writeCount, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2456,6 +2764,9 @@ function serviceHarness(
   client: FakeBinanceClient,
   leaseGuard: () => void = () => {},
   activityMonitoringEnabled?: () => boolean,
+  productionSelfTestPermit?: () => RwaBinanceProductionSelfTestPermit | null,
+  productionEnvironment?: () => boolean,
+  clock: () => number = () => now,
 ) {
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
@@ -2469,14 +2780,62 @@ function serviceHarness(
     current: new RwaBinanceAutomationService(
       store,
       () => client,
-      () => now,
+      clock,
       () => false,
       undefined,
       leaseGuard,
       activityMonitoringEnabled,
+      productionSelfTestPermit,
+      productionEnvironment,
     ),
     store,
     keyProvider,
+  };
+}
+
+async function productionSmokeHarness(directory: string, approvedCapitalUsd: number) {
+  const client = new FakeBinanceClient();
+  const userId = "USR-MOSSSMOKE";
+  const basePermit = {
+    permitId: "9".repeat(32),
+    ownerUserId: userId,
+    accountBindingSha256: binanceAccountBindingSha256(
+      client.access.accountId,
+      client.access.accountFingerprint,
+    ),
+    expiresAt: now + 60_000,
+    revision: "8".repeat(40),
+  };
+  let permit = productionSelfTestPermit(approvedCapitalUsd);
+  function productionSelfTestPermit(capitalUsd: number): RwaBinanceProductionSelfTestPermit {
+    const input = { ...basePermit, approvedCapitalUsd: capitalUsd };
+    return { ...input, digest: productionSelfTestPermitDigest(input) };
+  }
+  const harness = serviceHarness(
+    directory,
+    userId,
+    client,
+    () => {},
+    () => false,
+    () => permit,
+    () => true,
+  );
+  await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+  const accountId = (await harness.current.getCredentialStatus()).accountId!;
+  await harness.current.updateConfig({
+    accountId,
+    accountIsolationMode: "development_exclusive_account",
+    globalExecutionEnabled: true,
+    strategyEnabled: true,
+  });
+  await harness.current.setKillSwitch(false, accountId);
+  return {
+    ...harness,
+    client,
+    accountId,
+    setApprovedCapitalUsd(capitalUsd: number) {
+      permit = productionSelfTestPermit(capitalUsd);
+    },
   };
 }
 
@@ -2673,6 +3032,8 @@ class FakeBinanceClient implements RwaBinanceClient {
   attributionHook: () => void = () => {};
   assetOpenOrders: RwaAssetOrderReference[] = [];
   takeoverSnapshotHook: () => void = () => {};
+  snapshotHook: () => void = () => {};
+  leverageHook: () => void = () => {};
   activityFailure: Error | null = null;
   readonly activityPreparations: Array<Parameters<NonNullable<RwaBinanceClient["prepareProviderMutation"]>>[0]> = [];
 
@@ -2766,6 +3127,7 @@ class FakeBinanceClient implements RwaBinanceClient {
     if (this.staleSnapshotReads.has(this.snapshotReadCount)) {
       result.fetchedAt = now - RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS - 1;
     }
+    this.snapshotHook();
     return result;
   }
 
@@ -2823,6 +3185,7 @@ class FakeBinanceClient implements RwaBinanceClient {
 
   async setPerpetualLeverage() {
     this.writeCount += 1;
+    this.leverageHook();
     if (this.failLeverage) throw new Error("fake leverage mutation rejected");
   }
 

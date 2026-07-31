@@ -1036,7 +1036,10 @@ export class RwaAutomationControlService {
         userId,
         venue: "binance",
         accountId,
-        notionalUsd: Number(challenge.report?.budget?.totalCapitalUsd ?? 25),
+        notionalUsd: positiveNumber(
+          challenge.report?.budget?.totalCapitalUsd,
+          "connectivitySmokeBudgetTotalUsd",
+        ),
         expiresAt: challenge.expiresAt,
         purpose: "connectivity_smoke_execute",
       });

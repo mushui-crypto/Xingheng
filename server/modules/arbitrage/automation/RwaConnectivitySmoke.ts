@@ -5,11 +5,10 @@ import {
 } from "./RwaBinanceAutomationTypes";
 import type { RwaProviderOrder } from "./RwaNeutralExecutionTypes";
 
-export const RWA_CONNECTIVITY_SMOKE_BUDGET_USD = 25;
 export const RWA_CONNECTIVITY_SMOKE_PURPOSE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MODE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MAX_RECORDS = 100;
-export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-non-atomic-v1" as const;
+export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-gate2-capital-v3" as const;
 export const RWA_CONNECTIVITY_SMOKE_SLIPPAGE_FLOOR_BPS = 10;
 export const RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS = Object.freeze({
   spotOpen: Object.freeze({ suffix: "s1", category: "spot", side: "Buy", reduceOnly: false }),
@@ -21,8 +20,8 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
   version: RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
   venue: "binance",
   symbol: "XAUTUSDT",
-  maxPlannedCapitalUsd: 25,
-  dedicatedBlankSubaccount: true,
+  capitalAuthorization: "server_permit_exact_limit",
+  serverPermitBoundExclusiveBlankAccount: true,
   singleExecution: true,
   immediateExit: true,
   challengeTtlMs: 60_000,
@@ -34,12 +33,12 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
   ],
   exclusiveWindowRules: [
     {
-      code: "dedicated_blank_subaccount",
-      message: "必须使用专用空白 Binance 子账户，开始时 XAUT 余额、仓位和活动订单均为零。",
+      code: "server_permit_bound_exclusive_blank_account",
+      message: "账户必须由有效 server permit 绑定，批准窗口内 StellaX 是唯一写入者；开始时 XAUT Spot 净持仓、USD-M 仓位和活动订单必须满足空白事实。",
     },
     {
       code: "single_execution_immediate_exit",
-      message: "仅授权一次 connectivity smoke，并在建仓后立即退出；总计划资本不超过 25 USDT。",
+      message: "仅授权一次 connectivity smoke，并在Gate 2服务器批准金额内建仓后立即退出。",
     },
     {
       code: "no_other_xaut_activity",
@@ -75,7 +74,7 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
     },
     {
       code: "budget_is_not_a_maximum_loss_guarantee",
-      message: "25 USDT 是总计划资本硬预算，不是最大损失保证。",
+      message: "Gate 2批准金额是总计划资本上限，不是最大损失保证。",
     },
   ],
 } as const);
@@ -137,7 +136,7 @@ export type RwaConnectivitySmokeStage =
   | "manual_intervention";
 
 export type RwaConnectivitySmokeBudget = {
-  limitUsd: typeof RWA_CONNECTIVITY_SMOKE_BUDGET_USD;
+  limitUsd: number;
   quantityXaut: number;
   commonQtyStep: number;
   slippageBpsPerAction: number;
@@ -547,10 +546,10 @@ function validateConnectivitySmokeBudget(budget: RwaConnectivitySmokeBudget) {
       "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
       "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
     ])
-    || budget.limitUsd !== 25
+    || !Number.isFinite(budget.limitUsd) || budget.limitUsd <= 0
     || Object.entries(budget).some(([key, value]) =>
       key !== "prices" && !finiteNonNegative(value))
-    || budget.totalCapitalUsd > 25 + 1e-9
+    || budget.totalCapitalUsd > budget.limitUsd + 1e-9
     || !budget.prices || typeof budget.prices !== "object" || Array.isArray(budget.prices)
     || !hasExactKeys(budget.prices, [
       "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
@@ -722,7 +721,11 @@ export type RwaConnectivitySmokeChallengeReport = {
 export function calculateConnectivitySmokeBudget(
   snapshot: RwaBinancePreflightSnapshot,
   maxCombinedSlippageBps: number,
+  approvedCapitalUsd: number,
 ): RwaConnectivitySmokeBudget {
+  if (!Number.isFinite(approvedCapitalUsd) || approvedCapitalUsd <= 0) {
+    throw new Error("connectivity smoke approved capital is invalid");
+  }
   const commonQtyStep = commonDecimalStep(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep);
   const minQuantity = ceilStep(
     Math.max(
@@ -750,7 +753,7 @@ export function calculateConnectivitySmokeBudget(
     + prices.futuresCloseLimit * (1 + 2 * futuresFeeRate)
     + (prices.spotOpenLimit + prices.spotCloseLimit + prices.futuresOpenLimit + prices.futuresCloseLimit)
       * slippageRate;
-  const maxQuantity = floorStep(RWA_CONNECTIVITY_SMOKE_BUDGET_USD / perUnit, commonQtyStep);
+  const maxQuantity = floorStep(approvedCapitalUsd / perUnit, commonQtyStep);
   const quantityXaut = maxQuantity >= minQuantity ? minQuantity : 0;
   const spotNotionalUsd = quantityXaut * prices.spotOpenLimit;
   const futuresMarginUsd = quantityXaut * prices.futuresCloseLimit;
@@ -763,10 +766,10 @@ export function calculateConnectivitySmokeBudget(
   const subtotal = spotNotionalUsd + futuresMarginUsd + spotFeesUsd + futuresFeesUsd
     + spotSlippageReserveUsd + futuresSlippageReserveUsd;
   const roundingReserveUsd = quantityXaut > 0
-    ? Math.max(0, Math.min(RWA_CONNECTIVITY_SMOKE_BUDGET_USD - subtotal, commonQtyStep * Math.max(snapshot.spot.ask, snapshot.perpetual.bid)))
+    ? Math.max(0, Math.min(approvedCapitalUsd - subtotal, commonQtyStep * Math.max(snapshot.spot.ask, snapshot.perpetual.bid)))
     : 0;
   return {
-    limitUsd: RWA_CONNECTIVITY_SMOKE_BUDGET_USD,
+    limitUsd: approvedCapitalUsd,
     quantityXaut,
     commonQtyStep,
     slippageBpsPerAction,

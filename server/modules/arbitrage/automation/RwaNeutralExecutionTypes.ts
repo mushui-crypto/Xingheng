@@ -5,6 +5,7 @@ import {
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import type { RwaAssetTakeoverProviderSnapshot } from "./RwaAssetTakeover";
 import type { RwaAssetFundingSettlement } from "./RwaAssetTakeoverRuntime";
+import type { RwaBinanceProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
 
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -24,6 +25,7 @@ export type RwaExecutionConfig = {
   maxUnhedgedMs: number;
   accountIsolationMode: "unconfirmed" | "development_exclusive_account" | "dedicated_subaccount";
   accountIsolationConfirmedAt: number | null;
+  productionSelfTestPermitConfirmation: RwaBinanceProductionSelfTestPermitConfirmation | null;
 };
 
 export const defaultRwaExecutionConfig: RwaExecutionConfig = {
@@ -38,6 +40,7 @@ export const defaultRwaExecutionConfig: RwaExecutionConfig = {
   maxUnhedgedMs: 10_000,
   accountIsolationMode: "unconfirmed",
   accountIsolationConfirmedAt: null,
+  productionSelfTestPermitConfirmation: null,
 };
 
 export type RwaVenueCredentials = {

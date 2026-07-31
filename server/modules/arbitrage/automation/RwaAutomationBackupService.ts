@@ -45,6 +45,7 @@ import {
   writeGenerationState,
   type RwaAutomationDataLayoutOptions,
 } from "./RwaAutomationDataLayout";
+import { validProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
 import {
   RWA_ACTIVITY_MAX_PROVIDER_ORDER_IDS,
   RWA_ACTIVITY_MAX_RECENT_EVENT_IDS,
@@ -739,6 +740,8 @@ function sanitizeAutomationState(
       (parsed.config as Record<string, unknown>).accountIsolationMode ?? "unconfirmed",
     accountIsolationConfirmedAt:
       (parsed.config as Record<string, unknown>).accountIsolationConfirmedAt ?? null,
+    productionSelfTestPermitConfirmation:
+      (parsed.config as Record<string, unknown>).productionSelfTestPermitConfirmation ?? null,
   } as typeof parsed.config;
   validateExecutionConfig(parsed.config);
   if (!Array.isArray(parsed.challenges)) throw invalidSnapshot();
@@ -821,6 +824,7 @@ function validateExecutionConfig(value: unknown) {
     "globalExecutionEnabled", "killSwitchActive", "maxCombinedSlippageBps", "maxEntryBasisBps",
     "maxStrategyCapitalUsd", "maxUnhedgedMs", "minLiquidationDistancePercent", "minNetAprPercent",
     "strategyEnabled", "accountIsolationMode", "accountIsolationConfirmedAt",
+    "productionSelfTestPermitConfirmation",
   ])) throw invalidSnapshot();
   for (const key of ["globalExecutionEnabled", "strategyEnabled", "killSwitchActive"]) {
     if (typeof config[key] !== "boolean") throw invalidSnapshot();
@@ -833,6 +837,9 @@ function validateExecutionConfig(value: unknown) {
   }
   if (!["unconfirmed", "development_exclusive_account", "dedicated_subaccount"].includes(String(config.accountIsolationMode))
     || !isNullableTimestamp(config.accountIsolationConfirmedAt)) throw invalidSnapshot();
+  const permitConfirmation = config.productionSelfTestPermitConfirmation;
+  if (permitConfirmation !== null
+    && !validProductionSelfTestPermitConfirmation(permitConfirmation)) throw invalidSnapshot();
 }
 
 function validateStoredChallenge(value: unknown) {
@@ -973,9 +980,10 @@ function validateConnectivitySmoke(value: unknown) {
     "commonQtyStep", "futuresFeesUsd", "futuresMarginUsd", "futuresSlippageReserveUsd", "limitUsd",
     "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
     "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
-  ]) || budget.limitUsd !== 25 || Object.entries(budget).some(([key, item]) =>
+  ]) || !isFiniteNumber(budget.limitUsd) || Number(budget.limitUsd) <= 0
+    || Object.entries(budget).some(([key, item]) =>
     key !== "limitUsd" && key !== "prices" && (!isFiniteNumber(item) || Number(item) < 0))
-    || Number(budget.totalCapitalUsd) > 25 + 1e-9) throw invalidSnapshot();
+    || Number(budget.totalCapitalUsd) > Number(budget.limitUsd) + 1e-9) throw invalidSnapshot();
   const prices = assertObject(budget.prices);
   if (!hasExactKeys(prices, [
     "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",

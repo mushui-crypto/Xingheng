@@ -4,6 +4,7 @@ import {
   CredentialStoreError,
   RwaAutomationPersistentStore,
   automationCapitalExposuresFromExecutions,
+  automationCapitalExposuresFromTakeovers,
   readRwaAutomationCapitalExposures,
   type RwaCredentialMutationSnapshot,
   type RwaAutomationStateData,
@@ -99,6 +100,11 @@ import {
   type RwaConnectivitySmokeChallengeReport,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
+import {
+  binanceAccountBindingSha256,
+  loadRwaBinanceProductionSelfTestPermit,
+  type RwaBinanceProductionSelfTestPermit,
+} from "./RwaBinanceProductionSelfTestPermit";
 
 const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
@@ -133,6 +139,10 @@ export class RwaBinanceAutomationService {
     private readonly activityMonitoringEnabled: () => boolean = () =>
       process.env.NODE_ENV === "production"
       || process.env.RWA_BINANCE_ACTIVITY_MONITOR_ENABLED === "true",
+    private readonly productionSelfTestPermit: () => RwaBinanceProductionSelfTestPermit | null =
+      loadRwaBinanceProductionSelfTestPermit,
+    private readonly productionEnvironment: () => boolean = () =>
+      process.env.NODE_ENV === "production",
   ) {
     this.store.setClock(now);
     this.providerActivityGuard = new RwaBinanceActivityGuard(
@@ -149,7 +159,7 @@ export class RwaBinanceAutomationService {
     this.takeoverCoordinator = new RwaAssetTakeoverCoordinator({
       venue: "binance",
       store,
-      client: () => this.client(),
+      client: () => this.clientForTakeover(),
       publicMark: () => {
         if (!this.publicClient.readManagedAssetPublicMark) {
           throw new Error("Binance 公开标记价格接口不可用。");
@@ -532,12 +542,16 @@ export class RwaBinanceAutomationService {
     });
   }
 
-  previewAssetTakeover(input: {
+  async previewAssetTakeover(input: {
     assetId: string;
     newCapitalUsd: number;
     leverage: RwaAssetTakeoverLeverage;
   }) {
-    return this.withLock(() => this.takeoverCoordinator.preview(input));
+    return this.withLock(async () => {
+      await this.assertSelfTestNewRiskAllowed();
+      const preview = await this.takeoverCoordinator.preview(input);
+      return preview;
+    });
   }
 
   async startAssetTakeover(input: {
@@ -545,7 +559,11 @@ export class RwaBinanceAutomationService {
     preview: RwaAssetTakeoverPreview;
     idempotencyKey: string;
   }) {
-    const result = await this.withLock(() => this.takeoverCoordinator.start(input));
+    const result = await this.withLock(async () => {
+      await this.assertSelfTestNewRiskAllowed();
+      return this.takeoverCoordinator.start(input, () =>
+        this.assertSelfTestNewRiskAllowed());
+    });
     await this.startTakeoverMonitoring();
     return result;
   }
@@ -554,7 +572,11 @@ export class RwaBinanceAutomationService {
     takeoverId: string;
     preview: RwaAssetTakeoverPreview;
   }) {
-    const result = await this.withLock(() => this.takeoverCoordinator.reconfirm(input));
+    const result = await this.withLock(async () => {
+      await this.assertSelfTestNewRiskAllowed();
+      return this.takeoverCoordinator.reconfirm(input, () =>
+        this.assertSelfTestNewRiskAllowed());
+    });
     await this.startTakeoverMonitoring();
     return result;
   }
@@ -640,6 +662,7 @@ export class RwaBinanceAutomationService {
         globalExecutionEnabled: false,
         strategyEnabled: false,
         killSwitchActive: true,
+        productionSelfTestPermitConfirmation: null,
       };
       state.challenges = [];
       this.armedChallengeIds.clear();
@@ -708,6 +731,7 @@ export class RwaBinanceAutomationService {
       globalExecutionEnabled: false,
       strategyEnabled: false,
       killSwitchActive: true,
+      productionSelfTestPermitConfirmation: null,
     };
     state.challenges = [];
     state.credentialLifecycle = "unconfigured";
@@ -742,25 +766,45 @@ export class RwaBinanceAutomationService {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
-    if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
-      assertBinanceAccountIsolationForAutomaticExecution({
-        ...state.config,
-        ...(body.accountIsolationMode !== undefined
-          ? {
-            accountIsolationMode: binanceAccountIsolationMode(body.accountIsolationMode),
-            accountIsolationConfirmedAt: this.now(),
-          }
-          : {}),
-      });
-      const activeMetadata = await this.requireMetadata();
-      await this.validateActiveAccess(await this.clientForNewRisk(state, activeMetadata), activeMetadata.accountId, state);
-    }
     const next = { ...state.config };
     if ("globalExecutionEnabled" in body) next.globalExecutionEnabled = booleanField(body.globalExecutionEnabled, "globalExecutionEnabled");
     if ("strategyEnabled" in body) next.strategyEnabled = booleanField(body.strategyEnabled, "strategyEnabled");
     if ("accountIsolationMode" in body) {
       next.accountIsolationMode = binanceAccountIsolationMode(body.accountIsolationMode);
       next.accountIsolationConfirmedAt = this.now();
+      next.productionSelfTestPermitConfirmation = null;
+    }
+    let activeMetadata: BinanceCredentialMetadata | null = null;
+    let activeAccess: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>> | null = null;
+    if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
+      activeMetadata = await this.requireMetadata();
+      activeAccess = await this.validateActiveAccess(
+        await this.clientForNewRisk(state, activeMetadata),
+        activeMetadata.accountId,
+        state,
+      );
+    }
+    if (
+      this.productionEnvironment()
+      && next.accountIsolationMode === "development_exclusive_account"
+      && body.accountIsolationMode !== undefined
+    ) {
+      activeMetadata ??= await this.requireMetadata();
+      activeAccess ??= await this.validateActiveAccess(
+        await this.clientForNewRisk(state, activeMetadata),
+        activeMetadata.accountId,
+        state,
+      );
+      next.productionSelfTestPermitConfirmation = this.confirmProductionSelfTestPermit(
+        activeMetadata,
+        activeAccess,
+      );
+    }
+    if (
+      body.globalExecutionEnabled === true
+      || body.strategyEnabled === true
+    ) {
+      this.assertProductionSelfTestPermit(next, activeMetadata!, activeAccess!);
     }
     assignRange(
       next,
@@ -785,7 +829,12 @@ export class RwaBinanceAutomationService {
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
     if (!active) {
       const activeMetadata = await this.requireMetadata();
-      await this.validateActiveAccess(await this.clientForNewRisk(state, activeMetadata), activeMetadata.accountId, state);
+      const access = await this.validateActiveAccess(
+        await this.clientForNewRisk(state, activeMetadata),
+        activeMetadata.accountId,
+        state,
+      );
+      this.assertProductionSelfTestPermit(state.config, activeMetadata, access);
     }
     state.config.killSwitchActive = active;
     if (active) {
@@ -983,7 +1032,8 @@ export class RwaBinanceAutomationService {
         );
       }
       const client = await this.clientForNewRisk(state, metadata);
-      await this.validateActiveAccess(client, accountId, state);
+      const access = await this.validateActiveAccess(client, accountId, state);
+      this.assertProductionSelfTestPermit(state.config, metadata, access);
       const snapshot = await client.readPreflightSnapshot()
         .catch((error) => { throw providerError(error, "Binance 实时 preflight 读取失败。"); });
       assertAccountId(snapshot.accountId, accountId);
@@ -1049,11 +1099,22 @@ export class RwaBinanceAutomationService {
       const metadata = await this.requireMetadata();
       assertAccountId(accountId, metadata.accountId);
       const client = await this.clientForNewRisk(state, metadata);
-      await this.validateActiveAccess(client, accountId, state);
+      const access = await this.validateActiveAccess(client, accountId, state);
+      this.assertProductionSelfTestPermit(state.config, metadata, access);
       const snapshot = await client.readPreflightSnapshot()
         .catch((error) => { throw providerError(error, "Binance smoke preflight 读取失败。"); });
       assertAccountId(snapshot.accountId, accountId);
-      const budget = calculateConnectivitySmokeBudget(snapshot, state.config.maxCombinedSlippageBps);
+      const approvedCapitalUsd = this.approvedConnectivitySmokeCapital(
+        state.config,
+        metadata,
+        access,
+      );
+      const budget = calculateConnectivitySmokeBudget(
+        snapshot,
+        state.config.maxCombinedSlippageBps,
+        approvedCapitalUsd,
+      );
+      await this.assertProposedRiskCapacity(state, accountId, budget.totalCapitalUsd);
       const checks = smokePreflightChecks(snapshot, budget, this.now());
       const generatedAt = this.now();
       const report: RwaConnectivitySmokeChallengeReport = {
@@ -1176,9 +1237,20 @@ export class RwaBinanceAutomationService {
       try {
         const metadata = await this.requireMetadata();
         client = await this.clientForNewRisk(state, metadata);
-        await this.validateActiveAccess(client, accountId, state);
+        const access = await this.validateActiveAccess(client, accountId, state);
+        this.assertProductionSelfTestPermit(state.config, metadata, access);
         const snapshot = await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
-        const budget = calculateConnectivitySmokeBudget(snapshot, state.config.maxCombinedSlippageBps);
+        const approvedCapitalUsd = this.approvedConnectivitySmokeCapital(
+          state.config,
+          metadata,
+          access,
+        );
+        const budget = calculateConnectivitySmokeBudget(
+          snapshot,
+          state.config.maxCombinedSlippageBps,
+          approvedCapitalUsd,
+        );
+        await this.assertProposedRiskCapacity(state, accountId, budget.totalCapitalUsd);
         if (!sameSmokeBudget(budget, smoke.budget) || !smokePreflightChecks(snapshot, budget, this.now()).every((item) => item.passed)) {
           throw new RwaNeutralExecutionError(409, "connectivity_smoke_preflight_changed", "烟测执行前规则、余额或价格已变化。");
         }
@@ -1331,7 +1403,8 @@ export class RwaBinanceAutomationService {
       try {
         const metadata = await this.requireMetadata();
         client = await this.clientForNewRisk(state, metadata);
-        await this.validateActiveAccess(client, accountId, state);
+        const access = await this.validateActiveAccess(client, accountId, state);
+        this.assertProductionSelfTestPermit(state.config, metadata, access);
         const realtime = await client.readPreflightSnapshot();
         assertAccountId(realtime.accountId, accountId);
         const mode = challenge.report.mode === "manual_entry" ? "manual_entry" : "arbitrage_entry";
@@ -2137,7 +2210,7 @@ export class RwaBinanceAutomationService {
 
   private async clientForNewRisk(state: RwaAutomationStateData, metadata: BinanceCredentialMetadata) {
     try {
-      return await this.client();
+      return this.withPermitMutationGuard(await this.client(), false);
     } catch (error) {
       await this.freezeNewRisk(
         state,
@@ -2147,6 +2220,46 @@ export class RwaBinanceAutomationService {
       );
       throw error;
     }
+  }
+
+  private async clientForTakeover() {
+    return this.withPermitMutationGuard(await this.client(), true);
+  }
+
+  private withPermitMutationGuard(
+    client: RwaBinanceClient,
+    guardAllNonReduceOnlyOrders: boolean,
+  ): RwaBinanceClient {
+    return new Proxy(client, {
+      get: (target, property, receiver) => {
+        if (property === "setPerpetualLeverage") {
+          return async (...args: Parameters<RwaBinanceClient["setPerpetualLeverage"]>) => {
+            await this.assertCurrentPermitBeforeNewRiskMutation();
+            return target.setPerpetualLeverage(...args);
+          };
+        }
+        if (property === "placeOrder") {
+          return async (...args: Parameters<RwaBinanceClient["placeOrder"]>) => {
+            const request = args[0];
+            const riskReducing = request.reduceOnly
+              || (!guardAllNonReduceOnlyOrders && request.side === "Sell");
+            if (!riskReducing) await this.assertCurrentPermitBeforeNewRiskMutation();
+            return target.placeOrder(...args);
+          };
+        }
+        const value = Reflect.get(target, property, receiver);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+  }
+
+  private async assertCurrentPermitBeforeNewRiskMutation() {
+    const state = await this.store.readState();
+    const metadata = await this.requireMetadata();
+    this.assertProductionSelfTestPermit(state.config, metadata, {
+      accountId: metadata.accountId,
+      accountFingerprint: metadata.accountFingerprint,
+    } as Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>);
   }
 
   private async requireMetadata() {
@@ -2375,6 +2488,7 @@ export class RwaBinanceAutomationService {
     return mergeRwaAutomationCapitalExposures(
       await readRwaAutomationCapitalExposures(),
       automationCapitalExposuresFromExecutions(state.executions),
+      automationCapitalExposuresFromTakeovers(state.assetTakeovers),
     );
   }
 
@@ -2396,6 +2510,101 @@ export class RwaBinanceAutomationService {
     if (usage.assetNotionalUsd > state.config.maxStrategyCapitalUsd) {
       throw new RwaNeutralExecutionError(409, "strategy_cap_exceeded", "当前资产新增风险超过受控策略资本配置。");
     }
+  }
+
+  private async assertProposedRiskCapacity(
+    state: RwaAutomationStateData,
+    accountId: string,
+    proposedCapitalUsd: number,
+  ) {
+    const limits = XAUT_BINANCE_PROFILE.asset.currentStageRiskLimits!;
+    const usage = calculateRwaAutomationNewRiskUsage({
+      exposures: await this.riskExposures(state),
+      profile: XAUT_BINANCE_PROFILE,
+      userId: this.store.ownerUserId,
+      accountId,
+      orderNotionalUsd: 0,
+      proposedCapitalUsd,
+    });
+    try {
+      assertRwaAutomationNewRisk({ limits, ...usage });
+    } catch {
+      throw new RwaNeutralExecutionError(409, "risk_limit_exceeded", "当前新增风险超过服务端资产 profile 的分层上限。");
+    }
+    if (usage.assetNotionalUsd > state.config.maxStrategyCapitalUsd) {
+      throw new RwaNeutralExecutionError(409, "strategy_cap_exceeded", "当前资产新增风险超过受控策略资本配置。");
+    }
+  }
+
+  private async assertSelfTestNewRiskAllowed() {
+    const state = await this.store.readState();
+    if (
+      !this.productionEnvironment()
+      || state.config.accountIsolationMode !== "development_exclusive_account"
+    ) return;
+    this.assertEntrySwitches(state.config);
+    const metadata = await this.requireMetadata();
+    const client = await this.clientForNewRisk(state, metadata);
+    const access = await this.validateActiveAccess(client, metadata.accountId, state);
+    this.assertProductionSelfTestPermit(state.config, metadata, access);
+  }
+
+  private confirmProductionSelfTestPermit(
+    metadata: BinanceCredentialMetadata,
+    access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+  ) {
+    const permit = this.requireMatchingProductionSelfTestPermit(metadata, access);
+    return { ...permit, confirmedAt: this.now() };
+  }
+
+  private assertProductionSelfTestPermit(
+    config: RwaExecutionConfig,
+    metadata: BinanceCredentialMetadata,
+    access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+  ) {
+    if (
+      !this.productionEnvironment()
+      || config.accountIsolationMode === "dedicated_subaccount"
+    ) return;
+    const permit = this.requireMatchingProductionSelfTestPermit(metadata, access);
+    const confirmation = config.productionSelfTestPermitConfirmation;
+    if (
+      !confirmation
+      || confirmation.permitId !== permit.permitId
+      || confirmation.ownerUserId !== permit.ownerUserId
+      || confirmation.accountBindingSha256 !== permit.accountBindingSha256
+      || confirmation.approvedCapitalUsd !== permit.approvedCapitalUsd
+      || confirmation.expiresAt !== permit.expiresAt
+      || confirmation.revision !== permit.revision
+      || confirmation.digest !== permit.digest
+      || confirmation.confirmedAt >= permit.expiresAt
+    ) throw accountIsolationUnconfirmed();
+  }
+
+  private requireMatchingProductionSelfTestPermit(
+    metadata: BinanceCredentialMetadata,
+    access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+  ) {
+    const permit = this.productionSelfTestPermit();
+    const binding = binanceAccountBindingSha256(access.accountId, access.accountFingerprint);
+    if (
+      !permit
+      || this.now() >= permit.expiresAt
+      || permit.ownerUserId !== this.store.ownerUserId
+      || permit.accountBindingSha256 !== binding
+      || access.accountId !== metadata.accountId
+      || access.accountFingerprint !== metadata.accountFingerprint
+    ) throw accountIsolationUnconfirmed();
+    return permit;
+  }
+
+  private approvedConnectivitySmokeCapital(
+    config: RwaExecutionConfig,
+    metadata: BinanceCredentialMetadata,
+    access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+  ) {
+    if (!this.productionEnvironment()) return config.maxStrategyCapitalUsd;
+    return this.requireMatchingProductionSelfTestPermit(metadata, access).approvedCapitalUsd;
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {
@@ -2451,7 +2660,7 @@ function binanceAccountIsolationMode(
   value: unknown,
 ): RwaExecutionConfig["accountIsolationMode"] {
   if (value === "dedicated_subaccount") return value;
-  if (value === "development_exclusive_account" && process.env.NODE_ENV !== "production") return value;
+  if (value === "development_exclusive_account") return value;
   throw new RwaNeutralExecutionError(
     400,
     "account_isolation_invalid",
@@ -2465,14 +2674,17 @@ function assertBinanceAccountIsolationForAutomaticExecution(config: RwaExecution
     && config.accountIsolationConfirmedAt !== null
   ) return;
   if (
-    process.env.NODE_ENV !== "production"
-    && config.accountIsolationMode === "development_exclusive_account"
+    config.accountIsolationMode === "development_exclusive_account"
     && config.accountIsolationConfirmedAt !== null
   ) return;
-  throw new RwaNeutralExecutionError(
+  throw accountIsolationUnconfirmed();
+}
+
+function accountIsolationUnconfirmed() {
+  return new RwaNeutralExecutionError(
     409,
     "account_isolation_unconfirmed",
-    "自动执行要求可审计的账户唯一写入确认；production 仅接受专用 Binance 子账户。",
+    "自动执行要求可审计的账户唯一写入确认；production 普通账户自测还要求有效服务器 permit 与账户绑定确认。",
   );
 }
 
@@ -2633,10 +2845,11 @@ function assertSupportedOpportunity(opportunity: ArbitrageOpportunity, mode: Rwa
 }
 
 function publicConfig(userId: string, config: RwaExecutionConfig, accountId: string | null, serverGlobalKillSwitchActive: boolean) {
+  const { productionSelfTestPermitConfirmation: _privateConfirmation, ...publicExecutionConfig } = config;
   return {
     userId,
     accountId,
-    ...config,
+    ...publicExecutionConfig,
     serverGlobalKillSwitchActive,
     venue: "binance",
     phase: "execution_capable",
@@ -2952,7 +3165,7 @@ function smokePreflightChecks(
     { name: "blank_orders", passed: snapshot.openSpotOrderCount === 0
       && snapshot.openPerpetualOrderCount === 0, message: "两侧 XAUT 活动订单必须为 0。" },
     { name: "dynamic_quantity", passed: budget.quantityXaut > 0
-      && budget.totalCapitalUsd <= 25 + 1e-9, message: "共同最小数量必须满足实时规则和 25 USDT 总预算。" },
+      && budget.totalCapitalUsd <= budget.limitUsd + 1e-9, message: "共同最小数量必须满足实时规则和本次 Gate 2 授权总预算。" },
     { name: "spot_balance", passed: snapshot.spotAvailableUsdt + 1e-9 >= spotRequired, message: "Spot USDT 余额必须独立覆盖本侧预算。" },
     { name: "futures_balance", passed: snapshot.futuresAvailableUsdt + 1e-9 >= futuresRequired, message: "Futures USDT 余额必须独立覆盖 1x 保证金及本侧准备金。" },
     { name: "snapshot_fresh", passed: now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
@@ -3054,9 +3267,22 @@ function sameSmokeBudget(
   current: ReturnType<typeof calculateConnectivitySmokeBudget>,
   reserved: ReturnType<typeof calculateConnectivitySmokeBudget>,
 ) {
-  return current.quantityXaut === reserved.quantityXaut
+  return current.limitUsd === reserved.limitUsd
+    && current.quantityXaut === reserved.quantityXaut
     && current.commonQtyStep === reserved.commonQtyStep
-    && current.totalCapitalUsd <= 25 + 1e-9;
+    && current.slippageBpsPerAction === reserved.slippageBpsPerAction
+    && approximately(current.prices.spotOpenLimit, reserved.prices.spotOpenLimit)
+    && approximately(current.prices.futuresOpenLimit, reserved.prices.futuresOpenLimit)
+    && approximately(current.prices.futuresCloseLimit, reserved.prices.futuresCloseLimit)
+    && approximately(current.prices.spotCloseLimit, reserved.prices.spotCloseLimit)
+    && approximately(current.spotNotionalUsd, reserved.spotNotionalUsd)
+    && approximately(current.futuresMarginUsd, reserved.futuresMarginUsd)
+    && approximately(current.spotFeesUsd, reserved.spotFeesUsd)
+    && approximately(current.futuresFeesUsd, reserved.futuresFeesUsd)
+    && approximately(current.spotSlippageReserveUsd, reserved.spotSlippageReserveUsd)
+    && approximately(current.futuresSlippageReserveUsd, reserved.futuresSlippageReserveUsd)
+    && approximately(current.roundingReserveUsd, reserved.roundingReserveUsd)
+    && approximately(current.totalCapitalUsd, reserved.totalCapitalUsd);
 }
 
 function approximately(left: number, right: number) {
