@@ -135,6 +135,31 @@ test("takeover adds only the missing perpetual short through IOC and confirms au
   });
   assert.equal(result.status, "managed");
   assert.deepEqual(client.mutations.map((item) => item.kind), ["leverage", "place"]);
+  assert.deepEqual(
+    client.preparations.map((item) => ({
+      mutation: item.mutation,
+      prefixes: item.strategyOrderPrefixes,
+      since: item.since,
+      orderLinkId: item.orderLinkId,
+      expectedLeverage: item.expectedLeverage,
+    })),
+    [
+      {
+        mutation: "set_leverage",
+        prefixes: [record.orderLinkPrefix],
+        since: record.createdAt,
+        orderLinkId: undefined,
+        expectedLeverage: 2,
+      },
+      {
+        mutation: "place_futures_order",
+        prefixes: [record.orderLinkPrefix],
+        since: record.createdAt,
+        orderLinkId: `${record.orderLinkPrefix}p1`,
+        expectedLeverage: undefined,
+      },
+    ],
+  );
   assert.equal(client.mutations[1]?.category, "linear");
   assert.equal(client.mutations[1]?.side, "Sell");
   assert.equal(record.finalPerpetualQuantity, 0.1);
@@ -159,6 +184,10 @@ test("post-cancel quantity change returns an opaque reconfirmation boundary befo
   assert.equal(result.status, "reconfirm_required");
   assert.equal(record.state, "awaiting_reconfirm");
   assert.deepEqual(client.mutations.map((item) => item.kind), ["cancel"]);
+  assert.equal(client.preparations[0]?.mutation, "cancel_spot_order");
+  assert.equal(client.preparations[0]?.providerOrderId, "manual-1");
+  assert.deepEqual(client.preparations[0]?.strategyOrderPrefixes, [record.orderLinkPrefix]);
+  assert.equal(client.preparations[0]?.since, record.createdAt);
 });
 
 test("lease loss before a planned provider write produces zero provider mutation", async () => {
@@ -747,6 +776,7 @@ function hooks(assertMutationAllowed: () => void = () => {}) {
 
 class FakeTakeoverClient implements RwaNeutralTradingClient<RwaVenuePermissions> {
   readonly mutations: Array<Record<string, unknown>> = [];
+  readonly preparations: Array<Parameters<NonNullable<RwaNeutralTradingClient["prepareProviderMutation"]>>[0]> = [];
   readonly recoveredOrders = new Map<string, RwaProviderOrder>();
   afterCancel: { spot: number; perpetual: number } | null = null;
   fillFractions: number[] = [];
@@ -770,6 +800,12 @@ class FakeTakeoverClient implements RwaNeutralTradingClient<RwaVenuePermissions>
 
   async readAssetTakeoverSnapshot() {
     return structuredClone(this.provider);
+  }
+
+  async prepareProviderMutation(
+    input: Parameters<NonNullable<RwaNeutralTradingClient["prepareProviderMutation"]>>[0],
+  ) {
+    this.preparations.push(structuredClone(input));
   }
 
   async setPerpetualLeverage(leverage: 1 | 2 | 3) {

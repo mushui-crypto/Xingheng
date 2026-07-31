@@ -2,6 +2,7 @@ import type { RwaAccountAssetAuthorization, RwaAssetOrderReference } from "./Rwa
 import type { RwaAutomationResolvedAssetProfile } from "./RwaAutomationAssetProfile";
 import { RwaAutomationExecutionLeaseError } from "./RwaAutomationExecutionLease";
 import { createRwaAssetTakeoverRuntimeRecovery } from "./RwaAssetTakeoverRuntime";
+import { createMonitoredActivityContinuity } from "./RwaProviderActivityContinuity";
 import {
   createRwaAssetTakeoverPreview,
   RWA_ASSET_TAKEOVER_MAX_SLIPPAGE_BPS,
@@ -182,6 +183,12 @@ export class RwaAssetTakeoverExecutionEngine {
     record.updatedAt = this.now();
     await hooks.persist(record);
     await hooks.assertMutationAllowed(record);
+    await this.prepareProviderMutation(
+      client,
+      record,
+      order.category === "spot" ? "cancel_spot_order" : "cancel_futures_order",
+      { providerOrderId: order.orderId },
+    );
     await client.cancelOrder(order.category, order.orderId);
     record.cancelledOrders.push({
       category: order.category,
@@ -204,6 +211,12 @@ export class RwaAssetTakeoverExecutionEngine {
     record.updatedAt = this.now();
     await hooks.persist(record);
     await hooks.assertMutationAllowed(record);
+    await this.prepareProviderMutation(
+      client,
+      record,
+      "set_leverage",
+      { expectedLeverage: record.leverage },
+    );
     await client.setPerpetualLeverage(record.leverage);
     record.plannedMutation = null;
     record.updatedAt = this.now();
@@ -239,6 +252,12 @@ export class RwaAssetTakeoverExecutionEngine {
     record.updatedAt = this.now();
     await hooks.persist(record);
     await hooks.assertMutationAllowed(record);
+    await this.prepareProviderMutation(
+      client,
+      record,
+      category === "spot" ? "place_spot_order" : "place_futures_order",
+      { orderLinkId },
+    );
     const accepted = await client.placeOrder({
       category,
       symbol: category === "spot" ? this.profile.venue.spotSymbol : this.profile.venue.perpetualSymbol,
@@ -252,6 +271,25 @@ export class RwaAssetTakeoverExecutionEngine {
     record.updatedAt = this.now();
     await hooks.persist(record);
     return client.awaitOrder(category, accepted.orderId, Math.min(deadlineAt, this.now() + 6_000));
+  }
+
+  private async prepareProviderMutation<TPermissions extends RwaVenuePermissions>(
+    client: RwaNeutralTradingClient<TPermissions>,
+    record: RwaAssetTakeoverRecord,
+    mutation: Parameters<NonNullable<RwaNeutralTradingClient<TPermissions>["prepareProviderMutation"]>>[0]["mutation"],
+    identity: {
+      orderLinkId?: string;
+      providerOrderId?: string;
+      expectedLeverage?: 1 | 2 | 3;
+    },
+  ) {
+    await client.prepareProviderMutation?.({
+      mutation,
+      strategyOrderPrefixes: [record.orderLinkPrefix],
+      since: record.createdAt,
+      continuity: createMonitoredActivityContinuity(record.createdAt, record.orderLinkPrefix),
+      ...identity,
+    });
   }
 
   private async recoverPlannedMutation<TPermissions extends RwaVenuePermissions>(

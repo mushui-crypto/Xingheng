@@ -733,6 +733,13 @@ function sanitizeAutomationState(
   if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
     throw invalidSnapshot();
   }
+  parsed.config = {
+    ...(parsed.config as Record<string, unknown>),
+    accountIsolationMode:
+      (parsed.config as Record<string, unknown>).accountIsolationMode ?? "unconfirmed",
+    accountIsolationConfirmedAt:
+      (parsed.config as Record<string, unknown>).accountIsolationConfirmedAt ?? null,
+  } as typeof parsed.config;
   validateExecutionConfig(parsed.config);
   if (!Array.isArray(parsed.challenges)) throw invalidSnapshot();
   parsed.challenges.forEach(validateStoredChallenge);
@@ -813,7 +820,7 @@ function validateExecutionConfig(value: unknown) {
   if (!hasExactKeys(config, [
     "globalExecutionEnabled", "killSwitchActive", "maxCombinedSlippageBps", "maxEntryBasisBps",
     "maxStrategyCapitalUsd", "maxUnhedgedMs", "minLiquidationDistancePercent", "minNetAprPercent",
-    "strategyEnabled",
+    "strategyEnabled", "accountIsolationMode", "accountIsolationConfirmedAt",
   ])) throw invalidSnapshot();
   for (const key of ["globalExecutionEnabled", "strategyEnabled", "killSwitchActive"]) {
     if (typeof config[key] !== "boolean") throw invalidSnapshot();
@@ -824,6 +831,8 @@ function validateExecutionConfig(value: unknown) {
   ]) {
     if (!isFiniteNumber(config[key])) throw invalidSnapshot();
   }
+  if (!["unconfirmed", "development_exclusive_account", "dedicated_subaccount"].includes(String(config.accountIsolationMode))
+    || !isNullableTimestamp(config.accountIsolationConfirmedAt)) throw invalidSnapshot();
 }
 
 function validateStoredChallenge(value: unknown) {

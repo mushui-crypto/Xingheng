@@ -22,6 +22,8 @@ export type RwaExecutionConfig = {
   minNetAprPercent: number;
   minLiquidationDistancePercent: number;
   maxUnhedgedMs: number;
+  accountIsolationMode: "unconfirmed" | "development_exclusive_account" | "dedicated_subaccount";
+  accountIsolationConfirmedAt: number | null;
 };
 
 export const defaultRwaExecutionConfig: RwaExecutionConfig = {
@@ -34,6 +36,8 @@ export const defaultRwaExecutionConfig: RwaExecutionConfig = {
   minNetAprPercent: 8,
   minLiquidationDistancePercent: 30,
   maxUnhedgedMs: 10_000,
+  accountIsolationMode: "unconfirmed",
+  accountIsolationConfirmedAt: null,
 };
 
 export type RwaVenueCredentials = {
@@ -427,11 +431,32 @@ export type RwaNeutralTradingClient<
 > = {
   validateAccess(): Promise<{ permissions: TPermissions } & RwaVenueAccountIdentity>;
   readPreflightSnapshot(): Promise<TSnapshot>;
+  prepareProviderMutation?(input: {
+    mutation:
+      | "set_leverage"
+      | "place_spot_order"
+      | "place_futures_order"
+      | "cancel_spot_order"
+      | "cancel_futures_order";
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+    orderLinkId?: string;
+    providerOrderId?: string;
+    expectedLeverage?: 1 | 2 | 3;
+  }): Promise<void>;
   setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
   placeOrder(request: RwaProviderOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
   cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
-  cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
+  cancelStrategyOrders(
+    orderLinkPrefix: string,
+    activityContext?: {
+      strategyOrderPrefixes: string[];
+      since: number;
+      continuity: RwaStrategyActivityContinuity;
+    },
+  ): Promise<void>;
   listAssetOpenOrders?(): Promise<RwaAssetOrderReference[]>;
   readAssetTakeoverSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;
   readManagedAssetSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;

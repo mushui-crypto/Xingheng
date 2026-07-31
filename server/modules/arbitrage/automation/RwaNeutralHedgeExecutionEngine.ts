@@ -92,6 +92,7 @@ export class RwaNeutralHedgeExecutionEngine {
     }, snapshot.fetchedAt);
     await persist(state, execution);
     this.assertExecutionLeaseHeld();
+    await prepareProviderMutation(client, "set_leverage", execution, { expectedLeverage: 1 });
     await client.setPerpetualLeverage(1);
     this.assertExecutionLeaseHeld();
     const halfSlippage = config.maxCombinedSlippageBps / 2 / 10_000;
@@ -100,6 +101,7 @@ export class RwaNeutralHedgeExecutionEngine {
     execution.state = "opening_spot";
     await persist(state, execution);
     this.assertExecutionLeaseHeld();
+    await prepareProviderMutation(client, "place_spot_order", execution, { orderLinkId: `${execution.orderLinkPrefix}s1` });
     const spotAccepted = await client.placeOrder({
       category: "spot",
       symbol: this.marketProfile.venue.spotSymbol,
@@ -126,6 +128,7 @@ export class RwaNeutralHedgeExecutionEngine {
     await persist(state, execution);
     if (spot.status === "PartiallyFilled" || spot.status === "New") {
       this.assertExecutionLeaseHeld();
+      await prepareProviderMutation(client, "cancel_spot_order", execution, { providerOrderId: spot.orderId });
       await client.cancelOrder("spot", spot.orderId);
     }
     if (spot.filledQuantityXaut < snapshot.perpetual.minOrderQty) throw new Error("现货侧未形成可对冲的最小成交量。");
@@ -137,6 +140,7 @@ export class RwaNeutralHedgeExecutionEngine {
     while (remaining >= snapshot.perpetual.minOrderQty && attempt < 2 && this.now() < hedgeDeadline) {
       attempt += 1;
       this.assertExecutionLeaseHeld();
+      await prepareProviderMutation(client, "place_futures_order", execution, { orderLinkId: `${execution.orderLinkPrefix}p${attempt}` });
       const accepted = await client.placeOrder({
         category: "linear",
         symbol: this.marketProfile.venue.perpetualSymbol,
@@ -162,6 +166,7 @@ export class RwaNeutralHedgeExecutionEngine {
       await persist(state, execution);
       if (order.status === "PartiallyFilled" || order.status === "New") {
         this.assertExecutionLeaseHeld();
+        await prepareProviderMutation(client, "cancel_futures_order", execution, { providerOrderId: order.orderId });
         await client.cancelOrder("linear", order.orderId);
       }
       remaining = floorStep(Math.max(0, remaining - order.filledQuantityXaut), snapshot.perpetual.qtyStep);
@@ -173,6 +178,7 @@ export class RwaNeutralHedgeExecutionEngine {
       execution.state = "compensating";
       await persist(state, execution);
       this.assertExecutionLeaseHeld();
+      await prepareProviderMutation(client, "place_spot_order", execution, { orderLinkId: `${execution.orderLinkPrefix}x1` });
       const accepted = await client.placeOrder({
         category: "spot",
         symbol: this.marketProfile.venue.spotSymbol,
@@ -237,7 +243,11 @@ export class RwaNeutralHedgeExecutionEngine {
     await persistActivitySnapshot?.(attribution);
     assertPositionAttribution(attribution, trackedExposure, market.fetchedAt);
     this.assertExecutionLeaseHeld();
-    await client.cancelStrategyOrders(scope);
+    await client.cancelStrategyOrders(scope, {
+      strategyOrderPrefixes: trackedExposure.strategyOrderPrefixes,
+      since: trackedExposure.attributionSince,
+      continuity: trackedExposure.activityContinuity,
+    });
     this.assertExecutionLeaseHeld();
     const closableMarket = await client.readPreflightSnapshot();
     assertValidProviderSnapshot(closableMarket);
@@ -285,6 +295,7 @@ export class RwaNeutralHedgeExecutionEngine {
         remainingPerpetual = Math.max(0, remainingPerpetual - positionQuantity(order));
       },
       persistAcceptedOrder: persistProviderOrder,
+      trackedExposure,
     });
     if (spotResidual.tradable) await this.closeSide(client, {
       category: "spot",
@@ -303,6 +314,7 @@ export class RwaNeutralHedgeExecutionEngine {
         remainingSpot = Math.max(0, remainingSpot - positionQuantity(order));
       },
       persistAcceptedOrder: persistProviderOrder,
+      trackedExposure,
     });
     this.assertExecutionLeaseHeld();
     const confirmedPnl = await client.readStrategyPnl(scope, null);
@@ -350,6 +362,7 @@ export class RwaNeutralHedgeExecutionEngine {
     failureMessage: string;
     persistFill: (order: RwaProviderOrder) => Promise<void>;
     persistAcceptedOrder?: (category: "spot" | "linear", orderId: string) => Promise<void>;
+    trackedExposure: RwaTrackedStrategyExposure;
     },
   ) {
     let remaining = floorStep(input.quantity, input.qtyStep);
@@ -357,6 +370,12 @@ export class RwaNeutralHedgeExecutionEngine {
     while (remaining >= input.minOrderQty && attempt < 2 && this.now() < input.deadline) {
       attempt += 1;
       this.assertExecutionLeaseHeld();
+      await prepareTrackedProviderMutation(
+        client,
+        input.category === "spot" ? "place_spot_order" : "place_futures_order",
+        input.trackedExposure,
+        { orderLinkId: `${input.orderLinkPrefix}${attempt}` },
+      );
       const accepted = await client.placeOrder({
         category: input.category,
         symbol: input.symbol,
@@ -373,6 +392,12 @@ export class RwaNeutralHedgeExecutionEngine {
       if (order.filledQuantityXaut > 0) await input.persistFill(order);
       if (order.status === "PartiallyFilled" || order.status === "New") {
         this.assertExecutionLeaseHeld();
+        await prepareTrackedProviderMutation(
+          client,
+          input.category === "spot" ? "cancel_spot_order" : "cancel_futures_order",
+          input.trackedExposure,
+          { providerOrderId: order.orderId },
+        );
         await client.cancelOrder(input.category, order.orderId);
       }
       remaining = floorStep(Math.max(0, remaining - filledPositionQuantity), input.qtyStep);
@@ -396,6 +421,43 @@ export class RwaNeutralHedgeExecutionEngine {
     }
   }
 
+}
+
+async function prepareProviderMutation<TPermissions extends RwaVenuePermissions>(
+  client: RwaNeutralTradingClient<TPermissions, RwaProviderPreflightSnapshot<TPermissions>>,
+  mutation: Parameters<NonNullable<typeof client.prepareProviderMutation>>[0]["mutation"],
+  execution: RwaExecutionRecord,
+  identity: {
+    orderLinkId?: string;
+    providerOrderId?: string;
+    expectedLeverage?: 1 | 2 | 3;
+  },
+) {
+  await client.prepareProviderMutation?.({
+    mutation,
+    strategyOrderPrefixes: [execution.orderLinkPrefix],
+    since: execution.createdAt,
+    continuity: execution.activityContinuity,
+    ...identity,
+  });
+}
+
+async function prepareTrackedProviderMutation<TPermissions extends RwaVenuePermissions>(
+  client: RwaNeutralTradingClient<TPermissions, RwaProviderPreflightSnapshot<TPermissions>>,
+  mutation: Parameters<NonNullable<typeof client.prepareProviderMutation>>[0]["mutation"],
+  exposure: RwaTrackedStrategyExposure,
+  identity: {
+    orderLinkId?: string;
+    providerOrderId?: string;
+  },
+) {
+  await client.prepareProviderMutation?.({
+    mutation,
+    strategyOrderPrefixes: exposure.strategyOrderPrefixes,
+    since: exposure.attributionSince,
+    continuity: exposure.activityContinuity,
+    ...identity,
+  });
 }
 
 export function createNeutralExecutionRecord(input: {

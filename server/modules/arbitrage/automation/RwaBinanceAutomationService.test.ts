@@ -14,6 +14,7 @@ import {
   RwaBinanceAutomationService,
 } from "./RwaBinanceAutomationService";
 import { RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS } from "./RwaBinanceAutomationTypes";
+import { RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
 import type {
   RwaBinanceClient,
   RwaBinanceCredentials,
@@ -68,6 +69,46 @@ test("Binance connectivity smoke snapshot freshness accepts the exact boundary a
   assert.equal(isFreshConnectivitySmokeSnapshot(value, now), false);
   value.fetchedAt = Number.NaN;
   assert.equal(isFreshConnectivitySmokeSnapshot(value, now), false);
+});
+
+test("Binance development exclusive account cannot disable the real-client activity guard", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-development-guard-"));
+  try {
+    const client = new FakeBinanceClient();
+    const guards: unknown[] = [];
+    const keyProvider = new FakeCredentialKeyProvider();
+    const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+      userId: "user-a",
+      venue: "binance",
+      keyProvider,
+      credentialPath: join(directory, "credentials.json"),
+      statePath: join(directory, "state.json"),
+    });
+    const current = new RwaBinanceAutomationService(
+      store,
+      (_credentials, guard) => {
+        guards.push(guard);
+        return client;
+      },
+      () => now,
+      () => false,
+      client,
+      () => {},
+      () => false,
+    );
+    await current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await current.getCredentialStatus()).accountId!;
+    await current.updateConfig({
+      accountId,
+      accountIsolationMode: "development_exclusive_account",
+      globalExecutionEnabled: false,
+      strategyEnabled: false,
+    });
+    await current.previewAccountAssetAuthorization("xaut");
+    assert.ok(guards.at(-1), "private real-client construction must always receive an activity guard");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Binance asset authorization only reads XAUT state and local authorization persistence", async () => {
@@ -719,7 +760,7 @@ test("Binance fixed IP verification gates credential rotation and every new-risk
 
     client.setPermissions({ ipRestricted: false });
     await assert.rejects(
-      current.updateConfig({ accountId, globalExecutionEnabled: true }),
+      current.updateConfig({ accountId, accountIsolationMode: "dedicated_subaccount", globalExecutionEnabled: true }),
       permissionRejectedWithoutSecret,
     );
     await assert.rejects(
@@ -730,7 +771,12 @@ test("Binance fixed IP verification gates credential rotation and every new-risk
     assert.equal((await current.getConfig()).killSwitchActive, true);
 
     client.setPermissions({ ipRestricted: true });
-    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.updateConfig({
+      accountId,
+      accountIsolationMode: "dedicated_subaccount",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+    });
     await current.setKillSwitch(false, accountId);
     client.setPermissions({ ipRestricted: false });
     await assert.rejects(
@@ -786,7 +832,12 @@ test("Binance preflight remains read-only and execute establishes the whiteliste
     const accountId = (await current.getCredentialStatus()).accountId;
     assert.ok(accountId);
 
-    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.updateConfig({
+      accountId,
+      accountIsolationMode: "dedicated_subaccount",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+    });
     await current.setKillSwitch(false, accountId!);
 
     client.snapshot.fetchedAt = 1;
@@ -967,6 +1018,31 @@ test("Binance first provider mutation failure creates no orders or strategy expo
     assert.equal(pnl.legs.spot.quantityXaut, 0);
     assert.equal(pnl.legs.perpetual.quantityXaut, 0);
     assert.equal(pnl.openOrders.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance activity ambiguity stops without automatic cancel or close", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-activity-stop-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflight(opportunity(), accountId, "manual_entry");
+    client.activityFailure = new RwaBinanceProviderError(
+      "provider_activity_ambiguous",
+      "external activity",
+    );
+
+    const execution = await current.execute(executeInput(accountId, challenge, "binance:activity-stop:1"));
+    const config = await current.getConfig();
+    assert.equal(execution.state, "manual_intervention");
+    assert.equal(client.writeCount, 0);
+    assert.equal(client.cancelCount, 0);
+    assert.equal(config.globalExecutionEnabled, false);
+    assert.equal(config.strategyEnabled, false);
+    assert.equal(config.killSwitchActive, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -1351,7 +1427,12 @@ test("Binance rejects kill switches, account mismatch, unknown fields, and non-X
       current.preflight(opportunity(), accountId, "manual_entry"),
       (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "global_execution_disabled",
     );
-    await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+    await current.updateConfig({
+      accountId,
+      accountIsolationMode: "dedicated_subaccount",
+      globalExecutionEnabled: true,
+      strategyEnabled: true,
+    });
     await current.setKillSwitch(false, accountId);
     await assert.rejects(
       current.preflight(opportunity(), "binance:other-account", "manual_entry"),
@@ -2048,6 +2129,14 @@ for (const scenario of [
       const restored = (await harness.store.readState()).connectivitySmokes[0]!;
       assert.ok(["flat", "failed"].includes(restored.stage));
       assert.equal(client.cancelCount, 1);
+      const recoveryCancelPreparation = client.activityPreparations.find(
+        (item) => item.mutation === (category === "spot" ? "cancel_spot_order" : "cancel_futures_order")
+          && item.providerOrderId === acceptedOpening.orderId,
+      );
+      assert.ok(recoveryCancelPreparation);
+      assert.equal(recoveryCancelPreparation.orderLinkId, `${prefix}${category === "spot" ? "s1" : "p1"}`);
+      assert.deepEqual(recoveryCancelPreparation.strategyOrderPrefixes, [prefix]);
+      assert.equal(recoveryCancelPreparation.since, state.connectivitySmokes.at(-1)?.createdAt);
       assert.equal(
         client.placedRequests.filter((item) => item.orderLinkId === `${prefix}${category === "spot" ? "s1" : "p1"}`).length,
         1,
@@ -2394,7 +2483,12 @@ function serviceHarness(
 async function activate(current: RwaBinanceAutomationService) {
   await current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
   const accountId = (await current.getCredentialStatus()).accountId!;
-  await current.updateConfig({ accountId, globalExecutionEnabled: true, strategyEnabled: true });
+  await current.updateConfig({
+    accountId,
+    accountIsolationMode: "dedicated_subaccount",
+    globalExecutionEnabled: true,
+    strategyEnabled: true,
+  });
   await current.setKillSwitch(false, accountId);
   return accountId;
 }
@@ -2579,6 +2673,8 @@ class FakeBinanceClient implements RwaBinanceClient {
   attributionHook: () => void = () => {};
   assetOpenOrders: RwaAssetOrderReference[] = [];
   takeoverSnapshotHook: () => void = () => {};
+  activityFailure: Error | null = null;
+  readonly activityPreparations: Array<Parameters<NonNullable<RwaBinanceClient["prepareProviderMutation"]>>[0]> = [];
 
   constructor(input: {
     permissions?: RwaBinancePermissions;
@@ -2716,6 +2812,13 @@ class FakeBinanceClient implements RwaBinanceClient {
   async listAssetOpenOrders() {
     this.readCount += 1;
     return structuredClone(this.assetOpenOrders);
+  }
+
+  async prepareProviderMutation(
+    input: Parameters<NonNullable<RwaBinanceClient["prepareProviderMutation"]>>[0],
+  ) {
+    if (this.activityFailure) throw this.activityFailure;
+    this.activityPreparations.push(structuredClone(input));
   }
 
   async setPerpetualLeverage() {

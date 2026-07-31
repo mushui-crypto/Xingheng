@@ -504,6 +504,7 @@ test("rotating Binance credentials restores previous encrypted state when bindin
     const initialStatus = await harness.service.getCredentialStatus();
     await harness.service.updateConfig({
       accountId: initialStatus.accountId!,
+      accountIsolationMode: "dedicated_subaccount",
       globalExecutionEnabled: true,
       strategyEnabled: true,
     });

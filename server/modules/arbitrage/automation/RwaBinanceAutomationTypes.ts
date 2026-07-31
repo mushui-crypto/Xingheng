@@ -7,6 +7,7 @@ import type {
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
 import { XAUT_AUTOMATION_ASSET_PROFILE } from "./RwaAutomationAssetProfile";
+import type { RwaBinanceActivityGuard } from "./RwaBinanceActivityGuard";
 
 export const RWA_BINANCE_STRATEGY_ID = "binance-xaut-spot-perp-v1" as const;
 export const RWA_BINANCE_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -78,7 +79,11 @@ export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinanc
 };
 
 export type RwaBinanceClient = RwaNeutralTradingClient<RwaBinancePermissions, RwaBinancePreflightSnapshot> & {
+  readonly requiresProviderActivityStream?: true;
   readProductAvailability(): Promise<RwaBinanceProductAvailability>;
 };
 
-export type RwaBinanceClientFactory = (credentials: RwaBinanceCredentials) => RwaBinanceClient;
+export type RwaBinanceClientFactory = (
+  credentials: RwaBinanceCredentials,
+  activityGuard?: RwaBinanceActivityGuard,
+) => RwaBinanceClient;

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import test from "node:test";
 import { RwaBinanceMainnetClient, RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
-import { createUnmonitoredActivityContinuity } from "./RwaProviderActivityContinuity";
+import {
+  RwaBinanceActivityGuard,
+  RwaBinanceActivityUnsafeError,
+} from "./RwaBinanceActivityGuard";
+import {
+  createMonitoredActivityContinuity,
+  createUnmonitoredActivityContinuity,
+} from "./RwaProviderActivityContinuity";
 import {
   createNeutralExecutionRecord,
   RwaNeutralHedgeExecutionEngine,
@@ -562,11 +569,14 @@ test("Binance takeover snapshot proves a complete provider window and rejects fu
 
 test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders", async () => {
   const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
+  const guard = connectedGuard();
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     executionFetch(calls),
     () => 1_000,
     ["203.0.113.10"],
+    [],
+    guard,
   );
 
   await assert.rejects(
@@ -583,15 +593,19 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
   );
   assert.equal(calls.length, 0);
 
+  guard.issueCertificate({ mutation: "set_leverage", expectedLeverage: 1 });
   await client.setPerpetualLeverage(1);
+  guard.issueCertificate({ mutation: "place_spot_order", orderLinkId: "rwa-test-spot-1" });
   const spot = await client.placeOrder({
     category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.002,
     limitPrice: 4_130, reduceOnly: false, orderLinkId: "rwa-test-spot-1",
   });
+  guard.issueCertificate({ mutation: "place_futures_order", orderLinkId: "rwa-test-perp-1" });
   const perpetual = await client.placeOrder({
     category: "linear", symbol: "XAUTUSDT", side: "Sell", quantityXaut: 0.002,
     limitPrice: 4_128, reduceOnly: false, orderLinkId: "rwa-test-perp-1",
   });
+  guard.issueCertificate({ mutation: "place_spot_order", orderLinkId: "rwa-test-spot-large" });
   const largerThanLegacySmoke = await client.placeOrder({
     category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.2,
     limitPrice: 4_130, reduceOnly: false, orderLinkId: "rwa-test-spot-large",
@@ -609,6 +623,7 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
   assert.equal((await client.awaitOrder("linear", perpetual.orderId, 1_001)).status, "Filled");
   const recovered = await client.findOrderByClientOrderId("linear", "rwa-test-perp-1");
   assert.equal(recovered?.orderLinkId, "rwa-test-perp-1");
+  guard.issueCertificate({ mutation: "cancel_spot_order", providerOrderId: spot.orderId });
   await client.cancelOrder("spot", spot.orderId);
 
   const leverage = calls.find((item) => item.path === "/fapi/v1/leverage");
@@ -631,18 +646,115 @@ test("Binance writes enforce the XAUT IOC whitelist and map authoritative orders
   assert.equal(calls.some((item) => item.path === "/api/v3/order" && item.method === "DELETE"), true);
 });
 
-test("Binance strategy cancellation and PnL ignore non-strategy orders and fills", async () => {
+test("Binance real adapter performs zero writes without an activity guard certificate", async () => {
+  let calls = 0;
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async () => {
+      calls += 1;
+      return json({});
+    }) as typeof fetch,
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+
+  await assert.rejects(client.setPerpetualLeverage(1), providerError("provider_activity_unavailable"));
+  await assert.rejects(client.placeOrder({
+    category: "spot",
+    symbol: "XAUTUSDT",
+    side: "Buy",
+    quantityXaut: 0.002,
+    limitPrice: 4_130,
+    reduceOnly: false,
+    orderLinkId: "rwa-no-certificate",
+  }), providerError("provider_activity_unavailable"));
+  await assert.rejects(client.cancelOrder("spot", "10"), providerError("provider_activity_unavailable"));
+  assert.equal(calls, 0);
+});
+
+test("Binance account activity after certification invalidates the real adapter before its write", async () => {
+  let calls = 0;
+  const guard = connectedGuard();
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async () => {
+      calls += 1;
+      return json({});
+    }) as typeof fetch,
+    () => 1_000,
+    ["203.0.113.10"],
+    [],
+    guard,
+  );
+  guard.issueCertificate({ mutation: "place_spot_order", orderLinkId: "rwa-external-window" });
+  guard.observeAccountChange("spot", "spot_outboundAccountPosition", 1_001);
+
+  await assert.rejects(client.placeOrder({
+    category: "spot",
+    symbol: "XAUTUSDT",
+    side: "Buy",
+    quantityXaut: 0.002,
+    limitPrice: 4_130,
+    reduceOnly: false,
+    orderLinkId: "rwa-external-window",
+  }), (error: unknown) =>
+    error instanceof RwaBinanceActivityUnsafeError
+    && error.reason === "certificate_missing");
+  assert.equal(calls, 0);
+});
+
+test("Binance definitive leverage rejection revokes only its expectation and later external config blocks the next write", async () => {
+  const mutationCalls: string[] = [];
+  const guard = connectedGuard();
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    (async (input) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return json({ serverTime: 1_000 });
+      mutationCalls.push(url.pathname);
+      return json({ code: -2010, msg: "rejected" }, 400);
+    }) as typeof fetch,
+    () => 1_000,
+    ["203.0.113.10"],
+    [],
+    guard,
+  );
+  guard.issueCertificate({ mutation: "set_leverage", expectedLeverage: 1 });
+  await assert.rejects(client.setPerpetualLeverage(1), providerError("provider_rejected"));
+  assert.deepEqual(mutationCalls, ["/fapi/v1/leverage"]);
+
+  guard.observeAccountConfigUpdate("XAUTUSDT", 1);
+  const callsBeforeNextWrite = mutationCalls.length;
+  await assert.rejects(client.setPerpetualLeverage(1), (error: unknown) =>
+    error instanceof RwaBinanceActivityUnsafeError
+    && error.reason === "certificate_missing");
+  assert.equal(mutationCalls.length, callsBeforeNextWrite);
+});
+
+test("Binance strategy PnL ignores non-strategy activity and guarded cancellation refuses it", async () => {
   const calls: Array<{ path: string; method: string; params: URLSearchParams }> = [];
+  const guard = connectedGuard();
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     executionFetch(calls),
     () => 1_000,
     ["203.0.113.10"],
+    [],
+    guard,
   );
 
-  await client.cancelStrategyOrders("rwa-owned");
+  await assert.rejects(
+    client.prepareProviderMutation({
+      mutation: "cancel_spot_order",
+      strategyOrderPrefixes: ["rwa-owned"],
+      since: 1,
+      continuity: createMonitoredActivityContinuity(1, "rwa-owned"),
+      providerOrderId: "11",
+    }),
+    providerError("provider_activity_ambiguous"),
+  );
   const deletes = calls.filter((item) => item.method === "DELETE");
-  assert.deepEqual(deletes.map((item) => item.params.get("orderId")).sort(), ["11", "21"]);
+  assert.deepEqual(deletes, []);
 
   const pnl = await client.readStrategyPnl("rwa-owned", 1);
   assert.equal(pnl.legs.spot.quantityXaut, 0.002);
@@ -651,6 +763,13 @@ test("Binance strategy cancellation and PnL ignore non-strategy orders and fills
   assert.ok(pnl.openOrders.every((order) => order.orderLinkId.startsWith("rwa-owned")));
   assert.equal(JSON.stringify(pnl).includes("manual-order"), false);
 });
+
+function connectedGuard() {
+  const guard = new RwaBinanceActivityGuard(() => {}, () => 1_000);
+  guard.markConnected("spot");
+  guard.markConnected("futures");
+  return guard;
+}
 
 function executionFetch(calls: Array<{ path: string; method: string; params: URLSearchParams }>): typeof fetch {
   return async (input, init) => {
