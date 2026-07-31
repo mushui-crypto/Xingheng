@@ -56,6 +56,31 @@ test("rejects mutable, missing or crossed release image mappings", () => {
   }
 });
 
+test("requires a Web init reaper and an internal HTTP healthcheck", () => {
+  const mutations = [
+    (config) => { delete config.services.web.init; },
+    (config) => { config.services.web.init = false; },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- http://127.0.0.1/api/health | grep -q '\"production\"'";
+    },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- https://api:8787/api/health | grep -q '\"production\"'";
+    },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- --header 'Host: $DOMAIN' http://api:8787/api/health | grep -q '\"production\"'";
+    },
+  ];
+
+  for (const mutate of mutations) {
+    const config = fixture();
+    mutate(config);
+    assert.throws(() => validateProductionTopology(manifest, config));
+  }
+});
+
 function fixture() {
   const service = (image, extra = {}) => ({
     image,
@@ -86,6 +111,7 @@ function fixture() {
   api.healthcheck = healthcheck(false);
 
   const web = service(WEB, { DOMAIN: "app.example.com" });
+  web.init = true;
   web.volumes = mounts([
     ["volume", "caddy_data", "/data", false],
     ["volume", "caddy_config", "/config", false],
@@ -192,7 +218,7 @@ function fixture() {
 function healthcheck(web) {
   return {
     test: web
-      ? ["CMD-SHELL", "curl production 127.0.0.1/api/health"]
+      ? ["CMD-SHELL", "wget -qO- http://api:8787/api/health | grep -q '\"production\"'"]
       : ["CMD", "node", "-e", "cache-control production xingheng XINGHENG_EXPECTED_REVISION"],
     interval: "15s",
     timeout: "5s",

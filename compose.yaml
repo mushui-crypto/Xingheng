@@ -63,6 +63,7 @@ services:
   web:
     image: "${XINGHENG_WEB_IMAGE:?XINGHENG_WEB_IMAGE must come from the release manifest}"
     pull_policy: never
+    init: true
     environment:
       DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
       XINGHENG_DEPLOYMENT_ENVIRONMENT: production
@@ -80,7 +81,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          wget -qO- --header "Host: $$DOMAIN" http://127.0.0.1/api/health |
+          wget -qO- http://api:8787/api/health |
           grep -q '"production"'
       interval: 15s
       timeout: 5s

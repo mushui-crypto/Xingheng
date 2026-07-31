@@ -88,6 +88,9 @@ export function validateProductionTopology(manifest, production) {
   if (productionApi.environment?.DOMAIN !== productionDomain) {
     throw new Error("production domain boundary is invalid");
   }
+  if (productionWeb.init !== true) {
+    throw new Error("production Web init boundary is invalid");
+  }
   assertProductionIngressPorts(productionWeb);
   assertHealthcheck(productionApi, "production", "xingheng", false);
   assertHealthcheck(productionWeb, "production", "xingheng", true);
@@ -123,7 +126,11 @@ function assertHealthcheck(serviceValue, environment, project, web) {
     && command[0] === "CMD-SHELL"
     && typeof command[1] === "string"
     && command[1].includes(environment)
-    && command[1].includes("127.0.0.1/api/health");
+    && command[1].includes("http://api:8787/api/health")
+    && !command[1].includes("127.0.0.1")
+    && !command[1].includes("https://")
+    && !/\bhost\s*:/i.test(command[1])
+    && !/\bDOMAIN\b/.test(command[1]);
   if (
     !Array.isArray(command)
     || (web && !webCommandValid)
