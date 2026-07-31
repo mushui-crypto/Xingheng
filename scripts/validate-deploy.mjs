@@ -30,11 +30,6 @@ const firstReleaseActivator = read("scripts/activate-first-verified-release.sh")
 const firstReleaseVolumeMigration = read("scripts/first-release-volume-migration.mjs");
 const releaseManifestLoader = read("scripts/load-release-manifest.sh");
 const productionCompose = read("scripts/production-compose.sh");
-const realTestCompose = read("scripts/real-test-compose.sh");
-const standaloneRealTestCompose = read("scripts/real-test-standalone-compose.sh");
-const standaloneRealTestComposeConfig = read("compose.real-test-standalone.yaml");
-const realTestActivator = read("scripts/activate-real-test-release.sh");
-const realTestWebHealth = read("scripts/verify-real-test-web-health.sh");
 const composeEnvironmentVerifier = read("scripts/verify-compose-environment-file.mjs");
 const trustedDockerRuntime = read("scripts/trustedDockerRuntime.mjs");
 const trustedOperationLauncher = read("scripts/trusted-operation-launcher.mjs");
@@ -42,21 +37,13 @@ const trustedOperationPreamble = read("scripts/trusted-operation-preamble.sh");
 const trustedDockerCli = read("scripts/trusted-docker.mjs");
 const trustedReleaseCandidate = read("scripts/trustedReleaseCandidate.mjs");
 const trustedReleaseCandidateInstaller = read("scripts/install-trusted-release-candidate.mjs");
-const realTestCleanup = read("scripts/realTestCleanup.mjs");
-const cleanupTransactionStore = read("scripts/cleanupTransactionStore.mjs");
-const realTestCleanupWrapper = read("scripts/real-test-cleanup.sh");
-const realTestComposeConfig = read("compose.real-test.yaml");
-const realTestCaddy = read("deploy/Caddyfile.real-test");
-const standaloneRealTestCaddy = read("deploy/Caddyfile.real-test-standalone");
-const dualEnvironmentTopology = read("scripts/dualEnvironmentTopology.mjs");
-const dualEnvironmentRunbook = read("deploy/PRODUCTION_REAL_TEST_DUAL_ENVIRONMENT_RUNBOOK.md");
+const productionTopology = read("scripts/productionTopology.mjs");
 const deploymentReadme = read("deploy/README.md");
 const stepZeroChecklist = read("deploy/STEP_0_PRODUCTION_CHECKLIST.md");
 const releaseLifecycle = read("scripts/releaseLifecycleTransaction.mjs");
 const releaseRollback = read("scripts/rollback-release.sh");
 const providerIdentityPreflight = read("server/operations/RwaProviderIdentityPreflight.ts");
 const providerIdentityPreflightCli = read("server/operations/rwaProviderIdentityPreflightCli.ts");
-const providerIdentityReceipts = read("scripts/providerIdentityReceipts.mjs");
 const legacyBridge = read("scripts/legacyReleaseBridge.mjs");
 const legacyBridgeCli = read("scripts/legacy-release-bridge.mjs");
 const legacyBridgeWrapper = read("scripts/legacy-release-bridge.sh");
@@ -328,100 +315,16 @@ const assertions = [
     "release revision, image digests, and the final production Compose mapping must be verified around activation",
   ],
   [
-    realTestComposeConfig.includes("name: xingheng-real-test")
-      && productionCompose.includes('production "$@"')
-      && realTestCompose.includes('real-test "$@"')
-      && composeEnvironmentVerifier.includes('"xingheng-real-test"')
-      && composeEnvironmentVerifier.includes('"compose.real-test.yaml"')
-      && realTestCompose.includes("real-test Compose env file override is not allowed")
-      && !realTestComposeConfig.includes("\n    ports:")
-      && caddy.includes("real-test-web:80")
-      && realTestCaddy.includes("http://{$REAL_TEST_DOMAIN}")
-      && realTestCaddy.includes("reverse_proxy /api* api:8787"),
-    "production and real-test Compose identities and ingress routing must remain fixed",
-  ],
-  [
-    standaloneRealTestCompose.includes("real-test-standalone")
-      && standaloneRealTestCompose.includes("trusted-operation-launcher.mjs")
-      && standaloneRealTestComposeConfig.includes('"80:80"')
-      && standaloneRealTestComposeConfig.includes('"443:443"')
-      && standaloneRealTestComposeConfig.includes('"443:443/udp"')
-      && standaloneRealTestComposeConfig.includes("!reset null")
-      && standaloneRealTestComposeConfig.includes("Caddyfile.real-test-standalone")
-      && standaloneRealTestComposeConfig.includes("/usr/local/bin/verify-real-test-web-health")
-      && standaloneRealTestCaddy.includes("{$REAL_TEST_DOMAIN}")
-      && !standaloneRealTestCaddy.includes("http://")
-      && standaloneRealTestCaddy.includes("Strict-Transport-Security")
-      && dockerfile.includes("Caddyfile.real-test-standalone")
-      && dockerfile.includes("verify-real-test-web-health.sh")
-      && realTestWebHealth.includes("Cache-Control:")
-      && realTestWebHealth.includes('"deploymentEnvironment":"real-test"')
-      && realTestWebHealth.includes('"composeProject":"xingheng-real-test"')
-      && deploymentRevisionVerifier.includes("compose-real-test-standalone")
-      && deploymentRevisionVerifier.includes("healthStatus")
-      && deploymentRevisionVerifier.includes("runtime topology label mismatch")
-      && deploymentRevisionVerifier.includes("health status is starting")
-      && dualEnvironmentTopology.includes("validateStandaloneRealTestTopology")
-      && realTestActivator.includes("shared|standalone")
-      && realTestActivator.includes("containers-real-test")
-      && realTestActivator.includes("stop api web"),
-    "standalone real-test must use the trusted release chain and exclusive HTTPS ingress",
-  ],
-  [
-    deploymentRevision.includes("validateRealTestComposeConfig")
-      && deploymentRevisionVerifier.includes("dual-compose")
-      && deploymentRevisionVerifier.includes("containers-real-test")
-      && dualEnvironmentTopology.includes("provider account fingerprint is shared")
-      && dualEnvironmentTopology.includes("deployment service mount mapping is invalid")
-      && realTestComposeConfig.includes('RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"')
-      && realTestComposeConfig.includes("/run/xingheng-real-test/gcp-wif")
-      && compose.includes("/run/xingheng/gcp-wif"),
-    "dual-environment topology must reject domain, account, mount, and execution-gate crossings",
-  ],
-  [
-    releaseVolumeBoundaries.includes("REAL_TEST_VOLUME_BOUNDARIES")
-      && releaseVolumeBoundaries.includes("validateRealTestRuntimeMounts")
-      && releaseVolumeVerifier.includes('first === "real-test"')
-      && dualEnvironmentRunbook.includes("real-test runtime"),
-    "real-test live volumes must reuse the strict owner, filesystem, mount, and lock verifier",
-  ],
-  [
-    realTestCleanup.includes("REAL_TEST_RESET_VOLUMES")
-      && realTestCleanup.includes("PRODUCTION_PROTECTED_VOLUMES")
-      && realTestCleanup.includes("production evidence changed")
-      && realTestCleanup.includes("sqlite-backup")
-      && realTestCleanup.includes("rwa-automation-backup")
-      && realTestCleanup.includes('"down", "--remove-orphans"')
-      && realTestCleanup.includes('"ps", "-aq"')
-      && realTestCleanup.includes("restoreRealTest")
-      && realTestCleanup.includes("incident_restore_failed")
-      && realTestCleanup.includes("productionContainers")
-      && realTestCleanup.includes("trading.sqlite-wal")
-      && realTestCleanup.includes("treeEntries")
-      && realTestComposeConfig.includes("sqlite-verify:")
-      && realTestComposeConfig.includes("rwa-automation-verify:")
-      && realTestCleanup.includes("constants.O_NOFOLLOW")
-      && cleanupTransactionStore.includes("constants.O_EXCL")
-      && realTestCleanup.includes("fstatSync")
-      && cleanupTransactionStore.includes("fchmodSync")
-      && realTestCleanup.includes("strategy-backup")
-      && realTestCleanup.includes("publishRecoveryAudit")
-      && realTestCleanupWrapper.includes("trusted-operation-launcher.mjs")
-      && dualEnvironmentRunbook.includes("DELETE-XINGHENG-REAL-TEST-DATA")
-      && packageJson.includes('"test:dual-environment"'),
-    "real-test cleanup must be allowlisted, backed up, audited, and production-preserving",
-  ],
-  [
     packageJson.includes("rwa-provider-identity-preflight.js")
       && compose.includes("provider-identity-preflight:")
-      && realTestComposeConfig.includes("provider-identity-preflight:")
       && providerIdentityPreflight.includes("validateAccess()")
       && providerIdentityPreflight.includes("provider_identity_mismatch")
       && providerIdentityPreflight.includes('serverKillSwitch !== "true"')
       && providerIdentityPreflightCli.includes("providerIdentityPreflightErrorCategory")
-      && providerIdentityReceipts.includes("same authoritative provider account")
-      && dualEnvironmentRunbook.includes("field-pending"),
-    "provider identity isolation must use two read-only authoritative receipts and remain field-pending until现场 verification",
+      && productionTopology.includes("assertProviderIdentityPreflight")
+      && productionTopology.includes('"production"')
+      && productionTopology.includes('"xingheng"'),
+    "provider identity preflight must stay read-only and bound to production",
   ],
   [
     releaseActivator.includes("releaseLifecycleTransaction.mjs prepare")
@@ -507,8 +410,7 @@ const assertions = [
       && wifInstaller.includes("trusted-operation-preamble.sh")
       && trustedOperationLauncher.includes('"install-gcp-wif.sh"')
       && wifInstaller.includes('production) target="/run/xingheng/gcp-wif"')
-      && wifInstaller.includes('real-test) target="/run/xingheng-real-test/gcp-wif"')
-      && wifInstaller.includes("production|real-test")
+      && wifInstaller.includes("must be production")
       && activationPreflight.includes('serverKillSwitch() !== "true"')
       && activationPreflight.includes("credential_key_provider_unavailable"),
     "WIF installation and activation KMS health must use the frozen mTLS, tmpfs, ownership, and fail-closed boundaries",

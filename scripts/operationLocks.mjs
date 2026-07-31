@@ -19,14 +19,13 @@ import {
 export const OPERATION_LOCK_ORDER = Object.freeze([
   "release-global.lock",
   "production.lock",
-  "real-test.lock",
   "release-build.lock",
 ]);
 
 const PRODUCTION_LOCK_ROOT = "/run/lock/xingheng";
 
 export function acquireOperationLocks(environment, options = {}) {
-  if (!["production", "real-test", "release-build"].includes(environment)) {
+  if (!["production", "release-build"].includes(environment)) {
     throw new Error("operation lock environment is invalid");
   }
   const testMode = options.testMode === true;
@@ -39,9 +38,7 @@ export function acquireOperationLocks(environment, options = {}) {
     OPERATION_LOCK_ORDER[0],
     environment === "production"
       ? OPERATION_LOCK_ORDER[1]
-      : environment === "real-test"
-        ? OPERATION_LOCK_ORDER[2]
-        : OPERATION_LOCK_ORDER[3],
+      : OPERATION_LOCK_ORDER[2],
   ];
   const held = [];
   try {
@@ -72,9 +69,7 @@ export function inheritedOperationLocks(environment, source = process.env) {
     OPERATION_LOCK_ORDER[0],
     environment === "production"
       ? OPERATION_LOCK_ORDER[1]
-      : environment === "real-test"
-        ? OPERATION_LOCK_ORDER[2]
-        : OPERATION_LOCK_ORDER[3],
+      : OPERATION_LOCK_ORDER[2],
   ];
   const receipts = names.map((name, index) => {
     const fd = 3 + index;

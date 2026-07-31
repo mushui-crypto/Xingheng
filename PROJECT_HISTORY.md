@@ -16,7 +16,7 @@
 
 | 月份 | 主要内容 | 详细记录 |
 | --- | --- | --- |
-| 2026-07 | Paper 策略闭环、Hyperliquid Testnet 交易、安全与部署收口、RWA/XAUT 套利、Mainnet 小额烟测、正式与真实测试双环境 | [`docs/history/2026-07.md`](./docs/history/2026-07.md) |
+| 2026-07 | Paper 策略闭环、Hyperliquid Testnet 交易、安全与生产部署收口、RWA/XAUT 套利、Mainnet 小额烟测 | [`docs/history/2026-07.md`](./docs/history/2026-07.md) |
 
 2026 年 7 月归档由原《项目进度总览》完整迁移，保留当时的当前快照、阶段路线、治理约束、测试证据、发布记录和风险说明。
 
@@ -29,7 +29,7 @@
 - 7 月 18 日至 19 日：`/app/trade` Hyperliquid Testnet 的 P0/P1、安全门禁、持仓与会话体验完成多轮验收和生产部署。
 - 7 月 22 日至 23 日：公共套利看板、RWA/主流币市场聚合和多 venue 自动套利后端逐步完成验收。
 - 7 月 24 日至 26 日：KMS/WIF、TOTP、独立持久化与灾备、单实例租约、容量治理、XAUT 通用 profile、接管及自动退出完成安全收口；Binance Mainnet 小额烟测完成后重新关闭执行门禁。
-- 7 月 27 日：正式环境与真实测试环境完成隔离部署，运行同一 verified release。
+- 7 月 27 日：生产发布链路完成安全收口并运行 verified release。
 
 摘要只用于定位历史。发布哈希、测试数量、风险结论和当时的待办以月份归档原文为准。
 

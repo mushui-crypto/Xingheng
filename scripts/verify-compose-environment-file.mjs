@@ -23,28 +23,18 @@ import { inheritedOperationLocks } from "./operationLocks.mjs";
 
 const environment = process.argv[2];
 const composeArgs = process.argv.slice(3);
-if (!["production", "real-test", "real-test-standalone"].includes(environment) || composeArgs.length < 1) {
+if (environment !== "production" || composeArgs.length < 1) {
   console.error(
-    "usage: verify-compose-environment-file.mjs"
-    + " production|real-test|real-test-standalone COMPOSE_ARGS...",
+    "usage: verify-compose-environment-file.mjs production COMPOSE_ARGS...",
   );
   process.exit(2);
 }
 
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
-const targetEnvironment = environment === "production" ? "production" : "real-test";
-const composeFile = resolve(
-  repoRoot,
-  environment === "production" ? "compose.yaml" : "compose.real-test.yaml",
-);
-const standaloneComposeFile = environment === "real-test-standalone"
-  ? resolve(repoRoot, "compose.real-test-standalone.yaml")
-  : null;
-const project = environment === "production" ? "xingheng" : "xingheng-real-test";
-const expectedPath = resolve(
-  repoRoot,
-  environment === "production" ? ".env.production" : ".env.real-test",
-);
+const targetEnvironment = "production";
+const composeFile = resolve(repoRoot, "compose.yaml");
+const project = "xingheng";
+const expectedPath = resolve(repoRoot, ".env.production");
 
 try {
   if (process.getuid?.() === 0) {
@@ -54,9 +44,6 @@ try {
   }
   assertTrustedReleaseRoot(repoRoot, process.env);
   const composeDescriptor = openSecureReleaseFile(composeFile);
-  const standaloneComposeDescriptor = standaloneComposeFile === null
-    ? null
-    : openSecureReleaseFile(standaloneComposeFile);
   const frozenReleaseFiles = [
     secureReleaseFileReceipt(fileURLToPath(import.meta.url)),
     secureReleaseFileReceipt(resolve(repoRoot, "scripts/trustedDockerRuntime.mjs")),
@@ -177,21 +164,17 @@ try {
       const interpolationFdPath = `${descriptorRoot}/3`;
       const serviceFdPath = `${descriptorRoot}/4`;
       const composeFdPath = `${descriptorRoot}/6`;
-      const standaloneComposeFdPath = `${descriptorRoot}/7`;
       inheritedEnvironment.XINGHENG_COMPOSE_ENV_FD = serviceFdPath;
       console.error(
         `compose-env-receipt phase=validated environment=${environment}`
         + " interpolationFd=3 serviceFd=4"
         + ` dev=${opened.dev} ino=${opened.ino} size=${opened.size} sha256=${sha256}`,
       );
-      const composeFiles = standaloneComposeDescriptor === null
-        ? ["-f", composeFdPath]
-        : ["-f", composeFdPath, "-f", standaloneComposeFdPath];
       const result = spawnSync(
         trustedExecutableInvocation(trustedCompose, 5),
         [
           "--env-file", interpolationFdPath,
-          ...composeFiles,
+          "-f", composeFdPath,
           "-p", project,
           ...composeArgs,
         ],
@@ -200,14 +183,10 @@ try {
           stdio: [
             "inherit", "inherit", "inherit",
             fd, serviceFd, trustedCompose.fd, composeDescriptor.fd,
-            ...(standaloneComposeDescriptor === null ? [] : [standaloneComposeDescriptor.fd]),
           ],
         },
       );
       assertOpenReleaseFileUnchanged(composeDescriptor);
-      if (standaloneComposeDescriptor !== null) {
-        assertOpenReleaseFileUnchanged(standaloneComposeDescriptor);
-      }
       for (const receipt of frozenReleaseFiles) {
         assertReleaseFileReceiptUnchanged(receipt, secureReleaseFileReceipt(receipt.path));
       }
@@ -259,7 +238,6 @@ try {
   }
   } finally {
     closeSync(composeDescriptor.fd);
-    if (standaloneComposeDescriptor !== null) closeSync(standaloneComposeDescriptor.fd);
   }
 } catch (error) {
   console.error(error instanceof Error ? error.message : "Compose environment file verification failed");
@@ -378,15 +356,9 @@ function sha256Descriptor(fd, size) {
   }
 }
 
-function validateEnvironmentIdentity(targetEnvironment, entries) {
-  if (!entries.has("REAL_TEST_DOMAIN")) {
-    throw new Error("Compose environment file is missing REAL_TEST_DOMAIN");
-  }
-  if (targetEnvironment === "production" && !entries.has("DOMAIN")) {
+function validateEnvironmentIdentity(_targetEnvironment, entries) {
+  if (!entries.has("DOMAIN")) {
     throw new Error("Production Compose environment file is missing DOMAIN");
-  }
-  if (targetEnvironment === "real-test" && entries.has("DOMAIN")) {
-    throw new Error("Real-test Compose environment file contains production DOMAIN");
   }
 }
 
@@ -467,21 +439,24 @@ function validateComposeArguments(args, targetEnvironment) {
     if (!commandFound) commandFound = true;
     remaining.push(value);
   }
-  const allowedProfiles = targetEnvironment === "production"
-    ? new Set(["strategy-tools", "rwa-automation-ops", "sqlite-ops", "provider-identity-preflight"])
-    : new Set(["strategy-tools", "rwa-automation-ops", "real-test-cleanup", "provider-identity-preflight"]);
+  const allowedProfiles = new Set([
+    "strategy-tools",
+    "rwa-automation-ops",
+    "sqlite-ops",
+    "provider-identity-preflight",
+  ]);
   if (
     profiles.some((profile) => !allowedProfiles.has(profile))
     || new Set(profiles).size !== profiles.length
   ) {
     throw new Error(`${targetEnvironment} Compose profile set is not allowed`);
   }
-  if (!isAllowedComposeOperation(remaining, targetEnvironment, new Set(profiles))) {
+  if (!isAllowedComposeOperation(remaining, new Set(profiles))) {
     throw new Error(`${targetEnvironment} Compose operation is not allowed`);
   }
 }
 
-function isAllowedComposeOperation(args, environment, profiles) {
+function isAllowedComposeOperation(args, profiles) {
   if (sameArgs(args, ["config"]) || sameArgs(args, ["config", "--format", "json"])) return true;
   if (
     sameArgs(args, ["up", "-d", "api", "web"])
@@ -497,11 +472,6 @@ function isAllowedComposeOperation(args, environment, profiles) {
     return profiles.size === 0;
   }
   if (
-    environment === "real-test"
-    && sameArgs(args, ["down", "--remove-orphans"])
-    && profiles.size === 0
-  ) return true;
-  if (
     profiles.has("provider-identity-preflight")
     && profiles.size === 1
     && sameArgs(args, [
@@ -509,38 +479,32 @@ function isAllowedComposeOperation(args, environment, profiles) {
     ])
   ) return true;
   if (
-    environment === "production"
-    && profiles.has("sqlite-ops")
+    profiles.has("sqlite-ops")
     && profiles.size === 1
     && isProductionSqliteRestoreOperation(args)
   ) return true;
   if (
-    environment === "production"
-    && profiles.has("rwa-automation-ops")
+    profiles.has("rwa-automation-ops")
     && profiles.size === 1
     && sameArgs(args, ["run", "--rm", "--no-deps", "rwa-automation-backup"])
   ) return true;
   if (
-    environment === "production"
-    && profiles.size === 0
+    profiles.size === 0
     && sameArgs(args, [
       "run", "--rm", "--no-deps", "--entrypoint", "node", "api",
       "dist-server/operations/rwa-activation-preflight.js",
     ])
   ) return true;
   if (
-    environment === "production"
-    && profiles.size === 0
+    profiles.size === 0
     && isProductionSmokeOperation(args)
   ) return true;
   if (
-    environment === "production"
-    && profiles.size === 0
+    profiles.size === 0
     && sameArgs(args, ["exec", "-T", "api", "/app/scripts/sqlite-backup.sh"])
   ) return true;
   if (
-    environment === "production"
-    && profiles.has("strategy-tools")
+    profiles.has("strategy-tools")
     && profiles.size === 1
     && (
       sameArgs(args, ["run", "--rm", "strategy-history"])
@@ -551,26 +515,9 @@ function isAllowedComposeOperation(args, environment, profiles) {
     )
   ) return true;
   if (
-    environment === "production"
-    && profiles.has("rwa-automation-ops")
+    profiles.has("rwa-automation-ops")
     && profiles.size === 1
     && isProductionRwaRestoreOperation(args)
-  ) return true;
-  if (
-    environment === "real-test"
-    && profiles.has("real-test-cleanup")
-    && profiles.size === 1
-    && (
-      isRealTestSqliteOperation(args)
-      || isRealTestStrategyOperation(args)
-      || sameArgs(args, ["run", "--rm", "--no-deps", "volume-initialize"])
-    )
-  ) return true;
-  if (
-    environment === "real-test"
-    && profiles.has("rwa-automation-ops")
-    && profiles.size === 1
-    && isRealTestRwaOperation(args)
   ) return true;
   return false;
 }
@@ -603,50 +550,6 @@ function isProductionRwaRestoreOperation(args) {
   }
   return /^RWA_AUTOMATION_RESTORE_FILE=rwa-automation-[0-9]{8}T[0-9]{6}Z\.rwa\.enc\.json$/u.test(args[4])
     && args[5] === "rwa-automation-restore";
-}
-
-function isRealTestSqliteOperation(args) {
-  if (sameArgs(args, ["run", "--rm", "--no-deps", "sqlite-backup"])) return true;
-  if (
-    args.length === 7
-    && sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])
-    && /^REAL_TEST_SQLITE_BACKUP_FILE=trading-[0-9]{8}T[0-9]{6}Z\.sqlite$/u.test(args[4])
-    && args[5] === "sqlite-verify"
-    && args[6] === "verify"
-  ) return true;
-  if (
-    args.length === 7
-    && sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])
-    && /^REAL_TEST_SQLITE_BACKUP_FILE=trading-[0-9]{8}T[0-9]{6}Z\.sqlite$/u.test(args[4])
-    && args[5] === "sqlite-restore"
-    && args[6] === "restore"
-  ) return true;
-  return false;
-}
-
-function isRealTestStrategyOperation(args) {
-  if (sameArgs(args, ["run", "--rm", "--no-deps", "strategy-backup", "create"])) return true;
-  if (
-    args.length === 7
-    && sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])
-    && /^REAL_TEST_STRATEGY_BACKUP_FILE=strategy-[0-9]{8}T[0-9]{6}Z\.tar\.gz$/u.test(args[4])
-    && (
-      (args[5] === "strategy-verify" && args[6] === "verify")
-      || (args[5] === "strategy-restore" && args[6] === "restore")
-    )
-  ) return true;
-  return false;
-}
-
-function isRealTestRwaOperation(args) {
-  if (sameArgs(args, ["run", "--rm", "--no-deps", "rwa-automation-backup"])) return true;
-  if (
-    args.length === 6
-    && sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])
-    && /^RWA_AUTOMATION_RESTORE_FILE=rwa-automation-[0-9]{8}T[0-9]{6}Z\.rwa\.enc\.json$/u.test(args[4])
-    && ["rwa-automation-verify", "rwa-automation-restore"].includes(args[5])
-  ) return true;
-  return false;
 }
 
 function sameArgs(actual, expected) {

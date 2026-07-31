@@ -27,14 +27,9 @@ const productionIdentity = {
   deploymentEnvironment: "production" as const,
   composeProject: "xingheng" as const,
 };
-const realTestIdentity = {
-  deploymentEnvironment: "real-test" as const,
-  composeProject: "xingheng-real-test" as const,
-};
 
-test("health identity accepts only the two exact environment and Compose project pairs", () => {
+test("health identity accepts only the exact production environment and Compose project pair", () => {
   assert.deepEqual(parseRuntimeEnvironmentIdentity(productionIdentity), productionIdentity);
-  assert.deepEqual(parseRuntimeEnvironmentIdentity(realTestIdentity), realTestIdentity);
 });
 
 test("health identity fails closed for missing, unknown and mismatched fields", () => {
@@ -44,8 +39,8 @@ test("health identity fails closed for missing, unknown and mismatched fields", 
     { deploymentEnvironment: "production" },
     { composeProject: "xingheng" },
     { deploymentEnvironment: "development", composeProject: "development" },
-    { deploymentEnvironment: "production", composeProject: "xingheng-real-test" },
-    { deploymentEnvironment: "real-test", composeProject: "xingheng" },
+    { deploymentEnvironment: "production", composeProject: "other-project" },
+    { deploymentEnvironment: "staging", composeProject: "xingheng" },
     { deploymentEnvironment: "PRODUCTION", composeProject: "xingheng" },
   ];
 
@@ -64,14 +59,14 @@ test("runtime environment API reads no-store health identity without hostname in
   globalThis.fetch = async (input, init) => {
     requestedInput = input;
     requestedInit = init;
-    return new Response(JSON.stringify(realTestIdentity), {
+    return new Response(JSON.stringify(productionIdentity), {
       headers: { "Content-Type": "application/json" },
       status: 200,
     });
   };
 
   try {
-    assert.deepEqual(await fetchRuntimeEnvironmentIdentity(), realTestIdentity);
+    assert.deepEqual(await fetchRuntimeEnvironmentIdentity(), productionIdentity);
     assert.equal(requestedInput, "/api/health");
     assert.equal(requestedInit?.cache, "no-store");
     assert.equal(requestedInit?.credentials, "include");
@@ -97,10 +92,10 @@ test("first failure settles, retry verifies the scope and stale responses cannot
 
   await Promise.resolve();
   if (guard.isCurrent(retry)) {
-    state = { status: "verified", identity: realTestIdentity, message: null };
+    state = { status: "verified", identity: productionIdentity, message: null };
   }
   assert.equal(state.status, "verified");
-  assert.deepEqual(state.identity, realTestIdentity);
+  assert.deepEqual(state.identity, productionIdentity);
 
   const previousSession = guard.begin("user-a:no-admin");
   const nextSession = guard.begin("user-b:no-admin");
@@ -108,44 +103,32 @@ test("first failure settles, retry verifies the scope and stale responses cannot
   assert.equal(guard.isCurrent(nextSession), true);
 });
 
-test("rechecking retains a verified real-test label without treating it as operation-ready", () => {
+test("rechecking clears a verified identity without treating it as operation-ready", () => {
   const verified: RuntimeEnvironmentState = {
     status: "verified",
-    identity: realTestIdentity,
+    identity: productionIdentity,
     message: null,
   };
   const checking = beginRuntimeEnvironmentCheck(verified);
   assert.equal(checking.status, "checking");
-  assert.deepEqual(checking.identity, realTestIdentity);
+  assert.equal(checking.identity, null);
   assert.equal(runtimeEnvironmentAllowsSensitiveOperations(checking), false);
   assert.equal(runtimeEnvironmentAllowsSensitiveOperations(verified), true);
 
   const html = renderToStaticMarkup(
     <RuntimeEnvironmentStatusBarView onRetry={() => undefined} state={checking} />,
   );
-  assert.match(html, /真实测试环境/);
-  assert.match(html, /可能连接真实交易所/);
+  assert.equal(html, "");
 
   const failed = failRuntimeEnvironmentCheck(checking, "环境信息获取失败");
   const failedHtml = renderToStaticMarkup(
     <RuntimeEnvironmentStatusBarView onRetry={() => undefined} state={failed} />,
   );
-  assert.match(failedHtml, /真实测试环境 · 校验失败 · 可能连接真实交易所/);
+  assert.match(failedHtml, /环境信息校验失败/);
   assert.equal(runtimeEnvironmentAllowsSensitiveOperations(failed), false);
 });
 
-test("real-test status remains compact and production renders no test label", () => {
-  const realTestHtml = renderToStaticMarkup(
-    <RuntimeEnvironmentStatusBarView
-      onRetry={() => undefined}
-      state={{ status: "verified", identity: realTestIdentity, message: null }}
-    />,
-  );
-  assert.match(realTestHtml, /h-10 min-h-10 w-full min-w-0/);
-  assert.match(realTestHtml, /overflow-hidden/);
-  assert.match(realTestHtml, /min-w-0 truncate/);
-  assert.match(realTestHtml, /真实测试环境 · 可能连接真实交易所/);
-
+test("verified production renders no environment status bar", () => {
   const productionHtml = renderToStaticMarkup(
     <RuntimeEnvironmentStatusBarView
       onRetry={() => undefined}

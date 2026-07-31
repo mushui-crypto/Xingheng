@@ -19,23 +19,6 @@ const PRODUCTION_SERVICE_IMAGES = Object.freeze({
   "rwa-automation-backup": "api",
   "rwa-automation-restore": "api",
 });
-const REAL_TEST_SERVICE_IMAGES = Object.freeze({
-  api: "api",
-  web: "web",
-  "strategy-history": "strategyTools",
-  "sqlite-backup": "api",
-  "sqlite-restore": "api",
-  "sqlite-verify": "api",
-  "strategy-backup": "api",
-  "strategy-restore": "api",
-  "strategy-verify": "api",
-  "volume-initialize": "api",
-  "provider-identity-preflight": "api",
-  "rwa-automation-backup": "api",
-  "rwa-automation-restore": "api",
-  "rwa-automation-verify": "api",
-});
-
 export function assertFullRevision(value, field = "deployment revision") {
   if (typeof value !== "string" || !FULL_REVISION.test(value)) {
     throw new Error(`${field} must be a full lowercase Git commit`);
@@ -93,38 +76,18 @@ export function parseRevisionEnv(source) {
 }
 
 export function validateProductionComposeConfig(manifestValue, config) {
-  return validateComposeConfig(
-    manifestValue,
-    config,
-    "xingheng",
-    "production",
-    PRODUCTION_SERVICE_IMAGES,
-  );
-}
-
-export function validateRealTestComposeConfig(manifestValue, config) {
-  return validateComposeConfig(
-    manifestValue,
-    config,
-    "xingheng-real-test",
-    "real-test",
-    REAL_TEST_SERVICE_IMAGES,
-  );
-}
-
-function validateComposeConfig(manifestValue, config, project, environment, serviceImages) {
   const manifest = validateReleaseManifest(manifestValue);
   if (
     !config
     || typeof config !== "object"
     || Array.isArray(config)
-    || config.name !== project
-    || !hasExactKeys(config.services, Object.keys(serviceImages))
+    || config.name !== "xingheng"
+    || !hasExactKeys(config.services, Object.keys(PRODUCTION_SERVICE_IMAGES))
   ) {
-    throw new Error(`${environment} Compose topology is invalid`);
+    throw new Error("production Compose topology is invalid");
   }
 
-  for (const [serviceName, manifestKey] of Object.entries(serviceImages)) {
+  for (const [serviceName, manifestKey] of Object.entries(PRODUCTION_SERVICE_IMAGES)) {
     const service = config.services[serviceName];
     if (
       !service
@@ -137,10 +100,10 @@ function validateComposeConfig(manifestValue, config, project, environment, serv
       || typeof service.environment !== "object"
       || Array.isArray(service.environment)
       || service.environment.XINGHENG_EXPECTED_REVISION !== manifest.revision
-      || service.environment.XINGHENG_DEPLOYMENT_ENVIRONMENT !== environment
-      || service.environment.XINGHENG_COMPOSE_PROJECT !== project
+      || service.environment.XINGHENG_DEPLOYMENT_ENVIRONMENT !== "production"
+      || service.environment.XINGHENG_COMPOSE_PROJECT !== "xingheng"
     ) {
-      throw new Error(`${environment} Compose release mapping is invalid`);
+      throw new Error("production Compose release mapping is invalid");
     }
   }
 

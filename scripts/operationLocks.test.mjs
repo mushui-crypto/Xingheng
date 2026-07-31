@@ -15,18 +15,14 @@ test("operation locks enforce global then environment exclusion", (t) => {
   const root = join(parent, "locks");
   try {
     mkdirSync(root, { mode: 0o700 });
-    const first = acquireOperationLocks("real-test", { testMode: true, lockRoot: root });
+    const first = acquireOperationLocks("production", { testMode: true, lockRoot: root });
     try {
       assert.deepEqual(first.receipts.map((item) => item.path.split("/").at(-1)), [
         "release-global.lock",
-        "real-test.lock",
+        "production.lock",
       ]);
       assert.throws(
         () => acquireOperationLocks("production", { testMode: true, lockRoot: root }),
-        /already held/u,
-      );
-      assert.throws(
-        () => acquireOperationLocks("real-test", { testMode: true, lockRoot: root }),
         /already held/u,
       );
       assert.throws(
@@ -62,7 +58,7 @@ test("operation locks reject symlinked, hardlinked, or permissive objects", () =
       if (kind === "hardlink") linkSync(target, lock);
       if (kind === "mode") writeFileSync(lock, "", { mode: 0o666 });
       assert.throws(
-        () => acquireOperationLocks("real-test", { testMode: true, lockRoot: root }),
+        () => acquireOperationLocks("production", { testMode: true, lockRoot: root }),
       );
     } finally {
       rmSync(parent, { recursive: true, force: true });

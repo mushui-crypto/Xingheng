@@ -1,14 +1,9 @@
 import { requestJson } from "./httpClient";
 
-export type RuntimeEnvironmentIdentity =
-  | {
-      deploymentEnvironment: "production";
-      composeProject: "xingheng";
-    }
-  | {
-      deploymentEnvironment: "real-test";
-      composeProject: "xingheng-real-test";
-    };
+export type RuntimeEnvironmentIdentity = {
+  deploymentEnvironment: "production";
+  composeProject: "xingheng";
+};
 
 export class RuntimeEnvironmentValidationError extends Error {
   constructor() {
@@ -45,9 +40,5 @@ export function parseRuntimeEnvironmentIdentity(payload: unknown): RuntimeEnviro
   if (deploymentEnvironment === "production" && composeProject === "xingheng") {
     return { deploymentEnvironment, composeProject };
   }
-  if (deploymentEnvironment === "real-test" && composeProject === "xingheng-real-test") {
-    return { deploymentEnvironment, composeProject };
-  }
-
   throw new RuntimeEnvironmentValidationError();
 }

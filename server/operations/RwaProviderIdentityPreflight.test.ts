@@ -16,8 +16,8 @@ test("provider identity preflight binds authoritative access to stored metadata 
   let validateCount = 0;
   const receipt = await runRwaProviderIdentityPreflight({
     loadConfig: () => ({
-      deploymentEnvironment: "real-test",
-      composeProject: "xingheng-real-test",
+      deploymentEnvironment: "production",
+      composeProject: "xingheng",
     }),
     serverKillSwitch: () => "true",
     expectedRevision: () => REVISION,
@@ -39,7 +39,7 @@ test("provider identity preflight binds authoritative access to stored metadata 
   });
   assert.equal(loadCount, 1);
   assert.equal(validateCount, 1);
-  assert.equal(receipt.deploymentEnvironment, "real-test");
+  assert.equal(receipt.deploymentEnvironment, "production");
   assert.match(receipt.accountIdentitySha256, /^[a-f0-9]{64}$/u);
   assert.doesNotMatch(JSON.stringify(receipt), /fixture-user|fixture-key|fixture-secret|authoritative/u);
 });
@@ -102,7 +102,7 @@ test("invalid runtime identity is rejected before credential metadata is opened"
     }),
     () => ({
       deploymentEnvironment: "production",
-      composeProject: "xingheng-real-test",
+      composeProject: "other-project",
     }),
   ]) {
     let storeCreateCount = 0;

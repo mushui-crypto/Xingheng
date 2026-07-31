@@ -1,4 +1,4 @@
-import { AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
+import { AlertTriangle, RefreshCw } from "lucide-react";
 import type { ReactNode } from "react";
 import { Button } from "../../components/ui/Button";
 import { useRuntimeEnvironment } from "./RuntimeEnvironmentProvider";
@@ -20,21 +20,14 @@ export function RuntimeEnvironmentStatusBarView({
   state: RuntimeEnvironmentState;
 }) {
   if (state.status === "error") {
-    const retainedRealTest = state.identity?.deploymentEnvironment === "real-test";
     return (
       <div
         className="flex h-10 min-h-10 w-full min-w-0 items-center justify-center gap-2 overflow-hidden border-b border-red-400/25 bg-[#261014] px-3 text-[11px] font-semibold text-red-100 sm:text-xs"
         role="alert"
-        title={retainedRealTest
-          ? "真实测试环境，环境信息校验失败，可能连接真实交易所"
-          : "环境信息校验失败"}
+        title="环境信息校验失败"
       >
         <AlertTriangle aria-hidden="true" className="shrink-0" size={15} />
-        <span className="min-w-0 truncate">
-          {retainedRealTest
-            ? "真实测试环境 · 校验失败 · 可能连接真实交易所"
-            : "环境信息校验失败"}
-        </span>
+        <span className="min-w-0 truncate">环境信息校验失败</span>
         <button
           aria-label="重新获取环境信息"
           className="inline-flex h-8 min-h-8 w-8 shrink-0 items-center justify-center border border-red-200/35 text-red-50 transition hover:bg-red-200/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
@@ -48,20 +41,7 @@ export function RuntimeEnvironmentStatusBarView({
     );
   }
 
-  if (state.identity?.deploymentEnvironment !== "real-test") {
-    return null;
-  }
-
-  return (
-    <div
-      className="flex h-10 min-h-10 w-full min-w-0 items-center justify-center gap-2 overflow-hidden border-b border-amber-300/25 bg-[#211b0b] px-3 text-xs font-semibold text-amber-100"
-      role="status"
-      title="真实测试环境，可能连接真实交易所"
-    >
-      <ShieldAlert aria-hidden="true" className="shrink-0" size={15} />
-      <span className="min-w-0 truncate">真实测试环境 · 可能连接真实交易所</span>
-    </div>
-  );
+  return null;
 }
 
 export function SensitiveEnvironmentGate({ children }: { children: ReactNode }) {
@@ -112,5 +92,5 @@ export function SensitiveEnvironmentGateView({
 }
 
 export function hasRuntimeEnvironmentBar(state: RuntimeEnvironmentState) {
-  return state.status === "error" || state.identity?.deploymentEnvironment === "real-test";
+  return state.status === "error";
 }

@@ -7,8 +7,7 @@ source_dir="${2:-}"
 audience_file="${3:-}"
 case "$environment" in
   production) target="/run/xingheng/gcp-wif" ;;
-  real-test) target="/run/xingheng-real-test/gcp-wif" ;;
-  *) echo "WIF installation environment must be production or real-test" >&2; exit 2 ;;
+  *) echo "WIF installation environment must be production" >&2; exit 2 ;;
 esac
 if [ -n "${WIF_HOST_ROOT:-}" ]; then
   [ "${NODE_ENV:-}" = test ] || {
@@ -19,7 +18,7 @@ if [ -n "${WIF_HOST_ROOT:-}" ]; then
 fi
 
 [ -n "$source_dir" ] && [ -n "$audience_file" ] && [ "$#" -eq 3 ] || {
-  echo "usage: $0 production|real-test ROOT_ONLY_SOURCE_DIR ROOT_ONLY_AUDIENCE_FILE" >&2
+  echo "usage: $0 production ROOT_ONLY_SOURCE_DIR ROOT_ONLY_AUDIENCE_FILE" >&2
   exit 2
 }
 [ "$(id -u)" = 0 ] || {
@@ -40,7 +39,6 @@ node scripts/verify-gcp-wif-bundle.mjs source "$source_dir" "$audience_file"
 parent="$(dirname "$target")"
 if [ "${NODE_ENV:-}" != test ]; then
   expected_parent="/run/xingheng"
-  [ "$environment" = real-test ] && expected_parent="/run/xingheng-real-test"
   [ "$parent" = "$expected_parent" ] || {
     echo "WIF target parent is invalid" >&2
     exit 78

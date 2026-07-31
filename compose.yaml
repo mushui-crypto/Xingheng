@@ -65,7 +65,6 @@ services:
     pull_policy: never
     environment:
       DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
-      REAL_TEST_DOMAIN: "${REAL_TEST_DOMAIN:?REAL_TEST_DOMAIN is required for isolated real-test routing}"
       XINGHENG_DEPLOYMENT_ENVIRONMENT: production
       XINGHENG_COMPOSE_PROJECT: xingheng
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
