@@ -32,6 +32,7 @@ import {
   RwaAutomationBackupError,
   RwaAutomationBackupService,
   assertBackupFileName,
+  rwaAutomationBackupCreateFailureReceipt,
 } from "./RwaAutomationBackupService";
 import {
   RWA_AUTOMATION_CURRENT_POINTER,
@@ -301,6 +302,117 @@ test("snapshot rejects symlinks, unsafe modes, unknown SQLite/WIF-style entries,
   } finally {
     await fixture.cleanup();
   }
+});
+
+test("backup create failures expose exact non-sensitive stages without changing hard-fail categories", async () => {
+  const snapshotFixture = await createFixture();
+  try {
+    await writeSecure(join(snapshotFixture.active, "trading.sqlite"), "secret snapshot marker");
+    await assert.rejects(snapshotFixture.service.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "snapshot_content",
+        category: "backup_manifest_invalid",
+      });
+      assert.doesNotMatch(JSON.stringify(rwaAutomationBackupCreateFailureReceipt(error)), /secret snapshot marker/u);
+      return true;
+    });
+  } finally {
+    await snapshotFixture.cleanup();
+  }
+
+  const healthFixture = await createFixture();
+  try {
+    healthFixture.provider.failCategory = "credential_key_provider_unavailable";
+    await assert.rejects(healthFixture.service.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "kms_health",
+        category: "backup_key_unavailable",
+      });
+      return true;
+    });
+  } finally {
+    await healthFixture.cleanup();
+  }
+
+  const configurationFixture = await createFixture();
+  try {
+    Object.defineProperty(configurationFixture.provider, "configured", { value: false });
+    const unconfigured = new RwaAutomationBackupService(
+      configurationFixture.provider,
+      configurationFixture.options,
+    );
+    await assert.rejects(unconfigured.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "key_provider_config",
+        category: "backup_key_unavailable",
+      });
+      return true;
+    });
+  } finally {
+    await configurationFixture.cleanup();
+  }
+
+  const dataKeyFixture = await createFixture();
+  try {
+    dataKeyFixture.provider.createDataKey = async () => {
+      throw new Error("secret data key marker");
+    };
+    await assert.rejects(dataKeyFixture.service.createBackup(), (error: unknown) => {
+      const receipt = rwaAutomationBackupCreateFailureReceipt(error);
+      assert.deepEqual(receipt, {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "data_key_create",
+        category: "backup_failed",
+      });
+      assert.doesNotMatch(JSON.stringify(receipt), /secret data key marker/u);
+      return true;
+    });
+  } finally {
+    await dataKeyFixture.cleanup();
+  }
+
+  const publishFixture = await createFixture();
+  try {
+    const interrupted = new RwaAutomationBackupService(publishFixture.provider, {
+      ...publishFixture.options,
+      faultHook: (point) => {
+        if (point === "before_backup_publish") throw new Error("secret publish marker");
+      },
+    });
+    await assert.rejects(interrupted.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "backup_publish",
+        category: "backup_failed",
+      });
+      assert.doesNotMatch(JSON.stringify(rwaAutomationBackupCreateFailureReceipt(error)), /secret publish marker/u);
+      return true;
+    });
+    assert.deepEqual(await readdir(publishFixture.backupRoot), []);
+  } finally {
+    await publishFixture.cleanup();
+  }
+
+  assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(new Error("raw secret")), {
+    schemaVersion: 1,
+    operation: "create",
+    ok: false,
+    stage: "configuration",
+    category: "backup_failed",
+  });
 });
 
 test("takeover backup schema accepts legacy absence and rejects malformed, orphaned, or duplicate records", async () => {

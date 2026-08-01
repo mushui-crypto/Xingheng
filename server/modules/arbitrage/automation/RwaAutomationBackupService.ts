@@ -139,14 +139,59 @@ export type RwaAutomationBackupVerifyStage =
   | "backup_authentication"
   | "backup_content";
 
+export type RwaAutomationBackupCreateStage =
+  | "configuration"
+  | "data_layout"
+  | "backup_root"
+  | "snapshot_content"
+  | "key_provider_config"
+  | "kms_health"
+  | "data_key_create"
+  | "encryption"
+  | "backup_publish"
+  | "retention";
+
+export type RwaAutomationBackupCreateFailureReceipt = {
+  schemaVersion: 1;
+  operation: "create";
+  ok: false;
+  stage: RwaAutomationBackupCreateStage;
+  category: string;
+};
+
+const backupCreateReceiptCategories = new Set([
+  "backup_already_exists",
+  "backup_capacity_exceeded",
+  "backup_config_invalid",
+  "backup_failed",
+  "backup_key_unavailable",
+  "backup_manifest_invalid",
+  "backup_storage_invalid",
+]);
+
 export class RwaAutomationBackupError extends Error {
   constructor(
     readonly category: string,
     message: string,
     readonly verifyStage: RwaAutomationBackupVerifyStage | null = null,
+    readonly createStage: RwaAutomationBackupCreateStage | null = null,
   ) {
     super(message);
   }
+}
+
+export function rwaAutomationBackupCreateFailureReceipt(
+  error: unknown,
+  fallbackStage: RwaAutomationBackupCreateStage = "configuration",
+): RwaAutomationBackupCreateFailureReceipt {
+  const stage = error instanceof RwaAutomationBackupError && error.createStage !== null
+    ? error.createStage
+    : fallbackStage;
+  const category = error instanceof RwaAutomationBackupError
+    && backupCreateReceiptCategories.has(error.category)
+    ? error.category
+    : "backup_failed";
+  return { schemaVersion: 1, operation: "create", ok: false, stage, category };
 }
 
 export class RwaAutomationBackupService {
@@ -179,15 +224,18 @@ export class RwaAutomationBackupService {
   }
 
   async createBackup() {
+    let stage: RwaAutomationBackupCreateStage = "data_layout";
     try {
-      return await this.createBackupUnsafe();
+      return await this.createBackupUnsafe((nextStage) => { stage = nextStage; });
     } catch (error) {
-      throw asBackupError(error);
+      throw asBackupCreateError(error, stage);
     }
   }
 
-  private async createBackupUnsafe() {
+  private async createBackupUnsafe(setStage: (stage: RwaAutomationBackupCreateStage) => void) {
+    setStage("data_layout");
     const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
+    setStage("backup_root");
     await this.assertBackupRoot();
     const createdAt = new Date(Math.floor(this.now().getTime() / 1000) * 1000);
     const backupId = backupIdFromDate(createdAt);
@@ -197,6 +245,7 @@ export class RwaAutomationBackupService {
     if (await fileExists(destination)) {
       throw new RwaAutomationBackupError("backup_already_exists", "同一 UTC 秒的自动套利备份已存在。");
     }
+    setStage("snapshot_content");
     const plaintextSnapshot = await this.captureSnapshot(active, backupId, createdAt.getTime());
     this.faultHook?.("after_snapshot");
     const plaintext = Buffer.from(JSON.stringify(plaintextSnapshot), "utf8");
@@ -205,8 +254,13 @@ export class RwaAutomationBackupService {
       throw new RwaAutomationBackupError("backup_capacity_exceeded", "自动套利备份超过单快照容量上限。");
     }
     const context = backupContext(backupId);
+    setStage("key_provider_config");
+    this.assertKeyProviderConfigured();
+    setStage("kms_health");
     await this.assertKeyProviderHealthy(context);
+    setStage("data_key_create");
     const dataKey = await this.keyProvider.createDataKey(context).catch(throwBackupError);
+    setStage("encryption");
     const nonce = randomBytes(12);
     let ciphertext: Buffer | null = null;
     let published = false;
@@ -233,9 +287,11 @@ export class RwaAutomationBackupService {
         tag: cipher.getAuthTag().toString("base64url"),
       };
       envelope.wrapBindingTag = backupWrapBindingTag(dataKey.plaintextDek, envelope);
+      setStage("backup_publish");
       this.faultHook?.("before_backup_publish");
       await atomicWriteFile(destination, Buffer.from(`${JSON.stringify(envelope)}\n`, "utf8"), this.layoutOptions);
       published = true;
+      setStage("retention");
       await this.pruneBackups(fileName);
       return {
         fileName,
@@ -587,10 +643,13 @@ export class RwaAutomationBackupService {
     }
   }
 
-  private async assertKeyProviderHealthy(context: AutomationBackupKeyContext) {
+  private assertKeyProviderConfigured() {
     if (!this.keyProvider.configured) {
       throw new RwaAutomationBackupError("backup_key_unavailable", "自动套利备份密钥服务不可用。");
     }
+  }
+
+  private async assertKeyProviderHealthy(context: AutomationBackupKeyContext) {
     const health = await this.keyProvider.healthCheck(context).catch(throwBackupError);
     if (!health.ok) throw new RwaAutomationBackupError("backup_key_unavailable", "自动套利备份密钥服务不可用。");
   }
@@ -1563,6 +1622,20 @@ function capacityExceeded() {
 function asBackupError(error: unknown): RwaAutomationBackupError {
   if (error instanceof RwaAutomationBackupError) return error;
   return new RwaAutomationBackupError("backup_failed", "自动套利备份操作失败；未更改现有数据。");
+}
+
+function asBackupCreateError(
+  error: unknown,
+  stage: RwaAutomationBackupCreateStage,
+): RwaAutomationBackupError {
+  const normalized = asBackupError(error);
+  if (normalized.createStage !== null) return normalized;
+  return new RwaAutomationBackupError(
+    normalized.category,
+    normalized.message,
+    normalized.verifyStage,
+    stage,
+  );
 }
 
 function throwBackupError(error: unknown): never {

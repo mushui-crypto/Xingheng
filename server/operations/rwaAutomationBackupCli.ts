@@ -4,18 +4,19 @@ import {
   RwaAutomationBackupError,
   RwaAutomationBackupService,
   assertBackupFileName,
+  rwaAutomationBackupCreateFailureReceipt,
 } from "../modules/arbitrage/automation/RwaAutomationBackupService";
 import { RWA_AUTOMATION_DATA_ROOT } from "../modules/arbitrage/automation/RwaAutomationDataLayout";
 
 const operation = process.argv[2];
-const provider = new GcpKmsCredentialKeyProvider();
-const service = new RwaAutomationBackupService(provider, {
-  dataRoot: RWA_AUTOMATION_DATA_ROOT,
-  backupRoot: RWA_AUTOMATION_BACKUP_ROOT,
-  production: true,
-});
 
 try {
+  const provider = new GcpKmsCredentialKeyProvider();
+  const service = new RwaAutomationBackupService(provider, {
+    dataRoot: RWA_AUTOMATION_DATA_ROOT,
+    backupRoot: RWA_AUTOMATION_BACKUP_ROOT,
+    production: true,
+  });
   if (operation === "create") {
     const result = await service.createBackup();
     process.stdout.write(`${result.fileName}\n`);
@@ -36,7 +37,12 @@ try {
     throw new RwaAutomationBackupError("backup_operation_invalid", "自动套利备份操作无效。");
   }
 } catch (error) {
-  const category = error instanceof RwaAutomationBackupError ? error.category : "backup_failed";
-  process.stderr.write(`自动套利灾备操作失败（${category}）。\n`);
-  process.exitCode = 1;
+  if (operation === "create") {
+    process.stdout.write(`${JSON.stringify(rwaAutomationBackupCreateFailureReceipt(error))}\n`);
+    process.exitCode = 1;
+  } else {
+    const category = error instanceof RwaAutomationBackupError ? error.category : "backup_failed";
+    process.stderr.write(`自动套利灾备操作失败（${category}）。\n`);
+    process.exitCode = 1;
+  }
 }
