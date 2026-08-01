@@ -1,9 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  RWA_AUTOMATION_VERIFY_FAILURES,
   runRwaAutomationBackupVerify,
-  rwaAutomationBackupVerifyErrorCategory,
+  rwaAutomationBackupVerifyFailureReceipt,
 } from "./RwaAutomationBackupVerify";
+import {
+  RwaAutomationBackupError,
+  type RwaAutomationBackupVerifyStage,
+} from "../modules/arbitrage/automation/RwaAutomationBackupService";
 
 const NAME = "rwa-automation-20260731T120000Z.rwa.enc.json";
 
@@ -32,6 +37,33 @@ test("backup verify rejects paths, whitespace, control characters and extra suff
   }
 });
 
-test("unexpected backup verify failures expose only a stable category", () => {
-  assert.equal(rwaAutomationBackupVerifyErrorCategory(new Error("secret")), "backup_verify_failed");
+test("backup verify failures expose only an exact stable receipt", () => {
+  for (const [stage, category] of Object.entries(RWA_AUTOMATION_VERIFY_FAILURES)) {
+    if (stage === "container_receipt") continue;
+    assert.deepEqual(
+      rwaAutomationBackupVerifyFailureReceipt(new RwaAutomationBackupError(
+        category,
+        "secret must not escape",
+        stage as RwaAutomationBackupVerifyStage,
+      )),
+      {
+        schemaVersion: 1,
+        operation: "verify",
+        ok: false,
+        readOnly: true,
+        stage,
+        category,
+      },
+    );
+  }
+  const fallback = rwaAutomationBackupVerifyFailureReceipt(new Error("raw secret"));
+  assert.deepEqual(fallback, {
+    schemaVersion: 1,
+    operation: "verify",
+    ok: false,
+    readOnly: true,
+    stage: "container_receipt",
+    category: "docker_execution_unknown",
+  });
+  assert.doesNotMatch(JSON.stringify(fallback), /raw secret/u);
 });

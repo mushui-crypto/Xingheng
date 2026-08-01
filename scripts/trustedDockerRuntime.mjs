@@ -28,6 +28,17 @@ const PRODUCTION_TRUST_RECEIPT = "/etc/xingheng/trusted-operations.json";
 const PRODUCTION_RELEASE_ROOT = "/opt/xingheng-release/code";
 const MAX_CLIENT_BYTES = 256 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 64 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 4096;
+const CONTAINER_VERIFY_FAILURES = Object.freeze({
+  wif_identity: "wif_identity_invalid",
+  sts_exchange: "sts_exchange_failed",
+  kms_health: "kms_health_failed",
+  kms_decrypt: "kms_decrypt_failed",
+  backup_envelope: "backup_envelope_invalid",
+  backup_authentication: "backup_authentication_failed",
+  backup_content: "backup_content_invalid",
+  container_receipt: "docker_execution_unknown",
+});
 const SAFE_CHILD_KEYS = Object.freeze([
   "XINGHENG_REVISION",
   "XINGHENG_API_IMAGE",
@@ -309,13 +320,74 @@ export function execCandidateRwaVerifyDockerSync(args, contract, options = {}) {
       stdio: ["ignore", "pipe", "pipe", runtime.fd],
     });
     verifyTrustedDockerRuntime(runtime);
-    if (result.error || result.signal || result.status !== 0) {
-      throw new Error("candidate verify Docker command failed");
-    }
-    return result.stdout;
+    return validateCandidateRwaVerifyDockerResult(result);
   } finally {
     runtime.close();
   }
+}
+
+export class CandidateRwaVerifyDockerError extends Error {
+  constructor(readonlyFailure) {
+    super(readonlyFailure.category);
+    this.failure = Object.freeze({ ...readonlyFailure });
+  }
+}
+
+export function validateCandidateRwaVerifyDockerResult(result) {
+  if (
+    !result
+    || typeof result !== "object"
+    || typeof result.stdout !== "string"
+    || typeof result.stderr !== "string"
+    || result.error
+    || result.signal
+  ) throw dockerFailure("container_receipt", "docker_execution_unknown");
+  if (result.status === 0) {
+    if (result.stderr !== "") {
+      throw dockerFailure("container_receipt", "container_receipt_invalid");
+    }
+    return result.stdout;
+  }
+  if (result.status !== 1 || result.stdout !== "") {
+    throw dockerFailure("container_receipt", "docker_execution_unknown");
+  }
+  const failure = parseContainerVerifyFailure(result.stderr);
+  if (failure === null) {
+    throw dockerFailure("container_receipt", "docker_execution_unknown");
+  }
+  throw new CandidateRwaVerifyDockerError(failure);
+}
+
+function parseContainerVerifyFailure(output) {
+  if (
+    typeof output !== "string"
+    || Buffer.byteLength(output, "utf8") > MAX_DIAGNOSTIC_BYTES
+    || !output.endsWith("\n")
+    || output.slice(0, -1).includes("\n")
+  ) return null;
+  try {
+    const value = JSON.parse(output);
+    if (
+      !value
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== [
+        "category", "ok", "operation", "readOnly", "schemaVersion", "stage",
+      ].sort().join(",")
+      || value.schemaVersion !== 1
+      || value.operation !== "verify"
+      || value.ok !== false
+      || value.readOnly !== true
+      || CONTAINER_VERIFY_FAILURES[value.stage] !== value.category
+    ) return null;
+    return Object.freeze({ stage: value.stage, category: value.category });
+  } catch {
+    return null;
+  }
+}
+
+function dockerFailure(stage, category) {
+  return new CandidateRwaVerifyDockerError({ stage, category });
 }
 
 function validateCandidateRwaVerifyContract(contract) {

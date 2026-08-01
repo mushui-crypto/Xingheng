@@ -11,6 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  candidateRwaVerifyFailureReceipt,
   candidateVerifyDockerArguments,
   parseEnvironmentEntries,
   readCandidateIdentity,
@@ -20,6 +21,10 @@ import {
   validateCandidateApiInspection,
   validateContainerReceipt,
 } from "./candidateRwaAutomationVerify.mjs";
+import {
+  CandidateRwaVerifyDockerError,
+  validateCandidateRwaVerifyDockerResult,
+} from "./trustedDockerRuntime.mjs";
 import {
   captureTrustedCandidateTree,
   releaseCandidatePaths,
@@ -110,7 +115,38 @@ test("candidate verifier fails closed on identity drift and raw output injection
           })}\n`;
         },
       }),
-      /candidate_identity_invalid/u,
+      /candidate_identity_drift/u,
+    );
+    reads = 0;
+    assert.throws(
+      () => runCandidateRwaAutomationVerify(BACKUP, {
+        candidateRoot: `/opt/xingheng-release/candidates/${REVISION}/code`,
+        candidateRevision: REVISION,
+        readCandidateIdentity: () => candidateIdentity(),
+        readProductionIdentity: () => ({
+          ...productionIdentity(),
+          envSha256: reads++ === 0 ? "9".repeat(64) : "a".repeat(64),
+        }),
+        execDocker: successfulDocker,
+      }),
+      /production_identity_drift/u,
+    );
+    let inspections = 0;
+    assert.throws(
+      () => runCandidateRwaAutomationVerify(BACKUP, {
+        candidateRoot: `/opt/xingheng-release/candidates/${REVISION}/code`,
+        candidateRevision: REVISION,
+        readCandidateIdentity: () => candidateIdentity(),
+        readProductionIdentity: () => productionIdentity(),
+        execDocker(args, contract) {
+          if (args[0] !== "image") return `${JSON.stringify(validContainerReceipt())}\n`;
+          inspections += 1;
+          return inspections === 1
+            ? `${imageInspection(contract)}\n`
+            : `${JSON.stringify({ ...JSON.parse(imageInspection(contract)), Id: `sha256:${"f".repeat(64)}` })}\n`;
+        },
+      }),
+      /docker_identity_drift/u,
     );
     assert.throws(
       () => validateContainerReceipt(
@@ -124,6 +160,145 @@ test("candidate verifier fails closed on identity drift and raw output injection
       /output is invalid/u,
     );
   });
+});
+
+test("candidate verifier preserves stable child stages and separates receipt failures", () => {
+  withOperationEnvironment(() => {
+    const dependencies = {
+      candidateRoot: `/opt/xingheng-release/candidates/${REVISION}/code`,
+      candidateRevision: REVISION,
+      readCandidateIdentity: () => candidateIdentity(),
+      readProductionIdentity: () => productionIdentity(),
+    };
+    for (const [stage, category] of [
+      ["wif_identity", "wif_identity_invalid"],
+      ["sts_exchange", "sts_exchange_failed"],
+      ["kms_health", "kms_health_failed"],
+      ["kms_decrypt", "kms_decrypt_failed"],
+      ["backup_envelope", "backup_envelope_invalid"],
+      ["backup_authentication", "backup_authentication_failed"],
+      ["backup_content", "backup_content_invalid"],
+      ["container_receipt", "docker_execution_unknown"],
+    ]) {
+      assert.throws(
+        () => runCandidateRwaAutomationVerify(BACKUP, {
+          ...dependencies,
+          execDocker(args, contract) {
+            if (args[0] === "image") return `${imageInspection(contract)}\n`;
+            throw new CandidateRwaVerifyDockerError({ stage, category });
+          },
+        }),
+        (error) => error.stage === stage && error.category === category,
+      );
+    }
+    assert.throws(
+      () => runCandidateRwaAutomationVerify(BACKUP, {
+        ...dependencies,
+        execDocker(args, contract) {
+          if (args[0] === "image") return `${imageInspection(contract)}\n`;
+          return `${JSON.stringify({ ...validContainerReceipt(), secret: "must-not-pass" })}\n`;
+        },
+      }),
+      (error) => error.stage === "container_receipt"
+        && error.category === "container_receipt_invalid",
+    );
+  });
+});
+
+test("Docker result parser accepts only exact stable failure receipts", () => {
+  const failure = {
+    schemaVersion: 1,
+    operation: "verify",
+    ok: false,
+    readOnly: true,
+    stage: "kms_decrypt",
+    category: "kms_decrypt_failed",
+  };
+  assert.throws(
+    () => validateCandidateRwaVerifyDockerResult({
+      status: 1,
+      signal: null,
+      error: undefined,
+      stdout: "",
+      stderr: `${JSON.stringify(failure)}\n`,
+    }),
+    (error) => error instanceof CandidateRwaVerifyDockerError
+      && error.failure.stage === "kms_decrypt"
+      && error.failure.category === "kms_decrypt_failed",
+  );
+  assert.throws(
+    () => validateCandidateRwaVerifyDockerResult({
+      status: 1,
+      signal: null,
+      error: undefined,
+      stdout: "",
+      stderr: `${JSON.stringify({
+        ...failure,
+        stage: "container_receipt",
+        category: "docker_execution_unknown",
+      })}\n`,
+    }),
+    (error) => error instanceof CandidateRwaVerifyDockerError
+      && error.failure.stage === "container_receipt"
+      && error.failure.category === "docker_execution_unknown",
+  );
+  assert.equal(validateCandidateRwaVerifyDockerResult({
+    status: 0,
+    signal: null,
+    error: undefined,
+    stdout: "success receipt\n",
+    stderr: "",
+  }), "success receipt\n");
+  for (const result of [
+    { status: 1, stdout: "secret", stderr: `${JSON.stringify(failure)}\n` },
+    { status: 1, stdout: "", stderr: `${JSON.stringify({ ...failure, secret: true })}\n` },
+    { status: 1, stdout: "", stderr: `${JSON.stringify(failure)}\nraw secret\n` },
+    { status: 1, stdout: "", stderr: "x".repeat(4097) },
+    { status: 2, stdout: "", stderr: `${JSON.stringify(failure)}\n` },
+    { status: undefined, stdout: "", stderr: `${JSON.stringify(failure)}\n` },
+  ]) {
+    assert.throws(
+      () => validateCandidateRwaVerifyDockerResult({
+        signal: null,
+        error: undefined,
+        ...result,
+      }),
+      (error) => error instanceof CandidateRwaVerifyDockerError
+        && error.failure.stage === "container_receipt"
+        && error.failure.category === "docker_execution_unknown"
+        && !JSON.stringify(error).includes("raw secret"),
+    );
+  }
+  assert.throws(
+    () => validateCandidateRwaVerifyDockerResult({
+      status: 0,
+      signal: null,
+      error: undefined,
+      stdout: "success receipt\n",
+      stderr: "warning",
+    }),
+    (error) => error instanceof CandidateRwaVerifyDockerError
+      && error.failure.category === "container_receipt_invalid",
+  );
+});
+
+test("host failure receipt is exact and excludes raw causes", () => {
+  const failure = new Error("raw token and audience must not escape");
+  failure.stage = "sts_exchange";
+  failure.category = "sts_exchange_failed";
+  const receipt = candidateRwaVerifyFailureReceipt(failure);
+  assert.deepEqual(receipt, {
+    schemaVersion: 1,
+    operation: "candidate-rwa-backup-verify",
+    ok: false,
+    readOnly: true,
+    stage: "sts_exchange",
+    category: "sts_exchange_failed",
+  });
+  assert.deepEqual(Object.keys(receipt).sort(), [
+    "category", "ok", "operation", "readOnly", "schemaVersion", "stage",
+  ].sort());
+  assert.doesNotMatch(JSON.stringify(receipt), /token|audience/u);
 });
 
 test("image and container receipts reject tag, revision, schema and basename drift", () => {
@@ -326,6 +501,11 @@ function validContainerReceipt() {
     plaintextBytes: 1,
     readOnly: true,
   };
+}
+
+function successfulDocker(args, contract) {
+  if (args[0] === "image") return `${imageInspection(contract)}\n`;
+  return `${JSON.stringify(validContainerReceipt())}\n`;
 }
 
 function productionEnvironment() {

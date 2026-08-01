@@ -65,6 +65,7 @@ export interface CredentialKeyProvider {
   createDataKey(context: CredentialKeyContext): Promise<CreatedCredentialDataKey>;
   unwrapDataKey(input: WrappedCredentialDataKey, context: CredentialKeyContext): Promise<Buffer>;
   rewrapDataKey(input: WrappedCredentialDataKey, context: CredentialKeyContext): Promise<WrappedCredentialDataKey>;
+  authenticationHealthCheck(): Promise<CredentialKeyProviderHealth>;
   healthCheck(context: CredentialKeyContext): Promise<CredentialKeyProviderHealth>;
 }
 

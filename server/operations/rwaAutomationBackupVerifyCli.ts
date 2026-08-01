@@ -5,7 +5,7 @@ import {
 } from "../modules/arbitrage/automation/RwaAutomationBackupService";
 import {
   runRwaAutomationBackupVerify,
-  rwaAutomationBackupVerifyErrorCategory,
+  rwaAutomationBackupVerifyFailureReceipt,
 } from "./RwaAutomationBackupVerify";
 
 try {
@@ -17,6 +17,6 @@ try {
   const receipt = await runRwaAutomationBackupVerify(fileName, (name) => service.verifyBackup(name));
   process.stdout.write(`${JSON.stringify(receipt)}\n`);
 } catch (error) {
-  process.stderr.write(`${rwaAutomationBackupVerifyErrorCategory(error)}\n`);
+  process.stderr.write(`${JSON.stringify(rwaAutomationBackupVerifyFailureReceipt(error))}\n`);
   process.exitCode = 1;
 }

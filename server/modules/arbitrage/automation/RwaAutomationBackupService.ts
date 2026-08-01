@@ -130,8 +130,21 @@ export type RwaAutomationBackupServiceOptions = RwaAutomationDataLayoutOptions &
   faultHook?: (point: "after_snapshot" | "before_backup_publish" | "before_pointer_swap" | "after_pointer_swap") => void;
 };
 
+export type RwaAutomationBackupVerifyStage =
+  | "wif_identity"
+  | "sts_exchange"
+  | "kms_health"
+  | "kms_decrypt"
+  | "backup_envelope"
+  | "backup_authentication"
+  | "backup_content";
+
 export class RwaAutomationBackupError extends Error {
-  constructor(readonly category: string, message: string) {
+  constructor(
+    readonly category: string,
+    message: string,
+    readonly verifyStage: RwaAutomationBackupVerifyStage | null = null,
+  ) {
     super(message);
   }
 }
@@ -254,6 +267,7 @@ export class RwaAutomationBackupService {
   }
 
   async verifyBackup(fileName: string) {
+    let envelope: BackupEnvelope;
     try {
       const match = assertBackupFileName(fileName);
       const backupStorageBytes = await this.assertBackupRoot();
@@ -265,16 +279,44 @@ export class RwaAutomationBackupService {
         maxEncryptedBackupBytes(this.limits.maxSnapshotBytes),
         this.layoutOptions,
       );
-      let envelope: BackupEnvelope;
       try {
         envelope = validateEnvelope(JSON.parse(encoded.toString("utf8")), match[1]!);
       } finally {
         encoded.fill(0);
       }
-      const context = backupContext(envelope.backupId);
-      await this.assertKeyProviderHealthy(context);
-      const dataKey = await this.keyProvider.unwrapDataKey(envelope, context).catch(throwBackupError);
-      let plaintext: Buffer | null = null;
+    } catch {
+      throw verifyFailure("backup_envelope", "backup_envelope_invalid");
+    }
+
+    const context = backupContext(envelope.backupId);
+    const authentication = await this.keyProvider.authenticationHealthCheck().catch(() => ({
+      ok: false,
+      category: "sts_exchange_failed",
+      message: null,
+    }));
+    if (!authentication.ok) {
+      if (authentication.category === "wif_identity_invalid") {
+        throw verifyFailure("wif_identity", "wif_identity_invalid");
+      }
+      throw verifyFailure("sts_exchange", "sts_exchange_failed");
+    }
+
+    const health = await this.keyProvider.healthCheck(context).catch(() => ({
+      ok: false,
+      category: "kms_health_failed",
+      message: null,
+    }));
+    if (!health.ok) throw verifyFailure("kms_health", "kms_health_failed");
+
+    let dataKey: Buffer;
+    try {
+      dataKey = await this.keyProvider.unwrapDataKey(envelope, context);
+    } catch {
+      throw verifyFailure("kms_decrypt", "kms_decrypt_failed");
+    }
+
+    let plaintext: Buffer | null = null;
+    try {
       try {
         assertBackupWrapBinding(dataKey, envelope);
         const decipher = createDecipheriv("aes-256-gcm", dataKey, Buffer.from(envelope.nonce, "base64url"));
@@ -284,6 +326,10 @@ export class RwaAutomationBackupService {
           decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
           decipher.final(),
         ]);
+      } catch {
+        throw verifyFailure("backup_authentication", "backup_authentication_failed");
+      }
+      try {
         if (plaintext.length > this.limits.maxSnapshotBytes) throw capacityExceeded();
         const snapshot = validatePlaintext(JSON.parse(plaintext.toString("utf8")), envelope);
         return {
@@ -292,12 +338,12 @@ export class RwaAutomationBackupService {
           fileCount: snapshot.manifest.files.length,
           plaintextBytes: snapshot.manifest.totalBytes,
         };
-      } finally {
-        plaintext?.fill(0);
-        dataKey.fill(0);
+      } catch {
+        throw verifyFailure("backup_content", "backup_content_invalid");
       }
-    } catch (error) {
-      throw safeRestoreError(error);
+    } finally {
+      plaintext?.fill(0);
+      dataKey.fill(0);
     }
   }
 
@@ -1504,6 +1550,10 @@ function invalidSnapshot() {
 
 function invalidEnvelope() {
   return new RwaAutomationBackupError("backup_envelope_invalid", "自动套利备份 envelope 无效。");
+}
+
+function verifyFailure(stage: RwaAutomationBackupVerifyStage, category: string) {
+  return new RwaAutomationBackupError(category, "自动套利备份只读验证失败。", stage);
 }
 
 function capacityExceeded() {

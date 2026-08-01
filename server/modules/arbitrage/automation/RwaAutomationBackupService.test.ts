@@ -120,6 +120,99 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
   }
 });
 
+test("read-only verification preserves exact stage classifications", async () => {
+  for (const [authenticationCategory, stage] of [
+    ["wif_identity_invalid", "wif_identity"],
+    ["sts_exchange_failed", "sts_exchange"],
+  ] as const) {
+    const fixture = await createFixture();
+    try {
+      const backup = await fixture.service.createBackup();
+      fixture.provider.authenticationFailCategory = authenticationCategory;
+      await assert.rejects(
+        fixture.service.verifyBackup(backup.fileName),
+        hasVerifyFailure(stage, authenticationCategory),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  const healthFixture = await createFixture();
+  try {
+    const backup = await healthFixture.service.createBackup();
+    healthFixture.provider.failCategory = "credential_key_provider_unavailable";
+    await assert.rejects(
+      healthFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("kms_health", "kms_health_failed"),
+    );
+  } finally {
+    await healthFixture.cleanup();
+  }
+
+  const decryptFixture = await createFixture();
+  try {
+    const backup = await decryptFixture.service.createBackup();
+    decryptFixture.provider.unwrapDataKey = async () => {
+      throw new Error("raw decrypt failure");
+    };
+    await assert.rejects(
+      decryptFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("kms_decrypt", "kms_decrypt_failed"),
+    );
+  } finally {
+    await decryptFixture.cleanup();
+  }
+
+  const envelopeFixture = await createFixture();
+  try {
+    const name = "rwa-automation-20260724T102031Z.rwa.enc.json";
+    await writeSecure(join(envelopeFixture.backupRoot, name), "{}");
+    await assert.rejects(
+      envelopeFixture.service.verifyBackup(name),
+      hasVerifyFailure("backup_envelope", "backup_envelope_invalid"),
+    );
+  } finally {
+    await envelopeFixture.cleanup();
+  }
+
+  const authenticationFixture = await createFixture();
+  try {
+    const backup = await authenticationFixture.service.createBackup();
+    const path = join(authenticationFixture.backupRoot, backup.fileName);
+    const envelope = JSON.parse(await readFile(path, "utf8"));
+    envelope.ciphertext = flipBase64url(envelope.ciphertext);
+    await writeSecure(path, JSON.stringify(envelope));
+    await assert.rejects(
+      authenticationFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("backup_authentication", "backup_authentication_failed"),
+    );
+  } finally {
+    await authenticationFixture.cleanup();
+  }
+
+  const contentFixture = await createFixture();
+  try {
+    const backup = await contentFixture.service.createBackup();
+    const contentName = "rwa-automation-20260724T102032Z.rwa.enc.json";
+    await rewriteEncryptedSnapshot(
+      contentFixture,
+      join(contentFixture.backupRoot, backup.fileName),
+      join(contentFixture.backupRoot, contentName),
+      contentName,
+      (snapshot) => {
+        snapshot.manifest.totalBytes += 1;
+      },
+    );
+    await assert.rejects(
+      contentFixture.service.verifyBackup(contentName),
+      hasVerifyFailure("backup_content", "backup_content_invalid"),
+    );
+  } finally {
+    await contentFixture.cleanup();
+  }
+});
+
 test("tampered ciphertext, wrong KMS key, AAD identity, manifest hash, and unsafe path all fail before the current pointer changes", async () => {
   const fixture = await createFixture();
   try {
@@ -1154,6 +1247,13 @@ function flipBase64url(value: string) {
 
 function hasCategory(category: string) {
   return (error: unknown) => error instanceof RwaAutomationBackupError && error.category === category;
+}
+
+function hasVerifyFailure(stage: string, category: string) {
+  return (error: unknown) => error instanceof RwaAutomationBackupError
+    && error.verifyStage === stage
+    && error.category === category
+    && !JSON.stringify(error).includes("raw decrypt failure");
 }
 
 function isBackupError() {

@@ -25,6 +25,7 @@ import {
 } from "./trustedReleaseCandidate.mjs";
 import {
   assertTrustedProductionReleaseRoot,
+  CandidateRwaVerifyDockerError,
   candidateRwaVerifyDockerArguments,
   execCandidateRwaVerifyDockerSync,
 } from "./trustedDockerRuntime.mjs";
@@ -36,6 +37,22 @@ const BACKUP_NAME = /^rwa-automation-([0-9]{8}T[0-9]{6}Z)\.rwa\.enc\.json$/u;
 const CANONICAL_WIF_AUDIENCE = /^\/\/iam\.googleapis\.com\/projects\/[1-9][0-9]{5,19}\/locations\/global\/workloadIdentityPools\/[a-z][a-z0-9-]{3,31}\/providers\/[a-z][a-z0-9-]{3,31}$/u;
 const MAX_JSON_BYTES = 64 * 1024;
 const MAX_ENV_BYTES = 1024 * 1024;
+const HOST_FAILURES = Object.freeze({
+  candidate_identity: Object.freeze(["candidate_identity_invalid"]),
+  production_identity: Object.freeze(["production_identity_invalid"]),
+  docker_identity: Object.freeze(["docker_identity_invalid"]),
+  wif_identity: Object.freeze(["wif_identity_invalid"]),
+  sts_exchange: Object.freeze(["sts_exchange_failed"]),
+  kms_health: Object.freeze(["kms_health_failed"]),
+  kms_decrypt: Object.freeze(["kms_decrypt_failed"]),
+  backup_envelope: Object.freeze(["backup_envelope_invalid"]),
+  backup_authentication: Object.freeze(["backup_authentication_failed"]),
+  backup_content: Object.freeze(["backup_content_invalid"]),
+  container_receipt: Object.freeze(["container_receipt_invalid", "docker_execution_unknown"]),
+  post_identity: Object.freeze([
+    "candidate_identity_drift", "production_identity_drift", "docker_identity_drift",
+  ]),
+});
 
 export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
   const candidateRoot = dependencies.candidateRoot
@@ -51,18 +68,18 @@ export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
   if (
     process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "candidate-verify"
     || basename(dirname(resolve(candidateRoot))) !== candidateRevision
-  ) throw categorized("candidate_identity_invalid");
+  ) throw categorized("candidate_identity", "candidate_identity_invalid");
   let candidate;
   try {
     candidate = candidateReader(candidateRoot, candidateRevision);
   } catch {
-    throw categorized("candidate_identity_invalid");
+    throw categorized("candidate_identity", "candidate_identity_invalid");
   }
   let production;
   try {
     production = productionReader();
   } catch {
-    throw categorized("production_identity_invalid");
+    throw categorized("production_identity", "production_identity_invalid");
   }
 
   const contract = Object.freeze({
@@ -81,17 +98,25 @@ export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
     );
     validateCandidateApiInspection(inspected, contract);
   } catch {
-    throw categorized("docker_identity_invalid");
+    throw categorized("docker_identity", "docker_identity_invalid");
   }
 
   let containerReceipt;
+  let output;
   try {
-    const output = docker(candidateVerifyDockerArguments(contract), contract, {
+    output = docker(candidateVerifyDockerArguments(contract), contract, {
       maxBuffer: MAX_JSON_BYTES,
     });
+  } catch (error) {
+    if (error instanceof CandidateRwaVerifyDockerError) {
+      throw categorized(error.failure.stage, error.failure.category);
+    }
+    throw categorized("container_receipt", "docker_execution_unknown");
+  }
+  try {
     containerReceipt = validateContainerReceipt(output, backupName);
   } catch {
-    throw categorized("backup_verify_failed");
+    throw categorized("container_receipt", "container_receipt_invalid");
   }
 
   try {
@@ -100,7 +125,7 @@ export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
       throw new Error("candidate identity changed");
     }
   } catch {
-    throw categorized("candidate_identity_invalid");
+    throw categorized("post_identity", "candidate_identity_drift");
   }
   try {
     const afterProduction = productionReader();
@@ -108,7 +133,7 @@ export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
       throw new Error("production identity changed");
     }
   } catch {
-    throw categorized("production_identity_invalid");
+    throw categorized("post_identity", "production_identity_drift");
   }
   try {
     const afterInspection = docker(
@@ -118,7 +143,7 @@ export function runCandidateRwaAutomationVerify(backupName, dependencies = {}) {
     );
     validateCandidateApiInspection(afterInspection, contract);
   } catch {
-    throw categorized("docker_identity_invalid");
+    throw categorized("post_identity", "docker_identity_drift");
   }
 
   return Object.freeze({
@@ -424,10 +449,31 @@ function identityJson(value) {
   return JSON.stringify(value);
 }
 
-function categorized(category) {
+function categorized(stage, category) {
   const error = new Error(category);
+  error.stage = stage;
   error.category = category;
   return error;
+}
+
+export function candidateRwaVerifyFailureReceipt(error) {
+  const stage = error?.stage;
+  const category = error?.category;
+  const allowed = HOST_FAILURES[stage];
+  if (!Array.isArray(allowed) || !allowed.includes(category)) {
+    return candidateRwaVerifyFailureReceipt(categorized(
+      "candidate_identity",
+      "candidate_identity_invalid",
+    ));
+  }
+  return {
+    schemaVersion: 1,
+    operation: "candidate-rwa-backup-verify",
+    ok: false,
+    readOnly: true,
+    stage,
+    category,
+  };
 }
 
 async function main() {
@@ -438,7 +484,9 @@ async function main() {
     || process.getuid?.() !== 0
     || process.getgid?.() !== 0
   ) {
-    process.stderr.write("input_invalid\n");
+    process.stdout.write(`${JSON.stringify(candidateRwaVerifyFailureReceipt(
+      categorized("candidate_identity", "candidate_identity_invalid"),
+    ))}\n`);
     process.exitCode = 1;
     return;
   }
@@ -447,14 +495,7 @@ async function main() {
     const receipt = runCandidateRwaAutomationVerify(backupName);
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
   } catch (error) {
-    const allowed = new Set([
-      "input_invalid",
-      "candidate_identity_invalid",
-      "production_identity_invalid",
-      "docker_identity_invalid",
-      "backup_verify_failed",
-    ]);
-    process.stderr.write(`${allowed.has(error?.category) ? error.category : "candidate_identity_invalid"}\n`);
+    process.stdout.write(`${JSON.stringify(candidateRwaVerifyFailureReceipt(error))}\n`);
     process.exitCode = 1;
   }
 }
