@@ -329,7 +329,7 @@ test("image and container receipts reject tag, revision, schema and basename dri
   ]) assert.throws(() => validateContainerReceipt(JSON.stringify(value), BACKUP));
 });
 
-test("production identity reads only canonical mappings and rejects duplicates or mismatch", () => {
+test("production identity treats manifest images as canonical and validates optional env images", () => {
   const root = mkdtempSync(join(tmpdir(), "xingheng-candidate-verify-"));
   try {
     const envPath = join(root, ".env.production");
@@ -344,8 +344,12 @@ test("production identity reads only canonical mappings and rejects duplicates o
         receiptSha256: "8".repeat(64),
       }),
     };
-    writeFixture(envPath, productionEnvironment(), 0o600);
     writeFixture(manifestPath, `${JSON.stringify(productionIdentity().manifest)}\n`, 0o444);
+
+    writeFixture(envPath, productionEnvironment({ includeImages: false }), 0o600);
+    assert.doesNotThrow(() => readProductionIdentity(options));
+
+    writeFixture(envPath, productionEnvironment(), 0o600);
     const identity = readProductionIdentity(options);
     assert.equal(identity.manifest.revision, PRODUCTION_REVISION);
     assert.equal(identity.wifAudience, AUDIENCE);
@@ -353,8 +357,21 @@ test("production identity reads only canonical mappings and rejects duplicates o
 
     writeFixture(envPath, `${productionEnvironment()}XINGHENG_REVISION=${PRODUCTION_REVISION}\n`, 0o600);
     assert.throws(() => readProductionIdentity(options), /assignment is invalid/u);
-    writeFixture(envPath, productionEnvironment().replace(API_DIGEST, WEB_DIGEST), 0o600);
-    assert.throws(() => readProductionIdentity(options), /image identity mismatch/u);
+    for (const name of [
+      "XINGHENG_API_IMAGE",
+      "XINGHENG_WEB_IMAGE",
+      "XINGHENG_STRATEGY_TOOLS_IMAGE",
+    ]) {
+      writeFixture(envPath, productionEnvironment({
+        imageOverrides: { [name]: `sha256:${"f".repeat(64)}` },
+      }), 0o600);
+      assert.throws(() => readProductionIdentity(options), /image identity mismatch/u);
+
+      writeFixture(envPath, productionEnvironment({
+        imageOverrides: { [name]: "sha256:not-a-digest" },
+      }), 0o600);
+      assert.throws(() => readProductionIdentity(options), /must be an immutable sha256 digest/u);
+    }
     for (const invalid of [
       "", "localhost", "127.0.0.1", "https://trade.stellarx.example",
       "trade.stellarx.example/path", "trade.stellarx.example:443", " trade.stellarx.example ",
@@ -508,12 +525,17 @@ function successfulDocker(args, contract) {
   return `${JSON.stringify(validContainerReceipt())}\n`;
 }
 
-function productionEnvironment() {
+function productionEnvironment({ includeImages = true, imageOverrides = {} } = {}) {
+  const imageEntries = [
+    ["XINGHENG_API_IMAGE", API_DIGEST],
+    ["XINGHENG_WEB_IMAGE", WEB_DIGEST],
+    ["XINGHENG_STRATEGY_TOOLS_IMAGE", STRATEGY_DIGEST],
+  ];
   return [
     `XINGHENG_REVISION=${PRODUCTION_REVISION}`,
-    `XINGHENG_API_IMAGE=${API_DIGEST}`,
-    `XINGHENG_WEB_IMAGE=${WEB_DIGEST}`,
-    `XINGHENG_STRATEGY_TOOLS_IMAGE=${STRATEGY_DIGEST}`,
+    ...(includeImages
+      ? imageEntries.map(([name, digest]) => `${name}=${imageOverrides[name] ?? digest}`)
+      : []),
     `RWA_GCP_WIF_AUDIENCE=${AUDIENCE}`,
     `DOMAIN=${DOMAIN}`,
     "ADMIN_PASSWORD=must-not-escape",

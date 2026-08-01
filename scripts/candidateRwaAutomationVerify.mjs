@@ -229,7 +229,8 @@ export function readProductionIdentity(options = {}) {
     throw new Error("production revision identity mismatch");
   }
   for (const [name, expected] of mappings) {
-    const value = requireEnvironment(entries, name);
+    const value = entries.get(name);
+    if (value === undefined) continue;
     assertImageDigest(value, `production ${name}`);
     if (value !== expected) throw new Error("production image identity mismatch");
   }
