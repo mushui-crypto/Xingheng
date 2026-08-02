@@ -231,6 +231,7 @@ services:
     pull_policy: never
     user: "20001:20001"
     environment:
+      DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
       NODE_ENV: production
       XINGHENG_DEPLOYMENT_ENVIRONMENT: production
       XINGHENG_COMPOSE_PROJECT: xingheng
