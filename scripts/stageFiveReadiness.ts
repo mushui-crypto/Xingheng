@@ -56,6 +56,21 @@ export class StageFiveReadinessError extends Error {
   }
 }
 
+const CAPITAL_TEST_GATE_STATUS = Object.freeze({
+  p2FreshRwaRollbackReadiness: "INCOMPLETE",
+  stsRestoreVerification: "BLOCKED",
+  rollbackEvidence: "INCOMPLETE",
+  riskAcceptance: "ACTIVE",
+  capitalTestPreparation: "READY",
+  capitalTestExecution: "BLOCKED_PENDING_AUTHORIZATION",
+  providerAccess: "NOT_AUTHORIZED",
+  realFunds: "NOT_AUTHORIZED",
+});
+
+export function capitalTestGateStatus() {
+  return CAPITAL_TEST_GATE_STATUS;
+}
+
 export function canonicalStageFiveDigest(value) {
   return canonicalDigest(value);
 }
@@ -226,7 +241,11 @@ export function validateZeroFundsReadiness(value) {
   falseValue(evidence.takeoverCreated, "takeover created");
   zero(evidence.providerMutations, "provider mutations");
   validateRuntimeSwitchesDisabled(evidence.runtimeSwitches);
-  return Object.freeze({ zeroFundsReadiness: "verified", nextStop: "gate_2_external_approval_required" });
+  return Object.freeze({
+    zeroFundsReadiness: "verified",
+    capitalTestGate: capitalTestGateStatus(),
+    nextStop: "gate_2_external_approval_required",
+  });
 }
 
 export function requireGateTwoExternalApproval() {

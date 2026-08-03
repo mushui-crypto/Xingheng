@@ -15,6 +15,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   StageFiveReadinessError,
+  capitalTestGateStatus,
   canonicalStageFiveDigest,
   requireGateOneExternalApproval,
   requireGateTwoExternalApproval,
@@ -84,6 +85,21 @@ test("backend preparation stays separate from overall stage-five acceptance", as
     revision: REVISION,
     overallStageFivePassed: false,
   });
+});
+
+test("capital-test risk acceptance unlocks preparation only", () => {
+  const status = capitalTestGateStatus();
+  assert.deepEqual(status, {
+    p2FreshRwaRollbackReadiness: "INCOMPLETE",
+    stsRestoreVerification: "BLOCKED",
+    rollbackEvidence: "INCOMPLETE",
+    riskAcceptance: "ACTIVE",
+    capitalTestPreparation: "READY",
+    capitalTestExecution: "BLOCKED_PENDING_AUTHORIZATION",
+    providerAccess: "NOT_AUTHORIZED",
+    realFunds: "NOT_AUTHORIZED",
+  });
+  assert.equal(Object.isFrozen(status), true);
 });
 
 test("offline backend coverage requires the full fake lifecycle and both venue fixtures", async () => {
@@ -156,7 +172,9 @@ test("post-approval release evidence requires exact revision, digest and Compose
 
 test("zero-funds readiness is Binance XAUT read-only and stops before Gate 2", async () => {
   const evidence = zeroFunds();
-  assert.equal(validateZeroFundsReadiness(evidence).nextStop, "gate_2_external_approval_required");
+  const result = validateZeroFundsReadiness(evidence);
+  assert.equal(result.nextStop, "gate_2_external_approval_required");
+  assert.equal(result.capitalTestGate, capitalTestGateStatus());
   await assertCategory(
     () => validateZeroFundsReadiness({ ...evidence, providerMutations: 1 }),
     "stage_five_evidence_invalid",
@@ -903,6 +921,7 @@ function releaseEvidence() {
     "strategy-tools": STRATEGY_IMAGE,
     "rwa-automation-backup": API_IMAGE,
     "rwa-automation-restore": API_IMAGE,
+    "rwa-automation-verify": API_IMAGE,
   };
   const manifest = releaseManifest();
   const service = (image) => ({
@@ -927,6 +946,7 @@ function releaseEvidence() {
         "provider-identity-preflight": service(API_IMAGE),
         "rwa-automation-backup": service(API_IMAGE),
         "rwa-automation-restore": service(API_IMAGE),
+        "rwa-automation-verify": service(API_IMAGE),
       },
     },
     components: Object.entries(componentDigest).map(([name, image]) => ({
