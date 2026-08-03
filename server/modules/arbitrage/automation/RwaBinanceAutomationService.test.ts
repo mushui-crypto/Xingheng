@@ -32,6 +32,7 @@ import {
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import {
   createRwaAssetTakeoverRecord,
+  type RwaAssetTakeoverPreview,
   type RwaAssetTakeoverRecord,
   type RwaAssetTakeoverProviderSnapshot,
 } from "./RwaAssetTakeover";
@@ -129,6 +130,8 @@ test("Binance production development account requires an exact permit confirmati
       permitId: "a".repeat(32),
       ownerUserId: userId,
       accountBindingSha256: binding,
+      actionScope: ["READ", "TRADE"] as const,
+      authorizationDigest: "1".repeat(64),
       approvedCapitalUsd: 30,
       expiresAt: now + 1_000,
       revision: "b".repeat(40),
@@ -166,8 +169,24 @@ test("Binance production development account requires an exact permit confirmati
     const confirmed = (await harness.store.readState()).config.productionSelfTestPermitConfirmation;
     assert.equal(confirmed?.digest, permit.digest);
     assert.equal(confirmed?.ownerUserId, userId);
+    assert.deepEqual(confirmed?.actionScope, ["READ", "TRADE"]);
+    assert.equal(confirmed?.authorizationDigest, permit.authorizationDigest);
     await harness.current.setKillSwitch(false, accountId);
     assert.equal(client.writeCount, 0);
+
+    const mismatchedState = await harness.store.readState();
+    mismatchedState.config.productionSelfTestPermitConfirmation = {
+      ...mismatchedState.config.productionSelfTestPermitConfirmation!,
+      authorizationDigest: "5".repeat(64),
+    };
+    await harness.store.writeState(mismatchedState);
+    await assert.rejects(
+      harness.current.preflight(opportunity(), accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "account_isolation_unconfirmed",
+    );
+    mismatchedState.config.productionSelfTestPermitConfirmation = confirmed;
+    await harness.store.writeState(mismatchedState);
 
     const expired = new RwaBinanceAutomationService(
       harness.store,
@@ -188,7 +207,7 @@ test("Binance production development account requires an exact permit confirmati
     await assert.rejects(
       expired.previewAssetTakeover({ assetId: "xaut", newCapitalUsd: 1, leverage: 2 }),
       (error: unknown) => error instanceof RwaNeutralExecutionError
-        && error.category === "account_isolation_unconfirmed",
+        && error.category === "production_self_test_permit_smoke_only",
     );
     assert.equal(client.writeCount, 0);
   } finally {
@@ -196,7 +215,7 @@ test("Binance production development account requires an exact permit confirmati
   }
 });
 
-test("Binance production self-test rechecks permit expiry before each new-risk mutation", async () => {
+test("Binance production self-test blocks ordinary execution before every provider mutation", async () => {
   for (const expiryPoint of ["before_first_mutation", "after_leverage"] as const) {
     const directory = await mkdtemp(join(tmpdir(), `xingheng-binance-permit-mutation-${expiryPoint}-`));
     try {
@@ -210,6 +229,8 @@ test("Binance production self-test rechecks permit expiry before each new-risk m
           client.access.accountId,
           client.access.accountFingerprint,
         ),
+        actionScope: ["READ", "TRADE"] as const,
+        authorizationDigest: "2".repeat(64),
         approvedCapitalUsd: 30,
         expiresAt: now + 1_000,
         revision: "f".repeat(40),
@@ -244,11 +265,14 @@ test("Binance production self-test rechecks permit expiry before each new-risk m
         client.leverageHook = () => { clock = permit.expiresAt; };
       }
 
-      const result = await harness.current.execute(
-        executeInput(accountId, challenge, `binance:permit-mutation:${expiryPoint}`),
+      await assert.rejects(
+        harness.current.execute(
+          executeInput(accountId, challenge, `binance:permit-mutation:${expiryPoint}`),
+        ),
+        (error: unknown) => error instanceof RwaNeutralExecutionError
+          && error.category === "production_self_test_permit_smoke_only",
       );
-      assert.ok(result.state === "failed" || result.state === "manual_intervention");
-      assert.equal(client.writeCount, expiryPoint === "before_first_mutation" ? 0 : 1);
+      assert.equal(client.writeCount, 0);
       assert.equal(client.placedRequests.length, 0);
     } finally {
       await rm(directory, { recursive: true, force: true });
@@ -268,6 +292,8 @@ test("Binance production self-test preserves generic takeover and aggregate capi
         client.access.accountId,
         client.access.accountFingerprint,
       ),
+      actionScope: ["READ", "TRADE"] as const,
+      authorizationDigest: "3".repeat(64),
       approvedCapitalUsd: 200,
       expiresAt: now + 10_000,
       revision: "d".repeat(40),
@@ -347,7 +373,7 @@ test("Binance production self-test preserves generic takeover and aggregate capi
     await assert.rejects(
       harness.current.previewAssetTakeover({ assetId: "xaut", newCapitalUsd: 100, leverage: 2 }),
       (error: unknown) => (error as { category?: string }).category
-        === "asset_takeover_risk_rejected",
+        === "production_self_test_permit_smoke_only",
     );
     await assert.rejects(
       harness.current.startAssetTakeover({
@@ -356,7 +382,7 @@ test("Binance production self-test preserves generic takeover and aggregate capi
         idempotencyKey: "selftest-takeover-over-cap",
       }),
       (error: unknown) => (error as { category?: string }).category
-        === "asset_takeover_risk_rejected",
+        === "production_self_test_permit_smoke_only",
     );
     assert.equal(client.writeCount, writesBefore);
   } finally {
@@ -1988,13 +2014,154 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
       harness.accountId,
       smokePolicyAcceptance,
     );
-    const result = await harness.current.executeConnectivitySmoke(
-      smokeExecuteInput(harness.accountId, challenge, "smoke:approved-capital:1"),
-    ) as any;
+    const executeRequest = smokeExecuteInput(
+      harness.accountId,
+      challenge,
+      "smoke:approved-capital:1",
+    );
+    const writes: Array<{ writeCount: number; smokeCount: number; consumptionCount: number }> = [];
+    const writeState = harness.store.writeState.bind(harness.store);
+    harness.store.writeState = async (state) => {
+      writes.push({
+        writeCount: harness.client.writeCount,
+        smokeCount: state.connectivitySmokes.length,
+        consumptionCount: state.productionSelfTestPermitConsumptions.length,
+      });
+      return writeState(state);
+    };
+    const result = await harness.current.executeConnectivitySmoke(executeRequest) as any;
     assert.equal(result.stage, "flat");
     assert.equal(result.budget.limitUsd, 30);
     assert.ok(result.budget.totalCapitalUsd <= 30);
     assert.equal(harness.client.writeCount, 4);
+    assert.deepEqual(writes[0], { writeCount: 0, smokeCount: 1, consumptionCount: 1 });
+    const state = await harness.store.readState();
+    assert.deepEqual(state.productionSelfTestPermitConsumptions, [{
+      permitId: "9".repeat(32),
+      digest: state.config.productionSelfTestPermitConfirmation?.digest,
+      consumedAt: now,
+    }]);
+
+    const idempotent = await harness.current.executeConnectivitySmoke(executeRequest) as any;
+    assert.equal(idempotent.smokeId, result.smokeId);
+    assert.equal(harness.client.writeCount, 4);
+    assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+
+    const nextChallenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    await assert.rejects(
+      harness.current.executeConnectivitySmoke(
+        smokeExecuteInput(harness.accountId, nextChallenge, "smoke:approved-capital:2"),
+      ),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "production_self_test_permit_consumed",
+    );
+    assert.equal(harness.client.writeCount, 4);
+    assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production smoke failure permanently consumes the permit without provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-consumed-failure-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30);
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    harness.client.snapshot.perpetual.leverage = 2;
+    const failed = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(harness.accountId, challenge, "smoke:consumed-failure:1"),
+    ) as any;
+    assert.equal(failed.stage, "failed");
+    assert.equal(failed.receipt, null);
+    assert.equal(harness.client.writeCount, 0);
+    assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+
+    harness.client.snapshot.perpetual.leverage = 1;
+    const nextChallenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    await assert.rejects(
+      harness.current.executeConnectivitySmoke(
+        smokeExecuteInput(harness.accountId, nextChallenge, "smoke:consumed-failure:2"),
+      ),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "production_self_test_permit_consumed",
+    );
+    assert.equal(harness.client.writeCount, 0);
+    assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production self-test Permit rejects every non-smoke new-risk entry before provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-permit-smoke-only-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30);
+    const challenge = await harness.current.preflight(
+      opportunity(),
+      harness.accountId,
+      "manual_entry",
+    );
+    const smokeOnly = (error: unknown) => error instanceof RwaNeutralExecutionError
+      && error.category === "production_self_test_permit_smoke_only";
+    await assert.rejects(
+      harness.current.execute(
+        executeInput(harness.accountId, challenge, "permit:ordinary:execute"),
+      ),
+      smokeOnly,
+    );
+    assert.equal((await harness.store.readState()).executions.length, 0);
+
+    await assert.rejects(
+      harness.current.previewAssetTakeover({ assetId: "xaut", newCapitalUsd: 1, leverage: 2 }),
+      smokeOnly,
+    );
+    await assert.rejects(
+      harness.current.startAssetTakeover({
+        assetId: "xaut",
+        preview: {} as RwaAssetTakeoverPreview,
+        idempotencyKey: "permit-takeover-start",
+      }),
+      smokeOnly,
+    );
+    await assert.rejects(
+      harness.current.reconfirmAssetTakeover({
+        takeoverId: "permit-takeover",
+        preview: {} as RwaAssetTakeoverPreview,
+      }),
+      smokeOnly,
+    );
+
+    const guardedClient = await (harness.current as any).clientForTakeover() as RwaBinanceClient;
+    await assert.rejects(
+      guardedClient.placeOrder(
+        smokeProviderRequest("spot", "Buy", "permitnonriskentry", false),
+      ),
+      smokeOnly,
+    );
+    await assert.rejects(
+      guardedClient.placeOrder(
+        smokeProviderRequest("linear", "Sell", "permitnonriskfuture", false),
+      ),
+      smokeOnly,
+    );
+    assert.equal(harness.client.writeCount, 0);
+
+    await guardedClient.placeOrder(
+      smokeProviderRequest("spot", "Sell", "permitspotreduceonly", false),
+    );
+    await guardedClient.placeOrder(
+      smokeProviderRequest("linear", "Buy", "permitfuturereduce", true),
+    );
+    assert.equal(harness.client.writeCount, 2);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2962,6 +3129,8 @@ async function productionSmokeHarness(directory: string, approvedCapitalUsd: num
       client.access.accountId,
       client.access.accountFingerprint,
     ),
+    actionScope: ["READ", "TRADE"] as const,
+    authorizationDigest: "4".repeat(64),
     expiresAt: now + 60_000,
     revision: "8".repeat(40),
   };

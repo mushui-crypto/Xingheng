@@ -4,12 +4,14 @@ import {
   binanceAccountBindingSha256,
   loadRwaBinanceProductionSelfTestPermit,
   productionSelfTestPermitDigest,
+  validProductionSelfTestPermitConsumption,
   validProductionSelfTestPermitConfirmation,
 } from "./RwaBinanceProductionSelfTestPermit";
 
 const revision = "a".repeat(40);
 const permitId = "b".repeat(32);
 const accountBindingSha256 = "c".repeat(64);
+const authorizationDigest = "d".repeat(64);
 const expiresAt = Date.parse("2026-08-01T00:00:00.000Z");
 
 test("production self-test permit accepts only the exact server-controlled schema", () => {
@@ -18,6 +20,8 @@ test("production self-test permit accepts only the exact server-controlled schem
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: accountBindingSha256,
+    RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
+    RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorizationDigest,
     RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "30",
     RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00.000Z",
     XINGHENG_EXPECTED_REVISION: revision,
@@ -25,14 +29,34 @@ test("production self-test permit accepts only the exact server-controlled schem
   const parsed = loadRwaBinanceProductionSelfTestPermit(environment);
   assert.ok(parsed);
   assert.equal(parsed.expiresAt, expiresAt);
+  assert.deepEqual(parsed.actionScope, ["READ", "TRADE"]);
+  assert.equal(parsed.authorizationDigest, authorizationDigest);
   assert.equal(parsed.digest, productionSelfTestPermitDigest(parsed));
   assert.match(binanceAccountBindingSha256("account", "fingerprint"), /^[a-f0-9]{64}$/u);
+  const {
+    RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: _missingActionScope,
+    ...withoutActionScope
+  } = environment;
+  const {
+    RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: _missingAuthorizationDigest,
+    ...withoutAuthorizationDigest
+  } = environment;
+  assert.equal(loadRwaBinanceProductionSelfTestPermit(withoutActionScope), null);
+  assert.equal(loadRwaBinanceProductionSelfTestPermit(withoutAuthorizationDigest), null);
 
   for (const mutation of [
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "false" },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: "B".repeat(32) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "user-a" },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: "c".repeat(63) },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["TRADE","READ"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","READ"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","WITHDRAW"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ", "TRADE"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE","READ"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","trade"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: "D".repeat(64) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "0" },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00Z" },
     { XINGHENG_EXPECTED_REVISION: "main" },
@@ -47,6 +71,8 @@ test("production self-test confirmation rejects missing, legacy, and extra field
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: accountBindingSha256,
+    RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
+    RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorizationDigest,
     RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "30",
     RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00.000Z",
     XINGHENG_EXPECTED_REVISION: revision,
@@ -57,4 +83,33 @@ test("production self-test confirmation rejects missing, legacy, and extra field
   }), true);
   assert.equal(validProductionSelfTestPermitConfirmation(null), false);
   assert.equal(validProductionSelfTestPermitConfirmation({ ...permit, confirmedAt: 1, extra: true }), false);
+  assert.equal(validProductionSelfTestPermitConfirmation({
+    ...permit,
+    actionScope: ["TRADE", "READ"],
+    confirmedAt: 1,
+  }), false);
+  assert.equal(validProductionSelfTestPermitConfirmation({
+    ...permit,
+    authorizationDigest: "D".repeat(64),
+    confirmedAt: 1,
+  }), false);
+  const { actionScope: _actionScope, ...withoutActionScope } = permit;
+  const { authorizationDigest: _authorizationDigest, ...withoutAuthorizationDigest } = permit;
+  assert.equal(validProductionSelfTestPermitConfirmation({
+    ...withoutActionScope,
+    confirmedAt: 1,
+  }), false);
+  assert.equal(validProductionSelfTestPermitConfirmation({
+    ...withoutAuthorizationDigest,
+    confirmedAt: 1,
+  }), false);
+});
+
+test("production self-test consumption accepts only exact unique-record fields", () => {
+  const consumption = { permitId, digest: "e".repeat(64), consumedAt: 1 };
+  assert.equal(validProductionSelfTestPermitConsumption(consumption), true);
+  assert.equal(validProductionSelfTestPermitConsumption({ ...consumption, extra: true }), false);
+  assert.equal(validProductionSelfTestPermitConsumption({ ...consumption, permitId: "B".repeat(32) }), false);
+  assert.equal(validProductionSelfTestPermitConsumption({ ...consumption, digest: "E".repeat(64) }), false);
+  assert.equal(validProductionSelfTestPermitConsumption({ ...consumption, consumedAt: 0 }), false);
 });

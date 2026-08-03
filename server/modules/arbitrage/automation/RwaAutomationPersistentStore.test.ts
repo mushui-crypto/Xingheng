@@ -168,6 +168,59 @@ test("legacy state defaults to no asset authorization while new exact state pers
   }
 });
 
+test("production self-test permit consumptions are exact, unique, and never compacted", async () => {
+  const fixture = await createFixture("user-a", "binance");
+  try {
+    const legacy = await fixture.store.readState();
+    const {
+      productionSelfTestPermitConsumptions: _consumptions,
+      ...legacyWithoutConsumptions
+    } = legacy;
+    await writeFile(
+      fixture.store.statePath,
+      JSON.stringify(legacyWithoutConsumptions),
+      { mode: 0o600 },
+    );
+    assert.deepEqual(
+      (await fixture.store.readState()).productionSelfTestPermitConsumptions,
+      [],
+    );
+
+    const consumption = {
+      permitId: "a".repeat(32),
+      digest: "b".repeat(64),
+      consumedAt: 1,
+    };
+    const state = await fixture.store.readState();
+    state.productionSelfTestPermitConsumptions.push(consumption);
+    await fixture.store.writeState(state);
+    fixture.store.setClock(() => Number.MAX_SAFE_INTEGER - 1);
+    assert.deepEqual(
+      (await fixture.store.readState()).productionSelfTestPermitConsumptions,
+      [consumption],
+    );
+
+    for (const invalid of [
+      [{ ...consumption, extra: true }],
+      [consumption, { ...consumption, digest: "c".repeat(64) }],
+      [consumption, { ...consumption, permitId: "c".repeat(32) }],
+      [{ ...consumption, permitId: "A".repeat(32) }],
+      [{ ...consumption, digest: "B".repeat(64) }],
+      [{ ...consumption, consumedAt: 0 }],
+    ]) {
+      const candidate = await fixture.store.readState();
+      candidate.productionSelfTestPermitConsumptions = invalid as typeof candidate.productionSelfTestPermitConsumptions;
+      await assert.rejects(
+        fixture.store.writeState(candidate),
+        (error: unknown) => error instanceof RwaAutomationGovernanceError
+          && error.category === "automation_risk_state_invalid",
+      );
+    }
+  } finally {
+    await fixture.cleanup();
+  }
+});
+
 test("readStateView validates and normalizes in memory without persisting maintenance", async () => {
   const fixture = await createFixture("user-a", "bybit");
   try {

@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import {
   RWA_AUTOMATION_BACKUP_AAD_SCHEMA,
@@ -54,6 +54,26 @@ const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
 const totpMarker = "totp-secret-marker";
 const recoveryMarker = "recovery-code-marker";
+
+test("production restore and rollback keep the tombstone check and pointer swap under one operation lock", async () => {
+  const repositoryRoot = resolve(process.cwd());
+  const [compose, restoreWrapper, rollbackWrapper] = await Promise.all([
+    readFile(join(repositoryRoot, "compose.yaml"), "utf8"),
+    readFile(join(repositoryRoot, "scripts/rwa-automation-restore.sh"), "utf8"),
+    readFile(join(repositoryRoot, "scripts/rwa-automation-rollback.sh"), "utf8"),
+  ]);
+  const restoreService = compose.slice(compose.indexOf("  rwa-automation-restore:"));
+  assert.match(
+    restoreService,
+    /command:\s*\n\s*- flock\s*\n\s*- -n\s*\n\s*- -x\s*\n\s*- \/app\/rwa-automation-lock\/operation\.lock[\s\S]*- .*rwa-automation-backup\.js\s*\n\s*- restore/u,
+  );
+  assert.ok(restoreWrapper.indexOf("production_compose stop api")
+    < restoreWrapper.indexOf("rwa-automation-restore"));
+  assert.match(
+    rollbackWrapper,
+    /production_compose stop api[\s\S]*rwa-automation-restore flock -n -x \/app\/rwa-automation-lock\/operation\.lock[\s\S]*rwa-automation-backup\.js rollback/u,
+  );
+});
 
 test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and fail-closed switches without ephemeral challenges", async () => {
   const fixture = await createFixture();
@@ -420,6 +440,8 @@ test("takeover backup schema accepts legacy absence and rejects malformed, orpha
   try {
     const state = baseState() as any;
     delete state.assetTakeovers;
+    delete state.connectivitySmokes;
+    delete state.productionSelfTestPermitConsumptions;
     await writeSecure(join(legacy.active, stateFileName), JSON.stringify(state));
     await legacy.service.createBackup();
   } finally {
@@ -619,6 +641,92 @@ test("connectivity smoke backup migrates exact parent records and rejects malfor
     await assert.rejects(partialFixture.service.createBackup(), hasCategory("backup_manifest_invalid"));
   } finally {
     await partialFixture.cleanup();
+  }
+});
+
+test("backup preserves exact permanent production self-test permit consumptions", async () => {
+  const consumption = {
+    permitId: "a".repeat(32),
+    digest: "b".repeat(64),
+    consumedAt: baseNow.getTime(),
+  };
+  const fixture = await createFixture();
+  try {
+    const state = baseState() as any;
+    state.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(join(fixture.active, stateFileName), JSON.stringify(state));
+    const backup = await fixture.service.createBackup();
+    const restored = await fixture.service.restoreBackup(backup.fileName);
+    const restoredState = JSON.parse(await readFile(
+      join(fixture.dataRoot, restored.restoredGeneration, stateFileName),
+      "utf8",
+    ));
+    assert.deepEqual(restoredState.productionSelfTestPermitConsumptions, [consumption]);
+  } finally {
+    await fixture.cleanup();
+  }
+
+  for (const invalid of [
+    [{ ...consumption, extra: true }],
+    [consumption, { ...consumption, digest: "c".repeat(64) }],
+    [consumption, { ...consumption, permitId: "c".repeat(32) }],
+  ]) {
+    const invalidFixture = await createFixture();
+    try {
+      const state = baseState() as any;
+      state.productionSelfTestPermitConsumptions = invalid;
+      await writeSecure(join(invalidFixture.active, stateFileName), JSON.stringify(state));
+      await assert.rejects(
+        invalidFixture.service.createBackup(),
+        hasCategory("backup_manifest_invalid"),
+      );
+    } finally {
+      await invalidFixture.cleanup();
+    }
+  }
+
+  const staleRestoreFixture = await createFixture();
+  try {
+    const staleBackup = await staleRestoreFixture.service.createBackup();
+    const current = baseState() as any;
+    current.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(
+      join(staleRestoreFixture.active, stateFileName),
+      JSON.stringify(current),
+    );
+    await assert.rejects(
+      staleRestoreFixture.service.restoreBackup(staleBackup.fileName),
+      hasCategory("backup_manifest_invalid"),
+    );
+    const stillActive = JSON.parse(await readFile(
+      join(staleRestoreFixture.active, stateFileName),
+      "utf8",
+    ));
+    assert.deepEqual(stillActive.productionSelfTestPermitConsumptions, [consumption]);
+  } finally {
+    await staleRestoreFixture.cleanup();
+  }
+
+  const staleRollbackFixture = await createFixture();
+  try {
+    const withConsumption = baseState() as any;
+    withConsumption.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(
+      join(staleRollbackFixture.active, stateFileName),
+      JSON.stringify(withConsumption),
+    );
+    const backup = await staleRollbackFixture.service.createBackup();
+    await writeSecure(
+      join(staleRollbackFixture.active, stateFileName),
+      JSON.stringify(baseState()),
+    );
+    await staleRollbackFixture.service.restoreBackup(backup.fileName);
+    assert.throws(
+      () => staleRollbackFixture.service.rollbackRestore(),
+      hasCategory("backup_manifest_invalid"),
+    );
+  } finally {
+    await staleRollbackFixture.cleanup();
   }
 });
 
@@ -1000,6 +1108,8 @@ function baseState() {
       createdAt: baseNow.getTime() + 2,
       updatedAt: baseNow.getTime() + 2,
     }],
+    connectivitySmokes: [],
+    productionSelfTestPermitConsumptions: [],
     challenges: [{
       id: "challenge-secret-marker",
       tokenHash: "challenge-token-hash",

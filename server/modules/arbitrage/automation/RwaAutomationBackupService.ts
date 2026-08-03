@@ -16,6 +16,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
+import { readFileSync, readdirSync } from "node:fs";
 import { O_NOFOLLOW, O_RDONLY } from "node:constants";
 import { basename, dirname, resolve } from "node:path";
 import {
@@ -45,7 +46,10 @@ import {
   writeGenerationState,
   type RwaAutomationDataLayoutOptions,
 } from "./RwaAutomationDataLayout";
-import { validProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
+import {
+  validProductionSelfTestPermitConfirmation,
+  validProductionSelfTestPermitConsumption,
+} from "./RwaBinanceProductionSelfTestPermit";
 import {
   RWA_ACTIVITY_MAX_PROVIDER_ORDER_IDS,
   RWA_ACTIVITY_MAX_RECENT_EVENT_IDS,
@@ -404,6 +408,9 @@ export class RwaAutomationBackupService {
   }
 
   private async restoreBackupUnsafe(fileName: string) {
+    // Production invokes this entire method only through the offline restore wrapper:
+    // API is stopped and compose holds the shared operation.lock from process start to exit.
+    // Therefore the monotonic Permit check below and pointer swap share one cross-process lock.
     const match = assertBackupFileName(fileName);
     const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
     const backupStorageBytes = await this.assertBackupRoot();
@@ -448,6 +455,7 @@ export class RwaAutomationBackupService {
       ensureSecureDirectory(generationPath, this.layoutOptions);
       await this.writeSnapshot(generationPath, snapshot);
       await this.validateSnapshotTree(generationPath, snapshot.manifest);
+      assertPermitConsumptionsNotRolledBack(active, generationPath);
       this.faultHook?.("before_pointer_swap");
       writeGenerationState(
         this.dataRoot,
@@ -483,6 +491,8 @@ export class RwaAutomationBackupService {
 
   rollbackRestore() {
     try {
+      // The production rollback wrapper stops API and holds the same operation.lock across
+      // this monotonic Permit check and writeGenerationState pointer swap.
       const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
       let rollback: string;
       try {
@@ -492,6 +502,7 @@ export class RwaAutomationBackupService {
       }
       const activeGeneration = basename(active);
       const rollbackGeneration = basename(rollback);
+      assertPermitConsumptionsNotRolledBack(active, rollback);
       writeGenerationState(
         this.dataRoot,
         rollbackGeneration,
@@ -745,6 +756,7 @@ function sanitizeAutomationState(
         "credentialLifecycle",
         "executions",
         "pnlSeries",
+        "productionSelfTestPermitConsumptions",
         "version",
       ])
       && !hasExactKeys(parsed, [
@@ -833,6 +845,20 @@ function sanitizeAutomationState(
     connectivitySmokes.filter((item) =>
       !["flat", "failed", "manual_intervention"].includes(String((item as Record<string, unknown>).stage))).length > 1
   ) throw invalidSnapshot();
+  const rawPermitConsumptions = parsed.productionSelfTestPermitConsumptions === undefined
+    ? []
+    : parsed.productionSelfTestPermitConsumptions;
+  if (!Array.isArray(rawPermitConsumptions)) throw invalidSnapshot();
+  const productionSelfTestPermitConsumptions = rawPermitConsumptions.map((value) => {
+    if (!validProductionSelfTestPermitConsumption(value)) throw invalidSnapshot();
+    return value;
+  });
+  if (
+    new Set(productionSelfTestPermitConsumptions.map((value) => value.permitId)).size
+      !== productionSelfTestPermitConsumptions.length
+    || new Set(productionSelfTestPermitConsumptions.map((value) => value.digest)).size
+      !== productionSelfTestPermitConsumptions.length
+  ) throw invalidSnapshot();
   const capitalHoldingAuthorizations = validatedTakeovers
     .filter((takeover) => !["failed", "exited"].includes(takeover.state))
     .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
@@ -863,6 +889,7 @@ function sanitizeAutomationState(
     assetAuthorizations: validatedAuthorizations,
     assetTakeovers: validatedTakeovers,
     connectivitySmokes,
+    productionSelfTestPermitConsumptions,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,
@@ -873,6 +900,50 @@ function sanitizeAutomationState(
   };
   if (containsForbiddenPersistentKey(value)) throw invalidSnapshot();
   return Buffer.from(JSON.stringify(value), "utf8");
+}
+
+function assertPermitConsumptionsNotRolledBack(active: string, target: string) {
+  const activeConsumptions = readGenerationPermitConsumptions(active);
+  if (![...activeConsumptions.values()].some((values) => values.length > 0)) return;
+  const targetConsumptions = readGenerationPermitConsumptions(target);
+  for (const [fileName, current] of activeConsumptions) {
+    if (current.length === 0) continue;
+    const restored = targetConsumptions.get(fileName);
+    if (!restored) throw invalidSnapshot();
+    const restoredRecords = new Set(restored.map((value) =>
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`
+    ));
+    if (current.some((value) => !restoredRecords.has(
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`,
+    ))) throw invalidSnapshot();
+  }
+}
+
+function readGenerationPermitConsumptions(root: string) {
+  const result = new Map<string, Array<{
+    permitId: string;
+    digest: string;
+    consumedAt: number;
+  }>>();
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith("-state.json") || !rootStatePattern.test(entry.name)) continue;
+    const parsed = JSON.parse(readFileSync(resolve(root, entry.name), "utf8")) as Record<string, unknown>;
+    const raw = parsed.productionSelfTestPermitConsumptions;
+    if (raw === undefined) {
+      result.set(entry.name, []);
+      continue;
+    }
+    if (!Array.isArray(raw) || raw.some((value) => !validProductionSelfTestPermitConsumption(value))) {
+      throw invalidSnapshot();
+    }
+    const values = raw as Array<{ permitId: string; digest: string; consumedAt: number }>;
+    if (
+      new Set(values.map((value) => value.permitId)).size !== values.length
+      || new Set(values.map((value) => value.digest)).size !== values.length
+    ) throw invalidSnapshot();
+    result.set(entry.name, values);
+  }
+  return result;
 }
 
 function validateCredentialEnvelope(

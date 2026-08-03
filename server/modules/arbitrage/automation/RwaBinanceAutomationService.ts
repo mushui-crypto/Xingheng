@@ -103,6 +103,8 @@ import {
 import {
   binanceAccountBindingSha256,
   loadRwaBinanceProductionSelfTestPermit,
+  productionSelfTestPermitDigest,
+  validProductionSelfTestActionScope,
   type RwaBinanceProductionSelfTestPermit,
 } from "./RwaBinanceProductionSelfTestPermit";
 
@@ -1179,6 +1181,16 @@ export class RwaBinanceAutomationService {
         }
         return publicConnectivitySmoke(existing);
       }
+      const permit = this.requireConfirmedProductionSelfTestPermitForConsumption(state.config);
+      if (permit && state.productionSelfTestPermitConsumptions.some((item) =>
+        item.permitId === permit.permitId || item.digest === permit.digest
+      )) {
+        throw new RwaNeutralExecutionError(
+          409,
+          "production_self_test_permit_consumed",
+          "Production self-test Permit 已消费，禁止用于新的连通性烟测请求。",
+        );
+      }
       if (state.connectivitySmokes.some(isActiveConnectivitySmoke)) {
         throw new RwaNeutralExecutionError(409, "connectivity_smoke_active", "当前账户已有进行中的连通性烟测。");
       }
@@ -1231,12 +1243,20 @@ export class RwaBinanceAutomationService {
         createdAt: now,
         updatedAt: now,
       };
+      this.assertExecutionLeaseHeld();
+      if (permit) {
+        state.productionSelfTestPermitConsumptions.push({
+          permitId: permit.permitId,
+          digest: permit.digest,
+          consumedAt: now,
+        });
+      }
       state.connectivitySmokes.push(smoke);
       await this.store.writeState(state);
       let client: RwaBinanceClient | null = null;
       try {
         const metadata = await this.requireMetadata();
-        client = await this.clientForNewRisk(state, metadata);
+        client = await this.clientForNewRisk(state, metadata, true);
         const access = await this.validateActiveAccess(client, accountId, state);
         this.assertProductionSelfTestPermit(state.config, metadata, access);
         const snapshot = await this.verifyConnectivitySmokeWindow(
@@ -1372,6 +1392,7 @@ export class RwaBinanceAutomationService {
         assertAccountId(accountId, existing.accountId);
         return redactExecution(existing);
       }
+      this.assertProductionSelfTestPermitConnectivitySmokeOnly(state.config);
       this.assertEntrySwitches(state.config);
       const challenge = state.challenges.find((item) => item.id === challengeId);
       if (!challenge || challenge.tokenHash !== hash(challengeToken) || challenge.expiresAt <= this.now() || challenge.consumedAt !== null) {
@@ -2217,9 +2238,16 @@ export class RwaBinanceAutomationService {
     });
   }
 
-  private async clientForNewRisk(state: RwaAutomationStateData, metadata: BinanceCredentialMetadata) {
+  private async clientForNewRisk(
+    state: RwaAutomationStateData,
+    metadata: BinanceCredentialMetadata,
+    allowConsumedConnectivitySmokePermit = false,
+  ) {
     try {
-      return this.withPermitMutationGuard(await this.client(), false);
+      return this.withPermitMutationGuard(
+        await this.client(),
+        allowConsumedConnectivitySmokePermit,
+      );
     } catch (error) {
       await this.freezeNewRisk(
         state,
@@ -2232,18 +2260,20 @@ export class RwaBinanceAutomationService {
   }
 
   private async clientForTakeover() {
-    return this.withPermitMutationGuard(await this.client(), true);
+    return this.withPermitMutationGuard(await this.client(), false);
   }
 
   private withPermitMutationGuard(
     client: RwaBinanceClient,
-    guardAllNonReduceOnlyOrders: boolean,
+    allowConsumedConnectivitySmokePermit: boolean,
   ): RwaBinanceClient {
     return new Proxy(client, {
       get: (target, property, receiver) => {
         if (property === "setPerpetualLeverage") {
           return async (...args: Parameters<RwaBinanceClient["setPerpetualLeverage"]>) => {
-            await this.assertCurrentPermitBeforeNewRiskMutation();
+            await this.assertCurrentPermitBeforeNewRiskMutation(
+              allowConsumedConnectivitySmokePermit,
+            );
             return target.setPerpetualLeverage(...args);
           };
         }
@@ -2251,8 +2281,12 @@ export class RwaBinanceAutomationService {
           return async (...args: Parameters<RwaBinanceClient["placeOrder"]>) => {
             const request = args[0];
             const riskReducing = request.reduceOnly
-              || (!guardAllNonReduceOnlyOrders && request.side === "Sell");
-            if (!riskReducing) await this.assertCurrentPermitBeforeNewRiskMutation();
+              || (request.category === "spot" && request.side === "Sell");
+            if (!riskReducing) {
+              await this.assertCurrentPermitBeforeNewRiskMutation(
+                allowConsumedConnectivitySmokePermit,
+              );
+            }
             return target.placeOrder(...args);
           };
         }
@@ -2262,13 +2296,31 @@ export class RwaBinanceAutomationService {
     });
   }
 
-  private async assertCurrentPermitBeforeNewRiskMutation() {
+  private async assertCurrentPermitBeforeNewRiskMutation(
+    allowConsumedConnectivitySmokePermit: boolean,
+  ) {
     const state = await this.store.readState();
+    this.assertProductionSelfTestPermitConnectivitySmokeOnly(
+      state.config,
+      allowConsumedConnectivitySmokePermit,
+    );
     const metadata = await this.requireMetadata();
-    this.assertProductionSelfTestPermit(state.config, metadata, {
+    const permit = this.assertProductionSelfTestPermit(state.config, metadata, {
       accountId: metadata.accountId,
       accountFingerprint: metadata.accountFingerprint,
     } as Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>);
+    if (
+      permit
+      && !state.productionSelfTestPermitConsumptions.some((item) =>
+        item.permitId === permit.permitId && item.digest === permit.digest
+      )
+    ) {
+      throw new RwaNeutralExecutionError(
+        409,
+        "production_self_test_permit_not_consumed",
+        "Production self-test Permit 尚未由连通性烟测原子消费，禁止 Provider 新增风险动作。",
+      );
+    }
   }
 
   private async requireMetadata() {
@@ -2547,6 +2599,7 @@ export class RwaBinanceAutomationService {
 
   private async assertSelfTestNewRiskAllowed() {
     const state = await this.store.readState();
+    this.assertProductionSelfTestPermitConnectivitySmokeOnly(state.config);
     if (
       !this.productionEnvironment()
       || state.config.accountIsolationMode !== "development_exclusive_account"
@@ -2556,6 +2609,23 @@ export class RwaBinanceAutomationService {
     const client = await this.clientForNewRisk(state, metadata);
     const access = await this.validateActiveAccess(client, metadata.accountId, state);
     this.assertProductionSelfTestPermit(state.config, metadata, access);
+  }
+
+  private assertProductionSelfTestPermitConnectivitySmokeOnly(
+    config: RwaExecutionConfig,
+    allowConsumedConnectivitySmokePermit = false,
+  ) {
+    if (
+      this.productionEnvironment()
+      && config.accountIsolationMode === "development_exclusive_account"
+      && !allowConsumedConnectivitySmokePermit
+    ) {
+      throw new RwaNeutralExecutionError(
+        409,
+        "production_self_test_permit_smoke_only",
+        "Production self-test Permit 仅授权一次 Capital Test connectivity smoke，禁止其他新增风险路径。",
+      );
+    }
   }
 
   private confirmProductionSelfTestPermit(
@@ -2574,20 +2644,55 @@ export class RwaBinanceAutomationService {
     if (
       !this.productionEnvironment()
       || config.accountIsolationMode === "dedicated_subaccount"
-    ) return;
+    ) return null;
     const permit = this.requireMatchingProductionSelfTestPermit(metadata, access);
     const confirmation = config.productionSelfTestPermitConfirmation;
     if (
       !confirmation
-      || confirmation.permitId !== permit.permitId
-      || confirmation.ownerUserId !== permit.ownerUserId
-      || confirmation.accountBindingSha256 !== permit.accountBindingSha256
-      || confirmation.approvedCapitalUsd !== permit.approvedCapitalUsd
-      || confirmation.expiresAt !== permit.expiresAt
-      || confirmation.revision !== permit.revision
-      || confirmation.digest !== permit.digest
+      || !this.productionSelfTestPermitConfirmationMatches(confirmation, permit)
       || confirmation.confirmedAt >= permit.expiresAt
     ) throw accountIsolationUnconfirmed();
+    return permit;
+  }
+
+  private requireConfirmedProductionSelfTestPermitForConsumption(
+    config: RwaExecutionConfig,
+  ): RwaBinanceProductionSelfTestPermit | null {
+    if (
+      !this.productionEnvironment()
+      || config.accountIsolationMode === "dedicated_subaccount"
+    ) return null;
+    const permit = this.productionSelfTestPermit();
+    const confirmation = config.productionSelfTestPermitConfirmation;
+    if (
+      !permit
+      || this.now() >= permit.expiresAt
+      || permit.ownerUserId !== this.store.ownerUserId
+      || !validProductionSelfTestActionScope(permit.actionScope)
+      || !/^[a-f0-9]{64}$/u.test(permit.authorizationDigest)
+      || permit.digest !== productionSelfTestPermitDigest(permit)
+      || !confirmation
+      || !this.productionSelfTestPermitConfirmationMatches(confirmation, permit)
+      || confirmation.confirmedAt >= permit.expiresAt
+    ) throw accountIsolationUnconfirmed();
+    return permit;
+  }
+
+  private productionSelfTestPermitConfirmationMatches(
+    confirmation: NonNullable<RwaExecutionConfig["productionSelfTestPermitConfirmation"]>,
+    permit: RwaBinanceProductionSelfTestPermit,
+  ) {
+    return confirmation.permitId === permit.permitId
+      && confirmation.ownerUserId === permit.ownerUserId
+      && confirmation.accountBindingSha256 === permit.accountBindingSha256
+      && validProductionSelfTestActionScope(confirmation.actionScope)
+      && confirmation.actionScope[0] === permit.actionScope[0]
+      && confirmation.actionScope[1] === permit.actionScope[1]
+      && confirmation.authorizationDigest === permit.authorizationDigest
+      && confirmation.approvedCapitalUsd === permit.approvedCapitalUsd
+      && confirmation.expiresAt === permit.expiresAt
+      && confirmation.revision === permit.revision
+      && confirmation.digest === permit.digest;
   }
 
   private requireMatchingProductionSelfTestPermit(
@@ -2600,6 +2705,9 @@ export class RwaBinanceAutomationService {
       !permit
       || this.now() >= permit.expiresAt
       || permit.ownerUserId !== this.store.ownerUserId
+      || !validProductionSelfTestActionScope(permit.actionScope)
+      || !/^[a-f0-9]{64}$/u.test(permit.authorizationDigest)
+      || permit.digest !== productionSelfTestPermitDigest(permit)
       || permit.accountBindingSha256 !== binding
       || access.accountId !== metadata.accountId
       || access.accountFingerprint !== metadata.accountFingerprint

@@ -1,5 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { access, chmod, lstat, mkdir, open, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { O_DIRECTORY, O_RDONLY } from "node:constants";
 import { dirname, resolve } from "node:path";
 import type {
   RwaBybitCredentials,
@@ -56,7 +57,11 @@ import {
   validateConnectivitySmokeFacts,
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
-import { validProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
+import {
+  validProductionSelfTestPermitConfirmation,
+  validProductionSelfTestPermitConsumption,
+  type RwaBinanceProductionSelfTestPermitConsumption,
+} from "./RwaBinanceProductionSelfTestPermit";
 
 type LegacyCredentialEnvelope<TPermissions extends RwaVenuePermissions> = {
   version: 1;
@@ -131,6 +136,7 @@ type AutomationState = {
   assetAuthorizations: RwaAccountAssetAuthorization[];
   assetTakeovers: RwaAssetTakeoverRecord[];
   connectivitySmokes: RwaConnectivitySmokeRecord[];
+  productionSelfTestPermitConsumptions: RwaBinanceProductionSelfTestPermitConsumption[];
   challenges: StoredChallenge[];
   executions: RwaExecutionRecord[];
   pnlSeries: RwaStrategyPnlSnapshot[];
@@ -152,6 +158,7 @@ const emptyState = (): AutomationState => ({
   assetAuthorizations: [],
   assetTakeovers: [],
   connectivitySmokes: [],
+  productionSelfTestPermitConsumptions: [],
   challenges: [],
   executions: [],
   pnlSeries: [],
@@ -449,6 +456,12 @@ export class RwaAutomationPersistentStore<
           : parsed.connectivitySmokes === undefined
             ? []
             : (() => { throw invalidRiskState(); })(),
+        productionSelfTestPermitConsumptions:
+          parsed.productionSelfTestPermitConsumptions === undefined
+            ? []
+            : Array.isArray(parsed.productionSelfTestPermitConsumptions)
+              ? parsed.productionSelfTestPermitConsumptions
+              : (() => { throw invalidRiskState(); })(),
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
         executions: Array.isArray(parsed.executions)
           ? parsed.executions.map((execution) => normalizeExecutionRecord(execution, this.venue))
@@ -467,6 +480,9 @@ export class RwaAutomationPersistentStore<
       assertAccountAssetStateCapacity(normalized);
       assertTakeoverCollection(normalized.assetTakeovers, normalized.assetAuthorizations);
       assertConnectivitySmokeCollection(normalized.connectivitySmokes);
+      assertProductionSelfTestPermitConsumptionCollection(
+        normalized.productionSelfTestPermitConsumptions,
+      );
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
       const rawComparable = JSON.stringify(parsed);
       const normalizedComparable = JSON.stringify(normalized);
@@ -504,6 +520,9 @@ export class RwaAutomationPersistentStore<
       validateConnectivitySmokeForStore(smoke, this.ownerUserId, this.venue);
     }
     assertConnectivitySmokeCollection(state.connectivitySmokes);
+    assertProductionSelfTestPermitConsumptionCollection(
+      state.productionSelfTestPermitConsumptions,
+    );
     for (const execution of state.executions) {
       assertProfiledExecutionFields(execution, this.venue);
     }
@@ -670,6 +689,17 @@ function isCompletedExecution(execution: RwaExecutionRecord) {
   return execution.state === "closed" || execution.state === "reconciled" || execution.state === "failed";
 }
 
+function assertProductionSelfTestPermitConsumptionCollection(values: unknown[]) {
+  for (const value of values) {
+    if (!validProductionSelfTestPermitConsumption(value)) throw invalidRiskState();
+  }
+  const consumptions = values as RwaBinanceProductionSelfTestPermitConsumption[];
+  if (
+    new Set(consumptions.map((value) => value.permitId)).size !== consumptions.length
+    || new Set(consumptions.map((value) => value.digest)).size !== consumptions.length
+  ) throw invalidRiskState();
+}
+
 async function atomicWriteJson(path: string, value: unknown) {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 });
   const temporaryPath = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
@@ -683,10 +713,20 @@ async function atomicWriteJson(path: string, value: unknown) {
     await chmod(temporaryPath, 0o600);
     await rename(temporaryPath, path);
     await chmod(path, 0o600);
+    await fsyncDirectory(dirname(path));
   } catch (error) {
     await handle?.close().catch(() => undefined);
     await unlink(temporaryPath).catch(() => undefined);
     throw error;
+  }
+}
+
+async function fsyncDirectory(path: string) {
+  const handle = await open(path, O_RDONLY | O_DIRECTORY);
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
   }
 }
 
