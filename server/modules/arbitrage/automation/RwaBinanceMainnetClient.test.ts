@@ -303,6 +303,7 @@ test("Binance client signs private reads with server-time offset and keeps spot/
   assert.equal(snapshot.spot.minNotionalUsd, 5);
   assert.equal(snapshot.perpetual.qtyStep, 0.001);
   assert.equal(snapshot.perpetual.minNotionalUsd, 5);
+  assert.equal(snapshot.perpetual.leverage, null);
   assert.equal(snapshot.perpetual.fundingIntervalHours, 4);
   assert.equal(snapshot.spot.depthUsd > 8, true);
   assert.equal(snapshot.perpetual.depthUsd > 8, true);
@@ -367,6 +368,38 @@ test("Binance preflight rejects malformed authoritative position quantities", as
   for (const options of [
     { spotXautFree: "NaN" },
     { positionAmount: "Infinity" },
+  ]) {
+    const client = new RwaBinanceMainnetClient(
+      { apiKey: "fake-key", apiSecret: "fake-secret" },
+      fixtureFetch(options),
+      () => 1_000,
+      ["203.0.113.10"],
+    );
+    await assert.rejects(
+      client.readPreflightSnapshot(),
+      providerError("provider_snapshot_invalid"),
+    );
+  }
+});
+
+test("Binance preflight reads leverage from an empty XAUTUSDT position row", async () => {
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({ positionAmount: "0", positionLeverage: "1" }),
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  const snapshot = await client.readPreflightSnapshot();
+  assert.equal(snapshot.existingPerpetualQuantityXaut, 0);
+  assert.equal(snapshot.perpetual.leverage, 1);
+});
+
+test("Binance preflight rejects invalid leverage on an existing XAUTUSDT position row", async () => {
+  for (const options of [
+    { positionAmount: "0", omitPositionLeverage: true },
+    { positionAmount: "0", positionLeverage: "NaN" },
+    { positionAmount: "0", positionLeverage: "0" },
+    { positionAmount: "0", positionLeverage: "1.5" },
   ]) {
     const client = new RwaBinanceMainnetClient(
       { apiKey: "fake-key", apiSecret: "fake-secret" },
@@ -858,6 +891,8 @@ function fixtureFetch(options: {
   restrictionsFailure?: boolean;
   spotXautFree?: string;
   positionAmount?: string;
+  positionLeverage?: unknown;
+  omitPositionLeverage?: boolean;
   fundingGap?: boolean;
   invalidTakeoverDepth?: boolean;
 } = {}): typeof fetch {
@@ -944,7 +979,9 @@ function fixtureFetch(options: {
           positionAmt: options.positionAmount,
           liquidationPrice: "6000",
           initialMargin: "200",
-          leverage: "2",
+          ...(!options.omitPositionLeverage
+            ? { leverage: options.positionLeverage ?? "2" }
+            : {}),
         }]);
       case "/api/v3/openOrders":
       case "/fapi/v1/openOrders":

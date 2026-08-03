@@ -1826,6 +1826,11 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.ok(result.budget.totalCapitalUsd <= 2_000);
     assert.equal(result.policyVersion, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
     assert.equal(result.policyDigest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
+    assert.equal(result.providerMutationCount, 4);
+    assert.equal(
+      client.activityPreparations.some((item) => item.mutation === "set_leverage"),
+      false,
+    );
     assert.deepEqual(
       result.timeline.map((event: { stage: string }) => event.stage),
       [
@@ -1989,7 +1994,7 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
     assert.equal(result.stage, "flat");
     assert.equal(result.budget.limitUsd, 30);
     assert.ok(result.budget.totalCapitalUsd <= 30);
-    assert.equal(harness.client.writeCount, 5);
+    assert.equal(harness.client.writeCount, 4);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -2007,6 +2012,160 @@ test("Binance connectivity smoke rejects changed canonical budget facts before p
       smokeExecuteInput(accountId, challenge, "smoke:budget-change:1"),
     ));
     assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke requires a readable existing 1x leverage before provider writes", async () => {
+  for (const leverage of [2, null]) {
+    const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-leverage-preflight-"));
+    try {
+      const client = new FakeBinanceClient();
+      client.snapshot.perpetual.leverage = leverage;
+      const current = service(directory, "user-a", client);
+      const accountId = await activate(current);
+      await assert.rejects(
+        current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance),
+        (error: unknown) => error instanceof RwaNeutralExecutionError
+          && error.category === "connectivity_smoke_preflight_rejected",
+      );
+      assert.equal(client.writeCount, 0);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Binance connectivity smoke rejects a 1x to 2x change after challenge and before execution", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-leverage-changed-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshot.perpetual.leverage = 2;
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:leverage:changed"),
+    ) as any;
+    assert.equal(result.stage, "failed");
+    assert.equal(result.receipt, null);
+    assert.equal(client.writeCount, 0);
+    assert.equal(client.activityPreparations.length, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke tombstones a leverage race before its first Spot mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-leverage-first-mutation-race-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    client.snapshotReadCount = 0;
+    client.snapshotHook = () => {
+      if (client.snapshotReadCount === 2) client.snapshot.perpetual.leverage = 2;
+    };
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:leverage:first-mutation-race"),
+    ) as any;
+    assert.equal(result.stage, "failed");
+    assert.equal(result.errorCategory, "connectivity_smoke_leverage_not_1x");
+    assert.equal(result.receipt, null);
+    assert.equal(client.writeCount, 0);
+    assert.equal(client.activityPreparations.length, 0);
+
+    client.snapshotHook = () => {};
+    client.snapshot.perpetual.leverage = 1;
+    const nextChallenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    assert.ok(nextChallenge.challengeId);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke rejects the previous policy version before provider writes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-old-policy-"));
+  try {
+    const client = new FakeBinanceClient();
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    await assert.rejects(
+      current.executeConnectivitySmoke({
+        ...smokeExecuteInput(accountId, challenge, "smoke:old-policy:1"),
+        policyVersion: "connectivity-smoke-gate2-capital-v3",
+      }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "connectivity_smoke_policy_mismatch",
+    );
+    assert.equal(client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke closes owned Spot when leverage changes before Futures entry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-leverage-runtime-"));
+  try {
+    const client = new FakeBinanceClient();
+    client.snapshotHook = () => {
+      if (client.placedRequests.length === 1) client.snapshot.perpetual.leverage = 2;
+    };
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:leverage:runtime"),
+    ) as any;
+    assert.deepEqual(
+      client.placedRequests.map((item) => [item.category, item.side, item.reduceOnly]),
+      [
+        ["spot", "Buy", false],
+        ["spot", "Sell", false],
+      ],
+    );
+    assert.equal(result.stage, "flat");
+    assert.equal(result.receipt.providerFlatConfirmed, true);
+    assert.equal(
+      client.activityPreparations.some((item) => item.mutation === "set_leverage"),
+      false,
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke closes both owned legs when leverage changes after hedge", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-leverage-hedged-"));
+  try {
+    const client = new FakeBinanceClient();
+    client.snapshotHook = () => {
+      if (client.placedRequests.length === 2) client.snapshot.perpetual.leverage = 2;
+    };
+    const current = service(directory, "user-a", client);
+    const accountId = await activate(current);
+    const challenge = await current.preflightConnectivitySmoke(accountId, smokePolicyAcceptance);
+    const result = await current.executeConnectivitySmoke(
+      smokeExecuteInput(accountId, challenge, "smoke:leverage:hedged"),
+    ) as any;
+    assert.deepEqual(
+      client.placedRequests.map((item) => [item.category, item.side, item.reduceOnly]),
+      [
+        ["spot", "Buy", false],
+        ["linear", "Sell", false],
+        ["linear", "Buy", true],
+        ["spot", "Sell", false],
+      ],
+    );
+    assert.equal(result.stage, "flat");
+    assert.equal(result.receipt.providerFlatConfirmed, true);
+    assert.equal(
+      client.activityPreparations.some((item) => item.mutation === "set_leverage"),
+      false,
+    );
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -3095,6 +3254,7 @@ class FakeBinanceClient implements RwaBinanceClient {
         bid: 4_128,
         ask: 4_129,
         depthUsd: 100_000,
+        leverage: 1,
         mark: 4_128.5,
         fundingRate: 0.0002,
         fundingIntervalHours: 4,

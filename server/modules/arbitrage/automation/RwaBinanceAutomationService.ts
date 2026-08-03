@@ -1239,7 +1239,9 @@ export class RwaBinanceAutomationService {
         client = await this.clientForNewRisk(state, metadata);
         const access = await this.validateActiveAccess(client, accountId, state);
         this.assertProductionSelfTestPermit(state.config, metadata, access);
-        const snapshot = await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+        const snapshot = await this.verifyConnectivitySmokeWindow(
+          client, state, smoke, "blank", null, true,
+        );
         const approvedCapitalUsd = this.approvedConnectivitySmokeCapital(
           state.config,
           metadata,
@@ -1254,11 +1256,7 @@ export class RwaBinanceAutomationService {
         if (!sameSmokeBudget(budget, smoke.budget) || !smokePreflightChecks(snapshot, budget, this.now()).every((item) => item.passed)) {
           throw new RwaNeutralExecutionError(409, "connectivity_smoke_preflight_changed", "烟测执行前规则、余额或价格已变化。");
         }
-        await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
-        await this.prepareSmokeProviderMutation(client, smoke, "set_leverage", { expectedLeverage: 1 });
-        await client.setPerpetualLeverage(1);
-        smoke.providerMutationCount += 1;
-        await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+        await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank", null, true);
         await this.openAndImmediatelyCloseConnectivitySmoke(client, state, smoke, snapshot);
       } catch (error) {
         smoke.errorCategory = errorCategory(error);
@@ -1271,7 +1269,10 @@ export class RwaBinanceAutomationService {
           state.config.killSwitchActive = true;
         } else if (client && (
           smoke.providerMutationCount > 0
-          || smoke.errorCategory !== "connectivity_smoke_provider_snapshot_stale"
+          || (
+            smoke.errorCategory !== "connectivity_smoke_provider_snapshot_stale"
+            && smoke.errorCategory !== "connectivity_smoke_leverage_not_1x"
+          )
         )) {
           try {
             await this.reduceConnectivitySmokeRisk(client, state, smoke);
@@ -1285,7 +1286,14 @@ export class RwaBinanceAutomationService {
           smoke.stage = "manual_intervention";
           state.config.killSwitchActive = true;
         }
-        if (smoke.stage === "reserved" && smoke.providerMutationCount === 0) smoke.stage = "failed";
+        if (
+          smoke.errorCategory === "connectivity_smoke_leverage_not_1x"
+          && smoke.providerMutationCount === 0
+        ) {
+          smoke.stage = "failed";
+        } else if (smoke.stage === "reserved" && smoke.providerMutationCount === 0) {
+          smoke.stage = "failed";
+        }
         appendConnectivitySmokeTimeline(smoke, this.now());
         smoke.updatedAt = this.now();
         await this.store.writeState(state);
@@ -1566,7 +1574,7 @@ export class RwaBinanceAutomationService {
   ) {
     smoke.stage = "spot_opening";
     await this.persistConnectivitySmoke(state, smoke);
-    await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank");
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "blank", null, true);
     this.assertExecutionLeaseHeld();
     await this.prepareSmokeProviderMutation(client, smoke, "place_spot_order", {
       orderLinkId: `${smoke.orderLinkPrefix}s1`,
@@ -1626,7 +1634,7 @@ export class RwaBinanceAutomationService {
     }
     smoke.stage = "futures_opening";
     await this.persistConnectivitySmoke(state, smoke);
-    await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only");
+    await this.verifyConnectivitySmokeWindow(client, state, smoke, "spot_only", null, true);
     this.assertExecutionLeaseHeld();
     await this.prepareSmokeProviderMutation(client, smoke, "place_futures_order", {
       orderLinkId: `${smoke.orderLinkPrefix}p1`,
@@ -2004,6 +2012,7 @@ export class RwaBinanceAutomationService {
     smoke: RwaConnectivitySmokeRecord,
     expected: "blank" | "spot_only" | "hedged" | "within_ledger" | "futures_flat" | "flat",
     allowedOpenOrder: SmokeAllowedOpenOrder | null = null,
+    requireLeverage1x = false,
   ) {
     this.assertExecutionLeaseHeld();
     await this.reconcileConnectivitySmokeOrders(client, smoke);
@@ -2069,7 +2078,7 @@ export class RwaBinanceAutomationService {
       );
     }
     try {
-      assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder);
+      assertSmokeSnapshot(snapshot, smoke, expected, allowedOpenOrder, requireLeverage1x);
       smoke.providerState = providerStateFromSnapshot(
         snapshot,
         "verified",
@@ -3162,6 +3171,8 @@ function smokePreflightChecks(
       && snapshot.spotFreeXaut <= 1e-12 && snapshot.spotLockedXaut <= 1e-12, message: "专用子账户 Spot total/free/locked 必须为 0。" },
     { name: "blank_futures", passed: snapshot.existingPerpetualQuantityXaut <= 1e-12
       && snapshot.perpetualPositionSide === "flat", message: "专用子账户 Futures position 必须为 0。" },
+    { name: "leverage_1x", passed: snapshot.perpetual.leverage === 1,
+      message: "USD-M XAUTUSDT 当前杠杆必须已配置为 1x；smoke 仅只读验证，不执行杠杆配置写入。" },
     { name: "blank_orders", passed: snapshot.openSpotOrderCount === 0
       && snapshot.openPerpetualOrderCount === 0, message: "两侧 XAUT 活动订单必须为 0。" },
     { name: "dynamic_quantity", passed: budget.quantityXaut > 0
@@ -3178,6 +3189,7 @@ function assertSmokeSnapshot(
   smoke: RwaConnectivitySmokeRecord,
   expected: "blank" | "spot_only" | "hedged" | "within_ledger" | "futures_flat" | "flat",
   allowedOpenOrder: SmokeAllowedOpenOrder | null = null,
+  requireLeverage1x = false,
 ) {
   const allowedProviderOrder = allowedOpenOrder
     ? [
@@ -3207,6 +3219,13 @@ function assertSmokeSnapshot(
   const openOrdersMatch = allowedOpenOrder
     ? allowedOrderIsExactAndActive || allowedOrderBecameTerminal
     : snapshot.openSpotOrderCount === 0 && snapshot.openPerpetualOrderCount === 0;
+  if (requireLeverage1x && snapshot.perpetual.leverage !== 1) {
+    throw new RwaNeutralExecutionError(
+      409,
+      "connectivity_smoke_leverage_not_1x",
+      "XAUTUSDT USD-M 当前杠杆不再是 1x；smoke 已停止且不会自动修改杠杆。",
+    );
+  }
   if (
     snapshot.accountId !== smoke.accountId
     || snapshot.accountFingerprint !== smoke.accountFingerprint

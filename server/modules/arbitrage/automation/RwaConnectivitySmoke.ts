@@ -8,7 +8,7 @@ import type { RwaProviderOrder } from "./RwaNeutralExecutionTypes";
 export const RWA_CONNECTIVITY_SMOKE_PURPOSE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MODE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MAX_RECORDS = 100;
-export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-gate2-capital-v3" as const;
+export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-gate2-capital-v4" as const;
 export const RWA_CONNECTIVITY_SMOKE_SLIPPAGE_FLOOR_BPS = 10;
 export const RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS = Object.freeze({
   spotOpen: Object.freeze({ suffix: "s1", category: "spot", side: "Buy", reduceOnly: false }),
@@ -21,6 +21,7 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
   venue: "binance",
   symbol: "XAUTUSDT",
   capitalAuthorization: "server_permit_exact_limit",
+  leverageControl: "read_existing_1x_no_configuration_mutation",
   serverPermitBoundExclusiveBlankAccount: true,
   singleExecution: true,
   immediateExit: true,
@@ -39,6 +40,10 @@ export const RWA_CONNECTIVITY_SMOKE_POLICY = deepFreeze({
     {
       code: "single_execution_immediate_exit",
       message: "仅授权一次 connectivity smoke，并在Gate 2服务器批准金额内建仓后立即退出。",
+    },
+    {
+      code: "existing_leverage_read_verified_1x",
+      message: "XAUTUSDT USD-M 杠杆必须预先为 1x；StellaX 仅通过 positionRisk 只读验证，不执行杠杆配置 mutation。",
     },
     {
       code: "no_other_xaut_activity",

@@ -66,6 +66,7 @@ export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinanc
   openPerpetualOrderCount: number;
   spot: RwaBinanceInstrumentSnapshot;
   perpetual: RwaBinanceInstrumentSnapshot & {
+    leverage: number | null;
     mark: number;
     fundingRate: number;
     fundingIntervalHours: number;

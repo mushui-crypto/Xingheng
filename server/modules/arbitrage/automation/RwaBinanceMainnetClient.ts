@@ -225,6 +225,9 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const positionAmount = positionRow
       ? snapshotFiniteNumber(positionRow.positionAmt, "永续仓位数量")
       : 0;
+    const leverage = positionRow
+      ? snapshotPositiveInteger(positionRow.leverage, "永续杠杆")
+      : null;
     const position = Math.abs(positionAmount) > 0 ? positionRow : undefined;
     const spotBalances = list(spotAccount.balances).map(record);
     const usdt = spotBalances.find((item) => item.asset === "USDT");
@@ -279,6 +282,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       },
       perpetual: {
         ...products.perpetual,
+        leverage,
         bid: perpetualBid,
         ask: perpetualAsk,
         depthUsd: depthUsd(futuresDepthValue),
@@ -1191,6 +1195,14 @@ function depthLevels(value: unknown, key: "asks" | "bids") {
 function snapshotPositiveNumber(value: unknown, label: string) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed <= 0) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return parsed;
+}
+
+function snapshotPositiveInteger(value: unknown, label: string) {
+  const parsed = snapshotPositiveNumber(value, label);
+  if (!Number.isInteger(parsed)) {
     throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
   }
   return parsed;

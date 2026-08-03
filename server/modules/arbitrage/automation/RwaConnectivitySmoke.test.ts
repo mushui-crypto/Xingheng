@@ -24,13 +24,19 @@ test("connectivity smoke policy discovery is the canonical display and acceptanc
   assert.equal(discovery.policy.version, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
   assert.equal(discovery.policy.digest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
   assert.equal(discovery.policy.serverPermitBoundExclusiveBlankAccount, true);
+  assert.equal(discovery.policy.leverageControl, "read_existing_1x_no_configuration_mutation");
   assert.equal("dedicatedBlankSubaccount" in discovery.policy, false);
   assert.deepEqual(discovery.policy.requiredConfirmations, [
     "exclusive_window", "manual_recovery", "non_atomic_risk",
   ]);
   assert.deepEqual(
     discovery.policy.exclusiveWindowRules.map((item) => item.code),
-    ["server_permit_bound_exclusive_blank_account", "single_execution_immediate_exit", "no_other_xaut_activity"],
+    [
+      "server_permit_bound_exclusive_blank_account",
+      "single_execution_immediate_exit",
+      "existing_leverage_read_verified_1x",
+      "no_other_xaut_activity",
+    ],
   );
   assert.deepEqual(
     discovery.policy.manualRecoveryRequirements.map((item) => item.code),
@@ -65,6 +71,13 @@ test("connectivity smoke policy discovery is the canonical display and acceptanc
   assert.throws(() => assertConnectivitySmokePolicyAcceptance({
     version: discovery.policy.version,
     digest: `${discovery.policy.digest}-old`,
+    exclusiveWindowConfirmed: true,
+    manualRecoveryConfirmed: true,
+    nonAtomicRiskAccepted: true,
+  }));
+  assert.throws(() => assertConnectivitySmokePolicyAcceptance({
+    version: "connectivity-smoke-gate2-capital-v3" as typeof discovery.policy.version,
+    digest: discovery.policy.digest,
     exclusiveWindowConfirmed: true,
     manualRecoveryConfirmed: true,
     nonAtomicRiskAccepted: true,
@@ -482,6 +495,7 @@ function snapshot(): RwaBinancePreflightSnapshot {
       bid: 4_100,
       ask: 4_101,
       depthUsd: 100_000,
+      leverage: 1,
       mark: 4_100,
       fundingRate: 0,
       fundingIntervalHours: 8,
