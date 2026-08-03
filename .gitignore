@@ -25,3 +25,8 @@ server/data/strategy/fixed-grid-archive-cache/
 
 server/data/candles.json
 server/data/trading.sqlite*
+
+# Local-only migration and authorization evidence. These paths may contain
+# account identifiers, approval records, or task/session metadata.
+docs/private/
+docs/thread-handoffs/
