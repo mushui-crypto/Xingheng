@@ -18,6 +18,7 @@
 
 `reports/2026-08/RELEASE_ACTIVATION_REPORT.md` 是 artifact 构建前的历史中间记录；
 `reports/2026-08/RELEASE_ARTIFACT_BUILD_REPORT.md` 是当前 `6efe18e` artifact 状态证据。
+`reports/2026-08/REPOSITORY_MIGRATION_HANDOFF.md` 是可通过 Git 同步的脱敏迁移交接摘要。
 
 ## Local-only documents
 
