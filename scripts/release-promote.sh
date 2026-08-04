@@ -9,24 +9,26 @@ fi
 
 archive=false
 archive_root=
+archive_candidate_manifest=
 archive_revision=
 archive_parent=
 archive_source_sha256=
 archive_tree_sha256=
 archive_manifest_sha256=
 if [ "${1:-}" = --archive ]; then
-  [ "$#" -eq 15 ] || {
-    echo "--archive requires CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256" >&2
+  [ "$#" -eq 16 ] || {
+    echo "--archive requires CANDIDATE_ROOT CANDIDATE_MANIFEST REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256" >&2
     exit 2
   }
   archive=true
   archive_root="$2"
-  archive_revision="$3"
-  archive_parent="$4"
-  archive_source_sha256="$5"
-  archive_tree_sha256="$6"
-  archive_manifest_sha256="$7"
-  shift 7
+  archive_candidate_manifest="$3"
+  archive_revision="$4"
+  archive_parent="$5"
+  archive_source_sha256="$6"
+  archive_tree_sha256="$7"
+  archive_manifest_sha256="$8"
+  shift 8
 fi
 
 version="${1:-}"
@@ -38,7 +40,7 @@ approval_status="${6:-}"
 rollback_point="${7:-}"
 health_url="${8:-}"
 [ "$#" -eq 8 ] || {
-  echo "usage: $0 [--generate] [--archive CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256] VERSION RELEASE_MANIFEST_PATH ENVIRONMENT TEST_STATUS SECURITY_STATUS APPROVAL_STATUS ROLLBACK_POINT HEALTH_URL" >&2
+  echo "usage: $0 [--generate] [--archive CANDIDATE_ROOT CANDIDATE_MANIFEST REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256] VERSION CANONICAL_MANIFEST_PATH ENVIRONMENT TEST_STATUS SECURITY_STATUS APPROVAL_STATUS ROLLBACK_POINT HEALTH_URL" >&2
   exit 2
 }
 
@@ -69,11 +71,8 @@ case "$health_url" in
 esac
 
 if [ "$archive" = true ]; then
-  scripts/release-check.sh --archive \
-    "$archive_root" "$manifest_path" "$archive_revision" "$archive_parent" \
-    "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256"
   verify_output="$(scripts/release-verify.sh --archive \
-    "$archive_root" "$archive_revision" "$archive_parent" \
+    "$archive_root" "$archive_candidate_manifest" "$archive_revision" "$archive_parent" \
     "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256" \
     --deployment --health-url "$health_url" "$manifest_path")"
 else

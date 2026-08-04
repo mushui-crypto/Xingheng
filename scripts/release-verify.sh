@@ -3,24 +3,26 @@ set -eu
 
 archive=false
 archive_root=
+archive_candidate_manifest=
 archive_revision=
 archive_parent=
 archive_source_sha256=
 archive_tree_sha256=
 archive_manifest_sha256=
 if [ "${1:-}" = --archive ]; then
-  [ "$#" -ge 8 ] || {
-    echo "--archive requires CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256" >&2
+  [ "$#" -ge 9 ] || {
+    echo "--archive requires CANDIDATE_ROOT CANDIDATE_MANIFEST REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256" >&2
     exit 2
   }
   archive=true
   archive_root="$2"
-  archive_revision="$3"
-  archive_parent="$4"
-  archive_source_sha256="$5"
-  archive_tree_sha256="$6"
-  archive_manifest_sha256="$7"
-  shift 7
+  archive_candidate_manifest="$3"
+  archive_revision="$4"
+  archive_parent="$5"
+  archive_source_sha256="$6"
+  archive_tree_sha256="$7"
+  archive_manifest_sha256="$8"
+  shift 8
 fi
 
 deployment=false
@@ -41,12 +43,22 @@ done
 
 manifest_path="${1:-}"
 [ "$#" -eq 1 ] && [ -n "$manifest_path" ] || {
-  echo "usage: $0 [--archive CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256] [--deployment --health-url HTTPS_URL] RELEASE_MANIFEST_PATH" >&2
+  echo "usage: $0 [--archive CANDIDATE_ROOT CANDIDATE_MANIFEST REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256] [--deployment --health-url HTTPS_URL] CANONICAL_MANIFEST_PATH" >&2
   exit 2
 }
 if [ "$deployment" = false ] && [ -n "$health_url" ]; then
   echo "--health-url requires --deployment" >&2
   exit 2
+fi
+
+if [ "$archive" = true ]; then
+  [ "$archive_candidate_manifest" != "$manifest_path" ] || {
+    echo "release verify BLOCKED: candidate manifest cannot be used as canonical manifest" >&2
+    exit 1
+  }
+  scripts/release-check.sh --archive \
+    "$archive_root" "$archive_candidate_manifest" "$archive_revision" "$archive_parent" \
+    "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256" >/dev/null
 fi
 
 revision="$(node scripts/verify-deployment-revision.mjs manifest-revision "$manifest_path")"
@@ -57,9 +69,11 @@ if [ "$archive" = true ]; then
     echo "release verify BLOCKED: archive revision mismatch" >&2
     exit 1
   }
-  scripts/release-check.sh --archive \
-    "$archive_root" "$manifest_path" "$archive_revision" "$archive_parent" \
-    "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256" >/dev/null
+  canonical_manifest_sha256="$(/usr/bin/sha256sum "$manifest_path" | awk '{print $1}')"
+  [ "$canonical_manifest_sha256" = "$archive_manifest_sha256" ] || {
+    echo "release verify BLOCKED: canonical manifest identity mismatch" >&2
+    exit 1
+  }
   commit_sha="$archive_revision"
   tree_sha="$archive_tree_sha256"
   parent_sha="$archive_parent"
