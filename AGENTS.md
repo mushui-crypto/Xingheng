@@ -223,3 +223,32 @@ AI 判断依据优先级：
 不要将个人最佳实践等同于项目必须修改。
 
 优秀方案不是最复杂方案，而是当前阶段最合适、稳定、可维护的方案。
+
+------------------------------------------------------------------------
+
+# 10. Release Workflow
+
+所有 Agent 修改代码或发布相关文档后，必须遵守
+[`RELEASE_PROCESS.md`](./RELEASE_PROCESS.md) 定义的 Release Workflow。
+
+Agent 不允许：
+
+-   直接创建、标记或部署 production release
+-   绕过 commit identity、artifact digest、release manifest 或 production gate 直接部署
+-   调用其他智能体
+-   创建子智能体
+-   自行扩大任务范围
+
+Agent 可以在明确任务范围内准备 release candidate、运行默认只读检查并整理审计证据；构建、
+promotion、生产 activation、rollback 和任何资金相关动作仍分别受既有批准与安全边界约束。
+
+每次任务完成必须输出：
+
+```text
+Changed files:
+Commit SHA:
+Tree SHA:
+Tests:
+Risk:
+Remaining blockers:
+```
