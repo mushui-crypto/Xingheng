@@ -53,6 +53,16 @@ import {
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
+const capitalTestPermitLimits = {
+  leverage: 1,
+  maxPositionUsd: 40,
+  maxOrderSizeUsd: 40,
+  maxOrderCount: 4,
+  maxSlippageBps: 20,
+  maxFeeBps: 100,
+  lossLimitUsd: 40,
+  executionId: "7".repeat(32),
+};
 
 test("Binance connectivity smoke policy discovery is static and performs no provider or KMS read", () => {
   const client = new FakeBinanceClient();
@@ -127,6 +137,7 @@ test("Binance production development account requires an exact permit confirmati
       client.access.accountFingerprint,
     );
     const permitInput = {
+      ...capitalTestPermitLimits,
       permitId: "a".repeat(32),
       ownerUserId: userId,
       accountBindingSha256: binding,
@@ -223,6 +234,7 @@ test("Binance production self-test blocks ordinary execution before every provid
       const client = new FakeBinanceClient();
       const userId = "USR-MOSS3";
       const permitInput = {
+        ...capitalTestPermitLimits,
         permitId: "e".repeat(32),
         ownerUserId: userId,
         accountBindingSha256: binanceAccountBindingSha256(
@@ -286,6 +298,7 @@ test("Binance production self-test preserves generic takeover and aggregate capi
     const client = new FakeBinanceClient();
     const userId = "USR-MOSS2";
     const permitInput = {
+      ...capitalTestPermitLimits,
       permitId: "c".repeat(32),
       ownerUserId: userId,
       accountBindingSha256: binanceAccountBindingSha256(
@@ -294,7 +307,7 @@ test("Binance production self-test preserves generic takeover and aggregate capi
       ),
       actionScope: ["READ", "TRADE"] as const,
       authorizationDigest: "3".repeat(64),
-      approvedCapitalUsd: 200,
+      approvedCapitalUsd: 40,
       expiresAt: now + 10_000,
       revision: "d".repeat(40),
     };
@@ -2020,6 +2033,7 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
       "smoke:approved-capital:1",
     );
     const writes: Array<{ writeCount: number; smokeCount: number; consumptionCount: number }> = [];
+    const reservedStates: Array<Awaited<ReturnType<typeof harness.store.readState>>> = [];
     const writeState = harness.store.writeState.bind(harness.store);
     harness.store.writeState = async (state) => {
       writes.push({
@@ -2027,6 +2041,10 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
         smokeCount: state.connectivitySmokes.length,
         consumptionCount: state.productionSelfTestPermitConsumptions.length,
       });
+      if (state.connectivitySmokes[0]?.stage === "reserved"
+        && state.connectivitySmokes[0].authorization.capitalTest) {
+        reservedStates.push(structuredClone(state));
+      }
       return writeState(state);
     };
     const result = await harness.current.executeConnectivitySmoke(executeRequest) as any;
@@ -2036,11 +2054,42 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
     assert.equal(harness.client.writeCount, 4);
     assert.deepEqual(writes[0], { writeCount: 0, smokeCount: 1, consumptionCount: 1 });
     const state = await harness.store.readState();
+    assert.deepEqual(state.connectivitySmokes[0]?.authorization.capitalTest, {
+      accountBindingSha256: binanceAccountBindingSha256(
+        harness.client.access.accountId,
+        harness.client.access.accountFingerprint,
+      ),
+      revision: "8".repeat(40),
+      approvedCapitalUsd: 30,
+      expiresAt: now + 60_000,
+      ...capitalTestPermitLimits,
+      authorizationDigest: "4".repeat(64),
+      permitDigest: state.config.productionSelfTestPermitConfirmation?.digest,
+    });
     assert.deepEqual(state.productionSelfTestPermitConsumptions, [{
       permitId: "9".repeat(32),
       digest: state.config.productionSelfTestPermitConfirmation?.digest,
       consumedAt: now,
     }]);
+    const historical = structuredClone(state);
+    delete historical.connectivitySmokes[0]!.authorization.capitalTest;
+    await harness.store.writeState(historical);
+    const reservedState = reservedStates[0];
+    assert.ok(reservedState);
+    const activeWithoutTuple = structuredClone(reservedState);
+    delete activeWithoutTuple.connectivitySmokes[0]!.authorization.capitalTest;
+    await assert.rejects(harness.store.writeState(activeWithoutTuple));
+    for (const mutate of [
+      (tuple: any) => { delete tuple.executionId; },
+      (tuple: any) => { tuple.revision = "6".repeat(40); },
+      (tuple: any) => { tuple.accountBindingSha256 = "5".repeat(64); },
+      (tuple: any) => { tuple.authorizationDigest = "3".repeat(64); },
+      (tuple: any) => { tuple.maxOrderCount = 5; },
+    ]) {
+      const invalid = structuredClone(reservedState);
+      mutate(invalid.connectivitySmokes[0]!.authorization.capitalTest);
+      await assert.rejects(harness.store.writeState(invalid));
+    }
 
     const idempotent = await harness.current.executeConnectivitySmoke(executeRequest) as any;
     assert.equal(idempotent.smokeId, result.smokeId);
@@ -2060,6 +2109,25 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
     );
     assert.equal(harness.client.writeCount, 4);
     assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Capital Test loss limit is not compared with authorized deployed capital", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-loss-limit-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 40, { lossLimitUsd: 10 });
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(harness.accountId, challenge, "smoke:loss-limit:1"),
+    ) as any;
+    assert.ok(result.budget.totalCapitalUsd > 10);
+    assert.ok(result.budget.totalCapitalUsd <= 40);
+    assert.equal(result.stage, "flat");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -3119,10 +3187,16 @@ function serviceHarness(
   };
 }
 
-async function productionSmokeHarness(directory: string, approvedCapitalUsd: number) {
+async function productionSmokeHarness(
+  directory: string,
+  approvedCapitalUsd: number,
+  permitLimitOverrides: Partial<typeof capitalTestPermitLimits> = {},
+) {
   const client = new FakeBinanceClient();
   const userId = "USR-MOSSSMOKE";
   const basePermit = {
+    ...capitalTestPermitLimits,
+    ...permitLimitOverrides,
     permitId: "9".repeat(32),
     ownerUserId: userId,
     accountBindingSha256: binanceAccountBindingSha256(

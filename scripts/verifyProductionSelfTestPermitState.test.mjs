@@ -150,7 +150,8 @@ function runtimePermitEnvironment() {
   const expiresAt = "2026-08-04T09:00:00.000Z";
   const digest = createHash("sha256").update([
     "production", "binance", "xaut", permitId, OWNER, accountBindingSha256,
-    "READ", "TRADE", authorization, "40", revision, expiresAt,
+    "READ", "TRADE", authorization, "40", "1", "40", "40", "4", "20", "100", "40",
+    "e".repeat(32), revision, expiresAt,
   ].join(":"), "utf8").digest("hex");
   return {
     digest,
@@ -162,6 +163,14 @@ function runtimePermitEnvironment() {
       RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
       RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorization,
       RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "40",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE: "1",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD: "40",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD: "40",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT: "4",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS: "20",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS: "100",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD: "40",
+      RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID: "e".repeat(32),
       RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: expiresAt,
       XINGHENG_EXPECTED_REVISION: revision,
     },

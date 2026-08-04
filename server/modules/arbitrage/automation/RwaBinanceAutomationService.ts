@@ -1222,6 +1222,22 @@ export class RwaBinanceAutomationService {
           consumedBeforeProviderMutation: true,
           exitAuthorized: true,
           reservedAt: now,
+          ...(permit ? { capitalTest: {
+            accountBindingSha256: permit.accountBindingSha256,
+            revision: permit.revision,
+            approvedCapitalUsd: permit.approvedCapitalUsd,
+            expiresAt: permit.expiresAt,
+            leverage: permit.leverage,
+            maxPositionUsd: permit.maxPositionUsd,
+            maxOrderSizeUsd: permit.maxOrderSizeUsd,
+            maxOrderCount: permit.maxOrderCount,
+            maxSlippageBps: permit.maxSlippageBps,
+            maxFeeBps: permit.maxFeeBps,
+            lossLimitUsd: permit.lossLimitUsd,
+            executionId: permit.executionId,
+            authorizationDigest: permit.authorizationDigest,
+            permitDigest: permit.digest,
+          } } : {}),
         },
         spotOpenOrder: null,
         futuresOpenOrder: null,
@@ -1253,6 +1269,7 @@ export class RwaBinanceAutomationService {
       }
       state.connectivitySmokes.push(smoke);
       await this.store.writeState(state);
+      await this.assertPersistedCapitalTestReservation(smoke, permit);
       let client: RwaBinanceClient | null = null;
       try {
         const metadata = await this.requireMetadata();
@@ -2690,6 +2707,14 @@ export class RwaBinanceAutomationService {
       && confirmation.actionScope[1] === permit.actionScope[1]
       && confirmation.authorizationDigest === permit.authorizationDigest
       && confirmation.approvedCapitalUsd === permit.approvedCapitalUsd
+      && confirmation.leverage === permit.leverage
+      && confirmation.maxPositionUsd === permit.maxPositionUsd
+      && confirmation.maxOrderSizeUsd === permit.maxOrderSizeUsd
+      && confirmation.maxOrderCount === permit.maxOrderCount
+      && confirmation.maxSlippageBps === permit.maxSlippageBps
+      && confirmation.maxFeeBps === permit.maxFeeBps
+      && confirmation.lossLimitUsd === permit.lossLimitUsd
+      && confirmation.executionId === permit.executionId
       && confirmation.expiresAt === permit.expiresAt
       && confirmation.revision === permit.revision
       && confirmation.digest === permit.digest;
@@ -2722,6 +2747,46 @@ export class RwaBinanceAutomationService {
   ) {
     if (!this.productionEnvironment()) return config.maxStrategyCapitalUsd;
     return this.requireMatchingProductionSelfTestPermit(metadata, access).approvedCapitalUsd;
+  }
+
+  private async assertPersistedCapitalTestReservation(
+    smoke: RwaConnectivitySmokeRecord,
+    permit: RwaBinanceProductionSelfTestPermit | null,
+  ) {
+    if (!permit) return;
+    const tuple = smoke.authorization.capitalTest;
+    if (
+      !tuple
+      || tuple.accountBindingSha256 !== permit.accountBindingSha256
+      || tuple.revision !== permit.revision
+      || tuple.approvedCapitalUsd !== permit.approvedCapitalUsd
+      || tuple.expiresAt !== permit.expiresAt
+      || tuple.leverage !== permit.leverage
+      || tuple.maxPositionUsd !== permit.maxPositionUsd
+      || tuple.maxOrderSizeUsd !== permit.maxOrderSizeUsd
+      || tuple.maxOrderCount !== permit.maxOrderCount
+      || tuple.maxSlippageBps !== permit.maxSlippageBps
+      || tuple.maxFeeBps !== permit.maxFeeBps
+      || tuple.lossLimitUsd !== permit.lossLimitUsd
+      || tuple.executionId !== permit.executionId
+      || tuple.authorizationDigest !== permit.authorizationDigest
+      || tuple.permitDigest !== permit.digest
+      || smoke.budget.spotNotionalUsd > permit.maxPositionUsd + 1e-9
+      || smoke.budget.spotNotionalUsd > permit.maxOrderSizeUsd + 1e-9
+      || smoke.budget.slippageBpsPerAction > permit.maxSlippageBps
+    ) throw accountIsolationUnconfirmed();
+    const persisted = await this.store.readState();
+    const reserved = persisted.connectivitySmokes.find((value) => value.smokeId === smoke.smokeId);
+    const consumed = persisted.productionSelfTestPermitConsumptions.some((value) =>
+      value.permitId === permit.permitId && value.digest === permit.digest);
+    if (!reserved || reserved.stage !== "reserved" || reserved.providerMutationCount !== 0
+      || reserved.authorization.capitalTest?.executionId !== permit.executionId || !consumed) {
+      throw new RwaNeutralExecutionError(
+        409,
+        "capital_test_reservation_not_persisted",
+        "Capital Test Permit consumption and execution reservation were not persisted atomically.",
+      );
+    }
   }
 
   private async withLock<T>(operation: () => Promise<T>): Promise<T> {

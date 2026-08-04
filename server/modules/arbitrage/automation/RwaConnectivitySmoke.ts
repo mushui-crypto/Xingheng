@@ -317,6 +317,22 @@ export type RwaConnectivitySmokeRecord = {
     consumedBeforeProviderMutation: true;
     exitAuthorized: true;
     reservedAt: number;
+    capitalTest?: {
+      accountBindingSha256: string;
+      revision: string;
+      approvedCapitalUsd: number;
+      expiresAt: number;
+      leverage: number;
+      maxPositionUsd: number;
+      maxOrderSizeUsd: number;
+      maxOrderCount: number;
+      maxSlippageBps: number;
+      maxFeeBps: number;
+      lossLimitUsd: number;
+      executionId: string;
+      authorizationDigest: string;
+      permitDigest: string;
+    };
   };
   spotOpenOrder: RwaProviderOrder | null;
   futuresOpenOrder: RwaProviderOrder | null;
@@ -444,9 +460,14 @@ function validateConnectivitySmokeParentFacts(smoke: RwaConnectivitySmokeRecord)
   }
   const authorization = smoke.authorization;
   if (!authorization || typeof authorization !== "object" || Array.isArray(authorization)
-    || !hasExactKeys(authorization, [
-      "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
-    ])
+    || !(
+      hasExactKeys(authorization, [
+        "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+      ])
+      || hasExactKeys(authorization, [
+        "capitalTest", "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+      ])
+    )
     || authorization.operation !== "connectivity_smoke_execute"
     || authorization.consumedBeforeProviderMutation !== true
     || authorization.exitAuthorized !== true
@@ -454,6 +475,32 @@ function validateConnectivitySmokeParentFacts(smoke: RwaConnectivitySmokeRecord)
     || authorization.reservedAt < smoke.createdAt
     || authorization.reservedAt > smoke.updatedAt) {
     throw new Error("connectivity smoke parent authorization is invalid");
+  }
+  const capitalTest = authorization.capitalTest;
+  if (capitalTest !== undefined && (typeof capitalTest !== "object" || capitalTest === null || Array.isArray(capitalTest)
+    || !hasExactKeys(capitalTest, [
+      "accountBindingSha256", "approvedCapitalUsd", "authorizationDigest", "executionId",
+      "expiresAt", "leverage", "lossLimitUsd", "maxFeeBps", "maxOrderCount",
+      "maxOrderSizeUsd", "maxPositionUsd", "maxSlippageBps", "permitDigest", "revision",
+    ])
+    || !/^[a-f0-9]{64}$/u.test(capitalTest.accountBindingSha256)
+    || !/^[a-f0-9]{40}$/u.test(capitalTest.revision)
+    || !/^[a-f0-9]{64}$/u.test(capitalTest.authorizationDigest)
+    || !/^[a-f0-9]{64}$/u.test(capitalTest.permitDigest)
+    || !/^[a-f0-9]{32}$/u.test(capitalTest.executionId)
+    || !Number.isFinite(capitalTest.approvedCapitalUsd) || capitalTest.approvedCapitalUsd <= 0
+    || capitalTest.approvedCapitalUsd > 40 || capitalTest.leverage !== 1
+    || capitalTest.maxPositionUsd !== 40
+    || !Number.isFinite(capitalTest.maxOrderSizeUsd) || capitalTest.maxOrderSizeUsd <= 0
+    || capitalTest.maxOrderSizeUsd > 40 || capitalTest.maxOrderCount !== 4
+    || !Number.isSafeInteger(capitalTest.maxSlippageBps) || capitalTest.maxSlippageBps < 1
+    || capitalTest.maxSlippageBps > 20
+    || !Number.isFinite(capitalTest.maxFeeBps) || capitalTest.maxFeeBps <= 0
+    || capitalTest.maxFeeBps > 100
+    || !Number.isFinite(capitalTest.lossLimitUsd) || capitalTest.lossLimitUsd <= 0
+    || capitalTest.lossLimitUsd > 40
+    || !Number.isSafeInteger(capitalTest.expiresAt) || capitalTest.expiresAt <= authorization.reservedAt)) {
+    throw new Error("connectivity smoke capital test authorization is invalid");
   }
   validateConnectivitySmokeBudget(smoke.budget);
   const exit = smoke.exit;

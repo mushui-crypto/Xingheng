@@ -502,17 +502,6 @@ function isAllowedComposeOperation(args, profiles) {
     && /^[a-f0-9]{32}$/u.test(args[7])
   ) return true;
   if (
-    profiles.size === 0
-    && args.length === 9
-    && sameArgs(args.slice(0, 6), [
-      "exec", "-T", "api", "node",
-      "/app/scripts/productionSelfTestPermitLegacyState.mjs", "migrate",
-    ])
-    && /^USR-[A-Z0-9]+$/u.test(args[6])
-    && args[7] === "e0c3703b9a008ae5bcdfa56f413a6f36"
-    && args[8] === "e6392afb1072288986778143b54a48ac9ef4c4e69e418987a2e64b31f9bd04a1"
-  ) return true;
-  if (
     profiles.has("rwa-automation-verify")
     && profiles.size === 1
     && sameArgs(args, ["run", "--rm", "--no-deps", "rwa-automation-verify"])
@@ -584,6 +573,23 @@ function isProductionRwaRestoreOperation(args) {
     "flock", "-n", "-x", "/app/rwa-automation-lock/operation.lock",
     "node", "dist-server/operations/rwa-automation-backup.js", "rollback",
   ])) return true;
+  if (
+    args.length === 18
+    && process.env.XINGHENG_TRUSTED_OPERATION_ENTRY
+      === "migrate-production-self-test-permit-legacy-state.sh"
+    && sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])
+    && args[4] === "XINGHENG_TRUSTED_OPERATION_ENTRY=migrate-production-self-test-permit-legacy-state.sh"
+    && args[5] === "-e"
+    && args[6] === "XINGHENG_OPERATION_LOCK_CONTEXT=production"
+    && sameArgs(args.slice(7, 15), [
+      "rwa-automation-restore", "flock", "-n", "-x",
+      "/app/rwa-automation-lock/operation.lock", "node",
+      "/app/scripts/productionSelfTestPermitLegacyState.mjs", "migrate",
+    ])
+    && /^USR-[A-Z0-9]+$/u.test(args[15])
+    && args[16] === "e0c3703b9a008ae5bcdfa56f413a6f36"
+    && args[17] === "e6392afb1072288986778143b54a48ac9ef4c4e69e418987a2e64b31f9bd04a1"
+  ) return true;
   if (args.length !== 6 || !sameArgs(args.slice(0, 4), ["run", "--rm", "--no-deps", "-e"])) {
     return false;
   }

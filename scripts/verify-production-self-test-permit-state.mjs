@@ -52,12 +52,22 @@ function verifyRuntimePermit(ownerUserId) {
   const permitId = process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID ?? "";
   const accountBindingSha256 = process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256 ?? "";
   const approvedCapitalUsd = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD);
+  const leverage = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE);
+  const maxPositionUsd = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD);
+  const maxOrderSizeUsd = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD);
+  const maxOrderCount = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT);
+  const maxSlippageBps = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS);
+  const maxFeeBps = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS);
+  const lossLimitUsd = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD);
+  const executionId = process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID ?? "";
   const actual = productionSelfTestPermitDigest({
     permitId,
     ownerUserId,
     accountBindingSha256,
     authorizationDigest: expectedAuthorization,
     approvedCapitalUsd,
+    leverage, maxPositionUsd, maxOrderSizeUsd, maxOrderCount, maxSlippageBps,
+    maxFeeBps, lossLimitUsd, executionId,
     revision: expectedRevision,
     expiresAt: expectedExpiresAt,
   });

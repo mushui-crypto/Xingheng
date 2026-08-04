@@ -40,6 +40,14 @@ export const PERMIT_ENV_KEYS = Object.freeze([
   "RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT",
 ]);
 
@@ -47,6 +55,8 @@ const REQUEST_KEYS = [
   "accountBindingSha256", "actionScope", "approvedCapitalUsd",
   "apiImageDigest", "authorizationManifestSha256", "executionMode", "gitTreeSha",
   "leverage",
+  "lossLimitUsd", "maxFeeBps", "maxOrderCount", "maxOrderSizeUsd",
+  "maxPositionUsd", "maxSlippageBps", "executionId",
   "maximumDurationMinutes", "maximumExecutionDurationMinutes", "ownerUserId",
   "permitId", "releaseManifestSha256", "releaseRevision", "releaseTreeSha256",
   "schemaVersion", "webImageDigest",
@@ -59,7 +69,9 @@ const RECEIPT_KEYS = [
 const ATTEMPT_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => key !== "attemptReceiptSha256");
 const PERMIT_KEYS = [
   "accountBindingSha256", "actionScope", "approvedCapitalUsd", "authorizationDigest",
-  "digest", "expiresAt", "ownerUserId", "permitId", "revision",
+  "digest", "executionId", "expiresAt", "leverage", "lossLimitUsd", "maxFeeBps",
+  "maxOrderCount", "maxOrderSizeUsd", "maxPositionUsd", "maxSlippageBps", "ownerUserId",
+  "permitId", "revision",
 ];
 const RELEASE_IDENTITY_KEYS = [
   "apiImageDigest", "gitTreeSha", "lifecycleEstablishedAt", "lifecycleOperationId",
@@ -90,6 +102,17 @@ export function parseInstallRequest(value) {
     || typeof input.webImageDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(input.webImageDigest)
     || input.approvedCapitalUsd !== 40
     || input.leverage !== 1
+    || input.maxPositionUsd !== 40
+    || typeof input.maxOrderSizeUsd !== "number" || !Number.isFinite(input.maxOrderSizeUsd)
+    || input.maxOrderSizeUsd <= 0 || input.maxOrderSizeUsd > 40
+    || input.maxOrderCount !== 4
+    || !Number.isSafeInteger(input.maxSlippageBps) || input.maxSlippageBps < 1
+    || input.maxSlippageBps > 20
+    || typeof input.maxFeeBps !== "number" || !Number.isFinite(input.maxFeeBps)
+    || input.maxFeeBps <= 0 || input.maxFeeBps > 100
+    || typeof input.lossLimitUsd !== "number" || !Number.isFinite(input.lossLimitUsd)
+    || input.lossLimitUsd <= 0 || input.lossLimitUsd > 40
+    || typeof input.executionId !== "string" || !/^[a-f0-9]{32}$/u.test(input.executionId)
     || input.executionMode !== "single_funding_rate_arbitrage_round"
     || input.maximumDurationMinutes !== 60
     || input.maximumExecutionDurationMinutes !== 30
@@ -129,7 +152,10 @@ export function productionSelfTestPermitDigest(input) {
   return sha256(Buffer.from([
     "production", "binance", "xaut", input.permitId, input.ownerUserId,
     input.accountBindingSha256, "READ", "TRADE", input.authorizationDigest,
-    String(input.approvedCapitalUsd), input.revision, input.expiresAt,
+    String(input.approvedCapitalUsd), String(input.leverage), String(input.maxPositionUsd),
+    String(input.maxOrderSizeUsd), String(input.maxOrderCount), String(input.maxSlippageBps),
+    String(input.maxFeeBps), String(input.lossLimitUsd), input.executionId,
+    input.revision, input.expiresAt,
   ].join(":")));
 }
 
@@ -167,6 +193,14 @@ export function preparePermitInstallation(options) {
       actionScope: ["READ", "TRADE"],
       authorizationDigest: request.authorizationManifestSha256,
       approvedCapitalUsd: 40,
+      leverage: request.leverage,
+      maxPositionUsd: request.maxPositionUsd,
+      maxOrderSizeUsd: request.maxOrderSizeUsd,
+      maxOrderCount: request.maxOrderCount,
+      maxSlippageBps: request.maxSlippageBps,
+      maxFeeBps: request.maxFeeBps,
+      lossLimitUsd: request.lossLimitUsd,
+      executionId: request.executionId,
       expiresAt,
       revision: request.releaseRevision,
     };
@@ -490,6 +524,14 @@ export function readInstallReceipt(path = PERMIT_INSTALL_RECEIPT, options = {}) 
       || permit.actionScope[0] !== "READ" || permit.actionScope[1] !== "TRADE"
       || permit.authorizationDigest !== receipt.request.authorizationManifestSha256
       || permit.approvedCapitalUsd !== 40
+      || permit.leverage !== receipt.request.leverage
+      || permit.maxPositionUsd !== receipt.request.maxPositionUsd
+      || permit.maxOrderSizeUsd !== receipt.request.maxOrderSizeUsd
+      || permit.maxOrderCount !== receipt.request.maxOrderCount
+      || permit.maxSlippageBps !== receipt.request.maxSlippageBps
+      || permit.maxFeeBps !== receipt.request.maxFeeBps
+      || permit.lossLimitUsd !== receipt.request.lossLimitUsd
+      || permit.executionId !== receipt.request.executionId
       || permit.expiresAt !== receipt.expiresAt
       || permit.revision !== receipt.request.releaseRevision
       || typeof permit.digest !== "string" || !/^[a-f0-9]{64}$/u.test(permit.digest)
@@ -521,6 +563,14 @@ function permitEnvironment(permit) {
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE", '["READ","TRADE"]'],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST", permit.authorizationDigest],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD", String(permit.approvedCapitalUsd)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE", String(permit.leverage)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD", String(permit.maxPositionUsd)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD", String(permit.maxOrderSizeUsd)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT", String(permit.maxOrderCount)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS", String(permit.maxSlippageBps)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS", String(permit.maxFeeBps)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD", String(permit.lossLimitUsd)],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID", permit.executionId],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT", permit.expiresAt],
   ]);
 }

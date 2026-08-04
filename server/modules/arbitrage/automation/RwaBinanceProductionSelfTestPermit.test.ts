@@ -13,9 +13,20 @@ const permitId = "b".repeat(32);
 const accountBindingSha256 = "c".repeat(64);
 const authorizationDigest = "d".repeat(64);
 const expiresAt = Date.parse("2026-08-01T00:00:00.000Z");
+const riskTupleEnvironment = {
+  RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE: "1",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD: "40",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD: "40",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT: "4",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS: "20",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS: "100",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD: "40",
+  RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID: "e".repeat(32),
+};
 
 test("production self-test permit accepts only the exact server-controlled schema", () => {
   const environment = {
+    ...riskTupleEnvironment,
     RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "true",
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",
@@ -43,6 +54,11 @@ test("production self-test permit accepts only the exact server-controlled schem
   } = environment;
   assert.equal(loadRwaBinanceProductionSelfTestPermit(withoutActionScope), null);
   assert.equal(loadRwaBinanceProductionSelfTestPermit(withoutAuthorizationDigest), null);
+  for (const key of Object.keys(riskTupleEnvironment)) {
+    const incomplete = { ...environment } as Record<string, string>;
+    delete incomplete[key];
+    assert.equal(loadRwaBinanceProductionSelfTestPermit(incomplete), null);
+  }
 
   for (const mutation of [
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "false" },
@@ -58,6 +74,14 @@ test("production self-test permit accepts only the exact server-controlled schem
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","trade"]' },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: "D".repeat(64) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "0" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_LEVERAGE: "2" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_POSITION_USD: "41" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_SIZE_USD: "41" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_ORDER_COUNT: "5" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_SLIPPAGE_BPS: "21" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_MAX_FEE_BPS: "101" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_LOSS_LIMIT_USD: "41" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_ID: "E".repeat(32) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00Z" },
     { XINGHENG_EXPECTED_REVISION: "main" },
   ]) {
@@ -67,6 +91,7 @@ test("production self-test permit accepts only the exact server-controlled schem
 
 test("production self-test confirmation rejects missing, legacy, and extra fields", () => {
   const permit = loadRwaBinanceProductionSelfTestPermit({
+    ...riskTupleEnvironment,
     RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "true",
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",

@@ -13,17 +13,77 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import test from "node:test";
 import {
+  LEGACY_FAILED_AUTHORIZATION_SHA256,
   LEGACY_FAILED_OPERATION_ID,
   LEGACY_FAILED_RECEIPT_SHA256,
+  LEGACY_FAILED_REVISION,
   LEGACY_PERMIT_STATE,
   classifyLegacyPermitState,
   migrateLegacyPermitState,
   readLegacyMigrationReceipt,
+  validateLegacyFailedReceiptBinding,
 } from "./productionSelfTestPermitLegacyState.mjs";
 
 const OWNER = "USR-CAPITALTEST";
 const MIGRATION_REVISION = "b".repeat(40);
 const NOW = new Date("2026-08-04T10:00:00.000Z");
+
+test("pure legacy failed receipt binding validation accepts one exact isolated tuple", () => {
+  const actualReceiptSha256 = sha256(Buffer.from("isolated failed receipt test vector"));
+  const expected = {
+    authorizationManifestSha256: LEGACY_FAILED_AUTHORIZATION_SHA256,
+    operationId: LEGACY_FAILED_OPERATION_ID,
+    receiptSha256: actualReceiptSha256,
+    revision: LEGACY_FAILED_REVISION,
+  };
+  const receipt = {
+    operationId: expected.operationId,
+    request: {
+      releaseRevision: expected.revision,
+      authorizationManifestSha256: expected.authorizationManifestSha256,
+    },
+  };
+  assert.doesNotThrow(() =>
+    validateLegacyFailedReceiptBinding(receipt, actualReceiptSha256, expected));
+
+  for (const [mutateReceipt, actual] of [
+    [(value) => { value.operationId = "0".repeat(32); }, actualReceiptSha256],
+    [() => {}, "0".repeat(64)],
+    [(value) => { value.request.releaseRevision = "0".repeat(40); }, actualReceiptSha256],
+    [(value) => { value.request.authorizationManifestSha256 = "0".repeat(64); }, actualReceiptSha256],
+  ]) {
+    const invalid = structuredClone(receipt);
+    mutateReceipt(invalid);
+    assert.throws(() => validateLegacyFailedReceiptBinding(invalid, actual, expected));
+  }
+});
+
+test("pure legacy failed receipt binding validation rejects incomplete or malformed inputs", () => {
+  const digest = "1".repeat(64);
+  const receipt = {
+    operationId: "2".repeat(32),
+    request: { releaseRevision: "3".repeat(40), authorizationManifestSha256: "4".repeat(64) },
+  };
+  const expected = {
+    authorizationManifestSha256: receipt.request.authorizationManifestSha256,
+    operationId: receipt.operationId,
+    receiptSha256: digest,
+    revision: receipt.request.releaseRevision,
+  };
+  for (const invalid of [
+    null,
+    {},
+    { ...expected, extra: true },
+    { ...expected, operationId: "bad" },
+    { ...expected, receiptSha256: "bad" },
+    { ...expected, revision: "bad" },
+    { ...expected, authorizationManifestSha256: "bad" },
+  ]) assert.throws(() => validateLegacyFailedReceiptBinding(receipt, digest, invalid));
+  for (const invalidReceipt of [null, {}, { operationId: receipt.operationId }, {
+    operationId: receipt.operationId, request: {},
+  }]) assert.throws(() => validateLegacyFailedReceiptBinding(invalidReceipt, digest, expected));
+  assert.throws(() => validateLegacyFailedReceiptBinding(receipt, "bad", expected));
+});
 
 test("legacy Permit state classifier distinguishes all compatibility states", () => {
   assert.equal(classifyLegacyPermitState(state()).state, LEGACY_PERMIT_STATE.ABSENT);
@@ -109,7 +169,28 @@ test("migration receipt persistence failure leaves no prepared state or state mu
   });
 });
 
-test("migration terminal receipt failure rolls back the migrated state", () => {
+test("generation pointer race fails closed without replacing the latest state", () => {
+  withFixture((fixture) => {
+    assert.throws(() => migrateLegacyPermitState(fixture.input, fixture.options({
+      operations: {
+        beforeRename(fallback, path) {
+          if (path === fixture.statePath) {
+            writeSecure(fixture.pointerPath, Buffer.from(`${JSON.stringify({
+              version: 1,
+              generation: "generation-20260804T100000Z-abcdef123456",
+              rollbackGeneration: "generation-initial",
+            })}\n`), 0o600);
+          }
+          return fallback();
+        },
+      },
+    })), /changed before migration/u);
+    assert.deepEqual(readFileSync(fixture.statePath), fixture.stateBefore);
+    assert.equal(readLegacyMigrationReceipt(fixture.receiptPath, fixture.options()).status, "unknown");
+  });
+});
+
+test("migration terminal receipt failure preserves the latest migrated safe state", () => {
   withFixture((fixture) => {
     let injected = false;
     assert.throws(() => migrateLegacyPermitState(fixture.input, fixture.options({
@@ -123,7 +204,11 @@ test("migration terminal receipt failure rolls back the migrated state", () => {
         },
       },
     })), /injected terminal receipt failure/u);
-    assert.deepEqual(readFileSync(fixture.statePath), fixture.stateBefore);
+    assert.notDeepEqual(readFileSync(fixture.statePath), fixture.stateBefore);
+    assert.deepEqual(
+      JSON.parse(readFileSync(fixture.statePath, "utf8")).productionSelfTestPermitConsumptions,
+      [],
+    );
     assert.equal(readLegacyMigrationReceipt(fixture.receiptPath, fixture.options()).status, "unknown");
   });
 });
@@ -169,6 +254,54 @@ test("install wrapper checks compatibility before prepare and every install side
   assert.ok(runtimeBefore < restart);
 });
 
+test("legacy migration wrapper is offline, lock-bound, and has no API exec path", () => {
+  const source = readFileSync(
+    new URL("./migrate-production-self-test-permit-legacy-state.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /production_compose stop api/u);
+  assert.match(source, /\[ "\$#" -eq 0 \]/u);
+  const verifiedOwner = source.indexOf("legacy_failure=\"$(node scripts/productionSelfTestPermitLegacyState.mjs verify-failure)\"");
+  const migrationCall = source.indexOf("productionSelfTestPermitLegacyState.mjs migrate");
+  assert.ok(verifiedOwner > 0 && verifiedOwner < migrationCall);
+  assert.match(source, /ps --status running -q api/u);
+  assert.match(source, /flock -n -x \/app\/rwa-automation-lock\/operation\.lock/u);
+  assert.doesNotMatch(source, /exec -T api/u);
+  assert.doesNotMatch(source, /productionSelfTestPermitLegacyState\.mjs migrate[\s\S]*\$\{/u);
+});
+
+test("production Compose allowlist permits only the fixed offline legacy migration shape", () => {
+  const source = readFileSync(
+    new URL("./verify-compose-environment-file.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.doesNotMatch(source, /"exec", "-T", "api", "node",[\s\S]{0,120}productionSelfTestPermitLegacyState/u);
+  assert.match(source, /args\.length === 18/u);
+  assert.match(source, /process\.env\.XINGHENG_TRUSTED_OPERATION_ENTRY[\s\S]{0,80}=== "migrate-production-self-test-permit-legacy-state\.sh"/u);
+  assert.match(source, /XINGHENG_TRUSTED_OPERATION_ENTRY=migrate-production-self-test-permit-legacy-state\.sh/u);
+  assert.match(source, /XINGHENG_OPERATION_LOCK_CONTEXT=production/u);
+  assert.match(source, /"rwa-automation-restore", "flock", "-n", "-x"/u);
+  assert.match(source, /\/app\/rwa-automation-lock\/operation\.lock/u);
+  assert.match(source, /args\[16\] === "e0c3703b9a008ae5bcdfa56f413a6f36"/u);
+  assert.match(source, /args\[17\] === "e6392afb1072288986778143b54a48ac9ef4c4e69e418987a2e64b31f9bd04a1"/u);
+
+  const composeWrapper = readFileSync(
+    new URL("./production-compose.sh", import.meta.url),
+    "utf8",
+  );
+  assert.match(composeWrapper, /XINGHENG_TRUSTED_OPERATION_ENTRY="\$\{XINGHENG_TRUSTED_OPERATION_ENTRY:-\}"/u);
+  const launcher = readFileSync(
+    new URL("./trusted-operation-launcher.mjs", import.meta.url),
+    "utf8",
+  );
+  const childEnvironment = launcher.slice(
+    launcher.indexOf("const childEnvironment ="),
+    launcher.indexOf("const result = spawnSync"),
+  );
+  assert.doesNotMatch(childEnvironment, /XINGHENG_TRUSTED_OPERATION_ENTRY/u);
+  assert.match(source, /args\[4\] === "XINGHENG_TRUSTED_OPERATION_ENTRY=migrate-production-self-test-permit-legacy-state\.sh"/u);
+});
+
 function withFixture(run) {
   const root = mkdtempSync(resolve(tmpdir(), "xingheng-legacy-permit-"));
   try {
@@ -178,11 +311,18 @@ function withFixture(run) {
     const stateFile = "0123456789abcdef-binance-state.json";
     const statePath = resolve(generationRoot, stateFile);
     const receiptPath = resolve(root, ".production-self-test-permit-legacy-migration.json");
+    const pointerPath = resolve(root, "current.json");
     const stateBefore = stateBytes();
     writeSecure(statePath, stateBefore, 0o600);
+    writeSecure(pointerPath, Buffer.from(`${JSON.stringify({
+      version: 1,
+      generation,
+      rollbackGeneration: null,
+    })}\n`), 0o600);
     const fixture = {
       root,
       statePath,
+      pointerPath,
       receiptPath,
       stateBefore,
       input: {
@@ -193,6 +333,7 @@ function withFixture(run) {
         generation,
         stateFile,
         statePath,
+        pointerPath,
         receiptPath,
       },
       options(overrides = {}) {

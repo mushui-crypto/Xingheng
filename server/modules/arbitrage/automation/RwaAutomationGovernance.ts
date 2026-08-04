@@ -141,7 +141,8 @@ export class RwaAutomationGovernanceError extends Error {
   constructor(
     readonly statusCode: 429 | 503,
     readonly category: "automation_rate_limited" | "automation_concurrency_limited"
-      | "automation_capacity_exceeded" | "automation_risk_state_invalid",
+      | "automation_capacity_exceeded" | "automation_risk_state_invalid"
+      | "legacy_permit_state_migration_required",
     message: string,
     readonly retryAfterSeconds?: number,
   ) {

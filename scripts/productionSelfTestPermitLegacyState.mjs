@@ -87,13 +87,14 @@ export function legacyPermitStateError(classification) {
 export function verifyLegacyFailedReceipt(path = LEGACY_FAILED_RECEIPT, options = {}) {
   const receipt = secureJson(path, 64 * 1024, 0o400, { ...options, rootOwner: true });
   try {
+    validateLegacyFailedReceiptBinding(receipt.value, receipt.sha256, {
+      operationId: LEGACY_FAILED_OPERATION_ID,
+      receiptSha256: LEGACY_FAILED_RECEIPT_SHA256,
+      revision: LEGACY_FAILED_REVISION,
+      authorizationManifestSha256: LEGACY_FAILED_AUTHORIZATION_SHA256,
+    });
     if (
-      receipt.sha256 !== LEGACY_FAILED_RECEIPT_SHA256
-      || receipt.value?.operationId !== LEGACY_FAILED_OPERATION_ID
-      || receipt.value?.status !== "failed"
-      || receipt.value?.request?.authorizationManifestSha256
-        !== LEGACY_FAILED_AUTHORIZATION_SHA256
-      || receipt.value?.request?.releaseRevision !== LEGACY_FAILED_REVISION
+      receipt.value?.status !== "failed"
       || receipt.value?.runtimeBefore !== null
       || receipt.value?.runtimeAfter !== null
     ) {
@@ -106,6 +107,28 @@ export function verifyLegacyFailedReceipt(path = LEGACY_FAILED_RECEIPT, options 
     return Object.freeze({ ownerUserId, receiptSha256: receipt.sha256 });
   } finally {
     receipt.bytes.fill(0);
+  }
+}
+
+export function validateLegacyFailedReceiptBinding(receiptValue, actualReceiptSha256, expected) {
+  if (!expected || typeof expected !== "object" || Array.isArray(expected)
+    || Object.keys(expected).sort().join(",") !== [
+      "authorizationManifestSha256", "operationId", "receiptSha256", "revision",
+    ].join(",")
+    || !PERMIT_ID.test(expected.operationId ?? "")
+    || !SHA256.test(expected.receiptSha256 ?? "")
+    || !REVISION.test(expected.revision ?? "")
+    || !SHA256.test(expected.authorizationManifestSha256 ?? "")
+    || !SHA256.test(actualReceiptSha256 ?? "")
+    || !receiptValue || typeof receiptValue !== "object" || Array.isArray(receiptValue)
+    || !receiptValue.request || typeof receiptValue.request !== "object"
+    || Array.isArray(receiptValue.request)
+    || receiptValue.operationId !== expected.operationId
+    || actualReceiptSha256 !== expected.receiptSha256
+    || receiptValue.request.releaseRevision !== expected.revision
+    || receiptValue.request.authorizationManifestSha256
+      !== expected.authorizationManifestSha256) {
+    throw new Error("legacy failed Permit receipt identity is invalid");
   }
 }
 
@@ -124,15 +147,18 @@ export function migrateLegacyPermitState(input, options = {}) {
     throw new Error("legacy Permit migration binding is invalid");
   }
   const statePath = resolve(input.statePath);
+  const pointerPath = resolve(input.pointerPath ?? resolve(dirname(dirname(statePath)), "current.json"));
   const receiptPath = resolve(input.receiptPath
     ?? resolve(dirname(dirname(statePath)), LEGACY_MIGRATION_RECEIPT_NAME));
   assertSecureDirectory(dirname(statePath), options);
   assertSecureDirectory(dirname(receiptPath), options);
   assertPathAbsent(receiptPath);
+  const pointer = secureJson(pointerPath, 64 * 1024, 0o600, options);
   const state = secureJson(statePath, 10 * 1024 * 1024, 0o600, options);
   let prepared = null;
   try {
     const classification = classifyLegacyPermitState(state.value);
+    assertGenerationPointer(pointer.value, input.generation);
     if (classification.state !== LEGACY_PERMIT_STATE.ABSENT) {
       throw legacyPermitStateError(classification)
         ?? new Error("legacy Permit state migration is not eligible");
@@ -177,21 +203,31 @@ export function migrateLegacyPermitState(input, options = {}) {
     }
     let stateChanged = false;
     try {
-      replaceExact(statePath, migratedBytes, 0o600, state, options);
+      replaceExact(statePath, migratedBytes, 0o600, state, options, () => {
+        revalidateExact(pointerPath, pointer, 0o600, 64 * 1024, options);
+      });
       stateChanged = true;
       const success = { ...prepared, status: "success", updatedAt: now.toISOString() };
       replaceCurrent(receiptPath, jsonBytes(success), 0o400, options);
       return Object.freeze(success);
     } catch (error) {
-      if (stateChanged) {
-        try { replaceCurrent(statePath, state.bytes, 0o600, options); } catch {}
-      }
       const unknown = { ...prepared, status: "unknown", updatedAt: now.toISOString() };
       try { replaceCurrent(receiptPath, jsonBytes(unknown), 0o400, options); } catch {}
       throw error;
     }
   } finally {
+    pointer.bytes.fill(0);
     state.bytes.fill(0);
+  }
+}
+
+function assertGenerationPointer(value, generation) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "generation,rollbackGeneration,version"
+    || value.version !== 1 || value.generation !== generation
+    || !(value.rollbackGeneration === null
+      || /^generation-(?:initial|[0-9]{8}T[0-9]{6}Z-[a-f0-9]{12})$/u.test(value.rollbackGeneration))) {
+    throw new Error("legacy Permit migration generation pointer is invalid");
   }
 }
 
@@ -331,8 +367,16 @@ function writeExclusive(path, bytes, mode, options = {}) {
   fsyncDirectory(dirname(path), options);
 }
 
-function replaceExact(path, bytes, mode, expected, options) {
-  const current = secureFile(path, 10 * 1024 * 1024, mode, options);
+function replaceExact(path, bytes, mode, expected, options, additionalGuard = () => undefined) {
+  revalidateExact(path, expected, mode, 10 * 1024 * 1024, options);
+  replaceCurrent(path, bytes, mode, options, () => {
+    revalidateExact(path, expected, mode, 10 * 1024 * 1024, options);
+    additionalGuard();
+  });
+}
+
+function revalidateExact(path, expected, mode, maximum, options) {
+  const current = secureFile(path, maximum, mode, options);
   try {
     if (
       current.dev !== expected.dev || current.ino !== expected.ino
@@ -340,14 +384,14 @@ function replaceExact(path, bytes, mode, expected, options) {
       || current.ctimeMs !== expected.ctimeMs || current.sha256 !== expected.sha256
     ) throw new Error("legacy Permit state changed before migration");
   } finally { current.bytes.fill(0); }
-  replaceCurrent(path, bytes, mode, options);
 }
 
-function replaceCurrent(path, bytes, mode, options = {}) {
+function replaceCurrent(path, bytes, mode, options = {}, finalGuard = () => undefined) {
   const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
   try {
     writeExclusive(temporary, bytes, mode, options);
     invoke(options, "beforeRename", () => undefined, path);
+    finalGuard();
     renameSync(temporary, path);
     fsyncDirectory(dirname(path), options);
     const verified = secureFile(path, Math.max(bytes.length, 2), mode, options);
@@ -406,6 +450,9 @@ function main() {
     if (
       process.env.NODE_ENV !== "production"
       || process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
+      || process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+      || process.env.XINGHENG_TRUSTED_OPERATION_ENTRY
+        !== "migrate-production-self-test-permit-legacy-state.sh"
       || process.getuid?.() !== 20001 || process.getgid?.() !== 20001
     ) throw new Error("legacy Permit migration runtime boundary is invalid");
     const root = resolve(process.env.RWA_AUTOMATION_DATA_DIR ?? "/app/rwa-automation-data");
@@ -428,6 +475,7 @@ function main() {
       generation,
       stateFile,
       statePath: resolve(root, generation, stateFile),
+      pointerPath: resolve(root, "current.json"),
       receiptPath: resolve(root, LEGACY_MIGRATION_RECEIPT_NAME),
     });
     process.stdout.write(`legacy Permit state migrated; migration=${receipt.migrationId}\n`);

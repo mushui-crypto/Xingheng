@@ -385,6 +385,8 @@ export class RwaAutomationPersistentStore<
   }
 
   async restoreCredentialMutationSnapshot(snapshot: RwaCredentialMutationSnapshot) {
+    const currentState = await readOptionalUtf8(this.statePath);
+    assertSerializedPermitConsumptionsNotRolledBack(currentState, snapshot.stateFile);
     await Promise.all([
       restoreOptionalUtf8(this.credentialPath, snapshot.credentialFile),
       restoreOptionalUtf8(this.statePath, snapshot.stateFile),
@@ -430,6 +432,13 @@ export class RwaAutomationPersistentStore<
       }
       const parsed = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<AutomationState>;
       if (parsed.version !== 1) throw invalidRiskState();
+      if (!Object.hasOwn(parsed, "productionSelfTestPermitConsumptions")) {
+        throw new RwaAutomationGovernanceError(
+          503,
+          "legacy_permit_state_migration_required",
+          "Production self-test Permit legacy state requires the approved offline migration.",
+        );
+      }
       const normalized = {
         ...emptyState(),
         ...parsed,
@@ -457,9 +466,7 @@ export class RwaAutomationPersistentStore<
             ? []
             : (() => { throw invalidRiskState(); })(),
         productionSelfTestPermitConsumptions:
-          parsed.productionSelfTestPermitConsumptions === undefined
-            ? []
-            : Array.isArray(parsed.productionSelfTestPermitConsumptions)
+          Array.isArray(parsed.productionSelfTestPermitConsumptions)
               ? parsed.productionSelfTestPermitConsumptions
               : (() => { throw invalidRiskState(); })(),
         challenges: Array.isArray(parsed.challenges) ? parsed.challenges : [],
@@ -483,6 +490,7 @@ export class RwaAutomationPersistentStore<
       assertProductionSelfTestPermitConsumptionCollection(
         normalized.productionSelfTestPermitConsumptions,
       );
+      assertCapitalTestSmokeBindings(normalized);
       const compacted = compactState(normalized, this.governanceConfig, this.clock());
       const rawComparable = JSON.stringify(parsed);
       const normalizedComparable = JSON.stringify(normalized);
@@ -523,6 +531,8 @@ export class RwaAutomationPersistentStore<
     assertProductionSelfTestPermitConsumptionCollection(
       state.productionSelfTestPermitConsumptions,
     );
+    assertCapitalTestSmokeBindings(state);
+    await this.assertPermitConsumptionsMonotonic(state.productionSelfTestPermitConsumptions);
     for (const execution of state.executions) {
       assertProfiledExecutionFields(execution, this.venue);
     }
@@ -542,6 +552,33 @@ export class RwaAutomationPersistentStore<
       );
     }
     await atomicWriteJson(this.statePath, compacted);
+  }
+
+  private async assertPermitConsumptionsMonotonic(
+    next: RwaBinanceProductionSelfTestPermitConsumption[],
+  ) {
+    let current: Partial<AutomationState>;
+    try {
+      current = JSON.parse(await readFile(this.statePath, "utf8")) as Partial<AutomationState>;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw invalidRiskState();
+    }
+    if (!Object.hasOwn(current, "productionSelfTestPermitConsumptions")) {
+      throw new RwaAutomationGovernanceError(
+        503,
+        "legacy_permit_state_migration_required",
+        "Production self-test Permit legacy state requires the approved offline migration.",
+      );
+    }
+    const existing = current.productionSelfTestPermitConsumptions;
+    if (!Array.isArray(existing)) throw invalidRiskState();
+    assertProductionSelfTestPermitConsumptionCollection(existing);
+    const retained = new Set(next.map((value) =>
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`));
+    if (existing.some((value) => !retained.has(
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`,
+    ))) throw invalidRiskState();
   }
 
   private credentialContext(accountId: string): CredentialKeyContext {
@@ -574,6 +611,33 @@ export class RwaAutomationPersistentStore<
       throw new Error("交易所 API 凭证文件格式无效；已拒绝继续使用。");
     }
   }
+}
+
+function assertSerializedPermitConsumptionsNotRolledBack(
+  currentSource: string | null,
+  targetSource: string | null,
+) {
+  if (currentSource === null) return;
+  let current: Partial<AutomationState>;
+  let target: Partial<AutomationState> | null;
+  try {
+    current = JSON.parse(currentSource) as Partial<AutomationState>;
+    target = targetSource === null ? null : JSON.parse(targetSource) as Partial<AutomationState>;
+  } catch {
+    throw invalidRiskState();
+  }
+  const existing = current.productionSelfTestPermitConsumptions;
+  if (!Array.isArray(existing)) return;
+  assertProductionSelfTestPermitConsumptionCollection(existing);
+  if (existing.length === 0) return;
+  const restored = target?.productionSelfTestPermitConsumptions;
+  if (!Array.isArray(restored)) throw invalidRiskState();
+  assertProductionSelfTestPermitConsumptionCollection(restored);
+  const retained = new Set(restored.map((value) =>
+    `${value.permitId}\0${value.digest}\0${value.consumedAt}`));
+  if (existing.some((value) => !retained.has(
+    `${value.permitId}\0${value.digest}\0${value.consumedAt}`,
+  ))) throw invalidRiskState();
 }
 
 export async function discoverAutomationUsersWithExposure() {
@@ -698,6 +762,34 @@ function assertProductionSelfTestPermitConsumptionCollection(values: unknown[]) 
     new Set(consumptions.map((value) => value.permitId)).size !== consumptions.length
     || new Set(consumptions.map((value) => value.digest)).size !== consumptions.length
   ) throw invalidRiskState();
+}
+
+function assertCapitalTestSmokeBindings(state: AutomationState) {
+  const active = state.connectivitySmokes.filter(isActiveConnectivitySmoke);
+  if (active.length === 0) return;
+  const confirmation = state.config.productionSelfTestPermitConfirmation;
+  const consumed = confirmation !== null && state.productionSelfTestPermitConsumptions.some((value) =>
+    value.permitId === confirmation.permitId && value.digest === confirmation.digest);
+  if (!active.some((smoke) => smoke.authorization.capitalTest !== undefined) && !consumed) return;
+  if (!confirmation || !consumed) throw invalidRiskState();
+  for (const smoke of active) {
+    const tuple = smoke.authorization.capitalTest;
+    if (!tuple
+      || tuple.accountBindingSha256 !== confirmation.accountBindingSha256
+      || tuple.revision !== confirmation.revision
+      || tuple.approvedCapitalUsd !== confirmation.approvedCapitalUsd
+      || tuple.expiresAt !== confirmation.expiresAt
+      || tuple.leverage !== confirmation.leverage
+      || tuple.maxPositionUsd !== confirmation.maxPositionUsd
+      || tuple.maxOrderSizeUsd !== confirmation.maxOrderSizeUsd
+      || tuple.maxOrderCount !== confirmation.maxOrderCount
+      || tuple.maxSlippageBps !== confirmation.maxSlippageBps
+      || tuple.maxFeeBps !== confirmation.maxFeeBps
+      || tuple.lossLimitUsd !== confirmation.lossLimitUsd
+      || tuple.executionId !== confirmation.executionId
+      || tuple.authorizationDigest !== confirmation.authorizationDigest
+      || tuple.permitDigest !== confirmation.digest) throw invalidRiskState();
+  }
 }
 
 async function atomicWriteJson(path: string, value: unknown) {
@@ -1032,9 +1124,14 @@ function validateConnectivitySmokeForStore(
     || smoke.mode !== "connectivity_smoke"
     || !stages.includes(smoke.stage)
     || smoke.noReopen !== true
-    || !authorization || !hasExactObjectKeys(authorization, [
-      "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
-    ])
+    || !authorization || !(
+      hasExactObjectKeys(authorization, [
+        "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+      ])
+      || hasExactObjectKeys(authorization, [
+        "capitalTest", "consumedBeforeProviderMutation", "exitAuthorized", "operation", "reservedAt",
+      ])
+    )
     || authorization.operation !== "connectivity_smoke_execute"
     || authorization.consumedBeforeProviderMutation !== true
     || authorization.exitAuthorized !== true

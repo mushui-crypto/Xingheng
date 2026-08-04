@@ -168,7 +168,7 @@ test("legacy state defaults to no asset authorization while new exact state pers
   }
 });
 
-test("production self-test permit consumptions are exact, unique, and never compacted", async () => {
+test("legacy Permit absence remains migration-required while new state initializes exact tombstones", async () => {
   const fixture = await createFixture("user-a", "binance");
   try {
     const legacy = await fixture.store.readState();
@@ -181,10 +181,17 @@ test("production self-test permit consumptions are exact, unique, and never comp
       JSON.stringify(legacyWithoutConsumptions),
       { mode: 0o600 },
     );
-    assert.deepEqual(
-      (await fixture.store.readState()).productionSelfTestPermitConsumptions,
-      [],
+    await assert.rejects(
+      fixture.store.readState(),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "legacy_permit_state_migration_required",
     );
+
+    await rm(fixture.store.statePath, { force: true });
+    const initialized = await fixture.store.readState();
+    assert.deepEqual(initialized.productionSelfTestPermitConsumptions, []);
+    await fixture.store.writeState(initialized);
+    const emptySnapshot = await fixture.store.captureCredentialMutationSnapshot();
 
     const consumption = {
       permitId: "a".repeat(32),
@@ -198,6 +205,18 @@ test("production self-test permit consumptions are exact, unique, and never comp
     assert.deepEqual(
       (await fixture.store.readState()).productionSelfTestPermitConsumptions,
       [consumption],
+    );
+    await assert.rejects(fixture.store.restoreCredentialMutationSnapshot(emptySnapshot));
+    assert.deepEqual(
+      (await fixture.store.readState()).productionSelfTestPermitConsumptions,
+      [consumption],
+    );
+    const rollback = await fixture.store.readState();
+    rollback.productionSelfTestPermitConsumptions = [];
+    await assert.rejects(
+      fixture.store.writeState(rollback),
+      (error: unknown) => error instanceof RwaAutomationGovernanceError
+        && error.category === "automation_risk_state_invalid",
     );
 
     for (const invalid of [
@@ -385,6 +404,7 @@ test("persistent governance deterministically expires challenges and old tombsto
     await writeFile(current.statePath, JSON.stringify({
       version: 1,
       config: defaultRwaExecutionConfig,
+      productionSelfTestPermitConsumptions: [],
       challenges: [
         challenge("expired", now - 1),
         challenge("future-a", now + 30_000),
@@ -522,6 +542,7 @@ test("legacy execution schema is migrated with null reconciliation fields and pe
     await writeFile(current.statePath, JSON.stringify({
       version: 1,
       config: defaultRwaExecutionConfig,
+      productionSelfTestPermitConsumptions: [],
       challenges: [],
       executions: [{
         userId: "user-a",
@@ -584,6 +605,7 @@ test("runtime execution profile fields reject partial, unknown, and invalid capi
   const fileState = (item: unknown) => ({
     version: 1,
     config: defaultRwaExecutionConfig,
+    productionSelfTestPermitConsumptions: [],
     challenges: [],
     executions: [item],
     pnlSeries: [],
