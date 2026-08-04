@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   cpSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -16,11 +18,13 @@ import test from "node:test";
 import {
   ReleasePromotionTransaction,
   assertPromotionStateAllowsProduction,
+  validateTrustedPromotionArguments,
 } from "./releasePromotionTransaction.mjs";
 import {
   captureTrustedCandidateTree,
   secureArtifactReceipt,
 } from "./trustedReleaseCandidate.mjs";
+import { readValidatedPromotionHelperReceipt } from "./trustedDockerRuntime.mjs";
 
 const OLD_REVISION = "1".repeat(40);
 const NEW_REVISION = "2".repeat(40);
@@ -82,6 +86,7 @@ test("canonical drift after STARTED and post-exchange trust failure become UNKNO
 
 test("all nonterminal and malformed states block production; absent state preserves IDLE", () => {
   withFixture((fixture) => {
+    replaceFixtureFile(fixture.helperReceipt, "malformed\n", 0o400);
     assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state, "IDLE");
     fixture.transaction.exchange = () => { throw new Error("stop after STARTED"); };
     assert.throws(() => fixture.transaction.promote(fixture.expected));
@@ -104,6 +109,12 @@ test("COMPLETED requires exact record, canonical and trust identity", () => {
       () => writeManifest(join(fixture.canonicalRoot, "deploy/release-manifest.json"), "4".repeat(40)),
       () => replaceFixtureFile(fixture.trustReceipt, "{}\n", 0o400),
       () => replaceFixtureFile(fixture.lifecyclePointer, "changed\n", 0o600),
+      () => replaceFixtureFile(fixture.helperReceipt, "{}\n", 0o400),
+      () => replaceFixtureFile(fixture.helperPath, "changed\n", 0o500),
+      () => mutateJson(fixture.trustReceipt, (value) => { value.socket = "wrong"; }),
+      () => mutateJson(fixture.trustReceipt, (value) => { value.daemon.id = "wrong"; }),
+      () => mutateJson(fixture.trustReceipt, (value) => { value.extra = true; }),
+      () => mutateJson(fixture.trustReceipt, (value) => { delete value.binaries; }),
     ]) {
       const restore = snapshot(fixture);
       mutation();
@@ -111,6 +122,54 @@ test("COMPLETED requires exact record, canonical and trust identity", () => {
       restore();
     }
   });
+});
+
+test("independent helper receipt reopens the exact descriptor and rejects tampering", () => {
+  withFixture((fixture) => {
+    const opened = readValidatedPromotionHelperReceipt({ testMode: true,
+      helperPath: fixture.helperPath, receiptPath: fixture.helperReceipt });
+    closeSync(opened.opened.fd);
+    const receiptBytes = readFileSync(fixture.helperReceipt);
+    mutateJson(fixture.helperReceipt, (value) => { value.helper.sha256 = "0".repeat(64); });
+    assert.throws(() => readValidatedPromotionHelperReceipt({ testMode: true,
+      helperPath: fixture.helperPath, receiptPath: fixture.helperReceipt }));
+    replaceFixtureFile(fixture.helperReceipt, receiptBytes, 0o400);
+    chmodSync(fixture.helperPath, 0o700);
+    assert.throws(() => readValidatedPromotionHelperReceipt({ testMode: true,
+      helperPath: fixture.helperPath, receiptPath: fixture.helperReceipt }));
+  });
+});
+
+test("STARTED binds staging content, not only the directory inode", () => {
+  withFixture((fixture) => {
+    fixture.transaction.fault = (stage) => {
+      if (stage === "after_started_publish") {
+        writeManifest(join(fixture.stagingPath, "deploy/release-manifest.json"), "3".repeat(40));
+      }
+    };
+    assert.throws(() => fixture.transaction.promote(fixture.expected), /staging identity changed/u);
+    assert.equal(readManifest(fixture.canonicalRoot).revision, OLD_REVISION);
+    assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).state, "PROMOTION_UNKNOWN");
+  });
+});
+
+test("trusted promotion arguments are a strict command, payload and environment closure", () => {
+  const environment = { HOME: "/root", PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+    LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC" };
+  const value = { revision: NEW_REVISION, sourceSha256: "a".repeat(64),
+    treeSha256: "b".repeat(64), manifestSha256: "c".repeat(64),
+    images: manifest(NEW_REVISION).images, operationId: OPERATION_ID };
+  const payload = Buffer.from(JSON.stringify(value)).toString("base64url");
+  assert.equal(validateTrustedPromotionArguments(["--promotion-json", payload], environment).command,
+    "promote");
+  assert.equal(validateTrustedPromotionArguments(["--terminalize-unknown", OPERATION_ID], environment)
+    .command, "terminalize-unknown");
+  for (const args of [
+    ["--generate", payload], ["--promotion-json", payload, "extra"],
+    ["--promotion-json", "../payload"], ["scripts/other.sh", payload],
+  ]) assert.throws(() => validateTrustedPromotionArguments(args, environment));
+  assert.throws(() => validateTrustedPromotionArguments(["--promotion-json", payload],
+    { ...environment, NODE_OPTIONS: "--require=/tmp/caller.cjs" }));
 });
 
 test("manual terminalization can only move matching STARTED or EXCHANGED to UNKNOWN", () => {
@@ -166,6 +225,8 @@ function withFixture(callback) {
     const stateRoot = join(root, "state");
     const statePath = join(stateRoot, "current.json");
     const trustReceipt = join(root, "trusted-operations.json");
+    const helperPath = join(root, "helper");
+    const helperReceipt = join(root, "helper-receipt.json");
     const lifecyclePointer = join(root, "lifecycle.json");
     const stagingPath = join(releaseParent, `.promotion-staging-${OPERATION_ID}`);
     for (const path of [releaseParent, canonicalRoot, candidatesRoot, candidateRoot, candidateCode]) {
@@ -179,6 +240,9 @@ function withFixture(callback) {
     const lifecycleBytes = `${JSON.stringify({ revision: OLD_REVISION })}\n`;
     writeFileSync(lifecyclePointer, lifecycleBytes, { mode: 0o600 });
     chmodSync(lifecyclePointer, 0o600);
+    writeFileSync(helperPath, "fixture-helper\n", { mode: 0o500 });
+    chmodSync(helperPath, 0o500);
+    writeHelperReceipt(helperReceipt, helperPath);
     const archive = join(candidateRoot, "code.tar");
     writeFileSync(archive, "archive\n", { mode: 0o400 });
     chmodSync(archive, 0o400);
@@ -212,7 +276,7 @@ function withFixture(callback) {
       operationId: OPERATION_ID,
     };
     const paths = { releaseParent, canonicalRoot, candidatesRoot, stateRoot, statePath,
-      trustReceipt, lifecyclePointer, helperPath: join(root, "helper") };
+      trustReceipt, lifecyclePointer, helperPath, helperReceipt };
     const exchange = () => {
       const parked = join(releaseParent, ".unit-exchange");
       renameSync(canonicalRoot, parked);
@@ -221,16 +285,24 @@ function withFixture(callback) {
     };
     const installTrust = () => {
       const releaseTreeSha256 = sha256(readFileSync(join(canonicalRoot, "deploy/release-manifest.json")));
-      const value = { releaseRoot: canonicalRoot, releaseTree: { sha256: releaseTreeSha256 } };
+      const value = { schemaVersion: 1, releaseRoot: canonicalRoot,
+        releaseTree: { sha256: releaseTreeSha256 }, socket: "fixture-socket",
+        binaries: { node: { path: "/usr/bin/node", sha256: "a".repeat(64) } },
+        daemon: { id: "fixture-daemon", rootDir: "/var/lib/docker",
+          serverVersion: "1.2.3", storageDriver: "overlay2" } };
       const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
       writeFileSync(trustReceipt, bytes, { mode: 0o400 });
       chmodSync(trustReceipt, 0o400);
       return sha256(bytes);
     };
+    const validateMainTrust = () => validateMainTrustFixture(trustReceipt, canonicalRoot);
+    const validateHelper = () => validateHelperFixture(helperReceipt, helperPath);
     const transaction = new ReleasePromotionTransaction({ ...paths, testMode: true, exchange,
-      installTrust, now: () => new Date("2026-08-05T00:00:00.000Z") });
+      installTrust, validateMainTrust, validateHelper,
+      now: () => new Date("2026-08-05T00:00:00.000Z") });
     callback({ root, ...paths, transaction, expected, stagingPath, lifecycleBytes,
-      guardOptions: { ...paths, expectedUid: uid, expectedGid: gid } });
+      guardOptions: { ...paths, expectedUid: uid, expectedGid: gid,
+        validateMainTrust, validateHelper } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -265,6 +337,8 @@ function snapshot(fixture) {
     [join(fixture.canonicalRoot, "deploy/release-manifest.json"), 0o444],
     [fixture.trustReceipt, 0o400],
     [fixture.lifecyclePointer, 0o600],
+    [fixture.helperReceipt, 0o400],
+    [fixture.helperPath, 0o500],
   ].map(([path, mode]) => [path, readFileSync(path), mode]);
   return () => {
     for (const [path, bytes, mode] of files) {
@@ -273,12 +347,48 @@ function snapshot(fixture) {
   };
 }
 
+function writeHelperReceipt(path, helperPath) {
+  const metadata = lstatSync(helperPath);
+  const value = { schemaVersion: 1, helper: { path: helperPath,
+    sha256: sha256(readFileSync(helperPath)), dev: metadata.dev, ino: metadata.ino,
+    size: metadata.size, uid: metadata.uid, gid: metadata.gid, nlink: metadata.nlink,
+    mode: metadata.mode & 0o777 } };
+  replaceFixtureFile(path, `${JSON.stringify(value)}\n`, 0o400);
+}
+
+function validateHelperFixture(receiptPath, helperPath) {
+  const value = JSON.parse(readFileSync(receiptPath, "utf8"));
+  if (Object.keys(value).sort().join(",") !== "helper,schemaVersion"
+    || value.schemaVersion !== 1 || value.helper.path !== helperPath
+    || value.helper.sha256 !== sha256(readFileSync(helperPath))) {
+    throw new Error("fixture helper receipt invalid");
+  }
+  return { receiptSha256: sha256(readFileSync(receiptPath)) };
+}
+
+function validateMainTrustFixture(path, canonicalRoot) {
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  if (Object.keys(value).sort().join(",") !== [
+    "binaries", "daemon", "releaseRoot", "releaseTree", "schemaVersion", "socket",
+  ].sort().join(",") || value.schemaVersion !== 1 || value.releaseRoot !== canonicalRoot
+    || value.socket !== "fixture-socket"
+    || Object.keys(value.binaries).join(",") !== "node"
+    || value.daemon.id !== "fixture-daemon") throw new Error("fixture main trust receipt invalid");
+  return { ...value, receiptSha256: sha256(readFileSync(path)) };
+}
+
 function replaceFixtureFile(path, bytes, mode) {
   try { chmodSync(path, 0o600); } catch (error) {
     if (error?.code !== "ENOENT") throw error;
   }
   writeFileSync(path, bytes, { mode });
   chmodSync(path, mode);
+}
+
+function mutateJson(path, mutation) {
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  mutation(value);
+  replaceFixtureFile(path, `${JSON.stringify(value)}\n`, 0o400);
 }
 
 function canonical(value) {

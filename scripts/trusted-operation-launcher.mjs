@@ -22,7 +22,10 @@ import {
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
 import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
-import { assertPromotionStateAllowsProduction } from "./releasePromotionTransaction.mjs";
+import {
+  assertPromotionStateAllowsProduction,
+  validateTrustedPromotionArguments,
+} from "./releasePromotionTransaction.mjs";
 
 const operation = process.argv[2];
 const entryArgument = process.argv[3];
@@ -41,6 +44,7 @@ try {
   ) {
     throw new Error("nested trusted operation launcher is not allowed");
   }
+  if (operation === "promotion") validateTrustedPromotionArguments(args, process.env);
   const currentRoot = new URL("../", import.meta.url).pathname;
   const candidateRevision = ["release-build", "candidate-verify", "promotion"].includes(operation)
     ? basename(dirname(resolve(currentRoot)))
@@ -107,6 +111,9 @@ try {
           TZ: "UTC",
           XINGHENG_OPERATION_LOCK_CONTEXT: operation,
         };
+        if (operation === "promotion") {
+          childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = "release-promote.sh";
+        }
         if (candidateRevision !== null) {
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
         } else {

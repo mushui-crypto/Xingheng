@@ -28,6 +28,7 @@ const PRODUCTION_DOCKER_SOCKET = "/var/run/docker.sock";
 const PRODUCTION_TRUST_RECEIPT = "/etc/xingheng/trusted-operations.json";
 const PRODUCTION_RELEASE_ROOT = "/opt/xingheng-release/code";
 const PRODUCTION_PROMOTION_HELPER = "/usr/local/libexec/xingheng-promotion-atomic-exchange";
+const PRODUCTION_PROMOTION_HELPER_RECEIPT = "/etc/xingheng/promotion-atomic-exchange.json";
 const MAX_CLIENT_BYTES = 256 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_DIAGNOSTIC_BYTES = 4096;
@@ -60,7 +61,6 @@ const REQUIRED_TOOLS = Object.freeze({
   sha256sum: "/usr/bin/sha256sum",
   docker: PRODUCTION_DOCKER_CLI,
   compose: PRODUCTION_COMPOSE_PLUGIN,
-  promotionExchange: PRODUCTION_PROMOTION_HELPER,
 });
 
 export function assertNoDockerControlEnvironment(source = process.env) {
@@ -202,13 +202,8 @@ export function executePromotionAtomicExchange(input) {
     || !Number.isInteger(input.contextFd)) {
     throw new Error("promotion atomic exchange input is invalid");
   }
-  const receipt = readProductionTrustReceipt();
-  const helperIdentity = receipt.binaries.promotionExchange;
-  const helper = openTrustedExecutable(
-    PRODUCTION_PROMOTION_HELPER,
-    helperIdentity.sha256,
-    false,
-  );
+  const helperReceipt = readValidatedPromotionHelperReceipt();
+  const helper = helperReceipt.opened;
   try {
     const result = spawnSync(trustedExecutableInvocation(helper, 6), [
       input.operationId,
@@ -239,6 +234,47 @@ export function executePromotionAtomicExchange(input) {
   } finally {
     closeSync(helper.fd);
   }
+}
+
+export function readValidatedProductionTrustReceipt() {
+  return readProductionTrustReceipt();
+}
+
+export function readValidatedPromotionHelperReceipt(options = {}) {
+  const testMode = options.testMode === true;
+  const helperPath = resolve(options.helperPath ?? PRODUCTION_PROMOTION_HELPER);
+  const receiptPath = resolve(options.receiptPath ?? PRODUCTION_PROMOTION_HELPER_RECEIPT);
+  if (!testMode && (helperPath !== PRODUCTION_PROMOTION_HELPER
+    || receiptPath !== PRODUCTION_PROMOTION_HELPER_RECEIPT)) {
+    throw new Error("promotion helper fixed path is invalid");
+  }
+  const expectedUid = testMode ? (process.getuid?.() ?? -1) : 0;
+  const expectedGid = testMode ? (process.getgid?.() ?? -1) : 0;
+  const receipt = readSecureReceipt(receiptPath, expectedUid, expectedGid, 0o400, 16 * 1024);
+  const value = JSON.parse(receipt.bytes.toString("utf8"));
+  receipt.bytes.fill(0);
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "helper,schemaVersion"
+    || value.schemaVersion !== 1 || !value.helper || typeof value.helper !== "object"
+    || Array.isArray(value.helper)
+    || Object.keys(value.helper).sort().join(",") !== [
+      "dev", "gid", "ino", "mode", "nlink", "path", "sha256", "size", "uid",
+    ].sort().join(",")
+    || value.helper.path !== helperPath || value.helper.uid !== expectedUid
+    || value.helper.gid !== expectedGid || value.helper.mode !== 0o500
+    || value.helper.nlink !== 1 || !Number.isSafeInteger(value.helper.dev)
+    || !Number.isSafeInteger(value.helper.ino) || !Number.isSafeInteger(value.helper.size)
+    || value.helper.size < 1 || !/^[a-f0-9]{64}$/u.test(value.helper.sha256 ?? "")) {
+    throw new Error("promotion helper receipt schema is invalid");
+  }
+  const opened = openTrustedExecutable(helperPath, value.helper.sha256, testMode);
+  if (opened.dev !== value.helper.dev || opened.ino !== value.helper.ino
+    || opened.size !== value.helper.size || opened.uid !== value.helper.uid
+    || opened.gid !== value.helper.gid || opened.mode !== value.helper.mode) {
+    closeSync(opened.fd);
+    throw new Error("promotion helper receipt identity mismatch");
+  }
+  return Object.freeze({ value: Object.freeze(value), receiptSha256: receipt.sha256, opened });
 }
 
 export function verifyTrustedHostTool(tool) {
@@ -761,12 +797,37 @@ function readProductionTrustReceipt() {
   }
 }
 
+function readSecureReceipt(path, uid, gid, mode, maximum) {
+  validateDirectoryChain(dirname(path), uid !== 0 || gid !== 0);
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+    || before.uid !== uid || before.gid !== gid || (before.mode & 0o777) !== mode
+    || before.size < 2 || before.size > maximum) {
+    throw new Error("trusted receipt boundary is invalid");
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size
+      || opened.uid !== uid || opened.gid !== gid || opened.nlink !== 1
+      || (opened.mode & 0o777) !== mode) throw new Error("trusted receipt changed while opening");
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+      bytes.fill(0);
+      throw new Error("trusted receipt changed while reading");
+    }
+    return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } finally { closeSync(fd); }
+}
+
 function activeTrustReceipt(source) {
   if (["release-build", "candidate-verify", "promotion"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     );
-    validateCommonTrustReceipt(receipt, false);
+    validateCommonTrustReceipt(receipt);
     return {
       ...receipt,
       releaseRoot: receipt.codeRoot,
@@ -789,15 +850,11 @@ function validateTrustReceipt(value) {
   }
   validateTrustedReleaseTreeReceipt(value.releaseTree);
   assertTrustedReleaseTree(value.releaseRoot, value.releaseTree);
-  return validateCommonTrustReceipt(value, true);
+  return validateCommonTrustReceipt(value);
 }
 
-function validateCommonTrustReceipt(value, requirePromotionHelper = true) {
-  const tools = requirePromotionHelper
-    ? REQUIRED_TOOLS
-    : Object.fromEntries(Object.entries(REQUIRED_TOOLS)
-      .filter(([name]) => name !== "promotionExchange"));
-  const binaryKeys = Object.keys(tools).sort();
+function validateCommonTrustReceipt(value) {
+  const binaryKeys = Object.keys(REQUIRED_TOOLS).sort();
   if (
     !value.binaries
     || typeof value.binaries !== "object"
@@ -806,7 +863,7 @@ function validateCommonTrustReceipt(value, requirePromotionHelper = true) {
   ) {
     throw new Error("trusted operations binary receipt set is invalid");
   }
-  for (const [name, path] of Object.entries(tools)) {
+  for (const [name, path] of Object.entries(REQUIRED_TOOLS)) {
     const item = value.binaries[name];
     if (
       !item

@@ -118,10 +118,37 @@ test("Linux helper atomically exchanges non-empty fixed directories and rejects 
       assert.notEqual(nonroot.status, 0);
     }
     const testDigest = sha256(readFileSync(binary));
+    const installRoot = join(root, "install-fixture");
+    mkdirSync(installRoot, { mode: 0o700 });
     const install = spawnSync("sh", ["scripts/install-promotion-atomic-exchange.sh",
-      binary, testDigest], { encoding: "utf8" });
-    assert.notEqual(install.status, 0);
-    assert.match(install.stderr, /test helper cannot be installed/u);
+      "--test-root", installRoot, binary, testDigest], { encoding: "utf8" });
+    assert.equal(install.status, 0, install.stderr);
+    const installed = join(installRoot, "installed/xingheng-promotion-atomic-exchange");
+    const independentReceipt = join(installRoot, "receipt/promotion-atomic-exchange.json");
+    const installedMetadata = lstatSync(installed);
+    const receiptValue = JSON.parse(readFileSync(independentReceipt, "utf8"));
+    assert.equal(receiptValue.helper.path, installed);
+    assert.equal(receiptValue.helper.sha256, testDigest);
+    assert.equal(receiptValue.helper.ino, installedMetadata.ino);
+    assert.equal(receiptValue.helper.mode, 0o500);
+    const receiptBeforeFailure = sha256(readFileSync(independentReceipt));
+    const failedInstall = spawnSync("sh", ["scripts/install-promotion-atomic-exchange.sh",
+      "--test-root", installRoot, binary, "0".repeat(64)], { encoding: "utf8" });
+    assert.notEqual(failedInstall.status, 0);
+    assert.equal(sha256(readFileSync(independentReceipt)), receiptBeforeFailure);
+    const changedBinary = join(root, "changed-helper");
+    writeFileSync(changedBinary,
+      Buffer.concat([readFileSync(binary), Buffer.from("\ninterrupted replacement\n")]),
+      { mode: 0o500 });
+    chmodSync(changedBinary, 0o500);
+    const interrupted = spawnSync("sh", ["scripts/install-promotion-atomic-exchange.sh",
+      "--test-root", installRoot, changedBinary, sha256(readFileSync(changedBinary))], {
+      encoding: "utf8", env: { ...process.env,
+        XINGHENG_PROMOTION_INSTALL_TEST_FAULT: "after-helper" },
+    });
+    assert.equal(interrupted.status, 91);
+    assert.equal(sha256(readFileSync(independentReceipt)), receiptBeforeFailure);
+    assert.notEqual(sha256(readFileSync(installed)), receiptValue.helper.sha256);
     assert.equal(lstatSync(canonical).ino, current[0].ino);
     assert.equal(lstatSync(staging).ino, current[1].ino);
     closeSync(contextFd); locks.forEach(closeSync);

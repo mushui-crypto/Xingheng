@@ -19,13 +19,17 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { pathToFileURL } from "node:url";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { validateReleaseManifest } from "./deploymentRevision.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
 import { readTrustedReleaseCandidateReceipt, releaseCandidatePaths } from "./trustedReleaseCandidate.mjs";
 import { captureTrustedReleaseTree } from "./trustedReleaseTree.mjs";
-import { executePromotionAtomicExchange } from "./trustedDockerRuntime.mjs";
+import {
+  executePromotionAtomicExchange,
+  readValidatedProductionTrustReceipt,
+  readValidatedPromotionHelperReceipt,
+} from "./trustedDockerRuntime.mjs";
 
 export const PROMOTION_STATES = Object.freeze([
   "PROMOTION_STARTED",
@@ -36,6 +40,7 @@ export const PROMOTION_STATES = Object.freeze([
 export const PROMOTION_ROOT = "/var/lib/xingheng/release-promotion";
 export const PROMOTION_RECORD = `${PROMOTION_ROOT}/current.json`;
 export const PROMOTION_HELPER = "/usr/local/libexec/xingheng-promotion-atomic-exchange";
+export const PROMOTION_HELPER_RECEIPT = "/etc/xingheng/promotion-atomic-exchange.json";
 
 const RELEASE_PARENT = "/opt/xingheng-release";
 const CANONICAL_ROOT = `${RELEASE_PARENT}/code`;
@@ -45,6 +50,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{1
 const REVISION = /^[a-f0-9]{40}$/u;
 const SHA256 = /^[a-f0-9]{64}$/u;
 const IMAGE = /^sha256:[a-f0-9]{64}$/u;
+const SCRIPT_DIRECTORY = dirname(fileURLToPath(import.meta.url));
+const PROMOTION_WRAPPER = join(SCRIPT_DIRECTORY, "release-promote.sh");
+const TRUSTED_OPERATION_LAUNCHER = join(SCRIPT_DIRECTORY, "trusted-operation-launcher.mjs");
 
 export class ReleasePromotionTransaction {
   constructor(options = {}) {
@@ -64,17 +72,21 @@ export class ReleasePromotionTransaction {
       trustReceipt: resolve(options.trustReceipt ?? TRUST_RECEIPT),
       lifecyclePointer: resolve(options.lifecyclePointer ?? LIFECYCLE_POINTER),
       helperPath: resolve(options.helperPath ?? PROMOTION_HELPER),
+      helperReceipt: resolve(options.helperReceipt ?? PROMOTION_HELPER_RECEIPT),
     });
     this.exchange = options.exchange ?? ((input) => executePromotionAtomicExchange(input));
     this.installTrust = options.installTrust ?? (() => this.installTrustedOperations());
     this.now = options.now ?? (() => new Date());
     this.fault = options.fault ?? (() => {});
+    this.validateMainTrust = options.validateMainTrust ?? (() => readValidatedProductionTrustReceipt());
+    this.validateHelper = options.validateHelper ?? (() => readValidatedPromotionHelperReceipt({
+      helperPath: this.paths.helperPath,
+      receiptPath: this.paths.helperReceipt,
+    }));
   }
 
   promote(expected) {
-    if (!this.testMode && inheritedOperationLocks("promotion") === null) {
-      throw new Error("release promotion requires inherited trusted operation locks");
-    }
+    if (!this.testMode) assertTrustedPromotionMutationContext();
     validateExpectedCandidate(expected);
     if (existsNoFollow(this.paths.statePath)) {
       const current = readPromotionRecord(this.paths.statePath, this.uid, this.gid);
@@ -103,6 +115,7 @@ export class ReleasePromotionTransaction {
       staging,
       newCanonical: null,
       trustReceiptSha256: null,
+      helperReceiptSha256: null,
       success: null,
       failureStage: null,
     };
@@ -110,6 +123,7 @@ export class ReleasePromotionTransaction {
     writePromotionRecord(this.paths.statePath, started, this.uid, this.gid, true);
     let exchangeInvoked = false;
     try {
+      this.fault("after_started_publish");
       this.assertUnchangedBeforeExchange(candidate, oldCanonical, staging);
       const context = secureFile(this.paths.statePath, this.uid, this.gid, 0o400, 1024 * 1024);
       try {
@@ -134,16 +148,24 @@ export class ReleasePromotionTransaction {
       };
       writePromotionRecord(this.paths.statePath, exchanged, this.uid, this.gid);
       this.fault("after_exchanged_publish");
-      const newCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
+      let newCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
       assertNewCanonical(candidate, newCanonical, oldCanonical);
       const trustReceiptSha256 = this.installTrust();
       this.fault("after_trust_install");
-      const trusted = secureJson(this.paths.trustReceipt, this.uid, this.gid, 0o400, 64 * 1024);
-      if (trusted.sha256 !== trustReceiptSha256
-        || trusted.value.releaseRoot !== this.paths.canonicalRoot
-        || trusted.value.releaseTree?.sha256 !== newCanonical.releaseTreeSha256) {
+      const currentRecord = readPromotionRecord(this.paths.statePath, this.uid, this.gid);
+      if (currentRecord.state !== "PROMOTION_EXCHANGED"
+        || canonical(currentRecord) !== canonical(exchanged)) {
+        throw new Error("promotion record changed before completion");
+      }
+      newCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
+      assertNewCanonical(candidate, newCanonical, oldCanonical);
+      const trusted = this.validateMainTrust();
+      if (trusted.receiptSha256 !== trustReceiptSha256
+        || trusted.releaseRoot !== this.paths.canonicalRoot
+        || trusted.releaseTree?.sha256 !== newCanonical.releaseTreeSha256) {
         throw new Error("installed trust receipt identity mismatch");
       }
+      const helper = this.validateHelperIdentity();
       const completedAt = this.now().toISOString();
       const success = {
         operationId,
@@ -152,6 +174,7 @@ export class ReleasePromotionTransaction {
         newCanonical,
         candidate,
         trustReceiptSha256,
+        helperReceiptSha256: helper.receiptSha256,
       };
       const completed = {
         ...exchanged,
@@ -159,6 +182,7 @@ export class ReleasePromotionTransaction {
         updatedAt: completedAt,
         newCanonical,
         trustReceiptSha256,
+        helperReceiptSha256: helper.receiptSha256,
         success,
       };
       this.fault("before_completed_publish");
@@ -167,6 +191,8 @@ export class ReleasePromotionTransaction {
         ...this.paths,
         expectedUid: this.uid,
         expectedGid: this.gid,
+        validateMainTrust: this.validateMainTrust,
+        validateHelper: this.validateHelper,
       });
       return Object.freeze(completed);
     } catch (error) {
@@ -187,9 +213,7 @@ export class ReleasePromotionTransaction {
   }
 
   terminalizeUnknown(operationId) {
-    if (!this.testMode && inheritedOperationLocks("promotion") === null) {
-      throw new Error("promotion terminalization requires inherited trusted operation locks");
-    }
+    if (!this.testMode) assertTrustedPromotionMutationContext();
     if (!UUID.test(operationId ?? "")) throw new Error("promotion operation ID is invalid");
     assertSecureDirectory(this.paths.stateRoot, this.uid, this.gid, 0o700);
     const current = readPromotionRecord(this.paths.statePath, this.uid, this.gid);
@@ -282,13 +306,12 @@ export class ReleasePromotionTransaction {
       oldEnvironment.bytes.fill(0);
     }
     fsyncTree(path);
-    const identity = directoryIdentity(path, this.uid, this.gid);
-    return Object.freeze({
-      path,
-      dev: identity.dev,
-      ino: identity.ino,
-      environmentSha256: oldCanonical.environmentSha256,
-    });
+    const identity = captureStagingIdentity(path, this.uid, this.gid);
+    if (identity.manifestSha256 !== candidate.manifestSha256
+      || identity.environmentSha256 !== oldCanonical.environmentSha256) {
+      throw new Error("promotion staging identity is invalid");
+    }
+    return Object.freeze(identity);
   }
 
   assertUnchangedBeforeExchange(candidate, oldCanonical, staging) {
@@ -300,9 +323,21 @@ export class ReleasePromotionTransaction {
     if (canonical(currentCanonical) !== canonical(oldCanonical)) {
       throw new Error("canonical identity changed before exchange");
     }
-    const currentStaging = directoryIdentity(staging.path, this.uid, this.gid);
-    if (currentStaging.dev !== staging.dev || currentStaging.ino !== staging.ino) {
+    const currentStaging = captureStagingIdentity(staging.path, this.uid, this.gid);
+    if (canonical(currentStaging) !== canonical(staging)) {
       throw new Error("promotion staging identity changed before exchange");
+    }
+  }
+
+  validateHelperIdentity() {
+    const helper = this.validateHelper();
+    try {
+      if (!SHA256.test(helper.receiptSha256 ?? "")) {
+        throw new Error("promotion helper receipt identity is invalid");
+      }
+      return { receiptSha256: helper.receiptSha256 };
+    } finally {
+      if (helper.opened?.fd !== undefined) closeSync(helper.opened.fd);
     }
   }
 
@@ -335,13 +370,22 @@ export function assertPromotionStateAllowsProduction(options = {}) {
     canonicalRoot: resolve(options.canonicalRoot ?? CANONICAL_ROOT),
     trustReceipt: resolve(options.trustReceipt ?? TRUST_RECEIPT),
     lifecyclePointer: resolve(options.lifecyclePointer ?? LIFECYCLE_POINTER),
+    helperPath: resolve(options.helperPath ?? PROMOTION_HELPER),
+    helperReceipt: resolve(options.helperReceipt ?? PROMOTION_HELPER_RECEIPT),
   };
   const current = captureCanonicalIdentity(paths, uid, gid);
-  const trusted = secureJson(paths.trustReceipt, uid, gid, 0o400, 64 * 1024);
+  const trusted = options.validateMainTrust?.() ?? readValidatedProductionTrustReceipt();
+  const helper = options.validateHelper?.() ?? readValidatedPromotionHelperReceipt({
+    helperPath: paths.helperPath,
+    receiptPath: paths.helperReceipt,
+    testMode: uid !== 0 || gid !== 0,
+  });
+  try {
   if (canonical(record.newCanonical) !== canonical(current)
-    || record.trustReceiptSha256 !== trusted.sha256
-    || trusted.value.releaseRoot !== paths.canonicalRoot
-    || trusted.value.releaseTree?.sha256 !== current.releaseTreeSha256
+    || record.trustReceiptSha256 !== trusted.receiptSha256
+    || record.helperReceiptSha256 !== helper.receiptSha256
+    || trusted.releaseRoot !== paths.canonicalRoot
+    || trusted.releaseTree?.sha256 !== current.releaseTreeSha256
     || canonical(record.success) !== canonical({
       operationId: record.operationId,
       timestamp: record.updatedAt,
@@ -349,16 +393,81 @@ export function assertPromotionStateAllowsProduction(options = {}) {
       newCanonical: record.newCanonical,
       candidate: record.candidate,
       trustReceiptSha256: record.trustReceiptSha256,
+      helperReceiptSha256: record.helperReceiptSha256,
     })) {
     throw new Error("completed promotion identity is invalid");
   }
   return Object.freeze(record);
+  } finally {
+    if (helper.opened?.fd !== undefined) closeSync(helper.opened.fd);
+  }
 }
 
 export function readPromotionRecord(path = PROMOTION_RECORD, uid = 0, gid = 0) {
   const opened = secureJson(path, uid, gid, 0o400, 1024 * 1024);
   validatePromotionRecord(opened.value);
   return Object.freeze(opened.value);
+}
+
+export function validateTrustedPromotionArguments(args, source = process.env) {
+  const keys = Object.keys(source).sort();
+  if (keys.join(",") !== "HOME,LANG,LC_ALL,PATH,TZ"
+    || source.HOME !== "/root" || source.PATH !== "/usr/sbin:/usr/bin:/sbin:/bin"
+    || source.LANG !== "C.UTF-8" || source.LC_ALL !== "C.UTF-8" || source.TZ !== "UTC") {
+    throw new Error("trusted promotion environment is invalid");
+  }
+  if (args.length !== 2) throw new Error("trusted promotion arguments are invalid");
+  if (args[0] === "--terminalize-unknown") {
+    if (!UUID.test(args[1])) throw new Error("trusted promotion terminalization input is invalid");
+    return Object.freeze({ command: "terminalize-unknown", operationId: args[1] });
+  }
+  if (args[0] !== "--promotion-json"
+    || !/^[A-Za-z0-9_-]{100,8192}$/u.test(args[1])) {
+    throw new Error("trusted promotion payload is invalid");
+  }
+  let value;
+  try {
+    const decoded = Buffer.from(args[1], "base64url");
+    if (decoded.toString("base64url") !== args[1]) throw new Error("non-canonical base64url");
+    value = JSON.parse(decoded.toString("utf8"));
+  } catch {
+    throw new Error("trusted promotion payload is invalid");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== [
+      "images", "manifestSha256", "operationId", "revision", "sourceSha256", "treeSha256",
+    ].sort().join(",") || !UUID.test(value.operationId ?? "")) {
+    throw new Error("trusted promotion payload schema is invalid");
+  }
+  validateExpectedCandidate(value);
+  return Object.freeze({ command: "promote", value: Object.freeze(value) });
+}
+
+function assertTrustedPromotionMutationContext() {
+  if (inheritedOperationLocks("promotion") === null
+    || process.env.XINGHENG_TRUSTED_OPERATION_ENTRY !== "release-promote.sh") {
+    throw new Error("release promotion trusted wrapper context is invalid");
+  }
+  const candidateRevision = basename(dirname(resolve(SCRIPT_DIRECTORY, "..")));
+  if (!REVISION.test(candidateRevision)
+    || process.env.XINGHENG_RELEASE_CANDIDATE_REVISION !== candidateRevision) {
+    throw new Error("release promotion candidate context is invalid");
+  }
+  assertInheritedTrustedEntry(PROMOTION_WRAPPER, 6, "wrapper");
+  assertInheritedTrustedEntry(TRUSTED_OPERATION_LAUNCHER, 7, "launcher");
+}
+
+function assertInheritedTrustedEntry(path, fd, label) {
+  const current = lstatSync(path);
+  const inherited = fstatSync(fd);
+  if (!current.isFile() || current.isSymbolicLink() || current.nlink !== 1
+    || current.uid !== 0 || current.gid !== 0 || current.size < 1
+    || (current.mode & 0o022) !== 0 || (current.mode & 0o111) === 0
+    || inherited.dev !== current.dev || inherited.ino !== current.ino
+    || inherited.size !== current.size || inherited.uid !== 0 || inherited.gid !== 0
+    || inherited.nlink !== 1 || (inherited.mode & 0o777) !== (current.mode & 0o777)) {
+    throw new Error(`release promotion trusted ${label} descriptor is invalid`);
+  }
 }
 
 function captureCanonicalIdentity(paths, uid, gid) {
@@ -423,7 +532,7 @@ function validatePromotionRecord(value) {
     || Object.keys(value).sort().join(",") !== [
       "candidate", "failureStage", "newCanonical", "oldCanonical", "operationId",
       "schemaVersion", "staging", "startedAt", "state", "success",
-      "trustReceiptSha256", "updatedAt",
+      "trustReceiptSha256", "helperReceiptSha256", "updatedAt",
     ].sort().join(",")
     || value.schemaVersion !== 1 || !PROMOTION_STATES.includes(value.state)
     || !UUID.test(value.operationId ?? "") || !validUtc(value.startedAt) || !validUtc(value.updatedAt)) {
@@ -433,15 +542,22 @@ function validatePromotionRecord(value) {
   validateCanonicalIdentity(value.oldCanonical);
   if (!value.staging || typeof value.staging.path !== "string"
     || !Number.isSafeInteger(value.staging.dev) || !Number.isSafeInteger(value.staging.ino)
-    || !SHA256.test(value.staging.environmentSha256 ?? "")) {
+    || !SHA256.test(value.staging.environmentSha256 ?? "")
+    || !SHA256.test(value.staging.manifestSha256 ?? "")
+    || !SHA256.test(value.staging.releaseTreeSha256 ?? "")
+    || Object.keys(value.staging).sort().join(",") !== [
+      "dev", "environmentSha256", "ino", "manifestSha256", "path", "releaseTreeSha256",
+    ].sort().join(",")) {
     throw new Error("promotion staging record is invalid");
   }
   if (value.state === "PROMOTION_COMPLETED") {
     validateCanonicalIdentity(value.newCanonical);
-    if (!SHA256.test(value.trustReceiptSha256 ?? "") || !value.success) {
+    if (!SHA256.test(value.trustReceiptSha256 ?? "")
+      || !SHA256.test(value.helperReceiptSha256 ?? "") || !value.success) {
       throw new Error("completed promotion record is invalid");
     }
-  } else if (value.newCanonical !== null || value.trustReceiptSha256 !== null || value.success !== null) {
+  } else if (value.newCanonical !== null || value.trustReceiptSha256 !== null
+    || value.helperReceiptSha256 !== null || value.success !== null) {
     throw new Error("non-completed promotion record contains success state");
   }
   if (value.state === "PROMOTION_UNKNOWN") {
@@ -565,6 +681,26 @@ function directoryIdentity(path, uid, gid) {
   return { dev: metadata.dev, ino: metadata.ino };
 }
 
+function captureStagingIdentity(path, uid, gid) {
+  const directory = directoryIdentity(path, uid, gid);
+  const manifest = secureFile(join(path, "deploy/release-manifest.json"), uid, gid, 0o444, 64 * 1024);
+  const environment = secureFile(join(path, ".env.production"), uid, gid, 0o600, 16 * 1024 * 1024);
+  try {
+    const releaseTree = capturePromotionReleaseTree(path, uid, gid);
+    return Object.freeze({
+      path,
+      dev: directory.dev,
+      ino: directory.ino,
+      manifestSha256: manifest.sha256,
+      releaseTreeSha256: releaseTree.sha256,
+      environmentSha256: environment.sha256,
+    });
+  } finally {
+    closeSync(manifest.fd); manifest.bytes.fill(0);
+    closeSync(environment.fd); environment.bytes.fill(0);
+  }
+}
+
 function ensureSecureDirectory(path, uid, gid, mode) {
   try { mkdirSync(path, { mode, recursive: false }); } catch (error) {
     if (error?.code !== "EEXIST") throw error;
@@ -659,13 +795,22 @@ function existsNoFollow(path) {
 async function main() {
   const command = process.argv[2];
   if (command === "promote" && process.argv.length === 4) {
-    const input = JSON.parse(Buffer.from(process.argv[3], "base64url").toString("utf8"));
-    const result = new ReleasePromotionTransaction().promote(input);
+    const validated = validateTrustedPromotionArguments(
+      ["--promotion-json", process.argv[3]],
+      { HOME: "/root", PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8", TZ: "UTC" },
+    );
+    const result = new ReleasePromotionTransaction().promote(validated.value);
     console.log(JSON.stringify({ ok: true, state: result.state, operationId: result.operationId }));
     return;
   }
   if (command === "terminalize-unknown" && process.argv.length === 4) {
-    const result = new ReleasePromotionTransaction().terminalizeUnknown(process.argv[3]);
+    const validated = validateTrustedPromotionArguments(
+      ["--terminalize-unknown", process.argv[3]],
+      { HOME: "/root", PATH: "/usr/sbin:/usr/bin:/sbin:/bin", LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8", TZ: "UTC" },
+    );
+    const result = new ReleasePromotionTransaction().terminalizeUnknown(validated.operationId);
     console.log(JSON.stringify({ ok: true, state: result.state, operationId: result.operationId }));
     return;
   }

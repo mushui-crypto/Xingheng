@@ -1,6 +1,14 @@
 #!/bin/sh
 set -eu
 
+if [ "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" = promotion ]; then
+  case "${1:-}" in --promotion-json|--terminalize-unknown) ;; *)
+    echo "trusted promotion command is invalid" >&2
+    exit 78
+    ;;
+  esac
+fi
+
 case "${1:-}" in
   --promotion-json|--terminalize-unknown)
     case "$0" in */*) ;; *) echo "promotion entry requires an explicit path" >&2; exit 78;; esac
@@ -21,9 +29,22 @@ case "${1:-}" in
       echo "promotion lock context is invalid" >&2
       exit 78
     }
+    cd "$repo_root"
+    [ "${PWD:-}" = "$repo_root" ] || { echo "trusted promotion cwd is invalid" >&2; exit 78; }
+    if /usr/bin/env | /usr/bin/cut -d= -f1 | /usr/bin/grep -Ev \
+      '^(HOME|PATH|LANG|LC_ALL|TZ|PWD|SHLVL|_|XINGHENG_OPERATION_LOCK_CONTEXT|XINGHENG_RELEASE_CANDIDATE_REVISION|XINGHENG_TRUSTED_OPERATION_ENTRY)$' \
+      | /usr/bin/grep -q .; then
+      echo "trusted promotion environment is invalid" >&2
+      exit 78
+    fi
+    [ "${XINGHENG_TRUSTED_OPERATION_ENTRY:-}" = release-promote.sh ] || {
+      echo "trusted promotion wrapper identity is invalid" >&2
+      exit 78
+    }
     case "$1" in
       --promotion-json)
         [ "$#" -eq 2 ] || { echo "--promotion-json requires one base64url payload" >&2; exit 2; }
+        case "$2" in *[!A-Za-z0-9_-]*|'') echo "promotion payload encoding is invalid" >&2; exit 2;; esac
         exec /usr/bin/node "$script_dir/releasePromotionTransaction.mjs" promote "$2"
         ;;
       --terminalize-unknown)
