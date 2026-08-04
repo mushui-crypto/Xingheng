@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -13,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import {
   ReleasePromotionTransaction,
@@ -170,6 +171,28 @@ test("trusted promotion arguments are a strict command, payload and environment 
   ]) assert.throws(() => validateTrustedPromotionArguments(args, environment));
   assert.throws(() => validateTrustedPromotionArguments(["--promotion-json", payload],
     { ...environment, NODE_OPTIONS: "--require=/tmp/caller.cjs" }));
+});
+
+test("promotion wrapper process rejects trusted direct, legacy and polluted callers", () => {
+  const wrapper = new URL("./release-promote.sh", import.meta.url).pathname;
+  const payload = "A".repeat(120);
+  const environment = { HOME: tmpdir(), PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+    LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC" };
+  for (const invocation of [
+    { args: ["--generate", "legacy"], env: { ...environment,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion" } },
+    { args: ["--promotion-json", payload, "extra"], env: { ...environment,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion" } },
+    { args: ["--promotion-json", payload], env: environment },
+    { args: ["--promotion-json", payload], env: { ...environment,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion", NODE_OPTIONS: "--no-warnings" } },
+  ]) {
+    const result = spawnSync("/bin/sh", [wrapper, ...invocation.args], {
+      cwd: dirname(wrapper), env: invocation.env, encoding: "utf8",
+    });
+    assert.notEqual(result.status, 0);
+    assert.doesNotMatch(result.stdout, /production gate PASS|PROMOTION_COMPLETED/u);
+  }
 });
 
 test("manual terminalization can only move matching STARTED or EXCHANGED to UNKNOWN", () => {

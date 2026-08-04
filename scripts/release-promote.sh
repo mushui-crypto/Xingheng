@@ -1,7 +1,25 @@
 #!/bin/sh
 set -eu
 
-if [ "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" = promotion ]; then
+script_dir=
+repo_root=
+case "$0" in
+  */*)
+    script_dir="$(CDPATH= cd -P -- "${0%/*}" && pwd -P)"
+    repo_root="${script_dir%/*}"
+    ;;
+esac
+
+trusted_boundary=false
+if [ "$(/usr/bin/id -u)" -eq 0 ] \
+  || [ "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" = promotion ]; then
+  trusted_boundary=true
+fi
+case "$repo_root" in
+  /opt/xingheng-release/candidates/*/code) trusted_boundary=true ;;
+esac
+
+if [ "$trusted_boundary" = true ]; then
   case "${1:-}" in --promotion-json|--terminalize-unknown) ;; *)
     echo "trusted promotion command is invalid" >&2
     exit 78
@@ -11,9 +29,7 @@ fi
 
 case "${1:-}" in
   --promotion-json|--terminalize-unknown)
-    case "$0" in */*) ;; *) echo "promotion entry requires an explicit path" >&2; exit 78;; esac
-    script_dir="$(CDPATH= cd -P -- "${0%/*}" && pwd -P)"
-    repo_root="${script_dir%/*}"
+    [ -n "$script_dir" ] || { echo "promotion entry requires an explicit path" >&2; exit 78; }
     case "$repo_root" in /opt/xingheng-release/candidates/*/code) ;; *)
       echo "promotion entry must run from a trusted candidate" >&2
       exit 78
