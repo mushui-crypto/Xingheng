@@ -25,7 +25,7 @@ export const OPERATION_LOCK_ORDER = Object.freeze([
 const PRODUCTION_LOCK_ROOT = "/run/lock/xingheng";
 
 export function acquireOperationLocks(environment, options = {}) {
-  if (!["production", "release-build", "candidate-verify"].includes(environment)) {
+  if (!["production", "release-build", "candidate-verify", "promotion"].includes(environment)) {
     throw new Error("operation lock environment is invalid");
   }
   const testMode = options.testMode === true;
@@ -36,7 +36,7 @@ export function acquireOperationLocks(environment, options = {}) {
   secureLockRoot(root, testMode);
   const names = [
     OPERATION_LOCK_ORDER[0],
-    ["production", "candidate-verify"].includes(environment)
+    ["production", "candidate-verify", "promotion"].includes(environment)
       ? OPERATION_LOCK_ORDER[1]
       : OPERATION_LOCK_ORDER[2],
   ];
@@ -67,7 +67,7 @@ export function inheritedOperationLocks(environment, source = process.env) {
   }
   const names = [
     OPERATION_LOCK_ORDER[0],
-    ["production", "candidate-verify"].includes(environment)
+    ["production", "candidate-verify", "promotion"].includes(environment)
       ? OPERATION_LOCK_ORDER[1]
       : OPERATION_LOCK_ORDER[2],
   ];

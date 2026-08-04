@@ -1,6 +1,39 @@
 #!/bin/sh
 set -eu
 
+case "${1:-}" in
+  --promotion-json|--terminalize-unknown)
+    case "$0" in */*) ;; *) echo "promotion entry requires an explicit path" >&2; exit 78;; esac
+    script_dir="$(CDPATH= cd -P -- "${0%/*}" && pwd -P)"
+    repo_root="${script_dir%/*}"
+    case "$repo_root" in /opt/xingheng-release/candidates/*/code) ;; *)
+      echo "promotion entry must run from a trusted candidate" >&2
+      exit 78
+      ;;
+    esac
+    if [ "$(/usr/bin/id -u)" -eq 0 ] && [ "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" != promotion ]; then
+      exec /usr/bin/env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+        LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+        /usr/bin/node "$script_dir/trusted-operation-launcher.mjs" \
+        promotion scripts/release-promote.sh "$@"
+    fi
+    [ "${XINGHENG_OPERATION_LOCK_CONTEXT:-}" = promotion ] || {
+      echo "promotion lock context is invalid" >&2
+      exit 78
+    }
+    case "$1" in
+      --promotion-json)
+        [ "$#" -eq 2 ] || { echo "--promotion-json requires one base64url payload" >&2; exit 2; }
+        exec /usr/bin/node "$script_dir/releasePromotionTransaction.mjs" promote "$2"
+        ;;
+      --terminalize-unknown)
+        [ "$#" -eq 2 ] || { echo "--terminalize-unknown requires one operation ID" >&2; exit 2; }
+        exec /usr/bin/node "$script_dir/releasePromotionTransaction.mjs" terminalize-unknown "$2"
+        ;;
+    esac
+    ;;
+esac
+
 mode=check
 if [ "${1:-}" = "--generate" ]; then
   mode=generate

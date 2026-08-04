@@ -20,12 +20,14 @@ import {
   assertTrustedReleaseCandidateRoot,
   readTrustedReleaseCandidateReceipt,
 } from "./trustedReleaseCandidate.mjs";
+import { assertPromotionStateAllowsProduction } from "./releasePromotionTransaction.mjs";
 
 const PRODUCTION_DOCKER_CLI = "/usr/bin/docker";
 const PRODUCTION_COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
 const PRODUCTION_DOCKER_SOCKET = "/var/run/docker.sock";
 const PRODUCTION_TRUST_RECEIPT = "/etc/xingheng/trusted-operations.json";
 const PRODUCTION_RELEASE_ROOT = "/opt/xingheng-release/code";
+const PRODUCTION_PROMOTION_HELPER = "/usr/local/libexec/xingheng-promotion-atomic-exchange";
 const MAX_CLIENT_BYTES = 256 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 64 * 1024;
 const MAX_DIAGNOSTIC_BYTES = 4096;
@@ -58,6 +60,7 @@ const REQUIRED_TOOLS = Object.freeze({
   sha256sum: "/usr/bin/sha256sum",
   docker: PRODUCTION_DOCKER_CLI,
   compose: PRODUCTION_COMPOSE_PLUGIN,
+  promotionExchange: PRODUCTION_PROMOTION_HELPER,
 });
 
 export function assertNoDockerControlEnvironment(source = process.env) {
@@ -82,11 +85,14 @@ export function trustedReleaseRoot(source = process.env) {
 
 export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   if (process.getuid?.() !== 0) return realpathSync(currentRoot);
-  if (["release-build", "candidate-verify"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+  if (["release-build", "candidate-verify", "promotion"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     return assertTrustedReleaseCandidateRoot(
       currentRoot,
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     ).root;
+  }
+  if (source.XINGHENG_OPERATION_LOCK_CONTEXT !== "promotion") {
+    assertPromotionStateAllowsProduction();
   }
   const expected = trustedReleaseRoot(source);
   const actual = realpathSync(currentRoot);
@@ -118,6 +124,10 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
     throw new Error("trusted Docker runtime kind is invalid");
   }
   assertNoDockerControlEnvironment(source);
+  if (!["release-build", "candidate-verify", "promotion"]
+    .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+    assertPromotionStateAllowsProduction();
+  }
   const fixture = testFixture(source);
   const trustReceipt = fixture === null ? activeTrustReceipt(source) : null;
   if (fixture === null && process.getuid?.() !== 0) {
@@ -155,8 +165,13 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
 
 export function openTrustedHostTool(name, source = process.env) {
   assertNoDockerControlEnvironment(source);
-  if (!Object.hasOwn(REQUIRED_TOOLS, name) || ["docker", "compose"].includes(name)) {
+  if (!Object.hasOwn(REQUIRED_TOOLS, name)
+    || ["docker", "compose", "promotionExchange"].includes(name)) {
     throw new Error("trusted host tool name is invalid");
+  }
+  if (!["release-build", "candidate-verify", "promotion"]
+    .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+    assertPromotionStateAllowsProduction();
   }
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || testFixture(source) !== null) {
     throw new Error("trusted host tool requires the controlled root operator");
@@ -174,6 +189,56 @@ export function openTrustedHostTool(name, source = process.env) {
       closeSync(opened.fd);
     },
   };
+}
+
+export function executePromotionAtomicExchange(input) {
+  if (process.platform !== "linux" || process.getuid?.() !== 0 || process.getgid?.() !== 0
+    || process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "promotion") {
+    throw new Error("promotion atomic exchange requires the trusted promotion context");
+  }
+  if (!input || input.testMode === true || input.helperPath !== PRODUCTION_PROMOTION_HELPER
+    || !/^[0-9a-f-]{36}$/u.test(input.operationId ?? "")
+    || !/^[a-f0-9]{64}$/u.test(input.contextSha256 ?? "")
+    || !Number.isInteger(input.contextFd)) {
+    throw new Error("promotion atomic exchange input is invalid");
+  }
+  const receipt = readProductionTrustReceipt();
+  const helperIdentity = receipt.binaries.promotionExchange;
+  const helper = openTrustedExecutable(
+    PRODUCTION_PROMOTION_HELPER,
+    helperIdentity.sha256,
+    false,
+  );
+  try {
+    const result = spawnSync(trustedExecutableInvocation(helper, 6), [
+      input.operationId,
+      input.contextSha256,
+      String(input.canonical.dev),
+      String(input.canonical.ino),
+      String(input.staging.dev),
+      String(input.staging.ino),
+    ], {
+      encoding: "utf8",
+      env: {
+        HOME: "/root",
+        PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        TZ: "UTC",
+        XINGHENG_OPERATION_LOCK_CONTEXT: "promotion",
+        XINGHENG_PROMOTION_CONTEXT_SHA256: input.contextSha256,
+      },
+      stdio: ["ignore", "pipe", "pipe", 3, 4, input.contextFd, helper.fd],
+    });
+    verifyTrustedHostTool(helper);
+    if (result.status !== 0 || result.signal || result.error
+      || result.stdout !== "PROMOTION_ATOMIC_EXCHANGE=PASS\n" || result.stderr !== "") {
+      throw new Error("promotion atomic exchange execution failed");
+    }
+    return true;
+  } finally {
+    closeSync(helper.fd);
+  }
 }
 
 export function verifyTrustedHostTool(tool) {
@@ -697,11 +762,11 @@ function readProductionTrustReceipt() {
 }
 
 function activeTrustReceipt(source) {
-  if (["release-build", "candidate-verify"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+  if (["release-build", "candidate-verify", "promotion"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     );
-    validateCommonTrustReceipt(receipt);
+    validateCommonTrustReceipt(receipt, false);
     return {
       ...receipt,
       releaseRoot: receipt.codeRoot,
@@ -724,11 +789,15 @@ function validateTrustReceipt(value) {
   }
   validateTrustedReleaseTreeReceipt(value.releaseTree);
   assertTrustedReleaseTree(value.releaseRoot, value.releaseTree);
-  return validateCommonTrustReceipt(value);
+  return validateCommonTrustReceipt(value, true);
 }
 
-function validateCommonTrustReceipt(value) {
-  const binaryKeys = Object.keys(REQUIRED_TOOLS).sort();
+function validateCommonTrustReceipt(value, requirePromotionHelper = true) {
+  const tools = requirePromotionHelper
+    ? REQUIRED_TOOLS
+    : Object.fromEntries(Object.entries(REQUIRED_TOOLS)
+      .filter(([name]) => name !== "promotionExchange"));
+  const binaryKeys = Object.keys(tools).sort();
   if (
     !value.binaries
     || typeof value.binaries !== "object"
@@ -737,7 +806,7 @@ function validateCommonTrustReceipt(value) {
   ) {
     throw new Error("trusted operations binary receipt set is invalid");
   }
-  for (const [name, path] of Object.entries(REQUIRED_TOOLS)) {
+  for (const [name, path] of Object.entries(tools)) {
     const item = value.binaries[name];
     if (
       !item

@@ -33,6 +33,7 @@ const BINARIES = Object.freeze({
   sha256sum: "/usr/bin/sha256sum",
   docker: "/usr/bin/docker",
   compose: "/usr/libexec/docker/cli-plugins/docker-compose",
+  promotionExchange: "/usr/local/libexec/xingheng-promotion-atomic-exchange",
 });
 const FORBIDDEN_ENVIRONMENT = /^(?:DOCKER_|COMPOSE_|NODE_OPTIONS$|NODE_PATH$|NODE_ENV$|NODE_TEST_CONTEXT$|XINGHENG_TEST_|LD_|DYLD_|BASH_ENV$|ENV$|XDG_)/u;
 
