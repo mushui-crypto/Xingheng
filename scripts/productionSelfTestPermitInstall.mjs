@@ -108,6 +108,23 @@ export function parseCanonicalAuthorization(value) {
   return authorization;
 }
 
+export function readCanonicalAuthorizationIdentity(
+  path = AUTHORIZATION_MANIFEST,
+  options = {},
+) {
+  const bytes = readSecureFile(path, 1024 * 1024, 0o400, options);
+  try {
+    const authorization = parseCanonicalAuthorization(JSON.parse(bytes.toString("utf8")));
+    return Object.freeze({
+      ownerUserId: authorization.ownerUserId,
+      permitId: authorization.permitId,
+      sha256: sha256(bytes),
+    });
+  } finally {
+    bytes.fill(0);
+  }
+}
+
 export function productionSelfTestPermitDigest(input) {
   return sha256(Buffer.from([
     "production", "binance", "xaut", input.permitId, input.ownerUserId,
@@ -427,7 +444,7 @@ export function assertPermitEnvironmentAuthorized(input) {
   const prepared = receipt.status === "prepared"
     && input.operationEntry === "install-production-self-test-permit.sh"
     && input.operationId === receipt.operationId
-    && isPermitInstallComposeOperation(input.composeArgs, receipt.request.ownerUserId);
+    && isPermitInstallComposeOperation(input.composeArgs);
   if (receipt.status !== "success" && !prepared) {
     throw new Error("Production self-test Permit installation receipt is not active");
   }
@@ -714,14 +731,9 @@ function validateAttemptReceipt(receipt, options) {
   } finally { bytes.fill(0); }
 }
 
-function isPermitInstallComposeOperation(args, ownerUserId) {
-  return (args.length === 3
-      && args[0] === "up" && args[1] === "-d" && args[2] === "api"
-    || args.length === 6
-      && args[0] === "exec" && args[1] === "-T" && args[2] === "api"
-      && args[3] === "node"
-      && args[4] === "/app/scripts/verify-production-self-test-permit-state.mjs"
-      && args[5] === ownerUserId);
+function isPermitInstallComposeOperation(args) {
+  return args.length === 3
+    && args[0] === "up" && args[1] === "-d" && args[2] === "api";
 }
 
 function markPreparedReceiptUnknown(path, receipt, now, options = {}) {
@@ -932,6 +944,13 @@ function assertExactKeys(value, keys, message) {
 
 async function main() {
   const command = process.argv[2];
+  if (command === "authorization-identity") {
+    const operationId = process.argv[3] ?? "";
+    assertTrustedMutationContext(operationId);
+    const identity = readCanonicalAuthorizationIdentity();
+    process.stdout.write(`${identity.ownerUserId} ${identity.permitId} ${identity.sha256}\n`);
+    return;
+  }
   if (command === "prepare") {
     const operationId = process.argv[3] ?? "";
     assertTrustedMutationContext(operationId);
@@ -960,7 +979,7 @@ async function main() {
     finalizePermitInstallation(command, operationId);
     return;
   }
-  throw new Error("usage: productionSelfTestPermitInstall.mjs prepare|runtime-before|runtime-after|success|failed|unknown OPERATION_ID");
+  throw new Error("usage: productionSelfTestPermitInstall.mjs authorization-identity|prepare|runtime-before|runtime-after|success|failed|unknown OPERATION_ID");
 }
 
 function assertTrustedMutationContext(operationId) {

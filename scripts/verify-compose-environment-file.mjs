@@ -493,11 +493,24 @@ function isAllowedComposeOperation(args, profiles) {
   ) return true;
   if (
     profiles.size === 0
-    && args.length === 6
+    && args.length === 8
     && sameArgs(args.slice(0, 5), [
       "exec", "-T", "api", "node", "/app/scripts/verify-production-self-test-permit-state.mjs",
     ])
     && /^USR-[A-Z0-9]+$/u.test(args[5])
+    && args[6] === "state"
+    && /^[a-f0-9]{32}$/u.test(args[7])
+  ) return true;
+  if (
+    profiles.size === 0
+    && args.length === 9
+    && sameArgs(args.slice(0, 6), [
+      "exec", "-T", "api", "node",
+      "/app/scripts/productionSelfTestPermitLegacyState.mjs", "migrate",
+    ])
+    && /^USR-[A-Z0-9]+$/u.test(args[6])
+    && args[7] === "e0c3703b9a008ae5bcdfa56f413a6f36"
+    && args[8] === "e6392afb1072288986778143b54a48ac9ef4c4e69e418987a2e64b31f9bd04a1"
   ) return true;
   if (
     profiles.has("rwa-automation-verify")

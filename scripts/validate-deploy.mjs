@@ -55,6 +55,8 @@ const activationPreflight = read("server/operations/RwaAutomationActivationPrefl
 const permitInstaller = read("scripts/productionSelfTestPermitInstall.mjs");
 const permitInstallWrapper = read("scripts/install-production-self-test-permit.sh");
 const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
+const permitLegacyState = read("scripts/productionSelfTestPermitLegacyState.mjs");
+const permitLegacyMigrationWrapper = read("scripts/migrate-production-self-test-permit-legacy-state.sh");
 const packageJson = read("package.json");
 
 const assertions = [
@@ -127,7 +129,10 @@ const assertions = [
   ],
   [
     trustedOperationLauncher.includes('"install-production-self-test-permit.sh"')
+      && trustedOperationLauncher.includes('"migrate-production-self-test-permit-legacy-state.sh"')
       && permitInstallWrapper.includes("trusted-operation-preamble.sh")
+      && permitInstallWrapper.indexOf("verify-production-self-test-permit-state.mjs")
+        < permitInstallWrapper.indexOf("productionSelfTestPermitInstall.mjs prepare")
       && permitInstallWrapper.includes("productionSelfTestPermitInstall.mjs prepare")
       && permitInstallWrapper.includes("production up -d api")
       && !permitInstallWrapper.includes("up -d api web")
@@ -142,7 +147,16 @@ const assertions = [
       && permitInstaller.includes("API process Permit identity mismatch")
       && permitInstaller.includes("Production self-test Permit installation has already been attempted")
       && permitInstaller.includes("maximumExecutionDurationMinutes !== 30")
-      && permitStateVerifier.includes("productionSelfTestPermitConsumptions.length !== 0")
+      && permitStateVerifier.includes("classifyLegacyPermitState")
+      && permitLegacyState.includes('ABSENT: "LEGACY_FIELD_ABSENT"')
+      && permitLegacyState.includes('EMPTY: "PRESENT_EMPTY"')
+      && permitLegacyState.includes('CONSUMED: "PRESENT_CONSUMED"')
+      && permitLegacyState.includes('CORRUPT: "MALFORMED_OR_CORRUPT"')
+      && permitLegacyState.includes("LEGACY_FAILED_OPERATION_ID")
+      && permitLegacyState.includes('status: "prepared"')
+      && permitLegacyState.includes('status: "unknown"')
+      && permitLegacyMigrationWrapper.includes("trusted-operation-preamble.sh")
+      && permitLegacyMigrationWrapper.includes("verify-failure")
       && composeEnvironmentVerifier.includes("assertPermitEnvironmentAuthorized"),
     "the authorization-specific Permit installer must remain one-attempt, API-only, receipt-bound, and fail-closed",
   ],

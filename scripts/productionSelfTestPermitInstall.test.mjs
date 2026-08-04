@@ -23,6 +23,7 @@ import {
   captureRuntimeBefore,
   finalizePermitInstallation,
   preparePermitInstallation,
+  readCanonicalAuthorizationIdentity,
   readInstallReceipt,
   verifyAndRecordRuntimeAfter,
 } from "./productionSelfTestPermitInstall.mjs";
@@ -30,6 +31,23 @@ import {
 const REVISION = "6efe18eb943b8a57750eeeb06700f101bd676414";
 const OWNER = "USR-CAPITALTEST";
 const ACTIVATED_AT = new Date("2026-08-04T08:00:00.000Z");
+
+test("authorization identity preflight reads only the canonical owner, Permit ID and SHA", () => {
+  withFixture((fixture) => {
+    const identity = readCanonicalAuthorizationIdentity(
+      fixture.authorizationManifest,
+      fixture.options(),
+    );
+    assert.deepEqual(identity, {
+      ownerUserId: OWNER,
+      permitId: fixture.request.permitId,
+      sha256: fixture.request.authorizationManifestSha256,
+    });
+    assert.throws(() => readInstallReceipt(fixture.receipt, fixture.options()), /ENOENT/u);
+    assert.throws(() => lstatSync(fixture.attemptsRoot), /ENOENT/u);
+    assert.equal(environmentEntries(fixture.environment).has("RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED"), false);
+  });
+});
 
 test("first install succeeds and every later install is rejected", () => {
   withFixture((fixture) => {
@@ -86,7 +104,7 @@ test("uncertain environment identity becomes UNKNOWN and cannot authorize or ret
   });
 });
 
-test("prepared receipt authorizes only the dedicated state check and API-only restart", () => {
+test("prepared receipt authorizes only the API restart after the side-effect-free state check", () => {
   withFixture((fixture) => {
     const receipt = preparePermitInstallation(fixture.options());
     const entries = environmentEntries(fixture.environment);
@@ -102,10 +120,10 @@ test("prepared receipt authorizes only the dedicated state check and API-only re
       ...common,
       composeArgs: ["up", "-d", "api"],
     }));
-    assert.doesNotThrow(() => assertPermitEnvironmentAuthorized({
+    assert.throws(() => assertPermitEnvironmentAuthorized({
       ...common,
       composeArgs: ["exec", "-T", "api", "node", "/app/scripts/verify-production-self-test-permit-state.mjs", OWNER],
-    }));
+    }), /receipt is not active/u);
     assert.throws(() => assertPermitEnvironmentAuthorized({
       ...common,
       composeArgs: ["up", "-d", "api", "web"],

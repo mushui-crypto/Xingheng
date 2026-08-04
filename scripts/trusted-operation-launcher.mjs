@@ -72,6 +72,7 @@ try {
       "provider-gate1-preflight.sh",
       "rollback-release.sh",
       "install-production-self-test-permit.sh",
+      "migrate-production-self-test-permit-legacy-state.sh",
       "smoke.sh",
     ];
   if (

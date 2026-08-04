@@ -12,6 +12,24 @@ operation_id="$(node -e 'process.stdout.write(require("node:crypto").randomBytes
 export XINGHENG_PERMIT_INSTALL_OPERATION_ID="$operation_id"
 export XINGHENG_TRUSTED_OPERATION_ENTRY=install-production-self-test-permit.sh
 
+authorization_identity="$(node scripts/productionSelfTestPermitInstall.mjs authorization-identity "$operation_id")"
+set -- $authorization_identity
+[ "$#" -eq 3 ] || { echo "Permit authorization identity receipt is invalid" >&2; exit 1; }
+owner_user_id="$1"
+permit_id="$2"
+authorization_sha256="$3"
+case "$permit_id:$authorization_sha256" in
+  *[!0-9a-f:]*|'') echo "Permit authorization identity is invalid" >&2; exit 1 ;;
+esac
+[ "${#permit_id}" -eq 32 ] && [ "${#authorization_sha256}" -eq 64 ] || {
+  echo "Permit authorization identity is invalid" >&2
+  exit 1
+}
+
+node scripts/verify-compose-environment-file.mjs production \
+  exec -T api node /app/scripts/verify-production-self-test-permit-state.mjs \
+  "$owner_user_id" state "$permit_id"
+
 prepared="$(node scripts/productionSelfTestPermitInstall.mjs prepare "$operation_id")"
 set -- $prepared
 [ "$#" -eq 3 ] || { echo "Permit installation preparation receipt is invalid" >&2; exit 1; }
@@ -39,8 +57,6 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-node scripts/verify-compose-environment-file.mjs production \
-  exec -T api node /app/scripts/verify-production-self-test-permit-state.mjs "$owner_user_id"
 node scripts/productionSelfTestPermitInstall.mjs runtime-before "$operation_id" >/dev/null
 
 stage=restarting

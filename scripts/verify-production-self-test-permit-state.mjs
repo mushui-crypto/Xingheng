@@ -3,6 +3,10 @@ import { createHash } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, openSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { productionSelfTestPermitDigest } from "./productionSelfTestPermitInstall.mjs";
+import {
+  classifyLegacyPermitState,
+  legacyPermitStateError,
+} from "./productionSelfTestPermitLegacyState.mjs";
 
 try {
   const ownerUserId = process.argv[2] ?? "";
@@ -25,10 +29,10 @@ try {
     || state.config?.productionSelfTestPermitConfirmation !== null) {
     throw new Error("Persisted execution switches must remain fail-closed");
   }
-  if (!Array.isArray(state.productionSelfTestPermitConsumptions)
-    || state.productionSelfTestPermitConsumptions.length !== 0) {
-    throw new Error("Production self-test Permit has already been consumed");
-  }
+  const expectedPermitId = mode === "state" ? (process.argv[4] ?? "") : null;
+  const compatibility = classifyLegacyPermitState(state, expectedPermitId);
+  const compatibilityError = legacyPermitStateError(compatibility);
+  if (compatibilityError !== null) throw compatibilityError;
   if (!Array.isArray(state.connectivitySmokes)
     || state.connectivitySmokes.some((smoke) => !["flat", "failed", "manual_intervention"].includes(smoke?.stage))) {
     throw new Error("An unfinished connectivity smoke blocks Permit installation");

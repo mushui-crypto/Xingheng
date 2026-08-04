@@ -19,8 +19,9 @@ test("state verifier accepts only fail-closed unconsumed state", () => {
 });
 
 for (const [name, override, pattern] of [
-  ["missing tombstone collection", { productionSelfTestPermitConsumptions: undefined }, /already been consumed/u],
-  ["existing consumption", { productionSelfTestPermitConsumptions: [{ permitId: "a" }] }, /already been consumed/u],
+  ["missing tombstone collection", { productionSelfTestPermitConsumptions: undefined }, /LEGACY_PERMIT_STATE_MIGRATION_REQUIRED/u],
+  ["existing consumption", { productionSelfTestPermitConsumptions: [consumption("a")] }, /CONSUMPTION_HISTORY_PRESENT/u],
+  ["malformed consumption", { productionSelfTestPermitConsumptions: [{ permitId: "a" }] }, /STATE_CORRUPT/u],
   ["existing confirmation", { confirmation: { permitId: "a" } }, /switches must remain fail-closed/u],
   ["unfinished smoke", { connectivitySmokes: [{ stage: "reserved" }] }, /unfinished connectivity smoke/u],
 ]) {
@@ -32,6 +33,15 @@ for (const [name, override, pattern] of [
     });
   });
 }
+
+test("state verifier distinguishes a matching consumed Permit", () => {
+  const permitId = "a".repeat(32);
+  withState({ productionSelfTestPermitConsumptions: [consumption("a")] }, ({ root }) => {
+    const result = verify(root, { expectedPermitId: permitId });
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /ALREADY_CONSUMED/u);
+  });
+});
 
 test("state verifier rejects a symlinked generation pointer", () => {
   withState({}, ({ root, current }) => {
@@ -109,8 +119,8 @@ function verify(root, runtime = null) {
   const expiresAt = "2026-08-04T09:00:00.000Z";
   const revision = "6efe18eb943b8a57750eeeb06700f101bd676414";
   const authorization = "d".repeat(64);
-  const args = runtime === null
-    ? [SCRIPT, OWNER]
+  const args = runtime === null || runtime.expectedPermitId !== undefined
+    ? [SCRIPT, OWNER, "state", runtime?.expectedPermitId ?? ""]
     : [SCRIPT, OWNER, runtime.mode, runtime.digest, revision, authorization, expiresAt];
   return spawnSync(process.execPath, args, {
     encoding: "utf8",
@@ -122,6 +132,14 @@ function verify(root, runtime = null) {
       ...(runtime?.environment ?? {}),
     },
   });
+}
+
+function consumption(seed) {
+  return {
+    permitId: seed.repeat(32),
+    digest: seed.repeat(64),
+    consumedAt: Date.parse("2026-08-04T08:00:00.000Z"),
+  };
 }
 
 function runtimePermitEnvironment() {
