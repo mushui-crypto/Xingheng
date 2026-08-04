@@ -71,6 +71,7 @@ try {
       "rwa-automation-verify.sh",
       "provider-gate1-preflight.sh",
       "rollback-release.sh",
+      "install-production-self-test-permit.sh",
       "smoke.sh",
     ];
   if (
@@ -86,6 +87,7 @@ try {
   ) throw new Error("candidate verify input is invalid");
 
   const openedEntry = openTrustedEntry(entry);
+  const openedLauncher = openTrustedEntry(resolve(root, "scripts/trusted-operation-launcher.mjs"));
   try {
     const locks = acquireOperationLocks(operation);
     try {
@@ -121,10 +123,12 @@ try {
             stdio: [
               "inherit", "inherit", "inherit",
               locks.descriptors[0], locks.descriptors[1], shell.fd, openedEntry.fd,
+              openedLauncher.fd,
             ],
           },
         );
         verifyTrustedEntry(openedEntry);
+        verifyTrustedEntry(openedLauncher);
         verifyTrustedHostTool(shell);
         if (candidateRevision !== null) {
           assertTrustedReleaseCandidateRoot(root, candidateRevision);
@@ -145,6 +149,7 @@ try {
     }
   } finally {
     closeSync(openedEntry.fd);
+    closeSync(openedLauncher.fd);
   }
 } catch (error) {
   console.error(operation === "candidate-verify"

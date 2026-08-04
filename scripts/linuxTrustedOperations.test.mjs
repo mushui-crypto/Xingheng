@@ -20,6 +20,7 @@ const PRODUCTION_WRAPPER = `${ROOT}/scripts/production-compose.sh`;
 const PRODUCTION_ENV = `${ROOT}/.env.production`;
 const COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
 const FROZEN_LOADER = `${ROOT}/scripts/load-release-manifest.sh`;
+const PERMIT_INSTALLER = `${ROOT}/scripts/productionSelfTestPermitInstall.mjs`;
 const REVISION = "03bdbb354f225ae0a0999a355df1e70784d7d163";
 const FIXED_ENVIRONMENT = Object.freeze({
   HOME: "/root",
@@ -191,6 +192,34 @@ test("trusted release tree rejects sourced script drift before the environment h
     chmodSync(FROZEN_LOADER, 0o755);
     reinstallTrustReceipt();
   }
+});
+
+test("Permit mutating Node entry rejects direct and forged wrapper contexts", {
+  skip: !ENABLED && "requires the explicit isolated Linux trust fixture",
+}, () => {
+  const operationId = "a".repeat(32);
+  const direct = spawnSync("/usr/bin/node", [PERMIT_INSTALLER, "prepare", operationId], {
+    cwd: ROOT,
+    input: "{}",
+    encoding: "utf8",
+    env: FIXED_ENVIRONMENT,
+  });
+  assert.notEqual(direct.status, 0);
+  assert.match(direct.stderr, /trusted wrapper context/u);
+
+  const forged = spawnSync("/usr/bin/node", [PERMIT_INSTALLER, "prepare", operationId], {
+    cwd: ROOT,
+    input: "{}",
+    encoding: "utf8",
+    env: {
+      ...FIXED_ENVIRONMENT,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "production",
+      XINGHENG_TRUSTED_OPERATION_ENTRY: "install-production-self-test-permit.sh",
+      XINGHENG_PERMIT_INSTALL_OPERATION_ID: operationId,
+    },
+  });
+  assert.notEqual(forged.status, 0);
+  assert.match(forged.stderr, /operation lock|wrapper descriptor|EBADF|bad file descriptor/iu);
 });
 
 function invoke(wrapper, additions = {}) {
