@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import {
   ReleasePromotionTransaction,
@@ -178,20 +178,36 @@ test("promotion wrapper process rejects trusted direct, legacy and polluted call
   const payload = "A".repeat(120);
   const environment = { HOME: tmpdir(), PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
     LANG: "C.UTF-8", LC_ALL: "C.UTF-8", TZ: "UTC" };
-  for (const invocation of [
-    { args: ["--generate", "legacy"], env: { ...environment,
-      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion" } },
-    { args: ["--promotion-json", payload, "extra"], env: { ...environment,
-      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion" } },
-    { args: ["--promotion-json", payload], env: environment },
-    { args: ["--promotion-json", payload], env: { ...environment,
-      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion", NODE_OPTIONS: "--no-warnings" } },
-  ]) {
-    const result = spawnSync("/bin/sh", [wrapper, ...invocation.args], {
-      cwd: dirname(wrapper), env: invocation.env, encoding: "utf8",
-    });
-    assert.notEqual(result.status, 0);
-    assert.doesNotMatch(result.stdout, /production gate PASS|PROMOTION_COMPLETED/u);
+  const root = mkdtempSync(join(tmpdir(), "promotion-wrapper-process-"));
+  try {
+    const candidateScripts = join(root, "opt/xingheng-release/candidates", NEW_REVISION,
+      "code/scripts");
+    mkdirSync(candidateScripts, { recursive: true });
+    const candidateWrapper = join(candidateScripts, "release-promote.sh");
+    cpSync(wrapper, candidateWrapper);
+    chmodSync(candidateWrapper, 0o755);
+    const trustedEnvironment = { ...environment,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "promotion" };
+    for (const invocation of [
+      { command: "/bin/sh", args: ["release-promote.sh", "--generate", "legacy"],
+        cwd: candidateScripts, env: trustedEnvironment },
+      { command: "release-promote.sh", args: ["--generate", "legacy"], cwd: candidateScripts,
+        env: { ...trustedEnvironment, PATH: `${candidateScripts}:${environment.PATH}` } },
+      { command: "/bin/sh", args: [candidateWrapper, "--promotion-json", payload, "extra"],
+        cwd: candidateScripts, env: trustedEnvironment },
+      { command: "/bin/sh", args: [candidateWrapper, "--promotion-json", payload],
+        cwd: candidateScripts, env: environment },
+      { command: "/bin/sh", args: [candidateWrapper, "--promotion-json", payload],
+        cwd: candidateScripts, env: { ...trustedEnvironment, NODE_OPTIONS: "--no-warnings" } },
+    ]) {
+      const result = spawnSync(invocation.command, invocation.args, {
+        cwd: invocation.cwd, env: invocation.env, encoding: "utf8",
+      });
+      assert.notEqual(result.status, 0);
+      assert.doesNotMatch(result.stdout, /production gate PASS|PROMOTION_COMPLETED/u);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

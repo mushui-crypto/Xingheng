@@ -1,14 +1,42 @@
 #!/bin/sh
 set -eu
 
-script_dir=
-repo_root=
-case "$0" in
-  */*)
-    script_dir="$(CDPATH= cd -P -- "${0%/*}" && pwd -P)"
-    repo_root="${script_dir%/*}"
+if [ -x /usr/bin/realpath ]; then
+  realpath_tool=/usr/bin/realpath
+elif [ -x /bin/realpath ]; then
+  realpath_tool=/bin/realpath
+else
+  echo "release promotion entry identity cannot be resolved" >&2
+  exit 78
+fi
+entry_reference=$0
+case "$entry_reference" in
+  */*) ;;
+  ''|-*|*[!A-Za-z0-9._-]*)
+    echo "release promotion entry identity is invalid" >&2
+    exit 78
+    ;;
+  *)
+    if [ -f "./$entry_reference" ] || [ -L "./$entry_reference" ]; then
+      entry_reference="./$entry_reference"
+    else
+      entry_reference=$(command -v "$entry_reference") || {
+        echo "release promotion entry identity cannot be resolved" >&2
+        exit 78
+      }
+    fi
     ;;
 esac
+entry_path=$($realpath_tool -- "$entry_reference") || {
+  echo "release promotion entry identity cannot be resolved" >&2
+  exit 78
+}
+[ -f "$entry_path" ] && [ "${entry_path##*/}" = release-promote.sh ] || {
+  echo "release promotion entry identity is invalid" >&2
+  exit 78
+}
+script_dir=${entry_path%/*}
+repo_root=${script_dir%/*}
 
 trusted_boundary=false
 if [ "$(/usr/bin/id -u)" -eq 0 ] \
@@ -29,7 +57,6 @@ fi
 
 case "${1:-}" in
   --promotion-json|--terminalize-unknown)
-    [ -n "$script_dir" ] || { echo "promotion entry requires an explicit path" >&2; exit 78; }
     case "$repo_root" in /opt/xingheng-release/candidates/*/code) ;; *)
       echo "promotion entry must run from a trusted candidate" >&2
       exit 78
