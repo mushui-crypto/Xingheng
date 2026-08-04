@@ -64,11 +64,11 @@ if [ "${1:-}" = --archive ]; then
     exit 1
   }
   identity="$({
-    /usr/bin/node --input-type=module - "$candidate_root" "$revision" <<'NODE'
+    /usr/bin/node --input-type=module -e '
 import { pathToFileURL } from "node:url";
 
-const candidateRoot = process.argv[2];
-const revision = process.argv[3];
+const candidateRoot = process.argv[1];
+const revision = process.argv[2];
 const moduleUrl = pathToFileURL(
   `${candidateRoot}/code/scripts/candidateRwaAutomationVerify.mjs`,
 ).href;
@@ -81,7 +81,7 @@ process.stdout.write([
   value.manifestSha256,
   value.checksumsSha256,
 ].join("\n"));
-NODE
+' "$candidate_root" "$revision"
   } 2>&1)" || {
     echo "release archive identity validation failed" >&2
     exit 1
