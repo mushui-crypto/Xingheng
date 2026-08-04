@@ -7,6 +7,28 @@ if [ "${1:-}" = "--generate" ]; then
   shift
 fi
 
+archive=false
+archive_root=
+archive_revision=
+archive_parent=
+archive_source_sha256=
+archive_tree_sha256=
+archive_manifest_sha256=
+if [ "${1:-}" = --archive ]; then
+  [ "$#" -eq 15 ] || {
+    echo "--archive requires CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256" >&2
+    exit 2
+  }
+  archive=true
+  archive_root="$2"
+  archive_revision="$3"
+  archive_parent="$4"
+  archive_source_sha256="$5"
+  archive_tree_sha256="$6"
+  archive_manifest_sha256="$7"
+  shift 7
+fi
+
 version="${1:-}"
 manifest_path="${2:-}"
 environment="${3:-}"
@@ -16,7 +38,7 @@ approval_status="${6:-}"
 rollback_point="${7:-}"
 health_url="${8:-}"
 [ "$#" -eq 8 ] || {
-  echo "usage: $0 [--generate] VERSION RELEASE_MANIFEST_PATH ENVIRONMENT TEST_STATUS SECURITY_STATUS APPROVAL_STATUS ROLLBACK_POINT HEALTH_URL" >&2
+  echo "usage: $0 [--generate] [--archive CANDIDATE_ROOT REVISION PARENT_COMMIT SOURCE_SHA256 TREE_SHA256 MANIFEST_SHA256] VERSION RELEASE_MANIFEST_PATH ENVIRONMENT TEST_STATUS SECURITY_STATUS APPROVAL_STATUS ROLLBACK_POINT HEALTH_URL" >&2
   exit 2
 }
 
@@ -46,11 +68,30 @@ case "$health_url" in
   *) echo "release promotion BLOCKED: production health URL must use HTTPS" >&2; exit 1 ;;
 esac
 
-scripts/release-check.sh
-verify_output="$(scripts/release-verify.sh --deployment --health-url "$health_url" "$manifest_path")"
+if [ "$archive" = true ]; then
+  scripts/release-check.sh --archive \
+    "$archive_root" "$manifest_path" "$archive_revision" "$archive_parent" \
+    "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256"
+  verify_output="$(scripts/release-verify.sh --archive \
+    "$archive_root" "$archive_revision" "$archive_parent" \
+    "$archive_source_sha256" "$archive_tree_sha256" "$archive_manifest_sha256" \
+    --deployment --health-url "$health_url" "$manifest_path")"
+else
+  scripts/release-check.sh
+  verify_output="$(scripts/release-verify.sh --deployment --health-url "$health_url" "$manifest_path")"
+fi
 revision="$(node scripts/verify-deployment-revision.mjs manifest-revision "$manifest_path")"
-tree_sha="$(git rev-parse --verify "$revision^{tree}")"
-parent_sha="$(git rev-parse --verify "$revision^1")"
+if [ "$archive" = true ]; then
+  [ "$revision" = "$archive_revision" ] || {
+    echo "release promotion BLOCKED: archive revision mismatch" >&2
+    exit 1
+  }
+  tree_sha="$archive_tree_sha256"
+  parent_sha="$archive_parent"
+else
+  tree_sha="$(git rev-parse --verify "$revision^{tree}")"
+  parent_sha="$(git rev-parse --verify "$revision^1")"
+fi
 api_digest="$(node scripts/verify-deployment-revision.mjs manifest-image "$manifest_path" api)"
 web_digest="$(node scripts/verify-deployment-revision.mjs manifest-image "$manifest_path" web)"
 strategy_digest="$(node scripts/verify-deployment-revision.mjs manifest-image "$manifest_path" strategyTools)"
@@ -79,7 +120,13 @@ set -C
   printf '## Identity\n\n'
   printf -- '- version: `%s`\n' "$version"
   printf -- '- commit sha: `%s`\n' "$revision"
-  printf -- '- tree sha: `%s`\n' "$tree_sha"
+  if [ "$archive" = true ]; then
+    printf -- '- candidate tree sha256: `%s`\n' "$tree_sha"
+    printf -- '- source archive sha256: `%s`\n' "$archive_source_sha256"
+    printf -- '- release manifest sha256: `%s`\n' "$archive_manifest_sha256"
+  else
+    printf -- '- tree sha: `%s`\n' "$tree_sha"
+  fi
   printf -- '- parent commit: `%s`\n' "$parent_sha"
   printf -- '- environment: `%s`\n\n' "$environment"
   printf '## Artifact digests\n\n'
