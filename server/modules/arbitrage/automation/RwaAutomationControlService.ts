@@ -383,15 +383,14 @@ export class RwaAutomationControlService {
       const credentialSnapshot = binding ? await connector.captureCredentialMutationSnapshot?.() : undefined;
       let result;
       try {
-        result = await connector.deleteCredentials(sanitized);
-        if (binding) {
+        result = await connector.deleteCredentials(sanitized, binding ? () => {
           this.binanceBindingStore!.markBinanceVerifiedUnbound(
             userId,
             binding.uidSnapshot,
             binding.bindingVersion,
             this.now(),
           );
-        }
+        } : undefined);
       } catch (error) {
         if (binding && connector.restoreCredentialMutationSnapshot && credentialSnapshot !== undefined) {
           await connector.restoreCredentialMutationSnapshot(credentialSnapshot).catch(() => undefined);
@@ -434,7 +433,10 @@ export class RwaAutomationControlService {
       requestDigest,
       now: this.now(),
     });
-    if (reservation.kind === "completed") return reservation.result;
+    if (reservation.kind === "completed") {
+      if (reservation.result.status === "recovery_inconsistent") throw recoveryInconsistentError(reservation.result.receiptId);
+      return reservation.result;
+    }
     let connector: RwaAutomationConnector | null = null;
     let snapshot: unknown;
     let credentialMutated = false;
@@ -489,7 +491,33 @@ export class RwaAutomationControlService {
       return result;
     } catch (error) {
       if (credentialMutated && connector?.restoreCredentialMutationSnapshot && snapshot !== undefined) {
-        await connector.restoreCredentialMutationSnapshot(snapshot).catch(() => undefined);
+        try {
+          await connector.restoreCredentialMutationSnapshot(snapshot);
+        } catch {
+          let automationStopFailed = false;
+          try {
+            if (!connector.markCredentialRecoveryInconsistent) automationStopFailed = true;
+            else await connector.markCredentialRecoveryInconsistent();
+          } catch {
+            automationStopFailed = true;
+          }
+          const result = this.binanceBindingStore.completeBinanceRecoveryUnbind({
+            operationId,
+            userId,
+            venue: "binance",
+            requestDigest,
+            uidSnapshot,
+            bindingVersion,
+            operator: userId,
+            approver: approver ?? "not_available",
+            reason,
+            failureReason: "credential_restore_failed",
+            providerVerifiedFlat: false,
+            recoveryInconsistent: true,
+            now: this.now(),
+          });
+          throw recoveryInconsistentError(result.receiptId, automationStopFailed);
+        }
       }
       this.binanceBindingStore.releaseBinanceRecoveryOperation(operationId, userId, requestDigest);
       throw error;
@@ -2301,6 +2329,15 @@ export class RwaAutomationControlService {
       else this.challengeReservations.set(userId, current - 1);
     };
   }
+}
+
+function recoveryInconsistentError(receiptId: string, automationStopFailed = false) {
+  return new RwaAutomationControlError(
+    503,
+    "recovery_inconsistent",
+    "Recovery Unbind 回滚失败；系统已记录异常并等待人工处理。",
+    { receiptId, automationStopFailed },
+  );
 }
 
 export class RwaAutomationControlError extends Error {

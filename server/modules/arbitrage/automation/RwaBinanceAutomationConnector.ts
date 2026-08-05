@@ -64,8 +64,11 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
     return this.getStatus();
   }
 
-  deleteCredentials(input?: unknown) { return this.service.deleteCredentials(input); }
+  deleteCredentials(input?: unknown, finalize?: () => Promise<void> | void) {
+    return this.service.deleteCredentials(input, finalize);
+  }
   recoveryUnbind() { return this.service.recoveryUnbind(); }
+  markCredentialRecoveryInconsistent() { return this.service.markCredentialRecoveryInconsistent(); }
   getAccountAssetAuthorization(assetId: string) { return this.service.getAccountAssetAuthorization(assetId); }
   previewAccountAssetAuthorization(assetId: string) { return this.service.previewAccountAssetAuthorization(assetId); }
   createAccountAssetAuthorization(

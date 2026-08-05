@@ -671,66 +671,63 @@ export class RwaBinanceAutomationService {
     }
   }
 
-  async deleteCredentials(input: unknown = {}) {
+  async deleteCredentials(input: unknown = {}, finalize?: () => Promise<void> | void) {
     this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId"]);
-    const metadata = await this.store.readCredentialMetadata();
-    const state = await this.store.readState();
-    if (metadata) {
-      assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
-      let snapshot;
-      try {
-        snapshot = await this.client().then((client) => client.readPreflightSnapshot());
-      } catch {
-        state.credentialLifecycle = "invalid";
-        state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
-        state.config.killSwitchActive = true;
-        await this.store.writeState(state);
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_delete_manual_intervention",
-          "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
-          { accountId: metadata.accountId },
-        );
+    return this.withLock(async () => {
+      const metadata = await this.store.readCredentialMetadata();
+      const state = await this.store.readState();
+      assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
+      if (metadata) {
+        assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
+        let snapshot;
+        try {
+          snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+        } catch {
+          state.credentialLifecycle = "invalid";
+          state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
+          state.config.killSwitchActive = true;
+          await this.store.writeState(state);
+          throw new RwaNeutralExecutionError(
+            409,
+            "credential_delete_manual_intervention",
+            "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
+            { accountId: metadata.accountId },
+          );
+        }
+        if (
+          snapshot.existingSpotQuantityXaut > 1e-9
+          || snapshot.existingPerpetualQuantityXaut > 1e-9
+          || snapshot.openSpotOrderCount > 0
+          || snapshot.openPerpetualOrderCount > 0
+        ) {
+          throw new RwaNeutralExecutionError(
+            409,
+            "credential_delete_blocked",
+            "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
+            { accountId: metadata.accountId },
+          );
+        }
+        state.credentialAudit.push({
+          userId: this.store.ownerUserId,
+          action: "deleted",
+          accountId: metadata.accountId,
+          accountFingerprint: metadata.accountFingerprint,
+          maskedApiKey: metadata.maskedApiKey,
+          occurredAt: this.now(),
+        });
       }
-      if (
-        snapshot.existingSpotQuantityXaut > 1e-9
-        || snapshot.existingPerpetualQuantityXaut > 1e-9
-        || snapshot.openSpotOrderCount > 0
-        || snapshot.openPerpetualOrderCount > 0
-      ) {
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_delete_blocked",
-          "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
-          { accountId: metadata.accountId },
-        );
-      }
-      state.credentialAudit.push({
-        userId: this.store.ownerUserId,
-        action: "deleted",
-        accountId: metadata.accountId,
-        accountFingerprint: metadata.accountFingerprint,
-        maskedApiKey: metadata.maskedApiKey,
-        occurredAt: this.now(),
-      });
-    }
-    state.config = {
-      ...state.config,
-      globalExecutionEnabled: false,
-      strategyEnabled: false,
-      killSwitchActive: true,
-      productionSelfTestPermitConfirmation: null,
-    };
-    state.challenges = [];
-    state.credentialLifecycle = "unconfigured";
-    state.credentialAlert = null;
-    invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
-    await this.store.writeState(state);
-    await this.store.deleteCredentials();
-    this.armedChallengeIds.clear();
-    return { ok: true, credentials: await this.getCredentialStatus() };
+      stopAutomationForCredentialRemoval(state);
+      state.credentialLifecycle = "unconfigured";
+      state.credentialAlert = null;
+      invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+      await this.store.writeState(state);
+      await this.store.deleteCredentials();
+      await finalize?.();
+      this.armedChallengeIds.clear();
+      return { ok: true, credentials: await this.getCredentialStatus() };
+    });
   }
 
   async recoveryUnbind() {
@@ -776,6 +773,19 @@ export class RwaBinanceAutomationService {
       await this.store.deleteCredentials();
       this.armedChallengeIds.clear();
       return { providerVerifiedFlat };
+    });
+  }
+
+  async markCredentialRecoveryInconsistent() {
+    this.assertExecutionLeaseHeld();
+    return this.withLock(async () => {
+      const state = await this.store.readState();
+      stopAutomationForCredentialRemoval(state);
+      state.credentialLifecycle = "invalid";
+      state.credentialAlert = "Recovery Unbind 回滚失败；凭证与 Binding 一致性无法确认，等待人工处理。";
+      invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+      await this.store.writeState(state);
+      this.armedChallengeIds.clear();
     });
   }
 
@@ -3103,6 +3113,8 @@ function permissionsValid(value: RwaBinancePermissions) {
 function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKillSwitchActive: boolean) {
   const activeExecution = state.executions.some((execution) =>
     !["closed", "failed", "manual_intervention"].includes(execution.state));
+  const activeReservation = state.executions.some((execution) => execution.reservedCapitalUsd > 0)
+    || state.assetTakeovers.some((takeover) => takeover.reservedCapitalUsd > 0);
   const activeSmoke = state.connectivitySmokes.some((smoke) =>
     !["flat", "failed", "manual_intervention"].includes(smoke.stage));
   const activeTakeover = state.assetTakeovers.some((takeover) =>
@@ -3114,6 +3126,7 @@ function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKi
     || !serverKillSwitchActive
     || state.challenges.length > 0
     || activeExecution
+    || activeReservation
     || activeSmoke
     || activeTakeover
   ) {
@@ -3123,6 +3136,17 @@ function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKi
       "自动化停止条件未全部确认，Recovery Unbind 已按 fail-closed 拒绝。",
     );
   }
+}
+
+function stopAutomationForCredentialRemoval(state: RwaAutomationStateData) {
+  state.config = {
+    ...state.config,
+    globalExecutionEnabled: false,
+    strategyEnabled: false,
+    killSwitchActive: true,
+    productionSelfTestPermitConfirmation: null,
+  };
+  state.challenges = [];
 }
 
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {

@@ -2105,6 +2105,68 @@ test("Recovery Unbind restores the credential snapshot after a partial mutation 
   }
 });
 
+test("Recovery Unbind records recovery_inconsistent and fails when credential rollback fails", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-recovery-inconsistent-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidSnapshot = createHash("sha256").update("binance:inconsistent-user").digest("hex");
+  const operationId = "88888888-8888-4888-8888-888888888888";
+  bindingStore.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  let recoveryCalls = 0;
+  let stopCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: `binance:${uidSnapshot}`,
+    recoveryUnbind: async () => { recoveryCalls += 1; throw new Error("partial credential mutation"); },
+    captureCredentialSnapshot: async () => ({ credential: "encrypted" }),
+    restoreCredentialSnapshot: async () => { throw new Error("restore failed"); },
+    markCredentialRecoveryInconsistent: async () => { stopCalls += 1; },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  const body = {
+    uidSnapshot,
+    bindingVersion: 1,
+    operationId,
+    reason: "partial failure",
+    stepUpToken,
+  };
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      await assert.rejects(
+        control.recoveryUnbind("user-a", sessionDomain, body, "admin@example.com"),
+        (error: unknown) => error instanceof RwaAutomationControlError
+          && error.category === "recovery_inconsistent"
+          && typeof error.details?.receiptId === "string",
+      );
+    }
+    assert.equal(recoveryCalls, 1);
+    assert.equal(stopCalls, 1);
+    const binding = bindingStore.findBinanceCredentialBinding("user-a")!;
+    assert.equal(binding.status, "recovery_inconsistent");
+    assert.equal(binding.interventionStatus, "manual_intervention");
+    assert.equal(binding.bindingVersion, 2);
+    const receipt = bindingStore.listBinanceRecoveryReceipts("user-a")[0]!;
+    assert.equal(receipt.operationId, operationId);
+    assert.equal(receipt.bindingVersion, 2);
+    assert.equal(receipt.result, "recovery_inconsistent");
+    assert.equal(receipt.reason, "credential_restore_failed");
+    assert.throws(
+      () => bindingStore.bindBinanceCredential("user-a", uidSnapshot),
+      (error: unknown) => error instanceof Error && "category" in error && error.category === "binding_active",
+    );
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("normal Binance unbind marks the Binding verified before the same UID can be rebound", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-control-verified-unbind-"));
   const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
@@ -2385,6 +2447,7 @@ function fakeConnector(
     recoveryUnbind?: () => Promise<{ providerVerifiedFlat: boolean }>;
     captureCredentialSnapshot?: () => Promise<unknown>;
     restoreCredentialSnapshot?: (snapshot: unknown) => Promise<void>;
+    markCredentialRecoveryInconsistent?: () => Promise<void>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -2417,8 +2480,9 @@ function fakeConnector(
         },
       };
     },
-    deleteCredentials: async () => ({}),
+    deleteCredentials: async (_input, finalize) => { await finalize?.(); return {}; },
     recoveryUnbind: options.recoveryUnbind,
+    markCredentialRecoveryInconsistent: options.markCredentialRecoveryInconsistent,
     captureCredentialMutationSnapshot: options.captureCredentialSnapshot,
     restoreCredentialMutationSnapshot: options.restoreCredentialSnapshot,
     getAccountAssetAuthorization: async () => options.authorization ?? null,

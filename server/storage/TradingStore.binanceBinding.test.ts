@@ -189,3 +189,70 @@ test("Recovery operation reservation rethrows unrelated SQLite insert failures",
     /injected insert failure/,
   );
 });
+
+test("Binding schema upgrades existing recovery checks for recovery_inconsistent receipts", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-recovery-schema-"));
+  const dbPath = join(directory, "test.sqlite");
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec(`
+    CREATE TABLE binance_credential_bindings (
+      userId TEXT NOT NULL,
+      venue TEXT NOT NULL CHECK(venue = 'binance'),
+      uidSnapshot TEXT NOT NULL,
+      credentialNote TEXT NOT NULL DEFAULT '',
+      bindingVersion INTEGER NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('active', 'verified_unbound', 'unverified_unbound')),
+      interventionStatus TEXT NOT NULL CHECK(interventionStatus IN ('none', 'manual_intervention')),
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL,
+      PRIMARY KEY (userId, venue)
+    );
+    CREATE TABLE binance_binding_operations (
+      operationId TEXT PRIMARY KEY,
+      userId TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      requestDigest TEXT NOT NULL,
+      resultJson TEXT,
+      createdAt INTEGER NOT NULL,
+      completedAt INTEGER
+    );
+    CREATE TABLE binance_recovery_receipts (
+      receiptId TEXT PRIMARY KEY,
+      operationId TEXT NOT NULL UNIQUE,
+      userId TEXT NOT NULL,
+      venue TEXT NOT NULL,
+      uidSnapshot TEXT NOT NULL,
+      bindingVersion INTEGER NOT NULL,
+      operator TEXT NOT NULL,
+      approver TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      result TEXT NOT NULL CHECK(result IN ('verified_unbound', 'unverified_unbound')),
+      timestamp INTEGER NOT NULL,
+      digest TEXT NOT NULL
+    );
+  `);
+  legacy.close();
+  const store = new TradingStore(dbPath);
+  t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const uidSnapshot = fingerprint("schema-upgrade");
+  const operationId = "99999999-9999-4999-8999-999999999999";
+  store.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", venue: "binance", requestDigest: "request", now: 101 });
+  const result = store.completeBinanceRecoveryUnbind({
+    operationId,
+    userId: "user-a",
+    venue: "binance",
+    requestDigest: "request",
+    uidSnapshot,
+    bindingVersion: 1,
+    operator: "user-a",
+    approver: "admin@example.com",
+    reason: "rollback failed",
+    failureReason: "credential_restore_failed",
+    providerVerifiedFlat: false,
+    recoveryInconsistent: true,
+    now: 102,
+  });
+  assert.equal(result.status, "recovery_inconsistent");
+  assert.equal(store.listBinanceRecoveryReceipts("user-a")[0]?.result, "recovery_inconsistent");
+});
