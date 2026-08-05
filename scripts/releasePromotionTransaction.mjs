@@ -21,7 +21,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { validateReleaseManifest } from "./deploymentRevision.mjs";
+import { parseRevisionEnv, validateReleaseManifest } from "./deploymentRevision.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
 import { readTrustedReleaseCandidateReceipt, releaseCandidatePaths } from "./trustedReleaseCandidate.mjs";
 import { captureTrustedReleaseTree } from "./trustedReleaseTree.mjs";
@@ -149,7 +149,7 @@ export class ReleasePromotionTransaction {
       writePromotionRecord(this.paths.statePath, exchanged, this.uid, this.gid);
       this.fault("after_exchanged_publish");
       let newCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
-      assertNewCanonical(candidate, newCanonical, oldCanonical);
+      assertNewCanonical(candidate, newCanonical, oldCanonical, staging);
       const trustReceiptSha256 = this.installTrust();
       this.fault("after_trust_install");
       const currentRecord = readPromotionRecord(this.paths.statePath, this.uid, this.gid);
@@ -158,7 +158,7 @@ export class ReleasePromotionTransaction {
         throw new Error("promotion record changed before completion");
       }
       newCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
-      assertNewCanonical(candidate, newCanonical, oldCanonical);
+      assertNewCanonical(candidate, newCanonical, oldCanonical, staging);
       const trusted = this.validateMainTrust();
       if (trusted.receiptSha256 !== trustReceiptSha256
         || trusted.releaseRoot !== this.paths.canonicalRoot
@@ -288,18 +288,27 @@ export class ReleasePromotionTransaction {
     );
     try {
       const environmentTarget = join(path, ".env.production");
-      writeImmutableBytes(environmentTarget, oldEnvironment.bytes, this.uid, this.gid, 0o600);
-      const stagedEnvironment = secureFile(
-        environmentTarget, this.uid, this.gid, 0o600, 16 * 1024 * 1024,
+      const candidateEnvironment = bindPromotionEnvironment(
+        oldEnvironment.bytes,
+        oldCanonical.revision,
+        candidate.revision,
       );
       try {
-        if (stagedEnvironment.sha256 !== oldEnvironment.sha256
-          || stagedEnvironment.size !== oldEnvironment.size) {
-          throw new Error("promotion environment identity changed while staging");
+        writeImmutableBytes(environmentTarget, candidateEnvironment, this.uid, this.gid, 0o600);
+        const stagedEnvironment = secureFile(
+          environmentTarget, this.uid, this.gid, 0o600, 16 * 1024 * 1024,
+        );
+        try {
+          if (!stagedEnvironment.bytes.equals(candidateEnvironment)
+            || parseRevisionEnv(stagedEnvironment.bytes.toString("utf8")) !== candidate.revision) {
+            throw new Error("promotion environment identity changed while staging");
+          }
+        } finally {
+          closeSync(stagedEnvironment.fd);
+          stagedEnvironment.bytes.fill(0);
         }
       } finally {
-        closeSync(stagedEnvironment.fd);
-        stagedEnvironment.bytes.fill(0);
+        candidateEnvironment.fill(0);
       }
     } finally {
       closeSync(oldEnvironment.fd);
@@ -308,7 +317,7 @@ export class ReleasePromotionTransaction {
     fsyncTree(path);
     const identity = captureStagingIdentity(path, this.uid, this.gid);
     if (identity.manifestSha256 !== candidate.manifestSha256
-      || identity.environmentSha256 !== oldCanonical.environmentSha256) {
+      || identity.environmentSha256 === oldCanonical.environmentSha256) {
       throw new Error("promotion staging identity is invalid");
     }
     return Object.freeze(identity);
@@ -500,16 +509,32 @@ function captureCanonicalIdentity(paths, uid, gid) {
   }
 }
 
-function assertNewCanonical(candidate, current, oldCanonical) {
+function assertNewCanonical(candidate, current, oldCanonical, staging) {
   if (current.revision !== candidate.revision
     || canonical(current.images) !== canonical(candidate.images)
     || current.manifestSha256 !== candidate.manifestSha256
-    || current.environmentSha256 !== oldCanonical.environmentSha256
+    || current.environmentSha256 !== staging.environmentSha256
     || current.lifecyclePointerSha256 !== oldCanonical.lifecyclePointerSha256
     || current.rootDev === oldCanonical.rootDev
     && current.rootIno === oldCanonical.rootIno) {
     throw new Error("new canonical identity verification failed");
   }
+}
+
+function bindPromotionEnvironment(bytes, oldRevision, candidateRevision) {
+  const source = bytes.toString("utf8");
+  if (!Buffer.from(source, "utf8").equals(bytes)
+    || parseRevisionEnv(source) !== oldRevision) {
+    throw new Error("canonical promotion environment identity is invalid");
+  }
+  const bound = source.replace(
+    /^XINGHENG_REVISION=[^\r\n]*(?=\r?$)/mu,
+    `XINGHENG_REVISION=${candidateRevision}`,
+  );
+  if (bound === source || parseRevisionEnv(bound) !== candidateRevision) {
+    throw new Error("candidate promotion environment binding failed");
+  }
+  return Buffer.from(bound, "utf8");
 }
 
 function validateExpectedCandidate(value) {

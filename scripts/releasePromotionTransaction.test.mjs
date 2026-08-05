@@ -40,10 +40,27 @@ test("promotion publishes one completed record with embedded success receipt", (
     assert.equal(result.success.newCanonical.revision, NEW_REVISION);
     assert.equal(readManifest(fixture.canonicalRoot).revision, NEW_REVISION);
     assert.equal(readManifest(fixture.stagingPath).revision, OLD_REVISION);
-    assert.equal(readFileSync(join(fixture.canonicalRoot, ".env.production"), "utf8"), "A=1\n");
+    assert.equal(
+      readFileSync(join(fixture.canonicalRoot, ".env.production"), "utf8"),
+      `A=1\nXINGHENG_REVISION=${NEW_REVISION}\nB=2\n`,
+    );
+    assert.equal(
+      readFileSync(join(fixture.stagingPath, ".env.production"), "utf8"),
+      `A=1\nXINGHENG_REVISION=${OLD_REVISION}\nB=2\n`,
+    );
+    assert.equal(
+      result.newCanonical.environmentSha256,
+      sha256(readFileSync(join(fixture.canonicalRoot, ".env.production"))),
+    );
+    assert.equal(result.newCanonical.environmentSha256, result.staging.environmentSha256);
+    assert.notEqual(result.newCanonical.environmentSha256, result.oldCanonical.environmentSha256);
     assert.equal(readFileSync(fixture.lifecyclePointer, "utf8"), fixture.lifecycleBytes);
     assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state, "PROMOTION_COMPLETED");
     assert.throws(() => fixture.transaction.promote(fixture.expected), /already completed/u);
+    assert.throws(() => fixture.transaction.promote({
+      ...fixture.expected,
+      revision: "3".repeat(40),
+    }), /state is not IDLE/u);
   });
 });
 
@@ -111,6 +128,11 @@ test("COMPLETED requires exact record, canonical and trust identity", () => {
       () => writeManifest(join(fixture.canonicalRoot, "deploy/release-manifest.json"), "4".repeat(40)),
       () => replaceFixtureFile(fixture.trustReceipt, "{}\n", 0o400),
       () => replaceFixtureFile(fixture.lifecyclePointer, "changed\n", 0o600),
+      () => replaceFixtureFile(
+        join(fixture.canonicalRoot, ".env.production"),
+        `A=changed\nXINGHENG_REVISION=${NEW_REVISION}\nB=2\n`,
+        0o600,
+      ),
       () => replaceFixtureFile(fixture.helperReceipt, "{}\n", 0o400),
       () => replaceFixtureFile(fixture.helperPath, "changed\n", 0o500),
       () => mutateJson(fixture.trustReceipt, (value) => { value.socket = "wrong"; }),
@@ -147,6 +169,42 @@ test("STARTED binds staging content, not only the directory inode", () => {
     fixture.transaction.fault = (stage) => {
       if (stage === "after_started_publish") {
         writeManifest(join(fixture.stagingPath, "deploy/release-manifest.json"), "3".repeat(40));
+      }
+    };
+    assert.throws(() => fixture.transaction.promote(fixture.expected), /staging identity changed/u);
+    assert.equal(readManifest(fixture.canonicalRoot).revision, OLD_REVISION);
+    assert.equal(JSON.parse(readFileSync(fixture.statePath, "utf8")).state, "PROMOTION_UNKNOWN");
+  });
+});
+
+test("promotion rejects an unbound or ambiguous canonical environment before exchange", () => {
+  for (const environment of [
+    "A=1\n",
+    `XINGHENG_REVISION=${OLD_REVISION}\nXINGHENG_REVISION=${OLD_REVISION}\n`,
+    "XINGHENG_REVISION=not-a-revision\n",
+    `XINGHENG_REVISION=${"3".repeat(40)}\n`,
+  ]) {
+    withFixture((fixture) => {
+      replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
+      let exchanged = false;
+      fixture.transaction.exchange = () => { exchanged = true; };
+      assert.throws(() => fixture.transaction.promote(fixture.expected), /environment/u);
+      assert.equal(exchanged, false);
+      assert.equal(readManifest(fixture.canonicalRoot).revision, OLD_REVISION);
+      assert.equal(exists(fixture.statePath), false);
+    });
+  }
+});
+
+test("STARTED environment digest rejects staging environment drift before exchange", () => {
+  withFixture((fixture) => {
+    fixture.transaction.fault = (stage) => {
+      if (stage === "after_started_publish") {
+        replaceFixtureFile(
+          join(fixture.stagingPath, ".env.production"),
+          `A=changed\nXINGHENG_REVISION=${NEW_REVISION}\nB=2\n`,
+          0o600,
+        );
       }
     };
     assert.throws(() => fixture.transaction.promote(fixture.expected), /staging identity changed/u);
@@ -347,7 +405,11 @@ function withFixture(callback) {
     }
     makeCodeTree(canonicalRoot, OLD_REVISION);
     makeCodeTree(candidateCode, NEW_REVISION, false);
-    writeFileSync(join(canonicalRoot, ".env.production"), "A=1\n", { mode: 0o600 });
+    writeFileSync(
+      join(canonicalRoot, ".env.production"),
+      `A=1\nXINGHENG_REVISION=${OLD_REVISION}\nB=2\n`,
+      { mode: 0o600 },
+    );
     chmodSync(join(canonicalRoot, ".env.production"), 0o600);
     const lifecycleBytes = `${JSON.stringify({ revision: OLD_REVISION })}\n`;
     writeFileSync(lifecyclePointer, lifecycleBytes, { mode: 0o600 });
@@ -447,6 +509,7 @@ function exists(path) { try { readFileSync(path); return true; } catch { return 
 function snapshot(fixture) {
   const files = [
     [join(fixture.canonicalRoot, "deploy/release-manifest.json"), 0o444],
+    [join(fixture.canonicalRoot, ".env.production"), 0o600],
     [fixture.trustReceipt, 0o400],
     [fixture.lifecyclePointer, 0o600],
     [fixture.helperReceipt, 0o400],
