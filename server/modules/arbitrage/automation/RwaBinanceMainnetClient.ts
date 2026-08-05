@@ -148,23 +148,15 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       futuresAccount: true,
       positionModeSupported: !dualSidePosition,
     };
-    const accountFingerprint = createHash("sha256")
+    const uidSnapshot = createHash("sha256")
       .update(`binance:${uid}`)
-      .digest("hex")
-      .slice(0, 16);
+      .digest("hex");
+    const accountFingerprint = uidSnapshot.slice(0, 16);
     const accountId = `binance:${accountFingerprint}`;
-    if (
-      (process.env.NODE_ENV === "production" || this.monitoredAccountIds.length > 0)
-      && !this.monitoredAccountIds.includes(accountId)
-    ) {
-      throw new RwaBinanceProviderError(
-        "provider_identity_mismatch",
-        "Binance 权威账户身份与冻结的 monitored account 不一致。",
-      );
-    }
     return {
       accountId,
       accountFingerprint,
+      uidSnapshot,
       accountMode,
       ipWhitelistVerificationMode,
       permissions,

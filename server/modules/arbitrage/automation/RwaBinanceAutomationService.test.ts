@@ -53,6 +53,20 @@ import {
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
+const credentialNotConfigured = (error: unknown) => error instanceof RwaNeutralExecutionError
+  && error.category === "credential_not_configured";
+const recoveryInconsistentError = (error: unknown) => error instanceof RwaNeutralExecutionError
+  && error.category === "recovery_inconsistent";
+const capitalTestPermitLimits = {
+  leverage: 1,
+  maxPositionUsd: 40,
+  maxOrderSizeUsd: 40,
+  maxOrderCount: 4,
+  maxSlippageBps: 20,
+  maxFeeBps: 100,
+  lossLimitUsd: 40,
+  executionId: "7".repeat(32),
+};
 
 test("Binance connectivity smoke policy discovery is static and performs no provider or KMS read", () => {
   const client = new FakeBinanceClient();
@@ -428,8 +442,11 @@ test("Binance asset authorization only reads XAUT state and local authorization 
 
     const nextPreview = await harness.current.previewAccountAssetAuthorization("xaut");
     await harness.current.createAccountAssetAuthorization("xaut", nextPreview);
-    await harness.current.putCredentials({ apiKey: "rotated-key", apiSecret: "rotated-secret" });
-    assert.equal(await harness.current.getAccountAssetAuthorization("xaut"), null);
+    await assert.rejects(
+      harness.current.putCredentials({ apiKey: "replacement-key", apiSecret: "replacement-secret" }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "credential_rebind_requires_unbind",
+    );
+    assert.notEqual(await harness.current.getAccountAssetAuthorization("xaut"), null);
     assert.equal(client.writeCount, writesBefore);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -1018,7 +1035,7 @@ test("Binance credential validation wraps synchronous client construction failur
   }
 });
 
-test("Binance fixed IP verification gates credential rotation and every new-risk control entry", async () => {
+test("Binance rejects credential overwrite and fixed IP verification gates every new-risk control entry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-gates-"));
   try {
     const client = new FakeBinanceClient();
@@ -1030,7 +1047,8 @@ test("Binance fixed IP verification gates credential rotation and every new-risk
     client.setPermissions({ ipRestricted: false });
     await assert.rejects(
       current.putCredentials({ apiKey: "replacement-key", apiSecret: "replacement-secret" }),
-      permissionRejectedWithoutSecret,
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_rebind_requires_unbind",
     );
     client.setPermissions({ ipRestricted: true });
     const retained = await current.getCredentialStatus();
@@ -1064,6 +1082,30 @@ test("Binance fixed IP verification gates credential rotation and every new-risk
     );
     assert.equal(client.writeCount, 0);
     assert.equal((await current.getConfig()).killSwitchActive, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance rebind validates access again and accepts a changed UID snapshot after unbind", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-rebind-identity-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await harness.current.putCredentials({ apiKey: "first-key", apiSecret: "first-secret" });
+    const firstMetadata = await harness.store.readCredentialMetadata();
+    const readsAfterFirstBind = client.readCount;
+    const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    assert.deepEqual(await recovery.recoveryUnbind(), { providerVerifiedFlat: true });
+
+    client.access.accountId = "binance:replacement-account";
+    client.access.accountFingerprint = "replacement-uid-snapshot";
+    const rebound = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    await rebound.putCredentials({ apiKey: "second-key", apiSecret: "second-secret" });
+    const secondMetadata = await harness.store.readCredentialMetadata();
+    assert.ok(client.readCount > readsAfterFirstBind);
+    assert.notEqual(secondMetadata?.accountFingerprint, firstMetadata?.accountFingerprint);
+    assert.equal(secondMetadata?.accountFingerprint, "replacement-uid-snapshot");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -3066,6 +3108,360 @@ test("Binance connectivity smoke untradeable futures exit becomes manual interve
   }
 });
 
+test("Recovery Unbind distinguishes provider-verified flat from unreadable provider state", async () => {
+  for (const providerReadable of [true, false]) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-recovery-unbind-${providerReadable}-`));
+    try {
+      const client = new FakeBinanceClient();
+      const harness = serviceHarness(directory, "user-a", client);
+      await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+      if (!providerReadable) client.readPreflightSnapshot = async () => { throw new Error("provider unavailable"); };
+      const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+      assert.deepEqual(await recovery.recoveryUnbind(), { providerVerifiedFlat: providerReadable });
+      assert.equal(await harness.store.readCredentialMetadata(), null);
+      const state = await harness.store.readState();
+      assert.equal(state.config.killSwitchActive, true);
+      assert.equal(state.config.globalExecutionEnabled, false);
+      assert.equal(state.config.strategyEnabled, false);
+      assert.equal(providerReadable ? state.credentialAlert : Boolean(state.credentialAlert), providerReadable ? null : true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Recovery Unbind holds rollback against a queued automation mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-rollback-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const originalRestore = harness.store.restoreCredentialMutationSnapshot.bind(harness.store);
+    let releaseRestore!: () => void;
+    const restoreRelease = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    harness.store.restoreCredentialMutationSnapshot = async (snapshot) => {
+      restoreStarted();
+      await restoreRelease;
+      return originalRestore(snapshot);
+    };
+    const recovery = harness.current.recoveryUnbind(() => {
+      throw new Error("Binding finalization failed");
+    });
+    await restoreStart;
+    let mutationFinished = false;
+    const queuedMutation = harness.current.updateConfig({ accountId, maxEntryBasisBps: 13 })
+      .finally(() => { mutationFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseRestore();
+    await assert.rejects(recovery, /Binding finalization failed/);
+    await queuedMutation;
+    assert.equal((await harness.store.readState()).config.maxEntryBasisBps, 13);
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Recovery Unbind rollback preserves fail-closed state when Provider is unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-provider-unknown-rollback-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    client.readPreflightSnapshot = async () => { throw new Error("provider unavailable"); };
+
+    await assert.rejects(
+      harness.current.recoveryUnbind((result) => {
+        assert.equal(result.providerVerifiedFlat, false);
+        throw new Error("approval required");
+      }),
+      /approval required/,
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+    const state = await harness.store.readState();
+    assert.equal(state.credentialLifecycle, "invalid");
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+    assert.match(state.credentialAlert ?? "", /不能证明 Binance 账户已经清算/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Recovery Unbind fails closed while automation is not fully stopped", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-active-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const state = await harness.store.readState();
+    state.config.globalExecutionEnabled = true;
+    await harness.store.writeState(state);
+    const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    await assert.rejects(
+      recovery.recoveryUnbind(),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_unbind_automation_active",
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind rejects an active execution reservation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-reservation-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const state = await harness.store.readState();
+    const reservation = createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${harness.store.userDomain}`,
+      idempotencyKey: `${harness.store.userDomain}:unbind-reserved`,
+      challengeId: "unbind-reserved",
+      now,
+      venue: "binance",
+      reservedCapitalUsd: 10,
+    });
+    reservation.state = "manual_intervention";
+    state.executions.push(reservation);
+    await harness.store.writeState(state);
+
+    await assert.rejects(
+      harness.current.deleteCredentials({ accountId }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "recovery_unbind_automation_active",
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind rejects an active execution", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-execution-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const state = await harness.store.readState();
+    const execution = createNeutralExecutionRecord({
+      userId: "user-a",
+      accountId,
+      userOrderPrefix: `rwa${harness.store.userDomain}`,
+      idempotencyKey: `${harness.store.userDomain}:unbind-active`,
+      challengeId: "unbind-active",
+      now,
+      venue: "binance",
+    });
+    execution.state = "hedged";
+    state.executions.push(execution);
+    await harness.store.writeState(state);
+
+    await assert.rejects(
+      harness.current.deleteCredentials({ accountId }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "recovery_unbind_automation_active",
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind fails closed until automation stop is complete", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-stop-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const state = await harness.store.readState();
+    state.config.globalExecutionEnabled = true;
+    await harness.store.writeState(state);
+
+    await assert.rejects(
+      harness.current.deleteCredentials({ accountId }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "recovery_unbind_automation_active",
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind blocks updateConfig through credential deletion and Binding finalization", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    let releaseFinalizer!: () => void;
+    const finalizerRelease = new Promise<void>((resolve) => { releaseFinalizer = resolve; });
+    let finalizerStarted!: () => void;
+    const finalizerStart = new Promise<void>((resolve) => { finalizerStarted = resolve; });
+    const deletion = harness.current.deleteCredentials({ accountId }, async () => {
+      finalizerStarted();
+      await finalizerRelease;
+    });
+    await finalizerStart;
+    let competingOperationFinished = false;
+    const competingOperation = harness.current.updateConfig({
+      accountId,
+      globalExecutionEnabled: true,
+    }).finally(() => { competingOperationFinished = true; });
+    const competingRejection = assert.rejects(competingOperation, credentialNotConfigured);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(competingOperationFinished, false);
+    releaseFinalizer();
+    await deletion;
+    await competingRejection;
+    assert.equal(await harness.store.readCredentialMetadata(), null);
+    assert.equal((await harness.store.readState()).config.globalExecutionEnabled, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind blocks kill switch disable through credential deletion and Binding finalization", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-kill-switch-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    let releaseFinalizer!: () => void;
+    const finalizerRelease = new Promise<void>((resolve) => { releaseFinalizer = resolve; });
+    let finalizerStarted!: () => void;
+    const finalizerStart = new Promise<void>((resolve) => { finalizerStarted = resolve; });
+    const deletion = harness.current.deleteCredentials({ accountId }, async () => {
+      finalizerStarted();
+      await finalizerRelease;
+    });
+    await finalizerStart;
+    let competingOperationFinished = false;
+    const competingOperation = harness.current.setKillSwitch(false, accountId)
+      .finally(() => { competingOperationFinished = true; });
+    const competingRejection = assert.rejects(competingOperation, credentialNotConfigured);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(competingOperationFinished, false);
+    releaseFinalizer();
+    await deletion;
+    await competingRejection;
+    const state = await harness.store.readState();
+    assert.equal(state.config.killSwitchActive, true);
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind holds snapshot capture and restore in the same service lock", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-snapshot-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const originalCapture = harness.store.captureCredentialMutationSnapshot.bind(harness.store);
+    const originalRestore = harness.store.restoreCredentialMutationSnapshot.bind(harness.store);
+    let releaseCapture!: () => void;
+    const captureRelease = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    let captureStarted!: () => void;
+    const captureStart = new Promise<void>((resolve) => { captureStarted = resolve; });
+    let releaseRestore!: () => void;
+    const restoreRelease = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    harness.store.captureCredentialMutationSnapshot = async () => {
+      captureStarted();
+      await captureRelease;
+      return originalCapture();
+    };
+    harness.store.restoreCredentialMutationSnapshot = async (snapshot) => {
+      restoreStarted();
+      await restoreRelease;
+      return originalRestore(snapshot);
+    };
+
+    const deletion = harness.current.deleteCredentials({ accountId }, () => {
+      throw new Error("Binding finalization failed");
+    });
+    await captureStart;
+    let mutationFinished = false;
+    const queuedMutation = harness.current.updateConfig({ accountId, maxEntryBasisBps: 11 })
+      .finally(() => { mutationFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseCapture();
+    await restoreStart;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseRestore();
+    await assert.rejects(deletion, /Binding finalization failed/);
+    await queuedMutation;
+    assert.equal((await harness.store.readState()).config.maxEntryBasisBps, 11);
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovery_inconsistent blocks enable, execution, scheduler, and provider mutation gates", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-recovery-inconsistent-gate-"));
+  try {
+    let recoveryInconsistent = false;
+    const mutationGuard = () => {
+      if (recoveryInconsistent) {
+        throw new RwaNeutralExecutionError(409, "recovery_inconsistent", "manual intervention required");
+      }
+    };
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(
+      directory,
+      "user-a",
+      client,
+      () => {},
+      () => true,
+      undefined,
+      undefined,
+      () => now,
+      () => true,
+      mutationGuard,
+    );
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    recoveryInconsistent = true;
+
+    await assert.rejects(
+      harness.current.updateConfig({ accountId, globalExecutionEnabled: true }),
+      recoveryInconsistentError,
+    );
+    await assert.rejects(harness.current.execute({}), recoveryInconsistentError);
+    await assert.rejects(harness.current.startActivityMonitoring(), recoveryInconsistentError);
+    await assert.rejects(harness.current.closeAll({}), recoveryInconsistentError);
+    assert.equal(client.writeCount, 0);
+    const state = await harness.store.readState();
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
 }
@@ -3093,6 +3489,8 @@ function serviceHarness(
   productionSelfTestPermit?: () => RwaBinanceProductionSelfTestPermit | null,
   productionEnvironment?: () => boolean,
   clock: () => number = () => now,
+  serverKillSwitchActive: () => boolean = () => false,
+  automationMutationGuard: () => void = () => {},
 ) {
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
@@ -3107,12 +3505,13 @@ function serviceHarness(
       store,
       () => client,
       clock,
-      () => false,
+      serverKillSwitchActive,
       undefined,
       leaseGuard,
       activityMonitoringEnabled,
       productionSelfTestPermit,
       productionEnvironment,
+      automationMutationGuard,
     ),
     store,
     keyProvider,

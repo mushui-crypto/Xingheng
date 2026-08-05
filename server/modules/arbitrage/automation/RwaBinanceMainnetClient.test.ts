@@ -309,19 +309,23 @@ test("Binance client signs private reads with server-time offset and keeps spot/
   assert.equal(snapshot.perpetual.depthUsd > 8, true);
 });
 
-test("Binance client binds the authoritative UID to the frozen monitored account", async () => {
-  const expected = `binance:${createHash("sha256")
+test("Binance client returns the full authoritative UID fingerprint without using the monitored allowlist as binding authority", async () => {
+  const uidSnapshot = createHash("sha256")
     .update("binance:42")
-    .digest("hex")
-    .slice(0, 16)}`;
+    .digest("hex");
+  const expectedAccountId = `binance:${uidSnapshot.slice(0, 16)}`;
   const accepted = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     fixtureFetch(),
     () => 1_000,
     ["203.0.113.10"],
-    [expected],
+    [expectedAccountId],
   );
-  assert.equal((await accepted.validateAccess()).accountId, expected);
+  const acceptedIdentity = await accepted.validateAccess();
+  assert.deepEqual(
+    { accountId: acceptedIdentity.accountId, uidSnapshot: acceptedIdentity.uidSnapshot },
+    { accountId: expectedAccountId, uidSnapshot },
+  );
 
   for (const monitored of [
     ["binance:1111111111111111"],
@@ -334,10 +338,9 @@ test("Binance client binds the authoritative UID to the frozen monitored account
       ["203.0.113.10"],
       monitored,
     );
-    await assert.rejects(
-      mismatched.validateAccess(),
-      providerError("provider_identity_mismatch"),
-    );
+    const identity = await mismatched.validateAccess();
+    assert.equal(identity.accountId, expectedAccountId);
+    assert.equal(identity.uidSnapshot, uidSnapshot);
   }
 });
 

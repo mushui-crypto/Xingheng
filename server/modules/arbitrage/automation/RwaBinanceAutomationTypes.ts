@@ -24,6 +24,7 @@ export type RwaBinancePermissions = RwaVenuePermissions & {
 };
 
 export type RwaBinanceAccountIdentity = RwaVenueAccountIdentity & {
+  uidSnapshot?: string;
   accountMode:
     | "single_asset_one_way"
     | "single_asset_hedge"

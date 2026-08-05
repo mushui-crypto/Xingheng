@@ -33,6 +33,7 @@ import {
   RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,
   RWA_BINANCE_STRATEGY_ID,
   type RwaBinanceClient,
+  type RwaBinanceAccountIdentity,
   type RwaBinanceClientFactory,
   type RwaBinanceCredentials,
   type RwaBinancePermissions,
@@ -108,7 +109,6 @@ import {
   type RwaBinanceProductionSelfTestPermit,
 } from "./RwaBinanceProductionSelfTestPermit";
 
-const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
 const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating", "partial_closed"]);
 const XAUT_BINANCE_PROFILE = requireRwaAutomationExecutionProfile("xaut", "binance");
@@ -145,7 +145,19 @@ export class RwaBinanceAutomationService {
       loadRwaBinanceProductionSelfTestPermit,
     private readonly productionEnvironment: () => boolean = () =>
       process.env.NODE_ENV === "production",
+    assertAutomationMutationAllowed: () => void = () => {},
   ) {
+    this.assertExecutionLeaseHeld = () => {
+      assertExecutionLeaseHeld();
+      if (this.credentialLifecycleOverride === "invalid") {
+        throw new RwaNeutralExecutionError(
+          409,
+          "recovery_inconsistent",
+          "Credential 恢复失败终态无法持久化，自动化 mutation 已拒绝并等待人工处理。",
+        );
+      }
+      assertAutomationMutationAllowed();
+    };
     this.store.setClock(now);
     this.providerActivityGuard = new RwaBinanceActivityGuard(
       (reason) => { void this.failClosedForProviderActivity(reason); },
@@ -155,7 +167,7 @@ export class RwaBinanceAutomationService {
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
     this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(
       now,
-      assertExecutionLeaseHeld,
+      this.assertExecutionLeaseHeld,
       XAUT_BINANCE_PROFILE,
     );
     this.takeoverCoordinator = new RwaAssetTakeoverCoordinator({
@@ -169,7 +181,7 @@ export class RwaBinanceAutomationService {
         return this.publicClient.readManagedAssetPublicMark();
       },
       credentialBinding: () => this.requireMetadata(),
-      assertExecutionLeaseHeld,
+      assertExecutionLeaseHeld: this.assertExecutionLeaseHeld,
       serverKillSwitchActive,
       now,
     });
@@ -377,13 +389,13 @@ export class RwaBinanceAutomationService {
         message: this.store.masterKeyError,
       });
     }
-    if (metadata.requiresRotation) {
+    if (metadata.version === 1) {
       return this.status({
         metadata,
         stored: true,
         connectionStatus: "unavailable",
-        lifecycleStatus: "rotation_required",
-        message: "检测到旧版凭证格式；必须删除旧凭证并重新授权。",
+        lifecycleStatus: "invalid",
+        message: "检测到不支持的旧版凭证格式；必须安全解绑后重新绑定。",
         ipWhitelistConfigured: metadata.permissions.ipRestricted,
       });
     }
@@ -400,8 +412,7 @@ export class RwaBinanceAutomationService {
     try {
       const access = await this.client().then((client) => client.validateAccess());
       const valid = permissionsValid(access.permissions) && access.accountId === metadata.accountId;
-      const rotationRequired = this.now() - metadata.updatedAt >= rotationAgeMs;
-      const lifecycleStatus = !valid ? "invalid" as const : rotationRequired ? "rotation_required" as const : "active" as const;
+      const lifecycleStatus = !valid ? "invalid" as const : "active" as const;
       return this.status({
         metadata: {
           ...metadata,
@@ -412,9 +423,7 @@ export class RwaBinanceAutomationService {
         stored: true,
         connectionStatus: valid ? "verified" : "invalid",
         lifecycleStatus,
-        message: !valid
-          ? "Binance Key 当前权限、账户身份或持仓模式不符合只读预检安全门禁。"
-          : rotationRequired ? "API Key 已达到轮换周期，完成轮换前禁止新增风险。" : null,
+        message: !valid ? "Binance Key 当前权限、账户身份或持仓模式不符合只读预检安全门禁。" : null,
         warnings: ipWhitelistWarnings(access.ipWhitelistVerificationMode),
       });
     } catch (error) {
@@ -631,8 +640,8 @@ export class RwaBinanceAutomationService {
     this.credentialLifecycleOverride = "validating";
     try {
       const previous = await this.store.readCredentialMetadata();
-      if (previous?.requiresRotation) {
-        throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请先删除旧凭证并重新授权。");
+      if (previous) {
+        throw new RwaNeutralExecutionError(409, "credential_rebind_requires_unbind", "已有 Binance Credential；必须先安全解绑再重新绑定。");
       }
       await this.store.assertKeyProviderHealthy("pending-credential-validation").catch((error) => {
         throw credentialStoreExecutionError(error);
@@ -644,19 +653,11 @@ export class RwaBinanceAutomationService {
         throw providerError(error, "Binance 凭证校验失败。");
       }
       assertPermissions(access.permissions);
-      if (previous && previous.accountId !== access.accountId) {
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_account_mismatch",
-          "新凭证属于不同 Binance 账户；请先确认旧账户无订单/仓位并安全删除旧凭证。",
-        );
-      }
       const verifiedAt = this.now();
       await this.store.saveCredentials(input, access.permissions, access, verifiedAt).catch((error) => {
         throw credentialStoreExecutionError(error);
       });
       const state = await this.store.readState();
-      if (previous) invalidateAccountAssetAuthorizations(state.assetAuthorizations, verifiedAt);
       state.credentialLifecycle = "active";
       state.credentialAlert = null;
       state.config = {
@@ -670,79 +671,236 @@ export class RwaBinanceAutomationService {
       this.armedChallengeIds.clear();
       state.credentialAudit.push({
         userId: this.store.ownerUserId,
-        action: previous ? "rotated" : "activated",
+        action: "activated",
         accountId: access.accountId,
         accountFingerprint: access.accountFingerprint,
         maskedApiKey: (await this.store.readCredentialMetadata())?.maskedApiKey ?? null,
         occurredAt: verifiedAt,
       });
       await this.store.writeState(state);
-      return this.getCredentialStatus();
+      return {
+        ...(await this.getCredentialStatus()),
+        uidSnapshot: (access as RwaBinanceAccountIdentity).uidSnapshot ?? null,
+      };
     } finally {
       this.credentialLifecycleOverride = null;
     }
   }
 
-  async deleteCredentials(input: unknown = {}) {
+  async deleteCredentials(
+    input: unknown = {},
+    finalize?: () => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ) {
     this.assertExecutionLeaseHeld();
     const body = record(input);
     assertOnlyKeys(body, ["accountId"]);
-    const metadata = await this.store.readCredentialMetadata();
-    const state = await this.store.readState();
-    if (metadata) {
-      assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
-      let snapshot;
+    return this.withLock(async () => {
+      const credentialSnapshot = await this.store.captureCredentialMutationSnapshot();
+      let credentialMutated = false;
+      let preserveFailClosedState = false;
       try {
-        snapshot = await this.client().then((client) => client.readPreflightSnapshot());
-      } catch {
-        state.credentialLifecycle = "invalid";
-        state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
-        state.config.killSwitchActive = true;
+        const metadata = await this.store.readCredentialMetadata();
+        const state = await this.store.readState();
+        assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
+        if (metadata) {
+          assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
+          let snapshot;
+          try {
+            snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+          } catch {
+            state.credentialLifecycle = "invalid";
+            state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
+            state.config.killSwitchActive = true;
+            credentialMutated = true;
+            preserveFailClosedState = true;
+            await this.store.writeState(state);
+            throw new RwaNeutralExecutionError(
+              409,
+              "credential_delete_manual_intervention",
+              "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
+              { accountId: metadata.accountId },
+            );
+          }
+          if (
+            snapshot.existingSpotQuantityXaut > 1e-9
+            || snapshot.existingPerpetualQuantityXaut > 1e-9
+            || snapshot.openSpotOrderCount > 0
+            || snapshot.openPerpetualOrderCount > 0
+          ) {
+            throw new RwaNeutralExecutionError(
+              409,
+              "credential_delete_blocked",
+              "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
+              { accountId: metadata.accountId },
+            );
+          }
+          state.credentialAudit.push({
+            userId: this.store.ownerUserId,
+            action: "deleted",
+            accountId: metadata.accountId,
+            accountFingerprint: metadata.accountFingerprint,
+            maskedApiKey: metadata.maskedApiKey,
+            occurredAt: this.now(),
+          });
+        }
+        stopAutomationForCredentialRemoval(state);
+        state.credentialLifecycle = "unconfigured";
+        state.credentialAlert = null;
+        invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+        credentialMutated = true;
         await this.store.writeState(state);
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_delete_manual_intervention",
-          "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
-          { accountId: metadata.accountId },
-        );
+        await this.store.deleteCredentials();
+        const credentials = await this.getCredentialStatus();
+        await finalize?.();
+        this.armedChallengeIds.clear();
+        return { ok: true, credentials };
+      } catch (error) {
+        if (!credentialMutated || preserveFailClosedState) throw error;
+        try {
+          await this.store.restoreCredentialMutationSnapshot(credentialSnapshot);
+        } catch {
+          let automationStopFailed = false;
+          try {
+            await this.markCredentialRecoveryInconsistentLocked();
+          } catch {
+            automationStopFailed = true;
+          }
+          const failureFinalizeFailed = await this.finalizeRestoreFailureLocked(
+            finalizeRestoreFailure,
+            automationStopFailed,
+          );
+          throw new RwaNeutralExecutionError(
+            503,
+            "credential_restore_failed",
+            "Credential 恢复失败；Binding 一致性无法确认，已停止自动化并等待人工处理。",
+            { automationStopFailed, failureFinalizeFailed },
+          );
+        }
+        throw error;
       }
-      if (
-        snapshot.existingSpotQuantityXaut > 1e-9
-        || snapshot.existingPerpetualQuantityXaut > 1e-9
-        || snapshot.openSpotOrderCount > 0
-        || snapshot.openPerpetualOrderCount > 0
-      ) {
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_delete_blocked",
-          "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
-          { accountId: metadata.accountId },
-        );
+    });
+  }
+
+  async recoveryUnbind(
+    finalize?: (result: { providerVerifiedFlat: boolean }) => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ) {
+    this.assertExecutionLeaseHeld();
+    return this.withLock(async () => {
+      const credentialSnapshot = await this.store.captureCredentialMutationSnapshot();
+      let credentialMutated = false;
+      let providerStateUnknown = false;
+      try {
+        const metadata = await this.store.readCredentialMetadata();
+        if (!metadata) throw new RwaNeutralExecutionError(409, "credentials_unconfigured", "Binance API 凭证尚未配置。");
+        const state = await this.store.readState();
+        assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
+        let providerVerifiedFlat = false;
+        try {
+          const snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+          if (
+            snapshot.existingSpotQuantityXaut > 1e-9
+            || snapshot.existingPerpetualQuantityXaut > 1e-9
+            || snapshot.openSpotOrderCount > 0
+            || snapshot.openPerpetualOrderCount > 0
+          ) {
+            throw new RwaNeutralExecutionError(
+              409,
+              "credential_delete_blocked",
+              "Binance 账户存在受管理订单或仓位，Recovery Unbind 已拒绝。",
+            );
+          }
+          providerVerifiedFlat = true;
+        } catch (error) {
+          if (error instanceof RwaNeutralExecutionError) throw error;
+          providerStateUnknown = true;
+        }
+        state.config = {
+          ...state.config,
+          globalExecutionEnabled: false,
+          strategyEnabled: false,
+          killSwitchActive: true,
+          productionSelfTestPermitConfirmation: null,
+        };
+        state.challenges = [];
+        state.credentialLifecycle = "unconfigured";
+        state.credentialAlert = providerVerifiedFlat
+          ? null
+          : "Provider 状态无法验证；系统已停止管理，但不能证明 Binance 账户已经清算。";
+        invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+        credentialMutated = true;
+        await this.store.writeState(state);
+        await this.store.deleteCredentials();
+        const result = { providerVerifiedFlat };
+        await finalize?.(result);
+        this.armedChallengeIds.clear();
+        return result;
+      } catch (error) {
+        if (!credentialMutated) throw error;
+        try {
+          await this.store.restoreCredentialMutationSnapshot(credentialSnapshot);
+        } catch {
+          let automationStopFailed = false;
+          try {
+            await this.markCredentialRecoveryInconsistentLocked();
+          } catch {
+            automationStopFailed = true;
+          }
+          const failureFinalizeFailed = await this.finalizeRestoreFailureLocked(
+            finalizeRestoreFailure,
+            automationStopFailed,
+          );
+          throw new RwaNeutralExecutionError(
+            503,
+            "credential_restore_failed",
+            "Credential 恢复失败；Binding 一致性无法确认，已停止自动化并等待人工处理。",
+            { automationStopFailed, failureFinalizeFailed },
+          );
+        }
+        if (providerStateUnknown) await this.markProviderUnknownFailClosedLocked();
+        throw error;
       }
-      state.credentialAudit.push({
-        userId: this.store.ownerUserId,
-        action: "deleted",
-        accountId: metadata.accountId,
-        accountFingerprint: metadata.accountFingerprint,
-        maskedApiKey: metadata.maskedApiKey,
-        occurredAt: this.now(),
-      });
-    }
-    state.config = {
-      ...state.config,
-      globalExecutionEnabled: false,
-      strategyEnabled: false,
-      killSwitchActive: true,
-      productionSelfTestPermitConfirmation: null,
-    };
-    state.challenges = [];
-    state.credentialLifecycle = "unconfigured";
-    state.credentialAlert = null;
+    });
+  }
+
+  async markCredentialRecoveryInconsistent() {
+    this.assertExecutionLeaseHeld();
+    return this.withLock(() => this.markCredentialRecoveryInconsistentLocked());
+  }
+
+  private async markCredentialRecoveryInconsistentLocked() {
+    const state = await this.store.readState();
+    stopAutomationForCredentialRemoval(state);
+    state.credentialLifecycle = "invalid";
+    state.credentialAlert = "Recovery Unbind 回滚失败；凭证与 Binding 一致性无法确认，等待人工处理。";
     invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
     await this.store.writeState(state);
-    await this.store.deleteCredentials();
     this.armedChallengeIds.clear();
-    return { ok: true, credentials: await this.getCredentialStatus() };
+  }
+
+  private async finalizeRestoreFailureLocked(
+    finalize: ((automationStopFailed: boolean) => Promise<void> | void) | undefined,
+    automationStopFailed: boolean,
+  ) {
+    try {
+      await finalize?.(automationStopFailed);
+      return false;
+    } catch {
+      this.credentialLifecycleOverride = "invalid";
+      this.armedChallengeIds.clear();
+      return true;
+    }
+  }
+
+  private async markProviderUnknownFailClosedLocked() {
+    const state = await this.store.readState();
+    stopAutomationForCredentialRemoval(state);
+    state.credentialLifecycle = "invalid";
+    state.credentialAlert = "Provider 状态无法验证；系统已停止管理，但不能证明 Binance 账户已经清算。";
+    invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+    await this.store.writeState(state);
+    this.armedChallengeIds.clear();
   }
 
   async getConfig() {
@@ -752,6 +910,10 @@ export class RwaBinanceAutomationService {
   }
 
   async updateConfig(input: unknown) {
+    return this.withLock(() => this.updateConfigLocked(input));
+  }
+
+  private async updateConfigLocked(input: unknown) {
     const body = record(input);
     assertOnlyKeys(body, [
       "globalExecutionEnabled",
@@ -779,6 +941,7 @@ export class RwaBinanceAutomationService {
     let activeMetadata: BinanceCredentialMetadata | null = null;
     let activeAccess: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>> | null = null;
     if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
+      this.assertExecutionLeaseHeld();
       activeMetadata = await this.requireMetadata();
       activeAccess = await this.validateActiveAccess(
         await this.clientForNewRisk(state, activeMetadata),
@@ -826,10 +989,15 @@ export class RwaBinanceAutomationService {
   }
 
   async setKillSwitch(active: boolean, accountId?: string) {
+    return this.withLock(() => this.setKillSwitchLocked(active, accountId));
+  }
+
+  private async setKillSwitchLocked(active: boolean, accountId?: string) {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
     if (!active) {
+      this.assertExecutionLeaseHeld();
       const activeMetadata = await this.requireMetadata();
       const access = await this.validateActiveAccess(
         await this.clientForNewRisk(state, activeMetadata),
@@ -885,6 +1053,10 @@ export class RwaBinanceAutomationService {
   }
 
   async getPnl() {
+    return this.withLock(() => this.getPnlLocked());
+  }
+
+  private async getPnlLocked() {
     const metadata = await this.requireMetadata();
     const client = await this.client();
     const state = await this.store.readState();
@@ -2326,8 +2498,8 @@ export class RwaBinanceAutomationService {
   private async requireMetadata() {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credential_not_configured", "Binance API 凭证尚未配置。");
-    if (metadata.requiresRotation) {
-      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请删除旧凭证并重新授权。");
+    if (metadata.version === 1) {
+      throw new RwaNeutralExecutionError(409, "credential_format_unsupported", "旧版 Binance Credential 不受支持；必须安全解绑后重新绑定。");
     }
     return metadata;
   }
@@ -2335,10 +2507,6 @@ export class RwaBinanceAutomationService {
   private async validateActiveAccess(client: RwaBinanceClient, accountId: string, state: RwaAutomationStateData) {
     const metadata = await this.requireMetadata();
     assertAccountId(accountId, metadata.accountId);
-    if (this.now() - metadata.updatedAt >= rotationAgeMs) {
-      await this.freezeNewRisk(state, "rotation_required", metadata, "Binance API Key 已达到轮换周期，完成轮换前禁止新增风险。");
-      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "Binance API Key 已达到轮换周期，请先完成安全轮换。");
-    }
     try {
       const access = await client.validateAccess();
       assertPermissions(access.permissions);
@@ -3005,9 +3173,46 @@ function permissionsValid(value: RwaBinancePermissions) {
     && value.positionModeSupported;
 }
 
+function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKillSwitchActive: boolean) {
+  const activeExecution = state.executions.some((execution) =>
+    !["closed", "failed", "manual_intervention"].includes(execution.state));
+  const activeReservation = state.executions.some((execution) => execution.reservedCapitalUsd > 0)
+    || state.assetTakeovers.some((takeover) => takeover.reservedCapitalUsd > 0);
+  const activeSmoke = state.connectivitySmokes.some((smoke) =>
+    !["flat", "failed", "manual_intervention"].includes(smoke.stage));
+  const activeTakeover = state.assetTakeovers.some((takeover) =>
+    !["exited", "failed", "manual_intervention"].includes(takeover.state));
+  if (
+    state.config.globalExecutionEnabled
+    || state.config.strategyEnabled
+    || !state.config.killSwitchActive
+    || !serverKillSwitchActive
+    || state.challenges.length > 0
+    || activeExecution
+    || activeReservation
+    || activeSmoke
+    || activeTakeover
+  ) {
+    throw new RwaNeutralExecutionError(
+      409,
+      "recovery_unbind_automation_active",
+      "自动化停止条件未全部确认，Recovery Unbind 已按 fail-closed 拒绝。",
+    );
+  }
+}
+
+function stopAutomationForCredentialRemoval(state: RwaAutomationStateData) {
+  state.config = {
+    ...state.config,
+    globalExecutionEnabled: false,
+    strategyEnabled: false,
+    killSwitchActive: true,
+    productionSelfTestPermitConfirmation: null,
+  };
+  state.challenges = [];
+}
+
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {
-  if (error instanceof CredentialStoreError && error.category === "credential_rotation_required") return "rotation_required";
-  if (error instanceof RwaNeutralExecutionError && error.category === "credential_rotation_required") return "rotation_required";
   if (error instanceof RwaBinanceProviderError && ["provider_credential_invalid", "provider_permission_error"].includes(error.category)) {
     return "revoked";
   }
@@ -3025,8 +3230,7 @@ function keyProviderUnavailable(message: string | null) {
 function credentialStoreExecutionError(error: unknown) {
   if (error instanceof RwaNeutralExecutionError) return error;
   if (error instanceof CredentialStoreError) {
-    const statusCode = error.category === "credential_rotation_required" ? 409 : 503;
-    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+    return new RwaNeutralExecutionError(503, error.category, error.message);
   }
   return new RwaNeutralExecutionError(503, "credential_unavailable", "Binance API 凭证不可用；已拒绝私有请求。");
 }
