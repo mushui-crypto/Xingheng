@@ -72,7 +72,12 @@ case "${1:-}" in
       echo "promotion lock context is invalid" >&2
       exit 78
     }
+    [ "${OLDPWD+x}" != x ] || {
+      echo "trusted promotion environment is invalid" >&2
+      exit 78
+    }
     cd "$repo_root"
+    unset OLDPWD
     [ "${PWD:-}" = "$repo_root" ] || { echo "trusted promotion cwd is invalid" >&2; exit 78; }
     if /usr/bin/env | /usr/bin/cut -d= -f1 | /usr/bin/grep -Ev \
       '^(HOME|PATH|LANG|LC_ALL|TZ|PWD|SHLVL|_|XINGHENG_OPERATION_LOCK_CONTEXT|XINGHENG_RELEASE_CANDIDATE_REVISION|XINGHENG_TRUSTED_OPERATION_ENTRY)$' \

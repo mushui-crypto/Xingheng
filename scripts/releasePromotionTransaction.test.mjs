@@ -9,6 +9,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -211,6 +212,37 @@ test("promotion wrapper process rejects trusted direct, legacy and polluted call
   }
 });
 
+test("promotion wrapper removes only the OLDPWD created by its own cd", () => {
+  withPromotionWrapperFixture(({ candidateRoot, candidateScripts, candidateWrapper, environment,
+    resultPath }) => {
+    for (const cwd of [candidateRoot, candidateScripts]) {
+      rmSync(resultPath, { force: true });
+      const result = spawnSync("/bin/sh", [candidateWrapper, "--promotion-json", "A".repeat(120)], {
+        cwd,
+        env: environment,
+        encoding: "utf8",
+      });
+      assert.equal(result.status, 0, result.stderr);
+      const observed = JSON.parse(readFileSync(resultPath, "utf8"));
+      assert.equal(observed.oldpwd, null);
+      assert.deepEqual(observed.args, ["promote", "A".repeat(120)]);
+    }
+  });
+});
+
+test("promotion wrapper still rejects non-allowlisted business environment", () => {
+  withPromotionWrapperFixture(({ candidateScripts, candidateWrapper, environment, resultPath }) => {
+    const result = spawnSync("/bin/sh", [candidateWrapper, "--promotion-json", "A".repeat(120)], {
+      cwd: candidateScripts,
+      env: { ...environment, NODE_OPTIONS: "--no-warnings" },
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 78);
+    assert.match(result.stderr, /trusted promotion environment is invalid/u);
+    assert.equal(exists(resultPath), false);
+  });
+});
+
 test("manual terminalization can only move matching STARTED or EXCHANGED to UNKNOWN", () => {
   withFixture((fixture) => {
     fixture.transaction.exchange = () => { throw new Error("exchange stopped"); };
@@ -223,6 +255,47 @@ test("manual terminalization can only move matching STARTED or EXCHANGED to UNKN
     assert.throws(() => fixture.transaction.terminalizeUnknown(OPERATION_ID));
   });
 });
+
+function withPromotionWrapperFixture(callback) {
+  const wrapper = new URL("./release-promote.sh", import.meta.url).pathname;
+  const root = mkdtempSync(join(tmpdir(), "promotion-wrapper-positive-"));
+  try {
+    const canonicalRoot = realpathSync(root);
+    const candidateRoot = join(canonicalRoot, "opt/xingheng-release/candidates", NEW_REVISION, "code");
+    const candidateScripts = join(candidateRoot, "scripts");
+    const candidateWrapper = join(candidateScripts, "release-promote.sh");
+    const resultPath = join(candidateScripts, "wrapper-executed.json");
+    mkdirSync(candidateScripts, { recursive: true });
+    const fixtureCandidatePrefix = `${join(canonicalRoot, "opt/xingheng-release/candidates")}/`;
+    writeFileSync(candidateWrapper, readFileSync(wrapper, "utf8")
+      .replaceAll("/opt/xingheng-release/candidates/", fixtureCandidatePrefix)
+      .replaceAll("/usr/bin/node", process.execPath), { mode: 0o755 });
+    writeFileSync(join(candidateScripts, "releasePromotionTransaction.mjs"), [
+      'import { writeFileSync } from "node:fs";',
+      'writeFileSync(new URL("./wrapper-executed.json", import.meta.url),',
+      '  JSON.stringify({ oldpwd: process.env.OLDPWD ?? null, args: process.argv.slice(2) }));',
+      "",
+    ].join("\n"), { mode: 0o644 });
+    callback({
+      candidateRoot,
+      candidateScripts,
+      candidateWrapper,
+      resultPath,
+      environment: {
+        HOME: tmpdir(),
+        PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        TZ: "UTC",
+        XINGHENG_OPERATION_LOCK_CONTEXT: "promotion",
+        XINGHENG_RELEASE_CANDIDATE_REVISION: NEW_REVISION,
+        XINGHENG_TRUSTED_OPERATION_ENTRY: "release-promote.sh",
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 test("fault injection never publishes partial success", () => {
   for (const stage of [
