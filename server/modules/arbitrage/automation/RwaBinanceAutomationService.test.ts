@@ -53,6 +53,10 @@ import {
 
 const masterKey = "11".repeat(32);
 const now = 20_000;
+const credentialNotConfigured = (error: unknown) => error instanceof RwaNeutralExecutionError
+  && error.category === "credential_not_configured";
+const recoveryInconsistentError = (error: unknown) => error instanceof RwaNeutralExecutionError
+  && error.category === "recovery_inconsistent";
 const capitalTestPermitLimits = {
   leverage: 1,
   maxPositionUsd: 40,
@@ -3291,7 +3295,7 @@ test("normal Binance unbind fails closed until automation stop is complete", asy
   }
 });
 
-test("normal Binance unbind holds the service lock through credential deletion and Binding finalization", async () => {
+test("normal Binance unbind blocks updateConfig through credential deletion and Binding finalization", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-lock-"));
   try {
     const client = new FakeBinanceClient();
@@ -3308,15 +3312,95 @@ test("normal Binance unbind holds the service lock through credential deletion a
     });
     await finalizerStart;
     let competingOperationFinished = false;
-    const competingOperation = harness.current.markCredentialRecoveryInconsistent().then(() => {
-      competingOperationFinished = true;
-    });
+    const competingOperation = harness.current.updateConfig({
+      accountId,
+      globalExecutionEnabled: true,
+    }).finally(() => { competingOperationFinished = true; });
+    const competingRejection = assert.rejects(competingOperation, credentialNotConfigured);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(competingOperationFinished, false);
     releaseFinalizer();
     await deletion;
-    await competingOperation;
+    await competingRejection;
     assert.equal(await harness.store.readCredentialMetadata(), null);
+    assert.equal((await harness.store.readState()).config.globalExecutionEnabled, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind blocks kill switch disable through credential deletion and Binding finalization", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-kill-switch-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    let releaseFinalizer!: () => void;
+    const finalizerRelease = new Promise<void>((resolve) => { releaseFinalizer = resolve; });
+    let finalizerStarted!: () => void;
+    const finalizerStart = new Promise<void>((resolve) => { finalizerStarted = resolve; });
+    const deletion = harness.current.deleteCredentials({ accountId }, async () => {
+      finalizerStarted();
+      await finalizerRelease;
+    });
+    await finalizerStart;
+    let competingOperationFinished = false;
+    const competingOperation = harness.current.setKillSwitch(false, accountId)
+      .finally(() => { competingOperationFinished = true; });
+    const competingRejection = assert.rejects(competingOperation, credentialNotConfigured);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(competingOperationFinished, false);
+    releaseFinalizer();
+    await deletion;
+    await competingRejection;
+    const state = await harness.store.readState();
+    assert.equal(state.config.killSwitchActive, true);
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("recovery_inconsistent blocks enable, execution, scheduler, and provider mutation gates", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-recovery-inconsistent-gate-"));
+  try {
+    let recoveryInconsistent = false;
+    const mutationGuard = () => {
+      if (recoveryInconsistent) {
+        throw new RwaNeutralExecutionError(409, "recovery_inconsistent", "manual intervention required");
+      }
+    };
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(
+      directory,
+      "user-a",
+      client,
+      () => {},
+      () => true,
+      undefined,
+      undefined,
+      () => now,
+      () => true,
+      mutationGuard,
+    );
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    recoveryInconsistent = true;
+
+    await assert.rejects(
+      harness.current.updateConfig({ accountId, globalExecutionEnabled: true }),
+      recoveryInconsistentError,
+    );
+    await assert.rejects(harness.current.execute({}), recoveryInconsistentError);
+    await assert.rejects(harness.current.startActivityMonitoring(), recoveryInconsistentError);
+    await assert.rejects(harness.current.closeAll({}), recoveryInconsistentError);
+    assert.equal(client.writeCount, 0);
+    const state = await harness.store.readState();
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -3350,6 +3434,7 @@ function serviceHarness(
   productionEnvironment?: () => boolean,
   clock: () => number = () => now,
   serverKillSwitchActive: () => boolean = () => false,
+  automationMutationGuard: () => void = () => {},
 ) {
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
@@ -3370,6 +3455,7 @@ function serviceHarness(
       activityMonitoringEnabled,
       productionSelfTestPermit,
       productionEnvironment,
+      automationMutationGuard,
     ),
     store,
     keyProvider,

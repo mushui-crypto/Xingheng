@@ -32,7 +32,7 @@ import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaN
 import { RwaAutomationPersistentStore } from "./modules/arbitrage/automation/RwaAutomationPersistentStore";
 import { GcpKmsCredentialKeyProvider } from "./modules/arbitrage/automation/GcpKmsCredentialKeyProvider";
 import { RwaBybitMainnetClient } from "./modules/arbitrage/automation/RwaBybitMainnetClient";
-import { RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
+import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
 import { RwaBybitAutomationConnector } from "./modules/arbitrage/automation/RwaBybitAutomationConnector";
 import { RwaBinanceAutomationConnector } from "./modules/arbitrage/automation/RwaBinanceAutomationConnector";
 import { RwaBinanceAutomationService } from "./modules/arbitrage/automation/RwaBinanceAutomationService";
@@ -204,6 +204,18 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
     () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     undefined,
     () => rwaAutomationExecutionLease?.assertHeld(),
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      if (tradingStore.findBinanceCredentialBinding(userId)?.status === "recovery_inconsistent") {
+        throw new RwaNeutralExecutionError(
+          409,
+          "recovery_inconsistent",
+          "Binance Credential Binding 状态异常，自动化 mutation 已拒绝并等待人工处理。",
+        );
+      }
+    },
   );
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),

@@ -144,7 +144,12 @@ export class RwaBinanceAutomationService {
       loadRwaBinanceProductionSelfTestPermit,
     private readonly productionEnvironment: () => boolean = () =>
       process.env.NODE_ENV === "production",
+    assertAutomationMutationAllowed: () => void = () => {},
   ) {
+    this.assertExecutionLeaseHeld = () => {
+      assertExecutionLeaseHeld();
+      assertAutomationMutationAllowed();
+    };
     this.store.setClock(now);
     this.providerActivityGuard = new RwaBinanceActivityGuard(
       (reason) => { void this.failClosedForProviderActivity(reason); },
@@ -154,7 +159,7 @@ export class RwaBinanceAutomationService {
     this.publicClient = publicClient ?? clientFactory({ apiKey: "", apiSecret: "" });
     this.hedgeEngine = new RwaNeutralHedgeExecutionEngine(
       now,
-      assertExecutionLeaseHeld,
+      this.assertExecutionLeaseHeld,
       XAUT_BINANCE_PROFILE,
     );
     this.takeoverCoordinator = new RwaAssetTakeoverCoordinator({
@@ -168,7 +173,7 @@ export class RwaBinanceAutomationService {
         return this.publicClient.readManagedAssetPublicMark();
       },
       credentialBinding: () => this.requireMetadata(),
-      assertExecutionLeaseHeld,
+      assertExecutionLeaseHeld: this.assertExecutionLeaseHeld,
       serverKillSwitchActive,
       now,
     });
@@ -796,6 +801,10 @@ export class RwaBinanceAutomationService {
   }
 
   async updateConfig(input: unknown) {
+    return this.withLock(() => this.updateConfigLocked(input));
+  }
+
+  private async updateConfigLocked(input: unknown) {
     const body = record(input);
     assertOnlyKeys(body, [
       "globalExecutionEnabled",
@@ -823,6 +832,7 @@ export class RwaBinanceAutomationService {
     let activeMetadata: BinanceCredentialMetadata | null = null;
     let activeAccess: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>> | null = null;
     if (body.globalExecutionEnabled === true || body.strategyEnabled === true) {
+      this.assertExecutionLeaseHeld();
       activeMetadata = await this.requireMetadata();
       activeAccess = await this.validateActiveAccess(
         await this.clientForNewRisk(state, activeMetadata),
@@ -870,10 +880,15 @@ export class RwaBinanceAutomationService {
   }
 
   async setKillSwitch(active: boolean, accountId?: string) {
+    return this.withLock(() => this.setKillSwitchLocked(active, accountId));
+  }
+
+  private async setKillSwitchLocked(active: boolean, accountId?: string) {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
     if (metadata) assertAccountId(requiredString(accountId, "accountId", 100), metadata.accountId);
     if (!active) {
+      this.assertExecutionLeaseHeld();
       const activeMetadata = await this.requireMetadata();
       const access = await this.validateActiveAccess(
         await this.clientForNewRisk(state, activeMetadata),
@@ -929,6 +944,10 @@ export class RwaBinanceAutomationService {
   }
 
   async getPnl() {
+    return this.withLock(() => this.getPnlLocked());
+  }
+
+  private async getPnlLocked() {
     const metadata = await this.requireMetadata();
     const client = await this.client();
     const state = await this.store.readState();
