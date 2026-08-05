@@ -2199,6 +2199,93 @@ test("normal Binance unbind marks the Binding verified before the same UID can b
   }
 });
 
+test("normal Binance unbind restore failure records recovery_inconsistent and blocks automation mutations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-normal-unbind-inconsistent-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidSnapshot = createHash("sha256").update("binance:normal-unbind-inconsistent").digest("hex");
+  const accountId = "binance:test-account";
+  bindingStore.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  const client = new TestBinanceClient() as TestBinanceClient & {
+    readPreflightSnapshot: () => Promise<Record<string, unknown>>;
+  };
+  client.readPreflightSnapshot = async () => ({
+    accountId,
+    existingSpotQuantityXaut: 0,
+    existingPerpetualQuantityXaut: 0,
+    openSpotOrderCount: 0,
+    openPerpetualOrderCount: 0,
+  });
+  const keyProvider = new FakeCredentialKeyProvider();
+  const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+    userId: "user-a",
+    venue: "binance",
+    keyProvider,
+    credentialPath: join(directory, "credentials.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  const mutationGuard = () => {
+    if (bindingStore.findBinanceCredentialBinding("user-a")?.status === "recovery_inconsistent") {
+      throw new RwaNeutralExecutionError(409, "recovery_inconsistent", "manual intervention required");
+    }
+  };
+  const service = new RwaBinanceAutomationService(
+    store,
+    () => client as any,
+    () => 200,
+    () => true,
+    undefined,
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    mutationGuard,
+  );
+  const connector = new RwaBinanceAutomationConnector(service);
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await service.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    store.restoreCredentialMutationSnapshot = async () => { throw new Error("restore failed"); };
+    bindingStore.markBinanceVerifiedUnbound = () => { throw new Error("Binding finalization failed"); };
+
+    await assert.rejects(
+      control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken }),
+      (error: unknown) => error instanceof RwaAutomationControlError
+        && error.category === "recovery_inconsistent"
+        && typeof error.details?.receiptId === "string",
+    );
+    const binding = bindingStore.findBinanceCredentialBinding("user-a")!;
+    assert.equal(binding.status, "recovery_inconsistent");
+    assert.equal(binding.interventionStatus, "manual_intervention");
+    const receipt = bindingStore.listBinanceRecoveryReceipts("user-a")[0]!;
+    assert.equal(receipt.result, "recovery_inconsistent");
+    assert.equal(receipt.reason, "credential_restore_failed");
+    const state = await store.readState();
+    assert.equal(state.credentialLifecycle, "invalid");
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+    await assert.rejects(
+      service.updateConfig({ accountId, globalExecutionEnabled: true }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent",
+    );
+    await assert.rejects(service.execute({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+    await assert.rejects(service.closeAll({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnapshot> = {}) {
   const generatedAt = 1_800_000_000_000;
   return createAccountAssetAuthorizationPreview({

@@ -3363,6 +3363,57 @@ test("normal Binance unbind blocks kill switch disable through credential deleti
   }
 });
 
+test("normal Binance unbind holds snapshot capture and restore in the same service lock", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-unbind-snapshot-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const originalCapture = harness.store.captureCredentialMutationSnapshot.bind(harness.store);
+    const originalRestore = harness.store.restoreCredentialMutationSnapshot.bind(harness.store);
+    let releaseCapture!: () => void;
+    const captureRelease = new Promise<void>((resolve) => { releaseCapture = resolve; });
+    let captureStarted!: () => void;
+    const captureStart = new Promise<void>((resolve) => { captureStarted = resolve; });
+    let releaseRestore!: () => void;
+    const restoreRelease = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    harness.store.captureCredentialMutationSnapshot = async () => {
+      captureStarted();
+      await captureRelease;
+      return originalCapture();
+    };
+    harness.store.restoreCredentialMutationSnapshot = async (snapshot) => {
+      restoreStarted();
+      await restoreRelease;
+      return originalRestore(snapshot);
+    };
+
+    const deletion = harness.current.deleteCredentials({ accountId }, () => {
+      throw new Error("Binding finalization failed");
+    });
+    await captureStart;
+    let mutationFinished = false;
+    const queuedMutation = harness.current.updateConfig({ accountId, maxEntryBasisBps: 11 })
+      .finally(() => { mutationFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseCapture();
+    await restoreStart;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseRestore();
+    await assert.rejects(deletion, /Binding finalization failed/);
+    await queuedMutation;
+    assert.equal((await harness.store.readState()).config.maxEntryBasisBps, 11);
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("recovery_inconsistent blocks enable, execution, scheduler, and provider mutation gates", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-recovery-inconsistent-gate-"));
   try {

@@ -681,57 +681,79 @@ export class RwaBinanceAutomationService {
     const body = record(input);
     assertOnlyKeys(body, ["accountId"]);
     return this.withLock(async () => {
-      const metadata = await this.store.readCredentialMetadata();
-      const state = await this.store.readState();
-      assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
-      if (metadata) {
-        assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
-        let snapshot;
+      const credentialSnapshot = await this.store.captureCredentialMutationSnapshot();
+      try {
+        const metadata = await this.store.readCredentialMetadata();
+        const state = await this.store.readState();
+        assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
+        if (metadata) {
+          assertAccountId(requiredString(body.accountId, "accountId", 100), metadata.accountId);
+          let snapshot;
+          try {
+            snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+          } catch {
+            state.credentialLifecycle = "invalid";
+            state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
+            state.config.killSwitchActive = true;
+            await this.store.writeState(state);
+            throw new RwaNeutralExecutionError(
+              409,
+              "credential_delete_manual_intervention",
+              "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
+              { accountId: metadata.accountId },
+            );
+          }
+          if (
+            snapshot.existingSpotQuantityXaut > 1e-9
+            || snapshot.existingPerpetualQuantityXaut > 1e-9
+            || snapshot.openSpotOrderCount > 0
+            || snapshot.openPerpetualOrderCount > 0
+          ) {
+            throw new RwaNeutralExecutionError(
+              409,
+              "credential_delete_blocked",
+              "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
+              { accountId: metadata.accountId },
+            );
+          }
+          state.credentialAudit.push({
+            userId: this.store.ownerUserId,
+            action: "deleted",
+            accountId: metadata.accountId,
+            accountFingerprint: metadata.accountFingerprint,
+            maskedApiKey: metadata.maskedApiKey,
+            occurredAt: this.now(),
+          });
+        }
+        stopAutomationForCredentialRemoval(state);
+        state.credentialLifecycle = "unconfigured";
+        state.credentialAlert = null;
+        invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+        await this.store.writeState(state);
+        await this.store.deleteCredentials();
+        const credentials = await this.getCredentialStatus();
+        await finalize?.();
+        this.armedChallengeIds.clear();
+        return { ok: true, credentials };
+      } catch (error) {
         try {
-          snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+          await this.store.restoreCredentialMutationSnapshot(credentialSnapshot);
         } catch {
-          state.credentialLifecycle = "invalid";
-          state.credentialAlert = "Binance 凭证不可用，无法确认账户风险敞口。";
-          state.config.killSwitchActive = true;
-          await this.store.writeState(state);
+          let automationStopFailed = false;
+          try {
+            await this.markCredentialRecoveryInconsistentLocked();
+          } catch {
+            automationStopFailed = true;
+          }
           throw new RwaNeutralExecutionError(
-            409,
-            "credential_delete_manual_intervention",
-            "凭证已失效或不可用，无法安全解绑。请先在 Binance 现货与 USD-M Futures 人工撤单并确认无仓位。",
-            { accountId: metadata.accountId },
+            503,
+            "credential_restore_failed",
+            "Credential 恢复失败；Binding 一致性无法确认，已停止自动化并等待人工处理。",
+            { automationStopFailed },
           );
         }
-        if (
-          snapshot.existingSpotQuantityXaut > 1e-9
-          || snapshot.existingPerpetualQuantityXaut > 1e-9
-          || snapshot.openSpotOrderCount > 0
-          || snapshot.openPerpetualOrderCount > 0
-        ) {
-          throw new RwaNeutralExecutionError(
-            409,
-            "credential_delete_blocked",
-            "Binance 账户存在 XAUT 余额、永续仓位或活动订单；请先人工核对并退出后再删除凭证。",
-            { accountId: metadata.accountId },
-          );
-        }
-        state.credentialAudit.push({
-          userId: this.store.ownerUserId,
-          action: "deleted",
-          accountId: metadata.accountId,
-          accountFingerprint: metadata.accountFingerprint,
-          maskedApiKey: metadata.maskedApiKey,
-          occurredAt: this.now(),
-        });
+        throw error;
       }
-      stopAutomationForCredentialRemoval(state);
-      state.credentialLifecycle = "unconfigured";
-      state.credentialAlert = null;
-      invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
-      await this.store.writeState(state);
-      await this.store.deleteCredentials();
-      await finalize?.();
-      this.armedChallengeIds.clear();
-      return { ok: true, credentials: await this.getCredentialStatus() };
     });
   }
 
@@ -783,15 +805,17 @@ export class RwaBinanceAutomationService {
 
   async markCredentialRecoveryInconsistent() {
     this.assertExecutionLeaseHeld();
-    return this.withLock(async () => {
-      const state = await this.store.readState();
-      stopAutomationForCredentialRemoval(state);
-      state.credentialLifecycle = "invalid";
-      state.credentialAlert = "Recovery Unbind 回滚失败；凭证与 Binding 一致性无法确认，等待人工处理。";
-      invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
-      await this.store.writeState(state);
-      this.armedChallengeIds.clear();
-    });
+    return this.withLock(() => this.markCredentialRecoveryInconsistentLocked());
+  }
+
+  private async markCredentialRecoveryInconsistentLocked() {
+    const state = await this.store.readState();
+    stopAutomationForCredentialRemoval(state);
+    state.credentialLifecycle = "invalid";
+    state.credentialAlert = "Recovery Unbind 回滚失败；凭证与 Binding 一致性无法确认，等待人工处理。";
+    invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+    await this.store.writeState(state);
+    this.armedChallengeIds.clear();
   }
 
   async getConfig() {

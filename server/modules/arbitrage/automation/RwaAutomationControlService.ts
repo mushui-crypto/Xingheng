@@ -380,7 +380,6 @@ export class RwaAutomationControlService {
       const binding = normalizedVenue === "binance"
         ? this.binanceBindingStore?.findBinanceCredentialBinding(userId)
         : undefined;
-      const credentialSnapshot = binding ? await connector.captureCredentialMutationSnapshot?.() : undefined;
       let result;
       try {
         result = await connector.deleteCredentials(sanitized, binding ? () => {
@@ -392,8 +391,43 @@ export class RwaAutomationControlService {
           );
         } : undefined);
       } catch (error) {
-        if (binding && connector.restoreCredentialMutationSnapshot && credentialSnapshot !== undefined) {
-          await connector.restoreCredentialMutationSnapshot(credentialSnapshot).catch(() => undefined);
+        if (binding && isCredentialRestoreFailure(error)) {
+          const operationId = randomUUID();
+          const reason = "credential_restore_failed";
+          const requestDigest = canonicalRequestDigest({
+            operationId,
+            userId,
+            venue: "binance",
+            uidSnapshot: binding.uidSnapshot,
+            bindingVersion: binding.bindingVersion,
+            reason,
+          });
+          this.binanceBindingStore!.reserveBinanceRecoveryOperation({
+            operationId,
+            userId,
+            venue: "binance",
+            requestDigest,
+            now: this.now(),
+          });
+          const failed = this.binanceBindingStore!.completeBinanceRecoveryUnbind({
+            operationId,
+            userId,
+            venue: "binance",
+            requestDigest,
+            uidSnapshot: binding.uidSnapshot,
+            bindingVersion: binding.bindingVersion,
+            operator: userId,
+            approver: "not_available",
+            reason,
+            failureReason: reason,
+            providerVerifiedFlat: false,
+            recoveryInconsistent: true,
+            now: this.now(),
+          });
+          throw recoveryInconsistentError(
+            failed.receiptId,
+            error.details?.automationStopFailed === true,
+          );
         }
         throw error;
       }
@@ -2338,6 +2372,11 @@ function recoveryInconsistentError(receiptId: string, automationStopFailed = fal
     "Recovery Unbind 回滚失败；系统已记录异常并等待人工处理。",
     { receiptId, automationStopFailed },
   );
+}
+
+function isCredentialRestoreFailure(error: unknown): error is RwaNeutralExecutionError {
+  return error instanceof RwaNeutralExecutionError
+    && error.category === "credential_restore_failed";
 }
 
 export class RwaAutomationControlError extends Error {
