@@ -1,4 +1,4 @@
-import { AlertTriangle, CheckCircle2, Clipboard, Clock3, ExternalLink, Eye, EyeOff, KeyRound, Plus, RotateCw, Unlink, XCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle2, Clipboard, Clock3, ExternalLink, Eye, EyeOff, KeyRound, Plus, Unlink, XCircle } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import {
   presentCredentialAuthorizationError,
@@ -35,18 +35,20 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
   const [savingVenue, setSavingVenue] = useState<AutomationVenue | null>(null);
   const [showSecret, setShowSecret] = useState(false);
   const [showPassphrase, setShowPassphrase] = useState(false);
-  const [rotationTarget, setRotationTarget] = useState<AutomationCredentialSummary | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<AutomationCredentialSummary | null>(null);
   const [deletePhrase, setDeletePhrase] = useState("");
   const draft = drafts[selectedVenue];
   const selectedCredential = credentialMap.get(selectedVenue);
   const needsPassphrase = selectedVenue === "bitget" || selectedVenue === "okx";
 
-  const openAuthorization = (venue: AutomationVenue = "bybit") => {
-    if (!credentialMap.get(venue)?.canAuthorize) return;
+  const openAuthorization = (venue?: AutomationVenue) => {
+    const target = venue && credentialMap.get(venue)?.status === "unconfigured"
+      ? venue
+      : credentials.find((credential) => credential.canAuthorize && credential.status === "unconfigured")?.venue;
+    if (!target) return;
     setDrafts(createDrafts(credentials));
     setErrors({});
-    setSelectedVenue(venue);
+    setSelectedVenue(target);
     setShowSecret(false);
     setShowPassphrase(false);
     setOpen(true);
@@ -137,7 +139,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
             const hasExposure = credential.activeOrderCount > 0 || credential.openPositionCount > 0;
             const requiresManualExchangeAction = hasExposure && (credential.status === "expired" || credential.status === "revoked");
             const configured = credential.accountId !== null && credential.status !== "unconfigured";
-            return <React.Fragment key={`${credential.venue}:${credential.accountId ?? "unconfigured"}`}><tr><td className={`${tableCellClass} font-semibold text-white`}>{venueLabel(credential.venue)}</td><td className={tableCellClass}><div className="space-y-1.5"><CredentialStatus status={credential.status} /><p className="text-xs text-muted">{credential.phaseLabel}</p>{credential.canExecute && !credential.enabled ? <p className="text-xs text-amber-200">执行门禁尚未全部就绪</p> : null}</div></td><td className={tableCellClass}><div className="space-y-1 font-mono text-xs"><p className="truncate text-slate-200" title={credential.maskedKey ?? undefined}>{credential.maskedKey ?? "-"}</p><p className="truncate text-dim" title={credential.uidFingerprint ?? undefined}>{credential.uidFingerprint ?? "-"}</p></div></td><td className={tableCellClass}>{configured ? <div className="space-y-2"><PermissionSummary credential={credential} /><ProductAvailabilitySummary credential={credential} /></div> : <ProductAvailabilitySummary credential={credential} />}</td><td className={tableCellClass}>{credential.ipWhitelistConfigured === true ? "已配置" : credential.ipWhitelistConfigured === false ? <span className="text-amber-200">未配置</span> : "-"}</td><td className={tableCellClass}>{credential.lastVerifiedAt ? formatDate(credential.lastVerifiedAt) : "-"}</td><td className={tableCellClass}>{credential.defaultExecutionAccount ? "默认执行" : configured ? credential.canExecute ? "执行账户" : "只读账户" : "-"}</td><td className={`${tableCellClass} ${stickyActionCellClass} text-center`}><div className="flex justify-center gap-2">{!credential.canAuthorize ? <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" disabled type="button" variant="secondary">{credential.implemented ? "能力未知" : "暂未接入"}</Button> : <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" onClick={() => credential.status === "unconfigured" ? openAuthorization(credential.venue) : setRotationTarget(credential)} type="button" variant="secondary">{credential.status === "unconfigured" ? <><KeyRound size={14} />配置</> : <><RotateCw size={14} />轮换</>}</Button>}{configured && credential.accountId ? hasExposure ? <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" onClick={onGoToSafety} type="button" variant="danger">先退出仓位</Button> : <Button aria-label={`解绑 ${venueLabel(credential.venue)} API 账户`} className="min-h-9 w-9 px-0 py-2 text-xs" onClick={() => { setDeleteTarget(credential); setDeletePhrase(""); }} title="解绑 API 账户" type="button" variant="danger"><Unlink className="shrink-0" size={15} strokeWidth={2} aria-hidden="true" /></Button> : null}</div></td></tr>{requiresManualExchangeAction ? <tr><td className="border-b border-red-400/20 bg-red-400/[0.055] px-4 py-3 text-sm text-red-100" colSpan={8}><AlertTriangle className="mr-2 inline" size={15} />凭证已失效且仍有风险敞口，自动退出不可用。请立即前往 {venueLabel(credential.venue)} 人工处理订单与仓位。</td></tr> : null}</React.Fragment>;
+            return <React.Fragment key={`${credential.venue}:${credential.accountId ?? "unconfigured"}`}><tr><td className={`${tableCellClass} font-semibold text-white`}>{venueLabel(credential.venue)}</td><td className={tableCellClass}><div className="space-y-1.5"><CredentialStatus status={credential.status} /><p className="text-xs text-muted">{credential.phaseLabel}</p>{credential.canExecute && !credential.enabled ? <p className="text-xs text-amber-200">执行门禁尚未全部就绪</p> : null}</div></td><td className={tableCellClass}><div className="space-y-1 font-mono text-xs"><p className="truncate text-slate-200" title={credential.maskedKey ?? undefined}>{credential.maskedKey ?? "-"}</p><p className="truncate text-dim" title={credential.uidFingerprint ?? undefined}>{credential.uidFingerprint ?? "-"}</p></div></td><td className={tableCellClass}>{configured ? <div className="space-y-2"><PermissionSummary credential={credential} /><ProductAvailabilitySummary credential={credential} /></div> : <ProductAvailabilitySummary credential={credential} />}</td><td className={tableCellClass}>{credential.ipWhitelistConfigured === true ? "已配置" : credential.ipWhitelistConfigured === false ? <span className="text-amber-200">未配置</span> : "-"}</td><td className={tableCellClass}>{credential.lastVerifiedAt ? formatDate(credential.lastVerifiedAt) : "-"}</td><td className={tableCellClass}>{credential.defaultExecutionAccount ? "默认执行" : configured ? credential.canExecute ? "执行账户" : "只读账户" : "-"}</td><td className={`${tableCellClass} ${stickyActionCellClass} text-center`}><div className="flex justify-center gap-2">{!credential.canAuthorize ? <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" disabled type="button" variant="secondary">{credential.implemented ? "能力未知" : "暂未接入"}</Button> : credential.status === "unconfigured" ? <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" onClick={() => openAuthorization(credential.venue)} type="button" variant="secondary"><KeyRound size={14} />配置</Button> : null}{configured && credential.accountId ? hasExposure ? <Button className="min-h-9 w-[104px] px-3 py-2 text-xs" onClick={onGoToSafety} type="button" variant="danger">先退出仓位</Button> : <Button aria-label={`解绑 ${venueLabel(credential.venue)} API 账户`} className="min-h-9 w-9 px-0 py-2 text-xs" onClick={() => { setDeleteTarget(credential); setDeletePhrase(""); }} title="解绑 API 账户" type="button" variant="danger"><Unlink className="shrink-0" size={15} strokeWidth={2} aria-hidden="true" /></Button> : null}</div></td></tr>{requiresManualExchangeAction ? <tr><td className="border-b border-red-400/20 bg-red-400/[0.055] px-4 py-3 text-sm text-red-100" colSpan={8}><AlertTriangle className="mr-2 inline" size={15} />凭证已失效且仍有风险敞口，自动退出不可用。请立即前往 {venueLabel(credential.venue)} 人工处理订单与仓位。</td></tr> : null}</React.Fragment>;
           })}</tbody>
         </ScrollTable>
       </ConsoleSection>
@@ -146,7 +148,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
         <div className="no-scrollbar flex min-w-0 gap-2 overflow-x-auto border-b border-white/10 px-4 py-3 sm:px-5" role="tablist" aria-label="选择交易所">
           {venueOrder.map((venue) => {
             const credential = credentialMap.get(venue);
-            return <button aria-selected={selectedVenue === venue} className={`inline-flex min-h-11 shrink-0 items-center gap-2 border px-4 text-sm font-semibold transition ${selectedVenue === venue ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"}`} disabled={!credential?.canAuthorize} key={venue} onClick={() => switchVenue(venue)} role="tab" type="button">{venueLabel(venue)}{credential?.status === "connected" ? <span className={`h-2 w-2 rounded-full ${selectedVenue === venue ? "bg-emerald-600" : "bg-emerald-300"}`} aria-label="已连接" /> : null}{!credential?.canAuthorize ? <span className="text-[10px] opacity-65">{credential?.implemented ? "能力未知" : "暂未接入"}</span> : credential.canExecute ? <span className="text-[10px] opacity-70">受控执行</span> : null}</button>;
+            return <button aria-selected={selectedVenue === venue} className={`inline-flex min-h-11 shrink-0 items-center gap-2 border px-4 text-sm font-semibold transition ${selectedVenue === venue ? "border-white bg-white text-black" : "border-white/15 text-muted hover:border-white/50 hover:text-white"}`} disabled={!credential?.canAuthorize || credential.status !== "unconfigured"} key={venue} onClick={() => switchVenue(venue)} role="tab" type="button">{venueLabel(venue)}{credential?.status === "connected" ? <span className={`h-2 w-2 rounded-full ${selectedVenue === venue ? "bg-emerald-600" : "bg-emerald-300"}`} aria-label="已连接" /> : null}{!credential?.canAuthorize ? <span className="text-[10px] opacity-65">{credential?.implemented ? "能力未知" : "暂未接入"}</span> : credential.status !== "unconfigured" ? <span className="text-[10px] opacity-65">先解绑</span> : credential.canExecute ? <span className="text-[10px] opacity-70">受控执行</span> : null}</button>;
           })}
           <button className="min-h-11 shrink-0 border border-white/10 px-4 text-sm text-dim" disabled type="button">更多 Connector · 待接入</button>
         </div>
@@ -160,7 +162,7 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
             {needsPassphrase ? <Field label="Passphrase"><SensitiveInput onChange={(value) => updateDraft("passphrase", value)} onToggle={() => setShowPassphrase((current) => !current)} show={showPassphrase} value={draft.passphrase ?? ""} /></Field> : null}
             {selectedCredential?.ipWhitelistConfigured === false || selectedCredential?.ipWhitelistConfigured === null ? <div className="flex items-start gap-2 border border-amber-400/40 bg-amber-400/[0.07] p-3 text-xs leading-5 text-amber-100" role="status"><AlertTriangle className="mt-0.5 shrink-0" size={15} /><span><strong className="font-semibold">IP 白名单未确认</strong><br />仍可继续验证和保存，但 API 凭证暴露后的风险更高，强烈建议先在交易所绑定生产出口 IP。</span></div> : null}
             {errors[selectedVenue] ? <CredentialFailureNotice failure={errors[selectedVenue]} /> : null}
-            <div className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">浏览器不持久化。API Key 与 apiSecret 仅通过当前登录用户 HTTPS 会话提交；服务端验证失败不会覆盖旧连接，Secret 永不回显。</div>
+            <div className="border border-white/10 bg-white/[0.025] p-3 text-xs leading-5 text-muted">浏览器不持久化。API Key 与 apiSecret 仅通过当前登录用户 HTTPS 会话提交；已有连接必须先解绑，Secret 永不回显。</div>
             <Button className="w-full" disabled={savingVenue !== null || !draft.apiKey.trim() || !draft.secret.trim() || (needsPassphrase && !(draft.passphrase ?? "").trim())} type="submit">{savingVenue === selectedVenue ? "验证并保存中" : "验证并保存授权"}</Button>
           </form>
 
@@ -179,10 +181,6 @@ export function AutomationCredentials({ credentials, onDelete, onFeedback, onGoT
             />
           </aside>
         </div>
-      </Modal>
-
-      <Modal onClose={() => setRotationTarget(null)} open={rotationTarget !== null} title={`轮换 ${rotationTarget ? venueLabel(rotationTarget.venue) : ""} API 凭证`} description="旧连接会一直保留，只有新凭证通过服务端真实签名与权限验证后才原子替换。">
-        <div className="space-y-4"><div className="border border-amber-400/30 bg-amber-400/[0.06] p-4 text-sm leading-6 text-amber-100">新凭证验证失败不会覆盖旧 masked key、默认账户、权限或执行准备状态。</div><Button className="w-full" onClick={() => { if (rotationTarget) openAuthorization(rotationTarget.venue); setRotationTarget(null); }} type="button" variant="secondary"><RotateCw size={15} />继续轮换</Button></div>
       </Modal>
 
       <Modal closeDisabled={savingVenue !== null} onClose={() => setDeleteTarget(null)} open={deleteTarget !== null} title={`解绑 ${deleteTarget ? venueLabel(deleteTarget.venue) : ""} API 账户`} description="解绑成功后清空本页敏感草稿、默认账户与执行准备状态。">

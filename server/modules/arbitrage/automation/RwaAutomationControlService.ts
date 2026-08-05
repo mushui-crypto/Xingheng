@@ -138,6 +138,7 @@ export class RwaAutomationControlService {
     private readonly binanceBindingStore?: Pick<TradingStore,
       | "bindBinanceUid"
       | "findBinanceUidBindingByUserId"
+      | "markBinanceVerifiedUnbound"
       | "reserveBinanceRecoveryOperation"
       | "completeBinanceRecoveryUnbind"
       | "releaseBinanceRecoveryOperation">,
@@ -239,6 +240,16 @@ export class RwaAutomationControlService {
     const registry = this.registry(userId);
     const connector = registry.requireImplemented(normalizedVenue);
     const existingAccountId = await connector.getConfiguredAccountId();
+    if (
+      normalizedVenue === "binance"
+      && this.binanceBindingStore?.findBinanceUidBindingByUserId(userId)?.status === "active"
+    ) {
+      throw new RwaAutomationControlError(
+        409,
+        "credential_rebind_requires_unbind",
+        "已有 Binance Binding；必须先安全解绑，再重新验证并绑定 Credential。",
+      );
+    }
     try {
       const result = await this.governed("credential", sourceIp, userId, connector.venue, existingAccountId ?? "new-account", async () => {
         await registry.initialize();
@@ -321,7 +332,27 @@ export class RwaAutomationControlService {
         notionalUsd: null,
       });
       this.invalidateAssetAuthorizationPreviews(userId, connector.venue);
-      const result = await connector.deleteCredentials(sanitized);
+      const binding = normalizedVenue === "binance"
+        ? this.binanceBindingStore?.findBinanceUidBindingByUserId(userId)
+        : undefined;
+      const credentialSnapshot = binding ? await connector.captureCredentialMutationSnapshot?.() : undefined;
+      let result;
+      try {
+        result = await connector.deleteCredentials(sanitized);
+        if (binding) {
+          this.binanceBindingStore!.markBinanceVerifiedUnbound(
+            userId,
+            binding.uidFingerprint,
+            binding.bindingVersion,
+            this.now(),
+          );
+        }
+      } catch (error) {
+        if (binding && connector.restoreCredentialMutationSnapshot && credentialSnapshot !== undefined) {
+          await connector.restoreCredentialMutationSnapshot(credentialSnapshot).catch(() => undefined);
+        }
+        throw error;
+      }
       this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
       return result;
     });

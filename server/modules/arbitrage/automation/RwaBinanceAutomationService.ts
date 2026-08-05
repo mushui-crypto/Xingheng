@@ -108,7 +108,6 @@ import {
   type RwaBinanceProductionSelfTestPermit,
 } from "./RwaBinanceProductionSelfTestPermit";
 
-const rotationAgeMs = 90 * 24 * 60 * 60 * 1_000;
 const challengeTtlMs = 60_000;
 const executionStates = new Set(["accepted", "opening_spot", "opening_perpetual", "compensating", "partial_closed"]);
 const XAUT_BINANCE_PROFILE = requireRwaAutomationExecutionProfile("xaut", "binance");
@@ -382,8 +381,8 @@ export class RwaBinanceAutomationService {
         metadata,
         stored: true,
         connectionStatus: "unavailable",
-        lifecycleStatus: "rotation_required",
-        message: "检测到旧版凭证格式；必须删除旧凭证并重新授权。",
+        lifecycleStatus: "invalid",
+        message: "检测到不支持的旧版凭证格式；必须安全解绑后重新绑定。",
         ipWhitelistConfigured: metadata.permissions.ipRestricted,
       });
     }
@@ -400,8 +399,7 @@ export class RwaBinanceAutomationService {
     try {
       const access = await this.client().then((client) => client.validateAccess());
       const valid = permissionsValid(access.permissions) && access.accountId === metadata.accountId;
-      const rotationRequired = this.now() - metadata.updatedAt >= rotationAgeMs;
-      const lifecycleStatus = !valid ? "invalid" as const : rotationRequired ? "rotation_required" as const : "active" as const;
+      const lifecycleStatus = !valid ? "invalid" as const : "active" as const;
       return this.status({
         metadata: {
           ...metadata,
@@ -412,9 +410,7 @@ export class RwaBinanceAutomationService {
         stored: true,
         connectionStatus: valid ? "verified" : "invalid",
         lifecycleStatus,
-        message: !valid
-          ? "Binance Key 当前权限、账户身份或持仓模式不符合只读预检安全门禁。"
-          : rotationRequired ? "API Key 已达到轮换周期，完成轮换前禁止新增风险。" : null,
+        message: !valid ? "Binance Key 当前权限、账户身份或持仓模式不符合只读预检安全门禁。" : null,
         warnings: ipWhitelistWarnings(access.ipWhitelistVerificationMode),
       });
     } catch (error) {
@@ -631,8 +627,8 @@ export class RwaBinanceAutomationService {
     this.credentialLifecycleOverride = "validating";
     try {
       const previous = await this.store.readCredentialMetadata();
-      if (previous?.requiresRotation) {
-        throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请先删除旧凭证并重新授权。");
+      if (previous) {
+        throw new RwaNeutralExecutionError(409, "credential_rebind_requires_unbind", "已有 Binance Credential；必须先安全解绑再重新绑定。");
       }
       await this.store.assertKeyProviderHealthy("pending-credential-validation").catch((error) => {
         throw credentialStoreExecutionError(error);
@@ -644,19 +640,11 @@ export class RwaBinanceAutomationService {
         throw providerError(error, "Binance 凭证校验失败。");
       }
       assertPermissions(access.permissions);
-      if (previous && previous.accountId !== access.accountId) {
-        throw new RwaNeutralExecutionError(
-          409,
-          "credential_account_mismatch",
-          "新凭证属于不同 Binance 账户；请先确认旧账户无订单/仓位并安全删除旧凭证。",
-        );
-      }
       const verifiedAt = this.now();
       await this.store.saveCredentials(input, access.permissions, access, verifiedAt).catch((error) => {
         throw credentialStoreExecutionError(error);
       });
       const state = await this.store.readState();
-      if (previous) invalidateAccountAssetAuthorizations(state.assetAuthorizations, verifiedAt);
       state.credentialLifecycle = "active";
       state.credentialAlert = null;
       state.config = {
@@ -670,7 +658,7 @@ export class RwaBinanceAutomationService {
       this.armedChallengeIds.clear();
       state.credentialAudit.push({
         userId: this.store.ownerUserId,
-        action: previous ? "rotated" : "activated",
+        action: "activated",
         accountId: access.accountId,
         accountFingerprint: access.accountFingerprint,
         maskedApiKey: (await this.store.readCredentialMetadata())?.maskedApiKey ?? null,
@@ -2390,7 +2378,7 @@ export class RwaBinanceAutomationService {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credential_not_configured", "Binance API 凭证尚未配置。");
     if (metadata.requiresRotation) {
-      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "检测到旧版凭证格式；请删除旧凭证并重新授权。");
+      throw new RwaNeutralExecutionError(409, "credential_format_unsupported", "旧版 Binance Credential 不受支持；必须安全解绑后重新绑定。");
     }
     return metadata;
   }
@@ -2398,10 +2386,6 @@ export class RwaBinanceAutomationService {
   private async validateActiveAccess(client: RwaBinanceClient, accountId: string, state: RwaAutomationStateData) {
     const metadata = await this.requireMetadata();
     assertAccountId(accountId, metadata.accountId);
-    if (this.now() - metadata.updatedAt >= rotationAgeMs) {
-      await this.freezeNewRisk(state, "rotation_required", metadata, "Binance API Key 已达到轮换周期，完成轮换前禁止新增风险。");
-      throw new RwaNeutralExecutionError(409, "credential_rotation_required", "Binance API Key 已达到轮换周期，请先完成安全轮换。");
-    }
     try {
       const access = await client.validateAccess();
       assertPermissions(access.permissions);
@@ -3142,8 +3126,6 @@ function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKi
 }
 
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {
-  if (error instanceof CredentialStoreError && error.category === "credential_rotation_required") return "rotation_required";
-  if (error instanceof RwaNeutralExecutionError && error.category === "credential_rotation_required") return "rotation_required";
   if (error instanceof RwaBinanceProviderError && ["provider_credential_invalid", "provider_permission_error"].includes(error.category)) {
     return "revoked";
   }
@@ -3161,8 +3143,9 @@ function keyProviderUnavailable(message: string | null) {
 function credentialStoreExecutionError(error: unknown) {
   if (error instanceof RwaNeutralExecutionError) return error;
   if (error instanceof CredentialStoreError) {
-    const statusCode = error.category === "credential_rotation_required" ? 409 : 503;
-    return new RwaNeutralExecutionError(statusCode, error.category, error.message);
+    return error.category === "credential_rotation_required"
+      ? new RwaNeutralExecutionError(503, "credential_format_unsupported", "旧版 Binance Credential 不受支持；必须安全解绑后重新绑定。")
+      : new RwaNeutralExecutionError(503, error.category, error.message);
   }
   return new RwaNeutralExecutionError(503, "credential_unavailable", "Binance API 凭证不可用；已拒绝私有请求。");
 }

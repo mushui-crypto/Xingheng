@@ -493,7 +493,7 @@ test("first Binance credential binding failure restores pre-submit empty state",
   }
 });
 
-test("rotating Binance credentials restores previous encrypted state when binding fails", async () => {
+test("Binance credentials cannot be overwritten before unbind", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-binding-rotate-"));
   try {
     const harness = createBinanceCredentialHarness(directory);
@@ -513,18 +513,14 @@ test("rotating Binance credentials restores previous encrypted state when bindin
     const expectedCredentialFile = await readFile(harness.store.credentialPath, "utf8");
     const expectedState = await harness.store.readState();
 
-    harness.stepUp.recordCredentialBinding = async () => {
-      throw new Error("Authorization: Bearer should-not-log stepUpToken step-up-token-a path /tmp/secret");
-    };
-
     await assert.rejects(
       harness.control.putCredentials("user-a", sessionDomain, "binance", {
         apiKey: "new-key",
         apiSecret: "new-secret",
         stepUpToken,
       }),
-      (error: unknown) => error instanceof RwaAutomationControlError
-        && error.category === "credential_binding_unavailable",
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_rebind_requires_unbind",
     );
 
     const restoredStatus = await harness.service.getCredentialStatus();
@@ -2011,6 +2007,38 @@ test("Recovery Unbind requires user step-up plus admin approval for unreadable p
       control.recoveryUnbind("user-b", sessionDomain, { ...body, operationId: "55555555-5555-4555-8555-555555555555" }, "admin@example.com"),
       (error: unknown) => error instanceof RwaAutomationControlError && error.category === "binding_not_found",
     );
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("normal Binance unbind marks the Binding verified before the same UID can be rebound", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-verified-unbind-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidFingerprint = createHash("sha256").update("binance:verified-user").digest("hex");
+  const accountId = `binance:${uidFingerprint}`;
+  bindingStore.bindBinanceUid("user-a", uidFingerprint, 100);
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId,
+    captureCredentialSnapshot: async () => ({ credential: "encrypted" }),
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken });
+    const unbound = bindingStore.findBinanceUidBindingByUserId("user-a")!;
+    assert.equal(unbound.status, "verified_unbound");
+    assert.equal(unbound.bindingVersion, 2);
+    assert.equal(bindingStore.bindBinanceUid("user-a", uidFingerprint, 201).bindingVersion, 3);
   } finally {
     bindingStore.close();
     await rm(directory, { recursive: true, force: true });

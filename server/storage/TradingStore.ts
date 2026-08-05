@@ -209,6 +209,28 @@ export class TradingStore {
     });
   }
 
+  markBinanceVerifiedUnbound(userId: string, uidFingerprint: string, bindingVersion: number, now = Date.now()) {
+    return this.transaction(() => {
+      const binding = this.findBinanceUidBindingByUserId(userId);
+      if (!binding || binding.uidFingerprint !== uidFingerprint) {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      }
+      if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
+        throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧解绑请求不能继续执行。");
+      }
+      const nextVersion = bindingVersion + 1;
+      const updated = this.db.prepare(
+        `UPDATE binance_uid_bindings
+         SET bindingVersion = ?, status = 'verified_unbound', interventionStatus = 'none', updatedAt = ?
+         WHERE userId = ? AND bindingVersion = ? AND status = 'active'`,
+      ).run(nextVersion, now, userId, bindingVersion);
+      if (Number(updated.changes) !== 1) {
+        throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧解绑请求不能继续执行。");
+      }
+      return this.findBinanceUidBindingByUserId(userId)!;
+    });
+  }
+
   reserveBinanceRecoveryOperation(input: {
     operationId: string;
     userId: string;

@@ -99,3 +99,21 @@ test("a stale bindingVersion cannot unbind a re-established binding", (t) => {
     (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_version_conflict",
   );
 });
+
+test("verified unbind retains ownership and permits only the same UID to be rebound", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-verified-unbind-"));
+  const store = new TradingStore(join(directory, "test.sqlite"));
+  t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const uidFingerprint = fingerprint("50005");
+  store.bindBinanceUid("user-a", uidFingerprint, 100);
+  const unbound = store.markBinanceVerifiedUnbound("user-a", uidFingerprint, 1, 101);
+  assert.equal(unbound.status, "verified_unbound");
+  assert.equal(unbound.bindingVersion, 2);
+  assert.throws(
+    () => store.bindBinanceUid("user-a", fingerprint("different"), 102),
+    (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_user_conflict",
+  );
+  const rebound = store.bindBinanceUid("user-a", uidFingerprint, 103);
+  assert.equal(rebound.status, "active");
+  assert.equal(rebound.bindingVersion, 3);
+});

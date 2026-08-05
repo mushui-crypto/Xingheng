@@ -441,8 +441,11 @@ test("Binance asset authorization only reads XAUT state and local authorization 
 
     const nextPreview = await harness.current.previewAccountAssetAuthorization("xaut");
     await harness.current.createAccountAssetAuthorization("xaut", nextPreview);
-    await harness.current.putCredentials({ apiKey: "rotated-key", apiSecret: "rotated-secret" });
-    assert.equal(await harness.current.getAccountAssetAuthorization("xaut"), null);
+    await assert.rejects(
+      harness.current.putCredentials({ apiKey: "replacement-key", apiSecret: "replacement-secret" }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "credential_rebind_requires_unbind",
+    );
+    assert.notEqual(await harness.current.getAccountAssetAuthorization("xaut"), null);
     assert.equal(client.writeCount, writesBefore);
   } finally {
     await rm(directory, { recursive: true, force: true });
@@ -1031,7 +1034,7 @@ test("Binance credential validation wraps synchronous client construction failur
   }
 });
 
-test("Binance fixed IP verification gates credential rotation and every new-risk control entry", async () => {
+test("Binance rejects credential overwrite and fixed IP verification gates every new-risk control entry", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-gates-"));
   try {
     const client = new FakeBinanceClient();
@@ -1043,7 +1046,8 @@ test("Binance fixed IP verification gates credential rotation and every new-risk
     client.setPermissions({ ipRestricted: false });
     await assert.rejects(
       current.putCredentials({ apiKey: "replacement-key", apiSecret: "replacement-secret" }),
-      permissionRejectedWithoutSecret,
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_rebind_requires_unbind",
     );
     client.setPermissions({ ipRestricted: true });
     const retained = await current.getCredentialStatus();
