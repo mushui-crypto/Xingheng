@@ -500,7 +500,11 @@ export function assertPromotionStateAllowsProduction(options = {}) {
     testMode: uid !== 0 || gid !== 0,
   });
   try {
-  if (canonical(record.newCanonical) !== canonical(current)
+  const exactCanonical = canonical(record.newCanonical) === canonical(current);
+  const activatedCanonical = !exactCanonical
+    && canonicalWithoutLifecycle(record.newCanonical) === canonicalWithoutLifecycle(current)
+    && validateActivatedLifecycleTransition(paths, record.newCanonical, current, trusted, uid, gid);
+  if ((!exactCanonical && !activatedCanonical)
     || record.trustReceiptSha256 !== trusted.receiptSha256
     || record.helperReceiptSha256 !== helper.receiptSha256
     || trusted.releaseRoot !== paths.canonicalRoot
@@ -520,6 +524,211 @@ export function assertPromotionStateAllowsProduction(options = {}) {
   } finally {
     if (helper.opened?.fd !== undefined) closeSync(helper.opened.fd);
   }
+}
+
+function canonicalWithoutLifecycle(value) {
+  const { lifecyclePointerSha256: _lifecyclePointerSha256, ...identity } = value;
+  return canonical(identity);
+}
+
+function validateActivatedLifecycleTransition(paths, promoted, current, trusted, uid, gid) {
+  const lifecycleRoot = dirname(paths.lifecyclePointer);
+  assertSecureDirectory(lifecycleRoot, uid, gid, 0o700);
+  assertSecureDirectory(join(lifecycleRoot, "operations"), uid, gid, 0o700);
+  assertSecureDirectory(join(lifecycleRoot, "environment-snapshots"), uid, gid, 0o700);
+
+  const pointerReceipt = readCanonicalLifecycleJson(
+    paths.lifecyclePointer, uid, gid, 0o600, 1024 * 1024,
+  );
+  const pointer = pointerReceipt.value;
+  validateLifecyclePointer(pointer);
+  if (pointerReceipt.sha256 !== current.lifecyclePointerSha256
+    || pointer.operationId === null
+    || pointer.revision !== promoted.revision
+    || canonical(pointer.images) !== canonical(promoted.images)
+    || pointer.manifestSha256 !== promoted.manifestSha256
+    || pointer.environmentSha256 !== promoted.environmentSha256
+    || canonical(pointer.daemon) !== canonical(trusted.daemon)) {
+    throw new Error("activated release lifecycle identity is invalid");
+  }
+
+  const operationRoot = join(lifecycleRoot, "operations", `operation-${pointer.operationId}`);
+  assertSecureDirectory(operationRoot, uid, gid, 0o700);
+  const intent = readCanonicalLifecycleJson(
+    join(operationRoot, "intent.json"), uid, gid, 0o400, 1024 * 1024,
+  ).value;
+  const journal = readCanonicalLifecycleJson(
+    join(operationRoot, "journal.json"), uid, gid, 0o600, 1024 * 1024,
+  ).value;
+  validateLifecycleIntent(intent);
+  validateActiveLifecycleJournal(journal);
+
+  const previousSha256 = createHash("sha256")
+    .update(`${canonical(intent.previous)}\n`, "utf8")
+    .digest("hex");
+  if (intent.operationId !== pointer.operationId
+    || journal.operationId !== pointer.operationId
+    || previousSha256 !== promoted.lifecyclePointerSha256
+    || intent.previous.revision === pointer.revision
+    || canonical(intent.previous.daemon) !== canonical(pointer.daemon)
+    || canonical(intent.daemon) !== canonical(pointer.daemon)
+    || intent.candidate.revision !== pointer.revision
+    || canonical(intent.candidate.images) !== canonical(pointer.images)
+    || intent.candidate.manifest.sha256 !== pointer.manifestSha256
+    || intent.candidate.manifest.path
+      !== join(paths.canonicalRoot, "deploy/release-manifest.json")
+    || intent.candidate.manifest.mode !== 0o444
+    || intent.candidate.environment.sha256 !== pointer.environmentSha256
+    || intent.candidate.environment.path !== join(paths.canonicalRoot, ".env.production")
+    || intent.candidate.environment.mode !== 0o600
+    || pointer.establishedAt !== journal.updatedAt
+    || Date.parse(intent.createdAt) > Date.parse(pointer.establishedAt)) {
+    throw new Error("activated release lifecycle transition is invalid");
+  }
+
+  const snapshot = secureFile(
+    join(lifecycleRoot, "environment-snapshots", pointer.environmentArtifact.fileName),
+    uid,
+    gid,
+    0o400,
+    16 * 1024 * 1024,
+  );
+  try {
+    if (snapshot.sha256 !== pointer.environmentArtifact.sha256
+      || snapshot.size !== pointer.environmentArtifact.size) {
+      throw new Error("activated release lifecycle snapshot is invalid");
+    }
+  } finally {
+    closeSync(snapshot.fd);
+    snapshot.bytes.fill(0);
+  }
+
+  const stablePointer = secureFile(paths.lifecyclePointer, uid, gid, 0o600, 1024 * 1024);
+  try {
+    if (stablePointer.sha256 !== pointerReceipt.sha256) {
+      throw new Error("activated release lifecycle pointer changed during verification");
+    }
+  } finally {
+    closeSync(stablePointer.fd);
+    stablePointer.bytes.fill(0);
+  }
+  return true;
+}
+
+function readCanonicalLifecycleJson(path, uid, gid, mode, maximum) {
+  const file = secureFile(path, uid, gid, mode, maximum);
+  try {
+    const value = JSON.parse(file.bytes.toString("utf8"));
+    if (!file.bytes.equals(Buffer.from(`${canonical(value)}\n`, "utf8"))) {
+      throw new Error("release lifecycle JSON encoding is invalid");
+    }
+    return { value, sha256: file.sha256 };
+  } finally {
+    closeSync(file.fd);
+    file.bytes.fill(0);
+  }
+}
+
+function validateLifecyclePointer(value) {
+  assertExactKeys(value, [
+    "daemon", "environmentArtifact", "environmentSha256", "establishedAt", "images",
+    "manifestSha256", "operationId", "revision", "schemaVersion",
+  ], "release lifecycle pointer schema is invalid");
+  if (value.schemaVersion !== 1
+    || !REVISION.test(value.revision ?? "")
+    || !SHA256.test(value.manifestSha256 ?? "")
+    || !SHA256.test(value.environmentSha256 ?? "")
+    || (value.operationId !== null && !UUID.test(value.operationId ?? ""))
+    || !validLifecycleDate(value.establishedAt)) {
+    throw new Error("release lifecycle pointer schema is invalid");
+  }
+  validateLifecycleImages(value.images);
+  validateLifecycleDaemon(value.daemon);
+  assertExactKeys(value.environmentArtifact, ["fileName", "sha256", "size"],
+    "release lifecycle environment artifact is invalid");
+  if (value.environmentArtifact.fileName
+      !== `environment-${value.revision}-${value.environmentSha256}.env`
+    || value.environmentArtifact.sha256 !== value.environmentSha256
+    || !Number.isSafeInteger(value.environmentArtifact.size)
+    || value.environmentArtifact.size < 1
+    || value.environmentArtifact.size > 16 * 1024 * 1024) {
+    throw new Error("release lifecycle environment artifact is invalid");
+  }
+}
+
+function validateLifecycleIntent(value) {
+  assertExactKeys(value, [
+    "candidate", "createdAt", "daemon", "operation", "operationId", "previous", "schemaVersion",
+  ], "release lifecycle intent schema is invalid");
+  if (value.schemaVersion !== 1 || value.operation !== "verified-release-upgrade"
+    || !UUID.test(value.operationId ?? "") || !validLifecycleDate(value.createdAt)) {
+    throw new Error("release lifecycle intent schema is invalid");
+  }
+  validateLifecyclePointer(value.previous);
+  validateLifecycleDaemon(value.daemon);
+  assertExactKeys(value.candidate, ["environment", "images", "manifest", "revision"],
+    "release lifecycle candidate schema is invalid");
+  if (!REVISION.test(value.candidate.revision ?? "")) {
+    throw new Error("release lifecycle candidate schema is invalid");
+  }
+  validateLifecycleImages(value.candidate.images);
+  validateLifecycleFileReceipt(value.candidate.manifest);
+  validateLifecycleFileReceipt(value.candidate.environment);
+}
+
+function validateLifecycleFileReceipt(value) {
+  assertExactKeys(value, [
+    "ctimeMs", "dev", "ino", "mode", "mtimeMs", "path", "sha256", "size",
+  ], "release lifecycle file receipt is invalid");
+  if (![value.dev, value.ino, value.mode, value.size].every(Number.isSafeInteger)
+    || value.size < 1 || typeof value.path !== "string" || !value.path.startsWith("/")
+    || !Number.isFinite(value.mtimeMs) || !Number.isFinite(value.ctimeMs)
+    || !SHA256.test(value.sha256 ?? "")) {
+    throw new Error("release lifecycle file receipt is invalid");
+  }
+}
+
+function validateActiveLifecycleJournal(value) {
+  assertExactKeys(value, [
+    "failureExitCode", "failureStage", "incidentCategory", "operationId", "phase",
+    "schemaVersion", "sequence", "updatedAt",
+  ], "release lifecycle journal is invalid");
+  if (value.schemaVersion !== 1 || !UUID.test(value.operationId ?? "")
+    || value.phase !== "active" || value.sequence !== 1
+    || !validLifecycleDate(value.updatedAt) || value.incidentCategory !== null
+    || value.failureStage !== null || value.failureExitCode !== null) {
+    throw new Error("release lifecycle journal is invalid");
+  }
+}
+
+function validateLifecycleImages(value) {
+  assertExactKeys(value, ["api", "strategyTools", "web"],
+    "release lifecycle image set is invalid");
+  if (!Object.values(value).every((item) => IMAGE.test(item))) {
+    throw new Error("release lifecycle image set is invalid");
+  }
+}
+
+function validateLifecycleDaemon(value) {
+  assertExactKeys(value, ["id", "rootDir", "serverVersion", "storageDriver"],
+    "release lifecycle Docker daemon identity is invalid");
+  if (typeof value.id !== "string" || value.id.length < 8
+    || typeof value.rootDir !== "string" || !value.rootDir.startsWith("/")
+    || typeof value.serverVersion !== "string" || value.serverVersion.length < 1
+    || typeof value.storageDriver !== "string" || value.storageDriver.length < 1) {
+    throw new Error("release lifecycle Docker daemon identity is invalid");
+  }
+}
+
+function assertExactKeys(value, keys, message) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== [...keys].sort().join(",")) {
+    throw new Error(message);
+  }
+}
+
+function validLifecycleDate(value) {
+  return typeof value === "string" && Number.isFinite(Date.parse(value));
 }
 
 export function readPromotionRecord(path = PROMOTION_RECORD, uid = 0, gid = 0) {

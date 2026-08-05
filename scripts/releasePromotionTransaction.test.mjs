@@ -22,6 +22,7 @@ import {
   assertPromotionStateAllowsProduction,
   validateTrustedPromotionArguments,
 } from "./releasePromotionTransaction.mjs";
+import { ReleaseLifecycleTransactionStore } from "./releaseLifecycleTransaction.mjs";
 import {
   captureTrustedCandidateTree,
   secureArtifactReceipt,
@@ -61,6 +62,51 @@ test("promotion publishes one completed record with embedded success receipt", (
     assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state, "PROMOTION_COMPLETED");
     assert.throws(() => fixture.transaction.promote(fixture.expected), /already completed/u);
   });
+});
+
+test("completed promotion accepts only its verified prepared-to-active lifecycle transition", () => {
+  withFixture((fixture) => {
+    activateFixtureLifecycle(fixture);
+    assert.equal(
+      assertPromotionStateAllowsProduction(fixture.guardOptions).state,
+      "PROMOTION_COMPLETED",
+    );
+  });
+});
+
+test("activated lifecycle compatibility rejects every broken continuity relation", () => {
+  const mutations = [
+    ({ pointerPath }) => mutateCanonicalJson(pointerPath, 0o600, (value) => {
+      value.environmentSha256 = "d".repeat(64);
+    }),
+    ({ intentPath }) => mutateCanonicalJson(intentPath, 0o400, (value) => {
+      value.previous.establishedAt = "2026-08-03T00:00:00.000Z";
+    }),
+    ({ intentPath }) => mutateCanonicalJson(intentPath, 0o400, (value) => {
+      value.candidate.images.api = image("d");
+    }),
+    ({ intentPath }) => mutateCanonicalJson(intentPath, 0o400, (value) => {
+      value.candidate.manifest.path = "/tmp/release-manifest.json";
+    }),
+    ({ pointerPath }) => mutateCanonicalJson(pointerPath, 0o600, (value) => {
+      value.daemon.id = "drifted-daemon";
+    }),
+    ({ journalPath }) => mutateCanonicalJson(journalPath, 0o600, (value) => {
+      value.phase = "prepared";
+      value.sequence = 0;
+    }),
+    ({ journalPath }) => mutateCanonicalJson(journalPath, 0o600, (value) => {
+      value.sequence = 2;
+    }),
+    ({ snapshotPath }) => replaceFixtureFile(snapshotPath, "changed\n", 0o400),
+  ];
+  for (const mutate of mutations) {
+    withFixture((fixture) => {
+      const lifecycle = activateFixtureLifecycle(fixture);
+      mutate(lifecycle);
+      assert.throws(() => assertPromotionStateAllowsProduction(fixture.guardOptions));
+    });
+  }
 });
 
 test("validated COMPLETED is archived immutably before the next promotion", () => {
@@ -543,6 +589,53 @@ test("fault injection never publishes partial success", () => {
   }
 });
 
+function activateFixtureLifecycle(fixture) {
+  const lifecycleRoot = join(fixture.root, "release-lifecycle");
+  mkdirSync(join(lifecycleRoot, "operations"), { recursive: true, mode: 0o700 });
+  mkdirSync(join(lifecycleRoot, "environment-snapshots"), { mode: 0o700 });
+  const store = new ReleaseLifecycleTransactionStore(lifecycleRoot, { testMode: true });
+  const daemon = {
+    id: "fixture-daemon",
+    rootDir: "/var/lib/docker",
+    serverVersion: "1.2.3",
+    storageDriver: "overlay2",
+  };
+  store.establish(
+    join(fixture.canonicalRoot, "deploy/release-manifest.json"),
+    join(fixture.canonicalRoot, ".env.production"),
+    daemon,
+    new Date("2026-08-04T00:00:00.000Z"),
+  );
+  const pointerPath = join(lifecycleRoot, "current.json");
+  fixture.useLifecyclePointer(pointerPath);
+  fixture.transaction.promote(fixture.expected);
+  const intent = store.prepare(
+    join(fixture.canonicalRoot, "deploy/release-manifest.json"),
+    join(fixture.canonicalRoot, ".env.production"),
+    daemon,
+    new Date("2026-08-05T00:01:00.000Z"),
+  );
+  store.complete(
+    intent.operationId,
+    join(fixture.canonicalRoot, "deploy/release-manifest.json"),
+    join(fixture.canonicalRoot, ".env.production"),
+    daemon,
+    new Date("2026-08-05T00:02:00.000Z"),
+  );
+  const operationRoot = join(lifecycleRoot, "operations", `operation-${intent.operationId}`);
+  const pointer = JSON.parse(readFileSync(pointerPath, "utf8"));
+  return {
+    pointerPath,
+    intentPath: join(operationRoot, "intent.json"),
+    journalPath: join(operationRoot, "journal.json"),
+    snapshotPath: join(
+      lifecycleRoot,
+      "environment-snapshots",
+      pointer.environmentArtifact.fileName,
+    ),
+  };
+}
+
 function withFixture(callback) {
   const root = mkdtempSync(join(tmpdir(), "xingheng-promotion-"));
   try {
@@ -605,10 +698,16 @@ function withFixture(callback) {
     const transaction = new ReleasePromotionTransaction({ ...paths, testMode: true, exchange,
       installTrust, validateMainTrust, validateHelper,
       now: () => new Date("2026-08-05T00:00:00.000Z") });
-    callback({ root, ...paths, transaction, expected, stagingPath, lifecycleBytes,
+    const fixture = { root, ...paths, transaction, expected, stagingPath, lifecycleBytes,
       installCandidate,
       guardOptions: { ...paths, expectedUid: uid, expectedGid: gid,
-        validateMainTrust, validateHelper } });
+        validateMainTrust, validateHelper } };
+    fixture.useLifecyclePointer = (path) => {
+      transaction.paths = Object.freeze({ ...transaction.paths, lifecyclePointer: path });
+      fixture.lifecyclePointer = path;
+      fixture.guardOptions.lifecyclePointer = path;
+    };
+    callback(fixture);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -754,6 +853,12 @@ function mutateJson(path, mutation) {
   const value = JSON.parse(readFileSync(path, "utf8"));
   mutation(value);
   replaceFixtureFile(path, `${JSON.stringify(value)}\n`, 0o400);
+}
+
+function mutateCanonicalJson(path, mode, mutation) {
+  const value = JSON.parse(readFileSync(path, "utf8"));
+  mutation(value);
+  replaceFixtureFile(path, `${canonical(value)}\n`, mode);
 }
 
 function canonical(value) {
