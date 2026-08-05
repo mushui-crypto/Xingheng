@@ -16,6 +16,7 @@ import {
 export type StepUpOperation =
   | "credential_put"
   | "credential_delete"
+  | "credential_recovery_unbind"
   | "execution_enable"
   | "kill_switch_disable"
   | "hedge_execute"

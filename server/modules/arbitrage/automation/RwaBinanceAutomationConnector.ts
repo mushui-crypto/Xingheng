@@ -65,6 +65,7 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   }
 
   deleteCredentials(input?: unknown) { return this.service.deleteCredentials(input); }
+  recoveryUnbind() { return this.service.recoveryUnbind(); }
   getAccountAssetAuthorization(assetId: string) { return this.service.getAccountAssetAuthorization(assetId); }
   previewAccountAssetAuthorization(assetId: string) { return this.service.previewAccountAssetAuthorization(assetId); }
   createAccountAssetAuthorization(

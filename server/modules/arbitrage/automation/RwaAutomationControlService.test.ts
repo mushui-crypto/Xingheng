@@ -23,6 +23,7 @@ import {
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
 import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
+import { TradingStore } from "../../../storage/TradingStore";
 import {
   RwaAutomationGovernance,
   RwaAutomationGovernanceError,
@@ -1955,6 +1956,67 @@ test("takeover exit confirmations share challenge capacity atomically in both di
   );
 });
 
+test("Recovery Unbind requires user step-up plus admin approval for unreadable provider and is idempotent", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-recovery-unbind-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidFingerprint = createHash("sha256").update("binance:recovery-user").digest("hex");
+  bindingStore.bindBinanceUid("user-a", uidFingerprint, 100);
+  let recoveryCalls = 0;
+  let restoreCalls = 0;
+  let stepUpCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: `binance:${uidFingerprint}`,
+    recoveryUnbind: async () => { recoveryCalls += 1; return { providerVerifiedFlat: false }; },
+    captureCredentialSnapshot: async () => ({ credential: "encrypted" }),
+    restoreCredentialSnapshot: async () => { restoreCalls += 1; },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    {
+      ...passThroughStepUp,
+      consume: async () => { stepUpCalls += 1; },
+    },
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  const body = {
+    currentUidFingerprint: uidFingerprint,
+    bindingVersion: 1,
+    operationId: "44444444-4444-4444-8444-444444444444",
+    reason: "provider unavailable",
+    stepUpToken,
+  };
+  try {
+    await assert.rejects(
+      control.recoveryUnbind("user-a", sessionDomain, body, null),
+      (error: unknown) => error instanceof RwaAutomationControlError && error.category === "recovery_approval_required",
+    );
+    assert.equal(restoreCalls, 1);
+    const first = await control.recoveryUnbind("user-a", sessionDomain, body, "admin@example.com");
+    const replay = await control.recoveryUnbind("user-a", sessionDomain, body, "admin@example.com");
+    assert.deepEqual(replay, first);
+    assert.equal((first as any).status, "unverified_unbound");
+    assert.equal((first as any).accountCleared, false);
+    assert.equal(recoveryCalls, 2);
+    assert.equal(stepUpCalls, 2);
+    await assert.rejects(
+      control.recoveryUnbind("user-a", sessionDomain, { ...body, reason: "changed" }, "admin@example.com"),
+      (error: unknown) => error instanceof Error && "category" in error && error.category === "idempotency_conflict",
+    );
+    await assert.rejects(
+      control.recoveryUnbind("user-b", sessionDomain, { ...body, operationId: "55555555-5555-4555-8555-555555555555" }, "admin@example.com"),
+      (error: unknown) => error instanceof RwaAutomationControlError && error.category === "binding_not_found",
+    );
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnapshot> = {}) {
   const generatedAt = 1_800_000_000_000;
   return createAccountAssetAuthorizationPreview({
@@ -2200,6 +2262,9 @@ function fakeConnector(
     smokeExecute?: (input: any) => Promise<any>;
     smokeIdempotent?: (input: any) => Promise<any>;
     smokeLookup?: (input: any) => Promise<any>;
+    recoveryUnbind?: () => Promise<{ providerVerifiedFlat: boolean }>;
+    captureCredentialSnapshot?: () => Promise<unknown>;
+    restoreCredentialSnapshot?: (snapshot: unknown) => Promise<void>;
   } = {},
 ): RwaAutomationConnector {
   const venue = options.venue ?? "bybit";
@@ -2233,6 +2298,9 @@ function fakeConnector(
       };
     },
     deleteCredentials: async () => ({}),
+    recoveryUnbind: options.recoveryUnbind,
+    captureCredentialMutationSnapshot: options.captureCredentialSnapshot,
+    restoreCredentialMutationSnapshot: options.restoreCredentialSnapshot,
     getAccountAssetAuthorization: async () => options.authorization ?? null,
     previewAccountAssetAuthorization: async () => {
       if (options.authorizationPreviewFactory) return options.authorizationPreviewFactory();

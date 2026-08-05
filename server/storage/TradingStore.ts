@@ -1,3 +1,4 @@
+import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -101,9 +102,37 @@ export type BinanceUidBinding = {
   createdAt: number;
   updatedAt: number;
 };
+export type BinanceRecoveryUnbindResult = {
+  receiptId: string;
+  operationId: string;
+  uidFingerprint: string;
+  bindingVersion: number;
+  status: "verified_unbound" | "unverified_unbound";
+  interventionStatus: BinanceBindingInterventionStatus;
+  accountCleared: boolean;
+};
+export type BinanceRecoveryReceipt = {
+  receiptId: string;
+  operationId: string;
+  userId: string;
+  uidFingerprint: string;
+  bindingVersion: number;
+  operator: string;
+  approver: string;
+  reason: string;
+  result: string;
+  timestamp: number;
+  digest: string;
+};
 
 export class BinanceBindingStoreError extends Error {
-  constructor(readonly category: "binding_user_conflict" | "binding_uid_conflict", message: string) {
+  constructor(readonly category:
+    | "binding_user_conflict"
+    | "binding_uid_conflict"
+    | "binding_not_found"
+    | "binding_version_conflict"
+    | "idempotency_conflict"
+    | "operation_in_progress", message: string) {
     super(message);
   }
 }
@@ -178,6 +207,127 @@ export class TradingStore {
       }
       return this.findBinanceUidBindingByUserId(userId)!;
     });
+  }
+
+  reserveBinanceRecoveryOperation(input: {
+    operationId: string;
+    userId: string;
+    requestDigest: string;
+    now?: number;
+  }): { kind: "reserved" } | { kind: "completed"; result: BinanceRecoveryUnbindResult } {
+    assertOperationId(input.operationId);
+    const existing = this.db.prepare(
+      "SELECT userId, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
+    ).get(input.operationId) as { userId: string; requestDigest: string; resultJson: string | null } | undefined;
+    if (existing) {
+      if (existing.userId !== input.userId || existing.requestDigest !== input.requestDigest) {
+        throw new BinanceBindingStoreError("idempotency_conflict", "operationId 已用于不同的 Recovery Unbind 请求。");
+      }
+      if (!existing.resultJson) {
+        throw new BinanceBindingStoreError("operation_in_progress", "Recovery Unbind 请求正在处理中。");
+      }
+      return { kind: "completed", result: JSON.parse(existing.resultJson) as BinanceRecoveryUnbindResult };
+    }
+    try {
+      this.db.prepare(
+        `INSERT INTO binance_binding_operations (operationId, userId, requestDigest, resultJson, createdAt, completedAt)
+         VALUES (?, ?, ?, NULL, ?, NULL)`,
+      ).run(input.operationId, input.userId, input.requestDigest, input.now ?? Date.now());
+    } catch {
+      return this.reserveBinanceRecoveryOperation(input);
+    }
+    return { kind: "reserved" };
+  }
+
+  completeBinanceRecoveryUnbind(input: {
+    operationId: string;
+    userId: string;
+    requestDigest: string;
+    uidFingerprint: string;
+    bindingVersion: number;
+    operator: string;
+    approver: string;
+    reason: string;
+    providerVerifiedFlat: boolean;
+    now?: number;
+  }): BinanceRecoveryUnbindResult {
+    const timestamp = input.now ?? Date.now();
+    return this.transaction(() => {
+      const operation = this.db.prepare(
+        "SELECT userId, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
+      ).get(input.operationId) as { userId: string; requestDigest: string; resultJson: string | null } | undefined;
+      if (!operation || operation.userId !== input.userId || operation.requestDigest !== input.requestDigest) {
+        throw new BinanceBindingStoreError("idempotency_conflict", "Recovery Unbind operation reservation 不匹配。");
+      }
+      if (operation.resultJson) return JSON.parse(operation.resultJson) as BinanceRecoveryUnbindResult;
+      const binding = this.findBinanceUidBindingByUserId(input.userId);
+      if (!binding || binding.uidFingerprint !== input.uidFingerprint) {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      }
+      if (binding.bindingVersion !== input.bindingVersion || binding.status !== "active") {
+        throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧 Recovery Unbind 请求不能继续执行。");
+      }
+      const bindingVersion = binding.bindingVersion + 1;
+      const status = input.providerVerifiedFlat ? "verified_unbound" as const : "unverified_unbound" as const;
+      const interventionStatus = input.providerVerifiedFlat ? "none" as const : "manual_intervention" as const;
+      const receiptId = randomUUID();
+      const result: BinanceRecoveryUnbindResult = {
+        receiptId,
+        operationId: input.operationId,
+        uidFingerprint: input.uidFingerprint,
+        bindingVersion,
+        status,
+        interventionStatus,
+        accountCleared: input.providerVerifiedFlat,
+      };
+      const receiptCore = {
+        receiptId,
+        operationId: input.operationId,
+        userId: input.userId,
+        uidFingerprint: input.uidFingerprint,
+        bindingVersion,
+        operator: input.operator,
+        approver: input.approver,
+        reason: input.reason,
+        result: status,
+        timestamp,
+      };
+      const digest = createHash("sha256").update(JSON.stringify(receiptCore)).digest("hex");
+      const updated = this.db.prepare(
+        `UPDATE binance_uid_bindings
+         SET bindingVersion = ?, status = ?, interventionStatus = ?, updatedAt = ?
+         WHERE userId = ? AND bindingVersion = ? AND status = 'active'`,
+      ).run(bindingVersion, status, interventionStatus, timestamp, input.userId, input.bindingVersion);
+      if (Number(updated.changes) !== 1) {
+        throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧 Recovery Unbind 请求不能继续执行。");
+      }
+      this.db.prepare(
+        `INSERT INTO binance_recovery_receipts (
+           receiptId, operationId, userId, uidFingerprint, bindingVersion, operator, approver,
+           reason, result, timestamp, digest
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(
+        receiptId, input.operationId, input.userId, input.uidFingerprint, bindingVersion,
+        input.operator, input.approver, input.reason, status, timestamp, digest,
+      );
+      this.db.prepare(
+        "UPDATE binance_binding_operations SET resultJson = ?, completedAt = ? WHERE operationId = ? AND resultJson IS NULL",
+      ).run(JSON.stringify(result), timestamp, input.operationId);
+      return result;
+    });
+  }
+
+  releaseBinanceRecoveryOperation(operationId: string, userId: string, requestDigest: string) {
+    this.db.prepare(
+      `DELETE FROM binance_binding_operations
+       WHERE operationId = ? AND userId = ? AND requestDigest = ? AND resultJson IS NULL`,
+    ).run(operationId, userId, requestDigest);
+  }
+
+  listBinanceRecoveryReceipts(userId: string) {
+    return this.db.prepare(
+      "SELECT * FROM binance_recovery_receipts WHERE userId = ? ORDER BY timestamp ASC, receiptId ASC",
+    ).all(userId) as BinanceRecoveryReceipt[];
   }
 
   listAccounts() {
@@ -1846,6 +1996,38 @@ export class TradingStore {
         updatedAt INTEGER NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS binance_binding_operations (
+        operationId TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        requestDigest TEXT NOT NULL,
+        resultJson TEXT,
+        createdAt INTEGER NOT NULL,
+        completedAt INTEGER
+      );
+
+      CREATE TABLE IF NOT EXISTS binance_recovery_receipts (
+        receiptId TEXT PRIMARY KEY,
+        operationId TEXT NOT NULL UNIQUE,
+        userId TEXT NOT NULL,
+        uidFingerprint TEXT NOT NULL,
+        bindingVersion INTEGER NOT NULL,
+        operator TEXT NOT NULL,
+        approver TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        result TEXT NOT NULL CHECK(result IN ('verified_unbound', 'unverified_unbound')),
+        timestamp INTEGER NOT NULL,
+        digest TEXT NOT NULL CHECK(length(digest) = 64),
+        FOREIGN KEY(operationId) REFERENCES binance_binding_operations(operationId)
+      );
+
+      CREATE TRIGGER IF NOT EXISTS binance_recovery_receipts_no_update
+      BEFORE UPDATE ON binance_recovery_receipts
+      BEGIN SELECT RAISE(ABORT, 'binance recovery receipts are append-only'); END;
+
+      CREATE TRIGGER IF NOT EXISTS binance_recovery_receipts_no_delete
+      BEFORE DELETE ON binance_recovery_receipts
+      BEGIN SELECT RAISE(ABORT, 'binance recovery receipts are append-only'); END;
+
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_accounts_userId ON real_trading_accounts(userId);
@@ -1922,6 +2104,12 @@ function assertBinanceBindingIdentity(userId: string, uidFingerprint: string) {
   if (!userId.trim()) throw new Error("Binance binding userId is required");
   if (!/^[0-9a-f]{64}$/u.test(uidFingerprint)) {
     throw new Error("Binance UID fingerprint must be a full lowercase SHA-256 digest");
+  }
+}
+
+function assertOperationId(operationId: string) {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(operationId)) {
+    throw new Error("Recovery Unbind operationId must be a UUID");
   }
 }
 

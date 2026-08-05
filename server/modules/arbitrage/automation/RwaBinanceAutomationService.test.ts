@@ -3134,6 +3134,48 @@ test("Binance connectivity smoke untradeable futures exit becomes manual interve
   }
 });
 
+test("Recovery Unbind distinguishes provider-verified flat from unreadable provider state", async () => {
+  for (const providerReadable of [true, false]) {
+    const directory = await mkdtemp(join(tmpdir(), `xingheng-recovery-unbind-${providerReadable}-`));
+    try {
+      const client = new FakeBinanceClient();
+      const harness = serviceHarness(directory, "user-a", client);
+      await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+      if (!providerReadable) client.readPreflightSnapshot = async () => { throw new Error("provider unavailable"); };
+      const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+      assert.deepEqual(await recovery.recoveryUnbind(), { providerVerifiedFlat: providerReadable });
+      assert.equal(await harness.store.readCredentialMetadata(), null);
+      const state = await harness.store.readState();
+      assert.equal(state.config.killSwitchActive, true);
+      assert.equal(state.config.globalExecutionEnabled, false);
+      assert.equal(state.config.strategyEnabled, false);
+      assert.equal(providerReadable ? state.credentialAlert : Boolean(state.credentialAlert), providerReadable ? null : true);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+});
+
+test("Recovery Unbind fails closed while automation is not fully stopped", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-active-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const state = await harness.store.readState();
+    state.config.globalExecutionEnabled = true;
+    await harness.store.writeState(state);
+    const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    await assert.rejects(
+      recovery.recoveryUnbind(),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_unbind_automation_active",
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function service(directory: string, userId: string, client: FakeBinanceClient) {
   return serviceHarness(directory, userId, client).current;
 }

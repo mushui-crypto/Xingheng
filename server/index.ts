@@ -4,6 +4,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
 import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
+import { getAdminBearerToken } from "./modules/auth/session";
+import { hashSessionToken } from "./auth/security";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
@@ -214,6 +216,11 @@ registerArbitrageRoutes(
   arbitrageDashboard,
   new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
   automationControl,
+  (request) => {
+    const token = getAdminBearerToken(request);
+    const session = token ? tradingStore.findAuthSession(hashSessionToken(token), "admin") : null;
+    return config.adminAuthConfigured && session?.subjectId === config.adminEmail ? session.subjectId : null;
+  },
 );
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({

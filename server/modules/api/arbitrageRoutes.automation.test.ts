@@ -95,7 +95,7 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 37);
+  assert.equal(automationRoutes.length, 38);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
   for (const route of [
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",

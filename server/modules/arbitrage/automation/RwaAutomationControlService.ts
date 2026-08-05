@@ -62,7 +62,7 @@ import {
   type RwaAssetTakeoverExitPreview,
 } from "./RwaAssetTakeoverRuntime";
 import { RwaAssetTakeoverRuntimeError } from "./RwaAssetTakeoverRuntimeEngine";
-import type { TradingStore } from "../../../storage/TradingStore";
+import { BinanceBindingStoreError, type TradingStore } from "../../../storage/TradingStore";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -135,7 +135,12 @@ export class RwaAutomationControlService {
     private readonly governance = new RwaAutomationGovernance(),
     private readonly now: () => number = () => Date.now(),
     private readonly assertExecutionLeaseHeld: () => void = () => {},
-    private readonly binanceBindingStore?: Pick<TradingStore, "bindBinanceUid">,
+    private readonly binanceBindingStore?: Pick<TradingStore,
+      | "bindBinanceUid"
+      | "findBinanceUidBindingByUserId"
+      | "reserveBinanceRecoveryOperation"
+      | "completeBinanceRecoveryUnbind"
+      | "releaseBinanceRecoveryOperation">,
   ) {}
 
   async startPersistedActivityMonitoring() {
@@ -320,6 +325,106 @@ export class RwaAutomationControlService {
       this.stepUpSecurity.revokeAutomationScope(userId, connector.venue, accountId);
       return result;
     });
+  }
+
+  async recoveryUnbind(
+    userId: string,
+    sessionDomain: string,
+    input: unknown,
+    approver: string | null,
+    sourceIp = "unknown",
+  ) {
+    const body = record(input);
+    assertOnlyKeys(body, ["currentUidFingerprint", "bindingVersion", "operationId", "reason", "stepUpToken"]);
+    const currentUidFingerprint = requiredString(body.currentUidFingerprint, "currentUidFingerprint", 64);
+    if (!/^[0-9a-f]{64}$/u.test(currentUidFingerprint)) {
+      throw new RwaAutomationControlError(400, "invalid_request", "currentUidFingerprint 必须是完整 SHA-256。");
+    }
+    const bindingVersion = Number(body.bindingVersion);
+    if (!Number.isSafeInteger(bindingVersion) || bindingVersion <= 0) {
+      throw new RwaAutomationControlError(400, "invalid_request", "bindingVersion 无效。");
+    }
+    const operationId = requiredString(body.operationId, "operationId", 64);
+    const reason = requiredString(body.reason, "reason", 500);
+    if (!this.binanceBindingStore) {
+      throw new RwaAutomationControlError(503, "binding_store_unavailable", "Binance Binding Store 不可用。");
+    }
+    const sanitized = { currentUidFingerprint, bindingVersion, operationId, reason };
+    const requestDigest = canonicalRequestDigest(sanitized);
+    const reservation = this.binanceBindingStore.reserveBinanceRecoveryOperation({
+      operationId,
+      userId,
+      requestDigest,
+      now: this.now(),
+    });
+    if (reservation.kind === "completed") return reservation.result;
+    let connector: RwaAutomationConnector | null = null;
+    let snapshot: unknown;
+    let credentialMutated = false;
+    try {
+      const binding = this.binanceBindingStore.findBinanceUidBindingByUserId(userId);
+      if (!binding || binding.uidFingerprint !== currentUidFingerprint) {
+        throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      }
+      if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
+        throw new RwaAutomationControlError(409, "binding_version_conflict", "Binding 已变化，旧请求不能继续执行。");
+      }
+      this.admitRequest("credential", sourceIp, userId, "binance");
+      this.assertRecoveryControlStopped(userId);
+      const registry = this.registry(userId);
+      connector = registry.requireImplemented("binance");
+      await registry.initialize();
+      await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
+        operation: "credential_recovery_unbind",
+        venue: "binance",
+        accountId: `binance:${currentUidFingerprint}`,
+        resourceId: operationId,
+        requestDigest,
+        notionalUsd: null,
+      });
+      snapshot = await connector.captureCredentialMutationSnapshot?.();
+      const recovered = await connector.recoveryUnbind?.();
+      if (!recovered) throw new RwaAutomationControlError(501, "recovery_unbind_unavailable", "Binance Recovery Unbind 尚未实现。");
+      credentialMutated = true;
+      if (!recovered.providerVerifiedFlat && !approver) {
+        throw new RwaAutomationControlError(403, "recovery_approval_required", "Provider 不可读取时需要有效 owner/admin approval。");
+      }
+      const result = this.binanceBindingStore.completeBinanceRecoveryUnbind({
+        operationId,
+        userId,
+        requestDigest,
+        uidFingerprint: currentUidFingerprint,
+        bindingVersion,
+        operator: userId,
+        approver: recovered.providerVerifiedFlat ? "not_required" : approver!,
+        reason,
+        providerVerifiedFlat: recovered.providerVerifiedFlat,
+        now: this.now(),
+      });
+      this.invalidateAssetAuthorizationPreviews(userId, "binance");
+      this.stepUpSecurity.revokeAutomationScope(userId, "binance");
+      return result;
+    } catch (error) {
+      if (credentialMutated && connector?.restoreCredentialMutationSnapshot && snapshot !== undefined) {
+        await connector.restoreCredentialMutationSnapshot(snapshot).catch(() => undefined);
+      }
+      this.binanceBindingStore.releaseBinanceRecoveryOperation(operationId, userId, requestDigest);
+      throw error;
+    }
+  }
+
+  private assertRecoveryControlStopped(userId: string) {
+    const hasChallenge = [...this.challengeVenues.values()].some((challenge) => challenge.userId === userId);
+    const hasAssetPreview = [...this.assetAuthorizationPreviews.values()].some((preview) => preview.userId === userId);
+    const hasTakeoverPreview = [...this.assetTakeoverPreviews.values()].some((preview) => preview.userId === userId);
+    const hasExitPreview = [...this.assetTakeoverExitPreviews.values()].some((preview) => preview.userId === userId);
+    if (hasChallenge || hasAssetPreview || hasTakeoverPreview || hasExitPreview) {
+      throw new RwaAutomationControlError(
+        409,
+        "recovery_unbind_automation_active",
+        "Challenge 或 takeover 流程尚未终止，Recovery Unbind 已拒绝。",
+      );
+    }
   }
 
   async getAccountAssetAuthorization(
@@ -2136,6 +2241,7 @@ export function automationErrorResponse(error: unknown) {
     || error instanceof RwaAccountAssetAuthorizationError
     || error instanceof RwaAssetTakeoverError
     || error instanceof RwaAssetTakeoverRuntimeError
+    || error instanceof BinanceBindingStoreError
   ) {
     return {
       statusCode:
@@ -2144,7 +2250,9 @@ export function automationErrorResponse(error: unknown) {
         || error instanceof CredentialStoreError
         || error instanceof CredentialKeyProviderError
           ? 503
-          : error.statusCode,
+          : error instanceof BinanceBindingStoreError
+            ? error.category === "binding_not_found" ? 404 : 409
+            : error.statusCode,
       retryAfterSeconds: "retryAfterSeconds" in error ? error.retryAfterSeconds : undefined,
       body: {
         category: error.category,
@@ -2164,7 +2272,7 @@ function omitStepUp(body: Record<string, any>) {
 
 function normalizeStepUpOperation(value: unknown): StepUpOperation {
   const allowed: StepUpOperation[] = [
-    "credential_put", "credential_delete", "execution_enable", "kill_switch_disable",
+    "credential_put", "credential_delete", "credential_recovery_unbind", "execution_enable", "kill_switch_disable",
     "hedge_execute", "connectivity_smoke_execute", "position_close", "close_all", "reconciliation_finalize",
     "asset_authorization_create", "asset_authorization_revoke", "asset_takeover_start",
   ];

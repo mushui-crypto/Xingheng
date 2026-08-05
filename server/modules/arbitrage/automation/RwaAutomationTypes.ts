@@ -72,6 +72,7 @@ export type RwaAutomationConnector = {
   getStatus(): Promise<RwaAutomationVenueStatus>;
   putCredentials(input: RwaVenueCredentialInput): Promise<RwaAutomationVenueStatus>;
   deleteCredentials(input?: unknown): Promise<unknown>;
+  recoveryUnbind?(): Promise<{ providerVerifiedFlat: boolean }>;
   getAccountAssetAuthorization(assetId: string): Promise<RwaPublicAccountAssetAuthorization | null>;
   previewAccountAssetAuthorization(assetId: string): Promise<RwaAccountAssetAuthorizationPreview>;
   createAccountAssetAuthorization(

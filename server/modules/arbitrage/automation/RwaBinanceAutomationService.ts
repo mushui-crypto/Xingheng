@@ -745,6 +745,52 @@ export class RwaBinanceAutomationService {
     return { ok: true, credentials: await this.getCredentialStatus() };
   }
 
+  async recoveryUnbind() {
+    this.assertExecutionLeaseHeld();
+    return this.withLock(async () => {
+      const metadata = await this.store.readCredentialMetadata();
+      if (!metadata) throw new RwaNeutralExecutionError(409, "credentials_unconfigured", "Binance API 凭证尚未配置。");
+      const state = await this.store.readState();
+      assertRecoveryAutomationStopped(state, this.serverKillSwitchActive());
+      let providerVerifiedFlat = false;
+      try {
+        const snapshot = await this.client().then((client) => client.readPreflightSnapshot());
+        if (
+          snapshot.existingSpotQuantityXaut > 1e-9
+          || snapshot.existingPerpetualQuantityXaut > 1e-9
+          || snapshot.openSpotOrderCount > 0
+          || snapshot.openPerpetualOrderCount > 0
+        ) {
+          throw new RwaNeutralExecutionError(
+            409,
+            "credential_delete_blocked",
+            "Binance 账户存在受管理订单或仓位，Recovery Unbind 已拒绝。",
+          );
+        }
+        providerVerifiedFlat = true;
+      } catch (error) {
+        if (error instanceof RwaNeutralExecutionError) throw error;
+      }
+      state.config = {
+        ...state.config,
+        globalExecutionEnabled: false,
+        strategyEnabled: false,
+        killSwitchActive: true,
+        productionSelfTestPermitConfirmation: null,
+      };
+      state.challenges = [];
+      state.credentialLifecycle = "unconfigured";
+      state.credentialAlert = providerVerifiedFlat
+        ? null
+        : "Provider 状态无法验证；系统已停止管理，但不能证明 Binance 账户已经清算。";
+      invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
+      await this.store.writeState(state);
+      await this.store.deleteCredentials();
+      this.armedChallengeIds.clear();
+      return { providerVerifiedFlat };
+    });
+  }
+
   async getConfig() {
     const state = await this.store.readState();
     const metadata = await this.store.readCredentialMetadata();
@@ -3068,6 +3114,31 @@ function permissionsValid(value: RwaBinancePermissions) {
     && value.spotAccount
     && value.futuresAccount
     && value.positionModeSupported;
+}
+
+function assertRecoveryAutomationStopped(state: RwaAutomationStateData, serverKillSwitchActive: boolean) {
+  const activeExecution = state.executions.some((execution) =>
+    !["closed", "failed", "manual_intervention"].includes(execution.state));
+  const activeSmoke = state.connectivitySmokes.some((smoke) =>
+    !["flat", "failed", "manual_intervention"].includes(smoke.stage));
+  const activeTakeover = state.assetTakeovers.some((takeover) =>
+    !["exited", "failed", "manual_intervention"].includes(takeover.state));
+  if (
+    state.config.globalExecutionEnabled
+    || state.config.strategyEnabled
+    || !state.config.killSwitchActive
+    || !serverKillSwitchActive
+    || state.challenges.length > 0
+    || activeExecution
+    || activeSmoke
+    || activeTakeover
+  ) {
+    throw new RwaNeutralExecutionError(
+      409,
+      "recovery_unbind_automation_active",
+      "自动化停止条件未全部确认，Recovery Unbind 已按 fail-closed 拒绝。",
+    );
+  }
 }
 
 function credentialFailureLifecycle(error: unknown): Exclude<RwaCredentialLifecycle, "unconfigured" | "validating" | "active"> {
