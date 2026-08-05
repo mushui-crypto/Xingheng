@@ -672,14 +672,32 @@ function assertLegacyCanonicalEnvironmentCompatibility({
   oldCanonical,
   previousCompleted,
 }) {
-  if (previousCompleted?.state !== "PROMOTION_COMPLETED"
-    || canonical(previousCompleted.newCanonical) !== canonical(oldCanonical)
+  assertCompletedPromotionIdentityRelations(previousCompleted);
+  if (canonical(previousCompleted.newCanonical) !== canonical(oldCanonical)
     || previousCompleted.newCanonical.environmentSha256 !== environmentSha256
     || previousCompleted.oldCanonical.environmentSha256 !== environmentSha256
     || previousCompleted.staging.environmentSha256 !== environmentSha256
     || previousCompleted.oldCanonical.revision !== environmentRevision
     || previousCompleted.newCanonical.revision === environmentRevision) {
     throw new Error("canonical promotion environment identity is invalid");
+  }
+}
+
+function assertCompletedPromotionIdentityRelations(record) {
+  if (record?.state !== "PROMOTION_COMPLETED"
+    || record.candidate.revision !== record.newCanonical.revision
+    || record.candidate.manifestSha256 !== record.newCanonical.manifestSha256
+    || canonical(record.candidate.images) !== canonical(record.newCanonical.images)
+    || record.staging.manifestSha256 !== record.newCanonical.manifestSha256
+    || record.staging.environmentSha256 !== record.newCanonical.environmentSha256
+    || record.staging.releaseTreeSha256 !== record.newCanonical.releaseTreeSha256
+    || record.staging.dev !== record.newCanonical.rootDev
+    || record.staging.ino !== record.newCanonical.rootIno
+    || record.oldCanonical.lifecyclePointerSha256
+      !== record.newCanonical.lifecyclePointerSha256
+    || record.oldCanonical.rootDev === record.newCanonical.rootDev
+      && record.oldCanonical.rootIno === record.newCanonical.rootIno) {
+    throw new Error("canonical promotion environment internal identity is invalid");
   }
 }
 

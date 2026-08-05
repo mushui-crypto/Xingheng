@@ -196,6 +196,35 @@ test("legacy environment compatibility rejects a revision not bound by completed
   });
 });
 
+test("legacy environment compatibility rejects inconsistent completed identity relations", () => {
+  for (const mutate of [
+    (value) => {
+      value.candidate.revision = "4".repeat(40);
+      value.success.candidate.revision = value.candidate.revision;
+    },
+    (value) => {
+      value.staging.releaseTreeSha256 = "4".repeat(64);
+    },
+  ]) {
+    withFixture((fixture) => {
+      fixture.transaction.promote(fixture.expected);
+      convertCompletedToLegacyEnvironment(fixture, OLD_REVISION);
+      mutateJson(fixture.statePath, mutate);
+      const currentBytes = readFileSync(fixture.statePath);
+      assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state,
+        "PROMOTION_COMPLETED");
+      const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+      let exchanged = false;
+      fixture.transaction.exchange = () => { exchanged = true; };
+
+      assert.throws(() => fixture.transaction.promote(next), /internal identity/u);
+      assert.equal(exchanged, false);
+      assert.deepEqual(readFileSync(fixture.statePath), currentBytes);
+      assert.equal(readManifest(fixture.canonicalRoot).revision, NEW_REVISION);
+    });
+  }
+});
+
 test("every candidate identity mismatch becomes UNKNOWN without exchange", () => {
   for (const mutate of [
     (value) => { value.revision = "3".repeat(40); },
