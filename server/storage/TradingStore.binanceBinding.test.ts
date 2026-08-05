@@ -117,4 +117,28 @@ test("verified unbind permits a newly validated UID snapshot on rebind", (t) => 
   assert.equal(rebound.bindingVersion, 3);
   assert.equal(rebound.uidSnapshot, nextUidSnapshot);
   assert.equal(rebound.credentialNote, "new");
+  assert.deepEqual(
+    store.listBinanceBindingAudit("user-a").map((receipt) => receipt.result),
+    ["bound", "verified_unbound", "uid_changed"],
+  );
+});
+
+test("credential note changes are audited without changing binding identity", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-note-"));
+  const dbPath = join(directory, "test.sqlite");
+  const store = new TradingStore(dbPath);
+  t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
+  const uidSnapshot = fingerprint("note-account");
+  const original = store.bindBinanceCredential("user-a", uidSnapshot, "主账户", 100);
+  const updated = store.updateBinanceCredentialNote("user-a", " 套利账户 ", 101);
+  assert.equal(updated.credentialNote, "套利账户");
+  assert.equal(updated.bindingVersion, original.bindingVersion);
+  assert.equal(updated.uidSnapshot, original.uidSnapshot);
+  const receipts = store.listBinanceBindingAudit("user-a");
+  assert.deepEqual(receipts.map((receipt) => receipt.result), ["bound", "credential_note_updated"]);
+  assert.doesNotMatch(JSON.stringify(receipts), /api.?key|secret/i);
+  const db = new DatabaseSync(dbPath);
+  t.after(() => db.close());
+  assert.throws(() => db.prepare("UPDATE binance_binding_audit_receipts SET reason = 'changed'").run());
+  assert.throws(() => db.prepare("DELETE FROM binance_binding_audit_receipts").run());
 });

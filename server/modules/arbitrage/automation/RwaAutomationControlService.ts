@@ -62,7 +62,11 @@ import {
   type RwaAssetTakeoverExitPreview,
 } from "./RwaAssetTakeoverRuntime";
 import { RwaAssetTakeoverRuntimeError } from "./RwaAssetTakeoverRuntimeEngine";
-import { BinanceBindingStoreError, type TradingStore } from "../../../storage/TradingStore";
+import {
+  BinanceBindingStoreError,
+  type BinanceCredentialBinding,
+  type TradingStore,
+} from "../../../storage/TradingStore";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -138,6 +142,8 @@ export class RwaAutomationControlService {
     private readonly binanceBindingStore?: Pick<TradingStore,
       | "bindBinanceCredential"
       | "findBinanceCredentialBinding"
+      | "updateBinanceCredentialNote"
+      | "listBinanceBindingAudit"
       | "markBinanceVerifiedUnbound"
       | "reserveBinanceRecoveryOperation"
       | "completeBinanceRecoveryUnbind"
@@ -196,10 +202,19 @@ export class RwaAutomationControlService {
     return this.governed("private_read", sourceIp, userId, "multi", "all-accounts", async () => {
       const registry = this.registry(userId);
       await registry.initialize();
-      return (await registry.statuses()).map((status) => ({
-        ...status,
-        credential: { ...status.credential, userId },
-      }));
+      return (await registry.statuses()).map((status) => {
+        const binding = status.venue === "binance"
+          ? this.binanceBindingStore?.findBinanceCredentialBinding(userId)
+          : undefined;
+        return {
+          ...status,
+          credential: {
+            ...status.credential,
+            userId,
+            ...(binding ? bindingProjection(binding) : {}),
+          },
+        };
+      });
     });
   }
 
@@ -211,7 +226,13 @@ export class RwaAutomationControlService {
     const accountId = await connector.getConfiguredAccountId() ?? "unconfigured";
     return this.governed("private_read", sourceIp, userId, connector.venue, accountId, async () => {
       await registry.initialize();
-      return connector.getStatus();
+      const status = await connector.getStatus();
+      const binding = normalizedVenue === "binance"
+        ? this.binanceBindingStore?.findBinanceCredentialBinding(userId)
+        : undefined;
+      return binding
+        ? { ...status, credential: { ...status.credential, ...bindingProjection(binding) } }
+        : status;
     });
   }
 
@@ -221,8 +242,11 @@ export class RwaAutomationControlService {
     const supportsPassphrase = normalizedVenue === "bitget" || normalizedVenue === "okx";
     assertOnlyKeys(body, supportsPassphrase
       ? ["apiKey", "apiSecret", "passphrase", "stepUpToken"]
-      : ["apiKey", "apiSecret", "stepUpToken"]);
-    const credentials = normalizeCredentialInput(normalizedVenue, omitStepUp(body));
+      : normalizedVenue === "binance"
+        ? ["apiKey", "apiSecret", "credentialNote", "stepUpToken"]
+        : ["apiKey", "apiSecret", "stepUpToken"]);
+    const credentialNote = normalizedVenue === "binance" ? normalizeCredentialNote(body.credentialNote) : "";
+    const credentials = normalizeCredentialInput(normalizedVenue, omitCredentialNote(omitStepUp(body)));
     const requestId = randomUUID();
     const diagnosticContext: CredentialPutDiagnosticContext = {
       requestId,
@@ -260,7 +284,7 @@ export class RwaAutomationControlService {
           venue: connector.venue,
           accountId: existingAccountId ?? "new-account",
           resourceId: null,
-          requestDigest: canonicalRequestDigest(credentials),
+          requestDigest: canonicalRequestDigest({ ...credentials, credentialNote }),
           notionalUsd: null,
         });
         logCredentialPutEvent("step_up_consumed", diagnosticContext);
@@ -287,7 +311,7 @@ export class RwaAutomationControlService {
             if (typeof boundFingerprint !== "string" || !/^[0-9a-f]{64}$/u.test(boundFingerprint)) {
               throw new RwaAutomationControlError(503, "credential_identity_unavailable", "Binance UID 身份未返回完整 SHA-256 fingerprint。");
             }
-            this.binanceBindingStore.bindBinanceCredential(userId, boundFingerprint, "", this.now());
+            this.binanceBindingStore.bindBinanceCredential(userId, boundFingerprint, credentialNote, this.now());
           }
           await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
         } catch (error) {
@@ -308,6 +332,27 @@ export class RwaAutomationControlService {
       });
       throw augmented;
     }
+  }
+
+  async updateCredentialNote(userId: string, venue: string, input: unknown, sourceIp = "unknown") {
+    const normalizedVenue = normalizeVenue(venue);
+    if (normalizedVenue !== "binance" || !this.binanceBindingStore) {
+      throw new RwaAutomationControlError(400, "credential_note_unsupported", "credentialNote 当前仅支持 Binance Binding。");
+    }
+    const body = record(input);
+    assertOnlyKeys(body, ["credentialNote"]);
+    const credentialNote = normalizeCredentialNote(body.credentialNote);
+    this.admitRequest("credential", sourceIp, userId, normalizedVenue);
+    return this.governed("credential", sourceIp, userId, normalizedVenue, "credential-note", async () => {
+      const binding = this.binanceBindingStore!.updateBinanceCredentialNote(userId, credentialNote, this.now());
+      return {
+        venue: binding.venue,
+        uidSnapshot: binding.uidSnapshot,
+        credentialNote: binding.credentialNote,
+        bindingVersion: binding.bindingVersion,
+        status: binding.status,
+      };
+    });
   }
 
   async deleteCredentials(userId: string, sessionDomain: string, venue: string, input: unknown, sourceIp = "unknown") {
@@ -366,10 +411,10 @@ export class RwaAutomationControlService {
     sourceIp = "unknown",
   ) {
     const body = record(input);
-    assertOnlyKeys(body, ["currentUidFingerprint", "bindingVersion", "operationId", "reason", "stepUpToken"]);
-    const currentUidFingerprint = requiredString(body.currentUidFingerprint, "currentUidFingerprint", 64);
-    if (!/^[0-9a-f]{64}$/u.test(currentUidFingerprint)) {
-      throw new RwaAutomationControlError(400, "invalid_request", "currentUidFingerprint 必须是完整 SHA-256。");
+    assertOnlyKeys(body, ["uidSnapshot", "bindingVersion", "operationId", "reason", "stepUpToken"]);
+    const uidSnapshot = requiredString(body.uidSnapshot, "uidSnapshot", 64);
+    if (!/^[0-9a-f]{64}$/u.test(uidSnapshot)) {
+      throw new RwaAutomationControlError(400, "invalid_request", "uidSnapshot 必须是完整 SHA-256。");
     }
     const bindingVersion = Number(body.bindingVersion);
     if (!Number.isSafeInteger(bindingVersion) || bindingVersion <= 0) {
@@ -380,7 +425,7 @@ export class RwaAutomationControlService {
     if (!this.binanceBindingStore) {
       throw new RwaAutomationControlError(503, "binding_store_unavailable", "Binance Binding Store 不可用。");
     }
-    const sanitized = { currentUidFingerprint, bindingVersion, operationId, reason };
+    const sanitized = { uidSnapshot, bindingVersion, operationId, reason };
     const requestDigest = canonicalRequestDigest(sanitized);
     const reservation = this.binanceBindingStore.reserveBinanceRecoveryOperation({
       operationId,
@@ -395,8 +440,8 @@ export class RwaAutomationControlService {
     let credentialMutated = false;
     try {
       const binding = this.binanceBindingStore.findBinanceCredentialBinding(userId);
-      if (!binding || binding.uidSnapshot !== currentUidFingerprint) {
-        throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      if (!binding || binding.uidSnapshot !== uidSnapshot) {
+        throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
         throw new RwaAutomationControlError(409, "binding_version_conflict", "Binding 已变化，旧请求不能继续执行。");
@@ -409,7 +454,7 @@ export class RwaAutomationControlService {
       await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
         operation: "credential_recovery_unbind",
         venue: "binance",
-        accountId: `binance:${currentUidFingerprint}`,
+        accountId: `binance:${uidSnapshot}`,
         resourceId: operationId,
         requestDigest,
         notionalUsd: null,
@@ -426,7 +471,7 @@ export class RwaAutomationControlService {
         userId,
         venue: "binance",
         requestDigest,
-        uidSnapshot: currentUidFingerprint,
+        uidSnapshot,
         bindingVersion,
         operator: userId,
         approver: recovered.providerVerifiedFlat ? "not_required" : approver!,
@@ -1390,7 +1435,11 @@ export class RwaAutomationControlService {
         if (!connector) continue;
         venues.push({ venue, ...(await connector.getAudit() as Record<string, unknown>) });
       }
-      return { venues, governance: this.governance.auditForUser(userId) };
+      return {
+        venues,
+        governance: this.governance.auditForUser(userId),
+        binding: this.binanceBindingStore?.listBinanceBindingAudit(userId) ?? [],
+      };
     });
   }
 
@@ -2301,6 +2350,28 @@ export function automationErrorResponse(error: unknown) {
 function omitStepUp(body: Record<string, any>) {
   const { stepUpToken: _stepUpToken, ...sanitized } = body;
   return sanitized;
+}
+
+function omitCredentialNote(body: Record<string, any>) {
+  const { credentialNote: _credentialNote, ...credentials } = body;
+  return credentials;
+}
+
+function normalizeCredentialNote(value: unknown) {
+  if (value === undefined) return "";
+  if (typeof value !== "string" || value.length > 100) {
+    throw new RwaAutomationControlError(400, "invalid_request", "credentialNote 格式无效。");
+  }
+  return value.trim();
+}
+
+function bindingProjection(binding: BinanceCredentialBinding) {
+  return {
+    uidSnapshot: binding.uidSnapshot,
+    credentialNote: binding.credentialNote,
+    bindingVersion: binding.bindingVersion,
+    bindingStatus: binding.status,
+  };
 }
 
 function normalizeStepUpOperation(value: unknown): StepUpOperation {

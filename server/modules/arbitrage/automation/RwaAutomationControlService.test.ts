@@ -535,6 +535,52 @@ test("Binance credentials cannot be overwritten before unbind", async () => {
   }
 });
 
+test("Binance binding stores and audits credentialNote without changing bindingVersion", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-binding-note-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const client = new TestBinanceClient();
+  client.access.accountFingerprint = createHash("sha256").update("binance:note-user").digest("hex");
+  const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+    userId: "user-a",
+    venue: "binance",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credentials.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  const service = new RwaBinanceAutomationService(store, () => client as any, () => 100, () => false);
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([new RwaBinanceAutomationConnector(service)]),
+    passThroughStepUp,
+    undefined,
+    () => 100,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await control.putCredentials("user-a", sessionDomain, "binance", {
+      apiKey: "note-key",
+      apiSecret: "note-secret",
+      credentialNote: "主账户",
+      stepUpToken,
+    });
+    const before = bindingStore.findBinanceCredentialBinding("user-a")!;
+    assert.equal(before.credentialNote, "主账户");
+    const response = await control.updateCredentialNote("user-a", "binance", { credentialNote: "套利账户" });
+    assert.equal((response as any).credentialNote, "套利账户");
+    const after = bindingStore.findBinanceCredentialBinding("user-a")!;
+    assert.equal(after.bindingVersion, before.bindingVersion);
+    assert.equal(after.uidSnapshot, before.uidSnapshot);
+    assert.deepEqual(
+      bindingStore.listBinanceBindingAudit("user-a").map((receipt) => receipt.result),
+      ["bound", "credential_note_updated"],
+    );
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("credential put preserves the most specific failure stage when outer catch augments details", async () => {
   const diagnostics: string[] = [];
   const originalConsoleInfo = console.info;
@@ -1980,7 +2026,7 @@ test("Recovery Unbind requires user step-up plus admin approval for unreadable p
     bindingStore,
   );
   const body = {
-    currentUidFingerprint: uidFingerprint,
+    uidSnapshot: uidFingerprint,
     bindingVersion: 1,
     operationId: "44444444-4444-4444-8444-444444444444",
     reason: "provider unavailable",

@@ -128,6 +128,19 @@ export type BinanceRecoveryReceipt = {
   timestamp: number;
   digest: string;
 };
+export type BinanceBindingAuditReceipt = {
+  receiptId: string;
+  operationId: string;
+  userId: string;
+  venue: "binance";
+  uidSnapshot: string;
+  bindingVersion: number;
+  operator: string;
+  reason: string;
+  result: "bound" | "uid_changed" | "credential_note_updated" | "verified_unbound";
+  timestamp: number;
+  digest: string;
+};
 
 export class BinanceBindingStoreError extends Error {
   constructor(readonly category:
@@ -193,7 +206,17 @@ export class TradingStore {
                interventionStatus = 'none', updatedAt = ?
            WHERE userId = ? AND venue = 'binance' AND bindingVersion = ? AND status != 'active'`,
         ).run(uidSnapshot, normalizedNote, bindingVersion, now, userId, existing.bindingVersion);
-        return this.findBinanceCredentialBinding(userId)!;
+        const binding = this.findBinanceCredentialBinding(userId)!;
+        this.insertBinanceBindingAudit({
+          userId,
+          uidSnapshot,
+          bindingVersion,
+          operator: userId,
+          reason: "credential_rebound",
+          result: existing.uidSnapshot === uidSnapshot ? "bound" : "uid_changed",
+          timestamp: now,
+        });
+        return binding;
       }
       this.db.prepare(
         `INSERT INTO binance_credential_bindings (
@@ -201,7 +224,17 @@ export class TradingStore {
            interventionStatus, createdAt, updatedAt
          ) VALUES (?, 'binance', ?, ?, 1, 'active', 'none', ?, ?)`,
       ).run(userId, uidSnapshot, normalizedNote, now, now);
-      return this.findBinanceCredentialBinding(userId)!;
+      const binding = this.findBinanceCredentialBinding(userId)!;
+      this.insertBinanceBindingAudit({
+        userId,
+        uidSnapshot,
+        bindingVersion: 1,
+        operator: userId,
+        reason: "credential_bound",
+        result: "bound",
+        timestamp: now,
+      });
+      return binding;
     });
   }
 
@@ -223,6 +256,44 @@ export class TradingStore {
       if (Number(updated.changes) !== 1) {
         throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧解绑请求不能继续执行。");
       }
+      this.insertBinanceBindingAudit({
+        userId,
+        uidSnapshot,
+        bindingVersion: nextVersion,
+        operator: userId,
+        reason: "credential_unbound",
+        result: "verified_unbound",
+        timestamp: now,
+      });
+      return this.findBinanceCredentialBinding(userId)!;
+    });
+  }
+
+  updateBinanceCredentialNote(userId: string, credentialNote: string, now = Date.now()) {
+    const normalizedNote = normalizeCredentialNote(credentialNote);
+    return this.transaction(() => {
+      const binding = this.findBinanceCredentialBinding(userId);
+      if (!binding || binding.status !== "active") {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在有效的 Binance Credential Binding。");
+      }
+      if (binding.credentialNote === normalizedNote) return binding;
+      const updated = this.db.prepare(
+        `UPDATE binance_credential_bindings
+         SET credentialNote = ?, updatedAt = ?
+         WHERE userId = ? AND venue = 'binance' AND bindingVersion = ? AND status = 'active'`,
+      ).run(normalizedNote, now, userId, binding.bindingVersion);
+      if (Number(updated.changes) !== 1) {
+        throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，备注修改不能继续执行。");
+      }
+      this.insertBinanceBindingAudit({
+        userId,
+        uidSnapshot: binding.uidSnapshot,
+        bindingVersion: binding.bindingVersion,
+        operator: userId,
+        reason: "credential_note_updated",
+        result: "credential_note_updated",
+        timestamp: now,
+      });
       return this.findBinanceCredentialBinding(userId)!;
     });
   }
@@ -355,6 +426,29 @@ export class TradingStore {
     return this.db.prepare(
       "SELECT * FROM binance_recovery_receipts WHERE userId = ? ORDER BY timestamp ASC, receiptId ASC",
     ).all(userId) as BinanceRecoveryReceipt[];
+  }
+
+  listBinanceBindingAudit(userId: string) {
+    return this.db.prepare(
+      "SELECT * FROM binance_binding_audit_receipts WHERE userId = ? ORDER BY sequence ASC",
+    ).all(userId) as BinanceBindingAuditReceipt[];
+  }
+
+  private insertBinanceBindingAudit(input: Omit<BinanceBindingAuditReceipt,
+    "receiptId" | "operationId" | "venue" | "digest">) {
+    const receiptId = randomUUID();
+    const operationId = randomUUID();
+    const core = { receiptId, operationId, ...input, venue: "binance" as const };
+    const digest = createHash("sha256").update(JSON.stringify(core)).digest("hex");
+    this.db.prepare(
+      `INSERT INTO binance_binding_audit_receipts (
+         receiptId, operationId, userId, venue, uidSnapshot, bindingVersion,
+         operator, reason, result, timestamp, digest
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(
+      receiptId, operationId, input.userId, "binance", input.uidSnapshot, input.bindingVersion,
+      input.operator, input.reason, input.result, input.timestamp, digest,
+    );
   }
 
   listAccounts() {
@@ -2059,6 +2153,29 @@ export class TradingStore {
       CREATE TRIGGER IF NOT EXISTS binance_recovery_receipts_no_delete
       BEFORE DELETE ON binance_recovery_receipts
       BEGIN SELECT RAISE(ABORT, 'binance recovery receipts are append-only'); END;
+
+      CREATE TABLE IF NOT EXISTS binance_binding_audit_receipts (
+        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+        receiptId TEXT NOT NULL UNIQUE,
+        operationId TEXT NOT NULL UNIQUE,
+        userId TEXT NOT NULL,
+        venue TEXT NOT NULL CHECK(venue = 'binance'),
+        uidSnapshot TEXT NOT NULL,
+        bindingVersion INTEGER NOT NULL,
+        operator TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        result TEXT NOT NULL CHECK(result IN ('bound', 'uid_changed', 'credential_note_updated', 'verified_unbound')),
+        timestamp INTEGER NOT NULL,
+        digest TEXT NOT NULL CHECK(length(digest) = 64)
+      );
+
+      CREATE TRIGGER IF NOT EXISTS binance_binding_audit_receipts_no_update
+      BEFORE UPDATE ON binance_binding_audit_receipts
+      BEGIN SELECT RAISE(ABORT, 'binance binding audit receipts are append-only'); END;
+
+      CREATE TRIGGER IF NOT EXISTS binance_binding_audit_receipts_no_delete
+      BEFORE DELETE ON binance_binding_audit_receipts
+      BEGIN SELECT RAISE(ABORT, 'binance binding audit receipts are append-only'); END;
 
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);

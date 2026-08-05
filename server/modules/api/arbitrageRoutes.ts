@@ -72,6 +72,7 @@ function registerAutomationControlRoutes(
     credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue), sourceIp(request))).credential,
   })));
   app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.patch("/api/arbitrage/automation/venues/:venue/credentials/note", route((request) => control.updateCredentialNote(authenticatedUserId(request), singleParam(request.params.venue), request.body, sourceIp(request))));
   app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
   app.post("/api/arbitrage/automation/internal/binance/recovery-unbind", route((request) => control.recoveryUnbind(
     authenticatedUserId(request),
