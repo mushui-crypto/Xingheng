@@ -1956,7 +1956,7 @@ test("Recovery Unbind requires user step-up plus admin approval for unreadable p
   const directory = await mkdtemp(join(tmpdir(), "xingheng-control-recovery-unbind-"));
   const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
   const uidFingerprint = createHash("sha256").update("binance:recovery-user").digest("hex");
-  bindingStore.bindBinanceUid("user-a", uidFingerprint, 100);
+  bindingStore.bindBinanceCredential("user-a", uidFingerprint, "", 100);
   let recoveryCalls = 0;
   let restoreCalls = 0;
   let stepUpCalls = 0;
@@ -2018,7 +2018,7 @@ test("normal Binance unbind marks the Binding verified before the same UID can b
   const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
   const uidFingerprint = createHash("sha256").update("binance:verified-user").digest("hex");
   const accountId = `binance:${uidFingerprint}`;
-  bindingStore.bindBinanceUid("user-a", uidFingerprint, 100);
+  bindingStore.bindBinanceCredential("user-a", uidFingerprint, "", 100);
   const connector = fakeConnector(() => undefined, {
     venue: "binance",
     accountId,
@@ -2035,10 +2035,10 @@ test("normal Binance unbind marks the Binding verified before the same UID can b
   );
   try {
     await control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken });
-    const unbound = bindingStore.findBinanceUidBindingByUserId("user-a")!;
+    const unbound = bindingStore.findBinanceCredentialBinding("user-a")!;
     assert.equal(unbound.status, "verified_unbound");
     assert.equal(unbound.bindingVersion, 2);
-    assert.equal(bindingStore.bindBinanceUid("user-a", uidFingerprint, 201).bindingVersion, 3);
+    assert.equal(bindingStore.bindBinanceCredential("user-a", uidFingerprint, "", 201).bindingVersion, 3);
   } finally {
     bindingStore.close();
     await rm(directory, { recursive: true, force: true });

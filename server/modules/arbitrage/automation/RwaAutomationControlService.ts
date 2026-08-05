@@ -136,8 +136,8 @@ export class RwaAutomationControlService {
     private readonly now: () => number = () => Date.now(),
     private readonly assertExecutionLeaseHeld: () => void = () => {},
     private readonly binanceBindingStore?: Pick<TradingStore,
-      | "bindBinanceUid"
-      | "findBinanceUidBindingByUserId"
+      | "bindBinanceCredential"
+      | "findBinanceCredentialBinding"
       | "markBinanceVerifiedUnbound"
       | "reserveBinanceRecoveryOperation"
       | "completeBinanceRecoveryUnbind"
@@ -242,7 +242,7 @@ export class RwaAutomationControlService {
     const existingAccountId = await connector.getConfiguredAccountId();
     if (
       normalizedVenue === "binance"
-      && this.binanceBindingStore?.findBinanceUidBindingByUserId(userId)?.status === "active"
+      && this.binanceBindingStore?.findBinanceCredentialBinding(userId)?.status === "active"
     ) {
       throw new RwaAutomationControlError(
         409,
@@ -287,7 +287,7 @@ export class RwaAutomationControlService {
             if (typeof boundFingerprint !== "string" || !/^[0-9a-f]{64}$/u.test(boundFingerprint)) {
               throw new RwaAutomationControlError(503, "credential_identity_unavailable", "Binance UID 身份未返回完整 SHA-256 fingerprint。");
             }
-            this.binanceBindingStore.bindBinanceUid(userId, boundFingerprint, this.now());
+            this.binanceBindingStore.bindBinanceCredential(userId, boundFingerprint, "", this.now());
           }
           await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
         } catch (error) {
@@ -333,7 +333,7 @@ export class RwaAutomationControlService {
       });
       this.invalidateAssetAuthorizationPreviews(userId, connector.venue);
       const binding = normalizedVenue === "binance"
-        ? this.binanceBindingStore?.findBinanceUidBindingByUserId(userId)
+        ? this.binanceBindingStore?.findBinanceCredentialBinding(userId)
         : undefined;
       const credentialSnapshot = binding ? await connector.captureCredentialMutationSnapshot?.() : undefined;
       let result;
@@ -342,7 +342,7 @@ export class RwaAutomationControlService {
         if (binding) {
           this.binanceBindingStore!.markBinanceVerifiedUnbound(
             userId,
-            binding.uidFingerprint,
+            binding.uidSnapshot,
             binding.bindingVersion,
             this.now(),
           );
@@ -385,6 +385,7 @@ export class RwaAutomationControlService {
     const reservation = this.binanceBindingStore.reserveBinanceRecoveryOperation({
       operationId,
       userId,
+      venue: "binance",
       requestDigest,
       now: this.now(),
     });
@@ -393,8 +394,8 @@ export class RwaAutomationControlService {
     let snapshot: unknown;
     let credentialMutated = false;
     try {
-      const binding = this.binanceBindingStore.findBinanceUidBindingByUserId(userId);
-      if (!binding || binding.uidFingerprint !== currentUidFingerprint) {
+      const binding = this.binanceBindingStore.findBinanceCredentialBinding(userId);
+      if (!binding || binding.uidSnapshot !== currentUidFingerprint) {
         throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
       }
       if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
@@ -423,8 +424,9 @@ export class RwaAutomationControlService {
       const result = this.binanceBindingStore.completeBinanceRecoveryUnbind({
         operationId,
         userId,
+        venue: "binance",
         requestDigest,
-        uidFingerprint: currentUidFingerprint,
+        uidSnapshot: currentUidFingerprint,
         bindingVersion,
         operator: userId,
         approver: recovered.providerVerifiedFlat ? "not_required" : approver!,

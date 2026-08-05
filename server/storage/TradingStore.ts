@@ -93,9 +93,11 @@ type RealTradingAgentBindingRow = RealTradingAgentBinding;
 
 export type BinanceBindingStatus = "active" | "verified_unbound" | "unverified_unbound";
 export type BinanceBindingInterventionStatus = "none" | "manual_intervention";
-export type BinanceUidBinding = {
+export type BinanceCredentialBinding = {
   userId: string;
-  uidFingerprint: string;
+  venue: "binance";
+  uidSnapshot: string;
+  credentialNote: string;
   bindingVersion: number;
   status: BinanceBindingStatus;
   interventionStatus: BinanceBindingInterventionStatus;
@@ -105,7 +107,8 @@ export type BinanceUidBinding = {
 export type BinanceRecoveryUnbindResult = {
   receiptId: string;
   operationId: string;
-  uidFingerprint: string;
+  venue: "binance";
+  uidSnapshot: string;
   bindingVersion: number;
   status: "verified_unbound" | "unverified_unbound";
   interventionStatus: BinanceBindingInterventionStatus;
@@ -115,7 +118,8 @@ export type BinanceRecoveryReceipt = {
   receiptId: string;
   operationId: string;
   userId: string;
-  uidFingerprint: string;
+  venue: "binance";
+  uidSnapshot: string;
   bindingVersion: number;
   operator: string;
   approver: string;
@@ -127,8 +131,7 @@ export type BinanceRecoveryReceipt = {
 
 export class BinanceBindingStoreError extends Error {
   constructor(readonly category:
-    | "binding_user_conflict"
-    | "binding_uid_conflict"
+    | "binding_active"
     | "binding_not_found"
     | "binding_version_conflict"
     | "idempotency_conflict"
@@ -163,86 +166,80 @@ export class TradingStore {
     }
   }
 
-  findBinanceUidBindingByUserId(userId: string) {
-    return this.db.prepare("SELECT * FROM binance_uid_bindings WHERE userId = ?").get(userId) as BinanceUidBinding | undefined;
+  findBinanceCredentialBinding(userId: string, venue = "binance") {
+    return this.db.prepare(
+      "SELECT * FROM binance_credential_bindings WHERE userId = ? AND venue = ?",
+    ).get(userId, venue) as BinanceCredentialBinding | undefined;
   }
 
-  findBinanceUidBindingByFingerprint(uidFingerprint: string) {
-    return this.db.prepare("SELECT * FROM binance_uid_bindings WHERE uidFingerprint = ?").get(uidFingerprint) as BinanceUidBinding | undefined;
-  }
-
-  bindBinanceUid(userId: string, uidFingerprint: string, now = Date.now()) {
-    assertBinanceBindingIdentity(userId, uidFingerprint);
+  bindBinanceCredential(
+    userId: string,
+    uidSnapshot: string,
+    credentialNote = "",
+    now = Date.now(),
+  ) {
+    assertBinanceBindingIdentity(userId, uidSnapshot);
+    const normalizedNote = normalizeCredentialNote(credentialNote);
     return this.transaction(() => {
-      const existingUser = this.findBinanceUidBindingByUserId(userId);
-      if (existingUser) {
-        if (existingUser.uidFingerprint !== uidFingerprint) {
-          throw new BinanceBindingStoreError("binding_user_conflict", "当前用户已永久归属其他 Binance UID。");
+      const existing = this.findBinanceCredentialBinding(userId);
+      if (existing) {
+        if (existing.status === "active") {
+          throw new BinanceBindingStoreError("binding_active", "当前用户已有有效的 Binance Credential Binding。");
         }
-        if (existingUser.status === "active") return existingUser;
-        const bindingVersion = existingUser.bindingVersion + 1;
+        const bindingVersion = existing.bindingVersion + 1;
         this.db.prepare(
-          `UPDATE binance_uid_bindings
-           SET bindingVersion = ?, status = 'active', interventionStatus = 'none', updatedAt = ?
-           WHERE userId = ? AND bindingVersion = ?`,
-        ).run(bindingVersion, now, userId, existingUser.bindingVersion);
-        return this.findBinanceUidBindingByUserId(userId)!;
+          `UPDATE binance_credential_bindings
+           SET uidSnapshot = ?, credentialNote = ?, bindingVersion = ?, status = 'active',
+               interventionStatus = 'none', updatedAt = ?
+           WHERE userId = ? AND venue = 'binance' AND bindingVersion = ? AND status != 'active'`,
+        ).run(uidSnapshot, normalizedNote, bindingVersion, now, userId, existing.bindingVersion);
+        return this.findBinanceCredentialBinding(userId)!;
       }
-      const existingUid = this.findBinanceUidBindingByFingerprint(uidFingerprint);
-      if (existingUid) {
-        throw new BinanceBindingStoreError("binding_uid_conflict", "该 Binance UID 已永久归属其他用户。");
-      }
-      try {
-        this.db.prepare(
-          `INSERT INTO binance_uid_bindings (
-             userId, uidFingerprint, bindingVersion, status, interventionStatus, createdAt, updatedAt
-           ) VALUES (?, ?, 1, 'active', 'none', ?, ?)`,
-        ).run(userId, uidFingerprint, now, now);
-      } catch (error) {
-        const claimed = this.findBinanceUidBindingByFingerprint(uidFingerprint);
-        if (claimed?.userId !== userId) {
-          throw new BinanceBindingStoreError("binding_uid_conflict", "该 Binance UID 已永久归属其他用户。");
-        }
-        throw error;
-      }
-      return this.findBinanceUidBindingByUserId(userId)!;
+      this.db.prepare(
+        `INSERT INTO binance_credential_bindings (
+           userId, venue, uidSnapshot, credentialNote, bindingVersion, status,
+           interventionStatus, createdAt, updatedAt
+         ) VALUES (?, 'binance', ?, ?, 1, 'active', 'none', ?, ?)`,
+      ).run(userId, uidSnapshot, normalizedNote, now, now);
+      return this.findBinanceCredentialBinding(userId)!;
     });
   }
 
-  markBinanceVerifiedUnbound(userId: string, uidFingerprint: string, bindingVersion: number, now = Date.now()) {
+  markBinanceVerifiedUnbound(userId: string, uidSnapshot: string, bindingVersion: number, now = Date.now()) {
     return this.transaction(() => {
-      const binding = this.findBinanceUidBindingByUserId(userId);
-      if (!binding || binding.uidFingerprint !== uidFingerprint) {
-        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      const binding = this.findBinanceCredentialBinding(userId);
+      if (!binding || binding.uidSnapshot !== uidSnapshot) {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
         throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧解绑请求不能继续执行。");
       }
       const nextVersion = bindingVersion + 1;
       const updated = this.db.prepare(
-        `UPDATE binance_uid_bindings
+        `UPDATE binance_credential_bindings
          SET bindingVersion = ?, status = 'verified_unbound', interventionStatus = 'none', updatedAt = ?
-         WHERE userId = ? AND bindingVersion = ? AND status = 'active'`,
+         WHERE userId = ? AND venue = 'binance' AND bindingVersion = ? AND status = 'active'`,
       ).run(nextVersion, now, userId, bindingVersion);
       if (Number(updated.changes) !== 1) {
         throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧解绑请求不能继续执行。");
       }
-      return this.findBinanceUidBindingByUserId(userId)!;
+      return this.findBinanceCredentialBinding(userId)!;
     });
   }
 
   reserveBinanceRecoveryOperation(input: {
     operationId: string;
     userId: string;
+    venue: "binance";
     requestDigest: string;
     now?: number;
   }): { kind: "reserved" } | { kind: "completed"; result: BinanceRecoveryUnbindResult } {
     assertOperationId(input.operationId);
     const existing = this.db.prepare(
-      "SELECT userId, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
-    ).get(input.operationId) as { userId: string; requestDigest: string; resultJson: string | null } | undefined;
+      "SELECT userId, venue, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
+    ).get(input.operationId) as { userId: string; venue: string; requestDigest: string; resultJson: string | null } | undefined;
     if (existing) {
-      if (existing.userId !== input.userId || existing.requestDigest !== input.requestDigest) {
+      if (existing.userId !== input.userId || existing.venue !== input.venue || existing.requestDigest !== input.requestDigest) {
         throw new BinanceBindingStoreError("idempotency_conflict", "operationId 已用于不同的 Recovery Unbind 请求。");
       }
       if (!existing.resultJson) {
@@ -252,9 +249,10 @@ export class TradingStore {
     }
     try {
       this.db.prepare(
-        `INSERT INTO binance_binding_operations (operationId, userId, requestDigest, resultJson, createdAt, completedAt)
-         VALUES (?, ?, ?, NULL, ?, NULL)`,
-      ).run(input.operationId, input.userId, input.requestDigest, input.now ?? Date.now());
+        `INSERT INTO binance_binding_operations (
+           operationId, userId, venue, requestDigest, resultJson, createdAt, completedAt
+         ) VALUES (?, ?, ?, ?, NULL, ?, NULL)`,
+      ).run(input.operationId, input.userId, input.venue, input.requestDigest, input.now ?? Date.now());
     } catch {
       return this.reserveBinanceRecoveryOperation(input);
     }
@@ -264,8 +262,9 @@ export class TradingStore {
   completeBinanceRecoveryUnbind(input: {
     operationId: string;
     userId: string;
+    venue: "binance";
     requestDigest: string;
-    uidFingerprint: string;
+    uidSnapshot: string;
     bindingVersion: number;
     operator: string;
     approver: string;
@@ -276,18 +275,22 @@ export class TradingStore {
     const timestamp = input.now ?? Date.now();
     return this.transaction(() => {
       const operation = this.db.prepare(
-        "SELECT userId, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
-      ).get(input.operationId) as { userId: string; requestDigest: string; resultJson: string | null } | undefined;
-      if (!operation || operation.userId !== input.userId || operation.requestDigest !== input.requestDigest) {
+        "SELECT userId, venue, requestDigest, resultJson FROM binance_binding_operations WHERE operationId = ?",
+      ).get(input.operationId) as { userId: string; venue: string; requestDigest: string; resultJson: string | null } | undefined;
+      if (!operation || operation.userId !== input.userId || operation.venue !== input.venue
+        || operation.requestDigest !== input.requestDigest) {
         throw new BinanceBindingStoreError("idempotency_conflict", "Recovery Unbind operation reservation 不匹配。");
       }
       if (operation.resultJson) return JSON.parse(operation.resultJson) as BinanceRecoveryUnbindResult;
-      const binding = this.findBinanceUidBindingByUserId(input.userId);
-      if (!binding || binding.uidFingerprint !== input.uidFingerprint) {
-        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance UID Binding。");
+      const binding = this.findBinanceCredentialBinding(input.userId, input.venue);
+      if (!binding) {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       if (binding.bindingVersion !== input.bindingVersion || binding.status !== "active") {
         throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧 Recovery Unbind 请求不能继续执行。");
+      }
+      if (binding.uidSnapshot !== input.uidSnapshot) {
+        throw new BinanceBindingStoreError("binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       const bindingVersion = binding.bindingVersion + 1;
       const status = input.providerVerifiedFlat ? "verified_unbound" as const : "unverified_unbound" as const;
@@ -296,7 +299,8 @@ export class TradingStore {
       const result: BinanceRecoveryUnbindResult = {
         receiptId,
         operationId: input.operationId,
-        uidFingerprint: input.uidFingerprint,
+        venue: input.venue,
+        uidSnapshot: input.uidSnapshot,
         bindingVersion,
         status,
         interventionStatus,
@@ -306,7 +310,8 @@ export class TradingStore {
         receiptId,
         operationId: input.operationId,
         userId: input.userId,
-        uidFingerprint: input.uidFingerprint,
+        venue: input.venue,
+        uidSnapshot: input.uidSnapshot,
         bindingVersion,
         operator: input.operator,
         approver: input.approver,
@@ -316,20 +321,20 @@ export class TradingStore {
       };
       const digest = createHash("sha256").update(JSON.stringify(receiptCore)).digest("hex");
       const updated = this.db.prepare(
-        `UPDATE binance_uid_bindings
+        `UPDATE binance_credential_bindings
          SET bindingVersion = ?, status = ?, interventionStatus = ?, updatedAt = ?
-         WHERE userId = ? AND bindingVersion = ? AND status = 'active'`,
-      ).run(bindingVersion, status, interventionStatus, timestamp, input.userId, input.bindingVersion);
+         WHERE userId = ? AND venue = ? AND bindingVersion = ? AND status = 'active'`,
+      ).run(bindingVersion, status, interventionStatus, timestamp, input.userId, input.venue, input.bindingVersion);
       if (Number(updated.changes) !== 1) {
         throw new BinanceBindingStoreError("binding_version_conflict", "Binding 已变化，旧 Recovery Unbind 请求不能继续执行。");
       }
       this.db.prepare(
         `INSERT INTO binance_recovery_receipts (
-           receiptId, operationId, userId, uidFingerprint, bindingVersion, operator, approver,
+           receiptId, operationId, userId, venue, uidSnapshot, bindingVersion, operator, approver,
            reason, result, timestamp, digest
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       ).run(
-        receiptId, input.operationId, input.userId, input.uidFingerprint, bindingVersion,
+        receiptId, input.operationId, input.userId, input.venue, input.uidSnapshot, bindingVersion,
         input.operator, input.approver, input.reason, status, timestamp, digest,
       );
       this.db.prepare(
@@ -2007,20 +2012,24 @@ export class TradingStore {
         PRIMARY KEY (userId, masterAddress)
       );
 
-      CREATE TABLE IF NOT EXISTS binance_uid_bindings (
-        userId TEXT PRIMARY KEY,
-        uidFingerprint TEXT NOT NULL UNIQUE
-          CHECK(length(uidFingerprint) = 64 AND uidFingerprint = lower(uidFingerprint)),
+      CREATE TABLE IF NOT EXISTS binance_credential_bindings (
+        userId TEXT NOT NULL,
+        venue TEXT NOT NULL CHECK(venue = 'binance'),
+        uidSnapshot TEXT NOT NULL
+          CHECK(length(uidSnapshot) = 64 AND uidSnapshot = lower(uidSnapshot)),
+        credentialNote TEXT NOT NULL DEFAULT '',
         bindingVersion INTEGER NOT NULL CHECK(bindingVersion > 0),
         status TEXT NOT NULL CHECK(status IN ('active', 'verified_unbound', 'unverified_unbound')),
         interventionStatus TEXT NOT NULL CHECK(interventionStatus IN ('none', 'manual_intervention')),
         createdAt INTEGER NOT NULL,
-        updatedAt INTEGER NOT NULL
+        updatedAt INTEGER NOT NULL,
+        PRIMARY KEY (userId, venue)
       );
 
       CREATE TABLE IF NOT EXISTS binance_binding_operations (
         operationId TEXT PRIMARY KEY,
         userId TEXT NOT NULL,
+        venue TEXT NOT NULL CHECK(venue = 'binance'),
         requestDigest TEXT NOT NULL,
         resultJson TEXT,
         createdAt INTEGER NOT NULL,
@@ -2031,7 +2040,8 @@ export class TradingStore {
         receiptId TEXT PRIMARY KEY,
         operationId TEXT NOT NULL UNIQUE,
         userId TEXT NOT NULL,
-        uidFingerprint TEXT NOT NULL,
+        venue TEXT NOT NULL CHECK(venue = 'binance'),
+        uidSnapshot TEXT NOT NULL,
         bindingVersion INTEGER NOT NULL,
         operator TEXT NOT NULL,
         approver TEXT NOT NULL,
@@ -2072,7 +2082,8 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_real_trading_audit_completedAt ON real_trading_exchange_audit(completedAt);
       CREATE INDEX IF NOT EXISTS idx_real_trading_order_idempotency_requestId ON real_trading_order_idempotency(requestId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_agent_bindings_agent ON real_trading_agent_bindings(agentAddress);
-      CREATE INDEX IF NOT EXISTS idx_binance_uid_bindings_status ON binance_uid_bindings(status);
+      CREATE INDEX IF NOT EXISTS idx_binance_credential_bindings_status
+        ON binance_credential_bindings(status);
     `);
     this.addColumnIfMissing("withdrawal_requests", "onchainStatus", "TEXT");
     this.addColumnIfMissing("withdrawal_requests", "chainId", "INTEGER");
@@ -2122,11 +2133,17 @@ export class TradingStore {
   }
 }
 
-function assertBinanceBindingIdentity(userId: string, uidFingerprint: string) {
+function assertBinanceBindingIdentity(userId: string, uidSnapshot: string) {
   if (!userId.trim()) throw new Error("Binance binding userId is required");
-  if (!/^[0-9a-f]{64}$/u.test(uidFingerprint)) {
-    throw new Error("Binance UID fingerprint must be a full lowercase SHA-256 digest");
+  if (!/^[0-9a-f]{64}$/u.test(uidSnapshot)) {
+    throw new Error("Binance UID snapshot must be a full lowercase SHA-256 digest");
   }
+}
+
+function normalizeCredentialNote(value: string) {
+  const note = value.trim();
+  if (note.length > 100) throw new Error("credentialNote must not exceed 100 characters");
+  return note;
 }
 
 function assertOperationId(operationId: string) {

@@ -9,7 +9,7 @@ import { BinanceBindingStoreError, TradingStore } from "./TradingStore";
 
 const fingerprint = (uid: string) => createHash("sha256").update(`binance:${uid}`).digest("hex");
 
-test("Binance UID ownership is unique and permanent per user", (t) => {
+test("Binance credential binding is keyed by user and stores a non-unique UID snapshot", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-binding-"));
   const store = new TradingStore(join(directory, "test.sqlite"));
   t.after(() => {
@@ -17,19 +17,20 @@ test("Binance UID ownership is unique and permanent per user", (t) => {
     rmSync(directory, { recursive: true, force: true });
   });
 
-  const first = store.bindBinanceUid("user-a", fingerprint("10001"), 100);
+  const uidSnapshot = fingerprint("10001");
+  const first = store.bindBinanceCredential("user-a", uidSnapshot, " 主账户 ", 100);
   assert.equal(first.bindingVersion, 1);
   assert.equal(first.status, "active");
-  assert.equal(first.uidFingerprint.length, 64);
-  assert.deepEqual(store.bindBinanceUid("user-a", fingerprint("10001"), 101), first);
+  assert.equal(first.uidSnapshot.length, 64);
+  assert.equal(first.credentialNote, "主账户");
+  assert.equal(first.venue, "binance");
 
+  const second = store.bindBinanceCredential("user-b", uidSnapshot, "子账户", 101);
+  assert.equal(second.uidSnapshot, uidSnapshot);
+  assert.equal(second.userId, "user-b");
   assert.throws(
-    () => store.bindBinanceUid("user-b", fingerprint("10001"), 102),
-    (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_uid_conflict",
-  );
-  assert.throws(
-    () => store.bindBinanceUid("user-a", fingerprint("20002"), 103),
-    (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_user_conflict",
+    () => store.bindBinanceCredential("user-a", fingerprint("20002"), "replacement", 102),
+    (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_active",
   );
 });
 
@@ -40,7 +41,7 @@ test("Binance binding rejects truncated fingerprints", (t) => {
     store.close();
     rmSync(directory, { recursive: true, force: true });
   });
-  assert.throws(() => store.bindBinanceUid("user-a", fingerprint("10001").slice(0, 16)));
+  assert.throws(() => store.bindBinanceCredential("user-a", fingerprint("10001").slice(0, 16)));
 });
 
 test("Recovery Unbind is idempotent, versioned, and writes an append-only receipt", (t) => {
@@ -48,12 +49,12 @@ test("Recovery Unbind is idempotent, versioned, and writes an append-only receip
   const dbPath = join(directory, "test.sqlite");
   const store = new TradingStore(dbPath);
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  const uidFingerprint = fingerprint("30003");
+  const uidSnapshot = fingerprint("30003");
   const operationId = "11111111-1111-4111-8111-111111111111";
-  store.bindBinanceUid("user-a", uidFingerprint, 100);
-  assert.deepEqual(store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", requestDigest: "request-a", now: 101 }), { kind: "reserved" });
+  store.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  assert.deepEqual(store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", venue: "binance", requestDigest: "request-a", now: 101 }), { kind: "reserved" });
   const result = store.completeBinanceRecoveryUnbind({
-    operationId, userId: "user-a", requestDigest: "request-a", uidFingerprint, bindingVersion: 1,
+    operationId, userId: "user-a", venue: "binance", requestDigest: "request-a", uidSnapshot, bindingVersion: 1,
     operator: "user-a", approver: "admin@example.com", reason: "provider unavailable",
     providerVerifiedFlat: false, now: 102,
   });
@@ -61,13 +62,14 @@ test("Recovery Unbind is idempotent, versioned, and writes an append-only receip
   assert.equal(result.interventionStatus, "manual_intervention");
   assert.equal(result.accountCleared, false);
   assert.equal(result.bindingVersion, 2);
-  assert.deepEqual(store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", requestDigest: "request-a", now: 103 }), { kind: "completed", result });
+  assert.deepEqual(store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", venue: "binance", requestDigest: "request-a", now: 103 }), { kind: "completed", result });
   assert.throws(
-    () => store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", requestDigest: "request-b", now: 104 }),
+    () => store.reserveBinanceRecoveryOperation({ operationId, userId: "user-a", venue: "binance", requestDigest: "request-b", now: 104 }),
     (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "idempotency_conflict",
   );
   const receipt = store.listBinanceRecoveryReceipts("user-a")[0]!;
-  assert.equal(receipt.uidFingerprint, uidFingerprint);
+  assert.equal(receipt.uidSnapshot, uidSnapshot);
+  assert.equal(receipt.venue, "binance");
   assert.equal(receipt.digest.length, 64);
   assert.doesNotMatch(JSON.stringify(receipt), /api.?key|secret/i);
   const db = new DatabaseSync(dbPath);
@@ -80,40 +82,39 @@ test("a stale bindingVersion cannot unbind a re-established binding", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-stale-unbind-"));
   const store = new TradingStore(join(directory, "test.sqlite"));
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  const uidFingerprint = fingerprint("40004");
-  store.bindBinanceUid("user-a", uidFingerprint, 100);
+  const uidSnapshot = fingerprint("40004");
+  store.bindBinanceCredential("user-a", uidSnapshot, "", 100);
   const firstOperation = "22222222-2222-4222-8222-222222222222";
-  store.reserveBinanceRecoveryOperation({ operationId: firstOperation, userId: "user-a", requestDigest: "first" });
+  store.reserveBinanceRecoveryOperation({ operationId: firstOperation, userId: "user-a", venue: "binance", requestDigest: "first" });
   store.completeBinanceRecoveryUnbind({
-    operationId: firstOperation, userId: "user-a", requestDigest: "first", uidFingerprint,
+    operationId: firstOperation, userId: "user-a", venue: "binance", requestDigest: "first", uidSnapshot,
     bindingVersion: 1, operator: "user-a", approver: "not_required", reason: "verified", providerVerifiedFlat: true,
   });
-  assert.equal(store.bindBinanceUid("user-a", uidFingerprint).bindingVersion, 3);
+  assert.equal(store.bindBinanceCredential("user-a", fingerprint("new-account")).bindingVersion, 3);
   const staleOperation = "33333333-3333-4333-8333-333333333333";
-  store.reserveBinanceRecoveryOperation({ operationId: staleOperation, userId: "user-a", requestDigest: "stale" });
+  store.reserveBinanceRecoveryOperation({ operationId: staleOperation, userId: "user-a", venue: "binance", requestDigest: "stale" });
   assert.throws(
     () => store.completeBinanceRecoveryUnbind({
-      operationId: staleOperation, userId: "user-a", requestDigest: "stale", uidFingerprint,
+      operationId: staleOperation, userId: "user-a", venue: "binance", requestDigest: "stale", uidSnapshot,
       bindingVersion: 1, operator: "user-a", approver: "not_required", reason: "stale", providerVerifiedFlat: true,
     }),
     (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_version_conflict",
   );
 });
 
-test("verified unbind retains ownership and permits only the same UID to be rebound", (t) => {
+test("verified unbind permits a newly validated UID snapshot on rebind", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-verified-unbind-"));
   const store = new TradingStore(join(directory, "test.sqlite"));
   t.after(() => { store.close(); rmSync(directory, { recursive: true, force: true }); });
-  const uidFingerprint = fingerprint("50005");
-  store.bindBinanceUid("user-a", uidFingerprint, 100);
-  const unbound = store.markBinanceVerifiedUnbound("user-a", uidFingerprint, 1, 101);
+  const uidSnapshot = fingerprint("50005");
+  store.bindBinanceCredential("user-a", uidSnapshot, "old", 100);
+  const unbound = store.markBinanceVerifiedUnbound("user-a", uidSnapshot, 1, 101);
   assert.equal(unbound.status, "verified_unbound");
   assert.equal(unbound.bindingVersion, 2);
-  assert.throws(
-    () => store.bindBinanceUid("user-a", fingerprint("different"), 102),
-    (error: unknown) => error instanceof BinanceBindingStoreError && error.category === "binding_user_conflict",
-  );
-  const rebound = store.bindBinanceUid("user-a", uidFingerprint, 103);
+  const nextUidSnapshot = fingerprint("different");
+  const rebound = store.bindBinanceCredential("user-a", nextUidSnapshot, "new", 103);
   assert.equal(rebound.status, "active");
   assert.equal(rebound.bindingVersion, 3);
+  assert.equal(rebound.uidSnapshot, nextUidSnapshot);
+  assert.equal(rebound.credentialNote, "new");
 });
