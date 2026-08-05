@@ -30,7 +30,10 @@ import { readValidatedPromotionHelperReceipt } from "./trustedDockerRuntime.mjs"
 
 const OLD_REVISION = "1".repeat(40);
 const NEW_REVISION = "2".repeat(40);
+const NEXT_REVISION = "3".repeat(40);
 const OPERATION_ID = "12345678-1234-4123-8123-123456789abc";
+const NEXT_OPERATION_ID = "87654321-4321-4321-8321-cba987654321";
+const RETRY_OPERATION_ID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 
 test("promotion publishes one completed record with embedded success receipt", () => {
   withFixture((fixture) => {
@@ -57,10 +60,74 @@ test("promotion publishes one completed record with embedded success receipt", (
     assert.equal(readFileSync(fixture.lifecyclePointer, "utf8"), fixture.lifecycleBytes);
     assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state, "PROMOTION_COMPLETED");
     assert.throws(() => fixture.transaction.promote(fixture.expected), /already completed/u);
-    assert.throws(() => fixture.transaction.promote({
-      ...fixture.expected,
-      revision: "3".repeat(40),
-    }), /state is not IDLE/u);
+  });
+});
+
+test("validated COMPLETED is archived immutably before the next promotion", () => {
+  withFixture((fixture) => {
+    const first = fixture.transaction.promote(fixture.expected);
+    const firstBytes = readFileSync(fixture.statePath);
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    const second = fixture.transaction.promote(next);
+    const historyPath = join(fixture.completedHistoryRoot, `${first.operationId}.json`);
+    const history = lstatSync(historyPath);
+    const historyRoot = lstatSync(fixture.completedHistoryRoot);
+
+    assert.equal(second.state, "PROMOTION_COMPLETED");
+    assert.equal(second.operationId, NEXT_OPERATION_ID);
+    assert.equal(second.oldCanonical.revision, NEW_REVISION);
+    assert.equal(second.newCanonical.revision, NEXT_REVISION);
+    assert.deepEqual(readFileSync(historyPath), firstBytes);
+    assert.equal(historyRoot.mode & 0o777, 0o700);
+    assert.equal(history.mode & 0o777, 0o400);
+    assert.equal(history.nlink, 1);
+    assert.equal(
+      JSON.parse(readFileSync(fixture.statePath, "utf8")).operationId,
+      NEXT_OPERATION_ID,
+    );
+    assert.equal(
+      assertPromotionStateAllowsProduction(fixture.guardOptions).operationId,
+      NEXT_OPERATION_ID,
+    );
+  });
+});
+
+test("completed archival preserves current on interruption and is safely retryable", () => {
+  withFixture((fixture) => {
+    const first = fixture.transaction.promote(fixture.expected);
+    const firstBytes = readFileSync(fixture.statePath);
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    fixture.transaction.fault = (stage) => {
+      if (stage === "before_started_publish") throw new Error("stop after archival");
+    };
+    assert.throws(() => fixture.transaction.promote(next), /stop after archival/u);
+    const historyPath = join(fixture.completedHistoryRoot, `${first.operationId}.json`);
+    assert.deepEqual(readFileSync(historyPath), firstBytes);
+    assert.deepEqual(readFileSync(fixture.statePath), firstBytes);
+    assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).operationId, OPERATION_ID);
+
+    fixture.transaction.fault = () => {};
+    assert.equal(
+      fixture.transaction.promote({ ...next, operationId: RETRY_OPERATION_ID }).operationId,
+      RETRY_OPERATION_ID,
+    );
+    assert.deepEqual(readFileSync(historyPath), firstBytes);
+  });
+});
+
+test("completed archival never overwrites history with a different identity", () => {
+  withFixture((fixture) => {
+    const first = fixture.transaction.promote(fixture.expected);
+    const firstBytes = readFileSync(fixture.statePath);
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    mkdirSync(fixture.completedHistoryRoot, { mode: 0o700 });
+    const historyPath = join(fixture.completedHistoryRoot, `${first.operationId}.json`);
+    replaceFixtureFile(historyPath, "{}\n", 0o400);
+    assert.throws(
+      () => fixture.transaction.promote(next),
+      /different identity/u,
+    );
+    assert.deepEqual(readFileSync(fixture.statePath), firstBytes);
   });
 });
 
@@ -390,21 +457,19 @@ function withFixture(callback) {
     const releaseParent = join(root, "release");
     const canonicalRoot = join(releaseParent, "code");
     const candidatesRoot = join(releaseParent, "candidates");
-    const candidateRoot = join(candidatesRoot, NEW_REVISION);
-    const candidateCode = join(candidateRoot, "code");
     const stateRoot = join(root, "state");
     const statePath = join(stateRoot, "current.json");
+    const completedHistoryRoot = join(stateRoot, "completed");
     const trustReceipt = join(root, "trusted-operations.json");
     const helperPath = join(root, "helper");
     const helperReceipt = join(root, "helper-receipt.json");
     const lifecyclePointer = join(root, "lifecycle.json");
     const stagingPath = join(releaseParent, `.promotion-staging-${OPERATION_ID}`);
-    for (const path of [releaseParent, canonicalRoot, candidatesRoot, candidateRoot, candidateCode]) {
+    for (const path of [releaseParent, canonicalRoot, candidatesRoot]) {
       mkdirSync(path, { recursive: false, mode: 0o700 });
       chmodSync(path, 0o700);
     }
     makeCodeTree(canonicalRoot, OLD_REVISION);
-    makeCodeTree(candidateCode, NEW_REVISION, false);
     writeFileSync(
       join(canonicalRoot, ".env.production"),
       `A=1\nXINGHENG_REVISION=${OLD_REVISION}\nB=2\n`,
@@ -417,45 +482,18 @@ function withFixture(callback) {
     writeFileSync(helperPath, "fixture-helper\n", { mode: 0o500 });
     chmodSync(helperPath, 0o500);
     writeHelperReceipt(helperReceipt, helperPath);
-    const archive = join(candidateRoot, "code.tar");
-    writeFileSync(archive, "archive\n", { mode: 0o400 });
-    chmodSync(archive, 0o400);
-    const candidateManifest = join(candidateRoot, "release-manifest.json");
-    writeManifest(candidateManifest, NEW_REVISION);
-    const tree = captureTrustedCandidateTree(candidateCode, { expectedUid: uid, expectedGid: gid });
-    const sourceArchive = secureArtifactReceipt(archive, 0o400, { expectedUid: uid, expectedGid: gid });
-    const receipt = {
-      schemaVersion: 1,
-      revision: NEW_REVISION,
-      candidateRoot,
-      codeRoot: candidateCode,
-      sourceArchive,
-      candidateTree: tree,
-      socket: "/var/run/docker.sock",
-      binaries: Object.fromEntries([
-        "compose", "docker", "findmnt", "flock", "git", "node", "sh", "sha256sum", "tar",
-      ].map((name) => [name, { path: `/usr/bin/${name}`, sha256: "a".repeat(64) }])),
-      daemon: { id: "fixture-daemon", rootDir: "/var/lib/docker", serverVersion: "1.2.3",
-        storageDriver: "overlay2" },
-    };
-    writeFileSync(join(candidateRoot, "candidate-build-receipt.json"),
-      `${JSON.stringify(receipt)}\n`, { mode: 0o400 });
-    chmodSync(join(candidateRoot, "candidate-build-receipt.json"), 0o400);
-    const expected = {
-      revision: NEW_REVISION,
-      sourceSha256: sourceArchive.sha256,
-      treeSha256: tree.sha256,
-      manifestSha256: sha256(readFileSync(candidateManifest)),
-      images: manifest(NEW_REVISION).images,
-      operationId: OPERATION_ID,
-    };
+    const installCandidate = (revision, operationId) => installCandidateFixture({
+      candidatesRoot, revision, operationId, uid, gid,
+    });
+    const expected = installCandidate(NEW_REVISION, OPERATION_ID);
     const paths = { releaseParent, canonicalRoot, candidatesRoot, stateRoot, statePath,
-      trustReceipt, lifecyclePointer, helperPath, helperReceipt };
-    const exchange = () => {
+      completedHistoryRoot, trustReceipt, lifecyclePointer, helperPath, helperReceipt };
+    const exchange = ({ operationId }) => {
+      const activeStagingPath = join(releaseParent, `.promotion-staging-${operationId}`);
       const parked = join(releaseParent, ".unit-exchange");
       renameSync(canonicalRoot, parked);
-      renameSync(stagingPath, canonicalRoot);
-      renameSync(parked, stagingPath);
+      renameSync(activeStagingPath, canonicalRoot);
+      renameSync(parked, activeStagingPath);
     };
     const installTrust = () => {
       const releaseTreeSha256 = sha256(readFileSync(join(canonicalRoot, "deploy/release-manifest.json")));
@@ -465,8 +503,7 @@ function withFixture(callback) {
         daemon: { id: "fixture-daemon", rootDir: "/var/lib/docker",
           serverVersion: "1.2.3", storageDriver: "overlay2" } };
       const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
-      writeFileSync(trustReceipt, bytes, { mode: 0o400 });
-      chmodSync(trustReceipt, 0o400);
+      replaceFixtureFile(trustReceipt, bytes, 0o400);
       return sha256(bytes);
     };
     const validateMainTrust = () => validateMainTrustFixture(trustReceipt, canonicalRoot);
@@ -475,11 +512,54 @@ function withFixture(callback) {
       installTrust, validateMainTrust, validateHelper,
       now: () => new Date("2026-08-05T00:00:00.000Z") });
     callback({ root, ...paths, transaction, expected, stagingPath, lifecycleBytes,
+      installCandidate,
       guardOptions: { ...paths, expectedUid: uid, expectedGid: gid,
         validateMainTrust, validateHelper } });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+}
+
+function installCandidateFixture({ candidatesRoot, revision, operationId, uid, gid }) {
+  const candidateRoot = join(candidatesRoot, revision);
+  const candidateCode = join(candidateRoot, "code");
+  mkdirSync(candidateRoot, { mode: 0o700 });
+  mkdirSync(candidateCode, { mode: 0o700 });
+  makeCodeTree(candidateCode, revision, false);
+  const archive = join(candidateRoot, "code.tar");
+  writeFileSync(archive, `archive-${revision}\n`, { mode: 0o400 });
+  chmodSync(archive, 0o400);
+  const candidateManifest = join(candidateRoot, "release-manifest.json");
+  writeManifest(candidateManifest, revision);
+  const tree = captureTrustedCandidateTree(candidateCode, { expectedUid: uid, expectedGid: gid });
+  const sourceArchive = secureArtifactReceipt(
+    archive, 0o400, { expectedUid: uid, expectedGid: gid },
+  );
+  const receipt = {
+    schemaVersion: 1,
+    revision,
+    candidateRoot,
+    codeRoot: candidateCode,
+    sourceArchive,
+    candidateTree: tree,
+    socket: "/var/run/docker.sock",
+    binaries: Object.fromEntries([
+      "compose", "docker", "findmnt", "flock", "git", "node", "sh", "sha256sum", "tar",
+    ].map((name) => [name, { path: `/usr/bin/${name}`, sha256: "a".repeat(64) }])),
+    daemon: { id: "fixture-daemon", rootDir: "/var/lib/docker", serverVersion: "1.2.3",
+      storageDriver: "overlay2" },
+  };
+  writeFileSync(join(candidateRoot, "candidate-build-receipt.json"),
+    `${JSON.stringify(receipt)}\n`, { mode: 0o400 });
+  chmodSync(join(candidateRoot, "candidate-build-receipt.json"), 0o400);
+  return {
+    revision,
+    sourceSha256: sourceArchive.sha256,
+    treeSha256: tree.sha256,
+    manifestSha256: sha256(readFileSync(candidateManifest)),
+    images: manifest(revision).images,
+    operationId,
+  };
 }
 
 function makeCodeTree(root, revision, includeManifest = true) {

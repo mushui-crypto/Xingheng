@@ -63,12 +63,16 @@ export class ReleasePromotionTransaction {
       || process.getuid?.() !== 0 || process.getgid?.() !== 0)) {
       throw new Error("release promotion requires controlled root on Linux");
     }
+    const stateRoot = resolve(options.stateRoot ?? PROMOTION_ROOT);
     this.paths = Object.freeze({
       releaseParent: resolve(options.releaseParent ?? RELEASE_PARENT),
       canonicalRoot: resolve(options.canonicalRoot ?? CANONICAL_ROOT),
       candidatesRoot: resolve(options.candidatesRoot ?? `${RELEASE_PARENT}/candidates`),
-      stateRoot: resolve(options.stateRoot ?? PROMOTION_ROOT),
+      stateRoot,
       statePath: resolve(options.statePath ?? PROMOTION_RECORD),
+      completedHistoryRoot: resolve(
+        options.completedHistoryRoot ?? join(stateRoot, "completed"),
+      ),
       trustReceipt: resolve(options.trustReceipt ?? TRUST_RECEIPT),
       lifecyclePointer: resolve(options.lifecyclePointer ?? LIFECYCLE_POINTER),
       helperPath: resolve(options.helperPath ?? PROMOTION_HELPER),
@@ -88,13 +92,17 @@ export class ReleasePromotionTransaction {
   promote(expected) {
     if (!this.testMode) assertTrustedPromotionMutationContext();
     validateExpectedCandidate(expected);
+    let previousCompleted = null;
     if (existsNoFollow(this.paths.statePath)) {
       const current = readPromotionRecord(this.paths.statePath, this.uid, this.gid);
       if (current.state === "PROMOTION_COMPLETED"
         && current.candidate.revision === expected.revision) {
         throw new Error("candidate promotion is already completed");
       }
-      throw new Error("release promotion state is not IDLE");
+      if (current.state !== "PROMOTION_COMPLETED") {
+        throw new Error("release promotion state is not IDLE");
+      }
+      previousCompleted = this.archiveCompletedRecord(current);
     }
     const operationId = expected.operationId ?? randomUUID();
     if (!UUID.test(operationId)) throw new Error("promotion operation ID is invalid");
@@ -120,7 +128,12 @@ export class ReleasePromotionTransaction {
       failureStage: null,
     };
     this.fault("before_started_publish");
-    writePromotionRecord(this.paths.statePath, started, this.uid, this.gid, true);
+    if (previousCompleted === null) {
+      writePromotionRecord(this.paths.statePath, started, this.uid, this.gid, true);
+    } else {
+      this.assertArchivedCompletedUnchanged(previousCompleted);
+      writePromotionRecord(this.paths.statePath, started, this.uid, this.gid);
+    }
     let exchangeInvoked = false;
     try {
       this.fault("after_started_publish");
@@ -347,6 +360,95 @@ export class ReleasePromotionTransaction {
       return { receiptSha256: helper.receiptSha256 };
     } finally {
       if (helper.opened?.fd !== undefined) closeSync(helper.opened.fd);
+    }
+  }
+
+  archiveCompletedRecord(current) {
+    const validated = assertPromotionStateAllowsProduction({
+      ...this.paths,
+      expectedUid: this.uid,
+      expectedGid: this.gid,
+      validateMainTrust: this.validateMainTrust,
+      validateHelper: this.validateHelper,
+    });
+    if (canonical(validated) !== canonical(current)) {
+      throw new Error("completed promotion record changed before archival");
+    }
+    ensureSecureDirectory(this.paths.completedHistoryRoot, this.uid, this.gid, 0o700);
+    fsyncDirectory(this.paths.stateRoot);
+    const source = secureFile(
+      this.paths.statePath, this.uid, this.gid, 0o400, 1024 * 1024,
+    );
+    const archivePath = join(
+      this.paths.completedHistoryRoot,
+      `${current.operationId}.json`,
+    );
+    try {
+      if (canonical(JSON.parse(source.bytes.toString("utf8"))) !== canonical(current)) {
+        throw new Error("completed promotion source identity is invalid");
+      }
+      if (existsNoFollow(archivePath)) {
+        const archived = secureFile(archivePath, this.uid, this.gid, 0o400, 1024 * 1024);
+        try {
+          if (!archived.bytes.equals(source.bytes)) {
+            throw new Error("completed promotion history already exists with different identity");
+          }
+        } finally {
+          closeSync(archived.fd);
+          archived.bytes.fill(0);
+        }
+      } else {
+        writeImmutableBytes(archivePath, source.bytes, this.uid, this.gid, 0o400);
+      }
+      const archived = secureFile(archivePath, this.uid, this.gid, 0o400, 1024 * 1024);
+      try {
+        if (!archived.bytes.equals(source.bytes)) {
+          throw new Error("completed promotion archival verification failed");
+        }
+        return Object.freeze({
+          operationId: current.operationId,
+          currentSha256: source.sha256,
+          archivePath,
+          archiveSha256: archived.sha256,
+        });
+      } finally {
+        closeSync(archived.fd);
+        archived.bytes.fill(0);
+      }
+    } finally {
+      closeSync(source.fd);
+      source.bytes.fill(0);
+    }
+  }
+
+  assertArchivedCompletedUnchanged(previous) {
+    const current = assertPromotionStateAllowsProduction({
+      ...this.paths,
+      expectedUid: this.uid,
+      expectedGid: this.gid,
+      validateMainTrust: this.validateMainTrust,
+      validateHelper: this.validateHelper,
+    });
+    if (current.operationId !== previous.operationId) {
+      throw new Error("completed promotion changed before next session");
+    }
+    const source = secureFile(
+      this.paths.statePath, this.uid, this.gid, 0o400, 1024 * 1024,
+    );
+    const archived = secureFile(
+      previous.archivePath, this.uid, this.gid, 0o400, 1024 * 1024,
+    );
+    try {
+      if (source.sha256 !== previous.currentSha256
+        || archived.sha256 !== previous.archiveSha256
+        || !source.bytes.equals(archived.bytes)) {
+        throw new Error("completed promotion archival boundary changed");
+      }
+    } finally {
+      closeSync(source.fd);
+      source.bytes.fill(0);
+      closeSync(archived.fd);
+      archived.bytes.fill(0);
     }
   }
 
