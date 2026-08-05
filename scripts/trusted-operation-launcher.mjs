@@ -22,13 +22,17 @@ import {
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
 import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
+import {
+  assertPromotionStateAllowsProduction,
+  validateTrustedPromotionArguments,
+} from "./releasePromotionTransaction.mjs";
 
 const operation = process.argv[2];
 const entryArgument = process.argv[3];
 const args = process.argv.slice(4);
 
 try {
-  if (!["production", "release-build", "candidate-verify"].includes(operation) || !entryArgument) usage();
+  if (!["production", "release-build", "candidate-verify", "promotion"].includes(operation) || !entryArgument) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
   }
@@ -40,23 +44,28 @@ try {
   ) {
     throw new Error("nested trusted operation launcher is not allowed");
   }
+  if (operation === "promotion") validateTrustedPromotionArguments(args, process.env);
   const currentRoot = new URL("../", import.meta.url).pathname;
-  const candidateRevision = ["release-build", "candidate-verify"].includes(operation)
+  const candidateRevision = ["release-build", "candidate-verify", "promotion"].includes(operation)
     ? basename(dirname(resolve(currentRoot)))
     : null;
   const root = candidateRevision !== null
     ? assertTrustedReleaseCandidateRoot(currentRoot, candidateRevision).root
     : assertTrustedReleaseRoot(currentRoot);
   if (candidateRevision !== null) {
-    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = "release-build";
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = operation;
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+  } else {
+    assertPromotionStateAllowsProduction();
   }
   const entry = realpathSync(resolve(root, entryArgument));
   const entryName = entry.slice(`${root}/scripts/`.length);
   const allowedEntries = operation !== "production"
     ? [operation === "release-build"
       ? "build-release-images.sh"
-      : "candidate-rwa-automation-verify.sh"]
+      : (operation === "candidate-verify"
+        ? "candidate-rwa-automation-verify.sh"
+        : "release-promote.sh")]
     : [
       "production-compose.sh",
       "activate-release.sh",
@@ -101,6 +110,9 @@ try {
           TZ: "UTC",
           XINGHENG_OPERATION_LOCK_CONTEXT: operation,
         };
+        if (operation === "promotion") {
+          childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = "release-promote.sh";
+        }
         if (candidateRevision !== null) {
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
         } else {
@@ -160,7 +172,7 @@ try {
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|release-build|candidate-verify scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|release-build|candidate-verify|promotion scripts/ENTRY ARGS...",
   );
 }
 

@@ -33,6 +33,10 @@ test("operation locks enforce global then environment exclusion", (t) => {
         () => acquireOperationLocks("candidate-verify", { testMode: true, lockRoot: root }),
         /already held/u,
       );
+      assert.throws(
+        () => acquireOperationLocks("promotion", { testMode: true, lockRoot: root }),
+        /already held/u,
+      );
     } finally {
       first.close();
     }
@@ -50,6 +54,16 @@ test("operation locks enforce global then environment exclusion", (t) => {
       "production.lock",
     ]);
     verify.close();
+    const promotion = acquireOperationLocks("promotion", { testMode: true, lockRoot: root });
+    assert.deepEqual(promotion.receipts.map((item) => item.path.split("/").at(-1)), [
+      "release-global.lock",
+      "production.lock",
+    ]);
+    assert.throws(
+      () => acquireOperationLocks("production", { testMode: true, lockRoot: root }),
+      /already held/u,
+    );
+    promotion.close();
   } finally {
     rmSync(parent, { recursive: true, force: true });
   }
