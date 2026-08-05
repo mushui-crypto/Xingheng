@@ -148,6 +148,13 @@ export class RwaBinanceAutomationService {
   ) {
     this.assertExecutionLeaseHeld = () => {
       assertExecutionLeaseHeld();
+      if (this.credentialLifecycleOverride === "invalid") {
+        throw new RwaNeutralExecutionError(
+          409,
+          "recovery_inconsistent",
+          "Credential 恢复失败终态无法持久化，自动化 mutation 已拒绝并等待人工处理。",
+        );
+      }
       assertAutomationMutationAllowed();
     };
     this.store.setClock(now);
@@ -755,12 +762,15 @@ export class RwaBinanceAutomationService {
           } catch {
             automationStopFailed = true;
           }
-          await finalizeRestoreFailure?.(automationStopFailed);
+          const failureFinalizeFailed = await this.finalizeRestoreFailureLocked(
+            finalizeRestoreFailure,
+            automationStopFailed,
+          );
           throw new RwaNeutralExecutionError(
             503,
             "credential_restore_failed",
             "Credential 恢复失败；Binding 一致性无法确认，已停止自动化并等待人工处理。",
-            { automationStopFailed },
+            { automationStopFailed, failureFinalizeFailed },
           );
         }
         throw error;
@@ -833,12 +843,15 @@ export class RwaBinanceAutomationService {
           } catch {
             automationStopFailed = true;
           }
-          await finalizeRestoreFailure?.(automationStopFailed);
+          const failureFinalizeFailed = await this.finalizeRestoreFailureLocked(
+            finalizeRestoreFailure,
+            automationStopFailed,
+          );
           throw new RwaNeutralExecutionError(
             503,
             "credential_restore_failed",
             "Credential 恢复失败；Binding 一致性无法确认，已停止自动化并等待人工处理。",
-            { automationStopFailed },
+            { automationStopFailed, failureFinalizeFailed },
           );
         }
         if (providerStateUnknown) await this.markProviderUnknownFailClosedLocked();
@@ -860,6 +873,20 @@ export class RwaBinanceAutomationService {
     invalidateAccountAssetAuthorizations(state.assetAuthorizations, this.now());
     await this.store.writeState(state);
     this.armedChallengeIds.clear();
+  }
+
+  private async finalizeRestoreFailureLocked(
+    finalize: ((automationStopFailed: boolean) => Promise<void> | void) | undefined,
+    automationStopFailed: boolean,
+  ) {
+    try {
+      await finalize?.(automationStopFailed);
+      return false;
+    } catch {
+      this.credentialLifecycleOverride = "invalid";
+      this.armedChallengeIds.clear();
+      return true;
+    }
   }
 
   private async markProviderUnknownFailClosedLocked() {

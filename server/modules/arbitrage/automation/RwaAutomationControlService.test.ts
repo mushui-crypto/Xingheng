@@ -2308,6 +2308,153 @@ test("normal Binance unbind restore failure records recovery_inconsistent and bl
   }
 });
 
+test("normal unbind failure receipt write failure keeps runtime automation fail-closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-normal-finalize-fallback-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidSnapshot = createHash("sha256").update("binance:normal-finalize-fallback").digest("hex");
+  const accountId = "binance:test-account";
+  bindingStore.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  const client = new TestBinanceClient() as TestBinanceClient & {
+    readPreflightSnapshot: () => Promise<Record<string, unknown>>;
+  };
+  client.readPreflightSnapshot = async () => ({
+    accountId,
+    existingSpotQuantityXaut: 0,
+    existingPerpetualQuantityXaut: 0,
+    openSpotOrderCount: 0,
+    openPerpetualOrderCount: 0,
+  });
+  const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+    userId: "user-a",
+    venue: "binance",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credentials.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  const service = new RwaBinanceAutomationService(
+    store,
+    () => client as any,
+    () => 200,
+    () => true,
+    undefined,
+    () => {},
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      if (bindingStore.findBinanceCredentialBinding("user-a")?.status === "recovery_inconsistent") {
+        throw new RwaNeutralExecutionError(409, "recovery_inconsistent", "manual intervention required");
+      }
+    },
+  );
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([new RwaBinanceAutomationConnector(service)]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await service.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    store.restoreCredentialMutationSnapshot = async () => { throw new Error("restore failed"); };
+    bindingStore.markBinanceVerifiedUnbound = () => { throw new Error("Binding finalization failed"); };
+    bindingStore.completeBinanceRecoveryUnbind = () => { throw new Error("failure receipt write failed"); };
+
+    await assert.rejects(
+      control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_restore_failed"
+        && error.details?.failureFinalizeFailed === true,
+    );
+    assert.equal(bindingStore.findBinanceCredentialBinding("user-a")?.status, "active");
+    assert.equal(bindingStore.listBinanceRecoveryReceipts("user-a").length, 0);
+    await assert.rejects(
+      service.updateConfig({ accountId, globalExecutionEnabled: true }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent",
+    );
+    await assert.rejects(service.execute({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+    await assert.rejects(service.closeAll({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Recovery Unbind inconsistent finalize write failure keeps runtime automation fail-closed", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-recovery-finalize-fallback-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidSnapshot = createHash("sha256").update("binance:recovery-finalize-fallback").digest("hex");
+  const operationId = "99999999-9999-4999-8999-999999999999";
+  const accountId = "binance:test-account";
+  bindingStore.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  const client = new TestBinanceClient() as TestBinanceClient & {
+    readPreflightSnapshot: () => Promise<Record<string, unknown>>;
+  };
+  client.readPreflightSnapshot = async () => ({
+    accountId,
+    existingSpotQuantityXaut: 0,
+    existingPerpetualQuantityXaut: 0,
+    openSpotOrderCount: 0,
+    openPerpetualOrderCount: 0,
+  });
+  const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+    userId: "user-a",
+    venue: "binance",
+    keyProvider: new FakeCredentialKeyProvider(),
+    credentialPath: join(directory, "credentials.enc.json"),
+    statePath: join(directory, "state.json"),
+  });
+  const service = new RwaBinanceAutomationService(store, () => client as any, () => 200, () => true);
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([new RwaBinanceAutomationConnector(service)]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await service.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    store.restoreCredentialMutationSnapshot = async () => { throw new Error("restore failed"); };
+    bindingStore.completeBinanceRecoveryUnbind = (input) => {
+      throw new Error(input.recoveryInconsistent
+        ? "recovery_inconsistent write failed"
+        : "Binding finalization failed");
+    };
+
+    await assert.rejects(
+      control.recoveryUnbind("user-a", sessionDomain, {
+        uidSnapshot,
+        bindingVersion: 1,
+        operationId,
+        reason: "forced finalize failure",
+        stepUpToken,
+      }, "admin@example.com"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "credential_restore_failed"
+        && error.details?.failureFinalizeFailed === true,
+    );
+    assert.equal(bindingStore.findBinanceCredentialBinding("user-a")?.status, "active");
+    assert.equal(bindingStore.listBinanceRecoveryReceipts("user-a").length, 0);
+    await assert.rejects(
+      service.updateConfig({ accountId, globalExecutionEnabled: true }),
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent",
+    );
+    await assert.rejects(service.execute({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+    await assert.rejects(service.closeAll({}), (error: unknown) =>
+      error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent");
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 function controlAuthorizationPreview(overrides: Partial<RwaProviderPreflightSnapshot> = {}) {
   const generatedAt = 1_800_000_000_000;
   return createAccountAssetAuthorizationPreview({
