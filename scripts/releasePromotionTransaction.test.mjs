@@ -131,6 +131,71 @@ test("completed archival never overwrites history with a different identity", ()
   });
 });
 
+test("verified legacy COMPLETED environment can bind the next candidate before exchange", () => {
+  withFixture((fixture) => {
+    const first = fixture.transaction.promote(fixture.expected);
+    const legacyBytes = convertCompletedToLegacyEnvironment(fixture, OLD_REVISION);
+    assert.equal(
+      assertPromotionStateAllowsProduction(fixture.guardOptions).operationId,
+      first.operationId,
+    );
+
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    const second = fixture.transaction.promote(next);
+    const historyPath = join(fixture.completedHistoryRoot, `${first.operationId}.json`);
+
+    assert.equal(second.state, "PROMOTION_COMPLETED");
+    assert.equal(second.oldCanonical.revision, NEW_REVISION);
+    assert.equal(second.newCanonical.revision, NEXT_REVISION);
+    assert.equal(
+      readFileSync(join(fixture.canonicalRoot, ".env.production"), "utf8"),
+      `A=1\nXINGHENG_REVISION=${NEXT_REVISION}\nB=2\n`,
+    );
+    assert.deepEqual(readFileSync(historyPath), legacyBytes);
+    assert.equal(
+      assertPromotionStateAllowsProduction(fixture.guardOptions).operationId,
+      NEXT_OPERATION_ID,
+    );
+  });
+});
+
+test("legacy environment compatibility requires a fully validated COMPLETED record", () => {
+  withFixture((fixture) => {
+    fixture.transaction.promote(fixture.expected);
+    const currentBytes = convertCompletedToLegacyEnvironment(fixture, OLD_REVISION);
+    replaceFixtureFile(fixture.trustReceipt, "{}\n", 0o400);
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    let exchanged = false;
+    fixture.transaction.exchange = () => { exchanged = true; };
+
+    assert.throws(() => fixture.transaction.promote(next), /trust receipt|completed promotion/u);
+    assert.equal(exchanged, false);
+    assert.deepEqual(readFileSync(fixture.statePath), currentBytes);
+    assert.equal(
+      exists(join(fixture.completedHistoryRoot, `${OPERATION_ID}.json`)),
+      false,
+    );
+  });
+});
+
+test("legacy environment compatibility rejects a revision not bound by completed history", () => {
+  withFixture((fixture) => {
+    fixture.transaction.promote(fixture.expected);
+    const unboundRevision = "4".repeat(40);
+    const currentBytes = convertCompletedToLegacyEnvironment(fixture, unboundRevision);
+    assert.equal(assertPromotionStateAllowsProduction(fixture.guardOptions).state,
+      "PROMOTION_COMPLETED");
+    const next = fixture.installCandidate(NEXT_REVISION, NEXT_OPERATION_ID);
+    let exchanged = false;
+    fixture.transaction.exchange = () => { exchanged = true; };
+
+    assert.throws(() => fixture.transaction.promote(next), /environment identity/u);
+    assert.equal(exchanged, false);
+    assert.deepEqual(readFileSync(fixture.statePath), currentBytes);
+    assert.equal(readManifest(fixture.canonicalRoot).revision, NEW_REVISION);
+  });
+});
+
 test("every candidate identity mismatch becomes UNKNOWN without exchange", () => {
   for (const mutate of [
     (value) => { value.revision = "3".repeat(40); },
@@ -600,6 +665,22 @@ function snapshot(fixture) {
       replaceFixtureFile(path, bytes, mode);
     }
   };
+}
+
+function convertCompletedToLegacyEnvironment(fixture, environmentRevision) {
+  const environment = Buffer.from(
+    `A=1\nXINGHENG_REVISION=${environmentRevision}\nB=2\n`,
+    "utf8",
+  );
+  replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
+  const environmentSha256 = sha256(environment);
+  const completed = JSON.parse(readFileSync(fixture.statePath, "utf8"));
+  completed.newCanonical.environmentSha256 = environmentSha256;
+  completed.staging.environmentSha256 = environmentSha256;
+  completed.success.newCanonical.environmentSha256 = environmentSha256;
+  const bytes = Buffer.from(`${canonical(completed)}\n`, "utf8");
+  replaceFixtureFile(fixture.statePath, bytes, 0o400);
+  return bytes;
 }
 
 function writeHelperReceipt(path, helperPath) {

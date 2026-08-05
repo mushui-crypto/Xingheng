@@ -110,7 +110,12 @@ export class ReleasePromotionTransaction {
     const oldCanonical = captureCanonicalIdentity(this.paths, this.uid, this.gid);
     ensureSecureDirectory(this.paths.stateRoot, this.uid, this.gid, 0o700);
     const stagingPath = join(this.paths.releaseParent, `.promotion-staging-${operationId}`);
-    const staging = this.prepareStaging(stagingPath, candidate, oldCanonical);
+    const staging = this.prepareStaging(
+      stagingPath,
+      candidate,
+      oldCanonical,
+      previousCompleted?.record ?? null,
+    );
     this.fault("staging_prepared");
     const started = {
       schemaVersion: 1,
@@ -276,7 +281,7 @@ export class ReleasePromotionTransaction {
     return Object.freeze(actual);
   }
 
-  prepareStaging(path, candidate, oldCanonical) {
+  prepareStaging(path, candidate, oldCanonical, previousCompleted) {
     if (existsNoFollow(path)) throw new Error("promotion staging already exists");
     const candidatePaths = releaseCandidatePaths(candidate.revision, {
       candidatesRoot: this.paths.candidatesRoot,
@@ -303,8 +308,10 @@ export class ReleasePromotionTransaction {
       const environmentTarget = join(path, ".env.production");
       const candidateEnvironment = bindPromotionEnvironment(
         oldEnvironment.bytes,
-        oldCanonical.revision,
+        oldEnvironment.sha256,
+        oldCanonical,
         candidate.revision,
+        previousCompleted,
       );
       try {
         writeImmutableBytes(environmentTarget, candidateEnvironment, this.uid, this.gid, 0o600);
@@ -410,6 +417,7 @@ export class ReleasePromotionTransaction {
           currentSha256: source.sha256,
           archivePath,
           archiveSha256: archived.sha256,
+          record: validated,
         });
       } finally {
         closeSync(archived.fd);
@@ -623,11 +631,30 @@ function assertNewCanonical(candidate, current, oldCanonical, staging) {
   }
 }
 
-function bindPromotionEnvironment(bytes, oldRevision, candidateRevision) {
+function bindPromotionEnvironment(
+  bytes,
+  environmentSha256,
+  oldCanonical,
+  candidateRevision,
+  previousCompleted,
+) {
   const source = bytes.toString("utf8");
-  if (!Buffer.from(source, "utf8").equals(bytes)
-    || parseRevisionEnv(source) !== oldRevision) {
+  if (!Buffer.from(source, "utf8").equals(bytes)) {
     throw new Error("canonical promotion environment identity is invalid");
+  }
+  let environmentRevision;
+  try {
+    environmentRevision = parseRevisionEnv(source);
+  } catch {
+    throw new Error("canonical promotion environment identity is invalid");
+  }
+  if (environmentRevision !== oldCanonical.revision) {
+    assertLegacyCanonicalEnvironmentCompatibility({
+      environmentRevision,
+      environmentSha256,
+      oldCanonical,
+      previousCompleted,
+    });
   }
   const bound = source.replace(
     /^XINGHENG_REVISION=[^\r\n]*(?=\r?$)/mu,
@@ -637,6 +664,23 @@ function bindPromotionEnvironment(bytes, oldRevision, candidateRevision) {
     throw new Error("candidate promotion environment binding failed");
   }
   return Buffer.from(bound, "utf8");
+}
+
+function assertLegacyCanonicalEnvironmentCompatibility({
+  environmentRevision,
+  environmentSha256,
+  oldCanonical,
+  previousCompleted,
+}) {
+  if (previousCompleted?.state !== "PROMOTION_COMPLETED"
+    || canonical(previousCompleted.newCanonical) !== canonical(oldCanonical)
+    || previousCompleted.newCanonical.environmentSha256 !== environmentSha256
+    || previousCompleted.oldCanonical.environmentSha256 !== environmentSha256
+    || previousCompleted.staging.environmentSha256 !== environmentSha256
+    || previousCompleted.oldCanonical.revision !== environmentRevision
+    || previousCompleted.newCanonical.revision === environmentRevision) {
+    throw new Error("canonical promotion environment identity is invalid");
+  }
 }
 
 function validateExpectedCandidate(value) {
