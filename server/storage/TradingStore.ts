@@ -90,6 +90,24 @@ type RealTradingIdempotencyRow = {
 };
 type RealTradingAgentBindingRow = RealTradingAgentBinding;
 
+export type BinanceBindingStatus = "active" | "verified_unbound" | "unverified_unbound";
+export type BinanceBindingInterventionStatus = "none" | "manual_intervention";
+export type BinanceUidBinding = {
+  userId: string;
+  uidFingerprint: string;
+  bindingVersion: number;
+  status: BinanceBindingStatus;
+  interventionStatus: BinanceBindingInterventionStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export class BinanceBindingStoreError extends Error {
+  constructor(readonly category: "binding_user_conflict" | "binding_uid_conflict", message: string) {
+    super(message);
+  }
+}
+
 export class TradingStore {
   private db: DatabaseSync;
   private lastRealTradingAuditMaintenanceAt = 0;
@@ -114,6 +132,52 @@ export class TradingStore {
       this.db.exec("ROLLBACK;");
       throw error;
     }
+  }
+
+  findBinanceUidBindingByUserId(userId: string) {
+    return this.db.prepare("SELECT * FROM binance_uid_bindings WHERE userId = ?").get(userId) as BinanceUidBinding | undefined;
+  }
+
+  findBinanceUidBindingByFingerprint(uidFingerprint: string) {
+    return this.db.prepare("SELECT * FROM binance_uid_bindings WHERE uidFingerprint = ?").get(uidFingerprint) as BinanceUidBinding | undefined;
+  }
+
+  bindBinanceUid(userId: string, uidFingerprint: string, now = Date.now()) {
+    assertBinanceBindingIdentity(userId, uidFingerprint);
+    return this.transaction(() => {
+      const existingUser = this.findBinanceUidBindingByUserId(userId);
+      if (existingUser) {
+        if (existingUser.uidFingerprint !== uidFingerprint) {
+          throw new BinanceBindingStoreError("binding_user_conflict", "当前用户已永久归属其他 Binance UID。");
+        }
+        if (existingUser.status === "active") return existingUser;
+        const bindingVersion = existingUser.bindingVersion + 1;
+        this.db.prepare(
+          `UPDATE binance_uid_bindings
+           SET bindingVersion = ?, status = 'active', interventionStatus = 'none', updatedAt = ?
+           WHERE userId = ? AND bindingVersion = ?`,
+        ).run(bindingVersion, now, userId, existingUser.bindingVersion);
+        return this.findBinanceUidBindingByUserId(userId)!;
+      }
+      const existingUid = this.findBinanceUidBindingByFingerprint(uidFingerprint);
+      if (existingUid) {
+        throw new BinanceBindingStoreError("binding_uid_conflict", "该 Binance UID 已永久归属其他用户。");
+      }
+      try {
+        this.db.prepare(
+          `INSERT INTO binance_uid_bindings (
+             userId, uidFingerprint, bindingVersion, status, interventionStatus, createdAt, updatedAt
+           ) VALUES (?, ?, 1, 'active', 'none', ?, ?)`,
+        ).run(userId, uidFingerprint, now, now);
+      } catch (error) {
+        const claimed = this.findBinanceUidBindingByFingerprint(uidFingerprint);
+        if (claimed?.userId !== userId) {
+          throw new BinanceBindingStoreError("binding_uid_conflict", "该 Binance UID 已永久归属其他用户。");
+        }
+        throw error;
+      }
+      return this.findBinanceUidBindingByUserId(userId)!;
+    });
   }
 
   listAccounts() {
@@ -1771,6 +1835,17 @@ export class TradingStore {
         PRIMARY KEY (userId, masterAddress)
       );
 
+      CREATE TABLE IF NOT EXISTS binance_uid_bindings (
+        userId TEXT PRIMARY KEY,
+        uidFingerprint TEXT NOT NULL UNIQUE
+          CHECK(length(uidFingerprint) = 64 AND uidFingerprint = lower(uidFingerprint)),
+        bindingVersion INTEGER NOT NULL CHECK(bindingVersion > 0),
+        status TEXT NOT NULL CHECK(status IN ('active', 'verified_unbound', 'unverified_unbound')),
+        interventionStatus TEXT NOT NULL CHECK(interventionStatus IN ('none', 'manual_intervention')),
+        createdAt INTEGER NOT NULL,
+        updatedAt INTEGER NOT NULL
+      );
+
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_userId ON funding_ledger(userId);
       CREATE INDEX IF NOT EXISTS idx_funding_ledger_relatedId ON funding_ledger(relatedId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_accounts_userId ON real_trading_accounts(userId);
@@ -1793,6 +1868,7 @@ export class TradingStore {
       CREATE INDEX IF NOT EXISTS idx_real_trading_audit_completedAt ON real_trading_exchange_audit(completedAt);
       CREATE INDEX IF NOT EXISTS idx_real_trading_order_idempotency_requestId ON real_trading_order_idempotency(requestId);
       CREATE INDEX IF NOT EXISTS idx_real_trading_agent_bindings_agent ON real_trading_agent_bindings(agentAddress);
+      CREATE INDEX IF NOT EXISTS idx_binance_uid_bindings_status ON binance_uid_bindings(status);
     `);
     this.addColumnIfMissing("withdrawal_requests", "onchainStatus", "TEXT");
     this.addColumnIfMissing("withdrawal_requests", "chainId", "INTEGER");
@@ -1839,6 +1915,13 @@ export class TradingStore {
   private columnExists(table: string, column: string) {
     const columns = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
     return columns.some((item) => item.name === column);
+  }
+}
+
+function assertBinanceBindingIdentity(userId: string, uidFingerprint: string) {
+  if (!userId.trim()) throw new Error("Binance binding userId is required");
+  if (!/^[0-9a-f]{64}$/u.test(uidFingerprint)) {
+    throw new Error("Binance UID fingerprint must be a full lowercase SHA-256 digest");
   }
 }
 

@@ -62,6 +62,7 @@ import {
   type RwaAssetTakeoverExitPreview,
 } from "./RwaAssetTakeoverRuntime";
 import { RwaAssetTakeoverRuntimeError } from "./RwaAssetTakeoverRuntimeEngine";
+import type { TradingStore } from "../../../storage/TradingStore";
 
 export class RwaAutomationControlService {
   private challengeVenues = new Map<string, {
@@ -134,6 +135,7 @@ export class RwaAutomationControlService {
     private readonly governance = new RwaAutomationGovernance(),
     private readonly now: () => number = () => Date.now(),
     private readonly assertExecutionLeaseHeld: () => void = () => {},
+    private readonly binanceBindingStore?: Pick<TradingStore, "bindBinanceUid">,
   ) {}
 
   async startPersistedActivityMonitoring() {
@@ -255,6 +257,7 @@ export class RwaAutomationControlService {
           throw normalizeCredentialPutError(error, "validation", diagnosticContext);
         }
         const boundAccountId = (result as { credential?: { accountId?: unknown } })?.credential?.accountId;
+        const boundFingerprint = (result as { credential?: { accountFingerprint?: unknown } })?.credential?.accountFingerprint;
         if (typeof boundAccountId !== "string" || !boundAccountId.trim()) {
           await rollbackCredentialMutation(connector, credentialMutationSnapshot, "identity", diagnosticContext);
           throw withCredentialPutDetails(
@@ -264,6 +267,12 @@ export class RwaAutomationControlService {
           );
         }
         try {
+          if (connector.venue === "binance" && this.binanceBindingStore) {
+            if (typeof boundFingerprint !== "string" || !/^[0-9a-f]{64}$/u.test(boundFingerprint)) {
+              throw new RwaAutomationControlError(503, "credential_identity_unavailable", "Binance UID 身份未返回完整 SHA-256 fingerprint。");
+            }
+            this.binanceBindingStore.bindBinanceUid(userId, boundFingerprint, this.now());
+          }
           await this.stepUpSecurity.recordCredentialBinding(userId, boundAccountId);
         } catch (error) {
           await rollbackCredentialMutation(connector, credentialMutationSnapshot, "binding", diagnosticContext);

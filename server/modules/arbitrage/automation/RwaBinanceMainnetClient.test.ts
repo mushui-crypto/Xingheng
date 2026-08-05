@@ -99,7 +99,7 @@ test("Binance funding settlements use stable provider ids and reject duplicate p
 
 test("Binance scans the frozen signed endpoints but cannot certify a non-atomic mutation window", async () => {
   const paths: string[] = [];
-  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex")}`;
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     (async (input) => {
@@ -135,7 +135,7 @@ test("Binance scans the frozen signed endpoints but cannot certify a non-atomic 
 });
 
 test("Binance remains incomplete when a concurrent event is correctly excluded by endTime", async () => {
-  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex")}`;
   let concurrentEventCreated = false;
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
@@ -175,7 +175,7 @@ test("Binance remains incomplete when a concurrent event is correctly excluded b
 });
 
 test("a strict cutoff race reaches zero leverage or order mutations in the real Binance adapter", async () => {
-  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex").slice(0, 16)}`;
+  const monitoredAccountId = `binance:${createHash("sha256").update("binance:123456").digest("hex")}`;
   const mutationMethods: string[] = [];
   const client = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
@@ -309,11 +309,10 @@ test("Binance client signs private reads with server-time offset and keeps spot/
   assert.equal(snapshot.perpetual.depthUsd > 8, true);
 });
 
-test("Binance client binds the authoritative UID to the frozen monitored account", async () => {
+test("Binance client returns the full authoritative UID fingerprint without using the monitored allowlist as binding authority", async () => {
   const expected = `binance:${createHash("sha256")
     .update("binance:42")
-    .digest("hex")
-    .slice(0, 16)}`;
+    .digest("hex")}`;
   const accepted = new RwaBinanceMainnetClient(
     { apiKey: "fake-key", apiSecret: "fake-secret" },
     fixtureFetch(),
@@ -334,10 +333,7 @@ test("Binance client binds the authoritative UID to the frozen monitored account
       ["203.0.113.10"],
       monitored,
     );
-    await assert.rejects(
-      mismatched.validateAccess(),
-      providerError("provider_identity_mismatch"),
-    );
+    assert.equal((await mismatched.validateAccess()).accountId, expected);
   }
 });
 

@@ -150,18 +150,8 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     };
     const accountFingerprint = createHash("sha256")
       .update(`binance:${uid}`)
-      .digest("hex")
-      .slice(0, 16);
+      .digest("hex");
     const accountId = `binance:${accountFingerprint}`;
-    if (
-      (process.env.NODE_ENV === "production" || this.monitoredAccountIds.length > 0)
-      && !this.monitoredAccountIds.includes(accountId)
-    ) {
-      throw new RwaBinanceProviderError(
-        "provider_identity_mismatch",
-        "Binance 权威账户身份与冻结的 monitored account 不一致。",
-      );
-    }
     return {
       accountId,
       accountFingerprint,
@@ -646,7 +636,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       const account = record(await this.signedRequest("spot", "/api/v3/account"));
       const uid = String(account.uid ?? "").trim();
       const fingerprint = uid
-        ? createHash("sha256").update(`binance:${uid}`).digest("hex").slice(0, 16)
+        ? createHash("sha256").update(`binance:${uid}`).digest("hex")
         : "";
       if (!fingerprint || !this.monitoredAccountIds.includes(`binance:${fingerprint}`)) {
         return buildPositionAttributionSnapshot({

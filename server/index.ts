@@ -207,7 +207,7 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
     new RwaBybitAutomationConnector(rwaExecution),
     new RwaBinanceAutomationConnector(binance),
   ]);
-}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld());
+}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld(), tradingStore);
 registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
 registerArbitrageRoutes(
   app,
