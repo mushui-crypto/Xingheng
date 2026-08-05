@@ -376,7 +376,7 @@ export class RwaBinanceAutomationService {
         message: this.store.masterKeyError,
       });
     }
-    if (metadata.requiresRotation) {
+    if (metadata.version === 1) {
       return this.status({
         metadata,
         stored: true,
@@ -2377,7 +2377,7 @@ export class RwaBinanceAutomationService {
   private async requireMetadata() {
     const metadata = await this.store.readCredentialMetadata();
     if (!metadata) throw new RwaNeutralExecutionError(409, "credential_not_configured", "Binance API 凭证尚未配置。");
-    if (metadata.requiresRotation) {
+    if (metadata.version === 1) {
       throw new RwaNeutralExecutionError(409, "credential_format_unsupported", "旧版 Binance Credential 不受支持；必须安全解绑后重新绑定。");
     }
     return metadata;
@@ -3143,9 +3143,7 @@ function keyProviderUnavailable(message: string | null) {
 function credentialStoreExecutionError(error: unknown) {
   if (error instanceof RwaNeutralExecutionError) return error;
   if (error instanceof CredentialStoreError) {
-    return error.category === "credential_rotation_required"
-      ? new RwaNeutralExecutionError(503, "credential_format_unsupported", "旧版 Binance Credential 不受支持；必须安全解绑后重新绑定。")
-      : new RwaNeutralExecutionError(503, error.category, error.message);
+    return new RwaNeutralExecutionError(503, error.category, error.message);
   }
   return new RwaNeutralExecutionError(503, "credential_unavailable", "Binance API 凭证不可用；已拒绝私有请求。");
 }

@@ -1086,6 +1086,30 @@ test("Binance rejects credential overwrite and fixed IP verification gates every
   }
 });
 
+test("Binance rebind validates access again and accepts a changed UID snapshot after unbind", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-rebind-identity-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client);
+    await harness.current.putCredentials({ apiKey: "first-key", apiSecret: "first-secret" });
+    const firstMetadata = await harness.store.readCredentialMetadata();
+    const readsAfterFirstBind = client.readCount;
+    const recovery = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    assert.deepEqual(await recovery.recoveryUnbind(), { providerVerifiedFlat: true });
+
+    client.access.accountId = "binance:replacement-account";
+    client.access.accountFingerprint = "replacement-uid-snapshot";
+    const rebound = new RwaBinanceAutomationService(harness.store, () => client, () => now, () => true);
+    await rebound.putCredentials({ apiKey: "second-key", apiSecret: "second-secret" });
+    const secondMetadata = await harness.store.readCredentialMetadata();
+    assert.ok(client.readCount > readsAfterFirstBind);
+    assert.notEqual(secondMetadata?.accountFingerprint, firstMetadata?.accountFingerprint);
+    assert.equal(secondMetadata?.accountFingerprint, "replacement-uid-snapshot");
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance execute rechecks fixed IP verification after challenge issuance", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-binance-ip-execute-"));
   try {
