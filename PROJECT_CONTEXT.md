@@ -400,6 +400,11 @@ P2#2、STS `403` 和 rollback evidence 缺失继续作为已接受风险记录�
 
 -   已由人工确认：既有 trusted Linux root build host 可用于当前
     `6efe18eb943b8a57750eeeb06700f101bd676414` 及后续同类标准 Release Workflow。
+-   后续同类标准 Release Workflow 默认复用既有 Vultr Linux root build host 及其受控运维
+    入口；每次仍必须重新验证环境身份、Linux/root 边界、固定 binary、Docker daemon 和候选
+    revision/tree identity，不得因默认路线而跳过任何门禁。
+-   既有 Vultr 入口不可用、身份无法证明或门禁失败时必须 `BLOCKED`；未经用户明确授权，不得
+    改用其他 host、账号、密钥、端口、上传方式或自定义交付通道。
 -   后续同类 Release Workflow 不需要重复判断该 build host 是否存在；每次构建仍必须通过
     既有 trusted candidate installer、`trusted-operation-launcher`、release-build、artifact
     identity 和 manifest verification 边界。
