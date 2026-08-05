@@ -380,54 +380,60 @@ export class RwaAutomationControlService {
       const binding = normalizedVenue === "binance"
         ? this.binanceBindingStore?.findBinanceCredentialBinding(userId)
         : undefined;
+      let failureReceiptId: string | null = null;
+      let automationStopFailed = false;
       let result;
       try {
-        result = await connector.deleteCredentials(sanitized, binding ? () => {
-          this.binanceBindingStore!.markBinanceVerifiedUnbound(
-            userId,
-            binding.uidSnapshot,
-            binding.bindingVersion,
-            this.now(),
-          );
-        } : undefined);
+        result = await connector.deleteCredentials(
+          sanitized,
+          binding ? () => {
+            this.binanceBindingStore!.markBinanceVerifiedUnbound(
+              userId,
+              binding.uidSnapshot,
+              binding.bindingVersion,
+              this.now(),
+            );
+          } : undefined,
+          binding ? (stopFailed) => {
+            const operationId = randomUUID();
+            const reason = "credential_restore_failed";
+            const requestDigest = canonicalRequestDigest({
+              operationId,
+              userId,
+              venue: "binance",
+              uidSnapshot: binding.uidSnapshot,
+              bindingVersion: binding.bindingVersion,
+              reason,
+            });
+            this.binanceBindingStore!.reserveBinanceRecoveryOperation({
+              operationId,
+              userId,
+              venue: "binance",
+              requestDigest,
+              now: this.now(),
+            });
+            const failed = this.binanceBindingStore!.completeBinanceRecoveryUnbind({
+              operationId,
+              userId,
+              venue: "binance",
+              requestDigest,
+              uidSnapshot: binding.uidSnapshot,
+              bindingVersion: binding.bindingVersion,
+              operator: userId,
+              approver: "not_available",
+              reason,
+              failureReason: reason,
+              providerVerifiedFlat: false,
+              recoveryInconsistent: true,
+              now: this.now(),
+            });
+            failureReceiptId = failed.receiptId;
+            automationStopFailed = stopFailed;
+          } : undefined,
+        );
       } catch (error) {
-        if (binding && isCredentialRestoreFailure(error)) {
-          const operationId = randomUUID();
-          const reason = "credential_restore_failed";
-          const requestDigest = canonicalRequestDigest({
-            operationId,
-            userId,
-            venue: "binance",
-            uidSnapshot: binding.uidSnapshot,
-            bindingVersion: binding.bindingVersion,
-            reason,
-          });
-          this.binanceBindingStore!.reserveBinanceRecoveryOperation({
-            operationId,
-            userId,
-            venue: "binance",
-            requestDigest,
-            now: this.now(),
-          });
-          const failed = this.binanceBindingStore!.completeBinanceRecoveryUnbind({
-            operationId,
-            userId,
-            venue: "binance",
-            requestDigest,
-            uidSnapshot: binding.uidSnapshot,
-            bindingVersion: binding.bindingVersion,
-            operator: userId,
-            approver: "not_available",
-            reason,
-            failureReason: reason,
-            providerVerifiedFlat: false,
-            recoveryInconsistent: true,
-            now: this.now(),
-          });
-          throw recoveryInconsistentError(
-            failed.receiptId,
-            error.details?.automationStopFailed === true,
-          );
+        if (isCredentialRestoreFailure(error) && failureReceiptId) {
+          throw recoveryInconsistentError(failureReceiptId, automationStopFailed);
         }
         throw error;
       }
@@ -471,9 +477,8 @@ export class RwaAutomationControlService {
       if (reservation.result.status === "recovery_inconsistent") throw recoveryInconsistentError(reservation.result.receiptId);
       return reservation.result;
     }
-    let connector: RwaAutomationConnector | null = null;
-    let snapshot: unknown;
-    let credentialMutated = false;
+    let failureReceiptId: string | null = null;
+    let automationStopFailed = false;
     try {
       const binding = this.binanceBindingStore.findBinanceCredentialBinding(userId);
       if (!binding) {
@@ -488,7 +493,7 @@ export class RwaAutomationControlService {
       this.admitRequest("credential", sourceIp, userId, "binance");
       this.assertRecoveryControlStopped(userId);
       const registry = this.registry(userId);
-      connector = registry.requireImplemented("binance");
+      const connector = registry.requireImplemented("binance");
       await registry.initialize();
       await this.consumeStepUp(userId, sessionDomain, body.stepUpToken, {
         operation: "credential_recovery_unbind",
@@ -501,41 +506,28 @@ export class RwaAutomationControlService {
       if (!connector.recoveryUnbind) {
         throw new RwaAutomationControlError(501, "recovery_unbind_unavailable", "Binance Recovery Unbind 尚未实现。");
       }
-      snapshot = await connector.captureCredentialMutationSnapshot?.();
-      credentialMutated = true;
-      const recovered = await connector.recoveryUnbind();
-      if (!recovered.providerVerifiedFlat && !approver) {
-        throw new RwaAutomationControlError(403, "recovery_approval_required", "Provider 不可读取时需要有效 owner/admin approval。");
-      }
-      const result = this.binanceBindingStore.completeBinanceRecoveryUnbind({
-        operationId,
-        userId,
-        venue: "binance",
-        requestDigest,
-        uidSnapshot,
-        bindingVersion,
-        operator: userId,
-        approver: recovered.providerVerifiedFlat ? "not_required" : approver!,
-        reason,
-        providerVerifiedFlat: recovered.providerVerifiedFlat,
-        now: this.now(),
-      });
-      this.invalidateAssetAuthorizationPreviews(userId, "binance");
-      this.stepUpSecurity.revokeAutomationScope(userId, "binance");
-      return result;
-    } catch (error) {
-      if (credentialMutated && connector?.restoreCredentialMutationSnapshot && snapshot !== undefined) {
-        try {
-          await connector.restoreCredentialMutationSnapshot(snapshot);
-        } catch {
-          let automationStopFailed = false;
-          try {
-            if (!connector.markCredentialRecoveryInconsistent) automationStopFailed = true;
-            else await connector.markCredentialRecoveryInconsistent();
-          } catch {
-            automationStopFailed = true;
+      let result: ReturnType<TradingStore["completeBinanceRecoveryUnbind"]> | null = null;
+      await connector.recoveryUnbind(
+        (recovered) => {
+          if (!recovered.providerVerifiedFlat && !approver) {
+            throw new RwaAutomationControlError(403, "recovery_approval_required", "Provider 不可读取时需要有效 owner/admin approval。");
           }
-          const result = this.binanceBindingStore.completeBinanceRecoveryUnbind({
+          result = this.binanceBindingStore!.completeBinanceRecoveryUnbind({
+            operationId,
+            userId,
+            venue: "binance",
+            requestDigest,
+            uidSnapshot,
+            bindingVersion,
+            operator: userId,
+            approver: recovered.providerVerifiedFlat ? "not_required" : approver!,
+            reason,
+            providerVerifiedFlat: recovered.providerVerifiedFlat,
+            now: this.now(),
+          });
+        },
+        (stopFailed) => {
+          const failed = this.binanceBindingStore!.completeBinanceRecoveryUnbind({
             operationId,
             userId,
             venue: "binance",
@@ -550,9 +542,16 @@ export class RwaAutomationControlService {
             recoveryInconsistent: true,
             now: this.now(),
           });
-          throw recoveryInconsistentError(result.receiptId, automationStopFailed);
-        }
-      }
+          failureReceiptId = failed.receiptId;
+          automationStopFailed = stopFailed;
+        },
+      );
+      if (!result) throw new RwaAutomationControlError(503, "recovery_unbind_incomplete", "Recovery Unbind 未完成 Binding finalize。");
+      this.invalidateAssetAuthorizationPreviews(userId, "binance");
+      this.stepUpSecurity.revokeAutomationScope(userId, "binance");
+      return result;
+    } catch (error) {
+      if (failureReceiptId) throw recoveryInconsistentError(failureReceiptId, automationStopFailed);
       this.binanceBindingStore.releaseBinanceRecoveryOperation(operationId, userId, requestDigest);
       throw error;
     }

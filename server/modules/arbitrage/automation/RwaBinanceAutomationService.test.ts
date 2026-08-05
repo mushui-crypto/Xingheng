@@ -3188,6 +3188,69 @@ test("Recovery Unbind distinguishes provider-verified flat from unreadable provi
   }
 });
 
+test("Recovery Unbind holds rollback against a queued automation mutation", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-rollback-lock-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    const accountId = (await harness.current.getCredentialStatus()).accountId!;
+    const originalRestore = harness.store.restoreCredentialMutationSnapshot.bind(harness.store);
+    let releaseRestore!: () => void;
+    const restoreRelease = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    harness.store.restoreCredentialMutationSnapshot = async (snapshot) => {
+      restoreStarted();
+      await restoreRelease;
+      return originalRestore(snapshot);
+    };
+    const recovery = harness.current.recoveryUnbind(() => {
+      throw new Error("Binding finalization failed");
+    });
+    await restoreStart;
+    let mutationFinished = false;
+    const queuedMutation = harness.current.updateConfig({ accountId, maxEntryBasisBps: 13 })
+      .finally(() => { mutationFinished = true; });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(mutationFinished, false);
+    releaseRestore();
+    await assert.rejects(recovery, /Binding finalization failed/);
+    await queuedMutation;
+    assert.equal((await harness.store.readState()).config.maxEntryBasisBps, 13);
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Recovery Unbind rollback preserves fail-closed state when Provider is unknown", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-provider-unknown-rollback-"));
+  try {
+    const client = new FakeBinanceClient();
+    const harness = serviceHarness(directory, "user-a", client, () => {}, undefined, undefined, undefined, () => now, () => true);
+    await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
+    client.readPreflightSnapshot = async () => { throw new Error("provider unavailable"); };
+
+    await assert.rejects(
+      harness.current.recoveryUnbind((result) => {
+        assert.equal(result.providerVerifiedFlat, false);
+        throw new Error("approval required");
+      }),
+      /approval required/,
+    );
+    assert.notEqual(await harness.store.readCredentialMetadata(), null);
+    const state = await harness.store.readState();
+    assert.equal(state.credentialLifecycle, "invalid");
+    assert.equal(state.config.globalExecutionEnabled, false);
+    assert.equal(state.config.strategyEnabled, false);
+    assert.equal(state.config.killSwitchActive, true);
+    assert.match(state.credentialAlert ?? "", /不能证明 Binance 账户已经清算/);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Recovery Unbind fails closed while automation is not fully stopped", async () => {
   const directory = await mkdtemp(join(tmpdir(), "xingheng-recovery-unbind-active-"));
   try {

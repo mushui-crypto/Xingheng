@@ -2252,15 +2252,37 @@ test("normal Binance unbind restore failure records recovery_inconsistent and bl
   );
   try {
     await service.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
-    store.restoreCredentialMutationSnapshot = async () => { throw new Error("restore failed"); };
+    let releaseRestore!: () => void;
+    const restoreRelease = new Promise<void>((resolve) => { releaseRestore = resolve; });
+    let restoreStarted!: () => void;
+    const restoreStart = new Promise<void>((resolve) => { restoreStarted = resolve; });
+    store.restoreCredentialMutationSnapshot = async () => {
+      restoreStarted();
+      await restoreRelease;
+      throw new Error("restore failed");
+    };
     bindingStore.markBinanceVerifiedUnbound = () => { throw new Error("Binding finalization failed"); };
 
-    await assert.rejects(
-      control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken }),
+    const deletion = control.deleteCredentials("user-a", sessionDomain, "binance", { accountId, stepUpToken });
+    const deletionRejection = assert.rejects(
+      deletion,
       (error: unknown) => error instanceof RwaAutomationControlError
         && error.category === "recovery_inconsistent"
         && typeof error.details?.receiptId === "string",
     );
+    await restoreStart;
+    let enableFinished = false;
+    const queuedEnable = service.updateConfig({ accountId, globalExecutionEnabled: true })
+      .finally(() => { enableFinished = true; });
+    const enableRejection = assert.rejects(
+      queuedEnable,
+      (error: unknown) => error instanceof RwaNeutralExecutionError && error.category === "recovery_inconsistent",
+    );
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(enableFinished, false);
+    releaseRestore();
+    await deletionRejection;
+    await enableRejection;
     const binding = bindingStore.findBinanceCredentialBinding("user-a")!;
     assert.equal(binding.status, "recovery_inconsistent");
     assert.equal(binding.interventionStatus, "manual_intervention");
@@ -2568,7 +2590,30 @@ function fakeConnector(
       };
     },
     deleteCredentials: async (_input, finalize) => { await finalize?.(); return {}; },
-    recoveryUnbind: options.recoveryUnbind,
+    recoveryUnbind: options.recoveryUnbind ? async (finalize, finalizeRestoreFailure) => {
+      const snapshot = await options.captureCredentialSnapshot?.();
+      try {
+        const result = await options.recoveryUnbind!();
+        await finalize?.(result);
+        return result;
+      } catch (error) {
+        if (snapshot !== undefined && options.restoreCredentialSnapshot) {
+          try {
+            await options.restoreCredentialSnapshot(snapshot);
+          } catch {
+            let automationStopFailed = false;
+            try {
+              if (!options.markCredentialRecoveryInconsistent) automationStopFailed = true;
+              else await options.markCredentialRecoveryInconsistent();
+            } catch {
+              automationStopFailed = true;
+            }
+            await finalizeRestoreFailure?.(automationStopFailed);
+          }
+        }
+        throw error;
+      }
+    } : undefined,
     markCredentialRecoveryInconsistent: options.markCredentialRecoveryInconsistent,
     captureCredentialMutationSnapshot: options.captureCredentialSnapshot,
     restoreCredentialMutationSnapshot: options.restoreCredentialSnapshot,
