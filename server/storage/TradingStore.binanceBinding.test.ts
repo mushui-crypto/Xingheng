@@ -142,3 +142,50 @@ test("credential note changes are audited without changing binding identity", (t
   assert.throws(() => db.prepare("UPDATE binance_binding_audit_receipts SET reason = 'changed'").run());
   assert.throws(() => db.prepare("DELETE FROM binance_binding_audit_receipts").run());
 });
+
+test("two SQLite connections allow only one active binding for the same user and venue", async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-binding-race-"));
+  const dbPath = join(directory, "test.sqlite");
+  const firstStore = new TradingStore(dbPath);
+  const secondStore = new TradingStore(dbPath);
+  t.after(() => {
+    firstStore.close();
+    secondStore.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const attempts = await Promise.allSettled([
+    Promise.resolve().then(() => firstStore.bindBinanceCredential("user-a", fingerprint("first"))),
+    Promise.resolve().then(() => secondStore.bindBinanceCredential("user-a", fingerprint("second"))),
+  ]);
+  assert.equal(attempts.filter((attempt) => attempt.status === "fulfilled").length, 1);
+  assert.equal(attempts.filter((attempt) => attempt.status === "rejected").length, 1);
+  assert.equal(firstStore.findBinanceCredentialBinding("user-a")?.status, "active");
+});
+
+test("Recovery operation reservation rethrows unrelated SQLite insert failures", (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "xingheng-binance-operation-failure-"));
+  const dbPath = join(directory, "test.sqlite");
+  const store = new TradingStore(dbPath);
+  const db = new DatabaseSync(dbPath);
+  t.after(() => {
+    db.close();
+    store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  db.exec(`
+    CREATE TRIGGER reject_binance_binding_operation_insert
+    BEFORE INSERT ON binance_binding_operations
+    BEGIN
+      SELECT RAISE(ABORT, 'injected insert failure');
+    END
+  `);
+  assert.throws(
+    () => store.reserveBinanceRecoveryOperation({
+      operationId: "66666666-6666-4666-8666-666666666666",
+      userId: "user-a",
+      venue: "binance",
+      requestDigest: "request",
+    }),
+    /injected insert failure/,
+  );
+});

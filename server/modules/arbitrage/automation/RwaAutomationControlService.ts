@@ -440,11 +440,14 @@ export class RwaAutomationControlService {
     let credentialMutated = false;
     try {
       const binding = this.binanceBindingStore.findBinanceCredentialBinding(userId);
-      if (!binding || binding.uidSnapshot !== uidSnapshot) {
+      if (!binding) {
         throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       if (binding.bindingVersion !== bindingVersion || binding.status !== "active") {
         throw new RwaAutomationControlError(409, "binding_version_conflict", "Binding 已变化，旧请求不能继续执行。");
+      }
+      if (binding.uidSnapshot !== uidSnapshot) {
+        throw new RwaAutomationControlError(404, "binding_not_found", "当前用户不存在匹配的 Binance Credential Binding。");
       }
       this.admitRequest("credential", sourceIp, userId, "binance");
       this.assertRecoveryControlStopped(userId);
@@ -459,10 +462,12 @@ export class RwaAutomationControlService {
         requestDigest,
         notionalUsd: null,
       });
+      if (!connector.recoveryUnbind) {
+        throw new RwaAutomationControlError(501, "recovery_unbind_unavailable", "Binance Recovery Unbind 尚未实现。");
+      }
       snapshot = await connector.captureCredentialMutationSnapshot?.();
-      const recovered = await connector.recoveryUnbind?.();
-      if (!recovered) throw new RwaAutomationControlError(501, "recovery_unbind_unavailable", "Binance Recovery Unbind 尚未实现。");
       credentialMutated = true;
+      const recovered = await connector.recoveryUnbind();
       if (!recovered.providerVerifiedFlat && !approver) {
         throw new RwaAutomationControlError(403, "recovery_approval_required", "Provider 不可读取时需要有效 owner/admin approval。");
       }

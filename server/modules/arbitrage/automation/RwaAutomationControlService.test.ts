@@ -2033,6 +2033,12 @@ test("Recovery Unbind requires user step-up plus admin approval for unreadable p
     stepUpToken,
   };
   try {
+    for (const injected of [{ userId: "user-b" }, { binanceUid: "raw-uid" }]) {
+      await assert.rejects(
+        control.recoveryUnbind("user-a", sessionDomain, { ...body, ...injected }, "admin@example.com"),
+        (error: unknown) => error instanceof RwaAutomationControlError && error.category === "invalid_request",
+      );
+    }
     await assert.rejects(
       control.recoveryUnbind("user-a", sessionDomain, body, null),
       (error: unknown) => error instanceof RwaAutomationControlError && error.category === "recovery_approval_required",
@@ -2053,6 +2059,46 @@ test("Recovery Unbind requires user step-up plus admin approval for unreadable p
       control.recoveryUnbind("user-b", sessionDomain, { ...body, operationId: "55555555-5555-4555-8555-555555555555" }, "admin@example.com"),
       (error: unknown) => error instanceof RwaAutomationControlError && error.category === "binding_not_found",
     );
+  } finally {
+    bindingStore.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Recovery Unbind restores the credential snapshot after a partial mutation failure", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "xingheng-control-recovery-rollback-"));
+  const bindingStore = new TradingStore(join(directory, "binding.sqlite"));
+  const uidSnapshot = createHash("sha256").update("binance:rollback-user").digest("hex");
+  bindingStore.bindBinanceCredential("user-a", uidSnapshot, "", 100);
+  let restoreCalls = 0;
+  const connector = fakeConnector(() => undefined, {
+    venue: "binance",
+    accountId: `binance:${uidSnapshot}`,
+    recoveryUnbind: async () => { throw new Error("partial credential mutation"); },
+    captureCredentialSnapshot: async () => ({ credential: "encrypted" }),
+    restoreCredentialSnapshot: async () => { restoreCalls += 1; },
+  });
+  const control = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([connector]),
+    passThroughStepUp,
+    undefined,
+    () => 200,
+    () => undefined,
+    bindingStore,
+  );
+  try {
+    await assert.rejects(
+      control.recoveryUnbind("user-a", sessionDomain, {
+        uidSnapshot,
+        bindingVersion: 1,
+        operationId: "77777777-7777-4777-8777-777777777777",
+        reason: "partial failure",
+        stepUpToken,
+      }, "admin@example.com"),
+      /partial credential mutation/,
+    );
+    assert.equal(restoreCalls, 1);
   } finally {
     bindingStore.close();
     await rm(directory, { recursive: true, force: true });

@@ -324,8 +324,12 @@ export class TradingStore {
            operationId, userId, venue, requestDigest, resultJson, createdAt, completedAt
          ) VALUES (?, ?, ?, ?, NULL, ?, NULL)`,
       ).run(input.operationId, input.userId, input.venue, input.requestDigest, input.now ?? Date.now());
-    } catch {
-      return this.reserveBinanceRecoveryOperation(input);
+    } catch (error) {
+      const raced = this.db.prepare(
+        "SELECT 1 FROM binance_binding_operations WHERE operationId = ?",
+      ).get(input.operationId);
+      if (raced) return this.reserveBinanceRecoveryOperation(input);
+      throw error;
     }
     return { kind: "reserved" };
   }

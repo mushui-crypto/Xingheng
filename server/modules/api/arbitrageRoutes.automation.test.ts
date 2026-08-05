@@ -27,6 +27,14 @@ test("automation user API rejects anonymous and disabled users before handlers",
   auth(request(), anonymous, () => assert.fail("anonymous request continued"));
   assert.equal(anonymous.statusCode, 401);
   assert.equal(anonymous.headers["Cache-Control"], "no-store");
+  const adminOnly = mockResponse();
+  auth({
+    method: "POST",
+    originalUrl: "/api/arbitrage/automation/internal/binance/recovery-unbind",
+    baseUrl: "/api/arbitrage",
+    headers: { cookie: "xh_admin_session=admin-only" },
+  }, adminOnly, () => assert.fail("admin-only recovery request continued"));
+  assert.equal(adminOnly.statusCode, 401);
   const disabled = mockResponse();
   auth(request("disabled"), disabled, () => assert.fail("disabled request continued"));
   assert.equal(disabled.statusCode, 403);
