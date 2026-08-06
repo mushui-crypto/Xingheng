@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
+  cpSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -191,6 +192,57 @@ test("direct recovery entry is rejected before touching state", () => {
   ], { encoding: "utf8" });
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /controlled Linux root|trusted wrapper context/u);
+});
+
+test("recovery wrapper preserves caller arguments across release manifest loading", () => {
+  const root = mkdtempSync(resolve(tmpdir(), "xingheng-permit-recovery-wrapper-"));
+  try {
+    const scripts = resolve(root, "scripts");
+    const bin = resolve(root, "bin");
+    mkdirSync(scripts);
+    mkdirSync(bin);
+    cpSync(
+      new URL("./recover-production-self-test-permit.sh", import.meta.url),
+      resolve(scripts, "recover-production-self-test-permit.sh"),
+    );
+    cpSync(
+      new URL("./load-release-manifest.sh", import.meta.url),
+      resolve(scripts, "load-release-manifest.sh"),
+    );
+    writeExecutable(resolve(scripts, "trusted-operation-preamble.sh"), "#!/bin/sh\n");
+    const generatedOperation = "9".repeat(32);
+    writeExecutable(resolve(bin, "node"), `#!/bin/sh
+case "$1:$2" in
+  scripts/verify-deployment-revision.mjs:manifest-values)
+    printf '${REVISION}\\nsha256:%064d\\nsha256:%064d\\nsha256:%064d\\n' 1 2 3
+    ;;
+  scripts/verify-deployment-revision.mjs:*) ;;
+  -e:*) printf '${generatedOperation}' ;;
+  scripts/productionSelfTestPermitRecovery.mjs:run)
+    printf 'RECOVERY_CALL=%s|%s\\n' "$3" "$4"
+    ;;
+  *) exit 1 ;;
+esac
+`);
+    const environment = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+    const receiptSha256 = "8".repeat(64);
+    for (const [arguments_, expectedOperation] of [
+      [[receiptSha256], generatedOperation],
+      [[receiptSha256, RECOVERY_OPERATION], RECOVERY_OPERATION],
+    ]) {
+      const result = spawnSync("sh", [
+        "scripts/recover-production-self-test-permit.sh",
+        ...arguments_,
+      ], { cwd: root, env: environment, encoding: "utf8" });
+      assert.equal(result.status, 0, result.stderr);
+      assert.match(
+        result.stdout,
+        new RegExp(`RECOVERY_CALL=${expectedOperation}\\|${receiptSha256}`, "u"),
+      );
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 function withFixture(run) {
@@ -410,6 +462,11 @@ function writeSecure(path, bytes, mode) {
 
 function writeSecureIfAbsent(path, bytes, mode) {
   if (!exists(path)) writeSecure(path, bytes, mode);
+}
+
+function writeExecutable(path, contents) {
+  writeFileSync(path, contents, "utf8");
+  chmodSync(path, 0o755);
 }
 
 function readDir(path) { return exists(path) ? readdirSync(path).sort() : []; }
