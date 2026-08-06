@@ -6,6 +6,17 @@ export const RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE =
 export type RwaBinanceProductionSelfTestActionScope =
   readonly ["READ", "TRADE"];
 
+export const RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN =
+  "xingheng:capital-test:binance-credential-binding:v1" as const;
+
+export type RwaBinanceProductionSelfTestBinding = {
+  userId: string;
+  venue: "binance";
+  bindingVersion: number;
+  uidSnapshot: string;
+  status: "active" | "verified_unbound" | "unverified_unbound" | "recovery_inconsistent";
+};
+
 export type RwaBinanceProductionSelfTestPermit = {
   permitId: string;
   ownerUserId: string;
@@ -62,6 +73,7 @@ export function loadRwaBinanceProductionSelfTestPermit(
     || !/^[a-f0-9]{64}$/u.test(authorizationDigest)
     || !/^[a-f0-9]{40}$/u.test(revision)
     || !Number.isFinite(approvedCapitalUsd) || approvedCapitalUsd <= 0
+    || approvedCapitalUsd > 40
     || !isStrictUtcTimestamp(expiresAtSource)
   ) return null;
   const expiresAt = Date.parse(expiresAtSource);
@@ -82,8 +94,25 @@ export function loadRwaBinanceProductionSelfTestPermit(
   };
 }
 
-export function binanceAccountBindingSha256(accountId: string, accountFingerprint: string) {
-  return sha256(`binance:xaut:${accountId}:${accountFingerprint}`);
+export function binanceCredentialBindingSha256(
+  binding: Pick<RwaBinanceProductionSelfTestBinding,
+    "userId" | "venue" | "bindingVersion" | "uidSnapshot">,
+) {
+  if (
+    typeof binding.userId !== "string"
+    || binding.userId.length === 0
+    || binding.venue !== "binance"
+    || !Number.isSafeInteger(binding.bindingVersion)
+    || binding.bindingVersion <= 0
+    || !/^[a-f0-9]{64}$/u.test(binding.uidSnapshot)
+  ) throw new Error("Binance Credential Binding identity is invalid.");
+  return sha256([
+    RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
+    binding.userId,
+    binding.venue,
+    String(binding.bindingVersion),
+    binding.uidSnapshot,
+  ].join("\0"));
 }
 
 export function productionSelfTestPermitDigest(input: {
@@ -131,6 +160,7 @@ export function validProductionSelfTestPermitConfirmation(
     && typeof record.revision === "string" && /^[a-f0-9]{40}$/u.test(record.revision)
     && typeof record.approvedCapitalUsd === "number"
     && Number.isFinite(record.approvedCapitalUsd) && record.approvedCapitalUsd > 0
+    && record.approvedCapitalUsd <= 40
     && typeof record.digest === "string" && /^[a-f0-9]{64}$/u.test(record.digest)
     && typeof record.expiresAt === "number" && Number.isSafeInteger(record.expiresAt)
     && typeof record.confirmedAt === "number" && Number.isSafeInteger(record.confirmedAt);

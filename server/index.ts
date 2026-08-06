@@ -216,6 +216,7 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
         );
       }
     },
+    () => tradingStore.findBinanceCredentialBinding(userId) ?? null,
   );
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),

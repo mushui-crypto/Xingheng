@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
-  binanceAccountBindingSha256,
+  binanceCredentialBindingSha256,
   loadRwaBinanceProductionSelfTestPermit,
   productionSelfTestPermitDigest,
+  RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
   validProductionSelfTestPermitConsumption,
   validProductionSelfTestPermitConfirmation,
 } from "./RwaBinanceProductionSelfTestPermit";
@@ -32,7 +34,34 @@ test("production self-test permit accepts only the exact server-controlled schem
   assert.deepEqual(parsed.actionScope, ["READ", "TRADE"]);
   assert.equal(parsed.authorizationDigest, authorizationDigest);
   assert.equal(parsed.digest, productionSelfTestPermitDigest(parsed));
-  assert.match(binanceAccountBindingSha256("account", "fingerprint"), /^[a-f0-9]{64}$/u);
+  const binding = {
+    userId: "USR-MOSS1",
+    venue: "binance" as const,
+    bindingVersion: 1,
+    uidSnapshot: "f".repeat(64),
+  };
+  const bindingDigest = binanceCredentialBindingSha256(binding);
+  assert.match(bindingDigest, /^[a-f0-9]{64}$/u);
+  assert.equal(bindingDigest, createHash("sha256").update([
+    RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
+    binding.userId,
+    binding.venue,
+    String(binding.bindingVersion),
+    binding.uidSnapshot,
+  ].join("\0")).digest("hex"));
+  assert.notEqual(
+    binanceCredentialBindingSha256(binding),
+    binanceCredentialBindingSha256({ ...binding, bindingVersion: 2 }),
+  );
+  assert.notEqual(
+    binanceCredentialBindingSha256(binding),
+    binanceCredentialBindingSha256({ ...binding, userId: "USR-MOSS2" }),
+  );
+  const renamedBinding = { ...binding, credentialNote: "renamed" };
+  assert.equal(
+    binanceCredentialBindingSha256(binding),
+    binanceCredentialBindingSha256(renamedBinding),
+  );
   const {
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: _missingActionScope,
     ...withoutActionScope
@@ -58,10 +87,33 @@ test("production self-test permit accepts only the exact server-controlled schem
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","trade"]' },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: "D".repeat(64) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "0" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "40.01" },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00Z" },
     { XINGHENG_EXPECTED_REVISION: "main" },
   ]) {
     assert.equal(loadRwaBinanceProductionSelfTestPermit({ ...environment, ...mutation }), null);
+  }
+});
+
+test("production self-test binding identity rejects malformed snapshots and unsupported venues", () => {
+  const binding = {
+    userId: "USR-MOSS1",
+    venue: "binance" as const,
+    bindingVersion: 1,
+    uidSnapshot: "f".repeat(64),
+  };
+  for (const invalid of [
+    { ...binding, userId: "" },
+    { ...binding, venue: "bybit" },
+    { ...binding, bindingVersion: 0 },
+    { ...binding, bindingVersion: 1.5 },
+    { ...binding, uidSnapshot: "f".repeat(16) },
+    { ...binding, uidSnapshot: "F".repeat(64) },
+  ]) {
+    assert.throws(
+      () => binanceCredentialBindingSha256(invalid as typeof binding),
+      /Binding identity is invalid/u,
+    );
   }
 });
 

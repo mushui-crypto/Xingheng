@@ -102,10 +102,11 @@ import {
   type RwaConnectivitySmokeRecord,
 } from "./RwaConnectivitySmoke";
 import {
-  binanceAccountBindingSha256,
+  binanceCredentialBindingSha256,
   loadRwaBinanceProductionSelfTestPermit,
   productionSelfTestPermitDigest,
   validProductionSelfTestActionScope,
+  type RwaBinanceProductionSelfTestBinding,
   type RwaBinanceProductionSelfTestPermit,
 } from "./RwaBinanceProductionSelfTestPermit";
 
@@ -146,6 +147,8 @@ export class RwaBinanceAutomationService {
     private readonly productionEnvironment: () => boolean = () =>
       process.env.NODE_ENV === "production",
     assertAutomationMutationAllowed: () => void = () => {},
+    private readonly currentCredentialBinding: () => RwaBinanceProductionSelfTestBinding | null =
+      () => null,
   ) {
     this.assertExecutionLeaseHeld = () => {
       assertExecutionLeaseHeld();
@@ -2480,7 +2483,7 @@ export class RwaBinanceAutomationService {
     const permit = this.assertProductionSelfTestPermit(state.config, metadata, {
       accountId: metadata.accountId,
       accountFingerprint: metadata.accountFingerprint,
-    } as Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>);
+    } as Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>, false);
     if (
       permit
       && !state.productionSelfTestPermitConsumptions.some((item) =>
@@ -2808,12 +2811,17 @@ export class RwaBinanceAutomationService {
     config: RwaExecutionConfig,
     metadata: BinanceCredentialMetadata,
     access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+    requireProviderUidSnapshot = true,
   ) {
     if (
       !this.productionEnvironment()
       || config.accountIsolationMode === "dedicated_subaccount"
     ) return null;
-    const permit = this.requireMatchingProductionSelfTestPermit(metadata, access);
+    const permit = this.requireMatchingProductionSelfTestPermit(
+      metadata,
+      access,
+      requireProviderUidSnapshot,
+    );
     const confirmation = config.productionSelfTestPermitConfirmation;
     if (
       !confirmation
@@ -2838,7 +2846,11 @@ export class RwaBinanceAutomationService {
       || permit.ownerUserId !== this.store.ownerUserId
       || !validProductionSelfTestActionScope(permit.actionScope)
       || !/^[a-f0-9]{64}$/u.test(permit.authorizationDigest)
+      || !Number.isFinite(permit.approvedCapitalUsd)
+      || permit.approvedCapitalUsd <= 0
+      || permit.approvedCapitalUsd > 40
       || permit.digest !== productionSelfTestPermitDigest(permit)
+      || !this.productionSelfTestPermitBindingMatches(permit)
       || !confirmation
       || !this.productionSelfTestPermitConfirmationMatches(confirmation, permit)
       || confirmation.confirmedAt >= permit.expiresAt
@@ -2866,21 +2878,50 @@ export class RwaBinanceAutomationService {
   private requireMatchingProductionSelfTestPermit(
     metadata: BinanceCredentialMetadata,
     access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
+    requireProviderUidSnapshot = true,
   ) {
     const permit = this.productionSelfTestPermit();
-    const binding = binanceAccountBindingSha256(access.accountId, access.accountFingerprint);
     if (
       !permit
       || this.now() >= permit.expiresAt
       || permit.ownerUserId !== this.store.ownerUserId
       || !validProductionSelfTestActionScope(permit.actionScope)
       || !/^[a-f0-9]{64}$/u.test(permit.authorizationDigest)
+      || !Number.isFinite(permit.approvedCapitalUsd)
+      || permit.approvedCapitalUsd <= 0
+      || permit.approvedCapitalUsd > 40
       || permit.digest !== productionSelfTestPermitDigest(permit)
-      || permit.accountBindingSha256 !== binding
+      || !this.productionSelfTestPermitBindingMatches(
+        permit,
+        (access as { uidSnapshot?: unknown }).uidSnapshot,
+        requireProviderUidSnapshot,
+      )
       || access.accountId !== metadata.accountId
       || access.accountFingerprint !== metadata.accountFingerprint
     ) throw accountIsolationUnconfirmed();
     return permit;
+  }
+
+  private productionSelfTestPermitBindingMatches(
+    permit: RwaBinanceProductionSelfTestPermit,
+    providerUidSnapshot?: unknown,
+    requireProviderUidSnapshot = false,
+  ) {
+    const binding = this.currentCredentialBinding();
+    if (
+      !binding
+      || binding.status !== "active"
+      || binding.userId !== this.store.ownerUserId
+      || binding.venue !== "binance"
+      || (requireProviderUidSnapshot && typeof providerUidSnapshot !== "string")
+      || (providerUidSnapshot !== undefined
+        && (typeof providerUidSnapshot !== "string" || providerUidSnapshot !== binding.uidSnapshot))
+    ) return false;
+    try {
+      return permit.accountBindingSha256 === binanceCredentialBindingSha256(binding);
+    } catch {
+      return false;
+    }
   }
 
   private approvedConnectivitySmokeCapital(
