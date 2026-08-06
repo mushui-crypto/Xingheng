@@ -141,12 +141,14 @@ function fixture() {
   ]);
 
   const preflight = service(API, {
+    TRADING_DB_PATH: "/app/data/trading.sqlite",
     RWA_PROVIDER_PREFLIGHT_USER_ID: "",
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
     RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
   });
   preflight.volumes = mounts([
+    ["volume", "sqlite_data", "/app/data", true],
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
     ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
   ]);

@@ -165,6 +165,7 @@ services:
       XINGHENG_COMPOSE_PROJECT: xingheng
       XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+      TRADING_DB_PATH: /app/data/trading.sqlite
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
       RWA_PROVIDER_PREFLIGHT_USER_ID: "${RWA_PROVIDER_PREFLIGHT_USER_ID:-}"
       RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
@@ -173,6 +174,7 @@ services:
       RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
     volumes:
+      - sqlite_data:/app/data:ro
       - rwa_automation_data:/app/rwa-automation-data:ro
       - type: bind
         source: /run/xingheng/gcp-wif

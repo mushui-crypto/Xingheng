@@ -7,15 +7,27 @@ import type {
   RwaBinancePermissions,
 } from "../modules/arbitrage/automation/RwaBinanceAutomationTypes";
 import { RwaBinanceMainnetClient } from "../modules/arbitrage/automation/RwaBinanceMainnetClient";
+import {
+  binanceCredentialBindingSha256,
+  RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
+  type RwaBinanceProductionSelfTestBinding,
+} from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
+import { BinanceCredentialBindingReadStore } from "../storage/BinanceCredentialBindingReadStore";
 
 export type ProviderIdentityReceipt = {
-  schemaVersion: 1;
+  schemaVersion: 2;
   provider: "binance";
   deploymentEnvironment: "production";
   composeProject: "xingheng";
   revision: string;
-  accountIdentitySha256: string;
-  credentialBindingSha256: string;
+  userIdSha256: string;
+  venue: "binance";
+  bindingDomain: typeof RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN;
+  bindingVersion: number;
+  uidSnapshotSha256: string;
+  accountBindingSha256: string;
+  providerUidMatchesBinding: true;
+  snapshotUidMatchesBinding: true;
   accountMode: string;
   permissions: {
     read: boolean;
@@ -54,13 +66,8 @@ export type ProviderIdentityReceipt = {
   readOnly: true;
 };
 
-type Metadata = {
-  accountId: string;
-  accountFingerprint: string;
-};
-
 type Store = {
-  readCredentialMetadata(): Promise<Metadata | null>;
+  readCredentialBinding(): Promise<RwaBinanceProductionSelfTestBinding | null>;
   loadCredentials(): Promise<RwaBinanceCredentials>;
 };
 
@@ -68,10 +75,34 @@ type Client = {
   validateAccess(): Promise<{
     accountId: string;
     accountFingerprint: string;
+    uidSnapshot: string;
     accountMode: string;
     permissions: ProviderIdentityReceipt["permissions"];
   }>;
-  readPreflightSnapshot(): Promise<any>;
+  readPreflightSnapshot(): Promise<{
+    uidSnapshot?: string;
+    productAvailability: {
+      available: boolean;
+    };
+    spot: {
+      status: string;
+      qtyStep: number;
+      minOrderQty: number;
+      minNotionalUsd: number;
+      priceTick: number;
+    };
+    perpetual: {
+      status: string;
+      qtyStep: number;
+      minOrderQty: number;
+      minNotionalUsd: number;
+      priceTick: number;
+    };
+    existingSpotQuantityXaut: number;
+    existingPerpetualQuantityXaut: number;
+    openSpotOrderCount: number;
+    openPerpetualOrderCount: number;
+  }>;
 };
 
 type Dependencies = {
@@ -112,46 +143,63 @@ export async function runRwaProviderIdentityPreflight(
   if (!/^USR-[A-Z0-9]+$/u.test(userId ?? "")) {
     throw new ProviderIdentityPreflightError("provider_owner_unconfigured");
   }
-  const createStore = dependencies.createStore ?? ((ownerUserId: string) =>
-    new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
-      userId: ownerUserId,
-      venue: "binance",
-      keyProvider: new GcpKmsCredentialKeyProvider(),
+  const createStore = dependencies.createStore ?? ((ownerUserId: string) => ({
+      readCredentialBinding: async () => {
+        const readStore = new BinanceCredentialBindingReadStore();
+        try {
+          return readStore.findActiveBinanceCredentialBinding(ownerUserId);
+        } finally {
+          readStore.close();
+        }
+      },
+      loadCredentials: async () => new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
+        userId: ownerUserId,
+        venue: "binance",
+        keyProvider: new GcpKmsCredentialKeyProvider(),
+      }).loadCredentials(),
     }));
   const createClient = dependencies.createClient
     ?? ((credentials: RwaBinanceCredentials) => new RwaBinanceMainnetClient(credentials));
   const store = createStore(userId!);
-  const metadata = await store.readCredentialMetadata();
-  if (!metadata) {
+  const binding = await store.readCredentialBinding();
+  if (!binding || binding.status !== "active") {
     throw new ProviderIdentityPreflightError("provider_credential_unconfigured");
   }
   const credentials = await store.loadCredentials();
   const client = createClient(credentials);
   const authoritative = await client.validateAccess();
-  if (
-    authoritative.accountId !== metadata.accountId
-    || authoritative.accountFingerprint !== metadata.accountFingerprint
-  ) {
+  if (authoritative.uidSnapshot !== binding.uidSnapshot) {
     throw new ProviderIdentityPreflightError("provider_identity_mismatch");
   }
   const snapshot = await client.readPreflightSnapshot();
-  if (snapshot.accountId !== authoritative.accountId
-    || snapshot.accountFingerprint !== authoritative.accountFingerprint) {
+  if (snapshot.uidSnapshot !== binding.uidSnapshot) {
     throw new ProviderIdentityPreflightError("provider_identity_mismatch");
   }
   const streamProbe = await (dependencies.probeStreams ?? probeBinanceGate1UserStreams)(
     credentials,
   );
-  const binding = `${deploymentEnvironment}:${composeProject}`
-    + `:${authoritative.accountId}:${authoritative.accountFingerprint}`;
+  const confirmedBinding = await store.readCredentialBinding();
+  if (
+    !confirmedBinding
+    || confirmedBinding.status !== "active"
+    || !sameBindingIdentity(binding, confirmedBinding)
+  ) {
+    throw new ProviderIdentityPreflightError("provider_identity_mismatch");
+  }
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     provider: "binance",
     deploymentEnvironment,
     composeProject,
     revision: revision!,
-    accountIdentitySha256: digest(`binance-authoritative:${authoritative.accountId}`),
-    credentialBindingSha256: digest(binding),
+    userIdSha256: digest(userId!),
+    venue: binding.venue,
+    bindingDomain: RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
+    bindingVersion: binding.bindingVersion,
+    uidSnapshotSha256: digest(binding.uidSnapshot),
+    accountBindingSha256: binanceCredentialBindingSha256(binding),
+    providerUidMatchesBinding: true,
+    snapshotUidMatchesBinding: true,
     accountMode: authoritative.accountMode,
     permissions: {
       read: authoritative.permissions.read,
@@ -184,6 +232,19 @@ export async function runRwaProviderIdentityPreflight(
     verifiedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     readOnly: true,
   };
+}
+
+function sameBindingIdentity(
+  left: Pick<RwaBinanceProductionSelfTestBinding,
+    "status" | "userId" | "venue" | "bindingVersion" | "uidSnapshot">,
+  right: Pick<RwaBinanceProductionSelfTestBinding,
+    "status" | "userId" | "venue" | "bindingVersion" | "uidSnapshot">,
+) {
+  return left.status === right.status
+    && left.userId === right.userId
+    && left.venue === right.venue
+    && left.bindingVersion === right.bindingVersion
+    && left.uidSnapshot === right.uidSnapshot;
 }
 
 export async function probeBinanceGate1UserStreams(

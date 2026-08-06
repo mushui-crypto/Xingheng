@@ -58,6 +58,7 @@ const SERVICE_MOUNTS = Object.freeze({
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
   ]),
   "provider-identity-preflight": Object.freeze([
+    ["volume", "sqlite_data", "/app/data", true],
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", true],
     ["bind", "wif", "/run/secrets/gcp-wif", true],
   ]),
@@ -228,6 +229,7 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
   if (
     preflight.environment?.XINGHENG_DEPLOYMENT_ENVIRONMENT !== environment
     || preflight.environment?.XINGHENG_COMPOSE_PROJECT !== project
+    || preflight.environment?.TRADING_DB_PATH !== "/app/data/trading.sqlite"
     || preflight.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
     || preflight.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID === undefined
     || api.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID !== undefined

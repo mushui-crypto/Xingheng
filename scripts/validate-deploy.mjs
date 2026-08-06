@@ -362,7 +362,12 @@ const assertions = [
   [
     packageJson.includes("rwa-provider-identity-preflight.js")
       && compose.includes("provider-identity-preflight:")
+      && compose.includes("TRADING_DB_PATH: /app/data/trading.sqlite")
+      && compose.includes("sqlite_data:/app/data:ro")
       && providerIdentityPreflight.includes("validateAccess()")
+      && providerIdentityPreflight.includes("readCredentialBinding()")
+      && providerIdentityPreflight.includes("binanceCredentialBindingSha256(binding)")
+      && providerIdentityPreflight.includes("snapshot.uidSnapshot !== binding.uidSnapshot")
       && providerIdentityPreflight.includes("provider_identity_mismatch")
       && providerIdentityPreflight.includes('serverKillSwitch !== "true"')
       && providerIdentityPreflightCli.includes("providerIdentityPreflightErrorCategory")
