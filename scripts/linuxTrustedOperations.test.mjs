@@ -21,6 +21,7 @@ const PRODUCTION_ENV = `${ROOT}/.env.production`;
 const COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
 const FROZEN_LOADER = `${ROOT}/scripts/load-release-manifest.sh`;
 const PERMIT_INSTALLER = `${ROOT}/scripts/productionSelfTestPermitInstall.mjs`;
+const PERMIT_RECOVERY = `${ROOT}/scripts/productionSelfTestPermitRecovery.mjs`;
 const REVISION = "03bdbb354f225ae0a0999a355df1e70784d7d163";
 const FIXED_ENVIRONMENT = Object.freeze({
   HOME: "/root",
@@ -220,6 +221,37 @@ test("Permit mutating Node entry rejects direct and forged wrapper contexts", {
   });
   assert.notEqual(forged.status, 0);
   assert.match(forged.stderr, /operation lock|wrapper descriptor|EBADF|bad file descriptor/iu);
+});
+
+test("Permit recovery entry rejects direct and forged wrapper contexts", {
+  skip: !ENABLED && "requires the explicit isolated Linux trust fixture",
+}, () => {
+  const operationId = "b".repeat(32);
+  const sourceSha256 = "c".repeat(64);
+  const direct = spawnSync("/usr/bin/node", [
+    PERMIT_RECOVERY, "run", operationId, sourceSha256,
+  ], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: FIXED_ENVIRONMENT,
+  });
+  assert.notEqual(direct.status, 0);
+  assert.match(direct.stderr, /controlled Linux root|trusted wrapper context/u);
+
+  const forged = spawnSync("/usr/bin/node", [
+    PERMIT_RECOVERY, "run", operationId, sourceSha256,
+  ], {
+    cwd: ROOT,
+    encoding: "utf8",
+    env: {
+      ...FIXED_ENVIRONMENT,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "production",
+      XINGHENG_TRUSTED_OPERATION_ENTRY: "recover-production-self-test-permit.sh",
+      XINGHENG_PERMIT_RECOVERY_OPERATION_ID: operationId,
+    },
+  });
+  assert.notEqual(forged.status, 0);
+  assert.match(forged.stderr, /operation lock|trusted descriptor|EBADF|bad file descriptor/iu);
 });
 
 function invoke(wrapper, additions = {}) {

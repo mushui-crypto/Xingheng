@@ -24,6 +24,10 @@ import {
   assertTrustedProductionReleaseRoot,
   execTrustedDockerSync,
 } from "./trustedDockerRuntime.mjs";
+import {
+  PERMIT_RECOVERY_ROOT,
+  assertCompletedPermitRecovery,
+} from "./productionSelfTestPermitRecovery.mjs";
 
 export const PERMIT_INSTALL_RECEIPT = "/var/lib/xingheng/production-self-test-permit-install.json";
 export const AUTHORIZATION_MANIFEST = "/var/lib/xingheng/capital-test-authorization-manifest.json";
@@ -528,6 +532,7 @@ function installPaths(options) {
     environmentPath: resolve(options.environmentPath ?? "/opt/xingheng-release/code/.env.production"),
     lifecyclePointerPath: resolve(options.lifecyclePointerPath ?? RELEASE_LIFECYCLE_POINTER),
     lifecycleOperationsRoot: resolve(options.lifecycleOperationsRoot ?? RELEASE_LIFECYCLE_OPERATIONS),
+    recoveryRoot: resolve(options.recoveryRoot ?? PERMIT_RECOVERY_ROOT),
   };
 }
 
@@ -680,10 +685,26 @@ function assertNoTerminalReceipt(paths, options) {
   }
   try {
     const entries = readdirSync(paths.attemptsRoot);
-    if (entries.length === 0) return;
+    if (entries.length === 0) {
+      assertCompletedPermitRecovery({
+        ...options,
+        recoveryRoot: paths.recoveryRoot,
+        receiptPath: paths.receiptPath,
+        attemptsRoot: paths.attemptsRoot,
+      });
+      return;
+    }
     throw new Error("Production self-test Permit installation has already been attempted");
   } catch (error) {
-    if (error?.code === "ENOENT") return;
+    if (error?.code === "ENOENT") {
+      assertCompletedPermitRecovery({
+        ...options,
+        recoveryRoot: paths.recoveryRoot,
+        receiptPath: paths.receiptPath,
+        attemptsRoot: paths.attemptsRoot,
+      });
+      return;
+    }
     throw error;
   }
 }
