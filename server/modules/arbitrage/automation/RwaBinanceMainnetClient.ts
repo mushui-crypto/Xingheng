@@ -250,6 +250,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     return {
       accountId: access.accountId,
       accountFingerprint: access.accountFingerprint,
+      uidSnapshot: access.uidSnapshot,
       fetchedAt: this.now(),
       accountMode,
       permissions: { ...access.permissions, positionModeSupported: !dualSidePosition },

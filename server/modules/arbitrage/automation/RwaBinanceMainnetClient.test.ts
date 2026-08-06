@@ -297,6 +297,7 @@ test("Binance client signs private reads with server-time offset and keeps spot/
 
   const snapshot = await client.readPreflightSnapshot();
   assert.equal(snapshot.productAvailability.available, true);
+  assert.equal(snapshot.uidSnapshot, access.uidSnapshot);
   assert.equal(snapshot.spotAvailableUsdt, 18);
   assert.equal(snapshot.futuresAvailableUsdt, 17);
   assert.equal(snapshot.spot.qtyStep, 0.0001);

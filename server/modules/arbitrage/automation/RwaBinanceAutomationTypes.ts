@@ -53,6 +53,7 @@ export type RwaBinanceInstrumentSnapshot = RwaInstrumentSpec & {
 export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinancePermissions> & {
   accountId: string;
   accountFingerprint: string;
+  uidSnapshot?: string;
   fetchedAt: number;
   accountMode: RwaBinanceAccountIdentity["accountMode"];
   permissions: RwaBinancePermissions;

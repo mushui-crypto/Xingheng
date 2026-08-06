@@ -4,6 +4,35 @@
 副本；SQLite 数据卷只能由这一实例写入。行情和成交仍是 Hyperliquid 公开行情驱动的
 内部模拟交易，链上能力固定为 BSC Testnet。
 
+## 历史 failed Permit receipt 恢复
+
+旧 schema v1 且终态为 `failed` 的 production self-test Permit receipt 不能直接删除、覆盖，
+也不能改写为成功。只有在当前 release/runtime identity 正常、server kill switch 保持开启、
+Host 与 API 均无 active Permit、Capital Test window 已关闭时，才允许通过固定 trusted operation
+执行一次恢复。操作者必须提供现场只读核验得到的原 receipt SHA-256：
+
+```bash
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node /opt/xingheng-release/code/scripts/trusted-operation-launcher.mjs \
+  production scripts/recover-production-self-test-permit.sh FAILED_RECEIPT_SHA256
+```
+
+Wrapper 会在任何归档动作前输出 `PERMIT_RECOVERY_OPERATION_ID`。若进程或 SSH 在 terminal receipt
+完成前中断，只允许把该 ID 作为第二参数与相同 SHA-256 一起重新执行；不得生成新的 ID：
+
+```bash
+env -i HOME=/root PATH=/usr/sbin:/usr/bin:/sbin:/bin LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC \
+  /usr/bin/node /opt/xingheng-release/code/scripts/trusted-operation-launcher.mjs \
+  production scripts/recover-production-self-test-permit.sh \
+  FAILED_RECEIPT_SHA256 RECOVERY_OPERATION_ID
+```
+
+恢复操作只会把原 receipt 与对应 attempt 目录原子移动到 root-only archive，并生成独立
+operation journal 与 terminal recovery receipt；不会生成或安装 Permit，也不会修改生产环境或
+重启容器。`success`、`prepared`、`unknown`、未知 schema、未知字段、partial state、active Permit、
+active/unknown window、重复 recovery 或 identity drift 均必须 fail-closed。恢复中断后只能使用
+同一 operation identity 与 source SHA-256 延续；terminal recovery 完整前 installer 继续阻断。
+
 正式项目名固定为 `xingheng`，环境文件固定为 `.env.production`；不得把 production wrapper
 泛化成调用方可变项目或部署身份。
 

@@ -81,6 +81,7 @@ try {
       "provider-gate1-preflight.sh",
       "rollback-release.sh",
       "install-production-self-test-permit.sh",
+      "recover-production-self-test-permit.sh",
       "capital-test-window.sh",
       "smoke.sh",
     ];
@@ -114,7 +115,10 @@ try {
         if (operation === "promotion") {
           childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = "release-promote.sh";
         }
-        if (operation === "production" && entryName === "capital-test-window.sh") {
+        if (operation === "production" && [
+          "capital-test-window.sh",
+          "recover-production-self-test-permit.sh",
+        ].includes(entryName)) {
           childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = entryName;
         }
         if (candidateRevision !== null) {

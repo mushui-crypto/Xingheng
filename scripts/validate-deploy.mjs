@@ -54,6 +54,8 @@ const releaseVolumeBoundaries = read("scripts/releaseVolumeBoundaries.mjs");
 const activationPreflight = read("server/operations/RwaAutomationActivationPreflight.ts");
 const permitInstaller = read("scripts/productionSelfTestPermitInstall.mjs");
 const permitInstallWrapper = read("scripts/install-production-self-test-permit.sh");
+const permitRecovery = read("scripts/productionSelfTestPermitRecovery.mjs");
+const permitRecoveryWrapper = read("scripts/recover-production-self-test-permit.sh");
 const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
 const capitalTestWindowWrapper = read("scripts/capital-test-window.sh");
 const capitalTestWindowController = read("scripts/capitalTestWindowController.mjs");
@@ -148,6 +150,25 @@ const assertions = [
       && permitStateVerifier.includes("productionSelfTestPermitConsumptions.length !== 0")
       && composeEnvironmentVerifier.includes("assertPermitEnvironmentAuthorized"),
     "the authorization-specific Permit installer must remain one-attempt, API-only, receipt-bound, and fail-closed",
+  ],
+  [
+    trustedOperationLauncher.includes('"recover-production-self-test-permit.sh"')
+      && permitRecoveryWrapper.includes("trusted-operation-preamble.sh")
+      && permitRecoveryWrapper.includes("verify-deployment-revision.mjs images")
+      && permitRecoveryWrapper.includes("verify-deployment-revision.mjs containers")
+      && permitRecoveryWrapper.includes("productionSelfTestPermitRecovery.mjs run")
+      && permitRecovery.includes('LEGACY_EXECUTION_MODE = "single_funding_rate_arbitrage_round"')
+      && permitRecovery.includes('receipt.status !== "failed"')
+      && permitRecovery.includes("sourceReceiptSha256")
+      && permitRecovery.includes("legacyAttemptReceiptSha256")
+      && permitRecovery.includes("afterReceiptArchived")
+      && permitRecovery.includes("afterAttemptArchived")
+      && permitRecovery.includes("terminalReceiptSha256")
+      && permitRecovery.includes("assertCompletedPermitRecovery")
+      && permitInstaller.includes("assertCompletedPermitRecovery")
+      && !permitRecoveryWrapper.includes("productionSelfTestPermitInstall.mjs prepare")
+      && !permitRecoveryWrapper.includes("capital-test-window.sh"),
+    "legacy failed Permit recovery must remain one-shot, receipt-bound, auditable, and separate from installation",
   ],
   [
     trustedOperationLauncher.includes('"capital-test-window.sh"')
@@ -362,7 +383,12 @@ const assertions = [
   [
     packageJson.includes("rwa-provider-identity-preflight.js")
       && compose.includes("provider-identity-preflight:")
+      && compose.includes("TRADING_DB_PATH: /app/data/trading.sqlite")
+      && compose.includes("sqlite_data:/app/data:ro")
       && providerIdentityPreflight.includes("validateAccess()")
+      && providerIdentityPreflight.includes("readCredentialBinding()")
+      && providerIdentityPreflight.includes("binanceCredentialBindingSha256(binding)")
+      && providerIdentityPreflight.includes("snapshot.uidSnapshot !== binding.uidSnapshot")
       && providerIdentityPreflight.includes("provider_identity_mismatch")
       && providerIdentityPreflight.includes('serverKillSwitch !== "true"')
       && providerIdentityPreflightCli.includes("providerIdentityPreflightErrorCategory")

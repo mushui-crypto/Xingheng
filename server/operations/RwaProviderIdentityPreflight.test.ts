@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { RwaBinanceProductionSelfTestBinding } from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
 import {
   providerIdentityPreflightErrorCategory,
   runRwaProviderIdentityPreflight,
@@ -9,6 +10,7 @@ const REVISION = "a".repeat(40);
 const IDENTITY = {
   accountId: "binance:authoritative",
   accountFingerprint: "authoritative",
+  uidSnapshot: "f".repeat(64),
   accountMode: "single_asset_one_way",
   permissions: {
     read: true, spotTrade: true, contractTrade: true, withdraw: false,
@@ -32,9 +34,20 @@ const STREAM_PROBE = {
   futuresListenKeyClose: true as const,
 };
 
+function activeBinding(bindingVersion = 1, uidSnapshot = IDENTITY.uidSnapshot): RwaBinanceProductionSelfTestBinding {
+  return {
+    userId: "USR-FIXTURE",
+    venue: "binance",
+    uidSnapshot,
+    bindingVersion,
+    status: "active",
+  };
+}
+
 test("provider identity preflight binds authoritative access to stored metadata without writes", async () => {
   let loadCount = 0;
   let validateCount = 0;
+  let readBindingCount = 0;
   const receipt = await runRwaProviderIdentityPreflight({
     loadConfig: () => ({
       deploymentEnvironment: "production",
@@ -44,7 +57,10 @@ test("provider identity preflight binds authoritative access to stored metadata 
     expectedRevision: () => REVISION,
     userId: () => "USR-FIXTURE",
     createStore: () => ({
-      readCredentialMetadata: async () => IDENTITY,
+      readCredentialBinding: async () => {
+        readBindingCount += 1;
+        return activeBinding(3);
+      },
       loadCredentials: async () => {
         loadCount += 1;
         return { apiKey: "fixture-key", apiSecret: "fixture-secret" };
@@ -62,12 +78,87 @@ test("provider identity preflight binds authoritative access to stored metadata 
   });
   assert.equal(loadCount, 1);
   assert.equal(validateCount, 1);
+  assert.equal(readBindingCount, 2);
   assert.equal(receipt.deploymentEnvironment, "production");
   assert.equal(receipt.accountMode, "single_asset_one_way");
+  assert.equal(receipt.bindingVersion, 3);
+  assert.equal(receipt.venue, "binance");
   assert.deepEqual(receipt.streamProbe, STREAM_PROBE);
   assert.equal(receipt.account.spotXautExposure, false);
-  assert.match(receipt.accountIdentitySha256, /^[a-f0-9]{64}$/u);
+  assert.match(receipt.userIdSha256, /^[a-f0-9]{64}$/u);
+  assert.match(receipt.uidSnapshotSha256, /^[a-f0-9]{64}$/u);
+  assert.match(receipt.accountBindingSha256, /^[a-f0-9]{64}$/u);
   assert.doesNotMatch(JSON.stringify(receipt), /fixture-user|fixture-key|fixture-secret|authoritative/u);
+});
+
+test("binding must remain unchanged across preflight receipt generation", async () => {
+  const raceCases = [
+    {
+      label: "unbind",
+      bindings: [
+        activeBinding(1, IDENTITY.uidSnapshot),
+        { ...activeBinding(1, IDENTITY.uidSnapshot), status: "verified_unbound" } satisfies RwaBinanceProductionSelfTestBinding,
+      ],
+    },
+    {
+      label: "rebind",
+      bindings: [
+        activeBinding(1, IDENTITY.uidSnapshot),
+        {
+          userId: "USR-FIXTURE",
+          venue: "binance",
+          uidSnapshot: "e".repeat(64),
+          bindingVersion: 2,
+          status: "active",
+        } satisfies RwaBinanceProductionSelfTestBinding,
+      ],
+    },
+    {
+      label: "bindingVersion changed",
+      bindings: [
+        activeBinding(1, IDENTITY.uidSnapshot),
+        {
+          ...activeBinding(2, IDENTITY.uidSnapshot),
+        } satisfies RwaBinanceProductionSelfTestBinding,
+      ],
+    },
+    {
+      label: "uidSnapshot changed",
+      bindings: [
+        activeBinding(1, IDENTITY.uidSnapshot),
+        {
+          ...activeBinding(1, "e".repeat(64)),
+        } satisfies RwaBinanceProductionSelfTestBinding,
+      ],
+    },
+  ] as const;
+
+  for (const raceCase of raceCases) {
+    let readIndex = 0;
+    await assert.rejects(
+      runRwaProviderIdentityPreflight({
+        loadConfig: () => ({
+          deploymentEnvironment: "production",
+          composeProject: "xingheng",
+        }),
+        serverKillSwitch: () => "true",
+        expectedRevision: () => REVISION,
+        userId: () => "USR-FIXTURE",
+        createStore: () => ({
+          readCredentialBinding: async () => raceCase.bindings[Math.min(readIndex++, raceCase.bindings.length - 1)] ?? null,
+          loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+        }),
+        createClient: () => ({
+          validateAccess: async () => IDENTITY,
+          readPreflightSnapshot: async () => SNAPSHOT,
+        }),
+        probeStreams: async () => STREAM_PROBE,
+      }),
+      /provider_identity_mismatch/u,
+      raceCase.label,
+    );
+    assert.equal(readIndex, 2, raceCase.label);
+  }
 });
 
 test("missing kill switch, metadata, read failure and binding mismatch all fail closed", async () => {
@@ -80,7 +171,7 @@ test("missing kill switch, metadata, read failure and binding mismatch all fail 
     expectedRevision: () => REVISION,
     userId: () => "USR-FIXTURE",
     createStore: () => ({
-      readCredentialMetadata: async () => IDENTITY,
+      readCredentialBinding: async () => activeBinding(),
       loadCredentials: async () => ({ apiKey: "key", apiSecret: "secret" }),
     }),
     createClient: () => ({
@@ -94,7 +185,17 @@ test("missing kill switch, metadata, read failure and binding mismatch all fail 
     {
       ...base,
       createStore: () => ({
-        readCredentialMetadata: async () => null,
+        readCredentialBinding: async () => ({
+          ...activeBinding(),
+          status: "verified_unbound",
+        } satisfies RwaBinanceProductionSelfTestBinding),
+        loadCredentials: async () => ({ apiKey: "key", apiSecret: "secret" }),
+      }),
+    },
+    {
+      ...base,
+      createStore: () => ({
+        readCredentialBinding: async () => null,
         loadCredentials: async () => ({ apiKey: "key", apiSecret: "secret" }),
       }),
     },
@@ -111,12 +212,20 @@ test("missing kill switch, metadata, read failure and binding mismatch all fail 
       ...base,
       createClient: () => ({
         validateAccess: async () => ({
-          accountId: "binance:different",
-          accountFingerprint: "different",
-          accountMode: IDENTITY.accountMode,
-          permissions: IDENTITY.permissions,
+          ...IDENTITY,
+          uidSnapshot: "e".repeat(64),
         }),
         readPreflightSnapshot: async () => SNAPSHOT,
+      }),
+    },
+    {
+      ...base,
+      createClient: () => ({
+        validateAccess: async () => IDENTITY,
+        readPreflightSnapshot: async () => ({
+          ...SNAPSHOT,
+          uidSnapshot: "e".repeat(64),
+        }),
       }),
     },
     { ...base, probeStreams: async () => { throw new Error("stream failed"); } },
