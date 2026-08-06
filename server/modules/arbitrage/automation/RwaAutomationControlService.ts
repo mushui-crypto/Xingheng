@@ -284,7 +284,9 @@ export class RwaAutomationControlService {
           venue: connector.venue,
           accountId: existingAccountId ?? "new-account",
           resourceId: null,
-          requestDigest: canonicalRequestDigest({ ...credentials, credentialNote }),
+          requestDigest: canonicalRequestDigest(
+            connector.venue === "binance" ? { ...credentials, credentialNote } : credentials,
+          ),
           notionalUsd: null,
         });
         logCredentialPutEvent("step_up_consumed", diagnosticContext);

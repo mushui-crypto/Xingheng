@@ -22,7 +22,11 @@ import {
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
-import { canonicalRequestDigest, StepUpSecurityError } from "../../security/StepUpSecurityService";
+import {
+  canonicalRequestDigest,
+  StepUpSecurityError,
+  type StepUpIntent,
+} from "../../security/StepUpSecurityService";
 import { TradingStore } from "../../../storage/TradingStore";
 import {
   RwaAutomationGovernance,
@@ -355,6 +359,7 @@ test("public opportunity projection contains no user credential or account owner
 
 test("credential fields are strict per venue and rejected values never reach the connector or error response", async () => {
   const received = new Map<RwaAutomationVenue, RwaVenueCredentialInput[]>();
+  const consumedIntents: StepUpIntent[] = [];
   const binance = fakeConnector(() => undefined, {
     venue: "binance",
     providerWritesEnabled: false,
@@ -363,12 +368,32 @@ test("credential fields are strict per venue and rejected values never reach the
   const bybit = fakeConnector(() => undefined, {
     onCredentials: (input) => received.set("bybit", [...received.get("bybit") ?? [], input]),
   });
-  const service = new RwaAutomationControlService({} as any, () => new RwaAutomationConnectorRegistry([bybit, binance]), passThroughStepUp);
+  const service = new RwaAutomationControlService(
+    {} as any,
+    () => new RwaAutomationConnectorRegistry([bybit, binance]),
+    {
+      ...passThroughStepUp,
+      consume: async (_userId, _sessionDomain, _token, intent) => { consumedIntents.push(intent); },
+    },
+  );
 
-  await service.putCredentials("user-a", sessionDomain, "binance", { apiKey: "binance-key", apiSecret: "binance-secret", stepUpToken });
+  await service.putCredentials("user-a", sessionDomain, "binance", {
+    apiKey: "binance-key",
+    apiSecret: "binance-secret",
+    credentialNote: "binding-note",
+    stepUpToken,
+  });
   await service.putCredentials("user-a", sessionDomain, "bybit", { apiKey: "bybit-key", apiSecret: "bybit-secret", stepUpToken });
   assert.deepEqual(received.get("binance"), [{ apiKey: "binance-key", apiSecret: "binance-secret" }]);
   assert.deepEqual(received.get("bybit"), [{ apiKey: "bybit-key", apiSecret: "bybit-secret" }]);
+  assert.deepEqual(consumedIntents.map((intent) => intent.requestDigest), [
+    canonicalRequestDigest({
+      apiKey: "binance-key",
+      apiSecret: "binance-secret",
+      credentialNote: "binding-note",
+    }),
+    canonicalRequestDigest({ apiKey: "bybit-key", apiSecret: "bybit-secret" }),
+  ]);
 
   for (const rejected of [
     { apiKey: "binance-key", apiSecret: "binance-secret", passphrase: "must-not-leak-passphrase" },
