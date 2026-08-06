@@ -604,10 +604,13 @@ function releaseComposeMountConfig() {
     ...(readOnly ? { read_only: true } : {}),
     volume: {},
   });
-  const bind = () => ({
+  const bind = (
+    source = "/run/xingheng/gcp-wif",
+    target = "/run/secrets/gcp-wif",
+  ) => ({
     type: "bind",
-    source: "/run/xingheng/gcp-wif",
-    target: "/run/secrets/gcp-wif",
+    source,
+    target,
     read_only: true,
     bind: { create_host_path: false },
   });
@@ -621,6 +624,10 @@ function releaseComposeMountConfig() {
           volume("rwa_automation_data", "/app/rwa-automation-data"),
           volume("rwa_automation_lock", "/app/rwa-automation-lock"),
           bind(),
+          bind(
+            "/var/lib/xingheng/capital-test-window",
+            "/run/xingheng/capital-test-window",
+          ),
         ],
       },
       web: {
@@ -660,13 +667,13 @@ function releaseRuntimeMounts() {
     destination,
     rw: true,
   });
-  const bind = {
+  const bind = (source, destination) => ({
     type: "bind",
     name: "",
-    source: "/run/xingheng/gcp-wif",
-    destination: "/run/secrets/gcp-wif",
+    source,
+    destination,
     rw: false,
-  };
+  });
   return {
     api: [
       volume("xingheng_sqlite_data", "/app/data"),
@@ -674,7 +681,11 @@ function releaseRuntimeMounts() {
       volume("xingheng_sqlite_backups", "/backups"),
       volume("xingheng_rwa_automation_data", "/app/rwa-automation-data"),
       volume("xingheng_rwa_automation_lock", "/app/rwa-automation-lock"),
-      bind,
+      bind("/run/xingheng/gcp-wif", "/run/secrets/gcp-wif"),
+      bind(
+        "/var/lib/xingheng/capital-test-window",
+        "/run/xingheng/capital-test-window",
+      ),
     ],
     web: [
       volume("xingheng_caddy_data", "/data"),
@@ -1205,6 +1216,9 @@ test("release Compose and running containers require exact mount mappings", () =
     }),
     (value) => { value.services["rwa-automation-backup"].volumes[0].read_only = false; },
     (value) => { value.services.web.volumes[0].target = "/other"; },
+    (value) => { value.services.api.volumes[6].read_only = false; },
+    (value) => { value.services.api.volumes[6].source = "/var/lib/xingheng/other"; },
+    (value) => { value.services.api.volumes[6].target = "/run/xingheng/other"; },
   ]) {
     const changed = structuredClone(compose);
     mutate(changed);
@@ -1221,6 +1235,9 @@ test("release Compose and running containers require exact mount mappings", () =
     (value) => value.api.pop(),
     (value) => { value.api[0].rw = false; },
     (value) => { value.web[0].name = "external_data"; },
+    (value) => { value.api[6].rw = true; },
+    (value) => { value.api[6].source = "/var/lib/xingheng/other"; },
+    (value) => { value.api[6].destination = "/run/xingheng/other"; },
     (value) => value.api.push({
       type: "bind",
       name: "",

@@ -18,6 +18,10 @@ const RELEASE_COMPOSE_MOUNTS = Object.freeze({
     volumeMount("rwa_automation_data", "/app/rwa-automation-data"),
     volumeMount("rwa_automation_lock", "/app/rwa-automation-lock"),
     bindMount("/run/xingheng/gcp-wif", "/run/secrets/gcp-wif"),
+    bindMount(
+      "/var/lib/xingheng/capital-test-window",
+      "/run/xingheng/capital-test-window",
+    ),
   ]),
   web: Object.freeze([
     volumeMount("caddy_data", "/data"),
@@ -48,6 +52,10 @@ const RELEASE_RUNTIME_MOUNTS = Object.freeze({
     runtimeVolume("xingheng_rwa_automation_data", "/app/rwa-automation-data"),
     runtimeVolume("xingheng_rwa_automation_lock", "/app/rwa-automation-lock"),
     runtimeBind("/run/xingheng/gcp-wif", "/run/secrets/gcp-wif"),
+    runtimeBind(
+      "/var/lib/xingheng/capital-test-window",
+      "/run/xingheng/capital-test-window",
+    ),
   ]),
   web: Object.freeze([
     runtimeVolume("xingheng_caddy_data", "/data"),
