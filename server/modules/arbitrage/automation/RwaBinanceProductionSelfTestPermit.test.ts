@@ -17,17 +17,30 @@ const authorizationDigest = "d".repeat(64);
 const expiresAt = Date.parse("2026-08-01T00:00:00.000Z");
 
 test("production self-test permit accepts only the exact server-controlled schema", () => {
-  const environment = {
+  const environment: NodeJS.ProcessEnv = {
     RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "true",
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: accountBindingSha256,
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
+    RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE: "single_connectivity_smoke",
     RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorizationDigest,
     RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "30",
     RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00.000Z",
     XINGHENG_EXPECTED_REVISION: revision,
   };
+  const parsedDigest = productionSelfTestPermitDigest({
+    permitId,
+    ownerUserId: "USR-MOSS1",
+    accountBindingSha256,
+    actionScope: ["READ", "TRADE"],
+    executionMode: "single_connectivity_smoke",
+    authorizationDigest,
+    approvedCapitalUsd: 30,
+    expiresAt,
+    revision,
+  });
+  environment.RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST = parsedDigest;
   const parsed = loadRwaBinanceProductionSelfTestPermit(environment);
   assert.ok(parsed);
   assert.equal(parsed.expiresAt, expiresAt);
@@ -85,6 +98,9 @@ test("production self-test permit accepts only the exact server-controlled schem
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ", "TRADE"]' },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE","READ"]' },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","trade"]' },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE: "single_funding_rate_arbitrage_round" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE: "unknown" },
+    { RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST: "0".repeat(64) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: "D".repeat(64) },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "0" },
     { RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "40.01" },
@@ -118,17 +134,30 @@ test("production self-test binding identity rejects malformed snapshots and unsu
 });
 
 test("production self-test confirmation rejects missing, legacy, and extra fields", () => {
-  const permit = loadRwaBinanceProductionSelfTestPermit({
+  const environment: NodeJS.ProcessEnv = {
     RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED: "true",
     RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID: permitId,
     RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: "USR-MOSS1",
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: accountBindingSha256,
     RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
+    RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE: "single_connectivity_smoke",
     RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorizationDigest,
     RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "30",
     RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: "2026-08-01T00:00:00.000Z",
     XINGHENG_EXPECTED_REVISION: revision,
-  })!;
+  };
+  environment.RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST = productionSelfTestPermitDigest({
+    permitId,
+    ownerUserId: "USR-MOSS1",
+    accountBindingSha256,
+    actionScope: ["READ", "TRADE"],
+    executionMode: "single_connectivity_smoke",
+    authorizationDigest,
+    approvedCapitalUsd: 30,
+    expiresAt,
+    revision,
+  });
+  const permit = loadRwaBinanceProductionSelfTestPermit(environment)!;
   assert.equal(validProductionSelfTestPermitConfirmation({
     ...permit,
     confirmedAt: expiresAt - 1,
@@ -143,6 +172,11 @@ test("production self-test confirmation rejects missing, legacy, and extra field
   assert.equal(validProductionSelfTestPermitConfirmation({
     ...permit,
     authorizationDigest: "D".repeat(64),
+    confirmedAt: 1,
+  }), false);
+  assert.equal(validProductionSelfTestPermitConfirmation({
+    ...permit,
+    executionMode: "single_funding_rate_arbitrage_round",
     confirmedAt: 1,
   }), false);
   const { actionScope: _actionScope, ...withoutActionScope } = permit;

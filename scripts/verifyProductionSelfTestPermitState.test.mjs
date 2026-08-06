@@ -109,9 +109,10 @@ function verify(root, runtime = null) {
   const expiresAt = "2026-08-04T09:00:00.000Z";
   const revision = "6efe18eb943b8a57750eeeb06700f101bd676414";
   const authorization = "d".repeat(64);
+  const executionMode = "single_connectivity_smoke";
   const args = runtime === null
     ? [SCRIPT, OWNER]
-    : [SCRIPT, OWNER, runtime.mode, runtime.digest, revision, authorization, expiresAt];
+    : [SCRIPT, OWNER, runtime.mode, runtime.digest, revision, authorization, expiresAt, executionMode];
   return spawnSync(process.execPath, args, {
     encoding: "utf8",
     env: {
@@ -125,6 +126,7 @@ function verify(root, runtime = null) {
 }
 
 function runtimePermitEnvironment() {
+  const executionMode = "single_connectivity_smoke";
   const permitId = "a".repeat(32);
   const accountBindingSha256 = "c".repeat(64);
   const authorization = "d".repeat(64);
@@ -132,7 +134,7 @@ function runtimePermitEnvironment() {
   const expiresAt = "2026-08-04T09:00:00.000Z";
   const digest = createHash("sha256").update([
     "production", "binance", "xaut", permitId, OWNER, accountBindingSha256,
-    "READ", "TRADE", authorization, "40", revision, expiresAt,
+    "READ", "TRADE", executionMode, authorization, "40", revision, expiresAt,
   ].join(":"), "utf8").digest("hex");
   return {
     digest,
@@ -142,7 +144,9 @@ function runtimePermitEnvironment() {
       RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID: OWNER,
       RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256: accountBindingSha256,
       RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE: '["READ","TRADE"]',
+      RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE: executionMode,
       RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST: authorization,
+      RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST: digest,
       RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD: "40",
       RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT: expiresAt,
       XINGHENG_EXPECTED_REVISION: revision,

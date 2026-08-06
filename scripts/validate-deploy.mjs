@@ -55,6 +55,9 @@ const activationPreflight = read("server/operations/RwaAutomationActivationPrefl
 const permitInstaller = read("scripts/productionSelfTestPermitInstall.mjs");
 const permitInstallWrapper = read("scripts/install-production-self-test-permit.sh");
 const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
+const capitalTestWindowWrapper = read("scripts/capital-test-window.sh");
+const capitalTestWindowController = read("scripts/capitalTestWindowController.mjs");
+const capitalTestWindowReceipt = read("scripts/capitalTestWindowReceipt.mjs");
 const packageJson = read("package.json");
 
 const assertions = [
@@ -145,6 +148,24 @@ const assertions = [
       && permitStateVerifier.includes("productionSelfTestPermitConsumptions.length !== 0")
       && composeEnvironmentVerifier.includes("assertPermitEnvironmentAuthorized"),
     "the authorization-specific Permit installer must remain one-attempt, API-only, receipt-bound, and fail-closed",
+  ],
+  [
+    trustedOperationLauncher.includes('"capital-test-window.sh"')
+      && capitalTestWindowWrapper.includes("trusted-operation-preamble.sh")
+      && capitalTestWindowWrapper.includes("verify-production-self-test-permit-state.mjs")
+      && capitalTestWindowWrapper.includes("state_result")
+      && capitalTestWindowWrapper.includes("capitalTestWindowController.mjs run")
+      && capitalTestWindowController.includes("inheritedOperationLocks(\"production\")")
+      && capitalTestWindowController.includes("Capital Test window has already been attempted")
+      && capitalTestWindowReceipt.includes('CAPITAL_TEST_WINDOW_EXECUTION_MODE = "single_connectivity_smoke"')
+      && capitalTestWindowReceipt.includes("nowMs >= Date.parse(receipt.hardEndAt)")
+      && capitalTestWindowReceipt.includes("nowMs >= Date.parse(receipt.leaseValidUntil)")
+      && composeEnvironmentVerifier.includes("verify-production-self-test-permit-state.mjs")
+      && composeEnvironmentVerifier.includes('"window"')
+      && compose.includes("source: /var/lib/xingheng/capital-test-window")
+      && compose.includes("target: /run/xingheng/capital-test-window")
+      && compose.includes("create_host_path: false"),
+    "Capital Test must use the fixed foreground trusted receipt-and-lease window with a read-only API mount",
   ],
   [
     stepZeroChecklist.includes("cd /opt/xingheng-release/code")

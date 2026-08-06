@@ -108,6 +108,7 @@ function fixture() {
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
     ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
+    ["bind", "/var/lib/xingheng/capital-test-window", "/run/xingheng/capital-test-window", true],
   ]);
   api.healthcheck = healthcheck(false);
 

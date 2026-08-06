@@ -21,6 +21,7 @@ const SERVICE_MOUNTS = Object.freeze({
     ["volume", "rwa_automation_data", "/app/rwa-automation-data", false],
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
     ["bind", "wif", "/run/secrets/gcp-wif", true],
+    ["bind", "/var/lib/xingheng/capital-test-window", "/run/xingheng/capital-test-window", true],
   ]),
   web: Object.freeze([
     ["volume", "caddy_data", "/data", false],
@@ -161,7 +162,7 @@ function assertServiceMounts(config, wifSource) {
     for (let index = 0; index < expected.length; index += 1) {
       const [type, source, target, readOnly] = expected[index];
       const mount = actual[index];
-      const expectedSource = type === "bind" ? wifSource : source;
+      const expectedSource = source === "wif" ? wifSource : source;
       if (
         mount?.type !== type
         || mount?.source !== expectedSource

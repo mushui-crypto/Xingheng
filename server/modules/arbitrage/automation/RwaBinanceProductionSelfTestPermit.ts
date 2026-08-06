@@ -3,6 +3,9 @@ import { createHash } from "node:crypto";
 export const RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE =
   Object.freeze(["READ", "TRADE"] as const);
 
+export const RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE =
+  "single_connectivity_smoke" as const;
+
 export type RwaBinanceProductionSelfTestActionScope =
   readonly ["READ", "TRADE"];
 
@@ -22,6 +25,7 @@ export type RwaBinanceProductionSelfTestPermit = {
   ownerUserId: string;
   accountBindingSha256: string;
   actionScope: RwaBinanceProductionSelfTestActionScope;
+  executionMode: typeof RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE;
   authorizationDigest: string;
   approvedCapitalUsd: number;
   expiresAt: number;
@@ -34,6 +38,7 @@ export type RwaBinanceProductionSelfTestPermitConfirmation = {
   ownerUserId: string;
   accountBindingSha256: string;
   actionScope: RwaBinanceProductionSelfTestActionScope;
+  executionMode: typeof RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE;
   authorizationDigest: string;
   approvedCapitalUsd: number;
   expiresAt: number;
@@ -60,6 +65,10 @@ export function loadRwaBinanceProductionSelfTestPermit(
     environment.RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE ?? "";
   const authorizationDigest =
     environment.RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST ?? "";
+  const expectedDigest =
+    environment.RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST ?? "";
+  const executionMode =
+    environment.RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE ?? "";
   const expiresAtSource = environment.RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT ?? "";
   const approvedCapitalUsd = Number(
     environment.RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD,
@@ -71,6 +80,8 @@ export function loadRwaBinanceProductionSelfTestPermit(
     || !/^[a-f0-9]{64}$/u.test(accountBindingSha256)
     || actionScopeSource !== '["READ","TRADE"]'
     || !/^[a-f0-9]{64}$/u.test(authorizationDigest)
+    || !/^[a-f0-9]{64}$/u.test(expectedDigest)
+    || executionMode !== RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE
     || !/^[a-f0-9]{40}$/u.test(revision)
     || !Number.isFinite(approvedCapitalUsd) || approvedCapitalUsd <= 0
     || approvedCapitalUsd > 40
@@ -83,13 +94,16 @@ export function loadRwaBinanceProductionSelfTestPermit(
     ownerUserId,
     accountBindingSha256,
     actionScope,
+    executionMode,
     authorizationDigest,
     approvedCapitalUsd,
     expiresAt,
     revision,
   });
+  if (digest !== expectedDigest) return null;
   return {
     permitId, ownerUserId, accountBindingSha256, actionScope, authorizationDigest, approvedCapitalUsd,
+    executionMode,
     expiresAt, revision, digest,
   };
 }
@@ -120,6 +134,7 @@ export function productionSelfTestPermitDigest(input: {
   ownerUserId: string;
   accountBindingSha256: string;
   actionScope: RwaBinanceProductionSelfTestActionScope;
+  executionMode: typeof RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE;
   authorizationDigest: string;
   approvedCapitalUsd: number;
   expiresAt: number;
@@ -134,6 +149,7 @@ export function productionSelfTestPermitDigest(input: {
     input.accountBindingSha256,
     input.actionScope[0],
     input.actionScope[1],
+    input.executionMode,
     input.authorizationDigest,
     String(input.approvedCapitalUsd),
     input.revision,
@@ -148,7 +164,7 @@ export function validProductionSelfTestPermitConfirmation(
   const record = value as Record<string, unknown>;
   return Object.keys(record).sort().join(",") === [
     "accountBindingSha256", "actionScope", "approvedCapitalUsd", "authorizationDigest",
-    "confirmedAt", "digest", "expiresAt", "ownerUserId", "permitId", "revision",
+    "confirmedAt", "digest", "executionMode", "expiresAt", "ownerUserId", "permitId", "revision",
   ].sort().join(",")
     && typeof record.permitId === "string" && /^[a-f0-9]{32}$/u.test(record.permitId)
     && typeof record.ownerUserId === "string" && /^USR-[A-Z0-9]+$/u.test(record.ownerUserId)
@@ -157,6 +173,7 @@ export function validProductionSelfTestPermitConfirmation(
     && validProductionSelfTestActionScope(record.actionScope)
     && typeof record.authorizationDigest === "string"
     && /^[a-f0-9]{64}$/u.test(record.authorizationDigest)
+    && record.executionMode === RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE
     && typeof record.revision === "string" && /^[a-f0-9]{40}$/u.test(record.revision)
     && typeof record.approvedCapitalUsd === "number"
     && Number.isFinite(record.approvedCapitalUsd) && record.approvedCapitalUsd > 0

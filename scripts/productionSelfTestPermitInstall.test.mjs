@@ -53,10 +53,18 @@ test("first install succeeds and every later install is rejected", () => {
 test("invalid request fails before any installation state or environment mutation", () => {
   withFixture((fixture) => {
     const before = readFileSync(fixture.environment);
-    assert.throws(
-      () => preparePermitInstallation(fixture.options({ request: { ...fixture.request, approvedCapitalUsd: 41 } })),
-      /request is invalid/u,
-    );
+    const { executionMode: _executionMode, ...withoutExecutionMode } = fixture.request;
+    for (const request of [
+      { ...fixture.request, approvedCapitalUsd: 41 },
+      { ...fixture.request, executionMode: "single_funding_rate_arbitrage_round" },
+      { ...fixture.request, executionMode: "unknown" },
+      withoutExecutionMode,
+    ]) {
+      assert.throws(
+        () => preparePermitInstallation(fixture.options({ request })),
+        /request is invalid|unsupported fields/u,
+      );
+    }
     assert.deepEqual(readFileSync(fixture.environment), before);
     assert.throws(() => readInstallReceipt(fixture.receipt, fixture.options()), /ENOENT/u);
   });
@@ -526,14 +534,14 @@ function withFixture(run) {
     writeSecure(releaseManifest, releaseManifestBytes, 0o444);
     writeSecure(environment, Buffer.from(`NODE_ENV=production\nXINGHENG_EXPECTED_REVISION=${REVISION}\n`), 0o600);
     const authorization = {
-      schemaVersion: 1,
+      schemaVersion: 2,
       permitId: "a".repeat(32),
       ownerUserId: OWNER,
       accountBindingSha256: "c".repeat(64),
       actionScope: ["READ", "TRADE"],
       approvedCapitalUsd: 40,
       leverage: 1,
-      executionMode: "single_funding_rate_arbitrage_round",
+      executionMode: "single_connectivity_smoke",
       maximumDurationMinutes: 60,
       maximumExecutionDurationMinutes: 30,
       releaseRevision: REVISION,
@@ -660,7 +668,9 @@ function runtimeContainer(id, image, revision, receipt = null) {
     `RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID=${receipt.permit.ownerUserId}`,
     `RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256=${receipt.permit.accountBindingSha256}`,
     'RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE=["READ","TRADE"]',
+    `RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE=${receipt.permit.executionMode}`,
     `RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST=${receipt.permit.authorizationDigest}`,
+    `RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST=${receipt.permit.digest}`,
     `RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD=${receipt.permit.approvedCapitalUsd}`,
     `RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT=${receipt.permit.expiresAt}`,
   ];
