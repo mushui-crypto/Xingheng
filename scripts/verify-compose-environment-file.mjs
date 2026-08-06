@@ -493,6 +493,13 @@ function isAllowedComposeOperation(args, profiles) {
   ) return true;
   if (
     profiles.size === 0
+    && sameArgs(args, [
+      "exec", "-T", "api", "node",
+      "/app/scripts/verify-production-self-test-permit-state.mjs", "window",
+    ])
+  ) return true;
+  if (
+    profiles.size === 0
     && args.length === 6
     && sameArgs(args.slice(0, 5), [
       "exec", "-T", "api", "node", "/app/scripts/verify-production-self-test-permit-state.mjs",

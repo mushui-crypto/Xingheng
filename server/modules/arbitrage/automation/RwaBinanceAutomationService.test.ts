@@ -46,8 +46,9 @@ import {
   RWA_CONNECTIVITY_SMOKE_POLICY_VERSION,
 } from "./RwaConnectivitySmoke";
 import {
-  binanceAccountBindingSha256,
+  binanceCredentialBindingSha256,
   productionSelfTestPermitDigest,
+  type RwaBinanceProductionSelfTestBinding,
   type RwaBinanceProductionSelfTestPermit,
 } from "./RwaBinanceProductionSelfTestPermit";
 
@@ -136,15 +137,14 @@ test("Binance production development account requires an exact permit confirmati
   try {
     const client = new FakeBinanceClient();
     const userId = "USR-MOSS1";
-    const binding = binanceAccountBindingSha256(
-      client.access.accountId,
-      client.access.accountFingerprint,
-    );
+    const credentialBinding = testCredentialBinding(userId, client);
+    const binding = binanceCredentialBindingSha256(credentialBinding);
     const permitInput = {
       permitId: "a".repeat(32),
       ownerUserId: userId,
       accountBindingSha256: binding,
       actionScope: ["READ", "TRADE"] as const,
+      executionMode: "single_connectivity_smoke" as const,
       authorizationDigest: "1".repeat(64),
       approvedCapitalUsd: 30,
       expiresAt: now + 1_000,
@@ -162,6 +162,10 @@ test("Binance production development account requires an exact permit confirmati
       () => false,
       () => permit,
       () => true,
+      () => now,
+      () => false,
+      () => {},
+      () => credentialBinding,
     );
     await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
     const accountId = (await harness.current.getCredentialStatus()).accountId!;
@@ -239,11 +243,11 @@ test("Binance production self-test blocks ordinary execution before every provid
       const permitInput = {
         permitId: "e".repeat(32),
         ownerUserId: userId,
-        accountBindingSha256: binanceAccountBindingSha256(
-          client.access.accountId,
-          client.access.accountFingerprint,
+        accountBindingSha256: binanceCredentialBindingSha256(
+          testCredentialBinding(userId, client),
         ),
         actionScope: ["READ", "TRADE"] as const,
+        executionMode: "single_connectivity_smoke" as const,
         authorizationDigest: "2".repeat(64),
         approvedCapitalUsd: 30,
         expiresAt: now + 1_000,
@@ -302,13 +306,13 @@ test("Binance production self-test preserves generic takeover and aggregate capi
     const permitInput = {
       permitId: "c".repeat(32),
       ownerUserId: userId,
-      accountBindingSha256: binanceAccountBindingSha256(
-        client.access.accountId,
-        client.access.accountFingerprint,
+      accountBindingSha256: binanceCredentialBindingSha256(
+        testCredentialBinding(userId, client),
       ),
       actionScope: ["READ", "TRADE"] as const,
+      executionMode: "single_connectivity_smoke" as const,
       authorizationDigest: "3".repeat(64),
-      approvedCapitalUsd: 200,
+      approvedCapitalUsd: 40,
       expiresAt: now + 10_000,
       revision: "d".repeat(40),
     };
@@ -2143,22 +2147,104 @@ test("Binance production smoke failure permanently consumes the permit without p
   }
 });
 
+test("Binance production smoke requires the Capital Test window before Permit consumption", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-window-closed-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30, () => {
+      throw new Error("window closed");
+    });
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    await assert.rejects(
+      harness.current.executeConnectivitySmoke(
+        smokeExecuteInput(harness.accountId, challenge, "smoke:window-closed:1"),
+      ),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "capital_test_window_closed",
+    );
+    const state = await harness.store.readState();
+    assert.equal(state.productionSelfTestPermitConsumptions.length, 0);
+    assert.equal(state.connectivitySmokes.length, 0);
+    assert.equal(harness.client.writeCount, 0);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production smoke rechecks the window before each new risk and still reduces after lease loss", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-window-lease-"));
+  try {
+    let checks = 0;
+    const harness = await productionSmokeHarness(directory, 30, () => {
+      checks += 1;
+      if (checks >= 3) throw new Error("lease expired");
+    });
+    const challenge = await harness.current.preflightConnectivitySmoke(
+      harness.accountId,
+      smokePolicyAcceptance,
+    );
+    const result = await harness.current.executeConnectivitySmoke(
+      smokeExecuteInput(harness.accountId, challenge, "smoke:window-lease:1"),
+    ) as any;
+    assert.equal(result.stage, "flat");
+    assert.equal(checks, 3);
+    assert.deepEqual(
+      harness.client.placedRequests.map((request) => [request.category, request.side, request.reduceOnly]),
+      [["spot", "Buy", false], ["spot", "Sell", false]],
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance production smoke rejects binding lifecycle changes before Permit consumption", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-binding-lifecycle-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 30);
+    const mutations: Array<Partial<RwaBinanceProductionSelfTestBinding>> = [
+      { bindingVersion: 2 },
+      { uidSnapshot: "8".repeat(64) },
+      { status: "verified_unbound" },
+      { status: "recovery_inconsistent" },
+    ];
+    for (const [index, mutation] of mutations.entries()) {
+      harness.setCredentialBinding({
+        bindingVersion: 1,
+        uidSnapshot: harness.client.access.uidSnapshot,
+        status: "active",
+      });
+      const challenge = await harness.current.preflightConnectivitySmoke(
+        harness.accountId,
+        smokePolicyAcceptance,
+      );
+      harness.setCredentialBinding(mutation);
+      await assert.rejects(
+        harness.current.executeConnectivitySmoke(
+          smokeExecuteInput(harness.accountId, challenge, `smoke:binding-lifecycle:${index}`),
+        ),
+        (error: unknown) => error instanceof RwaNeutralExecutionError
+          && error.category === "account_isolation_unconfirmed",
+      );
+      assert.equal(harness.client.writeCount, 0);
+      assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 0);
+    }
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("Binance production self-test Permit rejects every non-smoke new-risk entry before provider writes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "rwa-binance-permit-smoke-only-"));
   try {
     const harness = await productionSmokeHarness(directory, 30);
-    const challenge = await harness.current.preflight(
-      opportunity(),
-      harness.accountId,
-      "manual_entry",
-    );
     const smokeOnly = (error: unknown) => error instanceof RwaNeutralExecutionError
       && error.category === "production_self_test_permit_smoke_only";
     await assert.rejects(
-      harness.current.execute(
-        executeInput(harness.accountId, challenge, "permit:ordinary:execute"),
-      ),
-      smokeOnly,
+      harness.current.preflight(opportunity(), harness.accountId, "manual_entry"),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "server_kill_switch_active",
     );
     assert.equal((await harness.store.readState()).executions.length, 0);
 
@@ -3491,6 +3577,9 @@ function serviceHarness(
   clock: () => number = () => now,
   serverKillSwitchActive: () => boolean = () => false,
   automationMutationGuard: () => void = () => {},
+  currentCredentialBinding: () => RwaBinanceProductionSelfTestBinding | null =
+    () => testCredentialBinding(userId, client),
+  assertCapitalTestWindowOpen: (permit: RwaBinanceProductionSelfTestPermit) => void = () => {},
 ) {
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
@@ -3512,23 +3601,28 @@ function serviceHarness(
       productionSelfTestPermit,
       productionEnvironment,
       automationMutationGuard,
+      currentCredentialBinding,
+      assertCapitalTestWindowOpen,
     ),
     store,
     keyProvider,
   };
 }
 
-async function productionSmokeHarness(directory: string, approvedCapitalUsd: number) {
+async function productionSmokeHarness(
+  directory: string,
+  approvedCapitalUsd: number,
+  assertCapitalTestWindowOpen: (permit: RwaBinanceProductionSelfTestPermit) => void = () => {},
+) {
   const client = new FakeBinanceClient();
   const userId = "USR-MOSSSMOKE";
+  let credentialBinding = testCredentialBinding(userId, client);
   const basePermit = {
     permitId: "9".repeat(32),
     ownerUserId: userId,
-    accountBindingSha256: binanceAccountBindingSha256(
-      client.access.accountId,
-      client.access.accountFingerprint,
-    ),
+    accountBindingSha256: binanceCredentialBindingSha256(credentialBinding),
     actionScope: ["READ", "TRADE"] as const,
+    executionMode: "single_connectivity_smoke" as const,
     authorizationDigest: "4".repeat(64),
     expiresAt: now + 60_000,
     revision: "8".repeat(40),
@@ -3546,6 +3640,11 @@ async function productionSmokeHarness(directory: string, approvedCapitalUsd: num
     () => false,
     () => permit,
     () => true,
+    () => now,
+    () => true,
+    () => {},
+    () => credentialBinding,
+    assertCapitalTestWindowOpen,
   );
   await harness.current.putCredentials({ apiKey: "fake-key", apiSecret: "fake-secret" });
   const accountId = (await harness.current.getCredentialStatus()).accountId!;
@@ -3563,6 +3662,24 @@ async function productionSmokeHarness(directory: string, approvedCapitalUsd: num
     setApprovedCapitalUsd(capitalUsd: number) {
       permit = productionSelfTestPermit(capitalUsd);
     },
+    setCredentialBinding(
+      overrides: Partial<RwaBinanceProductionSelfTestBinding>,
+    ) {
+      credentialBinding = { ...credentialBinding, ...overrides };
+    },
+  };
+}
+
+function testCredentialBinding(
+  userId: string,
+  client: FakeBinanceClient,
+): RwaBinanceProductionSelfTestBinding {
+  return {
+    userId,
+    venue: "binance",
+    bindingVersion: 1,
+    uidSnapshot: client.access.uidSnapshot,
+    status: "active",
   };
 }
 
@@ -3734,6 +3851,7 @@ class FakeBinanceClient implements RwaBinanceClient {
   readonly access: {
     accountId: string;
     accountFingerprint: string;
+    uidSnapshot: string;
     accountMode: "single_asset_one_way";
     permissions: RwaBinancePermissions;
     ipWhitelistVerificationMode?: "provider_list_exact" | "provider_restriction_only";
@@ -3777,6 +3895,7 @@ class FakeBinanceClient implements RwaBinanceClient {
     this.access = {
       accountId: "binance:test-account",
       accountFingerprint: "test-account",
+      uidSnapshot: "7".repeat(64),
       accountMode: "single_asset_one_way" as const,
       permissions: currentPermissions,
     };

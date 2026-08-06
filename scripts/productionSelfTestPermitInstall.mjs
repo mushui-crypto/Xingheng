@@ -38,7 +38,9 @@ export const PERMIT_ENV_KEYS = Object.freeze([
   "RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST",
+  "RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT",
 ]);
@@ -59,8 +61,9 @@ const RECEIPT_KEYS = [
 const ATTEMPT_RECEIPT_KEYS = RECEIPT_KEYS.filter((key) => key !== "attemptReceiptSha256");
 const PERMIT_KEYS = [
   "accountBindingSha256", "actionScope", "approvedCapitalUsd", "authorizationDigest",
-  "digest", "expiresAt", "ownerUserId", "permitId", "revision",
+  "digest", "executionMode", "expiresAt", "ownerUserId", "permitId", "revision",
 ];
+const EXECUTION_MODE = "single_connectivity_smoke";
 const RELEASE_IDENTITY_KEYS = [
   "apiImageDigest", "gitTreeSha", "lifecycleEstablishedAt", "lifecycleOperationId",
   "releaseManifestSha256", "releaseRevision", "releaseTreeSha256", "webImageDigest",
@@ -75,7 +78,7 @@ export function parseInstallRequest(value) {
   const input = assertObject(value, "Permit install request is invalid");
   assertExactKeys(input, REQUEST_KEYS, "Permit install request contains unsupported fields");
   if (
-    input.schemaVersion !== 1
+    input.schemaVersion !== 2
     || typeof input.permitId !== "string" || !/^[a-f0-9]{32}$/u.test(input.permitId)
     || typeof input.ownerUserId !== "string" || !/^USR-[A-Z0-9]+$/u.test(input.ownerUserId)
     || typeof input.accountBindingSha256 !== "string" || !/^[a-f0-9]{64}$/u.test(input.accountBindingSha256)
@@ -90,7 +93,7 @@ export function parseInstallRequest(value) {
     || typeof input.webImageDigest !== "string" || !/^sha256:[a-f0-9]{64}$/u.test(input.webImageDigest)
     || input.approvedCapitalUsd !== 40
     || input.leverage !== 1
-    || input.executionMode !== "single_funding_rate_arbitrage_round"
+    || input.executionMode !== EXECUTION_MODE
     || input.maximumDurationMinutes !== 60
     || input.maximumExecutionDurationMinutes !== 30
     || typeof input.releaseRevision !== "string" || !/^[a-f0-9]{40}$/u.test(input.releaseRevision)
@@ -111,7 +114,7 @@ export function parseCanonicalAuthorization(value) {
 export function productionSelfTestPermitDigest(input) {
   return sha256(Buffer.from([
     "production", "binance", "xaut", input.permitId, input.ownerUserId,
-    input.accountBindingSha256, "READ", "TRADE", input.authorizationDigest,
+    input.accountBindingSha256, "READ", "TRADE", input.executionMode, input.authorizationDigest,
     String(input.approvedCapitalUsd), input.revision, input.expiresAt,
   ].join(":")));
 }
@@ -148,6 +151,7 @@ export function preparePermitInstallation(options) {
       ownerUserId: request.ownerUserId,
       accountBindingSha256: request.accountBindingSha256,
       actionScope: ["READ", "TRADE"],
+      executionMode: request.executionMode,
       authorizationDigest: request.authorizationManifestSha256,
       approvedCapitalUsd: 40,
       expiresAt,
@@ -169,7 +173,7 @@ export function preparePermitInstallation(options) {
       atomicWrite(beforePath, environmentBytes, 0o600, options);
       atomicWrite(proposedPath, proposed, 0o600, options);
       const attemptReceipt = {
-        schemaVersion: 1,
+        schemaVersion: 2,
         operationId,
         status: "prepared",
         request,
@@ -377,6 +381,7 @@ function verifyApiLoadedPermit(receipt, apiContainerId, options) {
     receipt.releaseIdentity.releaseRevision,
     receipt.request.authorizationManifestSha256,
     receipt.expiresAt,
+    receipt.permit.executionMode,
   ]).trim();
   if (result !== "permit-runtime-safe") throw new Error("API process Permit identity mismatch");
 }
@@ -447,7 +452,7 @@ export function readInstallReceipt(path = PERMIT_INSTALL_RECEIPT, options = {}) 
     assertExactKeys(receipt, RECEIPT_KEYS, "Permit install receipt is invalid");
     parseInstallRequest(receipt.request);
     if (
-      receipt.schemaVersion !== 1
+      receipt.schemaVersion !== 2
       || typeof receipt.operationId !== "string" || !/^[a-f0-9]{32}$/u.test(receipt.operationId)
       || !["prepared", "success", "failed", "unknown"].includes(receipt.status)
       || !isStrictUtc(receipt.activatedAt) || !isStrictUtc(receipt.expiresAt)
@@ -471,6 +476,8 @@ export function readInstallReceipt(path = PERMIT_INSTALL_RECEIPT, options = {}) 
       || permit.accountBindingSha256 !== receipt.request.accountBindingSha256
       || !Array.isArray(permit.actionScope) || permit.actionScope.length !== 2
       || permit.actionScope[0] !== "READ" || permit.actionScope[1] !== "TRADE"
+      || permit.executionMode !== EXECUTION_MODE
+      || permit.executionMode !== receipt.request.executionMode
       || permit.authorizationDigest !== receipt.request.authorizationManifestSha256
       || permit.approvedCapitalUsd !== 40
       || permit.expiresAt !== receipt.expiresAt
@@ -502,7 +509,9 @@ function permitEnvironment(permit) {
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID", permit.ownerUserId],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256", permit.accountBindingSha256],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE", '["READ","TRADE"]'],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE", permit.executionMode],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST", permit.authorizationDigest],
+    ["RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST", permit.digest],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD", String(permit.approvedCapitalUsd)],
     ["RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT", permit.expiresAt],
   ]);

@@ -19,6 +19,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 import { captureTrustedReleaseTree } from "./trustedReleaseTree.mjs";
+import { initializeCapitalTestWindowStateRoot } from "./capitalTestWindowController.mjs";
 
 const RECEIPT = "/etc/xingheng/trusted-operations.json";
 const RELEASE_ROOT = "/opt/xingheng-release/code";
@@ -91,6 +92,7 @@ try {
     },
   );
   const info = JSON.parse(daemonRaw);
+  initializeCapitalTestWindowStateRoot();
   const value = {
     schemaVersion: 1,
     releaseRoot: RELEASE_ROOT,

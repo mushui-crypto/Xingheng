@@ -5,8 +5,11 @@ import { resolve } from "node:path";
 import { productionSelfTestPermitDigest } from "./productionSelfTestPermitInstall.mjs";
 
 try {
-  const ownerUserId = process.argv[2] ?? "";
-  const mode = process.argv[3] ?? "state";
+  const windowVerification = process.argv[2] === "window";
+  const ownerUserId = windowVerification
+    ? (process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID ?? "")
+    : (process.argv[2] ?? "");
+  const mode = windowVerification ? "runtime" : (process.argv[3] ?? "state");
   if (!/^USR-[A-Z0-9]+$/u.test(ownerUserId)) throw new Error("Permit owner is invalid");
   if (!new Set(["state", "runtime"]).has(mode)) throw new Error("Permit verification mode is invalid");
   if (process.env.NODE_ENV !== "production" || process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true") {
@@ -33,18 +36,31 @@ try {
     || state.connectivitySmokes.some((smoke) => !["flat", "failed", "manual_intervention"].includes(smoke?.stage))) {
     throw new Error("An unfinished connectivity smoke blocks Permit installation");
   }
-  if (mode === "runtime") verifyRuntimePermit(ownerUserId);
-  process.stdout.write(mode === "runtime" ? "permit-runtime-safe\n" : "permit-state-safe\n");
+  if (mode === "runtime") verifyRuntimePermit(ownerUserId, windowVerification);
+  process.stdout.write(windowVerification
+    ? "permit-window-state-safe\n"
+    : (mode === "runtime" ? "permit-runtime-safe\n" : "permit-state-safe\n"));
 } catch (error) {
   console.error(error instanceof Error ? error.message : "Permit state verification failed");
   process.exitCode = 1;
 }
 
-function verifyRuntimePermit(ownerUserId) {
-  const expectedDigest = process.argv[4] ?? "";
-  const expectedRevision = process.argv[5] ?? "";
-  const expectedAuthorization = process.argv[6] ?? "";
-  const expectedExpiresAt = process.argv[7] ?? "";
+function verifyRuntimePermit(ownerUserId, windowVerification) {
+  const expectedDigest = windowVerification
+    ? (process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_DIGEST ?? "")
+    : (process.argv[4] ?? "");
+  const expectedRevision = windowVerification
+    ? (process.env.XINGHENG_EXPECTED_REVISION ?? "")
+    : (process.argv[5] ?? "");
+  const expectedAuthorization = windowVerification
+    ? (process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST ?? "")
+    : (process.argv[6] ?? "");
+  const expectedExpiresAt = windowVerification
+    ? (process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT ?? "")
+    : (process.argv[7] ?? "");
+  const expectedExecutionMode = windowVerification
+    ? (process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE ?? "")
+    : (process.argv[8] ?? "");
   const permitId = process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID ?? "";
   const accountBindingSha256 = process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_ACCOUNT_BINDING_SHA256 ?? "";
   const approvedCapitalUsd = Number(process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_APPROVED_CAPITAL_USD);
@@ -52,6 +68,7 @@ function verifyRuntimePermit(ownerUserId) {
     permitId,
     ownerUserId,
     accountBindingSha256,
+    executionMode: expectedExecutionMode,
     authorizationDigest: expectedAuthorization,
     approvedCapitalUsd,
     revision: expectedRevision,
@@ -62,6 +79,8 @@ function verifyRuntimePermit(ownerUserId) {
     || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED !== "true"
     || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_OWNER_USER_ID !== ownerUserId
     || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_ACTION_SCOPE !== '["READ","TRADE"]'
+    || expectedExecutionMode !== "single_connectivity_smoke"
+    || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_EXECUTION_MODE !== expectedExecutionMode
     || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_AUTHORIZATION_DIGEST !== expectedAuthorization
     || process.env.RWA_BINANCE_PRODUCTION_SELF_TEST_EXPIRES_AT !== expectedExpiresAt
     || process.env.XINGHENG_EXPECTED_REVISION !== expectedRevision

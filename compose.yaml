@@ -46,6 +46,12 @@ services:
         read_only: true
         bind:
           create_host_path: false
+      - type: bind
+        source: /var/lib/xingheng/capital-test-window
+        target: /run/xingheng/capital-test-window
+        read_only: true
+        bind:
+          create_host_path: false
     command:
       - node
       - dist-server/index.js

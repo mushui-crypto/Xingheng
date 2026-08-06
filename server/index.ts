@@ -43,6 +43,7 @@ import type {
 } from "./modules/arbitrage/automation/RwaBinanceAutomationTypes";
 import { RwaAutomationConnectorRegistry } from "./modules/arbitrage/automation/RwaAutomationConnectorRegistry";
 import { RwaAutomationControlService } from "./modules/arbitrage/automation/RwaAutomationControlService";
+import { assertCapitalTestWindowAllowsNewRisk } from "../scripts/capitalTestWindowReceipt.mjs";
 import {
   RwaAutomationGovernance,
   loadRwaAutomationGovernanceConfig,
@@ -216,6 +217,8 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
         );
       }
     },
+    () => tradingStore.findBinanceCredentialBinding(userId) ?? null,
+    assertCapitalTestWindowAllowsNewRisk,
   );
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),

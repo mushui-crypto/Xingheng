@@ -406,8 +406,17 @@ Challenge 报告显式绑定 `arbitrage_entry` 或 `manual_entry`。执行前按
 
 Binance preflight 会重读机会与私有账户，分别核对现货/期货可用 USDT、读取/现货/Futures 交易权限、提现关闭、one-way 持仓模式、产品状态、数量/价格精度、最小名义、活动订单、已有 XAUT 敞口、公开盘口深度、stale、Funding、基差、净 APR、动态最小共同数量和 2000 USDT 四层 profile 上限。检查失败返回 `409 preflight_rejected`；全部通过才签发 60 秒一次性 challenge。Execute 会再次执行实时 preflight，设置 USD-M Futures 1x 杠杆，并只允许固定 `XAUTUSDT` 的现货侧 IOC Limit Buy 与永续侧 IOC Limit Sell。现货侧实际成交后才按成交数量建立永续侧；永续侧失败、订单状态超时或对冲未完成时，系统只撤销带本策略 client order ID 前缀的活动订单，并尝试补齐对冲或退出本策略仓位。两次退出仍无法闭环时进入 `manual_intervention` 并激活该用户的 Binance kill switch。
 
-`connectivity_smoke` 与两种套利入场 mode 明确分离；当前没有开放 connectivity smoke 路由，
-不能借该 mode 绕过机会资格，也不能记为套利仓位或收益。未来烟测预算按动态最小共同数量计算。
+`connectivity_smoke` 与两种套利入场 mode 明确分离；它不能借机绕过普通策略入口，也不能记为
+套利仓位或收益。Production Capital Test Permit 唯一接受
+`executionMode=single_connectivity_smoke`，该字段进入 Permit schema、digest、confirmation 和每次
+新增风险 mutation 的 runtime verification，但不进入 Credential Binding digest。旧
+`single_funding_rate_arbitrage_round` mode 一律 fail-closed。
+
+生产 server kill switch 始终保持默认激活。仅 `executeConnectivitySmoke()` 可在专用 trusted
+operation 创建的 receipt + lease 窗口中获得窄化例外；窗口默认 CLOSED，hard end 最长 30 分钟且
+不可延长，controller 中断后 lease 自动失效，API 每次从只读挂载重读 receipt。Spot Buy、Futures
+新增风险及 leverage mutation 前均重新校验 Permit、Binding、execution mode、receipt 与 lease；
+窗口失效后禁止新增风险和自动补单，但 cancel、reduce-only、Spot Sell 与 flat reconciliation 保持可用。
 
 ### 独立 connectivity smoke 契约
 

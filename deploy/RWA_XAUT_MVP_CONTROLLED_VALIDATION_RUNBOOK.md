@@ -116,6 +116,14 @@ Gate 1 后、Gate 2 前执行。任何 provider mutation 都是失败。
 一个 takeover；其他用户、venue、asset 全部关闭。服务器侧窗口最长 30 分钟，到期原子关闭
 新增执行，同时保留风险降低和退出能力。
 
+Capital Test connectivity smoke 使用独立 `single_connectivity_smoke` Permit mode。生产 server
+kill switch 不得修改默认值；窗口只能由固定 trusted operation 前台 controller 建立，并由 canonical
+receipt、不可延长的 `hardEndAt` 和短 lease 共同授权。API 通过只读 bind mount 在每次新增风险
+Provider mutation 前重读并核对 Permit/Binding/mode/window/lease；缺失、过期、controller 退出、
+身份漂移或 receipt 文件边界异常均视为 CLOSED。窗口关闭后不得新开风险或自动补单，但必须保留
+cancel、reduce-only、Spot Sell 和 flat reconciliation。该窗口不是通用 kill-switch 管理能力，
+不得通过环境变量、Admin API、续期或常驻 daemon 控制。
+
 ### 持久 takeover 发现与确认中止
 
 - `GET /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/current` 无 body。服务端只接受
