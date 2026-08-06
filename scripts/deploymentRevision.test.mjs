@@ -35,6 +35,7 @@ const COMPONENT_DIGESTS = Object.freeze({
   "strategy-tools": STRATEGY_DIGEST,
   "rwa-automation-backup": API_DIGEST,
   "rwa-automation-restore": API_DIGEST,
+  "rwa-automation-verify": API_DIGEST,
 });
 
 test("accepts one exact full revision across every release component", () => {
@@ -111,6 +112,26 @@ test("production Compose accepts only the fixed project and manifest service map
     mutate(config);
     assert.throws(() => validateProductionComposeConfig(manifestValue(), config));
   }
+});
+
+test("topology render includes verification-only services without expanding runtime components", () => {
+  const source = readFileSync(VERIFIER, "utf8");
+  const topologyRender = /function verifyProductionCompose\([\s\S]*?\n\}\n\nfunction readSecureEnvironmentRevision/u
+    .exec(source)?.[0];
+  assert.ok(topologyRender);
+  assert.equal(
+    [...topologyRender.matchAll(/"rwa-automation-verify"/gu)].length,
+    1,
+  );
+  assert.ok(Object.hasOwn(composeConfig().services, "rwa-automation-verify"));
+
+  const runningComponents = /const RUNNING_COMPONENTS = Object\.freeze\(\[([\s\S]*?)\n\]\);/u
+    .exec(source)?.[1];
+  assert.ok(runningComponents);
+  assert.deepEqual(
+    [...runningComponents.matchAll(/\["([a-z-]+)",/gu)].map((match) => match[1]),
+    ["api", "web"],
+  );
 });
 
 test("revision evidence rejects missing, mismatched and mutable components", () => {
@@ -238,6 +259,7 @@ function composeConfig() {
       "strategy-history": service(STRATEGY_DIGEST),
       "sqlite-restore": service(API_DIGEST),
       "provider-identity-preflight": service(API_DIGEST),
+      "rwa-automation-verify": service(API_DIGEST),
       "rwa-automation-backup": service(API_DIGEST),
       "rwa-automation-restore": service(API_DIGEST),
     },

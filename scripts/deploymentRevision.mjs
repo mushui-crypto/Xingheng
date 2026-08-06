@@ -5,6 +5,7 @@ export const REQUIRED_IMAGE_COMPONENTS = Object.freeze([
   "strategy-tools",
   "rwa-automation-backup",
   "rwa-automation-restore",
+  "rwa-automation-verify",
 ]);
 
 const FULL_REVISION = /^[0-9a-f]{40}$/;
@@ -18,6 +19,7 @@ const PRODUCTION_SERVICE_IMAGES = Object.freeze({
   "provider-identity-preflight": "api",
   "rwa-automation-backup": "api",
   "rwa-automation-restore": "api",
+  "rwa-automation-verify": "api",
 });
 export function assertFullRevision(value, field = "deployment revision") {
   if (typeof value !== "string" || !FULL_REVISION.test(value)) {

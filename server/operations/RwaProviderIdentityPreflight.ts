@@ -16,6 +16,40 @@ export type ProviderIdentityReceipt = {
   revision: string;
   accountIdentitySha256: string;
   credentialBindingSha256: string;
+  accountMode: string;
+  permissions: {
+    read: boolean;
+    spotTrade: boolean;
+    contractTrade: boolean;
+    withdraw: boolean;
+    ipRestricted: boolean;
+    positionModeSupported: boolean;
+  };
+  product: {
+    available: boolean;
+    spotStatus: string;
+    perpetualStatus: string;
+    spotQtyStep: number;
+    spotMinOrderQty: number;
+    spotMinNotionalUsd: number;
+    spotPriceTick: number;
+    perpetualQtyStep: number;
+    perpetualMinOrderQty: number;
+    perpetualMinNotionalUsd: number;
+    perpetualPriceTick: number;
+  };
+  account: {
+    spotXautExposure: boolean;
+    perpetualXautExposure: boolean;
+    activeSpotOrders: boolean;
+    activePerpetualOrders: boolean;
+  };
+  streamProbe: {
+    spotSignedSubscribe: true;
+    futuresListenKeyCreate: true;
+    futuresListenKeyKeepalive: true;
+    futuresListenKeyClose: true;
+  };
   verifiedAt: string;
   readOnly: true;
 };
@@ -34,7 +68,10 @@ type Client = {
   validateAccess(): Promise<{
     accountId: string;
     accountFingerprint: string;
+    accountMode: string;
+    permissions: ProviderIdentityReceipt["permissions"];
   }>;
+  readPreflightSnapshot(): Promise<any>;
 };
 
 type Dependencies = {
@@ -47,6 +84,7 @@ type Dependencies = {
   userId?: () => string | undefined;
   createStore?: (userId: string) => Store;
   createClient?: (credentials: RwaBinanceCredentials) => Client;
+  probeStreams?: (credentials: RwaBinanceCredentials) => Promise<ProviderIdentityReceipt["streamProbe"]>;
   now?: () => Date;
 };
 
@@ -71,7 +109,7 @@ export async function runRwaProviderIdentityPreflight(
   }
   const userId = (dependencies.userId
     ?? (() => process.env.RWA_PROVIDER_PREFLIGHT_USER_ID))()?.trim();
-  if (!userId || userId.length > 256 || /[\u0000-\u001f\u007f]/u.test(userId)) {
+  if (!/^USR-[A-Z0-9]+$/u.test(userId ?? "")) {
     throw new ProviderIdentityPreflightError("provider_owner_unconfigured");
   }
   const createStore = dependencies.createStore ?? ((ownerUserId: string) =>
@@ -82,12 +120,13 @@ export async function runRwaProviderIdentityPreflight(
     }));
   const createClient = dependencies.createClient
     ?? ((credentials: RwaBinanceCredentials) => new RwaBinanceMainnetClient(credentials));
-  const store = createStore(userId);
+  const store = createStore(userId!);
   const metadata = await store.readCredentialMetadata();
   if (!metadata) {
     throw new ProviderIdentityPreflightError("provider_credential_unconfigured");
   }
-  const client = createClient(await store.loadCredentials());
+  const credentials = await store.loadCredentials();
+  const client = createClient(credentials);
   const authoritative = await client.validateAccess();
   if (
     authoritative.accountId !== metadata.accountId
@@ -95,6 +134,14 @@ export async function runRwaProviderIdentityPreflight(
   ) {
     throw new ProviderIdentityPreflightError("provider_identity_mismatch");
   }
+  const snapshot = await client.readPreflightSnapshot();
+  if (snapshot.accountId !== authoritative.accountId
+    || snapshot.accountFingerprint !== authoritative.accountFingerprint) {
+    throw new ProviderIdentityPreflightError("provider_identity_mismatch");
+  }
+  const streamProbe = await (dependencies.probeStreams ?? probeBinanceGate1UserStreams)(
+    credentials,
+  );
   const binding = `${deploymentEnvironment}:${composeProject}`
     + `:${authoritative.accountId}:${authoritative.accountFingerprint}`;
   return {
@@ -105,9 +152,45 @@ export async function runRwaProviderIdentityPreflight(
     revision: revision!,
     accountIdentitySha256: digest(`binance-authoritative:${authoritative.accountId}`),
     credentialBindingSha256: digest(binding),
+    accountMode: authoritative.accountMode,
+    permissions: {
+      read: authoritative.permissions.read,
+      spotTrade: authoritative.permissions.spotTrade,
+      contractTrade: authoritative.permissions.contractTrade,
+      withdraw: authoritative.permissions.withdraw,
+      ipRestricted: authoritative.permissions.ipRestricted,
+      positionModeSupported: authoritative.permissions.positionModeSupported,
+    },
+    product: {
+      available: snapshot.productAvailability.available,
+      spotStatus: snapshot.spot.status,
+      perpetualStatus: snapshot.perpetual.status,
+      spotQtyStep: snapshot.spot.qtyStep,
+      spotMinOrderQty: snapshot.spot.minOrderQty,
+      spotMinNotionalUsd: snapshot.spot.minNotionalUsd,
+      spotPriceTick: snapshot.spot.priceTick,
+      perpetualQtyStep: snapshot.perpetual.qtyStep,
+      perpetualMinOrderQty: snapshot.perpetual.minOrderQty,
+      perpetualMinNotionalUsd: snapshot.perpetual.minNotionalUsd,
+      perpetualPriceTick: snapshot.perpetual.priceTick,
+    },
+    account: {
+      spotXautExposure: snapshot.existingSpotQuantityXaut > 0,
+      perpetualXautExposure: snapshot.existingPerpetualQuantityXaut > 0,
+      activeSpotOrders: snapshot.openSpotOrderCount > 0,
+      activePerpetualOrders: snapshot.openPerpetualOrderCount > 0,
+    },
+    streamProbe,
     verifiedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     readOnly: true,
   };
+}
+
+export async function probeBinanceGate1UserStreams(
+  credentials: RwaBinanceCredentials,
+): Promise<ProviderIdentityReceipt["streamProbe"]> {
+  const module = await import("./RwaProviderUserStreamProbe");
+  return module.runRwaProviderUserStreamProbe(credentials);
 }
 
 export function providerIdentityPreflightErrorCategory(error: unknown) {

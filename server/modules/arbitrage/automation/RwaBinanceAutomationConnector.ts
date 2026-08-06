@@ -60,11 +60,28 @@ export class RwaBinanceAutomationConnector implements RwaAutomationConnector {
   }
 
   async putCredentials(input: RwaVenueCredentialInput) {
-    await this.service.putCredentials({ apiKey: input.apiKey, apiSecret: input.apiSecret });
-    return this.getStatus();
+    const credential = await this.service.putCredentials({ apiKey: input.apiKey, apiSecret: input.apiSecret });
+    const status = await this.getStatus();
+    return {
+      ...status,
+      credential: { ...status.credential, uidSnapshot: credential.uidSnapshot },
+    };
   }
 
-  deleteCredentials(input?: unknown) { return this.service.deleteCredentials(input); }
+  deleteCredentials(
+    input?: unknown,
+    finalize?: () => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ) {
+    return this.service.deleteCredentials(input, finalize, finalizeRestoreFailure);
+  }
+  recoveryUnbind(
+    finalize?: (result: { providerVerifiedFlat: boolean }) => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ) {
+    return this.service.recoveryUnbind(finalize, finalizeRestoreFailure);
+  }
+  markCredentialRecoveryInconsistent() { return this.service.markCredentialRecoveryInconsistent(); }
   getAccountAssetAuthorization(assetId: string) { return this.service.getAccountAssetAuthorization(assetId); }
   previewAccountAssetAuthorization(assetId: string) { return this.service.previewAccountAssetAuthorization(assetId); }
   createAccountAssetAuthorization(

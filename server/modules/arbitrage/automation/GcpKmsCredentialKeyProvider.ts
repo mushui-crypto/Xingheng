@@ -21,7 +21,9 @@ import {
   validateGcpWifRuntimeBoundary,
 } from "./GcpWifCredentialConfig";
 
-type KmsClient = Pick<KeyManagementServiceClient, "encrypt" | "decrypt">;
+type KmsClient = Pick<KeyManagementServiceClient, "encrypt" | "decrypt"> & {
+  auth: Pick<KeyManagementServiceClient["auth"], "getAccessToken">;
+};
 const crc32cTable = createCrc32cTable();
 
 export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
@@ -139,6 +141,29 @@ export class GcpKmsCredentialKeyProvider implements CredentialKeyProvider {
       return { ok: false, category: safe.category, message: safe.message };
     } finally {
       probe.fill(0);
+    }
+  }
+
+  async authenticationHealthCheck(): Promise<CredentialKeyProviderHealth> {
+    try {
+      this.requireConfigured();
+      await this.validateAdcConfiguration();
+    } catch {
+      return {
+        ok: false,
+        category: "wif_identity_invalid",
+        message: "GCP WIF 身份边界无效。",
+      };
+    }
+    try {
+      let token = await this.getClient().auth.getAccessToken();
+      const ok = typeof token === "string" && token.length > 0;
+      token = undefined;
+      return ok
+        ? { ok: true, category: null, message: null }
+        : { ok: false, category: "sts_exchange_failed", message: "STS 身份交换失败。" };
+    } catch {
+      return { ok: false, category: "sts_exchange_failed", message: "STS 身份交换失败。" };
     }
   }
 

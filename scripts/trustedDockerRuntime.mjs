@@ -20,20 +20,36 @@ import {
   assertTrustedReleaseCandidateRoot,
   readTrustedReleaseCandidateReceipt,
 } from "./trustedReleaseCandidate.mjs";
+import { assertPromotionStateAllowsProduction } from "./releasePromotionTransaction.mjs";
 
 const PRODUCTION_DOCKER_CLI = "/usr/bin/docker";
 const PRODUCTION_COMPOSE_PLUGIN = "/usr/libexec/docker/cli-plugins/docker-compose";
 const PRODUCTION_DOCKER_SOCKET = "/var/run/docker.sock";
 const PRODUCTION_TRUST_RECEIPT = "/etc/xingheng/trusted-operations.json";
 const PRODUCTION_RELEASE_ROOT = "/opt/xingheng-release/code";
+const PRODUCTION_PROMOTION_HELPER = "/usr/local/libexec/xingheng-promotion-atomic-exchange";
+const PRODUCTION_PROMOTION_HELPER_RECEIPT = "/etc/xingheng/promotion-atomic-exchange.json";
 const MAX_CLIENT_BYTES = 256 * 1024 * 1024;
 const MAX_RECEIPT_BYTES = 64 * 1024;
+const MAX_DIAGNOSTIC_BYTES = 4096;
+const CONTAINER_VERIFY_FAILURES = Object.freeze({
+  wif_identity: "wif_identity_invalid",
+  sts_exchange: "sts_exchange_failed",
+  kms_health: "kms_health_failed",
+  kms_decrypt: "kms_decrypt_failed",
+  backup_envelope: "backup_envelope_invalid",
+  backup_authentication: "backup_authentication_failed",
+  backup_content: "backup_content_invalid",
+  container_receipt: "docker_execution_unknown",
+});
 const SAFE_CHILD_KEYS = Object.freeze([
   "XINGHENG_REVISION",
   "XINGHENG_API_IMAGE",
   "XINGHENG_WEB_IMAGE",
   "XINGHENG_STRATEGY_TOOLS_IMAGE",
   "XINGHENG_COMPOSE_ENV_FD",
+  "RWA_PROVIDER_PREFLIGHT_USER_ID",
+  "RWA_AUTOMATION_VERIFY_FILE",
 ]);
 const REQUIRED_TOOLS = Object.freeze({
   node: "/usr/bin/node",
@@ -69,11 +85,14 @@ export function trustedReleaseRoot(source = process.env) {
 
 export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   if (process.getuid?.() !== 0) return realpathSync(currentRoot);
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if (["release-build", "candidate-verify", "promotion"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     return assertTrustedReleaseCandidateRoot(
       currentRoot,
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     ).root;
+  }
+  if (source.XINGHENG_OPERATION_LOCK_CONTEXT !== "promotion") {
+    assertPromotionStateAllowsProduction();
   }
   const expected = trustedReleaseRoot(source);
   const actual = realpathSync(currentRoot);
@@ -85,11 +104,30 @@ export function assertTrustedReleaseRoot(currentRoot, source = process.env) {
   return actual;
 }
 
+export function assertTrustedProductionReleaseRoot(currentRoot = PRODUCTION_RELEASE_ROOT) {
+  const receipt = readProductionTrustReceipt();
+  const actual = realpathSync(currentRoot);
+  if (actual !== receipt.releaseRoot) {
+    throw new Error("production release root identity mismatch");
+  }
+  validateDirectoryChain(actual, false);
+  assertTrustedReleaseTree(actual, receipt.releaseTree);
+  return Object.freeze({
+    releaseRoot: actual,
+    releaseTree: receipt.releaseTree,
+    receiptSha256: receipt.receiptSha256,
+  });
+}
+
 export function openTrustedDockerRuntime(kind, source = process.env) {
   if (!["docker", "compose"].includes(kind)) {
     throw new Error("trusted Docker runtime kind is invalid");
   }
   assertNoDockerControlEnvironment(source);
+  if (!["release-build", "candidate-verify", "promotion"]
+    .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+    assertPromotionStateAllowsProduction();
+  }
   const fixture = testFixture(source);
   const trustReceipt = fixture === null ? activeTrustReceipt(source) : null;
   if (fixture === null && process.getuid?.() !== 0) {
@@ -127,8 +165,13 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
 
 export function openTrustedHostTool(name, source = process.env) {
   assertNoDockerControlEnvironment(source);
-  if (!Object.hasOwn(REQUIRED_TOOLS, name) || ["docker", "compose"].includes(name)) {
+  if (!Object.hasOwn(REQUIRED_TOOLS, name)
+    || ["docker", "compose", "promotionExchange"].includes(name)) {
     throw new Error("trusted host tool name is invalid");
+  }
+  if (!["release-build", "candidate-verify", "promotion"]
+    .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
+    assertPromotionStateAllowsProduction();
   }
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || testFixture(source) !== null) {
     throw new Error("trusted host tool requires the controlled root operator");
@@ -146,6 +189,92 @@ export function openTrustedHostTool(name, source = process.env) {
       closeSync(opened.fd);
     },
   };
+}
+
+export function executePromotionAtomicExchange(input) {
+  if (process.platform !== "linux" || process.getuid?.() !== 0 || process.getgid?.() !== 0
+    || process.env.XINGHENG_OPERATION_LOCK_CONTEXT !== "promotion") {
+    throw new Error("promotion atomic exchange requires the trusted promotion context");
+  }
+  if (!input || input.testMode === true || input.helperPath !== PRODUCTION_PROMOTION_HELPER
+    || !/^[0-9a-f-]{36}$/u.test(input.operationId ?? "")
+    || !/^[a-f0-9]{64}$/u.test(input.contextSha256 ?? "")
+    || !Number.isInteger(input.contextFd)) {
+    throw new Error("promotion atomic exchange input is invalid");
+  }
+  const helperReceipt = readValidatedPromotionHelperReceipt();
+  const helper = helperReceipt.opened;
+  try {
+    const result = spawnSync(trustedExecutableInvocation(helper, 6), [
+      input.operationId,
+      input.contextSha256,
+      String(input.canonical.dev),
+      String(input.canonical.ino),
+      String(input.staging.dev),
+      String(input.staging.ino),
+    ], {
+      encoding: "utf8",
+      env: {
+        HOME: "/root",
+        PATH: "/usr/sbin:/usr/bin:/sbin:/bin",
+        LANG: "C.UTF-8",
+        LC_ALL: "C.UTF-8",
+        TZ: "UTC",
+        XINGHENG_OPERATION_LOCK_CONTEXT: "promotion",
+        XINGHENG_PROMOTION_CONTEXT_SHA256: input.contextSha256,
+      },
+      stdio: ["ignore", "pipe", "pipe", 3, 4, input.contextFd, helper.fd],
+    });
+    verifyTrustedHostTool(helper);
+    if (result.status !== 0 || result.signal || result.error
+      || result.stdout !== "PROMOTION_ATOMIC_EXCHANGE=PASS\n" || result.stderr !== "") {
+      throw new Error("promotion atomic exchange execution failed");
+    }
+    return true;
+  } finally {
+    closeSync(helper.fd);
+  }
+}
+
+export function readValidatedProductionTrustReceipt() {
+  return readProductionTrustReceipt();
+}
+
+export function readValidatedPromotionHelperReceipt(options = {}) {
+  const testMode = options.testMode === true;
+  const helperPath = resolve(options.helperPath ?? PRODUCTION_PROMOTION_HELPER);
+  const receiptPath = resolve(options.receiptPath ?? PRODUCTION_PROMOTION_HELPER_RECEIPT);
+  if (!testMode && (helperPath !== PRODUCTION_PROMOTION_HELPER
+    || receiptPath !== PRODUCTION_PROMOTION_HELPER_RECEIPT)) {
+    throw new Error("promotion helper fixed path is invalid");
+  }
+  const expectedUid = testMode ? (process.getuid?.() ?? -1) : 0;
+  const expectedGid = testMode ? (process.getgid?.() ?? -1) : 0;
+  const receipt = readSecureReceipt(receiptPath, expectedUid, expectedGid, 0o400, 16 * 1024);
+  const value = JSON.parse(receipt.bytes.toString("utf8"));
+  receipt.bytes.fill(0);
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || Object.keys(value).sort().join(",") !== "helper,schemaVersion"
+    || value.schemaVersion !== 1 || !value.helper || typeof value.helper !== "object"
+    || Array.isArray(value.helper)
+    || Object.keys(value.helper).sort().join(",") !== [
+      "dev", "gid", "ino", "mode", "nlink", "path", "sha256", "size", "uid",
+    ].sort().join(",")
+    || value.helper.path !== helperPath || value.helper.uid !== expectedUid
+    || value.helper.gid !== expectedGid || value.helper.mode !== 0o500
+    || value.helper.nlink !== 1 || !Number.isSafeInteger(value.helper.dev)
+    || !Number.isSafeInteger(value.helper.ino) || !Number.isSafeInteger(value.helper.size)
+    || value.helper.size < 1 || !/^[a-f0-9]{64}$/u.test(value.helper.sha256 ?? "")) {
+    throw new Error("promotion helper receipt schema is invalid");
+  }
+  const opened = openTrustedExecutable(helperPath, value.helper.sha256, testMode);
+  if (opened.dev !== value.helper.dev || opened.ino !== value.helper.ino
+    || opened.size !== value.helper.size || opened.uid !== value.helper.uid
+    || opened.gid !== value.helper.gid || opened.mode !== value.helper.mode) {
+    closeSync(opened.fd);
+    throw new Error("promotion helper receipt identity mismatch");
+  }
+  return Object.freeze({ value: Object.freeze(value), receiptSha256: receipt.sha256, opened });
 }
 
 export function verifyTrustedHostTool(tool) {
@@ -236,6 +365,165 @@ export function execTrustedDockerSync(args, options = {}) {
   } finally {
     runtime.close();
   }
+}
+
+export function candidateRwaVerifyDockerArguments(contract) {
+  validateCandidateRwaVerifyContract(contract);
+  return Object.freeze([
+    "run",
+    "--pull", "never",
+    "--rm",
+    "--network", "bridge",
+    "--read-only",
+    "--user", "20001:20001",
+    "--cap-drop", "ALL",
+    "--security-opt", "no-new-privileges",
+    "--tmpfs", "/tmp:size=16m,mode=0700,uid=20001,gid=20001",
+    "--mount", "type=volume,src=xingheng_rwa_automation_backups,dst=/app/rwa-automation-backups,readonly",
+    "--mount", "type=bind,src=/run/xingheng/gcp-wif,dst=/run/secrets/gcp-wif,readonly,bind-propagation=rprivate",
+    "-e", "NODE_ENV=production",
+    "-e", "XINGHENG_DEPLOYMENT_ENVIRONMENT=production",
+    "-e", "XINGHENG_COMPOSE_PROJECT=xingheng",
+    "-e", `DOMAIN=${contract.domain}`,
+    "-e", "XINGHENG_WIF_HOST_PATH=/run/xingheng/gcp-wif",
+    "-e", `XINGHENG_EXPECTED_REVISION=${contract.candidateRevision}`,
+    "-e", "RWA_AUTOMATION_BACKUP_DIR=/app/rwa-automation-backups",
+    "-e", `RWA_AUTOMATION_VERIFY_FILE=${contract.backupName}`,
+    "-e", "RWA_CREDENTIAL_KEY_PROVIDER=gcp-kms",
+    "-e", "RWA_GCP_KMS_KEY_NAME=projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials",
+    "-e", `RWA_GCP_WIF_AUDIENCE=${contract.wifAudience}`,
+    "-e", "GOOGLE_APPLICATION_CREDENTIALS=/run/secrets/gcp-wif/adc.json",
+    contract.apiDigest,
+    "node", "dist-server/operations/rwa-automation-backup-verify.js",
+  ]);
+}
+
+export function validateCandidateRwaVerifyDockerArguments(values, contract, source = process.env) {
+  validateCandidateRwaVerifyContract(contract);
+  if (
+    source.XINGHENG_OPERATION_LOCK_CONTEXT !== "candidate-verify"
+    || source.XINGHENG_RELEASE_CANDIDATE_REVISION !== contract.candidateRevision
+  ) throw new Error("candidate verify Docker context is invalid");
+  const inspect = ["image", "inspect", "--format", "{{json .}}", contract.apiDigest];
+  const run = candidateRwaVerifyDockerArguments(contract);
+  if (sameArguments(values, inspect) || sameArguments(values, run)) return;
+  throw new Error("candidate verify Docker arguments are not allowlisted");
+}
+
+export function execCandidateRwaVerifyDockerSync(args, contract, options = {}) {
+  validateCandidateRwaVerifyDockerArguments(args, contract);
+  const runtime = openTrustedDockerRuntime("docker", process.env);
+  try {
+    const result = spawnSync(trustedExecutableInvocation(runtime, 3), args, {
+      encoding: "utf8",
+      maxBuffer: options.maxBuffer ?? 1024 * 1024,
+      env: runtime.environment,
+      stdio: ["ignore", "pipe", "pipe", runtime.fd],
+    });
+    verifyTrustedDockerRuntime(runtime);
+    return validateCandidateRwaVerifyDockerResult(result);
+  } finally {
+    runtime.close();
+  }
+}
+
+export class CandidateRwaVerifyDockerError extends Error {
+  constructor(readonlyFailure) {
+    super(readonlyFailure.category);
+    this.failure = Object.freeze({ ...readonlyFailure });
+  }
+}
+
+export function validateCandidateRwaVerifyDockerResult(result) {
+  if (
+    !result
+    || typeof result !== "object"
+    || typeof result.stdout !== "string"
+    || typeof result.stderr !== "string"
+    || result.error
+    || result.signal
+  ) throw dockerFailure("container_receipt", "docker_execution_unknown");
+  if (result.status === 0) {
+    if (result.stderr !== "") {
+      throw dockerFailure("container_receipt", "container_receipt_invalid");
+    }
+    return result.stdout;
+  }
+  if (result.status !== 1 || result.stdout !== "") {
+    throw dockerFailure("container_receipt", "docker_execution_unknown");
+  }
+  const failure = parseContainerVerifyFailure(result.stderr);
+  if (failure === null) {
+    throw dockerFailure("container_receipt", "docker_execution_unknown");
+  }
+  throw new CandidateRwaVerifyDockerError(failure);
+}
+
+function parseContainerVerifyFailure(output) {
+  if (
+    typeof output !== "string"
+    || Buffer.byteLength(output, "utf8") > MAX_DIAGNOSTIC_BYTES
+    || !output.endsWith("\n")
+    || output.slice(0, -1).includes("\n")
+  ) return null;
+  try {
+    const value = JSON.parse(output);
+    if (
+      !value
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || Object.keys(value).sort().join(",") !== [
+        "category", "ok", "operation", "readOnly", "schemaVersion", "stage",
+      ].sort().join(",")
+      || value.schemaVersion !== 1
+      || value.operation !== "verify"
+      || value.ok !== false
+      || value.readOnly !== true
+      || CONTAINER_VERIFY_FAILURES[value.stage] !== value.category
+    ) return null;
+    return Object.freeze({ stage: value.stage, category: value.category });
+  } catch {
+    return null;
+  }
+}
+
+function dockerFailure(stage, category) {
+  return new CandidateRwaVerifyDockerError({ stage, category });
+}
+
+function validateCandidateRwaVerifyContract(contract) {
+  if (
+    !contract
+    || typeof contract !== "object"
+    || Array.isArray(contract)
+    || Object.keys(contract).sort().join(",") !== [
+      "apiDigest", "backupName", "candidateRevision", "domain", "wifAudience",
+    ].sort().join(",")
+    || !/^[a-f0-9]{40}$/u.test(contract.candidateRevision ?? "")
+    || !/^sha256:[a-f0-9]{64}$/u.test(contract.apiDigest ?? "")
+    || !/^rwa-automation-[0-9]{8}T[0-9]{6}Z\.rwa\.enc\.json$/u.test(contract.backupName ?? "")
+    || !validProductionDomain(contract.domain)
+    || !/^\/\/iam\.googleapis\.com\/projects\/[1-9][0-9]{5,19}\/locations\/global\/workloadIdentityPools\/[a-z][a-z0-9-]{3,31}\/providers\/[a-z][a-z0-9-]{3,31}$/u
+      .test(contract.wifAudience ?? "")
+  ) throw new Error("candidate verify Docker contract is invalid");
+}
+
+function validProductionDomain(value) {
+  return typeof value === "string"
+    && !value.includes("://")
+    && !value.includes("/")
+    && !value.includes(":")
+    && !value.includes("@")
+    && !value.includes("*")
+    && value !== "localhost"
+    && !/^[0-9.]+$/u.test(value)
+    && /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/iu.test(value);
+}
+
+function sameArguments(left, right) {
+  return Array.isArray(left)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index]);
 }
 
 export function validateTrustedReleaseBuildDockerArguments(values, source = process.env) {
@@ -500,14 +788,42 @@ function readProductionTrustReceipt() {
     ) {
       throw new Error("trusted operations receipt changed while being read");
     }
-    return validateTrustReceipt(JSON.parse(bytes.toString("utf8")));
+    return Object.freeze({
+      ...validateTrustReceipt(JSON.parse(bytes.toString("utf8"))),
+      receiptSha256: createHash("sha256").update(bytes).digest("hex"),
+    });
   } finally {
     closeSync(fd);
   }
 }
 
+function readSecureReceipt(path, uid, gid, mode, maximum) {
+  validateDirectoryChain(dirname(path), uid !== 0 || gid !== 0);
+  const before = lstatSync(path);
+  if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+    || before.uid !== uid || before.gid !== gid || (before.mode & 0o777) !== mode
+    || before.size < 2 || before.size > maximum) {
+    throw new Error("trusted receipt boundary is invalid");
+  }
+  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+  try {
+    const opened = fstatSync(fd);
+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size
+      || opened.uid !== uid || opened.gid !== gid || opened.nlink !== 1
+      || (opened.mode & 0o777) !== mode) throw new Error("trusted receipt changed while opening");
+    const bytes = readFileSync(fd);
+    const after = fstatSync(fd);
+    if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size
+      || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) {
+      bytes.fill(0);
+      throw new Error("trusted receipt changed while reading");
+    }
+    return { bytes, sha256: createHash("sha256").update(bytes).digest("hex") };
+  } finally { closeSync(fd); }
+}
+
 function activeTrustReceipt(source) {
-  if (source.XINGHENG_OPERATION_LOCK_CONTEXT === "release-build") {
+  if (["release-build", "candidate-verify", "promotion"].includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     const receipt = readTrustedReleaseCandidateReceipt(
       source.XINGHENG_RELEASE_CANDIDATE_REVISION,
     );

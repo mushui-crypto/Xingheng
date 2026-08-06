@@ -22,13 +22,17 @@ import {
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
 import { assertTrustedReleaseCandidateRoot } from "./trustedReleaseCandidate.mjs";
+import {
+  assertPromotionStateAllowsProduction,
+  validateTrustedPromotionArguments,
+} from "./releasePromotionTransaction.mjs";
 
 const operation = process.argv[2];
 const entryArgument = process.argv[3];
 const args = process.argv.slice(4);
 
 try {
-  if (!["production", "release-build"].includes(operation) || !entryArgument) usage();
+  if (!["production", "release-build", "candidate-verify", "promotion"].includes(operation) || !entryArgument) usage();
   if (process.getuid?.() !== 0 || process.getgid?.() !== 0 || process.platform !== "linux") {
     throw new Error("trusted operation launcher requires root on Linux");
   }
@@ -40,21 +44,28 @@ try {
   ) {
     throw new Error("nested trusted operation launcher is not allowed");
   }
+  if (operation === "promotion") validateTrustedPromotionArguments(args, process.env);
   const currentRoot = new URL("../", import.meta.url).pathname;
-  const candidateRevision = operation === "release-build"
+  const candidateRevision = ["release-build", "candidate-verify", "promotion"].includes(operation)
     ? basename(dirname(resolve(currentRoot)))
     : null;
-  const root = operation === "release-build"
+  const root = candidateRevision !== null
     ? assertTrustedReleaseCandidateRoot(currentRoot, candidateRevision).root
     : assertTrustedReleaseRoot(currentRoot);
   if (candidateRevision !== null) {
-    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = "release-build";
+    process.env.XINGHENG_OPERATION_LOCK_CONTEXT = operation;
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
+  } else {
+    assertPromotionStateAllowsProduction();
   }
   const entry = realpathSync(resolve(root, entryArgument));
   const entryName = entry.slice(`${root}/scripts/`.length);
-  const allowedEntries = operation === "release-build"
-    ? ["build-release-images.sh"]
+  const allowedEntries = operation !== "production"
+    ? [operation === "release-build"
+      ? "build-release-images.sh"
+      : (operation === "candidate-verify"
+        ? "candidate-rwa-automation-verify.sh"
+        : "release-promote.sh")]
     : [
       "production-compose.sh",
       "activate-release.sh",
@@ -66,15 +77,26 @@ try {
       "rwa-automation-backup.sh",
       "rwa-automation-restore.sh",
       "rwa-automation-rollback.sh",
+      "rwa-automation-verify.sh",
+      "provider-gate1-preflight.sh",
       "rollback-release.sh",
+      "install-production-self-test-permit.sh",
       "smoke.sh",
     ];
   if (
     !entry.startsWith(`${root}/scripts/`)
     || !allowedEntries.includes(entryName)
   ) throw new Error("trusted operation entry is not allowlisted");
+  if (
+    operation === "candidate-verify"
+    && (
+      args.length !== 1
+      || !/^rwa-automation-[0-9]{8}T[0-9]{6}Z\.rwa\.enc\.json$/u.test(args[0] ?? "")
+    )
+  ) throw new Error("candidate verify input is invalid");
 
   const openedEntry = openTrustedEntry(entry);
+  const openedLauncher = openTrustedEntry(resolve(root, "scripts/trusted-operation-launcher.mjs"));
   try {
     const locks = acquireOperationLocks(operation);
     try {
@@ -88,7 +110,10 @@ try {
           TZ: "UTC",
           XINGHENG_OPERATION_LOCK_CONTEXT: operation,
         };
-        if (operation === "release-build") {
+        if (operation === "promotion") {
+          childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = "release-promote.sh";
+        }
+        if (candidateRevision !== null) {
           childEnvironment.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
         } else {
           for (const key of [
@@ -110,12 +135,14 @@ try {
             stdio: [
               "inherit", "inherit", "inherit",
               locks.descriptors[0], locks.descriptors[1], shell.fd, openedEntry.fd,
+              openedLauncher.fd,
             ],
           },
         );
         verifyTrustedEntry(openedEntry);
+        verifyTrustedEntry(openedLauncher);
         verifyTrustedHostTool(shell);
-        if (operation === "release-build") {
+        if (candidateRevision !== null) {
           assertTrustedReleaseCandidateRoot(root, candidateRevision);
         } else {
           assertTrustedReleaseRoot(root, process.env);
@@ -134,15 +161,18 @@ try {
     }
   } finally {
     closeSync(openedEntry.fd);
+    closeSync(openedLauncher.fd);
   }
 } catch (error) {
-  console.error(error instanceof Error ? error.message : "trusted operation launcher failed");
+  console.error(operation === "candidate-verify"
+    ? "candidate_identity_invalid"
+    : (error instanceof Error ? error.message : "trusted operation launcher failed"));
   process.exitCode = 1;
 }
 
 function usage() {
   throw new Error(
-    "usage: trusted-operation-launcher.mjs production|release-build scripts/ENTRY ARGS...",
+    "usage: trusted-operation-launcher.mjs production|release-build|candidate-verify|promotion scripts/ENTRY ARGS...",
   );
 }
 

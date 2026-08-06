@@ -14,6 +14,7 @@ export class FakeCredentialKeyProvider implements CredentialKeyProvider {
   readonly configurationError = null;
   readonly createdDekFingerprints: string[] = [];
   failCategory: string | null = null;
+  authenticationFailCategory: string | null = null;
   private readonly wrappingKey = randomBytes(32);
 
   constructor() {
@@ -62,6 +63,17 @@ export class FakeCredentialKeyProvider implements CredentialKeyProvider {
   async healthCheck() {
     if (this.failCategory) {
       return { ok: false, category: this.failCategory, message: "测试凭证密钥 provider 不可用。" };
+    }
+    return { ok: true, category: null, message: null };
+  }
+
+  async authenticationHealthCheck() {
+    if (this.authenticationFailCategory) {
+      return {
+        ok: false,
+        category: this.authenticationFailCategory,
+        message: "测试凭证认证不可用。",
+      };
     }
     return { ok: true, category: null, message: null };
   }

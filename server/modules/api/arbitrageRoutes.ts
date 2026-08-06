@@ -17,6 +17,7 @@ export function registerArbitrageRoutes(
   service: ArbitrageDashboardService,
   neutralAutomation?: RwaNeutralAutomationService,
   automationControl?: RwaAutomationControlService,
+  recoveryApprover?: (request: express.Request) => string | null,
 ) {
   app.get("/api/arbitrage/dashboard", async (request, response) => {
     try {
@@ -45,10 +46,14 @@ export function registerArbitrageRoutes(
     });
   }
 
-  if (automationControl) registerAutomationControlRoutes(app, automationControl);
+  if (automationControl) registerAutomationControlRoutes(app, automationControl, recoveryApprover);
 }
 
-function registerAutomationControlRoutes(app: express.Express, control: RwaAutomationControlService) {
+function registerAutomationControlRoutes(
+  app: express.Express,
+  control: RwaAutomationControlService,
+  recoveryApprover?: (request: express.Request) => string | null,
+) {
   const route = (handler: (request: express.Request) => Promise<unknown> | unknown) => async (request: express.Request, response: express.Response) => {
     response.setHeader("Cache-Control", "no-store");
     try {
@@ -67,7 +72,15 @@ function registerAutomationControlRoutes(app: express.Express, control: RwaAutom
     credential: (await control.getVenueStatus(authenticatedUserId(request), singleParam(request.params.venue), sourceIp(request))).credential,
   })));
   app.put("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.putCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.patch("/api/arbitrage/automation/venues/:venue/credentials/note", route((request) => control.updateCredentialNote(authenticatedUserId(request), singleParam(request.params.venue), request.body, sourceIp(request))));
   app.delete("/api/arbitrage/automation/venues/:venue/credentials", route((request) => control.deleteCredentials(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), request.body, sourceIp(request))));
+  app.post("/api/arbitrage/automation/internal/binance/recovery-unbind", route((request) => control.recoveryUnbind(
+    authenticatedUserId(request),
+    authenticatedSessionDomain(request),
+    request.body,
+    recoveryApprover?.(request) ?? null,
+    sourceIp(request),
+  )));
   app.get("/api/arbitrage/automation/venues/:venue/assets/:assetId/authorization", route((request) => control.getAccountAssetAuthorization(authenticatedUserId(request), singleParam(request.params.venue), singleParam(request.params.assetId), sourceIp(request))));
   app.post("/api/arbitrage/automation/venues/:venue/assets/:assetId/authorization/preview", route((request) => control.previewAccountAssetAuthorization(authenticatedUserId(request), singleParam(request.params.venue), singleParam(request.params.assetId), request.body, sourceIp(request), authenticatedSessionDomain(request))));
   app.put("/api/arbitrage/automation/venues/:venue/assets/:assetId/authorization", route((request) => control.createAccountAssetAuthorization(authenticatedUserId(request), authenticatedSessionDomain(request), singleParam(request.params.venue), singleParam(request.params.assetId), request.body, sourceIp(request))));

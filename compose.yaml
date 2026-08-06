@@ -63,6 +63,7 @@ services:
   web:
     image: "${XINGHENG_WEB_IMAGE:?XINGHENG_WEB_IMAGE must come from the release manifest}"
     pull_policy: never
+    init: true
     environment:
       DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
       XINGHENG_DEPLOYMENT_ENVIRONMENT: production
@@ -80,7 +81,7 @@ services:
       test:
         - CMD-SHELL
         - >-
-          wget -qO- --header "Host: $$DOMAIN" http://127.0.0.1/api/health |
+          wget -qO- http://api:8787/api/health |
           grep -q '"production"'
       interval: 15s
       timeout: 5s
@@ -159,6 +160,7 @@ services:
       XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
       XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
+      RWA_PROVIDER_PREFLIGHT_USER_ID: "${RWA_PROVIDER_PREFLIGHT_USER_ID:-}"
       RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
       RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
       RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
@@ -184,6 +186,44 @@ services:
       - node
       - dist-server/operations/rwa-provider-identity-preflight.js
 
+  rwa-automation-verify:
+    profiles:
+      - rwa-automation-verify
+    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
+    pull_policy: never
+    user: "20001:20001"
+    environment:
+      NODE_ENV: production
+      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
+      XINGHENG_COMPOSE_PROJECT: xingheng
+      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
+      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
+      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
+      RWA_AUTOMATION_VERIFY_FILE: "${RWA_AUTOMATION_VERIFY_FILE:-}"
+      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
+      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
+      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
+    volumes:
+      - rwa_automation_backups:/app/rwa-automation-backups:ro
+      - type: bind
+        source: /run/xingheng/gcp-wif
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=0700,uid=20001,gid=20001
+    restart: "no"
+    command:
+      - node
+      - dist-server/operations/rwa-automation-backup-verify.js
+
   rwa-automation-backup:
     profiles:
       - rwa-automation-ops
@@ -191,6 +231,7 @@ services:
     pull_policy: never
     user: "20001:20001"
     environment:
+      DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
       NODE_ENV: production
       XINGHENG_DEPLOYMENT_ENVIRONMENT: production
       XINGHENG_COMPOSE_PROJECT: xingheng

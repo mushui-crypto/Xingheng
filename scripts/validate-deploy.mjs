@@ -52,6 +52,9 @@ const wifInstaller = read("scripts/install-gcp-wif.sh");
 const releaseVolumeVerifier = read("scripts/verify-release-volume-boundaries.mjs");
 const releaseVolumeBoundaries = read("scripts/releaseVolumeBoundaries.mjs");
 const activationPreflight = read("server/operations/RwaAutomationActivationPreflight.ts");
+const permitInstaller = read("scripts/productionSelfTestPermitInstall.mjs");
+const permitInstallWrapper = read("scripts/install-production-self-test-permit.sh");
+const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
 const packageJson = read("package.json");
 
 const assertions = [
@@ -66,11 +69,11 @@ const assertions = [
     "all release image targets must embed and enforce the immutable build revision",
   ],
   [
-    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 7
-      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 5
+    (compose.match(/XINGHENG_EXPECTED_REVISION:/g) ?? []).length === 8
+      && (compose.match(/XINGHENG_API_IMAGE:\?/g) ?? []).length === 6
       && compose.includes("XINGHENG_WEB_IMAGE:?")
       && compose.includes("XINGHENG_STRATEGY_TOOLS_IMAGE:?")
-      && (compose.match(/pull_policy: never/g) ?? []).length === 7
+      && (compose.match(/pull_policy: never/g) ?? []).length === 8
       && !compose.includes("build:"),
     "production Compose must consume only manifest-pinned immutable release images",
   ],
@@ -121,6 +124,27 @@ const assertions = [
       && deploymentReadme.includes("candidate-build-receipt.json")
       && deploymentReadme.includes("release-build scripts/build-release-images.sh"),
     "all root operations must enter through the minimal trusted launcher and the build Docker shim must remain internal",
+  ],
+  [
+    trustedOperationLauncher.includes('"install-production-self-test-permit.sh"')
+      && permitInstallWrapper.includes("trusted-operation-preamble.sh")
+      && permitInstallWrapper.includes("productionSelfTestPermitInstall.mjs prepare")
+      && permitInstallWrapper.includes("production up -d api")
+      && !permitInstallWrapper.includes("up -d api web")
+      && !permitInstallWrapper.includes("verify_release_containers")
+      && permitInstallWrapper.includes("runtime-before")
+      && permitInstallWrapper.includes("runtime-after")
+      && permitInstaller.includes('status: "unknown"')
+      && permitInstaller.includes("assertTrustedMutationContext")
+      && permitInstaller.includes("inheritedOperationLocks")
+      && permitInstaller.includes("assertTrustedProductionReleaseRoot")
+      && permitInstaller.includes("Web container identity changed")
+      && permitInstaller.includes("API process Permit identity mismatch")
+      && permitInstaller.includes("Production self-test Permit installation has already been attempted")
+      && permitInstaller.includes("maximumExecutionDurationMinutes !== 30")
+      && permitStateVerifier.includes("productionSelfTestPermitConsumptions.length !== 0")
+      && composeEnvironmentVerifier.includes("assertPermitEnvironmentAuthorized"),
+    "the authorization-specific Permit installer must remain one-attempt, API-only, receipt-bound, and fail-closed",
   ],
   [
     stepZeroChecklist.includes("cd /opt/xingheng-release/code")

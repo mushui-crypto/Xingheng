@@ -20,6 +20,10 @@ import {
   verifyTrustedDockerRuntime,
 } from "./trustedDockerRuntime.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
+import {
+  assertPermitEnvironmentAuthorized,
+  PERMIT_INSTALL_RECEIPT,
+} from "./productionSelfTestPermitInstall.mjs";
 
 const environment = process.argv[2];
 const composeArgs = process.argv.slice(3);
@@ -139,6 +143,14 @@ try {
         environmentEntries = parseEnvironmentEntries(bytes);
         validateEnvironmentIdentity(targetEnvironment, environmentEntries);
         sha256 = createHash("sha256").update(bytes).digest("hex");
+        assertPermitEnvironmentAuthorized({
+          entries: environmentEntries,
+          environmentSha256: sha256,
+          composeArgs,
+          operationEntry: process.env.XINGHENG_TRUSTED_OPERATION_ENTRY,
+          operationId: process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID,
+          receiptPath: PERMIT_INSTALL_RECEIPT,
+        });
         const after = fstatSync(fd);
         if (
           after.dev !== opened.dev
@@ -444,6 +456,7 @@ function validateComposeArguments(args, targetEnvironment) {
     "rwa-automation-ops",
     "sqlite-ops",
     "provider-identity-preflight",
+    "rwa-automation-verify",
   ]);
   if (
     profiles.some((profile) => !allowedProfiles.has(profile))
@@ -477,6 +490,19 @@ function isAllowedComposeOperation(args, profiles) {
     && sameArgs(args, [
       "run", "--rm", "--no-deps", "provider-identity-preflight",
     ])
+  ) return true;
+  if (
+    profiles.size === 0
+    && args.length === 6
+    && sameArgs(args.slice(0, 5), [
+      "exec", "-T", "api", "node", "/app/scripts/verify-production-self-test-permit-state.mjs",
+    ])
+    && /^USR-[A-Z0-9]+$/u.test(args[5])
+  ) return true;
+  if (
+    profiles.has("rwa-automation-verify")
+    && profiles.size === 1
+    && sameArgs(args, ["run", "--rm", "--no-deps", "rwa-automation-verify"])
   ) return true;
   if (
     profiles.has("sqlite-ops")

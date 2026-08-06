@@ -4,6 +4,8 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
 import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
+import { getAdminBearerToken } from "./modules/auth/session";
+import { hashSessionToken } from "./auth/security";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
@@ -30,7 +32,7 @@ import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaN
 import { RwaAutomationPersistentStore } from "./modules/arbitrage/automation/RwaAutomationPersistentStore";
 import { GcpKmsCredentialKeyProvider } from "./modules/arbitrage/automation/GcpKmsCredentialKeyProvider";
 import { RwaBybitMainnetClient } from "./modules/arbitrage/automation/RwaBybitMainnetClient";
-import { RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
+import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
 import { RwaBybitAutomationConnector } from "./modules/arbitrage/automation/RwaBybitAutomationConnector";
 import { RwaBinanceAutomationConnector } from "./modules/arbitrage/automation/RwaBinanceAutomationConnector";
 import { RwaBinanceAutomationService } from "./modules/arbitrage/automation/RwaBinanceAutomationService";
@@ -190,23 +192,47 @@ const automationControl = new RwaAutomationControlService(arbitrageDashboard, (u
       keyProvider: rwaCredentialKeyProvider,
       governanceConfig: rwaAutomationGovernanceConfig,
     }),
-    (credentials) => new RwaBinanceMainnetClient(credentials),
+    (credentials, activityGuard) => new RwaBinanceMainnetClient(
+      credentials,
+      fetch,
+      Date.now,
+      undefined,
+      undefined,
+      activityGuard,
+    ),
     Date.now,
     () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
     undefined,
     () => rwaAutomationExecutionLease?.assertHeld(),
+    undefined,
+    undefined,
+    undefined,
+    () => {
+      if (tradingStore.findBinanceCredentialBinding(userId)?.status === "recovery_inconsistent") {
+        throw new RwaNeutralExecutionError(
+          409,
+          "recovery_inconsistent",
+          "Binance Credential Binding 状态异常，自动化 mutation 已拒绝并等待人工处理。",
+        );
+      }
+    },
   );
   return new RwaAutomationConnectorRegistry([
     new RwaBybitAutomationConnector(rwaExecution),
     new RwaBinanceAutomationConnector(binance),
   ]);
-}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld());
+}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld(), tradingStore);
 registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
 registerArbitrageRoutes(
   app,
   arbitrageDashboard,
   new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
   automationControl,
+  (request) => {
+    const token = getAdminBearerToken(request);
+    const session = token ? tradingStore.findAuthSession(hashSessionToken(token), "admin") : null;
+    return config.adminAuthConfigured && session?.subjectId === config.adminEmail ? session.subjectId : null;
+  },
 );
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({

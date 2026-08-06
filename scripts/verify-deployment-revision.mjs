@@ -287,6 +287,8 @@ function verifyProductionCompose(manifest, envFile) {
     "rwa-automation-ops",
     "--profile",
     "provider-identity-preflight",
+    "--profile",
+    "rwa-automation-verify",
     "config",
     "--format",
     "json",

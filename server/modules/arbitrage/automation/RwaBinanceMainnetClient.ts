@@ -33,6 +33,10 @@ import {
   buildPositionAttributionSnapshot,
   rejectNonAtomicAttribution,
 } from "./RwaProviderActivityContinuity";
+import {
+  RwaBinanceActivityGuard,
+  type RwaBinanceProviderMutation,
+} from "./RwaBinanceActivityGuard";
 
 const spotBaseUrl = "https://api.binance.com";
 const futuresBaseUrl = "https://fapi.binance.com";
@@ -46,10 +50,16 @@ type ProductCache = {
 };
 
 export class RwaBinanceMainnetClient implements RwaBinanceClient {
+  readonly requiresProviderActivityStream = true as const;
   private timeOffset: { value: number; expiresAt: number } | null = null;
   private timeOffsetInFlight: Promise<number> | null = null;
   private productCache: { value: ProductCache; expiresAt: number } | null = null;
   private productInFlight: Promise<ProductCache> | null = null;
+  private activityContext: {
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+  } | null = null;
 
   constructor(
     private readonly credentials: RwaBinanceCredentials,
@@ -57,7 +67,54 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     private readonly now: () => number = Date.now,
     private readonly allowedEgressIps: readonly string[] | null = configuredBinanceEgressIps(),
     private readonly monitoredAccountIds: readonly string[] = configuredMonitoredBinanceAccountIds(),
+    private readonly activityGuard: RwaBinanceActivityGuard | null = null,
   ) {}
+
+  async prepareProviderMutation(input: {
+    mutation: RwaBinanceProviderMutation;
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+    orderLinkId?: string;
+    providerOrderId?: string;
+    expectedLeverage?: 1 | 2 | 3;
+  }) {
+    if (!this.activityGuard) {
+      throw new RwaBinanceProviderError("provider_activity_unavailable", "Binance activity guard 未配置，禁止 provider mutation。");
+    }
+    input.strategyOrderPrefixes.forEach((prefix) => this.activityGuard!.registerStrategyOrderPrefix(prefix));
+    const checkedThrough = this.now();
+    const snapshot = await scanBinancePositionAttribution(
+      (path, params) => this.signedRequest("spot", path, params),
+      (path, params) => this.signedRequest("futures", path, params),
+      {
+        since: input.since,
+        checkedThrough,
+        strategyOrderPrefixes: input.strategyOrderPrefixes,
+        continuity: input.continuity,
+      },
+    );
+    if (snapshot.coverage !== "complete" || snapshot.externalPositionActivity) {
+      throw new RwaBinanceProviderError(
+        "provider_activity_ambiguous",
+        snapshot.externalPositionActivity
+          ? "Binance 检测到非本策略账户活动，已拒绝 provider mutation。"
+          : "Binance REST 活动扫描不完整，已拒绝 provider mutation。",
+      );
+    }
+    this.activityContext = {
+      strategyOrderPrefixes: [...input.strategyOrderPrefixes],
+      since: input.since,
+      continuity: input.continuity,
+    };
+    this.activityGuard.confirmAuthoritativeResync();
+    this.activityGuard.issueCertificate({
+      mutation: input.mutation,
+      orderLinkId: input.orderLinkId,
+      providerOrderId: input.providerOrderId,
+      expectedLeverage: input.expectedLeverage,
+    });
+  }
 
   async validateAccess() {
     const configuredEgressIps = requireConfiguredEgressIps(this.allowedEgressIps);
@@ -91,23 +148,15 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       futuresAccount: true,
       positionModeSupported: !dualSidePosition,
     };
-    const accountFingerprint = createHash("sha256")
+    const uidSnapshot = createHash("sha256")
       .update(`binance:${uid}`)
-      .digest("hex")
-      .slice(0, 16);
+      .digest("hex");
+    const accountFingerprint = uidSnapshot.slice(0, 16);
     const accountId = `binance:${accountFingerprint}`;
-    if (
-      (process.env.NODE_ENV === "production" || this.monitoredAccountIds.length > 0)
-      && !this.monitoredAccountIds.includes(accountId)
-    ) {
-      throw new RwaBinanceProviderError(
-        "provider_identity_mismatch",
-        "Binance 权威账户身份与冻结的 monitored account 不一致。",
-      );
-    }
     return {
       accountId,
       accountFingerprint,
+      uidSnapshot,
       accountMode,
       ipWhitelistVerificationMode,
       permissions,
@@ -168,6 +217,9 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
     const positionAmount = positionRow
       ? snapshotFiniteNumber(positionRow.positionAmt, "永续仓位数量")
       : 0;
+    const leverage = positionRow
+      ? snapshotPositiveInteger(positionRow.leverage, "永续杠杆")
+      : null;
     const position = Math.abs(positionAmount) > 0 ? positionRow : undefined;
     const spotBalances = list(spotAccount.balances).map(record);
     const usdt = spotBalances.find((item) => item.asset === "USDT");
@@ -222,6 +274,7 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
       },
       perpetual: {
         ...products.perpetual,
+        leverage,
         bid: perpetualBid,
         ask: perpetualAsk,
         depthUsd: depthUsd(futuresDepthValue),
@@ -429,29 +482,48 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   }
 
   async setPerpetualLeverage(leverage: 1 | 2 | 3) {
-    await this.signedRequest(
-      "futures",
-      "/fapi/v1/leverage",
-      { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, leverage: String(leverage) },
-      true,
-      "POST",
-    );
+    const certificate = this.consumeActivityCertificate("set_leverage");
+    try {
+      await this.signedRequest(
+        "futures",
+        "/fapi/v1/leverage",
+        { symbol: RWA_BINANCE_PERPETUAL_SYMBOL, leverage: String(leverage) },
+        true,
+        "POST",
+      );
+    } catch (error) {
+      if (isDefinitiveMutationRejection(error)) {
+        this.activityGuard!.revokeExpectedMutation(certificate.id);
+      }
+      throw error;
+    }
   }
 
   async placeOrder(request: RwaProviderOrderRequest) {
     assertWhitelistedOrder(request);
     const scope = request.category === "spot" ? "spot" : "futures";
+    const certificate = this.consumeActivityCertificate(
+      request.category === "spot" ? "place_spot_order" : "place_futures_order",
+    );
     const path = request.category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
-    const result = record(await this.signedRequest(scope, path, {
-      symbol: request.symbol,
-      side: request.side.toUpperCase(),
-      type: "LIMIT",
-      timeInForce: "IOC",
-      quantity: decimal(request.quantityXaut),
-      price: decimal(request.limitPrice),
-      newClientOrderId: request.orderLinkId,
-      ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
-    }, true, "POST"));
+    let result: Record<string, unknown>;
+    try {
+      result = record(await this.signedRequest(scope, path, {
+        symbol: request.symbol,
+        side: request.side.toUpperCase(),
+        type: "LIMIT",
+        timeInForce: "IOC",
+        quantity: decimal(request.quantityXaut),
+        price: decimal(request.limitPrice),
+        newClientOrderId: request.orderLinkId,
+        ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
+      }, true, "POST"));
+    } catch (error) {
+      if (isDefinitiveMutationRejection(error)) {
+        this.activityGuard!.revokeExpectedMutation(certificate.id);
+      }
+      throw error;
+    }
     const orderId = String(result.orderId ?? "");
     const orderLinkId = String(result.clientOrderId ?? request.orderLinkId);
     if (!orderId || orderLinkId !== request.orderLinkId) {
@@ -472,23 +544,61 @@ export class RwaBinanceMainnetClient implements RwaBinanceClient {
   }
 
   async cancelOrder(category: "spot" | "linear", orderId: string) {
+    const certificate = this.consumeActivityCertificate(
+      category === "spot" ? "cancel_spot_order" : "cancel_futures_order",
+    );
     const symbol = category === "spot"
       ? RWA_BINANCE_SPOT_SYMBOL
       : RWA_BINANCE_PERPETUAL_SYMBOL;
-    await this.signedRequest(
-      category === "spot" ? "spot" : "futures",
-      category === "spot" ? "/api/v3/order" : "/fapi/v1/order",
-      { symbol, orderId },
-      true,
-      "DELETE",
-    );
+    try {
+      await this.signedRequest(
+        category === "spot" ? "spot" : "futures",
+        category === "spot" ? "/api/v3/order" : "/fapi/v1/order",
+        { symbol, orderId },
+        true,
+        "DELETE",
+      );
+    } catch (error) {
+      if (isDefinitiveMutationRejection(error)) {
+        this.activityGuard!.revokeExpectedMutation(certificate.id);
+      }
+      throw error;
+    }
   }
 
-  async cancelStrategyOrders(orderLinkPrefix: string) {
+  async cancelStrategyOrders(
+    orderLinkPrefix: string,
+    activityContext?: {
+      strategyOrderPrefixes: string[];
+      since: number;
+      continuity: RwaStrategyActivityContinuity;
+    },
+  ) {
     for (const order of await this.listAssetOpenOrders()) {
       if (!order.clientOrderId.startsWith(orderLinkPrefix)) continue;
+      const context = activityContext ?? this.activityContext;
+      if (this.activityGuard && !context) {
+        throw new RwaBinanceProviderError("provider_activity_unavailable", "Binance 撤单缺少活动扫描上下文。");
+      }
+      if (context) {
+        await this.prepareProviderMutation({
+          mutation: order.category === "spot" ? "cancel_spot_order" : "cancel_futures_order",
+          ...context,
+          providerOrderId: order.orderId,
+        });
+      }
       await this.cancelOrder(order.category, order.orderId);
     }
+  }
+
+  private consumeActivityCertificate(mutation: RwaBinanceProviderMutation) {
+    if (!this.activityGuard) {
+      throw new RwaBinanceProviderError(
+        "provider_activity_unavailable",
+        "Binance activity guard 未配置，禁止 provider mutation。",
+      );
+    }
+    return this.activityGuard.consumeCertificate(mutation);
   }
 
   async listAssetOpenOrders() {
@@ -1082,6 +1192,14 @@ function snapshotPositiveNumber(value: unknown, label: string) {
   return parsed;
 }
 
+function snapshotPositiveInteger(value: unknown, label: string) {
+  const parsed = snapshotPositiveNumber(value, label);
+  if (!Number.isInteger(parsed)) {
+    throw new RwaBinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return parsed;
+}
+
 function nullableTimestamp(value: unknown) {
   const parsed = number(value);
   return parsed > 0 ? parsed : null;
@@ -1134,6 +1252,19 @@ function isAbortError(error: unknown) {
   if (!error || typeof error !== "object") return false;
   const name = "name" in error ? String((error as { name?: unknown }).name ?? "") : "";
   return /abort|timeout/i.test(name);
+}
+
+function isDefinitiveMutationRejection(error: unknown) {
+  return error instanceof RwaBinanceProviderError
+    && [
+      "provider_rate_limited",
+      "provider_region_restricted",
+      "provider_permission_error",
+      "provider_timestamp_error",
+      "provider_request_invalid",
+      "provider_credential_invalid",
+      "provider_rejected",
+    ].includes(error.category);
 }
 
 function categoryFromHttpStatus(status: number, fallback: string) {

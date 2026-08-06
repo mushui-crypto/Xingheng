@@ -7,6 +7,7 @@ import type {
   RwaVenuePermissions,
 } from "./RwaNeutralExecutionTypes";
 import { XAUT_AUTOMATION_ASSET_PROFILE } from "./RwaAutomationAssetProfile";
+import type { RwaBinanceActivityGuard } from "./RwaBinanceActivityGuard";
 
 export const RWA_BINANCE_STRATEGY_ID = "binance-xaut-spot-perp-v1" as const;
 export const RWA_BINANCE_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -23,6 +24,7 @@ export type RwaBinancePermissions = RwaVenuePermissions & {
 };
 
 export type RwaBinanceAccountIdentity = RwaVenueAccountIdentity & {
+  uidSnapshot?: string;
   accountMode:
     | "single_asset_one_way"
     | "single_asset_hedge"
@@ -65,6 +67,7 @@ export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinanc
   openPerpetualOrderCount: number;
   spot: RwaBinanceInstrumentSnapshot;
   perpetual: RwaBinanceInstrumentSnapshot & {
+    leverage: number | null;
     mark: number;
     fundingRate: number;
     fundingIntervalHours: number;
@@ -78,7 +81,11 @@ export type RwaBinancePreflightSnapshot = RwaProviderPreflightSnapshot<RwaBinanc
 };
 
 export type RwaBinanceClient = RwaNeutralTradingClient<RwaBinancePermissions, RwaBinancePreflightSnapshot> & {
+  readonly requiresProviderActivityStream?: true;
   readProductAvailability(): Promise<RwaBinanceProductAvailability>;
 };
 
-export type RwaBinanceClientFactory = (credentials: RwaBinanceCredentials) => RwaBinanceClient;
+export type RwaBinanceClientFactory = (
+  credentials: RwaBinanceCredentials,
+  activityGuard?: RwaBinanceActivityGuard,
+) => RwaBinanceClient;

@@ -16,6 +16,7 @@ import {
   stat,
   unlink,
 } from "node:fs/promises";
+import { readFileSync, readdirSync } from "node:fs";
 import { O_NOFOLLOW, O_RDONLY } from "node:constants";
 import { basename, dirname, resolve } from "node:path";
 import {
@@ -45,6 +46,10 @@ import {
   writeGenerationState,
   type RwaAutomationDataLayoutOptions,
 } from "./RwaAutomationDataLayout";
+import {
+  validProductionSelfTestPermitConfirmation,
+  validProductionSelfTestPermitConsumption,
+} from "./RwaBinanceProductionSelfTestPermit";
 import {
   RWA_ACTIVITY_MAX_PROVIDER_ORDER_IDS,
   RWA_ACTIVITY_MAX_RECENT_EVENT_IDS,
@@ -129,10 +134,68 @@ export type RwaAutomationBackupServiceOptions = RwaAutomationDataLayoutOptions &
   faultHook?: (point: "after_snapshot" | "before_backup_publish" | "before_pointer_swap" | "after_pointer_swap") => void;
 };
 
+export type RwaAutomationBackupVerifyStage =
+  | "wif_identity"
+  | "sts_exchange"
+  | "kms_health"
+  | "kms_decrypt"
+  | "backup_envelope"
+  | "backup_authentication"
+  | "backup_content";
+
+export type RwaAutomationBackupCreateStage =
+  | "configuration"
+  | "data_layout"
+  | "backup_root"
+  | "snapshot_content"
+  | "key_provider_config"
+  | "kms_health"
+  | "data_key_create"
+  | "encryption"
+  | "backup_publish"
+  | "retention";
+
+export type RwaAutomationBackupCreateFailureReceipt = {
+  schemaVersion: 1;
+  operation: "create";
+  ok: false;
+  stage: RwaAutomationBackupCreateStage;
+  category: string;
+};
+
+const backupCreateReceiptCategories = new Set([
+  "backup_already_exists",
+  "backup_capacity_exceeded",
+  "backup_config_invalid",
+  "backup_failed",
+  "backup_key_unavailable",
+  "backup_manifest_invalid",
+  "backup_storage_invalid",
+]);
+
 export class RwaAutomationBackupError extends Error {
-  constructor(readonly category: string, message: string) {
+  constructor(
+    readonly category: string,
+    message: string,
+    readonly verifyStage: RwaAutomationBackupVerifyStage | null = null,
+    readonly createStage: RwaAutomationBackupCreateStage | null = null,
+  ) {
     super(message);
   }
+}
+
+export function rwaAutomationBackupCreateFailureReceipt(
+  error: unknown,
+  fallbackStage: RwaAutomationBackupCreateStage = "configuration",
+): RwaAutomationBackupCreateFailureReceipt {
+  const stage = error instanceof RwaAutomationBackupError && error.createStage !== null
+    ? error.createStage
+    : fallbackStage;
+  const category = error instanceof RwaAutomationBackupError
+    && backupCreateReceiptCategories.has(error.category)
+    ? error.category
+    : "backup_failed";
+  return { schemaVersion: 1, operation: "create", ok: false, stage, category };
 }
 
 export class RwaAutomationBackupService {
@@ -165,15 +228,18 @@ export class RwaAutomationBackupService {
   }
 
   async createBackup() {
+    let stage: RwaAutomationBackupCreateStage = "data_layout";
     try {
-      return await this.createBackupUnsafe();
+      return await this.createBackupUnsafe((nextStage) => { stage = nextStage; });
     } catch (error) {
-      throw asBackupError(error);
+      throw asBackupCreateError(error, stage);
     }
   }
 
-  private async createBackupUnsafe() {
+  private async createBackupUnsafe(setStage: (stage: RwaAutomationBackupCreateStage) => void) {
+    setStage("data_layout");
     const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
+    setStage("backup_root");
     await this.assertBackupRoot();
     const createdAt = new Date(Math.floor(this.now().getTime() / 1000) * 1000);
     const backupId = backupIdFromDate(createdAt);
@@ -183,6 +249,7 @@ export class RwaAutomationBackupService {
     if (await fileExists(destination)) {
       throw new RwaAutomationBackupError("backup_already_exists", "同一 UTC 秒的自动套利备份已存在。");
     }
+    setStage("snapshot_content");
     const plaintextSnapshot = await this.captureSnapshot(active, backupId, createdAt.getTime());
     this.faultHook?.("after_snapshot");
     const plaintext = Buffer.from(JSON.stringify(plaintextSnapshot), "utf8");
@@ -191,8 +258,13 @@ export class RwaAutomationBackupService {
       throw new RwaAutomationBackupError("backup_capacity_exceeded", "自动套利备份超过单快照容量上限。");
     }
     const context = backupContext(backupId);
+    setStage("key_provider_config");
+    this.assertKeyProviderConfigured();
+    setStage("kms_health");
     await this.assertKeyProviderHealthy(context);
+    setStage("data_key_create");
     const dataKey = await this.keyProvider.createDataKey(context).catch(throwBackupError);
+    setStage("encryption");
     const nonce = randomBytes(12);
     let ciphertext: Buffer | null = null;
     let published = false;
@@ -219,9 +291,11 @@ export class RwaAutomationBackupService {
         tag: cipher.getAuthTag().toString("base64url"),
       };
       envelope.wrapBindingTag = backupWrapBindingTag(dataKey.plaintextDek, envelope);
+      setStage("backup_publish");
       this.faultHook?.("before_backup_publish");
       await atomicWriteFile(destination, Buffer.from(`${JSON.stringify(envelope)}\n`, "utf8"), this.layoutOptions);
       published = true;
+      setStage("retention");
       await this.pruneBackups(fileName);
       return {
         fileName,
@@ -253,6 +327,7 @@ export class RwaAutomationBackupService {
   }
 
   async verifyBackup(fileName: string) {
+    let envelope: BackupEnvelope;
     try {
       const match = assertBackupFileName(fileName);
       const backupStorageBytes = await this.assertBackupRoot();
@@ -264,16 +339,44 @@ export class RwaAutomationBackupService {
         maxEncryptedBackupBytes(this.limits.maxSnapshotBytes),
         this.layoutOptions,
       );
-      let envelope: BackupEnvelope;
       try {
         envelope = validateEnvelope(JSON.parse(encoded.toString("utf8")), match[1]!);
       } finally {
         encoded.fill(0);
       }
-      const context = backupContext(envelope.backupId);
-      await this.assertKeyProviderHealthy(context);
-      const dataKey = await this.keyProvider.unwrapDataKey(envelope, context).catch(throwBackupError);
-      let plaintext: Buffer | null = null;
+    } catch {
+      throw verifyFailure("backup_envelope", "backup_envelope_invalid");
+    }
+
+    const context = backupContext(envelope.backupId);
+    const authentication = await this.keyProvider.authenticationHealthCheck().catch(() => ({
+      ok: false,
+      category: "sts_exchange_failed",
+      message: null,
+    }));
+    if (!authentication.ok) {
+      if (authentication.category === "wif_identity_invalid") {
+        throw verifyFailure("wif_identity", "wif_identity_invalid");
+      }
+      throw verifyFailure("sts_exchange", "sts_exchange_failed");
+    }
+
+    const health = await this.keyProvider.healthCheck(context).catch(() => ({
+      ok: false,
+      category: "kms_health_failed",
+      message: null,
+    }));
+    if (!health.ok) throw verifyFailure("kms_health", "kms_health_failed");
+
+    let dataKey: Buffer;
+    try {
+      dataKey = await this.keyProvider.unwrapDataKey(envelope, context);
+    } catch {
+      throw verifyFailure("kms_decrypt", "kms_decrypt_failed");
+    }
+
+    let plaintext: Buffer | null = null;
+    try {
       try {
         assertBackupWrapBinding(dataKey, envelope);
         const decipher = createDecipheriv("aes-256-gcm", dataKey, Buffer.from(envelope.nonce, "base64url"));
@@ -283,6 +386,10 @@ export class RwaAutomationBackupService {
           decipher.update(Buffer.from(envelope.ciphertext, "base64url")),
           decipher.final(),
         ]);
+      } catch {
+        throw verifyFailure("backup_authentication", "backup_authentication_failed");
+      }
+      try {
         if (plaintext.length > this.limits.maxSnapshotBytes) throw capacityExceeded();
         const snapshot = validatePlaintext(JSON.parse(plaintext.toString("utf8")), envelope);
         return {
@@ -291,16 +398,19 @@ export class RwaAutomationBackupService {
           fileCount: snapshot.manifest.files.length,
           plaintextBytes: snapshot.manifest.totalBytes,
         };
-      } finally {
-        plaintext?.fill(0);
-        dataKey.fill(0);
+      } catch {
+        throw verifyFailure("backup_content", "backup_content_invalid");
       }
-    } catch (error) {
-      throw safeRestoreError(error);
+    } finally {
+      plaintext?.fill(0);
+      dataKey.fill(0);
     }
   }
 
   private async restoreBackupUnsafe(fileName: string) {
+    // Production invokes this entire method only through the offline restore wrapper:
+    // API is stopped and compose holds the shared operation.lock from process start to exit.
+    // Therefore the monotonic Permit check below and pointer swap share one cross-process lock.
     const match = assertBackupFileName(fileName);
     const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
     const backupStorageBytes = await this.assertBackupRoot();
@@ -345,6 +455,7 @@ export class RwaAutomationBackupService {
       ensureSecureDirectory(generationPath, this.layoutOptions);
       await this.writeSnapshot(generationPath, snapshot);
       await this.validateSnapshotTree(generationPath, snapshot.manifest);
+      assertPermitConsumptionsNotRolledBack(active, generationPath);
       this.faultHook?.("before_pointer_swap");
       writeGenerationState(
         this.dataRoot,
@@ -380,6 +491,8 @@ export class RwaAutomationBackupService {
 
   rollbackRestore() {
     try {
+      // The production rollback wrapper stops API and holds the same operation.lock across
+      // this monotonic Permit check and writeGenerationState pointer swap.
       const { active } = validateRwaAutomationDataLayout(this.layoutOptions);
       let rollback: string;
       try {
@@ -389,6 +502,7 @@ export class RwaAutomationBackupService {
       }
       const activeGeneration = basename(active);
       const rollbackGeneration = basename(rollback);
+      assertPermitConsumptionsNotRolledBack(active, rollback);
       writeGenerationState(
         this.dataRoot,
         rollbackGeneration,
@@ -540,10 +654,13 @@ export class RwaAutomationBackupService {
     }
   }
 
-  private async assertKeyProviderHealthy(context: AutomationBackupKeyContext) {
+  private assertKeyProviderConfigured() {
     if (!this.keyProvider.configured) {
       throw new RwaAutomationBackupError("backup_key_unavailable", "自动套利备份密钥服务不可用。");
     }
+  }
+
+  private async assertKeyProviderHealthy(context: AutomationBackupKeyContext) {
     const health = await this.keyProvider.healthCheck(context).catch(throwBackupError);
     if (!health.ok) throw new RwaAutomationBackupError("backup_key_unavailable", "自动套利备份密钥服务不可用。");
   }
@@ -639,6 +756,7 @@ function sanitizeAutomationState(
         "credentialLifecycle",
         "executions",
         "pnlSeries",
+        "productionSelfTestPermitConsumptions",
         "version",
       ])
       && !hasExactKeys(parsed, [
@@ -727,12 +845,35 @@ function sanitizeAutomationState(
     connectivitySmokes.filter((item) =>
       !["flat", "failed", "manual_intervention"].includes(String((item as Record<string, unknown>).stage))).length > 1
   ) throw invalidSnapshot();
+  const rawPermitConsumptions = parsed.productionSelfTestPermitConsumptions === undefined
+    ? []
+    : parsed.productionSelfTestPermitConsumptions;
+  if (!Array.isArray(rawPermitConsumptions)) throw invalidSnapshot();
+  const productionSelfTestPermitConsumptions = rawPermitConsumptions.map((value) => {
+    if (!validProductionSelfTestPermitConsumption(value)) throw invalidSnapshot();
+    return value;
+  });
+  if (
+    new Set(productionSelfTestPermitConsumptions.map((value) => value.permitId)).size
+      !== productionSelfTestPermitConsumptions.length
+    || new Set(productionSelfTestPermitConsumptions.map((value) => value.digest)).size
+      !== productionSelfTestPermitConsumptions.length
+  ) throw invalidSnapshot();
   const capitalHoldingAuthorizations = validatedTakeovers
     .filter((takeover) => !["failed", "exited"].includes(takeover.state))
     .map((takeover) => `${takeover.authorizationId}\0${takeover.authorizationCreatedAt}`);
   if (new Set(capitalHoldingAuthorizations).size !== capitalHoldingAuthorizations.length) {
     throw invalidSnapshot();
   }
+  parsed.config = {
+    ...(parsed.config as Record<string, unknown>),
+    accountIsolationMode:
+      (parsed.config as Record<string, unknown>).accountIsolationMode ?? "unconfirmed",
+    accountIsolationConfirmedAt:
+      (parsed.config as Record<string, unknown>).accountIsolationConfirmedAt ?? null,
+    productionSelfTestPermitConfirmation:
+      (parsed.config as Record<string, unknown>).productionSelfTestPermitConfirmation ?? null,
+  } as typeof parsed.config;
   validateExecutionConfig(parsed.config);
   if (!Array.isArray(parsed.challenges)) throw invalidSnapshot();
   parsed.challenges.forEach(validateStoredChallenge);
@@ -748,6 +889,7 @@ function sanitizeAutomationState(
     assetAuthorizations: validatedAuthorizations,
     assetTakeovers: validatedTakeovers,
     connectivitySmokes,
+    productionSelfTestPermitConsumptions,
     config: {
       ...(parsed.config as Record<string, unknown>),
       globalExecutionEnabled: false,
@@ -758,6 +900,50 @@ function sanitizeAutomationState(
   };
   if (containsForbiddenPersistentKey(value)) throw invalidSnapshot();
   return Buffer.from(JSON.stringify(value), "utf8");
+}
+
+function assertPermitConsumptionsNotRolledBack(active: string, target: string) {
+  const activeConsumptions = readGenerationPermitConsumptions(active);
+  if (![...activeConsumptions.values()].some((values) => values.length > 0)) return;
+  const targetConsumptions = readGenerationPermitConsumptions(target);
+  for (const [fileName, current] of activeConsumptions) {
+    if (current.length === 0) continue;
+    const restored = targetConsumptions.get(fileName);
+    if (!restored) throw invalidSnapshot();
+    const restoredRecords = new Set(restored.map((value) =>
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`
+    ));
+    if (current.some((value) => !restoredRecords.has(
+      `${value.permitId}\0${value.digest}\0${value.consumedAt}`,
+    ))) throw invalidSnapshot();
+  }
+}
+
+function readGenerationPermitConsumptions(root: string) {
+  const result = new Map<string, Array<{
+    permitId: string;
+    digest: string;
+    consumedAt: number;
+  }>>();
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith("-state.json") || !rootStatePattern.test(entry.name)) continue;
+    const parsed = JSON.parse(readFileSync(resolve(root, entry.name), "utf8")) as Record<string, unknown>;
+    const raw = parsed.productionSelfTestPermitConsumptions;
+    if (raw === undefined) {
+      result.set(entry.name, []);
+      continue;
+    }
+    if (!Array.isArray(raw) || raw.some((value) => !validProductionSelfTestPermitConsumption(value))) {
+      throw invalidSnapshot();
+    }
+    const values = raw as Array<{ permitId: string; digest: string; consumedAt: number }>;
+    if (
+      new Set(values.map((value) => value.permitId)).size !== values.length
+      || new Set(values.map((value) => value.digest)).size !== values.length
+    ) throw invalidSnapshot();
+    result.set(entry.name, values);
+  }
+  return result;
 }
 
 function validateCredentialEnvelope(
@@ -813,7 +999,8 @@ function validateExecutionConfig(value: unknown) {
   if (!hasExactKeys(config, [
     "globalExecutionEnabled", "killSwitchActive", "maxCombinedSlippageBps", "maxEntryBasisBps",
     "maxStrategyCapitalUsd", "maxUnhedgedMs", "minLiquidationDistancePercent", "minNetAprPercent",
-    "strategyEnabled",
+    "strategyEnabled", "accountIsolationMode", "accountIsolationConfirmedAt",
+    "productionSelfTestPermitConfirmation",
   ])) throw invalidSnapshot();
   for (const key of ["globalExecutionEnabled", "strategyEnabled", "killSwitchActive"]) {
     if (typeof config[key] !== "boolean") throw invalidSnapshot();
@@ -824,6 +1011,11 @@ function validateExecutionConfig(value: unknown) {
   ]) {
     if (!isFiniteNumber(config[key])) throw invalidSnapshot();
   }
+  if (!["unconfirmed", "development_exclusive_account", "dedicated_subaccount"].includes(String(config.accountIsolationMode))
+    || !isNullableTimestamp(config.accountIsolationConfirmedAt)) throw invalidSnapshot();
+  const permitConfirmation = config.productionSelfTestPermitConfirmation;
+  if (permitConfirmation !== null
+    && !validProductionSelfTestPermitConfirmation(permitConfirmation)) throw invalidSnapshot();
 }
 
 function validateStoredChallenge(value: unknown) {
@@ -964,9 +1156,10 @@ function validateConnectivitySmoke(value: unknown) {
     "commonQtyStep", "futuresFeesUsd", "futuresMarginUsd", "futuresSlippageReserveUsd", "limitUsd",
     "prices", "quantityXaut", "roundingReserveUsd", "slippageBpsPerAction", "spotFeesUsd",
     "spotNotionalUsd", "spotSlippageReserveUsd", "totalCapitalUsd",
-  ]) || budget.limitUsd !== 25 || Object.entries(budget).some(([key, item]) =>
+  ]) || !isFiniteNumber(budget.limitUsd) || Number(budget.limitUsd) <= 0
+    || Object.entries(budget).some(([key, item]) =>
     key !== "limitUsd" && key !== "prices" && (!isFiniteNumber(item) || Number(item) < 0))
-    || Number(budget.totalCapitalUsd) > 25 + 1e-9) throw invalidSnapshot();
+    || Number(budget.totalCapitalUsd) > Number(budget.limitUsd) + 1e-9) throw invalidSnapshot();
   const prices = assertObject(budget.prices);
   if (!hasExactKeys(prices, [
     "futuresCloseLimit", "futuresOpenLimit", "spotCloseLimit", "spotOpenLimit",
@@ -1489,6 +1682,10 @@ function invalidEnvelope() {
   return new RwaAutomationBackupError("backup_envelope_invalid", "自动套利备份 envelope 无效。");
 }
 
+function verifyFailure(stage: RwaAutomationBackupVerifyStage, category: string) {
+  return new RwaAutomationBackupError(category, "自动套利备份只读验证失败。", stage);
+}
+
 function capacityExceeded() {
   return new RwaAutomationBackupError("backup_capacity_exceeded", "自动套利备份超过容量上限。");
 }
@@ -1496,6 +1693,20 @@ function capacityExceeded() {
 function asBackupError(error: unknown): RwaAutomationBackupError {
   if (error instanceof RwaAutomationBackupError) return error;
   return new RwaAutomationBackupError("backup_failed", "自动套利备份操作失败；未更改现有数据。");
+}
+
+function asBackupCreateError(
+  error: unknown,
+  stage: RwaAutomationBackupCreateStage,
+): RwaAutomationBackupError {
+  const normalized = asBackupError(error);
+  if (normalized.createStage !== null) return normalized;
+  return new RwaAutomationBackupError(
+    normalized.category,
+    normalized.message,
+    normalized.verifyStage,
+    stage,
+  );
 }
 
 function throwBackupError(error: unknown): never {

@@ -88,6 +88,9 @@ export function validateProductionTopology(manifest, production) {
   if (productionApi.environment?.DOMAIN !== productionDomain) {
     throw new Error("production domain boundary is invalid");
   }
+  if (productionWeb.init !== true) {
+    throw new Error("production Web init boundary is invalid");
+  }
   assertProductionIngressPorts(productionWeb);
   assertHealthcheck(productionApi, "production", "xingheng", false);
   assertHealthcheck(productionWeb, "production", "xingheng", true);
@@ -101,6 +104,7 @@ export function validateProductionTopology(manifest, production) {
     "production",
     "xingheng",
   );
+  assertRwaAutomationVerify(production, productionApi);
   assertIngress(production, productionWeb, "production-web");
   return true;
 }
@@ -122,7 +126,11 @@ function assertHealthcheck(serviceValue, environment, project, web) {
     && command[0] === "CMD-SHELL"
     && typeof command[1] === "string"
     && command[1].includes(environment)
-    && command[1].includes("127.0.0.1/api/health");
+    && command[1].includes("http://api:8787/api/health")
+    && !command[1].includes("127.0.0.1")
+    && !command[1].includes("https://")
+    && !/\bhost\s*:/i.test(command[1])
+    && !/\bDOMAIN\b/.test(command[1]);
   if (
     !Array.isArray(command)
     || (web && !webCommandValid)
@@ -220,6 +228,8 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
     preflight.environment?.XINGHENG_DEPLOYMENT_ENVIRONMENT !== environment
     || preflight.environment?.XINGHENG_COMPOSE_PROJECT !== project
     || preflight.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
+    || preflight.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID === undefined
+    || api.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID !== undefined
     || preflight.environment?.RWA_GCP_KMS_KEY_NAME !== api.environment?.RWA_GCP_KMS_KEY_NAME
     || preflight.environment?.RWA_GCP_WIF_AUDIENCE !== api.environment?.RWA_GCP_WIF_AUDIENCE
     || JSON.stringify(preflight.command) !== JSON.stringify(expectedCommand)
@@ -231,6 +241,23 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
   ) {
     throw new Error("provider identity preflight boundary is invalid");
   }
+}
+
+function assertRwaAutomationVerify(config, api) {
+  const verify = service(config, "rwa-automation-verify");
+  if (
+    verify.environment?.RWA_GCP_KMS_KEY_NAME !== api.environment?.RWA_GCP_KMS_KEY_NAME
+    || verify.environment?.RWA_GCP_WIF_AUDIENCE !== api.environment?.RWA_GCP_WIF_AUDIENCE
+    || verify.environment?.RWA_AUTOMATION_VERIFY_FILE === undefined
+    || JSON.stringify(verify.command) !== JSON.stringify([
+      "node", "dist-server/operations/rwa-automation-backup-verify.js",
+    ])
+    || verify.read_only !== true
+    || JSON.stringify(verify.cap_drop) !== JSON.stringify(["ALL"])
+    || !Array.isArray(verify.security_opt)
+    || !verify.security_opt.includes("no-new-privileges:true")
+    || (Array.isArray(verify.ports) && verify.ports.length > 0)
+  ) throw new Error("RWA automation verify boundary is invalid");
 }
 
 function service(config, name) {

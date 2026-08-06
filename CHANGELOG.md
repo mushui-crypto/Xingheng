@@ -10,6 +10,7 @@
 
 ### 已完成
 
+- Capital Test 授权时间规则改为自 `approvedAt` 起 24 小时有效，不再要求预填固定执行开始/结束时间；单次 Maximum execution duration、Permit expiry、过期重新确认及 fail-closed 状态保持不变。
 - 删除独立真实测试部署环境的 Compose、Caddy、环境模板、运行入口、清理、备份、恢复与验证能力。
 - 部署环境、WIF、KMS、受信操作、运行身份、拓扑和卷边界收敛为 production-only。
 - 保留 Demo、Hyperliquid Testnet、普通单元/集成测试及生产发布、回滚、备份能力。

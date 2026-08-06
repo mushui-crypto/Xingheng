@@ -331,7 +331,7 @@ export function AutomationControlConsole({
       const intent = await credentialStepUpIntent(draft);
       const token = await requestStepUp(
         intent,
-        draft.accountId ? `轮换 ${venueLabel(draft.venue)} API 凭证` : `新增 ${venueLabel(draft.venue)} API 凭证`,
+        `新增 ${venueLabel(draft.venue)} API 凭证`,
         "验证通过后服务端才会保存加密凭证；本次授权只适用于当前请求。",
       );
       const credential = await client.validateCredential(draft, token);

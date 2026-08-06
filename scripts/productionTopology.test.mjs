@@ -29,6 +29,8 @@ test("rejects crossed production identity, domain, WIF, ingress and volume bound
     (config) => { config.networks.public_ingress.name = "other-ingress"; },
     (config) => { config.volumes.sqlite_data.name = "other_sqlite_data"; },
     (config) => { config.services["provider-identity-preflight"].read_only = false; },
+    (config) => { config.services["rwa-automation-verify"].volumes[0].read_only = false; },
+    (config) => { config.services["rwa-automation-verify"].command.push("restore"); },
   ];
 
   for (const mutate of mutations) {
@@ -44,7 +46,33 @@ test("rejects mutable, missing or crossed release image mappings", () => {
     (config) => { config.services.api.pull_policy = "always"; },
     (config) => { config.services.api.build = "."; },
     (config) => { delete config.services["strategy-history"]; },
+    (config) => { delete config.services["rwa-automation-verify"]; },
     (config) => { config.services.web.environment.XINGHENG_EXPECTED_REVISION = "b".repeat(40); },
+  ];
+
+  for (const mutate of mutations) {
+    const config = fixture();
+    mutate(config);
+    assert.throws(() => validateProductionTopology(manifest, config));
+  }
+});
+
+test("requires a Web init reaper and an internal HTTP healthcheck", () => {
+  const mutations = [
+    (config) => { delete config.services.web.init; },
+    (config) => { config.services.web.init = false; },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- http://127.0.0.1/api/health | grep -q '\"production\"'";
+    },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- https://api:8787/api/health | grep -q '\"production\"'";
+    },
+    (config) => {
+      config.services.web.healthcheck.test[1] =
+        "wget -qO- --header 'Host: $DOMAIN' http://api:8787/api/health | grep -q '\"production\"'";
+    },
   ];
 
   for (const mutate of mutations) {
@@ -84,6 +112,7 @@ function fixture() {
   api.healthcheck = healthcheck(false);
 
   const web = service(WEB, { DOMAIN: "app.example.com" });
+  web.init = true;
   web.volumes = mounts([
     ["volume", "caddy_data", "/data", false],
     ["volume", "caddy_config", "/config", false],
@@ -111,6 +140,7 @@ function fixture() {
   ]);
 
   const preflight = service(API, {
+    RWA_PROVIDER_PREFLIGHT_USER_ID: "",
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
     RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
@@ -141,6 +171,21 @@ function fixture() {
     ["volume", "rwa_automation_lock", "/app/rwa-automation-lock", false],
     ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
   ]);
+  const automationVerify = service(API, {
+    RWA_AUTOMATION_VERIFY_FILE: "",
+    RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,
+    RWA_GCP_WIF_AUDIENCE: api.environment.RWA_GCP_WIF_AUDIENCE,
+  });
+  automationVerify.volumes = mounts([
+    ["volume", "rwa_automation_backups", "/app/rwa-automation-backups", true],
+    ["bind", "/run/xingheng/gcp-wif", "/run/secrets/gcp-wif", true],
+  ]);
+  Object.assign(automationVerify, {
+    command: ["node", "dist-server/operations/rwa-automation-backup-verify.js"],
+    read_only: true,
+    cap_drop: ["ALL"],
+    security_opt: ["no-new-privileges:true"],
+  });
 
   return {
     name: "xingheng",
@@ -152,6 +197,7 @@ function fixture() {
       "provider-identity-preflight": preflight,
       "rwa-automation-backup": automationBackup,
       "rwa-automation-restore": automationRestore,
+      "rwa-automation-verify": automationVerify,
     },
     networks: {
       default: {},
@@ -173,7 +219,7 @@ function fixture() {
 function healthcheck(web) {
   return {
     test: web
-      ? ["CMD-SHELL", "curl production 127.0.0.1/api/health"]
+      ? ["CMD-SHELL", "wget -qO- http://api:8787/api/health | grep -q '\"production\"'"]
       : ["CMD", "node", "-e", "cache-control production xingheng XINGHENG_EXPECTED_REVISION"],
     interval: "15s",
     timeout: "5s",

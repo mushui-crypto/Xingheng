@@ -18,7 +18,11 @@ import {
   releaseCandidatePaths,
   secureArtifactReceipt,
 } from "./trustedReleaseCandidate.mjs";
-import { validateTrustedReleaseBuildDockerArguments } from "./trustedDockerRuntime.mjs";
+import {
+  candidateRwaVerifyDockerArguments,
+  validateCandidateRwaVerifyDockerArguments,
+  validateTrustedReleaseBuildDockerArguments,
+} from "./trustedDockerRuntime.mjs";
 
 const REVISION = "a".repeat(40);
 const OTHER_REVISION = "b".repeat(40);
@@ -160,6 +164,51 @@ test("release-build Docker allowlist excludes containers, volumes and runtime mu
       /not allowlisted/u,
     );
   }
+});
+
+test("candidate verify Docker allowlist accepts only the exact digest-bound inspect and run", () => {
+  const contract = {
+    candidateRevision: REVISION,
+    apiDigest: `sha256:${"1".repeat(64)}`,
+    backupName: "rwa-automation-20260801T120000Z.rwa.enc.json",
+    domain: "trade.stellarx.example",
+    wifAudience: "//iam.googleapis.com/projects/123456789012/locations/global/workloadIdentityPools/xingheng-rwa-prod/providers/vultr-x509",
+  };
+  const source = {
+    XINGHENG_OPERATION_LOCK_CONTEXT: "candidate-verify",
+    XINGHENG_RELEASE_CANDIDATE_REVISION: REVISION,
+  };
+  const inspect = ["image", "inspect", "--format", "{{json .}}", contract.apiDigest];
+  const run = candidateRwaVerifyDockerArguments(contract);
+  assert.doesNotThrow(() => validateCandidateRwaVerifyDockerArguments(inspect, contract, source));
+  assert.doesNotThrow(() => validateCandidateRwaVerifyDockerArguments(run, contract, source));
+
+  for (const mutate of [
+    (args) => args.with(4, `sha256:${"2".repeat(64)}`),
+    (args) => args.with(args.indexOf("bridge"), "host"),
+    (args) => args.with(args.indexOf("20001:20001"), "0:0"),
+    (args) => args.with(args.indexOf("--read-only"), "--privileged"),
+    (args) => args.with(args.indexOf("readonly"), "rw"),
+    (args) => [...args, "--env-file", "/opt/xingheng-release/code/.env.production"],
+    (args) => args.with(args.indexOf(contract.apiDigest), `xingheng-api:${REVISION}`),
+    (args) => args.with(args.indexOf("node"), "sh"),
+    (args) => args.with(args.indexOf("DOMAIN=trade.stellarx.example"), "DOMAIN=https://trade.stellarx.example"),
+    (args) => args.with(args.indexOf("XINGHENG_WIF_HOST_PATH=/run/xingheng/gcp-wif"), "XINGHENG_WIF_HOST_PATH=/tmp/wif"),
+    (args) => [...args, "-e", "DOMAIN=other.example"],
+    (args) => [...args, "-e", "EXTRA=value"],
+  ]) {
+    assert.throws(
+      () => validateCandidateRwaVerifyDockerArguments(mutate([...run]), contract, source),
+      /not allowlisted/u,
+    );
+  }
+  assert.throws(
+    () => validateCandidateRwaVerifyDockerArguments(run, contract, {
+      ...source,
+      XINGHENG_OPERATION_LOCK_CONTEXT: "release-build",
+    }),
+    /context is invalid/u,
+  );
 });
 
 function withCandidate(callback) {

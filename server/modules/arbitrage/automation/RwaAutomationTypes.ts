@@ -32,6 +32,7 @@ export type RwaAutomationVenueStatus = {
     stored: boolean;
     accountId: string | null;
     accountFingerprint: string | null;
+    uidSnapshot?: string | null;
     masterKeyConfigured: boolean;
     maskedApiKey: string | null;
     connectionStatus: "not_configured" | "verified" | "invalid" | "unavailable" | "not_implemented";
@@ -71,7 +72,16 @@ export type RwaAutomationConnector = {
   getConfiguredAccountId(): Promise<string | null>;
   getStatus(): Promise<RwaAutomationVenueStatus>;
   putCredentials(input: RwaVenueCredentialInput): Promise<RwaAutomationVenueStatus>;
-  deleteCredentials(input?: unknown): Promise<unknown>;
+  deleteCredentials(
+    input?: unknown,
+    finalize?: () => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ): Promise<unknown>;
+  recoveryUnbind?(
+    finalize?: (result: { providerVerifiedFlat: boolean }) => Promise<void> | void,
+    finalizeRestoreFailure?: (automationStopFailed: boolean) => Promise<void> | void,
+  ): Promise<{ providerVerifiedFlat: boolean }>;
+  markCredentialRecoveryInconsistent?(): Promise<void>;
   getAccountAssetAuthorization(assetId: string): Promise<RwaPublicAccountAssetAuthorization | null>;
   previewAccountAssetAuthorization(assetId: string): Promise<RwaAccountAssetAuthorizationPreview>;
   createAccountAssetAuthorization(

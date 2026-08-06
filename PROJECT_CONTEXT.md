@@ -349,3 +349,61 @@ AI 应该理解：
 不是：
 
 重新设计一个交易平台。
+
+------------------------------------------------------------------------
+
+# 11. 当前生产与资金测试门禁（2026-08-04）
+
+## 当前唯一主线
+
+最终业务目标是在 production 完成一次真实资金的自动开仓、对冲、退出和最终核账。
+当前完成新 revision 的 artifact 构建与验证，但尚未取得 production promotion/activation
+批准。任何发布准备都不等于 provider、交易或资金授权。
+
+## Production 当前事实
+
+-   当前正式 release revision：
+    `1ad3579c8f7b1c0f9b9982701db14871ec9d672e`。
+-   Production 已 activation 至该 revision，API/Web 健康。
+-   待发布 revision：`6efe18eb943b8a57750eeeb06700f101bd676414`；artifact 与 manifest
+    已验证，状态为 `ARTIFACT_VERIFIED_AWAITING_PRODUCTION_APPROVAL`，尚未部署。
+-   Compose project：`xingheng`。
+-   Global/server kill switch：`ENABLED`。
+-   Provider write、order、position 和 funds mutation：均为 `0`。
+-   最小零资金验收：`READY_FOR_CAPITAL_TEST`。
+
+## 当前 Gate 状态
+
+-   P2#2 fresh RWA rollback readiness：`INCOMPLETE`。
+-   STS restore verification：`BLOCKED`。
+-   Rollback evidence：`INCOMPLETE`。
+-   Risk acceptance：`ACTIVE`。
+-   Capital Test Authorization：`STALE / REVALIDATION_REQUIRED`。
+-   Capital Test Execution：`BLOCKED_PENDING_AUTHORIZATION`。
+-   Provider Access：`NOT_AUTHORIZED`。
+-   Real Funds：`NOT_AUTHORIZED`。
+
+P2#2、STS `403` 和 rollback evidence 缺失继续作为已接受风险记录，不得标记为
+`PASS`。它们不阻断授权准备，但不授予任何执行权限。
+
+## 当前授权准备边界
+
+本机私有 authorization package 保存在 `docs/private/authorization/`，不进入 Git。该材料绑定
+旧 release identity，授权时间已过期，且 SHA reference chain 已标记为 stale；不得用于
+`6efe18e` 或任何后续执行。必须在目标 production release identity 确定后重新生成、重新审查并
+取得新的明确人工授权。不得因历史材料存在而生成 permit、连接 provider、解除 kill switch、
+下单或执行 position/order/funds mutation。
+
+------------------------------------------------------------------------
+
+# 12. Trusted Release Build 环境确认（2026-08-03）
+
+-   已由人工确认：既有 trusted Linux root build host 可用于当前
+    `6efe18eb943b8a57750eeeb06700f101bd676414` 及后续同类标准 Release Workflow。
+-   后续同类 Release Workflow 不需要重复判断该 build host 是否存在；每次构建仍必须通过
+    既有 trusted candidate installer、`trusted-operation-launcher`、release-build、artifact
+    identity 和 manifest verification 边界。
+-   该确认仅表示 build host 已人工确认可用于上述范围，不表示永久可信、自动授权、production
+    approval、Provider access、真实资金授权或交易授权。
+-   主机地址、账号、密钥、凭证和敏感访问方式不进入项目文档；实际连接与制品交付继续使用受控
+    运维渠道。

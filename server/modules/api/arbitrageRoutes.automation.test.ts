@@ -27,6 +27,14 @@ test("automation user API rejects anonymous and disabled users before handlers",
   auth(request(), anonymous, () => assert.fail("anonymous request continued"));
   assert.equal(anonymous.statusCode, 401);
   assert.equal(anonymous.headers["Cache-Control"], "no-store");
+  const adminOnly = mockResponse();
+  auth({
+    method: "POST",
+    originalUrl: "/api/arbitrage/automation/internal/binance/recovery-unbind",
+    baseUrl: "/api/arbitrage",
+    headers: { cookie: "xh_admin_session=admin-only" },
+  }, adminOnly, () => assert.fail("admin-only recovery request continued"));
+  assert.equal(adminOnly.statusCode, 401);
   const disabled = mockResponse();
   auth(request("disabled"), disabled, () => assert.fail("disabled request continued"));
   assert.equal(disabled.statusCode, 403);
@@ -46,9 +54,11 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
   let abortedTakeoverOwner: string | undefined;
   let policyOwner: string | undefined;
   let smokeLookupOwner: string | undefined;
+  let credentialNoteOwner: string | undefined;
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put(path: string, handler: unknown) { routes.set(`PUT ${path}`, handler); },
+    patch(path: string, handler: unknown) { routes.set(`PATCH ${path}`, handler); },
     post(path: string, handler: unknown) { routes.set(`POST ${path}`, handler); },
     delete(path: string, handler: unknown) { routes.set(`DELETE ${path}`, handler); },
   };
@@ -91,12 +101,24 @@ test("automation user routes derive ownership from auth, are no-store, and sanit
           ? { smokeId: "smoke-r2", stage: "spot_opening" }
           : null;
       },
+      updateCredentialNote: async (userId: string) => {
+        credentialNoteOwner = userId;
+        return { credentialNote: "主账户" };
+      },
       putCredentials: async () => { throw new Error("secret=must-not-leak https://private.example"); },
     } as any,
   );
   const automationRoutes = [...routes.keys()].filter((key) => key.includes("/api/arbitrage/automation"));
-  assert.equal(automationRoutes.length, 37);
+  assert.equal(automationRoutes.length, 39);
   assert.ok(automationRoutes.every((key) => !key.includes(" /api/admin/")));
+  const noteResponse = mockResponse();
+  await routes.get("PATCH /api/arbitrage/automation/venues/:venue/credentials/note")({
+    user: { id: "user-note" },
+    params: { venue: "binance" },
+    body: { credentialNote: "主账户" },
+    headers: {},
+  }, noteResponse);
+  assert.equal(credentialNoteOwner, "user-note");
   for (const route of [
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/preview",
     "POST /api/arbitrage/automation/venues/:venue/assets/:assetId/takeover/start",
@@ -225,6 +247,7 @@ test("automation 429 responses are no-store and expose only stable retry metadat
   const app = {
     get(path: string, handler: unknown) { routes.set(`GET ${path}`, handler); },
     put() {},
+    patch() {},
     post() {},
     delete() {},
   };

@@ -17,7 +17,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import {
   RWA_AUTOMATION_BACKUP_AAD_SCHEMA,
@@ -32,6 +32,7 @@ import {
   RwaAutomationBackupError,
   RwaAutomationBackupService,
   assertBackupFileName,
+  rwaAutomationBackupCreateFailureReceipt,
 } from "./RwaAutomationBackupService";
 import {
   RWA_AUTOMATION_CURRENT_POINTER,
@@ -53,6 +54,26 @@ const baseNow = new Date("2026-07-24T10:20:30.000Z");
 const credentialMarker = "private-api-secret-marker";
 const totpMarker = "totp-secret-marker";
 const recoveryMarker = "recovery-code-marker";
+
+test("production restore and rollback keep the tombstone check and pointer swap under one operation lock", async () => {
+  const repositoryRoot = resolve(process.cwd());
+  const [compose, restoreWrapper, rollbackWrapper] = await Promise.all([
+    readFile(join(repositoryRoot, "compose.yaml"), "utf8"),
+    readFile(join(repositoryRoot, "scripts/rwa-automation-restore.sh"), "utf8"),
+    readFile(join(repositoryRoot, "scripts/rwa-automation-rollback.sh"), "utf8"),
+  ]);
+  const restoreService = compose.slice(compose.indexOf("  rwa-automation-restore:"));
+  assert.match(
+    restoreService,
+    /command:\s*\n\s*- flock\s*\n\s*- -n\s*\n\s*- -x\s*\n\s*- \/app\/rwa-automation-lock\/operation\.lock[\s\S]*- .*rwa-automation-backup\.js\s*\n\s*- restore/u,
+  );
+  assert.ok(restoreWrapper.indexOf("production_compose stop api")
+    < restoreWrapper.indexOf("rwa-automation-restore"));
+  assert.match(
+    rollbackWrapper,
+    /production_compose stop api[\s\S]*rwa-automation-restore flock -n -x \/app\/rwa-automation-lock\/operation\.lock[\s\S]*rwa-automation-backup\.js rollback/u,
+  );
+});
 
 test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and fail-closed switches without ephemeral challenges", async () => {
   const fixture = await createFixture();
@@ -117,6 +138,99 @@ test("encrypted snapshot restores credential, TOTP, execution, PnL, audit, and f
     assert.equal(rolledBackState.marker, "newer-state-that-will-be-rollback");
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("read-only verification preserves exact stage classifications", async () => {
+  for (const [authenticationCategory, stage] of [
+    ["wif_identity_invalid", "wif_identity"],
+    ["sts_exchange_failed", "sts_exchange"],
+  ] as const) {
+    const fixture = await createFixture();
+    try {
+      const backup = await fixture.service.createBackup();
+      fixture.provider.authenticationFailCategory = authenticationCategory;
+      await assert.rejects(
+        fixture.service.verifyBackup(backup.fileName),
+        hasVerifyFailure(stage, authenticationCategory),
+      );
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  const healthFixture = await createFixture();
+  try {
+    const backup = await healthFixture.service.createBackup();
+    healthFixture.provider.failCategory = "credential_key_provider_unavailable";
+    await assert.rejects(
+      healthFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("kms_health", "kms_health_failed"),
+    );
+  } finally {
+    await healthFixture.cleanup();
+  }
+
+  const decryptFixture = await createFixture();
+  try {
+    const backup = await decryptFixture.service.createBackup();
+    decryptFixture.provider.unwrapDataKey = async () => {
+      throw new Error("raw decrypt failure");
+    };
+    await assert.rejects(
+      decryptFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("kms_decrypt", "kms_decrypt_failed"),
+    );
+  } finally {
+    await decryptFixture.cleanup();
+  }
+
+  const envelopeFixture = await createFixture();
+  try {
+    const name = "rwa-automation-20260724T102031Z.rwa.enc.json";
+    await writeSecure(join(envelopeFixture.backupRoot, name), "{}");
+    await assert.rejects(
+      envelopeFixture.service.verifyBackup(name),
+      hasVerifyFailure("backup_envelope", "backup_envelope_invalid"),
+    );
+  } finally {
+    await envelopeFixture.cleanup();
+  }
+
+  const authenticationFixture = await createFixture();
+  try {
+    const backup = await authenticationFixture.service.createBackup();
+    const path = join(authenticationFixture.backupRoot, backup.fileName);
+    const envelope = JSON.parse(await readFile(path, "utf8"));
+    envelope.ciphertext = flipBase64url(envelope.ciphertext);
+    await writeSecure(path, JSON.stringify(envelope));
+    await assert.rejects(
+      authenticationFixture.service.verifyBackup(backup.fileName),
+      hasVerifyFailure("backup_authentication", "backup_authentication_failed"),
+    );
+  } finally {
+    await authenticationFixture.cleanup();
+  }
+
+  const contentFixture = await createFixture();
+  try {
+    const backup = await contentFixture.service.createBackup();
+    const contentName = "rwa-automation-20260724T102032Z.rwa.enc.json";
+    await rewriteEncryptedSnapshot(
+      contentFixture,
+      join(contentFixture.backupRoot, backup.fileName),
+      join(contentFixture.backupRoot, contentName),
+      contentName,
+      (snapshot) => {
+        snapshot.manifest.totalBytes += 1;
+      },
+    );
+    await assert.rejects(
+      contentFixture.service.verifyBackup(contentName),
+      hasVerifyFailure("backup_content", "backup_content_invalid"),
+    );
+  } finally {
+    await contentFixture.cleanup();
   }
 });
 
@@ -210,11 +324,124 @@ test("snapshot rejects symlinks, unsafe modes, unknown SQLite/WIF-style entries,
   }
 });
 
+test("backup create failures expose exact non-sensitive stages without changing hard-fail categories", async () => {
+  const snapshotFixture = await createFixture();
+  try {
+    await writeSecure(join(snapshotFixture.active, "trading.sqlite"), "secret snapshot marker");
+    await assert.rejects(snapshotFixture.service.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "snapshot_content",
+        category: "backup_manifest_invalid",
+      });
+      assert.doesNotMatch(JSON.stringify(rwaAutomationBackupCreateFailureReceipt(error)), /secret snapshot marker/u);
+      return true;
+    });
+  } finally {
+    await snapshotFixture.cleanup();
+  }
+
+  const healthFixture = await createFixture();
+  try {
+    healthFixture.provider.failCategory = "credential_key_provider_unavailable";
+    await assert.rejects(healthFixture.service.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "kms_health",
+        category: "backup_key_unavailable",
+      });
+      return true;
+    });
+  } finally {
+    await healthFixture.cleanup();
+  }
+
+  const configurationFixture = await createFixture();
+  try {
+    Object.defineProperty(configurationFixture.provider, "configured", { value: false });
+    const unconfigured = new RwaAutomationBackupService(
+      configurationFixture.provider,
+      configurationFixture.options,
+    );
+    await assert.rejects(unconfigured.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "key_provider_config",
+        category: "backup_key_unavailable",
+      });
+      return true;
+    });
+  } finally {
+    await configurationFixture.cleanup();
+  }
+
+  const dataKeyFixture = await createFixture();
+  try {
+    dataKeyFixture.provider.createDataKey = async () => {
+      throw new Error("secret data key marker");
+    };
+    await assert.rejects(dataKeyFixture.service.createBackup(), (error: unknown) => {
+      const receipt = rwaAutomationBackupCreateFailureReceipt(error);
+      assert.deepEqual(receipt, {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "data_key_create",
+        category: "backup_failed",
+      });
+      assert.doesNotMatch(JSON.stringify(receipt), /secret data key marker/u);
+      return true;
+    });
+  } finally {
+    await dataKeyFixture.cleanup();
+  }
+
+  const publishFixture = await createFixture();
+  try {
+    const interrupted = new RwaAutomationBackupService(publishFixture.provider, {
+      ...publishFixture.options,
+      faultHook: (point) => {
+        if (point === "before_backup_publish") throw new Error("secret publish marker");
+      },
+    });
+    await assert.rejects(interrupted.createBackup(), (error: unknown) => {
+      assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(error), {
+        schemaVersion: 1,
+        operation: "create",
+        ok: false,
+        stage: "backup_publish",
+        category: "backup_failed",
+      });
+      assert.doesNotMatch(JSON.stringify(rwaAutomationBackupCreateFailureReceipt(error)), /secret publish marker/u);
+      return true;
+    });
+    assert.deepEqual(await readdir(publishFixture.backupRoot), []);
+  } finally {
+    await publishFixture.cleanup();
+  }
+
+  assert.deepEqual(rwaAutomationBackupCreateFailureReceipt(new Error("raw secret")), {
+    schemaVersion: 1,
+    operation: "create",
+    ok: false,
+    stage: "configuration",
+    category: "backup_failed",
+  });
+});
+
 test("takeover backup schema accepts legacy absence and rejects malformed, orphaned, or duplicate records", async () => {
   const legacy = await createFixture();
   try {
     const state = baseState() as any;
     delete state.assetTakeovers;
+    delete state.connectivitySmokes;
+    delete state.productionSelfTestPermitConsumptions;
     await writeSecure(join(legacy.active, stateFileName), JSON.stringify(state));
     await legacy.service.createBackup();
   } finally {
@@ -414,6 +641,92 @@ test("connectivity smoke backup migrates exact parent records and rejects malfor
     await assert.rejects(partialFixture.service.createBackup(), hasCategory("backup_manifest_invalid"));
   } finally {
     await partialFixture.cleanup();
+  }
+});
+
+test("backup preserves exact permanent production self-test permit consumptions", async () => {
+  const consumption = {
+    permitId: "a".repeat(32),
+    digest: "b".repeat(64),
+    consumedAt: baseNow.getTime(),
+  };
+  const fixture = await createFixture();
+  try {
+    const state = baseState() as any;
+    state.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(join(fixture.active, stateFileName), JSON.stringify(state));
+    const backup = await fixture.service.createBackup();
+    const restored = await fixture.service.restoreBackup(backup.fileName);
+    const restoredState = JSON.parse(await readFile(
+      join(fixture.dataRoot, restored.restoredGeneration, stateFileName),
+      "utf8",
+    ));
+    assert.deepEqual(restoredState.productionSelfTestPermitConsumptions, [consumption]);
+  } finally {
+    await fixture.cleanup();
+  }
+
+  for (const invalid of [
+    [{ ...consumption, extra: true }],
+    [consumption, { ...consumption, digest: "c".repeat(64) }],
+    [consumption, { ...consumption, permitId: "c".repeat(32) }],
+  ]) {
+    const invalidFixture = await createFixture();
+    try {
+      const state = baseState() as any;
+      state.productionSelfTestPermitConsumptions = invalid;
+      await writeSecure(join(invalidFixture.active, stateFileName), JSON.stringify(state));
+      await assert.rejects(
+        invalidFixture.service.createBackup(),
+        hasCategory("backup_manifest_invalid"),
+      );
+    } finally {
+      await invalidFixture.cleanup();
+    }
+  }
+
+  const staleRestoreFixture = await createFixture();
+  try {
+    const staleBackup = await staleRestoreFixture.service.createBackup();
+    const current = baseState() as any;
+    current.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(
+      join(staleRestoreFixture.active, stateFileName),
+      JSON.stringify(current),
+    );
+    await assert.rejects(
+      staleRestoreFixture.service.restoreBackup(staleBackup.fileName),
+      hasCategory("backup_manifest_invalid"),
+    );
+    const stillActive = JSON.parse(await readFile(
+      join(staleRestoreFixture.active, stateFileName),
+      "utf8",
+    ));
+    assert.deepEqual(stillActive.productionSelfTestPermitConsumptions, [consumption]);
+  } finally {
+    await staleRestoreFixture.cleanup();
+  }
+
+  const staleRollbackFixture = await createFixture();
+  try {
+    const withConsumption = baseState() as any;
+    withConsumption.productionSelfTestPermitConsumptions = [consumption];
+    await writeSecure(
+      join(staleRollbackFixture.active, stateFileName),
+      JSON.stringify(withConsumption),
+    );
+    const backup = await staleRollbackFixture.service.createBackup();
+    await writeSecure(
+      join(staleRollbackFixture.active, stateFileName),
+      JSON.stringify(baseState()),
+    );
+    await staleRollbackFixture.service.restoreBackup(backup.fileName);
+    assert.throws(
+      () => staleRollbackFixture.service.rollbackRestore(),
+      hasCategory("backup_manifest_invalid"),
+    );
+  } finally {
+    await staleRollbackFixture.cleanup();
   }
 });
 
@@ -795,6 +1108,8 @@ function baseState() {
       createdAt: baseNow.getTime() + 2,
       updatedAt: baseNow.getTime() + 2,
     }],
+    connectivitySmokes: [],
+    productionSelfTestPermitConsumptions: [],
     challenges: [{
       id: "challenge-secret-marker",
       tokenHash: "challenge-token-hash",
@@ -1154,6 +1469,13 @@ function flipBase64url(value: string) {
 
 function hasCategory(category: string) {
   return (error: unknown) => error instanceof RwaAutomationBackupError && error.category === category;
+}
+
+function hasVerifyFailure(stage: string, category: string) {
+  return (error: unknown) => error instanceof RwaAutomationBackupError
+    && error.verifyStage === stage
+    && error.category === category
+    && !JSON.stringify(error).includes("raw decrypt failure");
 }
 
 function isBackupError() {

@@ -5,6 +5,7 @@ import {
 import type { RwaAssetOrderReference } from "./RwaAccountAssetAuthorization";
 import type { RwaAssetTakeoverProviderSnapshot } from "./RwaAssetTakeover";
 import type { RwaAssetFundingSettlement } from "./RwaAssetTakeoverRuntime";
+import type { RwaBinanceProductionSelfTestPermitConfirmation } from "./RwaBinanceProductionSelfTestPermit";
 
 export const RWA_STRATEGY_ID = "bybit-xaut-spot-perp-v1" as const;
 export const RWA_SPOT_SYMBOL = "XAUTUSDT" as const;
@@ -22,6 +23,9 @@ export type RwaExecutionConfig = {
   minNetAprPercent: number;
   minLiquidationDistancePercent: number;
   maxUnhedgedMs: number;
+  accountIsolationMode: "unconfirmed" | "development_exclusive_account" | "dedicated_subaccount";
+  accountIsolationConfirmedAt: number | null;
+  productionSelfTestPermitConfirmation: RwaBinanceProductionSelfTestPermitConfirmation | null;
 };
 
 export const defaultRwaExecutionConfig: RwaExecutionConfig = {
@@ -34,6 +38,9 @@ export const defaultRwaExecutionConfig: RwaExecutionConfig = {
   minNetAprPercent: 8,
   minLiquidationDistancePercent: 30,
   maxUnhedgedMs: 10_000,
+  accountIsolationMode: "unconfirmed",
+  accountIsolationConfirmedAt: null,
+  productionSelfTestPermitConfirmation: null,
 };
 
 export type RwaVenueCredentials = {
@@ -427,11 +434,32 @@ export type RwaNeutralTradingClient<
 > = {
   validateAccess(): Promise<{ permissions: TPermissions } & RwaVenueAccountIdentity>;
   readPreflightSnapshot(): Promise<TSnapshot>;
+  prepareProviderMutation?(input: {
+    mutation:
+      | "set_leverage"
+      | "place_spot_order"
+      | "place_futures_order"
+      | "cancel_spot_order"
+      | "cancel_futures_order";
+    strategyOrderPrefixes: string[];
+    since: number;
+    continuity: RwaStrategyActivityContinuity;
+    orderLinkId?: string;
+    providerOrderId?: string;
+    expectedLeverage?: 1 | 2 | 3;
+  }): Promise<void>;
   setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
   placeOrder(request: RwaProviderOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<RwaProviderOrder>;
   cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
-  cancelStrategyOrders(orderLinkPrefix: string): Promise<void>;
+  cancelStrategyOrders(
+    orderLinkPrefix: string,
+    activityContext?: {
+      strategyOrderPrefixes: string[];
+      since: number;
+      continuity: RwaStrategyActivityContinuity;
+    },
+  ): Promise<void>;
   listAssetOpenOrders?(): Promise<RwaAssetOrderReference[]>;
   readAssetTakeoverSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;
   readManagedAssetSnapshot?(): Promise<RwaAssetTakeoverProviderSnapshot<TPermissions>>;

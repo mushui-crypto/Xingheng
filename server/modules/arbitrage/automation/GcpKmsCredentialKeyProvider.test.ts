@@ -29,6 +29,9 @@ const testWifAudience =
 test("GCP KMS adapter accepts X.509 external-account ADC and wraps isolated data keys", async () => {
   const fixture = await createFixture();
   try {
+    const authentication = await fixture.provider.authenticationHealthCheck();
+    assert.deepEqual(authentication, { ok: true, category: null, message: null });
+    assert.equal(fixture.client.authCalls, 1);
     const created = await fixture.provider.createDataKey(context);
     assert.equal(created.provider, "gcp-kms");
     assert.equal(created.keyName, RWA_GCP_KMS_KEY_NAME);
@@ -46,6 +49,43 @@ test("GCP KMS adapter accepts X.509 external-account ADC and wraps isolated data
     assert.ok(fixture.client.decryptCalls >= 3);
   } finally {
     await fixture.cleanup();
+  }
+});
+
+test("GCP KMS authentication health separates WIF and STS without exposing tokens", async () => {
+  for (const client of [
+    new FakeKmsClient({ authToken: null }),
+    new FakeKmsClient({ authError: new Error("raw-token-error=must-not-leak") }),
+  ]) {
+    const fixture = await createFixture(x509Adc, client);
+    try {
+      const result = await fixture.provider.authenticationHealthCheck();
+      assert.deepEqual(result, {
+        ok: false,
+        category: "sts_exchange_failed",
+        message: "STS 身份交换失败。",
+      });
+      assert.equal(client.authCalls, 1);
+      assert.doesNotMatch(JSON.stringify(result), /raw-token|test-access-token/u);
+      assert.equal(client.encryptCalls, 0);
+      assert.equal(client.decryptCalls, 0);
+    } finally {
+      await fixture.cleanup();
+    }
+  }
+
+  const rejected = await createFixture({ type: "service_account", private_key: "secret" });
+  try {
+    const result = await rejected.provider.authenticationHealthCheck();
+    assert.deepEqual(result, {
+      ok: false,
+      category: "wif_identity_invalid",
+      message: "GCP WIF 身份边界无效。",
+    });
+    assert.equal(rejected.client.authCalls, 0);
+    assert.doesNotMatch(JSON.stringify(result), /private_key|secret/u);
+  } finally {
+    await rejected.cleanup();
   }
 });
 
@@ -571,15 +611,32 @@ type FakeDecryptRequest = {
 };
 
 class FakeKmsClient {
+  authCalls = 0;
   encryptCalls = 0;
   decryptCalls = 0;
   private readonly key = randomBytes(32);
   private readonly integrityMode: FakeIntegrityMode;
   private readonly versionName: string;
+  private readonly authToken: string | null;
+  private readonly authError: Error | null;
+  readonly auth = {
+    getAccessToken: async () => {
+      this.authCalls += 1;
+      if (this.authError) throw this.authError;
+      return this.authToken;
+    },
+  };
 
-  constructor(options: { integrityMode?: FakeIntegrityMode; versionName?: string } = {}) {
+  constructor(options: {
+    integrityMode?: FakeIntegrityMode;
+    versionName?: string;
+    authToken?: string | null;
+    authError?: Error;
+  } = {}) {
     this.integrityMode = options.integrityMode ?? "valid";
     this.versionName = options.versionName ?? `${RWA_GCP_KMS_KEY_NAME}/cryptoKeyVersions/1`;
+    this.authToken = options.authToken === undefined ? "test-access-token" : options.authToken;
+    this.authError = options.authError ?? null;
   }
 
   async encrypt(request: FakeEncryptRequest) {
