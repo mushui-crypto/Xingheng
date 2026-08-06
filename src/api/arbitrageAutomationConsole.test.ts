@@ -128,7 +128,7 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
     const credential = await client.validateCredential({
       accountId: binance.accountId,
       venue: "binance",
-      note: "not-sent",
+      note: "binding-note",
       apiKey: "fixture-binance-key",
       secret,
       passphrase: "must-not-be-sent",
@@ -200,6 +200,7 @@ test("real Binance client sends strict account-scoped bodies and maps controlled
   assert.deepEqual(credentialWrite.body, {
     apiKey: "fixture-binance-key",
     apiSecret: secret,
+    credentialNote: "binding-note",
     stepUpToken: "fixture-step-up-token",
   });
   assert.equal(JSON.stringify(credentialWrite.body).includes("passphrase"), false);
@@ -258,7 +259,7 @@ test("step-up intents bind the exact request body, account, resource and changed
   const credentialDraft = {
     accountId: null,
     venue: "binance" as const,
-    note: "not-sent",
+    note: "binding-note",
     apiKey: "fixture-binance-key",
     secret: "fixture-binance-secret",
     passphrase: "must-not-be-sent",
@@ -275,6 +276,7 @@ test("step-up intents bind the exact request body, account, resource and changed
     await canonicalRequestDigest({
       apiKey: "fixture-binance-key",
       apiSecret: "fixture-binance-secret",
+      credentialNote: "binding-note",
     }),
   );
   assert.equal(JSON.stringify(credentialIntent).includes("fixture-binance-secret"), false);

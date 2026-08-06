@@ -1621,6 +1621,9 @@ function credentialRequestBody(draft: CredentialDraft) {
     apiKey: draft.apiKey.trim(),
     apiSecret: draft.secret.trim(),
   };
+  if (draft.venue === "binance") {
+    body.credentialNote = draft.note.trim();
+  }
   if ((draft.venue === "bitget" || draft.venue === "okx") && draft.passphrase?.trim()) {
     body.passphrase = draft.passphrase.trim();
   }
