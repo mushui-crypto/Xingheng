@@ -63,6 +63,7 @@ const REQUIRED_TOOLS = Object.freeze({
   docker: PRODUCTION_DOCKER_CLI,
   compose: PRODUCTION_COMPOSE_PLUGIN,
 });
+const permitPreparedDockerContexts = new WeakSet();
 
 export function assertNoDockerControlEnvironment(source = process.env) {
   const key = Object.keys(source).find((name) =>
@@ -129,6 +130,27 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
     .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     assertPromotionStateAllowsProduction();
   }
+  return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
+}
+
+export function openTrustedPermitPreparedDockerRuntime(kind, source, context) {
+  if (!permitPreparedDockerContexts.has(context)) {
+    throw new Error("Permit prepared transient Docker context was not issued by the trusted validator");
+  }
+  assertPermitPreparedTransientRuntimeContext(context, source, true);
+  return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
+}
+
+export function createTrustedPermitPreparedDockerContext(context, source = process.env) {
+  assertPermitPreparedTransientRuntimeContext(context, source, true);
+  permitPreparedDockerContexts.add(context);
+  return context;
+}
+
+function openTrustedDockerRuntimeAfterLifecycleValidation(kind, source) {
+  if (!["docker", "compose"].includes(kind)) {
+    throw new Error("trusted Docker runtime kind is invalid");
+  }
   const fixture = testFixture(source);
   const trustReceipt = fixture === null ? activeTrustReceipt(source) : null;
   if (fixture === null && process.getuid?.() !== 0) {
@@ -161,6 +183,71 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
   } catch (error) {
     closeSync(executable.fd);
     throw error;
+  }
+}
+
+function assertPermitPreparedTransientRuntimeContext(context, source, validateDescriptors) {
+  const sha256 = /^[a-f0-9]{64}$/u;
+  const operationId = /^[a-f0-9]{32}$/u;
+  const identityKeys = ["dev", "ino", "size"];
+  const contextKeys = [
+    "attemptReceiptSha256", "authorizationManifestSha256", "environmentAfterSha256",
+    "environmentBeforeSha256", "kind", "launcherIdentity", "operationId",
+    "operationLockContext", "operationLocks", "receiptSha256", "releaseIdentitySha256",
+    "schemaVersion", "wrapperIdentity",
+  ];
+  const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+  const validIdentity = (value) => exactKeys(value, identityKeys)
+    && identityKeys.every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
+  const validLocks = Array.isArray(context?.operationLocks)
+    && context.operationLocks.length === 2
+    && context.operationLocks.every((lock, index) => exactKeys(
+      lock,
+      ["dev", "gid", "ino", "mode", "path", "uid"],
+    ) && Number.isSafeInteger(lock.dev) && Number.isSafeInteger(lock.ino)
+      && lock.uid === 0 && lock.gid === 0 && lock.mode === 0o600
+      && lock.path === [
+        "/run/lock/xingheng/release-global.lock",
+        "/run/lock/xingheng/production.lock",
+      ][index]);
+  if (!exactKeys(context, contextKeys)
+    || context.schemaVersion !== 1
+    || context.kind !== "permit-prepared-transient"
+    || !operationId.test(context.operationId ?? "")
+    || context.operationLockContext !== "production"
+    || source.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+    || source.XINGHENG_TRUSTED_OPERATION_ENTRY !== "install-production-self-test-permit.sh"
+    || source.XINGHENG_PERMIT_INSTALL_OPERATION_ID !== context.operationId
+    || !sha256.test(context.receiptSha256 ?? "")
+    || !sha256.test(context.attemptReceiptSha256 ?? "")
+    || !sha256.test(context.environmentBeforeSha256 ?? "")
+    || !sha256.test(context.environmentAfterSha256 ?? "")
+    || context.environmentBeforeSha256 === context.environmentAfterSha256
+    || !sha256.test(context.releaseIdentitySha256 ?? "")
+    || !sha256.test(context.authorizationManifestSha256 ?? "")
+    || !validIdentity(context.wrapperIdentity)
+    || !validIdentity(context.launcherIdentity)
+    || !validLocks) {
+    throw new Error("Permit prepared transient Docker context is invalid");
+  }
+  if (validateDescriptors) {
+    const descriptors = [fstatSync(3), fstatSync(4), fstatSync(6), fstatSync(7)];
+    const expected = [
+      context.operationLocks[0], context.operationLocks[1],
+      context.wrapperIdentity, context.launcherIdentity,
+    ];
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const descriptor = descriptors[index];
+      const identity = expected[index];
+      if (!descriptor.isFile() || descriptor.nlink !== 1
+        || descriptor.dev !== identity.dev || descriptor.ino !== identity.ino
+        || (index >= 2 && descriptor.size !== identity.size)
+        || descriptor.uid !== 0 || descriptor.gid !== 0
+        || (index < 2 && (descriptor.mode & 0o777) !== 0o600)) {
+        throw new Error("Permit prepared transient trusted descriptor identity mismatch");
+      }
+    }
   }
 }
 

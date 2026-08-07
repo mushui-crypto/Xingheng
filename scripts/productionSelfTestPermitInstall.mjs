@@ -22,6 +22,7 @@ import { validateReleaseManifest } from "./deploymentRevision.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
 import {
   assertTrustedProductionReleaseRoot,
+  createTrustedPermitPreparedDockerContext,
   execTrustedDockerSync,
 } from "./trustedDockerRuntime.mjs";
 import {
@@ -427,7 +428,7 @@ function revalidateReleaseIdentity(receipt, paths, options) {
 
 export function assertPermitEnvironmentAuthorized(input) {
   const present = PERMIT_ENV_KEYS.filter((key) => input.entries.has(key));
-  if (present.length === 0) return;
+  if (present.length === 0) return Object.freeze({ state: "absent" });
   if (present.length !== PERMIT_ENV_KEYS.length) throw new Error("Production self-test Permit environment is incomplete");
   const receiptOptions = input.options ?? {};
   const receipt = readInstallReceipt(input.receiptPath ?? PERMIT_INSTALL_RECEIPT, receiptOptions);
@@ -447,6 +448,83 @@ export function assertPermitEnvironmentAuthorized(input) {
   for (const [key, value] of expected) {
     if (input.entries.get(key) !== value) throw new Error("Production self-test Permit environment does not match its receipt");
   }
+  return Object.freeze({
+    state: prepared ? "prepared" : "active",
+    operationId: receipt.operationId,
+    receiptSha256: secureFileSha256(
+      input.receiptPath ?? PERMIT_INSTALL_RECEIPT,
+      64 * 1024,
+      0o400,
+      receiptOptions,
+    ),
+  });
+}
+
+export function assertPermitPreparedTransientContext(input) {
+  const operationId = input.operationId ?? "";
+  const trusted = assertTrustedMutationContext(operationId);
+  const paths = installPaths(input.options ?? {});
+  const receipt = readInstallReceipt(paths.receiptPath, input.options ?? {});
+  if (receipt.status !== "prepared"
+    || input.operationEntry !== "install-production-self-test-permit.sh"
+    || operationId !== receipt.operationId
+    || !isPermitInstallComposeOperation(input.composeArgs, receipt.request.ownerUserId)) {
+    throw new Error("Permit prepared transient context is not authorized");
+  }
+  revalidateReleaseIdentity(receipt, paths, input.options ?? {});
+  const lifecycle = readLifecycleIdentity(paths);
+  if (lifecycle.environmentSha256 !== receipt.envBeforeSha256
+    || lifecycle.revision !== receipt.releaseIdentity.releaseRevision
+    || lifecycle.manifestSha256 !== receipt.releaseIdentity.releaseManifestSha256
+    || lifecycle.images.api !== receipt.releaseIdentity.apiImageDigest
+    || lifecycle.images.web !== receipt.releaseIdentity.webImageDigest) {
+    throw new Error("Permit prepared transient lifecycle identity mismatch");
+  }
+  const environmentSha256 = secureFileSha256(
+    input.environmentPath ?? paths.environmentPath,
+    1024 * 1024,
+    0o600,
+    input.options ?? {},
+  );
+  if (environmentSha256 !== receipt.envAfterSha256
+    || receipt.envBeforeSha256 === receipt.envAfterSha256) {
+    throw new Error("Permit prepared transient environment identity mismatch");
+  }
+  const authorizationManifestSha256 = secureFileSha256(
+    paths.authorizationManifestPath,
+    1024 * 1024,
+    0o400,
+    input.options ?? {},
+  );
+  if (authorizationManifestSha256 !== receipt.request.authorizationManifestSha256
+    || receipt.permit.authorizationDigest !== authorizationManifestSha256) {
+    throw new Error("Permit prepared transient authorization binding mismatch");
+  }
+  const receiptSha256 = secureFileSha256(
+    paths.receiptPath,
+    64 * 1024,
+    0o400,
+    input.options ?? {},
+  );
+  const confirmedReceipt = readInstallReceipt(paths.receiptPath, input.options ?? {});
+  if (canonicalJson(confirmedReceipt) !== canonicalJson(receipt)) {
+    throw new Error("Permit prepared transient receipt changed during validation");
+  }
+  return createTrustedPermitPreparedDockerContext(Object.freeze({
+    schemaVersion: 1,
+    kind: "permit-prepared-transient",
+    operationId,
+    operationLockContext: "production",
+    receiptSha256,
+    attemptReceiptSha256: receipt.attemptReceiptSha256,
+    environmentBeforeSha256: receipt.envBeforeSha256,
+    environmentAfterSha256: receipt.envAfterSha256,
+    releaseIdentitySha256: sha256(Buffer.from(canonicalJson(receipt.releaseIdentity))),
+    authorizationManifestSha256,
+    wrapperIdentity: trusted.wrapperIdentity,
+    launcherIdentity: trusted.launcherIdentity,
+    operationLocks: trusted.operationLocks,
+  }), process.env);
 }
 
 export function readInstallReceipt(path = PERMIT_INSTALL_RECEIPT, options = {}) {
@@ -1003,7 +1081,7 @@ function assertTrustedMutationContext(operationId) {
     || process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID !== operationId
     || !/^[a-f0-9]{32}$/u.test(operationId)
   ) throw new Error("Permit installation trusted wrapper context is invalid");
-  inheritedOperationLocks("production");
+  const operationLocks = inheritedOperationLocks("production");
   const wrapperPath = resolve(PERMIT_INSTALL_WRAPPER);
   const pathMetadata = lstatSync(wrapperPath);
   const descriptor = fstatSync(6);
@@ -1024,6 +1102,19 @@ function assertTrustedMutationContext(operationId) {
     || launcherDescriptor.gid !== 0 || launcherDescriptor.nlink !== 1) {
     throw new Error("Permit installation trusted launcher descriptor is invalid");
   }
+  return Object.freeze({
+    wrapperIdentity: Object.freeze({
+      dev: descriptor.dev,
+      ino: descriptor.ino,
+      size: descriptor.size,
+    }),
+    launcherIdentity: Object.freeze({
+      dev: launcherDescriptor.dev,
+      ino: launcherDescriptor.ino,
+      size: launcherDescriptor.size,
+    }),
+    operationLocks: Object.freeze(operationLocks.receipts.map((receipt) => Object.freeze({ ...receipt }))),
+  });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

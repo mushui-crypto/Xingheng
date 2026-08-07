@@ -106,10 +106,13 @@ test("prepared receipt authorizes only the dedicated state check and API-only re
       receiptPath: fixture.receipt,
       options: fixture.options(),
     };
-    assert.doesNotThrow(() => assertPermitEnvironmentAuthorized({
+    const preparedState = assertPermitEnvironmentAuthorized({
       ...common,
       composeArgs: ["up", "-d", "api"],
-    }));
+    });
+    assert.equal(preparedState.state, "prepared");
+    assert.equal(preparedState.operationId, receipt.operationId);
+    assert.match(preparedState.receiptSha256, /^[a-f0-9]{64}$/u);
     assert.doesNotThrow(() => assertPermitEnvironmentAuthorized({
       ...common,
       composeArgs: ["exec", "-T", "api", "node", "/app/scripts/verify-production-self-test-permit-state.mjs", OWNER],

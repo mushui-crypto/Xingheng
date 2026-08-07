@@ -6,7 +6,10 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { openTrustedDockerRuntime } from "./trustedDockerRuntime.mjs";
+import {
+  openTrustedDockerRuntime,
+  openTrustedPermitPreparedDockerRuntime,
+} from "./trustedDockerRuntime.mjs";
 
 const REVISION = "a".repeat(40);
 
@@ -57,4 +60,13 @@ test("trusted Docker child receives the release manifest revision", async () => 
     await new Promise((resolvePromise) => server.close(resolvePromise));
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("Permit prepared Docker context rejects objects not issued by the trusted validator", () => {
+  const operationId = "b".repeat(32);
+  assert.throws(() => openTrustedPermitPreparedDockerRuntime("compose", {
+    XINGHENG_OPERATION_LOCK_CONTEXT: "production",
+    XINGHENG_TRUSTED_OPERATION_ENTRY: "install-production-self-test-permit.sh",
+    XINGHENG_PERMIT_INSTALL_OPERATION_ID: operationId,
+  }, Object.freeze({ operationId })), /not issued by the trusted validator/u);
 });
