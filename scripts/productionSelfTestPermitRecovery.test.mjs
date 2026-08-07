@@ -57,6 +57,89 @@ test("failed schema v1 receipt is archived without changing its file identity", 
   });
 });
 
+test("failed schema v2 receipt and attempt are archived with their original identities", () => {
+  withFixture((fixture) => {
+    const sourceReceipt = lstatSync(fixture.receiptPath);
+    const sourceAttempt = lstatSync(resolve(fixture.attemptsRoot, LEGACY_OPERATION));
+    const sourceAttemptReceiptSha256 = sha256(readFileSync(resolve(
+      fixture.attemptsRoot,
+      LEGACY_OPERATION,
+      "attempt-receipt.json",
+    )));
+
+    const result = recoverHistoricalFailedPermitReceipt(fixture.options());
+    assert.equal(result.sourceReceiptSha256, fixture.receiptSha256);
+    assert.equal(assertCompletedPermitRecovery(fixture.options()), true);
+
+    const operationRoot = resolve(fixture.recoveryRoot, "operations", RECOVERY_OPERATION);
+    const archivedReceipt = resolve(operationRoot, "legacy-receipt.json");
+    const archivedAttempt = resolve(operationRoot, "legacy-attempt");
+    assert.equal(lstatSync(archivedReceipt).ino, sourceReceipt.ino);
+    assert.equal(lstatSync(archivedAttempt).ino, sourceAttempt.ino);
+    assert.equal(sha256(readFileSync(archivedReceipt)), fixture.receiptSha256);
+    assert.equal(
+      sha256(readFileSync(resolve(archivedAttempt, "attempt-receipt.json"))),
+      sourceAttemptReceiptSha256,
+    );
+    assert.deepEqual(readDir(fixture.stateRoot), ["attempts", "recovery"]);
+  }, { schemaVersion: 2 });
+});
+
+test("schema v2 recovery rejects invalid terminal, mode, digest, and runtime identity", () => {
+  const cases = [
+    [(receipt) => { receipt.status = "success"; }, /exact failed terminal/u],
+    [(receipt) => { receipt.request.schemaVersion = 1; }, /exact failed terminal/u],
+    [(receipt) => { receipt.request.executionMode = "single_funding_rate_arbitrage_round"; }, /exact failed terminal/u],
+    [(receipt) => { receipt.permit.digest = "0".repeat(64); }, /digest is invalid/u],
+    [(receipt) => { receipt.runtimeBefore.api.revision = "9".repeat(40); }, /runtime identity does not match/u],
+    [(receipt) => { receipt.receiptType = "failed"; }, /receipt is invalid/u],
+  ];
+  for (const [mutation, expected] of cases) {
+    withFixture((fixture) => {
+      fixture.rewriteReceipt(mutation);
+      assert.throws(
+        () => recoverHistoricalFailedPermitReceipt(fixture.options()),
+        expected,
+      );
+      assert.equal(exists(fixture.recoveryRoot), false);
+    }, { schemaVersion: 2, runtimeBefore: true });
+  }
+});
+
+test("schema v2 recovery binds the exact source receipt SHA256", () => {
+  withFixture((fixture) => {
+    assert.throws(
+      () => recoverHistoricalFailedPermitReceipt(fixture.options({
+        expectedReceiptSha256: "f".repeat(64),
+      })),
+      /source receipt SHA256 mismatch/u,
+    );
+    assert.equal(exists(fixture.recoveryRoot), false);
+  }, { schemaVersion: 2 });
+});
+
+test("schema v2 recovery rejects mismatched attempt content", () => {
+  withFixture((fixture) => {
+    fixture.rewriteAttempt((attempt) => { attempt.schemaVersion = 1; });
+    assert.throws(
+      () => recoverHistoricalFailedPermitReceipt(fixture.options()),
+      /attempt receipt does not match terminal receipt/u,
+    );
+    assert.equal(exists(fixture.recoveryRoot), false);
+  }, { schemaVersion: 2 });
+});
+
+test("unsupported recovery receipt schema fails closed before creating recovery state", () => {
+  withFixture((fixture) => {
+    fixture.rewriteReceipt((receipt) => { receipt.schemaVersion = 3; });
+    assert.throws(
+      () => recoverHistoricalFailedPermitReceipt(fixture.options()),
+      /receipt schema is unsupported/u,
+    );
+    assert.equal(exists(fixture.recoveryRoot), false);
+  }, { schemaVersion: 2 });
+});
+
 test("completed recovery allows one new schema v2 installation attempt", () => {
   withFixture((fixture) => {
     recoverHistoricalFailedPermitReceipt(fixture.options());
@@ -65,6 +148,28 @@ test("completed recovery allows one new schema v2 installation attempt", () => {
     assert.equal(current.status, "prepared");
     assert.throws(() => preparePermitInstallation(fixture.v2InstallOptions()), /already been attempted/u);
   });
+});
+
+test("installer schema v2 output shape remains compatible with recovery schema v2", () => {
+  withFixture((fixture) => {
+    recoverHistoricalFailedPermitReceipt(fixture.options());
+    const archived = JSON.parse(readFileSync(resolve(
+      fixture.recoveryRoot,
+      "operations",
+      RECOVERY_OPERATION,
+      "legacy-receipt.json",
+    ), "utf8"));
+    const installer = preparePermitInstallation(fixture.v2InstallOptions());
+
+    assert.equal(installer.schemaVersion, 2);
+    assert.equal(archived.schemaVersion, 2);
+    assert.deepEqual(sortedKeys(installer), sortedKeys(archived));
+    assert.deepEqual(sortedKeys(installer.request), sortedKeys(archived.request));
+    assert.deepEqual(sortedKeys(installer.permit), sortedKeys(archived.permit));
+    assert.deepEqual(sortedKeys(installer.releaseIdentity), sortedKeys(archived.releaseIdentity));
+    assert.equal(installer.request.executionMode, archived.request.executionMode);
+    assert.equal(installer.permit.executionMode, archived.permit.executionMode);
+  }, { schemaVersion: 2 });
 });
 
 for (const hook of [
@@ -103,10 +208,10 @@ test("completed and competing recovery operations fail closed", () => {
   });
 });
 
-test("success, unknown schema, malformed, and closed-state violations are rejected", () => {
+test("success, unsupported schema, malformed, and closed-state violations are rejected", () => {
   for (const mutation of [
     (receipt) => { receipt.status = "success"; },
-    (receipt) => { receipt.schemaVersion = 2; },
+    (receipt) => { receipt.schemaVersion = 3; },
     (receipt) => { receipt.unknown = true; },
   ]) {
     withFixture((fixture) => {
@@ -115,7 +220,7 @@ test("success, unknown schema, malformed, and closed-state violations are reject
         () => recoverHistoricalFailedPermitReceipt(fixture.options({
           expectedReceiptSha256: sha256(readFileSync(fixture.receiptPath)),
         })),
-        /Legacy Permit/u,
+        /(?:Legacy Permit|receipt schema is unsupported)/u,
       );
       assert.equal(exists(fixture.recoveryRoot), false);
     });
@@ -245,7 +350,7 @@ esac
   }
 });
 
-function withFixture(run) {
+function withFixture(run, { schemaVersion = 1, runtimeBefore = false } = {}) {
   const root = mkdtempSync(resolve(tmpdir(), "xingheng-permit-recovery-"));
   try {
     const stateRoot = resolve(root, "state");
@@ -262,8 +367,8 @@ function withFixture(run) {
     writeSecure(resolve(attemptRoot, "environment.before"), environmentBefore, 0o600);
     writeSecure(resolve(attemptRoot, "environment.proposed"), environmentProposed, 0o600);
 
-    const request = legacyRequest();
-    const receipt = legacyReceipt(request, environmentBefore, environmentProposed);
+    const request = schemaVersion === 1 ? legacyRequest() : currentRequest();
+    const receipt = failedReceipt(request, environmentBefore, environmentProposed, runtimeBefore);
     const attempt = { ...receipt };
     delete attempt.attemptReceiptSha256;
     attempt.status = "prepared";
@@ -314,6 +419,18 @@ function withFixture(run) {
         mutation(value);
         chmodSync(receiptPath, 0o600);
         writeSecure(receiptPath, jsonBytes(value), 0o400);
+      },
+      rewriteAttempt(mutation) {
+        const attemptPath = resolve(attemptRoot, "attempt-receipt.json");
+        const value = JSON.parse(readFileSync(attemptPath, "utf8"));
+        mutation(value);
+        chmodSync(attemptPath, 0o600);
+        const bytes = jsonBytes(value);
+        writeSecure(attemptPath, bytes, 0o400);
+        const terminal = JSON.parse(readFileSync(receiptPath, "utf8"));
+        terminal.attemptReceiptSha256 = sha256(bytes);
+        chmodSync(receiptPath, 0o600);
+        writeSecure(receiptPath, jsonBytes(terminal), 0o400);
       },
       v2InstallOptions() {
         const releaseManifestPath = resolve(root, "release-manifest.json");
@@ -402,7 +519,15 @@ function legacyRequest() {
   };
 }
 
-function legacyReceipt(request, before, proposed) {
+function currentRequest() {
+  return {
+    ...legacyRequest(),
+    schemaVersion: 2,
+    executionMode: "single_connectivity_smoke",
+  };
+}
+
+function failedReceipt(request, before, proposed, withRuntimeBefore = false) {
   const expiresAt = new Date(ACTIVATED_AT.getTime() + 60 * 60_000).toISOString();
   const permit = {
     permitId: request.permitId,
@@ -414,9 +539,10 @@ function legacyReceipt(request, before, proposed) {
     expiresAt,
     revision: request.releaseRevision,
   };
-  permit.digest = legacyDigest(permit);
+  if (request.schemaVersion === 2) permit.executionMode = request.executionMode;
+  permit.digest = request.schemaVersion === 1 ? legacyDigest(permit) : currentDigest(permit);
   return {
-    schemaVersion: 1,
+    schemaVersion: request.schemaVersion,
     operationId: LEGACY_OPERATION,
     status: "failed",
     request,
@@ -431,7 +557,7 @@ function legacyReceipt(request, before, proposed) {
       lifecycleEstablishedAt: ACTIVATED_AT.toISOString(),
       lifecycleOperationId: "12345678-1234-4123-8123-123456789abc",
     },
-    runtimeBefore: null,
+    runtimeBefore: withRuntimeBefore ? runtimeSnapshot(request) : null,
     runtimeAfter: null,
     activatedAt: ACTIVATED_AT.toISOString(),
     expiresAt,
@@ -448,6 +574,36 @@ function legacyDigest(input) {
     input.accountBindingSha256, "READ", "TRADE", input.authorizationDigest,
     String(input.approvedCapitalUsd), input.revision, input.expiresAt,
   ].join(":")));
+}
+
+function currentDigest(input) {
+  return sha256(Buffer.from([
+    "production", "binance", "xaut", input.permitId, input.ownerUserId,
+    input.accountBindingSha256, "READ", "TRADE", input.executionMode, input.authorizationDigest,
+    String(input.approvedCapitalUsd), input.revision, input.expiresAt,
+  ].join(":")));
+}
+
+function runtimeSnapshot(request) {
+  return {
+    capturedAt: ACTIVATED_AT.toISOString(),
+    api: {
+      containerId: "a".repeat(64),
+      imageDigest: request.apiImageDigest,
+      revision: request.releaseRevision,
+      startedAt: ACTIVATED_AT.toISOString(),
+      running: true,
+      health: "healthy",
+    },
+    web: {
+      containerId: "b".repeat(64),
+      imageDigest: request.webImageDigest,
+      revision: request.releaseRevision,
+      startedAt: ACTIVATED_AT.toISOString(),
+      running: true,
+      health: "healthy",
+    },
+  };
 }
 
 function receiptPathIfPresent(receiptPath, recoveryRoot) {
@@ -470,6 +626,7 @@ function writeExecutable(path, contents) {
 }
 
 function readDir(path) { return exists(path) ? readdirSync(path).sort() : []; }
+function sortedKeys(value) { return Object.keys(value).sort(); }
 function jsonBytes(value) { return Buffer.from(`${JSON.stringify(value)}\n`); }
 function sha256(value) { return createHash("sha256").update(value).digest("hex"); }
 function exists(path) { try { lstatSync(path); return true; } catch (error) { if (error?.code === "ENOENT") return false; throw error; } }
