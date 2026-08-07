@@ -18,6 +18,7 @@ import {
 import { BinanceCredentialBindingReadStore } from "../storage/BinanceCredentialBindingReadStore";
 import type {
   ProviderUserStreamConnectivityFailureDetail,
+  ProviderUserStreamLifecycleDiagnostic,
   ProviderUserStreamProbeFailureStage,
 } from "./RwaProviderUserStreamProbe";
 
@@ -314,6 +315,10 @@ export function providerIdentityPreflightFailureReceipt(
       && error.streamProbeStage === "connectivity_failed"
       ? error.connectivityFailedDetail
       : null,
+    streamProbeLifecycle: error instanceof ProviderIdentityPreflightError
+      && error.category === "stream_probe"
+      ? error.streamProbeLifecycle
+      : null,
   };
 }
 
@@ -322,6 +327,7 @@ class ProviderIdentityPreflightError extends Error {
     readonly category: string,
     readonly streamProbeStage: ProviderUserStreamProbeFailureStage | null = null,
     readonly connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    readonly streamProbeLifecycle: ProviderUserStreamLifecycleDiagnostic | null = null,
   ) {
     super(category);
   }
@@ -351,6 +357,7 @@ async function diagnosticStreamProbe<T>(operation: () => Promise<T>): Promise<T>
     const {
       providerUserStreamProbeConnectivityFailureDetail,
       providerUserStreamProbeFailureStage,
+      providerUserStreamProbeLifecycleDiagnostic,
     } = await import("./RwaProviderUserStreamProbe");
     const stage = providerUserStreamProbeFailureStage(error);
     throw new ProviderIdentityPreflightError(
@@ -359,6 +366,7 @@ async function diagnosticStreamProbe<T>(operation: () => Promise<T>): Promise<T>
       stage === "connectivity_failed"
         ? providerUserStreamProbeConnectivityFailureDetail(error)
         : null,
+      providerUserStreamProbeLifecycleDiagnostic(error),
     );
   }
 }

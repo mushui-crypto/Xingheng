@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import test from "node:test";
 import type { RwaBinanceProductionSelfTestBinding } from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
 import { RwaBinanceProviderError } from "../modules/arbitrage/automation/RwaBinanceMainnetClient";
@@ -7,6 +8,7 @@ import {
   providerIdentityPreflightFailureReceipt,
   runRwaProviderIdentityPreflight,
 } from "./RwaProviderIdentityPreflight";
+import { runRwaProviderUserStreamProbe } from "./RwaProviderUserStreamProbe";
 
 const REVISION = "a".repeat(40);
 const IDENTITY = {
@@ -35,6 +37,51 @@ const STREAM_PROBE = {
   futuresListenKeyKeepalive: true as const,
   futuresListenKeyClose: true as const,
 };
+
+class LifecycleSocket extends EventEmitter {
+  constructor(readonly url: string, event: "error" | "close") {
+    super();
+    queueMicrotask(() => {
+      this.emit("open");
+      if (!url.includes("fstream")) return;
+      if (event === "error") {
+        this.emit("error", Object.assign(
+          new TypeError("listen-key fixture-key fixture-secret provider response"),
+          { code: "ECONNRESET" },
+        ));
+      } else {
+        this.emit("close", 1006, Buffer.from(
+          "listen-key fixture-key fixture-secret provider response",
+        ));
+      }
+    });
+  }
+
+  send(value: string) {
+    const request = JSON.parse(value);
+    queueMicrotask(() => this.emit("message", JSON.stringify({ id: request.id, status: 200 })));
+  }
+
+  close() {}
+}
+
+async function captureFuturesLifecycleFailure(event: "error" | "close") {
+  try {
+    await runRwaProviderUserStreamProbe(
+      { apiKey: "fixture-key", apiSecret: "fixture-secret" },
+      (async (_url: string, init?: RequestInit) => new Response(
+        init?.method === "POST" ? JSON.stringify({ listenKey: "listen-key" }) : "{}",
+        { status: 200 },
+      )) as typeof fetch,
+      ((url: string) => new LifecycleSocket(url, event) as any),
+      Date.now,
+      { timeoutMs: 50, observationMs: 5 },
+    );
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected Futures lifecycle failure");
+}
 
 function activeBinding(bindingVersion = 1, uidSnapshot = IDENTITY.uidSnapshot): RwaBinanceProductionSelfTestBinding {
   return {
@@ -306,13 +353,14 @@ test("unexpected failures expose only a stable diagnostic category and non-empty
   assert.deepEqual(Object.keys(receipt).sort(), [
     "category", "composeProject", "connectivity_failed_detail", "deploymentEnvironment", "mutation", "provider", "readOnly",
     "receiptType", "releaseManifestRevision", "runtimeIdentityMatchesManifest",
-    "runtimeRevision", "schemaVersion", "status", "streamProbeStage",
+    "runtimeRevision", "schemaVersion", "status", "streamProbeLifecycle", "streamProbeStage",
   ].sort());
   assert.equal(receipt.schemaVersion, 2);
   assert.equal(receipt.runtimeIdentityMatchesManifest, true);
   assert.equal(receipt.mutation, false);
   assert.equal(receipt.streamProbeStage, null);
   assert.equal(receipt.connectivity_failed_detail, null);
+  assert.equal(receipt.streamProbeLifecycle, null);
   assert.doesNotMatch(serialized, /secret|API-KEY-123/u);
 });
 
@@ -355,6 +403,7 @@ test("stream probe failure emits a non-empty redacted zero-mutation diagnostic r
   assert.equal(receipt.category, "stream_probe");
   assert.equal(receipt.streamProbeStage, "connectivity_failed");
   assert.equal(receipt.connectivity_failed_detail, null);
+  assert.equal(receipt.streamProbeLifecycle, null);
   assert.equal(receipt.readOnly, true);
   assert.equal(receipt.provider, "binance");
   assert.equal(receipt.runtimeRevision, REVISION);
@@ -401,8 +450,71 @@ test("connectivity diagnostics expose only a stable redacted detail", async () =
     assert.equal(receipt.category, "stream_probe");
     assert.equal(receipt.streamProbeStage, "connectivity_failed");
     assert.equal(receipt.connectivity_failed_detail, expected);
+    assert.equal(receipt.streamProbeLifecycle, null);
     assert.equal(receipt.mutation, false);
     assert.doesNotMatch(JSON.stringify(receipt), /raw|fixture-key|fixture-secret/u);
+  }
+});
+
+test("Futures lifecycle diagnostic propagates into the exact Gate 1 schema v2 receipt", async () => {
+  const cases = [
+    {
+      event: "error" as const,
+      expected: { error: { name: "TypeError", code: "ECONNRESET" }, close: null },
+    },
+    {
+      event: "close" as const,
+      expected: { error: null, close: { code: 1006 } },
+    },
+  ];
+  for (const item of cases) {
+    const probeError = await captureFuturesLifecycleFailure(item.event);
+    let captured: unknown;
+    const providerMutations: string[] = [];
+    try {
+      await runRwaProviderIdentityPreflight({
+        loadConfig: () => ({ deploymentEnvironment: "production", composeProject: "xingheng" }),
+        serverKillSwitch: () => "true",
+        expectedRevision: () => REVISION,
+        releaseManifestRevision: () => REVISION,
+        userId: () => "USR-FIXTURE",
+        createStore: () => ({
+          readCredentialBinding: async () => activeBinding(),
+          loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+        }),
+        createClient: () => ({
+          validateAccess: async () => IDENTITY,
+          readPreflightSnapshot: async () => SNAPSHOT,
+          placeOrder: async () => { providerMutations.push("placeOrder"); },
+          cancelOrder: async () => { providerMutations.push("cancelOrder"); },
+          transfer: async () => { providerMutations.push("transfer"); },
+          withdraw: async () => { providerMutations.push("withdraw"); },
+          setLeverage: async () => { providerMutations.push("setLeverage"); },
+        }),
+        probeStreams: async () => { throw probeError; },
+      });
+    } catch (error) {
+      captured = error;
+    }
+    const receipt = providerIdentityPreflightFailureReceipt(captured, {
+      XINGHENG_EXPECTED_REVISION: REVISION,
+      XINGHENG_RELEASE_MANIFEST_REVISION: REVISION,
+    });
+    assert.equal(receipt.schemaVersion, 2);
+    assert.equal(receipt.category, "stream_probe");
+    assert.equal(receipt.readOnly, true);
+    assert.equal(receipt.mutation, false);
+    assert.deepEqual(receipt.streamProbeLifecycle, item.expected);
+    assert.deepEqual(Object.keys(receipt.streamProbeLifecycle!).sort(), ["close", "error"]);
+    assert.deepEqual(
+      Object.keys(receipt.streamProbeLifecycle!.error ?? receipt.streamProbeLifecycle!.close!).sort(),
+      item.event === "error" ? ["code", "name"] : ["code"],
+    );
+    assert.deepEqual(providerMutations, []);
+    assert.doesNotMatch(
+      JSON.stringify(receipt),
+      /message|reason|listen-key|fixture-key|fixture-secret|provider response|apiKey|secret/u,
+    );
   }
 });
 
