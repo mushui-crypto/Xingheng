@@ -1252,33 +1252,31 @@ test("release Compose and running containers require exact mount mappings", () =
   }
 });
 
-test("release volume mount counts distinguish legacy preflight from verified runtime", () => {
-  const preflight = {
+test("release volume mount counts require the verified runtime during deploy preflight", () => {
+  const verifiedRuntime = {
     xingheng_sqlite_data: 1,
     xingheng_strategy_data: 1,
     xingheng_sqlite_backups: 1,
-    xingheng_rwa_automation_data: 0,
+    xingheng_rwa_automation_data: 1,
     xingheng_rwa_automation_backups: 0,
-    xingheng_rwa_automation_lock: 0,
+    xingheng_rwa_automation_lock: 1,
     xingheng_caddy_data: 1,
     xingheng_caddy_config: 1,
   };
-  assert.equal(validateReleaseVolumeMountCounts("preflight", preflight), true);
-  assert.equal(validateReleaseVolumeMountCounts("runtime", {
-    ...preflight,
-    xingheng_rwa_automation_data: 1,
-    xingheng_rwa_automation_lock: 1,
-  }), true);
+  assert.equal(validateReleaseVolumeMountCounts("preflight", verifiedRuntime), true);
+  assert.equal(validateReleaseVolumeMountCounts("runtime", verifiedRuntime), true);
   assert.equal(validateReleaseVolumeMountCounts("migration", {
-    ...preflight,
+    ...verifiedRuntime,
     xingheng_sqlite_data: 0,
     xingheng_strategy_data: 0,
     xingheng_sqlite_backups: 0,
+    xingheng_rwa_automation_data: 0,
+    xingheng_rwa_automation_lock: 0,
   }), true);
   for (const counts of [
-    { ...preflight, xingheng_sqlite_data: 0 },
-    { ...preflight, xingheng_sqlite_data: 2 },
-    { ...preflight, unexpected: 1 },
+    { ...verifiedRuntime, xingheng_rwa_automation_data: 0 },
+    { ...verifiedRuntime, xingheng_rwa_automation_data: 2 },
+    { ...verifiedRuntime, unexpected: 1 },
   ]) {
     assert.throws(
       () => validateReleaseVolumeMountCounts("preflight", counts),
