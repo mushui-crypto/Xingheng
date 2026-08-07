@@ -20,6 +20,7 @@ import test from "node:test";
 import {
   ReleasePromotionTransaction,
   assertPromotionStateAllowsProduction,
+  assertPromotionStateAllowsProductionWithTransition,
   validateTrustedPromotionArguments,
 } from "./releasePromotionTransaction.mjs";
 import { ReleaseLifecycleTransactionStore } from "./releaseLifecycleTransaction.mjs";
@@ -28,6 +29,8 @@ import {
   secureArtifactReceipt,
 } from "./trustedReleaseCandidate.mjs";
 import { readValidatedPromotionHelperReceipt } from "./trustedDockerRuntime.mjs";
+import { assertCapitalTestWindowLaunchIdentity } from "./capitalTestWindowLaunchIdentity.mjs";
+import { productionSelfTestPermitDigest } from "./productionSelfTestPermitInstall.mjs";
 
 const OLD_REVISION = "1".repeat(40);
 const NEW_REVISION = "2".repeat(40);
@@ -71,6 +74,60 @@ test("completed promotion accepts only its verified prepared-to-active lifecycle
       assertPromotionStateAllowsProduction(fixture.guardOptions).state,
       "PROMOTION_COMPLETED",
     );
+  });
+});
+
+test("stable promotion identity does not consult an alternate transition validator", () => {
+  withFixture((fixture) => {
+    fixture.transaction.promote(fixture.expected);
+    assert.equal(assertPromotionStateAllowsProductionWithTransition(
+      () => { throw new Error("alternate transition validator must not run"); },
+      fixture.guardOptions,
+    ).state, "PROMOTION_COMPLETED");
+  });
+});
+
+test("completed promotion delegates only an otherwise-invalid identity transition", () => {
+  withFixture((fixture) => {
+    const completed = fixture.transaction.promote(fixture.expected);
+    const environment = Buffer.from("PERMIT_TRANSITION=true\n", "utf8");
+    replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
+    let observed;
+    assert.equal(assertPromotionStateAllowsProductionWithTransition((transition) => {
+      observed = transition;
+      return true;
+    }, fixture.guardOptions).state, "PROMOTION_COMPLETED");
+    assert.equal(observed.promoted.environmentSha256, completed.newCanonical.environmentSha256);
+    assert.equal(observed.current.environmentSha256, sha256(environment));
+  });
+});
+
+test("Capital Test Window accepts active lifecycle plus Permit environment transition", () => {
+  withFixture((fixture) => {
+    activateFixtureLifecycle(fixture);
+    const completed = JSON.parse(readFileSync(fixture.statePath, "utf8"));
+    const environment = Buffer.from("PERMIT_TRANSITION=true\n", "utf8");
+    replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
+    assert.equal(assertCapitalTestWindowLaunchIdentity({
+      promotionOptions: fixture.guardOptions,
+      readReceipt: () => permitTransitionReceipt(completed.newCanonical, sha256(environment)),
+    }).state, "PROMOTION_COMPLETED");
+  });
+});
+
+test("Capital Test Window rejects Permit transition with invalid lifecycle continuity", () => {
+  withFixture((fixture) => {
+    const lifecycle = activateFixtureLifecycle(fixture);
+    const completed = JSON.parse(readFileSync(fixture.statePath, "utf8"));
+    const environment = Buffer.from("PERMIT_TRANSITION=true\n", "utf8");
+    replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
+    mutateCanonicalJson(lifecycle.pointerPath, 0o600, (value) => {
+      value.daemon.id = "invalid-lifecycle-daemon";
+    });
+    assert.throws(() => assertCapitalTestWindowLaunchIdentity({
+      promotionOptions: fixture.guardOptions,
+      readReceipt: () => permitTransitionReceipt(completed.newCanonical, sha256(environment)),
+    }), /lifecycle identity|lifecycle continuity/u);
   });
 });
 
@@ -633,6 +690,56 @@ function activateFixtureLifecycle(fixture) {
       "environment-snapshots",
       pointer.environmentArtifact.fileName,
     ),
+  };
+}
+
+function permitTransitionReceipt(promoted, envAfterSha256) {
+  const permit = {
+    permitId: "4".repeat(32),
+    ownerUserId: "USR-TEST",
+    accountBindingSha256: "5".repeat(64),
+    actionScope: ["READ", "TRADE"],
+    executionMode: "single_connectivity_smoke",
+    authorizationDigest: "6".repeat(64),
+    approvedCapitalUsd: 40,
+    expiresAt: "2026-08-07T12:00:00.000Z",
+    revision: promoted.revision,
+  };
+  permit.digest = productionSelfTestPermitDigest(permit);
+  const web = permitRuntimeComponent("7", promoted.images.web, promoted.revision);
+  return {
+    status: "success",
+    envBeforeSha256: promoted.environmentSha256,
+    envAfterSha256,
+    releaseIdentity: {
+      releaseRevision: promoted.revision,
+      releaseTreeSha256: promoted.releaseTreeSha256,
+      releaseManifestSha256: promoted.manifestSha256,
+      apiImageDigest: promoted.images.api,
+      webImageDigest: promoted.images.web,
+    },
+    permit,
+    runtimeBefore: {
+      capturedAt: "2026-08-07T10:00:00.000Z",
+      api: permitRuntimeComponent("8", promoted.images.api, promoted.revision),
+      web,
+    },
+    runtimeAfter: {
+      capturedAt: "2026-08-07T10:01:00.000Z",
+      api: permitRuntimeComponent("9", promoted.images.api, promoted.revision),
+      web: structuredClone(web),
+    },
+  };
+}
+
+function permitRuntimeComponent(containerCharacter, imageDigest, revision) {
+  return {
+    containerId: containerCharacter.repeat(64),
+    imageDigest,
+    revision,
+    startedAt: "2026-08-07T09:00:00.000Z",
+    running: true,
+    health: "healthy",
   };
 }
 
