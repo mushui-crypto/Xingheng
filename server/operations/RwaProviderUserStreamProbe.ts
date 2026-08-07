@@ -11,6 +11,30 @@ const futuresEvents = new Set([
   "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "ACCOUNT_CONFIG_UPDATE", "MARGIN_CALL",
 ]);
 
+export type ProviderUserStreamProbeFailureStage =
+  | "connectivity_failed"
+  | "auth_handshake_failed"
+  | "subscription_failed"
+  | "no_stream_data"
+  | "heartbeat_timeout";
+
+export type ProviderUserStreamConnectivityFailureDetail =
+  | "dns_resolution_failed"
+  | "tcp_connection_failed"
+  | "tls_handshake_failed"
+  | "endpoint_configuration_missing";
+
+export type ProviderUserStreamLifecycleDiagnostic = Readonly<{
+  error: Readonly<{ name: string; code: string | null }> | null;
+  close: Readonly<{ code: number | null }> | null;
+}>;
+
+const dnsFailureCodes = new Set(["EAI_AGAIN", "EAI_FAIL", "EAI_NODATA", "ENODATA", "ENOTFOUND"]);
+const tcpFailureCodes = new Set([
+  "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "ETIMEDOUT",
+]);
+const endpointFailureCodes = new Set(["ERR_INVALID_URL", "ERR_MISSING_ARGS"]);
+
 export async function runRwaProviderUserStreamProbe(
   credentials: RwaBinanceCredentials,
   fetchFn: typeof fetch = fetch,
@@ -92,17 +116,56 @@ export function providerUserStreamProbeErrorCategory(error: unknown) {
     : "provider_stream_probe_failed";
 }
 
+export function providerUserStreamProbeFailureStage(
+  error: unknown,
+): ProviderUserStreamProbeFailureStage {
+  const category = providerUserStreamProbeErrorCategory(error);
+  if ([
+    "spot_stream_error", "spot_stream_closed", "futures_stream_error", "futures_stream_closed",
+  ].includes(category)) return "connectivity_failed";
+  if ([
+    "spot_subscribe_ack_invalid", "futures_listen_key_create_failed", "futures_listen_key_missing",
+  ].includes(category)) return "auth_handshake_failed";
+  if ([
+    "spot_stream_unknown_payload", "futures_listen_key_expired", "futures_stream_unknown_payload",
+    "futures_listen_key_close_failed", "futures_listen_key_cleanup_failed",
+  ].includes(category)) return "subscription_failed";
+  if (category === "provider_stream_probe_timeout") return "no_stream_data";
+  if (category === "futures_listen_key_keepalive_failed") return "heartbeat_timeout";
+  return "connectivity_failed";
+}
+
+export function providerUserStreamProbeConnectivityFailureDetail(
+  error: unknown,
+): ProviderUserStreamConnectivityFailureDetail | null {
+  if (error instanceof RwaProviderUserStreamProbeError) {
+    return error.connectivityFailedDetail;
+  }
+  return connectivityFailureDetail(error);
+}
+
+export function providerUserStreamProbeLifecycleDiagnostic(
+  error: unknown,
+): ProviderUserStreamLifecycleDiagnostic | null {
+  return error instanceof RwaProviderUserStreamProbeError
+    ? error.lifecycleDiagnostic
+    : null;
+}
+
 function observeSpot(socket: WebSocket, id: string, observationMs: number, subscribe: () => void) {
   return new Promise<void>((resolve, reject) => {
     let acknowledged = false;
     let timer: NodeJS.Timeout | null = null;
-    const fail = (category: string) => {
+    const fail = (
+      category: string,
+      connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    ) => {
       if (timer) clearTimeout(timer);
-      reject(failure(category));
+      reject(failure(category, connectivityFailedDetail));
     };
     socket.once("open", subscribe);
-    socket.once("error", () => fail("spot_stream_error"));
-    socket.once("close", () => fail("spot_stream_closed"));
+    socket.once("error", (error) => fail("spot_stream_error", connectivityFailureDetail(error)));
+    socket.once("close", () => fail("spot_stream_closed", "tcp_connection_failed"));
     socket.on("message", (data) => {
       try {
         const value = record(JSON.parse(String(data)));
@@ -123,16 +186,28 @@ function observeSpot(socket: WebSocket, id: string, observationMs: number, subsc
 function observeFutures(socket: WebSocket, observationMs: number) {
   return new Promise<void>((resolve, reject) => {
     let timer: NodeJS.Timeout | null = null;
-    const fail = (category: string) => {
+    const fail = (
+      category: string,
+      connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+      lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
+    ) => {
       if (timer) clearTimeout(timer);
-      reject(failure(category));
+      reject(failure(category, connectivityFailedDetail, lifecycleDiagnostic));
     };
     socket.once("open", () => {
       timer = setTimeout(resolve, observationMs);
       timer.unref();
     });
-    socket.once("error", () => fail("futures_stream_error"));
-    socket.once("close", () => fail("futures_stream_closed"));
+    socket.once("error", (error) => fail(
+      "futures_stream_error",
+      connectivityFailureDetail(error),
+      errorLifecycleDiagnostic(error),
+    ));
+    socket.once("close", (code) => fail(
+      "futures_stream_closed",
+      "tcp_connection_failed",
+      closeLifecycleDiagnostic(code),
+    ));
     socket.on("message", (data) => {
       try {
         const value = record(JSON.parse(String(data)));
@@ -197,10 +272,92 @@ function positiveDuration(value: number | undefined, fallback: number) {
   return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
-function failure(category: string) {
-  return new RwaProviderUserStreamProbeError(category);
+function connectivityFailureDetail(
+  error: unknown,
+): ProviderUserStreamConnectivityFailureDetail | null {
+  let code: unknown = null;
+  try {
+    code = error !== null && typeof error === "object"
+      ? Reflect.get(error, "code")
+      : null;
+  } catch {
+    return null;
+  }
+  if (typeof code !== "string") return null;
+  if (dnsFailureCodes.has(code)) return "dns_resolution_failed";
+  if (tcpFailureCodes.has(code)) return "tcp_connection_failed";
+  if (endpointFailureCodes.has(code)) return "endpoint_configuration_missing";
+  if (
+    code.startsWith("ERR_TLS_")
+    || code.startsWith("ERR_SSL_")
+    || code.startsWith("CERT_")
+    || code.startsWith("UNABLE_TO_")
+    || ["DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"].includes(code)
+  ) return "tls_handshake_failed";
+  return null;
+}
+
+function failure(
+  category: string,
+  connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+  lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
+) {
+  return new RwaProviderUserStreamProbeError(
+    category,
+    connectivityFailedDetail,
+    lifecycleDiagnostic,
+  );
+}
+
+function errorLifecycleDiagnostic(error: unknown): ProviderUserStreamLifecycleDiagnostic {
+  let name: unknown = null;
+  let code: unknown = null;
+  try {
+    if (error !== null && typeof error === "object") {
+      name = Reflect.get(error, "name");
+      code = Reflect.get(error, "code");
+    }
+  } catch {
+    name = null;
+    code = null;
+  }
+  return Object.freeze({
+    error: Object.freeze({
+      name: safeErrorName(name),
+      code: safeErrorCode(code),
+    }),
+    close: null,
+  });
+}
+
+function closeLifecycleDiagnostic(code: unknown): ProviderUserStreamLifecycleDiagnostic {
+  return Object.freeze({
+    error: null,
+    close: Object.freeze({
+      code: Number.isInteger(code) && Number(code) >= 0 && Number(code) <= 65_535
+        ? Number(code)
+        : null,
+    }),
+  });
+}
+
+function safeErrorName(value: unknown) {
+  return typeof value === "string" && [
+    "AggregateError", "Error", "EvalError", "RangeError", "ReferenceError",
+    "SyntaxError", "TypeError", "URIError",
+  ].includes(value) ? value : "Error";
+}
+
+function safeErrorCode(value: unknown) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/u.test(value)
+    ? value
+    : null;
 }
 
 class RwaProviderUserStreamProbeError extends Error {
-  constructor(readonly category: string) { super(category); }
+  constructor(
+    readonly category: string,
+    readonly connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    readonly lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
+  ) { super(category); }
 }

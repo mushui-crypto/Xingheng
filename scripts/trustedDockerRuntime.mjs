@@ -47,6 +47,7 @@ const SAFE_CHILD_KEYS = Object.freeze([
   "XINGHENG_API_IMAGE",
   "XINGHENG_WEB_IMAGE",
   "XINGHENG_STRATEGY_TOOLS_IMAGE",
+  "XINGHENG_RELEASE_MANIFEST_REVISION",
   "XINGHENG_COMPOSE_ENV_FD",
   "RWA_PROVIDER_PREFLIGHT_USER_ID",
   "RWA_AUTOMATION_VERIFY_FILE",
@@ -62,6 +63,8 @@ const REQUIRED_TOOLS = Object.freeze({
   docker: PRODUCTION_DOCKER_CLI,
   compose: PRODUCTION_COMPOSE_PLUGIN,
 });
+const permitPreparedDockerContexts = new WeakSet();
+export const PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD = 8;
 
 export function assertNoDockerControlEnvironment(source = process.env) {
   const key = Object.keys(source).find((name) =>
@@ -128,6 +131,77 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
     .includes(source.XINGHENG_OPERATION_LOCK_CONTEXT)) {
     assertPromotionStateAllowsProduction();
   }
+  return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
+}
+
+export function openTrustedPermitPreparedDockerRuntime(kind, source, context) {
+  if (!permitPreparedDockerContexts.has(context)) {
+    throw new Error("Permit prepared transient Docker context was not issued by the trusted validator");
+  }
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
+  return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
+}
+
+export function createTrustedPermitPreparedDockerContext(context, source = process.env) {
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
+  permitPreparedDockerContexts.add(context);
+  return context;
+}
+
+export function serializeTrustedPermitPreparedDockerContext(context, source = process.env) {
+  if (!permitPreparedDockerContexts.has(context)) {
+    throw new Error("Permit prepared transient Docker context was not issued by the trusted validator");
+  }
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
+  return Buffer.from(`${canonicalContextJson(context)}\n`);
+}
+
+export function restoreTrustedPermitPreparedDockerContext(
+  expectedContext,
+  source = process.env,
+  descriptorFd = PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD,
+) {
+  if (!permitPreparedDockerContexts.has(expectedContext)) {
+    throw new Error("Permit prepared transient expected context was not issued by the trusted validator");
+  }
+  if (descriptorFd !== PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD
+    || source.XINGHENG_PERMIT_PREPARED_TRANSIENT_FD !== String(descriptorFd)) {
+    throw new Error("Permit prepared transient descriptor is not authorized");
+  }
+  const testMode = testFixture(source) !== null;
+  const before = fstatSync(descriptorFd);
+  const expectedUid = testMode ? (process.getuid?.() ?? -1) : 0;
+  const expectedGid = testMode ? (process.getgid?.() ?? -1) : 0;
+  if (!before.isFile() || before.uid !== expectedUid || before.gid !== expectedGid
+    || (before.mode & 0o777) !== 0o400 || before.size < 2 || before.size > MAX_RECEIPT_BYTES
+    || (!testMode && before.nlink !== 0) || (testMode && ![0, 1].includes(before.nlink))) {
+    throw new Error("Permit prepared transient descriptor boundary is invalid");
+  }
+  const bytes = readDescriptorBytes(descriptorFd, before.size);
+  try {
+    const after = fstatSync(descriptorFd);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.uid !== before.uid || after.gid !== before.gid || after.nlink !== before.nlink
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+      || (after.mode & 0o777) !== (before.mode & 0o777)) {
+      throw new Error("Permit prepared transient descriptor changed while reading");
+    }
+    const restored = Object.freeze(JSON.parse(bytes.toString("utf8")));
+    if (canonicalContextJson(restored) !== canonicalContextJson(expectedContext)) {
+      throw new Error("Permit prepared transient descriptor identity mismatch");
+    }
+    assertPermitPreparedTransientRuntimeContext(restored, source, !testMode);
+    permitPreparedDockerContexts.add(restored);
+    return restored;
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+function openTrustedDockerRuntimeAfterLifecycleValidation(kind, source) {
+  if (!["docker", "compose"].includes(kind)) {
+    throw new Error("trusted Docker runtime kind is invalid");
+  }
   const fixture = testFixture(source);
   const trustReceipt = fixture === null ? activeTrustReceipt(source) : null;
   if (fixture === null && process.getuid?.() !== 0) {
@@ -160,6 +234,71 @@ export function openTrustedDockerRuntime(kind, source = process.env) {
   } catch (error) {
     closeSync(executable.fd);
     throw error;
+  }
+}
+
+function assertPermitPreparedTransientRuntimeContext(context, source, validateDescriptors) {
+  const sha256 = /^[a-f0-9]{64}$/u;
+  const operationId = /^[a-f0-9]{32}$/u;
+  const identityKeys = ["dev", "ino", "size"];
+  const contextKeys = [
+    "attemptReceiptSha256", "authorizationManifestSha256", "environmentAfterSha256",
+    "environmentBeforeSha256", "kind", "launcherIdentity", "operationId",
+    "operationLockContext", "operationLocks", "receiptSha256", "releaseIdentitySha256",
+    "schemaVersion", "wrapperIdentity",
+  ];
+  const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+  const validIdentity = (value) => exactKeys(value, identityKeys)
+    && identityKeys.every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
+  const validLocks = Array.isArray(context?.operationLocks)
+    && context.operationLocks.length === 2
+    && context.operationLocks.every((lock, index) => exactKeys(
+      lock,
+      ["dev", "gid", "ino", "mode", "path", "uid"],
+    ) && Number.isSafeInteger(lock.dev) && Number.isSafeInteger(lock.ino)
+      && lock.uid === 0 && lock.gid === 0 && lock.mode === 0o600
+      && lock.path === [
+        "/run/lock/xingheng/release-global.lock",
+        "/run/lock/xingheng/production.lock",
+      ][index]);
+  if (!exactKeys(context, contextKeys)
+    || context.schemaVersion !== 1
+    || context.kind !== "permit-prepared-transient"
+    || !operationId.test(context.operationId ?? "")
+    || context.operationLockContext !== "production"
+    || source.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+    || source.XINGHENG_TRUSTED_OPERATION_ENTRY !== "install-production-self-test-permit.sh"
+    || source.XINGHENG_PERMIT_INSTALL_OPERATION_ID !== context.operationId
+    || !sha256.test(context.receiptSha256 ?? "")
+    || !sha256.test(context.attemptReceiptSha256 ?? "")
+    || !sha256.test(context.environmentBeforeSha256 ?? "")
+    || !sha256.test(context.environmentAfterSha256 ?? "")
+    || context.environmentBeforeSha256 === context.environmentAfterSha256
+    || !sha256.test(context.releaseIdentitySha256 ?? "")
+    || !sha256.test(context.authorizationManifestSha256 ?? "")
+    || !validIdentity(context.wrapperIdentity)
+    || !validIdentity(context.launcherIdentity)
+    || !validLocks) {
+    throw new Error("Permit prepared transient Docker context is invalid");
+  }
+  if (validateDescriptors) {
+    const descriptors = [fstatSync(3), fstatSync(4), fstatSync(6), fstatSync(7)];
+    const expected = [
+      context.operationLocks[0], context.operationLocks[1],
+      context.wrapperIdentity, context.launcherIdentity,
+    ];
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const descriptor = descriptors[index];
+      const identity = expected[index];
+      if (!descriptor.isFile() || descriptor.nlink !== 1
+        || descriptor.dev !== identity.dev || descriptor.ino !== identity.ino
+        || (index >= 2 && descriptor.size !== identity.size)
+        || descriptor.uid !== 0 || descriptor.gid !== 0
+        || (index < 2 && (descriptor.mode & 0o777) !== 0o600)) {
+        throw new Error("Permit prepared transient trusted descriptor identity mismatch");
+      }
+    }
   }
 }
 
@@ -348,6 +487,27 @@ export function execTrustedDockerSync(args, options = {}) {
     validateTrustedReleaseBuildDockerArguments(args);
   }
   const runtime = openTrustedDockerRuntime("docker", process.env);
+  try {
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
+    const baseStdio = options.stdio ?? ["inherit", "inherit", "inherit"];
+    if (!Array.isArray(baseStdio) || baseStdio.length !== 3) {
+      throw new Error("trusted Docker stdio boundary is invalid");
+    }
+    const output = execFileSync(trustedExecutableInvocation(runtime, 3), args, {
+      ...options,
+      env: runtime.environment,
+      stdio: [...baseStdio, runtime.fd],
+    });
+    verifyTrustedDockerRuntime(runtime);
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "consumed")}\n`);
+    return output;
+  } finally {
+    runtime.close();
+  }
+}
+
+export function execTrustedPermitPreparedDockerSync(args, context, options = {}) {
+  const runtime = openTrustedPermitPreparedDockerRuntime("docker", process.env, context);
   try {
     process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
     const baseStdio = options.stdio ?? ["inherit", "inherit", "inherit"];
@@ -935,6 +1095,13 @@ function canonicalJson(value) {
   return JSON.stringify(value, Object.keys(value).sort());
 }
 
+function canonicalContextJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalContextJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalContextJson(value[key])}`).join(",")}}`;
+}
+
 function sha256Text(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -951,5 +1118,21 @@ function sha256Descriptor(fd, size) {
     return createHash("sha256").update(bytes).digest("hex");
   } finally {
     bytes.fill(0);
+  }
+}
+
+function readDescriptorBytes(fd, size) {
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  try {
+    while (offset < size) {
+      const count = readSync(fd, bytes, offset, size - offset, offset);
+      if (count === 0) throw new Error("Permit prepared transient descriptor was truncated");
+      offset += count;
+    }
+    return bytes;
+  } catch (error) {
+    bytes.fill(0);
+    throw error;
   }
 }

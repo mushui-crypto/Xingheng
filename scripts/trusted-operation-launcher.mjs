@@ -26,6 +26,7 @@ import {
   assertPromotionStateAllowsProduction,
   validateTrustedPromotionArguments,
 } from "./releasePromotionTransaction.mjs";
+import { assertCapitalTestWindowLaunchIdentity } from "./capitalTestWindowLaunchIdentity.mjs";
 
 const operation = process.argv[2];
 const entryArgument = process.argv[3];
@@ -56,7 +57,11 @@ try {
     process.env.XINGHENG_OPERATION_LOCK_CONTEXT = operation;
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
   } else {
-    assertPromotionStateAllowsProduction();
+    if (operation === "production" && entryArgument === "scripts/capital-test-window.sh") {
+      assertCapitalTestWindowLaunchIdentity();
+    } else {
+      assertPromotionStateAllowsProduction();
+    }
   }
   const entry = realpathSync(resolve(root, entryArgument));
   const entryName = entry.slice(`${root}/scripts/`.length);

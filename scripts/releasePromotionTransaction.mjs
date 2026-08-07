@@ -477,6 +477,20 @@ export class ReleasePromotionTransaction {
 }
 
 export function assertPromotionStateAllowsProduction(options = {}) {
+  return assertPromotionStateAllowsProductionInternal(options, null);
+}
+
+export function assertPromotionStateAllowsProductionWithTransition(
+  validateIdentityTransition,
+  options = {},
+) {
+  if (typeof validateIdentityTransition !== "function") {
+    throw new Error("completed promotion transition validator is invalid");
+  }
+  return assertPromotionStateAllowsProductionInternal(options, validateIdentityTransition);
+}
+
+function assertPromotionStateAllowsProductionInternal(options, validateIdentityTransition) {
   const statePath = resolve(options.statePath ?? PROMOTION_RECORD);
   if (!existsNoFollow(statePath)) return Object.freeze({ state: "IDLE" });
   const uid = options.expectedUid ?? 0;
@@ -504,7 +518,20 @@ export function assertPromotionStateAllowsProduction(options = {}) {
   const activatedCanonical = !exactCanonical
     && canonicalWithoutLifecycle(record.newCanonical) === canonicalWithoutLifecycle(current)
     && validateActivatedLifecycleTransition(paths, record.newCanonical, current, trusted, uid, gid);
-  if ((!exactCanonical && !activatedCanonical)
+  const recognizedTransition = !exactCanonical && !activatedCanonical
+    && validateIdentityTransition?.(Object.freeze({
+      promoted: record.newCanonical,
+      current,
+      validateActivatedLifecycle: () => validateActivatedLifecycleTransition(
+        paths,
+        record.newCanonical,
+        current,
+        trusted,
+        uid,
+        gid,
+      ),
+    })) === true;
+  if ((!exactCanonical && !activatedCanonical && !recognizedTransition)
     || record.trustReceiptSha256 !== trusted.receiptSha256
     || record.helperReceiptSha256 !== helper.receiptSha256
     || trusted.releaseRoot !== paths.canonicalRoot

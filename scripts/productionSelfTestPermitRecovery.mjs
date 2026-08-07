@@ -41,12 +41,14 @@ const LIFECYCLE_OPERATIONS = "/var/lib/xingheng/release-lifecycle/operations";
 const WINDOW_ROOT = "/var/lib/xingheng/capital-test-window";
 const TRUSTED_LAUNCHER = "/opt/xingheng-release/code/scripts/trusted-operation-launcher.mjs";
 const OPERATIONS_DIRECTORY = "operations";
+const COMPLETED_DIRECTORY = "completed";
 const JOURNAL_FILE = "journal.json";
 const TERMINAL_FILE = "terminal-receipt.json";
 const ARCHIVED_RECEIPT = "legacy-receipt.json";
 const ARCHIVED_ATTEMPT = "legacy-attempt";
 const PERMIT_PREFIX = "RWA_BINANCE_PRODUCTION_SELF_TEST_";
 const LEGACY_EXECUTION_MODE = "single_funding_rate_arbitrage_round";
+const CURRENT_EXECUTION_MODE = "single_connectivity_smoke";
 const HEX_32 = /^[a-f0-9]{32}$/u;
 const HEX_40 = /^[a-f0-9]{40}$/u;
 const HEX_64 = /^[a-f0-9]{64}$/u;
@@ -66,9 +68,13 @@ const RECEIPT_KEYS = [
   "runtimeBefore", "schemaVersion", "status", "updatedAt",
 ];
 const ATTEMPT_KEYS = RECEIPT_KEYS.filter((key) => key !== "attemptReceiptSha256");
-const PERMIT_KEYS = [
+const LEGACY_PERMIT_KEYS = [
   "accountBindingSha256", "actionScope", "approvedCapitalUsd", "authorizationDigest",
   "digest", "expiresAt", "ownerUserId", "permitId", "revision",
+];
+const CURRENT_PERMIT_KEYS = [
+  "accountBindingSha256", "actionScope", "approvedCapitalUsd", "authorizationDigest",
+  "digest", "executionMode", "expiresAt", "ownerUserId", "permitId", "revision",
 ];
 const RELEASE_IDENTITY_KEYS = [
   "apiImageDigest", "gitTreeSha", "lifecycleEstablishedAt", "lifecycleOperationId",
@@ -108,9 +114,16 @@ export function recoverHistoricalFailedPermitReceipt(options = {}) {
   );
   const paths = recoveryPaths(options);
   const owner = expectedOwner(options);
-  const existingOperation = findRecoveryOperation(paths, owner, options);
+  let existingOperation = findRecoveryOperation(paths, owner, options);
+  if (completedRecoveryOperationIds(paths, owner, options).includes(operationId)) {
+    throw new Error("Permit recovery operation ID has already been archived");
+  }
   if (existingOperation && existingOperation.operationId !== operationId) {
-    throw new Error("A different Permit recovery operation already exists");
+    if (existingOperation.journal?.state !== "completed") {
+      throw new Error("A different Permit recovery operation already exists");
+    }
+    archiveCompletedRecoveryOperation(existingOperation, paths, owner, options);
+    existingOperation = null;
   }
 
   let journal = existingOperation?.journal ?? null;
@@ -128,7 +141,7 @@ export function recoverHistoricalFailedPermitReceipt(options = {}) {
   const sourceAttemptPath = exists(resolve(paths.attemptsRoot, journal?.legacyOperationId ?? ""))
     ? resolve(paths.attemptsRoot, journal?.legacyOperationId ?? "")
     : archivedAttemptPath;
-  const legacy = readLegacyFailedReceipt(sourceReceiptPath, {
+  const legacy = readFailedReceipt(sourceReceiptPath, {
     ...options,
     expectedSha256: expectedReceiptSha256,
     attemptPath: journal ? sourceAttemptPath : undefined,
@@ -138,7 +151,7 @@ export function recoverHistoricalFailedPermitReceipt(options = {}) {
     : archivedAttemptPath;
   assertLegacyAttemptSet(paths.attemptsRoot, legacy.receipt.operationId, legacyAttemptPath === archivedAttemptPath);
   const sourceAttemptIdentity = directoryIdentity(legacyAttemptPath, 0o700, options);
-  validateLegacyAttemptDirectory(legacyAttemptPath, legacy.receipt, options);
+  validateAttemptDirectory(legacyAttemptPath, legacy.receipt, options);
   const closedState = validateClosedState(
     options.closedState ?? captureProductionClosedState(legacy.receipt.request.ownerUserId, paths, options),
   );
@@ -173,7 +186,7 @@ export function recoverHistoricalFailedPermitReceipt(options = {}) {
     renameWithinFilesystem(paths.receiptPath, archivedReceiptPath, options);
     options.hooks?.afterReceiptArchived?.();
   }
-  const archivedReceipt = readLegacyFailedReceipt(archivedReceiptPath, {
+  const archivedReceipt = readFailedReceipt(archivedReceiptPath, {
     ...options,
     expectedSha256: journal.sourceReceiptSha256,
     attemptPath: legacyAttemptPath,
@@ -191,7 +204,7 @@ export function recoverHistoricalFailedPermitReceipt(options = {}) {
     renameWithinFilesystem(currentAttemptPath, archivedAttemptPath, options);
     options.hooks?.afterAttemptArchived?.();
   }
-  validateLegacyAttemptDirectory(archivedAttemptPath, legacy.receipt, options);
+  validateAttemptDirectory(archivedAttemptPath, legacy.receipt, options);
   const archivedAttemptIdentity = directoryIdentity(archivedAttemptPath, 0o700, options);
   if (!sameIdentity(archivedAttemptIdentity, journal.sourceAttemptIdentity)) {
     throw new Error("Archived Permit attempt identity mismatch");
@@ -250,19 +263,24 @@ export function assertCompletedPermitRecovery(options = {}) {
   if (journal.state !== "completed" || !HEX_64.test(journal.terminalReceiptSha256 ?? "")) {
     throw new Error("Permit recovery journal is incomplete");
   }
+  if (exists(paths.receiptPath)) throw new Error("Permit recovery left the legacy receipt active");
+  assertAttemptsRootEmpty(paths.attemptsRoot);
+  validateCompletedOperationEvidence(operationRoot, journal, options);
+  return true;
+}
+
+function validateCompletedOperationEvidence(operationRoot, journal, options) {
   const expectedEntries = [ARCHIVED_ATTEMPT, ARCHIVED_RECEIPT, JOURNAL_FILE, TERMINAL_FILE];
   if (readdirSync(operationRoot).sort().join(",") !== expectedEntries.sort().join(",")) {
     throw new Error("Permit recovery archive contains unknown files");
   }
-  if (exists(paths.receiptPath)) throw new Error("Permit recovery left the legacy receipt active");
-  assertAttemptsRootEmpty(paths.attemptsRoot);
   const terminalFile = secureFile(resolve(operationRoot, TERMINAL_FILE), 64 * 1024, 0o400, options);
   try {
     if (terminalFile.sha256 !== journal.terminalReceiptSha256) {
       throw new Error("Permit recovery terminal identity mismatch");
     }
     const terminal = validateTerminal(JSON.parse(terminalFile.bytes.toString("utf8")), journal);
-    const archived = readLegacyFailedReceipt(resolve(operationRoot, ARCHIVED_RECEIPT), {
+    const archived = readFailedReceipt(resolve(operationRoot, ARCHIVED_RECEIPT), {
       ...options,
       expectedSha256: journal.sourceReceiptSha256,
       attemptPath: resolve(operationRoot, ARCHIVED_ATTEMPT),
@@ -270,31 +288,36 @@ export function assertCompletedPermitRecovery(options = {}) {
     if (!sameIdentity(archived.identity, terminal.archivedReceiptIdentity)) {
       throw new Error("Permit recovery archived receipt identity mismatch");
     }
-    validateLegacyAttemptDirectory(resolve(operationRoot, ARCHIVED_ATTEMPT), archived.receipt, options);
+    validateAttemptDirectory(resolve(operationRoot, ARCHIVED_ATTEMPT), archived.receipt, options);
     const archivedAttempt = directoryIdentity(resolve(operationRoot, ARCHIVED_ATTEMPT), 0o700, options);
     if (!sameIdentity(archivedAttempt, terminal.archivedAttemptIdentity)) {
       throw new Error("Permit recovery archived attempt identity mismatch");
     }
-    return true;
   } finally {
     terminalFile.bytes.fill(0);
   }
 }
 
-function readLegacyFailedReceipt(path, options = {}) {
+function readFailedReceipt(path, options = {}) {
   const file = secureFile(path, 64 * 1024, 0o400, options);
   try {
     if (options.expectedSha256 && file.sha256 !== options.expectedSha256) {
-      throw new Error("Legacy Permit receipt SHA256 mismatch");
+      throw new Error("Permit recovery source receipt SHA256 mismatch");
     }
-    const receipt = parseLegacyReceipt(JSON.parse(file.bytes.toString("utf8")));
+    const receipt = parseFailedReceipt(JSON.parse(file.bytes.toString("utf8")));
     const attemptPath = options.attemptPath
       ?? resolve(options.attemptsRoot ?? PERMIT_ATTEMPTS, receipt.operationId);
-    validateLegacyAttemptDirectory(attemptPath, receipt, options);
+    validateAttemptDirectory(attemptPath, receipt, options);
     return { receipt, identity: fileIdentity(file) };
   } finally {
     file.bytes.fill(0);
   }
+}
+
+function parseFailedReceipt(value) {
+  if (value?.schemaVersion === 1) return parseLegacyReceipt(value);
+  if (value?.schemaVersion === 2) return parseCurrentReceipt(value);
+  throw new Error("Permit recovery receipt schema is unsupported");
 }
 
 function parseLegacyReceipt(value) {
@@ -328,7 +351,7 @@ function parseLegacyReceipt(value) {
       throw new Error("Legacy Permit runtime identity does not match its release");
     }
   }
-  const permit = exactObject(receipt.permit, PERMIT_KEYS, "Legacy Permit is invalid");
+  const permit = exactObject(receipt.permit, LEGACY_PERMIT_KEYS, "Legacy Permit is invalid");
   if (
     permit.permitId !== request.permitId || permit.ownerUserId !== request.ownerUserId
     || permit.accountBindingSha256 !== request.accountBindingSha256 || !exactScope(permit.actionScope)
@@ -340,11 +363,55 @@ function parseLegacyReceipt(value) {
   return receipt;
 }
 
-function validateLegacyAttemptDirectory(path, receipt, options = {}) {
+function parseCurrentReceipt(value) {
+  const receipt = exactObject(value, RECEIPT_KEYS, "Schema v2 Permit receipt is invalid");
+  const request = exactObject(receipt.request, REQUEST_KEYS, "Schema v2 Permit request is invalid");
+  if (
+    receipt.schemaVersion !== 2 || request.schemaVersion !== 2 || receipt.status !== "failed"
+    || !HEX_32.test(receipt.operationId ?? "") || !HEX_32.test(request.permitId ?? "")
+    || !/^USR-[A-Z0-9]+$/u.test(request.ownerUserId ?? "")
+    || !HEX_64.test(request.accountBindingSha256 ?? "")
+    || !exactScope(request.actionScope) || request.approvedCapitalUsd !== 40 || request.leverage !== 1
+    || request.executionMode !== CURRENT_EXECUTION_MODE || request.maximumDurationMinutes !== 60
+    || request.maximumExecutionDurationMinutes !== 30 || !HEX_40.test(request.releaseRevision ?? "")
+    || !HEX_40.test(request.gitTreeSha ?? "") || !HEX_64.test(request.releaseTreeSha256 ?? "")
+    || !HEX_64.test(request.releaseManifestSha256 ?? "")
+    || !IMAGE.test(request.apiImageDigest ?? "") || !IMAGE.test(request.webImageDigest ?? "")
+    || !HEX_64.test(request.authorizationManifestSha256 ?? "")
+    || !strictUtcString(receipt.activatedAt) || !strictUtcString(receipt.expiresAt)
+    || Date.parse(receipt.expiresAt) - Date.parse(receipt.activatedAt) !== 60 * 60_000
+    || !strictUtcString(receipt.updatedAt) || !HEX_64.test(receipt.attemptReceiptSha256 ?? "")
+    || !HEX_64.test(receipt.envBeforeSha256 ?? "") || !HEX_64.test(receipt.envAfterSha256 ?? "")
+    || receipt.runtimeAfter !== null || Date.parse(receipt.updatedAt) < Date.parse(receipt.activatedAt)
+  ) throw new Error("Schema v2 Permit receipt is not an exact failed terminal");
+  validateReleaseIdentity(receipt.releaseIdentity, request);
+  validateRuntime(receipt.runtimeBefore, true);
+  if (receipt.runtimeBefore !== null) {
+    if (receipt.runtimeBefore.api.revision !== receipt.releaseIdentity.releaseRevision
+      || receipt.runtimeBefore.web.revision !== receipt.releaseIdentity.releaseRevision
+      || receipt.runtimeBefore.api.imageDigest !== receipt.releaseIdentity.apiImageDigest
+      || receipt.runtimeBefore.web.imageDigest !== receipt.releaseIdentity.webImageDigest) {
+      throw new Error("Schema v2 Permit runtime identity does not match its release");
+    }
+  }
+  const permit = exactObject(receipt.permit, CURRENT_PERMIT_KEYS, "Schema v2 Permit is invalid");
+  if (
+    permit.permitId !== request.permitId || permit.ownerUserId !== request.ownerUserId
+    || permit.accountBindingSha256 !== request.accountBindingSha256 || !exactScope(permit.actionScope)
+    || permit.executionMode !== CURRENT_EXECUTION_MODE || permit.executionMode !== request.executionMode
+    || permit.authorizationDigest !== request.authorizationManifestSha256
+    || permit.approvedCapitalUsd !== 40 || permit.expiresAt !== receipt.expiresAt
+    || permit.revision !== request.releaseRevision || !HEX_64.test(permit.digest ?? "")
+    || permit.digest !== currentPermitDigest(permit)
+  ) throw new Error("Schema v2 Permit receipt digest is invalid");
+  return receipt;
+}
+
+function validateAttemptDirectory(path, receipt, options = {}) {
   directoryIdentity(path, 0o700, options);
   const entries = readdirSync(path).sort();
   if (entries.join(",") !== ["attempt-receipt.json", "environment.before", "environment.proposed"].join(",")) {
-    throw new Error("Legacy Permit attempt directory is incomplete");
+    throw new Error("Permit recovery attempt directory is incomplete");
   }
   const before = secureFile(resolve(path, "environment.before"), 1024 * 1024, 0o600, options);
   const proposed = secureFile(resolve(path, "environment.proposed"), 1024 * 1024, 0o600, options);
@@ -352,9 +419,9 @@ function validateLegacyAttemptDirectory(path, receipt, options = {}) {
   try {
     if (before.sha256 !== receipt.envBeforeSha256 || proposed.sha256 !== receipt.envAfterSha256
       || attempt.sha256 !== receipt.attemptReceiptSha256) {
-      throw new Error("Legacy Permit attempt artifact identity mismatch");
+      throw new Error("Permit recovery attempt artifact identity mismatch");
     }
-    const parsed = exactObject(JSON.parse(attempt.bytes.toString("utf8")), ATTEMPT_KEYS, "Legacy Permit attempt receipt is invalid");
+    const parsed = exactObject(JSON.parse(attempt.bytes.toString("utf8")), ATTEMPT_KEYS, "Permit recovery attempt receipt is invalid");
     const expected = { ...receipt };
     delete expected.attemptReceiptSha256;
     expected.status = "prepared";
@@ -362,7 +429,7 @@ function validateLegacyAttemptDirectory(path, receipt, options = {}) {
     expected.runtimeAfter = null;
     expected.updatedAt = receipt.activatedAt;
     if (canonicalJson(parsed) !== canonicalJson(expected)) {
-      throw new Error("Legacy Permit attempt receipt does not match terminal receipt");
+      throw new Error("Permit recovery attempt receipt does not match terminal receipt");
     }
   } finally {
     before.bytes.fill(0);
@@ -479,26 +546,69 @@ function findRecoveryOperation(paths, owner, options) {
   validateDirectory(paths.recoveryRoot, 0o700, owner);
   const entries = readdirSync(paths.recoveryRoot).sort();
   if (entries.length === 0) return null;
-  if (entries.join(",") !== OPERATIONS_DIRECTORY) throw new Error("Permit recovery root contains unknown files");
+  if (entries.some((entry) => ![COMPLETED_DIRECTORY, OPERATIONS_DIRECTORY].includes(entry))
+    || !entries.includes(OPERATIONS_DIRECTORY)) {
+    throw new Error("Permit recovery root contains unknown files");
+  }
+  const completedOperationIds = completedRecoveryOperationIds(paths, owner, options);
   validateDirectory(paths.operationsRoot, 0o700, owner);
   const operations = readdirSync(paths.operationsRoot).sort();
   if (operations.length === 0) return null;
   if (operations.length !== 1 || !HEX_32.test(operations[0] ?? "")) {
     throw new Error("Permit recovery operation set is invalid");
   }
+  if (completedOperationIds.includes(operations[0])) {
+    throw new Error("Permit recovery operation identity is duplicated");
+  }
   const operationRoot = resolve(paths.operationsRoot, operations[0]);
   validateDirectory(operationRoot, 0o700, owner);
+  return readRecoveryOperation(operationRoot, operations[0], options);
+}
+
+function completedRecoveryOperationIds(paths, owner, options) {
+  if (!exists(paths.completedRoot)) return [];
+  validateDirectory(paths.completedRoot, 0o700, owner);
+  const operationIds = readdirSync(paths.completedRoot).sort();
+  for (const operationId of operationIds) {
+    if (!HEX_32.test(operationId)) throw new Error("Permit recovery completed operation set is invalid");
+    const operationRoot = resolve(paths.completedRoot, operationId);
+    validateDirectory(operationRoot, 0o700, owner);
+    const operation = readRecoveryOperation(operationRoot, operationId, options);
+    if (!operation.journal || operation.journal.state !== "completed") {
+      throw new Error("Permit recovery completed operation is incomplete");
+    }
+    validateCompletedOperationEvidence(operationRoot, operation.journal, options);
+  }
+  return operationIds;
+}
+
+function readRecoveryOperation(operationRoot, operationId, options) {
   removeStaleRecoveryTemps(operationRoot, options);
   if (readdirSync(operationRoot).length === 0) {
-    return { operationId: operations[0], operationRoot, journal: null };
+    return { operationId, operationRoot, journal: null };
   }
   const journalFile = secureFile(resolve(operationRoot, JOURNAL_FILE), 64 * 1024, 0o400, options);
   try {
     const journal = validateJournal(JSON.parse(journalFile.bytes.toString("utf8")));
-    if (journal.operationId !== operations[0]) throw new Error("Permit recovery journal identity mismatch");
+    if (journal.operationId !== operationId) throw new Error("Permit recovery journal identity mismatch");
     validateOperationEntries(operationRoot, journal.state);
-    return { operationId: operations[0], operationRoot, journal };
+    return { operationId, operationRoot, journal };
   } finally { journalFile.bytes.fill(0); }
+}
+
+function archiveCompletedRecoveryOperation(operation, paths, owner, options) {
+  validateCompletedOperationEvidence(operation.operationRoot, operation.journal, options);
+  ensureDirectory(paths.completedRoot, 0o700, options);
+  const target = resolve(paths.completedRoot, operation.operationId);
+  if (exists(target)) throw new Error("Permit recovery completed operation already exists");
+  renameWithinFilesystem(operation.operationRoot, target, options);
+  options.hooks?.afterCompletedOperationArchived?.();
+  validateDirectory(target, 0o700, owner);
+  const archived = readRecoveryOperation(target, operation.operationId, options);
+  if (archived.journal?.state !== "completed") {
+    throw new Error("Permit recovery completed operation is incomplete");
+  }
+  validateCompletedOperationEvidence(target, archived.journal, options);
 }
 
 function updateJournal(operationRoot, journal, state, terminalReceiptSha256, options) {
@@ -806,6 +916,7 @@ function recoveryPaths(options) {
   return {
     recoveryRoot,
     operationsRoot: resolve(recoveryRoot, OPERATIONS_DIRECTORY),
+    completedRoot: resolve(recoveryRoot, COMPLETED_DIRECTORY),
     receiptPath: resolve(options.receiptPath ?? PERMIT_RECEIPT),
     attemptsRoot: resolve(options.attemptsRoot ?? PERMIT_ATTEMPTS),
     environmentPath: resolve(options.environmentPath ?? PRODUCTION_ENVIRONMENT),
@@ -820,6 +931,14 @@ function legacyPermitDigest(input) {
   return sha256(Buffer.from([
     "production", "binance", "xaut", input.permitId, input.ownerUserId,
     input.accountBindingSha256, "READ", "TRADE", input.authorizationDigest,
+    String(input.approvedCapitalUsd), input.revision, input.expiresAt,
+  ].join(":")));
+}
+
+function currentPermitDigest(input) {
+  return sha256(Buffer.from([
+    "production", "binance", "xaut", input.permitId, input.ownerUserId,
+    input.accountBindingSha256, "READ", "TRADE", input.executionMode, input.authorizationDigest,
     String(input.approvedCapitalUsd), input.revision, input.expiresAt,
   ].join(":")));
 }

@@ -13,7 +13,9 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertNoDockerControlEnvironment,
+  assertTrustedProductionReleaseRoot,
   assertTrustedReleaseRoot,
+  openTrustedPermitPreparedDockerRuntime,
   openTrustedDockerRuntime,
   trustedExecutableInvocation,
   trustedDockerReceipt,
@@ -23,6 +25,7 @@ import { inheritedOperationLocks } from "./operationLocks.mjs";
 import {
   assertPermitEnvironmentAuthorized,
   PERMIT_INSTALL_RECEIPT,
+  restorePermitPreparedTransientContext,
 } from "./productionSelfTestPermitInstall.mjs";
 
 const environment = process.argv[2];
@@ -46,7 +49,19 @@ try {
       throw new Error("root Compose operation requires inherited transaction locks");
     }
   }
-  assertTrustedReleaseRoot(repoRoot, process.env);
+  const permitPreparedRequested =
+    process.env.XINGHENG_TRUSTED_OPERATION_ENTRY === "install-production-self-test-permit.sh"
+    && process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID !== undefined;
+  const permitPreparedContext = permitPreparedRequested
+    ? restorePermitPreparedTransientContext({
+      operationId: process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID,
+      operationEntry: process.env.XINGHENG_TRUSTED_OPERATION_ENTRY,
+      composeArgs,
+      environmentPath: expectedPath,
+    })
+    : null;
+  if (permitPreparedContext === null) assertTrustedReleaseRoot(repoRoot, process.env);
+  else assertTrustedProductionReleaseRoot(repoRoot);
   const composeDescriptor = openSecureReleaseFile(composeFile);
   const frozenReleaseFiles = [
     secureReleaseFileReceipt(fileURLToPath(import.meta.url)),
@@ -59,7 +74,9 @@ try {
   if (process.env.XINGHENG_COMPOSE_ENV_FD !== undefined) {
     throw new Error(`${environment} Compose control environment is not allowed`);
   }
-  const trustedCompose = openTrustedDockerRuntime("compose", process.env);
+  const trustedCompose = permitPreparedContext === null
+    ? openTrustedDockerRuntime("compose", process.env)
+    : openTrustedPermitPreparedDockerRuntime("compose", process.env, permitPreparedContext);
   try {
     const pluginProbe = spawnSync(
       trustedExecutableInvocation(trustedCompose, 3),
