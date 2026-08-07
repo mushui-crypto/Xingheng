@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
   providerUserStreamProbeErrorCategory,
+  providerUserStreamProbeFailureStage,
   runRwaProviderUserStreamProbe,
 } from "./RwaProviderUserStreamProbe";
 
@@ -14,6 +15,10 @@ class Socket extends EventEmitter {
     queueMicrotask(() => this.emit("message", JSON.stringify({ id: request.id, status: 200 })));
   }
   close() { this.closeCount += 1; this.emit("close"); }
+}
+
+class SilentSocket extends EventEmitter {
+  close() {}
 }
 
 const credentials = { apiKey: "key", apiSecret: "secret" };
@@ -115,6 +120,83 @@ test("provider stream probe bounds a cleanup DELETE that never settles and prese
   assert.deepEqual(methods, ["POST", "DELETE"]);
   assert.ok(sockets.every((socket) => socket.closeCount === 1));
 });
+
+test("provider stream probe maps failures to five redacted diagnostic stages", async () => {
+  const cases = [
+    {
+      expected: "connectivity_failed",
+      run: () => captureProbeFailure((url) => {
+        const socket = new Socket(url);
+        if (url.includes("fstream")) setTimeout(() => socket.emit("close"), 1);
+        return socket;
+      }),
+    },
+    {
+      expected: "auth_handshake_failed",
+      run: () => captureProbeFailure((url) => {
+        class RejectedSpot extends Socket {
+          override send(value: string) {
+            const request = JSON.parse(value);
+            queueMicrotask(() => this.emit("message", JSON.stringify({ id: request.id, status: 401 })));
+          }
+        }
+        return url.includes("ws-api") ? new RejectedSpot(url) : new Socket(url);
+      }),
+    },
+    {
+      expected: "subscription_failed",
+      run: () => captureProbeFailure((url) => {
+        const socket = new Socket(url);
+        if (url.includes("fstream")) {
+          setTimeout(() => socket.emit("message", JSON.stringify({ e: "UNKNOWN_EVENT" })), 1);
+        }
+        return socket;
+      }),
+    },
+    {
+      expected: "no_stream_data",
+      run: () => captureProbeFailure(() => new SilentSocket() as Socket, fetchFixture([]), {
+        timeoutMs: 10,
+        observationMs: 5,
+      }),
+    },
+    {
+      expected: "heartbeat_timeout",
+      run: () => captureProbeFailure(
+        (url) => new Socket(url),
+        (async (_url: string, init?: RequestInit) => new Response(
+          init?.method === "POST" ? JSON.stringify({ listenKey: "listen-key" }) : "{}",
+          { status: init?.method === "PUT" ? 500 : 200 },
+        )) as typeof fetch,
+      ),
+    },
+  ] as const;
+
+  for (const item of cases) {
+    const error = await item.run();
+    assert.equal(providerUserStreamProbeFailureStage(error), item.expected);
+    assert.doesNotMatch(String(error), /fixture-key|fixture-secret|private UID/u);
+  }
+});
+
+async function captureProbeFailure(
+  socketFactory: (url: string) => Socket,
+  fetchFn: typeof fetch = fetchFixture([]),
+  timing = bounds,
+) {
+  try {
+    await runRwaProviderUserStreamProbe(
+      credentials,
+      fetchFn,
+      ((url: string) => socketFactory(url) as any),
+      Date.now,
+      timing,
+    );
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected stream probe failure");
+}
 
 async function assertProbeFailure(category: string, socketFactory: (url: string) => Socket) {
   const methods: string[] = [];

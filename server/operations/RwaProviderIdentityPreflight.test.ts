@@ -304,12 +304,61 @@ test("unexpected failures expose only a stable diagnostic category and non-empty
   const serialized = JSON.stringify(receipt);
   assert.ok(serialized.length > 0);
   assert.deepEqual(Object.keys(receipt).sort(), [
-    "category", "composeProject", "deploymentEnvironment", "provider", "readOnly",
+    "category", "composeProject", "deploymentEnvironment", "mutation", "provider", "readOnly",
     "receiptType", "releaseManifestRevision", "runtimeIdentityMatchesManifest",
-    "runtimeRevision", "schemaVersion", "status",
+    "runtimeRevision", "schemaVersion", "status", "streamProbeStage",
   ].sort());
+  assert.equal(receipt.schemaVersion, 2);
   assert.equal(receipt.runtimeIdentityMatchesManifest, true);
+  assert.equal(receipt.mutation, false);
+  assert.equal(receipt.streamProbeStage, null);
   assert.doesNotMatch(serialized, /secret|API-KEY-123/u);
+});
+
+test("stream probe failure emits a non-empty redacted zero-mutation diagnostic receipt", async () => {
+  let captured: unknown;
+  const providerMutations: string[] = [];
+  try {
+    await runRwaProviderIdentityPreflight({
+      loadConfig: () => ({ deploymentEnvironment: "production", composeProject: "xingheng" }),
+      serverKillSwitch: () => "true",
+      expectedRevision: () => REVISION,
+      releaseManifestRevision: () => REVISION,
+      userId: () => "USR-FIXTURE",
+      createStore: () => ({
+        readCredentialBinding: async () => activeBinding(),
+        loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+      }),
+      createClient: () => ({
+        validateAccess: async () => IDENTITY,
+        readPreflightSnapshot: async () => SNAPSHOT,
+        placeOrder: async () => { providerMutations.push("placeOrder"); },
+        cancelOrder: async () => { providerMutations.push("cancelOrder"); },
+        transfer: async () => { providerMutations.push("transfer"); },
+        withdraw: async () => { providerMutations.push("withdraw"); },
+        setLeverage: async () => { providerMutations.push("setLeverage"); },
+      }),
+      probeStreams: async () => {
+        throw new Error("provider raw response fixture-key fixture-secret private UID");
+      },
+    });
+  } catch (error) {
+    captured = error;
+  }
+  const receipt = providerIdentityPreflightFailureReceipt(captured, {
+    XINGHENG_EXPECTED_REVISION: REVISION,
+    XINGHENG_RELEASE_MANIFEST_REVISION: REVISION,
+  });
+  const serialized = JSON.stringify(receipt);
+  assert.ok(serialized.length > 0);
+  assert.equal(receipt.category, "stream_probe");
+  assert.equal(receipt.streamProbeStage, "connectivity_failed");
+  assert.equal(receipt.readOnly, true);
+  assert.equal(receipt.provider, "binance");
+  assert.equal(receipt.runtimeRevision, REVISION);
+  assert.equal(receipt.mutation, false);
+  assert.deepEqual(providerMutations, []);
+  assert.doesNotMatch(serialized, /raw|fixture-key|fixture-secret|private|UID/u);
 });
 
 test("runtime and release manifest identity mismatch fails before credential or Provider access", async () => {

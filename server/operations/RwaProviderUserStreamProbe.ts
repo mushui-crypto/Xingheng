@@ -11,6 +11,13 @@ const futuresEvents = new Set([
   "ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "ACCOUNT_CONFIG_UPDATE", "MARGIN_CALL",
 ]);
 
+export type ProviderUserStreamProbeFailureStage =
+  | "connectivity_failed"
+  | "auth_handshake_failed"
+  | "subscription_failed"
+  | "no_stream_data"
+  | "heartbeat_timeout";
+
 export async function runRwaProviderUserStreamProbe(
   credentials: RwaBinanceCredentials,
   fetchFn: typeof fetch = fetch,
@@ -90,6 +97,25 @@ export function providerUserStreamProbeErrorCategory(error: unknown) {
   return error instanceof RwaProviderUserStreamProbeError
     ? error.category
     : "provider_stream_probe_failed";
+}
+
+export function providerUserStreamProbeFailureStage(
+  error: unknown,
+): ProviderUserStreamProbeFailureStage {
+  const category = providerUserStreamProbeErrorCategory(error);
+  if ([
+    "spot_stream_error", "spot_stream_closed", "futures_stream_error", "futures_stream_closed",
+  ].includes(category)) return "connectivity_failed";
+  if ([
+    "spot_subscribe_ack_invalid", "futures_listen_key_create_failed", "futures_listen_key_missing",
+  ].includes(category)) return "auth_handshake_failed";
+  if ([
+    "spot_stream_unknown_payload", "futures_listen_key_expired", "futures_stream_unknown_payload",
+    "futures_listen_key_close_failed", "futures_listen_key_cleanup_failed",
+  ].includes(category)) return "subscription_failed";
+  if (category === "provider_stream_probe_timeout") return "no_stream_data";
+  if (category === "futures_listen_key_keepalive_failed") return "heartbeat_timeout";
+  return "connectivity_failed";
 }
 
 function observeSpot(socket: WebSocket, id: string, observationMs: number, subscribe: () => void) {

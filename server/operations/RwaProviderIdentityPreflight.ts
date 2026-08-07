@@ -16,6 +16,7 @@ import {
   type RwaBinanceProductionSelfTestBinding,
 } from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
 import { BinanceCredentialBindingReadStore } from "../storage/BinanceCredentialBindingReadStore";
+import type { ProviderUserStreamProbeFailureStage } from "./RwaProviderUserStreamProbe";
 
 export type ProviderIdentityReceipt = {
   schemaVersion: 2;
@@ -194,7 +195,7 @@ export async function runRwaProviderIdentityPreflight(
   if (snapshot.uidSnapshot !== binding.uidSnapshot) {
     throw new ProviderIdentityPreflightError("uid_binding");
   }
-  const streamProbe = await diagnosticStage("stream_probe", () => (
+  const streamProbe = await diagnosticStreamProbe(() => (
     dependencies.probeStreams ?? probeBinanceGate1UserStreams
   )(credentials));
   const confirmedBinding = await diagnosticStage("uid_binding", () => store.readCredentialBinding());
@@ -288,7 +289,7 @@ export function providerIdentityPreflightFailureReceipt(
   const runtimeRevision = safeRevision(environment.XINGHENG_EXPECTED_REVISION);
   const releaseManifestRevision = safeRevision(environment.XINGHENG_RELEASE_MANIFEST_REVISION);
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     receiptType: "provider_identity_preflight_diagnostic" as const,
     status: "failed" as const,
     provider: "binance" as const,
@@ -300,11 +301,19 @@ export function providerIdentityPreflightFailureReceipt(
       && runtimeRevision === releaseManifestRevision,
     category: providerIdentityPreflightErrorCategory(error),
     readOnly: true as const,
+    mutation: false as const,
+    streamProbeStage: error instanceof ProviderIdentityPreflightError
+      && error.category === "stream_probe"
+      ? error.streamProbeStage
+      : null,
   };
 }
 
 class ProviderIdentityPreflightError extends Error {
-  constructor(readonly category: string) {
+  constructor(
+    readonly category: string,
+    readonly streamProbeStage: ProviderUserStreamProbeFailureStage | null = null,
+  ) {
     super(category);
   }
 }
@@ -322,6 +331,19 @@ async function diagnosticStage<T>(category: DiagnosticCategory, operation: () =>
   } catch (error) {
     if (error instanceof ProviderIdentityPreflightError) throw error;
     throw new ProviderIdentityPreflightError(category);
+  }
+}
+
+async function diagnosticStreamProbe<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof ProviderIdentityPreflightError) throw error;
+    const { providerUserStreamProbeFailureStage } = await import("./RwaProviderUserStreamProbe");
+    throw new ProviderIdentityPreflightError(
+      "stream_probe",
+      providerUserStreamProbeFailureStage(error),
+    );
   }
 }
 
