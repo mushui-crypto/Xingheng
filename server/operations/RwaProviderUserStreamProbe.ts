@@ -24,6 +24,11 @@ export type ProviderUserStreamConnectivityFailureDetail =
   | "tls_handshake_failed"
   | "endpoint_configuration_missing";
 
+export type ProviderUserStreamLifecycleDiagnostic = Readonly<{
+  error: Readonly<{ name: string; code: string | null }> | null;
+  close: Readonly<{ code: number | null }> | null;
+}>;
+
 const dnsFailureCodes = new Set(["EAI_AGAIN", "EAI_FAIL", "EAI_NODATA", "ENODATA", "ENOTFOUND"]);
 const tcpFailureCodes = new Set([
   "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "ETIMEDOUT",
@@ -139,6 +144,14 @@ export function providerUserStreamProbeConnectivityFailureDetail(
   return connectivityFailureDetail(error);
 }
 
+export function providerUserStreamProbeLifecycleDiagnostic(
+  error: unknown,
+): ProviderUserStreamLifecycleDiagnostic | null {
+  return error instanceof RwaProviderUserStreamProbeError
+    ? error.lifecycleDiagnostic
+    : null;
+}
+
 function observeSpot(socket: WebSocket, id: string, observationMs: number, subscribe: () => void) {
   return new Promise<void>((resolve, reject) => {
     let acknowledged = false;
@@ -176,16 +189,25 @@ function observeFutures(socket: WebSocket, observationMs: number) {
     const fail = (
       category: string,
       connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+      lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
     ) => {
       if (timer) clearTimeout(timer);
-      reject(failure(category, connectivityFailedDetail));
+      reject(failure(category, connectivityFailedDetail, lifecycleDiagnostic));
     };
     socket.once("open", () => {
       timer = setTimeout(resolve, observationMs);
       timer.unref();
     });
-    socket.once("error", (error) => fail("futures_stream_error", connectivityFailureDetail(error)));
-    socket.once("close", () => fail("futures_stream_closed", "tcp_connection_failed"));
+    socket.once("error", (error) => fail(
+      "futures_stream_error",
+      connectivityFailureDetail(error),
+      errorLifecycleDiagnostic(error),
+    ));
+    socket.once("close", (code) => fail(
+      "futures_stream_closed",
+      "tcp_connection_failed",
+      closeLifecycleDiagnostic(code),
+    ));
     socket.on("message", (data) => {
       try {
         const value = record(JSON.parse(String(data)));
@@ -278,13 +300,64 @@ function connectivityFailureDetail(
 function failure(
   category: string,
   connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+  lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
 ) {
-  return new RwaProviderUserStreamProbeError(category, connectivityFailedDetail);
+  return new RwaProviderUserStreamProbeError(
+    category,
+    connectivityFailedDetail,
+    lifecycleDiagnostic,
+  );
+}
+
+function errorLifecycleDiagnostic(error: unknown): ProviderUserStreamLifecycleDiagnostic {
+  let name: unknown = null;
+  let code: unknown = null;
+  try {
+    if (error !== null && typeof error === "object") {
+      name = Reflect.get(error, "name");
+      code = Reflect.get(error, "code");
+    }
+  } catch {
+    name = null;
+    code = null;
+  }
+  return Object.freeze({
+    error: Object.freeze({
+      name: safeErrorName(name),
+      code: safeErrorCode(code),
+    }),
+    close: null,
+  });
+}
+
+function closeLifecycleDiagnostic(code: unknown): ProviderUserStreamLifecycleDiagnostic {
+  return Object.freeze({
+    error: null,
+    close: Object.freeze({
+      code: Number.isInteger(code) && Number(code) >= 0 && Number(code) <= 65_535
+        ? Number(code)
+        : null,
+    }),
+  });
+}
+
+function safeErrorName(value: unknown) {
+  return typeof value === "string" && [
+    "AggregateError", "Error", "EvalError", "RangeError", "ReferenceError",
+    "SyntaxError", "TypeError", "URIError",
+  ].includes(value) ? value : "Error";
+}
+
+function safeErrorCode(value: unknown) {
+  return typeof value === "string" && /^[A-Z][A-Z0-9_]{0,63}$/u.test(value)
+    ? value
+    : null;
 }
 
 class RwaProviderUserStreamProbeError extends Error {
   constructor(
     readonly category: string,
     readonly connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    readonly lifecycleDiagnostic: ProviderUserStreamLifecycleDiagnostic | null = null,
   ) { super(category); }
 }

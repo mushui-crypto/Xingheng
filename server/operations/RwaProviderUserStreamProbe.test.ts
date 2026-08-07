@@ -5,6 +5,7 @@ import {
   providerUserStreamProbeConnectivityFailureDetail,
   providerUserStreamProbeErrorCategory,
   providerUserStreamProbeFailureStage,
+  providerUserStreamProbeLifecycleDiagnostic,
   runRwaProviderUserStreamProbe,
 } from "./RwaProviderUserStreamProbe";
 
@@ -211,6 +212,88 @@ test("provider stream close retains only the redacted TCP detail", async () => {
     providerUserStreamProbeConnectivityFailureDetail(error),
     "tcp_connection_failed",
   );
+});
+
+test("Futures WebSocket error exposes only the redacted lifecycle diagnostic schema", async () => {
+  const error = await captureProbeFailure((url) => {
+    const socket = new Socket(url);
+    if (url.includes("fstream")) {
+      const raw = Object.assign(
+        new TypeError("listen-key fixture-key fixture-secret Binance response body"),
+        {
+          code: "ECONNRESET",
+          apiKey: "fixture-key",
+          secret: "fixture-secret",
+        },
+      );
+      setTimeout(() => socket.emit("error", raw), 1);
+    }
+    return socket;
+  });
+  const diagnostic = providerUserStreamProbeLifecycleDiagnostic(error);
+  assert.deepEqual(diagnostic, {
+    error: { name: "TypeError", code: "ECONNRESET" },
+    close: null,
+  });
+  assert.deepEqual(Object.keys(diagnostic!).sort(), ["close", "error"]);
+  assert.deepEqual(Object.keys(diagnostic!.error!).sort(), ["code", "name"]);
+  assert.equal(providerUserStreamProbeFailureStage(error), "connectivity_failed");
+  assert.equal(
+    providerUserStreamProbeConnectivityFailureDetail(error),
+    "tcp_connection_failed",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(diagnostic),
+    /message|reason|listen-key|fixture-key|fixture-secret|response body|apiKey|secret/u,
+  );
+});
+
+test("Futures WebSocket close exposes only close.code and never close.reason", async () => {
+  const error = await captureProbeFailure((url) => {
+    const socket = new Socket(url);
+    if (url.includes("fstream")) {
+      setTimeout(() => socket.emit(
+        "close",
+        1006,
+        Buffer.from("listen-key fixture-key fixture-secret Binance response body"),
+      ), 1);
+    }
+    return socket;
+  });
+  const diagnostic = providerUserStreamProbeLifecycleDiagnostic(error);
+  assert.deepEqual(diagnostic, {
+    error: null,
+    close: { code: 1006 },
+  });
+  assert.deepEqual(Object.keys(diagnostic!).sort(), ["close", "error"]);
+  assert.deepEqual(Object.keys(diagnostic!.close!).sort(), ["code"]);
+  assert.equal(providerUserStreamProbeFailureStage(error), "connectivity_failed");
+  assert.equal(
+    providerUserStreamProbeConnectivityFailureDetail(error),
+    "tcp_connection_failed",
+  );
+  assert.doesNotMatch(
+    JSON.stringify(diagnostic),
+    /reason|listen-key|fixture-key|fixture-secret|response body/u,
+  );
+});
+
+test("Futures lifecycle diagnostics reject unbounded error metadata", async () => {
+  const error = await captureProbeFailure((url) => {
+    const socket = new Socket(url);
+    if (url.includes("fstream")) {
+      const raw = Object.assign(new Error("fixture-secret"), {
+        name: "fixture-secret",
+        code: "fixture-secret",
+      });
+      setTimeout(() => socket.emit("error", raw), 1);
+    }
+    return socket;
+  });
+  assert.deepEqual(providerUserStreamProbeLifecycleDiagnostic(error), {
+    error: { name: "Error", code: null },
+    close: null,
+  });
 });
 
 async function captureProbeFailure(
