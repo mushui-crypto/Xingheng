@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 import {
+  providerUserStreamProbeConnectivityFailureDetail,
   providerUserStreamProbeErrorCategory,
   providerUserStreamProbeFailureStage,
   runRwaProviderUserStreamProbe,
@@ -177,6 +178,39 @@ test("provider stream probe maps failures to five redacted diagnostic stages", a
     assert.equal(providerUserStreamProbeFailureStage(error), item.expected);
     assert.doesNotMatch(String(error), /fixture-key|fixture-secret|private UID/u);
   }
+});
+
+test("provider stream probe maps connectivity errors to four redacted details", async () => {
+  const cases = [
+    ["ENOTFOUND", "dns_resolution_failed"],
+    ["ECONNREFUSED", "tcp_connection_failed"],
+    ["ERR_TLS_CERT_ALTNAME_INVALID", "tls_handshake_failed"],
+    ["ERR_INVALID_URL", "endpoint_configuration_missing"],
+  ] as const;
+  for (const [code, expected] of cases) {
+    const error = Object.assign(new Error("raw endpoint and credential detail"), { code });
+    assert.equal(providerUserStreamProbeConnectivityFailureDetail(error), expected);
+  }
+  assert.equal(
+    providerUserStreamProbeConnectivityFailureDetail(new Error("unknown raw failure")),
+    null,
+  );
+  assert.equal(providerUserStreamProbeConnectivityFailureDetail(Object.defineProperty({}, "code", {
+    get() { throw new Error("raw getter failure"); },
+  })), null);
+});
+
+test("provider stream close retains only the redacted TCP detail", async () => {
+  const error = await captureProbeFailure((url) => {
+    const socket = new Socket(url);
+    if (url.includes("fstream")) setTimeout(() => socket.emit("close"), 1);
+    return socket;
+  });
+  assert.equal(providerUserStreamProbeFailureStage(error), "connectivity_failed");
+  assert.equal(
+    providerUserStreamProbeConnectivityFailureDetail(error),
+    "tcp_connection_failed",
+  );
 });
 
 async function captureProbeFailure(

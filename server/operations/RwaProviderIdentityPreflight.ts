@@ -16,7 +16,10 @@ import {
   type RwaBinanceProductionSelfTestBinding,
 } from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
 import { BinanceCredentialBindingReadStore } from "../storage/BinanceCredentialBindingReadStore";
-import type { ProviderUserStreamProbeFailureStage } from "./RwaProviderUserStreamProbe";
+import type {
+  ProviderUserStreamConnectivityFailureDetail,
+  ProviderUserStreamProbeFailureStage,
+} from "./RwaProviderUserStreamProbe";
 
 export type ProviderIdentityReceipt = {
   schemaVersion: 2;
@@ -306,6 +309,11 @@ export function providerIdentityPreflightFailureReceipt(
       && error.category === "stream_probe"
       ? error.streamProbeStage
       : null,
+    connectivity_failed_detail: error instanceof ProviderIdentityPreflightError
+      && error.category === "stream_probe"
+      && error.streamProbeStage === "connectivity_failed"
+      ? error.connectivityFailedDetail
+      : null,
   };
 }
 
@@ -313,6 +321,7 @@ class ProviderIdentityPreflightError extends Error {
   constructor(
     readonly category: string,
     readonly streamProbeStage: ProviderUserStreamProbeFailureStage | null = null,
+    readonly connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
   ) {
     super(category);
   }
@@ -339,10 +348,17 @@ async function diagnosticStreamProbe<T>(operation: () => Promise<T>): Promise<T>
     return await operation();
   } catch (error) {
     if (error instanceof ProviderIdentityPreflightError) throw error;
-    const { providerUserStreamProbeFailureStage } = await import("./RwaProviderUserStreamProbe");
+    const {
+      providerUserStreamProbeConnectivityFailureDetail,
+      providerUserStreamProbeFailureStage,
+    } = await import("./RwaProviderUserStreamProbe");
+    const stage = providerUserStreamProbeFailureStage(error);
     throw new ProviderIdentityPreflightError(
       "stream_probe",
-      providerUserStreamProbeFailureStage(error),
+      stage,
+      stage === "connectivity_failed"
+        ? providerUserStreamProbeConnectivityFailureDetail(error)
+        : null,
     );
   }
 }

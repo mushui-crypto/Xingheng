@@ -304,7 +304,7 @@ test("unexpected failures expose only a stable diagnostic category and non-empty
   const serialized = JSON.stringify(receipt);
   assert.ok(serialized.length > 0);
   assert.deepEqual(Object.keys(receipt).sort(), [
-    "category", "composeProject", "deploymentEnvironment", "mutation", "provider", "readOnly",
+    "category", "composeProject", "connectivity_failed_detail", "deploymentEnvironment", "mutation", "provider", "readOnly",
     "receiptType", "releaseManifestRevision", "runtimeIdentityMatchesManifest",
     "runtimeRevision", "schemaVersion", "status", "streamProbeStage",
   ].sort());
@@ -312,6 +312,7 @@ test("unexpected failures expose only a stable diagnostic category and non-empty
   assert.equal(receipt.runtimeIdentityMatchesManifest, true);
   assert.equal(receipt.mutation, false);
   assert.equal(receipt.streamProbeStage, null);
+  assert.equal(receipt.connectivity_failed_detail, null);
   assert.doesNotMatch(serialized, /secret|API-KEY-123/u);
 });
 
@@ -353,12 +354,56 @@ test("stream probe failure emits a non-empty redacted zero-mutation diagnostic r
   assert.ok(serialized.length > 0);
   assert.equal(receipt.category, "stream_probe");
   assert.equal(receipt.streamProbeStage, "connectivity_failed");
+  assert.equal(receipt.connectivity_failed_detail, null);
   assert.equal(receipt.readOnly, true);
   assert.equal(receipt.provider, "binance");
   assert.equal(receipt.runtimeRevision, REVISION);
   assert.equal(receipt.mutation, false);
   assert.deepEqual(providerMutations, []);
   assert.doesNotMatch(serialized, /raw|fixture-key|fixture-secret|private|UID/u);
+});
+
+test("connectivity diagnostics expose only a stable redacted detail", async () => {
+  const cases = [
+    ["ENOTFOUND", "dns_resolution_failed"],
+    ["ECONNREFUSED", "tcp_connection_failed"],
+    ["ERR_TLS_CERT_ALTNAME_INVALID", "tls_handshake_failed"],
+    ["ERR_INVALID_URL", "endpoint_configuration_missing"],
+  ] as const;
+  for (const [code, expected] of cases) {
+    let captured: unknown;
+    try {
+      await runRwaProviderIdentityPreflight({
+        loadConfig: () => ({ deploymentEnvironment: "production", composeProject: "xingheng" }),
+        serverKillSwitch: () => "true",
+        expectedRevision: () => REVISION,
+        releaseManifestRevision: () => REVISION,
+        userId: () => "USR-FIXTURE",
+        createStore: () => ({
+          readCredentialBinding: async () => activeBinding(),
+          loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+        }),
+        createClient: () => ({
+          validateAccess: async () => IDENTITY,
+          readPreflightSnapshot: async () => SNAPSHOT,
+        }),
+        probeStreams: async () => {
+          throw Object.assign(new Error("raw endpoint fixture-key fixture-secret"), { code });
+        },
+      });
+    } catch (error) {
+      captured = error;
+    }
+    const receipt = providerIdentityPreflightFailureReceipt(captured, {
+      XINGHENG_EXPECTED_REVISION: REVISION,
+      XINGHENG_RELEASE_MANIFEST_REVISION: REVISION,
+    });
+    assert.equal(receipt.category, "stream_probe");
+    assert.equal(receipt.streamProbeStage, "connectivity_failed");
+    assert.equal(receipt.connectivity_failed_detail, expected);
+    assert.equal(receipt.mutation, false);
+    assert.doesNotMatch(JSON.stringify(receipt), /raw|fixture-key|fixture-secret/u);
+  }
 });
 
 test("runtime and release manifest identity mismatch fails before credential or Provider access", async () => {

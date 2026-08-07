@@ -18,6 +18,18 @@ export type ProviderUserStreamProbeFailureStage =
   | "no_stream_data"
   | "heartbeat_timeout";
 
+export type ProviderUserStreamConnectivityFailureDetail =
+  | "dns_resolution_failed"
+  | "tcp_connection_failed"
+  | "tls_handshake_failed"
+  | "endpoint_configuration_missing";
+
+const dnsFailureCodes = new Set(["EAI_AGAIN", "EAI_FAIL", "EAI_NODATA", "ENODATA", "ENOTFOUND"]);
+const tcpFailureCodes = new Set([
+  "ECONNREFUSED", "ECONNRESET", "EHOSTUNREACH", "ENETUNREACH", "EPIPE", "ETIMEDOUT",
+]);
+const endpointFailureCodes = new Set(["ERR_INVALID_URL", "ERR_MISSING_ARGS"]);
+
 export async function runRwaProviderUserStreamProbe(
   credentials: RwaBinanceCredentials,
   fetchFn: typeof fetch = fetch,
@@ -118,17 +130,29 @@ export function providerUserStreamProbeFailureStage(
   return "connectivity_failed";
 }
 
+export function providerUserStreamProbeConnectivityFailureDetail(
+  error: unknown,
+): ProviderUserStreamConnectivityFailureDetail | null {
+  if (error instanceof RwaProviderUserStreamProbeError) {
+    return error.connectivityFailedDetail;
+  }
+  return connectivityFailureDetail(error);
+}
+
 function observeSpot(socket: WebSocket, id: string, observationMs: number, subscribe: () => void) {
   return new Promise<void>((resolve, reject) => {
     let acknowledged = false;
     let timer: NodeJS.Timeout | null = null;
-    const fail = (category: string) => {
+    const fail = (
+      category: string,
+      connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    ) => {
       if (timer) clearTimeout(timer);
-      reject(failure(category));
+      reject(failure(category, connectivityFailedDetail));
     };
     socket.once("open", subscribe);
-    socket.once("error", () => fail("spot_stream_error"));
-    socket.once("close", () => fail("spot_stream_closed"));
+    socket.once("error", (error) => fail("spot_stream_error", connectivityFailureDetail(error)));
+    socket.once("close", () => fail("spot_stream_closed", "tcp_connection_failed"));
     socket.on("message", (data) => {
       try {
         const value = record(JSON.parse(String(data)));
@@ -149,16 +173,19 @@ function observeSpot(socket: WebSocket, id: string, observationMs: number, subsc
 function observeFutures(socket: WebSocket, observationMs: number) {
   return new Promise<void>((resolve, reject) => {
     let timer: NodeJS.Timeout | null = null;
-    const fail = (category: string) => {
+    const fail = (
+      category: string,
+      connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+    ) => {
       if (timer) clearTimeout(timer);
-      reject(failure(category));
+      reject(failure(category, connectivityFailedDetail));
     };
     socket.once("open", () => {
       timer = setTimeout(resolve, observationMs);
       timer.unref();
     });
-    socket.once("error", () => fail("futures_stream_error"));
-    socket.once("close", () => fail("futures_stream_closed"));
+    socket.once("error", (error) => fail("futures_stream_error", connectivityFailureDetail(error)));
+    socket.once("close", () => fail("futures_stream_closed", "tcp_connection_failed"));
     socket.on("message", (data) => {
       try {
         const value = record(JSON.parse(String(data)));
@@ -223,10 +250,41 @@ function positiveDuration(value: number | undefined, fallback: number) {
   return Number.isFinite(value) && Number(value) > 0 ? Number(value) : fallback;
 }
 
-function failure(category: string) {
-  return new RwaProviderUserStreamProbeError(category);
+function connectivityFailureDetail(
+  error: unknown,
+): ProviderUserStreamConnectivityFailureDetail | null {
+  let code: unknown = null;
+  try {
+    code = error !== null && typeof error === "object"
+      ? Reflect.get(error, "code")
+      : null;
+  } catch {
+    return null;
+  }
+  if (typeof code !== "string") return null;
+  if (dnsFailureCodes.has(code)) return "dns_resolution_failed";
+  if (tcpFailureCodes.has(code)) return "tcp_connection_failed";
+  if (endpointFailureCodes.has(code)) return "endpoint_configuration_missing";
+  if (
+    code.startsWith("ERR_TLS_")
+    || code.startsWith("ERR_SSL_")
+    || code.startsWith("CERT_")
+    || code.startsWith("UNABLE_TO_")
+    || ["DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN"].includes(code)
+  ) return "tls_handshake_failed";
+  return null;
+}
+
+function failure(
+  category: string,
+  connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+) {
+  return new RwaProviderUserStreamProbeError(category, connectivityFailedDetail);
 }
 
 class RwaProviderUserStreamProbeError extends Error {
-  constructor(readonly category: string) { super(category); }
+  constructor(
+    readonly category: string,
+    readonly connectivityFailedDetail: ProviderUserStreamConnectivityFailureDetail | null = null,
+  ) { super(category); }
 }
