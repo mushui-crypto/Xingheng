@@ -17,10 +17,13 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   createTrustedPermitPreparedDockerContext,
+  createTrustedPermitTerminalizationDockerContext,
   openTrustedDockerRuntime,
   openTrustedPermitPreparedDockerRuntime,
+  openTrustedPermitTerminalizationDockerRuntime,
   restoreTrustedPermitPreparedDockerContext,
   serializeTrustedPermitPreparedDockerContext,
+  validatePermitTerminalizationDockerArguments,
 } from "./trustedDockerRuntime.mjs";
 
 const REVISION = "a".repeat(40);
@@ -128,6 +131,43 @@ test("same-process and cross-process Permit transient capabilities remain descri
   }
 });
 
+test("Permit terminalization Docker capability is same-process and argument allowlisted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "xh-ptd-"));
+  const socket = join(root, "docker.sock");
+  const executable = join(root, "docker-fixture");
+  const server = createServer();
+  try {
+    writeFileSync(executable, "#!/bin/sh\nexit 0\n", { mode: 0o500 });
+    await new Promise((resolvePromise, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolvePromise);
+    });
+    chmodSync(socket, 0o660);
+    const executableSha256 = createHash("sha256").update(readFileSync(executable)).digest("hex");
+    const source = terminalizationFixtureSource(executable, executableSha256, socket);
+    const context = createTrustedPermitTerminalizationDockerContext(
+      terminalizationContext(),
+      source,
+    );
+    const runtime = openTrustedPermitTerminalizationDockerRuntime("docker", source, context);
+    runtime.close();
+    validatePermitTerminalizationDockerArguments([
+      "container", "inspect", context.apiContainerId,
+    ], context);
+    assert.throws(() => validatePermitTerminalizationDockerArguments([
+      "container", "rm", context.apiContainerId,
+    ], context), /not allowlisted/u);
+    assert.throws(() => openTrustedPermitTerminalizationDockerRuntime(
+      "docker",
+      source,
+      { ...context },
+    ), /not issued/u);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function permitContext() {
   return Object.freeze({
     schemaVersion: 1,
@@ -157,6 +197,44 @@ function permitFixtureSource(executable, executableSha256, socket) {
     XINGHENG_TRUSTED_OPERATION_ENTRY: "install-production-self-test-permit.sh",
     XINGHENG_PERMIT_INSTALL_OPERATION_ID: "b".repeat(32),
     XINGHENG_PERMIT_PREPARED_TRANSIENT_FD: "8",
+    XINGHENG_TEST_DOCKER_CLI_PATH: executable,
+    XINGHENG_TEST_DOCKER_CLI_SHA256: executableSha256,
+    XINGHENG_TEST_COMPOSE_PLUGIN_PATH: executable,
+    XINGHENG_TEST_COMPOSE_PLUGIN_SHA256: executableSha256,
+    XINGHENG_TEST_DOCKER_SOCKET_PATH: socket,
+  };
+}
+
+function terminalizationContext() {
+  const fileIdentity = { dev: 1, ino: 2, size: 3, uid: 0, gid: 0, mode: 0o400 };
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: "permit-terminalization-transient",
+    operationId: "c".repeat(32),
+    sourceReceiptSha256: "d".repeat(64),
+    sourceReceiptIdentity: fileIdentity,
+    sourceAttemptIdentity: { ...fileIdentity, ino: 4, mode: 0o700 },
+    apiContainerId: "e".repeat(64),
+    ownerUserId: "USR-TERMINAL1",
+    environmentBeforeSha256: "f".repeat(64),
+    environmentAfterSha256: "a".repeat(64),
+    wrapperIdentity: { ...fileIdentity, ino: 5, mode: 0o755 },
+    launcherIdentity: { ...fileIdentity, ino: 6, mode: 0o755 },
+    operationLocks: [
+      { path: "/run/lock/xingheng/release-global.lock", dev: 7, ino: 8, uid: 0, gid: 0, mode: 0o600 },
+      { path: "/run/lock/xingheng/production.lock", dev: 9, ino: 10, uid: 0, gid: 0, mode: 0o600 },
+    ],
+  });
+}
+
+function terminalizationFixtureSource(executable, executableSha256, socket) {
+  return {
+    NODE_ENV: "test",
+    NODE_TEST_CONTEXT: process.env.NODE_TEST_CONTEXT,
+    XINGHENG_OPERATION_LOCK_CONTEXT: "production",
+    XINGHENG_TRUSTED_OPERATION_ENTRY: "terminalize-production-self-test-permit.sh",
+    XINGHENG_PERMIT_TERMINALIZATION_OPERATION_ID: "c".repeat(32),
+    XINGHENG_PERMIT_TERMINALIZATION_SOURCE_SHA256: "d".repeat(64),
     XINGHENG_TEST_DOCKER_CLI_PATH: executable,
     XINGHENG_TEST_DOCKER_CLI_SHA256: executableSha256,
     XINGHENG_TEST_COMPOSE_PLUGIN_PATH: executable,

@@ -12,6 +12,7 @@ import {
 import { join } from "node:path";
 import {
   openTrustedHostTool,
+  openTrustedPermitTerminalizationFlockTool,
   trustedExecutableInvocation,
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
@@ -29,6 +30,12 @@ export function acquireOperationLocks(environment, options = {}) {
     throw new Error("operation lock environment is invalid");
   }
   const testMode = options.testMode === true;
+  if (options.transitionEntry !== undefined
+    && (environment !== "production"
+      || options.transitionEntry !== "terminalize-production-self-test-permit.sh"
+      || process.env.XINGHENG_TRUSTED_OPERATION_ENTRY !== options.transitionEntry)) {
+    throw new Error("operation lock transition entry is invalid");
+  }
   if (!testMode && (process.getuid?.() !== 0 || process.getgid?.() !== 0)) {
     throw new Error("operation locks require the controlled root operator");
   }
@@ -159,7 +166,9 @@ function acquireOne(path, testMode, options) {
     }
     const tool = testMode
       ? null
-      : openTrustedHostTool("flock", process.env);
+      : (options.transitionEntry
+        ? openTrustedPermitTerminalizationFlockTool(process.env)
+        : openTrustedHostTool("flock", process.env));
     try {
       const executable = tool
         ? trustedExecutableInvocation(tool, 3)

@@ -33,6 +33,22 @@ operation journal 与 terminal recovery receipt；不会生成或安装 Permit�
 active/unknown window、重复 recovery 或 identity drift 均必须 fail-closed。恢复中断后只能使用
 同一 operation identity 与 source SHA-256 延续；terminal recovery 完整前 installer 继续阻断。
 
+已过期且安装成功、但从未建立 Capital Test Window 的 schema v2 Permit，只能通过一次性
+`terminalize-success` trusted operation 恢复安装前环境。该入口要求人工提供原 success receipt
+SHA-256 与固定 operation ID，保留原 receipt、attempt 和环境快照不变，使用追加式 root-only
+journal 记录 `prepared -> environment_restored -> api_restarted -> completed`。它只允许原子恢复
+`environment.before`、通过固定 Compose allowlist 重启 API，并以普通 promotion guard 验证 baseline；
+不提供 Permit revoke、renew、cleanup 或 lifecycle 管理能力，也不会生成或安装 Permit：
+
+```sh
+/usr/bin/node /opt/xingheng-release/code/scripts/trusted-operation-launcher.mjs \
+  production scripts/terminalize-production-self-test-permit.sh \
+  terminalize-success SOURCE_RECEIPT_SHA256 OPERATION_ID
+```
+
+该命令只能在独立审批和生产只读 preflight 后执行。未过期 Permit、存在 Window/lease、已有消费、
+环境或 runtime identity 漂移均会 fail-closed；中断恢复必须复用相同 source SHA-256 与 operation ID。
+
 正式项目名固定为 `xingheng`，环境文件固定为 `.env.production`；不得把 production wrapper
 泛化成调用方可变项目或部署身份。
 

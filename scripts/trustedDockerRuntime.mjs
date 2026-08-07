@@ -64,6 +64,7 @@ const REQUIRED_TOOLS = Object.freeze({
   compose: PRODUCTION_COMPOSE_PLUGIN,
 });
 const permitPreparedDockerContexts = new WeakSet();
+const permitTerminalizationDockerContexts = new WeakSet();
 export const PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD = 8;
 
 export function assertNoDockerControlEnvironment(source = process.env) {
@@ -146,6 +147,20 @@ export function createTrustedPermitPreparedDockerContext(context, source = proce
   assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
   permitPreparedDockerContexts.add(context);
   return context;
+}
+
+export function createTrustedPermitTerminalizationDockerContext(context, source = process.env) {
+  assertPermitTerminalizationDockerContext(context, source, testFixture(source) === null);
+  permitTerminalizationDockerContexts.add(context);
+  return context;
+}
+
+export function openTrustedPermitTerminalizationDockerRuntime(kind, source, context) {
+  if (!permitTerminalizationDockerContexts.has(context)) {
+    throw new Error("Permit terminalization Docker context was not issued by the trusted validator");
+  }
+  assertPermitTerminalizationDockerContext(context, source, testFixture(source) === null);
+  return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
 }
 
 export function serializeTrustedPermitPreparedDockerContext(context, source = process.env) {
@@ -302,6 +317,67 @@ function assertPermitPreparedTransientRuntimeContext(context, source, validateDe
   }
 }
 
+function assertPermitTerminalizationDockerContext(context, source, validateDescriptors) {
+  const exactKeys = (value, keys) => value && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).sort().join(",") === [...keys].sort().join(",");
+  const identityKeys = ["dev", "gid", "ino", "mode", "size", "uid"];
+  const validIdentity = (value) => exactKeys(value, identityKeys)
+    && ["dev", "ino", "mode", "size", "uid", "gid"]
+      .every((key) => Number.isSafeInteger(value[key]) && value[key] >= 0);
+  const validLocks = Array.isArray(context?.operationLocks)
+    && context.operationLocks.length === 2
+    && context.operationLocks.every((lock, index) => exactKeys(
+      lock,
+      ["dev", "gid", "ino", "mode", "path", "uid"],
+    ) && Number.isSafeInteger(lock.dev) && Number.isSafeInteger(lock.ino)
+      && lock.uid === 0 && lock.gid === 0 && lock.mode === 0o600
+      && lock.path === [
+        "/run/lock/xingheng/release-global.lock",
+        "/run/lock/xingheng/production.lock",
+      ][index]);
+  if (!exactKeys(context, [
+    "apiContainerId", "environmentAfterSha256", "environmentBeforeSha256", "kind",
+    "launcherIdentity", "operationId", "operationLocks", "ownerUserId", "schemaVersion",
+    "sourceAttemptIdentity", "sourceReceiptIdentity", "sourceReceiptSha256", "wrapperIdentity",
+  ])
+    || context.schemaVersion !== 1 || context.kind !== "permit-terminalization-transient"
+    || !/^[a-f0-9]{32}$/u.test(context.operationId ?? "")
+    || !/^[a-f0-9]{64}$/u.test(context.sourceReceiptSha256 ?? "")
+    || !/^[a-f0-9]{12,64}$/u.test(context.apiContainerId ?? "")
+    || !/^USR-[A-Z0-9]+$/u.test(context.ownerUserId ?? "")
+    || !/^[a-f0-9]{64}$/u.test(context.environmentBeforeSha256 ?? "")
+    || !/^[a-f0-9]{64}$/u.test(context.environmentAfterSha256 ?? "")
+    || context.environmentBeforeSha256 === context.environmentAfterSha256
+    || source.XINGHENG_OPERATION_LOCK_CONTEXT !== "production"
+    || source.XINGHENG_TRUSTED_OPERATION_ENTRY !== "terminalize-production-self-test-permit.sh"
+    || source.XINGHENG_PERMIT_TERMINALIZATION_OPERATION_ID !== context.operationId
+    || source.XINGHENG_PERMIT_TERMINALIZATION_SOURCE_SHA256 !== context.sourceReceiptSha256
+    || !validIdentity(context.sourceReceiptIdentity)
+    || !validIdentity(context.sourceAttemptIdentity)
+    || !validIdentity(context.wrapperIdentity) || !validIdentity(context.launcherIdentity)
+    || !validLocks) {
+    throw new Error("Permit terminalization Docker context is invalid");
+  }
+  if (validateDescriptors) {
+    const descriptors = [fstatSync(3), fstatSync(4), fstatSync(6), fstatSync(7)];
+    const expected = [
+      context.operationLocks[0], context.operationLocks[1],
+      context.wrapperIdentity, context.launcherIdentity,
+    ];
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const descriptor = descriptors[index];
+      const identity = expected[index];
+      if (!descriptor.isFile() || descriptor.nlink !== 1
+        || descriptor.dev !== identity.dev || descriptor.ino !== identity.ino
+        || (index >= 2 && descriptor.size !== identity.size)
+        || descriptor.uid !== 0 || descriptor.gid !== 0
+        || (index < 2 && (descriptor.mode & 0o777) !== 0o600)) {
+        throw new Error("Permit terminalization trusted descriptor identity mismatch");
+      }
+    }
+  }
+}
+
 export function openTrustedHostTool(name, source = process.env) {
   assertNoDockerControlEnvironment(source);
   if (!Object.hasOwn(REQUIRED_TOOLS, name)
@@ -327,6 +403,46 @@ export function openTrustedHostTool(name, source = process.env) {
     close() {
       closeSync(opened.fd);
     },
+  };
+}
+
+export function openTrustedPermitTerminalizationFlockTool(source = process.env) {
+  assertNoDockerControlEnvironment(source);
+  if (source.XINGHENG_TRUSTED_OPERATION_ENTRY !== "terminalize-production-self-test-permit.sh"
+    || source.XINGHENG_OPERATION_LOCK_CONTEXT !== undefined
+    || process.getuid?.() !== 0 || process.getgid?.() !== 0 || testFixture(source) !== null) {
+    throw new Error("Permit terminalization flock context is invalid");
+  }
+  const receipt = activeTrustReceipt(source);
+  const opened = openTrustedExecutable(
+    receipt.binaries.flock.path,
+    receipt.binaries.flock.sha256,
+    false,
+  );
+  return {
+    ...opened,
+    name: "flock",
+    close() { closeSync(opened.fd); },
+  };
+}
+
+export function openTrustedPermitTerminalizationShellTool(source = process.env) {
+  assertNoDockerControlEnvironment(source);
+  if (source.XINGHENG_TRUSTED_OPERATION_ENTRY !== "terminalize-production-self-test-permit.sh"
+    || source.XINGHENG_OPERATION_LOCK_CONTEXT !== undefined
+    || process.getuid?.() !== 0 || process.getgid?.() !== 0 || testFixture(source) !== null) {
+    throw new Error("Permit terminalization shell context is invalid");
+  }
+  const receipt = activeTrustReceipt(source);
+  const opened = openTrustedExecutable(
+    receipt.binaries.sh.path,
+    receipt.binaries.sh.sha256,
+    false,
+  );
+  return {
+    ...opened,
+    name: "sh",
+    close() { closeSync(opened.fd); },
   };
 }
 
@@ -524,6 +640,48 @@ export function execTrustedPermitPreparedDockerSync(args, context, options = {})
     return output;
   } finally {
     runtime.close();
+  }
+}
+
+export function execTrustedPermitTerminalizationDockerSync(args, context, options = {}) {
+  validatePermitTerminalizationDockerArguments(args, context);
+  const runtime = openTrustedPermitTerminalizationDockerRuntime("docker", process.env, context);
+  try {
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
+    const baseStdio = options.stdio ?? ["inherit", "inherit", "inherit"];
+    if (!Array.isArray(baseStdio) || baseStdio.length !== 3) {
+      throw new Error("trusted Docker stdio boundary is invalid");
+    }
+    const output = execFileSync(trustedExecutableInvocation(runtime, 3), args, {
+      ...options,
+      env: runtime.environment,
+      stdio: [...baseStdio, runtime.fd],
+    });
+    verifyTrustedDockerRuntime(runtime);
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "consumed")}\n`);
+    return output;
+  } finally {
+    runtime.close();
+  }
+}
+
+export function validatePermitTerminalizationDockerArguments(args, context) {
+  if (!permitTerminalizationDockerContexts.has(context)) {
+    throw new Error("Permit terminalization Docker context was not issued by the trusted validator");
+  }
+  const allowed = [
+    [
+      "ps", "-a", "--filter", "label=com.docker.compose.project=xingheng",
+      "--filter", "label=com.docker.compose.service=api", "--format", "{{.ID}}",
+    ],
+    ["container", "inspect", context.apiContainerId],
+    [
+      "exec", context.apiContainerId, "node",
+      "/app/scripts/verify-production-self-test-permit-state.mjs", context.ownerUserId,
+    ],
+  ];
+  if (!allowed.some((candidate) => sameArguments(args, candidate))) {
+    throw new Error("Permit terminalization Docker arguments are not allowlisted");
   }
 }
 

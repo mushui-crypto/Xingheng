@@ -14,7 +14,7 @@
     "test:deployment-revision": "node --test scripts/deploymentRevision.test.mjs",
     "test:production-deployment": "tsx --test server/config/deploymentEnvironment.test.ts server/operations/RwaProviderIdentityPreflight.test.ts && node --test scripts/productionTopology.test.mjs",
     "test:trusted-linux-fixture": "node --test scripts/linuxTrustedOperations.test.mjs scripts/linuxVolumeOperations.test.mjs scripts/operationLocks.test.mjs",
-    "test:permit-install": "node --test scripts/productionSelfTestPermitInstall.test.mjs scripts/productionSelfTestPermitRecovery.test.mjs scripts/verifyProductionSelfTestPermitState.test.mjs",
+    "test:permit-install": "node --test scripts/productionSelfTestPermitInstall.test.mjs scripts/productionSelfTestPermitRecovery.test.mjs scripts/productionSelfTestPermitTerminalization.test.mjs scripts/productionSelfTestPermitTerminalizationLaunchIdentity.test.mjs scripts/verifyProductionSelfTestPermitState.test.mjs",
     "test:release-bridge": "node --test scripts/legacyReleaseBridge.test.mjs scripts/gcpWifBundle.test.mjs scripts/releaseLifecycleTransaction.test.mjs && node --import tsx --test server/operations/RwaAutomationActivationPreflight.test.ts",
     "test:stage-five-readiness": "node --import tsx --test scripts/stageFiveReadiness.test.mjs",
     "verify:production-safety": "tsx scripts/verify-production-wallet.ts && node scripts/verify-production-config.mjs && node scripts/verify-restore.mjs",

@@ -56,6 +56,9 @@ const permitInstaller = read("scripts/productionSelfTestPermitInstall.mjs");
 const permitInstallWrapper = read("scripts/install-production-self-test-permit.sh");
 const permitRecovery = read("scripts/productionSelfTestPermitRecovery.mjs");
 const permitRecoveryWrapper = read("scripts/recover-production-self-test-permit.sh");
+const permitTerminalization = read("scripts/productionSelfTestPermitTerminalization.mjs");
+const permitTerminalizationLaunchIdentity = read("scripts/productionSelfTestPermitTerminalizationLaunchIdentity.mjs");
+const permitTerminalizationWrapper = read("scripts/terminalize-production-self-test-permit.sh");
 const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
 const capitalTestWindowWrapper = read("scripts/capital-test-window.sh");
 const capitalTestWindowController = read("scripts/capitalTestWindowController.mjs");
@@ -169,6 +172,31 @@ const assertions = [
       && !permitRecoveryWrapper.includes("productionSelfTestPermitInstall.mjs prepare")
       && !permitRecoveryWrapper.includes("capital-test-window.sh"),
     "legacy failed Permit recovery must remain one-shot, receipt-bound, auditable, and separate from installation",
+  ],
+  [
+    trustedOperationLauncher.includes('"terminalize-production-self-test-permit.sh"')
+      && permitTerminalizationWrapper.includes("trusted-operation-preamble.sh")
+      && permitTerminalizationWrapper.includes("terminalize-success")
+      && permitTerminalizationWrapper.includes("productionSelfTestPermitTerminalization.mjs")
+      && permitTerminalization.includes('kind: "expired_success_permit_terminalization"')
+      && permitTerminalization.includes('state: "prepared"')
+      && permitTerminalization.includes('state: "environment_restored"')
+      && permitTerminalization.includes('state: "api_restarted"')
+      && permitTerminalization.includes('state: "completed"')
+      && permitTerminalization.includes("Successful Permit has not expired")
+      && permitTerminalization.includes("source SHA256 mismatch")
+      && permitTerminalization.includes("environment CAS mismatch")
+      && permitTerminalization.includes("verify-production-self-test-permit-state.mjs")
+      && permitTerminalization.includes("persistedStateSafe")
+      && permitTerminalization.includes("assertPromotionStateAllowsProduction")
+      && permitTerminalization.includes('["up", "-d", "api"]')
+      && !permitTerminalization.includes('["up", "-d", "api", "web"]')
+      && permitTerminalizationLaunchIdentity.includes("assertCapitalTestWindowLaunchIdentity")
+      && permitTerminalizationLaunchIdentity.includes("assertPromotionStateAllowsProduction")
+      && trustedDockerRuntime.includes("Permit terminalization Docker arguments are not allowlisted")
+      && !permitTerminalizationWrapper.includes("install-production-self-test-permit")
+      && !permitTerminalizationWrapper.includes("capital-test-window.sh"),
+    "expired successful Permit terminalization must remain one-shot, evidence-preserving, API-only, and promotion-baseline bound",
   ],
   [
     trustedOperationLauncher.includes('"capital-test-window.sh"')

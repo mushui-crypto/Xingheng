@@ -16,8 +16,10 @@ import {
 } from "./operationLocks.mjs";
 import {
   assertNoDockerControlEnvironment,
+  assertTrustedProductionReleaseRoot,
   assertTrustedReleaseRoot,
   openTrustedHostTool,
+  openTrustedPermitTerminalizationShellTool,
   trustedExecutableInvocation,
   verifyTrustedHostTool,
 } from "./trustedDockerRuntime.mjs";
@@ -27,6 +29,7 @@ import {
   validateTrustedPromotionArguments,
 } from "./releasePromotionTransaction.mjs";
 import { assertCapitalTestWindowLaunchIdentity } from "./capitalTestWindowLaunchIdentity.mjs";
+import { assertPermitTerminalizationLaunchIdentity } from "./productionSelfTestPermitTerminalizationLaunchIdentity.mjs";
 
 const operation = process.argv[2];
 const entryArgument = process.argv[3];
@@ -50,14 +53,32 @@ try {
   const candidateRevision = ["release-build", "candidate-verify", "promotion"].includes(operation)
     ? basename(dirname(resolve(currentRoot)))
     : null;
+  const permitTerminalizationRequested = candidateRevision === null
+    && operation === "production"
+    && entryArgument === "scripts/terminalize-production-self-test-permit.sh";
   const root = candidateRevision !== null
     ? assertTrustedReleaseCandidateRoot(currentRoot, candidateRevision).root
-    : assertTrustedReleaseRoot(currentRoot);
+    : (permitTerminalizationRequested
+      ? assertTrustedProductionReleaseRoot(currentRoot).releaseRoot
+      : assertTrustedReleaseRoot(currentRoot));
   if (candidateRevision !== null) {
     process.env.XINGHENG_OPERATION_LOCK_CONTEXT = operation;
     process.env.XINGHENG_RELEASE_CANDIDATE_REVISION = candidateRevision;
   } else {
-    if (operation === "production" && entryArgument === "scripts/capital-test-window.sh") {
+    if (operation === "production"
+      && entryArgument === "scripts/terminalize-production-self-test-permit.sh") {
+      if (args.length !== 3 || args[0] !== "terminalize-success"
+        || !/^[a-f0-9]{64}$/u.test(args[1] ?? "")
+        || !/^[a-f0-9]{32}$/u.test(args[2] ?? "")) {
+        throw new Error("Permit terminalization launcher arguments are invalid");
+      }
+      process.env.XINGHENG_TRUSTED_OPERATION_ENTRY =
+        "terminalize-production-self-test-permit.sh";
+      assertPermitTerminalizationLaunchIdentity({
+        sourceReceiptSha256: args[1],
+        operationId: args[2],
+      });
+    } else if (operation === "production" && entryArgument === "scripts/capital-test-window.sh") {
       assertCapitalTestWindowLaunchIdentity();
     } else {
       assertPromotionStateAllowsProduction();
@@ -87,6 +108,7 @@ try {
       "rollback-release.sh",
       "install-production-self-test-permit.sh",
       "recover-production-self-test-permit.sh",
+      "terminalize-production-self-test-permit.sh",
       "capital-test-window.sh",
       "smoke.sh",
     ];
@@ -105,9 +127,15 @@ try {
   const openedEntry = openTrustedEntry(entry);
   const openedLauncher = openTrustedEntry(resolve(root, "scripts/trusted-operation-launcher.mjs"));
   try {
-    const locks = acquireOperationLocks(operation);
+    const transitionEntry = candidateRevision === null
+      && entryName === "terminalize-production-self-test-permit.sh"
+      ? entryName
+      : undefined;
+    const locks = acquireOperationLocks(operation, { transitionEntry });
     try {
-      const shell = openTrustedHostTool("sh", process.env);
+      const shell = transitionEntry
+        ? openTrustedPermitTerminalizationShellTool(process.env)
+        : openTrustedHostTool("sh", process.env);
       try {
         const childEnvironment = {
           HOME: "/root",
@@ -123,6 +151,7 @@ try {
         if (operation === "production" && [
           "capital-test-window.sh",
           "recover-production-self-test-permit.sh",
+          "terminalize-production-self-test-permit.sh",
         ].includes(entryName)) {
           childEnvironment.XINGHENG_TRUSTED_OPERATION_ENTRY = entryName;
         }
