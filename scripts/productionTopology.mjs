@@ -232,6 +232,7 @@ function assertProviderIdentityPreflight(config, api, environment, project) {
     || preflight.environment?.TRADING_DB_PATH !== "/app/data/trading.sqlite"
     || preflight.environment?.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "true"
     || preflight.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID === undefined
+    || preflight.environment?.XINGHENG_RELEASE_MANIFEST_REVISION === undefined
     || api.environment?.RWA_PROVIDER_PREFLIGHT_USER_ID !== undefined
     || preflight.environment?.RWA_GCP_KMS_KEY_NAME !== api.environment?.RWA_GCP_KMS_KEY_NAME
     || preflight.environment?.RWA_GCP_WIF_AUDIENCE !== api.environment?.RWA_GCP_WIF_AUDIENCE

@@ -142,6 +142,7 @@ function fixture() {
 
   const preflight = service(API, {
     TRADING_DB_PATH: "/app/data/trading.sqlite",
+    XINGHENG_RELEASE_MANIFEST_REVISION: REVISION,
     RWA_PROVIDER_PREFLIGHT_USER_ID: "",
     RWA_AUTOMATION_SERVER_KILL_SWITCH: "true",
     RWA_GCP_KMS_KEY_NAME: api.environment.RWA_GCP_KMS_KEY_NAME,

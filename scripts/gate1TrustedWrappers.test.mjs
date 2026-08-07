@@ -10,6 +10,7 @@ test("Gate 1 wrappers expose only fixed Compose invocations", () => {
   const providerSource = readFileSync(provider, "utf8");
   const backupSource = readFileSync(backup, "utf8");
   assert.match(providerSource, /--profile provider-identity-preflight run --rm --no-deps provider-identity-preflight/u);
+  assert.match(providerSource, /XINGHENG_RELEASE_MANIFEST_REVISION="\$XINGHENG_REVISION"/u);
   assert.match(backupSource, /--profile rwa-automation-verify run --rm --no-deps rwa-automation-verify/u);
   for (const source of [providerSource, backupSource]) {
     assert.doesNotMatch(source, /run[^\n]*\s-e\s|--entrypoint|--command|--env-file/u);

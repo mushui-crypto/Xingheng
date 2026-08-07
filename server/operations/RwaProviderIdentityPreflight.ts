@@ -6,7 +6,10 @@ import type {
   RwaBinanceCredentials,
   RwaBinancePermissions,
 } from "../modules/arbitrage/automation/RwaBinanceAutomationTypes";
-import { RwaBinanceMainnetClient } from "../modules/arbitrage/automation/RwaBinanceMainnetClient";
+import {
+  RwaBinanceMainnetClient,
+  RwaBinanceProviderError,
+} from "../modules/arbitrage/automation/RwaBinanceMainnetClient";
 import {
   binanceCredentialBindingSha256,
   RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
@@ -20,6 +23,8 @@ export type ProviderIdentityReceipt = {
   deploymentEnvironment: "production";
   composeProject: "xingheng";
   revision: string;
+  releaseManifestRevision: string;
+  runtimeIdentityMatchesManifest: true;
   userIdSha256: string;
   venue: "binance";
   bindingDomain: typeof RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN;
@@ -112,6 +117,7 @@ type Dependencies = {
   };
   serverKillSwitch?: () => string | undefined;
   expectedRevision?: () => string | undefined;
+  releaseManifestRevision?: () => string | undefined;
   userId?: () => string | undefined;
   createStore?: (userId: string) => Store;
   createClient?: (credentials: RwaBinanceCredentials) => Client;
@@ -122,7 +128,12 @@ type Dependencies = {
 export async function runRwaProviderIdentityPreflight(
   dependencies: Dependencies = {},
 ): Promise<ProviderIdentityReceipt> {
-  const config = (dependencies.loadConfig ?? loadRuntimeConfig)();
+  let config;
+  try {
+    config = (dependencies.loadConfig ?? loadRuntimeConfig)();
+  } catch {
+    throw new ProviderIdentityPreflightError("deployment_identity_invalid");
+  }
   const deploymentEnvironment = config.deploymentEnvironment;
   const composeProject = config.composeProject;
   if (deploymentEnvironment !== "production" || composeProject !== "xingheng") {
@@ -135,8 +146,16 @@ export async function runRwaProviderIdentityPreflight(
   }
   const revision = (dependencies.expectedRevision
     ?? (() => process.env.XINGHENG_EXPECTED_REVISION))();
-  if (!/^[a-f0-9]{40}$/u.test(revision ?? "")) {
+  const releaseManifestRevision = (dependencies.releaseManifestRevision
+    ?? (() => process.env.XINGHENG_RELEASE_MANIFEST_REVISION))();
+  if (
+    !/^[a-f0-9]{40}$/u.test(revision ?? "")
+    || !/^[a-f0-9]{40}$/u.test(releaseManifestRevision ?? "")
+  ) {
     throw new ProviderIdentityPreflightError("deployment_revision_invalid");
+  }
+  if (revision !== releaseManifestRevision) {
+    throw new ProviderIdentityPreflightError("runtime_release_identity_mismatch");
   }
   const userId = (dependencies.userId
     ?? (() => process.env.RWA_PROVIDER_PREFLIGHT_USER_ID))()?.trim();
@@ -160,31 +179,31 @@ export async function runRwaProviderIdentityPreflight(
     }));
   const createClient = dependencies.createClient
     ?? ((credentials: RwaBinanceCredentials) => new RwaBinanceMainnetClient(credentials));
-  const store = createStore(userId!);
-  const binding = await store.readCredentialBinding();
+  const store = await diagnosticStage("kms_credential", async () => createStore(userId!));
+  const binding = await diagnosticStage("uid_binding", () => store.readCredentialBinding());
   if (!binding || binding.status !== "active") {
-    throw new ProviderIdentityPreflightError("provider_credential_unconfigured");
+    throw new ProviderIdentityPreflightError("uid_binding");
   }
-  const credentials = await store.loadCredentials();
-  const client = createClient(credentials);
-  const authoritative = await client.validateAccess();
+  const credentials = await diagnosticStage("kms_credential", () => store.loadCredentials());
+  const client = await diagnosticStage("binance_permission_api", async () => createClient(credentials));
+  const authoritative = await diagnosticStageForProviderIdentity(() => client.validateAccess());
   if (authoritative.uidSnapshot !== binding.uidSnapshot) {
-    throw new ProviderIdentityPreflightError("provider_identity_mismatch");
+    throw new ProviderIdentityPreflightError("uid_binding");
   }
-  const snapshot = await client.readPreflightSnapshot();
+  const snapshot = await diagnosticStageForSnapshot(() => client.readPreflightSnapshot());
   if (snapshot.uidSnapshot !== binding.uidSnapshot) {
-    throw new ProviderIdentityPreflightError("provider_identity_mismatch");
+    throw new ProviderIdentityPreflightError("uid_binding");
   }
-  const streamProbe = await (dependencies.probeStreams ?? probeBinanceGate1UserStreams)(
-    credentials,
-  );
-  const confirmedBinding = await store.readCredentialBinding();
+  const streamProbe = await diagnosticStage("stream_probe", () => (
+    dependencies.probeStreams ?? probeBinanceGate1UserStreams
+  )(credentials));
+  const confirmedBinding = await diagnosticStage("uid_binding", () => store.readCredentialBinding());
   if (
     !confirmedBinding
     || confirmedBinding.status !== "active"
     || !sameBindingIdentity(binding, confirmedBinding)
   ) {
-    throw new ProviderIdentityPreflightError("provider_identity_mismatch");
+    throw new ProviderIdentityPreflightError("uid_binding");
   }
   return {
     schemaVersion: 2,
@@ -192,6 +211,8 @@ export async function runRwaProviderIdentityPreflight(
     deploymentEnvironment,
     composeProject,
     revision: revision!,
+    releaseManifestRevision: releaseManifestRevision!,
+    runtimeIdentityMatchesManifest: true,
     userIdSha256: digest(userId!),
     venue: binding.venue,
     bindingDomain: RWA_BINANCE_PRODUCTION_SELF_TEST_BINDING_DOMAIN,
@@ -257,13 +278,83 @@ export async function probeBinanceGate1UserStreams(
 export function providerIdentityPreflightErrorCategory(error: unknown) {
   return error instanceof ProviderIdentityPreflightError
     ? error.category
-    : "provider_identity_preflight_failed";
+    : "binance_permission_api";
+}
+
+export function providerIdentityPreflightFailureReceipt(
+  error: unknown,
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  const runtimeRevision = safeRevision(environment.XINGHENG_EXPECTED_REVISION);
+  const releaseManifestRevision = safeRevision(environment.XINGHENG_RELEASE_MANIFEST_REVISION);
+  return {
+    schemaVersion: 1,
+    receiptType: "provider_identity_preflight_diagnostic" as const,
+    status: "failed" as const,
+    provider: "binance" as const,
+    deploymentEnvironment: "production" as const,
+    composeProject: "xingheng" as const,
+    runtimeRevision,
+    releaseManifestRevision,
+    runtimeIdentityMatchesManifest: runtimeRevision !== null
+      && runtimeRevision === releaseManifestRevision,
+    category: providerIdentityPreflightErrorCategory(error),
+    readOnly: true as const,
+  };
 }
 
 class ProviderIdentityPreflightError extends Error {
   constructor(readonly category: string) {
     super(category);
   }
+}
+
+type DiagnosticCategory =
+  | "kms_credential"
+  | "uid_binding"
+  | "binance_permission_api"
+  | "product_rule"
+  | "stream_probe";
+
+async function diagnosticStage<T>(category: DiagnosticCategory, operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    if (error instanceof ProviderIdentityPreflightError) throw error;
+    throw new ProviderIdentityPreflightError(category);
+  }
+}
+
+function diagnosticStageForProviderIdentity<T>(operation: () => Promise<T>) {
+  return diagnosticStageWithProviderMapping(operation, new Set(["provider_identity_unavailable"]), "uid_binding");
+}
+
+function diagnosticStageForSnapshot<T>(operation: () => Promise<T>) {
+  return diagnosticStageWithProviderMapping(
+    operation,
+    new Set(["provider_product_unavailable", "provider_snapshot_invalid"]),
+    "product_rule",
+  );
+}
+
+async function diagnosticStageWithProviderMapping<T>(
+  operation: () => Promise<T>,
+  mappedProviderCategories: ReadonlySet<string>,
+  mappedCategory: DiagnosticCategory,
+): Promise<T> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw new ProviderIdentityPreflightError(
+      error instanceof RwaBinanceProviderError && mappedProviderCategories.has(error.category)
+        ? mappedCategory
+        : "binance_permission_api",
+    );
+  }
+}
+
+function safeRevision(value: string | undefined) {
+  return /^[a-f0-9]{40}$/u.test(value ?? "") ? value! : null;
 }
 
 function digest(value: string) {

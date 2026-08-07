@@ -12,6 +12,7 @@ esac
 export RWA_PROVIDER_PREFLIGHT_USER_ID="$owner_id"
 
 . scripts/load-release-manifest.sh
+export XINGHENG_RELEASE_MANIFEST_REVISION="$XINGHENG_REVISION"
 verify_production_compose >/dev/null
 node scripts/verify-deployment-revision.mjs images "$release_manifest" >/dev/null
 verify_release_containers

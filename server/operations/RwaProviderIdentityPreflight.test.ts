@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { RwaBinanceProductionSelfTestBinding } from "../modules/arbitrage/automation/RwaBinanceProductionSelfTestPermit";
+import { RwaBinanceProviderError } from "../modules/arbitrage/automation/RwaBinanceMainnetClient";
 import {
   providerIdentityPreflightErrorCategory,
+  providerIdentityPreflightFailureReceipt,
   runRwaProviderIdentityPreflight,
 } from "./RwaProviderIdentityPreflight";
 
@@ -55,6 +57,7 @@ test("provider identity preflight binds authoritative access to stored metadata 
     }),
     serverKillSwitch: () => "true",
     expectedRevision: () => REVISION,
+    releaseManifestRevision: () => REVISION,
     userId: () => "USR-FIXTURE",
     createStore: () => ({
       readCredentialBinding: async () => {
@@ -80,6 +83,8 @@ test("provider identity preflight binds authoritative access to stored metadata 
   assert.equal(validateCount, 1);
   assert.equal(readBindingCount, 2);
   assert.equal(receipt.deploymentEnvironment, "production");
+  assert.equal(receipt.releaseManifestRevision, REVISION);
+  assert.equal(receipt.runtimeIdentityMatchesManifest, true);
   assert.equal(receipt.accountMode, "single_asset_one_way");
   assert.equal(receipt.bindingVersion, 3);
   assert.equal(receipt.venue, "binance");
@@ -143,6 +148,7 @@ test("binding must remain unchanged across preflight receipt generation", async 
         }),
         serverKillSwitch: () => "true",
         expectedRevision: () => REVISION,
+        releaseManifestRevision: () => REVISION,
         userId: () => "USR-FIXTURE",
         createStore: () => ({
           readCredentialBinding: async () => raceCase.bindings[Math.min(readIndex++, raceCase.bindings.length - 1)] ?? null,
@@ -154,7 +160,7 @@ test("binding must remain unchanged across preflight receipt generation", async 
         }),
         probeStreams: async () => STREAM_PROBE,
       }),
-      /provider_identity_mismatch/u,
+      /uid_binding/u,
       raceCase.label,
     );
     assert.equal(readIndex, 2, raceCase.label);
@@ -169,6 +175,7 @@ test("missing kill switch, metadata, read failure and binding mismatch all fail 
     }),
     serverKillSwitch: () => "true",
     expectedRevision: () => REVISION,
+    releaseManifestRevision: () => REVISION,
     userId: () => "USR-FIXTURE",
     createStore: () => ({
       readCredentialBinding: async () => activeBinding(),
@@ -253,6 +260,7 @@ test("invalid runtime identity is rejected before credential metadata is opened"
         loadConfig: loadConfig as never,
         serverKillSwitch: () => "true",
         expectedRevision: () => REVISION,
+        releaseManifestRevision: () => REVISION,
         userId: () => "USR-FIXTURE",
         createStore: () => {
           storeCreateCount += 1;
@@ -272,6 +280,7 @@ test("provider owner accepts only one canonical USR uppercase identity", async (
       loadConfig: () => ({ deploymentEnvironment: "production", composeProject: "xingheng" }),
       serverKillSwitch: () => "true",
       expectedRevision: () => REVISION,
+      releaseManifestRevision: () => REVISION,
       userId: () => owner,
       createStore: () => {
         storeCreateCount += 1;
@@ -282,9 +291,119 @@ test("provider owner accepts only one canonical USR uppercase identity", async (
   }
 });
 
-test("unexpected failures expose only a stable category", () => {
+test("unexpected failures expose only a stable diagnostic category and non-empty safe receipt", () => {
+  const secret = new Error("secret provider payload API-KEY-123");
   assert.equal(
-    providerIdentityPreflightErrorCategory(new Error("secret provider payload")),
-    "provider_identity_preflight_failed",
+    providerIdentityPreflightErrorCategory(secret),
+    "binance_permission_api",
   );
+  const receipt = providerIdentityPreflightFailureReceipt(secret, {
+    XINGHENG_EXPECTED_REVISION: REVISION,
+    XINGHENG_RELEASE_MANIFEST_REVISION: REVISION,
+  });
+  const serialized = JSON.stringify(receipt);
+  assert.ok(serialized.length > 0);
+  assert.deepEqual(Object.keys(receipt).sort(), [
+    "category", "composeProject", "deploymentEnvironment", "provider", "readOnly",
+    "receiptType", "releaseManifestRevision", "runtimeIdentityMatchesManifest",
+    "runtimeRevision", "schemaVersion", "status",
+  ].sort());
+  assert.equal(receipt.runtimeIdentityMatchesManifest, true);
+  assert.doesNotMatch(serialized, /secret|API-KEY-123/u);
+});
+
+test("runtime and release manifest identity mismatch fails before credential or Provider access", async () => {
+  let storeCreateCount = 0;
+  await assert.rejects(
+    runRwaProviderIdentityPreflight({
+      loadConfig: () => ({ deploymentEnvironment: "production", composeProject: "xingheng" }),
+      serverKillSwitch: () => "true",
+      expectedRevision: () => REVISION,
+      releaseManifestRevision: () => "b".repeat(40),
+      userId: () => "USR-FIXTURE",
+      createStore: () => {
+        storeCreateCount += 1;
+        throw new Error("must not open credentials");
+      },
+    }),
+    /runtime_release_identity_mismatch/u,
+  );
+  assert.equal(storeCreateCount, 0);
+});
+
+test("provider failures map to the five diagnostic categories without raw error text", async () => {
+  const base = {
+    loadConfig: () => ({ deploymentEnvironment: "production" as const, composeProject: "xingheng" as const }),
+    serverKillSwitch: () => "true",
+    expectedRevision: () => REVISION,
+    releaseManifestRevision: () => REVISION,
+    userId: () => "USR-FIXTURE",
+    createStore: () => ({
+      readCredentialBinding: async () => activeBinding(),
+      loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+    }),
+    createClient: () => ({
+      validateAccess: async () => IDENTITY,
+      readPreflightSnapshot: async () => SNAPSHOT,
+    }),
+    probeStreams: async () => STREAM_PROBE,
+  };
+  const cases = [
+    {
+      category: "kms_credential",
+      dependencies: {
+        ...base,
+        createStore: () => ({
+          readCredentialBinding: async () => activeBinding(),
+          loadCredentials: async () => { throw new Error("raw kms secret"); },
+        }),
+      },
+    },
+    {
+      category: "uid_binding",
+      dependencies: {
+        ...base,
+        createStore: () => ({
+          readCredentialBinding: async () => null,
+          loadCredentials: async () => ({ apiKey: "fixture-key", apiSecret: "fixture-secret" }),
+        }),
+      },
+    },
+    {
+      category: "binance_permission_api",
+      dependencies: {
+        ...base,
+        createClient: () => ({
+          validateAccess: async () => { throw new Error("raw Binance response"); },
+          readPreflightSnapshot: async () => SNAPSHOT,
+        }),
+      },
+    },
+    {
+      category: "product_rule",
+      dependencies: {
+        ...base,
+        createClient: () => ({
+          validateAccess: async () => IDENTITY,
+          readPreflightSnapshot: async () => {
+            throw new RwaBinanceProviderError("provider_product_unavailable", "raw product payload");
+          },
+        }),
+      },
+    },
+    {
+      category: "stream_probe",
+      dependencies: { ...base, probeStreams: async () => { throw new Error("raw stream payload"); } },
+    },
+  ];
+  for (const item of cases) {
+    let captured: unknown;
+    try {
+      await runRwaProviderIdentityPreflight(item.dependencies as never);
+    } catch (error) {
+      captured = error;
+    }
+    assert.equal(providerIdentityPreflightErrorCategory(captured), item.category);
+    assert.doesNotMatch(String(captured), /raw|secret|payload/u);
+  }
 });
