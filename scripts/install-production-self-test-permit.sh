@@ -23,10 +23,15 @@ case "$permit_digest" in
 esac
 [ "${#permit_digest}" -eq 64 ] || { echo "Permit digest is invalid" >&2; exit 1; }
 stage=prepared
+transient_descriptor=
 
 finish_failure() {
   status="$?"
   trap - EXIT
+  if [ -n "$transient_descriptor" ]; then
+    node -e 'try { require("node:fs").unlinkSync(process.argv[1]); } catch (error) { if (error.code !== "ENOENT") throw error; }' \
+      "$transient_descriptor" >/dev/null 2>&1 || true
+  fi
   if [ "$stage" = prepared ]; then
     node scripts/productionSelfTestPermitInstall.mjs failed "$operation_id" >/dev/null 2>&1 || true
   elif [ "$stage" = restarting ]; then
@@ -38,6 +43,16 @@ trap finish_failure EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+transient_descriptor="$(node scripts/productionSelfTestPermitInstall.mjs transient-descriptor "$operation_id")"
+[ "$transient_descriptor" = "/run/xingheng/permit-prepared-transient-$operation_id.json" ] || {
+  echo "Permit prepared transient descriptor path is invalid" >&2
+  exit 1
+}
+exec 8<"$transient_descriptor"
+node -e 'require("node:fs").unlinkSync(process.argv[1])' "$transient_descriptor"
+transient_descriptor=
+export XINGHENG_PERMIT_PREPARED_TRANSIENT_FD=8
 
 node scripts/verify-compose-environment-file.mjs production \
   exec -T api node /app/scripts/verify-production-self-test-permit-state.mjs "$owner_user_id"

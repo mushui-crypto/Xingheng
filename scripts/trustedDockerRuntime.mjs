@@ -64,6 +64,7 @@ const REQUIRED_TOOLS = Object.freeze({
   compose: PRODUCTION_COMPOSE_PLUGIN,
 });
 const permitPreparedDockerContexts = new WeakSet();
+export const PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD = 8;
 
 export function assertNoDockerControlEnvironment(source = process.env) {
   const key = Object.keys(source).find((name) =>
@@ -137,14 +138,64 @@ export function openTrustedPermitPreparedDockerRuntime(kind, source, context) {
   if (!permitPreparedDockerContexts.has(context)) {
     throw new Error("Permit prepared transient Docker context was not issued by the trusted validator");
   }
-  assertPermitPreparedTransientRuntimeContext(context, source, true);
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
   return openTrustedDockerRuntimeAfterLifecycleValidation(kind, source);
 }
 
 export function createTrustedPermitPreparedDockerContext(context, source = process.env) {
-  assertPermitPreparedTransientRuntimeContext(context, source, true);
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
   permitPreparedDockerContexts.add(context);
   return context;
+}
+
+export function serializeTrustedPermitPreparedDockerContext(context, source = process.env) {
+  if (!permitPreparedDockerContexts.has(context)) {
+    throw new Error("Permit prepared transient Docker context was not issued by the trusted validator");
+  }
+  assertPermitPreparedTransientRuntimeContext(context, source, testFixture(source) === null);
+  return Buffer.from(`${canonicalContextJson(context)}\n`);
+}
+
+export function restoreTrustedPermitPreparedDockerContext(
+  expectedContext,
+  source = process.env,
+  descriptorFd = PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD,
+) {
+  if (!permitPreparedDockerContexts.has(expectedContext)) {
+    throw new Error("Permit prepared transient expected context was not issued by the trusted validator");
+  }
+  if (descriptorFd !== PERMIT_PREPARED_TRANSIENT_DESCRIPTOR_FD
+    || source.XINGHENG_PERMIT_PREPARED_TRANSIENT_FD !== String(descriptorFd)) {
+    throw new Error("Permit prepared transient descriptor is not authorized");
+  }
+  const testMode = testFixture(source) !== null;
+  const before = fstatSync(descriptorFd);
+  const expectedUid = testMode ? (process.getuid?.() ?? -1) : 0;
+  const expectedGid = testMode ? (process.getgid?.() ?? -1) : 0;
+  if (!before.isFile() || before.uid !== expectedUid || before.gid !== expectedGid
+    || (before.mode & 0o777) !== 0o400 || before.size < 2 || before.size > MAX_RECEIPT_BYTES
+    || (!testMode && before.nlink !== 0) || (testMode && ![0, 1].includes(before.nlink))) {
+    throw new Error("Permit prepared transient descriptor boundary is invalid");
+  }
+  const bytes = readDescriptorBytes(descriptorFd, before.size);
+  try {
+    const after = fstatSync(descriptorFd);
+    if (after.dev !== before.dev || after.ino !== before.ino || after.size !== before.size
+      || after.uid !== before.uid || after.gid !== before.gid || after.nlink !== before.nlink
+      || after.mtimeMs !== before.mtimeMs || after.ctimeMs !== before.ctimeMs
+      || (after.mode & 0o777) !== (before.mode & 0o777)) {
+      throw new Error("Permit prepared transient descriptor changed while reading");
+    }
+    const restored = Object.freeze(JSON.parse(bytes.toString("utf8")));
+    if (canonicalContextJson(restored) !== canonicalContextJson(expectedContext)) {
+      throw new Error("Permit prepared transient descriptor identity mismatch");
+    }
+    assertPermitPreparedTransientRuntimeContext(restored, source, !testMode);
+    permitPreparedDockerContexts.add(restored);
+    return restored;
+  } finally {
+    bytes.fill(0);
+  }
 }
 
 function openTrustedDockerRuntimeAfterLifecycleValidation(kind, source) {
@@ -436,6 +487,27 @@ export function execTrustedDockerSync(args, options = {}) {
     validateTrustedReleaseBuildDockerArguments(args);
   }
   const runtime = openTrustedDockerRuntime("docker", process.env);
+  try {
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
+    const baseStdio = options.stdio ?? ["inherit", "inherit", "inherit"];
+    if (!Array.isArray(baseStdio) || baseStdio.length !== 3) {
+      throw new Error("trusted Docker stdio boundary is invalid");
+    }
+    const output = execFileSync(trustedExecutableInvocation(runtime, 3), args, {
+      ...options,
+      env: runtime.environment,
+      stdio: [...baseStdio, runtime.fd],
+    });
+    verifyTrustedDockerRuntime(runtime);
+    process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "consumed")}\n`);
+    return output;
+  } finally {
+    runtime.close();
+  }
+}
+
+export function execTrustedPermitPreparedDockerSync(args, context, options = {}) {
+  const runtime = openTrustedPermitPreparedDockerRuntime("docker", process.env, context);
   try {
     process.stderr.write(`${trustedDockerReceipt(runtime, "docker", "validated")}\n`);
     const baseStdio = options.stdio ?? ["inherit", "inherit", "inherit"];
@@ -1023,6 +1095,13 @@ function canonicalJson(value) {
   return JSON.stringify(value, Object.keys(value).sort());
 }
 
+function canonicalContextJson(value) {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalContextJson).join(",")}]`;
+  return `{${Object.keys(value).sort().map((key) =>
+    `${JSON.stringify(key)}:${canonicalContextJson(value[key])}`).join(",")}}`;
+}
+
 function sha256Text(value) {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -1039,5 +1118,21 @@ function sha256Descriptor(fd, size) {
     return createHash("sha256").update(bytes).digest("hex");
   } finally {
     bytes.fill(0);
+  }
+}
+
+function readDescriptorBytes(fd, size) {
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  try {
+    while (offset < size) {
+      const count = readSync(fd, bytes, offset, size - offset, offset);
+      if (count === 0) throw new Error("Permit prepared transient descriptor was truncated");
+      offset += count;
+    }
+    return bytes;
+  } catch (error) {
+    bytes.fill(0);
+    throw error;
   }
 }

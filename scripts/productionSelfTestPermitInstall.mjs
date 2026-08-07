@@ -23,7 +23,10 @@ import { inheritedOperationLocks } from "./operationLocks.mjs";
 import {
   assertTrustedProductionReleaseRoot,
   createTrustedPermitPreparedDockerContext,
+  execTrustedPermitPreparedDockerSync,
   execTrustedDockerSync,
+  restoreTrustedPermitPreparedDockerContext,
+  serializeTrustedPermitPreparedDockerContext,
 } from "./trustedDockerRuntime.mjs";
 import {
   PERMIT_RECOVERY_ROOT,
@@ -37,6 +40,7 @@ export const RELEASE_LIFECYCLE_POINTER = "/var/lib/xingheng/release-lifecycle/cu
 export const RELEASE_LIFECYCLE_OPERATIONS = "/var/lib/xingheng/release-lifecycle/operations";
 export const PERMIT_INSTALL_WRAPPER = "/opt/xingheng-release/code/scripts/install-production-self-test-permit.sh";
 export const TRUSTED_OPERATION_LAUNCHER = "/opt/xingheng-release/code/scripts/trusted-operation-launcher.mjs";
+export const PERMIT_PREPARED_TRANSIENT_ROOT = "/run/xingheng";
 export const PERMIT_ENV_KEYS = Object.freeze([
   "RWA_BINANCE_PRODUCTION_SELF_TEST_ENABLED",
   "RWA_BINANCE_PRODUCTION_SELF_TEST_PERMIT_ID",
@@ -398,11 +402,20 @@ function assertWebUnchanged(before, after) {
 }
 
 function productionDocker(args) {
-  return execTrustedDockerSync(args, {
+  const options = {
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
     stdio: ["ignore", "pipe", "pipe"],
+  };
+  if (process.env.XINGHENG_PERMIT_PREPARED_TRANSIENT_FD === undefined) {
+    return execTrustedDockerSync(args, options);
+  }
+  const context = restorePermitPreparedTransientContext({
+    operationId: process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID,
+    operationEntry: process.env.XINGHENG_TRUSTED_OPERATION_ENTRY,
+    dockerArgs: args,
   });
+  return execTrustedPermitPreparedDockerSync(args, context, options);
 }
 
 function revalidateReleaseIdentity(receipt, paths, options) {
@@ -461,14 +474,60 @@ export function assertPermitEnvironmentAuthorized(input) {
 }
 
 export function assertPermitPreparedTransientContext(input) {
+  assertTrustedMutationContext(input.operationId ?? "");
+  const options = input.options ?? {};
+  const receipt = readInstallReceipt(installPaths(options).receiptPath, options);
+  if (!isPermitInstallComposeOperation(input.composeArgs, receipt.request.ownerUserId)) {
+    throw new Error("Permit prepared transient context is not authorized");
+  }
+  return createPermitPreparedTransientContext(input);
+}
+
+export function createPermitPreparedTransientDescriptor(operationId, options = {}) {
+  const context = createPermitPreparedTransientContext({
+    operationId,
+    operationEntry: process.env.XINGHENG_TRUSTED_OPERATION_ENTRY,
+    environmentPath: options.environmentPath,
+    options,
+  });
+  const bytes = serializeTrustedPermitPreparedDockerContext(context, process.env);
+  const path = resolve(options.transientDescriptorPath
+    ?? `${PERMIT_PREPARED_TRANSIENT_ROOT}/permit-prepared-transient-${operationId}.json`);
+  try {
+    atomicWrite(path, bytes, 0o400, options);
+    return path;
+  } finally {
+    bytes.fill(0);
+  }
+}
+
+export function restorePermitPreparedTransientContext(input) {
+  assertTrustedMutationContext(input.operationId ?? "");
+  const options = input.options ?? {};
+  const receipt = readInstallReceipt(installPaths(options).receiptPath, options);
+  const composeAllowed = input.composeArgs !== undefined
+    && isPermitInstallComposeOperation(input.composeArgs, receipt.request.ownerUserId);
+  const dockerAllowed = input.dockerArgs !== undefined
+    && isPermitInstallDockerOperation(input.dockerArgs, receipt);
+  if (!composeAllowed && !dockerAllowed) {
+    throw new Error("Permit prepared transient operation is not authorized");
+  }
+  const expected = createPermitPreparedTransientContext(input);
+  return restoreTrustedPermitPreparedDockerContext(
+    expected,
+    process.env,
+    Number(process.env.XINGHENG_PERMIT_PREPARED_TRANSIENT_FD),
+  );
+}
+
+function createPermitPreparedTransientContext(input) {
   const operationId = input.operationId ?? "";
   const trusted = assertTrustedMutationContext(operationId);
   const paths = installPaths(input.options ?? {});
   const receipt = readInstallReceipt(paths.receiptPath, input.options ?? {});
   if (receipt.status !== "prepared"
     || input.operationEntry !== "install-production-self-test-permit.sh"
-    || operationId !== receipt.operationId
-    || !isPermitInstallComposeOperation(input.composeArgs, receipt.request.ownerUserId)) {
+    || operationId !== receipt.operationId) {
     throw new Error("Permit prepared transient context is not authorized");
   }
   revalidateReleaseIdentity(receipt, paths, input.options ?? {});
@@ -500,16 +559,19 @@ export function assertPermitPreparedTransientContext(input) {
     || receipt.permit.authorizationDigest !== authorizationManifestSha256) {
     throw new Error("Permit prepared transient authorization binding mismatch");
   }
-  const receiptSha256 = secureFileSha256(
+  const currentReceiptSha256 = secureFileSha256(
     paths.receiptPath,
     64 * 1024,
     0o400,
     input.options ?? {},
   );
   const confirmedReceipt = readInstallReceipt(paths.receiptPath, input.options ?? {});
-  if (canonicalJson(confirmedReceipt) !== canonicalJson(receipt)) {
+  if (canonicalJson(confirmedReceipt) !== canonicalJson(receipt)
+    || secureFileSha256(paths.receiptPath, 64 * 1024, 0o400, input.options ?? {})
+      !== currentReceiptSha256) {
     throw new Error("Permit prepared transient receipt changed during validation");
   }
+  const receiptSha256 = preparedInstallReceiptSha256(receipt);
   return createTrustedPermitPreparedDockerContext(Object.freeze({
     schemaVersion: 1,
     kind: "permit-prepared-transient",
@@ -832,6 +894,41 @@ function isPermitInstallComposeOperation(args, ownerUserId) {
       && args[5] === ownerUserId);
 }
 
+function isPermitInstallDockerOperation(args, receipt) {
+  const containerId = /^[a-f0-9]{12,64}$/u;
+  if (args.length === 8
+    && args[0] === "ps" && args[1] === "-a"
+    && args[2] === "--filter" && args[3] === "label=com.docker.compose.project=xingheng"
+    && args[4] === "--filter"
+    && new Set([
+      "label=com.docker.compose.service=api",
+      "label=com.docker.compose.service=web",
+    ]).has(args[5])
+    && args[6] === "--format" && args[7] === "{{.ID}}") return true;
+  if (args.length === 3 && args[0] === "container" && args[1] === "inspect"
+    && containerId.test(args[2])) return true;
+  return args.length === 11 && args[0] === "exec" && containerId.test(args[1])
+    && args[2] === "node"
+    && args[3] === "/app/scripts/verify-production-self-test-permit-state.mjs"
+    && args[4] === receipt.request.ownerUserId && args[5] === "runtime"
+    && args[6] === receipt.permit.digest
+    && args[7] === receipt.releaseIdentity.releaseRevision
+    && args[8] === receipt.request.authorizationManifestSha256
+    && args[9] === receipt.expiresAt
+    && args[10] === receipt.permit.executionMode;
+}
+
+function preparedInstallReceiptSha256(receipt) {
+  const prepared = {
+    ...receipt,
+    status: "prepared",
+    runtimeBefore: null,
+    runtimeAfter: null,
+    updatedAt: receipt.activatedAt,
+  };
+  return sha256(Buffer.from(`${JSON.stringify(prepared)}\n`));
+}
+
 function markPreparedReceiptUnknown(path, receipt, now, options = {}) {
   const terminal = {
     ...receipt,
@@ -1055,6 +1152,12 @@ async function main() {
     process.stdout.write(`${receipt.operationId} ${receipt.request.ownerUserId} ${receipt.permit.digest}\n`);
     return;
   }
+  if (command === "transient-descriptor") {
+    const operationId = process.argv[3] ?? "";
+    assertTrustedMutationContext(operationId);
+    process.stdout.write(`${createPermitPreparedTransientDescriptor(operationId)}\n`);
+    return;
+  }
   if (["runtime-before", "runtime-after"].includes(command)) {
     const operationId = process.argv[3] ?? "";
     assertTrustedMutationContext(operationId);
@@ -1068,7 +1171,7 @@ async function main() {
     finalizePermitInstallation(command, operationId);
     return;
   }
-  throw new Error("usage: productionSelfTestPermitInstall.mjs prepare|runtime-before|runtime-after|success|failed|unknown OPERATION_ID");
+  throw new Error("usage: productionSelfTestPermitInstall.mjs prepare|transient-descriptor|runtime-before|runtime-after|success|failed|unknown OPERATION_ID");
 }
 
 function assertTrustedMutationContext(operationId) {

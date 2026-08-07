@@ -24,8 +24,8 @@ import {
 import { inheritedOperationLocks } from "./operationLocks.mjs";
 import {
   assertPermitEnvironmentAuthorized,
-  assertPermitPreparedTransientContext,
   PERMIT_INSTALL_RECEIPT,
+  restorePermitPreparedTransientContext,
 } from "./productionSelfTestPermitInstall.mjs";
 
 const environment = process.argv[2];
@@ -53,7 +53,7 @@ try {
     process.env.XINGHENG_TRUSTED_OPERATION_ENTRY === "install-production-self-test-permit.sh"
     && process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID !== undefined;
   const permitPreparedContext = permitPreparedRequested
-    ? assertPermitPreparedTransientContext({
+    ? restorePermitPreparedTransientContext({
       operationId: process.env.XINGHENG_PERMIT_INSTALL_OPERATION_ID,
       operationEntry: process.env.XINGHENG_TRUSTED_OPERATION_ENTRY,
       composeArgs,
