@@ -9,6 +9,7 @@ services:
       NODE_ENV: production
       API_PORT: "8787"
       GIT_COMMIT: "${GIT_COMMIT:-development}"
+      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
       TRADING_DB_PATH: /app/data/trading.sqlite
       BINANCE_TRADING_DB_PATH: /app/data/binance-personal.sqlite
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
@@ -25,6 +26,12 @@ services:
       - sqlite_data:/app/data
       - strategy_data:/app/strategy-data
       - sqlite_backups:/backups
+      - type: bind
+        source: "${GOOGLE_ADC_DIR:?GOOGLE_ADC_DIR is required}"
+        target: /run/secrets/gcp-wif
+        read_only: true
+        bind:
+          create_host_path: false
     command: ["node", "dist-server/index.js"]
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))"]
