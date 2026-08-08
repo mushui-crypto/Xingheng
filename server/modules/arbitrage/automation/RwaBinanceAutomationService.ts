@@ -88,10 +88,12 @@ import {
 import {
   appendConnectivitySmokeTimeline,
   calculateConnectivitySmokeBudget,
+  connectivitySmokeBudgetInvariantFailures,
   assertConnectivitySmokePolicyAcceptance,
   connectivitySmokePolicyDiscovery,
   isActiveConnectivitySmoke,
   newSmokeOrderPrefix,
+  RWA_CONNECTIVITY_SMOKE_CAPITAL_LIMIT_USD,
   RWA_CONNECTIVITY_SMOKE_PURPOSE,
   RWA_CONNECTIVITY_SMOKE_POLICY,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
@@ -1828,7 +1830,7 @@ export class RwaBinanceAutomationService {
     const futuresQuantity = floorStep(smoke.openedSpotQuantityXaut, afterSpot.perpetual.qtyStep);
     if (
       futuresQuantity < afterSpot.perpetual.minOrderQty
-      || futuresQuantity * afterSpot.perpetual.bid < afterSpot.perpetual.minNotionalUsd
+      || futuresQuantity * smoke.budget.prices.futuresOpenLimit < afterSpot.perpetual.minNotionalUsd
     ) {
       await this.reduceConnectivitySmokeRisk(client, state, smoke);
       return;
@@ -2994,7 +2996,9 @@ export class RwaBinanceAutomationService {
     metadata: BinanceCredentialMetadata,
     access: Awaited<ReturnType<RwaBinanceClient["validateAccess"]>>,
   ) {
-    if (!this.productionEnvironment()) return config.maxStrategyCapitalUsd;
+    if (!this.productionEnvironment()) {
+      return Math.min(config.maxStrategyCapitalUsd, RWA_CONNECTIVITY_SMOKE_CAPITAL_LIMIT_USD);
+    }
     return this.requireMatchingProductionSelfTestPermit(metadata, access).approvedCapitalUsd;
   }
 
@@ -3576,6 +3580,7 @@ function smokePreflightChecks(
   budget: ReturnType<typeof calculateConnectivitySmokeBudget>,
   now: number,
 ) {
+  const invariantFailures = connectivitySmokeBudgetInvariantFailures(snapshot, budget, budget.limitUsd);
   const spotRequired = budget.spotNotionalUsd + budget.spotFeesUsd + budget.spotSlippageReserveUsd
     + budget.roundingReserveUsd;
   const futuresRequired = budget.futuresMarginUsd + budget.futuresFeesUsd + budget.futuresSlippageReserveUsd;
@@ -3589,12 +3594,14 @@ function smokePreflightChecks(
       && snapshot.spotFreeXaut <= 1e-12 && snapshot.spotLockedXaut <= 1e-12, message: "专用子账户 Spot total/free/locked 必须为 0。" },
     { name: "blank_futures", passed: snapshot.existingPerpetualQuantityXaut <= 1e-12
       && snapshot.perpetualPositionSide === "flat", message: "专用子账户 Futures position 必须为 0。" },
-    { name: "leverage_1x", passed: snapshot.perpetual.leverage === 1,
+    { name: "leverage_1x", passed: !invariantFailures.includes("leverage_1x"),
       message: "USD-M XAUTUSDT 当前杠杆必须已配置为 1x；smoke 仅只读验证，不执行杠杆配置写入。" },
     { name: "blank_orders", passed: snapshot.openSpotOrderCount === 0
       && snapshot.openPerpetualOrderCount === 0, message: "两侧 XAUT 活动订单必须为 0。" },
-    { name: "dynamic_quantity", passed: budget.quantityXaut > 0
-      && budget.totalCapitalUsd <= budget.limitUsd + 1e-9, message: "共同最小数量必须满足实时规则和本次 Gate 2 授权总预算。" },
+    { name: "dynamic_quantity", passed: invariantFailures.length === 0,
+      message: invariantFailures.length === 0
+        ? "共同最小数量满足两端实时规则、1x 和本次 Permit 总计划资本上限。"
+        : `共同最小数量校验失败：${invariantFailures.join(",")}` },
     { name: "spot_balance", passed: snapshot.spotAvailableUsdt + 1e-9 >= spotRequired, message: "Spot USDT 余额必须独立覆盖本侧预算。" },
     { name: "futures_balance", passed: snapshot.futuresAvailableUsdt + 1e-9 >= futuresRequired, message: "Futures USDT 余额必须独立覆盖 1x 保证金及本侧准备金。" },
     { name: "snapshot_fresh", passed: now - snapshot.fetchedAt <= RWA_BINANCE_PRIVATE_SNAPSHOT_MAX_AGE_MS,

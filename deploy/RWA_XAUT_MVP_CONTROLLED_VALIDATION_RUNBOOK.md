@@ -4,8 +4,11 @@
 产物、连接生产、访问 WIF/KMS 或交易所私有接口，也不授权任何订单或资金动作。
 
 旧 [`RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md`](./RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md)
-只保留为历史证据。当前数量必须在现场按 Binance 现货与永续实时规则计算共同最小可执行 base
-quantity；不得使用固定 `25 USDT` 或固定 `0.002 XAUT`。
+只保留为历史证据。当前首次 Capital Test 使用一次性 `single_connectivity_smoke`，总计划资本
+硬上限为 `40 USDT`，不是必须用满的固定预算。实际 XAUT 数量由服务端根据 Binance Spot 与
+USD-M Futures 的实时交易规则和实际订单限价，取满足两端共同约束的最小可交易数量，不得为接近
+上限而放大；若该数量对应的总计划资本超过 Permit 上限，必须 fail-closed，不得执行。历史
+`25 USDT` 和 `0.002 XAUT` 不再作为当前执行常量。
 
 ## 不可合并的两个批准点
 

@@ -668,7 +668,11 @@ SMTP_FROM="Stella X <no-reply@已验证域名>"
 和“真实资金窗口”两个独立用户批准点。离线 rehearsal 会拒绝 production、真实 ADC/凭证相关
 环境和已关闭的服务端总急停；它不能替代 Vultr、真实 WIF、真实 Binance 账户、产品或资金验证。
 旧 [`RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md`](./RWA_BINANCE_25_USDT_MAINNET_RUNBOOK.md)
-只保留为历史证据，固定 `25 USDT`/`0.002 XAUT` 不再是当前 smoke 口径。
+只保留为历史证据。当前首次 Capital Test 使用一次性 `single_connectivity_smoke`，总计划资本硬上限为
+`40 USDT`，不是必须用满的固定预算。实际 XAUT 数量由服务端根据 Binance Spot 与 USD-M Futures
+的实时交易规则和实际订单限价，取满足两端共同约束的最小可交易数量，不得为接近上限而放大；若
+该数量对应的总计划资本超过 Permit 上限，必须 fail-closed，不得执行。历史 `25 USDT` 和
+`0.002 XAUT` 不再作为当前执行常量。
 
 ```bash
 # 服务状态和最近日志

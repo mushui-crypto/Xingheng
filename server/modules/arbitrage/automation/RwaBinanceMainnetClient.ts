@@ -45,8 +45,8 @@ const timeOffsetTtlMs = 30_000;
 
 type ProductCache = {
   availability: RwaBinanceProductAvailability;
-  spot: RwaInstrumentSpec;
-  perpetual: RwaInstrumentSpec;
+  spot: RwaInstrumentSpec & { quantityPrecision: number };
+  perpetual: RwaInstrumentSpec & { quantityPrecision: number };
 };
 
 export class RwaBinanceMainnetClient implements RwaBinanceClient {
@@ -1129,7 +1129,7 @@ function fundingSettlementOrder(left: RwaAssetFundingSettlement, right: RwaAsset
   return left.settledAt - right.settledAt || left.settlementId.localeCompare(right.settlementId);
 }
 
-function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec {
+function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec & { quantityPrecision: number } {
   const filters = filterMap(row.filters);
   return {
     status: row.status === "TRADING" && boolean(row.isSpotTradingAllowed) ? "Trading" : row.status === "BREAK" ? "Paused" : "Unknown",
@@ -1137,10 +1137,11 @@ function spotSpec(row: Record<string, unknown>): RwaInstrumentSpec {
     qtyStep: positiveNumber(filters.LOT_SIZE?.stepSize),
     minNotionalUsd: positiveNumber(filters.NOTIONAL?.minNotional ?? filters.MIN_NOTIONAL?.minNotional),
     priceTick: positiveNumber(filters.PRICE_FILTER?.tickSize),
+    quantityPrecision: nonNegativeInteger(row.baseAssetPrecision),
   };
 }
 
-function perpetualSpec(row: Record<string, unknown>): RwaInstrumentSpec {
+function perpetualSpec(row: Record<string, unknown>): RwaInstrumentSpec & { quantityPrecision: number } {
   const filters = filterMap(row.filters);
   return {
     status: row.status === "TRADING" && row.contractType === "PERPETUAL" ? "Trading" : row.status === "PENDING_TRADING" ? "Paused" : "Unknown",
@@ -1148,11 +1149,19 @@ function perpetualSpec(row: Record<string, unknown>): RwaInstrumentSpec {
     qtyStep: positiveNumber(filters.LOT_SIZE?.stepSize),
     minNotionalUsd: positiveNumber(filters.MIN_NOTIONAL?.notional),
     priceTick: positiveNumber(filters.PRICE_FILTER?.tickSize),
+    quantityPrecision: nonNegativeInteger(row.quantityPrecision),
   };
 }
 
-function unavailableSpec(): RwaInstrumentSpec {
-  return { status: "Unknown", minOrderQty: 0, qtyStep: 0, minNotionalUsd: 0, priceTick: 0 };
+function unavailableSpec(): RwaInstrumentSpec & { quantityPrecision: number } {
+  return {
+    status: "Unknown",
+    minOrderQty: 0,
+    qtyStep: 0,
+    minNotionalUsd: 0,
+    priceTick: 0,
+    quantityPrecision: -1,
+  };
 }
 
 function filterMap(value: unknown) {
@@ -1214,6 +1223,11 @@ function positiveNumberOrNull(value: unknown) {
 function positiveNumber(value: unknown) {
   const parsed = number(value);
   return parsed > 0 ? parsed : 0;
+}
+
+function nonNegativeInteger(value: unknown) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 0 ? parsed : -1;
 }
 
 function number(value: unknown) {

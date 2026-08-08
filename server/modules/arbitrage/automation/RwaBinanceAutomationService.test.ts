@@ -1894,8 +1894,8 @@ test("Binance connectivity smoke opens, authoritatively hedges, immediately exit
     assert.equal(result.purpose, "connectivity_smoke");
     assert.equal(result.stage, "flat");
     assert.equal(result.receipt.providerFlatConfirmed, true);
-    assert.equal(result.budget.limitUsd, 2_000);
-    assert.ok(result.budget.totalCapitalUsd <= 2_000);
+    assert.equal(result.budget.limitUsd, 40);
+    assert.ok(result.budget.totalCapitalUsd <= 40);
     assert.equal(result.policyVersion, RWA_CONNECTIVITY_SMOKE_POLICY_VERSION);
     assert.equal(result.policyDigest, RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST);
     assert.equal(result.providerMutationCount, 4);
@@ -2106,6 +2106,35 @@ test("Binance production smoke accepts a permit above 25 within generic caps and
     );
     assert.equal(harness.client.writeCount, 4);
     assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 1);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Binance connectivity smoke rejects a minimum above 40 with zero provider mutations", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "rwa-binance-smoke-minimum-over-cap-"));
+  try {
+    const harness = await productionSmokeHarness(directory, 40);
+    Object.assign(harness.client.snapshot.spot, {
+      ask: 4_500,
+      bid: 4_500,
+      minOrderQty: 0.005,
+      minNotionalUsd: 1,
+    });
+    Object.assign(harness.client.snapshot.perpetual, {
+      ask: 4_500,
+      bid: 4_500,
+      mark: 4_500,
+      minOrderQty: 0.005,
+      minNotionalUsd: 1,
+    });
+    await assert.rejects(
+      harness.current.preflightConnectivitySmoke(harness.accountId, smokePolicyAcceptance),
+      (error: unknown) => error instanceof RwaNeutralExecutionError
+        && error.category === "connectivity_smoke_preflight_rejected",
+    );
+    assert.equal(harness.client.writeCount, 0);
+    assert.equal((await harness.store.readState()).productionSelfTestPermitConsumptions.length, 0);
   } finally {
     await rm(directory, { recursive: true, force: true });
   }
@@ -3928,6 +3957,7 @@ class FakeBinanceClient implements RwaBinanceClient {
         qtyStep: 0.0001,
         minNotionalUsd: 5,
         priceTick: 0.01,
+        quantityPrecision: 8,
         bid: 4_129,
         ask: 4_130,
         depthUsd: 100_000,
@@ -3938,6 +3968,7 @@ class FakeBinanceClient implements RwaBinanceClient {
         qtyStep: 0.001,
         minNotionalUsd: 5,
         priceTick: 0.01,
+        quantityPrecision: 3,
         bid: 4_128,
         ask: 4_129,
         depthUsd: 100_000,

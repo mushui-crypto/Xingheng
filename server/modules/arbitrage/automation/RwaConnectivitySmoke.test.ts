@@ -4,6 +4,7 @@ import {
   appendConnectivitySmokeTimeline,
   assertConnectivitySmokePolicyAcceptance,
   calculateConnectivitySmokeBudget,
+  connectivitySmokeBudgetInvariantFailures,
   connectivitySmokePolicyDiscovery,
   migrateLegacyConnectivitySmokeRecord,
   RWA_CONNECTIVITY_SMOKE_POLICY_DIGEST,
@@ -169,6 +170,120 @@ test("connectivity smoke budget includes adverse price-tick rounding and fails c
   const result = calculateConnectivitySmokeBudget(value, 1, 20);
   assert.equal(result.quantityXaut, 0);
   assert.equal(result.totalCapitalUsd, 0);
+});
+
+test("connectivity smoke minimum uses the actual futures open limit for min notional", () => {
+  const value = snapshot();
+  value.spot.ask = 100;
+  value.spot.bid = 100;
+  value.perpetual.ask = 100;
+  value.perpetual.bid = 100;
+  value.spot.minNotionalUsd = 0.01;
+  value.perpetual.minNotionalUsd = 0.09995;
+  value.spot.qtyStep = 0.001;
+  value.spot.minOrderQty = 0.001;
+  value.spot.quantityPrecision = 3;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.prices.futuresOpenLimit, 99.9);
+  assert.equal(result.quantityXaut, 0.002);
+  assert.ok(result.quantityXaut * value.perpetual.bid >= value.perpetual.minNotionalUsd);
+  assert.ok(result.quantityXaut * result.prices.futuresOpenLimit >= value.perpetual.minNotionalUsd);
+});
+
+test("connectivity smoke minimum uses the actual spot open limit for min notional", () => {
+  const value = snapshot();
+  value.spot.ask = 100;
+  value.spot.bid = 100;
+  value.perpetual.ask = 100;
+  value.perpetual.bid = 100;
+  value.spot.minNotionalUsd = 0.10005;
+  value.perpetual.minNotionalUsd = 0.01;
+  value.spot.qtyStep = 0.001;
+  value.spot.minOrderQty = 0.001;
+  value.spot.quantityPrecision = 3;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.ok(Math.abs(result.prices.spotOpenLimit - 100.1) <= 1e-9);
+  assert.equal(result.quantityXaut, 0.001);
+  assert.ok(result.quantityXaut * result.prices.spotOpenLimit >= value.spot.minNotionalUsd);
+});
+
+test("connectivity smoke uses the smallest quantity on both different steps", () => {
+  const value = snapshot();
+  value.spot.ask = 100;
+  value.spot.bid = 100;
+  value.perpetual.ask = 100;
+  value.perpetual.bid = 100;
+  value.spot.qtyStep = 0.002;
+  value.spot.minOrderQty = 0.002;
+  value.spot.quantityPrecision = 3;
+  value.perpetual.qtyStep = 0.003;
+  value.perpetual.minOrderQty = 0.003;
+  value.perpetual.quantityPrecision = 3;
+  value.spot.minNotionalUsd = 0.1;
+  value.perpetual.minNotionalUsd = 0.1;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.commonQtyStep, 0.006);
+  assert.equal(result.quantityXaut, 0.006);
+});
+
+test("connectivity smoke invariant rejects a quantity beyond serialization precision", () => {
+  const value = snapshot();
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  const invalid = { ...result, quantityXaut: 0.0001 };
+  value.perpetual.quantityPrecision = 3;
+  const failures = connectivitySmokeBudgetInvariantFailures(value, invalid, 40);
+  assert.ok(failures.includes("futures_quantity_precision"));
+});
+
+test("connectivity smoke fails closed when exchange step and precision contradict", () => {
+  const value = snapshot();
+  value.perpetual.qtyStep = 0.001;
+  value.perpetual.quantityPrecision = 2;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.quantityXaut, 0);
+  assert.ok(connectivitySmokeBudgetInvariantFailures(value, result, 40)
+    .includes("futures_precision_rules"));
+});
+
+test("connectivity smoke allows the minimum at exactly 40 without enlarging it", () => {
+  const value = snapshot();
+  value.spot.ask = 4_500;
+  value.spot.bid = 4_500;
+  value.perpetual.ask = 4_500;
+  value.perpetual.bid = 4_500;
+  value.spot.minOrderQty = 0.004;
+  value.perpetual.minOrderQty = 0.004;
+  value.spot.minNotionalUsd = 1;
+  value.perpetual.minNotionalUsd = 1;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.quantityXaut, 0.004);
+  assert.equal(result.totalCapitalUsd, 40);
+});
+
+test("connectivity smoke rejects a minimum above 40", () => {
+  const value = snapshot();
+  value.spot.ask = 4_500;
+  value.spot.bid = 4_500;
+  value.perpetual.ask = 4_500;
+  value.perpetual.bid = 4_500;
+  value.spot.minOrderQty = 0.005;
+  value.perpetual.minOrderQty = 0.005;
+  value.spot.minNotionalUsd = 1;
+  value.perpetual.minNotionalUsd = 1;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.quantityXaut, 0);
+  assert.equal(result.totalCapitalUsd, 0);
+});
+
+test("connectivity smoke keeps a valid minimum far below 40", () => {
+  const value = snapshot();
+  value.spot.minOrderQty = 0.001;
+  value.perpetual.minOrderQty = 0.001;
+  value.spot.minNotionalUsd = 1;
+  value.perpetual.minNotionalUsd = 1;
+  const result = calculateConnectivitySmokeBudget(value, 10, 40);
+  assert.equal(result.quantityXaut, 0.001);
+  assert.ok(result.totalCapitalUsd < 40);
 });
 
 test("connectivity smoke exact facts reject malformed order slots and contradictory receipts", () => {
@@ -482,6 +597,7 @@ function snapshot(): RwaBinancePreflightSnapshot {
       qtyStep: 0.0001,
       minNotionalUsd: 5,
       priceTick: 0.01,
+      quantityPrecision: 8,
       bid: 4_099,
       ask: 4_100,
       depthUsd: 100_000,
@@ -492,6 +608,7 @@ function snapshot(): RwaBinancePreflightSnapshot {
       qtyStep: 0.001,
       minNotionalUsd: 5,
       priceTick: 0.01,
+      quantityPrecision: 3,
       bid: 4_100,
       ask: 4_101,
       depthUsd: 100_000,

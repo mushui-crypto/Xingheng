@@ -199,7 +199,7 @@ export function ConnectivitySmokeConsole({
       }
       const token = await requestStepUp(
         prepared.intent,
-        "执行 25 USDT 闭环连通性验证",
+        "执行总计划资本不超过 40 USDT 的闭环连通性验证",
         `Binance · ${prepared.request.accountId} · 单次执行并立即退出 · 计划资本 ${formatMoney(preflight.report.budget.totalCapitalUsd)}`,
       );
       if (
@@ -282,7 +282,7 @@ export function ConnectivitySmokeConsole({
       <ConsoleSection
         actions={<Button disabled={loading || busy} onClick={() => void loadReadOnly()} type="button" variant="secondary"><RefreshCw className={loading ? "animate-spin" : ""} size={15} />重新读取</Button>}
         description="一次性运维验证；不属于套利机会、收益验证或长期自动化。"
-        title="25 USDT 闭环连通性验证"
+        title="不超过 40 USDT 的闭环连通性验证"
       >
         <div className="space-y-5 p-4 sm:p-5">
           {loading ? <InlineMessage icon={<RefreshCw className="animate-spin" size={17} />} text="正在读取服务端 policy 与最近一次验证状态。" /> : null}
@@ -305,7 +305,7 @@ export function ConnectivitySmokeConsole({
                   />
                   <Confirmation
                     checked={confirmations.nonAtomicRiskAccepted}
-                    label="我已阅读并接受服务端列出的非原子连续性风险，且理解 25 USDT 不是最大损失保证。"
+                    label="我已阅读并接受服务端列出的非原子连续性风险，且理解 40 USDT 仅为总计划资本硬上限，不是必须用满的预算或最大损失保证。"
                     onChange={(checked) => setConfirmations((current) => ({ ...current, nonAtomicRiskAccepted: checked }))}
                   />
                   <Button disabled={!canPreflight || busy} onClick={() => void requestPreflight()} type="button">

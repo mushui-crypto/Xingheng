@@ -45,6 +45,7 @@ export type RwaBinanceProductAvailability = {
 };
 
 export type RwaBinanceInstrumentSnapshot = RwaInstrumentSpec & {
+  quantityPrecision: number;
   bid: number;
   ask: number;
   depthUsd: number;

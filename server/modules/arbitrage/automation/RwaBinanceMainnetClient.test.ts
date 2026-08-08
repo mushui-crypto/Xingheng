@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash, createHmac } from "node:crypto";
 import test from "node:test";
 import { RwaBinanceMainnetClient, RwaBinanceProviderError } from "./RwaBinanceMainnetClient";
+import { calculateConnectivitySmokeBudget } from "./RwaConnectivitySmoke";
 import {
   RwaBinanceActivityGuard,
   RwaBinanceActivityUnsafeError,
@@ -301,8 +302,10 @@ test("Binance client signs private reads with server-time offset and keeps spot/
   assert.equal(snapshot.spotAvailableUsdt, 18);
   assert.equal(snapshot.futuresAvailableUsdt, 17);
   assert.equal(snapshot.spot.qtyStep, 0.0001);
+  assert.equal(snapshot.spot.quantityPrecision, 8);
   assert.equal(snapshot.spot.minNotionalUsd, 5);
   assert.equal(snapshot.perpetual.qtyStep, 0.001);
+  assert.equal(snapshot.perpetual.quantityPrecision, 3);
   assert.equal(snapshot.perpetual.minNotionalUsd, 5);
   assert.equal(snapshot.perpetual.leverage, null);
   assert.equal(snapshot.perpetual.fundingIntervalHours, 4);
@@ -396,6 +399,26 @@ test("Binance preflight reads leverage from an empty XAUTUSDT position row", asy
   const snapshot = await client.readPreflightSnapshot();
   assert.equal(snapshot.existingPerpetualQuantityXaut, 0);
   assert.equal(snapshot.perpetual.leverage, 1);
+});
+
+test("Binance exchangeInfo precision remains additive to LOT_SIZE and contradictions fail closed", async () => {
+  const client = new RwaBinanceMainnetClient(
+    { apiKey: "fake-key", apiSecret: "fake-secret" },
+    fixtureFetch({
+      positionAmount: "0",
+      positionLeverage: "1",
+      spotBaseAssetPrecision: 8,
+      futuresQuantityPrecision: 2,
+      futuresQtyStep: "0.001",
+    }),
+    () => 1_000,
+    ["203.0.113.10"],
+  );
+  const snapshot = await client.readPreflightSnapshot();
+  assert.equal(snapshot.spot.quantityPrecision, 8);
+  assert.equal(snapshot.perpetual.quantityPrecision, 2);
+  assert.equal(snapshot.perpetual.qtyStep, 0.001);
+  assert.equal(calculateConnectivitySmokeBudget(snapshot, 10, 40).quantityXaut, 0);
 });
 
 test("Binance preflight rejects invalid leverage on an existing XAUTUSDT position row", async () => {
@@ -899,6 +922,9 @@ function fixtureFetch(options: {
   omitPositionLeverage?: boolean;
   fundingGap?: boolean;
   invalidTakeoverDepth?: boolean;
+  spotBaseAssetPrecision?: number;
+  futuresQuantityPrecision?: number;
+  futuresQtyStep?: string;
 } = {}): typeof fetch {
   return async (input, init) => {
     const url = new URL(String(input));
@@ -949,6 +975,7 @@ function fixtureFetch(options: {
             symbol: "XAUTUSDT",
             status: "TRADING",
             baseAsset: "XAUT",
+            baseAssetPrecision: options.spotBaseAssetPrecision ?? 8,
             quoteAsset: "USDT",
             isSpotTradingAllowed: true,
             filters: [
@@ -965,10 +992,11 @@ function fixtureFetch(options: {
             status: "TRADING",
             contractType: "PERPETUAL",
             baseAsset: "XAUT",
+            quantityPrecision: options.futuresQuantityPrecision ?? 3,
             quoteAsset: "USDT",
             filters: [
               { filterType: "PRICE_FILTER", tickSize: "0.01" },
-              { filterType: "LOT_SIZE", minQty: "0.001", stepSize: "0.001" },
+              { filterType: "LOT_SIZE", minQty: "0.001", stepSize: options.futuresQtyStep ?? "0.001" },
               { filterType: "MIN_NOTIONAL", notional: "5" },
             ],
           }],

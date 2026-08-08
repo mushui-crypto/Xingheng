@@ -10,6 +10,7 @@ export const RWA_CONNECTIVITY_SMOKE_MODE = "connectivity_smoke" as const;
 export const RWA_CONNECTIVITY_SMOKE_MAX_RECORDS = 100;
 export const RWA_CONNECTIVITY_SMOKE_POLICY_VERSION = "connectivity-smoke-gate2-capital-v4" as const;
 export const RWA_CONNECTIVITY_SMOKE_SLIPPAGE_FLOOR_BPS = 10;
+export const RWA_CONNECTIVITY_SMOKE_CAPITAL_LIMIT_USD = 40;
 export const RWA_CONNECTIVITY_SMOKE_ORDER_SLOTS = Object.freeze({
   spotOpen: Object.freeze({ suffix: "s1", category: "spot", side: "Buy", reduceOnly: false }),
   futuresOpen: Object.freeze({ suffix: "p1", category: "linear", side: "Sell", reduceOnly: false }),
@@ -731,16 +732,6 @@ export function calculateConnectivitySmokeBudget(
   if (!Number.isFinite(approvedCapitalUsd) || approvedCapitalUsd <= 0) {
     throw new Error("connectivity smoke approved capital is invalid");
   }
-  const commonQtyStep = commonDecimalStep(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep);
-  const minQuantity = ceilStep(
-    Math.max(
-      snapshot.spot.minOrderQty,
-      snapshot.perpetual.minOrderQty,
-      snapshot.spot.minNotionalUsd / snapshot.spot.ask,
-      snapshot.perpetual.minNotionalUsd / snapshot.perpetual.bid,
-    ),
-    commonQtyStep,
-  );
   const slippageBpsPerAction = Math.max(
     RWA_CONNECTIVITY_SMOKE_SLIPPAGE_FLOOR_BPS,
     maxCombinedSlippageBps,
@@ -754,12 +745,53 @@ export function calculateConnectivitySmokeBudget(
     futuresCloseLimit: ceilPrice(snapshot.perpetual.ask * (1 + slippageRate), snapshot.perpetual.priceTick),
     spotCloseLimit: floorPrice(snapshot.spot.bid * (1 - slippageRate), snapshot.spot.priceTick),
   };
-  const perUnit = prices.spotOpenLimit * (1 + 2 * spotFeeRate)
-    + prices.futuresCloseLimit * (1 + 2 * futuresFeeRate)
-    + (prices.spotOpenLimit + prices.spotCloseLimit + prices.futuresOpenLimit + prices.futuresCloseLimit)
-      * slippageRate;
-  const maxQuantity = floorStep(approvedCapitalUsd / perUnit, commonQtyStep);
-  const quantityXaut = maxQuantity >= minQuantity ? minQuantity : 0;
+  const precisionRulesValid = validQuantityPrecision(snapshot.spot.qtyStep, snapshot.spot.quantityPrecision)
+    && validQuantityPrecision(snapshot.perpetual.qtyStep, snapshot.perpetual.quantityPrecision);
+  const commonQtyStep = precisionRulesValid
+    ? commonDecimalStep(snapshot.spot.qtyStep, snapshot.perpetual.qtyStep)
+    : 0;
+  const minQuantity = commonQtyStep > 0
+    ? ceilStep(
+      Math.max(
+        snapshot.spot.minOrderQty,
+        snapshot.perpetual.minOrderQty,
+        snapshot.spot.minNotionalUsd / prices.spotOpenLimit,
+        snapshot.perpetual.minNotionalUsd / prices.futuresOpenLimit,
+      ),
+      commonQtyStep,
+    )
+    : 0;
+  const candidate = buildConnectivitySmokeBudget(
+    snapshot,
+    approvedCapitalUsd,
+    commonQtyStep,
+    minQuantity,
+    slippageBpsPerAction,
+    prices,
+  );
+  return connectivitySmokeBudgetInvariantFailures(snapshot, candidate, approvedCapitalUsd).length === 0
+    ? candidate
+    : buildConnectivitySmokeBudget(
+      snapshot,
+      approvedCapitalUsd,
+      commonQtyStep,
+      0,
+      slippageBpsPerAction,
+      prices,
+    );
+}
+
+function buildConnectivitySmokeBudget(
+  snapshot: RwaBinancePreflightSnapshot,
+  approvedCapitalUsd: number,
+  commonQtyStep: number,
+  quantityXaut: number,
+  slippageBpsPerAction: number,
+  prices: RwaConnectivitySmokeBudget["prices"],
+): RwaConnectivitySmokeBudget {
+  const slippageRate = slippageBpsPerAction / 10_000;
+  const spotFeeRate = snapshot.fees.spotTakerBps / 10_000;
+  const futuresFeeRate = snapshot.fees.perpetualTakerBps / 10_000;
   const spotNotionalUsd = quantityXaut * prices.spotOpenLimit;
   const futuresMarginUsd = quantityXaut * prices.futuresCloseLimit;
   const spotFeesUsd = spotNotionalUsd * spotFeeRate * 2;
@@ -788,6 +820,41 @@ export function calculateConnectivitySmokeBudget(
     roundingReserveUsd,
     totalCapitalUsd: subtotal + roundingReserveUsd,
   };
+}
+
+export function connectivitySmokeBudgetInvariantFailures(
+  snapshot: RwaBinancePreflightSnapshot,
+  budget: RwaConnectivitySmokeBudget,
+  approvedCapitalUsd: number,
+) {
+  const failures: string[] = [];
+  const quantity = budget.quantityXaut;
+  if (!(approvedCapitalUsd > 0) || approvedCapitalUsd > RWA_CONNECTIVITY_SMOKE_CAPITAL_LIMIT_USD) {
+    failures.push("permit_capital_limit");
+  }
+  if (budget.limitUsd !== approvedCapitalUsd) failures.push("budget_permit_mismatch");
+  if (!(quantity > 0)) failures.push("quantity_positive");
+  if (!validQuantityPrecision(snapshot.spot.qtyStep, snapshot.spot.quantityPrecision)) {
+    failures.push("spot_precision_rules");
+  }
+  if (!validQuantityPrecision(snapshot.perpetual.qtyStep, snapshot.perpetual.quantityPrecision)) {
+    failures.push("futures_precision_rules");
+  }
+  if (!stepAligned(quantity, snapshot.spot.qtyStep)) failures.push("spot_step");
+  if (!stepAligned(quantity, snapshot.perpetual.qtyStep)) failures.push("futures_step");
+  if (!quantityMatchesPrecision(quantity, snapshot.spot.quantityPrecision)) failures.push("spot_quantity_precision");
+  if (!quantityMatchesPrecision(quantity, snapshot.perpetual.quantityPrecision)) failures.push("futures_quantity_precision");
+  if (quantity + 1e-12 < snapshot.spot.minOrderQty) failures.push("spot_min_qty");
+  if (quantity + 1e-12 < snapshot.perpetual.minOrderQty) failures.push("futures_min_qty");
+  if (quantity * budget.prices.spotOpenLimit + 1e-9 < snapshot.spot.minNotionalUsd) {
+    failures.push("spot_min_notional");
+  }
+  if (quantity * budget.prices.futuresOpenLimit + 1e-9 < snapshot.perpetual.minNotionalUsd) {
+    failures.push("futures_min_notional");
+  }
+  if (budget.totalCapitalUsd > approvedCapitalUsd + 1e-9) failures.push("capital_limit");
+  if (snapshot.perpetual.leverage !== 1) failures.push("leverage_1x");
+  return failures;
 }
 
 export function assertConnectivitySmokePolicyAcceptance(
@@ -822,6 +889,25 @@ function commonDecimalStep(left: number, right: number) {
   const a = Math.round(left * scale);
   const b = Math.round(right * scale);
   return lcm(a, b) / scale;
+}
+
+function validQuantityPrecision(step: number, precision: number) {
+  return Number.isFinite(step)
+    && step > 0
+    && Number.isInteger(precision)
+    && precision >= 0
+    && decimalPlaces(step) <= precision;
+}
+
+function quantityMatchesPrecision(quantity: number, precision: number) {
+  return Number.isInteger(precision)
+    && precision >= 0
+    && decimalPlaces(quantity) <= precision;
+}
+
+function stepAligned(quantity: number, step: number) {
+  if (!Number.isFinite(quantity) || !Number.isFinite(step) || step <= 0) return false;
+  return Math.abs(quantity / step - Math.round(quantity / step)) <= 1e-9;
 }
 
 function decimalPlaces(value: number) {
