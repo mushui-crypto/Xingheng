@@ -2,10 +2,6 @@ import { useEffect, type ReactNode } from "react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { USER_AUTH_FAILED_EVENT } from "../../api/session";
 import { useRuntimeEnvironment } from "../../features/runtimeEnvironment/RuntimeEnvironmentProvider";
-import {
-  hasRuntimeEnvironmentBar,
-  RuntimeEnvironmentStatusBar,
-} from "../../features/runtimeEnvironment/RuntimeEnvironmentUi";
 import { runtimeEnvironmentAllowsSensitiveOperations } from "../../features/runtimeEnvironment/runtimeEnvironmentState";
 import { useAuthStore } from "../../store/authStore";
 import { useUserStore } from "../../store/userStore";
@@ -38,7 +34,6 @@ export function UserLayout({ children }: UserLayoutProps) {
   const isAuthenticated = Boolean(currentUser);
   const isDashboard = location.pathname === "/app/dashboard";
   const sensitiveEnvironmentReady = runtimeEnvironmentAllowsSensitiveOperations(runtimeEnvironment);
-  const environmentBarVisible = hasRuntimeEnvironmentBar(runtimeEnvironment);
 
   useEffect(() => {
     if (!isAuthenticated || !sensitiveEnvironmentReady) return;
@@ -61,9 +56,8 @@ export function UserLayout({ children }: UserLayoutProps) {
   };
 
   return (
-    <div className={`min-h-screen min-w-0 overflow-x-hidden bg-shell text-white ${environmentBarVisible ? "xh-shell-with-environment-bar" : ""}`}>
+    <div className="min-h-screen min-w-0 overflow-x-hidden bg-shell text-white">
       <div className="sticky top-0 z-30">
-        <RuntimeEnvironmentStatusBar />
         <header className="h-[60px] border-b border-[#2b2b2b] bg-black">
           <div className="flex h-full w-full min-w-0 items-center justify-between gap-3 overflow-hidden px-3 py-2.5 sm:px-4 md:gap-6 md:px-8">
             <div className="flex min-w-0 flex-1 items-center gap-3 sm:gap-6 lg:gap-10">

@@ -93,8 +93,11 @@ rate limit、lease/idempotency、persistent store、backup/restore 和错误映�
 
 - 优先使用具有等价现货与永续产品的测试环境；若不存在，明确记录环境缺口。
 - 任何 Mainnet 连通性烟测仍属于真实资金操作；只有用户明确选择 `connectivity_smoke` 才能执行，且不能记录为套利仓位或收益。
-- 烟测数量必须按两侧实时价格、数量步长、最小数量和最小名义动态计算共同最小可执行数量；历史
-  `25 USDT / 0.002 XAUT` 仅是一次已完成烟测的事实，不是长期业务常量。
+- 当前首次 Capital Test 使用一次性 `single_connectivity_smoke`，总计划资本硬上限为 `40 USDT`，
+  不是必须用满的固定预算。实际 XAUT 数量由服务端根据 Binance Spot 与 USD-M Futures 的实时交易
+  规则和实际订单限价，取满足两端共同约束的最小可交易数量，不得为接近上限而放大；若该数量对应
+  的总计划资本超过 Permit 上限，必须 fail-closed，不得执行。历史 `25 USDT / 0.002 XAUT` 仅为
+  历史计划口径，不是当前执行常量。
 
 ### Phase D：用户 Mainnet 小额试运行
 
@@ -506,16 +509,18 @@ Preflight 请求固定为（policy version/digest 是稳定契约，不保存 TO
 
 Execute 请求沿用 challenge、幂等和 step-up 字段；step-up operation 固定为
 `connectivity_smoke_execute`，并携带与 preflight 相同的 `policyVersion`、`policyDigest`，绑定
-user/account fingerprint、Binance XAUTUSDT、25U 上限、单 execution、立即退出、短 TTL、人工
+user/account fingerprint、Binance XAUTUSDT、40U 上限、单 execution、立即退出、短 TTL、人工
 恢复能力和非原子风险确认的完整复合动作。用户明确承诺该窗口内不使用 Binance UI、其他 API Key、
 转账或其他系统操作 XAUT。首次 provider mutation 前必须
 持久化 reservation、`noReopen=true` 和授权退出事实。单账户同时只允许一个 active smoke；同一
 幂等键在 user/account/challenge/request digest 完全相同时只读返回原记录，不再次消费 step-up；
 任一字段冲突均拒绝，不能重新开仓。
 
-25 USDT 是 Spot 名义 + Futures 1x 保证金 + Spot 买卖两次 taker fee + Futures 开平两次 taker
-fee + 四动作保守滑点 + 取整准备的总硬预算。数量按两侧实时最小数量、最小名义和共同步长动态
-计算；Spot/Futures 余额分别核对。任一侧不足或规则不满足时 provider 写调用为 0。
+40 USDT 是 Spot 名义 + Futures 1x 保证金 + Spot 买卖两次 taker fee + Futures 开平两次 taker
+fee + 四动作保守滑点 + 取整准备的总计划资本硬上限，不是必须用满的预算。实际资本可以低于该
+上限；数量按实际开仓限价、两端实时 `LOT_SIZE` 步长、最小数量、最小名义和各端实际适用的数量
+precision 约束计算共同最小值，不得为接近 40 USDT 而放大。若共同最小数量超过 Permit 上限、任一
+侧余额不足或规则不满足，必须 fail-closed，provider 写调用为 0。
 
 状态阶段固定为 `reserved / spot_opening / spot_open / futures_opening / hedged /
 futures_closing / spot_closing / flat / failed / manual_intervention`。开始窗口要求 Spot
@@ -635,7 +640,7 @@ policy 完全一致时才联结当前披露全文，否则返回
 
 预算和 fee/slippage reserve 始终是 `planned` 风险上界，不能填入上述 actual 指标；smoke 仍不
 进入普通 positions/PnL/Funding/绩效。已接受残余风险包括 scan cutoff 到 mutation 的竞态、历史接口延迟、人工
-同净额往返可能不可见、资产可替代导致经济归属无法数学证明，以及 25U 仅为计划资本上限而非最大
+同净额往返可能不可见、资产可替代导致经济归属无法数学证明，以及 40U 仅为计划资本上限而非最大
 损失保证。
 
 ### 持仓、PnL 与退出

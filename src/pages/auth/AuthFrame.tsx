@@ -1,10 +1,6 @@
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { AuthVisual } from "../../components/auth/AuthVisual";
-import {
-  RuntimeEnvironmentStatusBar,
-  SensitiveEnvironmentGate,
-} from "../../features/runtimeEnvironment/RuntimeEnvironmentUi";
 
 type AuthFrameProps = {
   activeTab: "login" | "register";
@@ -14,12 +10,10 @@ type AuthFrameProps = {
 export function AuthFrame({ activeTab, children }: AuthFrameProps) {
   return (
     <div className="min-h-screen overflow-hidden bg-black text-white" style={{ fontFamily: "Poppins, Inter, sans-serif" }}>
-      <RuntimeEnvironmentStatusBar />
-      <SensitiveEnvironmentGate>
-        <div className="mx-auto grid min-h-[calc(100dvh-40px)] w-full max-w-[1920px] lg:grid-cols-[minmax(0,1fr)_minmax(520px,720px)]">
+      <div className="mx-auto grid min-h-dvh w-full max-w-[1920px] lg:grid-cols-[minmax(0,1fr)_minmax(520px,720px)]">
           <AuthVisual className="hidden lg:block" />
 
-          <section className="relative flex min-h-[calc(100dvh-40px)] min-w-0 items-start justify-start px-4 py-8 sm:px-6 sm:py-10 lg:block lg:px-0 lg:py-0">
+          <section className="relative flex min-h-dvh min-w-0 items-start justify-start px-4 py-8 sm:px-6 sm:py-10 lg:block lg:px-0 lg:py-0">
             <div className="absolute left-[529.48px] top-[77.28px] hidden h-px w-[118px] bg-[rgba(199,199,199,0.18)] lg:block" />
             <div className="absolute left-[623.48px] top-[51.28px] hidden h-px w-6 bg-[rgba(199,199,199,0.45)] lg:block" />
             <div className="absolute left-[623.48px] top-[51.28px] hidden h-6 w-px bg-[rgba(199,199,199,0.45)] lg:block" />
@@ -37,8 +31,7 @@ export function AuthFrame({ activeTab, children }: AuthFrameProps) {
               {children}
             </div>
           </section>
-        </div>
-      </SensitiveEnvironmentGate>
+      </div>
     </div>
   );
 }
