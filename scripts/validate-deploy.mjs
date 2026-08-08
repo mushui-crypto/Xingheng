@@ -60,12 +60,23 @@ const permitTerminalization = read("scripts/productionSelfTestPermitTerminalizat
 const permitTerminalizationLaunchIdentity = read("scripts/productionSelfTestPermitTerminalizationLaunchIdentity.mjs");
 const permitTerminalizationWrapper = read("scripts/terminalize-production-self-test-permit.sh");
 const permitStateVerifier = read("scripts/verify-production-self-test-permit-state.mjs");
+const productionIdentityTransition = read("scripts/productionIdentityTransition.mjs");
 const capitalTestWindowWrapper = read("scripts/capital-test-window.sh");
 const capitalTestWindowController = read("scripts/capitalTestWindowController.mjs");
 const capitalTestWindowReceipt = read("scripts/capitalTestWindowReceipt.mjs");
 const packageJson = read("package.json");
 
 const assertions = [
+  [
+    productionIdentityTransition.includes('EXACT_BASELINE: "exact_baseline"')
+      && productionIdentityTransition.includes('ACTIVATED_LIFECYCLE: "activated_lifecycle"')
+      && productionIdentityTransition.includes('PERMIT_TRANSITION: "permit_transition"')
+      && productionIdentityTransition.includes("receipt.schemaVersion !== 2")
+      && productionIdentityTransition.includes('receipt.status !== "success"')
+      && productionIdentityTransition.includes("receipt.envBeforeSha256 !== promoted.environmentSha256")
+      && productionIdentityTransition.includes("receipt.envAfterSha256 !== current.environmentSha256"),
+    "production identity transitions must use the single fail-closed proof boundary",
+  ],
   [dockerfile.includes("AS build") && dockerfile.includes("AS api") && dockerfile.includes("AS web"), "Dockerfile must use build/api/web stages"],
   [dockerfile.includes("npm ci --omit=dev") && dockerfile.includes('CMD [\"node\", \"dist-server/index.js\"]'), "API runtime must use production dependencies and compiled JS"],
   [dockerfile.includes("USER 20001:20001"), "API must run as the pinned non-root user"],

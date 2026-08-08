@@ -20,6 +20,7 @@ import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { validateReleaseManifest } from "./deploymentRevision.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
+import { productionSelfTestPermitDigest } from "./productionIdentityTransition.mjs";
 import {
   assertTrustedProductionReleaseRoot,
   createTrustedPermitPreparedDockerContext,
@@ -120,13 +121,7 @@ export function parseCanonicalAuthorization(value) {
   return authorization;
 }
 
-export function productionSelfTestPermitDigest(input) {
-  return sha256(Buffer.from([
-    "production", "binance", "xaut", input.permitId, input.ownerUserId,
-    input.accountBindingSha256, "READ", "TRADE", input.executionMode, input.authorizationDigest,
-    String(input.approvedCapitalUsd), input.revision, input.expiresAt,
-  ].join(":")));
-}
+export { productionSelfTestPermitDigest } from "./productionIdentityTransition.mjs";
 
 export function preparePermitInstallation(options) {
   const now = options.now ?? new Date();

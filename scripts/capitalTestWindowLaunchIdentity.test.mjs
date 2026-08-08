@@ -5,23 +5,31 @@ import {
   validatePermitInstalledTransition,
 } from "./capitalTestWindowLaunchIdentity.mjs";
 import { productionSelfTestPermitDigest } from "./productionSelfTestPermitInstall.mjs";
+import {
+  PRODUCTION_IDENTITY_PROOF_KINDS,
+  validateIdentityTransition,
+} from "./productionIdentityTransition.mjs";
 
-test("stable promotion transition remains accepted without a Permit receipt", () => {
-  const stable = Object.freeze({ state: "PROMOTION_COMPLETED" });
-  assert.equal(assertCapitalTestWindowLaunchIdentity({
-    verifyPromotion: () => stable,
-    readReceipt: () => { throw new Error("Permit receipt must not be read"); },
-  }), stable);
+test("Capital Test Window requires the Permit transition proof kind", () => {
+  assert.throws(() => assertCapitalTestWindowLaunchIdentity({
+    verifyPromotion: (options) => {
+      assert.equal(
+        options.requiredProofKind,
+        PRODUCTION_IDENTITY_PROOF_KINDS.PERMIT_TRANSITION,
+      );
+      throw new Error("Permit transition proof is required");
+    },
+  }), /Permit transition proof is required/u);
 });
 
 test("valid Permit environment transition is accepted", () => {
   const fixture = transitionFixture();
   assert.equal(validatePermitInstalledTransition(fixture), true);
   assert.equal(assertCapitalTestWindowLaunchIdentity({
-    verifyPromotion: (validate) => validate({
-      promoted: fixture.promoted,
-      current: fixture.current,
-    }),
+    verifyPromotion: (options) => validateIdentityTransition({
+      ...fixture,
+      permitReceipt: options.readPermitReceipt(),
+    }).kind === options.requiredProofKind,
     readReceipt: () => fixture.receipt,
   }), true);
 });
@@ -70,9 +78,9 @@ test("Permit digest mismatch is rejected", () => {
 test("missing Permit transition receipt is rejected", () => {
   const fixture = transitionFixture();
   assert.throws(() => assertCapitalTestWindowLaunchIdentity({
-    verifyPromotion: (validate) => validate({
-      promoted: fixture.promoted,
-      current: fixture.current,
+    verifyPromotion: (options) => validateIdentityTransition({
+      ...fixture,
+      permitReceipt: options.readPermitReceipt(),
     }),
     readReceipt: () => { throw Object.assign(new Error("missing receipt"), { code: "ENOENT" }); },
   }), /missing receipt/u);
@@ -123,6 +131,7 @@ function transitionFixture() {
     promoted,
     current,
     receipt: {
+      schemaVersion: 2,
       status: "success",
       envBeforeSha256: promoted.environmentSha256,
       envAfterSha256: current.environmentSha256,

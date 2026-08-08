@@ -23,6 +23,14 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseRevisionEnv, validateReleaseManifest } from "./deploymentRevision.mjs";
 import { inheritedOperationLocks } from "./operationLocks.mjs";
+import {
+  PRODUCTION_IDENTITY_PROOF_KINDS,
+  validateIdentityTransition,
+} from "./productionIdentityTransition.mjs";
+import {
+  PERMIT_INSTALL_RECEIPT,
+  readInstallReceipt,
+} from "./productionSelfTestPermitInstall.mjs";
 import { readTrustedReleaseCandidateReceipt, releaseCandidatePaths } from "./trustedReleaseCandidate.mjs";
 import { captureTrustedReleaseTree } from "./trustedReleaseTree.mjs";
 import {
@@ -477,20 +485,18 @@ export class ReleasePromotionTransaction {
 }
 
 export function assertPromotionStateAllowsProduction(options = {}) {
-  return assertPromotionStateAllowsProductionInternal(options, null);
+  return assertPromotionStateAllowsProductionInternal(options);
 }
 
-export function assertPromotionStateAllowsProductionWithTransition(
-  validateIdentityTransition,
-  options = {},
-) {
-  if (typeof validateIdentityTransition !== "function") {
-    throw new Error("completed promotion transition validator is invalid");
+/** @deprecated Use assertPromotionStateAllowsProduction. */
+export function assertPromotionStateAllowsProductionWithTransition(options = {}) {
+  if (typeof options === "function") {
+    throw new Error("custom completed promotion transition validators are not allowed");
   }
-  return assertPromotionStateAllowsProductionInternal(options, validateIdentityTransition);
+  return assertPromotionStateAllowsProduction(options);
 }
 
-function assertPromotionStateAllowsProductionInternal(options, validateIdentityTransition) {
+function assertPromotionStateAllowsProductionInternal(options) {
   const statePath = resolve(options.statePath ?? PROMOTION_RECORD);
   if (!existsNoFollow(statePath)) return Object.freeze({ state: "IDLE" });
   const uid = options.expectedUid ?? 0;
@@ -514,15 +520,15 @@ function assertPromotionStateAllowsProductionInternal(options, validateIdentityT
     testMode: uid !== 0 || gid !== 0,
   });
   try {
-  const exactCanonical = canonical(record.newCanonical) === canonical(current);
-  const activatedCanonical = !exactCanonical
-    && canonicalWithoutLifecycle(record.newCanonical) === canonicalWithoutLifecycle(current)
-    && validateActivatedLifecycleTransition(paths, record.newCanonical, current, trusted, uid, gid);
-  const recognizedTransition = !exactCanonical && !activatedCanonical
-    && validateIdentityTransition?.(Object.freeze({
-      promoted: record.newCanonical,
-      current,
-      validateActivatedLifecycle: () => validateActivatedLifecycleTransition(
+  const identityProof = validateIdentityTransition({
+    promoted: record.newCanonical,
+    current,
+    readPermitReceipt: options.readPermitReceipt
+      ?? (() => readInstallReceipt(
+        options.permitReceiptPath ?? PERMIT_INSTALL_RECEIPT,
+        options.permitReceiptOptions,
+      )),
+    validateActivatedLifecycle: () => validateActivatedLifecycleTransition(
         paths,
         record.newCanonical,
         current,
@@ -530,9 +536,13 @@ function assertPromotionStateAllowsProductionInternal(options, validateIdentityT
         uid,
         gid,
       ),
-    })) === true;
-  if ((!exactCanonical && !activatedCanonical && !recognizedTransition)
-    || record.trustReceiptSha256 !== trusted.receiptSha256
+  });
+  if (options.requiredProofKind !== undefined
+    && (!Object.values(PRODUCTION_IDENTITY_PROOF_KINDS).includes(options.requiredProofKind)
+      || identityProof.kind !== options.requiredProofKind)) {
+    throw new Error("completed promotion identity proof kind is invalid");
+  }
+  if (record.trustReceiptSha256 !== trusted.receiptSha256
     || record.helperReceiptSha256 !== helper.receiptSha256
     || trusted.releaseRoot !== paths.canonicalRoot
     || trusted.releaseTree?.sha256 !== current.releaseTreeSha256
@@ -551,11 +561,6 @@ function assertPromotionStateAllowsProductionInternal(options, validateIdentityT
   } finally {
     if (helper.opened?.fd !== undefined) closeSync(helper.opened.fd);
   }
-}
-
-function canonicalWithoutLifecycle(value) {
-  const { lifecyclePointerSha256: _lifecyclePointerSha256, ...identity } = value;
-  return canonical(identity);
 }
 
 function validateActivatedLifecycleTransition(paths, promoted, current, trusted, uid, gid) {

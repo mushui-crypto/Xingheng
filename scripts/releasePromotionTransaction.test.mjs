@@ -77,28 +77,35 @@ test("completed promotion accepts only its verified prepared-to-active lifecycle
   });
 });
 
-test("stable promotion identity does not consult an alternate transition validator", () => {
+test("deprecated transition guard delegates to the canonical production guard", () => {
   withFixture((fixture) => {
     fixture.transaction.promote(fixture.expected);
-    assert.equal(assertPromotionStateAllowsProductionWithTransition(
-      () => { throw new Error("alternate transition validator must not run"); },
-      fixture.guardOptions,
-    ).state, "PROMOTION_COMPLETED");
+    assert.equal(
+      assertPromotionStateAllowsProductionWithTransition(fixture.guardOptions).state,
+      "PROMOTION_COMPLETED",
+    );
   });
 });
 
-test("completed promotion delegates only an otherwise-invalid identity transition", () => {
+test("deprecated transition guard rejects custom transition callbacks", () => {
+  assert.throws(
+    () => assertPromotionStateAllowsProductionWithTransition(() => true),
+    /custom completed promotion transition validators are not allowed/u,
+  );
+});
+
+test("completed promotion accepts only a verified Permit identity transition", () => {
   withFixture((fixture) => {
     const completed = fixture.transaction.promote(fixture.expected);
     const environment = Buffer.from("PERMIT_TRANSITION=true\n", "utf8");
     replaceFixtureFile(join(fixture.canonicalRoot, ".env.production"), environment, 0o600);
-    let observed;
-    assert.equal(assertPromotionStateAllowsProductionWithTransition((transition) => {
-      observed = transition;
-      return true;
-    }, fixture.guardOptions).state, "PROMOTION_COMPLETED");
-    assert.equal(observed.promoted.environmentSha256, completed.newCanonical.environmentSha256);
-    assert.equal(observed.current.environmentSha256, sha256(environment));
+    assert.equal(assertPromotionStateAllowsProduction({
+      ...fixture.guardOptions,
+      readPermitReceipt: () => permitTransitionReceipt(
+        completed.newCanonical,
+        sha256(environment),
+      ),
+    }).state, "PROMOTION_COMPLETED");
   });
 });
 
@@ -708,6 +715,7 @@ function permitTransitionReceipt(promoted, envAfterSha256) {
   permit.digest = productionSelfTestPermitDigest(permit);
   const web = permitRuntimeComponent("7", promoted.images.web, promoted.revision);
   return {
+    schemaVersion: 2,
     status: "success",
     envBeforeSha256: promoted.environmentSha256,
     envAfterSha256,
