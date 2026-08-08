@@ -242,6 +242,10 @@ export const publicReadOnlyApiPaths: ReadonlySet<string> = new Set([
 ]);
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
+  app.use(["/api/binance", "/api/exchange-credentials"], (_request, response, next) => {
+    response.setHeader("Cache-Control", "no-store");
+    next();
+  });
   app.use(userAuthenticatedApiPrefixes, (request, response, next) => {
     const requestPath = request.originalUrl.split("?", 1)[0];
     if (request.method === "GET" && publicReadOnlyApiPaths.has(requestPath)) {
