@@ -180,7 +180,6 @@ export class UserService {
 
     this.store.transaction(() => {
       this.store.updateUserPassword(user.id, hashPassword(password));
-      this.store.invalidateStepUpEnrollment(user.id);
       this.store.markEmailTokenUsed(token.id);
       this.store.deleteAuthSessionsForSubject(user.id, "user");
     });
@@ -254,10 +253,6 @@ export class UserService {
 
   findUserIdByEmail(emailInput: string) {
     return this.store.findUserByEmail(normalizeEmail(emailInput))?.id ?? null;
-  }
-
-  getStepUpEnrollmentInvalidatedAt(userId: string) {
-    return this.store.getStepUpEnrollmentInvalidatedAt(userId);
   }
 
   listUsers() {

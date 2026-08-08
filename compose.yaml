@@ -1,34 +1,21 @@
-name: xingheng
+name: stellax-personal
 
 services:
   api:
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
+    image: "stellax-personal-api:${GIT_COMMIT:-latest}"
     env_file:
-      - "${XINGHENG_COMPOSE_ENV_FD:?fixed Compose env descriptor is required}"
+      - "${ENV_FILE:-.env.production}"
     environment:
       NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-      WEB_CONCURRENCY: "1"
       API_PORT: "8787"
+      GIT_COMMIT: "${GIT_COMMIT:-development}"
       TRADING_DB_PATH: /app/data/trading.sqlite
-      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
-      RWA_AUTOMATION_EXECUTION_MODE: single-host
-      RWA_AUTOMATION_INSTANCE_COUNT: "1"
-      RWA_AUTOMATION_LOCK_DIR: /app/rwa-automation-lock
-      RWA_AUTOMATION_LOCK_PATH: /app/rwa-automation-lock/operation.lock
+      BINANCE_TRADING_DB_PATH: /app/data/binance-personal.sqlite
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
-      STRATEGY_FORWARD_WORKER_POLL_MS: "300000"
       MARTINGALE_GRID_PAPER_REPORT_PATH: /app/strategy-data/martingale-grid-paper.json
-      MARTINGALE_GRID_PAPER_WORKER_POLL_MS: "300000"
       FIXED_GRID_PAPER_REPORT_PATH: /app/strategy-data/fixed-grid-paper.json
       FIXED_GRID_ARCHIVE_CACHE_PATH: /app/strategy-data/fixed-grid-archive-cache
-      FIXED_GRID_PAPER_WORKER_POLL_MS: "300000"
       TRUST_PROXY: "true"
       BSC_TESTNET_CHAIN_ID: "97"
     init: true
@@ -38,61 +25,23 @@ services:
       - sqlite_data:/app/data
       - strategy_data:/app/strategy-data
       - sqlite_backups:/backups
-      - rwa_automation_data:/app/rwa-automation-data
-      - rwa_automation_lock:/app/rwa-automation-lock
-      - type: bind
-        source: /run/xingheng/gcp-wif
-        target: /run/secrets/gcp-wif
-        read_only: true
-        bind:
-          create_host_path: false
-      - type: bind
-        source: /var/lib/xingheng/capital-test-window
-        target: /run/xingheng/capital-test-window
-        read_only: true
-        bind:
-          create_host_path: false
-    command:
-      - node
-      - dist-server/index.js
+    command: ["node", "dist-server/index.js"]
     healthcheck:
-      test:
-        - CMD
-        - node
-        - -e
-        - fetch('http://127.0.0.1:8787/api/health',{cache:'no-store'}).then(async r=>{const v=await r.json();if(!r.ok||r.headers.get('cache-control')!=='no-store'||v.deploymentEnvironment!=='production'||v.composeProject!=='xingheng'||v.revision!==process.env.XINGHENG_EXPECTED_REVISION)throw Error('identity')}).catch(()=>process.exit(1))
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8787/api/health',{cache:'no-store'}).then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))"]
       interval: 15s
       timeout: 5s
       start_period: 30s
       retries: 5
 
   web:
-    image: "${XINGHENG_WEB_IMAGE:?XINGHENG_WEB_IMAGE must come from the release manifest}"
-    pull_policy: never
-    init: true
+    image: "stellax-personal-web:${GIT_COMMIT:-latest}"
     environment:
-      DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-    command:
-      - /bin/sh
-      - -c
-      - test -n "$$DOMAIN" || { echo "DOMAIN is required" >&2; exit 1; }; exec caddy run --config /etc/caddy/Caddyfile --adapter caddyfile
+      DOMAIN: "${DOMAIN:?DOMAIN is required}"
+    command: ["caddy", "run", "--config", "/etc/caddy/Caddyfile", "--adapter", "caddyfile"]
     depends_on:
       api:
         condition: service_healthy
     restart: unless-stopped
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - >-
-          wget -qO- http://api:8787/api/health |
-          grep -q '"production"'
-      interval: 15s
-      timeout: 5s
-      start_period: 30s
-      retries: 5
     ports:
       - "80:80"
       - "443:443"
@@ -100,232 +49,34 @@ services:
     volumes:
       - caddy_data:/data
       - caddy_config:/config
-    networks:
-      default:
-      public_ingress:
-        aliases:
-          - production-web
 
   strategy-history:
-    profiles:
-      - strategy-tools
-    image: "${XINGHENG_STRATEGY_TOOLS_IMAGE:?XINGHENG_STRATEGY_TOOLS_IMAGE must come from the release manifest}"
-    pull_policy: never
+    profiles: ["strategy-tools"]
+    image: "stellax-personal-strategy-tools:${GIT_COMMIT:-latest}"
     environment:
       NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       STRATEGY_HISTORY_REPORT_PATH: /app/strategy-data/route-b-history.json
       STRATEGY_FORWARD_REPORT_PATH: /app/strategy-data/route-b-forward.json
-      MARTINGALE_GRID_PAPER_REPORT_PATH: /app/strategy-data/martingale-grid-paper.json
-      FIXED_GRID_PAPER_REPORT_PATH: /app/strategy-data/fixed-grid-paper.json
     volumes:
       - strategy_data:/app/strategy-data
     restart: "no"
-    command:
-      - npm
-      - run
-      - research:ict:history
+    command: ["npm", "run", "research:ict:history"]
 
   sqlite-restore:
-    profiles:
-      - sqlite-ops
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
+    profiles: ["sqlite-ops"]
+    image: "stellax-personal-api:${GIT_COMMIT:-latest}"
     environment:
-      NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
       TRADING_DB_PATH: /app/data/trading.sqlite
     volumes:
       - sqlite_data:/app/data
       - sqlite_backups:/backups:ro
     network_mode: none
-    read_only: true
-    cap_drop:
-      - ALL
     restart: "no"
-    entrypoint:
-      - /app/scripts/sqlite-restore-production.sh
-
-  provider-identity-preflight:
-    profiles:
-      - provider-identity-preflight
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
-    env_file:
-      - "${XINGHENG_COMPOSE_ENV_FD:?fixed Compose env descriptor is required}"
-    environment:
-      NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-      XINGHENG_RELEASE_MANIFEST_REVISION: "${XINGHENG_RELEASE_MANIFEST_REVISION:-}"
-      TRADING_DB_PATH: /app/data/trading.sqlite
-      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
-      RWA_PROVIDER_PREFLIGHT_USER_ID: "${RWA_PROVIDER_PREFLIGHT_USER_ID:-}"
-      RWA_AUTOMATION_SERVER_KILL_SWITCH: "true"
-      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
-      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
-      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
-    volumes:
-      - sqlite_data:/app/data:ro
-      - rwa_automation_data:/app/rwa-automation-data:ro
-      - type: bind
-        source: /run/xingheng/gcp-wif
-        target: /run/secrets/gcp-wif
-        read_only: true
-        bind:
-          create_host_path: false
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:size=16m,mode=0700,uid=20001,gid=20001
-    restart: "no"
-    command:
-      - node
-      - dist-server/operations/rwa-provider-identity-preflight.js
-
-  rwa-automation-verify:
-    profiles:
-      - rwa-automation-verify
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
-    environment:
-      NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
-      RWA_AUTOMATION_VERIFY_FILE: "${RWA_AUTOMATION_VERIFY_FILE:-}"
-      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
-      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
-      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
-    volumes:
-      - rwa_automation_backups:/app/rwa-automation-backups:ro
-      - type: bind
-        source: /run/xingheng/gcp-wif
-        target: /run/secrets/gcp-wif
-        read_only: true
-        bind:
-          create_host_path: false
-    read_only: true
-    cap_drop:
-      - ALL
-    security_opt:
-      - no-new-privileges:true
-    tmpfs:
-      - /tmp:size=16m,mode=0700,uid=20001,gid=20001
-    restart: "no"
-    command:
-      - node
-      - dist-server/operations/rwa-automation-backup-verify.js
-
-  rwa-automation-backup:
-    profiles:
-      - rwa-automation-ops
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
-    environment:
-      DOMAIN: "${DOMAIN:?DOMAIN is required in the fixed .env.production}"
-      NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
-      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
-      RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "${RWA_AUTOMATION_BACKUP_RETENTION_DAYS:-30}"
-      RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
-      RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
-      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
-      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
-      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
-    volumes:
-      - rwa_automation_data:/app/rwa-automation-data:ro
-      - rwa_automation_backups:/app/rwa-automation-backups
-      - rwa_automation_lock:/app/rwa-automation-lock
-      - type: bind
-        source: /run/xingheng/gcp-wif
-        target: /run/secrets/gcp-wif
-        read_only: true
-        bind:
-          create_host_path: false
-    restart: "no"
-    command:
-      - flock
-      - -n
-      - -x
-      - /app/rwa-automation-lock/operation.lock
-      - node
-      - dist-server/operations/rwa-automation-backup.js
-      - create
-
-  rwa-automation-restore:
-    profiles:
-      - rwa-automation-ops
-    image: "${XINGHENG_API_IMAGE:?XINGHENG_API_IMAGE must come from the release manifest}"
-    pull_policy: never
-    user: "20001:20001"
-    environment:
-      NODE_ENV: production
-      XINGHENG_DEPLOYMENT_ENVIRONMENT: production
-      XINGHENG_COMPOSE_PROJECT: xingheng
-      XINGHENG_WIF_HOST_PATH: /run/xingheng/gcp-wif
-      XINGHENG_EXPECTED_REVISION: "${XINGHENG_REVISION:?XINGHENG_REVISION must be a full Git commit}"
-      RWA_AUTOMATION_DATA_DIR: /app/rwa-automation-data
-      RWA_AUTOMATION_BACKUP_DIR: /app/rwa-automation-backups
-      RWA_AUTOMATION_BACKUP_RETENTION_DAYS: "${RWA_AUTOMATION_BACKUP_RETENTION_DAYS:-30}"
-      RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_TOTAL_BYTES:-1073741824}"
-      RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES: "${RWA_AUTOMATION_BACKUP_MAX_SNAPSHOT_BYTES:-104857600}"
-      RWA_CREDENTIAL_KEY_PROVIDER: gcp-kms
-      RWA_GCP_KMS_KEY_NAME: projects/xingheng-production/locations/asia/keyRings/xingheng-rwa-prod-sg/cryptoKeys/exchange-credentials
-      RWA_GCP_WIF_AUDIENCE: "${RWA_GCP_WIF_AUDIENCE:?RWA_GCP_WIF_AUDIENCE is required}"
-      GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/gcp-wif/adc.json
-    volumes:
-      - rwa_automation_data:/app/rwa-automation-data
-      - rwa_automation_backups:/app/rwa-automation-backups:ro
-      - rwa_automation_lock:/app/rwa-automation-lock
-      - type: bind
-        source: /run/xingheng/gcp-wif
-        target: /run/secrets/gcp-wif
-        read_only: true
-        bind:
-          create_host_path: false
-    restart: "no"
-    command:
-      - flock
-      - -n
-      - -x
-      - /app/rwa-automation-lock/operation.lock
-      - node
-      - dist-server/operations/rwa-automation-backup.js
-      - restore
+    entrypoint: ["/app/scripts/sqlite-restore-production.sh"]
 
 volumes:
   sqlite_data:
   strategy_data:
   sqlite_backups:
-  rwa_automation_data:
-  rwa_automation_backups:
-  rwa_automation_lock:
   caddy_data:
   caddy_config:
-
-networks:
-  public_ingress:
-    name: xingheng-public-ingress

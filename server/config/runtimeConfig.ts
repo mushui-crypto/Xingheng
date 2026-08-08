@@ -1,25 +1,4 @@
 import { isAddress } from "ethers";
-import { RWA_GCP_KMS_KEY_NAME } from "../modules/arbitrage/automation/CredentialKeyProvider";
-import {
-  RWA_GCP_WIF_ADC_PATH,
-  isCanonicalGcpWifAudience,
-  validateGcpWifCredentialFiles,
-  validateGcpWifRuntimeBoundary,
-} from "../modules/arbitrage/automation/GcpWifCredentialConfig";
-import {
-  RWA_AUTOMATION_BACKUP_ROOT,
-  loadRwaAutomationBackupLimits,
-} from "../modules/arbitrage/automation/RwaAutomationBackupService";
-import {
-  RWA_AUTOMATION_DATA_ROOT,
-  validateRwaAutomationDataLayout,
-} from "../modules/arbitrage/automation/RwaAutomationDataLayout";
-import { loadRwaAutomationGovernanceConfig } from "../modules/arbitrage/automation/RwaAutomationGovernance";
-import {
-  RWA_AUTOMATION_EXECUTION_MODE,
-  RWA_AUTOMATION_LOCK_PATH,
-  RWA_AUTOMATION_LOCK_ROOT,
-} from "../modules/arbitrage/automation/RwaAutomationExecutionLease";
 import {
   loadDeploymentIdentity,
   type DeploymentEnvironment,
@@ -142,16 +121,6 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
     ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
     ["BSC_TESTNET_DEPOSIT_MNEMONIC", process.env.BSC_TESTNET_DEPOSIT_MNEMONIC?.trim() ?? ""],
-    ["RWA_CREDENTIAL_KEY_PROVIDER", process.env.RWA_CREDENTIAL_KEY_PROVIDER?.trim() ?? ""],
-    ["RWA_GCP_KMS_KEY_NAME", process.env.RWA_GCP_KMS_KEY_NAME?.trim() ?? ""],
-    ["RWA_GCP_WIF_AUDIENCE", process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? ""],
-    ["GOOGLE_APPLICATION_CREDENTIALS", process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? ""],
-    ["RWA_AUTOMATION_DATA_DIR", process.env.RWA_AUTOMATION_DATA_DIR?.trim() ?? ""],
-    ["RWA_AUTOMATION_INSTANCE_COUNT", process.env.RWA_AUTOMATION_INSTANCE_COUNT?.trim() ?? ""],
-    ["WEB_CONCURRENCY", process.env.WEB_CONCURRENCY?.trim() ?? ""],
-    ["RWA_AUTOMATION_EXECUTION_MODE", process.env.RWA_AUTOMATION_EXECUTION_MODE?.trim() ?? ""],
-    ["RWA_AUTOMATION_LOCK_DIR", process.env.RWA_AUTOMATION_LOCK_DIR?.trim() ?? ""],
-    ["RWA_AUTOMATION_LOCK_PATH", process.env.RWA_AUTOMATION_LOCK_PATH?.trim() ?? ""],
   ] as const;
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
@@ -224,61 +193,4 @@ function validateProductionConfig(config: RuntimeConfig) {
       throw new Error("STRATEGY_ALERT_EMAIL_TO 必须是有效且非示例的告警收件邮箱。");
     }
   }
-  if (process.env.RWA_AUTOMATION_MASTER_KEY?.trim()) {
-    throw new Error("RWA_AUTOMATION_MASTER_KEY 已停用；生产环境禁止回退本地主密钥。");
-  }
-  if (process.env.RWA_CREDENTIAL_KEY_PROVIDER !== "gcp-kms") {
-    throw new Error("生产环境 RWA_CREDENTIAL_KEY_PROVIDER 必须固定为 gcp-kms。");
-  }
-  const kmsKeyName = process.env.RWA_GCP_KMS_KEY_NAME ?? "";
-  if (kmsKeyName !== RWA_GCP_KMS_KEY_NAME) {
-    throw new Error("正式环境 RWA_GCP_KMS_KEY_NAME 必须是已冻结的 CryptoKey 完整资源名。");
-  }
-  if (process.env.RWA_AUTOMATION_DATA_DIR !== RWA_AUTOMATION_DATA_ROOT) {
-    throw new Error("生产环境 RWA_AUTOMATION_DATA_DIR 必须使用冻结的专用卷路径。");
-  }
-  if (
-    process.env.RWA_AUTOMATION_INSTANCE_COUNT !== "1"
-    || process.env.WEB_CONCURRENCY !== "1"
-  ) {
-    throw new Error("自动套利容量治理当前只允许单 Node API 实例，禁止横向扩容。");
-  }
-  if (
-    process.env.RWA_AUTOMATION_EXECUTION_MODE !== RWA_AUTOMATION_EXECUTION_MODE
-    || process.env.RWA_AUTOMATION_LOCK_DIR !== RWA_AUTOMATION_LOCK_ROOT
-    || process.env.RWA_AUTOMATION_LOCK_PATH !== RWA_AUTOMATION_LOCK_PATH
-  ) {
-    throw new Error("自动套利执行拓扑必须使用冻结的单主机独占租约配置。");
-  }
-  const monitoredBinanceAccounts = process.env.RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS?.trim() ?? "";
-  if (
-    monitoredBinanceAccounts
-    && monitoredBinanceAccounts.split(",").some((value) => !/^binance:[a-f0-9]{16}$/.test(value.trim()))
-  ) {
-    throw new Error("RWA_AUTOMATION_MONITORED_BINANCE_ACCOUNT_IDS 必须只包含精确的 Binance 专用账户内部指纹。");
-  }
-  if (process.env.RWA_AUTOMATION_BACKUP_DIR && process.env.RWA_AUTOMATION_BACKUP_DIR !== RWA_AUTOMATION_BACKUP_ROOT) {
-    throw new Error("生产环境 RWA_AUTOMATION_BACKUP_DIR 必须使用独立备份卷路径。");
-  }
-  try {
-    loadRwaAutomationBackupLimits();
-  } catch {
-    throw new Error("生产环境自动套利备份保留或容量配置无效。");
-  }
-  try {
-    loadRwaAutomationGovernanceConfig();
-  } catch {
-    throw new Error("生产环境自动套利限流或状态容量配置无效。");
-  }
-  const wifAudience = process.env.RWA_GCP_WIF_AUDIENCE?.trim() ?? "";
-  if (!isCanonicalGcpWifAudience(wifAudience)) {
-    throw new Error("生产环境 RWA_GCP_WIF_AUDIENCE 必须是受信 WIF provider 的完整 audience。");
-  }
-  const adcPath = process.env.GOOGLE_APPLICATION_CREDENTIALS?.trim() ?? "";
-  if (adcPath !== RWA_GCP_WIF_ADC_PATH) {
-    throw new Error("GOOGLE_APPLICATION_CREDENTIALS 必须指向冻结的 X.509 WIF ADC secret 路径。");
-  }
-  validateGcpWifRuntimeBoundary();
-  validateGcpWifCredentialFiles({ adcPath, expectedAudience: wifAudience });
-  validateRwaAutomationDataLayout({ root: RWA_AUTOMATION_DATA_ROOT, production: true });
 }

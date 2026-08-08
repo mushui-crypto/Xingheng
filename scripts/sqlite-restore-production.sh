@@ -13,7 +13,7 @@ backup_uri="file:$backup?immutable=1"
   echo "production SQLite backup is unavailable" >&2
   exit 1
 }
-[ "$(stat -c '%h:%a:%u:%g' "$backup")" = "1:600:20001:20001" ] || {
+[ "$(stat -c '%h:%a:%u:%g' "$backup")" = "1:600:$(id -u):$(id -g)" ] || {
   echo "production SQLite backup boundary is invalid" >&2
   exit 1
 }

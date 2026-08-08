@@ -4,10 +4,10 @@ import { WebSocketServer, type WebSocket } from "ws";
 import { UserService } from "./auth/UserService";
 import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
-import { getAdminBearerToken } from "./modules/auth/session";
-import { hashSessionToken } from "./auth/security";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
+import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
+import { registerExchangeCredentialRoutes } from "./modules/api/exchangeCredentialRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
 import { registerRealTradingRoutes } from "./modules/api/realTradingRoutes";
@@ -27,31 +27,10 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
-import { RwaBybitReadOnlyConnector } from "./modules/arbitrage/automation/RwaBybitReadOnlyConnector";
-import { RwaNeutralAutomationService } from "./modules/arbitrage/automation/RwaNeutralAutomationService";
-import { RwaAutomationPersistentStore } from "./modules/arbitrage/automation/RwaAutomationPersistentStore";
-import { GcpKmsCredentialKeyProvider } from "./modules/arbitrage/automation/GcpKmsCredentialKeyProvider";
-import { RwaBybitMainnetClient } from "./modules/arbitrage/automation/RwaBybitMainnetClient";
-import { RwaNeutralExecutionError, RwaNeutralExecutionService } from "./modules/arbitrage/automation/RwaNeutralExecutionService";
-import { RwaBybitAutomationConnector } from "./modules/arbitrage/automation/RwaBybitAutomationConnector";
-import { RwaBinanceAutomationConnector } from "./modules/arbitrage/automation/RwaBinanceAutomationConnector";
-import { RwaBinanceAutomationService } from "./modules/arbitrage/automation/RwaBinanceAutomationService";
-import { RwaBinanceMainnetClient } from "./modules/arbitrage/automation/RwaBinanceMainnetClient";
-import type {
-  RwaBinanceCredentials,
-  RwaBinancePermissions,
-} from "./modules/arbitrage/automation/RwaBinanceAutomationTypes";
-import { RwaAutomationConnectorRegistry } from "./modules/arbitrage/automation/RwaAutomationConnectorRegistry";
-import { RwaAutomationControlService } from "./modules/arbitrage/automation/RwaAutomationControlService";
-import { assertCapitalTestWindowAllowsNewRisk } from "../scripts/capitalTestWindowReceipt.mjs";
-import {
-  RwaAutomationGovernance,
-  loadRwaAutomationGovernanceConfig,
-} from "./modules/arbitrage/automation/RwaAutomationGovernance";
-import { RwaAutomationExecutionLease } from "./modules/arbitrage/automation/RwaAutomationExecutionLease";
-import { StepUpSecurityStore } from "./modules/security/StepUpSecurityStore";
-import { StepUpSecurityService } from "./modules/security/StepUpSecurityService";
-import { registerStepUpSecurityRoutes } from "./modules/security/stepUpSecurityRoutes";
+import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
+import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
+import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
+import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -72,12 +51,6 @@ import type { MarketSymbol, MarketTick } from "./types";
 dotenv.config();
 
 const config = loadRuntimeConfig();
-const rwaAutomationExecutionLease = config.isProduction
-  ? await RwaAutomationExecutionLease.acquire()
-  : null;
-const rwaAutomationGovernanceConfig = loadRwaAutomationGovernanceConfig();
-const rwaAutomationGovernance = new RwaAutomationGovernance(rwaAutomationGovernanceConfig);
-const rwaCredentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const { port } = config;
 const app = express();
 if (process.env.TRUST_PROXY === "true") {
@@ -125,19 +98,6 @@ martingaleGridPaperWorker.start();
 const fixedGridPaperWorker = new FixedGridPaperWorker();
 fixedGridPaperWorker.start();
 const users = new UserService(tradingStore, email, config.appPublicUrl);
-const stepUpSecurity = new StepUpSecurityService({
-  storeFactory: (userId) => new StepUpSecurityStore(userId, rwaCredentialKeyProvider),
-  verifyPassword: (userId, password) => users.verifyCurrentPassword(userId, password),
-  getEnrollmentInvalidatedAt: (userId) => users.getStepUpEnrollmentInvalidatedAt(userId),
-  capacity: {
-    maxAuthorizationsGlobal: rwaAutomationGovernanceConfig.maxStepUpAuthorizationsGlobal,
-    maxAuthorizationsPerUser: rwaAutomationGovernanceConfig.maxStepUpAuthorizationsPerUser,
-    maxAttempts: rwaAutomationGovernanceConfig.maxStepUpAttempts,
-    maxAttemptsPerUser: rwaAutomationGovernanceConfig.maxStepUpAttemptsPerUser,
-    maxStores: rwaAutomationGovernanceConfig.maxStepUpStores,
-    storeIdleTtlMs: rwaAutomationGovernanceConfig.registryIdleTtlMs,
-  },
-});
 const realTradingConfig = getHyperliquidRealTradingConfig();
 const realTradingInfo = new HyperliquidInfoClient(realTradingConfig.baseUrl);
 const realTradingRisk = new RealTradingRiskGuard(realTradingInfo);
@@ -157,86 +117,28 @@ users.onStatusChange((userId, status) => {
   if (status !== "disabled") return;
   realTradingRealtimeTokens.revokeUser(userId);
   void realTradingUserStreams.revokeUser(userId);
-  void stepUpSecurity.revokeDisabledUser(userId).catch(() => {
-    // Authentication revocation remains fail-closed even when encrypted state cleanup is unavailable.
-  });
 });
-registerAuthRoutes({ app, users, wallet, tradingStore, config, stepUpSecurity });
+registerAuthRoutes({ app, users, wallet, tradingStore, config });
 
 registerMarketRoutes(app, market, tradingStore, {
   environment: config.deploymentEnvironment,
   composeProject: config.composeProject,
-  revision: process.env.XINGHENG_EXPECTED_REVISION ?? "development",
+  revision: process.env.GIT_COMMIT ?? "development",
 });
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
-const automationControl = new RwaAutomationControlService(arbitrageDashboard, (userId) => {
-  const rwaExecution = new RwaNeutralExecutionService(
-    new RwaAutomationPersistentStore({
-      userId,
-      venue: "bybit",
-      keyProvider: rwaCredentialKeyProvider,
-      governanceConfig: rwaAutomationGovernanceConfig,
-    }),
-    (credentials) => new RwaBybitMainnetClient(credentials),
-    Date.now,
-    () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
-    () => rwaAutomationExecutionLease?.assertHeld(),
-    undefined,
-    new RwaBybitMainnetClient({ apiKey: "", apiSecret: "" }),
-  );
-  const binance = new RwaBinanceAutomationService(
-    new RwaAutomationPersistentStore<RwaBinanceCredentials, RwaBinancePermissions>({
-      userId,
-      venue: "binance",
-      keyProvider: rwaCredentialKeyProvider,
-      governanceConfig: rwaAutomationGovernanceConfig,
-    }),
-    (credentials, activityGuard) => new RwaBinanceMainnetClient(
-      credentials,
-      fetch,
-      Date.now,
-      undefined,
-      undefined,
-      activityGuard,
-    ),
-    Date.now,
-    () => process.env.RWA_AUTOMATION_SERVER_KILL_SWITCH !== "false",
-    undefined,
-    () => rwaAutomationExecutionLease?.assertHeld(),
-    undefined,
-    undefined,
-    undefined,
-    () => {
-      if (tradingStore.findBinanceCredentialBinding(userId)?.status === "recovery_inconsistent") {
-        throw new RwaNeutralExecutionError(
-          409,
-          "recovery_inconsistent",
-          "Binance Credential Binding 状态异常，自动化 mutation 已拒绝并等待人工处理。",
-        );
-      }
-    },
-    () => tradingStore.findBinanceCredentialBinding(userId) ?? null,
-    assertCapitalTestWindowAllowsNewRisk,
-  );
-  return new RwaAutomationConnectorRegistry([
-    new RwaBybitAutomationConnector(rwaExecution),
-    new RwaBinanceAutomationConnector(binance),
-  ]);
-}, stepUpSecurity, rwaAutomationGovernance, Date.now, () => rwaAutomationExecutionLease?.assertHeld(), tradingStore);
-registerStepUpSecurityRoutes(app, stepUpSecurity, automationControl);
-registerArbitrageRoutes(
-  app,
-  arbitrageDashboard,
-  new RwaNeutralAutomationService(new RwaBybitReadOnlyConnector()),
-  automationControl,
-  (request) => {
-    const token = getAdminBearerToken(request);
-    const session = token ? tradingStore.findAuthSession(hashSessionToken(token), "admin") : null;
-    return config.adminAuthConfigured && session?.subjectId === config.adminEmail ? session.subjectId : null;
-  },
-);
+const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
+const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
+const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
+const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {
+  deleteCredential: (userId, venue) => venue === "binance"
+    ? binancePersonalTrading.deleteCredential(userId)
+    : Promise.resolve(false),
+});
+registerArbitrageRoutes(app, arbitrageDashboard);
+registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
+registerExchangeCredentialRoutes(app, userExchangeCredentialService);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({
   app,
@@ -254,26 +156,11 @@ registerAdminTradingRoutes({ app, trading, users, wallet });
 registerUserWalletRoutes(app, wallet);
 registerAdminWalletRoutes(app, wallet);
 
-if (config.isProduction) {
-  await automationControl.startPersistedActivityMonitoring();
-}
-
 const server = app.listen(port, "0.0.0.0", () => {
   console.log(`[api] listening on http://127.0.0.1:${port}`);
 });
 
 const socketHub = registerSocketHub(server, market, realTradingRealtimeTokens, realTradingUserStreams);
-const rwaAutomationLeaseMonitor = rwaAutomationExecutionLease
-  ? setInterval(() => {
-      try {
-        rwaAutomationExecutionLease.assertHeld();
-      } catch {
-        console.error("[api] automation execution lease lost; terminating");
-        process.exit(1);
-      }
-    }, 1_000)
-  : null;
-rwaAutomationLeaseMonitor?.unref();
 
 function registerSocketHub(
   httpServer: typeof server,
@@ -426,7 +313,6 @@ async function shutdown(signal: string) {
     martingaleGridPaperWorker.stop();
     fixedGridPaperWorker.stop();
     strategyRuntime.stop();
-    automationControl.dispose();
     realTradingReconciliation.stop();
     await realTradingUserStreams.stop();
     await market.stop();
@@ -443,9 +329,8 @@ async function shutdown(signal: string) {
         else resolve();
       });
     });
+    userExchangeCredentials.close();
     tradingStore.close();
-    if (rwaAutomationLeaseMonitor) clearInterval(rwaAutomationLeaseMonitor);
-    rwaAutomationExecutionLease?.release();
     clearTimeout(forceExit);
     process.exit(0);
   } catch (error) {

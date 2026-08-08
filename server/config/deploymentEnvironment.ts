@@ -38,10 +38,6 @@ export function loadDeploymentIdentity(): DeploymentIdentity {
     throw new Error("部署环境必须绑定有效的纯域名。");
   }
 
-  if (process.env.XINGHENG_WIF_HOST_PATH !== "/run/xingheng/gcp-wif") {
-    throw new Error("部署环境 WIF 挂载身份不一致。");
-  }
-
   return {
     environment,
     composeProject,

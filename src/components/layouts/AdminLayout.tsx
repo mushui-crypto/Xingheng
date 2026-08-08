@@ -1,4 +1,4 @@
-import { BarChart3, Eye, ListChecks, ListTree, LogOut, RadioTower, UsersRound } from "lucide-react";
+import { BarChart3, ListChecks, ListTree, LogOut, RadioTower, UsersRound } from "lucide-react";
 import { useEffect, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { RuntimeEnvironmentStatusBar } from "../../features/runtimeEnvironment/RuntimeEnvironmentUi";
@@ -58,7 +58,6 @@ export function AdminLayout({ children }: AdminLayoutProps) {
               <TopLink to="/admin/symbols" icon={<ListTree size={16} />} label="品种管理" />
               <TopLink to="/admin/trading" icon={<ListChecks size={16} />} label="交易查询" />
               <TopLink to="/admin/real-trading" icon={<RadioTower size={16} />} label="真实交易运维" />
-              <TopLink to="/admin/arbitrage-automation" icon={<Eye size={16} />} label="套利 Shadow" />
             </nav>
             <div className="hidden items-center gap-4 lg:flex">
               <p className="text-xs uppercase tracking-[0.16em] text-muted">
