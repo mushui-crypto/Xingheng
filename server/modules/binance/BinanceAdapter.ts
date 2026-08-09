@@ -105,7 +105,7 @@ function accountFromSnapshot(snapshot: BinancePreflightSnapshot): CanonicalAccou
       markPrice: snapshot.perpetual.mark,
       liquidationPrice: null,
       leverage: snapshot.perpetual.leverage,
-      marginMode: "unknown",
+      marginMode: snapshot.perpetual.marginMode,
       unrealizedPnlUsd: null,
       fetchedAt: snapshot.fetchedAt,
     },

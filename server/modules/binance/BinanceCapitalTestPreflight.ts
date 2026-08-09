@@ -22,6 +22,9 @@ export type BinanceCapitalTestPreflightReason =
   | "LEGS_INVALID"
   | "INSTRUMENT_UNSUPPORTED"
   | "PRODUCT_UNAVAILABLE"
+  | "POSITION_MODE_INVALID"
+  | "LEVERAGE_INVALID"
+  | "MARGIN_MODE_UNCONFIRMED"
   | "QUANTITY_INVALID"
   | "QUANTITY_MISMATCH"
   | "QUANTITY_STEP_INVALID"
@@ -34,7 +37,17 @@ export type BinanceCapitalTestPreflightReason =
   | "CONSTRAINT_INVALID";
 
 export type BinanceCapitalTestPreflightResult =
-  | Readonly<{ status: "PASS" }>
+  | Readonly<{
+    status: "PASS";
+    dustEvidence?: Readonly<{
+      classification: "untradeable_spot_dust";
+      quantityXaut: number;
+      referencePriceUsd: number;
+      notionalUsd: number;
+      venueMinQuantityXaut: number;
+      venueMinNotionalUsd: number;
+    }>;
+  }>
   | Readonly<{
     status: "FAIL";
     reason: BinanceCapitalTestPreflightReason;
@@ -88,6 +101,15 @@ export function preflightBinanceCapitalTest(
     || snapshot.perpetual.status !== "Trading") {
     return fail("PRODUCT_UNAVAILABLE", "Binance XAUTUSDT spot and perpetual products must both be tradable.");
   }
+  if (!snapshot.permissions.positionModeSupported || !snapshot.accountMode.endsWith("_one_way")) {
+    return fail("POSITION_MODE_INVALID", "Binance XAUTUSDT perpetual position mode must be ONE_WAY.");
+  }
+  if (snapshot.perpetual.leverage !== 1) {
+    return fail("LEVERAGE_INVALID", "Binance XAUTUSDT perpetual leverage must be 1x.");
+  }
+  if (snapshot.perpetual.marginMode !== "cross" && snapshot.perpetual.marginMode !== "isolated") {
+    return fail("MARGIN_MODE_UNCONFIRMED", "Binance XAUTUSDT perpetual margin mode must be confirmed read-only.");
+  }
 
   const spotQuantity = normalizeUnsignedDecimal(spotLeg.targetDeltaBaseQuantity);
   const perpetualQuantity = normalizeUnsignedDecimal(perpetualLeg.targetDeltaBaseQuantity);
@@ -123,7 +145,9 @@ export function preflightBinanceCapitalTest(
     return fail("CAPITAL_LIMIT_EXCEEDED", "Binance capital test total planned capital exceeds 40 USD.");
   }
 
-  if (snapshot.existingSpotQuantityXaut > 1e-9 || snapshot.existingPerpetualQuantityXaut > 1e-9) {
+  const dustEvidence = spotDustEvidence(snapshot);
+  if ((snapshot.existingSpotQuantityXaut > 1e-9 && !dustEvidence)
+    || snapshot.existingPerpetualQuantityXaut > 1e-9) {
     return fail("EXISTING_EXPOSURE", "Existing Binance XAUT exposure must be closed before the capital test.");
   }
   if (snapshot.openSpotOrderCount > 0 || snapshot.openPerpetualOrderCount > 0) {
@@ -138,7 +162,29 @@ export function preflightBinanceCapitalTest(
     return fail("CONSTRAINT_INVALID", "Binance capital test execution constraints are invalid.");
   }
 
-  return { status: "PASS" };
+  return dustEvidence ? { status: "PASS", dustEvidence } : { status: "PASS" };
+}
+
+function spotDustEvidence(snapshot: BinancePreflightSnapshot) {
+  const quantityXaut = snapshot.existingSpotQuantityXaut;
+  const referencePriceUsd = snapshot.spot.bid;
+  const notionalUsd = quantityXaut * referencePriceUsd;
+  if (!(quantityXaut > 1e-9)
+    || !Number.isFinite(referencePriceUsd)
+    || referencePriceUsd <= 0
+    || !Number.isFinite(notionalUsd)
+    || !(quantityXaut < snapshot.spot.minOrderQty)
+    || !(notionalUsd < snapshot.spot.minNotionalUsd)) {
+    return null;
+  }
+  return {
+    classification: "untradeable_spot_dust" as const,
+    quantityXaut,
+    referencePriceUsd,
+    notionalUsd,
+    venueMinQuantityXaut: snapshot.spot.minOrderQty,
+    venueMinNotionalUsd: snapshot.spot.minNotionalUsd,
+  };
 }
 
 function estimateTotalPlannedCapitalUsd(

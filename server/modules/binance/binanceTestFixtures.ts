@@ -46,7 +46,7 @@ export function snapshotFixture(overrides: Partial<BinancePreflightSnapshot> = {
     spot: { status: "Trading", minOrderQty: 0.001, qtyStep: 0.001, minNotionalUsd: 5, priceTick: 0.1, quantityPrecision: 3, bid: 999, ask: 1_000, depthUsd: 10_000 },
     perpetual: {
       status: "Trading", minOrderQty: 0.001, qtyStep: 0.001, minNotionalUsd: 5, priceTick: 0.1, quantityPrecision: 3,
-      bid: 1_001, ask: 1_002, depthUsd: 10_000, leverage: 1, mark: 1_001, fundingRate: 0.0002,
+      bid: 1_001, ask: 1_002, depthUsd: 10_000, leverage: 1, marginMode: "cross", mark: 1_001, fundingRate: 0.0002,
       fundingIntervalHours: 8, nextFundingTime: Date.now() + 1_000, liquidationDistancePercent: null,
     },
     fees: { spotTakerBps: 10, perpetualTakerBps: 5 },

@@ -54,6 +54,7 @@ test("canonical read capabilities map the existing Binance snapshot without muta
   assert.equal(funding.intervalHours, snapshot.perpetual.fundingIntervalHours);
   assert.equal(account.accountId, snapshot.accountId);
   assert.equal(account.openOrderCount, snapshot.openSpotOrderCount + snapshot.openPerpetualOrderCount);
+  assert.equal(account.positions[1]?.marginMode, snapshot.perpetual.marginMode);
   assert.equal(snapshotReads, 4);
 });
 

@@ -27,3 +27,134 @@ test("production orders remain IOC while test orders use GTC", async () => {
 
   assert.deepEqual(timeInForce, ["IOC", "GTC"]);
 });
+
+test("preflight snapshot maps cross and isolated margin modes using GET-only requests", async (t) => {
+  for (const marginType of ["cross", "isolated"] as const) {
+    await t.test(marginType, async () => {
+      const methods: string[] = [];
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        snapshotFetch(marginType, methods),
+        () => 1_800_000_000_000,
+        ["203.0.113.10"],
+      );
+
+      const snapshot = await client.readPreflightSnapshot();
+
+      assert.equal(snapshot.perpetual.marginMode, marginType);
+      assert.ok(methods.length > 0);
+      assert.ok(methods.every((method) => method === "GET"));
+    });
+  }
+});
+
+function snapshotFetch(
+  marginType: "cross" | "isolated",
+  methods: string[],
+) {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    methods.push(init?.method ?? "GET");
+    const response = snapshotResponse(url.pathname, marginType);
+    if (response === undefined) throw new Error(`Unhandled Binance fixture request: ${url.pathname}`);
+    return Response.json(response);
+  }) as typeof fetch;
+}
+
+function snapshotResponse(path: string, marginType: "cross" | "isolated"): unknown {
+  switch (path) {
+    case "/api/v3/time":
+      return { serverTime: 1_800_000_000_000 };
+    case "/api/v3/exchangeInfo":
+      return {
+        symbols: [{
+          symbol: "XAUTUSDT",
+          baseAsset: "XAUT",
+          quoteAsset: "USDT",
+          status: "TRADING",
+          isSpotTradingAllowed: true,
+          baseAssetPrecision: 8,
+          filters: [
+            { filterType: "LOT_SIZE", minQty: "0.0001", stepSize: "0.0001" },
+            { filterType: "NOTIONAL", minNotional: "5" },
+            { filterType: "PRICE_FILTER", tickSize: "0.01" },
+          ],
+        }],
+      };
+    case "/fapi/v1/exchangeInfo":
+      return {
+        symbols: [{
+          symbol: "XAUTUSDT",
+          baseAsset: "XAUT",
+          quoteAsset: "USDT",
+          contractType: "PERPETUAL",
+          status: "TRADING",
+          quantityPrecision: 3,
+          filters: [
+            { filterType: "LOT_SIZE", minQty: "0.001", stepSize: "0.001" },
+            { filterType: "MIN_NOTIONAL", notional: "5" },
+            { filterType: "PRICE_FILTER", tickSize: "0.01" },
+          ],
+        }],
+      };
+    case "/sapi/v1/account/apiRestrictions":
+      return {
+        enableReading: true,
+        enableSpotAndMarginTrading: true,
+        enableFutures: true,
+        enableWithdrawals: false,
+        ipRestrict: true,
+        ipList: ["203.0.113.10"],
+      };
+    case "/api/v3/account":
+      return {
+        uid: "fixture-account",
+        canTrade: true,
+        balances: [
+          { asset: "USDT", free: "100", locked: "0" },
+          { asset: "XAUT", free: "0", locked: "0" },
+        ],
+      };
+    case "/fapi/v2/account":
+      return {
+        canTrade: true,
+        multiAssetsMargin: false,
+        availableBalance: "100",
+        assets: [{ asset: "USDT", availableBalance: "100" }],
+      };
+    case "/fapi/v1/positionSide/dual":
+      return { dualSidePosition: false };
+    case "/sapi/v1/asset/tradeFee":
+      return [{ symbol: "XAUTUSDT", takerCommission: "0.001" }];
+    case "/fapi/v1/commissionRate":
+      return { symbol: "XAUTUSDT", takerCommissionRate: "0.0005" };
+    case "/fapi/v2/positionRisk":
+      return [{
+        symbol: "XAUTUSDT",
+        positionAmt: "0",
+        leverage: "1",
+        marginType,
+        liquidationPrice: "0",
+      }];
+    case "/api/v3/openOrders":
+    case "/fapi/v1/openOrders":
+      return [];
+    case "/api/v3/ticker/bookTicker":
+    case "/fapi/v1/ticker/bookTicker":
+      return { symbol: "XAUTUSDT", bidPrice: "4339.99", askPrice: "4340" };
+    case "/fapi/v1/premiumIndex":
+      return {
+        symbol: "XAUTUSDT",
+        markPrice: "4339.50",
+        lastFundingRate: "0.0001",
+        nextFundingTime: 1_800_000_028_800,
+      };
+    case "/fapi/v1/fundingInfo":
+      return [{ symbol: "XAUTUSDT", fundingIntervalHours: 8 }];
+    case "/api/v3/depth":
+    case "/fapi/v1/depth":
+      return { bids: [["4339.99", "1"]], asks: [["4340", "1"]] };
+    default:
+      return undefined;
+  }
+}

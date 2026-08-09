@@ -145,6 +145,9 @@ export class BinanceClient implements BinanceClientAdapter {
     const leverage = positionRow
       ? snapshotPositiveInteger(positionRow.leverage, "永续杠杆")
       : null;
+    const marginMode = positionRow
+      ? snapshotMarginMode(positionRow.marginType)
+      : "unknown";
     const position = Math.abs(positionAmount) > 0 ? positionRow : undefined;
     const spotBalances = list(spotAccount.balances).map(record);
     const usdt = spotBalances.find((item) => item.asset === "USDT");
@@ -201,6 +204,7 @@ export class BinanceClient implements BinanceClientAdapter {
       perpetual: {
         ...products.perpetual,
         leverage,
+        marginMode,
         bid: perpetualBid,
         ask: perpetualAsk,
         depthUsd: depthUsd(futuresDepthValue),
@@ -826,6 +830,11 @@ function snapshotPositiveInteger(value: unknown, label: string) {
     throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
   }
   return parsed;
+}
+
+function snapshotMarginMode(value: unknown): "cross" | "isolated" | "unknown" {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "cross" || normalized === "isolated" ? normalized : "unknown";
 }
 
 function nullableTimestamp(value: unknown) {

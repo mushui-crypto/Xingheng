@@ -52,6 +52,7 @@ export type BinanceAccountSnapshot = {
   spot: BinanceInstrumentSnapshot;
   perpetual: BinanceInstrumentSnapshot & {
     leverage: number | null;
+    marginMode: "cross" | "isolated" | "unknown";
     mark: number;
     fundingRate: number;
     fundingIntervalHours: number;

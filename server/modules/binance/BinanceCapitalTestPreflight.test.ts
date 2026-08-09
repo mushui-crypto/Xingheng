@@ -49,11 +49,64 @@ test("rejects an unsupported Binance instrument", () => {
   assertFail(unsupported, snapshotFixture(), "INSTRUMENT_UNSUPPORTED");
 });
 
-test("rejects existing XAUT exposure", () => {
+test("accepts untradeable spot dust and records evidence", () => {
+  const result = preflightBinanceCapitalTest(
+    context,
+    intentFixture(),
+    snapshotFixture({
+      accountId: context.accountId,
+      existingSpotQuantityXaut: 0.0005,
+      spotFreeXaut: 0.0005,
+      spotAvailableQuantityXaut: 0.0005,
+    }),
+    now,
+    20,
+  );
+  assert.deepEqual(result, {
+    status: "PASS",
+    dustEvidence: {
+      classification: "untradeable_spot_dust",
+      quantityXaut: 0.0005,
+      referencePriceUsd: 999,
+      notionalUsd: 0.4995,
+      venueMinQuantityXaut: 0.001,
+      venueMinNotionalUsd: 5,
+    },
+  });
+});
+
+test("rejects tradable spot residual", () => {
   assertFail(
     intentFixture(),
     snapshotFixture({ existingSpotQuantityXaut: 0.01, spotFreeXaut: 0.01 }),
     "EXISTING_EXPOSURE",
+  );
+});
+
+test("rejects non-zero perpetual exposure", () => {
+  assertFail(
+    intentFixture(),
+    snapshotFixture({ existingPerpetualQuantityXaut: 0.001, perpetualPositionSide: "short" }),
+    "EXISTING_EXPOSURE",
+  );
+});
+
+test("requires one-way position mode, 1x leverage, and confirmed margin mode", () => {
+  assertFail(intentFixture(), snapshotFixture({ accountMode: "single_asset_hedge" }), "POSITION_MODE_INVALID");
+  assertFail(
+    intentFixture(),
+    snapshotFixture({ permissions: { ...snapshotFixture().permissions, positionModeSupported: false } }),
+    "POSITION_MODE_INVALID",
+  );
+  assertFail(
+    intentFixture(),
+    snapshotFixture({ perpetual: { ...snapshotFixture().perpetual, leverage: 2 } }),
+    "LEVERAGE_INVALID",
+  );
+  assertFail(
+    intentFixture(),
+    snapshotFixture({ perpetual: { ...snapshotFixture().perpetual, marginMode: "unknown" } }),
+    "MARGIN_MODE_UNCONFIRMED",
   );
 });
 
