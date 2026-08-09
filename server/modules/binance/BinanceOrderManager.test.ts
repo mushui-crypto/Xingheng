@@ -49,6 +49,46 @@ test("order manager persists one provider write for duplicate idempotency keys",
   }
 });
 
+test("provider mutation guard runs after risk refresh and immediately before provider submission", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-personal-expiry-guard-"));
+  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  const events: string[] = [];
+  const client = {
+    readPreflightSnapshot: async () => {
+      events.push("risk-refresh");
+      return snapshotFixture();
+    },
+    placeOrder: async () => {
+      events.push("provider-mutation");
+      return { orderId: "must-not-submit", orderLinkId: "must-not-submit" };
+    },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture();
+  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  try {
+    await assert.rejects(
+      () => manager.place({
+        idempotencyKey: "expired-before-provider-mutation",
+        category: "spot",
+        symbol: "XAUTUSDT",
+        side: "Buy",
+        quantityXaut: 0.01,
+        limitPrice: 1_000,
+        reduceOnly: false,
+      }, () => {
+        events.push("expiry-guard");
+        throw new Error("Capital Test intent expired before provider mutation.");
+      }),
+      /expired before provider mutation/u,
+    );
+    assert.deepEqual(events, ["risk-refresh", "expiry-guard"]);
+    assert.equal(manager.listOrders()[0]?.status, "failed");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("partially filled orders are cancelled before completion", async () => {
   const root = mkdtempSync(join(tmpdir(), "binance-personal-partial-"));
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));

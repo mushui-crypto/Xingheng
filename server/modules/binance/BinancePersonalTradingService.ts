@@ -1,6 +1,10 @@
 import { BinanceCredential } from "./BinanceCredential";
 import { BinanceFundingArbitrageStrategy } from "./BinanceFundingArbitrageStrategy";
-import { BinanceOrderManager, type BinanceOrderInput } from "./BinanceOrderManager";
+import {
+  BinanceOrderManager,
+  type BinanceOrderInput,
+  type BinanceProviderMutationGuard,
+} from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
 import { loadBinanceTradingConfig } from "./BinanceTradingConfig";
@@ -33,7 +37,8 @@ export class BinancePersonalTradingService {
       : BinanceCredential.fromEnvironment();
     this.store = new BinanceOrderStore(options.orderDbPath);
     this.risk = new BinanceRiskGuard(this.config);
-    this.client = this.credential ? new BinanceClient(this.credential.toClientCredentials()) : null;
+    const rawClient = this.credential ? new BinanceClient(this.credential.toClientCredentials()) : null;
+    this.client = rawClient;
     this.orders = this.client ? new BinanceOrderManager(this.client, this.risk, this.store, this.config) : null;
     this.strategy = this.client && this.orders
       ? new BinanceFundingArbitrageStrategy(this.client, this.orders, this.config)
@@ -116,8 +121,8 @@ export class BinancePersonalTradingService {
     return this.requireStrategy().exit({ idempotencyKey: string(body.idempotencyKey, "idempotencyKey") });
   }
 
-  async placeOrder(input: unknown) {
-    return this.requireOrders().place(parseOrderInput(input));
+  async placeOrder(input: unknown, beforeProviderMutation?: BinanceProviderMutationGuard) {
+    return this.requireOrders().place(parseOrderInput(input), beforeProviderMutation);
   }
 
   async placeTestOrder(input: unknown) {

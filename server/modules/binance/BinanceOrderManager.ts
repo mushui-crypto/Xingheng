@@ -14,6 +14,8 @@ export type BinanceOrderInput = Omit<BinanceOrderRequest, "orderLinkId"> & {
   idempotencyKey: string;
 };
 
+export type BinanceProviderMutationGuard = () => void | Promise<void>;
+
 export class BinanceOrderManager {
   private readonly orderLock = new AsyncLock();
 
@@ -24,15 +26,19 @@ export class BinanceOrderManager {
     private readonly config: BinanceTradingConfig,
   ) {}
 
-  place(input: BinanceOrderInput) {
-    return this.placeWithMode(input, "production_ioc");
+  place(input: BinanceOrderInput, beforeProviderMutation?: BinanceProviderMutationGuard) {
+    return this.placeWithMode(input, "production_ioc", beforeProviderMutation);
   }
 
   placeTestOrder(input: BinanceOrderInput) {
     return this.placeWithMode(input, "test_gtc");
   }
 
-  private async placeWithMode(input: BinanceOrderInput, executionMode: BinanceOrderExecutionMode) {
+  private async placeWithMode(
+    input: BinanceOrderInput,
+    executionMode: BinanceOrderExecutionMode,
+    beforeProviderMutation?: BinanceProviderMutationGuard,
+  ) {
     const request = normalizeRequest(input);
     const requestFingerprint = fingerprint(request, executionMode);
     const reservation = this.store.reserve({
@@ -56,6 +62,7 @@ export class BinanceOrderManager {
       try {
         const snapshot = await this.syncPositions();
         this.risk.assertOrderAllowed(request, snapshot);
+        await beforeProviderMutation?.();
         submissionStarted = true;
         const accepted = executionMode === "test_gtc"
           ? await this.client.placeTestOrder(request)
