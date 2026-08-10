@@ -8,16 +8,29 @@ import {
 import type { CexVenue } from "./CexCanonicalModels";
 
 const venues: readonly CexVenue[] = ["binance", "okx", "bitget", "bybit"];
-const capabilities: readonly CexReadCapability[] = ["instrument_catalog", "funding_rate"];
+const defaultCapabilities: readonly CexReadCapability[] = ["instrument_catalog", "funding_rate", "market_data"];
+const expectedCapabilities: Readonly<Record<CexVenue, readonly CexReadCapability[]>> = {
+  binance: defaultCapabilities,
+  okx: defaultCapabilities,
+  bitget: defaultCapabilities,
+  bybit: defaultCapabilities,
+};
 
-test("the static registry discovers both read capabilities for every CEX venue", () => {
+test("the static registry discovers declared read capabilities for every CEX venue", () => {
   assert.equal(cexReadCapabilityRegistry.list().length, venues.length);
 
   for (const venue of venues) {
+    const capabilities = expectedCapabilities[venue];
     assert.deepEqual(cexReadCapabilityRegistry.lookup(venue), { venue, capabilities });
     for (const capability of capabilities) {
       assert.equal(cexReadCapabilityRegistry.hasCapability(venue, capability), true);
     }
+  }
+});
+
+test("every Phase 9.1 CEX venue advertises read-only market data", () => {
+  for (const venue of venues) {
+    assert.equal(cexReadCapabilityRegistry.hasCapability(venue, "market_data"), true);
   }
 });
 
