@@ -21,6 +21,11 @@ import { UserExchangeCredentialStore } from "../server/modules/credentials/UserE
 
 export const CAPITAL_TEST_USER_ID = "USR-MRDQ6DT1";
 export const CAPITAL_TEST_QUANTITY_XAUT = "0.002";
+export const CAPITAL_TEST_AUTHORIZATION_ORDINAL = 2;
+export const CAPITAL_TEST_RECEIPT_FILE_NAME =
+  "xaut-capital-test-once-authorization-2.jsonl";
+export const CAPITAL_TEST_RECEIPT_PATH =
+  `/app/data/binance-users/${CAPITAL_TEST_RECEIPT_FILE_NAME}`;
 const CAPITAL_TEST_MAX_RESIDUAL_XAUT = "0";
 const CAPITAL_TEST_MAX_LEG_START_SKEW_MS = 500;
 const CAPITAL_TEST_INTENT_TTL_MS = 60_000;
@@ -36,6 +41,7 @@ type CapitalTestResult =
 
 export type CapitalTestReceipt = Readonly<{
   executionId: string;
+  authorizationOrdinal: typeof CAPITAL_TEST_AUTHORIZATION_ORDINAL;
   timestamp: number;
   userId: typeof CAPITAL_TEST_USER_ID;
   revision: string;
@@ -162,14 +168,18 @@ function validateStartup(source: NodeJS.ProcessEnv) {
   }
   const receiptPath = source.BINANCE_CAPITAL_TEST_RECEIPT_PATH?.trim() ?? "";
   const orderStoreRoot = resolve(source.BINANCE_USER_ORDER_DB_DIR!);
-  const receiptRelativePath = receiptPath && isAbsolute(receiptPath)
-    ? relative(orderStoreRoot, resolve(receiptPath))
-    : "";
-  if (!receiptRelativePath
+  const receiptRelativePath = relative(orderStoreRoot, CAPITAL_TEST_RECEIPT_PATH);
+  if (!receiptPath
+    || !isAbsolute(receiptPath)
+    || receiptPath !== CAPITAL_TEST_RECEIPT_PATH
+    || !receiptRelativePath
     || receiptRelativePath === ".."
     || receiptRelativePath.startsWith("../")
     || isAbsolute(receiptRelativePath)) {
-    throw new Error("Capital test receipt must be an explicit file inside the persistent Binance order directory.");
+    throw new Error(
+      `Capital test receipt path must be exactly ${CAPITAL_TEST_RECEIPT_PATH}`
+      + " and inside BINANCE_USER_ORDER_DB_DIR.",
+    );
   }
   if (!source.GCP_KMS_CREDENTIAL_KEY_NAME?.trim() || !source.BINANCE_ALLOWED_EGRESS_IPS?.trim()) {
     throw new Error("Capital test production KMS and fixed egress configuration are required.");
@@ -289,7 +299,10 @@ async function readBoundSnapshot(registry: RegistryPort) {
 
 function stableExecutionId(revision: string) {
   const digest = createHash("sha256")
-    .update(`${revision}\u0000${CAPITAL_TEST_USER_ID}\u0000binance-xaut-capital-test-once`)
+    .update(
+      `${revision}\u0000${CAPITAL_TEST_USER_ID}\u0000binance-xaut-capital-test-once`
+      + `\u0000${CAPITAL_TEST_AUTHORIZATION_ORDINAL}`,
+    )
     .digest("hex");
   return `binance-capital-test-once:${digest}`;
 }
@@ -301,7 +314,14 @@ function baseReceipt(
   result: CapitalTestResult,
 ): CapitalTestReceipt {
   assertTimestamp(timestamp);
-  return { executionId, timestamp, userId: CAPITAL_TEST_USER_ID, revision, result };
+  return {
+    executionId,
+    authorizationOrdinal: CAPITAL_TEST_AUTHORIZATION_ORDINAL,
+    timestamp,
+    userId: CAPITAL_TEST_USER_ID,
+    revision,
+    result,
+  };
 }
 
 function assertTimestamp(value: number) {
