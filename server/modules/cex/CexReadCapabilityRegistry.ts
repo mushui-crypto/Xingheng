@@ -1,6 +1,6 @@
 import type { CexVenue } from "./CexCanonicalModels";
 
-export type CexReadCapability = "instrument_catalog" | "funding_rate";
+export type CexReadCapability = "instrument_catalog" | "funding_rate" | "market_data";
 
 export type VenueReadCapabilityDescriptor = Readonly<{
   venue: CexVenue;
@@ -39,7 +39,7 @@ export class CexReadCapabilityRegistry {
 }
 
 export const cexReadCapabilityRegistry = new CexReadCapabilityRegistry()
-  .register({ venue: "binance", capabilities: ["instrument_catalog", "funding_rate"] })
-  .register({ venue: "okx", capabilities: ["instrument_catalog", "funding_rate"] })
-  .register({ venue: "bitget", capabilities: ["instrument_catalog", "funding_rate"] })
-  .register({ venue: "bybit", capabilities: ["instrument_catalog", "funding_rate"] });
+  .register({ venue: "binance", capabilities: ["instrument_catalog", "funding_rate", "market_data"] })
+  .register({ venue: "okx", capabilities: ["instrument_catalog", "funding_rate", "market_data"] })
+  .register({ venue: "bitget", capabilities: ["instrument_catalog", "funding_rate", "market_data"] })
+  .register({ venue: "bybit", capabilities: ["instrument_catalog", "funding_rate", "market_data"] });

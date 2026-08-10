@@ -21,6 +21,12 @@ export type BybitFundingTicker = {
   markPrice: string;
 };
 
+export type BybitMarketTicker = {
+  symbol: string;
+  bid1Price: string;
+  ask1Price: string;
+};
+
 export type BybitInstrumentBinding = Readonly<{
   instrumentId: string;
   providerSymbol: string;

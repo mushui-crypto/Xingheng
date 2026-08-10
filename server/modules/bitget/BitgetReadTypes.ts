@@ -18,6 +18,12 @@ export type BitgetFundingRateRecord = {
   nextUpdate: string;
 };
 
+export type BitgetMarketTicker = {
+  symbol: string;
+  bidPr: string;
+  askPr: string;
+};
+
 export type BitgetInstrumentBinding = Readonly<{
   instrumentId: string;
   providerSymbol: string;

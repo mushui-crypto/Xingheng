@@ -20,6 +20,14 @@ export type OkxFundingRateRecord = {
   nextFundingTime: string;
 };
 
+export type OkxTickerRecord = {
+  instType: string;
+  instId: string;
+  bidPx: string;
+  askPx: string;
+  ts: string;
+};
+
 export type OkxInstrumentBinding = Readonly<{
   instrumentId: string;
   providerSymbol: string;
