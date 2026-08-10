@@ -8,7 +8,7 @@
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准，快速交接入口见
 > [`PROJECT_ONBOARDING.md`](./PROJECT_ONBOARDING.md)。
 
-更新时间：2026-07-27
+更新时间：2026-08-10
 
 ---
 
@@ -16,6 +16,7 @@
 
 | 月份 | 主要内容 | 详细记录 |
 | --- | --- | --- |
+| 2026-08 | Binance Personal Trading Mode、多用户 KMS 凭证、最小资金闭环、部署与主线收敛 | [`docs/history/2026-08.md`](./docs/history/2026-08.md) |
 | 2026-07 | Paper 策略闭环、Hyperliquid Testnet 交易、安全与生产部署收口、RWA/XAUT 套利、Mainnet 小额烟测 | [`docs/history/2026-07.md`](./docs/history/2026-07.md) |
 
 2026 年 7 月归档由原《项目进度总览》完整迁移，保留当时的当前快照、阶段路线、治理约束、测试证据、发布记录和风险说明。
@@ -35,7 +36,23 @@
 
 ---
 
-# 3. 专题历史资料
+# 3. 2026 年 8 月里程碑摘要
+
+- 8 月 10 日：最后确认的 Phase 8A production revision 为
+  `5f95f27c96f0ebbdf6b0bc6a269d6a945623b11d`；Phase 8B-0 因 `chrome-stellar` 控制通道超时
+  未取得新鲜认证 GET 证据，维持 `NOT_READY`、mutation `0`。Phase 8B-1 Harness 双模式改动
+  已进入代码主线 `70a22062425115e5c7fa696ec28ffaa01335a6a5`，尚未作为 production revision 验证。
+- 8 月 8 日：Binance 自动套利从企业治理链路裁剪为 Personal Trading Mode，保留真实交易、
+  策略、风险、订单与对账闭环，Hyperliquid 未修改。
+- 8 月 8 日：恢复按用户隔离的交易所凭证管理，以 GCP KMS envelope encryption 保存
+  `UserExchangeCredential`，并恢复用户端 API 配置和“我的自动套利”界面。
+- 8 月 8 日：完成 Binance 测试、构建、部署验证和用户确认的最小资金真实交易闭环，随后恢复
+  fail-closed 默认值。
+- 8 月 9 日：PR #26 合并到 `main`，本地与远端收敛为唯一 `main` 主线。
+
+---
+
+# 4. 专题历史资料
 
 | 主题 | 文件 | 状态 |
 | --- | --- | --- |
@@ -50,7 +67,7 @@
 
 ---
 
-# 4. 文档职责
+# 5. 文档职责
 
 | 文件 | 记录内容 | 不记录内容 |
 | --- | --- | --- |
@@ -64,7 +81,7 @@
 
 ---
 
-# 5. 后续归档规则
+# 6. 后续归档规则
 
 1. 当前事实发生变化时，先更新 `PROJECT_CONTEXT.md`；影响快速交接时同步更新 `PROJECT_ONBOARDING.md`。
 2. 影响系统行为的重要功能、安全或架构变化按规则写入 `CHANGELOG.md`。

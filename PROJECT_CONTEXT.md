@@ -31,14 +31,15 @@ AI Agent 必须理解：
 
 当前项目处于：
 
-真实交易能力建设与稳定性验证阶段。
+个人多用户 Binance 自动套利的真实运行与长期稳定性验证阶段。
 
 当前重点：
 
 -   保留 demo 模拟交易能力。
--   推进真实交易接入。
--   完善账户体系。
--   完善交易、风险、安全和运维能力。
+-   保持 Binance 真实交易闭环稳定。
+-   保持多用户交易所凭证隔离和加密存储。
+-   完善套利策略、订单对账和仓位同步。
+-   保持真实交易默认关闭和风险上限不扩张。
 
 ------------------------------------------------------------------------
 
@@ -84,19 +85,21 @@ AI Agent 必须理解：
 
 路径：
 
-`/app/arbitrage`
+`/app/arbitrage`、`/app/my-arbitrage`
 
 当前能力：
 
--   自动套利相关能力持续建设。
--   支持策略执行、状态管理和风险控制。
+-   公共套利行情与机会展示继续保留。
+-   用户端“我的自动套利”提供多交易所 API 配置和 Binance 个人套利操作界面。
+-   Binance 支持 API 连接、行情、资金费率、余额、下单、撤单、成交查询、仓位同步和订单对账。
+-   Binance 资金费率套利具备入场、退出、风险检查和订单状态管理。
 
 当前验证重点：
 
 -   交易执行可靠性。
 -   状态一致性。
 -   异常恢复。
--   审计记录。
+-   多用户凭证隔离。
 
 ------------------------------------------------------------------------
 
@@ -152,6 +155,8 @@ AI Agent 必须理解：
 
 SQLite。
 
+SQLite 同时保存按用户隔离的加密交易所凭证和 Binance 订单状态；运行数据不进入 Git。
+
 原则：
 
 当前阶段保持轻量架构。
@@ -171,8 +176,12 @@ SQLite。
 禁止：
 
 -   保存用户钱包私钥。
--   保存可直接代签敏感凭证。
+-   明文保存或回显交易所 Secret。
 -   绕过权限执行资金操作。
+
+交易所 API 凭证使用 `UserExchangeCredential` 按用户、venue、account 和 environment
+隔离。Secret 采用每凭证 DEK 的 AES-256-GCM envelope encryption，DEK 由 GCP KMS
+包装；解密仅在交易执行需要时发生。
 
 ------------------------------------------------------------------------
 
@@ -225,13 +234,13 @@ SQLite。
 -   Docker
 -   Docker Compose
 -   production-only 部署配置
--   自动化部署和验证流程
+-   Git commit / deployment version 作为 revision 标识
 
 当前唯一部署环境为 production：
 
 -   Compose project 固定为 `xingheng`。
--   WIF 路径固定为 `/run/xingheng/gcp-wif`。
--   不保留独立真实测试部署环境、测试域名、测试 Compose、测试凭证域或测试数据卷。
+-   GCP KMS 使用普通 ADC / Workload Identity，不依赖 release identity 或固定 UID/GID。
+-   不保留独立真实测试部署环境、测试域名、测试 Compose 或测试数据卷。
 -   Demo、Hyperliquid Testnet 和普通自动化测试能力不属于部署环境，继续保留。
 
 环境变更、发布、真实资金相关操作必须遵守项目沟通规则。
@@ -352,58 +361,89 @@ AI 应该理解：
 
 ------------------------------------------------------------------------
 
-# 11. 当前生产与资金测试门禁（2026-08-04）
+# 11. 当前 Binance Personal Trading 基线（2026-08-09）
 
-## 当前唯一主线
+## 唯一主线与部署
 
-最终业务目标是在 production 完成一次真实资金的自动开仓、对冲、退出和最终核账。
-当前完成新 revision 的 artifact 构建与验证，但尚未取得 production promotion/activation
-批准。任何发布准备都不等于 provider、交易或资金授权。
+-   唯一代码主线为 `main`。
+-   PR #26 merge commit `433cce9ceaa23390e98e5eddee43c57018269a58` 是 Personal
+    Trading Mode 主线切换的历史基线；当前代码主线已前进到
+    `70a22062425115e5c7fa696ec28ffaa01335a6a5`。
+-   最后确认的 Production revision 为 `5f95f27c96f0ebbdf6b0bc6a269d6a945623b11d`，入口为
+    `https://app.stellaxtrade.com`。不得用代码主线 commit 推断生产已升级。
+-   本地和远端多余分支已清理，仅保留 `main`。
 
-## Production 当前事实
+## Binance 调用链
 
--   当前正式 release revision：
-    `1ad3579c8f7b1c0f9b9982701db14871ec9d672e`。
--   Production 已 activation 至该 revision，API/Web 健康。
--   待发布 revision：`6efe18eb943b8a57750eeeb06700f101bd676414`；artifact 与 manifest
-    已验证，状态为 `ARTIFACT_VERIFIED_AWAITING_PRODUCTION_APPROVAL`，尚未部署。
--   Compose project：`xingheng`。
--   Global/server kill switch：`ENABLED`。
--   Provider write、order、position 和 funds mutation：均为 `0`。
--   最小零资金验收：`READY_FOR_CAPITAL_TEST`。
+`API -> Strategy -> RiskGuard -> OrderManager -> BinanceClient -> Binance API`
 
-## 当前 Gate 状态
+-   策略不直接调用交易所。
+-   `position refresh -> risk check -> submit order` 在同一串行锁内完成。
+-   `FILLED` 才进入 `complete`；`CANCELED/REJECTED/EXPIRED` 进入 `failed`；
+    `NEW/PARTIALLY_FILLED` 保持 `processing` 并进入 reconciliation。
+-   reconciliation 只扫描全部非终态订单，并处理 processing timeout。
+-   生产套利保持 IOC；独立测试订单支持 GTC LIMIT 的
+    `create -> NEW -> cancel -> CANCELED`。
+-   启动时校验 XAUTUSDT perpetual 杠杆必须为 1x，不自动修改杠杆。
 
--   P2#2 fresh RWA rollback readiness：`INCOMPLETE`。
--   STS restore verification：`BLOCKED`。
--   Rollback evidence：`INCOMPLETE`。
--   Risk acceptance：`ACTIVE`。
--   Capital Test Authorization：`STALE / REVALIDATION_REQUIRED`。
--   Capital Test Execution：`BLOCKED_PENDING_AUTHORIZATION`。
--   Provider Access：`NOT_AUTHORIZED`。
--   Real Funds：`NOT_AUTHORIZED`。
+## 安全默认值
 
-P2#2、STS `403` 和 rollback evidence 缺失继续作为已接受风险记录，不得标记为
-`PASS`。它们不阻断授权准备，但不授予任何执行权限。
+-   `LIVE_TRADING_ENABLED=false`
+-   `BINANCE_KILL_SWITCH=true`
+-   `MAX_ORDER_USD=25`
+-   `MAX_POSITION_USD=100`
 
-## 当前授权准备边界
+系统不得自动开启真实交易、关闭 kill switch 或扩大风险上限。历史 Permit、Capital Test
+Window、Execution Lease、Promotion、Release、Lifecycle、Trusted Build、proof chain、Admin
+Approval 和 Recovery workflow 已退出当前架构，不得作为兼容层恢复。
 
-本机私有 authorization package 保存在 `docs/private/authorization/`，不进入 Git。该材料绑定
-旧 release identity，授权时间已过期，且 SHA reference chain 已标记为 stale；不得用于
-`6efe18e` 或任何后续执行。必须在目标 production release identity 确定后重新生成、重新审查并
-取得新的明确人工授权。不得因历史材料存在而生成 permit、连接 provider、解除 kill switch、
-下单或执行 position/order/funds mutation。
+## 当前验证事实
+
+-   Binance Personal Trading 自动化测试：46/46 通过。
+-   TypeScript、API bundle、前端 production build 和 `git diff --check` 通过。
+-   GCP KMS encrypt/decrypt roundtrip 通过。
+-   Binance 公共行情与 symbol 查询通过。
+-   最小资金真实交易闭环已由用户确认测试通过；完成后安全默认值保持关闭。
+-   Hyperliquid 未纳入本次裁剪和改造范围。
 
 ------------------------------------------------------------------------
 
-# 12. Trusted Release Build 环境确认（2026-08-03）
+# 12. Codex 账号交接快照（2026-08-10）
 
--   已由人工确认：既有 trusted Linux root build host 可用于当前
-    `6efe18eb943b8a57750eeeb06700f101bd676414` 及后续同类标准 Release Workflow。
--   后续同类 Release Workflow 不需要重复判断该 build host 是否存在；每次构建仍必须通过
-    既有 trusted candidate installer、`trusted-operation-launcher`、release-build、artifact
-    identity 和 manifest verification 边界。
--   该确认仅表示 build host 已人工确认可用于上述范围，不表示永久可信、自动授权、production
-    approval、Provider access、真实资金授权或交易授权。
--   主机地址、账号、密钥、凭证和敏感访问方式不进入项目文档；实际连接与制品交付继续使用受控
-    运维渠道。
+## 当前唯一主线
+
+当前主线是完成 Phase 8B-0 的生产只读 Capital Test Revalidation，在取得新鲜、已认证的
+Binance GET 证据后，再由用户决定是否进入任何真实资金步骤。只读复核本身不授权下单、撤单、
+调杠杆、开关切换或运行 Capital Test Harness。
+
+## 已部署事实
+
+-   Production revision 仍记录为 `5f95f27c96f0ebbdf6b0bc6a269d6a945623b11d`。
+-   Phase 8A 已完成冻结、部署和部署后只读验证。
+-   上一次已确认的安全默认值为 `LIVE_TRADING_ENABLED=false`、
+    `BINANCE_KILL_SWITCH=true`；Phase 8B-0 必须重新取得运行态证据，不能仅沿用该历史结论。
+
+## Phase 8B-0 当前状态
+
+-   来源 Codex 任务：`019fea5b-dbe9-78b2-a601-d5099aee7d42`。
+-   已确认 Chrome Profile `Stellar` 即目标 `chrome-stellar`。
+-   浏览器控制通道连续超时，未取得新的认证 GET 响应体，因此当前结论为 `NOT_READY`。
+-   未调用 POST、connection-check、reconciliation 或 Harness；provider/order/position/funds
+    mutation 均为 `0`。
+-   最小解除动作是恢复或人工确认 `chrome-stellar` 浏览器连接，再执行白名单 GET 只读复核。
+
+## Phase 8B-1 代码状态
+
+Phase 8B-1 Harness 改动已由 commit `70a22062425115e5c7fa696ec28ffaa01335a6a5` 进入
+`main`/`origin/main`，涉及：
+
+-   `scripts/run-binance-capital-test-once.ts`
+-   `scripts/run-binance-capital-test-once.test.ts`
+-   `server/modules/binance/BinanceCapitalTestPreflight.ts`
+-   `server/modules/binance/BinanceExecutionCapability.test.ts`
+
+该实现为同一 one-shot Harness 增加 `PRICE_PRIORITY -> IOC_LIMIT` 与
+`EXECUTION_PRIORITY -> MARKET` 两种模式、稳定且互斥的 run identity/receipt、权限 fail-closed
+检查和 processing order 门禁。来源任务报告本地 Binance/Harness 回归 `133/133` 通过及 production
+build 通过。该 commit 尚未被记录为已部署 production revision，也不构成真实资金授权；继续
+Phase 8B 前仍须完成生产只读 Gate。

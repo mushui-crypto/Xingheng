@@ -171,19 +171,26 @@ SQLite。
 
 ------------------------------------------------------------------------
 
-## 6.2 Binance / Bybit
+## 6.2 Binance
 
-用于：
+Binance 用于个人多用户资金费率套利。当前调用链：
 
--   RWA/XAUT 自动套利模块。
+    API
+    ↓
+    Strategy
+    ↓
+    RiskGuard
+    ↓
+    OrderManager
+    ↓
+    BinanceClient
+    ↓
+    Binance API
 
-当前：
+Binance adapter 支持行情、账户、资金费率、下单、撤单、成交和仓位查询。OrderManager
+负责订单状态与 reconciliation；RiskGuard 负责 live trading 开关、kill switch、单笔和总仓位上限。
 
-总急停开启。
-
-原因：
-
-真实交易风险控制。
+当前自动执行不包含 Bybit。多交易所凭证配置能力不等于所有 venue 已接入自动执行。
 
 ------------------------------------------------------------------------
 
@@ -199,7 +206,8 @@ SQLite。
 
 -   加密存储；
 -   权限最小化；
--   不记录敏感信息。
+-   不记录或回显敏感信息；
+-   按 `userId + venue + accountId + environment` 隔离。
 
 ------------------------------------------------------------------------
 
@@ -226,13 +234,10 @@ Google Cloud KMS。
 -   加密交易所凭证；
 -   加密备份数据。
 
-使用：
-
-Google Cloud WIF。
-
-目的：
-
-服务器不持有长期云私钥。
+交易所凭证使用每凭证 DEK 的 AES-256-GCM envelope encryption，保存 wrapped DEK，并校验
+CRC32C；AAD 绑定用户、venue、account 和 environment。应用通过普通 ADC / Workload
+Identity 调用 KMS，不依赖 release identity、固定 UID/GID 或部署 gate，也不修改 KMS key
+policy。
 
 ------------------------------------------------------------------------
 
@@ -274,8 +279,11 @@ Cloudflare：
 
 xingheng
 
-生产运行身份、Compose project、域名、数据卷、WIF/KMS 与受信发布入口均固定，不接受调用方
-切换部署身份。开发、单元测试、集成测试和 Demo/Testnet 业务能力不构成第二套部署环境。
+Compose project、域名、数据卷和 KMS 配置保持稳定。revision 使用 Git commit / deployment
+version 标识。开发、单元测试、集成测试和 Demo/Testnet 业务能力不构成第二套部署环境。
+
+当前不包含 Release Candidate、Promotion、Activation、Permit、Capital Test Window、Execution
+Lease、Lifecycle proof chain、Trusted Build gate 或 production identity transition proof。
 
 ------------------------------------------------------------------------
 

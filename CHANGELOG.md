@@ -2,11 +2,67 @@
 
 本文档记录星衡项目的阶段版本。
 
-## Unreleased - Production-only 部署收敛
+## 2026-08-10 - Phase 8B-1 one-shot Harness 双模式收敛
+
+状态：代码已进入 `main`，尚未作为 production revision 验证
+
+### 已完成
+
+- 同一 one-shot Capital Test Harness 支持 `PRICE_PRIORITY -> IOC_LIMIT` 与
+  `EXECUTION_PRIORITY -> MARKET`，未新增 API、scheduler、batch 或第二套交易链。
+- Harness 使用显式 `--mode` 和 `--run-id` 生成稳定、互斥的 execution identity 与 receipt；
+  重复 run fail closed，旧 receipt 不覆盖。
+- Capital Test Preflight 增加账户权限、提现关闭、IP restriction 及 Spot/Futures account
+  availability 的 fail-closed 校验。
+- Harness 在 Runtime 前检查本地 processing orders，并继续复用
+  `Registry -> PersonalTradingService -> Runtime -> OrderManager -> RiskGuard -> BinanceClient`。
+- `UNKNOWN`、reconciliation、confirmed residual 和 dust 语义保持不变；未运行真实交易。
+
+### 版本状态
+
+- 代码主线 commit：`70a22062425115e5c7fa696ec28ffaa01335a6a5`。
+- 最后确认的 production revision 仍为 `5f95f27c96f0ebbdf6b0bc6a269d6a945623b11d`；代码进入
+  `main` 不等于部署或真实资金授权。
+- 来源任务报告定向测试 `38/38`、Binance/Harness 回归 `133/133` 和 production build 通过。
+
+## 2026-08-09 - Binance Personal Trading Mode 主线切换
+
+状态：已合并并部署
+
+### 已完成
+
+- 将 Binance 自动套利从企业治理流程裁剪为
+  `API -> Strategy -> RiskGuard -> OrderManager -> BinanceClient -> Binance API`。
+- 删除 Permit、Capital Test Window、Execution Lease、Promotion、Release、Lifecycle、Trusted
+  Build、proof chain、Admin Approval 和 Recovery workflow 依赖，不保留兼容层。
+- 保留 Binance 连接、行情、余额、资金费率、下单、撤单、成交、仓位、策略、订单状态和
+  reconciliation。
+- 增加 GTC LIMIT 测试订单的创建与撤销路径，生产套利继续使用 IOC。
+- 修正订单幂等状态和串行风险检查，reconciliation 扫描全部非终态订单并处理 timeout。
+- 增加 XAUTUSDT perpetual 启动时 1x 杠杆检查，不自动修改交易所杠杆。
+- 恢复多用户 `UserExchangeCredential` 和前端多交易所 API 配置；Secret 使用 GCP KMS
+  envelope encryption，不回显且按需解密。
+- PR #26 已合并至唯一 `main` 主线；Hyperliquid 未修改。
+
+### 安全默认值
+
+- `LIVE_TRADING_ENABLED=false`
+- `BINANCE_KILL_SWITCH=true`
+- `MAX_ORDER_USD=25`
+- `MAX_POSITION_USD=100`
+
+### 已验证
+
+- Binance Personal Trading 测试 46/46 通过。
+- TypeScript、API bundle、前端 production build 通过。
+- GCP KMS roundtrip、生产 smoke 与 WebSocket 检查通过。
+- 最小资金真实交易闭环由用户确认通过，完成后未自动开启真实交易。
+
+## 2026-07-31 - Production-only 部署收敛（历史）
 
 日期：2026-07-31
 
-状态：待发布
+状态：已被 2026-08-09 Personal Trading Mode 主线替代
 
 ### 已完成
 
