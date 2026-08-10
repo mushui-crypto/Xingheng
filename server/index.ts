@@ -6,6 +6,7 @@ import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
+import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
 import { registerExchangeCredentialRoutes } from "./modules/api/exchangeCredentialRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
@@ -27,6 +28,7 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
+import { FundingOpportunityQueryService } from "./modules/cex/funding-arbitrage/FundingOpportunityQueryService";
 import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
@@ -128,6 +130,7 @@ registerMarketRoutes(app, market, tradingStore, {
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
+const fundingOpportunityQuery = new FundingOpportunityQueryService();
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
@@ -137,6 +140,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
     : Promise.resolve(false),
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
+registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
 registerExchangeCredentialRoutes(app, userExchangeCredentialService);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });

@@ -6,6 +6,7 @@ const publicGetPaths = [
   "/api/market/summary",
   "/api/real-trading/market/summary",
   "/api/arbitrage/dashboard",
+  "/api/funding-arbitrage/opportunities",
   "/api/strategy/ict/forward",
   "/api/strategy/ict/history",
   "/api/strategy/ict/candles",
@@ -31,6 +32,7 @@ const sensitivePostPaths = [
   "/api/real-trading/exchange",
   "/api/real-trading/realtime/token",
   "/api/arbitrage/dashboard",
+  "/api/funding-arbitrage/opportunities",
   "/api/strategy/ict/forward",
 ];
 
