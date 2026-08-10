@@ -22,6 +22,7 @@ export type BinanceCapitalTestPreflightReason =
   | "LEGS_INVALID"
   | "INSTRUMENT_UNSUPPORTED"
   | "PRODUCT_UNAVAILABLE"
+  | "PERMISSIONS_INVALID"
   | "POSITION_MODE_INVALID"
   | "LEVERAGE_INVALID"
   | "MARGIN_MODE_UNCONFIRMED"
@@ -100,6 +101,19 @@ export function preflightBinanceCapitalTest(
     || snapshot.spot.status !== "Trading"
     || snapshot.perpetual.status !== "Trading") {
     return fail("PRODUCT_UNAVAILABLE", "Binance XAUTUSDT spot and perpetual products must both be tradable.");
+  }
+  const permissions = snapshot.permissions;
+  if (!permissions.read
+    || !permissions.spotTrade
+    || !permissions.contractTrade
+    || permissions.withdraw
+    || !permissions.ipRestricted
+    || !permissions.spotAccount
+    || !permissions.futuresAccount) {
+    return fail(
+      "PERMISSIONS_INVALID",
+      "Binance capital test requires read, Spot/Futures trading, withdrawal-disabled, and IP-restricted permissions.",
+    );
   }
   if (!snapshot.permissions.positionModeSupported || !snapshot.accountMode.endsWith("_one_way")) {
     return fail("POSITION_MODE_INVALID", "Binance XAUTUSDT perpetual position mode must be ONE_WAY.");

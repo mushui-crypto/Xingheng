@@ -9,27 +9,34 @@ import type { BinanceCapitalTestRuntimeResult } from "../server/modules/binance/
 import { snapshotFixture } from "../server/modules/binance/binanceTestFixtures";
 import type { BinancePreflightSnapshot } from "../server/modules/binance/BinanceTypes";
 import {
-  CAPITAL_TEST_AUTHORIZATION_ORDINAL,
+  CAPITAL_TEST_MAX_RESIDUAL_XAUT,
   CAPITAL_TEST_QUANTITY_XAUT,
-  CAPITAL_TEST_RECEIPT_FILE_NAME,
-  CAPITAL_TEST_RECEIPT_PATH,
+  CAPITAL_TEST_SYMBOL,
   CAPITAL_TEST_USER_ID,
+  capitalTestReceiptPath,
   createFileReceiptStore,
-  runBinanceCapitalTestOnce,
+  parseCapitalTestArguments,
+  runBinanceCapitalTestOnce as executeCapitalTestHarness,
+  type CapitalTestInvocation,
   type CapitalTestHarnessDependencies,
   type CapitalTestReceipt,
 } from "./run-binance-capital-test-once";
 
 const now = 1_800_000_000_000;
 const revision = "a".repeat(40);
+const defaultInvocation = invocation("PRICE_PRIORITY", "phase8b1-price-001");
 
-test("uses only the fixed approved user and capital test parameters", async () => {
+test("uses only the fixed approved user, tolerance, and capital test parameters", async () => {
   const fixture = harnessFixture();
 
   const receipt = await runBinanceCapitalTestOnce(validEnvironment(), fixture.dependencies);
 
   assert.equal(receipt.result, "PASS");
-  assert.equal(receipt.authorizationOrdinal, CAPITAL_TEST_AUTHORIZATION_ORDINAL);
+  assert.equal(receipt.runId, defaultInvocation.runId);
+  assert.equal(receipt.executionMode, "PRICE_PRIORITY");
+  assert.equal(receipt.executionPriceMode, "IOC_LIMIT");
+  assert.equal(receipt.symbol, CAPITAL_TEST_SYMBOL);
+  assert.equal(receipt.quantityXaut, CAPITAL_TEST_QUANTITY_XAUT);
   assert.equal(fixture.authenticatedUserId, CAPITAL_TEST_USER_ID);
   assert.equal(fixture.context?.userId, CAPITAL_TEST_USER_ID);
   assert.equal(fixture.intent?.strategyType, "SPOT_PERPETUAL");
@@ -39,9 +46,49 @@ test("uses only the fixed approved user and capital test parameters", async () =
   assert.equal(fixture.intent?.legs[1].marketType, "perpetual");
   assert.equal(fixture.intent?.legs[0].targetDeltaBaseQuantity, CAPITAL_TEST_QUANTITY_XAUT);
   assert.equal(fixture.intent?.legs[1].targetDeltaBaseQuantity, CAPITAL_TEST_QUANTITY_XAUT);
-  assert.equal(fixture.intent?.constraints.maxResidualBaseQuantity, "0");
+  assert.equal(fixture.intent?.constraints.maxResidualBaseQuantity, CAPITAL_TEST_MAX_RESIDUAL_XAUT);
+  assert.equal(fixture.runtimeOptions?.executionPriceMode, "IOC_LIMIT");
   assert.equal(fixture.runtimeCalls, 1);
   assert.equal(fixture.registryUserIds.every((userId) => userId === CAPITAL_TEST_USER_ID), true);
+});
+
+test("maps PRICE_PRIORITY to IOC_LIMIT and EXECUTION_PRIORITY to MARKET on the same runtime boundary", async () => {
+  const price = harnessFixture();
+  const execution = harnessFixture();
+
+  const priceReceipt = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    price.dependencies,
+    invocation("PRICE_PRIORITY", "price-run-001"),
+  );
+  const executionReceipt = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    execution.dependencies,
+    invocation("EXECUTION_PRIORITY", "execution-run-001"),
+  );
+
+  assert.equal(price.runtimeOptions?.executionPriceMode, "IOC_LIMIT");
+  assert.equal(execution.runtimeOptions?.executionPriceMode, "MARKET");
+  assert.equal(priceReceipt.executionPriceMode, "IOC_LIMIT");
+  assert.equal(executionReceipt.executionPriceMode, "MARKET");
+  assert.equal(price.runtimeCalls, 1);
+  assert.equal(execution.runtimeCalls, 1);
+});
+
+test("unique run-ids produce distinct execution and receipt identities in the same mode", async () => {
+  const first = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    harnessFixture().dependencies,
+    invocation("PRICE_PRIORITY", "unique-run-001"),
+  );
+  const second = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    harnessFixture().dependencies,
+    invocation("PRICE_PRIORITY", "unique-run-002"),
+  );
+
+  assert.notEqual(first.executionId, second.executionId);
+  assert.notEqual(capitalTestReceiptPath(first.runId), capitalTestReceiptPath(second.runId));
 });
 
 test("rejects an unauthorized user before claiming or invoking the runtime", async () => {
@@ -71,6 +118,23 @@ test("rejects any quantity outside the fixed approved scope", async () => {
   assert.equal(fixture.runtimeCalls, 0);
 });
 
+test("CLI requires exactly one valid --mode and unique-safe --run-id", () => {
+  assert.deepEqual(
+    parseCapitalTestArguments(["--mode", "PRICE_PRIORITY", "--run-id", "phase8b1.price-001"]),
+    { executionMode: "PRICE_PRIORITY", runId: "phase8b1.price-001" },
+  );
+  for (const args of [
+    [],
+    ["--mode", "MIXED", "--run-id", "run-1"],
+    ["--mode", "PRICE_PRIORITY"],
+    ["--run-id", "../escape", "--mode", "PRICE_PRIORITY"],
+    ["--mode", "PRICE_PRIORITY", "--mode", "EXECUTION_PRIORITY", "--run-id", "run-1"],
+    ["--mode", "PRICE_PRIORITY", "--run-id", "run-1", "--extra", "value"],
+  ]) {
+    assert.throws(() => parseCapitalTestArguments(args));
+  }
+});
+
 test("an atomic receipt rejects repeated execution of the same one-time capital test", async () => {
   const directory = mkdtempSync(join(tmpdir(), "stellax-capital-test-"));
   const path = join(directory, "receipt.jsonl");
@@ -78,9 +142,13 @@ test("an atomic receipt rejects repeated execution of the same one-time capital 
     const store = createFileReceiptStore(path);
     const receipt: CapitalTestReceipt = {
       executionId: "execution-once",
-      authorizationOrdinal: CAPITAL_TEST_AUTHORIZATION_ORDINAL,
+      runId: "execution-once",
       timestamp: now,
       userId: CAPITAL_TEST_USER_ID,
+      symbol: CAPITAL_TEST_SYMBOL,
+      quantityXaut: CAPITAL_TEST_QUANTITY_XAUT,
+      executionMode: "PRICE_PRIORITY",
+      executionPriceMode: "IOC_LIMIT",
       revision,
       result: "CLAIMED",
     };
@@ -93,71 +161,82 @@ test("an atomic receipt rejects repeated execution of the same one-time capital 
   }
 });
 
-test("authorization ordinal 2 creates a stable execution identity isolated from authorization 1", async () => {
-  const firstRun = await runBinanceCapitalTestOnce(validEnvironment(), harnessFixture().dependencies);
-  const secondRun = await runBinanceCapitalTestOnce(validEnvironment(), harnessFixture().dependencies);
-  const authorizationOneExecutionId = legacyAuthorizationOneExecutionId(revision);
+test("mode, run-id, execution, attempt, and order identities are isolated", async () => {
+  const price = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    harnessFixture().dependencies,
+    invocation("PRICE_PRIORITY", "identity-price-001"),
+  );
+  const execution = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    harnessFixture().dependencies,
+    invocation("EXECUTION_PRIORITY", "identity-execution-001"),
+  );
 
-  assert.equal(firstRun.executionId, secondRun.executionId);
-  assert.notEqual(firstRun.executionId, authorizationOneExecutionId);
-  assert.equal(firstRun.authorizationOrdinal, 2);
-  assert.ok(firstRun.attempts?.every((attempt) => attempt.executionId === firstRun.executionId));
+  assert.notEqual(price.executionId, execution.executionId);
+  assert.equal(price.runId, "identity-price-001");
+  assert.equal(execution.runId, "identity-execution-001");
+  assert.ok(price.attempts?.every((attempt) => attempt.executionId === price.executionId));
+  assert.ok(execution.attempts?.every((attempt) => attempt.executionId === execution.executionId));
 
-  const secondIdentities = derivedIdentitySet(firstRun.executionId);
-  const firstIdentities = derivedIdentitySet(authorizationOneExecutionId);
-  assert.equal([...secondIdentities].every((identity) => !firstIdentities.has(identity)), true);
+  const priceIdentities = derivedIdentitySet(price.executionId);
+  const executionIdentities = derivedIdentitySet(execution.executionId);
+  assert.equal([...priceIdentities].every((identity) => !executionIdentities.has(identity)), true);
 });
 
-test("startup accepts only the fixed authorization 2 receipt path before claim", async () => {
-  for (const receiptPath of [
-    "/app/data/binance-users/xaut-capital-test-once.jsonl",
-    "/app/data/binance-users/another.jsonl",
-    "/app/data/binance-users/nested/xaut-capital-test-once-authorization-2.jsonl",
-    "/app/data/binance-users/../binance-users/xaut-capital-test-once-authorization-2.jsonl",
-  ]) {
-    const fixture = harnessFixture();
-    await assert.rejects(
-      () => runBinanceCapitalTestOnce({
-        ...validEnvironment(),
-        BINANCE_CAPITAL_TEST_RECEIPT_PATH: receiptPath,
-      }, fixture.dependencies),
-      /receipt path must be exactly/u,
-    );
-    assert.equal(fixture.claimed.length, 0);
-    assert.equal(fixture.registryCalls, 0);
-    assert.equal(fixture.runtimeCalls, 0);
-  }
-
+test("run-id deterministically selects a safe receipt below the fixed receipt root", async () => {
+  assert.equal(
+    capitalTestReceiptPath("safe-run_001"),
+    "/app/data/binance-users/xaut-capital-test-once-safe-run_001.jsonl",
+  );
+  assert.throws(() => capitalTestReceiptPath("../escape"), /run-id/u);
   const fixture = harnessFixture();
   await assert.rejects(
     () => runBinanceCapitalTestOnce({
       ...validEnvironment(),
       BINANCE_USER_ORDER_DB_DIR: "/app/data/another-binance-users",
-    }, fixture.dependencies),
+    }, fixture.dependencies, defaultInvocation),
     /inside BINANCE_USER_ORDER_DB_DIR/u,
   );
   assert.equal(fixture.claimed.length, 0);
   assert.equal(fixture.registryCalls, 0);
 });
 
-test("claiming authorization 2 leaves the authorization 1 receipt bytes unchanged", () => {
+test("price and execution mode receipts do not conflict or alter old receipts", () => {
   const directory = mkdtempSync(join(tmpdir(), "stellax-capital-test-isolation-"));
-  const firstPath = join(directory, "xaut-capital-test-once.jsonl");
-  const secondPath = join(directory, CAPITAL_TEST_RECEIPT_FILE_NAME);
-  const firstBytes = "{\"executionId\":\"authorization-1-fixture\",\"result\":\"PASS\"}\n";
+  const oldPath = join(directory, "xaut-capital-test-once-authorization-2.jsonl");
+  const pricePath = join(directory, "xaut-capital-test-once-price-run-001.jsonl");
+  const executionPath = join(directory, "xaut-capital-test-once-execution-run-001.jsonl");
+  const oldBytes = "{\"executionId\":\"authorization-2-fixture\",\"result\":\"PASS\"}\n";
   try {
-    writeFileSync(firstPath, firstBytes);
-    createFileReceiptStore(secondPath).claimReceipt({
-      executionId: "authorization-2-fixture",
-      authorizationOrdinal: CAPITAL_TEST_AUTHORIZATION_ORDINAL,
+    writeFileSync(oldPath, oldBytes);
+    createFileReceiptStore(pricePath).claimReceipt({
+      executionId: "price-priority-fixture",
+      runId: "price-run-001",
       timestamp: now,
       userId: CAPITAL_TEST_USER_ID,
+      symbol: CAPITAL_TEST_SYMBOL,
+      quantityXaut: CAPITAL_TEST_QUANTITY_XAUT,
+      executionMode: "PRICE_PRIORITY",
+      executionPriceMode: "IOC_LIMIT",
+      revision,
+      result: "CLAIMED",
+    });
+    createFileReceiptStore(executionPath).claimReceipt({
+      executionId: "execution-priority-fixture",
+      runId: "execution-run-001",
+      timestamp: now,
+      userId: CAPITAL_TEST_USER_ID,
+      symbol: CAPITAL_TEST_SYMBOL,
+      quantityXaut: CAPITAL_TEST_QUANTITY_XAUT,
+      executionMode: "EXECUTION_PRIORITY",
+      executionPriceMode: "MARKET",
       revision,
       result: "CLAIMED",
     });
 
-    assert.equal(readFileSync(firstPath, "utf8"), firstBytes);
-    assert.equal(readFileSync(secondPath, "utf8").trim().length > 0, true);
+    assert.equal(readFileSync(oldPath, "utf8"), oldBytes);
+    assert.notEqual(readFileSync(pricePath, "utf8"), readFileSync(executionPath, "utf8"));
   } finally {
     rmSync(directory, { recursive: true, force: true });
   }
@@ -196,7 +275,71 @@ test("a failed local preflight performs no runtime mutation call", async () => {
   assert.equal(fixture.runtimeCalls, 0);
 });
 
-test("a runtime throw permanently consumes authorization 2 before another Registry call", async () => {
+test("unsafe permissions or processing orders fail preflight with zero runtime mutation calls", async () => {
+  const permissionsFixture = harnessFixture(accountSnapshot({
+    permissions: { ...snapshotFixture().permissions, withdraw: true },
+  }));
+  const permissionsReceipt = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    permissionsFixture.dependencies,
+    invocation("PRICE_PRIORITY", "unsafe-permissions-001"),
+  );
+  assert.equal(permissionsReceipt.result, "PREFLIGHT_FAILED");
+  assert.equal(permissionsReceipt.preflight?.status, "FAIL");
+  assert.equal(permissionsFixture.runtimeCalls, 0);
+
+  const processingFixture = harnessFixture();
+  processingFixture.processingOrderCount = 1;
+  const processingReceipt = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    processingFixture.dependencies,
+    invocation("EXECUTION_PRIORITY", "processing-order-001"),
+  );
+  assert.equal(processingReceipt.result, "PREFLIGHT_FAILED");
+  assert.equal(processingReceipt.preflight?.status, "FAIL");
+  assert.equal(processingFixture.runtimeCalls, 0);
+});
+
+test("final FLAT_WITH_DUST is a successful closure", async () => {
+  const finalDust = accountSnapshot({
+    existingSpotQuantityXaut: 0.000092,
+    spotFreeXaut: 0.000092,
+    spotAvailableQuantityXaut: 0.000092,
+    spotLockedXaut: 0,
+  });
+  const fixture = harnessFixture(finalDust);
+
+  const receipt = await runBinanceCapitalTestOnce(validEnvironment(), fixture.dependencies);
+
+  assert.equal(receipt.result, "PASS");
+  assert.equal(receipt.finalAccount?.flatOrDust, true);
+  assert.equal(receipt.finalAccount?.spotQuantityXaut, 0.000092);
+});
+
+test("unresolved UNKNOWN remains PENDING_RECONCILIATION in the one-shot receipt", async () => {
+  const fixture = harnessFixture();
+  let runtimeCalls = 0;
+  fixture.dependencies = {
+    ...fixture.dependencies,
+    executeCapitalTest: async (_registry, _userId, _context, intent) => {
+      runtimeCalls += 1;
+      return pendingRuntime(intent);
+    },
+  };
+
+  const receipt = await runBinanceCapitalTestOnce(
+    validEnvironment(),
+    fixture.dependencies,
+    invocation("EXECUTION_PRIORITY", "unknown-execution-001"),
+  );
+
+  assert.equal(receipt.result, "PENDING_RECONCILIATION");
+  assert.equal(receipt.aggregateStatus, "PENDING_RECONCILIATION");
+  assert.equal(receipt.exitStatus, null);
+  assert.equal(runtimeCalls, 1);
+});
+
+test("a runtime throw permanently consumes the selected mode identity before another Registry call", async () => {
   const fixture = harnessFixture();
   let throwingRuntimeCalls = 0;
   fixture.dependencies = {
@@ -253,6 +396,21 @@ test("harness imports only Registry and Runtime execution boundaries", () => {
   assert.doesNotMatch(source, /\.placeOrder\s*\(|\.cancelOrder\s*\(/u);
 });
 
+function runBinanceCapitalTestOnce(
+  environment: NodeJS.ProcessEnv,
+  dependencies: CapitalTestHarnessDependencies,
+  selectedInvocation: CapitalTestInvocation = defaultInvocation,
+) {
+  return executeCapitalTestHarness(environment, dependencies, selectedInvocation);
+}
+
+function invocation(
+  executionMode: CapitalTestInvocation["executionMode"],
+  runId: string,
+): CapitalTestInvocation {
+  return { executionMode, runId };
+}
+
 function validEnvironment(): NodeJS.ProcessEnv {
   return {
     NODE_ENV: "production",
@@ -264,7 +422,6 @@ function validEnvironment(): NodeJS.ProcessEnv {
     BINANCE_KILL_SWITCH: "false",
     USER_EXCHANGE_CREDENTIAL_DB_PATH: "/app/data/trading.sqlite",
     BINANCE_USER_ORDER_DB_DIR: "/app/data/binance-users",
-    BINANCE_CAPITAL_TEST_RECEIPT_PATH: CAPITAL_TEST_RECEIPT_PATH,
     GCP_KMS_CREDENTIAL_KEY_NAME: "projects/test/locations/global/keyRings/test/cryptoKeys/test",
     BINANCE_ALLOWED_EGRESS_IPS: "203.0.113.10",
     MAX_ORDER_USD: "25",
@@ -282,6 +439,8 @@ type HarnessFixture = {
   authenticatedUserId: string | null;
   context: Parameters<CapitalTestHarnessDependencies["executeCapitalTest"]>[2] | null;
   intent: FundingArbitrageExecutionIntent | null;
+  runtimeOptions: Parameters<CapitalTestHarnessDependencies["executeCapitalTest"]>[4] | null;
+  processingOrderCount: number;
   apiStopped: boolean;
   dependencies: CapitalTestHarnessDependencies;
 };
@@ -291,9 +450,20 @@ function harnessFixture(snapshot: BinancePreflightSnapshot = accountSnapshot()) 
   const appended: CapitalTestReceipt[] = [];
   const registryUserIds: string[] = [];
   const registry = {
-    run: async <T>(userId: string, operation: (service: { account: () => Promise<BinancePreflightSnapshot> }) => T) => {
+    run: async <T>(userId: string, operation: (service: {
+      account: () => Promise<BinancePreflightSnapshot>;
+      ordersState: () => { orders: Array<{ idempotencyKey: string; status: "processing" }> };
+    }) => T) => {
       registryUserIds.push(userId);
-      return operation({ account: async () => snapshot });
+      return operation({
+        account: async () => snapshot,
+        ordersState: () => ({
+          orders: Array.from({ length: fixture.processingOrderCount }, (_, index) => ({
+            idempotencyKey: `processing-${index}`,
+            status: "processing" as const,
+          })),
+        }),
+      });
     },
   };
   const fixture: HarnessFixture = {
@@ -305,6 +475,8 @@ function harnessFixture(snapshot: BinancePreflightSnapshot = accountSnapshot()) 
     authenticatedUserId: null,
     context: null,
     intent: null,
+    runtimeOptions: null,
+    processingOrderCount: 0,
     apiStopped: true,
     dependencies: null as unknown as CapitalTestHarnessDependencies,
   };
@@ -325,23 +497,17 @@ function harnessFixture(snapshot: BinancePreflightSnapshot = accountSnapshot()) 
         close: () => undefined,
       };
     },
-    executeCapitalTest: async (runtimeRegistry, userId, runtimeContext, runtimeIntent) => {
+    executeCapitalTest: async (runtimeRegistry, userId, runtimeContext, runtimeIntent, runtimeOptions) => {
       assert.equal(runtimeRegistry, registry);
       fixture.runtimeCalls += 1;
       fixture.authenticatedUserId = userId;
       fixture.context = runtimeContext;
       fixture.intent = runtimeIntent;
+      fixture.runtimeOptions = runtimeOptions;
       return successfulRuntime(runtimeIntent);
     },
   };
   return fixture;
-}
-
-function legacyAuthorizationOneExecutionId(approvedRevision: string) {
-  const digest = createHash("sha256")
-    .update(`${approvedRevision}\u0000${CAPITAL_TEST_USER_ID}\u0000binance-xaut-capital-test-once`)
-    .digest("hex");
-  return `binance-capital-test-once:${digest}`;
 }
 
 function derivedIdentitySet(executionId: string) {
@@ -440,5 +606,34 @@ function successfulRuntime(intent: FundingArbitrageExecutionIntent): BinanceCapi
       reason: null,
       message: "Capital Test closed successfully",
     },
+  };
+}
+
+function pendingRuntime(intent: FundingArbitrageExecutionIntent): BinanceCapitalTestRuntimeResult {
+  const runtime = successfulRuntime(intent);
+  const state = runtime.executionState;
+  if (!state) throw new Error("Fixture requires an execution state.");
+  return {
+    ...runtime,
+    executionState: {
+      ...state,
+      status: "PENDING_RECONCILIATION",
+      legs: state.legs.map((leg, index) => index === 0
+        ? leg
+        : {
+          ...leg,
+          confirmedExecutedQuantity: "0",
+          remainingQuantity: CAPITAL_TEST_QUANTITY_XAUT,
+          status: "PENDING_RECONCILIATION" as const,
+          remoteObservation: "UNKNOWN_REMOTE_STATE" as const,
+        }),
+      residualExposure: {
+        plannedQuantity: { long: CAPITAL_TEST_QUANTITY_XAUT, short: CAPITAL_TEST_QUANTITY_XAUT },
+        executedQuantity: { long: CAPITAL_TEST_QUANTITY_XAUT, short: "0" },
+        residualQuantity: CAPITAL_TEST_QUANTITY_XAUT,
+        calculatedAt: now,
+      },
+    },
+    residualExit: null,
   };
 }

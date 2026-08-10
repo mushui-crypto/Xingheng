@@ -10,6 +10,12 @@ import {
   type BinanceCapitalTestExecutionContext,
 } from "../server/modules/binance/BinanceCapitalTestPreflight";
 import {
+  BINANCE_XAUT_STRATEGY_MAX_RESIDUAL_QUANTITY,
+  type BinanceExecutionPriceMode,
+  type BinanceUserExecutionMode,
+  toBinanceExecutionPriceMode,
+} from "../server/modules/binance/BinanceExecutionPolicy";
+import {
   BINANCE_PERPETUAL_INSTRUMENT_ID,
   BINANCE_SPOT_INSTRUMENT_ID,
 } from "../server/modules/binance/BinanceInstrumentCatalog";
@@ -20,15 +26,37 @@ import { GcpKmsCredentialKeyProvider } from "../server/modules/credentials/GcpKm
 import { UserExchangeCredentialStore } from "../server/modules/credentials/UserExchangeCredentialStore";
 
 export const CAPITAL_TEST_USER_ID = "USR-MRDQ6DT1";
+export const CAPITAL_TEST_SYMBOL = "XAUTUSDT";
 export const CAPITAL_TEST_QUANTITY_XAUT = "0.002";
-export const CAPITAL_TEST_AUTHORIZATION_ORDINAL = 2;
-export const CAPITAL_TEST_RECEIPT_FILE_NAME =
-  "xaut-capital-test-once-authorization-2.jsonl";
-export const CAPITAL_TEST_RECEIPT_PATH =
-  `/app/data/binance-users/${CAPITAL_TEST_RECEIPT_FILE_NAME}`;
-const CAPITAL_TEST_MAX_RESIDUAL_XAUT = "0";
+export const CAPITAL_TEST_MAX_RESIDUAL_XAUT = String(
+  BINANCE_XAUT_STRATEGY_MAX_RESIDUAL_QUANTITY,
+);
+export const CAPITAL_TEST_MODE_CONFIG = {
+  PRICE_PRIORITY: {
+    executionPriceMode: "IOC_LIMIT",
+  },
+  EXECUTION_PRIORITY: {
+    executionPriceMode: "MARKET",
+  },
+} as const satisfies Record<BinanceUserExecutionMode, Readonly<{
+  executionPriceMode: BinanceExecutionPriceMode;
+}>>;
 const CAPITAL_TEST_INTENT_TTL_MS = 60_000;
 const CAPITAL_TEST_API_HEALTH_URL = "http://api:8787/api/health";
+const CAPITAL_TEST_RECEIPT_ROOT = "/app/data/binance-users";
+
+type CapitalTestModeConfig = typeof CAPITAL_TEST_MODE_CONFIG[BinanceUserExecutionMode];
+export type CapitalTestInvocation = Readonly<{
+  executionMode: BinanceUserExecutionMode;
+  runId: string;
+}>;
+type CapitalTestStartup = Readonly<{
+  revision: string;
+  maxSlippageBps: number;
+  executionMode: BinanceUserExecutionMode;
+  runId: string;
+  modeConfig: CapitalTestModeConfig;
+}>;
 
 type CapitalTestResult =
   | "CLAIMED"
@@ -40,9 +68,13 @@ type CapitalTestResult =
 
 export type CapitalTestReceipt = Readonly<{
   executionId: string;
-  authorizationOrdinal: typeof CAPITAL_TEST_AUTHORIZATION_ORDINAL;
+  runId: string;
   timestamp: number;
   userId: typeof CAPITAL_TEST_USER_ID;
+  symbol: typeof CAPITAL_TEST_SYMBOL;
+  quantityXaut: typeof CAPITAL_TEST_QUANTITY_XAUT;
+  executionMode: BinanceUserExecutionMode;
+  executionPriceMode: BinanceExecutionPriceMode;
   revision: string;
   result: CapitalTestResult;
   preflight?: BinanceCapitalTestRuntimeResult["preflight"];
@@ -78,37 +110,46 @@ export type CapitalTestHarnessDependencies = Readonly<{
 export async function runBinanceCapitalTestOnce(
   source: NodeJS.ProcessEnv,
   dependencies: CapitalTestHarnessDependencies,
+  invocation: CapitalTestInvocation,
 ) {
-  const startup = validateStartup(source);
+  const startup = validateStartup(source, invocation);
   await dependencies.assertApiStopped();
 
-  const executionId = stableExecutionId(startup.revision);
+  const executionId = stableExecutionId(startup);
   const claimedAt = dependencies.now();
   assertTimestamp(claimedAt);
-  dependencies.claimReceipt(baseReceipt(executionId, startup.revision, claimedAt, "CLAIMED"));
+  dependencies.claimReceipt(baseReceipt(executionId, startup, claimedAt, "CLAIMED"));
 
   let handle: ReturnType<CapitalTestHarnessDependencies["createRegistry"]> | null = null;
   try {
     handle = dependencies.createRegistry();
-    const snapshot = await readBoundSnapshot(handle.registry);
+    const initialGate = await readBoundGate(handle.registry);
+    const snapshot = initialGate.snapshot;
     const context: BinanceCapitalTestExecutionContext = {
       userId: CAPITAL_TEST_USER_ID,
       accountId: snapshot.accountId,
       venue: "binance",
     };
     const intent = fixedIntent(executionId, claimedAt);
-    assertFixedIntent(intent);
+    assertFixedIntent(intent, startup);
 
-    const localPreflight = preflightBinanceCapitalTest(
+    const accountPreflight = preflightBinanceCapitalTest(
       context,
       intent,
       snapshot,
       claimedAt,
       startup.maxSlippageBps,
     );
+    const localPreflight = accountPreflight.status === "PASS" && initialGate.processingOrderCount > 0
+      ? {
+        status: "FAIL" as const,
+        reason: "OPEN_ORDERS" as const,
+        message: "Existing processing Binance orders must be reconciled before the capital test.",
+      }
+      : accountPreflight;
     if (localPreflight.status === "FAIL") {
       const receipt: CapitalTestReceipt = {
-        ...baseReceipt(executionId, startup.revision, dependencies.now(), "PREFLIGHT_FAILED"),
+        ...baseReceipt(executionId, startup, dependencies.now(), "PREFLIGHT_FAILED"),
         preflight: localPreflight,
         message: "Capital test stopped before mutation because the local preflight failed.",
       };
@@ -121,21 +162,26 @@ export async function runBinanceCapitalTestOnce(
       CAPITAL_TEST_USER_ID,
       context,
       intent,
-      { maxSlippageBps: startup.maxSlippageBps, clock: dependencies.now },
+      {
+        maxSlippageBps: startup.maxSlippageBps,
+        clock: dependencies.now,
+        executionPriceMode: startup.modeConfig.executionPriceMode,
+      },
     );
-    const finalSnapshot = await readBoundSnapshot(handle.registry);
+    const finalGate = await readBoundGate(handle.registry);
     const receipt = completedReceipt(
       executionId,
-      startup.revision,
+      startup,
       dependencies.now(),
       runtime,
-      finalSnapshot,
+      finalGate.snapshot,
+      finalGate.processingOrderCount,
     );
     dependencies.appendReceipt(receipt);
     return receipt;
   } catch {
     const receipt: CapitalTestReceipt = {
-      ...baseReceipt(executionId, startup.revision, dependencies.now(), "FAILED"),
+      ...baseReceipt(executionId, startup, dependencies.now(), "FAILED"),
       message: "Capital test harness stopped without a confirmed closed result.",
     };
     dependencies.appendReceipt(receipt);
@@ -145,7 +191,7 @@ export async function runBinanceCapitalTestOnce(
   }
 }
 
-function validateStartup(source: NodeJS.ProcessEnv) {
+function validateStartup(source: NodeJS.ProcessEnv, invocation: CapitalTestInvocation) {
   if (source.NODE_ENV !== "production") throw new Error("Capital test harness requires NODE_ENV=production.");
   if (source.CAPITAL_TEST_USER_ID !== CAPITAL_TEST_USER_ID) {
     throw new Error("Capital test harness is restricted to the approved user.");
@@ -153,6 +199,9 @@ function validateStartup(source: NodeJS.ProcessEnv) {
   if (source.CAPITAL_TEST_QUANTITY_XAUT !== CAPITAL_TEST_QUANTITY_XAUT) {
     throw new Error("Capital test harness is restricted to the approved quantity.");
   }
+  const executionMode = parseHarnessExecutionMode(invocation.executionMode);
+  const runId = parseRunId(invocation.runId);
+  const modeConfig = CAPITAL_TEST_MODE_CONFIG[executionMode];
   const revision = source.GIT_COMMIT?.trim() ?? "";
   if (!/^[a-f0-9]{40}$/u.test(revision)
     || source.CAPITAL_TEST_APPROVED_REVISION?.trim() !== revision) {
@@ -165,19 +214,15 @@ function validateStartup(source: NodeJS.ProcessEnv) {
     const value = source[name]?.trim() ?? "";
     if (!value || !isAbsolute(value)) throw new Error(`${name} must be an explicit absolute production path.`);
   }
-  const receiptPath = source.BINANCE_CAPITAL_TEST_RECEIPT_PATH?.trim() ?? "";
   const orderStoreRoot = resolve(source.BINANCE_USER_ORDER_DB_DIR!);
-  const receiptRelativePath = relative(orderStoreRoot, CAPITAL_TEST_RECEIPT_PATH);
-  if (!receiptPath
-    || !isAbsolute(receiptPath)
-    || receiptPath !== CAPITAL_TEST_RECEIPT_PATH
-    || !receiptRelativePath
+  const expectedReceiptPath = capitalTestReceiptPath(runId);
+  const receiptRelativePath = relative(orderStoreRoot, expectedReceiptPath);
+  if (!receiptRelativePath
     || receiptRelativePath === ".."
     || receiptRelativePath.startsWith("../")
     || isAbsolute(receiptRelativePath)) {
     throw new Error(
-      `Capital test receipt path must be exactly ${CAPITAL_TEST_RECEIPT_PATH}`
-      + " and inside BINANCE_USER_ORDER_DB_DIR.",
+      "Capital test receipt path must remain inside BINANCE_USER_ORDER_DB_DIR.",
     );
   }
   if (!source.GCP_KMS_CREDENTIAL_KEY_NAME?.trim() || !source.BINANCE_ALLOWED_EGRESS_IPS?.trim()) {
@@ -187,7 +232,55 @@ function validateStartup(source: NodeJS.ProcessEnv) {
   if (config.maxOrderUsd > 25 || config.maxPositionUsd > 100) {
     throw new Error("Capital test harness refuses expanded Binance risk limits.");
   }
-  return { revision, maxSlippageBps: config.maxSlippageBps };
+  return {
+    revision,
+    maxSlippageBps: config.maxSlippageBps,
+    executionMode,
+    runId,
+    modeConfig,
+  };
+}
+
+export function parseCapitalTestArguments(args: readonly string[]): CapitalTestInvocation {
+  let executionMode: BinanceUserExecutionMode | null = null;
+  let runId: string | null = null;
+  for (let index = 0; index < args.length; index += 2) {
+    const name = args[index];
+    const value = args[index + 1];
+    if (!value || value.startsWith("--")) {
+      throw new Error(`Capital test argument ${name ?? "<missing>"} requires a value.`);
+    }
+    if (name === "--mode" && executionMode === null) {
+      executionMode = parseHarnessExecutionMode(value);
+    } else if (name === "--run-id" && runId === null) {
+      runId = parseRunId(value);
+    } else {
+      throw new Error(`Unknown or duplicate Capital Test argument: ${name ?? "<missing>"}.`);
+    }
+  }
+  if (executionMode === null || runId === null) {
+    throw new Error("Capital test requires --mode and --run-id exactly once.");
+  }
+  return { executionMode, runId };
+}
+
+function parseHarnessExecutionMode(value: unknown): BinanceUserExecutionMode {
+  if (value !== "PRICE_PRIORITY" && value !== "EXECUTION_PRIORITY") {
+    throw new Error("Capital test --mode must be PRICE_PRIORITY or EXECUTION_PRIORITY.");
+  }
+  return value;
+}
+
+function parseRunId(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(value)) {
+    throw new Error("Capital test run-id must be 1-64 safe identifier characters.");
+  }
+  return value;
+}
+
+export function capitalTestReceiptPath(runId: string) {
+  const safeRunId = parseRunId(runId);
+  return resolve(CAPITAL_TEST_RECEIPT_ROOT, `xaut-capital-test-once-${safeRunId}.jsonl`);
 }
 
 function fixedIntent(executionId: string, createdAt: number): FundingArbitrageExecutionIntent {
@@ -222,7 +315,7 @@ function fixedIntent(executionId: string, createdAt: number): FundingArbitrageEx
   };
 }
 
-function assertFixedIntent(intent: FundingArbitrageExecutionIntent) {
+function assertFixedIntent(intent: FundingArbitrageExecutionIntent, startup: CapitalTestStartup) {
   const [spot, perpetual] = intent.legs;
   if (intent.strategyType !== "SPOT_PERPETUAL"
     || intent.objective !== "ESTABLISH_HEDGE"
@@ -236,20 +329,22 @@ function assertFixedIntent(intent: FundingArbitrageExecutionIntent) {
     || perpetual.instrumentId !== BINANCE_PERPETUAL_INSTRUMENT_ID
     || perpetual.marketType !== "perpetual"
     || perpetual.targetDeltaBaseQuantity !== CAPITAL_TEST_QUANTITY_XAUT
-    || intent.constraints.maxResidualBaseQuantity !== CAPITAL_TEST_MAX_RESIDUAL_XAUT) {
+    || intent.constraints.maxResidualBaseQuantity !== CAPITAL_TEST_MAX_RESIDUAL_XAUT
+    || toBinanceExecutionPriceMode(startup.executionMode) !== startup.modeConfig.executionPriceMode) {
     throw new Error("Capital test intent does not match the fixed approved scope.");
   }
 }
 
 function completedReceipt(
   executionId: string,
-  revision: string,
+  startup: CapitalTestStartup,
   timestamp: number,
   runtime: BinanceCapitalTestRuntimeResult,
   finalSnapshot: BinancePreflightSnapshot,
+  finalProcessingOrderCount: number,
 ): CapitalTestReceipt {
   assertTimestamp(timestamp);
-  const flatOrDust = isFlatOrDust(finalSnapshot);
+  const flatOrDust = isFlatOrDust(finalSnapshot, finalProcessingOrderCount);
   const state = runtime.executionState;
   const exitStatus = runtime.residualExit?.status ?? null;
   const result: CapitalTestResult = state?.status === "PENDING_RECONCILIATION"
@@ -260,7 +355,7 @@ function completedReceipt(
         ? "FAILED_CLOSED"
         : "FAILED";
   return {
-    ...baseReceipt(executionId, revision, timestamp, result),
+    ...baseReceipt(executionId, startup, timestamp, result),
     preflight: runtime.preflight,
     attempts: runtime.attempts,
     ...(state ? {
@@ -272,15 +367,19 @@ function completedReceipt(
     finalAccount: {
       spotQuantityXaut: finalSnapshot.existingSpotQuantityXaut,
       perpetualQuantityXaut: finalSnapshot.existingPerpetualQuantityXaut,
-      openOrderCount: finalSnapshot.openSpotOrderCount + finalSnapshot.openPerpetualOrderCount,
+      openOrderCount: finalSnapshot.openSpotOrderCount
+        + finalSnapshot.openPerpetualOrderCount
+        + finalProcessingOrderCount,
       flatOrDust,
     },
   };
 }
 
-function isFlatOrDust(snapshot: BinancePreflightSnapshot) {
+function isFlatOrDust(snapshot: BinancePreflightSnapshot, processingOrderCount = 0) {
   const noPerpetual = snapshot.existingPerpetualQuantityXaut <= 1e-9;
-  const noOrders = snapshot.openSpotOrderCount === 0 && snapshot.openPerpetualOrderCount === 0;
+  const noOrders = snapshot.openSpotOrderCount === 0
+    && snapshot.openPerpetualOrderCount === 0
+    && processingOrderCount === 0;
   const spotQuantity = snapshot.existingSpotQuantityXaut;
   const spotDust = spotQuantity <= 1e-9
     || (spotQuantity < snapshot.spot.minOrderQty
@@ -290,15 +389,21 @@ function isFlatOrDust(snapshot: BinancePreflightSnapshot) {
   return noPerpetual && noOrders && spotDust;
 }
 
-async function readBoundSnapshot(registry: RegistryPort) {
-  return registry.run(CAPITAL_TEST_USER_ID, (service) => service.account());
+async function readBoundGate(registry: RegistryPort) {
+  return registry.run(CAPITAL_TEST_USER_ID, async (service) => {
+    const snapshot = await service.account();
+    const processingOrderCount = service.ordersState().orders
+      .filter((order) => order.status === "processing").length;
+    return { snapshot, processingOrderCount };
+  });
 }
 
-function stableExecutionId(revision: string) {
+function stableExecutionId(startup: CapitalTestStartup) {
   const digest = createHash("sha256")
     .update(
-      `${revision}\u0000${CAPITAL_TEST_USER_ID}\u0000binance-xaut-capital-test-once`
-      + `\u0000${CAPITAL_TEST_AUTHORIZATION_ORDINAL}`,
+      `${startup.revision}\u0000${CAPITAL_TEST_USER_ID}\u0000${CAPITAL_TEST_SYMBOL}`
+      + `\u0000${CAPITAL_TEST_QUANTITY_XAUT}\u0000${startup.executionMode}`
+      + `\u0000${startup.runId}\u0000binance-xaut-capital-test-once`,
     )
     .digest("hex");
   return `binance-capital-test-once:${digest}`;
@@ -306,17 +411,21 @@ function stableExecutionId(revision: string) {
 
 function baseReceipt(
   executionId: string,
-  revision: string,
+  startup: CapitalTestStartup,
   timestamp: number,
   result: CapitalTestResult,
 ): CapitalTestReceipt {
   assertTimestamp(timestamp);
   return {
     executionId,
-    authorizationOrdinal: CAPITAL_TEST_AUTHORIZATION_ORDINAL,
+    runId: startup.runId,
     timestamp,
     userId: CAPITAL_TEST_USER_ID,
-    revision,
+    symbol: CAPITAL_TEST_SYMBOL,
+    quantityXaut: CAPITAL_TEST_QUANTITY_XAUT,
+    executionMode: startup.executionMode,
+    executionPriceMode: startup.modeConfig.executionPriceMode,
+    revision: startup.revision,
     result,
   };
 }
@@ -363,9 +472,8 @@ async function assertProductionApiStopped() {
   throw new Error("Capital test harness refuses to run while the normal API process is reachable.");
 }
 
-function productionDependencies(source: NodeJS.ProcessEnv): CapitalTestHarnessDependencies {
-  const receiptPath = source.BINANCE_CAPITAL_TEST_RECEIPT_PATH?.trim() ?? "";
-  if (!receiptPath) throw new Error("BINANCE_CAPITAL_TEST_RECEIPT_PATH is required.");
+function productionDependencies(source: NodeJS.ProcessEnv, runId: string): CapitalTestHarnessDependencies {
+  const receiptPath = capitalTestReceiptPath(runId);
   const receipts = createFileReceiptStore(receiptPath);
   return {
     now: Date.now,
@@ -387,7 +495,12 @@ function productionDependencies(source: NodeJS.ProcessEnv): CapitalTestHarnessDe
 
 async function main() {
   try {
-    const receipt = await runBinanceCapitalTestOnce(process.env, productionDependencies(process.env));
+    const invocation = parseCapitalTestArguments(process.argv.slice(2));
+    const receipt = await runBinanceCapitalTestOnce(
+      process.env,
+      productionDependencies(process.env, invocation.runId),
+      invocation,
+    );
     process.stdout.write(`${JSON.stringify(receipt)}\n`);
     if (receipt.result !== "PASS") process.exitCode = 1;
   } catch {

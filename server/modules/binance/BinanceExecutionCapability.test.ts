@@ -39,10 +39,10 @@ test("implements the capability contract through the bound Binance service", asy
     category: "spot",
     symbol: "XAUTUSDT",
     side: "Buy",
-      quantityXaut: 0.12,
-      limitPrice: 1002,
-      executionPriceMode: "IOC_LIMIT",
-      reduceOnly: false,
+    quantityXaut: 0.12,
+    limitPrice: 1002,
+    executionPriceMode: "IOC_LIMIT",
+    reduceOnly: false,
   });
   assert.match(String(service.placeInputs[0]!.idempotencyKey), /^funding-arbitrage:[a-f0-9]{64}$/u);
 });
@@ -65,11 +65,36 @@ test("maps perpetual short preparation without exposing Binance parameters upwar
     category: "linear",
     symbol: "XAUTUSDT",
     side: "Sell",
-      quantityXaut: 0.12,
-      limitPrice: 998.9000000000001,
-      executionPriceMode: "IOC_LIMIT",
-      reduceOnly: false,
+    quantityXaut: 0.12,
+    limitPrice: 998.9000000000001,
+    executionPriceMode: "IOC_LIMIT",
+    reduceOnly: false,
   });
+});
+
+test("MARKET preserves provider fill facts without treating realized slippage as failure", async () => {
+  const service = new FakeBoundBinanceExecutionService();
+  service.placeResult = providerOrder({
+    status: "Filled",
+    filledQuantityXaut: 0.12,
+    averagePrice: 1_250,
+  });
+  const capability = new BinanceExecutionCapability(
+    service,
+    { maxSlippageBps: 20 },
+    () => now,
+    () => undefined,
+    "MARKET",
+  );
+  const request = submitRequest();
+
+  const result = await capability.submitLeg(request);
+
+  assert.deepEqual(result, { executionAttemptId: request.executionAttemptId });
+  assert.equal(service.placeInputs[0]?.executionPriceMode, "MARKET");
+  assert.equal(service.placeResult.status, "Filled");
+  assert.equal(service.placeResult.filledQuantityXaut, 0.12);
+  assert.equal(service.placeResult.averagePrice, 1_250);
 });
 
 test("maps Binance Unknown to the unified remote observation", async () => {
@@ -175,6 +200,7 @@ class FakeBoundBinanceExecutionService implements BoundBinanceExecutionService {
   orders: BinanceStoredOrder[] = [];
   reconciledOrders: BinanceStoredOrder[] = [];
   cancelResult = providerOrder({ status: "Cancelled" });
+  placeResult = providerOrder({ status: "Filled", filledQuantityXaut: 0.12 });
   marketCalls = 0;
   reconciliationCalls = 0;
 
@@ -193,7 +219,7 @@ class FakeBoundBinanceExecutionService implements BoundBinanceExecutionService {
   async placeExecutionOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
     await beforeProviderMutation?.();
     this.placeInputs.push(input as Record<string, unknown>);
-    return providerOrder({ status: "Filled", filledQuantityXaut: 0.12 });
+    return this.placeResult;
   }
 
   async cancelOrder(input: unknown) {
