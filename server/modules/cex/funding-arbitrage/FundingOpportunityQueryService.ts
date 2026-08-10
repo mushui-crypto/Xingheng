@@ -1,4 +1,5 @@
 import type { CexVenue } from "../CexCanonicalModels";
+import { emptyFundingOpportunitySource, type FundingOpportunitySource } from "./FundingOpportunitySource";
 import type { FundingSpreadConfidence, FundingSpreadPlan } from "./FundingSpreadPlan";
 
 export type FundingOpportunitySort = "estimatedNetYield" | "confidence" | "expiresAt";
@@ -26,16 +27,16 @@ export type FundingOpportunityQuerySnapshot = Readonly<{
   opportunities: FundingOpportunityView[];
 }>;
 
-export type FundingSpreadPlanSource = () => Promise<readonly FundingSpreadPlan[]>;
+export type FundingSpreadPlanSource = FundingOpportunitySource | (() => Promise<readonly FundingSpreadPlan[]>);
 
 export class FundingOpportunityQueryService {
   constructor(
-    private readonly source: FundingSpreadPlanSource = async () => [],
+    private readonly source: FundingSpreadPlanSource = emptyFundingOpportunitySource,
     private readonly now: () => number = Date.now,
   ) {}
 
   async list(query: FundingOpportunityQuery = {}): Promise<FundingOpportunityQuerySnapshot> {
-    const plans = await this.source();
+    const plans = await readPlans(this.source);
     const symbol = query.symbol?.trim().toUpperCase();
     const confidence = query.confidence ?? "all";
     const sort = query.sort ?? "estimatedNetYield";
@@ -87,4 +88,8 @@ function compareOpportunityViews(
 
 function confidenceRank(confidence: FundingSpreadConfidence) {
   return confidence === "high" ? 3 : confidence === "medium" ? 2 : 1;
+}
+
+function readPlans(source: FundingSpreadPlanSource) {
+  return typeof source === "function" ? source() : source.getOpportunities();
 }

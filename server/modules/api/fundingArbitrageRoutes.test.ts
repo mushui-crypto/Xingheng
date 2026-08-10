@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { registerFundingArbitrageRoutes } from "./fundingArbitrageRoutes";
-import type { FundingOpportunityQueryService } from "../cex/funding-arbitrage/FundingOpportunityQueryService";
+import { FundingOpportunityQueryService } from "../cex/funding-arbitrage/FundingOpportunityQueryService";
+import type { FundingSpreadPlan } from "../cex/funding-arbitrage/FundingSpreadPlan";
 
 test("funding opportunity API returns a read-only opportunity list", async () => {
   const { route, service } = buildRouteHarness();
@@ -53,6 +54,39 @@ test("funding opportunity API ignores unsupported query values and surfaces read
   assert.match(JSON.stringify(response.body), /plan source unavailable/u);
 });
 
+test("funding opportunity API can return plans from a read-only opportunity source", async () => {
+  const response = createMockResponse();
+  const service = new FundingOpportunityQueryService({
+    getOpportunities: async () => [plan()],
+  }, () => 1_800_000_000_000);
+  let route: any;
+  const app = {
+    get(path: string, handler: unknown) {
+      assert.equal(path, "/api/funding-arbitrage/opportunities");
+      route = handler;
+    },
+  };
+  registerFundingArbitrageRoutes(app as any, service);
+
+  await route(createMockRequest(), response as any);
+
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.body, {
+    generatedAt: 1_800_000_000_000,
+    opportunities: [{
+      symbol: "XAUTUSDT",
+      longVenue: "okx",
+      shortVenue: "binance",
+      fundingSpread: 0.0005,
+      estimatedCost: 0.0001,
+      estimatedNetYield: 0.0004,
+      confidence: "high",
+      createdAt: 1_800_000_000_000,
+      expiresAt: 1_800_000_060_000,
+    }],
+  });
+});
+
 function buildRouteHarness(options: {
   opportunities?: unknown[];
   error?: Error;
@@ -88,6 +122,26 @@ function buildRouteHarness(options: {
   registerFundingArbitrageRoutes(app as any, service as unknown as FundingOpportunityQueryService);
   assert.equal(typeof route, "function");
   return { route, service };
+}
+
+function plan(overrides: Partial<FundingSpreadPlan> = {}): FundingSpreadPlan {
+  return {
+    strategyType: "PERPETUAL_PERPETUAL",
+    symbol: "XAUTUSDT",
+    longVenue: "okx",
+    shortVenue: "binance",
+    longInstrumentId: "okx:perpetual:linear:XAUT:USDT:USDT",
+    shortInstrumentId: "binance:perpetual:linear:XAUT:USDT:USDT",
+    longFundingRate: -0.0002,
+    shortFundingRate: 0.0003,
+    fundingSpread: 0.0005,
+    estimatedCost: 0.0001,
+    estimatedNetYield: 0.0004,
+    confidence: "high",
+    createdAt: 1_800_000_000_000,
+    expiresAt: 1_800_000_060_000,
+    ...overrides,
+  };
 }
 
 function createMockRequest(input: { query?: Record<string, string> } = {}) {

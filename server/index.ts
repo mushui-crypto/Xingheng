@@ -28,6 +28,7 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
+import { createDefaultFundingOpportunitySource } from "./modules/cex/funding-arbitrage/createDefaultFundingOpportunitySource";
 import { FundingOpportunityQueryService } from "./modules/cex/funding-arbitrage/FundingOpportunityQueryService";
 import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
@@ -130,7 +131,7 @@ registerMarketRoutes(app, market, tradingStore, {
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
-const fundingOpportunityQuery = new FundingOpportunityQueryService();
+const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefaultFundingOpportunitySource());
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
