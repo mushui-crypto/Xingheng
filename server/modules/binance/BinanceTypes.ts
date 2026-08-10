@@ -5,6 +5,7 @@ export const BINANCE_PRODUCT_CACHE_TTL_MS = 30_000;
 
 export type BinanceCredentials = { apiKey: string; apiSecret: string };
 export type BinanceOrderExecutionMode = "production_ioc" | "test_gtc";
+export type BinanceExecutionPriceMode = import("./BinanceExecutionPolicy").BinanceExecutionPriceMode;
 
 export type BinancePermissions = {
   read: boolean;
@@ -94,6 +95,7 @@ export type BinanceOrderRequest = {
   side: "Buy" | "Sell";
   quantityXaut: number;
   limitPrice: number;
+  executionPriceMode?: BinanceExecutionPriceMode;
   reduceOnly: boolean;
   orderLinkId: string;
 };

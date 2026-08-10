@@ -186,7 +186,7 @@ function perpetualIntent(): PerpetualPerpetualFundingArbitrageExecutionIntent {
     objective: "ESTABLISH_HEDGE",
     createdAt: now - 1_000,
     expiresAt: now + 60_000,
-    constraints: { maxResidualBaseQuantity: "0.001", maxLegStartSkewMs: 500 },
+    constraints: { maxResidualBaseQuantity: "0.001" },
     legs: [
       {
         legId: "leg-long",

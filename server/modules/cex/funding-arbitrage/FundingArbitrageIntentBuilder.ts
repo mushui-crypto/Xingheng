@@ -7,7 +7,6 @@ import type { FundingArbitragePlan } from "./FundingArbitragePlan";
 export type FundingArbitrageIntentBuildParameters = Readonly<{
   now: number;
   maxResidualBaseQuantity: string;
-  maxLegStartSkewMs: number;
   expiresAt?: number;
 }>;
 
@@ -32,7 +31,6 @@ export function buildFundingArbitrageExecutionIntent(
     expiresAt: parameters.expiresAt ?? plan.expiresAt,
     constraints: {
       maxResidualBaseQuantity,
-      maxLegStartSkewMs: parameters.maxLegStartSkewMs,
     },
     legs: [
       {
@@ -69,11 +67,6 @@ function assertLifecycle(
   }
   if (expiresAt > plan.expiresAt) {
     throw new Error("Funding arbitrage intent expiry cannot exceed its source plan expiry.");
-  }
-  if (!Number.isFinite(parameters.maxLegStartSkewMs)
-    || !Number.isInteger(parameters.maxLegStartSkewMs)
-    || parameters.maxLegStartSkewMs < 0) {
-    throw new Error("Maximum leg start skew must be a non-negative integer.");
   }
 }
 

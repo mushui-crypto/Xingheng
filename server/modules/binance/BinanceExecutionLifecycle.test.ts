@@ -108,7 +108,7 @@ class LifecycleBinanceService implements BoundBinanceExecutionService {
     };
   }
 
-  async placeOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
+  async placeExecutionOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
     await beforeProviderMutation?.();
     const prepared = input as Record<string, unknown>;
     this.placeInputs.push(prepared);
@@ -147,7 +147,7 @@ function executionIntent(): SpotPerpetualFundingArbitrageExecutionIntent {
     objective: "ESTABLISH_HEDGE",
     createdAt: now,
     expiresAt: now + 60_000,
-    constraints: { maxResidualBaseQuantity: "0.001", maxLegStartSkewMs: 500 },
+    constraints: { maxResidualBaseQuantity: "0.001" },
     legs: [
       {
         legId: "leg-spot-long",

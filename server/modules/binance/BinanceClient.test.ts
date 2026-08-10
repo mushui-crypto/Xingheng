@@ -28,6 +28,38 @@ test("production orders remain IOC while test orders use GTC", async () => {
   assert.deepEqual(timeInForce, ["IOC", "GTC"]);
 });
 
+test("market orders omit provider price and timeInForce", async () => {
+  let submitted: URL | null = null;
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    assert.equal(init?.method, "POST");
+    submitted = url;
+    return Response.json({ orderId: 1, clientOrderId: url.searchParams.get("newClientOrderId") });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    Date.now,
+    ["203.0.113.10"],
+  );
+
+  await client.placeOrder({
+    category: "spot",
+    symbol: "XAUTUSDT",
+    side: "Buy",
+    quantityXaut: 0.002,
+    limitPrice: 4_010,
+    executionPriceMode: "MARKET",
+    reduceOnly: false,
+    orderLinkId: "ptmmarketguard",
+  });
+
+  assert.equal((submitted as URL | null)?.searchParams.get("type"), "MARKET");
+  assert.equal((submitted as URL | null)?.searchParams.has("price"), false);
+  assert.equal((submitted as URL | null)?.searchParams.has("timeInForce"), false);
+});
+
 test("preflight snapshot maps cross and isolated margin modes using GET-only requests", async (t) => {
   for (const marginType of ["cross", "isolated"] as const) {
     await t.test(marginType, async () => {

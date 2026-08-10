@@ -8,7 +8,6 @@ const plan = perpetualPlan();
 const buildParameters = {
   now,
   maxResidualBaseQuantity: "0.00100000",
-  maxLegStartSkewMs: 500,
 } as const;
 
 test("builds a decimal-safe perpetual/perpetual execution intent without changing the plan", () => {
@@ -22,7 +21,6 @@ test("builds a decimal-safe perpetual/perpetual execution intent without changin
   assert.equal(intent.createdAt, now);
   assert.equal(intent.expiresAt, plan.expiresAt);
   assert.equal(intent.constraints.maxResidualBaseQuantity, "0.001");
-  assert.equal(intent.constraints.maxLegStartSkewMs, 500);
 
   for (const index of [0, 1] as const) {
     assert.equal(intent.legs[index].role, plan.legs[index].role);

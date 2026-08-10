@@ -25,11 +25,17 @@ import {
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import type { BinancePersonalTradingServiceRegistry } from "./BinancePersonalTradingServiceRegistry";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
+import {
+  BINANCE_MAX_UNHEDGED_DURATION_MS,
+  type BinanceExecutionPriceMode,
+} from "./BinanceExecutionPolicy";
 
-type BinanceCapitalTestRuntimeService = BoundBinanceExecutionService & Pick<
-  BinancePersonalTradingService,
-  "account" | "exit"
->;
+const CAPITAL_TEST_EXECUTION_PRICE_MODE: BinanceExecutionPriceMode = "IOC_LIMIT";
+
+type BinanceCapitalTestRuntimeService = BoundBinanceExecutionService & Readonly<{
+  account: BinancePersonalTradingService["account"];
+  exit: (input: unknown) => Promise<unknown>;
+}>;
 
 export type BinanceCapitalTestAttempt = Readonly<{
   executionId: string;
@@ -46,6 +52,7 @@ export type BinanceCapitalTestRuntimeResult = Readonly<{
 
 export type BinanceCapitalTestRuntimeOptions = Readonly<{
   maxSlippageBps: number;
+  executionPriceMode?: BinanceExecutionPriceMode;
   clock?: () => number;
 }>;
 
@@ -64,6 +71,7 @@ export async function executeBinanceCapitalTest(
     { maxSlippageBps: options.maxSlippageBps },
     options.clock,
     intent.expiresAt,
+    options.executionPriceMode ?? CAPITAL_TEST_EXECUTION_PRICE_MODE,
   ).execute(context, intent));
 }
 
@@ -72,18 +80,21 @@ class BinanceCapitalTestRuntime {
   private readonly coordinator = new FundingArbitrageExecutionCoordinator();
   private readonly residualExit: BinanceCapitalTestResidualExit;
   private plannedMutationCapitalUsd = 0;
+  private firstConfirmedExposureAt: number | null = null;
 
   constructor(
     private readonly service: BinanceCapitalTestRuntimeService,
     private readonly config: Pick<BinanceTradingConfig, "maxSlippageBps">,
     private readonly clock: () => number = Date.now,
     private readonly intentExpiresAt: number,
+    executionPriceMode: BinanceExecutionPriceMode,
   ) {
     this.capability = new BinanceExecutionCapability(
       service,
       config,
       clock,
       (prepared) => this.assertRiskMutationAllowed(prepared),
+      executionPriceMode,
     );
     this.residualExit = new BinanceCapitalTestResidualExit(service);
   }
@@ -114,7 +125,6 @@ class BinanceCapitalTestRuntime {
     }));
     assertAttemptIdentities(attempts);
 
-    let firstLegStartedAt: number | null = null;
     for (const [index, leg] of intent.legs.entries()) {
       const attempt = attempts[index]!;
       const startedAt = this.nowAtOrAfter(state.updatedAt);
@@ -122,12 +132,6 @@ class BinanceCapitalTestRuntime {
         state = this.failOnlyWithoutConfirmedResidual(state, startedAt);
         break;
       }
-      if (firstLegStartedAt !== null
-        && startedAt - firstLegStartedAt > intent.constraints.maxLegStartSkewMs) {
-        state = this.failOnlyWithoutConfirmedResidual(state, startedAt);
-        break;
-      }
-      firstLegStartedAt ??= startedAt;
       state = this.transition(state, {
         type: "LEG_SUBMIT_STARTED",
         legId: leg.legId,
@@ -153,6 +157,7 @@ class BinanceCapitalTestRuntime {
         }
       } catch {
         state = await this.observeAfterSubmit(state, reference);
+        this.recordFirstConfirmedExposure(state);
         const currentLeg = state.legs.find((candidate) => candidate.legId === leg.legId)!;
         if (currentLeg.remoteObservation === "FILLED" && currentLeg.remainingQuantity === "0") continue;
         if (isConfirmedTerminalFailure(currentLeg.remoteObservation)) {
@@ -162,9 +167,10 @@ class BinanceCapitalTestRuntime {
       }
 
       state = await this.observeAfterSubmit(state, reference);
+      this.recordFirstConfirmedExposure(state);
       const currentLeg = state.legs.find((candidate) => candidate.legId === leg.legId)!;
       if (isConfirmedTerminalFailure(currentLeg.remoteObservation)) {
-        state = this.failOnlyWithoutConfirmedResidual(state);
+        if (state.status !== "HEDGED") state = this.failOnlyWithoutConfirmedResidual(state);
         break;
       }
       if (currentLeg.remoteObservation !== "FILLED" || currentLeg.remainingQuantity !== "0") break;
@@ -276,8 +282,13 @@ class BinanceCapitalTestRuntime {
   }
 
   private assertRiskMutationAllowed(prepared: Readonly<{ quantityXaut: number; limitPrice: number }>) {
-    if (this.now() >= this.intentExpiresAt) {
+    const checkedAt = this.now();
+    if (checkedAt >= this.intentExpiresAt) {
       throw new Error("Capital test intent expired before risk-increasing mutation.");
+    }
+    if (this.firstConfirmedExposureAt !== null
+      && checkedAt - this.firstConfirmedExposureAt > BINANCE_MAX_UNHEDGED_DURATION_MS) {
+      throw new Error("Capital test maximum unhedged duration elapsed before provider mutation.");
     }
     const mutationCapitalUsd = prepared.quantityXaut * prepared.limitPrice;
     const nextPlannedCapitalUsd = this.plannedMutationCapitalUsd + mutationCapitalUsd;
@@ -288,6 +299,13 @@ class BinanceCapitalTestRuntime {
       throw new Error("Capital test mutation would exceed the 40 USD total planned capital limit.");
     }
     this.plannedMutationCapitalUsd = nextPlannedCapitalUsd;
+  }
+
+  private recordFirstConfirmedExposure(state: FundingArbitrageExecutionState) {
+    if (this.firstConfirmedExposureAt === null
+      && state.legs.some((leg) => Number(leg.confirmedExecutedQuantity) > 0)) {
+      this.firstConfirmedExposureAt = this.now();
+    }
   }
 }
 

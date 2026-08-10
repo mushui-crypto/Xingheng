@@ -6,6 +6,7 @@ import type {
   BinanceClientAdapter,
   BinanceOrderExecutionMode,
   BinanceOrderRequest,
+  BinancePreflightSnapshot,
   BinanceProviderOrder,
 } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
@@ -14,7 +15,7 @@ export type BinanceOrderInput = Omit<BinanceOrderRequest, "orderLinkId"> & {
   idempotencyKey: string;
 };
 
-export type BinanceProviderMutationGuard = () => void | Promise<void>;
+export type BinanceProviderMutationGuard = (riskValuationPrice?: number) => void | Promise<void>;
 
 export class BinanceOrderManager {
   private readonly orderLock = new AsyncLock();
@@ -31,7 +32,7 @@ export class BinanceOrderManager {
   }
 
   placeTestOrder(input: BinanceOrderInput) {
-    return this.placeWithMode(input, "test_gtc");
+    return this.placeWithMode({ ...input, executionPriceMode: "IOC_LIMIT" }, "test_gtc");
   }
 
   private async placeWithMode(
@@ -61,8 +62,11 @@ export class BinanceOrderManager {
       let submissionStarted = false;
       try {
         const snapshot = await this.syncPositions();
-        this.risk.assertOrderAllowed(request, snapshot);
-        await beforeProviderMutation?.();
+        const riskValuationPrice = request.executionPriceMode === "MARKET"
+          ? mutationSnapshotRiskValuationPrice(request, snapshot, this.config.maxSlippageBps)
+          : request.limitPrice;
+        this.risk.assertOrderAllowed({ ...request, limitPrice: riskValuationPrice }, snapshot);
+        await beforeProviderMutation?.(riskValuationPrice);
         submissionStarted = true;
         const accepted = executionMode === "test_gtc"
           ? await this.client.placeTestOrder(request)
@@ -264,9 +268,28 @@ function normalizeRequest(input: BinanceOrderInput): BinanceOrderRequest {
     side: input.side,
     quantityXaut: input.quantityXaut,
     limitPrice: input.limitPrice,
+    executionPriceMode: input.executionPriceMode ?? "IOC_LIMIT",
     reduceOnly: input.reduceOnly,
     orderLinkId: `ptm${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 30)}`,
   };
+}
+
+function mutationSnapshotRiskValuationPrice(
+  request: BinanceOrderRequest,
+  snapshot: BinancePreflightSnapshot,
+  maxSlippageBps: number,
+): number {
+  const instrument = request.category === "spot" ? snapshot.spot : snapshot.perpetual;
+  const referencePrice = request.category === "linear"
+    ? Math.max(instrument.ask, snapshot.perpetual.mark)
+    : instrument.ask;
+  const unrounded = referencePrice * (1 + maxSlippageBps / 10_000);
+  const limitPrice = Math.ceil((unrounded - 1e-12) / instrument.priceTick) * instrument.priceTick;
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0
+    || !Number.isFinite(limitPrice) || limitPrice <= 0) {
+    throw new Error("Market risk valuation requires a valid mutation-time price snapshot.");
+  }
+  return limitPrice;
 }
 
 function fingerprint(request: BinanceOrderRequest, executionMode: BinanceOrderExecutionMode) {

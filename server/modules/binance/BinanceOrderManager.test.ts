@@ -128,15 +128,17 @@ test("GTC test order remains processing until explicit cancellation", async () =
   let writes = 0;
   let cancelled = false;
   let clientOrderId = "";
+  let submittedMode: string | undefined;
   const providerOrder = (): BinanceProviderOrder => ({
     orderId: "gtc-1", orderLinkId: clientOrderId, status: cancelled ? "Cancelled" : "New",
     requestedQuantityXaut: 0.01, filledQuantityXaut: 0, averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
   });
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
-    placeTestOrder: async (request: { orderLinkId: string }) => {
+    placeTestOrder: async (request: { orderLinkId: string; executionPriceMode?: string }) => {
       writes += 1;
       clientOrderId = request.orderLinkId;
+      submittedMode = request.executionPriceMode;
       return { orderId: "gtc-1", orderLinkId: request.orderLinkId };
     },
     findOrderByClientOrderId: async () => providerOrder(),
@@ -150,9 +152,10 @@ test("GTC test order remains processing until explicit cancellation", async () =
     side: "Buy" as const, quantityXaut: 0.01, limitPrice: 900, reduceOnly: false,
   };
   try {
-    assert.equal((await manager.placeTestOrder(input)).status, "New");
+    assert.equal((await manager.placeTestOrder({ ...input, executionPriceMode: "MARKET" })).status, "New");
     assert.equal((await manager.placeTestOrder(input)).status, "New");
     assert.equal(writes, 1);
+    assert.equal(submittedMode, "IOC_LIMIT");
     assert.equal(manager.listOrders()[0]?.status, "processing");
     assert.equal((await manager.cancel(input.idempotencyKey)).status, "Cancelled");
     assert.equal(manager.listOrders()[0]?.status, "failed");
@@ -276,5 +279,106 @@ test("ambiguous provider submission remains pending reconciliation", async () =>
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("market fills preserve authoritative FILLED with missing or volatile averagePrice", async (t) => {
+  for (const averagePrice of [null, 1_500]) {
+    await t.test(String(averagePrice), async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-market-fact-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      const order: BinanceProviderOrder = {
+        orderId: `market-${String(averagePrice)}`,
+        orderLinkId: "",
+        status: "Filled",
+        requestedQuantityXaut: 0.01,
+        filledQuantityXaut: 0.01,
+        averagePrice,
+        feeUsd: 0,
+        updatedAt: Date.now(),
+      };
+      const submitted: Array<Record<string, unknown>> = [];
+      const client = {
+        readPreflightSnapshot: async () => snapshotFixture(),
+        placeOrder: async (request: Record<string, unknown>) => {
+          submitted.push(request);
+          order.orderLinkId = String(request.orderLinkId);
+          return { orderId: order.orderId, orderLinkId: order.orderLinkId };
+        },
+        awaitOrder: async () => order,
+      } as unknown as BinanceClientAdapter;
+      const config = tradingConfigFixture();
+      const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+      try {
+        const result = await manager.place({
+          idempotencyKey: `market-fact-${String(averagePrice)}`,
+          category: "spot",
+          symbol: "XAUTUSDT",
+          side: "Buy",
+          quantityXaut: 0.01,
+          limitPrice: 999_999,
+          executionPriceMode: "MARKET",
+          reduceOnly: false,
+        });
+        assert.equal(result.status, "Filled");
+        assert.equal(result.averagePrice, averagePrice);
+        assert.equal(submitted[0]?.limitPrice, 999_999);
+        assert.equal(store.find(`market-fact-${String(averagePrice)}`)?.status, "completed");
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("MARKET linear Sell valuation conservatively enforces max order and position limits", async (t) => {
+  for (const scenario of [
+    { name: "max order", maxOrderUsd: 25, maxPositionUsd: 100, existingSpotQuantityXaut: 0, error: /MAX_ORDER_USD/u },
+    { name: "max position", maxOrderUsd: 100, maxPositionUsd: 30, existingSpotQuantityXaut: 0.005, error: /MAX_POSITION_USD/u },
+  ]) {
+    await t.test(scenario.name, async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-market-short-risk-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      let providerWrites = 0;
+      const snapshot = snapshotFixture({
+        existingSpotQuantityXaut: scenario.existingSpotQuantityXaut,
+        perpetual: {
+          ...snapshotFixture().perpetual,
+          bid: 990,
+          ask: 1_000,
+          mark: 1_002,
+          priceTick: 0.1,
+        },
+      });
+      const client = {
+        readPreflightSnapshot: async () => snapshot,
+        placeOrder: async () => {
+          providerWrites += 1;
+          return { orderId: "must-not-submit", orderLinkId: "must-not-submit" };
+        },
+      } as unknown as BinanceClientAdapter;
+      const config = tradingConfigFixture({
+        maxOrderUsd: scenario.maxOrderUsd,
+        maxPositionUsd: scenario.maxPositionUsd,
+      });
+      const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+      try {
+        await assert.rejects(() => manager.place({
+          idempotencyKey: `market-short-${scenario.name}`,
+          category: "linear",
+          symbol: "XAUTUSDT",
+          side: "Sell",
+          quantityXaut: 0.02491,
+          limitPrice: 1,
+          executionPriceMode: "MARKET",
+          reduceOnly: false,
+        }), scenario.error);
+        assert.equal(providerWrites, 0);
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   }
 });

@@ -27,7 +27,6 @@ type FundingArbitrageExecutionIntentBase = Readonly<{
   expiresAt: number;
   constraints: Readonly<{
     maxResidualBaseQuantity: string;
-    maxLegStartSkewMs: number;
   }>;
 }>;
 

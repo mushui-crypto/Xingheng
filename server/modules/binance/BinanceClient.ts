@@ -261,13 +261,14 @@ export class BinanceClient implements BinanceClientAdapter {
     assertWhitelistedOrder(request);
     const scope = request.category === "spot" ? "spot" : "futures";
     const path = request.category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
+    const isMarket = request.executionPriceMode === "MARKET";
     const result = record(await this.signedRequest(scope, path, {
       symbol: request.symbol,
       side: request.side.toUpperCase(),
-      type: "LIMIT",
-      timeInForce,
+      type: isMarket ? "MARKET" : "LIMIT",
+      ...(isMarket ? {} : { timeInForce }),
       quantity: decimal(request.quantityXaut),
-      price: decimal(request.limitPrice),
+      ...(isMarket ? {} : { price: decimal(request.limitPrice) }),
       newClientOrderId: request.orderLinkId,
       ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
     }, true, "POST"));
@@ -659,6 +660,9 @@ function assertWhitelistedOrder(request: BinanceOrderRequest) {
   if (
     !(request.quantityXaut > 0)
     || !(request.limitPrice > 0)
+    || (request.executionPriceMode !== undefined
+      && request.executionPriceMode !== "IOC_LIMIT"
+      && request.executionPriceMode !== "MARKET")
   ) {
     throw new BinanceProviderError("provider_order_rejected", "Binance 策略订单参数超出白名单。");
   }

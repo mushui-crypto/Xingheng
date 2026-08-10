@@ -39,9 +39,10 @@ test("implements the capability contract through the bound Binance service", asy
     category: "spot",
     symbol: "XAUTUSDT",
     side: "Buy",
-    quantityXaut: 0.12,
-    limitPrice: 1002,
-    reduceOnly: false,
+      quantityXaut: 0.12,
+      limitPrice: 1002,
+      executionPriceMode: "IOC_LIMIT",
+      reduceOnly: false,
   });
   assert.match(String(service.placeInputs[0]!.idempotencyKey), /^funding-arbitrage:[a-f0-9]{64}$/u);
 });
@@ -64,9 +65,10 @@ test("maps perpetual short preparation without exposing Binance parameters upwar
     category: "linear",
     symbol: "XAUTUSDT",
     side: "Sell",
-    quantityXaut: 0.12,
-    limitPrice: 998.9000000000001,
-    reduceOnly: false,
+      quantityXaut: 0.12,
+      limitPrice: 998.9000000000001,
+      executionPriceMode: "IOC_LIMIT",
+      reduceOnly: false,
   });
 });
 
@@ -156,7 +158,8 @@ test("imports no Client, OrderManager, RiskGuard, credential, or concrete coordi
   for (const path of importPaths) {
     assert.doesNotMatch(path, /BinanceClient|BinanceOrderManager|BinanceRiskGuard|Credential|Coordinator/u);
   }
-  assert.match(source, /this\.service\.placeOrder\(prepared, \(\) => this\.assertSubmitAllowed\(prepared\)\)/u);
+  assert.match(source, /this\.service\.placeExecutionOrder\(prepared, \(riskValuationPrice/u);
+  assert.match(source, /limitPrice: riskValuationPrice/u);
   assert.doesNotMatch(source, /new\s+BinanceClient|loadForExecution|apiKey|apiSecret/u);
 
   const coordinator = readFileSync(
@@ -187,7 +190,7 @@ class FakeBoundBinanceExecutionService implements BoundBinanceExecutionService {
     };
   }
 
-  async placeOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
+  async placeExecutionOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
     await beforeProviderMutation?.();
     this.placeInputs.push(input as Record<string, unknown>);
     return providerOrder({ status: "Filled", filledQuantityXaut: 0.12 });

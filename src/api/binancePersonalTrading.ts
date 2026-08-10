@@ -91,6 +91,22 @@ export type BinanceOpportunity = {
 export type BinanceStrategyStatus = {
   snapshot: BinanceAccountSnapshot;
   opportunity: BinanceOpportunity;
+  entryExposure: {
+    classification: "FLAT" | "FLAT_WITH_DUST" | "TRADABLE_EXPOSURE";
+    rulesValid: boolean;
+    blockingReason: "INVALID_TRADING_RULES" | null;
+    requiresAcknowledgement: boolean;
+    spot: {
+      totalQuantityXaut: number;
+      freeQuantityXaut: number;
+      lockedQuantityXaut: number;
+      notionalUsd: number | null;
+    };
+    perpetual: {
+      quantityXaut: number;
+      direction: "long" | "short" | "flat";
+    };
+  };
 };
 
 export type BinanceMarketSnapshot = Pick<BinanceAccountSnapshot, "fetchedAt" | "productAvailability" | "spot" | "perpetual" | "fees">;
@@ -127,6 +143,10 @@ export type BinanceReconciliation = {
   orders: BinanceStoredOrder[];
 };
 
+export type BinanceUserExecutionMode = "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
+export const BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT =
+  "ALLOW_ENTRY_AND_TOTAL_XAUT_RECOVERY" as const;
+
 const get = <T>(path: string, message: string, signal?: AbortSignal) => requestJson<T>(path, message, {
   userAuthFailure: true,
   init: { cache: "no-store", credentials: "include", headers: { Accept: "application/json" }, signal },
@@ -148,7 +168,12 @@ export const checkBinanceConnection = () => post<BinanceStatus>("/api/binance/co
 export const fetchBinanceAccount = (signal?: AbortSignal) => get<BinanceAccountSnapshot>("/api/binance/account", "Binance 账户加载失败。", signal);
 export const fetchBinanceMarket = (signal?: AbortSignal) => get<BinanceMarketSnapshot>("/api/binance/market", "Binance 行情加载失败。", signal);
 export const fetchBinanceStrategy = (signal?: AbortSignal) => get<BinanceStrategyStatus>("/api/binance/strategy", "Binance 策略状态加载失败。", signal);
-export const enterBinanceStrategy = (input: { idempotencyKey: string; budgetUsd?: number }) => post("/api/binance/strategy/enter", "Binance 建仓失败。", input);
+export const enterBinanceStrategy = (input: {
+  idempotencyKey: string;
+  executionMode: BinanceUserExecutionMode;
+  existingExposureRiskAcknowledgement?: typeof BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT;
+  budgetUsd?: number;
+}) => post("/api/binance/strategy/enter", "Binance 建仓失败。", input);
 export const exitBinanceStrategy = (input: { idempotencyKey: string }) => post("/api/binance/strategy/exit", "Binance 退出失败。", input);
 export const fetchBinanceOrders = (signal?: AbortSignal) => get<BinanceOrdersState>("/api/binance/orders", "Binance 订单加载失败。", signal);
 export const reconcileBinance = () => post<BinanceReconciliation>("/api/binance/reconciliation", "Binance 对账失败。");

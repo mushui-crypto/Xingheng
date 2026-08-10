@@ -17,7 +17,6 @@ export type BinanceSpotPerpetualCapitalTestIntentBuildParameters = Readonly<{
   expiresAt?: number;
   quantities: BinanceSpotPerpetualCapitalTestQuantities;
   maxResidualBaseQuantity: string;
-  maxLegStartSkewMs: number;
   identityFactory?: (identity: "intent" | "spot-leg" | "perpetual-leg") => string;
 }>;
 
@@ -60,7 +59,6 @@ export function buildBinanceSpotPerpetualCapitalTestIntent(
     expiresAt: parameters.expiresAt ?? decision.expiresAt,
     constraints: {
       maxResidualBaseQuantity,
-      maxLegStartSkewMs: parameters.maxLegStartSkewMs,
     },
     legs: [
       {
@@ -156,11 +154,6 @@ function assertLifecycle(
   }
   if (expiresAt > decision.expiresAt) {
     throw new Error("Capital test intent expiry cannot exceed its strategy decision expiry.");
-  }
-  if (!Number.isFinite(parameters.maxLegStartSkewMs)
-    || !Number.isInteger(parameters.maxLegStartSkewMs)
-    || parameters.maxLegStartSkewMs < 0) {
-    throw new Error("Maximum leg start skew must be a non-negative integer.");
   }
 }
 

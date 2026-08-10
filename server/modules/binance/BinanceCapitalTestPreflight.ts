@@ -147,7 +147,7 @@ export function preflightBinanceCapitalTest(
 
   const dustEvidence = spotDustEvidence(snapshot);
   if ((snapshot.existingSpotQuantityXaut > 1e-9 && !dustEvidence)
-    || snapshot.existingPerpetualQuantityXaut > 1e-9) {
+    || Math.abs(snapshot.existingPerpetualQuantityXaut) > 1e-9) {
     return fail("EXISTING_EXPOSURE", "Existing Binance XAUT exposure must be closed before the capital test.");
   }
   if (snapshot.openSpotOrderCount > 0 || snapshot.openPerpetualOrderCount > 0) {
@@ -155,10 +155,7 @@ export function preflightBinanceCapitalTest(
   }
 
   const maxResidual = normalizeUnsignedDecimal(intent.constraints.maxResidualBaseQuantity);
-  if (!maxResidual
-    || !Number.isFinite(intent.constraints.maxLegStartSkewMs)
-    || !Number.isInteger(intent.constraints.maxLegStartSkewMs)
-    || intent.constraints.maxLegStartSkewMs < 0) {
+  if (!maxResidual) {
     return fail("CONSTRAINT_INVALID", "Binance capital test execution constraints are invalid.");
   }
 

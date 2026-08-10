@@ -130,8 +130,8 @@ function legStatusForResolvedObservation(observation: ResolvedRemoteObservation)
 }
 
 function hasConfirmedHedge(state: FundingArbitrageExecutionState) {
-  return state.residualExposure.residualQuantity === "0"
-    && state.legs.every((leg) => leg.confirmedExecutedQuantity !== "0" && leg.remainingQuantity === "0")
+  return state.status === "HEDGED"
+    && state.legs.every((leg) => leg.confirmedExecutedQuantity !== "0")
     && state.legs.every((leg) => leg.remoteObservation !== "UNKNOWN_REMOTE_STATE");
 }
 

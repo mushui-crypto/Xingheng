@@ -1,45 +1,82 @@
-import type { BinanceClientAdapter, BinancePreflightSnapshot } from "./BinanceTypes";
+import { createHash } from "node:crypto";
+import {
+  classifyBinanceEntryExposure,
+  classifyBinanceExposure,
+} from "./BinanceExposureClassifier";
+import {
+  BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT,
+  BINANCE_MAX_UNHEDGED_DURATION_MS,
+  BINANCE_XAUT_STRATEGY_MAX_RESIDUAL_QUANTITY,
+  type BinanceExecutionPriceMode,
+} from "./BinanceExecutionPolicy";
+import type { BinancePreflightSnapshot } from "./BinanceTypes";
 import type { BinanceProviderOrder } from "./BinanceTypes";
 import { BinanceOrderManager } from "./BinanceOrderManager";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 
 export class BinanceFundingArbitrageStrategy {
   constructor(
-    private readonly client: BinanceClientAdapter,
     private readonly orders: BinanceOrderManager,
     private readonly config: BinanceTradingConfig,
   ) {}
 
   async status() {
     const snapshot = await this.orders.syncPositions();
-    return { snapshot, opportunity: assessOpportunity(snapshot, this.config) };
+    return {
+      snapshot,
+      opportunity: assessOpportunity(snapshot, this.config),
+      entryExposure: classifyBinanceEntryExposure(snapshot),
+    };
   }
 
-  async enter(input: { idempotencyKey: string; budgetUsd?: number }) {
+  async enter(input: {
+    idempotencyKey: string;
+    executionPriceMode: BinanceExecutionPriceMode;
+    existingExposureRiskAcknowledgement?: typeof BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT;
+    budgetUsd?: number;
+  }) {
     const snapshot = await this.orders.syncPositions();
     const opportunity = assessOpportunity(snapshot, this.config);
     if (!opportunity.eligible) throw new Error(`Funding arbitrage entry rejected: ${opportunity.reasons.join(", ")}`);
-    if (hasBlockingEntryExposure(snapshot, this.config.allowUntradeableSpotDustEntry)) {
-      throw new Error("Existing XAUT exposure must be closed before a new arbitrage entry.");
+    const entryExposure = classifyBinanceEntryExposure(snapshot);
+    if (!entryExposure.rulesValid) {
+      throw new Error("Binance trading rules are invalid; entry is blocked.");
+    }
+    if (entryExposure.requiresAcknowledgement
+      && input.existingExposureRiskAcknowledgement !== BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT) {
+      throw new Error("Existing tradable XAUT exposure requires explicit total-account recovery acknowledgement.");
     }
     const requestedBudget = input.budgetUsd ?? this.config.maxPositionUsd;
     const legBudget = Math.min(requestedBudget / 2, this.config.maxOrderUsd, this.config.maxPositionUsd / 2);
     const quantity = commonQuantity(legBudget / snapshot.spot.ask, snapshot);
     assertTradableQuantity(quantity, snapshot);
 
-    const spot = await this.orders.place({
-      idempotencyKey: `${input.idempotencyKey}:spot-entry`,
-      category: "spot",
-      symbol: "XAUTUSDT",
-      side: "Buy",
-      quantityXaut: quantity,
-      limitPrice: ceilStep(snapshot.spot.ask * slippageMultiplier(this.config.maxSlippageBps, 1), snapshot.spot.priceTick),
-      reduceOnly: false,
-    });
-    if (spot.filledQuantityXaut <= 0) throw new Error("Binance spot entry did not fill.");
-
+    let spot: BinanceProviderOrder | null = null;
     let perpetual: BinanceProviderOrder | null = null;
     try {
+      spot = await this.orders.place({
+        idempotencyKey: `${input.idempotencyKey}:spot-entry`,
+        category: "spot",
+        symbol: "XAUTUSDT",
+        side: "Buy",
+        quantityXaut: quantity,
+        limitPrice: ceilStep(snapshot.spot.ask * slippageMultiplier(this.config.maxSlippageBps, 1), snapshot.spot.priceTick),
+        executionPriceMode: input.executionPriceMode,
+        reduceOnly: false,
+      }, async () => {
+        const mutationSnapshot = await this.orders.syncPositions();
+        assertEntryExposureSnapshotUnchanged(snapshot, mutationSnapshot);
+      });
+      const firstLegSnapshot = await this.orders.syncPositions();
+      if (spot.filledQuantityXaut <= 0) {
+        return {
+          state: "not_filled" as const,
+          spot,
+          perpetual: null,
+          snapshot: firstLegSnapshot,
+        };
+      }
+      const firstConfirmedExposureAt = Date.now();
       const futuresQuantity = floorStep(spot.filledQuantityXaut, snapshot.perpetual.qtyStep);
       perpetual = await this.orders.place({
         idempotencyKey: `${input.idempotencyKey}:perpetual-entry`,
@@ -48,14 +85,22 @@ export class BinanceFundingArbitrageStrategy {
         side: "Sell",
         quantityXaut: futuresQuantity,
         limitPrice: floorStep(snapshot.perpetual.bid * slippageMultiplier(this.config.maxSlippageBps, -1), snapshot.perpetual.priceTick),
+        executionPriceMode: input.executionPriceMode,
         reduceOnly: false,
+      }, async () => {
+        if (Date.now() - firstConfirmedExposureAt > BINANCE_MAX_UNHEDGED_DURATION_MS) {
+          throw new Error("Maximum unhedged duration elapsed before the second provider mutation.");
+        }
+        const mutationSnapshot = await this.orders.syncPositions();
+        assertEntryExposureSnapshotUnchanged(firstLegSnapshot, mutationSnapshot);
       });
-      if (perpetual.filledQuantityXaut + 1e-9 < futuresQuantity) {
-        throw new Error("Binance perpetual entry was not fully hedged.");
+      const confirmedResidual = Math.abs(spot.filledQuantityXaut - perpetual.filledQuantityXaut);
+      if (confirmedResidual > BINANCE_XAUT_STRATEGY_MAX_RESIDUAL_QUANTITY + Number.EPSILON) {
+        throw new Error("Binance entry exceeded the confirmed XAUT residual tolerance.");
       }
       return { state: "hedged" as const, spot, perpetual, snapshot: await this.orders.syncPositions() };
     } catch (error) {
-      await this.compensateEntry(input.idempotencyKey, spot, perpetual, snapshot).catch(() => undefined);
+      await this.recoverEntry(input.idempotencyKey);
       throw error;
     }
   }
@@ -72,6 +117,7 @@ export class BinanceFundingArbitrageStrategy {
         side: "Buy",
         quantityXaut: perpetualExitQuantity,
         limitPrice: ceilStep(snapshot.perpetual.ask * slippageMultiplier(this.config.maxSlippageBps, 1), snapshot.perpetual.priceTick),
+        executionPriceMode: "IOC_LIMIT",
         reduceOnly: true,
       });
     }
@@ -86,55 +132,65 @@ export class BinanceFundingArbitrageStrategy {
         side: "Sell",
         quantityXaut: spotExitQuantity,
         limitPrice: floorStep(current.spot.bid * slippageMultiplier(this.config.maxSlippageBps, -1), current.spot.priceTick),
+        executionPriceMode: "IOC_LIMIT",
         reduceOnly: false,
       });
     }
     const finalSnapshot = await this.orders.syncPositions();
-    const state = finalSnapshot.existingSpotQuantityXaut <= 1e-9
-      && finalSnapshot.existingPerpetualQuantityXaut <= 1e-9
-      ? "closed" as const
-      : "residual" as const;
+    const exposureClassification = classifyBinanceExposure(finalSnapshot);
+    const state = exposureClassification === "TRADABLE_RESIDUAL" ? "residual" as const : "closed" as const;
     return { state, ...results, snapshot: finalSnapshot };
   }
 
-  private async compensateEntry(
-    key: string,
-    spot: BinanceProviderOrder,
-    perpetual: BinanceProviderOrder | null,
-    snapshot: BinancePreflightSnapshot,
-  ) {
-    if (perpetual && perpetual.filledQuantityXaut > 0) {
-      await this.orders.place({
-        idempotencyKey: `${key}:perpetual-compensation`, category: "linear", symbol: "XAUTUSDT", side: "Buy",
-        quantityXaut: floorStep(perpetual.filledQuantityXaut, snapshot.perpetual.qtyStep),
-        limitPrice: ceilStep(snapshot.perpetual.ask * slippageMultiplier(this.config.maxSlippageBps, 1), snapshot.perpetual.priceTick), reduceOnly: true,
-      });
+  private async recoverEntry(key: string) {
+    await this.orders.reconcile();
+    const entryOrders = this.orders.listOrders().filter((order) =>
+      order.idempotencyKey === `${key}:spot-entry`
+      || order.idempotencyKey === `${key}:perpetual-entry`);
+    const unresolved = entryOrders.some((order) => order.status === "processing"
+      || order.order?.status === "New"
+      || order.order?.status === "PartiallyFilled"
+      || order.order?.status === "Unknown");
+    if (unresolved) {
+      throw new Error("Entry recovery is blocked until authoritative reconciliation resolves all entry orders.");
     }
-    if (spot.filledQuantityXaut > 0) {
-      await this.orders.place({
-        idempotencyKey: `${key}:spot-compensation`, category: "spot", symbol: "XAUTUSDT", side: "Sell",
-        quantityXaut: floorStep(spot.filledQuantityXaut, snapshot.spot.qtyStep),
-        limitPrice: floorStep(snapshot.spot.bid * slippageMultiplier(this.config.maxSlippageBps, -1), snapshot.spot.priceTick), reduceOnly: false,
-      });
+
+    const hasConfirmedEntryFill = entryOrders.some((order) =>
+      order.order !== null
+      && order.order.filledQuantityXaut > 0
+      && ["Filled", "Cancelled", "Rejected", "Expired"].includes(order.order.status));
+    if (!hasConfirmedEntryFill) return;
+
+    const snapshot = await this.orders.syncPositions();
+    if (classifyBinanceExposure(snapshot) === "TRADABLE_RESIDUAL") {
+      const recoveryKey = `entry-recovery:${createHash("sha256")
+        .update(`${key}\u0000binance-entry-recovery\u00001`)
+        .digest("hex")}`;
+      await this.exit({ idempotencyKey: recoveryKey });
+      const recovered = await this.orders.syncPositions();
+      if (classifyBinanceExposure(recovered) === "TRADABLE_RESIDUAL") {
+        throw new Error("Entry recovery left a tradable Binance residual exposure.");
+      }
     }
   }
 }
 
-export function hasBlockingEntryExposure(
-  snapshot: BinancePreflightSnapshot,
-  allowUntradeableSpotDustEntry: boolean,
+function assertEntryExposureSnapshotUnchanged(
+  expected: BinancePreflightSnapshot,
+  actual: BinancePreflightSnapshot,
 ) {
-  if (snapshot.existingPerpetualQuantityXaut > 1e-9) return true;
-  if (snapshot.existingSpotQuantityXaut <= 1e-9) return false;
-  if (!allowUntradeableSpotDustEntry) return true;
-  const availableQuantity = Math.min(snapshot.spotAvailableQuantityXaut, snapshot.existingSpotQuantityXaut);
-  const tradableQuantity = floorStep(availableQuantity, snapshot.spot.qtyStep);
-  return isTradableLeg(
-    tradableQuantity,
-    snapshot.spot.minOrderQty,
-    snapshot.spot.bid,
-    snapshot.spot.minNotionalUsd,
-  );
+  const expectedClassification = classifyBinanceEntryExposure(expected).classification;
+  const actualClassification = classifyBinanceEntryExposure(actual).classification;
+  if (actual.accountId !== expected.accountId
+    || actual.accountFingerprint !== expected.accountFingerprint
+    || actual.existingSpotQuantityXaut !== expected.existingSpotQuantityXaut
+    || actual.existingPerpetualQuantityXaut !== expected.existingPerpetualQuantityXaut
+    || actual.perpetualPositionSide !== expected.perpetualPositionSide
+    || actualClassification !== expectedClassification
+    || actual.openSpotOrderCount !== expected.openSpotOrderCount
+    || actual.openPerpetualOrderCount !== expected.openPerpetualOrderCount) {
+    throw new Error("Binance account exposure changed before provider mutation; refresh and confirm again.");
+  }
 }
 
 export function assessOpportunity(snapshot: BinancePreflightSnapshot, config: BinanceTradingConfig) {

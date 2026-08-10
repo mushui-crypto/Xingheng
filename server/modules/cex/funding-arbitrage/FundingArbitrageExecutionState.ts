@@ -59,6 +59,7 @@ export type FundingArbitrageExecutionState = Readonly<{
   status: FundingArbitrageAggregateExecutionStatus;
   legs: readonly [FundingArbitrageLegExecutionState, FundingArbitrageLegExecutionState];
   residualExposure: FundingArbitrageResidualExposure;
+  maxResidualBaseQuantity?: string;
   createdAt: number;
   updatedAt: number;
 }>;
@@ -87,6 +88,7 @@ export function createFundingArbitrageExecutionState(
     status: "CREATED",
     legs,
     residualExposure: calculateResidualExposure(legs, createdAt),
+    maxResidualBaseQuantity: normalizeUnsignedDecimal(intent.constraints.maxResidualBaseQuantity),
     createdAt,
     updatedAt: createdAt,
   };
@@ -126,7 +128,7 @@ export function updateFundingArbitrageLegExecution(
 
   return {
     ...state,
-    status: deriveAggregateStatus(legs, residualExposure),
+    status: deriveAggregateStatus(legs, residualExposure, state.maxResidualBaseQuantity ?? "0"),
     legs,
     residualExposure,
     updatedAt: update.observedAt,
@@ -177,19 +179,22 @@ function calculateResidualExposure(
 function deriveAggregateStatus(
   legs: readonly [FundingArbitrageLegExecutionState, FundingArbitrageLegExecutionState],
   exposure: FundingArbitrageResidualExposure,
+  maxResidualBaseQuantity: string,
 ): FundingArbitrageAggregateExecutionStatus {
   if (legs.some((leg) => leg.status === "PENDING_RECONCILIATION"
     || leg.remoteObservation === "UNKNOWN_REMOTE_STATE")) {
     return "PENDING_RECONCILIATION";
   }
-  if (exposure.residualQuantity !== "0") return "RESIDUAL";
-  if (legs.every((leg) => leg.remainingQuantity === "0"
+  const terminalConfirmed = legs.every((leg) => leg.confirmedExecutedQuantity !== "0"
     && leg.status === "TERMINAL"
     && leg.remoteObservation !== null
     && leg.remoteObservation !== "OPEN"
-    && leg.remoteObservation !== "UNKNOWN_REMOTE_STATE")) {
+    && leg.remoteObservation !== "UNKNOWN_REMOTE_STATE");
+  if (terminalConfirmed
+    && compareUnsignedDecimals(exposure.residualQuantity, maxResidualBaseQuantity) <= 0) {
     return "HEDGED";
   }
+  if (exposure.residualQuantity !== "0") return "RESIDUAL";
   if (legs.every((leg) => leg.status === "NOT_STARTED")) return "CREATED";
   return "EXECUTING";
 }
@@ -222,6 +227,11 @@ function absoluteDifference(left: string, right: string) {
     ? aligned.left - aligned.right
     : aligned.right - aligned.left;
   return formatScaledInteger(difference, aligned.scale);
+}
+
+function compareUnsignedDecimals(left: string, right: string) {
+  const aligned = alignDecimals(left, right);
+  return aligned.left === aligned.right ? 0 : aligned.left > aligned.right ? 1 : -1;
 }
 
 function alignDecimals(left: string, right: string) {

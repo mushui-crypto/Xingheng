@@ -7,8 +7,12 @@ import {
   BINANCE_SPOT_INSTRUMENT_ID,
 } from "./BinanceInstrumentCatalog";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
+import { classifyBinanceExposure } from "./BinanceExposureClassifier";
 
-type BinanceCapitalTestResidualExitService = Pick<BinancePersonalTradingService, "account" | "exit">;
+type BinanceCapitalTestResidualExitService = Readonly<{
+  account: BinancePersonalTradingService["account"];
+  exit: (input: unknown) => Promise<unknown>;
+}>;
 
 export type BinanceCapitalTestResidualExitIdentity = Readonly<{
   executionAttemptId: string;
@@ -70,7 +74,7 @@ export class BinanceCapitalTestResidualExit {
       return failureWithoutMutation(intent.intentId, openingAttemptIds,
         "Residual exit account does not match the bound execution context.");
     }
-    if (isFlat(beforeExit)) {
+    if (classifyBinanceExposure(beforeExit) !== "TRADABLE_RESIDUAL") {
       return { status: "EXITED", identity: null, reason: null, message: "Capital Test closed successfully" };
     }
 
@@ -84,7 +88,7 @@ export class BinanceCapitalTestResidualExit {
         const afterFailure = await this.service.account();
         confirmation = afterFailure.accountId !== context.accountId
           ? "post-failure account binding could not be confirmed"
-          : isFlat(afterFailure)
+          : classifyBinanceExposure(afterFailure) !== "TRADABLE_RESIDUAL"
             ? "post-failure account read is flat"
             : "post-failure account read still contains XAUT exposure";
       } catch (confirmationError) {
@@ -114,7 +118,7 @@ export class BinanceCapitalTestResidualExit {
         reason: "Residual exit confirmation does not match the bound execution account.",
       };
     }
-    if (!isFlat(afterExit)) {
+    if (classifyBinanceExposure(afterExit) === "TRADABLE_RESIDUAL") {
       return {
         status: "FAILED",
         identity,
@@ -135,9 +139,7 @@ function isConfirmedTerminalResidual(state: FundingArbitrageExecutionState) {
 
 function isConfirmedHedge(state: FundingArbitrageExecutionState) {
   return state.status === "HEDGED"
-    && state.residualExposure.residualQuantity === "0"
     && state.legs.every((leg) => leg.confirmedExecutedQuantity !== "0")
-    && state.legs.every((leg) => leg.remainingQuantity === "0")
     && state.legs.every((leg) => leg.status === "TERMINAL")
     && state.legs.every((leg) => leg.remoteObservation !== null)
     && state.legs.every((leg) => leg.remoteObservation !== "OPEN")
@@ -188,13 +190,6 @@ function failureWithoutMutation(
   reason: string,
 ): BinanceCapitalTestResidualExitResult {
   return { status: "FAILED", identity: createExitIdentity(intentId, openingAttemptIds), reason };
-}
-
-function isFlat(snapshot: Awaited<ReturnType<BinanceCapitalTestResidualExitService["account"]>>) {
-  return snapshot.existingSpotQuantityXaut <= 1e-9
-    && snapshot.existingPerpetualQuantityXaut <= 1e-9
-    && snapshot.openSpotOrderCount === 0
-    && snapshot.openPerpetualOrderCount === 0;
 }
 
 function stableIdentity(intentId: string, identity: "execution-attempt" | "operation") {

@@ -9,6 +9,11 @@ import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
 import { loadBinanceTradingConfig } from "./BinanceTradingConfig";
 import { BinanceClient } from "./BinanceClient";
+import {
+  BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT,
+  parseBinanceUserExecutionMode,
+  toBinanceExecutionPriceMode,
+} from "./BinanceExecutionPolicy";
 
 export type BinancePersonalTradingServiceOptions = {
   credential?: BinanceCredential | null;
@@ -41,7 +46,7 @@ export class BinancePersonalTradingService {
     this.client = rawClient;
     this.orders = this.client ? new BinanceOrderManager(this.client, this.risk, this.store, this.config) : null;
     this.strategy = this.client && this.orders
-      ? new BinanceFundingArbitrageStrategy(this.client, this.orders, this.config)
+      ? new BinanceFundingArbitrageStrategy(this.orders, this.config)
       : null;
     this.connection = {
       status: this.credential ? "checking" : "not_configured",
@@ -112,6 +117,12 @@ export class BinancePersonalTradingService {
     const body = object(input);
     return this.requireStrategy().enter({
       idempotencyKey: string(body.idempotencyKey, "idempotencyKey"),
+      executionPriceMode: toBinanceExecutionPriceMode(
+        parseBinanceUserExecutionMode(body.executionMode),
+      ),
+      existingExposureRiskAcknowledgement: parseExistingExposureRiskAcknowledgement(
+        body.existingExposureRiskAcknowledgement,
+      ),
       ...(body.budgetUsd === undefined ? {} : { budgetUsd: positiveNumber(body.budgetUsd, "budgetUsd") }),
     });
   }
@@ -122,11 +133,15 @@ export class BinancePersonalTradingService {
   }
 
   async placeOrder(input: unknown, beforeProviderMutation?: BinanceProviderMutationGuard) {
-    return this.requireOrders().place(parseOrderInput(input), beforeProviderMutation);
+    return this.requireOrders().place(parsePublicOrderInput(input), beforeProviderMutation);
   }
 
   async placeTestOrder(input: unknown) {
-    return this.requireOrders().placeTestOrder(parseOrderInput(input));
+    return this.requireOrders().placeTestOrder(parsePublicOrderInput(input));
+  }
+
+  async placeExecutionOrder(input: BinanceOrderInput, beforeProviderMutation?: BinanceProviderMutationGuard) {
+    return this.requireOrders().place(input, beforeProviderMutation);
   }
 
   async cancelOrder(input: unknown) {
@@ -162,12 +177,15 @@ export class BinancePersonalTradingService {
   }
 }
 
-function parseOrderInput(input: unknown): BinanceOrderInput {
+export function parsePublicOrderInput(input: unknown): BinanceOrderInput {
   const body = object(input);
   const category = body.category;
   const side = body.side;
   if (category !== "spot" && category !== "linear") throw new Error("category must be spot or linear.");
   if (side !== "Buy" && side !== "Sell") throw new Error("side must be Buy or Sell.");
+  if (body.executionPriceMode !== undefined && body.executionPriceMode !== "IOC_LIMIT") {
+    throw new Error("Raw Binance order APIs support IOC_LIMIT only.");
+  }
   return {
     idempotencyKey: string(body.idempotencyKey, "idempotencyKey"),
     category,
@@ -175,6 +193,7 @@ function parseOrderInput(input: unknown): BinanceOrderInput {
     side,
     quantityXaut: positiveNumber(body.quantityXaut, "quantityXaut"),
     limitPrice: positiveNumber(body.limitPrice, "limitPrice"),
+    executionPriceMode: "IOC_LIMIT",
     reduceOnly: body.reduceOnly === true,
   };
 }
@@ -183,6 +202,14 @@ export function assertBinanceStartupLeverage(leverage: number | null) {
   if (leverage !== 1) {
     throw new Error("Binance XAUTUSDT perpetual leverage must be configured to 1x before startup.");
   }
+}
+
+export function parseExistingExposureRiskAcknowledgement(value: unknown) {
+  if (value === undefined) return undefined;
+  if (value !== BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT) {
+    throw new Error("existingExposureRiskAcknowledgement is invalid.");
+  }
+  return BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT;
 }
 
 function object(value: unknown) {

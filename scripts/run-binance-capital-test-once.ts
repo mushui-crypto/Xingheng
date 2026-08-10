@@ -27,7 +27,6 @@ export const CAPITAL_TEST_RECEIPT_FILE_NAME =
 export const CAPITAL_TEST_RECEIPT_PATH =
   `/app/data/binance-users/${CAPITAL_TEST_RECEIPT_FILE_NAME}`;
 const CAPITAL_TEST_MAX_RESIDUAL_XAUT = "0";
-const CAPITAL_TEST_MAX_LEG_START_SKEW_MS = 500;
 const CAPITAL_TEST_INTENT_TTL_MS = 60_000;
 const CAPITAL_TEST_API_HEALTH_URL = "http://api:8787/api/health";
 
@@ -201,7 +200,6 @@ function fixedIntent(executionId: string, createdAt: number): FundingArbitrageEx
     expiresAt: createdAt + CAPITAL_TEST_INTENT_TTL_MS,
     constraints: {
       maxResidualBaseQuantity: CAPITAL_TEST_MAX_RESIDUAL_XAUT,
-      maxLegStartSkewMs: CAPITAL_TEST_MAX_LEG_START_SKEW_MS,
     },
     legs: [
       {
@@ -238,8 +236,7 @@ function assertFixedIntent(intent: FundingArbitrageExecutionIntent) {
     || perpetual.instrumentId !== BINANCE_PERPETUAL_INSTRUMENT_ID
     || perpetual.marketType !== "perpetual"
     || perpetual.targetDeltaBaseQuantity !== CAPITAL_TEST_QUANTITY_XAUT
-    || intent.constraints.maxResidualBaseQuantity !== CAPITAL_TEST_MAX_RESIDUAL_XAUT
-    || intent.constraints.maxLegStartSkewMs !== CAPITAL_TEST_MAX_LEG_START_SKEW_MS) {
+    || intent.constraints.maxResidualBaseQuantity !== CAPITAL_TEST_MAX_RESIDUAL_XAUT) {
     throw new Error("Capital test intent does not match the fixed approved scope.");
   }
 }

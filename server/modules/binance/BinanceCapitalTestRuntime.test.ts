@@ -180,16 +180,55 @@ test("reconciliation-confirmed partial fill produces RESIDUAL and exits both con
   assert.equal(service.perpetualExposure, 0);
 });
 
-test("confirmed residual at or below tolerance remains RESIDUAL without forced exit", async () => {
+test("confirmed residual at or below tolerance is HEDGED", async () => {
   const service = new RuntimeBinanceService(["Filled", "Cancelled"]);
-  service.filledQuantities = [0.01, 0.0095];
-  const result = await runtimeFor(service).execute(context, intentFixture());
+  service.filledQuantities = [0.002, 0.00199];
+  service.snapshotOverride = {
+    spot: { ...snapshotFixture().spot, bid: 4_339, ask: 4_340 },
+    perpetual: { ...snapshotFixture().perpetual, bid: 4_338, ask: 4_339, mark: 4_338 },
+  };
+  const baseIntent = intentFixture();
+  const intent = {
+    ...baseIntent,
+    constraints: { ...baseIntent.constraints, maxResidualBaseQuantity: "0.00001" },
+    legs: baseIntent.legs.map((leg) => ({ ...leg, targetDeltaBaseQuantity: "0.002" })),
+  } as unknown as SpotPerpetualFundingArbitrageExecutionIntent;
+  const result = await runtimeFor(service).execute(context, intent);
 
+  assert.equal(result.executionState?.status, "HEDGED");
+  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.00001");
+  assert.equal(result.residualExit?.status, "EXITED");
+  assert.equal(service.exitInputs.length, 1);
+});
+
+test("more than 5000ms after the first confirmed fill blocks second mutation and exits residual", async () => {
+  let current = now + 1;
+  const service = new RuntimeBinanceService(["Filled", "Filled"]);
+  service.beforeMutation = () => {
+    if (service.placeInputs.length === 1) current += 6_000;
+  };
+
+  const result = await runtimeFor(service, () => current).execute(context, intentFixture());
+
+  assert.equal(service.placeInputs.length, 1);
   assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.0005");
-  assert.equal(result.residualExit?.status, "NOT_REQUIRED");
-  assert.match(result.residualExit?.reason ?? "", /within the approved maximum tolerance/u);
-  assert.equal(service.exitInputs.length, 0);
+  assert.equal(result.residualExit?.status, "EXITED");
+  assert.equal(service.exitInputs.length, 1);
+});
+
+test("a 501-4999ms delay after the first confirmed fill still allows the second mutation", async () => {
+  let clockCalls = 0;
+  const service = new RuntimeBinanceService(["Filled", "Filled"]);
+  const clock = () => {
+    clockCalls += 1;
+    return now + (clockCalls >= 5 ? 1_000 : 1);
+  };
+
+  const result = await runtimeFor(service, clock).execute(context, intentFixture());
+
+  assert.equal(service.placeInputs.length, 2);
+  assert.equal(result.executionState?.status, "HEDGED");
+  assert.equal(result.residualExit?.status, "EXITED");
 });
 
 test("intent expiry during the second leg safety window blocks provider mutation but permits residual exit", async () => {
@@ -299,7 +338,7 @@ class RuntimeBinanceService implements RuntimeService {
   perpetualExecutionPriceAfterFirstLeg: number | null = null;
   marketCalls = 0;
   private readonly statuses: BinanceProviderOrder["status"][];
-  private readonly beforeMutation?: () => void;
+  beforeMutation?: () => void;
   private readonly resolveUnknown: boolean;
   private orders: BinanceStoredOrder[] = [];
 
@@ -343,7 +382,7 @@ class RuntimeBinanceService implements RuntimeService {
     };
   }
 
-  async placeOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
+  async placeExecutionOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
     this.beforeMutation?.();
     await beforeProviderMutation?.();
     const prepared = input as Record<string, unknown>;
@@ -439,7 +478,7 @@ function intentFixture(): SpotPerpetualFundingArbitrageExecutionIntent {
     objective: "ESTABLISH_HEDGE",
     createdAt: now,
     expiresAt: now + 60_000,
-    constraints: { maxResidualBaseQuantity: "0.001", maxLegStartSkewMs: 500 },
+    constraints: { maxResidualBaseQuantity: "0.001" },
     legs: [
       {
         legId: "leg-spot-long",

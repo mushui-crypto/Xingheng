@@ -89,6 +89,11 @@ test("rejects non-zero perpetual exposure", () => {
     snapshotFixture({ existingPerpetualQuantityXaut: 0.001, perpetualPositionSide: "short" }),
     "EXISTING_EXPOSURE",
   );
+  assertFail(
+    intentFixture(),
+    snapshotFixture({ existingPerpetualQuantityXaut: -0.001, perpetualPositionSide: "short" }),
+    "EXISTING_EXPOSURE",
+  );
 });
 
 test("requires one-way position mode, 1x leverage, and confirmed margin mode", () => {
@@ -220,7 +225,7 @@ function intentFixture(
     objective: "ESTABLISH_HEDGE",
     createdAt: now - 1_000,
     expiresAt: now + 60_000,
-    constraints: { maxResidualBaseQuantity: "0.001", maxLegStartSkewMs: 500 },
+    constraints: { maxResidualBaseQuantity: "0.001" },
     legs: [
       {
         legId: "leg-spot-long",

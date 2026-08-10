@@ -14,10 +14,11 @@ import {
 } from "./BinanceInstrumentCatalog";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
+import type { BinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 
 export type BoundBinanceExecutionService = Pick<
   BinancePersonalTradingService,
-  "market" | "placeOrder" | "cancelOrder" | "ordersState" | "reconciliation"
+  "market" | "placeExecutionOrder" | "cancelOrder" | "ordersState" | "reconciliation"
 >;
 
 type BinancePreparedExecutionPrice = Readonly<{
@@ -33,6 +34,7 @@ export class BinanceExecutionCapability implements FundingArbitrageExecutionCapa
     private readonly assertSubmitAllowed: (
       prepared: BinancePreparedExecutionPrice,
     ) => void | Promise<void> = () => undefined,
+    private readonly executionPriceMode: BinanceExecutionPriceMode = "IOC_LIMIT",
   ) {
     if (!Number.isFinite(config.maxSlippageBps) || config.maxSlippageBps < 0) {
       throw new Error("Binance max slippage must be a non-negative number.");
@@ -43,7 +45,10 @@ export class BinanceExecutionCapability implements FundingArbitrageExecutionCapa
     request: FundingArbitrageSubmitLegRequest,
   ): Promise<FundingArbitrageExecutionAttemptIdentity> {
     const prepared = await this.prepareLeg(request);
-    await this.service.placeOrder(prepared, () => this.assertSubmitAllowed(prepared));
+    await this.service.placeExecutionOrder(prepared, (riskValuationPrice = prepared.limitPrice) => this.assertSubmitAllowed({
+      ...prepared,
+      limitPrice: riskValuationPrice,
+    }));
     return { executionAttemptId: request.executionAttemptId };
   }
 
@@ -118,6 +123,7 @@ export class BinanceExecutionCapability implements FundingArbitrageExecutionCapa
       side,
       quantityXaut,
       limitPrice,
+      executionPriceMode: this.executionPriceMode,
       reduceOnly: false,
     };
   }

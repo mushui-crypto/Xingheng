@@ -10,6 +10,7 @@ import {
   Wifi,
 } from "lucide-react";
 import {
+  BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT,
   checkBinanceConnection,
   enterBinanceStrategy,
   exitBinanceStrategy,
@@ -24,6 +25,7 @@ import {
   type BinanceOrdersState,
   type BinanceStatus,
   type BinanceStrategyStatus,
+  type BinanceUserExecutionMode,
 } from "../../../api/binancePersonalTrading";
 import { Button } from "../../../components/ui/Button";
 import { Input } from "../../../components/ui/Input";
@@ -45,6 +47,9 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [action, setAction] = useState<Action>(null);
   const [budgetUsd, setBudgetUsd] = useState("");
+  const [executionMode, setExecutionMode] =
+    useState<BinanceUserExecutionMode>("EXECUTION_PRIORITY");
+  const [existingExposureRiskAcknowledged, setExistingExposureRiskAcknowledged] = useState(false);
 
   const load = useCallback(async (initial = false, signal?: AbortSignal) => {
     initial ? setLoading(true) : setRefreshing(true);
@@ -126,6 +131,10 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
         const parsedBudget = budgetUsd.trim() ? Number(budgetUsd) : undefined;
         await enterBinanceStrategy({
           idempotencyKey: createIdempotencyKey("strategy-enter"),
+          executionMode,
+          ...(existingExposureRiskAcknowledged ? {
+            existingExposureRiskAcknowledgement: BINANCE_EXISTING_EXPOSURE_RISK_ACKNOWLEDGEMENT,
+          } : {}),
           ...(parsedBudget && parsedBudget > 0 ? { budgetUsd: parsedBudget } : {}),
         });
         setNotice("建仓请求已完成，请核对订单与持仓。");
@@ -135,9 +144,27 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
       }
       setAction(null);
       setBudgetUsd("");
+      setExecutionMode("EXECUTION_PRIORITY");
+      setExistingExposureRiskAcknowledged(false);
       await load();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : `${action === "enter" ? "建仓" : "退出"}失败。`);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const openEntryModal = async () => {
+    setBusyAction("entry-modal");
+    setError("");
+    setExistingExposureRiskAcknowledged(false);
+    try {
+      const refreshedStrategy = await fetchBinanceStrategy();
+      setStrategy(refreshedStrategy);
+      setAccount(refreshedStrategy.snapshot);
+      setAction("enter");
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "无法刷新 Binance 建仓风险快照。");
     } finally {
       setBusyAction(null);
     }
@@ -181,7 +208,7 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
           <StrategySection
             canEnter={canEnterBinancePosition(status)}
             canExit={canExit}
-            onEnter={() => setAction("enter")}
+            onEnter={() => void openEntryModal()}
             onExit={() => setAction("exit")}
             strategy={strategy}
           />
@@ -197,34 +224,112 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
       <Modal
         closeDisabled={busyAction === action}
         description={action === "enter" ? "服务端会再次执行风险检查；当前开关关闭时无法提交。" : "退出属于减险操作，不会因建仓开关关闭而在前端禁用。"}
-        onClose={() => { if (!busyAction) { setAction(null); setBudgetUsd(""); } }}
+        onClose={() => { if (!busyAction) { setAction(null); setBudgetUsd(""); setExecutionMode("EXECUTION_PRIORITY"); setExistingExposureRiskAcknowledged(false); } }}
         open={Boolean(action)}
         title={action === "enter" ? "确认建立对冲仓位" : "确认退出对冲仓位"}
       >
         <div className="space-y-4">
           {action === "enter" ? (
-            <Input
-              inputMode="decimal"
-              label="预算（USD，可选）"
-              max={status?.risk.maxPositionUsd}
-              min="0"
-              onChange={(event) => setBudgetUsd(event.target.value)}
-              placeholder={`服务端默认，上限 ${formatMoney(status?.risk.maxPositionUsd)}`}
-              type="number"
-              value={budgetUsd}
-            />
+            <>
+              <Input
+                inputMode="decimal"
+                label="预算（USD，可选）"
+                max={status?.risk.maxPositionUsd}
+                min="0"
+                onChange={(event) => setBudgetUsd(event.target.value)}
+                placeholder={`服务端默认，上限 ${formatMoney(status?.risk.maxPositionUsd)}`}
+                type="number"
+                value={budgetUsd}
+              />
+              <fieldset className="space-y-2">
+                <legend className="text-xs font-medium text-[#c5ccd4]">执行方式</legend>
+                <ExecutionModeOption
+                  checked={executionMode === "PRICE_PRIORITY"}
+                  description="内部使用限价 IOC，优先控制成交价格，允许未成交。"
+                  label="价格优先"
+                  onChange={() => setExecutionMode("PRICE_PRIORITY")}
+                />
+                <ExecutionModeOption
+                  checked={executionMode === "EXECUTION_PRIORITY"}
+                  description="内部使用市价，优先执行速度，接受成交价格波动。"
+                  label="执行优先"
+                  onChange={() => setExecutionMode("EXECUTION_PRIORITY")}
+                />
+              </fieldset>
+              <ExistingExposureRiskNotice
+                acknowledged={existingExposureRiskAcknowledged}
+                onAcknowledgedChange={setExistingExposureRiskAcknowledged}
+                strategy={strategy}
+              />
+            </>
           ) : (
             <p className="text-sm leading-6 text-[#c5ccd4]">系统将先退出永续空仓，再处理可交易的现货数量。完成后仍需执行对账。</p>
           )}
           <div className="flex flex-col-reverse gap-2 border-t border-[#25282f] pt-4 sm:flex-row sm:justify-end">
-            <Button disabled={Boolean(busyAction)} onClick={() => { setAction(null); setBudgetUsd(""); }} type="button" variant="ghost">取消</Button>
-            <Button disabled={Boolean(busyAction) || (action === "enter" && !canEnterBinancePosition(status))} onClick={() => void confirmAction()} type="button" variant={action === "exit" ? "danger" : "primary"}>
+            <Button disabled={Boolean(busyAction)} onClick={() => { setAction(null); setBudgetUsd(""); setExecutionMode("EXECUTION_PRIORITY"); setExistingExposureRiskAcknowledged(false); }} type="button" variant="ghost">取消</Button>
+            <Button disabled={Boolean(busyAction) || (action === "enter" && (!canEnterBinancePosition(status) || strategy?.entryExposure.rulesValid === false || (strategy?.entryExposure.requiresAcknowledgement && !existingExposureRiskAcknowledged)))} onClick={() => void confirmAction()} type="button" variant={action === "exit" ? "danger" : "primary"}>
               {busyAction === action ? "提交中" : action === "enter" ? "确认建仓" : "确认退出"}
             </Button>
           </div>
         </div>
       </Modal>
     </section>
+  );
+}
+
+function ExistingExposureRiskNotice({ acknowledged, onAcknowledgedChange, strategy }: {
+  acknowledged: boolean;
+  onAcknowledgedChange: (checked: boolean) => void;
+  strategy: BinanceStrategyStatus | null;
+}) {
+  const exposure = strategy?.entryExposure;
+  if (!exposure) return null;
+  const direction = { long: "LONG", short: "SHORT", flat: "FLAT" }[exposure.perpetual.direction];
+  return (
+    <div className="space-y-3 border border-amber-400/30 bg-amber-400/[0.05] p-3 text-xs leading-5 text-amber-100">
+      <p className="font-semibold">当前账户总 XAUT exposure</p>
+      <dl className="grid gap-1 font-mono text-[11px] sm:grid-cols-2">
+        <div>Spot total: {formatQuantity(exposure.spot.totalQuantityXaut)}</div>
+        <div>Spot notional: {formatMoney(exposure.spot.notionalUsd)}</div>
+        <div>Spot free: {formatQuantity(exposure.spot.freeQuantityXaut)}</div>
+        <div>Spot locked: {formatQuantity(exposure.spot.lockedQuantityXaut)}</div>
+        <div>Perp: {formatQuantity(exposure.perpetual.quantityXaut)}</div>
+        <div>Perp direction: {direction}</div>
+      </dl>
+      <p>本次将新增 Spot LONG + Perp SHORT，并承担额外净敞口风险。</p>
+      <p className="font-medium">新增仓位不与已有资产隔离。本次发生 confirmed fill 后失败恢复可能卖出/平掉账户全部可交易 XAUT。</p>
+      {!exposure.rulesValid ? (
+        <p className="border-t border-red-400/20 pt-3 font-medium text-red-200">交易规则无效，服务端已禁止建仓。请刷新后重试。</p>
+      ) : null}
+      {exposure.requiresAcknowledgement ? (
+        <label className="flex cursor-pointer items-start gap-2 border-t border-amber-400/20 pt-3">
+          <input
+            checked={acknowledged}
+            className="mt-1"
+            onChange={(event) => onAcknowledgedChange(event.target.checked)}
+            type="checkbox"
+          />
+          <span>我已理解并允许本次建仓及失败时的账户总 XAUT 恢复操作。</span>
+        </label>
+      ) : null}
+    </div>
+  );
+}
+
+function ExecutionModeOption({ checked, description, label, onChange }: {
+  checked: boolean;
+  description: string;
+  label: string;
+  onChange: () => void;
+}) {
+  return (
+    <label className={`block cursor-pointer border p-3 ${checked ? "border-emerald-400/50 bg-emerald-400/[0.06]" : "border-[#30343b]"}`}>
+      <span className="flex items-center gap-2 text-sm font-medium text-white">
+        <input checked={checked} name="binance-execution-price-mode" onChange={onChange} type="radio" />
+        {label}
+      </span>
+      <span className="mt-1 block pl-6 text-xs leading-5 text-[#8f99a5]">{description}</span>
+    </label>
   );
 }
 
@@ -309,7 +414,7 @@ function OrdersSection({ busy, onReconcile, orders, reconciliationEnabled }: { b
         <div className="overflow-x-auto">
           <table className="w-full min-w-[880px] border-collapse text-left text-xs">
             <thead className="bg-black text-[#8f99a5]"><tr>{["时间", "市场", "模式", "状态", "请求数量", "成交数量", "均价", "错误"].map((item) => <th className="px-4 py-3 font-medium" key={item}>{item}</th>)}</tr></thead>
-            <tbody className="divide-y divide-[#25282f] text-[#d7dce2]">{orders.orders.map((item) => <tr key={item.idempotencyKey}><td className="px-4 py-3">{formatDate(item.createdAt)}</td><td className="px-4 py-3">{item.category === "spot" ? "Spot" : "USD-M"}</td><td className="px-4 py-3">{item.executionMode === "test_gtc" ? "测试订单" : "IOC"}</td><td className="px-4 py-3 font-medium text-white">{item.order?.status ?? item.status}</td><Mono value={formatQuantity(item.order?.requestedQuantityXaut)} /><Mono value={formatQuantity(item.order?.filledQuantityXaut)} /><Mono value={formatMoney(item.order?.averagePrice)} /><td className="max-w-[280px] break-words px-4 py-3 text-red-200">{item.error ?? "-"}</td></tr>)}</tbody>
+            <tbody className="divide-y divide-[#25282f] text-[#d7dce2]">{orders.orders.map((item) => <tr key={item.idempotencyKey}><td className="px-4 py-3">{formatDate(item.createdAt)}</td><td className="px-4 py-3">{item.category === "spot" ? "Spot" : "USD-M"}</td><td className="px-4 py-3">{item.executionMode === "test_gtc" ? "测试订单" : "真实订单"}</td><td className="px-4 py-3 font-medium text-white">{item.order?.status ?? item.status}</td><Mono value={formatQuantity(item.order?.requestedQuantityXaut)} /><Mono value={formatQuantity(item.order?.filledQuantityXaut)} /><Mono value={formatMoney(item.order?.averagePrice)} /><td className="max-w-[280px] break-words px-4 py-3 text-red-200">{item.error ?? "-"}</td></tr>)}</tbody>
           </table>
         </div>
       )}

@@ -19,7 +19,6 @@ const parameters: BinanceSpotPerpetualCapitalTestIntentBuildParameters = {
   now,
   quantities: { spotBaseQuantity: "0.0100", perpetualBaseQuantity: "0.01" },
   maxResidualBaseQuantity: "0.001000",
-  maxLegStartSkewMs: 500,
   identityFactory: (identity) => `capital-test-${identity}`,
 };
 
@@ -35,7 +34,6 @@ test("builds the Binance XAUT/USDT spot-long and perpetual-short execution inten
   assert.equal(intent.expiresAt, decision.expiresAt);
   assert.deepEqual(intent.constraints, {
     maxResidualBaseQuantity: "0.001",
-    maxLegStartSkewMs: 500,
   });
   assert.deepEqual(intent.legs, [
     {

@@ -21,6 +21,7 @@ type PersonalTradingService = Pick<
   | "enter"
   | "exit"
   | "placeOrder"
+  | "placeExecutionOrder"
   | "placeTestOrder"
   | "cancelOrder"
   | "ordersState"

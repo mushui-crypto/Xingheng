@@ -40,7 +40,6 @@ test("uses only the fixed approved user and capital test parameters", async () =
   assert.equal(fixture.intent?.legs[0].targetDeltaBaseQuantity, CAPITAL_TEST_QUANTITY_XAUT);
   assert.equal(fixture.intent?.legs[1].targetDeltaBaseQuantity, CAPITAL_TEST_QUANTITY_XAUT);
   assert.equal(fixture.intent?.constraints.maxResidualBaseQuantity, "0");
-  assert.equal(fixture.intent?.constraints.maxLegStartSkewMs, 500);
   assert.equal(fixture.runtimeCalls, 1);
   assert.equal(fixture.registryUserIds.every((userId) => userId === CAPITAL_TEST_USER_ID), true);
 });
