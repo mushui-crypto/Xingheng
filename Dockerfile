@@ -16,6 +16,7 @@ ENV NODE_ENV=production \
     GIT_COMMIT=$GIT_COMMIT \
     TRADING_DB_PATH=/app/data/trading.sqlite \
     BINANCE_TRADING_DB_PATH=/app/data/binance-personal.sqlite \
+    BINANCE_USER_ORDER_DB_DIR=/app/data/binance-users \
     STRATEGY_FORWARD_REPORT_PATH=/app/strategy-data/route-b-forward.json \
     STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json \
     MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
@@ -33,7 +34,7 @@ USER node
 EXPOSE 8787
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8787/api/health').then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))"]
-CMD ["node", "dist-server/index.js"]
+CMD ["sh", "-c", "umask 077; exec node dist-server/index.js"]
 
 FROM build AS strategy-tools
 ARG GIT_COMMIT=development

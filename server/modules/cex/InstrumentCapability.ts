@@ -6,11 +6,19 @@ import type {
   VenueInstrumentCategory,
   InstrumentTradingRules,
 } from "./Instrument";
+import { canonicalInstrumentId } from "./Instrument";
 
 export class InstrumentCapability {
   resolveVenueInstrument(instrument: CanonicalInstrument, venue: string): VenueInstrument {
     if (venue !== "binance" && venue !== "okx" && venue !== "bybit" && venue !== "bitget") {
       throw new Error(`Unsupported venue: ${venue}.`);
+    }
+    if (instrument.instrumentId !== canonicalInstrumentId(
+      instrument.baseAsset,
+      instrument.quoteAsset,
+      instrument.contractType,
+    )) {
+      throw new Error("Canonical instrument identity does not match its fields.");
     }
     return Object.freeze({
       venue,

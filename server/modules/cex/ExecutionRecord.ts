@@ -8,7 +8,7 @@ export type ExecutionRecord = Readonly<{
   userId: string;
   venue: ExecutionIntent["venue"];
   accountId: string;
-  symbol: string;
+  instrumentId: string;
   status: ExecutionStatus;
   remoteOrderId?: string;
   createdAt: number;
@@ -24,7 +24,7 @@ export function createExecutionRecord(input: unknown): ExecutionRecord {
     "userId",
     "venue",
     "accountId",
-    "symbol",
+    "instrumentId",
     "status",
     "remoteOrderId",
     "createdAt",
@@ -41,7 +41,7 @@ export function createExecutionRecord(input: unknown): ExecutionRecord {
     userId: identifier(value.userId, "userId"),
     venue: venue(value.venue),
     accountId: identifier(value.accountId, "accountId"),
-    symbol: symbol(value.symbol),
+    instrumentId: instrumentId(value.instrumentId),
     status: status(value.status),
     ...(value.remoteOrderId === undefined ? {} : { remoteOrderId: identifier(value.remoteOrderId, "remoteOrderId") }),
     createdAt,
@@ -59,7 +59,7 @@ export function createExecutionRecordFromIntent(
     userId: intent.userId,
     venue: intent.venue,
     accountId: intent.accountId,
-    symbol: intent.symbol,
+    instrumentId: intent.instrumentId,
     status: "CREATED",
     createdAt: intent.createdAt,
     updatedAt: intent.createdAt,
@@ -104,7 +104,7 @@ function assertSameIdentity(record: ExecutionRecord, state: ExecutionState) {
     || record.userId !== state.userId
     || record.venue !== state.venue
     || record.accountId !== state.accountId
-    || record.symbol !== state.symbol
+    || record.instrumentId !== state.instrumentId
   ) {
     throw new Error("execution record and state identity do not match.");
   }
@@ -141,9 +141,9 @@ function venue(value: unknown): ExecutionIntent["venue"] {
   return value;
 }
 
-function symbol(value: unknown) {
-  if (typeof value !== "string" || !/^[A-Z0-9]{3,30}$/u.test(value)) {
-    throw new Error("symbol must be an uppercase venue symbol.");
+function instrumentId(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{2,12}-[A-Z0-9]{2,12}-(?:SPOT|PERP)$/u.test(value)) {
+    throw new Error("instrumentId must be a canonical instrument id.");
   }
   return value;
 }

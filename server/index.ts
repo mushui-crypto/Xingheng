@@ -7,6 +7,10 @@ import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/a
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
+import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
+import { FundingArbitrageManualExecutionService } from "./modules/api/FundingArbitrageManualExecutionService";
+import { ManualRequestFundingArbitrageExecutionIntentSource } from "./modules/api/ManualRequestFundingArbitrageExecutionIntentSource";
+import { CredentialVenueExecutionAccountResolver } from "./modules/api/CredentialVenueExecutionAccountResolver";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
 import { registerExchangeCredentialRoutes } from "./modules/api/exchangeCredentialRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
@@ -31,6 +35,10 @@ import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboar
 import { createDefaultFundingOpportunitySource } from "./modules/cex/funding-arbitrage/createDefaultFundingOpportunitySource";
 import { FundingOpportunityQueryService } from "./modules/cex/funding-arbitrage/FundingOpportunityQueryService";
 import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
+import { BinanceIntentExecutionRuntime } from "./modules/binance/BinanceIntentExecutionRuntime";
+import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
+import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
+import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
@@ -135,6 +143,19 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
+const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
+const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
+const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
+  binancePersonalTrading,
+  { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
+  executionRecordStore,
+);
+const fundingManualExecution = new FundingArbitrageManualExecutionService(
+  new ManualRequestFundingArbitrageExecutionIntentSource(),
+  new CredentialVenueExecutionAccountResolver(userExchangeCredentials),
+  binanceExecutionRuntime,
+  fundingLegExecutionLinks,
+);
 const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {
   deleteCredential: (userId, venue) => venue === "binance"
     ? binancePersonalTrading.deleteCredential(userId)
@@ -142,6 +163,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
+registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
 registerExchangeCredentialRoutes(app, userExchangeCredentialService);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
@@ -335,6 +357,8 @@ async function shutdown(signal: string) {
       });
     });
     userExchangeCredentials.close();
+    fundingLegExecutionLinks.close();
+    executionRecordStore.close();
     tradingStore.close();
     clearTimeout(forceExit);
     process.exit(0);

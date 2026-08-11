@@ -1,3 +1,5 @@
+import { createAssetQuantity, type AssetQuantity } from "./AssetQuantity";
+
 export type ExecutionVenue = "binance" | "okx" | "bybit" | "bitget";
 
 export type ExecutionIntent = Readonly<{
@@ -5,9 +7,9 @@ export type ExecutionIntent = Readonly<{
   userId: string;
   venue: ExecutionVenue;
   accountId: string;
-  symbol: string;
+  instrumentId: string;
   side: "buy" | "sell";
-  quantity: string;
+  quantity: AssetQuantity;
   orderConstraints: Readonly<{
     reduceOnly: boolean;
   }>;
@@ -23,7 +25,7 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
     "userId",
     "venue",
     "accountId",
-    "symbol",
+    "instrumentId",
     "side",
     "quantity",
     "orderConstraints",
@@ -56,9 +58,9 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
     userId: identifier(value.userId, "userId"),
     venue: value.venue,
     accountId: identifier(value.accountId, "accountId"),
-    symbol: symbol(value.symbol),
+    instrumentId: instrumentId(value.instrumentId),
     side: value.side,
-    quantity: positiveDecimal(value.quantity),
+    quantity: createAssetQuantity(value.quantity),
     orderConstraints: Object.freeze({ reduceOnly: constraints.reduceOnly }),
     executionMode: value.executionMode,
     createdAt,
@@ -86,22 +88,11 @@ function identifier(value: unknown, name: string) {
   return value.trim();
 }
 
-function symbol(value: unknown) {
-  if (typeof value !== "string" || !/^[A-Z0-9]{3,30}$/u.test(value)) {
-    throw new Error("symbol must be an uppercase venue symbol.");
+function instrumentId(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{2,12}-[A-Z0-9]{2,12}-(?:SPOT|PERP)$/u.test(value)) {
+    throw new Error("instrumentId must be a canonical instrument id.");
   }
   return value;
-}
-
-function positiveDecimal(value: unknown) {
-  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
-    throw new Error("quantity must be a positive decimal string.");
-  }
-  const [integer, fraction = ""] = value.split(".");
-  const normalizedFraction = fraction.replace(/0+$/u, "");
-  const normalized = normalizedFraction ? `${integer}.${normalizedFraction}` : integer;
-  if (normalized === "0") throw new Error("quantity must be greater than zero.");
-  return normalized;
 }
 
 function timestamp(value: unknown, name: string) {

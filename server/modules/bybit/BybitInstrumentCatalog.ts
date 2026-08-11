@@ -1,5 +1,6 @@
 import type { InstrumentCatalogPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalInstrument } from "../cex/CexCanonicalModels";
+import { canonicalInstrumentId } from "../cex/Instrument";
 import type { BybitLinearPerpetualInstrument } from "./BybitReadTypes";
 
 type BybitInstrumentSource = () => Promise<{
@@ -13,7 +14,6 @@ export class BybitInstrumentCatalog implements InstrumentCatalogPort {
   constructor(private readonly source: BybitInstrumentSource) {}
 
   async getInstrument(instrumentId: string) {
-    if (!instrumentId.startsWith("bybit:perpetual:linear:")) return null;
     return (await this.listInstruments()).find((instrument) => instrument.instrumentId === instrumentId) ?? null;
   }
 
@@ -31,7 +31,7 @@ export function toCanonicalBybitInstrument(
     throw new Error(`Unsupported Bybit contract type: ${raw.contractType}.`);
   }
   return {
-    instrumentId: `bybit:perpetual:linear:${raw.baseCoin}:${raw.quoteCoin}:${raw.settleCoin}`,
+    instrumentId: canonicalInstrumentId(raw.baseCoin, raw.quoteCoin, "perpetual"),
     venue: "bybit",
     marketType: "perpetual",
     contractType: "linear_perpetual",

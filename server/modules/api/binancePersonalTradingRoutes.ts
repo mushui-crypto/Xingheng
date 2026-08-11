@@ -1,6 +1,5 @@
 import type express from "express";
 import type { BinancePersonalTradingServiceRegistry } from "../binance/BinancePersonalTradingServiceRegistry";
-import { BinanceRiskError } from "../binance/BinanceRiskGuard";
 import { BinanceProviderError } from "../binance/BinanceClient";
 import { CredentialKeyProviderError } from "../credentials/CredentialKeyProvider";
 import { UserExchangeCredentialStoreError } from "../credentials/UserExchangeCredentialStore";
@@ -27,14 +26,7 @@ export function registerBinancePersonalTradingRoutes(
   app.post("/api/binance/connection-check", route((request) => registry.checkConnection(userId(request))));
   app.get("/api/binance/account", route((request) => run(request, (service) => service.account())));
   app.get("/api/binance/market", route((request) => run(request, (service) => service.market())));
-  app.get("/api/binance/strategy", route((request) => run(request, (service) => service.strategyStatus())));
-  app.post("/api/binance/strategy/enter", route((request) => run(request, (service) => service.enter(request.body))));
-  app.post("/api/binance/strategy/exit", route((request) => run(request, (service) => service.exit(request.body))));
-  app.post("/api/binance/orders", route((request) => run(request, (service) => service.placeOrder(request.body))));
-  app.post("/api/binance/test-orders", route((request) => run(request, (service) => service.placeTestOrder(request.body))));
-  app.post("/api/binance/orders/cancel", route((request) => run(request, (service) => service.cancelOrder(request.body))));
   app.get("/api/binance/orders", route((request) => run(request, (service) => service.ordersState())));
-  app.post("/api/binance/reconciliation", route((request) => run(request, (service) => service.reconciliation())));
 }
 
 function userId(request: express.Request) {
@@ -43,7 +35,6 @@ function userId(request: express.Request) {
 }
 
 function errorResponse(error: unknown) {
-  if (error instanceof BinanceRiskError) return { status: 409, category: error.category, message: error.message };
   if (error instanceof BinanceProviderError) return { status: 502, category: error.category, message: error.message };
   if (error instanceof CredentialKeyProviderError) return { status: 503, category: error.category, message: error.message };
   if (error instanceof UserExchangeCredentialStoreError) {

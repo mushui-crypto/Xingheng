@@ -19,6 +19,7 @@ export type FundingArbitrageLegExecutionStatus =
   | "ACTIVE"
   | "PENDING_CANCEL"
   | "TERMINAL"
+  | "FAILED"
   | "PENDING_RECONCILIATION";
 
 export type FundingArbitrageRemoteObservation =
@@ -195,6 +196,7 @@ function deriveAggregateStatus(
     return "HEDGED";
   }
   if (exposure.residualQuantity !== "0") return "RESIDUAL";
+  if (legs.some((leg) => leg.status === "FAILED")) return "FAILED";
   if (legs.every((leg) => leg.status === "NOT_STARTED")) return "CREATED";
   return "EXECUTING";
 }

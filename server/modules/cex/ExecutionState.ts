@@ -13,7 +13,7 @@ export type ExecutionState = Readonly<{
   userId: string;
   venue: ExecutionIntent["venue"];
   accountId: string;
-  symbol: string;
+  instrumentId: string;
   status: ExecutionStatus;
   createdAt: number;
   updatedAt: number;
@@ -22,6 +22,7 @@ export type ExecutionState = Readonly<{
 export type ExecutionStateEvent =
   | Readonly<{ type: "SUBMISSION_STARTED"; occurredAt: number }>
   | Readonly<{ type: "SUBMISSION_ACCEPTED"; occurredAt: number }>
+  | Readonly<{ type: "REMOTE_PENDING"; occurredAt: number }>
   | Readonly<{ type: "REMOTE_CONFIRMED"; occurredAt: number }>
   | Readonly<{ type: "REMOTE_FAILED"; occurredAt: number }>
   | Readonly<{ type: "REMOTE_UNKNOWN"; occurredAt: number }>;
@@ -32,7 +33,7 @@ export function createExecutionState(intent: ExecutionIntent): ExecutionState {
     userId: intent.userId,
     venue: intent.venue,
     accountId: intent.accountId,
-    symbol: intent.symbol,
+    instrumentId: intent.instrumentId,
     status: "CREATED",
     createdAt: intent.createdAt,
     updatedAt: intent.createdAt,
@@ -62,7 +63,8 @@ function nextStatus(
 ): ExecutionStatus {
   if (event === "SUBMISSION_STARTED" && status === "CREATED") return "SUBMITTED";
   if (event === "SUBMISSION_ACCEPTED" && status === "SUBMITTED") return "PENDING_CONFIRMATION";
-  if (event === "REMOTE_UNKNOWN" && (status === "SUBMITTED" || status === "PENDING_CONFIRMATION")) {
+  if (event === "REMOTE_PENDING" && isAwaitingRemoteFact(status)) return "PENDING_CONFIRMATION";
+  if (event === "REMOTE_UNKNOWN" && isAwaitingRemoteFact(status)) {
     return "UNKNOWN";
   }
   if (event === "REMOTE_CONFIRMED" && isAwaitingRemoteFact(status)) return "CONFIRMED";
@@ -71,7 +73,7 @@ function nextStatus(
 }
 
 function isAwaitingRemoteFact(status: ExecutionStatus) {
-  return status === "SUBMITTED" || status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
+  return status === "CREATED" || status === "SUBMITTED" || status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
 }
 
 function assertTimestamp(value: number) {

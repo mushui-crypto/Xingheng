@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { canonicalInstrumentFromId } from "../Instrument";
 import type {
   PerpetualPerpetualFundingArbitrageExecutionIntent,
 } from "./FundingArbitrageExecutionIntent";
@@ -37,7 +38,7 @@ export function buildFundingArbitrageExecutionIntent(
         legId: randomUUID(),
         role: plan.legs[0].role,
         venue: plan.legs[0].venue,
-        instrumentId: plan.legs[0].instrumentId,
+        instrumentId: canonicalInstrumentFromId(plan.legs[0].instrumentId).instrumentId,
         marketType: plan.legs[0].marketType,
         targetDeltaBaseQuantity: normalizeNumberAsDecimal(plan.legs[0].baseQuantity),
       },
@@ -45,7 +46,7 @@ export function buildFundingArbitrageExecutionIntent(
         legId: randomUUID(),
         role: plan.legs[1].role,
         venue: plan.legs[1].venue,
-        instrumentId: plan.legs[1].instrumentId,
+        instrumentId: canonicalInstrumentFromId(plan.legs[1].instrumentId).instrumentId,
         marketType: plan.legs[1].marketType,
         targetDeltaBaseQuantity: normalizeNumberAsDecimal(plan.legs[1].baseQuantity),
       },

@@ -11,15 +11,24 @@ export class BinanceRiskError extends Error {
 export class BinanceRiskGuard {
   constructor(private readonly config: BinanceTradingConfig) {}
 
-  assertOrderAllowed(request: BinanceOrderRequest, snapshot: BinancePreflightSnapshot) {
-    validateOrderShape(request);
-    if (isRiskReducing(request)) return;
+  assertMutationAllowed(riskEffect: "risk_increasing" | "risk_reducing") {
+    if (riskEffect === "risk_reducing") return;
     if (!this.config.liveTradingEnabled) {
       throw new BinanceRiskError("live_trading_disabled", "LIVE_TRADING_ENABLED is not true.");
     }
     if (this.config.killSwitchActive) {
       throw new BinanceRiskError("kill_switch_active", "Binance kill switch is active.");
     }
+  }
+
+  assertCancellationAllowed() {
+    this.assertMutationAllowed("risk_reducing");
+  }
+
+  assertOrderAllowed(request: BinanceOrderRequest, snapshot: BinancePreflightSnapshot) {
+    validateOrderShape(request);
+    this.assertMutationAllowed(isRiskReducing(request) ? "risk_reducing" : "risk_increasing");
+    if (isRiskReducing(request)) return;
     if (!permissionsSafe(snapshot)) {
       throw new BinanceRiskError("permissions_invalid", "Binance API permissions are not safe for live trading.");
     }

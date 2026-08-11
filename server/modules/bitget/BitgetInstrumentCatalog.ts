@@ -1,5 +1,6 @@
 import type { InstrumentCatalogPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalInstrument } from "../cex/CexCanonicalModels";
+import { canonicalInstrumentId } from "../cex/Instrument";
 import type { BitgetUsdtPerpetualInstrument } from "./BitgetReadTypes";
 
 type BitgetInstrumentSource = () => Promise<{
@@ -13,7 +14,6 @@ export class BitgetInstrumentCatalog implements InstrumentCatalogPort {
   constructor(private readonly source: BitgetInstrumentSource) {}
 
   async getInstrument(instrumentId: string) {
-    if (!instrumentId.startsWith("bitget:perpetual:linear:")) return null;
     return (await this.listInstruments()).find((instrument) => instrument.instrumentId === instrumentId) ?? null;
   }
 
@@ -29,7 +29,7 @@ export function toCanonicalBitgetInstrument(
 ): CanonicalInstrument {
   if (raw.type !== "perpetual") throw new Error(`Unsupported Bitget instrument type: ${raw.type}.`);
   return {
-    instrumentId: `bitget:perpetual:linear:${raw.baseCoin}:${raw.quoteCoin}:${raw.quoteCoin}`,
+    instrumentId: canonicalInstrumentId(raw.baseCoin, raw.quoteCoin, "perpetual"),
     venue: "bitget",
     marketType: "perpetual",
     contractType: "linear_perpetual",

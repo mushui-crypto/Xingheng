@@ -2,8 +2,8 @@
 set -eu
 backup_name="${1:-}"
 case "$backup_name" in
-  trading-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z.sqlite) ;;
-  *) echo "usage: $0 trading-YYYYMMDDTHHMMSSZ.sqlite" >&2; exit 2 ;;
+  stellax-[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]T[0-9][0-9][0-9][0-9][0-9][0-9]Z) ;;
+  *) echo "usage: $0 stellax-YYYYMMDDTHHMMSSZ" >&2; exit 2 ;;
 esac
 
 if [ "${RESTORE_VALIDATE_ONLY:-false}" = "true" ]; then
@@ -16,6 +16,6 @@ restart_api() {
 }
 trap restart_api EXIT HUP INT TERM
 docker compose --profile sqlite-ops run --rm --no-deps \
-  -e SQLITE_RESTORE_FILE="$backup_name" sqlite-restore
+  -e SQLITE_RESTORE_SNAPSHOT="$backup_name" sqlite-restore
 trap - EXIT HUP INT TERM
-docker compose up -d api web
+docker compose up -d --wait api web

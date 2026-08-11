@@ -48,6 +48,24 @@ test("UNKNOWN can resolve only from an authoritative remote fact", () => {
     transitionExecutionState(unknown, { type: "REMOTE_FAILED", occurredAt: now + 3 }).status,
     "FAILED",
   );
+  assert.equal(
+    transitionExecutionState(unknown, { type: "REMOTE_PENDING", occurredAt: now + 3 }).status,
+    "PENDING_CONFIRMATION",
+  );
+});
+
+test("query observations can preserve pending and unknown states", () => {
+  const pending = transitionExecutionState(
+    createExecutionState(executionIntent()),
+    { type: "REMOTE_PENDING", occurredAt: now + 1 },
+  );
+  const stillPending = transitionExecutionState(pending, { type: "REMOTE_PENDING", occurredAt: now + 2 });
+  const unknown = transitionExecutionState(stillPending, { type: "REMOTE_UNKNOWN", occurredAt: now + 3 });
+  const stillUnknown = transitionExecutionState(unknown, { type: "REMOTE_UNKNOWN", occurredAt: now + 4 });
+
+  assert.equal(stillPending.status, "PENDING_CONFIRMATION");
+  assert.equal(stillUnknown.status, "UNKNOWN");
+  assert.equal(stillUnknown.updatedAt, now + 4);
 });
 
 test("future venue values are preserved in execution state", () => {
@@ -61,9 +79,12 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,

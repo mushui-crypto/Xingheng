@@ -63,9 +63,12 @@ function confirmedLocalState() {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,
@@ -81,7 +84,7 @@ function remoteState(status: RemoteExecutionState["status"]): RemoteExecutionSta
     intentId: "intent-user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     status,
     observedAt: now + 4,
   };

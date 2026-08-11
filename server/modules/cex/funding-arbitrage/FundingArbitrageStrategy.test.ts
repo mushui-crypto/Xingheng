@@ -23,8 +23,8 @@ const parameters: FundingArbitragePlanningParameters = {
 };
 
 test("builds a perpetual/perpetual plan with canonical direction, spread, quantity, and expiry", () => {
-  const binance = instrument("binance", "binance:perpetual:linear:BTC:USDT:USDT");
-  const okx = instrument("okx", "okx:perpetual:linear:BTC:USDT:USDT", {
+  const binance = instrument("binance", "BTC-USDT-PERP");
+  const okx = instrument("okx", "BTC-USDT-PERP", {
     quantityUnit: "contract",
     contractSize: 0.01,
     quantityStep: 1,
@@ -55,8 +55,8 @@ test("builds a perpetual/perpetual plan with canonical direction, spread, quanti
 });
 
 test("rejects settlement mismatches and stale canonical snapshots", () => {
-  const binance = instrument("binance", "binance:perpetual:linear:BTC:USDT:USDT");
-  const bybitUsdc = instrument("bybit", "bybit:perpetual:linear:BTC:USDC:USDC", {
+  const binance = instrument("binance", "BTC-USDT-PERP");
+  const bybitUsdc = instrument("bybit", "BTC-USDC-PERP", {
     quoteAsset: "USDC",
     settlementAsset: "USDC",
   });
@@ -66,7 +66,7 @@ test("rejects settlement mismatches and stale canonical snapshots", () => {
     parameters,
   ), null);
 
-  const okx = instrument("okx", "okx:perpetual:linear:BTC:USDT:USDT");
+  const okx = instrument("okx", "BTC-USDT-PERP");
   const staleFunding = { ...funding(okx, 0.0003, 65_010), fetchedAt: now - 60_001 };
   assert.equal(buildFundingArbitragePlan(
     [binance, okx],
@@ -76,8 +76,8 @@ test("rejects settlement mismatches and stale canonical snapshots", () => {
 });
 
 test("rejects funding snapshots outside the configured settlement alignment window", () => {
-  const binance = instrument("binance", "binance:perpetual:linear:BTC:USDT:USDT");
-  const bitget = instrument("bitget", "bitget:perpetual:linear:BTC:USDT:USDT");
+  const binance = instrument("binance", "BTC-USDT-PERP");
+  const bitget = instrument("bitget", "BTC-USDT-PERP");
   const misaligned = {
     ...funding(bitget, 0.0003, 65_010),
     nextFundingAt: nextFundingAt + parameters.maxFundingTimeSkewMs + 1,
@@ -91,8 +91,8 @@ test("rejects funding snapshots outside the configured settlement alignment wind
 });
 
 test("keeps expected funding amount nullable when either mark price is unavailable", () => {
-  const okx = instrument("okx", "okx:perpetual:linear:BTC:USDT:USDT");
-  const bitget = instrument("bitget", "bitget:perpetual:linear:BTC:USDT:USDT");
+  const okx = instrument("okx", "BTC-USDT-PERP");
+  const bitget = instrument("bitget", "BTC-USDT-PERP");
   const plan = buildFundingArbitragePlan(
     [okx, bitget],
     [funding(okx, -0.0001, null), funding(bitget, 0.0003, null)],
@@ -107,8 +107,8 @@ test("keeps expected funding amount nullable when either mark price is unavailab
 });
 
 test("the strategy output contains no execution-bound fields", () => {
-  const binance = instrument("binance", "binance:perpetual:linear:BTC:USDT:USDT");
-  const bybit = instrument("bybit", "bybit:perpetual:linear:BTC:USDT:USDT");
+  const binance = instrument("binance", "BTC-USDT-PERP");
+  const bybit = instrument("bybit", "BTC-USDT-PERP");
   const plan = buildFundingArbitragePlan(
     [binance, bybit],
     [funding(binance, -0.0001, 65_000), funding(bybit, 0.0003, 65_010)],

@@ -17,15 +17,10 @@ type PersonalTradingService = Pick<
   | "checkConnection"
   | "account"
   | "market"
-  | "strategyStatus"
-  | "enter"
-  | "exit"
-  | "placeOrder"
   | "placeExecutionOrder"
-  | "placeTestOrder"
   | "cancelOrder"
   | "ordersState"
-  | "reconciliation"
+  | "findExecutionOrderByClientOrderId"
   | "close"
 >;
 

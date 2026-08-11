@@ -7,15 +7,15 @@ function validate(name) {
   });
 }
 
-const accepted = validate("trading-20260706T123456Z.sqlite");
+const accepted = validate("stellax-20260706T123456Z");
 if (accepted.status !== 0) throw new Error(`valid restore filename rejected: ${accepted.stderr}`);
 
 const rejected = [
-  "trading-20260706T12345Z.sqlite",
-  "trading-20260706T123456Z.sqlite.extra",
-  "trading-20260706T123456Z.sqlite;select 1",
-  "trading-20260706T123456Z.sqlite\n.shell id",
-  "../trading-20260706T123456Z.sqlite",
+  "stellax-20260706T12345Z",
+  "stellax-20260706T123456Z.extra",
+  "stellax-20260706T123456Z;select 1",
+  "stellax-20260706T123456Z\n.shell id",
+  "../stellax-20260706T123456Z",
 ];
 for (const name of rejected) {
   if (validate(name).status === 0) throw new Error(`unsafe restore filename accepted: ${JSON.stringify(name)}`);

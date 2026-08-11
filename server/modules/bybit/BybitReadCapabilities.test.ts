@@ -6,7 +6,7 @@ import { BybitMarketData, createBybitTickerSource } from "./BybitMarketData";
 import type { BybitFundingTicker, BybitLinearPerpetualInstrument, BybitMarketTicker } from "./BybitReadTypes";
 
 const fetchedAt = 1_800_000_000_000;
-const instrumentId = "bybit:perpetual:linear:BTC:USDT:USDT";
+const instrumentId = "BTC-USDT-PERP";
 const rawInstrument: BybitLinearPerpetualInstrument = {
   symbol: "BTCUSDT",
   contractType: "LinearPerpetual",

@@ -6,7 +6,7 @@ import { BitgetMarketData, createBitgetTickerSource } from "./BitgetMarketData";
 import type { BitgetFundingRateRecord, BitgetMarketTicker, BitgetUsdtPerpetualInstrument } from "./BitgetReadTypes";
 
 const fetchedAt = 1_800_000_000_000;
-const instrumentId = "bitget:perpetual:linear:BTC:USDT:USDT";
+const instrumentId = "BTC-USDT-PERP";
 const rawInstrument: BitgetUsdtPerpetualInstrument = {
   symbol: "BTCUSDT",
   category: "USDT-FUTURES",

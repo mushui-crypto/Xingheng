@@ -1,13 +1,15 @@
-import { createHash } from "node:crypto";
-import type {
-  FundingArbitrageLegObservation,
-} from "../cex/funding-arbitrage/FundingArbitrageExecutionCapability";
+import type { Asset } from "../cex/Asset";
+import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import {
-  FundingArbitrageExecutionCoordinator,
-  type FundingArbitrageExecutionEvent,
-} from "../cex/funding-arbitrage/FundingArbitrageExecutionCoordinator";
+  createExecutionQueryObservation,
+  type ExecutionQueryObservation,
+} from "../cex/ExecutionQueryCapability";
+import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { FundingArbitrageExecutionIntent } from "../cex/funding-arbitrage/FundingArbitrageExecutionIntent";
 import type { FundingArbitrageExecutionState } from "../cex/funding-arbitrage/FundingArbitrageExecutionState";
+import { FundingArbitrageIntentAdapter } from "../cex/funding-arbitrage/FundingArbitrageIntentAdapter";
+import type { FundingLegExecutionLink } from "../cex/funding-arbitrage/FundingLegExecutionLinkStore";
+import { FundingLegExecutionStateBridge } from "../cex/funding-arbitrage/FundingLegExecutionStateBridge";
 import {
   BINANCE_CAPITAL_TEST_MAX_TOTAL_PLANNED_CAPITAL_USD,
   preflightBinanceCapitalTest,
@@ -15,325 +17,420 @@ import {
   type BinanceCapitalTestPreflightResult,
 } from "./BinanceCapitalTestPreflight";
 import {
-  BinanceCapitalTestResidualExit,
-  type BinanceCapitalTestResidualExitResult,
-} from "./BinanceCapitalTestResidualExit";
+  BinanceIntentExecutionRuntime,
+  type BinanceIntentExecutionRecordStore,
+  type BinanceIntentExecutionRuntimeOptions,
+  type BinanceIntentExecutionRuntimeRegistry,
+  type BinanceIntentExecutionRuntimeResult,
+} from "./BinanceIntentExecutionRuntime";
 import {
-  BinanceExecutionCapability,
-  type BoundBinanceExecutionService,
-} from "./BinanceExecutionCapability";
-import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
-import type { BinancePersonalTradingServiceRegistry } from "./BinancePersonalTradingServiceRegistry";
-import type { BinanceTradingConfig } from "./BinanceTradingConfig";
-import {
-  BINANCE_MAX_UNHEDGED_DURATION_MS,
-  type BinanceExecutionPriceMode,
-} from "./BinanceExecutionPolicy";
+  BINANCE_PERPETUAL_INSTRUMENT_ID,
+  BINANCE_SPOT_INSTRUMENT_ID,
+} from "./BinanceInstrumentCatalog";
+import type { BinancePreflightSnapshot } from "./BinanceTypes";
 
-const CAPITAL_TEST_EXECUTION_PRICE_MODE: BinanceExecutionPriceMode = "IOC_LIMIT";
+type FundingLeg = FundingArbitrageExecutionIntent["legs"][number];
 
-type BinanceCapitalTestRuntimeService = BoundBinanceExecutionService & Readonly<{
-  account: BinancePersonalTradingService["account"];
-  exit: (input: unknown) => Promise<unknown>;
-}>;
-
-export type BinanceCapitalTestAttempt = Readonly<{
-  executionId: string;
-  executionAttemptId: string;
+export type BinanceCapitalTestLegRequest = Readonly<{
+  confirmed: true;
   legId: string;
+  executionIntentId: string;
+  quantityAsset: Asset;
+  orderConstraints: ExecutionIntent["orderConstraints"];
+  executionMode: ExecutionIntent["executionMode"];
+  expiresAt: number;
 }>;
 
-export type BinanceCapitalTestRuntimeResult = Readonly<{
+export type BinanceCapitalTestSubmitResult = Readonly<{
   preflight: BinanceCapitalTestPreflightResult;
-  executionState: FundingArbitrageExecutionState | null;
-  attempts: readonly BinanceCapitalTestAttempt[];
-  residualExit: BinanceCapitalTestResidualExitResult | null;
+  executionIntent: ExecutionIntent | null;
+  executionRecord: ExecutionRecord | null;
+  execution: BinanceIntentExecutionRuntimeResult["execution"] | null;
+  observation: ExecutionQueryObservation | null;
+  executionState: FundingArbitrageExecutionState;
+  link: FundingLegExecutionLink | null;
+}>;
+
+export type BinanceCapitalTestStateSyncResult = Readonly<{
+  executionRecord: ExecutionRecord;
+  observation: ExecutionQueryObservation | null;
+  executionState: FundingArbitrageExecutionState;
 }>;
 
 export type BinanceCapitalTestRuntimeOptions = Readonly<{
   maxSlippageBps: number;
-  executionPriceMode?: BinanceExecutionPriceMode;
   clock?: () => number;
+  createExecutionId?: () => string;
+  createCapability?: BinanceIntentExecutionRuntimeOptions["createCapability"];
+  managedExposure?: Readonly<{
+    fundingExecutionId: string;
+    exposureOwnerFundingExecutionId: string | null;
+    userId: string;
+    accountId: string;
+    venue: "binance";
+    instrumentIds: readonly ["XAUT-USDT-SPOT", "XAUT-USDT-PERP"];
+    spotBaseQuantity: string;
+    perpetualBaseQuantity: string;
+  }>;
 }>;
 
-export async function executeBinanceCapitalTest(
-  registry: Pick<BinancePersonalTradingServiceRegistry, "run">,
-  authenticatedUserId: string,
-  context: BinanceCapitalTestExecutionContext,
-  intent: FundingArbitrageExecutionIntent,
-  options: BinanceCapitalTestRuntimeOptions,
-): Promise<BinanceCapitalTestRuntimeResult> {
-  if (!authenticatedUserId.trim() || authenticatedUserId !== context.userId) {
-    throw new Error("Capital test authenticated user does not match the execution context.");
-  }
-  return registry.run(authenticatedUserId, (service) => new BinanceCapitalTestRuntime(
-    service,
-    { maxSlippageBps: options.maxSlippageBps },
-    options.clock,
-    intent.expiresAt,
-    options.executionPriceMode ?? CAPITAL_TEST_EXECUTION_PRICE_MODE,
-  ).execute(context, intent));
-}
-
-class BinanceCapitalTestRuntime {
-  private readonly capability: BinanceExecutionCapability;
-  private readonly coordinator = new FundingArbitrageExecutionCoordinator();
-  private readonly residualExit: BinanceCapitalTestResidualExit;
-  private plannedMutationCapitalUsd = 0;
-  private firstConfirmedExposureAt: number | null = null;
+export class BinanceCapitalTestRuntime {
+  private readonly adapter = new FundingArbitrageIntentAdapter();
+  private readonly bridge = new FundingLegExecutionStateBridge();
+  private readonly clock: () => number;
 
   constructor(
-    private readonly service: BinanceCapitalTestRuntimeService,
-    private readonly config: Pick<BinanceTradingConfig, "maxSlippageBps">,
-    private readonly clock: () => number = Date.now,
-    private readonly intentExpiresAt: number,
-    executionPriceMode: BinanceExecutionPriceMode,
+    private readonly registry: BinanceIntentExecutionRuntimeRegistry,
+    private readonly recordStore: BinanceIntentExecutionRecordStore,
+    private readonly options: BinanceCapitalTestRuntimeOptions,
   ) {
-    this.capability = new BinanceExecutionCapability(
-      service,
-      config,
-      clock,
-      (prepared) => this.assertRiskMutationAllowed(prepared),
-      executionPriceMode,
-    );
-    this.residualExit = new BinanceCapitalTestResidualExit(service);
+    this.clock = options.clock ?? Date.now;
   }
 
-  async execute(
+  async submitLeg(
+    authenticatedUserId: string,
     context: BinanceCapitalTestExecutionContext,
-    intent: FundingArbitrageExecutionIntent,
-  ): Promise<BinanceCapitalTestRuntimeResult> {
-    const snapshot = await this.service.account();
-    const preflightTime = this.now();
-    const preflight = preflightBinanceCapitalTest(
+    fundingIntent: FundingArbitrageExecutionIntent,
+    fundingState: FundingArbitrageExecutionState,
+    request: BinanceCapitalTestLegRequest,
+  ): Promise<BinanceCapitalTestSubmitResult> {
+    const userId = assertExecutionContext(authenticatedUserId, context);
+    assertFundingStateIdentity(fundingIntent, fundingState);
+    const leg = fundingLeg(fundingIntent, request.legId);
+    const snapshot = await this.registry.run(userId, (service) => service.account());
+    const confirmedAt = this.now();
+    const preflightSnapshot = capitalTestPreflightSnapshot(
       context,
-      intent,
       snapshot,
-      preflightTime,
-      this.config.maxSlippageBps,
+      fundingIntent,
+      fundingState,
+      this.options.managedExposure,
     );
-    if (preflight.status === "FAIL") {
-      return { preflight, executionState: null, attempts: [], residualExit: null };
-    }
-
-    let state = this.coordinator.createExecution(intent);
-    state = this.transition(state, { type: "START_EXECUTION", occurredAt: preflightTime });
-    const attempts = intent.legs.map((leg) => ({
-      executionId: intent.intentId,
-      executionAttemptId: stableAttemptIdentity(intent.intentId, leg.legId, "submit", 0),
-      legId: leg.legId,
-    }));
-    assertAttemptIdentities(attempts);
-
-    for (const [index, leg] of intent.legs.entries()) {
-      const attempt = attempts[index]!;
-      const startedAt = this.nowAtOrAfter(state.updatedAt);
-      if (startedAt >= intent.expiresAt) {
-        state = this.failOnlyWithoutConfirmedResidual(state, startedAt);
-        break;
-      }
-      state = this.transition(state, {
-        type: "LEG_SUBMIT_STARTED",
-        legId: leg.legId,
-        occurredAt: startedAt,
-      });
-
-      const reference = {
-        executionId: attempt.executionId,
-        executionAttemptId: attempt.executionAttemptId,
-        legId: attempt.legId,
-      };
-      try {
-        const accepted = await this.capability.submitLeg({
-          ...reference,
-          role: leg.role,
-          venue: leg.venue,
-          instrumentId: leg.instrumentId,
-          marketType: leg.marketType,
-          targetDeltaBaseQuantity: leg.targetDeltaBaseQuantity,
-        });
-        if (accepted.executionAttemptId !== attempt.executionAttemptId) {
-          throw new Error("Execution capability changed the caller-supplied attempt identity.");
-        }
-      } catch {
-        state = await this.observeAfterSubmit(state, reference);
-        this.recordFirstConfirmedExposure(state);
-        const currentLeg = state.legs.find((candidate) => candidate.legId === leg.legId)!;
-        if (currentLeg.remoteObservation === "FILLED" && currentLeg.remainingQuantity === "0") continue;
-        if (isConfirmedTerminalFailure(currentLeg.remoteObservation)) {
-          state = this.failOnlyWithoutConfirmedResidual(state);
-        }
-        break;
-      }
-
-      state = await this.observeAfterSubmit(state, reference);
-      this.recordFirstConfirmedExposure(state);
-      const currentLeg = state.legs.find((candidate) => candidate.legId === leg.legId)!;
-      if (isConfirmedTerminalFailure(currentLeg.remoteObservation)) {
-        if (state.status !== "HEDGED") state = this.failOnlyWithoutConfirmedResidual(state);
-        break;
-      }
-      if (currentLeg.remoteObservation !== "FILLED" || currentLeg.remainingQuantity !== "0") break;
-    }
-
-    const residualExit = state.status === "HEDGED" || state.status === "RESIDUAL"
-      ? await this.residualExit.execute(
+    const preflight = preflightSnapshot
+      ? preflightBinanceCapitalTest(
         context,
-        intent,
-        state,
-        attempts.map((attempt) => attempt.executionAttemptId),
+        fundingIntent,
+        preflightSnapshot,
+        confirmedAt,
+        this.options.maxSlippageBps,
       )
-      : null;
-    return { preflight, executionState: state, attempts, residualExit };
+      : {
+        status: "FAIL" as const,
+        reason: "EXISTING_EXPOSURE" as const,
+        message: "Binance exposure does not match the confirmed capital-test funding flow.",
+      };
+    if (preflight.status === "FAIL") {
+      return Object.freeze({
+        preflight,
+        executionIntent: null,
+        executionRecord: null,
+        execution: null,
+        observation: null,
+        executionState: fundingState,
+        link: null,
+      });
+    }
+
+    const executionIntent = this.adapter.createExecutionIntent(fundingIntent, {
+      confirmed: request.confirmed,
+      intentId: request.executionIntentId,
+      legId: request.legId,
+      userId,
+      accountId: context.accountId,
+      venue: leg.venue,
+      quantityAsset: request.quantityAsset,
+      orderConstraints: request.orderConstraints,
+      executionMode: request.executionMode,
+      confirmedAt,
+      expiresAt: request.expiresAt,
+    });
+    const runtime = this.executionRuntime((prepared) => {
+      assertCapitalMutationAllowed(
+        prepared,
+        leg,
+        fundingIntent,
+        snapshot,
+        this.options.maxSlippageBps,
+        this.now(),
+      );
+    });
+    const submitted = await runtime.execute(executionIntent);
+    const link = Object.freeze({
+      executionIntentId: executionIntent.intentId,
+      executionRecordId: submitted.executionRecord.executionId,
+    });
+    const queried = await runtime.query(userId, submitted.executionRecord.executionId);
+    const executionState = this.bridge.apply({
+      authenticatedUserId: userId,
+      fundingState,
+      legId: leg.legId,
+      link,
+      executionRecord: queried.executionRecord,
+      observation: queried.observation,
+    });
+
+    return Object.freeze({
+      preflight,
+      executionIntent,
+      executionRecord: queried.executionRecord,
+      execution: submitted.execution,
+      observation: queried.observation,
+      executionState,
+      link,
+    });
   }
 
-  private async observeAfterSubmit(
-    state: FundingArbitrageExecutionState,
-    reference: BinanceCapitalTestAttempt,
-  ) {
-    let observation;
-    try {
-      observation = await this.capability.queryLegState(reference);
-    } catch {
-      return this.transition(state, {
-        type: "LEG_REMOTE_UNKNOWN",
-        legId: reference.legId,
-        occurredAt: this.nowAtOrAfter(state.updatedAt),
+  async queryLeg(
+    authenticatedUserId: string,
+    fundingState: FundingArbitrageExecutionState,
+    legId: string,
+    link: FundingLegExecutionLink,
+  ): Promise<BinanceCapitalTestStateSyncResult> {
+    const result = await this.executionRuntime().query(authenticatedUserId, link.executionRecordId);
+    return this.applyObservation(authenticatedUserId, fundingState, legId, link, result);
+  }
+
+  async reconcileLeg(
+    authenticatedUserId: string,
+    fundingState: FundingArbitrageExecutionState,
+    legId: string,
+    link: FundingLegExecutionLink,
+  ): Promise<BinanceCapitalTestStateSyncResult> {
+    const result = await this.executionRuntime().reconcile(authenticatedUserId, link.executionRecordId);
+    if (!result.observation) {
+      return Object.freeze({
+        executionRecord: result.executionRecord,
+        observation: null,
+        executionState: fundingState,
       });
     }
-    state = this.applyObservation(state, reference.legId, observation);
-    if (observation.observation !== "UNKNOWN_REMOTE_STATE") return state;
+    return this.applyObservation(authenticatedUserId, fundingState, legId, link, {
+      executionRecord: result.executionRecord,
+      observation: result.observation,
+    });
+  }
 
-    let reconciled;
-    try {
-      reconciled = await this.capability.reconcileLeg(reference);
-    } catch {
-      return state;
-    }
-    if (reconciled.observation === "UNKNOWN_REMOTE_STATE") return state;
-    return this.transition(state, {
-      type: "LEG_RECONCILIATION_RESOLVED",
-      legId: reference.legId,
-      confirmedExecutedQuantity: reconciled.confirmedExecutedQuantity,
-      remoteObservation: reconciled.observation,
-      occurredAt: Math.max(state.updatedAt, reconciled.observedAt),
+  async cancelLeg(
+    authenticatedUserId: string,
+    fundingState: FundingArbitrageExecutionState,
+    legId: string,
+    link: FundingLegExecutionLink,
+  ): Promise<BinanceCapitalTestStateSyncResult> {
+    const result = await this.executionRuntime().cancel(authenticatedUserId, link.executionRecordId);
+    const leg = fundingState.legs.find((candidate) => candidate.legId === legId);
+    if (!leg) throw new Error("Funding leg does not belong to the funding flow state.");
+    const observation = createExecutionQueryObservation({
+      state: executionObservationState(result.executionRecord.status),
+      filledBaseQuantity: leg.confirmedExecutedQuantity,
+      observedAt: result.executionRecord.updatedAt,
+    });
+    return this.applyObservation(authenticatedUserId, fundingState, legId, link, {
+      executionRecord: result.executionRecord,
+      observation,
     });
   }
 
   private applyObservation(
-    state: FundingArbitrageExecutionState,
+    authenticatedUserId: string,
+    fundingState: FundingArbitrageExecutionState,
     legId: string,
-    observation: FundingArbitrageLegObservation,
+    link: FundingLegExecutionLink,
+    result: Readonly<{ executionRecord: ExecutionRecord; observation: ExecutionQueryObservation }>,
   ) {
-    const occurredAt = Math.max(state.updatedAt, observation.observedAt);
-    if (observation.observation === "UNKNOWN_REMOTE_STATE") {
-      return this.transition(state, { type: "LEG_REMOTE_UNKNOWN", legId, occurredAt });
-    }
-    if (observation.observation === "FILLED") {
-      return this.transition(state, {
-        type: "LEG_CONFIRMED_FILLED",
+    return Object.freeze({
+      executionRecord: result.executionRecord,
+      observation: result.observation,
+      executionState: this.bridge.apply({
+        authenticatedUserId,
+        fundingState,
         legId,
-        confirmedExecutedQuantity: observation.confirmedExecutedQuantity,
-        occurredAt,
-      });
-    }
-    if (observation.observation === "OPEN") {
-      return this.transition(state, {
-        type: "LEG_CONFIRMED_PARTIAL",
-        legId,
-        confirmedExecutedQuantity: observation.confirmedExecutedQuantity,
-        occurredAt,
-      });
-    }
-    return this.transition(state, {
-      type: "LEG_RECONCILIATION_RESOLVED",
-      legId,
-      confirmedExecutedQuantity: observation.confirmedExecutedQuantity,
-      remoteObservation: observation.observation,
-      occurredAt,
+        link,
+        executionRecord: result.executionRecord,
+        observation: result.observation,
+      }),
     });
   }
 
-  private transition(state: FundingArbitrageExecutionState, event: FundingArbitrageExecutionEvent) {
-    return this.coordinator.transition(state, event);
-  }
-
-  private failOnlyWithoutConfirmedResidual(
-    state: FundingArbitrageExecutionState,
-    occurredAt = this.nowAtOrAfter(state.updatedAt),
+  private executionRuntime(
+    assertSubmitAllowed?: BinanceIntentExecutionRuntimeOptions["assertSubmitAllowed"],
   ) {
-    if (state.status === "RESIDUAL" && state.residualExposure.residualQuantity !== "0") return state;
-    return this.transition(state, {
-      type: "MARK_FAILED",
-      occurredAt,
-    });
+    return new BinanceIntentExecutionRuntime(
+      this.registry,
+      { maxSlippageBps: this.options.maxSlippageBps },
+      this.recordStore,
+      {
+        clock: this.clock,
+        createExecutionId: this.options.createExecutionId,
+        assertSubmitAllowed,
+        createCapability: this.options.createCapability,
+      },
+    );
   }
 
   private now() {
     const value = this.clock();
-    if (!Number.isFinite(value) || !Number.isInteger(value) || value < 0) {
+    if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error("Capital test runtime clock must return a non-negative integer timestamp.");
     }
     return value;
   }
-
-  private nowAtOrAfter(timestamp: number) {
-    return Math.max(timestamp, this.now());
-  }
-
-  private assertRiskMutationAllowed(prepared: Readonly<{ quantityXaut: number; limitPrice: number }>) {
-    const checkedAt = this.now();
-    if (checkedAt >= this.intentExpiresAt) {
-      throw new Error("Capital test intent expired before risk-increasing mutation.");
-    }
-    if (this.firstConfirmedExposureAt !== null
-      && checkedAt - this.firstConfirmedExposureAt > BINANCE_MAX_UNHEDGED_DURATION_MS) {
-      throw new Error("Capital test maximum unhedged duration elapsed before provider mutation.");
-    }
-    const mutationCapitalUsd = prepared.quantityXaut * prepared.limitPrice;
-    const nextPlannedCapitalUsd = this.plannedMutationCapitalUsd + mutationCapitalUsd;
-    if (!Number.isFinite(mutationCapitalUsd)
-      || mutationCapitalUsd <= 0
-      || !Number.isFinite(nextPlannedCapitalUsd)
-      || nextPlannedCapitalUsd > BINANCE_CAPITAL_TEST_MAX_TOTAL_PLANNED_CAPITAL_USD + 1e-9) {
-      throw new Error("Capital test mutation would exceed the 40 USD total planned capital limit.");
-    }
-    this.plannedMutationCapitalUsd = nextPlannedCapitalUsd;
-  }
-
-  private recordFirstConfirmedExposure(state: FundingArbitrageExecutionState) {
-    if (this.firstConfirmedExposureAt === null
-      && state.legs.some((leg) => Number(leg.confirmedExecutedQuantity) > 0)) {
-      this.firstConfirmedExposureAt = this.now();
-    }
-  }
 }
 
-function assertAttemptIdentities(attempts: readonly BinanceCapitalTestAttempt[]) {
-  const identities = new Set<string>();
-  for (const attempt of attempts) {
-    if (!attempt.executionAttemptId.trim() || attempt.executionAttemptId.length > 200) {
-      throw new Error("Capital test execution attempt identity is invalid.");
-    }
-    if (identities.has(attempt.executionAttemptId)) {
-      throw new Error("Capital test execution attempt identities must be unique.");
-    }
-    identities.add(attempt.executionAttemptId);
-  }
-}
-
-function stableAttemptIdentity(
-  executionId: string,
-  legId: string,
-  operation: "submit",
-  attemptVersion: number,
+function assertExecutionContext(
+  authenticatedUserId: string,
+  context: BinanceCapitalTestExecutionContext,
 ) {
-  const digest = createHash("sha256")
-    .update(`${executionId}\u0000${legId}\u0000${operation}\u0000${attemptVersion}`)
-    .digest("hex");
-  return `funding-arbitrage-attempt:${attemptVersion}:${digest}`;
+  const userId = identifier(authenticatedUserId, "authenticated userId");
+  if (userId !== context.userId) {
+    throw new Error("Capital test authenticated user does not match the execution context.");
+  }
+  if (!identifier(context.accountId, "accountId") || context.venue !== "binance") {
+    throw new Error("Capital test execution context is invalid.");
+  }
+  return userId;
 }
 
-function isConfirmedTerminalFailure(observation: string | null) {
-  return observation === "REMOTE_NOT_FOUND" || observation === "CANCELED" || observation === "REJECTED";
+function assertFundingStateIdentity(
+  intent: FundingArbitrageExecutionIntent,
+  state: FundingArbitrageExecutionState,
+) {
+  if (state.intentId !== intent.intentId || state.sourcePlanId !== intent.sourcePlanId) {
+    throw new Error("Funding execution state does not match the funding intent.");
+  }
+}
+
+function fundingLeg(intent: FundingArbitrageExecutionIntent, legId: string): FundingLeg {
+  const normalizedLegId = identifier(legId, "legId");
+  const leg = intent.legs.find((candidate) => candidate.legId === normalizedLegId);
+  if (!leg) throw new Error("Funding leg does not belong to the funding intent.");
+  if (leg.venue !== "binance") throw new Error("Capital test supports Binance legs only.");
+  return leg;
+}
+
+function capitalTestPreflightSnapshot(
+  context: BinanceCapitalTestExecutionContext,
+  snapshot: BinancePreflightSnapshot,
+  fundingIntent: FundingArbitrageExecutionIntent,
+  fundingState: FundingArbitrageExecutionState,
+  managedExposure: BinanceCapitalTestRuntimeOptions["managedExposure"],
+) {
+  const binding = managedExposure ?? {
+    fundingExecutionId: fundingIntent.sourcePlanId,
+    exposureOwnerFundingExecutionId: fundingIntent.sourcePlanId,
+    userId: context.userId,
+    accountId: context.accountId,
+    venue: "binance" as const,
+    instrumentIds: ["XAUT-USDT-SPOT", "XAUT-USDT-PERP"] as const,
+    spotBaseQuantity: "0",
+    perpetualBaseQuantity: "0",
+  };
+  if (!fundingIntent.sourcePlanId.startsWith(`${binding.fundingExecutionId}:`)
+    && fundingIntent.sourcePlanId !== binding.fundingExecutionId) {
+    return null;
+  }
+  const baselineSpot = decimalNumber(binding.spotBaseQuantity);
+  const baselinePerpetual = decimalNumber(binding.perpetualBaseQuantity);
+  const spotLeg = fundingState.legs.find((leg) => leg.role === "long")!;
+  const perpetualLeg = fundingState.legs.find((leg) => leg.role === "short")!;
+  const expectedSpot = baselineSpot + decimalNumber(spotLeg.confirmedExecutedQuantity);
+  const expectedPerpetual = baselinePerpetual + decimalNumber(perpetualLeg.confirmedExecutedQuantity);
+  try {
+    assertNoUnexpectedExposure(context, snapshot, {
+      ...binding,
+      spotBaseQuantity: String(expectedSpot),
+      perpetualBaseQuantity: String(expectedPerpetual),
+    });
+  } catch {
+    return null;
+  }
+  return {
+    ...snapshot,
+    existingSpotQuantityXaut: 0,
+    existingPerpetualQuantityXaut: 0,
+    perpetualPositionSide: "flat" as const,
+  };
+}
+
+export function assertNoUnexpectedExposure(
+  context: BinanceCapitalTestExecutionContext,
+  snapshot: BinancePreflightSnapshot,
+  binding: NonNullable<BinanceCapitalTestRuntimeOptions["managedExposure"]>,
+) {
+  if (!identifier(binding.fundingExecutionId, "fundingExecutionId")
+    || binding.userId !== context.userId
+    || binding.accountId !== context.accountId
+    || binding.venue !== context.venue
+    || snapshot.accountId !== binding.accountId) {
+    throw new Error("Capital test exposure ownership identity does not match the execution context.");
+  }
+  if (binding.instrumentIds[0] !== "XAUT-USDT-SPOT"
+    || binding.instrumentIds[1] !== "XAUT-USDT-PERP") {
+    throw new Error("Capital test exposure ownership does not match the supported canonical instruments.");
+  }
+  const expectedSpot = decimalNumber(binding.spotBaseQuantity);
+  const expectedPerpetual = decimalNumber(binding.perpetualBaseQuantity);
+  if ((expectedSpot > 1e-9 || expectedPerpetual > 1e-9)
+    && binding.exposureOwnerFundingExecutionId !== binding.fundingExecutionId) {
+    throw new Error("Binance exposure belongs to a different funding execution.");
+  }
+  const expectedSide = expectedPerpetual > 1e-9 ? "short" : "flat";
+  if (!sameQuantity(snapshot.existingSpotQuantityXaut, expectedSpot)
+    || !sameQuantity(snapshot.existingPerpetualQuantityXaut, expectedPerpetual)
+    || snapshot.perpetualPositionSide !== expectedSide) {
+    throw new Error("Binance account contains exposure not managed by the current funding execution.");
+  }
+}
+
+function decimalNumber(value: string) {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+    throw new Error("Capital test expected exposure must be an unsigned decimal string.");
+  }
+  const result = Number(value);
+  if (!Number.isFinite(result)) throw new Error("Capital test expected exposure is out of range.");
+  return result;
+}
+
+function sameQuantity(actual: number, expected: number) {
+  return Number.isFinite(actual) && Math.abs(actual - expected) <= 1e-9;
+}
+
+function assertCapitalMutationAllowed(
+  prepared: Readonly<{ quantityXaut: number; limitPrice: number }>,
+  leg: FundingLeg,
+  intent: FundingArbitrageExecutionIntent,
+  snapshot: BinancePreflightSnapshot,
+  maxSlippageBps: number,
+  checkedAt: number,
+) {
+  if (checkedAt >= intent.expiresAt) {
+    throw new Error("Capital test intent expired before risk-increasing mutation.");
+  }
+  const otherLeg = intent.legs.find((candidate) => candidate.legId !== leg.legId)!;
+  const otherReferencePrice = otherLeg.marketType === "spot"
+    ? snapshot.spot.ask
+    : Math.max(snapshot.perpetual.ask, snapshot.perpetual.mark);
+  const otherCapitalUsd = Number(otherLeg.targetDeltaBaseQuantity)
+    * otherReferencePrice
+    * (1 + maxSlippageBps / 10_000);
+  const mutationCapitalUsd = prepared.quantityXaut * prepared.limitPrice;
+  const totalPlannedCapitalUsd = mutationCapitalUsd + otherCapitalUsd;
+  if (!Number.isFinite(totalPlannedCapitalUsd)
+    || totalPlannedCapitalUsd <= 0
+    || totalPlannedCapitalUsd > BINANCE_CAPITAL_TEST_MAX_TOTAL_PLANNED_CAPITAL_USD + 1e-9) {
+    throw new Error("Capital test mutation would exceed the 40 USD total planned capital limit.");
+  }
+}
+
+function executionObservationState(status: ExecutionRecord["status"]): ExecutionQueryObservation["state"] {
+  if (status === "CONFIRMED") return "CONFIRMED";
+  if (status === "FAILED") return "FAILED";
+  if (status === "UNKNOWN") return "UNKNOWN";
+  return "PENDING_CONFIRMATION";
+}
+
+function identifier(value: unknown, name: string) {
+  if (typeof value !== "string" || !value.trim() || value.length > 200) {
+    throw new Error(`${name} is invalid.`);
+  }
+  return value.trim();
 }

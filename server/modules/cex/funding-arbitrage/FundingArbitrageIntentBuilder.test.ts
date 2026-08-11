@@ -32,6 +32,21 @@ test("builds a decimal-safe perpetual/perpetual execution intent without changin
   }
 });
 
+test("rejects venue-qualified instrument identity at the funding intent boundary", () => {
+  const venueQualifiedPlan = {
+    ...plan,
+    legs: [
+      { ...plan.legs[0], instrumentId: "binance:perpetual:linear:BTC:USDT:USDT" },
+      plan.legs[1],
+    ],
+  } as FundingArbitragePlan;
+
+  assert.throws(
+    () => buildFundingArbitrageExecutionIntent(venueQualifiedPlan, buildParameters),
+    /Invalid canonical instrument id/u,
+  );
+});
+
 test("rejects expired plans and intent expiry beyond the source plan", () => {
   assert.throws(
     () => buildFundingArbitrageExecutionIntent(plan, { ...buildParameters, now: plan.expiresAt }),
@@ -122,18 +137,18 @@ function perpetualPlan(): FundingArbitragePlan {
       {
         role: "long",
         venue: "binance",
-        instrumentId: "binance:perpetual:linear:BTC:USDT:USDT",
+        instrumentId: "BTC-USDT-PERP",
         marketType: "perpetual",
         baseQuantity: 0.12,
-        fundingSnapshot: funding("binance", "binance:perpetual:linear:BTC:USDT:USDT", -0.0001, fundingAt),
+        fundingSnapshot: funding("binance", "BTC-USDT-PERP", -0.0001, fundingAt),
       },
       {
         role: "short",
         venue: "okx",
-        instrumentId: "okx:perpetual:linear:BTC:USDT:USDT",
+        instrumentId: "BTC-USDT-PERP",
         marketType: "perpetual",
         baseQuantity: 0.12,
-        fundingSnapshot: funding("okx", "okx:perpetual:linear:BTC:USDT:USDT", 0.0003, fundingAt),
+        fundingSnapshot: funding("okx", "BTC-USDT-PERP", 0.0003, fundingAt),
       },
     ],
     expectedFunding: { netRate: 0.0004, amount: 3.12, asset: "USDT", fundingAt },

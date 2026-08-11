@@ -23,6 +23,8 @@ test("default funding opportunity source wires public read data into the evaluat
   assert.equal(plans[0]?.symbol, "XAUTUSDT");
   assert.equal(plans[0]?.longVenue, "okx");
   assert.equal(plans[0]?.shortVenue, "binance");
+  assert.equal(plans[0]?.longInstrumentId, "XAUT-USDT-PERP");
+  assert.equal(plans[0]?.shortInstrumentId, "XAUT-USDT-PERP");
   assert.equal(plans[0]?.estimatedNetYield > 0, true);
   assert.equal(requested.some((url) => url.includes("fapi.binance.com/fapi/v1/exchangeInfo")), true);
   assert.equal(requested.some((url) => url.includes("www.okx.com/api/v5/public/instruments")), true);

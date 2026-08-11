@@ -22,7 +22,7 @@ test("associates an ExecutionIntent with an ExecutionRecord", () => {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     status: "CREATED",
     createdAt: now,
     updatedAt: now,
@@ -49,10 +49,10 @@ test("tracks execution attempt and remote order reference without order details"
     "createdAt",
     "executionAttemptId",
     "executionId",
+    "instrumentId",
     "intentId",
     "remoteOrderId",
     "status",
-    "symbol",
     "updatedAt",
     "userId",
     "venue",
@@ -111,7 +111,11 @@ test("supports all execution venues with the same record model", () => {
       executionIntent({
         venue,
         accountId: `${venue}:account-1`,
-        symbol: venue === "okx" ? "XAUTUSDT" : "BTCUSDT",
+        instrumentId: "BTC-USDT-PERP",
+        quantity: {
+          asset: { symbol: "BTC", type: "DIGITAL_ASSET" },
+          quantity: "0.01",
+        },
       }),
     );
     assert.equal(record.venue, venue);
@@ -126,13 +130,23 @@ test("rejects order-manager, fill, fee, strategy, and order-book fields", () => 
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     status: "CREATED",
     createdAt: now,
     updatedAt: now,
   };
 
-  for (const field of ["fills", "trades", "fee", "orderBook", "strategyData", "clientOrderRequest"]) {
+  for (const field of [
+    "fills",
+    "trades",
+    "fee",
+    "orderBook",
+    "strategyData",
+    "clientOrderRequest",
+    "sourceType",
+    "sourcePlanId",
+    "sourceLegId",
+  ]) {
     assert.throws(() => createExecutionRecord({ ...base, [field]: [] }), new RegExp(`unsupported field: ${field}`, "u"));
   }
 
@@ -147,9 +161,12 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,

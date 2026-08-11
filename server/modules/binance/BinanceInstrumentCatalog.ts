@@ -8,8 +8,8 @@ import {
   type BinancePreflightSnapshot,
 } from "./BinanceTypes";
 
-export const BINANCE_SPOT_INSTRUMENT_ID = "binance:spot:XAUT:USDT";
-export const BINANCE_PERPETUAL_INSTRUMENT_ID = "binance:perpetual:linear:XAUT:USDT:USDT";
+export const BINANCE_SPOT_INSTRUMENT_ID = "XAUT-USDT-SPOT";
+export const BINANCE_PERPETUAL_INSTRUMENT_ID = "XAUT-USDT-PERP";
 
 type BinanceInstrumentCatalogClient = Pick<BinanceClientAdapter, "readPreflightSnapshot">;
 

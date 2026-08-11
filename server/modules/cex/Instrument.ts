@@ -13,6 +13,7 @@ export type Instrument = Readonly<{
 }>;
 
 export type CanonicalInstrument = Readonly<{
+  instrumentId: string;
   baseAsset: string;
   quoteAsset: string;
   contractType: InstrumentContractType;
@@ -57,6 +58,7 @@ export function createInstrument(input: unknown): Instrument {
 
 export function toCanonicalInstrument(instrument: Instrument): CanonicalInstrument {
   return Object.freeze({
+    instrumentId: instrument.instrumentId,
     baseAsset: instrument.baseAsset.symbol,
     quoteAsset: instrument.quoteAsset.symbol,
     contractType: instrument.instrumentType === "SPOT" ? "spot" : "perpetual",
@@ -72,9 +74,33 @@ export function createCanonicalInstrument(input: unknown): CanonicalInstrument {
   }
 
   return Object.freeze({
+    instrumentId: canonicalInstrumentId(
+      asset(value.baseAsset, "baseAsset"),
+      asset(value.quoteAsset, "quoteAsset"),
+      value.contractType,
+    ),
     baseAsset: asset(value.baseAsset, "baseAsset"),
     quoteAsset: asset(value.quoteAsset, "quoteAsset"),
     contractType: value.contractType,
+  });
+}
+
+export function canonicalInstrumentId(
+  baseAsset: string,
+  quoteAsset: string,
+  contractType: InstrumentContractType,
+) {
+  return `${asset(baseAsset, "baseAsset")}-${asset(quoteAsset, "quoteAsset")}-${contractType === "spot" ? "SPOT" : "PERP"}`;
+}
+
+export function canonicalInstrumentFromId(instrumentId: string): CanonicalInstrument {
+  const match = /^([A-Z0-9]{2,12})-([A-Z0-9]{2,12})-(SPOT|PERP)$/u.exec(instrumentId);
+  if (!match) throw new Error(`Invalid canonical instrument id: ${instrumentId}.`);
+  return Object.freeze({
+    instrumentId,
+    baseAsset: match[1]!,
+    quoteAsset: match[2]!,
+    contractType: match[3] === "SPOT" ? "spot" : "perpetual",
   });
 }
 

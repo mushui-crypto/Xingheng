@@ -42,8 +42,8 @@ test("assembles canonical read data and evaluates FundingSpreadPlan", async () =
   assert.equal(plan.symbol, "XAUTUSDT");
   assert.equal(plan.longVenue, "okx");
   assert.equal(plan.shortVenue, "binance");
-  assert.equal(plan.longInstrumentId, "okx:perpetual:linear:XAUT:USDT:USDT");
-  assert.equal(plan.shortInstrumentId, "binance:perpetual:linear:XAUT:USDT:USDT");
+  assert.equal(plan.longInstrumentId, "XAUT-USDT-PERP");
+  assert.equal(plan.shortInstrumentId, "XAUT-USDT-PERP");
   assert.equal(plan.longFundingRate, -0.0001);
   assert.equal(plan.shortFundingRate, 0.0003);
   assert.equal(plan.fundingSpread, 0.0004);
@@ -116,7 +116,7 @@ function venue(
 
 function canonicalInstrument(venueName: CexVenue, baseAsset: string): CanonicalInstrument {
   return {
-    instrumentId: `${venueName}:perpetual:linear:${baseAsset}:USDT:USDT`,
+    instrumentId: `${baseAsset}-USDT-PERP`,
     venue: venueName,
     marketType: "perpetual",
     contractType: "linear_perpetual",

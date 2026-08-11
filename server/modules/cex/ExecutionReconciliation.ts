@@ -7,7 +7,7 @@ export type RemoteExecutionState = Readonly<{
   intentId: string;
   venue: ExecutionIntent["venue"];
   accountId: string;
-  symbol: string;
+  instrumentId: string;
   status: RemoteExecutionStatus;
   observedAt: number;
 }>;
@@ -36,7 +36,7 @@ export class ExecutionStateReconciliation implements ExecutionReconciliation {
     const identityMatches = local.intentId === remote.intentId
       && local.venue === remote.venue
       && local.accountId === remote.accountId
-      && local.symbol === remote.symbol;
+      && local.instrumentId === remote.instrumentId;
     const stateMatches = remote.status !== "UNKNOWN"
       && local.status === remote.status
       && remote.observedAt >= local.updatedAt;

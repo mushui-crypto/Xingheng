@@ -117,6 +117,7 @@ function validateProductionConfig(config: RuntimeConfig) {
     ["SMTP_PASSWORD", config.smtp.password],
     ["SMTP_FROM", config.smtp.from],
     ["TRADING_DB_PATH", process.env.TRADING_DB_PATH?.trim() ?? ""],
+    ["BINANCE_USER_ORDER_DB_DIR", process.env.BINANCE_USER_ORDER_DB_DIR?.trim() ?? ""],
     ["CORS_ALLOWED_ORIGINS", process.env.CORS_ALLOWED_ORIGINS?.trim() ?? ""],
     ["BSC_TESTNET_RPC_URL", process.env.BSC_TESTNET_RPC_URL?.trim() ?? ""],
     ["BSC_TESTNET_TOKEN_ADDRESS", process.env.BSC_TESTNET_TOKEN_ADDRESS?.trim() ?? ""],
@@ -125,6 +126,9 @@ function validateProductionConfig(config: RuntimeConfig) {
   const missing = required.filter(([, value]) => !value).map(([name]) => name);
   if (missing.length) {
     throw new Error(`生产环境缺少必填配置：${missing.join("、")}。`);
+  }
+  if (process.env.BINANCE_USER_ORDER_DB_DIR?.trim() !== "/app/data/binance-users") {
+    throw new Error("生产环境 BINANCE_USER_ORDER_DB_DIR 必须位于持久化数据卷 /app/data/binance-users。");
   }
   const domain = config.publicDomain;
   if (

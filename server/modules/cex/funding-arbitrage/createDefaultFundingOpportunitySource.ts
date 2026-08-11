@@ -1,6 +1,7 @@
 import { BitgetFundingRate } from "../../bitget/BitgetFundingRate";
 import { BitgetInstrumentCatalog } from "../../bitget/BitgetInstrumentCatalog";
 import { BitgetMarketData } from "../../bitget/BitgetMarketData";
+import { canonicalInstrumentId } from "../Instrument";
 import type {
   BitgetFundingRateRecord,
   BitgetMarketTicker,
@@ -75,7 +76,7 @@ function createOkxReadVenue(
   const timeoutMs = options.timeoutMs ?? 10_000;
   const now = options.now ?? Date.now;
   const bindings = symbols.map(toUsdtBinding).map((binding) => ({
-    instrumentId: `okx:perpetual:linear:${binding.base}:USDT:USDT`,
+    instrumentId: canonicalInstrumentId(binding.base, "USDT", "perpetual"),
     providerSymbol: `${binding.base}-USDT-SWAP`,
   }));
   return {
@@ -103,7 +104,7 @@ function createBybitReadVenue(
   const timeoutMs = options.timeoutMs ?? 10_000;
   const now = options.now ?? Date.now;
   const bindings = symbols.map(toUsdtBinding).map((binding) => ({
-    instrumentId: `bybit:perpetual:linear:${binding.base}:USDT:USDT`,
+    instrumentId: canonicalInstrumentId(binding.base, "USDT", "perpetual"),
     providerSymbol: `${binding.base}USDT`,
   }));
   return {
@@ -131,7 +132,7 @@ function createBitgetReadVenue(
   const timeoutMs = options.timeoutMs ?? 10_000;
   const now = options.now ?? Date.now;
   const bindings = symbols.map(toUsdtBinding).map((binding) => ({
-    instrumentId: `bitget:perpetual:linear:${binding.base}:USDT:USDT`,
+    instrumentId: canonicalInstrumentId(binding.base, "USDT", "perpetual"),
     providerSymbol: `${binding.base}USDT`,
   }));
   return {
@@ -404,7 +405,7 @@ function toCanonicalBinanceInstrument(raw: BinanceExchangeInfoSymbol, fetchedAt:
   const quoteAsset = requireProviderString(raw.quoteAsset, "Binance quoteAsset");
   const settlementAsset = requireProviderString(raw.marginAsset, "Binance marginAsset");
   return {
-    instrumentId: `binance:perpetual:linear:${baseAsset}:${quoteAsset}:${settlementAsset}`,
+    instrumentId: canonicalInstrumentId(baseAsset, quoteAsset, "perpetual"),
     venue: "binance",
     marketType: "perpetual",
     contractType: "linear_perpetual",
@@ -450,7 +451,7 @@ function normalizeSymbol(value: unknown) {
 }
 
 function binanceSymbolFromInstrumentId(instrumentId: string) {
-  const match = /^binance:perpetual:linear:([A-Z0-9]+):([A-Z0-9]+):([A-Z0-9]+)$/u.exec(instrumentId);
+  const match = /^([A-Z0-9]{2,12})-([A-Z0-9]{2,12})-PERP$/u.exec(instrumentId);
   if (!match) throw new Error(`Unsupported Binance funding opportunity instrument: ${instrumentId}.`);
   return `${match[1]}${match[2]}`;
 }

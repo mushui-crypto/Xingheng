@@ -6,7 +6,7 @@ import { createOkxTickerSource, OkxMarketData } from "./OkxMarketData";
 import type { OkxFundingRateRecord, OkxSwapInstrument, OkxTickerRecord } from "./OkxReadTypes";
 
 const fetchedAt = 1_800_000_000_000;
-const instrumentId = "okx:perpetual:linear:BTC:USDT:USDT";
+const instrumentId = "BTC-USDT-PERP";
 const rawInstrument: OkxSwapInstrument = {
   instType: "SWAP",
   instId: "BTC-USDT-SWAP",

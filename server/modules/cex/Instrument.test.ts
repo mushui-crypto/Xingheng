@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAsset } from "./Asset";
-import { createCanonicalInstrument, createInstrument, toCanonicalInstrument } from "./Instrument";
+import {
+  canonicalInstrumentFromId,
+  createCanonicalInstrument,
+  createInstrument,
+  toCanonicalInstrument,
+} from "./Instrument";
 import { InstrumentCapability } from "./InstrumentCapability";
 
 test("creates a spot instrument linked to assets", () => {
@@ -33,6 +38,7 @@ test("creates a perpetual instrument linked to assets", () => {
     instrumentType: "PERPETUAL",
   });
   assert.deepEqual(toCanonicalInstrument(instrument), {
+    instrumentId: "BTC-USDT-PERP",
     baseAsset: "BTC",
     quoteAsset: "USDT",
     contractType: "perpetual",
@@ -82,10 +88,24 @@ test("creates a canonical instrument model", () => {
   });
 
   assert.deepEqual(instrument, {
+    instrumentId: "XAUT-USDT-PERP",
     baseAsset: "XAUT",
     quoteAsset: "USDT",
     contractType: "perpetual",
   });
+});
+
+test("parses the unique canonical instrument identity for venue resolution", () => {
+  assert.deepEqual(canonicalInstrumentFromId("XAUT-USDT-PERP"), {
+    instrumentId: "XAUT-USDT-PERP",
+    baseAsset: "XAUT",
+    quoteAsset: "USDT",
+    contractType: "perpetual",
+  });
+  assert.throws(
+    () => canonicalInstrumentFromId("binance:perpetual:linear:XAUT:USDT:USDT"),
+    /Invalid canonical instrument id/u,
+  );
 });
 
 test("maps canonical instruments to Binance venue instruments", () => {
@@ -162,6 +182,13 @@ test("rejects unknown venues", () => {
   const instrument = canonicalPerp();
 
   assert.throws(() => capability.resolveVenueInstrument(instrument, "tradexyz"), /Unsupported venue/u);
+});
+
+test("resolver rejects a canonical identity that does not match its fields", () => {
+  assert.throws(() => new InstrumentCapability().resolveVenueInstrument({
+    ...canonicalPerp(),
+    instrumentId: "BTC-USDT-PERP",
+  }, "binance"), /identity does not match/u);
 });
 
 test("rejects malformed canonical instruments", () => {

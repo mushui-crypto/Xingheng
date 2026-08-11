@@ -13,9 +13,12 @@ test("creates a passive Binance user execution intent", () => {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,
@@ -26,15 +29,35 @@ test("creates a passive Binance user execution intent", () => {
 });
 
 test("preserves a valid venue without selecting strategy behavior", () => {
-  const intent = createExecutionIntent({ ...intentInput(), venue: "bybit", symbol: "BTCUSDT" });
+  const intent = createExecutionIntent({ ...intentInput(), venue: "bybit", instrumentId: "BTC-USDT-PERP" });
   assert.equal(intent.venue, "bybit");
-  assert.equal(intent.symbol, "BTCUSDT");
+  assert.equal(intent.instrumentId, "BTC-USDT-PERP");
 });
 
 test("also accepts bitget as a valid venue without selecting strategy behavior", () => {
-  const intent = createExecutionIntent({ ...intentInput(), venue: "bitget", symbol: "ETHUSDT" });
+  const intent = createExecutionIntent({ ...intentInput(), venue: "bitget", instrumentId: "ETH-USDT-PERP" });
   assert.equal(intent.venue, "bitget");
-  assert.equal(intent.symbol, "ETHUSDT");
+  assert.equal(intent.instrumentId, "ETH-USDT-PERP");
+});
+
+test("expresses the same canonical instrument across multiple venues", () => {
+  const venues = ["binance", "okx", "bybit", "bitget"] as const;
+
+  for (const venue of venues) {
+    const intent = createExecutionIntent({
+      ...intentInput(),
+      venue,
+      accountId: `${venue}:account-1`,
+      instrumentId: "BTC-USDT-PERP",
+      quantity: {
+        asset: { symbol: "BTC", type: "DIGITAL_ASSET" },
+        quantity: "0.01",
+      },
+    });
+    assert.equal(intent.venue, venue);
+    assert.equal(intent.instrumentId, "BTC-USDT-PERP");
+    assert.equal(intent.quantity.asset.symbol, "BTC");
+  }
 });
 
 test("rejects missing or invalid required execution facts", () => {
@@ -43,11 +66,12 @@ test("rejects missing or invalid required execution facts", () => {
     [{ userId: undefined }, /userId is invalid/u],
     [{ venue: "tradexyz" }, /venue must be binance, okx, bybit, or bitget/u],
     [{ accountId: "" }, /accountId is invalid/u],
-    [{ symbol: "" }, /symbol must be an uppercase venue symbol/u],
-    [{ symbol: "xaut-usdt" }, /symbol must be an uppercase venue symbol/u],
+    [{ instrumentId: "" }, /instrumentId must be a canonical instrument id/u],
+    [{ instrumentId: "xaut-usdt-perp" }, /instrumentId must be a canonical instrument id/u],
+    [{ instrumentId: "XAUTUSDT" }, /instrumentId must be a canonical instrument id/u],
     [{ side: "long" }, /side must be buy or sell/u],
-    [{ quantity: "0" }, /quantity must be greater than zero/u],
-    [{ quantity: 0.002 }, /positive decimal string/u],
+    [{ quantity: { asset: { symbol: "XAUT", type: "RWA_ASSET" }, quantity: "0" } }, /quantity must be greater than zero/u],
+    [{ quantity: 0.002 }, /AssetQuantity must be an object/u],
     [{ orderConstraints: {} }, /reduceOnly must be a boolean/u],
     [{ executionMode: "AUTO" }, /executionMode must be PRICE_PRIORITY or EXECUTION_PRIORITY/u],
     [{ createdAt: 1.5 }, /createdAt must be a non-negative integer/u],
@@ -77,7 +101,10 @@ test("creation has no provider or trading side effects", () => {
   const source = readFileSync(new URL("./ExecutionIntent.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /BinanceClient|OrderManager|RiskGuard|Credential|placeOrder|cancelOrder|fetch\(/u);
   assert.doesNotMatch(source, /expectedProfit|fundingRateSignal|strategyScore|opportunityRanking|autoExecute/iu);
-  assert.deepEqual([...source.matchAll(/from\s+"([^"]+)"/gu)], []);
+  assert.deepEqual(
+    [...source.matchAll(/from\s+"([^"]+)"/gu)].map((match) => match[1]),
+    ["./AssetQuantity"],
+  );
 });
 
 function intentInput(): Record<string, unknown> {
@@ -86,9 +113,12 @@ function intentInput(): Record<string, unknown> {
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002000",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002000",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,

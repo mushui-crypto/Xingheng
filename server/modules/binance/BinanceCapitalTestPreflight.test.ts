@@ -44,7 +44,7 @@ test("rejects an unsupported Binance instrument", () => {
   const intent = intentFixture();
   const unsupported = {
     ...intent,
-    legs: [{ ...intent.legs[0], instrumentId: "binance:spot:BTC:USDT" }, intent.legs[1]],
+    legs: [{ ...intent.legs[0], instrumentId: "BTC-USDT-SPOT" }, intent.legs[1]],
   } as SpotPerpetualFundingArbitrageExecutionIntent;
   assertFail(unsupported, snapshotFixture(), "INSTRUMENT_UNSUPPORTED");
 });

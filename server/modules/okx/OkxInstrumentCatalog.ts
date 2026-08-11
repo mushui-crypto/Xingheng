@@ -1,5 +1,6 @@
 import type { InstrumentCatalogPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalInstrument } from "../cex/CexCanonicalModels";
+import { canonicalInstrumentId } from "../cex/Instrument";
 import type { OkxSwapInstrument } from "./OkxReadTypes";
 
 type OkxInstrumentSource = () => Promise<{ instruments: OkxSwapInstrument[]; fetchedAt: number }>;
@@ -10,7 +11,6 @@ export class OkxInstrumentCatalog implements InstrumentCatalogPort {
   constructor(private readonly source: OkxInstrumentSource) {}
 
   async getInstrument(instrumentId: string) {
-    if (!instrumentId.startsWith("okx:perpetual:linear:")) return null;
     return (await this.listInstruments()).find((instrument) => instrument.instrumentId === instrumentId) ?? null;
   }
 
@@ -27,7 +27,7 @@ export function toCanonicalOkxInstrument(raw: OkxSwapInstrument, fetchedAt: numb
     throw new Error(`Unsupported OKX underlying: ${raw.uly}.`);
   }
   return {
-    instrumentId: `okx:perpetual:linear:${raw.ctValCcy}:${raw.settleCcy}:${raw.settleCcy}`,
+    instrumentId: canonicalInstrumentId(raw.ctValCcy, raw.settleCcy, "perpetual"),
     venue: "okx",
     marketType: "perpetual",
     contractType: "linear_perpetual",

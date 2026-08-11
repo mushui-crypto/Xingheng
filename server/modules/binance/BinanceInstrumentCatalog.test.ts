@@ -58,6 +58,6 @@ test("Binance instrument catalog rejects an unknown canonical id without a provi
     },
   });
 
-  assert.equal(await catalog.getInstrument("binance:perpetual:linear:BTC:USDT:USDT"), null);
+  assert.equal(await catalog.getInstrument("BTC-USDT-PERP"), null);
   assert.equal(reads, 0);
 });

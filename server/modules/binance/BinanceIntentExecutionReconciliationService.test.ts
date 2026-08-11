@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { createExecutionRecord } from "../cex/ExecutionRecord";
+import type { BinanceStoredOrder } from "./BinanceOrderStore";
+import { BinanceIntentExecutionReconciliationService } from "./BinanceIntentExecutionReconciliationService";
+import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
+import type { BinanceProviderOrder } from "./BinanceTypes";
+
+const now = 1_800_000_000_000;
+
+test("maps GET-only remote Binance order facts for reconciliation", async () => {
+  const cases = [
+    ["Filled", "CONFIRMED", 0.002],
+    ["PartiallyFilled", "PENDING_CONFIRMATION", 0.0015],
+    ["New", "PENDING_CONFIRMATION", 0],
+    ["Cancelled", "FAILED", 0.0005],
+    ["Rejected", "FAILED", 0],
+    ["Expired", "FAILED", 0],
+    ["Unknown", "UNKNOWN", 0.00000001],
+  ] as const;
+
+  for (const [providerStatus, expectedState, filledQuantity] of cases) {
+    const binding = new FakeReconciliationBinding(providerOrder(providerStatus, filledQuantity));
+    const observation = await new BinanceIntentExecutionReconciliationService(binding, () => now)
+      .reconcile(executionRecord());
+
+    assert.equal(observation.state, expectedState);
+    assert.equal(observation.filledBaseQuantity, decimal(filledQuantity));
+    assert.equal(observation.observedAt, now);
+    assert.deepEqual(binding.providerQueries, [{ category: "linear", clientOrderId: "binance-client-order-1" }]);
+    assert.equal(binding.providerMutations, 0);
+  }
+});
+
+test("maps missing remote order and provider GET errors to UNKNOWN", async () => {
+  for (const remote of [null, new Error("provider GET unavailable")] as const) {
+    const binding = new FakeReconciliationBinding(remote);
+    const observation = await new BinanceIntentExecutionReconciliationService(binding, () => now)
+      .reconcile(executionRecord());
+
+    assert.deepEqual(observation, { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now });
+    assert.equal(binding.providerMutations, 0);
+  }
+});
+
+test("returns UNKNOWN without provider query when local execution identity is unavailable", async () => {
+  const binding = new FakeReconciliationBinding(providerOrder("Filled", 0.002), []);
+
+  const observation = await new BinanceIntentExecutionReconciliationService(binding, () => now)
+    .reconcile(executionRecord());
+
+  assert.equal(observation.state, "UNKNOWN");
+  assert.equal(binding.providerQueries.length, 0);
+  assert.equal(binding.providerMutations, 0);
+});
+
+test("reconciliation service exposes a GET lookup only and no mutation workflow", () => {
+  const source = readFileSync(
+    new URL("./BinanceIntentExecutionReconciliationService.ts", import.meta.url),
+    "utf8",
+  );
+  assert.match(source, /findExecutionOrderByClientOrderId/u);
+  assert.doesNotMatch(source, /\.reconciliation\s*\(|cancelOrder\s*\(|placeExecutionOrder\s*\(|awaitOrder\s*\(|retry\s*\(|fetch\(/iu);
+});
+
+class FakeReconciliationBinding {
+  readonly providerQueries: Array<{ category: "spot" | "linear"; clientOrderId: string }> = [];
+  providerMutations = 0;
+
+  constructor(
+    private readonly remote: BinanceProviderOrder | null | Error,
+    private readonly orders: BinanceStoredOrder[] = [storedOrder()],
+  ) {}
+
+  ordersState() {
+    return { orders: this.orders };
+  }
+
+  async findExecutionOrderByClientOrderId(category: "spot" | "linear", clientOrderId: string) {
+    this.providerQueries.push({ category, clientOrderId });
+    if (this.remote instanceof Error) throw this.remote;
+    return this.remote;
+  }
+}
+
+function storedOrder(): BinanceStoredOrder {
+  return {
+    idempotencyKey: binanceExecutionIdempotencyKeyFor(executionRecord()),
+    requestFingerprint: "request-fingerprint",
+    clientOrderId: "binance-client-order-1",
+    providerOrderId: "binance-order-1",
+    category: "linear",
+    executionMode: "production_ioc",
+    status: "processing",
+    order: providerOrder("New", 0),
+    error: null,
+    createdAt: now - 1_000,
+    updatedAt: now - 1_000,
+  };
+}
+
+function providerOrder(
+  status: BinanceProviderOrder["status"],
+  filledQuantityXaut: number,
+): BinanceProviderOrder {
+  return {
+    orderId: "binance-order-1",
+    orderLinkId: "binance-client-order-1",
+    status,
+    requestedQuantityXaut: 0.002,
+    filledQuantityXaut,
+    averagePrice: null,
+    feeUsd: 0,
+    updatedAt: now - 500,
+  };
+}
+
+function executionRecord() {
+  return createExecutionRecord({
+    executionId: "execution-1",
+    intentId: "intent-1",
+    executionAttemptId: "intent-1",
+    remoteOrderId: "binance-order-1",
+    userId: "user-a",
+    venue: "binance",
+    accountId: "binance:account-user-a",
+    instrumentId: "XAUT-USDT-PERP",
+    status: "PENDING_CONFIRMATION",
+    createdAt: now - 2_000,
+    updatedAt: now - 1_000,
+  });
+}
+
+function decimal(value: number) {
+  return value === 0.00000001 ? "0.00000001" : String(value);
+}

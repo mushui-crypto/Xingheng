@@ -105,7 +105,7 @@ test("rejects mismatched canonical and strategy instrument identity", () => {
   const decision = decisionFixture();
   const wrongDecision = {
     ...decision,
-    legs: [decision.legs[0], { ...decision.legs[1], instrumentId: "binance:perpetual:linear:BTC:USDT:USDT" }],
+    legs: [decision.legs[0], { ...decision.legs[1], instrumentId: "BTC-USDT-PERP" }],
   } as SpotPerpetualFundingArbitragePlan;
   assert.throws(
     () => buildBinanceSpotPerpetualCapitalTestIntent(instruments, wrongDecision, parameters),

@@ -1,16 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { BinanceExecutionCapability } from "../binance/BinanceExecutionCapability";
-import type {
-  OkxCancelOrderRequest,
-  OkxClientLike,
-  OkxOrderQuery,
-  OkxOrderRecord,
-  OkxPositionRecord,
-  OkxSubmitOrderRequest,
-} from "../okx/OkxClient";
-import { OkxExecutionCapability } from "../okx/OkxExecutionCapability";
 import type { ExecutionCapability } from "./ExecutionCapability";
 import { ExecutionCapabilityRegistry, executionCapability } from "./ExecutionCapabilityRegistry";
 import { ExecutionCoordinator } from "./ExecutionCoordinator";
@@ -19,23 +9,21 @@ import { createExecutionIntent, type ExecutionIntent } from "./ExecutionIntent";
 const now = 1_800_000_000_000;
 
 test("resolves a registered Binance execution capability", () => {
-  const service = new FakeBinanceService();
-  const capability = new BinanceExecutionCapability(service);
+  const capability = new MockExecutionCapability("binance");
   const registry = new ExecutionCapabilityRegistry()
     .register(executionCapability("binance", capability));
 
   assert.equal(registry.resolve("binance"), capability);
-  assert.equal(service.calls.length, 0);
+  assert.equal(capability.calls.length, 0);
 });
 
 test("resolves a registered OKX execution capability", () => {
-  const client = new FakeOkxClient();
-  const capability = new OkxExecutionCapability(client);
+  const capability = new MockExecutionCapability("okx");
   const registry = new ExecutionCapabilityRegistry()
     .register(executionCapability("okx", capability));
 
   assert.equal(registry.resolve("okx"), capability);
-  assert.equal(client.submitted.length, 0);
+  assert.equal(capability.calls.length, 0);
 });
 
 test("rejects unknown or duplicate venue registrations", () => {
@@ -102,66 +90,18 @@ class MockExecutionCapability {
   }
 }
 
-class FakeBinanceService {
-  readonly calls: ExecutionIntent[] = [];
-
-  async execute(executionIntent: ExecutionIntent) {
-    this.calls.push(executionIntent);
-    return Object.freeze({ executionAttemptId: "binance-attempt-1" });
-  }
-}
-
-class FakeOkxClient implements OkxClientLike {
-  readonly submitted: OkxSubmitOrderRequest[] = [];
-
-  async submitOrder(request: OkxSubmitOrderRequest): Promise<OkxOrderRecord> {
-    this.submitted.push(request);
-    return {
-      ordId: "okx-ord-1",
-      clOrdId: "intent-user-1",
-      instId: "XAUT-USDT-SWAP",
-      state: "live",
-      filledSz: "0",
-      avgPx: "0",
-    };
-  }
-
-  async getOrder(_query: OkxOrderQuery): Promise<OkxOrderRecord> {
-    return {
-      ordId: "okx-ord-1",
-      clOrdId: "intent-user-1",
-      instId: "XAUT-USDT-SWAP",
-      state: "filled",
-      filledSz: "0.002",
-      avgPx: "4325",
-    };
-  }
-
-  async cancelOrder(_request: OkxCancelOrderRequest): Promise<OkxOrderRecord> {
-    return {
-      ordId: "okx-ord-1",
-      clOrdId: "intent-user-1",
-      instId: "XAUT-USDT-SWAP",
-      state: "canceled",
-      filledSz: "0",
-      avgPx: "0",
-    };
-  }
-
-  async getPosition(_instId: string): Promise<OkxPositionRecord | null> {
-    return null;
-  }
-}
-
 function intent(overrides: Partial<Record<string, unknown>> = {}) {
   return createExecutionIntent({
     intentId: "intent-user-1",
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    symbol: "XAUTUSDT",
+    instrumentId: "XAUT-USDT-PERP",
     side: "buy",
-    quantity: "0.002",
+    quantity: {
+      asset: { symbol: "XAUT", type: "RWA_ASSET" },
+      quantity: "0.002",
+    },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,

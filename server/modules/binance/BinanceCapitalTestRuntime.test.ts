@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
+import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { SpotPerpetualFundingArbitrageExecutionIntent } from "../cex/funding-arbitrage/FundingArbitrageExecutionIntent";
+import { FundingArbitrageExecutionCoordinator } from "../cex/funding-arbitrage/FundingArbitrageExecutionCoordinator";
+import type { FundingArbitrageExecutionState } from "../cex/funding-arbitrage/FundingArbitrageExecutionState";
 import type { BinanceCapitalTestExecutionContext } from "./BinanceCapitalTestPreflight";
-import { executeBinanceCapitalTest } from "./BinanceCapitalTestRuntime";
-import type { BoundBinanceExecutionService } from "./BinanceExecutionCapability";
+import {
+  BinanceCapitalTestRuntime,
+  type BinanceCapitalTestLegRequest,
+} from "./BinanceCapitalTestRuntime";
 import {
   BINANCE_PERPETUAL_INSTRUMENT_ID,
   BINANCE_SPOT_INSTRUMENT_ID,
@@ -20,453 +25,331 @@ const context: BinanceCapitalTestExecutionContext = {
   accountId: "binance:capital-test",
   venue: "binance",
 };
+type BinanceOrderInput = Parameters<BinancePersonalTradingService["placeExecutionOrder"]>[0];
 
-test("confirmed HEDGED execution exits through the bound service and confirms flat", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  const runtime = runtimeFor(service);
-
-  const result = await runtime.execute(context, intentFixture());
-
-  assert.deepEqual(result.preflight, { status: "PASS" });
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(result.residualExit?.status === "EXITED" ? result.residualExit.message : null,
-    "Capital Test closed successfully");
-  assert.equal(service.exitInputs.length, 1);
-  assert.equal(service.spotExposure, 0);
-  assert.equal(service.perpetualExposure, 0);
-  assert.equal(service.placeInputs.length, 2);
-  assert.equal(result.attempts.length, 2);
-  assert.ok(result.attempts.every((attempt) => /^funding-arbitrage-attempt:0:/u.test(attempt.executionAttemptId)));
-});
-
-test("equal confirmed quantities with an OPEN leg do not become HEDGED or trigger exit", async () => {
-  const service = new RuntimeBinanceService(["Filled", "PartiallyFilled"]);
-  service.filledQuantities = [0.01, 0.01];
-
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "EXECUTING");
-  assert.equal(result.executionState?.legs[1].remoteObservation, "OPEN");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0");
-  assert.equal(result.residualExit, null);
-  assert.equal(service.exitInputs.length, 0);
-});
-
-test("HEDGED exit requires zero open orders before reporting a successful closure", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.openSpotOrdersAfterExit = 1;
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.residualExit?.status, "FAILED");
-  assert.match(result.residualExit?.reason ?? "", /zero open orders/u);
-});
-
-test("HEDGED exit failure is explicit and cannot report a successful closure", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.exitError = new Error("fixture hedged exit failed");
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.residualExit?.status, "FAILED");
-  assert.match(result.residualExit?.reason ?? "", /hedged exit failed/u);
-  assert.equal(service.spotExposure, 0.01);
-  assert.equal(service.perpetualExposure, 0.01);
-});
-
-test("a second-leg price jump cannot exceed the 40 USD mutation-time capital limit", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.perpetualExecutionPriceAfterFirstLeg = 3_500;
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(service.placeInputs.length, 1);
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(service.spotExposure, 0);
-  assert.equal(service.perpetualExposure, 0);
-});
-
-test("both attempt identities exist before the first mutation", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  const runtime = runtimeFor(service);
-
-  const result = await runtime.execute(context, intentFixture());
-
-  assert.equal(result.attempts.length, 2);
-  assert.equal(service.placeInputs.length, 2);
-  assert.match(String(service.placeInputs[0]?.idempotencyKey), /^funding-arbitrage:/u);
-  const source = readFileSync(new URL("./BinanceCapitalTestRuntime.ts", import.meta.url), "utf8");
-  assert.ok(source.indexOf("const attempts = intent.legs.map") < source.indexOf("for (const [index, leg]"));
-});
-
-test("repeated execution of the same intent preserves attempt and idempotency identities", async () => {
-  const service = new RuntimeBinanceService(["Rejected", "Rejected"]);
-  const runtime = runtimeFor(service);
-  const intent = intentFixture();
-
-  const first = await runtime.execute(context, intent);
-  const second = await runtime.execute(context, intent);
-
-  assert.deepEqual(second.attempts, first.attempts);
-  assert.equal(service.placeInputs.length, 2);
-  assert.equal(service.placeInputs[0]?.idempotencyKey, service.placeInputs[1]?.idempotencyKey);
-});
-
-test("UNKNOWN enters reconciliation and only confirmed observation completes the hedge", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Unknown"]);
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(service.reconciliationCalls, 1);
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.executionState?.legs[1].remoteObservation, "FILLED");
-  assert.notEqual(result.executionState?.status, "FAILED");
-});
-
-test("unresolved UNKNOWN remains PENDING_RECONCILIATION and preserves residual exposure", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Unknown"], undefined, false);
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "PENDING_RECONCILIATION");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.01");
-  assert.notEqual(result.executionState?.status, "FAILED");
-  assert.equal(result.residualExit, null);
-  assert.equal(service.exitInputs.length, 0);
-});
-
-test("a rejected observation reaches FAILED through the Coordinator without starting the second leg", async () => {
-  const service = new RuntimeBinanceService(["Rejected", "Filled"]);
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "FAILED");
-  assert.equal(result.executionState?.legs[0].remoteObservation, "REJECTED");
-  assert.equal(result.executionState?.legs[1].status, "NOT_STARTED");
-  assert.equal(service.placeInputs.length, 1);
-});
-
-test("spot fill and perpetual rejection preserve RESIDUAL, exit through the service, and confirm flat", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Rejected"]);
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.01");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.match(result.residualExit?.identity?.executionAttemptId ?? "", /^funding-arbitrage-residual-exit:/u);
-  assert.match(result.residualExit?.identity?.operationId ?? "", /^funding-arbitrage-residual-exit:/u);
-  assert.equal(service.exitInputs[0]?.idempotencyKey, result.residualExit?.identity?.operationId);
-  assert.equal(service.spotExposure, 0);
-  assert.equal(service.perpetualExposure, 0);
-  assert.ok(result.attempts.every(
-    (attempt) => attempt.executionAttemptId !== result.residualExit?.identity?.executionAttemptId,
-  ));
-  assert.ok(service.placeInputs.every(
-    (input) => input.idempotencyKey !== result.residualExit?.identity?.operationId,
-  ));
-});
-
-test("reconciliation-confirmed partial fill produces RESIDUAL and exits both confirmed exposures", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Unknown"]);
-  service.unknownResolutionStatus = "Cancelled";
-  service.unknownResolutionFilledQuantity = 0.004;
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(service.reconciliationCalls, 1);
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.006");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(service.exitInputs.length, 1);
-  assert.equal(service.spotExposure, 0);
-  assert.equal(service.perpetualExposure, 0);
-});
-
-test("confirmed residual at or below tolerance is HEDGED", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Cancelled"]);
-  service.filledQuantities = [0.002, 0.00199];
-  service.snapshotOverride = {
-    spot: { ...snapshotFixture().spot, bid: 4_339, ask: 4_340 },
-    perpetual: { ...snapshotFixture().perpetual, bid: 4_338, ask: 4_339, mark: 4_338 },
-  };
-  const baseIntent = intentFixture();
-  const intent = {
-    ...baseIntent,
-    constraints: { ...baseIntent.constraints, maxResidualBaseQuantity: "0.00001" },
-    legs: baseIntent.legs.map((leg) => ({ ...leg, targetDeltaBaseQuantity: "0.002" })),
-  } as unknown as SpotPerpetualFundingArbitrageExecutionIntent;
-  const result = await runtimeFor(service).execute(context, intent);
-
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.00001");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(service.exitInputs.length, 1);
-});
-
-test("more than 5000ms after the first confirmed fill blocks second mutation and exits residual", async () => {
-  let current = now + 1;
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.beforeMutation = () => {
-    if (service.placeInputs.length === 1) current += 6_000;
-  };
-
-  const result = await runtimeFor(service, () => current).execute(context, intentFixture());
-
-  assert.equal(service.placeInputs.length, 1);
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(service.exitInputs.length, 1);
-});
-
-test("a 501-4999ms delay after the first confirmed fill still allows the second mutation", async () => {
-  let clockCalls = 0;
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  const clock = () => {
-    clockCalls += 1;
-    return now + (clockCalls >= 5 ? 1_000 : 1);
-  };
-
-  const result = await runtimeFor(service, clock).execute(context, intentFixture());
-
-  assert.equal(service.placeInputs.length, 2);
-  assert.equal(result.executionState?.status, "HEDGED");
-  assert.equal(result.residualExit?.status, "EXITED");
-});
-
-test("intent expiry during the second leg safety window blocks provider mutation but permits residual exit", async () => {
-  const times = [now + 1, now + 2, now + 3, now + 4, now + 60, now + 61];
-  const service = new RuntimeBinanceService(["Filled", "Filled"], () => times.shift());
-  const intent = { ...intentFixture(), expiresAt: now + 50 };
-  const result = await runtimeFor(service, () => times.shift() ?? now + 61).execute(context, intent);
-
-  assert.equal(service.placeInputs.length, 1);
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.residualExit?.status, "EXITED");
-  assert.equal(service.exitInputs.length, 1);
-});
-
-test("exit failure is explicit and preserves the confirmed RESIDUAL state", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Rejected"]);
-  service.exitError = new Error("fixture exit rejected by existing safety chain");
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.executionState?.status, "RESIDUAL");
-  assert.equal(result.executionState?.residualExposure.residualQuantity, "0.01");
-  assert.equal(result.residualExit?.status, "FAILED");
-  assert.match(result.residualExit?.reason ?? "", /existing safety chain/u);
-  assert.equal(service.spotExposure, 0.01);
-  assert.equal(service.exitInputs.length, 1);
-});
-
-test("preflight failure performs no mutation and creates no execution state", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.snapshotOverride = { existingSpotQuantityXaut: 0.01 };
-  const result = await runtimeFor(service).execute(context, intentFixture());
-
-  assert.equal(result.preflight.status, "FAIL");
-  assert.equal(result.executionState, null);
-  assert.deepEqual(result.attempts, []);
-  assert.equal(service.placeInputs.length, 0);
-});
-
-test("registry binding rejects authenticated user mismatch before service access", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  const runtime = runtimeFor(service);
-
-  await assert.rejects(
-    () => runtime.execute(context, intentFixture(), "different-user"),
-    /authenticated user does not match/u,
+test("explicit first-leg submit uses ExecutionIntent runtime and does not execute the second leg", async () => {
+  const fixture = runtimeFixture("Filled");
+  const result = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
   );
-  assert.deepEqual(runtime.registryUserIds, []);
-  assert.equal(service.accountCalls, 0);
+
+  assert.equal(result.preflight.status, "PASS");
+  assert.equal(result.executionIntent?.instrumentId, "XAUT-USDT-SPOT");
+  assert.equal(result.executionIntent?.quantity.quantity, "0.01");
+  assert.equal(result.executionRecord?.intentId, "execution-intent-spot");
+  assert.equal(result.observation?.state, "CONFIRMED");
+  assert.equal(result.executionState.legs[0].status, "TERMINAL");
+  assert.equal(result.executionState.legs[1].status, "NOT_STARTED");
+  assert.equal(result.executionState.status, "RESIDUAL");
+  assert.equal(fixture.service.providerMutations, 1);
+  assert.equal(fixture.service.placeInputs.length, 1);
+  assert.equal(fixture.service.placeInputs[0]?.category, "spot");
+  assert.equal(fixture.service.placeInputs[0]?.side, "Buy");
 });
 
-test("registry-bound service owner mismatch fails preflight before mutation", async () => {
-  const service = new RuntimeBinanceService(["Filled", "Filled"]);
-  service.accountId = "binance:different-owner";
-  const runtime = runtimeFor(service);
-  const result = await runtime.execute(context, intentFixture());
-
-  assert.equal(result.preflight.status, "FAIL");
-  if (result.preflight.status === "FAIL") assert.equal(result.preflight.reason, "ACCOUNT_BINDING_MISMATCH");
-  assert.deepEqual(runtime.registryUserIds, [context.userId]);
-  assert.equal(service.placeInputs.length, 0);
-});
-
-test("runtime composition requires Registry binding and imports no Client, OrderManager, RiskGuard, or credential", () => {
-  const source = readFileSync(new URL("./BinanceCapitalTestRuntime.ts", import.meta.url), "utf8");
-  const residualSource = readFileSync(new URL("./BinanceCapitalTestResidualExit.ts", import.meta.url), "utf8");
-  assert.doesNotMatch(
-    `${source}\n${residualSource}`,
-    /BinanceClient|BinanceOrderManager|BinanceRiskGuard|Credential/iu,
+test("current funding-cycle spot exposure allows the confirmed perpetual hedge leg", async () => {
+  const fixture = runtimeFixture("Filled");
+  const fundingIntent = intentFixture();
+  const first = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    fundingIntent,
+    startedState(),
+    request(),
   );
-  assert.match(source, /registry\.run\(authenticatedUserId/u);
-  assert.match(source, /new BinanceExecutionCapability/u);
-  assert.match(source, /this\.service\.account\(\)/u);
-  assert.match(residualSource, /this\.service\.exit\(/u);
-  assert.match(residualSource, /this\.service\.account\(\)/u);
+  fixture.service.snapshotOverride = {
+    existingSpotQuantityXaut: 0.01,
+    existingPerpetualQuantityXaut: 0,
+    perpetualPositionSide: "flat",
+  };
+
+  const second = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    fundingIntent,
+    first.executionState,
+    {
+      ...request(),
+      legId: "leg-perpetual-short",
+      executionIntentId: "execution-intent-perpetual",
+    },
+  );
+
+  assert.equal(second.preflight.status, "PASS");
+  assert.equal(second.executionIntent?.instrumentId, "XAUT-USDT-PERP");
+  assert.equal(second.executionRecord?.status, "CONFIRMED");
+  assert.equal(second.executionState.status, "HEDGED");
+  assert.equal(second.executionState.residualExposure.residualQuantity, "0");
+  assert.equal(fixture.service.providerMutations, 2);
+  assert.deepEqual(fixture.service.placeInputs.map((input) => input.category), ["spot", "linear"]);
 });
 
-test("capital test dependency surface contains no direct Binance client mutation", () => {
-  const sources = [
-    "./BinanceCapitalTestPreflight.ts",
-    "./BinanceCapitalTestRuntime.ts",
-    "./BinanceCapitalTestResidualExit.ts",
-    "./BinanceSpotPerpetualCapitalTestIntentBuilder.ts",
-    "./BinanceExecutionCapability.ts",
-    "./BinanceAdapter.ts",
-  ].map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n");
-  assert.doesNotMatch(sources, /from\s+["']\.\/BinanceClient["']/u);
-  assert.doesNotMatch(sources, /(?:this\.)?client\.(?:placeOrder|placeTestOrder|cancelOrder)\s*\(/u);
+test("local query synchronizes partial fill quantity through the funding state bridge", async () => {
+  const fixture = runtimeFixture("New");
+  const submitted = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+  fixture.service.setLocalOrder("PartiallyFilled", 0.004);
+
+  const queried = await fixture.runtime.queryLeg(
+    context.userId,
+    submitted.executionState,
+    "leg-spot-long",
+    submitted.link!,
+  );
+
+  assert.equal(queried.observation?.state, "PENDING_CONFIRMATION");
+  assert.equal(queried.observation?.filledBaseQuantity, "0.004");
+  assert.equal(queried.executionState.legs[0].status, "ACTIVE");
+  assert.equal(queried.executionState.legs[0].remainingQuantity, "0.006");
+  assert.equal(fixture.service.providerMutations, 1);
 });
 
-type RuntimeService = BoundBinanceExecutionService & Pick<BinancePersonalTradingService, "account" | "exit">;
+test("GET-only reconciliation resolves UNKNOWN and updates the linked funding leg", async () => {
+  const fixture = runtimeFixture("Unknown");
+  fixture.service.remoteOrder = providerOrder("Filled", 0.01, now + 200);
+  const submitted = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
 
-class RuntimeBinanceService implements RuntimeService {
-  readonly placeInputs: Array<Record<string, unknown>> = [];
-  readonly exitInputs: Array<Record<string, unknown>> = [];
-  accountCalls = 0;
-  reconciliationCalls = 0;
+  assert.equal(submitted.executionState.status, "PENDING_RECONCILIATION");
+  const reconciled = await fixture.runtime.reconcileLeg(
+    context.userId,
+    submitted.executionState,
+    "leg-spot-long",
+    submitted.link!,
+  );
+
+  assert.equal(reconciled.observation?.state, "CONFIRMED");
+  assert.equal(reconciled.executionState.legs[0].remoteObservation, "FILLED");
+  assert.equal(reconciled.executionState.status, "RESIDUAL");
+  assert.equal(fixture.service.providerQueries, 1);
+  assert.equal(fixture.service.providerMutations, 1);
+});
+
+test("explicit cancel updates the ExecutionRecord and funding leg without automatic follow-up", async () => {
+  const fixture = runtimeFixture("New");
+  const submitted = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+
+  const cancelled = await fixture.runtime.cancelLeg(
+    context.userId,
+    submitted.executionState,
+    "leg-spot-long",
+    submitted.link!,
+  );
+
+  assert.equal(cancelled.executionRecord.status, "FAILED");
+  assert.equal(cancelled.executionState.legs[0].status, "FAILED");
+  assert.equal(cancelled.executionState.legs[1].status, "NOT_STARTED");
+  assert.equal(fixture.service.providerMutations, 2);
+  assert.equal(fixture.service.placeInputs.length, 1);
+});
+
+test("unresolved UNKNOWN remains pending reconciliation", async () => {
+  const fixture = runtimeFixture("Unknown");
+  fixture.service.remoteOrder = new Error("GET unavailable");
+  const submitted = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+  const reconciled = await fixture.runtime.reconcileLeg(
+    context.userId,
+    submitted.executionState,
+    "leg-spot-long",
+    submitted.link!,
+  );
+
+  assert.equal(reconciled.executionRecord.status, "UNKNOWN");
+  assert.equal(reconciled.executionState.status, "PENDING_RECONCILIATION");
+  assert.equal(reconciled.executionState.legs[0].remoteObservation, "UNKNOWN_REMOTE_STATE");
+  assert.equal(fixture.service.providerMutations, 1);
+});
+
+test("preflight and mutation-time capital guards preserve zero-mutation rejection", async () => {
+  const preflightFailure = runtimeFixture("Filled");
+  preflightFailure.service.snapshotOverride = { existingSpotQuantityXaut: 0.01 };
+  const failed = await preflightFailure.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+  assert.equal(failed.preflight.status, "FAIL");
+  assert.equal(failed.executionRecord, null);
+  assert.equal(preflightFailure.service.providerMutations, 0);
+
+  const mutationFailure = runtimeFixture("Filled");
+  mutationFailure.service.marketPrice = 4_000;
+  const guarded = await mutationFailure.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+  assert.equal(guarded.executionRecord?.status, "UNKNOWN");
+  assert.equal(mutationFailure.service.providerMutations, 0);
+});
+
+test("capital-test runtime depends on canonical runtime boundaries and contains no old execution calls", () => {
+  assert.equal(existsSync(new URL("./BinanceCapitalTestResidualExit.ts", import.meta.url)), false);
+  const source = readFileSync(new URL("./BinanceCapitalTestRuntime.ts", import.meta.url), "utf8");
+  assert.match(source, /FundingArbitrageIntentAdapter/u);
+  assert.match(source, /BinanceIntentExecutionRuntime/u);
+  assert.match(source, /FundingLegExecutionStateBridge/u);
+  assert.doesNotMatch(source, /BinanceExecutionCapability|queryLegState|this\.capability/u);
+  assert.doesNotMatch(source, /BinanceCapitalTestResidualExit|\.exit\(|for\s*\([^)]*intent\.legs/u);
+  assert.doesNotMatch(source, /BinanceClient|BinanceOrderManager|BinanceRiskGuard|Credential/iu);
+});
+
+function runtimeFixture(initialStatus: BinanceProviderOrder["status"]) {
+  let currentTime = now + 10;
+  let executionSequence = 0;
+  const clock = () => ++currentTime;
+  const service = new RuntimeBinanceService(initialStatus, clock);
+  const records = new RuntimeExecutionRecordStore();
+  const registry = {
+    async run<T>(userId: string, operation: (bound: RuntimeBinanceService) => Promise<T> | T) {
+      if (userId !== context.userId) throw new Error("Missing user service.");
+      return operation(service);
+    },
+  };
+  return {
+    service,
+    records,
+    runtime: new BinanceCapitalTestRuntime(
+      registry,
+      records,
+      {
+        maxSlippageBps: 20,
+        clock,
+        createExecutionId: () => `execution-record-${++executionSequence}`,
+      },
+    ),
+  };
+}
+
+class RuntimeExecutionRecordStore {
+  private readonly records = new Map<string, ExecutionRecord>();
+
+  create(record: ExecutionRecord) {
+    this.records.set(record.executionId, record);
+  }
+
+  update(record: ExecutionRecord) {
+    this.records.set(record.executionId, record);
+  }
+
+  loadForUser(userId: string, executionId: string) {
+    const record = this.records.get(executionId);
+    return record?.userId === userId ? record : null;
+  }
+}
+
+class RuntimeBinanceService {
+  readonly placeInputs: BinanceOrderInput[] = [];
+  providerMutations = 0;
+  providerQueries = 0;
   snapshotOverride: Record<string, unknown> = {};
-  accountId = context.accountId;
-  spotExposure = 0;
-  perpetualExposure = 0;
-  filledQuantities: number[] = [];
-  unknownResolutionStatus: BinanceProviderOrder["status"] = "Filled";
-  unknownResolutionFilledQuantity = 0.01;
-  exitError: Error | null = null;
-  openSpotOrdersAfterExit = 0;
-  openSpotOrderCount = 0;
-  perpetualExecutionPriceAfterFirstLeg: number | null = null;
-  marketCalls = 0;
-  private readonly statuses: BinanceProviderOrder["status"][];
-  beforeMutation?: () => void;
-  private readonly resolveUnknown: boolean;
+  marketPrice = 1_000;
+  remoteOrder: BinanceProviderOrder | null | Error = null;
   private orders: BinanceStoredOrder[] = [];
 
   constructor(
-    statuses: BinanceProviderOrder["status"][],
-    beforeMutation?: () => void,
-    resolveUnknown = true,
-  ) {
-    this.statuses = [...statuses];
-    this.beforeMutation = beforeMutation;
-    this.resolveUnknown = resolveUnknown;
-  }
+    private readonly initialStatus: BinanceProviderOrder["status"],
+    private readonly clock: () => number,
+  ) {}
 
   async account() {
-    this.accountCalls += 1;
-    return snapshotFixture({
-      accountId: this.accountId,
-      existingSpotQuantityXaut: this.spotExposure,
-      spotFreeXaut: this.spotExposure,
-      spotAvailableQuantityXaut: this.spotExposure,
-      existingPerpetualQuantityXaut: this.perpetualExposure,
-      openSpotOrderCount: this.openSpotOrderCount,
-      ...this.snapshotOverride,
-    });
+    return snapshotFixture({ accountId: context.accountId, ...this.snapshotOverride });
   }
 
   async market() {
-    const snapshot = snapshotFixture({ accountId: context.accountId });
-    this.marketCalls += 1;
-    if (this.marketCalls > 1 && this.perpetualExecutionPriceAfterFirstLeg !== null) {
-      snapshot.perpetual.bid = this.perpetualExecutionPriceAfterFirstLeg;
-      snapshot.perpetual.ask = this.perpetualExecutionPriceAfterFirstLeg;
-      snapshot.perpetual.mark = this.perpetualExecutionPriceAfterFirstLeg;
-    }
+    const snapshot = snapshotFixture();
     return {
       fetchedAt: snapshot.fetchedAt,
       productAvailability: snapshot.productAvailability,
-      spot: snapshot.spot,
-      perpetual: snapshot.perpetual,
+      spot: { ...snapshot.spot, bid: this.marketPrice - 1, ask: this.marketPrice },
+      perpetual: { ...snapshot.perpetual, bid: this.marketPrice, ask: this.marketPrice + 1, mark: this.marketPrice },
       fees: snapshot.fees,
     };
   }
 
-  async placeExecutionOrder(input: unknown, beforeProviderMutation?: () => void | Promise<void>) {
-    this.beforeMutation?.();
-    await beforeProviderMutation?.();
-    const prepared = input as Record<string, unknown>;
-    this.placeInputs.push(prepared);
-    const status = this.statuses[this.placeInputs.length - 1] ?? "Rejected";
-    const configuredFilledQuantity = this.filledQuantities[this.placeInputs.length - 1];
-    const filledQuantity = configuredFilledQuantity
-      ?? (status === "Filled" ? Number(prepared.quantityXaut) : 0);
-    const order = providerOrder(status, filledQuantity, now + this.placeInputs.length + 2);
-    if (filledQuantity > 0) {
-      if (prepared.category === "linear") this.perpetualExposure = filledQuantity;
-      else this.spotExposure = filledQuantity;
-    }
-    this.orders.push(storedOrder(String(prepared.idempotencyKey), prepared.category, order));
+  async placeExecutionOrder(
+    input: BinanceOrderInput,
+    beforeProviderMutation?: (riskValuationPrice?: number) => void | Promise<void>,
+  ) {
+    await beforeProviderMutation?.(input.limitPrice ?? this.marketPrice);
+    this.providerMutations += 1;
+    this.placeInputs.push(input);
+    const filled = this.initialStatus === "Filled" ? input.quantityXaut : 0;
+    const order = providerOrder(this.initialStatus, filled, this.clock());
+    this.orders = [storedOrder(input, order)];
     return order;
-  }
-
-  async exit(input: unknown) {
-    const body = input as Record<string, unknown>;
-    this.exitInputs.push(body);
-    if (this.exitError) throw this.exitError;
-    this.spotExposure = 0;
-    this.perpetualExposure = 0;
-    this.openSpotOrderCount = this.openSpotOrdersAfterExit;
-    return {
-      state: "closed" as const,
-      spot: null,
-      perpetual: null,
-      snapshot: await this.account(),
-    };
-  }
-
-  async cancelOrder() {
-    return providerOrder("Cancelled", 0, now + 20);
   }
 
   ordersState() {
     return { orders: this.orders };
   }
 
-  async reconciliation() {
-    this.reconciliationCalls += 1;
-    if (this.resolveUnknown) {
-      this.orders = this.orders.map((stored) => stored.order?.status === "Unknown"
-        ? (() => {
-          const resolved = providerOrder(
-            this.unknownResolutionStatus,
-            this.unknownResolutionFilledQuantity,
-            now + 20,
-          );
-          if (stored.category === "linear") this.perpetualExposure = resolved.filledQuantityXaut;
-          else this.spotExposure = resolved.filledQuantityXaut;
-          return storedOrder(stored.idempotencyKey, stored.category, resolved);
-        })()
-        : stored);
-    }
-    return { reconciled: [], snapshot: snapshotFixture(), orders: this.orders };
+  async findExecutionOrderByClientOrderId() {
+    this.providerQueries += 1;
+    if (this.remoteOrder instanceof Error) throw this.remoteOrder;
+    return this.remoteOrder;
+  }
+
+  async cancelOrder(input: { idempotencyKey: string }) {
+    this.providerMutations += 1;
+    const current = this.orders.find((order) => order.idempotencyKey === input.idempotencyKey);
+    const order = providerOrder("Cancelled", current?.order?.filledQuantityXaut ?? 0, this.clock());
+    if (current) this.orders = [{ ...current, order, updatedAt: order.updatedAt }];
+    return order;
+  }
+
+  setLocalOrder(status: BinanceProviderOrder["status"], filledQuantityXaut: number) {
+    const current = this.orders[0]!;
+    const order = providerOrder(status, filledQuantityXaut, this.clock());
+    this.orders = [{ ...current, order, updatedAt: order.updatedAt }];
   }
 }
 
-function runtimeFor(
-  service: RuntimeService,
-  clock: () => number = () => now + 10,
-) {
-  const registryUserIds: string[] = [];
-  const registry = {
-    run: async (userId: string, operation: (boundService: RuntimeService) => unknown) => {
-      registryUserIds.push(userId);
-      return operation(service);
-    },
-  } as unknown as Parameters<typeof executeBinanceCapitalTest>[0];
+function startedState(): FundingArbitrageExecutionState {
+  const coordinator = new FundingArbitrageExecutionCoordinator();
+  const created = coordinator.createExecution(intentFixture());
+  return coordinator.transition(created, { type: "START_EXECUTION", occurredAt: now + 1 });
+}
+
+function request(): BinanceCapitalTestLegRequest {
   return {
-    registryUserIds,
-    execute: (
-      executionContext: BinanceCapitalTestExecutionContext,
-      intent: SpotPerpetualFundingArbitrageExecutionIntent,
-      authenticatedUserId = executionContext.userId,
-    ) => executeBinanceCapitalTest(
-      registry,
-      authenticatedUserId,
-      executionContext,
-      intent,
-      { maxSlippageBps: 20, clock },
-    ),
+    confirmed: true,
+    legId: "leg-spot-long",
+    executionIntentId: "execution-intent-spot",
+    quantityAsset: { symbol: "XAUT", type: "RWA_ASSET" },
+    orderConstraints: { reduceOnly: false },
+    executionMode: "PRICE_PRIORITY",
+    expiresAt: now + 50_000,
   };
 }
 
@@ -506,8 +389,8 @@ function providerOrder(
   updatedAt: number,
 ): BinanceProviderOrder {
   return {
-    orderId: "fixture-runtime",
-    orderLinkId: "fixture-runtime",
+    orderId: "fixture-runtime-order",
+    orderLinkId: "fixture-runtime-client-order",
     status,
     requestedQuantityXaut: 0.01,
     filledQuantityXaut,
@@ -517,17 +400,13 @@ function providerOrder(
   };
 }
 
-function storedOrder(
-  idempotencyKey: string,
-  category: unknown,
-  order: BinanceProviderOrder,
-): BinanceStoredOrder {
+function storedOrder(input: BinanceOrderInput, order: BinanceProviderOrder): BinanceStoredOrder {
   return {
-    idempotencyKey,
+    idempotencyKey: input.idempotencyKey,
     requestFingerprint: "fixture-runtime",
-    clientOrderId: "fixture-runtime",
+    clientOrderId: order.orderLinkId,
     providerOrderId: order.orderId,
-    category: category === "linear" ? "linear" : "spot",
+    category: input.category,
     executionMode: "production_ioc",
     status: order.status === "Filled" ? "completed" : "processing",
     order,
