@@ -1,142 +1,182 @@
-# 标准 Release 流程
+# 部署流程
 
-本文定义项目统一、可审计的 Release Workflow。它补充而不替代现有可信 Linux
-候选构建、verified release、production acceptance、zero capital acceptance、
-permit schema 和生产 operation lock。发生冲突时，现有生产安全门禁取更严格值；任何
-Release PASS 都不授予 provider、交易、持仓、资金或 permit 权限。
+本文定义当前项目实际可执行的部署流程。它替代此前未落地的 Release Workflow 草案。
 
-## 1. Release 生命周期
+项目定位是个人自用、小规模多用户、小额真实资金验证。部署流程保持简单、可审计、可回滚，不引入
+不存在的 release gate、manifest、trusted launcher 或企业级发布系统。
 
-```text
-Development
-→ Review
-→ Commit
-→ Revision Identity
-→ Build Artifact
-→ Release Manifest
-→ Production Gate
-→ Deploy
-→ Verify
-```
+## 1. 基本原则
 
-各阶段必须使用同一提交及其制品身份。Review 包含任务等级要求的 Code Review、Architecture
-Review 和安全审查；未经所需审查不得进入 Commit。Agent 可以准备候选、运行只读检查和整理
-证据，但不得自行创建或部署 production release。
+- 部署必须绑定一个已提交的 commit SHA。
+- 镜像 tag 必须使用完整 commit SHA，不以 `latest` 作为唯一依据。
+- 部署前必须确认工作区 clean。
+- 部署可以由用户明确授权后执行。
+- 部署不等于真实交易授权。
+- 部署流程不得自动打开 `LIVE_TRADING_ENABLED`。
+- 部署流程不得自动关闭 `BINANCE_KILL_SWITCH`。
+- 部署流程不得自动执行 funding cycle、repair、retry、residual close 或 provider mutation。
 
-## 2. 提交规范
+## 2. 提交检查
 
-所有提交必须精确指定文件，禁止使用 `git add .`、`git add -A` 或等价的全工作区暂存方式。
-提交前必须执行：
+部署前记录：
 
 ```bash
-git status
+git rev-parse --verify HEAD^{commit}
+git rev-parse --verify HEAD^{tree}
+git status --short --branch
 git diff --check
-git diff --stat
 ```
 
-推荐先运行 `./scripts/release-check.sh`。工作区中任何未提交或未跟踪文件都会阻断 release
-candidate；不得通过清理、覆盖或夹带其他人的改动来绕过。
+要求：
 
-Commit message 格式：
+- `git status` 必须 clean。
+- commit SHA 必须与计划部署版本一致。
+- 不允许把 `.env.production`、secret、SQLite、receipt、日志或 build artifact 纳入提交。
 
-```text
-<type>(scope): description
-```
+## 3. 构建检查
 
-`type` 只能是：`feat`、`fix`、`refactor`、`test`、`docs`、`chore`、`security`、
-`release`。
-
-## 3. Revision Identity
-
-每个 release candidate 必须从精确、已提交的 Git 对象记录：
-
-- commit SHA：`git rev-parse --verify HEAD^{commit}`
-- git tree SHA：`git rev-parse --verify HEAD^{tree}`
-- parent commit：`git rev-parse --verify HEAD^1`
-
-合并提交仍记录第一父提交；如需审计其他父提交，必须作为补充证据列出。短 SHA、工作区
-diff、tag 或分支名不能替代完整 revision identity。
-
-## 4. Artifact Identity
-
-正式制品只能由既有可信构建链生成。每次构建必须记录：
-
-- image/artifact name
-- 不可变 `sha256:<64 hex>` digest
-- UTC build timestamp
-
-项目的 canonical artifact manifest 仍是严格 schema 的 `release-manifest.json`，其中绑定完整
-commit SHA 与 API、Web、strategy-tools 三个 image digest。构建时间由外层审计输出记录，禁止
-向既有 JSON schema 增加未批准字段。
-
-`RELEASE_<version>.md` 在 Deploy 后由 Verify 结果完成 production 身份归档；在它生成前，
-canonical `release-manifest.json` 已在 Build Artifact 阶段生成并作为后续 Gate 与 Deploy 的唯一
-制品输入。两者名称相近但职责不同，不得互相替代。
-
-## 5. Release Manifest
-
-每个正式版本生成根目录下的 `RELEASE_<version>.md`，文件名中的 version 只允许字母、数字、
-点、下划线和连字符。它是对 canonical `release-manifest.json` 的审计摘要，不替代后者，必须包含：
-
-- version
-- commit sha
-- tree sha
-- artifact digest（逐项列出）
-- environment
-- test status
-- security status
-- approval status
-- deployment revision / health / rollback point 的 Production Gate 结果
-
-若任何 required evidence 缺失，manifest 状态只能是 `BLOCKED`，不得写成 production release。
-
-## 6. Production Gate
-
-production release 必须对同一个 revision 全部验证为 `PASS`：
-
-- commit identity
-- tree identity
-- artifact digest
-- deployment revision
-- health check
-- rollback point
-
-此外 test、security、approval 必须明确为 `PASS`。任一项失败、未知、缺失或不一致时，整体状态
-必须为 `BLOCKED`，不得标记为 production release。Production Gate 的批准只允许部署已验证制品；
-它不等于 Mainnet、真实资金、provider access、kill switch 解除或 permit 批准。
-
-部署仍必须通过既有受控入口：
+部署前运行：
 
 ```bash
-./scripts/activate-release.sh deploy/release-manifest.json
+npm run build
 ```
 
-不得让新包装脚本直接调用 Docker Compose、改写 `.env.production`、修改权限或更改生产配置。
-
-## 7. Rollback
-
-禁止通过重新构建回滚。回滚目标必须是 release lifecycle receipt 中已冻结且验证过的上一制品：
-
-```text
-deploy previous verified artifact
-```
-
-标准入口为：
+构建镜像时使用完整 commit SHA：
 
 ```bash
-./scripts/rollback-release.sh <RELEASE_OPERATION_ID>
+docker build --target api --build-arg GIT_COMMIT=<commit-sha> -t stellax-personal-api:<commit-sha> .
+docker build --target web --build-arg GIT_COMMIT=<commit-sha> -t stellax-personal-web:<commit-sha> .
 ```
 
-该入口恢复并验证 receipt 绑定的 previous revision、image digest 与 environment identity。不得用
-可覆盖 tag、当前源码重建或人工拼接镜像替代。
+构建日志中的依赖审计提示需要记录，但不在部署流程中自动升级依赖。
 
-## 8. 标准脚本边界
+## 4. Production 环境要求
 
-- `release-check.sh`：只读检查 Git 状态、diff、未提交文件和敏感文件名。
-- `release-build.sh`：默认只做候选预检；仅显式传入 `--build` 时调用既有可信制品构建入口。
-- `release-verify.sh`：只读核对 commit/tree、manifest digest、镜像及可选的 production runtime。
-- `release-promote.sh`：默认只读执行 Production Gate；仅显式传入 `--generate` 且全部 PASS 时创建
-  `RELEASE_<version>.md`。
+生产环境必须配置：
 
-这些脚本不得执行资金动作、修改权限或修改生产配置。构建、部署和回滚分别保留各自既有的人工
-批准与可信 operation boundary。
+```text
+NODE_ENV=production
+GIT_COMMIT=<commit-sha>
+DOMAIN=<domain>
+APP_PUBLIC_URL=https://<domain>
+CORS_ALLOWED_ORIGINS=https://<domain>
+TRADING_DB_PATH=/app/data/trading.sqlite
+BINANCE_USER_ORDER_DB_DIR=/app/data/binance-users
+BINANCE_TRADING_DB_PATH=/app/data/binance-personal.sqlite
+LIVE_TRADING_ENABLED=false
+BINANCE_KILL_SWITCH=true
+GCP_KMS_CREDENTIAL_KEY_NAME=<full CryptoKey resource name>
+GOOGLE_ADC_DIR=<host adc directory>
+```
+
+要求：
+
+- `BINANCE_USER_ORDER_DB_DIR` 必须位于 `/app/data/binance-users`。
+- `/app/data` 必须是持久 volume。
+- `/backups` 必须是持久 volume。
+- Binance API key 禁止提现权限。
+- KMS/ADC 缺失时应 fail closed。
+
+## 5. Compose 检查
+
+部署前运行：
+
+```bash
+docker compose config
+```
+
+确认：
+
+- `sqlite_data` 挂载到 `/app/data`。
+- `sqlite_backups` 挂载到 `/backups`。
+- `GOOGLE_ADC_DIR` 只读挂载到 `/run/secrets/gcp-wif`。
+- `LIVE_TRADING_ENABLED=false`。
+- `BINANCE_KILL_SWITCH=true`。
+
+## 6. 部署
+
+用户明确授权部署后，可以执行：
+
+```bash
+docker compose up -d api web
+```
+
+部署后检查：
+
+```bash
+docker compose ps
+scripts/smoke.sh https://<domain>
+```
+
+部署动作只允许更新服务进程和镜像版本。不得在部署步骤中：
+
+- 修改 `.env.production`。
+- 打开 `LIVE_TRADING_ENABLED`。
+- 关闭 `BINANCE_KILL_SWITCH`。
+- 调用 provider mutation。
+- 执行 capital harness。
+- 执行 funding manual execution API。
+
+## 7. 备份
+
+部署前后可执行：
+
+```bash
+scripts/backup.sh
+```
+
+备份应覆盖：
+
+- `TRADING_DB_PATH` 对应 SQLite。
+- `BINANCE_USER_ORDER_DB_DIR` 下的 user order SQLite。
+- receipt/audit `jsonl`。
+
+## 8. 回滚
+
+回滚使用已知可启动的上一组镜像 tag 和最近可用 SQLite backup snapshot。
+
+代码回滚：
+
+```bash
+GIT_COMMIT=<previous-commit-sha> docker compose up -d api web
+```
+
+数据恢复：
+
+```bash
+scripts/restore.sh stellax-YYYYMMDDTHHMMSSZ
+```
+
+回滚期间必须保持：
+
+```text
+LIVE_TRADING_ENABLED=false
+BINANCE_KILL_SWITCH=true
+```
+
+回滚不得自动 retry、resubmit、reopen position 或 residual close。
+
+## 9. 真实资金激活
+
+真实资金激活不是部署的一部分。
+
+首次真实资金前必须人工确认：
+
+- Binance credential 权限正确，且禁止提现。
+- account / balance / position / orders readonly 检查通过。
+- 当前无未知 exposure。
+- 当前无异常 `UNKNOWN` / `PENDING_CONFIRMATION` execution。
+- 已完成部署后 backup。
+
+只有在人工确认后，才可以单独调整：
+
+```text
+LIVE_TRADING_ENABLED=true
+BINANCE_KILL_SWITCH=false
+```
+
+完成小额验证后，应恢复：
+
+```text
+BINANCE_KILL_SWITCH=true
+```

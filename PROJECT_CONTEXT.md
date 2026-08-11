@@ -396,14 +396,15 @@ P2#2、STS `403` 和 rollback evidence 缺失继续作为已接受风险记录�
 
 ------------------------------------------------------------------------
 
-# 12. Trusted Release Build 环境确认（2026-08-03）
+# 12. 部署流程边界更新（2026-08-12）
 
--   已由人工确认：既有 trusted Linux root build host 可用于当前
-    `6efe18eb943b8a57750eeeb06700f101bd676414` 及后续同类标准 Release Workflow。
--   后续同类 Release Workflow 不需要重复判断该 build host 是否存在；每次构建仍必须通过
-    既有 trusted candidate installer、`trusted-operation-launcher`、release-build、artifact
-    identity 和 manifest verification 边界。
--   该确认仅表示 build host 已人工确认可用于上述范围，不表示永久可信、自动授权、production
-    approval、Provider access、真实资金授权或交易授权。
+-   此前文档中的标准 Release Workflow 属于未完整落地的草案；相关脚本和 trusted launcher
+    不再作为当前部署前置。
+-   当前部署流程以 [`RELEASE_PROCESS.md`](./RELEASE_PROCESS.md) 为准：固定 commit SHA、固定
+    Docker image tag、`docker compose config`、`npm run build`、Docker build、`docker compose
+    up -d api web`、health/smoke check、SQLite backup/restore。
+-   部署可以在用户明确授权后执行，但部署不等于真实资金授权。
+-   部署流程不得自动打开 `LIVE_TRADING_ENABLED`，不得自动关闭 `BINANCE_KILL_SWITCH`，不得执行
+    provider mutation、funding cycle、repair、retry 或 residual close。
 -   主机地址、账号、密钥、凭证和敏感访问方式不进入项目文档；实际连接与制品交付继续使用受控
     运维渠道。
