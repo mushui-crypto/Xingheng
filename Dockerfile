@@ -21,6 +21,8 @@ ENV NODE_ENV=production \
     STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json \
     MARTINGALE_GRID_PAPER_REPORT_PATH=/app/strategy-data/martingale-grid-paper.json
 WORKDIR /app
+RUN groupadd --system --gid 20001 xingheng \
+  && useradd --system --uid 20001 --gid 20001 --home-dir /app --shell /usr/sbin/nologin xingheng
 RUN apt-get update \
   && apt-get install -y --no-install-recommends sqlite3 \
   && rm -rf /var/lib/apt/lists/*
@@ -29,8 +31,8 @@ RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist-server ./dist-server
 COPY scripts ./scripts
 RUN mkdir -p /app/data /app/strategy-data /backups \
-  && chown -R node:node /app/data /app/strategy-data /backups
-USER node
+  && chown -R 20001:20001 /app/data /app/strategy-data /backups
+USER 20001:20001
 EXPOSE 8787
 HEALTHCHECK --interval=15s --timeout=5s --start-period=30s --retries=5 \
   CMD ["node", "-e", "fetch('http://127.0.0.1:8787/api/health').then(r=>{if(!r.ok)throw Error(r.status)}).catch(()=>process.exit(1))"]
@@ -39,9 +41,11 @@ CMD ["sh", "-c", "umask 077; exec node dist-server/index.js"]
 FROM build AS strategy-tools
 ARG GIT_COMMIT=development
 LABEL org.opencontainers.image.revision="$GIT_COMMIT"
+RUN groupadd --system --gid 20001 xingheng \
+  && useradd --system --uid 20001 --gid 20001 --home-dir /app --shell /usr/sbin/nologin xingheng
 RUN mkdir -p /app/strategy-data /app/.cache/strategy \
-  && chown -R node:node /app/strategy-data /app/.cache
-USER node
+  && chown -R 20001:20001 /app/strategy-data /app/.cache
+USER 20001:20001
 CMD ["npm", "run", "research:ict:history"]
 
 FROM caddy:2.10-alpine AS web
