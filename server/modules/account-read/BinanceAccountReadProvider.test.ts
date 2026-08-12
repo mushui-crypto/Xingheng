@@ -17,6 +17,7 @@ test("maps the Binance read-only snapshot without inventing permissions or valua
     { asset: "BTC", accountType: "spot", total: 0.002, available: 0.001, locked: 0.001 },
     { asset: "USDT", accountType: "derivatives", total: 120, available: 100, locked: null },
   ]);
+  assert.ok(snapshot.balances.every((balance) => typeof balance.available === "number"));
   assert.deepEqual(snapshot.permissions, {
     read: "ENABLED",
     spotTrade: "ENABLED",

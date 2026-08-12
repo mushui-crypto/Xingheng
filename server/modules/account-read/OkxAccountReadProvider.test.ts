@@ -45,6 +45,7 @@ test("maps only explicitly reported OKX permissions and keeps product capabiliti
   });
   assert.equal(snapshot.accountId.startsWith("okx:"), true);
   assert.equal(snapshot.accountId.includes("44705892343619584"), false);
+  assert.ok(snapshot.balances.every((balance) => typeof balance.available === "number"));
 });
 
 test("uses UNKNOWN when OKX permission metadata is unavailable", async () => {

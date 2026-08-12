@@ -6,7 +6,7 @@ export type VenueAccountReadBalance = {
   asset: string;
   accountType: AccountReadAccountType;
   total: number;
-  available: number;
+  available: number | null;
   locked: number | null;
 };
 

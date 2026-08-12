@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 import { AccountReadRegistry, AccountReadRegistryError } from "../account-read/AccountReadRegistry";
+import { BybitAccountReadProviderFactory } from "../account-read/BybitAccountReadProvider";
 import { OkxAccountReadProviderFactory } from "../account-read/OkxAccountReadProvider";
 import { registerAccountReadRoutes } from "./accountReadRoutes";
 
@@ -44,7 +45,6 @@ test("account read API distinguishes invalid and unimplemented venues", async (t
 
   for (const [path, expectedStatus, category] of [
     ["/api/account-read/unknown", 400, "account_read_venue_invalid"],
-    ["/api/account-read/bybit", 501, "account_read_provider_not_implemented"],
     ["/api/account-read/bitget", 501, "account_read_provider_not_implemented"],
   ] as const) {
     await t.test(category, async () => {
@@ -56,6 +56,44 @@ test("account read API distinguishes invalid and unimplemented venues", async (t
         await close();
       }
     });
+  }
+});
+
+test("account read API serves Bybit through the common registry route", async () => {
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  const registry = new AccountReadRegistry({
+    loadForAccountRead: async (userId: string, venue: string) => {
+      assert.equal(userId, "session-user");
+      assert.equal(venue, "bybit");
+      return { apiKey: "key", apiSecret: "secret" };
+    },
+  } as never, [new BybitAccountReadProviderFactory(() => ({
+    readAccountSnapshot: async () => ({
+      uid: "91234567",
+      unifiedMarginStatus: 5,
+      marginMode: "REGULAR_MARGIN",
+      readOnly: 1,
+      permissions: null,
+      boundIps: null,
+      balances: [{ asset: "USDT", accountType: "unified", total: 120, available: null, locked: 20 }],
+      fetchedAt: 1_800_000_000_000,
+    }),
+  }))]);
+  registerAccountReadRoutes(app, registry);
+
+  const { response, close } = await request(app, "/api/account-read/bybit");
+  try {
+    const body = await response.json() as { venue: string; accountTypes: string[]; valuationCoverage: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.venue, "bybit");
+    assert.deepEqual(body.accountTypes, ["unified"]);
+    assert.equal(body.valuationCoverage, "UNAVAILABLE");
+  } finally {
+    await close();
   }
 });
 
