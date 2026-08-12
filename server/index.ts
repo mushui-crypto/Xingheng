@@ -39,6 +39,7 @@ import { BinancePersonalTradingServiceRegistry } from "./modules/binance/Binance
 import { BinanceIntentExecutionRuntime } from "./modules/binance/BinanceIntentExecutionRuntime";
 import { AccountReadRegistry } from "./modules/account-read/AccountReadRegistry";
 import { BinanceAccountReadProviderFactory } from "./modules/account-read/BinanceAccountReadProvider";
+import { BitgetAccountReadProviderFactory } from "./modules/account-read/BitgetAccountReadProvider";
 import { BybitAccountReadProviderFactory } from "./modules/account-read/BybitAccountReadProvider";
 import { OkxAccountReadProviderFactory } from "./modules/account-read/OkxAccountReadProvider";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
@@ -150,6 +151,7 @@ const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: c
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
 const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new BinanceAccountReadProviderFactory(),
+  new BitgetAccountReadProviderFactory(),
   new BybitAccountReadProviderFactory(),
   new OkxAccountReadProviderFactory(),
 ]);

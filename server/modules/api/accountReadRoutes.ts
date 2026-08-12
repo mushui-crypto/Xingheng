@@ -3,6 +3,7 @@ import { AccountReadRegistry, AccountReadRegistryError } from "../account-read/A
 import { BinanceProviderError } from "../binance/BinanceClient";
 import { CredentialKeyProviderError, type ExchangeVenue } from "../credentials/CredentialKeyProvider";
 import { UserExchangeCredentialStoreError } from "../credentials/UserExchangeCredentialStore";
+import { BitgetAccountReadError } from "../bitget/BitgetAccountReadClient";
 import { BybitAccountReadError } from "../bybit/BybitAccountReadClient";
 import { OkxAccountReadError } from "../okx/OkxAccountReadClient";
 
@@ -59,6 +60,9 @@ function errorResponse(error: unknown) {
     return { status: 502, category: error.category, message: error.message };
   }
   if (error instanceof BybitAccountReadError) {
+    return { status: 502, category: error.category, message: error.message };
+  }
+  if (error instanceof BitgetAccountReadError) {
     return { status: 502, category: error.category, message: error.message };
   }
   return { status: 502, category: "account_read_failed", message: "Exchange account read failed." };

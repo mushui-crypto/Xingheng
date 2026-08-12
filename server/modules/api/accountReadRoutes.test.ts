@@ -4,6 +4,7 @@ import type { AddressInfo } from "node:net";
 import test from "node:test";
 import express from "express";
 import { AccountReadRegistry, AccountReadRegistryError } from "../account-read/AccountReadRegistry";
+import { BitgetAccountReadProviderFactory } from "../account-read/BitgetAccountReadProvider";
 import { BybitAccountReadProviderFactory } from "../account-read/BybitAccountReadProvider";
 import { OkxAccountReadProviderFactory } from "../account-read/OkxAccountReadProvider";
 import { registerAccountReadRoutes } from "./accountReadRoutes";
@@ -32,7 +33,7 @@ test("account read API binds the venue read to the authenticated user", async ()
   }
 });
 
-test("account read API distinguishes invalid and unimplemented venues", async (t) => {
+test("account read API rejects an invalid venue", async (t) => {
   const app = express();
   app.use((request, _response, next) => {
     request.user = { id: "session-user" } as never;
@@ -45,7 +46,6 @@ test("account read API distinguishes invalid and unimplemented venues", async (t
 
   for (const [path, expectedStatus, category] of [
     ["/api/account-read/unknown", 400, "account_read_venue_invalid"],
-    ["/api/account-read/bitget", 501, "account_read_provider_not_implemented"],
   ] as const) {
     await t.test(category, async () => {
       const { response, close } = await request(app, path);
@@ -56,6 +56,45 @@ test("account read API distinguishes invalid and unimplemented venues", async (t
         await close();
       }
     });
+  }
+});
+
+test("account read API serves Bitget through the common registry route", async () => {
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  const registry = new AccountReadRegistry({
+    loadForAccountRead: async (userId: string, venue: string) => {
+      assert.equal(userId, "session-user");
+      assert.equal(venue, "bitget");
+      return { apiKey: "key", apiSecret: "secret", passphrase: "passphrase" };
+    },
+  } as never, [new BitgetAccountReadProviderFactory(() => ({
+    readAccountSnapshot: async () => ({
+      uid: "8123456789",
+      accountMode: "hybrid",
+      assetMode: "multi_assets",
+      accountLevel: "advanced",
+      permType: "read-only",
+      permissions: ["uta_mgt"],
+      boundIps: "",
+      balances: [{ asset: "USDT", total: 120, available: 100, locked: 20 }],
+      fetchedAt: 1_800_000_000_000,
+    }),
+  }))]);
+  registerAccountReadRoutes(app, registry);
+
+  const { response, close } = await request(app, "/api/account-read/bitget");
+  try {
+    const body = await response.json() as { venue: string; accountTypes: string[]; valuationCoverage: string };
+    assert.equal(response.status, 200);
+    assert.equal(body.venue, "bitget");
+    assert.deepEqual(body.accountTypes, ["unified"]);
+    assert.equal(body.valuationCoverage, "UNAVAILABLE");
+  } finally {
+    await close();
   }
 });
 
