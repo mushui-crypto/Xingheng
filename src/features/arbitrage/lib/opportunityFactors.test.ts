@@ -23,12 +23,14 @@ test("opportunity factors cover the six decision categories without exposing sco
   assert.deepEqual(factors.map((factor) => factor.label), [
     "收益",
     "持续性",
-    "执行置信",
+    "比较置信度",
     "流动性 / 报价",
     "基差 / 资金费率",
-    "数据 / 执行安全",
+    "数据 / 条件状态",
   ]);
   assert.equal(factors.every((factor) => !factor.value.includes("/ 100")), true);
+  assert.match(factors[0]?.value ?? "", /^估算净 APR /u);
+  assert.equal(factors[2]?.value, "数据覆盖、标的匹配与结算兼容性支持高置信比较");
 });
 
 test("safety disqualifiers remain a negative conclusion factor", () => {

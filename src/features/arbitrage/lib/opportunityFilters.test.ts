@@ -3,13 +3,24 @@ import test from "node:test";
 import type { ArbitrageOpportunity } from "../model/types";
 import {
   matchesOpportunityEntryStatus,
+  matchesOpportunityProductType,
   matchesOpportunityRecommendation,
   matchesOpportunityVenue,
+  opportunityProductType,
   opportunityLegVenues,
 } from "./opportunityFilters";
 
-const bybitSameVenue = opportunity("same", "bybit", "bybit", "same_venue_neutral");
-const bybitCrossVenue = opportunity("cross", "bybit", "okx", "cross_venue_arbitrage");
+const bybitSameVenue = opportunity("same", "bybit", "bybit", "same_venue_neutral", "spot");
+const bybitCrossVenue = opportunity("cross", "bybit", "okx", "cross_venue_arbitrage", "perpetual");
+
+test("product type recognition uses the existing long and short market kinds", () => {
+  assert.equal(opportunityProductType(bybitSameVenue), "spot_perpetual");
+  assert.equal(opportunityProductType(bybitCrossVenue), "perpetual_perpetual");
+  assert.equal(matchesOpportunityProductType(bybitSameVenue, "spot_perpetual"), true);
+  assert.equal(matchesOpportunityProductType(bybitSameVenue, "perpetual_perpetual"), false);
+  assert.equal(matchesOpportunityProductType(bybitCrossVenue, "perpetual_perpetual"), true);
+  assert.equal(matchesOpportunityProductType(bybitCrossVenue, "all"), true);
+});
 
 test("long and short venue filters match their corresponding legs independently", () => {
   assert.equal(matchesOpportunityVenue(bybitSameVenue, "bybit", "bybit"), true);
@@ -48,11 +59,12 @@ function opportunity(
   longVenue: "bybit" | "okx",
   shortVenue: "bybit" | "okx",
   strategyType: ArbitrageOpportunity["strategyType"],
+  longKind: ArbitrageOpportunity["longLeg"]["kind"],
 ) {
   return {
     id,
     strategyType,
-    longLeg: { venue: longVenue },
-    shortLeg: { venue: shortVenue },
+    longLeg: { venue: longVenue, kind: longKind },
+    shortLeg: { venue: shortVenue, kind: "perpetual" },
   } as ArbitrageOpportunity;
 }

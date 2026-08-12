@@ -5,6 +5,27 @@ import type {
   ArbitrageVenue,
 } from "../model/types";
 
+export type OpportunityProductType = "spot_perpetual" | "perpetual_perpetual";
+
+export function opportunityProductType(
+  opportunity: Pick<ArbitrageOpportunity, "longLeg" | "shortLeg">,
+): OpportunityProductType | null {
+  if (opportunity.longLeg.kind === "spot" && opportunity.shortLeg.kind === "perpetual") {
+    return "spot_perpetual";
+  }
+  if (opportunity.longLeg.kind === "perpetual" && opportunity.shortLeg.kind === "perpetual") {
+    return "perpetual_perpetual";
+  }
+  return null;
+}
+
+export function matchesOpportunityProductType(
+  opportunity: ArbitrageOpportunity,
+  productType: "all" | OpportunityProductType,
+) {
+  return productType === "all" || opportunityProductType(opportunity) === productType;
+}
+
 export function matchesOpportunityRecommendation(
   opportunity: ArbitrageOpportunity,
   recommendation: "all" | ArbitrageRecommendation,

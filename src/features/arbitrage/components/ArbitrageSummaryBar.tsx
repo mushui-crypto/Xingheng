@@ -7,19 +7,19 @@ export function ArbitrageSummaryBar({ snapshot, yieldMetric }: { snapshot: Arbit
   const metricLabel = yieldMetric.toUpperCase();
   const items = [
     {
-      label: "持有质量",
+      label: "综合质量中高",
       value: `${snapshot.summary.eligibleOpportunityCount} 个`,
-      meta: "逻辑较强或值得关注",
-      help: "基于近90天资金费率、持续性、成本覆盖、标的匹配和数据质量评估中长期持有逻辑，不受最新一期Funding单独决定。",
+      meta: "综合质量状态为高或中",
+      help: "统计结合近90天资金费率与持续性、标的匹配、当前流动性与容量、成本和数据状态后，综合质量为高或中的机会。",
       icon: ListChecks,
     },
     {
-      label: `最高等效净 ${metricLabel}`,
+      label: `最高估算净 ${metricLabel}`,
       value: formatApr(equivalentNetYield(snapshot.summary.bestNetApr, snapshot.horizonDays, yieldMetric), true),
-      meta: `${snapshot.horizonDays}天持有${snapshot.horizonDays === 365 ? "情景" : "周期"}`,
+      meta: `${snapshot.horizonDays}天持有测算情景`,
       help: yieldMetric === "apr"
-        ? `基于近90天资金费率，将往返手续费和1万美元档滑点按${snapshot.horizonDays}天持有期摊销后年化。`
-        : `由等效净APR按${snapshot.horizonDays}天为一个再投资周期复利换算；365天情景下APY与APR相同。`,
+        ? `基于近90天资金费率，将往返手续费和1万美元档滑点按${snapshot.horizonDays}天持有测算情景摊销后年化。`
+        : `由估算净APR按${snapshot.horizonDays}天再投资周期假设复利换算；365天情景下APY与APR相同。`,
       icon: Scale,
     },
     {

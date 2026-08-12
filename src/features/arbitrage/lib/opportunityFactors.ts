@@ -27,7 +27,7 @@ export function buildOpportunityFactors(opportunity: FactorInput): OpportunityFa
   return [
     {
       label: "收益",
-      value: `等效净 APR ${formatApr(opportunity.netApr, true)}`,
+      value: `估算净 APR ${formatApr(opportunity.netApr, true)}`,
       tone: opportunity.netApr > 0 ? "positive" : "negative",
     },
     {
@@ -36,7 +36,7 @@ export function buildOpportunityFactors(opportunity: FactorInput): OpportunityFa
       tone: opportunity.persistenceRatio >= 0.7 ? "positive" : opportunity.persistenceRatio >= 0.5 ? "neutral" : "negative",
     },
     {
-      label: "执行置信",
+      label: "比较置信度",
       value: confidenceText(opportunity.confidence),
       tone: opportunity.confidence === "high" ? "positive" : opportunity.confidence === "medium" ? "neutral" : "negative",
     },
@@ -86,14 +86,18 @@ function driverFactor(opportunity: FactorInput): OpportunityFactor {
 
 function safetyFactor(opportunity: FactorInput): OpportunityFactor {
   if (opportunity.recommendation === "blocked" || opportunity.disqualifiers.length > 0) {
-    return { label: "数据 / 执行安全", value: opportunity.disqualifiers[0] ?? "当前无法安全执行", tone: "negative" };
+    return { label: "数据 / 条件状态", value: opportunity.disqualifiers[0] ?? "当前条件无法评估", tone: "negative" };
   }
   if (opportunity.warnings.length > 0) {
-    return { label: "数据 / 执行安全", value: opportunity.warnings[0], tone: "neutral" };
+    return { label: "数据 / 条件状态", value: opportunity.warnings[0], tone: "neutral" };
   }
-  return { label: "数据 / 执行安全", value: "当前未发现安全阻断", tone: "positive" };
+  return { label: "数据 / 条件状态", value: "当前未发现数据或条件阻断", tone: "positive" };
 }
 
 function confidenceText(confidence: FactorInput["confidence"]) {
-  return confidence === "high" ? "行情与执行数据置信度高" : confidence === "medium" ? "行情与执行数据置信度中等" : "行情或执行数据置信度低";
+  return confidence === "high"
+    ? "数据覆盖、标的匹配与结算兼容性支持高置信比较"
+    : confidence === "medium"
+      ? "数据覆盖、标的匹配或结算兼容性降低比较置信度"
+      : "市场数据可用性或历史覆盖不足，比较置信度低";
 }

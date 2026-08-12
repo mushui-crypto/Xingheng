@@ -1,5 +1,6 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { HttpRequestError } from "../../api/httpClient";
 import { DropdownSelect } from "../../components/ui/DropdownSelect";
@@ -8,17 +9,21 @@ import { ArbitrageOpportunityTable } from "../../features/arbitrage/components/A
 import { ArbitrageHelp } from "../../features/arbitrage/components/ArbitrageHelp";
 import { ArbitrageSummaryBar } from "../../features/arbitrage/components/ArbitrageSummaryBar";
 import { equivalentNetYield } from "../../features/arbitrage/lib/formatters";
+import { buildArbitrageAnalysisHref } from "../../features/arbitrage/lib/analysisRoute";
 import {
   matchesOpportunityEntryStatus,
+  matchesOpportunityProductType,
   matchesOpportunityRecommendation,
   matchesOpportunityVenue,
   opportunityLegVenues,
+  type OpportunityProductType,
 } from "../../features/arbitrage/lib/opportunityFilters";
 import type {
   ArbitrageAsset,
   ArbitrageDashboardSnapshot,
   ArbitrageEntryStatus,
   ArbitrageHorizon,
+  ArbitrageOpportunity,
   ArbitrageRecommendation,
   ArbitrageVenue,
   ArbitrageYieldMetric,
@@ -31,6 +36,7 @@ type AssetFilter = "all" | ArbitrageAsset;
 type VenueFilter = "all" | ArbitrageVenue;
 type RecommendationFilter = "all" | ArbitrageRecommendation;
 type EntryStatusFilter = "all" | ArbitrageEntryStatus;
+type ProductTypeFilter = "all" | OpportunityProductType;
 
 const horizons: ArbitrageHorizon[] = [90, 365];
 const assetRank = new Map(ARBITRAGE_ASSET_ORDER.map((value, index) => [value, index]));
@@ -42,46 +48,56 @@ const venues: Array<{ value: ArbitrageVenue; label: string }> = [
   { value: "tradexyz", label: "tradeXYZ" },
 ];
 const recommendationLabels: Record<ArbitrageRecommendation, string> = {
-  recommended: "持有逻辑较强",
-  watch: "值得持续关注",
-  neutral: "历史优势有限",
-  blocked: "无法安全评估",
+  recommended: "综合质量：高",
+  watch: "综合质量：中",
+  neutral: "综合质量：低",
+  blocked: "综合质量：无法评估",
 };
 const recommendationOptions: Array<{ value: RecommendationFilter; label: string }> = [
-  { value: "all", label: "持有质量-全部" },
+  { value: "all", label: "综合质量：全部" },
   ...Object.entries(recommendationLabels).map(([value, label]) => ({
     value: value as ArbitrageRecommendation,
     label,
   })),
 ];
 const entryStatusLabels: Record<ArbitrageEntryStatus, string> = {
-  favorable: "当前条件较好",
-  cautious: "谨慎评估入场",
-  waiting: "等待费率差转正",
-  blocked: "当前不可执行",
+  favorable: "当前条件：满足",
+  cautious: "当前条件：部分满足",
+  waiting: "当前费率差：未转正",
+  blocked: "当前条件：无法评估",
 };
 const entryStatusOptions: Array<{ value: EntryStatusFilter; label: string }> = [
-  { value: "all", label: "当前入场-全部" },
+  { value: "all", label: "当前条件：全部" },
   ...Object.entries(entryStatusLabels).map(([value, label]) => ({
     value: value as ArbitrageEntryStatus,
     label,
   })),
 ];
+const productTypeLabels: Record<OpportunityProductType, string> = {
+  perpetual_perpetual: "永续-永续",
+  spot_perpetual: "现货-永续",
+};
+const productTypeOptions: Array<{ value: ProductTypeFilter; label: string }> = [
+  { value: "all", label: "套利类型：全部" },
+  { value: "perpetual_perpetual", label: productTypeLabels.perpetual_perpetual },
+  { value: "spot_perpetual", label: productTypeLabels.spot_perpetual },
+];
 const opportunityPageSize = 25;
 
 export function ArbitragePage() {
+  const navigate = useNavigate();
   const [horizonDays, setHorizonDays] = useState<ArbitrageHorizon>(90);
   const [yieldMetric, setYieldMetric] = useState<ArbitrageYieldMetric>("apr");
   const [view, setView] = useState<BoardView>("opportunities");
   const [sort, setSort] = useState<OpportunitySort>("score");
   const [asset, setAsset] = useState<AssetFilter>("all");
+  const [productType, setProductType] = useState<ProductTypeFilter>("all");
   const [recommendation, setRecommendation] = useState<RecommendationFilter>("all");
   const [entryStatus, setEntryStatus] = useState<EntryStatusFilter>("all");
   const [longVenue, setLongVenue] = useState<VenueFilter>("all");
   const [shortVenue, setShortVenue] = useState<VenueFilter>("all");
   const [marketVenue, setMarketVenue] = useState<VenueFilter>("all");
   const [snapshot, setSnapshot] = useState<ArbitrageDashboardSnapshot | null>(null);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [opportunityPage, setOpportunityPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -148,6 +164,7 @@ export function ArbitragePage() {
     if (!snapshot) return [];
     const opportunities = snapshot.opportunities
       .filter((item) => asset === "all" || item.longLeg.asset === asset || item.shortLeg.asset === asset)
+      .filter((item) => matchesOpportunityProductType(item, productType))
       .filter((item) => matchesOpportunityRecommendation(item, recommendation))
       .filter((item) => matchesOpportunityEntryStatus(item, entryStatus))
       .filter((item) => matchesOpportunityVenue(item, longVenue, shortVenue));
@@ -167,7 +184,7 @@ export function ArbitragePage() {
         - (displayedYields.get(left.id) ?? Number.NEGATIVE_INFINITY)
         || right.score - left.score,
     );
-  }, [asset, entryStatus, horizonDays, longVenue, recommendation, shortVenue, snapshot, sort, yieldMetric]);
+  }, [asset, entryStatus, horizonDays, longVenue, productType, recommendation, shortVenue, snapshot, sort, yieldMetric]);
 
   const opportunityPageCount = Math.max(1, Math.ceil(filteredOpportunities.length / opportunityPageSize));
   const visibleOpportunities = useMemo(() => filteredOpportunities.slice(
@@ -175,19 +192,17 @@ export function ArbitragePage() {
     opportunityPage * opportunityPageSize,
   ), [filteredOpportunities, opportunityPage]);
 
-  const toggleOpportunity = useCallback((id: string) => {
-    setExpandedId((current) => current === id ? null : id);
-  }, []);
-
   const changeOpportunityPage = useCallback((page: number) => {
-    setExpandedId(null);
     setOpportunityPage(page);
   }, []);
 
+  const openAnalysis = useCallback((opportunity: ArbitrageOpportunity) => {
+    navigate(buildArbitrageAnalysisHref(opportunity.id, horizonDays));
+  }, [horizonDays, navigate]);
+
   useEffect(() => {
     setOpportunityPage(1);
-    setExpandedId(null);
-  }, [asset, entryStatus, horizonDays, longVenue, marketVenue, recommendation, shortVenue, sort, yieldMetric]);
+  }, [asset, entryStatus, horizonDays, longVenue, marketVenue, productType, recommendation, shortVenue, sort, yieldMetric]);
 
   useEffect(() => {
     if (!longVenueOptions.some((option) => option.value === longVenue)) setLongVenue("all");
@@ -205,9 +220,9 @@ export function ArbitragePage() {
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="xh-title">套利看板</h1>
-            <span className="inline-flex border border-sky-400/30 bg-sky-400/[0.07] px-2.5 py-1 text-xs font-medium text-sky-200">只读 · 主网公开行情</span>
+            <span className="inline-flex border border-sky-400/30 bg-sky-400/[0.07] px-2.5 py-1 text-xs font-medium text-sky-200">套利系统 · 只读公开行情</span>
           </div>
-          <p className="xh-subtitle">分别评估中长期持有质量与当前入场时机；结论仅辅助筛选，不代替用户决策。</p>
+          <p className="xh-subtitle">展示综合质量与当前市场条件；真实数据和估算指标仅辅助比较，不代替用户决策。</p>
         </div>
         <div className="flex items-center gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
@@ -259,18 +274,25 @@ export function ArbitragePage() {
             {view === "opportunities" ? (
               <>
                 <DropdownSelect
+                  className="w-[152px]"
+                  value={productType}
+                  options={productTypeOptions}
+                  onChange={setProductType}
+                  label="筛选套利类型"
+                />
+                <DropdownSelect
                   className="w-[172px]"
                   value={recommendation}
                   options={recommendationOptions}
                   onChange={setRecommendation}
-                  label="筛选持有质量"
+                  label="筛选综合质量"
                 />
                 <DropdownSelect
                   className="w-[166px]"
                   value={entryStatus}
                   options={entryStatusOptions}
                   onChange={setEntryStatus}
-                  label="筛选当前入场状态"
+                  label="筛选当前条件状态"
                 />
                 <DropdownSelect
                   className="w-[164px]"
@@ -301,7 +323,7 @@ export function ArbitragePage() {
             {view === "opportunities" ? (
               <SegmentedControl
                 value={sort}
-                options={[{ value: "score", label: "持有质量优先" }, { value: "netApr", label: `净${yieldMetric.toUpperCase()}优先` }]}
+                options={[{ value: "score", label: "综合质量优先" }, { value: "netApr", label: `估算净${yieldMetric.toUpperCase()}优先` }]}
                 onChange={(value) => setSort(value as OpportunitySort)}
                 label="机会排序"
               />
@@ -316,18 +338,18 @@ export function ArbitragePage() {
               value={String(horizonDays)}
               options={horizons.map((value) => ({ value: String(value), label: `${value}天` }))}
               onChange={(value) => setHorizonDays(Number(value) as ArbitrageHorizon)}
-              label="持有周期"
+              label="持有测算情景"
             />
           </div>
         </div>
 
         <div className="flex flex-wrap items-center justify-between gap-3 text-xs text-muted">
           <p>{view === "opportunities"
-            ? opportunityCountLabel(filteredOpportunities.length, recommendation, entryStatus, longVenue, shortVenue)
+            ? opportunityCountLabel(filteredOpportunities.length, productType, recommendation, entryStatus, longVenue, shortVenue)
             : `${filteredMarkets.length} 个市场`}</p>
           <div className="flex items-center gap-1.5">
-            <span>近90天费率基准 · {horizonDays}天持有{horizonDays === 365 ? "情景" : ""}</span>
-            <ArbitrageHelp content={`历史资金费率固定观察最近90天；${horizonDays}天仅用于持有期和往返成本摊销。按Taker成交，并分别计量USDT与USDC。`} label="查看测算口径" />
+            <span>近90天费率基准 · {horizonDays}天持有测算情景</span>
+            <ArbitrageHelp content={`历史资金费率固定观察最近90天；${horizonDays}天仅用于持有测算和往返成本摊销。按Taker成交，并分别计量USDT与USDC。`} label="查看测算口径" />
           </div>
         </div>
 
@@ -340,8 +362,7 @@ export function ArbitragePage() {
             opportunities={visibleOpportunities}
             holdingDays={horizonDays}
             yieldMetric={yieldMetric}
-            expandedId={expandedId}
-            onToggle={toggleOpportunity}
+            onAnalyze={openAnalysis}
           />
         )}
         {view === "opportunities" && filteredOpportunities.length > opportunityPageSize ? (
@@ -416,6 +437,7 @@ function filterVenueOptions(
 
 function opportunityCountLabel(
   count: number,
+  productType: ProductTypeFilter,
   recommendation: RecommendationFilter,
   entryStatus: EntryStatusFilter,
   longVenue: VenueFilter,
@@ -424,9 +446,10 @@ function opportunityCountLabel(
   const venueScope = longVenue === "all" && shortVenue === "all"
     ? "中性 / 套利组合"
     : venueFilterSummary(longVenue, shortVenue);
+  const productTypeScope = productType === "all" ? "" : ` · ${productTypeLabels[productType]}`;
   const recommendationScope = recommendation === "all" ? "" : ` · ${recommendationLabels[recommendation]}`;
   const entryScope = entryStatus === "all" ? "" : ` · ${entryStatusLabels[entryStatus]}`;
-  return `${count} 个 ${venueScope}${recommendationScope}${entryScope}`;
+  return `${count} 个 ${venueScope}${productTypeScope}${recommendationScope}${entryScope}`;
 }
 
 function venueFilterSummary(longVenue: VenueFilter, shortVenue: VenueFilter) {

@@ -18,10 +18,10 @@ export const ArbitrageMarketTable = memo(function ArbitrageMarketTable({ markets
             <th className="xh-th sticky left-0 z-10 bg-[#121212]">资产 / 市场</th>
             <th className="xh-th">交易所</th>
             <th className="xh-th">产品</th>
-            <th className="xh-th text-right"><HeaderLabel label="Bid / Ask" help="当前最优买价与最优卖价。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="Mark / Index" help="永续合约标记价格与指数价格；现货市场两者均使用最新成交价。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="当前 Funding" help="显示交易所最新一期原始资金费率、结算周期、等效APR和下次结算倒计时。正费率由多方支付给空方，负费率由空方支付给多方。" /></th>
-            <th className="xh-th text-right"><HeaderLabel label="近90天 Funding APR" help="最近90天资金费率按日汇总后取平均并年化；覆盖率不足时可靠性会降低。" /></th>
+            <th className="xh-th text-right"><HeaderLabel label="买一 / 卖一（Bid / Ask）" help="当前最优买价与最优卖价。" /></th>
+            <th className="xh-th text-right"><HeaderLabel label="标记价 / 指数价（Mark / Index）" help="永续合约标记价格与指数价格；现货市场两者均使用最新成交价。" /></th>
+            <th className="xh-th text-right"><HeaderLabel label="当前资金费率（Funding）" help="显示交易所最新一期原始资金费率、结算周期、估算APR和下次结算倒计时。正费率由多方支付给空方，负费率由空方支付给多方。" /></th>
+            <th className="xh-th text-right"><HeaderLabel label="近90天资金费率 APR" help="最近90天资金费率按日汇总后取平均并年化；覆盖率不足时可靠性会降低。" /></th>
             <th className="xh-th text-right"><HeaderLabel label="正费率占比" help="最近90天资金费率样本中大于零的比例。" /></th>
             <th className="xh-th text-right"><HeaderLabel label="盘口点差" help="当前最优买卖价差相对于中间价的bps。" /></th>
             <th className="xh-th text-right"><HeaderLabel label="$10k 滑点" help="按当前订单簿模拟1万美元单向市价成交的价格冲击。" /></th>

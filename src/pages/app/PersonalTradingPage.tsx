@@ -18,7 +18,7 @@ export function PersonalTradingPage() {
           <div className="flex flex-wrap items-center gap-3">
             <h1 className="xh-title">我的套利</h1>
             <span className="inline-flex items-center gap-1.5 border border-white/20 px-2.5 py-1 text-xs font-medium text-[#c5ccd4]">
-              <Activity size={13} /> Personal Trading
+              <Activity size={13} /> 套利系统 · 真实资产
             </span>
           </div>
           <p className="xh-subtitle">管理个人交易所连接，并查看 Binance XAUT 对冲策略的账户、行情、订单与对账状态。</p>

@@ -65,9 +65,12 @@ export function UserLayout({ children }: UserLayoutProps) {
               <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
                 <TopLink to="/app/dashboard" label="首页" />
                 <TopLink to="/app/markets" label="行情" />
-                <TopLink to="/app/arbitrage" label="套利看板" />
-                <TopLink to="/app/funding-arbitrage" label="资金费率机会" />
-                <TopLink to="/app/my-arbitrage" label="我的套利" />
+                <div className="flex shrink-0 items-center border border-white/15" aria-label="套利系统">
+                  <span className="px-3 text-[11px] font-semibold tracking-[0.12em] text-[#8f99a5]">套利系统</span>
+                  <TopLink to="/app/arbitrage" label="套利看板" />
+                  <TopLink to="/app/funding-arbitrage" label="套利分析" />
+                  <TopLink to="/app/my-arbitrage" label="我的套利" />
+                </div>
                 <TopLink to="/app/trade" label="真实交易" />
                 <TopLink to="/app/demo" label="模拟交易" />
                 <TopLink to="/app/strategy" label="策略交易" />
