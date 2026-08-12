@@ -5,6 +5,7 @@ import { userAuthenticatedApiPrefixes } from "./authRoutes";
 test("exchange credential routes require user authentication", () => {
   assert.equal(userAuthenticatedApiPrefixes.includes("/api/exchange-credentials"), true);
   assert.equal(userAuthenticatedApiPrefixes.includes("/api/binance"), true);
+  assert.equal(userAuthenticatedApiPrefixes.includes("/api/account-read"), true);
 });
 
 test("real-trading market remains public while account, orders, exchange and realtime are authenticated", () => {

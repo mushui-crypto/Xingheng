@@ -80,6 +80,27 @@ test("preflight snapshot maps cross and isolated margin modes using GET-only req
   }
 });
 
+test("read-only account snapshot returns non-zero raw balances using GET-only requests", async () => {
+  const methods: string[] = [];
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    snapshotFetch("cross", methods),
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+
+  const snapshot = await client.readAccountSnapshot();
+
+  assert.equal(snapshot.accountMode, "single_asset_one_way");
+  assert.deepEqual(snapshot.balances, [
+    { asset: "USDT", accountType: "spot", total: 100, available: 100, locked: 0 },
+    { asset: "BTC", accountType: "spot", total: 0.002, available: 0.0015, locked: 0.0005 },
+    { asset: "USDT", accountType: "derivatives", total: 125, available: 100, locked: null },
+  ]);
+  assert.ok(methods.length > 0);
+  assert.ok(methods.every((method) => method === "GET"));
+});
+
 function snapshotFetch(
   marginType: "cross" | "isolated",
   methods: string[],
@@ -144,6 +165,7 @@ function snapshotResponse(path: string, marginType: "cross" | "isolated"): unkno
         canTrade: true,
         balances: [
           { asset: "USDT", free: "100", locked: "0" },
+          { asset: "BTC", free: "0.0015", locked: "0.0005" },
           { asset: "XAUT", free: "0", locked: "0" },
         ],
       };
@@ -152,7 +174,10 @@ function snapshotResponse(path: string, marginType: "cross" | "isolated"): unkno
         canTrade: true,
         multiAssetsMargin: false,
         availableBalance: "100",
-        assets: [{ asset: "USDT", availableBalance: "100" }],
+        assets: [
+          { asset: "USDT", walletBalance: "125", availableBalance: "100" },
+          { asset: "BNB", walletBalance: "0", availableBalance: "0" },
+        ],
       };
     case "/fapi/v1/positionSide/dual":
       return { dualSidePosition: false };

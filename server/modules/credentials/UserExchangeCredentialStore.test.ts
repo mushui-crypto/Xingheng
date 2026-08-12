@@ -16,7 +16,7 @@ import {
 } from "./CredentialKeyProvider";
 import { UserExchangeCredentialStore } from "./UserExchangeCredentialStore";
 
-test("stores only encrypted credentials and decrypts only for execution", async () => {
+test("stores only encrypted credentials and decrypts only for explicit runtime consumers", async () => {
   const fixture = createFixture();
   try {
     const summary = await fixture.store.save(credential());
@@ -31,11 +31,16 @@ test("stores only encrypted credentials and decrypts only for execution", async 
     assert.equal(databaseBytes.includes("secret-value-001"), false);
     assert.equal(databaseBytes.includes("api-key-value-001"), false);
 
-    assert.deepEqual(await fixture.store.loadForExecution("user-1", "binance"), {
+    assert.deepEqual(await fixture.store.loadForAccountRead("user-1", "binance"), {
       apiKey: "api-key-value-001",
       apiSecret: "secret-value-001",
     });
     assert.equal(fixture.provider.unwrapCalls, 1);
+    assert.deepEqual(await fixture.store.loadForExecution("user-1", "binance"), {
+      apiKey: "api-key-value-001",
+      apiSecret: "secret-value-001",
+    });
+    assert.equal(fixture.provider.unwrapCalls, 2);
   } finally {
     fixture.close();
   }

@@ -217,6 +217,7 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
 export const userAuthenticatedApiPrefixes = [
   "/api/arbitrage",
   "/api/funding-arbitrage",
+  "/api/account-read",
   "/api/binance",
   "/api/exchange-credentials",
   "/api/trading",
@@ -244,7 +245,7 @@ export const publicReadOnlyApiPaths: ReadonlySet<string> = new Set([
 ]);
 
 export function registerUserAuthMiddleware(app: express.Express, users: UserService) {
-  app.use(["/api/binance", "/api/exchange-credentials"], (_request, response, next) => {
+  app.use(["/api/account-read", "/api/binance", "/api/exchange-credentials"], (_request, response, next) => {
     response.setHeader("Cache-Control", "no-store");
     next();
   });

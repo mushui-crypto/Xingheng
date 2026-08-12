@@ -199,6 +199,10 @@ export class UserExchangeCredentialStore {
     }
   }
 
+  async loadForAccountRead(userId: string, venue: ExchangeVenue): Promise<UserExchangeCredentialSecret> {
+    return this.loadForExecution(userId, venue);
+  }
+
   delete(userId: string, venue: ExchangeVenue) {
     this.db.prepare("DELETE FROM user_exchange_credentials WHERE userId = ? AND venue = ?")
       .run(requiredIdentifier(userId, "userId"), validVenue(venue));

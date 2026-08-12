@@ -14,6 +14,7 @@ import {
   type BinancePreflightSnapshot,
   type BinanceProductAvailability,
   type BinanceProviderOrder,
+  type BinanceReadOnlyAccountSnapshot,
   type BinanceStrategyPnlSnapshot,
 } from "./BinanceTypes";
 
@@ -90,6 +91,45 @@ export class BinanceClient implements BinanceClientAdapter {
 
   async readProductAvailability() {
     return (await this.loadProducts()).availability;
+  }
+
+  async readAccountSnapshot(): Promise<BinanceReadOnlyAccountSnapshot> {
+    const [access, spotAccountValue, futuresAccountValue] = await Promise.all([
+      this.validateAccess(),
+      this.signedRequest("spot", "/api/v3/account"),
+      this.signedRequest("futures", "/fapi/v2/account"),
+    ]);
+    const spotAccount = record(spotAccountValue);
+    const futuresAccount = record(futuresAccountValue);
+    const spotBalances = list(spotAccount.balances)
+      .map(record)
+      .map((balance) => {
+        const available = snapshotNonNegativeNumber(balance.free, "现货可用余额");
+        const locked = snapshotNonNegativeNumber(balance.locked, "现货锁定余额");
+        return {
+          asset: requiredAsset(balance.asset),
+          accountType: "spot" as const,
+          total: available + locked,
+          available,
+          locked,
+        };
+      })
+      .filter(hasBalance);
+    const futuresBalances = list(futuresAccount.assets)
+      .map(record)
+      .map((balance) => ({
+        asset: requiredAsset(balance.asset),
+        accountType: "derivatives" as const,
+        total: snapshotFiniteNumber(balance.walletBalance, "合约钱包余额"),
+        available: snapshotFiniteNumber(balance.availableBalance, "合约可用余额"),
+        locked: null,
+      }))
+      .filter(hasBalance);
+    return {
+      ...access,
+      fetchedAt: this.now(),
+      balances: [...spotBalances, ...futuresBalances],
+    };
   }
 
   async readPreflightSnapshot(): Promise<BinancePreflightSnapshot> {
@@ -892,6 +932,16 @@ function list(value: unknown): unknown[] {
 
 function record(value: unknown): Record<string, any> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {};
+}
+
+function requiredAsset(value: unknown) {
+  const asset = String(value ?? "").trim().toUpperCase();
+  if (!asset) throw new BinanceProviderError("provider_response_invalid", "Binance 返回了无效的资产标识。");
+  return asset;
+}
+
+function hasBalance(balance: { total: number; available: number; locked: number | null }) {
+  return balance.total !== 0 || balance.available !== 0 || (balance.locked ?? 0) !== 0;
 }
 
 function isAbortError(error: unknown) {

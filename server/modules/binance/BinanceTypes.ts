@@ -32,6 +32,20 @@ export type BinanceAccountIdentity = {
   ipWhitelistVerificationMode?: "provider_list_exact" | "provider_restriction_only";
 };
 
+export type BinanceReadOnlyAccountBalance = {
+  asset: string;
+  accountType: "spot" | "derivatives";
+  total: number;
+  available: number;
+  locked: number | null;
+};
+
+export type BinanceReadOnlyAccountSnapshot = BinanceAccountIdentity & {
+  fetchedAt: number;
+  permissions: BinancePermissions;
+  balances: BinanceReadOnlyAccountBalance[];
+};
+
 export type BinanceProductAvailability = {
   available: boolean;
   status: "available" | "spot_unavailable" | "perpetual_unavailable" | "both_unavailable";

@@ -12,6 +12,7 @@ import { FundingArbitrageManualExecutionService } from "./modules/api/FundingArb
 import { ManualRequestFundingArbitrageExecutionIntentSource } from "./modules/api/ManualRequestFundingArbitrageExecutionIntentSource";
 import { CredentialVenueExecutionAccountResolver } from "./modules/api/CredentialVenueExecutionAccountResolver";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
+import { registerAccountReadRoutes } from "./modules/api/accountReadRoutes";
 import { registerExchangeCredentialRoutes } from "./modules/api/exchangeCredentialRoutes";
 import { registerAdminWalletRoutes } from "./modules/api/adminWalletRoutes";
 import { getEditableMarketSymbol, registerMarketRoutes } from "./modules/api/marketRoutes";
@@ -36,6 +37,8 @@ import { createDefaultFundingOpportunitySource } from "./modules/cex/funding-arb
 import { FundingOpportunityQueryService } from "./modules/cex/funding-arbitrage/FundingOpportunityQueryService";
 import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
 import { BinanceIntentExecutionRuntime } from "./modules/binance/BinanceIntentExecutionRuntime";
+import { AccountReadRegistry } from "./modules/account-read/AccountReadRegistry";
+import { BinanceAccountReadProviderFactory } from "./modules/account-read/BinanceAccountReadProvider";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
@@ -143,6 +146,7 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
+const accountRead = new AccountReadRegistry(userExchangeCredentials, [new BinanceAccountReadProviderFactory()]);
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
@@ -165,6 +169,7 @@ registerArbitrageRoutes(app, arbitrageDashboard);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
+registerAccountReadRoutes(app, accountRead);
 registerExchangeCredentialRoutes(app, userExchangeCredentialService);
 registerStrategyRoutes(app, strategyRuntime, { forwardPaperWorker, martingaleGridPaperWorker, fixedGridPaperWorker });
 registerRealTradingRoutes({
