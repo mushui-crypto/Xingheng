@@ -20,11 +20,24 @@ import {
 } from "../../../api/binancePersonalTrading";
 import { Button } from "../../../components/ui/Button";
 
+type LoadStepKey = "connection" | "account" | "balance" | "positions" | "market" | "orders";
+type LoadStep = { status: "idle" | "success" | "failed" | "skipped"; message: string | null };
+
+const emptyLoadSteps: Record<LoadStepKey, LoadStep> = {
+  connection: { status: "idle", message: null },
+  account: { status: "idle", message: null },
+  balance: { status: "idle", message: null },
+  positions: { status: "idle", message: null },
+  market: { status: "idle", message: null },
+  orders: { status: "idle", message: null },
+};
+
 export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }) {
   const [status, setStatus] = useState<BinanceStatus | null>(null);
   const [account, setAccount] = useState<BinanceAccountSnapshot | null>(null);
   const [market, setMarket] = useState<BinanceMarketSnapshot | null>(null);
   const [orders, setOrders] = useState<BinanceOrdersState>({ orders: [] });
+  const [loadSteps, setLoadSteps] = useState<Record<LoadStepKey, LoadStep>>(emptyLoadSteps);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
@@ -34,25 +47,62 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
   const load = useCallback(async (initial = false, signal?: AbortSignal) => {
     initial ? setLoading(true) : setRefreshing(true);
     setError("");
+    setLoadSteps(emptyLoadSteps);
     try {
       const nextStatus = await fetchBinanceStatus(signal);
       setStatus(nextStatus);
+      setLoadSteps((current) => ({
+        ...current,
+        connection: {
+          status: nextStatus.connection.status === "failed" ? "failed" : nextStatus.credential.configured ? "success" : "skipped",
+          message: nextStatus.connection.message,
+        },
+      }));
       if (!nextStatus.credential.configured) {
         setAccount(null);
         setMarket(null);
         setOrders({ orders: [] });
+        setLoadSteps((current) => markSteps(current, ["account", "balance", "positions", "market", "orders"], "skipped", "Binance API credential is not configured."));
         return;
       }
       const [nextAccount, nextMarket, nextOrders] = await Promise.all([
-        fetchBinanceAccount(signal),
-        fetchBinanceMarket(signal),
-        fetchBinanceOrders(signal),
+        settle(fetchBinanceAccount(signal)),
+        settle(fetchBinanceMarket(signal)),
+        settle(fetchBinanceOrders(signal)),
       ]);
-      setAccount(nextAccount);
-      setMarket(nextMarket);
-      setOrders(nextOrders);
+
+      if (nextAccount.ok) {
+        setAccount(nextAccount.value);
+        setLoadSteps((current) => markSteps(current, ["account", "balance", "positions"], "success", null));
+      } else if (!signal?.aborted) {
+        setAccount(null);
+        setLoadSteps((current) => markSteps(current, ["account", "balance", "positions"], "failed", `Account snapshot query failed: ${nextAccount.message}`));
+      }
+
+      if (nextMarket.ok) {
+        setMarket(nextMarket.value);
+        setLoadSteps((current) => markSteps(current, ["market"], "success", null));
+      } else if (!signal?.aborted) {
+        setMarket(null);
+        setLoadSteps((current) => markSteps(current, ["market"], "failed", `Market query failed: ${nextMarket.message}`));
+      }
+
+      if (nextOrders.ok) {
+        setOrders(nextOrders.value);
+        setLoadSteps((current) => markSteps(current, ["orders"], "success", null));
+      } else if (!signal?.aborted) {
+        setOrders({ orders: [] });
+        setLoadSteps((current) => markSteps(current, ["orders"], "failed", `Orders query failed: ${nextOrders.message}`));
+      }
+
+      const failures = [nextAccount, nextMarket, nextOrders].filter((item) => !item.ok);
+      if (failures.length > 0 && !signal?.aborted) setError("Binance 数据部分加载失败，请查看状态明细。");
     } catch (reason) {
-      if (!signal?.aborted) setError(reason instanceof Error ? reason.message : "Binance Personal Trading 数据加载失败。");
+      if (!signal?.aborted) {
+        const message = reason instanceof Error ? reason.message : "Binance Personal Trading 数据加载失败。";
+        setError(message);
+        setLoadSteps((current) => markSteps(current, ["connection"], "failed", `Status query failed: ${message}`));
+      }
     } finally {
       if (!signal?.aborted) {
         setLoading(false);
@@ -112,12 +162,64 @@ export function BinanceTradingWorkbench({ reloadToken }: { reloadToken: number }
         <EmptyState icon={<ShieldOff size={20} />} title="尚未配置 Binance API" description="请先在上方配置并验证 Binance API，工作台不会使用其他交易所配置代替。" />
       ) : (
         <>
+          <LoadDiagnostics steps={loadSteps} />
           <AccountSection account={account} />
           <MarketSection market={market} />
           <OrdersSection orders={orders} />
         </>
       )}
     </section>
+  );
+}
+
+async function settle<T>(promise: Promise<T>) {
+  try {
+    return { ok: true as const, value: await promise };
+  } catch (error) {
+    return { ok: false as const, message: error instanceof Error ? error.message : "Unknown error." };
+  }
+}
+
+function markSteps(
+  current: Record<LoadStepKey, LoadStep>,
+  keys: LoadStepKey[],
+  status: LoadStep["status"],
+  message: string | null,
+) {
+  return keys.reduce((next, key) => ({ ...next, [key]: { status, message } }), current);
+}
+
+function LoadDiagnostics({ steps }: { steps: Record<LoadStepKey, LoadStep> }) {
+  return (
+    <section className="border-b border-[#25282f]" aria-labelledby="binance-load-diagnostics-title">
+      <SectionHeader title="加载状态" />
+      <div className="grid gap-px bg-[#25282f] sm:grid-cols-2 xl:grid-cols-3">
+        <DiagnosticItem label="Connection" step={steps.connection} />
+        <DiagnosticItem label="Account" step={steps.account} />
+        <DiagnosticItem label="Balance" step={steps.balance} />
+        <DiagnosticItem label="Positions" step={steps.positions} />
+        <DiagnosticItem label="Market" step={steps.market} />
+        <DiagnosticItem label="Orders" step={steps.orders} />
+      </div>
+    </section>
+  );
+}
+
+function DiagnosticItem({ label, step }: { label: string; step: LoadStep }) {
+  const color = step.status === "success"
+    ? "text-emerald-200"
+    : step.status === "failed"
+      ? "text-red-200"
+      : step.status === "skipped"
+        ? "text-amber-200"
+        : "text-[#8f99a5]";
+  const labelText = step.status === "success" ? "success" : step.status === "failed" ? "failed" : step.status === "skipped" ? "skipped" : "idle";
+  return (
+    <div className="min-w-0 bg-[#0b0d11] px-4 py-3">
+      <p className="text-[11px] text-[#8f99a5]">{label}</p>
+      <p className={`mt-1 font-mono text-sm font-semibold ${color}`}>{labelText}</p>
+      {step.message ? <p className="mt-1 break-words text-xs leading-5 text-[#aab3bd]">{step.message}</p> : null}
+    </div>
   );
 }
 

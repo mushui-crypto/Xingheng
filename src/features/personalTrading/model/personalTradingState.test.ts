@@ -34,5 +34,5 @@ test("credential summaries include every venue without inventing configured stat
   assert.equal(result.length, 4);
   assert.equal(result[0].configured, true);
   assert.equal(result[1].configured, false);
-  assert.equal(result[1].implemented, false);
+  assert.equal(result[1].implemented, true);
 });

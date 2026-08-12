@@ -15,7 +15,17 @@ import { exchangeVenues, mergeCredentialSummaries } from "../model/personalTradi
 type SecretForm = { apiKey: string; apiSecret: string; passphrase: string };
 const emptyForm: SecretForm = { apiKey: "", apiSecret: "", passphrase: "" };
 
-export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChanged: () => void }) {
+export function ExchangeCredentialsPanel({
+  onBinanceChanged,
+  onSummariesChanged,
+  onVenueSelect,
+  selectedVenue,
+}: {
+  onBinanceChanged: () => void;
+  onSummariesChanged?: (summaries: ExchangeCredentialSummary[]) => void;
+  onVenueSelect: (venue: ExchangeVenue) => void;
+  selectedVenue: ExchangeVenue;
+}) {
   const [summaries, setSummaries] = useState<ExchangeCredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -29,7 +39,9 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
     const controller = new AbortController();
     void fetchExchangeCredentials(controller.signal)
       .then((items) => {
-        setSummaries(Array.isArray(items) ? items : []);
+        const nextSummaries = Array.isArray(items) ? items : [];
+        setSummaries(nextSummaries);
+        onSummariesChanged?.(nextSummaries);
         setError("");
       })
       .catch((reason) => {
@@ -54,7 +66,8 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
   };
 
   const save = async () => {
-    if (!editingVenue || !form.apiKey.trim() || !form.apiSecret.trim()) return;
+    const needsPassphrase = exchangeVenues.find((item) => item.venue === editingVenue)?.needsPassphrase === true;
+    if (!editingVenue || !form.apiKey.trim() || !form.apiSecret.trim() || (needsPassphrase && !form.passphrase.trim())) return;
     setSaving(true);
     setError("");
     try {
@@ -63,7 +76,11 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
         apiSecret: form.apiSecret.trim(),
         ...(form.passphrase.trim() ? { passphrase: form.passphrase.trim() } : {}),
       });
-      setSummaries((current) => [...current.filter((item) => item.venue !== saved.venue), saved]);
+      setSummaries((current) => {
+        const nextSummaries = [...current.filter((item) => item.venue !== saved.venue), saved];
+        onSummariesChanged?.(nextSummaries);
+        return nextSummaries;
+      });
       setEditingVenue(null);
       if (saved.venue === "binance") onBinanceChanged();
     } catch (reason) {
@@ -79,7 +96,11 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
     setError("");
     try {
       const deleted = await deleteExchangeCredential(venue);
-      setSummaries((current) => [...current.filter((item) => item.venue !== venue), deleted]);
+      setSummaries((current) => {
+        const nextSummaries = [...current.filter((item) => item.venue !== venue), deleted];
+        onSummariesChanged?.(nextSummaries);
+        return nextSummaries;
+      });
       if (venue === "binance") onBinanceChanged();
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "交易所 API 配置删除失败。");
@@ -111,9 +132,15 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
         <div className="divide-y divide-[#25282f]">
           {venues.map((summary) => {
             const config = exchangeVenues.find((item) => item.venue === summary.venue)!;
+            const selected = summary.venue === selectedVenue;
             return (
-              <div className="flex min-w-0 flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5" key={summary.venue}>
-                <div className="min-w-0">
+              <div className={`flex min-w-0 flex-col gap-3 px-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-5 ${selected ? "bg-white/[0.04] ring-1 ring-inset ring-white/15" : ""}`} key={summary.venue}>
+                <button
+                  aria-pressed={selected}
+                  className="min-w-0 flex-1 text-left outline-none focus-visible:ring-2 focus-visible:ring-white/40"
+                  onClick={() => onVenueSelect(summary.venue)}
+                  type="button"
+                >
                   <div className="flex flex-wrap items-center gap-2">
                     <strong className="text-sm text-white">{config.label}</strong>
                     <StatusLabel configured={summary.configured} implemented={summary.implemented} />
@@ -122,7 +149,7 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
                     {summary.configured ? `${summary.maskedApiKey ?? "已配置"} · ${summary.accountFingerprint ?? summary.accountId ?? "账户已验证"}` : summary.message ?? "尚未配置"}
                   </p>
                   {summary.lastVerifiedAt ? <p className="mt-1 text-[11px] text-[#707985]">验证于 {formatDate(summary.lastVerifiedAt)}</p> : null}
-                </div>
+                </button>
                 <div className="flex shrink-0 flex-wrap gap-2">
                   {!summary.configured ? (
                     <Button disabled={!summary.implemented} onClick={() => openEditor(summary.venue)} type="button" variant="secondary">
@@ -142,7 +169,9 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
 
       <Modal
         closeDisabled={saving}
-        description="保存前会由服务端验证并绑定当前登录用户。已有 Secret 不会回显。"
+        description={editingVenue === "binance"
+          ? "保存前会由服务端验证并绑定当前登录用户。已有 Secret 不会回显。"
+          : "当前交易所仅加密保存 API 凭证，不执行私有接口验证或交易动作。已有 Secret 不会回显。"}
         onClose={closeEditor}
         open={Boolean(editingVenue)}
         title={`配置 ${venueConfig?.label ?? "交易所"} API`}
@@ -155,8 +184,8 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
           ) : null}
           <div className="flex flex-col-reverse gap-2 border-t border-[#25282f] pt-4 sm:flex-row sm:justify-end">
             <Button disabled={saving} onClick={closeEditor} type="button" variant="ghost">取消</Button>
-            <Button disabled={saving || !form.apiKey.trim() || !form.apiSecret.trim()} onClick={() => void save()} type="button">
-              {saving ? "验证并保存中" : "验证并保存"}
+            <Button disabled={saving || !form.apiKey.trim() || !form.apiSecret.trim() || (venueConfig?.needsPassphrase && !form.passphrase.trim())} onClick={() => void save()} type="button">
+              {saving ? (editingVenue === "binance" ? "验证并保存中" : "加密保存中") : (editingVenue === "binance" ? "验证并保存" : "加密保存")}
             </Button>
           </div>
         </div>

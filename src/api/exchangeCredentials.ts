@@ -1,4 +1,4 @@
-import { requestJson } from "./httpClient";
+import { HttpRequestError, requestJson } from "./httpClient";
 
 export type ExchangeVenue = "binance" | "bybit" | "bitget" | "okx";
 
@@ -51,7 +51,8 @@ export function saveExchangeCredential(venue: ExchangeVenue, input: SaveExchange
         body: JSON.stringify(input),
       },
     },
-  ).then((payload) => requireCredentialSummary(payload, venue));
+  ).then((payload) => requireCredentialSummary(payload, venue))
+    .catch((error: unknown) => { throw presentExchangeCredentialError(error); });
 }
 
 export function deleteExchangeCredential(venue: ExchangeVenue) {
@@ -59,7 +60,8 @@ export function deleteExchangeCredential(venue: ExchangeVenue) {
     `/api/exchange-credentials/${venue}`,
     "交易所 API 配置删除失败。",
     { ...requestOptions, init: { ...requestOptions.init, method: "DELETE" } },
-  ).then((payload) => requireCredentialSummary(payload, venue));
+  ).then((payload) => requireCredentialSummary(payload, venue))
+    .catch((error: unknown) => { throw presentExchangeCredentialError(error); });
 }
 
 export function normalizeExchangeCredentialSummary(payload: unknown): ExchangeCredentialSummary | null {
@@ -96,4 +98,19 @@ function nullableString(value: unknown) {
 function booleanRecord(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value).filter((entry): entry is [string, boolean] => typeof entry[1] === "boolean"));
+}
+
+export function presentExchangeCredentialError(error: unknown) {
+  if (error instanceof HttpRequestError) {
+    if (error.category?.startsWith("credential_key_")) {
+      return new Error("凭证加密服务当前不可用，请等待 KMS/WIF 恢复后重试；无需在交易所重新创建 API Key。");
+    }
+    if (error.category === "credential_input_invalid") {
+      return new Error(error.message || "API Key、Secret 或 Passphrase 格式不正确。");
+    }
+    if (error.category === "credential_already_configured") {
+      return new Error(error.message || "该交易所已配置 API 凭证，请先删除旧配置。");
+    }
+  }
+  return error instanceof Error ? error : new Error("交易所 API 配置请求失败。");
 }

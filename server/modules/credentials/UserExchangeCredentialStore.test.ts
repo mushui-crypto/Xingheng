@@ -41,6 +41,33 @@ test("stores only encrypted credentials and decrypts only for execution", async 
   }
 });
 
+test("stores Bitget passphrase inside the encrypted payload only", async () => {
+  const fixture = createFixture();
+  try {
+    await fixture.store.save({
+      ...credential(),
+      venue: "bitget",
+      accountId: "bitget:credential-only:account-001",
+      accountFingerprint: "BITGET-FINGERPRINT-001",
+      apiKey: "bitget-api-key-value-001",
+      apiSecret: "bitget-secret-value-001",
+      passphrase: "bitget-passphrase-value-001",
+      permissions: { read: false, executionEnabled: false, providerVerified: false },
+    });
+
+    const databaseBytes = readFileSync(fixture.dbPath).toString("utf8");
+    assert.equal(databaseBytes.includes("bitget-secret-value-001"), false);
+    assert.equal(databaseBytes.includes("bitget-passphrase-value-001"), false);
+    assert.deepEqual(await fixture.store.loadForExecution("user-1", "bitget"), {
+      apiKey: "bitget-api-key-value-001",
+      apiSecret: "bitget-secret-value-001",
+      passphrase: "bitget-passphrase-value-001",
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
 test("AAD prevents moving a credential to another user", async () => {
   const fixture = createFixture();
   try {
