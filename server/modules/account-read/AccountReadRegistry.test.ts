@@ -72,7 +72,7 @@ test("unimplemented venues do not load credentials or connect providers", async 
     },
   } as never, factory(() => undefined));
 
-  await assert.rejects(registry.read("user-a", "okx"), (error: unknown) => (
+  await assert.rejects(registry.read("user-a", "bitget"), (error: unknown) => (
     error instanceof AccountReadRegistryError && error.category === "account_read_provider_not_implemented"
   ));
   assert.equal(loads, 0);

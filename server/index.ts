@@ -39,6 +39,7 @@ import { BinancePersonalTradingServiceRegistry } from "./modules/binance/Binance
 import { BinanceIntentExecutionRuntime } from "./modules/binance/BinanceIntentExecutionRuntime";
 import { AccountReadRegistry } from "./modules/account-read/AccountReadRegistry";
 import { BinanceAccountReadProviderFactory } from "./modules/account-read/BinanceAccountReadProvider";
+import { OkxAccountReadProviderFactory } from "./modules/account-read/OkxAccountReadProvider";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
@@ -146,7 +147,10 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
-const accountRead = new AccountReadRegistry(userExchangeCredentials, [new BinanceAccountReadProviderFactory()]);
+const accountRead = new AccountReadRegistry(userExchangeCredentials, [
+  new BinanceAccountReadProviderFactory(),
+  new OkxAccountReadProviderFactory(),
+]);
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(

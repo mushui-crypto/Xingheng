@@ -1,8 +1,10 @@
 import type { ExchangeVenue } from "../credentials/CredentialKeyProvider";
 
+export type AccountReadAccountType = "spot" | "derivatives" | "unified" | "unknown";
+
 export type VenueAccountReadBalance = {
   asset: string;
-  accountType: "spot" | "derivatives";
+  accountType: AccountReadAccountType;
   total: number;
   available: number;
   locked: number | null;
@@ -20,7 +22,7 @@ export type VenueAccountReadSnapshot = {
   accountId: string;
   accountFingerprint: string;
   uidHash: string | null;
-  accountTypes: Array<"spot" | "derivatives">;
+  accountTypes: AccountReadAccountType[];
   accountMode: string | null;
   connection: {
     status: "connected";
