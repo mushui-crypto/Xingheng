@@ -22,7 +22,7 @@ export function mergeCredentialSummaries(items: ExchangeCredentialSummary[]) {
   return exchangeVenues.map(({ venue }) => summaries.get(venue) ?? {
     venue,
     configured: false,
-    implemented: venue === "binance",
+    implemented: true,
     accountId: null,
     accountFingerprint: null,
     maskedApiKey: null,

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { BinanceClient } from "../binance/BinanceClient";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
 import type { ExchangeVenue } from "./CredentialKeyProvider";
@@ -31,18 +32,34 @@ export class UserExchangeCredentialService {
 
   async put(userId: string, venueInput: string, input: unknown) {
     const venue = normalizeVenue(venueInput);
-    if (venue !== "binance") throw notImplemented(venue);
     if (this.store.findSummary(userId, venue)) {
       throw new UserExchangeCredentialServiceError(
         "credential_already_configured",
-        "Delete the existing Binance credential before configuring another one.",
+        `Delete the existing ${venueLabel(venue)} credential before configuring another one.`,
       );
     }
     const body = object(input);
     assertOnlyKeys(body, ["apiKey", "apiSecret", "passphrase"]);
     const apiKey = requiredSecret(body.apiKey, "apiKey");
     const apiSecret = requiredSecret(body.apiSecret, "apiSecret");
-    if (body.passphrase !== undefined && String(body.passphrase).trim()) {
+    const passphrase = optionalPassphrase(venue, body.passphrase);
+
+    if (venue !== "binance") {
+      const identity = localCredentialIdentity(venue, apiKey);
+      const summary = await this.store.save({
+        userId,
+        venue,
+        ...identity,
+        apiKey,
+        apiSecret,
+        ...(passphrase ? { passphrase } : {}),
+        permissions: credentialOnlyPermissions,
+        verifiedAt: Date.now(),
+      });
+      return status(venue, summary);
+    }
+
+    if (passphrase) {
       throw new UserExchangeCredentialServiceError("credential_input_invalid", "Binance does not use an API passphrase.");
     }
 
@@ -65,12 +82,11 @@ export class UserExchangeCredentialService {
 
   async delete(userId: string, venueInput: string) {
     const venue = normalizeVenue(venueInput);
-    if (venue !== "binance") throw notImplemented(venue);
     const summary = this.store.findSummary(userId, venue);
     if (!summary) return status(venue, null);
     if (this.options.deleteCredential) {
-      await this.options.deleteCredential(userId, venue);
-      return status(venue, null);
+      const handled = await this.options.deleteCredential(userId, venue);
+      if (handled) return status(venue, null);
     }
     await this.options.assertCanDelete?.(userId, venue);
     this.store.delete(userId, venue);
@@ -86,7 +102,7 @@ export class UserExchangeCredentialServiceError extends Error {
 }
 
 function status(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | null) {
-  const implemented = venue === "binance";
+  const implemented = true;
   return {
     venue,
     configured: Boolean(summary),
@@ -96,9 +112,19 @@ function status(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | n
     maskedApiKey: summary?.maskedApiKey ?? null,
     permissions: summary?.permissions ?? null,
     lastVerifiedAt: summary?.lastVerifiedAt ?? null,
-    message: implemented ? null : `${venue} credential adapter is not implemented.`,
+    message: message(venue, summary),
   };
 }
+
+const credentialOnlyPermissions = Object.freeze({
+  read: false,
+  spotTrade: false,
+  contractTrade: false,
+  withdraw: false,
+  ipRestricted: false,
+  providerVerified: false,
+  executionEnabled: false,
+});
 
 function assertBinancePermissions(permissions: BinancePermissions) {
   if (
@@ -121,13 +147,6 @@ function normalizeVenue(value: string): ExchangeVenue {
   throw new UserExchangeCredentialServiceError("credential_venue_invalid", "Unsupported exchange venue.");
 }
 
-function notImplemented(venue: ExchangeVenue) {
-  return new UserExchangeCredentialServiceError(
-    "credential_adapter_not_implemented",
-    `${venue} credential adapter is not implemented.`,
-  );
-}
-
 function object(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new UserExchangeCredentialServiceError("credential_input_invalid", "Credential request body must be an object.");
@@ -147,4 +166,40 @@ function assertOnlyKeys(value: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw new UserExchangeCredentialServiceError("credential_input_invalid", "Credential request contains unsupported fields.");
   }
+}
+
+function optionalPassphrase(venue: ExchangeVenue, value: unknown) {
+  if (value !== undefined && typeof value !== "string") {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", "passphrase is invalid.");
+  }
+  const passphrase = value?.trim() ?? "";
+  if ((venue === "bitget" || venue === "okx") && !passphrase) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", `${venueLabel(venue)} API passphrase is required.`);
+  }
+  if ((venue === "binance" || venue === "bybit") && passphrase) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", `${venueLabel(venue)} does not use an API passphrase.`);
+  }
+  if (passphrase.length > 512) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", "passphrase is invalid.");
+  }
+  return passphrase || undefined;
+}
+
+function localCredentialIdentity(venue: Exclude<ExchangeVenue, "binance">, apiKey: string) {
+  const digest = createHash("sha256").update(`${venue}:credential-only:${apiKey}`).digest("hex");
+  return {
+    accountId: `${venue}:credential-only:${digest.slice(0, 20)}`,
+    accountFingerprint: `${venue.toUpperCase()}-${digest.slice(20, 32).toUpperCase()}`,
+  };
+}
+
+function venueLabel(venue: ExchangeVenue) {
+  return venue === "binance" ? "Binance" : venue === "bybit" ? "Bybit" : venue === "bitget" ? "Bitget" : "OKX";
+}
+
+function message(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | null) {
+  if (venue === "binance") return null;
+  return summary
+    ? `${venueLabel(venue)} API credential is encrypted and saved. Private provider validation and execution are not enabled for this venue.`
+    : `${venueLabel(venue)} supports encrypted API credential storage only; private provider validation and execution are not enabled.`;
 }

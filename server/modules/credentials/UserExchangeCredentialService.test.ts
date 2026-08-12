@@ -37,16 +37,111 @@ test("rejects credentials with withdrawal permission", async () => {
   assert.equal(store.saved, null);
 });
 
-test("does not expose configuration actions for unimplemented venues", async () => {
+test("stores Bybit, Bitget and OKX credentials as credential-only without provider validation", async () => {
   const store = new MemoryCredentialStore();
   const service = new UserExchangeCredentialService(store as never);
-  const bybit = service.list("user-1").find((credential) => credential.venue === "bybit");
-  assert.equal(bybit?.implemented, false);
+
+  const bybit = await service.put("user-1", "bybit", {
+    apiKey: "bybit-api-key-001",
+    apiSecret: "bybit-api-secret-001",
+  });
+  const bitget = await service.put("user-1", "bitget", {
+    apiKey: "bitget-api-key-001",
+    apiSecret: "bitget-api-secret-001",
+    passphrase: "bitget-passphrase-001",
+  });
+  const okx = await service.put("user-1", "okx", {
+    apiKey: "okx-api-key-001",
+    apiSecret: "okx-api-secret-001",
+    passphrase: "okx-passphrase-001",
+  });
+
+  assert.equal(bybit.implemented, true);
+  assert.equal(bybit.configured, true);
+  assert.match(bybit.accountId ?? "", /^bybit:credential-only:/u);
+  assert.equal(bybit.permissions?.executionEnabled, false);
+  assert.equal(bitget.configured, true);
+  assert.equal(okx.configured, true);
+  assert.equal(JSON.stringify([bybit, bitget, okx]).includes("passphrase-001"), false);
+  assert.equal(store.savedItems.length, 3);
+  assert.equal(store.savedItems[1]?.passphrase, "bitget-passphrase-001");
+  assert.equal(store.savedItems[2]?.passphrase, "okx-passphrase-001");
+});
+
+test("requires passphrase only for Bitget and OKX credential-only storage", async () => {
+  const service = new UserExchangeCredentialService(new MemoryCredentialStore() as never);
   await assert.rejects(
-    service.put("user-1", "bybit", { apiKey: "key", apiSecret: "secret" }),
+    service.put("user-1", "bitget", { apiKey: "key", apiSecret: "secret" }),
     (error: unknown) => error instanceof UserExchangeCredentialServiceError
-      && error.category === "credential_adapter_not_implemented",
+      && error.category === "credential_input_invalid",
   );
+  await assert.rejects(
+    service.put("user-1", "bybit", { apiKey: "key", apiSecret: "secret", passphrase: "not-used" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_input_invalid",
+  );
+});
+
+test("deletes non-Binance credentials through the common store when the Binance hook does not handle them", async () => {
+  const store = new MemoryCredentialStore();
+  const service = new UserExchangeCredentialService(store as never, {
+    deleteCredential: async () => false,
+  });
+  await service.put("user-1", "okx", {
+    apiKey: "okx-api-key-001",
+    apiSecret: "okx-api-secret-001",
+    passphrase: "okx-passphrase-001",
+  });
+  const deleted = await service.delete("user-1", "okx");
+  assert.equal(deleted.configured, false);
+  assert.equal(store.findSummary("user-1", "okx"), null);
+});
+
+test("preserves Binance-specific guarded delete hook semantics", async () => {
+  const store = new MemoryCredentialStore();
+  const service = new UserExchangeCredentialService(store as never, {
+    binanceClientFactory: () => ({ validateAccess: async () => access() }),
+    deleteCredential: async (userId, venue) => {
+      store.delete(userId, venue);
+      return true;
+    },
+  });
+  await service.put("user-1", "binance", {
+    apiKey: "api-key-value-001",
+    apiSecret: "api-secret-value-001",
+  });
+  const deleted = await service.delete("user-1", "binance");
+  assert.equal(deleted.configured, false);
+  assert.equal(store.findSummary("user-1", "binance"), null);
+});
+
+test("lists every venue as configurable while only Binance represents provider-verified execution", async () => {
+  const service = new UserExchangeCredentialService(new MemoryCredentialStore() as never);
+  const list = service.list("user-1");
+  assert.deepEqual(list.map((credential) => [credential.venue, credential.implemented]), [
+    ["bybit", true],
+    ["bitget", true],
+    ["binance", true],
+    ["okx", true],
+  ]);
+  assert.match(list.find((credential) => credential.venue === "okx")?.message ?? "", /credential storage only/u);
+  assert.equal(list.find((credential) => credential.venue === "binance")?.message, null);
+});
+
+test("KMS failures fail closed for credential-only venues without exposing secrets", async () => {
+  const store = new MemoryCredentialStore();
+  store.failSave = true;
+  const service = new UserExchangeCredentialService(store as never);
+  await assert.rejects(
+    service.put("user-1", "okx", {
+      apiKey: "okx-api-key-001",
+      apiSecret: "must-not-leak",
+      passphrase: "okx-passphrase-001",
+    }),
+    (error: unknown) => error instanceof Error
+      && !String(error.message).includes("must-not-leak"),
+  );
+  assert.equal(store.saved, null);
 });
 
 function access(overrides: Partial<BinancePermissions> = {}): BinanceAccountIdentity & { permissions: BinancePermissions } {
@@ -70,7 +165,9 @@ function access(overrides: Partial<BinancePermissions> = {}): BinanceAccountIden
 
 class MemoryCredentialStore {
   readonly values = new Map<string, UserExchangeCredentialSummary>();
+  readonly savedItems: SaveUserExchangeCredentialInput[] = [];
   saved: SaveUserExchangeCredentialInput | null = null;
+  failSave = false;
 
   findSummary(userId: string, venue: string) {
     return this.values.get(`${userId}:${venue}`) ?? null;
@@ -81,7 +178,9 @@ class MemoryCredentialStore {
   }
 
   async save(input: SaveUserExchangeCredentialInput) {
+    if (this.failSave) throw new Error("GCP KMS is unavailable, unauthorized, or the key version is disabled.");
     this.saved = input;
+    this.savedItems.push(input);
     const now = input.verifiedAt ?? Date.now();
     const summary: UserExchangeCredentialSummary = {
       userId: input.userId,

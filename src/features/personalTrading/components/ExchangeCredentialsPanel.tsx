@@ -54,7 +54,8 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
   };
 
   const save = async () => {
-    if (!editingVenue || !form.apiKey.trim() || !form.apiSecret.trim()) return;
+    const needsPassphrase = exchangeVenues.find((item) => item.venue === editingVenue)?.needsPassphrase === true;
+    if (!editingVenue || !form.apiKey.trim() || !form.apiSecret.trim() || (needsPassphrase && !form.passphrase.trim())) return;
     setSaving(true);
     setError("");
     try {
@@ -142,7 +143,9 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
 
       <Modal
         closeDisabled={saving}
-        description="保存前会由服务端验证并绑定当前登录用户。已有 Secret 不会回显。"
+        description={editingVenue === "binance"
+          ? "保存前会由服务端验证并绑定当前登录用户。已有 Secret 不会回显。"
+          : "当前交易所仅加密保存 API 凭证，不执行私有接口验证或交易动作。已有 Secret 不会回显。"}
         onClose={closeEditor}
         open={Boolean(editingVenue)}
         title={`配置 ${venueConfig?.label ?? "交易所"} API`}
@@ -155,8 +158,8 @@ export function ExchangeCredentialsPanel({ onBinanceChanged }: { onBinanceChange
           ) : null}
           <div className="flex flex-col-reverse gap-2 border-t border-[#25282f] pt-4 sm:flex-row sm:justify-end">
             <Button disabled={saving} onClick={closeEditor} type="button" variant="ghost">取消</Button>
-            <Button disabled={saving || !form.apiKey.trim() || !form.apiSecret.trim()} onClick={() => void save()} type="button">
-              {saving ? "验证并保存中" : "验证并保存"}
+            <Button disabled={saving || !form.apiKey.trim() || !form.apiSecret.trim() || (venueConfig?.needsPassphrase && !form.passphrase.trim())} onClick={() => void save()} type="button">
+              {saving ? (editingVenue === "binance" ? "验证并保存中" : "加密保存中") : (editingVenue === "binance" ? "验证并保存" : "加密保存")}
             </Button>
           </div>
         </div>
