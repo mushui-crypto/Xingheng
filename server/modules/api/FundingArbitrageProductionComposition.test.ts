@@ -148,6 +148,9 @@ async function createComposition(dbPath: string, options: { accountId?: string }
         async account() {
           return { accountId: options.accountId };
         },
+        async executionAccountIdentity() {
+          return { accountId: options.accountId };
+        },
         async market() {
           throw new Error("provider market read is not expected");
         },

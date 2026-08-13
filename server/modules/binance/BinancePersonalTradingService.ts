@@ -6,6 +6,7 @@ import {
 } from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
+import type { BinanceGenericRiskContext } from "./BinanceTypes";
 import { loadBinanceTradingConfig } from "./BinanceTradingConfig";
 import { BinanceClient } from "./BinanceClient";
 import { createExecutionCanonicalAssetSource } from "../cex/CanonicalAssetSource";
@@ -94,6 +95,10 @@ export class BinancePersonalTradingService {
     return this.requireOrders().syncPositions();
   }
 
+  executionAccountIdentity() {
+    return this.requireClient().validateAccess();
+  }
+
   async market() {
     const snapshot = await this.requireOrders().syncPositions();
     return {
@@ -105,8 +110,12 @@ export class BinancePersonalTradingService {
     };
   }
 
-  async placeExecutionOrder(input: BinanceOrderInput, beforeProviderMutation?: BinanceProviderMutationGuard) {
-    return this.requireOrders().place(input, beforeProviderMutation);
+  async placeExecutionOrder(
+    input: BinanceOrderInput,
+    beforeProviderMutation?: BinanceProviderMutationGuard,
+    genericRiskContext?: BinanceGenericRiskContext,
+  ) {
+    return this.requireOrders().place(input, beforeProviderMutation, genericRiskContext);
   }
 
   loadExecutionReadContext(instrumentId: string) {

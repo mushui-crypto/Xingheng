@@ -89,30 +89,46 @@ test("provider mutation guard runs after risk refresh and immediately before pro
   }
 });
 
-test("generic symbols fail closed before provider mutation while the legacy RiskGuard remains XAUT-specific", async () => {
+test("generic symbols use instrument-scoped private risk state without reading the XAUT snapshot", async () => {
   const root = mkdtempSync(join(tmpdir(), "binance-generic-risk-boundary-"));
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));
   let writes = 0;
+  let legacyReads = 0;
+  const riskReads: Array<Record<string, unknown>> = [];
+  const filled: BinanceProviderOrder = {
+    orderId: "btc-filled", orderLinkId: "", status: "Filled", requestedQuantity: 0.001,
+    filledQuantity: 0.001, averagePrice: 65_000, feeUsd: 0, updatedAt: Date.now(),
+  };
   const client = {
-    readPreflightSnapshot: async () => snapshotFixture(),
-    placeOrder: async () => { writes += 1; return { orderId: "forbidden", orderLinkId: "forbidden" }; },
+    readPreflightSnapshot: async () => { legacyReads += 1; return snapshotFixture(); },
+    readGenericRiskSnapshot: async (request: Record<string, unknown>) => {
+      riskReads.push(request);
+      return genericRiskSnapshot({ symbol: "BTCUSDT", baseAsset: "BTC", availableUsdt: "65" });
+    },
+    placeOrder: async (request: { orderLinkId: string }) => {
+      writes += 1;
+      filled.orderLinkId = request.orderLinkId;
+      return { orderId: filled.orderId, orderLinkId: request.orderLinkId };
+    },
+    awaitOrder: async () => filled,
+    findOrderByClientOrderId: async () => filled,
+    cancelOrder: async () => undefined,
   } as unknown as BinanceClientAdapter;
   const config = tradingConfigFixture();
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   try {
-    await assert.rejects(
-      () => manager.place({
-        idempotencyKey: "btc-risk-boundary",
-        category: "spot",
-        symbol: "BTCUSDT",
-        side: "Buy",
-        quantity: "0.000123456789012345",
-        limitPrice: `1${"0".repeat(400)}`,
-        reduceOnly: false,
-      }),
-      /RiskGuard instrument scope is generalized/u,
-    );
-    assert.equal(writes, 0);
+    await manager.place({
+      idempotencyKey: "btc-risk-boundary",
+      category: "spot",
+      symbol: "BTCUSDT",
+      side: "Buy",
+      quantity: "0.001",
+      limitPrice: "65000",
+      reduceOnly: false,
+    }, undefined, genericRiskContext());
+    assert.equal(writes, 1);
+    assert.equal(legacyReads, 0);
+    assert.deepEqual(riskReads, [{ category: "spot", symbol: "BTCUSDT", baseAsset: "BTC" }]);
     assert.equal(store.find("btc-risk-boundary")?.symbol, "BTCUSDT");
   } finally {
     store.close();
@@ -295,8 +311,9 @@ test("cancel uses the persisted generic provider symbol", async () => {
     feeUsd: 0,
     updatedAt: Date.now(),
   };
+  let legacyReads = 0;
   const client = {
-    readPreflightSnapshot: async () => snapshotFixture(),
+    readPreflightSnapshot: async () => { legacyReads += 1; return snapshotFixture(); },
     findOrderByClientOrderId: async (_category: string, symbol: string) => {
       symbols.push(symbol);
       return cancelled;
@@ -313,6 +330,25 @@ test("cancel uses the persisted generic provider symbol", async () => {
     assert.equal((await manager.cancel("generic-cancel")).status, "Cancelled");
     assert.ok(symbols.length >= 3);
     assert.ok(symbols.every((symbol) => symbol === "DOGEUSDT"));
+    assert.equal(legacyReads, 0);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancel fails closed without a StellaX-known persisted order identity", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-unknown-cancel-"));
+  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  let providerMutations = 0;
+  const client = {
+    cancelOrder: async () => { providerMutations += 1; },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true });
+  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  try {
+    await assert.rejects(() => manager.cancel("unknown-order"), /not found/u);
+    assert.equal(providerMutations, 0);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -538,3 +574,39 @@ test("MARKET linear Sell valuation conservatively enforces max order and positio
     });
   }
 });
+
+function genericRiskContext(overrides: Record<string, unknown> = {}) {
+  return {
+    userId: "user-a",
+    accountId: "binance:test",
+    instrumentId: "BTC-USDT-SPOT",
+    category: "spot" as const,
+    providerSymbol: "BTCUSDT",
+    baseAsset: "BTC",
+    instrumentStatus: "trading" as const,
+    valuationPrice: "65000",
+    quoteFetchedAt: Date.now(),
+    ...overrides,
+  } as any;
+}
+
+function genericRiskSnapshot(overrides: Record<string, unknown> = {}) {
+  return {
+    accountId: "binance:test",
+    accountFingerprint: "test",
+    fetchedAt: Date.now(),
+    accountMode: "single_asset_one_way" as const,
+    permissions: {
+      read: true, spotTrade: true, contractTrade: true, withdraw: false, ipRestricted: true,
+      spotAccount: true, futuresAccount: true, positionModeSupported: true,
+    },
+    category: "spot" as const,
+    symbol: "BTCUSDT",
+    baseAsset: "BTC",
+    availableUsdt: "1000",
+    availableBaseAsset: "1",
+    openOrderCount: 0,
+    position: null,
+    ...overrides,
+  } as any;
+}

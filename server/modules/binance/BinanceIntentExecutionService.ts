@@ -4,7 +4,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 import type { BinanceProviderMutationGuard } from "./BinanceOrderManager";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
-import type { BinanceProviderOrder } from "./BinanceTypes";
+import type { BinanceGenericRiskContext, BinanceProviderOrder } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 import { toBinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 
@@ -43,9 +43,9 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
   constructor(
     private readonly service: BinanceIntentExecutionServiceBinding,
     private readonly config: Pick<BinanceTradingConfig, "maxSlippageBps">,
-    private readonly assertSubmitAllowed: (
+    private readonly assertSubmitAllowed: ((
       prepared: BinanceLegacyRiskPreparedOrder,
-    ) => void | Promise<void> = () => undefined,
+    ) => void | Promise<void>) | undefined = undefined,
     private readonly mapResult: (result: BinanceIntentExecutionResult) => TResult = (result) => result as TResult,
   ) {
     if (!Number.isFinite(config.maxSlippageBps) || config.maxSlippageBps < 0) {
@@ -59,11 +59,14 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     }
     const prepared = await this.prepare(intent);
     const order = await this.service.placeExecutionOrder(
-      prepared,
-      (riskValuationPrice) => this.assertSubmitAllowed({
-        ...prepared,
-        limitPrice: riskValuationPrice,
-      }),
+      prepared.order,
+      this.assertSubmitAllowed
+        ? (riskValuationPrice) => this.assertSubmitAllowed!({
+          ...prepared.order,
+          limitPrice: riskValuationPrice,
+        })
+        : undefined,
+      prepared.riskContext,
     );
     return this.mapResult(Object.freeze({
       executionAttemptId: intent.intentId,
@@ -73,7 +76,10 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     }));
   }
 
-  private async prepare(intent: ExecutionIntent): Promise<BinanceIntentPreparedOrder> {
+  private async prepare(intent: ExecutionIntent): Promise<Readonly<{
+    order: BinanceIntentPreparedOrder;
+    riskContext: BinanceGenericRiskContext;
+  }>> {
     const context = await this.service.loadExecutionReadContext(intent.instrumentId);
     assertExecutionContext(intent, context);
     const category = context.instrument.marketType === "spot" ? "spot" : "linear";
@@ -97,9 +103,25 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       quantity,
       reduceOnly: intent.orderConstraints.reduceOnly,
     } as const;
-    return executionPriceMode === "MARKET"
+    const order = executionPriceMode === "MARKET"
       ? Object.freeze({ ...base, executionPriceMode })
       : Object.freeze({ ...base, executionPriceMode, limitPrice: limitPrice! });
+    return Object.freeze({
+      order,
+      riskContext: Object.freeze({
+        userId: intent.userId,
+        accountId: intent.accountId,
+        instrumentId: context.instrument.instrumentId,
+        category,
+        providerSymbol: context.instrument.providerSymbol,
+        baseAsset: context.instrument.baseAsset.symbol,
+        instrumentStatus: context.instrument.status,
+        valuationPrice: executionPriceMode === "IOC_LIMIT"
+          ? limitPrice!
+          : side === "Buy" ? context.quote.ask : context.quote.bid,
+        quoteFetchedAt: context.quote.fetchedAt,
+      }),
+    });
   }
 }
 

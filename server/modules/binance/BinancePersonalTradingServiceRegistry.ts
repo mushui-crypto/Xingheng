@@ -16,6 +16,7 @@ type PersonalTradingService = Pick<
   BinancePersonalTradingService,
   | "checkConnection"
   | "account"
+  | "executionAccountIdentity"
   | "market"
   | "placeExecutionOrder"
   | "loadExecutionReadContext"

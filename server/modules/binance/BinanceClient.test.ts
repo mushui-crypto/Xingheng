@@ -243,6 +243,52 @@ test("reads a Binance perpetual position through the existing signed GET client"
   assert.ok(methods.every((method) => method === "GET"));
 });
 
+test("generic risk snapshots read only the requested Spot and perpetual instrument with Decimal strings", async () => {
+  const requests: Array<{ method: string; path: string; symbol: string | null }> = [];
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    requests.push({ method: init?.method ?? "GET", path: url.pathname, symbol: url.searchParams.get("symbol") });
+    if (url.pathname === "/fapi/v2/positionRisk") {
+      return Response.json([{
+        symbol: url.searchParams.get("symbol") ?? "BTCUSDT",
+        positionAmt: "-0.001234567890123456",
+        leverage: "1",
+        marginType: "cross",
+      }]);
+    }
+    const response = snapshotResponse(url.pathname, "cross");
+    if (response === undefined) throw new Error(`Unhandled Binance fixture request: ${url.pathname}`);
+    return Response.json(response);
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+
+  const spot = await client.readGenericRiskSnapshot({ category: "spot", symbol: "BTCUSDT", baseAsset: "BTC" });
+  assert.equal(spot.availableUsdt, "100");
+  assert.equal(spot.availableBaseAsset, "0.0015");
+  assert.equal(spot.position, null);
+
+  const perpetual = await client.readGenericRiskSnapshot({ category: "linear", symbol: "BTCUSDT", baseAsset: "BTC" });
+  assert.equal(perpetual.availableUsdt, "100");
+  assert.deepEqual(perpetual.position, {
+    side: "short", quantity: "0.001234567890123456", leverage: "1", marginMode: "cross",
+  });
+  assert.ok(requests.every((request) => request.method === "GET"));
+  assert.ok(requests
+    .filter((request) => request.path.endsWith("openOrders") || request.path.endsWith("positionRisk"))
+    .every((request) => request.symbol === "BTCUSDT"));
+
+  const dogeRequestStart = requests.length;
+  await client.readGenericRiskSnapshot({ category: "linear", symbol: "DOGEUSDT", baseAsset: "DOGE" });
+  assert.ok(requests.slice(dogeRequestStart)
+    .filter((request) => request.path.endsWith("openOrders") || request.path.endsWith("positionRisk"))
+    .every((request) => request.symbol === "DOGEUSDT"));
+});
+
 function snapshotFetch(
   marginType: "cross" | "isolated",
   methods: string[],

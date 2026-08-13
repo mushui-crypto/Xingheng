@@ -5,6 +5,7 @@ import { BinanceRiskGuard } from "./BinanceRiskGuard";
 import type {
   BinanceClientAdapter,
   BinanceExecutionOrderRequest,
+  BinanceGenericRiskContext,
   BinanceOrderExecutionMode,
   BinanceOrderRequest,
   BinancePreflightSnapshot,
@@ -30,8 +31,12 @@ export class BinanceOrderManager {
     private readonly config: BinanceTradingConfig,
   ) {}
 
-  place(input: BinanceOrderInput, beforeProviderMutation?: BinanceProviderMutationGuard) {
-    return this.placeWithMode(input, "production_ioc", beforeProviderMutation);
+  place(
+    input: BinanceOrderInput,
+    beforeProviderMutation?: BinanceProviderMutationGuard,
+    genericRiskContext?: BinanceGenericRiskContext,
+  ) {
+    return this.placeWithMode(input, "production_ioc", beforeProviderMutation, genericRiskContext);
   }
 
   placeTestOrder(input: BinanceOrderInput) {
@@ -45,6 +50,7 @@ export class BinanceOrderManager {
     input: BinanceOrderInput,
     executionMode: BinanceOrderExecutionMode,
     beforeProviderMutation?: BinanceProviderMutationGuard,
+    genericRiskContext?: BinanceGenericRiskContext,
   ) {
     const request = normalizeRequest(input);
     const requestFingerprint = fingerprint(request, executionMode);
@@ -67,11 +73,31 @@ export class BinanceOrderManager {
 
       let providerOrderId: string | null = null;
       let submissionStarted = false;
+      const legacyXaut = request.symbol === "XAUTUSDT";
       try {
-        const snapshot = await this.syncPositions();
-        const legacyRiskRequest = toLegacyRiskRequest(request, snapshot, this.config.maxSlippageBps);
-        this.risk.assertOrderAllowed(legacyRiskRequest, snapshot);
-        await beforeProviderMutation?.(legacyRiskRequest.limitPrice);
+        if (legacyXaut) {
+          const snapshot = await this.syncPositions();
+          const legacyRiskRequest = toLegacyRiskRequest(request, snapshot, this.config.maxSlippageBps);
+          this.risk.assertOrderAllowed(legacyRiskRequest, snapshot);
+          await beforeProviderMutation?.(legacyRiskRequest.limitPrice);
+        } else {
+          if (beforeProviderMutation) {
+            throw new Error("Binance legacy Capital Test guard cannot be used for generic instruments.");
+          }
+          if (!genericRiskContext) {
+            throw new Error("Binance generic execution risk context is required.");
+          }
+          const readRiskSnapshot = this.client.readGenericRiskSnapshot;
+          if (!readRiskSnapshot) {
+            throw new Error("Binance generic private risk read capability is unavailable.");
+          }
+          const snapshot = await readRiskSnapshot.call(this.client, {
+            category: request.category,
+            symbol: request.symbol,
+            baseAsset: genericRiskContext.baseAsset,
+          });
+          this.risk.assertGenericOrderAllowed(request, genericRiskContext, snapshot);
+        }
         submissionStarted = true;
         const accepted = executionMode === "test_gtc"
           ? await this.client.placeTestOrder(request)
@@ -87,7 +113,7 @@ export class BinanceOrderManager {
 
         const order = await this.settleOrder(request.category, request.symbol, accepted.orderId);
         this.persistProviderState(input.idempotencyKey, order);
-        await this.syncPositions();
+        if (legacyXaut) await this.syncPositions();
         return order;
       } catch (error) {
         if (!submissionStarted) {
@@ -103,7 +129,7 @@ export class BinanceOrderManager {
           const settled = await this.settleOrder(request.category, request.symbol, recovered.orderId).catch(() => null);
           if (settled) {
             this.persistProviderState(input.idempotencyKey, settled);
-            await this.syncPositions().catch(() => undefined);
+            if (legacyXaut) await this.syncPositions().catch(() => undefined);
             return settled;
           }
         }
@@ -147,7 +173,7 @@ export class BinanceOrderManager {
         Date.now() + this.config.orderTimeoutMs,
       );
       const result = this.persistProviderState(idempotencyKey, order);
-      await this.syncPositions();
+      if (stored.symbol === "XAUTUSDT") await this.syncPositions();
       return result;
     });
   }

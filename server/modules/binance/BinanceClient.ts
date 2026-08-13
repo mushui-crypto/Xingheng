@@ -9,6 +9,8 @@ import {
   type BinanceClientAdapter,
   type BinanceCredentials,
   type BinanceExecutionOrderRequest,
+  type BinanceGenericRiskSnapshot,
+  type BinanceGenericRiskSnapshotRequest,
   type BinanceInstrumentSpec,
   type BinancePermissions,
   type BinancePerpetualPositionSnapshot,
@@ -155,6 +157,76 @@ export class BinanceClient implements BinanceClientAdapter {
       baseQuantity: quantity.magnitude,
       updatedAt: optionalTimestamp(row.updateTime),
     };
+  }
+
+  async readGenericRiskSnapshot(
+    request: BinanceGenericRiskSnapshotRequest,
+  ): Promise<BinanceGenericRiskSnapshot> {
+    const symbol = requiredProviderSymbol(request.symbol);
+    const baseAsset = requiredAsset(request.baseAsset);
+    const access = await this.validateAccess();
+    if (request.category === "spot") {
+      const [accountValue, ordersValue] = await Promise.all([
+        this.signedRequest("spot", "/api/v3/account"),
+        this.signedRequest("spot", "/api/v3/openOrders", { symbol }),
+      ]);
+      const balances = providerList(record(accountValue).balances, "现货余额").map(record);
+      const usdt = balances.find((balance) => balance.asset === "USDT");
+      const base = balances.find((balance) => balance.asset === baseAsset);
+      return Object.freeze({
+        accountId: access.accountId,
+        accountFingerprint: access.accountFingerprint,
+        fetchedAt: this.now(),
+        accountMode: access.accountMode,
+        permissions: access.permissions,
+        category: "spot",
+        symbol,
+        baseAsset,
+        availableUsdt: providerNonNegativeDecimal(usdt?.free ?? "0", "现货 USDT 可用余额"),
+        availableBaseAsset: providerNonNegativeDecimal(base?.free ?? "0", `现货 ${baseAsset} 可用余额`),
+        openOrderCount: providerList(ordersValue, "现货活动订单").length,
+        position: null,
+      });
+    }
+
+    const [accountValue, positionValue, ordersValue] = await Promise.all([
+      this.signedRequest("futures", "/fapi/v2/account"),
+      this.signedRequest("futures", "/fapi/v2/positionRisk", { symbol }),
+      this.signedRequest("futures", "/fapi/v1/openOrders", { symbol }),
+    ]);
+    const account = record(accountValue);
+    const usdt = providerList(account.assets, "永续合约资产").map(record).find((asset) => asset.asset === "USDT");
+    const positionRow = providerList(positionValue, "永续合约仓位").map(record).find((position) => position.symbol === symbol);
+    if (!positionRow) {
+      throw new BinanceProviderError("provider_snapshot_invalid", "Binance 未返回目标永续合约仓位状态。");
+    }
+    const quantity = signedProviderQuantity(positionRow.positionAmt);
+    const marginMode = snapshotMarginMode(positionRow.marginType);
+    if (marginMode === "unknown") {
+      throw new BinanceProviderError("provider_snapshot_invalid", "Binance 永续合约保证金模式不可确认。");
+    }
+    return Object.freeze({
+      accountId: access.accountId,
+      accountFingerprint: access.accountFingerprint,
+      fetchedAt: this.now(),
+      accountMode: access.accountMode,
+      permissions: access.permissions,
+      category: "linear",
+      symbol,
+      baseAsset,
+      availableUsdt: providerNonNegativeDecimal(
+        usdt?.availableBalance ?? account.availableBalance,
+        "永续合约 USDT 可用保证金",
+      ),
+      availableBaseAsset: null,
+      openOrderCount: providerList(ordersValue, "永续合约活动订单").length,
+      position: Object.freeze({
+        side: quantity.negative ? "short" : quantity.magnitude === "0" ? "flat" : "long",
+        quantity: quantity.magnitude,
+        leverage: providerPositiveDecimal(positionRow.leverage, "永续合约杠杆"),
+        marginMode,
+      }),
+    });
   }
 
   async readPreflightSnapshot(): Promise<BinancePreflightSnapshot> {
@@ -658,8 +730,44 @@ function requiredProviderSymbol(value: unknown) {
   return value;
 }
 
+function providerList(value: unknown, label: string) {
+  if (!Array.isArray(value)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}结构无效。`);
+  }
+  return value;
+}
+
+function providerNonNegativeDecimal(value: unknown, label: string) {
+  const result = providerDecimal(value, label);
+  if (result.startsWith("-")) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}不能为负数。`);
+  }
+  return result;
+}
+
+function providerPositiveDecimal(value: unknown, label: string) {
+  const result = providerNonNegativeDecimal(value, label);
+  if (/^0(?:\.0+)?$/u.test(result)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}必须为正数。`);
+  }
+  return result;
+}
+
+function providerDecimal(value: unknown, label: string) {
+  const raw = typeof value === "string" ? value : "";
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  const negative = raw.startsWith("-");
+  const unsigned = negative ? raw.slice(1) : raw;
+  const [integer, fraction = ""] = unsigned.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  const normalized = normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+  return negative && normalized !== "0" ? `-${normalized}` : normalized;
+}
+
 function signedProviderQuantity(value: unknown) {
-  const raw = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  const raw = typeof value === "string" ? value : "";
   if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
     throw new BinanceProviderError("provider_invalid_response", "Binance 仓位数量无效。");
   }

@@ -7,6 +7,7 @@ import { BinanceIntentExecutionService } from "./BinanceIntentExecutionService";
 import type { BinanceOrderInput } from "./BinanceOrderManager";
 import type { BinanceProviderOrder } from "./BinanceTypes";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
+import type { BinanceGenericRiskContext } from "./BinanceTypes";
 
 const now = 1_800_000_000_000;
 
@@ -69,6 +70,9 @@ test("passes BTC, ETH, and DOGE symbols and Decimal quantities from generic cont
       }));
       assert.equal(binding.placeInputs[0]!.symbol, fixture.symbol);
       assert.equal(binding.placeInputs[0]!.quantity, fixture.quantity);
+      assert.equal(binding.riskContexts[0]!.providerSymbol, fixture.symbol);
+      assert.equal(binding.riskContexts[0]!.baseAsset, fixture.asset);
+      assert.equal(binding.riskContexts[0]!.accountId, "binance:account-1");
       assert.equal(binding.providerMutations, 1);
     });
   }
@@ -234,6 +238,7 @@ test("service stays inside Binance execution boundary and does not import client
 class FakeBinancePersonalTradingBinding {
   readonly placeInputs: BinanceOrderInput[] = [];
   readonly contextInstrumentIds: string[] = [];
+  readonly riskContexts: BinanceGenericRiskContext[] = [];
   placeCalls = 0;
   providerMutations = 0;
   placeResult: BinanceProviderOrder = providerOrder({ status: "Filled" });
@@ -250,12 +255,14 @@ class FakeBinancePersonalTradingBinding {
   async placeExecutionOrder(
     input: BinanceOrderInput,
     beforeProviderMutation?: (riskValuationPrice: number) => void | Promise<void>,
+    genericRiskContext?: BinanceGenericRiskContext,
   ) {
     this.placeCalls += 1;
     await beforeProviderMutation?.(input.limitPrice === undefined ? 1_004.1 : Number(input.limitPrice));
     this.providerMutations += 1;
     if (this.failure) throw this.failure;
     this.placeInputs.push(input);
+    if (genericRiskContext) this.riskContexts.push(genericRiskContext);
     return this.placeResult;
   }
 }

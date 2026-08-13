@@ -53,6 +53,44 @@ export type BinancePerpetualPositionSnapshot = {
   updatedAt: number | null;
 };
 
+export type BinanceGenericRiskSnapshotRequest = Readonly<{
+  category: "spot" | "linear";
+  symbol: string;
+  baseAsset: string;
+}>;
+
+export type BinanceGenericRiskSnapshot = Readonly<{
+  accountId: string;
+  accountFingerprint: string;
+  fetchedAt: number;
+  accountMode: BinanceAccountIdentity["accountMode"];
+  permissions: BinancePermissions;
+  category: "spot" | "linear";
+  symbol: string;
+  baseAsset: string;
+  availableUsdt: string;
+  availableBaseAsset: string | null;
+  openOrderCount: number;
+  position: Readonly<{
+    side: "long" | "short" | "flat";
+    quantity: string;
+    leverage: string;
+    marginMode: "cross" | "isolated";
+  }> | null;
+}>;
+
+export type BinanceGenericRiskContext = Readonly<{
+  userId: string;
+  accountId: string;
+  instrumentId: string;
+  category: "spot" | "linear";
+  providerSymbol: string;
+  baseAsset: string;
+  instrumentStatus: "trading" | "paused" | "close_only" | "delisted" | "unknown";
+  valuationPrice: string;
+  quoteFetchedAt: number;
+}>;
+
 export type BinanceProductAvailability = {
   available: boolean;
   status: "available" | "spot_unavailable" | "perpetual_unavailable" | "both_unavailable";
@@ -183,6 +221,7 @@ export type BinanceClientAdapter = {
   validateAccess(): Promise<BinanceAccountIdentity & { permissions: BinancePermissions }>;
   readProductAvailability(): Promise<BinanceProductAvailability>;
   readPreflightSnapshot(): Promise<BinancePreflightSnapshot>;
+  readGenericRiskSnapshot?(request: BinanceGenericRiskSnapshotRequest): Promise<BinanceGenericRiskSnapshot>;
   setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
   placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;

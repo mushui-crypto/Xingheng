@@ -395,6 +395,18 @@ class FakeBinanceIntentRuntimeService {
     return snapshotFixture({ accountId: this.accountId });
   }
 
+  async executionAccountIdentity() {
+    const snapshot = await this.account();
+    return {
+      accountId: snapshot.accountId,
+      accountFingerprint: snapshot.accountFingerprint,
+      uidSnapshot: snapshot.uidSnapshot ?? "uid-test",
+      accountMode: "single_asset_one_way" as const,
+      ipWhitelistVerificationMode: "provider_list_exact" as const,
+      permissions: snapshot.permissions,
+    };
+  }
+
   async market() {
     this.marketCalls += 1;
     const snapshot = snapshotFixture();

@@ -40,7 +40,7 @@ type BinanceIntentRuntimeService =
   BinanceIntentExecutionServiceBinding
   & Pick<
     BinancePersonalTradingService,
-    "account" | "ordersState" | "findExecutionOrderByClientOrderId" | "cancelOrder"
+    "account" | "executionAccountIdentity" | "ordersState" | "findExecutionOrderByClientOrderId" | "cancelOrder"
   >;
 
 export type BinanceIntentExecutionRuntimeRegistry = Readonly<{
@@ -99,7 +99,7 @@ export class BinanceIntentExecutionRuntime {
     }
 
     return this.registry.run(intent.userId, async (service) => {
-      const account = await service.account();
+      const account = await service.executionAccountIdentity();
       if (account.accountId !== intent.accountId) {
         throw new Error("ExecutionIntent accountId does not match the Binance execution account.");
       }

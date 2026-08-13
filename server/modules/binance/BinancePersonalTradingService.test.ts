@@ -23,7 +23,7 @@ test("personal trading service exposes no legacy mutation facade", () => {
   );
 });
 
-test("kill switch allows explicit cancel through RiskGuard without provider bypass", async () => {
+test("closed risk-increasing gates allow only a known-order cancel to continue past RiskGuard", async () => {
   const directory = mkdtempSync(join(tmpdir(), "binance-cancel-risk-"));
   const previous = {
     liveTradingEnabled: process.env.LIVE_TRADING_ENABLED,
@@ -41,6 +41,18 @@ test("kill switch allows explicit cancel through RiskGuard without provider bypa
       (error: unknown) => !(error instanceof BinanceRiskError) && /not configured/u.test(String(error)),
     );
     killSwitchActive.close();
+
+    process.env.LIVE_TRADING_ENABLED = "false";
+    process.env.BINANCE_KILL_SWITCH = "false";
+    const liveDisabled = new BinancePersonalTradingService({
+      credential: null,
+      orderDbPath: join(directory, "live-disabled.sqlite"),
+    });
+    await assert.rejects(
+      () => liveDisabled.cancelOrder({ idempotencyKey: "cancel-live-disabled" }),
+      (error: unknown) => !(error instanceof BinanceRiskError) && /not configured/u.test(String(error)),
+    );
+    liveDisabled.close();
   } finally {
     restore("LIVE_TRADING_ENABLED", previous.liveTradingEnabled);
     restore("BINANCE_KILL_SWITCH", previous.killSwitch);
