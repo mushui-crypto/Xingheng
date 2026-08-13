@@ -11,6 +11,7 @@ import {
   type BinanceInstrumentSpec,
   type BinanceOrderRequest,
   type BinancePermissions,
+  type BinancePerpetualPositionSnapshot,
   type BinancePreflightSnapshot,
   type BinanceProductAvailability,
   type BinanceProviderOrder,
@@ -129,6 +130,30 @@ export class BinanceClient implements BinanceClientAdapter {
       ...access,
       fetchedAt: this.now(),
       balances: [...spotBalances, ...futuresBalances],
+    };
+  }
+
+  async readPerpetualPosition(
+    symbol: string,
+    expectedSide?: "long" | "short",
+  ): Promise<BinancePerpetualPositionSnapshot> {
+    const normalizedSymbol = requiredProviderSymbol(symbol);
+    const rows = list(await this.signedRequest("futures", "/fapi/v2/positionRisk", {
+      symbol: normalizedSymbol,
+    })).map(record);
+    const matching = rows.filter((candidate) => String(candidate.symbol ?? "") === normalizedSymbol);
+    const row = matching.find((candidate) => expectedSide
+      ? String(candidate.positionSide ?? "").toLowerCase() === expectedSide
+      : true) ?? matching[0];
+    if (!row) {
+      return { symbol: normalizedSymbol, side: "flat", baseQuantity: "0", updatedAt: null };
+    }
+    const quantity = signedProviderQuantity(row.positionAmt);
+    return {
+      symbol: normalizedSymbol,
+      side: quantity.negative ? "short" : quantity.magnitude === "0" ? "flat" : "long",
+      baseQuantity: quantity.magnitude,
+      updatedAt: optionalTimestamp(row.updateTime),
     };
   }
 
@@ -627,6 +652,31 @@ export class BinanceProviderError extends Error {
   constructor(readonly category: string, message: string, readonly providerCode: number | null = null) {
     super(message);
   }
+}
+
+function requiredProviderSymbol(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{4,30}$/u.test(value)) {
+    throw new BinanceProviderError("provider_product_invalid", "Binance 仓位标的无效。");
+  }
+  return value;
+}
+
+function signedProviderQuantity(value: unknown) {
+  const raw = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
+    throw new BinanceProviderError("provider_invalid_response", "Binance 仓位数量无效。");
+  }
+  const negative = raw.startsWith("-");
+  const absolute = negative ? raw.slice(1) : raw;
+  const [integer, fraction = ""] = absolute.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  const magnitude = normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+  return { negative: negative && magnitude !== "0", magnitude };
+}
+
+function optionalTimestamp(value: unknown) {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
 }
 
 function configuredBinanceEgressIps() {

@@ -24,6 +24,13 @@ export type OkxAccountReadSnapshot = {
   fetchedAt: number;
 };
 
+export type OkxPerpetualPositionSnapshot = {
+  instId: string;
+  side: "long" | "short" | "flat";
+  contractQuantity: string;
+  updatedAt: number | null;
+};
+
 type OkxAccountReadClientOptions = Readonly<{
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -87,14 +94,53 @@ export class OkxAccountReadClient {
     };
   }
 
-  private async get(path: string): Promise<OkxResponse> {
+  async readPerpetualPosition(
+    instId: string,
+    expectedSide?: "long" | "short",
+  ): Promise<OkxPerpetualPositionSnapshot> {
+    const normalizedInstId = requiredString(instId, "OKX position instId");
+    const payload = await this.get("/api/v5/account/positions", { instId: normalizedInstId });
+    const rows = payload.data?.map((value) => requiredRecord(value, "OKX position")) ?? [];
+    const matching = rows.filter((row) => optionalString(row.instId) === normalizedInstId);
+    if (!matching.length) {
+      return { instId: normalizedInstId, side: "flat", contractQuantity: "0", updatedAt: null };
+    }
+    const nonZero = matching.filter((row) => decimalMagnitude(row.pos, "OKX position quantity") !== "0");
+    const sideMatched = expectedSide
+      ? nonZero.filter((row) => optionalString(row.posSide)?.toLowerCase() === expectedSide)
+      : nonZero;
+    if (sideMatched.length > 1 || (!expectedSide && nonZero.length > 1)
+      || (expectedSide !== undefined && nonZero.length > 1 && sideMatched.length === 0)) {
+      throw new OkxAccountReadError("provider_response_invalid", "OKX returned multiple non-zero position sides.");
+    }
+    const row = sideMatched[0] ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? matching[0]!;
+    const signed = finiteNumber(row.pos, "OKX position quantity");
+    const positionSide = optionalString(row.posSide)?.toLowerCase();
+    const side = signed === 0
+      ? "flat"
+      : positionSide === "long" ? "long"
+        : positionSide === "short" ? "short"
+          : signed > 0 ? "long" : "short";
+    return {
+      instId: normalizedInstId,
+      side,
+      contractQuantity: decimalMagnitude(row.pos, "OKX position quantity"),
+      updatedAt: optionalTimestamp(row.uTime),
+    };
+  }
+
+  private async get(path: string, query: Readonly<Record<string, string>> = {}): Promise<OkxResponse> {
+    const queryString = new URLSearchParams(
+      Object.entries(query).sort(([left], [right]) => left.localeCompare(right)),
+    ).toString();
+    const requestPath = queryString ? `${path}?${queryString}` : path;
     const timestamp = new Date(this.now()).toISOString();
     const signature = createHmac("sha256", this.credentials.apiSecret)
-      .update(`${timestamp}GET${path}`)
+      .update(`${timestamp}GET${requestPath}`)
       .digest("base64");
     let response: Response;
     try {
-      response = await this.fetchImpl(new URL(path, this.baseUrl), {
+      response = await this.fetchImpl(new URL(requestPath, this.baseUrl), {
         method: "GET",
         headers: {
           "OK-ACCESS-KEY": this.credentials.apiKey,
@@ -127,6 +173,25 @@ export class OkxAccountReadClient {
     }
     return payload;
   }
+}
+
+function decimalMagnitude(value: unknown, label: string) {
+  const raw = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
+    throw new OkxAccountReadError("provider_response_invalid", `${label} is invalid.`);
+  }
+  return normalizeDecimal(raw.startsWith("-") ? raw.slice(1) : raw);
+}
+
+function normalizeDecimal(value: string) {
+  const [integer, fraction = ""] = value.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  return normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+}
+
+function optionalTimestamp(value: unknown) {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
 }
 
 function isAuthenticationCode(code: string | undefined) {

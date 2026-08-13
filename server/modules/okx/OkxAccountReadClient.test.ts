@@ -53,6 +53,33 @@ test("maps OKX credential rejection to a stable validation failure", async () =>
   ));
 });
 
+test("reads an OKX position with a signed GET query", async () => {
+  let request: { url: URL; init?: RequestInit } | null = null;
+  const client = new OkxAccountReadClient(credentials, {
+    baseUrl: "https://okx.example.test",
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      request = { url, init };
+      return Response.json({ code: "0", data: [{ instId: "XAUT-USDT-SWAP", pos: "-10", posSide: "net", uTime: String(now - 1) }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.readPerpetualPosition("XAUT-USDT-SWAP"), {
+    instId: "XAUT-USDT-SWAP", side: "short", contractQuantity: "10", updatedAt: now - 1,
+  });
+  const captured = request as unknown as { url: URL; init?: RequestInit };
+  assert.equal(captured.init?.method, "GET");
+  assert.equal(captured.url.searchParams.get("instId"), "XAUT-USDT-SWAP");
+  const requestPath = `${captured.url.pathname}?${captured.url.searchParams.toString()}`;
+  assert.equal(
+    new Headers(captured.init?.headers).get("OK-ACCESS-SIGN"),
+    createHmac("sha256", credentials.apiSecret)
+      .update(`${new Date(now).toISOString()}GET${requestPath}`)
+      .digest("base64"),
+  );
+});
+
 test("rejects OKX API failures and malformed balance responses", async (t) => {
   await t.test("HTTP failure", async () => {
     const client = new OkxAccountReadClient(credentials, {

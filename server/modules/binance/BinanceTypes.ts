@@ -46,6 +46,13 @@ export type BinanceReadOnlyAccountSnapshot = BinanceAccountIdentity & {
   balances: BinanceReadOnlyAccountBalance[];
 };
 
+export type BinancePerpetualPositionSnapshot = {
+  symbol: string;
+  side: "long" | "short" | "flat";
+  baseQuantity: string;
+  updatedAt: number | null;
+};
+
 export type BinanceProductAvailability = {
   available: boolean;
   status: "available" | "spot_unavailable" | "perpetual_unavailable" | "both_unavailable";

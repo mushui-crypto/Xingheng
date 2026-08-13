@@ -27,6 +27,13 @@ export type BitgetAccountReadSnapshot = {
   fetchedAt: number;
 };
 
+export type BitgetPerpetualPositionSnapshot = {
+  symbol: string;
+  side: "long" | "short" | "flat";
+  baseQuantity: string;
+  updatedAt: number | null;
+};
+
 type BitgetAccountReadClientOptions = Readonly<{
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -97,6 +104,46 @@ export class BitgetAccountReadClient {
       boundIps: optionalStringPreservingEmpty(info.ips),
       balances,
       fetchedAt: this.now(),
+    };
+  }
+
+  async readPerpetualPosition(
+    symbol: string,
+    expectedSide?: "long" | "short",
+  ): Promise<BitgetPerpetualPositionSnapshot> {
+    const normalizedSymbol = requiredString(symbol, "Bitget position symbol").toUpperCase();
+    const payload = await this.get("/api/v3/position/current-position", {
+      category: "USDT-FUTURES",
+      symbol: normalizedSymbol,
+    });
+    const data = requiredRecord(payload.data, "Bitget position data");
+    const positions = requiredList(data.list, "Bitget position list")
+      .map((value) => requiredRecord(value, "Bitget position"))
+      .filter((position) => requiredString(position.symbol, "Bitget position symbol") === normalizedSymbol);
+    const nonZero = positions.filter((position) => decimalQuantity(position.total, "Bitget position total") !== "0");
+    const sideMatched = expectedSide ? nonZero.filter((position) => (
+      optionalString(position.posSide)?.toLowerCase() === expectedSide
+    )) : nonZero;
+    if (sideMatched.length > 1 || (!expectedSide && nonZero.length > 1)
+      || (expectedSide !== undefined && nonZero.length > 1 && sideMatched.length === 0)) {
+      throw new BitgetAccountReadError("provider_response_invalid", "Bitget returned multiple non-zero position sides.");
+    }
+    const position = sideMatched[0] ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? positions[0];
+    if (!position) {
+      return { symbol: normalizedSymbol, side: "flat", baseQuantity: "0", updatedAt: null };
+    }
+    const quantity = decimalQuantity(position.total, "Bitget position total");
+    const rawSide = optionalString(position.posSide)?.toLowerCase();
+    const side = quantity === "0"
+      ? "flat"
+      : rawSide === "long" ? "long"
+        : rawSide === "short" ? "short"
+          : invalidPositionSide();
+    return {
+      symbol: normalizedSymbol,
+      side,
+      baseQuantity: quantity,
+      updatedAt: optionalTimestamp(position.updatedTime),
     };
   }
 
@@ -205,4 +252,23 @@ function finiteNumber(value: unknown, label: string) {
 function optionalFiniteNumber(value: unknown, label: string) {
   if (value === undefined || value === null || value === "") return null;
   return finiteNumber(value, label);
+}
+
+function decimalQuantity(value: unknown, label: string) {
+  const raw = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
+    throw new BitgetAccountReadError("provider_response_invalid", `${label} is invalid.`);
+  }
+  const [integer, fraction = ""] = raw.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  return normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+}
+
+function optionalTimestamp(value: unknown) {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
+}
+
+function invalidPositionSide(): never {
+  throw new BitgetAccountReadError("provider_response_invalid", "Bitget position side is invalid.");
 }

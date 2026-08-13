@@ -65,6 +65,26 @@ test("maps Bybit credential rejection to a stable validation failure", async () 
   ));
 });
 
+test("reads a Bybit linear position through GET-only authentication", async () => {
+  let method: string | undefined;
+  const client = new BybitAccountReadClient(credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      method = init?.method;
+      assert.equal(url.pathname, "/v5/position/list");
+      assert.equal(url.searchParams.get("category"), "linear");
+      assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
+      return Response.json(success({ list: [{ symbol: "XAUTUSDT", side: "Sell", size: "0.5", updatedTime: String(now - 1) }] }));
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.readPerpetualPosition("XAUTUSDT"), {
+    symbol: "XAUTUSDT", side: "short", baseQuantity: "0.5", updatedAt: now - 1,
+  });
+  assert.equal(method, "GET");
+});
+
 test("rejects Bybit API failures and malformed balances", async (t) => {
   await t.test("HTTP failure", async () => {
     const client = new BybitAccountReadClient(credentials, {

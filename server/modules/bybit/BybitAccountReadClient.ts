@@ -28,6 +28,13 @@ export type BybitAccountReadSnapshot = {
   fetchedAt: number;
 };
 
+export type BybitPerpetualPositionSnapshot = {
+  symbol: string;
+  side: "long" | "short" | "flat";
+  baseQuantity: string;
+  updatedAt: number | null;
+};
+
 type BybitAccountReadClientOptions = Readonly<{
   baseUrl?: string;
   fetchImpl?: typeof fetch;
@@ -84,6 +91,46 @@ export class BybitAccountReadClient {
       boundIps: optionalStringArray(apiKey.ips),
       balances,
       fetchedAt: this.now(),
+    };
+  }
+
+  async readPerpetualPosition(
+    symbol: string,
+    expectedSide?: "long" | "short",
+  ): Promise<BybitPerpetualPositionSnapshot> {
+    const normalizedSymbol = requiredString(symbol, "Bybit position symbol").toUpperCase();
+    const payload = await this.get("/v5/position/list", {
+      category: "linear",
+      symbol: normalizedSymbol,
+    });
+    const result = requiredRecord(payload.result, "Bybit position result");
+    const positions = requiredList(result.list, "Bybit positions")
+      .map((value) => requiredRecord(value, "Bybit position"))
+      .filter((position) => requiredString(position.symbol, "Bybit position symbol") === normalizedSymbol);
+    const nonZero = positions.filter((position) => decimalQuantity(position.size, "Bybit position size") !== "0");
+    const sideMatched = expectedSide ? nonZero.filter((position) => (
+      expectedSide === "long" ? position.side === "Buy" : position.side === "Sell"
+    )) : nonZero;
+    if (sideMatched.length > 1 || (!expectedSide && nonZero.length > 1)
+      || (expectedSide !== undefined && nonZero.length > 1 && sideMatched.length === 0)) {
+      throw new BybitAccountReadError("provider_response_invalid", "Bybit returned multiple non-zero position sides.");
+    }
+    const position = sideMatched[0] ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? positions[0];
+    if (!position) {
+      return { symbol: normalizedSymbol, side: "flat", baseQuantity: "0", updatedAt: null };
+    }
+    const quantity = decimalQuantity(position.size, "Bybit position size");
+    const rawSide = optionalString(position.side);
+    const side = quantity === "0" || rawSide === null || rawSide === ""
+      ? "flat"
+      : rawSide === "Buy" ? "long"
+        : rawSide === "Sell" ? "short"
+          : invalidPositionSide();
+    return {
+      symbol: normalizedSymbol,
+      side,
+      baseQuantity: quantity,
+      updatedAt: optionalTimestamp(position.updatedTime),
     };
   }
 
@@ -234,6 +281,25 @@ function finiteNumber(value: unknown, label: string) {
 function optionalFiniteNumber(value: unknown, label: string) {
   if (value === undefined || value === null || value === "") return null;
   return finiteNumber(value, label);
+}
+
+function decimalQuantity(value: unknown, label: string) {
+  const raw = typeof value === "string" || typeof value === "number" ? String(value) : "";
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
+    throw new BybitAccountReadError("provider_response_invalid", `${label} is invalid.`);
+  }
+  const [integer, fraction = ""] = raw.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  return normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+}
+
+function optionalTimestamp(value: unknown) {
+  const timestamp = Number(value);
+  return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
+}
+
+function invalidPositionSide(): never {
+  throw new BybitAccountReadError("provider_response_invalid", "Bybit position side is invalid.");
 }
 
 function optionalStringArray(value: unknown) {

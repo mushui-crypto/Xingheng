@@ -71,6 +71,26 @@ test("maps Bitget credential rejection to a stable validation failure", async ()
   ));
 });
 
+test("reads a Bitget UTA position through the GET-only client", async () => {
+  let method: string | undefined;
+  const client = new BitgetAccountReadClient(credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      method = init?.method;
+      assert.equal(url.pathname, "/api/v3/position/current-position");
+      assert.equal(url.searchParams.get("category"), "USDT-FUTURES");
+      assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
+      return Response.json(success({ list: [{ symbol: "XAUTUSDT", posSide: "long", total: "0.5", updatedTime: String(now - 1) }] }));
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.readPerpetualPosition("XAUTUSDT"), {
+    symbol: "XAUTUSDT", side: "long", baseQuantity: "0.5", updatedAt: now - 1,
+  });
+  assert.equal(method, "GET");
+});
+
 test("rejects Bitget API failures and malformed account responses", async (t) => {
   await t.test("HTTP failure", async () => {
     const client = new BitgetAccountReadClient(credentials, {

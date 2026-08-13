@@ -101,6 +101,29 @@ test("read-only account snapshot returns non-zero raw balances using GET-only re
   assert.ok(methods.every((method) => method === "GET"));
 });
 
+test("reads a Binance perpetual position through the existing signed GET client", async () => {
+  const methods: string[] = [];
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      methods.push(init?.method ?? "GET");
+      if (url.pathname === "/api/v3/time") return Response.json({ serverTime: 1_800_000_000_000 });
+      if (url.pathname === "/fapi/v2/positionRisk") {
+        return Response.json([{ symbol: "XAUTUSDT", positionAmt: "-0.002" }]);
+      }
+      throw new Error(`Unexpected request: ${url.pathname}`);
+    }) as typeof fetch,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+
+  assert.deepEqual(await client.readPerpetualPosition("XAUTUSDT"), {
+    symbol: "XAUTUSDT", side: "short", baseQuantity: "0.002", updatedAt: null,
+  });
+  assert.ok(methods.every((method) => method === "GET"));
+});
+
 function snapshotFetch(
   marginType: "cross" | "isolated",
   methods: string[],
