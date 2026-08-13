@@ -6,7 +6,7 @@ import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionInt
 import { BinanceIntentExecutionService } from "./BinanceIntentExecutionService";
 import type { BinanceOrderInput } from "./BinanceOrderManager";
 import type { BinanceProviderOrder } from "./BinanceTypes";
-import { snapshotFixture } from "./binanceTestFixtures";
+import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 
 const now = 1_800_000_000_000;
 
@@ -18,14 +18,14 @@ test("converts canonical perpetual intent into Binance execution request", async
 
   assert.equal(result.state, "CONFIRMED");
   assert.equal(result.executionAttemptId, "intent-user-1");
-  assert.equal(binding.marketCalls, 1);
+  assert.deepEqual(binding.contextInstrumentIds, ["XAUT-USDT-PERP"]);
   assert.equal(binding.providerMutations, 1);
   assert.deepEqual(binding.placeInputs[0], {
     idempotencyKey: binding.placeInputs[0]!.idempotencyKey,
     category: "linear",
     symbol: "XAUTUSDT",
     side: "Buy",
-    quantityXaut: 0.002,
+    quantity: "0.002",
     limitPrice: 1004.1,
     executionPriceMode: "MARKET",
     reduceOnly: false,
@@ -49,26 +49,47 @@ test("maps spot, sell, price priority, and reduceOnly constraints", async () => 
     category: "spot",
     symbol: "XAUTUSDT",
     side: "Sell",
-    quantityXaut: 0.002,
+    quantity: "0.002",
     limitPrice: 997,
     executionPriceMode: "IOC_LIMIT",
     reduceOnly: true,
   });
 });
 
-test("rejects unsupported instrument and asset mismatch before provider mutation", async () => {
+test("passes BTC, ETH, and DOGE symbols and Decimal quantities from generic context", async (t) => {
+  for (const fixture of [
+    { instrumentId: "BTC-USDT-SPOT", symbol: "BTCUSDT", asset: "BTC", type: "DIGITAL_ASSET", quantity: "0.000123456789012345" },
+    { instrumentId: "ETH-USDT-SPOT", symbol: "ETHUSDT", asset: "ETH", type: "DIGITAL_ASSET", quantity: "0.012345678901234567" },
+    { instrumentId: "DOGE-USDT-PERP", symbol: "DOGEUSDT", asset: "DOGE", type: "DIGITAL_ASSET", quantity: "12.34567890123456789" },
+  ] as const) {
+    await t.test(fixture.instrumentId, async () => {
+      const binding = new FakeBinancePersonalTradingBinding();
+      await new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 }).execute(executionIntent({
+        instrumentId: fixture.instrumentId,
+        quantity: { asset: { symbol: fixture.asset, type: fixture.type }, quantity: fixture.quantity },
+      }));
+      assert.equal(binding.placeInputs[0]!.symbol, fixture.symbol);
+      assert.equal(binding.placeInputs[0]!.quantity, fixture.quantity);
+      assert.equal(binding.providerMutations, 1);
+    });
+  }
+});
+
+test("rejects generic context errors and asset mismatch before provider mutation", async () => {
   const binding = new FakeBinancePersonalTradingBinding();
   const service = new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 });
 
+  binding.contextFailure = new Error("generic context unavailable");
   await assert.rejects(
     () => service.execute(executionIntent({ instrumentId: "BTC-USDT-PERP" })),
-    /Unsupported Binance execution instrument/u,
+    /generic context unavailable/u,
   );
+  binding.contextFailure = null;
   await assert.rejects(
     () => service.execute(executionIntent({
       quantity: { asset: { symbol: "BTC", type: "DIGITAL_ASSET" }, quantity: "0.002" },
     })),
-    /quantity asset must be XAUT/u,
+    /does not match the canonical instrument base asset/u,
   );
   assert.equal(binding.providerMutations, 0);
   assert.equal(binding.placeInputs.length, 0);
@@ -89,7 +110,7 @@ test("preserves the existing RiskGuard path through the pre-mutation hook", asyn
     () => service.execute(executionIntent()),
     /RiskGuard blocked before provider mutation/u,
   );
-  assert.equal(binding.marketCalls, 1);
+  assert.deepEqual(binding.contextInstrumentIds, ["XAUT-USDT-PERP"]);
   assert.equal(binding.providerMutations, 0);
   assert.equal(binding.placeInputs.length, 0);
 });
@@ -125,22 +146,17 @@ test("service stays inside Binance execution boundary and does not import client
 
 class FakeBinancePersonalTradingBinding {
   readonly placeInputs: BinanceOrderInput[] = [];
-  marketCalls = 0;
+  readonly contextInstrumentIds: string[] = [];
   placeCalls = 0;
   providerMutations = 0;
   placeResult: BinanceProviderOrder = providerOrder({ status: "Filled" });
   failure: Error | null = null;
+  contextFailure: Error | null = null;
 
-  async market() {
-    this.marketCalls += 1;
-    const snapshot = snapshotFixture();
-    return {
-      fetchedAt: snapshot.fetchedAt,
-      productAvailability: snapshot.productAvailability,
-      spot: snapshot.spot,
-      perpetual: snapshot.perpetual,
-      fees: snapshot.fees,
-    };
+  async loadExecutionReadContext(instrumentId: string) {
+    this.contextInstrumentIds.push(instrumentId);
+    if (this.contextFailure) throw this.contextFailure;
+    return executionContext(instrumentId);
   }
 
   async placeExecutionOrder(
@@ -154,6 +170,41 @@ class FakeBinancePersonalTradingBinding {
     this.placeInputs.push(input);
     return this.placeResult;
   }
+}
+
+function executionContext(instrumentId: string): BinanceGenericExecutionContext {
+  const match = /^([A-Z0-9]+)-USDT-(SPOT|PERP)$/u.exec(instrumentId);
+  if (!match) throw new Error("generic context unavailable");
+  const symbol = match[1]!;
+  const marketType = match[2] === "SPOT" ? "spot" : "perpetual";
+  const assetType = symbol === "XAUT" ? "RWA_ASSET" as const : "DIGITAL_ASSET" as const;
+  return Object.freeze({
+    instrument: Object.freeze({
+      instrumentId,
+      venue: "binance",
+      providerSymbol: `${symbol}USDT`,
+      baseAsset: Object.freeze({ symbol, type: assetType }),
+      quoteAsset: "USDT",
+      ...(marketType === "perpetual" ? { settlementAsset: "USDT" } : {}),
+      marketType,
+      contractType: marketType === "spot" ? "spot" : "linear_perpetual",
+      quantityUnit: "base",
+      contractSize: "1",
+      status: "trading",
+    }),
+    tradingRules: Object.freeze({
+      quantityStep: "0.00000001",
+      minQuantity: "0.00000001",
+      priceTick: marketType === "spot" ? "1" : "0.1",
+      minNotional: "5",
+      precision: Object.freeze({ quantity: 8, price: 1 }),
+    }),
+    quote: Object.freeze({
+      bid: marketType === "spot" ? "999" : "1000",
+      ask: marketType === "spot" ? "1001" : "1002",
+      fetchedAt: now,
+    }),
+  });
 }
 
 function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
@@ -181,8 +232,8 @@ function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinancePr
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status: "Filled",
-    requestedQuantityXaut: 0.002,
-    filledQuantityXaut: 0.002,
+    requestedQuantity: 0.002,
+    filledQuantity: 0.002,
     averagePrice: 1_004,
     feeUsd: 0,
     updatedAt: now + 1_000,

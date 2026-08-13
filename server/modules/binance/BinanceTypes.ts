@@ -121,13 +121,24 @@ export type BinanceOrderRequest = {
   orderLinkId: string;
 };
 
+export type BinanceExecutionOrderRequest = {
+  category: "spot" | "linear";
+  symbol: string;
+  side: "Buy" | "Sell";
+  quantity: string;
+  limitPrice: number;
+  executionPriceMode?: BinanceExecutionPriceMode;
+  reduceOnly: boolean;
+  orderLinkId: string;
+};
+
 export type BinanceProviderOrder = {
   orderId: string;
   orderLinkId: string;
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Expired" | "Unknown";
-  requestedQuantityXaut: number;
-  filledQuantityXaut: number;
-  positionQuantityXaut?: number;
+  requestedQuantity: number;
+  filledQuantity: number;
+  positionQuantity?: number;
   averagePrice: number | null;
   feeUsd: number;
   updatedAt: number;
@@ -170,16 +181,16 @@ export type BinanceClientAdapter = {
   readProductAvailability(): Promise<BinanceProductAvailability>;
   readPreflightSnapshot(): Promise<BinancePreflightSnapshot>;
   setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
-  placeOrder(request: BinanceOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
-  placeTestOrder(request: BinanceOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
-  awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<BinanceProviderOrder>;
-  cancelOrder(category: "spot" | "linear", orderId: string): Promise<void>;
+  placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
+  placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
+  awaitOrder(category: "spot" | "linear", symbol: string, orderId: string, deadlineAt: number): Promise<BinanceProviderOrder>;
+  cancelOrder(category: "spot" | "linear", symbol: string, orderId: string): Promise<void>;
   listAssetOpenOrders(): Promise<Array<{
     category: "spot" | "linear";
     orderId: string;
     clientOrderId: string;
     symbol: string;
   }>>;
-  findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string): Promise<BinanceProviderOrder | null>;
+  findOrderByClientOrderId(category: "spot" | "linear", symbol: string, orderLinkId: string): Promise<BinanceProviderOrder | null>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<BinanceStrategyPnlSnapshot>;
 };

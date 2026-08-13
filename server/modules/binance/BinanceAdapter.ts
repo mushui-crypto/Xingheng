@@ -48,15 +48,25 @@ export class BinanceAdapter {
     this.orderQuery = {
       venue: "binance",
       findByClientOrderId: async (scope, clientOrderId) => {
-        const order = await client.findOrderByClientOrderId(categoryForScope(scope), clientOrderId);
+        const order = await client.findOrderByClientOrderId(
+          categoryForScope(scope),
+          symbolForScope(scope),
+          clientOrderId,
+        );
         return order ? toCanonicalOrder(scope, order) : null;
       },
       awaitOrder: async (scope, providerOrderId, deadlineAt) => toCanonicalOrder(
         scope,
-        await client.awaitOrder(categoryForScope(scope), providerOrderId, deadlineAt),
+        await client.awaitOrder(categoryForScope(scope), symbolForScope(scope), providerOrderId, deadlineAt),
       ),
     };
   }
+}
+
+function symbolForScope(scope: CanonicalOrderScope) {
+  if (scope.instrumentId === BINANCE_SPOT_INSTRUMENT_ID) return "XAUTUSDT";
+  if (scope.instrumentId === BINANCE_PERPETUAL_INSTRUMENT_ID) return "XAUTUSDT";
+  throw new Error(`Unsupported Binance instrument: ${scope.instrumentId}.`);
 }
 
 function topOfBookFromSnapshot(instrumentId: string, snapshot: BinancePreflightSnapshot) {
@@ -154,8 +164,8 @@ function toCanonicalOrder(scope: CanonicalOrderScope, order: BinanceProviderOrde
               : order.status === "Expired"
                 ? "EXPIRED"
                 : "UNKNOWN",
-    requestedBaseQuantity: order.requestedQuantityXaut,
-    filledBaseQuantity: order.filledQuantityXaut,
+    requestedBaseQuantity: order.requestedQuantity,
+    filledBaseQuantity: order.filledQuantity,
     averagePrice: order.averagePrice,
     feeAmount: order.feeUsd,
     feeAsset: "USD",

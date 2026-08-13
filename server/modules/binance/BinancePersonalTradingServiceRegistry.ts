@@ -18,6 +18,7 @@ type PersonalTradingService = Pick<
   | "account"
   | "market"
   | "placeExecutionOrder"
+  | "loadExecutionReadContext"
   | "cancelOrder"
   | "ordersState"
   | "findExecutionOrderByClientOrderId"

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { BinanceClient } from "./BinanceClient";
-import type { BinanceOrderRequest } from "./BinanceTypes";
+import type { BinanceExecutionOrderRequest } from "./BinanceTypes";
 
 test("production orders remain IOC while test orders use GTC", async () => {
   const timeInForce: string[] = [];
@@ -17,8 +17,8 @@ test("production orders remain IOC while test orders use GTC", async () => {
     return Response.json({ orderId, clientOrderId: url.searchParams.get("newClientOrderId") });
   }) as typeof fetch;
   const client = new BinanceClient({ apiKey: "test-key", apiSecret: "test-secret" }, fetchFn, Date.now, ["203.0.113.10"]);
-  const request: BinanceOrderRequest = {
-    category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.002,
+  const request: BinanceExecutionOrderRequest = {
+    category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.002",
     limitPrice: 4_000, reduceOnly: false, orderLinkId: "ptmtestorder",
   };
 
@@ -48,7 +48,7 @@ test("market orders omit provider price and timeInForce", async () => {
     category: "spot",
     symbol: "XAUTUSDT",
     side: "Buy",
-    quantityXaut: 0.002,
+    quantity: "0.002",
     limitPrice: 4_010,
     executionPriceMode: "MARKET",
     reduceOnly: false,
@@ -58,6 +58,89 @@ test("market orders omit provider price and timeInForce", async () => {
   assert.equal((submitted as URL | null)?.searchParams.get("type"), "MARKET");
   assert.equal((submitted as URL | null)?.searchParams.has("price"), false);
   assert.equal((submitted as URL | null)?.searchParams.has("timeInForce"), false);
+});
+
+test("generic place, query, and cancel keep the authoritative provider symbol", async () => {
+  const requests: Array<{ method: string; path: string; symbol: string | null; reduceOnly: string | null }> = [];
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    requests.push({
+      method: init?.method ?? "GET",
+      path: url.pathname,
+      symbol: url.searchParams.get("symbol"),
+      reduceOnly: url.searchParams.get("reduceOnly"),
+    });
+    if (init?.method === "POST") {
+      return Response.json({ orderId: 7, clientOrderId: url.searchParams.get("newClientOrderId") });
+    }
+    if (init?.method === "DELETE") return Response.json({});
+    return Response.json({
+      symbol: url.searchParams.get("symbol"),
+      orderId: 7,
+      clientOrderId: url.searchParams.get("origClientOrderId") ?? "ptmbtc",
+      status: "NEW",
+      origQty: "0.000000010000000001",
+      executedQty: "0",
+    });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    Date.now,
+    ["203.0.113.10"],
+  );
+
+  await client.placeOrder({
+    category: "spot",
+    symbol: "BTCUSDT",
+    side: "Sell",
+    quantity: "0.000000010000000001",
+    limitPrice: 100_000,
+    reduceOnly: true,
+    orderLinkId: "ptmbtc",
+  });
+  await client.findOrderByClientOrderId("spot", "BTCUSDT", "ptmbtc");
+  await client.cancelOrder("spot", "BTCUSDT", "7");
+
+  assert.ok(requests.length >= 4);
+  assert.ok(requests.every((request) => request.symbol === "BTCUSDT"));
+  assert.equal(requests.find((request) => request.method === "POST")?.reduceOnly, null);
+  assert.equal(requests.find((request) => request.method === "POST")?.path, "/api/v3/order");
+  assert.equal(requests.find((request) => request.method === "DELETE")?.path, "/api/v3/order");
+  assert.equal(requests.find((request) => request.method === "POST")?.symbol, "BTCUSDT");
+  assert.equal(requests.find((request) => request.method === "POST")?.method, "POST");
+});
+
+test("linear orders pass reduceOnly and preserve DOGEUSDT Decimal quantity", async () => {
+  let submitted: URL | null = null;
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    assert.equal(init?.method, "POST");
+    submitted = url;
+    return Response.json({ orderId: 8, clientOrderId: url.searchParams.get("newClientOrderId") });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    Date.now,
+    ["203.0.113.10"],
+  );
+
+  await client.placeOrder({
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Buy",
+    quantity: "12.34567890123456789",
+    limitPrice: 0.3,
+    reduceOnly: true,
+    orderLinkId: "ptmdoge",
+  });
+
+  assert.equal((submitted as URL | null)?.searchParams.get("symbol"), "DOGEUSDT");
+  assert.equal((submitted as URL | null)?.searchParams.get("quantity"), "12.34567890123456789");
+  assert.equal((submitted as URL | null)?.searchParams.get("reduceOnly"), "true");
 });
 
 test("preflight snapshot maps cross and isolated margin modes using GET-only requests", async (t) => {

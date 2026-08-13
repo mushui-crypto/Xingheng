@@ -8,8 +8,8 @@ import {
   type BinanceAccountIdentity,
   type BinanceClientAdapter,
   type BinanceCredentials,
+  type BinanceExecutionOrderRequest,
   type BinanceInstrumentSpec,
-  type BinanceOrderRequest,
   type BinancePermissions,
   type BinancePerpetualPositionSnapshot,
   type BinancePreflightSnapshot,
@@ -286,18 +286,16 @@ export class BinanceClient implements BinanceClientAdapter {
     };
   }
 
-  async findOrderByClientOrderId(category: "spot" | "linear", orderLinkId: string) {
+  async findOrderByClientOrderId(category: "spot" | "linear", symbol: string, orderLinkId: string) {
     const scope = category === "spot" ? "spot" : "futures";
     const path = category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
-    const symbol = category === "spot"
-      ? BINANCE_SPOT_SYMBOL
-      : BINANCE_PERPETUAL_SYMBOL;
+    assertProviderSymbol(symbol);
     try {
       const found = toOrder(await this.signedRequest(scope, path, {
         symbol,
         origClientOrderId: orderLinkId,
       }), category);
-      return this.readOrder(category, found.orderId);
+      return this.readOrder(category, symbol, found.orderId);
     } catch (error) {
       if (error instanceof BinanceProviderError && error.providerCode === -2013) return null;
       throw error;
@@ -314,15 +312,15 @@ export class BinanceClient implements BinanceClientAdapter {
     );
   }
 
-  async placeOrder(request: BinanceOrderRequest) {
+  async placeOrder(request: BinanceExecutionOrderRequest) {
     return this.submitOrder(request, "IOC");
   }
 
-  async placeTestOrder(request: BinanceOrderRequest) {
+  async placeTestOrder(request: BinanceExecutionOrderRequest) {
     return this.submitOrder(request, "GTC");
   }
 
-  private async submitOrder(request: BinanceOrderRequest, timeInForce: "IOC" | "GTC") {
+  private async submitOrder(request: BinanceExecutionOrderRequest, timeInForce: "IOC" | "GTC") {
     assertWhitelistedOrder(request);
     const scope = request.category === "spot" ? "spot" : "futures";
     const path = request.category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
@@ -332,7 +330,7 @@ export class BinanceClient implements BinanceClientAdapter {
       side: request.side.toUpperCase(),
       type: isMarket ? "MARKET" : "LIMIT",
       ...(isMarket ? {} : { timeInForce }),
-      quantity: decimal(request.quantityXaut),
+      quantity: request.quantity,
       ...(isMarket ? {} : { price: decimal(request.limitPrice) }),
       newClientOrderId: request.orderLinkId,
       ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
@@ -345,21 +343,19 @@ export class BinanceClient implements BinanceClientAdapter {
     return { orderId, orderLinkId };
   }
 
-  async awaitOrder(category: "spot" | "linear", orderId: string, deadlineAt: number): Promise<BinanceProviderOrder> {
+  async awaitOrder(category: "spot" | "linear", symbol: string, orderId: string, deadlineAt: number): Promise<BinanceProviderOrder> {
     while (this.now() < deadlineAt) {
-      const order = await this.readOrder(category, orderId);
+      const order = await this.readOrder(category, symbol, orderId);
       if (["Filled", "Cancelled", "Rejected"].includes(order.status)) return order;
       await delay(Math.min(250, Math.max(1, deadlineAt - this.now())));
     }
-    return this.readOrder(category, orderId).catch(() => {
+    return this.readOrder(category, symbol, orderId).catch(() => {
       throw new BinanceProviderError("provider_timeout", "Binance 订单权威状态确认超时。");
     });
   }
 
-  async cancelOrder(category: "spot" | "linear", orderId: string) {
-    const symbol = category === "spot"
-      ? BINANCE_SPOT_SYMBOL
-      : BINANCE_PERPETUAL_SYMBOL;
+  async cancelOrder(category: "spot" | "linear", symbol: string, orderId: string) {
+    assertProviderSymbol(symbol);
     await this.signedRequest(
       category === "spot" ? "spot" : "futures",
       category === "spot" ? "/api/v3/order" : "/fapi/v1/order",
@@ -372,7 +368,7 @@ export class BinanceClient implements BinanceClientAdapter {
   async cancelStrategyOrders(orderLinkPrefix: string) {
     for (const order of await this.listAssetOpenOrders()) {
       if (!order.clientOrderId.startsWith(orderLinkPrefix)) continue;
-      await this.cancelOrder(order.category, order.orderId);
+      await this.cancelOrder(order.category, order.symbol, order.orderId);
     }
   }
 
@@ -489,29 +485,30 @@ export class BinanceClient implements BinanceClientAdapter {
     };
   }
 
-  private async readOrder(category: "spot" | "linear", orderId: string) {
+  private async readOrder(category: "spot" | "linear", symbol: string, orderId: string) {
+    assertProviderSymbol(symbol);
     const scope = category === "spot" ? "spot" : "futures";
     const path = category === "spot" ? "/api/v3/order" : "/fapi/v1/order";
-    const value = await this.signedRequest(scope, path, { symbol: BINANCE_SPOT_SYMBOL, orderId });
+    const value = await this.signedRequest(scope, path, { symbol, orderId });
     if (category === "linear") return toOrder(value, category);
     const row = record(value);
     const filled = snapshotNonNegativeNumber(row.executedQty, "现货成交数量");
-    if (!(filled > 0)) return toOrder(value, category, 0);
+    if (!(filled > 0) || symbol !== BINANCE_SPOT_SYMBOL) return toOrder(value, category);
     const side = String(row.side ?? "").toUpperCase();
     if (!["BUY", "SELL"].includes(side)) {
       throw new BinanceProviderError("provider_snapshot_invalid", "Binance 现货订单方向无效。");
     }
     const trades = list(await this.signedRequest("spot", "/api/v3/myTrades", {
-      symbol: BINANCE_SPOT_SYMBOL,
+      symbol,
       orderId,
     })).map(record);
     const baseFee = trades
       .filter((trade) => String(trade.orderId ?? "") === orderId && trade.commissionAsset === "XAUT")
       .reduce((total, trade) => total + snapshotNonNegativeNumber(trade.commission, "现货基础资产手续费"), 0);
-    const positionQuantityXaut = side === "BUY"
+    const positionQuantity = side === "BUY"
       ? Math.max(0, filled - baseFee)
       : filled + baseFee;
-    return toOrder(value, category, positionQuantityXaut);
+    return toOrder(value, category, positionQuantity);
   }
 
   private async loadProducts() {
@@ -740,15 +737,16 @@ function sameStringSet(left: ReadonlySet<string>, right: ReadonlySet<string>) {
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-function assertWhitelistedOrder(request: BinanceOrderRequest) {
-  if (request.symbol !== BINANCE_SPOT_SYMBOL || !["spot", "linear"].includes(request.category)) {
-    throw new BinanceProviderError("provider_order_rejected", "Binance 真实执行仅允许 XAUTUSDT 现货与 USD-M 永续对冲组合。");
+function assertWhitelistedOrder(request: BinanceExecutionOrderRequest) {
+  if (!["spot", "linear"].includes(request.category)) {
+    throw new BinanceProviderError("provider_order_rejected", "Binance 订单市场类型无效。");
   }
+  assertProviderSymbol(request.symbol);
   if (!/^[A-Za-z0-9._:/-]{1,36}$/.test(request.orderLinkId)) {
     throw new BinanceProviderError("provider_order_rejected", "Binance 策略 clientOrderId 格式无效。");
   }
   if (
-    !(request.quantityXaut > 0)
+    !positiveDecimal(request.quantity)
     || !(request.limitPrice > 0)
     || (request.executionPriceMode !== undefined
       && request.executionPriceMode !== "IOC_LIMIT"
@@ -756,19 +754,12 @@ function assertWhitelistedOrder(request: BinanceOrderRequest) {
   ) {
     throw new BinanceProviderError("provider_order_rejected", "Binance 策略订单参数超出白名单。");
   }
-  if (request.category === "spot" && request.reduceOnly) {
-    throw new BinanceProviderError("provider_order_rejected", "Binance 现货侧订单不允许 reduceOnly。");
-  }
-  if (request.category === "linear") {
-    const permitted = (request.side === "Sell" && !request.reduceOnly) || (request.side === "Buy" && request.reduceOnly);
-    if (!permitted) throw new BinanceProviderError("provider_order_rejected", "Binance 永续侧订单方向不符合对冲组合白名单。");
-  }
 }
 
 function toOrder(
   value: unknown,
   category: "spot" | "linear",
-  positionQuantityXaut?: number,
+  positionQuantity?: number,
 ): BinanceProviderOrder {
   const row = record(value);
   const requested = number(row.origQty);
@@ -789,9 +780,9 @@ function toOrder(
     orderId: String(row.orderId ?? ""),
     orderLinkId: String(row.clientOrderId ?? ""),
     status,
-    requestedQuantityXaut: requested,
-    filledQuantityXaut: filled,
-    ...(positionQuantityXaut === undefined ? {} : { positionQuantityXaut }),
+    requestedQuantity: requested,
+    filledQuantity: filled,
+    ...(positionQuantity === undefined ? {} : { positionQuantity }),
     averagePrice: positiveNumberOrNull(row.avgPrice ?? (filled > 0 ? number(row.cummulativeQuoteQty) / filled : 0)),
     feeUsd: category === "linear" ? Math.abs(number(row.commission)) : 0,
     updatedAt: number(row.updateTime ?? row.time ?? Date.now()),
@@ -856,6 +847,16 @@ function basisBps(spot: number, perpetual: number) {
 
 function decimal(value: number) {
   return value.toFixed(10).replace(/0+$/, "").replace(/\.$/, "");
+}
+
+function assertProviderSymbol(value: string) {
+  if (!/^[A-Z0-9]{4,30}$/u.test(value)) {
+    throw new BinanceProviderError("provider_order_rejected", "Binance provider symbol 格式无效。");
+  }
+}
+
+function positiveDecimal(value: string) {
+  return /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) && !/^0(?:\.0+)?$/u.test(value);
 }
 
 function delay(ms: number) {

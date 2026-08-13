@@ -58,7 +58,7 @@ class FakeQueryBinding {
 
 function storedOrder(
   status: BinanceProviderOrder["status"],
-  filledQuantityXaut: number,
+  filledQuantity: number,
 ): BinanceStoredOrder {
   return {
     idempotencyKey: binanceExecutionIdempotencyKeyFor(executionRecord()),
@@ -66,6 +66,7 @@ function storedOrder(
     clientOrderId: "binance-client-order-1",
     providerOrderId: "binance-order-1",
     category: "linear",
+    symbol: "XAUTUSDT",
     executionMode: "production_ioc",
     status: status === "Filled" ? "completed"
       : status === "Rejected" || status === "Cancelled" || status === "Expired" ? "failed"
@@ -74,8 +75,8 @@ function storedOrder(
       orderId: "binance-order-1",
       orderLinkId: "binance-client-order-1",
       status,
-      requestedQuantityXaut: 0.002,
-      filledQuantityXaut,
+      requestedQuantity: 0.002,
+      filledQuantity,
       averagePrice: null,
       feeUsd: 0,
       updatedAt: now,

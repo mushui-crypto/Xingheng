@@ -31,6 +31,7 @@ export class BinanceIntentExecutionReconciliationService {
     try {
       const order = await this.service.findExecutionOrderByClientOrderId(
         stored.category,
+        stored.symbol,
         stored.clientOrderId,
       );
       return order

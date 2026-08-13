@@ -170,7 +170,7 @@ test("queries a user-bound local order fact and updates ExecutionRecord without 
   const record = queryRecord();
   const records = new FakeExecutionRecordStore([record]);
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
-  service.orders = [queryStoredOrder(record, { status: "PartiallyFilled", filledQuantityXaut: 0.0015 })];
+  service.orders = [queryStoredOrder(record, { status: "PartiallyFilled", filledQuantity: 0.0015 })];
   const runtime = new BinanceIntentExecutionRuntime(
     new FakeBinanceIntentRegistry({ "user-a": service }),
     { maxSlippageBps: 20 },
@@ -191,8 +191,8 @@ test("reconciles a user-bound remote order fact and updates ExecutionRecord with
   const record = queryRecord();
   const records = new FakeExecutionRecordStore([record]);
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
-  service.orders = [queryStoredOrder(record, { status: "New", filledQuantityXaut: 0 })];
-  service.remoteOrder = providerOrder({ status: "PartiallyFilled", filledQuantityXaut: 0.0015 });
+  service.orders = [queryStoredOrder(record, { status: "New", filledQuantity: 0 })];
+  service.remoteOrder = providerOrder({ status: "PartiallyFilled", filledQuantity: 0.0015 });
   const runtime = new BinanceIntentExecutionRuntime(
     new FakeBinanceIntentRegistry({ "user-a": service }),
     { maxSlippageBps: 20 },
@@ -206,7 +206,11 @@ test("reconciles a user-bound remote order fact and updates ExecutionRecord with
   assert.equal(result.observation?.filledBaseQuantity, "0.0015");
   assert.equal(result.terminalShortCircuit, false);
   assert.equal(records.updated.at(-1)?.executionId, "execution-query-1");
-  assert.deepEqual(service.providerQueries, [{ category: "linear", clientOrderId: "binance-client-query-1" }]);
+  assert.deepEqual(service.providerQueries, [{
+    category: "linear",
+    symbol: "XAUTUSDT",
+    clientOrderId: "binance-client-query-1",
+  }]);
   assert.equal(service.providerMutations, 0);
 });
 
@@ -379,7 +383,7 @@ class FakeBinanceIntentRuntimeService {
   marketCalls = 0;
   orderStateReads = 0;
   providerMutations = 0;
-  readonly providerQueries: Array<{ category: "spot" | "linear"; clientOrderId: string }> = [];
+  readonly providerQueries: Array<{ category: "spot" | "linear"; symbol: string; clientOrderId: string }> = [];
   orders: BinanceStoredOrder[] = [];
   remoteOrder: BinanceProviderOrder | null | Error = providerOrder();
   cancelResult: BinanceProviderOrder | Error = providerOrder({ status: "Cancelled" });
@@ -403,6 +407,10 @@ class FakeBinanceIntentRuntimeService {
     };
   }
 
+  async loadExecutionReadContext(instrumentId: string) {
+    return xautExecutionContext(instrumentId);
+  }
+
   async placeExecutionOrder(
     input: BinanceOrderInput,
     beforeProviderMutation?: (riskValuationPrice?: number) => void | Promise<void>,
@@ -418,8 +426,8 @@ class FakeBinanceIntentRuntimeService {
     return { orders: this.orders };
   }
 
-  async findExecutionOrderByClientOrderId(category: "spot" | "linear", clientOrderId: string) {
-    this.providerQueries.push({ category, clientOrderId });
+  async findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
+    this.providerQueries.push({ category, symbol, clientOrderId });
     if (this.remoteOrder instanceof Error) throw this.remoteOrder;
     return this.remoteOrder;
   }
@@ -456,8 +464,8 @@ function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinancePr
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status: "Filled",
-    requestedQuantityXaut: 0.002,
-    filledQuantityXaut: 0.002,
+    requestedQuantity: 0.002,
+    filledQuantity: 0.002,
     averagePrice: 1_004,
     feeUsd: 0,
     updatedAt: now + 1_000,
@@ -497,11 +505,39 @@ function queryStoredOrder(
     clientOrderId: order.orderLinkId,
     providerOrderId: order.orderId,
     category: "linear",
+    symbol: "XAUTUSDT",
     executionMode: "production_ioc",
     status: "processing",
     order,
     error: null,
     createdAt: now - 1_000,
     updatedAt: now + 1_000,
+  };
+}
+
+function xautExecutionContext(instrumentId: string) {
+  const spot = instrumentId.endsWith("-SPOT");
+  return {
+    instrument: {
+      instrumentId,
+      venue: "binance" as const,
+      providerSymbol: "XAUTUSDT",
+      baseAsset: { symbol: "XAUT", type: "RWA_ASSET" as const },
+      quoteAsset: "USDT",
+      ...(spot ? {} : { settlementAsset: "USDT" }),
+      marketType: spot ? "spot" as const : "perpetual" as const,
+      contractType: spot ? "spot" as const : "linear_perpetual" as const,
+      quantityUnit: "base" as const,
+      contractSize: "1" as const,
+      status: "trading" as const,
+    },
+    tradingRules: {
+      quantityStep: "0.001",
+      minQuantity: "0.001",
+      priceTick: spot ? "1" : "0.1",
+      minNotional: "5",
+      precision: {},
+    },
+    quote: { bid: spot ? "999" : "1000", ask: spot ? "1001" : "1002", fetchedAt: now },
   };
 }

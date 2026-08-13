@@ -4,6 +4,7 @@ import { BinanceOrderStore, type BinanceStoredOrder } from "./BinanceOrderStore"
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
 import type {
   BinanceClientAdapter,
+  BinanceExecutionOrderRequest,
   BinanceOrderExecutionMode,
   BinanceOrderRequest,
   BinancePreflightSnapshot,
@@ -11,7 +12,7 @@ import type {
 } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 
-export type BinanceOrderInput = Omit<BinanceOrderRequest, "orderLinkId"> & {
+export type BinanceOrderInput = Omit<BinanceExecutionOrderRequest, "orderLinkId"> & {
   idempotencyKey: string;
 };
 
@@ -47,6 +48,7 @@ export class BinanceOrderManager {
       requestFingerprint,
       clientOrderId: request.orderLinkId,
       category: request.category,
+      symbol: request.symbol,
       executionMode,
     });
     if (reservation.kind === "conflict") {
@@ -65,7 +67,7 @@ export class BinanceOrderManager {
         const riskValuationPrice = request.executionPriceMode === "MARKET"
           ? mutationSnapshotRiskValuationPrice(request, snapshot, this.config.maxSlippageBps)
           : request.limitPrice;
-        this.risk.assertOrderAllowed({ ...request, limitPrice: riskValuationPrice }, snapshot);
+        this.risk.assertOrderAllowed(toLegacyRiskRequest(request, riskValuationPrice), snapshot);
         await beforeProviderMutation?.(riskValuationPrice);
         submissionStarted = true;
         const accepted = executionMode === "test_gtc"
@@ -75,12 +77,12 @@ export class BinanceOrderManager {
         this.store.recordProviderOrder(input.idempotencyKey, accepted.orderId);
 
         if (executionMode === "test_gtc") {
-          const observed = await this.findByClientOrderId(request.category, request.orderLinkId);
+          const observed = await this.findByClientOrderId(request.category, request.symbol, request.orderLinkId);
           if (!observed) throw new Error("Binance GTC test order is pending provider reconciliation.");
           return this.persistProviderState(input.idempotencyKey, observed);
         }
 
-        const order = await this.settleOrder(request.category, accepted.orderId);
+        const order = await this.settleOrder(request.category, request.symbol, accepted.orderId);
         this.persistProviderState(input.idempotencyKey, order);
         await this.syncPositions();
         return order;
@@ -90,12 +92,12 @@ export class BinanceOrderManager {
           throw error;
         }
 
-        const recovered = await this.findByClientOrderId(request.category, request.orderLinkId).catch(() => null);
+        const recovered = await this.findByClientOrderId(request.category, request.symbol, request.orderLinkId).catch(() => null);
         if (recovered) {
           if (executionMode === "test_gtc") {
             return this.persistProviderState(input.idempotencyKey, recovered);
           }
-          const settled = await this.settleOrder(request.category, recovered.orderId).catch(() => null);
+          const settled = await this.settleOrder(request.category, request.symbol, recovered.orderId).catch(() => null);
           if (settled) {
             this.persistProviderState(input.idempotencyKey, settled);
             await this.syncPositions().catch(() => undefined);
@@ -123,20 +125,21 @@ export class BinanceOrderManager {
         throw new Error(stored.error ?? "Binance order is already terminal.");
       }
 
-      const found = await this.findByClientOrderId(stored.category, stored.clientOrderId);
+      const found = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
       const providerOrderId = stored.providerOrderId ?? found?.orderId;
       if (!providerOrderId) throw new Error("Binance provider order is not available for cancellation.");
 
       try {
-        await this.client.cancelOrder(stored.category, providerOrderId);
+        await this.client.cancelOrder(stored.category, stored.symbol, providerOrderId);
       } catch (error) {
-        const recovered = await this.findByClientOrderId(stored.category, stored.clientOrderId).catch(() => null);
+        const recovered = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId).catch(() => null);
         if (!recovered) throw error;
         return this.persistProviderState(idempotencyKey, recovered);
       }
 
       const order = await this.client.awaitOrder(
         stored.category,
+        stored.symbol,
         providerOrderId,
         Date.now() + this.config.orderTimeoutMs,
       );
@@ -152,7 +155,7 @@ export class BinanceOrderManager {
       for (const stored of this.store.listProcessing()) {
         let order: BinanceProviderOrder | null;
         try {
-          order = await this.findByClientOrderId(stored.category, stored.clientOrderId);
+          order = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
         } catch (error) {
           this.store.markProcessingError(stored.idempotencyKey, errorMessage(error));
           continue;
@@ -167,9 +170,10 @@ export class BinanceOrderManager {
 
         if (isNonTerminalProviderState(order) && this.processingExpired(stored)) {
           try {
-            await this.client.cancelOrder(stored.category, order.orderId);
+            await this.client.cancelOrder(stored.category, stored.symbol, order.orderId);
             order = await this.client.awaitOrder(
               stored.category,
+              stored.symbol,
               order.orderId,
               Date.now() + this.config.orderTimeoutMs,
             );
@@ -208,7 +212,7 @@ export class BinanceOrderManager {
       throw new Error(stored.error ?? "Previous Binance order attempt failed.");
     }
 
-    const recovered = await this.findByClientOrderId(stored.category, stored.clientOrderId);
+    const recovered = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
     if (!recovered) {
       if (this.processingExpired(stored)) {
         this.store.fail(idempotencyKey, "Processing timeout: Binance order was not found by clientOrderId.");
@@ -217,7 +221,7 @@ export class BinanceOrderManager {
     }
 
     if (stored.executionMode === "production_ioc" && isNonTerminalProviderState(recovered)) {
-      const settled = await this.settleOrder(stored.category, recovered.orderId).catch(() => null);
+      const settled = await this.settleOrder(stored.category, stored.symbol, recovered.orderId).catch(() => null);
       if (!settled) {
         this.store.recordProcessingOrder(idempotencyKey, recovered);
         throw new Error("Binance order is still pending reconciliation.");
@@ -238,15 +242,15 @@ export class BinanceOrderManager {
     return order;
   }
 
-  private async findByClientOrderId(category: "spot" | "linear", clientOrderId: string) {
-    return this.client.findOrderByClientOrderId(category, clientOrderId);
+  private async findByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
+    return this.client.findOrderByClientOrderId(category, symbol, clientOrderId);
   }
 
-  private async settleOrder(category: "spot" | "linear", orderId: string) {
-    let order = await this.client.awaitOrder(category, orderId, Date.now() + this.config.orderTimeoutMs);
+  private async settleOrder(category: "spot" | "linear", symbol: string, orderId: string) {
+    let order = await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs);
     if (isNonTerminalProviderState(order)) {
-      await this.client.cancelOrder(category, orderId);
-      order = await this.client.awaitOrder(category, orderId, Date.now() + this.config.orderTimeoutMs);
+      await this.client.cancelOrder(category, symbol, orderId);
+      order = await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs);
     }
     if (isNonTerminalProviderState(order)) {
       throw new Error("Binance order remains non-terminal and requires reconciliation.");
@@ -259,14 +263,14 @@ export class BinanceOrderManager {
   }
 }
 
-function normalizeRequest(input: BinanceOrderInput): BinanceOrderRequest {
+function normalizeRequest(input: BinanceOrderInput): BinanceExecutionOrderRequest {
   const idempotencyKey = input.idempotencyKey?.trim();
   if (!idempotencyKey || idempotencyKey.length > 160) throw new Error("A valid idempotencyKey is required.");
   return {
     category: input.category,
-    symbol: "XAUTUSDT",
+    symbol: providerSymbol(input.symbol),
     side: input.side,
-    quantityXaut: input.quantityXaut,
+    quantity: decimalQuantity(input.quantity),
     limitPrice: input.limitPrice,
     executionPriceMode: input.executionPriceMode ?? "IOC_LIMIT",
     reduceOnly: input.reduceOnly,
@@ -275,7 +279,7 @@ function normalizeRequest(input: BinanceOrderInput): BinanceOrderRequest {
 }
 
 function mutationSnapshotRiskValuationPrice(
-  request: BinanceOrderRequest,
+  request: BinanceExecutionOrderRequest,
   snapshot: BinancePreflightSnapshot,
   maxSlippageBps: number,
 ): number {
@@ -292,8 +296,43 @@ function mutationSnapshotRiskValuationPrice(
   return limitPrice;
 }
 
-function fingerprint(request: BinanceOrderRequest, executionMode: BinanceOrderExecutionMode) {
+function fingerprint(request: BinanceExecutionOrderRequest, executionMode: BinanceOrderExecutionMode) {
   return createHash("sha256").update(JSON.stringify({ request, executionMode })).digest("hex");
+}
+
+function toLegacyRiskRequest(
+  request: BinanceExecutionOrderRequest,
+  limitPrice: number,
+): BinanceOrderRequest {
+  if (request.symbol !== "XAUTUSDT") {
+    throw new Error("Binance generic execution remains blocked until RiskGuard instrument scope is generalized.");
+  }
+  const quantityXaut = Number(request.quantity);
+  if (!Number.isFinite(quantityXaut) || quantityXaut <= 0) {
+    throw new Error("Binance order quantity is not representable by the legacy RiskGuard.");
+  }
+  return {
+    category: request.category,
+    symbol: "XAUTUSDT",
+    side: request.side,
+    quantityXaut,
+    limitPrice,
+    executionPriceMode: request.executionPriceMode,
+    reduceOnly: request.reduceOnly,
+    orderLinkId: request.orderLinkId,
+  };
+}
+
+function providerSymbol(value: string) {
+  if (!/^[A-Z0-9]{4,30}$/u.test(value)) throw new Error("Binance provider symbol is invalid.");
+  return value;
+}
+
+function decimalQuantity(value: string) {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) || /^0(?:\.0+)?$/u.test(value)) {
+    throw new Error("Binance order quantity must be a positive decimal string.");
+  }
+  return value;
 }
 
 function isNonTerminalProviderState(order: BinanceProviderOrder) {

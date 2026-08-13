@@ -397,7 +397,7 @@ function sameQuantity(actual: number, expected: number) {
 }
 
 function assertCapitalMutationAllowed(
-  prepared: Readonly<{ quantityXaut: number; limitPrice: number }>,
+  prepared: Readonly<{ quantity: string; limitPrice: number }>,
   leg: FundingLeg,
   intent: FundingArbitrageExecutionIntent,
   snapshot: BinancePreflightSnapshot,
@@ -414,7 +414,7 @@ function assertCapitalMutationAllowed(
   const otherCapitalUsd = Number(otherLeg.targetDeltaBaseQuantity)
     * otherReferencePrice
     * (1 + maxSlippageBps / 10_000);
-  const mutationCapitalUsd = prepared.quantityXaut * prepared.limitPrice;
+  const mutationCapitalUsd = decimalNumber(prepared.quantity) * prepared.limitPrice;
   const totalPlannedCapitalUsd = mutationCapitalUsd + otherCapitalUsd;
   if (!Number.isFinite(totalPlannedCapitalUsd)
     || totalPlannedCapitalUsd <= 0

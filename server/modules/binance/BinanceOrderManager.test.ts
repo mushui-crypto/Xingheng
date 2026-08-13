@@ -16,8 +16,8 @@ test("order manager persists one provider write for duplicate idempotency keys",
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));
   let writes = 0;
   const order: BinanceProviderOrder = {
-    orderId: "provider-1", orderLinkId: "", status: "Filled", requestedQuantityXaut: 0.01,
-    filledQuantityXaut: 0.01, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
+    orderId: "provider-1", orderLinkId: "", status: "Filled", requestedQuantity: 0.01,
+    filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
   };
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
@@ -34,7 +34,7 @@ test("order manager persists one provider write for duplicate idempotency keys",
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   const input = {
     idempotencyKey: "entry-1", category: "spot" as const, symbol: "XAUTUSDT" as const, side: "Buy" as const,
-    quantityXaut: 0.01, limitPrice: 1_000, reduceOnly: false,
+    quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
   };
   try {
     const first = await manager.place(input);
@@ -72,7 +72,7 @@ test("provider mutation guard runs after risk refresh and immediately before pro
         category: "spot",
         symbol: "XAUTUSDT",
         side: "Buy",
-        quantityXaut: 0.01,
+        quantity: "0.01",
         limitPrice: 1_000,
         reduceOnly: false,
       }, () => {
@@ -89,14 +89,45 @@ test("provider mutation guard runs after risk refresh and immediately before pro
   }
 });
 
+test("generic symbols fail closed before provider mutation while the legacy RiskGuard remains XAUT-specific", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-generic-risk-boundary-"));
+  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  let writes = 0;
+  const client = {
+    readPreflightSnapshot: async () => snapshotFixture(),
+    placeOrder: async () => { writes += 1; return { orderId: "forbidden", orderLinkId: "forbidden" }; },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture();
+  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  try {
+    await assert.rejects(
+      () => manager.place({
+        idempotencyKey: "btc-risk-boundary",
+        category: "spot",
+        symbol: "BTCUSDT",
+        side: "Buy",
+        quantity: "0.000123456789012345",
+        limitPrice: 100_000,
+        reduceOnly: false,
+      }),
+      /RiskGuard instrument scope is generalized/u,
+    );
+    assert.equal(writes, 0);
+    assert.equal(store.find("btc-risk-boundary")?.symbol, "BTCUSDT");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("partially filled orders are cancelled before completion", async () => {
   const root = mkdtempSync(join(tmpdir(), "binance-personal-partial-"));
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));
   let reads = 0;
   let cancellations = 0;
   const partial: BinanceProviderOrder = {
-    orderId: "provider-partial", orderLinkId: "", status: "PartiallyFilled", requestedQuantityXaut: 0.01,
-    filledQuantityXaut: 0.005, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
+    orderId: "provider-partial", orderLinkId: "", status: "PartiallyFilled", requestedQuantity: 0.01,
+    filledQuantity: 0.005, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
   };
   const cancelled: BinanceProviderOrder = { ...partial, status: "Cancelled" };
   const client = {
@@ -111,7 +142,7 @@ test("partially filled orders are cancelled before completion", async () => {
   try {
     const result = await manager.place({
       idempotencyKey: "partial-1", category: "spot", symbol: "XAUTUSDT", side: "Buy",
-      quantityXaut: 0.01, limitPrice: 1_000, reduceOnly: false,
+      quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
     });
     assert.equal(result.status, "Cancelled");
     assert.equal(cancellations, 1);
@@ -131,7 +162,7 @@ test("GTC test order remains processing until explicit cancellation", async () =
   let submittedMode: string | undefined;
   const providerOrder = (): BinanceProviderOrder => ({
     orderId: "gtc-1", orderLinkId: clientOrderId, status: cancelled ? "Cancelled" : "New",
-    requestedQuantityXaut: 0.01, filledQuantityXaut: 0, averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
+    requestedQuantity: 0.01, filledQuantity: 0, averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
   });
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
@@ -149,7 +180,7 @@ test("GTC test order remains processing until explicit cancellation", async () =
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   const input = {
     idempotencyKey: "gtc-test-1", category: "spot" as const, symbol: "XAUTUSDT" as const,
-    side: "Buy" as const, quantityXaut: 0.01, limitPrice: 900, reduceOnly: false,
+    side: "Buy" as const, quantity: "0.01", limitPrice: 900, reduceOnly: false,
   };
   try {
     assert.equal((await manager.placeTestOrder({ ...input, executionPriceMode: "MARKET" })).status, "New");
@@ -184,8 +215,8 @@ test("risk refresh and provider submission are serialized across orders", async 
       return { orderId: `provider-${writes}`, orderLinkId: request.orderLinkId };
     },
     awaitOrder: async (_category: string, orderId: string) => ({
-      orderId, orderLinkId: "", status: "Filled", requestedQuantityXaut: 0.01,
-      filledQuantityXaut: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
+      orderId, orderLinkId: "", status: "Filled", requestedQuantity: 0.01,
+      filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
     }),
     cancelOrder: async () => undefined,
     findOrderByClientOrderId: async () => null,
@@ -193,8 +224,8 @@ test("risk refresh and provider submission are serialized across orders", async 
   const config = tradingConfigFixture();
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   try {
-    const first = manager.place({ idempotencyKey: "lock-1", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.01, limitPrice: 1_000, reduceOnly: false });
-    const second = manager.place({ idempotencyKey: "lock-2", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantityXaut: 0.01, limitPrice: 1_000, reduceOnly: false });
+    const first = manager.place({ idempotencyKey: "lock-1", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: 1_000, reduceOnly: false });
+    const second = manager.place({ idempotencyKey: "lock-2", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: 1_000, reduceOnly: false });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(snapshotReads, 1);
     assert.equal(writes, 1);
@@ -213,15 +244,19 @@ test("reconciliation scans every processing order without a 100 row limit", asyn
   for (let index = 0; index < 101; index += 1) {
     store.reserve({
       idempotencyKey: `pending-${index}`, requestFingerprint: `fingerprint-${index}`,
-      clientOrderId: `client-${index}`, category: "spot", executionMode: "production_ioc",
+      clientOrderId: `client-${index}`, category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
     });
   }
+  const queriedSymbols: string[] = [];
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
-    findOrderByClientOrderId: async (_category: string, clientOrderId: string) => ({
-      orderId: clientOrderId, orderLinkId: clientOrderId, status: "Filled", requestedQuantityXaut: 0.01,
-      filledQuantityXaut: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
-    }),
+    findOrderByClientOrderId: async (_category: string, symbol: string, clientOrderId: string) => {
+      queriedSymbols.push(symbol);
+      return ({
+      orderId: clientOrderId, orderLinkId: clientOrderId, status: "Filled", requestedQuantity: 0.01,
+      filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
+      });
+    },
   } as unknown as BinanceClientAdapter;
   const config = tradingConfigFixture();
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
@@ -230,6 +265,129 @@ test("reconciliation scans every processing order without a 100 row limit", asyn
     assert.equal(result.reconciled.length, 101);
     assert.equal(result.orders.length, 101);
     assert.equal(store.listProcessing().length, 0);
+    assert.deepEqual(new Set(queriedSymbols), new Set(["BTCUSDT"]));
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("cancel uses the persisted generic provider symbol", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-generic-cancel-"));
+  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  store.reserve({
+    idempotencyKey: "generic-cancel",
+    requestFingerprint: "generic-cancel-fingerprint",
+    clientOrderId: "generic-client-order",
+    category: "linear",
+    symbol: "DOGEUSDT",
+    executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("generic-cancel", "generic-provider-order");
+  const symbols: string[] = [];
+  const cancelled: BinanceProviderOrder = {
+    orderId: "generic-provider-order",
+    orderLinkId: "generic-client-order",
+    status: "Cancelled",
+    requestedQuantity: 12,
+    filledQuantity: 0,
+    averagePrice: null,
+    feeUsd: 0,
+    updatedAt: Date.now(),
+  };
+  const client = {
+    readPreflightSnapshot: async () => snapshotFixture(),
+    findOrderByClientOrderId: async (_category: string, symbol: string) => {
+      symbols.push(symbol);
+      return cancelled;
+    },
+    cancelOrder: async (_category: string, symbol: string) => { symbols.push(symbol); },
+    awaitOrder: async (_category: string, symbol: string) => {
+      symbols.push(symbol);
+      return cancelled;
+    },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture();
+  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  try {
+    assert.equal((await manager.cancel("generic-cancel")).status, "Cancelled");
+    assert.ok(symbols.length >= 3);
+    assert.ok(symbols.every((symbol) => symbol === "DOGEUSDT"));
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart keeps BTC, ETH, and DOGE symbols authoritative for cancel and reconciliation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-generic-symbol-restart-"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
+  for (const symbol of ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]) {
+    const category = symbol === "DOGEUSDT" ? "linear" as const : "spot" as const;
+    for (const operation of ["cancel", "reconcile"] as const) {
+      store.reserve({
+        idempotencyKey: `${operation}-${symbol}`,
+        requestFingerprint: `${operation}-fingerprint-${symbol}`,
+        clientOrderId: `${operation}-client-${symbol}`,
+        category,
+        symbol,
+        executionMode: "production_ioc",
+      });
+      if (operation === "cancel") store.recordProviderOrder(`${operation}-${symbol}`, `${operation}-provider-${symbol}`);
+    }
+  }
+  store.close();
+
+  store = new BinanceOrderStore(dbPath);
+  const queries: Array<{ operation: string; symbol: string }> = [];
+  const cancellations: string[] = [];
+  const awaits: string[] = [];
+  const client = {
+    readPreflightSnapshot: async () => snapshotFixture(),
+    findOrderByClientOrderId: async (_category: string, symbol: string, clientOrderId: string) => {
+      const operation = clientOrderId.startsWith("cancel-") ? "cancel" : "reconcile";
+      queries.push({ operation, symbol });
+      return {
+        orderId: `${operation}-provider-${symbol}`,
+        orderLinkId: clientOrderId,
+        status: operation === "cancel" ? "Cancelled" : "Filled",
+        requestedQuantity: 1,
+        filledQuantity: operation === "cancel" ? 0 : 1,
+        averagePrice: operation === "cancel" ? null : 1,
+        feeUsd: 0,
+        updatedAt: Date.now(),
+      } satisfies BinanceProviderOrder;
+    },
+    cancelOrder: async (_category: string, symbol: string) => { cancellations.push(symbol); },
+    awaitOrder: async (_category: string, symbol: string, orderId: string) => {
+      awaits.push(symbol);
+      return {
+        orderId,
+        orderLinkId: `cancel-client-${symbol}`,
+        status: "Cancelled",
+        requestedQuantity: 1,
+        filledQuantity: 0,
+        averagePrice: null,
+        feeUsd: 0,
+        updatedAt: Date.now(),
+      } satisfies BinanceProviderOrder;
+    },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture();
+  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  try {
+    for (const symbol of ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]) {
+      assert.equal((await manager.cancel(`cancel-${symbol}`)).status, "Cancelled");
+    }
+    const result = await manager.reconcile();
+    assert.equal(result.reconciled.length, 3);
+    assert.deepEqual(
+      new Set(queries.filter((query) => query.operation === "reconcile").map((query) => query.symbol)),
+      new Set(["BTCUSDT", "ETHUSDT", "DOGEUSDT"]),
+    );
+    assert.deepEqual(new Set(cancellations), new Set(["BTCUSDT", "ETHUSDT", "DOGEUSDT"]));
+    assert.deepEqual(new Set(awaits), new Set(["BTCUSDT", "ETHUSDT", "DOGEUSDT"]));
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -241,7 +399,7 @@ test("processing timeout fails an order authoritatively absent from Binance", as
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));
   store.reserve({
     idempotencyKey: "missing-1", requestFingerprint: "missing-fingerprint", clientOrderId: "missing-client",
-    category: "spot", executionMode: "production_ioc",
+    category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
   });
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
@@ -273,7 +431,7 @@ test("ambiguous provider submission remains pending reconciliation", async () =>
   try {
     await assert.rejects(() => manager.place({
       idempotencyKey: "timeout-1", category: "spot", symbol: "XAUTUSDT", side: "Buy",
-      quantityXaut: 0.01, limitPrice: 1_000, reduceOnly: false,
+      quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
     }), /timeout/u);
     assert.equal(manager.listOrders()[0]?.status, "processing");
   } finally {
@@ -291,8 +449,8 @@ test("market fills preserve authoritative FILLED with missing or volatile averag
         orderId: `market-${String(averagePrice)}`,
         orderLinkId: "",
         status: "Filled",
-        requestedQuantityXaut: 0.01,
-        filledQuantityXaut: 0.01,
+        requestedQuantity: 0.01,
+        filledQuantity: 0.01,
         averagePrice,
         feeUsd: 0,
         updatedAt: Date.now(),
@@ -315,7 +473,7 @@ test("market fills preserve authoritative FILLED with missing or volatile averag
           category: "spot",
           symbol: "XAUTUSDT",
           side: "Buy",
-          quantityXaut: 0.01,
+          quantity: "0.01",
           limitPrice: 999_999,
           executionPriceMode: "MARKET",
           reduceOnly: false,
@@ -369,7 +527,7 @@ test("MARKET linear Sell valuation conservatively enforces max order and positio
           category: "linear",
           symbol: "XAUTUSDT",
           side: "Sell",
-          quantityXaut: 0.02491,
+          quantity: "0.02491",
           limitPrice: 1,
           executionPriceMode: "MARKET",
           reduceOnly: false,

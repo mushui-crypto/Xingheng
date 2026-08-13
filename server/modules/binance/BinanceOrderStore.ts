@@ -11,6 +11,7 @@ export type BinanceStoredOrder = {
   clientOrderId: string;
   providerOrderId: string | null;
   category: "spot" | "linear";
+  symbol: string;
   executionMode: BinanceOrderExecutionMode;
   status: "processing" | "completed" | "failed";
   order: BinanceProviderOrder | null;
@@ -35,6 +36,7 @@ export class BinanceOrderStore {
         clientOrderId TEXT NOT NULL UNIQUE,
         providerOrderId TEXT,
         category TEXT NOT NULL CHECK(category IN ('spot', 'linear')),
+        symbol TEXT NOT NULL,
         executionMode TEXT NOT NULL DEFAULT 'production_ioc' CHECK(executionMode IN ('production_ioc', 'test_gtc')),
         status TEXT NOT NULL CHECK(status IN ('processing', 'completed', 'failed')),
         orderJson TEXT,
@@ -51,16 +53,28 @@ export class BinanceOrderStore {
     if (!this.columnExists("binance_personal_orders", "executionMode")) {
       this.db.exec("ALTER TABLE binance_personal_orders ADD COLUMN executionMode TEXT NOT NULL DEFAULT 'production_ioc';");
     }
+    if (!this.columnExists("binance_personal_orders", "symbol")) {
+      // Every row present before this migration belongs to the legacy XAUT-only execution path.
+      // The new nullable column deliberately has no default: records created after migration must
+      // persist an explicit provider symbol and fail closed when that metadata is absent.
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE binance_personal_orders ADD COLUMN symbol TEXT;
+        UPDATE binance_personal_orders SET symbol = 'XAUTUSDT' WHERE symbol IS NULL;
+        COMMIT;
+      `);
+    }
   }
 
   reserve(input: Omit<BinanceStoredOrder, "providerOrderId" | "status" | "order" | "error" | "createdAt" | "updatedAt">) {
     const now = Date.now();
+    const symbol = providerSymbol(input.symbol);
     try {
       this.db.prepare(`INSERT INTO binance_personal_orders (
-        idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, executionMode,
+        idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol, executionMode,
         status, orderJson, error, createdAt, updatedAt
-      ) VALUES (?, ?, ?, NULL, ?, ?, 'processing', NULL, NULL, ?, ?)`)
-        .run(input.idempotencyKey, input.requestFingerprint, input.clientOrderId, input.category, input.executionMode, now, now);
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, 'processing', NULL, NULL, ?, ?)`)
+        .run(input.idempotencyKey, input.requestFingerprint, input.clientOrderId, input.category, symbol, input.executionMode, now, now);
       return { kind: "reserved" as const };
     } catch {
       const existing = this.find(input.idempotencyKey);
@@ -143,17 +157,50 @@ export class BinanceOrderStore {
 }
 
 function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
+  const symbol = providerSymbol(row.symbol);
   return {
     idempotencyKey: String(row.idempotencyKey),
     requestFingerprint: String(row.requestFingerprint),
     clientOrderId: String(row.clientOrderId),
     providerOrderId: row.providerOrderId === null ? null : String(row.providerOrderId),
     category: row.category as "spot" | "linear",
+    symbol,
     executionMode: row.executionMode === "test_gtc" ? "test_gtc" : "production_ioc",
     status: row.status as BinanceStoredOrder["status"],
-    order: row.orderJson ? JSON.parse(String(row.orderJson)) as BinanceProviderOrder : null,
+    order: row.orderJson ? parseProviderOrder(JSON.parse(String(row.orderJson)), symbol) : null,
     error: row.error === null ? null : String(row.error),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt),
   };
+}
+
+function parseProviderOrder(value: unknown, persistedSymbol: string): BinanceProviderOrder {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Stored Binance provider order is invalid.");
+  }
+  const order = value as Record<string, unknown>;
+  if (Object.hasOwn(order, "symbol") && providerSymbol(order.symbol) !== persistedSymbol) {
+    throw new Error("Stored Binance provider order symbol conflicts with its persisted symbol.");
+  }
+  const requestedQuantity = order.requestedQuantity ?? order.requestedQuantityXaut;
+  const filledQuantity = order.filledQuantity ?? order.filledQuantityXaut;
+  const positionQuantity = order.positionQuantity ?? order.positionQuantityXaut;
+  return {
+    orderId: String(order.orderId ?? ""),
+    orderLinkId: String(order.orderLinkId ?? ""),
+    status: order.status as BinanceProviderOrder["status"],
+    requestedQuantity: Number(requestedQuantity),
+    filledQuantity: Number(filledQuantity),
+    ...(positionQuantity === undefined ? {} : { positionQuantity: Number(positionQuantity) }),
+    averagePrice: order.averagePrice === null ? null : Number(order.averagePrice),
+    feeUsd: Number(order.feeUsd),
+    updatedAt: Number(order.updatedAt),
+  };
+}
+
+function providerSymbol(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{4,30}$/u.test(value)) {
+    throw new Error("Stored Binance provider symbol is missing or invalid.");
+  }
+  return value;
 }

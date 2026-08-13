@@ -8,6 +8,11 @@ import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
 import { loadBinanceTradingConfig } from "./BinanceTradingConfig";
 import { BinanceClient } from "./BinanceClient";
+import { createExecutionCanonicalAssetSource } from "../cex/CanonicalAssetSource";
+import {
+  BinanceGenericExecutionReadContextService,
+  HttpBinanceGenericExecutionReadClient,
+} from "./BinanceGenericExecutionReadContext";
 
 export type BinancePersonalTradingServiceOptions = {
   credential?: BinanceCredential | null;
@@ -21,6 +26,10 @@ export class BinancePersonalTradingService {
   private readonly risk;
   private readonly client;
   private readonly orders;
+  private readonly executionReadContext = new BinanceGenericExecutionReadContextService(
+    new HttpBinanceGenericExecutionReadClient(),
+    createExecutionCanonicalAssetSource(),
+  );
   private connection: {
     status: "not_configured" | "checking" | "connected" | "failed";
     checkedAt: number | null;
@@ -100,6 +109,10 @@ export class BinancePersonalTradingService {
     return this.requireOrders().place(input, beforeProviderMutation);
   }
 
+  loadExecutionReadContext(instrumentId: string) {
+    return this.executionReadContext.load(instrumentId);
+  }
+
   async cancelOrder(input: unknown) {
     this.risk.assertCancellationAllowed();
     const body = object(input);
@@ -110,8 +123,8 @@ export class BinancePersonalTradingService {
     return { orders: this.requireOrders().listOrders() };
   }
 
-  findExecutionOrderByClientOrderId(category: "spot" | "linear", clientOrderId: string) {
-    return this.requireClient().findOrderByClientOrderId(category, clientOrderId);
+  findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
+    return this.requireClient().findOrderByClientOrderId(category, symbol, clientOrderId);
   }
 
   close() {

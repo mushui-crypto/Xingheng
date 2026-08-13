@@ -57,7 +57,7 @@ export function binanceExecutionObservationForOrder(
 ): ExecutionQueryObservation {
   return createExecutionQueryObservation({
     state: stateFor(order.status),
-    filledBaseQuantity: numberToDecimal(order.filledQuantityXaut),
+    filledBaseQuantity: numberToDecimal(order.filledQuantity),
     observedAt,
   });
 }

@@ -311,6 +311,37 @@ class RuntimeBinanceService {
     };
   }
 
+  async loadExecutionReadContext(instrumentId: string) {
+    const spot = instrumentId.endsWith("-SPOT");
+    return {
+      instrument: {
+        instrumentId,
+        venue: "binance" as const,
+        providerSymbol: "XAUTUSDT",
+        baseAsset: { symbol: "XAUT", type: "RWA_ASSET" as const },
+        quoteAsset: "USDT",
+        ...(spot ? {} : { settlementAsset: "USDT" }),
+        marketType: spot ? "spot" as const : "perpetual" as const,
+        contractType: spot ? "spot" as const : "linear_perpetual" as const,
+        quantityUnit: "base" as const,
+        contractSize: "1" as const,
+        status: "trading" as const,
+      },
+      tradingRules: {
+        quantityStep: "0.001",
+        minQuantity: "0.001",
+        priceTick: spot ? "1" : "0.1",
+        minNotional: "5",
+        precision: {},
+      },
+      quote: {
+        bid: String(spot ? this.marketPrice - 1 : this.marketPrice),
+        ask: String(spot ? this.marketPrice : this.marketPrice + 1),
+        fetchedAt: now,
+      },
+    };
+  }
+
   async placeExecutionOrder(
     input: BinanceOrderInput,
     beforeProviderMutation?: (riskValuationPrice?: number) => void | Promise<void>,
@@ -318,7 +349,7 @@ class RuntimeBinanceService {
     await beforeProviderMutation?.(input.limitPrice ?? this.marketPrice);
     this.providerMutations += 1;
     this.placeInputs.push(input);
-    const filled = this.initialStatus === "Filled" ? input.quantityXaut : 0;
+    const filled = this.initialStatus === "Filled" ? Number(input.quantity) : 0;
     const order = providerOrder(this.initialStatus, filled, this.clock());
     this.orders = [storedOrder(input, order)];
     return order;
@@ -337,14 +368,14 @@ class RuntimeBinanceService {
   async cancelOrder(input: { idempotencyKey: string }) {
     this.providerMutations += 1;
     const current = this.orders.find((order) => order.idempotencyKey === input.idempotencyKey);
-    const order = providerOrder("Cancelled", current?.order?.filledQuantityXaut ?? 0, this.clock());
+    const order = providerOrder("Cancelled", current?.order?.filledQuantity ?? 0, this.clock());
     if (current) this.orders = [{ ...current, order, updatedAt: order.updatedAt }];
     return order;
   }
 
-  setLocalOrder(status: BinanceProviderOrder["status"], filledQuantityXaut: number) {
+  setLocalOrder(status: BinanceProviderOrder["status"], filledQuantity: number) {
     const current = this.orders[0]!;
-    const order = providerOrder(status, filledQuantityXaut, this.clock());
+    const order = providerOrder(status, filledQuantity, this.clock());
     this.orders = [{ ...current, order, updatedAt: order.updatedAt }];
   }
 }
@@ -400,16 +431,16 @@ function intentFixture(): SpotPerpetualFundingArbitrageExecutionIntent {
 
 function providerOrder(
   status: BinanceProviderOrder["status"],
-  filledQuantityXaut: number,
+  filledQuantity: number,
   updatedAt: number,
 ): BinanceProviderOrder {
   return {
     orderId: "fixture-runtime-order",
     orderLinkId: "fixture-runtime-client-order",
     status,
-    requestedQuantityXaut: 0.01,
-    filledQuantityXaut,
-    averagePrice: filledQuantityXaut > 0 ? 1_000 : null,
+    requestedQuantity: 0.01,
+    filledQuantity,
+    averagePrice: filledQuantity > 0 ? 1_000 : null,
     feeUsd: 0,
     updatedAt,
   };
@@ -422,6 +453,7 @@ function storedOrder(input: BinanceOrderInput, order: BinanceProviderOrder): Bin
     clientOrderId: order.orderLinkId,
     providerOrderId: order.orderId,
     category: input.category,
+    symbol: input.symbol,
     executionMode: "production_ioc",
     status: order.status === "Filled" ? "completed" : "processing",
     order,

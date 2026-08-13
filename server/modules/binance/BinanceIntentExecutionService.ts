@@ -1,8 +1,7 @@
 import { createHash } from "node:crypto";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionStatus } from "../cex/ExecutionState";
-import { canonicalInstrumentFromId } from "../cex/Instrument";
-import { InstrumentCapability } from "../cex/InstrumentCapability";
+import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 import type { BinanceProviderMutationGuard } from "./BinanceOrderManager";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import type { BinanceProviderOrder } from "./BinanceTypes";
@@ -11,7 +10,7 @@ import { toBinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 
 export type BinanceIntentExecutionServiceBinding = Pick<
   BinancePersonalTradingService,
-  "market" | "placeExecutionOrder"
+  "loadExecutionReadContext" | "placeExecutionOrder"
 >;
 
 export type BinanceIntentExecutionResult = Readonly<{
@@ -24,9 +23,9 @@ export type BinanceIntentExecutionResult = Readonly<{
 type BinanceIntentPreparedOrder = Readonly<{
   idempotencyKey: string;
   category: "spot" | "linear";
-  symbol: "XAUTUSDT";
+  symbol: string;
   side: "Buy" | "Sell";
-  quantityXaut: number;
+  quantity: string;
   limitPrice: number;
   executionPriceMode: "IOC_LIMIT" | "MARKET";
   reduceOnly: boolean;
@@ -40,7 +39,6 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       prepared: BinanceIntentPreparedOrder,
     ) => void | Promise<void> = () => undefined,
     private readonly mapResult: (result: BinanceIntentExecutionResult) => TResult = (result) => result as TResult,
-    private readonly instrumentResolver: Pick<InstrumentCapability, "resolveVenueInstrument"> = new InstrumentCapability(),
   ) {
     if (!Number.isFinite(config.maxSlippageBps) || config.maxSlippageBps < 0) {
       throw new Error("Binance max slippage must be a non-negative number.");
@@ -68,32 +66,25 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
   }
 
   private async prepare(intent: ExecutionIntent): Promise<BinanceIntentPreparedOrder> {
-    const venueInstrument = this.instrumentResolver.resolveVenueInstrument(
-      canonicalInstrumentFromId(intent.instrumentId),
-      intent.venue,
-    );
-    if (venueInstrument.symbol !== "XAUTUSDT"
-      || (venueInstrument.category !== "spot" && venueInstrument.category !== "linear")) {
-      throw new Error(`Unsupported Binance execution instrument: ${intent.instrumentId}.`);
-    }
-    const category = venueInstrument.category;
-    assertQuantityAsset(intent, category);
+    const context = await this.service.loadExecutionReadContext(intent.instrumentId);
+    assertExecutionContext(intent, context);
+    const category = context.instrument.marketType === "spot" ? "spot" : "linear";
     const side = intent.side === "buy" ? "Buy" : "Sell";
-    const quantityXaut = decimalQuantityToNumber(intent.quantity.quantity);
-    const market = await this.service.market();
-    const instrument = category === "spot" ? market.spot : market.perpetual;
+    const quantity = decimalQuantity(intent.quantity.quantity);
+    const referencePrice = positiveDecimalNumber(side === "Buy" ? context.quote.ask : context.quote.bid, "quote");
+    const priceTick = positiveDecimalNumber(context.tradingRules.priceTick, "priceTick");
     const multiplier = 1 + (side === "Buy" ? 1 : -1) * this.config.maxSlippageBps / 10_000;
-    const unroundedPrice = (side === "Buy" ? instrument.ask : instrument.bid) * multiplier;
+    const unroundedPrice = referencePrice * multiplier;
     const limitPrice = side === "Buy"
-      ? ceilStep(unroundedPrice, instrument.priceTick)
-      : floorStep(unroundedPrice, instrument.priceTick);
+      ? ceilStep(unroundedPrice, priceTick)
+      : floorStep(unroundedPrice, priceTick);
 
     return Object.freeze({
       idempotencyKey: binanceExecutionIdempotencyKeyFor(intent),
       category,
-      symbol: venueInstrument.symbol,
+      symbol: context.instrument.providerSymbol,
       side,
-      quantityXaut,
+      quantity,
       limitPrice,
       executionPriceMode: toBinanceExecutionPriceMode(intent.executionMode),
       reduceOnly: intent.orderConstraints.reduceOnly,
@@ -101,12 +92,13 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
   }
 }
 
-function assertQuantityAsset(intent: ExecutionIntent, category: "spot" | "linear") {
-  if (intent.quantity.asset.symbol !== "XAUT") {
-    throw new Error("Binance intent quantity asset must be XAUT.");
+function assertExecutionContext(intent: ExecutionIntent, context: BinanceGenericExecutionContext) {
+  if (context.instrument.instrumentId !== intent.instrumentId) {
+    throw new Error("Binance execution context instrument identity does not match the intent.");
   }
-  if (category === "linear" && intent.quantity.asset.type !== "RWA_ASSET") {
-    throw new Error("Binance XAUT perpetual quantity asset must be an RWA asset.");
+  if (intent.quantity.asset.symbol !== context.instrument.baseAsset.symbol
+    || intent.quantity.asset.type !== context.instrument.baseAsset.type) {
+    throw new Error("Binance intent quantity asset does not match the canonical instrument base asset.");
   }
 }
 
@@ -124,15 +116,17 @@ export function binanceExecutionIdempotencyKeyFor(
   return `execution-intent:${createHash("sha256").update(identity).digest("hex")}`;
 }
 
-function decimalQuantityToNumber(value: string) {
-  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+function decimalQuantity(value: string) {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) || /^0(?:\.0+)?$/u.test(value)) {
     throw new Error("Binance intent quantity must be an unsigned decimal string.");
   }
-  const quantity = Number(value);
-  if (!Number.isFinite(quantity) || quantity <= 0) {
-    throw new Error("Binance intent quantity must be positive and representable.");
-  }
-  return quantity;
+  return value;
+}
+
+function positiveDecimalNumber(value: string, name: string) {
+  const result = Number(value);
+  if (!Number.isFinite(result) || result <= 0) throw new Error(`Binance ${name} must be positive.`);
+  return result;
 }
 
 function ceilStep(value: number, step: number) {

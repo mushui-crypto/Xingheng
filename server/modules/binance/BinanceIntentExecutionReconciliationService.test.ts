@@ -28,7 +28,11 @@ test("maps GET-only remote Binance order facts for reconciliation", async () => 
     assert.equal(observation.state, expectedState);
     assert.equal(observation.filledBaseQuantity, decimal(filledQuantity));
     assert.equal(observation.observedAt, now);
-    assert.deepEqual(binding.providerQueries, [{ category: "linear", clientOrderId: "binance-client-order-1" }]);
+    assert.deepEqual(binding.providerQueries, [{
+      category: "linear",
+      symbol: "XAUTUSDT",
+      clientOrderId: "binance-client-order-1",
+    }]);
     assert.equal(binding.providerMutations, 0);
   }
 });
@@ -65,7 +69,7 @@ test("reconciliation service exposes a GET lookup only and no mutation workflow"
 });
 
 class FakeReconciliationBinding {
-  readonly providerQueries: Array<{ category: "spot" | "linear"; clientOrderId: string }> = [];
+  readonly providerQueries: Array<{ category: "spot" | "linear"; symbol: string; clientOrderId: string }> = [];
   providerMutations = 0;
 
   constructor(
@@ -77,8 +81,8 @@ class FakeReconciliationBinding {
     return { orders: this.orders };
   }
 
-  async findExecutionOrderByClientOrderId(category: "spot" | "linear", clientOrderId: string) {
-    this.providerQueries.push({ category, clientOrderId });
+  async findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
+    this.providerQueries.push({ category, symbol, clientOrderId });
     if (this.remote instanceof Error) throw this.remote;
     return this.remote;
   }
@@ -91,6 +95,7 @@ function storedOrder(): BinanceStoredOrder {
     clientOrderId: "binance-client-order-1",
     providerOrderId: "binance-order-1",
     category: "linear",
+    symbol: "XAUTUSDT",
     executionMode: "production_ioc",
     status: "processing",
     order: providerOrder("New", 0),
@@ -102,14 +107,14 @@ function storedOrder(): BinanceStoredOrder {
 
 function providerOrder(
   status: BinanceProviderOrder["status"],
-  filledQuantityXaut: number,
+  filledQuantity: number,
 ): BinanceProviderOrder {
   return {
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status,
-    requestedQuantityXaut: 0.002,
-    filledQuantityXaut,
+    requestedQuantity: 0.002,
+    filledQuantity,
     averagePrice: null,
     feeUsd: 0,
     updatedAt: now - 500,
