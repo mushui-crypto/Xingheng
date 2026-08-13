@@ -6,6 +6,7 @@ import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
+import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
@@ -34,6 +35,8 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
+import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/ArbitrageExecutionDraftService";
+import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
 import {
   createDefaultFundingOpportunityReadVenues,
   createDefaultFundingOpportunitySource,
@@ -162,6 +165,11 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 }));
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
+const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
+  arbitrageDashboard,
+  new DefaultArbitrageExecutionPlanningContextSource(),
+  userExchangeCredentials,
+);
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
 const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new BinanceAccountReadProviderFactory(),
@@ -196,6 +204,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
     : Promise.resolve(false),
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
+registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);

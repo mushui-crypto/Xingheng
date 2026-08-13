@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { ArbitrageOpportunityAnalysis } from "../../features/arbitrage/components/ArbitrageOpportunityAnalysis";
+import { ArbitrageExecutionDraftEntry } from "../../features/arbitrage/components/ArbitrageExecutionDraftEntry";
 import {
   findArbitrageAnalysisOpportunity,
   parseArbitrageAnalysisHorizon,
@@ -84,6 +85,7 @@ export function FundingArbitrageOpportunitiesPage() {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
+          {opportunity ? <ArbitrageExecutionDraftEntry horizonDays={horizonDays} opportunityId={opportunity.id} /> : null}
           <button
             type="button"
             className="inline-flex h-10 w-10 items-center justify-center border border-white/20 text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:opacity-50"
