@@ -50,6 +50,11 @@ export type TargetQuantityUpdate = Readonly<{
   plannedQuantity: string;
 }>;
 
+export type ArbitrageHistoryPageQuery = Readonly<{
+  limit: number;
+  offset: number;
+}>;
+
 type InstanceRow = Readonly<{
   arbitrageId: string;
   userId: string;
@@ -153,8 +158,12 @@ export class ArbitrageInstanceStore {
     return this.listForStatuses(identifier(userId, "userId"), ACTIVE_STATUSES);
   }
 
-  listHistory(userId: string) {
-    return this.listForStatuses(identifier(userId, "userId"), HISTORY_STATUSES);
+  listHistory(userId: string, pagination?: ArbitrageHistoryPageQuery) {
+    return this.listForStatuses(
+      identifier(userId, "userId"),
+      HISTORY_STATUSES,
+      pagination === undefined ? undefined : normalizeHistoryPageQuery(pagination),
+    );
   }
 
   claimExecutionReference(
@@ -385,11 +394,19 @@ export class ArbitrageInstanceStore {
     this.db.close();
   }
 
-  private listForStatuses(userId: string, statuses: readonly ArbitrageInstanceStatus[]) {
+  private listForStatuses(
+    userId: string,
+    statuses: readonly ArbitrageInstanceStatus[],
+    pagination?: ArbitrageHistoryPageQuery,
+  ) {
     const placeholders = statuses.map(() => "?").join(", ");
-    const rows = this.db.prepare(`SELECT * FROM arbitrage_instances
+    const query = `SELECT * FROM arbitrage_instances
       WHERE userId = ? AND status IN (${placeholders})
-      ORDER BY createdAt DESC, arbitrageId ASC`).all(userId, ...statuses) as unknown as InstanceRow[];
+      ORDER BY createdAt DESC, arbitrageId ASC${pagination ? " LIMIT ? OFFSET ?" : ""}`;
+    const parameters = pagination
+      ? [userId, ...statuses, pagination.limit, pagination.offset]
+      : [userId, ...statuses];
+    const rows = this.db.prepare(query).all(...parameters) as unknown as InstanceRow[];
     return rows.map((row) => this.instanceFromRow(row));
   }
 
@@ -615,6 +632,16 @@ export class ArbitrageInstanceStore {
       FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId)
     ) STRICT;`);
   }
+}
+
+function normalizeHistoryPageQuery(input: ArbitrageHistoryPageQuery): ArbitrageHistoryPageQuery {
+  if (!Number.isSafeInteger(input.limit) || input.limit <= 0) {
+    throw new Error("history limit must be a positive integer.");
+  }
+  if (!Number.isSafeInteger(input.offset) || input.offset < 0) {
+    throw new Error("history offset must be a non-negative integer.");
+  }
+  return Object.freeze({ limit: input.limit, offset: input.offset });
 }
 
 function normalizeNewInstance(input: NewArbitrageInstance) {

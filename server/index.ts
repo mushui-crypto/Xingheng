@@ -6,6 +6,7 @@ import { loadRuntimeConfig } from "./config/runtimeConfig";
 import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/authRoutes";
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
+import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
 import { FundingArbitrageManualExecutionService } from "./modules/api/FundingArbitrageManualExecutionService";
@@ -50,6 +51,7 @@ import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
 import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
+import { ArbitrageInstanceQueryService } from "./modules/cex/arbitrage-instance/ArbitrageInstanceQueryService";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
@@ -163,6 +165,7 @@ const accountRead = new AccountReadRegistry(userExchangeCredentials, [
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
+const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   binancePersonalTrading,
   { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
@@ -181,6 +184,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
     : Promise.resolve(false),
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
+registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);

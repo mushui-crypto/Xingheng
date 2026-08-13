@@ -3,6 +3,7 @@ import { Activity, KeyRound, LockKeyhole, ShieldCheck } from "lucide-react";
 import type { ExchangeCredentialSummary, ExchangeVenue } from "../../api/exchangeCredentials";
 import { BinanceTradingWorkbench } from "../../features/personalTrading/components/BinanceTradingWorkbench";
 import { AccountReadOverview } from "../../features/personalTrading/components/AccountReadOverview";
+import { ArbitrageInstanceOverview } from "../../features/personalTrading/components/ArbitrageInstanceOverview";
 import { ExchangeCredentialsPanel } from "../../features/personalTrading/components/ExchangeCredentialsPanel";
 import { exchangeVenues, mergeCredentialSummaries } from "../../features/personalTrading/model/personalTradingState";
 
@@ -42,6 +43,8 @@ export function PersonalTradingPage() {
           ? <BinanceTradingWorkbench reloadToken={binanceReloadToken} />
           : <CredentialOnlyVenueDetail summary={selectedSummary} venue={selectedVenue} />}
       </div>
+
+      <ArbitrageInstanceOverview />
     </div>
   );
 }
