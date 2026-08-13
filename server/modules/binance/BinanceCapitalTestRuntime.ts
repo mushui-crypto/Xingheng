@@ -33,6 +33,7 @@ type FundingLeg = FundingArbitrageExecutionIntent["legs"][number];
 
 export type BinanceCapitalTestLegRequest = Readonly<{
   confirmed: true;
+  arbitrageId: string;
   legId: string;
   executionIntentId: string;
   quantityAsset: Asset;
@@ -134,6 +135,7 @@ export class BinanceCapitalTestRuntime {
     const executionIntent = this.adapter.createExecutionIntent(fundingIntent, {
       confirmed: request.confirmed,
       intentId: request.executionIntentId,
+      arbitrageId: request.arbitrageId,
       legId: request.legId,
       userId,
       accountId: context.accountId,

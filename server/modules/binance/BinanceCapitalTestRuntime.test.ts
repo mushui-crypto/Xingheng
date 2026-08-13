@@ -39,6 +39,7 @@ test("explicit first-leg submit uses ExecutionIntent runtime and does not execut
 
   assert.equal(result.preflight.status, "PASS");
   assert.equal(result.executionIntent?.instrumentId, "XAUT-USDT-SPOT");
+  assert.equal(result.executionIntent?.arbitrageId, "arbitrage-capital-runtime");
   assert.equal(result.executionIntent?.quantity.quantity, "0.01");
   assert.equal(result.executionRecord?.intentId, "execution-intent-spot");
   assert.equal(result.observation?.state, "CONFIRMED");
@@ -213,6 +214,19 @@ test("preflight and mutation-time capital guards preserve zero-mutation rejectio
   assert.equal(mutationFailure.service.providerMutations, 0);
 });
 
+test("capital-test runtime passes arbitrageId through without fallback and rejects an invalid value", async () => {
+  const fixture = runtimeFixture("Filled");
+
+  await assert.rejects(() => fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    { ...request(), arbitrageId: "" },
+  ), /arbitrageId is invalid/u);
+  assert.equal(fixture.service.providerMutations, 0);
+});
+
 test("capital-test runtime depends on canonical runtime boundaries and contains no old execution calls", () => {
   assert.equal(existsSync(new URL("./BinanceCapitalTestResidualExit.ts", import.meta.url)), false);
   const source = readFileSync(new URL("./BinanceCapitalTestRuntime.ts", import.meta.url), "utf8");
@@ -344,6 +358,7 @@ function startedState(): FundingArbitrageExecutionState {
 function request(): BinanceCapitalTestLegRequest {
   return {
     confirmed: true,
+    arbitrageId: "arbitrage-capital-runtime",
     legId: "leg-spot-long",
     executionIntentId: "execution-intent-spot",
     quantityAsset: { symbol: "XAUT", type: "RWA_ASSET" },
