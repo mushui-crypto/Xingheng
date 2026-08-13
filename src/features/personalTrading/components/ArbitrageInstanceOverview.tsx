@@ -1,14 +1,23 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { AlertTriangle, Layers3 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, CircleHelp, Layers3 } from "lucide-react";
 import {
   fetchActiveArbitrageInstances,
   fetchArbitrageInstanceHistory,
+  fetchArbitragePositionVerification,
   type ArbitrageInstance,
   type ArbitrageInstanceStatus,
+  type ArbitrageLegVerificationStatus,
+  type ArbitragePositionVerification,
 } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
 
 const HISTORY_LIMIT = 50;
+const VERIFICATION_CONCURRENCY = 4;
+
+export type VerificationState =
+  | { status: "loading" }
+  | { status: "success"; verification: ArbitragePositionVerification }
+  | { status: "error" };
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
@@ -17,7 +26,9 @@ export type ArbitrageInstanceLoadState =
 
 export function ArbitrageInstanceOverview() {
   const [page, setPage] = useState(1);
+  const [selectedSection, setSelectedSection] = useState<"active" | "history">("active");
   const [state, setState] = useState<ArbitrageInstanceLoadState>({ status: "loading" });
+  const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
 
   useEffect(() => {
     const controller = new AbortController();
@@ -26,24 +37,56 @@ export function ArbitrageInstanceOverview() {
       fetchActiveArbitrageInstances(controller.signal),
       fetchArbitrageInstanceHistory(page, HISTORY_LIMIT, controller.signal),
     ]).then(([active, history]) => {
-      if (!controller.signal.aborted) setState({ status: "success", active, history });
+      if (controller.signal.aborted) return;
+      setState({ status: "success", active, history });
+      setVerifications(Object.fromEntries(active.map((item) => [item.arbitrageId, { status: "loading" }])));
+      void loadVerifications(active, controller.signal, (arbitrageId, verificationState) => {
+        setVerifications((current) => ({ ...current, [arbitrageId]: verificationState }));
+      });
     }).catch(() => {
       if (!controller.signal.aborted) setState({ status: "error" });
     });
     return () => controller.abort();
   }, [page]);
 
-  return <ArbitrageInstanceContent onPageChange={setPage} page={page} state={state} />;
+  return <ArbitrageInstanceContent onPageChange={setPage} onSectionChange={setSelectedSection} page={page} selectedSection={selectedSection} state={state} verifications={verifications} />;
+}
+
+export async function loadVerifications(
+  active: ArbitrageInstance[],
+  signal: AbortSignal,
+  onSettled: (arbitrageId: string, state: VerificationState) => void,
+) {
+  let nextIndex = 0;
+  async function worker() {
+    while (!signal.aborted) {
+      const item = active[nextIndex++];
+      if (!item) return;
+      try {
+        const verification = await fetchArbitragePositionVerification(item.arbitrageId, signal);
+        if (!signal.aborted) onSettled(item.arbitrageId, { status: "success", verification });
+      } catch {
+        if (!signal.aborted) onSettled(item.arbitrageId, { status: "error" });
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(VERIFICATION_CONCURRENCY, active.length) }, worker));
 }
 
 export function ArbitrageInstanceContent({
   onPageChange,
+  onSectionChange = () => undefined,
   page,
+  selectedSection = "active",
   state,
+  verifications = {},
 }: {
   onPageChange: (page: number) => void;
+  onSectionChange?: (section: "active" | "history") => void;
   page: number;
+  selectedSection?: "active" | "history";
   state: ArbitrageInstanceLoadState;
+  verifications?: Record<string, VerificationState>;
 }) {
   if (state.status === "loading") {
     return <ArbitrageInstanceShell><p className="p-5 text-sm text-[#8f99a5]">正在加载套利组合…</p></ArbitrageInstanceShell>;
@@ -62,7 +105,10 @@ export function ArbitrageInstanceContent({
       active={state.active}
       history={state.history}
       onPageChange={onPageChange}
+      onSectionChange={onSectionChange}
       page={page}
+      selectedSection={selectedSection}
+      verifications={verifications}
     />
   );
 }
@@ -71,28 +117,39 @@ export function ArbitrageInstanceSections({
   active,
   history,
   onPageChange,
+  onSectionChange = () => undefined,
   page,
+  selectedSection = "active",
+  verifications = {},
 }: {
   active: ArbitrageInstance[];
   history: ArbitrageInstance[];
   onPageChange: (page: number) => void;
+  onSectionChange?: (section: "active" | "history") => void;
   page: number;
+  selectedSection?: "active" | "history";
+  verifications?: Record<string, VerificationState>;
 }) {
   return (
     <ArbitrageInstanceShell>
-      <div className="space-y-6 p-4 sm:p-5">
-        <InstanceSection
+      <div>
+        <div className="flex border-b border-[#25282f] bg-black px-4 sm:px-5" role="tablist" aria-label="套利记录视图">
+          <SectionTab active={selectedSection === "active"} count={active.length} label="当前套利" onClick={() => onSectionChange("active")} />
+          <SectionTab active={selectedSection === "history"} count={history.length} label="历史记录" onClick={() => onSectionChange("history")} />
+        </div>
+        <div className="p-4 sm:p-5">
+        {selectedSection === "active" ? <InstanceSection
           emptyText="暂无当前套利组合"
           instances={active}
           title="当前套利"
-        />
-        <InstanceSection
+          verifications={verifications}
+        /> : <InstanceSection
           emptyText="暂无历史套利记录"
           historical
           instances={history}
-          title="历史套利"
-        />
-        <div className="flex items-center justify-end gap-3 border-t border-[#25282f] pt-4">
+          title="历史记录"
+        />}
+        {selectedSection === "history" ? <div className="mt-5 flex items-center justify-end gap-3 border-t border-[#25282f] pt-4">
           <span className="text-xs text-[#8f99a5]">第 {page} 页 · 每页 {HISTORY_LIMIT} 条</span>
           <Button disabled={page <= 1} onClick={() => onPageChange(page - 1)} type="button" variant="secondary">
             上一页
@@ -100,10 +157,15 @@ export function ArbitrageInstanceSections({
           <Button disabled={history.length < HISTORY_LIMIT} onClick={() => onPageChange(page + 1)} type="button" variant="secondary">
             下一页
           </Button>
+        </div> : null}
         </div>
       </div>
     </ArbitrageInstanceShell>
   );
+}
+
+function SectionTab({ active, count, label, onClick }: { active: boolean; count: number; label: string; onClick: () => void }) {
+  return <button aria-selected={active} className={`relative min-h-12 border-b-2 px-4 text-xs font-semibold outline-none transition focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40 ${active ? "border-white text-white" : "border-transparent text-[#8f99a5] hover:text-[#d7dce2]"}`} onClick={onClick} role="tab" type="button">{label}<span className="ml-2 font-mono text-[10px] text-[#707985]">{count}</span></button>;
 }
 
 function ArbitrageInstanceShell({ children }: { children: ReactNode }) {
@@ -125,11 +187,13 @@ function InstanceSection({
   historical = false,
   instances,
   title,
+  verifications = {},
 }: {
   emptyText: string;
   historical?: boolean;
   instances: ArbitrageInstance[];
   title: string;
+  verifications?: Record<string, VerificationState>;
 }) {
   return (
     <section>
@@ -139,12 +203,12 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3 xl:grid-cols-2">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance }: { historical: boolean; instance: ArbitrageInstance }) {
+function InstanceCard({ historical, instance, verificationState }: { historical: boolean; instance: ArbitrageInstance; verificationState?: VerificationState }) {
   return (
     <article className="min-w-0 border border-[#25282f] bg-black p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -161,23 +225,64 @@ function InstanceCard({ historical, instance }: { historical: boolean; instance:
         <Metric label="建仓完成时间" value={formatOptionalTime(instance.openedAt)} />
         {historical ? <Metric label="关闭时间" value={formatOptionalTime(instance.closedAt)} /> : null}
       </dl>
-      <div className="mt-4 grid gap-3 sm:grid-cols-2">
+      <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
         {instance.legs.map((leg) => (
-          <div className="border border-[#25282f] p-3" key={leg.legId}>
+          <div className="bg-[#0b0d11] p-4" key={leg.legId}>
             <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-white">{leg.role === "LONG" ? "LONG 腿" : "SHORT 腿"}</span>
+              <span className="text-xs font-semibold text-white">{leg.role === "LONG" ? "多头腿" : "空头腿"}</span>
               <span className="text-[11px] text-[#8f99a5]">{venueLabel(leg.venue)}</span>
             </div>
             <dl className="mt-3 space-y-2 text-xs">
-              <LegRow label="账户" value={maskAccountId(leg.accountId)} />
+              <LegRow label="交易所" value={venueLabel(leg.venue)} />
               <LegRow label="交易标的" value={leg.instrumentId} />
-              <LegRow label="计划数量" value={leg.plannedQuantity} />
+              <LegRow label="方向" value={leg.role === "LONG" ? "多头" : "空头"} />
+              {historical ? (
+                <>
+                  <LegRow label="已确认开仓数量" value={leg.confirmedOpenedQuantity} />
+                  <LegRow label="已确认关闭数量" value={leg.confirmedClosedQuantity} />
+                </>
+              ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
             </dl>
           </div>
         ))}
       </div>
     </article>
   );
+}
+
+function LiveLegVerification({ legId, state }: { legId: string; state?: VerificationState }) {
+  if (!state || state.status === "loading") {
+    return <><LegRow label="系统管理数量" value="核验中…" /><LegRow label="当前真实数量" value="核验中…" /><VerificationNotice status="loading" /></>;
+  }
+  if (state.status === "error") {
+    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="当前真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
+  }
+  const verification = state.verification.legs.find((item) => item.legId === legId);
+  if (!verification) {
+    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="当前真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
+  }
+  return (
+    <>
+      <LegRow label="系统管理数量" value={verification.expectedManagedQuantity} />
+      <LegRow label="当前真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
+      <VerificationNotice status={verification.verificationStatus} />
+    </>
+  );
+}
+
+function VerificationNotice({ status }: { status: ArbitrageLegVerificationStatus | "loading" | "error" }) {
+  if (status === "loading") return <div className="mt-3 border-t border-[#25282f] pt-3 text-xs text-[#8f99a5]">正在核验当前仓位…</div>;
+  if (status === "error" || status === "UNKNOWN") {
+    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-amber-200"><CircleHelp className="mt-0.5 shrink-0" size={14} /><span>当前仓位暂无法可靠确认</span></div>;
+  }
+  if (status === "MISMATCH") {
+    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-red-200"><AlertTriangle className="mt-0.5 shrink-0" size={14} /><span>交易所当前数量与 StellaX 管理记录存在差异</span></div>;
+  }
+  return <div className="mt-3 flex items-center gap-2 border-t border-[#25282f] pt-3 text-xs text-emerald-200"><CheckCircle2 size={14} /><span>仓位一致</span></div>;
+}
+
+export function verificationStatusLabel(status: ArbitrageLegVerificationStatus) {
+  return { MATCHED: "仓位一致", MISMATCH: "仓位存在差异", UNKNOWN: "暂无法确认" }[status];
 }
 
 function StatusBadge({ status }: { status: ArbitrageInstanceStatus }) {

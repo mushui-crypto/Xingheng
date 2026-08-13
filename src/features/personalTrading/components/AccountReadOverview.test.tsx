@@ -4,6 +4,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { AccountReadRequestError, type AccountReadSnapshot } from "../../../api/accountRead";
+import type { ExchangeCredentialSummary } from "../../../api/exchangeCredentials";
 import { AccountDetail, AccountReadCards, type VenueState } from "./AccountReadOverview";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -15,13 +16,27 @@ test("account overview renders all four venue cards and isolates a venue failure
     bybit: { status: "loading" },
     bitget: { status: "success", snapshot: snapshot("bitget") },
   };
-  const html = renderToStaticMarkup(<AccountReadCards onOpen={() => undefined} states={states} />);
+  const html = renderToStaticMarkup(<AccountReadCards onConfigure={() => undefined} onDelete={() => undefined} onOpen={() => undefined} states={states} summaries={summaries()} />);
 
   for (const label of ["Binance", "OKX", "Bybit", "Bitget"]) assert.match(html, new RegExp(label));
-  assert.match(html, /交易所账户读取失败/);
+  assert.match(html, /账户读取失败/);
   assert.match(html, /Binance[\s\S]*已连接/);
   assert.match(html, /预估总资产/);
   assert.match(html, /Bitget[\s\S]*暂无估值/);
+  assert.doesNotMatch(html, /凭证验证|账户模式/u);
+});
+
+test("unconfigured cards guide API setup while configured cards expose a more menu", () => {
+  const states: Record<AccountReadSnapshot["venue"], VenueState> = {
+    binance: { status: "success", snapshot: snapshot("binance") },
+    okx: { status: "error", error: new AccountReadRequestError("unavailable", "ignored") },
+    bybit: { status: "loading" },
+    bitget: { status: "loading" },
+  };
+  const items = summaries().map((item) => item.venue === "okx" ? { ...item, configured: false } : item);
+  const html = renderToStaticMarkup(<AccountReadCards onConfigure={() => undefined} onDelete={() => undefined} onOpen={() => undefined} states={states} summaries={items} />);
+  assert.match(html, /OKX[\s\S]*未配置[\s\S]*配置 API[\s\S]*连接状态/u);
+  assert.match(html, /Binance[\s\S]*更多账户操作/u);
 });
 
 test("account detail shows Chinese permission states and null-safe balances", () => {
@@ -35,19 +50,29 @@ test("account detail shows Chinese permission states and null-safe balances", ()
   assert.doesNotMatch(html, /raw-user-id|api-secret|api-key/u);
 });
 
-test("account cards open details and the shared modal closes them", () => {
+test("account card actions use the more menu and shared modals", () => {
   const source = readFileSync(new URL("./AccountReadOverview.tsx", import.meta.url), "utf8");
-  assert.match(source, /onClick=\{onOpen\}/u);
+  assert.match(source, /aria-label="更多账户操作"/u);
+  assert.match(source, /账户详情/u);
+  assert.match(source, /删除 API 配置/u);
+  assert.match(source, /配置 .* API/u);
   assert.match(source, /onClose=\{\(\) => setSelectedVenue\(null\)\}/u);
-  assert.match(source, /open=\{Boolean\(selectedSnapshot\)\}/u);
+  assert.match(source, /open=\{Boolean\(selectedVenue && selectedConfigured\)\}/u);
+  assert.match(source, /selectedVenue === "binance" \? <BinanceAccountDiagnostics \/>/u);
 });
 
 test("my arbitrage page uses the common account overview without stale provider messaging", () => {
   const source = readFileSync(new URL("../../../pages/app/PersonalTradingPage.tsx", import.meta.url), "utf8");
-  assert.match(source, /<AccountReadOverview \/>/u);
+  assert.match(source, /<AccountReadOverview/u);
+  assert.doesNotMatch(source, /ExchangeCredentialsPanel|CredentialOnlyVenueDetail|BinanceTradingWorkbench/u);
   assert.doesNotMatch(source, /账户读取[^\n]*尚未接入|不连接 .* 私有账户接口/u);
-  assert.match(source, /持仓、订单与执行能力本阶段未接入/u);
 });
+
+function summaries(): ExchangeCredentialSummary[] {
+  return (["binance", "okx", "bybit", "bitget"] as const).map((venue) => ({
+    venue, configured: true, implemented: true, accountId: `${venue}:account`, accountFingerprint: `${venue}:fingerprint`, maskedApiKey: "••••1234", permissions: {}, lastVerifiedAt: 1_800_000_000_000, message: null,
+  }));
+}
 
 function snapshot(venue: AccountReadSnapshot["venue"]): AccountReadSnapshot {
   return {

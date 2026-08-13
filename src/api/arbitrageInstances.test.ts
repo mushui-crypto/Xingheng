@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   fetchActiveArbitrageInstances,
   fetchArbitrageInstanceHistory,
+  fetchArbitragePositionVerification,
   requireArbitrageInstanceList,
 } from "./arbitrageInstances";
 
@@ -20,6 +21,28 @@ test("arbitrage instance API uses active and paginated history query boundaries"
       "/api/arbitrage-instances/active",
       "/api/arbitrage-instances/history?page=2&limit=50",
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("verification API maps decimal strings and preserves unknown actual quantity as null", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    assert.equal(String(input), "/api/arbitrage-instances/arbitrage%2Fholding/verification");
+    return Response.json({
+      arbitrageId: "arbitrage/holding",
+      checkedAt: 1_800_000_004_000,
+      legs: [
+        { arbitrageId: "arbitrage/holding", legId: "long-leg", expectedManagedQuantity: "0.3", actualQuantity: "0.3", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+        { arbitrageId: "arbitrage/holding", legId: "short-leg", expectedManagedQuantity: "0.3", actualQuantity: null, verificationStatus: "UNKNOWN", checkedAt: 1_800_000_004_000 },
+      ],
+    });
+  };
+  try {
+    const result = await fetchArbitragePositionVerification("arbitrage/holding");
+    assert.equal(result.legs[0].expectedManagedQuantity, "0.3");
+    assert.equal(result.legs[1].actualQuantity, null);
   } finally {
     globalThis.fetch = originalFetch;
   }

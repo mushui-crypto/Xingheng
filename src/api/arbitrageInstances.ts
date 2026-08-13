@@ -57,6 +57,23 @@ export type ArbitrageInstance = {
   };
 };
 
+export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
+
+export type ArbitrageLegVerification = {
+  arbitrageId: string;
+  legId: string;
+  expectedManagedQuantity: string;
+  actualQuantity: string | null;
+  verificationStatus: ArbitrageLegVerificationStatus;
+  checkedAt: number;
+};
+
+export type ArbitragePositionVerification = {
+  arbitrageId: string;
+  checkedAt: number;
+  legs: [ArbitrageLegVerification, ArbitrageLegVerification];
+};
+
 export async function fetchActiveArbitrageInstances(signal?: AbortSignal) {
   const payload = await requestJson<unknown>(
     "/api/arbitrage-instances/active",
@@ -82,6 +99,15 @@ export async function fetchArbitrageInstanceById(arbitrageId: string, signal?: A
     { userAuthFailure: true, init: { cache: "no-store", signal } },
   );
   return instance(payload);
+}
+
+export async function fetchArbitragePositionVerification(arbitrageId: string, signal?: AbortSignal) {
+  const payload = await requestJson<unknown>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/verification`,
+    "当前仓位暂无法可靠确认",
+    { userAuthFailure: true, init: { cache: "no-store", signal } },
+  );
+  return positionVerification(payload);
 }
 
 export function requireArbitrageInstanceList(payload: unknown) {
@@ -121,6 +147,31 @@ function instance(payload: unknown): ArbitrageInstance {
       cumulativeNetPnl: nullableDecimal(pnl.cumulativeNetPnl),
       updatedAt: nullableTimestamp(pnl.updatedAt),
     },
+  };
+}
+
+function positionVerification(payload: unknown): ArbitragePositionVerification {
+  const value = requiredRecord(payload);
+  if (!Array.isArray(value.legs) || value.legs.length !== 2) throw invalidVerificationResponse();
+  const legs = value.legs.map(legVerification);
+  const arbitrageId = requiredString(value.arbitrageId);
+  if (legs.some((item) => item.arbitrageId !== arbitrageId)) throw invalidVerificationResponse();
+  return {
+    arbitrageId,
+    checkedAt: timestamp(value.checkedAt),
+    legs: legs as [ArbitrageLegVerification, ArbitrageLegVerification],
+  };
+}
+
+function legVerification(payload: unknown): ArbitrageLegVerification {
+  const value = requiredRecord(payload);
+  return {
+    arbitrageId: requiredString(value.arbitrageId),
+    legId: requiredString(value.legId),
+    expectedManagedQuantity: decimal(value.expectedManagedQuantity),
+    actualQuantity: nullableDecimal(value.actualQuantity),
+    verificationStatus: verificationStatus(value.verificationStatus),
+    checkedAt: timestamp(value.checkedAt),
   };
 }
 
@@ -167,6 +218,11 @@ function referenceStatus(value: unknown): ArbitrageExecutionReference["status"] 
   if (value === "CLAIMED" || value === "LINKED" || value === "PENDING_CONFIRMATION"
     || value === "CONFIRMED" || value === "FAILED" || value === "UNKNOWN") return value;
   throw invalidResponse();
+}
+
+function verificationStatus(value: unknown): ArbitrageLegVerificationStatus {
+  if (value === "MATCHED" || value === "MISMATCH" || value === "UNKNOWN") return value;
+  throw invalidVerificationResponse();
 }
 
 function strategyType(value: unknown): ArbitrageInstance["strategyType"] {
@@ -218,4 +274,8 @@ function nullableTimestamp(value: unknown) {
 
 function invalidResponse(): never {
   throw new Error("套利组合数据响应无效");
+}
+
+function invalidVerificationResponse(): never {
+  throw new Error("仓位核验数据响应无效");
 }
