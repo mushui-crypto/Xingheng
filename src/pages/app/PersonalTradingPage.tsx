@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Activity, KeyRound, LockKeyhole, ShieldCheck } from "lucide-react";
 import type { ExchangeCredentialSummary, ExchangeVenue } from "../../api/exchangeCredentials";
 import { BinanceTradingWorkbench } from "../../features/personalTrading/components/BinanceTradingWorkbench";
+import { AccountReadOverview } from "../../features/personalTrading/components/AccountReadOverview";
 import { ExchangeCredentialsPanel } from "../../features/personalTrading/components/ExchangeCredentialsPanel";
 import { exchangeVenues, mergeCredentialSummaries } from "../../features/personalTrading/model/personalTradingState";
 
@@ -21,14 +22,16 @@ export function PersonalTradingPage() {
               <Activity size={13} /> 套利系统 · 真实资产
             </span>
           </div>
-          <p className="xh-subtitle">管理个人交易所连接，并查看 Binance XAUT 对冲策略的账户、行情、订单与对账状态。</p>
+          <p className="xh-subtitle">查看个人交易所账户的真实只读数据，并管理交易所连接。</p>
         </div>
         <div className="flex items-center gap-2 text-xs text-[#8f99a5]">
-          <LockKeyhole size={14} /> Secret 不回显、不在浏览器持久化
+          <LockKeyhole size={14} /> 密钥不回显、不在浏览器持久化
         </div>
       </header>
 
-      <div className="grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(300px,380px)_minmax(0,1fr)]">
+      <AccountReadOverview />
+
+      <div className="mt-4 grid min-w-0 items-start gap-4 xl:grid-cols-[minmax(300px,380px)_minmax(0,1fr)]">
         <ExchangeCredentialsPanel
           onBinanceChanged={() => setBinanceReloadToken((value) => value + 1)}
           onSummariesChanged={setCredentialSummaries}
@@ -52,19 +55,19 @@ function CredentialOnlyVenueDetail({ summary, venue }: { summary: ExchangeCreden
       <header className="flex flex-col gap-3 border-b border-[#25282f] px-4 py-4 lg:flex-row lg:items-center lg:justify-between lg:px-5">
         <div>
           <div className="flex flex-wrap items-center gap-2">
-            <h2 className="text-sm font-semibold text-white" id="venue-detail-title">{label} Account Detail</h2>
+            <h2 className="text-sm font-semibold text-white" id="venue-detail-title">{label} 凭证详情</h2>
             <span className={`border px-2 py-0.5 text-[11px] ${configured ? "border-emerald-400/30 text-emerald-200" : "border-amber-400/30 text-amber-200"}`}>
               {configured ? "凭证已保存" : "待配置"}
             </span>
           </div>
-          <p className="mt-1 text-xs leading-5 text-[#8f99a5]">当前阶段仅展示加密凭证状态，不连接 {label} 私有账户接口。</p>
+          <p className="mt-1 text-xs leading-5 text-[#8f99a5]">此处管理加密凭证；真实账户级只读数据请查看上方账户概览。</p>
         </div>
       </header>
 
       <div className="grid gap-px border-b border-[#25282f] bg-[#25282f] sm:grid-cols-2 xl:grid-cols-4">
         <DetailMetric label="交易所" value={label} />
         <DetailMetric label="凭证状态" tone={configured ? "success" : "warning"} value={configured ? "已加密保存" : "尚未配置"} />
-        <DetailMetric label="账户读取" value="尚未接入" />
+        <DetailMetric label="账户读取" value="已接入上方概览" />
         <DetailMetric label="执行能力" value="尚未接入" />
       </div>
 
@@ -72,7 +75,7 @@ function CredentialOnlyVenueDetail({ summary, venue }: { summary: ExchangeCreden
         <div className="flex items-start gap-3 border border-[#25282f] bg-black px-4 py-4">
           <KeyRound className="mt-0.5 shrink-0 text-[#aab3bd]" size={17} />
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-white">Credential Storage</h3>
+            <h3 className="text-sm font-semibold text-white">凭证存储</h3>
             <p className="mt-1 break-words font-mono text-xs text-[#8f99a5]">
               {configured ? `${summary?.maskedApiKey ?? "已配置"} · ${summary?.accountFingerprint ?? summary?.accountId ?? "账户已验证"}` : summary?.message ?? "未保存 API 凭证"}
             </p>
@@ -81,8 +84,8 @@ function CredentialOnlyVenueDetail({ summary, venue }: { summary: ExchangeCreden
         <div className="flex items-start gap-3 border border-[#25282f] bg-black px-4 py-4">
           <ShieldCheck className="mt-0.5 shrink-0 text-[#aab3bd]" size={17} />
           <div className="min-w-0">
-            <h3 className="text-sm font-semibold text-white">Private Account Capability</h3>
-            <p className="mt-1 text-xs leading-5 text-[#8f99a5]">余额、仓位、订单与执行 provider 尚未接入；本页不会发起 {label} 私有查询或交易动作。</p>
+            <h3 className="text-sm font-semibold text-white">私有账户能力</h3>
+            <p className="mt-1 text-xs leading-5 text-[#8f99a5]">账户级只读数据已接入；持仓、订单与执行能力本阶段未接入。</p>
           </div>
         </div>
       </div>
