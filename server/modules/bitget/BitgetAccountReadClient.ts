@@ -117,7 +117,7 @@ export class BitgetAccountReadClient {
       symbol: normalizedSymbol,
     });
     const data = requiredRecord(payload.data, "Bitget position data");
-    const positions = requiredList(data.list, "Bitget position list")
+    const positions = positionList(data, "Bitget position list")
       .map((value) => requiredRecord(value, "Bitget position"))
       .filter((position) => requiredString(position.symbol, "Bitget position symbol") === normalizedSymbol);
     const nonZero = positions.filter((position) => decimalQuantity(position.total, "Bitget position total") !== "0");
@@ -219,6 +219,14 @@ function requiredList(value: unknown, label: string): unknown[] {
     throw new BitgetAccountReadError("provider_response_invalid", `${label} is invalid.`);
   }
   return value;
+}
+
+function positionList(data: Record<string, unknown>, label: string): unknown[] {
+  if (!("list" in data)) {
+    throw new BitgetAccountReadError("provider_response_invalid", `${label} is invalid.`);
+  }
+  if (data.list === null) return [];
+  return requiredList(data.list, label);
 }
 
 function requiredString(value: unknown, label: string) {

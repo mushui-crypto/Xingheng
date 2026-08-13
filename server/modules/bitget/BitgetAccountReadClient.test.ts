@@ -119,6 +119,42 @@ test("reads a Bitget UTA position through the GET-only client", async () => {
   assert.equal(method, "GET");
 });
 
+test("treats Bitget UTA empty position lists as a successful flat position", async (t) => {
+  for (const [name, list] of [["empty array", []], ["production null", null]] as const) {
+    await t.test(name, async () => {
+      const client = clientWithResponse(() => success({ list }));
+      assert.deepEqual(await client.readPerpetualPosition("BTCUSDT"), {
+        symbol: "BTCUSDT",
+        side: "flat",
+        baseQuantity: "0",
+        updatedAt: null,
+      });
+    });
+  }
+});
+
+test("fails closed for missing or invalid Bitget UTA position lists", async (t) => {
+  for (const [name, data] of [
+    ["missing", {}],
+    ["object", { list: {} }],
+    ["string", { list: "" }],
+  ] as const) {
+    await t.test(name, async () => {
+      const client = clientWithResponse(() => success(data));
+      await assert.rejects(client.readPerpetualPosition("BTCUSDT"), (error: unknown) => (
+        error instanceof BitgetAccountReadError && error.category === "provider_response_invalid"
+      ));
+    });
+  }
+});
+
+test("preserves Bitget business error classification for position reads", async () => {
+  const client = clientWithResponse(() => ({ code: "25000", msg: "system error", data: { list: [] } }));
+  await assert.rejects(client.readPerpetualPosition("BTCUSDT"), (error: unknown) => (
+    error instanceof BitgetAccountReadError && error.category === "provider_read_failed"
+  ));
+});
+
 test("rejects Bitget API failures and malformed account responses", async (t) => {
   await t.test("HTTP failure", async () => {
     const client = new BitgetAccountReadClient(credentials, {
