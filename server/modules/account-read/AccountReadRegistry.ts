@@ -1,6 +1,8 @@
 import type { ExchangeVenue } from "../credentials/CredentialKeyProvider";
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
 import type { AccountReadProviderFactory } from "./AccountReadProvider";
+import type { VenueAccountReadSnapshot } from "./AccountReadTypes";
+import type { AccountReadValuation } from "./AccountUsdtValuationService";
 
 type CredentialReader = Pick<UserExchangeCredentialStore, "loadForAccountRead">;
 
@@ -16,6 +18,7 @@ export class AccountReadRegistry {
   constructor(
     private readonly credentials: CredentialReader,
     factories: readonly AccountReadProviderFactory[],
+    private readonly valuation?: AccountReadValuation,
   ) {
     this.factories = new Map(factories.map((factory) => [factory.venue, factory]));
   }
@@ -34,20 +37,30 @@ export class AccountReadRegistry {
     }
     const secret = await this.credentials.loadForAccountRead(normalizedUserId, venue);
     const provider = factory.create(secret);
+    let snapshot: VenueAccountReadSnapshot;
     try {
-      const snapshot = await provider.readAccount();
-      return {
-        ...snapshot,
-        balances: snapshot.balances.map((balance) => ({
-          ...balance,
-          estimatedValueUsdt: null,
-          valuationStatus: "UNAVAILABLE" as const,
-        })),
-        estimatedTotalValueUsdt: null,
-        valuationCoverage: "UNAVAILABLE" as const,
-      };
+      snapshot = await provider.readAccount();
     } finally {
       await provider.dispose();
     }
+    if (!this.valuation) return withoutValuation(snapshot);
+    try {
+      return await this.valuation.value(snapshot);
+    } catch {
+      return withoutValuation(snapshot);
+    }
   }
+}
+
+function withoutValuation(snapshot: VenueAccountReadSnapshot) {
+  return {
+    ...snapshot,
+    balances: snapshot.balances.map((balance) => ({
+      ...balance,
+      estimatedValueUsdt: null,
+      valuationStatus: "UNAVAILABLE" as const,
+    })),
+    estimatedTotalValueUsdt: null,
+    valuationCoverage: "UNAVAILABLE" as const,
+  };
 }

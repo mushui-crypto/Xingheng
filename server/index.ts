@@ -42,6 +42,10 @@ import { BinanceAccountReadProviderFactory } from "./modules/account-read/Binanc
 import { BitgetAccountReadProviderFactory } from "./modules/account-read/BitgetAccountReadProvider";
 import { BybitAccountReadProviderFactory } from "./modules/account-read/BybitAccountReadProvider";
 import { OkxAccountReadProviderFactory } from "./modules/account-read/OkxAccountReadProvider";
+import {
+  AccountUsdtValuationService,
+  ArbitrageDashboardUsdtSpotPriceSource,
+} from "./modules/account-read/AccountUsdtValuationService";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
@@ -154,7 +158,7 @@ const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new BitgetAccountReadProviderFactory(),
   new BybitAccountReadProviderFactory(),
   new OkxAccountReadProviderFactory(),
-]);
+], new AccountUsdtValuationService(new ArbitrageDashboardUsdtSpotPriceSource(arbitrageDashboard)));
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(

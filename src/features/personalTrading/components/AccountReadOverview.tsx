@@ -126,7 +126,7 @@ function AccountCard({ label, onOpen, state }: { label: string; onOpen: () => vo
         <CardRow label="连接状态" value="已连接" />
         <CardRow label="凭证验证" value="已验证" />
         <CardRow label="账户模式" value={accountModeLabel(snapshot)} />
-        <CardRow label="估算总资产" value={estimatedTotalValue(snapshot)} />
+        <CardRow label="预估总资产" value={estimatedTotalValue(snapshot)} />
         <CardRow label="最近同步" value={formatSyncTime(snapshot.latestSyncAt)} />
       </dl>
     </button>

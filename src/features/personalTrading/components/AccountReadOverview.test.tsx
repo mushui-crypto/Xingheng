@@ -20,6 +20,7 @@ test("account overview renders all four venue cards and isolates a venue failure
   for (const label of ["Binance", "OKX", "Bybit", "Bitget"]) assert.match(html, new RegExp(label));
   assert.match(html, /交易所账户读取失败/);
   assert.match(html, /Binance[\s\S]*已连接/);
+  assert.match(html, /预估总资产/);
   assert.match(html, /Bitget[\s\S]*暂无估值/);
 });
 

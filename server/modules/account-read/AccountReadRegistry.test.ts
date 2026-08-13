@@ -63,6 +63,29 @@ test("disposes the provider when account read fails", async () => {
   assert.equal(disposed, true);
 });
 
+test("disposes the private provider before valuation and degrades valuation failures", async () => {
+  let disposed = false;
+  const registry = new AccountReadRegistry({
+    loadForAccountRead: async () => ({ apiKey: "key", apiSecret: "secret" }),
+  } as never, [{
+    venue: "binance",
+    create: () => ({
+      venue: "binance",
+      readAccount: async () => snapshot(),
+      dispose: () => { disposed = true; },
+    }),
+  }], {
+    value: async () => {
+      assert.equal(disposed, true);
+      throw new Error("valuation failed");
+    },
+  });
+
+  const result = await registry.read("user-a", "binance");
+  assert.equal(result.estimatedTotalValueUsdt, null);
+  assert.equal(result.valuationCoverage, "UNAVAILABLE");
+});
+
 test("unimplemented venues do not load credentials or connect providers", async () => {
   let loads = 0;
   const registry = new AccountReadRegistry({
