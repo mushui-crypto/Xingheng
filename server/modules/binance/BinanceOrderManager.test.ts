@@ -34,7 +34,7 @@ test("order manager persists one provider write for duplicate idempotency keys",
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   const input = {
     idempotencyKey: "entry-1", category: "spot" as const, symbol: "XAUTUSDT" as const, side: "Buy" as const,
-    quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
+    quantity: "0.01", limitPrice: "1000", reduceOnly: false,
   };
   try {
     const first = await manager.place(input);
@@ -73,7 +73,7 @@ test("provider mutation guard runs after risk refresh and immediately before pro
         symbol: "XAUTUSDT",
         side: "Buy",
         quantity: "0.01",
-        limitPrice: 1_000,
+        limitPrice: "1000",
         reduceOnly: false,
       }, () => {
         events.push("expiry-guard");
@@ -107,7 +107,7 @@ test("generic symbols fail closed before provider mutation while the legacy Risk
         symbol: "BTCUSDT",
         side: "Buy",
         quantity: "0.000123456789012345",
-        limitPrice: 100_000,
+        limitPrice: `1${"0".repeat(400)}`,
         reduceOnly: false,
       }),
       /RiskGuard instrument scope is generalized/u,
@@ -142,7 +142,7 @@ test("partially filled orders are cancelled before completion", async () => {
   try {
     const result = await manager.place({
       idempotencyKey: "partial-1", category: "spot", symbol: "XAUTUSDT", side: "Buy",
-      quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
+      quantity: "0.01", limitPrice: "1000", reduceOnly: false,
     });
     assert.equal(result.status, "Cancelled");
     assert.equal(cancellations, 1);
@@ -180,10 +180,10 @@ test("GTC test order remains processing until explicit cancellation", async () =
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   const input = {
     idempotencyKey: "gtc-test-1", category: "spot" as const, symbol: "XAUTUSDT" as const,
-    side: "Buy" as const, quantity: "0.01", limitPrice: 900, reduceOnly: false,
+    side: "Buy" as const, quantity: "0.01", limitPrice: "900", reduceOnly: false,
   };
   try {
-    assert.equal((await manager.placeTestOrder({ ...input, executionPriceMode: "MARKET" })).status, "New");
+    assert.equal((await manager.placeTestOrder(input)).status, "New");
     assert.equal((await manager.placeTestOrder(input)).status, "New");
     assert.equal(writes, 1);
     assert.equal(submittedMode, "IOC_LIMIT");
@@ -224,8 +224,8 @@ test("risk refresh and provider submission are serialized across orders", async 
   const config = tradingConfigFixture();
   const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   try {
-    const first = manager.place({ idempotencyKey: "lock-1", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: 1_000, reduceOnly: false });
-    const second = manager.place({ idempotencyKey: "lock-2", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: 1_000, reduceOnly: false });
+    const first = manager.place({ idempotencyKey: "lock-1", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: "1000", reduceOnly: false });
+    const second = manager.place({ idempotencyKey: "lock-2", category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.01", limitPrice: "1000", reduceOnly: false });
     await new Promise((resolve) => setImmediate(resolve));
     assert.equal(snapshotReads, 1);
     assert.equal(writes, 1);
@@ -431,7 +431,7 @@ test("ambiguous provider submission remains pending reconciliation", async () =>
   try {
     await assert.rejects(() => manager.place({
       idempotencyKey: "timeout-1", category: "spot", symbol: "XAUTUSDT", side: "Buy",
-      quantity: "0.01", limitPrice: 1_000, reduceOnly: false,
+      quantity: "0.01", limitPrice: "1000", reduceOnly: false,
     }), /timeout/u);
     assert.equal(manager.listOrders()[0]?.status, "processing");
   } finally {
@@ -474,13 +474,12 @@ test("market fills preserve authoritative FILLED with missing or volatile averag
           symbol: "XAUTUSDT",
           side: "Buy",
           quantity: "0.01",
-          limitPrice: 999_999,
           executionPriceMode: "MARKET",
           reduceOnly: false,
         });
         assert.equal(result.status, "Filled");
         assert.equal(result.averagePrice, averagePrice);
-        assert.equal(submitted[0]?.limitPrice, 999_999);
+        assert.equal(Object.hasOwn(submitted[0] ?? {}, "limitPrice"), false);
         assert.equal(store.find(`market-fact-${String(averagePrice)}`)?.status, "completed");
       } finally {
         store.close();
@@ -528,7 +527,6 @@ test("MARKET linear Sell valuation conservatively enforces max order and positio
           symbol: "XAUTUSDT",
           side: "Sell",
           quantity: "0.02491",
-          limitPrice: 1,
           executionPriceMode: "MARKET",
           reduceOnly: false,
         }), scenario.error);

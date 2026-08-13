@@ -413,9 +413,9 @@ class FakeBinanceIntentRuntimeService {
 
   async placeExecutionOrder(
     input: BinanceOrderInput,
-    beforeProviderMutation?: (riskValuationPrice?: number) => void | Promise<void>,
+    beforeProviderMutation?: (riskValuationPrice: number) => void | Promise<void>,
   ) {
-    await beforeProviderMutation?.(input.limitPrice);
+    await beforeProviderMutation?.(input.limitPrice === undefined ? 1_004.1 : Number(input.limitPrice));
     this.providerMutations += 1;
     this.placeInputs.push(input);
     return providerOrder();

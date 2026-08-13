@@ -20,15 +20,23 @@ export type BinanceIntentExecutionResult = Readonly<{
   state: ExecutionStatus;
 }>;
 
-type BinanceIntentPreparedOrder = Readonly<{
+type BinanceIntentPreparedOrderBase = Readonly<{
   idempotencyKey: string;
   category: "spot" | "linear";
   symbol: string;
   side: "Buy" | "Sell";
   quantity: string;
-  limitPrice: number;
-  executionPriceMode: "IOC_LIMIT" | "MARKET";
   reduceOnly: boolean;
+}>;
+
+type BinanceIntentPreparedOrder = BinanceIntentPreparedOrderBase & (
+  | Readonly<{ executionPriceMode: "IOC_LIMIT"; limitPrice: string }>
+  | Readonly<{ executionPriceMode: "MARKET"; limitPrice?: never }>
+);
+
+type BinanceLegacyRiskPreparedOrder = Omit<BinanceIntentPreparedOrderBase, "limitPrice"> & Readonly<{
+  executionPriceMode: "IOC_LIMIT" | "MARKET";
+  limitPrice: number;
 }>;
 
 export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutionResult = BinanceIntentExecutionResult> {
@@ -36,7 +44,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     private readonly service: BinanceIntentExecutionServiceBinding,
     private readonly config: Pick<BinanceTradingConfig, "maxSlippageBps">,
     private readonly assertSubmitAllowed: (
-      prepared: BinanceIntentPreparedOrder,
+      prepared: BinanceLegacyRiskPreparedOrder,
     ) => void | Promise<void> = () => undefined,
     private readonly mapResult: (result: BinanceIntentExecutionResult) => TResult = (result) => result as TResult,
   ) {
@@ -52,7 +60,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     const prepared = await this.prepare(intent);
     const order = await this.service.placeExecutionOrder(
       prepared,
-      (riskValuationPrice = prepared.limitPrice) => this.assertSubmitAllowed({
+      (riskValuationPrice) => this.assertSubmitAllowed({
         ...prepared,
         limitPrice: riskValuationPrice,
       }),
@@ -71,24 +79,27 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     const category = context.instrument.marketType === "spot" ? "spot" : "linear";
     const side = intent.side === "buy" ? "Buy" : "Sell";
     const quantity = decimalQuantity(intent.quantity.quantity);
-    const referencePrice = positiveDecimalNumber(side === "Buy" ? context.quote.ask : context.quote.bid, "quote");
-    const priceTick = positiveDecimalNumber(context.tradingRules.priceTick, "priceTick");
-    const multiplier = 1 + (side === "Buy" ? 1 : -1) * this.config.maxSlippageBps / 10_000;
-    const unroundedPrice = referencePrice * multiplier;
-    const limitPrice = side === "Buy"
-      ? ceilStep(unroundedPrice, priceTick)
-      : floorStep(unroundedPrice, priceTick);
+    const executionPriceMode = toBinanceExecutionPriceMode(intent.executionMode);
+    const limitPrice = executionPriceMode === "IOC_LIMIT"
+      ? protectionPrice({
+        referencePrice: side === "Buy" ? context.quote.ask : context.quote.bid,
+        priceTick: context.tradingRules.priceTick,
+        maxSlippageBps: this.config.maxSlippageBps,
+        side,
+      })
+      : undefined;
 
-    return Object.freeze({
+    const base = {
       idempotencyKey: binanceExecutionIdempotencyKeyFor(intent),
       category,
       symbol: context.instrument.providerSymbol,
       side,
       quantity,
-      limitPrice,
-      executionPriceMode: toBinanceExecutionPriceMode(intent.executionMode),
       reduceOnly: intent.orderConstraints.reduceOnly,
-    });
+    } as const;
+    return executionPriceMode === "MARKET"
+      ? Object.freeze({ ...base, executionPriceMode })
+      : Object.freeze({ ...base, executionPriceMode, limitPrice: limitPrice! });
   }
 }
 
@@ -123,18 +134,104 @@ function decimalQuantity(value: string) {
   return value;
 }
 
-function positiveDecimalNumber(value: string, name: string) {
-  const result = Number(value);
-  if (!Number.isFinite(result) || result <= 0) throw new Error(`Binance ${name} must be positive.`);
-  return result;
+type Decimal = Readonly<{ coefficient: bigint; scale: number }>;
+
+function protectionPrice(input: Readonly<{
+  referencePrice: string;
+  priceTick: string;
+  maxSlippageBps: number;
+  side: "Buy" | "Sell";
+}>) {
+  const referencePrice = positiveDecimal(input.referencePrice, "quote");
+  const priceTick = positiveDecimal(input.priceTick, "priceTick");
+  const slippageBps = nonNegativeDecimal(String(input.maxSlippageBps), "maxSlippageBps");
+  const basisPoints = decimal("10000");
+  const factor = input.side === "Buy"
+    ? add(basisPoints, slippageBps)
+    : subtractPositive(basisPoints, slippageBps, "maxSlippageBps must be less than 10000 for Sell orders.");
+  const numerator = multiply(referencePrice, factor);
+  const denominator = multiply(priceTick, basisPoints);
+  const tickCount = input.side === "Buy"
+    ? ceilRatio(numerator, denominator)
+    : floorRatio(numerator, denominator);
+  if (tickCount <= 0n) throw new Error("Binance protection price must be positive.");
+  return format(multiplyInteger(priceTick, tickCount));
 }
 
-function ceilStep(value: number, step: number) {
-  return Math.ceil(value / step) * step;
+function positiveDecimal(value: string, name: string) {
+  const parsed = decimal(value);
+  if (parsed.coefficient <= 0n) throw new Error(`Binance ${name} must be positive.`);
+  return parsed;
 }
 
-function floorStep(value: number, step: number) {
-  return Math.floor(value / step) * step;
+function nonNegativeDecimal(value: string, name: string) {
+  const parsed = decimal(value);
+  if (parsed.coefficient < 0n) throw new Error(`Binance ${name} must be non-negative.`);
+  return parsed;
+}
+
+function decimal(value: string): Decimal {
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) throw new Error("Binance Decimal value is invalid.");
+  const [integer, fraction = ""] = value.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  return normalize({ coefficient: BigInt(`${integer}${normalizedFraction}`), scale: normalizedFraction.length });
+}
+
+function add(left: Decimal, right: Decimal): Decimal {
+  const scale = Math.max(left.scale, right.scale);
+  return normalize({
+    coefficient: left.coefficient * powerOfTen(scale - left.scale)
+      + right.coefficient * powerOfTen(scale - right.scale),
+    scale,
+  });
+}
+
+function subtractPositive(left: Decimal, right: Decimal, message: string): Decimal {
+  const scale = Math.max(left.scale, right.scale);
+  const coefficient = left.coefficient * powerOfTen(scale - left.scale)
+    - right.coefficient * powerOfTen(scale - right.scale);
+  if (coefficient <= 0n) throw new Error(message);
+  return normalize({ coefficient, scale });
+}
+
+function multiply(left: Decimal, right: Decimal): Decimal {
+  return normalize({ coefficient: left.coefficient * right.coefficient, scale: left.scale + right.scale });
+}
+
+function multiplyInteger(value: Decimal, multiplier: bigint): Decimal {
+  return normalize({ coefficient: value.coefficient * multiplier, scale: value.scale });
+}
+
+function floorRatio(numerator: Decimal, denominator: Decimal) {
+  return numerator.coefficient * powerOfTen(denominator.scale)
+    / (denominator.coefficient * powerOfTen(numerator.scale));
+}
+
+function ceilRatio(numerator: Decimal, denominator: Decimal) {
+  const dividend = numerator.coefficient * powerOfTen(denominator.scale);
+  const divisor = denominator.coefficient * powerOfTen(numerator.scale);
+  return (dividend + divisor - 1n) / divisor;
+}
+
+function format(value: Decimal) {
+  const normalized = normalize(value);
+  if (normalized.scale === 0) return normalized.coefficient.toString();
+  const raw = normalized.coefficient.toString().padStart(normalized.scale + 1, "0");
+  return `${raw.slice(0, -normalized.scale)}.${raw.slice(-normalized.scale)}`;
+}
+
+function normalize(value: Decimal): Decimal {
+  let coefficient = value.coefficient;
+  let scale = value.scale;
+  while (scale > 0 && coefficient % 10n === 0n) {
+    coefficient /= 10n;
+    scale -= 1;
+  }
+  return Object.freeze({ coefficient, scale });
+}
+
+function powerOfTen(exponent: number) {
+  return 10n ** BigInt(exponent);
 }
 
 export type { BinanceProviderMutationGuard };

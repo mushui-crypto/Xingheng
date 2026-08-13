@@ -12,11 +12,13 @@ import type {
 } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 
-export type BinanceOrderInput = Omit<BinanceExecutionOrderRequest, "orderLinkId"> & {
-  idempotencyKey: string;
-};
+export type BinanceOrderInput = BinanceExecutionOrderRequest extends infer Request
+  ? Request extends BinanceExecutionOrderRequest
+    ? Omit<Request, "orderLinkId"> & { idempotencyKey: string }
+    : never
+  : never;
 
-export type BinanceProviderMutationGuard = (riskValuationPrice?: number) => void | Promise<void>;
+export type BinanceProviderMutationGuard = (riskValuationPrice: number) => void | Promise<void>;
 
 export class BinanceOrderManager {
   private readonly orderLock = new AsyncLock();
@@ -33,7 +35,10 @@ export class BinanceOrderManager {
   }
 
   placeTestOrder(input: BinanceOrderInput) {
-    return this.placeWithMode({ ...input, executionPriceMode: "IOC_LIMIT" }, "test_gtc");
+    if (input.limitPrice === undefined) {
+      throw new Error("Binance GTC test order requires an explicit Decimal limit price.");
+    }
+    return this.placeWithMode({ ...input, executionPriceMode: "IOC_LIMIT", limitPrice: input.limitPrice }, "test_gtc");
   }
 
   private async placeWithMode(
@@ -64,11 +69,9 @@ export class BinanceOrderManager {
       let submissionStarted = false;
       try {
         const snapshot = await this.syncPositions();
-        const riskValuationPrice = request.executionPriceMode === "MARKET"
-          ? mutationSnapshotRiskValuationPrice(request, snapshot, this.config.maxSlippageBps)
-          : request.limitPrice;
-        this.risk.assertOrderAllowed(toLegacyRiskRequest(request, riskValuationPrice), snapshot);
-        await beforeProviderMutation?.(riskValuationPrice);
+        const legacyRiskRequest = toLegacyRiskRequest(request, snapshot, this.config.maxSlippageBps);
+        this.risk.assertOrderAllowed(legacyRiskRequest, snapshot);
+        await beforeProviderMutation?.(legacyRiskRequest.limitPrice);
         submissionStarted = true;
         const accepted = executionMode === "test_gtc"
           ? await this.client.placeTestOrder(request)
@@ -266,16 +269,21 @@ export class BinanceOrderManager {
 function normalizeRequest(input: BinanceOrderInput): BinanceExecutionOrderRequest {
   const idempotencyKey = input.idempotencyKey?.trim();
   if (!idempotencyKey || idempotencyKey.length > 160) throw new Error("A valid idempotencyKey is required.");
-  return {
+  const executionPriceMode = input.executionPriceMode ?? "IOC_LIMIT";
+  const request = {
     category: input.category,
     symbol: providerSymbol(input.symbol),
     side: input.side,
     quantity: decimalQuantity(input.quantity),
-    limitPrice: input.limitPrice,
-    executionPriceMode: input.executionPriceMode ?? "IOC_LIMIT",
+    executionPriceMode,
     reduceOnly: input.reduceOnly,
     orderLinkId: `ptm${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 30)}`,
   };
+  if (executionPriceMode === "MARKET") {
+    if (input.limitPrice !== undefined) throw new Error("Binance MARKET order must not include a limit price.");
+    return { ...request, executionPriceMode };
+  }
+  return { ...request, executionPriceMode, limitPrice: decimalPrice(input.limitPrice) };
 }
 
 function mutationSnapshotRiskValuationPrice(
@@ -302,11 +310,15 @@ function fingerprint(request: BinanceExecutionOrderRequest, executionMode: Binan
 
 function toLegacyRiskRequest(
   request: BinanceExecutionOrderRequest,
-  limitPrice: number,
+  snapshot: BinancePreflightSnapshot,
+  maxSlippageBps: number,
 ): BinanceOrderRequest {
   if (request.symbol !== "XAUTUSDT") {
     throw new Error("Binance generic execution remains blocked until RiskGuard instrument scope is generalized.");
   }
+  const limitPrice = request.executionPriceMode === "MARKET"
+    ? mutationSnapshotRiskValuationPrice(request, snapshot, maxSlippageBps)
+    : legacyDecimalNumber(request.limitPrice, "limitPrice");
   const quantityXaut = Number(request.quantity);
   if (!Number.isFinite(quantityXaut) || quantityXaut <= 0) {
     throw new Error("Binance order quantity is not representable by the legacy RiskGuard.");
@@ -333,6 +345,23 @@ function decimalQuantity(value: string) {
     throw new Error("Binance order quantity must be a positive decimal string.");
   }
   return value;
+}
+
+function decimalPrice(value: unknown) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) || /^0(?:\.0+)?$/u.test(value)) {
+    throw new Error("Binance IOC limit price must be a positive decimal string.");
+  }
+  const [integer, fraction = ""] = value.split(".");
+  const normalizedFraction = fraction.replace(/0+$/u, "");
+  return normalizedFraction ? `${integer}.${normalizedFraction}` : integer;
+}
+
+function legacyDecimalNumber(value: string, name: string) {
+  const result = Number(value);
+  if (!Number.isFinite(result) || result <= 0) {
+    throw new Error(`Binance legacy ${name} is not representable as a number.`);
+  }
+  return result;
 }
 
 function isNonTerminalProviderState(order: BinanceProviderOrder) {

@@ -331,7 +331,7 @@ export class BinanceClient implements BinanceClientAdapter {
       type: isMarket ? "MARKET" : "LIMIT",
       ...(isMarket ? {} : { timeInForce }),
       quantity: request.quantity,
-      ...(isMarket ? {} : { price: decimal(request.limitPrice) }),
+      ...(isMarket ? {} : { price: request.limitPrice }),
       newClientOrderId: request.orderLinkId,
       ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
     }, true, "POST"));
@@ -747,7 +747,9 @@ function assertWhitelistedOrder(request: BinanceExecutionOrderRequest) {
   }
   if (
     !positiveDecimal(request.quantity)
-    || !(request.limitPrice > 0)
+    || (request.executionPriceMode === "MARKET"
+      ? request.limitPrice !== undefined
+      : !positiveDecimal(request.limitPrice))
     || (request.executionPriceMode !== undefined
       && request.executionPriceMode !== "IOC_LIMIT"
       && request.executionPriceMode !== "MARKET")

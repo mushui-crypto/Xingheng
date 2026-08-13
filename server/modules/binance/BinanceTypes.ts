@@ -121,16 +121,19 @@ export type BinanceOrderRequest = {
   orderLinkId: string;
 };
 
-export type BinanceExecutionOrderRequest = {
+type BinanceExecutionOrderRequestBase = {
   category: "spot" | "linear";
   symbol: string;
   side: "Buy" | "Sell";
   quantity: string;
-  limitPrice: number;
-  executionPriceMode?: BinanceExecutionPriceMode;
   reduceOnly: boolean;
   orderLinkId: string;
 };
+
+export type BinanceExecutionOrderRequest = BinanceExecutionOrderRequestBase & (
+  | Readonly<{ executionPriceMode?: "IOC_LIMIT"; limitPrice: string }>
+  | Readonly<{ executionPriceMode: "MARKET"; limitPrice?: never }>
+);
 
 export type BinanceProviderOrder = {
   orderId: string;

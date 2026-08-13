@@ -115,7 +115,7 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
     symbol: "XAUTUSDT" as const,
     side: "Buy" as const,
     quantity: "0.01",
-    limitPrice: 1_000,
+    limitPrice: "1000",
     reduceOnly: false,
   };
 
@@ -159,7 +159,7 @@ test("read-only adapter does not change OrderManager risk rejection", async () =
       symbol: "XAUTUSDT",
       side: "Buy",
       quantity: "0.01",
-      limitPrice: 1_000,
+      limitPrice: "1000",
       reduceOnly: false,
     }), /kill switch/u);
     assert.equal(writes, 0);
@@ -212,7 +212,7 @@ test("read-only adapter does not change OrderManager UNKNOWN handling and reconc
       symbol: "XAUTUSDT",
       side: "Buy",
       quantity: "0.01",
-      limitPrice: 1_000,
+      limitPrice: "1000",
       reduceOnly: false,
     }), /non-terminal/u);
     assert.equal(writes, 1);

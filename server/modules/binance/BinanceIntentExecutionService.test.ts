@@ -26,7 +26,6 @@ test("converts canonical perpetual intent into Binance execution request", async
     symbol: "XAUTUSDT",
     side: "Buy",
     quantity: "0.002",
-    limitPrice: 1004.1,
     executionPriceMode: "MARKET",
     reduceOnly: false,
   });
@@ -50,7 +49,7 @@ test("maps spot, sell, price priority, and reduceOnly constraints", async () => 
     symbol: "XAUTUSDT",
     side: "Sell",
     quantity: "0.002",
-    limitPrice: 997,
+    limitPrice: "997",
     executionPriceMode: "IOC_LIMIT",
     reduceOnly: true,
   });
@@ -71,6 +70,93 @@ test("passes BTC, ETH, and DOGE symbols and Decimal quantities from generic cont
       assert.equal(binding.placeInputs[0]!.symbol, fixture.symbol);
       assert.equal(binding.placeInputs[0]!.quantity, fixture.quantity);
       assert.equal(binding.providerMutations, 1);
+    });
+  }
+});
+
+test("generic IOC protection prices use exact Decimal BUY ceil and SELL floor alignment", async (t) => {
+  for (const fixture of [
+    {
+      name: "BTC BUY 0.01 tick with many quote decimals",
+      instrumentId: "BTC-USDT-SPOT",
+      side: "buy",
+      bid: "99.999999999999999999",
+      ask: "100.000000000000000001",
+      priceTick: "0.01",
+      expected: "100.21",
+    },
+    {
+      name: "BTC SELL 0.01 tick with many quote decimals",
+      instrumentId: "BTC-USDT-SPOT",
+      side: "sell",
+      bid: "99.999999999999999999",
+      ask: "100.000000000000000001",
+      priceTick: "0.01",
+      expected: "99.79",
+    },
+    {
+      name: "ETH BUY 0.001 tick",
+      instrumentId: "ETH-USDT-SPOT",
+      side: "buy",
+      bid: "1999.999",
+      ask: "2000.001",
+      priceTick: "0.001",
+      expected: "2004.002",
+    },
+    {
+      name: "ETH SELL 0.001 tick",
+      instrumentId: "ETH-USDT-SPOT",
+      side: "sell",
+      bid: "1999.999",
+      ask: "2000.001",
+      priceTick: "0.001",
+      expected: "1995.999",
+    },
+    {
+      name: "DOGE BUY 0.0001 tick",
+      instrumentId: "DOGE-USDT-PERP",
+      side: "buy",
+      bid: "0.123400000000000001",
+      ask: "0.123456789012345678",
+      priceTick: "0.0001",
+      expected: "0.1238",
+    },
+    {
+      name: "DOGE SELL 0.0001 tick",
+      instrumentId: "DOGE-USDT-PERP",
+      side: "sell",
+      bid: "0.123400000000000001",
+      ask: "0.123456789012345678",
+      priceTick: "0.0001",
+      expected: "0.1231",
+    },
+    {
+      name: "XAUT legacy 0.1 tick",
+      instrumentId: "XAUT-USDT-PERP",
+      side: "buy",
+      bid: "1000",
+      ask: "1002",
+      priceTick: "0.1",
+      expected: "1004.1",
+    },
+  ] as const) {
+    await t.test(fixture.name, async () => {
+      const binding = new FakeBinancePersonalTradingBinding();
+      binding.contextFactory = (instrumentId) => executionContextWithQuote(instrumentId, fixture);
+      await new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 }).execute(executionIntent({
+        instrumentId: fixture.instrumentId,
+        side: fixture.side,
+        executionMode: "PRICE_PRIORITY",
+        quantity: {
+          asset: {
+            symbol: fixture.instrumentId.split("-")[0]!,
+            type: fixture.instrumentId.startsWith("XAUT-") ? "RWA_ASSET" : "DIGITAL_ASSET",
+          },
+          quantity: "0.002",
+        },
+      }));
+      assert.equal(binding.placeInputs[0]?.executionPriceMode, "IOC_LIMIT");
+      assert.equal(binding.placeInputs[0]?.limitPrice, fixture.expected);
     });
   }
 });
@@ -141,6 +227,7 @@ test("provider anomaly becomes UNKNOWN through ExecutionCoordinator without prov
 test("service stays inside Binance execution boundary and does not import client or risk guard", () => {
   const source = readFileSync(new URL("./BinanceIntentExecutionService.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /BinanceClient|new\s+Binance|BinanceRiskGuard|Funding|Strategy|fetch\(|setInterval|scheduler|retry/iu);
+  assert.doesNotMatch(source, /Number\(value\)|parseFloat|Math\.ceil|Math\.floor/u);
   assert.match(source, /placeExecutionOrder/u);
 });
 
@@ -152,24 +239,37 @@ class FakeBinancePersonalTradingBinding {
   placeResult: BinanceProviderOrder = providerOrder({ status: "Filled" });
   failure: Error | null = null;
   contextFailure: Error | null = null;
+  contextFactory: (instrumentId: string) => BinanceGenericExecutionContext = executionContext;
 
   async loadExecutionReadContext(instrumentId: string) {
     this.contextInstrumentIds.push(instrumentId);
     if (this.contextFailure) throw this.contextFailure;
-    return executionContext(instrumentId);
+    return this.contextFactory(instrumentId);
   }
 
   async placeExecutionOrder(
     input: BinanceOrderInput,
-    beforeProviderMutation?: (riskValuationPrice?: number) => void | Promise<void>,
+    beforeProviderMutation?: (riskValuationPrice: number) => void | Promise<void>,
   ) {
     this.placeCalls += 1;
-    await beforeProviderMutation?.(input.limitPrice);
+    await beforeProviderMutation?.(input.limitPrice === undefined ? 1_004.1 : Number(input.limitPrice));
     this.providerMutations += 1;
     if (this.failure) throw this.failure;
     this.placeInputs.push(input);
     return this.placeResult;
   }
+}
+
+function executionContextWithQuote(
+  instrumentId: string,
+  values: Readonly<{ bid: string; ask: string; priceTick: string }>,
+): BinanceGenericExecutionContext {
+  const context = executionContext(instrumentId);
+  return Object.freeze({
+    ...context,
+    tradingRules: Object.freeze({ ...context.tradingRules, priceTick: values.priceTick }),
+    quote: Object.freeze({ ...context.quote, bid: values.bid, ask: values.ask }),
+  });
 }
 
 function executionContext(instrumentId: string): BinanceGenericExecutionContext {

@@ -19,7 +19,7 @@ test("production orders remain IOC while test orders use GTC", async () => {
   const client = new BinanceClient({ apiKey: "test-key", apiSecret: "test-secret" }, fetchFn, Date.now, ["203.0.113.10"]);
   const request: BinanceExecutionOrderRequest = {
     category: "spot", symbol: "XAUTUSDT", side: "Buy", quantity: "0.002",
-    limitPrice: 4_000, reduceOnly: false, orderLinkId: "ptmtestorder",
+    limitPrice: "4000", reduceOnly: false, orderLinkId: "ptmtestorder",
   };
 
   await client.placeOrder(request);
@@ -49,7 +49,6 @@ test("market orders omit provider price and timeInForce", async () => {
     symbol: "XAUTUSDT",
     side: "Buy",
     quantity: "0.002",
-    limitPrice: 4_010,
     executionPriceMode: "MARKET",
     reduceOnly: false,
     orderLinkId: "ptmmarketguard",
@@ -60,8 +59,42 @@ test("market orders omit provider price and timeInForce", async () => {
   assert.equal((submitted as URL | null)?.searchParams.has("timeInForce"), false);
 });
 
-test("generic place, query, and cancel keep the authoritative provider symbol", async () => {
-  const requests: Array<{ method: string; path: string; symbol: string | null; reduceOnly: string | null }> = [];
+test("provider request validation requires Decimal price only for IOC limit orders", async () => {
+  const writes: string[] = [];
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    if (init?.method === "POST") writes.push(url.pathname);
+    return Response.json({ orderId: 1, clientOrderId: url.searchParams.get("newClientOrderId") });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    Date.now,
+    ["203.0.113.10"],
+  );
+  const base = {
+    category: "spot" as const,
+    symbol: "BTCUSDT",
+    side: "Buy" as const,
+    quantity: "0.0001",
+    reduceOnly: false,
+    orderLinkId: "ptmpricevalidation",
+  };
+
+  await assert.rejects(
+    () => client.placeOrder({ ...base, executionPriceMode: "IOC_LIMIT" } as never),
+    /参数超出白名单/u,
+  );
+  await assert.rejects(
+    () => client.placeOrder({ ...base, executionPriceMode: "MARKET", limitPrice: "100000" } as never),
+    /参数超出白名单/u,
+  );
+  assert.equal(writes.length, 0);
+});
+
+test("generic place, query, and cancel keep the authoritative provider symbol and Decimal price", async () => {
+  const requests: Array<{ method: string; path: string; symbol: string | null; price: string | null; reduceOnly: string | null }> = [];
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
@@ -69,6 +102,7 @@ test("generic place, query, and cancel keep the authoritative provider symbol", 
       method: init?.method ?? "GET",
       path: url.pathname,
       symbol: url.searchParams.get("symbol"),
+      price: url.searchParams.get("price"),
       reduceOnly: url.searchParams.get("reduceOnly"),
     });
     if (init?.method === "POST") {
@@ -96,7 +130,7 @@ test("generic place, query, and cancel keep the authoritative provider symbol", 
     symbol: "BTCUSDT",
     side: "Sell",
     quantity: "0.000000010000000001",
-    limitPrice: 100_000,
+    limitPrice: "100000.0000000000000001",
     reduceOnly: true,
     orderLinkId: "ptmbtc",
   });
@@ -109,6 +143,7 @@ test("generic place, query, and cancel keep the authoritative provider symbol", 
   assert.equal(requests.find((request) => request.method === "POST")?.path, "/api/v3/order");
   assert.equal(requests.find((request) => request.method === "DELETE")?.path, "/api/v3/order");
   assert.equal(requests.find((request) => request.method === "POST")?.symbol, "BTCUSDT");
+  assert.equal(requests.find((request) => request.method === "POST")?.price, "100000.0000000000000001");
   assert.equal(requests.find((request) => request.method === "POST")?.method, "POST");
 });
 
@@ -133,13 +168,14 @@ test("linear orders pass reduceOnly and preserve DOGEUSDT Decimal quantity", asy
     symbol: "DOGEUSDT",
     side: "Buy",
     quantity: "12.34567890123456789",
-    limitPrice: 0.3,
+    limitPrice: "0.300000000000000001",
     reduceOnly: true,
     orderLinkId: "ptmdoge",
   });
 
   assert.equal((submitted as URL | null)?.searchParams.get("symbol"), "DOGEUSDT");
   assert.equal((submitted as URL | null)?.searchParams.get("quantity"), "12.34567890123456789");
+  assert.equal((submitted as URL | null)?.searchParams.get("price"), "0.300000000000000001");
   assert.equal((submitted as URL | null)?.searchParams.get("reduceOnly"), "true");
 });
 
