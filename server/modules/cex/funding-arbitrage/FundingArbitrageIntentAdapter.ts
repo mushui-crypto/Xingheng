@@ -7,6 +7,7 @@ type FundingArbitrageExecutionLeg = FundingArbitrageExecutionIntent["legs"][numb
 export type FundingArbitrageLegExecutionConfirmation = Readonly<{
   confirmed: true;
   intentId: string;
+  arbitrageId: string;
   legId: string;
   userId: string;
   accountId: string;
@@ -33,6 +34,8 @@ export class FundingArbitrageIntentAdapter {
 
     return createExecutionIntent({
       intentId: confirmation.intentId,
+      arbitrageId: confirmation.arbitrageId,
+      legId: confirmation.legId,
       userId: confirmation.userId,
       venue: confirmation.venue,
       accountId: confirmation.accountId,
@@ -87,6 +90,7 @@ function parseConfirmation(input: unknown): FundingArbitrageLegExecutionConfirma
   assertExactKeys(value, [
     "confirmed",
     "intentId",
+    "arbitrageId",
     "legId",
     "userId",
     "accountId",
@@ -114,6 +118,7 @@ function parseConfirmation(input: unknown): FundingArbitrageLegExecutionConfirma
   return Object.freeze({
     confirmed: true,
     intentId: identifier(value.intentId, "intentId"),
+    arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
     legId: identifier(value.legId, "legId"),
     userId: identifier(value.userId, "userId"),
     accountId: identifier(value.accountId, "accountId"),

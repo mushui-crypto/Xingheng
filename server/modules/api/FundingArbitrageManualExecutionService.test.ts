@@ -3,6 +3,7 @@ import test from "node:test";
 import type { Asset } from "../cex/Asset";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecordFromIntent } from "../cex/ExecutionRecord";
+import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type {
   FundingArbitrageExecutionIntent,
   PerpetualPerpetualFundingArbitrageExecutionIntent,
@@ -22,12 +23,14 @@ test("manual confirmation creates a canonical intent and executes through the ru
   const accounts = new FakeAccountResolver();
   const runtime = new FakeRuntime();
   const links = new FakeFundingLegExecutionLinkStore();
-  const service = newService(source, accounts, runtime, links);
+  const instances = new ArbitrageInstanceStore({ dbPath: ":memory:" });
+  const service = newService(source, accounts, runtime, links, instances);
 
   const result = await service.execute("user-a", request());
 
   assert.equal(result.intentId, "execution-intent-1");
   assert.equal(result.executionRecordId, "execution-record-1");
+  assert.equal(result.arbitrageId, "arbitrage-1");
   assert.equal(result.userId, "user-a");
   assert.equal(result.accountId, "binance:account-user-a");
   assert.equal(result.instrumentId, "XAUT-USDT-PERP");
@@ -37,8 +40,13 @@ test("manual confirmation creates a canonical intent and executes through the ru
     fundingIntentId: "funding-intent-1",
     input: fundingIntent(),
   }]);
-  assert.deepEqual(accounts.resolutions, [{ userId: "user-a", venue: "binance" }]);
+  assert.deepEqual(accounts.resolutions, [
+    { userId: "user-a", venue: "binance" },
+    { userId: "user-a", venue: "okx" },
+  ]);
   assert.equal(runtime.intents.length, 1);
+  assert.equal(runtime.intents[0]?.arbitrageId, "arbitrage-1");
+  assert.equal(runtime.intents[0]?.legId, "leg-binance");
   assert.equal(runtime.intents[0]?.userId, "user-a");
   assert.equal(runtime.intents[0]?.quantity.quantity, "0.002");
   assert.deepEqual(links.links, [{
@@ -54,6 +62,22 @@ test("manual confirmation creates a canonical intent and executes through the ru
     executionIntentId: "execution-intent-1",
     executionRecordId: "execution-record-1",
   });
+  const instance = instances.get("user-a", "arbitrage-1");
+  assert.equal(instance?.legs[0].role, "LONG");
+  assert.equal(instance?.legs[1].role, "SHORT");
+  assert.deepEqual(instance?.executionReferences, [{
+    arbitrageId: "arbitrage-1",
+    legId: "leg-binance",
+    phase: "OPENING",
+    quantityEffect: "INCREASE",
+    executionIntentId: "execution-intent-1",
+    executionRecordId: "execution-record-1",
+    requestedQuantity: "0.002",
+    confirmedQuantity: "0",
+    status: "LINKED",
+    createdAt: now,
+    updatedAt: now,
+  }]);
 });
 
 test("rejects a repeated funding leg before account resolution or provider mutation", async () => {
@@ -99,6 +123,52 @@ test("execution links are isolated by authenticated user", async () => {
   assert.equal(runtime.providerMutations, 1);
   assert.equal(links.findForUser("user-b", "funding-intent-1", "leg-binance")?.executionRecordId, "user-b-record");
   assert.equal(links.findForUser("user-a", "funding-intent-1", "leg-binance")?.executionRecordId, "execution-record-1");
+});
+
+test("an authenticated user cannot bind execution to another user's arbitrage instance", async () => {
+  const instances = new ArbitrageInstanceStore({ dbPath: ":memory:" });
+  instances.create({
+    arbitrageId: "arbitrage-user-b",
+    userId: "user-b",
+    strategyType: "PERPETUAL_PERPETUAL",
+    sourcePlanId: "plan-1",
+    maxResidualBaseQuantity: "0.0001",
+    createdAt: now,
+    legs: [
+      {
+        legId: "leg-binance",
+        role: "LONG",
+        venue: "binance",
+        accountId: "binance:account-user-b",
+        instrumentId: "XAUT-USDT-PERP",
+        plannedQuantity: "0.002",
+      },
+      {
+        legId: "leg-okx",
+        role: "SHORT",
+        venue: "okx",
+        accountId: "okx:account-user-b",
+        instrumentId: "XAUT-USDT-PERP",
+        plannedQuantity: "0.002",
+      },
+    ],
+  });
+  const runtime = new FakeRuntime();
+  const service = newService(
+    new FakeFundingIntentSource({ "user-a": fundingIntent() }),
+    new FakeAccountResolver(),
+    runtime,
+    new FakeFundingLegExecutionLinkStore(),
+    instances,
+  );
+
+  await assert.rejects(
+    () => service.execute("user-a", request({ arbitrageId: "arbitrage-user-b" })),
+    (error: unknown) => error instanceof FundingArbitrageManualExecutionError
+      && error.category === "arbitrage_instance_not_found",
+  );
+  assert.equal(runtime.providerMutations, 0);
+  assert.equal(instances.get("user-b", "arbitrage-user-b")?.executionReferences.length, 0);
 });
 
 test("missing confirmation rejects before runtime execution", async () => {
@@ -215,7 +285,7 @@ class FakeAccountResolver {
   async resolve(userId: string, venue: ExecutionIntent["venue"]) {
     this.resolutions.push({ userId, venue });
     return {
-      accountId: this.binding.accountId ?? `binance:account-${userId}`,
+      accountId: this.binding.accountId ?? `${venue}:account-${userId}`,
       quantityAsset: this.binding.quantityAsset ?? xaut,
     };
   }
@@ -296,10 +366,12 @@ function newService(
   accounts: FakeAccountResolver,
   runtime: FakeRuntime,
   links = new FakeFundingLegExecutionLinkStore(),
+  instances = new ArbitrageInstanceStore({ dbPath: ":memory:" }),
 ) {
-  return new FundingArbitrageManualExecutionService(source, accounts, runtime, links, {
+  return new FundingArbitrageManualExecutionService(source, accounts, runtime, links, instances, {
     clock: () => now,
     createIntentId: () => "execution-intent-1",
+    createArbitrageId: () => "arbitrage-1",
   });
 }
 

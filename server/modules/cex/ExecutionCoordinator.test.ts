@@ -17,6 +17,19 @@ test("accepts an ExecutionIntent and calls the explicit capability once", async 
   assert.deepEqual(capability.calls[0], intent);
 });
 
+test("passes the explicit arbitrage association through without interpreting the leg", async () => {
+  const capability = new MockExecutionCapability();
+  const coordinator = new ExecutionCoordinator(capability, () => now);
+  const intent = executionIntent({ arbitrageId: "arbitrage-1", legId: "leg-short", side: "sell" });
+
+  const coordinated = await coordinator.execute(intent);
+
+  assert.equal(capability.calls[0]?.arbitrageId, "arbitrage-1");
+  assert.equal(capability.calls[0]?.legId, "leg-short");
+  assert.equal(coordinated.arbitrageId, "arbitrage-1");
+  assert.equal(coordinated.legId, "leg-short");
+});
+
 test("returns the successful capability result", async () => {
   const capability = new MockExecutionCapability();
   const coordinator = new ExecutionCoordinator(capability, () => now);

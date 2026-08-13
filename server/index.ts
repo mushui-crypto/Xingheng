@@ -49,6 +49,7 @@ import {
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
+import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
@@ -161,6 +162,7 @@ const accountRead = new AccountReadRegistry(userExchangeCredentials, [
 ], new AccountUsdtValuationService(new ArbitrageDashboardUsdtSpotPriceSource(arbitrageDashboard)));
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
+const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   binancePersonalTrading,
   { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
@@ -171,6 +173,7 @@ const fundingManualExecution = new FundingArbitrageManualExecutionService(
   new CredentialVenueExecutionAccountResolver(userExchangeCredentials),
   binanceExecutionRuntime,
   fundingLegExecutionLinks,
+  arbitrageInstances,
 );
 const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {
   deleteCredential: (userId, venue) => venue === "binance"

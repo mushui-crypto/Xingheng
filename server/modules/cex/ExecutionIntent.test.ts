@@ -34,6 +34,25 @@ test("preserves a valid venue without selecting strategy behavior", () => {
   assert.equal(intent.instrumentId, "BTC-USDT-PERP");
 });
 
+test("preserves an explicit arbitrage instance and leg association", () => {
+  const intent = createExecutionIntent({
+    ...intentInput(),
+    arbitrageId: "arbitrage-1",
+    legId: "leg-long",
+  });
+
+  assert.equal(intent.arbitrageId, "arbitrage-1");
+  assert.equal(intent.legId, "leg-long");
+  assert.throws(
+    () => createExecutionIntent({ ...intentInput(), arbitrageId: "arbitrage-1" }),
+    /arbitrageId and legId must be provided together/u,
+  );
+  assert.throws(
+    () => createExecutionIntent({ ...intentInput(), legId: "leg-long" }),
+    /arbitrageId and legId must be provided together/u,
+  );
+});
+
 test("also accepts bitget as a valid venue without selecting strategy behavior", () => {
   const intent = createExecutionIntent({ ...intentInput(), venue: "bitget", instrumentId: "ETH-USDT-PERP" });
   assert.equal(intent.venue, "bitget");

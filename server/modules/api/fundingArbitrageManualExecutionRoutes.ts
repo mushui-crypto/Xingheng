@@ -33,8 +33,11 @@ function userId(request: express.Request) {
 function errorResponse(error: unknown) {
   if (error instanceof FundingArbitrageManualExecutionError) {
     const status = error.category === "authentication_required" ? 401
-      : error.category === "funding_intent_not_found" || error.category === "funding_leg_not_found" ? 404
-      : error.category === "unsupported_execution_venue" ? 409
+      : error.category === "funding_intent_not_found"
+        || error.category === "funding_leg_not_found"
+        || error.category === "arbitrage_instance_not_found" ? 404
+      : error.category === "unsupported_execution_venue"
+        || error.category === "arbitrage_instance_mismatch" ? 409
       : 400;
     return { status, category: error.category, message: error.message };
   }

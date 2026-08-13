@@ -15,6 +15,8 @@ export type ExecutionStep<TResult> = Readonly<{
 
 export type CoordinatedExecutionResult<TResult> = Readonly<{
   intentId: string;
+  arbitrageId?: string;
+  legId?: string;
   userId: string;
   venue: ExecutionIntent["venue"];
   accountId: string;
@@ -118,6 +120,9 @@ function result<TResult>(
 ): CoordinatedExecutionResult<TResult> {
   return Object.freeze({
     intentId: intent.intentId,
+    ...(intent.arbitrageId === undefined
+      ? {}
+      : { arbitrageId: intent.arbitrageId, legId: intent.legId }),
     userId: intent.userId,
     venue: intent.venue,
     accountId: intent.accountId,

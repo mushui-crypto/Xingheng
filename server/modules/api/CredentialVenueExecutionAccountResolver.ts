@@ -13,17 +13,11 @@ export class CredentialVenueExecutionAccountResolver implements VenueExecutionAc
 
   async resolve(userId: string, venue: ExecutionVenue, instrumentId: string) {
     const normalizedUserId = identifier(userId, "userId");
-    if (venue !== "binance") {
-      throw new UserExchangeCredentialStoreError(
-        "credential_not_configured",
-        "Execution venue is not configured for manual execution.",
-      );
-    }
     const instrument = canonicalInstrumentFromId(instrumentId);
     if (instrument.baseAsset !== "XAUT") {
       throw new UserExchangeCredentialStoreError(
         "credential_not_configured",
-        "Instrument is not configured for Binance manual execution.",
+        "Instrument is not configured for manual execution.",
       );
     }
     const summary = this.credentials.findSummary(normalizedUserId, venue);

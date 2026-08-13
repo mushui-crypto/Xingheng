@@ -4,6 +4,8 @@ export type ExecutionVenue = "binance" | "okx" | "bybit" | "bitget";
 
 export type ExecutionIntent = Readonly<{
   intentId: string;
+  arbitrageId?: string;
+  legId?: string;
   userId: string;
   venue: ExecutionVenue;
   accountId: string;
@@ -22,6 +24,8 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
   const value = object(input);
   assertExactKeys(value, [
     "intentId",
+    "arbitrageId",
+    "legId",
     "userId",
     "venue",
     "accountId",
@@ -36,6 +40,9 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
   const createdAt = timestamp(value.createdAt, "createdAt");
   const expiresAt = timestamp(value.expiresAt, "expiresAt");
   if (expiresAt <= createdAt) throw new Error("expiresAt must be after createdAt.");
+  if ((value.arbitrageId === undefined) !== (value.legId === undefined)) {
+    throw new Error("arbitrageId and legId must be provided together.");
+  }
 
   if (value.venue !== "binance" && value.venue !== "okx" && value.venue !== "bybit" && value.venue !== "bitget") {
     throw new Error("venue must be binance, okx, bybit, or bitget.");
@@ -55,6 +62,12 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
 
   return Object.freeze({
     intentId: identifier(value.intentId, "intentId"),
+    ...(value.arbitrageId === undefined
+      ? {}
+      : {
+          arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
+          legId: identifier(value.legId, "legId"),
+        }),
     userId: identifier(value.userId, "userId"),
     venue: value.venue,
     accountId: identifier(value.accountId, "accountId"),

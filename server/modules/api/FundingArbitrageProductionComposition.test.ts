@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { BinanceIntentExecutionRuntime } from "../binance/BinanceIntentExecutionRuntime";
 import { SqliteExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { FundingLegExecutionLinkStore } from "../cex/funding-arbitrage/FundingLegExecutionLinkStore";
 import { CredentialVenueExecutionAccountResolver } from "./CredentialVenueExecutionAccountResolver";
 import { FundingArbitrageManualExecutionService } from "./FundingArbitrageManualExecutionService";
@@ -19,7 +20,10 @@ test("authenticated manual API creates a user-scoped ExecutionRecord without pro
 
     assert.equal(response.statusCode, 200);
     assert.equal(response.body.executionRecordId, "execution-record-1");
-    assert.deepEqual(composition.credentialLookups, [{ userId: "user-a", venue: "binance" }]);
+    assert.deepEqual(composition.credentialLookups, [
+      { userId: "user-a", venue: "binance" },
+      { userId: "user-a", venue: "okx" },
+    ]);
     assert.equal(composition.providerMutations(), 0);
     assert.equal(composition.capabilityCalls(), 1);
 
@@ -30,6 +34,10 @@ test("authenticated manual API creates a user-scoped ExecutionRecord without pro
     assert.equal(record?.instrumentId, "XAUT-USDT-PERP");
     assert.equal(record?.status, "PENDING_CONFIRMATION");
     assert.equal(composition.records.loadForUser("user-b", "execution-record-1"), null);
+    const instance = composition.instances.get("user-a", "arbitrage-1");
+    assert.equal(response.body.arbitrageId, "arbitrage-1");
+    assert.equal(instance?.executionReferences[0]?.executionIntentId, "execution-intent-1");
+    assert.equal(instance?.executionReferences[0]?.executionRecordId, "execution-record-1");
   });
 });
 
@@ -113,6 +121,7 @@ async function withComposition(
   } finally {
     composition.links.close();
     composition.records.close();
+    composition.instances.close();
     rmSync(root, { recursive: true, force: true });
   }
 }
@@ -124,8 +133,12 @@ async function createComposition(dbPath: string, options: { accountId?: string }
   const credentials = {
     findSummary(userId: string, venue: string) {
       credentialLookups.push({ userId, venue });
-      if (!options.accountId || userId !== "user-a" || venue !== "binance") return null;
-      return { userId, venue, accountId: options.accountId } as any;
+      if (!options.accountId || userId !== "user-a" || (venue !== "binance" && venue !== "okx")) return null;
+      return {
+        userId,
+        venue,
+        accountId: venue === "binance" ? options.accountId : "okx:account-user-a",
+      } as any;
     },
   };
   const registry = {
@@ -157,6 +170,7 @@ async function createComposition(dbPath: string, options: { accountId?: string }
   };
   const records = new SqliteExecutionRecordStore({ dbPath });
   const links = new FundingLegExecutionLinkStore({ dbPath, now: () => now });
+  const instances = new ArbitrageInstanceStore({ dbPath });
   const runtime = new BinanceIntentExecutionRuntime(
     registry,
     { maxSlippageBps: 20 },
@@ -180,7 +194,12 @@ async function createComposition(dbPath: string, options: { accountId?: string }
     new CredentialVenueExecutionAccountResolver(credentials as any),
     runtime,
     links,
-    { clock: () => now, createIntentId: () => "execution-intent-1" },
+    instances,
+    {
+      clock: () => now,
+      createIntentId: () => "execution-intent-1",
+      createArbitrageId: () => "arbitrage-1",
+    },
   );
   let handler: any;
   registerFundingArbitrageManualExecutionRoutes({
@@ -193,6 +212,7 @@ async function createComposition(dbPath: string, options: { accountId?: string }
   return {
     records,
     links,
+    instances,
     credentialLookups,
     capabilityCalls: () => capabilityCalls,
     providerMutations: () => providerMutations,

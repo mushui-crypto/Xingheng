@@ -14,6 +14,8 @@ test("converts a confirmed funding leg into a canonical ExecutionIntent", () => 
 
   assert.deepEqual(intent, {
     intentId: "execution-intent-long",
+    arbitrageId: "arbitrage-1",
+    legId: "leg-long",
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
@@ -96,6 +98,10 @@ test("requires one explicit conversion per funding leg", () => {
 
   assert.equal(longIntent.side, "buy");
   assert.equal(shortIntent.side, "sell");
+  assert.equal(longIntent.arbitrageId, "arbitrage-1");
+  assert.equal(shortIntent.arbitrageId, "arbitrage-1");
+  assert.equal(longIntent.legId, "leg-long");
+  assert.equal(shortIntent.legId, "leg-short");
   assert.notEqual(longIntent.intentId, shortIntent.intentId);
   assert.throws(
     () => adapter.createExecutionIntent(funding, confirmation({ legId: "missing-leg" })),
@@ -132,6 +138,7 @@ function confirmation(overrides: Partial<Record<string, unknown>> = {}) {
   return {
     confirmed: true,
     intentId: "execution-intent-long",
+    arbitrageId: "arbitrage-1",
     legId: "leg-long",
     userId: "user-1",
     accountId: "binance:account-1",
