@@ -7,11 +7,15 @@ type BitgetInstrumentSource = () => Promise<{
   instruments: BitgetUsdtPerpetualInstrument[];
   fetchedAt: number;
 }>;
+type CatalogDiagnostic = Readonly<{ venue: "bitget"; skipped: number; reasons: Readonly<Record<string, number>> }>;
 
 export class BitgetInstrumentCatalog implements InstrumentCatalogPort {
   readonly venue = "bitget" as const;
 
-  constructor(private readonly source: BitgetInstrumentSource) {}
+  constructor(
+    private readonly source: BitgetInstrumentSource,
+    private readonly reportDiagnostic: (diagnostic: CatalogDiagnostic) => void = defaultDiagnostic,
+  ) {}
 
   async getInstrument(instrumentId: string) {
     return (await this.listInstruments()).find((instrument) => instrument.instrumentId === instrumentId) ?? null;
@@ -19,15 +23,35 @@ export class BitgetInstrumentCatalog implements InstrumentCatalogPort {
 
   async listInstruments() {
     const snapshot = await this.source();
-    return snapshot.instruments.map((instrument) => toCanonicalBitgetInstrument(instrument, snapshot.fetchedAt));
+    const instruments: CanonicalInstrument[] = [];
+    const reasons: Record<string, number> = {};
+    for (const instrument of snapshot.instruments) {
+      try {
+        instruments.push(toCanonicalBitgetInstrument(instrument, snapshot.fetchedAt));
+      } catch (error) {
+        const reason = error instanceof Error && error.message.startsWith("Unsupported Bitget instrument type:")
+          ? "unsupported_instrument_type"
+          : "invalid_instrument";
+        reasons[reason] = (reasons[reason] ?? 0) + 1;
+      }
+    }
+    const skipped = snapshot.instruments.length - instruments.length;
+    if (skipped > 0) this.reportDiagnostic({ venue: this.venue, skipped, reasons: Object.freeze(reasons) });
+    return instruments;
   }
+}
+
+function defaultDiagnostic(diagnostic: CatalogDiagnostic) {
+  console.warn("[bitget-instrument-catalog] skipped unsupported or invalid instruments", diagnostic);
 }
 
 export function toCanonicalBitgetInstrument(
   raw: BitgetUsdtPerpetualInstrument,
   fetchedAt: number,
 ): CanonicalInstrument {
-  if (raw.type !== "perpetual") throw new Error(`Unsupported Bitget instrument type: ${raw.type}.`);
+  if (raw.symbolType !== "perpetual") {
+    throw new Error(`Unsupported Bitget instrument type: ${raw.symbolType}.`);
+  }
   return {
     instrumentId: canonicalInstrumentId(raw.baseCoin, raw.quoteCoin, "perpetual"),
     venue: "bitget",
@@ -37,16 +61,25 @@ export function toCanonicalBitgetInstrument(
     quoteAsset: raw.quoteCoin,
     settlementAsset: raw.quoteCoin,
     providerSymbol: raw.symbol,
-    providerLocator: { category: raw.category },
+    providerLocator: { category: "USDT-FUTURES" },
     quantityUnit: "base",
     contractSize: 1,
-    priceTick: providerNumber(raw.priceMultiplier, "Bitget priceMultiplier"),
-    quantityStep: providerNumber(raw.quantityMultiplier, "Bitget quantityMultiplier"),
-    minQuantity: providerNumber(raw.minOrderQty, "Bitget minOrderQty"),
-    minNotional: providerNumber(raw.minOrderAmount, "Bitget minOrderAmount"),
-    status: raw.status === "online" ? "trading" : raw.status === "limit_open" ? "close_only" : raw.status === "listed" ? "paused" : raw.status === "offline" ? "delisted" : "unknown",
+    priceTick: priceTick(raw.priceEndStep, raw.pricePlace),
+    quantityStep: providerNumber(raw.sizeMultiplier, "Bitget sizeMultiplier"),
+    minQuantity: providerNumber(raw.minTradeNum, "Bitget minTradeNum"),
+    minNotional: providerNumber(raw.minTradeUSDT, "Bitget minTradeUSDT"),
+    status: raw.symbolStatus === "normal" ? "trading" : "unknown",
     fetchedAt,
   };
+}
+
+function priceTick(step: string, place: string) {
+  const normalizedStep = providerNumber(step, "Bitget priceEndStep");
+  const precision = Number(place);
+  if (!Number.isSafeInteger(precision) || precision < 0 || precision > 18) {
+    throw new Error(`Invalid Bitget pricePlace: ${place}.`);
+  }
+  return normalizedStep * (10 ** -precision);
 }
 
 function providerNumber(value: string, field: string) {

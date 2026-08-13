@@ -45,6 +45,24 @@ test("OKX catalog preserves contract-denominated quantity semantics", async () =
   }]);
 });
 
+test("OKX catalog skips inverse contracts without losing supported linear contracts", async () => {
+  const diagnostics: unknown[] = [];
+  const catalog = new OkxInstrumentCatalog(async () => ({
+    instruments: [{ ...rawInstrument, ctType: "inverse" }, rawInstrument],
+    fetchedAt,
+  }), (diagnostic) => diagnostics.push(diagnostic));
+
+  const instruments = await catalog.listInstruments();
+  assert.equal(instruments.length, 1);
+  assert.equal(instruments[0]?.instrumentId, instrumentId);
+  assert.equal(instruments[0]?.contractSize, 0.01);
+  assert.deepEqual(diagnostics, [{
+    venue: "okx",
+    skipped: 1,
+    reasons: { unsupported_contract_type: 1 },
+  }]);
+});
+
 test("OKX current funding maps its two future settlement timestamps without a mark price", async () => {
   const rawFunding: OkxFundingRateRecord = {
     instType: "SWAP",

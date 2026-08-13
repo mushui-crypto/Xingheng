@@ -42,6 +42,25 @@ test("Bybit catalog maps nested price and lot filters", async () => {
   }]);
 });
 
+test("Bybit catalog keeps XAUTUSDT when another instrument has an invalid asset", async () => {
+  const diagnostics: unknown[] = [];
+  const xaut = { ...rawInstrument, symbol: "XAUTUSDT", baseCoin: "XAUT" };
+  const catalog = new BybitInstrumentCatalog(async () => ({
+    instruments: [{ ...rawInstrument, baseCoin: "bad-asset" }, xaut],
+    fetchedAt,
+  }), (diagnostic) => diagnostics.push(diagnostic));
+
+  const instruments = await catalog.listInstruments();
+  assert.equal(instruments.length, 1);
+  assert.equal(instruments[0]?.instrumentId, "XAUT-USDT-PERP");
+  assert.equal(instruments[0]?.contractSize, 1);
+  assert.deepEqual(diagnostics, [{
+    venue: "bybit",
+    skipped: 1,
+    reasons: { invalid_instrument: 1 },
+  }]);
+});
+
 test("Bybit ticker supplies funding, interval, next time, and mark price", async () => {
   const rawFunding: BybitFundingTicker = {
     symbol: rawInstrument.symbol,

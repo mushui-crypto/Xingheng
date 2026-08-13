@@ -71,6 +71,34 @@ test("maps Bitget credential rejection to a stable validation failure", async ()
   ));
 });
 
+test("maps production Classic-account and invalid-password responses without hiding them", async (t) => {
+  await t.test("Classic account cannot use UTA endpoints", async () => {
+    const client = clientWithResponse(() => ({
+      code: "40084",
+      msg: "You are in Classic Account mode, and the Unified Account API is not supported at this time",
+      data: null,
+    }), 400);
+    await assert.rejects(client.readAccountSnapshot(), (error: unknown) => (
+      error instanceof BitgetAccountReadError
+      && error.category === "account_mode_unsupported"
+      && error.providerCode === "40084"
+    ));
+  });
+
+  await t.test("invalid API password is a credential validation failure", async () => {
+    const client = clientWithResponse(() => ({
+      code: "40012",
+      msg: "apikey/password is incorrect",
+      data: null,
+    }), 400);
+    await assert.rejects(client.readAccountSnapshot(), (error: unknown) => (
+      error instanceof BitgetAccountReadError
+      && error.category === "credential_validation_failed"
+      && error.providerCode === "40012"
+    ));
+  });
+});
+
 test("reads a Bitget UTA position through the GET-only client", async () => {
   let method: string | undefined;
   const client = new BitgetAccountReadClient(credentials, {
@@ -118,11 +146,11 @@ test("rejects Bitget API failures and malformed account responses", async (t) =>
   });
 });
 
-function clientWithResponse(payload: (path: string) => unknown) {
+function clientWithResponse(payload: (path: string) => unknown, status = 200) {
   return new BitgetAccountReadClient(credentials, {
     now: () => now,
     fetchImpl: (async (input: string | URL | Request) => {
-      return Response.json(payload(new URL(String(input)).pathname));
+      return Response.json(payload(new URL(String(input)).pathname), { status });
     }) as typeof fetch,
   });
 }

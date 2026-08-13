@@ -1,6 +1,6 @@
 export type BybitLinearPerpetualInstrument = {
   symbol: string;
-  contractType: "LinearPerpetual";
+  contractType: string;
   status: string;
   baseCoin: string;
   quoteCoin: string;

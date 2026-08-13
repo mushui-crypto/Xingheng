@@ -9,15 +9,15 @@ const fetchedAt = 1_800_000_000_000;
 const instrumentId = "BTC-USDT-PERP";
 const rawInstrument: BitgetUsdtPerpetualInstrument = {
   symbol: "BTCUSDT",
-  category: "USDT-FUTURES",
   baseCoin: "BTC",
   quoteCoin: "USDT",
-  minOrderQty: "0.0001",
-  minOrderAmount: "5",
-  priceMultiplier: "0.1",
-  quantityMultiplier: "0.0001",
-  type: "perpetual",
-  status: "online",
+  minTradeNum: "0.0001",
+  minTradeUSDT: "5",
+  priceEndStep: "1",
+  pricePlace: "1",
+  sizeMultiplier: "0.0001",
+  symbolType: "perpetual",
+  symbolStatus: "normal",
 };
 
 test("Bitget catalog maps multiplier fields as base-quantity increments", async () => {
@@ -41,6 +41,54 @@ test("Bitget catalog maps multiplier fields as base-quantity increments", async 
     minNotional: 5,
     status: "trading",
     fetchedAt,
+  }]);
+});
+
+test("Bitget catalog uses production contract fields and isolates unsupported rows", async () => {
+  const diagnostics: unknown[] = [];
+  const xaut = {
+    ...rawInstrument,
+    symbol: "XAUTUSDT",
+    baseCoin: "XAUT",
+    minTradeNum: "0.01",
+    priceEndStep: "1",
+    pricePlace: "2",
+    sizeMultiplier: "0.01",
+  };
+  const catalog = new BitgetInstrumentCatalog(async () => ({
+    instruments: [
+      { ...rawInstrument, symbolType: "delivery" },
+      { ...rawInstrument, baseCoin: "bad-asset" },
+      xaut,
+    ],
+    fetchedAt,
+  }), (diagnostic) => diagnostics.push(diagnostic));
+
+  const instruments = await catalog.listInstruments();
+  assert.equal(instruments.length, 1);
+  assert.deepEqual(instruments[0], {
+    instrumentId: "XAUT-USDT-PERP",
+    venue: "bitget",
+    marketType: "perpetual",
+    contractType: "linear_perpetual",
+    baseAsset: "XAUT",
+    quoteAsset: "USDT",
+    settlementAsset: "USDT",
+    providerSymbol: "XAUTUSDT",
+    providerLocator: { category: "USDT-FUTURES" },
+    quantityUnit: "base",
+    contractSize: 1,
+    priceTick: 0.01,
+    quantityStep: 0.01,
+    minQuantity: 0.01,
+    minNotional: 5,
+    status: "trading",
+    fetchedAt,
+  });
+  assert.deepEqual(diagnostics, [{
+    venue: "bitget",
+    skipped: 2,
+    reasons: { unsupported_instrument_type: 1, invalid_instrument: 1 },
   }]);
 });
 

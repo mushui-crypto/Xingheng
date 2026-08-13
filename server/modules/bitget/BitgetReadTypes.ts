@@ -1,14 +1,14 @@
 export type BitgetUsdtPerpetualInstrument = {
   symbol: string;
-  category: "USDT-FUTURES";
   baseCoin: string;
   quoteCoin: string;
-  minOrderQty: string;
-  minOrderAmount: string;
-  priceMultiplier: string;
-  quantityMultiplier: string;
-  type: "perpetual";
-  status: string;
+  minTradeNum: string;
+  minTradeUSDT: string;
+  priceEndStep: string;
+  pricePlace: string;
+  sizeMultiplier: string;
+  symbolType: string;
+  symbolStatus: string;
 };
 
 export type BitgetFundingRateRecord = {

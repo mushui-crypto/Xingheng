@@ -187,15 +187,15 @@ function bitgetPayload(url: URL) {
       code: "00000",
       data: [{
         symbol: "XAUTUSDT",
-        category: "USDT-FUTURES",
         baseCoin: "XAUT",
         quoteCoin: "USDT",
-        minOrderQty: "0.001",
-        minOrderAmount: "5",
-        priceMultiplier: "0.01",
-        quantityMultiplier: "0.001",
-        type: "perpetual",
-        status: "online",
+        minTradeNum: "0.001",
+        minTradeUSDT: "5",
+        priceEndStep: "1",
+        pricePlace: "2",
+        sizeMultiplier: "0.001",
+        symbolType: "perpetual",
+        symbolStatus: "normal",
       }],
     };
   }

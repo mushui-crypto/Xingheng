@@ -4,11 +4,15 @@ import { canonicalInstrumentId } from "../cex/Instrument";
 import type { OkxSwapInstrument } from "./OkxReadTypes";
 
 type OkxInstrumentSource = () => Promise<{ instruments: OkxSwapInstrument[]; fetchedAt: number }>;
+type CatalogDiagnostic = Readonly<{ venue: "okx"; skipped: number; reasons: Readonly<Record<string, number>> }>;
 
 export class OkxInstrumentCatalog implements InstrumentCatalogPort {
   readonly venue = "okx" as const;
 
-  constructor(private readonly source: OkxInstrumentSource) {}
+  constructor(
+    private readonly source: OkxInstrumentSource,
+    private readonly reportDiagnostic: (diagnostic: CatalogDiagnostic) => void = defaultDiagnostic,
+  ) {}
 
   async getInstrument(instrumentId: string) {
     return (await this.listInstruments()).find((instrument) => instrument.instrumentId === instrumentId) ?? null;
@@ -16,8 +20,26 @@ export class OkxInstrumentCatalog implements InstrumentCatalogPort {
 
   async listInstruments() {
     const snapshot = await this.source();
-    return snapshot.instruments.map((instrument) => toCanonicalOkxInstrument(instrument, snapshot.fetchedAt));
+    const instruments: CanonicalInstrument[] = [];
+    const reasons: Record<string, number> = {};
+    for (const instrument of snapshot.instruments) {
+      try {
+        instruments.push(toCanonicalOkxInstrument(instrument, snapshot.fetchedAt));
+      } catch (error) {
+        const reason = error instanceof Error && error.message.startsWith("Unsupported OKX contract type:")
+          ? "unsupported_contract_type"
+          : "invalid_instrument";
+        reasons[reason] = (reasons[reason] ?? 0) + 1;
+      }
+    }
+    const skipped = snapshot.instruments.length - instruments.length;
+    if (skipped > 0) this.reportDiagnostic({ venue: this.venue, skipped, reasons: Object.freeze(reasons) });
+    return instruments;
   }
+}
+
+function defaultDiagnostic(diagnostic: CatalogDiagnostic) {
+  console.warn("[okx-instrument-catalog] skipped unsupported or invalid instruments", diagnostic);
 }
 
 export function toCanonicalOkxInstrument(raw: OkxSwapInstrument, fetchedAt: number): CanonicalInstrument {

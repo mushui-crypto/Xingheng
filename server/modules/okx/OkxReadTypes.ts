@@ -3,7 +3,7 @@ export type OkxSwapInstrument = {
   instId: string;
   uly: string;
   settleCcy: string;
-  ctType: "linear";
+  ctType: string;
   ctVal: string;
   ctValCcy: string;
   tickSz: string;

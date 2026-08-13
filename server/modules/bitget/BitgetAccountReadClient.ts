@@ -49,7 +49,7 @@ type BitgetResponse = {
 };
 
 export class BitgetAccountReadError extends Error {
-  constructor(readonly category: string, message: string) {
+  constructor(readonly category: string, message: string, readonly providerCode: string | null = null) {
     super(message);
   }
 }
@@ -71,8 +71,8 @@ export class BitgetAccountReadClient {
   }
 
   async readAccountSnapshot(): Promise<BitgetAccountReadSnapshot> {
-    const [infoPayload, settingsPayload, assetsPayload] = await Promise.all([
-      this.get("/api/v3/account/info"),
+    const infoPayload = await this.get("/api/v3/account/info");
+    const [settingsPayload, assetsPayload] = await Promise.all([
       this.get("/api/v3/account/settings"),
       this.get("/api/v3/account/assets"),
     ]);
@@ -175,20 +175,26 @@ export class BitgetAccountReadClient {
     } catch {
       throw new BitgetAccountReadError("provider_read_failed", "Bitget account read request failed.");
     }
-    if (!response.ok) {
-      throw new BitgetAccountReadError("provider_read_failed", `Bitget account read request failed: ${response.status}.`);
-    }
     let payload: BitgetResponse;
     try {
       payload = await response.json() as BitgetResponse;
     } catch {
+      if (!response.ok) {
+        throw new BitgetAccountReadError("provider_read_failed", `Bitget account read request failed: ${response.status}.`);
+      }
       throw new BitgetAccountReadError("provider_response_invalid", "Bitget account read response is not valid JSON.");
     }
-    if (payload.code !== "00000") {
-      const category = isAuthenticationCode(payload.code)
+    if (!response.ok || payload.code !== "00000") {
+      const category = payload.code === "40084"
+        ? "account_mode_unsupported"
+        : isAuthenticationCode(payload.code)
         ? "credential_validation_failed"
         : "provider_read_failed";
-      throw new BitgetAccountReadError(category, `Bitget account read rejected: ${payload.code ?? "unknown"}.`);
+      throw new BitgetAccountReadError(
+        category,
+        `Bitget account read rejected: ${payload.code ?? `http_${response.status}`}.`,
+        payload.code ?? null,
+      );
     }
     return payload;
   }
@@ -196,7 +202,9 @@ export class BitgetAccountReadClient {
 
 function isAuthenticationCode(code: string | undefined) {
   return code === "40001" || code === "40002" || code === "40003" || code === "40004"
-    || code === "40005" || code === "40006" || code === "40008" || code === "40009";
+    || code === "40005" || code === "40006" || code === "40008" || code === "40009"
+    || code === "40011" || code === "40012" || code === "40036" || code === "40037"
+    || code === "40038" || code === "40040" || code === "40041";
 }
 
 function requiredRecord(value: unknown, label: string): Record<string, unknown> {
