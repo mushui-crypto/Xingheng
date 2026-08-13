@@ -34,7 +34,10 @@ import { RealTradingUserStreamManager } from "./modules/hyperliquid/RealTradingU
 import { KlineStore } from "./modules/kline/KlineStore";
 import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketService";
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
-import { createDefaultFundingOpportunitySource } from "./modules/cex/funding-arbitrage/createDefaultFundingOpportunitySource";
+import {
+  createDefaultFundingOpportunityReadVenues,
+  createDefaultFundingOpportunitySource,
+} from "./modules/cex/funding-arbitrage/createDefaultFundingOpportunitySource";
 import { FundingOpportunityQueryService } from "./modules/cex/funding-arbitrage/FundingOpportunityQueryService";
 import { BinancePersonalTradingServiceRegistry } from "./modules/binance/BinancePersonalTradingServiceRegistry";
 import { BinanceIntentExecutionRuntime } from "./modules/binance/BinanceIntentExecutionRuntime";
@@ -52,6 +55,7 @@ import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
 import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
 import { ArbitrageInstanceQueryService } from "./modules/cex/arbitrage-instance/ArbitrageInstanceQueryService";
+import { createDefaultArbitragePositionVerificationService } from "./modules/cex/arbitrage-instance/createDefaultArbitragePositionVerificationService";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
@@ -152,7 +156,10 @@ registerMarketRoutes(app, market, tradingStore, {
 
 registerUserAuthMiddleware(app, users);
 const arbitrageDashboard = new ArbitrageDashboardService();
-const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefaultFundingOpportunitySource());
+const fundingOpportunityReadVenues = createDefaultFundingOpportunityReadVenues({ symbols: [] });
+const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefaultFundingOpportunitySource({
+  venues: fundingOpportunityReadVenues,
+}));
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
@@ -166,6 +173,11 @@ const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.en
 const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
+const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
+  query: arbitrageInstanceQuery,
+  credentials: userExchangeCredentials,
+  readVenues: fundingOpportunityReadVenues,
+});
 const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   binancePersonalTrading,
   { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
@@ -184,7 +196,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
     : Promise.resolve(false),
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
-registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery);
+registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);

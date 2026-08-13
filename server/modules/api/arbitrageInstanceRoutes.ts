@@ -1,9 +1,11 @@
 import type express from "express";
 import type { ArbitrageInstanceQueryService } from "../cex/arbitrage-instance/ArbitrageInstanceQueryService";
+import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 
 export function registerArbitrageInstanceRoutes(
   app: express.Express,
   query: ArbitrageInstanceQueryService,
+  verification?: Pick<ArbitragePositionVerificationService, "verify">,
 ) {
   app.get("/api/arbitrage-instances/active", (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -25,6 +27,33 @@ export function registerArbitrageInstanceRoutes(
       sendError(response, error);
     }
   });
+
+  if (verification) {
+    app.get("/api/arbitrage-instances/:arbitrageId/verification", async (request, response) => {
+      response.setHeader("Cache-Control", "no-store");
+      try {
+        const arbitrageId = pathValue(request.params.arbitrageId, "arbitrageId");
+        const result = await verification.verify(userId(request), arbitrageId);
+        if (!result) {
+          response.status(404).json({
+            category: "arbitrage_instance_not_found",
+            message: "Arbitrage instance was not found for the authenticated user.",
+          });
+          return;
+        }
+        response.json(result);
+      } catch (error) {
+        if (error instanceof ArbitrageInstanceRouteError) {
+          sendError(response, error);
+          return;
+        }
+        response.status(503).json({
+          category: "arbitrage_position_verification_unavailable",
+          message: "Arbitrage position verification is temporarily unavailable.",
+        });
+      }
+    });
+  }
 
   app.get("/api/arbitrage-instances/:arbitrageId", (request, response) => {
     response.setHeader("Cache-Control", "no-store");

@@ -166,7 +166,7 @@ function serviceFor(
 
 function query(instances: ArbitrageInstance[]) {
   return {
-    get: (userId: string, arbitrageId: string) => instances.find((candidate) => (
+    getById: (userId: string, arbitrageId: string) => instances.find((candidate) => (
       candidate.userId === userId && candidate.arbitrageId === arbitrageId
     )) ?? null,
     listActive: (userId: string) => instances.filter((candidate) => candidate.userId === userId),

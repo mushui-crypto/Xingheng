@@ -4,14 +4,18 @@ import { BybitAccountReadProvider } from "../../account-read/BybitAccountReadPro
 import { OkxAccountReadProvider } from "../../account-read/OkxAccountReadProvider";
 import type { VenueAccountReadSnapshot } from "../../account-read/AccountReadTypes";
 import { BinanceClient } from "../../binance/BinanceClient";
-import type { BinancePerpetualPositionSnapshot } from "../../binance/BinanceTypes";
+import type {
+  BinancePerpetualPositionSnapshot,
+  BinanceReadOnlyAccountSnapshot,
+} from "../../binance/BinanceTypes";
 import { BitgetAccountReadClient, type BitgetPerpetualPositionSnapshot } from "../../bitget/BitgetAccountReadClient";
-import { BybitAccountReadClient, type BybitPerpetualPositionSnapshot } from "../../bybit/BybitAccountReadClient";
+import type { BitgetAccountReadSnapshot } from "../../bitget/BitgetAccountReadClient";
+import { BybitAccountReadClient, type BybitAccountReadSnapshot, type BybitPerpetualPositionSnapshot } from "../../bybit/BybitAccountReadClient";
 import type { ExecutionVenue } from "../ExecutionIntent";
 import type { InstrumentCatalogPort } from "../CexCapabilityPorts";
 import { canonicalInstrumentFromId } from "../Instrument";
 import { InstrumentCapability } from "../InstrumentCapability";
-import { OkxAccountReadClient, OkxAccountReadError, type OkxPerpetualPositionSnapshot } from "../../okx/OkxAccountReadClient";
+import { OkxAccountReadClient, OkxAccountReadError, type OkxAccountReadSnapshot, type OkxPerpetualPositionSnapshot } from "../../okx/OkxAccountReadClient";
 import type { UserExchangeCredentialSecret } from "../../credentials/UserExchangeCredentialStore";
 import type {
   ArbitrageLegObservedState,
@@ -29,6 +33,29 @@ type PositionSnapshot =
 type VerificationClient = Readonly<{
   readAccountSnapshot(): Promise<unknown>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<PositionSnapshot>;
+}>;
+
+type BinanceVerificationClient = VerificationClient & Readonly<{
+  readAccountSnapshot(): Promise<BinanceReadOnlyAccountSnapshot>;
+  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BinancePerpetualPositionSnapshot>;
+}>;
+
+type OkxVerificationClient = VerificationClient & Readonly<{
+  readAccountSnapshot(): Promise<OkxAccountReadSnapshot>;
+  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<OkxPerpetualPositionSnapshot>;
+  dispose?(): void | Promise<void>;
+}>;
+
+type BybitVerificationClient = VerificationClient & Readonly<{
+  readAccountSnapshot(): Promise<BybitAccountReadSnapshot>;
+  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BybitPerpetualPositionSnapshot>;
+  dispose?(): void | Promise<void>;
+}>;
+
+type BitgetVerificationClient = VerificationClient & Readonly<{
+  readAccountSnapshot(): Promise<BitgetAccountReadSnapshot>;
+  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BitgetPerpetualPositionSnapshot>;
+  dispose?(): void | Promise<void>;
 }>;
 
 type AccountReader = Readonly<{
@@ -57,14 +84,18 @@ export class ConventionVerificationInstrumentResolver implements VerificationIns
 }
 
 export class CatalogVerificationInstrumentResolver implements VerificationInstrumentResolver {
-  private readonly catalogs: ReadonlyMap<ExecutionVenue, InstrumentCatalogPort>;
+  private readonly catalogs: ReadonlyMap<
+    ExecutionVenue,
+    Pick<InstrumentCatalogPort, "venue" | "listInstruments">
+  >;
 
-  constructor(catalogs: readonly InstrumentCatalogPort[]) {
+  constructor(catalogs: readonly Pick<InstrumentCatalogPort, "venue" | "listInstruments">[]) {
     this.catalogs = new Map(catalogs.map((catalog) => [catalog.venue, catalog]));
   }
 
   async resolve(venue: ExecutionVenue, instrumentId: string) {
-    const instrument = await this.catalogs.get(venue)?.getInstrument(instrumentId);
+    const instruments = await this.catalogs.get(venue)?.listInstruments();
+    const instrument = instruments?.find((candidate) => candidate.instrumentId === instrumentId);
     if (!instrument || instrument.venue !== venue) return null;
     return Object.freeze({
       providerSymbol: instrument.providerSymbol,
@@ -136,7 +167,7 @@ export class BinanceArbitrageLegReadProviderFactory implements ArbitrageLegReadP
   readonly venue = "binance" as const;
   constructor(
     private readonly instruments: VerificationInstrumentResolver = new ConventionVerificationInstrumentResolver(),
-    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BinanceClient =
+    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BinanceVerificationClient =
       (secret) => new BinanceClient({ apiKey: secret.apiKey, apiSecret: secret.apiSecret }),
   ) {}
   create(secret: UserExchangeCredentialSecret) {
@@ -149,7 +180,7 @@ export class OkxArbitrageLegReadProviderFactory implements ArbitrageLegReadProvi
   readonly venue = "okx" as const;
   constructor(
     private readonly instruments: VerificationInstrumentResolver = new ConventionVerificationInstrumentResolver(),
-    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => OkxAccountReadClient = (secret) => {
+    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => OkxVerificationClient = (secret) => {
       if (!secret.passphrase?.trim()) throw new OkxAccountReadError("credential_validation_failed", "OKX passphrase is required.");
       return new OkxAccountReadClient({ apiKey: secret.apiKey, apiSecret: secret.apiSecret, passphrase: secret.passphrase });
     },
@@ -164,7 +195,7 @@ export class BybitArbitrageLegReadProviderFactory implements ArbitrageLegReadPro
   readonly venue = "bybit" as const;
   constructor(
     private readonly instruments: VerificationInstrumentResolver = new ConventionVerificationInstrumentResolver(),
-    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BybitAccountReadClient =
+    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BybitVerificationClient =
       (secret) => new BybitAccountReadClient({ apiKey: secret.apiKey, apiSecret: secret.apiSecret }),
   ) {}
   create(secret: UserExchangeCredentialSecret) {
@@ -177,7 +208,7 @@ export class BitgetArbitrageLegReadProviderFactory implements ArbitrageLegReadPr
   readonly venue = "bitget" as const;
   constructor(
     private readonly instruments: VerificationInstrumentResolver = new ConventionVerificationInstrumentResolver(),
-    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BitgetAccountReadClient = (secret) => {
+    private readonly clientFactory: (secret: UserExchangeCredentialSecret) => BitgetVerificationClient = (secret) => {
       if (!secret.passphrase?.trim()) throw new Error("Bitget passphrase is required.");
       return new BitgetAccountReadClient({ apiKey: secret.apiKey, apiSecret: secret.apiSecret, passphrase: secret.passphrase });
     },
@@ -186,6 +217,25 @@ export class BitgetArbitrageLegReadProviderFactory implements ArbitrageLegReadPr
     const client = this.clientFactory(secret);
     return new VenueArbitrageLegReadProvider(this.venue, client, new BitgetAccountReadProvider(client), this.instruments);
   }
+}
+
+export type ArbitrageVerificationClientFactories = Readonly<{
+  binance?: (secret: UserExchangeCredentialSecret) => BinanceVerificationClient;
+  okx?: (secret: UserExchangeCredentialSecret) => OkxVerificationClient;
+  bybit?: (secret: UserExchangeCredentialSecret) => BybitVerificationClient;
+  bitget?: (secret: UserExchangeCredentialSecret) => BitgetVerificationClient;
+}>;
+
+export function createVenueArbitrageLegReadProviderFactories(
+  instruments: VerificationInstrumentResolver,
+  clients: ArbitrageVerificationClientFactories = {},
+) {
+  return Object.freeze([
+    new BinanceArbitrageLegReadProviderFactory(instruments, clients.binance),
+    new OkxArbitrageLegReadProviderFactory(instruments, clients.okx),
+    new BybitArbitrageLegReadProviderFactory(instruments, clients.bybit),
+    new BitgetArbitrageLegReadProviderFactory(instruments, clients.bitget),
+  ]);
 }
 
 function sumNumbers(values: readonly number[]) {

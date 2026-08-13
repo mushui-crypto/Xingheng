@@ -7,7 +7,7 @@ import {
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
 } from "./ArbitrageInstance";
-import type { ArbitrageInstanceQueryStore } from "./ArbitrageInstanceQueryService";
+import type { ArbitrageInstanceQueryService } from "./ArbitrageInstanceQueryService";
 import type {
   ArbitrageLegObservedState,
   ArbitrageLegReadProviderFactory,
@@ -16,7 +16,7 @@ import type {
 } from "./ArbitragePositionVerification";
 
 type VerificationCredentialStore = Pick<UserExchangeCredentialStore, "findSummary" | "loadForAccountRead">;
-type VerificationQuery = Pick<ArbitrageInstanceQueryStore, "get" | "listActive">;
+type VerificationQuery = Pick<ArbitrageInstanceQueryService, "getById" | "listActive">;
 
 export class ArbitragePositionVerificationService {
   private readonly factories: ReadonlyMap<ArbitrageInstanceLeg["venue"], ArbitrageLegReadProviderFactory>;
@@ -33,7 +33,7 @@ export class ArbitragePositionVerificationService {
   async verify(userId: string, arbitrageId: string): Promise<ArbitragePositionVerificationResult | null> {
     const normalizedUserId = identifier(userId, "userId");
     const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
-    const instance = this.instances.get(normalizedUserId, normalizedArbitrageId);
+    const instance = this.instances.getById(normalizedUserId, normalizedArbitrageId);
     if (!instance) return null;
     const checkedAt = this.now();
     const active = this.instances.listActive(normalizedUserId);

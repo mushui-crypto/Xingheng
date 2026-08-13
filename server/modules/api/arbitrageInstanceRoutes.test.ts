@@ -81,6 +81,60 @@ test("missing and cross-user-invisible arbitrage ids both return not found", asy
   }
 });
 
+test("verification route binds the request to the authenticated user and returns no-store results", async () => {
+  const calls: unknown[] = [];
+  const app = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(app, emptyQuery(), {
+    async verify(userId: string, arbitrageId: string) {
+      calls.push({ userId, arbitrageId });
+      return {
+        arbitrageId,
+        checkedAt: 1_800_000_000_000,
+        legs: [
+          { arbitrageId, legId: "long", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_000_000 },
+          { arbitrageId, legId: "short", expectedManagedQuantity: "1", actualQuantity: null, verificationStatus: "UNKNOWN", checkedAt: 1_800_000_000_000 },
+        ],
+      } as never;
+    },
+  });
+
+  const result = await request(app, "/api/arbitrage-instances/arb-1/verification");
+  try {
+    assert.equal(result.response.status, 200);
+    assert.equal(result.response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(calls, [{ userId: "user-a", arbitrageId: "arb-1" }]);
+    assert.deepEqual((await result.response.json() as { legs: { verificationStatus: string }[] }).legs.map((leg) => leg.verificationStatus), ["MATCHED", "UNKNOWN"]);
+  } finally {
+    await result.close();
+  }
+});
+
+test("verification route keeps missing instances invisible and provider failures sanitized", async () => {
+  const missingApp = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(missingApp, emptyQuery(), { verify: async () => null });
+  const missing = await request(missingApp, "/api/arbitrage-instances/foreign/verification");
+  try {
+    assert.equal(missing.response.status, 404);
+    assert.equal((await missing.response.json() as { category: string }).category, "arbitrage_instance_not_found");
+  } finally {
+    await missing.close();
+  }
+
+  const failedApp = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(failedApp, emptyQuery(), {
+    verify: async () => { throw new Error("provider secret payload"); },
+  });
+  const failed = await request(failedApp, "/api/arbitrage-instances/arb-1/verification");
+  try {
+    assert.equal(failed.response.status, 503);
+    const payload = await failed.response.json() as { category: string; message: string };
+    assert.equal(payload.category, "arbitrage_position_verification_unavailable");
+    assert.doesNotMatch(payload.message, /provider secret/u);
+  } finally {
+    await failed.close();
+  }
+});
+
 test("routes reject missing authentication and invalid pagination before querying", async () => {
   let calls = 0;
   const app = express();
@@ -120,6 +174,14 @@ function authenticatedApp(userId: string) {
     next();
   });
   return app;
+}
+
+function emptyQuery() {
+  return {
+    listActive: () => [],
+    listHistory: () => [],
+    getById: () => null,
+  } as never;
 }
 
 async function request(app: express.Express, path: string) {

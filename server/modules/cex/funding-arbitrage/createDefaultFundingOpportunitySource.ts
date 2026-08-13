@@ -46,17 +46,13 @@ export type DefaultFundingOpportunitySourceOptions = Readonly<{
   timeoutMs?: number;
   now?: () => number;
   symbols?: readonly string[];
+  venues?: readonly FundingOpportunityReadVenue[];
 }>;
 
 export function createDefaultFundingOpportunitySource(options: DefaultFundingOpportunitySourceOptions = {}) {
   const symbols = options.symbols ?? DEFAULT_SYMBOLS;
   return new CanonicalFundingOpportunitySource({
-    venues: [
-      createBinanceReadVenue(options, symbols),
-      createOkxReadVenue(options, symbols),
-      createBybitReadVenue(options, symbols),
-      createBitgetReadVenue(options, symbols),
-    ],
+    venues: options.venues ?? createDefaultFundingOpportunityReadVenues(options),
     symbols,
     parameters: {
       minimumNetYield: 0,
@@ -66,6 +62,18 @@ export function createDefaultFundingOpportunitySource(options: DefaultFundingOpp
     },
     now: options.now,
   });
+}
+
+export function createDefaultFundingOpportunityReadVenues(
+  options: Omit<DefaultFundingOpportunitySourceOptions, "venues"> = {},
+) {
+  const symbols = options.symbols ?? DEFAULT_SYMBOLS;
+  return Object.freeze([
+    createBinanceReadVenue(options, symbols),
+    createOkxReadVenue(options, symbols),
+    createBybitReadVenue(options, symbols),
+    createBitgetReadVenue(options, symbols),
+  ]);
 }
 
 function createOkxReadVenue(
