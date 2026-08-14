@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import { BinanceIntentExecutionCancelService } from "./BinanceIntentExecutionCancelService";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 import type { BinanceProviderOrder } from "./BinanceTypes";
@@ -43,6 +44,20 @@ test("ambiguous cancel failure returns UNKNOWN without retry", async () => {
   assert.equal(binding.providerMutations, 1);
 });
 
+test("manual reconciliation error is never downgraded to UNKNOWN", async () => {
+  const binding = new FakeCancelBinding(new ManualReconciliationRequiredError(
+    "intent:intent-1",
+    "Stored Binance provider orderId is invalid.",
+  ));
+
+  await assert.rejects(
+    () => new BinanceIntentExecutionCancelService(binding, () => now).cancel(executionRecord()),
+    (error: unknown) => error instanceof ManualReconciliationRequiredError
+      && error.idempotencyKey === "intent:intent-1",
+  );
+  assert.equal(binding.cancelInputs.length, 1);
+});
+
 test("cancel service has no scheduler, reconciliation, timeout cancel, or retry entry", () => {
   const source = readFileSync(new URL("./BinanceIntentExecutionCancelService.ts", import.meta.url), "utf8");
   assert.match(source, /cancelOrder/u);
@@ -66,7 +81,7 @@ class FakeCancelBinding {
 function providerOrder(status: BinanceProviderOrder["status"]): BinanceProviderOrder {
   return {
     symbol: "XAUTUSDT",
-    orderId: "binance-order-1",
+    orderId: "9223372036854775807",
     orderLinkId: "binance-client-order-1",
     status,
     requestedQuantity: 0.002,
@@ -82,7 +97,7 @@ function executionRecord(overrides: Partial<Record<string, unknown>> = {}) {
     executionId: "execution-1",
     intentId: "intent-1",
     executionAttemptId: "intent-1",
-    remoteOrderId: "binance-order-1",
+    remoteOrderId: "9223372036854775807",
     userId: "user-a",
     venue: "binance",
     accountId: "binance:account-user-a",

@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import type { BinancePreflightSnapshot } from "./BinanceTypes";
 import type { BinanceProviderOrder } from "./BinanceTypes";
 import type { BinanceOrderExecutionMode } from "./BinanceTypes";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 
 export type BinanceStoredOrder = {
   idempotencyKey: string;
@@ -21,6 +22,38 @@ export type BinanceStoredOrder = {
   createdAt: number;
   updatedAt: number;
 };
+
+export type BinanceStoredOrderIsolation = {
+  idempotencyKey: string;
+  status: string;
+  reason: string;
+  manualReconciliationRequired: true;
+};
+
+export type BinanceStoredOrderCollection = {
+  orders: BinanceStoredOrder[];
+  isolatedOrders: BinanceStoredOrderIsolation[];
+};
+
+export type BinanceStoredOrderLookup =
+  | { kind: "found"; order: BinanceStoredOrder }
+  | { kind: "missing" }
+  | { kind: "isolated"; isolation: BinanceStoredOrderIsolation };
+
+export class BinanceStoredOrderManualReconciliationError extends ManualReconciliationRequiredError {
+  constructor(readonly isolation: BinanceStoredOrderIsolation) {
+    super(
+      isolation.idempotencyKey,
+      isolation.reason,
+      `Binance stored order requires manual reconciliation: ${isolation.reason}`,
+    );
+  }
+}
+
+const storedOrderSelect = `idempotencyKey, requestFingerprint, clientOrderId, providerOrderId,
+  category, symbol, executionMode, status, orderJson, error,
+  CAST(cancelRequestedAt AS TEXT) AS cancelRequestedAt, cancelDispatchState,
+  CAST(createdAt AS TEXT) AS createdAt, CAST(updatedAt AS TEXT) AS updatedAt`;
 
 export type BinanceCancelDispatchState =
   | "CLAIMED_NOT_DISPATCHED"
@@ -174,23 +207,52 @@ export class BinanceOrderStore {
   }
 
   find(idempotencyKey: string): BinanceStoredOrder | null {
-    const row = this.db.prepare("SELECT * FROM binance_personal_orders WHERE idempotencyKey = ?").get(idempotencyKey) as Record<string, unknown> | undefined;
-    return row ? parseStoredOrder(row) : null;
+    const result = this.lookup(idempotencyKey);
+    if (result.kind === "isolated") {
+      throw new BinanceStoredOrderManualReconciliationError(result.isolation);
+    }
+    return result.kind === "found" ? result.order : null;
+  }
+
+  lookup(idempotencyKey: string): BinanceStoredOrderLookup {
+    const row = this.db.prepare(`SELECT ${storedOrderSelect} FROM binance_personal_orders WHERE idempotencyKey = ?`)
+      .get(idempotencyKey) as Record<string, unknown> | undefined;
+    if (!row) return { kind: "missing" };
+    try {
+      return { kind: "found", order: parseStoredOrder(row) };
+    } catch (error) {
+      return { kind: "isolated", isolation: isolateStoredOrder(row, error) };
+    }
   }
 
   list(limit = 100) {
-    return (this.db.prepare("SELECT * FROM binance_personal_orders ORDER BY createdAt DESC LIMIT ?").all(limit) as Record<string, unknown>[])
-      .map(parseStoredOrder);
+    return this.listWithIsolation(limit).orders;
+  }
+
+  listWithIsolation(limit = 100): BinanceStoredOrderCollection {
+    return parseStoredOrderCollection(
+      this.db.prepare(`SELECT ${storedOrderSelect} FROM binance_personal_orders ORDER BY createdAt DESC LIMIT ?`).all(limit) as Record<string, unknown>[],
+    );
   }
 
   listAll() {
-    return (this.db.prepare("SELECT * FROM binance_personal_orders ORDER BY createdAt DESC").all() as Record<string, unknown>[])
-      .map(parseStoredOrder);
+    return this.listAllWithIsolation().orders;
+  }
+
+  listAllWithIsolation(): BinanceStoredOrderCollection {
+    return parseStoredOrderCollection(
+      this.db.prepare(`SELECT ${storedOrderSelect} FROM binance_personal_orders ORDER BY createdAt DESC`).all() as Record<string, unknown>[],
+    );
   }
 
   listProcessing() {
-    return (this.db.prepare("SELECT * FROM binance_personal_orders WHERE status = 'processing' ORDER BY createdAt ASC").all() as Record<string, unknown>[])
-      .map(parseStoredOrder);
+    return this.listProcessingWithIsolation().orders;
+  }
+
+  listProcessingWithIsolation(): BinanceStoredOrderCollection {
+    return parseStoredOrderCollection(
+      this.db.prepare(`SELECT ${storedOrderSelect} FROM binance_personal_orders WHERE status = 'processing' ORDER BY createdAt ASC`).all() as Record<string, unknown>[],
+    );
   }
 
   savePositionSnapshot(snapshot: BinancePreflightSnapshot) {
@@ -209,23 +271,66 @@ export class BinanceOrderStore {
   }
 }
 
+function parseStoredOrderCollection(rows: Record<string, unknown>[]): BinanceStoredOrderCollection {
+  const orders: BinanceStoredOrder[] = [];
+  const isolatedOrders: BinanceStoredOrderIsolation[] = [];
+  for (const row of rows) {
+    try {
+      orders.push(parseStoredOrder(row));
+    } catch (error) {
+      isolatedOrders.push(isolateStoredOrder(row, error));
+    }
+  }
+  return { orders, isolatedOrders };
+}
+
+function isolateStoredOrder(row: Record<string, unknown>, error: unknown): BinanceStoredOrderIsolation {
+  return {
+    idempotencyKey: storedIsolationText(row.idempotencyKey),
+    status: storedIsolationText(row.status),
+    reason: error instanceof Error && error.message.startsWith("Stored Binance ")
+      ? error.message
+      : "Stored Binance order payload is malformed.",
+    manualReconciliationRequired: true,
+  };
+}
+
+function storedIsolationText(value: unknown) {
+  return typeof value === "string" && value.length > 0 ? value : "UNKNOWN";
+}
+
 function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
   const symbol = providerSymbol(row.symbol);
+  const clientOrderId = storedClientOrderId(row.clientOrderId);
+  const providerOrderId = row.providerOrderId === null
+    ? null
+    : storedProviderOrderId(row.providerOrderId);
+  const order = row.orderJson === null
+    ? null
+    : parseProviderOrder(JSON.parse(String(row.orderJson)), symbol, clientOrderId);
+  if (order !== null && providerOrderId === null) {
+    throw new Error("Stored Binance providerOrderId column is missing for its provider order.");
+  }
+  if (providerOrderId !== null && order !== null && providerOrderId !== order.orderId) {
+    throw new Error("Stored Binance provider order identity conflicts with its providerOrderId column.");
+  }
+  const status = storedOuterOrderStatus(row.status);
+  assertStoredStatusCombination(status, order);
   return {
     idempotencyKey: String(row.idempotencyKey),
     requestFingerprint: String(row.requestFingerprint),
-    clientOrderId: String(row.clientOrderId),
-    providerOrderId: row.providerOrderId === null ? null : String(row.providerOrderId),
+    clientOrderId,
+    providerOrderId,
     category: row.category as "spot" | "linear",
     symbol,
-    executionMode: row.executionMode === "test_gtc" ? "test_gtc" : "production_ioc",
-    status: row.status as BinanceStoredOrder["status"],
-    order: row.orderJson ? parseProviderOrder(JSON.parse(String(row.orderJson)), symbol) : null,
+    executionMode: storedExecutionMode(row.executionMode),
+    status,
+    order,
     error: row.error === null ? null : String(row.error),
-    cancelRequestedAt: row.cancelRequestedAt === null ? null : Number(row.cancelRequestedAt),
+    cancelRequestedAt: row.cancelRequestedAt === null ? null : storedTimestamp(row.cancelRequestedAt, "cancel requested timestamp"),
     cancelDispatchState: cancelDispatchState(row.cancelDispatchState),
-    createdAt: Number(row.createdAt),
-    updatedAt: Number(row.updatedAt),
+    createdAt: storedTimestamp(row.createdAt, "created timestamp"),
+    updatedAt: storedTimestamp(row.updatedAt, "updated timestamp"),
   };
 }
 
@@ -236,11 +341,15 @@ function cancelDispatchState(value: unknown): BinanceCancelDispatchState | null 
   throw new Error("Stored Binance cancel dispatch state is invalid.");
 }
 
-function parseProviderOrder(value: unknown, persistedSymbol: string): BinanceProviderOrder {
+function parseProviderOrder(value: unknown, persistedSymbol: string, persistedClientOrderId: string): BinanceProviderOrder {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new Error("Stored Binance provider order is invalid.");
   }
   const order = value as Record<string, unknown>;
+  const orderLinkId = storedClientOrderId(order.orderLinkId);
+  if (orderLinkId !== persistedClientOrderId) {
+    throw new Error("Stored Binance provider order clientOrderId conflicts with its persisted clientOrderId.");
+  }
   if (Object.hasOwn(order, "symbol") && providerSymbol(order.symbol) !== persistedSymbol) {
     throw new Error("Stored Binance provider order symbol conflicts with its persisted symbol.");
   }
@@ -259,9 +368,9 @@ function parseProviderOrder(value: unknown, persistedSymbol: string): BinancePro
   const positionQuantity = order.positionQuantity ?? order.positionQuantityXaut;
   return {
     symbol: persistedSymbol,
-    orderId: String(order.orderId ?? ""),
-    orderLinkId: String(order.orderLinkId ?? ""),
-    status: order.status as BinanceProviderOrder["status"],
+    orderId: storedProviderOrderId(order.orderId),
+    orderLinkId,
+    status: storedProviderOrderStatus(order.status),
     requestedQuantity: Number(requestedQuantity),
     filledQuantity: Number(filledQuantity),
     requestedBaseQuantity,
@@ -269,8 +378,69 @@ function parseProviderOrder(value: unknown, persistedSymbol: string): BinancePro
     ...(positionQuantity === undefined ? {} : { positionQuantity: Number(positionQuantity) }),
     averagePrice: order.averagePrice === null ? null : Number(order.averagePrice),
     feeUsd: Number(order.feeUsd),
-    updatedAt: Number(order.updatedAt),
+    updatedAt: storedTimestamp(order.updatedAt, "provider order updated timestamp"),
   };
+}
+
+function storedClientOrderId(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9._:/-]{1,36}$/u.test(value)) {
+    throw new Error("Stored Binance clientOrderId is invalid.");
+  }
+  return value;
+}
+
+function storedExecutionMode(value: unknown): BinanceOrderExecutionMode {
+  if (value !== "production_ioc" && value !== "test_gtc") {
+    throw new Error("Stored Binance execution mode is invalid.");
+  }
+  return value;
+}
+
+function storedOuterOrderStatus(value: unknown): BinanceStoredOrder["status"] {
+  if (value !== "processing" && value !== "completed" && value !== "failed") {
+    throw new Error("Stored Binance order status is invalid.");
+  }
+  return value;
+}
+
+function storedProviderOrderStatus(value: unknown): BinanceProviderOrder["status"] {
+  if (value !== "New" && value !== "PartiallyFilled" && value !== "Filled"
+    && value !== "Cancelled" && value !== "Rejected" && value !== "Expired" && value !== "Unknown") {
+    throw new Error("Stored Binance provider order status is invalid.");
+  }
+  return value;
+}
+
+function storedTimestamp(value: unknown, name: string) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
+  if (typeof value === "string" && /^(?:0|[1-9]\d*)$/u.test(value)) {
+    const exact = BigInt(value);
+    if (exact <= BigInt(Number.MAX_SAFE_INTEGER)) return Number(exact);
+  }
+  throw new Error(`Stored Binance ${name} is invalid.`);
+}
+
+function assertStoredStatusCombination(
+  status: BinanceStoredOrder["status"],
+  order: BinanceProviderOrder | null,
+) {
+  if (order === null) {
+    if (status !== "completed") return;
+  } else if (status === "completed" && order.status === "Filled") {
+    return;
+  } else if (status === "processing" && ["New", "PartiallyFilled", "Unknown"].includes(order.status)) {
+    return;
+  } else if (status === "failed" && ["Cancelled", "Rejected", "Expired"].includes(order.status)) {
+    return;
+  }
+  throw new Error("Stored Binance outer and provider order statuses are inconsistent.");
+}
+
+function storedProviderOrderId(value: unknown) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw new Error("Stored Binance provider orderId is invalid.");
+  }
+  return value;
 }
 
 function storedDecimalQuantity(exact: unknown, legacy: unknown, name: string) {

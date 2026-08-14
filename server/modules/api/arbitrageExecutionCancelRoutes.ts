@@ -29,9 +29,15 @@ function sendError(response: express.Response, error: unknown) {
   if (error instanceof ArbitrageExecutionCancelError) {
     const status = error.category === "arbitrage_instance_not_found"
       || error.category === "arbitrage_execution_reference_not_found" ? 404
-      : error.category === "execution_state_unknown" || error.category === "cancel_state_unavailable" ? 409
+      : error.category === "execution_state_unknown"
+        || error.category === "cancel_state_unavailable"
+        || error.category === "manual_reconciliation_required" ? 409
         : 400;
-    response.status(status).json({ category: error.category, message: error.message });
+    response.status(status).json({
+      category: error.category,
+      message: error.message,
+      ...(error.manualReconciliation ?? {}),
+    });
     return;
   }
   response.status(502).json({

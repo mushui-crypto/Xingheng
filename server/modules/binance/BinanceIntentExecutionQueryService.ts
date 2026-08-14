@@ -3,7 +3,11 @@ import {
   type ExecutionQueryObservation,
 } from "../cex/ExecutionQueryCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
-import type { BinanceStoredOrder } from "./BinanceOrderStore";
+import {
+  BinanceStoredOrderManualReconciliationError,
+  type BinanceStoredOrder,
+  type BinanceStoredOrderLookup,
+} from "./BinanceOrderStore";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import { binanceFilledBaseQuantity } from "./BinanceTypes";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
@@ -11,7 +15,7 @@ import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdenti
 
 export type BinanceIntentExecutionQueryServiceBinding = Pick<
   BinancePersonalTradingService,
-  "ordersState"
+  "executionOrderState"
 >;
 
 export class BinanceIntentExecutionQueryService {
@@ -20,13 +24,21 @@ export class BinanceIntentExecutionQueryService {
     private readonly clock: () => number = Date.now,
   ) {}
 
-  async query(record: ExecutionRecord): Promise<ExecutionQueryObservation> {
+  async query(
+    record: ExecutionRecord,
+    localState?: BinanceStoredOrderLookup,
+  ): Promise<ExecutionQueryObservation> {
     if (record.venue !== "binance") {
       throw new Error(`Unsupported execution venue: ${record.venue}.`);
     }
     const idempotencyKey = binanceExecutionIdempotencyKeyFor(record);
-    const stored = this.service.ordersState().orders.find((order) => order.idempotencyKey === idempotencyKey);
-    return stored ? observationFor(stored, this.now()) : binanceUnknownExecutionObservation(this.now());
+    const stored = localState ?? this.service.executionOrderState(idempotencyKey);
+    if (stored.kind === "isolated") {
+      throw new BinanceStoredOrderManualReconciliationError(stored.isolation);
+    }
+    return stored.kind === "found"
+      ? observationFor(stored.order, this.now())
+      : binanceUnknownExecutionObservation(this.now());
   }
 
   private now() {

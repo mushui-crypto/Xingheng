@@ -267,7 +267,8 @@ export class BinanceOrderManager {
   async reconcile() {
     return this.orderLock.run(async () => {
       const reconciled: BinanceProviderOrder[] = [];
-      for (const stored of this.store.listProcessing()) {
+      const processing = this.store.listProcessingWithIsolation();
+      for (const stored of processing.orders) {
         let order: BinanceProviderOrder | null;
         try {
           order = await this.findByClientOrderId(
@@ -310,12 +311,25 @@ export class BinanceOrderManager {
         if (before === "processing" && after !== "processing") reconciled.push(order);
       }
       const snapshot = await this.syncPositions();
-      return { reconciled, snapshot, orders: this.store.listAll() };
+      const all = this.store.listAllWithIsolation();
+      const isolatedOrders = [...new Map(
+        [...processing.isolatedOrders, ...all.isolatedOrders]
+          .map((order) => [order.idempotencyKey, order]),
+      ).values()];
+      return { reconciled, snapshot, orders: all.orders, isolatedOrders };
     });
   }
 
   listOrders() {
     return this.store.list();
+  }
+
+  ordersState() {
+    return this.store.listAllWithIsolation();
+  }
+
+  orderState(idempotencyKey: string) {
+    return this.store.lookup(idempotencyKey);
   }
 
   async syncPositions() {

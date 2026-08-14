@@ -5,6 +5,7 @@ import {
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 
 export type BinanceIntentExecutionCancelServiceBinding = Pick<
   BinancePersonalTradingService,
@@ -29,7 +30,8 @@ export class BinanceIntentExecutionCancelService {
         state: cancelStateFor(order.status),
         observedAt: this.now(),
       });
-    } catch {
+    } catch (error) {
+      if (error instanceof ManualReconciliationRequiredError) throw error;
       return createExecutionCancelObservation({ state: "UNKNOWN", observedAt: this.now() });
     }
   }

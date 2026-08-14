@@ -395,7 +395,12 @@ class RuntimeBinanceService {
   }
 
   ordersState() {
-    return { orders: this.orders };
+    return { orders: this.orders, isolatedOrders: [] };
+  }
+
+  executionOrderState(idempotencyKey: string) {
+    const order = this.orders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    return order ? { kind: "found" as const, order } : { kind: "missing" as const };
   }
 
   async findExecutionOrderByClientOrderId() {
@@ -476,7 +481,7 @@ function providerOrder(
 ): BinanceProviderOrder {
   return {
     symbol: "XAUTUSDT",
-    orderId: "fixture-runtime-order",
+    orderId: "9223372036854775807",
     orderLinkId: "fixture-runtime-client-order",
     status,
     requestedQuantity: 0.01,

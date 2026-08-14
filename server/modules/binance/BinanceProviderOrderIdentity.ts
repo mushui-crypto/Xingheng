@@ -64,11 +64,8 @@ function providerClientOrderId(value: unknown) {
 }
 
 function providerOrderId(value: unknown) {
-  const normalized = typeof value === "number" && Number.isSafeInteger(value) && value > 0
-    ? String(value)
-    : value;
-  if (typeof normalized !== "string" || !/^[A-Za-z0-9._:/-]{1,128}$/u.test(normalized)) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/u.test(value)) {
     throw new BinanceProviderOrderIdentityError("Binance provider response orderId is missing or malformed.");
   }
-  return normalized;
+  return value;
 }

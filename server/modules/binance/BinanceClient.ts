@@ -1,10 +1,12 @@
 import { createHash, createHmac } from "node:crypto";
 import { isIP } from "node:net";
+import JSONBig from "json-bigint";
 import {
   BINANCE_PERPETUAL_SYMBOL,
   BINANCE_PRODUCT_CACHE_TTL_MS,
   BINANCE_SPOT_SYMBOL,
   BINANCE_STRATEGY_ID,
+  type BinanceAllSymbolAccountReadSnapshot,
   type BinanceAccountIdentity,
   type BinanceClientAdapter,
   type BinanceCredentials,
@@ -17,7 +19,6 @@ import {
   type BinancePreflightSnapshot,
   type BinanceProductAvailability,
   type BinanceProviderOrder,
-  type BinanceReadOnlyAccountSnapshot,
   type BinanceStrategyPnlSnapshot,
 } from "./BinanceTypes";
 import {
@@ -29,6 +30,7 @@ const spotBaseUrl = "https://api.binance.com";
 const futuresBaseUrl = "https://fapi.binance.com";
 const receiveWindow = "5000";
 const timeOffsetTtlMs = 30_000;
+const losslessBinanceJson = JSONBig({ storeAsString: true, alwaysParseAsBig: false });
 
 type ProductCache = {
   availability: BinanceProductAvailability;
@@ -100,11 +102,21 @@ export class BinanceClient implements BinanceClientAdapter {
     return (await this.loadProducts()).availability;
   }
 
-  async readAccountSnapshot(): Promise<BinanceReadOnlyAccountSnapshot> {
-    const [access, spotAccountValue, futuresAccountValue] = await Promise.all([
+  async readAccountSnapshot(): Promise<BinanceAllSymbolAccountReadSnapshot> {
+    const [
+      access,
+      spotAccountValue,
+      futuresAccountValue,
+      futuresPositionsValue,
+      spotOpenOrdersValue,
+      futuresOpenOrdersValue,
+    ] = await Promise.all([
       this.validateAccess(),
       this.signedRequest("spot", "/api/v3/account"),
       this.signedRequest("futures", "/fapi/v2/account"),
+      this.signedRequest("futures", "/fapi/v2/positionRisk"),
+      this.signedRequest("spot", "/api/v3/openOrders"),
+      this.signedRequest("futures", "/fapi/v1/openOrders"),
     ]);
     const spotAccount = record(spotAccountValue);
     const futuresAccount = record(futuresAccountValue);
@@ -132,10 +144,20 @@ export class BinanceClient implements BinanceClientAdapter {
         locked: null,
       }))
       .filter(hasBalance);
+    const futuresPositionRows = providerList(futuresPositionsValue, "全标的永续合约仓位").map(record);
     return {
       ...access,
       fetchedAt: this.now(),
       balances: [...spotBalances, ...futuresBalances],
+      allSymbolReadStatus: {
+        futuresPositions: { status: "success", fullScan: true },
+        spotOpenOrders: { status: "success", fullScan: true },
+        futuresOpenOrders: { status: "success", fullScan: true },
+      },
+      futuresPositions: readNonZeroFuturesPositions(futuresPositionRows),
+      spotOpenOrders: readAllSymbolOpenOrders(spotOpenOrdersValue, "现货"),
+      futuresOpenOrders: readAllSymbolFuturesOpenOrders(futuresOpenOrdersValue),
+      instrumentSettings: readInstrumentSettings(futuresPositionRows),
     };
   }
 
@@ -476,10 +498,9 @@ export class BinanceClient implements BinanceClientAdapter {
       ...list(linear).map((value) => ({ category: "linear" as const, value: record(value) })),
     ]).map(({ category, value }) => {
       const symbol = String(value.symbol ?? "");
-      const orderId = String(value.orderId ?? "");
+      const orderId = exactProviderOrderId(value.orderId, "XAUT 活动订单 orderId");
       if (
-        !orderId
-        || symbol !== (category === "spot" ? BINANCE_SPOT_SYMBOL : BINANCE_PERPETUAL_SYMBOL)
+        symbol !== (category === "spot" ? BINANCE_SPOT_SYMBOL : BINANCE_PERPETUAL_SYMBOL)
       ) {
         throw new BinanceProviderError("provider_snapshot_invalid", "Binance XAUT 活动订单结构无效。");
       }
@@ -521,10 +542,12 @@ export class BinanceClient implements BinanceClientAdapter {
       || String(order.clientOrderId ?? "").startsWith(orderLinkPrefix);
     const spotOrders = list(spotOrdersValue).map(record).filter(matches);
     const futuresOrders = list(futuresOrdersValue).map(record).filter(matches);
-    const spotOrderIds = new Set(spotOrders.map((order) => String(order.orderId ?? "")));
-    const futuresOrderIds = new Set(futuresOrders.map((order) => String(order.orderId ?? "")));
-    const spotTrades = list(spotTradesValue).map(record).filter((trade) => spotOrderIds.has(String(trade.orderId ?? "")));
-    const futuresTrades = list(futuresTradesValue).map(record).filter((trade) => futuresOrderIds.has(String(trade.orderId ?? "")));
+    const spotOrderIds = new Set(spotOrders.map((order) => exactProviderOrderId(order.orderId, "现货订单 orderId")));
+    const futuresOrderIds = new Set(futuresOrders.map((order) => exactProviderOrderId(order.orderId, "永续合约订单 orderId")));
+    const spotTrades = list(spotTradesValue).map(record)
+      .filter((trade) => spotOrderIds.has(exactProviderOrderId(trade.orderId, "现货成交 orderId")));
+    const futuresTrades = list(futuresTradesValue).map(record)
+      .filter((trade) => futuresOrderIds.has(exactProviderOrderId(trade.orderId, "永续合约成交 orderId")));
     const spotFills = spotTrades.map((trade) => ({
       side: boolean(trade.isBuyer) ? "Buy" : "Sell",
       quantity: positiveNumber(trade.qty),
@@ -608,7 +631,8 @@ export class BinanceClient implements BinanceClientAdapter {
       orderId,
     })).map(record);
     const baseFee = trades
-      .filter((trade) => String(trade.orderId ?? "") === orderId && trade.commissionAsset === "XAUT")
+      .filter((trade) => exactProviderOrderId(trade.orderId, "现货成交 orderId") === orderId
+        && trade.commissionAsset === "XAUT")
       .reduce((total, trade) => total + snapshotNonNegativeNumber(trade.commission, "现货基础资产手续费"), 0);
     const positionQuantity = side === "BUY"
       ? Math.max(0, filled - baseFee)
@@ -747,7 +771,7 @@ export class BinanceClient implements BinanceClientAdapter {
     const rawBody = await response.text().catch(() => "");
     let payload: unknown = null;
     try {
-      payload = rawBody ? JSON.parse(rawBody) : null;
+      payload = rawBody ? normalizeBinanceOrderIds(losslessBinanceJson.parse(rawBody)) : null;
     } catch {
       throw new BinanceProviderError(categoryFromHttpStatus(response.status, "provider_invalid_response"), httpFailureMessage(response.status), null);
     }
@@ -763,6 +787,169 @@ export class BinanceProviderError extends Error {
   constructor(readonly category: string, message: string, readonly providerCode: number | null = null) {
     super(message);
   }
+}
+
+function normalizeBinanceOrderIds(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    for (let index = 0; index < value.length; index += 1) {
+      value[index] = normalizeBinanceOrderIds(value[index]);
+    }
+    return value;
+  }
+  if (!value || typeof value !== "object") return value;
+  const object = value as Record<string, unknown>;
+  for (const [key, nested] of Object.entries(object)) {
+    object[key] = key === "orderId"
+      ? normalizeRawBinanceOrderId(nested)
+      : normalizeBinanceOrderIds(nested);
+  }
+  return object;
+}
+
+function normalizeRawBinanceOrderId(value: unknown) {
+  if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && !Object.is(value, -0)) return String(value);
+  if (typeof value === "string" && /^(?:0|[1-9]\d*)$/u.test(value)) return value;
+  throw new Error("Binance response orderId is not an exact non-negative decimal integer.");
+}
+
+function exactProviderOrderId(value: unknown, label: string) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)$/u.test(value)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return value;
+}
+
+const accountReadInstrumentSymbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT", "XAUTUSDT"] as const;
+
+function readNonZeroFuturesPositions(rows: Record<string, any>[]) {
+  return rows.flatMap((row) => {
+    const positionAmt = providerReadDecimal(row.positionAmt, "永续合约仓位数量");
+    if (/^-?0(?:\.0+)?$/u.test(positionAmt)) return [];
+    return [{
+      symbol: requiredProviderSymbol(row.symbol),
+      positionSide: providerPositionSide(row.positionSide),
+      positionAmt,
+      entryPrice: optionalProviderNonNegativeDecimal(row.entryPrice, "永续合约开仓均价"),
+      leverage: optionalProviderPositiveDecimal(row.leverage, "永续合约杠杆"),
+      marginType: optionalProviderMarginMode(row.marginType),
+    }];
+  });
+}
+
+function readAllSymbolOpenOrders(value: unknown, marketLabel: string) {
+  return providerList(value, `全标的${marketLabel}活动订单`)
+    .map((candidate) => readAccountOpenOrder(record(candidate), marketLabel));
+}
+
+function readAllSymbolFuturesOpenOrders(value: unknown) {
+  return providerList(value, "全标的永续合约活动订单").map((candidate) => {
+    const row = record(candidate);
+    return {
+      ...readAccountOpenOrder(row, "永续合约"),
+      reduceOnly: typeof row.reduceOnly === "boolean" ? row.reduceOnly : null,
+    };
+  });
+}
+
+function readAccountOpenOrder(row: Record<string, any>, marketLabel: string) {
+  return {
+    symbol: requiredProviderSymbol(row.symbol),
+    side: providerOrderSide(row.side),
+    orderId: providerReadOrderId(row.orderId),
+    clientOrderId: providerReadClientOrderId(row.clientOrderId),
+    status: providerReadOrderStatus(row.status),
+    originalQuantity: providerReadNonNegativeDecimal(row.origQty, `${marketLabel}订单原始数量`),
+    executedQuantity: providerReadNonNegativeDecimal(row.executedQty, `${marketLabel}订单成交数量`),
+  };
+}
+
+function readInstrumentSettings(rows: Record<string, any>[]) {
+  return accountReadInstrumentSymbols.map((symbol) => {
+    const row = rows.find((candidate) => candidate.symbol === symbol);
+    if (!row) {
+      return { symbol, status: "NOT_CURRENTLY_READABLE" as const, leverage: null, marginMode: null };
+    }
+    const leverage = optionalProviderPositiveDecimal(row.leverage, `${symbol} 永续合约杠杆`);
+    const marginMode = optionalProviderMarginMode(row.marginType);
+    return {
+      symbol,
+      status: leverage && marginMode ? "READABLE" as const : "NOT_CURRENTLY_READABLE" as const,
+      leverage,
+      marginMode,
+    };
+  });
+}
+
+function providerPositionSide(value: unknown): "BOTH" | "LONG" | "SHORT" {
+  const side = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (side === "BOTH" || side === "LONG" || side === "SHORT") return side;
+  throw new BinanceProviderError("provider_snapshot_invalid", "Binance 永续合约仓位方向无效。");
+}
+
+function providerOrderSide(value: unknown): "BUY" | "SELL" {
+  const side = typeof value === "string" ? value.trim().toUpperCase() : "";
+  if (side === "BUY" || side === "SELL") return side;
+  throw new BinanceProviderError("provider_snapshot_invalid", "Binance 活动订单方向无效。");
+}
+
+function providerReadOrderId(value: unknown) {
+  return exactProviderOrderId(value, "活动订单 orderId");
+}
+
+function providerReadClientOrderId(value: unknown) {
+  const clientOrderId = typeof value === "string" ? value.trim() : "";
+  if (!clientOrderId) {
+    throw new BinanceProviderError("provider_snapshot_invalid", "Binance 活动订单 clientOrderId 无效。");
+  }
+  return clientOrderId;
+}
+
+function providerReadOrderStatus(value: unknown) {
+  const status = typeof value === "string" ? value.trim() : "";
+  if (!status) {
+    throw new BinanceProviderError("provider_snapshot_invalid", "Binance 活动订单状态无效。");
+  }
+  return status;
+}
+
+function optionalProviderNonNegativeDecimal(value: unknown, label: string) {
+  return value === undefined || value === null || value === "" ? null : providerReadNonNegativeDecimal(value, label);
+}
+
+function optionalProviderPositiveDecimal(value: unknown, label: string) {
+  return value === undefined || value === null || value === "" ? null : providerReadPositiveDecimal(value, label);
+}
+
+function providerReadDecimal(value: unknown, label: string) {
+  if (typeof value !== "string" || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}无效。`);
+  }
+  return value;
+}
+
+function providerReadNonNegativeDecimal(value: unknown, label: string) {
+  const decimal = providerReadDecimal(value, label);
+  if (decimal.startsWith("-")) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}不能为负数。`);
+  }
+  return decimal;
+}
+
+function providerReadPositiveDecimal(value: unknown, label: string) {
+  const decimal = providerReadNonNegativeDecimal(value, label);
+  if (/^0(?:\.0+)?$/u.test(decimal)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", `Binance ${label}必须为正数。`);
+  }
+  return decimal;
+}
+
+function optionalProviderMarginMode(value: unknown) {
+  if (value === undefined || value === null || value === "") return null;
+  const marginMode = snapshotMarginMode(value);
+  if (marginMode === "unknown") {
+    throw new BinanceProviderError("provider_snapshot_invalid", "Binance 永续合约保证金模式无效。");
+  }
+  return marginMode;
 }
 
 function requiredProviderSymbol(value: unknown) {
@@ -932,7 +1119,7 @@ function toOrder(
           : rawStatus === "REJECTED" ? "Rejected" : "Unknown";
   return {
     symbol: String(row.symbol ?? ""),
-    orderId: String(row.orderId ?? ""),
+    orderId: exactProviderOrderId(row.orderId, "订单 orderId"),
     orderLinkId: String(row.clientOrderId ?? ""),
     status,
     requestedQuantity: requested,

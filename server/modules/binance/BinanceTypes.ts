@@ -40,10 +40,57 @@ export type BinanceReadOnlyAccountBalance = {
   locked: number | null;
 };
 
+export type BinanceAllSymbolReadStatus = {
+  status: "success";
+  fullScan: true;
+};
+
+export type BinanceReadOnlyFuturesPosition = {
+  symbol: string;
+  positionSide: "BOTH" | "LONG" | "SHORT";
+  positionAmt: string;
+  entryPrice: string | null;
+  leverage: string | null;
+  marginType: "cross" | "isolated" | null;
+};
+
+export type BinanceReadOnlyOpenOrder = {
+  symbol: string;
+  side: "BUY" | "SELL";
+  orderId: string;
+  clientOrderId: string;
+  status: string;
+  originalQuantity: string;
+  executedQuantity: string;
+};
+
+export type BinanceReadOnlyFuturesOpenOrder = BinanceReadOnlyOpenOrder & {
+  reduceOnly: boolean | null;
+};
+
+export type BinanceReadOnlyInstrumentSetting = {
+  symbol: "BTCUSDT" | "ETHUSDT" | "DOGEUSDT" | "XAUTUSDT";
+  status: "READABLE" | "NOT_CURRENTLY_READABLE";
+  leverage: string | null;
+  marginMode: "cross" | "isolated" | null;
+};
+
 export type BinanceReadOnlyAccountSnapshot = BinanceAccountIdentity & {
   fetchedAt: number;
   permissions: BinancePermissions;
   balances: BinanceReadOnlyAccountBalance[];
+};
+
+export type BinanceAllSymbolAccountReadSnapshot = BinanceReadOnlyAccountSnapshot & {
+  allSymbolReadStatus: {
+    futuresPositions: BinanceAllSymbolReadStatus;
+    spotOpenOrders: BinanceAllSymbolReadStatus;
+    futuresOpenOrders: BinanceAllSymbolReadStatus;
+  };
+  futuresPositions: BinanceReadOnlyFuturesPosition[];
+  spotOpenOrders: BinanceReadOnlyOpenOrder[];
+  futuresOpenOrders: BinanceReadOnlyFuturesOpenOrder[];
+  instrumentSettings: BinanceReadOnlyInstrumentSetting[];
 };
 
 export type BinancePerpetualPositionSnapshot = {

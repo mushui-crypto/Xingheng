@@ -8,6 +8,7 @@ import type { ExecutionRecordRecoveryStore } from "../cex/ExecutionRecordStore";
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
 import type { ArbitrageExecutionDraft, ArbitrageExecutionDraftLeg } from "./ArbitrageExecutionDraft";
 import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 
 type DraftService = Pick<ArbitrageExecutionDraftService, "preview">;
 type InstanceStore = Pick<
@@ -57,8 +58,14 @@ export class ArbitrageExecutionCommandError extends Error {
       | "execution_recovery_record_not_found"
       | "execution_recovery_identity_conflict"
       | "second_leg_not_allowed"
-      | "execution_state_unknown",
+      | "execution_state_unknown"
+      | "manual_reconciliation_required",
     message: string,
+    readonly manualReconciliation?: Readonly<{
+      manualReconciliationRequired: true;
+      idempotencyKey: string;
+      reason: string;
+    }>,
   ) {
     super(message);
   }
@@ -184,7 +191,10 @@ export class ArbitrageExecutionCommandService {
     let runtimeResult: FormalArbitrageExecutionRuntimeResult;
     try {
       runtimeResult = await this.runtime.execute(intent);
-    } catch {
+    } catch (error) {
+      if (error instanceof ManualReconciliationRequiredError) {
+        throw manualReconciliationCommandError(error);
+      }
       throw commandError(
         "execution_state_unknown",
         "执行状态暂时无法确认；套利实例和执行引用已保留，请勿重复提交。",
@@ -276,7 +286,10 @@ export class ArbitrageExecutionCommandService {
     let runtimeResult: FormalArbitrageExecutionRuntimeResult;
     try {
       runtimeResult = await this.runtime.reconcile(userId, executionRecordId);
-    } catch {
+    } catch (error) {
+      if (error instanceof ManualReconciliationRequiredError) {
+        throw manualReconciliationCommandError(error);
+      }
       throw commandError("execution_state_unknown", "执行状态核验暂不可用；未提交任何新订单。");
     }
     assertReconciliationIdentity(runtimeResult.executionRecord, userId, leg, reference);
@@ -622,4 +635,22 @@ function invalid(message: string) {
 
 function commandError(category: ArbitrageExecutionCommandError["category"], message: string) {
   return new ArbitrageExecutionCommandError(category, message);
+}
+
+function manualReconciliationCommandError(error: ManualReconciliationRequiredError) {
+  return new ArbitrageExecutionCommandError(
+    "manual_reconciliation_required",
+    "本地订单记录无法安全解析，需要人工核账；未调用交易所执行接口。",
+    {
+      manualReconciliationRequired: true,
+      idempotencyKey: error.idempotencyKey,
+      reason: safeManualReconciliationReason(error.reason),
+    },
+  );
+}
+
+function safeManualReconciliationReason(reason: string) {
+  return reason.length <= 200 && /^Stored Binance [A-Za-z0-9 ._-]+$/u.test(reason)
+    ? reason
+    : "Stored Binance order requires manual reconciliation.";
 }

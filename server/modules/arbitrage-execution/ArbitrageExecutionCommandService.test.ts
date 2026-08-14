@@ -7,6 +7,7 @@ import { createAsset } from "../cex/Asset";
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import type { ArbitrageExecutionDraft } from "./ArbitrageExecutionDraft";
 import {
   ArbitrageExecutionCommandError,
@@ -436,6 +437,32 @@ test("reconciliation enforces user/reference ownership and query failures never 
   fixture.runtime.onReconcile = async () => { throw new Error("provider GET failed"); };
   await assert.rejects(() => fixture.service.reconcileLeg("user-a", request), /核验暂不可用/u);
   assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.legs[0].confirmedOpenedQuantity, "0");
+  assert.equal(fixture.runtime.providerMutations, 0);
+});
+
+test("manual reconciliation metadata survives the formal CommandService boundary", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "UNKNOWN", null);
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  fixture.runtime.onReconcile = async () => {
+    throw new ManualReconciliationRequiredError(
+      "intent:intent-user-a",
+      "Stored Binance provider orderId is invalid.",
+    );
+  };
+
+  await assert.rejects(
+    () => fixture.service.reconcileLeg("user-a", {
+      arbitrageId: created.instance.arbitrageId,
+      legId: "long-leg",
+    }),
+    (error: unknown) => error instanceof ArbitrageExecutionCommandError
+      && error.category === "manual_reconciliation_required"
+      && error.manualReconciliation?.manualReconciliationRequired === true
+      && error.manualReconciliation.idempotencyKey === "intent:intent-user-a"
+      && error.manualReconciliation.reason === "Stored Binance provider orderId is invalid.",
+  );
   assert.equal(fixture.runtime.providerMutations, 0);
 });
 

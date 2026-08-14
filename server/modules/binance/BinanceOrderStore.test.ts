@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
+import { BinanceClient } from "./BinanceClient";
 import { BinanceOrderStore } from "./BinanceOrderStore";
 
 test("fresh stores persist explicit generic symbols and recover them after restart", () => {
@@ -34,7 +35,7 @@ test("fresh stores persist explicit generic symbols and recover them after resta
   }
 });
 
-test("exact Decimal base quantities survive order persistence and restart", () => {
+test("exact Decimal quantities and int64 provider orderId survive persistence and restart", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-decimal-fill-"));
   const dbPath = join(root, "orders.sqlite");
   try {
@@ -42,7 +43,7 @@ test("exact Decimal base quantities survive order persistence and restart", () =
     store.reserve(orderReservation("BTCUSDT"));
     store.recordProcessingOrder("order-BTCUSDT", {
       symbol: "BTCUSDT",
-      orderId: "provider-decimal",
+      orderId: "9223372036854775807",
       orderLinkId: "client-BTCUSDT",
       status: "PartiallyFilled",
       requestedQuantity: 0.12345678901234568,
@@ -56,8 +57,300 @@ test("exact Decimal base quantities survive order persistence and restart", () =
     store.close();
 
     store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("order-BTCUSDT")?.providerOrderId, "9223372036854775807");
+    assert.equal(store.find("order-BTCUSDT")?.order?.orderId, "9223372036854775807");
     assert.equal(store.find("order-BTCUSDT")?.order?.requestedBaseQuantity, "0.123456789012345678901");
     assert.equal(store.find("order-BTCUSDT")?.order?.filledBaseQuantity, "0.023456789012345678901");
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart rejects numeric orderJson identities before any rounded provider identity can escape", () => {
+  for (const rawOrderId of ["123456", "9223372036854775807"]) {
+    const root = mkdtempSync(join(tmpdir(), "binance-order-store-numeric-identity-"));
+    const dbPath = join(root, "orders.sqlite");
+    try {
+      const store = new BinanceOrderStore(dbPath);
+      store.reserve(orderReservation("BTCUSDT"));
+      store.close();
+
+      const db = new DatabaseSync(dbPath);
+      db.prepare("UPDATE binance_personal_orders SET providerOrderId = ?, orderJson = ? WHERE idempotencyKey = ?")
+        .run(rawOrderId, persistedOrderJson(rawOrderId), "order-BTCUSDT");
+      db.close();
+
+      const restarted = new BinanceOrderStore(dbPath);
+      assert.throws(() => restarted.find("order-BTCUSDT"), /provider orderId is invalid/u);
+      restarted.close();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("collection reads isolate one numeric identity while returning two valid processing orders", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-isolation-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    for (const symbol of ["ETHUSDT", "DOGEUSDT", "BTCUSDT"]) {
+      assert.deepEqual(store.reserve(orderReservation(symbol)), { kind: "reserved" });
+    }
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE binance_personal_orders SET providerOrderId = ?, orderJson = ? WHERE idempotencyKey = ?")
+      .run("9223372036854775807", persistedOrderJson("9223372036854775807"), "order-BTCUSDT");
+    db.close();
+
+    store = new BinanceOrderStore(dbPath);
+    const expected = ["order-DOGEUSDT", "order-ETHUSDT"];
+    assert.deepEqual(store.listProcessing().map((order) => order.idempotencyKey).sort(), expected);
+    assert.deepEqual(store.listAll().map((order) => order.idempotencyKey).sort(), expected);
+    assert.deepEqual(store.list().map((order) => order.idempotencyKey).sort(), expected);
+    const collection = store.listProcessingWithIsolation();
+    assert.deepEqual(collection.orders.map((order) => order.idempotencyKey).sort(), expected);
+    assert.deepEqual(collection.isolatedOrders, [{
+      idempotencyKey: "order-BTCUSDT",
+      status: "processing",
+      reason: "Stored Binance provider orderId is invalid.",
+      manualReconciliationRequired: true,
+    }]);
+    assert.throws(() => store.find("order-BTCUSDT"), /provider orderId is invalid/u);
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted order validation isolates identity, mode, status, and timestamp corruption", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-complete-validation-"));
+  const dbPath = join(root, "orders.sqlite");
+  const malformedIds = [
+    "client-conflict", "provider-missing", "provider-conflict", "execution-mode",
+    "outer-status", "nested-status", "outer-timestamp", "nested-timestamp", "empty-order-json",
+    "status-combination",
+  ];
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    for (const [index, id] of ["valid-one", "valid-two", ...malformedIds].entries()) {
+      const clientOrderId = `validation-${index}`;
+      store.reserve({
+        idempotencyKey: id, requestFingerprint: `${id}-fingerprint`, clientOrderId,
+        category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
+      });
+      store.recordProcessingOrder(id, persistedProviderOrder(clientOrderId, String(7_000 + index)));
+    }
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    db.exec("PRAGMA ignore_check_constraints = ON;");
+    mutateStoredProviderOrder(db, "client-conflict", (order) => ({ ...order, orderLinkId: "wrong-client" }));
+    db.prepare("UPDATE binance_personal_orders SET providerOrderId = NULL WHERE idempotencyKey = 'provider-missing'").run();
+    db.prepare("UPDATE binance_personal_orders SET providerOrderId = '7999' WHERE idempotencyKey = 'provider-conflict'").run();
+    db.prepare("UPDATE binance_personal_orders SET executionMode = 'invalid-mode' WHERE idempotencyKey = 'execution-mode'").run();
+    db.prepare("UPDATE binance_personal_orders SET status = 'invalid-status' WHERE idempotencyKey = 'outer-status'").run();
+    mutateStoredProviderOrder(db, "nested-status", (order) => ({ ...order, status: "INVALID" }));
+    db.prepare("UPDATE binance_personal_orders SET updatedAt = -1 WHERE idempotencyKey = 'outer-timestamp'").run();
+    mutateStoredProviderOrder(db, "nested-timestamp", (order) => ({ ...order, updatedAt: -1 }));
+    db.prepare("UPDATE binance_personal_orders SET orderJson = '' WHERE idempotencyKey = 'empty-order-json'").run();
+    mutateStoredProviderOrder(db, "status-combination", (order) => ({ ...order, status: "Filled" }));
+    db.close();
+
+    store = new BinanceOrderStore(dbPath);
+    const all = store.listAllWithIsolation();
+    assert.deepEqual(all.orders.map((order) => order.idempotencyKey).sort(), ["valid-one", "valid-two"]);
+    assert.deepEqual(all.isolatedOrders.map((order) => order.idempotencyKey).sort(), [...malformedIds].sort());
+    assert.equal(all.isolatedOrders.every((order) => order.manualReconciliationRequired), true);
+    assert.deepEqual(
+      store.listProcessing().map((order) => order.idempotencyKey).sort(),
+      ["valid-one", "valid-two"],
+    );
+    for (const id of malformedIds) {
+      assert.equal(store.lookup(id).kind, "isolated");
+      assert.throws(() => store.find(id), /requires manual reconciliation/u);
+    }
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("unsafe SQLite INTEGER timestamp is isolated without blocking valid records", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-unsafe-timestamp-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    for (const id of ["normal-one", "unsafe-created", "unsafe-updated", "unsafe-cancel", "normal-two"]) {
+      store.reserve({
+        idempotencyKey: id, requestFingerprint: `${id}-fingerprint`, clientOrderId: `${id}-client`,
+        category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
+      });
+    }
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    const unsafe = 9_223_372_036_854_775_807n;
+    db.prepare("UPDATE binance_personal_orders SET createdAt = ? WHERE idempotencyKey = 'unsafe-created'").run(unsafe);
+    db.prepare("UPDATE binance_personal_orders SET updatedAt = ? WHERE idempotencyKey = 'unsafe-updated'").run(unsafe);
+    db.prepare("UPDATE binance_personal_orders SET cancelRequestedAt = ? WHERE idempotencyKey = 'unsafe-cancel'").run(unsafe);
+    db.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.deepEqual(
+      store.listProcessing().map((order) => order.idempotencyKey).sort(),
+      ["normal-one", "normal-two"],
+    );
+    for (const id of ["unsafe-created", "unsafe-updated", "unsafe-cancel"]) {
+      const exact = store.lookup(id);
+      assert.equal(exact.kind, "isolated");
+      assert.match(exact.kind === "isolated" ? exact.isolation.reason : "", /timestamp is invalid/u);
+      assert.throws(() => store.find(id), /requires manual reconciliation/u);
+    }
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("persisted status matrix matches every formal Store write method", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-status-matrix-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const store = new BinanceOrderStore(dbPath);
+    const reserve = (id: string) => store.reserve({
+      idempotencyKey: id, requestFingerprint: `${id}-fingerprint`, clientOrderId: `${id}-client`,
+      category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
+    });
+    reserve("reserved");
+    reserve("provider-only");
+    store.recordProviderOrder("provider-only", "8100");
+    for (const [index, status] of ["New", "PartiallyFilled", "Unknown"].entries()) {
+      const id = `processing-${status}`;
+      reserve(id);
+      store.recordProcessingOrder(id, { ...persistedProviderOrder(`${id}-client`, String(8_101 + index)), status: status as "New" | "PartiallyFilled" | "Unknown" });
+    }
+    reserve("completed");
+    store.complete("completed", { ...persistedProviderOrder("completed-client", "8110"), status: "Filled" });
+    reserve("failed-without-order");
+    store.fail("failed-without-order", "pre-provider failure");
+    for (const [index, status] of ["Cancelled", "Rejected", "Expired"].entries()) {
+      const id = `failed-${status}`;
+      reserve(id);
+      store.failWithOrder(id, { ...persistedProviderOrder(`${id}-client`, String(8_111 + index)), status: status as "Cancelled" | "Rejected" | "Expired" }, status);
+    }
+
+    const state = store.listAllWithIsolation();
+    assert.equal(state.orders.length, 10);
+    assert.deepEqual(state.isolatedOrders, []);
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("exact-key lookup recovers the oldest order beyond the 100-row collection window", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-exact-key-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    for (let index = 0; index < 102; index += 1) {
+      store.reserve({
+        idempotencyKey: `exact-${index}`, requestFingerprint: `fingerprint-${index}`,
+        clientOrderId: `exact-client-${index}`, category: "spot", symbol: "BTCUSDT",
+        executionMode: "production_ioc",
+      });
+    }
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    for (let index = 0; index < 102; index += 1) {
+      db.prepare("UPDATE binance_personal_orders SET createdAt = ?, updatedAt = ? WHERE idempotencyKey = ?")
+        .run(index + 1, index + 1, `exact-${index}`);
+    }
+    db.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.list(100).some((order) => order.idempotencyKey === "exact-0"), false);
+    const exact = store.lookup("exact-0");
+    assert.equal(exact.kind, "found");
+    assert.equal(exact.kind === "found" ? exact.order.clientOrderId : null, "exact-client-0");
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart rejects mismatched providerOrderId column and orderJson exact strings", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-identity-conflict-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const store = new BinanceOrderStore(dbPath);
+    store.reserve(orderReservation("BTCUSDT"));
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    db.prepare("UPDATE binance_personal_orders SET providerOrderId = ?, orderJson = ? WHERE idempotencyKey = ?")
+      .run("9223372036854775807", persistedOrderJson("\"9223372036854775806\""), "order-BTCUSDT");
+    db.close();
+
+    const restarted = new BinanceOrderStore(dbPath);
+    assert.throws(() => restarted.find("order-BTCUSDT"), /identity conflicts with its providerOrderId column/u);
+    restarted.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("raw int64 identity survives parsing, persistence, restart, and exact cancel targeting", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-lossless-restart-"));
+  const dbPath = join(root, "orders.sqlite");
+  const exactOrderId = "9223372036854775807";
+  const cancelledOrderIds: string[] = [];
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return rawJsonResponse('{"serverTime":1800000000000}');
+      if (init?.method === "DELETE") {
+        cancelledOrderIds.push(url.searchParams.get("orderId") ?? "");
+        return rawJsonResponse("{}");
+      }
+      return rawJsonResponse(`{"symbol":"BTCUSDT","orderId":${exactOrderId},"clientOrderId":"ptmrestartlossless","status":"NEW","origQty":"0.001","executedQty":"0"}`);
+    }) as typeof fetch,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+  try {
+    const accepted = await client.placeOrder({
+      category: "spot", symbol: "BTCUSDT", side: "Buy", quantity: "0.001",
+      limitPrice: "1000", reduceOnly: false, orderLinkId: "ptmrestartlossless",
+    });
+    let store = new BinanceOrderStore(dbPath);
+    store.reserve({
+      idempotencyKey: "lossless-restart", requestFingerprint: "fingerprint",
+      clientOrderId: accepted.orderLinkId, category: "spot", symbol: "BTCUSDT",
+      executionMode: "production_ioc",
+    });
+    store.recordProcessingOrder("lossless-restart", {
+      symbol: "BTCUSDT", orderId: accepted.orderId, orderLinkId: accepted.orderLinkId,
+      status: "New", requestedQuantity: 0.001, filledQuantity: 0,
+      requestedBaseQuantity: "0.001", filledBaseQuantity: "0",
+      averagePrice: null, feeUsd: 0, updatedAt: 1_800_000_000_000,
+    });
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    const restarted = store.find("lossless-restart");
+    assert.equal(restarted?.providerOrderId, exactOrderId);
+    assert.equal(restarted?.order?.orderId, exactOrderId);
+    const queried = await client.findOrderByClientOrderId("spot", "BTCUSDT", restarted!.clientOrderId);
+    assert.equal(queried?.orderId, exactOrderId);
+    await client.cancelOrder("spot", "BTCUSDT", restarted!.providerOrderId!);
+    assert.deepEqual(cancelledOrderIds, [exactOrderId]);
+    assert.equal(cancelledOrderIds.includes("9223372036854776000"), false);
     store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -103,7 +396,7 @@ test("terminal provider evidence closes a claimed cancellation without losing hi
     store.markCancellationDispatched("order-BTCUSDT");
     store.failWithOrder("order-BTCUSDT", {
       symbol: "BTCUSDT",
-      orderId: "provider-terminal",
+      orderId: "5002",
       orderLinkId: "client-BTCUSDT",
       status: "Cancelled",
       requestedQuantity: 0.001,
@@ -132,7 +425,7 @@ test("pre-dispatch-model cancel claims migrate as legacy ambiguous and remain fa
     db.prepare(`INSERT INTO binance_personal_orders (
       idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol,
       executionMode, status, orderJson, error, cancelRequestedAt, createdAt, updatedAt
-    ) VALUES ('legacy-cancel', 'fingerprint', 'client', 'provider', 'spot', 'BTCUSDT',
+    ) VALUES ('legacy-cancel', 'fingerprint', 'client', '5001', 'spot', 'BTCUSDT',
       'production_ioc', 'processing', NULL, NULL, 1500, 1000, 1500)`).run();
     db.close();
 
@@ -164,9 +457,9 @@ test("legacy migration backfills only pre-migration XAUT orders and is idempoten
         "legacy-xaut",
         "legacy-fingerprint",
         "legacy-client",
-        "legacy-provider",
+        "5003",
         JSON.stringify({
-          orderId: "legacy-provider",
+          orderId: "5003",
           orderLinkId: "legacy-client",
           status: "Filled",
           requestedQuantityXaut: 0.01,
@@ -244,7 +537,7 @@ test("persisted symbol is authoritative over an optional provider payload symbol
     db.prepare("UPDATE binance_personal_orders SET orderJson = ? WHERE idempotencyKey = ?")
       .run(JSON.stringify({
         symbol: "ETHUSDT",
-        orderId: "provider",
+        orderId: "5004",
         orderLinkId: "client-BTCUSDT",
         status: "Filled",
         requestedQuantity: 0.001,
@@ -272,6 +565,41 @@ function orderReservation(symbol: string) {
     symbol,
     executionMode: "production_ioc" as const,
   };
+}
+
+function persistedOrderJson(rawOrderId: string) {
+  return `{"symbol":"BTCUSDT","orderId":${rawOrderId},"orderLinkId":"client-BTCUSDT","status":"New","requestedQuantity":0.001,"filledQuantity":0,"requestedBaseQuantity":"0.001","filledBaseQuantity":"0","averagePrice":null,"feeUsd":0,"updatedAt":3000}`;
+}
+
+function persistedProviderOrder(clientOrderId: string, orderId: string) {
+  return {
+    symbol: "BTCUSDT",
+    orderId,
+    orderLinkId: clientOrderId,
+    status: "New" as const,
+    requestedQuantity: 0.001,
+    filledQuantity: 0,
+    requestedBaseQuantity: "0.001",
+    filledBaseQuantity: "0",
+    averagePrice: null,
+    feeUsd: 0,
+    updatedAt: 3_000,
+  };
+}
+
+function mutateStoredProviderOrder(
+  db: DatabaseSync,
+  idempotencyKey: string,
+  mutate: (order: Record<string, unknown>) => Record<string, unknown>,
+) {
+  const row = db.prepare("SELECT orderJson FROM binance_personal_orders WHERE idempotencyKey = ?")
+    .get(idempotencyKey) as { orderJson: string };
+  db.prepare("UPDATE binance_personal_orders SET orderJson = ? WHERE idempotencyKey = ?")
+    .run(JSON.stringify(mutate(JSON.parse(row.orderJson) as Record<string, unknown>)), idempotencyKey);
+}
+
+function rawJsonResponse(rawBody: string) {
+  return new Response(rawBody, { status: 200, headers: { "Content-Type": "application/json" } });
 }
 
 function createLegacyOrdersTable(db: DatabaseSync) {

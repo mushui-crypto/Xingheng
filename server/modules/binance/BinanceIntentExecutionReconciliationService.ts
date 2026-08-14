@@ -2,6 +2,10 @@ import type { ExecutionReconciliationObservation } from "../cex/ExecutionReconci
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import {
+  BinanceStoredOrderManualReconciliationError,
+  type BinanceStoredOrderLookup,
+} from "./BinanceOrderStore";
+import {
   binanceExecutionObservationForOrder,
   binanceUnknownExecutionObservation,
 } from "./BinanceIntentExecutionQueryService";
@@ -10,7 +14,7 @@ import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdenti
 
 export type BinanceIntentExecutionReconciliationServiceBinding = Pick<
   BinancePersonalTradingService,
-  "ordersState" | "findExecutionOrderByClientOrderId"
+  "executionOrderState" | "findExecutionOrderByClientOrderId"
 >;
 
 export class BinanceIntentExecutionReconciliationService {
@@ -19,27 +23,32 @@ export class BinanceIntentExecutionReconciliationService {
     private readonly clock: () => number = Date.now,
   ) {}
 
-  async reconcile(record: ExecutionRecord): Promise<ExecutionReconciliationObservation> {
+  async reconcile(
+    record: ExecutionRecord,
+    localState?: BinanceStoredOrderLookup,
+  ): Promise<ExecutionReconciliationObservation> {
     if (record.venue !== "binance") {
       throw new Error(`Unsupported execution venue: ${record.venue}.`);
     }
-    const stored = this.service.ordersState().orders.find(
-      (order) => order.idempotencyKey === binanceExecutionIdempotencyKeyFor(record),
-    );
+    const stored = localState
+      ?? this.service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
     const observedAt = this.now();
-    if (!stored) return binanceUnknownExecutionObservation(observedAt);
+    if (stored.kind === "isolated") {
+      throw new BinanceStoredOrderManualReconciliationError(stored.isolation);
+    }
+    if (stored.kind === "missing") return binanceUnknownExecutionObservation(observedAt);
 
     try {
       const order = await this.service.findExecutionOrderByClientOrderId(
-        stored.category,
-        stored.symbol,
-        stored.clientOrderId,
+        stored.order.category,
+        stored.order.symbol,
+        stored.order.clientOrderId,
       );
       if (!order) return binanceUnknownExecutionObservation(observedAt);
       assertBinanceProviderOrderIdentity(order, {
-        symbol: stored.symbol,
-        clientOrderId: stored.clientOrderId,
-        providerOrderId: stored.providerOrderId,
+        symbol: stored.order.symbol,
+        clientOrderId: stored.order.clientOrderId,
+        providerOrderId: stored.order.providerOrderId,
       });
       return binanceExecutionObservationForOrder(order, observedAt);
     } catch {

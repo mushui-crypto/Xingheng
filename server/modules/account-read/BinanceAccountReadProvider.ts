@@ -1,5 +1,8 @@
 import { BinanceClient } from "../binance/BinanceClient";
-import type { BinanceReadOnlyAccountSnapshot } from "../binance/BinanceTypes";
+import type {
+  BinanceAllSymbolAccountReadSnapshot,
+  BinanceReadOnlyAccountSnapshot,
+} from "../binance/BinanceTypes";
 import type { UserExchangeCredentialSecret } from "../credentials/UserExchangeCredentialStore";
 import type { AccountReadProvider, AccountReadProviderFactory } from "./AccountReadProvider";
 
@@ -39,6 +42,7 @@ export class BinanceAccountReadProvider implements AccountReadProvider {
         derivativesAccount: "UNKNOWN" as const,
         positionModeSupported: status(snapshot.permissions.positionModeSupported),
       },
+      ...allSymbolFields(snapshot),
       latestSyncAt: snapshot.fetchedAt,
     };
   }
@@ -46,6 +50,18 @@ export class BinanceAccountReadProvider implements AccountReadProvider {
   dispose() {
     this.client = null;
   }
+}
+
+function allSymbolFields(snapshot: BinanceReadOnlyAccountSnapshot) {
+  if (!("allSymbolReadStatus" in snapshot)) return {};
+  const expanded = snapshot as BinanceAllSymbolAccountReadSnapshot;
+  return {
+    allSymbolReadStatus: expanded.allSymbolReadStatus,
+    futuresPositions: expanded.futuresPositions,
+    spotOpenOrders: expanded.spotOpenOrders,
+    futuresOpenOrders: expanded.futuresOpenOrders,
+    instrumentSettings: expanded.instrumentSettings,
+  };
 }
 
 function status(value: boolean) {

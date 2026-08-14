@@ -355,7 +355,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
 function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinanceProviderOrder {
   return {
     symbol: "XAUTUSDT",
-    orderId: "binance-order-1",
+    orderId: "9223372036854775807",
     orderLinkId: "binance-client-order-1",
     status: "Filled",
     requestedQuantity: 0.002,

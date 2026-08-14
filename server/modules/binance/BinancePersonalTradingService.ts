@@ -138,7 +138,11 @@ export class BinancePersonalTradingService {
   }
 
   ordersState() {
-    return { orders: this.requireOrders().listOrders() };
+    return this.requireOrders().ordersState();
+  }
+
+  executionOrderState(idempotencyKey: string) {
+    return this.requireOrders().orderState(idempotencyKey);
   }
 
   findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {

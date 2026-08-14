@@ -7,7 +7,7 @@ import { BinanceIntentExecutionCapability } from "./BinanceIntentExecutionCapabi
 import { BinanceIntentExecutionRuntime } from "./BinanceIntentExecutionRuntime";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 import type { BinanceOrderInput } from "./BinanceOrderManager";
-import type { BinanceStoredOrder } from "./BinanceOrderStore";
+import type { BinanceStoredOrder, BinanceStoredOrderIsolation } from "./BinanceOrderStore";
 import type { BinanceProviderOrder } from "./BinanceTypes";
 import { snapshotFixture } from "./binanceTestFixtures";
 
@@ -36,7 +36,7 @@ test("user A intent runs through user A Binance service", async () => {
   assert.equal(result.executionRecord.intentId, "intent-user-1");
   assert.equal(result.executionRecord.status, "CONFIRMED");
   assert.equal(result.executionRecord.executionAttemptId, "intent-user-1");
-  assert.equal(result.executionRecord.remoteOrderId, "binance-order-1");
+  assert.equal(result.executionRecord.remoteOrderId, "9223372036854775807");
   assert.deepEqual(records.created.map((record) => record.status), ["CREATED"]);
   assert.deepEqual(records.updated.map((record) => record.status), ["CONFIRMED"]);
   assert.deepEqual(registry.runUserIds, ["user-a"]);
@@ -193,7 +193,7 @@ test("reconciles a user-bound remote order fact and updates ExecutionRecord with
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
   service.orders = [queryStoredOrder(record, { status: "New", filledQuantity: 0 })];
   service.remoteOrder = providerOrder({
-    orderId: "binance-order-query-1",
+    orderId: "9223372036854775806",
     orderLinkId: "binance-client-query-1",
     status: "PartiallyFilled",
     filledQuantity: 0.0015,
@@ -217,6 +217,34 @@ test("reconciles a user-bound remote order fact and updates ExecutionRecord with
     clientOrderId: "binance-client-query-1",
   }]);
   assert.equal(service.providerMutations, 0);
+});
+
+test("isolated query, reconciliation, and cancel stop before Binance account or order access", async () => {
+  for (const operation of ["query", "reconcile", "cancel"] as const) {
+    const record = queryRecord();
+    const records = new FakeExecutionRecordStore([record]);
+    const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+    service.isolatedOrders = [{
+      idempotencyKey: binanceExecutionIdempotencyKeyFor(record),
+      status: "processing",
+      reason: "Stored Binance updated timestamp is invalid.",
+      manualReconciliationRequired: true,
+    }];
+    const runtime = new BinanceIntentExecutionRuntime(
+      new FakeBinanceIntentRegistry({ "user-a": service }),
+      { maxSlippageBps: 20 },
+      records,
+      { clock: () => now + 2_000 },
+    );
+
+    await assert.rejects(
+      () => runtime[operation]("user-a", "execution-query-1"),
+      /requires manual reconciliation/u,
+    );
+    assert.equal(service.accountCalls, 0);
+    assert.equal(service.providerQueries.length, 0);
+    assert.equal(service.providerMutations, 0);
+  }
 });
 
 test("confirmed reconciliation short-circuits before registry or provider access", async () => {
@@ -390,6 +418,7 @@ class FakeBinanceIntentRuntimeService {
   providerMutations = 0;
   readonly providerQueries: Array<{ category: "spot" | "linear"; symbol: string; clientOrderId: string }> = [];
   orders: BinanceStoredOrder[] = [];
+  isolatedOrders: BinanceStoredOrderIsolation[] = [];
   remoteOrder: BinanceProviderOrder | null | Error = providerOrder();
   cancelResult: BinanceProviderOrder | Error = providerOrder({ status: "Cancelled" });
 
@@ -440,7 +469,15 @@ class FakeBinanceIntentRuntimeService {
 
   ordersState() {
     this.orderStateReads += 1;
-    return { orders: this.orders };
+    return { orders: this.orders, isolatedOrders: [] };
+  }
+
+  executionOrderState(idempotencyKey: string) {
+    this.orderStateReads += 1;
+    const isolation = this.isolatedOrders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    if (isolation) return { kind: "isolated" as const, isolation };
+    const order = this.orders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    return order ? { kind: "found" as const, order } : { kind: "missing" as const };
   }
 
   async findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
@@ -479,7 +516,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
 function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinanceProviderOrder {
   return {
     symbol: "XAUTUSDT",
-    orderId: "binance-order-1",
+    orderId: "9223372036854775807",
     orderLinkId: "binance-client-order-1",
     status: "Filled",
     requestedQuantity: 0.002,
@@ -496,7 +533,7 @@ function queryRecord() {
     executionId: "execution-query-1",
     intentId: "intent-query-1",
     executionAttemptId: "intent-query-1",
-    remoteOrderId: "binance-order-query-1",
+    remoteOrderId: "9223372036854775806",
     userId: "user-a",
     venue: "binance",
     accountId: "binance:account-user-a",
@@ -512,7 +549,7 @@ function queryStoredOrder(
   orderOverrides: Partial<BinanceProviderOrder>,
 ): BinanceStoredOrder {
   const order = providerOrder({
-    orderId: "binance-order-query-1",
+    orderId: "9223372036854775806",
     orderLinkId: "binance-client-query-1",
     updatedAt: now + 1_000,
     ...orderOverrides,

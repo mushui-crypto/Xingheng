@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
 import type { BinanceStoredOrder } from "./BinanceOrderStore";
+import type { BinanceStoredOrderIsolation } from "./BinanceOrderStore";
 import { BinanceIntentExecutionReconciliationService } from "./BinanceIntentExecutionReconciliationService";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 import type { BinanceProviderOrder } from "./BinanceTypes";
@@ -52,7 +53,7 @@ test("identity mismatch maps filled and partial provider facts to UNKNOWN with z
   const cases = [
     providerOrder("Filled", 0.002, { symbol: "BTCUSDT" }),
     providerOrder("Filled", 0.002, { orderLinkId: "wrong-client" }),
-    providerOrder("Filled", 0.002, { orderId: "wrong-provider" }),
+    providerOrder("Filled", 0.002, { orderId: "3999" }),
     providerOrder("PartiallyFilled", 0.0015, { symbol: "BTCUSDT" }),
   ];
   for (const [index, remote] of cases.entries()) {
@@ -77,6 +78,44 @@ test("returns UNKNOWN without provider query when local execution identity is un
   assert.equal(binding.providerMutations, 0);
 });
 
+test("isolated exact target requires manual reconciliation without a provider query", async () => {
+  const idempotencyKey = binanceExecutionIdempotencyKeyFor(executionRecord());
+  const binding = new FakeReconciliationBinding(providerOrder("Filled", 0.002), [], [{
+    idempotencyKey,
+    status: "processing",
+    reason: "Stored Binance provider order status is invalid.",
+    manualReconciliationRequired: true,
+  }]);
+
+  await assert.rejects(
+    () => new BinanceIntentExecutionReconciliationService(binding, () => now).reconcile(executionRecord()),
+    /requires manual reconciliation/u,
+  );
+  assert.equal(binding.providerQueries.length, 0);
+  assert.equal(binding.providerMutations, 0);
+});
+
+test("exact-key reconciliation recovers a target beyond 100 unrelated orders", async () => {
+  const target = storedOrder();
+  const unrelated = Array.from({ length: 101 }, (_, index) => ({
+    ...storedOrder(),
+    idempotencyKey: `unrelated-${index}`,
+    clientOrderId: `unrelated-${index}`,
+    order: { ...storedOrder().order!, orderLinkId: `unrelated-${index}` },
+  }));
+  const binding = new FakeReconciliationBinding(
+    providerOrder("Filled", 0.002),
+    [...unrelated, target],
+  );
+
+  const observation = await new BinanceIntentExecutionReconciliationService(binding, () => now)
+    .reconcile(executionRecord());
+
+  assert.equal(observation.state, "CONFIRMED");
+  assert.equal(binding.providerQueries.length, 1);
+  assert.equal(binding.providerMutations, 0);
+});
+
 test("reconciliation service exposes a GET lookup only and no mutation workflow", () => {
   const source = readFileSync(
     new URL("./BinanceIntentExecutionReconciliationService.ts", import.meta.url),
@@ -93,10 +132,14 @@ class FakeReconciliationBinding {
   constructor(
     private readonly remote: BinanceProviderOrder | null | Error,
     private readonly orders: BinanceStoredOrder[] = [storedOrder()],
+    private readonly isolatedOrders: BinanceStoredOrderIsolation[] = [],
   ) {}
 
-  ordersState() {
-    return { orders: this.orders };
+  executionOrderState(idempotencyKey: string) {
+    const isolation = this.isolatedOrders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    if (isolation) return { kind: "isolated" as const, isolation };
+    const order = this.orders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    return order ? { kind: "found" as const, order } : { kind: "missing" as const };
   }
 
   async findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
@@ -111,7 +154,7 @@ function storedOrder(): BinanceStoredOrder {
     idempotencyKey: binanceExecutionIdempotencyKeyFor(executionRecord()),
     requestFingerprint: "request-fingerprint",
     clientOrderId: "binance-client-order-1",
-    providerOrderId: "binance-order-1",
+    providerOrderId: "9223372036854775807",
     category: "linear",
     symbol: "XAUTUSDT",
     executionMode: "production_ioc",
@@ -132,7 +175,7 @@ function providerOrder(
 ): BinanceProviderOrder {
   return {
     symbol: "XAUTUSDT",
-    orderId: "binance-order-1",
+    orderId: "9223372036854775807",
     orderLinkId: "binance-client-order-1",
     status,
     requestedQuantity: 0.002,
@@ -149,7 +192,7 @@ function executionRecord() {
     executionId: "execution-1",
     intentId: "intent-1",
     executionAttemptId: "intent-1",
-    remoteOrderId: "binance-order-1",
+    remoteOrderId: "9223372036854775807",
     userId: "user-a",
     venue: "binance",
     accountId: "binance:account-user-a",

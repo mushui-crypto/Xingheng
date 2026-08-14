@@ -16,8 +16,8 @@ import { snapshotFixture, tradingConfigFixture } from "./binanceTestFixtures";
 
 test("adapter exposes no mutation-capable client surface", () => {
   const client = {
-    placeOrder: async () => ({ orderId: "forbidden", orderLinkId: "forbidden" }),
-    placeTestOrder: async () => ({ orderId: "forbidden", orderLinkId: "forbidden" }),
+    placeOrder: async () => ({ orderId: "1004", orderLinkId: "forbidden" }),
+    placeTestOrder: async () => ({ orderId: "1004", orderLinkId: "forbidden" }),
     cancelOrder: async () => undefined,
     setPerpetualLeverage: async () => undefined,
   } as unknown as BinanceClientAdapter;
@@ -78,11 +78,11 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
     placeOrder: async (request: BinanceExecutionOrderRequest) => {
       writes += 1;
       orderLinkId = request.orderLinkId;
-      return { orderId: "provider-1", orderLinkId };
+      return { orderId: "1001", orderLinkId };
     },
     awaitOrder: async (): Promise<BinanceProviderOrder> => ({
       symbol: "XAUTUSDT",
-      orderId: "provider-1",
+      orderId: "1001",
       orderLinkId,
       status: "Filled",
       requestedQuantity: 0.01,
@@ -93,7 +93,7 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
     }),
     findOrderByClientOrderId: async (): Promise<BinanceProviderOrder> => ({
       symbol: "XAUTUSDT",
-      orderId: "provider-1",
+      orderId: "1001",
       orderLinkId,
       status: "Filled",
       requestedQuantity: 0.01,
@@ -124,8 +124,8 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
   try {
     const first = await manager.place(input);
     const second = await manager.place(input);
-    assert.equal(first.orderId, "provider-1");
-    assert.equal(second.orderId, "provider-1");
+    assert.equal(first.orderId, "1001");
+    assert.equal(second.orderId, "1001");
     assert.equal(writes, 1);
     assert.match(orderLinkId, /^ptm[0-9a-f]{30}$/u);
   } finally {
@@ -142,7 +142,7 @@ test("read-only adapter does not change OrderManager risk rejection", async () =
     readPreflightSnapshot: async () => snapshotFixture(),
     placeOrder: async () => {
       writes += 1;
-      return { orderId: "unexpected", orderLinkId: "unexpected" };
+      return { orderId: "1003", orderLinkId: "unexpected" };
     },
   } as unknown as BinanceClientAdapter;
   new BinanceAdapter(client);
@@ -179,7 +179,7 @@ test("read-only adapter does not change OrderManager UNKNOWN handling and reconc
   let orderLinkId = "";
   const currentOrder = (): BinanceProviderOrder => ({
     symbol: "XAUTUSDT",
-    orderId: "provider-unknown",
+    orderId: "1002",
     orderLinkId,
     status,
     requestedQuantity: 0.01,
@@ -193,7 +193,7 @@ test("read-only adapter does not change OrderManager UNKNOWN handling and reconc
     placeOrder: async (request: BinanceExecutionOrderRequest) => {
       writes += 1;
       orderLinkId = request.orderLinkId;
-      return { orderId: "provider-unknown", orderLinkId };
+      return { orderId: "1002", orderLinkId };
     },
     awaitOrder: async () => currentOrder(),
     cancelOrder: async () => undefined,

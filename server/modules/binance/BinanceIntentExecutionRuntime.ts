@@ -30,17 +30,19 @@ import { BinanceIntentExecutionReconciliationCapability } from "./BinanceIntentE
 import { BinanceIntentExecutionReconciliationService } from "./BinanceIntentExecutionReconciliationService";
 import {
   BinanceIntentExecutionService,
+  binanceExecutionIdempotencyKeyFor,
   type BinanceIntentExecutionResult,
   type BinanceIntentExecutionServiceBinding,
 } from "./BinanceIntentExecutionService";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
+import { BinanceStoredOrderManualReconciliationError } from "./BinanceOrderStore";
 
 type BinanceIntentRuntimeService =
   BinanceIntentExecutionServiceBinding
   & Pick<
     BinancePersonalTradingService,
-    "account" | "executionAccountIdentity" | "ordersState" | "findExecutionOrderByClientOrderId" | "cancelOrder"
+    "account" | "executionAccountIdentity" | "executionOrderState" | "findExecutionOrderByClientOrderId" | "cancelOrder"
   >;
 
 export type BinanceIntentExecutionRuntimeRegistry = Readonly<{
@@ -150,12 +152,18 @@ export class BinanceIntentExecutionRuntime {
     }
 
     return this.registry.run(userId, async (service) => {
+      const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
+      if (localState.kind === "isolated") {
+        throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
+      }
       const account = await service.account();
       if (account.accountId !== record.accountId) {
         throw new Error("ExecutionRecord accountId does not match the Binance execution account.");
       }
       const queryService = new BinanceIntentExecutionQueryService(service, this.options.clock);
-      const capability = new BinanceIntentExecutionQueryCapability(queryService, {
+      const capability = new BinanceIntentExecutionQueryCapability({
+        query: (target) => queryService.query(target, localState),
+      }, {
         userId,
         accountId: account.accountId,
       });
@@ -188,6 +196,10 @@ export class BinanceIntentExecutionRuntime {
     }
 
     return this.registry.run(userId, async (service) => {
+      const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
+      if (localState.kind === "isolated") {
+        throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
+      }
       const account = await service.account();
       if (account.accountId !== record.accountId) {
         throw new Error("ExecutionRecord accountId does not match the Binance execution account.");
@@ -196,7 +208,9 @@ export class BinanceIntentExecutionRuntime {
         service,
         this.options.clock,
       );
-      const capability = new BinanceIntentExecutionReconciliationCapability(reconciliationService, {
+      const capability = new BinanceIntentExecutionReconciliationCapability({
+        reconcile: (target) => reconciliationService.reconcile(target, localState),
+      }, {
         userId,
         accountId: account.accountId,
       });
@@ -225,6 +239,10 @@ export class BinanceIntentExecutionRuntime {
     }
 
     return this.registry.run(userId, async (service) => {
+      const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
+      if (localState.kind === "isolated") {
+        throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
+      }
       const account = await service.account();
       if (account.accountId !== record.accountId) {
         throw new Error("ExecutionRecord accountId does not match the Binance execution account.");

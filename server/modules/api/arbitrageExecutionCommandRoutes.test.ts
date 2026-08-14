@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ArbitrageExecutionCommandError } from "../arbitrage-execution/ArbitrageExecutionCommandService";
 import { registerArbitrageExecutionCommandRoutes } from "./arbitrageExecutionCommandRoutes";
 
 test("formal execution command routes are authenticated, no-store, and forward narrow commands", async () => {
@@ -53,6 +54,41 @@ test("formal execution command routes reject unauthenticated requests before ser
   await handler({ body: {} }, result);
   assert.equal(result.statusCode, 400);
   assert.equal(result.body.category, "invalid_execution_confirmation");
+});
+
+test("formal API preserves safe manual reconciliation outcome fields", async () => {
+  let handler: any;
+  registerArbitrageExecutionCommandRoutes({
+    post: (path: string, value: unknown) => {
+      if (path.endsWith("/reconcile")) handler = value;
+    },
+  } as any, {
+    confirm: async () => assert.fail("must not confirm"),
+    executeLeg: async () => assert.fail("must not execute"),
+    reconcileLeg: async () => {
+      throw new ArbitrageExecutionCommandError(
+        "manual_reconciliation_required",
+        "本地订单记录无法安全解析，需要人工核账；未调用交易所执行接口。",
+        {
+          manualReconciliationRequired: true,
+          idempotencyKey: "intent:intent-user-a",
+          reason: "Stored Binance provider orderId is invalid.",
+        },
+      );
+    },
+  });
+  const result = response();
+  await handler({ user: { id: "user-a" }, body: {} }, result);
+
+  assert.equal(result.statusCode, 409);
+  assert.deepEqual(result.body, {
+    category: "manual_reconciliation_required",
+    message: "本地订单记录无法安全解析，需要人工核账；未调用交易所执行接口。",
+    manualReconciliationRequired: true,
+    idempotencyKey: "intent:intent-user-a",
+    reason: "Stored Binance provider orderId is invalid.",
+  });
+  assert.equal(JSON.stringify(result.body).includes("orderJson"), false);
 });
 
 function response() {

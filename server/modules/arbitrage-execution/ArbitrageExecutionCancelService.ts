@@ -3,6 +3,7 @@ import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInsta
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import type {
   ArbitrageExecutionCommandService,
   ArbitrageLegExecutionConfirmation,
@@ -22,8 +23,14 @@ export class ArbitrageExecutionCancelError extends Error {
       | "arbitrage_execution_reference_not_found"
       | "cancel_identity_conflict"
       | "cancel_state_unavailable"
-      | "execution_state_unknown",
+      | "execution_state_unknown"
+      | "manual_reconciliation_required",
     message: string,
+    readonly manualReconciliation?: Readonly<{
+      manualReconciliationRequired: true;
+      idempotencyKey: string;
+      reason: string;
+    }>,
   ) {
     super(message);
   }
@@ -105,7 +112,10 @@ export class ArbitrageExecutionCancelService {
 
     try {
       await this.runtime.cancel(userId, record.executionId);
-    } catch {
+    } catch (error) {
+      if (error instanceof ManualReconciliationRequiredError) {
+        throw manualReconciliationCancelError(error);
+      }
       throw cancelError("execution_state_unknown", "订单撤销状态暂无法确认；未提交任何新订单。");
     }
     return this.reconciler.reconcileLeg(userId, {
@@ -187,4 +197,22 @@ function identifier(value: unknown, name: string) {
 
 function cancelError(category: ArbitrageExecutionCancelError["category"], message: string) {
   return new ArbitrageExecutionCancelError(category, message);
+}
+
+function manualReconciliationCancelError(error: ManualReconciliationRequiredError) {
+  return new ArbitrageExecutionCancelError(
+    "manual_reconciliation_required",
+    "本地订单记录无法安全解析，需要人工核账；未调用交易所撤单接口。",
+    {
+      manualReconciliationRequired: true,
+      idempotencyKey: error.idempotencyKey,
+      reason: safeManualReconciliationReason(error.reason),
+    },
+  );
+}
+
+function safeManualReconciliationReason(reason: string) {
+  return reason.length <= 200 && /^Stored Binance [A-Za-z0-9 ._-]+$/u.test(reason)
+    ? reason
+    : "Stored Binance order requires manual reconciliation.";
 }

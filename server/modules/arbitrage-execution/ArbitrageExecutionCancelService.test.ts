@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import {
   ArbitrageExecutionCancelError,
   ArbitrageExecutionCancelService,
@@ -96,12 +97,32 @@ test("missing local record and multiple unresolved references fail closed", asyn
   assert.equal(missing.cancelCalls.length + multiple.cancelCalls.length, 0);
 });
 
+test("formal cancel preserves manual reconciliation metadata", async () => {
+  const fixture = setup({
+    cancelError: new ManualReconciliationRequiredError(
+      "intent:intent-1",
+      "Stored Binance provider orderId is invalid.",
+    ),
+  });
+
+  await assert.rejects(
+    () => fixture.service.cancelKnownOrder("user-a", request()),
+    (error: unknown) => error instanceof ArbitrageExecutionCancelError
+      && error.category === "manual_reconciliation_required"
+      && error.manualReconciliation?.manualReconciliationRequired === true
+      && error.manualReconciliation.idempotencyKey === "intent:intent-1"
+      && error.manualReconciliation.reason === "Stored Binance provider orderId is invalid.",
+  );
+  assert.equal(fixture.reconcileCalls.length, 0);
+});
+
 function setup(options: Readonly<{
   instrumentId?: "BTC-USDT-SPOT" | "BTC-USDT-PERP";
   delay?: boolean;
   missingRecord?: boolean;
   multipleUnresolved?: boolean;
   record?: Partial<ExecutionRecord>;
+  cancelError?: Error;
 }> = {}) {
   const instrumentId = options.instrumentId ?? "BTC-USDT-SPOT";
   const reference = executionReference();
@@ -125,6 +146,7 @@ function setup(options: Readonly<{
   const runtime = {
     async cancel(userId: string, executionId: string) {
       cancelCalls.push({ userId, executionId });
+      if (options.cancelError) throw options.cancelError;
       if (options.delay) await new Promise((resolve) => setTimeout(resolve, 5));
       return { executionRecord: { ...record, status: "FAILED" }, observation: { state: "CANCELLED", observedAt: now + 1 } } as any;
     },

@@ -23,6 +23,7 @@ type PersonalTradingService = Pick<
   | "readExecutionRiskSnapshot"
   | "cancelOrder"
   | "ordersState"
+  | "executionOrderState"
   | "findExecutionOrderByClientOrderId"
   | "close"
 >;
