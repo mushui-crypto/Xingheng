@@ -7,6 +7,7 @@ import type { BinanceStoredOrder } from "./BinanceOrderStore";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
 import { binanceFilledBaseQuantity } from "./BinanceTypes";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
+import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdentity";
 
 export type BinanceIntentExecutionQueryServiceBinding = Pick<
   BinancePersonalTradingService,
@@ -46,6 +47,15 @@ function observationFor(stored: BinanceStoredOrder, fallbackObservedAt: number):
     });
   }
   const order = stored.order;
+  try {
+    assertBinanceProviderOrderIdentity(order, {
+      symbol: stored.symbol,
+      clientOrderId: stored.clientOrderId,
+      providerOrderId: stored.providerOrderId,
+    });
+  } catch {
+    return binanceUnknownExecutionObservation(Math.max(stored.updatedAt, fallbackObservedAt));
+  }
   return binanceExecutionObservationForOrder(
     order,
     Math.max(order.updatedAt, stored.updatedAt, fallbackObservedAt),

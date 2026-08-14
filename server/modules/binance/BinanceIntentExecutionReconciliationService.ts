@@ -6,6 +6,7 @@ import {
   binanceUnknownExecutionObservation,
 } from "./BinanceIntentExecutionQueryService";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
+import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdentity";
 
 export type BinanceIntentExecutionReconciliationServiceBinding = Pick<
   BinancePersonalTradingService,
@@ -34,9 +35,13 @@ export class BinanceIntentExecutionReconciliationService {
         stored.symbol,
         stored.clientOrderId,
       );
-      return order
-        ? binanceExecutionObservationForOrder(order, observedAt)
-        : binanceUnknownExecutionObservation(observedAt);
+      if (!order) return binanceUnknownExecutionObservation(observedAt);
+      assertBinanceProviderOrderIdentity(order, {
+        symbol: stored.symbol,
+        clientOrderId: stored.clientOrderId,
+        providerOrderId: stored.providerOrderId,
+      });
+      return binanceExecutionObservationForOrder(order, observedAt);
     } catch {
       return binanceUnknownExecutionObservation(observedAt);
     }

@@ -174,6 +174,7 @@ export type BinanceExecutionOrderRequest = BinanceExecutionOrderRequestBase & (
 );
 
 export type BinanceProviderOrder = {
+  symbol: string;
   orderId: string;
   orderLinkId: string;
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Expired" | "Unknown";
@@ -254,9 +255,15 @@ export type BinanceClientAdapter = {
   readPreflightSnapshot(): Promise<BinancePreflightSnapshot>;
   readGenericRiskSnapshot?(request: BinanceGenericRiskSnapshotRequest): Promise<BinanceGenericRiskSnapshot>;
   setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
-  placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
-  placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
-  awaitOrder(category: "spot" | "linear", symbol: string, orderId: string, deadlineAt: number): Promise<BinanceProviderOrder>;
+  placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string; symbol?: string }>;
+  placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string; symbol?: string }>;
+  awaitOrder(
+    category: "spot" | "linear",
+    symbol: string,
+    orderId: string,
+    deadlineAt: number,
+    clientOrderId?: string,
+  ): Promise<BinanceProviderOrder>;
   cancelOrder(
     category: "spot" | "linear",
     symbol: string,

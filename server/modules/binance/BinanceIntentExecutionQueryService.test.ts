@@ -50,6 +50,24 @@ test("uses the exact persisted Decimal fill instead of the legacy number bridge"
   assert.equal(observation.filledBaseQuantity, "0.123456789012345678901");
 });
 
+test("mismatched persisted provider identity cannot confirm or apply partial quantity", async (t) => {
+  for (const [index, override] of [
+    { symbol: "BTCUSDT" },
+    { orderLinkId: "wrong-client" },
+    { orderId: "wrong-provider" },
+  ].entries()) {
+    await t.test(String(index), async () => {
+      const stored = storedOrder("PartiallyFilled", 0.0015);
+      Object.assign(stored.order!, override);
+      const observation = await new BinanceIntentExecutionQueryService(
+        new FakeQueryBinding([stored]),
+        () => now,
+      ).query(executionRecord());
+      assert.deepEqual(observation, { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now });
+    });
+  }
+});
+
 test("query service exposes no provider, reconciliation, cancel, or retry dependency", () => {
   const source = readFileSync(new URL("./BinanceIntentExecutionQueryService.ts", import.meta.url), "utf8");
   assert.match(source, /ordersState/u);
@@ -82,6 +100,7 @@ function storedOrder(
       : status === "Rejected" || status === "Cancelled" || status === "Expired" ? "failed"
       : "processing",
     order: {
+      symbol: "XAUTUSDT",
       orderId: "binance-order-1",
       orderLinkId: "binance-client-order-1",
       status,

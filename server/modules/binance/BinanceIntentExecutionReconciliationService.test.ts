@@ -48,6 +48,24 @@ test("maps missing remote order and provider GET errors to UNKNOWN", async () =>
   }
 });
 
+test("identity mismatch maps filled and partial provider facts to UNKNOWN with zero quantity", async (t) => {
+  const cases = [
+    providerOrder("Filled", 0.002, { symbol: "BTCUSDT" }),
+    providerOrder("Filled", 0.002, { orderLinkId: "wrong-client" }),
+    providerOrder("Filled", 0.002, { orderId: "wrong-provider" }),
+    providerOrder("PartiallyFilled", 0.0015, { symbol: "BTCUSDT" }),
+  ];
+  for (const [index, remote] of cases.entries()) {
+    await t.test(String(index), async () => {
+      const binding = new FakeReconciliationBinding(remote);
+      const observation = await new BinanceIntentExecutionReconciliationService(binding, () => now)
+        .reconcile(executionRecord());
+      assert.deepEqual(observation, { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now });
+      assert.equal(binding.providerMutations, 0);
+    });
+  }
+});
+
 test("returns UNKNOWN without provider query when local execution identity is unavailable", async () => {
   const binding = new FakeReconciliationBinding(providerOrder("Filled", 0.002), []);
 
@@ -110,8 +128,10 @@ function storedOrder(): BinanceStoredOrder {
 function providerOrder(
   status: BinanceProviderOrder["status"],
   filledQuantity: number,
+  overrides: Partial<BinanceProviderOrder> = {},
 ): BinanceProviderOrder {
   return {
+    symbol: "XAUTUSDT",
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status,
@@ -120,6 +140,7 @@ function providerOrder(
     averagePrice: null,
     feeUsd: 0,
     updatedAt: now - 500,
+    ...overrides,
   };
 }
 

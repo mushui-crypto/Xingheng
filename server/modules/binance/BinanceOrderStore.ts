@@ -258,6 +258,7 @@ function parseProviderOrder(value: unknown, persistedSymbol: string): BinancePro
   );
   const positionQuantity = order.positionQuantity ?? order.positionQuantityXaut;
   return {
+    symbol: persistedSymbol,
     orderId: String(order.orderId ?? ""),
     orderLinkId: String(order.orderLinkId ?? ""),
     status: order.status as BinanceProviderOrder["status"],

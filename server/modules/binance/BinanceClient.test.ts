@@ -28,6 +28,70 @@ test("production orders remain IOC while test orders use GTC", async () => {
   assert.deepEqual(timeInForce, ["IOC", "GTC"]);
 });
 
+test("submit requires exact provider order identity without request fallback", async (t) => {
+  const cases = [
+    { name: "matching identity", response: { symbol: "BTCUSDT", orderId: 7, clientOrderId: "ptmidentity" }, error: null },
+    { name: "missing orderId", response: { symbol: "BTCUSDT", clientOrderId: "ptmidentity" }, error: /orderId/u },
+    { name: "missing clientOrderId", response: { symbol: "BTCUSDT", orderId: 7 }, error: /clientOrderId/u },
+    { name: "wrong clientOrderId", response: { symbol: "BTCUSDT", orderId: 7, clientOrderId: "wrong-client" }, error: /clientOrderId/u },
+    { name: "wrong symbol", response: { symbol: "ETHUSDT", orderId: 7, clientOrderId: "ptmidentity" }, error: /symbol/u },
+    { name: "malformed orderId", response: { symbol: "BTCUSDT", orderId: "bad order", clientOrderId: "ptmidentity" }, error: /orderId/u },
+  ] as const;
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        (async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+          return Response.json(fixture.response);
+        }) as typeof fetch,
+        Date.now,
+        ["203.0.113.10"],
+      );
+      const operation = () => client.placeOrder({
+        category: "spot", symbol: "BTCUSDT", side: "Buy", quantity: "0.001",
+        limitPrice: "1000", reduceOnly: false, orderLinkId: "ptmidentity",
+      });
+      if (fixture.error) await assert.rejects(operation, fixture.error);
+      else assert.deepEqual(await operation(), { orderId: "7", orderLinkId: "ptmidentity" });
+    });
+  }
+});
+
+test("provider reads reject mismatched or malformed identity before applying order facts", async (t) => {
+  const cases = [
+    { name: "matching identity", response: orderResponse(), expected: "Filled" },
+    { name: "wrong symbol", response: orderResponse({ symbol: "ETHUSDT" }), expected: /symbol/u },
+    { name: "wrong clientOrderId", response: orderResponse({ clientOrderId: "wrong-client" }), expected: /clientOrderId/u },
+    { name: "missing symbol", response: orderResponse({ symbol: undefined }), expected: /symbol/u },
+    { name: "missing clientOrderId", response: orderResponse({ clientOrderId: undefined }), expected: /clientOrderId/u },
+    { name: "missing orderId", response: orderResponse({ orderId: undefined }), expected: /orderId/u },
+    { name: "negative executedQty", response: orderResponse({ executedQty: "-0.1" }), expected: /filled quantity/u },
+    { name: "invalid executedQty", response: orderResponse({ executedQty: "not-decimal" }), expected: /filled quantity/u },
+    { name: "unknown status", response: orderResponse({ status: "UNRECOGNIZED" }), expected: "Unknown" },
+  ] as const;
+
+  for (const fixture of cases) {
+    await t.test(fixture.name, async () => {
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        (async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+          return Response.json(fixture.response);
+        }) as typeof fetch,
+        Date.now,
+        ["203.0.113.10"],
+      );
+      const operation = () => client.findOrderByClientOrderId("spot", "BTCUSDT", "ptmidentity");
+      if (fixture.expected instanceof RegExp) await assert.rejects(operation, fixture.expected);
+      else assert.equal((await operation())?.status, fixture.expected);
+    });
+  }
+});
+
 test("market orders omit provider price and timeInForce", async () => {
   let submitted: URL | null = null;
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -188,6 +252,7 @@ test("spot and USD-M order responses preserve full, partial, and cancelled Decim
           const url = new URL(String(input));
           if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
           return Response.json({
+            symbol: fixture.category === "spot" ? "BTCUSDT" : "DOGEUSDT",
             orderId: 9,
             clientOrderId: "decimal-fill",
             status: fixture.status,
@@ -350,6 +415,18 @@ test("generic risk snapshots read only the requested Spot and perpetual instrume
     .filter((request) => request.path.endsWith("openOrders") || request.path.endsWith("positionRisk"))
     .every((request) => request.symbol === "DOGEUSDT"));
 });
+
+function orderResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    symbol: "BTCUSDT",
+    orderId: 7,
+    clientOrderId: "ptmidentity",
+    status: "FILLED",
+    origQty: "0.001",
+    executedQty: "0.001",
+    ...overrides,
+  };
+}
 
 function snapshotFetch(
   marginType: "cross" | "isolated",

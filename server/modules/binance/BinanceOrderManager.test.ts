@@ -16,6 +16,7 @@ test("order manager persists one provider write for duplicate idempotency keys",
   const store = new BinanceOrderStore(join(root, "orders.sqlite"));
   let writes = 0;
   const order: BinanceProviderOrder = {
+    symbol: "XAUTUSDT",
     orderId: "provider-1", orderLinkId: "", status: "Filled", requestedQuantity: 0.01,
     filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
   };
@@ -43,6 +44,150 @@ test("order manager persists one provider write for duplicate idempotency keys",
     assert.equal(second.orderId, "provider-1");
     assert.equal(writes, 1);
     assert.equal(manager.listOrders()[0]?.status, "completed");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("submit identity mismatch fails closed without confirmed attribution", async (t) => {
+  const cases = [
+    { name: "missing orderId", response: { orderLinkId: "placeholder" } },
+    { name: "missing clientOrderId", response: { orderId: "provider-submit" } },
+    { name: "wrong clientOrderId", response: { orderId: "provider-submit", orderLinkId: "wrong-client" } },
+    { name: "wrong symbol", response: { orderId: "provider-submit", orderLinkId: "placeholder", symbol: "BTCUSDT" } },
+  ] as const;
+
+  for (const [index, fixture] of cases.entries()) {
+    await t.test(fixture.name, async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-submit-identity-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      let providerWrites = 0;
+      const client = {
+        readPreflightSnapshot: async () => snapshotFixture(),
+        placeOrder: async (request: { orderLinkId: string }) => {
+          providerWrites += 1;
+          return {
+            ...fixture.response,
+            ...(Object.hasOwn(fixture.response, "orderLinkId")
+              && (fixture.response as { orderLinkId?: string }).orderLinkId === "placeholder"
+              ? { orderLinkId: request.orderLinkId }
+              : {}),
+          };
+        },
+        findOrderByClientOrderId: async () => {
+          throw new Error("identity-invalid submit must not recover into success");
+        },
+      } as unknown as BinanceClientAdapter;
+      const config = tradingConfigFixture();
+      const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+      try {
+        await assert.rejects(() => manager.place({
+          idempotencyKey: `submit-identity-${index}`,
+          category: "spot",
+          symbol: "XAUTUSDT",
+          side: "Buy",
+          quantity: "0.01",
+          limitPrice: "1000",
+          reduceOnly: false,
+        }), /orderId|clientOrderId|symbol/u);
+        assert.equal(providerWrites, 1);
+        assert.equal(store.find(`submit-identity-${index}`)?.status, "processing");
+        assert.equal(store.find(`submit-identity-${index}`)?.order, null);
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("known-order cancel refuses mismatched provider identity before cancel mutation", async (t) => {
+  for (const [index, override] of [
+    { symbol: "BTCUSDT" },
+    { orderLinkId: "wrong-client" },
+    { orderId: "wrong-provider" },
+    { symbol: "" },
+  ].entries()) {
+    await t.test(String(index), async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-cancel-identity-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      store.reserve({
+        idempotencyKey: `cancel-identity-${index}`,
+        requestFingerprint: `fingerprint-${index}`,
+        clientOrderId: "known-client",
+        category: "spot",
+        symbol: "XAUTUSDT",
+        executionMode: "production_ioc",
+      });
+      store.recordProviderOrder(`cancel-identity-${index}`, "known-provider");
+      let providerCancels = 0;
+      const client = {
+        findOrderByClientOrderId: async () => ({
+          symbol: "XAUTUSDT",
+          orderId: "known-provider",
+          orderLinkId: "known-client",
+          status: "New",
+          requestedQuantity: 0.01,
+          filledQuantity: 0,
+          averagePrice: null,
+          feeUsd: 0,
+          updatedAt: Date.now(),
+          ...override,
+        }),
+        cancelOrder: async () => { providerCancels += 1; },
+      } as unknown as BinanceClientAdapter;
+      const config = tradingConfigFixture();
+      try {
+        const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+        await assert.rejects(() => manager.cancel(`cancel-identity-${index}`), /identity|missing|malformed|does not match/u);
+        assert.equal(providerCancels, 0);
+        assert.equal(store.find(`cancel-identity-${index}`)?.status, "processing");
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
+test("restart reconciliation cannot bind a mismatched filled provider order", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-reconcile-identity-restart-"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
+  store.reserve({
+    idempotencyKey: "restart-identity",
+    requestFingerprint: "restart-fingerprint",
+    clientOrderId: "known-client",
+    category: "spot",
+    symbol: "XAUTUSDT",
+    executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("restart-identity", "known-provider");
+  store.close();
+
+  store = new BinanceOrderStore(dbPath);
+  const client = {
+    findOrderByClientOrderId: async () => ({
+      symbol: "BTCUSDT",
+      orderId: "wrong-provider",
+      orderLinkId: "wrong-client",
+      status: "Filled",
+      requestedQuantity: 0.01,
+      filledQuantity: 0.01,
+      filledBaseQuantity: "0.01",
+      averagePrice: 1000,
+      feeUsd: 0,
+      updatedAt: Date.now(),
+    }),
+    readPreflightSnapshot: async () => snapshotFixture(),
+  } as unknown as BinanceClientAdapter;
+  try {
+    const config = tradingConfigFixture();
+    const result = await new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config).reconcile();
+    assert.equal(result.reconciled.length, 0);
+    assert.equal(store.find("restart-identity")?.status, "processing");
+    assert.equal(store.find("restart-identity")?.order, null);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -96,6 +241,7 @@ test("generic symbols use instrument-scoped private risk state without reading t
   let legacyReads = 0;
   const riskReads: Array<Record<string, unknown>> = [];
   const filled: BinanceProviderOrder = {
+    symbol: "BTCUSDT",
     orderId: "btc-filled", orderLinkId: "", status: "Filled", requestedQuantity: 0.001,
     filledQuantity: 0.001, averagePrice: 65_000, feeUsd: 0, updatedAt: Date.now(),
   };
@@ -195,6 +341,7 @@ test("explicit generic routing keeps formal XAUT on instrument-aware risk", asyn
       let legacyReads = 0;
       let providerMutations = 0;
       const filled: BinanceProviderOrder = {
+        symbol: "XAUTUSDT",
         orderId: `generic-xaut-${index}`, orderLinkId: "", status: "Filled", requestedQuantity: 0.1,
         filledQuantity: 0.1, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
       };
@@ -235,13 +382,18 @@ test("partially filled orders are cancelled before completion", async () => {
   let reads = 0;
   let cancellations = 0;
   const partial: BinanceProviderOrder = {
+    symbol: "XAUTUSDT",
     orderId: "provider-partial", orderLinkId: "", status: "PartiallyFilled", requestedQuantity: 0.01,
     filledQuantity: 0.005, averagePrice: 1_000, feeUsd: 0.01, updatedAt: Date.now(),
   };
   const cancelled: BinanceProviderOrder = { ...partial, status: "Cancelled" };
   const client = {
     readPreflightSnapshot: async () => snapshotFixture(),
-    placeOrder: async (request: { orderLinkId: string }) => ({ orderId: partial.orderId, orderLinkId: request.orderLinkId }),
+    placeOrder: async (request: { orderLinkId: string }) => {
+      partial.orderLinkId = request.orderLinkId;
+      cancelled.orderLinkId = request.orderLinkId;
+      return { orderId: partial.orderId, orderLinkId: request.orderLinkId };
+    },
     awaitOrder: async () => (++reads === 1 ? partial : cancelled),
     cancelOrder: async () => { cancellations += 1; },
     findOrderByClientOrderId: async () => partial,
@@ -270,6 +422,7 @@ test("GTC test order remains processing until explicit cancellation", async () =
   let clientOrderId = "";
   let submittedMode: string | undefined;
   const providerOrder = (): BinanceProviderOrder => ({
+    symbol: "XAUTUSDT",
     orderId: "gtc-1", orderLinkId: clientOrderId, status: cancelled ? "Cancelled" : "New",
     requestedQuantity: 0.01, filledQuantity: 0, averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
   });
@@ -323,8 +476,8 @@ test("risk refresh and provider submission are serialized across orders", async 
       }
       return { orderId: `provider-${writes}`, orderLinkId: request.orderLinkId };
     },
-    awaitOrder: async (_category: string, orderId: string) => ({
-      orderId, orderLinkId: "", status: "Filled", requestedQuantity: 0.01,
+    awaitOrder: async (_category: string, symbol: string, orderId: string, _deadline: number, clientOrderId: string) => ({
+      symbol, orderId, orderLinkId: clientOrderId, status: "Filled", requestedQuantity: 0.01,
       filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
     }),
     cancelOrder: async () => undefined,
@@ -362,6 +515,7 @@ test("reconciliation scans every processing order without a 100 row limit", asyn
     findOrderByClientOrderId: async (_category: string, symbol: string, clientOrderId: string) => {
       queriedSymbols.push(symbol);
       return ({
+      symbol,
       orderId: clientOrderId, orderLinkId: clientOrderId, status: "Filled", requestedQuantity: 0.01,
       filledQuantity: 0.01, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
       });
@@ -433,6 +587,7 @@ test("cancel uses the persisted generic provider symbol", async () => {
   store.recordProviderOrder("generic-cancel", "generic-provider-order");
   const symbols: string[] = [];
   const cancelled: BinanceProviderOrder = {
+    symbol: "DOGEUSDT",
     orderId: "generic-provider-order",
     orderLinkId: "generic-client-order",
     status: "Cancelled",
@@ -501,6 +656,7 @@ test("repeated cancel after an ambiguous provider response never repeats the pro
   });
   store.recordProviderOrder("cancel-once", "cancel-once-provider");
   const active: BinanceProviderOrder = {
+    symbol: "BTCUSDT",
     orderId: "cancel-once-provider",
     orderLinkId: "cancel-once-client",
     status: "New",
@@ -549,6 +705,7 @@ test("restart after claim but before dispatch can cancel an active provider orde
   store.close();
 
   const active: BinanceProviderOrder = {
+    symbol: "BTCUSDT",
     orderId: "provider", orderLinkId: "client", status: "New",
     requestedQuantity: 0.001, filledQuantity: 0,
     requestedBaseQuantity: "0.001", filledBaseQuantity: "0",
@@ -592,6 +749,7 @@ test("dispatch evidence plus a terminal provider query never repeats cancel afte
 
   let providerCancels = 0;
   const terminal: BinanceProviderOrder = {
+    symbol: "ETHUSDT",
     orderId: "provider", orderLinkId: "client", status: "Cancelled",
     requestedQuantity: 0.02, filledQuantity: 0.007,
     requestedBaseQuantity: "0.02", filledBaseQuantity: "0.007",
@@ -623,6 +781,7 @@ test("a failure before dispatch remains safely retryable", async () => {
   });
   store.recordProviderOrder("cancel-retry", "provider");
   const active: BinanceProviderOrder = {
+    symbol: "DOGEUSDT",
     orderId: "provider", orderLinkId: "client", status: "New",
     requestedQuantity: 72, filledQuantity: 0,
     requestedBaseQuantity: "72", filledBaseQuantity: "0",
@@ -682,6 +841,7 @@ test("restart keeps BTC, ETH, and DOGE symbols authoritative for cancel and reco
       const operation = clientOrderId.startsWith("cancel-") ? "cancel" : "reconcile";
       queries.push({ operation, symbol });
       return {
+        symbol,
         orderId: `${operation}-provider-${symbol}`,
         orderLinkId: clientOrderId,
         status: operation === "cancel" ? "New" : "Filled",
@@ -696,6 +856,7 @@ test("restart keeps BTC, ETH, and DOGE symbols authoritative for cancel and reco
     awaitOrder: async (_category: string, symbol: string, orderId: string) => {
       awaits.push(symbol);
       return {
+        symbol,
         orderId,
         orderLinkId: `cancel-client-${symbol}`,
         status: "Cancelled",
@@ -779,6 +940,7 @@ test("market fills preserve authoritative FILLED with missing or volatile averag
       const root = mkdtempSync(join(tmpdir(), "binance-market-fact-"));
       const store = new BinanceOrderStore(join(root, "orders.sqlite"));
       const order: BinanceProviderOrder = {
+        symbol: "XAUTUSDT",
         orderId: `market-${String(averagePrice)}`,
         orderLinkId: "",
         status: "Filled",

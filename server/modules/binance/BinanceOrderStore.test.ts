@@ -41,6 +41,7 @@ test("exact Decimal base quantities survive order persistence and restart", () =
     let store = new BinanceOrderStore(dbPath);
     store.reserve(orderReservation("BTCUSDT"));
     store.recordProcessingOrder("order-BTCUSDT", {
+      symbol: "BTCUSDT",
       orderId: "provider-decimal",
       orderLinkId: "client-BTCUSDT",
       status: "PartiallyFilled",
@@ -101,6 +102,7 @@ test("terminal provider evidence closes a claimed cancellation without losing hi
     store.claimCancellation("order-BTCUSDT");
     store.markCancellationDispatched("order-BTCUSDT");
     store.failWithOrder("order-BTCUSDT", {
+      symbol: "BTCUSDT",
       orderId: "provider-terminal",
       orderLinkId: "client-BTCUSDT",
       status: "Cancelled",

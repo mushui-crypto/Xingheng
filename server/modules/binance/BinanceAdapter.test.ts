@@ -81,6 +81,7 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
       return { orderId: "provider-1", orderLinkId };
     },
     awaitOrder: async (): Promise<BinanceProviderOrder> => ({
+      symbol: "XAUTUSDT",
       orderId: "provider-1",
       orderLinkId,
       status: "Filled",
@@ -91,6 +92,7 @@ test("read-only adapter does not change OrderManager idempotency and provider wr
       updatedAt: Date.now(),
     }),
     findOrderByClientOrderId: async (): Promise<BinanceProviderOrder> => ({
+      symbol: "XAUTUSDT",
       orderId: "provider-1",
       orderLinkId,
       status: "Filled",
@@ -176,6 +178,7 @@ test("read-only adapter does not change OrderManager UNKNOWN handling and reconc
   let writes = 0;
   let orderLinkId = "";
   const currentOrder = (): BinanceProviderOrder => ({
+    symbol: "XAUTUSDT",
     orderId: "provider-unknown",
     orderLinkId,
     status,

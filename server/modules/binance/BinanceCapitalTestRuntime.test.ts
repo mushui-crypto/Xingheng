@@ -140,6 +140,33 @@ test("GET-only reconciliation resolves UNKNOWN and updates the linked funding le
   assert.equal(fixture.service.providerMutations, 1);
 });
 
+test("filled identity mismatch stays UNKNOWN and cannot open the second leg", async () => {
+  const fixture = runtimeFixture("Unknown");
+  fixture.service.remoteOrder = providerOrder("Filled", 0.01, now + 200, { symbol: "BTCUSDT" });
+  const submitted = await fixture.runtime.submitLeg(
+    context.userId,
+    context,
+    intentFixture(),
+    startedState(),
+    request(),
+  );
+
+  const reconciled = await fixture.runtime.reconcileLeg(
+    context.userId,
+    submitted.executionState,
+    "leg-spot-long",
+    submitted.link!,
+  );
+
+  assert.equal(reconciled.observation?.state, "UNKNOWN");
+  assert.equal(reconciled.observation?.filledBaseQuantity, "0");
+  assert.equal(reconciled.executionState.status, "PENDING_RECONCILIATION");
+  assert.equal(reconciled.executionState.legs[0].status, "PENDING_RECONCILIATION");
+  assert.equal(reconciled.executionState.legs[1].status, "NOT_STARTED");
+  assert.equal(fixture.service.placeInputs.length, 1);
+  assert.equal(fixture.service.providerMutations, 1);
+});
+
 test("explicit cancel updates the ExecutionRecord and funding leg without automatic follow-up", async () => {
   const fixture = runtimeFixture("New");
   const submitted = await fixture.runtime.submitLeg(
@@ -445,8 +472,10 @@ function providerOrder(
   status: BinanceProviderOrder["status"],
   filledQuantity: number,
   updatedAt: number,
+  overrides: Partial<BinanceProviderOrder> = {},
 ): BinanceProviderOrder {
   return {
+    symbol: "XAUTUSDT",
     orderId: "fixture-runtime-order",
     orderLinkId: "fixture-runtime-client-order",
     status,
@@ -455,6 +484,7 @@ function providerOrder(
     averagePrice: filledQuantity > 0 ? 1_000 : null,
     feeUsd: 0,
     updatedAt,
+    ...overrides,
   };
 }
 

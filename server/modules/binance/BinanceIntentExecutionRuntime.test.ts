@@ -192,7 +192,12 @@ test("reconciles a user-bound remote order fact and updates ExecutionRecord with
   const records = new FakeExecutionRecordStore([record]);
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
   service.orders = [queryStoredOrder(record, { status: "New", filledQuantity: 0 })];
-  service.remoteOrder = providerOrder({ status: "PartiallyFilled", filledQuantity: 0.0015 });
+  service.remoteOrder = providerOrder({
+    orderId: "binance-order-query-1",
+    orderLinkId: "binance-client-query-1",
+    status: "PartiallyFilled",
+    filledQuantity: 0.0015,
+  });
   const runtime = new BinanceIntentExecutionRuntime(
     new FakeBinanceIntentRegistry({ "user-a": service }),
     { maxSlippageBps: 20 },
@@ -473,6 +478,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
 
 function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinanceProviderOrder {
   return {
+    symbol: "XAUTUSDT",
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status: "Filled",

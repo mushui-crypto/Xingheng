@@ -65,6 +65,7 @@ class FakeCancelBinding {
 
 function providerOrder(status: BinanceProviderOrder["status"]): BinanceProviderOrder {
   return {
+    symbol: "XAUTUSDT",
     orderId: "binance-order-1",
     orderLinkId: "binance-client-order-1",
     status,

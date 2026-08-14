@@ -12,6 +12,11 @@ import type {
   BinanceProviderOrder,
 } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
+import {
+  assertBinanceProviderOrderIdentity,
+  assertBinanceSubmissionIdentity,
+  BinanceProviderOrderIdentityError,
+} from "./BinanceProviderOrderIdentity";
 
 export type BinanceOrderInput = BinanceExecutionOrderRequest extends infer Request
   ? Request extends BinanceExecutionOrderRequest
@@ -112,16 +117,30 @@ export class BinanceOrderManager {
         const accepted = executionMode === "test_gtc"
           ? await this.client.placeTestOrder(request)
           : await this.client.placeOrder(request);
-        providerOrderId = accepted.orderId;
-        this.store.recordProviderOrder(input.idempotencyKey, accepted.orderId);
+        const acceptedIdentity = assertBinanceSubmissionIdentity(accepted, {
+          symbol: request.symbol,
+          clientOrderId: request.orderLinkId,
+        });
+        providerOrderId = acceptedIdentity.orderId;
+        this.store.recordProviderOrder(input.idempotencyKey, acceptedIdentity.orderId);
 
         if (executionMode === "test_gtc") {
-          const observed = await this.findByClientOrderId(request.category, request.symbol, request.orderLinkId);
+          const observed = await this.findByClientOrderId(
+            request.category,
+            request.symbol,
+            request.orderLinkId,
+            acceptedIdentity.orderId,
+          );
           if (!observed) throw new Error("Binance GTC test order is pending provider reconciliation.");
           return this.persistProviderState(input.idempotencyKey, observed);
         }
 
-        const order = await this.settleOrder(request.category, request.symbol, accepted.orderId);
+        const order = await this.settleOrder(
+          request.category,
+          request.symbol,
+          acceptedIdentity.orderId,
+          request.orderLinkId,
+        );
         this.persistProviderState(input.idempotencyKey, order);
         if (legacyRiskRouting) await this.syncPositions();
         return order;
@@ -131,12 +150,27 @@ export class BinanceOrderManager {
           throw error;
         }
 
-        const recovered = await this.findByClientOrderId(request.category, request.symbol, request.orderLinkId).catch(() => null);
+        if (error instanceof BinanceProviderOrderIdentityError
+          || (error instanceof BinanceProviderError && error.category === "provider_response_invalid")) {
+          this.store.markProcessingError(input.idempotencyKey, error.message);
+          throw error;
+        }
+        const recovered = await this.findByClientOrderId(
+          request.category,
+          request.symbol,
+          request.orderLinkId,
+          providerOrderId,
+        ).catch(() => null);
         if (recovered) {
           if (executionMode === "test_gtc") {
             return this.persistProviderState(input.idempotencyKey, recovered);
           }
-          const settled = await this.settleOrder(request.category, request.symbol, recovered.orderId).catch(() => null);
+          const settled = await this.settleOrder(
+            request.category,
+            request.symbol,
+            recovered.orderId,
+            request.orderLinkId,
+          ).catch(() => null);
           if (settled) {
             this.persistProviderState(input.idempotencyKey, settled);
             if (legacyRiskRouting) await this.syncPositions().catch(() => undefined);
@@ -164,7 +198,12 @@ export class BinanceOrderManager {
         throw new Error(stored.error ?? "Binance order is already terminal.");
       }
 
-      const found = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
+      const found = await this.findByClientOrderId(
+        stored.category,
+        stored.symbol,
+        stored.clientOrderId,
+        stored.providerOrderId,
+      );
       if (!found) throw new Error("Binance provider order state is unavailable for cancellation.");
       if (stored.providerOrderId && stored.providerOrderId !== found.orderId) {
         throw new Error("Binance provider order identity conflicts with the persisted order.");
@@ -202,7 +241,12 @@ export class BinanceOrderManager {
         // that do not expose the transport-start callback.
         recordDispatch();
       } catch (error) {
-        const recovered = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId).catch(() => null);
+        const recovered = await this.findByClientOrderId(
+          stored.category,
+          stored.symbol,
+          stored.clientOrderId,
+          stored.providerOrderId,
+        ).catch(() => null);
         if (!recovered) throw error;
         return this.persistProviderState(idempotencyKey, recovered);
       }
@@ -212,6 +256,7 @@ export class BinanceOrderManager {
         stored.symbol,
         found.orderId,
         Date.now() + this.config.orderTimeoutMs,
+        stored.clientOrderId,
       );
       const result = this.persistProviderState(idempotencyKey, order);
       if (stored.symbol === "XAUTUSDT") await this.syncPositions();
@@ -225,7 +270,12 @@ export class BinanceOrderManager {
       for (const stored of this.store.listProcessing()) {
         let order: BinanceProviderOrder | null;
         try {
-          order = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
+          order = await this.findByClientOrderId(
+            stored.category,
+            stored.symbol,
+            stored.clientOrderId,
+            stored.providerOrderId,
+          );
         } catch (error) {
           this.store.markProcessingError(stored.idempotencyKey, errorMessage(error));
           continue;
@@ -246,6 +296,7 @@ export class BinanceOrderManager {
               stored.symbol,
               order.orderId,
               Date.now() + this.config.orderTimeoutMs,
+              stored.clientOrderId,
             );
           } catch (error) {
             this.store.markProcessingError(stored.idempotencyKey, `Processing timeout cancellation failed: ${errorMessage(error)}`);
@@ -282,7 +333,12 @@ export class BinanceOrderManager {
       throw new Error(stored.error ?? "Previous Binance order attempt failed.");
     }
 
-    const recovered = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
+    const recovered = await this.findByClientOrderId(
+      stored.category,
+      stored.symbol,
+      stored.clientOrderId,
+      stored.providerOrderId,
+    );
     if (!recovered) {
       if (this.processingExpired(stored)) {
         this.store.fail(idempotencyKey, "Processing timeout: Binance order was not found by clientOrderId.");
@@ -291,7 +347,12 @@ export class BinanceOrderManager {
     }
 
     if (stored.executionMode === "production_ioc" && isNonTerminalProviderState(recovered)) {
-      const settled = await this.settleOrder(stored.category, stored.symbol, recovered.orderId).catch(() => null);
+      const settled = await this.settleOrder(
+        stored.category,
+        stored.symbol,
+        recovered.orderId,
+        stored.clientOrderId,
+      ).catch(() => null);
       if (!settled) {
         this.store.recordProcessingOrder(idempotencyKey, recovered);
         throw new Error("Binance order is still pending reconciliation.");
@@ -302,6 +363,13 @@ export class BinanceOrderManager {
   }
 
   private persistProviderState(idempotencyKey: string, order: BinanceProviderOrder) {
+    const stored = this.store.find(idempotencyKey);
+    if (!stored) throw new Error("Binance order identity reservation disappeared.");
+    assertBinanceProviderOrderIdentity(order, {
+      symbol: stored.symbol,
+      clientOrderId: stored.clientOrderId,
+      providerOrderId: stored.providerOrderId,
+    });
     if (order.status === "Filled") {
       this.store.complete(idempotencyKey, order);
     } else if (isFailedProviderState(order)) {
@@ -312,15 +380,29 @@ export class BinanceOrderManager {
     return order;
   }
 
-  private async findByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
-    return this.client.findOrderByClientOrderId(category, symbol, clientOrderId);
+  private async findByClientOrderId(
+    category: "spot" | "linear",
+    symbol: string,
+    clientOrderId: string,
+    providerOrderId?: string | null,
+  ) {
+    const order = await this.client.findOrderByClientOrderId(category, symbol, clientOrderId);
+    return order
+      ? assertBinanceProviderOrderIdentity(order, { symbol, clientOrderId, providerOrderId })
+      : null;
   }
 
-  private async settleOrder(category: "spot" | "linear", symbol: string, orderId: string) {
-    let order = await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs);
+  private async settleOrder(category: "spot" | "linear", symbol: string, orderId: string, clientOrderId: string) {
+    let order = assertBinanceProviderOrderIdentity(
+      await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs, clientOrderId),
+      { symbol, clientOrderId, providerOrderId: orderId },
+    );
     if (isNonTerminalProviderState(order)) {
       await this.client.cancelOrder(category, symbol, orderId);
-      order = await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs);
+      order = assertBinanceProviderOrderIdentity(
+        await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs, clientOrderId),
+        { symbol, clientOrderId, providerOrderId: orderId },
+      );
     }
     if (isNonTerminalProviderState(order)) {
       throw new Error("Binance order remains non-terminal and requires reconciliation.");
