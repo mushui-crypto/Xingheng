@@ -28,14 +28,16 @@ test("MAX_ORDER_USD and MAX_POSITION_USD are enforced", () => {
   );
 });
 
-test("live and kill-switch gates allow only risk-reducing mutations", () => {
+test("live and kill-switch gates allow only perpetual reduceOnly mutations and cancel", () => {
   for (const guard of [
     new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: false })),
     new BinanceRiskGuard(tradingConfigFixture({ killSwitchActive: true })),
   ]) {
     assert.doesNotThrow(() => guard.assertCancellationAllowed());
-    assert.doesNotThrow(
+    assert.throws(
       () => guard.assertOrderAllowed(orderFixture({ category: "spot", side: "Sell" }), snapshotFixture()),
+      (error: unknown) => error instanceof BinanceRiskError
+        && ["live_trading_disabled", "kill_switch_active"].includes(error.category),
     );
     assert.doesNotThrow(
       () => guard.assertOrderAllowed(
@@ -44,6 +46,10 @@ test("live and kill-switch gates allow only risk-reducing mutations", () => {
       ),
     );
   }
+
+  assert.doesNotThrow(() => new BinanceRiskGuard(
+    tradingConfigFixture({ liveTradingEnabled: true, killSwitchActive: false }),
+  ).assertOrderAllowed(orderFixture({ category: "spot", side: "Sell" }), snapshotFixture()));
 
   const killSwitchActive = new BinanceRiskGuard(tradingConfigFixture({ killSwitchActive: true }));
   assert.throws(

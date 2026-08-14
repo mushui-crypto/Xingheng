@@ -7,7 +7,7 @@ import type { BinanceClientAdapter } from "./BinanceTypes";
 import type { BinanceProviderOrder } from "./BinanceTypes";
 import { BinanceOrderManager } from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
-import { BinanceRiskGuard } from "./BinanceRiskGuard";
+import { BinanceRiskError, BinanceRiskGuard } from "./BinanceRiskGuard";
 import { BinanceProviderError } from "./BinanceClient";
 import { snapshotFixture, tradingConfigFixture } from "./binanceTestFixtures";
 
@@ -285,6 +285,44 @@ test("reconciliation scans every processing order without a 100 row limit", asyn
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy XAUT Spot SELL cannot reach the provider while risk gates are closed", async () => {
+  for (const config of [
+    tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: false }),
+    tradingConfigFixture({ liveTradingEnabled: true, killSwitchActive: true }),
+  ]) {
+    const root = mkdtempSync(join(tmpdir(), "binance-legacy-spot-close-gate-"));
+    const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+    let providerWrites = 0;
+    const client = {
+      readPreflightSnapshot: async () => snapshotFixture(),
+      placeOrder: async () => {
+        providerWrites += 1;
+        return { orderId: "must-not-submit", orderLinkId: "must-not-submit" };
+      },
+    } as unknown as BinanceClientAdapter;
+    const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+    try {
+      await assert.rejects(
+        () => manager.place({
+          idempotencyKey: `legacy-spot-close-${String(config.liveTradingEnabled)}-${String(config.killSwitchActive)}`,
+          category: "spot",
+          symbol: "XAUTUSDT",
+          side: "Sell",
+          quantity: "0.01",
+          limitPrice: "1000",
+          reduceOnly: false,
+        }),
+        (error: unknown) => error instanceof BinanceRiskError
+          && ["live_trading_disabled", "kill_switch_active"].includes(error.category),
+      );
+      assert.equal(providerWrites, 0);
+    } finally {
+      store.close();
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

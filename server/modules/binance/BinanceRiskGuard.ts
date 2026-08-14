@@ -237,7 +237,7 @@ function powerOfTen(exponent: number) {
 }
 
 function isRiskReducing(request: BinanceOrderRequest) {
-  return request.reduceOnly || (request.category === "spot" && request.side === "Sell");
+  return request.category === "linear" && request.reduceOnly;
 }
 
 function permissionsSafe(snapshot: BinancePreflightSnapshot) {
