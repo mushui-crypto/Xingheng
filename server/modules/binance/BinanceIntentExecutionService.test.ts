@@ -21,6 +21,7 @@ test("converts canonical perpetual intent into Binance execution request", async
   assert.equal(result.confirmedQuantity, "0.002");
   assert.equal(result.executionAttemptId, "intent-user-1");
   assert.deepEqual(binding.contextInstrumentIds, ["XAUT-USDT-PERP"]);
+  assert.deepEqual(binding.riskRoutings, ["generic"]);
   assert.equal(binding.providerMutations, 1);
   assert.deepEqual(binding.placeInputs[0], {
     idempotencyKey: binding.placeInputs[0]!.idempotencyKey,
@@ -136,7 +137,7 @@ test("generic IOC protection prices use exact Decimal BUY ceil and SELL floor al
       expected: "0.1231",
     },
     {
-      name: "XAUT legacy 0.1 tick",
+      name: "XAUT generic 0.1 tick",
       instrumentId: "XAUT-USDT-PERP",
       side: "buy",
       bid: "1000",
@@ -202,6 +203,7 @@ test("preserves the existing RiskGuard path through the pre-mutation hook", asyn
     /RiskGuard blocked before provider mutation/u,
   );
   assert.deepEqual(binding.contextInstrumentIds, ["XAUT-USDT-PERP"]);
+  assert.deepEqual(binding.riskRoutings, ["legacy"]);
   assert.equal(binding.providerMutations, 0);
   assert.equal(binding.placeInputs.length, 0);
 });
@@ -252,6 +254,7 @@ class FakeBinancePersonalTradingBinding {
   readonly placeInputs: BinanceOrderInput[] = [];
   readonly contextInstrumentIds: string[] = [];
   readonly riskContexts: BinanceGenericRiskContext[] = [];
+  readonly riskRoutings: string[] = [];
   placeCalls = 0;
   providerMutations = 0;
   placeResult: BinanceProviderOrder = providerOrder({ status: "Filled" });
@@ -269,8 +272,10 @@ class FakeBinancePersonalTradingBinding {
     input: BinanceOrderInput,
     beforeProviderMutation?: (riskValuationPrice: number) => void | Promise<void>,
     genericRiskContext?: BinanceGenericRiskContext,
+    riskRouting?: "generic" | "legacy",
   ) {
     this.placeCalls += 1;
+    if (riskRouting) this.riskRoutings.push(riskRouting);
     await beforeProviderMutation?.(input.limitPrice === undefined ? 1_004.1 : Number(input.limitPrice));
     this.providerMutations += 1;
     if (this.failure) throw this.failure;

@@ -12,10 +12,6 @@ import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageEx
 import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
-import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
-import { FundingArbitrageManualExecutionService } from "./modules/api/FundingArbitrageManualExecutionService";
-import { ManualRequestFundingArbitrageExecutionIntentSource } from "./modules/api/ManualRequestFundingArbitrageExecutionIntentSource";
-import { CredentialVenueExecutionAccountResolver } from "./modules/api/CredentialVenueExecutionAccountResolver";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
 import { registerAccountReadRoutes } from "./modules/api/accountReadRoutes";
 import { registerExchangeCredentialRoutes } from "./modules/api/exchangeCredentialRoutes";
@@ -63,7 +59,6 @@ import {
 } from "./modules/account-read/AccountUsdtValuationService";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
-import { FundingLegExecutionLinkStore } from "./modules/cex/funding-arbitrage/FundingLegExecutionLinkStore";
 import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
 import { ArbitrageInstanceQueryService } from "./modules/cex/arbitrage-instance/ArbitrageInstanceQueryService";
 import { createDefaultArbitragePositionVerificationService } from "./modules/cex/arbitrage-instance/createDefaultArbitragePositionVerificationService";
@@ -187,7 +182,6 @@ const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new OkxAccountReadProviderFactory(),
 ], new AccountUsdtValuationService(new ArbitrageDashboardUsdtSpotPriceSource(arbitrageDashboard)));
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
-const fundingLegExecutionLinks = new FundingLegExecutionLinkStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
 const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
@@ -221,13 +215,6 @@ const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   binanceExecutionRuntime,
   arbitrageExecutionCommand,
 );
-const fundingManualExecution = new FundingArbitrageManualExecutionService(
-  new ManualRequestFundingArbitrageExecutionIntentSource(),
-  new CredentialVenueExecutionAccountResolver(userExchangeCredentials),
-  binanceExecutionRuntime,
-  fundingLegExecutionLinks,
-  arbitrageInstances,
-);
 const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {
   deleteCredential: (userId, venue) => venue === "binance"
     ? binancePersonalTrading.deleteCredential(userId)
@@ -240,7 +227,6 @@ registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
-registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
 registerAccountReadRoutes(app, accountRead);
 registerExchangeCredentialRoutes(app, userExchangeCredentialService);
@@ -435,7 +421,6 @@ async function shutdown(signal: string) {
       });
     });
     userExchangeCredentials.close();
-    fundingLegExecutionLinks.close();
     executionRecordStore.close();
     tradingStore.close();
     clearTimeout(forceExit);

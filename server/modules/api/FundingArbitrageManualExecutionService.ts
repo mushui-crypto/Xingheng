@@ -72,6 +72,8 @@ export type FundingArbitrageManualExecutionResult<TResult = unknown> = Readonly<
   execution: TResult;
 }>;
 
+// PRODUCTION_NOT_WIRED: retained only for legacy/internal tests. Formal provider mutation is
+// orchestrated exclusively by ArbitrageExecutionCommandService in production composition.
 export class FundingArbitrageManualExecutionService<TResult = unknown> {
   private readonly adapter = new FundingArbitrageIntentAdapter();
 

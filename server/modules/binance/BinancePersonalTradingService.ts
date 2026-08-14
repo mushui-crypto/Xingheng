@@ -2,6 +2,7 @@ import { BinanceCredential } from "./BinanceCredential";
 import {
   BinanceOrderManager,
   type BinanceOrderInput,
+  type BinanceOrderRiskRouting,
   type BinanceProviderMutationGuard,
 } from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
@@ -115,10 +116,11 @@ export class BinancePersonalTradingService {
 
   async placeExecutionOrder(
     input: BinanceOrderInput,
-    beforeProviderMutation?: BinanceProviderMutationGuard,
-    genericRiskContext?: BinanceGenericRiskContext,
+    beforeProviderMutation: BinanceProviderMutationGuard | undefined,
+    genericRiskContext: BinanceGenericRiskContext | undefined,
+    riskRouting: BinanceOrderRiskRouting,
   ) {
-    return this.requireOrders().place(input, beforeProviderMutation, genericRiskContext);
+    return this.requireOrders().place(input, beforeProviderMutation, genericRiskContext, riskRouting);
   }
 
   loadExecutionReadContext(instrumentId: string) {

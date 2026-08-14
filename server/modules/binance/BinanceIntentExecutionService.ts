@@ -63,11 +63,12 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       prepared.order,
       this.assertSubmitAllowed
         ? (riskValuationPrice) => this.assertSubmitAllowed!({
-          ...prepared.order,
-          limitPrice: riskValuationPrice,
-        })
+            ...prepared.order,
+            limitPrice: riskValuationPrice,
+          })
         : undefined,
       prepared.riskContext,
+      this.assertSubmitAllowed ? "legacy" : "generic",
     );
     return this.mapResult(Object.freeze({
       executionAttemptId: intent.intentId,

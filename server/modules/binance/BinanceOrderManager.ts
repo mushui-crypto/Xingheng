@@ -21,6 +21,8 @@ export type BinanceOrderInput = BinanceExecutionOrderRequest extends infer Reque
 
 export type BinanceProviderMutationGuard = (riskValuationPrice: number) => void | Promise<void>;
 
+export type BinanceOrderRiskRouting = "generic" | "legacy";
+
 export class BinanceOrderManager {
   private readonly orderLock = new AsyncLock();
 
@@ -35,22 +37,30 @@ export class BinanceOrderManager {
     input: BinanceOrderInput,
     beforeProviderMutation?: BinanceProviderMutationGuard,
     genericRiskContext?: BinanceGenericRiskContext,
+    riskRouting: BinanceOrderRiskRouting = "legacy",
   ) {
-    return this.placeWithMode(input, "production_ioc", beforeProviderMutation, genericRiskContext);
+    return this.placeWithMode(input, "production_ioc", beforeProviderMutation, genericRiskContext, riskRouting);
   }
 
   placeTestOrder(input: BinanceOrderInput) {
     if (input.limitPrice === undefined) {
       throw new Error("Binance GTC test order requires an explicit Decimal limit price.");
     }
-    return this.placeWithMode({ ...input, executionPriceMode: "IOC_LIMIT", limitPrice: input.limitPrice }, "test_gtc");
+    return this.placeWithMode(
+      { ...input, executionPriceMode: "IOC_LIMIT", limitPrice: input.limitPrice },
+      "test_gtc",
+      undefined,
+      undefined,
+      "legacy",
+    );
   }
 
   private async placeWithMode(
     input: BinanceOrderInput,
     executionMode: BinanceOrderExecutionMode,
-    beforeProviderMutation?: BinanceProviderMutationGuard,
-    genericRiskContext?: BinanceGenericRiskContext,
+    beforeProviderMutation: BinanceProviderMutationGuard | undefined,
+    genericRiskContext: BinanceGenericRiskContext | undefined,
+    riskRouting: BinanceOrderRiskRouting,
   ) {
     const request = normalizeRequest(input);
     const requestFingerprint = fingerprint(request, executionMode);
@@ -73,16 +83,16 @@ export class BinanceOrderManager {
 
       let providerOrderId: string | null = null;
       let submissionStarted = false;
-      const legacyXaut = request.symbol === "XAUTUSDT";
+      const legacyRiskRouting = riskRouting === "legacy";
       try {
-        if (legacyXaut) {
+        if (legacyRiskRouting) {
           const snapshot = await this.syncPositions();
           const legacyRiskRequest = toLegacyRiskRequest(request, snapshot, this.config.maxSlippageBps);
           this.risk.assertOrderAllowed(legacyRiskRequest, snapshot);
           await beforeProviderMutation?.(legacyRiskRequest.limitPrice);
         } else {
           if (beforeProviderMutation) {
-            throw new Error("Binance legacy Capital Test guard cannot be used for generic instruments.");
+            throw new Error("Binance legacy Capital Test guard cannot be used for generic execution.");
           }
           if (!genericRiskContext) {
             throw new Error("Binance generic execution risk context is required.");
@@ -113,7 +123,7 @@ export class BinanceOrderManager {
 
         const order = await this.settleOrder(request.category, request.symbol, accepted.orderId);
         this.persistProviderState(input.idempotencyKey, order);
-        if (legacyXaut) await this.syncPositions();
+        if (legacyRiskRouting) await this.syncPositions();
         return order;
       } catch (error) {
         if (!submissionStarted) {
@@ -129,7 +139,7 @@ export class BinanceOrderManager {
           const settled = await this.settleOrder(request.category, request.symbol, recovered.orderId).catch(() => null);
           if (settled) {
             this.persistProviderState(input.idempotencyKey, settled);
-            if (legacyXaut) await this.syncPositions().catch(() => undefined);
+            if (legacyRiskRouting) await this.syncPositions().catch(() => undefined);
             return settled;
           }
         }

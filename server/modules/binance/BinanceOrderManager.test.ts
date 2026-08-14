@@ -125,7 +125,7 @@ test("generic symbols use instrument-scoped private risk state without reading t
       quantity: "0.001",
       limitPrice: "65000",
       reduceOnly: false,
-    }, undefined, genericRiskContext());
+    }, undefined, genericRiskContext(), "generic");
     assert.equal(writes, 1);
     assert.equal(legacyReads, 0);
     assert.deepEqual(riskReads, [{ category: "spot", symbol: "BTCUSDT", baseAsset: "BTC" }]);
@@ -133,6 +133,99 @@ test("generic symbols use instrument-scoped private risk state without reading t
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("explicit generic routing keeps formal XAUT on instrument-aware risk", async (t) => {
+  const scenarios = [
+    {
+      name: "Spot BUY ignores legacy 25/100 caps",
+      config: tradingConfigFixture({ maxOrderUsd: 25, maxPositionUsd: 100 }),
+      input: { category: "spot" as const, side: "Buy" as const, quantity: "1", limitPrice: "1000", reduceOnly: false },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-SPOT", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ symbol: "XAUTUSDT", baseAsset: "XAUT", availableUsdt: "2000", availableBaseAsset: "1" }),
+      expectedError: null,
+    },
+    {
+      name: "Spot SELL obeys LIVE gate",
+      config: tradingConfigFixture({ liveTradingEnabled: false }),
+      input: { category: "spot" as const, side: "Sell" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: false },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-SPOT", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: "1" }),
+      expectedError: /LIVE_TRADING_ENABLED/u,
+    },
+    {
+      name: "Spot SELL obeys kill gate",
+      config: tradingConfigFixture({ killSwitchActive: true }),
+      input: { category: "spot" as const, side: "Sell" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: false },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-SPOT", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: "1" }),
+      expectedError: /kill switch/u,
+    },
+    {
+      name: "Perp OPEN accepts provider-valid non-1x leverage",
+      config: tradingConfigFixture(),
+      input: { category: "linear" as const, side: "Buy" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: false },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-PERP", category: "linear", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ category: "linear", symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: null, position: { side: "flat", quantity: "0", leverage: "2.5" } }),
+      expectedError: null,
+    },
+    {
+      name: "Perp reduceOnly allows a controlled exit against the real position",
+      config: tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }),
+      input: { category: "linear" as const, side: "Sell" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: true },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-PERP", category: "linear", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ category: "linear", symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: null, position: { side: "long", quantity: "0.2", leverage: "3" } }),
+      expectedError: null,
+    },
+    {
+      name: "Perp reduceOnly validates real position side",
+      config: tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }),
+      input: { category: "linear" as const, side: "Buy" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: true },
+      context: genericRiskContext({ instrumentId: "XAUT-USDT-PERP", category: "linear", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
+      snapshot: genericRiskSnapshot({ category: "linear", symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: null, position: { side: "long", quantity: "0.2", leverage: "3" } }),
+      expectedError: /does not reduce the real position/u,
+    },
+  ] as const;
+
+  for (const [index, scenario] of scenarios.entries()) {
+    await t.test(scenario.name, async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-generic-xaut-risk-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      let legacyReads = 0;
+      let providerMutations = 0;
+      const filled: BinanceProviderOrder = {
+        orderId: `generic-xaut-${index}`, orderLinkId: "", status: "Filled", requestedQuantity: 0.1,
+        filledQuantity: 0.1, averagePrice: 1_000, feeUsd: 0, updatedAt: Date.now(),
+      };
+      const client = {
+        readPreflightSnapshot: async () => { legacyReads += 1; return snapshotFixture(); },
+        readGenericRiskSnapshot: async () => scenario.snapshot,
+        placeOrder: async (request: { orderLinkId: string }) => {
+          providerMutations += 1;
+          filled.orderLinkId = request.orderLinkId;
+          return { orderId: filled.orderId, orderLinkId: request.orderLinkId };
+        },
+        awaitOrder: async () => filled,
+        findOrderByClientOrderId: async () => filled,
+      } as unknown as BinanceClientAdapter;
+      const manager = new BinanceOrderManager(client, new BinanceRiskGuard(scenario.config), store, scenario.config);
+      const operation = () => manager.place({
+        idempotencyKey: `generic-xaut-${index}`,
+        symbol: "XAUTUSDT",
+        executionPriceMode: "IOC_LIMIT",
+        ...scenario.input,
+      }, undefined, scenario.context, "generic");
+      try {
+        if (scenario.expectedError) await assert.rejects(operation, scenario.expectedError);
+        else assert.equal((await operation()).status, "Filled");
+        assert.equal(legacyReads, 0);
+        assert.equal(providerMutations, scenario.expectedError ? 0 : 1);
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
   }
 });
 

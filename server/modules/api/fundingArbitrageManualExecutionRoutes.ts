@@ -8,6 +8,7 @@ import { BinanceRiskError } from "../binance/BinanceRiskGuard";
 import { CredentialKeyProviderError } from "../credentials/CredentialKeyProvider";
 import { UserExchangeCredentialStoreError } from "../credentials/UserExchangeCredentialStore";
 
+// PRODUCTION_NOT_WIRED: retained only for legacy route tests; server/index.ts must not register it.
 export function registerFundingArbitrageManualExecutionRoutes(
   app: express.Express,
   service: FundingArbitrageManualExecutionService,
