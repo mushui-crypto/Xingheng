@@ -147,7 +147,7 @@ export class BinanceOrderManager {
 
   async cancel(idempotencyKey: string) {
     return this.orderLock.run(async () => {
-      const stored = this.store.find(idempotencyKey);
+      let stored = this.store.find(idempotencyKey);
       if (!stored) throw new Error("Binance order was not found.");
       if (stored.status !== "processing") {
         if (stored.order) return stored.order;
@@ -155,18 +155,42 @@ export class BinanceOrderManager {
       }
 
       const found = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId);
-      const providerOrderId = stored.providerOrderId ?? found?.orderId;
-      if (!providerOrderId) throw new Error("Binance provider order is not available for cancellation.");
+      if (!found) throw new Error("Binance provider order state is unavailable for cancellation.");
+      if (stored.providerOrderId && stored.providerOrderId !== found.orderId) {
+        throw new Error("Binance provider order identity conflicts with the persisted order.");
+      }
+      if (isTerminalProviderState(found)) return this.persistProviderState(idempotencyKey, found);
+      if (!isActiveProviderState(found)) return this.persistProviderState(idempotencyKey, found);
 
-      // Persist the cancel claim immediately before the provider mutation. A repeated request or
-      // restarted process may query/reconcile this known order, but must not submit cancel twice.
-      if (!this.store.claimCancellation(idempotencyKey)) {
-        if (!found) throw new Error("Binance cancellation is pending reconciliation.");
+      if (stored.cancelDispatchState === null) {
+        this.store.claimCancellation(idempotencyKey);
+        stored = this.store.find(idempotencyKey);
+        if (!stored) throw new Error("Binance cancellation claim disappeared.");
+      }
+      if (stored.cancelDispatchState === "LEGACY_UNKNOWN") {
+        this.persistProviderState(idempotencyKey, found);
+        throw new Error("Legacy Binance cancellation dispatch state is ambiguous and requires manual reconciliation.");
+      }
+      if (stored.cancelDispatchState === "DISPATCHED_UNKNOWN") {
         return this.persistProviderState(idempotencyKey, found);
       }
+      if (stored.cancelDispatchState !== "CLAIMED_NOT_DISPATCHED") {
+        throw new Error("Binance cancellation dispatch state conflicts with the active provider order.");
+      }
 
+      let dispatchRecorded = false;
+      const recordDispatch = () => {
+        if (dispatchRecorded) return;
+        if (!this.store.markCancellationDispatched(idempotencyKey)) {
+          throw new Error("Binance cancellation dispatch could not be persisted.");
+        }
+        dispatchRecorded = true;
+      };
       try {
-        await this.client.cancelOrder(stored.category, stored.symbol, providerOrderId);
+        await this.client.cancelOrder(stored.category, stored.symbol, found.orderId, recordDispatch);
+        // A successful adapter return is also authoritative dispatch evidence for compatible clients
+        // that do not expose the transport-start callback.
+        recordDispatch();
       } catch (error) {
         const recovered = await this.findByClientOrderId(stored.category, stored.symbol, stored.clientOrderId).catch(() => null);
         if (!recovered) throw error;
@@ -176,7 +200,7 @@ export class BinanceOrderManager {
       const order = await this.client.awaitOrder(
         stored.category,
         stored.symbol,
-        providerOrderId,
+        found.orderId,
         Date.now() + this.config.orderTimeoutMs,
       );
       const result = this.persistProviderState(idempotencyKey, order);
@@ -399,6 +423,14 @@ function legacyDecimalNumber(value: string, name: string) {
 
 function isNonTerminalProviderState(order: BinanceProviderOrder) {
   return order.status === "New" || order.status === "PartiallyFilled" || order.status === "Unknown";
+}
+
+function isActiveProviderState(order: BinanceProviderOrder) {
+  return order.status === "New" || order.status === "PartiallyFilled";
+}
+
+function isTerminalProviderState(order: BinanceProviderOrder) {
+  return order.status === "Filled" || isFailedProviderState(order);
 }
 
 function isFailedProviderState(order: BinanceProviderOrder) {

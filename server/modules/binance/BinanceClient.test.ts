@@ -95,6 +95,7 @@ test("provider request validation requires Decimal price only for IOC limit orde
 
 test("generic place, query, and cancel keep the authoritative provider symbol and Decimal price", async () => {
   const requests: Array<{ method: string; path: string; symbol: string | null; price: string | null; reduceOnly: string | null }> = [];
+  let cancelDispatches = 0;
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
     const url = new URL(String(input));
     if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
@@ -135,7 +136,7 @@ test("generic place, query, and cancel keep the authoritative provider symbol an
     orderLinkId: "ptmbtc",
   });
   const queried = await client.findOrderByClientOrderId("spot", "BTCUSDT", "ptmbtc");
-  await client.cancelOrder("spot", "BTCUSDT", "7");
+  await client.cancelOrder("spot", "BTCUSDT", "7", () => { cancelDispatches += 1; });
 
   assert.ok(requests.length >= 4);
   assert.ok(requests.every((request) => request.symbol === "BTCUSDT"));
@@ -147,6 +148,28 @@ test("generic place, query, and cancel keep the authoritative provider symbol an
   assert.equal(requests.find((request) => request.method === "POST")?.method, "POST");
   assert.equal(queried?.requestedBaseQuantity, "0.000000010000000001");
   assert.equal(queried?.filledBaseQuantity, "0");
+  assert.equal(cancelDispatches, 1);
+});
+
+test("cancel dispatch evidence is emitted only after the provider DELETE transport starts", async () => {
+  const events: string[] = [];
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+      events.push(`transport:${init?.method ?? "GET"}`);
+      throw new Error("response unavailable");
+    }) as typeof fetch,
+    Date.now,
+    ["203.0.113.10"],
+  );
+
+  await assert.rejects(
+    () => client.cancelOrder("spot", "BTCUSDT", "7", () => { events.push("dispatch-persisted"); }),
+    /连接失败/u,
+  );
+  assert.deepEqual(events, ["transport:DELETE", "dispatch-persisted"]);
 });
 
 test("spot and USD-M order responses preserve full, partial, and cancelled Decimal executedQty", async (t) => {

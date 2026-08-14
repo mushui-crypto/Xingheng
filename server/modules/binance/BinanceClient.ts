@@ -426,7 +426,12 @@ export class BinanceClient implements BinanceClientAdapter {
     });
   }
 
-  async cancelOrder(category: "spot" | "linear", symbol: string, orderId: string) {
+  async cancelOrder(
+    category: "spot" | "linear",
+    symbol: string,
+    orderId: string,
+    onDispatch?: () => void,
+  ) {
     assertProviderSymbol(symbol);
     await this.signedRequest(
       category === "spot" ? "spot" : "futures",
@@ -434,6 +439,7 @@ export class BinanceClient implements BinanceClientAdapter {
       { symbol, orderId },
       true,
       "DELETE",
+      onDispatch,
     );
   }
 
@@ -637,6 +643,7 @@ export class BinanceClient implements BinanceClientAdapter {
     params: Record<string, string> = {},
     allowTimestampRetry = true,
     method: "GET" | "POST" | "DELETE" = "GET",
+    onDispatch?: () => void,
   ): Promise<unknown> {
     const offset = await this.serverTimeOffset();
     const query = new URLSearchParams();
@@ -652,7 +659,7 @@ export class BinanceClient implements BinanceClientAdapter {
         method,
         headers: { Accept: "application/json", "X-MBX-APIKEY": this.credentials.apiKey },
         signal: AbortSignal.timeout(5_000),
-      }));
+      }, onDispatch));
     } catch (error) {
       if (allowTimestampRetry && error instanceof BinanceProviderError && error.providerCode === -1021) {
         this.timeOffset = null;
@@ -690,9 +697,13 @@ export class BinanceClient implements BinanceClientAdapter {
     }));
   }
 
-  private async fetchResponse(url: URL, init: RequestInit) {
+  private async fetchResponse(url: URL, init: RequestInit, onDispatch?: () => void) {
     try {
-      return await this.fetchFn(url, init);
+      const response = this.fetchFn(url, init);
+      // The request promise now exists: transport dispatch has started. Persisting before this point
+      // would incorrectly treat a pre-dispatch failure as an ambiguous provider mutation.
+      onDispatch?.();
+      return await response;
     } catch (error) {
       if (isAbortError(error)) {
         throw new BinanceProviderError("provider_timeout", "Binance 私有接口响应超时。");

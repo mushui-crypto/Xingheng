@@ -311,12 +311,13 @@ test("cancel uses the persisted generic provider symbol", async () => {
     feeUsd: 0,
     updatedAt: Date.now(),
   };
+  const active = { ...cancelled, status: "New" as const };
   let legacyReads = 0;
   const client = {
     readPreflightSnapshot: async () => { legacyReads += 1; return snapshotFixture(); },
     findOrderByClientOrderId: async (_category: string, symbol: string) => {
       symbols.push(symbol);
-      return cancelled;
+      return active;
     },
     cancelOrder: async (_category: string, symbol: string) => { symbols.push(symbol); },
     awaitOrder: async (_category: string, symbol: string) => {
@@ -381,7 +382,11 @@ test("repeated cancel after an ambiguous provider response never repeats the pro
   let providerCancels = 0;
   const client = {
     findOrderByClientOrderId: async () => active,
-    cancelOrder: async () => { providerCancels += 1; throw new Error("ambiguous cancel"); },
+    cancelOrder: async (_category: string, _symbol: string, _orderId: string, onDispatch?: () => void) => {
+      providerCancels += 1;
+      onDispatch?.();
+      throw new Error("ambiguous cancel");
+    },
   } as unknown as BinanceClientAdapter;
   const config = tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true });
   try {
@@ -394,6 +399,122 @@ test("repeated cancel after an ambiguous provider response never repeats the pro
     manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
     assert.equal((await manager.cancel("cancel-once")).status, "New");
     assert.equal(providerCancels, 1);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart after claim but before dispatch can cancel an active provider order exactly once", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-cancel-before-dispatch-"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
+  store.reserve({
+    idempotencyKey: "cancel-recover", requestFingerprint: "fingerprint", clientOrderId: "client",
+    category: "spot", symbol: "BTCUSDT", executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("cancel-recover", "provider");
+  store.claimCancellation("cancel-recover");
+  store.close();
+
+  const active: BinanceProviderOrder = {
+    orderId: "provider", orderLinkId: "client", status: "New",
+    requestedQuantity: 0.001, filledQuantity: 0,
+    requestedBaseQuantity: "0.001", filledBaseQuantity: "0",
+    averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
+  };
+  const cancelled = { ...active, status: "Cancelled" as const };
+  let providerCancels = 0;
+  const client = {
+    findOrderByClientOrderId: async () => active,
+    cancelOrder: async (_category: string, _symbol: string, _orderId: string, onDispatch?: () => void) => {
+      providerCancels += 1;
+      onDispatch?.();
+    },
+    awaitOrder: async () => cancelled,
+  } as unknown as BinanceClientAdapter;
+  store = new BinanceOrderStore(dbPath);
+  const config = tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true });
+  try {
+    const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+    assert.equal((await manager.cancel("cancel-recover")).status, "Cancelled");
+    assert.equal(providerCancels, 1);
+    assert.equal(store.find("cancel-recover")?.cancelDispatchState, "TERMINAL_CONFIRMED");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dispatch evidence plus a terminal provider query never repeats cancel after restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-cancel-after-dispatch-"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
+  store.reserve({
+    idempotencyKey: "cancel-terminal", requestFingerprint: "fingerprint", clientOrderId: "client",
+    category: "linear", symbol: "ETHUSDT", executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("cancel-terminal", "provider");
+  store.claimCancellation("cancel-terminal");
+  store.markCancellationDispatched("cancel-terminal");
+  store.close();
+
+  let providerCancels = 0;
+  const terminal: BinanceProviderOrder = {
+    orderId: "provider", orderLinkId: "client", status: "Cancelled",
+    requestedQuantity: 0.02, filledQuantity: 0.007,
+    requestedBaseQuantity: "0.02", filledBaseQuantity: "0.007",
+    averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
+  };
+  const client = {
+    findOrderByClientOrderId: async () => terminal,
+    cancelOrder: async () => { providerCancels += 1; },
+  } as unknown as BinanceClientAdapter;
+  store = new BinanceOrderStore(dbPath);
+  try {
+    const manager = new BinanceOrderManager(client, new BinanceRiskGuard(tradingConfigFixture()), store, tradingConfigFixture());
+    const result = await manager.cancel("cancel-terminal");
+    assert.equal(result.filledBaseQuantity, "0.007");
+    assert.equal(providerCancels, 0);
+    assert.equal(store.find("cancel-terminal")?.cancelDispatchState, "TERMINAL_CONFIRMED");
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a failure before dispatch remains safely retryable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-cancel-pre-dispatch-failure-"));
+  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  store.reserve({
+    idempotencyKey: "cancel-retry", requestFingerprint: "fingerprint", clientOrderId: "client",
+    category: "spot", symbol: "DOGEUSDT", executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("cancel-retry", "provider");
+  const active: BinanceProviderOrder = {
+    orderId: "provider", orderLinkId: "client", status: "New",
+    requestedQuantity: 72, filledQuantity: 0,
+    requestedBaseQuantity: "72", filledBaseQuantity: "0",
+    averagePrice: null, feeUsd: 0, updatedAt: Date.now(),
+  };
+  const cancelled = { ...active, status: "Cancelled" as const };
+  let attempts = 0;
+  const client = {
+    findOrderByClientOrderId: async () => active,
+    cancelOrder: async (_category: string, _symbol: string, _orderId: string, onDispatch?: () => void) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("failed before dispatch");
+      onDispatch?.();
+    },
+    awaitOrder: async () => cancelled,
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true });
+  try {
+    const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+    assert.equal((await manager.cancel("cancel-retry")).status, "New");
+    assert.equal(store.find("cancel-retry")?.cancelDispatchState, "CLAIMED_NOT_DISPATCHED");
+    assert.equal((await manager.cancel("cancel-retry")).status, "Cancelled");
+    assert.equal(attempts, 2);
   } finally {
     store.close();
     rmSync(root, { recursive: true, force: true });
@@ -432,7 +553,7 @@ test("restart keeps BTC, ETH, and DOGE symbols authoritative for cancel and reco
       return {
         orderId: `${operation}-provider-${symbol}`,
         orderLinkId: clientOrderId,
-        status: operation === "cancel" ? "Cancelled" : "Filled",
+        status: operation === "cancel" ? "New" : "Filled",
         requestedQuantity: 1,
         filledQuantity: operation === "cancel" ? 0 : 1,
         averagePrice: operation === "cancel" ? null : 1,

@@ -471,6 +471,7 @@ function storedOrder(input: BinanceOrderInput, order: BinanceProviderOrder): Bin
     order,
     error: null,
     cancelRequestedAt: null,
+    cancelDispatchState: null,
     createdAt: now,
     updatedAt: order.updatedAt,
   };

@@ -101,6 +101,7 @@ function storedOrder(): BinanceStoredOrder {
     order: providerOrder("New", 0),
     error: null,
     cancelRequestedAt: null,
+    cancelDispatchState: null,
     createdAt: now - 1_000,
     updatedAt: now - 1_000,
   };

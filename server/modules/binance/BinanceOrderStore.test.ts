@@ -63,7 +63,7 @@ test("exact Decimal base quantities survive order persistence and restart", () =
   }
 });
 
-test("known-order cancellation claim is durable and idempotent across restart", () => {
+test("known-order cancellation claim and dispatch evidence are durable across restart", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-cancel-claim-"));
   const dbPath = join(root, "orders.sqlite");
   try {
@@ -72,11 +72,76 @@ test("known-order cancellation claim is durable and idempotent across restart", 
     assert.equal(store.claimCancellation("order-BTCUSDT"), true);
     assert.equal(store.claimCancellation("order-BTCUSDT"), false);
     assert.ok(store.find("order-BTCUSDT")?.cancelRequestedAt);
+    assert.equal(store.find("order-BTCUSDT")?.cancelDispatchState, "CLAIMED_NOT_DISPATCHED");
     store.close();
 
     store = new BinanceOrderStore(dbPath);
     assert.equal(store.claimCancellation("order-BTCUSDT"), false);
     assert.ok(store.find("order-BTCUSDT")?.cancelRequestedAt);
+    assert.equal(store.find("order-BTCUSDT")?.cancelDispatchState, "CLAIMED_NOT_DISPATCHED");
+    assert.equal(store.markCancellationDispatched("order-BTCUSDT"), true);
+    assert.equal(store.markCancellationDispatched("order-BTCUSDT"), false);
+    assert.equal(store.find("order-BTCUSDT")?.cancelDispatchState, "DISPATCHED_UNKNOWN");
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("order-BTCUSDT")?.cancelDispatchState, "DISPATCHED_UNKNOWN");
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("terminal provider evidence closes a claimed cancellation without losing history", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-cancel-terminal-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const store = new BinanceOrderStore(dbPath);
+    store.reserve(orderReservation("BTCUSDT"));
+    store.claimCancellation("order-BTCUSDT");
+    store.markCancellationDispatched("order-BTCUSDT");
+    store.failWithOrder("order-BTCUSDT", {
+      orderId: "provider-terminal",
+      orderLinkId: "client-BTCUSDT",
+      status: "Cancelled",
+      requestedQuantity: 0.001,
+      filledQuantity: 0.0004,
+      requestedBaseQuantity: "0.001",
+      filledBaseQuantity: "0.0004",
+      averagePrice: null,
+      feeUsd: 0,
+      updatedAt: 3_000,
+    }, "cancelled");
+    const terminal = store.find("order-BTCUSDT");
+    assert.equal(terminal?.cancelDispatchState, "TERMINAL_CONFIRMED");
+    assert.equal(terminal?.order?.filledBaseQuantity, "0.0004");
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pre-dispatch-model cancel claims migrate as legacy ambiguous and remain fail closed", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-legacy-cancel-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const db = new DatabaseSync(dbPath);
+    createPreDispatchStateOrdersTable(db);
+    db.prepare(`INSERT INTO binance_personal_orders (
+      idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol,
+      executionMode, status, orderJson, error, cancelRequestedAt, createdAt, updatedAt
+    ) VALUES ('legacy-cancel', 'fingerprint', 'client', 'provider', 'spot', 'BTCUSDT',
+      'production_ioc', 'processing', NULL, NULL, 1500, 1000, 1500)`).run();
+    db.close();
+
+    let store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("legacy-cancel")?.cancelDispatchState, "LEGACY_UNKNOWN");
+    assert.equal(store.claimCancellation("legacy-cancel"), false);
+    assert.equal(store.markCancellationDispatched("legacy-cancel"), false);
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("legacy-cancel")?.cancelDispatchState, "LEGACY_UNKNOWN");
     store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -218,6 +283,26 @@ function createLegacyOrdersTable(db: DatabaseSync) {
       status TEXT NOT NULL CHECK(status IN ('processing', 'completed', 'failed')),
       orderJson TEXT,
       error TEXT,
+      createdAt INTEGER NOT NULL,
+      updatedAt INTEGER NOT NULL
+    );
+  `);
+}
+
+function createPreDispatchStateOrdersTable(db: DatabaseSync) {
+  db.exec(`
+    CREATE TABLE binance_personal_orders (
+      idempotencyKey TEXT PRIMARY KEY,
+      requestFingerprint TEXT NOT NULL,
+      clientOrderId TEXT NOT NULL UNIQUE,
+      providerOrderId TEXT,
+      category TEXT NOT NULL CHECK(category IN ('spot', 'linear')),
+      symbol TEXT,
+      executionMode TEXT NOT NULL DEFAULT 'production_ioc',
+      status TEXT NOT NULL CHECK(status IN ('processing', 'completed', 'failed')),
+      orderJson TEXT,
+      error TEXT,
+      cancelRequestedAt INTEGER,
       createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL
     );

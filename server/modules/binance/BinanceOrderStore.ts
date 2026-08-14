@@ -17,9 +17,16 @@ export type BinanceStoredOrder = {
   order: BinanceProviderOrder | null;
   error: string | null;
   cancelRequestedAt: number | null;
+  cancelDispatchState: BinanceCancelDispatchState | null;
   createdAt: number;
   updatedAt: number;
 };
+
+export type BinanceCancelDispatchState =
+  | "CLAIMED_NOT_DISPATCHED"
+  | "DISPATCHED_UNKNOWN"
+  | "TERMINAL_CONFIRMED"
+  | "LEGACY_UNKNOWN";
 
 export class BinanceOrderStore {
   private readonly db: DatabaseSync;
@@ -43,6 +50,9 @@ export class BinanceOrderStore {
         orderJson TEXT,
         error TEXT,
         cancelRequestedAt INTEGER,
+        cancelDispatchState TEXT CHECK(cancelDispatchState IN (
+          'CLAIMED_NOT_DISPATCHED', 'DISPATCHED_UNKNOWN', 'TERMINAL_CONFIRMED', 'LEGACY_UNKNOWN'
+        )),
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
       );
@@ -69,9 +79,21 @@ export class BinanceOrderStore {
     if (!this.columnExists("binance_personal_orders", "cancelRequestedAt")) {
       this.db.exec("ALTER TABLE binance_personal_orders ADD COLUMN cancelRequestedAt INTEGER;");
     }
+    if (!this.columnExists("binance_personal_orders", "cancelDispatchState")) {
+      // A legacy cancelRequestedAt does not prove whether the provider request was dispatched.
+      // Keep it explicitly ambiguous and fail closed instead of guessing either direction.
+      this.db.exec(`
+        BEGIN IMMEDIATE;
+        ALTER TABLE binance_personal_orders ADD COLUMN cancelDispatchState TEXT;
+        UPDATE binance_personal_orders
+        SET cancelDispatchState = 'LEGACY_UNKNOWN'
+        WHERE cancelRequestedAt IS NOT NULL;
+        COMMIT;
+      `);
+    }
   }
 
-  reserve(input: Omit<BinanceStoredOrder, "providerOrderId" | "status" | "order" | "error" | "cancelRequestedAt" | "createdAt" | "updatedAt">) {
+  reserve(input: Omit<BinanceStoredOrder, "providerOrderId" | "status" | "order" | "error" | "cancelRequestedAt" | "cancelDispatchState" | "createdAt" | "updatedAt">) {
     const now = Date.now();
     const symbol = providerSymbol(input.symbol);
     try {
@@ -95,7 +117,11 @@ export class BinanceOrderStore {
 
   complete(idempotencyKey: string, order: BinanceProviderOrder) {
     if (order.status !== "Filled") throw new Error("Only Filled Binance orders can be completed.");
-    this.db.prepare("UPDATE binance_personal_orders SET providerOrderId = ?, status = 'completed', orderJson = ?, error = NULL, updatedAt = ? WHERE idempotencyKey = ?")
+    this.db.prepare(`UPDATE binance_personal_orders
+      SET providerOrderId = ?, status = 'completed', orderJson = ?, error = NULL,
+        cancelDispatchState = CASE WHEN cancelRequestedAt IS NULL THEN cancelDispatchState ELSE 'TERMINAL_CONFIRMED' END,
+        updatedAt = ?
+      WHERE idempotencyKey = ?`)
       .run(order.orderId, JSON.stringify(order), Date.now(), idempotencyKey);
   }
 
@@ -116,7 +142,11 @@ export class BinanceOrderStore {
     if (!["Cancelled", "Rejected", "Expired"].includes(order.status)) {
       throw new Error("Only failed terminal Binance orders can be terminalized as failed.");
     }
-    this.db.prepare("UPDATE binance_personal_orders SET providerOrderId = ?, status = 'failed', orderJson = ?, error = ?, updatedAt = ? WHERE idempotencyKey = ?")
+    this.db.prepare(`UPDATE binance_personal_orders
+      SET providerOrderId = ?, status = 'failed', orderJson = ?, error = ?,
+        cancelDispatchState = CASE WHEN cancelRequestedAt IS NULL THEN cancelDispatchState ELSE 'TERMINAL_CONFIRMED' END,
+        updatedAt = ?
+      WHERE idempotencyKey = ?`)
       .run(order.orderId, JSON.stringify(order), error.slice(0, 500), Date.now(), idempotencyKey);
   }
 
@@ -127,9 +157,19 @@ export class BinanceOrderStore {
 
   claimCancellation(idempotencyKey: string) {
     const result = this.db.prepare(`UPDATE binance_personal_orders
-      SET cancelRequestedAt = ?, updatedAt = ?
-      WHERE idempotencyKey = ? AND status = 'processing' AND cancelRequestedAt IS NULL`)
+      SET cancelRequestedAt = ?, cancelDispatchState = 'CLAIMED_NOT_DISPATCHED', updatedAt = ?
+      WHERE idempotencyKey = ? AND status = 'processing'
+        AND cancelRequestedAt IS NULL AND cancelDispatchState IS NULL`)
       .run(Date.now(), Date.now(), idempotencyKey);
+    return result.changes === 1;
+  }
+
+  markCancellationDispatched(idempotencyKey: string) {
+    const result = this.db.prepare(`UPDATE binance_personal_orders
+      SET cancelDispatchState = 'DISPATCHED_UNKNOWN', updatedAt = ?
+      WHERE idempotencyKey = ? AND status = 'processing'
+        AND cancelRequestedAt IS NOT NULL AND cancelDispatchState = 'CLAIMED_NOT_DISPATCHED'`)
+      .run(Date.now(), idempotencyKey);
     return result.changes === 1;
   }
 
@@ -183,9 +223,17 @@ function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
     order: row.orderJson ? parseProviderOrder(JSON.parse(String(row.orderJson)), symbol) : null,
     error: row.error === null ? null : String(row.error),
     cancelRequestedAt: row.cancelRequestedAt === null ? null : Number(row.cancelRequestedAt),
+    cancelDispatchState: cancelDispatchState(row.cancelDispatchState),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt),
   };
+}
+
+function cancelDispatchState(value: unknown): BinanceCancelDispatchState | null {
+  if (value === null || value === undefined) return null;
+  if (value === "CLAIMED_NOT_DISPATCHED" || value === "DISPATCHED_UNKNOWN"
+    || value === "TERMINAL_CONFIRMED" || value === "LEGACY_UNKNOWN") return value;
+  throw new Error("Stored Binance cancel dispatch state is invalid.");
 }
 
 function parseProviderOrder(value: unknown, persistedSymbol: string): BinanceProviderOrder {

@@ -257,7 +257,12 @@ export type BinanceClientAdapter = {
   placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string }>;
   awaitOrder(category: "spot" | "linear", symbol: string, orderId: string, deadlineAt: number): Promise<BinanceProviderOrder>;
-  cancelOrder(category: "spot" | "linear", symbol: string, orderId: string): Promise<void>;
+  cancelOrder(
+    category: "spot" | "linear",
+    symbol: string,
+    orderId: string,
+    onDispatch?: () => void,
+  ): Promise<void>;
   listAssetOpenOrders(): Promise<Array<{
     category: "spot" | "linear";
     orderId: string;
