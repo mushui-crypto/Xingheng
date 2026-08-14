@@ -1,0 +1,444 @@
+import { createHash, randomUUID } from "node:crypto";
+import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
+import { absoluteDifference } from "../cex/arbitrage-instance/ArbitrageInstance";
+import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
+import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
+import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
+import type { ArbitrageExecutionDraft, ArbitrageExecutionDraftLeg } from "./ArbitrageExecutionDraft";
+import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
+
+type DraftService = Pick<ArbitrageExecutionDraftService, "preview">;
+type InstanceStore = Pick<
+  ArbitrageInstanceStore,
+  "create" | "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
+>;
+type CredentialSummaries = Pick<UserExchangeCredentialStore, "findSummary">;
+
+export type FormalArbitrageExecutionRuntimeResult = Readonly<{
+  executionRecord: ExecutionRecord;
+  confirmedQuantity: string;
+}>;
+
+export interface FormalArbitrageExecutionRuntime {
+  execute(intent: ExecutionIntent): Promise<FormalArbitrageExecutionRuntimeResult>;
+}
+
+export type ArbitrageExecutionConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  created: boolean;
+}>;
+
+export type ArbitrageLegExecutionConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  executionRecord: Readonly<{
+    executionId: string | null;
+    intentId: string;
+    status: ExecutionRecord["status"] | "CREATED";
+    plannedQuantity: string;
+    confirmedQuantity: string;
+  }>;
+  idempotentReplay: boolean;
+  secondLegAllowed: boolean;
+}>;
+
+export class ArbitrageExecutionCommandError extends Error {
+  constructor(
+    readonly category:
+      | "invalid_execution_confirmation"
+      | "execution_capability_unavailable"
+      | "arbitrage_instance_not_found"
+      | "arbitrage_instance_mismatch"
+      | "arbitrage_leg_not_found"
+      | "second_leg_not_allowed"
+      | "execution_state_unknown",
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+export class ArbitrageExecutionCommandService {
+  constructor(
+    private readonly drafts: DraftService,
+    private readonly instances: InstanceStore,
+    private readonly credentials: CredentialSummaries,
+    private readonly runtime: FormalArbitrageExecutionRuntime,
+    private readonly options: Readonly<{
+      clock?: () => number;
+      createArbitrageId?: (userId: string, confirmationId: string) => string;
+      createIntentId?: (userId: string, arbitrageId: string, legId: string, commandId: string) => string;
+      intentTtlMs?: number;
+    }> = {},
+  ) {}
+
+  async confirm(authenticatedUserId: string, input: unknown): Promise<ArbitrageExecutionConfirmation> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const request = parseFinalConfirmation(input);
+    const draft = await this.revalidateDraft(userId, request);
+    const accounts = this.resolveAccounts(userId, draft);
+    const arbitrageId = this.options.createArbitrageId?.(userId, request.confirmationId)
+      ?? deterministicId("arbitrage", userId, request.confirmationId);
+    const sourcePlanId = sourcePlanIdentity(request);
+    const existing = this.instances.get(userId, arbitrageId);
+    if (existing) {
+      assertInstanceMatches(existing, draft, accounts, sourcePlanId);
+      return Object.freeze({ instance: existing, created: false });
+    }
+
+    const planned = plannedLegs(draft);
+    const createdAt = this.now();
+    let instance: ArbitrageInstance;
+    try {
+      instance = this.instances.create({
+        arbitrageId,
+        userId,
+        strategyType: draft.strategyType,
+        sourcePlanId,
+        maxResidualBaseQuantity: absoluteDifference(
+          planned[0].plan.plannedAssetQuantity.quantity,
+          planned[1].plan.plannedAssetQuantity.quantity,
+        ),
+        createdAt,
+        legs: [
+          newInstanceLeg(planned[0].leg, planned[0].plan.plannedAssetQuantity.quantity, accounts),
+          newInstanceLeg(planned[1].leg, planned[1].plan.plannedAssetQuantity.quantity, accounts),
+        ],
+      });
+    } catch (error) {
+      const raced = this.instances.get(userId, arbitrageId);
+      if (!raced) throw error;
+      assertInstanceMatches(raced, draft, accounts, sourcePlanId);
+      return Object.freeze({ instance: raced, created: false });
+    }
+    return Object.freeze({ instance, created: true });
+  }
+
+  async executeLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const request = parseLegConfirmation(input);
+    const instance = this.instances.get(userId, request.arbitrageId);
+    if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const selected = instance.legs.find((candidate) => candidate.legId === request.legId);
+    if (!selected) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+
+    const intentId = this.options.createIntentId?.(userId, request.arbitrageId, request.legId, request.commandId)
+      ?? deterministicId("intent", userId, request.arbitrageId, request.legId, request.commandId);
+    const existingReference = instance.executionReferences.find((reference) => reference.executionIntentId === intentId);
+    if (existingReference) return resultFromReference(instance, existingReference, true);
+
+    assertLegCanExecute(instance, request.legId);
+    const draft = await this.revalidateDraft(userId, request);
+    const accounts = this.resolveAccounts(userId, draft);
+    assertInstanceMatches(instance, draft, accounts, sourcePlanIdentity(request));
+    const draftLeg = draft.legs.find((candidate) => candidate.legId === request.legId);
+    if (!draftLeg || draftLeg.planning.status !== "PLANNED") {
+      throw commandError("arbitrage_instance_mismatch", "当前权威草案无法重新解析所选套利腿。");
+    }
+    const accountId = accounts.get(draftLeg.legId);
+    if (!accountId || accountId !== selected.accountId) {
+      throw commandError("arbitrage_instance_mismatch", "当前执行账户与套利实例绑定不一致。");
+    }
+
+    const now = this.now();
+    const intent = createExecutionIntent({
+      intentId,
+      arbitrageId: instance.arbitrageId,
+      legId: selected.legId,
+      userId,
+      venue: selected.venue,
+      accountId,
+      instrumentId: selected.instrumentId,
+      side: draftLeg.side,
+      quantity: draftLeg.planning.plan.plannedAssetQuantity,
+      orderConstraints: { reduceOnly: false },
+      executionMode: request.executionMode,
+      createdAt: now,
+      expiresAt: now + (this.options.intentTtlMs ?? 30_000),
+    });
+    try {
+      this.instances.claimExecutionReference(userId, instance.arbitrageId, {
+        legId: selected.legId,
+        phase: "OPENING",
+        quantityEffect: "INCREASE",
+        executionIntentId: intent.intentId,
+        requestedQuantity: intent.quantity.quantity,
+        createdAt: now,
+      });
+    } catch (error) {
+      const raced = this.instances.get(userId, instance.arbitrageId);
+      const reference = raced?.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId);
+      if (!raced || !reference) throw error;
+      return resultFromReference(raced, reference, true);
+    }
+
+    let runtimeResult: FormalArbitrageExecutionRuntimeResult;
+    try {
+      runtimeResult = await this.runtime.execute(intent);
+    } catch {
+      throw commandError(
+        "execution_state_unknown",
+        "执行状态暂时无法确认；套利实例和执行引用已保留，请勿重复提交。",
+      );
+    }
+    assertRuntimeIdentity(runtimeResult.executionRecord, intent);
+    this.instances.linkExecutionRecord(
+      userId,
+      instance.arbitrageId,
+      intent.intentId,
+      runtimeResult.executionRecord.executionId,
+      runtimeResult.executionRecord.updatedAt,
+    );
+    const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
+      executionIntentId: intent.intentId,
+      status: referenceStatus(runtimeResult.executionRecord.status),
+      confirmedQuantity: runtimeResult.confirmedQuantity,
+      updatedAt: runtimeResult.executionRecord.updatedAt,
+    });
+    const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
+    return resultFromReference(updated, reference, false, runtimeResult.executionRecord.status);
+  }
+
+  private async revalidateDraft(
+    userId: string,
+    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays" | "quantityInput">,
+  ) {
+    const draft = await this.drafts.preview(userId, {
+      opportunityId: request.opportunityId,
+      horizonDays: request.horizonDays,
+      quantityInput: request.quantityInput,
+    });
+    if (!draft.allLegsExecutable || draft.legs.some((leg) => leg.planning.status !== "PLANNED")) {
+      throw commandError(
+        "execution_capability_unavailable",
+        "两条腿当前未同时满足执行能力和数量规划条件，不能创建或继续执行套利。",
+      );
+    }
+    return draft;
+  }
+
+  private resolveAccounts(userId: string, draft: ArbitrageExecutionDraft) {
+    const accounts = new Map<string, string>();
+    for (const leg of draft.legs) {
+      const summary = this.credentials.findSummary(userId, leg.venue);
+      if (!summary) throw commandError("execution_capability_unavailable", "交易所执行账户当前不可用。");
+      accounts.set(leg.legId, summary.accountId);
+    }
+    return accounts;
+  }
+
+  private now() {
+    const value = this.options.clock?.() ?? Date.now();
+    if (!Number.isSafeInteger(value) || value < 0) throw new Error("Execution confirmation clock is invalid.");
+    return value;
+  }
+}
+
+type FinalConfirmationRequest = Readonly<{
+  confirmationId: string;
+  opportunityId: string;
+  horizonDays: 90 | 365;
+  quantityInput: Readonly<{ mode: "NOTIONAL_USDT"; amountUsdt: string } | { mode: "ASSET_QUANTITY"; quantity: string }>;
+  executionMode: ExecutionIntent["executionMode"];
+  confirmed: true;
+}>;
+
+type LegConfirmationRequest = FinalConfirmationRequest & Readonly<{
+  arbitrageId: string;
+  legId: string;
+  commandId: string;
+}>;
+
+function parseFinalConfirmation(input: unknown): FinalConfirmationRequest {
+  const value = object(input, "execution confirmation");
+  exactKeys(value, ["confirmationId", "opportunityId", "horizonDays", "quantityInput", "executionMode", "confirmed"]);
+  return commonConfirmation(value) as FinalConfirmationRequest;
+}
+
+function parseLegConfirmation(input: unknown): LegConfirmationRequest {
+  const value = object(input, "leg execution confirmation");
+  exactKeys(value, [
+    "confirmationId", "opportunityId", "horizonDays", "quantityInput", "executionMode", "confirmed",
+    "arbitrageId", "legId", "commandId",
+  ]);
+  return Object.freeze({
+    ...commonConfirmation(value),
+    arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
+    legId: identifier(value.legId, "legId"),
+    commandId: identifier(value.commandId, "commandId"),
+  });
+}
+
+function commonConfirmation(value: Record<string, unknown>) {
+  if (value.confirmed !== true) throw invalid("需要用户明确确认。 ");
+  if (value.horizonDays !== 90 && value.horizonDays !== 365) throw invalid("horizonDays 必须为 90 或 365。");
+  if (value.executionMode !== "PRICE_PRIORITY" && value.executionMode !== "EXECUTION_PRIORITY") {
+    throw invalid("executionMode 无效。");
+  }
+  return Object.freeze({
+    confirmationId: identifier(value.confirmationId, "confirmationId"),
+    opportunityId: identifier(value.opportunityId, "opportunityId"),
+    horizonDays: value.horizonDays,
+    quantityInput: quantityInput(value.quantityInput),
+    executionMode: value.executionMode,
+    confirmed: true as const,
+  });
+}
+
+function quantityInput(value: unknown): FinalConfirmationRequest["quantityInput"] {
+  const input = object(value, "quantityInput");
+  if (input.mode === "NOTIONAL_USDT") {
+    exactKeys(input, ["mode", "amountUsdt"]);
+    return Object.freeze({ mode: input.mode, amountUsdt: decimal(input.amountUsdt, "amountUsdt") });
+  }
+  if (input.mode === "ASSET_QUANTITY") {
+    exactKeys(input, ["mode", "quantity"]);
+    return Object.freeze({ mode: input.mode, quantity: decimal(input.quantity, "quantity") });
+  }
+  throw invalid("quantityInput.mode 无效。");
+}
+
+function plannedLegs(draft: ArbitrageExecutionDraft) {
+  return draft.legs.map((leg) => {
+    if (leg.planning.status !== "PLANNED") throw commandError("execution_capability_unavailable", "套利腿数量规划未通过。");
+    return { leg, plan: leg.planning.plan };
+  }) as [
+    { leg: ArbitrageExecutionDraftLeg; plan: Extract<ArbitrageExecutionDraftLeg["planning"], { status: "PLANNED" }>["plan"] },
+    { leg: ArbitrageExecutionDraftLeg; plan: Extract<ArbitrageExecutionDraftLeg["planning"], { status: "PLANNED" }>["plan"] },
+  ];
+}
+
+function newInstanceLeg(
+  leg: ArbitrageExecutionDraftLeg,
+  plannedQuantity: string,
+  accounts: ReadonlyMap<string, string>,
+) {
+  const accountId = accounts.get(leg.legId);
+  if (!accountId) throw commandError("execution_capability_unavailable", "套利腿执行账户不可用。");
+  return Object.freeze({
+    legId: leg.legId,
+    role: leg.role,
+    venue: leg.venue,
+    accountId,
+    instrumentId: leg.instrumentId,
+    plannedQuantity,
+  });
+}
+
+function assertInstanceMatches(
+  instance: ArbitrageInstance,
+  draft: ArbitrageExecutionDraft,
+  accounts: ReadonlyMap<string, string>,
+  sourcePlanId: string | null,
+) {
+  const planned = plannedLegs(draft);
+  const matches = sourcePlanId !== null
+    && instance.sourcePlanId === sourcePlanId
+    && instance.strategyType === draft.strategyType
+    && planned.every(({ leg, plan }) => instance.legs.some((candidate) => (
+      candidate.legId === leg.legId
+      && candidate.role === leg.role
+      && candidate.venue === leg.venue
+      && candidate.accountId === accounts.get(leg.legId)
+      && candidate.instrumentId === leg.instrumentId
+      && candidate.plannedQuantity === plan.plannedAssetQuantity.quantity
+    )));
+  if (!matches) throw commandError("arbitrage_instance_mismatch", "当前权威机会或数量计划与套利实例不一致。");
+}
+
+function assertLegCanExecute(instance: ArbitrageInstance, selectedLegId: string) {
+  const references = instance.executionReferences;
+  if (references.length === 0) return;
+  const sameLeg = references.some((reference) => reference.legId === selectedLegId);
+  if (sameLeg) throw commandError("second_leg_not_allowed", "该套利腿已经存在执行记录。");
+  if (references.length !== 1) throw commandError("second_leg_not_allowed", "当前实例存在多条执行状态，不能继续自动推进。");
+  const first = references[0]!;
+  if (first.status !== "CONFIRMED" || first.confirmedQuantity !== first.requestedQuantity) {
+    throw commandError("second_leg_not_allowed", "第一腿尚未完整确认，不能执行第二腿。");
+  }
+}
+
+function resultFromReference(
+  instance: ArbitrageInstance,
+  reference: ArbitrageInstance["executionReferences"][number],
+  idempotentReplay: boolean,
+  recordStatus?: ExecutionRecord["status"],
+): ArbitrageLegExecutionConfirmation {
+  return Object.freeze({
+    instance,
+    executionRecord: Object.freeze({
+      executionId: reference.executionRecordId,
+      intentId: reference.executionIntentId,
+      status: recordStatus ?? recordStatusFromReference(reference.status),
+      plannedQuantity: reference.requestedQuantity,
+      confirmedQuantity: reference.confirmedQuantity,
+    }),
+    idempotentReplay,
+    secondLegAllowed: instance.executionReferences.length === 1
+      && reference.status === "CONFIRMED"
+      && reference.confirmedQuantity === reference.requestedQuantity,
+  });
+}
+
+function referenceStatus(status: ExecutionRecord["status"]) {
+  if (status === "CONFIRMED" || status === "FAILED" || status === "UNKNOWN" || status === "PENDING_CONFIRMATION") return status;
+  return "PENDING_CONFIRMATION" as const;
+}
+
+function recordStatusFromReference(status: ArbitrageInstance["executionReferences"][number]["status"]): ExecutionRecord["status"] | "CREATED" {
+  if (status === "CLAIMED" || status === "LINKED") return "CREATED";
+  return status;
+}
+
+function assertRuntimeIdentity(record: ExecutionRecord, intent: ExecutionIntent) {
+  if (record.intentId !== intent.intentId || record.userId !== intent.userId
+    || record.accountId !== intent.accountId || record.venue !== intent.venue
+    || record.instrumentId !== intent.instrumentId) {
+    throw commandError("execution_state_unknown", "执行记录身份与套利执行意图不一致。");
+  }
+}
+
+function sourcePlanIdentity(request: FinalConfirmationRequest) {
+  return `execution-confirmation:${createHash("sha256").update(JSON.stringify({
+    opportunityId: request.opportunityId,
+    horizonDays: request.horizonDays,
+    quantityInput: request.quantityInput,
+    executionMode: request.executionMode,
+  })).digest("hex")}`;
+}
+
+function deterministicId(prefix: string, ...parts: string[]) {
+  return `${prefix}-${createHash("sha256").update(parts.join("\u0000")).digest("hex")}`;
+}
+
+function object(value: unknown, name: string) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalid(`${name} 必须为对象。`);
+  return value as Record<string, unknown>;
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[]) {
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown) throw invalid(`请求包含不允许的字段：${unknown}。`);
+  const missing = allowed.find((key) => !(key in value));
+  if (missing) throw invalid(`请求缺少字段：${missing}。`);
+}
+
+function identifier(value: unknown, name: string) {
+  if (typeof value !== "string" || !value.trim() || value.length > 240) throw invalid(`${name} 无效。`);
+  return value.trim();
+}
+
+function decimal(value: unknown, name: string) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) || /^0(?:\.0+)?$/u.test(value)) {
+    throw invalid(`${name} 必须为正十进制字符串。`);
+  }
+  return value;
+}
+
+function invalid(message: string) {
+  return commandError("invalid_execution_confirmation", message);
+}
+
+function commandError(category: ArbitrageExecutionCommandError["category"], message: string) {
+  return new ArbitrageExecutionCommandError(category, message);
+}

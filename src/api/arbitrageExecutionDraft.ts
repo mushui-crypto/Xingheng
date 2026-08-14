@@ -1,4 +1,5 @@
 import type { ArbitrageHorizon } from "../features/arbitrage/model/types";
+import { requireArbitrageInstance, type ArbitrageInstance } from "./arbitrageInstances";
 import { requestJson } from "./httpClient";
 
 export type ExecutionQuantityInput =
@@ -93,4 +94,120 @@ export function previewArbitrageExecutionDraft(
       userAuthFailure: true,
     },
   );
+}
+
+export type FormalExecutionMode = "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
+
+export type ArbitrageExecutionConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  created: boolean;
+}>;
+
+export type ArbitrageLegExecutionConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  executionRecord: Readonly<{
+    executionId: string | null;
+    intentId: string;
+    status: "CREATED" | "SUBMITTED" | "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN";
+    plannedQuantity: string;
+    confirmedQuantity: string;
+  }>;
+  idempotentReplay: boolean;
+  secondLegAllowed: boolean;
+}>;
+
+export async function confirmArbitrageExecution(
+  input: Readonly<{
+    confirmationId: string;
+    opportunityId: string;
+    horizonDays: ArbitrageHorizon;
+    quantityInput: ExecutionQuantityInput;
+    executionMode: FormalExecutionMode;
+  }>,
+) {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/confirm",
+    "套利执行确认失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  const value = record(payload);
+  if (typeof value.created !== "boolean") throw invalidCommandResponse();
+  return Object.freeze({ instance: requireArbitrageInstance(value.instance), created: value.created });
+}
+
+export async function confirmArbitrageExecutionLeg(
+  input: Readonly<{
+    confirmationId: string;
+    commandId: string;
+    opportunityId: string;
+    horizonDays: ArbitrageHorizon;
+    quantityInput: ExecutionQuantityInput;
+    executionMode: FormalExecutionMode;
+    arbitrageId: string;
+    legId: string;
+  }>,
+) {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/legs/confirm",
+    "套利腿执行确认失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  const value = record(payload);
+  const executionRecord = record(value.executionRecord);
+  if (typeof value.idempotentReplay !== "boolean" || typeof value.secondLegAllowed !== "boolean") {
+    throw invalidCommandResponse();
+  }
+  const status = executionStatus(executionRecord.status);
+  return Object.freeze({
+    instance: requireArbitrageInstance(value.instance),
+    executionRecord: Object.freeze({
+      executionId: executionRecord.executionId === null ? null : requiredString(executionRecord.executionId),
+      intentId: requiredString(executionRecord.intentId),
+      status,
+      plannedQuantity: decimalString(executionRecord.plannedQuantity),
+      confirmedQuantity: decimalString(executionRecord.confirmedQuantity),
+    }),
+    idempotentReplay: value.idempotentReplay,
+    secondLegAllowed: value.secondLegAllowed,
+  });
+}
+
+function record(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw invalidCommandResponse();
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown) {
+  if (typeof value !== "string" || !value.trim()) throw invalidCommandResponse();
+  return value;
+}
+
+function decimalString(value: unknown) {
+  const result = requiredString(value);
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(result)) throw invalidCommandResponse();
+  return result;
+}
+
+function executionStatus(value: unknown): ArbitrageLegExecutionConfirmation["executionRecord"]["status"] {
+  if (value === "CREATED" || value === "SUBMITTED" || value === "PENDING_CONFIRMATION"
+    || value === "CONFIRMED" || value === "FAILED" || value === "UNKNOWN") return value;
+  throw invalidCommandResponse();
+}
+
+function invalidCommandResponse() {
+  return new Error("套利执行确认响应无效。");
 }

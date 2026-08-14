@@ -73,7 +73,8 @@ export class ArbitrageExecutionDraftService {
       strategyType,
       ...(quantityInput === undefined ? {} : { quantityInput }),
       legs: Object.freeze(resolved),
-      allLegsExecutable: resolved.every((leg) => leg.executionAvailable),
+      allLegsExecutable: resolved.every((leg) => leg.executionAvailable)
+        && !sameAccountPerpetualConflict(resolved),
       generatedAt,
     });
   }
@@ -131,6 +132,12 @@ export class ArbitrageExecutionDraftService {
       executionAvailable: capability.status === "AVAILABLE" && planning.status === "PLANNED",
     });
   }
+}
+
+function sameAccountPerpetualConflict(legs: readonly [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg]) {
+  return legs[0].venue === legs[1].venue
+    && legs[0].instrumentId === legs[1].instrumentId
+    && legs.every((leg) => leg.marketType === "perpetual");
 }
 
 async function plan(

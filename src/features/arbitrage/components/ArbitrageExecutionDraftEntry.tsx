@@ -1,12 +1,16 @@
 import { useEffect, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import {
+  confirmArbitrageExecution,
+  confirmArbitrageExecutionLeg,
   fetchArbitrageExecutionDraft,
   previewArbitrageExecutionDraft,
   type ArbitrageExecutionDraft,
   type ArbitrageExecutionDraftLeg,
+  type ArbitrageLegExecutionConfirmation,
   type ExecutionQuantityInput,
 } from "../../../api/arbitrageExecutionDraft";
+import type { ArbitrageInstance, ArbitrageInstanceLeg } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
 import { Input } from "../../../components/ui/Input";
 import { Modal } from "../../../components/ui/Modal";
@@ -28,6 +32,10 @@ export function ArbitrageExecutionDraftEntry({
   const [amount, setAmount] = useState("");
   const [executionMode, setExecutionMode] = useState("PRICE_PRIORITY");
   const [validationNotice, setValidationNotice] = useState("");
+  const [instance, setInstance] = useState<ArbitrageInstance | null>(null);
+  const [executionResults, setExecutionResults] = useState<Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>>({});
+  const [confirmationId, setConfirmationId] = useState("");
+  const [commandIds, setCommandIds] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!open) return;
@@ -72,17 +80,82 @@ export function ArbitrageExecutionDraftEntry({
     setDraft(null);
     setError("");
     setValidationNotice("");
+    setInstance(null);
+    setExecutionResults({});
+    setCommandIds({});
+  }
+
+  function openConfirmation() {
+    setConfirmationId(createClientCommandId("confirmation"));
+    setOpen(true);
+  }
+
+  function currentQuantityInput(): ExecutionQuantityInput | null {
+    if (!amount.trim()) return null;
+    return mode === "NOTIONAL_USDT"
+      ? { mode, amountUsdt: amount.trim() }
+      : { mode, quantity: amount.trim() };
+  }
+
+  async function confirmInstance() {
+    const quantityInput = currentQuantityInput();
+    if (!draft || !quantityInput || !canConfirmDraft(draft)) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await confirmArbitrageExecution({
+        confirmationId,
+        opportunityId,
+        horizonDays,
+        quantityInput,
+        executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+      });
+      setInstance(result.instance);
+      setValidationNotice(result.created ? "套利实例已创建。请选择要先执行的套利腿。" : "已恢复此前创建的套利实例。");
+    } catch {
+      setError("最终确认未通过；服务端已重新校验机会、规则、报价和执行能力。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function executeLeg(legId: string) {
+    const quantityInput = currentQuantityInput();
+    if (!instance || !quantityInput || !canExecuteLeg(instance, legId)) return;
+    const commandId = commandIds[legId] ?? createClientCommandId(`leg-${legId}`);
+    setCommandIds((current) => ({ ...current, [legId]: commandId }));
+    setLoading(true);
+    setError("");
+    try {
+      const result = await confirmArbitrageExecutionLeg({
+        confirmationId,
+        commandId,
+        opportunityId,
+        horizonDays,
+        quantityInput,
+        executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+        arbitrageId: instance.arbitrageId,
+        legId,
+      });
+      setInstance(result.instance);
+      setExecutionResults((current) => ({ ...current, [legId]: result.executionRecord }));
+      setValidationNotice(executionNotice(result.executionRecord.status, result.secondLegAllowed));
+    } catch {
+      setError("该套利腿执行状态未能安全确认。实例和执行引用已保留，请勿重复提交。");
+    } finally {
+      setLoading(false);
+    }
   }
 
   return (
     <>
-      <Button type="button" onClick={() => setOpen(true)}>
+      <Button type="button" onClick={openConfirmation}>
         <ShieldCheck aria-hidden="true" size={15} /> 创建套利
       </Button>
       <Modal
         bodyClassName="max-h-[75vh] overflow-y-auto"
         closeDisabled={loading}
-        description="服务端将重新读取权威品种、交易规则和报价。本阶段只生成并校验草案，不创建实例，也不会提交订单。"
+        description="预览只生成草案；最终确认时服务端会重新校验权威机会、规则和报价，通过后才创建套利实例。每条腿仍需单独人工确认。"
         onClose={close}
         open={open}
         shellClassName="max-w-5xl"
@@ -92,12 +165,15 @@ export function ArbitrageExecutionDraftEntry({
           amount={amount}
           draft={draft}
           error={error}
+          executionResults={executionResults}
           executionMode={executionMode}
+          instance={instance}
           loading={loading}
           mode={mode}
           onAmountChange={setAmount}
           onCancel={close}
-          onConfirm={() => setValidationNotice("执行草案校验通过。本阶段未创建套利实例，也未提交任何订单。")}
+          onConfirm={() => void confirmInstance()}
+          onExecuteLeg={(legId) => void executeLeg(legId)}
           onExecutionModeChange={setExecutionMode}
           onModeChange={(nextMode) => {
             setMode(nextMode);
@@ -116,12 +192,15 @@ export function ArbitrageExecutionDraftContent({
   amount,
   draft,
   error,
+  executionResults = {},
   executionMode,
+  instance = null,
   loading,
   mode,
   onAmountChange,
   onCancel,
   onConfirm,
+  onExecuteLeg = () => undefined,
   onExecutionModeChange,
   onModeChange,
   onPlan,
@@ -130,12 +209,15 @@ export function ArbitrageExecutionDraftContent({
   amount: string;
   draft: ArbitrageExecutionDraft | null;
   error: string;
+  executionResults?: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
   executionMode: string;
+  instance?: ArbitrageInstance | null;
   loading: boolean;
   mode: ExecutionQuantityInput["mode"];
   onAmountChange: (value: string) => void;
   onCancel: () => void;
   onConfirm: () => void;
+  onExecuteLeg?: (legId: string) => void;
   onExecutionModeChange: (value: string) => void;
   onModeChange: (value: ExecutionQuantityInput["mode"]) => void;
   onPlan: () => void;
@@ -200,12 +282,21 @@ export function ArbitrageExecutionDraftContent({
         </>
       ) : loading ? <DraftSkeleton /> : null}
 
+      {instance ? (
+        <ExecutionInstancePanel
+          executionResults={executionResults}
+          instance={instance}
+          loading={loading}
+          onExecuteLeg={onExecuteLeg}
+        />
+      ) : null}
+
       {validationNotice ? <p className="border border-emerald-400/35 bg-emerald-500/[0.06] px-4 py-3 text-sm text-emerald-100" role="status">{validationNotice}</p> : null}
       <div className="flex flex-wrap justify-end gap-3 border-t border-[#25282f] pt-4">
         <Button disabled={loading} onClick={onCancel} type="button" variant="ghost">取消</Button>
-        <Button disabled={loading || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>
+        <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>
       </div>
-      <p className="text-right text-[11px] leading-5 text-[#707985]">当前确认仅校验只读草案；后续真实执行阶段仍需再次明确确认第二腿。</p>
+      <p className="text-right text-[11px] leading-5 text-[#707985]">最终确认会由服务端重新读取权威数据；两条腿始终分别要求人工确认。</p>
     </div>
   );
 }
@@ -213,6 +304,101 @@ export function ArbitrageExecutionDraftContent({
 export function canConfirmDraft(draft: ArbitrageExecutionDraft | null) {
   return draft?.allLegsExecutable === true
     && draft.legs.every((leg) => leg.executionAvailable && leg.planning.status === "PLANNED");
+}
+
+export function canExecuteLeg(instance: ArbitrageInstance, legId: string) {
+  if (!instance.legs.some((leg) => leg.legId === legId)) return false;
+  if (instance.executionReferences.some((reference) => reference.legId === legId)) return false;
+  if (instance.executionReferences.length === 0) return true;
+  if (instance.executionReferences.length !== 1) return false;
+  const first = instance.executionReferences[0]!;
+  return first.status === "CONFIRMED" && first.confirmedQuantity === first.requestedQuantity;
+}
+
+function ExecutionInstancePanel({
+  executionResults,
+  instance,
+  loading,
+  onExecuteLeg,
+}: {
+  executionResults: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
+  instance: ArbitrageInstance;
+  loading: boolean;
+  onExecuteLeg: (legId: string) => void;
+}) {
+  return (
+    <section className="border border-sky-400/30 bg-sky-500/[0.04] p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div><p className="text-xs text-[#8f99a5]">套利实例</p><p className="mt-1 break-all font-mono text-xs text-white">{instance.arbitrageId}</p></div>
+        <span className="border border-white/20 px-2 py-1 text-[11px] text-white">{instanceStatusLabel(instance.status)}</span>
+      </div>
+      <div className="mt-4 grid gap-3 lg:grid-cols-2">
+        {instance.legs.map((leg) => (
+          <ExecutionInstanceLeg
+            execution={executionResults[leg.legId]}
+            key={leg.legId}
+            leg={leg}
+            loading={loading}
+            onExecute={() => onExecuteLeg(leg.legId)}
+            permitted={canExecuteLeg(instance, leg.legId)}
+            referenceStatus={instance.executionReferences.find((reference) => reference.legId === leg.legId)?.status}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ExecutionInstanceLeg({ execution, leg, loading, onExecute, permitted, referenceStatus }: {
+  execution?: ArbitrageLegExecutionConfirmation["executionRecord"];
+  leg: ArbitrageInstanceLeg;
+  loading: boolean;
+  onExecute: () => void;
+  permitted: boolean;
+  referenceStatus?: string;
+}) {
+  const status = execution?.status ?? referenceStatus ?? "CREATED";
+  return (
+    <div className="border border-[#25282f] bg-black p-4">
+      <div className="flex items-center justify-between gap-3"><strong className="text-xs text-white">{leg.role === "LONG" ? "LONG · 多头腿" : "SHORT · 空头腿"}</strong><span className="text-[11px] text-[#8f99a5]">{executionStatusLabel(status)}</span></div>
+      <dl className="mt-3 space-y-2 text-xs">
+        <LegExecutionMetric label="计划数量" value={leg.plannedQuantity} />
+        <LegExecutionMetric label="已确认数量" value={execution?.confirmedQuantity ?? leg.confirmedOpenedQuantity} />
+        <LegExecutionMetric label="执行状态" value={executionStatusLabel(status)} />
+      </dl>
+      <Button className="mt-4 w-full" disabled={loading || !permitted} onClick={onExecute} type="button" variant="secondary">
+        {instanceLegButtonLabel(referenceStatus)}
+      </Button>
+    </div>
+  );
+}
+
+function LegExecutionMetric({ label, value }: { label: string; value: string }) {
+  return <div className="flex justify-between gap-3"><dt className="text-[#707985]">{label}</dt><dd className="font-mono text-white">{value}</dd></div>;
+}
+
+function executionStatusLabel(status: string) {
+  return ({ CREATED: "待确认", SUBMITTED: "已提交", PENDING_CONFIRMATION: "等待成交确认", CONFIRMED: "已确认", FAILED: "失败", UNKNOWN: "状态未知", CLAIMED: "已认领", LINKED: "已关联" } as Record<string, string>)[status] ?? "状态未知";
+}
+
+function instanceStatusLabel(status: ArbitrageInstance["status"]) {
+  return { OPENING: "建仓中", HOLDING: "持有中", RESIDUAL: "存在残余", CLOSING: "退出中", CLOSED: "已关闭", FAILED: "失败" }[status];
+}
+
+function instanceLegButtonLabel(status?: string) {
+  return status ? "该腿已提交" : "确认执行该腿";
+}
+
+function executionNotice(status: string, secondLegAllowed: boolean) {
+  if (status === "CONFIRMED" && secondLegAllowed) return "第一腿已完整确认。请核对结果后，再次人工确认第二腿。";
+  if (status === "CONFIRMED") return "两条腿均已确认。";
+  if (status === "PENDING_CONFIRMATION") return "当前存在部分成交或待确认状态，第二腿保持禁用。";
+  if (status === "FAILED") return "该腿执行失败，套利实例已保留，第二腿不会自动执行。";
+  return "执行状态暂时无法确认，第二腿保持禁用。";
+}
+
+function createClientCommandId(prefix: string) {
+  return `${prefix}-${globalThis.crypto.randomUUID()}`;
 }
 
 function ExecutionLegCard({ leg }: { leg: ArbitrageExecutionDraftLeg }) {

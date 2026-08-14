@@ -7,6 +7,7 @@ import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/a
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
+import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
@@ -37,6 +38,8 @@ import { HyperliquidMarketService } from "./modules/market/HyperliquidMarketServ
 import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboardService";
 import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/ArbitrageExecutionDraftService";
 import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
+import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
+import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
   createDefaultFundingOpportunityReadVenues,
   createDefaultFundingOpportunitySource,
@@ -191,6 +194,12 @@ const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
   executionRecordStore,
 );
+const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
+  arbitrageExecutionDraft,
+  arbitrageInstances,
+  userExchangeCredentials,
+  new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime),
+);
 const fundingManualExecution = new FundingArbitrageManualExecutionService(
   new ManualRequestFundingArbitrageExecutionIntentSource(),
   new CredentialVenueExecutionAccountResolver(userExchangeCredentials),
@@ -205,6 +214,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
 registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
+registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);

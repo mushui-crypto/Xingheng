@@ -62,6 +62,21 @@ test("marks OKX, Bybit, and Bitget execution capabilities unavailable without hi
   }
 });
 
+test("same-account opposite perpetual legs are not advertised as jointly executable", async () => {
+  const value = opportunity("binance", "binance");
+  const perpetualPair = {
+    ...value,
+    longLeg: { ...value.longLeg, kind: "perpetual" as const, id: "binance-btc-perpetual" },
+  };
+  const result = await draftService(perpetualPair, new FakeContexts()).preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+  assert.equal(result.legs.every((leg) => leg.executionAvailable), true);
+  assert.equal(result.allLegsExecutable, false);
+});
+
 test("returns structured Planner minimum errors and never raises the user budget", async () => {
   const service = draftService(opportunity("binance", "binance"), new FakeContexts({ minNotional: "25" }));
 

@@ -114,6 +114,10 @@ export function requireArbitrageInstanceList(payload: unknown) {
   return instanceList(payload);
 }
 
+export function requireArbitrageInstance(payload: unknown) {
+  return instance(payload);
+}
+
 function instanceList(payload: unknown) {
   if (!Array.isArray(payload)) throw invalidResponse();
   return payload.map(instance);

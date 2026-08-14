@@ -6,8 +6,10 @@ import type { ArbitrageExecutionDraft } from "../../../api/arbitrageExecutionDra
 import {
   ArbitrageExecutionDraftContent,
   ArbitrageExecutionDraftEntry,
+  canExecuteLeg,
   canConfirmDraft,
 } from "./ArbitrageExecutionDraftEntry";
+import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
@@ -45,6 +47,21 @@ test("confirmation content displays Planner minimum errors in Chinese", () => {
 test("final confirmation is enabled only after both legs have planned and available execution capability", () => {
   assert.equal(canConfirmDraft(draft(false)), false);
   assert.equal(canConfirmDraft(draft(true)), true);
+});
+
+test("leg selection remains manual and second leg unlocks only after a complete confirmed first leg", () => {
+  const created = instance([]);
+  assert.equal(canExecuteLeg(created, "long-leg"), true);
+  assert.equal(canExecuteLeg(created, "short-leg"), true);
+  assert.equal(canExecuteLeg(created, "foreign-leg"), false);
+
+  const unknown = instance([reference("long-leg", "UNKNOWN", "0")]);
+  assert.equal(canExecuteLeg(unknown, "short-leg"), false);
+  const partial = instance([reference("long-leg", "PENDING_CONFIRMATION", "0.0004")]);
+  assert.equal(canExecuteLeg(partial, "short-leg"), false);
+  const confirmed = instance([reference("long-leg", "CONFIRMED", "0.001")]);
+  assert.equal(canExecuteLeg(confirmed, "long-leg"), false);
+  assert.equal(canExecuteLeg(confirmed, "short-leg"), true);
 });
 
 function content(value: ArbitrageExecutionDraft) {
@@ -99,5 +116,42 @@ function draft(allAvailable: boolean): ArbitrageExecutionDraft {
     legs: [leg("LONG", "binance"), leg("SHORT", "okx")],
     allLegsExecutable: allAvailable,
     generatedAt: Date.now(),
+  };
+}
+
+function instance(executionReferences: ArbitrageInstance["executionReferences"]): ArbitrageInstance {
+  return {
+    arbitrageId: "arbitrage-1",
+    userId: "user-a",
+    strategyType: "SPOT_PERPETUAL",
+    sourcePlanId: "source-1",
+    maxResidualBaseQuantity: "0",
+    status: executionReferences.length ? "RESIDUAL" : "OPENING",
+    createdAt: 1,
+    openedAt: null,
+    updatedAt: 1,
+    closedAt: null,
+    legs: [
+      { legId: "long-leg", role: "LONG", venue: "binance", accountId: "account-a", instrumentId: "BTC-USDT-SPOT", plannedQuantity: "0.001", confirmedOpenedQuantity: "0", confirmedClosedQuantity: "0" },
+      { legId: "short-leg", role: "SHORT", venue: "binance", accountId: "account-a", instrumentId: "BTC-USDT-PERP", plannedQuantity: "0.001", confirmedOpenedQuantity: "0", confirmedClosedQuantity: "0" },
+    ],
+    executionReferences,
+    pnl: { asset: null, cumulativeFundingPnl: null, realizedTradingPnl: null, feesCosts: null, cumulativeNetPnl: null, updatedAt: null },
+  };
+}
+
+function reference(legId: string, status: "PENDING_CONFIRMATION" | "CONFIRMED" | "UNKNOWN", confirmedQuantity: string) {
+  return {
+    arbitrageId: "arbitrage-1",
+    legId,
+    phase: "OPENING" as const,
+    quantityEffect: "INCREASE" as const,
+    executionIntentId: `intent-${legId}`,
+    executionRecordId: `record-${legId}`,
+    requestedQuantity: "0.001",
+    confirmedQuantity,
+    status,
+    createdAt: 1,
+    updatedAt: 1,
   };
 }
