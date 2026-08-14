@@ -9,6 +9,7 @@ import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ArbitrageExecutionDraft } from "./ArbitrageExecutionDraft";
 import {
+  ArbitrageExecutionCommandError,
   ArbitrageExecutionCommandService,
   type FormalArbitrageExecutionRuntime,
 } from "./ArbitrageExecutionCommandService";
@@ -366,6 +367,176 @@ test("reconciliation enforces user/reference ownership and query failures never 
   assert.equal(fixture.runtime.providerMutations, 0);
 });
 
+test("CLAIMED reference recovers a unique local record and attributes confirmed or partial Decimal fills", async (t) => {
+  for (const scenario of [
+    { name: "confirmed", status: "CONFIRMED" as const, quantity: "0.001" },
+    { name: "partial", status: "PENDING_CONFIRMATION" as const, quantity: "0.000456789012345678" },
+    { name: "canceled-with-partial", status: "FAILED" as const, quantity: "0.0002" },
+  ]) {
+    await t.test(scenario.name, async (child) => {
+      const fixture = setup(child);
+      const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: `recovery-${scenario.name}` }));
+      const seeded = seedInterruptedExecution(fixture, created.instance, "long-leg", `intent-${scenario.name}`);
+      fixture.runtime.onReconcile = (record) => reconciliationResult(record, scenario.status, scenario.quantity);
+
+      const recovered = await fixture.service.reconcileLeg("user-a", {
+        arbitrageId: created.instance.arbitrageId,
+        legId: "long-leg",
+      });
+
+      const reference = recovered.instance.executionReferences[0]!;
+      assert.equal(reference.executionRecordId, seeded.executionId);
+      assert.equal(reference.confirmedQuantity, scenario.quantity);
+      assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, scenario.quantity);
+      assert.equal(recovered.secondLegAllowed, scenario.status === "CONFIRMED");
+      assert.equal(fixture.runtime.calls.length, 0);
+      assert.equal(fixture.runtime.reconcileCalls.length, 1);
+      assert.equal(fixture.runtime.providerMutations, 0);
+    });
+  }
+});
+
+test("CLAIMED UNKNOWN record recovers its link without fabricating confirmed quantity", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  const seeded = seedInterruptedExecution(fixture, created.instance, "long-leg", "intent-unknown", { status: "UNKNOWN" });
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "UNKNOWN", null);
+
+  const recovered = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "long-leg",
+  });
+
+  assert.equal(recovered.instance.executionReferences[0]?.executionRecordId, seeded.executionId);
+  assert.equal(recovered.instance.executionReferences[0]?.status, "UNKNOWN");
+  assert.equal(recovered.instance.executionReferences[0]?.confirmedQuantity, "0");
+  assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0");
+  assert.equal(recovered.secondLegAllowed, false);
+});
+
+test("missing or multiple local records fail closed without provider access", async (t) => {
+  for (const scenario of ["missing", "multiple"] as const) {
+    await t.test(scenario, async (child) => {
+      const fixture = setup(child);
+      const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: `recovery-${scenario}` }));
+      const intentId = `intent-${scenario}`;
+      fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
+        legId: "long-leg",
+        phase: "OPENING",
+        quantityEffect: "INCREASE",
+        executionIntentId: intentId,
+        requestedQuantity: "0.001",
+        createdAt: now,
+      });
+      if (scenario === "multiple") {
+        const leg = created.instance.legs[0];
+        fixture.runtime.records.set("record-a", recoveryRecord(intentId, leg, { executionId: "record-a" }));
+        fixture.runtime.records.set("record-b", recoveryRecord(intentId, leg, { executionId: "record-b" }));
+      }
+
+      await assert.rejects(
+        () => fixture.service.reconcileLeg("user-a", { arbitrageId: created.instance.arbitrageId, legId: "long-leg" }),
+        (error) => error instanceof ArbitrageExecutionCommandError
+          && error.category === (scenario === "missing"
+            ? "execution_recovery_record_not_found"
+            : "execution_recovery_identity_conflict"),
+      );
+      assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences[0]?.executionRecordId, null);
+      assert.equal(fixture.runtime.reconcileCalls.length, 0);
+      assert.equal(fixture.runtime.providerMutations, 0);
+    });
+  }
+});
+
+test("recovery rejects user, account, venue, and instrument identity conflicts", async (t) => {
+  const mismatches = [
+    { name: "intent", overrides: { intentId: "another-intent" } },
+    { name: "user", overrides: { userId: "user-b" } },
+    { name: "account", overrides: { accountId: "binance:account-b" } },
+    { name: "venue", overrides: { venue: "okx" as const } },
+    { name: "instrument", overrides: { instrumentId: "ETH-USDT-SPOT" } },
+  ];
+  for (const mismatch of mismatches) {
+    await t.test(mismatch.name, async (child) => {
+      const fixture = setup(child);
+      const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: `recovery-${mismatch.name}` }));
+      const intentId = `intent-${mismatch.name}`;
+      const leg = created.instance.legs[0];
+      fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
+        legId: leg.legId,
+        phase: "OPENING",
+        quantityEffect: "INCREASE",
+        executionIntentId: intentId,
+        requestedQuantity: "0.001",
+        createdAt: now,
+      });
+      const conflicting = recoveryRecord(intentId, leg, mismatch.overrides);
+      fixture.runtime.records.set("record-conflict", conflicting);
+      if (mismatch.name === "intent") fixture.runtime.recoveryCandidates = [conflicting];
+
+      await assert.rejects(
+        () => fixture.service.reconcileLeg("user-a", { arbitrageId: created.instance.arbitrageId, legId: leg.legId }),
+        (error) => error instanceof ArbitrageExecutionCommandError
+          && error.category === "execution_recovery_identity_conflict",
+      );
+      assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences[0]?.executionRecordId, null);
+      assert.equal(fixture.runtime.reconcileCalls.length, 0);
+    });
+  }
+});
+
+test("repeated and concurrent link recovery cannot double-count exposure", async (t) => {
+  const repeated = setup(t);
+  const created = await repeated.service.confirm("user-a", finalRequest({ confirmationId: "recovery-repeated" }));
+  seedInterruptedExecution(repeated, created.instance, "long-leg", "intent-repeated");
+  repeated.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.001");
+  const request = { arbitrageId: created.instance.arbitrageId, legId: "long-leg" };
+  const first = await repeated.service.reconcileLeg("user-a", request);
+  const replay = await repeated.service.reconcileLeg("user-a", request);
+  assert.equal(first.instance.legs[0].confirmedOpenedQuantity, "0.001");
+  assert.equal(replay.instance.legs[0].confirmedOpenedQuantity, "0.001");
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(repeated.runtime.reconcileCalls.length, 1);
+
+  const concurrent = setup(t);
+  const concurrentCreated = await concurrent.service.confirm("user-a", finalRequest({ confirmationId: "recovery-concurrent" }));
+  seedInterruptedExecution(concurrent, concurrentCreated.instance, "long-leg", "intent-concurrent");
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  concurrent.runtime.onReconcile = async (record) => {
+    await gate;
+    return reconciliationResult(record, "PENDING_CONFIRMATION", "0.0007");
+  };
+  const concurrentRequest = { arbitrageId: concurrentCreated.instance.arbitrageId, legId: "long-leg" };
+  const left = concurrent.service.reconcileLeg("user-a", concurrentRequest);
+  const right = concurrent.createService().reconcileLeg("user-a", concurrentRequest);
+  release();
+  const [leftResult, rightResult] = await Promise.all([left, right]);
+  assert.equal(leftResult.instance.legs[0].confirmedOpenedQuantity, "0.0007");
+  assert.equal(rightResult.instance.legs[0].confirmedOpenedQuantity, "0.0007");
+  assert.equal(concurrent.runtime.reconcileCalls.length, 2);
+  assert.equal(concurrent.runtime.providerMutations, 0);
+});
+
+test("recovered partial link continues through the existing reconciliation flow", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  seedInterruptedExecution(fixture, created.instance, "long-leg", "intent-continue");
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "PENDING_CONFIRMATION", "0.0004");
+  await fixture.service.reconcileLeg("user-a", { arbitrageId: created.instance.arbitrageId, legId: "long-leg" });
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.001");
+
+  const completed = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "long-leg",
+  });
+
+  assert.equal(completed.instance.legs[0].confirmedOpenedQuantity, "0.001");
+  assert.equal(completed.instance.executionReferences[0]?.status, "CONFIRMED");
+  assert.equal(completed.secondLegAllowed, true);
+  assert.equal(fixture.runtime.reconcileCalls.length, 2);
+});
+
 class FakeDraftService {
   readonly calls: unknown[] = [];
   constructor(public value: ArbitrageExecutionDraft) {}
@@ -379,6 +550,7 @@ class FakeRuntime implements FormalArbitrageExecutionRuntime {
   readonly calls: ExecutionIntent[] = [];
   readonly reconcileCalls: Array<{ userId: string; executionId: string }> = [];
   readonly records = new Map<string, ExecutionRecord>();
+  recoveryCandidates: readonly ExecutionRecord[] | null = null;
   providerMutations = 0;
   onExecute: (intent: ExecutionIntent) => ReturnType<typeof runtimeResult> = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
   onReconcile: (record: ExecutionRecord) => ReturnType<typeof reconciliationResult> | Promise<ReturnType<typeof reconciliationResult>> = (record) => reconciliationResult(record, "UNKNOWN", null);
@@ -396,6 +568,10 @@ class FakeRuntime implements FormalArbitrageExecutionRuntime {
     this.records.set(executionId, result.executionRecord);
     return result;
   }
+  findByIntentId(intentId: string) {
+    return this.recoveryCandidates
+      ?? [...this.records.values()].filter((record) => record.intentId === intentId);
+  }
 }
 
 function setup(t: TestContext, options: { draft?: ArbitrageExecutionDraft } = {}) {
@@ -407,14 +583,17 @@ function setup(t: TestContext, options: { draft?: ArbitrageExecutionDraft } = {}
   });
   const drafts = new FakeDraftService(options.draft ?? draft(true));
   const runtime = new FakeRuntime();
-  const service = new ArbitrageExecutionCommandService(
+  const credentials = { findSummary: (userId: string, venue: string) => userId === "user-a" && venue === "binance" ? ({ accountId: "binance:account-a" } as any) : null };
+  const createService = () => new ArbitrageExecutionCommandService(
     drafts,
     store,
-    { findSummary: (userId: string, venue: string) => userId === "user-a" && venue === "binance" ? ({ accountId: "binance:account-a" } as any) : null },
+    credentials,
+    runtime,
     runtime,
     { clock: () => now, intentTtlMs: 30_000 },
   );
-  return { drafts, runtime, service, store };
+  const service = createService();
+  return { drafts, runtime, service, store, createService };
 }
 
 function finalRequest(overrides: Record<string, unknown> = {}) {
@@ -458,6 +637,46 @@ function reconciliationResult(
   return Object.freeze({
     executionRecord: createExecutionRecord({ ...record, status, updatedAt: record.updatedAt + 1 }),
     confirmedQuantity,
+  });
+}
+
+function seedInterruptedExecution(
+  fixture: ReturnType<typeof setup>,
+  instance: Awaited<ReturnType<ArbitrageExecutionCommandService["confirm"]>>["instance"],
+  legId: string,
+  intentId: string,
+  recordOverrides: Partial<ExecutionRecord> = {},
+) {
+  const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+  fixture.store.claimExecutionReference("user-a", instance.arbitrageId, {
+    legId,
+    phase: "OPENING",
+    quantityEffect: "INCREASE",
+    executionIntentId: intentId,
+    requestedQuantity: leg.plannedQuantity,
+    createdAt: now,
+  });
+  const record = recoveryRecord(intentId, leg, recordOverrides);
+  fixture.runtime.records.set(record.executionId, record);
+  return record;
+}
+
+function recoveryRecord(
+  intentId: string,
+  leg: Awaited<ReturnType<ArbitrageExecutionCommandService["confirm"]>>["instance"]["legs"][number],
+  overrides: Partial<ExecutionRecord> = {},
+) {
+  return createExecutionRecord({
+    executionId: `record-${intentId}`,
+    intentId,
+    userId: "user-a",
+    venue: leg.venue,
+    accountId: leg.accountId,
+    instrumentId: leg.instrumentId,
+    status: "PENDING_CONFIRMATION",
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
   });
 }
 

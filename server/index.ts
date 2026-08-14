@@ -198,6 +198,7 @@ const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,
   userExchangeCredentials,
+  executionRecordStore,
   new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime),
 );
 const fundingManualExecution = new FundingArbitrageManualExecutionService(

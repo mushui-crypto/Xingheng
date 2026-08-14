@@ -64,6 +64,29 @@ test("restores an execution record after the store is restarted", () => {
   });
 });
 
+test("finds every persisted recovery candidate by intentId after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new SqliteExecutionRecordStore({ dbPath });
+    first.create(record({ executionId: "execution-b", userId: "user-b" }));
+    first.create(record({ executionId: "execution-a" }));
+    first.close();
+
+    const second = new SqliteExecutionRecordStore({ dbPath });
+    try {
+      assert.deepEqual(
+        second.findByIntentId("intent-1").map(({ executionId, userId }) => ({ executionId, userId })),
+        [
+          { executionId: "execution-a", userId: "user-a" },
+          { executionId: "execution-b", userId: "user-b" },
+        ],
+      );
+      assert.deepEqual(second.findByIntentId("missing-intent"), []);
+    } finally {
+      second.close();
+    }
+  });
+});
+
 test("persists UNKNOWN and CONFIRMED states", () => {
   withStore(({ store }) => {
     store.create(record({ status: "UNKNOWN" }));

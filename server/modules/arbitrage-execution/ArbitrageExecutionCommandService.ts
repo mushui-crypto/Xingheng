@@ -4,6 +4,7 @@ import { absoluteDifference } from "../cex/arbitrage-instance/ArbitrageInstance"
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import type { ExecutionRecordRecoveryStore } from "../cex/ExecutionRecordStore";
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
 import type { ArbitrageExecutionDraft, ArbitrageExecutionDraftLeg } from "./ArbitrageExecutionDraft";
 import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
@@ -53,6 +54,8 @@ export class ArbitrageExecutionCommandError extends Error {
       | "arbitrage_instance_mismatch"
       | "arbitrage_leg_not_found"
       | "arbitrage_execution_reference_not_found"
+      | "execution_recovery_record_not_found"
+      | "execution_recovery_identity_conflict"
       | "second_leg_not_allowed"
       | "execution_state_unknown",
     message: string,
@@ -68,6 +71,7 @@ export class ArbitrageExecutionCommandService {
     private readonly drafts: DraftService,
     private readonly instances: InstanceStore,
     private readonly credentials: CredentialSummaries,
+    private readonly executionRecords: ExecutionRecordRecoveryStore,
     private readonly runtime: FormalArbitrageExecutionRuntime,
     private readonly options: Readonly<{
       clock?: () => number;
@@ -241,23 +245,32 @@ export class ArbitrageExecutionCommandService {
     if (references.length !== 1) {
       throw commandError("arbitrage_execution_reference_not_found", "该套利腿不存在唯一可核验的执行引用。");
     }
-    const reference = references[0]!;
+    let currentInstance = instance;
+    let reference = references[0]!;
     if (!reference.executionRecordId) {
-      throw commandError("execution_state_unknown", "该套利腿尚无可核验的执行记录。");
+      const recovered = await this.recoverExecutionReference(userId, instance, leg, reference);
+      currentInstance = recovered.instance;
+      reference = recovered.reference;
     }
     if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
-      return resultFromReference(instance, reference, true);
+      return resultFromReference(currentInstance, reference, true);
     }
-    if (reference.status !== "PENDING_CONFIRMATION" && reference.status !== "UNKNOWN") {
+    if (reference.status !== "LINKED"
+      && reference.status !== "PENDING_CONFIRMATION"
+      && reference.status !== "UNKNOWN") {
       throw commandError("execution_state_unknown", "该套利腿当前尚不能进行远端核验。");
     }
     if (leg.venue !== "binance") {
       throw commandError("execution_capability_unavailable", "该交易所尚未接入正式执行核验能力。");
     }
+    const executionRecordId = reference.executionRecordId;
+    if (!executionRecordId) {
+      throw commandError("execution_state_unknown", "执行记录关联恢复结果不可用。");
+    }
 
     let runtimeResult: FormalArbitrageExecutionRuntimeResult;
     try {
-      runtimeResult = await this.runtime.reconcile(userId, reference.executionRecordId);
+      runtimeResult = await this.runtime.reconcile(userId, executionRecordId);
     } catch {
       throw commandError("execution_state_unknown", "执行状态核验暂不可用；未提交任何新订单。");
     }
@@ -265,7 +278,7 @@ export class ArbitrageExecutionCommandService {
     const attributableStatus = runtimeResult.confirmedQuantity === null
       ? "UNKNOWN" as const
       : referenceStatus(runtimeResult.executionRecord.status);
-    const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
+    const updated = this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, {
       executionIntentId: reference.executionIntentId,
       status: attributableStatus,
       confirmedQuantity: runtimeResult.confirmedQuantity ?? reference.confirmedQuantity,
@@ -275,6 +288,48 @@ export class ArbitrageExecutionCommandService {
       (candidate) => candidate.executionIntentId === reference.executionIntentId,
     )!;
     return resultFromReference(updated, updatedReference, false, attributableStatus);
+  }
+
+  private async recoverExecutionReference(
+    userId: string,
+    instance: ArbitrageInstance,
+    leg: ArbitrageInstance["legs"][number],
+    reference: ArbitrageInstance["executionReferences"][number],
+  ) {
+    let records: readonly ExecutionRecord[];
+    try {
+      records = await this.executionRecords.findByIntentId(reference.executionIntentId);
+    } catch {
+      throw commandError("execution_state_unknown", "本地执行记录恢复暂不可用；未提交任何新订单。");
+    }
+    if (records.length === 0) {
+      throw commandError(
+        "execution_recovery_record_not_found",
+        "未找到该执行引用对应的本地执行记录；未提交任何新订单。",
+      );
+    }
+    if (records.length !== 1) {
+      throw commandError(
+        "execution_recovery_identity_conflict",
+        "同一执行意图存在多条本地执行记录，无法安全恢复关联。",
+      );
+    }
+    const record = records[0]!;
+    assertRecoveryIdentity(record, userId, leg, reference);
+    const linked = this.instances.linkExecutionRecord(
+      userId,
+      instance.arbitrageId,
+      reference.executionIntentId,
+      record.executionId,
+      record.updatedAt,
+    );
+    const linkedReference = linked.executionReferences.find(
+      (candidate) => candidate.executionIntentId === reference.executionIntentId,
+    );
+    if (!linkedReference || linkedReference.executionRecordId !== record.executionId) {
+      throw commandError("execution_recovery_identity_conflict", "执行记录关联恢复结果不一致。");
+    }
+    return Object.freeze({ instance: linked, reference: linkedReference });
   }
 
   private async revalidateDraft(
@@ -501,6 +556,21 @@ function assertReconciliationIdentity(
     || record.venue !== leg.venue
     || record.instrumentId !== leg.instrumentId) {
     throw commandError("execution_state_unknown", "核验结果与套利实例的执行身份不一致。");
+  }
+}
+
+function assertRecoveryIdentity(
+  record: ExecutionRecord,
+  userId: string,
+  leg: ArbitrageInstance["legs"][number],
+  reference: ArbitrageInstance["executionReferences"][number],
+) {
+  if (record.intentId !== reference.executionIntentId
+    || record.userId !== userId
+    || record.accountId !== leg.accountId
+    || record.venue !== leg.venue
+    || record.instrumentId !== leg.instrumentId) {
+    throw commandError("execution_recovery_identity_conflict", "本地执行记录与套利执行引用身份不一致。");
   }
 }
 

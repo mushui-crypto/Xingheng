@@ -12,6 +12,10 @@ export interface ExecutionRecordStore {
   ): Promise<ExecutionRecord | null> | ExecutionRecord | null;
 }
 
+export interface ExecutionRecordRecoveryStore {
+  findByIntentId(intentId: string): Promise<readonly ExecutionRecord[]> | readonly ExecutionRecord[];
+}
+
 type ExecutionRecordRow = Readonly<{
   executionId: string;
   userId: string;
@@ -94,6 +98,16 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
       identifier(executionId, "executionId"),
     );
     return row ? recordFromRow(row) : null;
+  }
+
+  findByIntentId(intentId: string): readonly ExecutionRecord[] {
+    const rows = this.db.prepare(`SELECT
+      executionId, userId, venue, accountId, intentId, executionAttemptId,
+      instrumentId, state, remoteOrderId, createdAt, updatedAt
+      FROM execution_records
+      WHERE intentId = ?
+      ORDER BY executionId ASC`).all(identifier(intentId, "intentId")) as unknown as ExecutionRecordRow[];
+    return Object.freeze(rows.map(recordFromRow));
   }
 
   close() {
