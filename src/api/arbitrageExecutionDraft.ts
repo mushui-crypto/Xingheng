@@ -111,6 +111,7 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
     status: "CREATED" | "SUBMITTED" | "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN";
     plannedQuantity: string;
     confirmedQuantity: string;
+    verifiedAt: number;
   }>;
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
@@ -166,6 +167,28 @@ export async function confirmArbitrageExecutionLeg(
       userAuthFailure: true,
     },
   );
+  return legExecutionConfirmation(payload);
+}
+
+export async function reconcileArbitrageExecutionLeg(
+  input: Readonly<{ arbitrageId: string; legId: string }>,
+) {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/legs/reconcile",
+    "套利腿执行状态核验失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      },
+      userAuthFailure: true,
+    },
+  );
+  return legExecutionConfirmation(payload);
+}
+
+function legExecutionConfirmation(payload: unknown): ArbitrageLegExecutionConfirmation {
   const value = record(payload);
   const executionRecord = record(value.executionRecord);
   if (typeof value.idempotentReplay !== "boolean" || typeof value.secondLegAllowed !== "boolean") {
@@ -180,10 +203,16 @@ export async function confirmArbitrageExecutionLeg(
       status,
       plannedQuantity: decimalString(executionRecord.plannedQuantity),
       confirmedQuantity: decimalString(executionRecord.confirmedQuantity),
+      verifiedAt: timestamp(executionRecord.verifiedAt),
     }),
     idempotentReplay: value.idempotentReplay,
     secondLegAllowed: value.secondLegAllowed,
   });
+}
+
+function timestamp(value: unknown) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw invalidCommandResponse();
+  return value;
 }
 
 function record(value: unknown): Record<string, unknown> {

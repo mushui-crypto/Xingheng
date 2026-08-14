@@ -7,6 +7,7 @@ import {
   ArbitrageExecutionDraftContent,
   ArbitrageExecutionDraftEntry,
   canExecuteLeg,
+  canReconcileLeg,
   canConfirmDraft,
 } from "./ArbitrageExecutionDraftEntry";
 import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
@@ -59,18 +60,28 @@ test("leg selection remains manual and second leg unlocks only after a complete 
   assert.equal(canExecuteLeg(unknown, "short-leg"), false);
   const partial = instance([reference("long-leg", "PENDING_CONFIRMATION", "0.0004")]);
   assert.equal(canExecuteLeg(partial, "short-leg"), false);
+  assert.equal(canReconcileLeg(partial, "long-leg"), true);
   const confirmed = instance([reference("long-leg", "CONFIRMED", "0.001")]);
   assert.equal(canExecuteLeg(confirmed, "long-leg"), false);
   assert.equal(canExecuteLeg(confirmed, "short-leg"), true);
 });
 
-function content(value: ArbitrageExecutionDraft) {
+test("pending and unknown legs render a Chinese reconciliation action and latest checked time", () => {
+  const pending = instance([reference("long-leg", "PENDING_CONFIRMATION", "0.0004")]);
+  const html = renderToStaticMarkup(content(draft(true), pending));
+  assert.match(html, /重新核验/u);
+  assert.match(html, /最近核验时间/u);
+  assert.doesNotMatch(html, /provider_response/u);
+});
+
+function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInstance | null = null) {
   return <ArbitrageExecutionDraftContent
     amount="20"
     draft={value}
     error=""
     executionMode="PRICE_PRIORITY"
     loading={false}
+    instance={currentInstance}
     mode="NOTIONAL_USDT"
     onAmountChange={() => undefined}
     onCancel={() => undefined}
@@ -78,6 +89,7 @@ function content(value: ArbitrageExecutionDraft) {
     onExecutionModeChange={() => undefined}
     onModeChange={() => undefined}
     onPlan={() => undefined}
+    onReconcileLeg={() => undefined}
     validationNotice="本阶段未创建套利实例，也未提交任何订单。"
   />;
 }

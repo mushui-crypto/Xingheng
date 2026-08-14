@@ -5,7 +5,7 @@ import type {
   FormalArbitrageExecutionRuntimeResult,
 } from "./ArbitrageExecutionCommandService";
 
-type Runtime = Pick<BinanceIntentExecutionRuntime, "execute">;
+type Runtime = Pick<BinanceIntentExecutionRuntime, "execute" | "reconcile">;
 
 /** Production adapter preserving Binance's authoritative Decimal executedQty. */
 export class BinanceFormalArbitrageExecutionRuntime implements FormalArbitrageExecutionRuntime {
@@ -16,6 +16,16 @@ export class BinanceFormalArbitrageExecutionRuntime implements FormalArbitrageEx
     return Object.freeze({
       executionRecord: result.executionRecord,
       confirmedQuantity: result.execution.step.result?.confirmedQuantity ?? null,
+    });
+  }
+
+  async reconcile(userId: string, executionId: string): Promise<FormalArbitrageExecutionRuntimeResult> {
+    const result = await this.runtime.reconcile(userId, executionId);
+    return Object.freeze({
+      executionRecord: result.executionRecord,
+      confirmedQuantity: result.observation?.state === "UNKNOWN"
+        ? null
+        : result.observation?.filledBaseQuantity ?? null,
     });
   }
 }

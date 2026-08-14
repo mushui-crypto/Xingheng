@@ -6,7 +6,7 @@ import {
 
 export function registerArbitrageExecutionCommandRoutes(
   app: express.Express,
-  service: Pick<ArbitrageExecutionCommandService, "confirm" | "executeLeg">,
+  service: Pick<ArbitrageExecutionCommandService, "confirm" | "executeLeg" | "reconcileLeg">,
 ) {
   app.post("/api/arbitrage-execution/confirm", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -25,6 +25,15 @@ export function registerArbitrageExecutionCommandRoutes(
       sendError(response, error);
     }
   });
+
+  app.post("/api/arbitrage-execution/legs/reconcile", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    try {
+      response.json(await service.reconcileLeg(userId(request), request.body));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
 }
 function userId(request: express.Request) {
   if (!request.user?.id) {
@@ -35,7 +44,8 @@ function userId(request: express.Request) {
 
 function sendError(response: express.Response, error: unknown) {
   if (error instanceof ArbitrageExecutionCommandError) {
-    const status = error.category === "arbitrage_instance_not_found" ? 404
+    const status = error.category === "arbitrage_instance_not_found"
+      || error.category === "arbitrage_execution_reference_not_found" ? 404
       : error.category === "execution_state_unknown" ? 409
         : 400;
     response.status(status).json({ category: error.category, message: error.message });

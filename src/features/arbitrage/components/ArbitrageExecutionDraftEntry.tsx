@@ -5,6 +5,7 @@ import {
   confirmArbitrageExecutionLeg,
   fetchArbitrageExecutionDraft,
   previewArbitrageExecutionDraft,
+  reconcileArbitrageExecutionLeg,
   type ArbitrageExecutionDraft,
   type ArbitrageExecutionDraftLeg,
   type ArbitrageLegExecutionConfirmation,
@@ -147,6 +148,22 @@ export function ArbitrageExecutionDraftEntry({
     }
   }
 
+  async function reconcileLeg(legId: string) {
+    if (!instance || !canReconcileLeg(instance, legId)) return;
+    setLoading(true);
+    setError("");
+    try {
+      const result = await reconcileArbitrageExecutionLeg({ arbitrageId: instance.arbitrageId, legId });
+      setInstance(result.instance);
+      setExecutionResults((current) => ({ ...current, [legId]: result.executionRecord }));
+      setValidationNotice(reconciliationNotice(result.executionRecord.status, result.secondLegAllowed));
+    } catch {
+      setError("套利腿执行状态核验失败，请稍后重试；系统未提交任何新订单。");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <>
       <Button type="button" onClick={openConfirmation}>
@@ -174,6 +191,7 @@ export function ArbitrageExecutionDraftEntry({
           onCancel={close}
           onConfirm={() => void confirmInstance()}
           onExecuteLeg={(legId) => void executeLeg(legId)}
+          onReconcileLeg={(legId) => void reconcileLeg(legId)}
           onExecutionModeChange={setExecutionMode}
           onModeChange={(nextMode) => {
             setMode(nextMode);
@@ -201,6 +219,7 @@ export function ArbitrageExecutionDraftContent({
   onCancel,
   onConfirm,
   onExecuteLeg = () => undefined,
+  onReconcileLeg = () => undefined,
   onExecutionModeChange,
   onModeChange,
   onPlan,
@@ -218,6 +237,7 @@ export function ArbitrageExecutionDraftContent({
   onCancel: () => void;
   onConfirm: () => void;
   onExecuteLeg?: (legId: string) => void;
+  onReconcileLeg?: (legId: string) => void;
   onExecutionModeChange: (value: string) => void;
   onModeChange: (value: ExecutionQuantityInput["mode"]) => void;
   onPlan: () => void;
@@ -288,6 +308,7 @@ export function ArbitrageExecutionDraftContent({
           instance={instance}
           loading={loading}
           onExecuteLeg={onExecuteLeg}
+          onReconcileLeg={onReconcileLeg}
         />
       ) : null}
 
@@ -315,16 +336,25 @@ export function canExecuteLeg(instance: ArbitrageInstance, legId: string) {
   return first.status === "CONFIRMED" && first.confirmedQuantity === first.requestedQuantity;
 }
 
+export function canReconcileLeg(instance: ArbitrageInstance, legId: string) {
+  const references = instance.executionReferences.filter((reference) => reference.legId === legId);
+  return references.length === 1
+    && (references[0]!.status === "PENDING_CONFIRMATION" || references[0]!.status === "UNKNOWN")
+    && references[0]!.executionRecordId !== null;
+}
+
 function ExecutionInstancePanel({
   executionResults,
   instance,
   loading,
   onExecuteLeg,
+  onReconcileLeg,
 }: {
   executionResults: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
   instance: ArbitrageInstance;
   loading: boolean;
   onExecuteLeg: (legId: string) => void;
+  onReconcileLeg: (legId: string) => void;
 }) {
   return (
     <section className="border border-sky-400/30 bg-sky-500/[0.04] p-4">
@@ -340,8 +370,9 @@ function ExecutionInstancePanel({
             leg={leg}
             loading={loading}
             onExecute={() => onExecuteLeg(leg.legId)}
+            onReconcile={() => onReconcileLeg(leg.legId)}
             permitted={canExecuteLeg(instance, leg.legId)}
-            referenceStatus={instance.executionReferences.find((reference) => reference.legId === leg.legId)?.status}
+            reference={instance.executionReferences.find((reference) => reference.legId === leg.legId)}
           />
         ))}
       </div>
@@ -349,15 +380,18 @@ function ExecutionInstancePanel({
   );
 }
 
-function ExecutionInstanceLeg({ execution, leg, loading, onExecute, permitted, referenceStatus }: {
+function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference }: {
   execution?: ArbitrageLegExecutionConfirmation["executionRecord"];
   leg: ArbitrageInstanceLeg;
   loading: boolean;
   onExecute: () => void;
+  onReconcile: () => void;
   permitted: boolean;
-  referenceStatus?: string;
+  reference?: ArbitrageInstance["executionReferences"][number];
 }) {
-  const status = execution?.status ?? referenceStatus ?? "CREATED";
+  const status = execution?.status ?? reference?.status ?? "CREATED";
+  const reconcilable = status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
+  const verifiedAt = execution?.verifiedAt ?? reference?.updatedAt;
   return (
     <div className="border border-[#25282f] bg-black p-4">
       <div className="flex items-center justify-between gap-3"><strong className="text-xs text-white">{leg.role === "LONG" ? "LONG · 多头腿" : "SHORT · 空头腿"}</strong><span className="text-[11px] text-[#8f99a5]">{executionStatusLabel(status)}</span></div>
@@ -365,9 +399,16 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, permitted, r
         <LegExecutionMetric label="计划数量" value={leg.plannedQuantity} />
         <LegExecutionMetric label="已确认数量" value={execution?.confirmedQuantity ?? leg.confirmedOpenedQuantity} />
         <LegExecutionMetric label="执行状态" value={executionStatusLabel(status)} />
+        <LegExecutionMetric label="最近核验时间" value={verifiedAt === undefined ? "尚未核验" : formatCheckedAt(verifiedAt)} />
       </dl>
-      <Button className="mt-4 w-full" disabled={loading || !permitted} onClick={onExecute} type="button" variant="secondary">
-        {instanceLegButtonLabel(referenceStatus)}
+      <Button
+        className="mt-4 w-full"
+        disabled={loading || (reconcilable ? reference?.executionRecordId === null : !permitted)}
+        onClick={reconcilable ? onReconcile : onExecute}
+        type="button"
+        variant="secondary"
+      >
+        {reconcilable ? "重新核验" : instanceLegButtonLabel(reference?.status)}
       </Button>
     </div>
   );
@@ -395,6 +436,18 @@ function executionNotice(status: string, secondLegAllowed: boolean) {
   if (status === "PENDING_CONFIRMATION") return "当前存在部分成交或待确认状态，第二腿保持禁用。";
   if (status === "FAILED") return "该腿执行失败，套利实例已保留，第二腿不会自动执行。";
   return "执行状态暂时无法确认，第二腿保持禁用。";
+}
+
+function reconciliationNotice(status: string, secondLegAllowed: boolean) {
+  if (status === "CONFIRMED" && secondLegAllowed) return "核验已确认第一腿完整成交。请核对结果后，再次人工确认第二腿。";
+  if (status === "CONFIRMED") return "核验已确认该套利腿完整成交。";
+  if (status === "PENDING_CONFIRMATION") return "核验后仍为部分成交或待确认状态，第二腿保持禁用。";
+  if (status === "FAILED") return "核验确认该腿已终止；实际成交数量已保留，第二腿保持禁用。";
+  return "核验后状态仍无法确认，第二腿保持禁用。";
+}
+
+function formatCheckedAt(value: number) {
+  return new Date(value).toLocaleString("zh-CN", { hour12: false });
 }
 
 function createClientCommandId(prefix: string) {

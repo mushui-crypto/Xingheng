@@ -22,6 +22,7 @@ export type FormalArbitrageExecutionRuntimeResult = Readonly<{
 
 export interface FormalArbitrageExecutionRuntime {
   execute(intent: ExecutionIntent): Promise<FormalArbitrageExecutionRuntimeResult>;
+  reconcile(userId: string, executionId: string): Promise<FormalArbitrageExecutionRuntimeResult>;
 }
 
 export type ArbitrageExecutionConfirmation = Readonly<{
@@ -37,6 +38,7 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
     status: ExecutionRecord["status"] | "CREATED";
     plannedQuantity: string;
     confirmedQuantity: string;
+    verifiedAt: number;
   }>;
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
@@ -50,6 +52,7 @@ export class ArbitrageExecutionCommandError extends Error {
       | "arbitrage_instance_not_found"
       | "arbitrage_instance_mismatch"
       | "arbitrage_leg_not_found"
+      | "arbitrage_execution_reference_not_found"
       | "second_leg_not_allowed"
       | "execution_state_unknown",
     message: string,
@@ -59,6 +62,8 @@ export class ArbitrageExecutionCommandError extends Error {
 }
 
 export class ArbitrageExecutionCommandService {
+  private readonly reconciliationInFlight = new Map<string, Promise<ArbitrageLegExecutionConfirmation>>();
+
   constructor(
     private readonly drafts: DraftService,
     private readonly instances: InstanceStore,
@@ -209,6 +214,69 @@ export class ArbitrageExecutionCommandService {
     return resultFromReference(updated, reference, false, attributableStatus);
   }
 
+  async reconcileLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const request = parseReconciliationRequest(input);
+    const key = `${userId}\u0000${request.arbitrageId}\u0000${request.legId}`;
+    const existing = this.reconciliationInFlight.get(key);
+    if (existing) return existing;
+    const operation = this.reconcileLegOnce(userId, request);
+    this.reconciliationInFlight.set(key, operation);
+    try {
+      return await operation;
+    } finally {
+      if (this.reconciliationInFlight.get(key) === operation) this.reconciliationInFlight.delete(key);
+    }
+  }
+
+  private async reconcileLegOnce(
+    userId: string,
+    request: Readonly<{ arbitrageId: string; legId: string }>,
+  ): Promise<ArbitrageLegExecutionConfirmation> {
+    const instance = this.instances.get(userId, request.arbitrageId);
+    if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
+    if (!leg) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    const references = instance.executionReferences.filter((reference) => reference.legId === request.legId);
+    if (references.length !== 1) {
+      throw commandError("arbitrage_execution_reference_not_found", "该套利腿不存在唯一可核验的执行引用。");
+    }
+    const reference = references[0]!;
+    if (!reference.executionRecordId) {
+      throw commandError("execution_state_unknown", "该套利腿尚无可核验的执行记录。");
+    }
+    if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
+      return resultFromReference(instance, reference, true);
+    }
+    if (reference.status !== "PENDING_CONFIRMATION" && reference.status !== "UNKNOWN") {
+      throw commandError("execution_state_unknown", "该套利腿当前尚不能进行远端核验。");
+    }
+    if (leg.venue !== "binance") {
+      throw commandError("execution_capability_unavailable", "该交易所尚未接入正式执行核验能力。");
+    }
+
+    let runtimeResult: FormalArbitrageExecutionRuntimeResult;
+    try {
+      runtimeResult = await this.runtime.reconcile(userId, reference.executionRecordId);
+    } catch {
+      throw commandError("execution_state_unknown", "执行状态核验暂不可用；未提交任何新订单。");
+    }
+    assertReconciliationIdentity(runtimeResult.executionRecord, userId, leg, reference);
+    const attributableStatus = runtimeResult.confirmedQuantity === null
+      ? "UNKNOWN" as const
+      : referenceStatus(runtimeResult.executionRecord.status);
+    const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
+      executionIntentId: reference.executionIntentId,
+      status: attributableStatus,
+      confirmedQuantity: runtimeResult.confirmedQuantity ?? reference.confirmedQuantity,
+      updatedAt: runtimeResult.executionRecord.updatedAt,
+    });
+    const updatedReference = updated.executionReferences.find(
+      (candidate) => candidate.executionIntentId === reference.executionIntentId,
+    )!;
+    return resultFromReference(updated, updatedReference, false, attributableStatus);
+  }
+
   private async revalidateDraft(
     userId: string,
     request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays" | "quantityInput">,
@@ -259,6 +327,8 @@ type LegConfirmationRequest = FinalConfirmationRequest & Readonly<{
   commandId: string;
 }>;
 
+type ReconciliationRequest = Readonly<{ arbitrageId: string; legId: string }>;
+
 function parseFinalConfirmation(input: unknown): FinalConfirmationRequest {
   const value = object(input, "execution confirmation");
   exactKeys(value, ["confirmationId", "opportunityId", "horizonDays", "quantityInput", "executionMode", "confirmed"]);
@@ -276,6 +346,15 @@ function parseLegConfirmation(input: unknown): LegConfirmationRequest {
     arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
     legId: identifier(value.legId, "legId"),
     commandId: identifier(value.commandId, "commandId"),
+  });
+}
+
+function parseReconciliationRequest(input: unknown): ReconciliationRequest {
+  const value = object(input, "leg execution reconciliation");
+  exactKeys(value, ["arbitrageId", "legId"]);
+  return Object.freeze({
+    arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
+    legId: identifier(value.legId, "legId"),
   });
 }
 
@@ -382,6 +461,7 @@ function resultFromReference(
       status: recordStatus ?? recordStatusFromReference(reference.status),
       plannedQuantity: reference.requestedQuantity,
       confirmedQuantity: reference.confirmedQuantity,
+      verifiedAt: reference.updatedAt,
     }),
     idempotentReplay,
     secondLegAllowed: instance.executionReferences.length === 1
@@ -405,6 +485,22 @@ function assertRuntimeIdentity(record: ExecutionRecord, intent: ExecutionIntent)
     || record.accountId !== intent.accountId || record.venue !== intent.venue
     || record.instrumentId !== intent.instrumentId) {
     throw commandError("execution_state_unknown", "执行记录身份与套利执行意图不一致。");
+  }
+}
+
+function assertReconciliationIdentity(
+  record: ExecutionRecord,
+  userId: string,
+  leg: ArbitrageInstance["legs"][number],
+  reference: ArbitrageInstance["executionReferences"][number],
+) {
+  if (record.executionId !== reference.executionRecordId
+    || record.intentId !== reference.executionIntentId
+    || record.userId !== userId
+    || record.accountId !== leg.accountId
+    || record.venue !== leg.venue
+    || record.instrumentId !== leg.instrumentId) {
+    throw commandError("execution_state_unknown", "核验结果与套利实例的执行身份不一致。");
   }
 }
 

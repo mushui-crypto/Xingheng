@@ -16,18 +16,27 @@ test("formal execution command routes are authenticated, no-store, and forward n
       calls.push({ operation: "leg", userId, input });
       return { instance: { arbitrageId: "arbitrage-1" } } as any;
     },
+    async reconcileLeg(userId, input) {
+      calls.push({ operation: "reconcile", userId, input });
+      return { instance: { arbitrageId: "arbitrage-1" } } as any;
+    },
   });
   const finalBody = { opportunityId: "op-1", confirmed: true };
   const legBody = { arbitrageId: "arbitrage-1", legId: "long-leg", confirmed: true };
   const finalResponse = response();
   const legResponse = response();
+  const reconciliationBody = { arbitrageId: "arbitrage-1", legId: "long-leg" };
+  const reconciliationResponse = response();
   await handlers.get("/api/arbitrage-execution/confirm")({ user: { id: "user-a" }, body: finalBody }, finalResponse);
   await handlers.get("/api/arbitrage-execution/legs/confirm")({ user: { id: "user-a" }, body: legBody }, legResponse);
+  await handlers.get("/api/arbitrage-execution/legs/reconcile")({ user: { id: "user-a" }, body: reconciliationBody }, reconciliationResponse);
   assert.equal(finalResponse.headers["Cache-Control"], "no-store");
   assert.equal(legResponse.headers["Cache-Control"], "no-store");
+  assert.equal(reconciliationResponse.headers["Cache-Control"], "no-store");
   assert.deepEqual(calls, [
     { operation: "confirm", userId: "user-a", input: finalBody },
     { operation: "leg", userId: "user-a", input: legBody },
+    { operation: "reconcile", userId: "user-a", input: reconciliationBody },
   ]);
 });
 
@@ -38,6 +47,7 @@ test("formal execution command routes reject unauthenticated requests before ser
   } as any, {
     confirm: async () => assert.fail("service must not be called"),
     executeLeg: async () => assert.fail("service must not be called"),
+    reconcileLeg: async () => assert.fail("service must not be called"),
   });
   const result = response();
   await handler({ body: {} }, result);

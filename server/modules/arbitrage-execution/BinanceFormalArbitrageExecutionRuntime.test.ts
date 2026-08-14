@@ -11,6 +11,7 @@ test("formal adapter delegates and preserves the runtime's authoritative Decimal
   const intent = executionIntent();
   let received = null;
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async reconcile() { throw new Error("unused"); },
     async execute(value) {
       received = value;
       return {
@@ -35,6 +36,7 @@ test("partial and cancelled-with-partial production records retain exact Decimal
   ] as const) {
     const intent = executionIntent();
     const adapter = new BinanceFormalArbitrageExecutionRuntime({
+      async reconcile() { throw new Error("unused"); },
       async execute(value) {
         return {
           executionRecord: createExecutionRecord({
@@ -54,6 +56,7 @@ test("partial and cancelled-with-partial production records retain exact Decimal
 test("unknown production results expose no fabricated confirmed quantity", async () => {
   const intent = executionIntent();
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async reconcile() { throw new Error("unused"); },
     async execute(value) {
       return {
         executionRecord: createExecutionRecord({
@@ -67,6 +70,31 @@ test("unknown production results expose no fabricated confirmed quantity", async
   const result = await adapter.execute(intent);
   assert.equal(result.confirmedQuantity, null);
   assert.equal(result.executionRecord.status, "UNKNOWN");
+});
+
+test("formal reconciliation maps authoritative Decimal observations and UNKNOWN to null", async () => {
+  const record = createExecutionRecord({
+    ...createExecutionRecordFromIntent("record-reconcile", executionIntent()),
+    status: "PENDING_CONFIRMATION",
+  });
+  for (const observation of [
+    { state: "CONFIRMED", filledBaseQuantity: "0.001234567890123456789", observedAt: now + 1 },
+    { state: "PENDING_CONFIRMATION", filledBaseQuantity: "0.000456789012345678", observedAt: now + 2 },
+    { state: "FAILED", filledBaseQuantity: "0.000123456789012345", observedAt: now + 3 },
+    { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now + 4 },
+  ] as const) {
+    const adapter = new BinanceFormalArbitrageExecutionRuntime({
+      async execute() { throw new Error("unused"); },
+      async reconcile(userId, executionId) {
+        assert.equal(userId, "user-a");
+        assert.equal(executionId, record.executionId);
+        return { executionRecord: createExecutionRecord({ ...record, status: observation.state, updatedAt: observation.observedAt }), observation, terminalShortCircuit: false };
+      },
+    });
+    const result = await adapter.reconcile("user-a", record.executionId);
+    assert.equal(result.confirmedQuantity, observation.state === "UNKNOWN" ? null : observation.filledBaseQuantity);
+    assert.equal(result.executionRecord.status, observation.state);
+  }
 });
 
 function executionResult(confirmedQuantity: string | undefined) {

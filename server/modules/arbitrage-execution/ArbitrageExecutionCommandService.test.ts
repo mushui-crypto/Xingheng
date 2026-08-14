@@ -6,7 +6,7 @@ import test, { type TestContext } from "node:test";
 import { createAsset } from "../cex/Asset";
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
-import { createExecutionRecord } from "../cex/ExecutionRecord";
+import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ArbitrageExecutionDraft } from "./ArbitrageExecutionDraft";
 import {
   ArbitrageExecutionCommandService,
@@ -238,6 +238,134 @@ test("LIVE/kill-switch style RiskGuard blocks remain UNKNOWN and never enable a 
   }
 });
 
+test("PENDING and UNKNOWN reconciliation recover full Decimal fills and unlock only a complete first leg", async (t) => {
+  for (const initialStatus of ["PENDING_CONFIRMATION", "UNKNOWN"] as const) {
+    await t.test(initialStatus, async (child) => {
+      const fixture = setup(child);
+      const created = await fixture.service.confirm("user-a", finalRequest());
+      fixture.runtime.onExecute = (intent) => runtimeResult(intent, initialStatus, initialStatus === "UNKNOWN" ? null : "0");
+      await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+      fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.001");
+
+      const recovered = await fixture.service.reconcileLeg("user-a", {
+        arbitrageId: created.instance.arbitrageId,
+        legId: "long-leg",
+      });
+
+      assert.equal(recovered.executionRecord.status, "CONFIRMED");
+      assert.equal(recovered.executionRecord.confirmedQuantity, "0.001");
+      assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0.001");
+      assert.equal(recovered.secondLegAllowed, true);
+      assert.equal(fixture.runtime.reconcileCalls.length, 1);
+    });
+  }
+});
+
+test("PENDING and UNKNOWN reconciliation preserve partial Decimal fills and keep second leg disabled", async (t) => {
+  for (const initialStatus of ["PENDING_CONFIRMATION", "UNKNOWN"] as const) {
+    await t.test(initialStatus, async (child) => {
+      const fixture = setup(child);
+      const created = await fixture.service.confirm("user-a", finalRequest());
+      fixture.runtime.onExecute = (intent) => runtimeResult(intent, initialStatus, initialStatus === "UNKNOWN" ? null : "0.0001");
+      await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+      fixture.runtime.onReconcile = (record) => reconciliationResult(
+        record,
+        "PENDING_CONFIRMATION",
+        "0.000456789012345678",
+      );
+
+      const recovered = await fixture.service.reconcileLeg("user-a", {
+        arbitrageId: created.instance.arbitrageId,
+        legId: "long-leg",
+      });
+
+      assert.equal(recovered.executionRecord.confirmedQuantity, "0.000456789012345678");
+      assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0.000456789012345678");
+      assert.equal(recovered.secondLegAllowed, false);
+    });
+  }
+});
+
+test("UNKNOWN reconciliation retains prior evidence when provider quantity remains unknowable", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "PENDING_CONFIRMATION", "0.0004");
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "UNKNOWN", null);
+
+  const recovered = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "long-leg",
+  });
+
+  assert.equal(recovered.executionRecord.status, "UNKNOWN");
+  assert.equal(recovered.executionRecord.confirmedQuantity, "0.0004");
+  assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0.0004");
+  assert.equal(recovered.secondLegAllowed, false);
+});
+
+test("cancelled-with-partial reconciliation preserves exposure and becomes terminal idempotently", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "PENDING_CONFIRMATION", "0.0001");
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "FAILED", "0.0006");
+  const request = { arbitrageId: created.instance.arbitrageId, legId: "long-leg" };
+
+  const recovered = await fixture.service.reconcileLeg("user-a", request);
+  const replay = await fixture.service.reconcileLeg("user-a", request);
+
+  assert.equal(recovered.executionRecord.status, "FAILED");
+  assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0.0006");
+  assert.equal(replay.instance.legs[0].confirmedOpenedQuantity, "0.0006");
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(fixture.runtime.reconcileCalls.length, 1);
+});
+
+test("concurrent reconciliation shares one provider query and cannot double-count exposure", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "PENDING_CONFIRMATION", "0.0001");
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  fixture.runtime.onReconcile = async (record) => {
+    await gate;
+    return reconciliationResult(record, "PENDING_CONFIRMATION", "0.0007");
+  };
+  const request = { arbitrageId: created.instance.arbitrageId, legId: "long-leg" };
+  const first = fixture.service.reconcileLeg("user-a", request);
+  const second = fixture.service.reconcileLeg("user-a", request);
+  release();
+  const [left, right] = await Promise.all([first, second]);
+
+  assert.equal(left.instance.legs[0].confirmedOpenedQuantity, "0.0007");
+  assert.equal(right.instance.legs[0].confirmedOpenedQuantity, "0.0007");
+  assert.equal(fixture.runtime.reconcileCalls.length, 1);
+});
+
+test("reconciliation enforces user/reference ownership and query failures never mutate exposure", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "UNKNOWN", null);
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  const request = { arbitrageId: created.instance.arbitrageId, legId: "long-leg" };
+
+  await assert.rejects(() => fixture.service.reconcileLeg("user-b", request), /不存在或不属于/u);
+  await assert.rejects(
+    () => fixture.service.reconcileLeg("user-a", { ...request, legId: "short-leg" }),
+    /不存在唯一可核验/u,
+  );
+  await assert.rejects(
+    () => fixture.service.reconcileLeg("user-a", { ...request, providerOrderId: "untrusted-order" }),
+    /不允许的字段/u,
+  );
+  fixture.runtime.onReconcile = async () => { throw new Error("provider GET failed"); };
+  await assert.rejects(() => fixture.service.reconcileLeg("user-a", request), /核验暂不可用/u);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.legs[0].confirmedOpenedQuantity, "0");
+  assert.equal(fixture.runtime.providerMutations, 0);
+});
+
 class FakeDraftService {
   readonly calls: unknown[] = [];
   constructor(public value: ArbitrageExecutionDraft) {}
@@ -249,11 +377,24 @@ class FakeDraftService {
 
 class FakeRuntime implements FormalArbitrageExecutionRuntime {
   readonly calls: ExecutionIntent[] = [];
+  readonly reconcileCalls: Array<{ userId: string; executionId: string }> = [];
+  readonly records = new Map<string, ExecutionRecord>();
   providerMutations = 0;
   onExecute: (intent: ExecutionIntent) => ReturnType<typeof runtimeResult> = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+  onReconcile: (record: ExecutionRecord) => ReturnType<typeof reconciliationResult> | Promise<ReturnType<typeof reconciliationResult>> = (record) => reconciliationResult(record, "UNKNOWN", null);
   async execute(intent: ExecutionIntent) {
     this.calls.push(intent);
-    return this.onExecute(intent);
+    const result = this.onExecute(intent);
+    this.records.set(result.executionRecord.executionId, result.executionRecord);
+    return result;
+  }
+  async reconcile(userId: string, executionId: string) {
+    this.reconcileCalls.push({ userId, executionId });
+    const record = this.records.get(executionId);
+    if (!record || record.userId !== userId) throw new Error("ExecutionRecord unavailable");
+    const result = await this.onReconcile(record);
+    this.records.set(executionId, result.executionRecord);
+    return result;
   }
 }
 
@@ -305,6 +446,17 @@ function runtimeResult(intent: ExecutionIntent, status: "CONFIRMED" | "PENDING_C
       createdAt: intent.createdAt,
       updatedAt: intent.createdAt,
     }),
+    confirmedQuantity,
+  });
+}
+
+function reconciliationResult(
+  record: ExecutionRecord,
+  status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN",
+  confirmedQuantity: string | null,
+) {
+  return Object.freeze({
+    executionRecord: createExecutionRecord({ ...record, status, updatedAt: record.updatedAt + 1 }),
     confirmedQuantity,
   });
 }
