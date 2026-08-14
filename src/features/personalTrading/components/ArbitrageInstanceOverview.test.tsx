@@ -74,6 +74,34 @@ test("active legs render matched, mismatch, unknown and null quantities without 
   assert.doesNotMatch(html, />0<\/dd>[\s\S]*当前仓位暂无法可靠确认/u);
 });
 
+test("matched Binance perpetual leg exposes the minimal controlled close entry while Spot/other venues stay unavailable", () => {
+  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const html = renderToStaticMarkup(
+    <ArbitrageInstanceSections
+      active={[active!]}
+      history={[]}
+      onCloseLeg={() => undefined}
+      onPageChange={() => undefined}
+      page={1}
+      verifications={{
+        [active!.arbitrageId]: {
+          status: "success",
+          verification: {
+            arbitrageId: active!.arbitrageId,
+            checkedAt: 1_800_000_004_000,
+            legs: [
+              { arbitrageId: active!.arbitrageId, legId: "long-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+              { arbitrageId: active!.arbitrageId, legId: "short-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  assert.match(html, /OKX[\s\S]*退出该腿/u);
+  assert.equal((html.match(/退出该腿/gu) ?? []).length, 1);
+});
+
 test("history renders confirmed quantities without live verification fields", () => {
   const [history] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
   const html = renderToStaticMarkup(<ArbitrageInstanceSections active={[]} history={[history!]} onPageChange={() => undefined} page={1} selectedSection="history" />);

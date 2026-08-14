@@ -5,11 +5,14 @@ import {
   fetchArbitrageInstanceHistory,
   fetchArbitragePositionVerification,
   type ArbitrageInstance,
+  type ArbitrageInstanceLeg,
+  type ArbitrageLegVerification,
   type ArbitrageInstanceStatus,
   type ArbitrageLegVerificationStatus,
   type ArbitragePositionVerification,
 } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
+import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
 
 const HISTORY_LIMIT = 50;
 const VERIFICATION_CONCURRENCY = 4;
@@ -29,6 +32,11 @@ export function ArbitrageInstanceOverview() {
   const [selectedSection, setSelectedSection] = useState<"active" | "history">("active");
   const [state, setState] = useState<ArbitrageInstanceLoadState>({ status: "loading" });
   const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
+  const [closeTarget, setCloseTarget] = useState<Readonly<{
+    instance: ArbitrageInstance;
+    leg: ArbitrageInstanceLeg;
+    verification: ArbitrageLegVerification;
+  }> | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -49,7 +57,36 @@ export function ArbitrageInstanceOverview() {
     return () => controller.abort();
   }, [page]);
 
-  return <ArbitrageInstanceContent onPageChange={setPage} onSectionChange={setSelectedSection} page={page} selectedSection={selectedSection} state={state} verifications={verifications} />;
+  const onInstanceUpdated = (updated: ArbitrageInstance) => {
+    setState((current) => current.status === "success"
+      ? { ...current, active: current.active.map((item) => item.arbitrageId === updated.arbitrageId ? updated : item) }
+      : current);
+    setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "loading" } }));
+    void fetchArbitragePositionVerification(updated.arbitrageId).then((verification) => {
+      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "success", verification } }));
+    }).catch(() => {
+      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "error" } }));
+    });
+  };
+
+  return <>
+    <ArbitrageInstanceContent
+      onCloseLeg={setCloseTarget}
+      onPageChange={setPage}
+      onSectionChange={setSelectedSection}
+      page={page}
+      selectedSection={selectedSection}
+      state={state}
+      verifications={verifications}
+    />
+    {closeTarget ? <ArbitrageLegCloseDialog
+      instance={closeTarget.instance}
+      leg={closeTarget.leg}
+      onClose={() => setCloseTarget(null)}
+      onUpdated={onInstanceUpdated}
+      verification={closeTarget.verification}
+    /> : null}
+  </>;
 }
 
 export async function loadVerifications(
@@ -74,6 +111,7 @@ export async function loadVerifications(
 }
 
 export function ArbitrageInstanceContent({
+  onCloseLeg,
   onPageChange,
   onSectionChange = () => undefined,
   page,
@@ -81,6 +119,7 @@ export function ArbitrageInstanceContent({
   state,
   verifications = {},
 }: {
+  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
   onPageChange: (page: number) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -105,6 +144,7 @@ export function ArbitrageInstanceContent({
       active={state.active}
       history={state.history}
       onPageChange={onPageChange}
+      onCloseLeg={onCloseLeg}
       onSectionChange={onSectionChange}
       page={page}
       selectedSection={selectedSection}
@@ -117,6 +157,7 @@ export function ArbitrageInstanceSections({
   active,
   history,
   onPageChange,
+  onCloseLeg,
   onSectionChange = () => undefined,
   page,
   selectedSection = "active",
@@ -125,6 +166,7 @@ export function ArbitrageInstanceSections({
   active: ArbitrageInstance[];
   history: ArbitrageInstance[];
   onPageChange: (page: number) => void;
+  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
   selectedSection?: "active" | "history";
@@ -141,6 +183,7 @@ export function ArbitrageInstanceSections({
         {selectedSection === "active" ? <InstanceSection
           emptyText="暂无当前套利组合"
           instances={active}
+          onCloseLeg={onCloseLeg}
           title="当前套利"
           verifications={verifications}
         /> : <InstanceSection
@@ -186,12 +229,14 @@ function InstanceSection({
   emptyText,
   historical = false,
   instances,
+  onCloseLeg,
   title,
   verifications = {},
 }: {
   emptyText: string;
   historical?: boolean;
   instances: ArbitrageInstance[];
+  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
   title: string;
   verifications?: Record<string, VerificationState>;
 }) {
@@ -203,12 +248,17 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onCloseLeg={onCloseLeg} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, verificationState }: { historical: boolean; instance: ArbitrageInstance; verificationState?: VerificationState }) {
+function InstanceCard({ historical, instance, onCloseLeg, verificationState }: {
+  historical: boolean;
+  instance: ArbitrageInstance;
+  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  verificationState?: VerificationState;
+}) {
   return (
     <article className="min-w-0 border border-[#25282f] bg-black p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -243,11 +293,45 @@ function InstanceCard({ historical, instance, verificationState }: { historical:
                 </>
               ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
             </dl>
+            {!historical && onCloseLeg ? <CloseLegAction
+              instance={instance}
+              leg={leg}
+              onCloseLeg={onCloseLeg}
+              verificationState={verificationState}
+            /> : null}
           </div>
         ))}
       </div>
     </article>
   );
+}
+
+function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
+  instance: ArbitrageInstance;
+  leg: ArbitrageInstanceLeg;
+  onCloseLeg: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  verificationState?: VerificationState;
+}) {
+  const verification = verificationState?.status === "success"
+    ? verificationState.verification.legs.find((item) => item.legId === leg.legId)
+    : undefined;
+  const available = leg.venue === "binance"
+    && leg.instrumentId.endsWith("-PERP")
+    && verification?.verificationStatus === "MATCHED"
+    && verification.expectedManagedQuantity !== "0"
+    && verification.actualQuantity !== null;
+  return <div className="mt-3 border-t border-[#25282f] pt-3">
+    <Button
+      disabled={!available}
+      onClick={() => verification && onCloseLeg({ instance, leg, verification })}
+      type="button"
+      variant="secondary"
+    >
+      {leg.instrumentId.endsWith("-SPOT")
+        ? "现货退出尚未接入"
+        : leg.venue !== "binance" ? "执行能力尚未接入" : "退出该腿"}
+    </Button>
+  </div>;
 }
 
 function LiveLegVerification({ legId, state }: { legId: string; state?: VerificationState }) {

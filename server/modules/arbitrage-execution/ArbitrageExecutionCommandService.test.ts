@@ -262,6 +262,78 @@ test("PENDING and UNKNOWN reconciliation recover full Decimal fills and unlock o
   }
 });
 
+test("reconciliation selects the unique unresolved closing reference when a leg has opening history", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", "0.001");
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "short-leg", "second-command"));
+
+  const closeIntentId = "close-short-command";
+  fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
+    legId: "short-leg",
+    phase: "CLOSING",
+    quantityEffect: "DECREASE",
+    executionIntentId: closeIntentId,
+    requestedQuantity: "0.0005",
+    createdAt: now,
+  });
+  const shortLeg = created.instance.legs[1];
+  const pending = recoveryRecord(closeIntentId, shortLeg, { executionId: "record-close-short" });
+  fixture.runtime.records.set(pending.executionId, pending);
+  fixture.store.linkExecutionRecord("user-a", created.instance.arbitrageId, closeIntentId, pending.executionId, now);
+  fixture.store.applyExecutionResult("user-a", created.instance.arbitrageId, {
+    executionIntentId: closeIntentId,
+    status: "PENDING_CONFIRMATION",
+    confirmedQuantity: "0.0002",
+    updatedAt: now,
+  });
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.0005");
+
+  const result = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "short-leg",
+  });
+
+  assert.equal(result.executionRecord.intentId, closeIntentId);
+  assert.equal(result.executionRecord.confirmedQuantity, "0.0005");
+  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "0.0005");
+  assert.equal(result.instance.legs[1].confirmedOpenedQuantity, "0.001");
+  assert.equal(fixture.runtime.calls.length, 2, "reconciliation must not place a new order");
+});
+
+test("CLAIMED closing reference reuses link recovery and never places another order", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", "0.001");
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "short-leg", "second-command"));
+
+  const closeIntentId = "interrupted-close-short";
+  fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
+    legId: "short-leg",
+    phase: "CLOSING",
+    quantityEffect: "DECREASE",
+    executionIntentId: closeIntentId,
+    requestedQuantity: "0.0005",
+    createdAt: now,
+  });
+  const localRecord = recoveryRecord(closeIntentId, created.instance.legs[1], {
+    executionId: "record-interrupted-close",
+  });
+  fixture.runtime.records.set(localRecord.executionId, localRecord);
+  fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.0005");
+
+  const result = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "short-leg",
+  });
+
+  assert.equal(result.instance.executionReferences.at(-1)?.executionRecordId, localRecord.executionId);
+  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "0.0005");
+  assert.equal(fixture.runtime.calls.length, 2, "link recovery must not retry provider mutation");
+});
+
 test("PENDING and UNKNOWN reconciliation preserve partial Decimal fills and keep second leg disabled", async (t) => {
   for (const initialStatus of ["PENDING_CONFIRMATION", "UNKNOWN"] as const) {
     await t.test(initialStatus, async (child) => {

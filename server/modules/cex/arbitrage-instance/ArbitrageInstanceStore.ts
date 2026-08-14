@@ -188,6 +188,13 @@ export class ArbitrageInstanceStore {
       }
       const leg = instance.legs.find((candidate) => candidate.legId === normalizedClaim.legId);
       if (!leg) throw new Error("Execution reference leg does not belong to the arbitrage instance.");
+      if (normalizedClaim.phase === "CLOSING" && instance.executionReferences.some((reference) => (
+        reference.legId === normalizedClaim.legId
+        && reference.phase === "CLOSING"
+        && UNRESOLVED_REFERENCE_STATUSES.includes(reference.status)
+      ))) {
+        throw new Error("Arbitrage leg already has an unresolved closing execution.");
+      }
       try {
         this.db.prepare(`INSERT INTO arbitrage_execution_references (
           arbitrageId, legId, phase, quantityEffect, executionIntentId,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import express from "express";
 import { registerArbitrageExecutionCommandRoutes } from "../api/arbitrageExecutionCommandRoutes";
+import { registerArbitrageExecutionCloseRoutes } from "../api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "../api/arbitrageExecutionDraftRoutes";
 import { registerUserAuthMiddleware } from "./authRoutes";
 
@@ -11,6 +12,7 @@ const executionRequests = [
   { method: "POST", path: "/api/arbitrage-execution/confirm" },
   { method: "POST", path: "/api/arbitrage-execution/legs/confirm" },
   { method: "POST", path: "/api/arbitrage-execution/legs/reconcile" },
+  { method: "POST", path: "/api/arbitrage-execution/legs/close" },
 ] as const;
 
 test("formal execution routes reject anonymous requests before application service access", async () => {
@@ -54,6 +56,7 @@ test("formal execution routes use authenticated request.user and ignore client u
       { operation: "confirm", userId: "user-a" },
       { operation: "leg-confirm", userId: "user-a" },
       { operation: "reconcile", userId: "user-a" },
+      { operation: "close", userId: "user-a" },
     ]);
     assert.deepEqual(calls[0]?.input, { opportunityId: "op-1", horizonDays: 90 });
   } finally {
@@ -105,6 +108,12 @@ async function startServer(calls: unknown[]) {
     },
     async reconcileLeg(userId, input) {
       calls.push({ operation: "reconcile", userId, input });
+      return { ok: true } as any;
+    },
+  });
+  registerArbitrageExecutionCloseRoutes(app, {
+    async closeLeg(userId, input) {
+      calls.push({ operation: "close", userId, input });
       return { ok: true } as any;
     },
   });

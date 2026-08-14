@@ -8,6 +8,7 @@ import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
+import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
@@ -39,6 +40,7 @@ import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboar
 import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/ArbitrageExecutionDraftService";
 import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
+import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
   createDefaultFundingOpportunityReadVenues,
@@ -168,9 +170,10 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 }));
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
+const arbitrageExecutionPlanningContexts = new DefaultArbitrageExecutionPlanningContextSource();
 const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
   arbitrageDashboard,
-  new DefaultArbitrageExecutionPlanningContextSource(),
+  arbitrageExecutionPlanningContexts,
   userExchangeCredentials,
 );
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
@@ -194,12 +197,19 @@ const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   { maxSlippageBps: loadBinanceTradingConfig().maxSlippageBps },
   executionRecordStore,
 );
+const binanceFormalArbitrageExecutionRuntime = new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime);
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,
   userExchangeCredentials,
   executionRecordStore,
-  new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime),
+  binanceFormalArbitrageExecutionRuntime,
+);
+const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
+  arbitrageInstances,
+  arbitragePositionVerification,
+  arbitrageExecutionPlanningContexts,
+  binanceFormalArbitrageExecutionRuntime,
 );
 const fundingManualExecution = new FundingArbitrageManualExecutionService(
   new ManualRequestFundingArbitrageExecutionIntentSource(),
@@ -216,6 +226,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
 registerArbitrageRoutes(app, arbitrageDashboard);
 registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
+registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);

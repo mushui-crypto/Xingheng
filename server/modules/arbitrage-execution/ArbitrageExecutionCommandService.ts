@@ -242,11 +242,16 @@ export class ArbitrageExecutionCommandService {
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!leg) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
     const references = instance.executionReferences.filter((reference) => reference.legId === request.legId);
-    if (references.length !== 1) {
+    const reconcilable = references.filter((reference) => reference.status === "CLAIMED"
+      || reference.status === "LINKED"
+      || reference.status === "PENDING_CONFIRMATION"
+      || reference.status === "UNKNOWN");
+    const candidates = reconcilable.length > 0 ? reconcilable : references;
+    if (candidates.length !== 1) {
       throw commandError("arbitrage_execution_reference_not_found", "该套利腿不存在唯一可核验的执行引用。");
     }
     let currentInstance = instance;
-    let reference = references[0]!;
+    let reference = candidates[0]!;
     if (!reference.executionRecordId) {
       const recovered = await this.recoverExecutionReference(userId, instance, leg, reference);
       currentInstance = recovered.instance;

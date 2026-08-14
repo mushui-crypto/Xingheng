@@ -188,6 +188,30 @@ export async function reconcileArbitrageExecutionLeg(
   return legExecutionConfirmation(payload);
 }
 
+export async function closeArbitrageExecutionLeg(
+  input: Readonly<{
+    arbitrageId: string;
+    legId: string;
+    commandId: string;
+    quantity: string;
+    executionMode: FormalExecutionMode;
+  }>,
+) {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/legs/close",
+    "套利腿退出失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  return legExecutionConfirmation(payload);
+}
+
 function legExecutionConfirmation(payload: unknown): ArbitrageLegExecutionConfirmation {
   const value = record(payload);
   const executionRecord = record(value.executionRecord);

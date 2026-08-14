@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  closeArbitrageExecutionLeg,
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
   fetchArbitrageExecutionDraft,
@@ -100,6 +101,47 @@ test("reconciliation API sends only arbitrageId and legId and parses the latest 
   }
   assert.equal(calls[0]?.url, "/api/arbitrage-execution/legs/reconcile");
   assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), { arbitrageId: "arbitrage-1", legId: "long-leg" });
+});
+
+test("close API sends only application identity, Decimal quantity, mode, and explicit confirmation", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    return Response.json({
+      instance: instancePayload("arbitrage-1"),
+      executionRecord: {
+        executionId: "record-close-1",
+        intentId: "intent-close-1",
+        status: "CONFIRMED",
+        plannedQuantity: "0.0004",
+        confirmedQuantity: "0.0004",
+        verifiedAt: 20,
+      },
+      idempotentReplay: false,
+      secondLegAllowed: false,
+    });
+  };
+  try {
+    await closeArbitrageExecutionLeg({
+      arbitrageId: "arbitrage-1",
+      legId: "short-leg",
+      commandId: "close-command-1",
+      quantity: "0.0004",
+      executionMode: "EXECUTION_PRIORITY",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(calls[0]?.url, "/api/arbitrage-execution/legs/close");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    arbitrageId: "arbitrage-1",
+    legId: "short-leg",
+    commandId: "close-command-1",
+    quantity: "0.0004",
+    executionMode: "EXECUTION_PRIORITY",
+    confirmed: true,
+  });
 });
 
 function instancePayload(arbitrageId: string) {
