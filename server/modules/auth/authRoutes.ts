@@ -216,6 +216,7 @@ function createPurposeRateWindow(windowMs: number, rawMax: number) {
 
 export const userAuthenticatedApiPrefixes = [
   "/api/arbitrage",
+  "/api/arbitrage-execution",
   "/api/funding-arbitrage",
   "/api/account-read",
   "/api/binance",
