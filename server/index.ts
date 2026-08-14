@@ -9,6 +9,7 @@ import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageExecutionCloseRoutes";
+import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerFundingArbitrageManualExecutionRoutes } from "./modules/api/fundingArbitrageManualExecutionRoutes";
@@ -41,6 +42,7 @@ import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/Ar
 import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
+import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/ArbitrageExecutionCancelService";
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
@@ -213,6 +215,12 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   new BinanceSpotCloseBalanceSource(binancePersonalTrading),
   binanceFormalArbitrageExecutionRuntime,
 );
+const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
+  arbitrageInstances,
+  executionRecordStore,
+  binanceExecutionRuntime,
+  arbitrageExecutionCommand,
+);
 const fundingManualExecution = new FundingArbitrageManualExecutionService(
   new ManualRequestFundingArbitrageExecutionIntentSource(),
   new CredentialVenueExecutionAccountResolver(userExchangeCredentials),
@@ -229,6 +237,7 @@ registerArbitrageRoutes(app, arbitrageDashboard);
 registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
 registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
+registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerFundingArbitrageManualExecutionRoutes(app, fundingManualExecution);

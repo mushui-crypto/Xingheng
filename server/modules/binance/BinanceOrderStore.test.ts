@@ -63,6 +63,26 @@ test("exact Decimal base quantities survive order persistence and restart", () =
   }
 });
 
+test("known-order cancellation claim is durable and idempotent across restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-cancel-claim-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    store.reserve(orderReservation("BTCUSDT"));
+    assert.equal(store.claimCancellation("order-BTCUSDT"), true);
+    assert.equal(store.claimCancellation("order-BTCUSDT"), false);
+    assert.ok(store.find("order-BTCUSDT")?.cancelRequestedAt);
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.claimCancellation("order-BTCUSDT"), false);
+    assert.ok(store.find("order-BTCUSDT")?.cancelRequestedAt);
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy migration backfills only pre-migration XAUT orders and is idempotent", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-legacy-"));
   const dbPath = join(root, "orders.sqlite");

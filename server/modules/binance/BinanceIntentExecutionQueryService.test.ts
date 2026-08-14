@@ -92,6 +92,7 @@ function storedOrder(
       updatedAt: now,
     },
     error: null,
+    cancelRequestedAt: null,
     createdAt: now - 1_000,
     updatedAt: now,
   };

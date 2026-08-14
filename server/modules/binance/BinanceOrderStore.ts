@@ -16,6 +16,7 @@ export type BinanceStoredOrder = {
   status: "processing" | "completed" | "failed";
   order: BinanceProviderOrder | null;
   error: string | null;
+  cancelRequestedAt: number | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -41,6 +42,7 @@ export class BinanceOrderStore {
         status TEXT NOT NULL CHECK(status IN ('processing', 'completed', 'failed')),
         orderJson TEXT,
         error TEXT,
+        cancelRequestedAt INTEGER,
         createdAt INTEGER NOT NULL,
         updatedAt INTEGER NOT NULL
       );
@@ -64,9 +66,12 @@ export class BinanceOrderStore {
         COMMIT;
       `);
     }
+    if (!this.columnExists("binance_personal_orders", "cancelRequestedAt")) {
+      this.db.exec("ALTER TABLE binance_personal_orders ADD COLUMN cancelRequestedAt INTEGER;");
+    }
   }
 
-  reserve(input: Omit<BinanceStoredOrder, "providerOrderId" | "status" | "order" | "error" | "createdAt" | "updatedAt">) {
+  reserve(input: Omit<BinanceStoredOrder, "providerOrderId" | "status" | "order" | "error" | "cancelRequestedAt" | "createdAt" | "updatedAt">) {
     const now = Date.now();
     const symbol = providerSymbol(input.symbol);
     try {
@@ -120,6 +125,14 @@ export class BinanceOrderStore {
       .run(error.slice(0, 500), Date.now(), idempotencyKey);
   }
 
+  claimCancellation(idempotencyKey: string) {
+    const result = this.db.prepare(`UPDATE binance_personal_orders
+      SET cancelRequestedAt = ?, updatedAt = ?
+      WHERE idempotencyKey = ? AND status = 'processing' AND cancelRequestedAt IS NULL`)
+      .run(Date.now(), Date.now(), idempotencyKey);
+    return result.changes === 1;
+  }
+
   find(idempotencyKey: string): BinanceStoredOrder | null {
     const row = this.db.prepare("SELECT * FROM binance_personal_orders WHERE idempotencyKey = ?").get(idempotencyKey) as Record<string, unknown> | undefined;
     return row ? parseStoredOrder(row) : null;
@@ -169,6 +182,7 @@ function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
     status: row.status as BinanceStoredOrder["status"],
     order: row.orderJson ? parseProviderOrder(JSON.parse(String(row.orderJson)), symbol) : null,
     error: row.error === null ? null : String(row.error),
+    cancelRequestedAt: row.cancelRequestedAt === null ? null : Number(row.cancelRequestedAt),
     createdAt: Number(row.createdAt),
     updatedAt: Number(row.updatedAt),
   };

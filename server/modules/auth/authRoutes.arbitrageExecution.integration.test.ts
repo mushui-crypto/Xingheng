@@ -3,6 +3,7 @@ import test from "node:test";
 import express from "express";
 import { registerArbitrageExecutionCommandRoutes } from "../api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageExecutionCloseRoutes } from "../api/arbitrageExecutionCloseRoutes";
+import { registerArbitrageExecutionCancelRoutes } from "../api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "../api/arbitrageExecutionDraftRoutes";
 import { registerUserAuthMiddleware } from "./authRoutes";
 
@@ -13,6 +14,7 @@ const executionRequests = [
   { method: "POST", path: "/api/arbitrage-execution/legs/confirm" },
   { method: "POST", path: "/api/arbitrage-execution/legs/reconcile" },
   { method: "POST", path: "/api/arbitrage-execution/legs/close" },
+  { method: "POST", path: "/api/arbitrage-execution/orders/cancel" },
 ] as const;
 
 test("formal execution routes reject anonymous requests before application service access", async () => {
@@ -57,6 +59,7 @@ test("formal execution routes use authenticated request.user and ignore client u
       { operation: "leg-confirm", userId: "user-a" },
       { operation: "reconcile", userId: "user-a" },
       { operation: "close", userId: "user-a" },
+      { operation: "cancel", userId: "user-a" },
     ]);
     assert.deepEqual(calls[0]?.input, { opportunityId: "op-1", horizonDays: 90 });
   } finally {
@@ -114,6 +117,12 @@ async function startServer(calls: unknown[]) {
   registerArbitrageExecutionCloseRoutes(app, {
     async closeLeg(userId, input) {
       calls.push({ operation: "close", userId, input });
+      return { ok: true } as any;
+    },
+  });
+  registerArbitrageExecutionCancelRoutes(app, {
+    async cancelKnownOrder(userId, input) {
+      calls.push({ operation: "cancel", userId, input });
       return { ok: true } as any;
     },
   });

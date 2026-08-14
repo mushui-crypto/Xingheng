@@ -470,6 +470,7 @@ function storedOrder(input: BinanceOrderInput, order: BinanceProviderOrder): Bin
     status: order.status === "Filled" ? "completed" : "processing",
     order,
     error: null,
+    cancelRequestedAt: null,
     createdAt: now,
     updatedAt: order.updatedAt,
   };

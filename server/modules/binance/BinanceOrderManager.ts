@@ -158,6 +158,13 @@ export class BinanceOrderManager {
       const providerOrderId = stored.providerOrderId ?? found?.orderId;
       if (!providerOrderId) throw new Error("Binance provider order is not available for cancellation.");
 
+      // Persist the cancel claim immediately before the provider mutation. A repeated request or
+      // restarted process may query/reconcile this known order, but must not submit cancel twice.
+      if (!this.store.claimCancellation(idempotencyKey)) {
+        if (!found) throw new Error("Binance cancellation is pending reconciliation.");
+        return this.persistProviderState(idempotencyKey, found);
+      }
+
       try {
         await this.client.cancelOrder(stored.category, stored.symbol, providerOrderId);
       } catch (error) {

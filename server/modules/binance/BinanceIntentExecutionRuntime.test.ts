@@ -522,6 +522,7 @@ function queryStoredOrder(
     status: "processing",
     order,
     error: null,
+    cancelRequestedAt: null,
     createdAt: now - 1_000,
     updatedAt: now + 1_000,
   };

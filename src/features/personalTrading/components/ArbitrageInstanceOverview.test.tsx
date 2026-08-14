@@ -142,6 +142,59 @@ test("matched Binance Spot LONG with reliable available balance exposes the same
   assert.match(dialogSource, /现货不使用只减仓参数/u);
 });
 
+test("known active StellaX execution exposes cancel while terminal and historical records do not", () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("OPENING")]);
+  const active = {
+    ...parsed!,
+    executionReferences: [{
+      arbitrageId: parsed!.arbitrageId,
+      legId: "long-leg",
+      phase: "OPENING" as const,
+      quantityEffect: "INCREASE" as const,
+      executionIntentId: "intent-active",
+      executionRecordId: "record-active",
+      requestedQuantity: "1",
+      confirmedQuantity: "0.25",
+      status: "PENDING_CONFIRMATION" as const,
+      createdAt: 1_800_000_000_000,
+      updatedAt: 1_800_000_000_100,
+    }, {
+      arbitrageId: parsed!.arbitrageId,
+      legId: "short-leg",
+      phase: "OPENING" as const,
+      quantityEffect: "INCREASE" as const,
+      executionIntentId: "intent-terminal",
+      executionRecordId: "record-terminal",
+      requestedQuantity: "1",
+      confirmedQuantity: "1",
+      status: "CONFIRMED" as const,
+      createdAt: 1_800_000_000_000,
+      updatedAt: 1_800_000_000_100,
+    }],
+  };
+  const current = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[active]}
+    history={[]}
+    onCancelOrder={() => undefined}
+    onPageChange={() => undefined}
+    page={1}
+  />);
+  const history = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[]}
+    history={[{ ...active, status: "FAILED" as const }]}
+    onCancelOrder={() => undefined}
+    onPageChange={() => undefined}
+    page={1}
+    selectedSection="history"
+  />);
+  assert.equal((current.match(/撤销订单/gu) ?? []).length, 1);
+  assert.doesNotMatch(history, /撤销订单/u);
+  const dialogSource = readFileSync(new URL("./ArbitrageOrderCancelDialog.tsx", import.meta.url), "utf8");
+  assert.match(dialogSource, /计划数量/u);
+  assert.match(dialogSource, /已确认数量/u);
+  assert.doesNotMatch(dialogSource, /providerOrderId|providerSymbol|accountId/u);
+});
+
 test("history renders confirmed quantities without live verification fields", () => {
   const [history] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
   const html = renderToStaticMarkup(<ArbitrageInstanceSections active={[]} history={[history!]} onPageChange={() => undefined} page={1} selectedSection="history" />);

@@ -355,6 +355,51 @@ test("cancel fails closed without a StellaX-known persisted order identity", asy
   }
 });
 
+test("repeated cancel after an ambiguous provider response never repeats the provider mutation", async () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-cancel-idempotency-"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
+  store.reserve({
+    idempotencyKey: "cancel-once",
+    requestFingerprint: "cancel-once-fingerprint",
+    clientOrderId: "cancel-once-client",
+    category: "spot",
+    symbol: "BTCUSDT",
+    executionMode: "production_ioc",
+  });
+  store.recordProviderOrder("cancel-once", "cancel-once-provider");
+  const active: BinanceProviderOrder = {
+    orderId: "cancel-once-provider",
+    orderLinkId: "cancel-once-client",
+    status: "New",
+    requestedQuantity: 0.001,
+    filledQuantity: 0,
+    averagePrice: null,
+    feeUsd: 0,
+    updatedAt: Date.now(),
+  };
+  let providerCancels = 0;
+  const client = {
+    findOrderByClientOrderId: async () => active,
+    cancelOrder: async () => { providerCancels += 1; throw new Error("ambiguous cancel"); },
+  } as unknown as BinanceClientAdapter;
+  const config = tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true });
+  try {
+    let manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+    assert.equal((await manager.cancel("cancel-once")).status, "New");
+    assert.equal(providerCancels, 1);
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+    assert.equal((await manager.cancel("cancel-once")).status, "New");
+    assert.equal(providerCancels, 1);
+  } finally {
+    store.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart keeps BTC, ETH, and DOGE symbols authoritative for cancel and reconciliation", async () => {
   const root = mkdtempSync(join(tmpdir(), "binance-generic-symbol-restart-"));
   const dbPath = join(root, "orders.sqlite");
