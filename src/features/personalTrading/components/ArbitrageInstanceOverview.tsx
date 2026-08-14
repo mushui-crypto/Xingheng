@@ -316,10 +316,11 @@ function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
     ? verificationState.verification.legs.find((item) => item.legId === leg.legId)
     : undefined;
   const available = leg.venue === "binance"
-    && leg.instrumentId.endsWith("-PERP")
+    && (leg.instrumentId.endsWith("-PERP") || (leg.instrumentId.endsWith("-SPOT") && leg.role === "LONG"))
     && verification?.verificationStatus === "MATCHED"
     && verification.expectedManagedQuantity !== "0"
-    && verification.actualQuantity !== null;
+    && verification.actualQuantity !== null
+    && (!leg.instrumentId.endsWith("-SPOT") || typeof verification.availableQuantity === "string");
   return <div className="mt-3 border-t border-[#25282f] pt-3">
     <Button
       disabled={!available}
@@ -327,9 +328,7 @@ function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
       type="button"
       variant="secondary"
     >
-      {leg.instrumentId.endsWith("-SPOT")
-        ? "现货退出尚未接入"
-        : leg.venue !== "binance" ? "执行能力尚未接入" : "退出该腿"}
+      {leg.venue !== "binance" ? "执行能力尚未接入" : "退出该腿"}
     </Button>
   </div>;
 }

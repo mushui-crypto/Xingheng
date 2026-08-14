@@ -39,13 +39,14 @@ test("reports MISMATCH for quantity or direction changes without changing lifecy
 test("uses spot balance observations and keeps provider failures UNKNOWN", async () => {
   const spot = fixture({ strategyType: "SPOT_PERPETUAL", longInstrumentId: "XAUT-USDT-SPOT" });
   const service = serviceFor([spot], {
-    long: { actualQuantity: "1", direction: "LONG", observedAt: now },
+    long: { actualQuantity: "1", availableQuantity: "0.9", direction: "LONG", observedAt: now },
     short: new Error("provider failed"),
   });
 
   const result = await service.verify("user-a", "arb-1");
 
   assert.equal(result?.legs[0].verificationStatus, "MATCHED");
+  assert.equal(result?.legs[0].availableQuantity, "0.9");
   assert.equal(result?.legs[1].verificationStatus, "UNKNOWN");
   assert.equal(result?.legs[1].actualQuantity, null);
 });
@@ -131,7 +132,7 @@ test("rejects a replaced credential when an instance is bound to a credential-on
 
 function serviceFor(
   instances: ArbitrageInstance[],
-  observations: Record<string, { actualQuantity: string; direction: "LONG" | "SHORT" | "FLAT"; observedAt: number | null } | Error>,
+  observations: Record<string, { actualQuantity: string; availableQuantity?: string | null; direction: "LONG" | "SHORT" | "FLAT"; observedAt: number | null } | Error>,
 ) {
   const factories = ["binance", "okx"] as const;
   return new ArbitragePositionVerificationService(

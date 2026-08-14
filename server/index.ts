@@ -41,6 +41,7 @@ import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/Ar
 import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
+import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
   createDefaultFundingOpportunityReadVenues,
@@ -209,6 +210,7 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageInstances,
   arbitragePositionVerification,
   arbitrageExecutionPlanningContexts,
+  new BinanceSpotCloseBalanceSource(binancePersonalTrading),
   binanceFormalArbitrageExecutionRuntime,
 );
 const fundingManualExecution = new FundingArbitrageManualExecutionService(

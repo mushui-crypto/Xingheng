@@ -116,6 +116,11 @@ test("generic Spot SELL requires the real base-asset available balance and never
       .assertGenericOrderAllowed(request, context, snapshot),
     riskCategory("live_trading_disabled"),
   );
+  assert.throws(
+    () => new BinanceRiskGuard(tradingConfigFixture({ killSwitchActive: true }))
+      .assertGenericOrderAllowed(request, context, snapshot),
+    riskCategory("kill_switch_active"),
+  );
 });
 
 test("generic perpetual OPEN validates one-way state, permissions, margin and safety gates", () => {

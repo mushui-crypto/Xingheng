@@ -122,18 +122,55 @@ test("client cannot control side, reduceOnly, account, provider symbol, or anoth
   assert.equal(fixture.runtime.calls.length, 0);
 });
 
-test("Spot and unsupported venues fail closed before provider mutation", async (t) => {
+test("Spot LONG close is authoritative SELL DECREASE without provider reduceOnly", async (t) => {
   const spot = setup(t, { longInstrumentId: "BTC-USDT-SPOT" });
+  spot.runtime.resultStatus = "CONFIRMED";
+  spot.runtime.confirmedQuantity = "0.5";
+  const result = await spot.service.closeLeg("user-a", request("long-leg", "0.5"));
+  assert.equal(spot.runtime.calls[0]?.side, "sell");
+  assert.equal(spot.runtime.calls[0]?.orderConstraints.reduceOnly, false);
+  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "0.5");
+  assert.equal(result.instance.executionReferences.at(-1)?.quantityEffect, "DECREASE");
+});
+
+test("Spot and perpetual legs both flat reach CLOSED", async (t) => {
+  const fixture = setup(t, { longInstrumentId: "BTC-USDT-SPOT" });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "1";
+  await fixture.service.closeLeg("user-a", request("long-leg", "1", "close-spot"));
+  const result = await fixture.service.closeLeg("user-a", request("short-leg", "1", "close-perp"));
+  assert.equal(result.instance.status, "CLOSED");
+  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "1");
+  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "1");
+});
+
+test("Spot partial fill only decreases the authoritative confirmed Decimal quantity", async (t) => {
+  const fixture = setup(t, { longInstrumentId: "BTC-USDT-SPOT" });
+  fixture.runtime.resultStatus = "PENDING_CONFIRMATION";
+  fixture.runtime.confirmedQuantity = "0.12345678";
+  const result = await fixture.service.closeLeg("user-a", request("long-leg", "0.5", "partial-spot"));
+  assert.equal(result.executionRecord.confirmedQuantity, "0.12345678");
+  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "0.12345678");
+  assert.equal(result.instance.status, "CLOSING");
+});
+
+test("Spot close requires the whole managed quantity to be covered by available base balance", async (t) => {
+  const spot = setup(t, { longInstrumentId: "BTC-USDT-SPOT" });
+  spot.availableBaseQuantity = "0.99999999";
   await assert.rejects(
     () => spot.service.closeLeg("user-a", request("long-leg", "0.5")),
-    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "spot_close_not_yet_wired",
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
   );
+  assert.equal(spot.runtime.calls.length, 0);
+});
+
+test("unsupported venues fail closed before provider mutation", async (t) => {
   const venue = setup(t, { longVenue: "okx" });
   await assert.rejects(
     () => venue.service.closeLeg("user-a", request("long-leg", "0.5")),
     (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_capability_unavailable",
   );
-  assert.equal(spot.runtime.calls.length + venue.runtime.calls.length, 0);
+  assert.equal(venue.runtime.calls.length, 0);
 });
 
 test("duplicate and concurrent close commands cause one runtime mutation", async (t) => {
@@ -215,6 +252,7 @@ function setup(
   const fixture = {
     verificationStatus: "MATCHED" as "MATCHED" | "MISMATCH" | "UNKNOWN",
     actualQuantity: "1" as string | null,
+    availableBaseQuantity: "1",
   };
   let closeClock = now;
   const service = new ArbitrageExecutionCloseService(
@@ -259,6 +297,14 @@ function setup(
         }),
         quote: { bid: "60000", ask: "60001", fetchedAt: now },
       }),
+    },
+    {
+      readAvailableBalance: async (_userId, input) => {
+        assert.equal(input.accountId, "account-a");
+        assert.equal(input.providerSymbol, "BTCUSDT");
+        assert.equal(input.baseAsset, "BTC");
+        return { availableQuantity: fixture.availableBaseQuantity, checkedAt: now };
+      },
     },
     runtime,
     { clock: () => closeClock += 10, createIntentId: (_user, _arbitrage, leg, command) => `close-${leg}-${command}` },

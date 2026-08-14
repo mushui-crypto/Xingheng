@@ -41,7 +41,7 @@ test("spot provider reads the base asset balance and does not call a position en
       },
     },
     accountReader("bybit:account-a", [
-      { asset: "XAUT", accountType: "unified", total: 0.5, available: null, locked: 0 },
+      { asset: "XAUT", accountType: "unified", total: 0.5, available: 0.4, locked: 0.1 },
     ]),
     { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
   );
@@ -50,6 +50,7 @@ test("spot provider reads the base asset balance and does not call a position en
     venue: "bybit", role: "LONG", instrumentId: "XAUT-USDT-SPOT", accountId: "bybit:account-a",
   })), {
     actualQuantity: "0.5",
+    availableQuantity: "0.4",
     direction: "LONG",
     observedAt: 1_800_000_000_000,
   });

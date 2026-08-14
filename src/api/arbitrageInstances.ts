@@ -64,6 +64,7 @@ export type ArbitrageLegVerification = {
   legId: string;
   expectedManagedQuantity: string;
   actualQuantity: string | null;
+  availableQuantity?: string | null;
   verificationStatus: ArbitrageLegVerificationStatus;
   checkedAt: number;
 };
@@ -174,6 +175,7 @@ function legVerification(payload: unknown): ArbitrageLegVerification {
     legId: requiredString(value.legId),
     expectedManagedQuantity: decimal(value.expectedManagedQuantity),
     actualQuantity: nullableDecimal(value.actualQuantity),
+    availableQuantity: value.availableQuantity === undefined ? null : nullableDecimal(value.availableQuantity),
     verificationStatus: verificationStatus(value.verificationStatus),
     checkedAt: timestamp(value.checkedAt),
   };

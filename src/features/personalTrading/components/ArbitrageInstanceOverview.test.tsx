@@ -102,6 +102,46 @@ test("matched Binance perpetual leg exposes the minimal controlled close entry w
   assert.equal((html.match(/退出该腿/gu) ?? []).length, 1);
 });
 
+test("matched Binance Spot LONG with reliable available balance exposes the same close entry", () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const active = {
+    ...parsed!,
+    strategyType: "SPOT_PERPETUAL" as const,
+    legs: [
+      { ...parsed!.legs[0], venue: "binance" as const, instrumentId: "BTC-USDT-SPOT" },
+      parsed!.legs[1],
+    ] as typeof parsed.legs,
+  };
+  const html = renderToStaticMarkup(
+    <ArbitrageInstanceSections
+      active={[active]}
+      history={[]}
+      onCloseLeg={() => undefined}
+      onPageChange={() => undefined}
+      page={1}
+      verifications={{
+        [active.arbitrageId]: {
+          status: "success",
+          verification: {
+            arbitrageId: active.arbitrageId,
+            checkedAt: 1_800_000_004_000,
+            legs: [
+              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "1", actualQuantity: "1", availableQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+              { arbitrageId: active.arbitrageId, legId: "short-leg", expectedManagedQuantity: "1", actualQuantity: "1", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  assert.equal((html.match(/退出该腿/gu) ?? []).length, 2);
+  assert.doesNotMatch(html, /现货退出尚未接入/u);
+  const dialogSource = readFileSync(new URL("./ArbitrageLegCloseDialog.tsx", import.meta.url), "utf8");
+  assert.match(dialogSource, /当前实际可用数量/u);
+  assert.match(dialogSource, /verification\.availableQuantity/u);
+  assert.match(dialogSource, /现货不使用只减仓参数/u);
+});
+
 test("history renders confirmed quantities without live verification fields", () => {
   const [history] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
   const html = renderToStaticMarkup(<ArbitrageInstanceSections active={[]} history={[history!]} onPageChange={() => undefined} page={1} selectedSection="history" />);

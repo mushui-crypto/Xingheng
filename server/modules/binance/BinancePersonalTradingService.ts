@@ -6,7 +6,10 @@ import {
 } from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
-import type { BinanceGenericRiskContext } from "./BinanceTypes";
+import type {
+  BinanceGenericRiskContext,
+  BinanceGenericRiskSnapshotRequest,
+} from "./BinanceTypes";
 import { loadBinanceTradingConfig } from "./BinanceTradingConfig";
 import { BinanceClient } from "./BinanceClient";
 import { createExecutionCanonicalAssetSource } from "../cex/CanonicalAssetSource";
@@ -120,6 +123,10 @@ export class BinancePersonalTradingService {
 
   loadExecutionReadContext(instrumentId: string) {
     return this.executionReadContext.load(instrumentId);
+  }
+
+  readExecutionRiskSnapshot(request: BinanceGenericRiskSnapshotRequest) {
+    return this.requireClient().readGenericRiskSnapshot(request);
   }
 
   async cancelOrder(input: unknown) {

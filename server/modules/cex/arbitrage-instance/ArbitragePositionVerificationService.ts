@@ -103,6 +103,7 @@ function result(
     legId: leg.legId,
     expectedManagedQuantity,
     actualQuantity: observed.actualQuantity,
+    availableQuantity: observed.availableQuantity ?? null,
     verificationStatus: directionMatches && quantityMatches ? "MATCHED" : "MISMATCH",
     checkedAt,
   });
@@ -119,6 +120,7 @@ function unknown(
     legId,
     expectedManagedQuantity,
     actualQuantity: null,
+    availableQuantity: null,
     verificationStatus: "UNKNOWN",
     checkedAt,
   });

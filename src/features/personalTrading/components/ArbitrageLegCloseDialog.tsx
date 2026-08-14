@@ -69,7 +69,9 @@ export function ArbitrageLegCloseDialog({
   return (
     <Modal
       closeDisabled={busy}
-      description="仅退出该 StellaX 套利实例已知的永续合约腿。服务端会重新核验真实仓位并强制使用只减仓约束。"
+      description={leg.instrumentId.endsWith("-SPOT")
+        ? "仅卖出该 StellaX 套利实例已知的现货多头腿。服务端会重新核验真实可用余额，现货不使用只减仓参数。"
+        : "仅退出该 StellaX 套利实例已知的永续合约腿。服务端会重新核验真实仓位并强制使用只减仓约束。"}
       onClose={onClose}
       open
       title="确认退出套利腿"
@@ -81,6 +83,9 @@ export function ArbitrageLegCloseDialog({
           <Metric label="交易标的" value={leg.instrumentId} />
           <Metric label="系统管理数量" value={verification.expectedManagedQuantity} />
           <Metric label="当前真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
+          {leg.instrumentId.endsWith("-SPOT")
+            ? <Metric label="当前实际可用数量" value={verification.availableQuantity ?? "暂无可靠数据"} />
+            : null}
           <Metric label="核验状态" value={verification.verificationStatus === "MATCHED" ? "仓位一致" : "暂不可退出"} />
         </dl>
         <label className="block text-xs text-[#8f99a5]">

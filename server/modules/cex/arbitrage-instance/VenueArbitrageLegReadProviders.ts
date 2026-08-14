@@ -129,10 +129,19 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       }
       const balances = account.balances.filter((balance) => balance.asset === instrument.baseAsset
         && (balance.accountType === "spot" || balance.accountType === "unified"));
-      if (!balances.length) return { actualQuantity: "0", direction: "FLAT", observedAt: account.latestSyncAt };
+      if (!balances.length) return {
+        actualQuantity: "0",
+        availableQuantity: "0",
+        direction: "FLAT",
+        observedAt: account.latestSyncAt,
+      };
       const total = sumNumbers(balances.map((balance) => balance.total));
+      const available = balances.every((balance) => balance.available !== null)
+        ? decimalFromNumber(sumNumbers(balances.map((balance) => balance.available!)))
+        : null;
       return {
         actualQuantity: decimalFromNumber(total),
+        availableQuantity: available,
         direction: total === 0 ? "FLAT" : "LONG",
         observedAt: account.latestSyncAt,
       };

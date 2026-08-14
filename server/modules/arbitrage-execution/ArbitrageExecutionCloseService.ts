@@ -11,6 +11,7 @@ import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionInt
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import { ExecutionQuantityPlanner } from "../cex/ExecutionQuantityPlanner";
 import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
+import type { SpotCloseAvailableBalanceSource } from "./BinanceSpotCloseBalanceSource";
 import type {
   ArbitrageLegExecutionConfirmation,
   FormalArbitrageExecutionRuntime,
@@ -30,7 +31,6 @@ export class ArbitrageExecutionCloseError extends Error {
       | "arbitrage_instance_not_found"
       | "arbitrage_leg_not_found"
       | "close_capability_unavailable"
-      | "spot_close_not_yet_wired"
       | "position_verification_unavailable"
       | "close_quantity_unavailable"
       | "execution_state_unknown",
@@ -45,6 +45,7 @@ export class ArbitrageExecutionCloseService {
     private readonly instances: InstanceStore,
     private readonly positions: PositionVerifier,
     private readonly planningContexts: ArbitrageExecutionPlanningContextSource,
+    private readonly spotBalances: SpotCloseAvailableBalanceSource,
     private readonly runtime: FormalArbitrageExecutionRuntime,
     private readonly options: Readonly<{
       clock?: () => number;
@@ -79,17 +80,40 @@ export class ArbitrageExecutionCloseService {
     if (verifiedLeg.expectedManagedQuantity !== managedQuantity || verifiedLeg.actualQuantity === "0") {
       throw closeError("position_verification_unavailable", "当前真实仓位与套利实例管理数量不一致。");
     }
-    if (compareUnsignedDecimals(request.quantity, managedQuantity) > 0
-      || compareUnsignedDecimals(request.quantity, verifiedLeg.actualQuantity) > 0) {
+    if (compareUnsignedDecimals(request.quantity, managedQuantity) > 0) {
       throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
     }
 
     const context = await loadContext(this.planningContexts, leg.venue, leg.instrumentId);
-    if (context.instrument.marketType !== "perpetual"
-      || context.instrument.contractType !== "linear_perpetual"
-      || context.instrument.quoteAsset !== "USDT"
-      || context.instrument.settlementAsset !== "USDT") {
-      throw closeError("close_capability_unavailable", "当前只支持 USDT 线性永续套利腿退出。");
+    const spot = context.instrument.marketType === "spot" && context.instrument.contractType === "spot";
+    const perpetual = context.instrument.marketType === "perpetual"
+      && context.instrument.contractType === "linear_perpetual"
+      && context.instrument.settlementAsset === "USDT";
+    if (context.instrument.quoteAsset !== "USDT" || (!spot && !perpetual)) {
+      throw closeError("close_capability_unavailable", "当前只支持 USDT 现货与线性永续套利腿退出。");
+    }
+    if (perpetual && compareUnsignedDecimals(request.quantity, verifiedLeg.actualQuantity) > 0) {
+      throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
+    }
+    if (spot && leg.role !== "LONG") {
+      throw closeError("close_capability_unavailable", "现货空头腿无法通过可用余额可靠退出。");
+    }
+    if (spot) {
+      let availableQuantity: string;
+      try {
+        const balance = await this.spotBalances.readAvailableBalance(userId, {
+          accountId: leg.accountId,
+          instrumentId: leg.instrumentId,
+          providerSymbol: context.instrument.providerSymbol,
+          baseAsset: context.instrument.baseAsset.symbol,
+        });
+        availableQuantity = balance.availableQuantity;
+      } catch {
+        throw closeError("position_verification_unavailable", "当前现货可用余额无法可靠确认，不能提交退出。");
+      }
+      if (compareUnsignedDecimals(managedQuantity, availableQuantity) > 0) {
+        throw closeError("close_quantity_unavailable", "当前现货可用余额不足以覆盖该套利腿的管理数量。");
+      }
     }
     const side = leg.role === "LONG" ? "sell" as const : "buy" as const;
     const now = this.now();
@@ -118,7 +142,7 @@ export class ArbitrageExecutionCloseService {
       instrumentId: leg.instrumentId,
       side,
       quantity: planned.plan.plannedAssetQuantity,
-      orderConstraints: { reduceOnly: true },
+      orderConstraints: { reduceOnly: perpetual },
       executionMode: request.executionMode,
       createdAt: now,
       expiresAt: now + (this.options.intentTtlMs ?? 30_000),
@@ -208,9 +232,6 @@ function assertCloseCapability(instance: ArbitrageInstance, leg: ArbitrageInstan
   }
   if (leg.venue !== "binance") {
     throw closeError("close_capability_unavailable", "该交易所尚未接入正式退出能力。");
-  }
-  if (!leg.instrumentId.endsWith("-PERP")) {
-    throw closeError("spot_close_not_yet_wired", "现货套利腿退出能力尚未接入。");
   }
 }
 

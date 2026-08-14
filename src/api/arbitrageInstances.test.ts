@@ -34,7 +34,7 @@ test("verification API maps decimal strings and preserves unknown actual quantit
       arbitrageId: "arbitrage/holding",
       checkedAt: 1_800_000_004_000,
       legs: [
-        { arbitrageId: "arbitrage/holding", legId: "long-leg", expectedManagedQuantity: "0.3", actualQuantity: "0.3", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+        { arbitrageId: "arbitrage/holding", legId: "long-leg", expectedManagedQuantity: "0.3", actualQuantity: "0.3", availableQuantity: "0.25", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
         { arbitrageId: "arbitrage/holding", legId: "short-leg", expectedManagedQuantity: "0.3", actualQuantity: null, verificationStatus: "UNKNOWN", checkedAt: 1_800_000_004_000 },
       ],
     });
@@ -43,6 +43,7 @@ test("verification API maps decimal strings and preserves unknown actual quantit
     const result = await fetchArbitragePositionVerification("arbitrage/holding");
     assert.equal(result.legs[0].expectedManagedQuantity, "0.3");
     assert.equal(result.legs[1].actualQuantity, null);
+    assert.equal(result.legs[0].availableQuantity, "0.25");
   } finally {
     globalThis.fetch = originalFetch;
   }

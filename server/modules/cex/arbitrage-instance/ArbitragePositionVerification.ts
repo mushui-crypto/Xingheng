@@ -4,6 +4,8 @@ export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 
 export type ArbitrageLegObservedState = Readonly<{
   actualQuantity: string;
+  /** Reliable provider-reported available balance for Spot; not used as total position identity. */
+  availableQuantity?: string | null;
   direction: "LONG" | "SHORT" | "FLAT";
   observedAt: number | null;
 }>;
@@ -13,6 +15,7 @@ export type ArbitrageLegVerificationResult = Readonly<{
   legId: string;
   expectedManagedQuantity: string;
   actualQuantity: string | null;
+  availableQuantity: string | null;
   verificationStatus: ArbitrageLegVerificationStatus;
   checkedAt: number;
 }>;
