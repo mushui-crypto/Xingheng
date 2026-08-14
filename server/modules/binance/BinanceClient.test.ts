@@ -134,7 +134,7 @@ test("generic place, query, and cancel keep the authoritative provider symbol an
     reduceOnly: true,
     orderLinkId: "ptmbtc",
   });
-  await client.findOrderByClientOrderId("spot", "BTCUSDT", "ptmbtc");
+  const queried = await client.findOrderByClientOrderId("spot", "BTCUSDT", "ptmbtc");
   await client.cancelOrder("spot", "BTCUSDT", "7");
 
   assert.ok(requests.length >= 4);
@@ -145,6 +145,45 @@ test("generic place, query, and cancel keep the authoritative provider symbol an
   assert.equal(requests.find((request) => request.method === "POST")?.symbol, "BTCUSDT");
   assert.equal(requests.find((request) => request.method === "POST")?.price, "100000.0000000000000001");
   assert.equal(requests.find((request) => request.method === "POST")?.method, "POST");
+  assert.equal(queried?.requestedBaseQuantity, "0.000000010000000001");
+  assert.equal(queried?.filledBaseQuantity, "0");
+});
+
+test("spot and USD-M order responses preserve full, partial, and cancelled Decimal executedQty", async (t) => {
+  for (const fixture of [
+    { category: "spot", status: "FILLED", executedQty: "0.000123456789012345" },
+    { category: "spot", status: "PARTIALLY_FILLED", executedQty: "0.000023456789012345" },
+    { category: "spot", status: "CANCELED", executedQty: "0.000003456789012345" },
+    { category: "linear", status: "FILLED", executedQty: "1.234567890123456789" },
+    { category: "linear", status: "PARTIALLY_FILLED", executedQty: "0.234567890123456789" },
+    { category: "linear", status: "CANCELED", executedQty: "0.034567890123456789" },
+  ] as const) {
+    await t.test(`${fixture.category}-${fixture.status}`, async () => {
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        (async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+          return Response.json({
+            orderId: 9,
+            clientOrderId: "decimal-fill",
+            status: fixture.status,
+            origQty: "2.000000000000000001",
+            executedQty: fixture.executedQty,
+          });
+        }) as typeof fetch,
+        Date.now,
+        ["203.0.113.10"],
+      );
+      const order = await client.findOrderByClientOrderId(
+        fixture.category,
+        fixture.category === "spot" ? "BTCUSDT" : "DOGEUSDT",
+        "decimal-fill",
+      );
+      assert.equal(order?.requestedBaseQuantity, "2.000000000000000001");
+      assert.equal(order?.filledBaseQuantity, fixture.executedQty);
+    });
+  }
 });
 
 test("linear orders pass reduceOnly and preserve DOGEUSDT Decimal quantity", async () => {

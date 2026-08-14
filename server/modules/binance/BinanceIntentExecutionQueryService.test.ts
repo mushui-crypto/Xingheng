@@ -40,6 +40,16 @@ test("returns UNKNOWN when no local order fact exists", async () => {
   assert.equal(binding.providerMutations, 0);
 });
 
+test("uses the exact persisted Decimal fill instead of the legacy number bridge", async () => {
+  const order = storedOrder("PartiallyFilled", 0.12345678901234568);
+  order.order!.filledBaseQuantity = "0.123456789012345678901";
+  const observation = await new BinanceIntentExecutionQueryService(
+    new FakeQueryBinding([order]),
+    () => now,
+  ).query(executionRecord());
+  assert.equal(observation.filledBaseQuantity, "0.123456789012345678901");
+});
+
 test("query service exposes no provider, reconciliation, cancel, or retry dependency", () => {
   const source = readFileSync(new URL("./BinanceIntentExecutionQueryService.ts", import.meta.url), "utf8");
   assert.match(source, /ordersState/u);

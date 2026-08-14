@@ -34,6 +34,35 @@ test("fresh stores persist explicit generic symbols and recover them after resta
   }
 });
 
+test("exact Decimal base quantities survive order persistence and restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-decimal-fill-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    store.reserve(orderReservation("BTCUSDT"));
+    store.recordProcessingOrder("order-BTCUSDT", {
+      orderId: "provider-decimal",
+      orderLinkId: "client-BTCUSDT",
+      status: "PartiallyFilled",
+      requestedQuantity: 0.12345678901234568,
+      filledQuantity: 0.02345678901234568,
+      requestedBaseQuantity: "0.123456789012345678901",
+      filledBaseQuantity: "0.023456789012345678901",
+      averagePrice: null,
+      feeUsd: 0,
+      updatedAt: 3_000,
+    });
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("order-BTCUSDT")?.order?.requestedBaseQuantity, "0.123456789012345678901");
+    assert.equal(store.find("order-BTCUSDT")?.order?.filledBaseQuantity, "0.023456789012345678901");
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("legacy migration backfills only pre-migration XAUT orders and is idempotent", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-legacy-"));
   const dbPath = join(root, "orders.sqlite");

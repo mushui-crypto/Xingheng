@@ -872,6 +872,8 @@ function toOrder(
   positionQuantity?: number,
 ): BinanceProviderOrder {
   const row = record(value);
+  const requestedBaseQuantity = unsignedDecimalString(row.origQty, "Binance requested quantity");
+  const filledBaseQuantity = unsignedDecimalString(row.executedQty, "Binance filled quantity");
   const requested = number(row.origQty);
   const filled = number(row.executedQty);
   const rawStatus = String(row.status ?? "").toUpperCase();
@@ -892,11 +894,20 @@ function toOrder(
     status,
     requestedQuantity: requested,
     filledQuantity: filled,
+    requestedBaseQuantity,
+    filledBaseQuantity,
     ...(positionQuantity === undefined ? {} : { positionQuantity }),
     averagePrice: positiveNumberOrNull(row.avgPrice ?? (filled > 0 ? number(row.cummulativeQuoteQty) / filled : 0)),
     feeUsd: category === "linear" ? Math.abs(number(row.commission)) : 0,
     updatedAt: number(row.updateTime ?? row.time ?? Date.now()),
   };
+}
+
+function unsignedDecimalString(value: unknown, name: string) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+    throw new BinanceProviderError("provider_response_invalid", `${name} is invalid.`);
+  }
+  return value;
 }
 
 function calculateSideLedger(

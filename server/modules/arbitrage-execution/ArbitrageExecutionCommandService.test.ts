@@ -101,6 +101,23 @@ test("partial first leg is retained as RESIDUAL and never enables or auto-runs t
   assert.equal(fixture.runtime.calls.length, 1);
 });
 
+test("cancelled-with-partial fill remains FAILED execution evidence with managed residual exposure", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "FAILED", "0.0002");
+
+  const result = await fixture.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "long-leg"),
+  );
+
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(result.executionRecord.confirmedQuantity, "0.0002");
+  assert.equal(result.instance.legs[0].confirmedOpenedQuantity, "0.0002");
+  assert.equal(result.instance.status, "RESIDUAL");
+  assert.equal(result.secondLegAllowed, false);
+});
+
 test("FAILED and UNKNOWN first-leg facts preserve the instance and block the second leg", async (t) => {
   for (const status of ["FAILED", "UNKNOWN"] as const) {
     const fixture = setup(t);
@@ -125,6 +142,22 @@ test("FAILED and UNKNOWN first-leg facts preserve the instance and block the sec
       /第一腿尚未完整确认/u,
     );
   }
+});
+
+test("unattributable UNKNOWN result preserves zero evidence without fabricating a fill", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "UNKNOWN", null);
+
+  const result = await fixture.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "long-leg"),
+  );
+
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.confirmedQuantity, "0");
+  assert.equal(result.instance.legs[0].confirmedOpenedQuantity, "0");
+  assert.equal(result.secondLegAllowed, false);
 });
 
 test("the second leg requires a separate command and both confirmed legs reach HOLDING", async (t) => {
@@ -259,7 +292,7 @@ function legRequest(arbitrageId: string, legId: string, commandId = "first-comma
   return { ...finalRequest(overrides), arbitrageId, legId, commandId };
 }
 
-function runtimeResult(intent: ExecutionIntent, status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN", confirmedQuantity: string) {
+function runtimeResult(intent: ExecutionIntent, status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN", confirmedQuantity: string | null) {
   return Object.freeze({
     executionRecord: createExecutionRecord({
       executionId: `record-${intent.intentId}`,

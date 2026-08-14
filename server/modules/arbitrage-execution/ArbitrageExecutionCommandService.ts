@@ -17,7 +17,7 @@ type CredentialSummaries = Pick<UserExchangeCredentialStore, "findSummary">;
 
 export type FormalArbitrageExecutionRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord;
-  confirmedQuantity: string;
+  confirmedQuantity: string | null;
 }>;
 
 export interface FormalArbitrageExecutionRuntime {
@@ -189,14 +189,24 @@ export class ArbitrageExecutionCommandService {
       runtimeResult.executionRecord.executionId,
       runtimeResult.executionRecord.updatedAt,
     );
+    const linked = this.instances.get(userId, instance.arbitrageId);
+    const linkedReference = linked?.executionReferences.find(
+      (candidate) => candidate.executionIntentId === intent.intentId,
+    );
+    if (!linkedReference) {
+      throw commandError("execution_state_unknown", "执行引用状态暂时无法确认，请勿重复提交。");
+    }
+    const attributableStatus = runtimeResult.confirmedQuantity === null
+      ? "UNKNOWN" as const
+      : referenceStatus(runtimeResult.executionRecord.status);
     const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
       executionIntentId: intent.intentId,
-      status: referenceStatus(runtimeResult.executionRecord.status),
-      confirmedQuantity: runtimeResult.confirmedQuantity,
+      status: attributableStatus,
+      confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
-    return resultFromReference(updated, reference, false, runtimeResult.executionRecord.status);
+    return resultFromReference(updated, reference, false, attributableStatus);
   }
 
   private async revalidateDraft(

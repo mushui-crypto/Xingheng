@@ -4,7 +4,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 import type { BinanceProviderMutationGuard } from "./BinanceOrderManager";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
-import type { BinanceGenericRiskContext, BinanceProviderOrder } from "./BinanceTypes";
+import { binanceFilledBaseQuantity, type BinanceGenericRiskContext, type BinanceProviderOrder } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 import { toBinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 
@@ -18,6 +18,7 @@ export type BinanceIntentExecutionResult = Readonly<{
   providerOrderId?: string;
   clientOrderId?: string;
   state: ExecutionStatus;
+  confirmedQuantity?: string;
 }>;
 
 type BinanceIntentPreparedOrderBase = Readonly<{
@@ -73,6 +74,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       providerOrderId: order.orderId,
       clientOrderId: order.orderLinkId,
       state: stateForOrder(order),
+      confirmedQuantity: binanceFilledBaseQuantity(order),
     }));
   }
 

@@ -184,6 +184,16 @@ function parseProviderOrder(value: unknown, persistedSymbol: string): BinancePro
   }
   const requestedQuantity = order.requestedQuantity ?? order.requestedQuantityXaut;
   const filledQuantity = order.filledQuantity ?? order.filledQuantityXaut;
+  const requestedBaseQuantity = storedDecimalQuantity(
+    order.requestedBaseQuantity,
+    requestedQuantity,
+    "requested base quantity",
+  );
+  const filledBaseQuantity = storedDecimalQuantity(
+    order.filledBaseQuantity,
+    filledQuantity,
+    "filled base quantity",
+  );
   const positionQuantity = order.positionQuantity ?? order.positionQuantityXaut;
   return {
     orderId: String(order.orderId ?? ""),
@@ -191,11 +201,40 @@ function parseProviderOrder(value: unknown, persistedSymbol: string): BinancePro
     status: order.status as BinanceProviderOrder["status"],
     requestedQuantity: Number(requestedQuantity),
     filledQuantity: Number(filledQuantity),
+    requestedBaseQuantity,
+    filledBaseQuantity,
     ...(positionQuantity === undefined ? {} : { positionQuantity: Number(positionQuantity) }),
     averagePrice: order.averagePrice === null ? null : Number(order.averagePrice),
     feeUsd: Number(order.feeUsd),
     updatedAt: Number(order.updatedAt),
   };
+}
+
+function storedDecimalQuantity(exact: unknown, legacy: unknown, name: string) {
+  if (typeof exact === "string") {
+    if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(exact)) {
+      throw new Error(`Stored Binance ${name} is invalid.`);
+    }
+    return exact;
+  }
+  const numeric = Number(legacy);
+  if (!Number.isFinite(numeric) || numeric < 0) {
+    throw new Error(`Stored Binance ${name} is invalid.`);
+  }
+  return legacyNumberToDecimal(numeric);
+}
+
+function legacyNumberToDecimal(value: number) {
+  const text = String(value);
+  if (!/[eE]/u.test(text)) return text;
+  const [coefficient, exponentText] = text.toLowerCase().split("e");
+  const exponent = Number(exponentText);
+  const [integer, fraction = ""] = coefficient!.split(".");
+  const digits = `${integer}${fraction}`;
+  const decimalIndex = integer!.length + exponent;
+  if (decimalIndex <= 0) return `0.${"0".repeat(-decimalIndex)}${digits}`;
+  if (decimalIndex >= digits.length) return `${digits}${"0".repeat(decimalIndex - digits.length)}`;
+  return `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
 }
 
 function providerSymbol(value: unknown) {

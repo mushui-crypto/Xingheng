@@ -179,11 +179,42 @@ export type BinanceProviderOrder = {
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Expired" | "Unknown";
   requestedQuantity: number;
   filledQuantity: number;
+  /** Exact provider origQty in canonical base-asset units. */
+  requestedBaseQuantity?: string;
+  /** Exact provider executedQty in canonical base-asset units. */
+  filledBaseQuantity?: string;
   positionQuantity?: number;
   averagePrice: number | null;
   feeUsd: number;
   updatedAt: number;
 };
+
+export function binanceFilledBaseQuantity(
+  order: Pick<BinanceProviderOrder, "filledBaseQuantity" | "filledQuantity">,
+) {
+  if (order.filledBaseQuantity !== undefined) {
+    if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(order.filledBaseQuantity)) {
+      throw new Error("Binance filled base quantity is invalid.");
+    }
+    return order.filledBaseQuantity;
+  }
+  // Compatibility for orders persisted before exact Decimal quantities existed.
+  return legacyBinanceNumberToDecimal(order.filledQuantity);
+}
+
+function legacyBinanceNumberToDecimal(value: number) {
+  if (!Number.isFinite(value) || value < 0) throw new Error("Binance filled quantity is invalid.");
+  const text = String(value);
+  if (!/[eE]/u.test(text)) return text;
+  const [coefficient, exponentText] = text.toLowerCase().split("e");
+  const exponent = Number(exponentText);
+  const [integer, fraction = ""] = coefficient!.split(".");
+  const digits = `${integer}${fraction}`;
+  const decimalIndex = integer!.length + exponent;
+  if (decimalIndex <= 0) return `0.${"0".repeat(-decimalIndex)}${digits}`;
+  if (decimalIndex >= digits.length) return `${digits}${"0".repeat(decimalIndex - digits.length)}`;
+  return `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
+}
 
 export type BinanceStrategyPnlSnapshot = {
   accountId: string;

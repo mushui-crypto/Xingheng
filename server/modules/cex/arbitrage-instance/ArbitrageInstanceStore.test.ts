@@ -170,6 +170,14 @@ test("records a partial pending fill as managed residual exposure", () => {
     assert.equal(partial.status, "RESIDUAL");
     assert.equal(partial.legs[0].confirmedOpenedQuantity, "0.4");
     assert.equal(partial.executionReferences[0]?.status, "PENDING_CONFIRMATION");
+
+    const replay = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "long-partial",
+      status: "PENDING_CONFIRMATION",
+      confirmedQuantity: "0.4",
+      updatedAt: start + 12,
+    });
+    assert.equal(replay.legs[0].confirmedOpenedQuantity, "0.4");
   });
 });
 

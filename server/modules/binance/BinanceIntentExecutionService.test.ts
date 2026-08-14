@@ -18,6 +18,7 @@ test("converts canonical perpetual intent into Binance execution request", async
   const result = await service.execute(executionIntent());
 
   assert.equal(result.state, "CONFIRMED");
+  assert.equal(result.confirmedQuantity, "0.002");
   assert.equal(result.executionAttemptId, "intent-user-1");
   assert.deepEqual(binding.contextInstrumentIds, ["XAUT-USDT-PERP"]);
   assert.equal(binding.providerMutations, 1);
@@ -208,10 +209,22 @@ test("preserves the existing RiskGuard path through the pre-mutation hook", asyn
 test("maps provider states into execution states", async () => {
   const binding = new FakeBinancePersonalTradingBinding();
   const service = new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 });
-  binding.placeResult = providerOrder({ status: "PartiallyFilled" });
-  assert.equal((await service.execute(executionIntent())).state, "PENDING_CONFIRMATION");
-  binding.placeResult = providerOrder({ status: "Rejected" });
-  assert.equal((await service.execute(executionIntent({ intentId: "intent-user-2" }))).state, "FAILED");
+  binding.placeResult = providerOrder({
+    status: "PartiallyFilled",
+    filledQuantity: 0.0004,
+    filledBaseQuantity: "0.000400000000000001",
+  });
+  const partial = await service.execute(executionIntent());
+  assert.equal(partial.state, "PENDING_CONFIRMATION");
+  assert.equal(partial.confirmedQuantity, "0.000400000000000001");
+  binding.placeResult = providerOrder({
+    status: "Cancelled",
+    filledQuantity: 0.0002,
+    filledBaseQuantity: "0.000200000000000001",
+  });
+  const cancelled = await service.execute(executionIntent({ intentId: "intent-user-2" }));
+  assert.equal(cancelled.state, "FAILED");
+  assert.equal(cancelled.confirmedQuantity, "0.000200000000000001");
   binding.placeResult = providerOrder({ status: "Unknown" });
   assert.equal((await service.execute(executionIntent({ intentId: "intent-user-3" }))).state, "UNKNOWN");
 });
@@ -341,6 +354,8 @@ function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinancePr
     status: "Filled",
     requestedQuantity: 0.002,
     filledQuantity: 0.002,
+    requestedBaseQuantity: "0.002",
+    filledBaseQuantity: "0.002",
     averagePrice: 1_004,
     feeUsd: 0,
     updatedAt: now + 1_000,

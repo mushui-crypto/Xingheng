@@ -7,7 +7,7 @@ import { BinanceFormalArbitrageExecutionRuntime } from "./BinanceFormalArbitrage
 
 const now = 1_800_000_000_000;
 
-test("formal adapter delegates to the existing Binance runtime and confirms only full fills", async () => {
+test("formal adapter delegates and preserves the runtime's authoritative Decimal fill", async () => {
   const intent = executionIntent();
   let received = null;
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
@@ -18,18 +18,21 @@ test("formal adapter delegates to the existing Binance runtime and confirms only
           ...createExecutionRecordFromIntent("record-1", value),
           status: "CONFIRMED",
         }),
-        execution: {} as any,
+        execution: executionResult("0.001234567890123456789"),
       };
     },
   });
   const result = await adapter.execute(intent);
   assert.equal(received, intent);
-  assert.equal(result.confirmedQuantity, "0.00123456789");
+  assert.equal(result.confirmedQuantity, "0.001234567890123456789");
   assert.equal(result.executionRecord.status, "CONFIRMED");
 });
 
-test("pending/unknown production records fail closed without fabricating partial quantity", async () => {
-  for (const status of ["PENDING_CONFIRMATION", "UNKNOWN"] as const) {
+test("partial and cancelled-with-partial production records retain exact Decimal fills", async () => {
+  for (const [status, quantity] of [
+    ["PENDING_CONFIRMATION", "0.000456789012345678"],
+    ["FAILED", "0.000123456789012345"],
+  ] as const) {
     const intent = executionIntent();
     const adapter = new BinanceFormalArbitrageExecutionRuntime({
       async execute(value) {
@@ -38,15 +41,41 @@ test("pending/unknown production records fail closed without fabricating partial
             ...createExecutionRecordFromIntent(`record-${status}`, value),
             status,
           }),
-          execution: {} as any,
+          execution: executionResult(quantity),
         };
       },
     });
     const result = await adapter.execute(intent);
-    assert.equal(result.confirmedQuantity, "0");
+    assert.equal(result.confirmedQuantity, quantity);
     assert.equal(result.executionRecord.status, status);
   }
 });
+
+test("unknown production results expose no fabricated confirmed quantity", async () => {
+  const intent = executionIntent();
+  const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({
+          ...createExecutionRecordFromIntent("record-unknown", value),
+          status: "UNKNOWN",
+        }),
+        execution: executionResult(undefined),
+      };
+    },
+  });
+  const result = await adapter.execute(intent);
+  assert.equal(result.confirmedQuantity, null);
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+});
+
+function executionResult(confirmedQuantity: string | undefined) {
+  return {
+    step: {
+      result: confirmedQuantity === undefined ? null : { confirmedQuantity },
+    },
+  } as any;
+}
 
 function executionIntent() {
   return createExecutionIntent({

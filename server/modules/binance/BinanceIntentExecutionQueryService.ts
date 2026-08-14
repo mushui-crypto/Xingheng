@@ -5,6 +5,7 @@ import {
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { BinanceStoredOrder } from "./BinanceOrderStore";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
+import { binanceFilledBaseQuantity } from "./BinanceTypes";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 
 export type BinanceIntentExecutionQueryServiceBinding = Pick<
@@ -57,7 +58,7 @@ export function binanceExecutionObservationForOrder(
 ): ExecutionQueryObservation {
   return createExecutionQueryObservation({
     state: stateFor(order.status),
-    filledBaseQuantity: numberToDecimal(order.filledQuantity),
+    filledBaseQuantity: binanceFilledBaseQuantity(order),
     observedAt,
   });
 }
@@ -75,18 +76,4 @@ function stateFor(status: NonNullable<BinanceStoredOrder["order"]>["status"]): E
   if (status === "New" || status === "PartiallyFilled") return "PENDING_CONFIRMATION";
   if (status === "Cancelled" || status === "Rejected" || status === "Expired") return "FAILED";
   return "UNKNOWN";
-}
-
-function numberToDecimal(value: number) {
-  if (!Number.isFinite(value) || value < 0) throw new Error("Binance filled quantity is invalid.");
-  const text = String(value);
-  if (!/[eE]/u.test(text)) return text;
-  const [coefficient, exponentText] = text.toLowerCase().split("e");
-  const exponent = Number(exponentText);
-  const [integer, fraction = ""] = coefficient!.split(".");
-  const digits = `${integer}${fraction}`;
-  const decimalIndex = integer!.length + exponent;
-  if (decimalIndex <= 0) return `0.${"0".repeat(-decimalIndex)}${digits}`;
-  if (decimalIndex >= digits.length) return `${digits}${"0".repeat(decimalIndex - digits.length)}`;
-  return `${digits.slice(0, decimalIndex)}.${digits.slice(decimalIndex)}`;
 }
