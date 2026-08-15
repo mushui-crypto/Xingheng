@@ -100,6 +100,13 @@ export type BinancePerpetualPositionSnapshot = {
   updatedAt: number | null;
 };
 
+export type BinanceSpotOrderFillSummary = Readonly<{
+  symbol: string;
+  providerOrderId: string;
+  grossBaseQuantity: string;
+  baseCommissionQuantity: string;
+}>;
+
 export type BinanceGenericRiskSnapshotRequest = Readonly<{
   category: "spot" | "linear";
   symbol: string;

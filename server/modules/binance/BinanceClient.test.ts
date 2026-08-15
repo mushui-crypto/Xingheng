@@ -646,6 +646,74 @@ test("reads a Binance perpetual position through the existing signed GET client"
   assert.ok(methods.every((method) => method === "GET"));
 });
 
+test("reads exact Spot opening fills and deducts commission only when paid in the base asset", async (t) => {
+  for (const fixture of [
+    { name: "base commission", commissionAssets: ["DOGE", "DOGE"], expectedCommission: "0.073" },
+    { name: "quote commission", commissionAssets: ["USDT", "USDT"], expectedCommission: "0" },
+    { name: "BNB commission", commissionAssets: ["BNB", "BNB"], expectedCommission: "0" },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const requests: URL[] = [];
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        (async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          requests.push(url);
+          if (url.pathname === "/api/v3/time") return Response.json({ serverTime: 1_800_000_000_000 });
+          if (url.pathname === "/api/v3/myTrades") {
+            return Response.json([
+              { symbol: "DOGEUSDT", orderId: 123, qty: "30", commission: "0.03", commissionAsset: fixture.commissionAssets[0] },
+              { symbol: "DOGEUSDT", orderId: 123, qty: "43", commission: "0.043", commissionAsset: fixture.commissionAssets[1] },
+            ]);
+          }
+          throw new Error(`Unexpected request: ${url.pathname}`);
+        }) as typeof fetch,
+        () => 1_800_000_000_000,
+        ["203.0.113.10"],
+      );
+
+      assert.deepEqual(await client.readSpotOrderFills("DOGEUSDT", "123", "DOGE"), {
+        symbol: "DOGEUSDT",
+        providerOrderId: "123",
+        grossBaseQuantity: "73",
+        baseCommissionQuantity: fixture.expectedCommission,
+      });
+      const tradesRequest = requests.find(({ pathname }) => pathname === "/api/v3/myTrades");
+      assert.equal(tradesRequest?.searchParams.get("symbol"), "DOGEUSDT");
+      assert.equal(tradesRequest?.searchParams.get("orderId"), "123");
+    });
+  }
+});
+
+test("Spot opening fill reads fail closed on malformed commission data or mismatched order identity", async (t) => {
+  for (const fixture of [
+    { name: "missing commission", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commissionAsset: "DOGE" } },
+    { name: "wrong order", trade: { symbol: "DOGEUSDT", orderId: 124, qty: "73", commission: "0.073", commissionAsset: "DOGE" } },
+    { name: "missing commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073" } },
+    { name: "null commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: null } },
+    { name: "numeric commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: 123 } },
+    { name: "object commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: { asset: "DOGE" } } },
+    { name: "array commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: ["DOGE"] } },
+    { name: "empty commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: "" } },
+    { name: "malformed commission asset", trade: { symbol: "DOGEUSDT", orderId: 123, qty: "73", commission: "0.073", commissionAsset: "DOGE-USDT" } },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const client = new BinanceClient(
+        { apiKey: "test-key", apiSecret: "test-secret" },
+        (async (input: string | URL | Request) => {
+          const url = new URL(String(input));
+          if (url.pathname === "/api/v3/time") return Response.json({ serverTime: 1_800_000_000_000 });
+          if (url.pathname === "/api/v3/myTrades") return Response.json([fixture.trade]);
+          throw new Error(`Unexpected request: ${url.pathname}`);
+        }) as typeof fetch,
+        () => 1_800_000_000_000,
+        ["203.0.113.10"],
+      );
+      await assert.rejects(() => client.readSpotOrderFills("DOGEUSDT", "123", "DOGE"));
+    });
+  }
+});
+
 test("generic risk snapshots read only the requested Spot and perpetual instrument with Decimal strings", async () => {
   const requests: Array<{ method: string; path: string; symbol: string | null }> = [];
   const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {

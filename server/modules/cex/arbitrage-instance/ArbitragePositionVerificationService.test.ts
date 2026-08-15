@@ -49,6 +49,7 @@ test("uses spot balance observations and keeps provider failures UNKNOWN", async
   assert.equal(result?.legs[0].availableQuantity, "0.9");
   assert.equal(result?.legs[1].verificationStatus, "UNKNOWN");
   assert.equal(result?.legs[1].actualQuantity, null);
+  assert.equal(result?.legs[1].reason, "provider_read_failed");
 });
 
 test("keeps missing, cross-user, credential mismatch, and overlapping aggregate positions invisible or UNKNOWN", async () => {

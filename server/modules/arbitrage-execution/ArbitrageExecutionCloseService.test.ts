@@ -154,14 +154,121 @@ test("Spot partial fill only decreases the authoritative confirmed Decimal quant
   assert.equal(result.instance.status, "CLOSING");
 });
 
-test("Spot close requires the whole managed quantity to be covered by available base balance", async (t) => {
+test("Spot close requires the requested quantity to be covered by available base balance", async (t) => {
   const spot = setup(t, { longInstrumentId: "BTC-USDT-SPOT" });
   spot.availableBaseQuantity = "0.99999999";
   await assert.rejects(
-    () => spot.service.closeLeg("user-a", request("long-leg", "0.5")),
+    () => spot.service.closeLeg("user-a", request("long-leg", "1")),
     (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
   );
   assert.equal(spot.runtime.calls.length, 0);
+});
+
+test("DOGE Spot close uses base-commission attribution without borrowing unrelated balance and remains recoverably closable", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "73",
+    quantityStep: "1",
+    minQuantity: "72",
+    availableBaseQuantity: "73.855",
+    attributableBaseQuantity: "72.927",
+  });
+
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("long-leg", "73", "unsafe-spot-close")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "72";
+  const spot = await fixture.service.closeLeg("user-a", request("long-leg", "72", "safe-spot-close"));
+  assert.equal(fixture.runtime.calls[0]?.side, "sell");
+  assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, false);
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "72");
+  assert.equal(spot.instance.maxResidualBaseQuantity, "1");
+  assert.equal(managedCurrentQuantity(spot.instance.legs[0]), "1");
+  assert.equal(spot.instance.status, "RESIDUAL");
+
+  fixture.runtime.confirmedQuantity = "73";
+  const closed = await fixture.service.closeLeg("user-a", request("short-leg", "73", "perp-close"));
+  assert.equal(fixture.runtime.calls[1]?.side, "buy");
+  assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
+  assert.equal(fixture.runtime.calls[1]?.quantity.quantity, "73");
+  assert.equal(closed.instance.status, "CLOSED");
+  assert.deepEqual(closed.instance.legs.map(managedCurrentQuantity), ["1", "0"]);
+});
+
+test("accepted DOGE Spot residual never permits a partial perpetual close to reach CLOSED", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "73",
+    quantityStep: "1",
+    minQuantity: "72",
+    availableBaseQuantity: "73.855",
+    attributableBaseQuantity: "72.927",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "72";
+
+  await fixture.service.closeLeg("user-a", request("long-leg", "72", "safe-spot-close-partial-perp"));
+  const result = await fixture.service.closeLeg("user-a", request("short-leg", "73", "partial-perp-close"));
+
+  assert.equal(fixture.runtime.calls[1]?.side, "buy");
+  assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
+  assert.equal(fixture.runtime.calls[1]?.quantity.quantity, "73");
+  assert.equal(result.instance.status, "RESIDUAL");
+  assert.deepEqual(result.instance.legs.map(managedCurrentQuantity), ["1", "1"]);
+});
+
+test("Spot commission paid in quote or BNB leaves gross base quantity attributable", async (t) => {
+  for (const commissionAsset of ["USDT", "BNB"]) {
+    const fixture = setup(t, {
+      longInstrumentId: "DOGE-USDT-SPOT",
+      quantity: "73",
+      quantityStep: "1",
+      minQuantity: "1",
+      availableBaseQuantity: "73.928",
+      attributableBaseQuantity: "73",
+    });
+    fixture.runtime.resultStatus = "CONFIRMED";
+    fixture.runtime.confirmedQuantity = "73";
+
+    const result = await fixture.service.closeLeg("user-a", request("long-leg", "73", `quote-fee-${commissionAsset}`));
+
+    assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "73");
+    assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0");
+  }
+});
+
+test("unknown Spot opening commission fails closed before runtime", async (t) => {
+  const fixture = setup(t, { longInstrumentId: "DOGE-USDT-SPOT", attributionError: true });
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("long-leg", "1")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "position_verification_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+});
+
+test("a one-step residual that still satisfies current rules remains RESIDUAL", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "BTC-USDT-SPOT",
+    quantity: "2",
+    quantityStep: "1",
+    minQuantity: "1",
+    attributableBaseQuantity: "2",
+    availableBaseQuantity: "2",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "1";
+  const spot = await fixture.service.closeLeg("user-a", request("long-leg", "1", "tradable-spot-residual"));
+  assert.equal(spot.instance.maxResidualBaseQuantity, "0");
+  assert.equal(spot.instance.status, "RESIDUAL");
+
+  fixture.runtime.confirmedQuantity = "2";
+  const afterPerp = await fixture.service.closeLeg("user-a", request("short-leg", "2", "tradable-perp-close"));
+  assert.equal(afterPerp.instance.status, "RESIDUAL");
+  assert.deepEqual(afterPerp.instance.legs.map(managedCurrentQuantity), ["1", "0"]);
 });
 
 test("unsupported venues fail closed before provider mutation", async (t) => {
@@ -211,14 +318,21 @@ test("concurrent distinct commands cannot claim overlapping closes for the same 
 function setup(
   t: TestContext,
   options: Readonly<{
-    longInstrumentId?: "BTC-USDT-SPOT" | "BTC-USDT-PERP";
+    longInstrumentId?: "BTC-USDT-SPOT" | "BTC-USDT-PERP" | "DOGE-USDT-SPOT";
     longVenue?: "binance" | "okx";
+    quantity?: string;
+    quantityStep?: string;
+    minQuantity?: string;
+    availableBaseQuantity?: string;
+    attributableBaseQuantity?: string;
+    attributionError?: boolean;
   }> = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-close-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const store = new ArbitrageInstanceStore({ dbPath: join(directory, "trading.sqlite") });
   const arbitrageId = "arbitrage-close-1";
+  const quantity = options.quantity ?? "1";
   store.create({
     arbitrageId,
     userId: "user-a",
@@ -233,26 +347,28 @@ function setup(
         venue: options.longVenue ?? "binance",
         accountId: "account-a",
         instrumentId: options.longInstrumentId ?? "BTC-USDT-PERP",
-        plannedQuantity: "1",
+        plannedQuantity: quantity,
       },
       {
         legId: "short-leg",
         role: "SHORT",
         venue: "binance",
         accountId: "account-a",
-        instrumentId: "BTC-USDT-PERP",
-        plannedQuantity: "1",
+        instrumentId: options.longInstrumentId?.startsWith("DOGE-") ? "DOGE-USDT-PERP" : "BTC-USDT-PERP",
+        plannedQuantity: quantity,
       },
     ],
   });
-  openLeg(store, arbitrageId, "long-leg", now - 18);
-  openLeg(store, arbitrageId, "short-leg", now - 14);
+  openLeg(store, arbitrageId, "long-leg", quantity, now - 18);
+  openLeg(store, arbitrageId, "short-leg", quantity, now - 14);
 
   const runtime = new FakeRuntime();
   const fixture = {
     verificationStatus: "MATCHED" as "MATCHED" | "MISMATCH" | "UNKNOWN",
-    actualQuantity: "1" as string | null,
-    availableBaseQuantity: "1",
+    actualQuantity: quantity as string | null,
+    availableBaseQuantity: options.availableBaseQuantity ?? quantity,
+    attributableBaseQuantity: options.attributableBaseQuantity ?? quantity,
+    attributionError: options.attributionError ?? false,
   };
   let closeClock = now;
   const service = new ArbitrageExecutionCloseService(
@@ -278,8 +394,8 @@ function setup(
       load: async (_venue, instrumentId) => ({
         instrument: {
           instrumentId,
-          providerSymbol: "BTCUSDT",
-          baseAsset: createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }),
+          providerSymbol: instrumentId.startsWith("DOGE-") ? "DOGEUSDT" : "BTCUSDT",
+          baseAsset: createAsset({ symbol: instrumentId.startsWith("DOGE-") ? "DOGE" : "BTC", type: "DIGITAL_ASSET" }),
           quoteAsset: "USDT",
           settlementAsset: "USDT",
           marketType: instrumentId.endsWith("-SPOT") ? "spot" : "perpetual",
@@ -288,22 +404,30 @@ function setup(
           status: "trading",
         },
         tradingRules: createTradingRules({
-          quantityStep: "0.0001",
-          minQuantity: "0.0001",
+          quantityStep: options.quantityStep ?? "0.0001",
+          minQuantity: options.minQuantity ?? "0.0001",
           priceTick: "0.01",
           minNotional: "1",
           contractSize: "1",
-          precision: { quantity: 4, price: 2 },
+          precision: { quantity: instrumentId.startsWith("DOGE-") ? 0 : 4, price: 2 },
         }),
-        quote: { bid: "60000", ask: "60001", fetchedAt: now },
+        quote: { bid: instrumentId.startsWith("DOGE-") ? "0.07" : "60000", ask: instrumentId.startsWith("DOGE-") ? "0.071" : "60001", fetchedAt: now },
       }),
     },
     {
       readAvailableBalance: async (_userId, input) => {
         assert.equal(input.accountId, "account-a");
-        assert.equal(input.providerSymbol, "BTCUSDT");
-        assert.equal(input.baseAsset, "BTC");
+        assert.equal(input.providerSymbol, options.longInstrumentId?.startsWith("DOGE-") ? "DOGEUSDT" : "BTCUSDT");
+        assert.equal(input.baseAsset, options.longInstrumentId?.startsWith("DOGE-") ? "DOGE" : "BTC");
         return { availableQuantity: fixture.availableBaseQuantity, checkedAt: now };
+      },
+    },
+    {
+      readAttributableBaseQuantity: async (_userId, input) => {
+        if (fixture.attributionError) throw new Error("commission unavailable");
+        assert.equal(input.accountId, "account-a");
+        assert.equal(input.grossConfirmedQuantity, quantity);
+        return fixture.attributableBaseQuantity;
       },
     },
     runtime,
@@ -312,21 +436,21 @@ function setup(
   return Object.assign(fixture, { service, store, runtime, arbitrageId });
 }
 
-function openLeg(store: ArbitrageInstanceStore, arbitrageId: string, legId: string, timestamp: number) {
+function openLeg(store: ArbitrageInstanceStore, arbitrageId: string, legId: string, quantity: string, timestamp: number) {
   const intentId = `opening-${legId}`;
   store.claimExecutionReference("user-a", arbitrageId, {
     legId,
     phase: "OPENING",
     quantityEffect: "INCREASE",
     executionIntentId: intentId,
-    requestedQuantity: "1",
+    requestedQuantity: quantity,
     createdAt: timestamp,
   });
   store.linkExecutionRecord("user-a", arbitrageId, intentId, `record-${legId}`, timestamp + 1);
   store.applyExecutionResult("user-a", arbitrageId, {
     executionIntentId: intentId,
     status: "CONFIRMED",
-    confirmedQuantity: "1",
+    confirmedQuantity: quantity,
     updatedAt: timestamp + 2,
   });
 }

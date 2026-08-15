@@ -35,6 +35,7 @@ export type ExecutionReferenceClaim = Readonly<{
   quantityEffect: ArbitrageQuantityEffect;
   executionIntentId: string;
   requestedQuantity: string;
+  acceptedResidualQuantity?: string;
   createdAt: number;
 }>;
 
@@ -188,6 +189,26 @@ export class ArbitrageInstanceStore {
       }
       const leg = instance.legs.find((candidate) => candidate.legId === normalizedClaim.legId);
       if (!leg) throw new Error("Execution reference leg does not belong to the arbitrage instance.");
+      const firstClosingClaim = normalizedClaim.phase === "CLOSING"
+        && !instance.executionReferences.some((reference) => reference.phase === "CLOSING");
+      if (firstClosingClaim) {
+        this.db.prepare(`UPDATE arbitrage_instances SET maxResidualBaseQuantity = '0'
+          WHERE userId = ? AND arbitrageId = ?`).run(normalizedUserId, normalizedArbitrageId);
+      }
+      if (normalizedClaim.acceptedResidualQuantity !== undefined) {
+        if (normalizedClaim.phase !== "CLOSING" || normalizedClaim.quantityEffect !== "DECREASE") {
+          throw new Error("Accepted residual quantity is only valid for a closing decrease.");
+        }
+        const currentAcceptedResidual = firstClosingClaim ? "0" : instance.maxResidualBaseQuantity;
+        if (compareUnsignedDecimals(normalizedClaim.acceptedResidualQuantity, currentAcceptedResidual) > 0) {
+          this.db.prepare(`UPDATE arbitrage_instances SET maxResidualBaseQuantity = ?
+            WHERE userId = ? AND arbitrageId = ?`).run(
+            normalizedClaim.acceptedResidualQuantity,
+            normalizedUserId,
+            normalizedArbitrageId,
+          );
+        }
+      }
       if (normalizedClaim.phase === "CLOSING" && instance.executionReferences.some((reference) => (
         reference.legId === normalizedClaim.legId
         && reference.phase === "CLOSING"
@@ -492,6 +513,12 @@ export class ArbitrageInstanceStore {
   private deriveLifecycle(instance: ArbitrageInstance, updatedAt: number) {
     const quantities = instance.legs.map(managedCurrentQuantity) as [string, string];
     const hasExposure = quantities.some((quantity) => quantity !== "0");
+    const hasMaterialExposure = instance.legs.some((leg, index) => {
+      const quantity = quantities[index]!;
+      return leg.instrumentId.endsWith("-SPOT")
+        ? compareUnsignedDecimals(quantity, instance.maxResidualBaseQuantity) > 0
+        : quantity !== "0";
+    });
     const bothExposed = quantities.every((quantity) => quantity !== "0");
     const residualWithinThreshold = compareUnsignedDecimals(
       absoluteDifference(quantities[0], quantities[1]),
@@ -502,7 +529,7 @@ export class ArbitrageInstanceStore {
 
     let status: ArbitrageInstanceStatus;
     if (instance.status === "CLOSING") {
-      status = !hasExposure && !unresolved
+      status = !hasMaterialExposure && !unresolved
         ? "CLOSED"
         : unresolved
           ? "CLOSING"
@@ -693,6 +720,12 @@ function normalizeClaim(claim: ExecutionReferenceClaim): ExecutionReferenceClaim
     quantityEffect: quantityEffect(claim.quantityEffect),
     executionIntentId: identifier(claim.executionIntentId, "executionIntentId"),
     requestedQuantity: normalizePositiveDecimal(claim.requestedQuantity, "requestedQuantity"),
+    ...(claim.acceptedResidualQuantity === undefined ? {} : {
+      acceptedResidualQuantity: normalizePositiveDecimal(
+        claim.acceptedResidualQuantity,
+        "acceptedResidualQuantity",
+      ),
+    }),
     createdAt: timestamp(claim.createdAt, "createdAt"),
   });
 }

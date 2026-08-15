@@ -91,8 +91,8 @@ test("verification route binds the request to the authenticated user and returns
         arbitrageId,
         checkedAt: 1_800_000_000_000,
         legs: [
-          { arbitrageId, legId: "long", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_000_000 },
-          { arbitrageId, legId: "short", expectedManagedQuantity: "1", actualQuantity: null, verificationStatus: "UNKNOWN", checkedAt: 1_800_000_000_000 },
+          { arbitrageId, legId: "long", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", reason: null, checkedAt: 1_800_000_000_000 },
+          { arbitrageId, legId: "short", expectedManagedQuantity: "1", actualQuantity: null, verificationStatus: "UNKNOWN", reason: "provider_read_failed", checkedAt: 1_800_000_000_000 },
         ],
       } as never;
     },
@@ -103,7 +103,13 @@ test("verification route binds the request to the authenticated user and returns
     assert.equal(result.response.status, 200);
     assert.equal(result.response.headers.get("cache-control"), "no-store");
     assert.deepEqual(calls, [{ userId: "user-a", arbitrageId: "arb-1" }]);
-    assert.deepEqual((await result.response.json() as { legs: { verificationStatus: string }[] }).legs.map((leg) => leg.verificationStatus), ["MATCHED", "UNKNOWN"]);
+    assert.deepEqual((await result.response.json() as { legs: { verificationStatus: string; reason: string | null }[] }).legs.map((leg) => ({
+      verificationStatus: leg.verificationStatus,
+      reason: leg.reason,
+    })), [
+      { verificationStatus: "MATCHED", reason: null },
+      { verificationStatus: "UNKNOWN", reason: "provider_read_failed" },
+    ]);
   } finally {
     await result.close();
   }

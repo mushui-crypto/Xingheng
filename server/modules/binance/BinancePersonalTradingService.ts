@@ -131,6 +131,10 @@ export class BinancePersonalTradingService {
     return this.requireClient().readGenericRiskSnapshot(request);
   }
 
+  readSpotOrderFills(symbol: string, orderId: string, baseAsset: string) {
+    return this.requireClient().readSpotOrderFills(symbol, orderId, baseAsset);
+  }
+
   async cancelOrder(input: unknown) {
     this.risk.assertCancellationAllowed();
     const body = object(input);

@@ -29,7 +29,7 @@ test("perpetual provider preserves direction and converts OKX contracts to base 
   });
 });
 
-test("spot provider reads the base asset balance and does not call a position endpoint", async () => {
+test("spot provider keeps instance quantity authoritative and uses account balance only for availability", async () => {
   let positionReads = 0;
   const provider = new VenueArbitrageLegReadProvider(
     "bybit",
@@ -49,7 +49,7 @@ test("spot provider reads the base asset balance and does not call a position en
   assert.deepEqual(await provider.readLeg(leg({
     venue: "bybit", role: "LONG", instrumentId: "XAUT-USDT-SPOT", accountId: "bybit:account-a",
   })), {
-    actualQuantity: "0.5",
+    actualQuantity: "1",
     availableQuantity: "0.4",
     direction: "LONG",
     observedAt: 1_800_000_000_000,

@@ -22,7 +22,9 @@ import type {
   ArbitrageLegReadProvider,
   ArbitrageLegReadProviderFactory,
 } from "./ArbitragePositionVerification";
+import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
+import { managedCurrentQuantity } from "./ArbitrageInstance";
 
 type PositionSnapshot =
   | BinancePerpetualPositionSnapshot
@@ -94,6 +96,10 @@ export class CatalogVerificationInstrumentResolver implements VerificationInstru
   }
 
   async resolve(venue: ExecutionVenue, instrumentId: string) {
+    if (venue === "binance") {
+      const instrument = canonicalInstrumentFromId(instrumentId);
+      return Object.freeze({ providerSymbol: `${instrument.baseAsset}${instrument.quoteAsset}`, contractSize: "1" });
+    }
     const instruments = await this.catalogs.get(venue)?.listInstruments();
     const instrument = instruments?.find((candidate) => candidate.instrumentId === instrumentId);
     if (!instrument || instrument.venue !== venue) return null;
@@ -119,7 +125,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     if (leg.venue !== this.venue) throw new Error("Arbitrage leg venue does not match verification provider.");
     const account = await accountReader.readAccount();
     if (account.accountId !== leg.accountId && !isCredentialOnlyBinding(this.venue, leg.accountId)) {
-      throw new Error("Arbitrage leg account does not match the authenticated credential.");
+      throw new ArbitrageLegReadError("account_identity_mismatch", "Arbitrage leg account does not match the authenticated credential.");
     }
     const instrument = canonicalInstrumentFromId(leg.instrumentId);
     if (instrument.contractType === "spot") {
@@ -129,25 +135,19 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       }
       const balances = account.balances.filter((balance) => balance.asset === instrument.baseAsset
         && (balance.accountType === "spot" || balance.accountType === "unified"));
-      if (!balances.length) return {
-        actualQuantity: "0",
-        availableQuantity: "0",
-        direction: "FLAT",
-        observedAt: account.latestSyncAt,
-      };
-      const total = sumNumbers(balances.map((balance) => balance.total));
       const available = balances.every((balance) => balance.available !== null)
         ? decimalFromNumber(sumNumbers(balances.map((balance) => balance.available!)))
         : null;
+      const managedQuantity = managedCurrentQuantity(leg);
       return {
-        actualQuantity: decimalFromNumber(total),
-        availableQuantity: available,
-        direction: total === 0 ? "FLAT" : "LONG",
+        actualQuantity: managedQuantity,
+        availableQuantity: balances.length ? available : "0",
+        direction: managedQuantity === "0" ? "FLAT" : "LONG",
         observedAt: account.latestSyncAt,
       };
     }
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
-    if (!binding) throw new Error("Provider instrument mapping is unavailable.");
+    if (!binding) throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
     const position = await client.readPerpetualPosition(
       binding.providerSymbol,
       leg.role === "LONG" ? "long" : "short",

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   compareUnsignedDecimals,
   managedCurrentQuantity,
+  subtractUnsignedDecimals,
   type ArbitrageExecutionReference,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
@@ -12,6 +13,7 @@ import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import { ExecutionQuantityPlanner } from "../cex/ExecutionQuantityPlanner";
 import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
 import type { SpotCloseAvailableBalanceSource } from "./BinanceSpotCloseBalanceSource";
+import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 import type {
   ArbitrageLegExecutionConfirmation,
   FormalArbitrageExecutionRuntime,
@@ -46,6 +48,7 @@ export class ArbitrageExecutionCloseService {
     private readonly positions: PositionVerifier,
     private readonly planningContexts: ArbitrageExecutionPlanningContextSource,
     private readonly spotBalances: SpotCloseAvailableBalanceSource,
+    private readonly spotAttributions: SpotOpeningAttributionSource,
     private readonly runtime: FormalArbitrageExecutionRuntime,
     private readonly options: Readonly<{
       clock?: () => number;
@@ -98,7 +101,29 @@ export class ArbitrageExecutionCloseService {
     if (spot && leg.role !== "LONG") {
       throw closeError("close_capability_unavailable", "现货空头腿无法通过可用余额可靠退出。");
     }
+    const now = this.now();
+    const planner = new ExecutionQuantityPlanner(
+      { resolve: async (instrumentId) => instrumentId === leg.instrumentId ? context.instrument : null },
+      { getTradingRules: async () => context.tradingRules },
+      { now: () => now },
+    );
+    let acceptedResidualQuantity: string | undefined;
     if (spot) {
+      const opening = exactSpotOpeningReference(instance, leg.legId, leg.confirmedOpenedQuantity);
+      let attributableBaseQuantity: string;
+      try {
+        attributableBaseQuantity = await this.spotAttributions.readAttributableBaseQuantity(userId, {
+          accountId: leg.accountId,
+          instrumentId: leg.instrumentId,
+          providerSymbol: context.instrument.providerSymbol,
+          baseAsset: context.instrument.baseAsset.symbol,
+          executionIntentId: opening.executionIntentId,
+          executionRecordId: opening.executionRecordId!,
+          grossConfirmedQuantity: opening.confirmedQuantity,
+        });
+      } catch {
+        throw closeError("position_verification_unavailable", "现货开仓成交与手续费无法可靠归因，不能提交退出。");
+      }
       let availableQuantity: string;
       try {
         const balance = await this.spotBalances.readAvailableBalance(userId, {
@@ -111,17 +136,25 @@ export class ArbitrageExecutionCloseService {
       } catch {
         throw closeError("position_verification_unavailable", "当前现货可用余额无法可靠确认，不能提交退出。");
       }
-      if (compareUnsignedDecimals(managedQuantity, availableQuantity) > 0) {
-        throw closeError("close_quantity_unavailable", "当前现货可用余额不足以覆盖该套利腿的管理数量。");
+      const attributableAvailable = compareUnsignedDecimals(attributableBaseQuantity, availableQuantity) <= 0
+        ? attributableBaseQuantity
+        : availableQuantity;
+      const maxCloseQuantity = floorToStep(attributableAvailable, context.tradingRules.quantityStep);
+      if (maxCloseQuantity === "0" || compareUnsignedDecimals(request.quantity, maxCloseQuantity) > 0) {
+        throw closeError("close_quantity_unavailable", "退出数量超过当前实例可归因且可用的现货数量。");
+      }
+      const remainingQuantity = subtractUnsignedDecimals(managedQuantity, request.quantity);
+      if (remainingQuantity !== "0" && await isNonTradableSpotResidual(
+        remainingQuantity,
+        leg.instrumentId,
+        context.tradingRules.quantityStep,
+        context.quote,
+        planner,
+      )) {
+        acceptedResidualQuantity = remainingQuantity;
       }
     }
     const side = leg.role === "LONG" ? "sell" as const : "buy" as const;
-    const now = this.now();
-    const planner = new ExecutionQuantityPlanner(
-      { resolve: async (instrumentId) => instrumentId === leg.instrumentId ? context.instrument : null },
-      { getTradingRules: async () => context.tradingRules },
-      { now: () => now },
-    );
     const planned = await planner.plan({
       instrumentId: leg.instrumentId,
       side,
@@ -154,6 +187,7 @@ export class ArbitrageExecutionCloseService {
         quantityEffect: "DECREASE",
         executionIntentId: intent.intentId,
         requestedQuantity: intent.quantity.quantity,
+        ...(acceptedResidualQuantity === undefined ? {} : { acceptedResidualQuantity }),
         createdAt: now,
       });
     } catch (error) {
@@ -198,6 +232,66 @@ export class ArbitrageExecutionCloseService {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Close execution clock is invalid.");
     return value;
   }
+}
+
+function exactSpotOpeningReference(instance: ArbitrageInstance, legId: string, grossConfirmedQuantity: string) {
+  const openings = instance.executionReferences.filter((reference) => reference.legId === legId
+    && reference.phase === "OPENING"
+    && reference.quantityEffect === "INCREASE"
+    && reference.status === "CONFIRMED"
+    && reference.executionRecordId !== null);
+  if (openings.length !== 1 || openings[0]!.confirmedQuantity !== grossConfirmedQuantity) {
+    throw closeError("position_verification_unavailable", "现货开仓执行引用无法唯一归因。");
+  }
+  return openings[0]!;
+}
+
+async function isNonTradableSpotResidual(
+  residualQuantity: string,
+  instrumentId: string,
+  quantityStep: string,
+  quote: Parameters<ExecutionQuantityPlanner["plan"]>[0]["quote"],
+  planner: ExecutionQuantityPlanner,
+) {
+  const alignedQuantity = floorToStep(residualQuantity, quantityStep);
+  if (alignedQuantity === "0") return true;
+  const result = await planner.plan({
+    instrumentId,
+    side: "sell",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: alignedQuantity },
+    quote,
+  });
+  if (result.ok) return false;
+  if (result.error.code === "QUANTITY_ROUNDED_TO_ZERO"
+    || result.error.code === "QUANTITY_BELOW_MINIMUM"
+    || result.error.code === "NOTIONAL_BELOW_MINIMUM") {
+    return true;
+  }
+  throw closeError("close_quantity_unavailable", "现货残余数量无法通过当前交易规则可靠判定。");
+}
+
+function floorToStep(quantity: string, step: string) {
+  const scale = Math.max(decimalPlaces(quantity), decimalPlaces(step));
+  const quantityValue = decimalInteger(quantity, scale);
+  const stepValue = decimalInteger(step, scale);
+  if (stepValue <= 0n) throw closeError("close_quantity_unavailable", "现货交易步长无效。");
+  return decimalFromInteger((quantityValue / stepValue) * stepValue, scale);
+}
+
+function decimalInteger(value: string, scale: number) {
+  const [integer, fraction = ""] = value.split(".");
+  return BigInt(`${integer}${fraction.padEnd(scale, "0")}`);
+}
+
+function decimalFromInteger(value: bigint, scale: number) {
+  if (scale === 0) return value.toString();
+  const digits = value.toString().padStart(scale + 1, "0");
+  const fraction = digits.slice(-scale).replace(/0+$/u, "");
+  return fraction ? `${digits.slice(0, -scale)}.${fraction}` : digits.slice(0, -scale);
+}
+
+function decimalPlaces(value: string) {
+  return value.includes(".") ? value.length - value.indexOf(".") - 1 : 0;
 }
 
 type CloseRequest = Readonly<{

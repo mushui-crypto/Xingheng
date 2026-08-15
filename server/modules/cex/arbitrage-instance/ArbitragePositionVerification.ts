@@ -1,6 +1,15 @@
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
 
 export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
+export type ArbitrageLegVerificationUnknownReason =
+  | "overlapping_managed_leg"
+  | "credential_binding_unavailable"
+  | "credential_binding_mismatch"
+  | "credential_load_failed"
+  | "provider_initialization_failed"
+  | "provider_read_failed"
+  | "account_identity_mismatch"
+  | "instrument_mapping_unavailable";
 
 export type ArbitrageLegObservedState = Readonly<{
   actualQuantity: string;
@@ -17,8 +26,15 @@ export type ArbitrageLegVerificationResult = Readonly<{
   actualQuantity: string | null;
   availableQuantity: string | null;
   verificationStatus: ArbitrageLegVerificationStatus;
+  reason: ArbitrageLegVerificationUnknownReason | null;
   checkedAt: number;
 }>;
+
+export class ArbitrageLegReadError extends Error {
+  constructor(readonly reason: ArbitrageLegVerificationUnknownReason, message: string) {
+    super(message);
+  }
+}
 
 export type ArbitragePositionVerificationResult = Readonly<{
   arbitrageId: string;

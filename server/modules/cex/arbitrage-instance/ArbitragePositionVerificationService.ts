@@ -11,9 +11,12 @@ import type { ArbitrageInstanceQueryService } from "./ArbitrageInstanceQueryServ
 import type {
   ArbitrageLegObservedState,
   ArbitrageLegReadProviderFactory,
+  ArbitrageLegVerificationUnknownReason,
   ArbitrageLegVerificationResult,
   ArbitragePositionVerificationResult,
 } from "./ArbitragePositionVerification";
+import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
+import { canonicalInstrumentFromId } from "../Instrument";
 
 type VerificationCredentialStore = Pick<UserExchangeCredentialStore, "findSummary" | "loadForAccountRead">;
 type VerificationQuery = Pick<ArbitrageInstanceQueryService, "getById" | "listActive">;
@@ -52,25 +55,34 @@ export class ArbitragePositionVerificationService {
     checkedAt: number,
   ): Promise<ArbitrageLegVerificationResult> {
     const expectedManagedQuantity = managedCurrentQuantity(leg);
-    if (hasOverlappingManagedLeg(instance, leg, active)) {
-      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt);
+    if (!isSpotLeg(leg) && hasOverlappingManagedLeg(instance, leg, active)) {
+      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "overlapping_managed_leg");
     }
     const factory = this.factories.get(leg.venue);
     const summary = this.credentials.findSummary(instance.userId, leg.venue);
     if (!factory || !summary || summary.accountId !== leg.accountId) {
-      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt);
+      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "credential_binding_unavailable");
     }
     let provider;
+    let failureReason: ArbitrageLegVerificationUnknownReason = "credential_load_failed";
     try {
       const secret = await this.credentials.loadForAccountRead(instance.userId, leg.venue);
       if (!credentialBindingMatches(leg, secret.apiKey)) {
-        return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt);
+        return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "credential_binding_mismatch");
       }
+      failureReason = "provider_initialization_failed";
       provider = factory.create(secret);
+      failureReason = "provider_read_failed";
       const observed = await provider.readLeg(leg);
       return result(instance, leg, expectedManagedQuantity, observed, checkedAt);
-    } catch {
-      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt);
+    } catch (error) {
+      return unknown(
+        instance.arbitrageId,
+        leg.legId,
+        expectedManagedQuantity,
+        checkedAt,
+        error instanceof ArbitrageLegReadError ? error.reason : failureReason,
+      );
     } finally {
       if (provider) await Promise.resolve(provider.dispose()).catch(() => undefined);
     }
@@ -105,6 +117,7 @@ function result(
     actualQuantity: observed.actualQuantity,
     availableQuantity: observed.availableQuantity ?? null,
     verificationStatus: directionMatches && quantityMatches ? "MATCHED" : "MISMATCH",
+    reason: null,
     checkedAt,
   });
 }
@@ -114,6 +127,7 @@ function unknown(
   legId: string,
   expectedManagedQuantity: string,
   checkedAt: number,
+  reason: ArbitrageLegVerificationUnknownReason,
 ): ArbitrageLegVerificationResult {
   return Object.freeze({
     arbitrageId,
@@ -122,8 +136,13 @@ function unknown(
     actualQuantity: null,
     availableQuantity: null,
     verificationStatus: "UNKNOWN",
+    reason,
     checkedAt,
   });
+}
+
+function isSpotLeg(leg: ArbitrageInstanceLeg) {
+  return canonicalInstrumentFromId(leg.instrumentId).contractType === "spot";
 }
 
 function hasOverlappingManagedLeg(

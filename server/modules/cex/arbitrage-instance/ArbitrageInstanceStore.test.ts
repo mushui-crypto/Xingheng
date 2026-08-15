@@ -338,6 +338,130 @@ test("restores CLOSED lifecycle, quantities, references, timestamps, and nullabl
   });
 });
 
+test("persists an accepted close safety residual and restores terminal lifecycle after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({
+      strategyType: "SPOT_PERPETUAL",
+      legs: [
+        { ...instance().legs[0], instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "73" },
+        { ...instance().legs[1], plannedQuantity: "73" },
+      ],
+    }));
+    execute(first, "long-leg", "long-open", "OPENING", "INCREASE", "73", start + 10);
+    execute(first, "short-leg", "short-open", "OPENING", "INCREASE", "73", start + 20);
+    first.claimExecutionReference("user-a", "arbitrage-1", {
+      ...claim("long-leg", "long-close", start + 30, "CLOSING", "DECREASE", "72"),
+      acceptedResidualQuantity: "1",
+    });
+    first.linkExecutionRecord("user-a", "arbitrage-1", "long-close", "long-close-record", start + 31);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "long-close", status: "CONFIRMED", confirmedQuantity: "72", updatedAt: start + 32,
+    });
+    execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40);
+    const expected = first.get("user-a", "arbitrage-1");
+    assert.equal(expected?.status, "CLOSED");
+    assert.equal(expected?.maxResidualBaseQuantity, "1");
+    assert.deepEqual(expected?.legs.map(managedCurrentQuantity), ["1", "0"]);
+    first.close();
+
+    const second = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(second.get("user-a", "arbitrage-1"), expected);
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("clears the initial planned mismatch tolerance before terminalization unless Spot residual is audited", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({
+      strategyType: "SPOT_PERPETUAL",
+      maxResidualBaseQuantity: "1",
+      legs: [
+        { ...instance().legs[0], instrumentId: "BTC-USDT-SPOT", plannedQuantity: "73" },
+        { ...instance().legs[1], instrumentId: "BTC-USDT-PERP", plannedQuantity: "72" },
+      ],
+    }));
+    execute(first, "long-leg", "long-open", "OPENING", "INCREASE", "73", start + 10);
+    execute(first, "short-leg", "short-open", "OPENING", "INCREASE", "72", start + 20);
+    assert.equal(first.get("user-a", "arbitrage-1")?.status, "HOLDING");
+    assert.equal(first.get("user-a", "arbitrage-1")?.maxResidualBaseQuantity, "1");
+
+    execute(first, "long-leg", "long-close", "CLOSING", "DECREASE", "72", start + 30);
+    execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "72", start + 40);
+    const expected = first.get("user-a", "arbitrage-1");
+    assert.equal(expected?.maxResidualBaseQuantity, "0");
+    assert.equal(expected?.status, "RESIDUAL");
+    assert.deepEqual(expected?.legs.map(managedCurrentQuantity), ["1", "0"]);
+    first.close();
+
+    const second = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(second.get("user-a", "arbitrage-1"), expected);
+      assert.equal(second.get("user-a", "arbitrage-1")?.status, "RESIDUAL");
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("never applies an accepted Spot residual allowance to a perpetual residual, including after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({
+      strategyType: "SPOT_PERPETUAL",
+      legs: [
+        { ...instance().legs[0], instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "73" },
+        { ...instance().legs[1], instrumentId: "DOGE-USDT-PERP", plannedQuantity: "73" },
+      ],
+    }));
+    execute(first, "long-leg", "long-open", "OPENING", "INCREASE", "73", start + 10);
+    execute(first, "short-leg", "short-open", "OPENING", "INCREASE", "73", start + 20);
+    first.claimExecutionReference("user-a", "arbitrage-1", {
+      ...claim("long-leg", "long-close", start + 30, "CLOSING", "DECREASE", "72"),
+      acceptedResidualQuantity: "1",
+    });
+    first.linkExecutionRecord("user-a", "arbitrage-1", "long-close", "long-close-record", start + 31);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "long-close", status: "CONFIRMED", confirmedQuantity: "72", updatedAt: start + 32,
+    });
+    execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40, "CONFIRMED", "72");
+    const expected = first.get("user-a", "arbitrage-1");
+    assert.equal(expected?.status, "RESIDUAL");
+    assert.equal(expected?.maxResidualBaseQuantity, "1");
+    assert.deepEqual(expected?.legs.map(managedCurrentQuantity), ["1", "1"]);
+    first.close();
+
+    const second = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(second.get("user-a", "arbitrage-1"), expected);
+      assert.equal(second.get("user-a", "arbitrage-1")?.status, "RESIDUAL");
+    } finally {
+      second.close();
+    }
+  });
+});
+
+test("never closes a perpetual-perpetual instance while either perpetual leg has residual exposure", () => {
+  withStore(({ store }) => {
+    store.create(instance({ maxResidualBaseQuantity: "1", legs: [
+      { ...instance().legs[0], plannedQuantity: "73" },
+      { ...instance().legs[1], plannedQuantity: "73" },
+    ] }));
+    execute(store, "long-leg", "long-open", "OPENING", "INCREASE", "73", start + 10);
+    execute(store, "short-leg", "short-open", "OPENING", "INCREASE", "73", start + 20);
+    execute(store, "long-leg", "long-close", "CLOSING", "DECREASE", "73", start + 30, "CONFIRMED", "72");
+    execute(store, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40);
+
+    const result = store.get("user-a", "arbitrage-1");
+    assert.equal(result?.status, "RESIDUAL");
+    assert.deepEqual(result?.legs.map(managedCurrentQuantity), ["1", "0"]);
+  });
+});
+
 test("restores an unfinished execution claim after restart without relying on memory", () => {
   withDatabase(({ dbPath }) => {
     const first = new ArbitrageInstanceStore({ dbPath });

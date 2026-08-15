@@ -19,6 +19,7 @@ import {
   type BinancePreflightSnapshot,
   type BinanceProductAvailability,
   type BinanceProviderOrder,
+  type BinanceSpotOrderFillSummary,
   type BinanceStrategyPnlSnapshot,
 } from "./BinanceTypes";
 import {
@@ -183,6 +184,46 @@ export class BinanceClient implements BinanceClientAdapter {
       baseQuantity: quantity.magnitude,
       updatedAt: optionalTimestamp(row.updateTime),
     };
+  }
+
+  async readSpotOrderFills(
+    symbol: string,
+    orderId: string,
+    baseAsset: string,
+  ): Promise<BinanceSpotOrderFillSummary> {
+    const normalizedSymbol = requiredProviderSymbol(symbol);
+    const normalizedOrderId = exactProviderOrderId(orderId, "现货成交查询 orderId");
+    const normalizedBaseAsset = requiredAsset(baseAsset);
+    const trades = providerList(await this.signedRequest("spot", "/api/v3/myTrades", {
+      symbol: normalizedSymbol,
+      orderId: normalizedOrderId,
+    }), "现货订单成交").map(record);
+    if (!trades.length) {
+      throw new BinanceProviderError("provider_snapshot_invalid", "Binance 现货订单未返回权威成交记录。");
+    }
+    let grossBaseQuantity = "0";
+    let baseCommissionQuantity = "0";
+    for (const trade of trades) {
+      if (exactProviderOrderId(trade.orderId, "现货成交 orderId") !== normalizedOrderId
+        || requiredProviderSymbol(trade.symbol) !== normalizedSymbol) {
+        throw new BinanceProviderError("provider_snapshot_invalid", "Binance 现货成交身份与目标订单不一致。");
+      }
+      grossBaseQuantity = addDecimalStrings(
+        grossBaseQuantity,
+        providerPositiveDecimal(trade.qty, "现货成交数量"),
+      );
+      const commission = providerNonNegativeDecimal(trade.commission, "现货成交手续费");
+      const commissionAsset = requiredProviderCommissionAsset(trade.commissionAsset);
+      if (commissionAsset === normalizedBaseAsset) {
+        baseCommissionQuantity = addDecimalStrings(baseCommissionQuantity, commission);
+      }
+    }
+    return Object.freeze({
+      symbol: normalizedSymbol,
+      providerOrderId: normalizedOrderId,
+      grossBaseQuantity,
+      baseCommissionQuantity,
+    });
   }
 
   async readGenericRiskSnapshot(
@@ -995,6 +1036,23 @@ function providerDecimal(value: unknown, label: string) {
   return negative && normalized !== "0" ? `-${normalized}` : normalized;
 }
 
+function addDecimalStrings(left: string, right: string) {
+  const leftParts = decimalParts(left);
+  const rightParts = decimalParts(right);
+  const scale = Math.max(leftParts.scale, rightParts.scale);
+  const sum = leftParts.value * 10n ** BigInt(scale - leftParts.scale)
+    + rightParts.value * 10n ** BigInt(scale - rightParts.scale);
+  const digits = sum.toString().padStart(scale + 1, "0");
+  if (scale === 0) return digits;
+  const fraction = digits.slice(-scale).replace(/0+$/u, "");
+  return fraction ? `${digits.slice(0, -scale)}.${fraction}` : digits.slice(0, -scale);
+}
+
+function decimalParts(value: string) {
+  const [integer, fraction = ""] = value.split(".");
+  return { value: BigInt(`${integer}${fraction}`), scale: fraction.length };
+}
+
 function signedProviderQuantity(value: unknown) {
   const raw = typeof value === "string" ? value : "";
   if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(raw)) {
@@ -1340,6 +1398,13 @@ function requiredAsset(value: unknown) {
   const asset = String(value ?? "").trim().toUpperCase();
   if (!asset) throw new BinanceProviderError("provider_response_invalid", "Binance 返回了无效的资产标识。");
   return asset;
+}
+
+function requiredProviderCommissionAsset(value: unknown) {
+  if (typeof value !== "string" || !/^[A-Z0-9]{2,12}$/u.test(value)) {
+    throw new BinanceProviderError("provider_snapshot_invalid", "Binance 现货成交返回了无效的手续费资产标识。");
+  }
+  return value;
 }
 
 function hasBalance(balance: { total: number; available: number; locked: number | null }) {

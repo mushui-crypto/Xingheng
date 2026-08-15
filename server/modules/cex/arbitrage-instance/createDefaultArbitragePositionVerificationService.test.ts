@@ -120,6 +120,76 @@ test("production catalog composition returns UNKNOWN when OKX contract mapping i
   const result = await service.verify("user-a", "arb-a");
   assert.equal(result?.legs[0].verificationStatus, "MATCHED");
   assert.equal(result?.legs[1].verificationStatus, "UNKNOWN");
+  assert.equal(result?.legs[1].reason, "instrument_mapping_unavailable");
+});
+
+test("Binance DOGE verification uses persisted leg identity without attributing unrelated Spot balance", async () => {
+  const accountId = credentialAccountId("binance", secret.apiKey);
+  const instance: ArbitrageInstance = {
+    ...fixture("arb-doge", "binance", "binance"),
+    strategyType: "SPOT_PERPETUAL",
+    maxResidualBaseQuantity: "0",
+    legs: [
+      { legId: "spot", role: "LONG", venue: "binance", accountId, instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "73", confirmedOpenedQuantity: "73", confirmedClosedQuantity: "0" },
+      { legId: "perp", role: "SHORT", venue: "binance", accountId, instrumentId: "DOGE-USDT-PERP", plannedQuantity: "73", confirmedOpenedQuantity: "73", confirmedClosedQuantity: "0" },
+    ],
+  };
+  let catalogReads = 0;
+  let positionReads = 0;
+  const query = new ArbitrageInstanceQueryService({
+    get: (userId, arbitrageId) => userId === instance.userId && arbitrageId === instance.arbitrageId ? instance : null,
+    listActive: () => [instance],
+    listHistory: () => [],
+  });
+  const service = createDefaultArbitragePositionVerificationService({
+    query,
+    credentials: {
+      findSummary: (userId, venue) => ({ userId, venue, accountId, accountFingerprint: "fingerprint", maskedApiKey: "****", environment: "development", permissions: {}, lastVerifiedAt: now, createdAt: now, updatedAt: now }),
+      loadForAccountRead: async () => secret,
+    },
+    readVenues: [{
+      venue: "binance",
+      instrumentCatalog: {
+        venue: "binance",
+        listInstruments: async () => {
+          catalogReads += 1;
+          throw new Error("broad catalog must not gate an exact Binance verification read");
+        },
+      },
+      fundingRate: { venue: "binance", getFundingRate: async () => { throw new Error("not used"); } },
+      marketData: { venue: "binance", getTopOfBook: async () => { throw new Error("not used"); } },
+    }],
+    clients: {
+      binance: () => ({
+        readAccountSnapshot: async () => ({
+          accountId: "binance:provider-account",
+          accountFingerprint: "fingerprint",
+          accountMode: "single_asset_one_way",
+          fetchedAt: now,
+          balances: [{ asset: "DOGE", accountType: "spot", total: 73.855, available: 73.855, locked: 0 }],
+          permissions: { read: true, spotTrade: true, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
+        }),
+        readPerpetualPosition: async (symbol, expectedSide) => {
+          positionReads += 1;
+          assert.equal(symbol, "DOGEUSDT");
+          assert.equal(expectedSide, "short");
+          return { symbol: "DOGEUSDT", side: "short", baseQuantity: "73", updatedAt: now };
+        },
+      }),
+    },
+    now: () => now,
+  });
+
+  const result = await service.verify("user-a", "arb-doge");
+
+  assert.deepEqual(result?.legs.map(({ verificationStatus, actualQuantity, availableQuantity, reason }) => ({
+    verificationStatus, actualQuantity, availableQuantity, reason,
+  })), [
+    { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: "73.855", reason: null },
+    { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: null, reason: null },
+  ]);
+  assert.equal(catalogReads, 0);
+  assert.equal(positionReads, 1);
 });
 
 function fixture(arbitrageId: string, longVenue: CexVenue, shortVenue: CexVenue): ArbitrageInstance {
