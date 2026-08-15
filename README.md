@@ -24,14 +24,16 @@
 
 当前状态：
 
-> 已完成交易基础设施建设，正在进行自动套利安全收口与真实运行验证。
+> Binance 正式真实执行闭环已完成，当前稳定基线为 `0.4.0 Binance Real Execution Closed Loop`，下一阶段准备建设 OKX ExecutionCapability。
 
 当前重点：
 
--   保持已有交易能力稳定；
--   完善自动套利闭环；
--   提升系统安全性和可维护性；
--   为未来更多策略扩展建立基础。
+-   保持 Binance Spot + USDT Linear Perpetual 正式 execution/close/recovery 闭环稳定；
+-   维护 `ExecutionIntent / ExecutionRecord / ArbitrageInstance` 的权威归因和恢复边界；
+-   独立建设 OKX ExecutionCapability，之后再验证 Binance + OKX Perpetual/Perpetual；
+-   保持 LIVE/Kill Switch、用户隔离和 Provider mutation 授权边界。
+
+当前 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。DOGEUSDT Spot LONG + Perpetual SHORT 真实资金闭环已完成并最终归零；新的真实资金测试仍需单独明确授权。
 
 ------------------------------------------------------------------------
 

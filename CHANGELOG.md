@@ -2,6 +2,28 @@
 
 本文档记录星衡项目的阶段版本。
 
+## 0.4.0 - Binance Real Execution Closed Loop
+
+日期：2026-08-15
+
+状态：已实现并完成 production 真实资金闭环验证
+
+### 已完成
+
+- 建立套利分析 Draft/Preview、Final Confirm、Resume 与 authenticated ArbitrageInstance 正式产品入口。
+- 完成 Binance USDT Spot 与 USDT Linear Perpetual generic instrument、Decimal quantity/price、Trading Rules、RiskGuard 和 provider order identity 链。
+- 完成 ExecutionReference/ExecutionRecord 持久化、partial fill Decimal attribution、PENDING/UNKNOWN reconciliation、link recovery 和 restart recovery。
+- 完成 Perpetual reduceOnly close、Spot LONG close、known-order cancel、cancel dispatch recovery 与 residual safety。
+- Spot 成交归因改为按 Binance `myTrades` 的真实 symbol/orderId/fills/commission 读取，不使用账户总余额或 balance delta 猜实例归属。
+- DOGEUSDT production 真实验证完成：Spot BUY 73、Perpetual SHORT 73、Perpetual close 73、Spot close 72；最终 Futures position=0、active orders=0、ArbitrageInstance=CLOSED、unresolved=0。
+
+### 当前边界
+
+- Binance 当前正式支持 USDT Spot LONG 与 USDT Linear Perpetual LONG/SHORT。
+- OKX、Bybit、Bitget 仅完成真实 GET-only Account Read，尚无正式 ExecutionCapability。
+- `CANCEL_TRANSPORT_PERSISTENCE_ATOMICITY_RISK` 保持 `RESIDUAL`；不以复杂事务系统掩盖 HTTP/SQLite 物理非原子窗口。
+- 新的部署和真实资金窗口继续需要独立明确授权。
+
 ## Unreleased - Production-only 部署收敛
 
 日期：2026-07-31

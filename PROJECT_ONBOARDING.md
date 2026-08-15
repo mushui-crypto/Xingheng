@@ -4,7 +4,7 @@
 
 > 面向新团队成员、新 AI Agent 和新工作区的快速入口。
 >
-> 更新时间：2026-07-27
+> 更新时间：2026-08-15
 
 本文件提供项目入口和当前状态摘要，不替代需求、架构、变更日志或历史归档。发生冲突时，以用户最新明确要求以及更高优先级文档为准。
 
@@ -44,16 +44,16 @@
 
 # 3. 当前阶段
 
-当前处于真实交易能力建设与稳定性验证阶段。
+当前处于 Binance 正式真实执行闭环完成、准备进入 OKX ExecutionCapability 建设的阶段。
 
 当前优先级：
 
-1. 保证资金安全和交易正确性。
-2. 保持 Demo、Testnet 和生产公共能力稳定。
-3. 完成自动套利退出、恢复和仓位归属闭环。
-4. 在既有接口与行为不变的前提下渐进治理自动套利模块。
+1. 保证资金安全、交易正确性和已完成 Binance 闭环的稳定性。
+2. 保持 Demo、Testnet 和 production 公共能力稳定。
+3. 以独立阶段实现 OKX 正式 ExecutionCapability，不把 Binance readiness 外推到其他 venue。
+4. 保持权威成交归因、恢复、退出、撤单和实例生命周期可追踪、可恢复、可审计。
 
-自动套利各阶段可以开发和离线验收，但阶段性生产发布已暂停。统一生产发布和 Mainnet 真实资金窗口分别需要用户明确批准，二者不能互相替代。
+Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实资金开仓、对冲、退出和最终核账。后续部署、OKX 开发和任何新的真实资金窗口仍分别需要用户明确批准，不能互相替代。
 
 ---
 
@@ -63,7 +63,9 @@
 
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
-- 当前只保留这一套部署环境；开始发布前必须重新核对 verified release。
+- 当前 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。
+- 当前安全开关：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
+- 当前只保留这一套部署环境；开始发布前仍必须重新核对 fixed revision、数据库备份和运行健康。
 - 策略邮件通知关闭；登录、安全和账户类邮件路径不受影响。
 
 运行哈希只是归档时点基线。开始发布或运维任务前，必须重新核对当前 Git、manifest、镜像 digest 和运行环境，不能仅依赖本文件。
@@ -94,10 +96,12 @@
 ## 自动套利
 
 - 路径：`/app/arbitrage`、`/app/my-arbitrage`
-- 已有公开市场扫描、机会分析、RWA/主流币组合和自动执行框架。
-- XAUT 是当前唯一启用的执行 profile；BTC、ETH、SOL 仍为保留配置，不得因公开行情可见而进入真实执行。
-- 生产执行开关和急停保持 fail-closed，Mainnet 真实资金窗口当前未授权。
-- 真实 Binance/Bybit adapter 的活动连续性仍返回 `incomplete` 时，自动退出必须拒绝执行并转人工核对。
+- 已有公开市场扫描、机会分析、正式 Draft/Preview、Final Confirm、Resume、ExecutionRecord、reconcile、close 和 known-order cancel。
+- Binance 当前正式支持 USDT Spot LONG 与 USDT Linear Perpetual LONG/SHORT；generic canonical asset data 当前包含 BTC、ETH、DOGE、XAUT。
+- DOGEUSDT 实例已完成 Spot BUY 73、Perp SHORT 73、Perp reduceOnly close 73、Spot close 72；最终 Futures position=0、active orders=0、instance=CLOSED、unresolved=0。
+- Spot opening commission 使用 Binance `myTrades` 权威归因；实例残余按 Trading Rules fail-closed，不使用账户总余额或外部余额补足。
+- OKX、Bybit、Bitget 目前仅 GET-only Account Read 通过，尚无正式 ExecutionCapability，不得显示为可执行。
+- 生产执行开关和急停已恢复 fail-closed；新的真实资金窗口当前未授权。
 
 ## 策略 Paper
 
@@ -133,11 +137,12 @@ SQLite 当前保存用户、账户、订单、持仓、流水和审计数据。�
 
 # 8. 当前风险与待办
 
-- 自动套利自动退出的活动连续性证明仍未完成，生产环境继续拒绝自动退出。
-- “管理账户内全部 XAUT”的授权边界仍待最终确认，不能把旧讨论当作已冻结产品规则。
-- 自动套利核心服务职责集中，后续只允许行为不变的渐进治理，不在当前安全收口期间大规模重写。
+- 下一阶段是 OKX 正式 ExecutionCapability；完成前不得尝试 Binance + OKX Perpetual/Perpetual 真实执行。
+- `CANCEL_TRANSPORT_PERSISTENCE_ATOMICITY_RISK = RESIDUAL`：Provider HTTP transport 与 SQLite dispatch 状态无法形成真正原子事务，继续保留 query-first、fail-closed 与人工接管边界。
+- 第一腿完成、第二腿尚未人工确认期间存在短时裸露敞口，这是当前安全阶段的已知产品残余风险。
+- 历史 `RESIDUAL` instance、外部余额和新实例 managed exposure 必须严格隔离，不能按 symbol、方向或账户总余额自动归属。
+- Legacy XAUT/Capital Test 与 generic execution 仍共存，只能在后续独立 cleanup 阶段处理。
 - Hyperliquid Testnet 的账户激活、Agent 授权和受控钱包签名 smoke 仍需用户配合安排。
-- 双环境部署后的私有 provider 身份 preflight、授权、下单和资金动作均未因环境上线而自动获批。
 
 具体任务开始前，应以 `PROJECT_CONTEXT.md`、当前代码、对应模块文档和用户最新指令重新确认这些状态。
 

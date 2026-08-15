@@ -16,8 +16,9 @@
 - [`strategy/`](./strategy/)：策略研究与策略交接。
 - [`reports/2026-08/`](./reports/2026-08/)：2026 年 8 月的审查、实现和 Release 证据。
 
-`reports/2026-08/RELEASE_ACTIVATION_REPORT.md` 是 artifact 构建前的历史中间记录；
-`reports/2026-08/RELEASE_ARTIFACT_BUILD_REPORT.md` 是当前 `6efe18e` artifact 状态证据。
+`reports/2026-08/RELEASE_ACTIVATION_REPORT.md` 与
+`reports/2026-08/RELEASE_ARTIFACT_BUILD_REPORT.md` 是早期 release 流程的历史中间证据，不代表当前
+production revision；当前权威 production 状态见根目录 `PROJECT_CONTEXT.md`。
 `reports/2026-08/REPOSITORY_MIGRATION_HANDOFF.md` 是可通过 Git 同步的脱敏迁移交接摘要。
 
 ## Local-only documents

@@ -8,7 +8,7 @@
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准，快速交接入口见
 > [`PROJECT_ONBOARDING.md`](./PROJECT_ONBOARDING.md)。
 
-更新时间：2026-07-27
+更新时间：2026-08-15
 
 ---
 
@@ -16,6 +16,7 @@
 
 | 月份 | 主要内容 | 详细记录 |
 | --- | --- | --- |
+| 2026-08 | 四所 GET-only、Binance generic execution、正式套利入口、恢复/退出/撤单、DOGEUSDT production 真实闭环 | [`docs/history/2026-08.md`](./docs/history/2026-08.md) |
 | 2026-07 | Paper 策略闭环、Hyperliquid Testnet 交易、安全与生产部署收口、RWA/XAUT 套利、Mainnet 小额烟测 | [`docs/history/2026-07.md`](./docs/history/2026-07.md) |
 
 2026 年 7 月归档由原《项目进度总览》完整迁移，保留当时的当前快照、阶段路线、治理约束、测试证据、发布记录和风险说明。
@@ -35,7 +36,19 @@
 
 ---
 
-# 3. 专题历史资料
+# 3. 2026 年 8 月里程碑摘要
+
+- 四交易所真实 GET-only Account Read、仓位、余额、品种映射和 Trading Rules 复验完成。
+- Binance execution 从 legacy XAUT 专用边界演进为 USDT Spot / USDT Linear Perpetual generic execution。
+- 正式套利 Draft、Final Confirm、ArbitrageInstance、两腿人工确认、reconciliation、close、cancel 和 Resume UI 完成。
+- provider order identity、lossless orderId、exact-key recovery、partial fill/commission Decimal attribution 与 residual safety 完成。
+- Production revision `25588b2206ba4c39062f3e9d06ee315fed972ea6` 完成 DOGEUSDT Spot/Perpetual 真实资金开仓、对冲、退出和最终核账。
+
+摘要只用于定位历史；当前权威状态仍以 `PROJECT_CONTEXT.md` 最新快照为准。
+
+---
+
+# 4. 专题历史资料
 
 | 主题 | 文件 | 状态 |
 | --- | --- | --- |
@@ -50,7 +63,7 @@
 
 ---
 
-# 4. 文档职责
+# 5. 文档职责
 
 | 文件 | 记录内容 | 不记录内容 |
 | --- | --- | --- |
@@ -64,7 +77,7 @@
 
 ---
 
-# 5. 后续归档规则
+# 6. 后续归档规则
 
 1. 当前事实发生变化时，先更新 `PROJECT_CONTEXT.md`；影响快速交接时同步更新 `PROJECT_ONBOARDING.md`。
 2. 影响系统行为的重要功能、安全或架构变化按规则写入 `CHANGELOG.md`。
