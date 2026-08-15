@@ -1,6 +1,6 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { HttpRequestError } from "../../api/httpClient";
 import { DropdownSelect } from "../../components/ui/DropdownSelect";
@@ -86,6 +86,8 @@ const opportunityPageSize = 25;
 
 export function ArbitragePage() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const resumeArbitrageId = searchParams.get("resumeArbitrageId");
   const [horizonDays, setHorizonDays] = useState<ArbitrageHorizon>(90);
   const [yieldMetric, setYieldMetric] = useState<ArbitrageYieldMetric>("apr");
   const [view, setView] = useState<BoardView>("opportunities");
@@ -197,8 +199,8 @@ export function ArbitragePage() {
   }, []);
 
   const openAnalysis = useCallback((opportunity: ArbitrageOpportunity) => {
-    navigate(buildArbitrageAnalysisHref(opportunity.id, horizonDays));
-  }, [horizonDays, navigate]);
+    navigate(buildArbitrageAnalysisHref(opportunity.id, horizonDays, resumeArbitrageId));
+  }, [horizonDays, navigate, resumeArbitrageId]);
 
   useEffect(() => {
     setOpportunityPage(1);
@@ -245,6 +247,13 @@ export function ArbitragePage() {
         <div className="flex items-start gap-3 border border-amber-400/30 bg-amber-400/[0.06] px-4 py-3 text-sm text-amber-100">
           <AlertTriangle className="mt-0.5 shrink-0" size={16} />
           <p>{snapshot.warnings.join("；")}</p>
+        </div>
+      ) : null}
+
+      {resumeArbitrageId ? (
+        <div className="flex items-start gap-3 border border-sky-400/30 bg-sky-400/[0.06] px-4 py-3 text-sm text-sky-100" role="status">
+          <AlertTriangle className="mt-0.5 shrink-0" size={16} />
+          <p>正在继续现有套利实例。请重新选择并确认与原实例一致的套利机会；系统不会创建新实例。</p>
         </div>
       ) : null}
 

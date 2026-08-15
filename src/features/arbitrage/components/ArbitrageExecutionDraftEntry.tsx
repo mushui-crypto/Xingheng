@@ -11,7 +11,7 @@ import {
   type ArbitrageLegExecutionConfirmation,
   type ExecutionQuantityInput,
 } from "../../../api/arbitrageExecutionDraft";
-import type { ArbitrageInstance, ArbitrageInstanceLeg } from "../../../api/arbitrageInstances";
+import { fetchArbitrageInstanceById, type ArbitrageInstance, type ArbitrageInstanceLeg } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
 import { Input } from "../../../components/ui/Input";
 import { Modal } from "../../../components/ui/Modal";
@@ -21,11 +21,14 @@ import type { ArbitrageHorizon } from "../model/types";
 export function ArbitrageExecutionDraftEntry({
   horizonDays,
   opportunityId,
+  resumeArbitrageId = null,
 }: {
   horizonDays: ArbitrageHorizon;
   opportunityId: string;
+  resumeArbitrageId?: string | null;
 }) {
-  const [open, setOpen] = useState(false);
+  const resumeMode = Boolean(resumeArbitrageId);
+  const [open, setOpen] = useState(resumeMode);
   const [draft, setDraft] = useState<ArbitrageExecutionDraft | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -37,6 +40,7 @@ export function ArbitrageExecutionDraftEntry({
   const [executionResults, setExecutionResults] = useState<Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>>({});
   const [confirmationId, setConfirmationId] = useState("");
   const [commandIds, setCommandIds] = useState<Record<string, string>>({});
+  const [resumeValidated, setResumeValidated] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -44,16 +48,34 @@ export function ArbitrageExecutionDraftEntry({
     setLoading(true);
     setError("");
     setValidationNotice("");
-    void fetchArbitrageExecutionDraft(opportunityId, horizonDays, controller.signal)
-      .then(setDraft)
+    const request = resumeArbitrageId
+      ? loadResumeContext(resumeArbitrageId, opportunityId, horizonDays, controller.signal)
+      : fetchArbitrageExecutionDraft(opportunityId, horizonDays, controller.signal).then((nextDraft) => ({ draft: nextDraft }));
+    void request
+      .then((result) => {
+        if (controller.signal.aborted) return;
+        setDraft(result.draft);
+        if ("instance" in result) {
+          setInstance(result.instance);
+          setMode("ASSET_QUANTITY");
+          setAmount(result.quantity);
+          setExecutionMode(result.executionMode);
+          setConfirmationId(createClientCommandId("resume"));
+          setResumeValidated(true);
+          setValidationNotice(`已进入继续现有实例模式。请重新核对机会、${result.quantity} ${result.assetSymbol} 数量和两条腿后，再人工确认待执行腿。`);
+        }
+      })
       .catch(() => {
-        if (!controller.signal.aborted) setError("套利执行草案加载失败，请稍后重试。");
+        if (!controller.signal.aborted) {
+          setResumeValidated(false);
+          setError(resumeArbitrageId ? "当前实例无法继续，需要重新处理" : "套利执行草案加载失败，请稍后重试。");
+        }
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [horizonDays, open, opportunityId]);
+  }, [horizonDays, open, opportunityId, resumeArbitrageId]);
 
   async function planQuantity() {
     if (!amount.trim()) {
@@ -84,6 +106,7 @@ export function ArbitrageExecutionDraftEntry({
     setInstance(null);
     setExecutionResults({});
     setCommandIds({});
+    setResumeValidated(false);
   }
 
   function openConfirmation() {
@@ -100,7 +123,7 @@ export function ArbitrageExecutionDraftEntry({
 
   async function confirmInstance() {
     const quantityInput = currentQuantityInput();
-    if (!draft || !quantityInput || !canConfirmDraft(draft)) return;
+    if (resumeMode || !draft || !quantityInput || !canConfirmDraft(draft)) return;
     setLoading(true);
     setError("");
     try {
@@ -122,7 +145,7 @@ export function ArbitrageExecutionDraftEntry({
 
   async function executeLeg(legId: string) {
     const quantityInput = currentQuantityInput();
-    if (!instance || !quantityInput || !canExecuteLeg(instance, legId)) return;
+    if (!instance || !quantityInput || (resumeMode && !resumeValidated) || !canExecuteLeg(instance, legId)) return;
     const commandId = commandIds[legId] ?? createClientCommandId(`leg-${legId}`);
     setCommandIds((current) => ({ ...current, [legId]: commandId }));
     setLoading(true);
@@ -142,7 +165,8 @@ export function ArbitrageExecutionDraftEntry({
       setExecutionResults((current) => ({ ...current, [legId]: result.executionRecord }));
       setValidationNotice(executionNotice(result.executionRecord.status, result.secondLegAllowed));
     } catch {
-      setError("该套利腿执行状态未能安全确认。实例和执行引用已保留，请勿重复提交。");
+      if (resumeMode) setResumeValidated(false);
+      setError(resumeMode ? "当前实例无法继续，需要重新处理" : "该套利腿执行状态未能安全确认。实例和执行引用已保留，请勿重复提交。");
     } finally {
       setLoading(false);
     }
@@ -167,16 +191,16 @@ export function ArbitrageExecutionDraftEntry({
   return (
     <>
       <Button type="button" onClick={openConfirmation}>
-        <ShieldCheck aria-hidden="true" size={15} /> 创建套利
+        <ShieldCheck aria-hidden="true" size={15} /> {resumeMode ? "继续开仓" : "创建套利"}
       </Button>
       <Modal
         bodyClassName="max-h-[75vh] overflow-y-auto"
         closeDisabled={loading}
-        description="预览只生成草案；最终确认时服务端会重新校验权威机会、规则和报价，通过后才创建套利实例。每条腿仍需单独人工确认。"
+        description={resumeMode ? "继续使用现有套利实例；服务端会重新校验机会、source-plan、账户和数量，不会创建替代实例。" : "预览只生成草案；最终确认时服务端会重新校验权威机会、规则和报价，通过后才创建套利实例。每条腿仍需单独人工确认。"}
         onClose={close}
         open={open}
         shellClassName="max-w-5xl"
-        title="确认创建套利"
+        title={resumeMode ? "继续现有套利实例" : "确认创建套利"}
       >
         <ArbitrageExecutionDraftContent
           amount={amount}
@@ -187,6 +211,8 @@ export function ArbitrageExecutionDraftEntry({
           instance={instance}
           loading={loading}
           mode={mode}
+          resumeMode={resumeMode}
+          resumeValidated={resumeValidated}
           onAmountChange={setAmount}
           onCancel={close}
           onConfirm={() => void confirmInstance()}
@@ -215,6 +241,8 @@ export function ArbitrageExecutionDraftContent({
   instance = null,
   loading,
   mode,
+  resumeMode = false,
+  resumeValidated = false,
   onAmountChange,
   onCancel,
   onConfirm,
@@ -233,6 +261,8 @@ export function ArbitrageExecutionDraftContent({
   instance?: ArbitrageInstance | null;
   loading: boolean;
   mode: ExecutionQuantityInput["mode"];
+  resumeMode?: boolean;
+  resumeValidated?: boolean;
   onAmountChange: (value: string) => void;
   onCancel: () => void;
   onConfirm: () => void;
@@ -247,6 +277,7 @@ export function ArbitrageExecutionDraftContent({
     <div className="space-y-5">
       <div className="grid gap-4 md:grid-cols-3">
         <Select
+          disabled={resumeMode}
           label="数量输入方式"
           onChange={(event) => onModeChange(event.target.value as ExecutionQuantityInput["mode"])}
           options={[
@@ -259,6 +290,7 @@ export function ArbitrageExecutionDraftContent({
           autoComplete="off"
           inputMode="decimal"
           label={mode === "NOTIONAL_USDT" ? "名义金额（USDT）" : "资产数量"}
+          disabled={resumeMode}
           onChange={(event) => onAmountChange(event.target.value)}
           placeholder={mode === "NOTIONAL_USDT" ? "例如 20" : "例如 0.001"}
           value={amount}
@@ -275,7 +307,7 @@ export function ArbitrageExecutionDraftContent({
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
-        <Button disabled={loading} onClick={onPlan} type="button" variant="secondary">
+        <Button disabled={loading || resumeMode} onClick={onPlan} type="button" variant="secondary">
           {loading ? "正在读取规则" : "生成数量计划"}
         </Button>
         <p className="text-xs leading-5 text-[#8f99a5]">两条腿分别使用实时 bid/ask 和交易所规则规划；不会自动提高用户输入金额。</p>
@@ -315,9 +347,11 @@ export function ArbitrageExecutionDraftContent({
       {validationNotice ? <p className="border border-emerald-400/35 bg-emerald-500/[0.06] px-4 py-3 text-sm text-emerald-100" role="status">{validationNotice}</p> : null}
       <div className="flex flex-wrap justify-end gap-3 border-t border-[#25282f] pt-4">
         <Button disabled={loading} onClick={onCancel} type="button" variant="ghost">取消</Button>
-        <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>
+        {resumeMode
+          ? <span className={`inline-flex min-h-9 items-center border px-3 text-xs ${resumeValidated ? "border-sky-400/30 text-sky-100" : "border-red-400/30 text-red-200"}`}>{resumeValidated ? "继续使用现有实例" : "已停止继续执行"}</span>
+          : <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>}
       </div>
-      <p className="text-right text-[11px] leading-5 text-[#707985]">最终确认会由服务端重新读取权威数据；两条腿始终分别要求人工确认。</p>
+      <p className="text-right text-[11px] leading-5 text-[#707985]">{resumeMode ? "继续执行不会创建新套利实例；每条腿仍由现有 executeLeg 边界重新校验。" : "最终确认会由服务端重新读取权威数据；两条腿始终分别要求人工确认。"}</p>
     </div>
   );
 }
@@ -341,6 +375,67 @@ export function canReconcileLeg(instance: ArbitrageInstance, legId: string) {
   return references.length === 1
     && (references[0]!.status === "PENDING_CONFIRMATION" || references[0]!.status === "UNKNOWN")
     && references[0]!.executionRecordId !== null;
+}
+
+export async function loadResumeContext(
+  arbitrageId: string,
+  opportunityId: string,
+  horizonDays: ArbitrageHorizon,
+  signal?: AbortSignal,
+) {
+  const instance = await fetchArbitrageInstanceById(arbitrageId, signal);
+  if (instance.status !== "OPENING" || !instance.sourcePlanId) throw new Error("resume instance is not opening");
+  const [firstLeg, secondLeg] = instance.legs;
+  if (firstLeg.plannedQuantity !== secondLeg.plannedQuantity) throw new Error("resume quantities differ");
+  const quantityInput = { mode: "ASSET_QUANTITY" as const, quantity: firstLeg.plannedQuantity };
+  const draft = await previewArbitrageExecutionDraft(opportunityId, horizonDays, quantityInput, signal);
+  if (!resumeDraftMatchesInstance(draft, instance)) throw new Error("resume draft does not match instance");
+  const executionMode = await matchingResumeExecutionMode(instance.sourcePlanId, opportunityId, horizonDays, quantityInput);
+  if (!executionMode) throw new Error("resume source plan does not match instance");
+  const assetSymbol = plannedAssetSymbol(draft);
+  if (!assetSymbol) throw new Error("resume asset is unavailable");
+  return Object.freeze({ draft, instance, quantity: firstLeg.plannedQuantity, assetSymbol, executionMode });
+}
+
+export function resumeDraftMatchesInstance(draft: ArbitrageExecutionDraft, instance: ArbitrageInstance) {
+  if (draft.strategyType !== instance.strategyType || draft.legs.length !== instance.legs.length) return false;
+  return draft.legs.every((draftLeg) => {
+    const plannedQuantity = draftLeg.planning.status === "PLANNED"
+      ? draftLeg.planning.plan.plannedAssetQuantity.quantity
+      : null;
+    return instance.legs.some((instanceLeg) => instanceLeg.legId === draftLeg.legId
+      && instanceLeg.role === draftLeg.role
+      && instanceLeg.venue === draftLeg.venue
+      && instanceLeg.instrumentId === draftLeg.instrumentId
+      && instanceLeg.plannedQuantity === plannedQuantity);
+  });
+}
+
+async function matchingResumeExecutionMode(
+  sourcePlanId: string,
+  opportunityId: string,
+  horizonDays: ArbitrageHorizon,
+  quantityInput: ExecutionQuantityInput,
+) {
+  for (const executionMode of ["PRICE_PRIORITY", "EXECUTION_PRIORITY"] as const) {
+    const payload = JSON.stringify({ opportunityId, horizonDays, quantityInput, executionMode });
+    const digest = await sha256(payload);
+    if (sourcePlanId === `execution-confirmation:${digest}`) return executionMode;
+  }
+  return null;
+}
+
+async function sha256(value: string) {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function plannedAssetSymbol(draft: ArbitrageExecutionDraft) {
+  const symbols = draft.legs.map((leg) => leg.planning.status === "PLANNED"
+    ? leg.planning.plan.plannedAssetQuantity.asset.symbol
+    : null);
+  return symbols[0] && symbols[0] === symbols[1] ? symbols[0] : null;
 }
 
 function ExecutionInstancePanel({

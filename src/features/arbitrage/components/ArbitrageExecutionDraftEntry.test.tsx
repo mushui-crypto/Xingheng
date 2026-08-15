@@ -9,6 +9,8 @@ import {
   canExecuteLeg,
   canReconcileLeg,
   canConfirmDraft,
+  loadResumeContext,
+  resumeDraftMatchesInstance,
 } from "./ArbitrageExecutionDraftEntry";
 import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
 
@@ -17,6 +19,51 @@ import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
 test("analysis execution entry is labelled 创建套利", () => {
   const html = renderToStaticMarkup(<ArbitrageExecutionDraftEntry horizonDays={90} opportunityId="op-1" />);
   assert.match(html, /创建套利/u);
+});
+
+test("resume content binds the existing instance and removes the create confirmation action", () => {
+  const current = dogeInstance();
+  const html = renderToStaticMarkup(content(dogeDraft(), current, true, true));
+  assert.match(html, /72/u);
+  assert.match(html, /DOGE/u);
+  assert.match(html, /LONG · 多头腿/u);
+  assert.match(html, /SHORT · 空头腿/u);
+  assert.match(html, /继续使用现有实例/u);
+  assert.doesNotMatch(html, /确认创建套利/u);
+});
+
+test("resume compatibility fails closed when opportunity legs or quantity no longer match", () => {
+  const current = dogeInstance();
+  assert.equal(resumeDraftMatchesInstance(dogeDraft(), current), true);
+  const changed = dogeDraft();
+  const mismatched = { ...changed, legs: [{ ...changed.legs[0], instrumentId: "BTC-USDT-SPOT" }, changed.legs[1]] } as ArbitrageExecutionDraft;
+  assert.equal(resumeDraftMatchesInstance(mismatched, current), false);
+});
+
+test("resume loader uses instance GET and draft preview only, preserving the original arbitrage id", async () => {
+  const current = dogeInstance();
+  const payload = JSON.stringify({ opportunityId: "doge-op", horizonDays: 90, quantityInput: { mode: "ASSET_QUANTITY", quantity: "72" }, executionMode: "PRICE_PRIORITY" });
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
+  current.sourcePlanId = `execution-confirmation:${Buffer.from(digest).toString("hex")}`;
+  const calls: Array<{ url: string; method: string }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), method: init?.method ?? "GET" });
+    return Response.json(calls.length === 1 ? current : dogeDraft());
+  };
+  try {
+    const resumed = await loadResumeContext(current.arbitrageId, "doge-op", 90);
+    assert.equal(resumed.instance.arbitrageId, current.arbitrageId);
+    assert.equal(resumed.quantity, "72");
+    assert.equal(resumed.executionMode, "PRICE_PRIORITY");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.deepEqual(calls, [
+    { url: "/api/arbitrage-instances/arbitrage-existing", method: "GET" },
+    { url: "/api/arbitrage-execution/draft/preview", method: "POST" },
+  ]);
+  assert.equal(calls.some((call) => call.url === "/api/arbitrage-execution/confirm"), false);
 });
 
 test("confirmation content renders both legs and disables confirmation when one venue is unavailable", () => {
@@ -74,7 +121,7 @@ test("pending and unknown legs render a Chinese reconciliation action and latest
   assert.doesNotMatch(html, /provider_response/u);
 });
 
-function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInstance | null = null) {
+function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInstance | null = null, resumeMode = false, resumeValidated = false) {
   return <ArbitrageExecutionDraftContent
     amount="20"
     draft={value}
@@ -83,6 +130,8 @@ function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInsta
     loading={false}
     instance={currentInstance}
     mode="NOTIONAL_USDT"
+    resumeMode={resumeMode}
+    resumeValidated={resumeValidated}
     onAmountChange={() => undefined}
     onCancel={() => undefined}
     onConfirm={() => undefined}
@@ -92,6 +141,34 @@ function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInsta
     onReconcileLeg={() => undefined}
     validationNotice="本阶段未创建套利实例，也未提交任何订单。"
   />;
+}
+
+function dogeDraft(): ArbitrageExecutionDraft {
+  const makeLeg = (role: "LONG" | "SHORT", instrumentId: string) => ({
+    legId: `${role.toLowerCase()}-leg`, role, venue: "binance" as const, instrumentId,
+    providerSymbol: "DOGEUSDT", side: role === "LONG" ? "buy" as const : "sell" as const,
+    marketType: role === "LONG" ? "spot" as const : "perpetual" as const,
+    quote: { bid: "0.2", ask: "0.21", updatedAt: 1 },
+    tradingRules: { quantityStep: "1", minQuantity: "1", priceTick: "0.0001", minNotional: "5" },
+    capability: { status: "AVAILABLE" as const, reasonCode: "AVAILABLE" as const },
+    planning: { status: "PLANNED" as const, plan: { sizingPrice: "0.21", plannedAssetQuantity: { asset: { symbol: "DOGE" }, quantity: "72" }, estimatedNotionalUsdt: "15.12" } },
+    executionAvailable: true,
+  });
+  return {
+    opportunityId: "doge-op", sourceIdentity: "dashboard:doge-op:1", sourceSnapshotGeneratedAt: 1,
+    horizonDays: 90, strategyType: "SPOT_PERPETUAL", quantityInput: { mode: "ASSET_QUANTITY", quantity: "72" },
+    legs: [makeLeg("LONG", "DOGE-USDT-SPOT"), makeLeg("SHORT", "DOGE-USDT-PERP")], allLegsExecutable: true, generatedAt: 1,
+  };
+}
+
+function dogeInstance(): ArbitrageInstance {
+  return {
+    ...instance([]), arbitrageId: "arbitrage-existing", sourcePlanId: "source-pending", status: "OPENING",
+    legs: [
+      { ...instance([]).legs[0], instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "72" },
+      { ...instance([]).legs[1], instrumentId: "DOGE-USDT-PERP", plannedQuantity: "72" },
+    ],
+  };
 }
 
 function draft(allAvailable: boolean): ArbitrageExecutionDraft {

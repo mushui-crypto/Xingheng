@@ -44,6 +44,19 @@ test("current and history sections render every lifecycle status in Chinese", ()
   assert.doesNotMatch(html, /PERPETUAL_PERPETUAL|OPENING|HOLDING|RESIDUAL|CLOSING|CLOSED|FAILED/u);
   assert.doesNotMatch(html, /okx:private-account-1234|binance:private-account-5678/u);
   assert.doesNotMatch(html, /收益|APR|APY|当前价格/u);
+  assert.equal((activeHtml.match(/继续开仓/gu) ?? []).length, 1);
+  assert.match(activeHtml, /href="\/app\/arbitrage\?resumeArbitrageId=arbitrage-opening"/u);
+  assert.doesNotMatch(historyHtml, /继续开仓/u);
+});
+
+test("only OPENING instances expose the resume action", () => {
+  const active = requireArbitrageInstanceList([
+    arbitrageInstance("HOLDING"),
+    arbitrageInstance("RESIDUAL"),
+    arbitrageInstance("CLOSING"),
+  ]);
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections active={active} history={[]} onPageChange={() => undefined} page={1} />);
+  assert.doesNotMatch(html, /继续开仓|resumeArbitrageId/u);
 });
 
 test("active legs render matched, mismatch, unknown and null quantities without mixing legs", () => {

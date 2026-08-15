@@ -19,6 +19,12 @@ test("analysis href preserves the existing opportunity id and holding horizon", 
   assert.equal(url.searchParams.get("horizonDays"), "365");
 });
 
+test("resume analysis href preserves the existing arbitrage id", () => {
+  const href = buildArbitrageAnalysisHref(opportunity.id, 90, "arbitrage-existing");
+  const url = new URL(href, "https://stellax.local");
+  assert.equal(url.searchParams.get("resumeArbitrageId"), "arbitrage-existing");
+});
+
 test("analysis selection can be restored from a freshly loaded snapshot", () => {
   assert.equal(findArbitrageAnalysisOpportunity(snapshot, opportunity.id), opportunity);
   assert.equal(findArbitrageAnalysisOpportunity(snapshot, "missing-opportunity"), null);

@@ -9,12 +9,19 @@ export const ARBITRAGE_ANALYSIS_PATH = "/app/funding-arbitrage";
 export function buildArbitrageAnalysisHref(
   opportunityId: string,
   horizonDays: ArbitrageHorizon,
+  resumeArbitrageId?: string | null,
 ) {
   const params = new URLSearchParams({
     opportunityId,
     horizonDays: String(horizonDays),
   });
+  if (resumeArbitrageId) params.set("resumeArbitrageId", resumeArbitrageId);
   return `${ARBITRAGE_ANALYSIS_PATH}?${params.toString()}`;
+}
+
+export function buildArbitrageResumeHref(arbitrageId: string) {
+  const params = new URLSearchParams({ resumeArbitrageId: arbitrageId });
+  return `/app/arbitrage?${params.toString()}`;
 }
 
 export function parseArbitrageAnalysisHorizon(value: string | null): ArbitrageHorizon {

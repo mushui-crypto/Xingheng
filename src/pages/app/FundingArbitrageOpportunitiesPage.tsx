@@ -18,6 +18,7 @@ const horizons: ArbitrageHorizon[] = [90, 365];
 export function FundingArbitrageOpportunitiesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const opportunityId = searchParams.get("opportunityId");
+  const resumeArbitrageId = searchParams.get("resumeArbitrageId");
   const horizonDays = parseArbitrageAnalysisHorizon(searchParams.get("horizonDays"));
   const [snapshot, setSnapshot] = useState<ArbitrageDashboardSnapshot | null>(null);
   const [loading, setLoading] = useState(Boolean(opportunityId));
@@ -85,7 +86,7 @@ export function FundingArbitrageOpportunitiesPage() {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
-          {opportunity ? <ArbitrageExecutionDraftEntry horizonDays={horizonDays} opportunityId={opportunity.id} /> : null}
+          {opportunity ? <ArbitrageExecutionDraftEntry horizonDays={horizonDays} opportunityId={opportunity.id} resumeArbitrageId={resumeArbitrageId} /> : null}
           <button
             type="button"
             className="inline-flex h-10 w-10 items-center justify-center border border-white/20 text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:opacity-50"
@@ -100,7 +101,7 @@ export function FundingArbitrageOpportunitiesPage() {
       </header>
 
       <div className="flex flex-col gap-3 border-y border-line py-3 sm:flex-row sm:items-center sm:justify-between">
-        <Link className="inline-flex items-center gap-2 text-sm font-medium text-white hover:underline" to="/app/arbitrage">
+        <Link className="inline-flex items-center gap-2 text-sm font-medium text-white hover:underline" to={resumeArbitrageId ? `/app/arbitrage?resumeArbitrageId=${encodeURIComponent(resumeArbitrageId)}` : "/app/arbitrage"}>
           <ArrowLeft size={15} /> 返回套利看板
         </Link>
         <HorizonControl value={horizonDays} onChange={changeHorizon} />
@@ -123,9 +124,10 @@ export function FundingArbitrageOpportunitiesPage() {
         <AnalysisSkeleton />
       ) : snapshot && !opportunity ? (
         <ArbitrageAnalysisEmptyState
-          title="该套利机会当前已不可用或市场数据已更新"
-          description="请返回套利看板，根据最新市场数据重新选择机会。"
+          title={resumeArbitrageId ? "当前实例无法继续，需要重新处理" : "该套利机会当前已不可用或市场数据已更新"}
+          description={resumeArbitrageId ? "当前机会已无法与原实例安全匹配；旧实例保持不变。" : "请返回套利看板，根据最新市场数据重新选择机会。"}
           actionLabel="返回套利看板"
+          actionHref={resumeArbitrageId ? `/app/arbitrage?resumeArbitrageId=${encodeURIComponent(resumeArbitrageId)}` : undefined}
         />
       ) : opportunity ? (
         <ArbitrageOpportunityAnalysis
@@ -159,10 +161,12 @@ function HorizonControl({ value, onChange }: { value: ArbitrageHorizon; onChange
 
 export function ArbitrageAnalysisEmptyState({
   actionLabel,
+  actionHref = "/app/arbitrage",
   description,
   title,
 }: {
   actionLabel: string;
+  actionHref?: string;
   description: string;
   title: string;
 }) {
@@ -171,7 +175,7 @@ export function ArbitrageAnalysisEmptyState({
       <AlertTriangle className="text-amber-300" size={22} />
       <h2 className="mt-3 text-sm font-semibold text-white">{title}</h2>
       <p className="mt-2 max-w-xl text-xs leading-5 text-muted">{description}</p>
-      <Link className="mt-5 inline-flex min-h-10 items-center justify-center border border-white/25 px-4 text-sm font-semibold text-white hover:border-white" to="/app/arbitrage">
+      <Link className="mt-5 inline-flex min-h-10 items-center justify-center border border-white/25 px-4 text-sm font-semibold text-white hover:border-white" to={actionHref}>
         {actionLabel}
       </Link>
     </div>

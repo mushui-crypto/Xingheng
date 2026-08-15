@@ -13,6 +13,7 @@ import {
   type ArbitragePositionVerification,
 } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
+import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
 import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
 import { ArbitrageOrderCancelDialog } from "./ArbitrageOrderCancelDialog";
 
@@ -299,6 +300,16 @@ function InstanceCard({ historical, instance, onCancelOrder, onCloseLeg, verific
         <Metric label="建仓完成时间" value={formatOptionalTime(instance.openedAt)} />
         {historical ? <Metric label="关闭时间" value={formatOptionalTime(instance.closedAt)} /> : null}
       </dl>
+      {!historical && instance.status === "OPENING" ? (
+        <div className="mt-4 flex justify-end border-t border-[#25282f] pt-4">
+          <a
+            className="inline-flex min-h-9 items-center justify-center border border-white/25 px-4 text-xs font-semibold text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
+            href={buildArbitrageResumeHref(instance.arbitrageId)}
+          >
+            继续开仓
+          </a>
+        </div>
+      ) : null}
       <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
         {instance.legs.map((leg) => (
           <div className="bg-[#0b0d11] p-4" key={leg.legId}>
