@@ -44,8 +44,8 @@
 
 # 3. 当前阶段
 
-当前处于 Binance 正式真实执行闭环完成、OKX ExecutionCapability 已完成本地数量边界修复并等待
-独立 Position Verification 验收的阶段。
+当前处于 Binance 正式真实执行闭环完成、OKX ExecutionCapability 已完成本地数量边界修复，且
+Position Verification foundation 已验收、等待 production 私有仓位事实复核的阶段。
 
 当前优先级：
 
@@ -53,7 +53,7 @@
 2. 保持 Demo、Testnet 和 production 公共能力稳定。
 3. 在已完成本地实现的基础上，独立验收 OKX 正式 ExecutionCapability，不把 Binance readiness 外推到其他 venue。
 4. 保持权威成交归因、恢复、退出、撤单和实例生命周期可追踪、可恢复、可审计。
-5. 继续保持 OKX Position Verification 和真实 Provider mutation 阻断，直到取得独立批准。
+5. 继续保持 OKX production 私有仓位复核和真实 Provider mutation 阻断，直到取得独立批准。
 
 Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实资金开仓、对冲、退出和最终核账。后续部署、OKX 开发和任何新的真实资金窗口仍分别需要用户明确批准，不能互相替代。
 
@@ -66,8 +66,8 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
 - 最后已知 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。
-- 当前主线代码 checkpoint：`9f57c6177542f5eee587a5798bc781c61ae805d1`，tree
-  `fc518d4b74793c7b5ab0db20bac8d42c06cc748f`；本地与 GitHub 统一使用 `main`，未部署。
+- 当前主线代码 checkpoint：`030f50a4c8a841903097f511ed638c780275e3a8`，tree
+  `45995916dcbe5f8cdc0e463d42df3bd97f390268`；本地与 GitHub 统一使用 `main`，未部署。
 - 当前安全开关：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
 - 当前只保留这一套部署环境；开始发布前仍必须重新核对 fixed revision、数据库备份和运行健康。
 - 当前只保留 `/Users/moss/Documents/StellaX` 一个代码工作区；仓库同步不会自动触发 production 部署。
@@ -107,8 +107,10 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 - Spot opening commission 使用 Binance `myTrades` 权威归因；实例残余按 Trading Rules fail-closed，不使用账户总余额或外部余额补足。
 - OKX 已有本地正式 ExecutionCapability 与 canonical quantity boundary：`baseQuantity` 在 OKX Venue
   边界转换为 contract quantity；定向测试 `98/98`、全量 Server 测试 `1120/1120` 和 build 均通过。
-- OKX Position Verification 仍为 `BLOCKED`，真实 Provider mutation 保持 `0`；Bybit、Bitget 仍仅
-  GET-only Account Read，通过不代表可执行。
+- Position Verification foundation 已通过 `ACCEPTED` checkpoint：Binance/OKX perpetual reader 统一输出
+  canonical `PositionSnapshot`，再由通用 verifier 进入套利验证服务。
+- OKX production 私有 position GET 仍为 `NOT_REVERIFIED / BLOCKED`，真实 Provider mutation 保持 `0`；
+  Bybit、Bitget 尚无独立 `PositionReader`，GET-only Account Read 通过不代表可执行。
 - 生产执行开关和急停已恢复 fail-closed；新的真实资金窗口当前未授权。
 
 ## 策略 Paper

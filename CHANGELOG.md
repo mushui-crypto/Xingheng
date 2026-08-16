@@ -2,6 +2,28 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Unreleased - Position Verification foundation checkpoint
+
+日期：2026-08-16
+
+状态：已验收并集成到 `main`，未部署
+
+### 已完成
+
+- 固化 `030f50a4c8a841903097f511ed638c780275e3a8` 作为 Position Verification foundation checkpoint。
+- 建立 `Provider Position -> Venue PositionReader -> canonical PositionSnapshot -> PositionVerification -> ArbitragePositionVerificationService` 统一边界。
+- Binance 与 OKX perpetual position reader 已接入 canonical base quantity、方向、instrument identity 和 fail-closed 校验。
+- 保持 `ExecutionIntent`、`ExecutionRecord`、`ExecutionReference`、`ExecutionCoordinator`、
+  `ArbitrageInstance` schema、Trading Rules 和正式 mutation 链不变。
+- 全量 Server 测试 `1156 passed / 0 failed`，Server TypeScript、`npm run build` 和 `git diff --check` 通过。
+
+### 当前边界
+
+- `POSITION_VERIFICATION_FOUNDATION_CHECKPOINT = ACCEPTED`；这只确认本地基础架构和回归结果。
+- `OKX_PRIVATE_POSITION_VERIFICATION = NOT_REVERIFIED / BLOCKED`；尚未使用 production 私有 GET 重新确认真实仓位事实。
+- Bybit、Bitget 尚无独立 `PositionReader`；legacy `OkxPositionVerification` 仍保留但没有 production wiring。
+- 最后已知 production revision 仍为 `25588b2`，Provider mutation 为 `0`；本条目不授权部署或真实资金执行。
+
 ## Unreleased - OKX canonical quantity boundary checkpoint
 
 日期：2026-08-16
@@ -20,7 +42,7 @@
 ### 当前边界
 
 - 最后已知 production revision 仍为 `25588b2`；当前代码 checkpoint 为 `9f57c617`，仓库同步不等于部署。
-- OKX Position Verification 仍为 `BLOCKED`，真实 Provider mutation 为 `0`；本条目不授权部署或真实资金执行。
+- 当时 OKX Position Verification 仍为 `BLOCKED`；后续 foundation checkpoint 见上方条目。
 - 旧 phase-11 实验提交已明确放弃，没有合入 `main`；Bybit/Bitget execution 仍不在当前范围。
 
 ## 0.4.0 - Binance Real Execution Closed Loop

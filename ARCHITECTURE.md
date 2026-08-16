@@ -187,6 +187,36 @@ SQLite。
 
 ------------------------------------------------------------------------
 
+## 6.3 Canonical Position Verification
+
+套利仓位验证遵循单向依赖：
+
+    Provider Position
+    ↓
+    Venue PositionReader
+    ↓
+    Canonical PositionSnapshot
+    ↓
+    PositionVerification
+    ↓
+    ArbitragePositionVerificationService
+
+约束：
+
+-   交易所 symbol、side、contract quantity 和 contract size 只允许在 Venue reader 边界解释。
+-   通用层只接收 canonical instrument、`LONG / SHORT / FLAT`、unsigned Decimal base quantity、
+    tolerance 和账户身份。
+-   snapshot 缺失、非法或 instrument identity 无法确认时必须 fail closed，不得猜测仓位。
+-   账户总余额、外部持仓和历史实例不得作为当前套利实例 managed quantity。
+-   Position Verification 是只读事实确认，不修改 Execution 模型、订单状态、数据库 schema 或 Provider 状态。
+-   新增 venue 必须实现独立 `PositionReader` 后才能宣称接入统一仓位验证；GET-only Account Read
+    不能替代该能力。
+
+当前 Binance 与 OKX perpetual 已接入该基础链。Bybit、Bitget reader 和 legacy OKX verifier cleanup
+不属于当前 checkpoint；production 私有验证仍需要独立授权和实时 GET 证据。
+
+------------------------------------------------------------------------
+
 # 7. 交易安全边界
 
 ## 用户 API Key 模式

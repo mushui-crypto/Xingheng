@@ -762,16 +762,17 @@ production 状态、真实资金验证结论或下一步范围与本节冲突，
 
 ## Revision、production 与工作区
 
--   当前主线代码 checkpoint：`9f57c6177542f5eee587a5798bc781c61ae805d1`
-    （`fix(okx): enforce canonical quantity boundary`）。
--   对应代码 Git tree：`fc518d4b74793c7b5ab0db20bac8d42c06cc748f`；后续仓库收敛提交只更新项目文档。
+-   当前主线代码 checkpoint：`030f50a4c8a841903097f511ed638c780275e3a8`
+    （`feat(cex): checkpoint position verification foundation`）。
+-   对应代码 Git tree：`45995916dcbe5f8cdc0e463d42df3bd97f390268`；后续主线提交只更新项目文档。
 -   最后已知 production revision 仍为 `25588b2206ba4c39062f3e9d06ee315fed972ea6`；本轮没有部署、
-    production 复验或真实资金授权，因此不能把 `9f57c617` 写成 production revision。
+    production 复验或真实资金授权，因此不能把 `030f50a` 写成 production revision。
 -   当前安全开关已恢复并核验：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
 -   本地与 GitHub 统一使用 `main` 作为唯一工作线；仓库同步不会自动触发 production 部署。
 -   当前 Unified Quantity Boundary checkpoint：`PASS / CLOSED`。OKX canonical base quantity 只在
     Venue 边界转换为 provider contract quantity；Binance 已验证执行链未修改。
--   当前 OKX Position Verification checkpoint：`BLOCKED`；真实 Provider mutation：`0`。
+-   当前 Position Verification foundation checkpoint：`ACCEPTED`；OKX 私有 production position
+    verification 仍为 `NOT_REVERIFIED / BLOCKED`，真实 Provider mutation：`0`。
 -   集成采用 `git merge --ff-only`，未生成额外 merge commit；旧 stash、额外 worktree 和过期实验分支已退出当前工作线。
 -   交接时必须核对当前 branch/PR 与上述固定 revision，不得只依据分支名称判断代码身份。
 
@@ -782,6 +783,23 @@ production 状态、真实资金验证结论或下一步范围与本节冲突，
 -   已被 `main` 包含的旧 checkpoint 分支已删除；旧 phase-11 execution 实验提交明确放弃，未合入主线。
 -   过期 release 草稿、历史 RWA automation stash 和额外 worktree 不再作为开发或部署输入。
 -   Git 分支整理只改变源码版本管理状态，不修改 production revision、运行配置、数据库、开关或 Provider 状态。
+
+## Position Verification foundation
+
+当前套利仓位验证基础链为：
+
+`Provider Position -> Venue PositionReader -> canonical PositionSnapshot -> PositionVerification -> ArbitragePositionVerificationService`
+
+-   `cex/position` 只接收 canonical instrument、`LONG / SHORT / FLAT`、unsigned Decimal base quantity、
+    tolerance 和 account/venue identity，不接收 `pos`、`posSide`、`ctVal` 等交易所原始字段。
+-   Binance 与 OKX perpetual reader 已接入该链；OKX contract quantity 只在 Venue reader 边界使用
+    authoritative contract size 转换为 canonical base quantity。
+-   `MATCHED / MISMATCH / UNKNOWN` 由通用 `PositionVerification` 产生；snapshot 缺失、非法或 instrument
+    不匹配时 fail closed 为 `UNKNOWN`。
+-   Bybit、Bitget 尚未实现独立 `PositionReader`，不能据此宣称四个 venue 已完成统一仓位验证。
+-   legacy `OkxPositionVerification` 仍保留且没有 production wiring；后续 cleanup 不属于本 checkpoint。
+-   本 checkpoint 不修改 Execution 模型、数据库 schema、Trading Rules、mutation gate 或正式执行能力。
+-   本地 foundation 验收不能替代 production CredentialStore/KMS/WIF/private GET 的实时仓位复核。
 
 ## Binance 正式执行闭环
 
@@ -816,6 +834,7 @@ Test 代码仍保留，后续单独 cleanup，不得重新接管 generic product
 -   `4ff55a3`：OKX guarded execution 与 Position Verification 开发链。
 -   `2f37e8e`：记录 OKX quantity semantics review，确认修复前 checkpoint 阻断。
 -   `9f57c61`：OKX canonical quantity boundary 修复与双向数量转换验证。
+-   `030f50a`：Position Core、Binance/OKX PositionReader 与套利仓位验证统一接线 checkpoint。
 
 ## DOGEUSDT 真实资金验证证据
 
