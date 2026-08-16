@@ -2,6 +2,28 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Unreleased - Multi-venue coexistence architecture boundary
+
+日期：2026-08-17
+
+状态：已记录为长期架构边界，未改变运行权限或部署状态
+
+### 已记录
+
+- 明确 Binance、OKX、Bybit、Bitget 共存的统一分层：统一执行流程、正式运行层、交易所能力层、
+  venue adapter 和 Provider 层。
+- 固化 `ExecutionIntent` 使用 canonical base quantity；`sz`、张数、`ctVal`、`lotSz`、
+  `contractSize` 等交易所字段只允许在 venue 边界解释。
+- 固化统一订单引用、`PositionReader -> Canonical PositionSnapshot -> PositionVerification`、
+  交易规则转换、独立凭证/client/session 和 venue-specific 风控参数边界。
+- 明确新交易所通过能力和运行适配接入，不修改统一核心；Binance 已验证闭环作为基准。
+
+### 当前边界
+
+- 本条目是架构和决策记录，不是部署、Provider mutation 或真实资金授权。
+- 接入矩阵与当前实现、生产 revision、实时 Provider 事实必须以 `PROJECT_CONTEXT.md` 和独立验收
+  证据重新核对。
+
 ## Unreleased - Position Verification foundation checkpoint
 
 日期：2026-08-16

@@ -1,4 +1,3 @@
-import type { BinanceIntentExecutionRuntime } from "../binance/BinanceIntentExecutionRuntime";
 import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
@@ -8,10 +7,13 @@ import type {
   ArbitrageExecutionCommandService,
   ArbitrageLegExecutionConfirmation,
 } from "./ArbitrageExecutionCommandService";
+import {
+  FormalExecutionRuntimeRegistryError,
+  type FormalExecutionRuntimeResolver,
+} from "./FormalExecutionRuntimeRegistry";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
 type RecordStore = Pick<ExecutionRecordStore, "loadForUser">;
-type CancelRuntime = Pick<BinanceIntentExecutionRuntime, "cancel">;
 type Reconciler = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
 
 export class ArbitrageExecutionCancelError extends Error {
@@ -43,7 +45,7 @@ export class ArbitrageExecutionCancelService {
   constructor(
     private readonly instances: InstanceStore,
     private readonly executionRecords: RecordStore,
-    private readonly runtime: CancelRuntime,
+    private readonly runtimes: FormalExecutionRuntimeResolver,
     private readonly reconciler: Reconciler,
   ) {}
 
@@ -85,10 +87,6 @@ export class ArbitrageExecutionCancelService {
     if (!reference.executionRecordId) {
       throw cancelError("cancel_state_unavailable", "执行记录尚未完成关联，不能安全撤销订单。");
     }
-    if (leg.venue !== "binance") {
-      throw cancelError("cancel_state_unavailable", "该交易所尚未接入正式撤单能力。");
-    }
-
     const unresolved = instance.executionReferences.filter((candidate) => candidate.legId === leg.legId
       && (candidate.status === "LINKED"
         || candidate.status === "PENDING_CONFIRMATION"
@@ -100,6 +98,7 @@ export class ArbitrageExecutionCancelService {
     const record = await this.executionRecords.loadForUser(userId, reference.executionRecordId);
     if (!record) throw cancelError("cancel_identity_conflict", "已知执行记录不存在或不属于当前用户。");
     assertIdentity(record, userId, leg, reference);
+    const runtime = this.resolveRuntime(record.venue);
     if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
       if (record.status === "CONFIRMED" || record.status === "FAILED") {
         return this.reconciler.reconcileLeg(userId, {
@@ -111,7 +110,7 @@ export class ArbitrageExecutionCancelService {
     }
 
     try {
-      await this.runtime.cancel(userId, record.executionId);
+      await runtime.cancel(userId, record.executionId);
     } catch (error) {
       if (error instanceof ManualReconciliationRequiredError) {
         throw manualReconciliationCancelError(error);
@@ -122,6 +121,18 @@ export class ArbitrageExecutionCancelService {
       arbitrageId: instance.arbitrageId,
       legId: leg.legId,
     });
+  }
+
+  private resolveRuntime(venue: ExecutionRecord["venue"]) {
+    try {
+      return this.runtimes.resolve(venue);
+    } catch (error) {
+      if (error instanceof FormalExecutionRuntimeRegistryError
+        && error.category === "runtime_not_registered") {
+        throw cancelError("cancel_state_unavailable", "该交易所尚未接入正式撤单能力。");
+      }
+      throw error;
+    }
   }
 }
 

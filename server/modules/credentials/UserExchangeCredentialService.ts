@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { BinanceClient } from "../binance/BinanceClient";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
+import { OkxClient } from "../okx/OkxClient";
+import type { OkxAccountAccess, OkxCredentials } from "../okx/OkxTypes";
 import type { ExchangeVenue } from "./CredentialKeyProvider";
 import {
   UserExchangeCredentialStoreError,
@@ -14,11 +16,19 @@ type BinanceAccessClient = {
   validateAccess(): Promise<BinanceAccountIdentity & { permissions: BinancePermissions }>;
 };
 
+type OkxAccessClient = {
+  validateAccess(): Promise<OkxAccountAccess>;
+};
+
 export class UserExchangeCredentialService {
   constructor(
-    private readonly store: Pick<UserExchangeCredentialStore, "findSummary" | "listForUser" | "save" | "delete">,
+    private readonly store: Pick<
+      UserExchangeCredentialStore,
+      "findSummary" | "listForUser" | "save" | "replace" | "loadForExecution" | "delete"
+    >,
     private readonly options: {
       binanceClientFactory?: (credentials: { apiKey: string; apiSecret: string }) => BinanceAccessClient;
+      okxClientFactory?: (credentials: OkxCredentials) => OkxAccessClient;
       assertCanDelete?: (userId: string, venue: ExchangeVenue) => Promise<void>;
       deleteCredential?: (userId: string, venue: ExchangeVenue) => Promise<boolean>;
       onDeleted?: (userId: string, venue: ExchangeVenue) => void;
@@ -43,6 +53,24 @@ export class UserExchangeCredentialService {
     const apiKey = requiredSecret(body.apiKey, "apiKey");
     const apiSecret = requiredSecret(body.apiSecret, "apiSecret");
     const passphrase = optionalPassphrase(venue, body.passphrase);
+
+    if (venue === "okx") {
+      const credentials = okxCredentials(apiKey, apiSecret, passphrase);
+      const client = this.options.okxClientFactory?.(credentials)
+        ?? new OkxClient(() => credentials);
+      const access = await client.validateAccess();
+      assertOkxProviderIdentity(access);
+      const summary = await this.store.save({
+        userId,
+        venue,
+        accountId: access.accountId,
+        accountFingerprint: access.accountFingerprint,
+        ...credentials,
+        permissions: access.permissions,
+        verifiedAt: Date.now(),
+      });
+      return status(venue, summary);
+    }
 
     if (venue !== "binance") {
       const identity = localCredentialIdentity(venue, apiKey);
@@ -75,6 +103,54 @@ export class UserExchangeCredentialService {
       apiKey,
       apiSecret,
       permissions: access.permissions,
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async rebindOkx(userId: string) {
+    const venue = "okx" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_not_configured",
+        "OKX credential is not configured.",
+      );
+    }
+    const legacyIdentity = isLegacyOkxIdentity(existing.accountId);
+    if (!legacyIdentity && !isProviderDerivedOkxIdentity(existing.accountId)) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored OKX credential identity is not eligible for Provider rebind.",
+      );
+    }
+
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = okxCredentials(secret.apiKey, secret.apiSecret, secret.passphrase);
+    const client = this.options.okxClientFactory?.(credentials)
+      ?? new OkxClient(() => credentials);
+    const access = await client.validateAccess();
+    assertOkxProviderIdentity(access);
+    if (!legacyIdentity && access.accountId !== existing.accountId) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "OKX Provider identity does not match the stored credential identity.",
+      );
+    }
+
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: access.accountId,
+      accountFingerprint: access.accountFingerprint,
+      ...credentials,
+      permissions: {
+        ...access.permissions,
+        executionEnabled: legacyIdentity
+          ? false
+          : existing.permissions.executionEnabled === true && access.permissions.executionEnabled,
+      },
       verifiedAt: Date.now(),
     });
     return status(venue, summary);
@@ -185,7 +261,7 @@ function optionalPassphrase(venue: ExchangeVenue, value: unknown) {
   return passphrase || undefined;
 }
 
-function localCredentialIdentity(venue: Exclude<ExchangeVenue, "binance">, apiKey: string) {
+function localCredentialIdentity(venue: Exclude<ExchangeVenue, "binance" | "okx">, apiKey: string) {
   const digest = createHash("sha256").update(`${venue}:credential-only:${apiKey}`).digest("hex");
   return {
     accountId: `${venue}:credential-only:${digest.slice(0, 20)}`,
@@ -199,7 +275,45 @@ function venueLabel(venue: ExchangeVenue) {
 
 function message(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | null) {
   if (venue === "binance") return null;
+  if (venue === "okx") {
+    if (!summary) return "OKX credential requires Provider identity validation before storage.";
+    if (isLegacyOkxIdentity(summary.accountId)) {
+      return "OKX credential requires a controlled Provider identity rebind before execution.";
+    }
+    return summary.permissions.executionEnabled
+      ? "OKX credential identity and execution permissions are Provider-verified."
+      : "OKX credential identity is Provider-verified, but execution remains disabled.";
+  }
   return summary
     ? `${venueLabel(venue)} API credential is encrypted and saved. Private provider validation and execution are not enabled for this venue.`
     : `${venueLabel(venue)} supports encrypted API credential storage only; private provider validation and execution are not enabled.`;
+}
+
+function okxCredentials(apiKey: string, apiSecret: string, passphrase: string | undefined): OkxCredentials {
+  if (!passphrase) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", "OKX API passphrase is required.");
+  }
+  return Object.freeze({ apiKey, apiSecret, passphrase });
+}
+
+function assertOkxProviderIdentity(access: OkxAccountAccess) {
+  if (
+    !/^okx:[a-f0-9]{16}$/u.test(access.accountId)
+    || access.accountFingerprint !== access.accountId.slice("okx:".length)
+    || !/^[a-f0-9]{64}$/u.test(access.uidHash)
+    || !access.uidHash.startsWith(access.accountFingerprint)
+  ) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_provider_identity_invalid",
+      "OKX Provider returned an invalid account identity.",
+    );
+  }
+}
+
+function isLegacyOkxIdentity(accountId: string) {
+  return /^okx:credential-only:[a-f0-9]{20}$/u.test(accountId);
+}
+
+function isProviderDerivedOkxIdentity(accountId: string) {
+  return /^okx:[a-f0-9]{16}$/u.test(accountId);
 }

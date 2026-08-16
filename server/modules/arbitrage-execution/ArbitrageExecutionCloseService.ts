@@ -16,9 +16,12 @@ import type { SpotCloseAvailableBalanceSource } from "./BinanceSpotCloseBalanceS
 import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 import type {
   ArbitrageLegExecutionConfirmation,
-  FormalArbitrageExecutionRuntime,
-  FormalArbitrageExecutionRuntimeResult,
 } from "./ArbitrageExecutionCommandService";
+import type { FormalExecutionRuntimeResult } from "./FormalExecutionRuntime";
+import {
+  FormalExecutionRuntimeRegistryError,
+  type FormalExecutionRuntimeResolver,
+} from "./FormalExecutionRuntimeRegistry";
 
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
@@ -49,7 +52,7 @@ export class ArbitrageExecutionCloseService {
     private readonly planningContexts: ArbitrageExecutionPlanningContextSource,
     private readonly spotBalances: SpotCloseAvailableBalanceSource,
     private readonly spotAttributions: SpotOpeningAttributionSource,
-    private readonly runtime: FormalArbitrageExecutionRuntime,
+    private readonly runtimes: FormalExecutionRuntimeResolver,
     private readonly options: Readonly<{
       clock?: () => number;
       createIntentId?: (userId: string, arbitrageId: string, legId: string, commandId: string) => string;
@@ -70,7 +73,8 @@ export class ArbitrageExecutionCloseService {
     const replay = instance.executionReferences.find((reference) => reference.executionIntentId === intentId);
     if (replay) return closeResult(instance, replay, true);
 
-    assertCloseCapability(instance, leg);
+    assertCloseCapability(instance);
+    const runtime = this.resolveRuntime(leg.venue);
     assertNoUnresolvedClose(instance, leg.legId);
     const managedQuantity = managedCurrentQuantity(leg);
     if (managedQuantity === "0") throw closeError("close_quantity_unavailable", "该套利腿当前没有可退出的管理数量。");
@@ -197,9 +201,9 @@ export class ArbitrageExecutionCloseService {
       return closeResult(raced, reference, true);
     }
 
-    let runtimeResult: FormalArbitrageExecutionRuntimeResult;
+    let runtimeResult: FormalExecutionRuntimeResult;
     try {
-      runtimeResult = await this.runtime.execute(intent);
+      runtimeResult = await runtime.execute(intent);
     } catch {
       throw closeError("execution_state_unknown", "退出状态暂时无法确认；执行引用已保留，请勿重复提交。");
     }
@@ -231,6 +235,18 @@ export class ArbitrageExecutionCloseService {
     const value = this.options.clock?.() ?? Date.now();
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Close execution clock is invalid.");
     return value;
+  }
+
+  private resolveRuntime(venue: ExecutionIntent["venue"]) {
+    try {
+      return this.runtimes.resolve(venue);
+    } catch (error) {
+      if (error instanceof FormalExecutionRuntimeRegistryError
+        && error.category === "runtime_not_registered") {
+        throw closeError("close_capability_unavailable", "该交易所尚未接入正式退出能力。");
+      }
+      throw error;
+    }
   }
 }
 
@@ -320,12 +336,9 @@ function parseCloseRequest(input: unknown): CloseRequest {
   });
 }
 
-function assertCloseCapability(instance: ArbitrageInstance, leg: ArbitrageInstance["legs"][number]) {
+function assertCloseCapability(instance: ArbitrageInstance) {
   if (instance.status === "CLOSED" || instance.status === "FAILED") {
     throw closeError("close_capability_unavailable", "已结束的套利实例不能再次退出。");
-  }
-  if (leg.venue !== "binance") {
-    throw closeError("close_capability_unavailable", "该交易所尚未接入正式退出能力。");
   }
 }
 

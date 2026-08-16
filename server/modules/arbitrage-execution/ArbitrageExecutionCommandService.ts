@@ -9,6 +9,11 @@ import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCre
 import type { ArbitrageExecutionDraft, ArbitrageExecutionDraftLeg } from "./ArbitrageExecutionDraft";
 import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
+import type { FormalExecutionRuntimeResult } from "./FormalExecutionRuntime";
+import {
+  FormalExecutionRuntimeRegistryError,
+  type FormalExecutionRuntimeResolver,
+} from "./FormalExecutionRuntimeRegistry";
 
 type DraftService = Pick<ArbitrageExecutionDraftService, "preview">;
 type InstanceStore = Pick<
@@ -16,16 +21,6 @@ type InstanceStore = Pick<
   "create" | "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
 >;
 type CredentialSummaries = Pick<UserExchangeCredentialStore, "findSummary">;
-
-export type FormalArbitrageExecutionRuntimeResult = Readonly<{
-  executionRecord: ExecutionRecord;
-  confirmedQuantity: string | null;
-}>;
-
-export interface FormalArbitrageExecutionRuntime {
-  execute(intent: ExecutionIntent): Promise<FormalArbitrageExecutionRuntimeResult>;
-  reconcile(userId: string, executionId: string): Promise<FormalArbitrageExecutionRuntimeResult>;
-}
 
 export type ArbitrageExecutionConfirmation = Readonly<{
   instance: ArbitrageInstance;
@@ -79,7 +74,7 @@ export class ArbitrageExecutionCommandService {
     private readonly instances: InstanceStore,
     private readonly credentials: CredentialSummaries,
     private readonly executionRecords: ExecutionRecordRecoveryStore,
-    private readonly runtime: FormalArbitrageExecutionRuntime,
+    private readonly runtimes: FormalExecutionRuntimeResolver,
     private readonly options: Readonly<{
       clock?: () => number;
       createArbitrageId?: (userId: string, confirmationId: string) => string;
@@ -172,6 +167,7 @@ export class ArbitrageExecutionCommandService {
       createdAt: now,
       expiresAt: now + (this.options.intentTtlMs ?? 30_000),
     });
+    const runtime = this.resolveRuntime(intent.venue);
     try {
       this.instances.claimExecutionReference(userId, instance.arbitrageId, {
         legId: selected.legId,
@@ -188,9 +184,9 @@ export class ArbitrageExecutionCommandService {
       return resultFromReference(raced, reference, true);
     }
 
-    let runtimeResult: FormalArbitrageExecutionRuntimeResult;
+    let runtimeResult: FormalExecutionRuntimeResult;
     try {
-      runtimeResult = await this.runtime.execute(intent);
+      runtimeResult = await runtime.execute(intent);
     } catch (error) {
       if (error instanceof ManualReconciliationRequiredError) {
         throw manualReconciliationCommandError(error);
@@ -251,6 +247,7 @@ export class ArbitrageExecutionCommandService {
     if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!leg) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    const runtime = this.resolveRuntime(leg.venue);
     const references = instance.executionReferences.filter((reference) => reference.legId === request.legId);
     const reconcilable = references.filter((reference) => reference.status === "CLAIMED"
       || reference.status === "LINKED"
@@ -275,17 +272,14 @@ export class ArbitrageExecutionCommandService {
       && reference.status !== "UNKNOWN") {
       throw commandError("execution_state_unknown", "该套利腿当前尚不能进行远端核验。");
     }
-    if (leg.venue !== "binance") {
-      throw commandError("execution_capability_unavailable", "该交易所尚未接入正式执行核验能力。");
-    }
     const executionRecordId = reference.executionRecordId;
     if (!executionRecordId) {
       throw commandError("execution_state_unknown", "执行记录关联恢复结果不可用。");
     }
 
-    let runtimeResult: FormalArbitrageExecutionRuntimeResult;
+    let runtimeResult: FormalExecutionRuntimeResult;
     try {
-      runtimeResult = await this.runtime.reconcile(userId, executionRecordId);
+      runtimeResult = await runtime.reconcile(userId, executionRecordId);
     } catch (error) {
       if (error instanceof ManualReconciliationRequiredError) {
         throw manualReconciliationCommandError(error);
@@ -376,6 +370,18 @@ export class ArbitrageExecutionCommandService {
       accounts.set(leg.legId, summary.accountId);
     }
     return accounts;
+  }
+
+  private resolveRuntime(venue: ExecutionIntent["venue"]) {
+    try {
+      return this.runtimes.resolve(venue);
+    } catch (error) {
+      if (error instanceof FormalExecutionRuntimeRegistryError
+        && error.category === "runtime_not_registered") {
+        throw commandError("execution_capability_unavailable", "该交易所尚未接入正式执行能力。");
+      }
+      throw error;
+    }
   }
 
   private now() {

@@ -167,6 +167,8 @@ class FakeOkxRuntimeService {
     return { accountId: this.accountId };
   }
 
+  validateExecutionProviderIdentity() {}
+
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
     return {

@@ -12,8 +12,12 @@ import type { ArbitrageExecutionDraft } from "./ArbitrageExecutionDraft";
 import {
   ArbitrageExecutionCommandError,
   ArbitrageExecutionCommandService,
-  type FormalArbitrageExecutionRuntime,
 } from "./ArbitrageExecutionCommandService";
+import type { FormalExecutionRuntime } from "./FormalExecutionRuntime";
+import {
+  FormalExecutionRuntimeRegistry,
+  formalExecutionRuntime,
+} from "./FormalExecutionRuntimeRegistry";
 
 const now = 1_800_000_000_000;
 
@@ -59,6 +63,20 @@ test("capability failure and stale replanning fail closed before provider mutati
   );
   assert.equal(stale.runtime.calls.length, 0);
   assert.equal(stale.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+});
+
+test("an unregistered formal runtime fails closed before claiming an execution reference", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  const service = fixture.createService(new FormalExecutionRuntimeRegistry());
+
+  await assert.rejects(
+    () => service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg")),
+    (error) => error instanceof ArbitrageExecutionCommandError
+      && error.category === "execution_capability_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
 });
 
 test("user-selected first leg claims before runtime and confirmed result updates managed quantity", async (t) => {
@@ -645,7 +663,7 @@ class FakeDraftService {
   }
 }
 
-class FakeRuntime implements FormalArbitrageExecutionRuntime {
+class FakeRuntime implements FormalExecutionRuntime {
   readonly calls: ExecutionIntent[] = [];
   readonly reconcileCalls: Array<{ userId: string; executionId: string }> = [];
   readonly records = new Map<string, ExecutionRecord>();
@@ -667,6 +685,9 @@ class FakeRuntime implements FormalArbitrageExecutionRuntime {
     this.records.set(executionId, result.executionRecord);
     return result;
   }
+  async cancel(): ReturnType<FormalExecutionRuntime["cancel"]> {
+    throw new Error("not used");
+  }
   findByIntentId(intentId: string) {
     return this.recoveryCandidates
       ?? [...this.records.values()].filter((record) => record.intentId === intentId);
@@ -682,13 +703,15 @@ function setup(t: TestContext, options: { draft?: ArbitrageExecutionDraft } = {}
   });
   const drafts = new FakeDraftService(options.draft ?? draft(true));
   const runtime = new FakeRuntime();
+  const runtimes = new FormalExecutionRuntimeRegistry()
+    .register(formalExecutionRuntime("binance", runtime));
   const credentials = { findSummary: (userId: string, venue: string) => userId === "user-a" && venue === "binance" ? ({ accountId: "binance:account-a" } as any) : null };
-  const createService = () => new ArbitrageExecutionCommandService(
+  const createService = (runtimeRegistry = runtimes) => new ArbitrageExecutionCommandService(
     drafts,
     store,
     credentials,
     runtime,
-    runtime,
+    runtimeRegistry,
     { clock: () => now, intentTtlMs: 30_000 },
   );
   const service = createService();

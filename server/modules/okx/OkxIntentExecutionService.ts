@@ -13,6 +13,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
+  type ExecutionProviderIdentityValidator,
 } from "../cex/ExecutionMutationSafetyGuard";
 import {
   OkxInstrumentMappingAdapter,
@@ -53,6 +54,10 @@ export type OkxIntentExecutionServiceOptions = Readonly<{
   quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
+  validateProviderIdentity?: ExecutionProviderIdentityValidator;
+  persistRecoveryReference?: (
+    reference: Readonly<{ instId: string; clOrdId: string }>,
+  ) => Promise<void> | void;
 }>;
 
 export type OkxExecutionOrderIdentity = Readonly<OkxOrderIdentity>;
@@ -110,6 +115,10 @@ export class OkxIntentExecutionService {
       accountId: intent.accountId,
       instrumentId: intent.instrumentId,
       providerInstrumentId: prepared.instId,
+    }, this.options.validateProviderIdentity);
+    await this.options.persistRecoveryReference?.({
+      instId: prepared.instId,
+      clOrdId: prepared.clOrdId,
     });
     const accepted = await this.client.placeOrder(prepared);
     assertAcceptedIdentity(accepted, prepared);
@@ -174,7 +183,7 @@ export class OkxIntentExecutionService {
       accountId: context.accountId,
       instrumentId: context.instrumentId,
       providerInstrumentId: context.providerInstrumentId ?? lookup.instId,
-    });
+    }, this.options.validateProviderIdentity);
     await this.client.cancelOrder({
       instId: lookup.instId,
       ...(lookup.ordId === undefined ? {} : { ordId: lookup.ordId }),

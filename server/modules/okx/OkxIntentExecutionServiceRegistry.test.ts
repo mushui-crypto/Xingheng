@@ -12,6 +12,7 @@ test("loads the authenticated user's OKX credential for execution service creati
       created.push({ credential, accountId: summary.accountId, userId: summary.userId });
       return {
         executionAccountIdentity: () => ({ accountId: summary.accountId }),
+        validateExecutionProviderIdentity: () => {},
         placeOrder: async () => {
           providerMutations += 1;
           throw new Error("provider mutation must not run in credential injection test");
@@ -48,6 +49,7 @@ test("does not reuse user A credential for user B", async () => {
       created.push({ apiKey: credential.apiKey, accountId: summary.accountId, userId: summary.userId });
       return {
         executionAccountIdentity: () => ({ accountId: summary.accountId }),
+        validateExecutionProviderIdentity: () => {},
         placeOrder: async () => {
           throw new Error("provider mutation must not run in registry test");
         },
@@ -70,9 +72,23 @@ test("does not reuse user A credential for user B", async () => {
   ]);
 });
 
+test("fails closed before credential decrypt when OKX execution is not enabled", async () => {
+  const credentials = new MemoryCredentialStore(false);
+  const registry = new OkxIntentExecutionServiceRegistry(credentials);
+
+  await assert.rejects(
+    registry.run("user-a", (service) => service.executionAccountIdentity()),
+    /not enabled for execution/u,
+  );
+  assert.deepEqual(credentials.summaryCalls, [{ userId: "user-a", venue: "okx" }]);
+  assert.deepEqual(credentials.executionCalls, []);
+});
+
 class MemoryCredentialStore {
   readonly summaryCalls: Array<{ userId: string; venue: "okx" }> = [];
   readonly executionCalls: Array<{ userId: string; venue: "okx" }> = [];
+
+  constructor(private readonly executionEnabled = true) {}
 
   findSummary(userId: string, venue: "okx") {
     this.summaryCalls.push({ userId, venue });
@@ -84,7 +100,7 @@ class MemoryCredentialStore {
       accountFingerprint: `${userId}:fingerprint`,
       maskedApiKey: "okx-...-key",
       environment: "test" as const,
-      permissions: {},
+      permissions: { executionEnabled: this.executionEnabled },
       lastVerifiedAt: 1,
       createdAt: 1,
       updatedAt: 1,

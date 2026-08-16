@@ -11,6 +11,7 @@ test("formal adapter delegates and preserves the runtime's authoritative Decimal
   const intent = executionIntent();
   let received = null;
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
     async reconcile() { throw new Error("unused"); },
     async execute(value) {
       received = value;
@@ -36,6 +37,7 @@ test("partial and cancelled-with-partial production records retain exact Decimal
   ] as const) {
     const intent = executionIntent();
     const adapter = new BinanceFormalArbitrageExecutionRuntime({
+      async cancel() { throw new Error("unused"); },
       async reconcile() { throw new Error("unused"); },
       async execute(value) {
         return {
@@ -56,6 +58,7 @@ test("partial and cancelled-with-partial production records retain exact Decimal
 test("unknown production results expose no fabricated confirmed quantity", async () => {
   const intent = executionIntent();
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
     async reconcile() { throw new Error("unused"); },
     async execute(value) {
       return {
@@ -84,6 +87,7 @@ test("formal reconciliation maps authoritative Decimal observations and UNKNOWN 
     { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now + 4 },
   ] as const) {
     const adapter = new BinanceFormalArbitrageExecutionRuntime({
+      async cancel() { throw new Error("unused"); },
       async execute() { throw new Error("unused"); },
       async reconcile(userId, executionId) {
         assert.equal(userId, "user-a");
@@ -95,6 +99,28 @@ test("formal reconciliation maps authoritative Decimal observations and UNKNOWN 
     assert.equal(result.confirmedQuantity, observation.state === "UNKNOWN" ? null : observation.filledBaseQuantity);
     assert.equal(result.executionRecord.status, observation.state);
   }
+});
+
+test("formal cancel delegates without exposing provider-native fields", async () => {
+  const intent = executionIntent();
+  const executionRecord = createExecutionRecord({
+    ...createExecutionRecordFromIntent("record-cancel", intent),
+    status: "PENDING_CONFIRMATION",
+  });
+  const observation = { state: "CANCEL_REQUESTED" as const, observedAt: now + 1 };
+  const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async execute() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async cancel(userId, executionId) {
+      assert.equal(userId, intent.userId);
+      assert.equal(executionId, executionRecord.executionId);
+      return { executionRecord, observation };
+    },
+  });
+
+  const result = await adapter.cancel(intent.userId, executionRecord.executionId);
+  assert.deepEqual(result, { executionRecord, observation });
+  assert.deepEqual(Object.keys(result).sort(), ["executionRecord", "observation"]);
 });
 
 function executionResult(confirmedQuantity: string | undefined) {

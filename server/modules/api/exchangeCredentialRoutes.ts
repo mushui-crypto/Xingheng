@@ -7,6 +7,7 @@ import {
   UserExchangeCredentialServiceError,
 } from "../credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStoreError } from "../credentials/UserExchangeCredentialStore";
+import { OkxProviderError } from "../okx/OkxClient";
 
 export function registerExchangeCredentialRoutes(
   app: express.Express,
@@ -26,6 +27,9 @@ export function registerExchangeCredentialRoutes(
   app.get("/api/exchange-credentials", route((request) => service.list(userId(request))));
   app.put("/api/exchange-credentials/:venue", route((request) => (
     service.put(userId(request), singleParam(request.params.venue), request.body)
+  )));
+  app.post("/api/exchange-credentials/okx/rebind", route((request) => (
+    service.rebindOkx(userId(request))
   )));
   app.delete("/api/exchange-credentials/:venue", route((request) => (
     service.delete(userId(request), singleParam(request.params.venue))
@@ -51,13 +55,17 @@ function credentialErrorResponse(error: unknown) {
   }
   if (error instanceof UserExchangeCredentialStoreError) {
     const status = error.category === "credential_account_already_bound"
-      || error.category === "credential_already_configured" ? 409 : 503;
+      || error.category === "credential_already_configured"
+      || error.category === "credential_rebind_conflict" ? 409 : 503;
     return { status, category: error.category, message: error.message };
   }
   if (error instanceof CredentialKeyProviderError) {
     return { status: 503, category: error.category, message: error.message };
   }
   if (error instanceof BinanceProviderError) {
+    return { status: 502, category: error.category, message: error.message };
+  }
+  if (error instanceof OkxProviderError) {
     return { status: 502, category: error.category, message: error.message };
   }
   if (error instanceof BinanceCredentialInUseError) {

@@ -1,0 +1,200 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+import { createAsset } from "../cex/Asset";
+import { createExecutionIntent } from "../cex/ExecutionIntent";
+import { createExecutionRecordFromIntent, createExecutionRecord } from "../cex/ExecutionRecord";
+import type {
+  OkxIntentExecutionCancelRuntimeResult,
+  OkxIntentExecutionReconciliationRuntimeResult,
+  OkxIntentExecutionRuntimeResult,
+} from "./OkxIntentExecutionRuntime";
+import { OkxFormalArbitrageExecutionRuntime } from "./OkxFormalArbitrageExecutionRuntime";
+
+const now = 1_800_000_000_000;
+
+test("OKX formal adapter executes through the runtime and exposes only canonical result fields", async () => {
+  const intent = executionIntent();
+  const executionRecord = record("execution-okx-execute", "CONFIRMED");
+  let received = null;
+  const adapter = new OkxFormalArbitrageExecutionRuntime({
+    async execute(value) {
+      received = value;
+      return executeResult(executionRecord, "12.500000000000000001");
+    },
+    async reconcile() { throw new Error("unused"); },
+    async cancel() { throw new Error("unused"); },
+  });
+
+  const result = await adapter.execute(intent);
+
+  assert.equal(received, intent);
+  assert.deepEqual(result, {
+    executionRecord,
+    confirmedQuantity: "12.500000000000000001",
+  });
+  assert.deepEqual(Object.keys(result).sort(), ["confirmedQuantity", "executionRecord"]);
+  assert.equal(JSON.stringify(result).includes("DOGE-USDT-SWAP"), false);
+  assert.equal(JSON.stringify(result).includes("8001"), false);
+});
+
+test("OKX formal adapter reconciles canonical Decimal observations and fails closed on UNKNOWN", async () => {
+  const executionRecord = record("execution-okx-reconcile", "PENDING_CONFIRMATION");
+  for (const observation of [
+    { state: "CONFIRMED", filledBaseQuantity: "12.500000000000000001", observedAt: now + 1 },
+    { state: "PENDING_CONFIRMATION", filledBaseQuantity: "3.125", observedAt: now + 2 },
+    { state: "FAILED", filledBaseQuantity: "1.25", observedAt: now + 3 },
+    { state: "UNKNOWN", filledBaseQuantity: "0", observedAt: now + 4 },
+  ] as const) {
+    const adapter = new OkxFormalArbitrageExecutionRuntime({
+      async execute() { throw new Error("unused"); },
+      async reconcile(userId, executionId) {
+        assert.equal(userId, "user-a");
+        assert.equal(executionId, executionRecord.executionId);
+        return reconciliationResult(executionRecord, observation);
+      },
+      async cancel() { throw new Error("unused"); },
+    });
+
+    const result = await adapter.reconcile("user-a", executionRecord.executionId);
+
+    assert.equal(
+      result.confirmedQuantity,
+      observation.state === "UNKNOWN" ? null : observation.filledBaseQuantity,
+    );
+    assert.deepEqual(Object.keys(result).sort(), ["confirmedQuantity", "executionRecord"]);
+    assert.equal(JSON.stringify(result).includes("ordId"), false);
+    assert.equal(JSON.stringify(result).includes("clOrdId"), false);
+    assert.equal(JSON.stringify(result).includes("instId"), false);
+  }
+});
+
+test("OKX formal adapter cancels through the runtime without exposing order references", async () => {
+  const executionRecord = record("execution-okx-cancel", "PENDING_CONFIRMATION");
+  const observation = { state: "CANCEL_REQUESTED" as const, observedAt: now + 1 };
+  const adapter = new OkxFormalArbitrageExecutionRuntime({
+    async execute() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async cancel(userId, executionId) {
+      assert.equal(userId, "user-a");
+      assert.equal(executionId, executionRecord.executionId);
+      return cancelResult(executionRecord, observation);
+    },
+  });
+
+  const result = await adapter.cancel("user-a", executionRecord.executionId);
+
+  assert.deepEqual(result, { executionRecord, observation });
+  assert.deepEqual(Object.keys(result).sort(), ["executionRecord", "observation"]);
+  assert.equal(JSON.stringify(result).includes("DOGE-USDT-SWAP"), false);
+  assert.equal(JSON.stringify(result).includes("8001"), false);
+});
+
+test("OKX formal adapter has no direct provider mutation or production registration dependency", () => {
+  const source = readFileSync(new URL("./OkxFormalArbitrageExecutionRuntime.ts", import.meta.url), "utf8");
+
+  assert.doesNotMatch(source, /OkxClient|placeOrder|cancelOrder/u);
+  assert.doesNotMatch(source, /FormalExecutionRuntimeRegistry|formalExecutionRuntime\s*\(/u);
+});
+
+function executeResult(
+  executionRecord: ReturnType<typeof record>,
+  confirmedQuantity: string,
+): OkxIntentExecutionRuntimeResult {
+  return {
+    executionRecord,
+    execution: {
+      step: {
+        result: {
+          confirmedQuantity,
+          providerOrderId: "8001",
+          clientOrderId: "sxokxclientorder000000000000001",
+          instId: "DOGE-USDT-SWAP",
+        },
+      },
+    } as unknown as OkxIntentExecutionRuntimeResult["execution"],
+    orderReference: {
+      executionId: executionRecord.executionId,
+      intentId: executionRecord.intentId,
+      userId: executionRecord.userId,
+      accountId: executionRecord.accountId,
+      instrumentId: executionRecord.instrumentId,
+      instId: "DOGE-USDT-SWAP",
+      ordId: "8001",
+      clOrdId: "sxokxclientorder000000000000001",
+      createdAt: now,
+      updatedAt: now,
+    },
+  };
+}
+
+function reconciliationResult(
+  executionRecord: ReturnType<typeof record>,
+  observation: NonNullable<OkxIntentExecutionReconciliationRuntimeResult["observation"]>,
+): OkxIntentExecutionReconciliationRuntimeResult {
+  return {
+    executionRecord,
+    observation,
+    orderReference: {
+      executionId: executionRecord.executionId,
+      intentId: executionRecord.intentId,
+      userId: executionRecord.userId,
+      accountId: executionRecord.accountId,
+      instrumentId: executionRecord.instrumentId,
+      instId: "DOGE-USDT-SWAP",
+      ordId: "8001",
+      clOrdId: "sxokxclientorder000000000000001",
+      createdAt: now,
+      updatedAt: observation.observedAt,
+    },
+    statusReason: null,
+    terminalShortCircuit: false,
+  };
+}
+
+function cancelResult(
+  executionRecord: ReturnType<typeof record>,
+  observation: OkxIntentExecutionCancelRuntimeResult["observation"],
+): OkxIntentExecutionCancelRuntimeResult {
+  return {
+    executionRecord,
+    observation,
+    orderReference: {
+      executionId: executionRecord.executionId,
+      intentId: executionRecord.intentId,
+      userId: executionRecord.userId,
+      accountId: executionRecord.accountId,
+      instrumentId: executionRecord.instrumentId,
+      instId: "DOGE-USDT-SWAP",
+      ordId: "8001",
+      clOrdId: "sxokxclientorder000000000000001",
+      createdAt: now,
+      updatedAt: observation.observedAt,
+    },
+  };
+}
+
+function executionIntent() {
+  return createExecutionIntent({
+    intentId: "intent-okx-formal",
+    arbitrageId: "arbitrage-1",
+    legId: "long-leg",
+    userId: "user-a",
+    venue: "okx",
+    accountId: "okx:account-user-a",
+    instrumentId: "DOGE-USDT-PERP",
+    side: "buy",
+    quantity: { asset: createAsset({ symbol: "DOGE", type: "DIGITAL_ASSET" }), quantity: "12.5" },
+    orderConstraints: { reduceOnly: false },
+    executionMode: "EXECUTION_PRIORITY",
+    createdAt: now,
+    expiresAt: now + 30_000,
+  });
+}
+
+function record(executionId: string, status: "CONFIRMED" | "PENDING_CONFIRMATION") {
+  return createExecutionRecord({
+    ...createExecutionRecordFromIntent(executionId, executionIntent()),
+    status,
+  });
+}

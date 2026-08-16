@@ -1,0 +1,145 @@
+import assert from "node:assert/strict";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import { SqliteExecutionOrderReferenceStore } from "../cex/ExecutionOrderReferenceStore";
+import { SqliteExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import {
+  InMemoryOkxExecutionOrderReferenceStore,
+  PersistentOkxExecutionOrderReferenceStore,
+  type OkxExecutionOrderReference,
+  type OkxExecutionOrderRecoveryReference,
+} from "./OkxExecutionOrderReferenceStore";
+
+const now = 1_800_000_000_000;
+
+test("persists and restores the complete OKX order reference after service restart", async () => {
+  await withDatabase(async ({ dbPath }) => {
+    const records = new SqliteExecutionRecordStore({ dbPath });
+    records.create(executionRecord());
+    records.close();
+
+    const firstPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    const first = new PersistentOkxExecutionOrderReferenceStore(firstPersistence);
+    await first.create(orderReference());
+    assert.deepEqual(await first.loadForUser("user-a", "execution-okx-1"), orderReference());
+    firstPersistence.close();
+
+    const restartedPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    try {
+      const restarted = new PersistentOkxExecutionOrderReferenceStore(restartedPersistence);
+      assert.deepEqual(
+        await restarted.loadForUser("user-a", "execution-okx-1"),
+        orderReference(),
+      );
+      assert.equal(await restarted.loadForUser("user-b", "execution-okx-1"), null);
+    } finally {
+      restartedPersistence.close();
+    }
+  });
+});
+
+test("OKX provider fields remain outside the common order-reference source", () => {
+  const commonSource = readFileSync(
+    new URL("../cex/ExecutionOrderReferenceStore.ts", import.meta.url),
+    "utf8",
+  );
+
+  assert.doesNotMatch(commonSource, /\bordId\b|\bclOrdId\b|\binstId\b|\bsz\b/u);
+});
+
+test("persists a clOrdId recovery anchor across restart and upgrades it atomically", async () => {
+  await withDatabase(async ({ dbPath }) => {
+    const records = new SqliteExecutionRecordStore({ dbPath });
+    records.create(executionRecord());
+    records.close();
+
+    const firstPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    const first = new PersistentOkxExecutionOrderReferenceStore(firstPersistence);
+    await first.createRecovery(recoveryReference());
+    firstPersistence.close();
+
+    const recoveryPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    const recovering = new PersistentOkxExecutionOrderReferenceStore(recoveryPersistence);
+    assert.equal(await recovering.loadForUser("user-a", "execution-okx-1"), null);
+    assert.deepEqual(
+      await recovering.loadRecoveryForUser("user-a", "execution-okx-1"),
+      recoveryReference(),
+    );
+    await recovering.create(orderReference({ updatedAt: now + 1 }));
+    recoveryPersistence.close();
+
+    const completedPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    try {
+      const completed = new PersistentOkxExecutionOrderReferenceStore(completedPersistence);
+      assert.deepEqual(
+        await completed.loadForUser("user-a", "execution-okx-1"),
+        orderReference({ updatedAt: now + 1 }),
+      );
+      assert.equal(await completed.loadRecoveryForUser("user-a", "execution-okx-1"), null);
+    } finally {
+      completedPersistence.close();
+    }
+  });
+});
+
+test("refuses to upgrade a recovery anchor with mismatched OKX identity", () => {
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  references.createRecovery(recoveryReference());
+
+  assert.throws(
+    () => references.create(orderReference({ clOrdId: "sxokxwrong00000000000000000001" })),
+    /does not match/u,
+  );
+  assert.deepEqual(
+    references.loadRecoveryForUser("user-a", "execution-okx-1"),
+    recoveryReference(),
+  );
+});
+
+function executionRecord(): ExecutionRecord {
+  return Object.freeze({
+    executionId: "execution-okx-1",
+    intentId: "intent-okx-1",
+    userId: "user-a",
+    venue: "okx",
+    accountId: "okx:account-user-a",
+    instrumentId: "DOGE-USDT-PERP",
+    status: "PENDING_CONFIRMATION",
+    remoteOrderId: "8001",
+    createdAt: now,
+    updatedAt: now,
+  });
+}
+
+function orderReference(overrides: Partial<OkxExecutionOrderReference> = {}): OkxExecutionOrderReference {
+  return Object.freeze({
+    executionId: "execution-okx-1",
+    intentId: "intent-okx-1",
+    userId: "user-a",
+    accountId: "okx:account-user-a",
+    instrumentId: "DOGE-USDT-PERP",
+    instId: "DOGE-USDT-SWAP",
+    ordId: "8001",
+    clOrdId: "sxokxrestart000000000000000001",
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  });
+}
+
+function recoveryReference(): OkxExecutionOrderRecoveryReference {
+  const { ordId: _ordId, ...recovery } = orderReference();
+  return recovery;
+}
+
+async function withDatabase(operation: (fixture: { dbPath: string }) => Promise<void>) {
+  const root = mkdtempSync(join(tmpdir(), "okx-order-reference-store-"));
+  try {
+    await operation({ dbPath: join(root, "trading.sqlite") });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}

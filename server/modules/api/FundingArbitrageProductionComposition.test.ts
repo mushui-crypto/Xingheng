@@ -5,6 +5,10 @@ import { registerArbitrageExecutionCommandRoutes } from "./arbitrageExecutionCom
 import { registerFundingArbitrageRoutes } from "./fundingArbitrageRoutes";
 
 const productionSource = readFileSync(new URL("../../index.ts", import.meta.url), "utf8");
+const productionEnvironment = readFileSync(
+  new URL("../../../.env.production.example", import.meta.url),
+  "utf8",
+);
 
 test("production composition exposes only the formal arbitrage mutation boundary", () => {
   assert.doesNotMatch(productionSource, /FundingArbitrageManualExecutionService/u);
@@ -14,11 +18,40 @@ test("production composition exposes only the formal arbitrage mutation boundary
   assert.doesNotMatch(productionSource, /\/api\/funding-arbitrage\/executions\/manual/u);
 
   assert.match(productionSource, /new ArbitrageExecutionCommandService\(/u);
+  assert.match(productionSource, /new FormalExecutionRuntimeRegistry\(\)/u);
+  assert.match(
+    productionSource,
+    /\.register\(formalExecutionRuntime\("binance", binanceFormalArbitrageExecutionRuntime\)\)/u,
+  );
+  assert.match(
+    productionSource,
+    /\.register\(formalExecutionRuntime\("okx", okxFormalArbitrageExecutionRuntime\)\)/u,
+  );
+  assert.match(productionSource, /new OkxIntentExecutionServiceRegistry\(userExchangeCredentials\)/u);
+  assert.match(productionSource, /new OkxIntentExecutionRuntime\(/u);
+  assert.match(productionSource, /new OkxFormalArbitrageExecutionRuntime\(okxExecutionRuntime\)/u);
+  assert.match(productionSource, /createOkxInstrumentQuantityRulesSource\(\)/u);
+  assert.match(
+    productionSource,
+    /new PersistentOkxExecutionOrderReferenceStore\(executionOrderReferenceStore\)/u,
+  );
+  assert.match(productionSource, /executionRecordStore,/u);
+  assert.doesNotMatch(productionSource, /new OkxClient|\.placeOrder\(|\.cancelOrder\(/u);
+  assert.equal(productionSource.match(/formalExecutionRuntimes,/gu)?.length, 3);
   assert.match(
     productionSource,
     /registerArbitrageExecutionCommandRoutes\(app, arbitrageExecutionCommand\)/u,
   );
   assert.match(productionSource, /registerFundingArbitrageRoutes\(app, fundingOpportunityQuery\)/u);
+});
+
+test("production configuration keeps the registered OKX runtime dormant", () => {
+  assert.match(productionEnvironment, /^OKX_LIVE_TRADING_ENABLED=false$/mu);
+  assert.match(productionEnvironment, /^OKX_KILL_SWITCH=true$/mu);
+  assert.match(productionEnvironment, /^LIVE_TRADING_ENABLED=false$/mu);
+  assert.match(productionEnvironment, /^BINANCE_KILL_SWITCH=true$/mu);
+  assert.equal(productionEnvironment.match(/^OKX_LIVE_TRADING_ENABLED=/gmu)?.length, 1);
+  assert.equal(productionEnvironment.match(/^OKX_KILL_SWITCH=/gmu)?.length, 1);
 });
 
 test("the removed manual endpoint cannot call a mutation while read-only funding and formal routes remain", async () => {

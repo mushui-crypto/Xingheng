@@ -10,7 +10,7 @@ import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
 import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
-import type { OkxExecutionOrderReference } from "./OkxExecutionOrderReferenceStore";
+import { InMemoryOkxExecutionOrderReferenceStore } from "./OkxExecutionOrderReferenceStore";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -40,7 +40,7 @@ test("OKX perpetual single-leg long and short validation keeps the execution cha
       const runtime = new OkxIntentExecutionRuntime(
         new OkxRuntimeRegistry(service),
         recordStore,
-        new InMemoryOrderReferenceStore(),
+        new InMemoryOkxExecutionOrderReferenceStore(),
         {
           clock: () => now,
           createExecutionId: () => `execution-${scenario.scenarioId}-${++executionSequence}`,
@@ -139,6 +139,8 @@ class StatefulOkxPerpExecutionService {
     return { accountId: this.accountId };
   }
 
+  validateExecutionProviderIdentity() {}
+
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
     const ordId = String(++this.ordSeq);
@@ -233,18 +235,6 @@ class InMemoryExecutionRecordStore implements ExecutionRecordStore {
 
   loadForUser(userId: string, executionId: string) {
     return this.records.get(key(userId, executionId)) ?? null;
-  }
-}
-
-class InMemoryOrderReferenceStore {
-  private readonly refs = new Map<string, OkxExecutionOrderReference>();
-
-  async loadForUser(userId: string, executionId: string) {
-    return this.refs.get(key(userId, executionId)) ?? null;
-  }
-
-  async create(reference: OkxExecutionOrderReference) {
-    this.refs.set(key(reference.userId, reference.executionId), reference);
   }
 }
 

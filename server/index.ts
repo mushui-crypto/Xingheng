@@ -43,6 +43,10 @@ import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/Bin
 import { BinanceSpotOpeningAttributionSource } from "./modules/arbitrage-execution/BinanceSpotOpeningAttributionSource";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
+  FormalExecutionRuntimeRegistry,
+  formalExecutionRuntime,
+} from "./modules/arbitrage-execution/FormalExecutionRuntimeRegistry";
+import {
   createDefaultFundingOpportunityReadVenues,
   createDefaultFundingOpportunitySource,
 } from "./modules/cex/funding-arbitrage/createDefaultFundingOpportunitySource";
@@ -60,12 +64,18 @@ import {
 } from "./modules/account-read/AccountUsdtValuationService";
 import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig";
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
+import { SqliteExecutionOrderReferenceStore } from "./modules/cex/ExecutionOrderReferenceStore";
 import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
 import { ArbitrageInstanceQueryService } from "./modules/cex/arbitrage-instance/ArbitrageInstanceQueryService";
 import { createDefaultArbitragePositionVerificationService } from "./modules/cex/arbitrage-instance/createDefaultArbitragePositionVerificationService";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialService } from "./modules/credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeCredentialStore";
+import { OkxFormalArbitrageExecutionRuntime } from "./modules/okx/OkxFormalArbitrageExecutionRuntime";
+import { PersistentOkxExecutionOrderReferenceStore } from "./modules/okx/OkxExecutionOrderReferenceStore";
+import { createOkxInstrumentQuantityRulesSource } from "./modules/okx/OkxInstrumentQuantityRulesSource";
+import { OkxIntentExecutionRuntime } from "./modules/okx/OkxIntentExecutionRuntime";
+import { OkxIntentExecutionServiceRegistry } from "./modules/okx/OkxIntentExecutionServiceRegistry";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -183,6 +193,9 @@ const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new OkxAccountReadProviderFactory(),
 ], new AccountUsdtValuationService(new ArbitrageDashboardUsdtSpotPriceSource(arbitrageDashboard)));
 const executionRecordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
+const executionOrderReferenceStore = new SqliteExecutionOrderReferenceStore({
+  dbPath: process.env.TRADING_DB_PATH,
+});
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
 const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
@@ -196,12 +209,23 @@ const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
   executionRecordStore,
 );
 const binanceFormalArbitrageExecutionRuntime = new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime);
+const okxIntentExecutionServices = new OkxIntentExecutionServiceRegistry(userExchangeCredentials);
+const okxExecutionRuntime = new OkxIntentExecutionRuntime(
+  okxIntentExecutionServices,
+  executionRecordStore,
+  new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
+  { quantityRulesSource: createOkxInstrumentQuantityRulesSource() },
+);
+const okxFormalArbitrageExecutionRuntime = new OkxFormalArbitrageExecutionRuntime(okxExecutionRuntime);
+const formalExecutionRuntimes = new FormalExecutionRuntimeRegistry()
+  .register(formalExecutionRuntime("binance", binanceFormalArbitrageExecutionRuntime));
+formalExecutionRuntimes.register(formalExecutionRuntime("okx", okxFormalArbitrageExecutionRuntime));
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,
   userExchangeCredentials,
   executionRecordStore,
-  binanceFormalArbitrageExecutionRuntime,
+  formalExecutionRuntimes,
 );
 const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageInstances,
@@ -209,12 +233,12 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageExecutionPlanningContexts,
   new BinanceSpotCloseBalanceSource(binancePersonalTrading),
   new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
-  binanceFormalArbitrageExecutionRuntime,
+  formalExecutionRuntimes,
 );
 const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   arbitrageInstances,
   executionRecordStore,
-  binanceExecutionRuntime,
+  formalExecutionRuntimes,
   arbitrageExecutionCommand,
 );
 const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {

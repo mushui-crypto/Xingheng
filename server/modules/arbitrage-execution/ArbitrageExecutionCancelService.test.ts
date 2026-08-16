@@ -7,6 +7,10 @@ import {
   ArbitrageExecutionCancelError,
   ArbitrageExecutionCancelService,
 } from "./ArbitrageExecutionCancelService";
+import {
+  FormalExecutionRuntimeRegistry,
+  formalExecutionRuntime,
+} from "./FormalExecutionRuntimeRegistry";
 
 const now = 1_900_000_000_000;
 
@@ -144,6 +148,8 @@ function setup(options: Readonly<{
   const cancelCalls: Array<{ userId: string; executionId: string }> = [];
   const reconcileCalls: Array<{ userId: string; arbitrageId: string; legId: string }> = [];
   const runtime = {
+    async execute() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
     async cancel(userId: string, executionId: string) {
       cancelCalls.push({ userId, executionId });
       if (options.cancelError) throw options.cancelError;
@@ -151,6 +157,8 @@ function setup(options: Readonly<{
       return { executionRecord: { ...record, status: "FAILED" }, observation: { state: "CANCELLED", observedAt: now + 1 } } as any;
     },
   };
+  const runtimes = new FormalExecutionRuntimeRegistry()
+    .register(formalExecutionRuntime("binance", runtime));
   const reconciler = {
     async reconcileLeg(userId: string, input: unknown) {
       const request = input as { arbitrageId: string; legId: string };
@@ -176,7 +184,7 @@ function setup(options: Readonly<{
   const service = new ArbitrageExecutionCancelService(
     { get: (userId) => userId === "user-a" ? current : null },
     { loadForUser: (userId, executionId) => !options.missingRecord && userId === "user-a" && executionId === "execution-1" ? record : null },
-    runtime,
+    runtimes,
     reconciler as any,
   );
   return { service, cancelCalls, reconcileCalls };

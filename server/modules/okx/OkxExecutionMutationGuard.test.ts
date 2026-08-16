@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { ExecutionMutationSafetyGuard, ExecutionMutationSafetyError } from "../cex/ExecutionMutationSafetyGuard";
+import {
+  ExecutionMutationSafetyGuard,
+  ExecutionMutationSafetyError,
+  executionMutationSafetyConfigFromEnvironment,
+} from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { OkxIntentExecutionService } from "./OkxIntentExecutionService";
 import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
@@ -83,6 +87,138 @@ test("enabled gates allow OKX placeOrder and cancelOrder to reach a fake provide
   assert.equal(client.cancelCalls, 1);
 });
 
+test("unconfigured or closed OKX switches block placeOrder without inheriting open Binance switches", async (t) => {
+  for (const fixture of [
+    {
+      name: "OKX switches unconfigured",
+      environment: { LIVE_TRADING_ENABLED: "true", BINANCE_KILL_SWITCH: "false" },
+    },
+    {
+      name: "OKX live disabled",
+      environment: {
+        LIVE_TRADING_ENABLED: "true",
+        BINANCE_KILL_SWITCH: "false",
+        OKX_LIVE_TRADING_ENABLED: "false",
+        OKX_KILL_SWITCH: "false",
+      },
+    },
+    {
+      name: "OKX kill switch active",
+      environment: {
+        LIVE_TRADING_ENABLED: "true",
+        BINANCE_KILL_SWITCH: "false",
+        OKX_LIVE_TRADING_ENABLED: "true",
+        OKX_KILL_SWITCH: "true",
+      },
+    },
+  ] as const) {
+    await t.test(fixture.name, async () => {
+      const client = new FakeClient();
+      const service = serviceWithEnvironment(client, fixture.environment);
+
+      await assert.rejects(
+        () => service.execute(intent()),
+        (error: unknown) => error instanceof ExecutionMutationSafetyError
+          && /OKX_(?:LIVE_TRADING_ENABLED|KILL_SWITCH)/u.test(error.message),
+      );
+      assert.equal(client.placeCalls, 0);
+    });
+  }
+});
+
+test("open OKX switches allow fake mutation regardless of Binance switch state", async (t) => {
+  for (const binance of [
+    { LIVE_TRADING_ENABLED: "false", BINANCE_KILL_SWITCH: "true" },
+    { LIVE_TRADING_ENABLED: "true", BINANCE_KILL_SWITCH: "false" },
+  ] as const) {
+    await t.test(`Binance ${binance.LIVE_TRADING_ENABLED}/${binance.BINANCE_KILL_SWITCH}`, async () => {
+      const client = new FakeClient();
+      const service = serviceWithEnvironment(client, {
+        ...binance,
+        OKX_LIVE_TRADING_ENABLED: "true",
+        OKX_KILL_SWITCH: "false",
+      });
+
+      await service.execute(intent());
+      assert.equal(client.placeCalls, 1);
+    });
+  }
+});
+
+test("changing OKX switches does not change the Binance safety state", async () => {
+  const context = {
+    venue: "binance",
+    operation: "placeOrder",
+    userId: "user-1",
+    accountId: "binance:account-1",
+    instrumentId: "DOGE-USDT-PERP",
+    providerInstrumentId: "DOGEUSDT",
+  } as const;
+
+  for (const binance of [
+    {
+      environment: { LIVE_TRADING_ENABLED: "true", BINANCE_KILL_SWITCH: "false" },
+      allowed: true,
+    },
+    {
+      environment: { LIVE_TRADING_ENABLED: "false", BINANCE_KILL_SWITCH: "true" },
+      allowed: false,
+    },
+  ] as const) {
+    for (const okx of [
+      { OKX_LIVE_TRADING_ENABLED: "false", OKX_KILL_SWITCH: "true" },
+      { OKX_LIVE_TRADING_ENABLED: "true", OKX_KILL_SWITCH: "false" },
+    ] as const) {
+      const guard = guardForEnvironment({ ...binance.environment, ...okx });
+      assert.deepEqual(guard.status("binance"), {
+        liveTradingEnabled: binance.allowed,
+        killSwitchActive: !binance.allowed,
+      });
+      if (binance.allowed) {
+        await guard.assertAllowed(context);
+      } else {
+        await assert.rejects(() => guard.assertAllowed(context), ExecutionMutationSafetyError);
+      }
+    }
+  }
+});
+
+test("OKX cancelOrder is blocked and allowed by the same independent OKX switches", async () => {
+  const executionIntent = intent();
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP",
+    instId: "DOGE-USDT-SWAP",
+    ordId: "9001",
+    clOrdId: "sxokxidentity000000000000000000",
+  } as const;
+  const context = {
+    userId: executionIntent.userId,
+    accountId: executionIntent.accountId,
+    instrumentId: executionIntent.instrumentId,
+  };
+  const blockedClient = new FakeClient();
+  const blocked = serviceWithEnvironment(blockedClient, {
+    LIVE_TRADING_ENABLED: "true",
+    BINANCE_KILL_SWITCH: "false",
+    OKX_LIVE_TRADING_ENABLED: "true",
+    OKX_KILL_SWITCH: "true",
+  });
+
+  await assert.rejects(() => blocked.cancel(lookup, context), (error: unknown) =>
+    error instanceof ExecutionMutationSafetyError && error.category === "kill_switch_active");
+  assert.equal(blockedClient.cancelCalls, 0);
+
+  const allowedClient = new FakeClient();
+  const allowed = serviceWithEnvironment(allowedClient, {
+    LIVE_TRADING_ENABLED: "false",
+    BINANCE_KILL_SWITCH: "true",
+    OKX_LIVE_TRADING_ENABLED: "true",
+    OKX_KILL_SWITCH: "false",
+  });
+  await allowed.cancel(lookup, context);
+  assert.equal(allowedClient.cancelCalls, 1);
+});
+
 class FakeClient {
   placeCalls = 0;
   cancelCalls = 0;
@@ -128,4 +264,21 @@ function intent() {
     createdAt: now,
     expiresAt: now + 60_000,
   });
+}
+
+function serviceWithEnvironment(
+  client: FakeClient,
+  environment: Readonly<Record<string, string | undefined>>,
+) {
+  return new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
+    mutationSafetyGuard: guardForEnvironment(environment),
+  });
+}
+
+function guardForEnvironment(environment: Readonly<Record<string, string | undefined>>) {
+  return new ExecutionMutationSafetyGuard(
+    executionMutationSafetyConfigFromEnvironment(environment),
+  );
 }

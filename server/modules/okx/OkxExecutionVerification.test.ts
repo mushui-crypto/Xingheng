@@ -160,6 +160,8 @@ class FakeOkxVerificationService {
     return { accountId: this.accountId };
   }
 
+  validateExecutionProviderIdentity() {}
+
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
     return { instId: request.instId, ordId: "9001", clOrdId: request.clOrdId };

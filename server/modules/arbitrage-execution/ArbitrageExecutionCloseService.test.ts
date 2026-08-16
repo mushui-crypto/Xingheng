@@ -8,7 +8,11 @@ import { managedCurrentQuantity } from "../cex/arbitrage-instance/ArbitrageInsta
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import { createTradingRules } from "../cex/TradingRules";
-import type { FormalArbitrageExecutionRuntime } from "./ArbitrageExecutionCommandService";
+import type { FormalExecutionRuntime } from "./FormalExecutionRuntime";
+import {
+  FormalExecutionRuntimeRegistry,
+  formalExecutionRuntime,
+} from "./FormalExecutionRuntimeRegistry";
 import {
   ArbitrageExecutionCloseError,
   ArbitrageExecutionCloseService,
@@ -363,6 +367,8 @@ function setup(
   openLeg(store, arbitrageId, "short-leg", quantity, now - 14);
 
   const runtime = new FakeRuntime();
+  const runtimes = new FormalExecutionRuntimeRegistry()
+    .register(formalExecutionRuntime("binance", runtime));
   const fixture = {
     verificationStatus: "MATCHED" as "MATCHED" | "MISMATCH" | "UNKNOWN",
     actualQuantity: quantity as string | null,
@@ -430,7 +436,7 @@ function setup(
         return fixture.attributableBaseQuantity;
       },
     },
-    runtime,
+    runtimes,
     { clock: () => closeClock += 10, createIntentId: (_user, _arbitrage, leg, command) => `close-${leg}-${command}` },
   );
   return Object.assign(fixture, { service, store, runtime, arbitrageId });
@@ -466,7 +472,7 @@ function request(legId: string, quantity: string, commandId = "close-command") {
   };
 }
 
-class FakeRuntime implements FormalArbitrageExecutionRuntime {
+class FakeRuntime implements FormalExecutionRuntime {
   readonly calls: import("../cex/ExecutionIntent").ExecutionIntent[] = [];
   resultStatus: ExecutionRecord["status"] = "CONFIRMED";
   confirmedQuantity: string | null = "0.5";
@@ -491,7 +497,11 @@ class FakeRuntime implements FormalArbitrageExecutionRuntime {
     };
   }
 
-  async reconcile(): ReturnType<FormalArbitrageExecutionRuntime["reconcile"]> {
+  async reconcile(): ReturnType<FormalExecutionRuntime["reconcile"]> {
+    throw new Error("not used");
+  }
+
+  async cancel(): ReturnType<FormalExecutionRuntime["cancel"]> {
     throw new Error("not used");
   }
 }

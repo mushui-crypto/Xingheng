@@ -42,6 +42,10 @@ export type SaveUserExchangeCredentialInput = UserExchangeCredentialSecret & {
   verifiedAt?: number;
 };
 
+export type ReplaceUserExchangeCredentialInput = SaveUserExchangeCredentialInput & {
+  expectedAccountId: string;
+};
+
 type CredentialRow = UserExchangeCredentialSummary & Omit<WrappedCredentialDataKey, "provider"> & {
   keyProvider: string;
   envelopeVersion: number;
@@ -130,6 +134,85 @@ export class UserExchangeCredentialStore {
             "This user already has a credential for the exchange.",
           );
         }
+        if (isAccountBindingConflict(error)) {
+          throw new UserExchangeCredentialStoreError(
+            "credential_account_already_bound",
+            "This exchange account is already bound to another user.",
+          );
+        }
+        throw new UserExchangeCredentialStoreError("credential_storage_unavailable", "Credential storage is unavailable.");
+      }
+      return summary;
+    } finally {
+      plaintext.fill(0);
+      dataKey.plaintextDek.fill(0);
+      ciphertext.fill(0);
+      nonce.fill(0);
+    }
+  }
+
+  async replace(input: ReplaceUserExchangeCredentialInput): Promise<UserExchangeCredentialSummary> {
+    const normalized = normalizeSaveInput(input);
+    const expectedAccountId = requiredIdentifier(input.expectedAccountId, "expectedAccountId");
+    const existing = this.findRow(normalized.userId, normalized.venue);
+    if (!existing) {
+      throw new UserExchangeCredentialStoreError("credential_not_configured", "Exchange credential is not configured.");
+    }
+    if (existing.accountId !== expectedAccountId) {
+      throw new UserExchangeCredentialStoreError(
+        "credential_rebind_conflict",
+        "Credential identity changed before the replacement could be applied.",
+      );
+    }
+    if (existing.environment !== this.environment) {
+      throw new UserExchangeCredentialStoreError("credential_environment_mismatch", "Credential belongs to a different environment.");
+    }
+
+    const context = this.context(normalized.userId, normalized.venue, normalized.accountId);
+    const dataKey = await this.keyProvider.createDataKey(context);
+    const nonce = randomBytes(12);
+    const plaintext = Buffer.from(JSON.stringify(secretPayload(normalized)), "utf8");
+    let ciphertext = Buffer.alloc(0);
+    try {
+      const cipher = createCipheriv("aes-256-gcm", dataKey.plaintextDek, nonce);
+      cipher.setAAD(canonicalCredentialAad(context));
+      ciphertext = Buffer.concat([cipher.update(plaintext), cipher.final()]);
+      const now = this.now();
+      const summary: UserExchangeCredentialSummary = {
+        userId: normalized.userId,
+        venue: normalized.venue,
+        accountId: normalized.accountId,
+        accountFingerprint: normalized.accountFingerprint,
+        maskedApiKey: maskApiKey(normalized.apiKey),
+        environment: this.environment,
+        permissions: normalized.permissions,
+        lastVerifiedAt: normalized.verifiedAt ?? now,
+        createdAt: Number(existing.createdAt),
+        updatedAt: now,
+      };
+      try {
+        const result = this.db.prepare(`UPDATE user_exchange_credentials SET
+          accountId = ?, accountFingerprint = ?, maskedApiKey = ?, environment = ?, permissionsJson = ?,
+          envelopeVersion = ?, algorithm = 'AES-256-GCM', keyProvider = ?, keyName = ?,
+          wrapReference = ?, wrappedDek = ?, nonce = ?, authTag = ?, ciphertext = ?, aadSchema = ?,
+          lastVerifiedAt = ?, updatedAt = ?
+          WHERE userId = ? AND venue = ? AND accountId = ?`)
+          .run(
+            summary.accountId, summary.accountFingerprint, summary.maskedApiKey, summary.environment,
+            JSON.stringify(summary.permissions), USER_EXCHANGE_CREDENTIAL_ENVELOPE_VERSION,
+            dataKey.provider, dataKey.keyName, dataKey.wrapReference, dataKey.wrappedDek,
+            nonce.toString("base64url"), cipher.getAuthTag().toString("base64url"),
+            ciphertext.toString("base64url"), USER_EXCHANGE_CREDENTIAL_AAD_SCHEMA,
+            summary.lastVerifiedAt, summary.updatedAt, summary.userId, summary.venue, expectedAccountId,
+          );
+        if (result.changes !== 1) {
+          throw new UserExchangeCredentialStoreError(
+            "credential_rebind_conflict",
+            "Credential identity changed before the replacement could be applied.",
+          );
+        }
+      } catch (error) {
+        if (error instanceof UserExchangeCredentialStoreError) throw error;
         if (isAccountBindingConflict(error)) {
           throw new UserExchangeCredentialStoreError(
             "credential_account_already_bound",

@@ -66,7 +66,7 @@ test("credential API binds input to the authenticated user and never echoes Secr
   }
 });
 
-test("credential API accepts credential-only venues with passphrase without echoing secrets", async () => {
+test("credential API accepts OKX passphrase without echoing secrets", async () => {
   const captured: Array<{ userId: string; venue: string; input: unknown }> = [];
   const app = express();
   app.use(express.json());
@@ -133,6 +133,45 @@ test("credential API rejects a request without an authenticated user", async () 
   }
 });
 
+test("credential API exposes an authenticated OKX controlled rebind operation", async () => {
+  const users: string[] = [];
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, {
+    rebindOkx: async (userId: string) => {
+      users.push(userId);
+      return {
+        venue: "okx",
+        configured: true,
+        accountId: "okx:0123456789abcdef",
+        permissions: { providerVerified: true, executionEnabled: false },
+      };
+    },
+  } as never);
+  const server = app.listen(0, "127.0.0.1");
+
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx/rebind`, {
+      method: "POST",
+    });
+    const payload = await response.json() as {
+      accountId: string;
+      permissions: Record<string, boolean>;
+    };
+    assert.equal(response.status, 200);
+    assert.deepEqual(users, ["session-user"]);
+    assert.equal(payload.accountId, "okx:0123456789abcdef");
+    assert.equal(payload.permissions.executionEnabled, false);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("credential API returns a stable KMS category without echoing credential input", async () => {
   const app = express();
   app.use(express.json());
@@ -178,7 +217,27 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
   const dbPath = join(directory, "credentials.sqlite");
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new UserExchangeCredentialStore({ dbPath, environment: "test", keyProvider });
-  const service = new UserExchangeCredentialService(store);
+  const service = new UserExchangeCredentialService(store, {
+    okxClientFactory: () => ({
+      validateAccess: async () => ({
+        accountId: "okx:0123456789abcdef",
+        accountFingerprint: "0123456789abcdef",
+        uidHash: `0123456789abcdef${"0".repeat(48)}`,
+        accountLevel: "3",
+        permissions: {
+          read: true,
+          spotTrade: true,
+          contractTrade: true,
+          withdraw: false,
+          ipRestricted: true,
+          accountLevelSupported: true,
+          positionModeSupported: true,
+          providerVerified: true,
+          executionEnabled: true,
+        },
+      }),
+    }),
+  });
   const app = express();
   app.use(express.json());
   app.use((request, _response, next) => {
@@ -216,9 +275,15 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
       };
       assert.equal(payload.venue, venue);
       assert.equal(payload.configured, true);
-      assert.match(payload.accountId, new RegExp(`^${venue}:credential-only:`));
-      assert.equal(payload.permissions.executionEnabled, false);
-      assert.match(payload.message, /Private provider validation and execution are not enabled/u);
+      if (venue === "okx") {
+        assert.equal(payload.accountId, "okx:0123456789abcdef");
+        assert.equal(payload.permissions.executionEnabled, true);
+        assert.match(payload.message, /Provider-verified/u);
+      } else {
+        assert.match(payload.accountId, new RegExp(`^${venue}:credential-only:`));
+        assert.equal(payload.permissions.executionEnabled, false);
+        assert.match(payload.message, /Private provider validation and execution are not enabled/u);
+      }
 
       const databaseBytes = readFileSync(dbPath).toString("utf8");
       assert.equal(databaseBytes.includes(secret), false);
@@ -229,6 +294,85 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
         ...(venue === "bybit" ? {} : { passphrase }),
       });
     }
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("OKX rebind decrypts a legacy envelope and atomically saves Provider-derived identity", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "okx-credential-rebind-route-"));
+  const dbPath = join(directory, "credentials.sqlite");
+  const keyProvider = new FakeCredentialKeyProvider();
+  const store = new UserExchangeCredentialStore({ dbPath, environment: "test", keyProvider });
+  await store.save({
+    userId: "session-user",
+    venue: "okx",
+    accountId: "okx:credential-only:0123456789abcdef0123",
+    accountFingerprint: "OKX-LEGACY",
+    apiKey: "okx-api-key-rebind-001",
+    apiSecret: "okx-secret-rebind-001",
+    passphrase: "okx-passphrase-rebind-001",
+    permissions: { providerVerified: false, executionEnabled: false },
+  });
+  let providerReads = 0;
+  const service = new UserExchangeCredentialService(store, {
+    okxClientFactory: () => ({
+      validateAccess: async () => {
+        providerReads += 1;
+        return {
+          accountId: "okx:0123456789abcdef",
+          accountFingerprint: "0123456789abcdef",
+          uidHash: `0123456789abcdef${"0".repeat(48)}`,
+          accountLevel: "3",
+          permissions: {
+            read: true,
+            spotTrade: true,
+            contractTrade: true,
+            withdraw: false,
+            ipRestricted: true,
+            accountLevelSupported: true,
+            positionModeSupported: true,
+            providerVerified: true,
+            executionEnabled: true,
+          },
+        };
+      },
+    }),
+  });
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, service);
+  const server = app.listen(0, "127.0.0.1");
+
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx/rebind`, {
+      method: "POST",
+    });
+    const payload = await response.json() as {
+      accountId: string;
+      permissions: Record<string, boolean>;
+    };
+
+    assert.equal(response.status, 200);
+    assert.equal(payload.accountId, "okx:0123456789abcdef");
+    assert.equal(payload.permissions.providerVerified, true);
+    assert.equal(payload.permissions.executionEnabled, false);
+    assert.equal(providerReads, 1);
+    assert.deepEqual(await store.loadForExecution("session-user", "okx"), {
+      apiKey: "okx-api-key-rebind-001",
+      apiSecret: "okx-secret-rebind-001",
+      passphrase: "okx-passphrase-rebind-001",
+    });
+    const databaseBytes = readFileSync(dbPath).toString("utf8");
+    assert.equal(databaseBytes.includes("okx-secret-rebind-001"), false);
+    assert.equal(databaseBytes.includes("okx-passphrase-rebind-001"), false);
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     store.close();

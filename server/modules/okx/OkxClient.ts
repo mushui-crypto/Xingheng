@@ -1,5 +1,6 @@
 import { createHash, createHmac } from "node:crypto";
 import type {
+  OkxAccountAccess,
   OkxAccountIdentity,
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -113,16 +114,43 @@ export class OkxClient {
   }
 
   async getAccountIdentity(): Promise<OkxAccountIdentity> {
-    const row = await this.signedRequest("GET", "/api/v5/account/config")
-      .then((payload) => firstRow(payload.data, "OKX account config response"));
-    const uid = exactString(row.uid, "OKX uid");
-    const uidHash = createHash("sha256").update(`okx:${uid}`).digest("hex");
+    return accountIdentity(await this.getAccountConfig());
+  }
+
+  async validateAccess(): Promise<OkxAccountAccess> {
+    const row = await this.getAccountConfig();
+    const identity = accountIdentity(row);
+    const providerPermissions = permissionSet(row.perm);
+    const accountLevelSupported = identity.accountLevel === "2"
+      || identity.accountLevel === "3"
+      || identity.accountLevel === "4";
+    const positionModeSupported = exactString(row.posMode, "OKX position mode") === "net_mode";
+    const read = providerPermissions.has("read_only");
+    const spotTrade = providerPermissions.has("trade");
+    const contractTrade = spotTrade && accountLevelSupported;
+    const withdraw = providerPermissions.has("withdraw");
+    const ipRestricted = Boolean(optionalString(row.ip));
+    const executionEnabled = read && contractTrade && !withdraw
+      && ipRestricted && positionModeSupported;
     return Object.freeze({
-      accountId: `okx:${uidHash.slice(0, 16)}`,
-      accountFingerprint: uidHash.slice(0, 16),
-      uidHash,
-      accountLevel: exactString(row.acctLv, "OKX acctLv"),
+      ...identity,
+      permissions: Object.freeze({
+        read,
+        spotTrade,
+        contractTrade,
+        withdraw,
+        ipRestricted,
+        accountLevelSupported,
+        positionModeSupported,
+        providerVerified: true,
+        executionEnabled,
+      }),
     });
+  }
+
+  private async getAccountConfig() {
+    return this.signedRequest("GET", "/api/v5/account/config")
+      .then((payload) => firstRow(payload.data, "OKX account config response"));
   }
 
   private async signedRequest(
@@ -208,6 +236,31 @@ export function mapOkxOrderStatus(rawState: string): Readonly<{
   if (rawState === "partially_filled") return { status: "PENDING_CONFIRMATION", reason: null };
   if (rawState === "canceled" || rawState === "cancelled" || rawState === "rejected") return { status: "FAILED", reason: null };
   return { status: "UNKNOWN", reason: rawState ? `unmapped OKX order state: ${rawState}` : "missing OKX order state" };
+}
+
+function accountIdentity(row: Record<string, unknown>): OkxAccountIdentity {
+  const uid = exactString(row.uid, "OKX uid");
+  const uidHash = createHash("sha256").update(`okx:${uid}`).digest("hex");
+  return Object.freeze({
+    accountId: `okx:${uidHash.slice(0, 16)}`,
+    accountFingerprint: uidHash.slice(0, 16),
+    uidHash,
+    accountLevel: exactString(row.acctLv, "OKX acctLv"),
+  });
+}
+
+function permissionSet(value: unknown) {
+  if (typeof value !== "string" || value.length > 200) {
+    throw invalid("OKX API permissions are invalid.");
+  }
+  const text = value.trim();
+  if (!text) return new Set<string>();
+  const permissions = text.split(",").map((permission) => permission.trim());
+  const supported = new Set(["read_only", "trade", "withdraw"]);
+  if (permissions.some((permission) => !permission || !supported.has(permission))) {
+    throw invalid("OKX API permissions contain an unsupported value.");
+  }
+  return new Set(permissions);
 }
 
 function parseOrder(row: Record<string, unknown>, expected: Readonly<{ instId: string; ordId?: string; clOrdId?: string }>): OkxProviderOrder {

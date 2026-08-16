@@ -1,3 +1,8 @@
+import type {
+  ExecutionOrderReferenceAssociation,
+  ExecutionOrderReferenceStore,
+} from "../cex/ExecutionOrderReferenceStore";
+
 export type OkxExecutionOrderReference = Readonly<{
   executionId: string;
   intentId: string;
@@ -11,9 +16,26 @@ export type OkxExecutionOrderReference = Readonly<{
   updatedAt: number;
 }>;
 
+export type OkxExecutionOrderRecoveryReference = Readonly<{
+  executionId: string;
+  intentId: string;
+  userId: string;
+  accountId: string;
+  instrumentId: string;
+  instId: string;
+  clOrdId: string;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
 export interface OkxExecutionOrderReferenceStore {
   create(reference: OkxExecutionOrderReference): Promise<void> | void;
+  createRecovery(reference: OkxExecutionOrderRecoveryReference): Promise<void> | void;
   loadForUser(userId: string, executionId: string): Promise<OkxExecutionOrderReference | null> | OkxExecutionOrderReference | null;
+  loadRecoveryForUser(
+    userId: string,
+    executionId: string,
+  ): Promise<OkxExecutionOrderRecoveryReference | null> | OkxExecutionOrderRecoveryReference | null;
 }
 
 export function createOkxExecutionOrderReference(input: unknown): OkxExecutionOrderReference {
@@ -48,23 +70,223 @@ export function createOkxExecutionOrderReference(input: unknown): OkxExecutionOr
   });
 }
 
+export function createOkxExecutionOrderRecoveryReference(
+  input: unknown,
+): OkxExecutionOrderRecoveryReference {
+  const value = object(input, "OkxExecutionOrderRecoveryReference");
+  assertExactKeys(value, [
+    "executionId",
+    "intentId",
+    "userId",
+    "accountId",
+    "instrumentId",
+    "instId",
+    "clOrdId",
+    "createdAt",
+    "updatedAt",
+  ], "OkxExecutionOrderRecoveryReference");
+  const createdAt = timestamp(value.createdAt, "createdAt");
+  const updatedAt = timestamp(value.updatedAt, "updatedAt");
+  if (updatedAt < createdAt) throw new Error("updatedAt must be at or after createdAt.");
+  return Object.freeze({
+    executionId: identifier(value.executionId, "executionId"),
+    intentId: identifier(value.intentId, "intentId"),
+    userId: identifier(value.userId, "userId"),
+    accountId: identifier(value.accountId, "accountId"),
+    instrumentId: canonicalInstrumentId(value.instrumentId),
+    instId: okxInstId(value.instId),
+    clOrdId: okxClOrdId(value.clOrdId),
+    createdAt,
+    updatedAt,
+  });
+}
+
 export class InMemoryOkxExecutionOrderReferenceStore implements OkxExecutionOrderReferenceStore {
-  private readonly references = new Map<string, OkxExecutionOrderReference>();
+  private readonly references = new Map<string, OkxStoredReference>();
 
   create(reference: OkxExecutionOrderReference) {
     const normalized = createOkxExecutionOrderReference(reference);
     const key = referenceKey(normalized.userId, normalized.executionId);
-    if (this.references.has(key)) throw new Error("OKX execution order reference already exists.");
-    this.references.set(key, normalized);
+    const existing = this.references.get(key);
+    if (existing?.kind === "complete") throw new Error("OKX execution order reference already exists.");
+    if (existing) assertRecoveryMatchesReference(existing.value, normalized);
+    this.references.set(key, { kind: "complete", value: normalized });
+  }
+
+  createRecovery(reference: OkxExecutionOrderRecoveryReference) {
+    const normalized = createOkxExecutionOrderRecoveryReference(reference);
+    const key = referenceKey(normalized.userId, normalized.executionId);
+    if (this.references.has(key)) throw new Error("OKX execution order recovery reference already exists.");
+    this.references.set(key, { kind: "recovery", value: normalized });
   }
 
   loadForUser(userId: string, executionId: string) {
-    return this.references.get(referenceKey(identifier(userId, "userId"), identifier(executionId, "executionId"))) ?? null;
+    const stored = this.references.get(referenceKey(identifier(userId, "userId"), identifier(executionId, "executionId")));
+    return stored?.kind === "complete" ? stored.value : null;
+  }
+
+  loadRecoveryForUser(userId: string, executionId: string) {
+    const stored = this.references.get(referenceKey(identifier(userId, "userId"), identifier(executionId, "executionId")));
+    return stored?.kind === "recovery" ? stored.value : null;
   }
 }
 
+export class PersistentOkxExecutionOrderReferenceStore implements OkxExecutionOrderReferenceStore {
+  constructor(private readonly references: ExecutionOrderReferenceStore) {}
+
+  async create(reference: OkxExecutionOrderReference) {
+    const normalized = createOkxExecutionOrderReference(reference);
+    const association = completeAssociation(normalized);
+    const existing = await this.references.loadForUser(normalized.userId, normalized.executionId, "okx");
+    if (!existing) {
+      await this.references.create(association);
+      return;
+    }
+    const stored = parseStoredPayload(existing.referencePayload);
+    if (stored.kind === "complete") throw new Error("OKX execution order reference already exists.");
+    const recovery = recoveryFromAssociation(existing, stored.payload);
+    assertRecoveryMatchesReference(recovery, normalized);
+    await this.references.replace(association);
+  }
+
+  async createRecovery(reference: OkxExecutionOrderRecoveryReference) {
+    const normalized = createOkxExecutionOrderRecoveryReference(reference);
+    await this.references.create({
+      executionId: normalized.executionId,
+      userId: normalized.userId,
+      venue: "okx",
+      referencePayload: JSON.stringify({
+        recovery: "clOrdId",
+        intentId: normalized.intentId,
+        accountId: normalized.accountId,
+        instrumentId: normalized.instrumentId,
+        instId: normalized.instId,
+        clOrdId: normalized.clOrdId,
+      }),
+      createdAt: normalized.createdAt,
+      updatedAt: normalized.updatedAt,
+    });
+  }
+
+  async loadForUser(userId: string, executionId: string) {
+    const association = await this.references.loadForUser(userId, executionId, "okx");
+    if (!association) return null;
+    const stored = parseStoredPayload(association.referencePayload);
+    return stored.kind === "complete" ? completeFromAssociation(association, stored.payload) : null;
+  }
+
+  async loadRecoveryForUser(userId: string, executionId: string) {
+    const association = await this.references.loadForUser(userId, executionId, "okx");
+    if (!association) return null;
+    const stored = parseStoredPayload(association.referencePayload);
+    return stored.kind === "recovery" ? recoveryFromAssociation(association, stored.payload) : null;
+  }
+}
+
+type OkxStoredReference =
+  | Readonly<{ kind: "complete"; value: OkxExecutionOrderReference }>
+  | Readonly<{ kind: "recovery"; value: OkxExecutionOrderRecoveryReference }>;
+
 function referenceKey(userId: string, executionId: string) {
   return `${userId}\u0000${executionId}`;
+}
+
+function completeAssociation(
+  reference: OkxExecutionOrderReference,
+): ExecutionOrderReferenceAssociation {
+  return {
+    executionId: reference.executionId,
+    userId: reference.userId,
+    venue: "okx",
+    referencePayload: JSON.stringify({
+      intentId: reference.intentId,
+      accountId: reference.accountId,
+      instrumentId: reference.instrumentId,
+      instId: reference.instId,
+      ordId: reference.ordId,
+      clOrdId: reference.clOrdId,
+    }),
+    createdAt: reference.createdAt,
+    updatedAt: reference.updatedAt,
+  };
+}
+
+function parseStoredPayload(input: string) {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(input);
+  } catch {
+    throw new Error("Persisted OKX execution order reference is invalid.");
+  }
+  const value = object(parsed, "Persisted OKX execution order reference");
+  if (value.recovery !== undefined) {
+    assertExactKeys(value, [
+      "recovery",
+      "intentId",
+      "accountId",
+      "instrumentId",
+      "instId",
+      "clOrdId",
+    ], "Persisted OKX execution order recovery reference");
+    if (value.recovery !== "clOrdId") {
+      throw new Error("Persisted OKX execution order recovery strategy is invalid.");
+    }
+    return { kind: "recovery" as const, payload: value };
+  }
+  assertExactKeys(value, [
+    "intentId",
+    "accountId",
+    "instrumentId",
+    "instId",
+    "ordId",
+    "clOrdId",
+  ], "Persisted OKX execution order reference");
+  return { kind: "complete" as const, payload: value };
+}
+
+function completeFromAssociation(
+  association: ExecutionOrderReferenceAssociation,
+  payload: Record<string, unknown>,
+) {
+  return createOkxExecutionOrderReference({
+    executionId: association.executionId,
+    userId: association.userId,
+    ...payload,
+    createdAt: association.createdAt,
+    updatedAt: association.updatedAt,
+  });
+}
+
+function recoveryFromAssociation(
+  association: ExecutionOrderReferenceAssociation,
+  payload: Record<string, unknown>,
+) {
+  const { recovery: _recovery, ...reference } = payload;
+  return createOkxExecutionOrderRecoveryReference({
+    executionId: association.executionId,
+    userId: association.userId,
+    ...reference,
+    createdAt: association.createdAt,
+    updatedAt: association.updatedAt,
+  });
+}
+
+function assertRecoveryMatchesReference(
+  recovery: OkxExecutionOrderRecoveryReference,
+  reference: OkxExecutionOrderReference,
+) {
+  if (
+    recovery.executionId !== reference.executionId
+    || recovery.intentId !== reference.intentId
+    || recovery.userId !== reference.userId
+    || recovery.accountId !== reference.accountId
+    || recovery.instrumentId !== reference.instrumentId
+    || recovery.instId !== reference.instId
+    || recovery.clOrdId !== reference.clOrdId
+    || recovery.createdAt !== reference.createdAt
+  ) {
+    throw new Error("OKX recovered order identity does not match the persisted recovery reference.");
+  }
 }
 
 function object(value: unknown, name: string) {

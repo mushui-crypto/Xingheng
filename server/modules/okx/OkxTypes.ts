@@ -39,6 +39,22 @@ export type OkxAccountIdentity = Readonly<{
   accountLevel: string;
 }>;
 
+export type OkxPermissions = Readonly<{
+  read: boolean;
+  spotTrade: boolean;
+  contractTrade: boolean;
+  withdraw: boolean;
+  ipRestricted: boolean;
+  accountLevelSupported: boolean;
+  positionModeSupported: boolean;
+  providerVerified: boolean;
+  executionEnabled: boolean;
+}>;
+
+export type OkxAccountAccess = OkxAccountIdentity & Readonly<{
+  permissions: OkxPermissions;
+}>;
+
 export type OkxExecutionStatus = Extract<
   ExecutionStatus,
   "SUBMITTED" | "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN"

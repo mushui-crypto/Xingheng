@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { createOkxSignature, mapOkxOrderStatus, OkxClient, OkxProviderError } from "./OkxClient";
 
@@ -253,6 +254,68 @@ test("readiness GET paths read account identity and open orders without mutation
     "/api/v5/trade/orders-pending",
   ]);
   assert.equal(calls[1]?.query, "?instId=DOGE-USDT-SWAP");
+});
+
+test("validates Provider-derived OKX identity and perpetual execution permissions with one signed GET", async () => {
+  let providerReads = 0;
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      providerReads += 1;
+      assert.equal(new URL(String(input)).pathname, "/api/v5/account/config");
+      assert.equal(init?.method, "GET");
+      return Response.json({ code: "0", data: [{
+        uid: "123456789",
+        acctLv: "3",
+        posMode: "net_mode",
+        perm: "read_only,trade",
+        ip: "203.0.113.10",
+      }] });
+    }) as typeof fetch,
+  });
+
+  const access = await client.validateAccess();
+  const uidHash = createHash("sha256").update("okx:123456789").digest("hex");
+
+  assert.equal(access.accountId, `okx:${uidHash.slice(0, 16)}`);
+  assert.equal(access.accountFingerprint, uidHash.slice(0, 16));
+  assert.equal(access.uidHash, uidHash);
+  assert.deepEqual(access.permissions, {
+    read: true,
+    spotTrade: true,
+    contractTrade: true,
+    withdraw: false,
+    ipRestricted: true,
+    accountLevelSupported: true,
+    positionModeSupported: true,
+    providerVerified: true,
+    executionEnabled: true,
+  });
+  assert.equal(providerReads, 1);
+});
+
+test("reports insufficient OKX permission and account settings without enabling execution", async () => {
+  const client = new OkxClient(() => credentials, {
+    fetchImpl: (async () => Response.json({ code: "0", data: [{
+      uid: "987654321",
+      acctLv: "1",
+      posMode: "long_short_mode",
+      perm: "read_only,withdraw",
+      ip: "",
+    }] })) as typeof fetch,
+  });
+
+  assert.deepEqual((await client.validateAccess()).permissions, {
+    read: true,
+    spotTrade: false,
+    contractTrade: false,
+    withdraw: true,
+    ipRestricted: false,
+    accountLevelSupported: false,
+    positionModeSupported: false,
+    providerVerified: true,
+    executionEnabled: false,
+  });
 });
 
 test("status mapping preserves UNKNOWN reason", () => {

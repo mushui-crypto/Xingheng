@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 import {
   applyExecutionCancelObservation,
+  type ExecutionCancelCapability,
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
+import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
 import { ExecutionCoordinator, type CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import {
@@ -11,6 +13,7 @@ import {
 } from "../cex/ExecutionQueryCapability";
 import {
   applyExecutionReconciliationObservation,
+  createExecutionReconciliationObservation,
   type ExecutionReconciliationObservation,
 } from "../cex/ExecutionReconciliationCapability";
 import {
@@ -22,10 +25,13 @@ import { ExecutionCapabilityRegistry, executionCapability } from "../cex/Executi
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
 import {
+  createOkxExecutionOrderRecoveryReference,
   createOkxExecutionOrderReference,
   type OkxExecutionOrderReference,
+  type OkxExecutionOrderRecoveryReference,
   type OkxExecutionOrderReferenceStore,
 } from "./OkxExecutionOrderReferenceStore";
+import { OkxIntentCancellationCapability } from "./OkxIntentCancellationCapability";
 import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
 import {
   OkxIntentExecutionService,
@@ -39,6 +45,7 @@ export type OkxIntentRuntimeService =
   OkxIntentExecutionClient
   & Readonly<{
     executionAccountIdentity(): Promise<{ accountId: string }> | { accountId: string };
+    validateExecutionProviderIdentity(context: ExecutionMutationContext): Promise<void> | void;
   }>;
 
 export type OkxIntentExecutionRuntimeRegistry = Readonly<{
@@ -49,11 +56,18 @@ export type OkxIntentExecutionRuntimeRegistry = Readonly<{
 }>;
 
 export type OkxIntentExecutionRuntimeOptions = Readonly<
-  OkxIntentExecutionServiceOptions & {
+  Omit<
+    OkxIntentExecutionServiceOptions,
+    "validateProviderIdentity" | "persistRecoveryReference"
+  > & {
     createExecutionId?: () => string;
     createCapability?: (
       service: OkxIntentExecutionService,
     ) => OkxIntentExecutionCapability<OkxIntentExecutionResult>;
+    createCancelCapability?: (
+      service: OkxIntentExecutionService,
+      reference: OkxExecutionOrderReference,
+    ) => ExecutionCancelCapability;
   }
 >;
 
@@ -156,6 +170,8 @@ export class OkxIntentExecutionRuntime {
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
       const service = this.intentService(runtimeService);
+      const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
+      if (recovery) return this.reconcileRecovery(record, recovery, service);
       const reference = await this.resolveReference(record, service);
       const result: OkxExecutionQueryResult = await service.query(reference);
       const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
@@ -185,12 +201,10 @@ export class OkxIntentExecutionRuntime {
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
       const service = this.intentService(runtimeService);
-      const reference = await this.resolveReference(record, service);
-      const observation = await service.cancel(reference, {
-        userId: record.userId,
-        accountId: record.accountId,
-        instrumentId: record.instrumentId,
-      });
+      const reference = await this.loadCancelReference(record);
+      const capability = this.options.createCancelCapability?.(service, reference)
+        ?? new OkxIntentCancellationCapability(service, reference);
+      const observation = await capability.cancel(record);
       const executionRecord = applyExecutionCancelObservation(record, observation);
       await this.recordStore.update(executionRecord);
       return Object.freeze({ executionRecord, observation, orderReference: reference });
@@ -203,16 +217,27 @@ export class OkxIntentExecutionRuntime {
       if (account.accountId !== intent.accountId) {
         throw new Error("ExecutionIntent accountId does not match the OKX execution account.");
       }
-      const intentService = this.intentService(runtimeService);
-      const capability = this.options.createCapability?.(intentService)
-        ?? new OkxIntentExecutionCapability(intentService);
-      const capabilityRegistry = new ExecutionCapabilityRegistry<OkxIntentExecutionResult>()
-        .register(executionCapability("okx", capability));
       const initialRecord = createExecutionRecordFromIntent(
         this.options.createExecutionId?.() ?? randomUUID(),
         intent,
       );
       await this.recordStore.create(initialRecord);
+      const intentService = this.intentService(runtimeService, (reference) =>
+        this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
+          executionId: initialRecord.executionId,
+          intentId: initialRecord.intentId,
+          userId: initialRecord.userId,
+          accountId: initialRecord.accountId,
+          instrumentId: initialRecord.instrumentId,
+          instId: reference.instId,
+          clOrdId: reference.clOrdId,
+          createdAt: initialRecord.createdAt,
+          updatedAt: initialRecord.updatedAt,
+        })));
+      const capability = this.options.createCapability?.(intentService)
+        ?? new OkxIntentExecutionCapability(intentService);
+      const capabilityRegistry = new ExecutionCapabilityRegistry<OkxIntentExecutionResult>()
+        .register(executionCapability("okx", capability));
 
       const execution = await new ExecutionCoordinator(
         new RegistryBackedExecutionCapability(capabilityRegistry),
@@ -221,25 +246,36 @@ export class OkxIntentExecutionRuntime {
       let executionRecord = initialRecord;
       let orderReference: OkxExecutionOrderReference | null = null;
       if (execution.step.result) {
-        executionRecord = attachExecutionAttempt(initialRecord, {
+        const acceptedRecord = attachExecutionAttempt(initialRecord, {
           executionAttemptId: execution.step.result.executionAttemptId,
           remoteOrderId: execution.step.result.providerOrderId,
           status: execution.executionState.status,
           observedAt: execution.executionState.updatedAt,
         });
-        orderReference = createOkxExecutionOrderReference({
-          executionId: executionRecord.executionId,
-          intentId: executionRecord.intentId,
-          userId: executionRecord.userId,
-          accountId: executionRecord.accountId,
-          instrumentId: executionRecord.instrumentId,
+        const completedReference = createOkxExecutionOrderReference({
+          executionId: acceptedRecord.executionId,
+          intentId: acceptedRecord.intentId,
+          userId: acceptedRecord.userId,
+          accountId: acceptedRecord.accountId,
+          instrumentId: acceptedRecord.instrumentId,
           instId: execution.step.result.instId,
           ordId: execution.step.result.providerOrderId,
           clOrdId: execution.step.result.clientOrderId,
-          createdAt: executionRecord.createdAt,
-          updatedAt: executionRecord.updatedAt,
+          createdAt: acceptedRecord.createdAt,
+          updatedAt: acceptedRecord.updatedAt,
         });
-        await this.orderReferences.create(orderReference);
+        try {
+          await this.orderReferences.create(completedReference);
+          executionRecord = acceptedRecord;
+          orderReference = completedReference;
+        } catch {
+          executionRecord = attachExecutionAttempt(initialRecord, {
+            executionAttemptId: execution.step.result.executionAttemptId,
+            remoteOrderId: execution.step.result.providerOrderId,
+            status: "UNKNOWN",
+            observedAt: execution.executionState.updatedAt,
+          });
+        }
       } else {
         executionRecord = {
           ...initialRecord,
@@ -252,8 +288,19 @@ export class OkxIntentExecutionRuntime {
     });
   }
 
-  private intentService(client: OkxIntentExecutionClient) {
-    return new OkxIntentExecutionService(client, this.options);
+  private intentService(
+    client: OkxIntentExecutionClient,
+    persistRecoveryReference?: (
+      reference: Readonly<{ instId: string; clOrdId: string }>,
+    ) => Promise<void> | void,
+  ) {
+    const runtimeService = client as OkxIntentRuntimeService;
+    return new OkxIntentExecutionService(client, {
+      ...this.options,
+      validateProviderIdentity: (context) =>
+        runtimeService.validateExecutionProviderIdentity(context),
+      ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
+    });
   }
 
   private async loadRecord(userId: string, executionId: string) {
@@ -275,6 +322,10 @@ export class OkxIntentExecutionRuntime {
   private async resolveReference(record: ExecutionRecord, service: OkxIntentExecutionService) {
     const stored = await this.orderReferences.loadForUser(record.userId, record.executionId);
     if (stored) return stored;
+    const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
+    if (recovery) {
+      throw new Error("OKX execution order reference requires reconciliation before this operation.");
+    }
     const lookup = service.resolveLookup(record);
     if (!lookup.ordId) {
       throw new Error("OKX execution order identity is missing ordId.");
@@ -291,6 +342,90 @@ export class OkxIntentExecutionRuntime {
       createdAt: record.createdAt,
       updatedAt: record.updatedAt,
     });
+  }
+
+  private async loadCancelReference(record: ExecutionRecord) {
+    const reference = await this.orderReferences.loadForUser(record.userId, record.executionId);
+    if (reference) return reference;
+    const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
+    if (recovery) {
+      throw new Error("OKX execution order reference requires reconciliation before cancellation.");
+    }
+    throw new Error("OKX execution order reference is missing for cancellation.");
+  }
+
+  private async reconcileRecovery(
+    record: ExecutionRecord,
+    recovery: OkxExecutionOrderRecoveryReference,
+    service: OkxIntentExecutionService,
+  ): Promise<OkxIntentExecutionReconciliationRuntimeResult> {
+    let result: OkxExecutionQueryResult;
+    try {
+      result = await service.query({
+        instrumentId: recovery.instrumentId,
+        instId: recovery.instId,
+        clOrdId: recovery.clOrdId,
+      });
+    } catch {
+      return this.failedRecovery(record);
+    }
+
+    let reference: OkxExecutionOrderReference;
+    try {
+      reference = createOkxExecutionOrderReference({
+        executionId: recovery.executionId,
+        intentId: recovery.intentId,
+        userId: recovery.userId,
+        accountId: recovery.accountId,
+        instrumentId: recovery.instrumentId,
+        instId: result.orderIdentity.instId,
+        ordId: result.orderIdentity.ordId,
+        clOrdId: result.orderIdentity.clOrdId,
+        createdAt: recovery.createdAt,
+        updatedAt: Math.max(recovery.updatedAt, result.observation.observedAt),
+      });
+      await this.orderReferences.create(reference);
+    } catch {
+      return this.failedRecovery(record);
+    }
+
+    const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
+    await this.recordStore.update(executionRecord);
+    return Object.freeze({
+      executionRecord,
+      observation: result.observation,
+      orderReference: reference,
+      statusReason: result.statusReason,
+      terminalShortCircuit: false,
+    });
+  }
+
+  private async failedRecovery(
+    record: ExecutionRecord,
+  ): Promise<OkxIntentExecutionReconciliationRuntimeResult> {
+    const observedAt = this.observedAt(record.updatedAt);
+    const observation = createExecutionReconciliationObservation({
+      state: "UNKNOWN",
+      filledBaseQuantity: "0",
+      observedAt,
+    });
+    const executionRecord = applyExecutionReconciliationObservation(record, observation);
+    await this.recordStore.update(executionRecord);
+    return Object.freeze({
+      executionRecord,
+      observation,
+      orderReference: null,
+      statusReason: "OKX order reference recovery could not be confirmed.",
+      terminalShortCircuit: false,
+    });
+  }
+
+  private observedAt(minimum: number) {
+    const value = (this.options.clock ?? Date.now)();
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error("OKX execution clock must return a non-negative integer timestamp.");
+    }
+    return Math.max(minimum, value);
   }
 }
 

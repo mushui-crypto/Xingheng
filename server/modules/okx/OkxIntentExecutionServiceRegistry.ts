@@ -1,12 +1,18 @@
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
+import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
 import { OkxClient } from "./OkxClient";
-import type { OkxCredentials } from "./OkxTypes";
+import type { OkxAccountIdentity, OkxCredentials } from "./OkxTypes";
 import type { OkxIntentRuntimeService } from "./OkxIntentExecutionRuntime";
 
 export type OkxExecutionCredentialSummary = Readonly<{
   userId: string;
   accountId: string;
 }>;
+
+type OkxExecutionProviderClient = Pick<
+  OkxClient,
+  "placeOrder" | "getOrder" | "cancelOrder" | "getAccountIdentity"
+>;
 
 export class OkxIntentExecutionServiceRegistry {
   private readonly locks = new Map<string, AsyncLock>();
@@ -15,6 +21,7 @@ export class OkxIntentExecutionServiceRegistry {
     private readonly credentials: Pick<UserExchangeCredentialStore, "findSummary" | "loadForExecution">,
     private readonly options: Readonly<{
       serviceFactory?: (credential: OkxCredentials, summary: OkxExecutionCredentialSummary) => OkxIntentRuntimeService;
+      clientFactory?: (credential: OkxCredentials) => OkxExecutionProviderClient;
     }> = {},
   ) {}
 
@@ -26,12 +33,15 @@ export class OkxIntentExecutionServiceRegistry {
     const normalizedUserId = identifier(userId, "userId");
     const summary = this.credentials.findSummary(normalizedUserId, "okx");
     if (!summary) throw new Error("OKX credential is not configured for the authenticated user.");
+    if (summary.permissions.executionEnabled !== true) {
+      throw new Error("OKX credential is not enabled for execution.");
+    }
     const secret = await this.credentials.loadForExecution(normalizedUserId, "okx");
     const credential = normalizeCredential(secret);
     const service = this.options.serviceFactory?.(credential, {
       userId: normalizedUserId,
       accountId: summary.accountId,
-    }) ?? defaultService(credential, summary.accountId);
+    }) ?? defaultService(credential, summary.accountId, this.options.clientFactory);
     return operation(service);
   }
 
@@ -45,14 +55,34 @@ export class OkxIntentExecutionServiceRegistry {
   }
 }
 
-function defaultService(credential: OkxCredentials, accountId: string): OkxIntentRuntimeService {
-  const client = new OkxClient(() => credential);
+function defaultService(
+  credential: OkxCredentials,
+  accountId: string,
+  clientFactory?: (credential: OkxCredentials) => OkxExecutionProviderClient,
+): OkxIntentRuntimeService {
+  const client = clientFactory?.(credential) ?? new OkxClient(() => credential);
   return Object.freeze({
     placeOrder: (request) => client.placeOrder(request),
     getOrder: (request) => client.getOrder(request),
     cancelOrder: (request) => client.cancelOrder(request),
     executionAccountIdentity: () => Object.freeze({ accountId }),
+    validateExecutionProviderIdentity: (context) =>
+      validateExecutionProviderIdentity(client, accountId, context),
   });
+}
+
+async function validateExecutionProviderIdentity(
+  client: Pick<OkxExecutionProviderClient, "getAccountIdentity">,
+  expectedAccountId: string,
+  context: ExecutionMutationContext,
+) {
+  if (context.venue !== "okx" || context.accountId !== expectedAccountId) {
+    throw new Error("OKX execution account binding does not match the mutation context.");
+  }
+  const providerIdentity: OkxAccountIdentity = await client.getAccountIdentity();
+  if (providerIdentity.accountId !== expectedAccountId) {
+    throw new Error("OKX Provider UID does not match the configured execution account.");
+  }
 }
 
 function normalizeCredential(input: Readonly<{ apiKey: string; apiSecret: string; passphrase?: string }>): OkxCredentials {

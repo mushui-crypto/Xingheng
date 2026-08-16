@@ -159,6 +159,123 @@ test("an existing user venue credential cannot be overwritten", async () => {
   }
 });
 
+test("replaces a credential identity only with a new envelope bound to the new AAD", async () => {
+  const fixture = createFixture();
+  try {
+    const original = await fixture.store.save({
+      ...credential(),
+      venue: "okx",
+      accountId: "okx:credential-only:legacy-account",
+      accountFingerprint: "OKX-LEGACY",
+      passphrase: "okx-passphrase-value-001",
+      permissions: { providerVerified: false, executionEnabled: false },
+    });
+    const secret = await fixture.store.loadForExecution("user-1", "okx");
+
+    const replaced = await fixture.store.replace({
+      userId: "user-1",
+      venue: "okx",
+      expectedAccountId: "okx:credential-only:legacy-account",
+      accountId: "okx:0123456789abcdef",
+      accountFingerprint: "0123456789abcdef",
+      ...secret,
+      permissions: { providerVerified: true, contractTrade: true, executionEnabled: false },
+      verifiedAt: 1_800_000_000_000,
+    });
+
+    assert.equal(replaced.accountId, "okx:0123456789abcdef");
+    assert.equal(replaced.createdAt, original.createdAt);
+    assert.deepEqual(await fixture.store.loadForExecution("user-1", "okx"), secret);
+    const databaseBytes = readFileSync(fixture.dbPath).toString("utf8");
+    assert.equal(databaseBytes.includes("okx-passphrase-value-001"), false);
+    assert.equal(fixture.provider.unwrapCalls, 2);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("failed credential replacement preserves the old identity and decryptable envelope", async () => {
+  const fixture = createFixture();
+  try {
+    await fixture.store.save({
+      ...credential(),
+      venue: "okx",
+      accountId: "okx:credential-only:legacy-account",
+      accountFingerprint: "OKX-LEGACY",
+      passphrase: "okx-passphrase-value-001",
+    });
+
+    await assert.rejects(
+      fixture.store.replace({
+        ...credential(),
+        venue: "okx",
+        expectedAccountId: "okx:credential-only:stale-account",
+        accountId: "okx:0123456789abcdef",
+        accountFingerprint: "0123456789abcdef",
+        passphrase: "okx-passphrase-value-001",
+      }),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "credential_rebind_conflict",
+    );
+
+    assert.equal(fixture.store.findSummary("user-1", "okx")?.accountId, "okx:credential-only:legacy-account");
+    assert.deepEqual(await fixture.store.loadForExecution("user-1", "okx"), {
+      apiKey: "api-key-value-001",
+      apiSecret: "secret-value-001",
+      passphrase: "okx-passphrase-value-001",
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
+test("account binding conflict during replacement leaves the legacy envelope intact", async () => {
+  const fixture = createFixture();
+  try {
+    await fixture.store.save({
+      ...credential(),
+      venue: "okx",
+      accountId: "okx:credential-only:legacy-account",
+      accountFingerprint: "OKX-LEGACY",
+      passphrase: "okx-passphrase-value-001",
+    });
+    await fixture.store.save({
+      ...credential(),
+      userId: "user-2",
+      venue: "okx",
+      accountId: "okx:0123456789abcdef",
+      accountFingerprint: "0123456789abcdef",
+      apiKey: "api-key-value-002",
+      apiSecret: "secret-value-002",
+      passphrase: "okx-passphrase-value-002",
+    });
+
+    await assert.rejects(
+      fixture.store.replace({
+        ...credential(),
+        venue: "okx",
+        expectedAccountId: "okx:credential-only:legacy-account",
+        accountId: "okx:0123456789abcdef",
+        accountFingerprint: "0123456789abcdef",
+        passphrase: "okx-passphrase-value-001",
+      }),
+      (error: unknown) => error instanceof Error
+        && "category" in error
+        && error.category === "credential_account_already_bound",
+    );
+
+    assert.equal(fixture.store.findSummary("user-1", "okx")?.accountId, "okx:credential-only:legacy-account");
+    assert.deepEqual(await fixture.store.loadForExecution("user-1", "okx"), {
+      apiKey: "api-key-value-001",
+      apiSecret: "secret-value-001",
+      passphrase: "okx-passphrase-value-001",
+    });
+  } finally {
+    fixture.close();
+  }
+});
+
 function credential() {
   return {
     userId: "user-1",

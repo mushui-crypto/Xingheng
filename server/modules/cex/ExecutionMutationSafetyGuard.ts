@@ -10,13 +10,28 @@ export type ExecutionMutationContext = Readonly<{
   providerAccountId?: string;
 }>;
 
-export type ExecutionMutationSafetyConfig = Readonly<{
+export type ExecutionProviderIdentityValidator = (
+  context: ExecutionMutationContext,
+) => void | Promise<void>;
+
+export type ExecutionMutationSafetyState = Readonly<{
   liveTradingEnabled: boolean;
   killSwitchActive: boolean;
-  validateProviderIdentity?: (
-    context: ExecutionMutationContext,
-  ) => void | Promise<void>;
+  liveTradingDisabledMessage?: string;
+  killSwitchActiveMessage?: string;
 }>;
+
+export type ExecutionMutationSafetyConfig = ExecutionMutationSafetyState & Readonly<{
+  venues?: Readonly<Record<string, ExecutionMutationSafetyState>>;
+  validateProviderIdentity?: ExecutionProviderIdentityValidator;
+}>;
+
+type ExecutionMutationSafetyEnvironment = Readonly<Record<string, string | undefined>>;
+
+const FAIL_CLOSED_STATE = Object.freeze({
+  liveTradingEnabled: false,
+  killSwitchActive: true,
+});
 
 export class ExecutionMutationSafetyError extends Error {
   constructor(
@@ -33,23 +48,24 @@ export class ExecutionMutationSafetyError extends Error {
 
 export class ExecutionMutationSafetyGuard {
   constructor(
-    private readonly config: ExecutionMutationSafetyConfig = {
-      liveTradingEnabled: process.env.LIVE_TRADING_ENABLED === "true",
-      killSwitchActive: process.env.BINANCE_KILL_SWITCH !== "false",
-    },
+    private readonly config: ExecutionMutationSafetyConfig = executionMutationSafetyConfigFromEnvironment(),
   ) {}
 
-  async assertAllowed(context: ExecutionMutationContext) {
-    if (!this.config.liveTradingEnabled) {
+  async assertAllowed(
+    context: ExecutionMutationContext,
+    validateProviderIdentity?: ExecutionProviderIdentityValidator,
+  ) {
+    const state = this.stateFor(context.venue);
+    if (!state.liveTradingEnabled) {
       throw new ExecutionMutationSafetyError(
         "live_trading_disabled",
-        "LIVE_TRADING_ENABLED is not true.",
+        state.liveTradingDisabledMessage ?? "LIVE_TRADING_ENABLED is not true.",
       );
     }
-    if (this.config.killSwitchActive) {
+    if (state.killSwitchActive) {
       throw new ExecutionMutationSafetyError(
         "kill_switch_active",
-        "Unified execution kill switch is active.",
+        state.killSwitchActiveMessage ?? "Unified execution kill switch is active.",
       );
     }
     if (!nonEmpty(context.venue) || !nonEmpty(context.userId)
@@ -62,6 +78,7 @@ export class ExecutionMutationSafetyGuard {
     }
     try {
       await this.config.validateProviderIdentity?.(context);
+      await validateProviderIdentity?.(context);
     } catch (error) {
       if (error instanceof ExecutionMutationSafetyError) throw error;
       throw new ExecutionMutationSafetyError(
@@ -71,12 +88,56 @@ export class ExecutionMutationSafetyGuard {
     }
   }
 
-  status() {
+  status(venue?: string) {
+    const state = venue === undefined ? this.config : this.stateFor(venue);
     return Object.freeze({
-      liveTradingEnabled: this.config.liveTradingEnabled,
-      killSwitchActive: this.config.killSwitchActive,
+      liveTradingEnabled: state.liveTradingEnabled,
+      killSwitchActive: state.killSwitchActive,
     });
   }
+
+  private stateFor(venue: string) {
+    if (!this.config.venues) return this.config;
+    if (!nonEmpty(venue)) return this.config;
+    return this.config.venues[venue] ?? FAIL_CLOSED_STATE;
+  }
+}
+
+export function executionMutationSafetyConfigFromEnvironment(
+  source: ExecutionMutationSafetyEnvironment = process.env,
+): ExecutionMutationSafetyConfig {
+  const binance = state(
+    source.LIVE_TRADING_ENABLED === "true",
+    source.BINANCE_KILL_SWITCH !== "false",
+  );
+  const okx = state(
+    source.OKX_LIVE_TRADING_ENABLED === "true",
+    source.OKX_KILL_SWITCH !== "false",
+    {
+      liveTradingDisabledMessage: "OKX_LIVE_TRADING_ENABLED is not true.",
+      killSwitchActiveMessage: "OKX_KILL_SWITCH is active.",
+    },
+  );
+  return Object.freeze({
+    ...binance,
+    venues: Object.freeze({
+      binance,
+      okx,
+      bybit: FAIL_CLOSED_STATE,
+      bitget: FAIL_CLOSED_STATE,
+    }),
+  });
+}
+
+function state(
+  liveTradingEnabled: boolean,
+  killSwitchActive: boolean,
+  messages: Pick<
+    ExecutionMutationSafetyState,
+    "liveTradingDisabledMessage" | "killSwitchActiveMessage"
+  > = {},
+) {
+  return Object.freeze({ liveTradingEnabled, killSwitchActive, ...messages });
 }
 
 function nonEmpty(value: string) {
