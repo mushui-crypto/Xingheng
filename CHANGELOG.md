@@ -2,6 +2,27 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Unreleased - OKX canonical quantity boundary checkpoint
+
+日期：2026-08-16
+
+状态：已集成并收敛到唯一 `main` 工作线，未部署
+
+### 已完成
+
+- 将 `9f57c6177542f5eee587a5798bc781c61ae805d1` 以 fast-forward 方式集成到本地 `main`。
+- 在 OKX Venue 边界完成 Canonical Base Quantity 与 Provider Contract Quantity 的双向转换，并对
+  `ctVal`、`lotSz`、`minSz`、身份和 metadata 新鲜度执行 fail-closed 校验。
+- 保持 Binance 已验证执行链不变；统一数量边界 checkpoint 为 `PASS / CLOSED`。
+- OKX 定向测试 `98 passed`，全量 Server 测试 `1120 passed`，Server TypeScript 与 `npm run build` 通过。
+- 完成仓库单线收敛：旧实验分支、额外 worktree、过期 PR 与历史 stash 不再作为开发入口。
+
+### 当前边界
+
+- 最后已知 production revision 仍为 `25588b2`；当前代码 checkpoint 为 `9f57c617`，仓库同步不等于部署。
+- OKX Position Verification 仍为 `BLOCKED`，真实 Provider mutation 为 `0`；本条目不授权部署或真实资金执行。
+- 旧 phase-11 实验提交已明确放弃，没有合入 `main`；Bybit/Bitget execution 仍不在当前范围。
+
 ## 0.4.0 - Binance Real Execution Closed Loop
 
 日期：2026-08-15

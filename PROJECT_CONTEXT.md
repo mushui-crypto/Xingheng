@@ -755,21 +755,33 @@ production migration 与私有 GET 未复核，且尚未在当前 `afb2af1` 上�
 
 ------------------------------------------------------------------------
 
-# 20. 当前权威交接基线（2026-08-15）
+# 20. 当前权威交接基线（2026-08-16）
 
-本节是截至 2026-08-15 的最新权威快照。第 11 至 19 节保留为阶段过程与审计历史；凡 revision、
+本节是截至 2026-08-16 的最新权威快照。第 11 至 19 节保留为阶段过程与审计历史；凡 revision、
 production 状态、真实资金验证结论或下一步范围与本节冲突，均以本节为准。
 
 ## Revision、production 与工作区
 
--   当前代码 checkpoint / production revision：
-    `25588b2206ba4c39062f3e9d06ee315fed972ea6`
-    （`fix(arbitrage): harden position verification and close`）。
--   对应 Git tree：`d4ea8baef6b0cfde8a80d2edf32e8b393ad14fdd`。
--   Production 已部署该固定 revision；API healthy、Web running，部署后数据库与既有套利实例均保留。
+-   当前主线代码 checkpoint：`9f57c6177542f5eee587a5798bc781c61ae805d1`
+    （`fix(okx): enforce canonical quantity boundary`）。
+-   对应代码 Git tree：`fc518d4b74793c7b5ab0db20bac8d42c06cc748f`；后续仓库收敛提交只更新项目文档。
+-   最后已知 production revision 仍为 `25588b2206ba4c39062f3e9d06ee315fed972ea6`；本轮没有部署、
+    production 复验或真实资金授权，因此不能把 `9f57c617` 写成 production revision。
 -   当前安全开关已恢复并核验：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
--   本阶段形成 37 个本地 checkpoint；在交接 PR 合并前，`origin/main` 不能视为包含这些能力。
+-   本地与 GitHub 统一使用 `main` 作为唯一工作线；仓库同步不会自动触发 production 部署。
+-   当前 Unified Quantity Boundary checkpoint：`PASS / CLOSED`。OKX canonical base quantity 只在
+    Venue 边界转换为 provider contract quantity；Binance 已验证执行链未修改。
+-   当前 OKX Position Verification checkpoint：`BLOCKED`；真实 Provider mutation：`0`。
+-   集成采用 `git merge --ff-only`，未生成额外 merge commit；旧 stash、额外 worktree 和过期实验分支已退出当前工作线。
 -   交接时必须核对当前 branch/PR 与上述固定 revision，不得只依据分支名称判断代码身份。
+
+## 仓库工作线
+
+-   唯一工作区：`/Users/moss/Documents/StellaX`。
+-   唯一本地开发分支与 GitHub 默认分支：`main`。
+-   已被 `main` 包含的旧 checkpoint 分支已删除；旧 phase-11 execution 实验提交明确放弃，未合入主线。
+-   过期 release 草稿、历史 RWA automation stash 和额外 worktree 不再作为开发或部署输入。
+-   Git 分支整理只改变源码版本管理状态，不修改 production revision、运行配置、数据库、开关或 Provider 状态。
 
 ## Binance 正式执行闭环
 
@@ -800,6 +812,10 @@ Test 代码仍保留，后续单独 cleanup，不得重新接管 generic product
 -   `5fbc8d0`：已有 `OPENING` ArbitrageInstance Resume UI。
 -   `fc6ec8f`：`/api/arbitrage-instances` 接入 authenticated user middleware。
 -   `25588b2`：position verification、Spot commission attribution、close quantity 与 residual safety 收口。
+-   `1824981`：Binance execution handoff 文档基线。
+-   `4ff55a3`：OKX guarded execution 与 Position Verification 开发链。
+-   `2f37e8e`：记录 OKX quantity semantics review，确认修复前 checkpoint 阻断。
+-   `9f57c61`：OKX canonical quantity boundary 修复与双向数量转换验证。
 
 ## DOGEUSDT 真实资金验证证据
 

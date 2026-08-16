@@ -4,7 +4,7 @@
 
 > 面向新团队成员、新 AI Agent 和新工作区的快速入口。
 >
-> 更新时间：2026-08-15
+> 更新时间：2026-08-16
 
 本文件提供项目入口和当前状态摘要，不替代需求、架构、变更日志或历史归档。发生冲突时，以用户最新明确要求以及更高优先级文档为准。
 
@@ -44,14 +44,16 @@
 
 # 3. 当前阶段
 
-当前处于 Binance 正式真实执行闭环完成、准备进入 OKX ExecutionCapability 建设的阶段。
+当前处于 Binance 正式真实执行闭环完成、OKX ExecutionCapability 已完成本地数量边界修复并等待
+独立 Position Verification 验收的阶段。
 
 当前优先级：
 
 1. 保证资金安全、交易正确性和已完成 Binance 闭环的稳定性。
 2. 保持 Demo、Testnet 和 production 公共能力稳定。
-3. 以独立阶段实现 OKX 正式 ExecutionCapability，不把 Binance readiness 外推到其他 venue。
+3. 在已完成本地实现的基础上，独立验收 OKX 正式 ExecutionCapability，不把 Binance readiness 外推到其他 venue。
 4. 保持权威成交归因、恢复、退出、撤单和实例生命周期可追踪、可恢复、可审计。
+5. 继续保持 OKX Position Verification 和真实 Provider mutation 阻断，直到取得独立批准。
 
 Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实资金开仓、对冲、退出和最终核账。后续部署、OKX 开发和任何新的真实资金窗口仍分别需要用户明确批准，不能互相替代。
 
@@ -63,9 +65,12 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
-- 当前 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。
+- 最后已知 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。
+- 当前主线代码 checkpoint：`9f57c6177542f5eee587a5798bc781c61ae805d1`，tree
+  `fc518d4b74793c7b5ab0db20bac8d42c06cc748f`；本地与 GitHub 统一使用 `main`，未部署。
 - 当前安全开关：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
 - 当前只保留这一套部署环境；开始发布前仍必须重新核对 fixed revision、数据库备份和运行健康。
+- 当前只保留 `/Users/moss/Documents/StellaX` 一个代码工作区；仓库同步不会自动触发 production 部署。
 - 策略邮件通知关闭；登录、安全和账户类邮件路径不受影响。
 
 运行哈希只是归档时点基线。开始发布或运维任务前，必须重新核对当前 Git、manifest、镜像 digest 和运行环境，不能仅依赖本文件。
@@ -100,7 +105,10 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 - Binance 当前正式支持 USDT Spot LONG 与 USDT Linear Perpetual LONG/SHORT；generic canonical asset data 当前包含 BTC、ETH、DOGE、XAUT。
 - DOGEUSDT 实例已完成 Spot BUY 73、Perp SHORT 73、Perp reduceOnly close 73、Spot close 72；最终 Futures position=0、active orders=0、instance=CLOSED、unresolved=0。
 - Spot opening commission 使用 Binance `myTrades` 权威归因；实例残余按 Trading Rules fail-closed，不使用账户总余额或外部余额补足。
-- OKX、Bybit、Bitget 目前仅 GET-only Account Read 通过，尚无正式 ExecutionCapability，不得显示为可执行。
+- OKX 已有本地正式 ExecutionCapability 与 canonical quantity boundary：`baseQuantity` 在 OKX Venue
+  边界转换为 contract quantity；定向测试 `98/98`、全量 Server 测试 `1120/1120` 和 build 均通过。
+- OKX Position Verification 仍为 `BLOCKED`，真实 Provider mutation 保持 `0`；Bybit、Bitget 仍仅
+  GET-only Account Read，通过不代表可执行。
 - 生产执行开关和急停已恢复 fail-closed；新的真实资金窗口当前未授权。
 
 ## 策略 Paper
