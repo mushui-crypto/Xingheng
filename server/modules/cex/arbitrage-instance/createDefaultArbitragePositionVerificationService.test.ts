@@ -123,9 +123,149 @@ test("production catalog composition returns UNKNOWN when OKX contract mapping i
   assert.equal(result?.legs[1].reason, "instrument_mapping_unavailable");
 });
 
-test("Binance DOGE verification uses persisted leg identity without attributing unrelated Spot balance", async () => {
+test("OKX perpetual positions use canonical verification for open, close, quantity, and direction", async (t) => {
+  const cases = [
+    { name: "SHORT matched", role: "SHORT", closed: false, side: "short", contracts: "730", status: "MATCHED" },
+    { name: "LONG matched", role: "LONG", closed: false, side: "long", contracts: "730", status: "MATCHED" },
+    { name: "FLAT matched", role: "SHORT", closed: true, side: "flat", contracts: "0", status: "MATCHED" },
+    { name: "quantity mismatch", role: "SHORT", closed: false, side: "short", contracts: "720", status: "MISMATCH" },
+    { name: "direction mismatch", role: "SHORT", closed: false, side: "long", contracts: "730", status: "MISMATCH" },
+  ] as const;
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async () => {
+      const accountId = credentialAccountId("okx", secret.apiKey);
+      const base = fixture(`arb-okx-${scenario.name}`, "binance", "okx");
+      const instance: ArbitrageInstance = {
+        ...base,
+        status: scenario.closed ? "CLOSED" : "HOLDING",
+        closedAt: scenario.closed ? now : null,
+        maxResidualBaseQuantity: "0",
+        legs: [
+          {
+            ...base.legs[0],
+            instrumentId: "DOGE-USDT-PERP",
+            plannedQuantity: "73",
+            confirmedOpenedQuantity: "73",
+            confirmedClosedQuantity: scenario.closed ? "73" : "0",
+          },
+          {
+            ...base.legs[1],
+            role: scenario.role,
+            accountId,
+            instrumentId: "DOGE-USDT-PERP",
+            plannedQuantity: "73",
+            confirmedOpenedQuantity: "73",
+            confirmedClosedQuantity: scenario.closed ? "73" : "0",
+          },
+        ],
+      };
+      const query = new ArbitrageInstanceQueryService({
+        get: (userId, arbitrageId) => userId === instance.userId && arbitrageId === instance.arbitrageId ? instance : null,
+        listActive: () => [instance],
+        listHistory: () => [],
+      });
+      const service = createDefaultArbitragePositionVerificationService({
+        query,
+        credentials: {
+          findSummary: (userId, venue) => ({
+            userId,
+            venue,
+            accountId: venue === "okx" ? accountId : credentialAccountId(venue, secret.apiKey),
+            accountFingerprint: "fingerprint",
+            maskedApiKey: "****",
+            environment: "development",
+            permissions: {},
+            lastVerifiedAt: now,
+            createdAt: now,
+            updatedAt: now,
+          }),
+          loadForAccountRead: async () => secret,
+        },
+        readVenues: venues("DOGE-USDT-PERP", "DOGE"),
+        clients: {
+          binance: () => ({
+            readAccountSnapshot: async () => ({
+              accountId: "binance:provider-account",
+              accountFingerprint: "fingerprint",
+              accountMode: "single_asset_one_way",
+              fetchedAt: now,
+              balances: [],
+              permissions: { read: true, spotTrade: false, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
+            }),
+            readPerpetualPosition: async () => ({
+              symbol: "DOGEUSDT",
+              side: scenario.closed ? "flat" : "long",
+              baseQuantity: scenario.closed ? "0" : "73",
+              updatedAt: now,
+            }),
+          }),
+          okx: () => ({
+            readAccountSnapshot: async () => ({
+              uid: "okx-uid",
+              accountLevel: "3",
+              permissions: null,
+              boundIps: null,
+              balances: [],
+              fetchedAt: now,
+            }),
+            readPerpetualPosition: async () => ({
+              instId: "DOGE-USDT-SWAP",
+              side: scenario.side,
+              contractQuantity: scenario.contracts,
+              updatedAt: now,
+            }),
+          }),
+        },
+        now: () => now,
+      });
+
+      const result = await service.verify("user-a", instance.arbitrageId);
+
+      assert.equal(result?.legs[1].verificationStatus, scenario.status);
+      assert.equal(result?.legs[1].actualQuantity, scenario.contracts === "720" ? "72" : scenario.closed ? "0" : "73");
+      assert.equal(result?.legs[1].reason, null);
+    });
+  }
+});
+
+test("OKX provider errors remain UNKNOWN after reader migration", async () => {
+  const instance = fixture("arb-okx-error", "binance", "okx");
+  const query = new ArbitrageInstanceQueryService({
+    get: (userId, arbitrageId) => userId === instance.userId && arbitrageId === instance.arbitrageId ? instance : null,
+    listActive: () => [instance],
+    listHistory: () => [],
+  });
+  const service = createDefaultArbitragePositionVerificationService({
+    query,
+    credentials: {
+      findSummary: (userId, venue) => ({ userId, venue, accountId: credentialAccountId(venue, secret.apiKey), accountFingerprint: "fingerprint", maskedApiKey: "****", environment: "development", permissions: {}, lastVerifiedAt: now, createdAt: now, updatedAt: now }),
+      loadForAccountRead: async () => secret,
+    },
+    readVenues: venues(),
+    clients: {
+      binance: () => ({
+        readAccountSnapshot: async () => ({ accountId: "binance:provider-account", accountFingerprint: "fingerprint", accountMode: "single_asset_one_way", fetchedAt: now, balances: [], permissions: { read: true, spotTrade: false, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true } }),
+        readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "long", baseQuantity: "1", updatedAt: now }),
+      }),
+      okx: () => ({
+        readAccountSnapshot: async () => ({ uid: "okx-uid", accountLevel: "3", permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+        readPerpetualPosition: async () => { throw new Error("provider unavailable"); },
+      }),
+    },
+    now: () => now,
+  });
+
+  const result = await service.verify("user-a", "arb-okx-error");
+
+  assert.equal(result?.legs[0].verificationStatus, "MATCHED");
+  assert.equal(result?.legs[1].verificationStatus, "UNKNOWN");
+  assert.equal(result?.legs[1].reason, "provider_read_failed");
+});
+
+test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", async () => {
   const accountId = credentialAccountId("binance", secret.apiKey);
-  const instance: ArbitrageInstance = {
+  let instance: ArbitrageInstance = {
     ...fixture("arb-doge", "binance", "binance"),
     strategyType: "SPOT_PERPETUAL",
     maxResidualBaseQuantity: "0",
@@ -136,6 +276,7 @@ test("Binance DOGE verification uses persisted leg identity without attributing 
   };
   let catalogReads = 0;
   let positionReads = 0;
+  let providerSide: "short" | "flat" = "short";
   const query = new ArbitrageInstanceQueryService({
     get: (userId, arbitrageId) => userId === instance.userId && arbitrageId === instance.arbitrageId ? instance : null,
     listActive: () => [instance],
@@ -173,7 +314,9 @@ test("Binance DOGE verification uses persisted leg identity without attributing 
           positionReads += 1;
           assert.equal(symbol, "DOGEUSDT");
           assert.equal(expectedSide, "short");
-          return { symbol: "DOGEUSDT", side: "short", baseQuantity: "73", updatedAt: now };
+          return providerSide === "short"
+            ? { symbol: "DOGEUSDT", side: "short", baseQuantity: "73", updatedAt: now }
+            : { symbol: "DOGEUSDT", side: "flat", baseQuantity: "0", updatedAt: now };
         },
       }),
     },
@@ -188,8 +331,66 @@ test("Binance DOGE verification uses persisted leg identity without attributing 
     { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: "73.855", reason: null },
     { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: null, reason: null },
   ]);
+
+  providerSide = "flat";
+  instance = {
+    ...instance,
+    status: "CLOSED",
+    closedAt: now,
+    legs: [
+      { ...instance.legs[0], confirmedClosedQuantity: "73" },
+      { ...instance.legs[1], confirmedClosedQuantity: "73" },
+    ],
+  };
+  const closed = await service.verify("user-a", "arb-doge");
+
+  assert.deepEqual(closed?.legs.map(({ verificationStatus, actualQuantity }) => ({
+    verificationStatus,
+    actualQuantity,
+  })), [
+    { verificationStatus: "MATCHED", actualQuantity: "0" },
+    { verificationStatus: "MATCHED", actualQuantity: "0" },
+  ]);
   assert.equal(catalogReads, 0);
-  assert.equal(positionReads, 1);
+  assert.equal(positionReads, 2);
+});
+
+test("Binance provider errors remain UNKNOWN after reader migration", async () => {
+  const instance = fixture("arb-binance-error", "binance", "binance");
+  const query = new ArbitrageInstanceQueryService({
+    get: (userId, arbitrageId) => userId === instance.userId && arbitrageId === instance.arbitrageId ? instance : null,
+    listActive: () => [instance],
+    listHistory: () => [],
+  });
+  const service = createDefaultArbitragePositionVerificationService({
+    query,
+    credentials: {
+      findSummary: (userId, venue) => ({ userId, venue, accountId: credentialAccountId(venue, secret.apiKey), accountFingerprint: "fingerprint", maskedApiKey: "****", environment: "development", permissions: {}, lastVerifiedAt: now, createdAt: now, updatedAt: now }),
+      loadForAccountRead: async () => secret,
+    },
+    readVenues: venues(),
+    clients: {
+      binance: () => ({
+        readAccountSnapshot: async () => ({
+          accountId: "binance:provider-account",
+          accountFingerprint: "fingerprint",
+          accountMode: "single_asset_one_way",
+          fetchedAt: now,
+          balances: [],
+          permissions: { read: true, spotTrade: false, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
+        }),
+        readPerpetualPosition: async () => { throw new Error("provider unavailable"); },
+      }),
+    },
+    now: () => now,
+  });
+
+  const result = await service.verify("user-a", "arb-binance-error");
+
+  assert.deepEqual(result?.legs.map(({ verificationStatus, reason }) => ({ verificationStatus, reason })), [
+    { verificationStatus: "UNKNOWN", reason: "provider_read_failed" },
+    { verificationStatus: "UNKNOWN", reason: "provider_read_failed" },
+  ]);
 });
 
 function fixture(arbitrageId: string, longVenue: CexVenue, shortVenue: CexVenue): ArbitrageInstance {
@@ -213,25 +414,32 @@ function fixture(arbitrageId: string, longVenue: CexVenue, shortVenue: CexVenue)
   };
 }
 
-function venues(): FundingOpportunityReadVenue[] {
+function venues(
+  instrumentId = "XAUT-USDT-PERP",
+  baseAsset = "XAUT",
+): FundingOpportunityReadVenue[] {
   return (["binance", "okx", "bybit", "bitget"] as const).map((venue) => ({
     venue,
-    instrumentCatalog: { venue, listInstruments: async () => [instrument(venue)] },
+    instrumentCatalog: { venue, listInstruments: async () => [instrument(venue, instrumentId, baseAsset)] },
     fundingRate: { venue, getFundingRate: async () => { throw new Error("not used"); } },
     marketData: { venue, getTopOfBook: async () => { throw new Error("not used"); } },
   }));
 }
 
-function instrument(venue: CexVenue): CanonicalInstrument {
+function instrument(
+  venue: CexVenue,
+  instrumentId = "XAUT-USDT-PERP",
+  baseAsset = "XAUT",
+): CanonicalInstrument {
   return {
-    instrumentId: "XAUT-USDT-PERP",
+    instrumentId,
     venue,
     marketType: "perpetual",
     contractType: "linear_perpetual",
-    baseAsset: "XAUT",
+    baseAsset,
     quoteAsset: "USDT",
     settlementAsset: "USDT",
-    providerSymbol: venue === "okx" ? "XAUT-USDT-SWAP" : "XAUTUSDT",
+    providerSymbol: venue === "okx" ? `${baseAsset}-USDT-SWAP` : `${baseAsset}USDT`,
     providerLocator: {},
     quantityUnit: venue === "okx" ? "contract" : "base",
     contractSize: venue === "okx" ? 0.1 : 1,

@@ -23,9 +23,14 @@ test("perpetual provider preserves direction and converts OKX contracts to base 
   assert.deepEqual(await provider.readLeg(leg({
     venue: "okx", role: "SHORT", accountId: "okx:account-a",
   })), {
-    actualQuantity: "1",
-    direction: "SHORT",
-    observedAt: 1_800_000_000_000,
+    snapshot: {
+      venue: "okx",
+      accountId: "okx:account-a",
+      instrumentId: "XAUT-USDT-PERP",
+      side: "SHORT",
+      quantity: "1",
+      fetchedAt: 1_800_000_000_000,
+    },
   });
 });
 
@@ -49,10 +54,15 @@ test("spot provider keeps instance quantity authoritative and uses account balan
   assert.deepEqual(await provider.readLeg(leg({
     venue: "bybit", role: "LONG", instrumentId: "XAUT-USDT-SPOT", accountId: "bybit:account-a",
   })), {
-    actualQuantity: "1",
+    snapshot: {
+      venue: "bybit",
+      accountId: "bybit:account-a",
+      instrumentId: "XAUT-USDT-SPOT",
+      side: "LONG",
+      quantity: "1",
+      fetchedAt: 1_800_000_000_000,
+    },
     availableQuantity: "0.4",
-    direction: "LONG",
-    observedAt: 1_800_000_000_000,
   });
   assert.equal(positionReads, 0);
 });

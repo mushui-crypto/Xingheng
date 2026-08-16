@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
-import { OkxPositionReader } from "./OkxPositionReader";
 import { OkxPositionVerification } from "./OkxPositionVerification";
 import type { OkxAccountIdentity, OkxPerpetualPosition } from "./OkxTypes";
 
@@ -85,7 +84,13 @@ class FakePositionClient {
 }
 
 function verifier(client: FakePositionClient) {
-  return new OkxPositionVerification(new OkxPositionReader(client));
+  return new OkxPositionVerification({
+    read: async ({ instId }) => Object.freeze({
+      account: await client.getAccountIdentity(),
+      positions: await client.getPosition(instId),
+      instId,
+    }),
+  });
 }
 
 function record(instrumentId = "DOGE-USDT-PERP") {

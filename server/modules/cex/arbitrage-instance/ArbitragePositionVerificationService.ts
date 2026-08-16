@@ -1,8 +1,6 @@
 import { createHash } from "node:crypto";
 import type { UserExchangeCredentialStore } from "../../credentials/UserExchangeCredentialStore";
 import {
-  absoluteDifference,
-  compareUnsignedDecimals,
   managedCurrentQuantity,
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
@@ -17,6 +15,7 @@ import type {
 } from "./ArbitragePositionVerification";
 import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
 import { canonicalInstrumentFromId } from "../Instrument";
+import { verifyPosition } from "../position/PositionVerification";
 
 type VerificationCredentialStore = Pick<UserExchangeCredentialStore, "findSummary" | "loadForAccountRead">;
 type VerificationQuery = Pick<ArbitrageInstanceQueryService, "getById" | "listActive">;
@@ -103,21 +102,24 @@ function result(
   observed: ArbitrageLegObservedState,
   checkedAt: number,
 ): ArbitrageLegVerificationResult {
-  const directionMatches = expectedManagedQuantity === "0"
-    ? observed.direction === "FLAT" || observed.actualQuantity === "0"
-    : observed.direction === leg.role;
-  const quantityMatches = compareUnsignedDecimals(
-    absoluteDifference(expectedManagedQuantity, observed.actualQuantity),
-    instance.maxResidualBaseQuantity,
-  ) <= 0;
+  const verification = verifyPosition({
+    instrumentId: leg.instrumentId,
+    side: expectedManagedQuantity === "0" ? "FLAT" : leg.role,
+    quantity: expectedManagedQuantity,
+    tolerance: instance.maxResidualBaseQuantity,
+  }, observed.snapshot);
   return Object.freeze({
     arbitrageId: instance.arbitrageId,
     legId: leg.legId,
     expectedManagedQuantity,
-    actualQuantity: observed.actualQuantity,
+    actualQuantity: observed.snapshot.quantity,
     availableQuantity: observed.availableQuantity ?? null,
-    verificationStatus: directionMatches && quantityMatches ? "MATCHED" : "MISMATCH",
-    reason: null,
+    verificationStatus: verification.status,
+    reason: verification.status === "UNKNOWN"
+      ? verification.reason === "INSTRUMENT_MISMATCH"
+        ? "instrument_mapping_unavailable"
+        : "provider_read_failed"
+      : null,
     checkedAt,
   });
 }

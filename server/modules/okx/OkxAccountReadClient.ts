@@ -103,6 +103,9 @@ export class OkxAccountReadClient {
     const rows = payload.data?.map((value) => requiredRecord(value, "OKX position")) ?? [];
     const matching = rows.filter((row) => optionalString(row.instId) === normalizedInstId);
     if (!matching.length) {
+      if (rows.length) {
+        throw new OkxAccountReadError("provider_response_invalid", "OKX position instrument does not match the request.");
+      }
       return { instId: normalizedInstId, side: "flat", contractQuantity: "0", updatedAt: null };
     }
     const nonZero = matching.filter((row) => decimalMagnitude(row.pos, "OKX position quantity") !== "0");
@@ -115,12 +118,8 @@ export class OkxAccountReadClient {
     }
     const row = sideMatched[0] ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? matching[0]!;
     const signed = finiteNumber(row.pos, "OKX position quantity");
-    const positionSide = optionalString(row.posSide)?.toLowerCase();
-    const side = signed === 0
-      ? "flat"
-      : positionSide === "long" ? "long"
-        : positionSide === "short" ? "short"
-          : signed > 0 ? "long" : "short";
+    const positionSide = optionalString(row.posSide)?.toLowerCase() ?? null;
+    const side = okxPositionSide(signed, positionSide);
     return {
       instId: normalizedInstId,
       side,
@@ -173,6 +172,14 @@ export class OkxAccountReadClient {
     }
     return payload;
   }
+}
+
+function okxPositionSide(signedQuantity: number, positionSide: string | null) {
+  if (signedQuantity === 0) return "flat" as const;
+  if (positionSide === "long") return "long" as const;
+  if (positionSide === "short") return "short" as const;
+  if (positionSide === "net") return signedQuantity > 0 ? "long" as const : "short" as const;
+  throw new OkxAccountReadError("provider_response_invalid", "OKX position side is unknown.");
 }
 
 function decimalMagnitude(value: unknown, label: string) {

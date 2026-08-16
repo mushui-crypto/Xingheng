@@ -4,6 +4,7 @@ import { BybitAccountReadProvider } from "../../account-read/BybitAccountReadPro
 import { OkxAccountReadProvider } from "../../account-read/OkxAccountReadProvider";
 import type { VenueAccountReadSnapshot } from "../../account-read/AccountReadTypes";
 import { BinanceClient } from "../../binance/BinanceClient";
+import { BinancePositionReader } from "../../binance/BinancePositionReader";
 import type {
   BinancePerpetualPositionSnapshot,
   BinanceReadOnlyAccountSnapshot,
@@ -15,7 +16,10 @@ import type { ExecutionVenue } from "../ExecutionIntent";
 import type { InstrumentCatalogPort } from "../CexCapabilityPorts";
 import { canonicalInstrumentFromId } from "../Instrument";
 import { InstrumentCapability } from "../InstrumentCapability";
+import type { PositionReader } from "../position/PositionReader";
+import { createPositionSnapshot } from "../position/PositionSnapshot";
 import { OkxAccountReadClient, OkxAccountReadError, type OkxAccountReadSnapshot, type OkxPerpetualPositionSnapshot } from "../../okx/OkxAccountReadClient";
+import { OkxPositionReader } from "../../okx/OkxPositionReader";
 import type { UserExchangeCredentialSecret } from "../../credentials/UserExchangeCredentialStore";
 import type {
   ArbitrageLegObservedState,
@@ -26,7 +30,7 @@ import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
 import { managedCurrentQuantity } from "./ArbitrageInstance";
 
-type PositionSnapshot =
+type ProviderPositionSnapshot =
   | BinancePerpetualPositionSnapshot
   | OkxPerpetualPositionSnapshot
   | BybitPerpetualPositionSnapshot
@@ -34,7 +38,7 @@ type PositionSnapshot =
 
 type VerificationClient = Readonly<{
   readAccountSnapshot(): Promise<unknown>;
-  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<PositionSnapshot>;
+  readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<ProviderPositionSnapshot>;
 }>;
 
 type BinanceVerificationClient = VerificationClient & Readonly<{
@@ -116,6 +120,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     private client: VerificationClient | null,
     private accountReader: AccountReader | null,
     private readonly instruments: VerificationInstrumentResolver,
+    private readonly positionReader?: PositionReader,
   ) {}
 
   async readLeg(leg: ArbitrageInstanceLeg): Promise<ArbitrageLegObservedState> {
@@ -140,11 +145,24 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
         : null;
       const managedQuantity = managedCurrentQuantity(leg);
       return {
-        actualQuantity: managedQuantity,
+        snapshot: createPositionSnapshot({
+          venue: this.venue,
+          accountId: leg.accountId,
+          instrumentId: leg.instrumentId,
+          side: managedQuantity === "0" ? "FLAT" : "LONG",
+          quantity: managedQuantity,
+          fetchedAt: account.latestSyncAt,
+        }),
         availableQuantity: balances.length ? available : "0",
-        direction: managedQuantity === "0" ? "FLAT" : "LONG",
-        observedAt: account.latestSyncAt,
       };
+    }
+    if (this.positionReader) {
+      const position = await this.positionReader.readPosition({
+        accountId: leg.accountId,
+        instrumentId: leg.instrumentId,
+        expectedSide: leg.role,
+      });
+      return { snapshot: position };
     }
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
     if (!binding) throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
@@ -154,9 +172,14 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     );
     const rawQuantity = "contractQuantity" in position ? position.contractQuantity : position.baseQuantity;
     return {
-      actualQuantity: multiplyDecimals(rawQuantity, binding.contractSize),
-      direction: position.side === "long" ? "LONG" : position.side === "short" ? "SHORT" : "FLAT",
-      observedAt: position.updatedAt,
+      snapshot: createPositionSnapshot({
+        venue: this.venue,
+        accountId: leg.accountId,
+        instrumentId: leg.instrumentId,
+        side: position.side === "long" ? "LONG" : position.side === "short" ? "SHORT" : "FLAT",
+        quantity: multiplyDecimals(rawQuantity, binding.contractSize),
+        fetchedAt: position.updatedAt ?? account.latestSyncAt,
+      }),
     };
   }
 
@@ -181,7 +204,13 @@ export class BinanceArbitrageLegReadProviderFactory implements ArbitrageLegReadP
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
-    return new VenueArbitrageLegReadProvider(this.venue, client, new BinanceAccountReadProvider(client), this.instruments);
+    return new VenueArbitrageLegReadProvider(
+      this.venue,
+      client,
+      new BinanceAccountReadProvider(client),
+      this.instruments,
+      new BinancePositionReader(client),
+    );
   }
 }
 
@@ -196,7 +225,21 @@ export class OkxArbitrageLegReadProviderFactory implements ArbitrageLegReadProvi
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
-    return new VenueArbitrageLegReadProvider(this.venue, client, new OkxAccountReadProvider(client), this.instruments);
+    return new VenueArbitrageLegReadProvider(
+      this.venue,
+      client,
+      new OkxAccountReadProvider(client),
+      this.instruments,
+      new OkxPositionReader(client, {
+        resolve: async (instrumentId) => {
+          const binding = await this.instruments.resolve(this.venue, instrumentId);
+          if (!binding) {
+            throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
+          }
+          return Object.freeze({ instId: binding.providerSymbol, contractSize: binding.contractSize });
+        },
+      }),
+    );
   }
 }
 

@@ -1,8 +1,17 @@
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import { OkxInstrumentMappingAdapter } from "./OkxInstrumentMapping";
-import { OkxPositionReader, type OkxPositionReadResult } from "./OkxPositionReader";
-import type { OkxPerpetualPosition } from "./OkxTypes";
+import type { OkxAccountIdentity, OkxPerpetualPosition } from "./OkxTypes";
+
+export type OkxLegacyPositionReadResult = Readonly<{
+  account: OkxAccountIdentity;
+  positions: readonly OkxPerpetualPosition[];
+  instId: string;
+}>;
+
+export type OkxLegacyPositionReader = Readonly<{
+  read(request: Readonly<{ record: ExecutionRecord; instId: string }>): Promise<OkxLegacyPositionReadResult>;
+}>;
 
 export type OkxPositionVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 
@@ -22,7 +31,7 @@ export class OkxPositionVerification {
   private readonly instrumentMapping: OkxInstrumentMappingAdapter;
 
   constructor(
-    private readonly reader: OkxPositionReader,
+    private readonly reader: OkxLegacyPositionReader,
     options: Readonly<{ instrumentMapping?: OkxInstrumentMappingAdapter }> = {},
   ) {
     this.instrumentMapping = options.instrumentMapping ?? new OkxInstrumentMappingAdapter();
@@ -82,7 +91,7 @@ export class OkxPositionVerification {
       return result(base, "UNKNOWN", message(error, "OKX instrument mapping failed."), null);
     }
 
-    let read: OkxPositionReadResult;
+    let read: OkxLegacyPositionReadResult;
     try {
       read = await this.reader.read({ record, instId });
     } catch (error) {

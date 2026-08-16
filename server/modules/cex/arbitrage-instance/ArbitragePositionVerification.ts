@@ -1,4 +1,5 @@
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
+import type { PositionSnapshot } from "../position/PositionSnapshot";
 
 export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 export type ArbitrageLegVerificationUnknownReason =
@@ -12,11 +13,9 @@ export type ArbitrageLegVerificationUnknownReason =
   | "instrument_mapping_unavailable";
 
 export type ArbitrageLegObservedState = Readonly<{
-  actualQuantity: string;
+  snapshot: PositionSnapshot;
   /** Reliable provider-reported available balance for Spot; not used as total position identity. */
   availableQuantity?: string | null;
-  direction: "LONG" | "SHORT" | "FLAT";
-  observedAt: number | null;
 }>;
 
 export type ArbitrageLegVerificationResult = Readonly<{

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { UserExchangeCredentialSecret } from "../../credentials/UserExchangeCredentialStore";
+import { createPositionSnapshot } from "../position/PositionSnapshot";
+import type { PositionSide } from "../position/PositionSide";
 import type { ArbitrageInstance } from "./ArbitrageInstance";
 import { ArbitragePositionVerificationService } from "./ArbitragePositionVerificationService";
-import type { ArbitrageLegReadProviderFactory } from "./ArbitragePositionVerification";
+import type { ArbitrageLegObservedState, ArbitrageLegReadProviderFactory } from "./ArbitragePositionVerification";
 
 const now = 1_800_000_000_000;
 
@@ -11,8 +13,8 @@ test("verifies known perpetual legs as MATCHED without mutating the arbitrage in
   const instance = fixture();
   const before = structuredClone(instance);
   const service = serviceFor([instance], {
-    long: { actualQuantity: "1.0005", direction: "LONG", observedAt: now - 1 },
-    short: { actualQuantity: "1", direction: "SHORT", observedAt: now - 1 },
+    long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "1.0005", now - 1),
+    short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "1", now - 1),
   });
 
   const result = await service.verify("user-a", "arb-1");
@@ -25,8 +27,8 @@ test("verifies known perpetual legs as MATCHED without mutating the arbitrage in
 test("reports MISMATCH for quantity or direction changes without changing lifecycle or quantities", async () => {
   const instance = fixture();
   const service = serviceFor([instance], {
-    long: { actualQuantity: "1.01", direction: "LONG", observedAt: now },
-    short: { actualQuantity: "1", direction: "LONG", observedAt: now },
+    long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "1.01"),
+    short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "LONG", "1"),
   });
 
   const result = await service.verify("user-a", "arb-1");
@@ -39,7 +41,7 @@ test("reports MISMATCH for quantity or direction changes without changing lifecy
 test("uses spot balance observations and keeps provider failures UNKNOWN", async () => {
   const spot = fixture({ strategyType: "SPOT_PERPETUAL", longInstrumentId: "XAUT-USDT-SPOT" });
   const service = serviceFor([spot], {
-    long: { actualQuantity: "1", availableQuantity: "0.9", direction: "LONG", observedAt: now },
+    long: observed("binance", "binance:account-a", "XAUT-USDT-SPOT", "LONG", "1", now, "0.9"),
     short: new Error("provider failed"),
   });
 
@@ -56,8 +58,8 @@ test("keeps missing, cross-user, credential mismatch, and overlapping aggregate 
   const target = fixture();
   const overlap = fixture({ arbitrageId: "arb-2" });
   const service = serviceFor([target, overlap], {
-    long: { actualQuantity: "2", direction: "LONG", observedAt: now },
-    short: { actualQuantity: "2", direction: "SHORT", observedAt: now },
+    long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "2"),
+    short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "2"),
   });
 
   assert.equal(await service.verify("user-b", "arb-1"), null);
@@ -133,7 +135,7 @@ test("rejects a replaced credential when an instance is bound to a credential-on
 
 function serviceFor(
   instances: ArbitrageInstance[],
-  observations: Record<string, { actualQuantity: string; availableQuantity?: string | null; direction: "LONG" | "SHORT" | "FLAT"; observedAt: number | null } | Error>,
+  observations: Record<string, ArbitrageLegObservedState | Error>,
 ) {
   const factories = ["binance", "okx"] as const;
   return new ArbitragePositionVerificationService(
@@ -187,10 +189,25 @@ function factory(
       readLeg: async (leg) => {
         events.push(`read:${venue}:${leg.legId}`);
         if (fail) throw new Error("failed");
-        return { actualQuantity: "1", direction: leg.role, observedAt: now };
+        return observed(venue, leg.accountId, leg.instrumentId, leg.role, "1");
       },
       dispose: () => { events.push(`dispose:${venue}`); },
     }),
+  };
+}
+
+function observed(
+  venue: "binance" | "okx",
+  accountId: string,
+  instrumentId: string,
+  side: PositionSide,
+  quantity: string,
+  fetchedAt = now,
+  availableQuantity?: string | null,
+): ArbitrageLegObservedState {
+  return {
+    snapshot: createPositionSnapshot({ venue, accountId, instrumentId, side, quantity, fetchedAt }),
+    ...(availableQuantity === undefined ? {} : { availableQuantity }),
   };
 }
 
