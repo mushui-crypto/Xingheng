@@ -1,0 +1,295 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createOkxSignature, mapOkxOrderStatus, OkxClient, OkxProviderError } from "./OkxClient";
+
+const credentials = Object.freeze({
+  apiKey: "okx-api-key",
+  apiSecret: "okx-api-secret",
+  passphrase: "okx-passphrase",
+});
+const now = 1_800_000_000_000;
+const timestamp = new Date(now).toISOString();
+
+test("signs the exact OKX REST payload", () => {
+  assert.equal(
+    createOkxSignature(
+      credentials.apiSecret,
+      timestamp,
+      "POST",
+      "/api/v5/trade/order",
+      "{\"instId\":\"DOGE-USDT-SWAP\",\"tdMode\":\"cross\"}",
+    ),
+    "G+iUZ1XjxBWDeZmaRxveXU11KgRIxQQe2T7PMQ1IxeY=",
+  );
+});
+
+test("place order maps request body and authentication headers", async () => {
+  const calls: Array<{ body: any; headers: Headers; method: string; path: string }> = [];
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({
+        body: JSON.parse(String(init?.body)),
+        headers: new Headers(init?.headers),
+        method: init?.method ?? "GET",
+        path: url.pathname,
+      });
+      return Response.json({ code: "0", data: [{ ordId: "12345", clOrdId: "clientA1", instId: "DOGE-USDT-SWAP", sCode: "0" }] });
+    }) as typeof fetch,
+  });
+
+  const result = await client.placeOrder({
+    instId: "DOGE-USDT-SWAP",
+    tdMode: "cross",
+    side: "buy",
+    ordType: "limit",
+    quantity: "12.5",
+    price: "0.12345",
+    clOrdId: "clientA1",
+    reduceOnly: false,
+  });
+
+  assert.deepEqual(result, { ordId: "12345", clOrdId: "clientA1", instId: "DOGE-USDT-SWAP" });
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]?.method, "POST");
+  assert.equal(calls[0]?.path, "/api/v5/trade/order");
+  assert.deepEqual(calls[0]?.body, {
+    instId: "DOGE-USDT-SWAP",
+    tdMode: "cross",
+    side: "buy",
+    ordType: "limit",
+    sz: "12.5",
+    clOrdId: "clientA1",
+    px: "0.12345",
+    reduceOnly: "false",
+  });
+  assert.equal(calls[0]?.headers.get("OK-ACCESS-KEY"), credentials.apiKey);
+  assert.equal(calls[0]?.headers.get("OK-ACCESS-PASSPHRASE"), credentials.passphrase);
+  assert.equal(calls[0]?.headers.get("OK-ACCESS-TIMESTAMP"), timestamp);
+  assert.equal(calls[0]?.headers.get("OK-ACCESS-SIGN"), createOkxSignature(
+    credentials.apiSecret,
+    timestamp,
+    "POST",
+    "/api/v5/trade/order",
+    JSON.stringify(calls[0]?.body),
+  ));
+});
+
+test("market reduce-only close order omits price and preserves reduceOnly=true", async () => {
+  let body: any = null;
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ code: "0", data: [{ ordId: "12346", clOrdId: "closeA1", instId: "DOGE-USDT-SWAP", sCode: "0" }] });
+    }) as typeof fetch,
+  });
+
+  await client.placeOrder({
+    instId: "DOGE-USDT-SWAP",
+    tdMode: "cross",
+    side: "sell",
+    ordType: "market",
+    quantity: "12.5",
+    clOrdId: "closeA1",
+    reduceOnly: true,
+  });
+
+  assert.deepEqual(body, {
+    instId: "DOGE-USDT-SWAP",
+    tdMode: "cross",
+    side: "sell",
+    ordType: "market",
+    sz: "12.5",
+    clOrdId: "closeA1",
+    reduceOnly: "true",
+  });
+});
+
+test("get order parses Decimal strings and status mapping", async () => {
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      assert.equal(url.pathname, "/api/v5/trade/order");
+      assert.equal(url.searchParams.get("instId"), "DOGE-USDT-SWAP");
+      assert.equal(url.searchParams.get("clOrdId"), "clientA1");
+      return Response.json({ code: "0", data: [{
+        instId: "DOGE-USDT-SWAP",
+        ordId: "12345",
+        clOrdId: "clientA1",
+        state: "partially_filled",
+        sz: "12.5",
+        accFillSz: "1.25",
+        avgPx: "0.12345",
+        fee: "-0.001",
+        uTime: "1800000000123",
+      }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.getOrder({ instId: "DOGE-USDT-SWAP", clOrdId: "clientA1" }), {
+    instId: "DOGE-USDT-SWAP",
+    ordId: "12345",
+    clOrdId: "clientA1",
+    status: "PENDING_CONFIRMATION",
+    statusReason: null,
+    rawState: "partially_filled",
+    requestedQuantity: "12.5",
+    filledQuantity: "1.25",
+    averagePrice: "0.12345",
+    fee: "-0.001",
+    updatedAt: 1_800_000_000_123,
+  });
+});
+
+test("cancel order maps request and response identity", async () => {
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      assert.equal(url.pathname, "/api/v5/trade/cancel-order");
+      assert.equal(init?.method, "POST");
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        instId: "DOGE-USDT-SWAP",
+        ordId: "12345",
+      });
+      return Response.json({ code: "0", data: [{ instId: "DOGE-USDT-SWAP", ordId: "12345", clOrdId: "clientA1", sCode: "0" }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.cancelOrder({ instId: "DOGE-USDT-SWAP", ordId: "12345" }), {
+    instId: "DOGE-USDT-SWAP",
+    ordId: "12345",
+    clOrdId: "clientA1",
+  });
+});
+
+test("get position parses perpetual position with Decimal strings", async () => {
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      assert.equal(url.pathname, "/api/v5/account/positions");
+      assert.equal(url.searchParams.get("instId"), "DOGE-USDT-SWAP");
+      return Response.json({ code: "0", data: [{
+        instId: "DOGE-USDT-SWAP",
+        posSide: "short",
+        pos: "-12.5",
+        avgPx: "0.123",
+        markPx: "0.120",
+        liqPx: "0.222",
+        uTime: "1800000000999",
+      }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.getPosition("DOGE-USDT-SWAP"), [{
+    instId: "DOGE-USDT-SWAP",
+    side: "short",
+    quantity: "12.5",
+    averagePrice: "0.123",
+    markPrice: "0.120",
+    liquidationPrice: "0.222",
+    updatedAt: 1_800_000_000_999,
+  }]);
+});
+
+test("readiness GET paths read account identity and open orders without mutation methods", async () => {
+  const calls: Array<{ method: string; path: string; query: string; body: string | null }> = [];
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({
+        method: init?.method ?? "GET",
+        path: url.pathname,
+        query: url.search,
+        body: init?.body === undefined ? null : String(init.body),
+      });
+      if (url.pathname === "/api/v5/account/config") {
+        return Response.json({ code: "0", data: [{ uid: "123456789", acctLv: "3" }] });
+      }
+      if (url.pathname === "/api/v5/trade/orders-pending") {
+        return Response.json({ code: "0", data: [{
+          instId: "DOGE-USDT-SWAP",
+          ordId: "12347",
+          clOrdId: "openA1",
+          state: "live",
+          sz: "12.5",
+          accFillSz: "0",
+          avgPx: "",
+          fee: "0",
+          uTime: "1800000000999",
+        }] });
+      }
+      throw new Error(`Unexpected path: ${url.pathname}`);
+    }) as typeof fetch,
+  });
+
+  const identity = await client.getAccountIdentity();
+  const openOrders = await client.getOpenOrders("DOGE-USDT-SWAP");
+
+  assert.equal(identity.accountId, `okx:${identity.accountFingerprint}`);
+  assert.equal(identity.accountLevel, "3");
+  assert.deepEqual(openOrders, [{
+    instId: "DOGE-USDT-SWAP",
+    ordId: "12347",
+    clOrdId: "openA1",
+    status: "SUBMITTED",
+    statusReason: null,
+    rawState: "live",
+    requestedQuantity: "12.5",
+    filledQuantity: "0",
+    averagePrice: null,
+    fee: "0",
+    updatedAt: 1_800_000_000_999,
+  }]);
+  assert.deepEqual(calls.map((call) => call.method), ["GET", "GET"]);
+  assert.equal(calls.every((call) => call.body === null), true);
+  assert.deepEqual(calls.map((call) => call.path), [
+    "/api/v5/account/config",
+    "/api/v5/trade/orders-pending",
+  ]);
+  assert.equal(calls[1]?.query, "?instId=DOGE-USDT-SWAP");
+});
+
+test("status mapping preserves UNKNOWN reason", () => {
+  assert.deepEqual(mapOkxOrderStatus("filled"), { status: "CONFIRMED", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("live"), { status: "SUBMITTED", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("partially_filled"), { status: "PENDING_CONFIRMATION", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("canceled"), { status: "FAILED", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("cancelled"), { status: "FAILED", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("rejected"), { status: "FAILED", reason: null });
+  assert.deepEqual(mapOkxOrderStatus("mystery"), { status: "UNKNOWN", reason: "unmapped OKX order state: mystery" });
+});
+
+test("provider and item errors are mapped without swallowing reasons", async () => {
+  const providerRejected = new OkxClient(() => credentials, {
+    fetchImpl: (async () => Response.json({ code: "50101", msg: "bad key", data: [] }, { status: 401 })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => providerRejected.getOrder({ instId: "DOGE-USDT-SWAP", clOrdId: "clientA1" }),
+    (error: unknown) => error instanceof OkxProviderError
+      && error.category === "credential_validation_failed"
+      && error.providerCode === "50101",
+  );
+
+  const itemRejected = new OkxClient(() => credentials, {
+    fetchImpl: (async () => Response.json({ code: "0", data: [{ sCode: "51008", sMsg: "insufficient balance" }] })) as typeof fetch,
+  });
+  await assert.rejects(
+    () => itemRejected.placeOrder({
+      instId: "DOGE-USDT-SWAP",
+      tdMode: "cross",
+      side: "buy",
+      ordType: "market",
+      quantity: "1",
+      clOrdId: "clientA1",
+    }),
+    (error: unknown) => error instanceof OkxProviderError
+      && error.category === "provider_request_rejected"
+      && error.providerCode === "51008",
+  );
+});
