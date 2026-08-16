@@ -2,6 +2,7 @@ import type { InstrumentCatalogPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalInstrument } from "../cex/CexCanonicalModels";
 import { canonicalInstrumentId } from "../cex/Instrument";
 import type { OkxSwapInstrument } from "./OkxReadTypes";
+import type { OkxQuantityRulesSnapshot } from "./OkxQuantitySemantics";
 
 type OkxInstrumentSource = () => Promise<{ instruments: OkxSwapInstrument[]; fetchedAt: number }>;
 type CatalogDiagnostic = Readonly<{ venue: "okx"; skipped: number; reasons: Readonly<Record<string, number>> }>;
@@ -67,6 +68,22 @@ export function toCanonicalOkxInstrument(raw: OkxSwapInstrument, fetchedAt: numb
     status: raw.state === "live" ? "trading" : raw.state === "suspend" ? "paused" : raw.state === "preopen" ? "paused" : raw.state === "expired" ? "delisted" : "unknown",
     fetchedAt,
   };
+}
+
+export function toOkxQuantityRules(raw: OkxSwapInstrument, fetchedAt: number): OkxQuantityRulesSnapshot {
+  return Object.freeze({
+    instType: raw.instType,
+    instId: raw.instId,
+    uly: raw.uly,
+    ctType: raw.ctType,
+    ctValCcy: raw.ctValCcy,
+    settleCcy: raw.settleCcy,
+    lotSz: raw.lotSz,
+    minSz: raw.minSz,
+    ctVal: raw.ctVal,
+    state: raw.state,
+    fetchedAt,
+  });
 }
 
 function providerNumber(value: string, field: string) {

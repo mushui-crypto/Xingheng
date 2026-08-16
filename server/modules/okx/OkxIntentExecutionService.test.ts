@@ -3,6 +3,8 @@ import test from "node:test";
 import { OkxIntentExecutionService, okxClientOrderIdFor } from "./OkxIntentExecutionService";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
+import { okxTestQuantityRules, okxTestQuantityRulesSource } from "./OkxTestFixtures";
+import type { OkxQuantityRulesSnapshot, OkxQuantityRulesSource } from "./OkxQuantitySemantics";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -17,11 +19,24 @@ const testMutationGuard = () => new ExecutionMutationSafetyGuard({
   liveTradingEnabled: true,
   killSwitchActive: false,
 });
+const serviceOptions = (rules: Partial<OkxQuantityRulesSnapshot> = {}) => ({
+  clock: () => now,
+  mutationSafetyGuard: testMutationGuard(),
+  quantityRulesSource: okxTestQuantityRulesSource(now, rules),
+});
+const missingRuleSource = (field: keyof OkxQuantityRulesSnapshot): OkxQuantityRulesSource => {
+  const rules = { ...okxTestQuantityRules(now) } as Record<string, unknown>;
+  delete rules[field];
+  return () => rules as unknown as OkxQuantityRulesSnapshot;
+};
 
-test("submits an OKX open long as a market buy on the venue instrument", async () => {
+test("converts 100 canonical DOGE to 10 OKX contracts when ctVal=10 before market submit", async () => {
   const client = new FakeOkxExecutionClient();
-  const service = new OkxIntentExecutionService(client, { clock: () => now, mutationSafetyGuard: testMutationGuard() });
-  const intent = executionIntent({ side: "buy" });
+  const service = new OkxIntentExecutionService(client, serviceOptions({ ctVal: "10" }));
+  const intent = executionIntent({
+    side: "buy",
+    quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "100" },
+  });
 
   const result = await service.execute(intent);
 
@@ -39,7 +54,7 @@ test("submits an OKX open long as a market buy on the venue instrument", async (
     tdMode: "cross",
     side: "buy",
     ordType: "market",
-    quantity: "12.5",
+    quantity: "10",
     clOrdId: okxClientOrderIdFor(intent),
     reduceOnly: false,
   }]);
@@ -49,7 +64,7 @@ test("submits an OKX open short as a market sell", async () => {
   const client = new FakeOkxExecutionClient();
   const intent = executionIntent({ side: "sell", intentId: "intent-short-1" });
 
-  await new OkxIntentExecutionService(client, { mutationSafetyGuard: testMutationGuard() }).execute(intent);
+  await new OkxIntentExecutionService(client, serviceOptions()).execute(intent);
 
   assert.equal(client.placeRequests[0]?.side, "sell");
   assert.equal(client.placeRequests[0]?.reduceOnly, false);
@@ -64,7 +79,7 @@ test("perpetual close preserves reduceOnly=true at the OKX order boundary", asyn
     orderConstraints: { reduceOnly: true },
   });
 
-  await new OkxIntentExecutionService(client, { mutationSafetyGuard: testMutationGuard() }).execute(intent);
+  await new OkxIntentExecutionService(client, serviceOptions()).execute(intent);
 
   assert.equal(client.placeRequests[0]?.reduceOnly, true);
   assert.equal(client.placeRequests[0]?.ordType, "market");
@@ -72,7 +87,7 @@ test("perpetual close preserves reduceOnly=true at the OKX order boundary", asyn
 
 test("queries map OKX order states and preserve UNKNOWN reason", async () => {
   const client = new FakeOkxExecutionClient();
-  const service = new OkxIntentExecutionService(client, { clock: () => now, mutationSafetyGuard: testMutationGuard() });
+  const service = new OkxIntentExecutionService(client, serviceOptions());
 
   for (const fixture of [
     { rawState: "filled", expected: "CONFIRMED", reason: null },
@@ -84,6 +99,7 @@ test("queries map OKX order states and preserve UNKNOWN reason", async () => {
   ] as const) {
     client.orderState = fixture.rawState;
     const result = await service.query({
+      instrumentId: "DOGE-USDT-PERP",
       instId: "DOGE-USDT-SWAP",
       ordId: "7001",
       clOrdId: "sxokxidentity000000000000000000",
@@ -96,11 +112,26 @@ test("queries map OKX order states and preserve UNKNOWN reason", async () => {
   }
 });
 
+test("converts accFillSz=7 contracts to canonical filledBaseQuantity=70 when ctVal=10", async () => {
+  const client = new FakeOkxExecutionClient();
+  client.filledQuantityOverride = "7";
+  const service = new OkxIntentExecutionService(client, serviceOptions({ ctVal: "10" }));
+
+  const result = await service.query({
+    instrumentId: "DOGE-USDT-PERP",
+    instId: "DOGE-USDT-SWAP",
+    ordId: "7001",
+    clOrdId: "sxokxidentity000000000000000000",
+  });
+
+  assert.equal(result.observation.filledBaseQuantity, "70");
+});
+
 test("rejects unsupported instruments before provider mutation", async () => {
   const client = new FakeOkxExecutionClient();
 
   await assert.rejects(
-    () => new OkxIntentExecutionService(client, { mutationSafetyGuard: testMutationGuard() }).execute(executionIntent({
+    () => new OkxIntentExecutionService(client, serviceOptions()).execute(executionIntent({
       instrumentId: "BTC-USDT-PERP",
       quantity: { asset: { symbol: "BTC", type: "DIGITAL_ASSET" }, quantity: "0.01" },
     })),
@@ -109,11 +140,64 @@ test("rejects unsupported instruments before provider mutation", async () => {
   assert.equal(client.placeRequests.length, 0);
 });
 
+test("fails closed before provider mutation for unavailable, stale, invalid, or mismatched quantity rules", async (t) => {
+  for (const fixture of [
+    { name: "unavailable", source: undefined, pattern: /unavailable/u },
+    { name: "stale", source: okxTestQuantityRulesSource(now - 300_001), pattern: /stale/u },
+    { name: "missing lotSz", source: missingRuleSource("lotSz"), pattern: /lotSz/u },
+    { name: "missing minSz", source: missingRuleSource("minSz"), pattern: /minSz/u },
+    { name: "missing ctVal", source: missingRuleSource("ctVal"), pattern: /ctVal/u },
+    { name: "invalid lotSz", source: okxTestQuantityRulesSource(now, { lotSz: "0" }), pattern: /lotSz/u },
+    { name: "invalid minSz", source: okxTestQuantityRulesSource(now, { minSz: "0" }), pattern: /minSz/u },
+    { name: "invalid ctVal", source: okxTestQuantityRulesSource(now, { ctVal: "0" }), pattern: /ctVal/u },
+    { name: "ctValCcy mismatch", source: okxTestQuantityRulesSource(now, { ctValCcy: "BTC" }), pattern: /identity/u },
+    { name: "settleCcy mismatch", source: okxTestQuantityRulesSource(now, { settleCcy: "USDC" }), pattern: /identity/u },
+    { name: "instrument identity mismatch", source: okxTestQuantityRulesSource(now, { uly: "BTC-USDT" }), pattern: /identity/u },
+    { name: "instId mismatch", source: okxTestQuantityRulesSource(now, { instId: "BTC-USDT-SWAP" }), pattern: /identity/u },
+    { name: "unsupported contract type", source: okxTestQuantityRulesSource(now, { ctType: "inverse" }), pattern: /identity/u },
+    { name: "instrument not live", source: okxTestQuantityRulesSource(now, { state: "suspend" }), pattern: /identity/u },
+  ] as const) {
+    await t.test(fixture.name, async () => {
+      const client = new FakeOkxExecutionClient();
+      await assert.rejects(
+        () => new OkxIntentExecutionService(client, {
+          clock: () => now,
+          mutationSafetyGuard: testMutationGuard(),
+          quantityRulesSource: fixture.source,
+        }).execute(executionIntent()),
+        fixture.pattern,
+      );
+      assert.equal(client.placeRequests.length, 0);
+    });
+  }
+});
+
+test("fails closed before provider mutation when converted contracts violate lotSz or minSz", async (t) => {
+  for (const fixture of [
+    { name: "not exactly divisible", quantity: "95", rules: { ctVal: "10" } },
+    { name: "minimum", quantity: "0.1", rules: { minSz: "2" } },
+  ] as const) {
+    await t.test(fixture.name, async () => {
+      const client = new FakeOkxExecutionClient();
+      await assert.rejects(() => new OkxIntentExecutionService(client, {
+        clock: () => now,
+        mutationSafetyGuard: testMutationGuard(),
+        quantityRulesSource: okxTestQuantityRulesSource(now, fixture.rules),
+      }).execute(executionIntent({ quantity: {
+        asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },
+        quantity: fixture.quantity,
+      } })), /lotSz|minSz/u);
+      assert.equal(client.placeRequests.length, 0);
+    });
+  }
+});
+
 class FakeOkxExecutionClient {
   readonly placeRequests: OkxPlaceOrderRequest[] = [];
   readonly getRequests: OkxGetOrderRequest[] = [];
   readonly cancelRequests: OkxCancelOrderRequest[] = [];
   orderState = "filled";
+  filledQuantityOverride: string | null = null;
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
@@ -141,8 +225,9 @@ class FakeOkxExecutionClient {
               : "UNKNOWN",
       statusReason: this.orderState === "mystery" ? "unmapped OKX order state: mystery" : null,
       rawState: this.orderState,
-      requestedQuantity: "12.5",
-      filledQuantity: this.orderState === "filled" ? "12.5" : "1.25",
+      requestedQuantity: "125",
+      filledQuantity: this.filledQuantityOverride
+        ?? (this.orderState === "filled" ? "125" : "12"),
       averagePrice: "0.123",
       fee: "-0.001",
       updatedAt: now + 100,

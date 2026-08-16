@@ -11,6 +11,7 @@ import {
 } from "./OkxExecutionOrderReferenceStore";
 import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
+import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -21,6 +22,12 @@ import type {
 
 const now = 1_800_000_000_000;
 const fakeMutationGuard = () => new ExecutionMutationSafetyGuard({ liveTradingEnabled: true, killSwitchActive: false });
+const runtimeOptions = (executionId?: string) => ({
+  ...(executionId === undefined ? {} : { createExecutionId: () => executionId }),
+  clock: () => now,
+  mutationSafetyGuard: fakeMutationGuard(),
+  quantityRulesSource: okxTestQuantityRulesSource(now),
+});
 
 test("runtime submits through the authenticated user's OKX service and saves order identity", async () => {
   const serviceA = new FakeOkxRuntimeService("okx:account-user-a");
@@ -31,7 +38,7 @@ test("runtime submits through the authenticated user's OKX service and saves ord
     new FakeOkxRuntimeRegistry({ "user-a": serviceA, "user-b": serviceB }),
     records,
     references,
-    { clock: () => now, createExecutionId: () => "execution-okx-1", mutationSafetyGuard: fakeMutationGuard() },
+    runtimeOptions("execution-okx-1"),
   );
   const intent = executionIntent({ userId: "user-a", accountId: "okx:account-user-a" });
 
@@ -72,7 +79,7 @@ test("runtime close sends reduceOnly=true for perpetual close", async () => {
     new FakeOkxRuntimeRegistry({ "user-a": service }),
     new FakeExecutionRecordStore(),
     new InMemoryOkxExecutionOrderReferenceStore(),
-    { clock: () => now, createExecutionId: () => "execution-close-1", mutationSafetyGuard: fakeMutationGuard() },
+    runtimeOptions("execution-close-1"),
   );
 
   await runtime.close(executionIntent({
@@ -98,7 +105,7 @@ test("query uses saved OKX identity and updates record state", async () => {
     new FakeOkxRuntimeRegistry({ "user-a": service }),
     records,
     references,
-    { clock: () => now + 1_000 },
+    { ...runtimeOptions(), clock: () => now + 1_000, quantityRulesSource: okxTestQuantityRulesSource(now + 1_000) },
   );
 
   const result = await runtime.query("user-a", "execution-query-okx");
@@ -178,8 +185,8 @@ class FakeOkxRuntimeService {
       status: this.orderState === "filled" ? "CONFIRMED" : "PENDING_CONFIRMATION",
       statusReason: null,
       rawState: this.orderState,
-      requestedQuantity: "12.5",
-      filledQuantity: this.orderState === "filled" ? "12.5" : "1.25",
+      requestedQuantity: "125",
+      filledQuantity: this.orderState === "filled" ? "125" : "12.5",
       averagePrice: "0.123",
       fee: "-0.001",
       updatedAt: now + 100,

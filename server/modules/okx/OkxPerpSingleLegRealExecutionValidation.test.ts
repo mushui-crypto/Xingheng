@@ -9,6 +9,7 @@ import { ExecutionCapabilityRegistry, executionCapability } from "../cex/Executi
 import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
+import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
 import type { OkxExecutionOrderReference } from "./OkxExecutionOrderReferenceStore";
 import type {
   OkxCancelOrderRequest,
@@ -44,6 +45,7 @@ test("OKX perpetual single-leg long and short validation keeps the execution cha
           clock: () => now,
           createExecutionId: () => `execution-${scenario.scenarioId}-${++executionSequence}`,
           mutationSafetyGuard: fakeMutationGuard(),
+          quantityRulesSource: okxTestQuantityRulesSource(now),
         },
       );
       const quantity = "12.5";
@@ -75,7 +77,7 @@ test("OKX perpetual single-leg long and short validation keeps the execution cha
       assert.equal(openQuery.observation.filledBaseQuantity, quantity);
       assert.equal(openQuery.fee, "-0.001");
       assert.equal(service.position("DOGE-USDT-SWAP").side, scenario.expectedDirection);
-      assert.equal(service.position("DOGE-USDT-SWAP").quantity, quantity);
+      assert.equal(service.position("DOGE-USDT-SWAP").quantity, "125");
 
       const closeIntent = createExecutionIntent({
         intentId: `intent-close-${scenario.scenarioId}`,

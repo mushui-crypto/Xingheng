@@ -11,13 +11,14 @@ export type OkxCredentialProvider = () => OkxCredentials;
 export type OkxOrderSide = "buy" | "sell";
 export type OkxTradeMode = "cross" | "isolated";
 export type OkxOrderType = "market" | "limit";
+export type OkxContractQuantity = string;
 
 export type OkxPlaceOrderRequest = Readonly<{
   instId: string;
   tdMode: OkxTradeMode;
   side: OkxOrderSide;
   ordType: OkxOrderType;
-  quantity: string;
+  quantity: OkxContractQuantity;
   clOrdId: string;
   price?: string;
   reduceOnly?: boolean;
@@ -47,8 +48,8 @@ export type OkxProviderOrder = Readonly<OkxOrderIdentity & {
   status: OkxExecutionStatus;
   statusReason: string | null;
   rawState: string;
-  requestedQuantity: string;
-  filledQuantity: string;
+  requestedQuantity: OkxContractQuantity;
+  filledQuantity: OkxContractQuantity;
   averagePrice: string | null;
   fee: string;
   updatedAt: number | null;

@@ -12,6 +12,7 @@ import {
 import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
 import { mapOkxOrderStatus } from "./OkxClient";
+import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -22,6 +23,11 @@ import type {
 
 const now = 1_800_000_000_000;
 const fakeMutationGuard = () => new ExecutionMutationSafetyGuard({ liveTradingEnabled: true, killSwitchActive: false });
+const verificationOptions = (clock = now) => ({
+  clock: () => clock,
+  mutationSafetyGuard: fakeMutationGuard(),
+  quantityRulesSource: okxTestQuantityRulesSource(clock),
+});
 
 test("verifies submit chain from ExecutionIntent through registry-backed OKX capability to ExecutionRecord", async () => {
   const service = new FakeOkxVerificationService("okx:account-user-a");
@@ -31,7 +37,7 @@ test("verifies submit chain from ExecutionIntent through registry-backed OKX cap
     new FakeOkxVerificationRegistry(service),
     records,
     references,
-    { clock: () => now, createExecutionId: () => "execution-submit-okx", mutationSafetyGuard: fakeMutationGuard() },
+    { ...verificationOptions(), createExecutionId: () => "execution-submit-okx" },
   );
   const intent = executionIntent();
 
@@ -50,7 +56,7 @@ test("verifies submit chain from ExecutionIntent through registry-backed OKX cap
     tdMode: "cross",
     side: "buy",
     ordType: "market",
-    quantity: "12.5",
+    quantity: "125",
     clOrdId: okxClientOrderIdFor(intent),
     reduceOnly: false,
   }]);
@@ -71,7 +77,7 @@ test("verifies submit chain from ExecutionIntent through registry-backed OKX cap
 test("verifies query path maps OKX filled, partial, failed, and unknown states into ExecutionRecord", async (t) => {
   for (const fixture of [
     { rawState: "filled", expectedRecordState: "CONFIRMED", expectedFilled: "12.5", expectedReason: null },
-    { rawState: "partially_filled", expectedRecordState: "PENDING_CONFIRMATION", expectedFilled: "1.25", expectedReason: null },
+    { rawState: "partially_filled", expectedRecordState: "PENDING_CONFIRMATION", expectedFilled: "1.2", expectedReason: null },
     { rawState: "rejected", expectedRecordState: "FAILED", expectedFilled: "0", expectedReason: null },
     { rawState: "mystery", expectedRecordState: "UNKNOWN", expectedFilled: "0", expectedReason: "unmapped OKX order state: mystery" },
   ] as const) {
@@ -85,7 +91,7 @@ test("verifies query path maps OKX filled, partial, failed, and unknown states i
         new FakeOkxVerificationRegistry(service),
         records,
         references,
-        { clock: () => now + 1_000 },
+        verificationOptions(now + 1_000),
       );
 
       const result = await runtime.query("user-a", `execution-query-${fixture.rawState}`);
@@ -111,7 +117,7 @@ test("verifies cancel path uses saved ordId, clOrdId, and instId without schema 
     new FakeOkxVerificationRegistry(service),
     records,
     references,
-    { clock: () => now + 2_000, mutationSafetyGuard: fakeMutationGuard() },
+    verificationOptions(now + 2_000),
   );
 
   const result = await runtime.cancel("user-a", "execution-query-cancel");
@@ -163,8 +169,8 @@ class FakeOkxVerificationService {
     this.getRequests.push(request);
     const mapped = mapOkxOrderStatus(this.rawState);
     const filledQuantity = this.rawState === "filled"
-      ? "12.5"
-      : this.rawState === "partially_filled" ? "1.25" : "0";
+      ? "125"
+      : this.rawState === "partially_filled" ? "12" : "0";
     return {
       instId: request.instId,
       ordId: request.ordId ?? "9001",
@@ -172,7 +178,7 @@ class FakeOkxVerificationService {
       status: mapped.status,
       statusReason: mapped.reason,
       rawState: this.rawState,
-      requestedQuantity: "12.5",
+      requestedQuantity: "125",
       filledQuantity,
       averagePrice: filledQuantity === "0" ? null : "0.123",
       fee: "0",

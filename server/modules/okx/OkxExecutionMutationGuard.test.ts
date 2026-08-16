@@ -3,6 +3,7 @@ import test from "node:test";
 import { ExecutionMutationSafetyGuard, ExecutionMutationSafetyError } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { OkxIntentExecutionService } from "./OkxIntentExecutionService";
+import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
 import type { OkxCancelOrderRequest, OkxCancelOrderResult, OkxGetOrderRequest, OkxPlaceOrderRequest, OkxProviderOrder } from "./OkxTypes";
 
 const now = 1_800_000_000_000;
@@ -10,6 +11,8 @@ const now = 1_800_000_000_000;
 test("LIVE=false blocks OKX placeOrder before fake provider mutation", async () => {
   const client = new FakeClient();
   const service = new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
     mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: false }),
   });
 
@@ -21,6 +24,8 @@ test("LIVE=false blocks OKX placeOrder before fake provider mutation", async () 
 test("kill switch blocks OKX placeOrder before fake provider mutation", async () => {
   const client = new FakeClient();
   const service = new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
     mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: true, killSwitchActive: true }),
   });
 
@@ -32,6 +37,8 @@ test("kill switch blocks OKX placeOrder before fake provider mutation", async ()
 test("provider identity hook blocks OKX placeOrder before fake provider mutation", async () => {
   const client = new FakeClient();
   const service = new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
     mutationSafetyGuard: new ExecutionMutationSafetyGuard({
       liveTradingEnabled: true,
       killSwitchActive: false,
@@ -47,6 +54,8 @@ test("provider identity hook blocks OKX placeOrder before fake provider mutation
 test("enabled gates allow OKX placeOrder and cancelOrder to reach a fake provider", async () => {
   const client = new FakeClient();
   const service = new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
     mutationSafetyGuard: new ExecutionMutationSafetyGuard({
       liveTradingEnabled: true,
       killSwitchActive: false,
@@ -60,6 +69,7 @@ test("enabled gates allow OKX placeOrder and cancelOrder to reach a fake provide
 
   await service.execute(executionIntent);
   await service.cancel({
+    instrumentId: "DOGE-USDT-PERP",
     instId: "DOGE-USDT-SWAP",
     ordId: "9001",
     clOrdId: "sxokxidentity000000000000000000",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { OkxFundingRate } from "./OkxFundingRate";
-import { OkxInstrumentCatalog } from "./OkxInstrumentCatalog";
+import { OkxInstrumentCatalog, toOkxQuantityRules } from "./OkxInstrumentCatalog";
 import { createOkxTickerSource, OkxMarketData } from "./OkxMarketData";
 import type { OkxFundingRateRecord, OkxSwapInstrument, OkxTickerRecord } from "./OkxReadTypes";
 
@@ -43,6 +43,22 @@ test("OKX catalog preserves contract-denominated quantity semantics", async () =
     status: "trading",
     fetchedAt,
   }]);
+});
+
+test("OKX catalog exposes exact quantity metadata without numeric conversion", () => {
+  assert.deepEqual(toOkxQuantityRules(rawInstrument, fetchedAt), {
+    instType: "SWAP",
+    instId: "BTC-USDT-SWAP",
+    uly: "BTC-USDT",
+    ctType: "linear",
+    ctValCcy: "BTC",
+    settleCcy: "USDT",
+    lotSz: "1",
+    minSz: "1",
+    ctVal: "0.01",
+    state: "live",
+    fetchedAt,
+  });
 });
 
 test("OKX catalog skips inverse contracts without losing supported linear contracts", async () => {

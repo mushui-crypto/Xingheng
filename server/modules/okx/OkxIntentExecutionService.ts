@@ -18,6 +18,13 @@ import {
   OkxInstrumentMappingAdapter,
   type OkxInstrumentResolution,
 } from "./OkxInstrumentMapping";
+import {
+  loadOkxQuantityRules,
+  OKX_QUANTITY_RULES_MAX_AGE_MS,
+  okxBaseQuantityToContracts,
+  okxContractQuantityToBase,
+  type OkxQuantityRulesSource,
+} from "./OkxQuantitySemantics";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -42,6 +49,8 @@ export type OkxIntentExecutionServiceOptions = Readonly<{
   tdMode?: "cross" | "isolated";
   instrumentMapping?: OkxInstrumentMappingAdapter;
   limitPriceResolver?: OkxLimitPriceResolver;
+  quantityRulesSource?: OkxQuantityRulesSource;
+  quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
 }>;
@@ -67,6 +76,7 @@ export type OkxExecutionQueryResult = Readonly<{
 }>;
 
 export type OkxExecutionOrderLookup = Readonly<{
+  instrumentId: string;
   instId: string;
   ordId?: string;
   clOrdId: string;
@@ -120,13 +130,27 @@ export class OkxIntentExecutionService {
   }
 
   async query(lookup: OkxExecutionOrderLookup): Promise<OkxExecutionQueryResult> {
+    const instrument = this.instrumentMapping.resolve(lookup.instrumentId);
+    if (instrument.venueInstrument.instId !== lookup.instId) {
+      throw new Error("OKX order lookup instrument identity does not match the mapped instrument.");
+    }
+    const observedAt = this.now();
+    const rules = await loadOkxQuantityRules(
+      this.options.quantityRulesSource,
+      instrument,
+      observedAt,
+      this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
+    );
     const order = await this.client.getOrder({
       instId: lookup.instId,
       ...(lookup.ordId === undefined ? {} : { ordId: lookup.ordId }),
       clOrdId: lookup.clOrdId,
     });
+    if (order.instId !== lookup.instId) {
+      throw new Error("OKX order response instrument identity does not match the execution order.");
+    }
     return Object.freeze({
-      observation: observationForOrder(order, this.now()),
+      observation: observationForOrder(order, rules, observedAt),
       orderIdentity: Object.freeze({
         instId: order.instId,
         ordId: order.ordId,
@@ -168,6 +192,7 @@ export class OkxIntentExecutionService {
     }
     const instrument = this.instrumentMapping.resolve(record.instrumentId);
     return Object.freeze({
+      instrumentId: record.instrumentId,
       instId: instrument.venueInstrument.instId,
       ...(record.remoteOrderId === undefined ? {} : { ordId: record.remoteOrderId }),
       clOrdId: okxClientOrderIdFor(record),
@@ -177,11 +202,17 @@ export class OkxIntentExecutionService {
   private async prepare(intent: ExecutionIntent): Promise<OkxPlaceOrderRequest> {
     const instrument = this.instrumentMapping.resolve(intent.instrumentId);
     assertIntentMatchesInstrument(intent, instrument);
+    const rules = await loadOkxQuantityRules(
+      this.options.quantityRulesSource,
+      instrument,
+      this.now(),
+      this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
+    );
     const base = {
       instId: instrument.venueInstrument.instId,
       tdMode: this.tdMode,
       side: intent.side,
-      quantity: decimalQuantity(intent.quantity.quantity),
+      quantity: okxBaseQuantityToContracts(intent.quantity.quantity, rules),
       clOrdId: okxClientOrderIdFor(intent),
       reduceOnly: intent.orderConstraints.reduceOnly,
     } as const;
@@ -232,10 +263,14 @@ function assertAcceptedIdentity(accepted: OkxCancelOrderResult, prepared: OkxPla
   }
 }
 
-function observationForOrder(order: OkxProviderOrder, observedAt: number): ExecutionQueryObservation {
+function observationForOrder(
+  order: OkxProviderOrder,
+  rules: Awaited<ReturnType<typeof loadOkxQuantityRules>>,
+  observedAt: number,
+): ExecutionQueryObservation {
   return createExecutionQueryObservation({
     state: queryStateFor(order.status),
-    filledBaseQuantity: order.filledQuantity,
+    filledBaseQuantity: okxContractQuantityToBase(order.filledQuantity, rules),
     observedAt: order.updatedAt === null ? observedAt : Math.max(order.updatedAt, observedAt),
   });
 }
