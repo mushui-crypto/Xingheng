@@ -190,15 +190,32 @@ test("Spot balance read returns affected cash balances as Decimal strings", asyn
   });
 });
 
-test("Spot balance read rejects duplicate and missing affected currencies", async () => {
+test("Spot balance read treats omitted requested currencies as zero", async () => {
+  for (const [details, expected] of [
+    [
+      [{ ccy: "DOGE", cashBal: "12.3" }],
+      { baseTotal: "12.3", quoteTotal: "0" },
+    ],
+    [
+      [{ ccy: "USDT", cashBal: "45.67" }],
+      { baseTotal: "0", quoteTotal: "45.67" },
+    ],
+  ] as const) {
+    const client = new OkxClient(() => credentials, {
+      now: () => now,
+      fetchImpl: (async () => Response.json({ code: "0", data: [{ details }] })) as typeof fetch,
+    });
+    assert.deepEqual(await client.getSpotBalances("DOGE", "USDT"), expected);
+  }
+});
+
+test("Spot balance read rejects duplicate currencies and malformed balances", async () => {
   for (const details of [
     [
       { ccy: "DOGE", cashBal: "12.3" },
       { ccy: "DOGE", cashBal: "12.4" },
       { ccy: "USDT", cashBal: "45.67" },
     ],
-    [{ ccy: "DOGE", cashBal: "12.3" }],
-    [{ ccy: "USDT", cashBal: "45.67" }],
     [
       { ccy: "DOGE", cashBal: "not-a-decimal" },
       { ccy: "USDT", cashBal: "45.67" },

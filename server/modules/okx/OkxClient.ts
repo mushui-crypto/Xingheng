@@ -134,12 +134,9 @@ export class OkxClient {
       }
       balances.set(asset, positiveOrZeroDecimal(value.cashBal, "OKX Spot cash balance"));
     }
-    if (!balances.has(base) || !balances.has(quote)) {
-      throw invalid("OKX Spot balance response is missing an affected currency.");
-    }
     return Object.freeze({
-      baseTotal: balances.get(base) as string,
-      quoteTotal: balances.get(quote) as string,
+      baseTotal: balances.get(base) ?? "0",
+      quoteTotal: balances.get(quote) ?? "0",
     });
   }
 
