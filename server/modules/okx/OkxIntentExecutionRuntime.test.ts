@@ -224,6 +224,33 @@ test("Spot recovery uses the persisted client-order anchor and never repeats mut
   assert.equal((await references.loadForUser("user-a", record.executionId))?.expectedSide, "buy");
 });
 
+test("confirmed reconciliation re-reads the persisted OKX order and restores its fill without mutation", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  service.orderState = "filled";
+  const record = createExecutionRecord({
+    ...executionRecord(),
+    status: "CONFIRMED",
+  });
+  const records = new FakeExecutionRecordStore([record]);
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  references.create(orderReference());
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    records,
+    references,
+    { ...runtimeOptions(), clock: () => now + 1_000, quantityRulesSource: okxTestQuantityRulesSource(now + 1_000) },
+  );
+
+  const result = await runtime.reconcile("user-a", record.executionId);
+
+  assert.equal(result.executionRecord.status, "CONFIRMED");
+  assert.equal(result.observation?.filledBaseQuantity, "12.5");
+  assert.equal(result.terminalShortCircuit, false);
+  assert.equal(service.getRequests.length, 1);
+  assert.equal(service.placeRequests.length, 0);
+  assert.equal(service.cancelRequests.length, 0);
+});
+
 test("malformed Spot fee flows from OkxClient through Runtime to an UNKNOWN ExecutionRecord", async () => {
   const providerClient = new OkxClient(() => okxCredentials(), {
     now: () => now + 100,

@@ -187,14 +187,6 @@ export class BinanceIntentExecutionRuntime {
     if (record.venue !== "binance") {
       throw new Error(`Unsupported execution venue: ${record.venue}.`);
     }
-    if (record.status === "CONFIRMED") {
-      return Object.freeze({
-        executionRecord: record,
-        observation: null,
-        terminalShortCircuit: true,
-      });
-    }
-
     return this.registry.run(userId, async (service) => {
       const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
       if (localState.kind === "isolated") {

@@ -247,10 +247,16 @@ test("isolated query, reconciliation, and cancel stop before Binance account or 
   }
 });
 
-test("confirmed reconciliation short-circuits before registry or provider access", async () => {
+test("confirmed reconciliation re-reads the authoritative order and restores its fill without mutation", async () => {
   const confirmed = createExecutionRecord({ ...queryRecord(), status: "CONFIRMED" });
   const records = new FakeExecutionRecordStore([confirmed]);
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  service.remoteOrder = providerOrder({
+    orderId: confirmed.remoteOrderId,
+    orderLinkId: "binance-client-query-1",
+    filledQuantity: 0.0015,
+  });
+  service.orders = [queryStoredOrder(confirmed, { filledQuantity: 0.0015 })];
   const registry = new FakeBinanceIntentRegistry({ "user-a": service });
   const runtime = new BinanceIntentExecutionRuntime(
     registry,
@@ -261,12 +267,12 @@ test("confirmed reconciliation short-circuits before registry or provider access
 
   const result = await runtime.reconcile("user-a", "execution-query-1");
 
-  assert.equal(result.executionRecord, confirmed);
-  assert.equal(result.observation, null);
-  assert.equal(result.terminalShortCircuit, true);
-  assert.deepEqual(registry.runUserIds, []);
-  assert.equal(records.updated.length, 0);
-  assert.equal(service.providerQueries.length, 0);
+  assert.equal(result.executionRecord.status, "CONFIRMED");
+  assert.equal(result.observation?.filledBaseQuantity, "0.0015");
+  assert.equal(result.terminalShortCircuit, false);
+  assert.deepEqual(registry.runUserIds, ["user-a"]);
+  assert.equal(records.updated.length, 1);
+  assert.equal(service.providerQueries.length, 1);
   assert.equal(service.providerMutations, 0);
 });
 

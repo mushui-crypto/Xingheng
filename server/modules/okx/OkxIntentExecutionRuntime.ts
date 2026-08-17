@@ -164,15 +164,6 @@ export class OkxIntentExecutionRuntime {
     if (record.venue !== "okx") {
       throw new Error(`Unsupported execution venue: ${record.venue}.`);
     }
-    if (record.status === "CONFIRMED") {
-      return Object.freeze({
-        executionRecord: record,
-        observation: null,
-        orderReference: null,
-        statusReason: null,
-        terminalShortCircuit: true,
-      });
-    }
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
       const service = this.intentServiceFor(record.instrumentId, runtimeService);
