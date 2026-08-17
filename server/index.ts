@@ -74,6 +74,7 @@ import { UserExchangeCredentialStore } from "./modules/credentials/UserExchangeC
 import { OkxFormalArbitrageExecutionRuntime } from "./modules/okx/OkxFormalArbitrageExecutionRuntime";
 import { PersistentOkxExecutionOrderReferenceStore } from "./modules/okx/OkxExecutionOrderReferenceStore";
 import { createOkxInstrumentQuantityRulesSource } from "./modules/okx/OkxInstrumentQuantityRulesSource";
+import { createOkxSpotInstrumentQuantityRulesSource } from "./modules/okx/OkxSpotInstrumentQuantityRulesSource";
 import { OkxIntentExecutionRuntime } from "./modules/okx/OkxIntentExecutionRuntime";
 import { OkxIntentExecutionServiceRegistry } from "./modules/okx/OkxIntentExecutionServiceRegistry";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
@@ -209,7 +210,10 @@ const okxExecutionRuntime = new OkxIntentExecutionRuntime(
   okxIntentExecutionServices,
   executionRecordStore,
   new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
-  { quantityRulesSource: createOkxInstrumentQuantityRulesSource() },
+  {
+    quantityRulesSource: createOkxInstrumentQuantityRulesSource(),
+    spotQuantityRulesSource: createOkxSpotInstrumentQuantityRulesSource(),
+  },
 );
 const okxFormalArbitrageExecutionRuntime = new OkxFormalArbitrageExecutionRuntime(okxExecutionRuntime);
 const formalExecutionRuntimes = new FormalExecutionRuntimeRegistry()
