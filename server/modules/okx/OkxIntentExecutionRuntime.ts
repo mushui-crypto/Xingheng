@@ -66,7 +66,7 @@ export type OkxIntentExecutionRuntimeOptions = Readonly<
     "validateProviderIdentity" | "persistRecoveryReference"
   > & {
     spotQuantityRulesSource?: OkxSpotQuantityRulesSource;
-    createExecutionId?: () => string;
+    createExecutionId?: (intent: ExecutionIntent) => string;
     createCapability?: (
       service: OkxIntentExecutionService,
     ) => OkxIntentExecutionCapability<OkxIntentExecutionResult>;
@@ -224,7 +224,7 @@ export class OkxIntentExecutionRuntime {
         throw new Error("ExecutionIntent accountId does not match the OKX execution account.");
       }
       const initialRecord = createExecutionRecordFromIntent(
-        this.options.createExecutionId?.() ?? randomUUID(),
+        this.options.createExecutionId?.(intent) ?? randomUUID(),
         intent,
       );
       await this.recordStore.create(initialRecord);

@@ -10,6 +10,7 @@
     "build": "tsc -b && tsc -p tsconfig.server.json && npm run build:api && vite build",
     "build:api": "esbuild server/index.ts --bundle --platform=node --format=esm --target=node22 --packages=external --outfile=dist-server/index.js",
     "verify:production-safety": "tsx scripts/verify-production-wallet.ts && node scripts/verify-restore.mjs",
+    "real-trading:test": "tsx scripts/run-real-trading-test.ts",
     "preview": "vite preview",
     "start:api": "node dist-server/index.js",
     "test:credentials": "node --import tsx --test server/modules/credentials/*.test.ts",
