@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { parseUnifiedRealTradingTestArguments } from "./run-real-trading-test";
+import {
+  parseUnifiedRealTradingTestArguments,
+  unifiedRealTradingTestExitCode,
+} from "./run-real-trading-test";
 
 test("parses a default-preview OKX maximum-notional invocation", () => {
   assert.deepEqual(parseUnifiedRealTradingTestArguments([
@@ -63,6 +66,15 @@ test("rejects ambiguous quantity, duplicate flags, and unknown arguments", () =>
     "--execute-live",
   ]), /Duplicate argument/u);
   assert.throws(() => parseUnifiedRealTradingTestArguments([...required, "--quantity", "80", "--direct-provider"]), /Unsupported argument/u);
+});
+
+test("CLI returns nonzero for BLOCKED, FAILED, and UNKNOWN command feedback", () => {
+  assert.equal(unifiedRealTradingTestExitCode({ action: "BLOCKED" }), 1);
+  assert.equal(unifiedRealTradingTestExitCode({ action: "FAILED" }), 1);
+  assert.equal(unifiedRealTradingTestExitCode({ action: "UNKNOWN" }), 1);
+  assert.equal(unifiedRealTradingTestExitCode({ action: "PREVIEW" }), 0);
+  assert.equal(unifiedRealTradingTestExitCode({ action: "EXECUTED" }), 0);
+  assert.equal(unifiedRealTradingTestExitCode({ action: "RECONCILED" }), 0);
 });
 
 test("CLI composition contains only the formal runtime route and no direct Provider mutation", () => {

@@ -2,13 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
 import type { FormalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntime";
-import { ExecutionMutationSafetyGuard } from "./ExecutionMutationSafetyGuard";
 import { createAssetQuantity } from "./AssetQuantity";
 import type { ExecutionQuantityPlan } from "./ExecutionQuantityPlanner";
 import { createExecutionRecord, type ExecutionRecord } from "./ExecutionRecord";
 import type { ExecutionRecordStore } from "./ExecutionRecordStore";
 import {
   UnifiedRealTradingTestCommand,
+  UnifiedRealTradingTestMutationSafetyGuard,
   unifiedRealTradingTestExecutionId,
   unifiedRealTradingTestIntentId,
   type UnifiedRealTradingTestRequest,
@@ -50,19 +50,20 @@ test("existing intent is reconciled through the formal runtime instead of being 
   const runtime = new FakeFormalRuntime();
   const records = new MemoryExecutionRecordStore();
   const input = request();
-  const intentId = unifiedRealTradingTestIntentId(input);
-  records.create(record({ intentId }));
   const command = commandFor(runtime, records, preparation());
+  const preview = await command.run({ ...input, executeLive: false });
+  const executionId = unifiedRealTradingTestExecutionId(preview.intent);
+  records.create(record({ intentId: preview.intent.intentId, executionId }));
 
   const result = await command.run(input);
 
   assert.equal(result.action, "RECONCILED");
   assert.equal(runtime.executeCalls.length, 0);
-  assert.deepEqual(runtime.reconcileCalls, [{ userId: "user-a", executionId: "execution-existing" }]);
+  assert.deepEqual(runtime.reconcileCalls, [{ userId: "user-a", executionId }]);
 });
 
 test("real command sends OKX Spot and Perpetual intents through the formal runtime", async () => {
-  const fixture = okxFixture(new ExecutionMutationSafetyGuard({
+  const fixture = okxFixture(new UnifiedRealTradingTestMutationSafetyGuard({
     liveTradingEnabled: true,
     killSwitchActive: false,
   }));
@@ -80,23 +81,47 @@ test("real command sends OKX Spot and Perpetual intents through the formal runti
   assert.equal(fixture.records.findByIntentId(spot.intent.intentId).length, 1);
 });
 
-test("live trading disabled and active kill switch both keep Provider mutation at zero", async () => {
+test("live trading disabled and active kill switch return BLOCKED with Provider mutation at zero", async () => {
   for (const safety of [
     { liveTradingEnabled: false, killSwitchActive: false },
     { liveTradingEnabled: true, killSwitchActive: true },
   ]) {
-    const fixture = okxFixture(new ExecutionMutationSafetyGuard(safety));
+    const fixture = okxFixture(new UnifiedRealTradingTestMutationSafetyGuard(safety));
     const result = await fixture.command.run(request({ requestId: `blocked-${String(safety.killSwitchActive)}` }));
 
-    assert.equal(result.action, "EXECUTED");
+    assert.equal(result.action, "BLOCKED");
     assert.equal(result.runtimeResult?.executionRecord.status, "UNKNOWN");
     assert.equal(fixture.provider.placeRequests.length, 0);
     assert.equal(fixture.provider.cancelRequests.length, 0);
   }
 });
 
+for (const scenario of [
+  { runtimeStatus: "FAILED", commandAction: "FAILED" },
+  { runtimeStatus: "UNKNOWN", commandAction: "UNKNOWN" },
+  { runtimeStatus: "CREATED", commandAction: "UNKNOWN" },
+  { runtimeStatus: "SUBMITTED", commandAction: "UNKNOWN" },
+] as const) {
+  test(`an open safety state returns command-level ${scenario.commandAction} for formal runtime ${scenario.runtimeStatus}`, async () => {
+    const { runtimeStatus, commandAction } = scenario;
+    const runtime = new FakeFormalRuntime(runtimeStatus);
+    const records = new MemoryExecutionRecordStore();
+    const command = commandFor(
+      runtime,
+      records,
+      preparation(),
+      new UnifiedRealTradingTestMutationSafetyGuard({ liveTradingEnabled: true, killSwitchActive: false }),
+    );
+
+    const result = await command.run(request({ requestId: `remote-${runtimeStatus.toLowerCase()}` }));
+
+    assert.equal(result.action, commandAction);
+    assert.equal(result.runtimeResult?.executionRecord.status, runtimeStatus);
+  });
+}
+
 test("re-running the same request reconciles the stored order and never repeats placeOrder", async () => {
-  const fixture = okxFixture(new ExecutionMutationSafetyGuard({
+  const fixture = okxFixture(new UnifiedRealTradingTestMutationSafetyGuard({
     liveTradingEnabled: true,
     killSwitchActive: false,
   }));
@@ -113,8 +138,34 @@ test("re-running the same request reconciles the stored order and never repeats 
   assert.equal(fixture.records.findByIntentId(first.intent.intentId).length, 1);
 });
 
+for (const scenario of [
+  { name: "side", overrides: { side: "sell" as const } },
+  { name: "quantity", overrides: { quantityInput: { mode: "ASSET_QUANTITY" as const, quantity: "40" } } },
+  { name: "reduceOnly", overrides: { reduceOnly: true } },
+  { name: "executionMode", overrides: { executionMode: "PRICE_PRIORITY" as const } },
+]) {
+  test(`same request-id with changed ${scenario.name} is rejected before another Provider mutation`, async () => {
+    const fixture = okxFixture(new UnifiedRealTradingTestMutationSafetyGuard({
+      liveTradingEnabled: true,
+      killSwitchActive: false,
+    }));
+    const input = request({ requestId: `semantic-mismatch-${scenario.name}` });
+    await fixture.command.run(input);
+    const mutationsBeforeRetry = fixture.provider.placeRequests.length;
+
+    await assert.rejects(
+      () => fixture.command.run({ ...input, ...scenario.overrides }),
+      /request semantics do not match/u,
+    );
+
+    assert.equal(fixture.provider.placeRequests.length, mutationsBeforeRetry);
+    assert.equal(fixture.provider.getRequests.length, 0);
+    assert.equal(fixture.provider.cancelRequests.length, 0);
+  });
+}
+
 test("concurrent identical requests share a deterministic execution identity and only one reaches placeOrder", async () => {
-  const fixture = okxFixture(new ExecutionMutationSafetyGuard({
+  const fixture = okxFixture(new UnifiedRealTradingTestMutationSafetyGuard({
     liveTradingEnabled: true,
     killSwitchActive: false,
   }));
@@ -131,31 +182,35 @@ test("concurrent identical requests share a deterministic execution identity and
   assert.equal(fixture.records.findByIntentId(unifiedRealTradingTestIntentId(input)).length, 1);
 });
 
-test("test intent and execution identities are deterministic and user scoped", () => {
+test("test intent and execution identities are deterministic and user scoped", async () => {
   const first = request({ requestId: "stable" });
   const same = request({ requestId: "stable" });
   const otherUser = request({ requestId: "stable", userId: "user-b" });
   const firstId = unifiedRealTradingTestIntentId(first);
+  const command = commandFor(new FakeFormalRuntime(), new MemoryExecutionRecordStore(), preparation());
+  const firstIntent = (await command.run({ ...first, executeLive: false })).intent;
+  const sameIntent = (await command.run({ ...same, executeLive: false })).intent;
 
   assert.equal(firstId, unifiedRealTradingTestIntentId(same));
   assert.notEqual(firstId, unifiedRealTradingTestIntentId(otherUser));
-  assert.equal(unifiedRealTradingTestExecutionId({ intentId: firstId }), unifiedRealTradingTestExecutionId({ intentId: firstId }));
+  assert.equal(unifiedRealTradingTestExecutionId(firstIntent), unifiedRealTradingTestExecutionId(sameIntent));
 });
 
 function commandFor(
   runtime: FormalExecutionRuntime,
   records: MemoryExecutionRecordStore,
   venuePreparation: UnifiedRealTradingTestVenuePreparation,
+  mutationSafetyRejections?: Pick<UnifiedRealTradingTestMutationSafetyGuard, "rejectionCount">,
 ) {
   return new UnifiedRealTradingTestCommand(
     new FormalExecutionRuntimeRegistry().register(formalExecutionRuntime("okx", runtime)),
     records,
     [venuePreparation],
-    { now: () => now },
+    { now: () => now, ...(mutationSafetyRejections === undefined ? {} : { mutationSafetyRejections }) },
   );
 }
 
-function okxFixture(mutationSafetyGuard: ExecutionMutationSafetyGuard) {
+function okxFixture(mutationSafetyGuard: UnifiedRealTradingTestMutationSafetyGuard) {
   const provider = new FakeOkxRuntimeService();
   const records = new MemoryExecutionRecordStore();
   const runtime = new OkxIntentExecutionRuntime(
@@ -183,7 +238,12 @@ function okxFixture(mutationSafetyGuard: ExecutionMutationSafetyGuard) {
   return {
     provider,
     records,
-    command: commandFor(new OkxFormalArbitrageExecutionRuntime(runtime), records, preparation()),
+    command: commandFor(
+      new OkxFormalArbitrageExecutionRuntime(runtime),
+      records,
+      preparation(),
+      mutationSafetyGuard,
+    ),
   };
 }
 
@@ -191,9 +251,11 @@ class FakeFormalRuntime implements FormalExecutionRuntime {
   readonly executeCalls: import("./ExecutionIntent").ExecutionIntent[] = [];
   readonly reconcileCalls: Array<{ userId: string; executionId: string }> = [];
 
+  constructor(private readonly executionStatus: ExecutionRecord["status"] = "PENDING_CONFIRMATION") {}
+
   async execute(intent: import("./ExecutionIntent").ExecutionIntent) {
     this.executeCalls.push(intent);
-    return { executionRecord: record({ intentId: intent.intentId }), confirmedQuantity: "0" };
+    return { executionRecord: record({ intentId: intent.intentId, status: this.executionStatus }), confirmedQuantity: "0" };
   }
 
   async reconcile(userId: string, executionId: string) {
@@ -288,6 +350,7 @@ function preparation(): UnifiedRealTradingTestVenuePreparation {
 }
 
 function quantityPlan(instrumentId: string, quantityInput: UnifiedRealTradingTestRequest["quantityInput"]): ExecutionQuantityPlan {
+  const plannedQuantity = quantityInput.mode === "ASSET_QUANTITY" ? quantityInput.quantity : "80";
   return Object.freeze({
     instrumentId,
     providerSymbol: instrumentId.endsWith("-SPOT") ? "DOGE-USDT" : "DOGE-USDT-SWAP",
@@ -296,7 +359,7 @@ function quantityPlan(instrumentId: string, quantityInput: UnifiedRealTradingTes
     sizingPrice: "0.1",
     plannedAssetQuantity: createAssetQuantity({
       asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },
-      quantity: "80",
+      quantity: plannedQuantity,
     }),
     ...(instrumentId.endsWith("-PERP") ? { plannedVenueQuantity: "800" } : {}),
     estimatedNotionalUsdt: "8",

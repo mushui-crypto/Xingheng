@@ -1,15 +1,16 @@
 import { pathToFileURL } from "node:url";
 import dotenv from "dotenv";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../server/modules/arbitrage-execution/FormalExecutionRuntimeRegistry";
-import { ExecutionMutationSafetyGuard } from "../server/modules/cex/ExecutionMutationSafetyGuard";
 import type { ExecutionQuantityInput } from "../server/modules/cex/ExecutionQuantityPlanner";
 import type { ExecutionVenue } from "../server/modules/cex/ExecutionIntent";
 import { SqliteExecutionOrderReferenceStore } from "../server/modules/cex/ExecutionOrderReferenceStore";
 import { SqliteExecutionRecordStore } from "../server/modules/cex/ExecutionRecordStore";
 import {
   UnifiedRealTradingTestCommand,
+  UnifiedRealTradingTestMutationSafetyGuard,
   unifiedRealTradingTestExecutionId,
   type UnifiedRealTradingTestRequest,
+  type UnifiedRealTradingTestResult,
 } from "../server/modules/cex/UnifiedRealTradingTestCommand";
 import { GcpKmsCredentialKeyProvider } from "../server/modules/credentials/GcpKmsCredentialKeyProvider";
 import { UserExchangeCredentialStore } from "../server/modules/credentials/UserExchangeCredentialStore";
@@ -86,6 +87,7 @@ export async function runUnifiedRealTradingTest(
   const recordStore = new SqliteExecutionRecordStore({ dbPath: process.env.TRADING_DB_PATH });
   const orderReferenceStore = new SqliteExecutionOrderReferenceStore({ dbPath: process.env.TRADING_DB_PATH });
   try {
+    const mutationSafetyGuard = new UnifiedRealTradingTestMutationSafetyGuard();
     const okxTickerSource = createOkxTickerSource();
     const okxExecutionRuntime = new OkxIntentExecutionRuntime(
       new OkxIntentExecutionServiceRegistry(credentialStore),
@@ -93,6 +95,7 @@ export async function runUnifiedRealTradingTest(
       new PersistentOkxExecutionOrderReferenceStore(orderReferenceStore),
       {
         createExecutionId: unifiedRealTradingTestExecutionId,
+        mutationSafetyGuard,
         quantityRulesSource: createOkxInstrumentQuantityRulesSource(),
         spotQuantityRulesSource: createOkxSpotInstrumentQuantityRulesSource(),
         limitPriceResolver: async (intent, instrument) => {
@@ -110,10 +113,11 @@ export async function runUnifiedRealTradingTest(
       runtimes,
       recordStore,
       [new OkxRealTradingTestVenuePreparation(credentialStore, { tickerSource: okxTickerSource })],
+      { mutationSafetyRejections: mutationSafetyGuard },
     );
     const result = await command.run(invocation);
     return Object.freeze({
-      safety: new ExecutionMutationSafetyGuard().status(invocation.venue),
+      safety: mutationSafetyGuard.status(invocation.venue),
       result,
     });
   } finally {
@@ -129,6 +133,7 @@ async function main() {
     const invocation = parseUnifiedRealTradingTestArguments(process.argv.slice(2));
     const output = await runUnifiedRealTradingTest(invocation);
     process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+    process.exitCode = unifiedRealTradingTestExitCode(output.result);
   } catch (error) {
     process.stderr.write(`${JSON.stringify({
       category: "unified_real_trading_test_error",
@@ -136,6 +141,14 @@ async function main() {
     })}\n`);
     process.exitCode = 1;
   }
+}
+
+export function unifiedRealTradingTestExitCode(
+  result: Pick<UnifiedRealTradingTestResult, "action">,
+) {
+  return result.action === "PREVIEW" || result.action === "EXECUTED" || result.action === "RECONCILED"
+    ? 0
+    : 1;
 }
 
 function required(values: ReadonlyMap<string, string>, option: string) {

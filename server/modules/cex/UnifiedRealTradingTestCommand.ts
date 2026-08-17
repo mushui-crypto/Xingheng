@@ -8,6 +8,12 @@ import type {
 import { createExecutionIntent, type ExecutionIntent, type ExecutionVenue } from "./ExecutionIntent";
 import type { ExecutionRecord } from "./ExecutionRecord";
 import type { ExecutionRecordRecoveryStore } from "./ExecutionRecordStore";
+import {
+  ExecutionMutationSafetyError,
+  ExecutionMutationSafetyGuard,
+  type ExecutionMutationContext,
+  type ExecutionProviderIdentityValidator,
+} from "./ExecutionMutationSafetyGuard";
 
 export type UnifiedRealTradingTestRequest = Readonly<{
   requestId: string;
@@ -37,7 +43,7 @@ export interface UnifiedRealTradingTestVenuePreparation {
 }
 
 export type UnifiedRealTradingTestResult = Readonly<{
-  action: "PREVIEW" | "EXECUTED" | "RECONCILED";
+  action: "PREVIEW" | "EXECUTED" | "RECONCILED" | "BLOCKED" | "FAILED" | "UNKNOWN";
   intent: ExecutionIntent;
   quantityPlan: ExecutionQuantityPlan;
   runtimeResult: FormalExecutionRuntimeResult | null;
@@ -48,12 +54,36 @@ type RecoveryStore = Pick<ExecutionRecordRecoveryStore, "findByIntentId">;
 export type UnifiedRealTradingTestCommandOptions = Readonly<{
   now?: () => number;
   expiresInMs?: number;
+  mutationSafetyRejections?: Pick<UnifiedRealTradingTestMutationSafetyGuard, "rejectionCount">;
 }>;
+
+export class UnifiedRealTradingTestMutationSafetyGuard extends ExecutionMutationSafetyGuard {
+  private readonly rejections = new Map<string, number>();
+
+  override async assertAllowed(
+    context: ExecutionMutationContext,
+    validateProviderIdentity?: ExecutionProviderIdentityValidator,
+  ) {
+    try {
+      await super.assertAllowed(context, validateProviderIdentity);
+    } catch (error) {
+      if (error instanceof ExecutionMutationSafetyError) {
+        this.rejections.set(context.venue, this.rejectionCount(context.venue) + 1);
+      }
+      throw error;
+    }
+  }
+
+  rejectionCount(venue: string) {
+    return this.rejections.get(venue) ?? 0;
+  }
+}
 
 export class UnifiedRealTradingTestCommand {
   private readonly preparations = new Map<ExecutionVenue, UnifiedRealTradingTestVenuePreparation>();
   private readonly now: () => number;
   private readonly expiresInMs: number;
+  private readonly mutationSafetyRejections?: Pick<UnifiedRealTradingTestMutationSafetyGuard, "rejectionCount">;
 
   constructor(
     private readonly runtimes: FormalExecutionRuntimeResolver,
@@ -69,6 +99,7 @@ export class UnifiedRealTradingTestCommand {
     }
     this.now = options.now ?? Date.now;
     this.expiresInMs = options.expiresInMs ?? 60_000;
+    this.mutationSafetyRejections = options.mutationSafetyRejections;
     if (!Number.isSafeInteger(this.expiresInMs) || this.expiresInMs <= 0) {
       throw new Error("Real trading test intent expiry must be a positive safe integer.");
     }
@@ -112,11 +143,23 @@ export class UnifiedRealTradingTestCommand {
     if (record) {
       assertRecoveryIdentity(record, intent);
       const runtimeResult = await runtime.reconcile(intent.userId, record.executionId);
-      return result("RECONCILED", intent, prepared.quantityPlan, runtimeResult);
+      return result(
+        runtimeResultAction(runtimeResult, "RECONCILED"),
+        intent,
+        prepared.quantityPlan,
+        runtimeResult,
+      );
     }
 
+    const rejectionsBefore = this.mutationSafetyRejections?.rejectionCount(request.venue) ?? 0;
     const runtimeResult = await runtime.execute(intent);
-    return result("EXECUTED", intent, prepared.quantityPlan, runtimeResult);
+    const safetyRejected = (this.mutationSafetyRejections?.rejectionCount(request.venue) ?? 0) > rejectionsBefore;
+    return result(
+      runtimeResultAction(runtimeResult, "EXECUTED", safetyRejected),
+      intent,
+      prepared.quantityPlan,
+      runtimeResult,
+    );
   }
 }
 
@@ -129,9 +172,34 @@ export function unifiedRealTradingTestIntentId(
   return `real-test-${request.venue}-${digest.slice(0, 40)}`;
 }
 
-export function unifiedRealTradingTestExecutionId(intent: Pick<ExecutionIntent, "intentId">) {
+export function unifiedRealTradingTestExecutionId(
+  intent: Pick<
+    ExecutionIntent,
+    | "intentId"
+    | "userId"
+    | "venue"
+    | "accountId"
+    | "instrumentId"
+    | "side"
+    | "quantity"
+    | "orderConstraints"
+    | "executionMode"
+  >,
+) {
   const digest = createHash("sha256")
-    .update(`stellax-real-trading-test-execution\0${identifier(intent.intentId, "intentId")}`)
+    .update([
+      "stellax-real-trading-test-execution",
+      identifier(intent.intentId, "intentId"),
+      identifier(intent.userId, "userId"),
+      intent.venue,
+      identifier(intent.accountId, "accountId"),
+      identifier(intent.instrumentId, "instrumentId"),
+      intent.side,
+      identifier(intent.quantity.asset.symbol, "quantity asset"),
+      identifier(intent.quantity.quantity, "quantity"),
+      String(intent.orderConstraints.reduceOnly),
+      intent.executionMode,
+    ].join("\0"))
     .digest("hex");
   return `real-test-execution-${digest.slice(0, 40)}`;
 }
@@ -160,6 +228,9 @@ function normalizeRequest(input: UnifiedRealTradingTestRequest): UnifiedRealTrad
 }
 
 function assertRecoveryIdentity(record: ExecutionRecord, intent: ExecutionIntent) {
+  if (record.executionId !== unifiedRealTradingTestExecutionId(intent)) {
+    throw new Error("Existing ExecutionRecord request semantics do not match the real trading test request.");
+  }
   if (
     record.intentId !== intent.intentId
     || record.userId !== intent.userId
@@ -178,6 +249,24 @@ function result(
   runtimeResult: FormalExecutionRuntimeResult | null,
 ): UnifiedRealTradingTestResult {
   return Object.freeze({ action, intent, quantityPlan, runtimeResult });
+}
+
+function runtimeResultAction(
+  runtimeResult: FormalExecutionRuntimeResult,
+  successAction: "EXECUTED" | "RECONCILED",
+  safetyRejected = false,
+): UnifiedRealTradingTestResult["action"] {
+  if (runtimeResult.executionRecord.status === "FAILED") return "FAILED";
+  if (runtimeResult.executionRecord.status === "UNKNOWN") {
+    return safetyRejected ? "BLOCKED" : "UNKNOWN";
+  }
+  if (
+    runtimeResult.executionRecord.status === "PENDING_CONFIRMATION"
+    || runtimeResult.executionRecord.status === "CONFIRMED"
+  ) {
+    return successAction;
+  }
+  return "UNKNOWN";
 }
 
 function executionVenue(value: unknown): ExecutionVenue {
