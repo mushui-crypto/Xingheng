@@ -180,11 +180,6 @@ const fundingOpportunityQuery = new FundingOpportunityQueryService(createDefault
 const credentialKeyProvider = new GcpKmsCredentialKeyProvider();
 const userExchangeCredentials = new UserExchangeCredentialStore({ keyProvider: credentialKeyProvider });
 const arbitrageExecutionPlanningContexts = new DefaultArbitrageExecutionPlanningContextSource();
-const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
-  arbitrageDashboard,
-  arbitrageExecutionPlanningContexts,
-  userExchangeCredentials,
-);
 const binancePersonalTrading = new BinancePersonalTradingServiceRegistry(userExchangeCredentials);
 const accountRead = new AccountReadRegistry(userExchangeCredentials, [
   new BinanceAccountReadProviderFactory(),
@@ -220,6 +215,12 @@ const okxFormalArbitrageExecutionRuntime = new OkxFormalArbitrageExecutionRuntim
 const formalExecutionRuntimes = new FormalExecutionRuntimeRegistry()
   .register(formalExecutionRuntime("binance", binanceFormalArbitrageExecutionRuntime));
 formalExecutionRuntimes.register(formalExecutionRuntime("okx", okxFormalArbitrageExecutionRuntime));
+const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
+  arbitrageDashboard,
+  arbitrageExecutionPlanningContexts,
+  userExchangeCredentials,
+  formalExecutionRuntimes,
+);
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,

@@ -14,6 +14,7 @@ import type {
   ArbitrageExecutionPlanningContext,
   ArbitrageExecutionPlanningContextSource,
 } from "./ArbitrageExecutionPlanningContext";
+import type { FormalExecutionRuntimeResolver } from "./FormalExecutionRuntimeRegistry";
 
 export class ArbitrageExecutionDraftError extends Error {
   constructor(
@@ -32,6 +33,7 @@ export class ArbitrageExecutionDraftService {
     private readonly dashboard: DashboardSource,
     private readonly contexts: ArbitrageExecutionPlanningContextSource,
     private readonly credentials: CredentialSummarySource,
+    private readonly runtimes: FormalExecutionRuntimeResolver,
     private readonly now: () => number = Date.now,
   ) {}
 
@@ -87,11 +89,7 @@ export class ArbitrageExecutionDraftService {
   ): Promise<ArbitrageExecutionDraftLeg> {
     const venue = executionVenue(leg.venue);
     const instrumentId = canonicalInstrumentId(leg.asset, leg.quoteAsset, leg.kind);
-    const capability = venue === "binance"
-      ? this.credentials.findSummary(userId, venue)
-        ? Object.freeze({ status: "AVAILABLE" as const, reasonCode: "AVAILABLE" as const })
-        : Object.freeze({ status: "UNAVAILABLE" as const, reasonCode: "CREDENTIAL_NOT_CONFIGURED" as const })
-      : Object.freeze({ status: "UNAVAILABLE" as const, reasonCode: "EXECUTION_CAPABILITY_NOT_IMPLEMENTED" as const });
+    const capability = this.resolveCapability(userId, venue);
     let context: ArbitrageExecutionPlanningContext;
     try {
       context = await this.contexts.load(venue, instrumentId);
@@ -132,6 +130,38 @@ export class ArbitrageExecutionDraftService {
       executionAvailable: capability.status === "AVAILABLE" && planning.status === "PLANNED",
     });
   }
+
+  private resolveCapability(userId: string, venue: ArbitrageExecutionDraftVenue) {
+    try {
+      this.runtimes.resolve(venue);
+    } catch {
+      return Object.freeze({
+        status: "UNAVAILABLE" as const,
+        reasonCode: "EXECUTION_CAPABILITY_NOT_IMPLEMENTED" as const,
+      });
+    }
+    const credential = this.credentials.findSummary(userId, venue);
+    if (!credential || !credentialExecutionAvailable(credential.permissions)) {
+      return Object.freeze({
+        status: "UNAVAILABLE" as const,
+        reasonCode: "CREDENTIAL_NOT_CONFIGURED" as const,
+      });
+    }
+    return Object.freeze({ status: "AVAILABLE" as const, reasonCode: "AVAILABLE" as const });
+  }
+}
+
+function credentialExecutionAvailable(permissions: Readonly<Record<string, boolean>>) {
+  // Legacy Binance summaries predate explicit execution enablement; Provider-managed summaries must opt in.
+  if (permissions.executionEnabled === undefined) return permissions.providerVerified === undefined;
+  return permissions.executionEnabled === true
+    && permissions.providerVerified === true
+    && permissions.read === true
+    && permissions.contractTrade === true
+    && permissions.withdraw === false
+    && permissions.ipRestricted === true
+    && permissions.accountLevelSupported === true
+    && permissions.positionModeSupported === true;
 }
 
 function sameAccountPerpetualConflict(legs: readonly [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg]) {

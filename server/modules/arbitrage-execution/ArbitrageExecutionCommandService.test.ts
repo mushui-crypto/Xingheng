@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { createAsset } from "../cex/Asset";
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
-import type { ExecutionIntent } from "../cex/ExecutionIntent";
+import type { ExecutionIntent, ExecutionVenue } from "../cex/ExecutionIntent";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import type { ArbitrageExecutionDraft } from "./ArbitrageExecutionDraft";
@@ -77,6 +77,25 @@ test("an unregistered formal runtime fails closed before claiming an execution r
   );
   assert.equal(fixture.runtime.calls.length, 0);
   assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+});
+
+test("an eligible OKX Draft leg enters the registered OKX Formal runtime", async (t) => {
+  const fixture = setup(t, {
+    draft: draft(true, "0.001", ["binance", "okx"]),
+    runtimeVenues: ["binance", "okx"],
+    credentialVenues: ["binance", "okx"],
+  });
+  const created = await fixture.service.confirm("user-a", finalRequest());
+
+  const result = await fixture.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "short-leg"),
+  );
+
+  assert.equal(result.executionRecord.status, "CONFIRMED");
+  assert.equal(fixture.runtime.calls.length, 1);
+  assert.equal(fixture.runtime.calls[0]?.venue, "okx");
+  assert.equal(fixture.runtime.providerMutations, 0);
 });
 
 test("user-selected first leg claims before runtime and confirmed result updates managed quantity", async (t) => {
@@ -694,7 +713,11 @@ class FakeRuntime implements FormalExecutionRuntime {
   }
 }
 
-function setup(t: TestContext, options: { draft?: ArbitrageExecutionDraft } = {}) {
+function setup(t: TestContext, options: {
+  draft?: ArbitrageExecutionDraft;
+  runtimeVenues?: readonly ExecutionVenue[];
+  credentialVenues?: readonly ExecutionVenue[];
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-command-test-"));
   const store = new ArbitrageInstanceStore({ dbPath: join(directory, "test.sqlite") });
   t.after(() => {
@@ -705,7 +728,17 @@ function setup(t: TestContext, options: { draft?: ArbitrageExecutionDraft } = {}
   const runtime = new FakeRuntime();
   const runtimes = new FormalExecutionRuntimeRegistry()
     .register(formalExecutionRuntime("binance", runtime));
-  const credentials = { findSummary: (userId: string, venue: string) => userId === "user-a" && venue === "binance" ? ({ accountId: "binance:account-a" } as any) : null };
+  for (const venue of options.runtimeVenues ?? []) {
+    if (venue !== "binance") runtimes.register(formalExecutionRuntime(venue, runtime));
+  }
+  const credentials = {
+    findSummary: (userId: string, venue: string) => {
+      if (userId !== "user-a") return null;
+      const configuredVenues = options.credentialVenues ?? ["binance"];
+      if (!configuredVenues.includes(venue as ExecutionVenue)) return null;
+      return { accountId: `${venue}:account-a` } as any;
+    },
+  };
   const createService = (runtimeRegistry = runtimes) => new ArbitrageExecutionCommandService(
     drafts,
     store,
@@ -802,13 +835,17 @@ function recoveryRecord(
   });
 }
 
-function draft(allAvailable: boolean, quantity = "0.001"): ArbitrageExecutionDraft {
-  const leg = (role: "LONG" | "SHORT", instrumentId: string) => ({
+function draft(
+  allAvailable: boolean,
+  quantity = "0.001",
+  venues: readonly [ExecutionVenue, ExecutionVenue] = ["binance", "binance"],
+): ArbitrageExecutionDraft {
+  const leg = (role: "LONG" | "SHORT", instrumentId: string, venue: ExecutionVenue) => ({
     legId: role === "LONG" ? "long-leg" : "short-leg",
     role,
-    venue: "binance" as const,
+    venue,
     instrumentId,
-    providerSymbol: "BTCUSDT",
+    providerSymbol: venue === "okx" ? "BTC-USDT-SWAP" : "BTCUSDT",
     side: role === "LONG" ? "buy" as const : "sell" as const,
     marketType: instrumentId.endsWith("SPOT") ? "spot" as const : "perpetual" as const,
     quote: { bid: "99999", ask: "100001", updatedAt: now },
@@ -820,7 +857,7 @@ function draft(allAvailable: boolean, quantity = "0.001"): ArbitrageExecutionDra
       status: "PLANNED" as const,
       plan: {
         instrumentId,
-        providerSymbol: "BTCUSDT",
+        providerSymbol: venue === "okx" ? "BTC-USDT-SWAP" : "BTCUSDT",
         baseAsset: "BTC",
         quantityInput: { mode: "ASSET_QUANTITY" as const, quantity },
         sizingPrice: role === "LONG" ? "100001" : "99999",
@@ -838,7 +875,7 @@ function draft(allAvailable: boolean, quantity = "0.001"): ArbitrageExecutionDra
     horizonDays: 90,
     strategyType: "SPOT_PERPETUAL",
     quantityInput: { mode: "ASSET_QUANTITY", quantity },
-    legs: [leg("LONG", "BTC-USDT-SPOT"), leg("SHORT", "BTC-USDT-PERP")],
+    legs: [leg("LONG", "BTC-USDT-SPOT", venues[0]), leg("SHORT", "BTC-USDT-PERP", venues[1])],
     allLegsExecutable: allAvailable,
     generatedAt: now,
   };

@@ -8,6 +8,11 @@ import { createTradingRules } from "../cex/TradingRules";
 import type { ArbitrageExecutionDraftVenue } from "./ArbitrageExecutionDraft";
 import { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
 import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
+import type { FormalExecutionRuntime } from "./FormalExecutionRuntime";
+import {
+  FormalExecutionRuntimeRegistry,
+  formalExecutionRuntime,
+} from "./FormalExecutionRuntimeRegistry";
 
 const now = Date.now();
 
@@ -33,7 +38,7 @@ test("builds an authoritative two-leg NOTIONAL_USDT preview without trusting pro
   ]);
 });
 
-test("plans ASSET_QUANTITY for both legs but keeps unimplemented venues unavailable", async () => {
+test("plans ASSET_QUANTITY and exposes OKX when its formal runtime and credential are eligible", async () => {
   const service = draftService(opportunity("binance", "okx"), new FakeContexts());
 
   const result = await service.preview("user-a", {
@@ -44,13 +49,13 @@ test("plans ASSET_QUANTITY for both legs but keeps unimplemented venues unavaila
 
   assert.equal(result.legs[0].planning.status, "PLANNED");
   assert.equal(result.legs[1].planning.status, "PLANNED");
-  assert.equal(result.legs[1].capability.reasonCode, "EXECUTION_CAPABILITY_NOT_IMPLEMENTED");
-  assert.equal(result.legs[1].executionAvailable, false);
-  assert.equal(result.allLegsExecutable, false);
+  assert.equal(result.legs[1].capability.reasonCode, "AVAILABLE");
+  assert.equal(result.legs[1].executionAvailable, true);
+  assert.equal(result.allLegsExecutable, true);
 });
 
-test("marks OKX, Bybit, and Bitget execution capabilities unavailable without hiding their read-only plan", async () => {
-  for (const venue of ["okx", "bybit", "bitget"] as const) {
+test("keeps unregistered Bybit and Bitget capabilities unavailable without hiding their read-only plan", async () => {
+  for (const venue of ["bybit", "bitget"] as const) {
     const result = await draftService(opportunity("binance", venue), new FakeContexts()).preview("user-a", {
       opportunityId: "opportunity-1",
       horizonDays: 90,
@@ -60,6 +65,81 @@ test("marks OKX, Bybit, and Bitget execution capabilities unavailable without hi
     assert.equal(result.legs[1].capability.reasonCode, "EXECUTION_CAPABILITY_NOT_IMPLEMENTED");
     assert.equal(result.legs[1].executionAvailable, false);
   }
+});
+
+test("rejects an OKX Draft when the credential is not enabled", async () => {
+  const service = draftService(opportunity("binance", "okx"), new FakeContexts(), {
+    okxCredential: "disabled",
+  });
+  const result = await service.preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+
+  assert.equal(result.legs[0].executionAvailable, true);
+  assert.equal(result.legs[1].capability.reasonCode, "CREDENTIAL_NOT_CONFIGURED");
+  assert.equal(result.legs[1].executionAvailable, false);
+  assert.equal(result.allLegsExecutable, false);
+});
+
+test("rejects an OKX Draft when persisted Provider conditions are not valid", async (t) => {
+  for (const [name, permissions] of [
+    ["provider identity", { providerVerified: false }],
+    ["contract permission", { contractTrade: false }],
+    ["position mode", { positionModeSupported: false }],
+  ] as const) {
+    await t.test(name, async () => {
+      const service = draftService(opportunity("binance", "okx"), new FakeContexts(), {
+        okxCredential: "enabled",
+        okxPermissionOverrides: permissions,
+      });
+      const result = await service.preview("user-a", {
+        opportunityId: "opportunity-1",
+        horizonDays: 90,
+        quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+      });
+      assert.equal(result.legs[1].executionAvailable, false);
+      assert.equal(result.allLegsExecutable, false);
+    });
+  }
+});
+
+test("rejects an OKX Draft when the formal runtime is not registered", async () => {
+  const service = draftService(opportunity("binance", "okx"), new FakeContexts(), {
+    registeredVenues: ["binance"],
+  });
+  const result = await service.preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+
+  assert.equal(result.legs[1].capability.reasonCode, "EXECUTION_CAPABILITY_NOT_IMPLEMENTED");
+  assert.equal(result.legs[1].executionAvailable, false);
+  assert.equal(result.allLegsExecutable, false);
+});
+
+test("isolates Binance and OKX Draft credential states", async () => {
+  const okxDisabled = await draftService(opportunity("binance", "okx"), new FakeContexts(), {
+    okxCredential: "disabled",
+  }).preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+  assert.equal(okxDisabled.legs[0].executionAvailable, true);
+  assert.equal(okxDisabled.legs[1].executionAvailable, false);
+
+  const binanceMissing = await draftService(opportunity("binance", "okx"), new FakeContexts(), {
+    binanceCredential: false,
+  }).preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+  assert.equal(binanceMissing.legs[0].executionAvailable, false);
+  assert.equal(binanceMissing.legs[1].executionAvailable, true);
 });
 
 test("same-account opposite perpetual legs are not advertised as jointly executable", async () => {
@@ -158,14 +238,57 @@ class FakeContexts implements ArbitrageExecutionPlanningContextSource {
   }
 }
 
-function draftService(value: ArbitrageOpportunity, contexts: ArbitrageExecutionPlanningContextSource) {
+function draftService(
+  value: ArbitrageOpportunity,
+  contexts: ArbitrageExecutionPlanningContextSource,
+  options: Readonly<{
+    registeredVenues?: readonly ArbitrageExecutionDraftVenue[];
+    binanceCredential?: boolean;
+    okxCredential?: "enabled" | "disabled" | "missing";
+    okxPermissionOverrides?: Readonly<Record<string, boolean>>;
+  }> = {},
+) {
+  const runtimes = new FormalExecutionRuntimeRegistry();
+  for (const venue of options.registeredVenues ?? ["binance", "okx"]) {
+    runtimes.register(formalExecutionRuntime(venue, unusedRuntime));
+  }
   return new ArbitrageExecutionDraftService(
     { getSnapshot: async (horizonDays: 90 | 365) => snapshot(horizonDays, value) },
     contexts,
-    { findSummary: (_userId: string, venue: string) => venue === "binance" ? ({ accountId: "account-a" } as any) : null },
+    {
+      findSummary: (userId: string, venue: string) => {
+        if (userId !== "user-a") return null;
+        if (venue === "binance") {
+          return options.binanceCredential === false ? null : ({ accountId: "binance:account-a", permissions: {} } as any);
+        }
+        if (venue !== "okx" || options.okxCredential === "missing") return null;
+        const executionEnabled = options.okxCredential !== "disabled";
+        return {
+          accountId: "okx:0123456789abcdef",
+          permissions: {
+            executionEnabled,
+            providerVerified: true,
+            read: true,
+            contractTrade: true,
+            withdraw: false,
+            ipRestricted: true,
+            accountLevelSupported: true,
+            positionModeSupported: true,
+            ...options.okxPermissionOverrides,
+          },
+        } as any;
+      },
+    },
+    runtimes,
     () => now,
   );
 }
+
+const unusedRuntime: FormalExecutionRuntime = Object.freeze({
+  execute: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },
+  reconcile: async () => { throw new Error("Draft capability resolution must not query a Provider."); },
+  cancel: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },
+});
 
 function snapshot(horizonDays: 90 | 365, value: ArbitrageOpportunity): ArbitrageDashboardSnapshot {
   return {

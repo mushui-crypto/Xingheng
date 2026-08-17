@@ -37,7 +37,11 @@ test("production composition exposes only the formal arbitrage mutation boundary
   );
   assert.match(productionSource, /executionRecordStore,/u);
   assert.doesNotMatch(productionSource, /new OkxClient|\.placeOrder\(|\.cancelOrder\(/u);
-  assert.equal(productionSource.match(/formalExecutionRuntimes,/gu)?.length, 3);
+  assert.match(
+    productionSource,
+    /new ArbitrageExecutionDraftService\([\s\S]*?formalExecutionRuntimes,\s*\)/u,
+  );
+  assert.equal(productionSource.match(/formalExecutionRuntimes,/gu)?.length, 4);
   assert.match(
     productionSource,
     /registerArbitrageExecutionCommandRoutes\(app, arbitrageExecutionCommand\)/u,
