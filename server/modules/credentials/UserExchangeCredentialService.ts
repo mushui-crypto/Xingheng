@@ -66,7 +66,10 @@ export class UserExchangeCredentialService {
         accountId: access.accountId,
         accountFingerprint: access.accountFingerprint,
         ...credentials,
-        permissions: access.permissions,
+        permissions: {
+          ...access.permissions,
+          executionEnabled: false,
+        },
         verifiedAt: Date.now(),
       });
       return status(venue, summary);
@@ -103,6 +106,61 @@ export class UserExchangeCredentialService {
       apiKey,
       apiSecret,
       permissions: access.permissions,
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async enableOkxExecution(userIdInput: string, input: unknown) {
+    assertOkxExecutionEnableConfirmation(input);
+    const userId = requiredIdentifier(userIdInput, "userId");
+    const venue = "okx" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_not_configured",
+        "OKX credential is not configured.",
+      );
+    }
+    if (
+      existing.userId !== userId
+      || existing.venue !== venue
+      || !isProviderDerivedOkxIdentity(existing.accountId)
+    ) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored OKX credential identity is not eligible for execution enablement.",
+      );
+    }
+
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = okxCredentials(secret.apiKey, secret.apiSecret, secret.passphrase);
+    const client = this.options.okxClientFactory?.(credentials)
+      ?? new OkxClient(() => credentials);
+    const access = await client.validateAccess();
+    assertOkxProviderIdentity(access);
+    if (
+      access.accountId !== existing.accountId
+      || access.accountFingerprint !== existing.accountFingerprint
+    ) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "OKX Provider identity does not match the stored credential identity.",
+      );
+    }
+    assertOkxExecutionPermissions(access);
+
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: existing.accountId,
+      accountFingerprint: existing.accountFingerprint,
+      ...credentials,
+      permissions: {
+        ...access.permissions,
+        executionEnabled: true,
+      },
       verifiedAt: Date.now(),
     });
     return status(venue, summary);
@@ -238,6 +296,14 @@ function requiredSecret(value: unknown, name: string) {
   return text;
 }
 
+function requiredIdentifier(value: unknown, name: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 200) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", `${name} is invalid.`);
+  }
+  return text;
+}
+
 function assertOnlyKeys(value: Record<string, unknown>, allowed: string[]) {
   if (Object.keys(value).some((key) => !allowed.includes(key))) {
     throw new UserExchangeCredentialServiceError("credential_input_invalid", "Credential request contains unsupported fields.");
@@ -306,6 +372,36 @@ function assertOkxProviderIdentity(access: OkxAccountAccess) {
     throw new UserExchangeCredentialServiceError(
       "credential_provider_identity_invalid",
       "OKX Provider returned an invalid account identity.",
+    );
+  }
+}
+
+function assertOkxExecutionEnableConfirmation(input: unknown) {
+  const body = object(input);
+  assertOnlyKeys(body, ["confirmation"]);
+  if (body.confirmation !== "ENABLE_OKX_EXECUTION") {
+    throw new UserExchangeCredentialServiceError(
+      "credential_execution_enable_confirmation_required",
+      "Explicit OKX execution enablement confirmation is required.",
+    );
+  }
+}
+
+function assertOkxExecutionPermissions(access: OkxAccountAccess) {
+  const permissions = access.permissions;
+  if (
+    !permissions.providerVerified
+    || !permissions.read
+    || !permissions.contractTrade
+    || permissions.withdraw
+    || !permissions.ipRestricted
+    || !permissions.accountLevelSupported
+    || !permissions.positionModeSupported
+    || !permissions.executionEnabled
+  ) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_permissions_invalid",
+      "OKX credential must be Provider-verified, allow read and perpetual trading, deny withdrawals, use an IP whitelist, and use net position mode before execution can be enabled.",
     );
   }
 }

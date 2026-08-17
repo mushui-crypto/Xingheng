@@ -3,6 +3,7 @@ import test from "node:test";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
 import { OkxProviderError } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxPermissions } from "../okx/OkxTypes";
+import { OkxIntentExecutionServiceRegistry } from "../okx/OkxIntentExecutionServiceRegistry";
 import { UserExchangeCredentialService, UserExchangeCredentialServiceError } from "./UserExchangeCredentialService";
 import type {
   ReplaceUserExchangeCredentialInput,
@@ -89,12 +90,169 @@ test("binds a new OKX credential to Provider-derived identity before saving", as
   assert.equal(result.accountId, "okx:0123456789abcdef");
   assert.equal(result.accountFingerprint, "0123456789abcdef");
   assert.equal(result.permissions?.providerVerified, true);
-  assert.equal(result.permissions?.executionEnabled, true);
+  assert.equal(result.permissions?.executionEnabled, false);
   assert.equal(store.saved?.accountId, "okx:0123456789abcdef");
   assert.equal(store.saved?.passphrase, "okx-passphrase-001");
   assert.equal(JSON.stringify(result).includes("okx-api-secret-001"), false);
   assert.equal(providerReads, 1);
   assert.equal(providerMutations, 0);
+});
+
+test("requires explicit confirmation before enabling OKX execution", async () => {
+  const store = new MemoryCredentialStore();
+  await seedOkx(store, "user-1");
+  let providerReads = 0;
+  const service = new UserExchangeCredentialService(store as never, {
+    okxClientFactory: () => ({
+      validateAccess: async () => {
+        providerReads += 1;
+        return okxAccess();
+      },
+    }),
+  });
+
+  for (const input of [{}, { confirmation: "ENABLE_BINANCE_EXECUTION" }]) {
+    await assert.rejects(
+      service.enableOkxExecution("user-1", input),
+      (error: unknown) => error instanceof UserExchangeCredentialServiceError
+        && error.category === "credential_execution_enable_confirmation_required",
+    );
+  }
+  assert.equal(providerReads, 0);
+  assert.equal(store.replacedItems.length, 0);
+  assert.equal(store.findSummary("user-1", "okx")?.permissions.executionEnabled, false);
+});
+
+test("enables OKX execution only after Provider verification and Runtime can read the state", async () => {
+  const store = new MemoryCredentialStore();
+  await seedOkx(store, "user-1");
+  let providerReads = 0;
+  const service = new UserExchangeCredentialService(store as never, {
+    okxClientFactory: () => ({
+      validateAccess: async () => {
+        providerReads += 1;
+        return okxAccess();
+      },
+    }),
+  });
+
+  const result = await service.enableOkxExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" });
+
+  assert.equal(result.permissions?.providerVerified, true);
+  assert.equal(result.permissions?.positionModeSupported, true);
+  assert.equal(result.permissions?.executionEnabled, true);
+  assert.equal(providerReads, 1);
+  assert.equal(store.replacedItems.length, 1);
+  assert.equal(store.replacedItems[0]?.expectedAccountId, "okx:0123456789abcdef");
+  assert.deepEqual(await store.loadForExecution("user-1", "okx"), {
+    apiKey: "okx-api-user-1",
+    apiSecret: "okx-secret-user-1",
+    passphrase: "okx-pass-user-1",
+  });
+
+  const registry = new OkxIntentExecutionServiceRegistry(store as never, {
+    serviceFactory: (_credential, summary) => ({
+      executionAccountIdentity: () => ({ accountId: summary.accountId }),
+      validateExecutionProviderIdentity: () => {},
+      placeOrder: async () => { throw new Error("provider mutation must not run in enable test"); },
+      getOrder: async () => { throw new Error("provider query must not run in enable test"); },
+      cancelOrder: async () => { throw new Error("provider mutation must not run in enable test"); },
+    }),
+  });
+  assert.deepEqual(
+    await registry.run("user-1", (runtimeService) => runtimeService.executionAccountIdentity()),
+    { accountId: "okx:0123456789abcdef" },
+  );
+});
+
+test("rejects OKX enable when Provider conditions are not satisfied and preserves state", async (t) => {
+  for (const [name, access] of [
+    ["position mode", okxAccess({ positionModeSupported: false, executionEnabled: false })],
+    ["provider verification", okxAccess({ providerVerified: false, executionEnabled: false })],
+    ["contract trading permission", okxAccess({ contractTrade: false, executionEnabled: false })],
+    ["uid mismatch", okxAccessFor("fedcba9876543210")],
+    ["withdraw permission", okxAccess({ withdraw: true, executionEnabled: false })],
+  ] as const) {
+    await t.test(name, async () => {
+      const store = new MemoryCredentialStore();
+      await seedOkx(store, "user-1");
+      const service = new UserExchangeCredentialService(store as never, {
+        okxClientFactory: () => ({ validateAccess: async () => access }),
+      });
+
+      await assert.rejects(
+        service.enableOkxExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" }),
+        (error: unknown) => error instanceof UserExchangeCredentialServiceError
+          && (name === "uid mismatch"
+            ? error.category === "credential_provider_identity_mismatch"
+            : error.category === "credential_permissions_invalid"),
+      );
+      assert.equal(store.replacedItems.length, 0);
+      assert.equal(store.findSummary("user-1", "okx")?.permissions.executionEnabled, false);
+    });
+  }
+});
+
+test("fails closed when OKX Provider revalidation fails during enable", async () => {
+  const store = new MemoryCredentialStore();
+  await seedOkx(store, "user-1");
+  const service = new UserExchangeCredentialService(store as never, {
+    okxClientFactory: () => ({
+      validateAccess: async () => {
+        throw new OkxProviderError("provider_transport_error", "OKX account access validation failed.");
+      },
+    }),
+  });
+
+  await assert.rejects(
+    service.enableOkxExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" }),
+    (error: unknown) => error instanceof OkxProviderError
+      && error.category === "provider_transport_error",
+  );
+  assert.equal(store.replacedItems.length, 0);
+  assert.equal(store.findSummary("user-1", "okx")?.permissions.executionEnabled, false);
+});
+
+test("rejects non-OKX credentials and isolates users during OKX enable", async () => {
+  const store = new MemoryCredentialStore();
+  const service = new UserExchangeCredentialService(store as never, {
+    binanceClientFactory: () => ({ validateAccess: async () => access() }),
+    okxClientFactory: () => ({ validateAccess: async () => okxAccess() }),
+  });
+  await service.put("user-1", "binance", { apiKey: "binance-key", apiSecret: "binance-secret" });
+  await seedOkx(store, "user-1");
+  await service.put("binance-only", "binance", { apiKey: "binance-key-2", apiSecret: "binance-secret-2" });
+
+  await assert.rejects(
+    service.enableOkxExecution("user-2", { confirmation: "ENABLE_OKX_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_not_configured",
+  );
+  await assert.rejects(
+    service.enableOkxExecution("binance-only", { confirmation: "ENABLE_OKX_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_not_configured",
+  );
+  await service.enableOkxExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" });
+
+  assert.equal(store.findSummary("user-1", "okx")?.permissions.executionEnabled, true);
+  assert.equal("executionEnabled" in (store.findSummary("user-1", "binance")?.permissions ?? {}), false);
+  assert.equal("executionEnabled" in (store.findSummary("binance-only", "binance")?.permissions ?? {}), false);
+  assert.equal(store.findSummary("user-2", "okx"), null);
+});
+
+test("keeps the original OKX state when the encrypted replacement fails", async () => {
+  const store = new MemoryCredentialStore();
+  await seedOkx(store, "user-1");
+  store.failReplace = true;
+  const service = new UserExchangeCredentialService(store as never, {
+    okxClientFactory: () => ({ validateAccess: async () => okxAccess() }),
+  });
+
+  await assert.rejects(
+    service.enableOkxExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" }),
+  );
+  assert.equal(store.findSummary("user-1", "okx")?.permissions.executionEnabled, false);
 });
 
 test("saves Provider-verified OKX identity with execution disabled when permissions are insufficient", async () => {
@@ -337,6 +495,19 @@ function okxAccessFor(
   };
 }
 
+async function seedOkx(store: MemoryCredentialStore, userId: string) {
+  await store.save({
+    userId,
+    venue: "okx",
+    accountId: "okx:0123456789abcdef",
+    accountFingerprint: "0123456789abcdef",
+    apiKey: `okx-api-${userId}`,
+    apiSecret: `okx-secret-${userId}`,
+    passphrase: `okx-pass-${userId}`,
+    permissions: { providerVerified: true, executionEnabled: false },
+  });
+}
+
 class MemoryCredentialStore {
   readonly values = new Map<string, UserExchangeCredentialSummary>();
   readonly secrets = new Map<string, UserExchangeCredentialSecret>();
@@ -344,6 +515,7 @@ class MemoryCredentialStore {
   readonly replacedItems: ReplaceUserExchangeCredentialInput[] = [];
   saved: SaveUserExchangeCredentialInput | null = null;
   failSave = false;
+  failReplace = false;
 
   findSummary(userId: string, venue: string) {
     return this.values.get(`${userId}:${venue}`) ?? null;
@@ -381,6 +553,7 @@ class MemoryCredentialStore {
   }
 
   async replace(input: ReplaceUserExchangeCredentialInput) {
+    if (this.failReplace) throw new Error("credential replacement failed");
     const key = `${input.userId}:${input.venue}`;
     const existing = this.values.get(key);
     if (!existing || existing.accountId !== input.expectedAccountId) {

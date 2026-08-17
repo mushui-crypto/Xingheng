@@ -31,6 +31,9 @@ export function registerExchangeCredentialRoutes(
   app.post("/api/exchange-credentials/okx/rebind", route((request) => (
     service.rebindOkx(userId(request))
   )));
+  app.post("/api/exchange-credentials/okx/execution/enable", route((request) => (
+    service.enableOkxExecution(userId(request), request.body)
+  )));
   app.delete("/api/exchange-credentials/:venue", route((request) => (
     service.delete(userId(request), singleParam(request.params.venue))
   )));

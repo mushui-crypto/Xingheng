@@ -277,7 +277,7 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
       assert.equal(payload.configured, true);
       if (venue === "okx") {
         assert.equal(payload.accountId, "okx:0123456789abcdef");
-        assert.equal(payload.permissions.executionEnabled, true);
+        assert.equal(payload.permissions.executionEnabled, false);
         assert.match(payload.message, /Provider-verified/u);
       } else {
         assert.match(payload.accountId, new RegExp(`^${venue}:credential-only:`));
@@ -298,6 +298,133 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     store.close();
     rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("credential API enables OKX execution only after authenticated confirmation and Provider revalidation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "okx-credential-enable-route-"));
+  const dbPath = join(directory, "credentials.sqlite");
+  const keyProvider = new FakeCredentialKeyProvider();
+  const store = new UserExchangeCredentialStore({ dbPath, environment: "test", keyProvider });
+  let providerReads = 0;
+  let providerMutations = 0;
+  const service = new UserExchangeCredentialService(store, {
+    okxClientFactory: () => ({
+      validateAccess: async () => {
+        providerReads += 1;
+        return {
+          accountId: "okx:0123456789abcdef",
+          accountFingerprint: "0123456789abcdef",
+          uidHash: `0123456789abcdef${"0".repeat(48)}`,
+          accountLevel: "3",
+          permissions: {
+            read: true,
+            spotTrade: true,
+            contractTrade: true,
+            withdraw: false,
+            ipRestricted: true,
+            accountLevelSupported: true,
+            positionModeSupported: true,
+            providerVerified: true,
+            executionEnabled: true,
+          },
+        };
+      },
+    }),
+  });
+  const app = express();
+  app.use(express.json());
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, service);
+  const server = app.listen(0, "127.0.0.1");
+
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const onboarding = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        apiKey: "okx-api-key-enable-route-001",
+        apiSecret: "okx-secret-enable-route-001",
+        passphrase: "okx-passphrase-enable-route-001",
+      }),
+    });
+    assert.equal(onboarding.status, 200);
+    assert.equal((await onboarding.json() as { permissions: Record<string, boolean> }).permissions.executionEnabled, false);
+
+    const missingConfirmation = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx/execution/enable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    assert.equal(missingConfirmation.status, 400);
+    assert.equal((await missingConfirmation.json() as { category: string }).category, "credential_execution_enable_confirmation_required");
+    assert.equal(providerReads, 1);
+
+    const enable = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx/execution/enable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation: "ENABLE_OKX_EXECUTION" }),
+    });
+    const payload = await enable.json() as {
+      accountId: string;
+      permissions: Record<string, boolean>;
+      apiSecret?: string;
+      passphrase?: string;
+    };
+    assert.equal(enable.status, 200);
+    assert.equal(payload.accountId, "okx:0123456789abcdef");
+    assert.equal(payload.permissions.executionEnabled, true);
+    assert.equal(providerReads, 2);
+    assert.equal(JSON.stringify(payload).includes("okx-secret-enable-route-001"), false);
+    assert.equal(JSON.stringify(payload).includes("okx-passphrase-enable-route-001"), false);
+    assert.deepEqual(await store.loadForExecution("session-user", "okx"), {
+      apiKey: "okx-api-key-enable-route-001",
+      apiSecret: "okx-secret-enable-route-001",
+      passphrase: "okx-passphrase-enable-route-001",
+    });
+    assert.equal(providerMutations, 0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+    store.close();
+    rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("credential API binds OKX enablement to the authenticated user", async () => {
+  const captured: Array<{ userId: string; input: unknown }> = [];
+  const app = express();
+  app.use(express.json());
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, {
+    enableOkxExecution: async (userId: string, input: unknown) => {
+      captured.push({ userId, input });
+      return { venue: "okx", configured: true, permissions: { executionEnabled: true } };
+    },
+  } as never);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/okx/execution/enable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation: "ENABLE_OKX_EXECUTION" }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(captured, [{
+      userId: "session-user",
+      input: { confirmation: "ENABLE_OKX_EXECUTION" },
+    }]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
