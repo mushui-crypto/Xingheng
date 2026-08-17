@@ -71,6 +71,8 @@ export type OkxIntentExecutionResult = Readonly<{
   state: ExecutionStatus;
   confirmedQuantity: string;
   statusReason: string | null;
+  expectedProviderQuantity?: string;
+  expectedSide?: "buy" | "sell";
 }>;
 
 export type OkxExecutionQueryResult = Readonly<{
@@ -85,6 +87,8 @@ export type OkxExecutionOrderLookup = Readonly<{
   instId: string;
   ordId?: string;
   clOrdId: string;
+  expectedProviderQuantity?: string;
+  expectedSide?: "buy" | "sell";
 }>;
 
 export class OkxIntentExecutionService {

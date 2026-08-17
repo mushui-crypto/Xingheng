@@ -108,6 +108,19 @@ test("market reduce-only close order omits price and preserves reduceOnly=true",
   });
 });
 
+test("Spot market buy sends cash tdMode and base_ccy target currency", async () => {
+  let body: unknown;
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
+      body = JSON.parse(String(init?.body));
+      return Response.json({ code: "0", data: [{ ordId: "12347", clOrdId: "spotA1", instId: "DOGE-USDT", sCode: "0" }] });
+    }) as typeof fetch,
+  });
+  await client.placeOrder({ instId: "DOGE-USDT", tdMode: "cash", side: "buy", ordType: "market", quantity: "100", clOrdId: "spotA1", targetCurrency: "base_ccy" });
+  assert.deepEqual(body, { instId: "DOGE-USDT", tdMode: "cash", side: "buy", ordType: "market", sz: "100", clOrdId: "spotA1", tgtCcy: "base_ccy" });
+});
+
 test("get order parses Decimal strings and status mapping", async () => {
   const client = new OkxClient(() => credentials, {
     now: () => now,
@@ -125,6 +138,7 @@ test("get order parses Decimal strings and status mapping", async () => {
         accFillSz: "1.25",
         avgPx: "0.12345",
         fee: "-0.001",
+        feeCcy: "USDT",
         uTime: "1800000000123",
       }] });
     }) as typeof fetch,
@@ -141,8 +155,64 @@ test("get order parses Decimal strings and status mapping", async () => {
     filledQuantity: "1.25",
     averagePrice: "0.12345",
     fee: "-0.001",
+    feeCcy: "USDT",
     updatedAt: 1_800_000_000_123,
   });
+});
+
+test("Spot order preserves malformed fee evidence for UNKNOWN reconciliation", async () => {
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ code: "0", data: [{
+      instId: "DOGE-USDT", ordId: "12346", clOrdId: "spotFeeA1", side: "buy",
+      state: "filled", sz: "100", accFillSz: "100", avgPx: "0.1",
+      fee: "not-a-decimal", feeCcy: "USDT", uTime: String(now),
+    }] })) as typeof fetch,
+  });
+
+  const order = await client.getOrder({ instId: "DOGE-USDT", clOrdId: "spotFeeA1" });
+  assert.equal(order.fee, "not-a-decimal");
+  assert.equal(order.feeCcy, "USDT");
+});
+
+test("Spot balance read returns affected cash balances as Decimal strings", async () => {
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ code: "0", data: [{ details: [
+      { ccy: "DOGE", cashBal: "12.3" },
+      { ccy: "USDT", cashBal: "45.67" },
+    ] }] })) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.getSpotBalances("DOGE", "USDT"), {
+    baseTotal: "12.3",
+    quoteTotal: "45.67",
+  });
+});
+
+test("Spot balance read rejects duplicate and missing affected currencies", async () => {
+  for (const details of [
+    [
+      { ccy: "DOGE", cashBal: "12.3" },
+      { ccy: "DOGE", cashBal: "12.4" },
+      { ccy: "USDT", cashBal: "45.67" },
+    ],
+    [{ ccy: "DOGE", cashBal: "12.3" }],
+    [{ ccy: "USDT", cashBal: "45.67" }],
+    [
+      { ccy: "DOGE", cashBal: "not-a-decimal" },
+      { ccy: "USDT", cashBal: "45.67" },
+    ],
+  ]) {
+    const client = new OkxClient(() => credentials, {
+      now: () => now,
+      fetchImpl: (async () => Response.json({ code: "0", data: [{ details }] })) as typeof fetch,
+    });
+    await assert.rejects(
+      () => client.getSpotBalances("DOGE", "USDT"),
+      (error: unknown) => error instanceof OkxProviderError && error.category === "provider_response_invalid",
+    );
+  }
 });
 
 test("cancel order maps request and response identity", async () => {
@@ -245,6 +315,7 @@ test("readiness GET paths read account identity and open orders without mutation
     filledQuantity: "0",
     averagePrice: null,
     fee: "0",
+    feeCcy: null,
     updatedAt: 1_800_000_000_999,
   }]);
   assert.deepEqual(calls.map((call) => call.method), ["GET", "GET"]);

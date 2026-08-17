@@ -26,6 +26,20 @@ test("maps DOGE-USDT-PERP to the OKX USDT swap instrument", () => {
   });
 });
 
+test("maps DOGE-USDT-SPOT to the distinct OKX Spot instrument", () => {
+  assert.deepEqual(new OkxInstrumentMappingAdapter().resolve("DOGE-USDT-SPOT").venueInstrument, {
+    venue: "okx",
+    instId: "DOGE-USDT",
+    contractType: "spot",
+    quantityRulesReference: {
+      source: "okx-instruments",
+      instType: "SPOT",
+      instId: "DOGE-USDT",
+      fields: ["lotSz", "minSz", "tickSz"],
+    },
+  });
+});
+
 test("rejects unsupported canonical instruments", () => {
   assert.throws(
     () => new OkxInstrumentMappingAdapter().resolve("BTC-USDT-PERP"),
@@ -49,7 +63,7 @@ test("rejects invalid OKX mapping records", () => {
       instId: "DOGE-USDT-SWAP",
       contractType: "linear_perpetual",
     }]),
-    /Invalid OKX instrument mapping: only perpetual instruments are supported/u,
+    /Invalid OKX instrument mapping: contractType must be spot/u,
   );
 });
 

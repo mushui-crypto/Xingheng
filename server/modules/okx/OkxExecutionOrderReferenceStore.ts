@@ -12,6 +12,8 @@ export type OkxExecutionOrderReference = Readonly<{
   instId: string;
   ordId: string;
   clOrdId: string;
+  expectedProviderQuantity?: string;
+  expectedSide?: "buy" | "sell";
   createdAt: number;
   updatedAt: number;
 }>;
@@ -24,6 +26,8 @@ export type OkxExecutionOrderRecoveryReference = Readonly<{
   instrumentId: string;
   instId: string;
   clOrdId: string;
+  expectedProviderQuantity?: string;
+  expectedSide?: "buy" | "sell";
   createdAt: number;
   updatedAt: number;
 }>;
@@ -49,22 +53,26 @@ export function createOkxExecutionOrderReference(input: unknown): OkxExecutionOr
     "instId",
     "ordId",
     "clOrdId",
+    "expectedProviderQuantity",
+    "expectedSide",
     "createdAt",
     "updatedAt",
   ], "OkxExecutionOrderReference");
   const createdAt = timestamp(value.createdAt, "createdAt");
   const updatedAt = timestamp(value.updatedAt, "updatedAt");
   if (updatedAt < createdAt) throw new Error("updatedAt must be at or after createdAt.");
+  const instrumentId = canonicalInstrumentId(value.instrumentId);
 
   return Object.freeze({
     executionId: identifier(value.executionId, "executionId"),
     intentId: identifier(value.intentId, "intentId"),
     userId: identifier(value.userId, "userId"),
     accountId: identifier(value.accountId, "accountId"),
-    instrumentId: canonicalInstrumentId(value.instrumentId),
+    instrumentId,
     instId: okxInstId(value.instId),
     ordId: okxOrdId(value.ordId),
     clOrdId: okxClOrdId(value.clOrdId),
+    ...expectedOrderFacts(value, instrumentId),
     createdAt,
     updatedAt,
   });
@@ -82,20 +90,24 @@ export function createOkxExecutionOrderRecoveryReference(
     "instrumentId",
     "instId",
     "clOrdId",
+    "expectedProviderQuantity",
+    "expectedSide",
     "createdAt",
     "updatedAt",
   ], "OkxExecutionOrderRecoveryReference");
   const createdAt = timestamp(value.createdAt, "createdAt");
   const updatedAt = timestamp(value.updatedAt, "updatedAt");
   if (updatedAt < createdAt) throw new Error("updatedAt must be at or after createdAt.");
+  const instrumentId = canonicalInstrumentId(value.instrumentId);
   return Object.freeze({
     executionId: identifier(value.executionId, "executionId"),
     intentId: identifier(value.intentId, "intentId"),
     userId: identifier(value.userId, "userId"),
     accountId: identifier(value.accountId, "accountId"),
-    instrumentId: canonicalInstrumentId(value.instrumentId),
+    instrumentId,
     instId: okxInstId(value.instId),
     clOrdId: okxClOrdId(value.clOrdId),
+    ...expectedOrderFacts(value, instrumentId),
     createdAt,
     updatedAt,
   });
@@ -162,6 +174,10 @@ export class PersistentOkxExecutionOrderReferenceStore implements OkxExecutionOr
         instrumentId: normalized.instrumentId,
         instId: normalized.instId,
         clOrdId: normalized.clOrdId,
+        ...(normalized.expectedProviderQuantity === undefined ? {} : {
+          expectedProviderQuantity: normalized.expectedProviderQuantity,
+          expectedSide: normalized.expectedSide,
+        }),
       }),
       createdAt: normalized.createdAt,
       updatedAt: normalized.updatedAt,
@@ -205,6 +221,10 @@ function completeAssociation(
       instId: reference.instId,
       ordId: reference.ordId,
       clOrdId: reference.clOrdId,
+      ...(reference.expectedProviderQuantity === undefined ? {} : {
+        expectedProviderQuantity: reference.expectedProviderQuantity,
+        expectedSide: reference.expectedSide,
+      }),
     }),
     createdAt: reference.createdAt,
     updatedAt: reference.updatedAt,
@@ -227,6 +247,8 @@ function parseStoredPayload(input: string) {
       "instrumentId",
       "instId",
       "clOrdId",
+      "expectedProviderQuantity",
+      "expectedSide",
     ], "Persisted OKX execution order recovery reference");
     if (value.recovery !== "clOrdId") {
       throw new Error("Persisted OKX execution order recovery strategy is invalid.");
@@ -240,6 +262,8 @@ function parseStoredPayload(input: string) {
     "instId",
     "ordId",
     "clOrdId",
+    "expectedProviderQuantity",
+    "expectedSide",
   ], "Persisted OKX execution order reference");
   return { kind: "complete" as const, payload: value };
 }
@@ -283,6 +307,8 @@ function assertRecoveryMatchesReference(
     || recovery.instrumentId !== reference.instrumentId
     || recovery.instId !== reference.instId
     || recovery.clOrdId !== reference.clOrdId
+    || recovery.expectedProviderQuantity !== reference.expectedProviderQuantity
+    || recovery.expectedSide !== reference.expectedSide
     || recovery.createdAt !== reference.createdAt
   ) {
     throw new Error("OKX recovered order identity does not match the persisted recovery reference.");
@@ -318,7 +344,9 @@ function canonicalInstrumentId(value: unknown) {
 
 function okxInstId(value: unknown) {
   const text = identifier(value, "instId");
-  if (!/^[A-Z0-9]{2,12}-USDT-SWAP$/u.test(text)) throw new Error("instId must be an OKX USDT swap id.");
+  if (!/^[A-Z0-9]{2,12}-USDT(?:-SWAP)?$/u.test(text)) {
+    throw new Error("instId must be an OKX USDT spot or swap id.");
+  }
   return text;
 }
 
@@ -332,6 +360,25 @@ function okxClOrdId(value: unknown) {
   const text = identifier(value, "clOrdId");
   if (!/^[A-Za-z0-9]{1,32}$/u.test(text)) throw new Error("clOrdId must be an OKX client order id.");
   return text;
+}
+
+function expectedOrderFacts(value: Record<string, unknown>, instrumentId: string) {
+  const expectedProviderQuantity = value.expectedProviderQuantity;
+  const expectedSide = value.expectedSide;
+  const required = instrumentId.endsWith("-SPOT");
+  if (expectedProviderQuantity === undefined && expectedSide === undefined) {
+    if (required) throw new Error("OKX Spot order reference is missing expected order facts.");
+    return {};
+  }
+  if (typeof expectedProviderQuantity !== "string"
+    || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(expectedProviderQuantity)
+    || /^0(?:\.0+)?$/u.test(expectedProviderQuantity)) {
+    throw new Error("expectedProviderQuantity must be a positive OKX Decimal string.");
+  }
+  if (expectedSide !== "buy" && expectedSide !== "sell") {
+    throw new Error("expectedSide must be an OKX order side.");
+  }
+  return { expectedProviderQuantity, expectedSide } as const;
 }
 
 function timestamp(value: unknown, name: string) {

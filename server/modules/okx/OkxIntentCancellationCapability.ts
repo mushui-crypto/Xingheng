@@ -4,9 +4,15 @@ import type {
 } from "../cex/ExecutionCancelCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { OkxExecutionOrderReference } from "./OkxExecutionOrderReferenceStore";
-import type { OkxIntentExecutionService } from "./OkxIntentExecutionService";
+import type { OkxExecutionOrderLookup } from "./OkxIntentExecutionService";
+import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
 
-export type BoundOkxIntentCancellationService = Pick<OkxIntentExecutionService, "cancel">;
+export type BoundOkxIntentCancellationService = Readonly<{
+  cancel(
+    lookup: OkxExecutionOrderLookup,
+    context: Omit<ExecutionMutationContext, "operation" | "providerInstrumentId" | "venue"> & { providerInstrumentId?: string },
+  ): Promise<ExecutionCancelObservation>;
+}>;
 
 /** Keeps OKX order identity and cancellation transport behind the capability boundary. */
 export class OkxIntentCancellationCapability implements ExecutionCancelCapability {

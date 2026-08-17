@@ -6,20 +6,20 @@ import {
 export type OkxInstrumentMappingRecord = Readonly<{
   canonicalInstrumentId: string;
   instId: string;
-  contractType: "linear_perpetual";
+  contractType: "linear_perpetual" | "spot";
 }>;
 
 export type OkxQuantityRulesReference = Readonly<{
   source: "okx-instruments";
-  instType: "SWAP";
+  instType: "SWAP" | "SPOT";
   instId: string;
-  fields: readonly ["lotSz", "minSz", "ctVal", "tickSz"];
+  fields: readonly ["lotSz", "minSz", "ctVal", "tickSz"] | readonly ["lotSz", "minSz", "tickSz"];
 }>;
 
 export type OkxVenueInstrument = Readonly<{
   venue: "okx";
   instId: string;
-  contractType: "linear_perpetual";
+  contractType: "linear_perpetual" | "spot";
   quantityRulesReference: OkxQuantityRulesReference;
 }>;
 
@@ -29,8 +29,14 @@ export type OkxInstrumentResolution = Readonly<{
 }>;
 
 const OKX_QUANTITY_RULE_FIELDS = Object.freeze(["lotSz", "minSz", "ctVal", "tickSz"] as const);
+const OKX_SPOT_QUANTITY_RULE_FIELDS = Object.freeze(["lotSz", "minSz", "tickSz"] as const);
 
 const DEFAULT_OKX_INSTRUMENT_MAPPINGS = Object.freeze([
+  Object.freeze({
+    canonicalInstrumentId: "DOGE-USDT-SPOT",
+    instId: "DOGE-USDT",
+    contractType: "spot",
+  }),
   Object.freeze({
     canonicalInstrumentId: "DOGE-USDT-PERP",
     instId: "DOGE-USDT-SWAP",
@@ -77,21 +83,24 @@ function buildRecordMap(records: readonly OkxInstrumentMappingRecord[]) {
 
 function validateMappingRecord(record: OkxInstrumentMappingRecord): OkxInstrumentMappingRecord {
   const canonical = canonicalInstrumentFromId(record.canonicalInstrumentId);
-  if (canonical.contractType !== "perpetual") {
-    throw new Error("Invalid OKX instrument mapping: only perpetual instruments are supported.");
-  }
   if (canonical.quoteAsset !== "USDT") {
-    throw new Error("Invalid OKX instrument mapping: only USDT linear perpetual instruments are supported.");
+    throw new Error("Invalid OKX instrument mapping: only USDT-quoted instruments are supported.");
   }
-  if (record.contractType !== "linear_perpetual") {
-    throw new Error("Invalid OKX instrument mapping: contractType must be linear_perpetual.");
+  const expectedContractType = canonical.contractType === "spot" ? "spot" : "linear_perpetual";
+  if (record.contractType !== expectedContractType) {
+    throw new Error(`Invalid OKX instrument mapping: contractType must be ${expectedContractType}.`);
   }
-  const expectedInstId = `${canonical.baseAsset}-${canonical.quoteAsset}-SWAP`;
+  const expectedInstId = canonical.contractType === "spot"
+    ? `${canonical.baseAsset}-${canonical.quoteAsset}`
+    : `${canonical.baseAsset}-${canonical.quoteAsset}-SWAP`;
   if (record.instId !== expectedInstId) {
     throw new Error(`Invalid OKX instrument mapping: ${record.canonicalInstrumentId} must map to ${expectedInstId}.`);
   }
-  if (!/^[A-Z0-9]{2,12}-USDT-SWAP$/u.test(record.instId)) {
-    throw new Error("Invalid OKX instrument mapping: instId must be a USDT swap id.");
+  const instIdPattern = canonical.contractType === "spot"
+    ? /^[A-Z0-9]{2,12}-USDT$/u
+    : /^[A-Z0-9]{2,12}-USDT-SWAP$/u;
+  if (!instIdPattern.test(record.instId)) {
+    throw new Error(`Invalid OKX instrument mapping: instId must be an OKX USDT ${canonical.contractType === "spot" ? "spot" : "swap"} id.`);
   }
   return Object.freeze({
     canonicalInstrumentId: canonical.instrumentId,
@@ -114,10 +123,11 @@ function normalizeCanonicalInstrument(input: string | CanonicalInstrument): Cano
 }
 
 function quantityRulesReference(instId: string): OkxQuantityRulesReference {
+  const instType = instId.endsWith("-SWAP") ? "SWAP" as const : "SPOT" as const;
   return Object.freeze({
     source: "okx-instruments",
-    instType: "SWAP",
+    instType,
     instId,
-    fields: OKX_QUANTITY_RULE_FIELDS,
+    fields: instType === "SWAP" ? OKX_QUANTITY_RULE_FIELDS : OKX_SPOT_QUANTITY_RULE_FIELDS,
   });
 }

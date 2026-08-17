@@ -22,8 +22,10 @@ import {
   type ExecutionRecord,
 } from "../cex/ExecutionRecord";
 import { ExecutionCapabilityRegistry, executionCapability } from "../cex/ExecutionCapabilityRegistry";
+import type { ExecutionCapability } from "../cex/ExecutionCapability";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
+import { canonicalInstrumentFromId } from "../cex/Instrument";
 import {
   createOkxExecutionOrderRecoveryReference,
   createOkxExecutionOrderReference,
@@ -33,6 +35,9 @@ import {
 } from "./OkxExecutionOrderReferenceStore";
 import { OkxIntentCancellationCapability } from "./OkxIntentCancellationCapability";
 import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
+import { OkxSpotExecutionCapability } from "./OkxSpotExecutionCapability";
+import { OkxSpotIntentExecutionService } from "./OkxSpotIntentExecutionService";
+import type { OkxSpotQuantityRulesSource } from "./OkxSpotQuantitySemantics";
 import {
   OkxIntentExecutionService,
   type OkxExecutionQueryResult,
@@ -60,12 +65,13 @@ export type OkxIntentExecutionRuntimeOptions = Readonly<
     OkxIntentExecutionServiceOptions,
     "validateProviderIdentity" | "persistRecoveryReference"
   > & {
+    spotQuantityRulesSource?: OkxSpotQuantityRulesSource;
     createExecutionId?: () => string;
     createCapability?: (
       service: OkxIntentExecutionService,
     ) => OkxIntentExecutionCapability<OkxIntentExecutionResult>;
     createCancelCapability?: (
-      service: OkxIntentExecutionService,
+      service: import("./OkxIntentCancellationCapability").BoundOkxIntentCancellationService,
       reference: OkxExecutionOrderReference,
     ) => ExecutionCancelCapability;
   }
@@ -134,7 +140,7 @@ export class OkxIntentExecutionRuntime {
     }
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
-      const service = this.intentService(runtimeService);
+      const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const reference = await this.resolveReference(record, service);
       const result = await service.query(reference);
       const executionRecord = applyExecutionQueryObservation(record, result.observation);
@@ -169,7 +175,7 @@ export class OkxIntentExecutionRuntime {
     }
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
-      const service = this.intentService(runtimeService);
+      const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
       if (recovery) return this.reconcileRecovery(record, recovery, service);
       const reference = await this.resolveReference(record, service);
@@ -200,7 +206,7 @@ export class OkxIntentExecutionRuntime {
     }
     return this.registry.run(userId, async (runtimeService) => {
       await this.assertAccount(record, runtimeService);
-      const service = this.intentService(runtimeService);
+      const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const reference = await this.loadCancelReference(record);
       const capability = this.options.createCancelCapability?.(service, reference)
         ?? new OkxIntentCancellationCapability(service, reference);
@@ -222,7 +228,7 @@ export class OkxIntentExecutionRuntime {
         intent,
       );
       await this.recordStore.create(initialRecord);
-      const intentService = this.intentService(runtimeService, (reference) =>
+      const intentService = this.intentServiceFor(intent.instrumentId, runtimeService, (reference) =>
         this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
           executionId: initialRecord.executionId,
           intentId: initialRecord.intentId,
@@ -231,11 +237,17 @@ export class OkxIntentExecutionRuntime {
           instrumentId: initialRecord.instrumentId,
           instId: reference.instId,
           clOrdId: reference.clOrdId,
+          ...(reference.expectedProviderQuantity === undefined ? {} : {
+            expectedProviderQuantity: reference.expectedProviderQuantity,
+            expectedSide: reference.expectedSide,
+          }),
           createdAt: initialRecord.createdAt,
           updatedAt: initialRecord.updatedAt,
         })));
-      const capability = this.options.createCapability?.(intentService)
-        ?? new OkxIntentExecutionCapability(intentService);
+      const capability: ExecutionCapability<OkxIntentExecutionResult> = isSpotInstrumentId(intent.instrumentId)
+        ? new OkxSpotExecutionCapability(intentService as OkxSpotIntentExecutionService)
+        : this.options.createCapability?.(intentService as OkxIntentExecutionService)
+          ?? new OkxIntentExecutionCapability(intentService as OkxIntentExecutionService);
       const capabilityRegistry = new ExecutionCapabilityRegistry<OkxIntentExecutionResult>()
         .register(executionCapability("okx", capability));
 
@@ -261,6 +273,10 @@ export class OkxIntentExecutionRuntime {
           instId: execution.step.result.instId,
           ordId: execution.step.result.providerOrderId,
           clOrdId: execution.step.result.clientOrderId,
+          ...(execution.step.result.expectedProviderQuantity === undefined ? {} : {
+            expectedProviderQuantity: execution.step.result.expectedProviderQuantity,
+            expectedSide: execution.step.result.expectedSide,
+          }),
           createdAt: acceptedRecord.createdAt,
           updatedAt: acceptedRecord.updatedAt,
         });
@@ -288,13 +304,28 @@ export class OkxIntentExecutionRuntime {
     });
   }
 
-  private intentService(
+  private intentServiceFor(
+    instrumentId: string,
     client: OkxIntentExecutionClient,
-    persistRecoveryReference?: (
-      reference: Readonly<{ instId: string; clOrdId: string }>,
-    ) => Promise<void> | void,
-  ) {
+    persistRecoveryReference?: (reference: Readonly<{
+      instId: string;
+      clOrdId: string;
+      expectedProviderQuantity?: string;
+      expectedSide?: "buy" | "sell";
+    }>) => Promise<void> | void,
+  ): OkxIntentExecutionService | OkxSpotIntentExecutionService {
     const runtimeService = client as OkxIntentRuntimeService;
+    if (isSpotInstrumentId(instrumentId)) {
+      return new OkxSpotIntentExecutionService(client, {
+        instrumentMapping: this.options.instrumentMapping,
+        quantityRulesSource: this.options.spotQuantityRulesSource,
+        quantityRulesMaxAgeMs: this.options.quantityRulesMaxAgeMs,
+        clock: this.options.clock,
+        mutationSafetyGuard: this.options.mutationSafetyGuard,
+        validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
+        ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
+      });
+    }
     return new OkxIntentExecutionService(client, {
       ...this.options,
       validateProviderIdentity: (context) =>
@@ -319,7 +350,7 @@ export class OkxIntentExecutionRuntime {
     }
   }
 
-  private async resolveReference(record: ExecutionRecord, service: OkxIntentExecutionService) {
+  private async resolveReference(record: ExecutionRecord, service: OkxIntentExecutionService | OkxSpotIntentExecutionService) {
     const stored = await this.orderReferences.loadForUser(record.userId, record.executionId);
     if (stored) return stored;
     const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
@@ -357,7 +388,7 @@ export class OkxIntentExecutionRuntime {
   private async reconcileRecovery(
     record: ExecutionRecord,
     recovery: OkxExecutionOrderRecoveryReference,
-    service: OkxIntentExecutionService,
+    service: OkxIntentExecutionService | OkxSpotIntentExecutionService,
   ): Promise<OkxIntentExecutionReconciliationRuntimeResult> {
     let result: OkxExecutionQueryResult;
     try {
@@ -365,6 +396,10 @@ export class OkxIntentExecutionRuntime {
         instrumentId: recovery.instrumentId,
         instId: recovery.instId,
         clOrdId: recovery.clOrdId,
+        ...(recovery.expectedProviderQuantity === undefined ? {} : {
+          expectedProviderQuantity: recovery.expectedProviderQuantity,
+          expectedSide: recovery.expectedSide,
+        }),
       });
     } catch {
       return this.failedRecovery(record);
@@ -381,6 +416,10 @@ export class OkxIntentExecutionRuntime {
         instId: result.orderIdentity.instId,
         ordId: result.orderIdentity.ordId,
         clOrdId: result.orderIdentity.clOrdId,
+        ...(recovery.expectedProviderQuantity === undefined ? {} : {
+          expectedProviderQuantity: recovery.expectedProviderQuantity,
+          expectedSide: recovery.expectedSide,
+        }),
         createdAt: recovery.createdAt,
         updatedAt: Math.max(recovery.updatedAt, result.observation.observedAt),
       });
@@ -427,6 +466,10 @@ export class OkxIntentExecutionRuntime {
     }
     return Math.max(minimum, value);
   }
+}
+
+function isSpotInstrumentId(instrumentId: string) {
+  return canonicalInstrumentFromId(instrumentId).contractType === "spot";
 }
 
 function identifier(value: unknown, name: string) {

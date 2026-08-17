@@ -70,6 +70,7 @@ export class OkxClient {
       clOrdId: normalized.clOrdId,
       ...(normalized.price === undefined ? {} : { px: normalized.price }),
       ...(normalized.reduceOnly === undefined ? {} : { reduceOnly: String(normalized.reduceOnly) }),
+      ...(normalized.targetCurrency === undefined ? {} : { tgtCcy: normalized.targetCurrency }),
     }).then((payload) => firstRow(payload.data, "OKX place order response"));
     assertItemAccepted(row, "OKX place order");
     return Object.freeze({
@@ -115,6 +116,31 @@ export class OkxClient {
 
   async getAccountIdentity(): Promise<OkxAccountIdentity> {
     return accountIdentity(await this.getAccountConfig());
+  }
+
+  async getSpotBalances(baseAsset: string, quoteAsset: string) {
+    const base = exactAsset(baseAsset, "OKX Spot base asset");
+    const quote = exactAsset(quoteAsset, "OKX Spot quote asset");
+    const row = await this.signedRequest("GET", "/api/v5/account/balance", { ccy: `${base},${quote}` })
+      .then((payload) => firstRow(payload.data, "OKX Spot balance response"));
+    const details = row.details;
+    if (!Array.isArray(details)) throw invalid("OKX Spot balance details are invalid.");
+    const balances = new Map<string, string>();
+    for (const detail of details) {
+      const value = record(detail, "OKX Spot balance detail");
+      const asset = exactAsset(value.ccy, "OKX Spot balance currency");
+      if (balances.has(asset)) {
+        throw invalid("OKX Spot balance response contains a duplicate currency.");
+      }
+      balances.set(asset, positiveOrZeroDecimal(value.cashBal, "OKX Spot cash balance"));
+    }
+    if (!balances.has(base) || !balances.has(quote)) {
+      throw invalid("OKX Spot balance response is missing an affected currency.");
+    }
+    return Object.freeze({
+      baseTotal: balances.get(base) as string,
+      quoteTotal: balances.get(quote) as string,
+    });
   }
 
   async validateAccess(): Promise<OkxAccountAccess> {
@@ -279,10 +305,14 @@ function parseOrder(row: Record<string, unknown>, expected: Readonly<{ instId: s
     status: mapped.status,
     statusReason: mapped.reason,
     rawState,
+    ...(row.side === undefined ? {} : { side: orderSide(row.side) }),
     requestedQuantity: decimal(row.sz, "OKX order quantity"),
     filledQuantity: decimal(row.accFillSz, "OKX order filled quantity"),
     averagePrice: nullableDecimal(row.avgPx, "OKX order average price"),
-    fee: signedDecimal(row.fee ?? "0", "OKX order fee"),
+    fee: isSpotInstrumentId(instId)
+      ? untrustedSpotFee(row.fee ?? "0")
+      : signedDecimal(row.fee ?? "0", "OKX order fee"),
+    feeCcy: optionalString(row.feeCcy) || null,
     updatedAt: nullableTimestamp(row.uTime),
   });
 }
@@ -305,11 +335,20 @@ function parsePosition(row: Record<string, unknown>, expectedInstId: string): Ok
 
 function normalizePlaceOrderRequest(request: OkxPlaceOrderRequest): OkxPlaceOrderRequest {
   const instId = exactInstrumentId(request.instId);
-  if (request.tdMode !== "cross" && request.tdMode !== "isolated") throw invalid("OKX tdMode is invalid.");
+  if (request.tdMode !== "cross" && request.tdMode !== "isolated" && request.tdMode !== "cash") throw invalid("OKX tdMode is invalid.");
   if (request.side !== "buy" && request.side !== "sell") throw invalid("OKX order side is invalid.");
   if (request.ordType !== "market" && request.ordType !== "limit") throw invalid("OKX order type is invalid.");
   if (request.ordType === "limit" && request.price === undefined) throw invalid("OKX limit order requires price.");
   if (request.ordType === "market" && request.price !== undefined) throw invalid("OKX market order must not include price.");
+  const spot = isSpotInstrumentId(instId);
+  if (request.tdMode === "cash") {
+    if (!spot || request.reduceOnly !== undefined) throw invalid("OKX Spot order configuration is invalid.");
+    if (request.side === "buy" && request.ordType === "market" && request.targetCurrency !== "base_ccy") {
+      throw invalid("OKX Spot market buy must specify base_ccy target currency.");
+    }
+  } else if (spot || request.targetCurrency !== undefined) {
+    throw invalid("OKX swap order configuration is invalid.");
+  }
   return Object.freeze({
     instId,
     tdMode: request.tdMode,
@@ -319,6 +358,7 @@ function normalizePlaceOrderRequest(request: OkxPlaceOrderRequest): OkxPlaceOrde
     clOrdId: exactClientOrderId(request.clOrdId),
     ...(request.price === undefined ? {} : { price: positiveDecimal(request.price, "OKX order price") }),
     ...(request.reduceOnly === undefined ? {} : { reduceOnly: request.reduceOnly === true }),
+    ...(request.targetCurrency === undefined ? {} : { targetCurrency: request.targetCurrency }),
   });
 }
 
@@ -367,8 +407,23 @@ function record(value: unknown, label: string): Record<string, unknown> {
 
 function exactInstrumentId(value: unknown) {
   const result = exactString(value, "OKX instId");
-  if (!/^[A-Z0-9]{2,12}-USDT-SWAP$/u.test(result)) throw invalid("OKX instId must be a USDT linear perpetual swap.");
+  if (!/^[A-Z0-9]{2,12}-USDT(?:-SWAP)?$/u.test(result)) throw invalid("OKX instId must be an OKX USDT spot or linear perpetual swap id.");
   return result;
+}
+
+function exactAsset(value: unknown, label: string) {
+  const result = exactString(value, label).toUpperCase();
+  if (!/^[A-Z0-9]{2,12}$/u.test(result)) throw invalid(`${label} is invalid.`);
+  return result;
+}
+
+function orderSide(value: unknown): OkxProviderOrder["side"] {
+  if (value === "buy" || value === "sell") return value;
+  throw invalid("OKX order side is invalid.");
+}
+
+function isSpotInstrumentId(instId: string) {
+  return /^[A-Z0-9]{2,12}-USDT$/u.test(instId);
 }
 
 function exactClientOrderId(value: unknown) {
@@ -405,6 +460,10 @@ function positiveDecimal(value: unknown, label: string) {
   return result;
 }
 
+function positiveOrZeroDecimal(value: unknown, label: string) {
+  return decimal(value, label);
+}
+
 function nullableDecimal(value: unknown, label: string) {
   return value === undefined || value === null || value === "" ? null : decimal(value, label);
 }
@@ -421,6 +480,10 @@ function signedDecimal(value: unknown, label: string) {
     throw invalid(`${label} is invalid.`);
   }
   return value;
+}
+
+function untrustedSpotFee(value: unknown) {
+  return typeof value === "string" && value.length <= 200 ? value : "";
 }
 
 function magnitudeDecimal(value: string) {

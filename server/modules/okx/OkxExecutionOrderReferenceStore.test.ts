@@ -50,6 +50,18 @@ test("OKX provider fields remain outside the common order-reference source", () 
   assert.doesNotMatch(commonSource, /\bordId\b|\bclOrdId\b|\binstId\b|\bsz\b/u);
 });
 
+test("accepts an OKX Spot order reference without changing common persistence fields", () => {
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const spot = orderReference({
+    instrumentId: "DOGE-USDT-SPOT",
+    instId: "DOGE-USDT",
+    expectedProviderQuantity: "100",
+    expectedSide: "buy",
+  });
+  references.create(spot);
+  assert.deepEqual(references.loadForUser("user-a", "execution-okx-1"), spot);
+});
+
 test("persists a clOrdId recovery anchor across restart and upgrades it atomically", async () => {
   await withDatabase(async ({ dbPath }) => {
     const records = new SqliteExecutionRecordStore({ dbPath });
@@ -85,6 +97,47 @@ test("persists a clOrdId recovery anchor across restart and upgrades it atomical
   });
 });
 
+test("persists the Spot recovery anchor through process restart", async () => {
+  await withDatabase(async ({ dbPath }) => {
+    const records = new SqliteExecutionRecordStore({ dbPath });
+    records.create(executionRecord({ instrumentId: "DOGE-USDT-SPOT" }));
+    records.close();
+
+    const recoveryPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    const recoveryStore = new PersistentOkxExecutionOrderReferenceStore(recoveryPersistence);
+    const recovery = recoveryReference({
+      instrumentId: "DOGE-USDT-SPOT",
+      instId: "DOGE-USDT",
+      expectedProviderQuantity: "100",
+      expectedSide: "buy",
+    });
+    await recoveryStore.createRecovery(recovery);
+    recoveryPersistence.close();
+
+    const upgradePersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    const upgradeStore = new PersistentOkxExecutionOrderReferenceStore(upgradePersistence);
+    assert.deepEqual(await upgradeStore.loadRecoveryForUser("user-a", "execution-okx-1"), recovery);
+    const complete = orderReference({
+      instrumentId: "DOGE-USDT-SPOT",
+      instId: "DOGE-USDT",
+      expectedProviderQuantity: "100",
+      expectedSide: "buy",
+      updatedAt: now + 1,
+    });
+    await upgradeStore.create(complete);
+    upgradePersistence.close();
+
+    const restartedPersistence = new SqliteExecutionOrderReferenceStore({ dbPath });
+    try {
+      const restarted = new PersistentOkxExecutionOrderReferenceStore(restartedPersistence);
+      assert.deepEqual(await restarted.loadForUser("user-a", "execution-okx-1"), complete);
+      assert.equal(await restarted.loadRecoveryForUser("user-a", "execution-okx-1"), null);
+    } finally {
+      restartedPersistence.close();
+    }
+  });
+});
+
 test("refuses to upgrade a recovery anchor with mismatched OKX identity", () => {
   const references = new InMemoryOkxExecutionOrderReferenceStore();
   references.createRecovery(recoveryReference());
@@ -99,7 +152,7 @@ test("refuses to upgrade a recovery anchor with mismatched OKX identity", () => 
   );
 });
 
-function executionRecord(): ExecutionRecord {
+function executionRecord(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {
   return Object.freeze({
     executionId: "execution-okx-1",
     intentId: "intent-okx-1",
@@ -111,6 +164,7 @@ function executionRecord(): ExecutionRecord {
     remoteOrderId: "8001",
     createdAt: now,
     updatedAt: now,
+    ...overrides,
   });
 }
 
@@ -130,8 +184,8 @@ function orderReference(overrides: Partial<OkxExecutionOrderReference> = {}): Ok
   });
 }
 
-function recoveryReference(): OkxExecutionOrderRecoveryReference {
-  const { ordId: _ordId, ...recovery } = orderReference();
+function recoveryReference(overrides: Partial<OkxExecutionOrderReference> = {}): OkxExecutionOrderRecoveryReference {
+  const { ordId: _ordId, ...recovery } = orderReference(overrides);
   return recovery;
 }
 

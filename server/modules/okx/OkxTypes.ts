@@ -9,7 +9,7 @@ export type OkxCredentials = Readonly<{
 export type OkxCredentialProvider = () => OkxCredentials;
 
 export type OkxOrderSide = "buy" | "sell";
-export type OkxTradeMode = "cross" | "isolated";
+export type OkxTradeMode = "cross" | "isolated" | "cash";
 export type OkxOrderType = "market" | "limit";
 export type OkxContractQuantity = string;
 
@@ -22,6 +22,8 @@ export type OkxPlaceOrderRequest = Readonly<{
   clOrdId: string;
   price?: string;
   reduceOnly?: boolean;
+  /** OKX Spot market buy quantity must be expressed in base currency. */
+  targetCurrency?: "base_ccy";
 }>;
 
 export type OkxOrderIdentity = Readonly<{
@@ -61,6 +63,7 @@ export type OkxExecutionStatus = Extract<
 >;
 
 export type OkxProviderOrder = Readonly<OkxOrderIdentity & {
+  side?: OkxOrderSide;
   status: OkxExecutionStatus;
   statusReason: string | null;
   rawState: string;
@@ -68,6 +71,7 @@ export type OkxProviderOrder = Readonly<OkxOrderIdentity & {
   filledQuantity: OkxContractQuantity;
   averagePrice: string | null;
   fee: string;
+  feeCcy?: string | null;
   updatedAt: number | null;
 }>;
 
