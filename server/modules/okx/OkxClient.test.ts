@@ -36,7 +36,10 @@ test("place order maps request body and authentication headers", async () => {
         method: init?.method ?? "GET",
         path: url.pathname,
       });
-      return Response.json({ code: "0", data: [{ ordId: "12345", clOrdId: "clientA1", instId: "DOGE-USDT-SWAP", sCode: "0" }] });
+      return Response.json({
+        code: "0",
+        data: [{ ordId: "12345", clOrdId: "clientA1", tag: "", ts: String(now), sCode: "0", sMsg: "" }],
+      });
     }) as typeof fetch,
   });
 
@@ -83,7 +86,7 @@ test("market reduce-only close order omits price and preserves reduceOnly=true",
     now: () => now,
     fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
-      return Response.json({ code: "0", data: [{ ordId: "12346", clOrdId: "closeA1", instId: "DOGE-USDT-SWAP", sCode: "0" }] });
+      return Response.json({ code: "0", data: [{ ordId: "12346", clOrdId: "closeA1", sCode: "0", sMsg: "" }] });
     }) as typeof fetch,
   });
 
@@ -114,11 +117,97 @@ test("Spot market buy sends cash tdMode and base_ccy target currency", async () 
     now: () => now,
     fetchImpl: (async (_input: string | URL | Request, init?: RequestInit) => {
       body = JSON.parse(String(init?.body));
-      return Response.json({ code: "0", data: [{ ordId: "12347", clOrdId: "spotA1", instId: "DOGE-USDT", sCode: "0" }] });
+      return Response.json({ code: "0", data: [{ ordId: "12347", clOrdId: "spotA1", sCode: "0", sMsg: "" }] });
     }) as typeof fetch,
   });
-  await client.placeOrder({ instId: "DOGE-USDT", tdMode: "cash", side: "buy", ordType: "market", quantity: "100", clOrdId: "spotA1", targetCurrency: "base_ccy" });
+  const result = await client.placeOrder({ instId: "DOGE-USDT", tdMode: "cash", side: "buy", ordType: "market", quantity: "100", clOrdId: "spotA1", targetCurrency: "base_ccy" });
   assert.deepEqual(body, { instId: "DOGE-USDT", tdMode: "cash", side: "buy", ordType: "market", sz: "100", clOrdId: "spotA1", tgtCcy: "base_ccy" });
+  assert.deepEqual(result, { instId: "DOGE-USDT", ordId: "12347", clOrdId: "spotA1" });
+});
+
+test("place order rejects incomplete or mismatched order identity without requiring response instId", async (t) => {
+  for (const fixture of [
+    { name: "mismatched clOrdId", row: { ordId: "12345", clOrdId: "differentA1", sCode: "0" } },
+    { name: "missing ordId", row: { clOrdId: "clientA1", sCode: "0" } },
+    { name: "missing clOrdId", row: { ordId: "12345", sCode: "0" } },
+  ]) {
+    await t.test(fixture.name, async () => {
+      const client = new OkxClient(() => credentials, {
+        now: () => now,
+        fetchImpl: (async () => Response.json({ code: "0", data: [fixture.row] })) as typeof fetch,
+      });
+      await assert.rejects(
+        () => client.placeOrder({
+          instId: "DOGE-USDT-SWAP",
+          tdMode: "cross",
+          side: "buy",
+          ordType: "market",
+          quantity: "1",
+          clOrdId: "clientA1",
+        }),
+        (error: unknown) => error instanceof OkxProviderError
+          && error.category === "provider_response_invalid",
+      );
+    });
+  }
+});
+
+test("place order requires an exact string zero item success code", async (t) => {
+  const invalidCodes: Array<{ name: string; sCode?: unknown }> = [
+    { name: "missing" },
+    { name: "null", sCode: null },
+    { name: "numeric zero", sCode: 0 },
+    { name: "empty string", sCode: "" },
+    { name: "non-string", sCode: {} },
+  ];
+  for (const fixture of invalidCodes) {
+    await t.test(fixture.name, async () => {
+      const row = {
+        ordId: "12345",
+        clOrdId: "clientA1",
+        ...(fixture.sCode === undefined ? {} : { sCode: fixture.sCode }),
+      };
+      const client = new OkxClient(() => credentials, {
+        now: () => now,
+        fetchImpl: (async () => Response.json({ code: "0", data: [row] })) as typeof fetch,
+      });
+      await assert.rejects(
+        () => client.placeOrder({
+          instId: "DOGE-USDT-SWAP",
+          tdMode: "cross",
+          side: "buy",
+          ordType: "market",
+          quantity: "1",
+          clOrdId: "clientA1",
+        }),
+        (error: unknown) => error instanceof OkxProviderError
+          && error.category === "provider_response_invalid",
+      );
+    });
+  }
+
+  await t.test("non-zero string", async () => {
+    const client = new OkxClient(() => credentials, {
+      now: () => now,
+      fetchImpl: (async () => Response.json({
+        code: "0",
+        data: [{ ordId: "12345", clOrdId: "clientA1", sCode: "51000" }],
+      })) as typeof fetch,
+    });
+    await assert.rejects(
+      () => client.placeOrder({
+        instId: "DOGE-USDT-SWAP",
+        tdMode: "cross",
+        side: "buy",
+        ordType: "market",
+        quantity: "1",
+        clOrdId: "clientA1",
+      }),
+      (error: unknown) => error instanceof OkxProviderError
+        && error.category === "provider_request_rejected"
+        && error.providerCode === "51000",
+    );
+  });
 });
 
 test("get order parses Decimal strings and status mapping", async () => {

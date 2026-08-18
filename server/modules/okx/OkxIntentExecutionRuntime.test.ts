@@ -70,6 +70,50 @@ test("runtime submits through the authenticated user's OKX service and saves ord
   assert.deepEqual(records.updated.map((record) => record.status), ["PENDING_CONFIRMATION"]);
 });
 
+test("runtime upgrades the recovery anchor from the real OKX place-order response shape", async () => {
+  let providerMutations = 0;
+  let providerReads = 0;
+  const providerClient = new OkxClient(() => okxCredentials(), {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      assert.equal(url.pathname, "/api/v5/trade/order");
+      assert.equal(init?.method, "POST");
+      providerMutations += 1;
+      const body = JSON.parse(String(init?.body)) as { clOrdId: string };
+      return Response.json({
+        code: "0",
+        data: [{ ordId: "8002", clOrdId: body.clOrdId, sCode: "0", sMsg: "" }],
+      });
+    }) as typeof fetch,
+  });
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  service.placeOrderDelegate = (request) => providerClient.placeOrder(request);
+  service.getOrderDelegate = async (request) => {
+    providerReads += 1;
+    return providerClient.getOrder(request);
+  };
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    new FakeExecutionRecordStore(),
+    references,
+    runtimeOptions("execution-okx-real-response"),
+  );
+
+  const result = await runtime.execute(executionIntent({ intentId: "intent-okx-real-response" }));
+
+  assert.equal(result.executionRecord.status, "PENDING_CONFIRMATION");
+  assert.equal(result.executionRecord.remoteOrderId, "8002");
+  assert.equal(result.orderReference?.ordId, "8002");
+  assert.equal(result.orderReference?.instId, "DOGE-USDT-SWAP");
+  assert.equal(await references.loadRecoveryForUser("user-a", "execution-okx-real-response"), null);
+  assert.equal((await references.loadForUser("user-a", "execution-okx-real-response"))?.ordId, "8002");
+  assert.equal(service.placeRequests.length, 1);
+  assert.equal(providerMutations, 1);
+  assert.equal(providerReads, 0);
+});
+
 test("runtime selects the OKX Spot capability and persists the normal order reference", async () => {
   const service = new FakeOkxRuntimeService("okx:account-user-a");
   const references = new InMemoryOkxExecutionOrderReferenceStore();
@@ -320,6 +364,7 @@ class FakeOkxRuntimeService {
   readonly cancelRequests: OkxCancelOrderRequest[] = [];
   orderState = "live";
   orderOverride: Partial<OkxProviderOrder> = {};
+  placeOrderDelegate?: (request: OkxPlaceOrderRequest) => Promise<OkxCancelOrderResult>;
   getOrderDelegate?: (request: OkxGetOrderRequest) => Promise<OkxProviderOrder>;
 
   constructor(private readonly accountId: string) {}
@@ -332,6 +377,7 @@ class FakeOkxRuntimeService {
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
+    if (this.placeOrderDelegate) return this.placeOrderDelegate(request);
     return {
       instId: request.instId,
       ordId: "8001",

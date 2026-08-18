@@ -73,10 +73,14 @@ export class OkxClient {
       ...(normalized.targetCurrency === undefined ? {} : { tgtCcy: normalized.targetCurrency }),
     }).then((payload) => firstRow(payload.data, "OKX place order response"));
     assertItemAccepted(row, "OKX place order");
+    const clOrdId = exactClientOrderId(row.clOrdId);
+    if (clOrdId !== normalized.clOrdId) {
+      throw invalid("OKX place order clOrdId does not match request.");
+    }
     return Object.freeze({
-      instId: exactString(row.instId, "OKX place order instId"),
+      instId: normalized.instId,
       ordId: exactProviderId(row.ordId, "OKX place order ordId"),
-      clOrdId: exactString(row.clOrdId, "OKX place order clOrdId"),
+      clOrdId,
     });
   }
 
@@ -397,8 +401,11 @@ function normalizeCredentials(credentials: OkxCredentials): OkxCredentials {
 }
 
 function assertItemAccepted(row: Record<string, unknown>, label: string) {
-  const itemCode = optionalString(row.sCode);
-  if (itemCode && itemCode !== "0") {
+  const itemCode = exactString(row.sCode, `${label} sCode`);
+  if (row.sCode !== itemCode) {
+    throw invalid(`${label} sCode is invalid.`);
+  }
+  if (itemCode !== "0") {
     throw new OkxProviderError(
       isAuthenticationCode(itemCode) ? "credential_validation_failed" : "provider_request_rejected",
       `${label} rejected: ${itemCode}.`,
