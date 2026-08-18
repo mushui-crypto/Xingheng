@@ -114,7 +114,8 @@ test("propagates resolved remote execution states from capability results", asyn
 
 test("reports a capability call failure without retrying or asserting provider failure", async () => {
   const capability = new MockExecutionCapability();
-  capability.failure = new Error("provider state is unknown");
+  const failure = new Error("provider state is unknown");
+  capability.failure = failure;
   const coordinator = new ExecutionCoordinator(capability, () => now);
 
   const coordinated = await coordinator.execute(executionIntent());
@@ -140,8 +141,24 @@ test("reports a capability call failure without retrying or asserting provider f
       stepId: "execution-capability",
       status: "CALL_FAILED",
       result: null,
+      error: failure,
     },
   });
+  assert.equal(coordinated.step.status === "CALL_FAILED" && coordinated.step.error, failure);
+});
+
+test("preserves a non-Error capability failure without retrying", async () => {
+  const capability = new MockExecutionCapability();
+  const failure = Object.freeze({ category: "provider_response_invalid" });
+  capability.failure = failure;
+
+  const coordinated = await new ExecutionCoordinator(capability, () => now).execute(executionIntent());
+
+  assert.equal(capability.calls.length, 1);
+  assert.equal(coordinated.status, "CALL_FAILED");
+  assert.equal(coordinated.executionState.status, "UNKNOWN");
+  assert.equal(coordinated.step.status, "CALL_FAILED");
+  if (coordinated.step.status === "CALL_FAILED") assert.equal(coordinated.step.error, failure);
 });
 
 test("an expired intent is rejected before the capability call", async () => {
@@ -172,7 +189,7 @@ test("has no Binance, strategy, scheduler, worker, API, or provider dependency",
 
 class MockExecutionCapability {
   readonly calls: ExecutionIntent[] = [];
-  failure: Error | null = null;
+  failure: unknown = null;
 
   constructor(private readonly result: Record<string, unknown> = { executionAttemptId: "attempt-1" }) {}
 

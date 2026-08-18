@@ -7,11 +7,23 @@ import {
 } from "./ExecutionState";
 import type { ExecutionCapability } from "./ExecutionCapability";
 
-export type ExecutionStep<TResult> = Readonly<{
-  stepId: "execution-capability";
-  status: "SUCCEEDED" | "CALL_FAILED" | "SKIPPED_EXPIRED";
-  result: TResult | null;
-}>;
+export type ExecutionStep<TResult> =
+  | Readonly<{
+    stepId: "execution-capability";
+    status: "SUCCEEDED";
+    result: TResult;
+  }>
+  | Readonly<{
+    stepId: "execution-capability";
+    status: "CALL_FAILED";
+    result: null;
+    error: unknown;
+  }>
+  | Readonly<{
+    stepId: "execution-capability";
+    status: "SKIPPED_EXPIRED";
+    result: null;
+  }>;
 
 export type CoordinatedExecutionResult<TResult> = Readonly<{
   intentId: string;
@@ -36,7 +48,7 @@ export class ExecutionCoordinator<TResult> {
     let executionState = createExecutionState(intent);
     const startedAt = this.now();
     if (startedAt >= intent.expiresAt) {
-      return result(intent, "EXPIRED", executionState, {
+      return result<TResult>(intent, "EXPIRED", executionState, {
         stepId: "execution-capability",
         status: "SKIPPED_EXPIRED",
         result: null,
@@ -59,7 +71,7 @@ export class ExecutionCoordinator<TResult> {
         status: "SUCCEEDED",
         result: capabilityResult,
       });
-    } catch {
+    } catch (error) {
       executionState = transitionExecutionState(executionState, {
         type: "REMOTE_UNKNOWN",
         occurredAt: this.nowAtOrAfter(executionState.updatedAt),
@@ -68,6 +80,7 @@ export class ExecutionCoordinator<TResult> {
         stepId: "execution-capability",
         status: "CALL_FAILED",
         result: null,
+        error,
       });
     }
   }
