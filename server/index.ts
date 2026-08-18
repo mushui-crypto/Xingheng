@@ -244,7 +244,11 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   },
   {
     binance: new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
-    okx: new OkxSpotOpeningAttributionSource(executionRecordStore, userExchangeCredentials),
+    okx: new OkxSpotOpeningAttributionSource(
+      executionRecordStore,
+      userExchangeCredentials,
+      new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
+    ),
   },
   formalExecutionRuntimes,
 );
