@@ -85,7 +85,7 @@ export class OkxAccountReadProviderFactory implements AccountReadProviderFactory
 
 function accountMode(level: string): { accountType: AccountReadAccountType; accountMode: string } {
   if (level === "1") return { accountType: "spot", accountMode: "spot" };
-  if (level === "2") return { accountType: "derivatives", accountMode: "futures" };
+  if (level === "2") return { accountType: "unified", accountMode: "single_currency_margin" };
   if (level === "3") return { accountType: "unified", accountMode: "multi_currency_margin" };
   if (level === "4") return { accountType: "unified", accountMode: "portfolio_margin" };
   return { accountType: "unknown", accountMode: "unknown" };

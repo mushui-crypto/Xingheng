@@ -8,7 +8,7 @@ import { OkxAccountReadProvider, OkxAccountReadProviderFactory } from "./OkxAcco
 test("maps OKX account modes without forcing unified balances into spot or derivatives", async (t) => {
   for (const [level, accountType, accountMode] of [
     ["1", "spot", "spot"],
-    ["2", "derivatives", "futures"],
+    ["2", "unified", "single_currency_margin"],
     ["3", "unified", "multi_currency_margin"],
     ["4", "unified", "portfolio_margin"],
     ["9", "unknown", "unknown"],
