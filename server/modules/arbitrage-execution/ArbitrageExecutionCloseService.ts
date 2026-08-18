@@ -28,6 +28,7 @@ type InstanceStore = Pick<
   "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
 >;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
+type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
 
 export class ArbitrageExecutionCloseError extends Error {
   constructor(
@@ -50,8 +51,8 @@ export class ArbitrageExecutionCloseService {
     private readonly instances: InstanceStore,
     private readonly positions: PositionVerifier,
     private readonly planningContexts: ArbitrageExecutionPlanningContextSource,
-    private readonly spotBalances: SpotCloseAvailableBalanceSource,
-    private readonly spotAttributions: SpotOpeningAttributionSource,
+    private readonly spotBalances: SpotSource<SpotCloseAvailableBalanceSource>,
+    private readonly spotAttributions: SpotSource<SpotOpeningAttributionSource>,
     private readonly runtimes: FormalExecutionRuntimeResolver,
     private readonly options: Readonly<{
       clock?: () => number;
@@ -116,7 +117,7 @@ export class ArbitrageExecutionCloseService {
       const opening = exactSpotOpeningReference(instance, leg.legId, leg.confirmedOpenedQuantity);
       let attributableBaseQuantity: string;
       try {
-        attributableBaseQuantity = await this.spotAttributions.readAttributableBaseQuantity(userId, {
+        attributableBaseQuantity = await this.spotAttributionFor(leg.venue).readAttributableBaseQuantity(userId, {
           accountId: leg.accountId,
           instrumentId: leg.instrumentId,
           providerSymbol: context.instrument.providerSymbol,
@@ -130,7 +131,7 @@ export class ArbitrageExecutionCloseService {
       }
       let availableQuantity: string;
       try {
-        const balance = await this.spotBalances.readAvailableBalance(userId, {
+        const balance = await this.spotBalanceFor(leg.venue).readAvailableBalance(userId, {
           accountId: leg.accountId,
           instrumentId: leg.instrumentId,
           providerSymbol: context.instrument.providerSymbol,
@@ -237,6 +238,14 @@ export class ArbitrageExecutionCloseService {
     return value;
   }
 
+  private spotBalanceFor(venue: ExecutionIntent["venue"]): SpotCloseAvailableBalanceSource {
+    return resolveSpotSource(this.spotBalances, venue, "balance");
+  }
+
+  private spotAttributionFor(venue: ExecutionIntent["venue"]): SpotOpeningAttributionSource {
+    return resolveSpotSource(this.spotAttributions, venue, "attribution");
+  }
+
   private resolveRuntime(venue: ExecutionIntent["venue"]) {
     try {
       return this.runtimes.resolve(venue);
@@ -248,6 +257,14 @@ export class ArbitrageExecutionCloseService {
       throw error;
     }
   }
+}
+
+function resolveSpotSource<T extends object>(source: SpotSource<T>, venue: ExecutionIntent["venue"], kind: string): T {
+  if (kind === "balance" && "readAvailableBalance" in source) return source as T;
+  if (kind === "attribution" && "readAttributableBaseQuantity" in source) return source as T;
+  const selected = (source as Partial<Record<ExecutionIntent["venue"], T>>)[venue];
+  if (!selected) throw new Error(`Spot ${kind} source is not configured for ${venue}.`);
+  return selected;
 }
 
 function exactSpotOpeningReference(instance: ArbitrageInstance, legId: string, grossConfirmedQuantity: string) {

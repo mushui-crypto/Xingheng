@@ -40,6 +40,8 @@ import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/ArbitrageExecutionCancelService";
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
+import { OkxSpotCloseBalanceSource } from "./modules/okx/OkxSpotCloseBalanceSource";
+import { OkxSpotOpeningAttributionSource } from "./modules/okx/OkxSpotOpeningAttributionSource";
 import { BinanceSpotOpeningAttributionSource } from "./modules/arbitrage-execution/BinanceSpotOpeningAttributionSource";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
@@ -236,8 +238,14 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageInstances,
   arbitragePositionVerification,
   arbitrageExecutionPlanningContexts,
-  new BinanceSpotCloseBalanceSource(binancePersonalTrading),
-  new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
+  {
+    binance: new BinanceSpotCloseBalanceSource(binancePersonalTrading),
+    okx: new OkxSpotCloseBalanceSource(userExchangeCredentials),
+  },
+  {
+    binance: new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
+    okx: new OkxSpotOpeningAttributionSource(executionRecordStore, userExchangeCredentials),
+  },
   formalExecutionRuntimes,
 );
 const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
