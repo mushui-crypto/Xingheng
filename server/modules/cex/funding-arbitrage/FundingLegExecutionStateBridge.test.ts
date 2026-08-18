@@ -3,7 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createExecutionRecord } from "../ExecutionRecord";
 import type { ExecutionQueryObservation } from "../ExecutionQueryCapability";
-import type { FundingArbitrageExecutionIntent } from "./FundingArbitrageExecutionIntent";
+import type {
+  FundingArbitrageExecutionIntent,
+  SpotPerpetualFundingArbitrageExecutionIntent,
+} from "./FundingArbitrageExecutionIntent";
 import { FundingArbitrageExecutionCoordinator } from "./FundingArbitrageExecutionCoordinator";
 import { FundingLegExecutionStateBridge } from "./FundingLegExecutionStateBridge";
 
@@ -84,6 +87,40 @@ test("failed execution becomes a failed funding leg without a fill", () => {
   assert.equal(updated.status, "FAILED");
 });
 
+test("keeps Spot BUY exposure recoverable when the Perpetual SHORT leg fails", () => {
+  const spotBought = apply(
+    startedSpotPerpState(),
+    "leg-spot",
+    execution("long", "CONFIRMED"),
+    confirmed("100", now + 2),
+  );
+  const failedPerp = apply(
+    spotBought,
+    "leg-perp",
+    execution("short", "FAILED", now + 2),
+    {
+      state: "FAILED",
+      filledBaseQuantity: "0",
+      observedAt: now + 3,
+    },
+  );
+
+  assert.equal(failedPerp.status, "RESIDUAL");
+  assert.equal(failedPerp.legs[0].status, "TERMINAL");
+  assert.equal(failedPerp.legs[1].status, "FAILED");
+  assert.equal(failedPerp.legs[1].confirmedExecutedQuantity, "0");
+  assert.equal(failedPerp.residualExposure.residualQuantity, "100");
+
+  const reconciled = apply(
+    failedPerp,
+    "leg-perp",
+    execution("short", "CONFIRMED", now + 3),
+    confirmed("100", now + 4),
+  );
+  assert.equal(reconciled.status, "HEDGED");
+  assert.equal(reconciled.residualExposure.residualQuantity, "0");
+});
+
 test("rejects user and link identity mismatch without provider access", () => {
   const record = execution("long", "CONFIRMED");
   const observation = confirmed("0.002", now + 2);
@@ -142,6 +179,12 @@ function startedState() {
   return coordinator.transition(created, { type: "START_EXECUTION", occurredAt: now + 1 });
 }
 
+function startedSpotPerpState() {
+  const coordinator = new FundingArbitrageExecutionCoordinator();
+  const created = coordinator.createExecution(spotPerpFundingIntent());
+  return coordinator.transition(created, { type: "START_EXECUTION", occurredAt: now + 1 });
+}
+
 function execution(
   suffix: "long" | "short",
   status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN",
@@ -191,6 +234,36 @@ function fundingIntent(): FundingArbitrageExecutionIntent {
         instrumentId: "XAUT-USDT-PERP",
         marketType: "perpetual",
         targetDeltaBaseQuantity: "0.002",
+      },
+    ],
+  };
+}
+
+function spotPerpFundingIntent(): SpotPerpetualFundingArbitrageExecutionIntent {
+  return {
+    intentId: "funding-intent-okx-spot-perp",
+    sourcePlanId: "plan-okx-spot-perp",
+    strategyType: "SPOT_PERPETUAL",
+    objective: "ESTABLISH_HEDGE",
+    constraints: { maxResidualBaseQuantity: "0" },
+    createdAt: now,
+    expiresAt: now + 60_000,
+    legs: [
+      {
+        legId: "leg-spot",
+        role: "long",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-SPOT",
+        marketType: "spot",
+        targetDeltaBaseQuantity: "100",
+      },
+      {
+        legId: "leg-perp",
+        role: "short",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-PERP",
+        marketType: "perpetual",
+        targetDeltaBaseQuantity: "100",
       },
     ],
   };

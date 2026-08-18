@@ -7,6 +7,7 @@ import type {
 } from "../CexCanonicalModels";
 import {
   buildFundingArbitragePlan,
+  buildSpotPerpetualFundingArbitragePlan,
   type FundingArbitragePlanningParameters,
 } from "./FundingArbitrageStrategy";
 
@@ -127,6 +128,67 @@ test("the strategy output contains no execution-bound fields", () => {
     "execution",
   ]);
   for (const key of collectKeys(plan)) assert.equal(forbiddenFields.has(key), false, `unexpected field: ${key}`);
+});
+
+test("builds an OKX Spot plus Swap plan with canonical base quantity and directional legs", () => {
+  const spot = instrument("okx", "DOGE-USDT-SPOT", {
+    baseAsset: "DOGE",
+    marketType: "spot",
+    contractType: "spot",
+    providerSymbol: "DOGE-USDT",
+    quantityUnit: "base",
+    contractSize: 1,
+    quantityStep: 1,
+    minQuantity: 1,
+  });
+  const perpetual = instrument("okx", "DOGE-USDT-PERP", {
+    baseAsset: "DOGE",
+    providerSymbol: "DOGE-USDT-SWAP",
+    quantityUnit: "contract",
+    contractSize: 10,
+    quantityStep: 1,
+    minQuantity: 1,
+  });
+  const fundingSnapshot = funding(perpetual, 0.0003, 0.12);
+
+  const plan = buildSpotPerpetualFundingArbitragePlan(spot, perpetual, fundingSnapshot, {
+    ...parameters,
+    targetBaseQuantity: 100,
+  });
+
+  assert.ok(plan);
+  assert.equal(plan.strategyType, "SPOT_PERPETUAL");
+  assert.deepEqual(plan.legs.map((leg) => ({
+    venue: leg.venue,
+    instrumentId: leg.instrumentId,
+    marketType: leg.marketType,
+    role: leg.role,
+    baseQuantity: leg.baseQuantity,
+  })), [
+    { venue: "okx", instrumentId: "DOGE-USDT-SPOT", marketType: "spot", role: "long", baseQuantity: 100 },
+    { venue: "okx", instrumentId: "DOGE-USDT-PERP", marketType: "perpetual", role: "short", baseQuantity: 100 },
+  ]);
+  assert.equal(plan.expectedFunding.netRate, 0.0003);
+  assert.equal(plan.expectedFunding.amount, 0.0036);
+});
+
+test("fails closed for an invalid or stale Spot/Perpetual plan input", () => {
+  const spot = instrument("okx", "DOGE-USDT-SPOT", {
+    baseAsset: "DOGE",
+    marketType: "spot",
+    contractType: "spot",
+    providerSymbol: "DOGE-USDT",
+  });
+  const perpetual = instrument("okx", "DOGE-USDT-PERP", { baseAsset: "DOGE" });
+  const staleFunding = { ...funding(perpetual, 0.0003, 0.12), fetchedAt: now - 60_001 };
+
+  assert.equal(buildSpotPerpetualFundingArbitragePlan(spot, perpetual, staleFunding, parameters), null);
+  assert.equal(buildSpotPerpetualFundingArbitragePlan(
+    spot,
+    perpetual,
+    funding(perpetual, -0.0003, 0.12),
+    parameters,
+  ), null);
 });
 
 function instrument(

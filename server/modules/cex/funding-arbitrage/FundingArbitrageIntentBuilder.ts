@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { canonicalInstrumentFromId } from "../Instrument";
 import type {
-  PerpetualPerpetualFundingArbitrageExecutionIntent,
+  FundingArbitrageExecutionIntent,
 } from "./FundingArbitrageExecutionIntent";
 import type { FundingArbitragePlan } from "./FundingArbitragePlan";
 
@@ -14,19 +14,20 @@ export type FundingArbitrageIntentBuildParameters = Readonly<{
 export function buildFundingArbitrageExecutionIntent(
   plan: FundingArbitragePlan,
   parameters: FundingArbitrageIntentBuildParameters,
-): PerpetualPerpetualFundingArbitrageExecutionIntent {
+): FundingArbitrageExecutionIntent {
   assertLifecycle(plan, parameters);
-  if (plan.strategyType !== "PERPETUAL_PERPETUAL") {
-    throw new Error(`Unsupported funding arbitrage strategy type: ${plan.strategyType}.`);
+  const strategyType = (plan as unknown as { strategyType: unknown }).strategyType;
+  if (strategyType !== "PERPETUAL_PERPETUAL" && strategyType !== "SPOT_PERPETUAL") {
+    throw new Error(`Unsupported funding arbitrage strategy type: ${String(strategyType)}.`);
   }
-  assertPerpetualPair(plan);
+  assertLegPair(plan);
 
   const maxResidualBaseQuantity = normalizeDecimalString(parameters.maxResidualBaseQuantity);
 
   return {
     intentId: randomUUID(),
     sourcePlanId: plan.planId,
-    strategyType: "PERPETUAL_PERPETUAL",
+    strategyType: plan.strategyType,
     objective: "ESTABLISH_HEDGE",
     createdAt: parameters.now,
     expiresAt: parameters.expiresAt ?? plan.expiresAt,
@@ -50,8 +51,8 @@ export function buildFundingArbitrageExecutionIntent(
         marketType: plan.legs[1].marketType,
         targetDeltaBaseQuantity: normalizeNumberAsDecimal(plan.legs[1].baseQuantity),
       },
-    ],
-  };
+    ] as FundingArbitrageExecutionIntent["legs"],
+  } as FundingArbitrageExecutionIntent;
 }
 
 function assertLifecycle(
@@ -71,15 +72,19 @@ function assertLifecycle(
   }
 }
 
-function assertPerpetualPair(plan: FundingArbitragePlan) {
+function assertLegPair(plan: FundingArbitragePlan) {
   const legs = plan.legs as readonly unknown[];
   if (legs.length !== 2) throw new Error("Funding arbitrage intent requires exactly two legs.");
   const [longLeg, shortLeg] = plan.legs;
   if (longLeg.role !== "long" || shortLeg.role !== "short") {
     throw new Error("Funding arbitrage intent requires one ordered long leg and one ordered short leg.");
   }
-  if (longLeg.marketType !== "perpetual" || shortLeg.marketType !== "perpetual") {
-    throw new Error("PERPETUAL_PERPETUAL intent requires two perpetual legs.");
+  if (plan.strategyType === "PERPETUAL_PERPETUAL") {
+    if (longLeg.marketType !== "perpetual" || shortLeg.marketType !== "perpetual") {
+      throw new Error("PERPETUAL_PERPETUAL intent requires two perpetual legs.");
+    }
+  } else if (longLeg.marketType === shortLeg.marketType) {
+    throw new Error("SPOT_PERPETUAL intent requires one spot leg and one perpetual leg.");
   }
   if (!Number.isFinite(longLeg.baseQuantity) || longLeg.baseQuantity <= 0
     || !Number.isFinite(shortLeg.baseQuantity) || shortLeg.baseQuantity <= 0) {

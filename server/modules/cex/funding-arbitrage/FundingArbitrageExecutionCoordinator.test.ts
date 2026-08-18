@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import type { PerpetualPerpetualFundingArbitrageExecutionIntent } from "./FundingArbitrageExecutionIntent";
+import type {
+  FundingArbitrageExecutionIntent,
+  PerpetualPerpetualFundingArbitrageExecutionIntent,
+  SpotPerpetualFundingArbitrageExecutionIntent,
+} from "./FundingArbitrageExecutionIntent";
 import { FundingArbitrageExecutionCoordinator } from "./FundingArbitrageExecutionCoordinator";
 
 const now = 1_800_000_000_000;
@@ -38,6 +42,34 @@ test("transitions to HEDGED only after both legs reach planned confirmed quantit
     confirmedExecutedQuantity: "0.120000",
     occurredAt: now + 3,
   });
+  assert.equal(hedged.status, "HEDGED");
+  assert.equal(hedged.residualExposure.residualQuantity, "0");
+});
+
+test("supports Spot BUY plus Perpetual SHORT as two independently confirmed legs", () => {
+  const executing = startExecution(spotPerpetualIntent());
+
+  assert.deepEqual(executing.legs.map((leg) => ({
+    role: leg.role,
+    legId: leg.legId,
+  })), [
+    { role: "long", legId: "leg-spot" },
+    { role: "short", legId: "leg-perp" },
+  ]);
+
+  const spotBought = coordinator.transition(executing, {
+    type: "LEG_CONFIRMED_FILLED",
+    legId: "leg-spot",
+    confirmedExecutedQuantity: "100",
+    occurredAt: now + 2,
+  });
+  const hedged = coordinator.transition(spotBought, {
+    type: "LEG_CONFIRMED_FILLED",
+    legId: "leg-perp",
+    confirmedExecutedQuantity: "100",
+    occurredAt: now + 3,
+  });
+
   assert.equal(hedged.status, "HEDGED");
   assert.equal(hedged.residualExposure.residualQuantity, "0");
 });
@@ -151,9 +183,39 @@ test("coordinator imports only the Intent and Execution State boundaries", () =>
   ]);
 });
 
-function startExecution() {
-  const created = coordinator.createExecution(perpetualIntent());
+function startExecution(intent: FundingArbitrageExecutionIntent = perpetualIntent()) {
+  const created = coordinator.createExecution(intent);
   return coordinator.transition(created, { type: "START_EXECUTION", occurredAt: now + 1 });
+}
+
+function spotPerpetualIntent(): SpotPerpetualFundingArbitrageExecutionIntent {
+  return {
+    intentId: "intent-okx-spot-perp",
+    sourcePlanId: "plan-okx-spot-perp",
+    strategyType: "SPOT_PERPETUAL",
+    objective: "ESTABLISH_HEDGE",
+    createdAt: now,
+    expiresAt: now + 60_000,
+    constraints: { maxResidualBaseQuantity: "0" },
+    legs: [
+      {
+        legId: "leg-spot",
+        role: "long",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-SPOT",
+        marketType: "spot",
+        targetDeltaBaseQuantity: "100",
+      },
+      {
+        legId: "leg-perp",
+        role: "short",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-PERP",
+        marketType: "perpetual",
+        targetDeltaBaseQuantity: "100",
+      },
+    ],
+  };
 }
 
 function perpetualIntent(): PerpetualPerpetualFundingArbitrageExecutionIntent {

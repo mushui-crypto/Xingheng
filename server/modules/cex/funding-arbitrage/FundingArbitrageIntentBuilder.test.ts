@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { FundingArbitrageIntentAdapter } from "./FundingArbitrageIntentAdapter";
+import type { FundingArbitrageExecutionIntent } from "./FundingArbitrageExecutionIntent";
 import type { FundingArbitragePlan } from "./FundingArbitragePlan";
 import { buildFundingArbitrageExecutionIntent } from "./FundingArbitrageIntentBuilder";
 
@@ -61,6 +63,51 @@ test("rejects expired plans and intent expiry beyond the source plan", () => {
   );
 });
 
+test("builds an OKX Spot plus perpetual plan into two independent canonical leg intents", () => {
+  const spotPerpetual = spotPerpetualPlan();
+  const fundingIntent = buildFundingArbitrageExecutionIntent(spotPerpetual, buildParameters);
+
+  assert.equal(fundingIntent.strategyType, "SPOT_PERPETUAL");
+  assert.deepEqual(fundingIntent.legs.map((leg) => ({
+    venue: leg.venue,
+    instrumentId: leg.instrumentId,
+    marketType: leg.marketType,
+    role: leg.role,
+    targetDeltaBaseQuantity: leg.targetDeltaBaseQuantity,
+  })), [
+    {
+      venue: "okx",
+      instrumentId: "DOGE-USDT-SPOT",
+      marketType: "spot",
+      role: "long",
+      targetDeltaBaseQuantity: "100",
+    },
+    {
+      venue: "okx",
+      instrumentId: "DOGE-USDT-PERP",
+      marketType: "perpetual",
+      role: "short",
+      targetDeltaBaseQuantity: "100",
+    },
+  ]);
+
+  const adapter = new FundingArbitrageIntentAdapter();
+  const spotIntent = adapter.createExecutionIntent(fundingIntent, confirmationFor(fundingIntent.legs[0], {
+    intentId: "execution-intent-spot",
+    accountId: "okx:spot-account",
+  }));
+  const perpetualIntent = adapter.createExecutionIntent(fundingIntent, confirmationFor(fundingIntent.legs[1], {
+    intentId: "execution-intent-perp",
+    accountId: "okx:perp-account",
+  }));
+
+  assert.equal(spotIntent.instrumentId, "DOGE-USDT-SPOT");
+  assert.equal(spotIntent.side, "buy");
+  assert.equal(perpetualIntent.instrumentId, "DOGE-USDT-PERP");
+  assert.equal(perpetualIntent.side, "sell");
+  assert.notEqual(spotIntent.intentId, perpetualIntent.intentId);
+});
+
 test("rejects unsupported strategy types and invalid leg structures", () => {
   const spotPerpetual = {
     ...plan,
@@ -68,7 +115,7 @@ test("rejects unsupported strategy types and invalid leg structures", () => {
   } as unknown as FundingArbitragePlan;
   assert.throws(
     () => buildFundingArbitrageExecutionIntent(spotPerpetual, buildParameters),
-    /Unsupported/u,
+    /requires one spot leg and one perpetual leg/u,
   );
 
   const missingLeg = { ...plan, legs: [plan.legs[0]] } as unknown as FundingArbitragePlan;
@@ -87,7 +134,7 @@ test("rejects unsupported strategy types and invalid leg structures", () => {
   );
 });
 
-test("rejects non-positive quantities and non-perpetual legs for v1", () => {
+test("rejects non-positive quantities and invalid Spot/Perpetual leg pairs", () => {
   const zeroQuantity = {
     ...plan,
     legs: [{ ...plan.legs[0], baseQuantity: 0 }, plan.legs[1]],
@@ -157,6 +204,58 @@ function perpetualPlan(): FundingArbitragePlan {
     createdAt: now - 1_000,
     expiresAt: now + 60_000,
   };
+}
+
+function spotPerpetualPlan(): FundingArbitragePlan {
+  const fundingAt = now + 8 * 60 * 60 * 1_000;
+  return {
+    planId: "plan-okx-spot-perp",
+    strategyType: "SPOT_PERPETUAL",
+    instrument: { baseAsset: "DOGE", quoteAsset: "USDT", settlementAsset: "USDT" },
+    legs: [
+      {
+        role: "long",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-SPOT",
+        marketType: "spot",
+        baseQuantity: 100,
+        fundingSnapshot: null,
+      },
+      {
+        role: "short",
+        venue: "okx",
+        instrumentId: "DOGE-USDT-PERP",
+        marketType: "perpetual",
+        baseQuantity: 100,
+        fundingSnapshot: funding("okx", "DOGE-USDT-PERP", 0.0003, fundingAt),
+      },
+    ],
+    expectedFunding: { netRate: 0.0003, amount: 0.03, asset: "USDT", fundingAt },
+    confidence: "high",
+    details: { perpetualFundingRate: 0.0003, entryBasisBps: null },
+    createdAt: now - 1_000,
+    expiresAt: now + 60_000,
+  };
+}
+
+function confirmationFor(
+  leg: FundingArbitrageExecutionIntent["legs"][number],
+  overrides: Readonly<{ intentId: string; accountId: string }>,
+) {
+  return {
+    confirmed: true,
+    intentId: overrides.intentId,
+    arbitrageId: "arbitrage-okx-spot-perp",
+    legId: leg.legId,
+    userId: "user-okx",
+    accountId: overrides.accountId,
+    venue: leg.venue,
+    quantityAsset: { symbol: "DOGE", type: "DIGITAL_ASSET" },
+    orderConstraints: { reduceOnly: false },
+    executionMode: "EXECUTION_PRIORITY",
+    confirmedAt: now + 1_000,
+    expiresAt: now + 30_000,
+  } as const;
 }
 
 function funding(

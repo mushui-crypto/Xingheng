@@ -3,6 +3,7 @@ import type {
   FundingArbitrageConfidence,
   FundingArbitragePlan,
   PerpetualFundingArbitrageLeg,
+  SpotFundingArbitrageLeg,
 } from "./FundingArbitragePlan";
 
 export type FundingArbitragePlanningParameters = Readonly<{
@@ -82,6 +83,85 @@ export function buildFundingArbitragePlan(
   return best ? toPlan(best, parameters) : null;
 }
 
+/**
+ * Builds the explicit long-Spot/short-Perpetual funding carry shape. The
+ * existing two-perpetual planner remains unchanged; this boundary is used
+ * when the caller already selected the Spot and Perpetual instruments.
+ */
+export function buildSpotPerpetualFundingArbitragePlan(
+  spotInstrument: CanonicalInstrument,
+  perpetualInstrument: CanonicalInstrument,
+  perpetualFunding: CanonicalFundingRate,
+  parameters: FundingArbitragePlanningParameters,
+): FundingArbitragePlan | null {
+  assertPlanningParameters(parameters);
+  if (!isEligibleSpotInstrument(spotInstrument, parameters)
+    || !isEligibleInstrument(perpetualInstrument, parameters)
+    || !isExactMatch(spotInstrument, perpetualInstrument)) {
+    return null;
+  }
+  if (perpetualFunding.venue !== perpetualInstrument.venue
+    || perpetualFunding.instrumentId !== perpetualInstrument.instrumentId
+    || !isFresh(perpetualFunding.fetchedAt, parameters)
+    || perpetualFunding.nextFundingAt === null
+    || perpetualFunding.rate < parameters.minimumFundingSpreadRate) {
+    return null;
+  }
+
+  const baseQuantity = normalizeBaseQuantity(parameters.targetBaseQuantity, spotInstrument, perpetualInstrument);
+  if (baseQuantity === null) return null;
+  const expiresAt = Math.min(
+    spotInstrument.fetchedAt + parameters.maxSnapshotAgeMs,
+    perpetualInstrument.fetchedAt + parameters.maxSnapshotAgeMs,
+    perpetualFunding.fetchedAt + parameters.maxSnapshotAgeMs,
+    perpetualFunding.nextFundingAt - parameters.entryCutoffMs,
+  );
+  if (expiresAt <= parameters.now) return null;
+
+  const amount = perpetualFunding.markPrice === null
+    ? null
+    : baseQuantity * perpetualFunding.markPrice * perpetualFunding.rate;
+  const longLeg: SpotFundingArbitrageLeg & { role: "long" } = {
+    role: "long",
+    venue: spotInstrument.venue,
+    instrumentId: spotInstrument.instrumentId,
+    marketType: "spot",
+    baseQuantity,
+    fundingSnapshot: null,
+  };
+  const shortLeg: PerpetualFundingArbitrageLeg & { role: "short" } = {
+    role: "short",
+    venue: perpetualInstrument.venue,
+    instrumentId: perpetualInstrument.instrumentId,
+    marketType: "perpetual",
+    baseQuantity,
+    fundingSnapshot: perpetualFunding,
+  };
+  return {
+    planId: parameters.planId,
+    strategyType: "SPOT_PERPETUAL",
+    instrument: {
+      baseAsset: spotInstrument.baseAsset,
+      quoteAsset: spotInstrument.quoteAsset,
+      settlementAsset: perpetualInstrument.settlementAsset,
+    },
+    legs: [longLeg, shortLeg],
+    expectedFunding: {
+      netRate: perpetualFunding.rate,
+      amount,
+      asset: amount === null ? null : perpetualInstrument.settlementAsset,
+      fundingAt: perpetualFunding.nextFundingAt,
+    },
+    confidence: perpetualFunding.markPrice === null ? "low" : "high",
+    details: {
+      perpetualFundingRate: perpetualFunding.rate,
+      entryBasisBps: null,
+    },
+    createdAt: parameters.now,
+    expiresAt,
+  };
+}
+
 function toPlan(candidate: Candidate, parameters: FundingArbitragePlanningParameters): FundingArbitragePlan {
   const longLeg = toPerpetualLeg("long", candidate.longInstrument, candidate.longFunding, candidate.baseQuantity);
   const shortLeg = toPerpetualLeg("short", candidate.shortInstrument, candidate.shortFunding, candidate.baseQuantity);
@@ -138,6 +218,13 @@ function toPerpetualLeg<Role extends "long" | "short">(
 function isEligibleInstrument(instrument: CanonicalInstrument, parameters: FundingArbitragePlanningParameters) {
   return instrument.marketType === "perpetual"
     && instrument.contractType === "linear_perpetual"
+    && instrument.status === "trading"
+    && isFresh(instrument.fetchedAt, parameters);
+}
+
+function isEligibleSpotInstrument(instrument: CanonicalInstrument, parameters: FundingArbitragePlanningParameters) {
+  return instrument.marketType === "spot"
+    && instrument.contractType === "spot"
     && instrument.status === "trading"
     && isFresh(instrument.fetchedAt, parameters);
 }
