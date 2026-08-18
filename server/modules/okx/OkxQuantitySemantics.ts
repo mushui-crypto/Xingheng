@@ -25,14 +25,14 @@ type Decimal = Readonly<{ coefficient: bigint; scale: number }>;
 export async function loadOkxQuantityRules(
   source: OkxQuantityRulesSource | undefined,
   instrument: OkxInstrumentResolution,
-  now: number,
+  now: number | (() => number),
   maxAgeMs = OKX_QUANTITY_RULES_MAX_AGE_MS,
 ): Promise<OkxQuantityRulesSnapshot> {
   if (!source) throw new Error("OKX quantity rules are unavailable.");
   const snapshot = await source(instrument.venueInstrument.instId);
   if (!snapshot) throw new Error("OKX quantity rules are unavailable.");
   assertRulesIdentity(snapshot, instrument);
-  assertRulesFreshness(snapshot, now, maxAgeMs);
+  assertRulesFreshness(snapshot, typeof now === "function" ? now() : now, maxAgeMs);
   positiveDecimal(snapshot.lotSz, "OKX lotSz");
   positiveDecimal(snapshot.minSz, "OKX minSz");
   positiveDecimal(snapshot.ctVal, "OKX ctVal");

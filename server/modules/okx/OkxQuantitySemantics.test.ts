@@ -19,6 +19,17 @@ test("converts base=100 to sz=10 and accFillSz=7 to filledBase=70 for ctVal=10",
   assert.equal(okxContractQuantityToBase("0", rules), "0");
 });
 
+test("evaluates quantity-rule freshness after the asynchronous Provider fetch", async () => {
+  const fetchedAt = now + 1;
+  const rules = await loadOkxQuantityRules(
+    async () => okxTestQuantityRules(fetchedAt, { ctVal: "10" }),
+    instrument,
+    () => fetchedAt,
+  );
+
+  assert.equal(rules.fetchedAt, fetchedAt);
+});
+
 test("supports a non-unit fractional ctVal exactly", () => {
   const rules = okxTestQuantityRules(now);
 

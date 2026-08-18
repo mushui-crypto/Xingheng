@@ -23,7 +23,7 @@ type Decimal = Readonly<{ coefficient: bigint; scale: number }>;
 export async function loadOkxSpotQuantityRules(
   source: OkxSpotQuantityRulesSource | undefined,
   instrument: OkxInstrumentResolution,
-  now: number,
+  now: number | (() => number),
   maxAgeMs = OKX_QUANTITY_RULES_MAX_AGE_MS,
 ): Promise<OkxSpotQuantityRulesSnapshot> {
   if (!source) throw new Error("OKX Spot quantity rules are unavailable.");
@@ -35,7 +35,7 @@ export async function loadOkxSpotQuantityRules(
     || rules.quoteCcy !== instrument.canonicalInstrument.quoteAsset || rules.state !== "live") {
     throw new Error("OKX Spot quantity rules instrument identity or trading state does not match the execution instrument.");
   }
-  assertFresh(rules.fetchedAt, now, maxAgeMs);
+  assertFresh(rules.fetchedAt, typeof now === "function" ? now() : now, maxAgeMs);
   const lot = positive(rules.lotSz, "OKX Spot lotSz");
   const minimum = positive(rules.minSz, "OKX Spot minSz");
   positive(rules.tickSz, "OKX Spot tickSz");

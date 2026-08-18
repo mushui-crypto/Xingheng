@@ -147,13 +147,13 @@ export class OkxIntentExecutionService {
     if (instrument.venueInstrument.instId !== lookup.instId) {
       throw new Error("OKX order lookup instrument identity does not match the mapped instrument.");
     }
-    const observedAt = this.now();
     const rules = await loadOkxQuantityRules(
       this.options.quantityRulesSource,
       instrument,
-      observedAt,
+      () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
     );
+    const observedAt = this.now();
     const order = await this.client.getOrder({
       instId: lookup.instId,
       ...(lookup.ordId === undefined ? {} : { ordId: lookup.ordId }),
@@ -218,7 +218,7 @@ export class OkxIntentExecutionService {
     const rules = await loadOkxQuantityRules(
       this.options.quantityRulesSource,
       instrument,
-      this.now(),
+      () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
     );
     const base = {

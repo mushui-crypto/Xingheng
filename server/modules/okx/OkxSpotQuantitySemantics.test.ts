@@ -20,6 +20,17 @@ test("Spot keeps canonical base quantity as sz without ctVal", async () => {
   assert.equal(okxSpotSizeToBase("100.2", loaded), "100.2");
 });
 
+test("evaluates Spot rule freshness after the asynchronous Provider fetch", async () => {
+  const fetchedAt = now + 1;
+  const loaded = await loadOkxSpotQuantityRules(
+    async () => rules({ fetchedAt }),
+    instrument,
+    () => fetchedAt,
+  );
+
+  assert.equal(loaded.fetchedAt, fetchedAt);
+});
+
 test("Spot quantity rules fail closed for minimum, stale, invalid, or mismatched instruments", async () => {
   await assert.rejects(() => loadOkxSpotQuantityRules(async () => null, instrument, now), /unavailable/u);
   await assert.rejects(() => loadOkxSpotQuantityRules(async () => rules({ fetchedAt: now - 300_001 }), instrument, now), /stale/u);

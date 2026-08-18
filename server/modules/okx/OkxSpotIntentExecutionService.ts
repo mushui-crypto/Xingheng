@@ -93,8 +93,13 @@ export class OkxSpotIntentExecutionService {
     const instrument = this.instruments.resolve(lookup.instrumentId);
     assertSpotInstrument(instrument);
     if (instrument.venueInstrument.instId !== lookup.instId) throw new Error("OKX Spot order lookup instrument identity does not match the mapped instrument.");
+    const rules = await loadOkxSpotQuantityRules(
+      this.options.quantityRulesSource,
+      instrument,
+      () => this.now(),
+      this.options.quantityRulesMaxAgeMs,
+    );
     const observedAt = this.now();
-    const rules = await loadOkxSpotQuantityRules(this.options.quantityRulesSource, instrument, observedAt, this.options.quantityRulesMaxAgeMs);
     const order = await this.client.getOrder({
       instId: lookup.instId,
       ...(lookup.ordId === undefined ? {} : { ordId: lookup.ordId }),
@@ -150,7 +155,12 @@ export class OkxSpotIntentExecutionService {
       throw new Error("OKX Spot intent quantity asset does not match the canonical instrument base asset.");
     }
     if (intent.orderConstraints.reduceOnly) throw new Error("OKX Spot execution must not use reduceOnly.");
-    const rules = await loadOkxSpotQuantityRules(this.options.quantityRulesSource, instrument, this.now(), this.options.quantityRulesMaxAgeMs);
+    const rules = await loadOkxSpotQuantityRules(
+      this.options.quantityRulesSource,
+      instrument,
+      () => this.now(),
+      this.options.quantityRulesMaxAgeMs,
+    );
     const base: OkxPlaceOrderRequest = {
       instId: instrument.venueInstrument.instId,
       tdMode: "cash",
