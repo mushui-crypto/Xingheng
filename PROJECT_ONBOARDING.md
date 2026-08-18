@@ -4,7 +4,7 @@
 
 > 面向新团队成员、新 AI Agent 和新工作区的快速入口。
 >
-> 更新时间：2026-08-16
+> 更新时间：2026-08-18
 
 本文件提供项目入口和当前状态摘要，不替代需求、架构、变更日志或历史归档。发生冲突时，以用户最新明确要求以及更高优先级文档为准。
 
@@ -44,18 +44,19 @@
 
 # 3. 当前阶段
 
-当前处于 Binance 正式真实执行闭环完成、OKX ExecutionCapability 已完成本地数量边界修复，且
-Position Verification foundation 已验收、等待 production 私有仓位事实复核的阶段。
+当前处于 Binance 与 OKX 正式执行能力均已接入统一主链、OKX DOGE Spot + Perpetual Test C
+真实资金闭环完成、生产重新 fail-closed 的阶段。
 
 当前优先级：
 
 1. 保证资金安全、交易正确性和已完成 Binance 闭环的稳定性。
 2. 保持 Demo、Testnet 和 production 公共能力稳定。
-3. 在已完成本地实现的基础上，独立验收 OKX 正式 ExecutionCapability，不把 Binance readiness 外推到其他 venue。
+3. 保持 OKX Spot / Perpetual 已验证正式能力稳定，不把 Binance/OKX readiness 外推到 Bybit/Bitget。
 4. 保持权威成交归因、恢复、退出、撤单和实例生命周期可追踪、可恢复、可审计。
-5. 继续保持 OKX production 私有仓位复核和真实 Provider mutation 阻断，直到取得独立批准。
+5. 修复前先审查 `NOTIONAL_USDT` 第一腿执行前数量重验漂移；新的 Provider mutation 必须重新批准。
 
-Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实资金开仓、对冲、退出和最终核账。后续部署、OKX 开发和任何新的真实资金窗口仍分别需要用户明确批准，不能互相替代。
+Binance DOGEUSDT 与 OKX DOGE Spot LONG + Perpetual SHORT 均已通过 production 真实资金开仓、
+对冲、退出和最终核账。后续部署、代码合并和新的真实资金窗口仍分别需要用户明确批准，不能互相替代。
 
 ---
 
@@ -65,10 +66,11 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
-- 最后已知 production revision：`25588b2206ba4c39062f3e9d06ee315fed972ea6`。
-- 当前主线代码 checkpoint：`030f50a4c8a841903097f511ed638c780275e3a8`，tree
-  `45995916dcbe5f8cdc0e463d42df3bd97f390268`；本地与 GitHub 统一使用 `main`，未部署。
-- 当前安全开关：`LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
+- 最后已知 production revision：`2bcea91e4e57096d34b63ef0098cf2811e56c547`。
+- 当前主线以本交接提交后的 `main` 为准；主线新增的旧 Manual 清理、Funding 平行模型、套利导航和
+  文档尚未部署，不能据此改变 production 事实。
+- 当前安全开关：`OKX_LIVE_TRADING_ENABLED=false`、`OKX_KILL_SWITCH=true`、
+  `LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
 - 当前只保留这一套部署环境；开始发布前仍必须重新核对 fixed revision、数据库备份和运行健康。
 - 当前只保留 `/Users/moss/Documents/StellaX` 一个代码工作区；仓库同步不会自动触发 production 部署。
 - 策略邮件通知关闭；登录、安全和账户类邮件路径不受影响。
@@ -105,12 +107,15 @@ Binance DOGEUSDT Spot LONG + USD-M Perpetual SHORT 已通过 production 真实�
 - Binance 当前正式支持 USDT Spot LONG 与 USDT Linear Perpetual LONG/SHORT；generic canonical asset data 当前包含 BTC、ETH、DOGE、XAUT。
 - DOGEUSDT 实例已完成 Spot BUY 73、Perp SHORT 73、Perp reduceOnly close 73、Spot close 72；最终 Futures position=0、active orders=0、instance=CLOSED、unresolved=0。
 - Spot opening commission 使用 Binance `myTrades` 权威归因；实例残余按 Trading Rules fail-closed，不使用账户总余额或外部余额补足。
-- OKX 已有本地正式 ExecutionCapability 与 canonical quantity boundary：`baseQuantity` 在 OKX Venue
-  边界转换为 contract quantity；定向测试 `98/98`、全量 Server 测试 `1120/1120` 和 build 均通过。
+- OKX Spot / Perpetual 已进入 production Formal Runtime；Spot order-reference recovery、Provider
+  quantity/side 闭环、placeOrder response contract 与 Coordinator error observability 已完成并部署。
+- 2026-08-18 Test C 实例
+  `arbitrage-85ffc5966169a9a9e3ca41cc87740946ecdb2da130ddff53ebd5790e80486b06` 最终 `CLOSED`：
+  Spot BUY `110`、实际 base exposure `109.89`、Perp SHORT/close `100`、Spot close `109.89`；
+  四个唯一 Provider 订单均 `CONFIRMED`，最终 Perp=`FLAT`、active orders=`0`。
 - Position Verification foundation 已通过 `ACCEPTED` checkpoint：Binance/OKX perpetual reader 统一输出
   canonical `PositionSnapshot`，再由通用 verifier 进入套利验证服务。
-- OKX production 私有 position GET 仍为 `NOT_REVERIFIED / BLOCKED`，真实 Provider mutation 保持 `0`；
-  Bybit、Bitget 尚无独立 `PositionReader`，GET-only Account Read 通过不代表可执行。
+- Bybit、Bitget 尚无正式 mutation 能力；GET-only Account Read 通过不代表可执行。
 - 生产执行开关和急停已恢复 fail-closed；新的真实资金窗口当前未授权。
 
 ## 策略 Paper
@@ -147,11 +152,17 @@ SQLite 当前保存用户、账户、订单、持仓、流水和审计数据。�
 
 # 8. 当前风险与待办
 
-- 下一阶段是 OKX 正式 ExecutionCapability；完成前不得尝试 Binance + OKX Perpetual/Perpetual 真实执行。
+- 当前 P1：`NOTIONAL_USDT` 模式的第一腿在实例创建与执行前重验之间会因报价变化产生精确数量漂移，
+  fail closed 为 `arbitrage_instance_mismatch`，但会留下无执行引用、无敞口的空 `OPENING` 实例。
+- Test C 使用由 8U Preview 向下合法化的固定 `110 DOGE` 完成；这证明正式交易链可行，但不代表上述
+  `NOTIONAL_USDT` P1 已修复。
+- 本交接提交中的 Funding Strategy / IntentBuilder / Coordinator / Bridge 仍没有 production consumer；
+  正式 Funding 执行继续以 `Draft -> ArbitrageExecutionCommandService -> FormalRuntime` 为准。
 - `CANCEL_TRANSPORT_PERSISTENCE_ATOMICITY_RISK = RESIDUAL`：Provider HTTP transport 与 SQLite dispatch 状态无法形成真正原子事务，继续保留 query-first、fail-closed 与人工接管边界。
 - 第一腿完成、第二腿尚未人工确认期间存在短时裸露敞口，这是当前安全阶段的已知产品残余风险。
 - 历史 `RESIDUAL` instance、外部余额和新实例 managed exposure 必须严格隔离，不能按 symbol、方向或账户总余额自动归属。
-- Legacy XAUT/Capital Test 与 generic execution 仍共存，只能在后续独立 cleanup 阶段处理。
+- 已删除的旧 Funding Manual 文件只属于主线 cleanup 候选；production revision `2bcea91e...` 尚未包含
+  本交接提交，部署前必须单独复核。
 - Hyperliquid Testnet 的账户激活、Agent 授权和受控钱包签名 smoke 仍需用户配合安排。
 
 具体任务开始前，应以 `PROJECT_CONTEXT.md`、当前代码、对应模块文档和用户最新指令重新确认这些状态。

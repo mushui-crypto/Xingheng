@@ -40,6 +40,24 @@ AI Agent 必须理解：
 -   完善账户体系。
 -   完善交易、风险、安全和运维能力。
 
+## 2.1 2026-08-18 当前执行基线
+
+-   当前 production revision 为 `2bcea91e4e57096d34b63ef0098cf2811e56c547`，API healthy，
+    `RestartCount=0`。
+-   OKX Spot / Perpetual 已接入统一正式执行链：`ExecutionIntent -> FormalExecutionRuntime ->
+    OKX Capability -> Mutation Safety Guard -> Provider`。Binance 既有正式执行语义未改变。
+-   OKX DOGE Test C 已完成真实资金闭环：Spot BUY `110 DOGE`，扣除 base fee 后实际 exposure
+    `109.89 DOGE`；Perpetual SHORT/close `100 DOGE`；Spot close `109.89 DOGE`。四个
+    ExecutionRecord 和四个唯一 Provider `ordId` 均为 `CONFIRMED`，最终 Perpetual=`FLAT`、
+    active orders=`0`、DOGE 仅保留测试前 dust `0.000000824`。
+-   第二腿数量已按第一腿权威成交事实计算：`109.89 DOGE target -> 100 DOGE executable`，
+    `9.89 DOGE` 为持有期间的 venue 粒度 residual；双腿退出后不存在残余敞口。
+-   最终安全状态为 `OKX_LIVE_TRADING_ENABLED=false`、`OKX_KILL_SWITCH=true`、
+    `LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。新的真实资金操作必须重新获得明确授权。
+-   已知 P1：`NOTIONAL_USDT` 第一腿在实例创建与执行前重验之间可能因报价变化产生精确数量漂移，
+    fail closed 为 `arbitrage_instance_mismatch`，Provider mutation=`0`，但会留下无执行引用、无敞口的
+    空 `OPENING` 实例。该问题尚未修复。
+
 ------------------------------------------------------------------------
 
 # 3. 当前核心模块

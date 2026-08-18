@@ -8,7 +8,7 @@
 > [`ARCHITECTURE.md`](./ARCHITECTURE.md) 为准，快速交接入口见
 > [`PROJECT_ONBOARDING.md`](./PROJECT_ONBOARDING.md)。
 
-更新时间：2026-08-15
+更新时间：2026-08-18
 
 ---
 
@@ -43,6 +43,10 @@
 - 正式套利 Draft、Final Confirm、ArbitrageInstance、两腿人工确认、reconciliation、close、cancel 和 Resume UI 完成。
 - provider order identity、lossless orderId、exact-key recovery、partial fill/commission Decimal attribution 与 residual safety 完成。
 - Production revision `25588b2206ba4c39062f3e9d06ee315fed972ea6` 完成 DOGEUSDT Spot/Perpetual 真实资金开仓、对冲、退出和最终核账。
+- Production revision `2bcea91e4e57096d34b63ef0098cf2811e56c547` 完成 OKX Spot/Perpetual
+  正式接线、order-reference recovery、第二腿实际 exposure hedge、placeOrder contract 和错误可观测性收口。
+- 2026-08-18 OKX DOGE Test C 完成 Spot BUY、Perpetual SHORT 和双腿退出；四笔订单均
+  `CONFIRMED`，最终 Perpetual=`FLAT`、active orders=`0`、无残余敞口。
 
 摘要只用于定位历史；当前权威状态仍以 `PROJECT_CONTEXT.md` 最新快照为准。
 

@@ -2,6 +2,36 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Unreleased - OKX Spot/Perpetual real-money closed loop and handoff cleanup
+
+日期：2026-08-18
+
+状态：OKX 核心修复已部署并完成 Test C；本地 cleanup、Funding 平行模型、导航与文档改动待部署
+
+### 已完成并部署
+
+- `058afc7`：第二腿以第一腿实际 base exposure 为 hedge target，并在 venue 边界向下合法化数量。
+- `7f985b8`：收紧 OKX `placeOrder` response contract，固定 `sCode/ordId/clOrdId/instId` 权威边界。
+- `2bcea91`：保留 Capability 原始失败原因；该 revision 为当前 production 基线。
+- OKX Test C 完成四笔真实订单：Spot open、Perpetual open、Perpetual close、Spot close；全部
+  `CONFIRMED` 且 `ordId` 唯一，最终 Perpetual=`FLAT`、active orders=`0`、无残余敞口。
+- Spot gross fill `110 DOGE`，base fee `0.11 DOGE`，第二腿 target=`109.89 DOGE`，OKX 可执行
+  `100 DOGE`，venue 粒度 residual=`9.89 DOGE`；退出后 Spot 回到测试前 dust。
+- 测试结束后恢复 `OKX_LIVE_TRADING_ENABLED=false`、`OKX_KILL_SWITCH=true`；Binance 始终关闭。
+
+### 当前本地主线候选
+
+- 删除无生产消费者且已被 Formal Runtime 主链覆盖的旧 Funding Manual API/Service 路径。
+- 收拢套利顶栏为“套利系统”菜单，并支持从套利看板整行进入套利分析。
+- Funding Strategy / IntentBuilder / Coordinator / Bridge 的 Spot/Perpetual 扩展仍没有 production
+  consumer，不得视为新的正式执行入口。
+- 记录 Funding Opportunity Evaluator 的只读分析边界；它不是执行、策略或自动交易系统。
+
+### 已知问题
+
+- `NOTIONAL_USDT` 第一腿精确重验可能因报价变化产生 quantity drift，安全阻断且 mutation=`0`，但会
+  留下空 `OPENING` 实例。该 P1 尚未修复。
+
 ## Unreleased - Multi-venue coexistence architecture boundary
 
 日期：2026-08-17

@@ -328,6 +328,75 @@ adapter，不能改变公共风险模型的语义。平台允许交易权限，�
 分别接入 -> 统一交易规则。当前不做四 venue 一次性重构、不提前建设企业级账户治理、不把 venue
 字段放入公共模型，也不为了 OKX 修改已验证的 Binance 语义。
 
+## 6.5 Funding Opportunity Evaluator
+
+### 定位
+
+`Funding Opportunity Evaluator` 是后续规划的只读分析层。它负责汇总多交易所公开市场数据、计算
+资金费率差异并展示潜在套利机会，为用户人工决策提供参考。
+
+它不属于执行系统、策略系统或自动交易系统，不判断机会一定盈利，也不取得任何交易授权。
+
+### 数据流边界
+
+未来数据流必须保持为：
+
+```text
+Market Data
+(Binance / OKX / Bybit / Bitget)
+        |
+        v
+Funding Opportunity Evaluator
+        |
+        v
+Opportunity Display
+        |
+        v
+用户人工判断
+        |
+        v
+用户主动确认
+        |
+        v
+ExecutionIntent
+        |
+        v
+Formal Execution Runtime
+```
+
+`Opportunity` 只是只读分析结果，不能直接或间接产生 `ExecutionIntent`，也不能触发交易。只有用户
+在正式产品入口主动确认后，执行系统才可以按既有安全边界创建和处理 `ExecutionIntent`。
+
+### 允许与禁止依赖
+
+`Funding Opportunity Evaluator` 可以读取：
+
+- Funding Rate；
+- Price；
+- Instrument 信息；
+- 市场状态。
+
+它不能调用或依赖：
+
+- `ExecutionCoordinator`；
+- `FormalExecutionRuntime`；
+- `ExecutionCapability`；
+- 任何 Provider mutation。
+
+只读分析失败、数据缺失或数据过期时只能降级、标记不可评估或停止展示，不能转入执行链。
+
+### 交易决策边界
+
+系统不负责自动选择机会、自动开仓、自动平仓或自动分配资金，也不承诺分析结果必然盈利。最终是否
+执行、执行哪个机会以及何时提交正式确认，均由用户决定。
+
+### 当前阶段关系
+
+当前优先完成多交易所执行能力、Spot / Perpetual Capability 和正式执行闭环。
+`Funding Opportunity Evaluator` 作为后续独立分析能力规划，不是当前执行链依赖，也不得作为当前
+执行能力、部署状态或真实资金 readiness 的证明。若后续实施，必须以独立 Phase 明确输入数据、
+评价口径、数据新鲜度、展示协议和验收标准，并继续保持与执行系统的单向隔离。
+
 ------------------------------------------------------------------------
 
 # 7. 交易安全边界
