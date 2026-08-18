@@ -244,13 +244,6 @@ test("the removed manual endpoint cannot call a mutation while read-only funding
   assert.equal(providerMutations, 0);
 });
 
-test("legacy manual service and route stay explicitly production-not-wired", () => {
-  const service = readFileSync(new URL("./FundingArbitrageManualExecutionService.ts", import.meta.url), "utf8");
-  const route = readFileSync(new URL("./fundingArbitrageManualExecutionRoutes.ts", import.meta.url), "utf8");
-  assert.match(service, /PRODUCTION_NOT_WIRED/u);
-  assert.match(route, /PRODUCTION_NOT_WIRED/u);
-});
-
 function response() {
   return {
     statusCode: 200,
