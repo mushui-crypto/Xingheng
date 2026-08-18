@@ -77,7 +77,17 @@ const OpportunityRow = memo(function OpportunityRow({ opportunity, holdingDays, 
 }) {
   const displayedYield = equivalentNetYield(opportunity.netApr, holdingDays, yieldMetric);
   return (
-    <tr className="hover:bg-white/[0.025]">
+    <tr
+      aria-label={`查看 ${opportunity.longLeg.symbol} 与 ${opportunity.shortLeg.symbol} 套利分析`}
+      className="cursor-pointer transition hover:bg-white/[0.035] focus-visible:bg-white/[0.035] focus-visible:outline focus-visible:outline-1 focus-visible:outline-inset focus-visible:outline-white"
+      onClick={() => onAnalyze(opportunity)}
+      onKeyDown={(event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        event.preventDefault();
+        onAnalyze(opportunity);
+      }}
+      tabIndex={0}
+    >
       <td className="sticky left-0 z-[1] bg-black px-5 py-4">
         <div className="flex flex-col items-start gap-1.5">
           <RecommendationBadge recommendation={opportunity.recommendation} />
@@ -102,7 +112,10 @@ const OpportunityRow = memo(function OpportunityRow({ opportunity, holdingDays, 
           type="button"
           className="inline-flex min-h-9 items-center justify-center gap-1.5 whitespace-nowrap border border-white/20 px-2.5 text-xs font-medium text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
           aria-label={`查看 ${opportunity.longLeg.symbol} 与 ${opportunity.shortLeg.symbol} 套利分析`}
-          onClick={() => onAnalyze(opportunity)}
+          onClick={(event) => {
+            event.stopPropagation();
+            onAnalyze(opportunity);
+          }}
         >
           <BarChart3 aria-hidden="true" size={14} /> 查看分析
         </button>

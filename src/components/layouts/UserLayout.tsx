@@ -1,4 +1,6 @@
-import { useEffect, type ReactNode } from "react";
+import { ChevronDown } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { USER_AUTH_FAILED_EVENT } from "../../api/session";
 import { useRuntimeEnvironment } from "../../features/runtimeEnvironment/RuntimeEnvironmentProvider";
@@ -25,7 +27,7 @@ export function UserLayout({ children }: UserLayoutProps) {
   const initializeWallet = useWalletConnectionStore((state) => state.initialize);
   const { state: runtimeEnvironment } = useRuntimeEnvironment();
   const isAccountPage = location.pathname.startsWith("/app/account");
-  const isArbitragePage = location.pathname.startsWith("/app/arbitrage");
+  const isArbitragePage = isArbitrageRoute(location.pathname);
   const isTradingPage =
     location.pathname.startsWith("/app/trade") ||
     location.pathname.startsWith("/app/demo") ||
@@ -65,12 +67,7 @@ export function UserLayout({ children }: UserLayoutProps) {
               <nav className="no-scrollbar flex items-center gap-2 overflow-x-auto">
                 <TopLink to="/app/dashboard" label="首页" />
                 <TopLink to="/app/markets" label="行情" />
-                <div className="flex shrink-0 items-center border border-white/15" aria-label="套利系统">
-                  <span className="px-3 text-[11px] font-semibold tracking-[0.12em] text-[#8f99a5]">套利系统</span>
-                  <TopLink to="/app/arbitrage" label="套利看板" />
-                  <TopLink to="/app/funding-arbitrage" label="套利分析" />
-                  <TopLink to="/app/my-arbitrage" label="我的套利" />
-                </div>
+                <ArbitrageNavigationMenu pathname={location.pathname} />
                 <TopLink to="/app/trade" label="真实交易" />
                 <TopLink to="/app/demo" label="模拟交易" />
                 <TopLink to="/app/strategy" label="策略交易" />
@@ -162,4 +159,125 @@ function TopLink({ to, label }: { to: string; label: string }) {
       {label}
     </NavLink>
   );
+}
+
+export function ArbitrageNavigationMenu({ pathname }: { pathname: string }) {
+  const [open, setOpen] = useState(false);
+  const [menuLeft, setMenuLeft] = useState(12);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const active = isArbitrageRoute(pathname);
+
+  const cancelClose = () => {
+    if (closeTimerRef.current !== null) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = null;
+  };
+  const openMenu = () => {
+    cancelClose();
+    const rect = triggerRef.current?.getBoundingClientRect();
+    if (rect) setMenuLeft(Math.max(12, Math.min(rect.left, window.innerWidth - 180)));
+    setOpen(true);
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimerRef.current = setTimeout(() => setOpen(false), 120);
+  };
+
+  useEffect(() => {
+    setOpen(false);
+  }, [pathname]);
+
+  useEffect(() => () => cancelClose(), []);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOutside = (event: PointerEvent) => {
+      const target = event.target as Node;
+      if (!containerRef.current?.contains(target) && !menuRef.current?.contains(target)) setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    return () => document.removeEventListener("pointerdown", closeOutside);
+  }, [open]);
+
+  return (
+    <div
+      className="relative shrink-0"
+      onMouseEnter={openMenu}
+      onMouseLeave={scheduleClose}
+      onFocusCapture={openMenu}
+      onBlurCapture={(event) => {
+        const next = event.relatedTarget as Node | null;
+        if (!event.currentTarget.contains(next) && !menuRef.current?.contains(next)) scheduleClose();
+      }}
+      ref={containerRef}
+    >
+      <button
+        aria-expanded={open}
+        aria-haspopup="menu"
+        className={`flex min-h-11 items-center justify-center gap-2 px-3 py-2.5 text-[13px] font-medium leading-none transition sm:px-4 ${
+          active ? "bg-[#f5f5f5] text-black" : "bg-black text-[#f5f5f5] hover:bg-white/[0.06]"
+        }`}
+        onClick={openMenu}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") setOpen(false);
+        }}
+        ref={triggerRef}
+        type="button"
+      >
+        套利系统
+        <ChevronDown aria-hidden="true" className={`transition-transform ${open ? "rotate-180" : ""}`} size={14} />
+      </button>
+      {open && typeof document !== "undefined" ? createPortal(
+        <div
+          aria-label="套利系统导航"
+          className="fixed top-[60px] z-50 w-[168px] border border-[#2b2b2b] bg-black p-1 shadow-2xl"
+          onFocusCapture={openMenu}
+          onBlurCapture={(event) => {
+            const next = event.relatedTarget as Node | null;
+            if (!containerRef.current?.contains(next) && !event.currentTarget.contains(next)) scheduleClose();
+          }}
+          onMouseEnter={openMenu}
+          onMouseLeave={scheduleClose}
+          ref={menuRef}
+          role="menu"
+          style={{ left: menuLeft }}
+        >
+          <ArbitrageMenuItems />
+        </div>,
+        document.body,
+      ) : null}
+    </div>
+  );
+}
+
+export function ArbitrageMenuItems() {
+  return (
+    <>
+      <ArbitrageMenuLink to="/app/arbitrage" label="套利看板" />
+      <ArbitrageMenuLink to="/app/funding-arbitrage" label="套利分析" />
+      <ArbitrageMenuLink to="/app/my-arbitrage" label="我的套利" />
+    </>
+  );
+}
+
+function ArbitrageMenuLink({ to, label }: { to: string; label: string }) {
+  return (
+    <NavLink
+      className={({ isActive }) => `flex min-h-10 items-center px-3 text-[13px] font-medium transition ${
+        isActive ? "bg-[#f5f5f5] text-black" : "text-[#f5f5f5] hover:bg-white/[0.08]"
+      }`}
+      role="menuitem"
+      to={to}
+    >
+      {label}
+    </NavLink>
+  );
+}
+
+function isArbitrageRoute(pathname: string) {
+  return pathname.startsWith("/app/arbitrage")
+    || pathname.startsWith("/app/funding-arbitrage")
+    || pathname.startsWith("/app/my-arbitrage");
 }
