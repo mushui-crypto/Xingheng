@@ -51,6 +51,20 @@ export type TargetQuantityUpdate = Readonly<{
   plannedQuantity: string;
 }>;
 
+export type SecondLegHedgePreparation = Readonly<{
+  firstExecutionIntentId: string;
+  secondLegId: string;
+  targetBaseQuantity: string;
+  executableBaseQuantity: string;
+  updatedAt: number;
+}>;
+
+type PreparedSecondLegHedge = Readonly<{
+  targetBaseQuantity: string;
+  executableBaseQuantity: string;
+  residualBaseQuantity: string;
+}>;
+
 export type ArbitrageHistoryPageQuery = Readonly<{
   limit: number;
   offset: number;
@@ -387,6 +401,101 @@ export class ArbitrageInstanceStore {
     });
   }
 
+  prepareSecondLegHedge(
+    userId: string,
+    arbitrageId: string,
+    input: SecondLegHedgePreparation,
+  ): ArbitrageInstance {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const firstExecutionIntentId = identifier(input.firstExecutionIntentId, "firstExecutionIntentId");
+    const secondLegId = identifier(input.secondLegId, "secondLegId");
+    const targetBaseQuantity = normalizePositiveDecimal(input.targetBaseQuantity, "targetBaseQuantity");
+    const executableBaseQuantity = normalizePositiveDecimal(input.executableBaseQuantity, "executableBaseQuantity");
+    const updatedAt = timestamp(input.updatedAt, "updatedAt");
+    if (compareUnsignedDecimals(executableBaseQuantity, targetBaseQuantity) > 0) {
+      throw new Error("Second-leg executable quantity cannot exceed the first-leg exposure target.");
+    }
+    return this.transaction(() => {
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      if (instance.status === "CLOSED" || instance.status === "FAILED") {
+        throw new Error("Terminal arbitrage instance cannot prepare a second-leg hedge.");
+      }
+      if (updatedAt < instance.updatedAt) throw new Error("Arbitrage instance time cannot move backwards.");
+      const firstReference = this.referenceRow(normalizedArbitrageId, firstExecutionIntentId);
+      if (!firstReference
+        || firstReference.phase !== "OPENING"
+        || firstReference.quantityEffect !== "INCREASE"
+        || firstReference.status !== "CONFIRMED") {
+        throw new Error("Second-leg hedge requires one confirmed first-leg opening reference.");
+      }
+      const firstLeg = instance.legs.find((leg) => leg.legId === firstReference.legId);
+      const secondLeg = instance.legs.find((leg) => leg.legId === secondLegId);
+      if (!firstLeg || !secondLeg || firstLeg.legId === secondLeg.legId) {
+        throw new Error("Second-leg hedge leg identity is invalid.");
+      }
+      const prepared = preparedSecondLegHedge(instance, firstReference, secondLegId);
+      if (prepared) {
+        if (prepared.targetBaseQuantity !== targetBaseQuantity
+          || prepared.executableBaseQuantity !== executableBaseQuantity) {
+          throw new Error("Second-leg hedge quantities are already frozen.");
+        }
+        return instance;
+      }
+      if (firstLeg.confirmedClosedQuantity !== "0" || secondLeg.confirmedOpenedQuantity !== "0"
+        || secondLeg.confirmedClosedQuantity !== "0"
+        || instance.executionReferences.some((reference) => reference.legId === secondLegId)) {
+        throw new Error("Second-leg hedge cannot replace existing execution state.");
+      }
+      if (firstLeg.confirmedOpenedQuantity !== firstReference.confirmedQuantity) {
+        throw new Error("First-leg managed exposure no longer matches its confirmed opening fact.");
+      }
+      if (updatedAt <= firstReference.updatedAt) {
+        throw new Error("Second-leg hedge preparation must follow the confirmed first-leg fact.");
+      }
+      this.db.prepare(`UPDATE arbitrage_instance_legs
+        SET plannedQuantity = ?, confirmedOpenedQuantity = ?
+        WHERE arbitrageId = ? AND legId = ?`).run(
+        targetBaseQuantity,
+        targetBaseQuantity,
+        normalizedArbitrageId,
+        firstLeg.legId,
+      );
+      this.db.prepare(`UPDATE arbitrage_instance_legs SET plannedQuantity = ?
+        WHERE arbitrageId = ? AND legId = ?`).run(
+        executableBaseQuantity,
+        normalizedArbitrageId,
+        secondLegId,
+      );
+      this.db.prepare(`UPDATE arbitrage_instances SET maxResidualBaseQuantity = ?
+        WHERE userId = ? AND arbitrageId = ?`).run(
+        absoluteDifference(targetBaseQuantity, executableBaseQuantity),
+        normalizedUserId,
+        normalizedArbitrageId,
+      );
+      const next = this.deriveLifecycle(
+        this.requireForUser(normalizedUserId, normalizedArbitrageId),
+        updatedAt,
+      );
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, next);
+      return this.requireForUser(normalizedUserId, normalizedArbitrageId);
+    });
+  }
+
+  readPreparedSecondLegHedge(
+    userId: string,
+    arbitrageId: string,
+    firstExecutionIntentId: string,
+    secondLegId: string,
+  ): PreparedSecondLegHedge | null {
+    const normalizedIntentId = identifier(firstExecutionIntentId, "firstExecutionIntentId");
+    const instance = this.requireForUser(identifier(userId, "userId"), identifier(arbitrageId, "arbitrageId"));
+    const reference = instance.executionReferences.find((candidate) =>
+      candidate.executionIntentId === normalizedIntentId);
+    if (!reference) return null;
+    return preparedSecondLegHedge(instance, reference, identifier(secondLegId, "secondLegId"));
+  }
+
   updateCumulativeReturns(
     userId: string,
     arbitrageId: string,
@@ -666,6 +775,43 @@ export class ArbitrageInstanceStore {
       FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId)
     ) STRICT;`);
   }
+}
+
+function preparedSecondLegHedge(
+  instance: ArbitrageInstance,
+  firstReference: Readonly<{
+    legId: string;
+    phase: string;
+    quantityEffect: string;
+    status: string;
+    updatedAt: number;
+  }>,
+  secondLegId: string,
+): PreparedSecondLegHedge | null {
+  if (firstReference.phase !== "OPENING"
+    || firstReference.quantityEffect !== "INCREASE"
+    || firstReference.status !== "CONFIRMED"
+    || instance.updatedAt <= firstReference.updatedAt) {
+    return null;
+  }
+  const firstLeg = instance.legs.find((leg) => leg.legId === firstReference.legId);
+  const secondLeg = instance.legs.find((leg) => leg.legId === secondLegId);
+  if (!firstLeg || !secondLeg || firstLeg.legId === secondLeg.legId
+    || firstLeg.confirmedClosedQuantity !== "0"
+    || firstLeg.confirmedOpenedQuantity !== firstLeg.plannedQuantity
+    || secondLeg.confirmedOpenedQuantity !== "0"
+    || secondLeg.confirmedClosedQuantity !== "0"
+    || instance.executionReferences.some((reference) => reference.legId === secondLegId)
+    || compareUnsignedDecimals(secondLeg.plannedQuantity, firstLeg.plannedQuantity) > 0) {
+    return null;
+  }
+  const residualBaseQuantity = absoluteDifference(firstLeg.plannedQuantity, secondLeg.plannedQuantity);
+  if (instance.maxResidualBaseQuantity !== residualBaseQuantity) return null;
+  return Object.freeze({
+    targetBaseQuantity: firstLeg.plannedQuantity,
+    executableBaseQuantity: secondLeg.plannedQuantity,
+    residualBaseQuantity,
+  });
 }
 
 function normalizeHistoryPageQuery(input: ArbitrageHistoryPageQuery): ArbitrageHistoryPageQuery {

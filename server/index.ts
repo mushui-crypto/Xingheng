@@ -227,12 +227,24 @@ const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
   userExchangeCredentials,
   formalExecutionRuntimes,
 );
+const spotOpeningAttributions = {
+  binance: new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
+  okx: new OkxSpotOpeningAttributionSource(
+    executionRecordStore,
+    userExchangeCredentials,
+    new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
+  ),
+};
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,
   userExchangeCredentials,
   executionRecordStore,
   formalExecutionRuntimes,
+  {
+    contexts: arbitrageExecutionPlanningContexts,
+    spotAttributions: spotOpeningAttributions,
+  },
 );
 const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageInstances,
@@ -242,14 +254,7 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
     binance: new BinanceSpotCloseBalanceSource(binancePersonalTrading),
     okx: new OkxSpotCloseBalanceSource(userExchangeCredentials),
   },
-  {
-    binance: new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
-    okx: new OkxSpotOpeningAttributionSource(
-      executionRecordStore,
-      userExchangeCredentials,
-      new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
-    ),
-  },
+  spotOpeningAttributions,
   formalExecutionRuntimes,
 );
 const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(

@@ -1,4 +1,9 @@
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import {
+  addUnsignedDecimals,
+  normalizeSignedDecimal,
+  subtractUnsignedDecimals,
+} from "../cex/arbitrage-instance/ArbitrageInstance";
 import type {
   SpotOpeningAttributionRequest,
   SpotOpeningAttributionSource,
@@ -71,8 +76,47 @@ export class OkxSpotOpeningAttributionSource implements SpotOpeningAttributionSo
       || !decimalEquals(order.filledQuantity, request.grossConfirmedQuantity)) {
       throw new Error("Spot opening provider order does not match the confirmed execution.");
     }
-    return request.grossConfirmedQuantity;
+    return attributableBaseQuantity(
+      request.grossConfirmedQuantity,
+      order.fee,
+      order.feeCcy,
+      request.baseAsset,
+      quoteAsset(request.instrumentId),
+    );
   }
+}
+
+function attributableBaseQuantity(
+  grossQuantity: string,
+  feeValue: string,
+  feeCcy: string | null | undefined,
+  baseAsset: string,
+  quoteAssetValue: string,
+) {
+  let fee: string;
+  try {
+    fee = normalizeSignedDecimal(feeValue, "OKX Spot opening fee");
+  } catch {
+    throw new Error("Spot opening fee cannot be attributed to base exposure.");
+  }
+  if (feeCcy !== undefined && feeCcy !== null
+    && feeCcy !== baseAsset && feeCcy !== quoteAssetValue) {
+    throw new Error("Spot opening fee currency cannot be attributed to the traded assets.");
+  }
+  if (fee === "0") return grossQuantity;
+  if (feeCcy === undefined || feeCcy === null) {
+    throw new Error("Spot opening fee currency is unavailable.");
+  }
+  if (feeCcy !== baseAsset) return grossQuantity;
+  return fee.startsWith("-")
+    ? subtractUnsignedDecimals(grossQuantity, fee.slice(1))
+    : addUnsignedDecimals(grossQuantity, fee);
+}
+
+function quoteAsset(instrumentId: string) {
+  const match = /^[A-Z0-9]{2,12}-([A-Z0-9]{2,12})-SPOT$/u.exec(instrumentId);
+  if (!match) throw new Error("Spot opening canonical instrument identity is invalid.");
+  return match[1]!;
 }
 
 function normalizeCredential(input: Readonly<{ apiKey: string; apiSecret: string; passphrase?: string }>): OkxCredentials {

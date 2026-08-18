@@ -35,6 +35,7 @@ export type ExecutionQuantityPlanRequest = Readonly<{
   side: "buy" | "sell";
   quantityInput: ExecutionQuantityInput;
   quote: ExecutionQuantityDecimalQuote;
+  quantityAlignment?: "EXACT" | "FLOOR";
 }>;
 
 export type ExecutionQuantityPlan = Readonly<{
@@ -154,7 +155,12 @@ export class ExecutionQuantityPlanner {
 
     const planned = input.value.mode === "NOTIONAL_USDT"
       ? planFromNotional(input.value.amountUsdt, sizingPrice, baseQuantum, venueStep, minimum)
-      : planFromAssetQuantity(input.value.quantity, baseQuantum, venueStep);
+      : planFromAssetQuantity(
+        input.value.quantity,
+        baseQuantum,
+        venueStep,
+        request.quantityAlignment ?? "EXACT",
+      );
     if (!planned.ok) return planned;
 
     const estimatedQuoteNotional = multiply(planned.assetQuantity, sizingPrice);
@@ -316,6 +322,7 @@ function planFromAssetQuantity(
   quantityValue: string,
   baseQuantum: Decimal,
   venueStep: Decimal,
+  quantityAlignment: "EXACT" | "FLOOR",
 ): PlannedQuantityResult {
   const quantity = parsePositiveDecimal(quantityValue)!;
   const stepCount = floorRatio(quantity, baseQuantum);
@@ -323,7 +330,7 @@ function planFromAssetQuantity(
     return failure("QUANTITY_ROUNDED_TO_ZERO", "Asset quantity becomes zero after venue step alignment.");
   }
   const aligned = multiplyInteger(baseQuantum, stepCount);
-  if (compare(aligned, quantity) !== 0) {
+  if (quantityAlignment === "EXACT" && compare(aligned, quantity) !== 0) {
     return failure(
       "QUANTITY_STEP_MISMATCH",
       "Asset quantity does not align with the venue quantity step.",

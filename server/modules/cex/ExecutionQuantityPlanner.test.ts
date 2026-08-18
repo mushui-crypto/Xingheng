@@ -151,6 +151,85 @@ test("ASSET_QUANTITY returns a structured mismatch and nearest lower legal quant
   assert.equal(result.error.nearestLegalAssetQuantity, "1.23");
 });
 
+test("explicit hedge alignment floors to the nearest legal quantity without exceeding exposure", async () => {
+  const result = await planner({
+    instrument: instrument({ quantityUnit: "contract" }),
+    rules: rules({ quantityStep: "1", minQuantity: "1", contractSize: "10" }),
+  }).plan(request({
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "114.597074" },
+    quantityAlignment: "FLOOR",
+  }));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.plan.plannedAssetQuantity.quantity, "110");
+  assert.equal(result.plan.plannedVenueQuantity, "11");
+});
+
+test("explicit hedge alignment floors Spot base quantity to its quantity step", async () => {
+  const spotInstrument = instrument({
+    instrumentId: "BTC-USDT-SPOT",
+    providerSymbol: "BTCUSDT",
+    quantityUnit: "base",
+    marketType: "spot",
+    contractType: "spot",
+    settlementAsset: undefined,
+  });
+  const result = await planner({
+    instrument: spotInstrument,
+    rules: rules({ quantityStep: "0.01", minQuantity: "0.01" }),
+  }).plan(request({
+    instrumentId: spotInstrument.instrumentId,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "10.129" },
+    quantityAlignment: "FLOOR",
+  }));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.plan.plannedAssetQuantity.quantity, "10.12");
+});
+
+test("explicit hedge alignment handles fractional contract size with exact Decimal flooring", async () => {
+  const result = await planner({
+    instrument: instrument({ quantityUnit: "contract" }),
+    rules: rules({ quantityStep: "0.1", minQuantity: "0.1", contractSize: "0.01" }),
+  }).plan(request({
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "0.0129" },
+    quantityAlignment: "FLOOR",
+  }));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.plan.plannedAssetQuantity.quantity, "0.012");
+  assert.equal(result.plan.plannedVenueQuantity, "1.2");
+});
+
+test("explicit hedge alignment combines quantity precision and step without floating-point overshoot", async () => {
+  const result = await planner({
+    instrument: instrument({ quantityUnit: "base" }),
+    rules: rules({ quantityStep: "0.0025", minQuantity: "0.005", precision: { quantity: 3 } }),
+  }).plan(request({
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "0.0129" },
+    quantityAlignment: "FLOOR",
+  }));
+
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.equal(result.plan.plannedAssetQuantity.quantity, "0.01");
+});
+
+test("explicit hedge alignment fails closed instead of rounding up to the venue minimum", async () => {
+  const result = await planner({ rules: rules({ quantityStep: "1", minQuantity: "10" }) }).plan(request({
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "5" },
+    quantityAlignment: "FLOOR",
+  }));
+
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.error.code, "QUANTITY_BELOW_MINIMUM");
+  assert.equal(result.error.minimumRequiredAssetQuantity, "10");
+});
+
 test("contract quantity is aligned and converted back to base AssetQuantity", async () => {
   const result = await planner({
     instrument: instrument({ quantityUnit: "contract" }),
@@ -427,6 +506,7 @@ function rules(overrides: Partial<{
   priceTick: string;
   minNotional: string;
   contractSize: string | undefined;
+  precision: Readonly<{ price?: number; quantity?: number }>;
 }> = {}) {
   return createTradingRules({
     quantityStep: overrides.quantityStep ?? "0.01",
@@ -434,6 +514,6 @@ function rules(overrides: Partial<{
     priceTick: overrides.priceTick ?? "0.01",
     ...(overrides.minNotional === undefined ? {} : { minNotional: overrides.minNotional }),
     ...(overrides.contractSize === undefined ? {} : { contractSize: overrides.contractSize }),
-    precision: {},
+    precision: overrides.precision ?? {},
   });
 }

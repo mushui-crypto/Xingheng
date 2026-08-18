@@ -114,7 +114,7 @@ export class ArbitrageExecutionCloseService {
     );
     let acceptedResidualQuantity: string | undefined;
     if (spot) {
-      const opening = exactSpotOpeningReference(instance, leg.legId, leg.confirmedOpenedQuantity);
+      const opening = exactSpotOpeningReference(instance, leg.legId);
       let attributableBaseQuantity: string;
       try {
         attributableBaseQuantity = await this.spotAttributionFor(leg.venue).readAttributableBaseQuantity(userId, {
@@ -267,13 +267,13 @@ function resolveSpotSource<T extends object>(source: SpotSource<T>, venue: Execu
   return selected;
 }
 
-function exactSpotOpeningReference(instance: ArbitrageInstance, legId: string, grossConfirmedQuantity: string) {
+function exactSpotOpeningReference(instance: ArbitrageInstance, legId: string) {
   const openings = instance.executionReferences.filter((reference) => reference.legId === legId
     && reference.phase === "OPENING"
     && reference.quantityEffect === "INCREASE"
     && reference.status === "CONFIRMED"
     && reference.executionRecordId !== null);
-  if (openings.length !== 1 || openings[0]!.confirmedQuantity !== grossConfirmedQuantity) {
+  if (openings.length !== 1) {
     throw closeError("position_verification_unavailable", "现货开仓执行引用无法唯一归因。");
   }
   return openings[0]!;

@@ -217,6 +217,218 @@ test("the second leg requires a separate command and both confirmed legs reach H
   assert.equal(second.instance.legs[1].confirmedOpenedQuantity, "0.001");
 });
 
+test("second leg uses confirmed first-leg exposure instead of a drifted latest budget plan", async (t) => {
+  const fixture = setup(t, {
+    draft: draftWithLegQuantities("114.711786", "110"),
+    spotExposure: "114.597074",
+    planningContext: (venue, instrumentId, current) => ({
+      instrument: {
+        instrumentId,
+        providerSymbol: current.planning.status === "PLANNED" ? current.planning.plan.providerSymbol : "",
+        baseAsset: current.planning.status === "PLANNED"
+          ? current.planning.plan.plannedAssetQuantity.asset
+          : createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }),
+        quoteAsset: "USDT",
+        settlementAsset: "USDT",
+        marketType: "perpetual",
+        contractType: "linear_perpetual",
+        quantityUnit: "contract",
+        status: "trading",
+      },
+      tradingRules: {
+        quantityStep: "1",
+        minQuantity: "1",
+        contractSize: "10",
+        priceTick: "0.1",
+        minNotional: "5",
+        precision: {},
+      },
+      quote: { bid: "0.069", ask: "0.07", fetchedAt: now },
+    }),
+  });
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+  await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg"));
+  fixture.drafts.value = draftWithLegQuantities("111", "110");
+
+  const second = await fixture.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "short-leg", "second-command"),
+  );
+
+  assert.equal(fixture.runtime.calls[1]?.quantity.quantity, "110");
+  assert.equal(second.instance.executionReferences[0]?.confirmedQuantity, "114.711786");
+  assert.equal(second.instance.legs[0].confirmedOpenedQuantity, "114.597074");
+  assert.equal(second.instance.legs[0].plannedQuantity, "114.597074");
+  assert.equal(second.instance.legs[1].plannedQuantity, "110");
+  assert.equal(second.instance.legs[1].confirmedOpenedQuantity, "110");
+  assert.equal(second.instance.maxResidualBaseQuantity, "4.597074");
+  assert.equal(second.instance.status, "HOLDING");
+  assert.equal(fixture.drafts.calls.length, 2, "second leg must not rerun the original budget preview");
+  assert.equal(fixture.drafts.createCalls.length, 1, "second leg still revalidates Draft identity and capability");
+});
+
+test("restart reuses a prepared second-leg hedge instead of replanning with changed venue rules", async (t) => {
+  let rulesReads = 0;
+  const fixture = setup(t, {
+    draft: draftWithLegQuantities("114.711786", "110"),
+    spotExposure: "114.597074",
+    planningContext: (_venue, instrumentId, current) => {
+      rulesReads += 1;
+      return {
+        instrument: {
+          instrumentId,
+          providerSymbol: current.planning.status === "PLANNED" ? current.planning.plan.providerSymbol : "",
+          baseAsset: current.planning.status === "PLANNED"
+            ? current.planning.plan.plannedAssetQuantity.asset
+            : createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }),
+          quoteAsset: "USDT",
+          settlementAsset: "USDT",
+          marketType: "perpetual",
+          contractType: "linear_perpetual",
+          quantityUnit: "contract",
+          status: "trading",
+        },
+        tradingRules: {
+          quantityStep: "1",
+          minQuantity: "1",
+          contractSize: "20",
+          priceTick: "0.1",
+          minNotional: "5",
+          precision: {},
+        },
+        quote: { bid: "0.069", ask: "0.07", fetchedAt: now },
+      };
+    },
+  });
+  const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: "restart-hedge" }));
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+  await fixture.service.executeLeg("user-a", legRequest(
+    created.instance.arbitrageId,
+    "long-leg",
+    "first-command",
+    { confirmationId: "restart-hedge" },
+  ));
+  const firstReference = fixture.store.get("user-a", created.instance.arbitrageId)!.executionReferences[0]!;
+  fixture.store.prepareSecondLegHedge("user-a", created.instance.arbitrageId, {
+    firstExecutionIntentId: firstReference.executionIntentId,
+    secondLegId: "short-leg",
+    targetBaseQuantity: "114.597074",
+    executableBaseQuantity: "110",
+    updatedAt: now + 1,
+  });
+
+  const restarted = fixture.restart();
+  const result = await restarted.service.executeLeg("user-a", legRequest(
+    created.instance.arbitrageId,
+    "short-leg",
+    "second-command",
+    { confirmationId: "restart-hedge" },
+  ));
+
+  assert.equal(rulesReads, 0, "recovery must not reload rules to replace the frozen executable quantity");
+  assert.equal(fixture.runtime.calls.length, 2, "recovery must execute the second leg exactly once");
+  assert.equal(fixture.runtime.calls[1]?.quantity.quantity, "110");
+  assert.equal(result.instance.legs[0].plannedQuantity, "114.597074");
+  assert.equal(result.instance.legs[0].confirmedOpenedQuantity, "114.597074");
+  assert.equal(result.instance.legs[1].plannedQuantity, "110");
+  assert.equal(result.instance.maxResidualBaseQuantity, "4.597074");
+  assert.equal(result.instance.status, "HOLDING");
+});
+
+test("second-leg hedge below the venue minimum fails closed without a second mutation", async (t) => {
+  const fixture = setup(t, {
+    draft: draftWithLegQuantities("5", "5"),
+    spotExposure: "5",
+    planningContext: (_venue, instrumentId, current) => ({
+      instrument: {
+        instrumentId,
+        providerSymbol: current.planning.status === "PLANNED" ? current.planning.plan.providerSymbol : "",
+        baseAsset: current.planning.status === "PLANNED"
+          ? current.planning.plan.plannedAssetQuantity.asset
+          : createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }),
+        quoteAsset: "USDT",
+        settlementAsset: "USDT",
+        marketType: "perpetual",
+        contractType: "linear_perpetual",
+        quantityUnit: "base",
+        status: "trading",
+      },
+      tradingRules: {
+        quantityStep: "1",
+        minQuantity: "10",
+        priceTick: "0.1",
+        minNotional: "5",
+        precision: {},
+      },
+      quote: { bid: "1", ask: "1", fetchedAt: now },
+    }),
+  });
+  const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: "below-minimum" }));
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+  await fixture.service.executeLeg("user-a", legRequest(
+    created.instance.arbitrageId,
+    "long-leg",
+    "first-command",
+    { confirmationId: "below-minimum" },
+  ));
+
+  await assert.rejects(
+    fixture.service.executeLeg("user-a", legRequest(
+      created.instance.arbitrageId,
+      "short-leg",
+      "second-command",
+      { confirmationId: "below-minimum" },
+    )),
+    /最小合法数量/u,
+  );
+  assert.equal(fixture.runtime.calls.length, 1);
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 1);
+});
+
+test("second-leg revalidation still rejects identity and side drift after first-leg confirmation", async (t) => {
+  for (const scenario of ["instrument", "venue", "side", "account"] as const) {
+    await t.test(scenario, async (child) => {
+      const fixture = setup(child, {
+        runtimeVenues: ["binance", "okx"],
+        credentialVenues: ["binance", "okx"],
+      });
+      const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: `identity-${scenario}` }));
+      fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+      await fixture.service.executeLeg("user-a", legRequest(
+        created.instance.arbitrageId,
+        "long-leg",
+        "first-command",
+        { confirmationId: `identity-${scenario}` },
+      ));
+      const changed = draft(true);
+      const short = changed.legs[1];
+      fixture.drafts.value = {
+        ...changed,
+        legs: [changed.legs[0], {
+          ...short,
+          ...(scenario === "instrument" ? { instrumentId: "ETH-USDT-PERP" } : {}),
+          ...(scenario === "venue" ? { venue: "okx" as const } : {}),
+          ...(scenario === "side" ? { side: "buy" as const } : {}),
+        }],
+      };
+      if (scenario === "account") fixture.accountIds.set("binance", "binance:account-b");
+
+      await assert.rejects(
+        fixture.service.executeLeg("user-a", legRequest(
+          created.instance.arbitrageId,
+          "short-leg",
+          "second-command",
+          { confirmationId: `identity-${scenario}` },
+        )),
+        /不一致/u,
+      );
+      assert.equal(fixture.runtime.calls.length, 1);
+    });
+  }
+});
+
 test("duplicate leg confirmation returns the existing reference without a second mutation", async (t) => {
   const fixture = setup(t);
   const created = await fixture.service.confirm("user-a", finalRequest());
@@ -308,23 +520,28 @@ test("reconciliation selects the unique unresolved closing reference when a leg 
   await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "short-leg", "second-command"));
 
   const closeIntentId = "close-short-command";
+  const closeTime = now + 2;
   fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
     legId: "short-leg",
     phase: "CLOSING",
     quantityEffect: "DECREASE",
     executionIntentId: closeIntentId,
     requestedQuantity: "0.0005",
-    createdAt: now,
+    createdAt: closeTime,
   });
   const shortLeg = created.instance.legs[1];
-  const pending = recoveryRecord(closeIntentId, shortLeg, { executionId: "record-close-short" });
+  const pending = recoveryRecord(closeIntentId, shortLeg, {
+    executionId: "record-close-short",
+    createdAt: closeTime,
+    updatedAt: closeTime,
+  });
   fixture.runtime.records.set(pending.executionId, pending);
-  fixture.store.linkExecutionRecord("user-a", created.instance.arbitrageId, closeIntentId, pending.executionId, now);
+  fixture.store.linkExecutionRecord("user-a", created.instance.arbitrageId, closeIntentId, pending.executionId, closeTime);
   fixture.store.applyExecutionResult("user-a", created.instance.arbitrageId, {
     executionIntentId: closeIntentId,
     status: "PENDING_CONFIRMATION",
     confirmedQuantity: "0.0002",
-    updatedAt: now,
+    updatedAt: closeTime,
   });
   fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.0005");
 
@@ -348,16 +565,19 @@ test("CLAIMED closing reference reuses link recovery and never places another or
   await fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "short-leg", "second-command"));
 
   const closeIntentId = "interrupted-close-short";
+  const closeTime = now + 2;
   fixture.store.claimExecutionReference("user-a", created.instance.arbitrageId, {
     legId: "short-leg",
     phase: "CLOSING",
     quantityEffect: "DECREASE",
     executionIntentId: closeIntentId,
     requestedQuantity: "0.0005",
-    createdAt: now,
+    createdAt: closeTime,
   });
   const localRecord = recoveryRecord(closeIntentId, created.instance.legs[1], {
     executionId: "record-interrupted-close",
+    createdAt: closeTime,
+    updatedAt: closeTime,
   });
   fixture.runtime.records.set(localRecord.executionId, localRecord);
   fixture.runtime.onReconcile = (record) => reconciliationResult(record, "CONFIRMED", "0.0005");
@@ -675,7 +895,20 @@ test("recovered partial link continues through the existing reconciliation flow"
 
 class FakeDraftService {
   readonly calls: unknown[] = [];
+  readonly createCalls: unknown[] = [];
   constructor(public value: ArbitrageExecutionDraft) {}
+  async createDraft(userId: string, input: unknown) {
+    this.createCalls.push({ userId, input });
+    return {
+      ...this.value,
+      legs: this.value.legs.map((leg) => ({
+        ...leg,
+        planning: { status: "NOT_REQUESTED" as const },
+        executionAvailable: false,
+      })) as unknown as ArbitrageExecutionDraft["legs"],
+      allLegsExecutable: false,
+    };
+  }
   async preview(userId: string, input: unknown) {
     this.calls.push({ userId, input });
     return this.value;
@@ -717,11 +950,19 @@ function setup(t: TestContext, options: {
   draft?: ArbitrageExecutionDraft;
   runtimeVenues?: readonly ExecutionVenue[];
   credentialVenues?: readonly ExecutionVenue[];
+  spotExposure?: string;
+  planningContext?: (
+    venue: ExecutionVenue,
+    instrumentId: string,
+    leg: ArbitrageExecutionDraft["legs"][number],
+  ) => Promise<import("./ArbitrageExecutionPlanningContext").ArbitrageExecutionPlanningContext>
+    | import("./ArbitrageExecutionPlanningContext").ArbitrageExecutionPlanningContext;
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-command-test-"));
-  const store = new ArbitrageInstanceStore({ dbPath: join(directory, "test.sqlite") });
+  const dbPath = join(directory, "test.sqlite");
+  let activeStore = new ArbitrageInstanceStore({ dbPath });
   t.after(() => {
-    store.close();
+    activeStore.close();
     rmSync(directory, { recursive: true, force: true });
   });
   const drafts = new FakeDraftService(options.draft ?? draft(true));
@@ -732,23 +973,73 @@ function setup(t: TestContext, options: {
     if (venue !== "binance") runtimes.register(formalExecutionRuntime(venue, runtime));
   }
   const credentials = {
+    accountIds: new Map<ExecutionVenue, string>(),
     findSummary: (userId: string, venue: string) => {
       if (userId !== "user-a") return null;
       const configuredVenues = options.credentialVenues ?? ["binance"];
       if (!configuredVenues.includes(venue as ExecutionVenue)) return null;
-      return { accountId: `${venue}:account-a` } as any;
+      return { accountId: credentials.accountIds.get(venue as ExecutionVenue) ?? `${venue}:account-a` } as any;
     },
   };
-  const createService = (runtimeRegistry = runtimes) => new ArbitrageExecutionCommandService(
+  const createServiceFor = (
+    store: ArbitrageInstanceStore,
+    runtimeRegistry = runtimes,
+  ) => new ArbitrageExecutionCommandService(
     drafts,
     store,
     credentials,
     runtime,
     runtimeRegistry,
+    {
+      contexts: {
+        load: async (venue, instrumentId) => {
+          const current = drafts.value.legs.find((leg) => leg.venue === venue && leg.instrumentId === instrumentId);
+          if (!current || current.planning.status !== "PLANNED" || !current.quote || !current.tradingRules) {
+            throw new Error("planning context unavailable");
+          }
+          if (options.planningContext) return options.planningContext(venue, instrumentId, current);
+          return {
+            instrument: {
+              instrumentId,
+              providerSymbol: current.planning.plan.providerSymbol,
+              baseAsset: current.planning.plan.plannedAssetQuantity.asset,
+              quoteAsset: "USDT",
+              ...(current.marketType === "perpetual" ? { settlementAsset: "USDT" } : {}),
+              marketType: current.marketType,
+              contractType: current.marketType === "spot" ? "spot" as const : "linear_perpetual" as const,
+              quantityUnit: "base" as const,
+              status: "trading" as const,
+            },
+            tradingRules: current.tradingRules,
+            quote: { ...current.quote, fetchedAt: current.quote.updatedAt },
+          };
+        },
+      },
+      spotAttributions: {
+        binance: {
+          readAttributableBaseQuantity: async (_userId, request) =>
+            options.spotExposure ?? request.grossConfirmedQuantity,
+        },
+      },
+    },
     { clock: () => now, intentTtlMs: 30_000 },
   );
+  const createService = (runtimeRegistry = runtimes) => createServiceFor(activeStore, runtimeRegistry);
   const service = createService();
-  return { drafts, runtime, service, store, createService };
+  const restart = () => {
+    activeStore.close();
+    activeStore = new ArbitrageInstanceStore({ dbPath });
+    return { store: activeStore, service: createService() };
+  };
+  return {
+    drafts,
+    runtime,
+    service,
+    store: activeStore,
+    createService,
+    restart,
+    accountIds: credentials.accountIds,
+  };
 }
 
 function finalRequest(overrides: Record<string, unknown> = {}) {
@@ -878,5 +1169,28 @@ function draft(
     legs: [leg("LONG", "BTC-USDT-SPOT", venues[0]), leg("SHORT", "BTC-USDT-PERP", venues[1])],
     allLegsExecutable: allAvailable,
     generatedAt: now,
+  };
+}
+
+function draftWithLegQuantities(firstQuantity: string, secondQuantity: string): ArbitrageExecutionDraft {
+  const base = draft(true, firstQuantity);
+  const second = base.legs[1];
+  if (second.planning.status !== "PLANNED") throw new Error("test draft is not planned");
+  return {
+    ...base,
+    legs: [base.legs[0], {
+      ...second,
+      planning: {
+        status: "PLANNED",
+        plan: {
+          ...second.planning.plan,
+          quantityInput: { mode: "ASSET_QUANTITY", quantity: secondQuantity },
+          plannedAssetQuantity: {
+            ...second.planning.plan.plannedAssetQuantity,
+            quantity: secondQuantity,
+          },
+        },
+      },
+    }],
   };
 }

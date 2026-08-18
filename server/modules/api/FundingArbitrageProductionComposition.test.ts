@@ -161,11 +161,15 @@ test("Funding Command sends an OKX Spot leg through the registered OKX Formal Ru
     .register(formalExecutionRuntime("okx", trackedOkx));
   const draft = okxFundingDraft();
   const command = new ArbitrageExecutionCommandService(
-    { preview: async () => draft },
+    { preview: async () => draft, createDraft: async () => draft },
     instances,
     fixture.credentials,
     fixture.records,
     runtimes,
+    {
+      contexts: { load: async () => { throw new Error("not used by the first leg"); } },
+      spotAttributions: {},
+    },
     { clock: () => now, intentTtlMs: 30_000 },
   );
   const request = fundingConfirmationRequest();

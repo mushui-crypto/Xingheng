@@ -299,6 +299,87 @@ test("updates target quantities without creating a new arbitrage instance", () =
   });
 });
 
+test("atomically attributes first-leg exposure and freezes a non-overshooting second-leg hedge", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    execute(store, "long-leg", "long-open", "OPENING", "INCREASE", "1", start + 10);
+
+    const prepared = store.prepareSecondLegHedge("user-a", "arbitrage-1", {
+      firstExecutionIntentId: "long-open",
+      secondLegId: "short-leg",
+      targetBaseQuantity: "0.95",
+      executableBaseQuantity: "0.9",
+      updatedAt: start + 13,
+    });
+    const replay = store.prepareSecondLegHedge("user-a", "arbitrage-1", {
+      firstExecutionIntentId: "long-open",
+      secondLegId: "short-leg",
+      targetBaseQuantity: "0.95",
+      executableBaseQuantity: "0.9",
+      updatedAt: start + 13,
+    });
+
+    assert.equal(prepared.legs[0].confirmedOpenedQuantity, "0.95");
+    assert.equal(prepared.legs[0].plannedQuantity, "0.95");
+    assert.equal(prepared.legs[1].plannedQuantity, "0.9");
+    assert.equal(prepared.maxResidualBaseQuantity, "0.05");
+    assert.deepEqual(
+      store.readPreparedSecondLegHedge("user-a", "arbitrage-1", "long-open", "short-leg"),
+      { targetBaseQuantity: "0.95", executableBaseQuantity: "0.9", residualBaseQuantity: "0.05" },
+    );
+    assert.deepEqual(replay, prepared);
+    assert.throws(
+      () => store.prepareSecondLegHedge("user-a", "arbitrage-1", {
+        firstExecutionIntentId: "long-open",
+        secondLegId: "short-leg",
+        targetBaseQuantity: "0.95",
+        executableBaseQuantity: "0.8",
+        updatedAt: start + 30,
+      }),
+      /already frozen/u,
+    );
+    execute(store, "short-leg", "short-open", "OPENING", "INCREASE", "0.9", start + 20);
+    assert.equal(store.get("user-a", "arbitrage-1")?.status, "HOLDING");
+    assert.throws(
+      () => store.prepareSecondLegHedge("user-a", "arbitrage-1", {
+        firstExecutionIntentId: "long-open",
+        secondLegId: "short-leg",
+        targetBaseQuantity: "0.9",
+        executableBaseQuantity: "1",
+        updatedAt: start + 30,
+      }),
+      /cannot exceed/u,
+    );
+  });
+});
+
+test("restores the same prepared hedge target and residual after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance());
+    execute(first, "long-leg", "long-open", "OPENING", "INCREASE", "1", start + 10);
+    const prepared = first.prepareSecondLegHedge("user-a", "arbitrage-1", {
+      firstExecutionIntentId: "long-open",
+      secondLegId: "short-leg",
+      targetBaseQuantity: "0.95",
+      executableBaseQuantity: "0.9",
+      updatedAt: start + 13,
+    });
+    first.close();
+
+    const second = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(second.get("user-a", "arbitrage-1"), prepared);
+      assert.deepEqual(
+        second.readPreparedSecondLegHedge("user-a", "arbitrage-1", "long-open", "short-leg"),
+        { targetBaseQuantity: "0.95", executableBaseQuantity: "0.9", residualBaseQuantity: "0.05" },
+      );
+    } finally {
+      second.close();
+    }
+  });
+});
+
 test("restores CLOSED lifecycle, quantities, references, timestamps, and nullable PnL after restart", () => {
   withDatabase(({ dbPath }) => {
     const first = new ArbitrageInstanceStore({ dbPath });

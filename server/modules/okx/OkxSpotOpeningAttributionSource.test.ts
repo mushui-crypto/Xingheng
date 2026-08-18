@@ -40,7 +40,7 @@ test("uses the persisted OKX order reference when a recovered Spot ExecutionReco
     }),
   );
 
-  assert.equal(await source.readAttributableBaseQuantity("user-a", request()), "114.711786");
+  assert.equal(await source.readAttributableBaseQuantity("user-a", request()), "114.597074214");
   assert.deepEqual(orderQuery, {
     instId: "DOGE-USDT",
     ordId: "3842710862301057024",
@@ -75,6 +75,49 @@ test("fails closed when ExecutionRecord and persisted OKX order reference disagr
   );
   assert.equal(providerReads, 0);
 });
+
+test("attributes only base-denominated signed fees to Spot base exposure", async () => {
+  assert.equal(await sourceWithFee("-0.1", "USDT").readAttributableBaseQuantity("user-a", request()), "114.711786");
+  assert.equal(await sourceWithFee("0.1", "DOGE").readAttributableBaseQuantity("user-a", request()), "114.811786");
+  await assert.rejects(
+    sourceWithFee("-0.1", "OKB").readAttributableBaseQuantity("user-a", request()),
+    /fee currency cannot be attributed/u,
+  );
+});
+
+function sourceWithFee(fee: string, feeCcy: string | null) {
+  return new OkxSpotOpeningAttributionSource(
+    { loadForUser: async () => executionRecord() },
+    {
+      findSummary: () => ({ accountId: "okx:account" }) as never,
+      loadForExecution: async () => ({ apiKey: "key", apiSecret: "secret", passphrase: "passphrase" }),
+    },
+    { loadForUser: async () => orderReference() },
+    () => ({
+      getAccountIdentity: async () => ({
+        accountId: "okx:account",
+        accountFingerprint: "fingerprint",
+        uidHash: "uid-hash",
+        accountLevel: "2",
+      }),
+      getOrder: async () => ({
+        instId: "DOGE-USDT",
+        ordId: "3842710862301057024",
+        clOrdId: "sxokx-recovered",
+        side: "buy",
+        status: "CONFIRMED",
+        statusReason: null,
+        rawState: "filled",
+        requestedQuantity: "114.711786",
+        filledQuantity: "114.711786",
+        averagePrice: "0.0697",
+        fee,
+        feeCcy,
+        updatedAt: 1_800_000_000_100,
+      }),
+    }),
+  );
+}
 
 function executionRecord(): ExecutionRecord {
   return {

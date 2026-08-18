@@ -54,6 +54,27 @@ test("uses spot balance observations and keeps provider failures UNKNOWN", async
   assert.equal(result?.legs[1].reason, "provider_read_failed");
 });
 
+test("uses prepared net Spot exposure and its corrected hedge residual tolerance", async () => {
+  const base = fixture({ strategyType: "SPOT_PERPETUAL", longInstrumentId: "XAUT-USDT-SPOT" });
+  const prepared: ArbitrageInstance = {
+    ...base,
+    maxResidualBaseQuantity: "0.05",
+    legs: [
+      { ...base.legs[0], plannedQuantity: "0.95", confirmedOpenedQuantity: "0.95" },
+      { ...base.legs[1], plannedQuantity: "0.9", confirmedOpenedQuantity: "0.9" },
+    ],
+  };
+  const service = serviceFor([prepared], {
+    long: observed("binance", "binance:account-a", "XAUT-USDT-SPOT", "LONG", "0.9"),
+    short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "0.9"),
+  });
+
+  const result = await service.verify("user-a", "arb-1");
+
+  assert.deepEqual(result?.legs.map((leg) => leg.expectedManagedQuantity), ["0.95", "0.9"]);
+  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MATCHED", "MATCHED"]);
+});
+
 test("keeps missing, cross-user, credential mismatch, and overlapping aggregate positions invisible or UNKNOWN", async () => {
   const target = fixture();
   const overlap = fixture({ arbitrageId: "arb-2" });

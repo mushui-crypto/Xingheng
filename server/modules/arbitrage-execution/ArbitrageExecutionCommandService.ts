@@ -2,12 +2,18 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { absoluteDifference } from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
+import { createAssetQuantity } from "../cex/AssetQuantity";
+import { createExecutionCanonicalAssetSource } from "../cex/CanonicalAssetSource";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordRecoveryStore } from "../cex/ExecutionRecordStore";
+import { ExecutionQuantityPlanner } from "../cex/ExecutionQuantityPlanner";
+import { canonicalInstrumentFromId } from "../cex/Instrument";
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
 import type { ArbitrageExecutionDraft, ArbitrageExecutionDraftLeg } from "./ArbitrageExecutionDraft";
 import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftService";
+import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
+import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import type { FormalExecutionRuntimeResult } from "./FormalExecutionRuntime";
 import {
@@ -15,12 +21,18 @@ import {
   type FormalExecutionRuntimeResolver,
 } from "./FormalExecutionRuntimeRegistry";
 
-type DraftService = Pick<ArbitrageExecutionDraftService, "preview">;
+type DraftService = Pick<ArbitrageExecutionDraftService, "createDraft" | "preview">;
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
   "create" | "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
+  | "prepareSecondLegHedge" | "readPreparedSecondLegHedge"
 >;
 type CredentialSummaries = Pick<UserExchangeCredentialStore, "findSummary">;
+type SpotAttributionSources = Partial<Record<ExecutionIntent["venue"], SpotOpeningAttributionSource>>;
+type PlannedDraftLeg = ArbitrageExecutionDraftLeg & Readonly<{
+  planning: Extract<ArbitrageExecutionDraftLeg["planning"], { status: "PLANNED" }>;
+}>;
+const canonicalAssets = createExecutionCanonicalAssetSource();
 
 export type ArbitrageExecutionConfirmation = Readonly<{
   instance: ArbitrageInstance;
@@ -75,6 +87,10 @@ export class ArbitrageExecutionCommandService {
     private readonly credentials: CredentialSummaries,
     private readonly executionRecords: ExecutionRecordRecoveryStore,
     private readonly runtimes: FormalExecutionRuntimeResolver,
+    private readonly hedgePlanning: Readonly<{
+      contexts: ArbitrageExecutionPlanningContextSource;
+      spotAttributions: SpotAttributionSources;
+    }>,
     private readonly options: Readonly<{
       clock?: () => number;
       createArbitrageId?: (userId: string, confirmationId: string) => string;
@@ -138,12 +154,20 @@ export class ArbitrageExecutionCommandService {
     const existingReference = instance.executionReferences.find((reference) => reference.executionIntentId === intentId);
     if (existingReference) return resultFromReference(instance, existingReference, true);
 
-    assertLegCanExecute(instance, request.legId);
-    const draft = await this.revalidateDraft(userId, request);
+    const confirmedFirstLeg = assertLegCanExecute(instance, request.legId);
+    const draft = confirmedFirstLeg === null
+      ? await this.revalidateDraft(userId, request)
+      : await this.revalidateSecondLegDraft(userId, request);
     const accounts = this.resolveAccounts(userId, draft);
-    assertInstanceMatches(instance, draft, accounts, sourcePlanIdentity(request));
+    assertInstanceMatches(
+      instance,
+      draft,
+      accounts,
+      sourcePlanIdentity(request),
+      confirmedFirstLeg === null,
+    );
     const draftLeg = draft.legs.find((candidate) => candidate.legId === request.legId);
-    if (!draftLeg || draftLeg.planning.status !== "PLANNED") {
+    if (!draftLeg || (confirmedFirstLeg === null && draftLeg.planning.status !== "PLANNED")) {
       throw commandError("arbitrage_instance_mismatch", "当前权威草案无法重新解析所选套利腿。");
     }
     const accountId = accounts.get(draftLeg.legId);
@@ -151,7 +175,30 @@ export class ArbitrageExecutionCommandService {
       throw commandError("arbitrage_instance_mismatch", "当前执行账户与套利实例绑定不一致。");
     }
 
-    const now = this.now();
+    const preparedHedge = confirmedFirstLeg === null
+      ? null
+      : this.instances.readPreparedSecondLegHedge(
+        userId,
+        instance.arbitrageId,
+        confirmedFirstLeg.executionIntentId,
+        selected.legId,
+      );
+    const hedge = confirmedFirstLeg === null
+      ? null
+      : preparedHedge
+        ? restorePreparedHedge(selected.instrumentId, preparedHedge)
+        : await this.planSecondLegQuantity(userId, instance, selected, draft, draftLeg, confirmedFirstLeg);
+    const quantity = hedge?.quantity ?? (draftLeg as PlannedDraftLeg).planning.plan.plannedAssetQuantity;
+    const now = confirmedFirstLeg === null ? this.now() : nextTimestamp(this.now(), instance.updatedAt);
+    if (hedge !== null && preparedHedge === null) {
+      this.instances.prepareSecondLegHedge(userId, instance.arbitrageId, {
+        firstExecutionIntentId: confirmedFirstLeg!.executionIntentId,
+        secondLegId: selected.legId,
+        targetBaseQuantity: hedge.targetBaseQuantity,
+        executableBaseQuantity: quantity.quantity,
+        updatedAt: now,
+      });
+    }
     const intent = createExecutionIntent({
       intentId,
       arbitrageId: instance.arbitrageId,
@@ -161,7 +208,7 @@ export class ArbitrageExecutionCommandService {
       accountId,
       instrumentId: selected.instrumentId,
       side: draftLeg.side,
-      quantity: draftLeg.planning.plan.plannedAssetQuantity,
+      quantity,
       orderConstraints: { reduceOnly: false },
       executionMode: request.executionMode,
       createdAt: now,
@@ -362,6 +409,23 @@ export class ArbitrageExecutionCommandService {
     return draft;
   }
 
+  private async revalidateSecondLegDraft(
+    userId: string,
+    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays">,
+  ) {
+    const draft = await this.drafts.createDraft(userId, {
+      opportunityId: request.opportunityId,
+      horizonDays: request.horizonDays,
+    });
+    if (draft.legs.some((leg) => leg.capability.status !== "AVAILABLE" || leg.providerSymbol === null)) {
+      throw commandError(
+        "execution_capability_unavailable",
+        "两条腿当前未同时满足执行能力和交易品种条件，不能继续执行套利。",
+      );
+    }
+    return draft;
+  }
+
   private resolveAccounts(userId: string, draft: ArbitrageExecutionDraft) {
     const accounts = new Map<string, string>();
     for (const leg of draft.legs) {
@@ -384,11 +448,100 @@ export class ArbitrageExecutionCommandService {
     }
   }
 
+  private async planSecondLegQuantity(
+    userId: string,
+    instance: ArbitrageInstance,
+    selected: ArbitrageInstance["legs"][number],
+    draft: ArbitrageExecutionDraft,
+    draftLeg: ArbitrageExecutionDraftLeg,
+    firstReference: ArbitrageInstance["executionReferences"][number],
+  ) {
+    const firstLeg = instance.legs.find((candidate) => candidate.legId === firstReference.legId);
+    const firstDraftLeg = draft.legs.find((candidate) => candidate.legId === firstReference.legId);
+    if (!firstLeg || !firstDraftLeg) {
+      throw commandError("arbitrage_instance_mismatch", "第一腿执行事实无法映射到当前套利实例。");
+    }
+    const firstInstrument = canonicalInstrumentFromId(firstLeg.instrumentId);
+    const targetBaseQuantity = firstDraftLeg.marketType === "spot"
+      ? await this.readSpotExposure(userId, firstLeg, firstDraftLeg, firstInstrument.baseAsset, firstReference)
+      : firstReference.confirmedQuantity;
+    const context = await this.hedgePlanning.contexts.load(selected.venue, selected.instrumentId);
+    if (context.instrument.instrumentId !== selected.instrumentId
+      || context.instrument.providerSymbol !== draftLeg.providerSymbol
+      || context.instrument.baseAsset.symbol !== firstInstrument.baseAsset) {
+      throw commandError("arbitrage_instance_mismatch", "第二腿交易品种与第一腿实际敞口不一致。");
+    }
+    const planner = new ExecutionQuantityPlanner(
+      { resolve: async (instrumentId) => instrumentId === selected.instrumentId ? context.instrument : null },
+      { getTradingRules: async () => context.tradingRules },
+      { now: () => this.now() },
+    );
+    const planned = await planner.plan({
+      instrumentId: selected.instrumentId,
+      side: draftLeg.side,
+      quantityInput: { mode: "ASSET_QUANTITY", quantity: targetBaseQuantity },
+      quote: context.quote,
+      quantityAlignment: "FLOOR",
+    });
+    if (!planned.ok) {
+      throw commandError("execution_capability_unavailable", "第一腿实际敞口无法转换为第二腿最小合法数量。");
+    }
+    return Object.freeze({
+      targetBaseQuantity,
+      quantity: planned.plan.plannedAssetQuantity,
+    });
+  }
+
+  private async readSpotExposure(
+    userId: string,
+    leg: ArbitrageInstance["legs"][number],
+    draftLeg: ArbitrageExecutionDraftLeg,
+    baseAsset: string,
+    reference: ArbitrageInstance["executionReferences"][number],
+  ) {
+    const source = this.hedgePlanning.spotAttributions[leg.venue];
+    if (!source || reference.executionRecordId === null || draftLeg.providerSymbol === null) {
+      throw commandError("execution_state_unknown", "第一腿现货实际敞口无法可靠归因，不能执行第二腿。");
+    }
+    try {
+      return await source.readAttributableBaseQuantity(userId, {
+        accountId: leg.accountId,
+        instrumentId: leg.instrumentId,
+        providerSymbol: draftLeg.providerSymbol,
+        baseAsset,
+        executionIntentId: reference.executionIntentId,
+        executionRecordId: reference.executionRecordId,
+        grossConfirmedQuantity: reference.confirmedQuantity,
+      });
+    } catch {
+      throw commandError("execution_state_unknown", "第一腿现货实际敞口无法可靠归因，不能执行第二腿。");
+    }
+  }
+
   private now() {
     const value = this.options.clock?.() ?? Date.now();
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Execution confirmation clock is invalid.");
     return value;
   }
+}
+
+function restorePreparedHedge(
+  instrumentId: string,
+  prepared: Readonly<{ targetBaseQuantity: string; executableBaseQuantity: string }>,
+) {
+  const canonical = canonicalInstrumentFromId(instrumentId);
+  const asset = canonicalAssets.getAsset(canonical.baseAsset);
+  if (!asset) throw commandError("execution_capability_unavailable", "第二腿冻结数量的标准资产映射不可用。");
+  return Object.freeze({
+    targetBaseQuantity: prepared.targetBaseQuantity,
+    quantity: createAssetQuantity({ asset, quantity: prepared.executableBaseQuantity }),
+  });
+}
+
+function nextTimestamp(candidate: number, current: number) {
+  const value = Math.max(candidate, current + 1);
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error("Execution confirmation clock is invalid.");
+  return value;
 }
 
 type FinalConfirmationRequest = Readonly<{
@@ -498,25 +651,30 @@ function assertInstanceMatches(
   draft: ArbitrageExecutionDraft,
   accounts: ReadonlyMap<string, string>,
   sourcePlanId: string | null,
+  requirePlannedQuantities = true,
 ) {
-  const planned = plannedLegs(draft);
-  const matches = sourcePlanId !== null
+  const identityMatches = sourcePlanId !== null
     && instance.sourcePlanId === sourcePlanId
     && instance.strategyType === draft.strategyType
-    && planned.every(({ leg, plan }) => instance.legs.some((candidate) => (
+    && draft.legs.every((leg) => instance.legs.some((candidate) => (
       candidate.legId === leg.legId
       && candidate.role === leg.role
+      && leg.side === (candidate.role === "LONG" ? "buy" : "sell")
       && candidate.venue === leg.venue
       && candidate.accountId === accounts.get(leg.legId)
       && candidate.instrumentId === leg.instrumentId
-      && candidate.plannedQuantity === plan.plannedAssetQuantity.quantity
     )));
-  if (!matches) throw commandError("arbitrage_instance_mismatch", "当前权威机会或数量计划与套利实例不一致。");
+  const quantitiesMatch = !requirePlannedQuantities || plannedLegs(draft).every(({ leg, plan }) =>
+    instance.legs.some((candidate) => candidate.legId === leg.legId
+      && candidate.plannedQuantity === plan.plannedAssetQuantity.quantity));
+  if (!identityMatches || !quantitiesMatch) {
+    throw commandError("arbitrage_instance_mismatch", "当前权威机会或数量计划与套利实例不一致。");
+  }
 }
 
 function assertLegCanExecute(instance: ArbitrageInstance, selectedLegId: string) {
   const references = instance.executionReferences;
-  if (references.length === 0) return;
+  if (references.length === 0) return null;
   const sameLeg = references.some((reference) => reference.legId === selectedLegId);
   if (sameLeg) throw commandError("second_leg_not_allowed", "该套利腿已经存在执行记录。");
   if (references.length !== 1) throw commandError("second_leg_not_allowed", "当前实例存在多条执行状态，不能继续自动推进。");
@@ -524,6 +682,7 @@ function assertLegCanExecute(instance: ArbitrageInstance, selectedLegId: string)
   if (first.status !== "CONFIRMED" || first.confirmedQuantity !== first.requestedQuantity) {
     throw commandError("second_leg_not_allowed", "第一腿尚未完整确认，不能执行第二腿。");
   }
+  return first;
 }
 
 function resultFromReference(
