@@ -169,6 +169,26 @@ export class ArbitrageInstanceStore {
     return row ? this.instanceFromRow(row) : null;
   }
 
+  failEmptyOpening(userId: string, arbitrageId: string, updatedAt: number): ArbitrageInstance | null {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const timestampValue = timestamp(updatedAt, "updatedAt");
+    return this.transaction(() => {
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const empty = instance.status === "OPENING"
+        && instance.executionReferences.length === 0
+        && instance.legs.every((leg) => managedCurrentQuantity(leg) === "0");
+      if (!empty) return null;
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, {
+        status: "FAILED",
+        openedAt: instance.openedAt,
+        closedAt: null,
+        updatedAt: Math.max(timestampValue, instance.updatedAt),
+      });
+      return this.requireForUser(normalizedUserId, normalizedArbitrageId);
+    });
+  }
+
   listActive(userId: string) {
     return this.listForStatuses(identifier(userId, "userId"), ACTIVE_STATUSES);
   }

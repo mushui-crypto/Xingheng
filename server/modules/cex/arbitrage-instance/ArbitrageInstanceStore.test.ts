@@ -195,6 +195,45 @@ test("marks a terminated zero-exposure opening as FAILED and lists active/histor
   });
 });
 
+test("fails only a truly empty OPENING instance and never clears execution evidence", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    const failed = store.failEmptyOpening("user-a", "arbitrage-1", start + 1);
+    assert.equal(failed?.status, "FAILED");
+    assert.equal(failed?.executionReferences.length, 0);
+
+    store.create(instance({ arbitrageId: "arbitrage-with-reference" }));
+    store.claimExecutionReference("user-a", "arbitrage-with-reference", claim(
+      "long-leg",
+      "unknown-opening",
+      start + 2,
+    ));
+    const preserved = store.failEmptyOpening("user-a", "arbitrage-with-reference", start + 3);
+    assert.equal(preserved, null);
+    assert.equal(store.get("user-a", "arbitrage-with-reference")?.status, "OPENING");
+    assert.equal(store.get("user-a", "arbitrage-with-reference")?.executionReferences.length, 1);
+  });
+});
+
+test("persists empty OPENING cleanup as FAILED across restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance());
+    const failed = first.failEmptyOpening("user-a", "arbitrage-1", start + 1);
+    assert.equal(failed?.status, "FAILED");
+    first.close();
+
+    const second = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.equal(second.get("user-a", "arbitrage-1")?.status, "FAILED");
+      assert.equal(second.listActive("user-a").length, 0);
+      assert.equal(second.listHistory("user-a").length, 1);
+    } finally {
+      second.close();
+    }
+  });
+});
+
 test("moves HOLDING through CLOSING to CLOSED only after both managed quantities reach zero", () => {
   withStore(({ store }) => {
     store.create(instance());

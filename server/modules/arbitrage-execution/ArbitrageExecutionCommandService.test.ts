@@ -63,6 +63,201 @@ test("capability failure and stale replanning fail closed before provider mutati
   );
   assert.equal(stale.runtime.calls.length, 0);
   assert.equal(stale.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+  assert.equal(stale.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+});
+
+test("claim failure without a persisted reference closes the empty opening instance and preserves the claim error", async (t) => {
+  const fixture = setup(t, { claimFailure: "before" });
+  const created = await fixture.service.confirm("user-a", finalRequest());
+
+  await assert.rejects(
+    () => fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg")),
+    /synthetic claim failure/u,
+  );
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+  const restarted = fixture.restart();
+  assert.equal(restarted.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+});
+
+test("claim conflict from another instance closes only the still-empty current instance", async (t) => {
+  const fixture = setup(t, { createIntentId: () => "shared-claim-intent" });
+  const current = await fixture.service.confirm("user-a", finalRequest({ confirmationId: "current" }));
+  const other = await fixture.service.confirm("user-a", finalRequest({ confirmationId: "other" }));
+  fixture.store.claimExecutionReference("user-a", other.instance.arbitrageId, {
+    legId: "long-leg",
+    phase: "OPENING",
+    quantityEffect: "INCREASE",
+    executionIntentId: "shared-claim-intent",
+    requestedQuantity: "0.001",
+    createdAt: now,
+  });
+
+  await assert.rejects(
+    () => fixture.service.executeLeg("user-a", legRequest(current.instance.arbitrageId, "long-leg")),
+    /already claimed/u,
+  );
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", current.instance.arbitrageId)?.status, "FAILED");
+  assert.equal(fixture.store.get("user-a", other.instance.arbitrageId)?.status, "OPENING");
+  assert.equal(fixture.store.get("user-a", other.instance.arbitrageId)?.executionReferences.length, 1);
+});
+
+test("claim failure with a raced persisted reference never cleans up", async (t) => {
+  const fixture = setup(t, { claimFailure: "after" });
+  const created = await fixture.service.confirm("user-a", finalRequest());
+
+  const result = await fixture.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "long-leg"),
+  );
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(result.idempotentReplay, true);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "OPENING");
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 1);
+});
+
+test("NOTIONAL_USDT allows normal execution quantity drift while preserving the confirmed budget", async (t) => {
+  const fixture = setup(t, { draft: notionalDraft("100", "100", "8") });
+  const created = await fixture.service.confirm("user-a", finalRequest({
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" },
+  }));
+  fixture.drafts.value = notionalDraft("90", "90", "8");
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+
+  const result = await fixture.service.executeLeg("user-a", legRequest(
+    created.instance.arbitrageId,
+    "long-leg",
+    "notional-drift",
+    { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" } },
+  ));
+
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "90");
+  assert.equal(result.instance.legs[0].plannedQuantity, "100");
+  assert.equal(result.instance.legs[0].confirmedOpenedQuantity, "90");
+  assert.equal(fixture.runtime.providerMutations, 0);
+});
+
+test("NOTIONAL_USDT rejects an execution plan that exceeds the confirmed budget", async (t) => {
+  const fixture = setup(t, { draft: notionalDraft("100", "100", "8") });
+  const created = await fixture.service.confirm("user-a", finalRequest({
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" },
+  }));
+  fixture.drafts.value = notionalDraft("120", "120", "9");
+
+  await assert.rejects(
+    () => fixture.service.executeLeg("user-a", legRequest(
+      created.instance.arbitrageId,
+      "long-leg",
+      "notional-over-budget",
+      { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" } },
+    )),
+    (error) => error instanceof ArbitrageExecutionCommandError
+      && error.category === "execution_capability_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+});
+
+test("BASE_QUANTITY remains frozen when the latest quote changes", async (t) => {
+  const fixture = setup(t, { draft: draft(true, "100") });
+  const created = await fixture.service.confirm("user-a", finalRequest({
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" },
+  }));
+  fixture.drafts.value = draft(true, "90");
+
+  await assert.rejects(
+    () => fixture.service.executeLeg("user-a", legRequest(
+      created.instance.arbitrageId,
+      "long-leg",
+      "base-quantity-drift",
+      { quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" } },
+    )),
+    /不一致/u,
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+});
+
+test("NOTIONAL_USDT keeps identity checks strict while ignoring only planned quantity drift", async (t) => {
+  const scenarios = [
+    {
+      name: "target notional",
+      request: { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "10" } },
+      draft: notionalDraft("100", "100", "8"),
+    },
+    {
+      name: "strategy",
+      request: { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" } },
+      draft: { ...notionalDraft("100", "100", "8"), strategyType: "PERPETUAL_PERPETUAL" as const },
+    },
+    {
+      name: "instrument",
+      request: { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" } },
+      draft: {
+        ...notionalDraft("100", "100", "8"),
+        legs: [
+          { ...notionalDraft("100", "100", "8").legs[0], instrumentId: "ETH-USDT-SPOT" },
+          notionalDraft("100", "100", "8").legs[1],
+        ],
+      },
+    },
+    {
+      name: "side",
+      request: { quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" } },
+      draft: {
+        ...notionalDraft("100", "100", "8"),
+        legs: [notionalDraft("100", "100", "8").legs[0], {
+          ...notionalDraft("100", "100", "8").legs[1],
+          side: "buy" as const,
+        }],
+      },
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    await t.test(scenario.name, async (child) => {
+      const fixture = setup(child, { draft: notionalDraft("100", "100", "8") });
+      const created = await fixture.service.confirm("user-a", finalRequest({
+        confirmationId: `notional-identity-${scenario.name}`,
+        quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" },
+      }));
+      fixture.drafts.value = scenario.draft;
+
+      await assert.rejects(
+        () => fixture.service.executeLeg("user-a", legRequest(
+          created.instance.arbitrageId,
+          "long-leg",
+          `notional-identity-${scenario.name}`,
+          { confirmationId: `notional-identity-${scenario.name}`, ...scenario.request },
+        )),
+        /不一致/u,
+      );
+      assert.equal(fixture.runtime.calls.length, 0);
+      assert.equal(fixture.runtime.providerMutations, 0);
+      assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+    });
+  }
+});
+
+test("pre-mutation planning failure closes an empty OPENING instance without a reference", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  fixture.drafts.value = planningFailureDraft();
+
+  await assert.rejects(
+    () => fixture.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg")),
+    /未同时满足执行能力/u,
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+  assert.equal(fixture.runtime.providerMutations, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+  assert.equal(fixture.store.listActive("user-a").length, 0);
+  assert.equal(fixture.store.listHistory("user-a").length, 1);
 });
 
 test("an unregistered formal runtime fails closed before claiming an execution reference", async (t) => {
@@ -77,6 +272,7 @@ test("an unregistered formal runtime fails closed before claiming an execution r
   );
   assert.equal(fixture.runtime.calls.length, 0);
   assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
+  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
 });
 
 test("an eligible OKX Draft leg enters the registered OKX Formal runtime", async (t) => {
@@ -951,6 +1147,8 @@ function setup(t: TestContext, options: {
   runtimeVenues?: readonly ExecutionVenue[];
   credentialVenues?: readonly ExecutionVenue[];
   spotExposure?: string;
+  claimFailure?: "before" | "after";
+  createIntentId?: (userId: string, arbitrageId: string, legId: string, commandId: string) => string;
   planningContext?: (
     venue: ExecutionVenue,
     instrumentId: string,
@@ -986,7 +1184,18 @@ function setup(t: TestContext, options: {
     runtimeRegistry = runtimes,
   ) => new ArbitrageExecutionCommandService(
     drafts,
-    store,
+    options.claimFailure
+      ? new Proxy(store, {
+        get(target, property, receiver) {
+          if (property !== "claimExecutionReference") return Reflect.get(target, property, receiver);
+          return (...args: Parameters<ArbitrageInstanceStore["claimExecutionReference"]>) => {
+            if (options.claimFailure === "before") throw new Error("synthetic claim failure");
+            target.claimExecutionReference(...args);
+            throw new Error("synthetic claim failure");
+          };
+        },
+      })
+      : store,
     credentials,
     runtime,
     runtimeRegistry,
@@ -1022,7 +1231,11 @@ function setup(t: TestContext, options: {
         },
       },
     },
-    { clock: () => now, intentTtlMs: 30_000 },
+    {
+      clock: () => now,
+      createIntentId: options.createIntentId,
+      intentTtlMs: 30_000,
+    },
   );
   const createService = (runtimeRegistry = runtimes) => createServiceFor(activeStore, runtimeRegistry);
   const service = createService();
@@ -1192,5 +1405,42 @@ function draftWithLegQuantities(firstQuantity: string, secondQuantity: string): 
         },
       },
     }],
+  };
+}
+
+function notionalDraft(firstQuantity: string, secondQuantity: string, estimatedNotionalUsdt: string): ArbitrageExecutionDraft {
+  const base = draft(true, firstQuantity);
+  const quantities = [firstQuantity, secondQuantity] as const;
+  return {
+    ...base,
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "8" },
+    legs: base.legs.map((leg, index) => {
+      if (leg.planning.status !== "PLANNED") throw new Error("test draft is not planned");
+      return {
+        ...leg,
+        planning: {
+          status: "PLANNED" as const,
+          plan: {
+            ...leg.planning.plan,
+            quantityInput: { mode: "NOTIONAL_USDT" as const, amountUsdt: "8" },
+            plannedAssetQuantity: { ...leg.planning.plan.plannedAssetQuantity, quantity: quantities[index]! },
+            estimatedNotionalUsdt,
+          },
+        },
+      };
+    }) as unknown as ArbitrageExecutionDraft["legs"],
+  };
+}
+
+function planningFailureDraft(): ArbitrageExecutionDraft {
+  const base = draft(true);
+  return {
+    ...base,
+    allLegsExecutable: false,
+    legs: base.legs.map((leg) => ({
+      ...leg,
+      executionAvailable: false,
+      planning: { status: "ERROR" as const, errorCode: "QUOTE_STALE" as const },
+    })) as unknown as ArbitrageExecutionDraft["legs"],
   };
 }
