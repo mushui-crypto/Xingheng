@@ -4,14 +4,9 @@
 
 本文档定义所有 AI Agent 在本项目中的通用工作边界。
 
-具体岗位职责位于 `ai-team/roles/`：
+当前不采用强制角色分工。每个任务由一个统一 Owner 负责理解、实现、验证和文档同步。
 
--   [Product Technical Lead](./ai-team/roles/product-technical-lead.md)
--   [Architecture Reviewer](./ai-team/roles/architecture-reviewer.md)
--   [Backend Engineer](./ai-team/roles/backend-engineer.md)
--   [Frontend Engineer](./ai-team/roles/frontend-engineer.md)
--   [Security DevOps Engineer](./ai-team/roles/security-devops-engineer.md)
--   [Code Reviewer](./ai-team/roles/code-reviewer.md)
+`ai-team/roles/` 中的角色文件仅作为历史参考，不构成当前任务的调用、审批或交接要求。
 
 ------------------------------------------------------------------------
 
@@ -111,7 +106,7 @@ AI 的首要目标：
 
 ## Level 3：核心修改
 
-以下必须经过架构审查：
+以下必须进行架构和安全自检；是否需要额外审查由用户或统一 Owner 根据风险决定：
 
 -   交易流程
 -   订单状态
@@ -122,7 +117,7 @@ AI 的首要目标：
 -   部署架构
 -   技术栈变化
 
-禁止直接修改。
+不再因角色分工自动阻断修改，但不得跳过风险验证、测试和用户授权边界。
 
 ------------------------------------------------------------------------
 
