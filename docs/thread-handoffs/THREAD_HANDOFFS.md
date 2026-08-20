@@ -3,6 +3,69 @@
 > 本文件用于跨 Codex 对话、账号和 worktree 的 Owner 交接。当前项目事实仍以
 > [`PROJECT_CONTEXT.md`](../../PROJECT_CONTEXT.md) 为准；历史交接不得覆盖用户最新明确要求。
 
+## 2026-08-20：统一 CEX Runtime 生命周期与 Binance CLI 交接
+
+【当前 Owner】
+
+当前 Codex 账号；本轮实现、验证、提交并推送已完成。
+
+【代码状态】
+
+- 工作分支：`architecture-optimization`
+- 本地/远端提交：`7851223 feat(execution): unify CEX runtime lifecycle`
+- 远端分支：`origin/architecture-optimization`
+- Draft PR：[Xingheng #32](https://github.com/mushui-crypto/Xingheng/pull/32)
+- 工作树：干净
+
+【本轮完成】
+
+- Binance 接入 `UnifiedRealTradingTestCommand` 的 venue preparation、Formal Runtime registry
+  wiring 和稳定 execution identity。
+- Binance/OKX Runtime lifecycle contract assertions 及真实 Runtime 路径测试护栏。
+- Net Position Delta 语义收敛：managed signed delta、managed slice reversal、partial close、
+  reduceOnly 边界和 Binance/OKX close-path 测试。
+- 删除旧 Binance Capital Test/Funding execution production 模块及仅服务旧模型的测试；不恢复第二套
+  mutation path 或 recovery source。
+- 修复 close 测试 fixture/type 遗留，恢复完整 TypeScript/build。
+- `docs/decisions/DECISION_LOG.md` 已记录 ADR-003 的 signed net position 语义。
+
+【正式执行链】
+
+```text
+UnifiedRealTradingTestCommand
+→ FormalExecutionRuntimeRegistry
+→ Venue Formal Runtime
+→ Intent Runtime
+→ ExecutionCoordinator
+→ Capability
+→ Provider
+```
+
+ExecutionRecord 仍是订单事实来源；ArbitrageInstance 维护本实例尚未撤销的 managed signed delta。
+账户总仓位/余额不作为 execution ownership；Binance/OKX venue-specific 字段留在 venue/provider 边界。
+
+【验证证据】
+
+- 全仓测试：`1450 passed`, `0 failed`
+- `npx tsc -b`：PASS
+- `npm run build`：PASS
+- `git diff --check`：PASS
+- Provider mutation：`0`
+- 未执行真实交易、未部署。
+
+【下一步】
+
+- 先审阅 Draft PR #32，再决定是否合并；不要直接从该分支部署或打开真实交易开关。
+- 合并前继续保持 `LIVE_TRADING_ENABLED=false`、venue kill switch 和现有 Provider Identity 安全门禁。
+- 后续如处理 ADR-003 之外的空 `OPENING` 实例生命周期问题，应单独审查，不要在本 PR 中扩展范围。
+
+【明确不在本轮】
+
+- 没有恢复 `BinanceCapitalTestRuntime`、Funding state/adapter/bridge/link/coordinator。
+- 没有修改 `ExecutionIntent`、`ExecutionRecord` schema、`ExecutionCoordinator` 生命周期或 Provider
+  contract。
+- 没有新增 receipt/audit 状态源、通用 execution abstraction 或分布式锁。
+
 ## 2026-08-18：OKX Test C 完成与账号切换交接
 
 【当前 Owner】
