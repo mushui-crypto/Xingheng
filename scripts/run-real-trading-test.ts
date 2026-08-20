@@ -22,6 +22,11 @@ import { OkxIntentExecutionServiceRegistry } from "../server/modules/okx/OkxInte
 import { createOkxTickerSource } from "../server/modules/okx/OkxMarketData";
 import { OkxRealTradingTestVenuePreparation } from "../server/modules/okx/OkxRealTradingTestVenuePreparation";
 import { createOkxSpotInstrumentQuantityRulesSource } from "../server/modules/okx/OkxSpotInstrumentQuantityRulesSource";
+import { BinanceFormalArbitrageExecutionRuntime } from "../server/modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
+import { BinanceIntentExecutionRuntime } from "../server/modules/binance/BinanceIntentExecutionRuntime";
+import { BinancePersonalTradingServiceRegistry } from "../server/modules/binance/BinancePersonalTradingServiceRegistry";
+import { BinanceRealTradingTestVenuePreparation } from "../server/modules/binance/BinanceRealTradingTestVenuePreparation";
+import { loadBinanceTradingConfig } from "../server/modules/binance/BinanceTradingConfig";
 
 export type UnifiedRealTradingTestInvocation = UnifiedRealTradingTestRequest;
 
@@ -89,6 +94,14 @@ export async function runUnifiedRealTradingTest(
   try {
     const mutationSafetyGuard = new UnifiedRealTradingTestMutationSafetyGuard();
     const okxTickerSource = createOkxTickerSource();
+    const binanceTradingConfig = loadBinanceTradingConfig();
+    const binanceServices = new BinancePersonalTradingServiceRegistry(credentialStore);
+    const binanceExecutionRuntime = new BinanceIntentExecutionRuntime(
+      binanceServices,
+      { maxSlippageBps: binanceTradingConfig.maxSlippageBps },
+      recordStore,
+      { createExecutionId: unifiedRealTradingTestExecutionId },
+    );
     const okxExecutionRuntime = new OkxIntentExecutionRuntime(
       new OkxIntentExecutionServiceRegistry(credentialStore),
       recordStore,
@@ -108,11 +121,15 @@ export async function runUnifiedRealTradingTest(
       },
     );
     const runtimes = new FormalExecutionRuntimeRegistry()
+      .register(formalExecutionRuntime("binance", new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime)))
       .register(formalExecutionRuntime("okx", new OkxFormalArbitrageExecutionRuntime(okxExecutionRuntime)));
     const command = new UnifiedRealTradingTestCommand(
       runtimes,
       recordStore,
-      [new OkxRealTradingTestVenuePreparation(credentialStore, { tickerSource: okxTickerSource })],
+      [
+        new BinanceRealTradingTestVenuePreparation(credentialStore),
+        new OkxRealTradingTestVenuePreparation(credentialStore, { tickerSource: okxTickerSource }),
+      ],
       { mutationSafetyRejections: mutationSafetyGuard },
     );
     const result = await command.run(invocation);

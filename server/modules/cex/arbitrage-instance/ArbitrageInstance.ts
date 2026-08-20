@@ -97,6 +97,12 @@ export function managedCurrentQuantity(leg: ArbitrageInstanceLeg) {
   return subtractUnsignedDecimals(leg.confirmedOpenedQuantity, leg.confirmedClosedQuantity);
 }
 
+/** Canonical signed delta still outstanding for this arbitrage leg. */
+export function managedSignedDelta(leg: ArbitrageInstanceLeg) {
+  const quantity = managedCurrentQuantity(leg);
+  return quantity === "0" || leg.role === "LONG" ? quantity : `-${quantity}`;
+}
+
 export function normalizeUnsignedDecimal(value: unknown, name: string) {
   if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
     throw new Error(`${name} must be an unsigned decimal string.`);

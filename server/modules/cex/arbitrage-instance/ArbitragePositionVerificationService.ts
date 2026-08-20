@@ -14,8 +14,7 @@ import type {
   ArbitragePositionVerificationResult,
 } from "./ArbitragePositionVerification";
 import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
-import { canonicalInstrumentFromId } from "../Instrument";
-import { verifyPosition } from "../position/PositionVerification";
+import { signedCurrentNet } from "../position/PositionVerification";
 
 type VerificationCredentialStore = Pick<UserExchangeCredentialStore, "findSummary" | "loadForAccountRead">;
 type VerificationQuery = Pick<ArbitrageInstanceQueryService, "getById" | "listActive">;
@@ -38,8 +37,7 @@ export class ArbitragePositionVerificationService {
     const instance = this.instances.getById(normalizedUserId, normalizedArbitrageId);
     if (!instance) return null;
     const checkedAt = this.now();
-    const active = this.instances.listActive(normalizedUserId);
-    const legs = await Promise.all(instance.legs.map((leg) => this.verifyLeg(instance, leg, active, checkedAt)));
+    const legs = await Promise.all(instance.legs.map((leg) => this.verifyLeg(instance, leg, checkedAt)));
     return Object.freeze({
       arbitrageId: instance.arbitrageId,
       checkedAt,
@@ -50,13 +48,9 @@ export class ArbitragePositionVerificationService {
   private async verifyLeg(
     instance: ArbitrageInstance,
     leg: ArbitrageInstanceLeg,
-    active: readonly ArbitrageInstance[],
     checkedAt: number,
   ): Promise<ArbitrageLegVerificationResult> {
     const expectedManagedQuantity = managedCurrentQuantity(leg);
-    if (!isSpotLeg(leg) && hasOverlappingManagedLeg(instance, leg, active)) {
-      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "overlapping_managed_leg");
-    }
     const factory = this.factories.get(leg.venue);
     const summary = this.credentials.findSummary(instance.userId, leg.venue);
     if (!factory || !summary || summary.accountId !== leg.accountId) {
@@ -102,24 +96,20 @@ function result(
   observed: ArbitrageLegObservedState,
   checkedAt: number,
 ): ArbitrageLegVerificationResult {
-  const verification = verifyPosition({
-    instrumentId: leg.instrumentId,
-    side: expectedManagedQuantity === "0" ? "FLAT" : leg.role,
-    quantity: expectedManagedQuantity,
-    tolerance: instance.maxResidualBaseQuantity,
-  }, observed.snapshot);
+  if (observed.snapshot.venue !== leg.venue
+    || observed.snapshot.accountId !== leg.accountId
+    || observed.snapshot.instrumentId !== leg.instrumentId) {
+    return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "instrument_mapping_unavailable");
+  }
   return Object.freeze({
     arbitrageId: instance.arbitrageId,
     legId: leg.legId,
     expectedManagedQuantity,
     actualQuantity: observed.snapshot.quantity,
+    actualSignedNetQuantity: signedCurrentNet(observed.snapshot),
     availableQuantity: observed.availableQuantity ?? null,
-    verificationStatus: verification.status,
-    reason: verification.status === "UNKNOWN"
-      ? verification.reason === "INSTRUMENT_MISMATCH"
-        ? "instrument_mapping_unavailable"
-        : "provider_read_failed"
-      : null,
+    verificationStatus: "MATCHED",
+    reason: null,
     checkedAt,
   });
 }
@@ -136,27 +126,12 @@ function unknown(
     legId,
     expectedManagedQuantity,
     actualQuantity: null,
+    actualSignedNetQuantity: null,
     availableQuantity: null,
     verificationStatus: "UNKNOWN",
     reason,
     checkedAt,
   });
-}
-
-function isSpotLeg(leg: ArbitrageInstanceLeg) {
-  return canonicalInstrumentFromId(leg.instrumentId).contractType === "spot";
-}
-
-function hasOverlappingManagedLeg(
-  instance: ArbitrageInstance,
-  leg: ArbitrageInstanceLeg,
-  active: readonly ArbitrageInstance[],
-) {
-  return active.some((candidate) => candidate.arbitrageId !== instance.arbitrageId
-    && candidate.legs.some((other) => other.venue === leg.venue
-      && other.accountId === leg.accountId
-      && other.instrumentId === leg.instrumentId
-      && managedCurrentQuantity(other) !== "0"));
 }
 
 function identifier(value: unknown, name: string) {

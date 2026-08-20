@@ -23,6 +23,8 @@ export type ArbitrageLegVerificationResult = Readonly<{
   legId: string;
   expectedManagedQuantity: string;
   actualQuantity: string | null;
+  /** Canonical signed account net quantity. This is not execution ownership. */
+  actualSignedNetQuantity: string | null;
   availableQuantity: string | null;
   verificationStatus: ArbitrageLegVerificationStatus;
   reason: ArbitrageLegVerificationUnknownReason | null;

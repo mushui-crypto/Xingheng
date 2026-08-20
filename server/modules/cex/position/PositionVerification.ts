@@ -25,6 +25,24 @@ export type PositionVerificationResult = Readonly<{
   reason: PositionVerificationUnknownReason | null;
 }>;
 
+/** Converts a canonical position snapshot to its signed net-base quantity. */
+export function signedCurrentNet(snapshot: PositionSnapshot) {
+  const normalized = createPositionSnapshot(snapshot);
+  return normalized.side === "SHORT" ? `-${normalized.quantity}` : normalized.quantity;
+}
+
+/**
+ * A reversal can use reduce-only only when the managed slice being reversed
+ * reduces the account's current net position without crossing flat. It does
+ * not establish ownership.
+ */
+export function reduceOnlyEligible(currentNet: string, managedSliceToReverse: string) {
+  const current = normalizeSignedDecimal(currentNet, "currentNet");
+  const managed = normalizeSignedDecimal(managedSliceToReverse, "managedSliceToReverse");
+  if (current === "0" || managed === "0" || isNegative(current) !== isNegative(managed)) return false;
+  return compareUnsignedDecimals(unsignedMagnitude(current), unsignedMagnitude(managed)) >= 0;
+}
+
 export function verifyPosition(
   expected: ExpectedPosition,
   actual: PositionSnapshot | null,
@@ -102,6 +120,23 @@ function unsignedDecimal(value: unknown, name: string) {
   const [integer, fraction = ""] = value.split(".");
   const normalizedFraction = fraction.replace(/0+$/u, "");
   return normalizedFraction ? `${integer}.${normalizedFraction}` : integer!;
+}
+
+function normalizeSignedDecimal(value: unknown, name: string) {
+  if (typeof value !== "string" || !/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+    throw new Error(`${name} must be a signed Decimal string.`);
+  }
+  const negative = value.startsWith("-");
+  const normalized = unsignedDecimal(negative ? value.slice(1) : value, name);
+  return negative && normalized !== "0" ? `-${normalized}` : normalized;
+}
+
+function isNegative(value: string) {
+  return value.startsWith("-");
+}
+
+function unsignedMagnitude(value: string) {
+  return isNegative(value) ? value.slice(1) : value;
 }
 
 function compareUnsignedDecimals(left: string, right: string) {

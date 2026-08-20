@@ -1,8 +1,9 @@
 import type { BinanceIntentExecutionRuntime } from "../binance/BinanceIntentExecutionRuntime";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
-import type {
-  FormalExecutionRuntime,
-  FormalExecutionRuntimeResult,
+import {
+  diagnosticFromExecution,
+  type FormalExecutionRuntime,
+  type FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
 
 type Runtime = Pick<BinanceIntentExecutionRuntime, "execute" | "reconcile" | "cancel">;
@@ -13,9 +14,11 @@ export class BinanceFormalArbitrageExecutionRuntime implements FormalExecutionRu
 
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
     const result = await this.runtime.execute(intent);
+    const diagnostic = diagnosticFromExecution(result.execution);
     return Object.freeze({
       executionRecord: result.executionRecord,
       confirmedQuantity: result.execution.step.result?.confirmedQuantity ?? null,
+      ...(diagnostic === undefined ? {} : { diagnostic }),
     });
   }
 

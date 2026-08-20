@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { FundingArbitrageIntentAdapter } from "./FundingArbitrageIntentAdapter";
 import type { FundingArbitrageExecutionIntent } from "./FundingArbitrageExecutionIntent";
 import type { FundingArbitragePlan } from "./FundingArbitragePlan";
 import { buildFundingArbitrageExecutionIntent } from "./FundingArbitrageIntentBuilder";
@@ -63,7 +62,7 @@ test("rejects expired plans and intent expiry beyond the source plan", () => {
   );
 });
 
-test("builds an OKX Spot plus perpetual plan into two independent canonical leg intents", () => {
+test("builds an OKX Spot plus perpetual plan into two independent canonical legs", () => {
   const spotPerpetual = spotPerpetualPlan();
   const fundingIntent = buildFundingArbitrageExecutionIntent(spotPerpetual, buildParameters);
 
@@ -91,21 +90,6 @@ test("builds an OKX Spot plus perpetual plan into two independent canonical leg 
     },
   ]);
 
-  const adapter = new FundingArbitrageIntentAdapter();
-  const spotIntent = adapter.createExecutionIntent(fundingIntent, confirmationFor(fundingIntent.legs[0], {
-    intentId: "execution-intent-spot",
-    accountId: "okx:spot-account",
-  }));
-  const perpetualIntent = adapter.createExecutionIntent(fundingIntent, confirmationFor(fundingIntent.legs[1], {
-    intentId: "execution-intent-perp",
-    accountId: "okx:perp-account",
-  }));
-
-  assert.equal(spotIntent.instrumentId, "DOGE-USDT-SPOT");
-  assert.equal(spotIntent.side, "buy");
-  assert.equal(perpetualIntent.instrumentId, "DOGE-USDT-PERP");
-  assert.equal(perpetualIntent.side, "sell");
-  assert.notEqual(spotIntent.intentId, perpetualIntent.intentId);
 });
 
 test("rejects unsupported strategy types and invalid leg structures", () => {
@@ -236,26 +220,6 @@ function spotPerpetualPlan(): FundingArbitragePlan {
     createdAt: now - 1_000,
     expiresAt: now + 60_000,
   };
-}
-
-function confirmationFor(
-  leg: FundingArbitrageExecutionIntent["legs"][number],
-  overrides: Readonly<{ intentId: string; accountId: string }>,
-) {
-  return {
-    confirmed: true,
-    intentId: overrides.intentId,
-    arbitrageId: "arbitrage-okx-spot-perp",
-    legId: leg.legId,
-    userId: "user-okx",
-    accountId: overrides.accountId,
-    venue: leg.venue,
-    quantityAsset: { symbol: "DOGE", type: "DIGITAL_ASSET" },
-    orderConstraints: { reduceOnly: false },
-    executionMode: "EXECUTION_PRIORITY",
-    confirmedAt: now + 1_000,
-    expiresAt: now + 30_000,
-  } as const;
 }
 
 function funding(

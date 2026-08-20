@@ -3,6 +3,12 @@ import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
+import {
+  assertCoordinatorBoundaryContract,
+  assertExecutionIdentityContract,
+  assertPreparationFailureContract,
+  assertPreflightFailureContract,
+} from "../cex/RuntimeLifecycleContractAssertions";
 import { BinanceIntentExecutionCapability } from "./BinanceIntentExecutionCapability";
 import { BinanceIntentExecutionRuntime } from "./BinanceIntentExecutionRuntime";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
@@ -47,10 +53,11 @@ test("user A intent runs through user A Binance service", async () => {
 test("account mismatch rejects before provider mutation or capability creation", async () => {
   let capabilityCreations = 0;
   const service = new FakeBinanceIntentRuntimeService("binance:actual-account");
+  const records = new FakeExecutionRecordStore();
   const runtime = new BinanceIntentExecutionRuntime(
     new FakeBinanceIntentRegistry({ "user-a": service }),
     { maxSlippageBps: 20 },
-    new FakeExecutionRecordStore(),
+    records,
     {
       clock: () => now,
       createCapability: (intentService) => {
@@ -71,6 +78,104 @@ test("account mismatch rejects before provider mutation or capability creation",
   assert.equal(service.marketCalls, 0);
   assert.equal(service.providerMutations, 0);
   assert.equal(capabilityCreations, 0);
+  await assertPreflightFailureContract({
+    record: null,
+    loadRecord: () => records.loadForUser("user-a", "missing"),
+    mutationCount: service.providerMutations,
+  });
+});
+
+test("capability preparation failure closes the durable record without provider mutation", async () => {
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  const records = new FakeExecutionRecordStore();
+  const preparationError = new Error("Binance capability preparation failed.");
+  const runtime = new BinanceIntentExecutionRuntime(
+    new FakeBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: 20 },
+    records,
+    {
+      clock: () => now,
+      createExecutionId: () => "execution-preparation-failed",
+      createCapability: () => { throw preparationError; },
+    },
+  );
+
+  await assert.rejects(
+    () => runtime.execute(executionIntent()),
+    (error: unknown) => error === preparationError,
+  );
+
+  const failed = await records.loadForUser("user-a", "execution-preparation-failed");
+  assert.equal(failed?.status, "FAILED");
+  assert.equal(failed?.executionAttemptId, undefined);
+  assert.equal(failed?.remoteOrderId, undefined);
+  assert.equal(records.created[0]?.status, "CREATED");
+  assert.equal(records.updated[0]?.status, "FAILED");
+  assert.equal(service.orderStateReads, 1);
+  assert.equal(service.providerMutations, 0);
+  await assertPreparationFailureContract({
+    initialRecord: records.created[0]!,
+    finalRecord: failed,
+    loadRecord: () => records.loadForUser("user-a", "execution-preparation-failed"),
+    mutationCount: service.providerMutations,
+    error: preparationError,
+    originalError: preparationError,
+  });
+  assertExecutionIdentityContract(failed!, executionIntent());
+});
+
+test("service preparation failure closes the durable record without provider mutation", async () => {
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  const records = new FakeExecutionRecordStore();
+  const runtime = new BinanceIntentExecutionRuntime(
+    new FakeBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: -1 },
+    records,
+    { clock: () => now, createExecutionId: () => "execution-service-preparation-failed" },
+  );
+
+  await assert.rejects(
+    () => runtime.execute(executionIntent()),
+    /max slippage must be a non-negative number/u,
+  );
+  assert.equal((await records.loadForUser("user-a", "execution-service-preparation-failed"))?.status, "FAILED");
+  assert.equal(records.updated[0]?.status, "FAILED");
+  assert.equal(service.orderStateReads, 1);
+  assert.equal(service.providerMutations, 0);
+});
+
+test("existing Binance local order fact blocks pre-mutation cleanup", async () => {
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  service.orders = [queryStoredOrder(
+    createExecutionRecord({
+      executionId: "execution-local-fact",
+      intentId: "intent-user-1",
+      userId: "user-a",
+      venue: "binance",
+      accountId: "binance:account-user-a",
+      instrumentId: "XAUT-USDT-PERP",
+      status: "CREATED",
+      createdAt: now,
+      updatedAt: now,
+    }),
+    {},
+  )];
+  const records = new FakeExecutionRecordStore();
+  const runtime = new BinanceIntentExecutionRuntime(
+    new FakeBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: 20 },
+    records,
+    {
+      clock: () => now,
+      createExecutionId: () => "execution-local-fact",
+      createCapability: () => { throw new Error("preparation failed after local fact"); },
+    },
+  );
+
+  await assert.rejects(() => runtime.execute(executionIntent()));
+  assert.equal((await records.loadForUser("user-a", "execution-local-fact"))?.status, "CREATED");
+  assert.equal(records.updated.length, 0);
+  assert.equal(service.providerMutations, 0);
 });
 
 test("venue mismatch rejects before registry lookup or provider mutation", async () => {
@@ -164,6 +269,13 @@ test("saves UNKNOWN when capability throws before provider mutation", async () =
   assert.equal(result.executionRecord.executionId, "execution-unknown");
   assert.equal(records.updated[0]?.status, "UNKNOWN");
   assert.equal(service.providerMutations, 0);
+  assertCoordinatorBoundaryContract({
+    executionRecord: result.executionRecord,
+    persistedRecords: records.updated,
+    expectedStatus: "UNKNOWN",
+    mutationCount: service.providerMutations,
+    expectedMutationCount: 0,
+  });
 });
 
 test("queries a user-bound local order fact and updates ExecutionRecord without provider mutation", async () => {
