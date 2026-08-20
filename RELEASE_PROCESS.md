@@ -50,6 +50,14 @@ docker build --target web --build-arg GIT_COMMIT=<commit-sha> -t stellax-persona
 
 构建日志中的依赖审计提示需要记录，但不在部署流程中自动升级依赖。
 
+生产构建在目标主机的独立 release 目录中进行。目录名必须包含完整 commit SHA，例如：
+
+```text
+/opt/xingheng-release-<commit-sha>
+```
+
+release 目录只包含该 SHA 的 Git archive，不能包含 `.env.production`、SQLite、日志或本机构建产物。
+
 ## 4. Production 环境要求
 
 生产环境必须配置：
@@ -79,10 +87,14 @@ GOOGLE_ADC_DIR=<host adc directory>
 
 ## 5. Compose 检查
 
-部署前运行：
+部署前在目标 release 目录运行：
 
 ```bash
-docker compose config
+GIT_COMMIT=<commit-sha> \
+ENV_FILE=/opt/xingheng/.env.production \
+docker compose -p xingheng \
+  --env-file /opt/xingheng/.env.production \
+  config --quiet
 ```
 
 确认：
@@ -95,11 +107,22 @@ docker compose config
 
 ## 6. 部署
 
-用户明确授权部署后，可以执行：
+用户明确授权部署后，在目标 release 目录执行：
 
 ```bash
-docker compose up -d api web
+GIT_COMMIT=<commit-sha> \
+ENV_FILE=/opt/xingheng/.env.production \
+docker compose -p xingheng \
+  --env-file /opt/xingheng/.env.production \
+  up -d api web
 ```
+
+`-p xingheng` 是固定的 production Compose project，确保新容器继续使用现有
+`xingheng_sqlite_data`、备份、策略数据和 Caddy volumes。不得省略它，也不得执行
+`docker compose down`。
+
+`ENV_FILE` 用于 Compose 中的 `env_file` 路径，`--env-file` 用于解析
+`GOOGLE_ADC_DIR` 等 Compose 变量；两者必须同时提供。
 
 部署后检查：
 
@@ -138,7 +161,12 @@ scripts/backup.sh
 代码回滚：
 
 ```bash
-GIT_COMMIT=<previous-commit-sha> docker compose up -d api web
+cd /opt/xingheng-release-<previous-commit-sha>
+GIT_COMMIT=<previous-commit-sha> \
+ENV_FILE=/opt/xingheng/.env.production \
+docker compose -p xingheng \
+  --env-file /opt/xingheng/.env.production \
+  up -d api web
 ```
 
 数据恢复：
