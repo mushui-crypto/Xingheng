@@ -218,6 +218,25 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new UserExchangeCredentialStore({ dbPath, environment: "test", keyProvider });
   const service = new UserExchangeCredentialService(store, {
+    bybitClientFactory: () => ({
+      validateAccess: async () => ({
+        accountId: "bybit:abcdef0123456789",
+        accountFingerprint: "abcdef0123456789",
+        uidHash: `abcdef0123456789${"0".repeat(48)}`,
+        unifiedMarginStatus: 5,
+        marginMode: "REGULAR_MARGIN",
+        permissions: {
+          read: true,
+          spotTrade: true,
+          contractTrade: true,
+          withdraw: false,
+          ipRestricted: true,
+          accountLevelSupported: true,
+          providerVerified: true,
+          executionEnabled: true,
+        },
+      }),
+    }),
     okxClientFactory: () => ({
       validateAccess: async () => ({
         accountId: "okx:0123456789abcdef",
@@ -275,8 +294,8 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
       };
       assert.equal(payload.venue, venue);
       assert.equal(payload.configured, true);
-      if (venue === "okx") {
-        assert.equal(payload.accountId, "okx:0123456789abcdef");
+      if (venue === "okx" || venue === "bybit") {
+        assert.equal(payload.accountId, venue === "okx" ? "okx:0123456789abcdef" : "bybit:abcdef0123456789");
         assert.equal(payload.permissions.executionEnabled, false);
         assert.match(payload.message, /Provider-verified/u);
       } else {

@@ -54,6 +54,43 @@ test("plans ASSET_QUANTITY and exposes OKX when its formal runtime and credentia
   assert.equal(result.allLegsExecutable, true);
 });
 
+test("exposes an enabled Bybit Draft without a credential-global position mode field", async () => {
+  const service = draftService(opportunity("binance", "bybit"), new FakeContexts(), {
+    registeredVenues: ["binance", "bybit"],
+    bybitCredential: "enabled",
+  });
+  const result = await service.preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+  assert.equal(result.legs[1].capability.reasonCode, "AVAILABLE");
+  assert.equal(result.legs[1].executionAvailable, true);
+  assert.equal(result.allLegsExecutable, true);
+});
+
+test("keeps Bybit Draft credential readiness fail-closed", async (t) => {
+  for (const [name, overrides] of [
+    ["disabled", { bybitCredential: "disabled" as const }],
+    ["missing contract permission", { bybitCredential: "enabled" as const, bybitPermissionOverrides: { contractTrade: false } }],
+    ["withdraw permission", { bybitCredential: "enabled" as const, bybitPermissionOverrides: { withdraw: true } }],
+  ] as const) {
+    await t.test(name, async () => {
+      const result = await draftService(opportunity("binance", "bybit"), new FakeContexts(), {
+        registeredVenues: ["binance", "bybit"],
+        ...overrides,
+      }).preview("user-a", {
+        opportunityId: "opportunity-1",
+        horizonDays: 90,
+        quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+      });
+      assert.equal(result.legs[1].capability.reasonCode, "CREDENTIAL_NOT_CONFIGURED");
+      assert.equal(result.legs[1].executionAvailable, false);
+      assert.equal(result.allLegsExecutable, false);
+    });
+  }
+});
+
 test("keeps unregistered Bybit and Bitget capabilities unavailable without hiding their read-only plan", async () => {
   for (const venue of ["bybit", "bitget"] as const) {
     const result = await draftService(opportunity("binance", venue), new FakeContexts()).preview("user-a", {
@@ -246,6 +283,8 @@ function draftService(
     binanceCredential?: boolean;
     okxCredential?: "enabled" | "disabled" | "missing";
     okxPermissionOverrides?: Readonly<Record<string, boolean>>;
+    bybitCredential?: "enabled" | "disabled" | "missing";
+    bybitPermissionOverrides?: Readonly<Record<string, boolean>>;
   }> = {},
 ) {
   const runtimes = new FormalExecutionRuntimeRegistry();
@@ -260,6 +299,23 @@ function draftService(
         if (userId !== "user-a") return null;
         if (venue === "binance") {
           return options.binanceCredential === false ? null : ({ accountId: "binance:account-a", permissions: {} } as any);
+        }
+        if (venue === "bybit") {
+          if (options.bybitCredential === "missing") return null;
+          const executionEnabled = options.bybitCredential !== "disabled";
+          return {
+            accountId: "bybit:account-a",
+            permissions: {
+              executionEnabled,
+              providerVerified: true,
+              read: true,
+              contractTrade: true,
+              withdraw: false,
+              ipRestricted: true,
+              accountLevelSupported: true,
+              ...options.bybitPermissionOverrides,
+            },
+          } as any;
         }
         if (venue !== "okx" || options.okxCredential === "missing") return null;
         const executionEnabled = options.okxCredential !== "disabled";

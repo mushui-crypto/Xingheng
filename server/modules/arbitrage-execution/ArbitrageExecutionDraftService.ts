@@ -141,7 +141,7 @@ export class ArbitrageExecutionDraftService {
       });
     }
     const credential = this.credentials.findSummary(userId, venue);
-    if (!credential || !credentialExecutionAvailable(credential.permissions)) {
+    if (!credential || !credentialExecutionAvailable(venue, credential.permissions)) {
       return Object.freeze({
         status: "UNAVAILABLE" as const,
         reasonCode: "CREDENTIAL_NOT_CONFIGURED" as const,
@@ -151,17 +151,23 @@ export class ArbitrageExecutionDraftService {
   }
 }
 
-function credentialExecutionAvailable(permissions: Readonly<Record<string, boolean>>) {
+function credentialExecutionAvailable(
+  venue: ArbitrageExecutionDraftVenue,
+  permissions: Readonly<Record<string, boolean>>,
+) {
   // Legacy Binance summaries predate explicit execution enablement; Provider-managed summaries must opt in.
   if (permissions.executionEnabled === undefined) return permissions.providerVerified === undefined;
-  return permissions.executionEnabled === true
+  const credentialReady = permissions.executionEnabled === true
     && permissions.providerVerified === true
     && permissions.read === true
     && permissions.contractTrade === true
     && permissions.withdraw === false
     && permissions.ipRestricted === true
-    && permissions.accountLevelSupported === true
-    && permissions.positionModeSupported === true;
+    && permissions.accountLevelSupported === true;
+  if (!credentialReady) return false;
+  // Binance/OKX persist an account-global one-way/net-mode capability. Bybit
+  // validates positionIdx for the target instrument during execution prepare.
+  return venue === "bybit" || permissions.positionModeSupported === true;
 }
 
 function sameAccountPerpetualConflict(legs: readonly [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg]) {
