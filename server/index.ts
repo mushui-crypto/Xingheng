@@ -42,6 +42,8 @@ import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/A
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
 import { OkxSpotCloseBalanceSource } from "./modules/okx/OkxSpotCloseBalanceSource";
 import { OkxSpotOpeningAttributionSource } from "./modules/okx/OkxSpotOpeningAttributionSource";
+import { BybitSpotCloseBalanceSource } from "./modules/bybit/BybitSpotCloseBalanceSource";
+import { BybitSpotOpeningAttributionSource } from "./modules/bybit/BybitSpotOpeningAttributionSource";
 import { BinanceSpotOpeningAttributionSource } from "./modules/arbitrage-execution/BinanceSpotOpeningAttributionSource";
 import { BinanceFormalArbitrageExecutionRuntime } from "./modules/arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
 import {
@@ -79,6 +81,12 @@ import { createOkxInstrumentQuantityRulesSource } from "./modules/okx/OkxInstrum
 import { createOkxSpotInstrumentQuantityRulesSource } from "./modules/okx/OkxSpotInstrumentQuantityRulesSource";
 import { OkxIntentExecutionRuntime } from "./modules/okx/OkxIntentExecutionRuntime";
 import { OkxIntentExecutionServiceRegistry } from "./modules/okx/OkxIntentExecutionServiceRegistry";
+import { BybitFormalArbitrageExecutionRuntime } from "./modules/bybit/BybitFormalArbitrageExecutionRuntime";
+import { PersistentBybitExecutionOrderReferenceStore } from "./modules/bybit/BybitExecutionOrderReferenceStore";
+import { createBybitInstrumentQuantityRulesSource } from "./modules/bybit/BybitInstrumentQuantityRulesSource";
+import { BybitIntentExecutionRuntime } from "./modules/bybit/BybitIntentExecutionRuntime";
+import { BybitIntentExecutionServiceRegistry } from "./modules/bybit/BybitIntentExecutionServiceRegistry";
+import { createBybitExecutionTickerSource } from "./modules/bybit/BybitExecutionMarketData";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -218,9 +226,24 @@ const okxExecutionRuntime = new OkxIntentExecutionRuntime(
   },
 );
 const okxFormalArbitrageExecutionRuntime = new OkxFormalArbitrageExecutionRuntime(okxExecutionRuntime);
+const bybitTickerSource = createBybitExecutionTickerSource();
+const bybitExecutionRuntime = new BybitIntentExecutionRuntime(
+  new BybitIntentExecutionServiceRegistry(userExchangeCredentials),
+  executionRecordStore,
+  new PersistentBybitExecutionOrderReferenceStore(executionOrderReferenceStore),
+  {
+    quantityRulesSource: createBybitInstrumentQuantityRulesSource(),
+    limitPriceResolver: async (intent, instrument) => {
+      const ticker = await bybitTickerSource(instrument.venueInstrument.category, instrument.venueInstrument.symbol);
+      return intent.side === "buy" ? ticker.ask : ticker.bid;
+    },
+  },
+);
+const bybitFormalArbitrageExecutionRuntime = new BybitFormalArbitrageExecutionRuntime(bybitExecutionRuntime);
 const formalExecutionRuntimes = new FormalExecutionRuntimeRegistry()
   .register(formalExecutionRuntime("binance", binanceFormalArbitrageExecutionRuntime));
 formalExecutionRuntimes.register(formalExecutionRuntime("okx", okxFormalArbitrageExecutionRuntime));
+formalExecutionRuntimes.register(formalExecutionRuntime("bybit", bybitFormalArbitrageExecutionRuntime));
 const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
   arbitrageDashboard,
   arbitrageExecutionPlanningContexts,
@@ -233,6 +256,11 @@ const spotOpeningAttributions = {
     executionRecordStore,
     userExchangeCredentials,
     new PersistentOkxExecutionOrderReferenceStore(executionOrderReferenceStore),
+  ),
+  bybit: new BybitSpotOpeningAttributionSource(
+    executionRecordStore,
+    userExchangeCredentials,
+    new PersistentBybitExecutionOrderReferenceStore(executionOrderReferenceStore),
   ),
 };
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
@@ -253,6 +281,7 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   {
     binance: new BinanceSpotCloseBalanceSource(binancePersonalTrading),
     okx: new OkxSpotCloseBalanceSource(userExchangeCredentials),
+    bybit: new BybitSpotCloseBalanceSource(userExchangeCredentials),
   },
   spotOpeningAttributions,
   formalExecutionRuntimes,

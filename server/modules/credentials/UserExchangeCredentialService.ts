@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { BinanceClient } from "../binance/BinanceClient";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
+import { BybitClient } from "../bybit/BybitClient";
+import type { BybitAccountAccess, BybitCredentials } from "../bybit/BybitTypes";
 import { OkxClient } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxCredentials } from "../okx/OkxTypes";
 import type { ExchangeVenue } from "./CredentialKeyProvider";
@@ -20,6 +22,10 @@ type OkxAccessClient = {
   validateAccess(): Promise<OkxAccountAccess>;
 };
 
+type BybitAccessClient = {
+  validateAccess(): Promise<BybitAccountAccess>;
+};
+
 export class UserExchangeCredentialService {
   constructor(
     private readonly store: Pick<
@@ -28,6 +34,7 @@ export class UserExchangeCredentialService {
     >,
     private readonly options: {
       binanceClientFactory?: (credentials: { apiKey: string; apiSecret: string }) => BinanceAccessClient;
+      bybitClientFactory?: (credentials: BybitCredentials) => BybitAccessClient;
       okxClientFactory?: (credentials: OkxCredentials) => OkxAccessClient;
       assertCanDelete?: (userId: string, venue: ExchangeVenue) => Promise<void>;
       deleteCredential?: (userId: string, venue: ExchangeVenue) => Promise<boolean>;
@@ -70,6 +77,24 @@ export class UserExchangeCredentialService {
           ...access.permissions,
           executionEnabled: false,
         },
+        verifiedAt: Date.now(),
+      });
+      return status(venue, summary);
+    }
+
+    if (venue === "bybit") {
+      const credentials = Object.freeze({ apiKey, apiSecret });
+      const client = this.options.bybitClientFactory?.(credentials)
+        ?? new BybitClient(() => credentials);
+      const access = await client.validateAccess();
+      assertBybitProviderIdentity(access);
+      const summary = await this.store.save({
+        userId,
+        venue,
+        accountId: access.accountId,
+        accountFingerprint: access.accountFingerprint,
+        ...credentials,
+        permissions: { ...access.permissions, executionEnabled: false },
         verifiedAt: Date.now(),
       });
       return status(venue, summary);
@@ -160,6 +185,84 @@ export class UserExchangeCredentialService {
       permissions: {
         ...access.permissions,
         executionEnabled: true,
+      },
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async enableBybitExecution(userIdInput: string, input: unknown) {
+    assertBybitExecutionEnableConfirmation(input);
+    const userId = requiredIdentifier(userIdInput, "userId");
+    const venue = "bybit" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) {
+      throw new UserExchangeCredentialServiceError("credential_not_configured", "Bybit credential is not configured.");
+    }
+    if (existing.userId !== userId || existing.venue !== venue || !isProviderDerivedBybitIdentity(existing.accountId)) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored Bybit credential identity is not eligible for execution enablement.",
+      );
+    }
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = Object.freeze({ apiKey: secret.apiKey, apiSecret: secret.apiSecret });
+    const client = this.options.bybitClientFactory?.(credentials) ?? new BybitClient(() => credentials);
+    const access = await client.validateAccess();
+    assertBybitProviderIdentity(access);
+    if (access.accountId !== existing.accountId || access.accountFingerprint !== existing.accountFingerprint) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "Bybit Provider identity does not match the stored credential identity.",
+      );
+    }
+    assertBybitExecutionPermissions(access);
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: existing.accountId,
+      accountFingerprint: existing.accountFingerprint,
+      ...credentials,
+      permissions: { ...access.permissions, executionEnabled: true },
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async rebindBybit(userIdInput: string) {
+    const userId = requiredIdentifier(userIdInput, "userId");
+    const venue = "bybit" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) throw new UserExchangeCredentialServiceError("credential_not_configured", "Bybit credential is not configured.");
+    const legacy = isLegacyBybitIdentity(existing.accountId);
+    if (!legacy && !isProviderDerivedBybitIdentity(existing.accountId)) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored Bybit credential identity is not eligible for Provider rebind.",
+      );
+    }
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = Object.freeze({ apiKey: secret.apiKey, apiSecret: secret.apiSecret });
+    const client = this.options.bybitClientFactory?.(credentials) ?? new BybitClient(() => credentials);
+    const access = await client.validateAccess();
+    assertBybitProviderIdentity(access);
+    if (!legacy && access.accountId !== existing.accountId) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "Bybit Provider identity does not match the stored credential identity.",
+      );
+    }
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: access.accountId,
+      accountFingerprint: access.accountFingerprint,
+      ...credentials,
+      permissions: {
+        ...access.permissions,
+        executionEnabled: legacy ? false : existing.permissions.executionEnabled === true && access.permissions.executionEnabled,
       },
       verifiedAt: Date.now(),
     });
@@ -341,6 +444,15 @@ function venueLabel(venue: ExchangeVenue) {
 
 function message(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | null) {
   if (venue === "binance") return null;
+  if (venue === "bybit") {
+    if (!summary) return "Bybit credential requires Provider identity validation before storage.";
+    if (isLegacyBybitIdentity(summary.accountId)) {
+      return "Bybit credential requires a controlled Provider identity rebind before execution.";
+    }
+    return summary.permissions.executionEnabled
+      ? "Bybit credential identity and execution permissions are Provider-verified."
+      : "Bybit credential identity is Provider-verified, but execution remains disabled.";
+  }
   if (venue === "okx") {
     if (!summary) return "OKX credential requires Provider identity validation before storage.";
     if (isLegacyOkxIdentity(summary.accountId)) {
@@ -376,6 +488,18 @@ function assertOkxProviderIdentity(access: OkxAccountAccess) {
   }
 }
 
+function assertBybitProviderIdentity(access: BybitAccountAccess) {
+  if (!/^bybit:[a-f0-9]{16}$/u.test(access.accountId)
+    || access.accountFingerprint !== access.accountId.slice("bybit:".length)
+    || !/^[a-f0-9]{64}$/u.test(access.uidHash)
+    || !access.uidHash.startsWith(access.accountFingerprint)) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_provider_identity_invalid",
+      "Bybit Provider returned an invalid account identity.",
+    );
+  }
+}
+
 function assertOkxExecutionEnableConfirmation(input: unknown) {
   const body = object(input);
   assertOnlyKeys(body, ["confirmation"]);
@@ -383,6 +507,17 @@ function assertOkxExecutionEnableConfirmation(input: unknown) {
     throw new UserExchangeCredentialServiceError(
       "credential_execution_enable_confirmation_required",
       "Explicit OKX execution enablement confirmation is required.",
+    );
+  }
+}
+
+function assertBybitExecutionEnableConfirmation(input: unknown) {
+  const body = object(input);
+  assertOnlyKeys(body, ["confirmation"]);
+  if (body.confirmation !== "ENABLE_BYBIT_EXECUTION") {
+    throw new UserExchangeCredentialServiceError(
+      "credential_execution_enable_confirmation_required",
+      "Explicit Bybit execution enablement confirmation is required.",
     );
   }
 }
@@ -406,10 +541,30 @@ function assertOkxExecutionPermissions(access: OkxAccountAccess) {
   }
 }
 
+function assertBybitExecutionPermissions(access: BybitAccountAccess) {
+  const permissions = access.permissions;
+  if (!permissions.providerVerified || !permissions.read || !permissions.spotTrade
+    || !permissions.contractTrade || permissions.withdraw || !permissions.ipRestricted
+    || !permissions.accountLevelSupported || !permissions.executionEnabled) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_permissions_invalid",
+      "Bybit credential must be Provider-verified, allow read, Spot, and Linear trading, deny withdrawals, use an IP whitelist, and use UTA 2.0 REGULAR_MARGIN before execution can be enabled.",
+    );
+  }
+}
+
 function isLegacyOkxIdentity(accountId: string) {
   return /^okx:credential-only:[a-f0-9]{20}$/u.test(accountId);
 }
 
 function isProviderDerivedOkxIdentity(accountId: string) {
   return /^okx:[a-f0-9]{16}$/u.test(accountId);
+}
+
+function isLegacyBybitIdentity(accountId: string) {
+  return /^bybit:credential-only:[a-f0-9]{20}$/u.test(accountId);
+}
+
+function isProviderDerivedBybitIdentity(accountId: string) {
+  return /^bybit:[a-f0-9]{16}$/u.test(accountId);
 }

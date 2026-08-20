@@ -1,5 +1,6 @@
 import type { ExchangeVenue } from "../credentials/CredentialKeyProvider";
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
+import { BybitAccountReadProvider } from "./BybitAccountReadProvider";
 import type { AccountReadProviderFactory } from "./AccountReadProvider";
 import type { VenueAccountReadSnapshot } from "./AccountReadTypes";
 import type { AccountReadValuation } from "./AccountUsdtValuationService";
@@ -48,6 +49,33 @@ export class AccountReadRegistry {
       return await this.valuation.value(snapshot);
     } catch {
       return withoutValuation(snapshot);
+    }
+  }
+
+  async readBybitLinearPositionMode(userId: string, symbol: string) {
+    const normalizedUserId = userId.trim();
+    if (!normalizedUserId) {
+      throw new AccountReadRegistryError("authentication_required", "User authentication is required.");
+    }
+    const factory = this.factories.get("bybit");
+    if (!factory) {
+      throw new AccountReadRegistryError(
+        "account_read_provider_not_implemented",
+        "bybit private account read is not implemented.",
+      );
+    }
+    const secret = await this.credentials.loadForAccountRead(normalizedUserId, "bybit");
+    const provider = factory.create(secret);
+    try {
+      if (!(provider instanceof BybitAccountReadProvider)) {
+        throw new AccountReadRegistryError(
+          "account_read_provider_not_implemented",
+          "bybit linear position mode read is not implemented.",
+        );
+      }
+      return await provider.readLinearPositionMode(symbol);
+    } finally {
+      await provider.dispose();
     }
   }
 }

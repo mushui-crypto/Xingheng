@@ -74,15 +74,71 @@ test("reads a Bybit linear position through GET-only authentication", async () =
       method = init?.method;
       assert.equal(url.pathname, "/v5/position/list");
       assert.equal(url.searchParams.get("category"), "linear");
-      assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
-      return Response.json(success({ list: [{ symbol: "XAUTUSDT", side: "Sell", size: "0.5", updatedTime: String(now - 1) }] }));
+      assert.equal(url.searchParams.get("symbol"), "BTCUSDT");
+      return Response.json(success({ list: [{ symbol: "BTCUSDT", positionIdx: 0, side: "Sell", size: "0.5", updatedTime: String(now - 1) }] }));
     }) as typeof fetch,
   });
 
-  assert.deepEqual(await client.readPerpetualPosition("XAUTUSDT"), {
-    symbol: "XAUTUSDT", side: "short", baseQuantity: "0.5", updatedAt: now - 1,
+  assert.deepEqual(await client.readPerpetualPosition("BTCUSDT"), {
+    symbol: "BTCUSDT", side: "short", baseQuantity: "0.5", positionIdx: 0, updatedAt: now - 1,
   });
   assert.equal(method, "GET");
+});
+
+test("maps target-symbol positionIdx into Bybit-specific mode facts", async (t) => {
+  for (const [positionIdx, expectedMode] of [
+    [0, "ONE_WAY"],
+    [1, "HEDGE"],
+    [2, "HEDGE"],
+  ] as const) {
+    await t.test(`positionIdx=${positionIdx}`, async () => {
+      const client = linearPositionClient("BTCUSDT", [{
+        symbol: "BTCUSDT", positionIdx, side: "", size: "0",
+      }]);
+
+      assert.deepEqual(await client.readLinearPositionMode("BTCUSDT"), {
+        category: "linear",
+        symbol: "BTCUSDT",
+        positionMode: expectedMode,
+        positions: [{ category: "linear", symbol: "BTCUSDT", positionIdx, side: "flat", size: "0" }],
+      });
+    });
+  }
+});
+
+test("fails closed when Bybit cannot confirm the target-symbol positionIdx", async (t) => {
+  await t.test("positionIdx is missing", async () => {
+    const client = linearPositionClient("BTCUSDT", [{ symbol: "BTCUSDT", side: "", size: "0" }]);
+    assert.deepEqual(await client.readLinearPositionMode("BTCUSDT"), {
+      category: "linear", symbol: "BTCUSDT", positionMode: "NOT_CONFIRMED", positions: [],
+    });
+  });
+
+  await t.test("response mixes one-way and hedge rows", async () => {
+    const client = linearPositionClient("BTCUSDT", [
+      { symbol: "BTCUSDT", positionIdx: 0, side: "", size: "0" },
+      { symbol: "BTCUSDT", positionIdx: 1, side: "", size: "0" },
+    ]);
+    assert.equal((await client.readLinearPositionMode("BTCUSDT")).positionMode, "NOT_CONFIRMED");
+  });
+});
+
+test("reads Bybit position mode per symbol without account-global caching", async () => {
+  const requestedSymbols: string[] = [];
+  const client = new BybitAccountReadClient(credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      const symbol = url.searchParams.get("symbol");
+      requestedSymbols.push(symbol ?? "");
+      const positionIdx = symbol === "BTCUSDT" ? 0 : 1;
+      return Response.json(success({ list: [{ symbol, positionIdx, side: "", size: "0" }] }));
+    }) as typeof fetch,
+  });
+
+  assert.equal((await client.readLinearPositionMode("BTCUSDT")).positionMode, "ONE_WAY");
+  assert.equal((await client.readLinearPositionMode("DOGEUSDT")).positionMode, "HEDGE");
+  assert.deepEqual(requestedSymbols, ["BTCUSDT", "DOGEUSDT"]);
 });
 
 test("rejects Bybit API failures and malformed balances", async (t) => {
@@ -110,6 +166,20 @@ function clientWithResponse(payload: (url: URL) => unknown) {
   return new BybitAccountReadClient(credentials, {
     now: () => now,
     fetchImpl: (async (input: string | URL | Request) => Response.json(payload(new URL(String(input))))) as typeof fetch,
+  });
+}
+
+function linearPositionClient(symbol: string, list: unknown[]) {
+  return new BybitAccountReadClient(credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      assert.equal(init?.method, "GET");
+      assert.equal(url.pathname, "/v5/position/list");
+      assert.equal(url.searchParams.get("category"), "linear");
+      assert.equal(url.searchParams.get("symbol"), symbol);
+      return Response.json(success({ list }));
+    }) as typeof fetch,
   });
 }
 
