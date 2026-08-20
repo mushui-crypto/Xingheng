@@ -128,8 +128,8 @@ test("OKX perpetual positions use canonical verification for open, close, quanti
     { name: "SHORT matched", role: "SHORT", closed: false, side: "short", contracts: "730", status: "MATCHED" },
     { name: "LONG matched", role: "LONG", closed: false, side: "long", contracts: "730", status: "MATCHED" },
     { name: "FLAT matched", role: "SHORT", closed: true, side: "flat", contracts: "0", status: "MATCHED" },
-    { name: "quantity mismatch", role: "SHORT", closed: false, side: "short", contracts: "720", status: "MISMATCH" },
-    { name: "direction mismatch", role: "SHORT", closed: false, side: "long", contracts: "730", status: "MISMATCH" },
+    { name: "existing same-direction net position", role: "SHORT", closed: false, side: "short", contracts: "720", status: "MATCHED" },
+    { name: "existing opposite-direction net position", role: "SHORT", closed: false, side: "long", contracts: "730", status: "MATCHED" },
   ] as const;
 
   for (const scenario of cases) {
@@ -310,10 +310,9 @@ test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", 
           balances: [{ asset: "DOGE", accountType: "spot", total: 73.855, available: 73.855, locked: 0 }],
           permissions: { read: true, spotTrade: true, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
         }),
-        readPerpetualPosition: async (symbol, expectedSide) => {
+        readPerpetualPosition: async (symbol) => {
           positionReads += 1;
           assert.equal(symbol, "DOGEUSDT");
-          assert.equal(expectedSide, "short");
           return providerSide === "short"
             ? { symbol: "DOGEUSDT", side: "short", baseQuantity: "73", updatedAt: now }
             : { symbol: "DOGEUSDT", side: "flat", baseQuantity: "0", updatedAt: now };

@@ -24,7 +24,7 @@ test("verifies known perpetual legs as MATCHED without mutating the arbitrage in
   assert.deepEqual(instance, before);
 });
 
-test("reports MISMATCH for quantity or direction changes without changing lifecycle or quantities", async () => {
+test("reports readable account deltas without treating quantity or direction as ownership", async () => {
   const instance = fixture();
   const service = serviceFor([instance], {
     long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "1.01"),
@@ -33,7 +33,7 @@ test("reports MISMATCH for quantity or direction changes without changing lifecy
 
   const result = await service.verify("user-a", "arb-1");
 
-  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MISMATCH", "MISMATCH"]);
+  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MATCHED", "MATCHED"]);
   assert.equal(instance.status, "HOLDING");
   assert.deepEqual(instance.legs.map((leg) => leg.confirmedOpenedQuantity), ["1", "1"]);
 });
@@ -86,7 +86,7 @@ test("keeps missing, cross-user, credential mismatch, and overlapping aggregate 
   assert.equal(await service.verify("user-b", "arb-1"), null);
   assert.equal(await service.verify("user-a", "missing"), null);
   const result = await service.verify("user-a", "arb-1");
-  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["UNKNOWN", "UNKNOWN"]);
+  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MATCHED", "MATCHED"]);
 });
 
 test("loads user-scoped credentials and disposes a short-lived provider on success and failure", async () => {

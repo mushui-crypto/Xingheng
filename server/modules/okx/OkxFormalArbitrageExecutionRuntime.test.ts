@@ -4,12 +4,58 @@ import test from "node:test";
 import { createAsset } from "../cex/Asset";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecordFromIntent, createExecutionRecord } from "../cex/ExecutionRecord";
+import { assertExecutionIdentityContract, assertFormalResultContract } from "../cex/RuntimeLifecycleContractAssertions";
 import type {
   OkxIntentExecutionCancelRuntimeResult,
   OkxIntentExecutionReconciliationRuntimeResult,
   OkxIntentExecutionRuntimeResult,
 } from "./OkxIntentExecutionRuntime";
 import { OkxFormalArbitrageExecutionRuntime } from "./OkxFormalArbitrageExecutionRuntime";
+
+test("uses the same diagnostic contract for rejected and credential errors", async () => {
+  for (const [category, message] of [
+    ["provider_request_rejected", "request rejected"],
+    ["credential_validation_failed", "passphrase=top-secret rejected"],
+  ] as const) {
+    const intent = diagnosticExecutionIntent();
+    const adapter = new OkxFormalArbitrageExecutionRuntime({
+      async cancel() { throw new Error("unused"); },
+      async reconcile() { throw new Error("unused"); },
+      async execute(value) {
+        return {
+          executionRecord: createExecutionRecord({ ...createExecutionRecordFromIntent(`record-${category}`, value), status: "UNKNOWN" }),
+          execution: {
+            status: "CALL_FAILED",
+            step: { status: "CALL_FAILED", result: null, error: Object.assign(new Error(message), { category }) },
+          },
+        } as any;
+      },
+    });
+    const result = await adapter.execute(intent);
+    assert.equal(result.diagnostic?.category, category);
+    assert.equal(result.diagnostic?.stage, "execution-capability");
+    assert.equal(result.diagnostic?.errorType, "Error");
+    assert.doesNotMatch(result.diagnostic?.sanitizedMessage ?? "", /top-secret/u);
+  }
+});
+
+function diagnosticExecutionIntent() {
+  return createExecutionIntent({
+    intentId: "intent-okx-diagnostic",
+    arbitrageId: "arbitrage-okx",
+    legId: "leg-okx",
+    userId: "user-a",
+    venue: "okx",
+    accountId: "okx:account-a",
+    instrumentId: "BTC-USDT-PERP",
+    side: "buy",
+    quantity: { asset: createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }), quantity: "1" },
+    orderConstraints: { reduceOnly: false },
+    executionMode: "PRICE_PRIORITY",
+    createdAt: 1_800_000_000_000,
+    expiresAt: 1_800_000_030_000,
+  });
+}
 
 const now = 1_800_000_000_000;
 
@@ -36,6 +82,8 @@ test("OKX formal adapter executes through the runtime and exposes only canonical
   assert.deepEqual(Object.keys(result).sort(), ["confirmedQuantity", "executionRecord"]);
   assert.equal(JSON.stringify(result).includes("DOGE-USDT-SWAP"), false);
   assert.equal(JSON.stringify(result).includes("8001"), false);
+  assertExecutionIdentityContract(result.executionRecord, intent);
+  assertFormalResultContract({ result, expectedQuantity: "12.500000000000000001" });
 });
 
 test("OKX formal adapter reconciles canonical Decimal observations and fails closed on UNKNOWN", async () => {

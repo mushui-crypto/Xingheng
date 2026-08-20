@@ -160,16 +160,12 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       const position = await this.positionReader.readPosition({
         accountId: leg.accountId,
         instrumentId: leg.instrumentId,
-        expectedSide: leg.role,
       });
       return { snapshot: position };
     }
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
     if (!binding) throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
-    const position = await client.readPerpetualPosition(
-      binding.providerSymbol,
-      leg.role === "LONG" ? "long" : "short",
-    );
+    const position = await client.readPerpetualPosition(binding.providerSymbol);
     const rawQuantity = "contractQuantity" in position ? position.contractQuantity : position.baseQuantity;
     return {
       snapshot: createPositionSnapshot({

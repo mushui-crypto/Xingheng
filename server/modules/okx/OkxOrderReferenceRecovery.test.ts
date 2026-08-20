@@ -4,6 +4,7 @@ import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import { assertNoDuplicateMutationContract } from "../cex/RuntimeLifecycleContractAssertions";
 import {
   InMemoryOkxExecutionOrderReferenceStore,
   type OkxExecutionOrderRecoveryReference,
@@ -87,6 +88,10 @@ test("a restarted runtime recovers ordId by clOrdId and never repeats placeOrder
   }]);
   assert.equal(service.placeMutations, 1);
   assert.equal(service.providerMutations, mutationsBeforeRecovery);
+  assertNoDuplicateMutationContract({
+    mutationCountBeforeRecovery: mutationsBeforeRecovery,
+    mutationCountAfterRecovery: service.providerMutations,
+  });
   assert.equal(service.cancelMutations, 0);
   assert.equal(await references.loadRecoveryForUser("user-a", executionId), null);
   assert.equal((await references.loadForUser("user-a", executionId))?.ordId, "9101");

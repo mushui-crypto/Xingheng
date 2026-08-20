@@ -2,10 +2,12 @@ import { createHash } from "node:crypto";
 import {
   compareUnsignedDecimals,
   managedCurrentQuantity,
+  managedSignedDelta,
   subtractUnsignedDecimals,
   type ArbitrageExecutionReference,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
+import { reduceOnlyEligible } from "../cex/position/PositionVerification";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
@@ -78,15 +80,13 @@ export class ArbitrageExecutionCloseService {
     const runtime = this.resolveRuntime(leg.venue);
     assertNoUnresolvedClose(instance, leg.legId);
     const managedQuantity = managedCurrentQuantity(leg);
+    const managedDelta = managedSignedDelta(leg);
     if (managedQuantity === "0") throw closeError("close_quantity_unavailable", "该套利腿当前没有可退出的管理数量。");
 
     const verification = await this.positions.verify(userId, instance.arbitrageId);
     const verifiedLeg = verification?.legs.find((candidate) => candidate.legId === leg.legId);
-    if (!verifiedLeg || verifiedLeg.verificationStatus !== "MATCHED" || verifiedLeg.actualQuantity === null) {
+    if (!verifiedLeg || verifiedLeg.verificationStatus !== "MATCHED") {
       throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
-    }
-    if (verifiedLeg.expectedManagedQuantity !== managedQuantity || verifiedLeg.actualQuantity === "0") {
-      throw closeError("position_verification_unavailable", "当前真实仓位与套利实例管理数量不一致。");
     }
     if (compareUnsignedDecimals(request.quantity, managedQuantity) > 0) {
       throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
@@ -100,8 +100,8 @@ export class ArbitrageExecutionCloseService {
     if (context.instrument.quoteAsset !== "USDT" || (!spot && !perpetual)) {
       throw closeError("close_capability_unavailable", "当前只支持 USDT 现货与线性永续套利腿退出。");
     }
-    if (perpetual && compareUnsignedDecimals(request.quantity, verifiedLeg.actualQuantity) > 0) {
-      throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
+    if (perpetual && verifiedLeg.actualSignedNetQuantity == null) {
+      throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
     }
     if (spot && leg.role !== "LONG") {
       throw closeError("close_capability_unavailable", "现货空头腿无法通过可用余额可靠退出。");
@@ -159,7 +159,18 @@ export class ArbitrageExecutionCloseService {
         acceptedResidualQuantity = remainingQuantity;
       }
     }
-    const side = leg.role === "LONG" ? "sell" as const : "buy" as const;
+    // This is the managed slice reversed by this request, not the full
+    // outstanding instance delta. The opposite signed quantity is the actual
+    // provider order delta used to derive the side below.
+    const managedSliceToReverse = managedDelta.startsWith("-") ? `-${request.quantity}` : request.quantity;
+    const reversalOrderDelta = managedSliceToReverse.startsWith("-")
+      ? request.quantity
+      : `-${request.quantity}`;
+    const side = reversalOrderDelta.startsWith("-") ? "sell" as const : "buy" as const;
+    const reduceOnly = perpetual && reduceOnlyEligible(
+      verifiedLeg.actualSignedNetQuantity!,
+      managedSliceToReverse,
+    );
     const planned = await planner.plan({
       instrumentId: leg.instrumentId,
       side,
@@ -180,7 +191,7 @@ export class ArbitrageExecutionCloseService {
       instrumentId: leg.instrumentId,
       side,
       quantity: planned.plan.plannedAssetQuantity,
-      orderConstraints: { reduceOnly: perpetual },
+      orderConstraints: { reduceOnly },
       executionMode: request.executionMode,
       createdAt: now,
       expiresAt: now + (this.options.intentTtlMs ?? 30_000),

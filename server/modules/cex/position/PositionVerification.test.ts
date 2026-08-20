@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createPositionSnapshot, type PositionSnapshot } from "./PositionSnapshot";
 import {
+  reduceOnlyEligible,
+  signedCurrentNet,
   verifyPosition,
   type ExpectedPosition,
 } from "./PositionVerification";
@@ -42,6 +44,33 @@ test("matches a FLAT canonical position", () => {
 
   assert.equal(result.status, "MATCHED");
   assert.equal(result.quantityDifference, "0");
+});
+
+test("derives canonical signed current net without provider fields", () => {
+  assert.equal(signedCurrentNet(snapshot({ side: "LONG", quantity: "20" })), "20");
+  assert.equal(signedCurrentNet(snapshot({ side: "SHORT", quantity: "20" })), "-20");
+  assert.equal(signedCurrentNet(snapshot({ side: "FLAT", quantity: "0" })), "0");
+});
+
+test("determines reduceOnly eligibility from the managed slice being reversed", () => {
+  for (const scenario of [
+    { currentNet: "-15", managedSliceToReverse: "-10", expected: true },
+    { currentNet: "-5", managedSliceToReverse: "-10", expected: false },
+    { currentNet: "100", managedSliceToReverse: "-10", expected: false },
+    { currentNet: "-10", managedSliceToReverse: "-10", expected: true },
+    { currentNet: "-9.999999999999999999", managedSliceToReverse: "-10", expected: false },
+    { currentNet: "15", managedSliceToReverse: "10", expected: true },
+    { currentNet: "5", managedSliceToReverse: "10", expected: false },
+    { currentNet: "-100", managedSliceToReverse: "10", expected: false },
+    { currentNet: "10", managedSliceToReverse: "10", expected: true },
+    { currentNet: "9.999999999999999999", managedSliceToReverse: "10", expected: false },
+  ]) {
+    assert.equal(
+      reduceOnlyEligible(scenario.currentNet, scenario.managedSliceToReverse),
+      scenario.expected,
+      `${scenario.currentNet} / ${scenario.managedSliceToReverse}`,
+    );
+  }
 });
 
 test("reports quantity mismatch outside tolerance", () => {

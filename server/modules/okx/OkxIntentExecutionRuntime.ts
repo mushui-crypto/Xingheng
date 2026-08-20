@@ -123,9 +123,6 @@ export class OkxIntentExecutionRuntime {
 
   async close(input: ExecutionIntent): Promise<OkxIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
-    if (!intent.orderConstraints.reduceOnly) {
-      throw new Error("OKX perpetual close requires reduceOnly=true.");
-    }
     return this.execute(intent);
   }
 
@@ -219,33 +216,36 @@ export class OkxIntentExecutionRuntime {
         intent,
       );
       await this.recordStore.create(initialRecord);
-      const intentService = this.intentServiceFor(intent.instrumentId, runtimeService, (reference) =>
-        this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
-          executionId: initialRecord.executionId,
-          intentId: initialRecord.intentId,
-          userId: initialRecord.userId,
-          accountId: initialRecord.accountId,
-          instrumentId: initialRecord.instrumentId,
-          instId: reference.instId,
-          clOrdId: reference.clOrdId,
-          ...(reference.expectedProviderQuantity === undefined ? {} : {
-            expectedProviderQuantity: reference.expectedProviderQuantity,
-            expectedSide: reference.expectedSide,
-          }),
-          createdAt: initialRecord.createdAt,
-          updatedAt: initialRecord.updatedAt,
-        })));
-      const capability: ExecutionCapability<OkxIntentExecutionResult> = isSpotInstrumentId(intent.instrumentId)
-        ? new OkxSpotExecutionCapability(intentService as OkxSpotIntentExecutionService)
-        : this.options.createCapability?.(intentService as OkxIntentExecutionService)
-          ?? new OkxIntentExecutionCapability(intentService as OkxIntentExecutionService);
-      const capabilityRegistry = new ExecutionCapabilityRegistry<OkxIntentExecutionResult>()
-        .register(executionCapability("okx", capability));
-
-      const execution = await new ExecutionCoordinator(
-        new RegistryBackedExecutionCapability(capabilityRegistry),
-        this.options.clock,
-      ).execute(intent);
+      let coordinatedCapability: ExecutionCapability<OkxIntentExecutionResult>;
+      try {
+        const intentService = this.intentServiceFor(intent.instrumentId, runtimeService, (reference) =>
+          this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
+            executionId: initialRecord.executionId,
+            intentId: initialRecord.intentId,
+            userId: initialRecord.userId,
+            accountId: initialRecord.accountId,
+            instrumentId: initialRecord.instrumentId,
+            instId: reference.instId,
+            clOrdId: reference.clOrdId,
+            ...(reference.expectedProviderQuantity === undefined ? {} : {
+              expectedProviderQuantity: reference.expectedProviderQuantity,
+              expectedSide: reference.expectedSide,
+            }),
+            createdAt: initialRecord.createdAt,
+            updatedAt: initialRecord.updatedAt,
+          })));
+        const capability: ExecutionCapability<OkxIntentExecutionResult> = isSpotInstrumentId(intent.instrumentId)
+          ? new OkxSpotExecutionCapability(intentService as OkxSpotIntentExecutionService)
+          : this.options.createCapability?.(intentService as OkxIntentExecutionService)
+            ?? new OkxIntentExecutionCapability(intentService as OkxIntentExecutionService);
+        const capabilityRegistry = new ExecutionCapabilityRegistry<OkxIntentExecutionResult>()
+          .register(executionCapability("okx", capability));
+        coordinatedCapability = new RegistryBackedExecutionCapability(capabilityRegistry);
+      } catch (error) {
+        await this.failPreMutationRecordIfSafe(initialRecord);
+        throw error;
+      }
+      const execution = await new ExecutionCoordinator(coordinatedCapability, this.options.clock).execute(intent);
       let executionRecord = initialRecord;
       let orderReference: OkxExecutionOrderReference | null = null;
       if (execution.step.result) {
@@ -293,6 +293,30 @@ export class OkxIntentExecutionRuntime {
       await this.recordStore.update(executionRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
     });
+  }
+
+  private async failPreMutationRecordIfSafe(record: ExecutionRecord) {
+    try {
+      const [current, reference, recovery] = await Promise.all([
+        this.recordStore.loadForUser(record.userId, record.executionId),
+        this.orderReferences.loadForUser(record.userId, record.executionId),
+        this.orderReferences.loadRecoveryForUser(record.userId, record.executionId),
+      ]);
+      if (!current
+        || current.intentId !== record.intentId
+        || current.userId !== record.userId
+        || current.venue !== record.venue
+        || current.accountId !== record.accountId
+        || current.instrumentId !== record.instrumentId
+        || current.status !== "CREATED"
+        || current.executionAttemptId !== undefined
+        || current.remoteOrderId !== undefined
+        || reference
+        || recovery) return;
+      await this.recordStore.update({ ...current, status: "FAILED" });
+    } catch (cleanupError) {
+      console.error("[okx] pre-mutation ExecutionRecord cleanup failed", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+    }
   }
 
   private intentServiceFor(

@@ -54,7 +54,7 @@ export type BinanceIntentExecutionRuntimeRegistry = Readonly<{
 
 export type BinanceIntentExecutionRuntimeOptions = Readonly<{
   clock?: () => number;
-  createExecutionId?: () => string;
+  createExecutionId?: (intent: ExecutionIntent) => string;
   assertSubmitAllowed?: ConstructorParameters<typeof BinanceIntentExecutionService>[2];
   createCapability?: (
     service: BinanceIntentExecutionService,
@@ -106,18 +106,24 @@ export class BinanceIntentExecutionRuntime {
         throw new Error("ExecutionIntent accountId does not match the Binance execution account.");
       }
 
-      const intentService = new BinanceIntentExecutionService(
-        service,
-        this.config,
-        this.options.assertSubmitAllowed,
-      );
-      const capability = this.options.createCapability?.(intentService)
-        ?? new BinanceIntentExecutionCapability(intentService);
       const initialRecord = createExecutionRecordFromIntent(
-        this.options.createExecutionId?.() ?? randomUUID(),
+        this.options.createExecutionId?.(intent) ?? randomUUID(),
         intent,
       );
       await this.recordStore.create(initialRecord);
+      let capability: ExecutionCapability<BinanceIntentExecutionResult>;
+      try {
+        const intentService = new BinanceIntentExecutionService(
+          service,
+          this.config,
+          this.options.assertSubmitAllowed,
+        );
+        capability = this.options.createCapability?.(intentService)
+          ?? new BinanceIntentExecutionCapability(intentService);
+      } catch (error) {
+        await this.failPreMutationRecordIfSafe(initialRecord, service);
+        throw error;
+      }
 
       const execution = await new ExecutionCoordinator(capability, this.options.clock).execute(intent);
       let executionRecord = syncExecutionRecordState(initialRecord, execution.executionState);
@@ -135,6 +141,31 @@ export class BinanceIntentExecutionRuntime {
 
       return Object.freeze({ executionRecord, execution });
     });
+  }
+
+  private async failPreMutationRecordIfSafe(
+    record: ExecutionRecord,
+    service: BinanceIntentRuntimeService,
+  ) {
+    try {
+      const [current, localState] = await Promise.all([
+        this.recordStore.loadForUser(record.userId, record.executionId),
+        Promise.resolve(service.executionOrderState(binanceExecutionIdempotencyKeyFor(record))),
+      ]);
+      if (!current
+        || current.intentId !== record.intentId
+        || current.userId !== record.userId
+        || current.venue !== record.venue
+        || current.accountId !== record.accountId
+        || current.instrumentId !== record.instrumentId
+        || current.status !== "CREATED"
+        || current.executionAttemptId !== undefined
+        || current.remoteOrderId !== undefined
+        || localState.kind !== "missing") return;
+      await this.recordStore.update({ ...current, status: "FAILED" });
+    } catch (cleanupError) {
+      console.error("[binance] pre-mutation ExecutionRecord cleanup failed", cleanupError instanceof Error ? cleanupError.message : "unknown error");
+    }
   }
 
   async query(

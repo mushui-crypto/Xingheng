@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
 import type { FormalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntime";
@@ -18,6 +19,13 @@ import { InMemoryOkxExecutionOrderReferenceStore } from "../okx/OkxExecutionOrde
 import { OkxFormalArbitrageExecutionRuntime } from "../okx/OkxFormalArbitrageExecutionRuntime";
 import { OkxIntentExecutionRuntime } from "../okx/OkxIntentExecutionRuntime";
 import { okxTestQuantityRulesSource } from "../okx/OkxTestFixtures";
+import { BinanceFormalArbitrageExecutionRuntime } from "../arbitrage-execution/BinanceFormalArbitrageExecutionRuntime";
+import { BinanceIntentExecutionRuntime } from "../binance/BinanceIntentExecutionRuntime";
+import type { BinanceGenericExecutionContext } from "../binance/BinanceGenericExecutionReadContext";
+import type { BinanceOrderInput } from "../binance/BinanceOrderManager";
+import type { BinanceStoredOrder } from "../binance/BinanceOrderStore";
+import type { BinanceProviderOrder } from "../binance/BinanceTypes";
+import { snapshotFixture } from "../binance/binanceTestFixtures";
 import type {
   OkxCancelOrderRequest,
   OkxCancelOrderResult,
@@ -80,6 +88,73 @@ test("real command sends OKX Spot and Perpetual intents through the formal runti
   assert.equal(fixture.records.findByIntentId(perpetual.intent.intentId).length, 1);
   assert.equal(fixture.records.findByIntentId(spot.intent.intentId).length, 1);
 });
+
+test("real command dispatches Binance through the Formal Runtime registry", async () => {
+  const runtime = new FakeFormalRuntime();
+  const records = new MemoryExecutionRecordStore();
+  const command = commandFor(runtime, records, preparationFor("binance"), undefined, "binance");
+
+  const result = await command.run(request({
+    venue: "binance",
+    instrumentId: "DOGE-USDT-PERP",
+    requestId: "binance-formal-dispatch",
+  }));
+
+  assert.equal(result.action, "EXECUTED");
+  assert.equal(result.intent.venue, "binance");
+  assert.equal(runtime.executeCalls.length, 1);
+  assert.equal(runtime.executeCalls[0]?.venue, "binance");
+});
+
+test("Binance unified command recreates the real runtime and reconciles the deterministic execution without another place", async () => {
+  const service = new FakeBinanceRuntimeService();
+  const records = new MemoryExecutionRecordStore();
+  const input = request({
+    venue: "binance",
+    instrumentId: "DOGE-USDT-PERP",
+    requestId: "binance-restart-recovery",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "20" },
+  });
+
+  const first = await binanceCommand(service, records).run(input);
+  const expectedExecutionId = unifiedRealTradingTestExecutionId(first.intent);
+  const restarted = await binanceCommand(service, records).run(input);
+
+  assert.equal(first.action, "EXECUTED");
+  assert.equal(first.runtimeResult?.executionRecord.executionId, expectedExecutionId);
+  assert.equal(records.loadForUser("user-a", expectedExecutionId)?.executionId, expectedExecutionId);
+  assert.equal(service.placeCount, 1);
+  assert.equal(restarted.action, "RECONCILED");
+  assert.equal(restarted.runtimeResult?.executionRecord.executionId, expectedExecutionId);
+  assert.equal(service.reconcileCount, 1);
+  assert.equal(service.placeCount, 1);
+});
+
+for (const scenario of [
+  { name: "side", overrides: { side: "sell" as const } },
+  { name: "quantity", overrides: { quantityInput: { mode: "ASSET_QUANTITY" as const, quantity: "10" } } },
+  { name: "reduceOnly", overrides: { reduceOnly: true } },
+]) {
+  test(`Binance unified recovery rejects changed ${scenario.name} before another place`, async () => {
+    const service = new FakeBinanceRuntimeService();
+    const records = new MemoryExecutionRecordStore();
+    const input = request({
+      venue: "binance",
+      instrumentId: "DOGE-USDT-PERP",
+      requestId: `binance-mismatch-${scenario.name}`,
+      quantityInput: { mode: "ASSET_QUANTITY", quantity: "20" },
+    });
+    await binanceCommand(service, records).run(input);
+
+    await assert.rejects(
+      () => binanceCommand(service, records).run({ ...input, ...scenario.overrides }),
+      /request semantics do not match/u,
+    );
+
+    assert.equal(service.placeCount, 1);
+    assert.equal(service.reconcileCount, 0);
+  });
+}
 
 test("live trading disabled and active kill switch return BLOCKED with Provider mutation at zero", async () => {
   for (const safety of [
@@ -201,9 +276,10 @@ function commandFor(
   records: MemoryExecutionRecordStore,
   venuePreparation: UnifiedRealTradingTestVenuePreparation,
   mutationSafetyRejections?: Pick<UnifiedRealTradingTestMutationSafetyGuard, "rejectionCount">,
+  venue: "okx" | "binance" = "okx",
 ) {
   return new UnifiedRealTradingTestCommand(
-    new FormalExecutionRuntimeRegistry().register(formalExecutionRuntime("okx", runtime)),
+    new FormalExecutionRuntimeRegistry().register(formalExecutionRuntime(venue, runtime)),
     records,
     [venuePreparation],
     { now: () => now, ...(mutationSafetyRejections === undefined ? {} : { mutationSafetyRejections }) },
@@ -245,6 +321,22 @@ function okxFixture(mutationSafetyGuard: UnifiedRealTradingTestMutationSafetyGua
       mutationSafetyGuard,
     ),
   };
+}
+
+function binanceCommand(service: FakeBinanceRuntimeService, records: MemoryExecutionRecordStore) {
+  const runtime = new BinanceIntentExecutionRuntime(
+    { run: async (_userId, operation) => operation(service) },
+    { maxSlippageBps: 20 },
+    records,
+    { createExecutionId: unifiedRealTradingTestExecutionId, clock: () => now },
+  );
+  return commandFor(
+    new BinanceFormalArbitrageExecutionRuntime(runtime),
+    records,
+    preparationFor("binance"),
+    undefined,
+    "binance",
+  );
 }
 
 class FakeFormalRuntime implements FormalExecutionRuntime {
@@ -337,12 +429,127 @@ class FakeOkxRuntimeService {
   }
 }
 
-function preparation(): UnifiedRealTradingTestVenuePreparation {
+class FakeBinanceRuntimeService {
+  private readonly orders: BinanceStoredOrder[] = [];
+  placeCount = 0;
+  reconcileCount = 0;
+
+  async executionAccountIdentity() {
+    const snapshot = await this.account();
+    return {
+      accountId: snapshot.accountId,
+      accountFingerprint: snapshot.accountFingerprint,
+      uidSnapshot: "binance-test-uid",
+      accountMode: "single_asset_one_way" as const,
+      ipWhitelistVerificationMode: "provider_list_exact" as const,
+      permissions: snapshot.permissions,
+    };
+  }
+
+  async account() {
+    return snapshotFixture({ accountId: "binance:account-user-a" });
+  }
+
+  async loadExecutionReadContext(instrumentId: string): Promise<BinanceGenericExecutionContext> {
+    return Object.freeze({
+      instrument: Object.freeze({
+        instrumentId,
+        venue: "binance",
+        providerSymbol: "DOGEUSDT",
+        baseAsset: Object.freeze({ symbol: "DOGE", type: "DIGITAL_ASSET" }),
+        quoteAsset: "USDT",
+        settlementAsset: "USDT",
+        marketType: "perpetual",
+        contractType: "linear_perpetual",
+        quantityUnit: "base",
+        contractSize: "1",
+        status: "trading",
+      }),
+      tradingRules: Object.freeze({
+        quantityStep: "1",
+        minQuantity: "1",
+        priceTick: "0.0001",
+        minNotional: "1",
+        precision: Object.freeze({ quantity: 0, price: 4 }),
+      }),
+      quote: Object.freeze({ bid: "0.1", ask: "0.1001", fetchedAt: now }),
+    });
+  }
+
+  async placeExecutionOrder(input: BinanceOrderInput) {
+    this.placeCount += 1;
+    const order = binanceProviderOrder({
+      orderLinkId: binanceClientOrderId(input.idempotencyKey),
+      requestedQuantity: Number(input.quantity),
+      filledQuantity: Number(input.quantity),
+      requestedBaseQuantity: input.quantity,
+      filledBaseQuantity: input.quantity,
+    });
+    this.orders.push({
+      idempotencyKey: input.idempotencyKey,
+      requestFingerprint: "unified-binance-test",
+      clientOrderId: order.orderLinkId,
+      providerOrderId: order.orderId,
+      category: input.category,
+      symbol: input.symbol,
+      executionMode: "production_ioc",
+      status: "completed",
+      order,
+      error: null,
+      cancelRequestedAt: null,
+      cancelDispatchState: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    return order;
+  }
+
+  executionOrderState(idempotencyKey: string) {
+    const order = this.orders.find((candidate) => candidate.idempotencyKey === idempotencyKey);
+    return order ? { kind: "found" as const, order } : { kind: "missing" as const };
+  }
+
+  async findExecutionOrderByClientOrderId(_category: "spot" | "linear", _symbol: string, clientOrderId: string) {
+    this.reconcileCount += 1;
+    return this.orders.find((candidate) => candidate.clientOrderId === clientOrderId)?.order ?? null;
+  }
+
+  async cancelOrder() {
+    return binanceProviderOrder({ status: "Cancelled" });
+  }
+}
+
+function binanceProviderOrder(overrides: Partial<BinanceProviderOrder> = {}): BinanceProviderOrder {
   return {
-    venue: "okx",
+    symbol: "DOGEUSDT",
+    orderId: "9001",
+    orderLinkId: "binance-unified-client-1",
+    status: "Filled",
+    requestedQuantity: 20,
+    filledQuantity: 20,
+    requestedBaseQuantity: "20",
+    filledBaseQuantity: "20",
+    averagePrice: 0.1,
+    feeUsd: 0,
+    updatedAt: now,
+    ...overrides,
+  };
+}
+
+function binanceClientOrderId(idempotencyKey: string) {
+  return `ptm${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 30)}`;
+}
+
+function preparation(): UnifiedRealTradingTestVenuePreparation {
+  return preparationFor("okx");
+}
+
+function preparationFor(venue: "okx" | "binance"): UnifiedRealTradingTestVenuePreparation {
+  return {
+    venue,
     async prepare(input) {
       return {
-        accountId: "okx:account-user-a",
+        accountId: `${venue}:account-user-a`,
         quantityPlan: quantityPlan(input.instrumentId, input.quantityInput),
       };
     },

@@ -1,15 +1,23 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import test from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
-import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import { SqliteExecutionRecordStore, type ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import {
+  assertCoordinatorBoundaryContract,
+  assertExecutionIdentityContract,
+  assertPreparationFailureContract,
+} from "../cex/RuntimeLifecycleContractAssertions";
 import {
   InMemoryOkxExecutionOrderReferenceStore,
   type OkxExecutionOrderReference,
 } from "./OkxExecutionOrderReferenceStore";
 import { OkxClient } from "./OkxClient";
+import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
 import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
 import { okxTestQuantityRulesSource } from "./OkxTestFixtures";
@@ -141,19 +149,132 @@ test("runtime selects the OKX Spot capability and persists the normal order refe
   assert.equal((await references.loadForUser("user-a", "execution-okx-spot-1"))?.instrumentId, "DOGE-USDT-SPOT");
 });
 
-test("runtime close rejects missing reduceOnly before provider mutation", async () => {
+test("pre-mutation preparation failure closes the created record without provider mutation", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  const records = new FakeExecutionRecordStore();
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const preparationError = new Error("capability preparation failed");
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    records,
+    references,
+    {
+      ...runtimeOptions("execution-okx-preparation-failure"),
+      createCapability: () => { throw preparationError; },
+    },
+  );
+
+  await assert.rejects(
+    () => runtime.execute(executionIntent({ intentId: "intent-okx-preparation-failure" })),
+    (error: unknown) => error === preparationError,
+  );
+
+  const failed = await records.loadForUser("user-a", "execution-okx-preparation-failure");
+  assert.equal(failed?.status, "FAILED");
+  assert.equal(failed?.executionAttemptId, undefined);
+  assert.equal(failed?.remoteOrderId, undefined);
+  assert.equal(await references.loadForUser("user-a", "execution-okx-preparation-failure"), null);
+  assert.equal(await references.loadRecoveryForUser("user-a", "execution-okx-preparation-failure"), null);
+  assert.deepEqual(records.created.map((record) => record.status), ["CREATED"]);
+  assert.deepEqual(records.updated.map((record) => record.status), ["FAILED"]);
+  assert.equal(service.placeRequests.length, 0);
+  await assertPreparationFailureContract({
+    initialRecord: records.created[0]!,
+    finalRecord: failed,
+    loadRecord: () => records.loadForUser("user-a", "execution-okx-preparation-failure"),
+    mutationCount: service.placeRequests.length,
+    error: preparationError,
+    originalError: preparationError,
+  });
+  assertExecutionIdentityContract(failed!, executionIntent({ intentId: "intent-okx-preparation-failure" }));
+});
+
+test("pre-mutation failure remains FAILED after SQLite store restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "stellax-okx-preparation-"));
+  const dbPath = join(directory, "trading.sqlite");
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const firstStore = new SqliteExecutionRecordStore({ dbPath });
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    firstStore,
+    references,
+    {
+      ...runtimeOptions("execution-okx-preparation-restart"),
+      createCapability: () => { throw new Error("preparation failed before coordinator"); },
+    },
+  );
+
+  try {
+    await assert.rejects(() => runtime.execute(executionIntent({ intentId: "intent-okx-preparation-restart" })));
+    firstStore.close();
+    const restarted = new SqliteExecutionRecordStore({ dbPath });
+    try {
+      const record = restarted.loadForUser("user-a", "execution-okx-preparation-restart");
+      assert.equal(record?.status, "FAILED");
+      assert.equal(record?.executionAttemptId, undefined);
+      assert.equal(record?.remoteOrderId, undefined);
+      assert.equal(await references.loadForUser("user-a", "execution-okx-preparation-restart"), null);
+      assert.equal(await references.loadRecoveryForUser("user-a", "execution-okx-preparation-restart"), null);
+      assert.equal(service.placeRequests.length, 0);
+    } finally {
+      restarted.close();
+    }
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("capability failure after Coordinator starts keeps the existing UNKNOWN semantics", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  const records = new FakeExecutionRecordStore();
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    records,
+    references,
+    {
+      ...runtimeOptions("execution-okx-coordinator-failure"),
+      createCapability: () => new OkxIntentExecutionCapability({
+        execute: async () => { throw new Error("capability call failed"); },
+      }),
+    },
+  );
+
+  const result = await runtime.execute(executionIntent({ intentId: "intent-okx-coordinator-failure" }));
+
+  assert.equal(result.execution.step.status, "CALL_FAILED");
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.deepEqual(records.updated.map((record) => record.status), ["UNKNOWN"]);
+  assert.equal(service.placeRequests.length, 0);
+  assert.equal(await references.loadForUser("user-a", "execution-okx-coordinator-failure"), null);
+  assert.equal(await references.loadRecoveryForUser("user-a", "execution-okx-coordinator-failure"), null);
+  assertCoordinatorBoundaryContract({
+    executionRecord: result.executionRecord,
+    persistedRecords: records.updated,
+    expectedStatus: "UNKNOWN",
+    mutationCount: service.placeRequests.length,
+    expectedMutationCount: 0,
+  });
+});
+
+test("runtime close accepts non-reduceOnly reversal intents", async () => {
   const service = new FakeOkxRuntimeService("okx:account-user-a");
   const runtime = new OkxIntentExecutionRuntime(
     new FakeOkxRuntimeRegistry({ "user-a": service }),
     new FakeExecutionRecordStore(),
     new InMemoryOkxExecutionOrderReferenceStore(),
+    runtimeOptions("execution-close-runtime-non-reduce"),
   );
 
-  await assert.rejects(
-    () => runtime.close(executionIntent({ userId: "user-a", accountId: "okx:account-user-a" })),
-    /requires reduceOnly=true/u,
-  );
-  assert.equal(service.placeRequests.length, 0);
+  await runtime.close(executionIntent({
+    userId: "user-a",
+    accountId: "okx:account-user-a",
+    intentId: "intent-close-runtime-non-reduce",
+    orderConstraints: { reduceOnly: false },
+  }));
+  assert.equal(service.placeRequests.length, 1);
+  assert.equal(service.placeRequests[0]?.reduceOnly, false);
 });
 
 test("runtime close sends reduceOnly=true for perpetual close", async () => {

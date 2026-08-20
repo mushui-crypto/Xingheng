@@ -15,7 +15,11 @@ import type { ArbitrageExecutionDraftService } from "./ArbitrageExecutionDraftSe
 import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
 import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
-import type { FormalExecutionRuntime, FormalExecutionRuntimeResult } from "./FormalExecutionRuntime";
+import type {
+  FormalExecutionDiagnostic,
+  FormalExecutionRuntime,
+  FormalExecutionRuntimeResult,
+} from "./FormalExecutionRuntime";
 import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
@@ -49,6 +53,7 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
     confirmedQuantity: string;
     verifiedAt: number;
   }>;
+  diagnostic?: FormalExecutionDiagnostic;
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
 }>;
@@ -317,7 +322,7 @@ export class ArbitrageExecutionCommandService {
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
-    return resultFromReference(updated, reference, false, attributableStatus);
+    return resultFromReference(updated, reference, false, attributableStatus, runtimeResult.diagnostic);
   }
 
   async reconcileLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
@@ -750,6 +755,7 @@ function resultFromReference(
   reference: ArbitrageInstance["executionReferences"][number],
   idempotentReplay: boolean,
   recordStatus?: ExecutionRecord["status"],
+  diagnostic?: FormalExecutionDiagnostic,
 ): ArbitrageLegExecutionConfirmation {
   return Object.freeze({
     instance,
@@ -765,6 +771,7 @@ function resultFromReference(
     secondLegAllowed: instance.executionReferences.length === 1
       && reference.status === "CONFIRMED"
       && reference.confirmedQuantity === reference.requestedQuantity,
+    ...(diagnostic === undefined ? {} : { diagnostic }),
   });
 }
 

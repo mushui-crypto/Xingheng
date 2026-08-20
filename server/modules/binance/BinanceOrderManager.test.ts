@@ -10,11 +10,13 @@ import { BinanceOrderManager } from "./BinanceOrderManager";
 import { BinanceOrderStore } from "./BinanceOrderStore";
 import { BinanceRiskError, BinanceRiskGuard } from "./BinanceRiskGuard";
 import { BinanceProviderError } from "./BinanceClient";
+import { assertNoDuplicateMutationContract } from "../cex/RuntimeLifecycleContractAssertions";
 import { snapshotFixture, tradingConfigFixture } from "./binanceTestFixtures";
 
 test("order manager persists one provider write for duplicate idempotency keys", async () => {
   const root = mkdtempSync(join(tmpdir(), "binance-personal-order-"));
-  const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+  const dbPath = join(root, "orders.sqlite");
+  let store = new BinanceOrderStore(dbPath);
   let writes = 0;
   const order: BinanceProviderOrder = {
     symbol: "XAUTUSDT",
@@ -33,17 +35,25 @@ test("order manager persists one provider write for duplicate idempotency keys",
     findOrderByClientOrderId: async () => order,
   } as unknown as BinanceClientAdapter;
   const config = tradingConfigFixture();
-  const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+  let manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
   const input = {
     idempotencyKey: "entry-1", category: "spot" as const, symbol: "XAUTUSDT" as const, side: "Buy" as const,
     quantity: "0.01", limitPrice: "1000", reduceOnly: false,
   };
   try {
     const first = await manager.place(input);
+    const mutationsBeforeRecovery = writes;
+    store.close();
+    store = new BinanceOrderStore(dbPath);
+    manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
     const second = await manager.place(input);
     assert.equal(first.orderId, "4001");
     assert.equal(second.orderId, "4001");
     assert.equal(writes, 1);
+    assertNoDuplicateMutationContract({
+      mutationCountBeforeRecovery: mutationsBeforeRecovery,
+      mutationCountAfterRecovery: writes,
+    });
     assert.equal(manager.listOrders()[0]?.status, "completed");
   } finally {
     store.close();
