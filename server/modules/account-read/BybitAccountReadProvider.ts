@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   BybitAccountReadClient,
+  type BybitLinearPositionModeRead,
   type BybitAccountReadSnapshot,
 } from "../bybit/BybitAccountReadClient";
 import type { UserExchangeCredentialSecret } from "../credentials/UserExchangeCredentialStore";
@@ -9,6 +10,7 @@ import type { AccountReadProvider, AccountReadProviderFactory } from "./AccountR
 
 type BybitReadOnlyClient = {
   readAccountSnapshot(): Promise<BybitAccountReadSnapshot>;
+  readLinearPositionMode?(symbol: string): Promise<BybitLinearPositionModeRead>;
   dispose?(): void | Promise<void>;
 };
 
@@ -51,6 +53,15 @@ export class BybitAccountReadProvider implements AccountReadProvider {
       },
       latestSyncAt: snapshot.fetchedAt,
     };
+  }
+
+  async readLinearPositionMode(symbol: string) {
+    const client = this.client;
+    if (!client) throw new Error("Bybit account read provider has been disposed.");
+    if (!client.readLinearPositionMode) {
+      throw new Error("Bybit Linear position mode read is not implemented.");
+    }
+    return client.readLinearPositionMode(symbol);
   }
 
   async dispose() {

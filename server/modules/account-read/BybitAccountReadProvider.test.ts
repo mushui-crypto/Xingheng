@@ -87,6 +87,26 @@ test("Bybit provider boundary exposes no trading or transfer methods", () => {
   assert.equal("setLeverage" in provider, false);
 });
 
+test("reads Bybit Linear position mode through the provider without an account-global cache", async () => {
+  const requested: string[] = [];
+  const provider = new BybitAccountReadProvider({
+    readAccountSnapshot: async () => bybitSnapshot(),
+    readLinearPositionMode: async (symbol) => {
+      requested.push(symbol);
+      return {
+        category: "linear",
+        symbol,
+        positionMode: symbol === "BTCUSDT" ? "ONE_WAY" : "HEDGE",
+        positions: [],
+      };
+    },
+  });
+
+  assert.equal((await provider.readLinearPositionMode("BTCUSDT")).positionMode, "ONE_WAY");
+  assert.equal((await provider.readLinearPositionMode("DOGEUSDT")).positionMode, "HEDGE");
+  assert.deepEqual(requested, ["BTCUSDT", "DOGEUSDT"]);
+});
+
 test("loads isolated Bybit credentials into independent clients and disposes on success", async () => {
   const clients: Array<{ apiKey: string; disposed: boolean }> = [];
   const registry = new AccountReadRegistry({

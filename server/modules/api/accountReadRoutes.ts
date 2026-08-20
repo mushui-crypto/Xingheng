@@ -10,6 +10,16 @@ import { OkxAccountReadError } from "../okx/OkxAccountReadClient";
 const venues = new Set<ExchangeVenue>(["binance", "okx", "bybit", "bitget"]);
 
 export function registerAccountReadRoutes(app: express.Express, registry: AccountReadRegistry) {
+  app.get("/api/account-read/bybit/linear-position/:symbol", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    try {
+      response.json(await registry.readBybitLinearPositionMode(userId(request), request.params.symbol));
+    } catch (error) {
+      const result = errorResponse(error);
+      response.status(result.status).json({ category: result.category, message: result.message });
+    }
+  });
+
   app.get("/api/account-read/:venue", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     try {
