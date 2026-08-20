@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
+import type { BybitAccountAccess, BybitPermissions } from "../bybit/BybitTypes";
 import { OkxProviderError } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxPermissions } from "../okx/OkxTypes";
 import { OkxIntentExecutionServiceRegistry } from "../okx/OkxIntentExecutionServiceRegistry";
@@ -45,9 +46,11 @@ test("rejects credentials with withdrawal permission", async () => {
   assert.equal(store.saved, null);
 });
 
-test("keeps Bybit and Bitget credential-only behavior unchanged", async () => {
+test("binds Bybit to Provider identity while Bitget remains credential-only", async () => {
   const store = new MemoryCredentialStore();
-  const service = new UserExchangeCredentialService(store as never);
+  const service = new UserExchangeCredentialService(store as never, {
+    bybitClientFactory: () => ({ validateAccess: async () => bybitAccess() }),
+  });
 
   const bybit = await service.put("user-1", "bybit", {
     apiKey: "bybit-api-key-001",
@@ -60,12 +63,35 @@ test("keeps Bybit and Bitget credential-only behavior unchanged", async () => {
   });
   assert.equal(bybit.implemented, true);
   assert.equal(bybit.configured, true);
-  assert.match(bybit.accountId ?? "", /^bybit:credential-only:/u);
+  assert.equal(bybit.accountId, "bybit:abcdef0123456789");
+  assert.equal(bybit.permissions?.providerVerified, true);
   assert.equal(bybit.permissions?.executionEnabled, false);
   assert.equal(bitget.configured, true);
   assert.equal(JSON.stringify([bybit, bitget]).includes("passphrase-001"), false);
   assert.equal(store.savedItems.length, 2);
   assert.equal(store.savedItems[1]?.passphrase, "bitget-passphrase-001");
+});
+
+test("enables Bybit execution only after explicit confirmation and Provider revalidation", async () => {
+  const store = new MemoryCredentialStore();
+  await store.save({
+    userId: "user-1", venue: "bybit", accountId: "bybit:abcdef0123456789",
+    accountFingerprint: "abcdef0123456789", apiKey: "bybit-key", apiSecret: "bybit-secret",
+    permissions: { providerVerified: true, executionEnabled: false },
+  });
+  let reads = 0;
+  const service = new UserExchangeCredentialService(store as never, {
+    bybitClientFactory: () => ({ validateAccess: async () => { reads += 1; return bybitAccess(); } }),
+  });
+  await assert.rejects(
+    service.enableBybitExecution("user-1", { confirmation: "ENABLE_OKX_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_execution_enable_confirmation_required",
+  );
+  const enabled = await service.enableBybitExecution("user-1", { confirmation: "ENABLE_BYBIT_EXECUTION" });
+  assert.equal(enabled.permissions?.executionEnabled, true);
+  assert.equal(reads, 1);
+  assert.equal(store.replacedItems.length, 1);
 });
 
 test("binds a new OKX credential to Provider-derived identity before saving", async () => {
@@ -469,6 +495,27 @@ function access(overrides: Partial<BinancePermissions> = {}): BinanceAccountIden
 
 function okxAccess(overrides: Partial<OkxPermissions> = {}): OkxAccountAccess {
   return okxAccessFor("0123456789abcdef", overrides);
+}
+
+function bybitAccess(overrides: Partial<BybitPermissions> = {}): BybitAccountAccess {
+  return {
+    accountId: "bybit:abcdef0123456789",
+    accountFingerprint: "abcdef0123456789",
+    uidHash: `abcdef0123456789${"0".repeat(48)}`,
+    unifiedMarginStatus: 5,
+    marginMode: "REGULAR_MARGIN",
+    permissions: {
+      read: true,
+      spotTrade: true,
+      contractTrade: true,
+      withdraw: false,
+      ipRestricted: true,
+      accountLevelSupported: true,
+      providerVerified: true,
+      executionEnabled: true,
+      ...overrides,
+    },
+  };
 }
 
 function okxAccessFor(
