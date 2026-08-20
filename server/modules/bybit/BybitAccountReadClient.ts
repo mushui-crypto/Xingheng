@@ -32,7 +32,27 @@ export type BybitPerpetualPositionSnapshot = {
   symbol: string;
   side: "long" | "short" | "flat";
   baseQuantity: string;
+  positionIdx?: BybitPositionIdx;
   updatedAt: number | null;
+};
+
+export type BybitPositionIdx = 0 | 1 | 2;
+
+export type BybitLinearPositionMode = "ONE_WAY" | "HEDGE" | "NOT_CONFIRMED";
+
+export type BybitLinearPositionFact = {
+  category: "linear";
+  symbol: string;
+  positionIdx: BybitPositionIdx;
+  side: "long" | "short" | "flat";
+  size: string;
+};
+
+export type BybitLinearPositionModeRead = {
+  category: "linear";
+  symbol: string;
+  positionMode: BybitLinearPositionMode;
+  positions: BybitLinearPositionFact[];
 };
 
 type BybitAccountReadClientOptions = Readonly<{
@@ -130,8 +150,33 @@ export class BybitAccountReadClient {
       symbol: normalizedSymbol,
       side,
       baseQuantity: quantity,
+      positionIdx: optionalPositionIdx(position.positionIdx),
       updatedAt: optionalTimestamp(position.updatedTime),
     };
+  }
+
+  async readLinearPositionMode(symbol: string): Promise<BybitLinearPositionModeRead> {
+    const normalizedSymbol = requiredString(symbol, "Bybit position symbol").toUpperCase();
+    const payload = await this.get("/v5/position/list", {
+      category: "linear",
+      symbol: normalizedSymbol,
+    });
+    const result = requiredRecord(payload.result, "Bybit position result");
+    const positions = requiredList(result.list, "Bybit positions")
+      .map((value) => requiredRecord(value, "Bybit position"))
+      .filter((position) => requiredString(position.symbol, "Bybit position symbol") === normalizedSymbol)
+      .map((position) => toLinearPositionFact(position));
+
+    if (!positions.length) return notConfirmedPositionMode(normalizedSymbol);
+    if (positions.some((position) => position === null)) return notConfirmedPositionMode(normalizedSymbol);
+
+    const facts = positions as BybitLinearPositionFact[];
+    const positionMode = facts.every((position) => position.positionIdx === 0)
+      ? "ONE_WAY"
+      : facts.every((position) => position.positionIdx === 1 || position.positionIdx === 2)
+        ? "HEDGE"
+        : "NOT_CONFIRMED";
+    return { category: "linear", symbol: normalizedSymbol, positionMode, positions: facts };
   }
 
   private async readUnifiedBalances(): Promise<BybitAccountBalance[]> {
@@ -296,6 +341,37 @@ function decimalQuantity(value: unknown, label: string) {
 function optionalTimestamp(value: unknown) {
   const timestamp = Number(value);
   return Number.isSafeInteger(timestamp) && timestamp >= 0 ? timestamp : null;
+}
+
+function optionalPositionIdx(value: unknown): BybitPositionIdx | undefined {
+  if (value === 0 || value === "0") return 0;
+  if (value === 1 || value === "1") return 1;
+  if (value === 2 || value === "2") return 2;
+  return undefined;
+}
+
+function toLinearPositionFact(position: Record<string, unknown>): BybitLinearPositionFact | null {
+  const positionIdx = optionalPositionIdx(position.positionIdx);
+  if (positionIdx === undefined) return null;
+  const size = decimalQuantity(position.size, "Bybit position size");
+  const rawSide = optionalString(position.side);
+  const side = size === "0" || rawSide === null || rawSide === ""
+    ? "flat"
+    : rawSide === "Buy" ? "long"
+      : rawSide === "Sell" ? "short"
+        : null;
+  if (side === null) return null;
+  return {
+    category: "linear",
+    symbol: requiredString(position.symbol, "Bybit position symbol").toUpperCase(),
+    positionIdx,
+    side,
+    size,
+  };
+}
+
+function notConfirmedPositionMode(symbol: string): BybitLinearPositionModeRead {
+  return { category: "linear", symbol, positionMode: "NOT_CONFIRMED", positions: [] };
 }
 
 function invalidPositionSide(): never {

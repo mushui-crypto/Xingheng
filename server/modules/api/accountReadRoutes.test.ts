@@ -33,6 +33,30 @@ test("account read API binds the venue read to the authenticated user", async ()
   }
 });
 
+test("Bybit position-mode API uses the authenticated user and requested target symbol", async () => {
+  const reads: Array<{ userId: string; symbol: string }> = [];
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerAccountReadRoutes(app, {
+    readBybitLinearPositionMode: async (userId: string, symbol: string) => {
+      reads.push({ userId, symbol });
+      return { category: "linear", symbol, positionMode: "ONE_WAY", positions: [] };
+    },
+  } as never);
+
+  const { response, close } = await request(app, "/api/account-read/bybit/linear-position/BTCUSDT");
+  try {
+    assert.equal(response.status, 200);
+    assert.deepEqual(reads, [{ userId: "session-user", symbol: "BTCUSDT" }]);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+  } finally {
+    await close();
+  }
+});
+
 test("account read API rejects an invalid venue", async (t) => {
   const app = express();
   app.use((request, _response, next) => {
