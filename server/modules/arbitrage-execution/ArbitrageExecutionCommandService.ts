@@ -20,6 +20,7 @@ import type {
   FormalExecutionRuntime,
   FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
+import { hasPersistedNotDispatchedProof } from "./FormalExecutionRuntime";
 import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
@@ -319,6 +320,9 @@ export class ArbitrageExecutionCommandService {
       executionIntentId: intent.intentId,
       status: attributableStatus,
       confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
+      ...(runtimeResult.mutationDisposition === undefined
+        ? {}
+        : { mutationDisposition: runtimeResult.mutationDisposition }),
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
@@ -360,10 +364,25 @@ export class ArbitrageExecutionCommandService {
     }
     let currentInstance = instance;
     let reference = candidates[0]!;
+    let recoveredRecord: ExecutionRecord | null = null;
     if (!reference.executionRecordId) {
       const recovered = await this.recoverExecutionReference(userId, instance, leg, reference);
       currentInstance = recovered.instance;
       reference = recovered.reference;
+      recoveredRecord = recovered.record;
+    }
+    if (recoveredRecord && hasPersistedNotDispatchedProof(recoveredRecord)) {
+      const updated = this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, {
+        executionIntentId: reference.executionIntentId,
+        status: "FAILED",
+        confirmedQuantity: "0",
+        mutationDisposition: "NOT_DISPATCHED",
+        updatedAt: recoveredRecord.updatedAt,
+      });
+      const updatedReference = updated.executionReferences.find(
+        (candidate) => candidate.executionIntentId === reference.executionIntentId,
+      )!;
+      return resultFromReference(updated, updatedReference, false, "FAILED");
     }
     if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
       return resultFromReference(currentInstance, reference, true);
@@ -442,7 +461,7 @@ export class ArbitrageExecutionCommandService {
     if (!linkedReference || linkedReference.executionRecordId !== record.executionId) {
       throw commandError("execution_recovery_identity_conflict", "执行记录关联恢复结果不一致。");
     }
-    return Object.freeze({ instance: linked, reference: linkedReference });
+    return Object.freeze({ instance: linked, reference: linkedReference, record });
   }
 
   private async revalidateDraft(

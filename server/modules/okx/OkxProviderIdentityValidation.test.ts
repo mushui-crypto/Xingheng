@@ -44,7 +44,7 @@ test("closed mutation guard blocks OKX Provider identity reads and placeOrder", 
   const result = await runtime.execute(intent());
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(provider.identityReads, 0);
   assert.equal(provider.placeMutations, 0);
   assert.deepEqual(provider.events, []);
@@ -57,8 +57,8 @@ test("mismatched OKX Provider UID identity fails closed before placeOrder", asyn
   const result = await runtime.execute(intent());
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
-  assert.equal(records.updated.at(-1)?.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(records.updated.at(-1)?.status, "FAILED");
   assert.equal(provider.identityReads, 1);
   assert.equal(provider.placeMutations, 0);
   assert.deepEqual(provider.events, ["identity"]);
@@ -73,7 +73,7 @@ test("OKX Provider identity query failure fails closed before placeOrder", async
   const result = await runtime.execute(intent());
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(provider.identityReads, 1);
   assert.equal(provider.placeMutations, 0);
   assert.deepEqual(provider.events, ["identity"]);
@@ -88,7 +88,7 @@ test("invalid OKX API Key fails closed before placeOrder", async () => {
   const result = await runtime.execute(intent());
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(provider.identityReads, 1);
   assert.equal(provider.placeMutations, 0);
   assert.deepEqual(provider.events, ["identity"]);

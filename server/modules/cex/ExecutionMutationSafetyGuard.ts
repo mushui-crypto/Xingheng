@@ -1,3 +1,5 @@
+import { ExecutionPreMutationFailure } from "./ExecutionCapability";
+
 export type ExecutionMutationOperation = "placeOrder" | "cancelOrder";
 
 export type ExecutionMutationContext = Readonly<{
@@ -33,7 +35,7 @@ const FAIL_CLOSED_STATE = Object.freeze({
   killSwitchActive: true,
 });
 
-export class ExecutionMutationSafetyError extends Error {
+export class ExecutionMutationSafetyError extends ExecutionPreMutationFailure {
   constructor(
     readonly category:
       | "live_trading_disabled"
@@ -43,6 +45,7 @@ export class ExecutionMutationSafetyError extends Error {
     message: string,
   ) {
     super(message);
+    this.name = "ExecutionMutationSafetyError";
   }
 }
 

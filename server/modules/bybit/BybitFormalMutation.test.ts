@@ -12,6 +12,7 @@ import type { ArbitrageExecutionPlanningContextSource } from "../arbitrage-execu
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordRecoveryStore, ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { createAsset } from "../cex/Asset";
@@ -23,6 +24,7 @@ import {
   type UnifiedRealTradingTestRequest,
 } from "../cex/UnifiedRealTradingTestCommand";
 import { BybitFormalArbitrageExecutionRuntime } from "./BybitFormalArbitrageExecutionRuntime";
+import { BybitIntentExecutionCapability } from "./BybitIntentExecutionCapability";
 import { InMemoryBybitExecutionOrderReferenceStore } from "./BybitExecutionOrderReferenceStore";
 import { BybitIntentExecutionRuntime, type BybitIntentRuntimeService } from "./BybitIntentExecutionRuntime";
 import { BybitIntentExecutionService, bybitOrderLinkIdFor } from "./BybitIntentExecutionService";
@@ -119,7 +121,9 @@ test("Bybit position mode, LIVE switch, and kill switch fail closed before fake 
     const provider = new FakeBybitRuntimeService("bybit:account-a");
     provider.positionModeResult = 1;
     const service = new BybitIntentExecutionService(provider as never, serviceOptions());
-    await assert.rejects(() => service.execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" })), /positionIdx/u);
+    const result = await new ExecutionCoordinator(new BybitIntentExecutionCapability(service), () => now)
+      .execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" }));
+    assert.equal(result.executionState.status, "FAILED");
     assert.equal(provider.placeRequests.length, 0);
   });
   for (const state of [
@@ -136,18 +140,62 @@ test("Bybit position mode, LIVE switch, and kill switch fail closed before fake 
           venues: { bybit: state },
         }),
       });
-      await assert.rejects(() => service.execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" })), state.message);
+      const result = await new ExecutionCoordinator(new BybitIntentExecutionCapability(service), () => now)
+        .execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" }));
+      assert.equal(result.executionState.status, "FAILED");
+      assert.match(result.step.status === "CALL_FAILED" && result.step.error instanceof Error
+        ? result.step.error.message
+        : "", state.message);
       assert.equal(provider.placeRequests.length, 0);
     });
   }
 });
 
+test("Bybit Provider write uncertainty remains UNKNOWN after the mutation call begins", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  provider.placeFailure = new Error("Provider write outcome is uncertain.");
+  const service = new BybitIntentExecutionService(provider, serviceOptions());
+
+  const result = await new ExecutionCoordinator(new BybitIntentExecutionCapability(service), () => now)
+    .execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" }));
+
+  assert.equal(result.executionState.status, "UNKNOWN");
+  assert.equal(provider.placeRequests.length, 1);
+});
+
+test("Bybit formal runtime exposes NOT_DISPATCHED for a safety rejection without a Provider mutation", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  const records = new InMemoryRecoveryRecordStore();
+  const references = new InMemoryBybitExecutionOrderReferenceStore();
+  const runtime = new BybitIntentExecutionRuntime(
+    { run: async (_userId, operation) => operation(provider) },
+    records,
+    references,
+    {
+      ...serviceOptions(),
+      mutationSafetyGuard: new ExecutionMutationSafetyGuard({
+        liveTradingEnabled: false,
+        killSwitchActive: true,
+        venues: { bybit: { liveTradingEnabled: false, killSwitchActive: true } },
+      }),
+      createExecutionId: () => "execution-bybit-not-dispatched",
+    },
+  );
+
+  const result = await new BybitFormalArbitrageExecutionRuntime(runtime).execute(executionIntent());
+
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(result.confirmedQuantity, "0");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(provider.placeRequests.length, 0);
+});
+
 test("Bybit normal business Command reaches the formal chain while positionIdx remains a dynamic fail-closed preflight", async (t) => {
   for (const [mode, expectedPlaceCount, expectedStatus] of [
     [0, 1, "PENDING_CONFIRMATION"],
-    [1, 0, "UNKNOWN"],
-    [2, 0, "UNKNOWN"],
-    [null, 0, "UNKNOWN"],
+    [1, 0, "FAILED"],
+    [2, 0, "FAILED"],
+    [null, 0, "FAILED"],
   ] as const) {
     await t.test(`positionIdx=${mode ?? "unknown"}`, async () => {
       const fixture = businessCommandFixture(mode);
@@ -340,6 +388,7 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
   orderStatus: BybitProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
   orderSideOverride?: "Buy" | "Sell";
+  placeFailure?: Error;
   private lastOrder?: BybitPlaceOrderRequest;
 
   constructor(private readonly accountId: string) {}
@@ -353,6 +402,7 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
   async placeOrder(request: BybitPlaceOrderRequest) {
     this.placeRequests.push(request);
     this.lastOrder = request;
+    if (this.placeFailure) throw this.placeFailure;
     return { category: request.category, symbol: request.symbol, orderId: "bybit-order-1", orderLinkId: request.orderLinkId };
   }
   async getOrder(request: BybitGetOrderRequest): Promise<BybitProviderOrder> {

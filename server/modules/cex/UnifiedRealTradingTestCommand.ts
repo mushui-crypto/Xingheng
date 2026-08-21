@@ -256,6 +256,7 @@ function runtimeResultAction(
   successAction: "EXECUTED" | "RECONCILED",
   safetyRejected = false,
 ): UnifiedRealTradingTestResult["action"] {
+  if (runtimeResult.executionRecord.status === "FAILED" && safetyRejected) return "BLOCKED";
   if (runtimeResult.executionRecord.status === "FAILED") return "FAILED";
   if (runtimeResult.executionRecord.status === "UNKNOWN") {
     return safetyRejected ? "BLOCKED" : "UNKNOWN";

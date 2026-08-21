@@ -133,7 +133,7 @@ test("production-equivalent OKX Spot mutation remains behind Mutation Safety Gua
 
   const result = await fixture.formalRuntime.execute(okxIntent("DOGE-USDT-SPOT", "buy", "100"));
 
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(fixture.provider.identityReads, 0);
   assert.equal(fixture.provider.placeRequests.length, 0);
 });

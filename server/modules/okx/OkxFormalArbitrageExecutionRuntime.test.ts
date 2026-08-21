@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createAsset } from "../cex/Asset";
+import { ExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecordFromIntent, createExecutionRecord } from "../cex/ExecutionRecord";
 import { assertExecutionIdentityContract, assertFormalResultContract } from "../cex/RuntimeLifecycleContractAssertions";
@@ -37,6 +38,35 @@ test("uses the same diagnostic contract for rejected and credential errors", asy
     assert.equal(result.diagnostic?.errorType, "Error");
     assert.doesNotMatch(result.diagnostic?.sanitizedMessage ?? "", /top-secret/u);
   }
+});
+
+test("exposes NOT_DISPATCHED only for a proven OKX pre-mutation FAILED result", async () => {
+  const intent = diagnosticExecutionIntent();
+  const adapter = new OkxFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({
+          ...createExecutionRecordFromIntent("record-okx-not-dispatched", value),
+          status: "FAILED",
+        }),
+        execution: {
+          status: "CALL_FAILED",
+          step: {
+            status: "CALL_FAILED",
+            result: null,
+            error: new ExecutionPreMutationFailure("OKX blocked before placeOrder"),
+          },
+        },
+      } as any;
+    },
+  });
+
+  const result = await adapter.execute(intent);
+
+  assert.equal(result.confirmedQuantity, "0");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
 });
 
 function diagnosticExecutionIntent() {

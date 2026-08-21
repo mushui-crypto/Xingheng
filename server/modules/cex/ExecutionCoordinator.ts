@@ -5,7 +5,10 @@ import {
   type ExecutionState,
   type ExecutionStatus,
 } from "./ExecutionState";
-import type { ExecutionCapability } from "./ExecutionCapability";
+import {
+  isExecutionPreMutationFailure,
+  type ExecutionCapability,
+} from "./ExecutionCapability";
 
 export type ExecutionStep<TResult> =
   | Readonly<{
@@ -72,8 +75,9 @@ export class ExecutionCoordinator<TResult> {
         result: capabilityResult,
       });
     } catch (error) {
+      const failedBeforeMutation = isExecutionPreMutationFailure(error);
       executionState = transitionExecutionState(executionState, {
-        type: "REMOTE_UNKNOWN",
+        type: failedBeforeMutation ? "SUBMISSION_FAILED" : "REMOTE_UNKNOWN",
         occurredAt: this.nowAtOrAfter(executionState.updatedAt),
       });
       return result(intent, "CALL_FAILED", executionState, {

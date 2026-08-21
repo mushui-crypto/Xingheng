@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { ExecutionPreMutationFailure } from "./ExecutionCapability";
 import { ExecutionCoordinator } from "./ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "./ExecutionIntent";
 
@@ -145,6 +146,21 @@ test("reports a capability call failure without retrying or asserting provider f
     },
   });
   assert.equal(coordinated.step.status === "CALL_FAILED" && coordinated.step.error, failure);
+});
+
+test("maps explicitly proven pre-mutation rejects to FAILED for every formal venue", async () => {
+  for (const venue of ["binance", "okx", "bybit"] as const) {
+    const capability = new MockExecutionCapability();
+    capability.failure = new ExecutionPreMutationFailure("deterministic pre-mutation rejection");
+
+    const coordinated = await new ExecutionCoordinator(capability, () => now)
+      .execute(executionIntent({ venue }));
+
+    assert.equal(capability.calls.length, 1);
+    assert.equal(coordinated.status, "CALL_FAILED");
+    assert.equal(coordinated.executionState.status, "FAILED");
+    assert.equal(coordinated.step.status, "CALL_FAILED");
+  }
 });
 
 test("preserves a non-Error capability failure without retrying", async () => {

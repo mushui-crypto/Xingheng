@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createAsset } from "../cex/Asset";
+import { ExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecordFromIntent, createExecutionRecord } from "../cex/ExecutionRecord";
 import { assertExecutionIdentityContract, assertFormalResultContract } from "../cex/RuntimeLifecycleContractAssertions";
@@ -76,6 +77,57 @@ test("unknown production results expose no fabricated confirmed quantity", async
   const result = await adapter.execute(intent);
   assert.equal(result.confirmedQuantity, null);
   assert.equal(result.executionRecord.status, "UNKNOWN");
+});
+
+test("deterministic FAILED without a Provider attempt carries authoritative zero quantity", async () => {
+  const intent = executionIntent();
+  const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({
+          ...createExecutionRecordFromIntent("record-pre-mutation-failed", value),
+          status: "FAILED",
+        }),
+        execution: {
+          step: {
+            status: "CALL_FAILED",
+            result: null,
+            error: new ExecutionPreMutationFailure("deterministic rejection"),
+          },
+        } as any,
+      };
+    },
+  });
+
+  const result = await adapter.execute(intent);
+
+  assert.equal(result.confirmedQuantity, "0");
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+});
+
+test("FAILED without explicit pre-mutation proof does not fabricate zero quantity", async () => {
+  const intent = executionIntent();
+  const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({
+          ...createExecutionRecordFromIntent("record-unproven-failed", value),
+          status: "FAILED",
+        }),
+        execution: executionResult(undefined),
+      };
+    },
+  });
+
+  const result = await adapter.execute(intent);
+
+  assert.equal(result.confirmedQuantity, null);
+  assert.equal(result.mutationDisposition, undefined);
 });
 
 test("maps a failed capability to a safe shared diagnostic without changing UNKNOWN semantics", async () => {

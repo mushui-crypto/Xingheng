@@ -1,6 +1,8 @@
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import {
+  confirmedQuantityFromExecution,
   diagnosticFromExecution,
+  mutationDispositionFromExecution,
   type FormalExecutionRuntime,
   type FormalExecutionRuntimeResult,
 } from "../arbitrage-execution/FormalExecutionRuntime";
@@ -15,9 +17,24 @@ export class OkxFormalArbitrageExecutionRuntime implements FormalExecutionRuntim
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
     const result = await this.runtime.execute(intent);
     const diagnostic = diagnosticFromExecution(result.execution);
+    const mutationDisposition = mutationDispositionFromExecution({
+      executionRecord: result.executionRecord,
+      ...(result.execution.step.status === "CALL_FAILED"
+        ? { capabilityError: result.execution.step.error }
+        : {}),
+    });
     return Object.freeze({
       executionRecord: result.executionRecord,
-      confirmedQuantity: result.execution.step.result?.confirmedQuantity ?? null,
+      confirmedQuantity: confirmedQuantityFromExecution({
+        executionRecord: result.executionRecord,
+        ...(result.execution.step.result?.confirmedQuantity === undefined
+          ? {}
+          : { capabilityConfirmedQuantity: result.execution.step.result.confirmedQuantity }),
+        ...(result.execution.step.status === "CALL_FAILED"
+          ? { capabilityError: result.execution.step.error }
+          : {}),
+      }),
+      ...(mutationDisposition === undefined ? {} : { mutationDisposition }),
       ...(diagnostic === undefined ? {} : { diagnostic }),
     });
   }

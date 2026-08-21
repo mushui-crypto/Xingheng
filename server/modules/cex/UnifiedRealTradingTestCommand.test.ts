@@ -165,7 +165,7 @@ test("live trading disabled and active kill switch return BLOCKED with Provider 
     const result = await fixture.command.run(request({ requestId: `blocked-${String(safety.killSwitchActive)}` }));
 
     assert.equal(result.action, "BLOCKED");
-    assert.equal(result.runtimeResult?.executionRecord.status, "UNKNOWN");
+    assert.equal(result.runtimeResult?.executionRecord.status, "FAILED");
     assert.equal(fixture.provider.placeRequests.length, 0);
     assert.equal(fixture.provider.cancelRequests.length, 0);
   }

@@ -33,6 +33,17 @@ test("a provider call anomaly becomes UNKNOWN instead of FAILED", () => {
   );
 });
 
+test("a deterministic failure before Provider mutation becomes FAILED", () => {
+  const submitted = transitionExecutionState(
+    createExecutionState(executionIntent()),
+    { type: "SUBMISSION_STARTED", occurredAt: now + 1 },
+  );
+
+  const failed = transitionExecutionState(submitted, { type: "SUBMISSION_FAILED", occurredAt: now + 2 });
+
+  assert.equal(failed.status, "FAILED");
+});
+
 test("UNKNOWN can resolve only from an authoritative remote fact", () => {
   const submitted = transitionExecutionState(
     createExecutionState(executionIntent()),

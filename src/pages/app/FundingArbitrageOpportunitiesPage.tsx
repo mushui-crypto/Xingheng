@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useReducer } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { ArbitrageOpportunityAnalysis } from "../../features/arbitrage/components/ArbitrageOpportunityAnalysis";
@@ -14,35 +14,92 @@ import type {
 } from "../../features/arbitrage/model/types";
 
 const horizons: ArbitrageHorizon[] = [90, 365];
+export const ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
+
+export type ArbitrageDashboardRefreshState = {
+  snapshot: ArbitrageDashboardSnapshot | null;
+  executionOpportunityId: string | null;
+  status: "idle" | "loading" | "refreshing";
+  error: string;
+};
+
+type ArbitrageDashboardRefreshAction =
+  | { type: "load-started"; selectedOpportunityId: string }
+  | { type: "load-succeeded"; snapshot: ArbitrageDashboardSnapshot; selectedOpportunityId: string }
+  | { type: "load-failed"; error: string }
+  | { type: "reset" };
+
+export const initialArbitrageDashboardRefreshState: ArbitrageDashboardRefreshState = {
+  snapshot: null,
+  executionOpportunityId: null,
+  status: "idle",
+  error: "",
+};
+
+export function reduceArbitrageDashboardRefreshState(
+  state: ArbitrageDashboardRefreshState,
+  action: ArbitrageDashboardRefreshAction,
+): ArbitrageDashboardRefreshState {
+  switch (action.type) {
+    case "load-started":
+      return {
+        ...state,
+        executionOpportunityId: state.executionOpportunityId === action.selectedOpportunityId
+          ? state.executionOpportunityId
+          : null,
+        status: state.snapshot ? "refreshing" : "loading",
+        error: "",
+      };
+    case "load-succeeded": {
+      const selectedOpportunityAvailable = action.snapshot.opportunities.some(
+        (opportunity) => opportunity.id === action.selectedOpportunityId,
+      );
+      return {
+        snapshot: action.snapshot,
+        executionOpportunityId: selectedOpportunityAvailable
+          ? action.selectedOpportunityId
+          : state.executionOpportunityId,
+        status: "idle",
+        error: "",
+      };
+    }
+    case "load-failed":
+      return { ...state, status: "idle", error: action.error };
+    case "reset":
+      return initialArbitrageDashboardRefreshState;
+  }
+}
 
 export function FundingArbitrageOpportunitiesPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const opportunityId = searchParams.get("opportunityId");
   const resumeArbitrageId = searchParams.get("resumeArbitrageId");
   const horizonDays = parseArbitrageAnalysisHorizon(searchParams.get("horizonDays"));
-  const [snapshot, setSnapshot] = useState<ArbitrageDashboardSnapshot | null>(null);
-  const [loading, setLoading] = useState(Boolean(opportunityId));
-  const [refreshing, setRefreshing] = useState(false);
-  const [error, setError] = useState("");
+  const [{ snapshot, executionOpportunityId, status, error }, dispatchRefresh] = useReducer(
+    reduceArbitrageDashboardRefreshState,
+    initialArbitrageDashboardRefreshState,
+  );
+  const loading = status === "loading" || (Boolean(opportunityId) && !snapshot && !error);
+  const refreshing = status === "refreshing";
 
   const load = useCallback(async (forceRefresh = false) => {
     if (!opportunityId) {
-      setSnapshot(null);
-      setLoading(false);
-      setRefreshing(false);
+      dispatchRefresh({ type: "reset" });
       return;
     }
 
-    forceRefresh ? setRefreshing(true) : setLoading(true);
-    if (!forceRefresh) setSnapshot(null);
-    setError("");
+    dispatchRefresh({ type: "load-started", selectedOpportunityId: opportunityId });
     try {
-      setSnapshot(await fetchArbitrageDashboard(horizonDays, forceRefresh));
+      dispatchRefresh({
+        type: "load-succeeded",
+        snapshot: await fetchArbitrageDashboard(horizonDays, forceRefresh),
+        selectedOpportunityId: opportunityId,
+      });
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : "套利分析数据加载失败。");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
+      dispatchRefresh({
+        type: "load-failed",
+        error: loadError instanceof Error ? loadError.message : "套利分析数据加载失败。",
+      });
     }
   }, [horizonDays, opportunityId]);
 
@@ -52,7 +109,7 @@ export function FundingArbitrageOpportunitiesPage() {
 
   useEffect(() => {
     if (!opportunityId) return;
-    const timer = window.setInterval(() => void load(), 30_000);
+    const timer = window.setInterval(() => void load(), ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [load, opportunityId]);
 
@@ -86,7 +143,7 @@ export function FundingArbitrageOpportunitiesPage() {
         </div>
         <div className="flex flex-wrap items-center justify-end gap-3 text-xs text-muted">
           <span>{snapshot ? `更新于 ${new Date(snapshot.generatedAt).toLocaleTimeString("zh-CN", { hour12: false })}` : "等待数据"}</span>
-          {opportunity ? <ArbitrageExecutionDraftEntry horizonDays={horizonDays} opportunityId={opportunity.id} resumeArbitrageId={resumeArbitrageId} /> : null}
+          {executionOpportunityId && executionOpportunityId === opportunityId ? <ArbitrageExecutionDraftEntry horizonDays={horizonDays} opportunityId={executionOpportunityId} resumeArbitrageId={resumeArbitrageId} /> : null}
           <button
             type="button"
             className="inline-flex h-10 w-10 items-center justify-center border border-white/20 text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white disabled:opacity-50"
@@ -108,8 +165,8 @@ export function FundingArbitrageOpportunitiesPage() {
       </div>
 
       {error ? (
-        <div className="flex items-center justify-between gap-4 border border-red-400/35 bg-black px-4 py-3 text-sm text-red-200">
-          <span>{error}</span>
+        <div className="flex items-center justify-between gap-4 border border-red-400/35 bg-black px-4 py-3 text-sm text-red-200" role={snapshot ? "status" : "alert"}>
+          <span>{snapshot ? `后台刷新失败，继续显示上次有效数据：${error}` : error}</span>
           <button className="shrink-0 font-semibold text-white hover:underline" type="button" onClick={() => void load(true)}>重试</button>
         </div>
       ) : null}

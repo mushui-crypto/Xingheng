@@ -3,6 +3,7 @@ import {
   createExecutionCancelObservation,
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
+import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import {
   createExecutionQueryObservation,
@@ -111,18 +112,21 @@ export class OkxIntentExecutionService {
     if (intent.venue !== "okx") {
       throw new Error(`Unsupported execution venue: ${intent.venue}.`);
     }
-    const prepared = await this.prepare(intent);
-    await this.mutationSafetyGuard.assertAllowed({
-      venue: intent.venue,
-      operation: "placeOrder",
-      userId: intent.userId,
-      accountId: intent.accountId,
-      instrumentId: intent.instrumentId,
-      providerInstrumentId: prepared.instId,
-    }, this.options.validateProviderIdentity);
-    await this.options.persistRecoveryReference?.({
-      instId: prepared.instId,
-      clOrdId: prepared.clOrdId,
+    const prepared = await runExecutionPreMutationPhase(async () => {
+      const value = await this.prepare(intent);
+      await this.mutationSafetyGuard.assertAllowed({
+        venue: intent.venue,
+        operation: "placeOrder",
+        userId: intent.userId,
+        accountId: intent.accountId,
+        instrumentId: intent.instrumentId,
+        providerInstrumentId: value.instId,
+      }, this.options.validateProviderIdentity);
+      await this.options.persistRecoveryReference?.({
+        instId: value.instId,
+        clOrdId: value.clOrdId,
+      });
+      return value;
     });
     const accepted = await this.client.placeOrder(prepared);
     assertAcceptedIdentity(accepted, prepared);

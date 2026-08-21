@@ -195,6 +195,68 @@ test("marks a terminated zero-exposure opening as FAILED and lists active/histor
   });
 });
 
+test("terminalizes only a proven first-leg NOT_DISPATCHED failure without a synthetic second reference", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    claimAndLink(store, "long-leg", "long-not-dispatched", "OPENING", "INCREASE", "1", start + 10);
+    const failed = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "long-not-dispatched",
+      status: "FAILED",
+      confirmedQuantity: "0",
+      mutationDisposition: "NOT_DISPATCHED",
+      updatedAt: start + 12,
+    });
+
+    assert.equal(failed.status, "FAILED");
+    assert.equal(failed.executionReferences.length, 1);
+    assert.equal(failed.executionReferences[0]?.legId, "long-leg");
+    assert.deepEqual(failed.legs.map(managedCurrentQuantity), ["0", "0"]);
+  });
+});
+
+test("does not terminalize UNKNOWN, unproven FAILED, nonzero FAILED, or an opening with a second reference", () => {
+  withStore(({ store }) => {
+    for (const [arbitrageId, status, quantity] of [
+      ["unknown", "UNKNOWN", "0"],
+      ["unproven", "FAILED", "0"],
+      ["nonzero", "FAILED", "0.1"],
+    ] as const) {
+      store.create(instance({ arbitrageId }));
+      claimAndLink(store, "long-leg", `${arbitrageId}-intent`, "OPENING", "INCREASE", "1", start + 10, arbitrageId);
+      const current = store.applyExecutionResult("user-a", arbitrageId, {
+        executionIntentId: `${arbitrageId}-intent`,
+        status,
+        confirmedQuantity: quantity,
+        updatedAt: start + 12,
+      });
+      assert.notEqual(current.status, "FAILED", arbitrageId);
+    }
+
+    store.create(instance({ arbitrageId: "second-reference" }));
+    claimAndLink(store, "long-leg", "first-intent", "OPENING", "INCREASE", "1", start + 20, "second-reference");
+    store.claimExecutionReference("user-a", "second-reference", claim(
+      "short-leg", "second-intent", start + 21,
+    ));
+    const preserved = store.applyExecutionResult("user-a", "second-reference", {
+      executionIntentId: "first-intent",
+      status: "FAILED",
+      confirmedQuantity: "0",
+      mutationDisposition: "NOT_DISPATCHED",
+      updatedAt: start + 22,
+    });
+    assert.equal(preserved.status, "OPENING");
+    assert.equal(preserved.executionReferences.length, 2);
+
+    assert.throws(() => store.applyExecutionResult("user-a", "unknown", {
+      executionIntentId: "unknown-intent",
+      status: "UNKNOWN",
+      confirmedQuantity: "0",
+      mutationDisposition: "NOT_DISPATCHED",
+      updatedAt: start + 13,
+    }), /NOT_DISPATCHED proof requires/u);
+  });
+});
+
 test("fails only a truly empty OPENING instance and never clears execution evidence", () => {
   withStore(({ store }) => {
     store.create(instance());
@@ -661,15 +723,16 @@ function claimAndLink(
   quantityEffect: "INCREASE" | "DECREASE",
   requestedQuantity: string,
   time: number,
+  arbitrageId = "arbitrage-1",
 ) {
   store.claimExecutionReference(
     "user-a",
-    "arbitrage-1",
+    arbitrageId,
     claim(legId, executionIntentId, time, phase, quantityEffect, requestedQuantity),
   );
   store.linkExecutionRecord(
     "user-a",
-    "arbitrage-1",
+    arbitrageId,
     executionIntentId,
     `${executionIntentId}-record`,
     time + 1,

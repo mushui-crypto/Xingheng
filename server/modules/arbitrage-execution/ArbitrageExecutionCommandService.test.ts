@@ -365,6 +365,7 @@ test("FAILED and UNKNOWN first-leg facts preserve the instance and block the sec
       { confirmationId: `confirmation-${status}` },
     ));
     assert.ok(fixture.store.get("user-a", created.instance.arbitrageId));
+    assert.equal(first.instance.status, "OPENING");
     assert.equal(first.secondLegAllowed, false);
     assert.equal(first.instance.executionReferences[0]?.status, status);
     await assert.rejects(
@@ -668,20 +669,39 @@ test("client-controlled provider fields and complete intents are rejected", asyn
   assert.equal(fixture.runtime.calls.length, 0);
 });
 
-test("LIVE/kill-switch style RiskGuard blocks remain UNKNOWN and never enable a second leg", async (t) => {
-  for (const gate of ["LIVE_TRADING_ENABLED=false", "BINANCE_KILL_SWITCH=true"] as const) {
-    const fixture = setup(t);
-    const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId: gate }));
-    fixture.runtime.onExecute = (intent) => runtimeResult(intent, "UNKNOWN", "0");
-    const result = await fixture.service.executeLeg("user-a", legRequest(
-      created.instance.arbitrageId,
-      "long-leg",
-      gate,
-      { confirmationId: gate },
-    ));
-    assert.equal(result.executionRecord.status, "UNKNOWN");
-    assert.equal(result.secondLegAllowed, false);
-    assert.equal(fixture.runtime.providerMutations, 0);
+test("LIVE/kill-switch deterministic pre-mutation blocks remain FAILED and never enable a second leg", async (t) => {
+  for (const venue of ["binance", "okx", "bybit"] as const) {
+    for (const gate of ["LIVE_TRADING_ENABLED=false", "KILL_SWITCH=true"] as const) {
+      const confirmationId = `${venue}-${gate}`;
+      const fixture = setup(t, {
+        draft: draft(true, "0.001", [venue, venue]),
+        runtimeVenues: [venue],
+        credentialVenues: [venue],
+      });
+      const created = await fixture.service.confirm("user-a", finalRequest({ confirmationId }));
+      fixture.runtime.onExecute = (intent) => runtimeResult(intent, "FAILED", "0", "NOT_DISPATCHED");
+      const result = await fixture.service.executeLeg("user-a", legRequest(
+        created.instance.arbitrageId,
+        "long-leg",
+        gate,
+        { confirmationId },
+      ));
+      assert.equal(result.executionRecord.status, "FAILED");
+      assert.equal(result.instance.status, "FAILED");
+      assert.equal(result.instance.executionReferences.length, 1);
+      assert.equal(result.secondLegAllowed, false);
+      assert.equal(fixture.runtime.providerMutations, 0);
+      await assert.rejects(
+        () => fixture.service.executeLeg("user-a", legRequest(
+          created.instance.arbitrageId,
+          "short-leg",
+          `second-${gate}`,
+          { confirmationId },
+        )),
+        /Terminal arbitrage instance|终态|不能/u,
+      );
+      assert.equal(fixture.runtime.calls.length, 1);
+    }
   }
 });
 
@@ -964,6 +984,31 @@ test("CLAIMED UNKNOWN record recovers its link without fabricating confirmed qua
   assert.equal(recovered.instance.executionReferences[0]?.confirmedQuantity, "0");
   assert.equal(recovered.instance.legs[0].confirmedOpenedQuantity, "0");
   assert.equal(recovered.secondLegAllowed, false);
+});
+
+test("link recovery terminalizes a persisted pre-mutation FAILED record without Provider reconciliation", async (t) => {
+  const fixture = setup(t);
+  const created = await fixture.service.confirm("user-a", finalRequest());
+  const seeded = seedInterruptedExecution(
+    fixture,
+    created.instance,
+    "long-leg",
+    "intent-not-dispatched",
+    { status: "FAILED" },
+  );
+
+  const recovered = await fixture.service.reconcileLeg("user-a", {
+    arbitrageId: created.instance.arbitrageId,
+    legId: "long-leg",
+  });
+
+  assert.equal(recovered.executionRecord.executionId, seeded.executionId);
+  assert.equal(recovered.executionRecord.status, "FAILED");
+  assert.equal(recovered.executionRecord.confirmedQuantity, "0");
+  assert.equal(recovered.instance.status, "FAILED");
+  assert.equal(recovered.instance.executionReferences.length, 1);
+  assert.equal(fixture.runtime.reconcileCalls.length, 0);
+  assert.equal(fixture.runtime.providerMutations, 0);
 });
 
 test("missing or multiple local records fail closed without provider access", async (t) => {
@@ -1271,7 +1316,12 @@ function legRequest(arbitrageId: string, legId: string, commandId = "first-comma
   return { ...finalRequest(overrides), arbitrageId, legId, commandId };
 }
 
-function runtimeResult(intent: ExecutionIntent, status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN", confirmedQuantity: string | null) {
+function runtimeResult(
+  intent: ExecutionIntent,
+  status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN",
+  confirmedQuantity: string | null,
+  mutationDisposition?: "NOT_DISPATCHED",
+) {
   return Object.freeze({
     executionRecord: createExecutionRecord({
       executionId: `record-${intent.intentId}`,
@@ -1285,6 +1335,7 @@ function runtimeResult(intent: ExecutionIntent, status: "CONFIRMED" | "PENDING_C
       updatedAt: intent.createdAt,
     }),
     confirmedQuantity,
+    ...(mutationDisposition === undefined ? {} : { mutationDisposition }),
   });
 }
 
