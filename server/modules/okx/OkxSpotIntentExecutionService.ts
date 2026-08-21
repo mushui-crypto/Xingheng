@@ -2,6 +2,7 @@ import {
   createExecutionCancelObservation,
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
+import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import {
   createExecutionQueryObservation,
@@ -56,20 +57,23 @@ export class OkxSpotIntentExecutionService {
 
   async execute(intent: ExecutionIntent): Promise<OkxIntentExecutionResult> {
     if (intent.venue !== "okx") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    const prepared = await this.prepare(intent);
-    const persistRecoveryReference = this.options.persistRecoveryReference;
-    if (persistRecoveryReference === undefined) {
-      throw new Error("OKX Spot recovery reference persistence is required before mutation.");
-    }
-    await this.mutationSafetyGuard.assertAllowed({
-      venue: "okx", operation: "placeOrder", userId: intent.userId, accountId: intent.accountId,
-      instrumentId: intent.instrumentId, providerInstrumentId: prepared.instId,
-    }, this.options.validateProviderIdentity);
-    await persistRecoveryReference({
-      instId: prepared.instId,
-      clOrdId: prepared.clOrdId,
-      expectedProviderQuantity: prepared.quantity,
-      expectedSide: prepared.side,
+    const prepared = await runExecutionPreMutationPhase(async () => {
+      const value = await this.prepare(intent);
+      const persistRecoveryReference = this.options.persistRecoveryReference;
+      if (persistRecoveryReference === undefined) {
+        throw new Error("OKX Spot recovery reference persistence is required before mutation.");
+      }
+      await this.mutationSafetyGuard.assertAllowed({
+        venue: "okx", operation: "placeOrder", userId: intent.userId, accountId: intent.accountId,
+        instrumentId: intent.instrumentId, providerInstrumentId: value.instId,
+      }, this.options.validateProviderIdentity);
+      await persistRecoveryReference({
+        instId: value.instId,
+        clOrdId: value.clOrdId,
+        expectedProviderQuantity: value.quantity,
+        expectedSide: value.side,
+      });
+      return value;
     });
     const accepted = await this.client.placeOrder(prepared);
     if (accepted.instId !== prepared.instId || accepted.clOrdId !== prepared.clOrdId) {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionStatus } from "../cex/ExecutionState";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
@@ -58,7 +59,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     if (intent.venue !== "binance") {
       throw new Error(`Unsupported execution venue: ${intent.venue}.`);
     }
-    const prepared = await this.prepare(intent);
+    const prepared = await runExecutionPreMutationPhase(() => this.prepare(intent));
     const order = await this.service.placeExecutionOrder(
       prepared.order,
       this.assertSubmitAllowed

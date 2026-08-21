@@ -119,6 +119,10 @@ export function requireArbitrageInstance(payload: unknown) {
   return instance(payload);
 }
 
+export function requireArbitragePositionVerification(payload: unknown) {
+  return positionVerification(payload);
+}
+
 function instanceList(payload: unknown) {
   if (!Array.isArray(payload)) throw invalidResponse();
   return payload.map(instance);

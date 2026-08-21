@@ -1,3 +1,4 @@
+import { ExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import type {
   BinanceExecutionOrderRequest,
   BinanceGenericRiskContext,
@@ -7,9 +8,10 @@ import type {
 } from "./BinanceTypes";
 import type { BinanceTradingConfig } from "./BinanceTradingConfig";
 
-export class BinanceRiskError extends Error {
+export class BinanceRiskError extends ExecutionPreMutationFailure {
   constructor(readonly category: string, message: string) {
     super(message);
+    this.name = "BinanceRiskError";
   }
 }
 

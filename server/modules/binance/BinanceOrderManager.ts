@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { executionPreMutationFailure } from "../cex/ExecutionCapability";
 import { BinanceProviderError } from "./BinanceClient";
 import { BinanceOrderStore, type BinanceStoredOrder } from "./BinanceOrderStore";
 import { BinanceRiskGuard } from "./BinanceRiskGuard";
@@ -147,7 +148,7 @@ export class BinanceOrderManager {
       } catch (error) {
         if (!submissionStarted) {
           this.store.fail(input.idempotencyKey, errorMessage(error));
-          throw error;
+          throw executionPreMutationFailure(error);
         }
 
         if (error instanceof BinanceProviderOrderIdentityError

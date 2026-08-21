@@ -150,7 +150,7 @@ test("recovery-anchor persistence failure blocks placeOrder before Provider muta
   const result = await runtime.execute(intent("intent-recovery-anchor-failure"));
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(service.placeMutations, 0);
   assert.equal(service.cancelMutations, 0);
   assert.equal(service.providerMutations, 0);

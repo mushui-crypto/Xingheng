@@ -114,7 +114,7 @@ test("default OKX production safety state blocks place and cancel mutations", as
     (error: unknown) => error instanceof ExecutionMutationSafetyError,
   );
 
-  assert.equal(placed.executionRecord.status, "UNKNOWN");
+  assert.equal(placed.executionRecord.status, "FAILED");
   assert.equal(provider.identityReads, 0);
   assert.equal(provider.placeMutations, 0);
   assert.equal(provider.cancelMutations, 0);
@@ -146,7 +146,7 @@ test("OKX Provider identity mismatch blocks production runtime mutation", async 
 
   const result = await runtime.execute(intent());
 
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(provider.identityReads, 1);
   assert.equal(provider.placeMutations, 0);
   assert.equal(provider.cancelMutations, 0);

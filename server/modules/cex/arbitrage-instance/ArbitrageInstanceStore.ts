@@ -43,6 +43,7 @@ export type ExecutionResultUpdate = Readonly<{
   executionIntentId: string;
   status: "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN";
   confirmedQuantity: string;
+  mutationDisposition?: "NOT_DISPATCHED";
   updatedAt: number;
 }>;
 
@@ -378,6 +379,7 @@ export class ArbitrageInstanceStore {
       const next = this.deriveLifecycle(
         this.requireForUser(normalizedUserId, normalizedArbitrageId),
         normalizedUpdate.updatedAt,
+        normalizedUpdate.mutationDisposition,
       );
       this.persistLifecycle(normalizedUserId, normalizedArbitrageId, next);
       return this.requireForUser(normalizedUserId, normalizedArbitrageId);
@@ -639,7 +641,11 @@ export class ArbitrageInstanceStore {
       WHERE arbitrageId = ? AND legId = ?`).run(next, arbitrageId, reference.legId);
   }
 
-  private deriveLifecycle(instance: ArbitrageInstance, updatedAt: number) {
+  private deriveLifecycle(
+    instance: ArbitrageInstance,
+    updatedAt: number,
+    mutationDisposition?: "NOT_DISPATCHED",
+  ) {
     const quantities = instance.legs.map(managedCurrentQuantity) as [string, string];
     const hasExposure = quantities.some((quantity) => quantity !== "0");
     const hasMaterialExposure = instance.legs.some((leg, index) => {
@@ -667,11 +673,17 @@ export class ArbitrageInstanceStore {
       status = bothExposed && residualWithinThreshold && !unresolved ? "HOLDING" : "RESIDUAL";
     } else {
       const openingReferences = instance.executionReferences.filter(({ phase }) => phase === "OPENING");
+      const notDispatchedFirstLegFailure = mutationDisposition === "NOT_DISPATCHED"
+        && instance.executionReferences.length === 1
+        && openingReferences.length === 1
+        && openingReferences[0]?.quantityEffect === "INCREASE"
+        && openingReferences[0]?.status === "FAILED"
+        && openingReferences[0]?.confirmedQuantity === "0";
       const attemptedLegIds = new Set(openingReferences.map(({ legId }) => legId));
       const openingTerminated = instance.legs.every(({ legId }) => attemptedLegIds.has(legId))
         && openingReferences.every(({ status: referenceStatus }) =>
           referenceStatus === "CONFIRMED" || referenceStatus === "FAILED");
-      status = openingTerminated && !unresolved ? "FAILED" : "OPENING";
+      status = (notDispatchedFirstLegFailure || openingTerminated) && !unresolved ? "FAILED" : "OPENING";
     }
     return {
       status,
@@ -901,10 +913,18 @@ function normalizeExecutionResult(update: ExecutionResultUpdate): ExecutionResul
     && update.status !== "FAILED" && update.status !== "UNKNOWN") {
     throw new Error("Execution result status is invalid.");
   }
+  const confirmedQuantity = normalizeUnsignedDecimal(update.confirmedQuantity, "confirmedQuantity");
+  if (update.mutationDisposition !== undefined
+    && (update.mutationDisposition !== "NOT_DISPATCHED"
+      || update.status !== "FAILED"
+      || confirmedQuantity !== "0")) {
+    throw new Error("NOT_DISPATCHED proof requires a zero-quantity FAILED execution result.");
+  }
   return Object.freeze({
     executionIntentId: identifier(update.executionIntentId, "executionIntentId"),
     status: update.status,
-    confirmedQuantity: normalizeUnsignedDecimal(update.confirmedQuantity, "confirmedQuantity"),
+    confirmedQuantity,
+    ...(update.mutationDisposition === undefined ? {} : { mutationDisposition: update.mutationDisposition }),
     updatedAt: timestamp(update.updatedAt, "updatedAt"),
   });
 }

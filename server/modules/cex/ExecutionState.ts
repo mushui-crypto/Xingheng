@@ -21,6 +21,7 @@ export type ExecutionState = Readonly<{
 
 export type ExecutionStateEvent =
   | Readonly<{ type: "SUBMISSION_STARTED"; occurredAt: number }>
+  | Readonly<{ type: "SUBMISSION_FAILED"; occurredAt: number }>
   | Readonly<{ type: "SUBMISSION_ACCEPTED"; occurredAt: number }>
   | Readonly<{ type: "REMOTE_PENDING"; occurredAt: number }>
   | Readonly<{ type: "REMOTE_CONFIRMED"; occurredAt: number }>
@@ -62,6 +63,7 @@ function nextStatus(
   event: ExecutionStateEvent["type"],
 ): ExecutionStatus {
   if (event === "SUBMISSION_STARTED" && status === "CREATED") return "SUBMITTED";
+  if (event === "SUBMISSION_FAILED" && status === "SUBMITTED") return "FAILED";
   if (event === "SUBMISSION_ACCEPTED" && status === "SUBMITTED") return "PENDING_CONFIRMATION";
   if (event === "REMOTE_PENDING" && isAwaitingRemoteFact(status)) return "PENDING_CONFIRMATION";
   if (event === "REMOTE_UNKNOWN" && isAwaitingRemoteFact(status)) {

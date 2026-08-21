@@ -7,14 +7,14 @@ import {
   type ArbitrageInstance,
   type ArbitrageExecutionReference,
   type ArbitrageInstanceLeg,
-  type ArbitrageLegVerification,
   type ArbitrageInstanceStatus,
   type ArbitrageLegVerificationStatus,
   type ArbitragePositionVerification,
 } from "../../../api/arbitrageInstances";
+import { reconcileArbitrageInstance } from "../../../api/arbitrageExecutionDraft";
 import { Button } from "../../../components/ui/Button";
 import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
-import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
+import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
 import { ArbitrageOrderCancelDialog } from "./ArbitrageOrderCancelDialog";
 
 const HISTORY_LIMIT = 50;
@@ -35,10 +35,8 @@ export function ArbitrageInstanceOverview() {
   const [selectedSection, setSelectedSection] = useState<"active" | "history">("active");
   const [state, setState] = useState<ArbitrageInstanceLoadState>({ status: "loading" });
   const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
-  const [closeTarget, setCloseTarget] = useState<Readonly<{
+  const [exitTarget, setExitTarget] = useState<Readonly<{
     instance: ArbitrageInstance;
-    leg: ArbitrageInstanceLeg;
-    verification: ArbitrageLegVerification;
   }> | null>(null);
   const [cancelTarget, setCancelTarget] = useState<Readonly<{
     instance: ArbitrageInstance;
@@ -77,10 +75,24 @@ export function ArbitrageInstanceOverview() {
     });
   };
 
+  const reconcileHedge = async (instance: ArbitrageInstance) => {
+    setVerifications((current) => ({ ...current, [instance.arbitrageId]: { status: "loading" } }));
+    try {
+      const { instance: updated, verification } = await reconcileArbitrageHedge(instance);
+      setState((current) => current.status === "success"
+        ? { ...current, active: current.active.map((item) => item.arbitrageId === updated.arbitrageId ? updated : item) }
+        : current);
+      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "success", verification } }));
+    } catch {
+      setVerifications((current) => ({ ...current, [instance.arbitrageId]: { status: "error" } }));
+    }
+  };
+
   return <>
     <ArbitrageInstanceContent
-      onCloseLeg={setCloseTarget}
       onCancelOrder={setCancelTarget}
+      onExitHedge={setExitTarget}
+      onReconcileHedge={(instance) => void reconcileHedge(instance)}
       onPageChange={setPage}
       onSectionChange={setSelectedSection}
       page={page}
@@ -88,12 +100,10 @@ export function ArbitrageInstanceOverview() {
       state={state}
       verifications={verifications}
     />
-    {closeTarget ? <ArbitrageLegCloseDialog
-      instance={closeTarget.instance}
-      leg={closeTarget.leg}
-      onClose={() => setCloseTarget(null)}
+    {exitTarget ? <ArbitrageHedgeExitDialog
+      instance={exitTarget.instance}
+      onClose={() => setExitTarget(null)}
       onUpdated={onInstanceUpdated}
-      verification={closeTarget.verification}
     /> : null}
     {cancelTarget ? <ArbitrageOrderCancelDialog
       instance={cancelTarget.instance}
@@ -128,7 +138,8 @@ export async function loadVerifications(
 
 export function ArbitrageInstanceContent({
   onCancelOrder,
-  onCloseLeg,
+  onExitHedge,
+  onReconcileHedge,
   onPageChange,
   onSectionChange = () => undefined,
   page,
@@ -137,7 +148,8 @@ export function ArbitrageInstanceContent({
   verifications = {},
 }: {
   onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
-  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onPageChange: (page: number) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -163,7 +175,8 @@ export function ArbitrageInstanceContent({
       onCancelOrder={onCancelOrder}
       history={state.history}
       onPageChange={onPageChange}
-      onCloseLeg={onCloseLeg}
+      onExitHedge={onExitHedge}
+      onReconcileHedge={onReconcileHedge}
       onSectionChange={onSectionChange}
       page={page}
       selectedSection={selectedSection}
@@ -176,7 +189,8 @@ export function ArbitrageInstanceSections({
   active,
   history,
   onPageChange,
-  onCloseLeg,
+  onExitHedge,
+  onReconcileHedge,
   onCancelOrder,
   onSectionChange = () => undefined,
   page,
@@ -186,7 +200,8 @@ export function ArbitrageInstanceSections({
   active: ArbitrageInstance[];
   history: ArbitrageInstance[];
   onPageChange: (page: number) => void;
-  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -205,7 +220,8 @@ export function ArbitrageInstanceSections({
           emptyText="暂无当前套利组合"
           instances={active}
           onCancelOrder={onCancelOrder}
-          onCloseLeg={onCloseLeg}
+          onExitHedge={onExitHedge}
+          onReconcileHedge={onReconcileHedge}
           title="当前套利"
           verifications={verifications}
         /> : <InstanceSection
@@ -251,7 +267,8 @@ function InstanceSection({
   emptyText,
   historical = false,
   instances,
-  onCloseLeg,
+  onExitHedge,
+  onReconcileHedge,
   onCancelOrder,
   title,
   verifications = {},
@@ -259,7 +276,8 @@ function InstanceSection({
   emptyText: string;
   historical?: boolean;
   instances: ArbitrageInstance[];
-  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   title: string;
   verifications?: Record<string, VerificationState>;
@@ -272,16 +290,17 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onCancelOrder={onCancelOrder} onCloseLeg={onCloseLeg} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onCancelOrder={onCancelOrder} onExitHedge={onExitHedge} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, onCancelOrder, onCloseLeg, verificationState }: {
+function InstanceCard({ historical, instance, onCancelOrder, onExitHedge, onReconcileHedge, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
-  onCloseLeg?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
   onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
+  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
 }) {
   return (
@@ -311,8 +330,8 @@ function InstanceCard({ historical, instance, onCancelOrder, onCloseLeg, verific
         </div>
       ) : null}
       <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
-        {instance.legs.map((leg) => (
-          <div className="bg-[#0b0d11] p-4" key={leg.legId}>
+        {instance.legs.map((leg) => {
+          return <div className="bg-[#0b0d11] p-4" key={leg.legId}>
             <div className="flex items-center justify-between gap-2">
               <span className="text-xs font-semibold text-white">{leg.role === "LONG" ? "多头腿" : "空头腿"}</span>
               <span className="text-[11px] text-[#8f99a5]">{venueLabel(leg.venue)}</span>
@@ -328,12 +347,6 @@ function InstanceCard({ historical, instance, onCancelOrder, onCloseLeg, verific
                 </>
               ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
             </dl>
-            {!historical && onCloseLeg ? <CloseLegAction
-              instance={instance}
-              leg={leg}
-              onCloseLeg={onCloseLeg}
-              verificationState={verificationState}
-            /> : null}
             {!historical && onCancelOrder ? instance.executionReferences
               .filter((reference) => reference.legId === leg.legId
                 && reference.executionRecordId !== null
@@ -345,38 +358,122 @@ function InstanceCard({ historical, instance, onCancelOrder, onCloseLeg, verific
                   撤销订单
                 </Button>
               </div>) : null}
-          </div>
-        ))}
+          </div>;
+        })}
       </div>
+      {!historical ? <HedgeExitActions
+        instance={instance}
+        onExitHedge={onExitHedge}
+        onReconcileHedge={onReconcileHedge}
+        verificationState={verificationState}
+      /> : null}
     </article>
   );
 }
 
-function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
+export function unresolvedClosingReference(instance: ArbitrageInstance, legId: string) {
+  return instance.executionReferences.find((reference) => reference.legId === legId
+    && reference.phase === "CLOSING"
+    && (reference.status === "CLAIMED" || reference.status === "LINKED"
+      || reference.status === "PENDING_CONFIRMATION" || reference.status === "UNKNOWN"));
+}
+
+export async function reconcileArbitrageHedge(
+  instance: ArbitrageInstance,
+  reconcile: typeof reconcileArbitrageInstance = reconcileArbitrageInstance,
+) {
+  return reconcile(instance.arbitrageId);
+}
+
+function HedgeExitActions({ instance, onExitHedge, onReconcileHedge, verificationState }: {
   instance: ArbitrageInstance;
-  leg: ArbitrageInstanceLeg;
-  onCloseLeg: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; verification: ArbitrageLegVerification }>) => void;
+  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
 }) {
-  const verification = verificationState?.status === "success"
-    ? verificationState.verification.legs.find((item) => item.legId === leg.legId)
-    : undefined;
-  const available = leg.venue === "binance"
-    && (leg.instrumentId.endsWith("-PERP") || (leg.instrumentId.endsWith("-SPOT") && leg.role === "LONG"))
-    && verification?.verificationStatus === "MATCHED"
-    && verification.expectedManagedQuantity !== "0"
-    && verification.actualQuantity !== null
-    && (!leg.instrumentId.endsWith("-SPOT") || typeof verification.availableQuantity === "string");
-  return <div className="mt-3 border-t border-[#25282f] pt-3">
-    <Button
-      disabled={!available}
-      onClick={() => verification && onCloseLeg({ instance, leg, verification })}
-      type="button"
-      variant="secondary"
-    >
-      {leg.venue !== "binance" ? "执行能力尚未接入" : "退出该腿"}
-    </Button>
+  const summary = hedgeExitSummary(instance, verificationState);
+  const verification = verificationState?.status === "success" ? verificationState.verification : null;
+  const canExit = summary.kind === "remaining"
+    && verification !== null
+    && verification.legs.every((leg) => leg.verificationStatus === "MATCHED" && leg.actualQuantity !== null)
+    && !instance.legs.some((leg) => unresolvedClosingReference(instance, leg.legId));
+  return <div className="mt-4 border-t border-[#25282f] pt-4">
+    <p className={`text-xs font-semibold ${summary.kind === "ended" ? "text-emerald-200" : summary.kind === "unknown" ? "text-amber-200" : "text-white"}`}>
+      {summary.label}
+    </p>
+    {summary.details.map((detail) => <p className="mt-2 text-xs text-[#8f99a5]" key={detail}>{detail}</p>)}
+    {summary.progress.length > 0 ? <div className="mt-3 space-y-1 text-xs text-[#c5ccd4]">
+      {summary.progress.map((item) => <p key={item}>{item}</p>)}
+    </div> : null}
+    <div className="mt-4 flex flex-wrap justify-end gap-2">
+      {summary.kind !== "ended" && onReconcileHedge ? <Button
+        disabled={verificationState?.status === "loading"}
+        onClick={() => onReconcileHedge(instance)}
+        type="button"
+        variant="secondary"
+      >
+        {verificationState?.status === "loading" ? "正在核验…" : "重新核验"}
+      </Button> : null}
+      {summary.kind !== "ended" && onExitHedge ? <Button
+        disabled={!canExit}
+        onClick={() => onExitHedge({ instance })}
+        type="button"
+      >
+        退出对冲
+      </Button> : null}
+    </div>
   </div>;
+}
+
+export function hedgeExitSummary(instance: ArbitrageInstance, state?: VerificationState) {
+  const hasClosingProgress = instance.executionReferences.some((reference) => reference.phase === "CLOSING");
+  const progress = hasClosingProgress ? instance.legs.map((leg) => {
+    const reference = latestClosingReference(instance, leg.legId);
+    const label = instanceLegLabel(instance, leg);
+    if (!reference) return `○ ${label}等待退出`;
+    if (reference.status === "CONFIRMED") return [`✓ ${label}已退出`];
+    if (reference.status === "FAILED") return [`○ ${label}退出失败`];
+    return `○ ${label}确认中`;
+  }).flat() : [];
+  if (instance.status === "CLOSED") {
+    return { kind: "ended" as const, label: "对冲已结束", details: [] as string[], progress };
+  }
+  if (!state || state.status === "loading" || state.status === "error") {
+    return { kind: "unknown" as const, label: "仓位状态待确认", details: [] as string[], progress };
+  }
+  if (state.verification.legs.some((leg) => leg.actualQuantity === null || leg.verificationStatus === "UNKNOWN")) {
+    return { kind: "unknown" as const, label: "仓位状态待确认", details: [] as string[], progress };
+  }
+  const remaining = state.verification.legs.filter((leg) => !isZeroDecimal(leg.actualQuantity!));
+  if (remaining.length === 0) {
+    return { kind: "ended" as const, label: "对冲已结束", details: [] as string[], progress };
+  }
+  return {
+    kind: "remaining" as const,
+    label: "对冲尚未完全退出",
+    details: remaining.map((fact) => {
+      const leg = instance.legs.find((candidate) => candidate.legId === fact.legId)!;
+      return `${instanceLegLabel(instance, leg)}剩余 ${fact.actualQuantity}`;
+    }),
+    progress,
+  };
+}
+
+function instanceLegLabel(instance: ArbitrageInstance, leg: ArbitrageInstanceLeg) {
+  if (leg.instrumentId.endsWith("-SPOT")) return "现货腿";
+  return instance.strategyType === "PERPETUAL_PERPETUAL"
+    ? `${leg.role === "LONG" ? "多头" : "空头"}永续腿`
+    : "永续腿";
+}
+
+function latestClosingReference(instance: ArbitrageInstance, legId: string) {
+  return instance.executionReferences
+    .filter((reference) => reference.legId === legId && reference.phase === "CLOSING")
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+}
+
+function isZeroDecimal(value: string) {
+  return /^-?0(?:\.0+)?$/u.test(value);
 }
 
 function LiveLegVerification({ legId, state }: { legId: string; state?: VerificationState }) {

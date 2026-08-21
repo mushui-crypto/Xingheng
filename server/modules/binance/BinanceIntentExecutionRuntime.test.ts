@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 import test from "node:test";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
+import { ExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import {
   assertCoordinatorBoundaryContract,
@@ -244,7 +245,7 @@ test("saves FAILED without a provider mutation when capability rejects execution
   assert.equal(service.providerMutations, 0);
 });
 
-test("saves UNKNOWN when capability throws before provider mutation", async () => {
+test("saves FAILED when capability proves deterministic rejection before provider mutation", async () => {
   const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
   const records = new FakeExecutionRecordStore();
   const runtime = new BinanceIntentExecutionRuntime(
@@ -256,7 +257,7 @@ test("saves UNKNOWN when capability throws before provider mutation", async () =
       createExecutionId: () => "execution-unknown",
       createCapability: () => ({
         async execute() {
-          throw new Error("RiskGuard rejected before provider mutation.");
+          throw new ExecutionPreMutationFailure("RiskGuard rejected before provider mutation.");
         },
       }),
     },
@@ -265,14 +266,14 @@ test("saves UNKNOWN when capability throws before provider mutation", async () =
   const result = await runtime.execute(executionIntent());
 
   assert.equal(result.execution.status, "CALL_FAILED");
-  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.status, "FAILED");
   assert.equal(result.executionRecord.executionId, "execution-unknown");
-  assert.equal(records.updated[0]?.status, "UNKNOWN");
+  assert.equal(records.updated[0]?.status, "FAILED");
   assert.equal(service.providerMutations, 0);
   assertCoordinatorBoundaryContract({
     executionRecord: result.executionRecord,
     persistedRecords: records.updated,
-    expectedStatus: "UNKNOWN",
+    expectedStatus: "FAILED",
     mutationCount: service.providerMutations,
     expectedMutationCount: 0,
   });

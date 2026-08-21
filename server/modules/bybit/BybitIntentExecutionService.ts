@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { createExecutionCancelObservation, type ExecutionCancelObservation } from "../cex/ExecutionCancelCapability";
+import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionQueryObservation, type ExecutionQueryObservation } from "../cex/ExecutionQueryCapability";
 import type { ExecutionStatus } from "../cex/ExecutionState";
@@ -113,25 +114,28 @@ export class BybitIntentExecutionService {
 
   async execute(intent: ExecutionIntent): Promise<BybitIntentExecutionResult> {
     if (intent.venue !== "bybit") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    const prepared = await this.prepare(intent);
-    const persistRecoveryReference = this.options.persistRecoveryReference;
-    if (!persistRecoveryReference) throw new Error("Bybit recovery reference persistence is required before mutation.");
-    await this.mutationSafetyGuard.assertAllowed({
-      venue: "bybit",
-      operation: "placeOrder",
-      userId: intent.userId,
-      accountId: intent.accountId,
-      instrumentId: intent.instrumentId,
-      providerInstrumentId: prepared.symbol,
-    }, this.options.validateProviderIdentity);
-    await persistRecoveryReference({
-      category: prepared.category,
-      symbol: prepared.symbol,
-      orderLinkId: prepared.orderLinkId,
-      expectedProviderQuantity: prepared.qty,
-      expectedSide: prepared.side,
-      ...(prepared.marketUnit === undefined ? {} : { marketUnit: prepared.marketUnit }),
-      ...(prepared.positionIdx === undefined ? {} : { positionIdx: prepared.positionIdx }),
+    const prepared = await runExecutionPreMutationPhase(async () => {
+      const value = await this.prepare(intent);
+      const persistRecoveryReference = this.options.persistRecoveryReference;
+      if (!persistRecoveryReference) throw new Error("Bybit recovery reference persistence is required before mutation.");
+      await this.mutationSafetyGuard.assertAllowed({
+        venue: "bybit",
+        operation: "placeOrder",
+        userId: intent.userId,
+        accountId: intent.accountId,
+        instrumentId: intent.instrumentId,
+        providerInstrumentId: value.symbol,
+      }, this.options.validateProviderIdentity);
+      await persistRecoveryReference({
+        category: value.category,
+        symbol: value.symbol,
+        orderLinkId: value.orderLinkId,
+        expectedProviderQuantity: value.qty,
+        expectedSide: value.side,
+        ...(value.marketUnit === undefined ? {} : { marketUnit: value.marketUnit }),
+        ...(value.positionIdx === undefined ? {} : { positionIdx: value.positionIdx }),
+      });
+      return value;
     });
     const accepted = await this.client.placeOrder(prepared);
     assertAcceptedIdentity(accepted, prepared);

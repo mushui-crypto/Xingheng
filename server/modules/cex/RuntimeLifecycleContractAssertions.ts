@@ -50,11 +50,13 @@ export function assertCoordinatorBoundaryContract(input: Readonly<{
     input.persistedRecords.some((record) => record.status === input.expectedStatus),
     "Coordinator failure status must be persisted",
   );
-  assert.equal(
-    input.persistedRecords.some((record) => record.status === "FAILED"),
-    false,
-    "Coordinator failure must not be claimed by pre-mutation FAILED cleanup",
-  );
+  if (input.expectedStatus !== "FAILED") {
+    assert.equal(
+      input.persistedRecords.some((record) => record.status === "FAILED"),
+      false,
+      "unproven Coordinator failure must not be claimed by pre-mutation FAILED semantics",
+    );
+  }
   assert.equal(input.mutationCount, input.expectedMutationCount, "Coordinator failure must preserve its Provider mutation count");
 }
 

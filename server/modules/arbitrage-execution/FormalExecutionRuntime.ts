@@ -1,4 +1,5 @@
 import type { ExecutionCancelObservation } from "../cex/ExecutionCancelCapability";
+import { isExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 
@@ -29,8 +30,39 @@ const CONTROLLED_PROVIDER_CATEGORIES = new Set([
 export type FormalExecutionRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord;
   confirmedQuantity: string | null;
+  mutationDisposition?: "NOT_DISPATCHED";
   diagnostic?: FormalExecutionDiagnostic;
 }>;
+
+export function mutationDispositionFromExecution(input: Readonly<{
+  executionRecord: ExecutionRecord;
+  capabilityError?: unknown;
+}>): FormalExecutionRuntimeResult["mutationDisposition"] {
+  return input.executionRecord.status === "FAILED"
+    && input.executionRecord.executionAttemptId === undefined
+    && input.executionRecord.remoteOrderId === undefined
+    && isExecutionPreMutationFailure(input.capabilityError)
+    ? "NOT_DISPATCHED"
+    : undefined;
+}
+
+export function hasPersistedNotDispatchedProof(record: ExecutionRecord) {
+  return record.status === "FAILED"
+    && record.executionAttemptId === undefined
+    && record.remoteOrderId === undefined;
+}
+
+export function confirmedQuantityFromExecution(input: Readonly<{
+  executionRecord: ExecutionRecord;
+  capabilityConfirmedQuantity?: string;
+  capabilityError?: unknown;
+}>): string | null {
+  if (input.capabilityConfirmedQuantity !== undefined) return input.capabilityConfirmedQuantity;
+  return input.executionRecord.status === "FAILED"
+    && isExecutionPreMutationFailure(input.capabilityError)
+    ? "0"
+    : null;
+}
 
 export function diagnosticFromExecution(execution: {
   step: { status: string; error?: unknown };

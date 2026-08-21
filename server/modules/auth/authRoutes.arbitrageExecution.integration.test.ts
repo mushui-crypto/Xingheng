@@ -5,6 +5,8 @@ import { registerArbitrageExecutionCommandRoutes } from "../api/arbitrageExecuti
 import { registerArbitrageExecutionCloseRoutes } from "../api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageExecutionCancelRoutes } from "../api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "../api/arbitrageExecutionDraftRoutes";
+import { registerArbitrageInstanceExitRoutes } from "../api/arbitrageInstanceExitRoutes";
+import { registerHistoricalUnknownRecoveryRoutes } from "../api/historicalUnknownRecoveryRoutes";
 import { registerUserAuthMiddleware } from "./authRoutes";
 
 const executionRequests = [
@@ -15,6 +17,9 @@ const executionRequests = [
   { method: "POST", path: "/api/arbitrage-execution/legs/reconcile" },
   { method: "POST", path: "/api/arbitrage-execution/legs/close" },
   { method: "POST", path: "/api/arbitrage-execution/orders/cancel" },
+  { method: "POST", path: "/api/arbitrage-execution/exit" },
+  { method: "POST", path: "/api/arbitrage-execution/reconcile" },
+  { method: "POST", path: "/api/arbitrage-execution/legs/recover-not-dispatched" },
 ] as const;
 
 test("formal execution routes reject anonymous requests before application service access", async () => {
@@ -60,6 +65,9 @@ test("formal execution routes use authenticated request.user and ignore client u
       { operation: "reconcile", userId: "user-a" },
       { operation: "close", userId: "user-a" },
       { operation: "cancel", userId: "user-a" },
+      { operation: "instance-exit", userId: "user-a" },
+      { operation: "instance-reconcile", userId: "user-a" },
+      { operation: "historical-recovery", userId: "user-a" },
     ]);
     assert.deepEqual(calls[0]?.input, { opportunityId: "op-1", horizonDays: 90 });
   } finally {
@@ -123,6 +131,22 @@ async function startServer(calls: unknown[]) {
   registerArbitrageExecutionCancelRoutes(app, {
     async cancelKnownOrder(userId, input) {
       calls.push({ operation: "cancel", userId, input });
+      return { ok: true } as any;
+    },
+  });
+  registerArbitrageInstanceExitRoutes(app, {
+    async exit(userId, input) {
+      calls.push({ operation: "instance-exit", userId, input });
+      return { ok: true } as any;
+    },
+    async reconcile(userId, input) {
+      calls.push({ operation: "instance-reconcile", userId, input });
+      return { ok: true } as any;
+    },
+  });
+  registerHistoricalUnknownRecoveryRoutes(app, {
+    async recover(userId, input) {
+      calls.push({ operation: "historical-recovery", userId, input });
       return { ok: true } as any;
     },
   });

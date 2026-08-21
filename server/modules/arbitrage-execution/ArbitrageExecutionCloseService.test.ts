@@ -282,7 +282,7 @@ test("partial and UNKNOWN close retain Decimal evidence and remain reconcilable"
   assert.equal(unknownResult.instance.executionReferences.at(-1)?.status, "UNKNOWN");
 });
 
-test("unavailable snapshots and exact trading rules fail closed without using account ownership", async (t) => {
+test("unavailable snapshots and ownership limits fail closed while step mismatch legalizes downward", async (t) => {
   const tooLarge = setup(t);
   await assert.rejects(
     () => tooLarge.service.closeLeg("user-a", request("long-leg", "1.1")),
@@ -303,11 +303,12 @@ test("unavailable snapshots and exact trading rules fail closed without using ac
   await flat.service.closeLeg("user-a", request("long-leg", "0.5"));
 
   const invalidStep = setup(t);
-  await assert.rejects(
-    () => invalidStep.service.closeLeg("user-a", request("long-leg", "0.00015")),
-    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
-  );
-  assert.equal(tooLarge.runtime.calls.length + invalidStep.runtime.calls.length, 0);
+  invalidStep.runtime.resultStatus = "CONFIRMED";
+  invalidStep.runtime.confirmedQuantity = "0.0001";
+  const legalized = await invalidStep.service.closeLeg("user-a", request("long-leg", "0.00015"));
+  assert.equal(invalidStep.runtime.calls[0]?.quantity.quantity, "0.0001");
+  assert.equal(legalized.executionRecord.plannedQuantity, "0.0001");
+  assert.equal(tooLarge.runtime.calls.length, 0);
 });
 
 test("client cannot control side, reduceOnly, account, provider symbol, or another user's instance", async (t) => {
@@ -402,6 +403,76 @@ test("DOGE Spot close uses base-commission attribution without borrowing unrelat
   assert.deepEqual(closed.instance.legs.map(managedCurrentQuantity), ["1", "0"]);
 });
 
+test("Spot managed quantity is legalized by dynamic rules and the non-tradable remainder enters the residual contract", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "93.906",
+    quantityStep: "0.1",
+    quantityPrecision: 1,
+    minQuantity: "0.1",
+    minNotional: "5",
+    availableBaseQuantity: "93.906",
+    attributableBaseQuantity: "93.906",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "93.9";
+
+  const result = await fixture.service.closeLeg(
+    "user-a",
+    request("long-leg", "93.906", "legalize-managed-spot"),
+  );
+
+  assert.equal(fixture.runtime.calls.length, 1);
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "93.9");
+  assert.equal(result.executionRecord.plannedQuantity, "93.9");
+  assert.equal(result.instance.executionReferences.at(-1)?.requestedQuantity, "93.9");
+  assert.equal(result.instance.maxResidualBaseQuantity, "0.006");
+  assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0.006");
+});
+
+test("legalization never raises quantity to minQty or minNotional and fails before runtime", async (t) => {
+  for (const scenario of [
+    { name: "minQty", minQuantity: "10", minNotional: "0.1" },
+    { name: "minNotional", minQuantity: "1", minNotional: "5" },
+  ]) {
+    const fixture = setup(t, {
+      longInstrumentId: "DOGE-USDT-PERP",
+      quantity: "9.9",
+      quantityStep: "0.1",
+      quantityPrecision: 1,
+      minQuantity: scenario.minQuantity,
+      minNotional: scenario.minNotional,
+    });
+
+    await assert.rejects(
+      () => fixture.service.closeLeg("user-a", request("long-leg", "9.9", `below-${scenario.name}`)),
+      (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+    );
+    assert.equal(fixture.runtime.calls.length, 0, scenario.name);
+  }
+});
+
+test("unaligned partial close preserves a tradable managed remainder instead of accepting it as dust", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "BTC-USDT-SPOT",
+    quantity: "2",
+    quantityStep: "0.1",
+    quantityPrecision: 1,
+    minQuantity: "0.1",
+    attributableBaseQuantity: "2",
+    availableBaseQuantity: "2",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "1.5";
+
+  const result = await fixture.service.closeLeg("user-a", request("long-leg", "1.55", "legal-partial"));
+
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "1.5");
+  assert.equal(result.instance.maxResidualBaseQuantity, "0");
+  assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0.5");
+  assert.equal(result.instance.status, "RESIDUAL");
+});
+
 test("accepted DOGE Spot residual never permits a partial perpetual close to reach CLOSED", async (t) => {
   const fixture = setup(t, {
     longInstrumentId: "DOGE-USDT-SPOT",
@@ -445,9 +516,15 @@ test("Spot commission paid in quote or BNB leaves gross base quantity attributab
 });
 
 test("unknown Spot opening commission fails closed before runtime", async (t) => {
-  const fixture = setup(t, { longInstrumentId: "DOGE-USDT-SPOT", attributionError: true });
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "20",
+    quantityStep: "1",
+    minQuantity: "1",
+    attributionError: true,
+  });
   await assert.rejects(
-    () => fixture.service.closeLeg("user-a", request("long-leg", "1")),
+    () => fixture.service.closeLeg("user-a", request("long-leg", "20")),
     (error) => error instanceof ArbitrageExecutionCloseError && error.category === "position_verification_unavailable",
   );
   assert.equal(fixture.runtime.calls.length, 0);
@@ -525,7 +602,9 @@ function setup(
     longVenue?: "binance" | "okx";
     quantity?: string;
     quantityStep?: string;
+    quantityPrecision?: number;
     minQuantity?: string;
+    minNotional?: string;
     availableBaseQuantity?: string;
     attributableBaseQuantity?: string;
     attributionError?: boolean;
@@ -642,9 +721,9 @@ function setup(
           quantityStep: options.quantityStep ?? "0.0001",
           minQuantity: options.minQuantity ?? "0.0001",
           priceTick: "0.01",
-          minNotional: "1",
+          minNotional: options.minNotional ?? "1",
           contractSize: "1",
-          precision: { quantity: instrumentId.startsWith("DOGE-") ? 0 : 4, price: 2 },
+          precision: { quantity: options.quantityPrecision ?? (instrumentId.startsWith("DOGE-") ? 0 : 4), price: 2 },
         }),
         quote: { bid: instrumentId.startsWith("DOGE-") ? "0.07" : "60000", ask: instrumentId.startsWith("DOGE-") ? "0.071" : "60001", fetchedAt: now },
       }),
