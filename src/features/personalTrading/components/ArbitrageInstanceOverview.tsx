@@ -367,7 +367,9 @@ function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
     && verification?.verificationStatus === "MATCHED"
     && verification.expectedManagedQuantity !== "0"
     && verification.actualQuantity !== null
-    && (!leg.instrumentId.endsWith("-SPOT") || typeof verification.availableQuantity === "string");
+    && (!leg.instrumentId.endsWith("-SPOT")
+      || leg.venue === "bybit"
+      || typeof verification.availableQuantity === "string");
   return <div className="mt-3 border-t border-[#25282f] pt-3">
     <Button
       disabled={!available}

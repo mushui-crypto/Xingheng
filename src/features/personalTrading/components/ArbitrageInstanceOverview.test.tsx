@@ -180,7 +180,7 @@ test("matched Bybit Spot LONG and perpetual SHORT expose the formal close entrie
             arbitrageId: active.arbitrageId,
             checkedAt: 1_800_000_004_000,
             legs: [
-              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "93.906", actualQuantity: "93.906", availableQuantity: "93.906", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "93.906", actualQuantity: "93.906", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
               { arbitrageId: active.arbitrageId, legId: "short-leg", expectedManagedQuantity: "93", actualQuantity: "93", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
             ],
           },
