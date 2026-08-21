@@ -28,6 +28,12 @@ export type BybitClientOptions = Readonly<{
   timeoutMs?: number;
 }>;
 
+export type BybitHistoricalOrderEvidence = Readonly<{
+  exactOrderEvidence: "ABSENT" | "PRESENT";
+  activeOrderCount: number;
+  checkedAt: number;
+}>;
+
 export class BybitClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -159,6 +165,42 @@ export class BybitClient {
     return subtractDecimal(wallet, locked);
   }
 
+  async readHistoricalOrderEvidence(input: Readonly<{
+    category: "spot" | "linear";
+    symbol: string;
+    orderLinkId: string;
+    startedAt: number;
+  }>): Promise<BybitHistoricalOrderEvidence> {
+    const category = input.category;
+    const symbol = providerSymbol(input.symbol);
+    const orderLinkId = exactOrderLinkId(input.orderLinkId, "Bybit orderLinkId");
+    const startedAt = timestamp(input.startedAt, "Bybit historical execution start");
+    const endTime = this.timestamp();
+    const startTime = Math.max(0, Math.min(startedAt - 60_000, endTime));
+    const exactQuery = {
+      category, symbol, orderLinkId,
+      startTime: String(startTime),
+      endTime: String(endTime),
+    };
+    const [realtime, history, executions, active] = await Promise.all([
+      this.orderRows("/v5/order/realtime", { category, symbol, orderLinkId }),
+      this.orderRows("/v5/order/history", exactQuery),
+      this.executionRows(exactQuery),
+      this.orderRows("/v5/order/realtime", { category, symbol }),
+    ]);
+    const exactOrderEvidence = [...realtime, ...history, ...executions].some((row) => (
+      row.orderLinkId === orderLinkId && row.symbol === symbol
+    )) ? "PRESENT" as const : "ABSENT" as const;
+    const activeOrderCount = active.filter((row) => row.symbol === symbol).length;
+    return Object.freeze({ exactOrderEvidence, activeOrderCount, checkedAt: endTime });
+  }
+
+  async readActiveOrderCount(category: "spot" | "linear", symbolInput: string) {
+    const symbol = providerSymbol(symbolInput);
+    const rows = await this.orderRows("/v5/order/realtime", { category, symbol });
+    return rows.filter((row) => row.symbol === symbol).length;
+  }
+
   private async orderRows(path: string, query: Record<string, string>) {
     const payload = await this.signedRequest("GET", path, query);
     const result = record(payload.result, "Bybit order result");
@@ -193,6 +235,12 @@ export class BybitClient {
       }
     }
     return Object.freeze({ fee, filled, feeCurrency });
+  }
+
+  private async executionRows(query: Record<string, unknown>) {
+    const payload = await this.signedRequest("GET", "/v5/execution/list", query);
+    const result = record(payload.result, "Bybit execution result");
+    return array(result.list, "Bybit execution list").map((item) => record(item, "Bybit execution"));
   }
 
   private async signedRequest(method: "GET" | "POST", path: string, values: Record<string, unknown>) {
@@ -282,6 +330,13 @@ function providerOrder(
     ...(row.marketUnit === undefined || row.marketUnit === "" ? {} : { marketUnit: marketUnit(row.marketUnit) }),
     updatedAt: optionalTimestamp(row.updatedTime),
   });
+}
+
+function timestamp(value: unknown, name: string) {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} is invalid.`);
+  }
+  return value;
 }
 
 function placeRequest(input: BybitPlaceOrderRequest): BybitPlaceOrderRequest {

@@ -10,6 +10,7 @@ import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageEx
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
+import { registerHistoricalUnknownRecoveryRoutes } from "./modules/api/historicalUnknownRecoveryRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
@@ -39,6 +40,8 @@ import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitr
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/ArbitrageExecutionCancelService";
+import { HistoricalExecutionEvidenceRegistry } from "./modules/arbitrage-execution/HistoricalExecutionEvidence";
+import { HistoricalUnknownNotDispatchedRecoveryService } from "./modules/arbitrage-execution/HistoricalUnknownNotDispatchedRecoveryService";
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
 import { OkxSpotCloseBalanceSource } from "./modules/okx/OkxSpotCloseBalanceSource";
 import { OkxSpotOpeningAttributionSource } from "./modules/okx/OkxSpotOpeningAttributionSource";
@@ -87,6 +90,7 @@ import { createBybitInstrumentQuantityRulesSource } from "./modules/bybit/BybitI
 import { BybitIntentExecutionRuntime } from "./modules/bybit/BybitIntentExecutionRuntime";
 import { BybitIntentExecutionServiceRegistry } from "./modules/bybit/BybitIntentExecutionServiceRegistry";
 import { createBybitExecutionTickerSource } from "./modules/bybit/BybitExecutionMarketData";
+import { BybitHistoricalExecutionEvidenceSource } from "./modules/bybit/BybitHistoricalExecutionEvidenceSource";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -292,6 +296,15 @@ const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   formalExecutionRuntimes,
   arbitrageExecutionCommand,
 );
+const historicalUnknownRecovery = new HistoricalUnknownNotDispatchedRecoveryService(
+  arbitrageInstances,
+  executionRecordStore,
+  executionOrderReferenceStore,
+  arbitragePositionVerification,
+  new HistoricalExecutionEvidenceRegistry([
+    new BybitHistoricalExecutionEvidenceSource(userExchangeCredentials),
+  ]),
+);
 const userExchangeCredentialService = new UserExchangeCredentialService(userExchangeCredentials, {
   deleteCredential: (userId, venue) => venue === "binance"
     ? binancePersonalTrading.deleteCredential(userId)
@@ -302,6 +315,7 @@ registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
 registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
+registerHistoricalUnknownRecoveryRoutes(app, historicalUnknownRecovery);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);

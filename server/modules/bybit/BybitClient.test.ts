@@ -83,6 +83,33 @@ test("Bybit order recovery falls back from realtime to history using determinist
   assert.deepEqual(paths, ["/v5/order/realtime", "/v5/order/history", "/v5/execution/list"]);
 });
 
+test("Bybit historical evidence scans realtime, order history, executions, and active orders without mutation", async () => {
+  const calls: Array<{ method: string; path: string; orderLinkId: string | null }> = [];
+  const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({ method: init?.method ?? "GET", path: url.pathname, orderLinkId: url.searchParams.get("orderLinkId") });
+      if (url.pathname === "/v5/order/realtime"
+        || url.pathname === "/v5/order/history"
+        || url.pathname === "/v5/execution/list") {
+        return Response.json({ retCode: 0, result: { list: [] } });
+      }
+      throw new Error(`Unexpected path ${url.pathname}`);
+    }) as typeof fetch,
+  });
+
+  const result = await client.readHistoricalOrderEvidence({
+    category: "spot", symbol: "DOGEUSDT", orderLinkId: "sxby-history", startedAt: now - 1_000,
+  });
+  assert.deepEqual(result, { exactOrderEvidence: "ABSENT", activeOrderCount: 0, checkedAt: now });
+  assert.equal(calls.length, 4);
+  assert.ok(calls.every(({ method }) => method === "GET"));
+  assert.deepEqual(new Set(calls.map(({ path }) => path)), new Set([
+    "/v5/order/realtime", "/v5/order/history", "/v5/execution/list",
+  ]));
+});
+
 test("Bybit dynamic instrument rules preserve base quantity for Spot and Linear without symbol allow-lists", async () => {
   const requested: string[] = [];
   const source = createBybitInstrumentQuantityRulesSource({
