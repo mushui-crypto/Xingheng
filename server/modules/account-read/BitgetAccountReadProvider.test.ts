@@ -25,21 +25,21 @@ test("maps Bitget unified and transitional account modes without guessing", asyn
   }
 });
 
-test("maps Bitget account-info permissions without splitting uta_trade by product", async () => {
+test("maps Bitget UTA trade permission and execution eligibility without guessing", async () => {
   const provider = new BitgetAccountReadProvider({ readAccountSnapshot: async () => bitgetSnapshot() });
   const snapshot = await provider.readAccount();
 
   assert.deepEqual(snapshot.permissions, {
     read: "ENABLED",
-    spotTrade: "UNKNOWN",
-    derivativesTrade: "UNKNOWN",
+    spotTrade: "ENABLED",
+    derivativesTrade: "ENABLED",
     withdraw: "DISABLED",
     ipRestricted: "ENABLED",
   });
   assert.deepEqual(snapshot.capabilities, {
-    spotAccount: "UNKNOWN",
-    derivativesAccount: "UNKNOWN",
-    positionModeSupported: "UNKNOWN",
+    spotAccount: "ENABLED",
+    derivativesAccount: "ENABLED",
+    positionModeSupported: "ENABLED",
   });
   assert.equal(snapshot.accountId.startsWith("bitget:"), true);
   assert.equal(snapshot.accountId.includes("8123456789"), false);
@@ -174,7 +174,8 @@ function bitgetSnapshot(overrides: Partial<BitgetAccountReadSnapshot> = {}): Bit
     accountMode: "hybrid",
     assetMode: "multi_assets",
     accountLevel: "advanced",
-    permType: "read-only",
+    holdMode: "one_way_mode",
+    permType: "read-and-write",
     permissions: ["uta_mgt", "uta_trade"],
     boundIps: "192.0.2.10",
     balances: [

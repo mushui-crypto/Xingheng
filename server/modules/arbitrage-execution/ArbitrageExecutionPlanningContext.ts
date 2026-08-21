@@ -123,9 +123,9 @@ function quoteRequest(
     url.searchParams.set("symbol", symbol);
     return { url };
   }
-  const url = new URL(category === "spot" ? "/api/v2/spot/market/tickers" : "/api/v2/mix/market/ticker", BASE_URLS.bitget);
+  const url = new URL("/api/v3/market/tickers", BASE_URLS.bitget);
+  url.searchParams.set("category", category === "spot" ? "SPOT" : "USDT-FUTURES");
   url.searchParams.set("symbol", symbol);
-  if (category !== "spot") url.searchParams.set("productType", "USDT-FUTURES");
   return { url };
 }
 
@@ -150,7 +150,7 @@ function quoteValues(
   if (root.code !== undefined && root.code !== "00000") throw new Error("Bitget quote was rejected.");
   const row = first(root.data);
   if (row.symbol !== symbol) throw new Error("Bitget quote identity is invalid.");
-  return { bid: row.bidPr ?? row.bidPrice, ask: row.askPr ?? row.askPrice };
+  return { bid: row.bid1Price, ask: row.ask1Price };
 }
 
 function first(value: unknown) {

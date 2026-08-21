@@ -34,6 +34,13 @@ import { BybitIntentExecutionRuntime } from "../server/modules/bybit/BybitIntent
 import { BybitIntentExecutionServiceRegistry } from "../server/modules/bybit/BybitIntentExecutionServiceRegistry";
 import { createBybitExecutionTickerSource } from "../server/modules/bybit/BybitExecutionMarketData";
 import { BybitRealTradingTestVenuePreparation } from "../server/modules/bybit/BybitRealTradingTestVenuePreparation";
+import { BitgetFormalArbitrageExecutionRuntime } from "../server/modules/bitget/BitgetFormalArbitrageExecutionRuntime";
+import { PersistentBitgetExecutionOrderReferenceStore } from "../server/modules/bitget/BitgetExecutionOrderReferenceStore";
+import { createBitgetExecutionTickerSource } from "../server/modules/bitget/BitgetExecutionMarketData";
+import { createBitgetInstrumentQuantityRulesSource } from "../server/modules/bitget/BitgetInstrumentQuantityRulesSource";
+import { BitgetIntentExecutionRuntime } from "../server/modules/bitget/BitgetIntentExecutionRuntime";
+import { BitgetIntentExecutionServiceRegistry } from "../server/modules/bitget/BitgetIntentExecutionServiceRegistry";
+import { BitgetRealTradingTestVenuePreparation } from "../server/modules/bitget/BitgetRealTradingTestVenuePreparation";
 
 export type UnifiedRealTradingTestInvocation = UnifiedRealTradingTestRequest;
 
@@ -142,10 +149,26 @@ export async function runUnifiedRealTradingTest(
         },
       },
     );
+    const bitgetTickerSource = createBitgetExecutionTickerSource();
+    const bitgetExecutionRuntime = new BitgetIntentExecutionRuntime(
+      new BitgetIntentExecutionServiceRegistry(credentialStore),
+      recordStore,
+      new PersistentBitgetExecutionOrderReferenceStore(orderReferenceStore),
+      {
+        createExecutionId: unifiedRealTradingTestExecutionId,
+        mutationSafetyGuard,
+        quantityRulesSource: createBitgetInstrumentQuantityRulesSource(),
+        limitPriceResolver: async (intent, instrument) => {
+          const ticker = await bitgetTickerSource(instrument.venueInstrument.category, instrument.venueInstrument.symbol);
+          return intent.side === "buy" ? ticker.ask : ticker.bid;
+        },
+      },
+    );
     const runtimes = new FormalExecutionRuntimeRegistry()
       .register(formalExecutionRuntime("binance", new BinanceFormalArbitrageExecutionRuntime(binanceExecutionRuntime)))
       .register(formalExecutionRuntime("okx", new OkxFormalArbitrageExecutionRuntime(okxExecutionRuntime)))
-      .register(formalExecutionRuntime("bybit", new BybitFormalArbitrageExecutionRuntime(bybitExecutionRuntime)));
+      .register(formalExecutionRuntime("bybit", new BybitFormalArbitrageExecutionRuntime(bybitExecutionRuntime)))
+      .register(formalExecutionRuntime("bitget", new BitgetFormalArbitrageExecutionRuntime(bitgetExecutionRuntime)));
     const command = new UnifiedRealTradingTestCommand(
       runtimes,
       recordStore,
@@ -153,6 +176,7 @@ export async function runUnifiedRealTradingTest(
         new BinanceRealTradingTestVenuePreparation(credentialStore),
         new OkxRealTradingTestVenuePreparation(credentialStore, { tickerSource: okxTickerSource }),
         new BybitRealTradingTestVenuePreparation(credentialStore, { tickerSource: bybitTickerSource }),
+        new BitgetRealTradingTestVenuePreparation(credentialStore, { tickerSource: bitgetTickerSource }),
       ],
       { mutationSafetyRejections: mutationSafetyGuard },
     );

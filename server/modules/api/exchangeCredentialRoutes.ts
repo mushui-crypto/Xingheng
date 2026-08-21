@@ -2,6 +2,7 @@ import type express from "express";
 import { BinanceProviderError } from "../binance/BinanceClient";
 import { BinanceCredentialInUseError } from "../binance/BinancePersonalTradingServiceRegistry";
 import { BybitProviderError } from "../bybit/BybitClient";
+import { BitgetAccountReadError } from "../bitget/BitgetAccountReadClient";
 import { CredentialKeyProviderError } from "../credentials/CredentialKeyProvider";
 import {
   UserExchangeCredentialService,
@@ -41,6 +42,12 @@ export function registerExchangeCredentialRoutes(
   app.post("/api/exchange-credentials/bybit/execution/enable", route((request) => (
     service.enableBybitExecution(userId(request), request.body)
   )));
+  app.post("/api/exchange-credentials/bitget/rebind", route((request) => (
+    service.rebindBitget(userId(request))
+  )));
+  app.post("/api/exchange-credentials/bitget/execution/enable", route((request) => (
+    service.enableBitgetExecution(userId(request), request.body)
+  )));
   app.delete("/api/exchange-credentials/:venue", route((request) => (
     service.delete(userId(request), singleParam(request.params.venue))
   )));
@@ -79,6 +86,9 @@ function credentialErrorResponse(error: unknown) {
     return { status: 502, category: error.category, message: error.message };
   }
   if (error instanceof BybitProviderError) {
+    return { status: 502, category: error.category, message: error.message };
+  }
+  if (error instanceof BitgetAccountReadError) {
     return { status: 502, category: error.category, message: error.message };
   }
   if (error instanceof BinanceCredentialInUseError) {

@@ -70,7 +70,7 @@ test("production composition routes four user-scoped credentials through venue p
       bitget: (credential) => {
         clientCredentials.push(`bitget:${credential.apiKey}`);
         return {
-          readAccountSnapshot: async () => ({ uid: "bitget-uid", accountMode: "unified", assetMode: null, accountLevel: null, permType: null, permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+          readAccountSnapshot: async () => ({ uid: "bitget-uid", accountMode: "unified", assetMode: null, accountLevel: null, holdMode: "one_way_mode", permType: null, permissions: null, boundIps: null, balances: [], fetchedAt: now }),
           readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "short", baseQuantity: "1", updatedAt: now }),
         };
       },
@@ -452,6 +452,9 @@ function instrument(
 }
 
 function credentialAccountId(venue: CexVenue, apiKey: string) {
+  if (venue === "bitget") {
+    return `bitget:${createHash("sha256").update("bitget:bitget-uid").digest("hex").slice(0, 16)}`;
+  }
   const prefix = `${venue}:credential-only:`;
   const digest = createHash("sha256").update(`${prefix}${apiKey}`).digest("hex");
   return `${prefix}${digest.slice(0, 20)}`;

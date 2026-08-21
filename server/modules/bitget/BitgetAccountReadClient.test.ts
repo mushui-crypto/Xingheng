@@ -28,6 +28,7 @@ test("reads and signs only Bitget UTA account GET endpoints", async () => {
   assert.equal(snapshot.accountMode, "hybrid");
   assert.equal(snapshot.assetMode, "multi_assets");
   assert.equal(snapshot.accountLevel, "advanced");
+  assert.equal(snapshot.holdMode, "one_way_mode");
   assert.equal(snapshot.permType, "read-and-write");
   assert.deepEqual(snapshot.permissions, ["uta_mgt", "uta_trade", "withdraw"]);
   assert.equal(snapshot.boundIps, "192.0.2.10,192.0.2.11");
@@ -50,6 +51,56 @@ test("reads and signs only Bitget UTA account GET endpoints", async () => {
       headers.get("ACCESS-SIGN"),
       createHmac("sha256", credentials.apiSecret).update(`${now}GET${url.pathname}`).digest("base64"),
     );
+  }
+});
+
+test("validates Bitget Provider identity and execution readiness from authoritative account fields", async () => {
+  const client = clientWithResponse((path) => {
+    const response = bitgetResponse(path) as { data?: Record<string, unknown> };
+    if (path === "/api/v3/account/info") {
+      return success({ ...response.data, permissions: ["uta_mgt", "uta_trade"] });
+    }
+    return response;
+  });
+
+  const access = await client.validateAccess();
+
+  assert.match(access.accountId, /^bitget:[a-f0-9]{16}$/u);
+  assert.equal(access.accountId.includes("8123456789"), false);
+  assert.equal(access.accountFingerprint, access.accountId.slice("bitget:".length));
+  assert.equal(access.uidHash.startsWith(access.accountFingerprint), true);
+  assert.equal(access.accountMode, "hybrid");
+  assert.equal(access.holdMode, "one_way_mode");
+  assert.deepEqual(access.permissions, {
+    read: true,
+    spotTrade: true,
+    contractTrade: true,
+    withdraw: false,
+    ipRestricted: true,
+    accountLevelSupported: true,
+    positionModeSupported: true,
+    providerVerified: true,
+    executionEnabled: true,
+  });
+});
+
+test("fails Bitget execution readiness closed when an authoritative requirement is absent", async (t) => {
+  for (const [name, infoOverride, settingsOverride] of [
+    ["withdraw", { permissions: ["uta_trade", "withdraw"] }, {}],
+    ["IP restriction", { ips: "", permissions: ["uta_trade"] }, {}],
+    ["trade permission", { permissions: ["uta_mgt"] }, {}],
+    ["one-way mode", { permissions: ["uta_trade"] }, { holdMode: "hedge_mode" }],
+    ["account mode", { permissions: ["uta_trade"] }, { accountMode: "switching" }],
+  ] as const) {
+    await t.test(name, async () => {
+      const client = clientWithResponse((path) => {
+        const response = bitgetResponse(path) as { data?: Record<string, unknown> };
+        if (path === "/api/v3/account/info") return success({ ...response.data, ...infoOverride });
+        if (path === "/api/v3/account/settings") return success({ ...response.data, ...settingsOverride });
+        return response;
+      });
+      assert.equal((await client.validateAccess()).permissions.executionEnabled, false);
+    });
   }
 });
 
@@ -109,7 +160,7 @@ test("reads a Bitget UTA position through the GET-only client", async () => {
       assert.equal(url.pathname, "/api/v3/position/current-position");
       assert.equal(url.searchParams.get("category"), "USDT-FUTURES");
       assert.equal(url.searchParams.get("symbol"), "XAUTUSDT");
-      return Response.json(success({ list: [{ symbol: "XAUTUSDT", posSide: "long", total: "0.5", updatedTime: String(now - 1) }] }));
+      return Response.json(success({ list: [{ category: "USDT-FUTURES", symbol: "XAUTUSDT", holdMode: "one_way_mode", posSide: "long", total: "0.5", updatedTime: String(now - 1) }] }));
     }) as typeof fetch,
   });
 
@@ -206,6 +257,7 @@ function bitgetResponse(path: string) {
       accountMode: "hybrid",
       assetMode: "multi_assets",
       accountLevel: "advanced",
+      holdMode: "one_way_mode",
     });
   }
   if (path === "/api/v3/account/assets") {

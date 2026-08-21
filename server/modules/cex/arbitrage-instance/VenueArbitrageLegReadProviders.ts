@@ -11,6 +11,7 @@ import type {
 } from "../../binance/BinanceTypes";
 import { BitgetAccountReadClient, type BitgetPerpetualPositionSnapshot } from "../../bitget/BitgetAccountReadClient";
 import type { BitgetAccountReadSnapshot } from "../../bitget/BitgetAccountReadClient";
+import { BitgetPositionReader } from "../../bitget/BitgetPositionReader";
 import { BybitAccountReadClient, type BybitAccountReadSnapshot, type BybitPerpetualPositionSnapshot } from "../../bybit/BybitAccountReadClient";
 import type { ExecutionVenue } from "../ExecutionIntent";
 import type { InstrumentCatalogPort } from "../CexCapabilityPorts";
@@ -188,7 +189,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
 }
 
 function isCredentialOnlyBinding(venue: ExecutionVenue, accountId: string) {
-  return accountId.startsWith(`${venue}:credential-only:`);
+  return venue !== "bitget" && accountId.startsWith(`${venue}:credential-only:`);
 }
 
 export class BinanceArbitrageLegReadProviderFactory implements ArbitrageLegReadProviderFactory {
@@ -263,7 +264,18 @@ export class BitgetArbitrageLegReadProviderFactory implements ArbitrageLegReadPr
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
-    return new VenueArbitrageLegReadProvider(this.venue, client, new BitgetAccountReadProvider(client), this.instruments);
+    return new VenueArbitrageLegReadProvider(
+      this.venue,
+      client,
+      new BitgetAccountReadProvider(client),
+      this.instruments,
+      new BitgetPositionReader(client, {
+        resolve: async (instrumentId) => {
+          const binding = await this.instruments.resolve(this.venue, instrumentId);
+          return binding ? Object.freeze({ symbol: binding.providerSymbol, contractSize: binding.contractSize }) : null;
+        },
+      }),
+    );
   }
 }
 

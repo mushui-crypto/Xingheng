@@ -46,6 +46,18 @@ test("parses BTC trading rules for all four venues", async () => {
   assert.equal(bitget.contractSize, "0.001");
 });
 
+test("parses authoritative Bitget UTA multiplier and minimum amount fields", async () => {
+  const instrument = createCanonicalInstrument({ baseAsset: "DOGE", quoteAsset: "USDT", contractType: "perpetual" });
+  const rules = await new BitgetTradingRulesAdapter(new FakePublicRulesClient({ code: "00000", data: [{
+    symbol: "DOGEUSDT", quantityPrecision: "0", quantityMultiplier: "1", minOrderQty: "1",
+    pricePrecision: "5", priceMultiplier: "0.00001", minOrderAmount: "5",
+  }] })).getTradingRules(new InstrumentCapability().resolveVenueInstrument(instrument, "bitget"));
+  assert.equal(rules.quantityStep, "1");
+  assert.equal(rules.minQuantity, "1");
+  assert.equal(rules.priceTick, "0.00001");
+  assert.equal(rules.minNotional, "5");
+});
+
 test("parses XAUT RWA trading rules without asset identity assumptions", async () => {
   const instrument = createCanonicalInstrument({ baseAsset: "XAUT", quoteAsset: "USDT", contractType: "perpetual" });
   const venueInstrument = new InstrumentCapability().resolveVenueInstrument(instrument, "okx");

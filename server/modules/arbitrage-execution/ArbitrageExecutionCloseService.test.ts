@@ -430,6 +430,36 @@ test("Spot managed quantity is legalized by dynamic rules and the non-tradable r
   assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0.006");
 });
 
+test("Bitget Spot attribution and Perp reduceOnly close reuse the shared residual lifecycle", async (t) => {
+  const fixture = setup(t, {
+    formalVenue: "bitget",
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "95",
+    quantityStep: "0.1",
+    quantityPrecision: 1,
+    minQuantity: "0.1",
+    minNotional: "5",
+    availableBaseQuantity: "95.005",
+    attributableBaseQuantity: "94.905",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "94.9";
+
+  const spot = await fixture.service.closeLeg("user-a", request("long-leg", "94.9", "bitget-spot-close"));
+  assert.equal(fixture.runtime.calls[0]?.venue, "bitget");
+  assert.equal(fixture.runtime.calls[0]?.side, "sell");
+  assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, false);
+  assert.equal(managedCurrentQuantity(spot.instance.legs[0]), "0.1");
+  assert.equal(spot.instance.maxResidualBaseQuantity, "0.1");
+
+  fixture.runtime.confirmedQuantity = "95";
+  const closed = await fixture.service.closeLeg("user-a", request("short-leg", "95", "bitget-perp-close"));
+  assert.equal(fixture.runtime.calls[1]?.venue, "bitget");
+  assert.equal(fixture.runtime.calls[1]?.side, "buy");
+  assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
+  assert.equal(closed.instance.status, "CLOSED");
+});
+
 test("legalization never raises quantity to minQty or minNotional and fails before runtime", async (t) => {
   for (const scenario of [
     { name: "minQty", minQuantity: "10", minNotional: "0.1" },
@@ -599,7 +629,7 @@ function setup(
   t: TestContext,
   options: Readonly<{
     longInstrumentId?: "BTC-USDT-SPOT" | "BTC-USDT-PERP" | "DOGE-USDT-SPOT" | "DOGE-USDT-PERP";
-    longVenue?: "binance" | "okx";
+    longVenue?: "binance" | "okx" | "bitget";
     quantity?: string;
     quantityStep?: string;
     quantityPrecision?: number;
@@ -609,7 +639,7 @@ function setup(
     attributableBaseQuantity?: string;
     attributionError?: boolean;
     actualSignedNetQuantity?: string;
-    formalVenue?: "binance" | "okx";
+    formalVenue?: "binance" | "okx" | "bitget";
   }> = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-close-"));

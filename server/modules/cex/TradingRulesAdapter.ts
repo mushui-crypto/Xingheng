@@ -115,10 +115,12 @@ export class BitgetTradingRulesAdapter implements TradingRulesAdapter {
     const row = firstDataItem(payload, instrument.symbol, "Bitget");
 
     return createTradingRules({
-      quantityStep: optionalString(row.quantityStep) ?? decimalStepFromPrecision(row.quantityPrecision, "Bitget quantity precision"),
+      quantityStep: optionalString(row.quantityMultiplier ?? row.quantityStep)
+        ?? decimalStepFromPrecision(row.quantityPrecision, "Bitget quantity precision"),
       minQuantity: requiredString(row.minTradeAmount ?? row.minTradeNum ?? row.minOrderQty, "Bitget min quantity"),
-      priceTick: optionalString(row.priceTick) ?? decimalStepFromPrecision(row.pricePrecision, "Bitget price precision"),
-      minNotional: optionalString(row.minTradeUSDT ?? row.minNotional),
+      priceTick: optionalString(row.priceMultiplier ?? row.priceTick)
+        ?? decimalStepFromPrecision(row.pricePrecision, "Bitget price precision"),
+      minNotional: optionalString(row.minTradeUSDT ?? row.minNotional ?? row.minOrderAmount),
       contractSize: optionalString(row.contractSize),
       precision: {
         quantity: optionalNumber(row.quantityPrecision),

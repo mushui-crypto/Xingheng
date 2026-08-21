@@ -36,15 +36,15 @@ export class BitgetAccountReadProvider implements AccountReadProvider {
       balances: snapshot.balances.map((balance) => ({ ...balance, accountType: mode.accountType })),
       permissions: {
         read: readPermission(snapshot.permType),
-        spotTrade: "UNKNOWN" as const,
-        derivativesTrade: "UNKNOWN" as const,
+        spotTrade: tradePermission(snapshot.permType, snapshot.permissions),
+        derivativesTrade: tradePermission(snapshot.permType, snapshot.permissions),
         withdraw: namedPermission(snapshot.permissions, "withdraw"),
         ipRestricted: ipRestrictionStatus(snapshot.boundIps),
       },
       capabilities: {
-        spotAccount: "UNKNOWN" as const,
-        derivativesAccount: "UNKNOWN" as const,
-        positionModeSupported: "UNKNOWN" as const,
+        spotAccount: accountCapability(snapshot.accountMode),
+        derivativesAccount: accountCapability(snapshot.accountMode),
+        positionModeSupported: positionModeCapability(snapshot.holdMode),
       },
       latestSyncAt: snapshot.fetchedAt,
     };
@@ -55,6 +55,30 @@ export class BitgetAccountReadProvider implements AccountReadProvider {
     this.client = null;
     await client?.dispose?.();
   }
+}
+
+function tradePermission(
+  permType: string | null,
+  permissions: string[] | null,
+): AccountReadCapabilityStatus {
+  if (permType === null || permissions === null) return "UNKNOWN";
+  if (permType.trim().toLowerCase() !== "read-and-write") return "DISABLED";
+  return permissions.some((value) => value.trim().toLowerCase() === "uta_trade") ? "ENABLED" : "DISABLED";
+}
+
+function accountCapability(accountMode: string): AccountReadCapabilityStatus {
+  const normalized = accountMode.trim().toLowerCase();
+  if (normalized === "unified" || normalized === "hybrid") return "ENABLED";
+  if (normalized === "upgrading" || normalized === "switching") return "DISABLED";
+  return "UNKNOWN";
+}
+
+function positionModeCapability(holdMode: string | null): AccountReadCapabilityStatus {
+  if (holdMode === null) return "UNKNOWN";
+  const normalized = holdMode.trim().toLowerCase();
+  if (normalized === "one_way_mode") return "ENABLED";
+  if (normalized === "hedge_mode") return "DISABLED";
+  return "UNKNOWN";
 }
 
 function readPermission(value: string | null): AccountReadCapabilityStatus {

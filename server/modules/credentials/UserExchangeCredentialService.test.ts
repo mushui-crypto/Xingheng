@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
 import type { BybitAccountAccess, BybitPermissions } from "../bybit/BybitTypes";
+import type { BitgetAccountAccess, BitgetPermissions } from "../bitget/BitgetAccountReadClient";
 import { OkxProviderError } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxPermissions } from "../okx/OkxTypes";
 import { OkxIntentExecutionServiceRegistry } from "../okx/OkxIntentExecutionServiceRegistry";
@@ -46,10 +47,11 @@ test("rejects credentials with withdrawal permission", async () => {
   assert.equal(store.saved, null);
 });
 
-test("binds Bybit to Provider identity while Bitget remains credential-only", async () => {
+test("binds Bybit and Bitget to Provider identities while keeping execution disabled", async () => {
   const store = new MemoryCredentialStore();
   const service = new UserExchangeCredentialService(store as never, {
     bybitClientFactory: () => ({ validateAccess: async () => bybitAccess() }),
+    bitgetClientFactory: () => ({ validateAccess: async () => bitgetAccess() }),
   });
 
   const bybit = await service.put("user-1", "bybit", {
@@ -67,9 +69,68 @@ test("binds Bybit to Provider identity while Bitget remains credential-only", as
   assert.equal(bybit.permissions?.providerVerified, true);
   assert.equal(bybit.permissions?.executionEnabled, false);
   assert.equal(bitget.configured, true);
+  assert.equal(bitget.accountId, "bitget:1234567890abcdef");
+  assert.equal(bitget.permissions?.providerVerified, true);
+  assert.equal(bitget.permissions?.executionEnabled, false);
   assert.equal(JSON.stringify([bybit, bitget]).includes("passphrase-001"), false);
   assert.equal(store.savedItems.length, 2);
   assert.equal(store.savedItems[1]?.passphrase, "bitget-passphrase-001");
+});
+
+test("enables Bitget execution only after explicit confirmation and complete Provider readiness", async () => {
+  const store = new MemoryCredentialStore();
+  await seedBitget(store, "user-1");
+  let reads = 0;
+  const service = new UserExchangeCredentialService(store as never, {
+    bitgetClientFactory: () => ({ validateAccess: async () => { reads += 1; return bitgetAccess(); } }),
+  });
+  await assert.rejects(
+    service.enableBitgetExecution("user-1", { confirmation: "ENABLE_BYBIT_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_execution_enable_confirmation_required",
+  );
+  const enabled = await service.enableBitgetExecution("user-1", { confirmation: "ENABLE_BITGET_EXECUTION" });
+  assert.equal(enabled.permissions?.executionEnabled, true);
+  assert.equal(enabled.permissions?.positionModeSupported, true);
+  assert.equal(reads, 1);
+});
+
+test("fails Bitget execution enablement closed for unsafe permissions and wrong user identity", async () => {
+  const store = new MemoryCredentialStore();
+  await seedBitget(store, "user-1");
+  const unsafe = new UserExchangeCredentialService(store as never, {
+    bitgetClientFactory: () => ({
+      validateAccess: async () => bitgetAccess({ positionModeSupported: false, executionEnabled: false }),
+    }),
+  });
+  await assert.rejects(
+    unsafe.enableBitgetExecution("user-1", { confirmation: "ENABLE_BITGET_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_permissions_invalid",
+  );
+  await assert.rejects(
+    unsafe.enableBitgetExecution("user-2", { confirmation: "ENABLE_BITGET_EXECUTION" }),
+    (error: unknown) => error instanceof UserExchangeCredentialServiceError
+      && error.category === "credential_not_configured",
+  );
+  assert.equal(store.findSummary("user-1", "bitget")?.permissions.executionEnabled, false);
+});
+
+test("rebinds a legacy Bitget credential to Provider identity without enabling execution", async () => {
+  const store = new MemoryCredentialStore();
+  await store.save({
+    userId: "user-1", venue: "bitget", accountId: "bitget:credential-only:0123456789abcdef0123",
+    accountFingerprint: "BITGET-LEGACY", apiKey: "bitget-key", apiSecret: "bitget-secret",
+    passphrase: "bitget-pass", permissions: { providerVerified: false, executionEnabled: false },
+  });
+  const service = new UserExchangeCredentialService(store as never, {
+    bitgetClientFactory: () => ({ validateAccess: async () => bitgetAccess() }),
+  });
+  const rebound = await service.rebindBitget("user-1");
+  assert.equal(rebound.accountId, "bitget:1234567890abcdef");
+  assert.equal(rebound.permissions?.providerVerified, true);
+  assert.equal(rebound.permissions?.executionEnabled, false);
+  assert.equal(store.replacedItems[0]?.expectedAccountId, "bitget:credential-only:0123456789abcdef0123");
 });
 
 test("enables Bybit execution only after explicit confirmation and Provider revalidation", async () => {
@@ -301,7 +362,7 @@ test("saves Provider-verified OKX identity with execution disabled when permissi
   assert.equal(result.permissions?.executionEnabled, false);
 });
 
-test("requires passphrase only for Bitget and OKX credential-only storage", async () => {
+test("requires passphrase only for Bitget and OKX credential storage", async () => {
   const service = new UserExchangeCredentialService(new MemoryCredentialStore() as never);
   await assert.rejects(
     service.put("user-1", "bitget", { apiKey: "key", apiSecret: "secret" }),
@@ -318,6 +379,7 @@ test("requires passphrase only for Bitget and OKX credential-only storage", asyn
 test("deletes non-Binance credentials through the common store when the Binance hook does not handle them", async () => {
   const store = new MemoryCredentialStore();
   const service = new UserExchangeCredentialService(store as never, {
+    bitgetClientFactory: () => ({ validateAccess: async () => bitgetAccess() }),
     deleteCredential: async () => false,
   });
   await service.put("user-1", "bitget", {
@@ -518,6 +580,28 @@ function bybitAccess(overrides: Partial<BybitPermissions> = {}): BybitAccountAcc
   };
 }
 
+function bitgetAccess(overrides: Partial<BitgetPermissions> = {}): BitgetAccountAccess {
+  return {
+    accountId: "bitget:1234567890abcdef",
+    accountFingerprint: "1234567890abcdef",
+    uidHash: `1234567890abcdef${"0".repeat(48)}`,
+    accountMode: "unified",
+    holdMode: "one_way_mode",
+    permissions: {
+      read: true,
+      spotTrade: true,
+      contractTrade: true,
+      withdraw: false,
+      ipRestricted: true,
+      accountLevelSupported: true,
+      positionModeSupported: true,
+      providerVerified: true,
+      executionEnabled: true,
+      ...overrides,
+    },
+  };
+}
+
 function okxAccessFor(
   accountFingerprint: string,
   overrides: Partial<OkxPermissions> = {},
@@ -551,6 +635,19 @@ async function seedOkx(store: MemoryCredentialStore, userId: string) {
     apiKey: `okx-api-${userId}`,
     apiSecret: `okx-secret-${userId}`,
     passphrase: `okx-pass-${userId}`,
+    permissions: { providerVerified: true, executionEnabled: false },
+  });
+}
+
+async function seedBitget(store: MemoryCredentialStore, userId: string) {
+  await store.save({
+    userId,
+    venue: "bitget",
+    accountId: "bitget:1234567890abcdef",
+    accountFingerprint: "1234567890abcdef",
+    apiKey: `bitget-api-${userId}`,
+    apiSecret: `bitget-secret-${userId}`,
+    passphrase: `bitget-pass-${userId}`,
     permissions: { providerVerified: true, executionEnabled: false },
   });
 }

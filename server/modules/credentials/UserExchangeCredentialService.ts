@@ -3,6 +3,11 @@ import { BinanceClient } from "../binance/BinanceClient";
 import type { BinanceAccountIdentity, BinancePermissions } from "../binance/BinanceTypes";
 import { BybitClient } from "../bybit/BybitClient";
 import type { BybitAccountAccess, BybitCredentials } from "../bybit/BybitTypes";
+import {
+  BitgetAccountReadClient,
+  type BitgetAccountAccess,
+  type BitgetAccountReadCredentials,
+} from "../bitget/BitgetAccountReadClient";
 import { OkxClient } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxCredentials } from "../okx/OkxTypes";
 import type { ExchangeVenue } from "./CredentialKeyProvider";
@@ -26,6 +31,10 @@ type BybitAccessClient = {
   validateAccess(): Promise<BybitAccountAccess>;
 };
 
+type BitgetAccessClient = {
+  validateAccess(): Promise<BitgetAccountAccess>;
+};
+
 export class UserExchangeCredentialService {
   constructor(
     private readonly store: Pick<
@@ -34,6 +43,7 @@ export class UserExchangeCredentialService {
     >,
     private readonly options: {
       binanceClientFactory?: (credentials: { apiKey: string; apiSecret: string }) => BinanceAccessClient;
+      bitgetClientFactory?: (credentials: BitgetAccountReadCredentials) => BitgetAccessClient;
       bybitClientFactory?: (credentials: BybitCredentials) => BybitAccessClient;
       okxClientFactory?: (credentials: OkxCredentials) => OkxAccessClient;
       assertCanDelete?: (userId: string, venue: ExchangeVenue) => Promise<void>;
@@ -77,6 +87,24 @@ export class UserExchangeCredentialService {
           ...access.permissions,
           executionEnabled: false,
         },
+        verifiedAt: Date.now(),
+      });
+      return status(venue, summary);
+    }
+
+    if (venue === "bitget") {
+      const credentials = bitgetCredentials(apiKey, apiSecret, passphrase);
+      const client = this.options.bitgetClientFactory?.(credentials)
+        ?? new BitgetAccountReadClient(credentials);
+      const access = await client.validateAccess();
+      assertBitgetProviderIdentity(access);
+      const summary = await this.store.save({
+        userId,
+        venue,
+        accountId: access.accountId,
+        accountFingerprint: access.accountFingerprint,
+        ...credentials,
+        permissions: { ...access.permissions, executionEnabled: false },
         verifiedAt: Date.now(),
       });
       return status(venue, summary);
@@ -225,6 +253,89 @@ export class UserExchangeCredentialService {
       accountFingerprint: existing.accountFingerprint,
       ...credentials,
       permissions: { ...access.permissions, executionEnabled: true },
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async enableBitgetExecution(userIdInput: string, input: unknown) {
+    assertBitgetExecutionEnableConfirmation(input);
+    const userId = requiredIdentifier(userIdInput, "userId");
+    const venue = "bitget" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) {
+      throw new UserExchangeCredentialServiceError("credential_not_configured", "Bitget credential is not configured.");
+    }
+    if (existing.userId !== userId || existing.venue !== venue || !isProviderDerivedBitgetIdentity(existing.accountId)) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored Bitget credential identity is not eligible for execution enablement.",
+      );
+    }
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = bitgetCredentials(secret.apiKey, secret.apiSecret, secret.passphrase);
+    const client = this.options.bitgetClientFactory?.(credentials) ?? new BitgetAccountReadClient(credentials);
+    const access = await client.validateAccess();
+    assertBitgetProviderIdentity(access);
+    if (access.accountId !== existing.accountId || access.accountFingerprint !== existing.accountFingerprint) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "Bitget Provider identity does not match the stored credential identity.",
+      );
+    }
+    assertBitgetExecutionPermissions(access);
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: existing.accountId,
+      accountFingerprint: existing.accountFingerprint,
+      ...credentials,
+      permissions: { ...access.permissions, executionEnabled: true },
+      verifiedAt: Date.now(),
+    });
+    return status(venue, summary);
+  }
+
+  async rebindBitget(userIdInput: string) {
+    const userId = requiredIdentifier(userIdInput, "userId");
+    const venue = "bitget" as const;
+    const existing = this.store.findSummary(userId, venue);
+    if (!existing) throw new UserExchangeCredentialServiceError("credential_not_configured", "Bitget credential is not configured.");
+    const legacy = isLegacyBitgetIdentity(existing.accountId);
+    if (!legacy && !isProviderDerivedBitgetIdentity(existing.accountId)) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_invalid",
+        "Stored Bitget credential identity is not eligible for Provider rebind.",
+      );
+    }
+    const secret = await this.store.loadForExecution(userId, venue);
+    const credentials = bitgetCredentials(secret.apiKey, secret.apiSecret, secret.passphrase);
+    const client = this.options.bitgetClientFactory?.(credentials) ?? new BitgetAccountReadClient(credentials);
+    const access = await client.validateAccess();
+    assertBitgetProviderIdentity(access);
+    if (!legacy && (
+      access.accountId !== existing.accountId
+      || access.accountFingerprint !== existing.accountFingerprint
+    )) {
+      throw new UserExchangeCredentialServiceError(
+        "credential_provider_identity_mismatch",
+        "Bitget Provider identity does not match the stored credential identity.",
+      );
+    }
+    const summary = await this.store.replace({
+      userId,
+      venue,
+      expectedAccountId: existing.accountId,
+      accountId: access.accountId,
+      accountFingerprint: access.accountFingerprint,
+      ...credentials,
+      permissions: {
+        ...access.permissions,
+        executionEnabled: legacy
+          ? false
+          : existing.permissions.executionEnabled === true && access.permissions.executionEnabled,
+      },
       verifiedAt: Date.now(),
     });
     return status(venue, summary);
@@ -453,6 +564,15 @@ function message(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | 
       ? "Bybit credential identity and execution permissions are Provider-verified."
       : "Bybit credential identity is Provider-verified, but execution remains disabled.";
   }
+  if (venue === "bitget") {
+    if (!summary) return "Bitget credential requires Provider identity validation before storage.";
+    if (isLegacyBitgetIdentity(summary.accountId)) {
+      return "Bitget credential requires a controlled Provider identity rebind before execution.";
+    }
+    return summary.permissions.executionEnabled
+      ? "Bitget credential identity and execution permissions are Provider-verified."
+      : "Bitget credential identity is Provider-verified, but execution remains disabled.";
+  }
   if (venue === "okx") {
     if (!summary) return "OKX credential requires Provider identity validation before storage.";
     if (isLegacyOkxIdentity(summary.accountId)) {
@@ -470,6 +590,17 @@ function message(venue: ExchangeVenue, summary: UserExchangeCredentialSummary | 
 function okxCredentials(apiKey: string, apiSecret: string, passphrase: string | undefined): OkxCredentials {
   if (!passphrase) {
     throw new UserExchangeCredentialServiceError("credential_input_invalid", "OKX API passphrase is required.");
+  }
+  return Object.freeze({ apiKey, apiSecret, passphrase });
+}
+
+function bitgetCredentials(
+  apiKey: string,
+  apiSecret: string,
+  passphrase: string | undefined,
+): BitgetAccountReadCredentials {
+  if (!passphrase) {
+    throw new UserExchangeCredentialServiceError("credential_input_invalid", "Bitget API passphrase is required.");
   }
   return Object.freeze({ apiKey, apiSecret, passphrase });
 }
@@ -500,6 +631,18 @@ function assertBybitProviderIdentity(access: BybitAccountAccess) {
   }
 }
 
+function assertBitgetProviderIdentity(access: BitgetAccountAccess) {
+  if (!/^bitget:[a-f0-9]{16}$/u.test(access.accountId)
+    || access.accountFingerprint !== access.accountId.slice("bitget:".length)
+    || !/^[a-f0-9]{64}$/u.test(access.uidHash)
+    || !access.uidHash.startsWith(access.accountFingerprint)) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_provider_identity_invalid",
+      "Bitget Provider returned an invalid account identity.",
+    );
+  }
+}
+
 function assertOkxExecutionEnableConfirmation(input: unknown) {
   const body = object(input);
   assertOnlyKeys(body, ["confirmation"]);
@@ -518,6 +661,17 @@ function assertBybitExecutionEnableConfirmation(input: unknown) {
     throw new UserExchangeCredentialServiceError(
       "credential_execution_enable_confirmation_required",
       "Explicit Bybit execution enablement confirmation is required.",
+    );
+  }
+}
+
+function assertBitgetExecutionEnableConfirmation(input: unknown) {
+  const body = object(input);
+  assertOnlyKeys(body, ["confirmation"]);
+  if (body.confirmation !== "ENABLE_BITGET_EXECUTION") {
+    throw new UserExchangeCredentialServiceError(
+      "credential_execution_enable_confirmation_required",
+      "Explicit Bitget execution enablement confirmation is required.",
     );
   }
 }
@@ -553,6 +707,19 @@ function assertBybitExecutionPermissions(access: BybitAccountAccess) {
   }
 }
 
+function assertBitgetExecutionPermissions(access: BitgetAccountAccess) {
+  const permissions = access.permissions;
+  if (!permissions.providerVerified || !permissions.read || !permissions.spotTrade
+    || !permissions.contractTrade || permissions.withdraw || !permissions.ipRestricted
+    || !permissions.accountLevelSupported || !permissions.positionModeSupported
+    || !permissions.executionEnabled) {
+    throw new UserExchangeCredentialServiceError(
+      "credential_permissions_invalid",
+      "Bitget credential must be Provider-verified, allow read and UTA trading, deny withdrawals, use an IP whitelist, use a supported UTA account mode, and use one-way position mode before execution can be enabled.",
+    );
+  }
+}
+
 function isLegacyOkxIdentity(accountId: string) {
   return /^okx:credential-only:[a-f0-9]{20}$/u.test(accountId);
 }
@@ -567,4 +734,12 @@ function isLegacyBybitIdentity(accountId: string) {
 
 function isProviderDerivedBybitIdentity(accountId: string) {
   return /^bybit:[a-f0-9]{16}$/u.test(accountId);
+}
+
+function isLegacyBitgetIdentity(accountId: string) {
+  return /^bitget:credential-only:[a-f0-9]{20}$/u.test(accountId);
+}
+
+function isProviderDerivedBitgetIdentity(accountId: string) {
+  return /^bitget:[a-f0-9]{16}$/u.test(accountId);
 }

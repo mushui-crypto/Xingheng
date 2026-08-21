@@ -101,6 +101,7 @@ test("account read API serves Bitget through the common registry route", async (
       accountMode: "hybrid",
       assetMode: "multi_assets",
       accountLevel: "advanced",
+      holdMode: "one_way_mode",
       permType: "read-only",
       permissions: ["uta_mgt"],
       boundIps: "",

@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 const BITGET_API_BASE_URL = "https://api.bitget.com";
 
@@ -20,12 +20,37 @@ export type BitgetAccountReadSnapshot = {
   accountMode: string;
   assetMode: string | null;
   accountLevel: string | null;
+  holdMode: string | null;
   permType: string | null;
   permissions: string[] | null;
   boundIps: string | null;
   balances: BitgetAccountBalance[];
   fetchedAt: number;
 };
+
+export type BitgetAccountIdentity = Readonly<{
+  accountId: string;
+  accountFingerprint: string;
+  uidHash: string;
+}>;
+
+export type BitgetPermissions = Readonly<{
+  read: boolean;
+  spotTrade: boolean;
+  contractTrade: boolean;
+  withdraw: boolean;
+  ipRestricted: boolean;
+  accountLevelSupported: boolean;
+  positionModeSupported: boolean;
+  providerVerified: boolean;
+  executionEnabled: boolean;
+}>;
+
+export type BitgetAccountAccess = BitgetAccountIdentity & Readonly<{
+  accountMode: string;
+  holdMode: string;
+  permissions: BitgetPermissions;
+}>;
 
 export type BitgetPerpetualPositionSnapshot = {
   symbol: string;
@@ -99,12 +124,48 @@ export class BitgetAccountReadClient {
       accountMode: requiredString(settings.accountMode, "Bitget account mode"),
       assetMode: optionalString(settings.assetMode),
       accountLevel: optionalString(settings.accountLevel),
+      holdMode: optionalString(settings.holdMode),
       permType: optionalString(info.permType),
       permissions: optionalStringArray(info.permissions, "Bitget account permissions"),
       boundIps: optionalStringPreservingEmpty(info.ips),
       balances,
       fetchedAt: this.now(),
     };
+  }
+
+  async validateAccess(): Promise<BitgetAccountAccess> {
+    const snapshot = await this.readAccountSnapshot();
+    const identity = accountIdentity(snapshot.uid);
+    const permType = snapshot.permType?.trim().toLowerCase() ?? null;
+    const permissionNames = snapshot.permissions === null
+      ? null
+      : new Set(snapshot.permissions.map((value) => value.trim().toLowerCase()));
+    const read = permType === "read-only" || permType === "read-and-write";
+    const unifiedTrade = permType === "read-and-write" && permissionNames?.has("uta_trade") === true;
+    const withdraw = permissionNames === null || permissionNames.has("withdraw");
+    const ipRestricted = snapshot.boundIps !== null && snapshot.boundIps.trim().length > 0;
+    const accountMode = snapshot.accountMode.trim().toLowerCase();
+    const holdMode = snapshot.holdMode?.trim().toLowerCase() ?? "unknown";
+    const accountLevelSupported = accountMode === "unified" || accountMode === "hybrid";
+    const positionModeSupported = holdMode === "one_way_mode";
+    const executionEnabled = read && unifiedTrade && !withdraw && ipRestricted
+      && accountLevelSupported && positionModeSupported;
+    return Object.freeze({
+      ...identity,
+      accountMode,
+      holdMode,
+      permissions: Object.freeze({
+        read,
+        spotTrade: unifiedTrade,
+        contractTrade: unifiedTrade,
+        withdraw,
+        ipRestricted,
+        accountLevelSupported,
+        positionModeSupported,
+        providerVerified: true,
+        executionEnabled,
+      }),
+    });
   }
 
   async readPerpetualPosition(
@@ -120,6 +181,12 @@ export class BitgetAccountReadClient {
     const positions = positionList(data, "Bitget position list")
       .map((value) => requiredRecord(value, "Bitget position"))
       .filter((position) => requiredString(position.symbol, "Bitget position symbol") === normalizedSymbol);
+    if (positions.some((position) => optionalString(position.category)?.toUpperCase() !== "USDT-FUTURES")) {
+      throw new BitgetAccountReadError("provider_response_invalid", "Bitget position category does not match USDT-FUTURES.");
+    }
+    if (positions.some((position) => optionalString(position.holdMode)?.toLowerCase() !== "one_way_mode")) {
+      throw new BitgetAccountReadError("position_mode_unsupported", "Bitget position read requires one-way mode.");
+    }
     const nonZero = positions.filter((position) => decimalQuantity(position.total, "Bitget position total") !== "0");
     const sideMatched = expectedSide ? nonZero.filter((position) => (
       optionalString(position.posSide)?.toLowerCase() === expectedSide
@@ -198,6 +265,16 @@ export class BitgetAccountReadClient {
     }
     return payload;
   }
+}
+
+function accountIdentity(uid: string): BitgetAccountIdentity {
+  const uidHash = createHash("sha256").update(`bitget:${requiredIdentifier(uid, "Bitget account userId")}`).digest("hex");
+  const accountFingerprint = uidHash.slice(0, 16);
+  return Object.freeze({
+    accountId: `bitget:${accountFingerprint}`,
+    accountFingerprint,
+    uidHash,
+  });
 }
 
 function isAuthenticationCode(code: string | undefined) {

@@ -69,6 +69,22 @@ test("exposes an enabled Bybit Draft without a credential-global position mode f
   assert.equal(result.allLegsExecutable, true);
 });
 
+test("exposes an enabled Bitget Draft only when formal runtime and persisted one-way readiness are present", async () => {
+  const service = draftService(opportunity("bitget", "bitget"), new FakeContexts(), {
+    registeredVenues: ["bitget"],
+    bitgetCredential: "enabled",
+  });
+  const result = await service.preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+  assert.equal(result.legs[0].planning.status, "PLANNED");
+  assert.equal(result.legs[1].planning.status, "PLANNED");
+  assert.equal(result.legs.every((leg) => leg.capability.reasonCode === "AVAILABLE"), true);
+  assert.equal(result.allLegsExecutable, true);
+});
+
 test("keeps Bybit Draft credential readiness fail-closed", async (t) => {
   for (const [name, overrides] of [
     ["disabled", { bybitCredential: "disabled" as const }],
@@ -285,6 +301,8 @@ function draftService(
     okxPermissionOverrides?: Readonly<Record<string, boolean>>;
     bybitCredential?: "enabled" | "disabled" | "missing";
     bybitPermissionOverrides?: Readonly<Record<string, boolean>>;
+    bitgetCredential?: "enabled" | "disabled" | "missing";
+    bitgetPermissionOverrides?: Readonly<Record<string, boolean>>;
   }> = {},
 ) {
   const runtimes = new FormalExecutionRuntimeRegistry();
@@ -314,6 +332,24 @@ function draftService(
               ipRestricted: true,
               accountLevelSupported: true,
               ...options.bybitPermissionOverrides,
+            },
+          } as any;
+        }
+        if (venue === "bitget") {
+          if (options.bitgetCredential === "missing") return null;
+          const executionEnabled = options.bitgetCredential !== "disabled";
+          return {
+            accountId: "bitget:0123456789abcdef",
+            permissions: {
+              executionEnabled,
+              providerVerified: true,
+              read: true,
+              contractTrade: true,
+              withdraw: false,
+              ipRestricted: true,
+              accountLevelSupported: true,
+              positionModeSupported: true,
+              ...options.bitgetPermissionOverrides,
             },
           } as any;
         }

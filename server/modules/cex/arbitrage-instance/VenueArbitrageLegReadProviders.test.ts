@@ -75,6 +75,9 @@ test("provider rejects mismatched account identity and spot short inference", as
     { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
   );
   await assert.rejects(provider.readLeg(leg({ venue: "bitget", accountId: "bitget:account-a" })), /account does not match/u);
+  await assert.rejects(provider.readLeg(leg({
+    venue: "bitget", accountId: "bitget:credential-only:0123456789abcdef0123",
+  })), /account does not match/u);
 
   const spotShort = new VenueArbitrageLegReadProvider(
     "binance",

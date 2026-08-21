@@ -93,6 +93,14 @@ import { BybitIntentExecutionRuntime } from "./modules/bybit/BybitIntentExecutio
 import { BybitIntentExecutionServiceRegistry } from "./modules/bybit/BybitIntentExecutionServiceRegistry";
 import { createBybitExecutionTickerSource } from "./modules/bybit/BybitExecutionMarketData";
 import { BybitHistoricalExecutionEvidenceSource } from "./modules/bybit/BybitHistoricalExecutionEvidenceSource";
+import { BitgetFormalArbitrageExecutionRuntime } from "./modules/bitget/BitgetFormalArbitrageExecutionRuntime";
+import { PersistentBitgetExecutionOrderReferenceStore } from "./modules/bitget/BitgetExecutionOrderReferenceStore";
+import { createBitgetExecutionTickerSource } from "./modules/bitget/BitgetExecutionMarketData";
+import { createBitgetInstrumentQuantityRulesSource } from "./modules/bitget/BitgetInstrumentQuantityRulesSource";
+import { BitgetIntentExecutionRuntime } from "./modules/bitget/BitgetIntentExecutionRuntime";
+import { BitgetIntentExecutionServiceRegistry } from "./modules/bitget/BitgetIntentExecutionServiceRegistry";
+import { BitgetSpotCloseBalanceSource } from "./modules/bitget/BitgetSpotCloseBalanceSource";
+import { BitgetSpotOpeningAttributionSource } from "./modules/bitget/BitgetSpotOpeningAttributionSource";
 import { normalizeInterval, normalizeSymbol } from "./modules/market/marketConfig";
 import {
   createCorsMiddleware,
@@ -246,10 +254,25 @@ const bybitExecutionRuntime = new BybitIntentExecutionRuntime(
   },
 );
 const bybitFormalArbitrageExecutionRuntime = new BybitFormalArbitrageExecutionRuntime(bybitExecutionRuntime);
+const bitgetTickerSource = createBitgetExecutionTickerSource();
+const bitgetExecutionRuntime = new BitgetIntentExecutionRuntime(
+  new BitgetIntentExecutionServiceRegistry(userExchangeCredentials),
+  executionRecordStore,
+  new PersistentBitgetExecutionOrderReferenceStore(executionOrderReferenceStore),
+  {
+    quantityRulesSource: createBitgetInstrumentQuantityRulesSource(),
+    limitPriceResolver: async (intent, instrument) => {
+      const ticker = await bitgetTickerSource(instrument.venueInstrument.category, instrument.venueInstrument.symbol);
+      return intent.side === "buy" ? ticker.ask : ticker.bid;
+    },
+  },
+);
+const bitgetFormalArbitrageExecutionRuntime = new BitgetFormalArbitrageExecutionRuntime(bitgetExecutionRuntime);
 const formalExecutionRuntimes = new FormalExecutionRuntimeRegistry()
   .register(formalExecutionRuntime("binance", binanceFormalArbitrageExecutionRuntime));
 formalExecutionRuntimes.register(formalExecutionRuntime("okx", okxFormalArbitrageExecutionRuntime));
 formalExecutionRuntimes.register(formalExecutionRuntime("bybit", bybitFormalArbitrageExecutionRuntime));
+formalExecutionRuntimes.register(formalExecutionRuntime("bitget", bitgetFormalArbitrageExecutionRuntime));
 const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
   arbitrageDashboard,
   arbitrageExecutionPlanningContexts,
@@ -267,6 +290,11 @@ const spotOpeningAttributions = {
     executionRecordStore,
     userExchangeCredentials,
     new PersistentBybitExecutionOrderReferenceStore(executionOrderReferenceStore),
+  ),
+  bitget: new BitgetSpotOpeningAttributionSource(
+    executionRecordStore,
+    userExchangeCredentials,
+    new PersistentBitgetExecutionOrderReferenceStore(executionOrderReferenceStore),
   ),
 };
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
@@ -288,6 +316,7 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
     binance: new BinanceSpotCloseBalanceSource(binancePersonalTrading),
     okx: new OkxSpotCloseBalanceSource(userExchangeCredentials),
     bybit: new BybitSpotCloseBalanceSource(userExchangeCredentials),
+    bitget: new BitgetSpotCloseBalanceSource(userExchangeCredentials),
   },
   spotOpeningAttributions,
   formalExecutionRuntimes,

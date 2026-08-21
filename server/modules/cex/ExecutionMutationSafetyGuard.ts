@@ -129,13 +129,21 @@ export function executionMutationSafetyConfigFromEnvironment(
       killSwitchActiveMessage: "BYBIT_KILL_SWITCH is active.",
     },
   );
+  const bitget = state(
+    source.BITGET_LIVE_TRADING_ENABLED === "true",
+    source.BITGET_KILL_SWITCH !== "false",
+    {
+      liveTradingDisabledMessage: "BITGET_LIVE_TRADING_ENABLED is not true.",
+      killSwitchActiveMessage: "BITGET_KILL_SWITCH is active.",
+    },
+  );
   return Object.freeze({
     ...binance,
     venues: Object.freeze({
       binance,
       okx,
       bybit,
-      bitget: FAIL_CLOSED_STATE,
+      bitget,
     }),
   });
 }

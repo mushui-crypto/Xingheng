@@ -218,6 +218,26 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
   const keyProvider = new FakeCredentialKeyProvider();
   const store = new UserExchangeCredentialStore({ dbPath, environment: "test", keyProvider });
   const service = new UserExchangeCredentialService(store, {
+    bitgetClientFactory: () => ({
+      validateAccess: async () => ({
+        accountId: "bitget:1234567890abcdef",
+        accountFingerprint: "1234567890abcdef",
+        uidHash: `1234567890abcdef${"0".repeat(48)}`,
+        accountMode: "unified",
+        holdMode: "one_way_mode",
+        permissions: {
+          read: true,
+          spotTrade: true,
+          contractTrade: true,
+          withdraw: false,
+          ipRestricted: true,
+          accountLevelSupported: true,
+          positionModeSupported: true,
+          providerVerified: true,
+          executionEnabled: true,
+        },
+      }),
+    }),
     bybitClientFactory: () => ({
       validateAccess: async () => ({
         accountId: "bybit:abcdef0123456789",
@@ -294,14 +314,11 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
       };
       assert.equal(payload.venue, venue);
       assert.equal(payload.configured, true);
-      if (venue === "okx" || venue === "bybit") {
-        assert.equal(payload.accountId, venue === "okx" ? "okx:0123456789abcdef" : "bybit:abcdef0123456789");
+      if (venue === "okx" || venue === "bybit" || venue === "bitget") {
+        assert.equal(payload.accountId, venue === "okx" ? "okx:0123456789abcdef"
+          : venue === "bybit" ? "bybit:abcdef0123456789" : "bitget:1234567890abcdef");
         assert.equal(payload.permissions.executionEnabled, false);
         assert.match(payload.message, /Provider-verified/u);
-      } else {
-        assert.match(payload.accountId, new RegExp(`^${venue}:credential-only:`));
-        assert.equal(payload.permissions.executionEnabled, false);
-        assert.match(payload.message, /Private provider validation and execution are not enabled/u);
       }
 
       const databaseBytes = readFileSync(dbPath).toString("utf8");
@@ -317,6 +334,45 @@ test("credential API persists Bybit, Bitget and OKX credentials through service,
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
     store.close();
     rmSync(directory, { force: true, recursive: true });
+  }
+});
+
+test("credential API binds Bitget rebind and execution enablement to authenticated identity", async () => {
+  const captured: Array<{ operation: string; userId: string; input?: unknown }> = [];
+  const app = express();
+  app.use(express.json());
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, {
+    rebindBitget: async (userId: string) => {
+      captured.push({ operation: "rebind", userId });
+      return { venue: "bitget", configured: true, permissions: { executionEnabled: false } };
+    },
+    enableBitgetExecution: async (userId: string, input: unknown) => {
+      captured.push({ operation: "enable", userId, input });
+      return { venue: "bitget", configured: true, permissions: { executionEnabled: true } };
+    },
+  } as never);
+  const server = app.listen(0, "127.0.0.1");
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const rebind = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/bitget/rebind`, { method: "POST" });
+    const enable = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/bitget/execution/enable`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation: "ENABLE_BITGET_EXECUTION" }),
+    });
+    assert.equal(rebind.status, 200);
+    assert.equal(enable.status, 200);
+    assert.deepEqual(captured, [
+      { operation: "rebind", userId: "session-user" },
+      { operation: "enable", userId: "session-user", input: { confirmation: "ENABLE_BITGET_EXECUTION" } },
+    ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
 
