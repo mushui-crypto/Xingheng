@@ -361,7 +361,8 @@ function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
   const verification = verificationState?.status === "success"
     ? verificationState.verification.legs.find((item) => item.legId === leg.legId)
     : undefined;
-  const available = leg.venue === "binance"
+  const venueSupported = leg.venue === "binance" || leg.venue === "bybit";
+  const available = venueSupported
     && (leg.instrumentId.endsWith("-PERP") || (leg.instrumentId.endsWith("-SPOT") && leg.role === "LONG"))
     && verification?.verificationStatus === "MATCHED"
     && verification.expectedManagedQuantity !== "0"
@@ -374,7 +375,7 @@ function CloseLegAction({ instance, leg, onCloseLeg, verificationState }: {
       type="button"
       variant="secondary"
     >
-      {leg.venue !== "binance" ? "执行能力尚未接入" : "退出该腿"}
+      {!venueSupported ? "执行能力尚未接入" : "退出该腿"}
     </Button>
   </div>;
 }

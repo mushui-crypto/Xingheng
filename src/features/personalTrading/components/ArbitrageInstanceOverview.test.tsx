@@ -155,6 +155,43 @@ test("matched Binance Spot LONG with reliable available balance exposes the same
   assert.match(dialogSource, /现货不使用只减仓参数/u);
 });
 
+test("matched Bybit Spot LONG and perpetual SHORT expose the formal close entries", () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const current = parsed!;
+  const active = {
+    ...current,
+    strategyType: "SPOT_PERPETUAL" as const,
+    legs: [
+      { ...current.legs[0], venue: "bybit" as const, instrumentId: "DOGE-USDT-SPOT" },
+      { ...current.legs[1], venue: "bybit" as const, instrumentId: "DOGE-USDT-PERP" },
+    ] as typeof current.legs,
+  };
+  const html = renderToStaticMarkup(
+    <ArbitrageInstanceSections
+      active={[active]}
+      history={[]}
+      onCloseLeg={() => undefined}
+      onPageChange={() => undefined}
+      page={1}
+      verifications={{
+        [active.arbitrageId]: {
+          status: "success",
+          verification: {
+            arbitrageId: active.arbitrageId,
+            checkedAt: 1_800_000_004_000,
+            legs: [
+              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "93.906", actualQuantity: "93.906", availableQuantity: "93.906", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+              { arbitrageId: active.arbitrageId, legId: "short-leg", expectedManagedQuantity: "93", actualQuantity: "93", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
+            ],
+          },
+        },
+      }}
+    />,
+  );
+  assert.equal((html.match(/退出该腿/gu) ?? []).length, 2);
+  assert.doesNotMatch(html, /执行能力尚未接入/u);
+});
+
 test("known active StellaX execution exposes cancel while terminal and historical records do not", () => {
   const [parsed] = requireArbitrageInstanceList([arbitrageInstance("OPENING")]);
   const active = {
