@@ -136,7 +136,7 @@ export class BitgetAccountReadClient {
   async validateAccess(): Promise<BitgetAccountAccess> {
     const snapshot = await this.readAccountSnapshot();
     const identity = accountIdentity(snapshot.uid);
-    const permType = snapshot.permType?.trim().toLowerCase() ?? null;
+    const permType = normalizePermissionType(snapshot.permType);
     const permissionNames = snapshot.permissions === null
       ? null
       : new Set(snapshot.permissions.map((value) => value.trim().toLowerCase()));
@@ -364,4 +364,9 @@ function optionalTimestamp(value: unknown) {
 
 function invalidPositionSide(): never {
   throw new BitgetAccountReadError("provider_response_invalid", "Bitget position side is invalid.");
+}
+
+function normalizePermissionType(value: string | null) {
+  const normalized = value?.trim().toLowerCase() ?? null;
+  return normalized === "read_and_write" ? "read-and-write" : normalized;
 }

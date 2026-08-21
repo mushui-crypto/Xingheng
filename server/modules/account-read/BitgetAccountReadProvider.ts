@@ -62,8 +62,13 @@ function tradePermission(
   permissions: string[] | null,
 ): AccountReadCapabilityStatus {
   if (permType === null || permissions === null) return "UNKNOWN";
-  if (permType.trim().toLowerCase() !== "read-and-write") return "DISABLED";
+  if (normalizePermissionType(permType) !== "read-and-write") return "DISABLED";
   return permissions.some((value) => value.trim().toLowerCase() === "uta_trade") ? "ENABLED" : "DISABLED";
+}
+
+function normalizePermissionType(value: string) {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "read_and_write" ? "read-and-write" : normalized;
 }
 
 function accountCapability(accountMode: string): AccountReadCapabilityStatus {
@@ -83,7 +88,7 @@ function positionModeCapability(holdMode: string | null): AccountReadCapabilityS
 
 function readPermission(value: string | null): AccountReadCapabilityStatus {
   if (value === null) return "UNKNOWN";
-  const normalized = value.trim().toLowerCase();
+  const normalized = normalizePermissionType(value);
   return normalized === "read-only" || normalized === "read-and-write" ? "ENABLED" : "UNKNOWN";
 }
 

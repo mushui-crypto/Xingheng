@@ -84,6 +84,19 @@ test("validates Bitget Provider identity and execution readiness from authoritat
   });
 });
 
+test("normalizes Bitget's underscore read-and-write permission enum", async () => {
+  const client = clientWithResponse((path) => {
+    const response = bitgetResponse(path) as { data?: Record<string, unknown> };
+    if (path === "/api/v3/account/info") return success({ ...response.data, permType: "read_and_write", permissions: ["uta_mgt", "uta_trade"] });
+    return response;
+  });
+  const access = await client.validateAccess();
+  assert.equal(access.permissions.read, true);
+  assert.equal(access.permissions.spotTrade, true);
+  assert.equal(access.permissions.contractTrade, true);
+  assert.equal(access.permissions.executionEnabled, true);
+});
+
 test("fails Bitget execution readiness closed when an authoritative requirement is absent", async (t) => {
   for (const [name, infoOverride, settingsOverride] of [
     ["withdraw", { permissions: ["uta_trade", "withdraw"] }, {}],
