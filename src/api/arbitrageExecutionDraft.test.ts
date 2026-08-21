@@ -5,8 +5,10 @@ import {
   closeArbitrageExecutionLeg,
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
+  exitArbitrageInstance,
   fetchArbitrageExecutionDraft,
   previewArbitrageExecutionDraft,
+  reconcileArbitrageInstance,
   reconcileArbitrageExecutionLeg,
 } from "./arbitrageExecutionDraft";
 
@@ -143,6 +145,49 @@ test("close API sends only application identity, Decimal quantity, mode, and exp
     executionMode: "EXECUTION_PRIORITY",
     confirmed: true,
   });
+});
+
+test("instance exit and reconciliation APIs do not expose browser leg orchestration", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), init });
+    return Response.json(String(input).endsWith("/exit")
+      ? { instance: { ...instancePayload("arbitrage-1"), status: "CLOSED", closedAt: 40 }, status: "CONFIRMED", legs: [] }
+      : {
+          instance: instancePayload("arbitrage-1"),
+          verification: {
+            arbitrageId: "arbitrage-1",
+            checkedAt: 50,
+            legs: [
+              { arbitrageId: "arbitrage-1", legId: "long-leg", expectedManagedQuantity: "0", actualQuantity: "0", actualSignedNetQuantity: "0", availableQuantity: null, verificationStatus: "MATCHED", reason: null, checkedAt: 50 },
+              { arbitrageId: "arbitrage-1", legId: "short-leg", expectedManagedQuantity: "0", actualQuantity: "0", actualSignedNetQuantity: "0", availableQuantity: null, verificationStatus: "MATCHED", reason: null, checkedAt: 50 },
+            ],
+          },
+        });
+  };
+  try {
+    await exitArbitrageInstance({
+      arbitrageId: "arbitrage-1",
+      commandId: "instance-exit-1",
+      executionMode: "EXECUTION_PRIORITY",
+    });
+    await reconcileArbitrageInstance("arbitrage-1");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  assert.equal(calls[0]?.url, "/api/arbitrage-execution/exit");
+  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
+    arbitrageId: "arbitrage-1",
+    commandId: "instance-exit-1",
+    executionMode: "EXECUTION_PRIORITY",
+    confirmed: true,
+  });
+  assert.equal(calls[1]?.url, "/api/arbitrage-execution/reconcile");
+  assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { arbitrageId: "arbitrage-1" });
+  assert.equal("legId" in JSON.parse(String(calls[0]?.init?.body)), false);
+  assert.equal("quantity" in JSON.parse(String(calls[0]?.init?.body)), false);
 });
 
 test("known-order cancel API sends only StellaX application identity and explicit confirmation", async () => {

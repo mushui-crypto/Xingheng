@@ -1,5 +1,10 @@
 import type { ArbitrageHorizon } from "../features/arbitrage/model/types";
-import { requireArbitrageInstance, type ArbitrageInstance } from "./arbitrageInstances";
+import {
+  requireArbitrageInstance,
+  requireArbitragePositionVerification,
+  type ArbitrageInstance,
+  type ArbitragePositionVerification,
+} from "./arbitrageInstances";
 import { requestJson } from "./httpClient";
 
 export type ExecutionQuantityInput =
@@ -210,6 +215,57 @@ export async function closeArbitrageExecutionLeg(
     },
   );
   return legExecutionConfirmation(payload);
+}
+
+export type ArbitrageInstanceExitResult = Readonly<{
+  instance: ArbitrageInstance;
+  status: "CONFIRMED" | "STOPPED";
+}>;
+
+export async function exitArbitrageInstance(input: Readonly<{
+  arbitrageId: string;
+  commandId: string;
+  executionMode: FormalExecutionMode;
+}>): Promise<ArbitrageInstanceExitResult> {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/exit",
+    "对冲退出失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  const value = record(payload);
+  if (value.status !== "CONFIRMED" && value.status !== "STOPPED") throw invalidCommandResponse();
+  if (!Array.isArray(value.legs)) throw invalidCommandResponse();
+  return Object.freeze({ instance: requireArbitrageInstance(value.instance), status: value.status });
+}
+
+export async function reconcileArbitrageInstance(arbitrageId: string): Promise<Readonly<{
+  instance: ArbitrageInstance;
+  verification: ArbitragePositionVerification;
+}>> {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/reconcile",
+    "对冲状态核验失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ arbitrageId }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  const value = record(payload);
+  return Object.freeze({
+    instance: requireArbitrageInstance(value.instance),
+    verification: requireArbitragePositionVerification(value.verification),
+  });
 }
 
 export async function cancelKnownArbitrageOrder(

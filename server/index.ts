@@ -10,6 +10,7 @@ import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageEx
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
+import { registerArbitrageInstanceExitRoutes } from "./modules/api/arbitrageInstanceExitRoutes";
 import { registerHistoricalUnknownRecoveryRoutes } from "./modules/api/historicalUnknownRecoveryRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
@@ -40,6 +41,7 @@ import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitr
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/ArbitrageExecutionCancelService";
+import { ArbitrageInstanceExitService } from "./modules/arbitrage-execution/ArbitrageInstanceExitService";
 import { HistoricalExecutionEvidenceRegistry } from "./modules/arbitrage-execution/HistoricalExecutionEvidence";
 import { HistoricalUnknownNotDispatchedRecoveryService } from "./modules/arbitrage-execution/HistoricalUnknownNotDispatchedRecoveryService";
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
@@ -296,6 +298,12 @@ const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   formalExecutionRuntimes,
   arbitrageExecutionCommand,
 );
+const arbitrageInstanceExit = new ArbitrageInstanceExitService(
+  arbitrageInstances,
+  arbitrageExecutionClose,
+  arbitrageExecutionCommand,
+  arbitragePositionVerification,
+);
 const historicalUnknownRecovery = new HistoricalUnknownNotDispatchedRecoveryService(
   arbitrageInstances,
   executionRecordStore,
@@ -315,6 +323,7 @@ registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
 registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
+registerArbitrageInstanceExitRoutes(app, arbitrageInstanceExit);
 registerHistoricalUnknownRecoveryRoutes(app, historicalUnknownRecovery);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);

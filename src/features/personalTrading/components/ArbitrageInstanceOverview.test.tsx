@@ -3,15 +3,19 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { requireArbitrageInstanceList } from "../../../api/arbitrageInstances";
+import { requireArbitrageInstanceList, type ArbitrageInstance } from "../../../api/arbitrageInstances";
 import {
   ArbitrageInstanceContent,
   ArbitrageInstanceSections,
   loadVerifications,
   maskAccountId,
+  hedgeExitSummary,
+  reconcileArbitrageHedge,
   statusLabel,
+  unresolvedClosingReference,
   verificationStatusLabel,
 } from "./ArbitrageInstanceOverview";
+import { persistedExitProgress } from "./ArbitrageHedgeExitDialog";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
@@ -87,109 +91,37 @@ test("active legs render matched, mismatch, unknown and null quantities without 
   assert.doesNotMatch(html, />0<\/dd>[\s\S]*当前仓位暂无法可靠确认/u);
 });
 
-test("matched Binance perpetual leg exposes the minimal controlled close entry while Spot/other venues stay unavailable", () => {
-  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
-  const html = renderToStaticMarkup(
-    <ArbitrageInstanceSections
-      active={[active!]}
-      history={[]}
-      onCloseLeg={() => undefined}
-      onPageChange={() => undefined}
-      page={1}
-      verifications={{
-        [active!.arbitrageId]: {
-          status: "success",
-          verification: {
-            arbitrageId: active!.arbitrageId,
-            checkedAt: 1_800_000_004_000,
-            legs: [
-              { arbitrageId: active!.arbitrageId, legId: "long-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-              { arbitrageId: active!.arbitrageId, legId: "short-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-            ],
-          },
-        },
-      }}
-    />,
-  );
-  assert.match(html, /OKX[\s\S]*退出该腿/u);
-  assert.equal((html.match(/退出该腿/gu) ?? []).length, 1);
+test("Binance, OKX, Bybit and Bitget share one instance-level exit and reconciliation entry", () => {
+  const venues = ["binance", "okx", "bybit", "bitget"] as const;
+  const active = venues.map((venue) => {
+    const [parsed] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+    return { ...parsed!, arbitrageId: `arbitrage-${venue}`, legs: parsed!.legs.map((leg) => ({ ...leg, venue })) as ArbitrageInstance["legs"] };
+  });
+  const verifications = Object.fromEntries(active.map((instance) => [instance.arbitrageId, matchedVerification(instance, "1", "1")]));
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={active}
+    history={[]}
+    onExitHedge={() => undefined}
+    onPageChange={() => undefined}
+    onReconcileHedge={() => undefined}
+    page={1}
+    verifications={verifications}
+  />);
+
+  assert.equal((html.match(/>退出对冲</gu) ?? []).length, 4);
+  assert.equal((html.match(/>重新核验</gu) ?? []).length, 4);
+  assert.doesNotMatch(html, /退出该腿|重新核验退出/u);
 });
 
-test("matched Binance Spot LONG with reliable available balance exposes the same close entry", () => {
-  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
-  const active = {
-    ...parsed!,
-    strategyType: "SPOT_PERPETUAL" as const,
-    legs: [
-      { ...parsed!.legs[0], venue: "binance" as const, instrumentId: "BTC-USDT-SPOT" },
-      parsed!.legs[1],
-    ] as typeof parsed.legs,
-  };
-  const html = renderToStaticMarkup(
-    <ArbitrageInstanceSections
-      active={[active]}
-      history={[]}
-      onCloseLeg={() => undefined}
-      onPageChange={() => undefined}
-      page={1}
-      verifications={{
-        [active.arbitrageId]: {
-          status: "success",
-          verification: {
-            arbitrageId: active.arbitrageId,
-            checkedAt: 1_800_000_004_000,
-            legs: [
-              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "1", actualQuantity: "1", availableQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-              { arbitrageId: active.arbitrageId, legId: "short-leg", expectedManagedQuantity: "1", actualQuantity: "1", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-            ],
-          },
-        },
-      }}
-    />,
-  );
-  assert.equal((html.match(/退出该腿/gu) ?? []).length, 2);
-  assert.doesNotMatch(html, /现货退出尚未接入/u);
-  const dialogSource = readFileSync(new URL("./ArbitrageLegCloseDialog.tsx", import.meta.url), "utf8");
-  assert.match(dialogSource, /当前实际可用数量/u);
-  assert.match(dialogSource, /verification\.availableQuantity/u);
-  assert.match(dialogSource, /现货不使用只减仓参数/u);
-});
-
-test("matched Bybit Spot LONG and perpetual SHORT expose the formal close entries", () => {
-  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
-  const current = parsed!;
-  const active = {
-    ...current,
-    strategyType: "SPOT_PERPETUAL" as const,
-    legs: [
-      { ...current.legs[0], venue: "bybit" as const, instrumentId: "DOGE-USDT-SPOT" },
-      { ...current.legs[1], venue: "bybit" as const, instrumentId: "DOGE-USDT-PERP" },
-    ] as typeof current.legs,
-  };
-  const html = renderToStaticMarkup(
-    <ArbitrageInstanceSections
-      active={[active]}
-      history={[]}
-      onCloseLeg={() => undefined}
-      onPageChange={() => undefined}
-      page={1}
-      verifications={{
-        [active.arbitrageId]: {
-          status: "success",
-          verification: {
-            arbitrageId: active.arbitrageId,
-            checkedAt: 1_800_000_004_000,
-            legs: [
-              { arbitrageId: active.arbitrageId, legId: "long-leg", expectedManagedQuantity: "93.906", actualQuantity: "93.906", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-              { arbitrageId: active.arbitrageId, legId: "short-leg", expectedManagedQuantity: "93", actualQuantity: "93", availableQuantity: null, verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
-            ],
-          },
-        },
-      }}
-    />,
-  );
-  assert.equal((html.match(/退出该腿/gu) ?? []).length, 2);
-  assert.doesNotMatch(html, /执行能力尚未接入/u);
+test("the browser submits one instance command and renders persisted two-leg progress", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const source = readFileSync(new URL("./ArbitrageHedgeExitDialog.tsx", import.meta.url), "utf8");
+  assert.deepEqual(persistedExitProgress(instance!), ["○ 空头永续腿等待退出", "○ 多头永续腿等待退出"]);
+  assert.match(source, /exitArbitrageInstance/u);
+  assert.match(source, /正在退出对冲/u);
+  assert.match(source, /已退出/u);
+  assert.match(source, /确认中/u);
+  assert.doesNotMatch(source, /closeArbitrageExecutionLeg|\.closeLeg\(|legId:|quantity:|UnifiedRealTradingTest|Provider/u);
 });
 
 test("known active StellaX execution exposes cancel while terminal and historical records do not", () => {
@@ -243,6 +175,164 @@ test("known active StellaX execution exposes cancel while terminal and historica
   assert.match(dialogSource, /计划数量/u);
   assert.match(dialogSource, /已确认数量/u);
   assert.doesNotMatch(dialogSource, /providerOrderId|providerSymbol|accountId/u);
+});
+
+test("reopening restores two-leg exit progress from persisted execution references", () => {
+  const venues = ["binance", "okx", "bybit", "bitget"] as const;
+  const active = venues.map((venue, index) => {
+    const [parsed] = requireArbitrageInstanceList([arbitrageInstance("CLOSING")]);
+    const legs: ArbitrageInstance["legs"] = [
+      { ...parsed!.legs[0], venue },
+      parsed!.legs[1],
+    ];
+    const instance: ArbitrageInstance = {
+      ...parsed!,
+      arbitrageId: `arbitrage-recovery-${venue}`,
+      legs,
+      executionReferences: [{
+        arbitrageId: `arbitrage-recovery-${venue}`,
+        legId: "long-leg",
+        phase: "CLOSING" as const,
+        quantityEffect: "DECREASE" as const,
+        executionIntentId: `close-${venue}`,
+        executionRecordId: `record-long-${venue}`,
+        requestedQuantity: "0.9",
+        confirmedQuantity: "0.9",
+        status: "CONFIRMED" as const,
+        createdAt: 1_800_000_000_000,
+        updatedAt: 1_800_000_000_100,
+      }, {
+        arbitrageId: `arbitrage-recovery-${venue}`,
+        legId: "short-leg",
+        phase: "CLOSING" as const,
+        quantityEffect: "DECREASE" as const,
+        executionIntentId: `close-short-${venue}`,
+        executionRecordId: index === 0 ? null : `record-short-${venue}`,
+        requestedQuantity: "1",
+        confirmedQuantity: "0",
+        status: (["CLAIMED", "LINKED", "PENDING_CONFIRMATION", "UNKNOWN"] as const)[index]!,
+        createdAt: 1_800_000_000_000,
+        updatedAt: 1_800_000_000_200,
+      }],
+    };
+    assert.equal(unresolvedClosingReference(instance, "short-leg")?.executionIntentId, `close-short-${venue}`);
+    return instance;
+  });
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={active}
+    history={[]}
+    onExitHedge={() => undefined}
+    onPageChange={() => undefined}
+    onReconcileHedge={() => undefined}
+    page={1}
+  />);
+
+  assert.equal((html.match(/✓ 多头永续腿已退出/gu) ?? []).length, 4);
+  assert.equal((html.match(/○ 空头永续腿确认中/gu) ?? []).length, 4);
+  assert.equal((html.match(/>重新核验</gu) ?? []).length, 4);
+  assert.doesNotMatch(html, /退出该腿|重新核验退出/u);
+});
+
+test("verification maps both flat, one-sided residual and unknown states at instance level", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("CLOSING")]);
+  const ended = hedgeExitSummary(instance!, matchedVerification(instance!, "0", "0"));
+  const remaining = hedgeExitSummary(instance!, matchedVerification(instance!, "0.006", "0"));
+  const unknown = hedgeExitSummary(instance!, {
+    status: "success",
+    verification: {
+      ...matchedVerification(instance!, "0", "0").verification,
+      legs: [
+        { ...matchedVerification(instance!, "0", "0").verification.legs[0], actualQuantity: null, verificationStatus: "UNKNOWN" },
+        matchedVerification(instance!, "0", "0").verification.legs[1],
+      ],
+    },
+  });
+
+  assert.equal(ended.label, "对冲已结束");
+  assert.equal(remaining.label, "对冲尚未完全退出");
+  assert.deepEqual(remaining.details, ["多头永续腿剩余 0.006"]);
+  assert.equal(unknown.label, "仓位状态待确认");
+  const overviewSource = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  assert.match(overviewSource, /fetchArbitragePositionVerification/u);
+  assert.match(overviewSource, /reconcileArbitrageInstance/u);
+  assert.doesNotMatch(overviewSource, /reconcileArbitrageExecutionLeg/u);
+  assert.doesNotMatch(overviewSource, /onReconcileLeg|重新核验退出/u);
+});
+
+test("persisted CLOSED status wins over accepted residual and unrelated account dust", () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
+  const instance = { ...parsed!, maxResidualBaseQuantity: "0.006" };
+  const state = matchedVerification(instance, "0.011", "0");
+
+  const summary = hedgeExitSummary(instance, state);
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[instance]}
+    history={[]}
+    onExitHedge={() => undefined}
+    onPageChange={() => undefined}
+    onReconcileHedge={() => undefined}
+    page={1}
+    verifications={{ [instance.arbitrageId]: state }}
+  />);
+
+  assert.equal(summary.kind, "ended");
+  assert.equal(summary.label, "对冲已结束");
+  assert.match(html, /对冲已结束/u);
+  assert.doesNotMatch(html, />退出对冲<|>重新核验</u);
+});
+
+test("refresh recovery keeps the not-yet-started second leg visible in exit progress", () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("CLOSING")]);
+  const instance: ArbitrageInstance = {
+    ...parsed!,
+    executionReferences: [{
+      arbitrageId: parsed!.arbitrageId,
+      legId: "short-leg",
+      phase: "CLOSING",
+      quantityEffect: "DECREASE",
+      executionIntentId: "close-short",
+      executionRecordId: "record-short",
+      requestedQuantity: "1",
+      confirmedQuantity: "1",
+      status: "CONFIRMED",
+      createdAt: 1_800_000_000_000,
+      updatedAt: 1_800_000_000_100,
+    }],
+  };
+
+  assert.deepEqual(hedgeExitSummary(instance, matchedVerification(instance, "1", "0")).progress, [
+    "○ 多头永续腿等待退出",
+    "✓ 空头永续腿已退出",
+  ]);
+});
+
+test("one reconciliation action restores persisted references and verifies both positions once", async () => {
+  const [parsed] = requireArbitrageInstanceList([arbitrageInstance("CLOSING")]);
+  const references = parsed!.legs.map((leg, index) => ({
+    arbitrageId: parsed!.arbitrageId,
+    legId: leg.legId,
+    phase: "CLOSING" as const,
+    quantityEffect: "DECREASE" as const,
+    executionIntentId: `close-${leg.legId}`,
+    executionRecordId: `record-${leg.legId}`,
+    requestedQuantity: "1",
+    confirmedQuantity: "0",
+    status: (index === 0 ? "PENDING_CONFIRMATION" : "UNKNOWN") as "PENDING_CONFIRMATION" | "UNKNOWN",
+    createdAt: 1_800_000_000_000,
+    updatedAt: 1_800_000_000_100,
+  }));
+  const current: ArbitrageInstance = { ...parsed!, executionReferences: references };
+  const calls: string[] = [];
+  const result = await reconcileArbitrageHedge(
+    current,
+    async (arbitrageId) => {
+      calls.push(arbitrageId);
+      return { instance: current, verification: matchedVerification(current, "0", "0").verification };
+    },
+  );
+
+  assert.deepEqual(calls, [current.arbitrageId]);
+  assert.equal(result.verification.legs.every((leg) => leg.actualQuantity === "0"), true);
 });
 
 test("history renders confirmed quantities without live verification fields", () => {
@@ -375,5 +465,22 @@ function verificationPayload(arbitrageId: string) {
       { arbitrageId, legId: "long-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
       { arbitrageId, legId: "short-leg", expectedManagedQuantity: "1", actualQuantity: "1", verificationStatus: "MATCHED", checkedAt: 1_800_000_004_000 },
     ],
+  };
+}
+
+function matchedVerification(instance: ArbitrageInstance, longQuantity: string, shortQuantity: string) {
+  return {
+    status: "success" as const,
+    verification: {
+      arbitrageId: instance.arbitrageId,
+      checkedAt: 1_800_000_004_000,
+      legs: [
+        { arbitrageId: instance.arbitrageId, legId: instance.legs[0].legId, expectedManagedQuantity: longQuantity, actualQuantity: longQuantity, verificationStatus: "MATCHED" as const, checkedAt: 1_800_000_004_000 },
+        { arbitrageId: instance.arbitrageId, legId: instance.legs[1].legId, expectedManagedQuantity: shortQuantity, actualQuantity: shortQuantity, verificationStatus: "MATCHED" as const, checkedAt: 1_800_000_004_000 },
+      ] as [
+        { arbitrageId: string; legId: string; expectedManagedQuantity: string; actualQuantity: string; verificationStatus: "MATCHED"; checkedAt: number },
+        { arbitrageId: string; legId: string; expectedManagedQuantity: string; actualQuantity: string; verificationStatus: "MATCHED"; checkedAt: number },
+      ],
+    },
   };
 }

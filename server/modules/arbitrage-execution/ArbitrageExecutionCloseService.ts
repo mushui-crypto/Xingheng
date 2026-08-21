@@ -112,6 +112,24 @@ export class ArbitrageExecutionCloseService {
       { getTradingRules: async () => context.tradingRules },
       { now: () => now },
     );
+    // The request remains the ownership ceiling. Venue rules may only reduce
+    // that quantity to the nearest legal provider quantity.
+    const managedSliceToReverse = managedDelta.startsWith("-") ? `-${request.quantity}` : request.quantity;
+    const reversalOrderDelta = managedSliceToReverse.startsWith("-")
+      ? request.quantity
+      : `-${request.quantity}`;
+    const side = reversalOrderDelta.startsWith("-") ? "sell" as const : "buy" as const;
+    const planned = await planner.plan({
+      instrumentId: leg.instrumentId,
+      side,
+      quantityInput: { mode: "ASSET_QUANTITY", quantity: request.quantity },
+      quantityAlignment: "FLOOR",
+      quote: context.quote,
+    });
+    if (!planned.ok) {
+      throw closeError("close_quantity_unavailable", "退出数量无法按当前交易规则合法化。");
+    }
+    const closeQuantity = planned.plan.plannedAssetQuantity.quantity;
     let acceptedResidualQuantity: string | undefined;
     if (spot) {
       const opening = exactSpotOpeningReference(instance, leg.legId);
@@ -145,10 +163,10 @@ export class ArbitrageExecutionCloseService {
         ? attributableBaseQuantity
         : availableQuantity;
       const maxCloseQuantity = floorToStep(attributableAvailable, context.tradingRules.quantityStep);
-      if (maxCloseQuantity === "0" || compareUnsignedDecimals(request.quantity, maxCloseQuantity) > 0) {
+      if (maxCloseQuantity === "0" || compareUnsignedDecimals(closeQuantity, maxCloseQuantity) > 0) {
         throw closeError("close_quantity_unavailable", "退出数量超过当前实例可归因且可用的现货数量。");
       }
-      const remainingQuantity = subtractUnsignedDecimals(managedQuantity, request.quantity);
+      const remainingQuantity = subtractUnsignedDecimals(managedQuantity, closeQuantity);
       if (remainingQuantity !== "0" && await isNonTradableSpotResidual(
         remainingQuantity,
         leg.instrumentId,
@@ -159,27 +177,13 @@ export class ArbitrageExecutionCloseService {
         acceptedResidualQuantity = remainingQuantity;
       }
     }
-    // This is the managed slice reversed by this request, not the full
-    // outstanding instance delta. The opposite signed quantity is the actual
-    // provider order delta used to derive the side below.
-    const managedSliceToReverse = managedDelta.startsWith("-") ? `-${request.quantity}` : request.quantity;
-    const reversalOrderDelta = managedSliceToReverse.startsWith("-")
-      ? request.quantity
-      : `-${request.quantity}`;
-    const side = reversalOrderDelta.startsWith("-") ? "sell" as const : "buy" as const;
+    // This is the legal managed slice reversed by this order, not the full
+    // account position or the unaligned request ceiling.
+    const legalManagedSlice = managedDelta.startsWith("-") ? `-${closeQuantity}` : closeQuantity;
     const reduceOnly = perpetual && reduceOnlyEligible(
       verifiedLeg.actualSignedNetQuantity!,
-      managedSliceToReverse,
+      legalManagedSlice,
     );
-    const planned = await planner.plan({
-      instrumentId: leg.instrumentId,
-      side,
-      quantityInput: { mode: "ASSET_QUANTITY", quantity: request.quantity },
-      quote: context.quote,
-    });
-    if (!planned.ok || planned.plan.plannedAssetQuantity.quantity !== request.quantity) {
-      throw closeError("close_quantity_unavailable", "退出数量不符合当前交易规则。");
-    }
 
     const intent = createExecutionIntent({
       intentId,
