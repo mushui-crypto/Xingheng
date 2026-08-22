@@ -1,49 +1,62 @@
-# Execution Architecture Handoff
+# Execution Architecture Closure
 
 - updated: `2026-08-20`
-- branch: `architecture-optimization`
-- implementation commit: `7851223 feat(execution): unify CEX runtime lifecycle`
-- draft PR: [Xingheng #32](https://github.com/mushui-crypto/Xingheng/pull/32)
-- deployment: `NOT_DEPLOYED`
-- real trading: `NOT_EXECUTED`
+- production baseline: `f57d053eb1c7b0fc89c917b5fd8558d67b316bac`
+- deployment: `COMPLETE`
+- post-deploy read-only validation: `PASS`
 
-本文件是可通过 Git 同步的脱敏交接摘要。它不包含凭证、账号身份、任务 ID、主机信息或真实资金
-授权材料。
+本文件是可通过 Git 同步的脱敏架构关闭记录。它不包含凭证、账号身份、任务 ID、主机信息或真实资金授权材料。
 
-## Current execution baseline
+## Final execution architecture
 
-正式 CEX mutation 测试与执行链已经收敛为：
+正式业务执行与 Unified Real Trading Test 共用唯一主链：
 
 ```text
-UnifiedRealTradingTestCommand
+Business layer / Unified Real Trading Test
+-> ExecutionIntent
 -> FormalExecutionRuntimeRegistry
 -> Venue Formal Runtime
--> Intent Runtime
+-> Venue Intent Runtime
+-> ExecutionRecord
 -> ExecutionCoordinator
--> Capability
--> Provider
+-> Venue Capability
+-> Safety Guard / Provider Identity
+-> Adapter / Provider
+-> Provider API
+-> Reconciliation
 ```
 
-`ExecutionRecord` 是订单执行事实来源；`ArbitrageInstance` 维护本实例尚未撤销的 managed signed
-delta。账户总仓位和总余额不作为 execution ownership 来源。
+`ExecutionCoordinator` 位于 Venue Runtime 内部。业务服务、Close Service 与 Unified Real Trading Test 都通过
+`FormalExecutionRuntimeRegistry` 解析 Venue Runtime，不得形成直达 Intent Runtime、Coordinator、Capability
+或 Provider 的第二 mutation 路径。
 
-## Completed changes
+## Frozen contracts
 
-- Binance 接入 Unified Real Trading CLI，包括 venue preparation、Formal Runtime registry wiring 和
-  deterministic execution identity。
-- Binance 与 OKX 对齐冻结的 Runtime lifecycle：Preflight、durable `CREATED` record、venue
-  preparation、Coordinator mutation boundary、venue finalization 和 final persistence。
-- 增加薄的 Runtime lifecycle contract assertions，并由 Binance/OKX 真实 Runtime fixture 消费。
-- 完成 Net Position Delta 语义收敛：managed delta、managed slice reversal、partial close 和
-  `reduceOnly` 边界；venue-specific position/order 字段仍留在 venue/provider 层。
-- 删除旧 Binance Capital Test CLI/runtime/preflight，以及 Funding execution state、adapter、bridge、
-  link store、coordinator 和对应旧模型测试。
-- 修复 close-path 测试 fixture/type 遗留，完整 TypeScript 和 production build 已恢复。
-- ADR-003 已记录 signed net position 的权威语义。
+- `ExecutionRecord` 是单次 execution/provider fact：身份、状态、attempt、remote/provider identity、确认数量和
+  recovery/reconciliation 事实。
+- `ArbitrageInstance` 是业务实例事实：双腿、managed exposure、开仓/退出 lifecycle、partial close 与剩余 managed
+  quantity。它不是 Provider order recovery 的替代来源。
+- recovery 的唯一事实源为 `ExecutionRecord`、持久化 Provider/order identity 与 authoritative Provider GET /
+  reconciliation。`UNKNOWN` 不自动重新 place，保留事实并 fail-closed 进入 reconcile。
+- Unified Real Trading Test 对同一 `requestId` 和同一 execution semantics 产生稳定 `intentId` 与 `executionId`；
+  restart 只 reconcile。side、quantity、`reduceOnly`、execution mode、instrument 或 account identity 改变时必须
+  fail-closed。Binance production composition 已注入 `unifiedRealTradingTestExecutionId(intent)`。
+- LONG managed delta 为 `+Q`，SHORT managed delta 为 `-Q`；允许 partial close。close quantity 来自 managed
+  quantity/requested slice，账户总净仓只用于 safety 与 `reduceOnly` eligibility。关闭 intent 在 recovery 时不得重新规划。
+- canonical quantity 是 base-asset Decimal；Provider quantity、contract conversion、position-mode 字段和其他 venue
+  特有字段仅留在 Capability、Adapter 与 Provider 边界。
+
+## Completed work
+
+- Formal Runtime diagnostic 与 Binance/OKX runtime lifecycle contract 对齐。
+- Net Position Delta 语义、partial close 与 `reduceOnly` 边界冻结。
+- Unified Real Trading CLI Binance wiring 与 deterministic execution identity recovery 完成。
+- Legacy test migration、Capital Test production cleanup 与 Funding execution legacy cleanup 完成。
+- build/type 遗留修复、Final Architecture Audit、production deployment 与 post-deploy read-only acceptance 完成。
 
 ## Removed legacy paths
 
-以下模块不得恢复为兼容层或第二套 mutation/recovery 路径：
+以下模块不得恢复为兼容层、第二 execution fact 或第二 mutation/recovery 路径：
 
 - `run-binance-capital-test-once.ts`
 - `BinanceCapitalTestRuntime`
@@ -54,37 +67,30 @@ delta。账户总仓位和总余额不作为 execution ownership 来源。
 - `FundingLegExecutionLinkStore`
 - `FundingArbitrageExecutionCoordinator`
 
-## Frozen boundaries
+## Production baseline
 
-- 不修改 `ExecutionIntent`、`ExecutionRecord` 或 `ArbitrageInstance` schema。
-- 不改变 `ExecutionCoordinator` lifecycle、Formal Runtime contract、quantity boundary 或 Provider
-  contract。
-- 不通过账户总仓位/余额推断 execution ownership。
-- close 只撤销当前 instance 的 outstanding managed delta；`reduceOnly` 仅是 venue/provider 约束。
-- recovery/reconcile 必须保持稳定 execution identity 且不得重复 Provider mutation。
-- Spot attribution 继续来自当前订单 fill/fee，不从账户总余额推导。
+- API revision: `f57d053eb1c7b0fc89c917b5fd8558d67b316bac`
+- Web revision: `f57d053eb1c7b0fc89c917b5fd8558d67b316bac`
+- health: `PASS`
+- safety gates: `LIVE_TRADING_ENABLED=false`, `BINANCE_KILL_SWITCH=true`,
+  `OKX_LIVE_TRADING_ENABLED=false`, `OKX_KILL_SWITCH=true`
+- Provider real mutation during deployment and read-only acceptance: `0`
+- P0: `NONE`
+- P1: `NONE`
 
-## Verification
+## Follow-up classification
 
-- full test suite: `1450 passed`, `0 failed`
-- `npx tsc -b`: `PASS`
-- `npm run build`: `PASS`
-- `git diff --check`: `PASS`
-- real Provider mutation: `0`
+Current blocker: `NONE`
 
-## Review and next steps
+P2 cleanup candidate: `BinanceSpotPerpetualCapitalTestIntentBuilder` 及其测试。它没有 production 或 Runtime caller，
+也不包含 Provider mutation；仅可在单独 cleanup 阶段处理。
 
-1. 审阅 Draft PR #32，确认本次改动范围与 ADR-003 一致。
-2. 合并前保持全局/venue LIVE gate、kill switch 和 Provider Identity 门禁关闭或 fail-closed。
-3. 不从该分支直接部署，不将测试通过解释为真实资金授权。
-4. 空 `OPENING` ArbitrageInstance 的既有生命周期问题属于独立任务，不在本 PR 中顺带处理。
-5. 后续 Bybit/Bitget mutation 接入必须复用同一 lifecycle contract，不得把 venue 字段加入公共模型。
+Future feature / venue work: Bybit/Bitget 的后续正式 mutation integration、后续真实资金验证及其他业务功能。这些不属于
+本轮 architecture optimization 的未完成事项。
 
-## Handoff status
+## Closure status
 
-- code implementation: `COMPLETE`
-- automated verification: `PASS`
-- draft PR review: `PENDING`
-- merge: `PENDING`
-- deployment: `NOT_AUTHORIZED`
-- real-funds execution: `NOT_AUTHORIZED`
+- architecture optimization: `COMPLETE`
+- deployment: `COMPLETE`
+- post-deploy read-only validation: `PASS`
+- real-funds authorization: `NOT_GRANTED_BY_THIS_CLOSURE`
