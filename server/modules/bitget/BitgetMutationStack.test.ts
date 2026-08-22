@@ -234,6 +234,9 @@ function executionIntent(input: Partial<{ instrumentId: string; side: "buy" | "s
   return createExecutionIntent({
     intentId: `intent-${instrumentId}-${input.side ?? "buy"}-${input.reduceOnly ?? false}`,
     userId: "user-a", venue: "bitget", accountId: "bitget:account-a", instrumentId,
+    ...(instrumentId.endsWith("-PERP")
+      ? { positionDirection: input.side === "sell" ? "SHORT" as const : "LONG" as const }
+      : {}),
     side: input.side ?? "buy", quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "95.12345678" },
     orderConstraints: { reduceOnly: input.reduceOnly ?? false }, executionMode: "EXECUTION_PRIORITY",
     createdAt: now, expiresAt: now + 60_000,

@@ -105,6 +105,9 @@ export class BitgetIntentExecutionRuntime {
           accountId: accepted.accountId, instrumentId: accepted.instrumentId, category: result.category,
           symbol: result.symbol, orderId: result.providerOrderId, clientOid: result.clientOrderId,
           expectedProviderQuantity: result.expectedProviderQuantity, expectedSide: result.expectedSide,
+          ...(result.positionMode === undefined ? {} : { positionMode: result.positionMode }),
+          ...(result.positionDirection === undefined ? {} : { positionDirection: result.positionDirection }),
+          ...(result.posSide === undefined ? {} : { posSide: result.posSide }),
           createdAt: accepted.createdAt, updatedAt: accepted.updatedAt,
         });
         try {

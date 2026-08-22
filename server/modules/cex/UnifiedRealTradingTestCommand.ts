@@ -123,6 +123,9 @@ export class UnifiedRealTradingTestCommand {
       accountId: prepared.accountId,
       instrumentId: request.instrumentId,
       side: request.side,
+      ...(request.instrumentId.endsWith("-PERP")
+        ? { positionDirection: request.side === "buy" ? "LONG" as const : "SHORT" as const }
+        : {}),
       quantity: prepared.quantityPlan.plannedAssetQuantity,
       orderConstraints: { reduceOnly: request.reduceOnly },
       executionMode: request.executionMode,
@@ -181,6 +184,7 @@ export function unifiedRealTradingTestExecutionId(
     | "accountId"
     | "instrumentId"
     | "side"
+    | "positionDirection"
     | "quantity"
     | "orderConstraints"
     | "executionMode"
@@ -199,6 +203,7 @@ export function unifiedRealTradingTestExecutionId(
       identifier(intent.quantity.quantity, "quantity"),
       String(intent.orderConstraints.reduceOnly),
       intent.executionMode,
+      intent.positionDirection ?? "LEGACY_ONE_WAY",
     ].join("\0"))
     .digest("hex");
   return `real-test-execution-${digest.slice(0, 40)}`;

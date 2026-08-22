@@ -31,6 +31,7 @@ test("converts canonical perpetual intent into Binance execution request", async
     quantity: "0.002",
     executionPriceMode: "MARKET",
     reduceOnly: false,
+    positionDirection: "LONG",
   });
   assert.match(binding.placeInputs[0]!.idempotencyKey, /^execution-intent:[a-f0-9]{64}$/u);
 });
@@ -121,6 +122,7 @@ test("generic IOC protection prices use exact Decimal BUY ceil and SELL floor al
     {
       name: "DOGE BUY 0.0001 tick",
       instrumentId: "DOGE-USDT-PERP",
+      positionDirection: "LONG",
       side: "buy",
       bid: "0.123400000000000001",
       ask: "0.123456789012345678",
@@ -130,6 +132,7 @@ test("generic IOC protection prices use exact Decimal BUY ceil and SELL floor al
     {
       name: "DOGE SELL 0.0001 tick",
       instrumentId: "DOGE-USDT-PERP",
+      positionDirection: "LONG",
       side: "sell",
       bid: "0.123400000000000001",
       ask: "0.123456789012345678",
@@ -139,6 +142,7 @@ test("generic IOC protection prices use exact Decimal BUY ceil and SELL floor al
     {
       name: "XAUT generic 0.1 tick",
       instrumentId: "XAUT-USDT-PERP",
+      positionDirection: "LONG",
       side: "buy",
       bid: "1000",
       ask: "1002",
@@ -333,12 +337,15 @@ function executionContext(instrumentId: string): BinanceGenericExecutionContext 
 }
 
 function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
+  const instrumentId = (overrides.instrumentId as string | undefined) ?? "XAUT-USDT-PERP";
+  const { instrumentId: _ignoredInstrumentId, positionDirection: _ignoredDirection, ...rest } = overrides;
   return createExecutionIntent({
     intentId: "intent-user-1",
     userId: "user-1",
     venue: "binance",
     accountId: "binance:account-1",
-    instrumentId: "XAUT-USDT-PERP",
+    instrumentId,
+    ...(instrumentId.endsWith("-PERP") ? { positionDirection: "LONG" as const } : {}),
     side: "buy",
     quantity: {
       asset: { symbol: "XAUT", type: "RWA_ASSET" },
@@ -348,7 +355,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,
     expiresAt: now + 60_000,
-    ...overrides,
+    ...rest,
   });
 }
 

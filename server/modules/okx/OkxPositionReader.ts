@@ -1,6 +1,6 @@
 import { canonicalInstrumentFromId } from "../cex/Instrument";
 import type { PositionReadRequest, PositionReader } from "../cex/position/PositionReader";
-import { createPositionSnapshot } from "../cex/position/PositionSnapshot";
+import { createHedgePositionSnapshot, createPositionSnapshot } from "../cex/position/PositionSnapshot";
 import type { PositionSide } from "../cex/position/PositionSide";
 import type { OkxPerpetualPositionSnapshot } from "./OkxAccountReadClient";
 
@@ -43,13 +43,25 @@ export class OkxPositionReader implements PositionReader {
       throw new Error("OKX position instrument mapping does not match the canonical instrument.");
     }
 
-    const position = await this.client.readPerpetualPosition(
-      binding.instId,
-      toProviderSide(request.expectedSide),
-    );
-    if (position.instId !== binding.instId) {
-      throw new Error("OKX position instrument does not match the mapped instrument.");
+    if (request.positionMode === "HEDGE") {
+      const [long, short] = await Promise.all([
+        this.client.readPerpetualPosition(binding.instId, "long"),
+        this.client.readPerpetualPosition(binding.instId, "short"),
+      ]);
+      if (long.instId !== binding.instId || short.instId !== binding.instId) {
+        throw new Error("OKX position instrument does not match the mapped instrument.");
+      }
+      return createHedgePositionSnapshot({
+        venue: this.venue,
+        accountId: request.accountId,
+        instrumentId: instrument.instrumentId,
+        longQuantity: long.side === "long" ? multiplyUnsignedDecimals(long.contractQuantity, binding.contractSize) : "0",
+        shortQuantity: short.side === "short" ? multiplyUnsignedDecimals(short.contractQuantity, binding.contractSize) : "0",
+        fetchedAt: Math.max(long.updatedAt ?? this.now(), short.updatedAt ?? this.now()),
+      });
     }
+    const position = await this.client.readPerpetualPosition(binding.instId, toProviderSide(request.expectedSide));
+    if (position.instId !== binding.instId) throw new Error("OKX position instrument does not match the mapped instrument.");
 
     return createPositionSnapshot({
       venue: this.venue,

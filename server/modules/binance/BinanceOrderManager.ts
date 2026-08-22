@@ -69,7 +69,7 @@ export class BinanceOrderManager {
     riskRouting: BinanceOrderRiskRouting,
   ) {
     const request = normalizeRequest(input);
-    const requestFingerprint = fingerprint(request, executionMode);
+    const requestFingerprint = fingerprint(input, executionMode);
     const reservation = this.store.reserve({
       idempotencyKey: input.idempotencyKey,
       requestFingerprint,
@@ -441,6 +441,9 @@ function normalizeRequest(input: BinanceOrderInput): BinanceExecutionOrderReques
     quantity: decimalQuantity(input.quantity),
     executionPriceMode,
     reduceOnly: input.reduceOnly,
+    ...(input.positionDirection === undefined ? {} : { positionDirection: input.positionDirection }),
+    ...(input.positionSide === undefined ? {} : { positionSide: input.positionSide }),
+    ...(input.positionMode === undefined ? {} : { positionMode: input.positionMode }),
     orderLinkId: `ptm${createHash("sha256").update(idempotencyKey).digest("hex").slice(0, 30)}`,
   };
   if (executionPriceMode === "MARKET") {
@@ -468,7 +471,7 @@ function mutationSnapshotRiskValuationPrice(
   return limitPrice;
 }
 
-function fingerprint(request: BinanceExecutionOrderRequest, executionMode: BinanceOrderExecutionMode) {
+function fingerprint(request: BinanceOrderInput, executionMode: BinanceOrderExecutionMode) {
   return createHash("sha256").update(JSON.stringify({ request, executionMode })).digest("hex");
 }
 

@@ -137,6 +137,18 @@ test("Bitget opaque clientOid recovery reference survives SQLite restart", async
   }
 });
 
+test("Bitget HEDGE recovery persists the resolved posSide bucket", () => {
+  const store = new InMemoryBitgetExecutionOrderReferenceStore();
+  const recovery = createBitgetExecutionOrderRecoveryReference({
+    executionId: "execution-bitget-hedge", intentId: "intent-bitget-hedge", userId: "user-a", accountId: "bitget:account-a",
+    instrumentId: "DOGE-USDT-PERP", category: "USDT-FUTURES", symbol: "DOGEUSDT", clientOid: "sxbghedgerecovery",
+    expectedProviderQuantity: "10", expectedSide: "buy", createdAt: now, updatedAt: now,
+    positionMode: "HEDGE", positionDirection: "LONG", posSide: "long",
+  });
+  store.createRecovery(recovery);
+  assert.equal(store.loadRecoveryForUser("user-a", recovery.executionId)?.posSide, "long");
+});
+
 test("Bitget duplicate execution identity is rejected before a second place", async () => {
   const provider = new FakeBitgetRuntimeService();
   const records = new MemoryExecutionRecordStore();
@@ -289,6 +301,7 @@ function runtime(
 function intent(instrumentId = "DOGE-USDT-PERP", side: "buy" | "sell" = "sell"): ExecutionIntent {
   return createExecutionIntent({ intentId: "intent-bitget-1", userId: "user-a", venue: "bitget",
     accountId: "bitget:account-a", instrumentId, side,
+    ...(instrumentId.endsWith("-PERP") ? { positionDirection: side === "buy" ? "LONG" as const : "SHORT" as const } : {}),
     quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "95" },
     orderConstraints: { reduceOnly: false }, executionMode: "EXECUTION_PRIORITY",
     createdAt: now, expiresAt: now + 60_000 });

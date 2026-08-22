@@ -1,5 +1,5 @@
 import { canonicalInstrumentFromId } from "../Instrument";
-import { createPositionSnapshot, type PositionSnapshot } from "./PositionSnapshot";
+import { createPositionSnapshot, type PositionMode, type PositionSnapshot } from "./PositionSnapshot";
 import { isPositionSide, type PositionSide } from "./PositionSide";
 
 export type ExpectedPosition = Readonly<{
@@ -25,10 +25,90 @@ export type PositionVerificationResult = Readonly<{
   reason: PositionVerificationUnknownReason | null;
 }>;
 
+export type ExecutionDeltaVerificationRequest = Readonly<{
+  instrumentId: string;
+  positionMode: PositionMode;
+  positionDirection: "LONG" | "SHORT";
+  /** Signed ONE_WAY delta, or unsigned magnitude for HEDGE. */
+  executionDelta: string;
+  /** Mutation-time baseline; it is not an ownership source. */
+  baseline: PositionSnapshot;
+  tolerance: string;
+}>;
+
+export type ExecutionDeltaVerificationResult = Readonly<{
+  status: PositionVerificationStatus;
+  expectedSignedNetQuantity: string | null;
+  observedSignedNetQuantity: string | null;
+  expectedBucketQuantity: string | null;
+  observedBucketQuantity: string | null;
+  quantityDifference: string | null;
+  reason: PositionVerificationUnknownReason | "POSITION_MODE_MISMATCH" | "POSITION_BUCKET_UNAVAILABLE" | null;
+}>;
+
 /** Converts a canonical position snapshot to its signed net-base quantity. */
 export function signedCurrentNet(snapshot: PositionSnapshot) {
   const normalized = createPositionSnapshot(snapshot);
-  return normalized.side === "SHORT" ? `-${normalized.quantity}` : normalized.quantity;
+  if (normalized.positionMode === "ONE_WAY" && normalized.signedNetQuantity !== null) {
+    return normalized.signedNetQuantity;
+  }
+  return null;
+}
+
+/** Verifies only the result of one execution delta against its read baseline. */
+export function verifyExecutionDelta(
+  request: ExecutionDeltaVerificationRequest,
+  actual: PositionSnapshot | null,
+): ExecutionDeltaVerificationResult {
+  if (actual === null) return deltaUnknown("SNAPSHOT_UNAVAILABLE");
+  let baseline: PositionSnapshot;
+  let observed: PositionSnapshot;
+  try {
+    baseline = createPositionSnapshot(request.baseline);
+    observed = createPositionSnapshot(actual);
+  } catch {
+    return deltaUnknown("SNAPSHOT_INVALID");
+  }
+  const instrumentId = canonicalInstrumentFromId(request.instrumentId).instrumentId;
+  if (baseline.instrumentId !== instrumentId || observed.instrumentId !== instrumentId) {
+    return deltaUnknown("INSTRUMENT_MISMATCH");
+  }
+  if (baseline.positionMode !== request.positionMode || observed.positionMode !== request.positionMode) {
+    return deltaUnknown("POSITION_MODE_MISMATCH");
+  }
+  const tolerance = unsignedDecimal(request.tolerance, "tolerance");
+  const delta = normalizeSignedDecimal(request.executionDelta, "executionDelta");
+  if (request.positionMode === "ONE_WAY") {
+    const baselineNet = signedCurrentNet(baseline);
+    const observedNet = signedCurrentNet(observed);
+    if (baselineNet === null || observedNet === null) return deltaUnknown("POSITION_MODE_MISMATCH");
+    const expected = addSigned(baselineNet, delta);
+    const difference = absoluteDifference(unsignedMagnitude(expected), unsignedMagnitude(observedNet));
+    return Object.freeze({
+      status: compareUnsignedDecimals(difference, tolerance) <= 0 ? "MATCHED" : "MISMATCH",
+      expectedSignedNetQuantity: expected,
+      observedSignedNetQuantity: observedNet,
+      expectedBucketQuantity: null,
+      observedBucketQuantity: null,
+      quantityDifference: difference,
+      reason: null,
+    });
+  }
+
+  const magnitude = unsignedMagnitude(delta);
+  const baselineBucket = request.positionDirection === "LONG" ? baseline.longQuantity : baseline.shortQuantity;
+  const observedBucket = request.positionDirection === "LONG" ? observed.longQuantity : observed.shortQuantity;
+  const expectedBucket = addUnsigned(baselineBucket, magnitude);
+  const difference = absoluteDifference(expectedBucket, observedBucket);
+  return Object.freeze({
+    status: compareUnsignedDecimals(difference, tolerance) <= 0 ? "MATCHED" : "MISMATCH",
+    expectedSignedNetQuantity: null,
+    observedSignedNetQuantity: null,
+    expectedBucketQuantity: expectedBucket,
+    observedBucketQuantity: observedBucket,
+    quantityDifference: difference,
+    reason: null,
+  });
 }
 
 /**
@@ -113,6 +193,18 @@ function unknown(reason: PositionVerificationUnknownReason): PositionVerificatio
   });
 }
 
+function deltaUnknown(reason: ExecutionDeltaVerificationResult["reason"]): ExecutionDeltaVerificationResult {
+  return Object.freeze({
+    status: "UNKNOWN",
+    expectedSignedNetQuantity: null,
+    observedSignedNetQuantity: null,
+    expectedBucketQuantity: null,
+    observedBucketQuantity: null,
+    quantityDifference: null,
+    reason,
+  });
+}
+
 function unsignedDecimal(value: unknown, name: string) {
   if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
     throw new Error(`${name} must be an unsigned Decimal string.`);
@@ -129,6 +221,29 @@ function normalizeSignedDecimal(value: unknown, name: string) {
   const negative = value.startsWith("-");
   const normalized = unsignedDecimal(negative ? value.slice(1) : value, name);
   return negative && normalized !== "0" ? `-${normalized}` : normalized;
+}
+
+function addSigned(left: string, right: string) {
+  const leftNegative = isNegative(left);
+  const rightNegative = isNegative(right);
+  if (leftNegative === rightNegative) {
+    const sum = addUnsigned(unsignedMagnitude(left), unsignedMagnitude(right));
+    return leftNegative && sum !== "0" ? `-${sum}` : sum;
+  }
+  const leftMagnitude = unsignedMagnitude(left);
+  const rightMagnitude = unsignedMagnitude(right);
+  const comparison = compareUnsignedDecimals(leftMagnitude, rightMagnitude);
+  if (comparison === 0) return "0";
+  const difference = comparison > 0
+    ? absoluteDifference(leftMagnitude, rightMagnitude)
+    : absoluteDifference(rightMagnitude, leftMagnitude);
+  const negative = comparison > 0 ? leftNegative : rightNegative;
+  return negative ? `-${difference}` : difference;
+}
+
+function addUnsigned(left: string, right: string) {
+  const aligned = alignUnsignedDecimals(left, right);
+  return formatScaledInteger(aligned.left + aligned.right, aligned.scale);
 }
 
 function isNegative(value: string) {

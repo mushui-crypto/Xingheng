@@ -271,6 +271,13 @@ test("test intent and execution identities are deterministic and user scoped", a
   assert.equal(unifiedRealTradingTestExecutionId(firstIntent), unifiedRealTradingTestExecutionId(sameIntent));
 });
 
+test("LONG and SHORT directions cannot share a deterministic execution identity", async () => {
+  const command = commandFor(new FakeFormalRuntime(), new MemoryExecutionRecordStore(), preparation());
+  const base = (await command.run({ ...request({ requestId: "direction-identity" }), executeLive: false })).intent;
+  const short = { ...base, side: "sell" as const, positionDirection: "SHORT" as const };
+  assert.notEqual(unifiedRealTradingTestExecutionId(base), unifiedRealTradingTestExecutionId(short));
+});
+
 function commandFor(
   runtime: FormalExecutionRuntime,
   records: MemoryExecutionRecordStore,

@@ -312,6 +312,7 @@ function intent() {
     venue: "okx",
     accountId,
     instrumentId: "DOGE-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: {
       asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },

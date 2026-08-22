@@ -39,9 +39,6 @@ export class BinanceRiskGuard {
     if (!permissionsSafe(snapshot)) {
       throw new BinanceRiskError("permissions_invalid", "Binance API permissions are not safe for live trading.");
     }
-    if (snapshot.perpetual.leverage !== 1) {
-      throw new BinanceRiskError("leverage_invalid", "Binance XAUTUSDT perpetual leverage must be 1x.");
-    }
     if (snapshot.openSpotOrderCount > 0 || snapshot.openPerpetualOrderCount > 0) {
       throw new BinanceRiskError("open_orders_present", "Existing Binance XAUTUSDT orders must be reconciled before new risk.");
     }

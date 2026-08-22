@@ -4,6 +4,7 @@ import { createPositionSnapshot, type PositionSnapshot } from "./PositionSnapsho
 import {
   reduceOnlyEligible,
   signedCurrentNet,
+  verifyExecutionDelta,
   verifyPosition,
   type ExpectedPosition,
 } from "./PositionVerification";
@@ -155,6 +156,60 @@ test("preserves exact Decimal semantics without floating-point arithmetic", () =
   assert.equal(actual.quantity, "0.300000000000000000000000000001");
   assert.equal(result.quantityDifference, "0.000000000000000000000000000001");
   assert.equal(result.status, "MATCHED");
+});
+
+test("ONE_WAY verifies a delta from a non-flat baseline, including crossing flat", () => {
+  const baseline = snapshot({ side: "SHORT", quantity: "10" });
+  const result = verifyExecutionDelta({
+    instrumentId: "BTC-USDT-PERP",
+    positionMode: "ONE_WAY",
+    positionDirection: "LONG",
+    executionDelta: "20",
+    baseline,
+    tolerance: "0",
+  }, snapshot({ side: "LONG", quantity: "10" }));
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.expectedSignedNetQuantity, "10");
+  assert.equal(result.observedSignedNetQuantity, "10");
+});
+
+test("HEDGE verifies only the selected bucket and ignores unrelated position", () => {
+  const baseline = snapshot({
+    positionMode: "HEDGE",
+    side: "FLAT",
+    quantity: "110",
+    longQuantity: "100",
+    shortQuantity: "10",
+    signedNetQuantity: null,
+  });
+  const result = verifyExecutionDelta({
+    instrumentId: "BTC-USDT-PERP",
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+    executionDelta: "20",
+    baseline,
+    tolerance: "0",
+  }, snapshot({
+    positionMode: "HEDGE",
+    side: "FLAT",
+    quantity: "130",
+    longQuantity: "100",
+    shortQuantity: "30",
+    signedNetQuantity: null,
+  }));
+  assert.equal(result.status, "MATCHED");
+  assert.equal(result.expectedBucketQuantity, "30");
+  assert.equal(result.observedBucketQuantity, "30");
+});
+
+test("HEDGE fails when the selected bucket does not contain the expected result", () => {
+  const baseline = snapshot({ positionMode: "HEDGE", side: "FLAT", quantity: "100", longQuantity: "100", shortQuantity: "0", signedNetQuantity: null });
+  const result = verifyExecutionDelta({
+    instrumentId: "BTC-USDT-PERP", positionMode: "HEDGE", positionDirection: "SHORT", executionDelta: "5", baseline, tolerance: "0",
+  }, snapshot({ positionMode: "HEDGE", side: "FLAT", quantity: "100", longQuantity: "100", shortQuantity: "0", signedNetQuantity: null }));
+  assert.equal(result.status, "MISMATCH");
+  assert.equal(result.expectedBucketQuantity, "5");
+  assert.equal(result.observedBucketQuantity, "0");
 });
 
 test("enforces quantity semantic boundaries", () => {

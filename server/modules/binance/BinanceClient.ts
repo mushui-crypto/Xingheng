@@ -82,7 +82,8 @@ export class BinanceClient implements BinanceClientAdapter {
       ipRestricted: true,
       spotAccount: true,
       futuresAccount: true,
-      positionModeSupported: !dualSidePosition,
+      // Both provider modes are supported; an unreadable mode fails above.
+      positionModeSupported: true,
     };
     const uidSnapshot = createHash("sha256")
       .update(`binance:${uid}`)
@@ -101,6 +102,11 @@ export class BinanceClient implements BinanceClientAdapter {
 
   async readProductAvailability() {
     return (await this.loadProducts()).availability;
+  }
+
+  async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
+    const value = record(await this.signedRequest("futures", "/fapi/v1/positionSide/dual"));
+    return boolean(value.dualSidePosition) ? "HEDGE" : "ONE_WAY";
   }
 
   async readAccountSnapshot(): Promise<BinanceAllSymbolAccountReadSnapshot> {
@@ -385,7 +391,7 @@ export class BinanceClient implements BinanceClientAdapter {
       uidSnapshot: access.uidSnapshot,
       fetchedAt: this.now(),
       accountMode,
-      permissions: { ...access.permissions, positionModeSupported: !dualSidePosition },
+      permissions: { ...access.permissions, positionModeSupported: true },
       productAvailability: products.availability,
       spotAvailableUsdt: positiveNumber(usdt?.free),
       futuresAvailableUsdt: positiveNumber(futuresUsdt?.availableBalance ?? futuresAccount.availableBalance),
@@ -441,16 +447,6 @@ export class BinanceClient implements BinanceClientAdapter {
     }
   }
 
-  async setPerpetualLeverage(leverage: 1 | 2 | 3) {
-    await this.signedRequest(
-      "futures",
-      "/fapi/v1/leverage",
-      { symbol: BINANCE_PERPETUAL_SYMBOL, leverage: String(leverage) },
-      true,
-      "POST",
-    );
-  }
-
   async placeOrder(request: BinanceExecutionOrderRequest) {
     return this.submitOrder(request, "IOC");
   }
@@ -473,6 +469,8 @@ export class BinanceClient implements BinanceClientAdapter {
       ...(isMarket ? {} : { price: request.limitPrice }),
       newClientOrderId: request.orderLinkId,
       ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
+      ...(request.category === "linear" && request.positionSide !== undefined && request.positionSide !== "BOTH"
+        ? { positionSide: request.positionSide } : {}),
     }, true, "POST"));
     try {
       return assertBinanceSubmissionIdentity({
@@ -1182,6 +1180,7 @@ function toOrder(
     status,
     requestedQuantity: requested,
     filledQuantity: filled,
+    ...(category === "linear" && row.positionSide !== undefined ? { positionSide: providerPositionSide(row.positionSide) } : {}),
     requestedBaseQuantity,
     filledBaseQuantity,
     ...(positionQuantity === undefined ? {} : { positionQuantity }),

@@ -25,6 +25,7 @@ import type {
 
 export type BitgetIntentExecutionClient = Readonly<{
   assertOneWayMode(): Promise<void>;
+  readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
   placeOrder(request: BitgetPlaceOrderRequest): Promise<BitgetPlaceOrderResult>;
   getOrder(request: BitgetGetOrderRequest): Promise<BitgetProviderOrder>;
   cancelOrder(request: BitgetCancelOrderRequest): Promise<BitgetOrderIdentity>;
@@ -49,6 +50,9 @@ export type BitgetIntentExecutionServiceOptions = Readonly<{
     clientOid: string;
     expectedProviderQuantity: string;
     expectedSide: BitgetOrderSide;
+    positionMode?: "ONE_WAY" | "HEDGE";
+    positionDirection?: "LONG" | "SHORT";
+    posSide?: "long" | "short";
   }>) => Promise<void> | void;
 }>;
 
@@ -64,6 +68,9 @@ export type BitgetIntentExecutionResult = Readonly<{
   statusReason: string | null;
   expectedProviderQuantity: string;
   expectedSide: BitgetOrderSide;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
 }>;
 
 export type BitgetExecutionQueryResult = Readonly<{
@@ -109,6 +116,7 @@ export class BitgetIntentExecutionService {
       await persistRecoveryReference({
         category: value.category, symbol: value.symbol, clientOid: value.clientOid,
         expectedProviderQuantity: value.qty, expectedSide: value.side,
+        positionMode: value.positionMode, positionDirection: intent.positionDirection, posSide: value.posSide,
       });
       return value;
     });
@@ -126,6 +134,9 @@ export class BitgetIntentExecutionService {
       statusReason: null,
       expectedProviderQuantity: prepared.qty,
       expectedSide: prepared.side,
+      ...(prepared.positionMode === undefined ? {} : { positionMode: prepared.positionMode }),
+      ...(prepared.positionDirection === undefined ? {} : { positionDirection: prepared.positionDirection }),
+      ...(prepared.posSide === undefined ? {} : { posSide: prepared.posSide }),
     });
   }
 
@@ -155,7 +166,7 @@ export class BitgetIntentExecutionService {
   ): Promise<ExecutionCancelObservation> {
     const instrument = this.instruments.resolve(lookup.instrumentId);
     assertLookupInstrument(lookup, instrument);
-    if (lookup.category === "USDT-FUTURES") await this.client.assertOneWayMode();
+    if (lookup.category === "USDT-FUTURES") await this.assertPositionMode();
     await this.mutationSafetyGuard.assertAllowed({
       venue: "bitget", operation: "cancelOrder", userId: context.userId, accountId: context.accountId,
       instrumentId: context.instrumentId, providerInstrumentId: context.providerInstrumentId ?? lookup.symbol,
@@ -178,7 +189,10 @@ export class BitgetIntentExecutionService {
     }
     const category = instrument.venueInstrument.category;
     if (category === "SPOT" && intent.orderConstraints.reduceOnly) throw new Error("Bitget Spot execution must not use reduceOnly.");
-    if (category === "USDT-FUTURES") await this.client.assertOneWayMode();
+    const positionMode = category === "USDT-FUTURES" ? await this.readPositionMode() : undefined;
+    if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
+      throw new Error("Bitget HEDGE execution requires positionDirection.");
+    }
     const rules = await loadBitgetQuantityRules(this.options.quantityRulesSource, instrument, () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? BITGET_QUANTITY_RULES_MAX_AGE_MS);
     const base = {
@@ -188,6 +202,9 @@ export class BitgetIntentExecutionService {
       qty: bitgetBaseQuantityToProvider(intent.quantity.quantity, rules),
       clientOid: bitgetClientOrderIdFor(intent),
       ...(category === "USDT-FUTURES" ? { reduceOnly: intent.orderConstraints.reduceOnly ? "yes" as const : "no" as const } : {}),
+      ...(positionMode === "HEDGE" ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const } : {}),
+      positionMode,
+      positionDirection: intent.positionDirection,
     };
     // Bitget UTA Spot market BUY qty is quote coin. IOC limit keeps the public
     // canonical contract in base quantity without a float conversion.
@@ -209,11 +226,17 @@ export class BitgetIntentExecutionService {
     if (!this.options.validateProviderIdentity) throw new Error("Bitget Provider credential identity validation is required before mutation.");
     return this.options.validateProviderIdentity;
   }
+  private async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
+    if (this.client.readPositionMode) return this.client.readPositionMode();
+    await this.client.assertOneWayMode();
+    return "ONE_WAY";
+  }
+  private async assertPositionMode() { await this.readPositionMode(); }
   private now() { const value = this.clock(); if (!Number.isSafeInteger(value) || value < 0) throw new Error("Bitget execution clock is invalid."); return value; }
 }
 
-export function bitgetClientOrderIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId">) {
-  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}`;
+export function bitgetClientOrderIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">) {
+  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}\u0000${intent.positionDirection ?? "LEGACY_ONE_WAY"}`;
   return `sxbg${createHash("sha256").update(identity).digest("hex").slice(0, 28)}`;
 }
 

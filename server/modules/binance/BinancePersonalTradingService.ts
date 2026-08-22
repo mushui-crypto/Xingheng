@@ -103,6 +103,10 @@ export class BinancePersonalTradingService {
     return this.requireClient().validateAccess();
   }
 
+  readExecutionPositionMode() {
+    return this.requireClient().readPositionMode();
+  }
+
   async market() {
     const snapshot = await this.requireOrders().syncPositions();
     return {

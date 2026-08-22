@@ -62,3 +62,22 @@ test("Bybit persistent reference payload is venue-opaque and survives SQLite res
     rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("Bybit HEDGE recovery persists the resolved bucket and rejects a mismatched bucket", () => {
+  const store = new InMemoryBybitExecutionOrderReferenceStore();
+  const { orderId: _orderId, ...recoveryBase } = complete;
+  const reference = createBybitExecutionOrderRecoveryReference({
+    ...recoveryBase,
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+    positionIdx: 2,
+  });
+  store.createRecovery(reference);
+  assert.equal(store.loadRecoveryForUser("user-a", "execution-bybit-1")?.positionIdx, 2);
+  assert.throws(() => createBybitExecutionOrderRecoveryReference({
+    ...recoveryBase,
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+    positionIdx: 1,
+  }), /bucket does not match/u);
+});

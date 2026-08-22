@@ -117,6 +117,9 @@ function intent(side: "buy" | "sell", quantity: string, instrumentId = "DOGE-USD
     accountId: "okx:account-1",
     instrumentId,
     side,
+    ...(instrumentId.endsWith("-PERP")
+      ? { positionDirection: side === "buy" ? "LONG" as const : "SHORT" as const }
+      : {}),
     quantity: { asset: { symbol: instrumentId.split("-")[0]!, type: "DIGITAL_ASSET" }, quantity },
     orderConstraints: { reduceOnly: side === "buy" ? false : true },
     executionMode: "EXECUTION_PRIORITY",

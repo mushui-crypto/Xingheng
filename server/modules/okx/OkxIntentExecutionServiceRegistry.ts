@@ -12,7 +12,7 @@ export type OkxExecutionCredentialSummary = Readonly<{
 type OkxExecutionProviderClient = Pick<
   OkxClient,
   "placeOrder" | "getOrder" | "cancelOrder" | "getAccountIdentity"
->;
+> & Partial<Pick<OkxClient, "readPositionMode">>;
 
 export class OkxIntentExecutionServiceRegistry {
   private readonly locks = new Map<string, AsyncLock>();
@@ -65,6 +65,7 @@ function defaultService(
     placeOrder: (request) => client.placeOrder(request),
     getOrder: (request) => client.getOrder(request),
     cancelOrder: (request) => client.cancelOrder(request),
+    readPositionMode: () => client.readPositionMode?.() ?? Promise.resolve("ONE_WAY" as const),
     executionAccountIdentity: () => Object.freeze({ accountId }),
     validateExecutionProviderIdentity: (context) =>
       validateExecutionProviderIdentity(client, accountId, context),

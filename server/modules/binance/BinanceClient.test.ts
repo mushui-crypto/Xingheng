@@ -3,6 +3,29 @@ import test from "node:test";
 import { BinanceClient } from "./BinanceClient";
 import type { BinanceExecutionOrderRequest } from "./BinanceTypes";
 
+test("Binance HEDGE position mode is readiness-supported", async () => {
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    (async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v3/time") return Response.json({ serverTime: 1_800_000_000_000 });
+      if (path === "/sapi/v1/account/apiRestrictions") return Response.json({
+        enableReading: true, enableSpotAndMarginTrading: true, enableFutures: true,
+        enableWithdrawals: false, ipRestrict: true, ipList: ["203.0.113.10"],
+      });
+      if (path === "/api/v3/account") return Response.json({ uid: "binance-hedge", canTrade: true, balances: [] });
+      if (path === "/fapi/v2/account") return Response.json({ canTrade: true, multiAssetsMargin: false, assets: [] });
+      if (path === "/fapi/v1/positionSide/dual") return Response.json({ dualSidePosition: true });
+      throw new Error(`Unexpected Binance readiness path: ${path}`);
+    }) as typeof fetch,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+  const access = await client.validateAccess();
+  assert.equal(access.accountMode, "single_asset_hedge");
+  assert.equal(access.permissions.positionModeSupported, true);
+});
+
 test("production orders remain IOC while test orders use GTC", async () => {
   const timeInForce: string[] = [];
   let orderId = 0;

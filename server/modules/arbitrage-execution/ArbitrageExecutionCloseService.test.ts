@@ -67,6 +67,39 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
   assert.notEqual(result.instance.status, "CLOSED", "one flat leg must not close the two-leg instance");
 });
 
+test("HEDGE LONG and SHORT closes use independent buckets", async (t) => {
+  const longFixture = setup(t, {
+    positionMode: "HEDGE", actualLongQuantity: "20", actualShortQuantity: "7",
+  });
+  longFixture.runtime.resultStatus = "CONFIRMED";
+  longFixture.runtime.confirmedQuantity = "1";
+  await longFixture.service.closeLeg("user-a", request("long-leg", "1", "hedge-long-close"));
+  assert.equal(longFixture.runtime.calls[0]?.side, "sell");
+  assert.equal(longFixture.runtime.calls[0]?.positionDirection, "LONG");
+  assert.equal(longFixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
+
+  const shortFixture = setup(t, {
+    positionMode: "HEDGE", actualLongQuantity: "20", actualShortQuantity: "7",
+  });
+  shortFixture.runtime.resultStatus = "CONFIRMED";
+  shortFixture.runtime.confirmedQuantity = "1";
+  await shortFixture.service.closeLeg("user-a", request("short-leg", "1", "hedge-short-close"));
+  assert.equal(shortFixture.runtime.calls[0]?.side, "buy");
+  assert.equal(shortFixture.runtime.calls[0]?.positionDirection, "SHORT");
+  assert.equal(shortFixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
+});
+
+test("HEDGE close fails closed when the target bucket is insufficient", async (t) => {
+  const fixture = setup(t, {
+    positionMode: "HEDGE", actualLongQuantity: "20", actualShortQuantity: "0.5",
+  });
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("short-leg", "1", "hedge-insufficient")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+});
+
 test("SHORT A/B/C/D close reverses the managed delta without re-sizing from current net", async (t) => {
   for (const scenario of [
     { name: "A", currentNet: "-20", reduceOnly: true },
@@ -639,6 +672,9 @@ function setup(
     attributableBaseQuantity?: string;
     attributionError?: boolean;
     actualSignedNetQuantity?: string;
+    positionMode?: "ONE_WAY" | "HEDGE";
+    actualLongQuantity?: string;
+    actualShortQuantity?: string;
     formalVenue?: "binance" | "okx" | "bitget";
   }> = {},
 ) {
@@ -708,6 +744,9 @@ function setup(
     verificationStatus: "MATCHED" as "MATCHED" | "MISMATCH" | "UNKNOWN",
     actualQuantity: quantity as string | null,
     actualSignedNetQuantity: options.actualSignedNetQuantity,
+    positionMode: options.positionMode ?? "ONE_WAY",
+    actualLongQuantity: options.actualLongQuantity ?? (options.positionMode === "HEDGE" ? "0" : quantity),
+    actualShortQuantity: options.actualShortQuantity ?? "0",
     availableBaseQuantity: options.availableBaseQuantity ?? quantity,
     attributableBaseQuantity: options.attributableBaseQuantity ?? quantity,
     attributionError: options.attributionError ?? false,
@@ -726,8 +765,11 @@ function setup(
             legId: leg.legId,
             expectedManagedQuantity: managedCurrentQuantity(leg),
             actualQuantity: fixture.actualQuantity,
-            actualSignedNetQuantity: fixture.actualSignedNetQuantity
+            actualSignedNetQuantity: fixture.positionMode === "HEDGE" ? null : fixture.actualSignedNetQuantity
               ?? (leg.role === "SHORT" ? `-${fixture.actualQuantity}` : fixture.actualQuantity),
+            positionMode: fixture.positionMode,
+            actualLongQuantity: fixture.actualLongQuantity,
+            actualShortQuantity: fixture.actualShortQuantity,
             verificationStatus: fixture.verificationStatus,
             checkedAt: now,
           })) as any,

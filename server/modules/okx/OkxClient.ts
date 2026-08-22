@@ -70,6 +70,7 @@ export class OkxClient {
       clOrdId: normalized.clOrdId,
       ...(normalized.price === undefined ? {} : { px: normalized.price }),
       ...(normalized.reduceOnly === undefined ? {} : { reduceOnly: String(normalized.reduceOnly) }),
+      ...(normalized.posSide === undefined ? {} : { posSide: normalized.posSide }),
       ...(normalized.targetCurrency === undefined ? {} : { tgtCcy: normalized.targetCurrency }),
     }).then((payload) => firstRow(payload.data, "OKX place order response"));
     assertItemAccepted(row, "OKX place order");
@@ -122,6 +123,14 @@ export class OkxClient {
     return accountIdentity(await this.getAccountConfig());
   }
 
+  async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
+    const row = await this.getAccountConfig();
+    const mode = exactString(row.posMode, "OKX position mode");
+    if (mode === "net_mode") return "ONE_WAY";
+    if (mode === "long_short_mode") return "HEDGE";
+    throw invalid("OKX position mode is unsupported.");
+  }
+
   async getSpotBalances(baseAsset: string, quoteAsset: string) {
     const base = exactAsset(baseAsset, "OKX Spot base asset");
     const quote = exactAsset(quoteAsset, "OKX Spot quote asset");
@@ -168,7 +177,8 @@ export class OkxClient {
     const accountLevelSupported = identity.accountLevel === "2"
       || identity.accountLevel === "3"
       || identity.accountLevel === "4";
-    const positionModeSupported = exactString(row.posMode, "OKX position mode") === "net_mode";
+    const positionMode = exactString(row.posMode, "OKX position mode");
+    const positionModeSupported = positionMode === "net_mode" || positionMode === "long_short_mode";
     const read = providerPermissions.has("read_only");
     const spotTrade = providerPermissions.has("trade");
     const contractTrade = spotTrade && accountLevelSupported;
@@ -367,6 +377,10 @@ function normalizePlaceOrderRequest(request: OkxPlaceOrderRequest): OkxPlaceOrde
   } else if (spot || request.targetCurrency !== undefined) {
     throw invalid("OKX swap order configuration is invalid.");
   }
+  if (spot && request.posSide !== undefined) throw invalid("OKX Spot order must not contain posSide.");
+  if (!spot && request.posSide !== undefined && request.posSide !== "long" && request.posSide !== "short") {
+    throw invalid("OKX posSide is invalid.");
+  }
   return Object.freeze({
     instId,
     tdMode: request.tdMode,
@@ -377,6 +391,7 @@ function normalizePlaceOrderRequest(request: OkxPlaceOrderRequest): OkxPlaceOrde
     ...(request.price === undefined ? {} : { price: positiveDecimal(request.price, "OKX order price") }),
     ...(request.reduceOnly === undefined ? {} : { reduceOnly: request.reduceOnly === true }),
     ...(request.targetCurrency === undefined ? {} : { targetCurrency: request.targetCurrency }),
+    ...(request.posSide === undefined ? {} : { posSide: request.posSide }),
   });
 }
 

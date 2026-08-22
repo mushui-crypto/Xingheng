@@ -25,8 +25,12 @@ test("maps an OKX LONG position to a canonical snapshot", async () => {
     venue: "okx",
     accountId: "okx:account-1",
     instrumentId: "DOGE-USDT-PERP",
+    positionMode: "ONE_WAY",
     side: "LONG",
     quantity: "73",
+    signedNetQuantity: "73",
+    longQuantity: "73",
+    shortQuantity: "0",
     fetchedAt: now - 1,
   });
   assert.equal(Object.hasOwn(snapshot, "instId"), false);

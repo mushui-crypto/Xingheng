@@ -369,6 +369,7 @@ function executionIntent(input: Partial<{
     venue: "bybit",
     accountId: "bybit:account-a",
     instrumentId,
+    ...(instrumentId.endsWith("-PERP") ? { positionDirection: input.side === "buy" ? "LONG" as const : "SHORT" as const } : {}),
     side: input.side ?? "buy",
     quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "100" },
     orderConstraints: { reduceOnly: input.reduceOnly ?? false },

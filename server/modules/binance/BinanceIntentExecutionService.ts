@@ -12,7 +12,7 @@ import { toBinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 export type BinanceIntentExecutionServiceBinding = Pick<
   BinancePersonalTradingService,
   "loadExecutionReadContext" | "placeExecutionOrder"
->;
+> & Readonly<{ readExecutionPositionMode?: () => Promise<"ONE_WAY" | "HEDGE"> }>;
 
 export type BinanceIntentExecutionResult = Readonly<{
   executionAttemptId: string;
@@ -29,6 +29,9 @@ type BinanceIntentPreparedOrderBase = Readonly<{
   side: "Buy" | "Sell";
   quantity: string;
   reduceOnly: boolean;
+  positionDirection?: "LONG" | "SHORT";
+  positionSide?: "BOTH" | "LONG" | "SHORT";
+  positionMode?: "ONE_WAY" | "HEDGE";
 }>;
 
 type BinanceIntentPreparedOrder = BinanceIntentPreparedOrderBase & (
@@ -90,6 +93,12 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     const side = intent.side === "buy" ? "Buy" : "Sell";
     const quantity = decimalQuantity(intent.quantity.quantity);
     const executionPriceMode = toBinanceExecutionPriceMode(intent.executionMode);
+    const positionMode = category === "linear"
+      ? await this.service.readExecutionPositionMode?.() ?? "ONE_WAY"
+      : undefined;
+    if (category === "linear" && positionMode === "HEDGE" && intent.positionDirection === undefined) {
+      throw new Error("Binance HEDGE execution requires positionDirection.");
+    }
     const limitPrice = executionPriceMode === "IOC_LIMIT"
       ? protectionPrice({
         referencePrice: side === "Buy" ? context.quote.ask : context.quote.bid,
@@ -106,10 +115,17 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       side,
       quantity,
       reduceOnly: intent.orderConstraints.reduceOnly,
+      ...(category === "linear" && intent.positionDirection !== undefined
+        ? { positionDirection: intent.positionDirection }
+        : {}),
+      ...(category === "linear" && positionMode === "HEDGE"
+        ? { positionSide: intent.positionDirection === "LONG" ? "LONG" as const : "SHORT" as const }
+        : {}),
     } as const;
-    const order = executionPriceMode === "MARKET"
-      ? Object.freeze({ ...base, executionPriceMode })
-      : Object.freeze({ ...base, executionPriceMode, limitPrice: limitPrice! });
+    const rawOrder = executionPriceMode === "MARKET"
+      ? { ...base, executionPriceMode }
+      : { ...base, executionPriceMode, limitPrice: limitPrice! };
+    const order = attachPositionMode(rawOrder, positionMode);
     return Object.freeze({
       order,
       riskContext: Object.freeze({
@@ -127,6 +143,11 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       }),
     });
   }
+}
+
+function attachPositionMode<T extends object>(order: T, mode: "ONE_WAY" | "HEDGE" | undefined): T & { positionMode?: "ONE_WAY" | "HEDGE" } {
+  if (mode !== undefined) Object.defineProperty(order, "positionMode", { value: mode, enumerable: false, writable: false });
+  return Object.freeze(order) as T & { positionMode?: "ONE_WAY" | "HEDGE" };
 }
 
 function assertExecutionContext(intent: ExecutionIntent, context: BinanceGenericExecutionContext) {
@@ -147,7 +168,7 @@ function stateForOrder(order: BinanceProviderOrder): ExecutionStatus {
 }
 
 export function binanceExecutionIdempotencyKeyFor(
-  intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId">,
+  intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">,
 ) {
   const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}`;
   return `execution-intent:${createHash("sha256").update(identity).digest("hex")}`;

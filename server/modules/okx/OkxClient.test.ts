@@ -489,10 +489,21 @@ test("reports insufficient OKX permission and account settings without enabling 
     withdraw: true,
     ipRestricted: false,
     accountLevelSupported: false,
-    positionModeSupported: false,
+    positionModeSupported: true,
     providerVerified: true,
     executionEnabled: false,
   });
+});
+
+test("OKX HEDGE position mode is readiness-supported", async () => {
+  const client = new OkxClient(() => credentials, {
+    fetchImpl: (async () => Response.json({ code: "0", data: [{
+      uid: "987654322", acctLv: "3", posMode: "long_short_mode", perm: "read_only,trade", ip: "203.0.113.10",
+    }] })) as typeof fetch,
+  });
+  const access = await client.validateAccess();
+  assert.equal(access.permissions.positionModeSupported, true);
+  assert.equal(access.permissions.executionEnabled, true);
 });
 
 test("status mapping preserves UNKNOWN reason", () => {

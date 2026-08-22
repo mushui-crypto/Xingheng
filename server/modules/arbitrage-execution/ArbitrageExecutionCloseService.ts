@@ -100,8 +100,14 @@ export class ArbitrageExecutionCloseService {
     if (context.instrument.quoteAsset !== "USDT" || (!spot && !perpetual)) {
       throw closeError("close_capability_unavailable", "当前只支持 USDT 现货与线性永续套利腿退出。");
     }
-    if (perpetual && verifiedLeg.actualSignedNetQuantity == null) {
+    if (perpetual && verifiedLeg.positionMode !== "HEDGE" && verifiedLeg.actualSignedNetQuantity == null) {
       throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
+    }
+    if (perpetual && verifiedLeg.positionMode === "HEDGE") {
+      const bucketQuantity = leg.role === "LONG" ? verifiedLeg.actualLongQuantity : verifiedLeg.actualShortQuantity;
+      if (bucketQuantity === null || compareUnsignedDecimals(request.quantity, bucketQuantity) > 0) {
+        throw closeError("close_quantity_unavailable", "HEDGE 对应仓位桶不足，不能扩大或反向退出。");
+      }
     }
     if (spot && leg.role !== "LONG") {
       throw closeError("close_capability_unavailable", "现货空头腿无法通过可用余额可靠退出。");
@@ -180,10 +186,10 @@ export class ArbitrageExecutionCloseService {
     // This is the legal managed slice reversed by this order, not the full
     // account position or the unaligned request ceiling.
     const legalManagedSlice = managedDelta.startsWith("-") ? `-${closeQuantity}` : closeQuantity;
-    const reduceOnly = perpetual && reduceOnlyEligible(
-      verifiedLeg.actualSignedNetQuantity!,
-      legalManagedSlice,
-    );
+    const reduceOnly = perpetual
+      && (verifiedLeg.positionMode === "HEDGE"
+        ? true
+        : reduceOnlyEligible(verifiedLeg.actualSignedNetQuantity!, legalManagedSlice));
 
     const intent = createExecutionIntent({
       intentId,
@@ -194,6 +200,7 @@ export class ArbitrageExecutionCloseService {
       accountId: leg.accountId,
       instrumentId: leg.instrumentId,
       side,
+      ...(perpetual ? { positionDirection: leg.role } : {}),
       quantity: planned.plan.plannedAssetQuantity,
       orderConstraints: { reduceOnly },
       executionMode: request.executionMode,

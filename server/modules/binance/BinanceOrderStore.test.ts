@@ -35,6 +35,30 @@ test("fresh stores persist explicit generic symbols and recover them after resta
   }
 });
 
+test("Binance order recovery persists resolved HEDGE bucket semantics", () => {
+  const directory = mkdtempSync(join(tmpdir(), "stellax-binance-hedge-recovery-"));
+  const dbPath = join(directory, "trading.sqlite");
+  try {
+    const store = new BinanceOrderStore(dbPath);
+    store.reserve({
+      idempotencyKey: "hedge-recovery",
+      requestFingerprint: "hedge-fingerprint",
+      clientOrderId: "sx-hedge-recovery",
+      category: "linear",
+      symbol: "DOGEUSDT",
+      executionMode: "production_ioc",
+      positionMode: "HEDGE",
+      positionDirection: "SHORT",
+      positionSide: "SHORT",
+    });
+    assert.equal(store.find("hedge-recovery")?.positionMode, "HEDGE");
+    assert.equal(store.find("hedge-recovery")?.positionSide, "SHORT");
+    store.close();
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("exact Decimal quantities and int64 provider orderId survive persistence and restart", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-decimal-fill-"));
   const dbPath = join(root, "orders.sqlite");

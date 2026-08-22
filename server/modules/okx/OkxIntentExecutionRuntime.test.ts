@@ -566,12 +566,15 @@ function key(userId: string, executionId: string) {
 }
 
 function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
+  const instrumentId = (overrides.instrumentId as string | undefined) ?? "DOGE-USDT-PERP";
+  const { instrumentId: _ignoredInstrumentId, positionDirection: _ignoredDirection, ...rest } = overrides;
   return createExecutionIntent({
     intentId: "intent-okx-runtime",
     userId: "user-a",
     venue: "okx",
     accountId: "okx:account-user-a",
-    instrumentId: "DOGE-USDT-PERP",
+    instrumentId,
+    ...(instrumentId.endsWith("-PERP") ? { positionDirection: "LONG" as const } : {}),
     side: "buy",
     quantity: {
       asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },
@@ -581,7 +584,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     executionMode: "EXECUTION_PRIORITY",
     createdAt: now,
     expiresAt: now + 60_000,
-    ...overrides,
+    ...rest,
   });
 }
 

@@ -47,6 +47,7 @@ function executionIntent(venue: "binance" | "okx") {
     venue,
     accountId: `${venue}:account-user-a`,
     instrumentId: "XAUT-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: { asset: { symbol: "XAUT", type: "RWA_ASSET" }, quantity: "0.002" },
     orderConstraints: { reduceOnly: false },

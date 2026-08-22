@@ -37,6 +37,7 @@ import type {
 } from "./OkxTypes";
 
 export type OkxIntentExecutionClient = Readonly<{
+  readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
   placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult>;
   getOrder(request: OkxGetOrderRequest): Promise<OkxProviderOrder>;
   cancelOrder(request: OkxCancelOrderRequest): Promise<OkxCancelOrderResult>;
@@ -57,7 +58,7 @@ export type OkxIntentExecutionServiceOptions = Readonly<{
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
   persistRecoveryReference?: (
-    reference: Readonly<{ instId: string; clOrdId: string }>,
+    reference: Readonly<{ instId: string; clOrdId: string; positionMode?: "ONE_WAY" | "HEDGE"; positionDirection?: "LONG" | "SHORT"; posSide?: "long" | "short" }>,
   ) => Promise<void> | void;
 }>;
 
@@ -125,6 +126,9 @@ export class OkxIntentExecutionService {
       await this.options.persistRecoveryReference?.({
         instId: value.instId,
         clOrdId: value.clOrdId,
+        positionMode: value.positionMode,
+        positionDirection: intent.positionDirection,
+        posSide: value.posSide,
       });
       return value;
     });
@@ -225,6 +229,12 @@ export class OkxIntentExecutionService {
       () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
     );
+    const positionMode = instrument.venueInstrument.contractType !== "spot"
+      ? await this.client.readPositionMode?.() ?? "ONE_WAY"
+      : undefined;
+    if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
+      throw new Error("OKX HEDGE execution requires positionDirection.");
+    }
     const base = {
       instId: instrument.venueInstrument.instId,
       tdMode: this.tdMode,
@@ -232,18 +242,21 @@ export class OkxIntentExecutionService {
       quantity: okxBaseQuantityToContracts(intent.quantity.quantity, rules),
       clOrdId: okxClientOrderIdFor(intent),
       reduceOnly: intent.orderConstraints.reduceOnly,
+      ...(positionMode === "HEDGE"
+        ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const }
+        : {}),
     } as const;
     if (intent.executionMode === "EXECUTION_PRIORITY") {
-      return Object.freeze({ ...base, ordType: "market" });
+      return attachPositionMode({ ...base, ordType: "market" }, positionMode);
     }
     if (!this.options.limitPriceResolver) {
       throw new Error("OKX PRICE_PRIORITY execution requires an explicit limit price resolver.");
     }
-    return Object.freeze({
+    return attachPositionMode({
       ...base,
       ordType: "limit",
       price: decimalQuantity(await this.options.limitPriceResolver(intent, instrument)),
-    });
+    }, positionMode);
   }
 
   private now() {
@@ -255,10 +268,16 @@ export class OkxIntentExecutionService {
   }
 }
 
+function attachPositionMode<T extends object>(order: T, mode: "ONE_WAY" | "HEDGE" | undefined): T & { positionMode?: "ONE_WAY" | "HEDGE" } {
+  if (mode === undefined) return Object.freeze(order) as T & { positionMode?: "ONE_WAY" | "HEDGE" };
+  Object.defineProperty(order, "positionMode", { value: mode, enumerable: false, writable: false });
+  return Object.freeze(order) as T & { positionMode?: "ONE_WAY" | "HEDGE" };
+}
+
 export function okxClientOrderIdFor(
-  intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId">,
+  intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">,
 ) {
-  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}`;
+  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}\u0000${intent.positionDirection ?? "LEGACY_ONE_WAY"}`;
   return `sxokx${createHash("sha256").update(identity).digest("hex").slice(0, 27)}`;
 }
 

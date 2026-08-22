@@ -329,6 +329,7 @@ function executionIntent() {
     venue: "binance",
     accountId: "binance:account-a",
     instrumentId: "BTC-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: { asset: createAsset({ symbol: "BTC", type: "DIGITAL_ASSET" }), quantity: "0.00123456789" },
     orderConstraints: { reduceOnly: false },

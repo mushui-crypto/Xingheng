@@ -308,6 +308,9 @@ function okxIntent(
     accountId: okxAccountId,
     instrumentId,
     side,
+    ...(instrumentId.endsWith("-PERP")
+      ? { positionDirection: side === "buy" ? "LONG" as const : "SHORT" as const }
+      : {}),
     quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity },
     orderConstraints: { reduceOnly: false },
     executionMode: "EXECUTION_PRIORITY",

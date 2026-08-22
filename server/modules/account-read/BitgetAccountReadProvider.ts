@@ -81,8 +81,7 @@ function accountCapability(accountMode: string): AccountReadCapabilityStatus {
 function positionModeCapability(holdMode: string | null): AccountReadCapabilityStatus {
   if (holdMode === null) return "UNKNOWN";
   const normalized = holdMode.trim().toLowerCase();
-  if (normalized === "one_way_mode") return "ENABLED";
-  if (normalized === "hedge_mode") return "DISABLED";
+  if (normalized === "one_way_mode" || normalized === "hedge_mode") return "ENABLED";
   return "UNKNOWN";
 }
 

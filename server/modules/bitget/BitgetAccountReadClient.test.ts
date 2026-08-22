@@ -102,7 +102,7 @@ test("fails Bitget execution readiness closed when an authoritative requirement 
     ["withdraw", { permissions: ["uta_trade", "withdraw"] }, {}],
     ["IP restriction", { ips: "", permissions: ["uta_trade"] }, {}],
     ["trade permission", { permissions: ["uta_mgt"] }, {}],
-    ["one-way mode", { permissions: ["uta_trade"] }, { holdMode: "hedge_mode" }],
+    ["unknown position mode", { permissions: ["uta_trade"] }, { holdMode: "unknown_mode" }],
     ["account mode", { permissions: ["uta_trade"] }, { accountMode: "switching" }],
   ] as const) {
     await t.test(name, async () => {
@@ -115,6 +115,35 @@ test("fails Bitget execution readiness closed when an authoritative requirement 
       assert.equal((await client.validateAccess()).permissions.executionEnabled, false);
     });
   }
+});
+
+test("allows Bitget HEDGE readiness and reads independent LONG/SHORT buckets", async () => {
+  const accessClient = clientWithResponse((path) => {
+    const response = bitgetResponse(path) as { data?: Record<string, unknown> };
+    if (path === "/api/v3/account/info") return success({ ...response.data, permissions: ["uta_mgt", "uta_trade"] });
+    if (path === "/api/v3/account/settings") return success({ ...response.data, holdMode: "hedge_mode" });
+    return response;
+  });
+  const access = await accessClient.validateAccess();
+  assert.equal(access.permissions.positionModeSupported, true);
+  assert.equal(access.permissions.executionEnabled, true);
+
+  const client = new BitgetAccountReadClient(credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      return Response.json(success({ list: [
+        { category: "USDT-FUTURES", symbol: "DOGEUSDT", holdMode: "hedge_mode", posSide: "long", total: "20", updatedTime: String(now - 2) },
+        { category: "USDT-FUTURES", symbol: "DOGEUSDT", holdMode: "hedge_mode", posSide: "short", total: "7", updatedTime: String(now - 1) },
+      ] }));
+    }) as typeof fetch,
+  });
+  assert.deepEqual(await client.readPerpetualPosition("DOGEUSDT", "long"), {
+    symbol: "DOGEUSDT", side: "long", baseQuantity: "20", updatedAt: now - 2,
+  });
+  assert.deepEqual(await client.readPerpetualPosition("DOGEUSDT", "short"), {
+    symbol: "DOGEUSDT", side: "short", baseQuantity: "7", updatedAt: now - 1,
+  });
 });
 
 test("filters zero Bitget balances and preserves nullable official fields", async () => {

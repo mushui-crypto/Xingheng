@@ -65,14 +65,8 @@ test("live and kill-switch gates allow only perpetual reduceOnly mutations and c
   );
 });
 
-test("new risk requires 1x leverage and no existing open orders", () => {
+test("new risk rejects existing open orders", () => {
   const guard = new BinanceRiskGuard(tradingConfigFixture());
-  assert.throws(
-    () => guard.assertOrderAllowed(orderFixture(), snapshotFixture({
-      perpetual: { ...snapshotFixture().perpetual, leverage: 2 },
-    })),
-    (error: unknown) => error instanceof BinanceRiskError && error.category === "leverage_invalid",
-  );
   assert.throws(
     () => guard.assertOrderAllowed(orderFixture(), snapshotFixture({ openSpotOrderCount: 1 })),
     (error: unknown) => error instanceof BinanceRiskError && error.category === "open_orders_present",
@@ -177,7 +171,7 @@ test("generic perpetual OPEN validates one-way state, permissions, margin and sa
   );
 });
 
-test("generic perpetual accepts any reliably reported positive leverage without changing legacy 1x rules", () => {
+test("generic perpetual accepts any reliably reported positive leverage", () => {
   const guard = new BinanceRiskGuard(tradingConfigFixture());
   const request = genericOrder({ category: "linear", symbol: "BTCUSDT", quantity: "0.001", limitPrice: "65000" });
   const context = genericContext({ category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000" });
@@ -197,12 +191,6 @@ test("generic perpetual accepts any reliably reported positive leverage without 
     );
   }
 
-  assert.throws(
-    () => guard.assertOrderAllowed(orderFixture({ category: "linear" }), snapshotFixture({
-      perpetual: { ...snapshotFixture().perpetual, leverage: 2 },
-    })),
-    riskCategory("leverage_invalid"),
-  );
 });
 
 test("generic perpetual reduceOnly proves real position, side, and quantity before allowing risk reduction", () => {

@@ -31,6 +31,7 @@ import type {
 
 export type BybitIntentExecutionClient = Readonly<{
   getLinearPositionIdx(symbol: string): Promise<0>;
+  readLinearPositionMode?(symbol: string): Promise<"ONE_WAY" | "HEDGE">;
   placeOrder(request: BybitPlaceOrderRequest): Promise<BybitPlaceOrderResult>;
   getOrder(request: BybitGetOrderRequest): Promise<BybitProviderOrder>;
   cancelOrder(request: BybitCancelOrderRequest): Promise<BybitOrderIdentity>;
@@ -57,6 +58,8 @@ export type BybitIntentExecutionServiceOptions = Readonly<{
     expectedSide: BybitOrderSide;
     marketUnit?: BybitMarketUnit;
     positionIdx?: BybitPositionIdx;
+    positionMode?: "ONE_WAY" | "HEDGE";
+    positionDirection?: "LONG" | "SHORT";
   }>) => Promise<void> | void;
 }>;
 
@@ -76,6 +79,8 @@ export type BybitIntentExecutionResult = Readonly<{
   expectedSide: BybitOrderSide;
   marketUnit?: BybitMarketUnit;
   positionIdx?: BybitPositionIdx;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
 }>;
 
 export type BybitExecutionQueryResult = Readonly<{
@@ -96,6 +101,8 @@ export type BybitExecutionOrderLookup = Readonly<{
   expectedSide: BybitOrderSide;
   marketUnit?: BybitMarketUnit;
   positionIdx?: BybitPositionIdx;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
 }>;
 
 export class BybitIntentExecutionService {
@@ -134,6 +141,8 @@ export class BybitIntentExecutionService {
         expectedSide: value.side,
         ...(value.marketUnit === undefined ? {} : { marketUnit: value.marketUnit }),
         ...(value.positionIdx === undefined ? {} : { positionIdx: value.positionIdx }),
+        ...(value.positionMode === undefined ? {} : { positionMode: value.positionMode }),
+        ...(value.positionDirection === undefined ? {} : { positionDirection: value.positionDirection }),
       });
       return value;
     });
@@ -153,6 +162,8 @@ export class BybitIntentExecutionService {
       expectedSide: prepared.side,
       ...(prepared.marketUnit === undefined ? {} : { marketUnit: prepared.marketUnit }),
       ...(prepared.positionIdx === undefined ? {} : { positionIdx: prepared.positionIdx }),
+      ...(prepared.positionMode === undefined ? {} : { positionMode: prepared.positionMode }),
+      ...(prepared.positionDirection === undefined ? {} : { positionDirection: prepared.positionDirection }),
     });
   }
 
@@ -228,6 +239,12 @@ export class BybitIntentExecutionService {
       this.options.quantityRulesMaxAgeMs ?? BYBIT_QUANTITY_RULES_MAX_AGE_MS,
     );
     const category = instrument.venueInstrument.category;
+    const positionMode = category === "linear" && this.client.readLinearPositionMode
+      ? await this.client.readLinearPositionMode(instrument.venueInstrument.symbol)
+      : undefined;
+    if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
+      throw new Error("Bybit HEDGE execution requires positionDirection.");
+    }
     const base = {
       category,
       symbol: instrument.venueInstrument.symbol,
@@ -236,7 +253,11 @@ export class BybitIntentExecutionService {
       orderLinkId: bybitOrderLinkIdFor(intent),
       ...(category === "linear" ? {
         reduceOnly: intent.orderConstraints.reduceOnly,
-        positionIdx: await this.client.getLinearPositionIdx(instrument.venueInstrument.symbol),
+        positionIdx: positionMode === "HEDGE"
+          ? intent.positionDirection === "LONG" ? 1 as const : 2 as const
+          : await this.client.getLinearPositionIdx(instrument.venueInstrument.symbol),
+        positionMode,
+        ...(positionMode === undefined ? {} : { positionDirection: intent.positionDirection }),
       } : {}),
     };
     if (intent.executionMode === "EXECUTION_PRIORITY") {
@@ -261,8 +282,8 @@ export class BybitIntentExecutionService {
   }
 }
 
-export function bybitOrderLinkIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId">) {
-  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}`;
+export function bybitOrderLinkIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">) {
+  const identity = `${intent.userId}\u0000${intent.accountId}\u0000${intent.intentId}\u0000${intent.positionDirection ?? "LEGACY_ONE_WAY"}`;
   return `sxby${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`;
 }
 
@@ -276,8 +297,10 @@ function assertLookupInstrument(lookup: BybitExecutionOrderLookup, instrument: B
   if (lookup.category !== instrument.venueInstrument.category || lookup.symbol !== instrument.venueInstrument.symbol) {
     throw new Error("Bybit order lookup instrument identity does not match the mapped instrument.");
   }
-  if (lookup.category === "linear" && (lookup.positionIdx !== 0 || lookup.marketUnit !== undefined)) {
-    throw new Error("Bybit Linear order lookup requires positionIdx=0.");
+  if (lookup.category === "linear" && (lookup.marketUnit !== undefined
+    || (lookup.positionMode === "ONE_WAY" && lookup.positionIdx !== 0)
+    || (lookup.positionMode === "HEDGE" && lookup.positionIdx !== (lookup.positionDirection === "LONG" ? 1 : 2)))) {
+    throw new Error("Bybit Linear order lookup position facts are inconsistent.");
   }
   if (lookup.category === "spot" && lookup.positionIdx !== undefined) {
     throw new Error("Bybit Spot order lookup must not contain positionIdx.");
@@ -304,8 +327,9 @@ function observationForOrder(
   if (compareDecimal(order.filledQuantity, lookup.expectedProviderQuantity) > 0) {
     return unknown("Bybit cumulative fill exceeds the expected execution quantity.", observedAt, filled);
   }
-  if (lookup.category === "linear" && order.positionIdx !== 0) {
-    return unknown("Bybit Provider positionIdx does not match one-way execution.", observedAt, filled);
+  if (lookup.category === "linear" && lookup.positionMode === "HEDGE"
+    && lookup.positionIdx !== undefined && order.positionIdx !== lookup.positionIdx) {
+    return unknown("Bybit Provider positionIdx does not match the persisted execution bucket.", observedAt, filled);
   }
   if (order.marketUnit !== undefined && order.marketUnit !== lookup.marketUnit) {
     return unknown("Bybit Provider marketUnit does not match the execution reference.", observedAt, filled);

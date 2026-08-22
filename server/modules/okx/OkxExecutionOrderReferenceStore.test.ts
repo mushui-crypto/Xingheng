@@ -9,6 +9,7 @@ import { SqliteExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import {
   InMemoryOkxExecutionOrderReferenceStore,
   PersistentOkxExecutionOrderReferenceStore,
+  createOkxExecutionOrderRecoveryReference,
   type OkxExecutionOrderReference,
   type OkxExecutionOrderRecoveryReference,
 } from "./OkxExecutionOrderReferenceStore";
@@ -150,6 +151,16 @@ test("refuses to upgrade a recovery anchor with mismatched OKX identity", () => 
     references.loadRecoveryForUser("user-a", "execution-okx-1"),
     recoveryReference(),
   );
+});
+
+test("OKX HEDGE recovery persists posSide and direction", () => {
+  const store = new InMemoryOkxExecutionOrderReferenceStore();
+  const recovery = recoveryReference({ expectedProviderQuantity: "10", expectedSide: "buy", positionMode: "HEDGE", positionDirection: "LONG", posSide: "long" });
+  store.createRecovery(recovery);
+  const loaded = store.loadRecoveryForUser("user-a", recovery.executionId);
+  assert.equal(loaded?.positionMode, "HEDGE");
+  assert.equal(loaded?.posSide, "long");
+  assert.throws(() => createOkxExecutionOrderRecoveryReference({ ...recovery, posSide: "short" }), /bucket/u);
 });
 
 function executionRecord(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {

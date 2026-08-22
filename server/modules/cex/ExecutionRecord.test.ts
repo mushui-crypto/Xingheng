@@ -162,6 +162,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     venue: "binance",
     accountId: "binance:account-1",
     instrumentId: "XAUT-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: {
       asset: { symbol: "XAUT", type: "RWA_ASSET" },

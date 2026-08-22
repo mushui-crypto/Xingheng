@@ -219,6 +219,11 @@ type BinanceExecutionOrderRequestBase = {
   side: "Buy" | "Sell";
   quantity: string;
   reduceOnly: boolean;
+  /** Internal semantic identity only; never serialized to Binance. */
+  positionDirection?: "LONG" | "SHORT";
+  /** Provider-only position bucket; serialized only for HEDGE futures. */
+  positionSide?: "BOTH" | "LONG" | "SHORT";
+  positionMode?: "ONE_WAY" | "HEDGE";
   orderLinkId: string;
 };
 
@@ -234,6 +239,7 @@ export type BinanceProviderOrder = {
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Expired" | "Unknown";
   requestedQuantity: number;
   filledQuantity: number;
+  positionSide?: "BOTH" | "LONG" | "SHORT";
   /** Exact provider origQty in canonical base-asset units. */
   requestedBaseQuantity?: string;
   /** Exact provider executedQty in canonical base-asset units. */
@@ -308,7 +314,6 @@ export type BinanceClientAdapter = {
   readProductAvailability(): Promise<BinanceProductAvailability>;
   readPreflightSnapshot(): Promise<BinancePreflightSnapshot>;
   readGenericRiskSnapshot?(request: BinanceGenericRiskSnapshotRequest): Promise<BinanceGenericRiskSnapshot>;
-  setPerpetualLeverage(leverage: 1 | 2 | 3): Promise<void>;
   placeOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string; symbol?: string }>;
   placeTestOrder(request: BinanceExecutionOrderRequest): Promise<{ orderId: string; orderLinkId: string; symbol?: string }>;
   awaitOrder(
@@ -332,4 +337,5 @@ export type BinanceClientAdapter = {
   }>>;
   findOrderByClientOrderId(category: "spot" | "linear", symbol: string, orderLinkId: string): Promise<BinanceProviderOrder | null>;
   readStrategyPnl(orderLinkPrefix: string | null, since: number | null): Promise<BinanceStrategyPnlSnapshot>;
+  readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
 };

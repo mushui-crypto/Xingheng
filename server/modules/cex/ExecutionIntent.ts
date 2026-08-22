@@ -1,6 +1,7 @@
 import { createAssetQuantity, type AssetQuantity } from "./AssetQuantity";
 
 export type ExecutionVenue = "binance" | "okx" | "bybit" | "bitget";
+export type PositionDirection = "LONG" | "SHORT";
 
 export type ExecutionIntent = Readonly<{
   intentId: string;
@@ -11,6 +12,8 @@ export type ExecutionIntent = Readonly<{
   accountId: string;
   instrumentId: string;
   side: "buy" | "sell";
+  /** Canonical perpetual position bucket. Spot intents must omit this field. */
+  positionDirection?: PositionDirection;
   quantity: AssetQuantity;
   orderConstraints: Readonly<{
     reduceOnly: boolean;
@@ -21,6 +24,18 @@ export type ExecutionIntent = Readonly<{
 }>;
 
 export function createExecutionIntent(input: unknown): ExecutionIntent {
+  return parseExecutionIntent(input, false);
+}
+
+/**
+ * Parses a pre-direction legacy one-way intent for an explicit recovery path.
+ * New execution callers must use createExecutionIntent and provide direction.
+ */
+export function createLegacyOneWayExecutionIntent(input: unknown): ExecutionIntent {
+  return parseExecutionIntent(input, true);
+}
+
+function parseExecutionIntent(input: unknown, allowLegacyOneWay: boolean): ExecutionIntent {
   const value = object(input);
   assertExactKeys(value, [
     "intentId",
@@ -31,6 +46,7 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
     "accountId",
     "instrumentId",
     "side",
+    "positionDirection",
     "quantity",
     "orderConstraints",
     "executionMode",
@@ -49,6 +65,25 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
   }
   if (value.side !== "buy" && value.side !== "sell") {
     throw new Error("side must be buy or sell.");
+  }
+  const canonicalInstrument = instrumentId(value.instrumentId);
+  const perpetual = canonicalInstrument.endsWith("-PERP");
+  if (perpetual && value.positionDirection !== undefined
+    && value.positionDirection !== "LONG" && value.positionDirection !== "SHORT") {
+    throw new Error("positionDirection must be LONG or SHORT.");
+  }
+  if (perpetual && value.positionDirection === undefined && !allowLegacyOneWay) {
+    throw new Error("Perpetual ExecutionIntent requires positionDirection.");
+  }
+  // Legacy one-way recovery preserves its historical side-derived semantics;
+  // it never enables HEDGE or claims to identify an account position.
+  const positionDirection = perpetual
+    ? value.positionDirection === "LONG" || value.positionDirection === "SHORT"
+      ? value.positionDirection
+      : value.side === "buy" ? "LONG" as const : "SHORT" as const
+    : undefined;
+  if (!perpetual && value.positionDirection !== undefined) {
+    throw new Error("Spot ExecutionIntent must not contain positionDirection.");
   }
   if (value.executionMode !== "PRICE_PRIORITY" && value.executionMode !== "EXECUTION_PRIORITY") {
     throw new Error("executionMode must be PRICE_PRIORITY or EXECUTION_PRIORITY.");
@@ -71,8 +106,9 @@ export function createExecutionIntent(input: unknown): ExecutionIntent {
     userId: identifier(value.userId, "userId"),
     venue: value.venue,
     accountId: identifier(value.accountId, "accountId"),
-    instrumentId: instrumentId(value.instrumentId),
+    instrumentId: canonicalInstrument,
     side: value.side,
+    ...(perpetual ? { positionDirection } : {}),
     quantity: createAssetQuantity(value.quantity),
     orderConstraints: Object.freeze({ reduceOnly: constraints.reduceOnly }),
     executionMode: value.executionMode,

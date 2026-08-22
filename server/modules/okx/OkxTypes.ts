@@ -24,6 +24,9 @@ export type OkxPlaceOrderRequest = Readonly<{
   reduceOnly?: boolean;
   /** OKX Spot market buy quantity must be expressed in base currency. */
   targetCurrency?: "base_ccy";
+  /** Provider-only hedge bucket; omitted for net_mode and Spot. */
+  posSide?: "long" | "short";
+  positionMode?: "ONE_WAY" | "HEDGE";
 }>;
 
 export type OkxOrderIdentity = Readonly<{

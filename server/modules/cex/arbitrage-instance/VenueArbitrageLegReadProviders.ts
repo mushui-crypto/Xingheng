@@ -13,6 +13,7 @@ import { BitgetAccountReadClient, type BitgetPerpetualPositionSnapshot } from ".
 import type { BitgetAccountReadSnapshot } from "../../bitget/BitgetAccountReadClient";
 import { BitgetPositionReader } from "../../bitget/BitgetPositionReader";
 import { BybitAccountReadClient, type BybitAccountReadSnapshot, type BybitPerpetualPositionSnapshot } from "../../bybit/BybitAccountReadClient";
+import { BybitPositionReader } from "../../bybit/BybitPositionReader";
 import type { ExecutionVenue } from "../ExecutionIntent";
 import type { InstrumentCatalogPort } from "../CexCapabilityPorts";
 import { canonicalInstrumentFromId } from "../Instrument";
@@ -57,6 +58,7 @@ type BybitVerificationClient = VerificationClient & Readonly<{
   readAccountSnapshot(): Promise<BybitAccountReadSnapshot>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BybitPerpetualPositionSnapshot>;
   dispose?(): void | Promise<void>;
+  readLinearPositionMode?(symbol: string): Promise<import("../../bybit/BybitAccountReadClient").BybitLinearPositionModeRead>;
 }>;
 
 type BitgetVerificationClient = VerificationClient & Readonly<{
@@ -249,7 +251,13 @@ export class BybitArbitrageLegReadProviderFactory implements ArbitrageLegReadPro
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
-    return new VenueArbitrageLegReadProvider(this.venue, client, new BybitAccountReadProvider(client), this.instruments);
+    return new VenueArbitrageLegReadProvider(
+      this.venue,
+      client,
+      new BybitAccountReadProvider(client),
+      this.instruments,
+      typeof client.readLinearPositionMode === "function" ? new BybitPositionReader(client) : undefined,
+    );
   }
 }
 

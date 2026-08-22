@@ -85,6 +85,20 @@ export class BybitClient {
     return 0 as const;
   }
 
+  async readLinearPositionMode(symbolInput: string): Promise<"ONE_WAY" | "HEDGE"> {
+    const symbol = providerSymbol(symbolInput);
+    const payload = await this.signedRequest("GET", "/v5/position/list", { category: "linear", symbol });
+    const result = record(payload.result, "Bybit position result");
+    const rows = array(result.list, "Bybit positions").map((item) => record(item, "Bybit position"))
+      .filter((item) => item.symbol === symbol);
+    if (!rows.length) throw new BybitProviderError("provider_response_invalid", "Bybit position mode response is empty.");
+    const indexes = new Set(rows.map((row) => positionIdx(row.positionIdx)));
+    if (indexes.has(0) && indexes.size > 1) throw new BybitProviderError("provider_response_invalid", "Bybit position mode is ambiguous.");
+    if (indexes.has(0)) return "ONE_WAY";
+    if ([...indexes].every((index) => index === 1 || index === 2)) return "HEDGE";
+    throw new BybitProviderError("position_mode_unsupported", "Bybit position mode is unsupported.");
+  }
+
   async placeOrder(requestInput: BybitPlaceOrderRequest): Promise<BybitPlaceOrderResult> {
     const request = placeRequest(requestInput);
     const payload = await this.signedRequest("POST", "/v5/order/create", {
@@ -353,14 +367,14 @@ function placeRequest(input: BybitPlaceOrderRequest): BybitPlaceOrderRequest {
     if (input.reduceOnly !== undefined || input.positionIdx !== undefined) throw new Error("Bybit Spot order contains Linear-only fields.");
     if (orderType === "Market" && input.marketUnit !== "baseCoin") throw new Error("Bybit Spot market quantity must use marketUnit=baseCoin.");
   } else {
-    if (input.positionIdx !== 0) throw new Error("Bybit Linear execution requires positionIdx=0.");
+    if (input.positionIdx !== 0 && input.positionIdx !== 1 && input.positionIdx !== 2) throw new Error("Bybit Linear positionIdx is invalid.");
     if (input.marketUnit !== undefined) throw new Error("Bybit Linear order must not include marketUnit.");
   }
   return Object.freeze({
     category, symbol, side, orderType, qty, orderLinkId,
     ...(price === undefined ? {} : { price }),
     ...(input.reduceOnly === undefined ? {} : { reduceOnly: Boolean(input.reduceOnly) }),
-    ...(input.positionIdx === undefined ? {} : { positionIdx: 0 as const }),
+    ...(input.positionIdx === undefined ? {} : { positionIdx: input.positionIdx }),
     ...(input.marketUnit === undefined ? {} : { marketUnit: "baseCoin" as const }),
   });
 }

@@ -19,7 +19,6 @@ test("adapter exposes no mutation-capable client surface", () => {
     placeOrder: async () => ({ orderId: "1004", orderLinkId: "forbidden" }),
     placeTestOrder: async () => ({ orderId: "1004", orderLinkId: "forbidden" }),
     cancelOrder: async () => undefined,
-    setPerpetualLeverage: async () => undefined,
   } as unknown as BinanceClientAdapter;
   const adapter = new BinanceAdapter(client);
 
@@ -233,7 +232,7 @@ test("read-only adapter does not change OrderManager UNKNOWN handling and reconc
 });
 
 function assertNoMutationSurface(value: object) {
-  const forbidden = new Set(["placeOrder", "placeTestOrder", "cancelOrder", "setPerpetualLeverage"]);
+  const forbidden = new Set(["placeOrder", "placeTestOrder", "cancelOrder"]);
   const pending: object[] = [value];
   const visited = new Set<object>();
   while (pending.length > 0) {

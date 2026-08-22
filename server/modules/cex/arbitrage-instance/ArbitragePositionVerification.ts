@@ -25,6 +25,9 @@ export type ArbitrageLegVerificationResult = Readonly<{
   actualQuantity: string | null;
   /** Canonical signed account net quantity. This is not execution ownership. */
   actualSignedNetQuantity: string | null;
+  positionMode: "ONE_WAY" | "HEDGE" | null;
+  actualLongQuantity: string | null;
+  actualShortQuantity: string | null;
   availableQuantity: string | null;
   verificationStatus: ArbitrageLegVerificationStatus;
   reason: ArbitrageLegVerificationUnknownReason | null;

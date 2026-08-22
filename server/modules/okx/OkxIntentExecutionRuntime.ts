@@ -219,7 +219,7 @@ export class OkxIntentExecutionRuntime {
       let coordinatedCapability: ExecutionCapability<OkxIntentExecutionResult>;
       try {
         const intentService = this.intentServiceFor(intent.instrumentId, runtimeService, (reference) =>
-          this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
+      this.orderReferences.createRecovery(createOkxExecutionOrderRecoveryReference({
             executionId: initialRecord.executionId,
             intentId: initialRecord.intentId,
             userId: initialRecord.userId,
@@ -227,6 +227,9 @@ export class OkxIntentExecutionRuntime {
             instrumentId: initialRecord.instrumentId,
             instId: reference.instId,
             clOrdId: reference.clOrdId,
+            ...(reference.positionMode === undefined ? {} : { positionMode: reference.positionMode }),
+            ...(reference.positionDirection === undefined ? {} : { positionDirection: reference.positionDirection }),
+            ...(reference.posSide === undefined ? {} : { posSide: reference.posSide }),
             ...(reference.expectedProviderQuantity === undefined ? {} : {
               expectedProviderQuantity: reference.expectedProviderQuantity,
               expectedSide: reference.expectedSide,
@@ -327,6 +330,9 @@ export class OkxIntentExecutionRuntime {
       clOrdId: string;
       expectedProviderQuantity?: string;
       expectedSide?: "buy" | "sell";
+      positionMode?: "ONE_WAY" | "HEDGE";
+      positionDirection?: "LONG" | "SHORT";
+      posSide?: "long" | "short";
     }>) => Promise<void> | void,
   ): OkxIntentExecutionService | OkxSpotIntentExecutionService {
     const runtimeService = client as OkxIntentRuntimeService;

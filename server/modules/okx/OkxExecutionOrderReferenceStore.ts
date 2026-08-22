@@ -14,6 +14,9 @@ export type OkxExecutionOrderReference = Readonly<{
   clOrdId: string;
   expectedProviderQuantity?: string;
   expectedSide?: "buy" | "sell";
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
   createdAt: number;
   updatedAt: number;
 }>;
@@ -28,6 +31,9 @@ export type OkxExecutionOrderRecoveryReference = Readonly<{
   clOrdId: string;
   expectedProviderQuantity?: string;
   expectedSide?: "buy" | "sell";
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
   createdAt: number;
   updatedAt: number;
 }>;
@@ -55,6 +61,7 @@ export function createOkxExecutionOrderReference(input: unknown): OkxExecutionOr
     "clOrdId",
     "expectedProviderQuantity",
     "expectedSide",
+    "positionMode", "positionDirection", "posSide",
     "createdAt",
     "updatedAt",
   ], "OkxExecutionOrderReference");
@@ -92,6 +99,7 @@ export function createOkxExecutionOrderRecoveryReference(
     "clOrdId",
     "expectedProviderQuantity",
     "expectedSide",
+    "positionMode", "positionDirection", "posSide",
     "createdAt",
     "updatedAt",
   ], "OkxExecutionOrderRecoveryReference");
@@ -178,6 +186,9 @@ export class PersistentOkxExecutionOrderReferenceStore implements OkxExecutionOr
           expectedProviderQuantity: normalized.expectedProviderQuantity,
           expectedSide: normalized.expectedSide,
         }),
+        ...(normalized.positionMode === undefined ? {} : { positionMode: normalized.positionMode }),
+        ...(normalized.positionDirection === undefined ? {} : { positionDirection: normalized.positionDirection }),
+        ...(normalized.posSide === undefined ? {} : { posSide: normalized.posSide }),
       }),
       createdAt: normalized.createdAt,
       updatedAt: normalized.updatedAt,
@@ -225,6 +236,9 @@ function completeAssociation(
         expectedProviderQuantity: reference.expectedProviderQuantity,
         expectedSide: reference.expectedSide,
       }),
+      ...(reference.positionMode === undefined ? {} : { positionMode: reference.positionMode }),
+      ...(reference.positionDirection === undefined ? {} : { positionDirection: reference.positionDirection }),
+      ...(reference.posSide === undefined ? {} : { posSide: reference.posSide }),
     }),
     createdAt: reference.createdAt,
     updatedAt: reference.updatedAt,
@@ -249,6 +263,7 @@ function parseStoredPayload(input: string) {
       "clOrdId",
       "expectedProviderQuantity",
       "expectedSide",
+      "positionMode", "positionDirection", "posSide",
     ], "Persisted OKX execution order recovery reference");
     if (value.recovery !== "clOrdId") {
       throw new Error("Persisted OKX execution order recovery strategy is invalid.");
@@ -264,6 +279,7 @@ function parseStoredPayload(input: string) {
     "clOrdId",
     "expectedProviderQuantity",
     "expectedSide",
+    "positionMode", "positionDirection", "posSide",
   ], "Persisted OKX execution order reference");
   return { kind: "complete" as const, payload: value };
 }
@@ -378,7 +394,14 @@ function expectedOrderFacts(value: Record<string, unknown>, instrumentId: string
   if (expectedSide !== "buy" && expectedSide !== "sell") {
     throw new Error("expectedSide must be an OKX order side.");
   }
-  return { expectedProviderQuantity, expectedSide } as const;
+  const positionMode = value.positionMode === undefined ? undefined : value.positionMode;
+  const positionDirection = value.positionDirection === undefined ? undefined : value.positionDirection;
+  const posSide = value.posSide === undefined ? undefined : value.posSide;
+  if (positionMode !== undefined && positionMode !== "ONE_WAY" && positionMode !== "HEDGE") throw new Error("OKX positionMode is invalid.");
+  if (positionDirection !== undefined && positionDirection !== "LONG" && positionDirection !== "SHORT") throw new Error("OKX positionDirection is invalid.");
+  if (posSide !== undefined && posSide !== "long" && posSide !== "short") throw new Error("OKX posSide is invalid.");
+  if (positionMode === "HEDGE" && posSide !== (positionDirection === "LONG" ? "long" : "short")) throw new Error("OKX persisted bucket does not match direction.");
+  return { expectedProviderQuantity, expectedSide, ...(positionMode === undefined ? {} : { positionMode }), ...(positionDirection === undefined ? {} : { positionDirection }), ...(posSide === undefined ? {} : { posSide }) } as const;
 }
 
 function timestamp(value: unknown, name: string) {

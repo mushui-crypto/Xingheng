@@ -9,7 +9,7 @@ export type BybitCategory = "spot" | "linear";
 export type BybitOrderSide = "Buy" | "Sell";
 export type BybitOrderType = "Market" | "Limit";
 export type BybitMarketUnit = "baseCoin";
-export type BybitPositionIdx = 0;
+export type BybitPositionIdx = 0 | 1 | 2;
 export type BybitObservedPositionIdx = 0 | 1 | 2;
 
 export type BybitPlaceOrderRequest = Readonly<{
@@ -22,6 +22,8 @@ export type BybitPlaceOrderRequest = Readonly<{
   price?: string;
   reduceOnly?: boolean;
   positionIdx?: BybitPositionIdx;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
   marketUnit?: BybitMarketUnit;
 }>;
 

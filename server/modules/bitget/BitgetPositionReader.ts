@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { canonicalInstrumentFromId } from "../cex/Instrument";
 import type { PositionReadRequest, PositionReader } from "../cex/position/PositionReader";
-import { createPositionSnapshot } from "../cex/position/PositionSnapshot";
+import { createHedgePositionSnapshot, createPositionSnapshot } from "../cex/position/PositionSnapshot";
 import type { PositionSide } from "../cex/position/PositionSide";
 import type {
   BitgetAccountReadSnapshot,
@@ -45,13 +45,31 @@ export class BitgetPositionReader implements PositionReader {
       throw new Error("Bitget position contract size is not canonical base quantity.");
     }
     const account = await this.client.readAccountSnapshot();
-    if (account.holdMode?.trim().toLowerCase() !== "one_way_mode") {
-      throw new Error("Bitget position verification requires one-way mode.");
+    const holdMode = account.holdMode?.trim().toLowerCase();
+    if (holdMode !== "one_way_mode" && holdMode !== "hedge_mode") {
+      throw new Error("Bitget position mode is unavailable.");
     }
     const uidHash = createHash("sha256").update(`bitget:${account.uid}`).digest("hex");
     if (request.accountId !== `bitget:${uidHash.slice(0, 16)}`) {
       throw new Error("Bitget position account identity does not match the authenticated Provider account.");
     }
+    if (request.positionMode === "HEDGE") {
+      if (holdMode !== "hedge_mode") throw new Error("Bitget HEDGE position mode is unavailable.");
+      const [long, short] = await Promise.all([
+        this.client.readPerpetualPosition(binding.symbol, "long"),
+        this.client.readPerpetualPosition(binding.symbol, "short"),
+      ]);
+      if (long.symbol !== binding.symbol || short.symbol !== binding.symbol) throw new Error("Bitget position symbol does not match the mapped instrument.");
+      return createHedgePositionSnapshot({
+        venue: this.venue,
+        accountId: request.accountId,
+        instrumentId: instrument.instrumentId,
+        longQuantity: long.side === "long" ? normalizeDecimal(long.baseQuantity) : "0",
+        shortQuantity: short.side === "short" ? normalizeDecimal(short.baseQuantity) : "0",
+        fetchedAt: Math.max(long.updatedAt ?? this.now(), short.updatedAt ?? this.now()),
+      });
+    }
+    if (holdMode !== "one_way_mode") throw new Error("Bitget one-way position mode is unavailable.");
     const position = await this.client.readPerpetualPosition(binding.symbol, providerSide(request.expectedSide));
     if (position.symbol !== binding.symbol) throw new Error("Bitget position symbol does not match the mapped instrument.");
     return createPositionSnapshot({

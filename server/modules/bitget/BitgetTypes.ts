@@ -21,6 +21,10 @@ export type BitgetPlaceOrderRequest = Readonly<{
   price?: string;
   force?: BitgetTimeInForce;
   reduceOnly?: "yes" | "no";
+  /** Provider-only hedge bucket; omitted for one-way and Spot. */
+  posSide?: "long" | "short";
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
 }>;
 
 export type BitgetOrderIdentity = Readonly<{

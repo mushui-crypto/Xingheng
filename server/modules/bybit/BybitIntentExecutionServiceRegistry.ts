@@ -9,7 +9,7 @@ export type BybitExecutionCredentialSummary = Readonly<{ userId: string; account
 type BybitExecutionProviderClient = Pick<
   BybitClient,
   "getLinearPositionIdx" | "placeOrder" | "getOrder" | "cancelOrder" | "getAccountIdentity"
->;
+> & Partial<Pick<BybitClient, "readLinearPositionMode">>;
 
 export class BybitIntentExecutionServiceRegistry {
   private readonly locks = new Map<string, AsyncLock>();
@@ -56,6 +56,7 @@ function defaultService(
   const client = clientFactory?.(credential) ?? new BybitClient(() => credential);
   return Object.freeze({
     getLinearPositionIdx: (symbol) => client.getLinearPositionIdx(symbol),
+    readLinearPositionMode: (symbol) => client.readLinearPositionMode?.(symbol) ?? Promise.resolve("ONE_WAY" as const),
     placeOrder: (request) => client.placeOrder(request),
     getOrder: (request) => client.getOrder(request),
     cancelOrder: (request) => client.cancelOrder(request),

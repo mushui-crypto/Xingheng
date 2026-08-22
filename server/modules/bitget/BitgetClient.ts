@@ -67,6 +67,15 @@ export class BitgetClient {
     }
   }
 
+  async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
+    const payload = await this.signedRequest("GET", "/api/v3/account/settings", {});
+    const settings = record(payload.data, "Bitget account settings");
+    const mode = requiredString(settings.holdMode, "Bitget holdMode").toLowerCase();
+    if (mode === "one_way_mode") return "ONE_WAY";
+    if (mode === "hedge_mode") return "HEDGE";
+    throw new BitgetProviderError("position_mode_unsupported", "Bitget position mode is unsupported.");
+  }
+
   async placeOrder(input: BitgetPlaceOrderRequest): Promise<BitgetPlaceOrderResult> {
     const request = placeRequest(input);
     const payload = await this.signedRequest("POST", "/api/v3/trade/place-order", request);
@@ -184,16 +193,21 @@ function placeRequest(input: BitgetPlaceOrderRequest): BitgetPlaceOrderRequest {
     throw new Error("Bitget market order must not include price or force.");
   }
   if (category === "SPOT" && input.reduceOnly !== undefined) throw new Error("Bitget Spot order must not include reduceOnly.");
+  if (category === "SPOT" && input.posSide !== undefined) throw new Error("Bitget Spot order must not include posSide.");
   if (category === "SPOT" && orderType === "market" && side === "buy") {
     throw new Error("Bitget Spot market BUY uses quote quantity and is unavailable for canonical base execution.");
   }
   if (category === "USDT-FUTURES" && input.reduceOnly !== "yes" && input.reduceOnly !== "no") {
     throw new Error("Bitget USDT-FUTURES order requires explicit reduceOnly.");
   }
+  if (category === "USDT-FUTURES" && input.posSide !== undefined && input.posSide !== "long" && input.posSide !== "short") {
+    throw new Error("Bitget posSide is invalid.");
+  }
   return Object.freeze({ category, symbol, side, orderType, qty, clientOid: id,
     ...(price === undefined ? {} : { price }),
     ...(input.force === undefined ? {} : { force: input.force }),
     ...(input.reduceOnly === undefined ? {} : { reduceOnly: input.reduceOnly }),
+    ...(input.posSide === undefined ? {} : { posSide: input.posSide }),
   });
 }
 

@@ -5,7 +5,8 @@ import type { BitgetCredentials } from "./BitgetTypes";
 import type { BitgetIntentRuntimeService } from "./BitgetIntentExecutionRuntime";
 
 export type BitgetExecutionCredentialSummary = Readonly<{ userId: string; accountId: string }>;
-type BitgetExecutionProviderClient = Pick<BitgetClient, "assertOneWayMode" | "placeOrder" | "getOrder" | "cancelOrder" | "getAccountIdentity">;
+type BitgetExecutionProviderClient = Pick<BitgetClient, "assertOneWayMode" | "placeOrder" | "getOrder" | "cancelOrder" | "getAccountIdentity">
+  & Partial<Pick<BitgetClient, "readPositionMode">>;
 
 export class BitgetIntentExecutionServiceRegistry {
   private readonly locks = new Map<string, AsyncLock>();
@@ -27,8 +28,8 @@ export class BitgetIntentExecutionServiceRegistry {
     const summary = this.credentials.findSummary(normalized, "bitget");
     if (!summary) throw new Error("Bitget credential is not configured for the authenticated user.");
     if (summary.permissions.executionEnabled !== true || summary.permissions.providerVerified !== true
-      || summary.permissions.positionModeSupported !== true) {
-      throw new Error("Bitget credential is not enabled for one-way execution.");
+      ) {
+      throw new Error("Bitget credential is not enabled for execution.");
     }
     const secret = await this.credentials.loadForExecution(normalized, "bitget");
     const credential = Object.freeze({
@@ -55,6 +56,7 @@ function defaultService(
   const client = clientFactory?.(credential) ?? new BitgetClient(() => credential);
   return Object.freeze({
     assertOneWayMode: () => client.assertOneWayMode(),
+    readPositionMode: () => client.readPositionMode?.() ?? client.assertOneWayMode().then(() => "ONE_WAY" as const),
     placeOrder: (request) => client.placeOrder(request),
     getOrder: (request) => client.getOrder(request),
     cancelOrder: (request) => client.cancelOrder(request),

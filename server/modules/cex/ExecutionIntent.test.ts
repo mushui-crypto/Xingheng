@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createExecutionIntent, type ExecutionIntent } from "./ExecutionIntent";
+import {
+  createExecutionIntent,
+  createLegacyOneWayExecutionIntent,
+  type ExecutionIntent,
+} from "./ExecutionIntent";
 
 const now = 1_800_000_000_000;
 
@@ -14,6 +18,7 @@ test("creates a passive Binance user execution intent", () => {
     venue: "binance",
     accountId: "binance:account-1",
     instrumentId: "XAUT-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: {
       asset: { symbol: "XAUT", type: "RWA_ASSET" },
@@ -96,10 +101,30 @@ test("rejects missing or invalid required execution facts", () => {
     [{ createdAt: 1.5 }, /createdAt must be a non-negative integer/u],
     [{ expiresAt: now }, /expiresAt must be after createdAt/u],
     [{ expectedProfit: 1 }, /unsupported field: expectedProfit/u],
+    [{ positionDirection: "SIDEWAYS" }, /unsupported field|positionDirection/u],
   ];
 
   for (const [override, expected] of requiredFailures) {
     assert.throws(() => createExecutionIntent({ ...intentInput(), ...override }), expected);
+  }
+});
+
+test("requires canonical direction for perpetuals and rejects it for Spot", () => {
+  assert.throws(
+    () => createExecutionIntent({ ...intentInput(), positionDirection: undefined }),
+    /requires positionDirection/u,
+  );
+  assert.equal(
+    createLegacyOneWayExecutionIntent({ ...intentInput(), positionDirection: undefined }).positionDirection,
+    "LONG",
+  );
+  assert.throws(
+    () => createExecutionIntent({ ...intentInput(), instrumentId: "XAUT-USDT-SPOT", positionDirection: "LONG" }),
+    /Spot ExecutionIntent must not contain positionDirection/u,
+  );
+  for (const [side, positionDirection] of [["buy", "LONG"], ["sell", "SHORT"]] as const) {
+    const intent = createExecutionIntent({ ...intentInput(), side, positionDirection });
+    assert.equal(intent.positionDirection, positionDirection);
   }
 });
 
@@ -133,6 +158,7 @@ function intentInput(): Record<string, unknown> {
     venue: "binance",
     accountId: "binance:account-1",
     instrumentId: "XAUT-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: {
       asset: { symbol: "XAUT", type: "RWA_ASSET" },

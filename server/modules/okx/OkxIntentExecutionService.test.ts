@@ -255,6 +255,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     venue: "okx",
     accountId: "okx:account-1",
     instrumentId: "DOGE-USDT-PERP",
+    positionDirection: "LONG",
     side: "buy",
     quantity: {
       asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },

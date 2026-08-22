@@ -23,8 +23,12 @@ test("maps a Binance LONG position to a canonical snapshot", async () => {
     venue: "binance",
     accountId: "binance:account-1",
     instrumentId: "DOGE-USDT-PERP",
+    positionMode: "ONE_WAY",
     side: "LONG",
     quantity: "1.25",
+    signedNetQuantity: "1.25",
+    longQuantity: "1.25",
+    shortQuantity: "0",
     fetchedAt: now - 1,
   });
   assert.deepEqual(calls, [["DOGEUSDT", "long"]]);
@@ -47,6 +51,20 @@ test("keeps the verified DOGEUSDT SHORT 73 position MATCHED", async () => {
   assert.equal(result.status, "MATCHED");
 });
 
+test("reads independent LONG and SHORT buckets in HEDGE mode", async () => {
+  const reader = new BinancePositionReader(client(async (symbol, side) => ({
+    symbol,
+    side: side === "long" ? "long" : "short",
+    baseQuantity: side === "long" ? "100" : "20",
+    updatedAt: now,
+  })), () => now);
+  const snapshot = await reader.readPosition(request({ positionMode: "HEDGE" }));
+  assert.equal(snapshot.positionMode, "HEDGE");
+  assert.equal(snapshot.longQuantity, "100");
+  assert.equal(snapshot.shortQuantity, "20");
+  assert.equal(snapshot.signedNetQuantity, null);
+});
+
 test("keeps a closed DOGEUSDT FLAT 0 position MATCHED", async () => {
   const reader = new BinancePositionReader(client(async (_symbol, side) => {
     assert.equal(side, "short");
@@ -60,8 +78,12 @@ test("keeps a closed DOGEUSDT FLAT 0 position MATCHED", async () => {
     venue: "binance",
     accountId: "binance:account-1",
     instrumentId: "DOGE-USDT-PERP",
+    positionMode: "ONE_WAY",
     side: "FLAT",
     quantity: "0",
+    signedNetQuantity: "0",
+    longQuantity: "0",
+    shortQuantity: "0",
     fetchedAt: now,
   });
   assert.equal(result.status, "MATCHED");

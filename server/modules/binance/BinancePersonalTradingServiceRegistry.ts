@@ -17,6 +17,7 @@ type PersonalTradingService = Pick<
   | "checkConnection"
   | "account"
   | "executionAccountIdentity"
+  | "readExecutionPositionMode"
   | "market"
   | "placeExecutionOrder"
   | "loadExecutionReadContext"

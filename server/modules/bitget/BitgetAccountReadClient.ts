@@ -147,7 +147,7 @@ export class BitgetAccountReadClient {
     const accountMode = snapshot.accountMode.trim().toLowerCase();
     const holdMode = snapshot.holdMode?.trim().toLowerCase() ?? "unknown";
     const accountLevelSupported = accountMode === "unified" || accountMode === "hybrid";
-    const positionModeSupported = holdMode === "one_way_mode";
+    const positionModeSupported = holdMode === "one_way_mode" || holdMode === "hedge_mode";
     const executionEnabled = read && unifiedTrade && !withdraw && ipRestricted
       && accountLevelSupported && positionModeSupported;
     return Object.freeze({
@@ -184,8 +184,11 @@ export class BitgetAccountReadClient {
     if (positions.some((position) => optionalString(position.category)?.toUpperCase() !== "USDT-FUTURES")) {
       throw new BitgetAccountReadError("provider_response_invalid", "Bitget position category does not match USDT-FUTURES.");
     }
-    if (positions.some((position) => optionalString(position.holdMode)?.toLowerCase() !== "one_way_mode")) {
-      throw new BitgetAccountReadError("position_mode_unsupported", "Bitget position read requires one-way mode.");
+    const holdModes = new Set(positions.map((position) => optionalString(position.holdMode)?.toLowerCase()));
+    const observedHoldMode = [...holdModes][0];
+    if (positions.length > 0 && (holdModes.size !== 1
+      || (observedHoldMode !== "one_way_mode" && observedHoldMode !== "hedge_mode"))) {
+      throw new BitgetAccountReadError("position_mode_unsupported", "Bitget position mode is unavailable or inconsistent.");
     }
     const nonZero = positions.filter((position) => decimalQuantity(position.total, "Bitget position total") !== "0");
     const sideMatched = expectedSide ? nonZero.filter((position) => (
@@ -195,7 +198,11 @@ export class BitgetAccountReadClient {
       || (expectedSide !== undefined && nonZero.length > 1 && sideMatched.length === 0)) {
       throw new BitgetAccountReadError("provider_response_invalid", "Bitget returned multiple non-zero position sides.");
     }
-    const position = sideMatched[0] ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? positions[0];
+    const requestedPosition = expectedSide
+      ? positions.find((position) => optionalString(position.posSide)?.toLowerCase() === expectedSide)
+      : undefined;
+    const position = sideMatched[0] ?? (expectedSide ? requestedPosition : undefined)
+      ?? (nonZero.length <= 1 ? nonZero[0] : undefined) ?? positions[0];
     if (!position) {
       return { symbol: normalizedSymbol, side: "flat", baseQuantity: "0", updatedAt: null };
     }

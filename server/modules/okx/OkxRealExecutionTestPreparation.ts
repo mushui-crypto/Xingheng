@@ -322,6 +322,9 @@ export class OkxRealExecutionTestPreparation {
       accountId,
       instrumentId: quantityPlan.instrumentId,
       side: scenarioLeg.side,
+      ...(quantityPlan.instrumentId.endsWith("-PERP")
+        ? { positionDirection: scenarioLeg.side === "buy" ? "LONG" as const : "SHORT" as const }
+        : {}),
       quantity: quantityPlan.plannedAssetQuantity,
       orderConstraints: { reduceOnly: false },
       executionMode: "EXECUTION_PRIORITY",
@@ -345,6 +348,9 @@ export class OkxRealExecutionTestPreparation {
       accountId,
       instrumentId: quantityPlan.instrumentId,
       side: scenarioLeg.side === "buy" ? "sell" : "buy",
+      ...(quantityPlan.instrumentId.endsWith("-PERP")
+        ? { positionDirection: scenarioLeg.side === "buy" ? "SHORT" as const : "LONG" as const }
+        : {}),
       quantity: quantityPlan.plannedAssetQuantity,
       orderConstraints: { reduceOnly: true },
       executionMode: "EXECUTION_PRIORITY",

@@ -6,6 +6,8 @@ type ExpectedOrderFacts = Readonly<{
   expectedSide: BybitOrderSide;
   marketUnit?: BybitMarketUnit;
   positionIdx?: BybitPositionIdx;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
 }>;
 
 export type BybitExecutionOrderReference = Readonly<{
@@ -47,6 +49,7 @@ export function createBybitExecutionOrderReference(input: unknown): BybitExecuti
   exactKeys(value, [
     "executionId", "intentId", "userId", "accountId", "instrumentId", "category", "symbol",
     "orderId", "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx",
+    "positionMode", "positionDirection",
     "createdAt", "updatedAt",
   ], "BybitExecutionOrderReference");
   return normalizeComplete(value);
@@ -57,6 +60,7 @@ export function createBybitExecutionOrderRecoveryReference(input: unknown): Bybi
   exactKeys(value, [
     "executionId", "intentId", "userId", "accountId", "instrumentId", "category", "symbol",
     "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx", "createdAt", "updatedAt",
+    "positionMode", "positionDirection",
   ], "BybitExecutionOrderRecoveryReference");
   return normalizeRecovery(value);
 }
@@ -150,8 +154,18 @@ function normalizeCommon(value: Record<string, unknown>) {
   const marketUnitValue = value.marketUnit === undefined ? undefined : marketUnit(value.marketUnit);
   const positionIdxValue = value.positionIdx === undefined ? undefined : positionIdx(value.positionIdx);
   if (category === "spot" && positionIdxValue !== undefined) throw new Error("Bybit Spot reference must not include positionIdx.");
-  if (category === "linear" && (positionIdxValue !== 0 || marketUnitValue !== undefined)) {
-    throw new Error("Bybit Linear reference requires positionIdx=0 and no marketUnit.");
+  const mode = value.positionMode === undefined ? undefined : positionMode(value.positionMode);
+  const direction = value.positionDirection === undefined ? undefined : positionDirection(value.positionDirection);
+  if (category === "spot" && (positionIdxValue !== undefined || mode !== undefined || direction !== undefined)) {
+    throw new Error("Bybit Spot reference must not contain position bucket facts.");
+  }
+  if (category === "linear" && (marketUnitValue !== undefined || (mode === "ONE_WAY" && positionIdxValue !== 0)
+    || (mode === "HEDGE" && (positionIdxValue !== 1 && positionIdxValue !== 2)))) {
+    throw new Error("Bybit Linear reference position facts do not match the persisted mode.");
+  }
+  if (category === "linear" && mode === "HEDGE" && direction !== undefined
+    && positionIdxValue !== (direction === "LONG" ? 1 : 2)) {
+    throw new Error("Bybit Linear reference bucket does not match positionDirection.");
   }
   return {
     executionId: identifier(value.executionId, "executionId"),
@@ -166,6 +180,8 @@ function normalizeCommon(value: Record<string, unknown>) {
     expectedSide: side(value.expectedSide),
     ...(marketUnitValue === undefined ? {} : { marketUnit: marketUnitValue }),
     ...(positionIdxValue === undefined ? {} : { positionIdx: positionIdxValue }),
+    ...(mode === undefined ? {} : { positionMode: mode }),
+    ...(direction === undefined ? {} : { positionDirection: direction }),
     createdAt,
     updatedAt,
   } as const;
@@ -188,6 +204,8 @@ function completeAssociation(reference: BybitExecutionOrderReference): Execution
       expectedSide: reference.expectedSide,
       ...(reference.marketUnit === undefined ? {} : { marketUnit: reference.marketUnit }),
       ...(reference.positionIdx === undefined ? {} : { positionIdx: reference.positionIdx }),
+      ...(reference.positionMode === undefined ? {} : { positionMode: reference.positionMode }),
+      ...(reference.positionDirection === undefined ? {} : { positionDirection: reference.positionDirection }),
     }),
     createdAt: reference.createdAt,
     updatedAt: reference.updatedAt,
@@ -211,6 +229,8 @@ function recoveryAssociation(reference: BybitExecutionOrderRecoveryReference): E
       expectedSide: reference.expectedSide,
       ...(reference.marketUnit === undefined ? {} : { marketUnit: reference.marketUnit }),
       ...(reference.positionIdx === undefined ? {} : { positionIdx: reference.positionIdx }),
+      ...(reference.positionMode === undefined ? {} : { positionMode: reference.positionMode }),
+      ...(reference.positionDirection === undefined ? {} : { positionDirection: reference.positionDirection }),
     }),
     createdAt: reference.createdAt,
     updatedAt: reference.updatedAt,
@@ -223,8 +243,8 @@ function parsePayload(input: string) {
   const value = object(parsed, "Persisted Bybit execution order reference");
   const recovery = value.recovery !== undefined;
   exactKeys(value, recovery
-    ? ["recovery", "intentId", "accountId", "instrumentId", "category", "symbol", "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx"]
-    : ["intentId", "accountId", "instrumentId", "category", "symbol", "orderId", "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx"],
+    ? ["recovery", "intentId", "accountId", "instrumentId", "category", "symbol", "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx", "positionMode", "positionDirection"]
+    : ["intentId", "accountId", "instrumentId", "category", "symbol", "orderId", "orderLinkId", "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx", "positionMode", "positionDirection"],
   recovery ? "Persisted Bybit recovery reference" : "Persisted Bybit order reference");
   if (recovery && value.recovery !== "orderLinkId") throw new Error("Persisted Bybit recovery strategy is invalid.");
   return recovery ? { kind: "recovery" as const, payload: value } : { kind: "complete" as const, payload: value };
@@ -248,7 +268,7 @@ function recoveryFromAssociation(association: ExecutionOrderReferenceAssociation
 function assertRecoveryMatches(recovery: BybitExecutionOrderRecoveryReference, complete: BybitExecutionOrderReference) {
   for (const key of [
     "executionId", "intentId", "userId", "accountId", "instrumentId", "category", "symbol", "orderLinkId",
-    "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx",
+    "expectedProviderQuantity", "expectedSide", "marketUnit", "positionIdx", "positionMode", "positionDirection",
   ] as const) {
     if (recovery[key] !== complete[key]) throw new Error("Bybit completed order reference does not match its recovery reference.");
   }
@@ -263,6 +283,14 @@ function exactKeys(value: Record<string, unknown>, allowed: readonly string[], n
   const keys = new Set(allowed);
   const unknown = Object.keys(value).find((key) => !keys.has(key));
   if (unknown) throw new Error(`${name} contains unsupported field: ${unknown}.`);
+}
+function positionMode(value: unknown): "ONE_WAY" | "HEDGE" {
+  if (value !== "ONE_WAY" && value !== "HEDGE") throw new Error("Bybit positionMode is invalid.");
+  return value;
+}
+function positionDirection(value: unknown): "LONG" | "SHORT" {
+  if (value !== "LONG" && value !== "SHORT") throw new Error("Bybit positionDirection is invalid.");
+  return value;
 }
 function identifier(value: unknown, name: string) {
   if (typeof value !== "string" || !value.trim() || value.length > 200) throw new Error(`${name} is invalid.`);
@@ -301,7 +329,7 @@ function marketUnit(value: unknown): BybitMarketUnit {
   return value;
 }
 function positionIdx(value: unknown): BybitPositionIdx {
-  if (value !== 0) throw new Error("Bybit positionIdx is invalid.");
+  if (value !== 0 && value !== 1 && value !== 2) throw new Error("Bybit positionIdx is invalid.");
   return value;
 }
 function timestamp(value: unknown, name: string) {

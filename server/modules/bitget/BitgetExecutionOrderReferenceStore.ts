@@ -4,7 +4,11 @@ import type { BitgetCategory, BitgetOrderSide } from "./BitgetTypes";
 type ExpectedOrderFacts = Readonly<{
   expectedProviderQuantity: string;
   expectedSide: BitgetOrderSide;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
 }>;
+
 
 export type BitgetExecutionOrderReference = Readonly<{
   executionId: string;
@@ -106,7 +110,7 @@ export class PersistentBitgetExecutionOrderReferenceStore implements BitgetExecu
 
 const commonKeys = [
   "executionId", "intentId", "userId", "accountId", "instrumentId", "category", "symbol", "clientOid",
-  "expectedProviderQuantity", "expectedSide", "createdAt", "updatedAt",
+  "expectedProviderQuantity", "expectedSide", "positionMode", "positionDirection", "posSide", "createdAt", "updatedAt",
 ] as const;
 
 type Stored =
@@ -122,7 +126,11 @@ function normalizeCommon(value: Record<string, unknown>) {
     userId: identifier(value.userId, "userId"), accountId: identifier(value.accountId, "accountId"),
     instrumentId: instrumentId(value.instrumentId), category: category(value.category), symbol: symbol(value.symbol),
     clientOid: clientOid(value.clientOid), expectedProviderQuantity: positiveDecimal(value.expectedProviderQuantity),
-    expectedSide: side(value.expectedSide), createdAt, updatedAt,
+    expectedSide: side(value.expectedSide),
+    ...(value.positionMode === undefined || value.positionMode === null ? {} : { positionMode: positionMode(value.positionMode) }),
+    ...(value.positionDirection === undefined || value.positionDirection === null ? {} : { positionDirection: positionDirection(value.positionDirection) }),
+    ...(value.posSide === undefined || value.posSide === null ? {} : { posSide: posSide(value.posSide) }),
+    createdAt, updatedAt,
   } as const;
 }
 
@@ -139,6 +147,9 @@ function association(reference: BitgetExecutionOrderRecoveryReference, extra: Re
       ...extra, intentId: reference.intentId, accountId: reference.accountId, instrumentId: reference.instrumentId,
       category: reference.category, symbol: reference.symbol, clientOid: reference.clientOid,
       expectedProviderQuantity: reference.expectedProviderQuantity, expectedSide: reference.expectedSide,
+      ...(reference.positionMode === undefined ? {} : { positionMode: reference.positionMode }),
+      ...(reference.positionDirection === undefined ? {} : { positionDirection: reference.positionDirection }),
+      ...(reference.posSide === undefined ? {} : { posSide: reference.posSide }),
     }),
     createdAt: reference.createdAt, updatedAt: reference.updatedAt,
   };
@@ -149,8 +160,8 @@ function parsePayload(input: string) {
   const value = object(parsed, "Persisted Bitget execution order reference");
   const recovery = value.recovery !== undefined;
   exactKeys(value, recovery
-    ? ["recovery", "intentId", "accountId", "instrumentId", "category", "symbol", "clientOid", "expectedProviderQuantity", "expectedSide"]
-    : ["orderId", "intentId", "accountId", "instrumentId", "category", "symbol", "clientOid", "expectedProviderQuantity", "expectedSide"],
+    ? ["recovery", "intentId", "accountId", "instrumentId", "category", "symbol", "clientOid", "expectedProviderQuantity", "expectedSide", "positionMode", "positionDirection", "posSide"]
+    : ["orderId", "intentId", "accountId", "instrumentId", "category", "symbol", "clientOid", "expectedProviderQuantity", "expectedSide", "positionMode", "positionDirection", "posSide"],
   recovery ? "Persisted Bitget recovery reference" : "Persisted Bitget order reference");
   if (recovery && value.recovery !== "clientOid") throw new Error("Persisted Bitget recovery strategy is invalid.");
   return recovery ? { kind: "recovery" as const, payload: value } : { kind: "complete" as const, payload: value };
@@ -179,4 +190,7 @@ function symbol(value: unknown) { const text = identifier(value, "symbol"); if (
 function clientOid(value: unknown) { const id = identifier(value, "clientOid"); if (!/^[A-Za-z0-9_-]{1,32}$/u.test(id)) throw new Error("Bitget clientOid is invalid."); return id; }
 function positiveDecimal(value: unknown) { if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) || /^0(?:\.0+)?$/u.test(value)) throw new Error("expectedProviderQuantity is invalid."); return value; }
 function side(value: unknown): BitgetOrderSide { if (value !== "buy" && value !== "sell") throw new Error("Bitget expectedSide is invalid."); return value; }
+function positionMode(value: unknown): "ONE_WAY" | "HEDGE" { if (value !== "ONE_WAY" && value !== "HEDGE") throw new Error("Bitget positionMode is invalid."); return value; }
+function positionDirection(value: unknown): "LONG" | "SHORT" { if (value !== "LONG" && value !== "SHORT") throw new Error("Bitget positionDirection is invalid."); return value; }
+function posSide(value: unknown): "long" | "short" { if (value !== "long" && value !== "short") throw new Error("Bitget posSide is invalid."); return value; }
 function timestamp(value: unknown, name: string) { if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) throw new Error(`${name} is invalid.`); return value; }

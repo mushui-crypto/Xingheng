@@ -250,6 +250,9 @@ export class ArbitrageExecutionCommandService {
         accountId,
         instrumentId: selected.instrumentId,
         side: draftLeg.side,
+        ...(selected.instrumentId.endsWith("-PERP")
+          ? { positionDirection: selected.role }
+          : {}),
         quantity,
         orderConstraints: { reduceOnly: false },
         executionMode: request.executionMode,
