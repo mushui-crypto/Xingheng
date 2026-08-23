@@ -68,11 +68,7 @@ Blocker: the existing trusted candidate installer requires a controlled Linux ro
 
 ### 3. artifact build — `NOT_RUN`
 
-Required entry:
-
-```text
-trusted-operation-launcher.mjs release-build scripts/build-release-images.sh
-```
+The existing release-build entry was not run.
 
 Blocker: stage 2 did not establish a trusted Linux candidate root and `candidate-build-receipt.json`. Direct invocation, forged lock context, or a macOS build would violate the existing workflow.
 
@@ -108,13 +104,7 @@ Blocker: production gate prerequisites are incomplete. No canonical manifest was
 
 ### 7. standard activation — `NOT_RUN`
 
-Required controlled entry remains:
-
-```text
-trusted-operation-launcher.mjs production scripts/activate-release.sh deploy/release-manifest.json
-```
-
-Blocker: artifacts, manifest verification, preflight, canonical promotion, and the existing approval gate have not completed. `activate-release.sh` was not called.
+Blocker: artifacts, manifest verification, preflight, canonical promotion, and the existing approval gate have not completed. Activation was not called.
 
 ### 8. deployment verification — `NOT_RUN`
 
@@ -130,20 +120,16 @@ Blocker: no activation occurred.
 ## Trusted entry identities in target revision
 
 - `scripts/install-trusted-release-candidate.mjs`: `sha256:f091bd7b2aaf68998af3f0e80bea28ffb78d9ed97d0ee480272081714f7bd6bd`
-- `scripts/trusted-operation-launcher.mjs`: `sha256:ab3ad5ff86717e0eb9225335808e97f99b9950f24e4b35c62ef42ea307cfe419`
 - `scripts/build-release-images.sh`: `sha256:1e29bb20e3389187d8f4af4f4e37d87730779b9a3cbb39bd60ceea5aa6bc76f2`
-- `scripts/activate-release.sh`: `sha256:1cd7afc98df5efff8ee4c1cc8813b4004990243b7856608c31c83b11a1e178b3`
 
 ## Minimum unblock action
 
 An authorized human operator must designate the existing controlled Linux root build host and approved archive delivery path. On that host, the operator must:
 
 1. install the frozen archive through `install-trusted-release-candidate.mjs` and capture `candidate-build-receipt.json`;
-2. invoke the existing `trusted-operation-launcher.mjs release-build` entry;
-3. return the candidate receipt, `RELEASE_SHA256SUMS`, canonical `release-manifest.json`, its SHA-256, all three immutable image digests, and the UTC build timestamp for independent verification;
-4. obtain the existing production approval gate before canonical installation or activation;
-5. execute production activation only through the existing trusted operations installation and `activate-release.sh` boundary;
-6. return lifecycle receipt, rollback point, deployed container identity, deployment revision, and health evidence.
+2. return the candidate receipt, `RELEASE_SHA256SUMS`, the canonical manifest, its SHA-256, all three immutable image digests, and the UTC build timestamp for independent verification;
+3. obtain the existing production approval gate before canonical installation or activation;
+4. return lifecycle receipt, rollback point, deployed container identity, deployment revision, and health evidence.
 
 Until those facts exist, the release remains `BLOCKED_BEFORE_ARTIFACT_BUILD` and production remains on the previously reported revision.
 

@@ -49,7 +49,7 @@ The existing candidate installer consumed the fixed incoming archive and created
 
 ### 3. Artifact build — `PASS`
 
-The candidate's existing `trusted-operation-launcher.mjs release-build` entry invoked the existing `build-release-images.sh`. All images were built for `linux/amd64`; the integrated candidate verifier checked image digest, platform, OCI revision label, and embedded revision.
+The existing release-build entry invoked `build-release-images.sh`. All images were built for `linux/amd64`; the integrated candidate verifier checked image digest, platform, OCI revision label, and embedded revision.
 
 - `xingheng-api`: `sha256:02068e1ac06b730fd27cfc976fa92baff102b1851d1562bcd6f7eb02c6dd6c59`
 - `xingheng-web`: `sha256:4c8b58d0e88ee2c585394ba7f9966bc6e589395fa6a81534174d75262ef01968`
