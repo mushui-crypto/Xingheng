@@ -176,8 +176,11 @@ function recoveryFromAssociation(association: ExecutionOrderReferenceAssociation
     createdAt: association.createdAt, updatedAt: association.updatedAt });
 }
 function assertRecoveryMatches(recovery: BitgetExecutionOrderRecoveryReference, complete: BitgetExecutionOrderReference) {
-  for (const key of commonKeys) if (recovery[key] !== complete[key]) {
+  for (const key of commonKeys) if (key !== "updatedAt" && recovery[key] !== complete[key]) {
     throw new Error("Bitget completed order reference does not match its recovery reference.");
+  }
+  if (complete.updatedAt < recovery.updatedAt) {
+    throw new Error("Bitget completed order reference predates its recovery reference.");
   }
 }
 function referenceKey(userId: string, executionId: string) { return `${userId}\u0000${executionId}`; }

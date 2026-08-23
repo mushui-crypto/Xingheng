@@ -6,6 +6,7 @@ import test from "node:test";
 import { BitgetFormalArbitrageExecutionRuntime } from "./BitgetFormalArbitrageExecutionRuntime";
 import { createBitgetExecutionTickerSource } from "./BitgetExecutionMarketData";
 import {
+  createBitgetExecutionOrderReference,
   createBitgetExecutionOrderRecoveryReference,
   InMemoryBitgetExecutionOrderReferenceStore,
   PersistentBitgetExecutionOrderReferenceStore,
@@ -135,6 +136,49 @@ test("Bitget opaque clientOid recovery reference survives SQLite restart", async
   } finally {
     generic.close(); records.close(); rmSync(directory, { recursive: true, force: true });
   }
+});
+
+test("Bitget persistent recovery upgrades when the completed reference has a later observation time", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "stellax-bitget-reference-upgrade-"));
+  const dbPath = join(directory, "trading.sqlite");
+  const records = new SqliteExecutionRecordStore({ dbPath });
+  const generic = new SqliteExecutionOrderReferenceStore({ dbPath });
+  try {
+    const recovery = createBitgetExecutionOrderRecoveryReference({
+      executionId: "execution-bitget-upgrade", intentId: "intent-bitget-upgrade", userId: "user-a",
+      accountId: "bitget:account-a", instrumentId: "DOGE-USDT-SPOT", category: "SPOT", symbol: "DOGEUSDT",
+      clientOid: "sxbgupgrade1", expectedProviderQuantity: "64.5", expectedSide: "buy",
+      createdAt: now, updatedAt: now,
+    });
+    records.create({
+      executionId: recovery.executionId, intentId: recovery.intentId, userId: recovery.userId, venue: "bitget",
+      accountId: recovery.accountId, instrumentId: recovery.instrumentId, status: "CREATED",
+      createdAt: recovery.createdAt, updatedAt: recovery.updatedAt,
+    });
+    const store = new PersistentBitgetExecutionOrderReferenceStore(generic);
+    await store.createRecovery(recovery);
+    await store.create(createBitgetExecutionOrderReference({
+      ...recovery, orderId: "1475522063476211712", updatedAt: now + 1_000,
+    }));
+    assert.equal((await store.loadRecoveryForUser("user-a", recovery.executionId)), null);
+    assert.equal((await store.loadForUser("user-a", recovery.executionId))?.orderId, "1475522063476211712");
+  } finally {
+    generic.close(); records.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("Bitget recovery upgrade rejects a completed reference with an earlier observation time", () => {
+  const store = new InMemoryBitgetExecutionOrderReferenceStore();
+  const recovery = createBitgetExecutionOrderRecoveryReference({
+    executionId: "execution-bitget-stale", intentId: "intent-bitget-stale", userId: "user-a",
+    accountId: "bitget:account-a", instrumentId: "DOGE-USDT-SPOT", category: "SPOT", symbol: "DOGEUSDT",
+    clientOid: "sxbgstale1", expectedProviderQuantity: "64.5", expectedSide: "buy",
+    createdAt: now, updatedAt: now + 1_000,
+  });
+  store.createRecovery(recovery);
+  assert.throws(() => store.create(createBitgetExecutionOrderReference({
+    ...recovery, orderId: "1475522063476211712", updatedAt: now,
+  })), /predates its recovery reference/u);
 });
 
 test("Bitget HEDGE recovery persists the resolved posSide bucket", () => {
