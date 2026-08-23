@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { BitgetProviderError } from "./BitgetClient";
 import { BitgetFormalArbitrageExecutionRuntime } from "./BitgetFormalArbitrageExecutionRuntime";
 import { createBitgetExecutionTickerSource } from "./BitgetExecutionMarketData";
 import {
@@ -82,6 +83,43 @@ test("Bitget UNKNOWN never invents confirmed quantity", async () => {
   const result = await adapter.reconcile("user-a", "execution-bitget-1");
   assert.equal(result.executionRecord.status, "UNKNOWN");
   assert.equal(result.confirmedQuantity, null);
+});
+
+test("Bitget recovery keeps a fresh missing order UNKNOWN, then fails it after the settle window", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  provider.placeFailure = new Error("response lost after write");
+  assert.equal((await runtime(provider, records, references).execute(intent())).executionRecord.status, "UNKNOWN");
+
+  provider.queryFailure = new BitgetProviderError("provider_rejected", "Order does not exist", "25204");
+  const fresh = await runtime(provider, records, references, undefined, () => now + 59_999)
+    .reconcile("user-a", "execution-bitget-1");
+  assert.equal(fresh.executionRecord.status, "UNKNOWN");
+  assert.equal(fresh.executionRecord.executionAttemptId, undefined);
+
+  const settled = await runtime(provider, records, references, undefined, () => now + 60_000)
+    .reconcile("user-a", "execution-bitget-1");
+  assert.equal(settled.executionRecord.status, "FAILED");
+  assert.equal(settled.executionRecord.executionAttemptId, "intent-bitget-1");
+  assert.equal(settled.executionRecord.remoteOrderId, undefined);
+  assert.equal(settled.observation?.filledBaseQuantity, "0");
+  assert.equal(provider.placeRequests.length, 1);
+  assert.equal(provider.queryRequests.length, 2);
+});
+
+test("Bitget recovery keeps non-not-found Provider failures UNKNOWN", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  provider.placeFailure = new Error("response lost after write");
+  await runtime(provider, records, references).execute(intent());
+  provider.queryFailure = new BitgetProviderError("provider_transport_error", "Bitget request failed");
+
+  const result = await runtime(provider, records, references, undefined, () => now + 120_000)
+    .reconcile("user-a", "execution-bitget-1");
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.executionRecord.executionAttemptId, undefined);
 });
 
 test("Bitget deterministic pre-mutation safety rejection is FAILED/0 with no recovery anchor or place", async () => {
@@ -333,10 +371,11 @@ function runtime(
   references: InMemoryBitgetExecutionOrderReferenceStore,
   guard = new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true,
     venues: { bitget: { liveTradingEnabled: true, killSwitchActive: false } } }),
+  clock: () => number = () => now,
 ) {
   return new BitgetIntentExecutionRuntime(
     { run: async (_userId, operation) => operation(provider) }, records, references,
-    { createExecutionId: () => "execution-bitget-1", clock: () => now,
+    { createExecutionId: () => "execution-bitget-1", clock,
       mutationSafetyGuard: guard, quantityRulesSource: rules,
       limitPriceResolver: async () => "0.085" },
   );
@@ -360,6 +399,7 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
   queryRequests: BitgetGetOrderRequest[] = [];
   cancelCount = 0;
   placeFailure?: Error;
+  queryFailure?: Error;
   status: BitgetProviderOrder["status"] = "PENDING_CONFIRMATION";
   filled = "0";
   fee = "0";
@@ -375,6 +415,7 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
   }
   async getOrder(request: BitgetGetOrderRequest): Promise<BitgetProviderOrder> {
     this.queryRequests.push(request);
+    if (this.queryFailure) throw this.queryFailure;
     const placed = this.placed;
     if (!placed) throw new Error("No fake Bitget order exists.");
     return { category: placed.category, symbol: placed.symbol, orderId: "order-1", clientOid: placed.clientOid,

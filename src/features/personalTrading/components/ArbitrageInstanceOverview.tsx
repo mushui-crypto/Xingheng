@@ -5,7 +5,6 @@ import {
   fetchArbitrageInstanceHistory,
   fetchArbitragePositionVerification,
   type ArbitrageInstance,
-  type ArbitrageExecutionReference,
   type ArbitrageInstanceLeg,
   type ArbitrageInstanceStatus,
   type ArbitrageLegVerificationStatus,
@@ -15,7 +14,6 @@ import { reconcileArbitrageInstance } from "../../../api/arbitrageExecutionDraft
 import { Button } from "../../../components/ui/Button";
 import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
 import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
-import { ArbitrageOrderCancelDialog } from "./ArbitrageOrderCancelDialog";
 
 const HISTORY_LIMIT = 50;
 const VERIFICATION_CONCURRENCY = 4;
@@ -37,11 +35,6 @@ export function ArbitrageInstanceOverview() {
   const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
   const [exitTarget, setExitTarget] = useState<Readonly<{
     instance: ArbitrageInstance;
-  }> | null>(null);
-  const [cancelTarget, setCancelTarget] = useState<Readonly<{
-    instance: ArbitrageInstance;
-    leg: ArbitrageInstanceLeg;
-    reference: ArbitrageExecutionReference;
   }> | null>(null);
 
   useEffect(() => {
@@ -90,7 +83,6 @@ export function ArbitrageInstanceOverview() {
 
   return <>
     <ArbitrageInstanceContent
-      onCancelOrder={setCancelTarget}
       onExitHedge={setExitTarget}
       onReconcileHedge={(instance) => void reconcileHedge(instance)}
       onPageChange={setPage}
@@ -104,13 +96,6 @@ export function ArbitrageInstanceOverview() {
       instance={exitTarget.instance}
       onClose={() => setExitTarget(null)}
       onUpdated={onInstanceUpdated}
-    /> : null}
-    {cancelTarget ? <ArbitrageOrderCancelDialog
-      instance={cancelTarget.instance}
-      leg={cancelTarget.leg}
-      onClose={() => setCancelTarget(null)}
-      onUpdated={onInstanceUpdated}
-      reference={cancelTarget.reference}
     /> : null}
   </>;
 }
@@ -137,7 +122,6 @@ export async function loadVerifications(
 }
 
 export function ArbitrageInstanceContent({
-  onCancelOrder,
   onExitHedge,
   onReconcileHedge,
   onPageChange,
@@ -147,7 +131,6 @@ export function ArbitrageInstanceContent({
   state,
   verifications = {},
 }: {
-  onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onPageChange: (page: number) => void;
@@ -172,7 +155,6 @@ export function ArbitrageInstanceContent({
   return (
     <ArbitrageInstanceSections
       active={state.active}
-      onCancelOrder={onCancelOrder}
       history={state.history}
       onPageChange={onPageChange}
       onExitHedge={onExitHedge}
@@ -191,7 +173,6 @@ export function ArbitrageInstanceSections({
   onPageChange,
   onExitHedge,
   onReconcileHedge,
-  onCancelOrder,
   onSectionChange = () => undefined,
   page,
   selectedSection = "active",
@@ -202,7 +183,6 @@ export function ArbitrageInstanceSections({
   onPageChange: (page: number) => void;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
-  onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
   selectedSection?: "active" | "history";
@@ -219,7 +199,6 @@ export function ArbitrageInstanceSections({
         {selectedSection === "active" ? <InstanceSection
           emptyText="暂无当前套利组合"
           instances={active}
-          onCancelOrder={onCancelOrder}
           onExitHedge={onExitHedge}
           onReconcileHedge={onReconcileHedge}
           title="当前套利"
@@ -269,7 +248,6 @@ function InstanceSection({
   instances,
   onExitHedge,
   onReconcileHedge,
-  onCancelOrder,
   title,
   verifications = {},
 }: {
@@ -278,7 +256,6 @@ function InstanceSection({
   instances: ArbitrageInstance[];
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
-  onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   title: string;
   verifications?: Record<string, VerificationState>;
 }) {
@@ -290,15 +267,14 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onCancelOrder={onCancelOrder} onExitHedge={onExitHedge} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, onCancelOrder, onExitHedge, onReconcileHedge, verificationState }: {
+function InstanceCard({ historical, instance, onExitHedge, onReconcileHedge, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
-  onCancelOrder?: (target: Readonly<{ instance: ArbitrageInstance; leg: ArbitrageInstanceLeg; reference: ArbitrageExecutionReference }>) => void;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
@@ -347,17 +323,6 @@ function InstanceCard({ historical, instance, onCancelOrder, onExitHedge, onReco
                 </>
               ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
             </dl>
-            {!historical && onCancelOrder ? instance.executionReferences
-              .filter((reference) => reference.legId === leg.legId
-                && reference.executionRecordId !== null
-                && (reference.status === "LINKED"
-                  || reference.status === "PENDING_CONFIRMATION"
-                  || reference.status === "UNKNOWN"))
-              .map((reference) => <div className="mt-3" key={reference.executionIntentId}>
-                <Button onClick={() => onCancelOrder({ instance, leg, reference })} type="button" variant="secondary">
-                  撤销订单
-                </Button>
-              </div>) : null}
           </div>;
         })}
       </div>

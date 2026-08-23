@@ -124,7 +124,7 @@ test("the browser submits one instance command and renders persisted two-leg pro
   assert.doesNotMatch(source, /closeArbitrageExecutionLeg|\.closeLeg\(|legId:|quantity:|UnifiedRealTradingTest|Provider/u);
 });
 
-test("known active StellaX execution exposes cancel while terminal and historical records do not", () => {
+test("arbitrage records do not expose order cancellation controls", () => {
   const [parsed] = requireArbitrageInstanceList([arbitrageInstance("OPENING")]);
   const active = {
     ...parsed!,
@@ -157,24 +157,18 @@ test("known active StellaX execution exposes cancel while terminal and historica
   const current = renderToStaticMarkup(<ArbitrageInstanceSections
     active={[active]}
     history={[]}
-    onCancelOrder={() => undefined}
     onPageChange={() => undefined}
     page={1}
   />);
   const history = renderToStaticMarkup(<ArbitrageInstanceSections
     active={[]}
     history={[{ ...active, status: "FAILED" as const }]}
-    onCancelOrder={() => undefined}
     onPageChange={() => undefined}
     page={1}
     selectedSection="history"
   />);
-  assert.equal((current.match(/撤销订单/gu) ?? []).length, 1);
+  assert.doesNotMatch(current, /撤销订单/u);
   assert.doesNotMatch(history, /撤销订单/u);
-  const dialogSource = readFileSync(new URL("./ArbitrageOrderCancelDialog.tsx", import.meta.url), "utf8");
-  assert.match(dialogSource, /计划数量/u);
-  assert.match(dialogSource, /已确认数量/u);
-  assert.doesNotMatch(dialogSource, /providerOrderId|providerSymbol|accountId/u);
 });
 
 test("reopening restores two-leg exit progress from persisted execution references", () => {

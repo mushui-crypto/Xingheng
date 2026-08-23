@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  cancelKnownArbitrageOrder,
   closeArbitrageExecutionLeg,
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
@@ -188,43 +187,6 @@ test("instance exit and reconciliation APIs do not expose browser leg orchestrat
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { arbitrageId: "arbitrage-1" });
   assert.equal("legId" in JSON.parse(String(calls[0]?.init?.body)), false);
   assert.equal("quantity" in JSON.parse(String(calls[0]?.init?.body)), false);
-});
-
-test("known-order cancel API sends only StellaX application identity and explicit confirmation", async () => {
-  const calls: Array<{ url: string; init?: RequestInit }> = [];
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = async (input, init) => {
-    calls.push({ url: String(input), init });
-    return Response.json({
-      instance: instancePayload("arbitrage-1"),
-      executionRecord: {
-        executionId: "record-1",
-        intentId: "intent-1",
-        status: "FAILED",
-        plannedQuantity: "0.001",
-        confirmedQuantity: "0.0004",
-        verifiedAt: 30,
-      },
-      idempotentReplay: false,
-      secondLegAllowed: false,
-    });
-  };
-  try {
-    await cancelKnownArbitrageOrder({
-      arbitrageId: "arbitrage-1",
-      legId: "long-leg",
-      executionIntentId: "intent-1",
-    });
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-  assert.equal(calls[0]?.url, "/api/arbitrage-execution/orders/cancel");
-  assert.deepEqual(JSON.parse(String(calls[0]?.init?.body)), {
-    arbitrageId: "arbitrage-1",
-    legId: "long-leg",
-    executionIntentId: "intent-1",
-    confirmed: true,
-  });
 });
 
 function instancePayload(arbitrageId: string) {

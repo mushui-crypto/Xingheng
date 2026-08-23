@@ -268,24 +268,6 @@ export async function reconcileArbitrageInstance(arbitrageId: string): Promise<R
   });
 }
 
-export async function cancelKnownArbitrageOrder(
-  input: Readonly<{ arbitrageId: string; legId: string; executionIntentId: string }>,
-) {
-  const payload = await requestJson<unknown>(
-    "/api/arbitrage-execution/orders/cancel",
-    "订单撤销暂不可用，请稍后重试。",
-    {
-      init: {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...input, confirmed: true }),
-      },
-      userAuthFailure: true,
-    },
-  );
-  return legExecutionConfirmation(payload);
-}
-
 function legExecutionConfirmation(payload: unknown): ArbitrageLegExecutionConfirmation {
   const value = record(payload);
   const executionRecord = record(value.executionRecord);

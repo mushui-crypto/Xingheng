@@ -18,6 +18,7 @@ import {
   type BitgetExecutionOrderReferenceStore,
 } from "./BitgetExecutionOrderReferenceStore";
 import { BitgetIntentCancellationCapability } from "./BitgetIntentCancellationCapability";
+import { BitgetProviderError } from "./BitgetClient";
 import { BitgetIntentExecutionCapability } from "./BitgetIntentExecutionCapability";
 import {
   BitgetIntentExecutionService,
@@ -57,6 +58,8 @@ export type BitgetIntentExecutionReconciliationRuntimeResult = Readonly<{
 export type BitgetIntentExecutionCancelRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord; observation: ExecutionCancelObservation; orderReference: BitgetExecutionOrderReference;
 }>;
+
+const BITGET_RECOVERY_NOT_FOUND_SETTLE_MS = 60_000;
 
 export class BitgetIntentExecutionRuntime {
   constructor(
@@ -190,7 +193,12 @@ export class BitgetIntentExecutionRuntime {
 
   private async reconcileRecovery(record: ExecutionRecord, recovery: BitgetExecutionOrderRecoveryReference, service: BitgetIntentExecutionService) {
     let result: BitgetExecutionQueryResult;
-    try { result = await service.query(recovery); } catch { return this.failedRecovery(record); }
+    try {
+      result = await service.query(recovery);
+    } catch (error) {
+      if (settledMissingOrder(error, recovery, this.now())) return this.missingOrderRecovery(record);
+      return this.failedRecovery(record);
+    }
     let reference: BitgetExecutionOrderReference;
     try {
       reference = createBitgetExecutionOrderReference({ ...recovery, orderId: result.orderIdentity.orderId,
@@ -214,6 +222,31 @@ export class BitgetIntentExecutionRuntime {
     await this.recordStore.update(executionRecord);
     return Object.freeze({ executionRecord, observation, orderReference: null,
       statusReason: "Bitget order reference recovery could not be confirmed.", terminalShortCircuit: false });
+  }
+
+  private async missingOrderRecovery(record: ExecutionRecord): Promise<BitgetIntentExecutionReconciliationRuntimeResult> {
+    const observedAt = Math.max(record.updatedAt, this.now());
+    const observation = createExecutionReconciliationObservation({
+      state: "FAILED",
+      filledBaseQuantity: "0",
+      observedAt,
+    });
+    const executionRecord = attachExecutionAttempt(
+      applyExecutionReconciliationObservation(record, observation),
+      {
+        executionAttemptId: record.executionAttemptId ?? record.intentId,
+        status: "FAILED",
+        observedAt,
+      },
+    );
+    await this.recordStore.update(executionRecord);
+    return Object.freeze({
+      executionRecord,
+      observation,
+      orderReference: null,
+      statusReason: "Bitget confirmed that the recovery order does not exist.",
+      terminalShortCircuit: false,
+    });
   }
 
   private async failPreMutationRecordIfSafe(record: ExecutionRecord) {
@@ -263,6 +296,17 @@ export class BitgetIntentExecutionRuntime {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Bitget execution clock is invalid.");
     return value;
   }
+}
+
+function settledMissingOrder(
+  error: unknown,
+  recovery: BitgetExecutionOrderRecoveryReference,
+  observedAt: number,
+) {
+  return error instanceof BitgetProviderError
+    && error.category === "provider_rejected"
+    && error.providerCode === "25204"
+    && observedAt >= recovery.createdAt + BITGET_RECOVERY_NOT_FOUND_SETTLE_MS;
 }
 
 function identifier(value: unknown, name: string) {
