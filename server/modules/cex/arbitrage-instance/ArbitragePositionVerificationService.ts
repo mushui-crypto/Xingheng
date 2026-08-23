@@ -101,11 +101,14 @@ function result(
     || observed.snapshot.instrumentId !== leg.instrumentId) {
     return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "instrument_mapping_unavailable");
   }
+  const actualQuantity = observed.snapshot.positionMode === "HEDGE"
+    ? leg.role === "LONG" ? observed.snapshot.longQuantity : observed.snapshot.shortQuantity
+    : observed.snapshot.quantity;
   return Object.freeze({
     arbitrageId: instance.arbitrageId,
     legId: leg.legId,
     expectedManagedQuantity,
-    actualQuantity: observed.snapshot.quantity,
+    actualQuantity,
     actualSignedNetQuantity: signedCurrentNet(observed.snapshot),
     positionMode: observed.snapshot.positionMode,
     actualLongQuantity: observed.snapshot.longQuantity,

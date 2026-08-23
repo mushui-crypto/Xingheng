@@ -19,6 +19,7 @@ import type { InstrumentCatalogPort } from "../CexCapabilityPorts";
 import { canonicalInstrumentFromId } from "../Instrument";
 import { InstrumentCapability } from "../InstrumentCapability";
 import type { PositionReader } from "../position/PositionReader";
+import type { PositionMode } from "../position/PositionSnapshot";
 import { createPositionSnapshot } from "../position/PositionSnapshot";
 import { OkxAccountReadClient, OkxAccountReadError, type OkxAccountReadSnapshot, type OkxPerpetualPositionSnapshot } from "../../okx/OkxAccountReadClient";
 import { OkxPositionReader } from "../../okx/OkxPositionReader";
@@ -61,7 +62,7 @@ type BybitVerificationClient = VerificationClient & Readonly<{
   readLinearPositionMode?(symbol: string): Promise<import("../../bybit/BybitAccountReadClient").BybitLinearPositionModeRead>;
 }>;
 
-type BitgetVerificationClient = VerificationClient & Readonly<{
+type BitgetVerificationClient = Readonly<{
   readAccountSnapshot(): Promise<BitgetAccountReadSnapshot>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BitgetPerpetualPositionSnapshot>;
   dispose?(): void | Promise<void>;
@@ -70,6 +71,10 @@ type BitgetVerificationClient = VerificationClient & Readonly<{
 type AccountReader = Readonly<{
   readAccount(): Promise<VenueAccountReadSnapshot>;
   dispose(): void | Promise<void>;
+}>;
+
+type PositionReadContextSource = Readonly<{
+  read(): Readonly<{ positionMode: PositionMode }>;
 }>;
 
 export type VerificationInstrumentBinding = Readonly<{
@@ -124,6 +129,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     private accountReader: AccountReader | null,
     private readonly instruments: VerificationInstrumentResolver,
     private readonly positionReader?: PositionReader,
+    private readonly positionReadContext?: PositionReadContextSource,
   ) {}
 
   async readLeg(leg: ArbitrageInstanceLeg): Promise<ArbitrageLegObservedState> {
@@ -160,9 +166,14 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       };
     }
     if (this.positionReader) {
+      const context = this.positionReadContext?.read();
       const position = await this.positionReader.readPosition({
         accountId: leg.accountId,
         instrumentId: leg.instrumentId,
+        ...(context === undefined ? {} : {
+          positionMode: context.positionMode,
+          expectedSide: leg.role,
+        }),
       });
       return { snapshot: position };
     }
@@ -272,19 +283,48 @@ export class BitgetArbitrageLegReadProviderFactory implements ArbitrageLegReadPr
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
+    let accountFact: BitgetAccountReadSnapshot | null = null;
+    const accountClient = {
+      readAccountSnapshot: async () => {
+        accountFact = await client.readAccountSnapshot();
+        return accountFact;
+      },
+      dispose: () => client.dispose?.(),
+    };
+    const positionClient = {
+      readAccountSnapshot: async () => {
+        if (!accountFact) throw new Error("Bitget authoritative account position mode is unavailable.");
+        return accountFact;
+      },
+      readPerpetualPosition: (symbol: string, expectedSide?: "long" | "short") => (
+        client.readPerpetualPosition(symbol, expectedSide)
+      ),
+    };
     return new VenueArbitrageLegReadProvider(
       this.venue,
       client,
-      new BitgetAccountReadProvider(client),
+      new BitgetAccountReadProvider(accountClient),
       this.instruments,
-      new BitgetPositionReader(client, {
+      new BitgetPositionReader(positionClient, {
         resolve: async (instrumentId) => {
           const binding = await this.instruments.resolve(this.venue, instrumentId);
           return binding ? Object.freeze({ symbol: binding.providerSymbol, contractSize: binding.contractSize }) : null;
         },
       }),
+      {
+        read: () => Object.freeze({
+          positionMode: authoritativeBitgetPositionMode(accountFact?.holdMode),
+        }),
+      },
     );
   }
+}
+
+function authoritativeBitgetPositionMode(holdMode: string | null | undefined): PositionMode {
+  const normalized = holdMode?.trim().toLowerCase();
+  if (normalized === "one_way_mode") return "ONE_WAY";
+  if (normalized === "hedge_mode") return "HEDGE";
+  throw new Error("Bitget authoritative account position mode is unavailable.");
 }
 
 export type ArbitrageVerificationClientFactories = Readonly<{
