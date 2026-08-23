@@ -75,7 +75,7 @@ export function AccountReadOverview({ onBinanceChanged = () => undefined }: { on
       const controller = new AbortController();
       controllers.set(venue, controller);
       setStates((current) => ({ ...current, [venue]: { status: "loading" } }));
-      void fetchAccountRead(venue, controller.signal)
+      void fetchAccountRead(venue, { signal: controller.signal })
         .then((snapshot) => {
           if (!controller.signal.aborted) {
             setStates((current) => ({ ...current, [venue]: { status: "success", snapshot } }));

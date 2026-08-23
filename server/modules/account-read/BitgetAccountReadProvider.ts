@@ -10,6 +10,12 @@ import type { AccountReadProvider, AccountReadProviderFactory } from "./AccountR
 
 type BitgetReadOnlyClient = {
   readAccountSnapshot(): Promise<BitgetAccountReadSnapshot>;
+  readPerpetualPosition?(symbol: string, expectedSide?: "long" | "short"): Promise<{
+    symbol: string;
+    side: "long" | "short" | "flat";
+    baseQuantity: string;
+    updatedAt: number | null;
+  }>;
   dispose?(): void | Promise<void>;
 };
 
@@ -18,12 +24,15 @@ export class BitgetAccountReadProvider implements AccountReadProvider {
 
   constructor(private client: BitgetReadOnlyClient | null) {}
 
-  async readAccount() {
+  async readAccount(options: Readonly<{ positionSymbol?: string }> = {}) {
     const client = this.client;
     if (!client) throw new Error("Bitget account read provider has been disposed.");
     const snapshot = await client.readAccountSnapshot();
     const mode = accountMode(snapshot);
     const uidHash = createHash("sha256").update(`bitget:${snapshot.uid}`).digest("hex");
+    const perpetualPositions = options.positionSymbol
+      ? await readPerpetualPositions(client, options.positionSymbol, snapshot.holdMode)
+      : undefined;
     return {
       venue: this.venue,
       accountId: `bitget:${uidHash.slice(0, 16)}`,
@@ -34,6 +43,7 @@ export class BitgetAccountReadProvider implements AccountReadProvider {
       connection: { status: "connected" as const, checkedAt: snapshot.fetchedAt },
       credentialValidation: { status: "validated" as const, checkedAt: snapshot.fetchedAt },
       balances: snapshot.balances.map((balance) => ({ ...balance, accountType: mode.accountType })),
+      ...(perpetualPositions === undefined ? {} : { perpetualPositions }),
       permissions: {
         read: readPermission(snapshot.permType),
         spotTrade: tradePermission(snapshot.permType, snapshot.permissions),
@@ -55,6 +65,26 @@ export class BitgetAccountReadProvider implements AccountReadProvider {
     this.client = null;
     await client?.dispose?.();
   }
+}
+
+async function readPerpetualPositions(
+  client: BitgetReadOnlyClient,
+  symbol: string,
+  holdMode: string | null,
+) {
+  if (!client.readPerpetualPosition) {
+    throw new BitgetAccountReadError("position_read_unavailable", "Bitget perpetual position read is not implemented.");
+  }
+  const [long, short] = await Promise.all([
+    client.readPerpetualPosition(symbol, "long"),
+    client.readPerpetualPosition(symbol, "short"),
+  ]);
+  return {
+    symbol: symbol.toUpperCase(),
+    holdMode,
+    long: { side: long.side, baseQuantity: long.baseQuantity, updatedAt: long.updatedAt },
+    short: { side: short.side, baseQuantity: short.baseQuantity, updatedAt: short.updatedAt },
+  };
 }
 
 function tradePermission(

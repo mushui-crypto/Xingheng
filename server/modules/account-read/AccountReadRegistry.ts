@@ -24,7 +24,7 @@ export class AccountReadRegistry {
     this.factories = new Map(factories.map((factory) => [factory.venue, factory]));
   }
 
-  async read(userId: string, venue: ExchangeVenue) {
+  async read(userId: string, venue: ExchangeVenue, options: Readonly<{ positionSymbol?: string }> = {}) {
     const normalizedUserId = userId.trim();
     if (!normalizedUserId) {
       throw new AccountReadRegistryError("authentication_required", "User authentication is required.");
@@ -40,7 +40,7 @@ export class AccountReadRegistry {
     const provider = factory.create(secret);
     let snapshot: VenueAccountReadSnapshot;
     try {
-      snapshot = await provider.readAccount();
+      snapshot = await provider.readAccount(options);
     } finally {
       await provider.dispose();
     }

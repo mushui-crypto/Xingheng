@@ -17,6 +17,19 @@ export type AccountReadBalance = VenueAccountReadBalance & {
 
 export type AccountReadCapabilityStatus = "ENABLED" | "DISABLED" | "UNKNOWN";
 
+export type AccountReadPerpetualPosition = {
+  side: "long" | "short" | "flat";
+  baseQuantity: string;
+  updatedAt: number | null;
+};
+
+export type AccountReadPerpetualPositions = {
+  symbol: string;
+  holdMode: string | null;
+  long: AccountReadPerpetualPosition;
+  short: AccountReadPerpetualPosition;
+};
+
 export type VenueAccountReadSnapshot = {
   venue: ExchangeVenue;
   accountId: string;
@@ -33,6 +46,7 @@ export type VenueAccountReadSnapshot = {
     checkedAt: number;
   };
   balances: VenueAccountReadBalance[];
+  perpetualPositions?: AccountReadPerpetualPositions;
   permissions: {
     read: AccountReadCapabilityStatus;
     spotTrade: AccountReadCapabilityStatus;

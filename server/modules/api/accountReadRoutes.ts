@@ -23,12 +23,23 @@ export function registerAccountReadRoutes(app: express.Express, registry: Accoun
   app.get("/api/account-read/:venue", async (request, response) => {
     response.setHeader("Cache-Control", "no-store");
     try {
-      response.json(await registry.read(userId(request), venue(request.params.venue)));
+      response.json(await registry.read(userId(request), venue(request.params.venue), {
+        positionSymbol: positionSymbol(request.query.positionSymbol),
+      }));
     } catch (error) {
       const result = errorResponse(error);
       response.status(result.status).json({ category: result.category, message: result.message });
     }
   });
+}
+
+function positionSymbol(value: unknown) {
+  const normalized = Array.isArray(value) ? value[0] : value;
+  if (normalized === undefined) return undefined;
+  if (typeof normalized !== "string" || !/^[A-Z0-9]{2,20}$/u.test(normalized.trim().toUpperCase())) {
+    throw new AccountReadRegistryError("account_read_position_symbol_invalid", "Position symbol is invalid.");
+  }
+  return normalized.trim().toUpperCase();
 }
 
 function userId(request: express.Request) {

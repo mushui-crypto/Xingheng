@@ -14,6 +14,19 @@ export type AccountReadBalance = {
   valuationStatus: "VALUED" | "UNAVAILABLE";
 };
 
+export type AccountReadPerpetualPosition = {
+  side: "long" | "short" | "flat";
+  baseQuantity: string;
+  updatedAt: number | null;
+};
+
+export type AccountReadPerpetualPositions = {
+  symbol: string;
+  holdMode: string | null;
+  long: AccountReadPerpetualPosition;
+  short: AccountReadPerpetualPosition;
+};
+
 export type AccountReadSnapshot = {
   venue: ExchangeVenue;
   accountId: string;
@@ -23,6 +36,7 @@ export type AccountReadSnapshot = {
   connection: { status: "connected"; checkedAt: number };
   credentialValidation: { status: "validated"; checkedAt: number };
   balances: AccountReadBalance[];
+  perpetualPositions?: AccountReadPerpetualPositions;
   permissions: {
     read: AccountReadPermissionStatus;
     spotTrade: AccountReadPermissionStatus;
@@ -43,14 +57,20 @@ export class AccountReadRequestError extends Error {
   }
 }
 
-export async function fetchAccountRead(venue: ExchangeVenue, signal?: AbortSignal) {
+export async function fetchAccountRead(
+  venue: ExchangeVenue,
+  options: Readonly<{ positionSymbol?: string; signal?: AbortSignal }> = {},
+) {
   try {
+    const query = options.positionSymbol
+      ? `?positionSymbol=${encodeURIComponent(options.positionSymbol)}`
+      : "";
     const payload = await requestJson<unknown>(
-      `/api/account-read/${venue}`,
+      `/api/account-read/${venue}${query}`,
       "账户读取暂时不可用。",
       {
         userAuthFailure: true,
-        init: { cache: "no-store", headers: { Accept: "application/json" }, signal },
+        init: { cache: "no-store", headers: { Accept: "application/json" }, signal: options.signal },
       },
     );
     return requireAccountReadSnapshot(payload, venue);
@@ -87,6 +107,9 @@ export function requireAccountReadSnapshot(payload: unknown, venue: ExchangeVenu
   const permissions = record(value.permissions);
   const balances = Array.isArray(value.balances) ? value.balances.map(accountBalance) : null;
   const accountTypes = Array.isArray(value.accountTypes) ? value.accountTypes.filter(isAccountType) : null;
+  const perpetualPositions = value.perpetualPositions === undefined
+    ? undefined
+    : accountPerpetualPositions(value.perpetualPositions);
   if (!connection || connection.status !== "connected" || !credentialValidation
     || credentialValidation.status !== "validated" || !permissions || !balances || !accountTypes) {
     throw invalidResponse();
@@ -100,6 +123,7 @@ export function requireAccountReadSnapshot(payload: unknown, venue: ExchangeVenu
     connection: { status: "connected", checkedAt: finiteNumber(connection.checkedAt) },
     credentialValidation: { status: "validated", checkedAt: finiteNumber(credentialValidation.checkedAt) },
     balances,
+    ...(perpetualPositions === undefined ? {} : { perpetualPositions }),
     permissions: {
       read: permission(permissions.read),
       spotTrade: permission(permissions.spotTrade),
@@ -110,6 +134,29 @@ export function requireAccountReadSnapshot(payload: unknown, venue: ExchangeVenu
     latestSyncAt: finiteNumber(value.latestSyncAt),
     estimatedTotalValueUsdt: nullableFiniteNumber(value.estimatedTotalValueUsdt),
     valuationCoverage: valuationCoverage(value.valuationCoverage),
+  };
+}
+
+function accountPerpetualPositions(value: unknown): AccountReadPerpetualPositions {
+  const positions = record(value);
+  if (!positions) throw invalidResponse();
+  const long = accountPerpetualPosition(positions.long);
+  const short = accountPerpetualPosition(positions.short);
+  return {
+    symbol: requiredString(positions.symbol),
+    holdMode: nullableString(positions.holdMode),
+    long,
+    short,
+  };
+}
+
+function accountPerpetualPosition(value: unknown): AccountReadPerpetualPosition {
+  const position = record(value);
+  if (!position || !["long", "short", "flat"].includes(String(position.side))) throw invalidResponse();
+  return {
+    side: position.side as AccountReadPerpetualPosition["side"],
+    baseQuantity: requiredString(position.baseQuantity),
+    updatedAt: nullableFiniteNumber(position.updatedAt),
   };
 }
 

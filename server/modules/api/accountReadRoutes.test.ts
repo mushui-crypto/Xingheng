@@ -10,15 +10,15 @@ import { OkxAccountReadProviderFactory } from "../account-read/OkxAccountReadPro
 import { registerAccountReadRoutes } from "./accountReadRoutes";
 
 test("account read API binds the venue read to the authenticated user", async () => {
-  const reads: Array<{ userId: string; venue: string }> = [];
+  const reads: Array<{ userId: string; venue: string; positionSymbol?: string }> = [];
   const app = express();
   app.use((request, _response, next) => {
     request.user = { id: "session-user" } as never;
     next();
   });
   registerAccountReadRoutes(app, {
-    read: async (userId: string, venue: string) => {
-      reads.push({ userId, venue });
+    read: async (userId: string, venue: string, options?: { positionSymbol?: string }) => {
+      reads.push({ userId, venue, positionSymbol: options?.positionSymbol });
       return { venue };
     },
   } as never);
@@ -26,8 +26,31 @@ test("account read API binds the venue read to the authenticated user", async ()
   const { response, close } = await request(app, "/api/account-read/binance");
   try {
     assert.equal(response.status, 200);
-    assert.deepEqual(reads, [{ userId: "session-user", venue: "binance" }]);
+    assert.deepEqual(reads, [{ userId: "session-user", venue: "binance", positionSymbol: undefined }]);
     assert.equal(response.headers.get("cache-control"), "no-store");
+  } finally {
+    await close();
+  }
+});
+
+test("account read API forwards any requested position symbol without a venue-specific hardcode", async () => {
+  const reads: Array<{ userId: string; venue: string; positionSymbol?: string }> = [];
+  const app = express();
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerAccountReadRoutes(app, {
+    read: async (userId: string, venue: string, options?: { positionSymbol?: string }) => {
+      reads.push({ userId, venue, positionSymbol: options?.positionSymbol });
+      return { venue };
+    },
+  } as never);
+
+  const { response, close } = await request(app, "/api/account-read/bitget?positionSymbol=BTCUSDT");
+  try {
+    assert.equal(response.status, 200);
+    assert.deepEqual(reads, [{ userId: "session-user", venue: "bitget", positionSymbol: "BTCUSDT" }]);
   } finally {
     await close();
   }

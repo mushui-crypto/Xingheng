@@ -4,7 +4,7 @@ import type { VenueAccountReadSnapshot } from "./AccountReadTypes";
 
 export interface AccountReadProvider {
   readonly venue: ExchangeVenue;
-  readAccount(): Promise<VenueAccountReadSnapshot>;
+  readAccount(options?: Readonly<{ positionSymbol?: string }>): Promise<VenueAccountReadSnapshot>;
   dispose(): void | Promise<void>;
 }
 

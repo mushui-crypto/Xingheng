@@ -45,6 +45,26 @@ test("maps Bitget UTA trade permission and execution eligibility without guessin
   assert.equal(snapshot.accountId.includes("8123456789"), false);
 });
 
+test("reads requested Bitget perpetual long and short positions without hardcoding a symbol", async () => {
+  const calls: Array<[string, string | undefined]> = [];
+  const provider = new BitgetAccountReadProvider({
+    readAccountSnapshot: async () => bitgetSnapshot({ holdMode: "hedge_mode" }),
+    readPerpetualPosition: async (symbol, side) => {
+      calls.push([symbol, side]);
+      return { symbol, side: side!, baseQuantity: side === "long" ? "2" : "3", updatedAt: 1_800_000_000_000 };
+    },
+  });
+
+  const snapshot = await provider.readAccount({ positionSymbol: "BTCUSDT" });
+  assert.deepEqual(snapshot.perpetualPositions, {
+    symbol: "BTCUSDT",
+    holdMode: "hedge_mode",
+    long: { side: "long", baseQuantity: "2", updatedAt: 1_800_000_000_000 },
+    short: { side: "short", baseQuantity: "3", updatedAt: 1_800_000_000_000 },
+  });
+  assert.deepEqual(calls, [["BTCUSDT", "long"], ["BTCUSDT", "short"]]);
+});
+
 test("maps Bitget withdraw permission from the explicit permissions array", async (t) => {
   const cases: Array<[string, string[] | null, "ENABLED" | "DISABLED" | "UNKNOWN"]> = [
     ["included", ["uta_mgt", "withdraw"], "ENABLED"],
