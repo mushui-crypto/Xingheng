@@ -116,7 +116,7 @@ test("fails Bitget execution enablement closed for unsafe permissions and wrong 
   assert.equal(store.findSummary("user-1", "bitget")?.permissions.executionEnabled, false);
 });
 
-test("rebinds a legacy Bitget credential to Provider identity without enabling execution", async () => {
+test("rebinds a legacy Bitget credential and enables execution when fresh readiness passes", async () => {
   const store = new MemoryCredentialStore();
   await store.save({
     userId: "user-1", venue: "bitget", accountId: "bitget:credential-only:0123456789abcdef0123",
@@ -129,8 +129,26 @@ test("rebinds a legacy Bitget credential to Provider identity without enabling e
   const rebound = await service.rebindBitget("user-1");
   assert.equal(rebound.accountId, "bitget:1234567890abcdef");
   assert.equal(rebound.permissions?.providerVerified, true);
-  assert.equal(rebound.permissions?.executionEnabled, false);
+  assert.equal(rebound.permissions?.executionEnabled, true);
+  assert.deepEqual(rebound.readinessBlockers, []);
   assert.equal(store.replacedItems[0]?.expectedAccountId, "bitget:credential-only:0123456789abcdef0123");
+});
+
+test("keeps legacy Bitget execution disabled and reports readiness blockers", async () => {
+  const store = new MemoryCredentialStore();
+  await store.save({
+    userId: "user-1", venue: "bitget", accountId: "bitget:credential-only:0123456789abcdef0123",
+    accountFingerprint: "BITGET-LEGACY", apiKey: "bitget-key", apiSecret: "bitget-secret",
+    passphrase: "bitget-pass", permissions: { providerVerified: false, executionEnabled: false },
+  });
+  const service = new UserExchangeCredentialService(store as never, {
+    bitgetClientFactory: () => ({
+      validateAccess: async () => bitgetAccess({ positionModeSupported: false, executionEnabled: false }),
+    }),
+  });
+  const rebound = await service.rebindBitget("user-1");
+  assert.equal(rebound.permissions?.executionEnabled, false);
+  assert.deepEqual(rebound.readinessBlockers, ["positionModeSupported=false"]);
 });
 
 test("enables Bybit execution only after explicit confirmation and Provider revalidation", async () => {

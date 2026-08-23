@@ -7,6 +7,7 @@ import {
   BitgetAccountReadClient,
   type BitgetAccountAccess,
   type BitgetAccountReadCredentials,
+  type BitgetPermissions,
 } from "../bitget/BitgetAccountReadClient";
 import { OkxClient } from "../okx/OkxClient";
 import type { OkxAccountAccess, OkxCredentials } from "../okx/OkxTypes";
@@ -323,6 +324,7 @@ export class UserExchangeCredentialService {
         "Bitget Provider identity does not match the stored credential identity.",
       );
     }
+    const readinessBlockers = bitgetExecutionReadinessBlockers(access.permissions);
     const summary = await this.store.replace({
       userId,
       venue,
@@ -332,13 +334,11 @@ export class UserExchangeCredentialService {
       ...credentials,
       permissions: {
         ...access.permissions,
-        executionEnabled: legacy
-          ? false
-          : existing.permissions.executionEnabled === true && access.permissions.executionEnabled,
+        executionEnabled: readinessBlockers.length === 0,
       },
       verifiedAt: Date.now(),
     });
-    return status(venue, summary);
+    return { ...status(venue, summary), readinessBlockers };
   }
 
   async rebindBybit(userIdInput: string) {
@@ -718,6 +718,19 @@ function assertBitgetExecutionPermissions(access: BitgetAccountAccess) {
       "Bitget credential must be Provider-verified, allow read and UTA trading, deny withdrawals, use an IP whitelist, use a supported UTA account mode, and use one-way position mode before execution can be enabled.",
     );
   }
+}
+
+function bitgetExecutionReadinessBlockers(permissions: BitgetPermissions) {
+  const blockers: string[] = [];
+  if (!permissions.providerVerified) blockers.push("providerVerified=false");
+  if (!permissions.read) blockers.push("read=false");
+  if (!permissions.spotTrade) blockers.push("spotTrade=false");
+  if (!permissions.contractTrade) blockers.push("contractTrade=false");
+  if (permissions.withdraw) blockers.push("withdraw=true");
+  if (!permissions.ipRestricted) blockers.push("ipRestricted=false");
+  if (!permissions.accountLevelSupported) blockers.push("accountLevelSupported=false");
+  if (!permissions.positionModeSupported) blockers.push("positionModeSupported=false");
+  return blockers;
 }
 
 function isLegacyOkxIdentity(accountId: string) {
