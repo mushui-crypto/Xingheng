@@ -11,6 +11,9 @@ export type ExecutionRecord = Readonly<{
   instrumentId: string;
   status: ExecutionStatus;
   remoteOrderId?: string;
+  failureCategory?: string;
+  failureCode?: string;
+  failureMessage?: string;
   createdAt: number;
   updatedAt: number;
 }>;
@@ -27,6 +30,9 @@ export function createExecutionRecord(input: unknown): ExecutionRecord {
     "instrumentId",
     "status",
     "remoteOrderId",
+    "failureCategory",
+    "failureCode",
+    "failureMessage",
     "createdAt",
     "updatedAt",
   ], "ExecutionRecord");
@@ -44,6 +50,9 @@ export function createExecutionRecord(input: unknown): ExecutionRecord {
     instrumentId: instrumentId(value.instrumentId),
     status: status(value.status),
     ...(value.remoteOrderId === undefined ? {} : { remoteOrderId: identifier(value.remoteOrderId, "remoteOrderId") }),
+    ...(value.failureCategory === undefined ? {} : { failureCategory: identifier(value.failureCategory, "failureCategory") }),
+    ...(value.failureCode === undefined ? {} : { failureCode: identifier(value.failureCode, "failureCode") }),
+    ...(value.failureMessage === undefined ? {} : { failureMessage: boundedMessage(value.failureMessage, "failureMessage") }),
     createdAt,
     updatedAt,
   });
@@ -167,4 +176,9 @@ function timestamp(value: unknown, name: string) {
     throw new Error(`${name} must be a non-negative integer timestamp.`);
   }
   return value;
+}
+
+function boundedMessage(value: unknown, name: string) {
+  if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error(`${name} is invalid.`);
+  return value.trim();
 }

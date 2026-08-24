@@ -124,7 +124,12 @@ export class BitgetIntentExecutionRuntime {
           });
         }
       } else {
-        executionRecord = { ...initial, status: execution.executionState.status, updatedAt: execution.executionState.updatedAt };
+        executionRecord = {
+          ...initial,
+          status: execution.executionState.status,
+          updatedAt: execution.executionState.updatedAt,
+          ...(execution.step.status === "CALL_FAILED" ? diagnosticFromError(execution.step.error) : {}),
+        };
       }
       await this.recordStore.update(executionRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
@@ -296,6 +301,17 @@ export class BitgetIntentExecutionRuntime {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Bitget execution clock is invalid.");
     return value;
   }
+}
+
+function diagnosticFromError(error: unknown) {
+  if (error instanceof BitgetProviderError) {
+    return {
+      failureCategory: error.category,
+      ...(error.providerCode === null ? {} : { failureCode: error.providerCode }),
+      failureMessage: error.message,
+    };
+  }
+  return { failureCategory: "execution_call_failed", failureMessage: error instanceof Error ? error.message : "Bitget execution call failed." };
 }
 
 function settledMissingOrder(

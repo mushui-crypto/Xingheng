@@ -26,6 +26,9 @@ type ExecutionRecordRow = Readonly<{
   instrumentId: string;
   state: string;
   remoteOrderId: string | null;
+  failureCategory: string | null;
+  failureCode: string | null;
+  failureMessage: string | null;
   createdAt: number;
   updatedAt: number;
 }>;
@@ -47,8 +50,8 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
     const normalized = createExecutionRecord(record);
     this.db.prepare(`INSERT INTO execution_records (
       executionId, userId, venue, accountId, intentId, executionAttemptId,
-      instrumentId, state, remoteOrderId, createdAt, updatedAt
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      instrumentId, state, remoteOrderId, failureCategory, failureCode, failureMessage, createdAt, updatedAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
       normalized.executionId,
       normalized.userId,
       normalized.venue,
@@ -58,6 +61,9 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
       normalized.instrumentId,
       normalized.status,
       normalized.remoteOrderId ?? null,
+      normalized.failureCategory ?? null,
+      normalized.failureCode ?? null,
+      normalized.failureMessage ?? null,
       normalized.createdAt,
       normalized.updatedAt,
     );
@@ -73,11 +79,14 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
     }
 
     const result = this.db.prepare(`UPDATE execution_records
-      SET executionAttemptId = ?, state = ?, remoteOrderId = ?, updatedAt = ?
+      SET executionAttemptId = ?, state = ?, remoteOrderId = ?, failureCategory = ?, failureCode = ?, failureMessage = ?, updatedAt = ?
       WHERE userId = ? AND executionId = ? AND updatedAt = ?`).run(
       normalized.executionAttemptId ?? null,
       normalized.status,
       normalized.remoteOrderId ?? null,
+      normalized.failureCategory ?? null,
+      normalized.failureCode ?? null,
+      normalized.failureMessage ?? null,
       normalized.updatedAt,
       normalized.userId,
       normalized.executionId,
@@ -103,7 +112,7 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
   findByIntentId(intentId: string): readonly ExecutionRecord[] {
     const rows = this.db.prepare(`SELECT
       executionId, userId, venue, accountId, intentId, executionAttemptId,
-      instrumentId, state, remoteOrderId, createdAt, updatedAt
+      instrumentId, state, remoteOrderId, failureCategory, failureCode, failureMessage, createdAt, updatedAt
       FROM execution_records
       WHERE intentId = ?
       ORDER BY executionId ASC`).all(identifier(intentId, "intentId")) as unknown as ExecutionRecordRow[];
@@ -117,7 +126,7 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
   private findRow(userId: string, executionId: string) {
     return this.db.prepare(`SELECT
       executionId, userId, venue, accountId, intentId, executionAttemptId,
-      instrumentId, state, remoteOrderId, createdAt, updatedAt
+      instrumentId, state, remoteOrderId, failureCategory, failureCode, failureMessage, createdAt, updatedAt
       FROM execution_records
       WHERE userId = ? AND executionId = ?`).get(userId, executionId) as unknown as ExecutionRecordRow | undefined;
   }
@@ -135,9 +144,16 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
         'CREATED', 'SUBMITTED', 'PENDING_CONFIRMATION', 'CONFIRMED', 'FAILED', 'UNKNOWN'
       )),
       remoteOrderId TEXT,
+      failureCategory TEXT,
+      failureCode TEXT,
+      failureMessage TEXT,
       createdAt INTEGER NOT NULL,
       updatedAt INTEGER NOT NULL
     ) STRICT;`);
+    const columns = new Set((this.db.prepare("PRAGMA table_info(execution_records)").all() as Array<{ name: string }>).map((column) => column.name));
+    for (const column of ["failureCategory", "failureCode", "failureMessage"] as const) {
+      if (!columns.has(column)) this.db.exec(`ALTER TABLE execution_records ADD COLUMN ${column} TEXT`);
+    }
   }
 }
 
@@ -152,6 +168,9 @@ function recordFromRow(row: ExecutionRecordRow) {
     instrumentId: row.instrumentId,
     status: row.state,
     ...(row.remoteOrderId === null ? {} : { remoteOrderId: row.remoteOrderId }),
+    ...(row.failureCategory === null ? {} : { failureCategory: row.failureCategory }),
+    ...(row.failureCode === null ? {} : { failureCode: row.failureCode }),
+    ...(row.failureMessage === null ? {} : { failureMessage: row.failureMessage }),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   });
