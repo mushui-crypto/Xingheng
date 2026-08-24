@@ -4,7 +4,9 @@
 
 > 面向新团队成员、新 AI Agent 和新工作区的快速入口。
 >
-> 更新时间：2026-08-18
+> 更新时间：2026-08-24
+
+当前版本的详细交接报告见 [`docs/reports/2026-08/CURRENT_VERSION_HANDOFF.md`](./docs/reports/2026-08/CURRENT_VERSION_HANDOFF.md)。
 
 本文件提供项目入口和当前状态摘要，不替代需求、架构、变更日志或历史归档。发生冲突时，以用户最新明确要求以及更高优先级文档为准。
 
@@ -44,8 +46,8 @@
 
 # 3. 当前阶段
 
-当前处于 Binance 与 OKX 正式执行能力均已接入统一主链、OKX DOGE Spot + Perpetual Test C
-真实资金闭环完成、生产重新 fail-closed 的阶段。
+当前处于四个 venue Formal Runtime 均已接入统一主链、Binance/OKX/Bitget 已有真实资金闭环证据、Bybit
+尚未完成生产闭环验收的阶段。当前生产四 venue gate 持久开启，任何真实 mutation 都必须按全局生产风险处理。
 
 当前优先级：
 
@@ -66,11 +68,13 @@ Binance DOGEUSDT 与 OKX DOGE Spot LONG + Perpetual SHORT 均已通过 productio
 
 - 入口：`https://app.stellaxtrade.com`
 - Compose project：`xingheng`
-- 最后已知 production revision：`2bcea91e4e57096d34b63ef0098cf2811e56c547`。
+- 最后已知 production revision：`1281472`。
 - 当前主线以本交接提交后的 `main` 为准；主线新增的旧 Manual 清理、Funding 平行模型、套利导航和
   文档尚未部署，不能据此改变 production 事实。
-- 当前安全开关：`OKX_LIVE_TRADING_ENABLED=false`、`OKX_KILL_SWITCH=true`、
-  `LIVE_TRADING_ENABLED=false`、`BINANCE_KILL_SWITCH=true`。
+- 当前生产 gate：`LIVE_TRADING_ENABLED=true`、`BINANCE_KILL_SWITCH=false`、
+  `OKX_LIVE_TRADING_ENABLED=true`、`OKX_KILL_SWITCH=false`、
+  `BYBIT_LIVE_TRADING_ENABLED=true`、`BYBIT_KILL_SWITCH=false`、
+  `BITGET_LIVE_TRADING_ENABLED=true`、`BITGET_KILL_SWITCH=false`。
 - 当前只保留这一套部署环境；开始发布前仍必须重新核对 fixed revision、数据库备份和运行健康。
 - 当前只保留 `/Users/moss/Documents/StellaX` 一个代码工作区；仓库同步不会自动触发 production 部署。
 - 策略邮件通知关闭；登录、安全和账户类邮件路径不受影响。
@@ -115,8 +119,9 @@ Binance DOGEUSDT 与 OKX DOGE Spot LONG + Perpetual SHORT 均已通过 productio
   四个唯一 Provider 订单均 `CONFIRMED`，最终 Perp=`FLAT`、active orders=`0`。
 - Position Verification foundation 已通过 `ACCEPTED` checkpoint：Binance/OKX perpetual reader 统一输出
   canonical `PositionSnapshot`，再由通用 verifier 进入套利验证服务。
-- Bybit、Bitget 尚无正式 mutation 能力；GET-only Account Read 通过不代表可执行。
-- 生产执行开关和急停已恢复 fail-closed；新的真实资金窗口当前未授权。
+- Bybit、Bitget 已接入 Formal Runtime 与 mutation safety/readiness 代码；Bitget 已完成 DOGE Spot/Perp
+  真实闭环，Bybit 尚无生产闭环验收。GET-only Account Read 通过不代表真实闭环已验收。
+- 当前四 venue gate 持久开启，必须在每轮真实资金自测前执行 fresh readiness、identity、仓位与数量规则核对。
 
 ## 策略 Paper
 
