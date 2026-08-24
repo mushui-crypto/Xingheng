@@ -307,7 +307,7 @@ test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", 
           accountFingerprint: "fingerprint",
           accountMode: "single_asset_one_way",
           fetchedAt: now,
-          balances: [{ asset: "DOGE", accountType: "spot", total: 73.855, available: 73.855, locked: 0 }],
+          balances: [{ asset: "DOGE", accountType: "spot", total: providerSide === "short" ? 73.855 : 0, available: providerSide === "short" ? 73.855 : 0, locked: 0 }],
           permissions: { read: true, spotTrade: true, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
         }),
         readPerpetualPosition: async (symbol) => {
@@ -327,7 +327,7 @@ test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", 
   assert.deepEqual(result?.legs.map(({ verificationStatus, actualQuantity, availableQuantity, reason }) => ({
     verificationStatus, actualQuantity, availableQuantity, reason,
   })), [
-    { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: "73.855", reason: null },
+    { verificationStatus: "MATCHED", actualQuantity: "73.855", availableQuantity: "73.855", reason: null },
     { verificationStatus: "MATCHED", actualQuantity: "73", availableQuantity: null, reason: null },
   ]);
 

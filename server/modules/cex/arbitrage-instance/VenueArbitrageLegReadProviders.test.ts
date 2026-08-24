@@ -38,7 +38,7 @@ test("perpetual provider preserves direction and converts OKX contracts to base 
   });
 });
 
-test("spot provider keeps instance quantity authoritative and uses account balance only for availability", async () => {
+test("spot provider uses the provider-reported total balance as the authoritative quantity", async () => {
   let positionReads = 0;
   const provider = new VenueArbitrageLegReadProvider(
     "bybit",
@@ -64,15 +64,32 @@ test("spot provider keeps instance quantity authoritative and uses account balan
       instrumentId: "XAUT-USDT-SPOT",
       positionMode: "ONE_WAY",
       side: "LONG",
-      quantity: "1",
-      signedNetQuantity: "1",
-      longQuantity: "1",
+      quantity: "0.5",
+      signedNetQuantity: "0.5",
+      longQuantity: "0.5",
       shortQuantity: "0",
       fetchedAt: 1_800_000_000_000,
     },
     availableQuantity: "0.4",
   });
   assert.equal(positionReads, 0);
+});
+
+test("spot provider reports FLAT when the provider balance is zero instead of echoing managed quantity", async () => {
+  const provider = new VenueArbitrageLegReadProvider(
+    "binance",
+    { readAccountSnapshot: async () => ({}), readPerpetualPosition: async () => { throw new Error("not expected"); } },
+    accountReader("binance:account-a", []),
+    { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
+  );
+
+  const result = await provider.readLeg(leg({
+    venue: "binance", role: "LONG", instrumentId: "XAUT-USDT-SPOT", plannedQuantity: "1", confirmedOpenedQuantity: "1",
+  }));
+
+  assert.equal(result.snapshot.quantity, "0");
+  assert.equal(result.snapshot.side, "FLAT");
+  assert.equal(result.availableQuantity, "0");
 });
 
 test("provider rejects mismatched account identity and spot short inference", async () => {

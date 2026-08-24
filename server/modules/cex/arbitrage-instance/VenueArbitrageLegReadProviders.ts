@@ -152,14 +152,16 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       const available = balances.every((balance) => balance.available !== null)
         ? decimalFromNumber(sumNumbers(balances.map((balance) => balance.available!)))
         : null;
-      const managedQuantity = managedCurrentQuantity(leg);
+      const total = balances.length
+        ? decimalFromNumber(sumNumbers(balances.map((balance) => balance.total)))
+        : "0";
       return {
         snapshot: createPositionSnapshot({
           venue: this.venue,
           accountId: leg.accountId,
           instrumentId: leg.instrumentId,
-          side: managedQuantity === "0" ? "FLAT" : "LONG",
-          quantity: managedQuantity,
+          side: total === "0" ? "FLAT" : "LONG",
+          quantity: total,
           fetchedAt: account.latestSyncAt,
         }),
         availableQuantity: balances.length ? available : "0",
