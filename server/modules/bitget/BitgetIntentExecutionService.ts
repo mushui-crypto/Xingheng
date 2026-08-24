@@ -201,7 +201,12 @@ export class BitgetIntentExecutionService {
       side: intent.side,
       qty: bitgetBaseQuantityToProvider(intent.quantity.quantity, rules),
       clientOid: bitgetClientOrderIdFor(intent),
-      ...(category === "USDT-FUTURES" ? { reduceOnly: intent.orderConstraints.reduceOnly ? "yes" as const : "no" as const } : {}),
+      // Bitget HEDGE orders use posSide as the bucket selector; the Provider
+      // rejects reduceOnly together with posSide. Local close validation still
+      // enforces the managed HEDGE bucket ceiling before this request.
+      ...(category === "USDT-FUTURES"
+        ? { reduceOnly: positionMode === "HEDGE" ? "no" as const : intent.orderConstraints.reduceOnly ? "yes" as const : "no" as const }
+        : {}),
       ...(positionMode === "HEDGE" ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const } : {}),
       positionMode,
       positionDirection: intent.positionDirection,

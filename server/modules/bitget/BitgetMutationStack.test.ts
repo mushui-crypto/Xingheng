@@ -154,6 +154,16 @@ test("Bitget ACK is not confirmed; query preserves partial and canceled-with-fil
   assert.equal(queried.observation.state, "UNKNOWN");
 });
 
+test("Bitget HEDGE close sends posSide without the rejected reduceOnly combination", async () => {
+  const provider = new FakeBitgetService();
+  provider.readPositionMode = async () => "HEDGE";
+  const service = new BitgetIntentExecutionService(provider, serviceOptions());
+  await new BitgetIntentExecutionCapability(service).execute(executionIntent({ instrumentId: "DOGE-USDT-PERP", side: "buy", reduceOnly: true }));
+  const request = provider.placeRequests[0]!;
+  assert.equal(request.posSide, "long");
+  assert.equal(request.reduceOnly, "no");
+});
+
 test("Bitget gates, identity, one-way mode, and recovery anchor fail closed before mutation while remote uncertainty remains UNKNOWN", async (t) => {
   for (const scenario of ["live", "kill", "identity", "validator", "position", "anchor"] as const) {
     await t.test(scenario, async () => {
@@ -250,6 +260,7 @@ class FakeBitgetService {
   identityValidations = 0;
   positionModeReads = 0;
   oneWay = true;
+  readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
   orderStatus: BitgetProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
   placeFailure?: Error;
