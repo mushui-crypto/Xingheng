@@ -38,6 +38,31 @@ test("kill switch blocks OKX placeOrder before fake provider mutation", async ()
   assert.equal(client.placeCalls, 0);
 });
 
+test("halted OKX allows only an internally classified DECREASE placeOrder", async () => {
+  const client = new FakeClient();
+  const guard = new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true });
+  const closing = new OkxIntentExecutionService(client, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
+    mutationSafetyGuard: guard,
+    mutationEffect: "DECREASE",
+  });
+  await closing.execute(createExecutionIntent({
+    ...intent(),
+    intentId: "intent-okx-close-halted",
+    side: "sell",
+    orderConstraints: { reduceOnly: true },
+  }));
+  assert.equal(client.placeCalls, 1);
+
+  const ordinary = new OkxIntentExecutionService(new FakeClient(), {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
+    mutationSafetyGuard: guard,
+  });
+  await assert.rejects(() => ordinary.execute(intent()), ExecutionMutationSafetyError);
+});
+
 test("provider identity hook blocks OKX placeOrder before fake provider mutation", async () => {
   const client = new FakeClient();
   const service = new OkxIntentExecutionService(client, {
@@ -183,7 +208,7 @@ test("changing OKX switches does not change the Binance safety state", async () 
   }
 });
 
-test("OKX cancelOrder is blocked and allowed by the same independent OKX switches", async () => {
+test("OKX known-order cancel remains allowed while halted and still validates identity", async () => {
   const executionIntent = intent();
   const lookup = {
     instrumentId: "DOGE-USDT-PERP",
@@ -204,9 +229,8 @@ test("OKX cancelOrder is blocked and allowed by the same independent OKX switche
     OKX_KILL_SWITCH: "true",
   });
 
-  await assert.rejects(() => blocked.cancel(lookup, context), (error: unknown) =>
-    error instanceof ExecutionMutationSafetyError && error.category === "kill_switch_active");
-  assert.equal(blockedClient.cancelCalls, 0);
+  await blocked.cancel(lookup, context);
+  assert.equal(blockedClient.cancelCalls, 1);
 
   const allowedClient = new FakeClient();
   const allowed = serviceWithEnvironment(allowedClient, {
@@ -217,6 +241,20 @@ test("OKX cancelOrder is blocked and allowed by the same independent OKX switche
   });
   await allowed.cancel(lookup, context);
   assert.equal(allowedClient.cancelCalls, 1);
+
+  const invalidClient = new FakeClient();
+  const invalid = new OkxIntentExecutionService(invalidClient, {
+    clock: () => now,
+    quantityRulesSource: okxTestQuantityRulesSource(now),
+    mutationSafetyGuard: new ExecutionMutationSafetyGuard({
+      liveTradingEnabled: false,
+      killSwitchActive: true,
+      validateProviderIdentity: () => { throw new Error("wrong account"); },
+    }),
+  });
+  await assert.rejects(() => invalid.cancel(lookup, context), (error: unknown) =>
+    error instanceof ExecutionMutationSafetyError && error.category === "provider_identity_invalid");
+  assert.equal(invalidClient.cancelCalls, 0);
 });
 
 class FakeClient {

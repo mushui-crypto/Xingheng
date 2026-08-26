@@ -218,6 +218,7 @@ export const userAuthenticatedApiPrefixes = [
   "/api/arbitrage",
   "/api/arbitrage-instances",
   "/api/arbitrage-execution",
+  "/api/arbitrage-recovery",
   "/api/funding-arbitrage",
   "/api/account-read",
   "/api/binance",

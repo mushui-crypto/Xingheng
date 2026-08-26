@@ -198,17 +198,20 @@ function closeService(shortQuantity: string, calls: ExecutionIntent[]) {
     shortQuantity,
     reads: [],
   });
+  const execute = async (intent: ExecutionIntent) => {
+    calls.push(intent);
+    throw new Error("stop before Provider mutation");
+  };
   const runtime = {
-    execute: async (intent: ExecutionIntent) => {
-      calls.push(intent);
-      throw new Error("stop before Provider mutation");
-    },
+    execute,
+    executeManagedClose: execute,
     reconcile: async () => { throw new Error("not used"); },
     cancel: async () => { throw new Error("not used"); },
   };
   const service = new ArbitrageExecutionCloseService(
     {
       get: (requestedUserId, arbitrageId) => requestedUserId === userId && arbitrageId === instance.arbitrageId ? instance : null,
+      readCommandReplay: () => null,
       claimExecutionReference: () => { claims.count += 1; return instance; },
       linkExecutionRecord: () => instance,
       applyExecutionResult: () => instance,

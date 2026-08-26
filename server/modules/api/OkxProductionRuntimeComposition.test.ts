@@ -10,7 +10,6 @@ import {
 } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import {
-  ExecutionMutationSafetyError,
   ExecutionMutationSafetyGuard,
   executionMutationSafetyConfigFromEnvironment,
 } from "../cex/ExecutionMutationSafetyGuard";
@@ -88,7 +87,7 @@ test("production-equivalent construction registers Binance and OKX without Provi
   }
 });
 
-test("default OKX production safety state blocks place and cancel mutations", async () => {
+test("default OKX production safety blocks place but allows a known-order cancel after identity validation", async () => {
   const provider = new FakeOkxProvider(identity(accountId));
   const credentials = new CredentialFixture("enabled");
   const records = new MemoryExecutionRecordStore([cancelRecord()]);
@@ -109,15 +108,13 @@ test("default OKX production safety state blocks place and cancel mutations", as
   ));
 
   const placed = await runtime.execute(intent());
-  await assert.rejects(
-    () => runtime.cancel("user-a", "execution-okx-default-cancel"),
-    (error: unknown) => error instanceof ExecutionMutationSafetyError,
-  );
+  const cancelled = await runtime.cancel("user-a", "execution-okx-default-cancel");
 
   assert.equal(placed.executionRecord.status, "FAILED");
-  assert.equal(provider.identityReads, 0);
+  assert.equal(cancelled.executionRecord.status, "PENDING_CONFIRMATION");
+  assert.equal(provider.identityReads, 1);
   assert.equal(provider.placeMutations, 0);
-  assert.equal(provider.cancelMutations, 0);
+  assert.equal(provider.cancelMutations, 1);
 });
 
 test("OKX production runtime fails closed for missing or disabled credentials", async (context) => {

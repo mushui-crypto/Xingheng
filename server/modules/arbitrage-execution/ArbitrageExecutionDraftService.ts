@@ -7,6 +7,7 @@ import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCre
 import type {
   ArbitrageExecutionDraft,
   ArbitrageExecutionDraftLeg,
+  ArbitrageExecutionMode,
   ArbitrageExecutionDraftStrategyType,
   ArbitrageExecutionDraftVenue,
 } from "./ArbitrageExecutionDraft";
@@ -40,19 +41,20 @@ export class ArbitrageExecutionDraftService {
   async createDraft(authenticatedUserId: string, input: unknown): Promise<ArbitrageExecutionDraft> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = parseDraftRequest(input, false);
-    return this.build(userId, request.opportunityId, request.horizonDays);
+    return this.build(userId, request.opportunityId, request.horizonDays, request.executionMode);
   }
 
   async preview(authenticatedUserId: string, input: unknown): Promise<ArbitrageExecutionDraft> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = parseDraftRequest(input, true);
-    return this.build(userId, request.opportunityId, request.horizonDays, request.quantityInput);
+    return this.build(userId, request.opportunityId, request.horizonDays, request.executionMode, request.quantityInput);
   }
 
   private async build(
     userId: string,
     opportunityId: string,
     horizonDays: 90 | 365,
+    executionMode: ArbitrageExecutionMode,
     quantityInput?: ExecutionQuantityInput,
   ) {
     const snapshot = await this.dashboard.getSnapshot(horizonDays, false);
@@ -62,8 +64,8 @@ export class ArbitrageExecutionDraftService {
     }
     const strategyType = strategyTypeFor(opportunity);
     const resolved = await Promise.all([
-      this.resolveLeg(userId, opportunity.longLeg, "LONG", quantityInput),
-      this.resolveLeg(userId, opportunity.shortLeg, "SHORT", quantityInput),
+      this.resolveLeg(userId, opportunity.longLeg, "LONG", executionMode, quantityInput),
+      this.resolveLeg(userId, opportunity.shortLeg, "SHORT", executionMode, quantityInput),
     ]) as [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg];
     const generatedAt = this.now();
     if (!Number.isSafeInteger(generatedAt) || generatedAt < 0) throw new Error("Draft clock is invalid.");
@@ -72,6 +74,7 @@ export class ArbitrageExecutionDraftService {
       sourceIdentity: `arbitrage-dashboard:${opportunity.id}:${snapshot.generatedAt}`,
       sourceSnapshotGeneratedAt: snapshot.generatedAt,
       horizonDays,
+      executionMode,
       strategyType,
       ...(quantityInput === undefined ? {} : { quantityInput }),
       legs: Object.freeze(resolved),
@@ -85,11 +88,12 @@ export class ArbitrageExecutionDraftService {
     userId: string,
     leg: ArbitrageOpportunityLeg,
     role: "LONG" | "SHORT",
+    executionMode: ArbitrageExecutionMode,
     quantityInput?: ExecutionQuantityInput,
   ): Promise<ArbitrageExecutionDraftLeg> {
     const venue = executionVenue(leg.venue);
     const instrumentId = canonicalInstrumentId(leg.asset, leg.quoteAsset, leg.kind);
-    const capability = this.resolveCapability(userId, venue);
+    const capability = this.resolveCapability(userId, venue, leg.kind, executionMode);
     let context: ArbitrageExecutionPlanningContext;
     try {
       context = await this.contexts.load(venue, instrumentId);
@@ -131,13 +135,26 @@ export class ArbitrageExecutionDraftService {
     });
   }
 
-  private resolveCapability(userId: string, venue: ArbitrageExecutionDraftVenue) {
+  private resolveCapability(
+    userId: string,
+    venue: ArbitrageExecutionDraftVenue,
+    marketType: "spot" | "perpetual",
+    executionMode: ArbitrageExecutionMode,
+  ) {
+    let runtime;
     try {
-      this.runtimes.resolve(venue);
+      runtime = this.runtimes.resolve(venue);
     } catch {
       return Object.freeze({
         status: "UNAVAILABLE" as const,
         reasonCode: "EXECUTION_CAPABILITY_NOT_IMPLEMENTED" as const,
+      });
+    }
+    const modeCapability = runtime.openingExecutionCapability?.({ executionMode, marketType });
+    if (modeCapability?.supported === false) {
+      return Object.freeze({
+        status: "UNAVAILABLE" as const,
+        reasonCode: modeCapability.reasonCode,
       });
     }
     const credential = this.credentials.findSummary(userId, venue);
@@ -222,13 +239,19 @@ function executionVenue(venue: ArbitrageVenue): ArbitrageExecutionDraftVenue {
 
 function parseDraftRequest(input: unknown, requireQuantity: boolean) {
   const value = object(input, "execution draft request");
-  const allowed = requireQuantity ? ["opportunityId", "horizonDays", "quantityInput"] : ["opportunityId", "horizonDays"];
+  const allowed = requireQuantity
+    ? ["opportunityId", "horizonDays", "executionMode", "quantityInput"]
+    : ["opportunityId", "horizonDays", "executionMode"];
   exactKeys(value, allowed);
   const horizonDays = value.horizonDays === 90 || value.horizonDays === 365 ? value.horizonDays : null;
   if (!horizonDays) throw invalid("horizonDays 必须为 90 或 365。");
+  if (value.executionMode !== "PRICE_PRIORITY" && value.executionMode !== "EXECUTION_PRIORITY") {
+    throw invalid("executionMode 必须为 PRICE_PRIORITY 或 EXECUTION_PRIORITY。");
+  }
   return Object.freeze({
     opportunityId: identifier(value.opportunityId, "opportunityId"),
     horizonDays,
+    executionMode: value.executionMode,
     ...(requireQuantity ? { quantityInput: quantityInput(value.quantityInput) } : {}),
   });
 }

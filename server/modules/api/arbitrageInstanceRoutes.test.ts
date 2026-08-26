@@ -141,6 +141,82 @@ test("verification route keeps missing instances invisible and provider failures
   }
 });
 
+test("hedge delta route is authenticated, no-store, and keeps missing instances invisible", async () => {
+  const calls: unknown[] = [];
+  const app = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(app, emptyQuery(), undefined, {
+    async derive(userId: string, arbitrageId: string) {
+      calls.push({ userId, arbitrageId });
+      return arbitrageId === "owned" ? {
+        arbitrageId, status: "HOLDING", deltaStatus: "KNOWN", signedDeltaBaseQuantity: "0.2",
+        absoluteDeltaBaseQuantity: "0.2", legContributions: [], currentOpeningDelta: "0.2",
+        openingDeltaStatus: "KNOWN", requiredSecondLegSignedExposure: "-0.2",
+        openingDelta: { status: "KNOWN", signedDeltaBaseQuantity: "0.2", absoluteDeltaBaseQuantity: "0.2", reason: null },
+        activeManagedDelta: { status: "KNOWN", signedDeltaBaseQuantity: "0.2", absoluteDeltaBaseQuantity: "0.2", reason: null },
+        openingWorkflow: { secondLegRequired: true, secondLegExecutionEligible: null, requiredSecondLegSignedExposure: "-0.2" },
+        plannedResidualDelta: "0.1", actualResidualDelta: "0.2", deltaKnown: true,
+        derivedAt: 100, reason: null,
+      } as never : null;
+    },
+  });
+
+  const owned = await request(app, "/api/arbitrage-instances/owned/hedge-delta");
+  const missing = await request(app, "/api/arbitrage-instances/foreign/hedge-delta");
+  try {
+    assert.equal(owned.response.status, 200);
+    assert.equal(owned.response.headers.get("cache-control"), "no-store");
+    const payload = await owned.response.json() as {
+      signedDeltaBaseQuantity: string;
+      openingDelta: { status: string };
+      activeManagedDelta: { status: string };
+      openingWorkflow: { secondLegRequired: boolean };
+    };
+    assert.equal(payload.signedDeltaBaseQuantity, "0.2");
+    assert.equal(payload.openingDelta.status, "KNOWN");
+    assert.equal(payload.activeManagedDelta.status, "KNOWN");
+    assert.equal(payload.openingWorkflow.secondLegRequired, true);
+    assert.equal(missing.response.status, 404);
+    assert.deepEqual(calls, [
+      { userId: "user-a", arbitrageId: "owned" },
+      { userId: "user-a", arbitrageId: "foreign" },
+    ]);
+  } finally {
+    await owned.close();
+    await missing.close();
+  }
+});
+
+test("hedge delta route sanitizes derivation failures", async () => {
+  const app = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(app, emptyQuery(), undefined, {
+    derive: async () => { throw new Error("sensitive provider evidence"); },
+  });
+  const result = await request(app, "/api/arbitrage-instances/arb-1/hedge-delta");
+  try {
+    assert.equal(result.response.status, 503);
+    const payload = await result.response.json() as { category: string; message: string };
+    assert.equal(payload.category, "instance_hedge_delta_unavailable");
+    assert.doesNotMatch(payload.message, /sensitive/u);
+  } finally {
+    await result.close();
+  }
+});
+
+test("hedge delta route rejects missing authentication before derivation", async () => {
+  let calls = 0;
+  const app = express();
+  registerArbitrageInstanceRoutes(app, emptyQuery(), undefined, {
+    derive: async () => { calls += 1; return null; },
+  });
+  const result = await request(app, "/api/arbitrage-instances/arb-1/hedge-delta");
+  try {
+    assert.equal(result.response.status, 401);
+    assert.equal(calls, 0);
+  } finally {
+    await result.close();
+  }
+});
+
 test("routes reject missing authentication and invalid pagination before querying", async () => {
   let calls = 0;
   const app = express();

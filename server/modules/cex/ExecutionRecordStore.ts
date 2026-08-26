@@ -5,7 +5,7 @@ import { createExecutionRecord, type ExecutionRecord } from "./ExecutionRecord";
 
 export interface ExecutionRecordStore {
   create(record: ExecutionRecord): Promise<void> | void;
-  update(record: ExecutionRecord): Promise<void> | void;
+  update(record: ExecutionRecord, expectedPersistedRecord: ExecutionRecord): Promise<void> | void;
   loadForUser(
     userId: string,
     executionId: string,
@@ -69,18 +69,20 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
     );
   }
 
-  update(record: ExecutionRecord) {
+  update(record: ExecutionRecord, expectedPersistedRecord: ExecutionRecord) {
     const normalized = createExecutionRecord(record);
-    const existing = this.findRow(normalized.userId, normalized.executionId);
-    if (!existing) throw new Error("ExecutionRecord was not found for the authenticated user.");
-    assertImmutableIdentity(existing, normalized);
-    if (normalized.updatedAt < existing.updatedAt) {
+    const expected = createExecutionRecord(expectedPersistedRecord);
+    assertSameRecordIdentity(expected, normalized);
+    if (normalized.updatedAt < expected.updatedAt) {
       throw new Error("ExecutionRecord updatedAt cannot move backwards.");
     }
 
     const result = this.db.prepare(`UPDATE execution_records
       SET executionAttemptId = ?, state = ?, remoteOrderId = ?, failureCategory = ?, failureCode = ?, failureMessage = ?, updatedAt = ?
-      WHERE userId = ? AND executionId = ? AND updatedAt = ?`).run(
+      WHERE userId = ? AND executionId = ?
+        AND executionAttemptId IS ? AND state = ? AND remoteOrderId IS ?
+        AND failureCategory IS ? AND failureCode IS ? AND failureMessage IS ?
+        AND createdAt = ? AND updatedAt = ?`).run(
       normalized.executionAttemptId ?? null,
       normalized.status,
       normalized.remoteOrderId ?? null,
@@ -90,10 +92,21 @@ export class SqliteExecutionRecordStore implements ExecutionRecordStore {
       normalized.updatedAt,
       normalized.userId,
       normalized.executionId,
-      existing.updatedAt,
+      expected.executionAttemptId ?? null,
+      expected.status,
+      expected.remoteOrderId ?? null,
+      expected.failureCategory ?? null,
+      expected.failureCode ?? null,
+      expected.failureMessage ?? null,
+      expected.createdAt,
+      expected.updatedAt,
     );
     if (result.changes !== 1) {
-      throw new Error("ExecutionRecord update conflicted with another writer.");
+      const current = this.findRow(normalized.userId, normalized.executionId);
+      if (!current) {
+        throw new Error("ExecutionRecord was not found for the authenticated user.");
+      }
+      throw new ExecutionRecordVersionConflictError(normalized.executionId, recordFromRow(current));
     }
   }
 
@@ -176,15 +189,26 @@ function recordFromRow(row: ExecutionRecordRow) {
   });
 }
 
-function assertImmutableIdentity(row: ExecutionRecordRow, record: ExecutionRecord) {
+function assertSameRecordIdentity(expected: ExecutionRecord, record: ExecutionRecord) {
   if (
-    row.intentId !== record.intentId
-    || row.venue !== record.venue
-    || row.accountId !== record.accountId
-    || row.instrumentId !== record.instrumentId
-    || row.createdAt !== record.createdAt
+    expected.executionId !== record.executionId
+    || expected.intentId !== record.intentId
+    || expected.userId !== record.userId
+    || expected.venue !== record.venue
+    || expected.accountId !== record.accountId
+    || expected.instrumentId !== record.instrumentId
+    || expected.createdAt !== record.createdAt
   ) {
     throw new Error("ExecutionRecord immutable identity cannot be changed.");
+  }
+}
+
+export class ExecutionRecordVersionConflictError extends Error {
+  constructor(
+    readonly executionId: string,
+    readonly currentRecord: ExecutionRecord,
+  ) {
+    super(`ExecutionRecord ${executionId} update is based on a stale persisted record.`);
   }
 }
 

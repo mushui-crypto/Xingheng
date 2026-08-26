@@ -49,6 +49,34 @@ const runtimeOptions = (executionId?: string) => ({
   }),
 });
 
+test("runtime reports its configured opening execution-mode capability without Provider access", () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    new FakeExecutionRecordStore(),
+    new InMemoryOkxExecutionOrderReferenceStore(),
+    runtimeOptions(),
+  );
+
+  assert.equal(runtime.supportsOpeningExecutionMode({
+    executionMode: "EXECUTION_PRIORITY",
+    marketType: "spot",
+  }), true);
+  assert.equal(runtime.supportsOpeningExecutionMode({
+    executionMode: "EXECUTION_PRIORITY",
+    marketType: "perpetual",
+  }), true);
+  assert.equal(runtime.supportsOpeningExecutionMode({
+    executionMode: "PRICE_PRIORITY",
+    marketType: "spot",
+  }), false);
+  assert.equal(runtime.supportsOpeningExecutionMode({
+    executionMode: "PRICE_PRIORITY",
+    marketType: "perpetual",
+  }), false);
+  assert.equal(service.placeRequests.length, 0);
+});
+
 test("runtime submits through the authenticated user's OKX service and saves order identity", async () => {
   const serviceA = new FakeOkxRuntimeService("okx:account-user-a");
   const serviceB = new FakeOkxRuntimeService("okx:account-user-b");
@@ -120,6 +148,30 @@ test("runtime upgrades the recovery anchor from the real OKX place-order respons
   assert.equal(service.placeRequests.length, 1);
   assert.equal(providerMutations, 1);
   assert.equal(providerReads, 0);
+});
+
+test("runtime promotes an OKX HEDGE recovery reference without dropping bucket identity", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  service.readPositionMode = async () => "HEDGE";
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    new FakeExecutionRecordStore(),
+    references,
+    runtimeOptions("execution-okx-hedge-promotion"),
+  );
+
+  const result = await runtime.execute(executionIntent({
+    intentId: "intent-okx-hedge-promotion",
+    positionDirection: "SHORT",
+    side: "sell",
+  }));
+
+  assert.equal(result.executionRecord.status, "PENDING_CONFIRMATION");
+  assert.equal(result.orderReference?.positionMode, "HEDGE");
+  assert.equal(result.orderReference?.positionDirection, "SHORT");
+  assert.equal(result.orderReference?.posSide, "short");
+  assert.equal(await references.loadRecoveryForUser("user-a", "execution-okx-hedge-promotion"), null);
 });
 
 test("runtime selects the OKX Spot capability and persists the normal order reference", async () => {
@@ -389,6 +441,61 @@ test("Spot recovery uses the persisted client-order anchor and never repeats mut
   assert.equal((await references.loadForUser("user-a", record.executionId))?.expectedSide, "buy");
 });
 
+test("OKX HEDGE recovery keeps the recovery anchor when Provider evidence is from another bucket", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  service.orderOverride = {
+    status: "CONFIRMED",
+    rawState: "filled",
+    requestedQuantity: "125",
+    filledQuantity: "125",
+    side: "sell",
+    posSide: "long",
+  };
+  const record = createExecutionRecord({
+    executionId: "execution-okx-hedge-wrong-bucket",
+    intentId: "intent-okx-hedge-wrong-bucket",
+    executionAttemptId: "intent-okx-hedge-wrong-bucket",
+    userId: "user-a",
+    venue: "okx",
+    accountId: "okx:account-user-a",
+    instrumentId: "DOGE-USDT-PERP",
+    status: "UNKNOWN",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const records = new FakeExecutionRecordStore([record]);
+  const references = new InMemoryOkxExecutionOrderReferenceStore();
+  references.createRecovery({
+    executionId: record.executionId,
+    intentId: record.intentId,
+    userId: record.userId,
+    accountId: record.accountId,
+    instrumentId: record.instrumentId,
+    instId: "DOGE-USDT-SWAP",
+    clOrdId: "sxokxhedgewrongevidence0000001",
+    expectedProviderQuantity: "125",
+    expectedSide: "sell",
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+    posSide: "short",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    records,
+    references,
+    { ...runtimeOptions(), clock: () => now + 100, quantityRulesSource: okxTestQuantityRulesSource(now + 100) },
+  );
+
+  const result = await runtime.reconcile("user-a", record.executionId);
+
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.orderReference, null);
+  assert.equal(await references.loadForUser("user-a", record.executionId), null);
+  assert.equal((await references.loadRecoveryForUser("user-a", record.executionId))?.posSide, "short");
+});
+
 test("confirmed reconciliation re-reads the persisted OKX order and restores its fill without mutation", async () => {
   const service = new FakeOkxRuntimeService("okx:account-user-a");
   service.orderState = "filled";
@@ -487,6 +594,7 @@ class FakeOkxRuntimeService {
   orderOverride: Partial<OkxProviderOrder> = {};
   placeOrderDelegate?: (request: OkxPlaceOrderRequest) => Promise<OkxCancelOrderResult>;
   getOrderDelegate?: (request: OkxGetOrderRequest) => Promise<OkxProviderOrder>;
+  readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
 
   constructor(private readonly accountId: string) {}
 
@@ -567,6 +675,7 @@ function key(userId: string, executionId: string) {
 
 function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
   const instrumentId = (overrides.instrumentId as string | undefined) ?? "DOGE-USDT-PERP";
+  const positionDirection = (overrides.positionDirection as "LONG" | "SHORT" | undefined) ?? "LONG";
   const { instrumentId: _ignoredInstrumentId, positionDirection: _ignoredDirection, ...rest } = overrides;
   return createExecutionIntent({
     intentId: "intent-okx-runtime",
@@ -574,7 +683,7 @@ function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
     venue: "okx",
     accountId: "okx:account-user-a",
     instrumentId,
-    ...(instrumentId.endsWith("-PERP") ? { positionDirection: "LONG" as const } : {}),
+    ...(instrumentId.endsWith("-PERP") ? { positionDirection } : {}),
     side: "buy",
     quantity: {
       asset: { symbol: "DOGE", type: "DIGITAL_ASSET" },

@@ -50,6 +50,7 @@ test("production composition routes four user-scoped credentials through venue p
             fetchedAt: now, balances: [],
             permissions: { read: true, spotTrade: false, contractTrade: false, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
           }),
+          readPositionMode: async () => "ONE_WAY" as const,
           readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "long", baseQuantity: "1", updatedAt: now }),
         };
       },
@@ -57,6 +58,7 @@ test("production composition routes four user-scoped credentials through venue p
         clientCredentials.push(`okx:${credential.apiKey}`);
         return {
           readAccountSnapshot: async () => ({ uid: "okx-uid", accountLevel: "3", permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+          readPositionMode: async () => "ONE_WAY" as const,
           readPerpetualPosition: async () => ({ instId: "XAUT-USDT-SWAP", side: "short", contractQuantity: "10", updatedAt: now }),
         };
       },
@@ -64,6 +66,12 @@ test("production composition routes four user-scoped credentials through venue p
         clientCredentials.push(`bybit:${credential.apiKey}`);
         return {
           readAccountSnapshot: async () => ({ uid: "bybit-uid", unifiedMarginStatus: 5, marginMode: "REGULAR_MARGIN", readOnly: null, permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+          readLinearPositionMode: async (symbol) => ({
+            category: "linear" as const,
+            symbol,
+            positionMode: "ONE_WAY" as const,
+            positions: [{ category: "linear" as const, symbol, positionIdx: 0 as const, side: "long" as const, size: "1" }],
+          }),
           readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "long", baseQuantity: "1", updatedAt: now }),
         };
       },
@@ -107,10 +115,12 @@ test("production catalog composition returns UNKNOWN when OKX contract mapping i
     clients: {
       binance: () => ({
         readAccountSnapshot: async () => ({ accountId: "provider", accountFingerprint: "fingerprint", accountMode: "unknown", fetchedAt: now, balances: [], permissions: { read: true, spotTrade: false, contractTrade: false, withdraw: false, ipRestricted: false, spotAccount: false, futuresAccount: false, positionModeSupported: false } }),
+        readPositionMode: async () => "ONE_WAY" as const,
         readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "long", baseQuantity: "1", updatedAt: now }),
       }),
       okx: () => ({
         readAccountSnapshot: async () => ({ uid: "uid", accountLevel: "3", permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+        readPositionMode: async () => "ONE_WAY" as const,
         readPerpetualPosition: async () => { throw new Error("position must not be read without a catalog mapping"); },
       }),
     },
@@ -128,8 +138,8 @@ test("OKX perpetual positions use canonical verification for open, close, quanti
     { name: "SHORT matched", role: "SHORT", closed: false, side: "short", contracts: "730", status: "MATCHED" },
     { name: "LONG matched", role: "LONG", closed: false, side: "long", contracts: "730", status: "MATCHED" },
     { name: "FLAT matched", role: "SHORT", closed: true, side: "flat", contracts: "0", status: "MATCHED" },
-    { name: "existing same-direction net position", role: "SHORT", closed: false, side: "short", contracts: "720", status: "MATCHED" },
-    { name: "existing opposite-direction net position", role: "SHORT", closed: false, side: "long", contracts: "730", status: "MATCHED" },
+    { name: "existing same-direction insufficient net position", role: "SHORT", closed: false, side: "short", contracts: "720", status: "MISMATCH" },
+    { name: "existing opposite-direction net position", role: "SHORT", closed: false, side: "long", contracts: "730", status: "MISMATCH" },
   ] as const;
 
   for (const scenario of cases) {
@@ -193,6 +203,7 @@ test("OKX perpetual positions use canonical verification for open, close, quanti
               balances: [],
               permissions: { read: true, spotTrade: false, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
             }),
+            readPositionMode: async () => "ONE_WAY" as const,
             readPerpetualPosition: async () => ({
               symbol: "DOGEUSDT",
               side: scenario.closed ? "flat" : "long",
@@ -209,6 +220,7 @@ test("OKX perpetual positions use canonical verification for open, close, quanti
               balances: [],
               fetchedAt: now,
             }),
+            readPositionMode: async () => "ONE_WAY" as const,
             readPerpetualPosition: async () => ({
               instId: "DOGE-USDT-SWAP",
               side: scenario.side,
@@ -246,10 +258,12 @@ test("OKX provider errors remain UNKNOWN after reader migration", async () => {
     clients: {
       binance: () => ({
         readAccountSnapshot: async () => ({ accountId: "binance:provider-account", accountFingerprint: "fingerprint", accountMode: "single_asset_one_way", fetchedAt: now, balances: [], permissions: { read: true, spotTrade: false, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true } }),
+        readPositionMode: async () => "ONE_WAY" as const,
         readPerpetualPosition: async () => ({ symbol: "XAUTUSDT", side: "long", baseQuantity: "1", updatedAt: now }),
       }),
       okx: () => ({
         readAccountSnapshot: async () => ({ uid: "okx-uid", accountLevel: "3", permissions: null, boundIps: null, balances: [], fetchedAt: now }),
+        readPositionMode: async () => "ONE_WAY" as const,
         readPerpetualPosition: async () => { throw new Error("provider unavailable"); },
       }),
     },
@@ -310,6 +324,7 @@ test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", 
           balances: [{ asset: "DOGE", accountType: "spot", total: providerSide === "short" ? 73.855 : 0, available: providerSide === "short" ? 73.855 : 0, locked: 0 }],
           permissions: { read: true, spotTrade: true, contractTrade: true, withdraw: false, ipRestricted: true, spotAccount: true, futuresAccount: true, positionModeSupported: true },
         }),
+        readPositionMode: async () => "ONE_WAY" as const,
         readPerpetualPosition: async (symbol) => {
           positionReads += 1;
           assert.equal(symbol, "DOGEUSDT");

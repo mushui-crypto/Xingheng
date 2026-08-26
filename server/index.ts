@@ -8,10 +8,14 @@ import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
+import { registerArbitrageHedgeStartRoutes } from "./modules/api/arbitrageHedgeStartRoutes";
+import { registerArbitrageHedgeWorkflowRoutes } from "./modules/api/arbitrageHedgeWorkflowRoutes";
 import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageExecutionCloseRoutes";
 import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageInstanceExitRoutes } from "./modules/api/arbitrageInstanceExitRoutes";
+import { registerArbitrageManagementReleaseRoutes } from "./modules/api/arbitrageManagementReleaseRoutes";
 import { registerHistoricalUnknownRecoveryRoutes } from "./modules/api/historicalUnknownRecoveryRoutes";
+import { registerArbitrageRecoveryRoutes } from "./modules/api/arbitrageRecoveryRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
@@ -39,9 +43,21 @@ import { ArbitrageDashboardService } from "./modules/arbitrage/ArbitrageDashboar
 import { ArbitrageExecutionDraftService } from "./modules/arbitrage-execution/ArbitrageExecutionDraftService";
 import { DefaultArbitrageExecutionPlanningContextSource } from "./modules/arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { ArbitrageExecutionCommandService } from "./modules/arbitrage-execution/ArbitrageExecutionCommandService";
+import { ArbitrageOpeningSafetyEvaluator } from "./modules/arbitrage-execution/ArbitrageOpeningSafetyEvaluator";
+import { OpeningContinuationSafetyEvaluator } from "./modules/arbitrage-execution/OpeningContinuationSafetyEvaluator";
+import { ProviderMutationSerializer } from "./modules/arbitrage-execution/ProviderMutationSerializer";
+import { ArbitrageStartupRecoveryService } from "./modules/arbitrage-execution/ArbitrageStartupRecoveryService";
+import { LocalNotDispatchedEvidenceEvaluator } from "./modules/arbitrage-execution/LocalNotDispatchedEvidenceEvaluator";
+import { ArbitrageRecoveryAnomalyDetector } from "./modules/arbitrage-execution/ArbitrageRecoveryAnomalyDetector";
+import { ArbitrageRecoveryAuditStore } from "./modules/arbitrage-execution/ArbitrageRecoveryAuditStore";
+import { ArbitrageRecoveryOperatorService } from "./modules/arbitrage-execution/ArbitrageRecoveryOperatorService";
 import { ArbitrageExecutionCloseService } from "./modules/arbitrage-execution/ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCancelService } from "./modules/arbitrage-execution/ArbitrageExecutionCancelService";
 import { ArbitrageInstanceExitService } from "./modules/arbitrage-execution/ArbitrageInstanceExitService";
+import { ArbitrageHedgeStartService } from "./modules/arbitrage-execution/ArbitrageHedgeStartService";
+import { ArbitrageHedgeWorkflowService } from "./modules/arbitrage-execution/ArbitrageHedgeWorkflowService";
+import { ArbitrageManagementReleaseService } from "./modules/arbitrage-execution/ArbitrageManagementReleaseService";
+import { InstanceHedgeDeltaService } from "./modules/arbitrage-execution/InstanceHedgeDeltaService";
 import { HistoricalExecutionEvidenceRegistry } from "./modules/arbitrage-execution/HistoricalExecutionEvidence";
 import { HistoricalUnknownNotDispatchedRecoveryService } from "./modules/arbitrage-execution/HistoricalUnknownNotDispatchedRecoveryService";
 import { BinanceSpotCloseBalanceSource } from "./modules/arbitrage-execution/BinanceSpotCloseBalanceSource";
@@ -297,16 +313,40 @@ const spotOpeningAttributions = {
     new PersistentBitgetExecutionOrderReferenceStore(executionOrderReferenceStore),
   ),
 };
+const providerMutationSerializer = new ProviderMutationSerializer();
 const arbitrageExecutionCommand = new ArbitrageExecutionCommandService(
   arbitrageExecutionDraft,
   arbitrageInstances,
   userExchangeCredentials,
   executionRecordStore,
   formalExecutionRuntimes,
+  new ArbitrageOpeningSafetyEvaluator(arbitragePositionVerification),
   {
     contexts: arbitrageExecutionPlanningContexts,
     spotAttributions: spotOpeningAttributions,
+    continuationSafety: new OpeningContinuationSafetyEvaluator(arbitragePositionVerification),
   },
+  { mutationSerializer: providerMutationSerializer },
+);
+const arbitrageStartupRecovery = new ArbitrageStartupRecoveryService(
+  arbitrageInstances,
+  arbitrageExecutionCommand,
+  undefined,
+  new LocalNotDispatchedEvidenceEvaluator(executionRecordStore),
+);
+const arbitrageRecoveryAnomalyDetector = new ArbitrageRecoveryAnomalyDetector({
+  dbPath: process.env.TRADING_DB_PATH,
+});
+const arbitrageRecoveryAudit = new ArbitrageRecoveryAuditStore({ dbPath: process.env.TRADING_DB_PATH });
+const arbitrageRecoveryOperator = new ArbitrageRecoveryOperatorService(
+  arbitrageInstances,
+  arbitrageRecoveryAnomalyDetector,
+  arbitrageStartupRecovery,
+  executionRecordStore,
+  formalExecutionRuntimes,
+  arbitrageExecutionPlanningContexts,
+  spotOpeningAttributions,
+  arbitrageRecoveryAudit,
 );
 const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   arbitrageInstances,
@@ -320,6 +360,7 @@ const arbitrageExecutionClose = new ArbitrageExecutionCloseService(
   },
   spotOpeningAttributions,
   formalExecutionRuntimes,
+  { mutationSerializer: providerMutationSerializer },
 );
 const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   arbitrageInstances,
@@ -332,6 +373,19 @@ const arbitrageInstanceExit = new ArbitrageInstanceExitService(
   arbitrageExecutionClose,
   arbitrageExecutionCommand,
   arbitragePositionVerification,
+);
+const arbitrageHedgeStart = new ArbitrageHedgeStartService(
+  arbitrageInstances,
+  arbitrageExecutionCommand,
+);
+const arbitrageHedgeWorkflow = new ArbitrageHedgeWorkflowService(arbitrageInstances);
+const arbitrageManagementRelease = new ArbitrageManagementReleaseService(
+  arbitrageInstances,
+  arbitrageExecutionClose,
+);
+const instanceHedgeDelta = new InstanceHedgeDeltaService(
+  arbitrageInstances,
+  spotOpeningAttributions,
 );
 const historicalUnknownRecovery = new HistoricalUnknownNotDispatchedRecoveryService(
   arbitrageInstances,
@@ -350,11 +404,15 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
 registerArbitrageRoutes(app, arbitrageDashboard);
 registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
+registerArbitrageHedgeStartRoutes(app, arbitrageHedgeStart);
+registerArbitrageHedgeWorkflowRoutes(app, arbitrageHedgeWorkflow, arbitrageExecutionCommand);
 registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
 registerArbitrageInstanceExitRoutes(app, arbitrageInstanceExit);
+registerArbitrageManagementReleaseRoutes(app, arbitrageManagementRelease);
 registerHistoricalUnknownRecoveryRoutes(app, historicalUnknownRecovery);
-registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification);
+registerArbitrageRecoveryRoutes(app, arbitrageRecoveryOperator);
+registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification, instanceHedgeDelta);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
 registerAccountReadRoutes(app, accountRead);
@@ -376,8 +434,29 @@ registerAdminTradingRoutes({ app, trading, users, wallet });
 registerUserWalletRoutes(app, wallet);
 registerAdminWalletRoutes(app, wallet);
 
+// Freeze the candidate set before accepting requests. This is the proof boundary
+// that distinguishes a restart-left CLAIMED reference from a live claim whose
+// runtime has not created its ExecutionRecord yet.
+const startupRecoveryCandidates = arbitrageStartupRecovery.discoverCandidates();
 const server = app.listen(port, "0.0.0.0", () => {
   console.log(`[api] listening on http://127.0.0.1:${port}`);
+});
+void arbitrageStartupRecovery.runOnce(startupRecoveryCandidates).then(() => {
+  try {
+    const summary = arbitrageRecoveryAnomalyDetector.scan();
+    console.info("[arbitrage-recovery-anomaly] local scan completed", {
+      classification: summary.classification,
+      historicalAnomalies: summary.historicalAnomalies,
+      manualReview: summary.manualReview,
+      recoverable: summary.recoverable,
+      integrityErrors: summary.integrityErrors,
+      providerMutationCount: 0,
+    });
+  } catch {
+    console.error("[arbitrage-recovery-anomaly] local scan unavailable; server remains online");
+  }
+}).catch(() => {
+  console.error("[arbitrage-startup-recovery] one-shot unavailable; server remains online");
 });
 
 const socketHub = registerSocketHub(server, market, realTradingRealtimeTokens, realTradingUserStreams);

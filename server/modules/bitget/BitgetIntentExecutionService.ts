@@ -4,7 +4,7 @@ import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionQueryObservation, type ExecutionQueryObservation } from "../cex/ExecutionQueryCapability";
 import type { ExecutionStatus } from "../cex/ExecutionState";
-import { ExecutionMutationSafetyGuard, type ExecutionMutationContext, type ExecutionProviderIdentityValidator } from "../cex/ExecutionMutationSafetyGuard";
+import { ExecutionMutationSafetyGuard, type ExecutionMutationContext, type ExecutionMutationEffect, type ExecutionProviderIdentityValidator } from "../cex/ExecutionMutationSafetyGuard";
 import { BitgetInstrumentMappingAdapter, type BitgetInstrumentResolution } from "./BitgetInstrumentMapping";
 import {
   BITGET_QUANTITY_RULES_MAX_AGE_MS,
@@ -43,6 +43,7 @@ export type BitgetIntentExecutionServiceOptions = Readonly<{
   quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
+  mutationEffect?: ExecutionMutationEffect;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
   persistRecoveryReference?: (reference: Readonly<{
     category: "SPOT" | "USDT-FUTURES";
@@ -89,6 +90,9 @@ export type BitgetExecutionOrderLookup = Readonly<{
   clientOid: string;
   expectedProviderQuantity: string;
   expectedSide: BitgetOrderSide;
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
 }>;
 
 export class BitgetIntentExecutionService {
@@ -112,6 +116,7 @@ export class BitgetIntentExecutionService {
       await this.mutationSafetyGuard.assertAllowed({
         venue: "bitget", operation: "placeOrder", userId: intent.userId, accountId: intent.accountId,
         instrumentId: intent.instrumentId, providerInstrumentId: value.symbol,
+        ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, validateProviderIdentity);
       await persistRecoveryReference({
         category: value.category, symbol: value.symbol, clientOid: value.clientOid,
@@ -193,6 +198,11 @@ export class BitgetIntentExecutionService {
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Bitget HEDGE execution requires positionDirection.");
     }
+    if (positionMode === "HEDGE" && intent.orderConstraints.reduceOnly
+      && ((intent.positionDirection === "LONG" && intent.side !== "sell")
+        || (intent.positionDirection === "SHORT" && intent.side !== "buy"))) {
+      throw new Error("Bitget HEDGE close side does not reduce the selected position bucket.");
+    }
     const rules = await loadBitgetQuantityRules(this.options.quantityRulesSource, instrument, () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? BITGET_QUANTITY_RULES_MAX_AGE_MS);
     const base = {
@@ -201,11 +211,10 @@ export class BitgetIntentExecutionService {
       side: intent.side,
       qty: bitgetBaseQuantityToProvider(intent.quantity.quantity, rules),
       clientOid: bitgetClientOrderIdFor(intent),
-      // Bitget HEDGE orders use posSide as the bucket selector; the Provider
-      // rejects reduceOnly together with posSide. Local close validation still
-      // enforces the managed HEDGE bucket ceiling before this request.
+      // Bitget UTA HEDGE closes are expressed by side + posSide. reduceOnly is
+      // a ONE_WAY-only field, so it is omitted for HEDGE requests.
       ...(category === "USDT-FUTURES"
-        ? { reduceOnly: positionMode === "HEDGE" ? "no" as const : intent.orderConstraints.reduceOnly ? "yes" as const : "no" as const }
+        ? positionMode === "HEDGE" ? {} : { reduceOnly: intent.orderConstraints.reduceOnly ? "yes" as const : "no" as const }
         : {}),
       ...(positionMode === "HEDGE" ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const } : {}),
       positionMode,
@@ -265,22 +274,51 @@ function observationForOrder(
   if (filled === null) return unknown("Bitget cumulative fill does not satisfy quantity rules.", observedAt);
   if (order.category !== lookup.category || order.symbol !== lookup.symbol || order.clientOid !== lookup.clientOid
     || (lookup.orderId !== undefined && order.orderId !== lookup.orderId)) {
-    return unknown("Bitget Provider order identity does not match the execution reference.", observedAt, filled);
+    return unknown("Bitget Provider order identity does not match the execution reference.", observedAt);
   }
-  if (order.side !== lookup.expectedSide) return unknown("Bitget Provider side does not match the execution reference.", observedAt, filled);
+  if (order.side !== lookup.expectedSide) return unknown("Bitget Provider side does not match the execution reference.", observedAt);
   if (!decimalEquals(order.requestedQuantity, lookup.expectedProviderQuantity)) {
-    return unknown("Bitget Provider quantity does not match the execution reference.", observedAt, filled);
+    return unknown("Bitget Provider quantity does not match the execution reference.", observedAt);
   }
   if (compareDecimal(order.filledQuantity, lookup.expectedProviderQuantity) > 0) {
-    return unknown("Bitget cumulative fill exceeds the expected execution quantity.", observedAt, filled);
+    return unknown("Bitget cumulative fill exceeds the expected execution quantity.", observedAt);
+  }
+  if (lookup.positionMode === "HEDGE") {
+    if (order.holdMode !== "hedge_mode") {
+      return unknown("Bitget Provider holdMode does not confirm HEDGE mode.", observedAt);
+    }
+    if (order.posSide !== lookup.posSide) {
+      return unknown("Bitget Provider posSide does not match the execution bucket.", observedAt);
+    }
+    const expectedTradeSide = lookup.posSide === "long"
+      ? lookup.expectedSide === "buy" ? "open" : "close"
+      : lookup.expectedSide === "sell" ? "open" : "close";
+    if (order.tradeSide !== expectedTradeSide) {
+      return unknown("Bitget Provider tradeSide does not match the execution semantic.", observedAt);
+    }
+  }
+  if (lookup.positionMode === "ONE_WAY") {
+    if (order.holdMode !== "one_way_mode") {
+      return unknown("Bitget Provider holdMode does not confirm ONE_WAY mode.", observedAt);
+    }
+    const close = lookup.positionDirection === "LONG" ? lookup.expectedSide === "sell"
+      : lookup.positionDirection === "SHORT" ? lookup.expectedSide === "buy" : false;
+    if (order.reduceOnly !== (close ? "yes" : "no")
+      || order.tradeSide !== (close ? "close" : "open")) {
+      return unknown("Bitget Provider ONE_WAY open/close semantic does not match the execution reference.", observedAt);
+    }
   }
   const finalObservedAt = order.updatedAt === null ? observedAt : Math.max(observedAt, order.updatedAt);
   if (order.status === "UNKNOWN") return unknown("Bitget Provider order state is unknown.", finalObservedAt, filled);
   if (order.status === "CONFIRMED" && !decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)) {
     return unknown("Bitget filled order does not complete the submitted quantity.", finalObservedAt, filled);
   }
+  const normalizedStatus = order.status === "FAILED" && order.rawStatus.toLowerCase() === "cancelled"
+    && decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)
+    ? "CONFIRMED" as const
+    : order.status;
   return Object.freeze({
-    observation: createExecutionQueryObservation({ state: order.status, filledBaseQuantity: filled, observedAt: finalObservedAt }),
+    observation: createExecutionQueryObservation({ state: normalizedStatus, filledBaseQuantity: filled, observedAt: finalObservedAt }),
     statusReason: null as string | null,
   });
 }

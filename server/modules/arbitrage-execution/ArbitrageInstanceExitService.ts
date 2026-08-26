@@ -1,5 +1,9 @@
 import { createHash } from "node:crypto";
-import { managedCurrentQuantity, type ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
+import {
+  activeManagedQuantity,
+  compareUnsignedDecimals,
+  type ArbitrageInstance,
+} from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import type { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
@@ -70,7 +74,7 @@ export class ArbitrageInstanceExitService {
     for (const leg of orderedExitLegs(instance)) {
       if (instance.status === "CLOSED") break;
       const currentLeg = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
-      const quantity = managedCurrentQuantity(currentLeg);
+      const quantity = activeManagedQuantity(instance, currentLeg);
       if (quantity === "0") continue;
       if (hasUnresolvedClosingReference(instance, leg.legId)) {
         return result(instance, "STOPPED", outcomes);
@@ -90,7 +94,11 @@ export class ArbitrageInstanceExitService {
         status: confirmation.executionRecord.status,
         confirmedQuantity: confirmation.executionRecord.confirmedQuantity,
       }));
-      if (confirmation.executionRecord.status !== "CONFIRMED") {
+      if (confirmation.executionRecord.status !== "CONFIRMED"
+        || compareUnsignedDecimals(
+          confirmation.executionRecord.confirmedQuantity,
+          confirmation.executionRecord.plannedQuantity,
+        ) !== 0) {
         return result(instance, "STOPPED", outcomes);
       }
     }
@@ -119,6 +127,7 @@ type ArbitrageInstanceExitLegResult = Readonly<{
 
 type ArbitrageInstanceExitResult = Readonly<{
   instance: ArbitrageInstance;
+  /** A pre-existing CLOSED instance is idempotently complete and may have no new leg outcomes. */
   status: "CONFIRMED" | "STOPPED";
   legs: readonly ArbitrageInstanceExitLegResult[];
 }>;

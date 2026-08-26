@@ -121,8 +121,24 @@ export type FormalExecutionCancelRuntimeResult = Readonly<{
   observation: ExecutionCancelObservation;
 }>;
 
+export type FormalOpeningExecutionCapability = Readonly<{
+  supported: boolean;
+  reasonCode: "AVAILABLE" | "EXECUTION_MODE_NOT_SUPPORTED";
+}>;
+
+export type FormalOpeningExecutionCapabilityInput = Readonly<{
+  executionMode: ExecutionIntent["executionMode"];
+  marketType: "spot" | "perpetual";
+}>;
+
 export interface FormalExecutionRuntime {
+  /** Read-only production capability used by Draft/Confirm/Start before any mutation. */
+  openingExecutionCapability?(
+    input: FormalOpeningExecutionCapabilityInput,
+  ): FormalOpeningExecutionCapability;
   execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult>;
+  /** Trusted managed-close entry point. Only CloseService may use this mutation path. */
+  executeManagedClose?(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult>;
   reconcile(userId: string, executionId: string): Promise<FormalExecutionRuntimeResult>;
   cancel(userId: string, executionId: string): Promise<FormalExecutionCancelRuntimeResult>;
 }

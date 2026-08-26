@@ -1,5 +1,9 @@
 # RWA 中性自动套利 V1 执行契约
 
+> **HISTORICAL / SUPERSEDED**
+>
+> 本文是早期 V1 自动化执行契约的历史快照，不再定义当前 production 套利编排、门禁或生命周期语义。当前事实以 `PROJECT_CONTEXT.md`、`ARCHITECTURE.md` 和 `docs/ARBITRAGE_PRODUCT.md` 为准；以下正文不作追溯改写。
+
 更新时间：2026-07-26
 
 当前状态：Phase A 私有只读/Shadow 已部署；用户已明确授权普通登录用户进入 Mainnet 真实资金执行开发。当前后端采用按用户隔离的统一 venue registry，Bybit 保留既有执行 adapter，Binance 已完成受控执行闭环并进入 `execution_capable`，Bitget/OKX 仍默认 disabled 且未实现。Binance 默认执行开关关闭、用户 kill switch 激活、服务端全局 kill switch 激活；生产 Compose 的 X.509 WIF/ADC 只读挂载契约已实现，但尚未在服务器注入真实身份材料或配置真实交易所凭证，因此当前不会发生 provider 写调用。自动策略继续严格要求 `automationEligible=true`，用户主动入场则使用独立 `manual_entry` 风险预检，两者都不能绕过安全、私有账户或急停门禁。

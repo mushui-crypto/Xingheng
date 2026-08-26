@@ -49,7 +49,11 @@ export type ArbitrageExecutionDraftLeg = Readonly<{
   }> | null;
   capability: Readonly<{
     status: "AVAILABLE" | "UNAVAILABLE";
-    reasonCode: "AVAILABLE" | "EXECUTION_CAPABILITY_NOT_IMPLEMENTED" | "CREDENTIAL_NOT_CONFIGURED";
+    reasonCode:
+      | "AVAILABLE"
+      | "EXECUTION_CAPABILITY_NOT_IMPLEMENTED"
+      | "EXECUTION_MODE_NOT_SUPPORTED"
+      | "CREDENTIAL_NOT_CONFIGURED";
   }>;
   planning: ExecutionDraftPlanning;
   executionAvailable: boolean;
@@ -60,6 +64,7 @@ export type ArbitrageExecutionDraft = Readonly<{
   sourceIdentity: string;
   sourceSnapshotGeneratedAt: number;
   horizonDays: ArbitrageHorizon;
+  executionMode: FormalExecutionMode;
   strategyType: "PERPETUAL_PERPETUAL" | "SPOT_PERPETUAL";
   quantityInput?: ExecutionQuantityInput;
   legs: readonly [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg];
@@ -70,9 +75,10 @@ export type ArbitrageExecutionDraft = Readonly<{
 export function fetchArbitrageExecutionDraft(
   opportunityId: string,
   horizonDays: ArbitrageHorizon,
+  executionMode: FormalExecutionMode,
   signal?: AbortSignal,
 ) {
-  const query = new URLSearchParams({ opportunityId, horizonDays: String(horizonDays) });
+  const query = new URLSearchParams({ opportunityId, horizonDays: String(horizonDays), executionMode });
   return requestJson<ArbitrageExecutionDraft>(
     `/api/arbitrage-execution/draft?${query.toString()}`,
     "套利执行草案加载失败。",
@@ -84,6 +90,7 @@ export function previewArbitrageExecutionDraft(
   opportunityId: string,
   horizonDays: ArbitrageHorizon,
   quantityInput: ExecutionQuantityInput,
+  executionMode: FormalExecutionMode,
   signal?: AbortSignal,
 ) {
   return requestJson<ArbitrageExecutionDraft>(
@@ -93,7 +100,7 @@ export function previewArbitrageExecutionDraft(
       init: {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ opportunityId, horizonDays, quantityInput }),
+        body: JSON.stringify({ opportunityId, horizonDays, executionMode, quantityInput }),
         signal,
       },
       userAuthFailure: true,
@@ -121,6 +128,97 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
 }>;
+
+export type ArbitrageHedgeWorkflowPhase =
+  | "NOT_STARTED" | "FIRST_LEG_EXECUTING" | "FIRST_LEG_PENDING" | "FIRST_LEG_CONFIRMED"
+  | "SECOND_LEG_EXECUTING" | "SECOND_LEG_PENDING" | "COMPLETED"
+  | "FIRST_LEG_FAILED_ZERO" | "FIRST_LEG_PARTIAL" | "FIRST_LEG_UNKNOWN"
+  | "SECOND_LEG_FAILED_ZERO" | "SECOND_LEG_PARTIAL" | "SECOND_LEG_UNKNOWN"
+  | "RESIDUAL" | "CLOSED";
+
+export type ArbitrageHedgeWorkflow = Readonly<{
+  arbitrageId: string;
+  phase: ArbitrageHedgeWorkflowPhase;
+  firstLeg: WorkflowLeg | null;
+  secondLeg: WorkflowLeg | null;
+  requiresUserAction: boolean;
+  riskAction?: "RESTART_HEDGE" | "CONTINUE_PARTIAL_HEDGE" | "CONTINUE_SECOND_LEG" | "RECONCILE" | "REVIEW_RESIDUAL";
+  reason: string | null;
+  derivedAt: number;
+}>;
+
+type WorkflowLeg = Readonly<{
+  legId: string;
+  executionIntentId: string;
+  status: ArbitrageInstance["executionReferences"][number]["status"];
+  requestedQuantity: string;
+  confirmedQuantity: string;
+  activeManagedQuantity: string;
+  updatedAt: number;
+}>;
+
+type HedgeCommandInput = Readonly<{
+  confirmationId: string;
+  opportunityId: string;
+  horizonDays: ArbitrageHorizon;
+  quantityInput: ExecutionQuantityInput;
+  executionMode: FormalExecutionMode;
+}>;
+
+type ArbitrageHedgeStartResult = Readonly<{
+  status: string;
+  reason?: string;
+  firstLeg: Readonly<{ diagnostic?: Readonly<{ category: string; sanitizedMessage: string }> }>;
+}>;
+
+export async function startArbitrageHedge(input: HedgeCommandInput & Readonly<{
+  arbitrageId: string;
+  hedgeCommandId: string;
+  firstLegId: string;
+}>) {
+  const { arbitrageId, ...body } = input;
+  return requestJson<ArbitrageHedgeStartResult>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/start-hedge`,
+    "一键开始对冲失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+}
+
+export async function continuePartialArbitrageHedge(input: HedgeCommandInput & Readonly<{
+  arbitrageId: string;
+  commandId: string;
+}>) {
+  const { arbitrageId, ...body } = input;
+  const payload = await requestJson<unknown>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/continue-hedge`,
+    "继续对冲已成交部分失败。",
+    {
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...body, confirmed: true }),
+      },
+      userAuthFailure: true,
+    },
+  );
+  return legExecutionConfirmation(payload);
+}
+
+export async function fetchArbitrageHedgeWorkflow(arbitrageId: string, signal?: AbortSignal) {
+  const payload = await requestJson<unknown>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/workflow`,
+    "对冲流程状态加载失败。",
+    { init: { cache: "no-store", signal }, userAuthFailure: true },
+  );
+  return workflowSnapshot(payload);
+}
 
 export async function confirmArbitrageExecution(
   input: Readonly<{
@@ -219,6 +317,7 @@ export async function closeArbitrageExecutionLeg(
 
 export type ArbitrageInstanceExitResult = Readonly<{
   instance: ArbitrageInstance;
+  /** Command completion, not proof that this invocation created a new Provider close fill. */
   status: "CONFIRMED" | "STOPPED";
 }>;
 
@@ -319,4 +418,19 @@ function executionStatus(value: unknown): ArbitrageLegExecutionConfirmation["exe
 
 function invalidCommandResponse() {
   return new Error("套利执行确认响应无效。");
+}
+
+function workflowSnapshot(payload: unknown): ArbitrageHedgeWorkflow {
+  const value = record(payload);
+  const phases: readonly string[] = [
+    "NOT_STARTED", "FIRST_LEG_EXECUTING", "FIRST_LEG_PENDING", "FIRST_LEG_CONFIRMED",
+    "SECOND_LEG_EXECUTING", "SECOND_LEG_PENDING", "COMPLETED", "FIRST_LEG_FAILED_ZERO",
+    "FIRST_LEG_PARTIAL", "FIRST_LEG_UNKNOWN", "SECOND_LEG_FAILED_ZERO", "SECOND_LEG_PARTIAL",
+    "SECOND_LEG_UNKNOWN", "RESIDUAL", "CLOSED",
+  ];
+  if (typeof value.arbitrageId !== "string" || !phases.includes(String(value.phase))
+    || typeof value.requiresUserAction !== "boolean" || !Number.isSafeInteger(value.derivedAt)) {
+    throw invalidCommandResponse();
+  }
+  return value as ArbitrageHedgeWorkflow;
 }

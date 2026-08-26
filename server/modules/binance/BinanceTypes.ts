@@ -111,6 +111,7 @@ export type BinanceGenericRiskSnapshotRequest = Readonly<{
   category: "spot" | "linear";
   symbol: string;
   baseAsset: string;
+  positionSide?: "BOTH" | "LONG" | "SHORT";
 }>;
 
 export type BinanceGenericRiskSnapshot = Readonly<{
@@ -143,6 +144,8 @@ export type BinanceGenericRiskContext = Readonly<{
   instrumentStatus: "trading" | "paused" | "close_only" | "delisted" | "unknown";
   valuationPrice: string;
   quoteFetchedAt: number;
+  /** Server-owned mutation semantic; never parsed from an ExecutionIntent request. */
+  mutationEffect?: "INCREASE" | "DECREASE";
 }>;
 
 export type BinanceProductAvailability = {
@@ -239,6 +242,9 @@ export type BinanceProviderOrder = {
   status: "New" | "PartiallyFilled" | "Filled" | "Cancelled" | "Rejected" | "Expired" | "Unknown";
   requestedQuantity: number;
   filledQuantity: number;
+  side?: "Buy" | "Sell";
+  /** Provider fact for USD-M orders; absent for Spot. */
+  reduceOnly?: boolean;
   positionSide?: "BOTH" | "LONG" | "SHORT";
   /** Exact provider origQty in canonical base-asset units. */
   requestedBaseQuantity?: string;

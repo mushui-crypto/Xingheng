@@ -32,6 +32,7 @@ test("Bybit evidence uses deterministic order identity and scans both instance i
     recoveryAnchorRequiredBeforeMutation: true,
     exactOrderEvidence: "ABSENT",
     activeOrderEvidence: "NONE",
+    absenceScope: "HISTORICAL_WINDOW_UNCERTAIN",
     checkedAt: 123,
   });
   assert.deepEqual(exact, [{

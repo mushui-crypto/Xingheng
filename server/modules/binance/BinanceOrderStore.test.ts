@@ -342,7 +342,7 @@ test("raw int64 identity survives parsing, persistence, restart, and exact cance
         cancelledOrderIds.push(url.searchParams.get("orderId") ?? "");
         return rawJsonResponse("{}");
       }
-      return rawJsonResponse(`{"symbol":"BTCUSDT","orderId":${exactOrderId},"clientOrderId":"ptmrestartlossless","status":"NEW","origQty":"0.001","executedQty":"0"}`);
+      return rawJsonResponse(`{"symbol":"BTCUSDT","side":"BUY","orderId":${exactOrderId},"clientOrderId":"ptmrestartlossless","status":"NEW","origQty":"0.001","executedQty":"0"}`);
     }) as typeof fetch,
     () => 1_800_000_000_000,
     ["203.0.113.10"],

@@ -80,7 +80,7 @@ export class BinanceRiskGuard {
     }
     if (request.category === "spot") {
       assertGenericSpotOrder(request, snapshot, quantity, orderNotional);
-      this.assertMutationAllowed("risk_increasing");
+      this.assertMutationAllowed(context.mutationEffect === "DECREASE" ? "risk_reducing" : "risk_increasing");
       return;
     }
 
@@ -88,15 +88,34 @@ export class BinanceRiskGuard {
     if (!position) {
       throw new BinanceRiskError("position_unavailable", "Binance perpetual position state is unavailable.");
     }
-    if (!snapshot.permissions.positionModeSupported
-      || !["single_asset_one_way", "multi_assets_one_way"].includes(snapshot.accountMode)) {
-      throw new BinanceRiskError("position_mode_unsupported", "Binance generic execution supports one-way position mode only.");
+    const oneWayMode = ["single_asset_one_way", "multi_assets_one_way"].includes(snapshot.accountMode);
+    const hedgeMode = ["single_asset_hedge", "multi_assets_hedge"].includes(snapshot.accountMode);
+    const nativeHedgeOrder = hedgeMode
+      && request.positionMode === "HEDGE"
+      && (request.positionSide === "LONG" || request.positionSide === "SHORT")
+      && request.positionDirection === request.positionSide;
+    if (!snapshot.permissions.positionModeSupported || (!oneWayMode && !nativeHedgeOrder)) {
+      throw new BinanceRiskError(
+        "position_mode_unsupported",
+        "Binance generic execution requires a reliable one-way mode or an explicitly bucketed HEDGE order.",
+      );
+    }
+    if (nativeHedgeOrder) {
+      const expectedSide = request.positionDirection === "LONG"
+        ? request.reduceOnly ? "Sell" : "Buy"
+        : request.reduceOnly ? "Buy" : "Sell";
+      if (request.side !== expectedSide) {
+        throw new BinanceRiskError(
+          "hedge_side_invalid",
+          "Binance HEDGE order side does not match its position direction and open/close semantic.",
+        );
+      }
     }
     positiveDecimal(position.leverage, "Perpetual leverage");
 
     if (request.reduceOnly) {
       assertReduceOnly(request, position.side, nonNegativeDecimal(position.quantity, "Perpetual position quantity"), quantity);
-      this.assertMutationAllowed("risk_reducing");
+      this.assertMutationAllowed(context.mutationEffect === "DECREASE" ? "risk_reducing" : "risk_increasing");
       return;
     }
     this.assertMutationAllowed("risk_increasing");

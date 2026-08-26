@@ -1,7 +1,7 @@
 import type express from "express";
 import { BinanceProviderError } from "../binance/BinanceClient";
 import { BinanceCredentialInUseError } from "../binance/BinancePersonalTradingServiceRegistry";
-import { BybitProviderError } from "../bybit/BybitClient";
+import { BybitProviderError, safeBybitProviderMessage } from "../bybit/BybitClient";
 import { BitgetAccountReadError } from "../bitget/BitgetAccountReadClient";
 import { CredentialKeyProviderError } from "../credentials/CredentialKeyProvider";
 import {
@@ -22,7 +22,11 @@ export function registerExchangeCredentialRoutes(
         response.json(await handler(request));
       } catch (error) {
         const result = credentialErrorResponse(error);
-        response.status(result.status).json({ category: result.category, message: result.message });
+        response.status(result.status).json({
+          category: result.category,
+          message: result.message,
+          ...("code" in result ? { code: result.code } : {}),
+        });
       }
     };
 
@@ -86,7 +90,12 @@ function credentialErrorResponse(error: unknown) {
     return { status: 502, category: error.category, message: error.message };
   }
   if (error instanceof BybitProviderError) {
-    return { status: 502, category: error.category, message: error.message };
+    return {
+      status: 502,
+      category: error.category,
+      message: safeBybitProviderMessage(error.category),
+      ...(error.providerCode === undefined ? {} : { code: error.providerCode }),
+    };
   }
   if (error instanceof BitgetAccountReadError) {
     return { status: 502, category: error.category, message: error.message };

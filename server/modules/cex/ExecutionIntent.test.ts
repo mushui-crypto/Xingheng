@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   createExecutionIntent,
-  createLegacyOneWayExecutionIntent,
   type ExecutionIntent,
 } from "./ExecutionIntent";
 
@@ -113,10 +112,6 @@ test("requires canonical direction for perpetuals and rejects it for Spot", () =
   assert.throws(
     () => createExecutionIntent({ ...intentInput(), positionDirection: undefined }),
     /requires positionDirection/u,
-  );
-  assert.equal(
-    createLegacyOneWayExecutionIntent({ ...intentInput(), positionDirection: undefined }).positionDirection,
-    "LONG",
   );
   assert.throws(
     () => createExecutionIntent({ ...intentInput(), instrumentId: "XAUT-USDT-SPOT", positionDirection: "LONG" }),

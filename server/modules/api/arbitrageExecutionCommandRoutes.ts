@@ -47,7 +47,8 @@ function sendError(response: express.Response, error: unknown) {
     const status = error.category === "arbitrage_instance_not_found"
       || error.category === "arbitrage_execution_reference_not_found" ? 404
       : error.category === "execution_state_unknown"
-        || error.category === "manual_reconciliation_required" ? 409
+        || error.category === "manual_reconciliation_required"
+        || error.category === "idempotency_conflict" ? 409
         : 400;
     response.status(status).json({
       category: error.category,

@@ -7,6 +7,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
+  type ExecutionMutationEffect,
   type ExecutionProviderIdentityValidator,
 } from "../cex/ExecutionMutationSafetyGuard";
 import { BybitInstrumentMappingAdapter, type BybitInstrumentResolution } from "./BybitInstrumentMapping";
@@ -49,6 +50,7 @@ export type BybitIntentExecutionServiceOptions = Readonly<{
   quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
+  mutationEffect?: ExecutionMutationEffect;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
   persistRecoveryReference?: (reference: Readonly<{
     category: "spot" | "linear";
@@ -132,6 +134,7 @@ export class BybitIntentExecutionService {
         accountId: intent.accountId,
         instrumentId: intent.instrumentId,
         providerInstrumentId: value.symbol,
+        ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, this.options.validateProviderIdentity);
       await persistRecoveryReference({
         category: value.category,
@@ -245,6 +248,11 @@ export class BybitIntentExecutionService {
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Bybit HEDGE execution requires positionDirection.");
     }
+    if (positionMode === "HEDGE" && intent.orderConstraints.reduceOnly
+      && ((intent.positionDirection === "LONG" && intent.side !== "sell")
+        || (intent.positionDirection === "SHORT" && intent.side !== "buy"))) {
+      throw new Error("Bybit HEDGE close side does not reduce the selected position bucket.");
+    }
     const base = {
       category,
       symbol: instrument.venueInstrument.symbol,
@@ -318,33 +326,50 @@ function observationForOrder(
   if (order.category !== lookup.category || order.symbol !== lookup.symbol
     || order.orderLinkId !== lookup.orderLinkId
     || (lookup.orderId !== undefined && order.orderId !== lookup.orderId)) {
-    return unknown("Bybit Provider order identity does not match the execution reference.", observedAt, filled);
+    return unknown("Bybit Provider order identity does not match the execution reference.", observedAt);
   }
-  if (order.side !== lookup.expectedSide) return unknown("Bybit Provider side does not match the expected execution side.", observedAt, filled);
+  if (order.side !== lookup.expectedSide) return unknown("Bybit Provider side does not match the expected execution side.", observedAt);
   if (!decimalEquals(order.requestedQuantity, lookup.expectedProviderQuantity)) {
-    return unknown("Bybit Provider quantity does not match the expected execution quantity.", observedAt, filled);
+    return unknown("Bybit Provider quantity does not match the expected execution quantity.", observedAt);
   }
   if (compareDecimal(order.filledQuantity, lookup.expectedProviderQuantity) > 0) {
-    return unknown("Bybit cumulative fill exceeds the expected execution quantity.", observedAt, filled);
+    return unknown("Bybit cumulative fill exceeds the expected execution quantity.", observedAt);
   }
-  if (lookup.category === "linear" && lookup.positionMode === "HEDGE"
-    && lookup.positionIdx !== undefined && order.positionIdx !== lookup.positionIdx) {
-    return unknown("Bybit Provider positionIdx does not match the persisted execution bucket.", observedAt, filled);
+  if (lookup.category === "linear" && order.positionIdx !== lookup.positionIdx) {
+    return unknown("Bybit Provider positionIdx does not match the persisted execution bucket.", observedAt);
+  }
+  if (lookup.category === "linear") {
+    const expectedReduceOnly = reduceOnlySemantic(lookup);
+    if (expectedReduceOnly === null || order.reduceOnly !== expectedReduceOnly) {
+      return unknown("Bybit Provider reduceOnly does not match the execution semantic.", observedAt);
+    }
   }
   if (order.marketUnit !== undefined && order.marketUnit !== lookup.marketUnit) {
-    return unknown("Bybit Provider marketUnit does not match the execution reference.", observedAt, filled);
+    return unknown("Bybit Provider marketUnit does not match the execution reference.", observedAt);
   }
   const finalObservedAt = order.updatedAt === null ? observedAt : Math.max(observedAt, order.updatedAt);
   if (order.status === "UNKNOWN") return unknown("Bybit Provider order state is unknown.", finalObservedAt, filled);
   if (order.status === "CONFIRMED" && !decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)) {
     return unknown("Bybit filled order does not complete the submitted quantity.", finalObservedAt, filled);
   }
+  const normalizedStatus = order.status === "FAILED"
+    && (order.rawStatus === "Cancelled" || order.rawStatus === "PartiallyFilledCanceled")
+    && decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)
+    ? "CONFIRMED" as const
+    : order.status;
   const observation = createExecutionQueryObservation({
-    state: order.status === "SUBMITTED" ? "PENDING_CONFIRMATION" : order.status,
+    state: normalizedStatus === "SUBMITTED" ? "PENDING_CONFIRMATION" : normalizedStatus,
     filledBaseQuantity: filled,
     observedAt: finalObservedAt,
   });
   return Object.freeze({ observation, statusReason: null as string | null });
+}
+
+function reduceOnlySemantic(lookup: BybitExecutionOrderLookup) {
+  // Legacy/generic ONE_WAY opening references predate positionDirection. They
+  // can prove only a non-reduce opening; a close still requires direction.
+  if (!lookup.positionDirection) return false;
+  return lookup.positionDirection === "LONG" ? lookup.expectedSide === "Sell" : lookup.expectedSide === "Buy";
 }
 
 function unknown(statusReason: string, observedAt: number, filledBaseQuantity = "0") {

@@ -76,6 +76,8 @@ test("exact-key query recovers a target beyond 100 unrelated orders", async () =
 
 test("uses the exact persisted Decimal fill instead of the legacy number bridge", async () => {
   const order = storedOrder("PartiallyFilled", 0.12345678901234568);
+  order.expectedBaseQuantity = "0.2";
+  order.order!.requestedBaseQuantity = "0.2";
   order.order!.filledBaseQuantity = "0.123456789012345678901";
   const observation = await new BinanceIntentExecutionQueryService(
     new FakeQueryBinding([order]),
@@ -137,6 +139,9 @@ function storedOrder(
     category: "linear",
     symbol: "XAUTUSDT",
     executionMode: "production_ioc",
+    expectedSide: "Sell",
+    expectedBaseQuantity: "0.002",
+    expectedReduceOnly: false,
     status: status === "Filled" ? "completed"
       : status === "Rejected" || status === "Cancelled" || status === "Expired" ? "failed"
       : "processing",
@@ -147,6 +152,10 @@ function storedOrder(
       status,
       requestedQuantity: 0.002,
       filledQuantity,
+      side: "Sell",
+      reduceOnly: false,
+      requestedBaseQuantity: "0.002",
+      filledBaseQuantity: decimal(filledQuantity),
       averagePrice: null,
       feeUsd: 0,
       updatedAt: now,

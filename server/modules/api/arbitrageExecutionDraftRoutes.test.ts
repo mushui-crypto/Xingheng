@@ -28,15 +28,39 @@ test("execution draft routes are authenticated, no-store, and pass only the narr
   });
 
   const getResponse = response();
-  await getHandler({ user: { id: "user-a" }, query: { opportunityId: "op-1", horizonDays: "90" } }, getResponse);
+  await getHandler({
+    user: { id: "user-a" },
+    query: { opportunityId: "op-1", horizonDays: "90", executionMode: "PRICE_PRIORITY" },
+  }, getResponse);
   const postResponse = response();
-  await postHandler({ user: { id: "user-a" }, body: { opportunityId: "op-1", horizonDays: 90, quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" } } }, postResponse);
+  await postHandler({
+    user: { id: "user-a" },
+    body: {
+      opportunityId: "op-1",
+      horizonDays: 90,
+      executionMode: "EXECUTION_PRIORITY",
+      quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+    },
+  }, postResponse);
 
   assert.equal(getResponse.headers["Cache-Control"], "no-store");
   assert.equal(postResponse.headers["Cache-Control"], "no-store");
   assert.deepEqual(calls, [
-    { operation: "draft", userId: "user-a", input: { opportunityId: "op-1", horizonDays: 90 } },
-    { operation: "preview", userId: "user-a", input: { opportunityId: "op-1", horizonDays: 90, quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" } } },
+    {
+      operation: "draft",
+      userId: "user-a",
+      input: { opportunityId: "op-1", horizonDays: 90, executionMode: "PRICE_PRIORITY" },
+    },
+    {
+      operation: "preview",
+      userId: "user-a",
+      input: {
+        opportunityId: "op-1",
+        horizonDays: 90,
+        executionMode: "EXECUTION_PRIORITY",
+        quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+      },
+    },
   ]);
 });
 

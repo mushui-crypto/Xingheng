@@ -92,6 +92,83 @@ test("spot provider reports FLAT when the provider balance is zero instead of ec
   assert.equal(result.availableQuantity, "0");
 });
 
+test("one provider context coalesces the account-wide snapshot across same-account legs", async () => {
+  let accountReads = 0;
+  let positionReads = 0;
+  const reader = accountReader("binance:account-a", [
+    { asset: "XAUT", accountType: "unified", total: 1, available: 1, locked: 0 },
+  ]);
+  const provider = new VenueArbitrageLegReadProvider(
+    "binance",
+    {
+      readAccountSnapshot: async () => ({}),
+      readPerpetualPosition: async () => {
+        positionReads += 1;
+        return { symbol: "XAUTUSDT", side: "short", baseQuantity: "1", updatedAt: 1_800_000_000_000 };
+      },
+    },
+    {
+      readAccount: async () => { accountReads += 1; return reader.readAccount(); },
+      dispose: reader.dispose,
+    },
+    { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
+  );
+
+  await Promise.all([
+    provider.readLeg(leg({ legId: "spot", instrumentId: "XAUT-USDT-SPOT" })),
+    provider.readLeg(leg({ legId: "perp", role: "SHORT", instrumentId: "XAUT-USDT-PERP" })),
+  ]);
+
+  assert.equal(accountReads, 1);
+  assert.equal(positionReads, 1);
+});
+
+test("one provider context coalesces same-instrument mode facts while preserving leg position reads", async () => {
+  let accountReads = 0;
+  let modeReads = 0;
+  let positionReads = 0;
+  const reader = accountReader("binance:account-a", []);
+  const provider = new VenueArbitrageLegReadProvider(
+    "binance",
+    { readAccountSnapshot: async () => ({}), readPerpetualPosition: async () => { throw new Error("not used"); } },
+    {
+      readAccount: async () => { accountReads += 1; return reader.readAccount(); },
+      dispose: reader.dispose,
+    },
+    { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
+    {
+      venue: "binance",
+      readPosition: async (request) => {
+        positionReads += 1;
+        return {
+          venue: "binance",
+          accountId: request.accountId,
+          instrumentId: request.instrumentId,
+          positionMode: "HEDGE",
+          side: "FLAT",
+          quantity: "0",
+          signedNetQuantity: null,
+          longQuantity: "1",
+          shortQuantity: "1",
+          fetchedAt: 1_800_000_000_000,
+        };
+      },
+    },
+    {
+      read: async () => { modeReads += 1; return { positionMode: "HEDGE" as const }; },
+    },
+  );
+
+  await Promise.all([
+    provider.readLeg(leg({ legId: "long", role: "LONG" })),
+    provider.readLeg(leg({ legId: "short", role: "SHORT" })),
+  ]);
+
+  assert.equal(accountReads, 1);
+  assert.equal(modeReads, 1);
+  assert.equal(positionReads, 2);
+});
+
 test("provider rejects mismatched account identity and spot short inference", async () => {
   const provider = new VenueArbitrageLegReadProvider(
     "bitget",

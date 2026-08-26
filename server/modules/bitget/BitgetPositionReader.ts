@@ -22,7 +22,7 @@ export type BitgetPositionInstrumentResolver = Readonly<{
   resolve(instrumentId: string): Promise<BitgetPositionInstrumentBinding | null> | BitgetPositionInstrumentBinding | null;
 }>;
 
-/** Reads one one-way USDT Perp position as an exact canonical base quantity. */
+/** Reads ONE_WAY net or HEDGE bucket positions as exact canonical base quantities. */
 export class BitgetPositionReader implements PositionReader {
   readonly venue = "bitget" as const;
 

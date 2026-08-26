@@ -14,6 +14,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
+  type ExecutionMutationEffect,
   type ExecutionProviderIdentityValidator,
 } from "../cex/ExecutionMutationSafetyGuard";
 import {
@@ -56,9 +57,18 @@ export type OkxIntentExecutionServiceOptions = Readonly<{
   quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
+  mutationEffect?: ExecutionMutationEffect;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
   persistRecoveryReference?: (
-    reference: Readonly<{ instId: string; clOrdId: string; positionMode?: "ONE_WAY" | "HEDGE"; positionDirection?: "LONG" | "SHORT"; posSide?: "long" | "short" }>,
+    reference: Readonly<{
+      instId: string;
+      clOrdId: string;
+      expectedProviderQuantity: string;
+      expectedSide: "buy" | "sell";
+      positionMode?: "ONE_WAY" | "HEDGE";
+      positionDirection?: "LONG" | "SHORT";
+      posSide?: "long" | "short";
+    }>,
   ) => Promise<void> | void;
 }>;
 
@@ -75,6 +85,9 @@ export type OkxIntentExecutionResult = Readonly<{
   statusReason: string | null;
   expectedProviderQuantity?: string;
   expectedSide?: "buy" | "sell";
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
 }>;
 
 export type OkxExecutionQueryResult = Readonly<{
@@ -91,6 +104,9 @@ export type OkxExecutionOrderLookup = Readonly<{
   clOrdId: string;
   expectedProviderQuantity?: string;
   expectedSide?: "buy" | "sell";
+  positionMode?: "ONE_WAY" | "HEDGE";
+  positionDirection?: "LONG" | "SHORT";
+  posSide?: "long" | "short";
 }>;
 
 export class OkxIntentExecutionService {
@@ -122,10 +138,13 @@ export class OkxIntentExecutionService {
         accountId: intent.accountId,
         instrumentId: intent.instrumentId,
         providerInstrumentId: value.instId,
+        ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, this.options.validateProviderIdentity);
       await this.options.persistRecoveryReference?.({
         instId: value.instId,
         clOrdId: value.clOrdId,
+        expectedProviderQuantity: value.quantity,
+        expectedSide: value.side,
         positionMode: value.positionMode,
         positionDirection: intent.positionDirection,
         posSide: value.posSide,
@@ -147,6 +166,11 @@ export class OkxIntentExecutionService {
       state: "SUBMITTED",
       confirmedQuantity: "0",
       statusReason: null,
+      expectedProviderQuantity: prepared.quantity,
+      expectedSide: prepared.side,
+      ...(prepared.positionMode === undefined ? {} : { positionMode: prepared.positionMode }),
+      ...(intent.positionDirection === undefined ? {} : { positionDirection: intent.positionDirection }),
+      ...(prepared.posSide === undefined ? {} : { posSide: prepared.posSide }),
     });
   }
 
@@ -170,15 +194,16 @@ export class OkxIntentExecutionService {
     if (order.instId !== lookup.instId) {
       throw new Error("OKX order response instrument identity does not match the execution order.");
     }
+    const verified = observationForOrder(order, lookup, rules, observedAt, this.tdMode);
     return Object.freeze({
-      observation: observationForOrder(order, rules, observedAt),
+      observation: verified.observation,
       orderIdentity: Object.freeze({
         instId: order.instId,
         ordId: order.ordId,
         clOrdId: order.clOrdId,
       }),
       fee: order.fee,
-      statusReason: order.statusReason,
+      statusReason: verified.statusReason,
     });
   }
 
@@ -235,16 +260,20 @@ export class OkxIntentExecutionService {
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("OKX HEDGE execution requires positionDirection.");
     }
+    if (positionMode === "HEDGE" && intent.orderConstraints.reduceOnly
+      && ((intent.positionDirection === "LONG" && intent.side !== "sell")
+        || (intent.positionDirection === "SHORT" && intent.side !== "buy"))) {
+      throw new Error("OKX HEDGE close side does not reduce the selected position bucket.");
+    }
     const base = {
       instId: instrument.venueInstrument.instId,
       tdMode: this.tdMode,
       side: intent.side,
       quantity: okxBaseQuantityToContracts(intent.quantity.quantity, rules),
       clOrdId: okxClientOrderIdFor(intent),
-      reduceOnly: intent.orderConstraints.reduceOnly,
       ...(positionMode === "HEDGE"
         ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const }
-        : {}),
+        : { reduceOnly: intent.orderConstraints.reduceOnly }),
     } as const;
     if (intent.executionMode === "EXECUTION_PRIORITY") {
       return attachPositionMode({ ...base, ordType: "market" }, positionMode);
@@ -301,13 +330,70 @@ function assertAcceptedIdentity(accepted: OkxCancelOrderResult, prepared: OkxPla
 
 function observationForOrder(
   order: OkxProviderOrder,
+  lookup: OkxExecutionOrderLookup,
   rules: Awaited<ReturnType<typeof loadOkxQuantityRules>>,
   observedAt: number,
-): ExecutionQueryObservation {
-  return createExecutionQueryObservation({
-    state: queryStateFor(order.status),
-    filledBaseQuantity: okxContractQuantityToBase(order.filledQuantity, rules),
-    observedAt: order.updatedAt === null ? observedAt : Math.max(order.updatedAt, observedAt),
+  expectedTdMode: "cross" | "isolated",
+): Readonly<{ observation: ExecutionQueryObservation; statusReason: string | null }> {
+  const finalObservedAt = order.updatedAt === null ? observedAt : Math.max(order.updatedAt, observedAt);
+  if (lookup.expectedSide !== undefined && order.side !== lookup.expectedSide) {
+    return unknown("OKX Provider side does not match the execution reference.", finalObservedAt);
+  }
+  if (lookup.expectedProviderQuantity !== undefined
+    && !decimalEquals(order.requestedQuantity, lookup.expectedProviderQuantity)) {
+    return unknown("OKX Provider quantity does not match the execution reference.", finalObservedAt);
+  }
+  if (lookup.positionMode === "HEDGE" && order.posSide !== lookup.posSide) {
+    return unknown("OKX Provider posSide does not match the execution bucket.", finalObservedAt);
+  }
+  if (lookup.positionMode === "ONE_WAY" && order.posSide !== "net") {
+    return unknown("OKX Provider posSide does not confirm ONE_WAY net mode.", finalObservedAt);
+  }
+  if (order.tdMode !== undefined && order.tdMode !== expectedTdMode) {
+    return unknown("OKX Provider tdMode does not match the execution reference.", finalObservedAt);
+  }
+  const expectedReduceOnly = reduceOnlySemantic(lookup);
+  if (lookup.positionMode === "ONE_WAY" && (expectedReduceOnly === null || order.reduceOnly !== expectedReduceOnly)) {
+    return unknown("OKX Provider reduceOnly does not match the execution semantic.", finalObservedAt);
+  }
+  let filledBaseQuantity: string;
+  try {
+    filledBaseQuantity = okxContractQuantityToBase(order.filledQuantity, rules);
+    if (lookup.expectedProviderQuantity !== undefined) {
+      const requestedBaseQuantity = okxContractQuantityToBase(lookup.expectedProviderQuantity, rules);
+      if (compareDecimal(filledBaseQuantity, requestedBaseQuantity) > 0) {
+        return unknown("OKX cumulative fill exceeds the canonical execution quantity.", finalObservedAt);
+      }
+    }
+  } catch {
+    return unknown("OKX cumulative fill cannot be converted to canonical base quantity.", finalObservedAt);
+  }
+  if (order.status === "CONFIRMED" && lookup.expectedProviderQuantity !== undefined
+    && !decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)) {
+    return unknown("OKX filled order does not complete the submitted quantity.", finalObservedAt);
+  }
+  const state = order.status === "FAILED" && order.rawState === "canceled"
+    && lookup.expectedProviderQuantity !== undefined
+    && decimalEquals(order.filledQuantity, lookup.expectedProviderQuantity)
+    ? "CONFIRMED" as const
+    : queryStateFor(order.status);
+  return Object.freeze({ observation: createExecutionQueryObservation({
+    state,
+    filledBaseQuantity,
+    observedAt: finalObservedAt,
+  }), statusReason: order.statusReason });
+}
+
+function reduceOnlySemantic(lookup: OkxExecutionOrderLookup) {
+  if (!lookup.expectedSide) return null;
+  if (!lookup.positionDirection) return false;
+  return lookup.positionDirection === "LONG" ? lookup.expectedSide === "sell" : lookup.expectedSide === "buy";
+}
+
+function unknown(statusReason: string, observedAt: number) {
+  return Object.freeze({
+    observation: createExecutionQueryObservation({ state: "UNKNOWN", filledBaseQuantity: "0", observedAt }),
+    statusReason,
   });
 }
 
@@ -323,4 +409,23 @@ function decimalQuantity(value: string) {
     throw new Error("OKX Decimal quantity or price must be an unsigned positive decimal string.");
   }
   return value;
+}
+
+function decimalEquals(left: string, right: string) {
+  return canonicalDecimal(left) === canonicalDecimal(right);
+}
+
+function compareDecimal(left: string, right: string) {
+  const [li, lf = ""] = canonicalDecimal(left).split(".");
+  const [ri, rf = ""] = canonicalDecimal(right).split(".");
+  const scale = Math.max(lf.length, rf.length);
+  const a = BigInt(`${li}${lf.padEnd(scale, "0")}`);
+  const b = BigInt(`${ri}${rf.padEnd(scale, "0")}`);
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+function canonicalDecimal(value: string) {
+  const [integer, fraction = ""] = value.split(".");
+  const normalized = fraction.replace(/0+$/u, "");
+  return normalized ? `${integer}.${normalized}` : integer!;
 }

@@ -44,6 +44,28 @@ export type ArbitrageExecutionReference = Readonly<{
   updatedAt: number;
 }>;
 
+export type ArbitrageLegManagementRelease = Readonly<{
+  releaseId: string;
+  arbitrageId: string;
+  legId: string;
+  releasedQuantity: string;
+  reason: "USER_CONFIRMED_STOP_MANAGEMENT";
+  source: "AUTHENTICATED_API";
+  requestedByUserId: string;
+  requestedAt: number;
+  confirmedAt: number;
+  venue: ExecutionVenue;
+  accountId: string;
+  instrumentId: string;
+  positionMode: "ONE_WAY" | "HEDGE";
+  actualQuantity: string;
+  actualSignedNetQuantity: string | null;
+  actualLongQuantity: string;
+  actualShortQuantity: string;
+  availableQuantity: string | null;
+  realityCheckedAt: number;
+}>;
+
 export type ArbitragePnlSummary = Readonly<{
   asset: string | null;
   cumulativeFundingPnl: string | null;
@@ -63,9 +85,12 @@ export type ArbitrageInstance = Readonly<{
   createdAt: number;
   openedAt: number | null;
   updatedAt: number;
+  /** Time Xingheng's management responsibility ended; not necessarily a Provider close fill time. */
   closedAt: number | null;
   legs: readonly [ArbitrageInstanceLeg, ArbitrageInstanceLeg];
   executionReferences: readonly ArbitrageExecutionReference[];
+  /** Explicit user decisions to stop managing a leg; never execution evidence. */
+  managementReleases?: readonly ArbitrageLegManagementRelease[];
   pnl: ArbitragePnlSummary;
 }>;
 
@@ -95,6 +120,18 @@ export type NewArbitrageInstance = Readonly<{
 
 export function managedCurrentQuantity(leg: ArbitrageInstanceLeg) {
   return subtractUnsignedDecimals(leg.confirmedOpenedQuantity, leg.confirmedClosedQuantity);
+}
+
+/** Remaining quantity Xingheng may still operate after explicit management release. */
+export function activeManagedQuantity(instance: ArbitrageInstance, leg: ArbitrageInstanceLeg) {
+  const release = instance.managementReleases?.find((candidate) => candidate.legId === leg.legId);
+  if (release) return "0";
+  return managedCurrentQuantity(leg);
+}
+
+export function activeManagedSignedQuantity(instance: ArbitrageInstance, leg: ArbitrageInstanceLeg) {
+  const quantity = activeManagedQuantity(instance, leg);
+  return quantity === "0" || leg.role === "LONG" ? quantity : `-${quantity}`;
 }
 
 /** Canonical signed delta still outstanding for this arbitrage leg. */

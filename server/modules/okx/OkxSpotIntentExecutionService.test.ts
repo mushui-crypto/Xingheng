@@ -88,6 +88,23 @@ test("Spot invalid rules and a closed guard prevent Provider mutation", async ()
   assert.equal(blockedClient.placeCalls, 0);
 });
 
+test("halted OKX Spot allows only a trusted managed-close SELL", async () => {
+  const halted = new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true });
+  const managedClient = new FakeClient();
+  await spotService(managedClient, {
+    mutationSafetyGuard: halted,
+    mutationEffect: "DECREASE",
+  }).execute(intent({ side: "sell", intentId: "okx-spot-managed-close" }));
+  assert.equal(managedClient.placeCalls, 1);
+  assert.equal(managedClient.placeRequests[0]?.side, "sell");
+
+  const ordinaryClient = new FakeClient();
+  await assert.rejects(() => spotService(ordinaryClient, {
+    mutationSafetyGuard: halted,
+  }).execute(intent({ side: "sell", intentId: "okx-spot-ordinary-sell" })));
+  assert.equal(ordinaryClient.placeCalls, 0);
+});
+
 test("Spot accepts Decimal signed base and quote fees without using balance deltas", async () => {
   for (const scenario of [
     { side: "buy" as const, fee: "-0.2", feeCcy: "DOGE" },

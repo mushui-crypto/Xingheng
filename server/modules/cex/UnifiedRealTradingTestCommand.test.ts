@@ -415,6 +415,11 @@ class FakeOkxRuntimeService {
       ordId: request.ordId ?? "9991",
       clOrdId: placed.clOrdId,
       side: placed.side,
+      tdMode: placed.tdMode,
+      ...(placed.instId.endsWith("-SWAP") ? {
+        posSide: placed.posSide ?? "net" as const,
+        reduceOnly: placed.reduceOnly ?? false,
+      } : {}),
       status: "CONFIRMED",
       statusReason: null,
       rawState: "filled",

@@ -23,6 +23,7 @@ import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuar
 import { OkxIntentExecutionRuntime } from "../okx/OkxIntentExecutionRuntime";
 import { InMemoryOkxExecutionOrderReferenceStore } from "../okx/OkxExecutionOrderReferenceStore";
 import { okxTestQuantityRulesSource } from "../okx/OkxTestFixtures";
+import { ProviderMutationSerializer } from "./ProviderMutationSerializer";
 import type { OkxPlaceOrderRequest, OkxCancelOrderResult, OkxGetOrderRequest, OkxProviderOrder } from "../okx/OkxTypes";
 import {
   FormalExecutionRuntimeRegistry,
@@ -67,6 +68,43 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
   assert.notEqual(result.instance.status, "CLOSED", "one flat leg must not close the two-leg instance");
 });
 
+test("a released leg cannot create a later close Provider mutation", async (t) => {
+  const fixture = setup(t);
+  const instance = fixture.store.get("user-a", fixture.arbitrageId)!;
+  fixture.store.releaseLegManagement("user-a", fixture.arbitrageId, {
+    releaseId: "release-short",
+    commandId: "release-short-command",
+    operationType: "MANAGEMENT_RELEASE",
+    businessPayloadFingerprint: "release-short-fingerprint",
+    arbitrageId: fixture.arbitrageId,
+    legId: "short-leg",
+    releasedQuantity: "1",
+    reason: "USER_CONFIRMED_STOP_MANAGEMENT",
+    source: "AUTHENTICATED_API",
+    requestedByUserId: "user-a",
+    requestedAt: now,
+    confirmedAt: now,
+    venue: instance.legs[1].venue,
+    accountId: instance.legs[1].accountId,
+    instrumentId: instance.legs[1].instrumentId,
+    positionMode: "ONE_WAY",
+    actualQuantity: "1",
+    actualSignedNetQuantity: "-1",
+    actualLongQuantity: "0",
+    actualShortQuantity: "1",
+    availableQuantity: null,
+    realityCheckedAt: now,
+  });
+
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("short-leg", "1", "released-close")),
+    (error: unknown) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "close_quantity_unavailable",
+  );
+  assert.equal(fixture.runtime.calls.length, 0);
+  assert.equal(fixture.store.get("user-a", fixture.arbitrageId)?.legs[1].confirmedClosedQuantity, "0");
+});
+
 test("HEDGE LONG and SHORT closes use independent buckets", async (t) => {
   const longFixture = setup(t, {
     positionMode: "HEDGE", actualLongQuantity: "20", actualShortQuantity: "7",
@@ -89,6 +127,66 @@ test("HEDGE LONG and SHORT closes use independent buckets", async (t) => {
   assert.equal(shortFixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
 });
 
+for (const venue of ["binance", "okx", "bybit", "bitget"] as const) {
+  test(`${venue} close boundary covers ONE_WAY and HEDGE fail-closed scenarios`, async (t) => {
+    const sufficient = setup(t, {
+      venue, quantity: "100", actualSignedNetQuantity: "-150",
+    });
+    sufficient.runtime.resultStatus = "CONFIRMED";
+    sufficient.runtime.confirmedQuantity = "100";
+    await sufficient.service.closeLeg("user-a", request("short-leg", "100", `${venue}-one-way-close`));
+    assert.equal(sufficient.runtime.calls.length, 1);
+    assert.equal(sufficient.runtime.calls[0]?.side, "buy");
+    assert.equal(sufficient.runtime.calls[0]?.orderConstraints.reduceOnly, true);
+
+    for (const [label, actualSignedNetQuantity] of [
+      ["insufficient", "-20"],
+      ["flat", "0"],
+      ["opposite", "20"],
+    ] as const) {
+      const failed = setup(t, { venue, quantity: "100", actualSignedNetQuantity });
+      await assert.rejects(
+        () => failed.service.closeLeg("user-a", request("short-leg", "100", `${venue}-${label}`)),
+        (error: unknown) => error instanceof ArbitrageExecutionCloseError
+          && error.category === "close_quantity_unavailable",
+      );
+      assert.equal(failed.runtime.calls.length, 0, `${venue} ${label} must not reach Provider mutation`);
+      assert.equal(failed.store.get("user-a", failed.arbitrageId)?.legs[1].confirmedClosedQuantity, "0");
+    }
+
+    const hedge = setup(t, {
+      venue, quantity: "100", positionMode: "HEDGE", actualLongQuantity: "50", actualShortQuantity: "100",
+    });
+    hedge.runtime.resultStatus = "CONFIRMED";
+    hedge.runtime.confirmedQuantity = "100";
+    await hedge.service.closeLeg("user-a", request("short-leg", "100", `${venue}-hedge-close`));
+    assert.equal(hedge.runtime.calls.length, 1);
+    assert.equal(hedge.runtime.calls[0]?.positionDirection, "SHORT");
+    assert.equal(managedCurrentQuantity(hedge.store.get("user-a", hedge.arbitrageId)!.legs[1]!), "0");
+
+    const hedgeLong = setup(t, {
+      venue, quantity: "100", positionMode: "HEDGE", actualLongQuantity: "100", actualShortQuantity: "50",
+    });
+    hedgeLong.runtime.resultStatus = "CONFIRMED";
+    hedgeLong.runtime.confirmedQuantity = "100";
+    await hedgeLong.service.closeLeg("user-a", request("long-leg", "100", `${venue}-hedge-long-close`));
+    assert.equal(hedgeLong.runtime.calls.length, 1);
+    assert.equal(hedgeLong.runtime.calls[0]?.positionDirection, "LONG");
+    assert.equal(managedCurrentQuantity(hedgeLong.store.get("user-a", hedgeLong.arbitrageId)!.legs[0]!), "0");
+
+    const wrongBucket = setup(t, {
+      venue, quantity: "100", positionMode: "HEDGE", actualLongQuantity: "100", actualShortQuantity: "20",
+    });
+    await assert.rejects(
+      () => wrongBucket.service.closeLeg("user-a", request("short-leg", "100", `${venue}-wrong-bucket`)),
+      (error: unknown) => error instanceof ArbitrageExecutionCloseError
+        && error.category === "close_quantity_unavailable",
+    );
+    assert.equal(wrongBucket.runtime.calls.length, 0, `${venue} wrong HEDGE bucket must not reach Provider mutation`);
+    assert.equal(wrongBucket.store.get("user-a", wrongBucket.arbitrageId)?.legs[1].confirmedClosedQuantity, "0");
+  });
+}
+
 test("HEDGE close fails closed when the target bucket is insufficient", async (t) => {
   const fixture = setup(t, {
     positionMode: "HEDGE", actualLongQuantity: "20", actualShortQuantity: "0.5",
@@ -100,23 +198,119 @@ test("HEDGE close fails closed when the target bucket is insufficient", async (t
   assert.equal(fixture.runtime.calls.length, 0);
 });
 
-test("SHORT A/B/C/D close reverses the managed delta without re-sizing from current net", async (t) => {
+test("ONE_WAY close allows only a sufficient same-direction Provider net and always uses reduceOnly", async (t) => {
   for (const scenario of [
-    { name: "A", currentNet: "-20", reduceOnly: true },
-    { name: "B", currentNet: "-120", reduceOnly: true },
-    { name: "C", currentNet: "80", reduceOnly: false },
-    { name: "D", currentNet: "-10", reduceOnly: false },
-  ]) {
-    const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: scenario.currentNet });
+    { name: "short-larger", legId: "short-leg", currentNet: "-150", side: "buy" },
+    { name: "short-equal", legId: "short-leg", currentNet: "-100", side: "buy" },
+    { name: "long-larger", legId: "long-leg", currentNet: "150", side: "sell" },
+    { name: "long-equal", legId: "long-leg", currentNet: "100", side: "sell" },
+  ] as const) {
+    const fixture = setup(t, { quantity: "100", actualQuantity: scenario.currentNet.replace("-", ""), actualSignedNetQuantity: scenario.currentNet });
     fixture.runtime.resultStatus = "CONFIRMED";
-    fixture.runtime.confirmedQuantity = "20";
+    fixture.runtime.confirmedQuantity = "100";
 
-    const result = await fixture.service.closeLeg("user-a", request("short-leg", "20", `short-${scenario.name}`));
+    const result = await fixture.service.closeLeg("user-a", request(scenario.legId, "100", scenario.name));
 
-    assert.equal(fixture.runtime.calls[0]?.side, "buy", scenario.name);
-    assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "20", scenario.name);
-    assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, scenario.reduceOnly, scenario.name);
-    assert.equal(managedSignedDelta(result.instance.legs[1]), "0", scenario.name);
+    assert.equal(fixture.runtime.calls.length, 1, scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.side, scenario.side, scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "100", scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, true, scenario.name);
+    const closedLeg = result.instance.legs.find((leg) => leg.legId === scenario.legId)!;
+    assert.equal(managedCurrentQuantity(closedLeg), "0", scenario.name);
+  }
+});
+
+test("ONE_WAY close fails closed for insufficient, flat, or opposite Provider Reality", async (t) => {
+  for (const scenario of [
+    { name: "short-insufficient", legId: "short-leg", actualQuantity: "20", currentNet: "-20" },
+    { name: "short-flat", legId: "short-leg", actualQuantity: "0", currentNet: "0" },
+    { name: "short-opposite", legId: "short-leg", actualQuantity: "20", currentNet: "20" },
+    { name: "long-insufficient", legId: "long-leg", actualQuantity: "20", currentNet: "20" },
+    { name: "long-flat", legId: "long-leg", actualQuantity: "0", currentNet: "0" },
+    { name: "long-opposite", legId: "long-leg", actualQuantity: "20", currentNet: "-20" },
+  ] as const) {
+    const fixture = setup(t, {
+      quantity: "100",
+      actualQuantity: scenario.actualQuantity,
+      actualSignedNetQuantity: scenario.currentNet,
+    });
+    const before = fixture.store.get("user-a", fixture.arbitrageId)!;
+
+    await assert.rejects(
+      () => fixture.service.closeLeg("user-a", request(scenario.legId, "100", scenario.name)),
+      (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+      scenario.name,
+    );
+
+    const after = fixture.store.get("user-a", fixture.arbitrageId)!;
+    assert.equal(fixture.runtime.calls.length, 0, scenario.name);
+    assert.equal(after.executionReferences.length, before.executionReferences.length, scenario.name);
+    assert.deepEqual(after.legs.map((leg) => leg.confirmedClosedQuantity), ["0", "0"], scenario.name);
+    assert.deepEqual(after.legs.map(managedCurrentQuantity), ["100", "100"], scenario.name);
+    assert.equal(after.status, before.status, scenario.name);
+  }
+});
+
+test("MISMATCH is descriptive; requested-quantity Reality gates remain authoritative", async (t) => {
+  const sufficient = setup(t, { quantity: "100", actualSignedNetQuantity: "-150" });
+  sufficient.verificationStatus = "MISMATCH";
+  sufficient.runtime.resultStatus = "CONFIRMED";
+  sufficient.runtime.confirmedQuantity = "100";
+  await sufficient.service.closeLeg("user-a", request("short-leg", "100", "mismatch-sufficient"));
+  assert.equal(sufficient.runtime.calls.length, 1);
+
+  const insufficient = setup(t, { quantity: "100", actualQuantity: "20", actualSignedNetQuantity: "-20" });
+  insufficient.verificationStatus = "MISMATCH";
+  await assert.rejects(
+    () => insufficient.service.closeLeg("user-a", request("short-leg", "100", "mismatch-insufficient")),
+    (error: unknown) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "close_quantity_unavailable",
+  );
+  assert.equal(insufficient.runtime.calls.length, 0);
+});
+
+test("HEDGE close uses only the managed direction bucket", async (t) => {
+  for (const scenario of [
+    { name: "short", legId: "short-leg", long: "50", short: "100", side: "buy" },
+    { name: "long", legId: "long-leg", long: "100", short: "50", side: "sell" },
+  ] as const) {
+    const fixture = setup(t, {
+      quantity: "100", positionMode: "HEDGE",
+      actualLongQuantity: scenario.long, actualShortQuantity: scenario.short,
+    });
+    fixture.runtime.resultStatus = "CONFIRMED";
+    fixture.runtime.confirmedQuantity = "100";
+
+    await fixture.service.closeLeg("user-a", request(scenario.legId, "100", `hedge-${scenario.name}`));
+
+    assert.equal(fixture.runtime.calls.length, 1, scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.side, scenario.side, scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.positionDirection, scenario.name.toUpperCase(), scenario.name);
+    assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, true, scenario.name);
+  }
+});
+
+test("HEDGE close fails closed when only the opposite bucket has additional quantity", async (t) => {
+  for (const scenario of [
+    { name: "short", legId: "short-leg", long: "50", short: "20" },
+    { name: "long", legId: "long-leg", long: "20", short: "50" },
+  ] as const) {
+    const fixture = setup(t, {
+      quantity: "100", positionMode: "HEDGE",
+      actualLongQuantity: scenario.long, actualShortQuantity: scenario.short,
+    });
+    const before = fixture.store.get("user-a", fixture.arbitrageId)!;
+
+    await assert.rejects(
+      () => fixture.service.closeLeg("user-a", request(scenario.legId, "100", `hedge-insufficient-${scenario.name}`)),
+      (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+    );
+
+    const after = fixture.store.get("user-a", fixture.arbitrageId)!;
+    assert.equal(fixture.runtime.calls.length, 0, scenario.name);
+    assert.equal(after.executionReferences.length, before.executionReferences.length, scenario.name);
+    assert.deepEqual(after.legs.map((leg) => leg.confirmedClosedQuantity), ["0", "0"], scenario.name);
+    assert.equal(after.status, before.status, scenario.name);
   }
 });
 
@@ -139,18 +333,22 @@ test("partial SHORT close reverses only the requested managed slice and plans th
   assert.equal(managedSignedDelta(second.instance.legs[1]!), "0");
 });
 
-test("Binance formal close preserves CLOSING when the reversal is not reduce-only", async (t) => {
+test("Binance formal close does not mutate when Provider Reality is opposite", async (t) => {
   const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: "80", formalVenue: "binance" });
   fixture.binanceService!.providerOrder = realPathBinanceOrder({ filledQuantity: 20, requestedQuantity: 20 });
-  const result = await fixture.service.closeLeg("user-a", request("short-leg", "20", "formal-binance-c"));
+  const before = fixture.store.get("user-a", fixture.arbitrageId)!;
 
-  assert.equal(fixture.binanceService!.placeInputs[0]?.side, "Buy");
-  assert.equal(fixture.binanceService!.placeInputs[0]?.quantity, "20");
-  assert.equal(fixture.binanceService!.placeInputs[0]?.reduceOnly, false);
-  assert.equal(result.instance.executionReferences.at(-1)?.phase, "CLOSING");
-  assert.equal(result.instance.executionReferences.at(-1)?.quantityEffect, "DECREASE");
-  assert.equal(result.instance.legs[1]?.confirmedClosedQuantity, "20");
-  assert.equal(managedSignedDelta(result.instance.legs[1]!), "0");
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("short-leg", "20", "formal-binance-c")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+  );
+
+  const after = fixture.store.get("user-a", fixture.arbitrageId)!;
+  assert.equal(fixture.binanceService!.providerMutations, 0);
+  assert.equal(after.executionReferences.length, before.executionReferences.length);
+  assert.equal(after.legs[1]?.confirmedClosedQuantity, "0");
+  assert.equal(managedSignedDelta(after.legs[1]!), "-20");
+  assert.equal(after.status, before.status);
 });
 
 test("Binance formal close passes a reduce-only managed slice through the real provider boundary", async (t) => {
@@ -191,6 +389,7 @@ test("Binance close recovery rebuilds the runtime without a second provider plac
     {} as never, fixture.store, {} as never, fixture.binanceRecords!,
     new FormalExecutionRuntimeRegistry().register(formalExecutionRuntime("binance", restartedRuntime)),
     {} as never,
+    {} as never,
   );
   const recovered = await commands.reconcileLeg("user-a", { arbitrageId: fixture.arbitrageId, legId: "short-leg" });
 
@@ -201,31 +400,32 @@ test("Binance close recovery rebuilds the runtime without a second provider plac
   assert.equal(managedSignedDelta(recovered.instance.legs[1]!), "-10");
 });
 
-test("OKX formal close preserves CLOSING when the reversal crosses the current net", async (t) => {
+test("OKX formal close does not mutate when the requested close crosses flat", async (t) => {
   const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: "-10", formalVenue: "okx", longInstrumentId: "DOGE-USDT-PERP" });
   fixture.okxService!.providerOrder = {
     ...fixture.okxService!.providerOrder,
     status: "CONFIRMED", filledQuantity: "20", requestedQuantity: "20",
   };
-  const result = await fixture.service.closeLeg("user-a", request("short-leg", "20", "formal-okx-d"));
+  const before = fixture.store.get("user-a", fixture.arbitrageId)!;
 
-  assert.equal(fixture.okxService!.placeRequests[0]?.side, "buy");
-  assert.equal(fixture.okxService!.placeRequests[0]?.quantity, "200");
-  assert.equal(fixture.okxService!.placeRequests[0]?.reduceOnly, false);
-  assert.equal(fixture.okxService!.placeRequests[0]?.tdMode, "cross");
-  assert.equal(fixture.okxService!.positionMode, "net_mode");
-  assert.equal(fixture.okxService!.identityValidations, 1);
-  assert.equal(result.instance.executionReferences.at(-1)?.phase, "CLOSING");
-  assert.equal(result.instance.executionReferences.at(-1)?.quantityEffect, "DECREASE");
-  assert.equal(result.instance.legs[1]?.confirmedClosedQuantity, "0");
-  assert.equal(managedSignedDelta(result.instance.legs[1]!), "-20");
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("short-leg", "20", "formal-okx-d")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+  );
+
+  const after = fixture.store.get("user-a", fixture.arbitrageId)!;
+  assert.equal(fixture.okxService!.placeRequests.length, 0);
+  assert.equal(after.executionReferences.length, before.executionReferences.length);
+  assert.equal(after.legs[1]?.confirmedClosedQuantity, "0");
+  assert.equal(managedSignedDelta(after.legs[1]!), "-20");
+  assert.equal(after.status, before.status);
 });
 
 test("OKX close recovery reuses the persisted execution identity without a second place", async (t) => {
   const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: "-120", formalVenue: "okx", longInstrumentId: "DOGE-USDT-PERP" });
   fixture.okxService!.providerOrder = {
     ...fixture.okxService!.providerOrder,
-    status: "CONFIRMED", requestedQuantity: "200", filledQuantity: "200",
+    side: "buy", status: "CONFIRMED", requestedQuantity: "200", filledQuantity: "200",
   };
   const first = await fixture.service.closeLeg("user-a", request("short-leg", "20", "okx-recovery-close"));
   const placeCount = fixture.okxService!.placeRequests.length;
@@ -247,6 +447,7 @@ test("OKX close recovery reuses the persisted execution identity without a secon
     {} as never,
     fixture.okxRecords!,
     restartedRegistry,
+    {} as never,
     {} as never,
   );
   const recovered = await commands.reconcileLeg("user-a", {
@@ -272,14 +473,14 @@ test("OKX close recovery reuses the persisted execution identity without a secon
 });
 
 test("partial SHORT close retains only the unfilled managed delta", async (t) => {
-  const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: "80" });
+  const fixture = setup(t, { quantity: "20", actualSignedNetQuantity: "-80" });
   fixture.runtime.resultStatus = "PENDING_CONFIRMATION";
   fixture.runtime.confirmedQuantity = "8";
 
   const result = await fixture.service.closeLeg("user-a", request("short-leg", "20", "short-partial"));
 
   assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "20");
-  assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, false);
+  assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
   assert.equal(result.instance.legs[1].confirmedClosedQuantity, "8");
   assert.equal(managedSignedDelta(result.instance.legs[1]), "-12");
 });
@@ -331,9 +532,10 @@ test("unavailable snapshots and ownership limits fail closed while step mismatch
 
   const flat = setup(t);
   flat.actualQuantity = "0";
-  flat.runtime.resultStatus = "CONFIRMED";
-  flat.runtime.confirmedQuantity = "0.5";
-  await flat.service.closeLeg("user-a", request("long-leg", "0.5"));
+  await assert.rejects(
+    () => flat.service.closeLeg("user-a", request("long-leg", "0.5")),
+    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_quantity_unavailable",
+  );
 
   const invalidStep = setup(t);
   invalidStep.runtime.resultStatus = "CONFIRMED";
@@ -432,7 +634,7 @@ test("DOGE Spot close uses base-commission attribution without borrowing unrelat
   assert.equal(fixture.runtime.calls[1]?.side, "buy");
   assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
   assert.equal(fixture.runtime.calls[1]?.quantity.quantity, "73");
-  assert.equal(closed.instance.status, "CLOSED");
+  assert.equal(closed.instance.status, "RESIDUAL");
   assert.deepEqual(closed.instance.legs.map(managedCurrentQuantity), ["1", "0"]);
 });
 
@@ -490,7 +692,7 @@ test("Bitget Spot attribution and Perp reduceOnly close reuse the shared residua
   assert.equal(fixture.runtime.calls[1]?.venue, "bitget");
   assert.equal(fixture.runtime.calls[1]?.side, "buy");
   assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
-  assert.equal(closed.instance.status, "CLOSED");
+  assert.equal(closed.instance.status, "RESIDUAL");
 });
 
 test("legalization never raises quantity to minQty or minNotional and fails before runtime", async (t) => {
@@ -545,7 +747,7 @@ test("accepted DOGE Spot residual never permits a partial perpetual close to rea
     availableBaseQuantity: "73.855",
     attributableBaseQuantity: "72.927",
   });
-  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.resultStatus = "FAILED";
   fixture.runtime.confirmedQuantity = "72";
 
   await fixture.service.closeLeg("user-a", request("long-leg", "72", "safe-spot-close-partial-perp"));
@@ -642,7 +844,28 @@ test("duplicate and concurrent close commands cause one runtime mutation", async
   assert.equal(fixture.runtime.calls.length, 1);
 });
 
-test("concurrent distinct commands cannot claim overlapping closes for the same leg", async (t) => {
+test("Close command fingerprint normalizes equivalent quantities and conflicts on a changed quantity", async (t) => {
+  const fixture = setup(t);
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "0.5";
+  const commandId = "close-payload-fingerprint";
+
+  const first = await fixture.service.closeLeg("user-a", request("long-leg", "0.5", commandId));
+  const replay = await fixture.service.closeLeg("user-a", request("long-leg", "0.5000", commandId));
+  assert.equal(first.idempotentReplay, false);
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(fixture.runtime.calls.length, 1);
+
+  await assert.rejects(
+    () => fixture.service.closeLeg("user-a", request("long-leg", "0.25", commandId)),
+    (error: unknown) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "idempotency_conflict",
+  );
+  assert.equal(fixture.runtime.calls.length, 1);
+  assert.equal(fixture.store.get("user-a", fixture.arbitrageId)?.legs[0].confirmedClosedQuantity, "0.5");
+});
+
+test("concurrent distinct close commands serialize and recheck the remaining managed ceiling", async (t) => {
   const fixture = setup(t);
   fixture.runtime.resultStatus = "CONFIRMED";
   fixture.runtime.confirmedQuantity = "0.5";
@@ -652,10 +875,99 @@ test("concurrent distinct commands cannot claim overlapping closes for the same 
     fixture.service.closeLeg("user-a", request("long-leg", "0.5", "close-b")),
   ]);
 
-  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 1);
-  assert.equal(outcomes.filter(({ status }) => status === "rejected").length, 1);
-  assert.equal(fixture.runtime.calls.length, 1);
-  assert.equal(fixture.store.get("user-a", fixture.arbitrageId)?.legs[0].confirmedClosedQuantity, "0.5");
+  assert.equal(outcomes.filter(({ status }) => status === "fulfilled").length, 2);
+  assert.equal(fixture.runtime.calls.length, 2);
+  assert.equal(fixture.store.get("user-a", fixture.arbitrageId)?.legs[0].confirmedClosedQuantity, "1");
+});
+
+test("a close waiting behind another mutation re-reads Reality inside serialization ownership", async (t) => {
+  const mutationSerializer = new ProviderMutationSerializer();
+  const fixture = setup(t, { mutationSerializer });
+  let entered!: () => void;
+  let release!: () => void;
+  const ownershipEntered = new Promise<void>((resolve) => { entered = resolve; });
+  const holdOwnership = new Promise<void>((resolve) => { release = resolve; });
+  const competingOpening = mutationSerializer.runExclusive({
+    userId: "user-a", venue: "binance", accountId: "account-a", canonicalInstrumentId: "BTC-USDT-PERP",
+  }, async () => {
+    entered();
+    await holdOwnership;
+    fixture.actualQuantity = "0";
+    fixture.actualSignedNetQuantity = "0";
+  });
+  await ownershipEntered;
+  const close = fixture.service.closeLeg("user-a", request("long-leg", "1", "close-after-open"));
+  release();
+  await competingOpening;
+  await assert.rejects(close, /真实仓位不足/u);
+  assert.equal(fixture.runtime.calls.length, 0);
+});
+
+test("shared close safety reports full availability from ONE_WAY, HEDGE, and Spot facts", async (t) => {
+  for (const scenario of [
+    { name: "SHORT exact", legId: "short-leg", actual: "100", signed: "-100", full: true, safe: "100" },
+    { name: "SHORT larger", legId: "short-leg", actual: "150", signed: "-150", full: true, safe: "100" },
+    { name: "SHORT smaller", legId: "short-leg", actual: "20", signed: "-20", full: false, safe: "20" },
+    { name: "SHORT flat", legId: "short-leg", actual: "0", signed: "0", full: false, safe: "0" },
+    { name: "SHORT opposite", legId: "short-leg", actual: "20", signed: "20", full: false, safe: "0" },
+    { name: "LONG exact", legId: "long-leg", actual: "100", signed: "100", full: true, safe: "100" },
+    { name: "LONG larger", legId: "long-leg", actual: "150", signed: "150", full: true, safe: "100" },
+    { name: "LONG smaller", legId: "long-leg", actual: "20", signed: "20", full: false, safe: "20" },
+    { name: "LONG flat", legId: "long-leg", actual: "0", signed: "0", full: false, safe: "0" },
+    { name: "LONG opposite", legId: "long-leg", actual: "20", signed: "-20", full: false, safe: "0" },
+  ] as const) {
+    await t.test(scenario.name, async (child) => {
+      const fixture = setup(child, {
+        quantity: "100",
+        actualQuantity: scenario.actual,
+        actualSignedNetQuantity: scenario.signed,
+      });
+      const safety = await fixture.service.evaluateCloseSafety("user-a", fixture.arbitrageId, scenario.legId);
+      assert.equal(safety.fullManagedCloseAvailable, scenario.full);
+      assert.equal(safety.safeClosableQuantity, scenario.safe);
+      assert.equal(fixture.runtime.calls.length, 0);
+    });
+  }
+
+  for (const scenario of [
+    { name: "HEDGE SHORT exact bucket", legId: "short-leg", long: "50", short: "100", full: true, safe: "100" },
+    { name: "HEDGE SHORT insufficient bucket", legId: "short-leg", long: "50", short: "20", full: false, safe: "20" },
+    { name: "HEDGE LONG exact bucket", legId: "long-leg", long: "100", short: "50", full: true, safe: "100" },
+    { name: "HEDGE LONG insufficient bucket", legId: "long-leg", long: "20", short: "50", full: false, safe: "20" },
+  ] as const) {
+    await t.test(scenario.name, async (child) => {
+      const fixture = setup(child, {
+        quantity: "100",
+        positionMode: "HEDGE",
+        actualQuantity: scenario.legId === "short-leg" ? scenario.short : scenario.long,
+        actualLongQuantity: scenario.long,
+        actualShortQuantity: scenario.short,
+      });
+      const safety = await fixture.service.evaluateCloseSafety("user-a", fixture.arbitrageId, scenario.legId);
+      assert.equal(safety.fullManagedCloseAvailable, scenario.full);
+      assert.equal(safety.safeClosableQuantity, scenario.safe);
+      assert.equal(fixture.runtime.calls.length, 0);
+    });
+  }
+
+  for (const scenario of [
+    { name: "Spot full", attributable: "1", available: "1", full: true, safe: "1" },
+    { name: "Spot available short", attributable: "1", available: "0.4", full: false, safe: "0.4" },
+    { name: "Spot attribution short", attributable: "0.3", available: "2", full: false, safe: "0.3" },
+  ] as const) {
+    await t.test(scenario.name, async (child) => {
+      const fixture = setup(child, {
+        longInstrumentId: "BTC-USDT-SPOT",
+        quantity: "1",
+        attributableBaseQuantity: scenario.attributable,
+        availableBaseQuantity: scenario.available,
+      });
+      const safety = await fixture.service.evaluateCloseSafety("user-a", fixture.arbitrageId, "long-leg");
+      assert.equal(safety.fullManagedCloseAvailable, scenario.full);
+      assert.equal(safety.safeClosableQuantity, scenario.safe);
+      assert.equal(fixture.runtime.calls.length, 0);
+    });
+  }
 });
 
 function setup(
@@ -663,6 +975,7 @@ function setup(
   options: Readonly<{
     longInstrumentId?: "BTC-USDT-SPOT" | "BTC-USDT-PERP" | "DOGE-USDT-SPOT" | "DOGE-USDT-PERP";
     longVenue?: "binance" | "okx" | "bitget";
+    venue?: "binance" | "okx" | "bybit" | "bitget";
     quantity?: string;
     quantityStep?: string;
     quantityPrecision?: number;
@@ -671,11 +984,13 @@ function setup(
     availableBaseQuantity?: string;
     attributableBaseQuantity?: string;
     attributionError?: boolean;
+    actualQuantity?: string;
     actualSignedNetQuantity?: string;
     positionMode?: "ONE_WAY" | "HEDGE";
     actualLongQuantity?: string;
     actualShortQuantity?: string;
     formalVenue?: "binance" | "okx" | "bitget";
+    mutationSerializer?: ProviderMutationSerializer;
   }> = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-close-"));
@@ -694,7 +1009,7 @@ function setup(
       {
         legId: "long-leg",
         role: "LONG",
-        venue: options.longVenue ?? options.formalVenue ?? "binance",
+        venue: options.longVenue ?? options.formalVenue ?? options.venue ?? "binance",
         accountId: "account-a",
         instrumentId: options.longInstrumentId ?? "BTC-USDT-PERP",
         plannedQuantity: quantity,
@@ -702,7 +1017,7 @@ function setup(
       {
         legId: "short-leg",
         role: "SHORT",
-        venue: options.formalVenue ?? "binance",
+        venue: options.formalVenue ?? options.venue ?? "binance",
         accountId: "account-a",
         instrumentId: options.longInstrumentId?.startsWith("DOGE-") ? "DOGE-USDT-PERP" : "BTC-USDT-PERP",
         plannedQuantity: quantity,
@@ -739,10 +1054,10 @@ function setup(
         ))
       : runtime;
   const runtimes = new FormalExecutionRuntimeRegistry()
-    .register(formalExecutionRuntime(options.formalVenue ?? "binance", formalRuntime));
+    .register(formalExecutionRuntime(options.formalVenue ?? options.venue ?? "binance", formalRuntime));
   const fixture = {
     verificationStatus: "MATCHED" as "MATCHED" | "MISMATCH" | "UNKNOWN",
-    actualQuantity: quantity as string | null,
+    actualQuantity: (options.actualQuantity ?? quantity) as string | null,
     actualSignedNetQuantity: options.actualSignedNetQuantity,
     positionMode: options.positionMode ?? "ONE_WAY",
     actualLongQuantity: options.actualLongQuantity ?? (options.positionMode === "HEDGE" ? "0" : quantity),
@@ -817,7 +1132,8 @@ function setup(
       },
     },
     runtimes,
-    { clock: () => closeClock += 10, createIntentId: (_user, _arbitrage, leg, command) => `close-${leg}-${command}` },
+    { clock: () => closeClock += 10, createIntentId: (_user, _arbitrage, leg, command) => `close-${leg}-${command}`,
+      mutationSerializer: options.mutationSerializer },
   );
   return Object.assign(fixture, { service, store, runtime, arbitrageId, binanceService, binanceRecords, okxService, okxRecords, okxReferences, formalRuntime });
 }
@@ -859,6 +1175,7 @@ function executionIdOf(record: Readonly<{ executionId: string | null }>) {
 
 class FakeRuntime implements FormalExecutionRuntime {
   readonly calls: import("../cex/ExecutionIntent").ExecutionIntent[] = [];
+  readonly managedCloseCalls: import("../cex/ExecutionIntent").ExecutionIntent[] = [];
   resultStatus: ExecutionRecord["status"] = "CONFIRMED";
   confirmedQuantity: string | null = "0.5";
   delay = false;
@@ -880,6 +1197,11 @@ class FakeRuntime implements FormalExecutionRuntime {
       }),
       confirmedQuantity: this.confirmedQuantity,
     };
+  }
+
+  async executeManagedClose(intent: import("../cex/ExecutionIntent").ExecutionIntent) {
+    this.managedCloseCalls.push(intent);
+    return this.execute(intent);
   }
 
   async reconcile(): ReturnType<FormalExecutionRuntime["reconcile"]> {
@@ -980,6 +1302,7 @@ class RealPathOkxService {
   providerOrder: OkxProviderOrder = {
     instId: "DOGE-USDT-SWAP", ordId: "8001", clOrdId: "testclord", status: "CONFIRMED",
     statusReason: null, rawState: "filled", requestedQuantity: "20", filledQuantity: "20",
+    side: "buy", posSide: "net", reduceOnly: true, tdMode: "cross",
     averagePrice: "1", fee: "0", updatedAt: now + 1_000,
   };
   providerMutations = 0;

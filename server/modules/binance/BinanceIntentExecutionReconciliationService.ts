@@ -49,6 +49,7 @@ export class BinanceIntentExecutionReconciliationService {
         symbol: stored.order.symbol,
         clientOrderId: stored.order.clientOrderId,
         providerOrderId: stored.order.providerOrderId,
+        positionSide: stored.order.positionSide,
       });
       return binanceExecutionObservationForOrder(order, observedAt);
     } catch {

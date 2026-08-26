@@ -4,7 +4,7 @@
 
 > 面向新团队成员、新 AI Agent 和新工作区的快速入口。
 >
-> 更新时间：2026-08-24
+> 更新时间：2026-08-26
 
 当前版本的详细交接报告见 [`docs/reports/2026-08/CURRENT_VERSION_HANDOFF.md`](./docs/reports/2026-08/CURRENT_VERSION_HANDOFF.md)。
 
@@ -108,6 +108,10 @@ Binance DOGEUSDT 与 OKX DOGE Spot LONG + Perpetual SHORT 均已通过 productio
 
 - 路径：`/app/arbitrage`、`/app/my-arbitrage`
 - 已有公开市场扫描、机会分析、正式 Draft/Preview、Final Confirm、Resume、ExecutionRecord、reconcile、close 和 known-order cancel。
+- `SPOT_PERPETUAL` 采用一次确认的一键 Start，服务端强制 Spot first；Spot 只有完整 `CONFIRMED` 才自动执行 Perpetual second。`FAILED0`、partial、`PENDING_CONFIRMATION`、`UNKNOWN` 不自动执行第二腿；partial continue 必须显式触发且不重试第一腿。`PERPETUAL_PERPETUAL` 保留现有合法 first-leg 选择。
+- Account Reality、Active Managed Exposure 与 Instance Hedge Delta 是不同事实。`CLOSED` / `closedAt` 表示实例管理责任终结，可来自正常 close、Management Release 或两者组合，不等于账户已清仓；Release 不伪造 confirmed close。
+- trading halt 阻止 INCREASE，但允许正式管理仓位 DECREASE、已知订单 cancel、query、reconcile 和 recovery。恢复 query-first，不把 timeout 当 `FAILED0`，不把 not found 当 `NOT_DISPATCHED`，`UNKNOWN` fail closed 且重启不自动派发第二腿。
+- `executionMode` 是服务端 Draft/Confirm/Start 均会验证的显式契约；OKX `PRICE_PRIORITY` 当前不可执行，`EXECUTION_PRIORITY` 保持可用。机会评分、APR、funding、capacity 等只用于分析与人工决策，不是手动 Start hard gate。
 - Binance 当前正式支持 USDT Spot LONG 与 USDT Linear Perpetual LONG/SHORT；generic canonical asset data 当前包含 BTC、ETH、DOGE、XAUT。
 - DOGEUSDT 实例已完成 Spot BUY 73、Perp SHORT 73、Perp reduceOnly close 73、Spot close 72；最终 Futures position=0、active orders=0、instance=CLOSED、unresolved=0。
 - Spot opening commission 使用 Binance `myTrades` 权威归因；实例残余按 Trading Rules fail-closed，不使用账户总余额或外部余额补足。
@@ -117,11 +121,10 @@ Binance DOGEUSDT 与 OKX DOGE Spot LONG + Perpetual SHORT 均已通过 productio
   `arbitrage-85ffc5966169a9a9e3ca41cc87740946ecdb2da130ddff53ebd5790e80486b06` 最终 `CLOSED`：
   Spot BUY `110`、实际 base exposure `109.89`、Perp SHORT/close `100`、Spot close `109.89`；
   四个唯一 Provider 订单均 `CONFIRMED`，最终 Perp=`FLAT`、active orders=`0`。
-- Position Verification foundation 已通过 `ACCEPTED` checkpoint：Binance/OKX perpetual reader 统一输出
-  canonical `PositionSnapshot`，再由通用 verifier 进入套利验证服务。
+- 四家 venue 的 PositionReader 均在边界内解释原生字段并统一输出 canonical `PositionSnapshot`，再由通用 verifier 进入套利验证服务；已删除无生产调用的旧 OKX verifier。
 - Bybit、Bitget 已接入 Formal Runtime 与 mutation safety/readiness 代码；Bitget 已完成 DOGE Spot/Perp
   真实闭环，Bybit 尚无生产闭环验收。GET-only Account Read 通过不代表真实闭环已验收。
-- 当前四 venue gate 持久开启，必须在每轮真实资金自测前执行 fresh readiness、identity、仓位与数量规则核对。
+- 四 venue 执行链已接入；每轮真实资金自测前仍必须执行 fresh gate、readiness、identity、仓位与数量规则核对。
 
 ## 策略 Paper
 
@@ -164,7 +167,7 @@ SQLite 当前保存用户、账户、订单、持仓、流水和审计数据。�
 - 本交接提交中的 Funding Strategy / IntentBuilder / Coordinator / Bridge 仍没有 production consumer；
   正式 Funding 执行继续以 `Draft -> ArbitrageExecutionCommandService -> FormalRuntime` 为准。
 - `CANCEL_TRANSPORT_PERSISTENCE_ATOMICITY_RISK = RESIDUAL`：Provider HTTP transport 与 SQLite dispatch 状态无法形成真正原子事务，继续保留 query-first、fail-closed 与人工接管边界。
-- 第一腿完成、第二腿尚未人工确认期间存在短时裸露敞口，这是当前安全阶段的已知产品残余风险。
+- 一键 Start 不是跨 Provider 原子事务；第一腿完整确认后，第二腿失败、部分或未知仍可能留下单腿 exposure，系统停止自动推进并要求人工处置。
 - 历史 `RESIDUAL` instance、外部余额和新实例 managed exposure 必须严格隔离，不能按 symbol、方向或账户总余额自动归属。
 - 已删除的旧 Funding Manual 文件只属于主线 cleanup 候选；production revision `2bcea91e...` 尚未包含
   本交接提交，部署前必须单独复核。
@@ -180,6 +183,7 @@ SQLite 当前保存用户、账户、订单、持仓、流水和审计数据。�
 | --- | --- |
 | AI 工作规则 | [`AGENTS.md`](./AGENTS.md) |
 | 当前项目事实 | [`PROJECT_CONTEXT.md`](./PROJECT_CONTEXT.md) |
+| 套利产品能力与用户流程 | [`docs/ARBITRAGE_PRODUCT.md`](./docs/ARBITRAGE_PRODUCT.md) |
 | 架构和安全边界 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) |
 | 协作与验收 | [`项目沟通规则.md`](./项目沟通规则.md) |
 | 重要行为变化 | [`CHANGELOG.md`](./CHANGELOG.md) |

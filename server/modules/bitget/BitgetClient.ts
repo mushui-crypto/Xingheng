@@ -166,7 +166,9 @@ export class BitgetClient {
     }
     const root = record(payload, "Bitget response");
     if (!response.ok || root.code !== "00000") {
-      throw new BitgetProviderError("provider_rejected", optionalString(root.msg) ?? "Bitget request was rejected.", optionalString(root.code));
+      const providerCode = optionalString(root.code);
+      const category = bitgetAuthenticationCode(providerCode) ? "credential_validation_failed" : "provider_rejected";
+      throw new BitgetProviderError(category, safeBitgetProviderMessage(category, providerCode), providerCode);
     }
     return root;
   }
@@ -197,8 +199,11 @@ function placeRequest(input: BitgetPlaceOrderRequest): BitgetPlaceOrderRequest {
   if (category === "SPOT" && orderType === "market" && side === "buy") {
     throw new Error("Bitget Spot market BUY uses quote quantity and is unavailable for canonical base execution.");
   }
-  if (category === "USDT-FUTURES" && input.reduceOnly !== "yes" && input.reduceOnly !== "no") {
+  if (category === "USDT-FUTURES" && input.posSide === undefined && input.reduceOnly !== "yes" && input.reduceOnly !== "no") {
     throw new Error("Bitget USDT-FUTURES order requires explicit reduceOnly.");
+  }
+  if (category === "USDT-FUTURES" && input.posSide !== undefined && input.reduceOnly !== undefined) {
+    throw new Error("Bitget HEDGE order must express close semantics with side and posSide, not reduceOnly.");
   }
   if (category === "USDT-FUTURES" && input.posSide !== undefined && input.posSide !== "long" && input.posSide !== "short") {
     throw new Error("Bitget posSide is invalid.");
@@ -223,12 +228,20 @@ function getOrderRequest(input: BitgetGetOrderRequest): BitgetGetOrderRequest {
 function providerOrder(row: Record<string, unknown>, category: BitgetProviderOrder["category"]): BitgetProviderOrder {
   const rawStatus = orderStatus(row);
   const fee = feeDetail(row.feeDetail);
+  const posSide = providerEnum(row.posSide, ["long", "short"], "Bitget order posSide");
+  const tradeSide = providerEnum(row.tradeSide, ["open", "close"], "Bitget order tradeSide");
+  const holdMode = providerEnum(row.holdMode, ["one_way_mode", "hedge_mode"], "Bitget order holdMode");
+  const reduceOnly = providerEnum(typeof row.reduceOnly === "string" ? row.reduceOnly.toLowerCase() : row.reduceOnly, ["yes", "no"], "Bitget order reduceOnly");
   return Object.freeze({
     category,
     symbol: providerSymbol(row.symbol),
     orderId: identifier(row.orderId, "Bitget orderId"),
     clientOid: clientOid(row.clientOid, "Bitget clientOid"),
     side: row.side === "buy" || row.side === "sell" ? row.side : invalid("Bitget order side is invalid."),
+    ...(posSide === undefined ? {} : { posSide }),
+    ...(tradeSide === undefined ? {} : { tradeSide }),
+    ...(holdMode === undefined ? {} : { holdMode }),
+    ...(reduceOnly === undefined ? {} : { reduceOnly }),
     status: status(rawStatus), rawStatus,
     requestedQuantity: decimal(row.qty, "Bitget order qty"),
     filledQuantity: decimal(row.cumExecQty, "Bitget cumulative executed quantity"),
@@ -286,6 +299,27 @@ function clientOid(value: unknown, label: string) { const text = requiredString(
 function identifier(value: unknown, label: string) { const text = typeof value === "number" && Number.isSafeInteger(value) ? String(value) : requiredString(value, label); if (!/^[A-Za-z0-9_-]{1,64}$/u.test(text)) throw new Error(`${label} is invalid.`); return text; }
 function requiredString(value: unknown, label: string) { const text = typeof value === "string" ? value.trim() : ""; if (!text || text.length > 512) throw new BitgetProviderError("provider_response_invalid", `${label} is invalid.`); return text; }
 function optionalString(value: unknown) { return typeof value === "string" && value.trim() ? value.trim() : null; }
+function bitgetAuthenticationCode(code: string | null) {
+  return code === "40001" || code === "40002" || code === "40003" || code === "40004"
+    || code === "40005" || code === "40006" || code === "40008" || code === "40009"
+    || code === "40011" || code === "40012" || code === "40036" || code === "40037";
+}
+export function safeBitgetProviderMessage(category: string, providerCode: string | null) {
+  if (category === "credential_validation_failed") return "Bitget credential validation failed.";
+  if (category === "provider_transport_error" || category === "provider_unavailable") {
+    return "Bitget provider is currently unavailable.";
+  }
+  if (category === "provider_response_invalid") return "Bitget returned an invalid response.";
+  if (category === "position_mode_unsupported") return "Bitget position mode is unsupported.";
+  if (providerCode === "25204") return "Bitget order lookup did not find the requested order.";
+  return "Bitget request was rejected.";
+}
+function providerEnum<T extends string>(value: unknown, allowed: readonly T[], label: string): T | undefined {
+  const text = optionalString(value)?.toLowerCase();
+  if (text === undefined || text === null) return undefined;
+  if ((allowed as readonly string[]).includes(text)) return text as T;
+  throw new BitgetProviderError("provider_response_invalid", `${label} is invalid.`);
+}
 function decimal(value: unknown, label: string) { const text = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : ""; if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(text)) throw new BitgetProviderError("provider_response_invalid", `${label} is invalid.`); return normalizeDecimal(text); }
 function positiveDecimal(value: unknown, label: string) { const result = decimal(value, label); if (result === "0") throw new Error(`${label} must be positive.`); return result; }
 function optionalPositiveDecimal(value: unknown, label: string) { return value === undefined || value === null || value === "" ? null : positiveDecimal(value, label); }

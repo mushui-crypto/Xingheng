@@ -53,6 +53,7 @@ export class BybitHistoricalExecutionEvidenceSource implements HistoricalExecuti
       recoveryAnchorRequiredBeforeMutation: true,
       exactOrderEvidence: exact.exactOrderEvidence,
       activeOrderEvidence: activeCounts.every((count) => count === 0) ? "NONE" as const : "PRESENT" as const,
+      absenceScope: "HISTORICAL_WINDOW_UNCERTAIN" as const,
       checkedAt: exact.checkedAt,
     });
   }

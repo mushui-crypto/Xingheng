@@ -23,6 +23,7 @@ test("builds an authoritative two-leg NOTIONAL_USDT preview without trusting pro
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
   });
 
@@ -38,12 +39,44 @@ test("builds an authoritative two-leg NOTIONAL_USDT preview without trusting pro
   ]);
 });
 
+test("manual execution capability ignores adverse opportunity economics when all technical safety gates pass", async () => {
+  const baseline = opportunity("binance", "binance");
+  const adverse = {
+    ...baseline,
+    netApr: -5,
+    score: 1,
+    capacityUsd: 1,
+    automationEligible: false,
+    disqualifiers: ["capacity_warning", "funding_sign_reversed"],
+    automationDisqualifiers: ["low_score", "unfavorable_funding"],
+    shortLeg: {
+      ...baseline.shortLeg,
+      fundingRate: -0.0001,
+      currentFundingApr: -10,
+      historicalFundingApr: -8,
+    },
+  } satisfies ArbitrageOpportunity;
+  const service = draftService(adverse, new FakeContexts());
+
+  const result = await service.preview("user-a", {
+    opportunityId: adverse.id,
+    horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+
+  assert.equal(result.legs.every((leg) => leg.planning.status === "PLANNED"), true);
+  assert.equal(result.legs.every((leg) => leg.executionAvailable), true);
+  assert.equal(result.allLegsExecutable, true);
+});
+
 test("plans ASSET_QUANTITY and exposes OKX when its formal runtime and credential are eligible", async () => {
   const service = draftService(opportunity("binance", "okx"), new FakeContexts());
 
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 365,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
 
@@ -54,6 +87,46 @@ test("plans ASSET_QUANTITY and exposes OKX when its formal runtime and credentia
   assert.equal(result.allLegsExecutable, true);
 });
 
+test("rejects OKX PRICE_PRIORITY from the registered production runtime capability", async () => {
+  const service = draftService(opportunity("binance", "okx"), new FakeContexts());
+
+  const result = await service.preview("user-a", {
+    opportunityId: "opportunity-1",
+    horizonDays: 90,
+    executionMode: "PRICE_PRIORITY",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+  });
+
+  assert.equal(result.executionMode, "PRICE_PRIORITY");
+  assert.equal(result.legs[0].executionAvailable, true);
+  assert.deepEqual(result.legs[1].capability, {
+    status: "UNAVAILABLE",
+    reasonCode: "EXECUTION_MODE_NOT_SUPPORTED",
+  });
+  assert.equal(result.legs[1].planning.status, "PLANNED");
+  assert.equal(result.legs[1].executionAvailable, false);
+  assert.equal(result.allLegsExecutable, false);
+});
+
+test("preserves PRICE_PRIORITY capability for Binance, Bybit, and Bitget", async (t) => {
+  for (const venue of ["binance", "bybit", "bitget"] as const) {
+    await t.test(venue, async () => {
+      const result = await draftService(opportunity(venue, venue), new FakeContexts(), {
+        registeredVenues: [venue],
+        bybitCredential: "enabled",
+        bitgetCredential: "enabled",
+      }).preview("user-a", {
+        opportunityId: "opportunity-1",
+        horizonDays: 90,
+        executionMode: "PRICE_PRIORITY",
+        quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+      });
+      assert.equal(result.legs.every((leg) => leg.capability.reasonCode === "AVAILABLE"), true);
+      assert.equal(result.allLegsExecutable, true);
+    });
+  }
+});
+
 test("exposes an enabled Bybit Draft without a credential-global position mode field", async () => {
   const service = draftService(opportunity("binance", "bybit"), new FakeContexts(), {
     registeredVenues: ["binance", "bybit"],
@@ -62,6 +135,7 @@ test("exposes an enabled Bybit Draft without a credential-global position mode f
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
   assert.equal(result.legs[1].capability.reasonCode, "AVAILABLE");
@@ -77,6 +151,7 @@ test("exposes an enabled Bitget Draft only when formal runtime and persisted one
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
   assert.equal(result.legs[0].planning.status, "PLANNED");
@@ -98,7 +173,8 @@ test("keeps Bybit Draft credential readiness fail-closed", async (t) => {
       }).preview("user-a", {
         opportunityId: "opportunity-1",
         horizonDays: 90,
-        quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+        executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
       });
       assert.equal(result.legs[1].capability.reasonCode, "CREDENTIAL_NOT_CONFIGURED");
       assert.equal(result.legs[1].executionAvailable, false);
@@ -112,7 +188,8 @@ test("keeps unregistered Bybit and Bitget capabilities unavailable without hidin
     const result = await draftService(opportunity("binance", venue), new FakeContexts()).preview("user-a", {
       opportunityId: "opportunity-1",
       horizonDays: 90,
-      quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+      executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
     });
     assert.equal(result.legs[1].planning.status, "PLANNED");
     assert.equal(result.legs[1].capability.reasonCode, "EXECUTION_CAPABILITY_NOT_IMPLEMENTED");
@@ -127,6 +204,7 @@ test("rejects an OKX Draft when the credential is not enabled", async () => {
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
 
@@ -150,7 +228,8 @@ test("rejects an OKX Draft when persisted Provider conditions are not valid", as
       const result = await service.preview("user-a", {
         opportunityId: "opportunity-1",
         horizonDays: 90,
-        quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
+        executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
       });
       assert.equal(result.legs[1].executionAvailable, false);
       assert.equal(result.allLegsExecutable, false);
@@ -165,6 +244,7 @@ test("rejects an OKX Draft when the formal runtime is not registered", async () 
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
 
@@ -179,6 +259,7 @@ test("isolates Binance and OKX Draft credential states", async () => {
   }).preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
   assert.equal(okxDisabled.legs[0].executionAvailable, true);
@@ -189,6 +270,7 @@ test("isolates Binance and OKX Draft credential states", async () => {
   }).preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
   assert.equal(binanceMissing.legs[0].executionAvailable, false);
@@ -204,6 +286,7 @@ test("same-account opposite perpetual legs are not advertised as jointly executa
   const result = await draftService(perpetualPair, new FakeContexts()).preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "2" },
   });
   assert.equal(result.legs.every((leg) => leg.executionAvailable), true);
@@ -216,6 +299,7 @@ test("returns structured Planner minimum errors and never raises the user budget
   const result = await service.preview("user-a", {
     opportunityId: "opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
   });
 
@@ -235,7 +319,8 @@ test("fails closed when a client supplies providerSymbol or a complete Funding I
     () => service.preview("user-a", {
       opportunityId: "opportunity-1",
       horizonDays: 90,
-      quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+      executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
       providerSymbol: "BTCUSDT",
     }),
     /不允许的字段：providerSymbol/u,
@@ -244,10 +329,23 @@ test("fails closed when a client supplies providerSymbol or a complete Funding I
     () => service.preview("user-a", {
       opportunityId: "opportunity-1",
       horizonDays: 90,
-      quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+      executionMode: "EXECUTION_PRIORITY",
+    quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
       fundingIntent: { intentId: "client-controlled" },
     }),
     /不允许的字段：fundingIntent/u,
+  );
+});
+
+test("requires executionMode so a direct Draft API call cannot bypass mode capability", async () => {
+  const service = draftService(opportunity("binance", "okx"), new FakeContexts());
+  await assert.rejects(
+    () => service.preview("user-a", {
+      opportunityId: "opportunity-1",
+      horizonDays: 90,
+      quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+    }),
+    /请求缺少字段：executionMode/u,
   );
 });
 
@@ -307,7 +405,7 @@ function draftService(
 ) {
   const runtimes = new FormalExecutionRuntimeRegistry();
   for (const venue of options.registeredVenues ?? ["binance", "okx"]) {
-    runtimes.register(formalExecutionRuntime(venue, unusedRuntime));
+    runtimes.register(formalExecutionRuntime(venue, venue === "okx" ? okxProductionRuntime : unusedRuntime));
   }
   return new ArbitrageExecutionDraftService(
     { getSnapshot: async (horizonDays: 90 | 365) => snapshot(horizonDays, value) },
@@ -377,6 +475,19 @@ function draftService(
 }
 
 const unusedRuntime: FormalExecutionRuntime = Object.freeze({
+  execute: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },
+  reconcile: async () => { throw new Error("Draft capability resolution must not query a Provider."); },
+  cancel: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },
+});
+
+const okxProductionRuntime: FormalExecutionRuntime = Object.freeze({
+  openingExecutionCapability: ({ executionMode }: Readonly<{
+    executionMode: "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
+    marketType: "spot" | "perpetual";
+  }>) => Object.freeze({
+    supported: executionMode === "EXECUTION_PRIORITY",
+    reasonCode: executionMode === "EXECUTION_PRIORITY" ? "AVAILABLE" : "EXECUTION_MODE_NOT_SUPPORTED",
+  }),
   execute: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },
   reconcile: async () => { throw new Error("Draft capability resolution must not query a Provider."); },
   cancel: async () => { throw new Error("Draft capability resolution must not execute a Provider mutation."); },

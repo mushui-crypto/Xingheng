@@ -334,6 +334,9 @@ function parseOrder(row: Record<string, unknown>, expected: Readonly<{ instId: s
     statusReason: mapped.reason,
     rawState,
     ...(row.side === undefined ? {} : { side: orderSide(row.side) }),
+    ...(row.posSide === undefined || row.posSide === "" ? {} : { posSide: orderPositionSide(row.posSide) }),
+    ...(row.reduceOnly === undefined || row.reduceOnly === "" ? {} : { reduceOnly: providerBoolean(row.reduceOnly, "OKX order reduceOnly") }),
+    ...(row.tdMode === undefined || row.tdMode === "" ? {} : { tdMode: orderTradeMode(row.tdMode) }),
     requestedQuantity: decimal(row.sz, "OKX order quantity"),
     filledQuantity: decimal(row.accFillSz, "OKX order filled quantity"),
     averagePrice: nullableDecimal(row.avgPx, "OKX order average price"),
@@ -456,6 +459,22 @@ function exactAsset(value: unknown, label: string) {
 function orderSide(value: unknown): OkxProviderOrder["side"] {
   if (value === "buy" || value === "sell") return value;
   throw invalid("OKX order side is invalid.");
+}
+
+function orderPositionSide(value: unknown): NonNullable<OkxProviderOrder["posSide"]> {
+  if (value === "net" || value === "long" || value === "short") return value;
+  throw invalid("OKX order posSide is invalid.");
+}
+
+function providerBoolean(value: unknown, label: string) {
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  throw invalid(`${label} is invalid.`);
+}
+
+function orderTradeMode(value: unknown): NonNullable<OkxProviderOrder["tdMode"]> {
+  if (value === "cross" || value === "isolated" || value === "cash") return value;
+  throw invalid("OKX order tdMode is invalid.");
 }
 
 function isSpotInstrumentId(instId: string) {

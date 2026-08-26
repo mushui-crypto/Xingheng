@@ -65,8 +65,8 @@ STRATEGY_HISTORY_REPORT_PATH=/app/strategy-data/route-b-history.json
 历史报告生产生成使用一次性 tools service，不在 API runtime 中执行：
 
 ```bash
-docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history
-docker compose --env-file .env.production --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
+docker compose -p xingheng --env-file .env.production --profile strategy-tools run --rm strategy-history
+docker compose -p xingheng --env-file .env.production --profile strategy-tools run --rm strategy-history npm run strategy:history:check -- /app/strategy-data/route-b-history.json
 ```
 
 ## 数据限制

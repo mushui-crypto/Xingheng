@@ -10,7 +10,7 @@ import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbit
 import type { FormalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { ArbitrageExecutionPlanningContextSource } from "../arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
-import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordRecoveryStore, ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
@@ -71,6 +71,49 @@ test("Bybit service maps Spot/Linear BUY/SELL, quantity, marketUnit, positionIdx
   }
 });
 
+test("Bybit HEDGE close uses reduceOnly plus the target positionIdx and rejects the wrong side", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  provider.readLinearPositionMode = async () => "HEDGE";
+  const service = new BybitIntentExecutionService(provider, {
+    ...serviceOptions(),
+    mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true }),
+    mutationEffect: "DECREASE",
+  });
+  await service.execute(executionIntent({ side: "buy", positionDirection: "SHORT", reduceOnly: true }));
+  assert.equal(provider.placeRequests[0]?.side, "Buy");
+  assert.equal(provider.placeRequests[0]?.positionIdx, 2);
+  assert.equal(provider.placeRequests[0]?.reduceOnly, true);
+
+  const invalid = new FakeBybitRuntimeService("bybit:account-a");
+  invalid.readLinearPositionMode = async () => "HEDGE";
+  await assert.rejects(() => new BybitIntentExecutionService(invalid, serviceOptions()).execute(executionIntent({
+    side: "buy", positionDirection: "LONG", reduceOnly: true,
+  })), /does not reduce/u);
+  assert.equal(invalid.placeRequests.length, 0);
+});
+
+test("Bybit HEDGE LONG and SHORT openings preserve positionIdx and omit close semantics", async () => {
+  for (const fixture of [
+    { direction: "LONG" as const, side: "buy" as const, providerSide: "Buy" as const, positionIdx: 1 as const },
+    { direction: "SHORT" as const, side: "sell" as const, providerSide: "Sell" as const, positionIdx: 2 as const },
+  ]) {
+    const provider = new FakeBybitRuntimeService("bybit:account-a");
+    provider.readLinearPositionMode = async () => "HEDGE";
+    const result = await new BybitIntentExecutionService(provider, serviceOptions()).execute(executionIntent({
+      side: fixture.side,
+      positionDirection: fixture.direction,
+      reduceOnly: false,
+    }));
+
+    assert.equal(provider.placeRequests[0]?.side, fixture.providerSide);
+    assert.equal(provider.placeRequests[0]?.positionIdx, fixture.positionIdx);
+    assert.equal(provider.placeRequests[0]?.reduceOnly, false);
+    assert.equal(result.positionIdx, fixture.positionIdx);
+    assert.equal(result.positionMode, "HEDGE");
+    assert.equal(result.positionDirection, fixture.direction);
+  }
+});
+
 test("Bybit ACK never becomes CONFIRMED and authoritative query handles partial fill, terminal fill, UNKNOWN, and identity mismatch", async () => {
   const provider = new FakeBybitRuntimeService("bybit:account-a");
   const recovery: unknown[] = [];
@@ -116,6 +159,44 @@ test("Bybit ACK never becomes CONFIRMED and authoritative query handles partial 
   assert.match(queried.statusReason ?? "", /side/u);
 });
 
+test("Bybit HEDGE authoritative query confirms only the persisted target positionIdx", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  provider.readLinearPositionMode = async () => "HEDGE";
+  const service = new BybitIntentExecutionService(provider, serviceOptions());
+  const accepted = await service.execute(executionIntent({
+    side: "sell",
+    positionDirection: "SHORT",
+    reduceOnly: false,
+  }));
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP",
+    category: accepted.category,
+    symbol: accepted.symbol,
+    orderId: accepted.providerOrderId,
+    orderLinkId: accepted.clientOrderId,
+    expectedProviderQuantity: accepted.expectedProviderQuantity,
+    expectedSide: accepted.expectedSide,
+    positionIdx: accepted.positionIdx,
+    positionMode: accepted.positionMode,
+    positionDirection: accepted.positionDirection,
+  };
+  provider.orderStatus = "CONFIRMED";
+  provider.filledQuantity = "100";
+
+  assert.equal((await service.query(lookup)).observation.state, "CONFIRMED");
+  provider.orderPositionIdxOverride = 1;
+  const wrongBucket = await service.query(lookup);
+  assert.equal(wrongBucket.observation.state, "UNKNOWN");
+  assert.equal(wrongBucket.observation.filledBaseQuantity, "0");
+  assert.match(wrongBucket.statusReason ?? "", /positionIdx/u);
+  provider.orderPositionIdxOverride = 2;
+  provider.orderReduceOnlyOverride = true;
+  const wrongSemantic = await service.query(lookup);
+  assert.equal(wrongSemantic.observation.state, "UNKNOWN");
+  assert.equal(wrongSemantic.observation.filledBaseQuantity, "0");
+  assert.match(wrongSemantic.statusReason ?? "", /reduceOnly/u);
+});
+
 test("Bybit position mode, LIVE switch, and kill switch fail closed before fake Provider mutation", async (t) => {
   await t.test("positionIdx is not one-way", async () => {
     const provider = new FakeBybitRuntimeService("bybit:account-a");
@@ -149,6 +230,44 @@ test("Bybit position mode, LIVE switch, and kill switch fail closed before fake 
       assert.equal(provider.placeRequests.length, 0);
     });
   }
+});
+
+test("halted Bybit allows trusted managed closes and known-order cancel but blocks ordinary SELL", async () => {
+  const halted = new ExecutionMutationSafetyGuard({
+    liveTradingEnabled: false,
+    killSwitchActive: true,
+    venues: { bybit: { liveTradingEnabled: false, killSwitchActive: true } },
+  });
+  for (const instrumentId of ["DOGE-USDT-PERP", "DOGE-USDT-SPOT"] as const) {
+    const provider = new FakeBybitRuntimeService("bybit:account-a");
+    const service = new BybitIntentExecutionService(provider, {
+      ...serviceOptions(), mutationSafetyGuard: halted, mutationEffect: "DECREASE",
+    });
+    await service.execute(executionIntent({
+      instrumentId,
+      side: "sell",
+      ...(instrumentId.endsWith("-PERP") ? { positionDirection: "LONG", reduceOnly: true } : {}),
+    }));
+    assert.equal(provider.placeRequests.length, 1);
+  }
+
+  const ordinaryProvider = new FakeBybitRuntimeService("bybit:account-a");
+  const ordinary = new BybitIntentExecutionService(ordinaryProvider, {
+    ...serviceOptions(), mutationSafetyGuard: halted,
+  });
+  await assert.rejects(() => ordinary.execute(executionIntent({ instrumentId: "DOGE-USDT-SPOT", side: "sell" })));
+  assert.equal(ordinaryProvider.placeRequests.length, 0);
+
+  const cancelProvider = new FakeBybitRuntimeService("bybit:account-a");
+  const cancel = new BybitIntentExecutionService(cancelProvider, {
+    ...serviceOptions(), mutationSafetyGuard: halted,
+  });
+  await cancel.cancel({
+    instrumentId: "DOGE-USDT-PERP", category: "linear", symbol: "DOGEUSDT",
+    orderId: "bybit-order-1", orderLinkId: "bybit-link-1", expectedProviderQuantity: "100",
+    expectedSide: "Sell", positionIdx: 0, positionMode: "ONE_WAY", positionDirection: "LONG",
+  }, { userId: "user-a", accountId: "bybit:account-a", instrumentId: "DOGE-USDT-PERP" });
+  assert.equal(cancelProvider.cancelRequests.length, 1);
 });
 
 test("Bybit Provider write uncertainty remains UNKNOWN after the mutation call begins", async () => {
@@ -188,6 +307,95 @@ test("Bybit formal runtime exposes NOT_DISPATCHED for a safety rejection without
   assert.equal(result.confirmedQuantity, "0");
   assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
   assert.equal(provider.placeRequests.length, 0);
+});
+
+test("Bybit runtime promotion preserves HEDGE mode, direction, and positionIdx", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  provider.readLinearPositionMode = async () => "HEDGE";
+  const records = new InMemoryRecoveryRecordStore();
+  const references = new InMemoryBybitExecutionOrderReferenceStore();
+  const runtime = new BybitIntentExecutionRuntime(
+    { run: async (_userId, operation) => operation(provider) },
+    records,
+    references,
+    { ...serviceOptions(), createExecutionId: () => "execution-bybit-hedge-promotion" },
+  );
+
+  const result = await runtime.execute(executionIntent({
+    side: "sell",
+    positionDirection: "SHORT",
+    reduceOnly: false,
+  }));
+
+  assert.equal(result.executionRecord.status, "PENDING_CONFIRMATION");
+  assert.equal(result.orderReference?.positionMode, "HEDGE");
+  assert.equal(result.orderReference?.positionDirection, "SHORT");
+  assert.equal(result.orderReference?.positionIdx, 2);
+  assert.equal(await references.loadRecoveryForUser("user-a", "execution-bybit-hedge-promotion"), null);
+});
+
+test("Bybit HEDGE recovery does not promote Provider evidence from another positionIdx", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  await provider.placeOrder({
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Sell",
+    orderType: "Market",
+    qty: "100",
+    orderLinkId: "bybit-hedge-recovery",
+    reduceOnly: false,
+    positionIdx: 2,
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+  });
+  provider.orderStatus = "CONFIRMED";
+  provider.filledQuantity = "100";
+  provider.orderPositionIdxOverride = 1;
+  const record = createExecutionRecord({
+    executionId: "execution-bybit-hedge-recovery",
+    intentId: "intent-bybit-hedge-recovery",
+    executionAttemptId: "intent-bybit-hedge-recovery",
+    userId: "user-a",
+    venue: "bybit",
+    accountId: "bybit:account-a",
+    instrumentId: "DOGE-USDT-PERP",
+    status: "UNKNOWN",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const records = new InMemoryRecoveryRecordStore();
+  records.create(record);
+  const references = new InMemoryBybitExecutionOrderReferenceStore();
+  references.createRecovery({
+    executionId: record.executionId,
+    intentId: record.intentId,
+    userId: record.userId,
+    accountId: record.accountId,
+    instrumentId: record.instrumentId,
+    category: "linear",
+    symbol: "DOGEUSDT",
+    orderLinkId: "bybit-hedge-recovery",
+    expectedProviderQuantity: "100",
+    expectedSide: "Sell",
+    positionIdx: 2,
+    positionMode: "HEDGE",
+    positionDirection: "SHORT",
+    createdAt: now,
+    updatedAt: now,
+  });
+  const runtime = new BybitIntentExecutionRuntime(
+    { run: async (_userId, operation) => operation(provider) },
+    records,
+    references,
+    serviceOptions(),
+  );
+
+  const result = await runtime.reconcile("user-a", record.executionId);
+
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.orderReference, null);
+  assert.equal(await references.loadForUser("user-a", record.executionId), null);
+  assert.equal((await references.loadRecoveryForUser("user-a", record.executionId))?.positionIdx, 2);
 });
 
 test("Bybit normal business Command reaches the formal chain while positionIdx remains a dynamic fail-closed preflight", async (t) => {
@@ -231,6 +439,7 @@ test("Bybit disabled or incomplete credential is rejected by Draft before the bu
   const draft = await fixture.drafts.preview("user-a", {
     opportunityId: "business-opportunity-1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" },
   });
   assert.equal(draft.legs.find((leg) => leg.venue === "bybit")?.executionAvailable, false);
@@ -360,7 +569,7 @@ function serviceOptions() {
 }
 
 function executionIntent(input: Partial<{
-  instrumentId: string; side: "buy" | "sell"; reduceOnly: boolean;
+  instrumentId: string; side: "buy" | "sell"; reduceOnly: boolean; positionDirection: "LONG" | "SHORT";
 }> = {}): ExecutionIntent {
   const instrumentId = input.instrumentId ?? "DOGE-USDT-PERP";
   return createExecutionIntent({
@@ -369,7 +578,9 @@ function executionIntent(input: Partial<{
     venue: "bybit",
     accountId: "bybit:account-a",
     instrumentId,
-    ...(instrumentId.endsWith("-PERP") ? { positionDirection: input.side === "buy" ? "LONG" as const : "SHORT" as const } : {}),
+    ...(instrumentId.endsWith("-PERP")
+      ? { positionDirection: input.positionDirection ?? (input.side === "buy" ? "LONG" as const : "SHORT" as const) }
+      : {}),
     side: input.side ?? "buy",
     quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "100" },
     orderConstraints: { reduceOnly: input.reduceOnly ?? false },
@@ -389,7 +600,10 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
   orderStatus: BybitProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
   orderSideOverride?: "Buy" | "Sell";
+  orderPositionIdxOverride?: 0 | 1 | 2;
+  orderReduceOnlyOverride?: boolean;
   placeFailure?: Error;
+  readLinearPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
   private lastOrder?: BybitPlaceOrderRequest;
 
   constructor(private readonly accountId: string) {}
@@ -424,7 +638,10 @@ class FakeBybitRuntimeService implements BybitIntentRuntimeService {
       averagePrice: this.filledQuantity === "0" ? null : "0.1",
       fee: "0",
       feeCurrency: null,
-      ...(placed.positionIdx === undefined ? {} : { positionIdx: placed.positionIdx }),
+      ...(placed.positionIdx === undefined
+        ? {}
+        : { positionIdx: this.orderPositionIdxOverride ?? placed.positionIdx }),
+      ...(placed.reduceOnly === undefined ? {} : { reduceOnly: this.orderReduceOnlyOverride ?? placed.reduceOnly }),
       ...(placed.marketUnit === undefined ? {} : { marketUnit: placed.marketUnit }),
       updatedAt: now,
     };
@@ -504,7 +721,21 @@ function businessCommandFixture(
     credentials,
     records,
     runtimes,
-    { contexts, spotAttributions: {} },
+    { evaluate: async (_userId, instance) => instance.legs
+      .filter((leg) => leg.instrumentId.endsWith("-PERP"))
+      .map((leg) => ({
+        legId: leg.legId,
+        targetDirection: leg.role,
+        positionMode: "ONE_WAY" as const,
+        currentSignedNetQuantity: "0",
+        openingAttributionSafe: true,
+        reason: "ONE_WAY_FLAT" as const,
+        checkedAt: now,
+      })) },
+    { contexts, spotAttributions: {}, continuationSafety: {
+      loadFreshVerification: async () => null,
+      evaluate: async () => { throw new Error("not used"); },
+    } },
     { clock: () => now, intentTtlMs: 30_000 },
   );
   return {
@@ -526,7 +757,7 @@ function businessSnapshot(horizonDays: 90 | 365): ArbitrageDashboardSnapshot {
     nextFundingTime: kind === "perpetual" ? now + 3_600_000 : null,
   });
   const opportunity: ArbitrageOpportunity = {
-    id: "business-opportunity-1", longLeg: leg("binance", "spot", "binance-spot-leg"),
+    id: "business-opportunity-1", longLeg: leg("binance", "perpetual", "binance-perp-leg"),
     shortLeg: leg("bybit", "perpetual", "bybit-perp-leg"), strategyType: "cross_venue_arbitrage",
     strategyLabel: "套利", matchQuality: "exact", matchLabel: "精确匹配", currentGrossApr: 10,
     historicalGrossApr: 8, netApr: 5, persistenceRatio: 0.8, annualizedTradingCostApr: 2,

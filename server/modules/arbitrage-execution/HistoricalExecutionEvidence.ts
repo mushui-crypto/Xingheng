@@ -6,6 +6,7 @@ export type HistoricalExecutionEvidence = Readonly<{
   recoveryAnchorRequiredBeforeMutation: boolean;
   exactOrderEvidence: "ABSENT" | "PRESENT" | "UNKNOWN";
   activeOrderEvidence: "NONE" | "PRESENT" | "UNKNOWN";
+  absenceScope: "AUTHORITATIVE" | "HISTORICAL_WINDOW_UNCERTAIN" | "UNKNOWN";
   checkedAt: number;
 }>;
 
@@ -46,6 +47,7 @@ function unknownEvidence(checkedAt: number): HistoricalExecutionEvidence {
     recoveryAnchorRequiredBeforeMutation: false,
     exactOrderEvidence: "UNKNOWN",
     activeOrderEvidence: "UNKNOWN",
+    absenceScope: "UNKNOWN",
     checkedAt,
   });
 }

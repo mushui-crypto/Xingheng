@@ -11,6 +11,22 @@
 
 ------------------------------------------------------------------------
 
+# CURRENT AUTHORITATIVE SNAPSHOT（Round 1–6 已封板）
+
+以下是当前代码语义的权威摘要；本文后续带日期的阶段记录和审查结论仅用于解释历史，如有冲突以本节为准。
+
+- `SPOT_PERPETUAL` 使用服务端一键 Start：用户一次确认，Spot 必须第一腿；Spot 完整 `CONFIRMED` 后才自动执行 Perpetual 第二腿。`FAILED0`、partial、`PENDING_CONFIRMATION`、`UNKNOWN` 均不自动执行第二腿；terminal partial 只能由用户显式 partial continue，按已确认可归因 Spot exposure 规划且不重试第一腿。
+- `PERPETUAL_PERPETUAL` 保留现有合法 first-leg 选择，不套用 Spot-first 规则。`/legs/confirm` 兼容入口仍然有效，不因当前编排语义而删除。
+- trading halt 阻止 INCREASE；正式管理仓位的 DECREASE、已知订单 cancel、query、reconcile 和 recovery 继续允许，并各自保持既有安全 gate。
+- Account Reality 是 Provider 账户事实；Active Managed Exposure 是实例管理责任账本；Instance Hedge Delta 是该实例可归因 signed exposure 之和，不是全账户 Delta。三者不得互相覆盖。
+- `CLOSED` 表示实例 Active Managed Exposure 已归零；`closedAt` 是管理责任终结时间。归零可以来自正常 close、Management Release 或两者组合，不证明 Provider 账户仓位已由系统全部平仓。Management Release 无 Provider mutation，不伪造 confirmed close。
+- restart 和 recovery 不自动恢复交易意图或自动派发第二腿；恢复始终 query-first。超时不等于 `FAILED0`，not found 不等于 `NOT_DISPATCHED`，`UNKNOWN` 必须 fail closed。
+- `executionMode` 是 Draft 的显式服务端契约，并在 Confirm / Start 重验。当前 OKX `PRICE_PRIORITY` capability 不可用，Draft/Confirm/Start 均 fail closed；`EXECUTION_PRIORITY` 保持可用。
+- `automationEligible`、entry status、disqualifiers、APR、funding、capacity 和 score 是分析、排序与人工决策信息，不是当前手动 Start 的硬门禁。
+- Round 1–6 已完成封板审查与对应修复，当前确认的该范围资金安全 P0/P1 为零。旧 chronology 中的手动第二腿、旧 verification、旧 halt 或旧 recovery 表述均已被本节和当前产品/架构文档取代。
+
+------------------------------------------------------------------------
+
 # 1. 项目认知
 
 本项目是一个已经持续开发中的自动交易系统。
@@ -425,8 +441,8 @@ position/order/funds mutation。
 -   此前文档中的标准 Release Workflow 属于未完整落地的草案；相关脚本和 trusted launcher
     不再作为当前部署前置。
 -   当前部署流程以 [`RELEASE_PROCESS.md`](./RELEASE_PROCESS.md) 为准：固定 commit SHA、固定
-    Docker image tag、`docker compose config`、`npm run build`、Docker build、`docker compose
-    up -d api web`、health/smoke check、SQLite backup/restore。
+    Docker image tag、`docker compose -p xingheng config`、`npm run build`、Docker build、
+    `docker compose -p xingheng up -d api web`、health/smoke check、SQLite backup/restore。
 -   部署可以在用户明确授权后执行，但部署不等于真实资金授权。
 -   部署流程不得自动打开 `LIVE_TRADING_ENABLED`，不得自动关闭 `BINANCE_KILL_SWITCH`，不得执行
     provider mutation、funding cycle、repair、retry 或 residual close。

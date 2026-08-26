@@ -325,6 +325,9 @@ function assertRecoveryMatchesReference(
     || recovery.clOrdId !== reference.clOrdId
     || recovery.expectedProviderQuantity !== reference.expectedProviderQuantity
     || recovery.expectedSide !== reference.expectedSide
+    || recovery.positionMode !== reference.positionMode
+    || recovery.positionDirection !== reference.positionDirection
+    || recovery.posSide !== reference.posSide
     || recovery.createdAt !== reference.createdAt
   ) {
     throw new Error("OKX recovered order identity does not match the persisted recovery reference.");

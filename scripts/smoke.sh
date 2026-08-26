@@ -11,6 +11,6 @@ case "${base_url#https://}" in
   *[:/@?#]*|*..*|.*|*.) echo "smoke URL is invalid" >&2; exit 78 ;;
 esac
 
-docker compose run --rm --no-deps \
+docker compose -p xingheng run --rm --no-deps \
   -e "SMOKE_BASE_URL=$base_url" \
   api node /app/scripts/deployment-smoke.mjs

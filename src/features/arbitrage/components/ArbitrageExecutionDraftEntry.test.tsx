@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { ArbitrageExecutionDraft } from "../../../api/arbitrageExecutionDraft";
+import type { ArbitrageExecutionDraft, ArbitrageHedgeWorkflow } from "../../../api/arbitrageExecutionDraft";
 import {
   ArbitrageExecutionDraftContent,
   ArbitrageExecutionDraftEntry,
@@ -78,6 +79,26 @@ test("confirmation content renders both legs and disables confirmation when one 
   assert.match(html, /本阶段未创建套利实例/u);
 });
 
+test("server execution-mode reason is rendered without a venue-specific UI rule", () => {
+  const value = draft(true);
+  const blocked: ArbitrageExecutionDraft = {
+    ...value,
+    executionMode: "PRICE_PRIORITY",
+    legs: [
+      value.legs[0],
+      {
+        ...value.legs[1],
+        capability: { status: "UNAVAILABLE", reasonCode: "EXECUTION_MODE_NOT_SUPPORTED" },
+        executionAvailable: false,
+      },
+    ],
+    allLegsExecutable: false,
+  };
+  const html = renderToStaticMarkup(content(blocked));
+  assert.match(html, /当前执行模式暂不支持/u);
+  assert.match(html, /disabled=""/u);
+});
+
 test("confirmation content displays Planner minimum errors in Chinese", () => {
   const value = draft(false);
   const failed: ArbitrageExecutionDraft = {
@@ -97,11 +118,15 @@ test("final confirmation is enabled only after both legs have planned and availa
   assert.equal(canConfirmDraft(draft(true)), true);
 });
 
-test("leg selection remains manual and second leg unlocks only after a complete confirmed first leg", () => {
+test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual after full confirmation", () => {
   const created = instance([]);
   assert.equal(canExecuteLeg(created, "long-leg"), true);
-  assert.equal(canExecuteLeg(created, "short-leg"), true);
+  assert.equal(canExecuteLeg(created, "short-leg"), false);
   assert.equal(canExecuteLeg(created, "foreign-leg"), false);
+
+  const startHtml = renderToStaticMarkup(content(draft(true), created));
+  assert.equal(startHtml.match(/以此腿开始对冲/gu)?.length, 1);
+  assert.match(startHtml, /永续合约腿将在现货成交后自动执行/u);
 
   const unknown = instance([reference("long-leg", "UNKNOWN", "0")]);
   assert.equal(canExecuteLeg(unknown, "short-leg"), false);
@@ -121,7 +146,58 @@ test("pending and unknown legs render a Chinese reconciliation action and latest
   assert.doesNotMatch(html, /provider_response/u);
 });
 
-function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInstance | null = null, resumeMode = false, resumeValidated = false) {
+test("terminal first partial renders high-priority risk and explicit continuation only", () => {
+  const current = instance([reference("long-leg", "FAILED", "0.0004")]);
+  const html = renderToStaticMarkup(content(draft(true), current, false, false, workflow("FIRST_LEG_PARTIAL", {
+    riskAction: "CONTINUE_PARTIAL_HEDGE",
+    confirmedQuantity: "0.0004",
+  })));
+  assert.match(html, /Risk Action Required/u);
+  assert.match(html, /继续对冲已成交部分/u);
+  assert.match(html, /planned 0\.001 · confirmed 0\.0004/u);
+  assert.doesNotMatch(html, /重新开始对冲/u);
+});
+
+test("UNKNOWN and live partial never render continuation, while FAILED0 renders restart", () => {
+  const unknown = renderToStaticMarkup(content(draft(true), instance([reference("long-leg", "UNKNOWN", "0")]), false, false,
+    workflow("FIRST_LEG_UNKNOWN", { riskAction: "RECONCILE", confirmedQuantity: "0" })));
+  assert.match(unknown, /重新核验/u);
+  assert.doesNotMatch(unknown, /继续对冲已成交部分|重新开始对冲/u);
+
+  const pending = renderToStaticMarkup(content(draft(true), instance([reference("long-leg", "PENDING_CONFIRMATION", "0.0004")]), false, false,
+    workflow("FIRST_LEG_PENDING", { confirmedQuantity: "0.0004" })));
+  assert.doesNotMatch(pending, /继续对冲已成交部分/u);
+
+  const failed = renderToStaticMarkup(content(draft(true), instance([reference("long-leg", "FAILED", "0")]), false, false,
+    workflow("FIRST_LEG_FAILED_ZERO", { riskAction: "RESTART_HEDGE", confirmedQuantity: "0" })));
+  assert.match(failed, /第一腿未成交，对冲未建立/u);
+  assert.match(failed, /重新开始对冲/u);
+});
+
+test("Start workflow polling is serial, recursive, abort-aware, and cleans up its timer", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const effectStart = source.indexOf("if (!open || !instance) return;");
+  const effectEnd = source.indexOf("async function planQuantity", effectStart);
+  const polling = source.slice(effectStart, effectEnd);
+  const awaitedReads = polling.indexOf("await Promise.all");
+  const successTimer = polling.indexOf("setTimeout(poll, 750)");
+
+  assert.ok(effectStart >= 0 && effectEnd > effectStart);
+  assert.match(polling, /const poll = async \(\) =>/u);
+  assert.doesNotMatch(polling, /setInterval/u);
+  assert.ok(awaitedReads >= 0 && successTimer > awaitedReads);
+  assert.match(polling, /if \(controller\.signal\.aborted\) return;/u);
+  assert.match(polling, /if \(!controller\.signal\.aborted && workflowPolling\) timer = setTimeout\(poll, 1000\);/u);
+  assert.match(polling, /controller\.abort\(\);[\s\S]*clearTimeout\(timer\)/u);
+});
+
+function content(
+  value: ArbitrageExecutionDraft,
+  currentInstance: ArbitrageInstance | null = null,
+  resumeMode = false,
+  resumeValidated = false,
+  currentWorkflow: ArbitrageHedgeWorkflow | null = null,
+) {
   return <ArbitrageExecutionDraftContent
     amount="20"
     draft={value}
@@ -129,6 +205,7 @@ function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInsta
     executionMode="PRICE_PRIORITY"
     loading={false}
     instance={currentInstance}
+    workflow={currentWorkflow}
     mode="NOTIONAL_USDT"
     resumeMode={resumeMode}
     resumeValidated={resumeValidated}
@@ -141,6 +218,20 @@ function content(value: ArbitrageExecutionDraft, currentInstance: ArbitrageInsta
     onReconcileLeg={() => undefined}
     validationNotice="本阶段未创建套利实例，也未提交任何订单。"
   />;
+}
+
+function workflow(
+  phase: ArbitrageHedgeWorkflow["phase"],
+  options: { riskAction?: ArbitrageHedgeWorkflow["riskAction"]; confirmedQuantity: string },
+): ArbitrageHedgeWorkflow {
+  return {
+    arbitrageId: "arbitrage-1", phase, requiresUserAction: options.riskAction !== undefined,
+    ...(options.riskAction ? { riskAction: options.riskAction } : {}), reason: null, derivedAt: 2,
+    firstLeg: { legId: "long-leg", executionIntentId: "intent-long-leg", status: phase.includes("UNKNOWN") ? "UNKNOWN"
+      : phase.includes("PENDING") ? "PENDING_CONFIRMATION" : "FAILED", requestedQuantity: "0.001",
+      confirmedQuantity: options.confirmedQuantity, activeManagedQuantity: options.confirmedQuantity, updatedAt: 2 },
+    secondLeg: null,
+  };
 }
 
 function dogeDraft(): ArbitrageExecutionDraft {
@@ -156,7 +247,7 @@ function dogeDraft(): ArbitrageExecutionDraft {
   });
   return {
     opportunityId: "doge-op", sourceIdentity: "dashboard:doge-op:1", sourceSnapshotGeneratedAt: 1,
-    horizonDays: 90, strategyType: "SPOT_PERPETUAL", quantityInput: { mode: "ASSET_QUANTITY", quantity: "72" },
+    horizonDays: 90, executionMode: "EXECUTION_PRIORITY", strategyType: "SPOT_PERPETUAL", quantityInput: { mode: "ASSET_QUANTITY", quantity: "72" },
     legs: [makeLeg("LONG", "DOGE-USDT-SPOT"), makeLeg("SHORT", "DOGE-USDT-PERP")], allLegsExecutable: true, generatedAt: 1,
   };
 }
@@ -200,6 +291,7 @@ function draft(allAvailable: boolean): ArbitrageExecutionDraft {
     sourceIdentity: "dashboard:op-1:1",
     sourceSnapshotGeneratedAt: Date.now(),
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     strategyType: "SPOT_PERPETUAL",
     quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
     legs: [leg("LONG", "binance"), leg("SHORT", "okx")],
@@ -225,11 +317,16 @@ function instance(executionReferences: ArbitrageInstance["executionReferences"])
       { legId: "short-leg", role: "SHORT", venue: "binance", accountId: "account-a", instrumentId: "BTC-USDT-PERP", plannedQuantity: "0.001", confirmedOpenedQuantity: "0", confirmedClosedQuantity: "0" },
     ],
     executionReferences,
+    managementReleases: [],
     pnl: { asset: null, cumulativeFundingPnl: null, realizedTradingPnl: null, feesCosts: null, cumulativeNetPnl: null, updatedAt: null },
   };
 }
 
-function reference(legId: string, status: "PENDING_CONFIRMATION" | "CONFIRMED" | "UNKNOWN", confirmedQuantity: string) {
+function reference(
+  legId: string,
+  status: "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN",
+  confirmedQuantity: string,
+) {
   return {
     arbitrageId: "arbitrage-1",
     legId,

@@ -28,7 +28,7 @@ function userId(request: express.Request) {
 function sendError(response: express.Response, error: unknown) {
   if (error instanceof ArbitrageExecutionCloseError) {
     const status = error.category === "arbitrage_instance_not_found" ? 404
-      : error.category === "execution_state_unknown" ? 409
+      : error.category === "execution_state_unknown" || error.category === "idempotency_conflict" ? 409
         : 400;
     response.status(status).json({ category: error.category, message: error.message });
     return;

@@ -14,6 +14,7 @@ export function registerArbitrageExecutionDraftRoutes(
       response.json(await service.createDraft(userId(request), {
         opportunityId: request.query.opportunityId,
         horizonDays: numericHorizon(request.query.horizonDays),
+        executionMode: request.query.executionMode,
       }));
     } catch (error) {
       sendError(response, error);

@@ -19,17 +19,26 @@ test("draft API sends only opportunity identity, horizon, and explicit quantity 
     return Response.json({ opportunityId: "op-1", legs: [] });
   };
   try {
-    await fetchArbitrageExecutionDraft("op/1", 90);
-    await previewArbitrageExecutionDraft("op/1", 90, { mode: "NOTIONAL_USDT", amountUsdt: "20" });
+    await fetchArbitrageExecutionDraft("op/1", 90, "PRICE_PRIORITY");
+    await previewArbitrageExecutionDraft(
+      "op/1",
+      90,
+      { mode: "NOTIONAL_USDT", amountUsdt: "20" },
+      "EXECUTION_PRIORITY",
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }
 
-  assert.equal(calls[0]?.url, "/api/arbitrage-execution/draft?opportunityId=op%2F1&horizonDays=90");
+  assert.equal(
+    calls[0]?.url,
+    "/api/arbitrage-execution/draft?opportunityId=op%2F1&horizonDays=90&executionMode=PRICE_PRIORITY",
+  );
   const body = JSON.parse(String(calls[1]?.init?.body));
   assert.deepEqual(body, {
     opportunityId: "op/1",
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "20" },
   });
   assert.equal("providerSymbol" in body, false);

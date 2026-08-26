@@ -31,6 +31,15 @@ test("preserves repeated UNKNOWN observations instead of forcing failure", () =>
   assert.equal(updated.updatedAt, now + 1_000);
 });
 
+test("full fill wins over an earlier terminal cancel observation", () => {
+  const updated = applyExecutionQueryObservation(
+    executionRecord({ status: "FAILED" }),
+    createExecutionQueryObservation({ state: "CONFIRMED", filledBaseQuantity: "1", observedAt: now + 1_000 }),
+  );
+
+  assert.equal(updated.status, "CONFIRMED");
+});
+
 test("rejects invalid query observations and backwards time", () => {
   assert.throws(
     () => createExecutionQueryObservation({ state: "FILLED", filledBaseQuantity: "0", observedAt: now }),

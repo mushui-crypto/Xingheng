@@ -10,12 +10,12 @@ if [ "${RESTORE_VALIDATE_ONLY:-false}" = "true" ]; then
   exit 0
 fi
 
-docker compose stop api
+docker compose -p xingheng stop api
 restart_api() {
-  docker compose up -d api web
+  docker compose -p xingheng up -d api web
 }
 trap restart_api EXIT HUP INT TERM
-docker compose --profile sqlite-ops run --rm --no-deps \
+docker compose -p xingheng --profile sqlite-ops run --rm --no-deps \
   -e SQLITE_RESTORE_SNAPSHOT="$backup_name" sqlite-restore
 trap - EXIT HUP INT TERM
-docker compose up -d --wait api web
+docker compose -p xingheng up -d --wait api web

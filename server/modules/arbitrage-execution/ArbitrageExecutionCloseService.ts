@@ -1,14 +1,13 @@
 import { createHash } from "node:crypto";
 import {
   compareUnsignedDecimals,
-  managedCurrentQuantity,
-  managedSignedDelta,
+  activeManagedQuantity,
   subtractUnsignedDecimals,
   type ArbitrageExecutionReference,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
-import { reduceOnlyEligible } from "../cex/position/PositionVerification";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
+import type { ArbitrageCommandFingerprint } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
@@ -24,10 +23,22 @@ import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
 } from "./FormalExecutionRuntimeRegistry";
+import {
+  ArbitrageCloseSafetyEvaluator,
+  type ArbitrageCloseSafetyResult,
+} from "./ArbitrageCloseSafetyEvaluator";
+import {
+  processProviderMutationSerializer,
+  type ProviderMutationSerializer,
+} from "./ProviderMutationSerializer";
+import {
+  canonicalCommandDecimal,
+  createArbitrageCommandPayloadFingerprint,
+} from "./ArbitrageCommandFingerprint";
 
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
-  "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
+  "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult" | "readCommandReplay"
 >;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
 type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
@@ -41,7 +52,8 @@ export class ArbitrageExecutionCloseError extends Error {
       | "close_capability_unavailable"
       | "position_verification_unavailable"
       | "close_quantity_unavailable"
-      | "execution_state_unknown",
+      | "execution_state_unknown"
+      | "idempotency_conflict",
     message: string,
   ) {
     super(message);
@@ -49,6 +61,8 @@ export class ArbitrageExecutionCloseError extends Error {
 }
 
 export class ArbitrageExecutionCloseService {
+  private readonly closeSafety: ArbitrageCloseSafetyEvaluator;
+
   constructor(
     private readonly instances: InstanceStore,
     private readonly positions: PositionVerifier,
@@ -60,8 +74,32 @@ export class ArbitrageExecutionCloseService {
       clock?: () => number;
       createIntentId?: (userId: string, arbitrageId: string, legId: string, commandId: string) => string;
       intentTtlMs?: number;
+      mutationSerializer?: ProviderMutationSerializer;
     }> = {},
-  ) {}
+  ) {
+    this.closeSafety = new ArbitrageCloseSafetyEvaluator(
+      positions,
+      planningContexts,
+      spotBalances,
+      spotAttributions,
+      () => this.now(),
+    );
+  }
+
+  async evaluateCloseSafety(
+    authenticatedUserId: string,
+    arbitrageIdInput: string,
+    legIdInput: string,
+  ): Promise<ArbitrageCloseSafetyResult> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const arbitrageId = identifier(arbitrageIdInput, "arbitrageId");
+    const legId = identifier(legIdInput, "legId");
+    const instance = this.instances.get(userId, arbitrageId);
+    if (!instance) throw closeError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const leg = instance.legs.find((candidate) => candidate.legId === legId);
+    if (!leg) throw closeError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    return (await this.closeSafety.evaluate(userId, instance, leg)).result;
+  }
 
   async closeLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
@@ -70,61 +108,53 @@ export class ArbitrageExecutionCloseService {
     if (!instance) throw closeError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!leg) throw closeError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    return (this.options.mutationSerializer ?? processProviderMutationSerializer).runExclusive({
+      userId,
+      venue: leg.venue,
+      accountId: leg.accountId,
+      canonicalInstrumentId: leg.instrumentId,
+    }, () => this.closeLegOnce(userId, request));
+  }
+
+  private async closeLegOnce(userId: string, request: CloseRequest): Promise<ArbitrageLegExecutionConfirmation> {
+    const instance = this.instances.get(userId, request.arbitrageId);
+    if (!instance) throw closeError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
+    if (!leg) throw closeError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
 
     const intentId = this.options.createIntentId?.(userId, instance.arbitrageId, leg.legId, request.commandId)
       ?? deterministicId("close-intent", userId, instance.arbitrageId, leg.legId, request.commandId);
-    const replay = instance.executionReferences.find((reference) => reference.executionIntentId === intentId);
-    if (replay) return closeResult(instance, replay, true);
+    const commandFingerprint = closeCommandFingerprint(userId, request, instance, leg, intentId);
+    const replayReferenceId = this.readCommandReplay(commandFingerprint);
+    if (replayReferenceId !== null) return closeResultFromCommandReplay(instance, replayReferenceId);
+    if (instance.executionReferences.some((reference) => reference.executionIntentId === intentId)) {
+      throw closeError("execution_state_unknown", "退出引用缺少可验证的 command fingerprint，请勿重复提交。");
+    }
 
     assertCloseCapability(instance);
     const runtime = this.resolveRuntime(leg.venue);
-    assertNoUnresolvedClose(instance, leg.legId);
-    const managedQuantity = managedCurrentQuantity(leg);
-    const managedDelta = managedSignedDelta(leg);
-    if (managedQuantity === "0") throw closeError("close_quantity_unavailable", "该套利腿当前没有可退出的管理数量。");
-
-    const verification = await this.positions.verify(userId, instance.arbitrageId);
-    const verifiedLeg = verification?.legs.find((candidate) => candidate.legId === leg.legId);
-    if (!verifiedLeg || verifiedLeg.verificationStatus !== "MATCHED") {
-      throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
+    if (!runtime.executeManagedClose) {
+      throw closeError("close_capability_unavailable", "当前执行运行时不支持可信的管理仓位退出。");
     }
+    assertNoUnresolvedClose(instance, leg.legId);
+    const managedQuantity = activeManagedQuantity(instance, leg);
+    if (managedQuantity === "0") throw closeError("close_quantity_unavailable", "该套利腿当前没有可退出的管理数量。");
     if (compareUnsignedDecimals(request.quantity, managedQuantity) > 0) {
       throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
     }
-
-    const context = await loadContext(this.planningContexts, leg.venue, leg.instrumentId);
-    const spot = context.instrument.marketType === "spot" && context.instrument.contractType === "spot";
-    const perpetual = context.instrument.marketType === "perpetual"
-      && context.instrument.contractType === "linear_perpetual"
-      && context.instrument.settlementAsset === "USDT";
-    if (context.instrument.quoteAsset !== "USDT" || (!spot && !perpetual)) {
-      throw closeError("close_capability_unavailable", "当前只支持 USDT 现货与线性永续套利腿退出。");
+    const safety = await this.closeSafety.evaluate(userId, instance, leg);
+    assertCloseSafetyAvailable(safety.result);
+    const context = safety.context;
+    const planner = safety.planner;
+    if (!context || !planner || safety.market === null) {
+      throw closeError("close_capability_unavailable", "当前交易品种或交易规则不可用。");
     }
-    if (perpetual && verifiedLeg.positionMode !== "HEDGE" && verifiedLeg.actualSignedNetQuantity == null) {
-      throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
-    }
-    if (perpetual && verifiedLeg.positionMode === "HEDGE") {
-      const bucketQuantity = leg.role === "LONG" ? verifiedLeg.actualLongQuantity : verifiedLeg.actualShortQuantity;
-      if (bucketQuantity === null || compareUnsignedDecimals(request.quantity, bucketQuantity) > 0) {
-        throw closeError("close_quantity_unavailable", "HEDGE 对应仓位桶不足，不能扩大或反向退出。");
-      }
-    }
-    if (spot && leg.role !== "LONG") {
-      throw closeError("close_capability_unavailable", "现货空头腿无法通过可用余额可靠退出。");
-    }
+    const spot = safety.market === "SPOT";
+    const perpetual = safety.market === "PERPETUAL";
     const now = this.now();
-    const planner = new ExecutionQuantityPlanner(
-      { resolve: async (instrumentId) => instrumentId === leg.instrumentId ? context.instrument : null },
-      { getTradingRules: async () => context.tradingRules },
-      { now: () => now },
-    );
     // The request remains the ownership ceiling. Venue rules may only reduce
     // that quantity to the nearest legal provider quantity.
-    const managedSliceToReverse = managedDelta.startsWith("-") ? `-${request.quantity}` : request.quantity;
-    const reversalOrderDelta = managedSliceToReverse.startsWith("-")
-      ? request.quantity
-      : `-${request.quantity}`;
-    const side = reversalOrderDelta.startsWith("-") ? "sell" as const : "buy" as const;
+    const side = safety.side;
     const planned = await planner.plan({
       instrumentId: leg.instrumentId,
       side,
@@ -136,42 +166,11 @@ export class ArbitrageExecutionCloseService {
       throw closeError("close_quantity_unavailable", "退出数量无法按当前交易规则合法化。");
     }
     const closeQuantity = planned.plan.plannedAssetQuantity.quantity;
+    if (compareUnsignedDecimals(closeQuantity, safety.result.safeClosableQuantity) > 0) {
+      throw closeError("close_quantity_unavailable", "当前真实仓位不足以安全执行该退出数量。");
+    }
     let acceptedResidualQuantity: string | undefined;
     if (spot) {
-      const opening = exactSpotOpeningReference(instance, leg.legId);
-      let attributableBaseQuantity: string;
-      try {
-        attributableBaseQuantity = await this.spotAttributionFor(leg.venue).readAttributableBaseQuantity(userId, {
-          accountId: leg.accountId,
-          instrumentId: leg.instrumentId,
-          providerSymbol: context.instrument.providerSymbol,
-          baseAsset: context.instrument.baseAsset.symbol,
-          executionIntentId: opening.executionIntentId,
-          executionRecordId: opening.executionRecordId!,
-          grossConfirmedQuantity: opening.confirmedQuantity,
-        });
-      } catch {
-        throw closeError("position_verification_unavailable", "现货开仓成交与手续费无法可靠归因，不能提交退出。");
-      }
-      let availableQuantity: string;
-      try {
-        const balance = await this.spotBalanceFor(leg.venue).readAvailableBalance(userId, {
-          accountId: leg.accountId,
-          instrumentId: leg.instrumentId,
-          providerSymbol: context.instrument.providerSymbol,
-          baseAsset: context.instrument.baseAsset.symbol,
-        });
-        availableQuantity = balance.availableQuantity;
-      } catch {
-        throw closeError("position_verification_unavailable", "当前现货可用余额无法可靠确认，不能提交退出。");
-      }
-      const attributableAvailable = compareUnsignedDecimals(attributableBaseQuantity, availableQuantity) <= 0
-        ? attributableBaseQuantity
-        : availableQuantity;
-      const maxCloseQuantity = floorToStep(attributableAvailable, context.tradingRules.quantityStep);
-      if (maxCloseQuantity === "0" || compareUnsignedDecimals(closeQuantity, maxCloseQuantity) > 0) {
-        throw closeError("close_quantity_unavailable", "退出数量超过当前实例可归因且可用的现货数量。");
-      }
       const remainingQuantity = subtractUnsignedDecimals(managedQuantity, closeQuantity);
       if (remainingQuantity !== "0" && await isNonTradableSpotResidual(
         remainingQuantity,
@@ -183,13 +182,9 @@ export class ArbitrageExecutionCloseService {
         acceptedResidualQuantity = remainingQuantity;
       }
     }
-    // This is the legal managed slice reversed by this order, not the full
-    // account position or the unaligned request ceiling.
-    const legalManagedSlice = managedDelta.startsWith("-") ? `-${closeQuantity}` : closeQuantity;
-    const reduceOnly = perpetual
-      && (verifiedLeg.positionMode === "HEDGE"
-        ? true
-        : reduceOnlyEligible(verifiedLeg.actualSignedNetQuantity!, legalManagedSlice));
+    // Every perpetual close is a hard reduce-only mutation. Account Reality
+    // has already proved that the requested managed slice cannot cross flat.
+    const reduceOnly = perpetual;
 
     const intent = createExecutionIntent({
       intentId,
@@ -214,19 +209,22 @@ export class ArbitrageExecutionCloseService {
         quantityEffect: "DECREASE",
         executionIntentId: intent.intentId,
         requestedQuantity: intent.quantity.quantity,
+        commandId: request.commandId,
+        operationType: "EXECUTION_CLOSE",
+        businessPayloadFingerprint: commandFingerprint.businessPayloadFingerprint,
         ...(acceptedResidualQuantity === undefined ? {} : { acceptedResidualQuantity }),
         createdAt: now,
       });
     } catch (error) {
       const raced = this.instances.get(userId, instance.arbitrageId);
-      const reference = raced?.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId);
-      if (!raced || !reference) throw error;
-      return closeResult(raced, reference, true);
+      const replayId = this.readCommandReplay(commandFingerprint);
+      if (!raced || replayId === null) throw error;
+      return closeResultFromCommandReplay(raced, replayId);
     }
 
     let runtimeResult: FormalExecutionRuntimeResult;
     try {
-      runtimeResult = await runtime.execute(intent);
+      runtimeResult = await runtime.executeManagedClose(intent);
     } catch {
       throw closeError("execution_state_unknown", "退出状态暂时无法确认；执行引用已保留，请勿重复提交。");
     }
@@ -260,14 +258,6 @@ export class ArbitrageExecutionCloseService {
     return value;
   }
 
-  private spotBalanceFor(venue: ExecutionIntent["venue"]): SpotCloseAvailableBalanceSource {
-    return resolveSpotSource(this.spotBalances, venue, "balance");
-  }
-
-  private spotAttributionFor(venue: ExecutionIntent["venue"]): SpotOpeningAttributionSource {
-    return resolveSpotSource(this.spotAttributions, venue, "attribution");
-  }
-
   private resolveRuntime(venue: ExecutionIntent["venue"]) {
     try {
       return this.runtimes.resolve(venue);
@@ -279,26 +269,14 @@ export class ArbitrageExecutionCloseService {
       throw error;
     }
   }
-}
 
-function resolveSpotSource<T extends object>(source: SpotSource<T>, venue: ExecutionIntent["venue"], kind: string): T {
-  if (kind === "balance" && "readAvailableBalance" in source) return source as T;
-  if (kind === "attribution" && "readAttributableBaseQuantity" in source) return source as T;
-  const selected = (source as Partial<Record<ExecutionIntent["venue"], T>>)[venue];
-  if (!selected) throw new Error(`Spot ${kind} source is not configured for ${venue}.`);
-  return selected;
-}
-
-function exactSpotOpeningReference(instance: ArbitrageInstance, legId: string) {
-  const openings = instance.executionReferences.filter((reference) => reference.legId === legId
-    && reference.phase === "OPENING"
-    && reference.quantityEffect === "INCREASE"
-    && reference.status === "CONFIRMED"
-    && reference.executionRecordId !== null);
-  if (openings.length !== 1) {
-    throw closeError("position_verification_unavailable", "现货开仓执行引用无法唯一归因。");
+  private readCommandReplay(fingerprint: ArbitrageCommandFingerprint) {
+    try {
+      return this.instances.readCommandReplay(fingerprint);
+    } catch {
+      throw closeError("idempotency_conflict", "commandId 已用于不同的退出业务请求。");
+    }
   }
-  return openings[0]!;
 }
 
 async function isNonTradableSpotResidual(
@@ -389,15 +367,21 @@ function assertNoUnresolvedClose(instance: ArbitrageInstance, legId: string) {
   if (unresolved) throw closeError("execution_state_unknown", "该套利腿已有未完成的退出执行，请先重新核验。");
 }
 
-async function loadContext(
-  source: ArbitrageExecutionPlanningContextSource,
-  venue: ArbitrageInstance["legs"][number]["venue"],
-  instrumentId: string,
-) {
-  try {
-    return await source.load(venue, instrumentId);
-  } catch {
-    throw closeError("close_capability_unavailable", "当前交易品种或交易规则不可用。");
+function assertCloseSafetyAvailable(safety: ArbitrageCloseSafetyResult) {
+  if (safety.reason === "PROVIDER_REALITY_UNAVAILABLE") {
+    throw closeError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能提交退出。");
+  }
+  if (safety.reason === "CLOSE_CAPABILITY_UNAVAILABLE" || safety.reason === "SPOT_ROLE_UNSUPPORTED") {
+    throw closeError("close_capability_unavailable", "当前交易品种不支持安全退出。");
+  }
+  if (safety.reason === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE") {
+    throw closeError("position_verification_unavailable", "现货开仓成交与手续费无法可靠归因，不能提交退出。");
+  }
+  if (safety.reason === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE") {
+    throw closeError("position_verification_unavailable", "当前现货可用余额无法可靠确认，不能提交退出。");
+  }
+  if (safety.safeClosableQuantity === "0") {
+    throw closeError("close_quantity_unavailable", "当前真实仓位不足以安全执行该退出数量。");
   }
 }
 
@@ -420,6 +404,46 @@ function closeResult(
     idempotentReplay,
     secondLegAllowed: false,
   });
+}
+
+function closeCommandFingerprint(
+  userId: string,
+  request: CloseRequest,
+  instance: ArbitrageInstance,
+  leg: ArbitrageInstance["legs"][number],
+  referenceId: string,
+): ArbitrageCommandFingerprint {
+  return Object.freeze({
+    commandId: request.commandId,
+    operationType: "EXECUTION_CLOSE",
+    requestedByUserId: userId,
+    arbitrageId: instance.arbitrageId,
+    legId: leg.legId,
+    referenceId,
+    businessPayloadFingerprint: createArbitrageCommandPayloadFingerprint([
+      "EXECUTION_CLOSE",
+      userId,
+      instance.arbitrageId,
+      leg.legId,
+      canonicalCommandDecimal(request.quantity),
+      request.executionMode,
+      "CONFIRMED_TRUE",
+      leg.role,
+      leg.venue,
+      leg.accountId,
+      leg.instrumentId,
+    ]),
+  });
+}
+
+function closeResultFromCommandReplay(instance: ArbitrageInstance, referenceId: string) {
+  const reference = instance.executionReferences.find(
+    (candidate) => candidate.executionIntentId === referenceId,
+  );
+  if (!reference) {
+    throw closeError("execution_state_unknown", "command fingerprint 存在但退出引用不可用，请先核验。");
+  }
+  return closeResult(instance, reference, true);
 }
 
 function referenceStatus(status: ExecutionRecord["status"]) {

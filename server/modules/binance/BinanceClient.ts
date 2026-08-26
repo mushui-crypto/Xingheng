@@ -269,7 +269,14 @@ export class BinanceClient implements BinanceClientAdapter {
     ]);
     const account = record(accountValue);
     const usdt = providerList(account.assets, "永续合约资产").map(record).find((asset) => asset.asset === "USDT");
-    const positionRow = providerList(positionValue, "永续合约仓位").map(record).find((position) => position.symbol === symbol);
+    const expectedPositionSide = request.positionSide
+      ?? (access.accountMode === "single_asset_one_way" || access.accountMode === "multi_assets_one_way"
+        ? "BOTH"
+        : undefined);
+    const positionRow = providerList(positionValue, "永续合约仓位").map(record).find((position) => (
+      position.symbol === symbol
+      && (expectedPositionSide === undefined || providerPositionSide(position.positionSide) === expectedPositionSide)
+    ));
     if (!positionRow) {
       throw new BinanceProviderError("provider_snapshot_invalid", "Binance 未返回目标永续合约仓位状态。");
     }
@@ -468,7 +475,10 @@ export class BinanceClient implements BinanceClientAdapter {
       quantity: request.quantity,
       ...(isMarket ? {} : { price: request.limitPrice }),
       newClientOrderId: request.orderLinkId,
-      ...(request.category === "linear" ? { reduceOnly: String(request.reduceOnly) } : {}),
+      ...(request.category === "linear"
+        && (request.positionSide === undefined || request.positionSide === "BOTH")
+        ? { reduceOnly: String(request.reduceOnly) }
+        : {}),
       ...(request.category === "linear" && request.positionSide !== undefined && request.positionSide !== "BOTH"
         ? { positionSide: request.positionSide } : {}),
     }, true, "POST"));
@@ -1180,6 +1190,8 @@ function toOrder(
     status,
     requestedQuantity: requested,
     filledQuantity: filled,
+    side: providerOrderSide(row.side) === "BUY" ? "Buy" : "Sell",
+    ...(category === "linear" ? { reduceOnly: boolean(row.reduceOnly) } : {}),
     ...(category === "linear" && row.positionSide !== undefined ? { positionSide: providerPositionSide(row.positionSide) } : {}),
     requestedBaseQuantity,
     filledBaseQuantity,

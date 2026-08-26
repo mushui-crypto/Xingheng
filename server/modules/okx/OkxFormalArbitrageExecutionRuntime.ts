@@ -8,14 +8,37 @@ import {
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 
-type Runtime = Pick<OkxIntentExecutionRuntime, "execute" | "reconcile" | "cancel">;
+type Runtime = Pick<OkxIntentExecutionRuntime, "execute" | "reconcile" | "cancel">
+  & Partial<Pick<OkxIntentExecutionRuntime, "close" | "supportsOpeningExecutionMode">>;
 
 /** Maps the OKX runtime to the venue-neutral formal execution contract. */
 export class OkxFormalArbitrageExecutionRuntime implements FormalExecutionRuntime {
   constructor(private readonly runtime: Runtime) {}
 
+  openingExecutionCapability(input: Readonly<{
+    executionMode: ExecutionIntent["executionMode"];
+    marketType: "spot" | "perpetual";
+  }>) {
+    const supported = "supportsOpeningExecutionMode" in this.runtime
+      && typeof this.runtime.supportsOpeningExecutionMode === "function"
+      && this.runtime.supportsOpeningExecutionMode(input);
+    return Object.freeze({
+      supported,
+      reasonCode: supported ? "AVAILABLE" as const : "EXECUTION_MODE_NOT_SUPPORTED" as const,
+    });
+  }
+
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
-    const result = await this.runtime.execute(intent);
+    return this.executeWith(() => this.runtime.execute(intent));
+  }
+
+  async executeManagedClose(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
+    if (!this.runtime.close) throw new Error("OKX managed-close runtime is unavailable.");
+    return this.executeWith(() => this.runtime.close!(intent));
+  }
+
+  private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {
+    const result = await run();
     const diagnostic = diagnosticFromExecution(result.execution);
     const mutationDisposition = mutationDispositionFromExecution({
       executionRecord: result.executionRecord,

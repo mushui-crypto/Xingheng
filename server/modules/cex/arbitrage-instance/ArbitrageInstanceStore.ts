@@ -1,8 +1,10 @@
 import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   absoluteDifference,
+  activeManagedQuantity,
   addUnsignedDecimals,
   compareUnsignedDecimals,
   managedCurrentQuantity,
@@ -14,11 +16,13 @@ import {
   type ArbitrageExecutionReferenceStatus,
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
+  type ArbitrageLegManagementRelease,
   type ArbitrageInstanceStatus,
   type ArbitragePnlSummary,
   type ArbitrageQuantityEffect,
   type NewArbitrageInstance,
 } from "./ArbitrageInstance";
+import { recoveryAuditSchema } from "./ArbitrageRecoveryAuditSchema";
 
 const ACTIVE_STATUSES: readonly ArbitrageInstanceStatus[] = ["OPENING", "HOLDING", "RESIDUAL", "CLOSING"];
 const HISTORY_STATUSES: readonly ArbitrageInstanceStatus[] = ["CLOSED", "FAILED"];
@@ -36,6 +40,9 @@ export type ExecutionReferenceClaim = Readonly<{
   executionIntentId: string;
   requestedQuantity: string;
   acceptedResidualQuantity?: string;
+  commandId?: string;
+  operationType?: "EXECUTION_OPEN" | "EXECUTION_CLOSE";
+  businessPayloadFingerprint?: string;
   createdAt: number;
 }>;
 
@@ -45,6 +52,42 @@ export type ExecutionResultUpdate = Readonly<{
   confirmedQuantity: string;
   mutationDisposition?: "NOT_DISPATCHED";
   updatedAt: number;
+}>;
+
+export type LegacyHistoricalRepair = ExecutionResultUpdate & Readonly<{
+  status: "FAILED" | "CONFIRMED";
+  recoveryId: string;
+  actorId: string;
+  evidenceCategory: "PROVIDER_AUTHORITATIVE_TERMINAL_ORDER";
+  checkedAt: number;
+}>;
+
+export type HistoricalReconcileAudit = Readonly<{
+  recoveryId: string;
+  actorId: string;
+  checkedAt: number;
+}>;
+
+export type ManagementReleaseClaim = ArbitrageLegManagementRelease & Readonly<{
+  commandId: string;
+  operationType: "MANAGEMENT_RELEASE";
+  businessPayloadFingerprint: string;
+}>;
+
+export type ArbitrageCommandFingerprint = Readonly<{
+  commandId: string;
+  operationType: "EXECUTION_OPEN" | "EXECUTION_CLOSE" | "MANAGEMENT_RELEASE";
+  requestedByUserId: string;
+  arbitrageId: string;
+  legId: string;
+  referenceId: string;
+  businessPayloadFingerprint: string;
+}>;
+
+export type ManagementReleaseResult = Readonly<{
+  instance: ArbitrageInstance;
+  release: ArbitrageLegManagementRelease;
+  idempotentReplay: boolean;
 }>;
 
 export type TargetQuantityUpdate = Readonly<{
@@ -60,6 +103,25 @@ export type SecondLegHedgePreparation = Readonly<{
   updatedAt: number;
 }>;
 
+export type SpotOpeningAttributionEvidence = Readonly<{
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string;
+  attributableBaseQuantity: string;
+  source: "PROVIDER_ORDER_FILLS";
+  confirmedAt: number;
+  venue: ArbitrageInstanceLeg["venue"];
+  accountId: string;
+  instrumentId: string;
+}>;
+
+export type SpotAttributionRecoveryAudit = Readonly<{
+  recoveryId: string;
+  actorId: string;
+  checkedAt: number;
+}>;
+
 type PreparedSecondLegHedge = Readonly<{
   targetBaseQuantity: string;
   executableBaseQuantity: string;
@@ -69,6 +131,25 @@ type PreparedSecondLegHedge = Readonly<{
 export type ArbitrageHistoryPageQuery = Readonly<{
   limit: number;
   offset: number;
+}>;
+
+export type UnresolvedExecutionRecoveryCandidate = Readonly<{
+  userId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string | null;
+  status: Extract<ArbitrageExecutionReferenceStatus, "CLAIMED" | "LINKED" | "PENDING_CONFIRMATION" | "UNKNOWN">;
+  phase: ArbitrageExecutionPhase;
+  quantityEffect: ArbitrageQuantityEffect;
+  requestedQuantity: string;
+  confirmedQuantity: string;
+  venue: ArbitrageInstanceLeg["venue"];
+  accountId: string;
+  instrumentId: string;
+  role: ArbitrageInstanceLeg["role"];
+  createdAt: number;
+  updatedAt: number;
 }>;
 
 type InstanceRow = Readonly<{
@@ -114,6 +195,71 @@ type ReferenceRow = Readonly<{
   status: string;
   createdAt: number;
   updatedAt: number;
+}>;
+
+type UnresolvedRecoveryCandidateRow = Readonly<{
+  userId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string | null;
+  status: string;
+  phase: string;
+  quantityEffect: string;
+  requestedQuantity: string;
+  confirmedQuantity: string;
+  venue: string;
+  accountId: string;
+  instrumentId: string;
+  role: string;
+  createdAt: number;
+  updatedAt: number;
+}>;
+
+type ManagementReleaseRow = Readonly<{
+  releaseId: string;
+  arbitrageId: string;
+  legId: string;
+  releasedQuantity: string;
+  reason: string;
+  source: string;
+  requestedByUserId: string;
+  requestedAt: number;
+  confirmedAt: number;
+  venue: string;
+  accountId: string;
+  instrumentId: string;
+  positionMode: string;
+  actualQuantity: string;
+  actualSignedNetQuantity: string | null;
+  actualLongQuantity: string;
+  actualShortQuantity: string;
+  availableQuantity: string | null;
+  realityCheckedAt: number;
+}>;
+
+type CommandIdempotencyRow = Readonly<{
+  commandId: string;
+  operationType: string;
+  requestedByUserId: string;
+  arbitrageId: string;
+  legId: string;
+  referenceId: string;
+  businessPayloadFingerprint: string | null;
+  createdAt: number;
+}>;
+
+type SpotOpeningAttributionEvidenceRow = Readonly<{
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string;
+  attributableBaseQuantity: string;
+  source: string;
+  confirmedAt: number;
+  venue: string;
+  accountId: string;
+  instrumentId: string;
 }>;
 
 export class ArbitrageInstanceStore {
@@ -170,6 +316,102 @@ export class ArbitrageInstanceStore {
     return row ? this.instanceFromRow(row) : null;
   }
 
+  readSpotOpeningAttributionEvidence(userId: string, arbitrageId: string, legId: string) {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalizedLegId = identifier(legId, "legId");
+    const instance = this.get(normalizedUserId, normalizedArbitrageId);
+    if (!instance || !instance.legs.some((leg) => leg.legId === normalizedLegId)) return Object.freeze([]);
+    const rows = this.db.prepare(`SELECT * FROM arbitrage_spot_opening_attribution_evidence
+      WHERE arbitrageId = ? AND legId = ? ORDER BY confirmedAt, executionIntentId`).all(
+      normalizedArbitrageId,
+      normalizedLegId,
+    ) as unknown as SpotOpeningAttributionEvidenceRow[];
+    return Object.freeze(rows.map(spotOpeningAttributionEvidenceFromRow));
+  }
+
+  recordSpotOpeningAttributionEvidence(
+    userId: string,
+    evidence: SpotOpeningAttributionEvidence,
+    recoveryAudit?: SpotAttributionRecoveryAudit,
+  ): SpotOpeningAttributionEvidence {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalized = normalizeSpotOpeningAttributionEvidence(evidence);
+    return this.transaction(() => {
+      const instance = this.requireForUser(normalizedUserId, normalized.arbitrageId);
+      const leg = instance.legs.find((candidate) => candidate.legId === normalized.legId);
+      if (!leg || !leg.instrumentId.endsWith("-SPOT") || leg.role !== "LONG"
+        || leg.venue !== normalized.venue || leg.accountId !== normalized.accountId
+        || leg.instrumentId !== normalized.instrumentId) {
+        throw new Error("Spot opening attribution evidence leg identity is invalid.");
+      }
+      const reference = instance.executionReferences.find((candidate) =>
+        candidate.executionIntentId === normalized.executionIntentId);
+      const fullyConfirmed = reference?.status === "CONFIRMED"
+        && reference.confirmedQuantity === reference.requestedQuantity;
+      const terminalPartial = reference?.status === "FAILED"
+        && compareUnsignedDecimals(reference.confirmedQuantity, "0") > 0
+        && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) < 0;
+      if (!reference || reference.legId !== leg.legId || reference.phase !== "OPENING"
+        || reference.quantityEffect !== "INCREASE" || (!fullyConfirmed && !terminalPartial)
+        || reference.executionRecordId !== normalized.executionRecordId) {
+        throw new Error("Spot opening attribution evidence requires authoritative terminal opening fill evidence.");
+      }
+      if (normalized.confirmedAt < reference.updatedAt) {
+        throw new Error("Spot opening attribution evidence cannot predate its confirmed reference.");
+      }
+      const existing = this.db.prepare(`SELECT * FROM arbitrage_spot_opening_attribution_evidence
+        WHERE arbitrageId = ? AND executionIntentId = ?`).get(
+        normalized.arbitrageId,
+        normalized.executionIntentId,
+      ) as unknown as SpotOpeningAttributionEvidenceRow | undefined;
+      if (existing) {
+        const persisted = spotOpeningAttributionEvidenceFromRow(existing);
+        if (!sameSpotOpeningAttributionEvidence(persisted, normalized)) {
+          throw new Error("Spot opening attribution evidence is immutable.");
+        }
+        return persisted;
+      }
+      this.db.prepare(`INSERT INTO arbitrage_spot_opening_attribution_evidence (
+        arbitrageId, legId, executionIntentId, executionRecordId,
+        attributableBaseQuantity, source, confirmedAt, venue, accountId, instrumentId
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        normalized.arbitrageId,
+        normalized.legId,
+        normalized.executionIntentId,
+        normalized.executionRecordId,
+        normalized.attributableBaseQuantity,
+        normalized.source,
+        normalized.confirmedAt,
+        normalized.venue,
+        normalized.accountId,
+        normalized.instrumentId,
+      );
+      if (recoveryAudit !== undefined) {
+        const recoveryId = identifier(recoveryAudit.recoveryId, "recoveryId");
+        const actorId = identifier(recoveryAudit.actorId, "actorId");
+        const checkedAt = timestamp(recoveryAudit.checkedAt, "checkedAt");
+        this.db.prepare(`INSERT INTO arbitrage_recovery_audit (
+          recoveryId, source, actorId, arbitrageId, legId, executionIntentId,
+          action, oldStatus, oldQuantity, newStatus, newQuantity, evidenceCategory,
+          checkedAt, completedAt, result
+        ) VALUES (?, 'AUTHENTICATED_API', ?, ?, ?, ?, 'SPOT_ATTRIBUTION_BACKFILL',
+          'MISSING', '0', 'CONFIRMED', ?, 'PROVIDER_AUTHORITATIVE_SPOT_FILLS',
+          ?, ?, 'COMPLETED')`).run(
+            recoveryId,
+            actorId,
+            normalized.arbitrageId,
+            normalized.legId,
+            normalized.executionIntentId,
+            normalized.attributableBaseQuantity,
+            checkedAt,
+            normalized.confirmedAt,
+          );
+      }
+      return normalized;
+    });
+  }
+
   failEmptyOpening(userId: string, arbitrageId: string, updatedAt: number): ArbitrageInstance | null {
     const normalizedUserId = identifier(userId, "userId");
     const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
@@ -202,6 +444,95 @@ export class ArbitrageInstanceStore {
     );
   }
 
+  listUnresolvedExecutionReferencesForRecovery(): readonly UnresolvedExecutionRecoveryCandidate[] {
+    const rows = this.db.prepare(`SELECT
+      owner.userId,
+      reference.arbitrageId,
+      reference.legId,
+      reference.executionIntentId,
+      reference.executionRecordId,
+      reference.status,
+      reference.phase,
+      reference.quantityEffect,
+      reference.requestedQuantity,
+      reference.confirmedQuantity,
+      leg.venue,
+      leg.accountId,
+      leg.instrumentId,
+      leg.role,
+      reference.createdAt,
+      reference.updatedAt
+      FROM arbitrage_execution_references reference
+      JOIN arbitrage_instances owner ON owner.arbitrageId = reference.arbitrageId
+      JOIN arbitrage_instance_legs leg
+        ON leg.arbitrageId = reference.arbitrageId AND leg.legId = reference.legId
+      WHERE reference.status IN ('CLAIMED', 'LINKED', 'PENDING_CONFIRMATION', 'UNKNOWN')
+      ORDER BY reference.createdAt ASC, reference.executionIntentId ASC`).all() as unknown as UnresolvedRecoveryCandidateRow[];
+    return Object.freeze(rows.map(unresolvedRecoveryCandidateFromRow));
+  }
+
+  terminalizeClaimedReferenceWithLocalNotDispatchedProof(
+    userId: string,
+    arbitrageId: string,
+    executionIntentId: string,
+    checkedAt: number,
+  ): ArbitrageInstance {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalizedIntentId = identifier(executionIntentId, "executionIntentId");
+    const normalizedCheckedAt = timestamp(checkedAt, "checkedAt");
+    return this.transaction(() => {
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const reference = this.referenceRow(normalizedArbitrageId, normalizedIntentId);
+      if (!reference
+        || reference.status !== "CLAIMED"
+        || reference.executionRecordId !== null
+        || reference.confirmedQuantity !== "0") {
+        throw new Error("Local NOT_DISPATCHED proof no longer matches a zero-quantity CLAIMED reference.");
+      }
+      const projectedAt = Math.max(instance.updatedAt, reference.updatedAt, normalizedCheckedAt);
+      const result = this.db.prepare(`UPDATE arbitrage_execution_references
+        SET status = 'FAILED', updatedAt = ?
+        WHERE arbitrageId = ? AND executionIntentId = ?
+          AND status = 'CLAIMED' AND executionRecordId IS NULL AND confirmedQuantity = '0'`).run(
+            projectedAt,
+            normalizedArbitrageId,
+            normalizedIntentId,
+          );
+      if (result.changes !== 1) {
+        throw new Error("Local NOT_DISPATCHED proof conflicted with another execution update.");
+      }
+      this.db.prepare(`INSERT INTO arbitrage_recovery_audit (
+        recoveryId, source, actorId, arbitrageId, legId, executionIntentId,
+        action, oldStatus, oldQuantity, newStatus, newQuantity, evidenceCategory,
+        checkedAt, completedAt, result
+      ) VALUES (?, 'SYSTEM_RECOVERY', 'SYSTEM_RECOVERY', ?, ?, ?,
+        'LOCAL_NOT_DISPATCHED_TERMINALIZATION', 'CLAIMED', '0', 'FAILED', '0',
+        'LOCAL_PRE_DISPATCH_PROOF', ?, ?, 'COMPLETED')`).run(
+          recoveryAuditId("LOCAL_NOT_DISPATCHED_TERMINALIZATION", normalizedArbitrageId, normalizedIntentId),
+          normalizedArbitrageId,
+          reference.legId,
+          normalizedIntentId,
+          normalizedCheckedAt,
+          projectedAt,
+        );
+      const updated = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const next = this.deriveLifecycle(updated, projectedAt, "NOT_DISPATCHED");
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, next);
+      return this.requireForUser(normalizedUserId, normalizedArbitrageId);
+    });
+  }
+
+  readCommandReplay(fingerprint: ArbitrageCommandFingerprint) {
+    const normalized = normalizeCommandFingerprint(fingerprint);
+    const existing = this.commandFingerprint(normalized.commandId);
+    if (!existing) return null;
+    if (!sameCommandFingerprint(existing, normalized)) {
+      throw new Error("Arbitrage command idempotency conflict.");
+    }
+    return existing.referenceId;
+  }
+
   claimExecutionReference(
     userId: string,
     arbitrageId: string,
@@ -212,6 +543,21 @@ export class ArbitrageInstanceStore {
     const normalizedClaim = normalizeClaim(claim);
     return this.transaction(() => {
       const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      if (normalizedClaim.commandId !== undefined) {
+        const existingCommand = this.commandFingerprint(normalizedClaim.commandId);
+        if (existingCommand) {
+          if (!sameCommandFingerprint(existingCommand, {
+            commandId: normalizedClaim.commandId,
+            operationType: normalizedClaim.operationType!,
+            requestedByUserId: normalizedUserId,
+            arbitrageId: normalizedArbitrageId,
+            legId: normalizedClaim.legId,
+            referenceId: normalizedClaim.executionIntentId,
+            businessPayloadFingerprint: normalizedClaim.businessPayloadFingerprint!,
+          })) throw new Error("Arbitrage command idempotency conflict.");
+          throw new Error("Arbitrage command idempotent replay.");
+        }
+      }
       if (instance.status === "CLOSED" || instance.status === "FAILED") {
         throw new Error("Terminal arbitrage instance cannot claim another execution.");
       }
@@ -224,6 +570,19 @@ export class ArbitrageInstanceStore {
       }
       const leg = instance.legs.find((candidate) => candidate.legId === normalizedClaim.legId);
       if (!leg) throw new Error("Execution reference leg does not belong to the arbitrage instance.");
+      if (instance.managementReleases?.some((release) => release.legId === leg.legId)) {
+        throw new Error("Released arbitrage leg cannot claim another execution.");
+      }
+      // Only a formal command claim can dispatch a new Provider mutation.
+      // Claims without an operation fingerprint are persisted historical/test
+      // facts and must not be mistaken for a fresh dispatch request.
+      if (normalizedClaim.phase === "OPENING" && normalizedClaim.operationType === "EXECUTION_OPEN") {
+        this.assertOpeningClaimAllowed(instance, leg, normalizedClaim);
+      }
+      if (normalizedClaim.phase === "CLOSING"
+        && compareUnsignedDecimals(normalizedClaim.requestedQuantity, activeManagedQuantity(instance, leg)) > 0) {
+        throw new Error("Closing execution cannot exceed active managed quantity.");
+      }
       const firstClosingClaim = normalizedClaim.phase === "CLOSING"
         && !instance.executionReferences.some((reference) => reference.phase === "CLOSING");
       if (firstClosingClaim) {
@@ -265,6 +624,18 @@ export class ArbitrageInstanceStore {
           normalizedClaim.createdAt,
           normalizedClaim.createdAt,
         );
+        if (normalizedClaim.commandId !== undefined) {
+          this.insertCommandFingerprint({
+            commandId: normalizedClaim.commandId,
+            operationType: normalizedClaim.operationType!,
+            requestedByUserId: normalizedUserId,
+            arbitrageId: normalizedArbitrageId,
+            legId: normalizedClaim.legId,
+            referenceId: normalizedClaim.executionIntentId,
+            businessPayloadFingerprint: normalizedClaim.businessPayloadFingerprint!,
+            createdAt: normalizedClaim.createdAt,
+          });
+        }
       } catch (error) {
         if (isConstraintError(error)) {
           throw new Error("Execution intent is already claimed by an arbitrage instance.");
@@ -329,28 +700,144 @@ export class ArbitrageInstanceStore {
     arbitrageId: string,
     update: ExecutionResultUpdate,
   ): ArbitrageInstance {
+    return this.applyExecutionProjection(userId, arbitrageId, update, false);
+  }
+
+  applyHistoricalExecutionCorrection(
+    userId: string,
+    arbitrageId: string,
+    update: ExecutionResultUpdate,
+    recoveryAudit?: HistoricalReconcileAudit,
+  ): ArbitrageInstance {
+    return this.applyExecutionProjection(userId, arbitrageId, update, true, recoveryAudit);
+  }
+
+  repairLegacyPartialConfirmed(
+    userId: string,
+    arbitrageId: string,
+    update: LegacyHistoricalRepair,
+  ): ArbitrageInstance {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalizedUpdate = normalizeExecutionResult(update);
+    const recoveryId = identifier(update.recoveryId, "recoveryId");
+    const actorId = identifier(update.actorId, "actorId");
+    const checkedAt = timestamp(update.checkedAt, "checkedAt");
+    if (update.evidenceCategory !== "PROVIDER_AUTHORITATIVE_TERMINAL_ORDER") {
+      throw new Error("Legacy historical repair evidence is invalid.");
+    }
+    return this.transaction(() => {
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      if (instance.status !== "CLOSED" && instance.status !== "FAILED") {
+        throw new Error("Legacy historical repair requires a terminal arbitrage instance.");
+      }
+      const reference = this.referenceRow(normalizedArbitrageId, normalizedUpdate.executionIntentId);
+      if (!reference || reference.executionRecordId === null
+        || reference.status !== "CONFIRMED"
+        || compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) >= 0) {
+        throw new Error("Legacy partial-CONFIRMED evidence no longer matches.");
+      }
+      const quantityComparison = compareUnsignedDecimals(
+        normalizedUpdate.confirmedQuantity,
+        reference.requestedQuantity,
+      );
+      const validProviderTerminal = normalizedUpdate.status === "CONFIRMED"
+        ? quantityComparison === 0
+        : normalizedUpdate.status === "FAILED" && quantityComparison < 0;
+      if (!validProviderTerminal
+        || compareUnsignedDecimals(normalizedUpdate.confirmedQuantity, reference.confirmedQuantity) < 0) {
+        throw new Error("Legacy repair requires a monotonic authoritative Provider terminal result.");
+      }
+      const projectedAt = Math.max(instance.updatedAt, reference.updatedAt, normalizedUpdate.updatedAt, checkedAt);
+      const confirmedDelta = subtractForDelta(normalizedUpdate.confirmedQuantity, reference.confirmedQuantity);
+      if (confirmedDelta !== "0") this.applyQuantityDelta(normalizedArbitrageId, reference, confirmedDelta);
+      const changed = this.db.prepare(`UPDATE arbitrage_execution_references
+        SET confirmedQuantity = ?, status = ?, updatedAt = ?
+        WHERE arbitrageId = ? AND executionIntentId = ?
+          AND status = 'CONFIRMED' AND confirmedQuantity = ? AND requestedQuantity = ?`).run(
+            normalizedUpdate.confirmedQuantity,
+            normalizedUpdate.status,
+            projectedAt,
+            normalizedArbitrageId,
+            normalizedUpdate.executionIntentId,
+            reference.confirmedQuantity,
+            reference.requestedQuantity,
+          );
+      if (changed.changes !== 1) throw new Error("Legacy historical repair conflicted with another writer.");
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, {
+        status: instance.status,
+        openedAt: instance.openedAt,
+        closedAt: instance.closedAt,
+        updatedAt: projectedAt,
+      });
+      this.db.prepare(`INSERT INTO arbitrage_recovery_audit (
+        recoveryId, source, actorId, arbitrageId, legId, executionIntentId,
+        action, oldStatus, oldQuantity, newStatus, newQuantity, evidenceCategory,
+        checkedAt, completedAt, result
+      ) VALUES (?, 'AUTHENTICATED_API', ?, ?, ?, ?, 'LEGACY_HISTORICAL_REPAIR',
+        'CONFIRMED', ?, ?, ?, ?, ?, ?, 'COMPLETED')`).run(
+          recoveryId,
+          actorId,
+          normalizedArbitrageId,
+          reference.legId,
+          normalizedUpdate.executionIntentId,
+          reference.confirmedQuantity,
+          normalizedUpdate.status,
+          normalizedUpdate.confirmedQuantity,
+          update.evidenceCategory,
+          checkedAt,
+          projectedAt,
+        );
+      return this.requireForUser(normalizedUserId, normalizedArbitrageId);
+    });
+  }
+
+  private applyExecutionProjection(
+    userId: string,
+    arbitrageId: string,
+    update: ExecutionResultUpdate,
+    historicalCorrection: boolean,
+    recoveryAudit?: HistoricalReconcileAudit,
+  ): ArbitrageInstance {
     const normalizedUserId = identifier(userId, "userId");
     const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
     const normalizedUpdate = normalizeExecutionResult(update);
     return this.transaction(() => {
       const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
-      if (instance.status === "CLOSED" || instance.status === "FAILED") {
-        throw new Error("Terminal arbitrage instance cannot accept execution results.");
+      const instanceTerminal = instance.status === "CLOSED" || instance.status === "FAILED";
+      if (historicalCorrection !== instanceTerminal) {
+        throw new Error(historicalCorrection
+          ? "Historical execution correction requires a terminal arbitrage instance."
+          : "Terminal arbitrage instance requires the historical execution correction path.");
       }
       const reference = this.referenceRow(normalizedArbitrageId, normalizedUpdate.executionIntentId);
       if (!reference) throw new Error("Execution reference was not found for the arbitrage instance.");
       if (reference.executionRecordId === null) {
         throw new Error("Execution reference must link an ExecutionRecord before applying a result.");
       }
-      if (normalizedUpdate.updatedAt < reference.updatedAt) {
-        throw new Error("Execution result time cannot move backwards.");
+      if (historicalCorrection && reference.status !== "CONFIRMED" && reference.status !== "FAILED") {
+        throw new Error("Historical execution correction requires an existing terminal execution reference.");
       }
       if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
-        if (reference.status === normalizedUpdate.status
-          && reference.confirmedQuantity === normalizedUpdate.confirmedQuantity) {
-          return instance;
+        if (!terminalStatusCorrectionAllowed(reference, normalizedUpdate)) {
+          throw new Error("Terminal execution status cannot be changed.");
         }
-        throw new Error("Terminal execution result cannot be changed.");
+        if (compareUnsignedDecimals(normalizedUpdate.confirmedQuantity, reference.confirmedQuantity) < 0) {
+          throw new Error("Confirmed execution quantity cannot move backwards.");
+        }
+        if (compareUnsignedDecimals(normalizedUpdate.confirmedQuantity, reference.requestedQuantity) > 0) {
+          throw new Error("Confirmed execution quantity cannot exceed requested quantity.");
+        }
+        if (reference.status === "CONFIRMED"
+          && normalizedUpdate.confirmedQuantity !== reference.requestedQuantity) {
+          throw new Error("CONFIRMED execution quantity must equal requested quantity.");
+        }
+        if (reference.status === normalizedUpdate.status
+          && reference.confirmedQuantity === normalizedUpdate.confirmedQuantity) return instance;
+      } else {
+        if (normalizedUpdate.updatedAt < reference.updatedAt) {
+          throw new Error("Execution result time cannot move backwards.");
+        }
       }
       if (compareUnsignedDecimals(normalizedUpdate.confirmedQuantity, reference.confirmedQuantity) < 0) {
         throw new Error("Confirmed execution quantity cannot move backwards.");
@@ -358,6 +845,12 @@ export class ArbitrageInstanceStore {
       if (compareUnsignedDecimals(normalizedUpdate.confirmedQuantity, reference.requestedQuantity) > 0) {
         throw new Error("Confirmed execution quantity cannot exceed requested quantity.");
       }
+      if (normalizedUpdate.status === "CONFIRMED"
+        && normalizedUpdate.confirmedQuantity !== reference.requestedQuantity) {
+        throw new Error("CONFIRMED execution quantity must equal requested quantity.");
+      }
+
+      const projectedAt = Math.max(instance.updatedAt, reference.updatedAt, normalizedUpdate.updatedAt);
 
       const confirmedDelta = subtractForDelta(
         normalizedUpdate.confirmedQuantity,
@@ -369,20 +862,155 @@ export class ArbitrageInstanceStore {
       this.db.prepare(`UPDATE arbitrage_execution_references
         SET confirmedQuantity = ?, status = ?, updatedAt = ?
         WHERE arbitrageId = ? AND executionIntentId = ?`).run(
-        normalizedUpdate.confirmedQuantity,
-        normalizedUpdate.status,
-        normalizedUpdate.updatedAt,
-        normalizedArbitrageId,
-        normalizedUpdate.executionIntentId,
-      );
+          normalizedUpdate.confirmedQuantity,
+          normalizedUpdate.status,
+          projectedAt,
+          normalizedArbitrageId,
+          normalizedUpdate.executionIntentId,
+        );
 
-      const next = this.deriveLifecycle(
-        this.requireForUser(normalizedUserId, normalizedArbitrageId),
-        normalizedUpdate.updatedAt,
-        normalizedUpdate.mutationDisposition,
-      );
+      const next = historicalCorrection
+        ? {
+            status: instance.status,
+            openedAt: instance.openedAt,
+            closedAt: instance.closedAt,
+            updatedAt: projectedAt,
+          }
+        : this.deriveLifecycle(
+            this.requireForUser(normalizedUserId, normalizedArbitrageId),
+            projectedAt,
+            normalizedUpdate.mutationDisposition,
+          );
       this.persistLifecycle(normalizedUserId, normalizedArbitrageId, next);
+      if (historicalCorrection && recoveryAudit !== undefined) {
+        const recoveryId = identifier(recoveryAudit.recoveryId, "recoveryId");
+        const actorId = identifier(recoveryAudit.actorId, "actorId");
+        const checkedAt = timestamp(recoveryAudit.checkedAt, "checkedAt");
+        this.db.prepare(`INSERT INTO arbitrage_recovery_audit (
+          recoveryId, source, actorId, arbitrageId, legId, executionIntentId,
+          action, oldStatus, oldQuantity, newStatus, newQuantity, evidenceCategory,
+          checkedAt, completedAt, result
+        ) VALUES (?, 'AUTHENTICATED_API', ?, ?, ?, ?, 'HISTORICAL_RECONCILE',
+          ?, ?, ?, ?, 'PROVIDER_AUTHORITATIVE_ORDER_QUERY', ?, ?, 'COMPLETED')`).run(
+            recoveryId,
+            actorId,
+            normalizedArbitrageId,
+            reference.legId,
+            normalizedUpdate.executionIntentId,
+            reference.status,
+            reference.confirmedQuantity,
+            normalizedUpdate.status,
+            normalizedUpdate.confirmedQuantity,
+            checkedAt,
+            projectedAt,
+          );
+      }
       return this.requireForUser(normalizedUserId, normalizedArbitrageId);
+    });
+  }
+
+  releaseLegManagement(
+    userId: string,
+    arbitrageId: string,
+    claim: ManagementReleaseClaim,
+  ): ManagementReleaseResult {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalized = normalizeManagementReleaseClaim(claim);
+    if (normalized.arbitrageId !== normalizedArbitrageId || normalized.requestedByUserId !== normalizedUserId) {
+      throw new Error("Management release identity does not match the authenticated instance.");
+    }
+    return this.transaction(() => {
+      const existingCommand = this.commandFingerprint(normalized.commandId);
+      if (existingCommand) {
+        if (!sameCommandFingerprint(existingCommand, {
+          commandId: normalized.commandId,
+          operationType: normalized.operationType,
+          requestedByUserId: normalized.requestedByUserId,
+          arbitrageId: normalized.arbitrageId,
+          legId: normalized.legId,
+          referenceId: normalized.releaseId,
+          businessPayloadFingerprint: normalized.businessPayloadFingerprint,
+        })) throw new Error("Management release command idempotency conflict.");
+        const replayInstance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+        const replay = replayInstance.managementReleases?.find((release) => release.releaseId === normalized.releaseId);
+        if (!replay) throw new Error("Management release command exists without its release audit record.");
+        return Object.freeze({ instance: replayInstance, release: replay, idempotentReplay: true });
+      }
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const replay = instance.managementReleases?.find((release) => release.releaseId === normalized.releaseId);
+      if (replay) return Object.freeze({ instance, release: replay, idempotentReplay: true });
+      if (instance.status === "CLOSED" || instance.status === "FAILED") {
+        throw new Error("Terminal arbitrage instance cannot release managed exposure.");
+      }
+      if (normalized.confirmedAt < instance.updatedAt) {
+        throw new Error("Management release time cannot move backwards.");
+      }
+      const leg = instance.legs.find((candidate) => candidate.legId === normalized.legId);
+      if (!leg) throw new Error("Management release leg does not belong to the arbitrage instance.");
+      if (leg.venue !== normalized.venue || leg.accountId !== normalized.accountId
+        || leg.instrumentId !== normalized.instrumentId) {
+        throw new Error("Management release reality identity does not match the arbitrage leg.");
+      }
+      if (instance.managementReleases?.some((release) => release.legId === leg.legId)) {
+        throw new Error("Arbitrage leg management has already been released.");
+      }
+      if (instance.executionReferences.some((reference) => UNRESOLVED_REFERENCE_STATUSES.includes(reference.status))) {
+        throw new Error("Management release requires every execution reference to be resolved.");
+      }
+      const activeQuantity = activeManagedQuantity(instance, leg);
+      if (activeQuantity === "0") throw new Error("Arbitrage leg has no active managed quantity to release.");
+      if (normalized.releasedQuantity !== activeQuantity) {
+        throw new Error("Management release must release the full active managed quantity.");
+      }
+      try {
+        this.db.prepare(`INSERT INTO arbitrage_leg_management_releases (
+          releaseId, arbitrageId, legId, releasedQuantity, reason, source,
+          requestedByUserId, requestedAt, confirmedAt, venue, accountId,
+          instrumentId, positionMode, actualQuantity, actualSignedNetQuantity,
+          actualLongQuantity, actualShortQuantity, availableQuantity, realityCheckedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+          normalized.releaseId,
+          normalized.arbitrageId,
+          normalized.legId,
+          normalized.releasedQuantity,
+          normalized.reason,
+          normalized.source,
+          normalized.requestedByUserId,
+          normalized.requestedAt,
+          normalized.confirmedAt,
+          normalized.venue,
+          normalized.accountId,
+          normalized.instrumentId,
+          normalized.positionMode,
+          normalized.actualQuantity,
+          normalized.actualSignedNetQuantity,
+          normalized.actualLongQuantity,
+          normalized.actualShortQuantity,
+          normalized.availableQuantity,
+          normalized.realityCheckedAt,
+        );
+        this.insertCommandFingerprint({
+          commandId: normalized.commandId,
+          operationType: normalized.operationType,
+          requestedByUserId: normalized.requestedByUserId,
+          arbitrageId: normalized.arbitrageId,
+          legId: normalized.legId,
+          referenceId: normalized.releaseId,
+          businessPayloadFingerprint: normalized.businessPayloadFingerprint,
+          createdAt: normalized.requestedAt,
+        });
+      } catch (error) {
+        if (isConstraintError(error)) throw new Error("Management release command idempotency conflict.");
+        throw error;
+      }
+      const updated = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const next = this.deriveLifecycle(updated, normalized.confirmedAt);
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, next);
+      const persisted = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const release = persisted.managementReleases?.find((candidate) => candidate.releaseId === normalized.releaseId);
+      if (!release) throw new Error("Management release persistence failed.");
+      return Object.freeze({ instance: persisted, release, idempotentReplay: false });
     });
   }
 
@@ -410,6 +1038,9 @@ export class ArbitrageInstanceStore {
       }
       if (timestampValue < instance.updatedAt) throw new Error("Arbitrage instance time cannot move backwards.");
       for (const update of normalizedUpdates) {
+        if (instance.managementReleases?.some((release) => release.legId === update.legId)) {
+          throw new Error("Released arbitrage leg cannot update its target quantity.");
+        }
         const result = this.db.prepare(`UPDATE arbitrage_instance_legs
           SET plannedQuantity = ? WHERE arbitrageId = ? AND legId = ?`).run(
           update.plannedQuantity,
@@ -443,13 +1074,19 @@ export class ArbitrageInstanceStore {
       if (instance.status === "CLOSED" || instance.status === "FAILED") {
         throw new Error("Terminal arbitrage instance cannot prepare a second-leg hedge.");
       }
+      if ((instance.managementReleases?.length ?? 0) > 0) {
+        throw new Error("Released arbitrage instance cannot prepare a second-leg hedge.");
+      }
       if (updatedAt < instance.updatedAt) throw new Error("Arbitrage instance time cannot move backwards.");
       const firstReference = this.referenceRow(normalizedArbitrageId, firstExecutionIntentId);
       if (!firstReference
         || firstReference.phase !== "OPENING"
         || firstReference.quantityEffect !== "INCREASE"
-        || firstReference.status !== "CONFIRMED") {
-        throw new Error("Second-leg hedge requires one confirmed first-leg opening reference.");
+        || (firstReference.status !== "CONFIRMED"
+          && !(firstReference.status === "FAILED"
+            && compareUnsignedDecimals(firstReference.confirmedQuantity, "0") > 0
+            && compareUnsignedDecimals(firstReference.confirmedQuantity, firstReference.requestedQuantity) < 0))) {
+        throw new Error("Second-leg hedge requires one confirmed or terminal-partial first-leg opening reference.");
       }
       const firstLeg = instance.legs.find((leg) => leg.legId === firstReference.legId);
       const secondLeg = instance.legs.find((leg) => leg.legId === secondLegId);
@@ -588,6 +1225,27 @@ export class ArbitrageInstanceStore {
     ) as unknown as ReferenceRow | undefined;
   }
 
+  private commandFingerprint(commandId: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_command_idempotency
+      WHERE commandId = ?`).get(commandId) as unknown as CommandIdempotencyRow | undefined;
+  }
+
+  private insertCommandFingerprint(row: CommandIdempotencyRow) {
+    this.db.prepare(`INSERT INTO arbitrage_command_idempotency (
+      commandId, operationType, requestedByUserId, arbitrageId, legId, referenceId,
+      businessPayloadFingerprint, createdAt
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(
+      row.commandId,
+      row.operationType,
+      row.requestedByUserId,
+      row.arbitrageId,
+      row.legId,
+      row.referenceId,
+      row.businessPayloadFingerprint,
+      row.createdAt,
+    );
+  }
+
   private instanceFromRow(row: InstanceRow): ArbitrageInstance {
     const legs = this.db.prepare(`SELECT * FROM arbitrage_instance_legs
       WHERE arbitrageId = ? ORDER BY CASE role WHEN 'LONG' THEN 0 ELSE 1 END`).all(
@@ -598,6 +1256,10 @@ export class ArbitrageInstanceStore {
       WHERE arbitrageId = ? ORDER BY createdAt ASC, executionIntentId ASC`).all(
       row.arbitrageId,
     ) as unknown as ReferenceRow[];
+    const releases = this.db.prepare(`SELECT * FROM arbitrage_leg_management_releases
+      WHERE arbitrageId = ? ORDER BY confirmedAt ASC, releaseId ASC`).all(
+      row.arbitrageId,
+    ) as unknown as ManagementReleaseRow[];
     return Object.freeze({
       arbitrageId: row.arbitrageId,
       userId: row.userId,
@@ -611,6 +1273,7 @@ export class ArbitrageInstanceStore {
       closedAt: row.closedAt,
       legs: Object.freeze(legs.map(legFromRow)) as unknown as readonly [ArbitrageInstanceLeg, ArbitrageInstanceLeg],
       executionReferences: Object.freeze(references.map(referenceFromRow)),
+      managementReleases: Object.freeze(releases.map(managementReleaseFromRow)),
       pnl: Object.freeze({
         asset: row.pnlAsset,
         cumulativeFundingPnl: row.cumulativeFundingPnl,
@@ -641,19 +1304,54 @@ export class ArbitrageInstanceStore {
       WHERE arbitrageId = ? AND legId = ?`).run(next, arbitrageId, reference.legId);
   }
 
+  private assertOpeningClaimAllowed(
+    instance: ArbitrageInstance,
+    leg: ArbitrageInstanceLeg,
+    claim: ExecutionReferenceClaim,
+  ) {
+    const unresolvedForMutationDomain = this.db.prepare(`SELECT 1
+      FROM arbitrage_execution_references reference
+      JOIN arbitrage_instance_legs candidate
+        ON candidate.arbitrageId = reference.arbitrageId AND candidate.legId = reference.legId
+      JOIN arbitrage_instances owner ON owner.arbitrageId = reference.arbitrageId
+      WHERE owner.userId = ? AND candidate.venue = ? AND candidate.accountId = ?
+        AND candidate.instrumentId = ? AND reference.phase = 'OPENING'
+        AND reference.quantityEffect = 'INCREASE'
+        AND reference.status IN ('CLAIMED', 'LINKED', 'PENDING_CONFIRMATION', 'UNKNOWN')
+      LIMIT 1`).get(instance.userId, leg.venue, leg.accountId, leg.instrumentId);
+    if (unresolvedForMutationDomain) {
+      throw new Error("Provider mutation domain already has an unresolved risk-increasing opening execution.");
+    }
+
+    const openingReferences = instance.executionReferences.filter((reference) => reference.phase === "OPENING");
+    if (openingReferences.some((reference) => reference.legId === leg.legId)) {
+      throw new Error("Arbitrage leg already has an opening execution reference.");
+    }
+    if (openingReferences.length === 0) return;
+    if (openingReferences.length !== 1) {
+      throw new Error("Arbitrage instance does not have a unique first-leg opening execution.");
+    }
+    const first = openingReferences[0]!;
+    const fullConfirmed = first.status === "CONFIRMED"
+      && first.confirmedQuantity === first.requestedQuantity;
+    const terminalPartial = first.status === "FAILED"
+      && compareUnsignedDecimals(first.confirmedQuantity, "0") > 0
+      && compareUnsignedDecimals(first.confirmedQuantity, first.requestedQuantity) < 0;
+    if (!fullConfirmed && !terminalPartial) {
+      throw new Error("Arbitrage first-leg opening is not authoritatively confirmed.");
+    }
+    if (preparedSecondLegHedge(instance, first, claim.legId) === null) {
+      throw new Error("Arbitrage second-leg opening has no authoritative prepared exposure.");
+    }
+  }
+
   private deriveLifecycle(
     instance: ArbitrageInstance,
     updatedAt: number,
     mutationDisposition?: "NOT_DISPATCHED",
   ) {
-    const quantities = instance.legs.map(managedCurrentQuantity) as [string, string];
+    const quantities = instance.legs.map((leg) => activeManagedQuantity(instance, leg)) as [string, string];
     const hasExposure = quantities.some((quantity) => quantity !== "0");
-    const hasMaterialExposure = instance.legs.some((leg, index) => {
-      const quantity = quantities[index]!;
-      return leg.instrumentId.endsWith("-SPOT")
-        ? compareUnsignedDecimals(quantity, instance.maxResidualBaseQuantity) > 0
-        : quantity !== "0";
-    });
     const bothExposed = quantities.every((quantity) => quantity !== "0");
     const residualWithinThreshold = compareUnsignedDecimals(
       absoluteDifference(quantities[0], quantities[1]),
@@ -661,10 +1359,15 @@ export class ArbitrageInstanceStore {
     ) <= 0;
     const unresolved = instance.executionReferences.some((reference) =>
       UNRESOLVED_REFERENCE_STATUSES.includes(reference.status));
+    const hasClosingExecution = instance.executionReferences.some((reference) =>
+      reference.phase === "CLOSING" && reference.quantityEffect === "DECREASE");
 
     let status: ArbitrageInstanceStatus;
-    if (instance.status === "CLOSING") {
-      status = !hasMaterialExposure && !unresolved
+    if (!hasExposure && !unresolved
+      && ((instance.managementReleases?.length ?? 0) > 0 || hasClosingExecution)) {
+      status = "CLOSED";
+    } else if (instance.status === "CLOSING") {
+      status = !hasExposure && !unresolved
         ? "CLOSED"
         : unresolved
           ? "CLOSING"
@@ -752,7 +1455,9 @@ export class ArbitrageInstanceStore {
   }
 
   private migrate() {
-    this.db.exec(`CREATE TABLE IF NOT EXISTS arbitrage_instances (
+    this.db.exec(`${recoveryAuditSchema}
+
+    CREATE TABLE IF NOT EXISTS arbitrage_instances (
       arbitrageId TEXT PRIMARY KEY,
       userId TEXT NOT NULL,
       strategyType TEXT NOT NULL CHECK (strategyType IN ('PERPETUAL_PERPETUAL', 'SPOT_PERPETUAL')),
@@ -805,8 +1510,163 @@ export class ArbitrageInstanceStore {
       updatedAt INTEGER NOT NULL,
       PRIMARY KEY (arbitrageId, executionIntentId),
       FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS arbitrage_leg_management_releases (
+      releaseId TEXT PRIMARY KEY,
+      arbitrageId TEXT NOT NULL,
+      legId TEXT NOT NULL,
+      releasedQuantity TEXT NOT NULL,
+      reason TEXT NOT NULL CHECK (reason IN ('USER_CONFIRMED_STOP_MANAGEMENT')),
+      source TEXT NOT NULL CHECK (source IN ('AUTHENTICATED_API')),
+      requestedByUserId TEXT NOT NULL,
+      requestedAt INTEGER NOT NULL,
+      confirmedAt INTEGER NOT NULL,
+      venue TEXT NOT NULL CHECK (venue IN ('binance', 'okx', 'bybit', 'bitget')),
+      accountId TEXT NOT NULL,
+      instrumentId TEXT NOT NULL,
+      positionMode TEXT NOT NULL CHECK (positionMode IN ('ONE_WAY', 'HEDGE')),
+      actualQuantity TEXT NOT NULL,
+      actualSignedNetQuantity TEXT,
+      actualLongQuantity TEXT NOT NULL,
+      actualShortQuantity TEXT NOT NULL,
+      availableQuantity TEXT,
+      realityCheckedAt INTEGER NOT NULL,
+      UNIQUE (arbitrageId, legId),
+      FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS arbitrage_command_idempotency (
+      commandId TEXT PRIMARY KEY,
+      operationType TEXT NOT NULL CHECK (operationType IN (
+        'EXECUTION_OPEN', 'EXECUTION_CLOSE', 'MANAGEMENT_RELEASE'
+      )),
+      requestedByUserId TEXT NOT NULL,
+      arbitrageId TEXT NOT NULL,
+      legId TEXT NOT NULL,
+      referenceId TEXT NOT NULL UNIQUE,
+      businessPayloadFingerprint TEXT,
+      createdAt INTEGER NOT NULL
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS arbitrage_spot_opening_attribution_evidence (
+      arbitrageId TEXT NOT NULL,
+      legId TEXT NOT NULL,
+      executionIntentId TEXT NOT NULL,
+      executionRecordId TEXT NOT NULL UNIQUE,
+      attributableBaseQuantity TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('PROVIDER_ORDER_FILLS')),
+      confirmedAt INTEGER NOT NULL,
+      venue TEXT NOT NULL CHECK (venue IN ('binance', 'okx', 'bybit', 'bitget')),
+      accountId TEXT NOT NULL,
+      instrumentId TEXT NOT NULL,
+      PRIMARY KEY (arbitrageId, executionIntentId),
+      FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId),
+      FOREIGN KEY (arbitrageId, executionIntentId)
+        REFERENCES arbitrage_execution_references(arbitrageId, executionIntentId)
     ) STRICT;`);
+    const commandColumns = new Set((this.db.prepare(
+      "PRAGMA table_info(arbitrage_command_idempotency)",
+    ).all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!commandColumns.has("businessPayloadFingerprint")) {
+      // Existing rows cannot be truthfully backfilled from the former partial
+      // fingerprint. NULL therefore means legacy/unverifiable and fails closed.
+      this.db.exec("ALTER TABLE arbitrage_command_idempotency ADD COLUMN businessPayloadFingerprint TEXT");
+    }
   }
+}
+
+function recoveryAuditId(action: string, arbitrageId: string, executionIntentId: string) {
+  return `recovery:${createHash("sha256").update(`${action}\u0000${arbitrageId}\u0000${executionIntentId}`).digest("hex")}`;
+}
+
+function normalizeCommandFingerprint(fingerprint: ArbitrageCommandFingerprint): ArbitrageCommandFingerprint {
+  if (fingerprint.operationType !== "EXECUTION_OPEN"
+    && fingerprint.operationType !== "EXECUTION_CLOSE"
+    && fingerprint.operationType !== "MANAGEMENT_RELEASE") {
+    throw new Error("Arbitrage command operation type is invalid.");
+  }
+  return Object.freeze({
+    commandId: identifier(fingerprint.commandId, "commandId"),
+    operationType: fingerprint.operationType,
+    requestedByUserId: identifier(fingerprint.requestedByUserId, "requestedByUserId"),
+    arbitrageId: identifier(fingerprint.arbitrageId, "arbitrageId"),
+    legId: identifier(fingerprint.legId, "legId"),
+    referenceId: identifier(fingerprint.referenceId, "referenceId"),
+    businessPayloadFingerprint: identifier(
+      fingerprint.businessPayloadFingerprint,
+      "businessPayloadFingerprint",
+    ),
+  });
+}
+
+function sameCommandFingerprint(
+  existing: CommandIdempotencyRow,
+  expected: Omit<ArbitrageCommandFingerprint, "commandId"> & Readonly<{ commandId: string }>,
+) {
+  return existing.commandId === expected.commandId
+    && existing.operationType === expected.operationType
+    && existing.requestedByUserId === expected.requestedByUserId
+    && existing.arbitrageId === expected.arbitrageId
+    && existing.legId === expected.legId
+    && existing.referenceId === expected.referenceId
+    && existing.businessPayloadFingerprint !== null
+    && existing.businessPayloadFingerprint === expected.businessPayloadFingerprint;
+}
+
+function normalizeSpotOpeningAttributionEvidence(
+  evidence: SpotOpeningAttributionEvidence,
+): SpotOpeningAttributionEvidence {
+  if (evidence.source !== "PROVIDER_ORDER_FILLS") {
+    throw new Error("Spot opening attribution evidence source is invalid.");
+  }
+  return Object.freeze({
+    arbitrageId: identifier(evidence.arbitrageId, "arbitrageId"),
+    legId: identifier(evidence.legId, "legId"),
+    executionIntentId: identifier(evidence.executionIntentId, "executionIntentId"),
+    executionRecordId: identifier(evidence.executionRecordId, "executionRecordId"),
+    attributableBaseQuantity: normalizeUnsignedDecimal(
+      evidence.attributableBaseQuantity,
+      "attributableBaseQuantity",
+    ),
+    source: evidence.source,
+    confirmedAt: timestamp(evidence.confirmedAt, "confirmedAt"),
+    venue: venue(evidence.venue),
+    accountId: identifier(evidence.accountId, "accountId"),
+    instrumentId: identifier(evidence.instrumentId, "instrumentId"),
+  });
+}
+
+function spotOpeningAttributionEvidenceFromRow(
+  row: SpotOpeningAttributionEvidenceRow,
+): SpotOpeningAttributionEvidence {
+  return normalizeSpotOpeningAttributionEvidence({
+    arbitrageId: row.arbitrageId,
+    legId: row.legId,
+    executionIntentId: row.executionIntentId,
+    executionRecordId: row.executionRecordId,
+    attributableBaseQuantity: row.attributableBaseQuantity,
+    source: row.source as "PROVIDER_ORDER_FILLS",
+    confirmedAt: row.confirmedAt,
+    venue: row.venue as ArbitrageInstanceLeg["venue"],
+    accountId: row.accountId,
+    instrumentId: row.instrumentId,
+  });
+}
+
+function sameSpotOpeningAttributionEvidence(
+  left: SpotOpeningAttributionEvidence,
+  right: SpotOpeningAttributionEvidence,
+) {
+  return left.arbitrageId === right.arbitrageId
+    && left.legId === right.legId
+    && left.executionIntentId === right.executionIntentId
+    && left.executionRecordId === right.executionRecordId
+    && left.attributableBaseQuantity === right.attributableBaseQuantity
+    && left.source === right.source
+    && left.venue === right.venue
+    && left.accountId === right.accountId
+    && left.instrumentId === right.instrumentId;
 }
 
 function preparedSecondLegHedge(
@@ -816,13 +1676,18 @@ function preparedSecondLegHedge(
     phase: string;
     quantityEffect: string;
     status: string;
+    requestedQuantity: string;
+    confirmedQuantity: string;
     updatedAt: number;
   }>,
   secondLegId: string,
 ): PreparedSecondLegHedge | null {
+  const terminalPartial = firstReference.status === "FAILED"
+    && compareUnsignedDecimals(firstReference.confirmedQuantity, "0") > 0
+    && compareUnsignedDecimals(firstReference.confirmedQuantity, firstReference.requestedQuantity) < 0;
   if (firstReference.phase !== "OPENING"
     || firstReference.quantityEffect !== "INCREASE"
-    || firstReference.status !== "CONFIRMED"
+    || (firstReference.status !== "CONFIRMED" && !terminalPartial)
     || instance.updatedAt <= firstReference.updatedAt) {
     return null;
   }
@@ -892,6 +1757,15 @@ function normalizeNewInstance(input: NewArbitrageInstance) {
 }
 
 function normalizeClaim(claim: ExecutionReferenceClaim): ExecutionReferenceClaim {
+  if ((claim.commandId === undefined) !== (claim.operationType === undefined)
+    || (claim.commandId === undefined) !== (claim.businessPayloadFingerprint === undefined)) {
+    throw new Error("Execution command idempotency fields must be provided together.");
+  }
+  if (claim.operationType !== undefined
+    && claim.operationType !== "EXECUTION_OPEN"
+    && claim.operationType !== "EXECUTION_CLOSE") {
+    throw new Error("Execution command operation type is invalid.");
+  }
   return Object.freeze({
     legId: identifier(claim.legId, "legId"),
     phase: executionPhase(claim.phase),
@@ -904,7 +1778,66 @@ function normalizeClaim(claim: ExecutionReferenceClaim): ExecutionReferenceClaim
         "acceptedResidualQuantity",
       ),
     }),
+    ...(claim.commandId === undefined ? {} : {
+      commandId: identifier(claim.commandId, "commandId"),
+      operationType: claim.operationType,
+      businessPayloadFingerprint: identifier(claim.businessPayloadFingerprint, "businessPayloadFingerprint"),
+    }),
     createdAt: timestamp(claim.createdAt, "createdAt"),
+  });
+}
+
+function normalizeManagementReleaseClaim(claim: ManagementReleaseClaim): ManagementReleaseClaim {
+  if (claim.operationType !== "MANAGEMENT_RELEASE") {
+    throw new Error("Management release operation type is invalid.");
+  }
+  return Object.freeze({
+    ...normalizeManagementRelease(claim),
+    commandId: identifier(claim.commandId, "commandId"),
+    operationType: claim.operationType,
+    businessPayloadFingerprint: identifier(claim.businessPayloadFingerprint, "businessPayloadFingerprint"),
+  });
+}
+
+function normalizeManagementRelease(claim: ArbitrageLegManagementRelease): ArbitrageLegManagementRelease {
+  if (claim.reason !== "USER_CONFIRMED_STOP_MANAGEMENT" || claim.source !== "AUTHENTICATED_API") {
+    throw new Error("Management release reason or source is invalid.");
+  }
+  const requestedAt = timestamp(claim.requestedAt, "requestedAt");
+  const confirmedAt = timestamp(claim.confirmedAt, "confirmedAt");
+  const realityCheckedAt = timestamp(claim.realityCheckedAt, "realityCheckedAt");
+  if (confirmedAt < requestedAt || confirmedAt < realityCheckedAt) {
+    throw new Error("Management release timestamps are invalid.");
+  }
+  const mode = positionMode(claim.positionMode);
+  if ((mode === "ONE_WAY" && claim.actualSignedNetQuantity === null)
+    || (mode === "HEDGE" && claim.actualSignedNetQuantity !== null)) {
+    throw new Error("Management release reality does not match its position mode.");
+  }
+  return Object.freeze({
+    releaseId: identifier(claim.releaseId, "releaseId"),
+    arbitrageId: identifier(claim.arbitrageId, "arbitrageId"),
+    legId: identifier(claim.legId, "legId"),
+    releasedQuantity: normalizePositiveDecimal(claim.releasedQuantity, "releasedQuantity"),
+    reason: claim.reason,
+    source: claim.source,
+    requestedByUserId: identifier(claim.requestedByUserId, "requestedByUserId"),
+    requestedAt,
+    confirmedAt,
+    venue: venue(claim.venue),
+    accountId: identifier(claim.accountId, "accountId"),
+    instrumentId: instrumentId(claim.instrumentId),
+    positionMode: mode,
+    actualQuantity: normalizeUnsignedDecimal(claim.actualQuantity, "actualQuantity"),
+    actualSignedNetQuantity: claim.actualSignedNetQuantity === null
+      ? null
+      : normalizeSignedDecimal(claim.actualSignedNetQuantity, "actualSignedNetQuantity"),
+    actualLongQuantity: normalizeUnsignedDecimal(claim.actualLongQuantity, "actualLongQuantity"),
+    actualShortQuantity: normalizeUnsignedDecimal(claim.actualShortQuantity, "actualShortQuantity"),
+    availableQuantity: claim.availableQuantity === null
+      ? null
+      : normalizeUnsignedDecimal(claim.availableQuantity, "availableQuantity"),
+    realityCheckedAt,
   });
 }
 
@@ -979,6 +1912,59 @@ function referenceFromRow(row: ReferenceRow): ArbitrageExecutionReference {
   });
 }
 
+function unresolvedRecoveryCandidateFromRow(
+  row: UnresolvedRecoveryCandidateRow,
+): UnresolvedExecutionRecoveryCandidate {
+  const status = referenceStatus(row.status);
+  if (!UNRESOLVED_REFERENCE_STATUSES.includes(status)) {
+    throw new Error("Recovery candidate status is terminal.");
+  }
+  return Object.freeze({
+    userId: identifier(row.userId, "userId"),
+    arbitrageId: identifier(row.arbitrageId, "arbitrageId"),
+    legId: identifier(row.legId, "legId"),
+    executionIntentId: identifier(row.executionIntentId, "executionIntentId"),
+    executionRecordId: row.executionRecordId === null
+      ? null
+      : identifier(row.executionRecordId, "executionRecordId"),
+    status: status as UnresolvedExecutionRecoveryCandidate["status"],
+    phase: executionPhase(row.phase),
+    quantityEffect: quantityEffect(row.quantityEffect),
+    requestedQuantity: normalizePositiveDecimal(row.requestedQuantity, "requestedQuantity"),
+    confirmedQuantity: normalizeUnsignedDecimal(row.confirmedQuantity, "confirmedQuantity"),
+    venue: venue(row.venue),
+    accountId: identifier(row.accountId, "accountId"),
+    instrumentId: instrumentId(row.instrumentId),
+    role: legRole(row.role),
+    createdAt: timestamp(row.createdAt, "createdAt"),
+    updatedAt: timestamp(row.updatedAt, "updatedAt"),
+  });
+}
+
+function managementReleaseFromRow(row: ManagementReleaseRow): ArbitrageLegManagementRelease {
+  return normalizeManagementRelease({
+    releaseId: row.releaseId,
+    arbitrageId: row.arbitrageId,
+    legId: row.legId,
+    releasedQuantity: row.releasedQuantity,
+    reason: row.reason as ArbitrageLegManagementRelease["reason"],
+    source: row.source as ArbitrageLegManagementRelease["source"],
+    requestedByUserId: row.requestedByUserId,
+    requestedAt: row.requestedAt,
+    confirmedAt: row.confirmedAt,
+    venue: row.venue as ArbitrageLegManagementRelease["venue"],
+    accountId: row.accountId,
+    instrumentId: row.instrumentId,
+    positionMode: row.positionMode as ArbitrageLegManagementRelease["positionMode"],
+    actualQuantity: row.actualQuantity,
+    actualSignedNetQuantity: row.actualSignedNetQuantity,
+    actualLongQuantity: row.actualLongQuantity,
+    actualShortQuantity: row.actualShortQuantity,
+    availableQuantity: row.availableQuantity,
+    realityCheckedAt: row.realityCheckedAt,
+  });
+}
+
 function subtractForDelta(left: string, right: string) {
   const normalizedLeft = normalizeUnsignedDecimal(left, "confirmedQuantity");
   const normalizedRight = normalizeUnsignedDecimal(right, "previousConfirmedQuantity");
@@ -993,6 +1979,16 @@ function subtractForDelta(left: string, right: string) {
   const integer = digits.slice(0, -scale);
   const fraction = digits.slice(-scale).replace(/0+$/u, "");
   return fraction ? `${integer}.${fraction}` : integer;
+}
+
+function terminalStatusCorrectionAllowed(
+  reference: Pick<ReferenceRow, "status" | "requestedQuantity">,
+  update: ExecutionResultUpdate,
+) {
+  if (reference.status === update.status) return true;
+  return reference.status === "FAILED"
+    && update.status === "CONFIRMED"
+    && update.confirmedQuantity === reference.requestedQuantity;
 }
 
 function decimalParts(value: string) {
@@ -1056,6 +2052,11 @@ function venue(value: unknown): ArbitrageInstanceLeg["venue"] {
   if (value !== "binance" && value !== "okx" && value !== "bybit" && value !== "bitget") {
     throw new Error("Arbitrage leg venue is invalid.");
   }
+  return value;
+}
+
+function positionMode(value: unknown): ArbitrageLegManagementRelease["positionMode"] {
+  if (value !== "ONE_WAY" && value !== "HEDGE") throw new Error("Position mode is invalid.");
   return value;
 }
 

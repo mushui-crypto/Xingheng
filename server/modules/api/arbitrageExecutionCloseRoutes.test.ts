@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ArbitrageExecutionCloseError } from "../arbitrage-execution/ArbitrageExecutionCloseService";
 import { registerArbitrageExecutionCloseRoutes } from "./arbitrageExecutionCloseRoutes";
 
 test("formal close route is authenticated, no-store, and forwards only the request body", async () => {
@@ -29,6 +30,17 @@ test("formal close route rejects unauthenticated requests before service access"
   await handler({ body: {} }, result);
   assert.equal(result.statusCode, 400);
   assert.equal(result.body.category, "invalid_close_confirmation");
+});
+
+test("Close payload idempotency conflicts are returned as HTTP 409", async () => {
+  let handler: any;
+  registerArbitrageExecutionCloseRoutes({ post: (_path: string, value: unknown) => { handler = value; } } as any, {
+    closeLeg: async () => { throw new ArbitrageExecutionCloseError("idempotency_conflict", "conflict"); },
+  });
+  const result = response();
+  await handler({ user: { id: "user-a" }, body: {} }, result);
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.category, "idempotency_conflict");
 });
 
 function response() {

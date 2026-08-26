@@ -1,5 +1,9 @@
 # RWA 中性与跨所套利看板维护文档
 
+> **HISTORICAL / SUPERSEDED**
+>
+> 本文是早期看板与评定口径的历史快照，不再定义当前 production Start、执行能力或自动化门禁。当前事实以 `PROJECT_CONTEXT.md`、`ARCHITECTURE.md` 和 `docs/ARBITRAGE_PRODUCT.md` 为准；以下正文不作追溯改写。
+
 更新时间：2026-07-23
 
 当前状态：已部署版本覆盖黄金同所中性与首批多所股票 RWA；本轮主流币扩展、前端评定因子和手动/自动预检分离已通过独立终验并合并 `main`，尚未部署或发布。

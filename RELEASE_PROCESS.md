@@ -127,7 +127,7 @@ docker compose -p xingheng \
 部署后检查：
 
 ```bash
-docker compose ps
+docker compose -p xingheng ps
 scripts/smoke.sh https://<domain>
 ```
 

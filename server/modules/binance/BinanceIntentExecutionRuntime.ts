@@ -6,6 +6,7 @@ import {
 } from "../cex/ExecutionCancelCapability";
 import { ExecutionCoordinator, type CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
+import type { ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import {
   applyExecutionQueryObservation,
   type ExecutionQueryObservation,
@@ -95,6 +96,17 @@ export class BinanceIntentExecutionRuntime {
   async execute(
     input: ExecutionIntent,
   ): Promise<BinanceIntentExecutionRuntimeResult> {
+    return this.executeWithEffect(input, "INCREASE");
+  }
+
+  close(input: ExecutionIntent): Promise<BinanceIntentExecutionRuntimeResult> {
+    return this.executeWithEffect(input, "DECREASE");
+  }
+
+  private async executeWithEffect(
+    input: ExecutionIntent,
+    mutationEffect: ExecutionMutationEffect,
+  ): Promise<BinanceIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "binance") {
       throw new Error(`Unsupported execution venue: ${intent.venue}.`);
@@ -117,6 +129,8 @@ export class BinanceIntentExecutionRuntime {
           service,
           this.config,
           this.options.assertSubmitAllowed,
+          undefined,
+          mutationEffect,
         );
         capability = this.options.createCapability?.(intentService)
           ?? new BinanceIntentExecutionCapability(intentService);
@@ -137,7 +151,7 @@ export class BinanceIntentExecutionRuntime {
           observedAt: execution.executionState.updatedAt,
         });
       }
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, initialRecord);
 
       return Object.freeze({ executionRecord, execution });
     });
@@ -162,7 +176,7 @@ export class BinanceIntentExecutionRuntime {
         || current.executionAttemptId !== undefined
         || current.remoteOrderId !== undefined
         || localState.kind !== "missing") return;
-      await this.recordStore.update({ ...current, status: "FAILED" });
+      await this.recordStore.update({ ...current, status: "FAILED" }, current);
     } catch (cleanupError) {
       console.error("[binance] pre-mutation ExecutionRecord cleanup failed", cleanupError instanceof Error ? cleanupError.message : "unknown error");
     }
@@ -173,16 +187,11 @@ export class BinanceIntentExecutionRuntime {
     executionId: string,
   ): Promise<BinanceIntentExecutionQueryRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.recordStore.loadForUser(userId, identifier(executionId, "executionId"));
-    if (!record) throw new Error("ExecutionRecord was not found for the authenticated user.");
-    if (record.userId !== userId) {
-      throw new Error("ExecutionRecord userId does not match the authenticated user.");
-    }
-    if (record.venue !== "binance") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
+    const normalizedExecutionId = identifier(executionId, "executionId");
+    await this.loadRecord(userId, normalizedExecutionId);
 
     return this.registry.run(userId, async (service) => {
+      const record = await this.loadRecord(userId, normalizedExecutionId);
       const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
       if (localState.kind === "isolated") {
         throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
@@ -200,7 +209,7 @@ export class BinanceIntentExecutionRuntime {
       });
       const observation = await capability.query(record);
       const executionRecord = applyExecutionQueryObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation });
     });
   }
@@ -210,15 +219,10 @@ export class BinanceIntentExecutionRuntime {
     executionId: string,
   ): Promise<BinanceIntentExecutionReconciliationRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.recordStore.loadForUser(userId, identifier(executionId, "executionId"));
-    if (!record) throw new Error("ExecutionRecord was not found for the authenticated user.");
-    if (record.userId !== userId) {
-      throw new Error("ExecutionRecord userId does not match the authenticated user.");
-    }
-    if (record.venue !== "binance") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
+    const normalizedExecutionId = identifier(executionId, "executionId");
+    await this.loadRecord(userId, normalizedExecutionId);
     return this.registry.run(userId, async (service) => {
+      const record = await this.loadRecord(userId, normalizedExecutionId);
       const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
       if (localState.kind === "isolated") {
         throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
@@ -239,7 +243,7 @@ export class BinanceIntentExecutionRuntime {
       });
       const observation = await capability.reconcile(record);
       const executionRecord = applyExecutionReconciliationObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation, terminalShortCircuit: false });
     });
   }
@@ -249,19 +253,14 @@ export class BinanceIntentExecutionRuntime {
     executionId: string,
   ): Promise<BinanceIntentExecutionCancelRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.recordStore.loadForUser(userId, identifier(executionId, "executionId"));
-    if (!record) throw new Error("ExecutionRecord was not found for the authenticated user.");
-    if (record.userId !== userId) {
-      throw new Error("ExecutionRecord userId does not match the authenticated user.");
-    }
-    if (record.venue !== "binance") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
-    if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
-      throw new Error(`Execution record ${record.status} cannot be cancelled.`);
-    }
+    const normalizedExecutionId = identifier(executionId, "executionId");
+    await this.loadRecord(userId, normalizedExecutionId);
 
     return this.registry.run(userId, async (service) => {
+      const record = await this.loadRecord(userId, normalizedExecutionId);
+      if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
+        throw new Error(`Execution record ${record.status} cannot be cancelled.`);
+      }
       const localState = service.executionOrderState(binanceExecutionIdempotencyKeyFor(record));
       if (localState.kind === "isolated") {
         throw new BinanceStoredOrderManualReconciliationError(localState.isolation);
@@ -277,9 +276,21 @@ export class BinanceIntentExecutionRuntime {
       });
       const observation = await capability.cancel(record);
       const executionRecord = applyExecutionCancelObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation });
     });
+  }
+
+  private async loadRecord(userId: string, executionId: string) {
+    const record = await this.recordStore.loadForUser(userId, executionId);
+    if (!record) throw new Error("ExecutionRecord was not found for the authenticated user.");
+    if (record.userId !== userId) {
+      throw new Error("ExecutionRecord userId does not match the authenticated user.");
+    }
+    if (record.venue !== "binance") {
+      throw new Error(`Unsupported execution venue: ${record.venue}.`);
+    }
+    return record;
   }
 }
 

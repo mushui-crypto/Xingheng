@@ -47,11 +47,13 @@ type VerificationClient = Readonly<{
 type BinanceVerificationClient = VerificationClient & Readonly<{
   readAccountSnapshot(): Promise<BinanceReadOnlyAccountSnapshot>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<BinancePerpetualPositionSnapshot>;
+  readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
 }>;
 
 type OkxVerificationClient = VerificationClient & Readonly<{
   readAccountSnapshot(): Promise<OkxAccountReadSnapshot>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<OkxPerpetualPositionSnapshot>;
+  readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
   dispose?(): void | Promise<void>;
 }>;
 
@@ -74,7 +76,7 @@ type AccountReader = Readonly<{
 }>;
 
 type PositionReadContextSource = Readonly<{
-  read(): Readonly<{ positionMode: PositionMode }>;
+  read(instrumentId: string): Promise<Readonly<{ positionMode: PositionMode }>> | Readonly<{ positionMode: PositionMode }>;
 }>;
 
 export type VerificationInstrumentBinding = Readonly<{
@@ -123,6 +125,9 @@ export class CatalogVerificationInstrumentResolver implements VerificationInstru
 }
 
 export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
+  private accountSnapshot: Promise<VenueAccountReadSnapshot> | null = null;
+  private readonly positionContexts = new Map<string, Promise<Readonly<{ positionMode: PositionMode }>>>();
+
   constructor(
     readonly venue: ExecutionVenue,
     private client: VerificationClient | null,
@@ -137,7 +142,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     const accountReader = this.accountReader;
     if (!client || !accountReader) throw new Error(`${this.venue} verification provider has been disposed.`);
     if (leg.venue !== this.venue) throw new Error("Arbitrage leg venue does not match verification provider.");
-    const account = await accountReader.readAccount();
+    const account = await (this.accountSnapshot ??= accountReader.readAccount());
     if (account.accountId !== leg.accountId && !isCredentialOnlyBinding(this.venue, leg.accountId)) {
       throw new ArbitrageLegReadError("account_identity_mismatch", "Arbitrage leg account does not match the authenticated credential.");
     }
@@ -168,7 +173,9 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       };
     }
     if (this.positionReader) {
-      const context = this.positionReadContext?.read();
+      const context = this.positionReadContext === undefined
+        ? undefined
+        : await this.readPositionContext(leg.instrumentId);
       const position = await this.positionReader.readPosition({
         accountId: leg.accountId,
         instrumentId: leg.instrumentId,
@@ -199,7 +206,18 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     const accountReader = this.accountReader;
     this.client = null;
     this.accountReader = null;
+    this.accountSnapshot = null;
+    this.positionContexts.clear();
     await accountReader?.dispose();
+  }
+
+  private readPositionContext(instrumentId: string) {
+    let context = this.positionContexts.get(instrumentId);
+    if (!context) {
+      context = Promise.resolve(this.positionReadContext!.read(instrumentId));
+      this.positionContexts.set(instrumentId, context);
+    }
+    return context;
   }
 }
 
@@ -222,6 +240,14 @@ export class BinanceArbitrageLegReadProviderFactory implements ArbitrageLegReadP
       new BinanceAccountReadProvider(client),
       this.instruments,
       new BinancePositionReader(client),
+      {
+        read: async () => {
+          if (typeof client.readPositionMode !== "function") {
+            throw new Error("Binance authoritative position mode is unavailable.");
+          }
+          return Object.freeze({ positionMode: await client.readPositionMode() });
+        },
+      },
     );
   }
 }
@@ -251,6 +277,14 @@ export class OkxArbitrageLegReadProviderFactory implements ArbitrageLegReadProvi
           return Object.freeze({ instId: binding.providerSymbol, contractSize: binding.contractSize });
         },
       }),
+      {
+        read: async () => {
+          if (typeof client.readPositionMode !== "function") {
+            throw new Error("OKX authoritative position mode is unavailable.");
+          }
+          return Object.freeze({ positionMode: await client.readPositionMode() });
+        },
+      },
     );
   }
 }
@@ -264,12 +298,34 @@ export class BybitArbitrageLegReadProviderFactory implements ArbitrageLegReadPro
   ) {}
   create(secret: UserExchangeCredentialSecret) {
     const client = this.clientFactory(secret);
+    let positionModeRead: import("../../bybit/BybitAccountReadClient").BybitLinearPositionModeRead | null = null;
+    const positionClient = {
+      readLinearPositionMode: async (symbol: string) => {
+        if (typeof client.readLinearPositionMode !== "function") {
+          throw new Error("Bybit authoritative position mode is unavailable.");
+        }
+        if (positionModeRead?.symbol === symbol) return positionModeRead;
+        positionModeRead = await client.readLinearPositionMode(symbol);
+        return positionModeRead;
+      },
+    };
     return new VenueArbitrageLegReadProvider(
       this.venue,
       client,
       new BybitAccountReadProvider(client),
       this.instruments,
-      typeof client.readLinearPositionMode === "function" ? new BybitPositionReader(client) : undefined,
+      new BybitPositionReader(positionClient),
+      {
+        read: async (instrumentId) => {
+          const instrument = canonicalInstrumentFromId(instrumentId);
+          const symbol = `${instrument.baseAsset}${instrument.quoteAsset}`;
+          positionModeRead = await positionClient.readLinearPositionMode(symbol);
+          if (positionModeRead.positionMode === "NOT_CONFIRMED") {
+            throw new Error("Bybit authoritative position mode is unavailable.");
+          }
+          return Object.freeze({ positionMode: positionModeRead.positionMode });
+        },
+      },
     );
   }
 }

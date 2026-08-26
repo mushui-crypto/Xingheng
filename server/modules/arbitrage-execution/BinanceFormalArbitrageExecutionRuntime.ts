@@ -8,14 +8,24 @@ import {
   type FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
 
-type Runtime = Pick<BinanceIntentExecutionRuntime, "execute" | "reconcile" | "cancel">;
+type Runtime = Pick<BinanceIntentExecutionRuntime, "execute" | "reconcile" | "cancel">
+  & Partial<Pick<BinanceIntentExecutionRuntime, "close">>;
 
 /** Production adapter preserving Binance's authoritative Decimal executedQty. */
 export class BinanceFormalArbitrageExecutionRuntime implements FormalExecutionRuntime {
   constructor(private readonly runtime: Runtime) {}
 
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
-    const result = await this.runtime.execute(intent);
+    return this.executeWith(() => this.runtime.execute(intent));
+  }
+
+  async executeManagedClose(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
+    if (!this.runtime.close) throw new Error("Binance managed-close runtime is unavailable.");
+    return this.executeWith(() => this.runtime.close!(intent));
+  }
+
+  private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {
+    const result = await run();
     const diagnostic = diagnosticFromExecution(result.execution);
     const mutationDisposition = mutationDispositionFromExecution({
       executionRecord: result.executionRecord,

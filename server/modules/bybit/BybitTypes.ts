@@ -61,6 +61,7 @@ export type BybitProviderOrder = Readonly<BybitOrderIdentity & {
   fee: string;
   feeCurrency: string | null;
   positionIdx?: BybitObservedPositionIdx;
+  reduceOnly?: boolean;
   marketUnit?: BybitMarketUnit;
   updatedAt: number | null;
 }>;

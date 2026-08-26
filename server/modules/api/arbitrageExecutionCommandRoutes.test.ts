@@ -91,6 +91,21 @@ test("formal API preserves safe manual reconciliation outcome fields", async () 
   assert.equal(JSON.stringify(result.body).includes("orderJson"), false);
 });
 
+test("Open payload idempotency conflicts are returned as HTTP 409", async () => {
+  let handler: any;
+  registerArbitrageExecutionCommandRoutes({
+    post: (path: string, value: unknown) => { if (path.endsWith("/legs/confirm")) handler = value; },
+  } as any, {
+    confirm: async () => assert.fail("must not confirm"),
+    executeLeg: async () => { throw new ArbitrageExecutionCommandError("idempotency_conflict", "conflict"); },
+    reconcileLeg: async () => assert.fail("must not reconcile"),
+  });
+  const result = response();
+  await handler({ user: { id: "user-a" }, body: {} }, result);
+  assert.equal(result.statusCode, 409);
+  assert.equal(result.body.category, "idempotency_conflict");
+});
+
 function response() {
   return {
     statusCode: 200,

@@ -212,8 +212,9 @@ SQLite。
 -   新增 venue 必须实现独立 `PositionReader` 后才能宣称接入统一仓位验证；GET-only Account Read
     不能替代该能力。
 
-当前 Binance 与 OKX perpetual 已接入该基础链。Bybit、Bitget reader 和 legacy OKX verifier cleanup
-不属于当前 checkpoint；production 私有验证仍需要独立授权和实时 GET 证据。
+当前 Binance、OKX、Bybit、Bitget 的 PositionReader 均已接入该基础链；venue 原始 mode、bucket、
+contract multiplier 等字段只在 reader/adapter 边界解释。无生产调用的 legacy OKX verifier 已删除。
+production 私有验证仍需要独立授权和实时 GET 证据。
 
 ## 6.4 多交易所共存架构边界
 
@@ -313,14 +314,21 @@ adapter，不能改变公共风险模型的语义。平台允许交易权限，�
 | 模块 | Binance | OKX | Bybit | Bitget |
 | --- | --- | --- | --- | --- |
 | Provider/client | 已有 | 已有 | 已有 | 已有 |
-| ExecutionCapability | 基准已验证 | 目标独立接入 | 目标独立接入 | 目标独立接入 |
-| FormalExecutionRuntime | 已有 | 目标边界 | 目标边界 | 目标边界 |
-| 数量边界 | 已验证 | canonical -> contract | 待独立验证 | 待独立验证 |
-| PositionReader/verification | 已验证 | 基础链已接入，需实时复核 | 待独立接入 | 待独立接入 |
-| 真实资金测试 | 已完成历史闭环 | 未授权 | 未授权 | 未授权 |
+| ExecutionCapability | 已接入 | 已接入 | 已接入 | 已接入 |
+| FormalExecutionRuntime | 已接入 | 已接入 | 已接入 | 已接入 |
+| 数量边界 | canonical 已验证 | canonical -> contract 已接入 | canonical 已接入 | canonical 已接入 |
+| PositionReader/verification | 已接入 | 已接入 | 已接入 | 已接入 |
+| 真实资金测试 | 已完成历史闭环 | 已有历史 PASS，需 fresh read | 尚无生产闭环 PASS | 已完成历史闭环 |
 
 当前实现状态、部署 revision、Provider mutation 和授权状态仍以 `PROJECT_CONTEXT.md` 及独立验收
 证据为准；本节只定义长期结构和不可越过的边界。
+
+### 已封板的编排与安全语义
+
+- `SPOT_PERPETUAL` 的 Start 由服务端强制 Spot first；Spot 只有完整 `CONFIRMED` 才自动执行 Perpetual second。第一腿 `FAILED0`、partial、`PENDING_CONFIRMATION` 或 `UNKNOWN` 时第二腿 mutation 为零；partial continue 是显式命令且不重试第一腿。`PERPETUAL_PERPETUAL` 保留现有合法 first-leg 选择。
+- Account Reality、Active Managed Exposure 和 Instance Hedge Delta 是三个独立事实。`CLOSED` / `closedAt` 表示管理责任终结，可由 close、Management Release 或混合路径产生，不证明 Provider 账户清仓。
+- halt 阻止 INCREASE；正式管理仓位 DECREASE、已知订单 cancel、query、reconcile 和 recovery 继续允许。恢复 query-first，timeout 不等于 `FAILED0`，not found 不等于 `NOT_DISPATCHED`，`UNKNOWN` fail closed，restart 不自动恢复第二腿交易意图。
+- Draft 必须显式携带 `executionMode`，Confirm 和 Start 重验同一 server-authoritative capability。OKX `PRICE_PRIORITY` 当前不可执行，必须在 Draft 即暴露 unavailable；机会 economics、score、funding、APR 和 capacity 不作为人工 Start hard gate。
 
 ### 演进顺序与禁止事项
 

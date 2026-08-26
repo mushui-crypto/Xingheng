@@ -3,10 +3,15 @@ import type { TradingRules } from "../cex/TradingRules";
 
 export type ArbitrageExecutionDraftStrategyType = "PERPETUAL_PERPETUAL" | "SPOT_PERPETUAL";
 export type ArbitrageExecutionDraftVenue = "binance" | "okx" | "bybit" | "bitget";
+export type ArbitrageExecutionMode = "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
 
 export type ArbitrageExecutionCapability = Readonly<{
   status: "AVAILABLE" | "UNAVAILABLE";
-  reasonCode: "AVAILABLE" | "EXECUTION_CAPABILITY_NOT_IMPLEMENTED" | "CREDENTIAL_NOT_CONFIGURED";
+  reasonCode:
+    | "AVAILABLE"
+    | "EXECUTION_CAPABILITY_NOT_IMPLEMENTED"
+    | "EXECUTION_MODE_NOT_SUPPORTED"
+    | "CREDENTIAL_NOT_CONFIGURED";
 }>;
 
 export type ArbitrageExecutionDraftPlanning =
@@ -41,6 +46,7 @@ export type ArbitrageExecutionDraft = Readonly<{
   sourceIdentity: string;
   sourceSnapshotGeneratedAt: number;
   horizonDays: 90 | 365;
+  executionMode: ArbitrageExecutionMode;
   strategyType: ArbitrageExecutionDraftStrategyType;
   quantityInput?: ExecutionQuantityInput;
   legs: readonly [ArbitrageExecutionDraftLeg, ArbitrageExecutionDraftLeg];

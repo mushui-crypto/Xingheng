@@ -1,5 +1,9 @@
 # DECISION_LOG.md
 
+> **HISTORICAL / SUPERSEDED NOTICE**
+>
+> 本文件记录决策发生时的历史背景，不是当前产品或执行语义的权威来源。涉及套利 Start、close、verification、recovery、halt、lifecycle 与用户流程的旧结论，如与 `PROJECT_CONTEXT.md`、`ARCHITECTURE.md` 或 `docs/ARBITRAGE_PRODUCT.md` 冲突，均以后者为准。
+
 记录重要技术决策。
 
 格式：
@@ -62,6 +66,8 @@
 授权或已获得真实资金测试许可；当前状态仍以 `PROJECT_CONTEXT.md` 和独立证据为准。
 
 ## ADR-003
+
+状态：**SUPERSEDED（仅保留历史）**。当前 opening / close / verification / recovery 语义见权威当前文档。
 
 日期：2026-08-20
 

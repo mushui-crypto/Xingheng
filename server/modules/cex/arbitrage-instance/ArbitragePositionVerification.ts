@@ -1,6 +1,15 @@
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
 import type { PositionSnapshot } from "../position/PositionSnapshot";
 
+/**
+ * MATCHED means reliable Account Reality does not contradict the full managed
+ * leg's direction/bucket relationship. It never means account quantity is
+ * owned by, or equal to, this arbitrage instance.
+ *
+ * MISMATCH means Account Reality is reliable, but the full managed perpetual
+ * leg is no longer present in the same direction/bucket at sufficient size.
+ * UNKNOWN means Account Reality could not be established reliably.
+ */
 export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 export type ArbitrageLegVerificationUnknownReason =
   | "overlapping_managed_leg"

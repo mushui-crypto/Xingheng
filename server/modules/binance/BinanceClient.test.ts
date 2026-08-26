@@ -208,7 +208,7 @@ test("formal query, partial fill, and cancel retain the exact int64 provider ord
       const requested = url.searchParams.get("orderId");
       if (requested) requestedOrderIds.push(requested);
       if (init?.method === "DELETE") return rawJsonResponse("{}");
-      return rawJsonResponse(`{"symbol":"BTCUSDT","orderId":${rawOrderId},"clientOrderId":"ptmlosslessquery","status":"PARTIALLY_FILLED","origQty":"0.100000000000000001","executedQty":"0.000000000000000001"}`);
+      return rawJsonResponse(`{"symbol":"BTCUSDT","side":"BUY","orderId":${rawOrderId},"clientOrderId":"ptmlosslessquery","status":"PARTIALLY_FILLED","origQty":"0.100000000000000001","executedQty":"0.000000000000000001"}`);
     }) as typeof fetch,
     () => 1_800_000_000_000,
     ["203.0.113.10"],
@@ -344,8 +344,10 @@ test("generic place, query, and cancel keep the authoritative provider symbol an
       orderId: 7,
       clientOrderId: url.searchParams.get("origClientOrderId") ?? "ptmbtc",
       status: "NEW",
+      side: "BUY",
       origQty: "0.000000010000000001",
       executedQty: "0",
+      reduceOnly: false,
     });
   }) as typeof fetch;
   const client = new BinanceClient(
@@ -421,8 +423,10 @@ test("spot and USD-M order responses preserve full, partial, and cancelled Decim
             orderId: 9,
             clientOrderId: "decimal-fill",
             status: fixture.status,
+            side: "BUY",
             origQty: "2.000000000000000001",
             executedQty: fixture.executedQty,
+            ...(fixture.category === "linear" ? { reduceOnly: false } : {}),
           });
         }) as typeof fetch,
         Date.now,
@@ -469,6 +473,65 @@ test("linear orders pass reduceOnly and preserve DOGEUSDT Decimal quantity", asy
   assert.equal((submitted as URL | null)?.searchParams.get("quantity"), "12.34567890123456789");
   assert.equal((submitted as URL | null)?.searchParams.get("price"), "0.300000000000000001");
   assert.equal((submitted as URL | null)?.searchParams.get("reduceOnly"), "true");
+});
+
+test("HEDGE close selects the Binance bucket and omits the unsupported reduceOnly field", async () => {
+  let submitted: URL | null = null;
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    assert.equal(init?.method, "POST");
+    submitted = url;
+    return Response.json({ orderId: 9, clientOrderId: url.searchParams.get("newClientOrderId") });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    Date.now,
+    ["203.0.113.10"],
+  );
+
+  await client.placeOrder({
+    category: "linear",
+    symbol: "DOGEUSDT",
+    side: "Buy",
+    quantity: "100",
+    executionPriceMode: "MARKET",
+    reduceOnly: true,
+    positionDirection: "SHORT",
+    positionSide: "SHORT",
+    positionMode: "HEDGE",
+    orderLinkId: "ptmhedgeclose",
+  });
+
+  assert.equal((submitted as URL | null)?.pathname, "/fapi/v1/order");
+  assert.equal((submitted as URL | null)?.searchParams.get("side"), "BUY");
+  assert.equal((submitted as URL | null)?.searchParams.get("positionSide"), "SHORT");
+  assert.equal((submitted as URL | null)?.searchParams.has("reduceOnly"), false);
+});
+
+test("HEDGE opening sends the target positionSide and omits reduceOnly", async () => {
+  let submitted: URL | null = null;
+  const fetchFn = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/api/v3/time") return Response.json({ serverTime: Date.now() });
+    assert.equal(init?.method, "POST");
+    submitted = url;
+    return Response.json({ orderId: 10, clientOrderId: url.searchParams.get("newClientOrderId") });
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" }, fetchFn, Date.now, ["203.0.113.10"],
+  );
+
+  await client.placeOrder({
+    category: "linear", symbol: "DOGEUSDT", side: "Sell", quantity: "100",
+    executionPriceMode: "MARKET", reduceOnly: false, positionDirection: "SHORT",
+    positionSide: "SHORT", positionMode: "HEDGE", orderLinkId: "ptmhedgeopen",
+  });
+
+  assert.equal((submitted as URL | null)?.searchParams.get("side"), "SELL");
+  assert.equal((submitted as URL | null)?.searchParams.get("positionSide"), "SHORT");
+  assert.equal((submitted as URL | null)?.searchParams.has("reduceOnly"), false);
 });
 
 test("preflight snapshot maps cross and isolated margin modes using GET-only requests", async (t) => {
@@ -745,6 +808,7 @@ test("generic risk snapshots read only the requested Spot and perpetual instrume
     if (url.pathname === "/fapi/v2/positionRisk") {
       return Response.json([{
         symbol: url.searchParams.get("symbol") ?? "BTCUSDT",
+        positionSide: "BOTH",
         positionAmt: "-0.001234567890123456",
         leverage: "1",
         marginType: "cross",
@@ -783,12 +847,44 @@ test("generic risk snapshots read only the requested Spot and perpetual instrume
     .every((request) => request.symbol === "DOGEUSDT"));
 });
 
+test("generic HEDGE risk snapshot reads the explicitly requested Binance bucket", async () => {
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.pathname === "/fapi/v1/positionSide/dual") return Response.json({ dualSidePosition: true });
+    if (url.pathname === "/fapi/v2/positionRisk") {
+      return Response.json([
+        { symbol: "BTCUSDT", positionSide: "LONG", positionAmt: "50", leverage: "2", marginType: "cross" },
+        { symbol: "BTCUSDT", positionSide: "SHORT", positionAmt: "-100", leverage: "2", marginType: "cross" },
+      ]);
+    }
+    const response = snapshotResponse(url.pathname, "cross");
+    if (response === undefined) throw new Error(`Unhandled Binance fixture request: ${url.pathname}`);
+    return Response.json(response);
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    fetchFn,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+
+  const snapshot = await client.readGenericRiskSnapshot({
+    category: "linear", symbol: "BTCUSDT", baseAsset: "BTC", positionSide: "SHORT",
+  });
+
+  assert.equal(snapshot.accountMode, "single_asset_hedge");
+  assert.deepEqual(snapshot.position, {
+    side: "short", quantity: "100", leverage: "2", marginMode: "cross",
+  });
+});
+
 function orderResponse(overrides: Record<string, unknown> = {}) {
   return {
     symbol: "BTCUSDT",
     orderId: 7,
     clientOrderId: "ptmidentity",
     status: "FILLED",
+    side: "BUY",
     origQty: "0.001",
     executedQty: "0.001",
     ...overrides,

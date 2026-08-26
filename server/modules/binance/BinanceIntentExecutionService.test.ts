@@ -59,6 +59,47 @@ test("maps spot, sell, price priority, and reduceOnly constraints", async () => 
   });
 });
 
+test("Binance HEDGE close maps the selected bucket and rejects an opening side before mutation", async () => {
+  const binding = new FakeBinancePersonalTradingBinding();
+  binding.readExecutionPositionMode = async () => "HEDGE";
+  const service = new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 });
+
+  await service.execute(executionIntent({
+    side: "buy", positionDirection: "SHORT", orderConstraints: { reduceOnly: true },
+  }));
+  assert.equal(binding.placeInputs[0]?.positionSide, "SHORT");
+  assert.equal(binding.placeInputs[0]?.side, "Buy");
+
+  const invalid = new FakeBinancePersonalTradingBinding();
+  invalid.readExecutionPositionMode = async () => "HEDGE";
+  await assert.rejects(() => new BinanceIntentExecutionService(invalid, { maxSlippageBps: 20 }).execute(executionIntent({
+    side: "buy", positionDirection: "LONG", orderConstraints: { reduceOnly: true },
+  })), /does not reduce/u);
+  assert.equal(invalid.providerMutations, 0);
+});
+
+test("Binance HEDGE opening maps LONG and SHORT without reduce-only semantics", async (t) => {
+  for (const scenario of [
+    { direction: "LONG" as const, side: "buy" as const, providerSide: "Buy", bucket: "LONG" },
+    { direction: "SHORT" as const, side: "sell" as const, providerSide: "Sell", bucket: "SHORT" },
+  ]) {
+    await t.test(scenario.direction, async () => {
+      const binding = new FakeBinancePersonalTradingBinding();
+      binding.readExecutionPositionMode = async () => "HEDGE";
+      await new BinanceIntentExecutionService(binding, { maxSlippageBps: 20 }).execute(executionIntent({
+        side: scenario.side,
+        positionDirection: scenario.direction,
+        orderConstraints: { reduceOnly: false },
+      }));
+      assert.equal(binding.placeInputs[0]?.side, scenario.providerSide);
+      assert.equal(binding.placeInputs[0]?.positionSide, scenario.bucket);
+      assert.equal(binding.placeInputs[0]?.positionMode, "HEDGE");
+      assert.equal(binding.placeInputs[0]?.reduceOnly, false);
+      assert.equal(binding.providerMutations, 1);
+    });
+  }
+});
+
 test("passes BTC, ETH, and DOGE symbols and Decimal quantities from generic context", async (t) => {
   for (const fixture of [
     { instrumentId: "BTC-USDT-SPOT", symbol: "BTCUSDT", asset: "BTC", type: "DIGITAL_ASSET", quantity: "0.000123456789012345" },
@@ -265,6 +306,7 @@ class FakeBinancePersonalTradingBinding {
   failure: Error | null = null;
   contextFailure: Error | null = null;
   contextFactory: (instrumentId: string) => BinanceGenericExecutionContext = executionContext;
+  readExecutionPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
 
   async loadExecutionReadContext(instrumentId: string) {
     this.contextInstrumentIds.push(instrumentId);
@@ -338,7 +380,7 @@ function executionContext(instrumentId: string): BinanceGenericExecutionContext 
 
 function executionIntent(overrides: Partial<Record<string, unknown>> = {}) {
   const instrumentId = (overrides.instrumentId as string | undefined) ?? "XAUT-USDT-PERP";
-  const { instrumentId: _ignoredInstrumentId, positionDirection: _ignoredDirection, ...rest } = overrides;
+  const { instrumentId: _ignoredInstrumentId, ...rest } = overrides;
   return createExecutionIntent({
     intentId: "intent-user-1",
     userId: "user-1",

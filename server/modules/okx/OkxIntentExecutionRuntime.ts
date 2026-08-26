@@ -4,7 +4,7 @@ import {
   type ExecutionCancelCapability,
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
-import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
+import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { ExecutionCoordinator, type CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import {
@@ -113,17 +113,26 @@ export class OkxIntentExecutionRuntime {
     private readonly options: OkxIntentExecutionRuntimeOptions = {},
   ) {}
 
+  supportsOpeningExecutionMode(input: Readonly<{
+    executionMode: ExecutionIntent["executionMode"];
+    marketType: "spot" | "perpetual";
+  }>) {
+    if (input.executionMode === "EXECUTION_PRIORITY") return true;
+    return input.marketType === "perpetual" && this.options.limitPriceResolver !== undefined;
+  }
+
   async execute(input: ExecutionIntent): Promise<OkxIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "okx") {
       throw new Error(`Unsupported execution venue: ${intent.venue}.`);
     }
-    return this.executeIntent(intent);
+    return this.executeIntent(intent, "INCREASE");
   }
 
   async close(input: ExecutionIntent): Promise<OkxIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
-    return this.execute(intent);
+    if (intent.venue !== "okx") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
+    return this.executeIntent(intent, "DECREASE");
   }
 
   async query(
@@ -131,17 +140,16 @@ export class OkxIntentExecutionRuntime {
     executionId: string,
   ): Promise<OkxIntentExecutionQueryRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "okx") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "okx") throw new Error(`Unsupported execution venue: ${record.venue}.`);
       await this.assertAccount(record, runtimeService);
       const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const reference = await this.resolveReference(record, service);
       const result = await service.query(reference);
       const executionRecord = applyExecutionQueryObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({
         executionRecord,
         observation: result.observation,
@@ -157,11 +165,10 @@ export class OkxIntentExecutionRuntime {
     executionId: string,
   ): Promise<OkxIntentExecutionReconciliationRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "okx") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "okx") throw new Error(`Unsupported execution venue: ${record.venue}.`);
       await this.assertAccount(record, runtimeService);
       const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
@@ -169,7 +176,7 @@ export class OkxIntentExecutionRuntime {
       const reference = await this.resolveReference(record, service);
       const result: OkxExecutionQueryResult = await service.query(reference);
       const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({
         executionRecord,
         observation: result.observation,
@@ -185,14 +192,13 @@ export class OkxIntentExecutionRuntime {
     executionId: string,
   ): Promise<OkxIntentExecutionCancelRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "okx") {
-      throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    }
-    if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
-      throw new Error(`Execution record ${record.status} cannot be cancelled.`);
-    }
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "okx") throw new Error(`Unsupported execution venue: ${record.venue}.`);
+      if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
+        throw new Error(`Execution record ${record.status} cannot be cancelled.`);
+      }
       await this.assertAccount(record, runtimeService);
       const service = this.intentServiceFor(record.instrumentId, runtimeService);
       const reference = await this.loadCancelReference(record);
@@ -200,12 +206,15 @@ export class OkxIntentExecutionRuntime {
         ?? new OkxIntentCancellationCapability(service, reference);
       const observation = await capability.cancel(record);
       const executionRecord = applyExecutionCancelObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation, orderReference: reference });
     });
   }
 
-  private async executeIntent(intent: ExecutionIntent): Promise<OkxIntentExecutionRuntimeResult> {
+  private async executeIntent(
+    intent: ExecutionIntent,
+    mutationEffect: ExecutionMutationEffect,
+  ): Promise<OkxIntentExecutionRuntimeResult> {
     return this.registry.run(intent.userId, async (runtimeService) => {
       const account = await runtimeService.executionAccountIdentity();
       if (account.accountId !== intent.accountId) {
@@ -236,7 +245,7 @@ export class OkxIntentExecutionRuntime {
             }),
             createdAt: initialRecord.createdAt,
             updatedAt: initialRecord.updatedAt,
-          })));
+          })), mutationEffect);
         const capability: ExecutionCapability<OkxIntentExecutionResult> = isSpotInstrumentId(intent.instrumentId)
           ? new OkxSpotExecutionCapability(intentService as OkxSpotIntentExecutionService)
           : this.options.createCapability?.(intentService as OkxIntentExecutionService)
@@ -271,6 +280,9 @@ export class OkxIntentExecutionRuntime {
             expectedProviderQuantity: execution.step.result.expectedProviderQuantity,
             expectedSide: execution.step.result.expectedSide,
           }),
+          ...(execution.step.result.positionMode === undefined ? {} : { positionMode: execution.step.result.positionMode }),
+          ...(execution.step.result.positionDirection === undefined ? {} : { positionDirection: execution.step.result.positionDirection }),
+          ...(execution.step.result.posSide === undefined ? {} : { posSide: execution.step.result.posSide }),
           createdAt: acceptedRecord.createdAt,
           updatedAt: acceptedRecord.updatedAt,
         });
@@ -293,7 +305,7 @@ export class OkxIntentExecutionRuntime {
           updatedAt: execution.executionState.updatedAt,
         };
       }
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, initialRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
     });
   }
@@ -316,7 +328,7 @@ export class OkxIntentExecutionRuntime {
         || current.remoteOrderId !== undefined
         || reference
         || recovery) return;
-      await this.recordStore.update({ ...current, status: "FAILED" });
+      await this.recordStore.update({ ...current, status: "FAILED" }, current);
     } catch (cleanupError) {
       console.error("[okx] pre-mutation ExecutionRecord cleanup failed", cleanupError instanceof Error ? cleanupError.message : "unknown error");
     }
@@ -334,6 +346,7 @@ export class OkxIntentExecutionRuntime {
       positionDirection?: "LONG" | "SHORT";
       posSide?: "long" | "short";
     }>) => Promise<void> | void,
+    mutationEffect: ExecutionMutationEffect = "INCREASE",
   ): OkxIntentExecutionService | OkxSpotIntentExecutionService {
     const runtimeService = client as OkxIntentRuntimeService;
     if (isSpotInstrumentId(instrumentId)) {
@@ -343,12 +356,14 @@ export class OkxIntentExecutionRuntime {
         quantityRulesMaxAgeMs: this.options.quantityRulesMaxAgeMs,
         clock: this.options.clock,
         mutationSafetyGuard: this.options.mutationSafetyGuard,
+        mutationEffect,
         validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
         ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
       });
     }
     return new OkxIntentExecutionService(client, {
       ...this.options,
+      mutationEffect,
       validateProviderIdentity: (context) =>
         runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
@@ -421,8 +436,14 @@ export class OkxIntentExecutionRuntime {
           expectedProviderQuantity: recovery.expectedProviderQuantity,
           expectedSide: recovery.expectedSide,
         }),
+        ...(recovery.positionMode === undefined ? {} : { positionMode: recovery.positionMode }),
+        ...(recovery.positionDirection === undefined ? {} : { positionDirection: recovery.positionDirection }),
+        ...(recovery.posSide === undefined ? {} : { posSide: recovery.posSide }),
       });
     } catch {
+      return this.failedRecovery(record);
+    }
+    if (recovery.positionMode === "HEDGE" && result.observation.state === "UNKNOWN") {
       return this.failedRecovery(record);
     }
 
@@ -441,6 +462,9 @@ export class OkxIntentExecutionRuntime {
           expectedProviderQuantity: recovery.expectedProviderQuantity,
           expectedSide: recovery.expectedSide,
         }),
+        ...(recovery.positionMode === undefined ? {} : { positionMode: recovery.positionMode }),
+        ...(recovery.positionDirection === undefined ? {} : { positionDirection: recovery.positionDirection }),
+        ...(recovery.posSide === undefined ? {} : { posSide: recovery.posSide }),
         createdAt: recovery.createdAt,
         updatedAt: Math.max(recovery.updatedAt, result.observation.observedAt),
       });
@@ -450,7 +474,7 @@ export class OkxIntentExecutionRuntime {
     }
 
     const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
-    await this.recordStore.update(executionRecord);
+    await this.recordStore.update(executionRecord, record);
     return Object.freeze({
       executionRecord,
       observation: result.observation,
@@ -470,7 +494,7 @@ export class OkxIntentExecutionRuntime {
       observedAt,
     });
     const executionRecord = applyExecutionReconciliationObservation(record, observation);
-    await this.recordStore.update(executionRecord);
+    await this.recordStore.update(executionRecord, record);
     return Object.freeze({
       executionRecord,
       observation,

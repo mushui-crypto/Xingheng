@@ -1,6 +1,7 @@
 import { ExecutionPreMutationFailure } from "./ExecutionCapability";
 
 export type ExecutionMutationOperation = "placeOrder" | "cancelOrder";
+export type ExecutionMutationEffect = "INCREASE" | "DECREASE";
 
 export type ExecutionMutationContext = Readonly<{
   venue: string;
@@ -10,6 +11,8 @@ export type ExecutionMutationContext = Readonly<{
   instrumentId: string;
   providerInstrumentId: string;
   providerAccountId?: string;
+  /** Internal server-owned semantic. Missing or unrecognized values fail safe as INCREASE. */
+  mutationEffect?: ExecutionMutationEffect;
 }>;
 
 export type ExecutionProviderIdentityValidator = (
@@ -59,13 +62,14 @@ export class ExecutionMutationSafetyGuard {
     validateProviderIdentity?: ExecutionProviderIdentityValidator,
   ) {
     const state = this.stateFor(context.venue);
-    if (!state.liveTradingEnabled) {
+    const riskIncreasing = context.operation === "placeOrder" && context.mutationEffect !== "DECREASE";
+    if (riskIncreasing && !state.liveTradingEnabled) {
       throw new ExecutionMutationSafetyError(
         "live_trading_disabled",
         state.liveTradingDisabledMessage ?? "LIVE_TRADING_ENABLED is not true.",
       );
     }
-    if (state.killSwitchActive) {
+    if (riskIncreasing && state.killSwitchActive) {
       throw new ExecutionMutationSafetyError(
         "kill_switch_active",
         state.killSwitchActiveMessage ?? "Unified execution kill switch is active.",

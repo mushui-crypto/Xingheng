@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { managedCurrentQuantity, type NewArbitrageInstance } from "./ArbitrageInstance";
+import { activeManagedQuantity, managedCurrentQuantity, type NewArbitrageInstance } from "./ArbitrageInstance";
 import { ArbitrageInstanceStore } from "./ArbitrageInstanceStore";
 
 const start = 1_800_000_000_000;
@@ -69,6 +70,203 @@ test("claims before linking and rejects reusing an executionIntentId across inst
     );
     assert.equal(linked.executionReferences[0]?.status, "LINKED");
     assert.equal(linked.executionReferences[0]?.executionRecordId, "record-1");
+  });
+});
+
+test("startup recovery candidates come only from persisted unresolved references and survive restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    const seed = (
+      arbitrageId: string,
+      status: "CLAIMED" | "LINKED" | "PENDING_CONFIRMATION" | "UNKNOWN" | "CONFIRMED" | "FAILED",
+      createdAt: number,
+    ) => {
+      first.create(instance({ arbitrageId }));
+      const executionIntentId = `intent-${status.toLowerCase()}`;
+      first.claimExecutionReference("user-a", arbitrageId, {
+        ...claim("long-leg", executionIntentId, createdAt),
+      });
+      if (status !== "CLAIMED") {
+        first.linkExecutionRecord("user-a", arbitrageId, executionIntentId, `record-${status.toLowerCase()}`, createdAt + 1);
+      }
+      if (status !== "CLAIMED" && status !== "LINKED") {
+        first.applyExecutionResult("user-a", arbitrageId, {
+          executionIntentId,
+          status,
+          confirmedQuantity: status === "CONFIRMED" ? "1" : status === "FAILED" ? "0" : "0.4",
+          updatedAt: createdAt + 2,
+        });
+      }
+    };
+    seed("candidate-claimed", "CLAIMED", start + 10);
+    seed("candidate-linked", "LINKED", start + 20);
+    seed("candidate-pending", "PENDING_CONFIRMATION", start + 30);
+    seed("candidate-unknown", "UNKNOWN", start + 40);
+    seed("terminal-confirmed", "CONFIRMED", start + 50);
+    seed("terminal-failed", "FAILED", start + 60);
+    first.close();
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const candidates = restarted.listUnresolvedExecutionReferencesForRecovery();
+      assert.deepEqual(candidates.map(({ status }) => status), [
+        "CLAIMED", "LINKED", "PENDING_CONFIRMATION", "UNKNOWN",
+      ]);
+      assert.deepEqual(candidates.map(({ executionIntentId }) => executionIntentId), [
+        "intent-claimed", "intent-linked", "intent-pending_confirmation", "intent-unknown",
+      ]);
+      assert.equal(candidates[0]?.executionRecordId, null);
+      assert.equal(candidates[1]?.executionRecordId, "record-linked");
+      assert.deepEqual(candidates.map(({ confirmedQuantity }) => confirmedQuantity), ["0", "0", "0.4", "0.4"]);
+      assert.ok(candidates.every(({ userId, venue, accountId, instrumentId, role }) =>
+        userId === "user-a" && venue === "okx" && accountId === "okx:account-a"
+        && instrumentId === "XAUT-USDT-PERP" && role === "LONG"));
+      assert.equal(Object.isFrozen(candidates), true);
+      assert.equal(Object.isFrozen(candidates[0]), true);
+
+      restarted.create(instance({ arbitrageId: "restart-gate-target" }));
+      assert.throws(
+        () => restarted.claimExecutionReference(
+          "user-a",
+          "restart-gate-target",
+          formalOpeningClaim("long-leg", "restart-gate-intent", "restart-gate-command", start + 70),
+        ),
+        /unresolved risk-increasing opening/u,
+      );
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("formal OPENING claims atomically exclude duplicate legs and concurrent first-leg ownership", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    store.claimExecutionReference("user-a", "arbitrage-1", formalOpeningClaim("long-leg", "first-intent", "first-command", start + 1));
+
+    assert.throws(
+      () => store.claimExecutionReference("user-a", "arbitrage-1",
+        formalOpeningClaim("long-leg", "duplicate-intent", "duplicate-command", start + 2)),
+      /unresolved risk-increasing opening|already has an opening/u,
+    );
+    assert.throws(
+      () => store.claimExecutionReference("user-a", "arbitrage-1",
+        formalOpeningClaim("short-leg", "other-first-intent", "other-first-command", start + 3)),
+      /first-leg opening is not authoritatively confirmed/u,
+    );
+    assert.equal(store.get("user-a", "arbitrage-1")?.executionReferences.length, 1);
+  });
+});
+
+test("formal unresolved opening blocks the same mutation domain across instances and terminal confirmation releases it", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    store.create(instance({ arbitrageId: "arbitrage-2" }));
+    store.claimExecutionReference("user-a", "arbitrage-1", formalOpeningClaim("long-leg", "first-intent", "first-command", start + 1));
+
+    assert.throws(
+      () => store.claimExecutionReference("user-a", "arbitrage-2",
+        formalOpeningClaim("long-leg", "blocked-intent", "blocked-command", start + 2)),
+      /unresolved risk-increasing opening/u,
+    );
+    store.linkExecutionRecord("user-a", "arbitrage-1", "first-intent", "first-record", start + 2);
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "first-intent", status: "CONFIRMED", confirmedQuantity: "1", updatedAt: start + 3,
+    });
+    const allowed = store.claimExecutionReference("user-a", "arbitrage-2",
+      formalOpeningClaim("long-leg", "allowed-intent", "allowed-command", start + 4));
+    assert.equal(allowed.executionReferences[0]?.executionIntentId, "allowed-intent");
+  });
+});
+
+test("Bitget UNKNOWN opening and closing references keep their persisted mutation gates", () => {
+  withStore(({ store }) => {
+    store.create(bitgetInstance());
+    store.create(bitgetInstance("arbitrage-2"));
+    store.claimExecutionReference(
+      "user-a",
+      "arbitrage-1",
+      formalOpeningClaim("long-leg", "bitget-open-unknown", "bitget-open-command", start + 1),
+    );
+    store.linkExecutionRecord(
+      "user-a", "arbitrage-1", "bitget-open-unknown", "bitget-open-record", start + 2,
+    );
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "bitget-open-unknown",
+      status: "UNKNOWN",
+      confirmedQuantity: "0",
+      updatedAt: start + 3,
+    });
+
+    assert.throws(
+      () => store.claimExecutionReference(
+        "user-a",
+        "arbitrage-2",
+        formalOpeningClaim("long-leg", "bitget-open-blocked", "bitget-blocked-command", start + 4),
+      ),
+      /unresolved risk-increasing opening/u,
+    );
+
+  });
+
+  withStore(({ store }) => {
+    store.create(bitgetInstance());
+    execute(store, "long-leg", "bitget-long-open", "OPENING", "INCREASE", "1", start + 10);
+    execute(store, "short-leg", "bitget-short-open", "OPENING", "INCREASE", "1", start + 20);
+    claimAndLink(store, "long-leg", "bitget-close-unknown", "CLOSING", "DECREASE", "1", start + 30);
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "bitget-close-unknown",
+      status: "UNKNOWN",
+      confirmedQuantity: "0.4",
+      updatedAt: start + 32,
+    });
+
+    assert.throws(
+      () => store.claimExecutionReference(
+        "user-a",
+        "arbitrage-1",
+        claim("long-leg", "bitget-close-blocked", start + 33, "CLOSING", "DECREASE", "0.6"),
+      ),
+      /unresolved closing execution/u,
+    );
+    const current = store.get("user-a", "arbitrage-1")!;
+    assert.equal(current.executionReferences.at(-1)?.status, "UNKNOWN");
+    assert.equal(current.legs[0]?.confirmedClosedQuantity, "0.4");
+  });
+});
+
+test("an unresolved close keeps the same-leg mutation gate after SQLite restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance());
+    execute(first, "long-leg", "restart-long-open", "OPENING", "INCREASE", "1", start + 10);
+    execute(first, "short-leg", "restart-short-open", "OPENING", "INCREASE", "1", start + 20);
+    claimAndLink(first, "long-leg", "restart-close-unknown", "CLOSING", "DECREASE", "1", start + 30);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "restart-close-unknown",
+      status: "UNKNOWN",
+      confirmedQuantity: "0.4",
+      updatedAt: start + 32,
+    });
+    first.close();
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.throws(
+        () => restarted.claimExecutionReference(
+          "user-a",
+          "arbitrage-1",
+          claim("long-leg", "restart-close-blocked", start + 33, "CLOSING", "DECREASE", "0.6"),
+        ),
+        /unresolved closing execution/u,
+      );
+      assert.equal(
+        restarted.get("user-a", "arbitrage-1")?.executionReferences.at(-1)?.status,
+        "UNKNOWN",
+      );
+    } finally {
+      restarted.close();
+    }
   });
 });
 
@@ -329,24 +527,301 @@ test("moves HOLDING through CLOSING to CLOSED only after both managed quantities
   });
 });
 
-test("rolls back a DECREASE that would exceed this arbitrage instance's managed exposure", () => {
+test("terminal FAILED opening cumulative fill is monotonic-correctable without reopening the reference", () => {
+  withStore(({ store }) => {
+    store.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      { ...instance().legs[1], plannedQuantity: "100" },
+    ] }));
+    claimAndLink(store, "long-leg", "failed-open", "OPENING", "INCREASE", "100", start + 10);
+
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "40", updatedAt: start + 12,
+    });
+    const replay = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "40", updatedAt: start + 13,
+    });
+    const corrected = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 14,
+    });
+    const correctedReplay = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 15,
+    });
+    const finalQuantityObservation = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "100", updatedAt: start + 16,
+    });
+    const fullFillWins = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "CONFIRMED", confirmedQuantity: "100", updatedAt: start + 17,
+    });
+
+    assert.equal(replay.legs[0].confirmedOpenedQuantity, "40");
+    assert.equal(corrected.legs[0].confirmedOpenedQuantity, "70");
+    assert.equal(correctedReplay.legs[0].confirmedOpenedQuantity, "70");
+    assert.equal(finalQuantityObservation.legs[0].confirmedOpenedQuantity, "100");
+    assert.equal(fullFillWins.executionReferences[0]?.confirmedQuantity, "100");
+    assert.equal(fullFillWins.executionReferences[0]?.status, "CONFIRMED");
+    assert.equal(fullFillWins.status, "RESIDUAL");
+    assert.throws(() => store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "CONFIRMED", confirmedQuantity: "70", updatedAt: start + 18,
+    }), /cannot move backwards/u);
+    assert.throws(() => store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "CONFIRMED", confirmedQuantity: "101", updatedAt: start + 19,
+    }), /cannot exceed requested/u);
+    assert.throws(() => store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-open", status: "FAILED", confirmedQuantity: "100", updatedAt: start + 20,
+    }), /status cannot be changed/u);
+
+    store.create(instance({ arbitrageId: "arbitrage-after-terminal" }));
+    assert.doesNotThrow(() => store.claimExecutionReference(
+      "user-a",
+      "arbitrage-after-terminal",
+      formalOpeningClaim("long-leg", "after-terminal-intent", "after-terminal-command", start + 21),
+    ));
+  });
+});
+
+test("terminal FAILED close correction projects only its delta and re-derives CLOSED", () => {
+  withStore(({ store }) => {
+    store.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      { ...instance().legs[1], plannedQuantity: "100" },
+    ] }));
+    execute(store, "long-leg", "long-open", "OPENING", "INCREASE", "100", start + 10);
+    execute(store, "short-leg", "short-open", "OPENING", "INCREASE", "100", start + 20);
+    claimAndLink(store, "long-leg", "failed-close", "CLOSING", "DECREASE", "100", start + 30);
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-close", status: "FAILED", confirmedQuantity: "40", updatedAt: start + 32,
+    });
+    const corrected = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-close", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 33,
+    });
+    assert.equal(corrected.legs[0].confirmedClosedQuantity, "70");
+    assert.equal(managedCurrentQuantity(corrected.legs[0]), "30");
+
+    execute(store, "short-leg", "short-close", "CLOSING", "DECREASE", "100", start + 40);
+    const closed = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "failed-close", status: "FAILED", confirmedQuantity: "100", updatedAt: start + 50,
+    });
+    assert.equal(closed.legs[0].confirmedClosedQuantity, "100");
+    assert.equal(closed.status, "CLOSED");
+    const replay = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "failed-close", status: "FAILED", confirmedQuantity: "100", updatedAt: start + 51,
+    });
+    assert.equal(replay.status, "CLOSED");
+    assert.equal(replay.legs[0].confirmedClosedQuantity, "100");
+  });
+});
+
+test("CONFIRMED remains full-fill-only and terminal replay is idempotent", () => {
+  withStore(({ store }) => {
+    store.create(instance());
+    claimAndLink(store, "long-leg", "confirmed-open", "OPENING", "INCREASE", "1", start + 10);
+    assert.throws(() => store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "confirmed-open", status: "CONFIRMED", confirmedQuantity: "0.8", updatedAt: start + 12,
+    }), /must equal requested/u);
+    const confirmed = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "confirmed-open", status: "CONFIRMED", confirmedQuantity: "1", updatedAt: start + 13,
+    });
+    const replay = store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "confirmed-open", status: "CONFIRMED", confirmedQuantity: "1", updatedAt: start + 14,
+    });
+    assert.equal(confirmed.legs[0].confirmedOpenedQuantity, "1");
+    assert.equal(replay.legs[0].confirmedOpenedQuantity, "1");
+    assert.throws(() => store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "confirmed-open", status: "CONFIRMED", confirmedQuantity: "1.01", updatedAt: start + 15,
+    }), /cannot exceed requested/u);
+  });
+});
+
+test("Spot attribution evidence can freeze an authoritative terminal partial FAILED opening", () => {
+  withStore(({ store }) => {
+    store.create(instance({ strategyType: "SPOT_PERPETUAL", legs: [
+      { ...instance().legs[0], venue: "binance", accountId: "binance:account-a", instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "100" },
+      { ...instance().legs[1], instrumentId: "DOGE-USDT-PERP", plannedQuantity: "100" },
+    ] }));
+    claimAndLink(store, "long-leg", "spot-failed-open", "OPENING", "INCREASE", "100", start + 10);
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "spot-failed-open", status: "FAILED", confirmedQuantity: "40", updatedAt: start + 12,
+    });
+    store.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "spot-failed-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 13,
+    });
+    const evidence = store.recordSpotOpeningAttributionEvidence("user-a", {
+      arbitrageId: "arbitrage-1", legId: "long-leg", executionIntentId: "spot-failed-open",
+      executionRecordId: "spot-failed-open-record", attributableBaseQuantity: "39.9",
+      source: "PROVIDER_ORDER_FILLS", confirmedAt: start + 14, venue: "binance",
+      accountId: "binance:account-a", instrumentId: "DOGE-USDT-SPOT",
+    });
+    assert.equal(evidence.attributableBaseQuantity, "39.9");
+    assert.equal(store.readSpotOpeningAttributionEvidence("user-a", "arbitrage-1", "long-leg").length, 1);
+  });
+});
+
+test("legacy partial-CONFIRMED Spot opening is detected before immutable attribution is written", () => {
+  withDatabase(({ dbPath }) => {
+    const initial = new ArbitrageInstanceStore({ dbPath });
+    initial.create(instance({ strategyType: "SPOT_PERPETUAL", legs: [
+      { ...instance().legs[0], venue: "binance", accountId: "binance:account-a", instrumentId: "DOGE-USDT-SPOT", plannedQuantity: "100" },
+      { ...instance().legs[1], instrumentId: "DOGE-USDT-PERP", plannedQuantity: "100" },
+    ] }));
+    claimAndLink(initial, "long-leg", "legacy-partial-confirmed", "OPENING", "INCREASE", "100", start + 10);
+    initial.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "legacy-partial-confirmed",
+      status: "PENDING_CONFIRMATION",
+      confirmedQuantity: "40",
+      updatedAt: start + 12,
+    });
+    initial.close();
+
+    const legacyDb = new DatabaseSync(dbPath);
+    legacyDb.prepare(`UPDATE arbitrage_execution_references SET status = 'CONFIRMED'
+      WHERE arbitrageId = ? AND executionIntentId = ?`).run("arbitrage-1", "legacy-partial-confirmed");
+    legacyDb.close();
+
+    const reopened = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.throws(() => reopened.recordSpotOpeningAttributionEvidence("user-a", {
+        arbitrageId: "arbitrage-1",
+        legId: "long-leg",
+        executionIntentId: "legacy-partial-confirmed",
+        executionRecordId: "legacy-partial-confirmed-record",
+        attributableBaseQuantity: "39.9",
+        source: "PROVIDER_ORDER_FILLS",
+        confirmedAt: start + 13,
+        venue: "binance",
+        accountId: "binance:account-a",
+        instrumentId: "DOGE-USDT-SPOT",
+      }), /requires authoritative terminal opening fill evidence/u);
+      assert.deepEqual(reopened.readSpotOpeningAttributionEvidence("user-a", "arbitrage-1", "long-leg"), []);
+    } finally {
+      reopened.close();
+    }
+  });
+});
+
+test("CLOSED historical correction updates an existing execution while preserving the workflow lock", () => {
+  withStore(({ store }) => {
+    store.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      { ...instance().legs[1], plannedQuantity: "100" },
+    ] }));
+    execute(store, "long-leg", "historical-open", "OPENING", "INCREASE", "100", start + 10, "FAILED", "40");
+    execute(store, "long-leg", "known-close", "CLOSING", "DECREASE", "40", start + 20);
+    const before = store.get("user-a", "arbitrage-1")!;
+    assert.equal(before.status, "CLOSED");
+
+    const corrected = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "historical-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 30,
+    });
+
+    assert.equal(corrected.status, "CLOSED");
+    assert.equal(corrected.closedAt, before.closedAt);
+    assert.equal(corrected.legs[0].confirmedOpenedQuantity, "70");
+    assert.equal(corrected.legs[0].confirmedClosedQuantity, "40");
+    assert.equal(corrected.executionReferences[0]?.confirmedQuantity, "70");
+    const replay = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "historical-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 31,
+    });
+    assert.deepEqual(replay, corrected);
+    assert.throws(() => store.claimExecutionReference(
+      "user-a", "arbitrage-1", claim("long-leg", "forbidden-after-correction", start + 32, "CLOSING", "DECREASE", "30"),
+    ), /Terminal arbitrage instance/u);
+    assert.throws(() => store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "historical-open", status: "FAILED", confirmedQuantity: "60", updatedAt: start + 33,
+    }), /cannot move backwards/u);
+    assert.throws(() => store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "historical-open", status: "FAILED", confirmedQuantity: "101", updatedAt: start + 34,
+    }), /cannot exceed requested/u);
+    assert.throws(() => store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "historical-open", status: "UNKNOWN", confirmedQuantity: "70", updatedAt: start + 35,
+    }), /Terminal execution status cannot be changed/u);
+    const afterUnknown = store.get("user-a", "arbitrage-1")!;
+    assert.equal(afterUnknown.executionReferences[0]?.status, "FAILED");
+    assert.equal(afterUnknown.executionReferences[0]?.confirmedQuantity, "70");
+    assert.equal(afterUnknown.legs[0]?.confirmedOpenedQuantity, "70");
+  });
+});
+
+test("FAILED historical correction updates a dispatched terminal reference without reopening lifecycle", () => {
+  withDatabase(({ dbPath }) => {
+    const store = new ArbitrageInstanceStore({ dbPath });
+    try {
+      store.create(instance({ legs: [
+        { ...instance().legs[0], plannedQuantity: "100" },
+        { ...instance().legs[1], plannedQuantity: "100" },
+      ] }));
+      execute(store, "long-leg", "legacy-failed-open", "OPENING", "INCREASE", "100", start + 10, "FAILED", "40");
+      const legacyDb = new DatabaseSync(dbPath);
+      legacyDb.prepare(`UPDATE arbitrage_instances SET status = 'FAILED', updatedAt = ?
+        WHERE arbitrageId = ?`).run(start + 20, "arbitrage-1");
+      legacyDb.close();
+
+      const corrected = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+        executionIntentId: "legacy-failed-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 30,
+      });
+      assert.equal(corrected.status, "FAILED");
+      assert.equal(corrected.legs[0].confirmedOpenedQuantity, "70");
+      assert.equal(corrected.executionReferences[0]?.status, "FAILED");
+      assert.throws(() => store.claimExecutionReference(
+        "user-a", "arbitrage-1", claim("short-leg", "forbidden-failed-open", start + 31),
+      ), /Terminal arbitrage instance/u);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+test("Management Release remains an immutable responsibility cutoff across opening correction", () => {
+  withStore(({ store }) => {
+    store.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      { ...instance().legs[1], plannedQuantity: "100" },
+    ] }));
+    execute(store, "long-leg", "released-open", "OPENING", "INCREASE", "100", start + 10, "FAILED", "40");
+    const released = release(store, "long-leg", "40", start + 20);
+
+    const corrected = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "released-open", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 30,
+    });
+    assert.equal(corrected.status, "CLOSED");
+    assert.equal(corrected.legs[0].confirmedOpenedQuantity, "70");
+    assert.equal(activeManagedQuantity(corrected, corrected.legs[0]), "0");
+    assert.deepEqual(corrected.managementReleases?.[0], released);
+  });
+});
+
+test("Management Release avoids unsigned subtraction after historical close correction", () => {
+  withStore(({ store }) => {
+    store.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      { ...instance().legs[1], plannedQuantity: "100" },
+    ] }));
+    execute(store, "long-leg", "released-full-open", "OPENING", "INCREASE", "100", start + 10);
+    execute(store, "long-leg", "released-partial-close", "CLOSING", "DECREASE", "100", start + 20, "FAILED", "40");
+    const released = release(store, "long-leg", "60", start + 30);
+
+    const corrected = store.applyHistoricalExecutionCorrection("user-a", "arbitrage-1", {
+      executionIntentId: "released-partial-close", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 40,
+    });
+    assert.equal(corrected.status, "CLOSED");
+    assert.equal(corrected.legs[0].confirmedClosedQuantity, "70");
+    assert.equal(managedCurrentQuantity(corrected.legs[0]), "30");
+    assert.equal(activeManagedQuantity(corrected, corrected.legs[0]), "0");
+    assert.deepEqual(corrected.managementReleases?.[0], released);
+  });
+});
+
+test("rejects a DECREASE claim that would exceed this arbitrage instance's active managed exposure", () => {
   withStore(({ store }) => {
     store.create(instance());
     execute(store, "long-leg", "long-open", "OPENING", "INCREASE", "1", start + 10);
-    claimAndLink(store, "long-leg", "bad-close", "CLOSING", "DECREASE", "2", start + 20);
-
     assert.throws(
-      () => store.applyExecutionResult("user-a", "arbitrage-1", {
-        executionIntentId: "bad-close",
-        status: "CONFIRMED",
-        confirmedQuantity: "2",
-        updatedAt: start + 23,
-      }),
-      /cannot exceed confirmed opened quantity/u,
+      () => claimAndLink(store, "long-leg", "bad-close", "CLOSING", "DECREASE", "2", start + 20),
+      /cannot exceed active managed quantity/u,
     );
     const current = store.get("user-a", "arbitrage-1")!;
     assert.equal(current.legs[0].confirmedClosedQuantity, "0");
-    assert.equal(current.executionReferences.find(({ executionIntentId }) => executionIntentId === "bad-close")?.confirmedQuantity, "0");
+    assert.equal(current.executionReferences.some(({ executionIntentId }) => executionIntentId === "bad-close"), false);
   });
 });
 
@@ -520,7 +995,7 @@ test("restores CLOSED lifecycle, quantities, references, timestamps, and nullabl
   });
 });
 
-test("persists an accepted close safety residual and restores terminal lifecycle after restart", () => {
+test("persists an accepted close safety residual without claiming Active Managed is closed", () => {
   withDatabase(({ dbPath }) => {
     const first = new ArbitrageInstanceStore({ dbPath });
     first.create(instance({
@@ -542,7 +1017,7 @@ test("persists an accepted close safety residual and restores terminal lifecycle
     });
     execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40);
     const expected = first.get("user-a", "arbitrage-1");
-    assert.equal(expected?.status, "CLOSED");
+    assert.equal(expected?.status, "RESIDUAL");
     assert.equal(expected?.maxResidualBaseQuantity, "1");
     assert.deepEqual(expected?.legs.map(managedCurrentQuantity), ["1", "0"]);
     first.close();
@@ -610,7 +1085,7 @@ test("never applies an accepted Spot residual allowance to a perpetual residual,
     first.applyExecutionResult("user-a", "arbitrage-1", {
       executionIntentId: "long-close", status: "CONFIRMED", confirmedQuantity: "72", updatedAt: start + 32,
     });
-    execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40, "CONFIRMED", "72");
+    execute(first, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40, "FAILED", "72");
     const expected = first.get("user-a", "arbitrage-1");
     assert.equal(expected?.status, "RESIDUAL");
     assert.equal(expected?.maxResidualBaseQuantity, "1");
@@ -635,7 +1110,7 @@ test("never closes a perpetual-perpetual instance while either perpetual leg has
     ] }));
     execute(store, "long-leg", "long-open", "OPENING", "INCREASE", "73", start + 10);
     execute(store, "short-leg", "short-open", "OPENING", "INCREASE", "73", start + 20);
-    execute(store, "long-leg", "long-close", "CLOSING", "DECREASE", "73", start + 30, "CONFIRMED", "72");
+    execute(store, "long-leg", "long-close", "CLOSING", "DECREASE", "73", start + 30, "FAILED", "72");
     execute(store, "short-leg", "short-close", "CLOSING", "DECREASE", "73", start + 40);
 
     const result = store.get("user-a", "arbitrage-1");
@@ -674,6 +1149,406 @@ test("restores an unfinished execution claim after restart without relying on me
   });
 });
 
+test("real SQLITE_BUSY before an opening claim fails closed without a persisted exposure or Provider mutation", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance());
+    const lock = new DatabaseSync(dbPath);
+    let providerMutations = 0;
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+      assert.throws(
+        () => first.claimExecutionReference(
+          "user-a",
+          "arbitrage-1",
+          formalOpeningClaim("long-leg", "busy-intent", "busy-command", start + 1),
+        ),
+        /database is locked/u,
+      );
+      assert.equal(providerMutations, 0);
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+      first.close();
+    }
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const persisted = restarted.get("user-a", "arbitrage-1");
+      assert.deepEqual(persisted?.executionReferences, []);
+      assert.deepEqual(persisted?.legs.map(managedCurrentQuantity), ["0", "0"]);
+      assert.equal(providerMutations, 0);
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+for (const injectedFailure of ["SQLITE_FULL", "SQLITE_IOERR"] as const) {
+  test(`${injectedFailure} at the opening-claim write boundary fails closed`, () => {
+    withDatabase(({ dbPath }) => {
+      const seeded = new ArbitrageInstanceStore({ dbPath });
+      seeded.create(instance());
+      seeded.close();
+      const injector = new DatabaseSync(dbPath);
+      injector.exec(`CREATE TRIGGER inject_claim_failure BEFORE INSERT ON arbitrage_execution_references
+        BEGIN SELECT RAISE(ABORT, '${injectedFailure} injected'); END`);
+      injector.close();
+
+      const store = new ArbitrageInstanceStore({ dbPath });
+      let providerMutations = 0;
+      try {
+        assert.throws(
+          () => store.claimExecutionReference(
+            "user-a",
+            "arbitrage-1",
+            formalOpeningClaim("long-leg", `${injectedFailure}-intent`, `${injectedFailure}-command`, start + 1),
+          ),
+          new RegExp(injectedFailure, "u"),
+        );
+        assert.equal(store.get("user-a", "arbitrage-1")?.executionReferences.length, 0);
+        assert.equal(providerMutations, 0);
+      } finally {
+        store.close();
+      }
+    });
+  });
+}
+
+test("a persisted opening claim survives a post-dispatch projection BUSY and converges delta-only after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      instance().legs[1],
+    ] }));
+    claimAndLink(first, "long-leg", "post-dispatch", "OPENING", "INCREASE", "100", start + 1);
+    const lock = new DatabaseSync(dbPath);
+    let providerMutations = 1;
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+      assert.throws(() => first.applyExecutionResult("user-a", "arbitrage-1", {
+        executionIntentId: "post-dispatch",
+        status: "UNKNOWN",
+        confirmedQuantity: "40",
+        updatedAt: start + 3,
+      }), /database is locked/u);
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+      first.close();
+    }
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const candidate = restarted.listUnresolvedExecutionReferencesForRecovery();
+      assert.equal(candidate.length, 1);
+      assert.equal(candidate[0]?.executionIntentId, "post-dispatch");
+      assert.equal(candidate[0]?.status, "LINKED");
+      assert.equal(candidate[0]?.confirmedQuantity, "0");
+      assert.equal(providerMutations, 1);
+
+      for (const [status, quantity, expected] of [
+        ["UNKNOWN", "40", "40"],
+        ["UNKNOWN", "70", "70"],
+        ["UNKNOWN", "70", "70"],
+        ["CONFIRMED", "100", "100"],
+      ] as const) {
+        restarted.applyExecutionResult("user-a", "arbitrage-1", {
+          executionIntentId: "post-dispatch",
+          status,
+          confirmedQuantity: quantity,
+          updatedAt: start + 10 + Number(quantity),
+        });
+        assert.equal(
+          restarted.get("user-a", "arbitrage-1")?.legs[0]?.confirmedOpenedQuantity,
+          expected,
+        );
+      }
+      assert.equal(providerMutations, 1);
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("UNKNOWN with a known cumulative lower bound survives shutdown and reopen without becoming zero", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({ legs: [
+      { ...instance().legs[0], plannedQuantity: "100" },
+      instance().legs[1],
+    ] }));
+    claimAndLink(first, "long-leg", "unknown-lower-bound", "OPENING", "INCREASE", "100", start + 1);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "unknown-lower-bound",
+      status: "UNKNOWN",
+      confirmedQuantity: "40",
+      updatedAt: start + 3,
+    });
+    first.close();
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const restored = restarted.get("user-a", "arbitrage-1");
+      assert.equal(restored?.executionReferences[0]?.status, "UNKNOWN");
+      assert.equal(restored?.executionReferences[0]?.confirmedQuantity, "40");
+      assert.equal(restored?.legs[0]?.confirmedOpenedQuantity, "40");
+      assert.equal(restarted.listUnresolvedExecutionReferencesForRecovery()[0]?.confirmedQuantity, "40");
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("an interrupted index migration is safely recreated on restart without changing execution facts", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance());
+    claimAndLink(first, "long-leg", "index-migration-fact", "OPENING", "INCREASE", "1", start + 1);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "index-migration-fact",
+      status: "UNKNOWN",
+      confirmedQuantity: "0.4",
+      updatedAt: start + 3,
+    });
+    first.close();
+    const interrupted = new DatabaseSync(dbPath);
+    interrupted.exec("DROP INDEX arbitrage_instances_user_status_created");
+    interrupted.close();
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const restored = restarted.get("user-a", "arbitrage-1");
+      assert.equal(restored?.executionReferences[0]?.status, "UNKNOWN");
+      assert.equal(restored?.executionReferences[0]?.confirmedQuantity, "0.4");
+      assert.equal(restored?.legs[0]?.confirmedOpenedQuantity, "0.4");
+      const inspect = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        assert.equal((inspect.prepare(`SELECT count(*) AS count FROM sqlite_master
+          WHERE type = 'index' AND name = 'arbitrage_instances_user_status_created'`).get() as { count: number }).count, 1);
+      } finally {
+        inspect.close();
+      }
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("persists immutable Spot opening attribution evidence bound to a confirmed reference", () => {
+  withDatabase(({ dbPath }) => {
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({
+      strategyType: "SPOT_PERPETUAL",
+      legs: [
+        { ...instance().legs[0], venue: "binance", accountId: "binance:account-a", instrumentId: "XAUT-USDT-SPOT" },
+        instance().legs[1],
+      ],
+    }));
+    claimAndLink(first, "long-leg", "spot-open", "OPENING", "INCREASE", "100", start + 1);
+    const evidence = {
+      arbitrageId: "arbitrage-1", legId: "long-leg", executionIntentId: "spot-open",
+      executionRecordId: "spot-open-record", attributableBaseQuantity: "99.9",
+      source: "PROVIDER_ORDER_FILLS" as const, confirmedAt: start + 4,
+      venue: "binance" as const, accountId: "binance:account-a", instrumentId: "XAUT-USDT-SPOT",
+    };
+    assert.throws(
+      () => first.recordSpotOpeningAttributionEvidence("user-a", evidence),
+      /authoritative terminal opening fill evidence/u,
+    );
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "spot-open", status: "CONFIRMED", confirmedQuantity: "100", updatedAt: start + 3,
+    });
+    assert.deepEqual(first.recordSpotOpeningAttributionEvidence("user-a", evidence), evidence);
+    assert.deepEqual(
+      first.recordSpotOpeningAttributionEvidence("user-a", { ...evidence, confirmedAt: start + 10 }),
+      evidence,
+    );
+    assert.throws(
+      () => first.recordSpotOpeningAttributionEvidence("user-a", { ...evidence, attributableBaseQuantity: "99.8" }),
+      /immutable/u,
+    );
+    assert.deepEqual(first.readSpotOpeningAttributionEvidence("user-b", "arbitrage-1", "long-leg"), []);
+    first.close();
+
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(restarted.readSpotOpeningAttributionEvidence("user-a", "arbitrage-1", "long-leg"), [evidence]);
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("Spot attribution and its recovery audit roll back together when the audit write fails", () => {
+  withDatabase(({ dbPath }) => {
+    const seeded = new ArbitrageInstanceStore({ dbPath });
+    seeded.create(instance({
+      strategyType: "SPOT_PERPETUAL",
+      legs: [
+        { ...instance().legs[0], venue: "binance", accountId: "binance:account-a", instrumentId: "XAUT-USDT-SPOT" },
+        instance().legs[1],
+      ],
+    }));
+    claimAndLink(seeded, "long-leg", "spot-audit-failure", "OPENING", "INCREASE", "100", start + 1);
+    seeded.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "spot-audit-failure", status: "CONFIRMED",
+      confirmedQuantity: "100", updatedAt: start + 3,
+    });
+    seeded.close();
+
+    const injector = new DatabaseSync(dbPath);
+    injector.exec(`CREATE TRIGGER inject_spot_audit_failure BEFORE INSERT ON arbitrage_recovery_audit
+      BEGIN SELECT RAISE(ABORT, 'SQLITE_IOERR injected audit failure'); END`);
+    injector.close();
+    const evidence = {
+      arbitrageId: "arbitrage-1", legId: "long-leg", executionIntentId: "spot-audit-failure",
+      executionRecordId: "spot-audit-failure-record", attributableBaseQuantity: "99.9",
+      source: "PROVIDER_ORDER_FILLS" as const, confirmedAt: start + 4,
+      venue: "binance" as const, accountId: "binance:account-a", instrumentId: "XAUT-USDT-SPOT",
+    };
+    const failed = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.throws(() => failed.recordSpotOpeningAttributionEvidence("user-a", evidence, {
+        recoveryId: "spot-recovery-1", actorId: "operator-a", checkedAt: start + 4,
+      }), /SQLITE_IOERR/u);
+      assert.deepEqual(failed.readSpotOpeningAttributionEvidence("user-a", "arbitrage-1", "long-leg"), []);
+    } finally {
+      failed.close();
+    }
+
+    const repair = new DatabaseSync(dbPath);
+    repair.exec("DROP TRIGGER inject_spot_audit_failure");
+    repair.close();
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(restarted.recordSpotOpeningAttributionEvidence("user-a", evidence, {
+        recoveryId: "spot-recovery-1", actorId: "operator-a", checkedAt: start + 4,
+      }), evidence);
+      assert.deepEqual(
+        restarted.recordSpotOpeningAttributionEvidence("user-a", { ...evidence, confirmedAt: start + 10 }),
+        evidence,
+      );
+      assert.throws(
+        () => restarted.recordSpotOpeningAttributionEvidence("user-a", {
+          ...evidence, attributableBaseQuantity: "99.8",
+        }),
+        /immutable/u,
+      );
+    } finally {
+      restarted.close();
+    }
+  });
+});
+
+test("Management Release rolls back evidence, fingerprint, and lifecycle together on a mid-transaction failure", () => {
+  withDatabase(({ dbPath }) => {
+    const seeded = new ArbitrageInstanceStore({ dbPath });
+    seeded.create(instance());
+    execute(seeded, "long-leg", "release-open", "OPENING", "INCREASE", "1", start + 1);
+    seeded.close();
+
+    const injector = new DatabaseSync(dbPath);
+    injector.exec(`CREATE TRIGGER inject_release_lifecycle_failure BEFORE UPDATE ON arbitrage_instances
+      BEGIN SELECT RAISE(ABORT, 'SQLITE_FULL injected lifecycle failure'); END`);
+    injector.close();
+    const failed = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.throws(() => release(failed, "long-leg", "1", start + 10), /SQLITE_FULL/u);
+      const unchanged = failed.get("user-a", "arbitrage-1");
+      assert.deepEqual(unchanged?.managementReleases, []);
+      assert.equal(unchanged?.legs[0] && activeManagedQuantity(unchanged, unchanged.legs[0]), "1");
+      assert.notEqual(unchanged?.status, "CLOSED");
+    } finally {
+      failed.close();
+    }
+
+    const inspect = new DatabaseSync(dbPath);
+    assert.equal((inspect.prepare("SELECT count(*) AS count FROM arbitrage_command_idempotency WHERE commandId = ?")
+      .get("release-command-long-leg") as { count: number }).count, 0);
+    inspect.exec("DROP TRIGGER inject_release_lifecycle_failure");
+    inspect.close();
+    const restarted = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const result = release(restarted, "long-leg", "1", start + 10);
+      assert.equal(result.releasedQuantity, "1");
+      const persisted = restarted.get("user-a", "arbitrage-1")!;
+      assert.equal(activeManagedQuantity(persisted, persisted.legs[0]), "0");
+    } finally {
+      restarted.close();
+    }
+
+    const finalRestart = new ArbitrageInstanceStore({ dbPath });
+    try {
+      const durable = finalRestart.get("user-a", "arbitrage-1");
+      assert.equal(durable?.managementReleases?.length, 1);
+      assert.equal(durable?.legs[0] && activeManagedQuantity(durable, durable.legs[0]), "0");
+    } finally {
+      finalRestart.close();
+    }
+  });
+});
+
+test("concurrent terminal cumulative projections converge without double-counting or stale overwrite", async () => {
+  const root = mkdtempSync(join(tmpdir(), "arbitrage-instance-store-concurrent-terminal-"));
+  const dbPath = join(root, "arbitrage-instances.sqlite");
+  const first = new ArbitrageInstanceStore({ dbPath });
+  const second = new ArbitrageInstanceStore({ dbPath });
+  try {
+    first.create(instance());
+    claimAndLink(first, "long-leg", "terminal-race", "OPENING", "INCREASE", "100", start + 1);
+    first.applyExecutionResult("user-a", "arbitrage-1", {
+      executionIntentId: "terminal-race", status: "FAILED", confirmedQuantity: "40", updatedAt: start + 3,
+    });
+
+    let releaseEqual!: () => void;
+    const equalGate = new Promise<void>((resolve) => { releaseEqual = resolve; });
+    const equalProjection = (store: ArbitrageInstanceStore) => (async () => {
+      await equalGate;
+      return store.applyExecutionResult("user-a", "arbitrage-1", {
+        executionIntentId: "terminal-race", status: "FAILED", confirmedQuantity: "70", updatedAt: start + 4,
+      });
+    })();
+    const equalLeft = equalProjection(first);
+    const equalRight = equalProjection(second);
+    releaseEqual();
+    await Promise.all([equalLeft, equalRight]);
+    assert.equal(first.get("user-a", "arbitrage-1")?.legs[0]?.confirmedOpenedQuantity, "70");
+
+    let releaseOrdered!: () => void;
+    const orderedGate = new Promise<void>((resolve) => { releaseOrdered = resolve; });
+    const project = (
+      store: ArbitrageInstanceStore,
+      status: "CONFIRMED" | "FAILED",
+      confirmedQuantity: string,
+      updatedAt: number,
+    ) => (async () => {
+      await orderedGate;
+      return store.applyExecutionResult("user-a", "arbitrage-1", {
+        executionIntentId: "terminal-race", status, confirmedQuantity, updatedAt,
+      });
+    })();
+    const newer = project(first, "CONFIRMED", "100", start + 6);
+    const stale = project(second, "FAILED", "70", start + 5);
+    releaseOrdered();
+    const outcomes = await Promise.allSettled([newer, stale]);
+
+    assert.equal(outcomes[0]?.status, "fulfilled");
+    if (outcomes[1]?.status === "rejected") {
+      assert.match(String(outcomes[1].reason), /move backwards|status cannot be changed/u);
+    }
+    const converged = second.get("user-a", "arbitrage-1")!;
+    assert.equal(converged.legs[0]?.confirmedOpenedQuantity, "100");
+    assert.equal(converged.executionReferences[0]?.confirmedQuantity, "100");
+    assert.equal(converged.executionReferences[0]?.status, "CONFIRMED");
+  } finally {
+    first.close();
+    second.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 function instance(overrides: Partial<NewArbitrageInstance> = {}): NewArbitrageInstance {
   return {
     arbitrageId: "arbitrage-1",
@@ -704,6 +1579,30 @@ function instance(overrides: Partial<NewArbitrageInstance> = {}): NewArbitrageIn
   };
 }
 
+function bitgetInstance(arbitrageId = "arbitrage-1"): NewArbitrageInstance {
+  return instance({
+    arbitrageId,
+    legs: [
+      {
+        legId: "long-leg",
+        role: "LONG",
+        venue: "bitget",
+        accountId: "bitget:account-a",
+        instrumentId: "XAUT-USDT-PERP",
+        plannedQuantity: "1",
+      },
+      {
+        legId: "short-leg",
+        role: "SHORT",
+        venue: "bitget",
+        accountId: "bitget:account-a",
+        instrumentId: "BTC-USDT-PERP",
+        plannedQuantity: "1",
+      },
+    ],
+  });
+}
+
 function claim(
   legId: string,
   executionIntentId: string,
@@ -713,6 +1612,20 @@ function claim(
   requestedQuantity = "1",
 ) {
   return { legId, phase, quantityEffect, executionIntentId, requestedQuantity, createdAt } as const;
+}
+
+function formalOpeningClaim(legId: string, executionIntentId: string, commandId: string, createdAt: number) {
+  return {
+    legId,
+    phase: "OPENING" as const,
+    quantityEffect: "INCREASE" as const,
+    executionIntentId,
+    requestedQuantity: "1",
+    commandId,
+    operationType: "EXECUTION_OPEN" as const,
+    businessPayloadFingerprint: `opening-fingerprint-${commandId}`,
+    createdAt,
+  };
 }
 
 function claimAndLink(
@@ -757,6 +1670,40 @@ function execute(
     confirmedQuantity,
     updatedAt: time + 2,
   });
+}
+
+function release(
+  store: ArbitrageInstanceStore,
+  legId: string,
+  releasedQuantity: string,
+  at: number,
+) {
+  const current = store.get("user-a", "arbitrage-1")!;
+  const leg = current.legs.find((candidate) => candidate.legId === legId)!;
+  return store.releaseLegManagement("user-a", "arbitrage-1", {
+    releaseId: `release-${legId}`,
+    commandId: `release-command-${legId}`,
+    operationType: "MANAGEMENT_RELEASE",
+    businessPayloadFingerprint: `release-fingerprint-${legId}`,
+    arbitrageId: "arbitrage-1",
+    legId,
+    releasedQuantity,
+    reason: "USER_CONFIRMED_STOP_MANAGEMENT",
+    source: "AUTHENTICATED_API",
+    requestedByUserId: "user-a",
+    requestedAt: at,
+    confirmedAt: at + 2,
+    venue: leg.venue,
+    accountId: leg.accountId,
+    instrumentId: leg.instrumentId,
+    positionMode: "ONE_WAY",
+    actualQuantity: releasedQuantity,
+    actualSignedNetQuantity: leg.role === "SHORT" ? `-${releasedQuantity}` : releasedQuantity,
+    actualLongQuantity: leg.role === "LONG" ? releasedQuantity : "0",
+    actualShortQuantity: leg.role === "SHORT" ? releasedQuantity : "0",
+    availableQuantity: null,
+    realityCheckedAt: at + 1,
+  }).release;
 }
 
 function unknownPnl() {

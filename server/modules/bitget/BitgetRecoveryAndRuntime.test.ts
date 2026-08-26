@@ -85,7 +85,27 @@ test("Bitget UNKNOWN never invents confirmed quantity", async () => {
   assert.equal(result.confirmedQuantity, null);
 });
 
-test("Bitget recovery keeps a fresh missing order UNKNOWN, then fails it after the settle window", async () => {
+test("Bitget Provider raw msg is sanitized before ExecutionRecord persistence without changing UNKNOWN", async () => {
+  const rawMessage = "authorization=provider-secret unexpected upstream diagnostic";
+  const provider = new FakeBitgetRuntimeService();
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  provider.placeFailure = new BitgetProviderError("provider_rejected", rawMessage, "40725");
+
+  const result = await new BitgetFormalArbitrageExecutionRuntime(runtime(provider, records, references)).execute(intent());
+  const persisted = records.loadForUser("user-a", "execution-bitget-1");
+
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.confirmedQuantity, null);
+  assert.equal(persisted?.failureCategory, "provider_rejected");
+  assert.equal(persisted?.failureCode, "40725");
+  assert.equal(persisted?.failureMessage, "Bitget request was rejected.");
+  assert.equal(JSON.stringify(persisted).includes(rawMessage), false);
+  assert.equal(JSON.stringify(result.diagnostic).includes(rawMessage), false);
+  assert.equal(provider.placeRequests.length, 1);
+});
+
+test("Bitget 25204 recovery remains UNKNOWN regardless of local age and is idempotent", async () => {
   const provider = new FakeBitgetRuntimeService();
   const records = new MemoryExecutionRecordStore();
   const references = new InMemoryBitgetExecutionOrderReferenceStore();
@@ -93,19 +113,45 @@ test("Bitget recovery keeps a fresh missing order UNKNOWN, then fails it after t
   assert.equal((await runtime(provider, records, references).execute(intent())).executionRecord.status, "UNKNOWN");
 
   provider.queryFailure = new BitgetProviderError("provider_rejected", "Order does not exist", "25204");
-  const fresh = await runtime(provider, records, references, undefined, () => now + 59_999)
-    .reconcile("user-a", "execution-bitget-1");
-  assert.equal(fresh.executionRecord.status, "UNKNOWN");
-  assert.equal(fresh.executionRecord.executionAttemptId, undefined);
+  const mutationCount = provider.placeRequests.length;
+  for (const age of [59_999, 60_000, 300_000, 365 * 24 * 60 * 60 * 1_000]) {
+    const result = await new BitgetFormalArbitrageExecutionRuntime(
+      runtime(provider, records, references, undefined, () => now + age),
+    ).reconcile("user-a", "execution-bitget-1");
+    assert.equal(result.executionRecord.status, "UNKNOWN", `age=${age}`);
+    assert.equal(result.executionRecord.executionAttemptId, undefined, `age=${age}`);
+    assert.equal(result.executionRecord.remoteOrderId, undefined, `age=${age}`);
+    assert.equal(result.confirmedQuantity, null, `age=${age}`);
+  }
+  assert.ok(await references.loadRecoveryForUser("user-a", "execution-bitget-1"));
+  assert.equal(provider.placeRequests.length, mutationCount);
+  assert.ok(provider.queryRequests.length >= 1);
+});
 
-  const settled = await runtime(provider, records, references, undefined, () => now + 60_000)
-    .reconcile("user-a", "execution-bitget-1");
-  assert.equal(settled.executionRecord.status, "FAILED");
-  assert.equal(settled.executionRecord.executionAttemptId, "intent-bitget-1");
-  assert.equal(settled.executionRecord.remoteOrderId, undefined);
-  assert.equal(settled.observation?.filledBaseQuantity, "0");
-  assert.equal(provider.placeRequests.length, 1);
-  assert.equal(provider.queryRequests.length, 2);
+test("Bitget successful recovery still maps live, partial, filled, and cancelled Provider facts", async (t) => {
+  for (const scenario of [
+    { name: "live", status: "PENDING_CONFIRMATION" as const, filled: "0" },
+    { name: "partial", status: "PENDING_CONFIRMATION" as const, filled: "40" },
+    { name: "filled", status: "CONFIRMED" as const, filled: "95" },
+    { name: "cancelled", status: "FAILED" as const, filled: "40" },
+  ]) await t.test(scenario.name, async () => {
+    const provider = new FakeBitgetRuntimeService();
+    const records = new MemoryExecutionRecordStore();
+    const references = new InMemoryBitgetExecutionOrderReferenceStore();
+    provider.placeFailure = new Error("response lost after write");
+    const active = runtime(provider, records, references);
+    await active.execute(intent());
+    provider.placeFailure = undefined;
+    provider.status = scenario.status;
+    provider.filled = scenario.filled;
+
+    const result = await new BitgetFormalArbitrageExecutionRuntime(active)
+      .reconcile("user-a", "execution-bitget-1");
+
+    assert.equal(result.executionRecord.status, scenario.status);
+    assert.equal(result.confirmedQuantity, scenario.filled);
+    assert.equal(provider.placeRequests.length, 1);
+  });
 });
 
 test("Bitget recovery keeps non-not-found Provider failures UNKNOWN", async () => {
@@ -152,6 +198,22 @@ test("Bitget known-order cancel uses persisted identity and later reconcile pres
   const reconciled = await new BitgetFormalArbitrageExecutionRuntime(active).reconcile("user-a", "execution-bitget-1");
   assert.equal(reconciled.confirmedQuantity, "20.5");
   assert.equal(provider.placeRequests.length, 1);
+});
+
+test("Bitget cancel finalization 25204 remains unresolved and cannot become FAILED zero", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  const active = runtime(provider, records, references);
+  await active.execute(intent());
+  await active.cancel("user-a", "execution-bitget-1");
+  provider.queryFailure = new BitgetProviderError("provider_rejected", "Order does not exist", "25204");
+
+  await assert.rejects(() => active.reconcile("user-a", "execution-bitget-1"), /Order does not exist/u);
+
+  assert.equal(records.loadForUser("user-a", "execution-bitget-1")?.status, "PENDING_CONFIRMATION");
+  assert.equal(provider.placeRequests.length, 1);
+  assert.equal(provider.cancelCount, 1);
 });
 
 test("Bitget opaque clientOid recovery reference survives SQLite restart", async () => {
@@ -229,6 +291,48 @@ test("Bitget HEDGE recovery persists the resolved posSide bucket", () => {
   });
   store.createRecovery(recovery);
   assert.equal(store.loadRecoveryForUser("user-a", recovery.executionId)?.posSide, "long");
+});
+
+test("Bitget HEDGE timeout recovery verifies bucket evidence and promotes the same bucket", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  provider.positionMode = "HEDGE";
+  provider.placeFailure = new Error("response lost after write");
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  const active = runtime(provider, records, references);
+
+  const submitted = await active.execute(intent());
+  assert.equal(submitted.executionRecord.status, "UNKNOWN");
+  assert.equal((await references.loadRecoveryForUser("user-a", "execution-bitget-1"))?.posSide, "short");
+
+  provider.placeFailure = undefined;
+  provider.status = "CONFIRMED";
+  provider.filled = "95";
+  const recovered = await active.reconcile("user-a", "execution-bitget-1");
+  assert.equal(recovered.executionRecord.status, "CONFIRMED");
+  assert.equal(recovered.orderReference?.positionMode, "HEDGE");
+  assert.equal(recovered.orderReference?.positionDirection, "SHORT");
+  assert.equal(recovered.orderReference?.posSide, "short");
+  assert.equal(provider.placeRequests.length, 1);
+});
+
+test("Bitget HEDGE recovery does not claim Provider evidence from another bucket", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  provider.positionMode = "HEDGE";
+  provider.placeFailure = new Error("response lost after write");
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  const active = runtime(provider, records, references);
+  await active.execute(intent());
+
+  provider.placeFailure = undefined;
+  provider.status = "CONFIRMED";
+  provider.filled = "95";
+  provider.posSideOverride = "long";
+  const recovered = await active.reconcile("user-a", "execution-bitget-1");
+  assert.equal(recovered.executionRecord.status, "UNKNOWN");
+  assert.equal(recovered.orderReference, null);
+  assert.equal(await references.loadForUser("user-a", "execution-bitget-1"), null);
 });
 
 test("Bitget duplicate execution identity is rejected before a second place", async () => {
@@ -404,10 +508,13 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
   filled = "0";
   fee = "0";
   feeCurrency: string | null = null;
+  positionMode: "ONE_WAY" | "HEDGE" = "ONE_WAY";
+  posSideOverride?: "long" | "short";
   private placed?: BitgetPlaceOrderRequest;
   executionAccountIdentity() { return { accountId: "bitget:account-a" }; }
   validateExecutionProviderIdentity() {}
   async assertOneWayMode() {}
+  async readPositionMode() { return this.positionMode; }
   async placeOrder(request: BitgetPlaceOrderRequest) {
     this.placeRequests.push(request); this.placed = request;
     if (this.placeFailure) throw this.placeFailure;
@@ -418,10 +525,21 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
     if (this.queryFailure) throw this.queryFailure;
     const placed = this.placed;
     if (!placed) throw new Error("No fake Bitget order exists.");
+    const posSide = this.posSideOverride ?? placed.posSide;
+    const tradeSide = placed.posSide === undefined ? undefined
+      : placed.posSide === "long" ? placed.side === "buy" ? "open" as const : "close" as const
+        : placed.side === "sell" ? "open" as const : "close" as const;
     return { category: placed.category, symbol: placed.symbol, orderId: "order-1", clientOid: placed.clientOid,
       side: placed.side, status: this.status, rawStatus: this.status, requestedQuantity: placed.qty,
       filledQuantity: this.filled, averagePrice: this.filled === "0" ? null : "0.085",
-      fee: this.fee, feeCurrency: this.feeCurrency, updatedAt: now };
+      fee: this.fee, feeCurrency: this.feeCurrency,
+      ...(posSide === undefined ? {} : { posSide, tradeSide, holdMode: "hedge_mode" as const }),
+      ...(placed.category === "USDT-FUTURES" && posSide === undefined ? {
+        holdMode: "one_way_mode" as const,
+        reduceOnly: placed.reduceOnly,
+        tradeSide: placed.reduceOnly === "yes" ? "close" as const : "open" as const,
+      } : {}),
+      updatedAt: now };
   }
   async cancelOrder(request: BitgetGetOrderRequest) {
     this.cancelCount += 1;

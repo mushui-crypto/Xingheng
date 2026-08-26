@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { UserExchangeCredentialSecret } from "../../credentials/UserExchangeCredentialStore";
-import { createPositionSnapshot } from "../position/PositionSnapshot";
+import { createHedgePositionSnapshot, createPositionSnapshot } from "../position/PositionSnapshot";
 import type { PositionSide } from "../position/PositionSide";
 import type { ArbitrageInstance } from "./ArbitrageInstance";
 import { ArbitragePositionVerificationService } from "./ArbitragePositionVerificationService";
@@ -24,7 +24,7 @@ test("verifies known perpetual legs as MATCHED without mutating the arbitrage in
   assert.deepEqual(instance, before);
 });
 
-test("reports readable account deltas without treating quantity or direction as ownership", async () => {
+test("reports reliable Account Reality without treating quantity as ownership, but flags a conflicting direction", async () => {
   const instance = fixture();
   const service = serviceFor([instance], {
     long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "1.01"),
@@ -33,9 +33,125 @@ test("reports readable account deltas without treating quantity or direction as 
 
   const result = await service.verify("user-a", "arb-1");
 
-  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MATCHED", "MATCHED"]);
+  assert.deepEqual(result?.legs.map((leg) => leg.verificationStatus), ["MATCHED", "MISMATCH"]);
   assert.equal(instance.status, "HOLDING");
   assert.deepEqual(instance.legs.map((leg) => leg.confirmedOpenedQuantity), ["1", "1"]);
+});
+
+test("compares Provider Reality with active managed exposure after an explicit management release", async () => {
+  const base = fixture();
+  const instance: ArbitrageInstance = {
+    ...base,
+    managementReleases: [{
+      releaseId: "release-short",
+      arbitrageId: base.arbitrageId,
+      legId: "short",
+      releasedQuantity: "1",
+      reason: "USER_CONFIRMED_STOP_MANAGEMENT",
+      source: "AUTHENTICATED_API",
+      requestedByUserId: "user-a",
+      requestedAt: now - 5,
+      confirmedAt: now - 4,
+      venue: "okx",
+      accountId: "okx:account-a",
+      instrumentId: "XAUT-USDT-PERP",
+      positionMode: "ONE_WAY",
+      actualQuantity: "0",
+      actualSignedNetQuantity: "0",
+      actualLongQuantity: "0",
+      actualShortQuantity: "0",
+      availableQuantity: null,
+      realityCheckedAt: now - 6,
+    }],
+  };
+  const service = serviceFor([instance], {
+    long: observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "1"),
+    short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "LONG", "50"),
+  });
+
+  const result = await service.verify("user-a", "arb-1");
+  assert.equal(result?.legs[1].expectedManagedQuantity, "0");
+  assert.equal(result?.legs[1].actualQuantity, "50");
+  assert.equal(result?.legs[1].verificationStatus, "MATCHED");
+  assert.equal(instance.legs[1].confirmedClosedQuantity, "0");
+});
+
+test("ONE_WAY verification expresses whether full managed LONG/SHORT remains directionally available", async (t) => {
+  for (const target of ["LONG", "SHORT"] as const) {
+    for (const scenario of [
+      { name: "same direction larger", side: target, quantity: "150", expected: "MATCHED" },
+      { name: "same direction exact", side: target, quantity: "100", expected: "MATCHED" },
+      { name: "same direction insufficient", side: target, quantity: "20", expected: "MISMATCH" },
+      { name: "flat", side: "FLAT", quantity: "0", expected: "MISMATCH" },
+      { name: "opposite", side: target === "LONG" ? "SHORT" : "LONG", quantity: "20", expected: "MISMATCH" },
+    ] as const) {
+      await t.test(`${target} ${scenario.name}`, async () => {
+        const instance = fixture({ quantity: "100" });
+        const service = serviceFor([instance], {
+          long: target === "LONG"
+            ? observed("binance", "binance:account-a", "XAUT-USDT-PERP", scenario.side, scenario.quantity)
+            : observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "100"),
+          short: target === "SHORT"
+            ? observed("okx", "okx:account-a", "XAUT-USDT-PERP", scenario.side, scenario.quantity)
+            : observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "100"),
+        });
+        const result = await service.verify("user-a", "arb-1");
+        assert.equal(result?.legs[target === "LONG" ? 0 : 1].verificationStatus, scenario.expected);
+      });
+    }
+    await t.test(`${target} unknown`, async () => {
+      const instance = fixture({ quantity: "100" });
+      const service = serviceFor([instance], {
+        long: target === "LONG"
+          ? new Error("provider failed")
+          : observed("binance", "binance:account-a", "XAUT-USDT-PERP", "LONG", "100"),
+        short: target === "SHORT"
+          ? new Error("provider failed")
+          : observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "100"),
+      });
+      const result = await service.verify("user-a", "arb-1");
+      assert.equal(result?.legs[target === "LONG" ? 0 : 1].verificationStatus, "UNKNOWN");
+    });
+  }
+});
+
+test("HEDGE verification uses only the managed direction bucket", async (t) => {
+  for (const target of ["LONG", "SHORT"] as const) {
+    for (const scenario of [
+      { name: "larger", targetQuantity: "150", oppositeQuantity: "50", expected: "MATCHED" },
+      { name: "exact", targetQuantity: "100", oppositeQuantity: "50", expected: "MATCHED" },
+      { name: "insufficient", targetQuantity: "20", oppositeQuantity: "150", expected: "MISMATCH" },
+      { name: "empty with opposite bucket", targetQuantity: "0", oppositeQuantity: "150", expected: "MISMATCH" },
+    ] as const) {
+      await t.test(`${target} ${scenario.name}`, async () => {
+        const instance = fixture({ quantity: "100" });
+        const longQuantity = target === "LONG" ? scenario.targetQuantity : scenario.oppositeQuantity;
+        const shortQuantity = target === "SHORT" ? scenario.targetQuantity : scenario.oppositeQuantity;
+        const service = serviceFor([instance], {
+          long: hedgeObserved("binance", "binance:account-a", "XAUT-USDT-PERP", longQuantity, shortQuantity),
+          short: hedgeObserved("okx", "okx:account-a", "XAUT-USDT-PERP", longQuantity, shortQuantity),
+        });
+        const result = await service.verify("user-a", "arb-1");
+        assert.equal(result?.legs[target === "LONG" ? 0 : 1].verificationStatus, scenario.expected);
+      });
+    }
+  }
+});
+
+test("Spot Account Reality never becomes an instance mismatch solely because account total exceeds managed", async (t) => {
+  for (const total of ["0.1", "1", "1.4"] as const) {
+    await t.test(`account total ${total}`, async () => {
+      const instance = fixture({ strategyType: "SPOT_PERPETUAL", longInstrumentId: "XAUT-USDT-SPOT", quantity: "0.1" });
+      const service = serviceFor([instance], {
+        long: observed("binance", "binance:account-a", "XAUT-USDT-SPOT", "LONG", total),
+        short: observed("okx", "okx:account-a", "XAUT-USDT-PERP", "SHORT", "0.1"),
+      });
+      const result = await service.verify("user-a", "arb-1");
+      assert.equal(result?.legs[0].expectedManagedQuantity, "0.1");
+      assert.equal(result?.legs[0].actualQuantity, total);
+      assert.equal(result?.legs[0].verificationStatus, "MATCHED");
+    });
+  }
 });
 
 test("uses spot balance observations and keeps provider failures UNKNOWN", async () => {
@@ -117,6 +233,52 @@ test("loads user-scoped credentials and disposes a short-lived provider on succe
     "read:binance:long", "read:okx:short",
     "dispose:binance", "dispose:okx",
   ]);
+});
+
+test("one verification reuses credential and provider only for the same venue and account", async () => {
+  const base = fixture({ strategyType: "SPOT_PERPETUAL", longInstrumentId: "XAUT-USDT-SPOT" });
+  const sameDomain: ArbitrageInstance = {
+    ...base,
+    legs: [base.legs[0], { ...base.legs[1], venue: "binance", accountId: "binance:account-a" }],
+  };
+  let credentialLoads = 0;
+  let providers = 0;
+  let reads = 0;
+  let disposals = 0;
+  const service = new ArbitragePositionVerificationService(
+    query([sameDomain]),
+    {
+      findSummary: (userId, venue) => ({
+        userId, venue, accountId: "binance:account-a", accountFingerprint: "fingerprint",
+        maskedApiKey: "****", environment: "development", permissions: {}, lastVerifiedAt: now,
+        createdAt: now, updatedAt: now,
+      }),
+      loadForAccountRead: async () => { credentialLoads += 1; return secret(); },
+    },
+    [{
+      venue: "binance",
+      create: () => {
+        providers += 1;
+        return {
+          venue: "binance",
+          readLeg: async (leg) => {
+            reads += 1;
+            return observed("binance", leg.accountId, leg.instrumentId, leg.role, "1");
+          },
+          dispose: () => { disposals += 1; },
+        };
+      },
+    }],
+    () => now,
+  );
+
+  const result = await service.verify("user-a", "arb-1");
+
+  assert.deepEqual(result?.legs.map(({ verificationStatus }) => verificationStatus), ["MATCHED", "MATCHED"]);
+  assert.equal(credentialLoads, 1);
+  assert.equal(providers, 1);
+  assert.equal(reads, 2);
+  assert.equal(disposals, 1);
 });
 
 test("rejects a replaced credential when an instance is bound to a credential-only account id", async () => {
@@ -232,6 +394,20 @@ function observed(
   };
 }
 
+function hedgeObserved(
+  venue: "binance" | "okx",
+  accountId: string,
+  instrumentId: string,
+  longQuantity: string,
+  shortQuantity: string,
+): ArbitrageLegObservedState {
+  return {
+    snapshot: createHedgePositionSnapshot({
+      venue, accountId, instrumentId, longQuantity, shortQuantity, fetchedAt: now,
+    }),
+  };
+}
+
 function secret(): UserExchangeCredentialSecret {
   return { apiKey: "key", apiSecret: "secret", passphrase: "passphrase" };
 }
@@ -240,7 +416,9 @@ function fixture(overrides: {
   arbitrageId?: string;
   strategyType?: ArbitrageInstance["strategyType"];
   longInstrumentId?: string;
+  quantity?: string;
 } = {}): ArbitrageInstance {
+  const quantity = overrides.quantity ?? "1";
   return {
     arbitrageId: overrides.arbitrageId ?? "arb-1",
     userId: "user-a",
@@ -255,13 +433,13 @@ function fixture(overrides: {
     legs: [
       {
         legId: "long", role: "LONG", venue: "binance", accountId: "binance:account-a",
-        instrumentId: overrides.longInstrumentId ?? "XAUT-USDT-PERP", plannedQuantity: "1",
-        confirmedOpenedQuantity: "1", confirmedClosedQuantity: "0",
+        instrumentId: overrides.longInstrumentId ?? "XAUT-USDT-PERP", plannedQuantity: quantity,
+        confirmedOpenedQuantity: quantity, confirmedClosedQuantity: "0",
       },
       {
         legId: "short", role: "SHORT", venue: "okx", accountId: "okx:account-a",
-        instrumentId: "XAUT-USDT-PERP", plannedQuantity: "1",
-        confirmedOpenedQuantity: "1", confirmedClosedQuantity: "0",
+        instrumentId: "XAUT-USDT-PERP", plannedQuantity: quantity,
+        confirmedOpenedQuantity: quantity, confirmedClosedQuantity: "0",
       },
     ],
     executionReferences: [],

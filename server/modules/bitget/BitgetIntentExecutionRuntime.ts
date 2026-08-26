@@ -8,7 +8,7 @@ import { applyExecutionQueryObservation, type ExecutionQueryObservation } from "
 import { applyExecutionReconciliationObservation, createExecutionReconciliationObservation, type ExecutionReconciliationObservation } from "../cex/ExecutionReconciliationCapability";
 import { attachExecutionAttempt, createExecutionRecordFromIntent, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
-import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
+import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
 import {
   createBitgetExecutionOrderRecoveryReference,
@@ -18,7 +18,7 @@ import {
   type BitgetExecutionOrderReferenceStore,
 } from "./BitgetExecutionOrderReferenceStore";
 import { BitgetIntentCancellationCapability } from "./BitgetIntentCancellationCapability";
-import { BitgetProviderError } from "./BitgetClient";
+import { BitgetProviderError, safeBitgetProviderMessage } from "./BitgetClient";
 import { BitgetIntentExecutionCapability } from "./BitgetIntentExecutionCapability";
 import {
   BitgetIntentExecutionService,
@@ -59,8 +59,6 @@ export type BitgetIntentExecutionCancelRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord; observation: ExecutionCancelObservation; orderReference: BitgetExecutionOrderReference;
 }>;
 
-const BITGET_RECOVERY_NOT_FOUND_SETTLE_MS = 60_000;
-
 export class BitgetIntentExecutionRuntime {
   constructor(
     private readonly registry: BitgetIntentExecutionRuntimeRegistry,
@@ -70,6 +68,17 @@ export class BitgetIntentExecutionRuntime {
   ) {}
 
   async execute(input: ExecutionIntent): Promise<BitgetIntentExecutionRuntimeResult> {
+    return this.executeWithEffect(input, "INCREASE");
+  }
+
+  close(input: ExecutionIntent) {
+    return this.executeWithEffect(input, "DECREASE");
+  }
+
+  private async executeWithEffect(
+    input: ExecutionIntent,
+    mutationEffect: ExecutionMutationEffect,
+  ): Promise<BitgetIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "bitget") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
     return this.registry.run(intent.userId, async (runtimeService) => {
@@ -85,7 +94,7 @@ export class BitgetIntentExecutionRuntime {
             accountId: initial.accountId, instrumentId: initial.instrumentId, ...reference,
             createdAt: initial.createdAt, updatedAt: initial.updatedAt,
           }),
-        ));
+        ), mutationEffect);
         const capability = this.options.createCapability?.(service) ?? new BitgetIntentExecutionCapability(service);
         coordinatedCapability = new RegistryBackedExecutionCapability(
           new ExecutionCapabilityRegistry<BitgetIntentExecutionResult>().register(executionCapability("bitget", capability)),
@@ -131,22 +140,21 @@ export class BitgetIntentExecutionRuntime {
           ...(execution.step.status === "CALL_FAILED" ? diagnosticFromError(execution.step.error) : {}),
         };
       }
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, initial);
       return Object.freeze({ executionRecord, execution, orderReference });
     });
   }
 
-  close(input: ExecutionIntent) { return this.execute(input); }
-
   async query(authenticatedUserId: string, executionId: string): Promise<BitgetIntentExecutionQueryRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
       await this.assertAccount(record, runtimeService);
       const reference = await this.loadCompleteReference(record);
       const result = await this.service(runtimeService).query(reference);
       const executionRecord = applyExecutionQueryObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation: result.observation, orderReference: reference,
         fee: result.fee, feeCurrency: result.feeCurrency, statusReason: result.statusReason });
     });
@@ -154,8 +162,9 @@ export class BitgetIntentExecutionRuntime {
 
   async reconcile(authenticatedUserId: string, executionId: string): Promise<BitgetIntentExecutionReconciliationRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
       await this.assertAccount(record, runtimeService);
       const service = this.service(runtimeService);
       const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
@@ -163,7 +172,7 @@ export class BitgetIntentExecutionRuntime {
       const reference = await this.loadCompleteReference(record);
       const result = await service.query(reference);
       const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation: result.observation, orderReference: reference,
         statusReason: result.statusReason, terminalShortCircuit: false });
     });
@@ -171,11 +180,12 @@ export class BitgetIntentExecutionRuntime {
 
   async cancel(authenticatedUserId: string, executionId: string): Promise<BitgetIntentExecutionCancelRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
-      throw new Error(`Execution record ${record.status} cannot be cancelled.`);
-    }
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
+        throw new Error(`Execution record ${record.status} cannot be cancelled.`);
+      }
       await this.assertAccount(record, runtimeService);
       const reference = await this.loadCancelReference(record);
       const service = this.service(runtimeService);
@@ -183,14 +193,19 @@ export class BitgetIntentExecutionRuntime {
         ?? new BitgetIntentCancellationCapability(service, reference);
       const observation = await capability.cancel(record);
       const executionRecord = applyExecutionCancelObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation, orderReference: reference });
     });
   }
 
-  private service(runtimeService: BitgetIntentRuntimeService, persistRecoveryReference?: BitgetIntentExecutionServiceOptions["persistRecoveryReference"]) {
+  private service(
+    runtimeService: BitgetIntentRuntimeService,
+    persistRecoveryReference?: BitgetIntentExecutionServiceOptions["persistRecoveryReference"],
+    mutationEffect: ExecutionMutationEffect = "INCREASE",
+  ) {
     return new BitgetIntentExecutionService(runtimeService, {
       ...this.options,
+      mutationEffect,
       validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
     });
@@ -200,8 +215,10 @@ export class BitgetIntentExecutionRuntime {
     let result: BitgetExecutionQueryResult;
     try {
       result = await service.query(recovery);
-    } catch (error) {
-      if (settledMissingOrder(error, recovery, this.now())) return this.missingOrderRecovery(record);
+    } catch {
+      return this.failedRecovery(record);
+    }
+    if (recovery.positionMode === "HEDGE" && result.observation.state === "UNKNOWN") {
       return this.failedRecovery(record);
     }
     let reference: BitgetExecutionOrderReference;
@@ -215,7 +232,7 @@ export class BitgetIntentExecutionRuntime {
       ? attachExecutionAttempt(reconciled, { executionAttemptId: record.intentId, remoteOrderId: result.orderIdentity.orderId,
         status: reconciled.status, observedAt: reconciled.updatedAt })
       : reconciled;
-    await this.recordStore.update(executionRecord);
+    await this.recordStore.update(executionRecord, record);
     return Object.freeze({ executionRecord, observation: result.observation, orderReference: reference,
       statusReason: result.statusReason, terminalShortCircuit: false });
   }
@@ -224,34 +241,9 @@ export class BitgetIntentExecutionRuntime {
     const observedAt = Math.max(record.updatedAt, this.now());
     const observation = createExecutionReconciliationObservation({ state: "UNKNOWN", filledBaseQuantity: "0", observedAt });
     const executionRecord = applyExecutionReconciliationObservation(record, observation);
-    await this.recordStore.update(executionRecord);
+    await this.recordStore.update(executionRecord, record);
     return Object.freeze({ executionRecord, observation, orderReference: null,
       statusReason: "Bitget order reference recovery could not be confirmed.", terminalShortCircuit: false });
-  }
-
-  private async missingOrderRecovery(record: ExecutionRecord): Promise<BitgetIntentExecutionReconciliationRuntimeResult> {
-    const observedAt = Math.max(record.updatedAt, this.now());
-    const observation = createExecutionReconciliationObservation({
-      state: "FAILED",
-      filledBaseQuantity: "0",
-      observedAt,
-    });
-    const executionRecord = attachExecutionAttempt(
-      applyExecutionReconciliationObservation(record, observation),
-      {
-        executionAttemptId: record.executionAttemptId ?? record.intentId,
-        status: "FAILED",
-        observedAt,
-      },
-    );
-    await this.recordStore.update(executionRecord);
-    return Object.freeze({
-      executionRecord,
-      observation,
-      orderReference: null,
-      statusReason: "Bitget confirmed that the recovery order does not exist.",
-      terminalShortCircuit: false,
-    });
   }
 
   private async failPreMutationRecordIfSafe(record: ExecutionRecord) {
@@ -263,7 +255,7 @@ export class BitgetIntentExecutionRuntime {
       ]);
       if (!current || current.status !== "CREATED" || current.executionAttemptId !== undefined
         || current.remoteOrderId !== undefined || reference || recovery) return;
-      await this.recordStore.update({ ...current, status: "FAILED" });
+      await this.recordStore.update({ ...current, status: "FAILED" }, current);
     } catch (error) {
       console.error("[bitget] pre-mutation ExecutionRecord cleanup failed", error instanceof Error ? error.message : "unknown error");
     }
@@ -308,21 +300,10 @@ function diagnosticFromError(error: unknown) {
     return {
       failureCategory: error.category,
       ...(error.providerCode === null ? {} : { failureCode: error.providerCode }),
-      failureMessage: error.message,
+      failureMessage: safeBitgetProviderMessage(error.category, error.providerCode),
     };
   }
   return { failureCategory: "execution_call_failed", failureMessage: error instanceof Error ? error.message : "Bitget execution call failed." };
-}
-
-function settledMissingOrder(
-  error: unknown,
-  recovery: BitgetExecutionOrderRecoveryReference,
-  observedAt: number,
-) {
-  return error instanceof BitgetProviderError
-    && error.category === "provider_rejected"
-    && error.providerCode === "25204"
-    && observedAt >= recovery.createdAt + BITGET_RECOVERY_NOT_FOUND_SETTLE_MS;
 }
 
 function identifier(value: unknown, name: string) {

@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import type { UserExchangeCredentialStore } from "../../credentials/UserExchangeCredentialStore";
 import {
-  managedCurrentQuantity,
+  compareUnsignedDecimals,
+  activeManagedQuantity,
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
 } from "./ArbitrageInstance";
@@ -14,7 +15,7 @@ import type {
   ArbitragePositionVerificationResult,
 } from "./ArbitragePositionVerification";
 import { ArbitrageLegReadError } from "./ArbitragePositionVerification";
-import { signedCurrentNet } from "../position/PositionVerification";
+import { reduceOnlyEligible, signedCurrentNet } from "../position/PositionVerification";
 
 type VerificationCredentialStore = Pick<UserExchangeCredentialStore, "findSummary" | "loadForAccountRead">;
 type VerificationQuery = Pick<ArbitrageInstanceQueryService, "getById" | "listActive">;
@@ -37,7 +38,15 @@ export class ArbitragePositionVerificationService {
     const instance = this.instances.getById(normalizedUserId, normalizedArbitrageId);
     if (!instance) return null;
     const checkedAt = this.now();
-    const legs = await Promise.all(instance.legs.map((leg) => this.verifyLeg(instance, leg, checkedAt)));
+    const groups = new Map<string, ArbitrageInstanceLeg[]>();
+    for (const leg of instance.legs) {
+      const key = `${leg.venue}\u0000${leg.accountId}`;
+      groups.set(key, [...(groups.get(key) ?? []), leg]);
+    }
+    const verifiedGroups = await Promise.all([...groups.values()].map((legs) =>
+      this.verifyGroup(instance, legs, checkedAt)));
+    const byLegId = new Map(verifiedGroups.flat().map((leg) => [leg.legId, leg]));
+    const legs = instance.legs.map((leg) => byLegId.get(leg.legId)!);
     return Object.freeze({
       arbitrageId: instance.arbitrageId,
       checkedAt,
@@ -45,41 +54,55 @@ export class ArbitragePositionVerificationService {
     });
   }
 
-  private async verifyLeg(
+  private async verifyGroup(
     instance: ArbitrageInstance,
-    leg: ArbitrageInstanceLeg,
+    legs: readonly ArbitrageInstanceLeg[],
     checkedAt: number,
-  ): Promise<ArbitrageLegVerificationResult> {
-    const expectedManagedQuantity = managedCurrentQuantity(leg);
-    const factory = this.factories.get(leg.venue);
-    const summary = this.credentials.findSummary(instance.userId, leg.venue);
-    if (!factory || !summary || summary.accountId !== leg.accountId) {
-      return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "credential_binding_unavailable");
+  ): Promise<readonly ArbitrageLegVerificationResult[]> {
+    const first = legs[0]!;
+    const factory = this.factories.get(first.venue);
+    const summary = this.credentials.findSummary(instance.userId, first.venue);
+    if (!factory || !summary || summary.accountId !== first.accountId) {
+      return legs.map((leg) => unknownFor(instance, leg, checkedAt, "credential_binding_unavailable"));
     }
     let provider;
     let failureReason: ArbitrageLegVerificationUnknownReason = "credential_load_failed";
     try {
-      const secret = await this.credentials.loadForAccountRead(instance.userId, leg.venue);
-      if (!credentialBindingMatches(leg, secret.apiKey)) {
-        return unknown(instance.arbitrageId, leg.legId, expectedManagedQuantity, checkedAt, "credential_binding_mismatch");
+      const secret = await this.credentials.loadForAccountRead(instance.userId, first.venue);
+      if (legs.some((leg) => !credentialBindingMatches(leg, secret.apiKey))) {
+        return legs.map((leg) => unknownFor(instance, leg, checkedAt, "credential_binding_mismatch"));
       }
       failureReason = "provider_initialization_failed";
       provider = factory.create(secret);
-      failureReason = "provider_read_failed";
-      const observed = await provider.readLeg(leg);
-      return result(instance, leg, expectedManagedQuantity, observed, checkedAt);
+      return await Promise.all(legs.map(async (leg) => {
+        try {
+          const observed = await provider!.readLeg(leg);
+          return result(instance, leg, activeManagedQuantity(instance, leg), observed, checkedAt);
+        } catch (error) {
+          return unknownFor(
+            instance,
+            leg,
+            checkedAt,
+            error instanceof ArbitrageLegReadError ? error.reason : "provider_read_failed",
+          );
+        }
+      }));
     } catch (error) {
-      return unknown(
-        instance.arbitrageId,
-        leg.legId,
-        expectedManagedQuantity,
-        checkedAt,
-        error instanceof ArbitrageLegReadError ? error.reason : failureReason,
-      );
+      const reason = error instanceof ArbitrageLegReadError ? error.reason : failureReason;
+      return legs.map((leg) => unknownFor(instance, leg, checkedAt, reason));
     } finally {
       if (provider) await Promise.resolve(provider.dispose()).catch(() => undefined);
     }
   }
+}
+
+function unknownFor(
+  instance: ArbitrageInstance,
+  leg: ArbitrageInstanceLeg,
+  checkedAt: number,
+  reason: ArbitrageLegVerificationUnknownReason,
+) {
+  return unknown(instance.arbitrageId, leg.legId, activeManagedQuantity(instance, leg), checkedAt, reason);
 }
 
 function credentialBindingMatches(leg: ArbitrageInstanceLeg, apiKey: string) {
@@ -104,6 +127,7 @@ function result(
   const actualQuantity = observed.snapshot.positionMode === "HEDGE"
     ? leg.role === "LONG" ? observed.snapshot.longQuantity : observed.snapshot.shortQuantity
     : observed.snapshot.quantity;
+  const verificationStatus = relationshipStatus(leg, expectedManagedQuantity, observed);
   return Object.freeze({
     arbitrageId: instance.arbitrageId,
     legId: leg.legId,
@@ -114,10 +138,26 @@ function result(
     actualLongQuantity: observed.snapshot.longQuantity,
     actualShortQuantity: observed.snapshot.shortQuantity,
     availableQuantity: observed.availableQuantity ?? null,
-    verificationStatus: "MATCHED",
+    verificationStatus,
     reason: null,
     checkedAt,
   });
+}
+
+function relationshipStatus(
+  leg: ArbitrageInstanceLeg,
+  expectedManagedQuantity: string,
+  observed: ArbitrageLegObservedState,
+): "MATCHED" | "MISMATCH" {
+  // Spot account totals are Account Reality, not instance ownership. Reliable
+  // reads therefore do not become mismatches merely because users hold more.
+  if (leg.instrumentId.endsWith("-SPOT") || expectedManagedQuantity === "0") return "MATCHED";
+  if (observed.snapshot.positionMode === "HEDGE") {
+    const bucket = leg.role === "LONG" ? observed.snapshot.longQuantity : observed.snapshot.shortQuantity;
+    return compareUnsignedDecimals(bucket, expectedManagedQuantity) >= 0 ? "MATCHED" : "MISMATCH";
+  }
+  const managedSignedQuantity = leg.role === "SHORT" ? `-${expectedManagedQuantity}` : expectedManagedQuantity;
+  return reduceOnlyEligible(signedCurrentNet(observed.snapshot)!, managedSignedQuantity) ? "MATCHED" : "MISMATCH";
 }
 
 function unknown(

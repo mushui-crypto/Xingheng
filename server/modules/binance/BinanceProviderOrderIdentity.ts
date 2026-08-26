@@ -4,6 +4,10 @@ type ExpectedOrderIdentity = Readonly<{
   symbol: string;
   clientOrderId: string;
   providerOrderId?: string | null;
+  positionSide?: "BOTH" | "LONG" | "SHORT";
+  side?: "Buy" | "Sell";
+  requestedBaseQuantity?: string;
+  reduceOnly?: boolean;
 }>;
 
 type SubmissionIdentity = Readonly<{
@@ -46,7 +50,42 @@ export function assertBinanceProviderOrderIdentity(
     && orderId !== expected.providerOrderId) {
     throw new BinanceProviderOrderIdentityError("Binance provider response orderId does not match the exact StellaX order.");
   }
+  if (expected.positionSide !== undefined && order.positionSide !== expected.positionSide) {
+    throw new BinanceProviderOrderIdentityError("Binance provider response positionSide does not match the execution bucket.");
+  }
+  if (expected.side !== undefined && order.side !== undefined && order.side !== expected.side) {
+    throw new BinanceProviderOrderIdentityError("Binance provider response side does not match the execution order.");
+  }
+  if (expected.requestedBaseQuantity !== undefined && order.requestedBaseQuantity !== undefined
+    && canonicalDecimal(order.requestedBaseQuantity) !== canonicalDecimal(expected.requestedBaseQuantity)) {
+    throw new BinanceProviderOrderIdentityError("Binance provider response origQty does not match the execution order.");
+  }
+  if (expected.reduceOnly !== undefined && order.reduceOnly !== undefined && order.reduceOnly !== expected.reduceOnly) {
+    throw new BinanceProviderOrderIdentityError("Binance provider response reduceOnly does not match the execution semantic.");
+  }
+  if (expected.requestedBaseQuantity !== undefined
+    && compareDecimal(order.filledBaseQuantity ?? String(order.filledQuantity), expected.requestedBaseQuantity) > 0) {
+    throw new BinanceProviderOrderIdentityError("Binance provider cumulative fill exceeds the execution quantity.");
+  }
   return order;
+}
+
+function canonicalDecimal(value: unknown) {
+  if (typeof value !== "string" || !/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value)) {
+    throw new BinanceProviderOrderIdentityError("Binance provider quantity evidence is missing or malformed.");
+  }
+  const [integer, fraction = ""] = value.split(".");
+  const normalized = fraction.replace(/0+$/u, "");
+  return normalized ? `${integer}.${normalized}` : integer!;
+}
+
+function compareDecimal(left: string, right: string) {
+  const [li, lf = ""] = canonicalDecimal(left).split(".");
+  const [ri, rf = ""] = canonicalDecimal(right).split(".");
+  const scale = Math.max(lf.length, rf.length);
+  const a = BigInt(`${li}${lf.padEnd(scale, "0")}`);
+  const b = BigInt(`${ri}${rf.padEnd(scale, "0")}`);
+  return a < b ? -1 : a > b ? 1 : 0;
 }
 
 function providerSymbol(value: unknown) {

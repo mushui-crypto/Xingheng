@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { exitArbitrageInstance } from "../../../api/arbitrageExecutionDraft";
-import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
+import { fetchArbitrageInstanceById, type ArbitrageInstance } from "../../../api/arbitrageInstances";
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 
@@ -11,10 +11,28 @@ export function ArbitrageHedgeExitDialog({ instance, onClose, onUpdated }: {
 }) {
   const [commandId] = useState(createCommandId);
   const [status, setStatus] = useState<"idle" | "submitting" | "done" | "stopped" | "error">("idle");
+  const [currentInstance, setCurrentInstance] = useState(instance);
+  useEffect(() => {
+    if (status !== "submitting") return;
+    const controller = new AbortController();
+    const timer = setInterval(() => {
+      void fetchArbitrageInstanceById(instance.arbitrageId, controller.signal)
+        .then((next) => {
+          setCurrentInstance(next);
+          onUpdated(next);
+        })
+        .catch(() => undefined);
+    }, 750);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [instance.arbitrageId, onUpdated, status]);
   const submit = async () => {
     setStatus("submitting");
     try {
       const result = await exitArbitrageInstance({ arbitrageId: instance.arbitrageId, commandId, executionMode: "EXECUTION_PRIORITY" });
+      setCurrentInstance(result.instance);
       onUpdated(result.instance);
       setStatus(result.status === "CONFIRMED" ? "done" : "stopped");
     } catch {
@@ -22,7 +40,7 @@ export function ArbitrageHedgeExitDialog({ instance, onClose, onUpdated }: {
     }
   };
   const busy = status === "submitting";
-  const progress = persistedExitProgress(instance);
+  const progress = persistedExitProgress(currentInstance);
   return <Modal
     closeDisabled={busy}
     description="服务端按套利实例的正式退出顺序处理两腿。任一腿状态不确定时会停止，不会自动重试。"
@@ -40,7 +58,7 @@ export function ArbitrageHedgeExitDialog({ instance, onClose, onUpdated }: {
         </div>
       </div>
       {status === "stopped" || status === "error"
-        ? <p className="text-xs text-red-200">退出流程已停止。请使用实例级“重新核验”恢复权威状态，系统不会自动重试。</p>
+        ? <p className="text-xs text-red-200">退出流程已停止。{remainingActiveManaged(currentInstance) !== "0" ? `剩余 Active Managed ${remainingActiveManaged(currentInstance)}。` : ""} 请重新核验后再人工处理；系统不会自动重试。</p>
         : null}
       <div className="flex justify-end gap-2">
         <Button disabled={busy} onClick={onClose} type="button" variant="secondary">关闭</Button>
@@ -61,6 +79,38 @@ export function persistedExitProgress(instance: ArbitrageInstance) {
     if (reference) return `○ ${label}确认中`;
     return `○ ${label}等待退出`;
   });
+}
+
+export function remainingActiveManaged(instance: ArbitrageInstance) {
+  return instance.legs.reduce((sum, leg) => addDecimals(sum, activeManaged(instance, leg)), "0");
+}
+
+function activeManaged(instance: ArbitrageInstance, leg: ArbitrageInstance["legs"][number]) {
+  if (instance.managementReleases.some((release) => release.legId === leg.legId)) return "0";
+  return subtractDecimals(leg.confirmedOpenedQuantity, leg.confirmedClosedQuantity);
+}
+
+function addDecimals(left: string, right: string) {
+  const scale = Math.max((left.split(".")[1] ?? "").length, (right.split(".")[1] ?? "").length);
+  const value = scaled(left, scale) + scaled(right, scale);
+  return decimal(value, scale);
+}
+
+function subtractDecimals(left: string, right: string) {
+  const scale = Math.max((left.split(".")[1] ?? "").length, (right.split(".")[1] ?? "").length);
+  return decimal(scaled(left, scale) - scaled(right, scale), scale);
+}
+
+function scaled(value: string, scale: number) {
+  const [whole, fraction = ""] = value.split(".");
+  return BigInt(`${whole}${fraction.padEnd(scale, "0")}`);
+}
+
+function decimal(value: bigint, scale: number) {
+  if (scale === 0) return value.toString();
+  const raw = value.toString().padStart(scale + 1, "0");
+  const normalized = `${raw.slice(0, -scale)}.${raw.slice(-scale)}`.replace(/\.0+$/u, "").replace(/(\.\d*?)0+$/u, "$1");
+  return normalized;
 }
 
 function orderedLegs(instance: ArbitrageInstance) {

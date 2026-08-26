@@ -34,6 +34,28 @@ export type ArbitrageExecutionReference = {
   updatedAt: number;
 };
 
+export type ArbitrageManagementRelease = {
+  releaseId: string;
+  arbitrageId: string;
+  legId: string;
+  releasedQuantity: string;
+  reason: "USER_CONFIRMED_STOP_MANAGEMENT";
+  source: "AUTHENTICATED_API";
+  requestedByUserId: string;
+  requestedAt: number;
+  confirmedAt: number;
+  venue: ExchangeVenue;
+  accountId: string;
+  instrumentId: string;
+  positionMode: "ONE_WAY" | "HEDGE";
+  actualQuantity: string;
+  actualSignedNetQuantity: string | null;
+  actualLongQuantity: string;
+  actualShortQuantity: string;
+  availableQuantity: string | null;
+  realityCheckedAt: number;
+};
+
 export type ArbitrageInstance = {
   arbitrageId: string;
   userId: string;
@@ -47,6 +69,7 @@ export type ArbitrageInstance = {
   closedAt: number | null;
   legs: [ArbitrageInstanceLeg, ArbitrageInstanceLeg];
   executionReferences: ArbitrageExecutionReference[];
+  managementReleases: ArbitrageManagementRelease[];
   pnl: {
     asset: string | null;
     cumulativeFundingPnl: string | null;
@@ -56,6 +79,8 @@ export type ArbitrageInstance = {
     updatedAt: number | null;
   };
 };
+
+export type ArbitrageManagementEndMethod = "NORMAL_CLOSE" | "MANAGEMENT_RELEASE" | "MIXED";
 
 export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 
@@ -73,6 +98,100 @@ export type ArbitragePositionVerification = {
   arbitrageId: string;
   checkedAt: number;
   legs: [ArbitrageLegVerification, ArbitrageLegVerification];
+};
+
+export type ArbitrageCloseSafetyReason =
+  | "FULL_MANAGED_CLOSE_AVAILABLE"
+  | "NO_ACTIVE_MANAGED_EXPOSURE"
+  | "PROVIDER_REALITY_UNAVAILABLE"
+  | "CLOSE_CAPABILITY_UNAVAILABLE"
+  | "ONE_WAY_REALITY_INSUFFICIENT"
+  | "HEDGE_BUCKET_INSUFFICIENT"
+  | "SPOT_ROLE_UNSUPPORTED"
+  | "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
+  | "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
+  | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+  | "TRADING_RULES_REJECT_FULL_QUANTITY";
+
+export type ArbitrageManagementReleaseEligibilityReason =
+  | "RELEASE_ELIGIBLE"
+  | "INSTANCE_TERMINAL"
+  | "UNRESOLVED_EXECUTION"
+  | "NO_ACTIVE_MANAGED_EXPOSURE"
+  | "PROVIDER_REALITY_UNAVAILABLE"
+  | "FULL_MANAGED_CLOSE_AVAILABLE";
+
+export type ArbitrageCloseSafety = {
+  activeManagedQuantity: string;
+  safeClosableQuantity: string;
+  fullManagedCloseAvailable: boolean;
+  reason: ArbitrageCloseSafetyReason;
+  checkedAt: number;
+  realityReliable: boolean;
+  releaseEligible: boolean;
+  hasUnresolvedExecution: boolean;
+  releaseEligibilityReason: ArbitrageManagementReleaseEligibilityReason;
+  positionMode: "ONE_WAY" | "HEDGE" | null;
+  actualQuantity: string | null;
+  actualSignedNetQuantity: string | null;
+  actualLongQuantity: string | null;
+  actualShortQuantity: string | null;
+  availableQuantity: string | null;
+};
+
+export type InstanceHedgeDeltaStatus = "KNOWN" | "UNKNOWN";
+export type InstanceHedgeDeltaReason =
+  | "EXECUTION_EVIDENCE_UNRESOLVED"
+  | "EXECUTION_QUANTITY_INCOMPLETE"
+  | "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
+  | "LEG_IDENTITY_INVALID"
+  | "ACTIVE_EXPOSURE_INVALID";
+
+export type InstanceHedgeDeltaView = {
+  status: InstanceHedgeDeltaStatus;
+  signedDeltaBaseQuantity: string | null;
+  absoluteDeltaBaseQuantity: string | null;
+  reason: InstanceHedgeDeltaReason | null;
+};
+
+export type InstanceHedgeDeltaLegContribution = {
+  legId: string;
+  role: "LONG" | "SHORT";
+  marketType: "SPOT" | "PERPETUAL";
+  signedContribution: string | null;
+  openingSignedContribution: string | null;
+  activeManagedQuantity: string;
+  source: "SPOT_OPENING_ATTRIBUTION" | "PERPETUAL_CONFIRMED_EXECUTION";
+  openingStatus: InstanceHedgeDeltaStatus;
+  openingReason: InstanceHedgeDeltaReason | null;
+  activeStatus: InstanceHedgeDeltaStatus;
+  activeReason: InstanceHedgeDeltaReason | null;
+  status: InstanceHedgeDeltaStatus;
+  reason: InstanceHedgeDeltaReason | null;
+};
+
+export type InstanceHedgeDelta = {
+  arbitrageId: string;
+  status: ArbitrageInstanceStatus;
+  openingDelta: InstanceHedgeDeltaView;
+  activeManagedDelta: InstanceHedgeDeltaView;
+  openingWorkflow: {
+    secondLegRequired: boolean;
+    secondLegExecutionEligible: null;
+    requiredSecondLegSignedExposure: string | null;
+  };
+  legContributions: [InstanceHedgeDeltaLegContribution, InstanceHedgeDeltaLegContribution];
+  plannedResidualDelta: string;
+  actualResidualDelta: string | null;
+  derivedAt: number;
+  deltaStatus: InstanceHedgeDeltaStatus;
+  signedDeltaBaseQuantity: string | null;
+  absoluteDeltaBaseQuantity: string | null;
+  currentOpeningDelta: string | null;
+  openingDeltaStatus: InstanceHedgeDeltaStatus;
+  requiredSecondLegSignedExposure: string | null;
+  deltaKnown: boolean;
+  reason: InstanceHedgeDeltaReason | null;
 };
 
 export async function fetchActiveArbitrageInstances(signal?: AbortSignal) {
@@ -111,6 +230,59 @@ export async function fetchArbitragePositionVerification(arbitrageId: string, si
   return positionVerification(payload);
 }
 
+export async function fetchArbitrageCloseSafety(
+  arbitrageId: string,
+  legId: string,
+  signal?: AbortSignal,
+) {
+  const payload = await requestJson<unknown>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/legs/${encodeURIComponent(legId)}/close-safety`,
+    "当前退出安全状态暂无法可靠确认",
+    { userAuthFailure: true, init: { cache: "no-store", signal } },
+  );
+  return closeSafety(payload);
+}
+
+export async function fetchInstanceHedgeDelta(arbitrageId: string, signal?: AbortSignal) {
+  const payload = await requestJson<unknown>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/hedge-delta`,
+    "当前实例对冲 Delta 暂无法可靠确认",
+    { userAuthFailure: true, init: { cache: "no-store", signal } },
+  );
+  return instanceHedgeDelta(payload);
+}
+
+export type ArbitrageManagementReleaseConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  release: ArbitrageManagementRelease;
+  idempotentReplay: boolean;
+}>;
+
+export async function releaseArbitrageLegManagement(input: Readonly<{
+  arbitrageId: string;
+  legId: string;
+  commandId: string;
+}>): Promise<ArbitrageManagementReleaseConfirmation> {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/legs/release-management",
+    "停止管理请求失败，请重新核验后再试。",
+    {
+      userAuthFailure: true,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+    },
+  );
+  const value = requiredRecord(payload);
+  return Object.freeze({
+    instance: instance(value.instance),
+    release: managementRelease(value.release),
+    idempotentReplay: booleanValue(value.idempotentReplay),
+  });
+}
+
 export function requireArbitrageInstanceList(payload: unknown) {
   return instanceList(payload);
 }
@@ -121,6 +293,19 @@ export function requireArbitrageInstance(payload: unknown) {
 
 export function requireArbitragePositionVerification(payload: unknown) {
   return positionVerification(payload);
+}
+
+export function deriveArbitrageManagementEndMethod(
+  value: ArbitrageInstance,
+): ArbitrageManagementEndMethod | null {
+  if (value.status !== "CLOSED") return null;
+  if (value.managementReleases.length === 0) return "NORMAL_CLOSE";
+  const hasConfirmedCloseExecution = value.executionReferences.some((reference) =>
+    reference.phase === "CLOSING"
+    && reference.quantityEffect === "DECREASE"
+    && !isZeroDecimal(reference.confirmedQuantity)
+    && (reference.status === "CONFIRMED" || reference.status === "FAILED"));
+  return hasConfirmedCloseExecution ? "MIXED" : "MANAGEMENT_RELEASE";
 }
 
 function instanceList(payload: unknown) {
@@ -148,6 +333,11 @@ function instance(payload: unknown): ArbitrageInstance {
     closedAt: nullableTimestamp(value.closedAt),
     legs: legs as [ArbitrageInstanceLeg, ArbitrageInstanceLeg],
     executionReferences: value.executionReferences.map(executionReference),
+    managementReleases: value.managementReleases === undefined
+      ? []
+      : Array.isArray(value.managementReleases)
+        ? value.managementReleases.map(managementRelease)
+        : invalidResponse(),
     pnl: {
       asset: nullableString(pnl.asset),
       cumulativeFundingPnl: nullableDecimal(pnl.cumulativeFundingPnl),
@@ -156,6 +346,31 @@ function instance(payload: unknown): ArbitrageInstance {
       cumulativeNetPnl: nullableDecimal(pnl.cumulativeNetPnl),
       updatedAt: nullableTimestamp(pnl.updatedAt),
     },
+  };
+}
+
+function managementRelease(payload: unknown): ArbitrageManagementRelease {
+  const value = requiredRecord(payload);
+  return {
+    releaseId: requiredString(value.releaseId),
+    arbitrageId: requiredString(value.arbitrageId),
+    legId: requiredString(value.legId),
+    releasedQuantity: decimal(value.releasedQuantity),
+    reason: value.reason === "USER_CONFIRMED_STOP_MANAGEMENT" ? value.reason : invalidResponse(),
+    source: value.source === "AUTHENTICATED_API" ? value.source : invalidResponse(),
+    requestedByUserId: requiredString(value.requestedByUserId),
+    requestedAt: timestamp(value.requestedAt),
+    confirmedAt: timestamp(value.confirmedAt),
+    venue: venue(value.venue),
+    accountId: requiredString(value.accountId),
+    instrumentId: requiredString(value.instrumentId),
+    positionMode: positionMode(value.positionMode),
+    actualQuantity: decimal(value.actualQuantity),
+    actualSignedNetQuantity: nullableDecimal(value.actualSignedNetQuantity),
+    actualLongQuantity: decimal(value.actualLongQuantity),
+    actualShortQuantity: decimal(value.actualShortQuantity),
+    availableQuantity: nullableDecimal(value.availableQuantity),
+    realityCheckedAt: timestamp(value.realityCheckedAt),
   };
 }
 
@@ -182,6 +397,95 @@ function legVerification(payload: unknown): ArbitrageLegVerification {
     availableQuantity: value.availableQuantity === undefined ? null : nullableDecimal(value.availableQuantity),
     verificationStatus: verificationStatus(value.verificationStatus),
     checkedAt: timestamp(value.checkedAt),
+  };
+}
+
+function closeSafety(payload: unknown): ArbitrageCloseSafety {
+  const value = requiredRecord(payload);
+  return {
+    activeManagedQuantity: decimal(value.activeManagedQuantity),
+    safeClosableQuantity: decimal(value.safeClosableQuantity),
+    fullManagedCloseAvailable: booleanValue(value.fullManagedCloseAvailable),
+    reason: closeSafetyReason(value.reason),
+    checkedAt: timestamp(value.checkedAt),
+    realityReliable: booleanValue(value.realityReliable),
+    releaseEligible: booleanValue(value.releaseEligible),
+    hasUnresolvedExecution: booleanValue(value.hasUnresolvedExecution),
+    releaseEligibilityReason: releaseEligibilityReason(value.releaseEligibilityReason),
+    positionMode: value.positionMode === null ? null : positionMode(value.positionMode),
+    actualQuantity: nullableDecimal(value.actualQuantity),
+    actualSignedNetQuantity: nullableDecimal(value.actualSignedNetQuantity),
+    actualLongQuantity: nullableDecimal(value.actualLongQuantity),
+    actualShortQuantity: nullableDecimal(value.actualShortQuantity),
+    availableQuantity: nullableDecimal(value.availableQuantity),
+  };
+}
+
+function instanceHedgeDelta(payload: unknown): InstanceHedgeDelta {
+  const value = requiredRecord(payload);
+  if (!Array.isArray(value.legContributions) || value.legContributions.length !== 2) throw invalidResponse();
+  return {
+    arbitrageId: requiredString(value.arbitrageId),
+    status: instanceStatus(value.status),
+    openingDelta: deltaView(value.openingDelta),
+    activeManagedDelta: deltaView(value.activeManagedDelta),
+    openingWorkflow: openingWorkflow(value.openingWorkflow),
+    legContributions: value.legContributions.map(deltaLegContribution) as [
+      InstanceHedgeDeltaLegContribution,
+      InstanceHedgeDeltaLegContribution,
+    ],
+    plannedResidualDelta: decimal(value.plannedResidualDelta),
+    actualResidualDelta: nullableDecimal(value.actualResidualDelta),
+    derivedAt: timestamp(value.derivedAt),
+    deltaStatus: deltaStatus(value.deltaStatus),
+    signedDeltaBaseQuantity: nullableDecimal(value.signedDeltaBaseQuantity),
+    absoluteDeltaBaseQuantity: nullableDecimal(value.absoluteDeltaBaseQuantity),
+    currentOpeningDelta: nullableDecimal(value.currentOpeningDelta),
+    openingDeltaStatus: deltaStatus(value.openingDeltaStatus),
+    requiredSecondLegSignedExposure: nullableDecimal(value.requiredSecondLegSignedExposure),
+    deltaKnown: booleanValue(value.deltaKnown),
+    reason: nullableDeltaReason(value.reason),
+  };
+}
+
+function deltaView(payload: unknown): InstanceHedgeDeltaView {
+  const value = requiredRecord(payload);
+  return {
+    status: deltaStatus(value.status),
+    signedDeltaBaseQuantity: nullableDecimal(value.signedDeltaBaseQuantity),
+    absoluteDeltaBaseQuantity: nullableDecimal(value.absoluteDeltaBaseQuantity),
+    reason: nullableDeltaReason(value.reason),
+  };
+}
+
+function openingWorkflow(payload: unknown): InstanceHedgeDelta["openingWorkflow"] {
+  const value = requiredRecord(payload);
+  if (value.secondLegExecutionEligible !== null) throw invalidResponse();
+  return {
+    secondLegRequired: booleanValue(value.secondLegRequired),
+    secondLegExecutionEligible: null,
+    requiredSecondLegSignedExposure: nullableDecimal(value.requiredSecondLegSignedExposure),
+  };
+}
+
+function deltaLegContribution(payload: unknown): InstanceHedgeDeltaLegContribution {
+  const value = requiredRecord(payload);
+  return {
+    legId: requiredString(value.legId),
+    role: value.role === "LONG" || value.role === "SHORT" ? value.role : invalidResponse(),
+    marketType: value.marketType === "SPOT" || value.marketType === "PERPETUAL"
+      ? value.marketType : invalidResponse(),
+    signedContribution: nullableDecimal(value.signedContribution),
+    openingSignedContribution: nullableDecimal(value.openingSignedContribution),
+    activeManagedQuantity: decimal(value.activeManagedQuantity),
+    source: value.source === "SPOT_OPENING_ATTRIBUTION" || value.source === "PERPETUAL_CONFIRMED_EXECUTION"
+      ? value.source : invalidResponse(),
+    openingStatus: deltaStatus(value.openingStatus),
+    openingReason: nullableDeltaReason(value.openingReason),
+    activeStatus: deltaStatus(value.activeStatus),
+    activeReason: nullableDeltaReason(value.activeReason),
+    status: deltaStatus(value.status),
+    reason: nullableDeltaReason(value.reason),
   };
 }
 
@@ -235,6 +539,51 @@ function verificationStatus(value: unknown): ArbitrageLegVerificationStatus {
   throw invalidVerificationResponse();
 }
 
+function closeSafetyReason(value: unknown): ArbitrageCloseSafetyReason {
+  if (value === "FULL_MANAGED_CLOSE_AVAILABLE"
+    || value === "NO_ACTIVE_MANAGED_EXPOSURE"
+    || value === "PROVIDER_REALITY_UNAVAILABLE"
+    || value === "CLOSE_CAPABILITY_UNAVAILABLE"
+    || value === "ONE_WAY_REALITY_INSUFFICIENT"
+    || value === "HEDGE_BUCKET_INSUFFICIENT"
+    || value === "SPOT_ROLE_UNSUPPORTED"
+    || value === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
+    || value === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
+    || value === "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+    || value === "TRADING_RULES_REJECT_FULL_QUANTITY") return value;
+  throw invalidResponse();
+}
+
+function releaseEligibilityReason(value: unknown): ArbitrageManagementReleaseEligibilityReason {
+  if (value === "RELEASE_ELIGIBLE"
+    || value === "INSTANCE_TERMINAL"
+    || value === "UNRESOLVED_EXECUTION"
+    || value === "NO_ACTIVE_MANAGED_EXPOSURE"
+    || value === "PROVIDER_REALITY_UNAVAILABLE"
+    || value === "FULL_MANAGED_CLOSE_AVAILABLE") return value;
+  throw invalidResponse();
+}
+
+function positionMode(value: unknown): "ONE_WAY" | "HEDGE" {
+  if (value === "ONE_WAY" || value === "HEDGE") return value;
+  throw invalidResponse();
+}
+
+function deltaStatus(value: unknown): InstanceHedgeDeltaStatus {
+  if (value === "KNOWN" || value === "UNKNOWN") return value;
+  throw invalidResponse();
+}
+
+function nullableDeltaReason(value: unknown): InstanceHedgeDeltaReason | null {
+  if (value === null) return null;
+  if (value === "EXECUTION_EVIDENCE_UNRESOLVED"
+    || value === "EXECUTION_QUANTITY_INCOMPLETE"
+    || value === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
+    || value === "LEG_IDENTITY_INVALID"
+    || value === "ACTIVE_EXPOSURE_INVALID") return value;
+  throw invalidResponse();
+}
+
 function strategyType(value: unknown): ArbitrageInstance["strategyType"] {
   if (value === "PERPETUAL_PERPETUAL" || value === "SPOT_PERPETUAL") return value;
   throw invalidResponse();
@@ -269,6 +618,10 @@ function decimal(value: unknown) {
   return value;
 }
 
+function isZeroDecimal(value: string) {
+  return /^-?0(?:\.0+)?$/u.test(value);
+}
+
 function nullableDecimal(value: unknown) {
   return value === null ? null : decimal(value);
 }
@@ -280,6 +633,11 @@ function timestamp(value: unknown) {
 
 function nullableTimestamp(value: unknown) {
   return value === null ? null : timestamp(value);
+}
+
+function booleanValue(value: unknown) {
+  if (typeof value !== "boolean") throw invalidResponse();
+  return value;
 }
 
 function invalidResponse(): never {

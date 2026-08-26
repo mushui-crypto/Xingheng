@@ -13,6 +13,7 @@ import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
+  type ExecutionMutationEffect,
   type ExecutionProviderIdentityValidator,
 } from "../cex/ExecutionMutationSafetyGuard";
 import { OkxInstrumentMappingAdapter, type OkxInstrumentResolution } from "./OkxInstrumentMapping";
@@ -31,6 +32,7 @@ export type OkxSpotIntentExecutionServiceOptions = Readonly<{
   quantityRulesMaxAgeMs?: number;
   clock?: () => number;
   mutationSafetyGuard?: ExecutionMutationSafetyGuard;
+  mutationEffect?: ExecutionMutationEffect;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
   persistRecoveryReference?: (reference: Readonly<{
     instId: string;
@@ -66,6 +68,7 @@ export class OkxSpotIntentExecutionService {
       await this.mutationSafetyGuard.assertAllowed({
         venue: "okx", operation: "placeOrder", userId: intent.userId, accountId: intent.accountId,
         instrumentId: intent.instrumentId, providerInstrumentId: value.instId,
+        ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, this.options.validateProviderIdentity);
       await persistRecoveryReference({
         instId: value.instId,

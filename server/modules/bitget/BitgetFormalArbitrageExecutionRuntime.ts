@@ -8,13 +8,23 @@ import {
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { BitgetIntentExecutionRuntime } from "./BitgetIntentExecutionRuntime";
 
-type Runtime = Pick<BitgetIntentExecutionRuntime, "execute" | "reconcile" | "cancel">;
+type Runtime = Pick<BitgetIntentExecutionRuntime, "execute" | "reconcile" | "cancel">
+  & Partial<Pick<BitgetIntentExecutionRuntime, "close">>;
 
 export class BitgetFormalArbitrageExecutionRuntime implements FormalExecutionRuntime {
   constructor(private readonly runtime: Runtime) {}
 
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
-    const result = await this.runtime.execute(intent);
+    return this.executeWith(() => this.runtime.execute(intent));
+  }
+
+  async executeManagedClose(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
+    if (!this.runtime.close) throw new Error("Bitget managed-close runtime is unavailable.");
+    return this.executeWith(() => this.runtime.close!(intent));
+  }
+
+  private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {
+    const result = await run();
     const diagnostic = diagnosticFromExecution(result.execution);
     const mutationDisposition = mutationDispositionFromExecution({
       executionRecord: result.executionRecord,

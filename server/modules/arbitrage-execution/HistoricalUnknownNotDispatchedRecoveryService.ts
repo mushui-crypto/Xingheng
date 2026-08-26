@@ -94,20 +94,21 @@ export class HistoricalUnknownNotDispatchedRecoveryService {
 
     const verification = await this.positions.verify(userId, instance.arbitrageId);
     if (!verification
-      || verification.legs.some((candidate) => candidate.verificationStatus !== "MATCHED"
+      || verification.legs.some((candidate) => candidate.verificationStatus === "UNKNOWN"
         || candidate.actualQuantity !== "0")) {
       throw incomplete("Provider position facts 不能证明实例当前无 managed exposure。");
     }
     const evidence = await this.evidence.verify(record.venue, { instance, executionRecord: record });
     if (!evidence.recoveryAnchorRequiredBeforeMutation
       || evidence.exactOrderEvidence !== "ABSENT"
-      || evidence.activeOrderEvidence !== "NONE") {
+      || evidence.activeOrderEvidence !== "NONE"
+      || evidence.absenceScope !== "AUTHORITATIVE") {
       throw incomplete("Provider order/history facts 不能完整证明 NOT_DISPATCHED。");
     }
 
     const failedAt = Math.max(record.updatedAt, evidence.checkedAt, this.now());
     if (record.status === "UNKNOWN") {
-      await this.records.update({ ...record, status: "FAILED", updatedAt: failedAt });
+      await this.records.update({ ...record, status: "FAILED", updatedAt: failedAt }, record);
     }
     const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
       executionIntentId: reference.executionIntentId,
@@ -161,6 +162,7 @@ function unavailableEvidence(checkedAt: number): HistoricalExecutionEvidence {
     recoveryAnchorRequiredBeforeMutation: false,
     exactOrderEvidence: "UNKNOWN",
     activeOrderEvidence: "UNKNOWN",
+    absenceScope: "UNKNOWN",
     checkedAt,
   });
 }

@@ -69,6 +69,10 @@ test("verifies submit chain from ExecutionIntent through registry-backed OKX cap
     instId: "DOGE-USDT-SWAP",
     ordId: "9001",
     clOrdId: okxClientOrderIdFor(intent),
+    expectedProviderQuantity: "125",
+    expectedSide: "buy",
+    positionMode: "ONE_WAY",
+    positionDirection: "LONG",
     createdAt: now,
     updatedAt: now,
   });

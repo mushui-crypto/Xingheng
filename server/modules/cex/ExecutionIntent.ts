@@ -24,18 +24,10 @@ export type ExecutionIntent = Readonly<{
 }>;
 
 export function createExecutionIntent(input: unknown): ExecutionIntent {
-  return parseExecutionIntent(input, false);
+  return parseExecutionIntent(input);
 }
 
-/**
- * Parses a pre-direction legacy one-way intent for an explicit recovery path.
- * New execution callers must use createExecutionIntent and provide direction.
- */
-export function createLegacyOneWayExecutionIntent(input: unknown): ExecutionIntent {
-  return parseExecutionIntent(input, true);
-}
-
-function parseExecutionIntent(input: unknown, allowLegacyOneWay: boolean): ExecutionIntent {
+function parseExecutionIntent(input: unknown): ExecutionIntent {
   const value = object(input);
   assertExactKeys(value, [
     "intentId",
@@ -72,15 +64,11 @@ function parseExecutionIntent(input: unknown, allowLegacyOneWay: boolean): Execu
     && value.positionDirection !== "LONG" && value.positionDirection !== "SHORT") {
     throw new Error("positionDirection must be LONG or SHORT.");
   }
-  if (perpetual && value.positionDirection === undefined && !allowLegacyOneWay) {
+  if (perpetual && value.positionDirection === undefined) {
     throw new Error("Perpetual ExecutionIntent requires positionDirection.");
   }
-  // Legacy one-way recovery preserves its historical side-derived semantics;
-  // it never enables HEDGE or claims to identify an account position.
   const positionDirection = perpetual
-    ? value.positionDirection === "LONG" || value.positionDirection === "SHORT"
-      ? value.positionDirection
-      : value.side === "buy" ? "LONG" as const : "SHORT" as const
+    ? value.positionDirection as PositionDirection
     : undefined;
   if (!perpetual && value.positionDirection !== undefined) {
     throw new Error("Spot ExecutionIntent must not contain positionDirection.");

@@ -17,6 +17,9 @@ export type BinanceStoredOrder = {
   positionMode?: "ONE_WAY" | "HEDGE";
   positionDirection?: "LONG" | "SHORT";
   positionSide?: "BOTH" | "LONG" | "SHORT";
+  expectedSide?: "Buy" | "Sell";
+  expectedBaseQuantity?: string;
+  expectedReduceOnly?: boolean;
   status: "processing" | "completed" | "failed";
   order: BinanceProviderOrder | null;
   error: string | null;
@@ -54,7 +57,8 @@ export class BinanceStoredOrderManualReconciliationError extends ManualReconcili
 }
 
 const storedOrderSelect = `idempotencyKey, requestFingerprint, clientOrderId, providerOrderId,
-  category, symbol, executionMode, positionMode, positionDirection, positionSide, status, orderJson, error,
+  category, symbol, executionMode, positionMode, positionDirection, positionSide,
+  expectedSide, expectedBaseQuantity, expectedReduceOnly, status, orderJson, error,
   CAST(cancelRequestedAt AS TEXT) AS cancelRequestedAt, cancelDispatchState,
   CAST(createdAt AS TEXT) AS createdAt, CAST(updatedAt AS TEXT) AS updatedAt`;
 
@@ -82,6 +86,9 @@ export class BinanceOrderStore {
         category TEXT NOT NULL CHECK(category IN ('spot', 'linear')),
         symbol TEXT NOT NULL,
         executionMode TEXT NOT NULL DEFAULT 'production_ioc' CHECK(executionMode IN ('production_ioc', 'test_gtc')),
+        expectedSide TEXT,
+        expectedBaseQuantity TEXT,
+        expectedReduceOnly INTEGER,
         status TEXT NOT NULL CHECK(status IN ('processing', 'completed', 'failed')),
         orderJson TEXT,
         error TEXT,
@@ -127,7 +134,7 @@ export class BinanceOrderStore {
         COMMIT;
       `);
     }
-    for (const column of ["positionMode", "positionDirection", "positionSide"] as const) {
+    for (const column of ["positionMode", "positionDirection", "positionSide", "expectedSide", "expectedBaseQuantity", "expectedReduceOnly"] as const) {
       if (!this.columnExists("binance_personal_orders", column)) {
         this.db.exec(`ALTER TABLE binance_personal_orders ADD COLUMN ${column} TEXT;`);
       }
@@ -140,10 +147,13 @@ export class BinanceOrderStore {
     try {
       this.db.prepare(`INSERT INTO binance_personal_orders (
         idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol, executionMode, positionMode, positionDirection, positionSide,
+        expectedSide, expectedBaseQuantity, expectedReduceOnly,
         status, orderJson, error, createdAt, updatedAt
-      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, 'processing', NULL, NULL, ?, ?)`)
+      ) VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'processing', NULL, NULL, ?, ?)`)
         .run(input.idempotencyKey, input.requestFingerprint, input.clientOrderId, input.category, symbol, input.executionMode,
-          input.positionMode ?? null, input.positionDirection ?? null, input.positionSide ?? null, now, now);
+          input.positionMode ?? null, input.positionDirection ?? null, input.positionSide ?? null,
+          input.expectedSide ?? null, input.expectedBaseQuantity ?? null,
+          input.expectedReduceOnly === undefined ? null : Number(input.expectedReduceOnly), now, now);
       return { kind: "reserved" as const };
     } catch {
       const existing = this.find(input.idempotencyKey);
@@ -336,6 +346,9 @@ function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
     ...(row.positionMode === null || row.positionMode === undefined ? {} : { positionMode: row.positionMode as "ONE_WAY" | "HEDGE" }),
     ...(row.positionDirection === null || row.positionDirection === undefined ? {} : { positionDirection: row.positionDirection as "LONG" | "SHORT" }),
     ...(row.positionSide === null || row.positionSide === undefined ? {} : { positionSide: row.positionSide as "BOTH" | "LONG" | "SHORT" }),
+    ...(row.expectedSide === null || row.expectedSide === undefined ? {} : { expectedSide: row.expectedSide as "Buy" | "Sell" }),
+    ...(row.expectedBaseQuantity === null || row.expectedBaseQuantity === undefined ? {} : { expectedBaseQuantity: String(row.expectedBaseQuantity) }),
+    ...(row.expectedReduceOnly === null || row.expectedReduceOnly === undefined ? {} : { expectedReduceOnly: Boolean(row.expectedReduceOnly) }),
     status,
     order,
     error: row.error === null ? null : String(row.error),
@@ -385,6 +398,10 @@ function parseProviderOrder(value: unknown, persistedSymbol: string, persistedCl
     status: storedProviderOrderStatus(order.status),
     requestedQuantity: Number(requestedQuantity),
     filledQuantity: Number(filledQuantity),
+    ...(order.side === undefined ? {} : order.side === "Buy" || order.side === "Sell"
+      ? { side: order.side }
+      : (() => { throw new Error("Stored Binance provider side is malformed."); })()),
+    ...(order.reduceOnly === undefined ? {} : { reduceOnly: Boolean(order.reduceOnly) }),
     requestedBaseQuantity,
     filledBaseQuantity,
     ...(positionQuantity === undefined ? {} : { positionQuantity: Number(positionQuantity) }),

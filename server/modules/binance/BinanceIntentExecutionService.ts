@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
+import type { ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import type { ExecutionStatus } from "../cex/ExecutionState";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 import type { BinanceProviderMutationGuard } from "./BinanceOrderManager";
@@ -52,6 +53,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       prepared: BinanceLegacyRiskPreparedOrder,
     ) => void | Promise<void>) | undefined = undefined,
     private readonly mapResult: (result: BinanceIntentExecutionResult) => TResult = (result) => result as TResult,
+    private readonly mutationEffect: ExecutionMutationEffect = "INCREASE",
   ) {
     if (!Number.isFinite(config.maxSlippageBps) || config.maxSlippageBps < 0) {
       throw new Error("Binance max slippage must be a non-negative number.");
@@ -99,6 +101,11 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     if (category === "linear" && positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Binance HEDGE execution requires positionDirection.");
     }
+    if (category === "linear" && positionMode === "HEDGE" && intent.orderConstraints.reduceOnly
+      && ((intent.positionDirection === "LONG" && side !== "Sell")
+        || (intent.positionDirection === "SHORT" && side !== "Buy"))) {
+      throw new Error("Binance HEDGE close side does not reduce the selected position bucket.");
+    }
     const limitPrice = executionPriceMode === "IOC_LIMIT"
       ? protectionPrice({
         referencePrice: side === "Buy" ? context.quote.ask : context.quote.bid,
@@ -140,6 +147,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
           ? limitPrice!
           : side === "Buy" ? context.quote.ask : context.quote.bid,
         quoteFetchedAt: context.quote.fetchedAt,
+        mutationEffect: this.mutationEffect,
       }),
     });
   }

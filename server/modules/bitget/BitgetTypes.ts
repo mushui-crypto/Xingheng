@@ -47,6 +47,10 @@ export type BitgetCancelOrderRequest = BitgetGetOrderRequest;
 
 export type BitgetProviderOrder = Readonly<BitgetOrderIdentity & {
   side: BitgetOrderSide;
+  posSide?: "long" | "short";
+  tradeSide?: "open" | "close";
+  holdMode?: "one_way_mode" | "hedge_mode";
+  reduceOnly?: "yes" | "no";
   status: Extract<ExecutionStatus, "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN">;
   rawStatus: string;
   requestedQuantity: string;

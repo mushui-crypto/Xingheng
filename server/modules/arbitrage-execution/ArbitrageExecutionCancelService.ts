@@ -3,9 +3,10 @@ import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/Arbitrage
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
-import type {
-  ArbitrageExecutionCommandService,
-  ArbitrageLegExecutionConfirmation,
+import {
+  ArbitrageExecutionCommandError,
+  type ArbitrageLegExecutionConfirmation,
+  type ArbitrageExecutionCommandService,
 } from "./ArbitrageExecutionCommandService";
 import {
   FormalExecutionRuntimeRegistryError,
@@ -81,8 +82,11 @@ export class ArbitrageExecutionCancelService {
     if (!reference || reference.legId !== leg.legId) {
       throw cancelError("arbitrage_execution_reference_not_found", "未找到该套利腿对应的已知执行引用。");
     }
-    if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
+    if (reference.status === "CONFIRMED") {
       return resultFromReference(instance, reference, true);
+    }
+    if (reference.status === "FAILED") {
+      return this.reconcileExisting(userId, instance, leg, reference);
     }
     if (!reference.executionRecordId) {
       throw cancelError("cancel_state_unavailable", "执行记录尚未完成关联，不能安全撤销订单。");
@@ -101,12 +105,25 @@ export class ArbitrageExecutionCancelService {
     const runtime = this.resolveRuntime(record.venue);
     if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
       if (record.status === "CONFIRMED" || record.status === "FAILED") {
-        return this.reconciler.reconcileLeg(userId, {
-          arbitrageId: instance.arbitrageId,
-          legId: leg.legId,
-        });
+        return this.reconcileExisting(userId, instance, leg, reference);
       }
       throw cancelError("cancel_state_unavailable", "该执行记录当前不是可撤销的活动订单。");
+    }
+
+    // A persisted PENDING/UNKNOWN state is only a recovery fact, not proof that
+    // the Provider order is still live. Reconcile authoritatively before any
+    // cancel mutation. If the query or any persistence/projection step fails,
+    // reconcileExisting fails closed and this request must not call cancel.
+    const preCancel = await this.reconcileExisting(userId, instance, leg, reference);
+    if (preCancel.executionRecord.status === "CONFIRMED"
+      || preCancel.executionRecord.status === "FAILED") {
+      return preCancel;
+    }
+    if (preCancel.executionRecord.status !== "PENDING_CONFIRMATION") {
+      throw cancelError(
+        "execution_state_unknown",
+        "撤单前无法确认原订单仍可撤销；订单保持未决。可稍后再次核验。",
+      );
     }
 
     try {
@@ -115,12 +132,40 @@ export class ArbitrageExecutionCancelService {
       if (error instanceof ManualReconciliationRequiredError) {
         throw manualReconciliationCancelError(error);
       }
-      throw cancelError("execution_state_unknown", "订单撤销状态暂无法确认；未提交任何新订单。");
+      // A cancel timeout/not-found response is ambiguous. Query the original
+      // order identity before deciding whether the unresolved gate may move.
+      return this.reconcileExisting(userId, instance, leg, reference);
     }
-    return this.reconciler.reconcileLeg(userId, {
-      arbitrageId: instance.arbitrageId,
-      legId: leg.legId,
-    });
+    return this.reconcileExisting(userId, instance, leg, reference);
+  }
+
+  private async reconcileExisting(
+    userId: string,
+    instance: ArbitrageInstance,
+    leg: ArbitrageInstance["legs"][number],
+    reference: ArbitrageInstance["executionReferences"][number],
+  ) {
+    try {
+      return await this.reconciler.reconcileLeg(userId, {
+        arbitrageId: instance.arbitrageId,
+        legId: leg.legId,
+        executionIntentId: reference.executionIntentId,
+      });
+    } catch (error) {
+      if (error instanceof ManualReconciliationRequiredError) {
+        throw manualReconciliationCancelError(error);
+      }
+      if (error instanceof ArbitrageExecutionCommandError
+        && error.category === "manual_reconciliation_required"
+        && error.manualReconciliation) {
+        throw new ArbitrageExecutionCancelError(
+          "manual_reconciliation_required",
+          error.message,
+          error.manualReconciliation,
+        );
+      }
+      throw cancelError("execution_state_unknown", "撤单后的原订单事实暂无法可靠确认；订单仍保持未决。可稍后再次核验。");
+    }
   }
 
   private resolveRuntime(venue: ExecutionRecord["venue"]) {

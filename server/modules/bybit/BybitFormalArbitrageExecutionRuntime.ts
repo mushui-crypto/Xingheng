@@ -8,13 +8,23 @@ import {
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { BybitIntentExecutionRuntime } from "./BybitIntentExecutionRuntime";
 
-type Runtime = Pick<BybitIntentExecutionRuntime, "execute" | "reconcile" | "cancel">;
+type Runtime = Pick<BybitIntentExecutionRuntime, "execute" | "reconcile" | "cancel">
+  & Partial<Pick<BybitIntentExecutionRuntime, "close">>;
 
 export class BybitFormalArbitrageExecutionRuntime implements FormalExecutionRuntime {
   constructor(private readonly runtime: Runtime) {}
 
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
-    const result = await this.runtime.execute(intent);
+    return this.executeWith(() => this.runtime.execute(intent));
+  }
+
+  async executeManagedClose(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
+    if (!this.runtime.close) throw new Error("Bybit managed-close runtime is unavailable.");
+    return this.executeWith(() => this.runtime.close!(intent));
+  }
+
+  private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {
+    const result = await run();
     const diagnostic = diagnosticFromExecution(result.execution);
     const mutationDisposition = mutationDispositionFromExecution({
       executionRecord: result.executionRecord,

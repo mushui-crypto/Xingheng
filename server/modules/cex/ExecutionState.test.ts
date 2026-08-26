@@ -65,6 +65,21 @@ test("UNKNOWN can resolve only from an authoritative remote fact", () => {
   );
 });
 
+test("an authoritative full-fill query wins after a cancel-side FAILED observation", () => {
+  const pending = transitionExecutionState(
+    createExecutionState(executionIntent()),
+    { type: "REMOTE_PENDING", occurredAt: now + 1 },
+  );
+  const cancelled = transitionExecutionState(pending, { type: "REMOTE_FAILED", occurredAt: now + 2 });
+  const filled = transitionExecutionState(cancelled, { type: "REMOTE_CONFIRMED", occurredAt: now + 3 });
+
+  assert.equal(filled.status, "CONFIRMED");
+  assert.throws(
+    () => transitionExecutionState(cancelled, { type: "REMOTE_PENDING", occurredAt: now + 3 }),
+    /does not accept/u,
+  );
+});
+
 test("query observations can preserve pending and unknown states", () => {
   const pending = transitionExecutionState(
     createExecutionState(executionIntent()),

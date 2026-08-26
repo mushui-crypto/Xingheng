@@ -13,6 +13,16 @@ test("one instance command closes both legs through the existing close service i
   assert.equal(result.instance.status, "CLOSED");
 });
 
+test("instance exit skips a released leg and never asks CloseService to mutate it", async () => {
+  const fixture = setup({ releasedShort: true });
+  const result = await fixture.service.exit("user-a", exitRequest("released-short"));
+
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "0");
+});
+
 test("sequential instance exit requests reuse the CLOSED lifecycle without another closing execution", async () => {
   const fixture = setup();
   const first = await fixture.service.exit("user-a", exitRequest("sequential-a"));
@@ -52,6 +62,37 @@ test("server continues the second leg without browser participation after the fi
   assert.equal(result.instance.status, "CLOSED");
 });
 
+test("two-leg Exit records C1-C4 without a server-side inter-leg delay", async (t) => {
+  const milliseconds = (end: bigint, start: bigint) => Number(end - start) / 1_000_000;
+  for (let run = 1; run <= 5; run += 1) {
+    await t.test(`fake provider run ${run}`, async (child) => {
+      const marks: Partial<Record<"c1" | "c2" | "c3" | "c4", bigint>> = {};
+      const fixture = setup({
+        timing: {
+          firstAuthoritative: () => { marks.c1 = process.hrtime.bigint(); },
+          firstDurable: () => { marks.c2 = process.hrtime.bigint(); },
+          secondSafetyReady: () => { marks.c3 = process.hrtime.bigint(); },
+          secondDispatch: () => { marks.c4 = process.hrtime.bigint(); },
+        },
+      });
+
+      const result = await fixture.service.exit("user-a", exitRequest(`exit-timing-${run}`));
+
+      assert.equal(result.status, "CONFIRMED");
+      assert.ok(marks.c1 && marks.c2 && marks.c3 && marks.c4);
+      assert.ok(marks.c1 <= marks.c2);
+      assert.ok(marks.c2 <= marks.c3);
+      assert.ok(marks.c3 <= marks.c4);
+      child.diagnostic(JSON.stringify({ run,
+        "C2-C1-ms": milliseconds(marks.c2, marks.c1),
+        "C3-C2-ms": milliseconds(marks.c3, marks.c2),
+        "C4-C3-ms": milliseconds(marks.c4, marks.c3),
+        "C4-C2-ms": milliseconds(marks.c4, marks.c2),
+      }));
+    });
+  }
+});
+
 test("first-leg FAILED, UNKNOWN, or pending reconciliation stops before the second leg", async (context) => {
   for (const status of ["FAILED", "UNKNOWN", "PENDING_CONFIRMATION"] as const) {
     await context.test(status, async () => {
@@ -65,33 +106,63 @@ test("first-leg FAILED, UNKNOWN, or pending reconciliation stops before the seco
   }
 });
 
-test("accepted residual reaches CLOSED from the persisted instance contract", async () => {
+test("a defensive fake partial-CONFIRMED close stops before the next leg", async () => {
+  const fixture = setup({ firstStatus: "CONFIRMED", firstConfirmedQuantity: "0.4" });
+  const result = await fixture.service.exit("user-a", exitRequest("fake-partial-confirmed"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["short-leg"]);
+});
+
+test("accepted residual remains managed and cannot report a confirmed CLOSED exit", async () => {
   const fixture = setup({ residual: "0.006" });
   const result = await fixture.service.exit("user-a", exitRequest("accepted-residual"));
 
-  assert.equal(result.status, "CONFIRMED");
-  assert.equal(result.instance.status, "CLOSED");
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.instance.status, "RESIDUAL");
   assert.equal(result.instance.maxResidualBaseQuantity, "0.006");
   assert.equal(result.instance.legs[1].confirmedClosedQuantity, "1");
   assert.equal(result.instance.legs[0].confirmedClosedQuantity, "0.994");
 });
 
-test("unrelated account dust does not override an instance CLOSED result", async () => {
+test("account dust does not erase an Active Managed residual", async () => {
   const fixture = setup({ residual: "0.006", verifiedActualQuantity: "0.011" });
   const closed = await fixture.service.exit("user-a", exitRequest("dust-independent"));
   const reconciled = await fixture.service.reconcile("user-a", { arbitrageId: closed.instance.arbitrageId });
 
-  assert.equal(closed.instance.status, "CLOSED");
-  assert.equal(reconciled.instance.status, "CLOSED");
+  assert.equal(closed.instance.status, "RESIDUAL");
+  assert.equal(reconciled.instance.status, "RESIDUAL");
   assert.equal(reconciled.verification.legs[0].actualQuantity, "0.011");
 });
 
 function setup(options: Readonly<{
   firstStatus?: "CONFIRMED" | "FAILED" | "UNKNOWN" | "PENDING_CONFIRMATION";
+  firstConfirmedQuantity?: string;
   residual?: string;
   verifiedActualQuantity?: string;
+  releasedShort?: boolean;
+  timing?: Readonly<{
+    firstAuthoritative(): void;
+    firstDurable(): void;
+    secondSafetyReady(): void;
+    secondDispatch(): void;
+  }>;
 }> = {}) {
   let instance = baseInstance();
+  if (options.releasedShort) {
+    instance = {
+      ...instance,
+      status: "RESIDUAL",
+      managementReleases: [{
+        releaseId: "release-short", arbitrageId: instance.arbitrageId, legId: "short-leg",
+        releasedQuantity: "1", reason: "USER_CONFIRMED_STOP_MANAGEMENT", source: "AUTHENTICATED_API",
+        requestedByUserId: "user-a", requestedAt: 1_800_000_000_030, confirmedAt: 1_800_000_000_031,
+        venue: "bybit", accountId: "account-a", instrumentId: "DOGE-USDT-PERP", positionMode: "ONE_WAY",
+        actualQuantity: "0", actualSignedNetQuantity: "0", actualLongQuantity: "0", actualShortQuantity: "0",
+        availableQuantity: null, realityCheckedAt: 1_800_000_000_029,
+      }],
+    };
+  }
   let lifecycleApplyCount = 0;
   const closeCalls: Array<{ legId: string; commandId: string }> = [];
   let releaseSecondLeg: () => void = () => undefined;
@@ -102,7 +173,10 @@ function setup(options: Readonly<{
     async closeLeg(_userId: string, input: any) {
       closeCalls.push({ legId: input.legId, commandId: input.commandId });
       const first = input.legId === "short-leg";
+      if (!first) options.timing?.secondSafetyReady();
       const status = first ? (options.firstStatus ?? "CONFIRMED") : "CONFIRMED";
+      if (first) options.timing?.firstAuthoritative();
+      else options.timing?.secondDispatch();
       if (first && status !== "CONFIRMED") {
         instance = { ...instance, status: "CLOSING" };
       } else {
@@ -114,10 +188,11 @@ function setup(options: Readonly<{
         instance = {
           ...instance,
           legs,
-          status: first ? "CLOSING" : "CLOSED",
+          status: first ? "CLOSING" : options.residual ? "RESIDUAL" : "CLOSED",
           maxResidualBaseQuantity: first ? instance.maxResidualBaseQuantity : (options.residual ?? "0"),
         };
       }
+      if (first) options.timing?.firstDurable();
       if (first) completeFirstLeg();
       else await secondLegGate;
       return {
@@ -127,7 +202,7 @@ function setup(options: Readonly<{
           intentId: `intent-${input.legId}`,
           status,
           plannedQuantity: input.quantity,
-          confirmedQuantity: status === "CONFIRMED" ? input.quantity : "0",
+          confirmedQuantity: options.firstConfirmedQuantity ?? (status === "CONFIRMED" ? input.quantity : "0"),
           verifiedAt: 1_800_000_000_100,
         },
         idempotentReplay: false,

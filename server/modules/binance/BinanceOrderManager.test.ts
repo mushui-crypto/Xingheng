@@ -293,6 +293,61 @@ test("generic symbols use instrument-scoped private risk state without reading t
   }
 });
 
+test("HEDGE opening persists and verifies the exact Provider positionSide", async (t) => {
+  for (const providerPositionSide of ["SHORT", "LONG"] as const) {
+    await t.test(`Provider ${providerPositionSide}`, async () => {
+      const root = mkdtempSync(join(tmpdir(), "binance-hedge-bucket-"));
+      const store = new BinanceOrderStore(join(root, "orders.sqlite"));
+      let providerMutations = 0;
+      const order: BinanceProviderOrder = {
+        symbol: "DOGEUSDT", orderId: "4401", orderLinkId: "", status: "Filled",
+        requestedQuantity: 100, filledQuantity: 100, requestedBaseQuantity: "100",
+        filledBaseQuantity: "100", positionSide: providerPositionSide,
+        averagePrice: 0.1, feeUsd: 0, updatedAt: Date.now(),
+      };
+      const client = {
+        readGenericRiskSnapshot: async () => genericRiskSnapshot({
+          category: "linear", symbol: "DOGEUSDT", baseAsset: "DOGE", availableBaseAsset: null,
+          accountMode: "single_asset_hedge", position: { side: "short", quantity: "20", leverage: "2", marginMode: "cross" },
+        }),
+        placeOrder: async (request: { orderLinkId: string }) => {
+          providerMutations += 1;
+          order.orderLinkId = request.orderLinkId;
+          return { orderId: order.orderId, orderLinkId: request.orderLinkId };
+        },
+        awaitOrder: async () => order,
+        findOrderByClientOrderId: async () => order,
+        cancelOrder: async () => undefined,
+      } as unknown as BinanceClientAdapter;
+      const config = tradingConfigFixture({ liveTradingEnabled: true, killSwitchActive: false });
+      const manager = new BinanceOrderManager(client, new BinanceRiskGuard(config), store, config);
+      const operation = () => manager.place({
+        idempotencyKey: `hedge-short-${providerPositionSide}`,
+        category: "linear", symbol: "DOGEUSDT", side: "Sell", quantity: "100",
+        executionPriceMode: "MARKET", reduceOnly: false, positionMode: "HEDGE",
+        positionDirection: "SHORT", positionSide: "SHORT",
+      }, undefined, genericRiskContext({
+        instrumentId: "DOGE-USDT-PERP", category: "linear", providerSymbol: "DOGEUSDT",
+        baseAsset: "DOGE", valuationPrice: "0.1",
+      }), "generic");
+      try {
+        if (providerPositionSide === "SHORT") {
+          assert.equal((await operation()).status, "Filled");
+          assert.equal(store.find(`hedge-short-${providerPositionSide}`)?.positionSide, "SHORT");
+          assert.equal(store.find(`hedge-short-${providerPositionSide}`)?.positionDirection, "SHORT");
+        } else {
+          await assert.rejects(operation, /positionSide/u);
+          assert.equal(store.find(`hedge-short-${providerPositionSide}`)?.status, "processing");
+        }
+        assert.equal(providerMutations, 1);
+      } finally {
+        store.close();
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+});
+
 test("explicit generic routing keeps formal XAUT on instrument-aware risk", async (t) => {
   const scenarios = [
     {
@@ -328,12 +383,12 @@ test("explicit generic routing keeps formal XAUT on instrument-aware risk", asyn
       expectedError: null,
     },
     {
-      name: "Perp reduceOnly allows a controlled exit against the real position",
+      name: "generic Perp reduceOnly cannot self-declare a trusted managed decrease while halted",
       config: tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }),
       input: { category: "linear" as const, side: "Sell" as const, quantity: "0.1", limitPrice: "1000", reduceOnly: true },
       context: genericRiskContext({ instrumentId: "XAUT-USDT-PERP", category: "linear", providerSymbol: "XAUTUSDT", baseAsset: "XAUT", valuationPrice: "1000" }),
       snapshot: genericRiskSnapshot({ category: "linear", symbol: "XAUTUSDT", baseAsset: "XAUT", availableBaseAsset: null, position: { side: "long", quantity: "0.2", leverage: "3" } }),
-      expectedError: null,
+      expectedError: /LIVE_TRADING_ENABLED|kill switch/u,
     },
     {
       name: "Perp reduceOnly validates real position side",

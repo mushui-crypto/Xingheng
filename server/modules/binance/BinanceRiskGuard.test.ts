@@ -121,6 +121,19 @@ test("generic Spot SELL requires the real base-asset available balance and never
       .assertGenericOrderAllowed(request, context, snapshot),
     riskCategory("kill_switch_active"),
   );
+  assert.doesNotThrow(
+    () => new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }))
+      .assertGenericOrderAllowed(request, genericContext({
+        providerSymbol: "ETHUSDT", baseAsset: "ETH", valuationPrice: "3500", mutationEffect: "DECREASE",
+      }), snapshot),
+  );
+  assert.throws(
+    () => new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }))
+      .assertGenericOrderAllowed(request, genericContext({
+        providerSymbol: "ETHUSDT", baseAsset: "ETH", valuationPrice: "3500", mutationEffect: "DECREASE",
+      }), genericSnapshot({ symbol: "ETHUSDT", baseAsset: "ETH", availableBaseAsset: "0.009" })),
+    riskCategory("insufficient_balance"),
+  );
 });
 
 test("generic perpetual OPEN validates one-way state, permissions, margin and safety gates", () => {
@@ -197,7 +210,10 @@ test("generic perpetual reduceOnly proves real position, side, and quantity befo
   const guard = new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }));
   const run = (side: "Buy" | "Sell", positionSide: "long" | "short", requested = "0.01") => guard.assertGenericOrderAllowed(
     genericOrder({ category: "linear", symbol: "BTCUSDT", side, quantity: requested, limitPrice: "65000", reduceOnly: true }),
-    genericContext({ category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000" }),
+    genericContext({
+      category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000",
+      mutationEffect: "DECREASE",
+    }),
     genericSnapshot({
       category: "linear", symbol: "BTCUSDT", baseAsset: "BTC", availableBaseAsset: null,
       position: genericPosition({ side: positionSide, quantity: "0.01" }),
@@ -205,9 +221,23 @@ test("generic perpetual reduceOnly proves real position, side, and quantity befo
   );
   assert.doesNotThrow(() => run("Sell", "long"));
   assert.doesNotThrow(() => run("Buy", "short"));
+  assert.throws(
+    () => guard.assertGenericOrderAllowed(
+      genericOrder({ category: "linear", symbol: "BTCUSDT", side: "Sell", quantity: "0.01", limitPrice: "65000", reduceOnly: true }),
+      genericContext({ category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000" }),
+      genericSnapshot({
+        category: "linear", symbol: "BTCUSDT", baseAsset: "BTC", availableBaseAsset: null,
+        position: genericPosition({ side: "long", quantity: "0.01" }),
+      }),
+    ),
+    riskCategory("live_trading_disabled"),
+  );
   assert.doesNotThrow(() => guard.assertGenericOrderAllowed(
     genericOrder({ category: "linear", symbol: "BTCUSDT", side: "Sell", quantity: "0.01", limitPrice: "65000", reduceOnly: true }),
-    genericContext({ category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000" }),
+    genericContext({
+      category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000",
+      mutationEffect: "DECREASE",
+    }),
     genericSnapshot({
       category: "linear", symbol: "BTCUSDT", baseAsset: "BTC", availableBaseAsset: null,
       position: genericPosition({ side: "long", quantity: "0.01", leverage: "5" }),
@@ -226,6 +256,63 @@ test("generic perpetual reduceOnly proves real position, side, and quantity befo
     ),
     riskCategory("reduce_only_position_missing"),
   );
+});
+
+test("generic perpetual permits explicitly bucketed HEDGE opens and preserves close-only validation", () => {
+  const closeGuard = new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: false, killSwitchActive: true }));
+  const openingGuard = new BinanceRiskGuard(tradingConfigFixture({ liveTradingEnabled: true, killSwitchActive: false }));
+  const context = genericContext({
+    category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000",
+    mutationEffect: "DECREASE",
+  });
+  const openingContext = genericContext({
+    category: "linear", providerSymbol: "BTCUSDT", baseAsset: "BTC", valuationPrice: "65000",
+  });
+  const snapshot = genericSnapshot({
+    category: "linear", symbol: "BTCUSDT", baseAsset: "BTC", availableBaseAsset: null,
+    accountMode: "single_asset_hedge",
+    position: genericPosition({ side: "short", quantity: "0.01" }),
+  });
+  assert.doesNotThrow(() => closeGuard.assertGenericOrderAllowed(
+    genericOrder({
+      category: "linear", symbol: "BTCUSDT", side: "Buy", quantity: "0.01", limitPrice: "65000",
+      reduceOnly: true, positionMode: "HEDGE", positionSide: "SHORT", positionDirection: "SHORT",
+    }),
+    context,
+    snapshot,
+  ));
+  assert.doesNotThrow(() => openingGuard.assertGenericOrderAllowed(
+    genericOrder({
+      category: "linear", symbol: "BTCUSDT", side: "Sell", quantity: "0.01", limitPrice: "65000",
+      reduceOnly: false, positionMode: "HEDGE", positionSide: "SHORT", positionDirection: "SHORT",
+    }),
+    openingContext,
+    snapshot,
+  ));
+  assert.doesNotThrow(() => openingGuard.assertGenericOrderAllowed(
+    genericOrder({
+      category: "linear", symbol: "BTCUSDT", side: "Buy", quantity: "0.01", limitPrice: "65000",
+      reduceOnly: false, positionMode: "HEDGE", positionSide: "LONG", positionDirection: "LONG",
+    }),
+    openingContext,
+    { ...snapshot, position: genericPosition({ side: "long", quantity: "0.01" }) },
+  ));
+  assert.throws(() => openingGuard.assertGenericOrderAllowed(
+    genericOrder({
+      category: "linear", symbol: "BTCUSDT", side: "Buy", quantity: "0.01", limitPrice: "65000",
+      reduceOnly: false, positionMode: "HEDGE", positionSide: "SHORT", positionDirection: "SHORT",
+    }),
+    openingContext,
+    snapshot,
+  ), riskCategory("hedge_side_invalid"));
+  assert.throws(() => closeGuard.assertGenericOrderAllowed(
+    genericOrder({
+      category: "linear", symbol: "BTCUSDT", side: "Buy", quantity: "0.01", limitPrice: "65000",
+      reduceOnly: true, positionMode: "HEDGE", positionSide: "SHORT", positionDirection: "LONG",
+    }),
+    context,
+    snapshot,
+  ), riskCategory("position_mode_unsupported"));
 });
 
 test("generic risk is instrument scoped and fails closed for mismatch, open orders, and unavailable position", () => {

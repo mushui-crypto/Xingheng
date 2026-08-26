@@ -163,6 +163,31 @@ test("OKX HEDGE recovery persists posSide and direction", () => {
   assert.throws(() => createOkxExecutionOrderRecoveryReference({ ...recovery, posSide: "short" }), /bucket/u);
 });
 
+test("OKX HEDGE recovery promotion preserves bucket identity and rejects a different bucket", () => {
+  const store = new InMemoryOkxExecutionOrderReferenceStore();
+  const hedgeFacts = {
+    expectedProviderQuantity: "10",
+    expectedSide: "sell" as const,
+    positionMode: "HEDGE" as const,
+    positionDirection: "SHORT" as const,
+    posSide: "short" as const,
+  };
+  store.createRecovery(recoveryReference(hedgeFacts));
+  store.create(orderReference(hedgeFacts));
+  assert.equal(store.loadForUser("user-a", "execution-okx-1")?.posSide, "short");
+
+  const conflict = new InMemoryOkxExecutionOrderReferenceStore();
+  conflict.createRecovery(recoveryReference(hedgeFacts));
+  assert.throws(
+    () => conflict.create(orderReference({
+      ...hedgeFacts,
+      positionDirection: "LONG",
+      posSide: "long",
+    })),
+    /does not match/u,
+  );
+});
+
 function executionRecord(overrides: Partial<ExecutionRecord> = {}): ExecutionRecord {
   return Object.freeze({
     executionId: "execution-okx-1",

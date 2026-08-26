@@ -85,6 +85,70 @@ test("perpetual close preserves reduceOnly=true at the OKX order boundary", asyn
   assert.equal(client.placeRequests[0]?.ordType, "market");
 });
 
+test("OKX HEDGE close uses side plus posSide, omits net-mode reduceOnly, and rejects an opening side", async () => {
+  const client = new FakeOkxExecutionClient();
+  client.readPositionMode = async () => "HEDGE";
+  const service = new OkxIntentExecutionService(client, {
+    ...serviceOptions(),
+    mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true }),
+    mutationEffect: "DECREASE",
+  });
+  await service.execute(executionIntent({
+    side: "buy", positionDirection: "SHORT", orderConstraints: { reduceOnly: true },
+  }));
+  assert.equal(client.placeRequests[0]?.posSide, "short");
+  assert.equal(client.placeRequests[0]?.side, "buy");
+  assert.equal(client.placeRequests[0]?.reduceOnly, undefined);
+
+  const invalid = new FakeOkxExecutionClient();
+  invalid.readPositionMode = async () => "HEDGE";
+  await assert.rejects(() => new OkxIntentExecutionService(invalid, serviceOptions()).execute(executionIntent({
+    side: "buy", positionDirection: "LONG", orderConstraints: { reduceOnly: true },
+  })), /does not reduce/u);
+  assert.equal(invalid.placeRequests.length, 0);
+});
+
+test("OKX HEDGE LONG and SHORT openings preserve the target bucket in recovery and complete evidence", async () => {
+  for (const fixture of [
+    { direction: "LONG" as const, side: "buy" as const, posSide: "long" as const },
+    { direction: "SHORT" as const, side: "sell" as const, posSide: "short" as const },
+  ]) {
+    const client = new FakeOkxExecutionClient();
+    client.readPositionMode = async () => "HEDGE";
+    let recovery: unknown = null;
+    const service = new OkxIntentExecutionService(client, {
+      ...serviceOptions(),
+      persistRecoveryReference: (value) => { recovery = value; },
+    });
+
+    const result = await service.execute(executionIntent({
+      intentId: `intent-okx-hedge-${fixture.posSide}`,
+      positionDirection: fixture.direction,
+      side: fixture.side,
+    }));
+
+    assert.equal(client.placeRequests[0]?.side, fixture.side);
+    assert.equal(client.placeRequests[0]?.posSide, fixture.posSide);
+    assert.equal(client.placeRequests[0]?.reduceOnly, undefined);
+    assert.equal(result.positionMode, "HEDGE");
+    assert.equal(result.positionDirection, fixture.direction);
+    assert.equal(result.posSide, fixture.posSide);
+    assert.deepEqual(recovery, {
+      instId: "DOGE-USDT-SWAP",
+      clOrdId: okxClientOrderIdFor(executionIntent({
+        intentId: `intent-okx-hedge-${fixture.posSide}`,
+        positionDirection: fixture.direction,
+        side: fixture.side,
+      })),
+      expectedProviderQuantity: "125",
+      expectedSide: fixture.side,
+      positionMode: "HEDGE",
+      positionDirection: fixture.direction,
+      posSide: fixture.posSide,
+    });
+  }
+});
+
 test("queries map OKX order states and preserve UNKNOWN reason", async () => {
   const client = new FakeOkxExecutionClient();
   const service = new OkxIntentExecutionService(client, serviceOptions());
@@ -125,6 +189,52 @@ test("converts accFillSz=7 contracts to canonical filledBaseQuantity=70 when ctV
   });
 
   assert.equal(result.observation.filledBaseQuantity, "70");
+});
+
+test("OKX HEDGE query confirms only matching Provider side, quantity, and bucket evidence", async () => {
+  const client = new FakeOkxExecutionClient();
+  client.orderOverride = { side: "sell", posSide: "short" };
+  const service = new OkxIntentExecutionService(client, serviceOptions());
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP",
+    instId: "DOGE-USDT-SWAP",
+    ordId: "7001",
+    clOrdId: "sxokxidentity000000000000000000",
+    expectedProviderQuantity: "125",
+    expectedSide: "sell" as const,
+    positionMode: "HEDGE" as const,
+    positionDirection: "SHORT" as const,
+    posSide: "short" as const,
+  };
+
+  assert.equal((await service.query(lookup)).observation.state, "CONFIRMED");
+
+  client.orderOverride = { side: "sell", posSide: "long" };
+  const wrongBucket = await service.query(lookup);
+  assert.equal(wrongBucket.observation.state, "UNKNOWN");
+  assert.equal(wrongBucket.observation.filledBaseQuantity, "0");
+  assert.match(wrongBucket.statusReason ?? "", /posSide/u);
+});
+
+test("OKX ONE_WAY query proves net mode, reduce semantic, and canonical cumulative ceiling", async () => {
+  const client = new FakeOkxExecutionClient();
+  client.orderOverride = { side: "sell", posSide: "net", reduceOnly: false, tdMode: "cross" };
+  const service = new OkxIntentExecutionService(client, serviceOptions());
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP", instId: "DOGE-USDT-SWAP", ordId: "7001",
+    clOrdId: "sxokxidentity000000000000000000", expectedProviderQuantity: "125",
+    expectedSide: "sell" as const, positionMode: "ONE_WAY" as const, positionDirection: "SHORT" as const,
+  };
+  assert.equal((await service.query(lookup)).observation.state, "CONFIRMED");
+  for (const override of [
+    { posSide: "short" as const },
+    { reduceOnly: true },
+    { tdMode: "isolated" as const },
+    { filledQuantity: "126" },
+  ]) {
+    client.orderOverride = { side: "sell", posSide: "net", reduceOnly: false, tdMode: "cross", ...override };
+    assert.equal((await service.query(lookup)).observation.state, "UNKNOWN");
+  }
 });
 
 test("rejects unsupported instruments before provider mutation", async () => {
@@ -198,6 +308,8 @@ class FakeOkxExecutionClient {
   readonly cancelRequests: OkxCancelOrderRequest[] = [];
   orderState = "filled";
   filledQuantityOverride: string | null = null;
+  orderOverride: Partial<OkxProviderOrder> = {};
+  readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);
@@ -225,12 +337,16 @@ class FakeOkxExecutionClient {
               : "UNKNOWN",
       statusReason: this.orderState === "mystery" ? "unmapped OKX order state: mystery" : null,
       rawState: this.orderState,
+      tdMode: "cross",
+      posSide: "net",
+      reduceOnly: false,
       requestedQuantity: "125",
       filledQuantity: this.filledQuantityOverride
         ?? (this.orderState === "filled" ? "125" : "12"),
       averagePrice: "0.123",
       fee: "-0.001",
       updatedAt: now + 100,
+      ...this.orderOverride,
     };
   }
 

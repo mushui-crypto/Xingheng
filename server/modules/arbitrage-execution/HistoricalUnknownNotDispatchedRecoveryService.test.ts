@@ -31,7 +31,7 @@ test("recovery resumes after the record was persisted FAILED before instance att
   const fixture = setup(t);
   const record = fixture.records.loadForUser("user-a", "record-1");
   assert.ok(record);
-  fixture.records.update({ ...record, status: "FAILED", updatedAt: now + 3 });
+  fixture.records.update({ ...record, status: "FAILED", updatedAt: now + 3 }, record);
 
   const result = await fixture.service.recover("user-a", request());
 
@@ -67,6 +67,14 @@ test("managed exposure rejects historical UNKNOWN recovery", async (t) => {
 });
 
 test("uncertain or conflicting Provider facts preserve UNKNOWN", async (t) => {
+  await t.test("position verification is unknown", async (child) => {
+    const fixture = setup(child, { verificationStatus: "UNKNOWN" });
+    await rejected(fixture);
+  });
+  await t.test("an unrelated account position remains a conservative blocker", async (child) => {
+    const fixture = setup(child, { actualQuantity: "1" });
+    await rejected(fixture);
+  });
   await t.test("exact order evidence is unknown", async (child) => {
     const fixture = setup(child, { evidence: evidence({ exactOrderEvidence: "UNKNOWN" }) });
     await rejected(fixture);
@@ -77,6 +85,12 @@ test("uncertain or conflicting Provider facts preserve UNKNOWN", async (t) => {
   });
   await t.test("an active order is present", async (child) => {
     const fixture = setup(child, { evidence: evidence({ activeOrderEvidence: "PRESENT" }) });
+    await rejected(fixture);
+  });
+  await t.test("a bounded historical window remains insufficient", async (child) => {
+    const fixture = setup(child, {
+      evidence: evidence({ absenceScope: "HISTORICAL_WINDOW_UNCERTAIN" }),
+    });
     await rejected(fixture);
   });
 });
@@ -106,6 +120,8 @@ function setup(t: test.TestContext, options: Readonly<{
   remoteOrderId?: string;
   confirmedQuantity?: string;
   evidence?: HistoricalExecutionEvidence;
+  verificationStatus?: "MATCHED" | "MISMATCH" | "UNKNOWN";
+  actualQuantity?: string;
 }> = {}) {
   const directory = mkdtempSync(join(tmpdir(), "historical-unknown-recovery-"));
   const dbPath = join(directory, "trading.sqlite");
@@ -151,8 +167,8 @@ function setup(t: test.TestContext, options: Readonly<{
       verify: async () => ({
         arbitrageId: "arbitrage-1", checkedAt: now + 3,
         legs: [
-          verification("spot-leg"),
-          verification("perp-leg"),
+          verification("spot-leg", options.verificationStatus, options.actualQuantity),
+          verification("perp-leg", options.verificationStatus, options.actualQuantity),
         ],
       }),
     } as never,
@@ -162,11 +178,15 @@ function setup(t: test.TestContext, options: Readonly<{
   return { instances, records, orderReferences, service, get providerMutations() { return providerMutations; } };
 }
 
-function verification(legId: string) {
+function verification(
+  legId: string,
+  verificationStatus: "MATCHED" | "MISMATCH" | "UNKNOWN" = "MATCHED",
+  actualQuantity = "0",
+) {
   return {
-    arbitrageId: "arbitrage-1", legId, expectedManagedQuantity: "0", actualQuantity: "0",
-    actualSignedNetQuantity: "0", availableQuantity: legId === "spot-leg" ? "0.005" : null,
-    verificationStatus: "MATCHED", reason: null, checkedAt: now + 3,
+    arbitrageId: "arbitrage-1", legId, expectedManagedQuantity: "0", actualQuantity,
+    actualSignedNetQuantity: actualQuantity, availableQuantity: legId === "spot-leg" ? "0.005" : null,
+    verificationStatus, reason: null, checkedAt: now + 3,
   } as const;
 }
 
@@ -175,6 +195,7 @@ function evidence(overrides: Partial<HistoricalExecutionEvidence> = {}): Histori
     recoveryAnchorRequiredBeforeMutation: true,
     exactOrderEvidence: "ABSENT",
     activeOrderEvidence: "NONE",
+    absenceScope: "AUTHORITATIVE",
     checkedAt: now + 3,
     ...overrides,
   });

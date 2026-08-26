@@ -77,6 +77,12 @@ export class BinanceOrderManager {
       category: request.category,
       symbol: request.symbol,
       executionMode,
+      ...(request.positionMode === undefined ? {} : { positionMode: request.positionMode }),
+      ...(request.positionDirection === undefined ? {} : { positionDirection: request.positionDirection }),
+      ...(request.positionSide === undefined ? {} : { positionSide: request.positionSide }),
+      expectedSide: request.side,
+      expectedBaseQuantity: request.quantity,
+      ...(request.category === "linear" ? { expectedReduceOnly: request.reduceOnly } : {}),
     });
     if (reservation.kind === "conflict") {
       throw new Error("Idempotency key is already used for a different Binance order.");
@@ -111,6 +117,7 @@ export class BinanceOrderManager {
             category: request.category,
             symbol: request.symbol,
             baseAsset: genericRiskContext.baseAsset,
+            ...(request.positionSide === undefined ? {} : { positionSide: request.positionSide }),
           });
           this.risk.assertGenericOrderAllowed(request, genericRiskContext, snapshot);
         }
@@ -131,6 +138,7 @@ export class BinanceOrderManager {
             request.symbol,
             request.orderLinkId,
             acceptedIdentity.orderId,
+            request.positionSide,
           );
           if (!observed) throw new Error("Binance GTC test order is pending provider reconciliation.");
           return this.persistProviderState(input.idempotencyKey, observed);
@@ -141,6 +149,8 @@ export class BinanceOrderManager {
           request.symbol,
           acceptedIdentity.orderId,
           request.orderLinkId,
+          request.positionSide,
+          providerFacts(request),
         );
         this.persistProviderState(input.idempotencyKey, order);
         if (legacyRiskRouting) await this.syncPositions();
@@ -161,6 +171,7 @@ export class BinanceOrderManager {
           request.symbol,
           request.orderLinkId,
           providerOrderId,
+          request.positionSide,
         ).catch(() => null);
         if (recovered) {
           if (executionMode === "test_gtc") {
@@ -171,6 +182,8 @@ export class BinanceOrderManager {
             request.symbol,
             recovered.orderId,
             request.orderLinkId,
+            request.positionSide,
+            providerFacts(request),
           ).catch(() => null);
           if (settled) {
             this.persistProviderState(input.idempotencyKey, settled);
@@ -204,6 +217,8 @@ export class BinanceOrderManager {
         stored.symbol,
         stored.clientOrderId,
         stored.providerOrderId,
+        stored.positionSide,
+        storedProviderFacts(stored),
       );
       if (!found) throw new Error("Binance provider order state is unavailable for cancellation.");
       if (stored.providerOrderId && stored.providerOrderId !== found.orderId) {
@@ -247,6 +262,7 @@ export class BinanceOrderManager {
           stored.symbol,
           stored.clientOrderId,
           stored.providerOrderId,
+          stored.positionSide,
         ).catch(() => null);
         if (!recovered) throw error;
         return this.persistProviderState(idempotencyKey, recovered);
@@ -277,6 +293,7 @@ export class BinanceOrderManager {
             stored.symbol,
             stored.clientOrderId,
             stored.providerOrderId,
+            stored.positionSide,
           );
         } catch (error) {
           this.store.markProcessingError(stored.idempotencyKey, errorMessage(error));
@@ -353,6 +370,7 @@ export class BinanceOrderManager {
       stored.symbol,
       stored.clientOrderId,
       stored.providerOrderId,
+      stored.positionSide,
     );
     if (!recovered) {
       if (this.processingExpired(stored)) {
@@ -367,6 +385,8 @@ export class BinanceOrderManager {
         stored.symbol,
         recovered.orderId,
         stored.clientOrderId,
+        stored.positionSide,
+        storedProviderFacts(stored),
       ).catch(() => null);
       if (!settled) {
         this.store.recordProcessingOrder(idempotencyKey, recovered);
@@ -384,6 +404,10 @@ export class BinanceOrderManager {
       symbol: stored.symbol,
       clientOrderId: stored.clientOrderId,
       providerOrderId: stored.providerOrderId,
+      positionSide: stored.positionSide,
+      side: stored.expectedSide,
+      requestedBaseQuantity: stored.expectedBaseQuantity,
+      reduceOnly: stored.expectedReduceOnly,
     });
     if (order.status === "Filled") {
       this.store.complete(idempotencyKey, order);
@@ -400,23 +424,32 @@ export class BinanceOrderManager {
     symbol: string,
     clientOrderId: string,
     providerOrderId?: string | null,
+    positionSide?: "BOTH" | "LONG" | "SHORT",
+    facts: Readonly<{ side?: "Buy" | "Sell"; requestedBaseQuantity?: string; reduceOnly?: boolean }> = {},
   ) {
     const order = await this.client.findOrderByClientOrderId(category, symbol, clientOrderId);
     return order
-      ? assertBinanceProviderOrderIdentity(order, { symbol, clientOrderId, providerOrderId })
+      ? assertBinanceProviderOrderIdentity(order, { symbol, clientOrderId, providerOrderId, positionSide, ...facts })
       : null;
   }
 
-  private async settleOrder(category: "spot" | "linear", symbol: string, orderId: string, clientOrderId: string) {
+  private async settleOrder(
+    category: "spot" | "linear",
+    symbol: string,
+    orderId: string,
+    clientOrderId: string,
+    positionSide?: "BOTH" | "LONG" | "SHORT",
+    facts: Readonly<{ side?: "Buy" | "Sell"; requestedBaseQuantity?: string; reduceOnly?: boolean }> = {},
+  ) {
     let order = assertBinanceProviderOrderIdentity(
       await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs, clientOrderId),
-      { symbol, clientOrderId, providerOrderId: orderId },
+      { symbol, clientOrderId, providerOrderId: orderId, positionSide, ...facts },
     );
     if (isNonTerminalProviderState(order)) {
       await this.client.cancelOrder(category, symbol, orderId);
       order = assertBinanceProviderOrderIdentity(
         await this.client.awaitOrder(category, symbol, orderId, Date.now() + this.config.orderTimeoutMs, clientOrderId),
-        { symbol, clientOrderId, providerOrderId: orderId },
+        { symbol, clientOrderId, providerOrderId: orderId, positionSide, ...facts },
       );
     }
     if (isNonTerminalProviderState(order)) {
@@ -451,6 +484,22 @@ function normalizeRequest(input: BinanceOrderInput): BinanceExecutionOrderReques
     return { ...request, executionPriceMode };
   }
   return { ...request, executionPriceMode, limitPrice: decimalPrice(input.limitPrice) };
+}
+
+function providerFacts(request: BinanceExecutionOrderRequest) {
+  return Object.freeze({
+    side: request.side,
+    requestedBaseQuantity: request.quantity,
+    ...(request.category === "linear" ? { reduceOnly: request.reduceOnly } : {}),
+  });
+}
+
+function storedProviderFacts(stored: BinanceStoredOrder) {
+  return Object.freeze({
+    side: stored.expectedSide,
+    requestedBaseQuantity: stored.expectedBaseQuantity,
+    reduceOnly: stored.expectedReduceOnly,
+  });
 }
 
 function mutationSnapshotRiskValuationPrice(

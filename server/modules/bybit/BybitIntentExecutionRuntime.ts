@@ -12,7 +12,7 @@ import {
 } from "../cex/ExecutionReconciliationCapability";
 import { attachExecutionAttempt, createExecutionRecordFromIntent, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
-import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
+import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
 import {
   createBybitExecutionOrderRecoveryReference,
@@ -88,21 +88,26 @@ export class BybitIntentExecutionRuntime {
   async execute(input: ExecutionIntent): Promise<BybitIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "bybit") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    return this.executeIntent(intent);
+    return this.executeIntent(intent, "INCREASE");
   }
 
-  close(input: ExecutionIntent) { return this.execute(input); }
+  close(input: ExecutionIntent) {
+    const intent = createExecutionIntent(input);
+    if (intent.venue !== "bybit") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
+    return this.executeIntent(intent, "DECREASE");
+  }
 
   async query(authenticatedUserId: string, executionId: string): Promise<BybitIntentExecutionQueryRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
       await this.assertAccount(record, runtimeService);
       const reference = await this.loadCompleteReference(record);
       const result = await this.service(runtimeService).query(reference);
       const executionRecord = applyExecutionQueryObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({
         executionRecord,
         observation: result.observation,
@@ -116,9 +121,10 @@ export class BybitIntentExecutionRuntime {
 
   async reconcile(authenticatedUserId: string, executionId: string): Promise<BybitIntentExecutionReconciliationRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
       await this.assertAccount(record, runtimeService);
       const service = this.service(runtimeService);
       const recovery = await this.orderReferences.loadRecoveryForUser(record.userId, record.executionId);
@@ -126,7 +132,7 @@ export class BybitIntentExecutionRuntime {
       const reference = await this.loadCompleteReference(record);
       const result = await service.query(reference);
       const executionRecord = applyExecutionReconciliationObservation(record, result.observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({
         executionRecord,
         observation: result.observation,
@@ -139,12 +145,13 @@ export class BybitIntentExecutionRuntime {
 
   async cancel(authenticatedUserId: string, executionId: string): Promise<BybitIntentExecutionCancelRuntimeResult> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const record = await this.loadRecord(userId, executionId);
-    if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
-    if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
-      throw new Error(`Execution record ${record.status} cannot be cancelled.`);
-    }
+    await this.loadRecord(userId, executionId);
     return this.registry.run(userId, async (runtimeService) => {
+      const record = await this.loadRecord(userId, executionId);
+      if (record.venue !== "bybit") throw new Error(`Unsupported execution venue: ${record.venue}.`);
+      if (record.status !== "PENDING_CONFIRMATION" && record.status !== "UNKNOWN") {
+        throw new Error(`Execution record ${record.status} cannot be cancelled.`);
+      }
       await this.assertAccount(record, runtimeService);
       const reference = await this.loadCancelReference(record);
       const service = this.service(runtimeService);
@@ -152,12 +159,15 @@ export class BybitIntentExecutionRuntime {
         ?? new BybitIntentCancellationCapability(service, reference);
       const observation = await capability.cancel(record);
       const executionRecord = applyExecutionCancelObservation(record, observation);
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, record);
       return Object.freeze({ executionRecord, observation, orderReference: reference });
     });
   }
 
-  private async executeIntent(intent: ExecutionIntent): Promise<BybitIntentExecutionRuntimeResult> {
+  private async executeIntent(
+    intent: ExecutionIntent,
+    mutationEffect: ExecutionMutationEffect,
+  ): Promise<BybitIntentExecutionRuntimeResult> {
     return this.registry.run(intent.userId, async (runtimeService) => {
       const account = await runtimeService.executionAccountIdentity();
       if (account.accountId !== intent.accountId) throw new Error("ExecutionIntent accountId does not match the Bybit execution account.");
@@ -176,7 +186,7 @@ export class BybitIntentExecutionRuntime {
             createdAt: initialRecord.createdAt,
             updatedAt: initialRecord.updatedAt,
           }),
-        ));
+        ), mutationEffect);
         const capability = this.options.createCapability?.(service) ?? new BybitIntentExecutionCapability(service);
         const capabilities = new ExecutionCapabilityRegistry<BybitIntentExecutionResult>()
           .register(executionCapability("bybit", capability));
@@ -209,6 +219,8 @@ export class BybitIntentExecutionRuntime {
           expectedSide: execution.step.result.expectedSide,
           ...(execution.step.result.marketUnit === undefined ? {} : { marketUnit: execution.step.result.marketUnit }),
           ...(execution.step.result.positionIdx === undefined ? {} : { positionIdx: execution.step.result.positionIdx }),
+          ...(execution.step.result.positionMode === undefined ? {} : { positionMode: execution.step.result.positionMode }),
+          ...(execution.step.result.positionDirection === undefined ? {} : { positionDirection: execution.step.result.positionDirection }),
           createdAt: accepted.createdAt,
           updatedAt: accepted.updatedAt,
         });
@@ -227,7 +239,7 @@ export class BybitIntentExecutionRuntime {
       } else {
         executionRecord = { ...initialRecord, status: execution.executionState.status, updatedAt: execution.executionState.updatedAt };
       }
-      await this.recordStore.update(executionRecord);
+      await this.recordStore.update(executionRecord, initialRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
     });
   }
@@ -235,9 +247,11 @@ export class BybitIntentExecutionRuntime {
   private service(
     runtimeService: BybitIntentRuntimeService,
     persistRecoveryReference?: BybitIntentExecutionServiceOptions["persistRecoveryReference"],
+    mutationEffect: ExecutionMutationEffect = "INCREASE",
   ) {
     return new BybitIntentExecutionService(runtimeService, {
       ...this.options,
+      mutationEffect,
       validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
     });
@@ -250,6 +264,9 @@ export class BybitIntentExecutionRuntime {
   ): Promise<BybitIntentExecutionReconciliationRuntimeResult> {
     let result: BybitExecutionQueryResult;
     try { result = await service.query(recovery); } catch { return this.failedRecovery(record); }
+    if (recovery.positionMode === "HEDGE" && result.observation.state === "UNKNOWN") {
+      return this.failedRecovery(record);
+    }
     let reference: BybitExecutionOrderReference;
     try {
       reference = createBybitExecutionOrderReference({
@@ -268,7 +285,7 @@ export class BybitIntentExecutionRuntime {
         observedAt: executionRecord.updatedAt,
       })
       : executionRecord;
-    await this.recordStore.update(withAttempt);
+    await this.recordStore.update(withAttempt, record);
     return Object.freeze({
       executionRecord: withAttempt,
       observation: result.observation,
@@ -282,7 +299,7 @@ export class BybitIntentExecutionRuntime {
     const observedAt = this.observedAt(record.updatedAt);
     const observation = createExecutionReconciliationObservation({ state: "UNKNOWN", filledBaseQuantity: "0", observedAt });
     const executionRecord = applyExecutionReconciliationObservation(record, observation);
-    await this.recordStore.update(executionRecord);
+    await this.recordStore.update(executionRecord, record);
     return Object.freeze({
       executionRecord,
       observation,
@@ -301,7 +318,7 @@ export class BybitIntentExecutionRuntime {
       ]);
       if (!current || current.status !== "CREATED" || current.executionAttemptId !== undefined
         || current.remoteOrderId !== undefined || reference || recovery) return;
-      await this.recordStore.update({ ...current, status: "FAILED" });
+      await this.recordStore.update({ ...current, status: "FAILED" }, current);
     } catch (error) {
       console.error("[bybit] pre-mutation ExecutionRecord cleanup failed", error instanceof Error ? error.message : "unknown error");
     }

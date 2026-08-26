@@ -86,7 +86,7 @@ test("OKX provider identity failure blocks cancel mutation", async () => {
   assert.equal(records.updated.length, 0);
 });
 
-test("closed OKX safety switches block cancel mutation", async () => {
+test("closed OKX safety switches still allow known-order cancel after identity validation", async () => {
   const provider = new FakeOkxCancellationService();
   const { runtime, records } = fixture(provider, {
     mutationSafetyGuard: new ExecutionMutationSafetyGuard({
@@ -95,14 +95,11 @@ test("closed OKX safety switches block cancel mutation", async () => {
     }),
   });
 
-  await assert.rejects(
-    () => runtime.cancel("user-a", "execution-okx-cancel"),
-    (error: unknown) => error instanceof ExecutionMutationSafetyError,
-  );
+  await runtime.cancel("user-a", "execution-okx-cancel");
 
-  assert.equal(provider.identityValidations, 0);
-  assert.equal(provider.cancelMutations, 0);
-  assert.equal(records.updated.length, 0);
+  assert.equal(provider.identityValidations, 1);
+  assert.equal(provider.cancelMutations, 1);
+  assert.equal(records.updated.length, 1);
 });
 
 test("missing or mismatched OKX order references block cancel mutation", async (context) => {

@@ -6,20 +6,24 @@ import { registerArbitrageExecutionCloseRoutes } from "../api/arbitrageExecution
 import { registerArbitrageExecutionCancelRoutes } from "../api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "../api/arbitrageExecutionDraftRoutes";
 import { registerArbitrageInstanceExitRoutes } from "../api/arbitrageInstanceExitRoutes";
+import { registerArbitrageManagementReleaseRoutes } from "../api/arbitrageManagementReleaseRoutes";
+import { registerArbitrageHedgeStartRoutes } from "../api/arbitrageHedgeStartRoutes";
 import { registerHistoricalUnknownRecoveryRoutes } from "../api/historicalUnknownRecoveryRoutes";
 import { registerUserAuthMiddleware } from "./authRoutes";
 
 const executionRequests = [
-  { method: "GET", path: "/api/arbitrage-execution/draft?opportunityId=op-1&horizonDays=90" },
+  { method: "GET", path: "/api/arbitrage-execution/draft?opportunityId=op-1&horizonDays=90&executionMode=EXECUTION_PRIORITY" },
   { method: "POST", path: "/api/arbitrage-execution/draft/preview" },
   { method: "POST", path: "/api/arbitrage-execution/confirm" },
   { method: "POST", path: "/api/arbitrage-execution/legs/confirm" },
+  { method: "POST", path: "/api/arbitrage-instances/arbitrage-1/start-hedge" },
   { method: "POST", path: "/api/arbitrage-execution/legs/reconcile" },
   { method: "POST", path: "/api/arbitrage-execution/legs/close" },
   { method: "POST", path: "/api/arbitrage-execution/orders/cancel" },
   { method: "POST", path: "/api/arbitrage-execution/exit" },
   { method: "POST", path: "/api/arbitrage-execution/reconcile" },
   { method: "POST", path: "/api/arbitrage-execution/legs/recover-not-dispatched" },
+  { method: "POST", path: "/api/arbitrage-execution/legs/release-management" },
 ] as const;
 
 test("formal execution routes reject anonymous requests before application service access", async () => {
@@ -62,14 +66,16 @@ test("formal execution routes use authenticated request.user and ignore client u
       { operation: "preview", userId: "user-a" },
       { operation: "confirm", userId: "user-a" },
       { operation: "leg-confirm", userId: "user-a" },
+      { operation: "hedge-start", userId: "user-a" },
       { operation: "reconcile", userId: "user-a" },
       { operation: "close", userId: "user-a" },
       { operation: "cancel", userId: "user-a" },
       { operation: "instance-exit", userId: "user-a" },
       { operation: "instance-reconcile", userId: "user-a" },
       { operation: "historical-recovery", userId: "user-a" },
+      { operation: "management-release", userId: "user-a" },
     ]);
-    assert.deepEqual(calls[0]?.input, { opportunityId: "op-1", horizonDays: 90 });
+    assert.deepEqual(calls[0]?.input, { opportunityId: "op-1", horizonDays: 90, executionMode: "EXECUTION_PRIORITY" });
   } finally {
     await server.close();
   }
@@ -122,6 +128,12 @@ async function startServer(calls: unknown[]) {
       return { ok: true } as any;
     },
   });
+  registerArbitrageHedgeStartRoutes(app, {
+    async start(userId, arbitrageId, input) {
+      calls.push({ operation: "hedge-start", userId, input: { arbitrageId, input } });
+      return { ok: true } as any;
+    },
+  });
   registerArbitrageExecutionCloseRoutes(app, {
     async closeLeg(userId, input) {
       calls.push({ operation: "close", userId, input });
@@ -147,6 +159,16 @@ async function startServer(calls: unknown[]) {
   registerHistoricalUnknownRecoveryRoutes(app, {
     async recover(userId, input) {
       calls.push({ operation: "historical-recovery", userId, input });
+      return { ok: true } as any;
+    },
+  });
+  registerArbitrageManagementReleaseRoutes(app, {
+    async evaluateEligibility(userId, arbitrageId, legId) {
+      calls.push({ operation: "management-release-eligibility", userId, input: { arbitrageId, legId } });
+      return { releaseEligible: false } as any;
+    },
+    async release(userId, input) {
+      calls.push({ operation: "management-release", userId, input });
       return { ok: true } as any;
     },
   });

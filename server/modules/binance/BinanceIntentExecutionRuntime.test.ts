@@ -15,7 +15,7 @@ import { BinanceIntentExecutionRuntime } from "./BinanceIntentExecutionRuntime";
 import { binanceExecutionIdempotencyKeyFor } from "./BinanceIntentExecutionService";
 import type { BinanceOrderInput } from "./BinanceOrderManager";
 import type { BinanceStoredOrder, BinanceStoredOrderIsolation } from "./BinanceOrderStore";
-import type { BinanceProviderOrder } from "./BinanceTypes";
+import type { BinanceGenericRiskContext, BinanceProviderOrder } from "./BinanceTypes";
 import { snapshotFixture } from "./binanceTestFixtures";
 
 const now = 1_800_000_000_000;
@@ -49,6 +49,22 @@ test("user A intent runs through user A Binance service", async () => {
   assert.deepEqual(registry.runUserIds, ["user-a"]);
   assert.equal(registry.services["user-a"]!.providerMutations, 1);
   assert.equal(registry.services["user-b"]!.providerMutations, 0);
+});
+
+test("Binance runtime owns the mutation effect: execute is INCREASE and close is DECREASE", async () => {
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  const runtime = new BinanceIntentExecutionRuntime(
+    new FakeBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: 20 },
+    new FakeExecutionRecordStore(),
+    { clock: () => now, createExecutionId: (intent) => `execution-${intent.intentId}` },
+  );
+  await runtime.execute(executionIntent({ intentId: "opening-effect" }));
+  await runtime.close(executionIntent({
+    intentId: "closing-effect", side: "sell", positionDirection: "LONG",
+    orderConstraints: { reduceOnly: true },
+  }));
+  assert.deepEqual(service.riskContexts.map((value) => value?.mutationEffect), ["INCREASE", "DECREASE"]);
 });
 
 test("account mismatch rejects before provider mutation or capability creation", async () => {
@@ -432,6 +448,65 @@ test("pending execution can be explicitly cancelled through the bound OrderManag
   assert.equal(service.providerMutations, 1);
 });
 
+test("a queued cancel reloads the terminal record after reconcile and performs no provider mutation", async () => {
+  const record = createExecutionRecord({ ...queryRecord(), status: "PENDING_CONFIRMATION" });
+  const records = new FakeExecutionRecordStore([record]);
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  service.orders = [queryStoredOrder(record, { status: "New", filledQuantity: 0 })];
+  service.remoteOrder = providerOrder({
+    orderId: record.remoteOrderId,
+    orderLinkId: "binance-client-query-1",
+    status: "Filled",
+    filledQuantity: 0.002,
+  });
+  const runtime = new BinanceIntentExecutionRuntime(
+    new SerialBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: 20 },
+    records,
+    { clock: () => now + 2_000 },
+  );
+
+  const reconciliation = runtime.reconcile("user-a", record.executionId);
+  const cancellation = runtime.cancel("user-a", record.executionId);
+  const [reconciled, cancelled] = await Promise.allSettled([reconciliation, cancellation]);
+
+  assert.equal(reconciled.status, "fulfilled");
+  assert.equal(records.loadForUser("user-a", record.executionId)?.status, "CONFIRMED");
+  assert.equal(cancelled.status, "rejected");
+  if (cancelled.status === "rejected") assert.match(String(cancelled.reason), /CONFIRMED cannot be cancelled/u);
+  assert.equal(service.providerQueries.length, 1);
+  assert.equal(service.providerMutations, 0);
+  assert.equal(records.created.length, 0);
+});
+
+test("two queued reconciles cannot let a later UNKNOWN observation regress CONFIRMED", async () => {
+  const record = createExecutionRecord({ ...queryRecord(), status: "PENDING_CONFIRMATION" });
+  const records = new FakeExecutionRecordStore([record]);
+  const service = new FakeBinanceIntentRuntimeService("binance:account-user-a");
+  service.orders = [queryStoredOrder(record, { status: "New", filledQuantity: 0 })];
+  service.remoteOrderSequence = [
+    providerOrder({ orderId: record.remoteOrderId, orderLinkId: "binance-client-query-1", status: "Filled" }),
+    new Error("later provider query unavailable"),
+  ];
+  const runtime = new BinanceIntentExecutionRuntime(
+    new SerialBinanceIntentRegistry({ "user-a": service }),
+    { maxSlippageBps: 20 },
+    records,
+    { clock: () => now + 2_000 },
+  );
+
+  const [first, second] = await Promise.allSettled([
+    runtime.reconcile("user-a", record.executionId),
+    runtime.reconcile("user-a", record.executionId),
+  ]);
+
+  assert.equal(first.status, "fulfilled");
+  assert.equal(second.status, "rejected");
+  assert.equal(records.loadForUser("user-a", record.executionId)?.status, "CONFIRMED");
+  assert.equal(service.providerMutations, 0);
+  assert.equal(records.created.length, 0);
+});
+
 test("unknown execution preserves UNKNOWN after an ambiguous explicit cancel", async () => {
   const record = queryRecord();
   const records = new FakeExecutionRecordStore([record]);
@@ -504,6 +579,29 @@ class FakeBinanceIntentRegistry {
   }
 }
 
+class SerialBinanceIntentRegistry {
+  private tail = Promise.resolve();
+
+  constructor(readonly services: Record<string, FakeBinanceIntentRuntimeService>) {}
+
+  async run<T>(
+    userId: string,
+    operation: (service: FakeBinanceIntentRuntimeService) => Promise<T> | T,
+  ): Promise<T> {
+    const previous = this.tail;
+    let release!: () => void;
+    this.tail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      const service = this.services[userId];
+      if (!service) throw new Error(`Missing service for ${userId}.`);
+      return await operation(service);
+    } finally {
+      release();
+    }
+  }
+}
+
 class FakeExecutionRecordStore {
   readonly created: ExecutionRecord[] = [];
   readonly updated: ExecutionRecord[] = [];
@@ -536,9 +634,11 @@ class FakeBinanceIntentRuntimeService {
   orderStateReads = 0;
   providerMutations = 0;
   readonly providerQueries: Array<{ category: "spot" | "linear"; symbol: string; clientOrderId: string }> = [];
+  readonly riskContexts: Array<BinanceGenericRiskContext | undefined> = [];
   orders: BinanceStoredOrder[] = [];
   isolatedOrders: BinanceStoredOrderIsolation[] = [];
   remoteOrder: BinanceProviderOrder | null | Error = providerOrder();
+  remoteOrderSequence: Array<BinanceProviderOrder | null | Error> = [];
   cancelResult: BinanceProviderOrder | Error = providerOrder({ status: "Cancelled" });
 
   constructor(private readonly accountId: string) {}
@@ -579,10 +679,12 @@ class FakeBinanceIntentRuntimeService {
   async placeExecutionOrder(
     input: BinanceOrderInput,
     beforeProviderMutation?: (riskValuationPrice: number) => void | Promise<void>,
+    genericRiskContext?: BinanceGenericRiskContext,
   ) {
     await beforeProviderMutation?.(input.limitPrice === undefined ? 1_004.1 : Number(input.limitPrice));
     this.providerMutations += 1;
     this.placeInputs.push(input);
+    this.riskContexts.push(genericRiskContext);
     return providerOrder();
   }
 
@@ -601,8 +703,9 @@ class FakeBinanceIntentRuntimeService {
 
   async findExecutionOrderByClientOrderId(category: "spot" | "linear", symbol: string, clientOrderId: string) {
     this.providerQueries.push({ category, symbol, clientOrderId });
-    if (this.remoteOrder instanceof Error) throw this.remoteOrder;
-    return this.remoteOrder;
+    const result = this.remoteOrderSequence.length > 0 ? this.remoteOrderSequence.shift()! : this.remoteOrder;
+    if (result instanceof Error) throw result;
+    return result;
   }
 
   async cancelOrder() {
@@ -641,6 +744,9 @@ function providerOrder(overrides: Partial<BinanceProviderOrder> = {}): BinancePr
     status: "Filled",
     requestedQuantity: 0.002,
     filledQuantity: 0.002,
+    side: "Buy",
+    reduceOnly: false,
+    requestedBaseQuantity: "0.002",
     averagePrice: 1_004,
     feeUsd: 0,
     updatedAt: now + 1_000,
@@ -674,6 +780,7 @@ function queryStoredOrder(
     updatedAt: now + 1_000,
     ...orderOverrides,
   });
+  order.filledBaseQuantity = String(order.filledQuantity);
   return {
     idempotencyKey: binanceExecutionIdempotencyKeyFor(record),
     requestFingerprint: "query-request-fingerprint",
@@ -682,6 +789,9 @@ function queryStoredOrder(
     category: "linear",
     symbol: "XAUTUSDT",
     executionMode: "production_ioc",
+    expectedSide: "Buy",
+    expectedBaseQuantity: "0.002",
+    expectedReduceOnly: false,
     status: "processing",
     order,
     error: null,

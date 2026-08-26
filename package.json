@@ -4,6 +4,8 @@
   "version": "0.3.0",
   "type": "module",
   "scripts": {
+    "test": "node scripts/run-full-test-suite.mjs",
+    "test:full": "node scripts/run-full-test-suite.mjs",
     "dev": "concurrently \"npm:dev:api\" \"npm:dev:web\"",
     "dev:web": "vite",
     "dev:api": "tsx watch server/index.ts",

@@ -59,11 +59,20 @@ function observationFor(stored: BinanceStoredOrder, fallbackObservedAt: number):
     });
   }
   const order = stored.order;
+  if (stored.expectedSide === undefined || stored.expectedBaseQuantity === undefined
+    || order.side === undefined || order.requestedBaseQuantity === undefined
+    || (stored.category === "linear" && (stored.expectedReduceOnly === undefined || order.reduceOnly === undefined))) {
+    return binanceUnknownExecutionObservation(Math.max(stored.updatedAt, fallbackObservedAt));
+  }
   try {
     assertBinanceProviderOrderIdentity(order, {
       symbol: stored.symbol,
       clientOrderId: stored.clientOrderId,
       providerOrderId: stored.providerOrderId,
+      positionSide: stored.positionSide,
+      side: stored.expectedSide,
+      requestedBaseQuantity: stored.expectedBaseQuantity,
+      reduceOnly: stored.expectedReduceOnly,
     });
   } catch {
     return binanceUnknownExecutionObservation(Math.max(stored.updatedAt, fallbackObservedAt));
@@ -79,10 +88,26 @@ export function binanceExecutionObservationForOrder(
   observedAt: number,
 ): ExecutionQueryObservation {
   return createExecutionQueryObservation({
-    state: stateFor(order.status),
+    state: stateForOrder(order),
     filledBaseQuantity: binanceFilledBaseQuantity(order),
     observedAt,
   });
+}
+
+function stateForOrder(order: NonNullable<BinanceStoredOrder["order"]>): ExecutionQueryObservation["state"] {
+  if ((order.status === "Cancelled" || order.status === "Expired")
+    && order.requestedBaseQuantity !== undefined && order.filledBaseQuantity !== undefined
+    && decimalEquals(order.requestedBaseQuantity, order.filledBaseQuantity)) return "CONFIRMED";
+  return stateFor(order.status);
+}
+
+function decimalEquals(left: string, right: string) {
+  const normalize = (value: string) => {
+    const [integer, fraction = ""] = value.split(".");
+    const trimmed = fraction.replace(/0+$/u, "");
+    return trimmed ? `${integer}.${trimmed}` : integer;
+  };
+  return normalize(left) === normalize(right);
 }
 
 export function binanceUnknownExecutionObservation(observedAt: number): ExecutionQueryObservation {

@@ -16,9 +16,47 @@ import {
   type CredentialKeyProvider,
   type WrappedCredentialDataKey,
 } from "../credentials/CredentialKeyProvider";
+import { BybitProviderError } from "../bybit/BybitClient";
 import { UserExchangeCredentialService } from "../credentials/UserExchangeCredentialService";
 import { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
 import { registerExchangeCredentialRoutes } from "./exchangeCredentialRoutes";
+
+test("credential API never returns Bybit raw retMsg and retains safe code/category", async () => {
+  const rawMessage = "apiSecret=never-return-this signed query rejected";
+  const app = express();
+  app.use(express.json());
+  app.use((request, _response, next) => {
+    request.user = { id: "session-user" } as never;
+    next();
+  });
+  registerExchangeCredentialRoutes(app, {
+    put: async () => {
+      throw new BybitProviderError("credential_validation_failed", rawMessage, 10004);
+    },
+  } as never);
+  const server = app.listen(0, "127.0.0.1");
+
+  try {
+    await once(server, "listening");
+    const port = (server.address() as AddressInfo).port;
+    const response = await fetch(`http://127.0.0.1:${port}/api/exchange-credentials/bybit`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ apiKey: "key", apiSecret: "secret" }),
+    });
+    const body = await response.text();
+    assert.equal(response.status, 502);
+    assert.equal(body.includes(rawMessage), false);
+    assert.equal(body.includes("never-return-this"), false);
+    assert.deepEqual(JSON.parse(body), {
+      category: "credential_validation_failed",
+      message: "Bybit credential validation failed.",
+      code: 10004,
+    });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test("credential API binds input to the authenticated user and never echoes Secret", async () => {
   const captured: Array<{ userId: string; venue: string; input: unknown }> = [];

@@ -3,12 +3,16 @@ import { ShieldCheck } from "lucide-react";
 import {
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
+  continuePartialArbitrageHedge,
   fetchArbitrageExecutionDraft,
+  fetchArbitrageHedgeWorkflow,
   previewArbitrageExecutionDraft,
   reconcileArbitrageExecutionLeg,
+  startArbitrageHedge,
   type ArbitrageExecutionDraft,
   type ArbitrageExecutionDraftLeg,
   type ArbitrageLegExecutionConfirmation,
+  type ArbitrageHedgeWorkflow,
   type ExecutionQuantityInput,
 } from "../../../api/arbitrageExecutionDraft";
 import { fetchArbitrageInstanceById, type ArbitrageInstance, type ArbitrageInstanceLeg } from "../../../api/arbitrageInstances";
@@ -41,6 +45,8 @@ export function ArbitrageExecutionDraftEntry({
   const [confirmationId, setConfirmationId] = useState("");
   const [commandIds, setCommandIds] = useState<Record<string, string>>({});
   const [resumeValidated, setResumeValidated] = useState(false);
+  const [workflow, setWorkflow] = useState<ArbitrageHedgeWorkflow | null>(null);
+  const [workflowPolling, setWorkflowPolling] = useState(false);
 
   useEffect(() => {
     if (!open) return;
@@ -50,7 +56,12 @@ export function ArbitrageExecutionDraftEntry({
     setValidationNotice("");
     const request = resumeArbitrageId
       ? loadResumeContext(resumeArbitrageId, opportunityId, horizonDays, controller.signal)
-      : fetchArbitrageExecutionDraft(opportunityId, horizonDays, controller.signal).then((nextDraft) => ({ draft: nextDraft }));
+      : fetchArbitrageExecutionDraft(
+        opportunityId,
+        horizonDays,
+        executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+        controller.signal,
+      ).then((nextDraft) => ({ draft: nextDraft }));
     void request
       .then((result) => {
         if (controller.signal.aborted) return;
@@ -75,7 +86,33 @@ export function ArbitrageExecutionDraftEntry({
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [horizonDays, open, opportunityId, resumeArbitrageId]);
+  }, [executionMode, horizonDays, open, opportunityId, resumeArbitrageId]);
+
+  useEffect(() => {
+    if (!open || !instance) return;
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const poll = async () => {
+      try {
+        const [nextWorkflow, nextInstance] = await Promise.all([
+          fetchArbitrageHedgeWorkflow(instance.arbitrageId, controller.signal),
+          fetchArbitrageInstanceById(instance.arbitrageId, controller.signal),
+        ]);
+        if (controller.signal.aborted) return;
+        setWorkflow(nextWorkflow);
+        setInstance(nextInstance);
+        if (workflowPolling && isWorkflowInFlight(nextWorkflow.phase)) timer = setTimeout(poll, 750);
+        else setWorkflowPolling(false);
+      } catch {
+        if (!controller.signal.aborted && workflowPolling) timer = setTimeout(poll, 1000);
+      }
+    };
+    void poll();
+    return () => {
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [instance?.arbitrageId, open, workflowPolling]);
 
   async function planQuantity() {
     if (!amount.trim()) {
@@ -89,7 +126,12 @@ export function ArbitrageExecutionDraftEntry({
     setError("");
     setValidationNotice("");
     try {
-      setDraft(await previewArbitrageExecutionDraft(opportunityId, horizonDays, quantityInput));
+      setDraft(await previewArbitrageExecutionDraft(
+        opportunityId,
+        horizonDays,
+        quantityInput,
+        executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+      ));
     } catch {
       setError("套利数量计划生成失败，请检查输入后重试。");
     } finally {
@@ -107,6 +149,8 @@ export function ArbitrageExecutionDraftEntry({
     setExecutionResults({});
     setCommandIds({});
     setResumeValidated(false);
+    setWorkflow(null);
+    setWorkflowPolling(false);
   }
 
   function openConfirmation() {
@@ -141,6 +185,72 @@ export function ArbitrageExecutionDraftEntry({
     } finally {
       setLoading(false);
     }
+  }
+
+  async function startHedge(firstLegId: string) {
+    const quantityInput = currentQuantityInput();
+    if (!instance || !quantityInput || instance.executionReferences.length !== 0) return;
+    setLoading(true);
+    setWorkflowPolling(true);
+    setError("");
+    try {
+      const result = await startArbitrageHedge({
+        arbitrageId: instance.arbitrageId,
+        hedgeCommandId: createClientCommandId("hedge-start"),
+        firstLegId,
+        confirmationId,
+        opportunityId,
+        horizonDays,
+        quantityInput,
+        executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+      });
+      setInstance(await fetchArbitrageInstanceById(instance.arbitrageId));
+      setWorkflow(await fetchArbitrageHedgeWorkflow(instance.arbitrageId));
+      const diagnostic = result.firstLeg.diagnostic;
+      setValidationNotice(diagnostic
+        ? `${diagnostic.category}：${diagnostic.sanitizedMessage}`
+        : "一键开始流程已停止在当前权威状态；不会自动重试未确认或部分成交订单。");
+    } catch {
+      setError("一键开始对冲未能安全完成；请根据当前流程状态处理。");
+    } finally {
+      setWorkflowPolling(false);
+      setLoading(false);
+    }
+  }
+
+  async function continuePartial() {
+    const quantityInput = currentQuantityInput();
+    if (!instance || !quantityInput || workflow?.riskAction !== "CONTINUE_PARTIAL_HEDGE") return;
+    setLoading(true);
+    setWorkflowPolling(true);
+    setError("");
+    try {
+      const result = await continuePartialArbitrageHedge({
+        arbitrageId: instance.arbitrageId,
+        commandId: createClientCommandId("partial-continue"),
+        confirmationId,
+        opportunityId,
+        horizonDays,
+        quantityInput,
+        executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
+      });
+      setInstance(result.instance);
+      setValidationNotice("已按第一腿可归因 exposure 执行第二腿；第一腿历史 partial 事实保持不变。");
+    } catch {
+      setError("当前账户 Reality 或执行事实不支持继续对冲；未提交不安全的第二腿订单。");
+    } finally {
+      setWorkflowPolling(false);
+      setLoading(false);
+    }
+  }
+
+  function restartAfterFailedZero() {
+    if (workflow?.phase !== "FIRST_LEG_FAILED_ZERO") return;
+    setInstance(null);
+    setWorkflow(null);
+    setConfirmationId(createClientCommandId("restart-confirmation"));
+    setCommandIds({});
+    setValidationNotice("旧 FAILED execution 保持不变。请创建新实例后重新开始完整对冲流程。");
   }
 
   async function executeLeg(legId: string) {
@@ -196,7 +306,7 @@ export function ArbitrageExecutionDraftEntry({
       <Modal
         bodyClassName="max-h-[75vh] overflow-y-auto"
         closeDisabled={loading}
-        description={resumeMode ? "继续使用现有套利实例；服务端会重新校验机会、source-plan、账户和数量，不会创建替代实例。" : "预览只生成草案；最终确认时服务端会重新校验权威机会、规则和报价，通过后才创建套利实例。每条腿仍需单独人工确认。"}
+        description={resumeMode ? "继续使用现有套利实例；异常后的任何 mutation 都需要再次明确确认。" : "创建实例后只需一次“开始对冲”确认；第一腿完整确认时由服务端连续推进第二腿。"}
         onClose={close}
         open={open}
         shellClassName="max-w-5xl"
@@ -209,6 +319,7 @@ export function ArbitrageExecutionDraftEntry({
           executionResults={executionResults}
           executionMode={executionMode}
           instance={instance}
+          workflow={workflow}
           loading={loading}
           mode={mode}
           resumeMode={resumeMode}
@@ -216,7 +327,9 @@ export function ArbitrageExecutionDraftEntry({
           onAmountChange={setAmount}
           onCancel={close}
           onConfirm={() => void confirmInstance()}
-          onExecuteLeg={(legId) => void executeLeg(legId)}
+          onExecuteLeg={(legId) => void (resumeMode || instance?.executionReferences.length ? executeLeg(legId) : startHedge(legId))}
+          onContinuePartial={() => void continuePartial()}
+          onRestart={restartAfterFailedZero}
           onReconcileLeg={(legId) => void reconcileLeg(legId)}
           onExecutionModeChange={setExecutionMode}
           onModeChange={(nextMode) => {
@@ -239,6 +352,7 @@ export function ArbitrageExecutionDraftContent({
   executionResults = {},
   executionMode,
   instance = null,
+  workflow = null,
   loading,
   mode,
   resumeMode = false,
@@ -247,6 +361,8 @@ export function ArbitrageExecutionDraftContent({
   onCancel,
   onConfirm,
   onExecuteLeg = () => undefined,
+  onContinuePartial = () => undefined,
+  onRestart = () => undefined,
   onReconcileLeg = () => undefined,
   onExecutionModeChange,
   onModeChange,
@@ -259,6 +375,7 @@ export function ArbitrageExecutionDraftContent({
   executionResults?: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
   executionMode: string;
   instance?: ArbitrageInstance | null;
+  workflow?: ArbitrageHedgeWorkflow | null;
   loading: boolean;
   mode: ExecutionQuantityInput["mode"];
   resumeMode?: boolean;
@@ -267,6 +384,8 @@ export function ArbitrageExecutionDraftContent({
   onCancel: () => void;
   onConfirm: () => void;
   onExecuteLeg?: (legId: string) => void;
+  onContinuePartial?: () => void;
+  onRestart?: () => void;
   onReconcileLeg?: (legId: string) => void;
   onExecutionModeChange: (value: string) => void;
   onModeChange: (value: ExecutionQuantityInput["mode"]) => void;
@@ -340,7 +459,10 @@ export function ArbitrageExecutionDraftContent({
           instance={instance}
           loading={loading}
           onExecuteLeg={onExecuteLeg}
+          onContinuePartial={onContinuePartial}
           onReconcileLeg={onReconcileLeg}
+          onRestart={onRestart}
+          workflow={workflow}
         />
       ) : null}
 
@@ -351,7 +473,7 @@ export function ArbitrageExecutionDraftContent({
           ? <span className={`inline-flex min-h-9 items-center border px-3 text-xs ${resumeValidated ? "border-sky-400/30 text-sky-100" : "border-red-400/30 text-red-200"}`}>{resumeValidated ? "继续使用现有实例" : "已停止继续执行"}</span>
           : <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>}
       </div>
-      <p className="text-right text-[11px] leading-5 text-[#707985]">{resumeMode ? "继续执行不会创建新套利实例；每条腿仍由现有 executeLeg 边界重新校验。" : "最终确认会由服务端重新读取权威数据；两条腿始终分别要求人工确认。"}</p>
+      <p className="text-right text-[11px] leading-5 text-[#707985]">{resumeMode ? "异常恢复需要再次明确确认；UNKNOWN 或 live partial 只能先重新核验。" : "开始对冲只需一次确认；第一腿完整确认后由服务端连续推进第二腿。"}</p>
     </div>
   );
 }
@@ -362,9 +484,12 @@ export function canConfirmDraft(draft: ArbitrageExecutionDraft | null) {
 }
 
 export function canExecuteLeg(instance: ArbitrageInstance, legId: string) {
-  if (!instance.legs.some((leg) => leg.legId === legId)) return false;
+  const selected = instance.legs.find((leg) => leg.legId === legId);
+  if (!selected) return false;
   if (instance.executionReferences.some((reference) => reference.legId === legId)) return false;
-  if (instance.executionReferences.length === 0) return true;
+  if (instance.executionReferences.length === 0) {
+    return instance.strategyType !== "SPOT_PERPETUAL" || selected.instrumentId.endsWith("-SPOT");
+  }
   if (instance.executionReferences.length !== 1) return false;
   const first = instance.executionReferences[0]!;
   return first.status === "CONFIRMED" && first.confirmedQuantity === first.requestedQuantity;
@@ -384,14 +509,19 @@ export async function loadResumeContext(
   signal?: AbortSignal,
 ) {
   const instance = await fetchArbitrageInstanceById(arbitrageId, signal);
-  if (instance.status !== "OPENING" || !instance.sourcePlanId) throw new Error("resume instance is not opening");
+  if ((instance.status !== "OPENING" && instance.status !== "RESIDUAL") || !instance.sourcePlanId) {
+    throw new Error("resume instance is not an active opening workflow");
+  }
   const [firstLeg, secondLeg] = instance.legs;
   if (firstLeg.plannedQuantity !== secondLeg.plannedQuantity) throw new Error("resume quantities differ");
   const quantityInput = { mode: "ASSET_QUANTITY" as const, quantity: firstLeg.plannedQuantity };
-  const draft = await previewArbitrageExecutionDraft(opportunityId, horizonDays, quantityInput, signal);
-  if (!resumeDraftMatchesInstance(draft, instance)) throw new Error("resume draft does not match instance");
-  const executionMode = await matchingResumeExecutionMode(instance.sourcePlanId, opportunityId, horizonDays, quantityInput);
+  const firstOpening = instance.executionReferences.filter((reference) => reference.phase === "OPENING")[0];
+  const executionMode = firstOpening
+    ? "EXECUTION_PRIORITY" as const
+    : await matchingResumeExecutionMode(instance.sourcePlanId, opportunityId, horizonDays, quantityInput);
   if (!executionMode) throw new Error("resume source plan does not match instance");
+  const draft = await previewArbitrageExecutionDraft(opportunityId, horizonDays, quantityInput, executionMode, signal);
+  if (!resumeDraftMatchesInstance(draft, instance)) throw new Error("resume draft does not match instance");
   const assetSymbol = plannedAssetSymbol(draft);
   if (!assetSymbol) throw new Error("resume asset is unavailable");
   return Object.freeze({ draft, instance, quantity: firstLeg.plannedQuantity, assetSymbol, executionMode });
@@ -443,13 +573,19 @@ function ExecutionInstancePanel({
   instance,
   loading,
   onExecuteLeg,
+  onContinuePartial,
   onReconcileLeg,
+  onRestart,
+  workflow,
 }: {
   executionResults: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
   instance: ArbitrageInstance;
   loading: boolean;
   onExecuteLeg: (legId: string) => void;
+  onContinuePartial: () => void;
   onReconcileLeg: (legId: string) => void;
+  onRestart: () => void;
+  workflow: ArbitrageHedgeWorkflow | null;
 }) {
   return (
     <section className="border border-sky-400/30 bg-sky-500/[0.04] p-4">
@@ -457,6 +593,7 @@ function ExecutionInstancePanel({
         <div><p className="text-xs text-[#8f99a5]">套利实例</p><p className="mt-1 break-all font-mono text-xs text-white">{instance.arbitrageId}</p></div>
         <span className="border border-white/20 px-2 py-1 text-[11px] text-white">{instanceStatusLabel(instance.status)}</span>
       </div>
+      {workflow ? <WorkflowStatus workflow={workflow} /> : null}
       <div className="mt-4 grid gap-3 lg:grid-cols-2">
         {instance.legs.map((leg) => (
           <ExecutionInstanceLeg
@@ -468,14 +605,55 @@ function ExecutionInstancePanel({
             onReconcile={() => onReconcileLeg(leg.legId)}
             permitted={canExecuteLeg(instance, leg.legId)}
             reference={instance.executionReferences.find((reference) => reference.legId === leg.legId)}
+            startMode={instance.executionReferences.length === 0}
           />
         ))}
       </div>
+      {workflow?.riskAction === "CONTINUE_PARTIAL_HEDGE" ? (
+        <div className="mt-4 border border-red-400/40 bg-red-500/[0.08] p-4">
+          <p className="text-sm font-semibold text-red-100">Risk Action Required · 第一腿部分成交，对冲未完整建立</p>
+          <p className="mt-2 text-xs text-red-200">继续操作只会针对已确认且仍受当前 Reality 支持的可归因 exposure 规划第二腿，不会重试第一腿剩余数量。</p>
+          <Button className="mt-3" disabled={loading} onClick={onContinuePartial} type="button">继续对冲已成交部分</Button>
+        </div>
+      ) : null}
+      {workflow?.riskAction === "RESTART_HEDGE" ? (
+        <div className="mt-4 border border-amber-400/35 bg-amber-500/[0.06] p-4">
+          <p className="text-sm text-amber-100">第一腿未成交，对冲未建立。</p>
+          <Button className="mt-3" disabled={loading} onClick={onRestart} type="button" variant="secondary">重新开始对冲</Button>
+        </div>
+      ) : null}
     </section>
   );
 }
 
-function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference }: {
+function WorkflowStatus({ workflow }: { workflow: ArbitrageHedgeWorkflow }) {
+  const label = workflowPhaseLabel(workflow.phase);
+  return <div className={`mt-4 border p-3 text-xs ${workflow.requiresUserAction ? "border-amber-400/35 bg-amber-500/[0.06] text-amber-100" : "border-sky-400/25 bg-sky-500/[0.04] text-sky-100"}`}>
+    <p className="font-semibold">{label}</p>
+    {workflow.reason ? <p className="mt-1">{workflow.reason}</p> : null}
+    {workflow.firstLeg ? <p className="mt-2 font-mono">第一腿 planned {workflow.firstLeg.requestedQuantity} · confirmed {workflow.firstLeg.confirmedQuantity} · Active Managed {workflow.firstLeg.activeManagedQuantity}</p> : null}
+    {workflow.secondLeg ? <p className="mt-1 font-mono">第二腿 planned {workflow.secondLeg.requestedQuantity} · confirmed {workflow.secondLeg.confirmedQuantity} · Active Managed {workflow.secondLeg.activeManagedQuantity}</p> : null}
+  </div>;
+}
+
+function workflowPhaseLabel(phase: ArbitrageHedgeWorkflow["phase"]) {
+  return ({
+    NOT_STARTED: "等待开始对冲", FIRST_LEG_EXECUTING: "第一腿执行中", FIRST_LEG_PENDING: "第一腿订单等待最终确认",
+    FIRST_LEG_CONFIRMED: "第一腿完整成交已确认", SECOND_LEG_EXECUTING: "第二腿执行中",
+    SECOND_LEG_PENDING: "第二腿订单等待最终确认", COMPLETED: "对冲建立完成",
+    FIRST_LEG_FAILED_ZERO: "第一腿未成交", FIRST_LEG_PARTIAL: "第一腿部分成交 · 单边风险",
+    FIRST_LEG_UNKNOWN: "第一腿执行结果暂无法确认", SECOND_LEG_FAILED_ZERO: "第二腿未成交",
+    SECOND_LEG_PARTIAL: "第二腿部分成交 · Residual", SECOND_LEG_UNKNOWN: "第二腿执行结果暂无法确认",
+    RESIDUAL: "Residual · 需要人工处理", CLOSED: "实例管理已结束",
+  } as const)[phase];
+}
+
+function isWorkflowInFlight(phase: ArbitrageHedgeWorkflow["phase"]) {
+  return phase === "FIRST_LEG_EXECUTING" || phase === "FIRST_LEG_PENDING"
+    || phase === "SECOND_LEG_EXECUTING" || phase === "SECOND_LEG_PENDING";
+}
+
+function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference, startMode }: {
   execution?: ArbitrageLegExecutionConfirmation["executionRecord"];
   leg: ArbitrageInstanceLeg;
   loading: boolean;
@@ -483,10 +661,12 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
   onReconcile: () => void;
   permitted: boolean;
   reference?: ArbitrageInstance["executionReferences"][number];
+  startMode: boolean;
 }) {
   const status = execution?.status ?? reference?.status ?? "CREATED";
   const reconcilable = status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
   const verifiedAt = execution?.verifiedAt ?? reference?.updatedAt;
+  const deferredPerpetual = startMode && !permitted && leg.instrumentId.endsWith("-PERP");
   return (
     <div className="border border-[#25282f] bg-black p-4">
       <div className="flex items-center justify-between gap-3"><strong className="text-xs text-white">{leg.role === "LONG" ? "LONG · 多头腿" : "SHORT · 空头腿"}</strong><span className="text-[11px] text-[#8f99a5]">{executionStatusLabel(status)}</span></div>
@@ -496,15 +676,17 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
         <LegExecutionMetric label="执行状态" value={executionStatusLabel(status)} />
         <LegExecutionMetric label="最近核验时间" value={verifiedAt === undefined ? "尚未核验" : formatCheckedAt(verifiedAt)} />
       </dl>
-      <Button
-        className="mt-4 w-full"
-        disabled={loading || (reconcilable ? reference?.executionRecordId === null : !permitted)}
-        onClick={reconcilable ? onReconcile : onExecute}
-        type="button"
-        variant="secondary"
-      >
-        {reconcilable ? "重新核验" : instanceLegButtonLabel(reference?.status)}
-      </Button>
+      {deferredPerpetual
+        ? <p className="mt-4 border border-sky-400/25 px-3 py-2 text-center text-xs text-sky-100">永续合约腿将在现货成交后自动执行</p>
+        : <Button
+            className="mt-4 w-full"
+            disabled={loading || (reconcilable ? reference?.executionRecordId === null : !permitted)}
+            onClick={reconcilable ? onReconcile : onExecute}
+            type="button"
+            variant="secondary"
+          >
+            {reconcilable ? "重新核验" : startMode ? "以此腿开始对冲" : instanceLegButtonLabel(reference?.status)}
+          </Button>}
     </div>
   );
 }
@@ -518,7 +700,7 @@ function executionStatusLabel(status: string) {
 }
 
 function instanceStatusLabel(status: ArbitrageInstance["status"]) {
-  return { OPENING: "建仓中", HOLDING: "持有中", RESIDUAL: "存在残余", CLOSING: "退出中", CLOSED: "已关闭", FAILED: "失败" }[status];
+  return { OPENING: "建仓中", HOLDING: "持有中", RESIDUAL: "存在残余", CLOSING: "退出中", CLOSED: "实例管理已结束", FAILED: "失败" }[status];
 }
 
 function instanceLegButtonLabel(status?: string) {
@@ -591,6 +773,7 @@ function DraftMetric({ label, mono = false, value }: { label: string; mono?: boo
 function capabilityLabel(leg: ArbitrageExecutionDraftLeg) {
   if (leg.capability.status === "AVAILABLE") return "执行能力已接入";
   if (leg.capability.reasonCode === "CREDENTIAL_NOT_CONFIGURED") return "账户凭证未配置";
+  if (leg.capability.reasonCode === "EXECUTION_MODE_NOT_SUPPORTED") return "当前执行模式暂不支持";
   return "执行能力尚未接入";
 }
 

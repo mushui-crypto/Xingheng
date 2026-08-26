@@ -67,6 +67,9 @@ export type OkxExecutionStatus = Extract<
 
 export type OkxProviderOrder = Readonly<OkxOrderIdentity & {
   side?: OkxOrderSide;
+  posSide?: "net" | "long" | "short";
+  reduceOnly?: boolean;
+  tdMode?: OkxTradeMode;
   status: OkxExecutionStatus;
   statusReason: string | null;
   rawState: string;

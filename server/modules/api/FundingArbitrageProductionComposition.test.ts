@@ -72,11 +72,13 @@ test("production composition exposes only the formal arbitrage mutation boundary
     productionSource,
     /new ArbitrageExecutionDraftService\([\s\S]*?formalExecutionRuntimes,\s*\)/u,
   );
-  assert.equal(productionSource.match(/formalExecutionRuntimes,/gu)?.length, 4);
+  assert.equal(productionSource.match(/formalExecutionRuntimes,/gu)?.length, 5);
   assert.match(
     productionSource,
     /registerArbitrageExecutionCommandRoutes\(app, arbitrageExecutionCommand\)/u,
   );
+  assert.match(productionSource, /new ArbitrageHedgeStartService\(\s*arbitrageInstances,\s*arbitrageExecutionCommand,\s*\)/u);
+  assert.match(productionSource, /registerArbitrageHedgeStartRoutes\(app, arbitrageHedgeStart\)/u);
   assert.match(productionSource, /new ArbitrageInstanceExitService\(\s*arbitrageInstances,\s*arbitrageExecutionClose,\s*arbitrageExecutionCommand,\s*arbitragePositionVerification,\s*\)/u);
   assert.match(productionSource, /registerArbitrageInstanceExitRoutes\(app, arbitrageInstanceExit\)/u);
   assert.match(productionSource, /registerFundingArbitrageRoutes\(app, fundingOpportunityQuery\)/u);
@@ -168,9 +170,24 @@ test("Funding Command sends an OKX Spot leg through the registered OKX Formal Ru
     fixture.credentials,
     fixture.records,
     runtimes,
+    { evaluate: async (_userId, instance) => instance.legs
+      .filter((leg) => leg.instrumentId.endsWith("-PERP"))
+      .map((leg) => ({
+        legId: leg.legId,
+        targetDirection: leg.role,
+        positionMode: "ONE_WAY" as const,
+        currentSignedNetQuantity: "0",
+        openingAttributionSafe: true,
+        reason: "ONE_WAY_FLAT" as const,
+        checkedAt: now,
+      })) },
     {
       contexts: { load: async () => { throw new Error("not used by the first leg"); } },
       spotAttributions: {},
+      continuationSafety: {
+        loadFreshVerification: async () => null,
+        evaluate: async () => { throw new Error("not used by the first leg"); },
+      },
     },
     { clock: () => now, intentTtlMs: 30_000 },
   );
@@ -488,6 +505,7 @@ function okxFundingDraft(): ArbitrageExecutionDraft {
     sourceIdentity: `arbitrage-dashboard:okx-spot-perp-opportunity:${now}`,
     sourceSnapshotGeneratedAt: now,
     horizonDays: 90,
+    executionMode: "EXECUTION_PRIORITY",
     strategyType: "SPOT_PERPETUAL",
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" },
     legs: [

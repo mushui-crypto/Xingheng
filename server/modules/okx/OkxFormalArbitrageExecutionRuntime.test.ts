@@ -13,6 +13,24 @@ import type {
 } from "./OkxIntentExecutionRuntime";
 import { OkxFormalArbitrageExecutionRuntime } from "./OkxFormalArbitrageExecutionRuntime";
 
+test("formal runtime exposes the underlying mode capability used by Draft", () => {
+  const adapter = new OkxFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute() { throw new Error("unused"); },
+    supportsOpeningExecutionMode: ({ executionMode }) => executionMode === "EXECUTION_PRIORITY",
+  });
+
+  assert.deepEqual(adapter.openingExecutionCapability({
+    executionMode: "PRICE_PRIORITY",
+    marketType: "perpetual",
+  }), { supported: false, reasonCode: "EXECUTION_MODE_NOT_SUPPORTED" });
+  assert.deepEqual(adapter.openingExecutionCapability({
+    executionMode: "EXECUTION_PRIORITY",
+    marketType: "perpetual",
+  }), { supported: true, reasonCode: "AVAILABLE" });
+});
+
 test("uses the same diagnostic contract for rejected and credential errors", async () => {
   for (const [category, message] of [
     ["provider_request_rejected", "request rejected"],

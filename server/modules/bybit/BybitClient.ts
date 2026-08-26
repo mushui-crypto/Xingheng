@@ -305,8 +305,8 @@ export class BybitClient {
     const root = record(payload, "Bybit response");
     const code = integer(root.retCode, "Bybit retCode");
     if (code !== 0) {
-      const message = optionalString(root.retMsg) ?? "Bybit request was rejected.";
-      throw new BybitProviderError(authenticationCode(code) ? "credential_validation_failed" : "provider_rejected", message, code);
+      const category = authenticationCode(code) ? "credential_validation_failed" : "provider_rejected";
+      throw new BybitProviderError(category, safeBybitProviderMessage(category), code);
     }
     return root;
   }
@@ -341,9 +341,16 @@ function providerOrder(
     fee: executions.fee,
     feeCurrency: executions.feeCurrency,
     ...(row.positionIdx === undefined || row.positionIdx === "" ? {} : { positionIdx: positionIdx(row.positionIdx) }),
+    ...(row.reduceOnly === undefined || row.reduceOnly === "" ? {} : { reduceOnly: providerBoolean(row.reduceOnly) }),
     ...(row.marketUnit === undefined || row.marketUnit === "" ? {} : { marketUnit: marketUnit(row.marketUnit) }),
     updatedAt: optionalTimestamp(row.updatedTime),
   });
+}
+
+function providerBoolean(value: unknown) {
+  if (value === true || value === "true") return true;
+  if (value === false || value === "false") return false;
+  throw new Error("Bybit reduceOnly is invalid.");
 }
 
 function timestamp(value: unknown, name: string) {
@@ -513,6 +520,16 @@ function normalizeCredentials(value: BybitCredentials) {
 
 function authenticationCode(code: number) {
   return code === 10002 || code === 10003 || code === 10004 || code === 10005 || code === 33004;
+}
+
+export function safeBybitProviderMessage(category: string) {
+  if (category === "credential_validation_failed") return "Bybit credential validation failed.";
+  if (category === "provider_transport_error" || category === "provider_unavailable") {
+    return "Bybit provider is currently unavailable.";
+  }
+  if (category === "provider_response_invalid") return "Bybit returned an invalid response.";
+  if (category === "position_mode_unsupported") return "Bybit position mode is unsupported.";
+  return "Bybit request was rejected.";
 }
 
 function record(value: unknown, label: string): Record<string, unknown> {

@@ -69,7 +69,9 @@ function nextStatus(
   if (event === "REMOTE_UNKNOWN" && isAwaitingRemoteFact(status)) {
     return "UNKNOWN";
   }
-  if (event === "REMOTE_CONFIRMED" && isAwaitingRemoteFact(status)) return "CONFIRMED";
+  // A cancel/terminal-failure observation is not allowed to defeat a later
+  // authoritative full-fill query for the same Provider order.
+  if (event === "REMOTE_CONFIRMED" && (isAwaitingRemoteFact(status) || status === "FAILED")) return "CONFIRMED";
   if (event === "REMOTE_FAILED" && isAwaitingRemoteFact(status)) return "FAILED";
   throw new Error(`Execution state ${status} does not accept ${event}.`);
 }

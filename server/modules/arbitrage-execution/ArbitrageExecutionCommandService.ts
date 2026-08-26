@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { absoluteDifference, compareUnsignedDecimals } from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
+import type { ArbitrageCommandFingerprint } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { createAssetQuantity } from "../cex/AssetQuantity";
 import { createExecutionCanonicalAssetSource } from "../cex/CanonicalAssetSource";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
@@ -25,15 +26,35 @@ import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
 } from "./FormalExecutionRuntimeRegistry";
+import type {
+  ArbitrageOpeningSafetyEvaluator,
+  ArbitrageOpeningSafetyResult,
+} from "./ArbitrageOpeningSafetyEvaluator";
+import type { OpeningContinuationSafetyEvaluator } from "./OpeningContinuationSafetyEvaluator";
+import {
+  processProviderMutationSerializer,
+  type ProviderMutationKey,
+  type ProviderMutationSerializer,
+} from "./ProviderMutationSerializer";
+import {
+  canonicalCommandDecimal,
+  createArbitrageCommandPayloadFingerprint,
+} from "./ArbitrageCommandFingerprint";
+import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
 
 type DraftService = Pick<ArbitrageExecutionDraftService, "createDraft" | "preview">;
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
   "create" | "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult"
+  | "applyHistoricalExecutionCorrection"
+  | "readCommandReplay"
   | "prepareSecondLegHedge" | "readPreparedSecondLegHedge" | "failEmptyOpening"
+  | "readSpotOpeningAttributionEvidence" | "recordSpotOpeningAttributionEvidence"
 >;
 type CredentialSummaries = Pick<UserExchangeCredentialStore, "findSummary">;
 type SpotAttributionSources = Partial<Record<ExecutionIntent["venue"], SpotOpeningAttributionSource>>;
+type OpeningSafetyEvaluator = Pick<ArbitrageOpeningSafetyEvaluator, "evaluate">;
+type ContinuationSafetyEvaluator = Pick<OpeningContinuationSafetyEvaluator, "evaluate" | "loadFreshVerification">;
 type PlannedDraftLeg = ArbitrageExecutionDraftLeg & Readonly<{
   planning: Extract<ArbitrageExecutionDraftLeg["planning"], { status: "PLANNED" }>;
 }>;
@@ -71,8 +92,10 @@ export class ArbitrageExecutionCommandError extends Error {
       | "execution_recovery_record_not_found"
       | "execution_recovery_identity_conflict"
       | "second_leg_not_allowed"
+      | "opening_attribution_unsafe"
       | "execution_state_unknown"
-      | "manual_reconciliation_required",
+      | "manual_reconciliation_required"
+      | "idempotency_conflict",
     message: string,
     readonly manualReconciliation?: Readonly<{
       manualReconciliationRequired: true;
@@ -93,15 +116,18 @@ export class ArbitrageExecutionCommandService {
     private readonly credentials: CredentialSummaries,
     private readonly executionRecords: ExecutionRecordRecoveryStore,
     private readonly runtimes: FormalExecutionRuntimeResolver,
+    private readonly openingSafety: OpeningSafetyEvaluator,
     private readonly hedgePlanning: Readonly<{
       contexts: ArbitrageExecutionPlanningContextSource;
       spotAttributions: SpotAttributionSources;
+      continuationSafety: ContinuationSafetyEvaluator;
     }>,
     private readonly options: Readonly<{
       clock?: () => number;
       createArbitrageId?: (userId: string, confirmationId: string) => string;
       createIntentId?: (userId: string, arbitrageId: string, legId: string, commandId: string) => string;
       intentTtlMs?: number;
+      mutationSerializer?: ProviderMutationSerializer;
     }> = {},
   ) {}
 
@@ -150,17 +176,72 @@ export class ArbitrageExecutionCommandService {
   async executeLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = parseLegConfirmation(input);
+    return this.executeLegRequest(userId, request, "STANDARD");
+  }
+
+  async continuePartialHedge(
+    authenticatedUserId: string,
+    arbitrageIdInput: string,
+    input: unknown,
+  ): Promise<ArbitrageLegExecutionConfirmation> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const arbitrageId = identifier(arbitrageIdInput, "arbitrageId");
+    const continuation = parsePartialContinuation(input);
+    const instance = this.instances.get(userId, arbitrageId);
+    if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const first = authoritativeTerminalPartialFirst(instance);
+    const second = instance.legs.find((candidate) => candidate.legId !== first.legId);
+    if (!second) throw commandError("second_leg_not_allowed", "第二腿身份无法可靠确认。");
+    const request: LegConfirmationRequest = Object.freeze({
+      ...continuation,
+      arbitrageId,
+      legId: second.legId,
+    });
+    return this.executeLegRequest(userId, request, "TERMINAL_PARTIAL_CONTINUE");
+  }
+
+  private async executeLegRequest(
+    userId: string,
+    request: LegConfirmationRequest,
+    continuationMode: "STANDARD" | "TERMINAL_PARTIAL_CONTINUE",
+  ): Promise<ArbitrageLegExecutionConfirmation> {
     const instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     const selected = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!selected) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    const openingNotStarted = !instance.executionReferences.some((reference) => reference.phase === "OPENING");
+    if (openingNotStarted && !validOpeningFirstLeg(instance, selected.legId)) {
+      throw commandError(
+        "invalid_execution_confirmation",
+        "现货永续套利必须先执行现货腿，再执行永续合约腿。",
+      );
+    }
 
     const intentId = this.options.createIntentId?.(userId, request.arbitrageId, request.legId, request.commandId)
       ?? deterministicId("intent", userId, request.arbitrageId, request.legId, request.commandId);
-    const existingReference = instance.executionReferences.find((reference) => reference.executionIntentId === intentId);
-    if (existingReference) return resultFromReference(instance, existingReference, true);
+    const commandFingerprint = openingCommandFingerprint(
+      userId,
+      request,
+      instance,
+      selected,
+      intentId,
+      continuationMode,
+    );
+    const replayReferenceId = this.readCommandReplay(commandFingerprint);
+    if (replayReferenceId !== null) {
+      return resultFromCommandReplay(instance, replayReferenceId);
+    }
+    if (instance.executionReferences.some((reference) => reference.executionIntentId === intentId)) {
+      throw commandError("execution_state_unknown", "执行引用缺少可验证的 command fingerprint，请勿重复提交。");
+    }
 
-    const confirmedFirstLeg = assertLegCanExecute(instance, request.legId);
+    const confirmedFirstLeg = assertLegCanExecute(instance, request.legId, continuationMode);
+    if (confirmedFirstLeg === null) {
+      this.assertOpeningSafety(
+        await this.openingSafety.evaluate(userId, instance),
+        instance.legs.filter((leg) => leg.instrumentId.endsWith("-PERP")).map((leg) => leg.legId),
+      );
+    }
     let draft: ArbitrageExecutionDraft;
     try {
       draft = confirmedFirstLeg === null
@@ -184,7 +265,9 @@ export class ArbitrageExecutionCommandService {
         instance,
         draft,
         accounts,
-        sourcePlanIdentity(request),
+        confirmedFirstLeg !== null
+          ? instance.sourcePlanId
+          : sourcePlanIdentity(request),
         confirmedFirstLeg === null,
       );
       const selectedDraftLeg = draft.legs.find((candidate) => candidate.legId === request.legId);
@@ -270,72 +353,133 @@ export class ArbitrageExecutionCommandService {
       if (confirmedFirstLeg === null) this.failEmptyOpeningIfSafe(userId, instance.arbitrageId);
       throw error;
     }
-    try {
-      this.instances.claimExecutionReference(userId, instance.arbitrageId, {
-        legId: selected.legId,
-        phase: "OPENING",
-        quantityEffect: "INCREASE",
-        executionIntentId: intent.intentId,
-        requestedQuantity: intent.quantity.quantity,
-        createdAt: now,
-      });
-    } catch (error) {
-      const raced = this.instances.get(userId, instance.arbitrageId);
-      const reference = raced?.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId);
-      if (!raced || !reference) {
-        if (confirmedFirstLeg === null) this.failEmptyOpeningIfSafe(userId, instance.arbitrageId);
-        throw error;
+    const mutationKeys: ProviderMutationKey[] = [mutationKey(userId, selected)];
+    if (confirmedFirstLeg === null) {
+      for (const perpetualLeg of instance.legs.filter((candidate) => candidate.instrumentId.endsWith("-PERP"))) {
+        mutationKeys.push(mutationKey(userId, perpetualLeg));
       }
-      return resultFromReference(raced, reference, true);
+    } else {
+      const firstLeg = instance.legs.find((candidate) => candidate.legId === confirmedFirstLeg.legId);
+      if (!firstLeg) throw commandError("second_leg_not_allowed", "第一腿身份无法可靠确认，不能执行第二腿。");
+      mutationKeys.push(mutationKey(userId, firstLeg));
     }
+    return this.mutationSerializer().runExclusiveMany(mutationKeys, async () => {
+      const currentInstance = this.instances.get(userId, instance.arbitrageId);
+      if (!currentInstance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+      const serializedReplayReferenceId = this.readCommandReplay(commandFingerprint);
+      if (serializedReplayReferenceId !== null) {
+        return resultFromCommandReplay(currentInstance, serializedReplayReferenceId);
+      }
+      const freshVerification = confirmedFirstLeg === null
+        ? undefined
+        : await this.hedgePlanning.continuationSafety.loadFreshVerification(userId, currentInstance);
+      if (confirmedFirstLeg !== null) {
+        const continuation = await this.hedgePlanning.continuationSafety.evaluate(
+          userId,
+          currentInstance,
+          confirmedFirstLeg.executionIntentId,
+          freshVerification,
+        );
+        if (continuation.status !== "SUPPORTED") {
+          throw commandError(
+            "second_leg_not_allowed",
+            continuation.status === "UNKNOWN"
+              ? "第一腿当前真实仓位无法可靠确认，不能执行第二腿。"
+              : "第一腿当前真实仓位已不足以支持确认的执行敞口，不能执行第二腿。",
+          );
+        }
+      }
+      const openingSafetyLegIds = confirmedFirstLeg === null
+        ? currentInstance.legs.filter((candidate) => candidate.instrumentId.endsWith("-PERP")).map(({ legId }) => legId)
+        : selected.instrumentId.endsWith("-PERP") ? [selected.legId] : [];
+      if (openingSafetyLegIds.length > 0) {
+        const currentSafety = await this.openingSafety.evaluate(userId, currentInstance, freshVerification);
+        this.assertOpeningSafety(currentSafety, openingSafetyLegIds);
+      }
+      try {
+        this.instances.claimExecutionReference(userId, instance.arbitrageId, {
+          legId: selected.legId,
+          phase: "OPENING",
+          quantityEffect: "INCREASE",
+          executionIntentId: intent.intentId,
+          requestedQuantity: intent.quantity.quantity,
+          commandId: request.commandId,
+          operationType: "EXECUTION_OPEN",
+          businessPayloadFingerprint: commandFingerprint.businessPayloadFingerprint,
+          createdAt: now,
+        });
+      } catch (error) {
+        const raced = this.instances.get(userId, instance.arbitrageId);
+        let replayId: string | null = null;
+        try {
+          replayId = this.readCommandReplay(commandFingerprint);
+        } catch (replayError) {
+          throw replayError;
+        }
+        if (!raced || replayId === null) {
+          if (confirmedFirstLeg === null) this.failEmptyOpeningIfSafe(userId, instance.arbitrageId);
+          throw error;
+        }
+        return resultFromCommandReplay(raced, replayId);
+      }
 
-    let runtimeResult: FormalExecutionRuntimeResult;
-    try {
-      runtimeResult = await runtime.execute(intent);
-    } catch (error) {
-      if (error instanceof ManualReconciliationRequiredError) {
-        throw manualReconciliationCommandError(error);
+      let runtimeResult: FormalExecutionRuntimeResult;
+      try {
+        runtimeResult = await runtime.execute(intent);
+      } catch (error) {
+        if (error instanceof ManualReconciliationRequiredError) {
+          throw manualReconciliationCommandError(error);
+        }
+        throw commandError(
+          "execution_state_unknown",
+          "执行状态暂时无法确认；套利实例和执行引用已保留，请勿重复提交。",
+        );
       }
-      throw commandError(
-        "execution_state_unknown",
-        "执行状态暂时无法确认；套利实例和执行引用已保留，请勿重复提交。",
+      assertRuntimeIdentity(runtimeResult.executionRecord, intent);
+      this.instances.linkExecutionRecord(
+        userId,
+        instance.arbitrageId,
+        intent.intentId,
+        runtimeResult.executionRecord.executionId,
+        runtimeResult.executionRecord.updatedAt,
       );
-    }
-    assertRuntimeIdentity(runtimeResult.executionRecord, intent);
-    this.instances.linkExecutionRecord(
-      userId,
-      instance.arbitrageId,
-      intent.intentId,
-      runtimeResult.executionRecord.executionId,
-      runtimeResult.executionRecord.updatedAt,
-    );
-    const linked = this.instances.get(userId, instance.arbitrageId);
-    const linkedReference = linked?.executionReferences.find(
-      (candidate) => candidate.executionIntentId === intent.intentId,
-    );
-    if (!linkedReference) {
-      throw commandError("execution_state_unknown", "执行引用状态暂时无法确认，请勿重复提交。");
-    }
-    const attributableStatus = runtimeResult.confirmedQuantity === null
-      ? "UNKNOWN" as const
-      : referenceStatus(runtimeResult.executionRecord.status);
-    const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
-      executionIntentId: intent.intentId,
-      status: attributableStatus,
-      confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
-      ...(runtimeResult.mutationDisposition === undefined
-        ? {}
-        : { mutationDisposition: runtimeResult.mutationDisposition }),
-      updatedAt: runtimeResult.executionRecord.updatedAt,
+      const linked = this.instances.get(userId, instance.arbitrageId);
+      const linkedReference = linked?.executionReferences.find(
+        (candidate) => candidate.executionIntentId === intent.intentId,
+      );
+      if (!linkedReference) {
+        throw commandError("execution_state_unknown", "执行引用状态暂时无法确认，请勿重复提交。");
+      }
+      const attributableStatus = runtimeResult.confirmedQuantity === null
+        ? "UNKNOWN" as const
+        : referenceStatus(runtimeResult.executionRecord.status);
+      const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
+        executionIntentId: intent.intentId,
+        status: attributableStatus,
+        confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
+        ...(runtimeResult.mutationDisposition === undefined
+          ? {}
+          : { mutationDisposition: runtimeResult.mutationDisposition }),
+        updatedAt: runtimeResult.executionRecord.updatedAt,
+      });
+      const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
+      if (draftLeg.marketType === "spot" && attributableStatus === "CONFIRMED") {
+        const canonical = canonicalInstrumentFromId(selected.instrumentId);
+        try {
+          await this.readSpotExposure(userId, selected, draftLeg, canonical.baseAsset, reference);
+        } catch {
+          // The execution fact remains confirmed. Missing attribution evidence is recovered by later
+          // second-leg planning or the read-only Delta service and must never fabricate net exposure.
+        }
+      }
+      return resultFromReference(updated, reference, false, attributableStatus, runtimeResult.diagnostic);
     });
-    const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
-    return resultFromReference(updated, reference, false, attributableStatus, runtimeResult.diagnostic);
   }
 
   async reconcileLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = parseReconciliationRequest(input);
-    const key = `${userId}\u0000${request.arbitrageId}\u0000${request.legId}`;
+    const key = `${userId}\u0000${request.arbitrageId}\u0000${request.legId}\u0000${request.executionIntentId ?? "LATEST"}`;
     const existing = this.reconciliationInFlight.get(key);
     if (existing) return existing;
     const operation = this.reconcileLegOnce(userId, request);
@@ -349,19 +493,30 @@ export class ArbitrageExecutionCommandService {
 
   private async reconcileLegOnce(
     userId: string,
-    request: Readonly<{ arbitrageId: string; legId: string }>,
+    request: ReconciliationRequest,
   ): Promise<ArbitrageLegExecutionConfirmation> {
     const instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw commandError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const historicalCorrection = instance.status === "CLOSED" || instance.status === "FAILED";
+    if (historicalCorrection && request.executionIntentId === undefined) {
+      throw commandError(
+        "arbitrage_execution_reference_not_found",
+        "历史执行事实核验必须明确指定 executionIntentId。",
+      );
+    }
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!leg) throw commandError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
     const runtime = this.resolveRuntime(leg.venue);
-    const references = instance.executionReferences.filter((reference) => reference.legId === request.legId);
+    const references = instance.executionReferences.filter((reference) => reference.legId === request.legId
+      && (request.executionIntentId === undefined
+        || reference.executionIntentId === request.executionIntentId));
     const reconcilable = references.filter((reference) => reference.status === "CLAIMED"
       || reference.status === "LINKED"
       || reference.status === "PENDING_CONFIRMATION"
       || reference.status === "UNKNOWN");
-    const candidates = reconcilable.length > 0 ? reconcilable : references;
+    const latestUpdatedAt = references.reduce((latest, reference) => Math.max(latest, reference.updatedAt), -1);
+    const terminalCandidates = references.filter((reference) => reference.updatedAt === latestUpdatedAt);
+    const candidates = reconcilable.length > 0 ? reconcilable : terminalCandidates;
     if (candidates.length !== 1) {
       throw commandError("arbitrage_execution_reference_not_found", "该套利腿不存在唯一可核验的执行引用。");
     }
@@ -387,12 +542,11 @@ export class ArbitrageExecutionCommandService {
       )!;
       return resultFromReference(updated, updatedReference, false, "FAILED");
     }
-    if (reference.status === "CONFIRMED" || reference.status === "FAILED") {
-      return resultFromReference(currentInstance, reference, true);
-    }
     if (reference.status !== "LINKED"
       && reference.status !== "PENDING_CONFIRMATION"
-      && reference.status !== "UNKNOWN") {
+      && reference.status !== "UNKNOWN"
+      && reference.status !== "CONFIRMED"
+      && reference.status !== "FAILED") {
       throw commandError("execution_state_unknown", "该套利腿当前尚不能进行远端核验。");
     }
     const executionRecordId = reference.executionRecordId;
@@ -413,16 +567,33 @@ export class ArbitrageExecutionCommandService {
     const attributableStatus = runtimeResult.confirmedQuantity === null
       ? "UNKNOWN" as const
       : referenceStatus(runtimeResult.executionRecord.status);
-    const updated = this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, {
+    const idempotentReplay = reference.status === attributableStatus
+      && runtimeResult.confirmedQuantity === reference.confirmedQuantity;
+    const projectionUpdate = {
       executionIntentId: reference.executionIntentId,
       status: attributableStatus,
       confirmedQuantity: runtimeResult.confirmedQuantity ?? reference.confirmedQuantity,
       updatedAt: runtimeResult.executionRecord.updatedAt,
-    });
+    } as const;
+    const updated = historicalCorrection
+      ? this.instances.applyHistoricalExecutionCorrection(userId, currentInstance.arbitrageId, projectionUpdate, {
+          recoveryId: deterministicId(
+            "recovery",
+            userId,
+            currentInstance.arbitrageId,
+            reference.executionIntentId,
+            attributableStatus,
+            projectionUpdate.confirmedQuantity,
+            String(runtimeResult.executionRecord.updatedAt),
+          ),
+          actorId: userId,
+          checkedAt: runtimeResult.executionRecord.updatedAt,
+        })
+      : this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, projectionUpdate);
     const updatedReference = updated.executionReferences.find(
       (candidate) => candidate.executionIntentId === reference.executionIntentId,
     )!;
-    return resultFromReference(updated, updatedReference, false, attributableStatus);
+    return resultFromReference(updated, updatedReference, idempotentReplay, attributableStatus);
   }
 
   private async recoverExecutionReference(
@@ -469,13 +640,17 @@ export class ArbitrageExecutionCommandService {
 
   private async revalidateDraft(
     userId: string,
-    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays" | "quantityInput">,
+    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays" | "quantityInput" | "executionMode">,
   ) {
     const draft = await this.drafts.preview(userId, {
       opportunityId: request.opportunityId,
       horizonDays: request.horizonDays,
+      executionMode: request.executionMode,
       quantityInput: request.quantityInput,
     });
+    if (draft.executionMode !== request.executionMode) {
+      throw commandError("execution_capability_unavailable", "当前草案执行模式与用户确认不一致。");
+    }
     if (!draft.allLegsExecutable || draft.legs.some((leg) => leg.planning.status !== "PLANNED")) {
       throw commandError(
         "execution_capability_unavailable",
@@ -487,12 +662,16 @@ export class ArbitrageExecutionCommandService {
 
   private async revalidateSecondLegDraft(
     userId: string,
-    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays">,
+    request: Pick<FinalConfirmationRequest, "opportunityId" | "horizonDays" | "executionMode">,
   ) {
     const draft = await this.drafts.createDraft(userId, {
       opportunityId: request.opportunityId,
       horizonDays: request.horizonDays,
+      executionMode: request.executionMode,
     });
+    if (draft.executionMode !== request.executionMode) {
+      throw commandError("execution_capability_unavailable", "当前草案执行模式与用户确认不一致。");
+    }
     if (draft.legs.some((leg) => leg.capability.status !== "AVAILABLE" || leg.providerSymbol === null)) {
       throw commandError(
         "execution_capability_unavailable",
@@ -551,7 +730,7 @@ export class ArbitrageExecutionCommandService {
     const targetBaseQuantity = firstDraftLeg.marketType === "spot"
       ? await this.readSpotExposure(userId, firstLeg, firstDraftLeg, firstInstrument.baseAsset, firstReference)
       : firstReference.confirmedQuantity;
-    const context = await this.hedgePlanning.contexts.load(selected.venue, selected.instrumentId);
+    const context = planningContextFromDraftLeg(draftLeg);
     if (context.instrument.instrumentId !== selected.instrumentId
       || context.instrument.providerSymbol !== draftLeg.providerSymbol
       || context.instrument.baseAsset.symbol !== firstInstrument.baseAsset) {
@@ -586,11 +765,26 @@ export class ArbitrageExecutionCommandService {
     reference: ArbitrageInstance["executionReferences"][number],
   ) {
     const source = this.hedgePlanning.spotAttributions[leg.venue];
-    if (!source || reference.executionRecordId === null || draftLeg.providerSymbol === null) {
+    if (reference.executionRecordId === null) {
       throw commandError("execution_state_unknown", "第一腿现货实际敞口无法可靠归因，不能执行第二腿。");
     }
     try {
-      return await source.readAttributableBaseQuantity(userId, {
+      const persisted = this.instances.readSpotOpeningAttributionEvidence(
+        userId,
+        reference.arbitrageId,
+        leg.legId,
+      ).find((evidence) => evidence.executionIntentId === reference.executionIntentId);
+      if (persisted) {
+        if (persisted.executionRecordId !== reference.executionRecordId || persisted.venue !== leg.venue
+          || persisted.accountId !== leg.accountId || persisted.instrumentId !== leg.instrumentId) {
+          throw new Error("Persisted Spot opening attribution identity is invalid.");
+        }
+        return persisted.attributableBaseQuantity;
+      }
+      if (!source || draftLeg.providerSymbol === null) {
+        throw new Error("Spot opening attribution source is unavailable.");
+      }
+      const attributableBaseQuantity = await source.readAttributableBaseQuantity(userId, {
         accountId: leg.accountId,
         instrumentId: leg.instrumentId,
         providerSymbol: draftLeg.providerSymbol,
@@ -599,6 +793,19 @@ export class ArbitrageExecutionCommandService {
         executionRecordId: reference.executionRecordId,
         grossConfirmedQuantity: reference.confirmedQuantity,
       });
+      this.instances.recordSpotOpeningAttributionEvidence(userId, {
+        arbitrageId: reference.arbitrageId,
+        legId: leg.legId,
+        executionIntentId: reference.executionIntentId,
+        executionRecordId: reference.executionRecordId,
+        attributableBaseQuantity,
+        source: "PROVIDER_ORDER_FILLS",
+        confirmedAt: Math.max(reference.updatedAt, this.now()),
+        venue: leg.venue,
+        accountId: leg.accountId,
+        instrumentId: leg.instrumentId,
+      });
+      return attributableBaseQuantity;
     } catch {
       throw commandError("execution_state_unknown", "第一腿现货实际敞口无法可靠归因，不能执行第二腿。");
     }
@@ -609,6 +816,70 @@ export class ArbitrageExecutionCommandService {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Execution confirmation clock is invalid.");
     return value;
   }
+
+  private mutationSerializer() {
+    return this.options.mutationSerializer ?? processProviderMutationSerializer;
+  }
+
+  private readCommandReplay(fingerprint: ArbitrageCommandFingerprint) {
+    try {
+      return this.instances.readCommandReplay(fingerprint);
+    } catch {
+      throw commandError("idempotency_conflict", "commandId 已用于不同的开仓业务请求。");
+    }
+  }
+
+  private assertOpeningSafety(
+    results: readonly ArbitrageOpeningSafetyResult[],
+    expectedLegIds: readonly string[],
+  ) {
+    const missingLeg = expectedLegIds.find((legId) => !results.some((result) => result.legId === legId));
+    if (missingLeg) {
+      throw commandError(
+        "opening_attribution_unsafe",
+        "当前永续仓位模式或真实仓位无法可靠确认，不能执行开仓。",
+      );
+    }
+    const expected = results.filter((result) => expectedLegIds.includes(result.legId));
+    const unsafe = expected.find((result) => !result.openingAttributionSafe);
+    if (!unsafe) return;
+    if (unsafe.reason === "ONE_WAY_OPPOSITE_DIRECTION") {
+      throw commandError(
+        "opening_attribution_unsafe",
+        "当前 ONE_WAY 永续净仓与目标套利腿方向相反，不能安全归因本次开仓。",
+      );
+    }
+    throw commandError(
+      "opening_attribution_unsafe",
+      "当前永续仓位模式或真实仓位无法可靠确认，不能执行开仓。",
+    );
+  }
+}
+
+function planningContextFromDraftLeg(
+  leg: ArbitrageExecutionDraftLeg,
+): import("./ArbitrageExecutionPlanningContext").ArbitrageExecutionPlanningContext {
+  const canonical = canonicalInstrumentFromId(leg.instrumentId);
+  const asset = canonicalAssets.getAsset(canonical.baseAsset);
+  if (!asset || leg.providerSymbol === null || leg.tradingRules === null || leg.quote === null
+    || leg.marketType !== canonical.contractType) {
+    throw commandError("execution_capability_unavailable", "第二腿权威规划上下文当前不可用。");
+  }
+  return Object.freeze({
+    instrument: Object.freeze({
+      instrumentId: canonical.instrumentId,
+      providerSymbol: leg.providerSymbol,
+      baseAsset: asset,
+      quoteAsset: canonical.quoteAsset,
+      ...(canonical.contractType === "perpetual" ? { settlementAsset: canonical.quoteAsset } : {}),
+      marketType: canonical.contractType,
+      contractType: canonical.contractType === "spot" ? "spot" as const : "linear_perpetual" as const,
+      quantityUnit: leg.venue === "okx" && canonical.contractType === "perpetual" ? "contract" as const : "base" as const,
+      status: "trading" as const,
+    }),
+    tradingRules: leg.tradingRules,
+    quote: Object.freeze({ bid: leg.quote.bid, ask: leg.quote.ask, fetchedAt: leg.quote.updatedAt }),
+  });
 }
 
 function restorePreparedHedge(
@@ -645,7 +916,15 @@ type LegConfirmationRequest = FinalConfirmationRequest & Readonly<{
   commandId: string;
 }>;
 
-type ReconciliationRequest = Readonly<{ arbitrageId: string; legId: string }>;
+type PartialContinuationRequest = FinalConfirmationRequest & Readonly<{
+  commandId: string;
+}>;
+
+type ReconciliationRequest = Readonly<{
+  arbitrageId: string;
+  legId: string;
+  executionIntentId?: string;
+}>;
 
 function parseFinalConfirmation(input: unknown): FinalConfirmationRequest {
   const value = object(input, "execution confirmation");
@@ -667,12 +946,31 @@ function parseLegConfirmation(input: unknown): LegConfirmationRequest {
   });
 }
 
+function parsePartialContinuation(input: unknown): PartialContinuationRequest {
+  const value = object(input, "partial hedge continuation");
+  exactKeys(value, [
+    "confirmationId", "opportunityId", "horizonDays", "quantityInput", "executionMode", "confirmed", "commandId",
+  ]);
+  return Object.freeze({
+    ...commonConfirmation(value),
+    commandId: identifier(value.commandId, "commandId"),
+  });
+}
+
 function parseReconciliationRequest(input: unknown): ReconciliationRequest {
   const value = object(input, "leg execution reconciliation");
-  exactKeys(value, ["arbitrageId", "legId"]);
+  const allowed = ["arbitrageId", "legId", "executionIntentId"];
+  const unknown = Object.keys(value).find((key) => !allowed.includes(key));
+  if (unknown) throw invalid(`请求包含不允许的字段：${unknown}。`);
+  for (const required of ["arbitrageId", "legId"] as const) {
+    if (!(required in value)) throw invalid(`请求缺少字段：${required}。`);
+  }
   return Object.freeze({
     arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
     legId: identifier(value.legId, "legId"),
+    ...(value.executionIntentId === undefined
+      ? {}
+      : { executionIntentId: identifier(value.executionIntentId, "executionIntentId") }),
   });
 }
 
@@ -759,17 +1057,102 @@ function assertInstanceMatches(
   }
 }
 
-function assertLegCanExecute(instance: ArbitrageInstance, selectedLegId: string) {
+function assertLegCanExecute(
+  instance: ArbitrageInstance,
+  selectedLegId: string,
+  continuationMode: "STANDARD" | "TERMINAL_PARTIAL_CONTINUE",
+) {
   const references = instance.executionReferences;
   if (references.length === 0) return null;
   const sameLeg = references.some((reference) => reference.legId === selectedLegId);
   if (sameLeg) throw commandError("second_leg_not_allowed", "该套利腿已经存在执行记录。");
   if (references.length !== 1) throw commandError("second_leg_not_allowed", "当前实例存在多条执行状态，不能继续自动推进。");
   const first = references[0]!;
-  if (first.status !== "CONFIRMED" || first.confirmedQuantity !== first.requestedQuantity) {
+  const fullConfirmed = first.status === "CONFIRMED"
+    && first.confirmedQuantity === first.requestedQuantity;
+  const terminalPartial = continuationMode === "TERMINAL_PARTIAL_CONTINUE"
+    && first.status === "FAILED"
+    && compareUnsignedDecimals(first.confirmedQuantity, "0") > 0
+    && compareUnsignedDecimals(first.confirmedQuantity, first.requestedQuantity) < 0;
+  if (!fullConfirmed && !terminalPartial) {
     throw commandError("second_leg_not_allowed", "第一腿尚未完整确认，不能执行第二腿。");
   }
   return first;
+}
+
+function authoritativeTerminalPartialFirst(instance: ArbitrageInstance) {
+  const opening = instance.executionReferences.filter((reference) => reference.phase === "OPENING")
+    .sort((left, right) => left.createdAt - right.createdAt || left.executionIntentId.localeCompare(right.executionIntentId));
+  const first = opening[0];
+  if (!first) throw commandError("second_leg_not_allowed", "当前实例不存在第一腿 terminal partial 事实。");
+  if (first.status !== "FAILED"
+    || first.executionRecordId === null
+    || compareUnsignedDecimals(first.confirmedQuantity, "0") <= 0
+    || compareUnsignedDecimals(first.confirmedQuantity, first.requestedQuantity) >= 0) {
+    throw commandError("second_leg_not_allowed", "只有第一腿权威 terminal partial 才能继续对冲已成交部分。");
+  }
+  return first;
+}
+
+function mutationKey(
+  userId: string,
+  leg: Pick<ArbitrageInstance["legs"][number], "venue" | "accountId" | "instrumentId">,
+): ProviderMutationKey {
+  return Object.freeze({
+    userId,
+    venue: leg.venue,
+    accountId: leg.accountId,
+    canonicalInstrumentId: leg.instrumentId,
+  });
+}
+
+function openingCommandFingerprint(
+  userId: string,
+  request: LegConfirmationRequest,
+  instance: ArbitrageInstance,
+  leg: ArbitrageInstance["legs"][number],
+  referenceId: string,
+  continuationMode: "STANDARD" | "TERMINAL_PARTIAL_CONTINUE",
+): ArbitrageCommandFingerprint {
+  const quantity = request.quantityInput.mode === "NOTIONAL_USDT"
+    ? canonicalCommandDecimal(request.quantityInput.amountUsdt)
+    : canonicalCommandDecimal(request.quantityInput.quantity);
+  return Object.freeze({
+    commandId: request.commandId,
+    operationType: "EXECUTION_OPEN",
+    requestedByUserId: userId,
+    arbitrageId: instance.arbitrageId,
+    legId: leg.legId,
+    referenceId,
+    businessPayloadFingerprint: createArbitrageCommandPayloadFingerprint([
+      "EXECUTION_OPEN",
+      continuationMode,
+      userId,
+      instance.arbitrageId,
+      leg.legId,
+      request.confirmationId,
+      request.opportunityId,
+      String(request.horizonDays),
+      request.quantityInput.mode,
+      quantity,
+      request.executionMode,
+      "CONFIRMED_TRUE",
+      leg.role,
+      leg.venue,
+      leg.accountId,
+      leg.instrumentId,
+    ]),
+  });
+}
+
+function resultFromCommandReplay(instance: ArbitrageInstance, referenceId: string) {
+  const reference = instance.executionReferences.find(
+    (candidate) => candidate.executionIntentId === referenceId,
+  );
+  if (!reference) {
+    throw commandError("execution_state_unknown", "command fingerprint 存在但执行引用不可用，请先核验。");
+  }
+  return resultFromReference(instance, reference, true);
 }
 
 function resultFromReference(

@@ -1,19 +1,27 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, CircleHelp, Layers3 } from "lucide-react";
 import {
+  deriveArbitrageManagementEndMethod,
   fetchActiveArbitrageInstances,
+  fetchArbitrageCloseSafety,
+  fetchArbitrageInstanceById,
   fetchArbitrageInstanceHistory,
   fetchArbitragePositionVerification,
+  fetchInstanceHedgeDelta,
+  type ArbitrageCloseSafety,
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
   type ArbitrageInstanceStatus,
   type ArbitrageLegVerificationStatus,
   type ArbitragePositionVerification,
+  type InstanceHedgeDelta,
 } from "../../../api/arbitrageInstances";
 import { reconcileArbitrageInstance } from "../../../api/arbitrageExecutionDraft";
 import { Button } from "../../../components/ui/Button";
 import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
 import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
+import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
+import { ArbitrageManagementReleaseDialog } from "./ArbitrageManagementReleaseDialog";
 
 const HISTORY_LIMIT = 50;
 const VERIFICATION_CONCURRENCY = 4;
@@ -22,6 +30,8 @@ export type VerificationState =
   | { status: "loading" }
   | { status: "success"; verification: ArbitragePositionVerification }
   | { status: "error" };
+
+export type ReadState<T> = { status: "loading" } | { status: "success"; value: T } | { status: "error" };
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
@@ -56,16 +66,31 @@ export function ArbitrageInstanceOverview() {
     return () => controller.abort();
   }, [page]);
 
-  const onInstanceUpdated = (updated: ArbitrageInstance) => {
+  const applyInstanceUpdate = (updated: ArbitrageInstance) => {
     setState((current) => current.status === "success"
-      ? { ...current, active: current.active.map((item) => item.arbitrageId === updated.arbitrageId ? updated : item) }
+      ? updateInstanceSections(current, updated)
       : current);
+    if (updated.status === "CLOSED" || updated.status === "FAILED") {
+      setVerifications((current) => {
+        const next = { ...current };
+        delete next[updated.arbitrageId];
+        return next;
+      });
+      return updated;
+    }
     setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "loading" } }));
     void fetchArbitragePositionVerification(updated.arbitrageId).then((verification) => {
       setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "success", verification } }));
     }).catch(() => {
       setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "error" } }));
     });
+    return updated;
+  };
+
+  const refreshInstance = async (arbitrageId: string) => {
+    const updated = await fetchArbitrageInstanceById(arbitrageId);
+    applyInstanceUpdate(updated);
+    return updated;
   };
 
   const reconcileHedge = async (instance: ArbitrageInstance) => {
@@ -73,9 +98,16 @@ export function ArbitrageInstanceOverview() {
     try {
       const { instance: updated, verification } = await reconcileArbitrageHedge(instance);
       setState((current) => current.status === "success"
-        ? { ...current, active: current.active.map((item) => item.arbitrageId === updated.arbitrageId ? updated : item) }
+        ? updateInstanceSections(current, updated)
         : current);
-      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "success", verification } }));
+      setVerifications((current) => {
+        if (updated.status !== "CLOSED" && updated.status !== "FAILED") {
+          return { ...current, [updated.arbitrageId]: { status: "success", verification } };
+        }
+        const next = { ...current };
+        delete next[updated.arbitrageId];
+        return next;
+      });
     } catch {
       setVerifications((current) => ({ ...current, [instance.arbitrageId]: { status: "error" } }));
     }
@@ -84,6 +116,7 @@ export function ArbitrageInstanceOverview() {
   return <>
     <ArbitrageInstanceContent
       onExitHedge={setExitTarget}
+      onInstanceRefresh={refreshInstance}
       onReconcileHedge={(instance) => void reconcileHedge(instance)}
       onPageChange={setPage}
       onSectionChange={setSelectedSection}
@@ -95,9 +128,28 @@ export function ArbitrageInstanceOverview() {
     {exitTarget ? <ArbitrageHedgeExitDialog
       instance={exitTarget.instance}
       onClose={() => setExitTarget(null)}
-      onUpdated={onInstanceUpdated}
+      onUpdated={(updated) => { void refreshInstance(updated.arbitrageId); }}
     /> : null}
   </>;
+}
+
+export function updateInstanceSections(
+  current: Extract<ArbitrageInstanceLoadState, { status: "success" }>,
+  updated: ArbitrageInstance,
+): Extract<ArbitrageInstanceLoadState, { status: "success" }> {
+  const terminal = updated.status === "CLOSED" || updated.status === "FAILED";
+  if (terminal) {
+    return {
+      ...current,
+      active: current.active.filter((item) => item.arbitrageId !== updated.arbitrageId),
+      history: [updated, ...current.history.filter((item) => item.arbitrageId !== updated.arbitrageId)],
+    };
+  }
+  return {
+    ...current,
+    active: current.active.map((item) => item.arbitrageId === updated.arbitrageId ? updated : item),
+    history: current.history.filter((item) => item.arbitrageId !== updated.arbitrageId),
+  };
 }
 
 export async function loadVerifications(
@@ -123,6 +175,7 @@ export async function loadVerifications(
 
 export function ArbitrageInstanceContent({
   onExitHedge,
+  onInstanceRefresh,
   onReconcileHedge,
   onPageChange,
   onSectionChange = () => undefined,
@@ -132,6 +185,7 @@ export function ArbitrageInstanceContent({
   verifications = {},
 }: {
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onPageChange: (page: number) => void;
   onSectionChange?: (section: "active" | "history") => void;
@@ -158,6 +212,7 @@ export function ArbitrageInstanceContent({
       history={state.history}
       onPageChange={onPageChange}
       onExitHedge={onExitHedge}
+      onInstanceRefresh={onInstanceRefresh}
       onReconcileHedge={onReconcileHedge}
       onSectionChange={onSectionChange}
       page={page}
@@ -172,6 +227,7 @@ export function ArbitrageInstanceSections({
   history,
   onPageChange,
   onExitHedge,
+  onInstanceRefresh,
   onReconcileHedge,
   onSectionChange = () => undefined,
   page,
@@ -182,6 +238,7 @@ export function ArbitrageInstanceSections({
   history: ArbitrageInstance[];
   onPageChange: (page: number) => void;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -200,6 +257,7 @@ export function ArbitrageInstanceSections({
           emptyText="暂无当前套利组合"
           instances={active}
           onExitHedge={onExitHedge}
+          onInstanceRefresh={onInstanceRefresh}
           onReconcileHedge={onReconcileHedge}
           title="当前套利"
           verifications={verifications}
@@ -247,6 +305,7 @@ function InstanceSection({
   historical = false,
   instances,
   onExitHedge,
+  onInstanceRefresh,
   onReconcileHedge,
   title,
   verifications = {},
@@ -255,6 +314,7 @@ function InstanceSection({
   historical?: boolean;
   instances: ArbitrageInstance[];
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   title: string;
   verifications?: Record<string, VerificationState>;
@@ -267,19 +327,54 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onInstanceRefresh={onInstanceRefresh} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, onExitHedge, onReconcileHedge, verificationState }: {
+function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onReconcileHedge, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
 }) {
-  return (
+  const [closeSafeties, setCloseSafeties] = useState<Record<string, ReadState<ArbitrageCloseSafety>>>({});
+  const [deltaState, setDeltaState] = useState<ReadState<InstanceHedgeDelta>>({ status: "loading" });
+  const [closeTarget, setCloseTarget] = useState<ArbitrageInstanceLeg | null>(null);
+  const [releaseTarget, setReleaseTarget] = useState<ArbitrageInstanceLeg | null>(null);
+
+  useEffect(() => {
+    if (historical) return;
+    const controller = new AbortController();
+    setCloseSafeties(Object.fromEntries(instance.legs.map((leg) => [leg.legId, { status: "loading" }])));
+    setDeltaState({ status: "loading" });
+    for (const leg of instance.legs) {
+      void fetchArbitrageCloseSafety(instance.arbitrageId, leg.legId, controller.signal).then((value) => {
+        if (!controller.signal.aborted) setCloseSafeties((current) => ({ ...current, [leg.legId]: { status: "success", value } }));
+      }).catch(() => {
+        if (!controller.signal.aborted) setCloseSafeties((current) => ({ ...current, [leg.legId]: { status: "error" } }));
+      });
+    }
+    void fetchInstanceHedgeDelta(instance.arbitrageId, controller.signal).then((value) => {
+      if (!controller.signal.aborted) setDeltaState({ status: "success", value });
+    }).catch(() => {
+      if (!controller.signal.aborted) setDeltaState({ status: "error" });
+    });
+    return () => controller.abort();
+  }, [historical, instance.arbitrageId, instance.updatedAt]);
+
+  const safetyValues = Object.fromEntries(Object.entries(closeSafeties)
+    .filter((entry): entry is [string, Extract<ReadState<ArbitrageCloseSafety>, { status: "success" }>] => entry[1].status === "success")
+    .map(([legId, state]) => [legId, state.value]));
+  const canExitFully = instanceExitAvailability(instance, verificationState, safetyValues);
+  const closeTargetVerification = closeTarget && verificationState?.status === "success"
+    ? verificationState.verification.legs.find((item) => item.legId === closeTarget.legId)
+    : null;
+  const closeTargetSafety = closeTarget ? safetyValues[closeTarget.legId] : null;
+  const releaseTargetSafety = releaseTarget ? safetyValues[releaseTarget.legId] : null;
+  return <>
     <article className="min-w-0 border border-[#25282f] bg-black p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
@@ -293,9 +388,10 @@ function InstanceCard({ historical, instance, onExitHedge, onReconcileHedge, ver
         <Metric label="创建时间" value={formatTime(instance.createdAt)} />
         <Metric label="更新时间" value={formatTime(instance.updatedAt)} />
         <Metric label="建仓完成时间" value={formatOptionalTime(instance.openedAt)} />
-        {historical ? <Metric label="关闭时间" value={formatOptionalTime(instance.closedAt)} /> : null}
+        {historical ? <Metric label="管理结束时间" value={formatOptionalTime(instance.closedAt)} /> : null}
+        {historical ? <Metric label="管理结束方式" value={managementEndMethodLabel(deriveArbitrageManagementEndMethod(instance))} /> : null}
       </dl>
-      {!historical && instance.status === "OPENING" ? (
+      {!historical && canResumeOpeningWorkflow(instance) ? (
         <div className="mt-4 flex justify-end border-t border-[#25282f] pt-4">
           <a
             className="inline-flex min-h-9 items-center justify-center border border-white/25 px-4 text-xs font-semibold text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
@@ -319,21 +415,181 @@ function InstanceCard({ historical, instance, onExitHedge, onReconcileHedge, ver
               {historical ? (
                 <>
                   <LegRow label="已确认开仓数量" value={leg.confirmedOpenedQuantity} />
-                  <LegRow label="已确认关闭数量" value={leg.confirmedClosedQuantity} />
+                  <LegRow label="正常确认退出数量" value={leg.confirmedClosedQuantity} />
                 </>
               ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
+              {!historical ? <LiveCloseSafety state={closeSafeties[leg.legId]} /> : null}
             </dl>
+            {!historical ? <LegCloseActions
+              closeSafetyState={closeSafeties[leg.legId]}
+              onClose={() => setCloseTarget(leg)}
+              onRelease={() => setReleaseTarget(leg)}
+              verificationState={verificationState}
+              legId={leg.legId}
+              enabled={Boolean(onInstanceRefresh)}
+            /> : null}
           </div>;
         })}
       </div>
+      {historical ? null : <InstanceDeltaPanel instance={instance} state={deltaState} />}
+      <ManagementHistory instance={instance} />
+      {!historical && instance.status === "RESIDUAL" ? <p className="mt-4 text-xs text-amber-200">存在管理残余；当前证据不足以进一步判断具体原因。</p> : null}
       {!historical ? <HedgeExitActions
+        canExit={canExitFully}
         instance={instance}
         onExitHedge={onExitHedge}
         onReconcileHedge={onReconcileHedge}
         verificationState={verificationState}
       /> : null}
     </article>
-  );
+    {closeTarget && closeTargetSafety && closeTargetVerification && onInstanceRefresh ? <ArbitrageLegCloseDialog
+      closeSafety={closeTargetSafety}
+      instance={instance}
+      leg={closeTarget}
+      onClose={() => setCloseTarget(null)}
+      onUpdated={async () => {
+        await onInstanceRefresh(instance.arbitrageId);
+        setCloseTarget(null);
+      }}
+      verification={closeTargetVerification}
+    /> : null}
+    {releaseTarget && releaseTargetSafety && onInstanceRefresh ? <ArbitrageManagementReleaseDialog
+      closeSafety={releaseTargetSafety}
+      instance={instance}
+      leg={releaseTarget}
+      onClose={() => setReleaseTarget(null)}
+      onReleased={async (arbitrageId) => {
+        await onInstanceRefresh(arbitrageId);
+        setReleaseTarget(null);
+      }}
+    /> : null}
+  </>;
+}
+
+export function canResumeOpeningWorkflow(instance: ArbitrageInstance) {
+  if (instance.status !== "OPENING" && instance.status !== "RESIDUAL") return false;
+  const opening = instance.executionReferences.filter((reference) => reference.phase === "OPENING");
+  return instance.status === "OPENING" ? opening.length <= 1 : opening.length === 1;
+}
+
+function LiveCloseSafety({ state }: { state?: ReadState<ArbitrageCloseSafety> }) {
+  if (!state || state.status === "loading") return <LegRow label="退出安全状态" value="读取中…" />;
+  if (state.status === "error" || !state.value.realityReliable) return <LegRow label="退出安全状态" value="暂无法可靠确认" />;
+  return <>
+    <LegRow label="当前可安全退出数量" value={state.value.safeClosableQuantity} />
+    <LegRow label="正常完整退出" value={state.value.fullManagedCloseAvailable ? "可用" : "不可用"} />
+  </>;
+}
+
+function LegCloseActions({ closeSafetyState, enabled, legId, onClose, onRelease, verificationState }: {
+  closeSafetyState?: ReadState<ArbitrageCloseSafety>;
+  enabled: boolean;
+  legId: string;
+  onClose: () => void;
+  onRelease: () => void;
+  verificationState?: VerificationState;
+}) {
+  const verification = verificationState?.status === "success"
+    ? verificationState.verification.legs.find((item) => item.legId === legId)
+    : null;
+  const safety = closeSafetyState?.status === "success" ? closeSafetyState.value : null;
+  const actions = legActionAvailability(verification?.verificationStatus, safety);
+  if (!enabled || (!actions.partialClose && !actions.release)) return null;
+  return <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[#25282f] pt-3">
+    {actions.partialClose ? <Button onClick={onClose} type="button" variant="secondary">安全部分退出</Button> : null}
+    {actions.release ? <Button onClick={onRelease} type="button" variant="secondary">停止管理</Button> : null}
+  </div>;
+}
+
+export function legActionAvailability(
+  verificationStatus: ArbitrageLegVerificationStatus | undefined,
+  safety: ArbitrageCloseSafety | null,
+) {
+  const reliable = verificationStatus !== undefined && verificationStatus !== "UNKNOWN"
+    && safety?.realityReliable === true;
+  return {
+    partialClose: reliable && !safety.fullManagedCloseAvailable && !isZeroDecimal(safety.safeClosableQuantity),
+    release: reliable && safety.releaseEligible,
+  };
+}
+
+export function instanceExitAvailability(
+  instance: ArbitrageInstance,
+  verificationState: VerificationState | undefined,
+  safeties: Record<string, ArbitrageCloseSafety | undefined>,
+) {
+  if (verificationState?.status !== "success"
+    || verificationState.verification.legs.some((leg) => leg.verificationStatus === "UNKNOWN")
+    || instance.legs.some((leg) => unresolvedClosingReference(instance, leg.legId))) return false;
+  const relevant = instance.legs.map((leg) => safeties[leg.legId])
+    .filter((safety): safety is ArbitrageCloseSafety => Boolean(safety) && !isZeroDecimal(safety!.activeManagedQuantity));
+  return relevant.length > 0 && relevant.every((safety) => safety.realityReliable && safety.fullManagedCloseAvailable);
+}
+
+export function InstanceDeltaPanel({ instance, state }: { instance: ArbitrageInstance; state: ReadState<InstanceHedgeDelta> }) {
+  const asset = canonicalBaseAsset(instance);
+  if (state.status === "loading") return <section className="mt-4 border-t border-[#25282f] pt-4"><p className="text-xs text-[#8f99a5]">正在读取本实例 Hedge Delta…</p></section>;
+  if (state.status === "error") return <section className="mt-4 border-t border-[#25282f] pt-4"><p className="text-xs text-amber-200">本实例 Hedge Delta 暂无法可靠计算</p></section>;
+  const delta = state.value;
+  return <section className="mt-4 border-t border-[#25282f] pt-4">
+    <h4 className="text-xs font-semibold text-white">本实例 Hedge Delta</h4>
+    <dl className="mt-3 grid gap-3 text-xs sm:grid-cols-2">
+      <Metric label="本实例开仓 Delta" value={deltaValue(delta.openingDelta, asset)} />
+      <Metric label="当前管理 Delta" value={deltaValue(delta.activeManagedDelta, asset)} />
+      <Metric label="计划残差" value={withAsset(delta.plannedResidualDelta, asset)} />
+      <Metric label="实际开仓残差" value={delta.actualResidualDelta === null ? "暂无法可靠计算" : withAsset(delta.actualResidualDelta, asset)} />
+    </dl>
+    {delta.openingWorkflow.secondLegRequired ? <div className="mt-3 text-xs leading-5 text-amber-200">
+      <p>第二腿尚待执行</p>
+      {delta.openingWorkflow.requiredSecondLegSignedExposure !== null
+        ? <p>理论所需对冲暴露：{withAsset(delta.openingWorkflow.requiredSecondLegSignedExposure, asset)}</p>
+        : null}
+    </div> : null}
+  </section>;
+}
+
+export function ManagementHistory({ instance }: { instance: ArbitrageInstance }) {
+  if (instance.managementReleases.length === 0) return null;
+  return <section className="mt-4 border-t border-[#25282f] pt-4">
+    <h4 className="text-xs font-semibold text-white">停止管理记录</h4>
+    <p className="mt-2 text-xs leading-5 text-amber-200">以下记录表示用户确认停止系统管理，不代表 Xingheng 已执行平仓。</p>
+    <div className="mt-3 grid gap-2">{instance.managementReleases.map((release) => {
+      const leg = instance.legs.find((candidate) => candidate.legId === release.legId);
+      return <dl className="grid gap-2 border border-[#25282f] bg-[#0b0d11] p-3 text-xs sm:grid-cols-2" key={release.releaseId}>
+        <Metric label="套利腿" value={leg ? `${leg.role === "LONG" ? "多头腿" : "空头腿"} · ${leg.instrumentId}` : release.legId} />
+        <Metric label="已停止管理数量" value={release.releasedQuantity} />
+        <Metric label="确认时间" value={formatTime(release.confirmedAt)} />
+        <Metric label="原因" value="用户确认停止管理" />
+        <Metric label="Release 时交易所真实数量（历史快照）" value={release.actualQuantity} />
+        <Metric label="Reality 快照时间" value={formatTime(release.realityCheckedAt)} />
+      </dl>;
+    })}</div>
+  </section>;
+}
+
+export function managementEndMethodLabel(method: ReturnType<typeof deriveArbitrageManagementEndMethod>) {
+  return method === "NORMAL_CLOSE" ? "正常退出完成"
+    : method === "MANAGEMENT_RELEASE" ? "用户确认停止管理"
+      : method === "MIXED" ? "部分正常退出 + 部分停止管理" : "—";
+}
+
+function deltaValue(value: InstanceHedgeDelta["openingDelta"], asset: string | null) {
+  return value.status === "KNOWN" && value.signedDeltaBaseQuantity !== null
+    ? withAsset(value.signedDeltaBaseQuantity, asset)
+    : "暂无法可靠计算";
+}
+
+function withAsset(quantity: string, asset: string | null) {
+  return asset ? `${quantity} ${asset}` : `${quantity} 基础资产`;
+}
+
+export function canonicalBaseAsset(instance: ArbitrageInstance) {
+  const assets = instance.legs.map((leg) => leg.instrumentId.split("-")[0]).filter(Boolean);
+  return assets.length === 2 && assets[0] === assets[1] ? assets[0]! : null;
+}
+
+function isZeroDecimal(value: string) {
+  return /^0+(?:\.0+)?$/u.test(value);
 }
 
 export function unresolvedClosingReference(instance: ArbitrageInstance, legId: string) {
@@ -350,18 +606,14 @@ export async function reconcileArbitrageHedge(
   return reconcile(instance.arbitrageId);
 }
 
-function HedgeExitActions({ instance, onExitHedge, onReconcileHedge, verificationState }: {
+function HedgeExitActions({ canExit, instance, onExitHedge, onReconcileHedge, verificationState }: {
+  canExit: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
 }) {
   const summary = hedgeExitSummary(instance, verificationState);
-  const verification = verificationState?.status === "success" ? verificationState.verification : null;
-  const canExit = summary.kind === "remaining"
-    && verification !== null
-    && verification.legs.every((leg) => leg.verificationStatus === "MATCHED" && leg.actualQuantity !== null)
-    && !instance.legs.some((leg) => unresolvedClosingReference(instance, leg.legId));
   return <div className="mt-4 border-t border-[#25282f] pt-4">
     <p className={`text-xs font-semibold ${summary.kind === "ended" ? "text-emerald-200" : summary.kind === "unknown" ? "text-amber-200" : "text-white"}`}>
       {summary.label}
@@ -379,12 +631,11 @@ function HedgeExitActions({ instance, onExitHedge, onReconcileHedge, verificatio
       >
         {verificationState?.status === "loading" ? "正在核验…" : "重新核验"}
       </Button> : null}
-      {summary.kind !== "ended" && onExitHedge ? <Button
-        disabled={!canExit}
+      {summary.kind !== "ended" && canExit && onExitHedge ? <Button
         onClick={() => onExitHedge({ instance })}
         type="button"
       >
-        退出对冲
+        完整退出
       </Button> : null}
     </div>
   </div>;
@@ -401,24 +652,21 @@ export function hedgeExitSummary(instance: ArbitrageInstance, state?: Verificati
     return `○ ${label}确认中`;
   }).flat() : [];
   if (instance.status === "CLOSED") {
-    return { kind: "ended" as const, label: "对冲已结束", details: [] as string[], progress };
+    return { kind: "ended" as const, label: "实例管理已结束", details: [] as string[], progress };
   }
   if (!state || state.status === "loading" || state.status === "error") {
-    return { kind: "unknown" as const, label: "仓位状态待确认", details: [] as string[], progress };
+    return { kind: "unknown" as const, label: "当前真实仓位暂无法可靠确认", details: [] as string[], progress };
   }
   if (state.verification.legs.some((leg) => leg.actualQuantity === null || leg.verificationStatus === "UNKNOWN")) {
-    return { kind: "unknown" as const, label: "仓位状态待确认", details: [] as string[], progress };
+    return { kind: "unknown" as const, label: "当前真实仓位暂无法可靠确认", details: [] as string[], progress };
   }
-  const remaining = state.verification.legs.filter((leg) => !isZeroDecimal(leg.actualQuantity!));
-  if (remaining.length === 0) {
-    return { kind: "ended" as const, label: "对冲已结束", details: [] as string[], progress };
-  }
+  const conflict = state.verification.legs.some((leg) => leg.verificationStatus === "MISMATCH");
   return {
     kind: "remaining" as const,
-    label: "对冲尚未完全退出",
-    details: remaining.map((fact) => {
+    label: conflict ? "当前真实仓位已无法完整支持系统管理数量" : "实例仍在管理",
+    details: state.verification.legs.map((fact) => {
       const leg = instance.legs.find((candidate) => candidate.legId === fact.legId)!;
-      return `${instanceLegLabel(instance, leg)}剩余 ${fact.actualQuantity}`;
+      return `${instanceLegLabel(instance, leg)}交易所真实数量 ${fact.actualQuantity}`;
     }),
     progress,
   };
@@ -437,25 +685,21 @@ function latestClosingReference(instance: ArbitrageInstance, legId: string) {
     .sort((left, right) => right.updatedAt - left.updatedAt)[0];
 }
 
-function isZeroDecimal(value: string) {
-  return /^-?0(?:\.0+)?$/u.test(value);
-}
-
 function LiveLegVerification({ legId, state }: { legId: string; state?: VerificationState }) {
   if (!state || state.status === "loading") {
-    return <><LegRow label="系统管理数量" value="核验中…" /><LegRow label="当前真实数量" value="核验中…" /><VerificationNotice status="loading" /></>;
+    return <><LegRow label="系统管理数量" value="核验中…" /><LegRow label="交易所真实数量" value="核验中…" /><VerificationNotice status="loading" /></>;
   }
   if (state.status === "error") {
-    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="当前真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
+    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="交易所真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
   }
   const verification = state.verification.legs.find((item) => item.legId === legId);
   if (!verification) {
-    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="当前真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
+    return <><LegRow label="系统管理数量" value="暂无可靠数据" /><LegRow label="交易所真实数量" value="暂无可靠数据" /><VerificationNotice status="error" /></>;
   }
   return (
     <>
       <LegRow label="系统管理数量" value={verification.expectedManagedQuantity} />
-      <LegRow label="当前真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
+      <LegRow label="交易所真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
       <VerificationNotice status={verification.verificationStatus} />
     </>
   );
@@ -464,16 +708,20 @@ function LiveLegVerification({ legId, state }: { legId: string; state?: Verifica
 function VerificationNotice({ status }: { status: ArbitrageLegVerificationStatus | "loading" | "error" }) {
   if (status === "loading") return <div className="mt-3 border-t border-[#25282f] pt-3 text-xs text-[#8f99a5]">正在核验当前仓位…</div>;
   if (status === "error" || status === "UNKNOWN") {
-    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-amber-200"><CircleHelp className="mt-0.5 shrink-0" size={14} /><span>当前仓位暂无法可靠确认</span></div>;
+    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-amber-200"><CircleHelp className="mt-0.5 shrink-0" size={14} /><span>当前真实仓位暂无法可靠确认</span></div>;
   }
   if (status === "MISMATCH") {
-    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-red-200"><AlertTriangle className="mt-0.5 shrink-0" size={14} /><span>交易所当前数量与 StellaX 管理记录存在差异</span></div>;
+    return <div className="mt-3 flex items-start gap-2 border-t border-[#25282f] pt-3 text-xs text-red-200"><AlertTriangle className="mt-0.5 shrink-0" size={14} /><span>当前真实仓位已无法完整支持系统管理数量</span></div>;
   }
-  return <div className="mt-3 flex items-center gap-2 border-t border-[#25282f] pt-3 text-xs text-emerald-200"><CheckCircle2 size={14} /><span>仓位一致</span></div>;
+  return <div className="mt-3 flex items-center gap-2 border-t border-[#25282f] pt-3 text-xs text-emerald-200"><CheckCircle2 size={14} /><span>当前仓位关系正常</span></div>;
 }
 
 export function verificationStatusLabel(status: ArbitrageLegVerificationStatus) {
-  return { MATCHED: "仓位一致", MISMATCH: "仓位存在差异", UNKNOWN: "暂无法确认" }[status];
+  return {
+    MATCHED: "当前仓位关系正常",
+    MISMATCH: "当前真实仓位已无法完整支持系统管理数量",
+    UNKNOWN: "当前真实仓位暂无法可靠确认",
+  }[status];
 }
 
 function StatusBadge({ status }: { status: ArbitrageInstanceStatus }) {
@@ -499,7 +747,7 @@ export function statusLabel(status: ArbitrageInstanceStatus) {
     HOLDING: "持有中",
     RESIDUAL: "存在残余",
     CLOSING: "退出中",
-    CLOSED: "已关闭",
+    CLOSED: "实例管理已结束",
     FAILED: "失败",
   }[status];
 }

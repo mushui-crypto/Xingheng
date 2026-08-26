@@ -6,6 +6,7 @@ import {
   type FormalExecutionMode,
 } from "../../../api/arbitrageExecutionDraft";
 import type {
+  ArbitrageCloseSafety,
   ArbitrageInstance,
   ArbitrageInstanceLeg,
   ArbitrageLegVerification,
@@ -17,16 +18,18 @@ export function ArbitrageLegCloseDialog({
   instance,
   leg,
   verification,
+  closeSafety,
   onClose,
   onUpdated,
 }: {
   instance: ArbitrageInstance;
   leg: ArbitrageInstanceLeg;
   verification: ArbitrageLegVerification;
+  closeSafety: ArbitrageCloseSafety;
   onClose: () => void;
-  onUpdated: (instance: ArbitrageInstance) => void;
+  onUpdated: (instance: ArbitrageInstance) => Promise<void> | void;
 }) {
-  const [quantity, setQuantity] = useState(verification.expectedManagedQuantity);
+  const [quantity, setQuantity] = useState(closeSafety.safeClosableQuantity);
   const [executionMode, setExecutionMode] = useState<FormalExecutionMode>("EXECUTION_PRIORITY");
   const [commandId] = useState(createCommandId);
   const [result, setResult] = useState<ArbitrageLegExecutionConfirmation | null>(null);
@@ -44,7 +47,7 @@ export function ArbitrageLegCloseDialog({
       });
       setResult(next);
       setStatus("idle");
-      onUpdated(next.instance);
+      await onUpdated(next.instance);
     } catch {
       setStatus("error");
     }
@@ -56,7 +59,7 @@ export function ArbitrageLegCloseDialog({
       const next = await reconcileArbitrageExecutionLeg({ arbitrageId: instance.arbitrageId, legId: leg.legId });
       setResult(next);
       setStatus("idle");
-      onUpdated(next.instance);
+      await onUpdated(next.instance);
     } catch {
       setStatus("error");
     }
@@ -65,6 +68,8 @@ export function ArbitrageLegCloseDialog({
   const pending = result?.executionRecord.status === "PENDING_CONFIRMATION"
     || result?.executionRecord.status === "UNKNOWN";
   const busy = status === "submitting" || status === "reconciling";
+  const quantityValid = positiveDecimal(quantity)
+    && compareUnsignedDecimals(quantity, closeSafety.safeClosableQuantity) <= 0;
 
   return (
     <Modal
@@ -82,11 +87,12 @@ export function ArbitrageLegCloseDialog({
           <Metric label="套利腿" value={leg.role === "LONG" ? "多头腿" : "空头腿"} />
           <Metric label="交易标的" value={leg.instrumentId} />
           <Metric label="系统管理数量" value={verification.expectedManagedQuantity} />
-          <Metric label="当前真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
+          <Metric label="当前可安全退出上限" value={closeSafety.safeClosableQuantity} />
+          <Metric label="交易所真实数量" value={verification.actualQuantity ?? "暂无可靠数据"} />
           {leg.instrumentId.endsWith("-SPOT")
             ? <Metric label="当前实际可用数量" value={verification.availableQuantity ?? "暂无可靠数据"} />
             : null}
-          <Metric label="核验状态" value={verification.verificationStatus === "MATCHED" ? "仓位一致" : "暂不可退出"} />
+          <Metric label="核验状态" value={verificationStatusLabel(verification.verificationStatus)} />
         </dl>
         <label className="block text-xs text-[#8f99a5]">
           计划退出数量
@@ -98,6 +104,10 @@ export function ArbitrageLegCloseDialog({
             value={quantity}
           />
         </label>
+        {!quantityValid && quantity.trim() ? (
+          <p className="text-xs text-red-200">退出数量必须大于 0，且不得超过当前可安全退出上限。</p>
+        ) : null}
+        <p className="text-xs leading-5 text-[#8f99a5]">该上限是读取时快照；提交后服务端会重新核验真实仓位并作最终裁决。</p>
         <label className="block text-xs text-[#8f99a5]">
           执行模式
           <select
@@ -121,7 +131,7 @@ export function ArbitrageLegCloseDialog({
         <div className="flex justify-end gap-2">
           <Button disabled={busy} onClick={onClose} type="button" variant="secondary">关闭</Button>
           {!result ? (
-            <Button disabled={busy || !positiveDecimal(quantity)} onClick={() => void submit()} type="button">
+            <Button disabled={busy || !quantityValid} onClick={() => void submit()} type="button">
               {status === "submitting" ? "正在提交…" : "确认退出"}
             </Button>
           ) : null}
@@ -144,6 +154,23 @@ function positiveDecimal(value: string) {
   return /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value) && !/^0(?:\.0+)?$/u.test(value);
 }
 
+export function compareUnsignedDecimals(left: string, right: string) {
+  const [leftInteger, leftFraction = ""] = left.split(".");
+  const [rightInteger, rightFraction = ""] = right.split(".");
+  const normalizedLeftInteger = leftInteger!.replace(/^0+(?=\d)/u, "");
+  const normalizedRightInteger = rightInteger!.replace(/^0+(?=\d)/u, "");
+  if (normalizedLeftInteger.length !== normalizedRightInteger.length) {
+    return normalizedLeftInteger.length < normalizedRightInteger.length ? -1 : 1;
+  }
+  if (normalizedLeftInteger !== normalizedRightInteger) {
+    return normalizedLeftInteger < normalizedRightInteger ? -1 : 1;
+  }
+  const width = Math.max(leftFraction.length, rightFraction.length);
+  const normalizedLeftFraction = leftFraction.padEnd(width, "0");
+  const normalizedRightFraction = rightFraction.padEnd(width, "0");
+  return normalizedLeftFraction === normalizedRightFraction ? 0 : normalizedLeftFraction < normalizedRightFraction ? -1 : 1;
+}
+
 function executionStatusLabel(status: ArbitrageLegExecutionConfirmation["executionRecord"]["status"]) {
   return {
     CREATED: "已创建",
@@ -161,8 +188,16 @@ function instanceStatusLabel(status: ArbitrageInstance["status"]) {
     HOLDING: "持有中",
     RESIDUAL: "存在残余",
     CLOSING: "退出中",
-    CLOSED: "已关闭",
+    CLOSED: "实例管理已结束",
     FAILED: "失败",
+  }[status];
+}
+
+function verificationStatusLabel(status: ArbitrageLegVerification["verificationStatus"]) {
+  return {
+    MATCHED: "当前仓位关系正常",
+    MISMATCH: "当前真实仓位已无法完整支持系统管理数量",
+    UNKNOWN: "当前真实仓位暂无法可靠确认",
   }[status];
 }
 

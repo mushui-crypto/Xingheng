@@ -4,7 +4,7 @@ import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
-import { BitgetClient } from "./BitgetClient";
+import { BitgetClient, BitgetProviderError } from "./BitgetClient";
 import { BitgetIntentCancellationCapability } from "./BitgetIntentCancellationCapability";
 import { BitgetIntentExecutionCapability } from "./BitgetIntentExecutionCapability";
 import { BitgetIntentExecutionService, bitgetClientOrderIdFor } from "./BitgetIntentExecutionService";
@@ -14,6 +14,23 @@ import { bitgetBaseQuantityToProvider, loadBitgetQuantityRules } from "./BitgetQ
 import type { BitgetCancelOrderRequest, BitgetGetOrderRequest, BitgetPlaceOrderRequest, BitgetProviderOrder } from "./BitgetTypes";
 
 const now = 1_800_000_000_000;
+
+test("Bitget UTA client preserves safe auth category/code without exposing Provider msg", async () => {
+  const rawMessage = "passphrase=provider-secret arbitrary upstream details";
+  const client = new BitgetClient(() => ({ apiKey: "key", apiSecret: "secret", passphrase: "pass" }), {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ code: "40009", msg: rawMessage, data: {} })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => client.getAccountIdentity(),
+    (error: unknown) => error instanceof BitgetProviderError
+      && error.category === "credential_validation_failed"
+      && error.providerCode === "40009"
+      && error.message === "Bitget credential validation failed."
+      && !error.message.includes(rawMessage),
+  );
+});
 
 test("Bitget UTA client signs Spot/Perp place, exact query, and known-order cancel without number quantity conversion", async () => {
   const calls: Array<{ method: string; path: string; body: Record<string, unknown> | null; query: URLSearchParams }> = [];
@@ -32,6 +49,7 @@ test("Bitget UTA client signs Spot/Perp place, exact query, and known-order canc
       if (url.pathname === "/api/v3/trade/order-info") {
         return Response.json({ code: "00000", data: {
           symbol: "DOGEUSDT", orderId: "90071992547409931234", clientOid: "sxbg-test", side: "sell",
+          posSide: "short", tradeSide: "open", holdMode: "hedge_mode",
           orderStatus: "partially_filled", qty: "95.12345678", cumExecQty: "40.12345678", avgPrice: "0.0842",
           feeDetail: [{ fee: "0.002", feeCoin: "USDT" }, { fee: "0.001", feeCoin: "USDT" }], updatedTime: String(now),
         } });
@@ -56,6 +74,9 @@ test("Bitget UTA client signs Spot/Perp place, exact query, and known-order canc
   assert.equal(order.filledQuantity, "40.12345678");
   assert.equal(order.fee, "0.003");
   assert.equal(order.feeCurrency, "USDT");
+  assert.equal(order.posSide, "short");
+  assert.equal(order.tradeSide, "open");
+  assert.equal(order.holdMode, "hedge_mode");
   await client.cancelOrder({ category: "USDT-FUTURES", symbol: "DOGEUSDT", orderId: accepted.orderId, clientOid: "sxbg-test" });
   assert.deepEqual(calls.map(({ method, path }) => [method, path]), [
     ["POST", "/api/v3/trade/place-order"], ["GET", "/api/v3/trade/order-info"], ["POST", "/api/v3/trade/cancel-order"],
@@ -154,14 +175,90 @@ test("Bitget ACK is not confirmed; query preserves partial and canceled-with-fil
   assert.equal(queried.observation.state, "UNKNOWN");
 });
 
-test("Bitget HEDGE close sends posSide without the rejected reduceOnly combination", async () => {
+test("Bitget UTA HEDGE close uses side plus posSide, omits one-way reduceOnly, and rejects an opening side", async () => {
+  const provider = new FakeBitgetService();
+  provider.readPositionMode = async () => "HEDGE";
+  const service = new BitgetIntentExecutionService(provider, {
+    ...serviceOptions(), mutationSafetyGuard: guard(false, true), mutationEffect: "DECREASE",
+  });
+  await new BitgetIntentExecutionCapability(service).execute(executionIntent({
+    instrumentId: "DOGE-USDT-PERP", side: "buy", positionDirection: "SHORT", reduceOnly: true,
+  }));
+  const request = provider.placeRequests[0]!;
+  assert.equal(request.posSide, "short");
+  assert.equal(request.reduceOnly, undefined);
+
+  const invalid = new FakeBitgetService();
+  invalid.readPositionMode = async () => "HEDGE";
+  await assert.rejects(() => new BitgetIntentExecutionCapability(new BitgetIntentExecutionService(invalid, serviceOptions()))
+    .execute(executionIntent({
+      instrumentId: "DOGE-USDT-PERP", side: "buy", positionDirection: "LONG", reduceOnly: true,
+    })), /does not reduce/u);
+  assert.equal(invalid.placeRequests.length, 0);
+});
+
+test("Bitget UTA HEDGE LONG and SHORT openings preserve the target posSide without Classic tradeSide request fields", async () => {
+  for (const fixture of [
+    { direction: "LONG" as const, side: "buy" as const, posSide: "long" as const },
+    { direction: "SHORT" as const, side: "sell" as const, posSide: "short" as const },
+  ]) {
+    const provider = new FakeBitgetService();
+    provider.readPositionMode = async () => "HEDGE";
+    const result = await new BitgetIntentExecutionService(provider, serviceOptions()).execute(executionIntent({
+      instrumentId: "DOGE-USDT-PERP",
+      side: fixture.side,
+      positionDirection: fixture.direction,
+      reduceOnly: false,
+    }));
+    const request = provider.placeRequests[0]!;
+
+    assert.equal(request.side, fixture.side);
+    assert.equal(request.posSide, fixture.posSide);
+    assert.equal(request.reduceOnly, undefined);
+    assert.equal("tradeSide" in request, false);
+    assert.equal(result.positionMode, "HEDGE");
+    assert.equal(result.positionDirection, fixture.direction);
+    assert.equal(result.posSide, fixture.posSide);
+  }
+});
+
+test("Bitget UTA HEDGE query requires matching holdMode, posSide, and open semantic", async () => {
   const provider = new FakeBitgetService();
   provider.readPositionMode = async () => "HEDGE";
   const service = new BitgetIntentExecutionService(provider, serviceOptions());
-  await new BitgetIntentExecutionCapability(service).execute(executionIntent({ instrumentId: "DOGE-USDT-PERP", side: "buy", reduceOnly: true }));
-  const request = provider.placeRequests[0]!;
-  assert.equal(request.posSide, "long");
-  assert.equal(request.reduceOnly, "no");
+  const accepted = await service.execute(executionIntent({
+    instrumentId: "DOGE-USDT-PERP",
+    side: "sell",
+    positionDirection: "SHORT",
+    reduceOnly: false,
+  }));
+  const lookup = {
+    instrumentId: "DOGE-USDT-PERP",
+    category: accepted.category,
+    symbol: accepted.symbol,
+    orderId: accepted.providerOrderId,
+    clientOid: accepted.clientOrderId,
+    expectedProviderQuantity: accepted.expectedProviderQuantity,
+    expectedSide: accepted.expectedSide,
+    positionMode: accepted.positionMode,
+    positionDirection: accepted.positionDirection,
+    posSide: accepted.posSide,
+  };
+  provider.orderStatus = "CONFIRMED";
+  provider.filledQuantity = "95.12345678";
+
+  assert.equal((await service.query(lookup)).observation.state, "CONFIRMED");
+  for (const fixture of [
+    { posSide: "long" as const, reason: /posSide/u },
+    { tradeSide: "close" as const, reason: /tradeSide/u },
+    { holdMode: "one_way_mode" as const, reason: /holdMode/u },
+  ]) {
+    provider.orderEvidenceOverride = fixture;
+    const wrongEvidence = await service.query(lookup);
+    assert.equal(wrongEvidence.observation.state, "UNKNOWN");
+    assert.equal(wrongEvidence.observation.filledBaseQuantity, "0");
+    assert.match(wrongEvidence.statusReason ?? "", fixture.reason);
+  }
 });
 
 test("Bitget gates, identity, one-way mode, and recovery anchor fail closed before mutation while remote uncertainty remains UNKNOWN", async (t) => {
@@ -189,6 +286,39 @@ test("Bitget gates, identity, one-way mode, and recovery anchor fail closed befo
     .execute(executionIntent({ instrumentId: "DOGE-USDT-PERP" }));
   assert.equal(result.executionState.status, "UNKNOWN");
   assert.equal(provider.placeRequests.length, 1);
+});
+
+test("halted Bitget allows trusted managed closes and known-order cancel but blocks ordinary Spot SELL", async () => {
+  for (const instrumentId of ["DOGE-USDT-PERP", "DOGE-USDT-SPOT"] as const) {
+    const provider = new FakeBitgetService();
+    const service = new BitgetIntentExecutionService(provider, {
+      ...serviceOptions(), mutationSafetyGuard: guard(false, true), mutationEffect: "DECREASE",
+    });
+    await service.execute(executionIntent({
+      instrumentId,
+      side: "sell",
+      ...(instrumentId.endsWith("-PERP") ? { positionDirection: "LONG", reduceOnly: true } : {}),
+    }));
+    assert.equal(provider.placeRequests.length, 1);
+  }
+
+  const ordinaryProvider = new FakeBitgetService();
+  const ordinary = new BitgetIntentExecutionService(ordinaryProvider, {
+    ...serviceOptions(), mutationSafetyGuard: guard(false, true),
+  });
+  await assert.rejects(() => ordinary.execute(executionIntent({ instrumentId: "DOGE-USDT-SPOT", side: "sell" })));
+  assert.equal(ordinaryProvider.placeRequests.length, 0);
+
+  const cancelProvider = new FakeBitgetService();
+  const cancel = new BitgetIntentExecutionService(cancelProvider, {
+    ...serviceOptions(), mutationSafetyGuard: guard(false, true),
+  });
+  await cancel.cancel({
+    instrumentId: "DOGE-USDT-PERP", category: "USDT-FUTURES", symbol: "DOGEUSDT",
+    orderId: "order-1", clientOid: "sxbg-reference", expectedProviderQuantity: "95",
+    expectedSide: "sell", positionMode: "ONE_WAY", positionDirection: "SHORT",
+  }, { userId: "user-a", accountId: "bitget:account-a", instrumentId: "DOGE-USDT-PERP" });
+  assert.equal(cancelProvider.cancelRequests.length, 1);
 });
 
 test("Bitget rejects Spot reduceOnly and Spot market-BUY quote-size semantics before Provider mutation", async () => {
@@ -239,13 +369,15 @@ function serviceOptions() {
     persistRecoveryReference: async (_reference: unknown) => undefined,
   } as const;
 }
-function executionIntent(input: Partial<{ instrumentId: string; side: "buy" | "sell"; reduceOnly: boolean }> = {}): ExecutionIntent {
+function executionIntent(input: Partial<{
+  instrumentId: string; side: "buy" | "sell"; reduceOnly: boolean; positionDirection: "LONG" | "SHORT";
+}> = {}): ExecutionIntent {
   const instrumentId = input.instrumentId ?? "DOGE-USDT-PERP";
   return createExecutionIntent({
     intentId: `intent-${instrumentId}-${input.side ?? "buy"}-${input.reduceOnly ?? false}`,
     userId: "user-a", venue: "bitget", accountId: "bitget:account-a", instrumentId,
     ...(instrumentId.endsWith("-PERP")
-      ? { positionDirection: input.side === "sell" ? "SHORT" as const : "LONG" as const }
+      ? { positionDirection: input.positionDirection ?? (input.side === "sell" ? "SHORT" as const : "LONG" as const) }
       : {}),
     side: input.side ?? "buy", quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "95.12345678" },
     orderConstraints: { reduceOnly: input.reduceOnly ?? false }, executionMode: "EXECUTION_PRIORITY",
@@ -263,15 +395,28 @@ class FakeBitgetService {
   readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
   orderStatus: BitgetProviderOrder["status"] = "PENDING_CONFIRMATION";
   filledQuantity = "0";
+  orderEvidenceOverride: Partial<Pick<BitgetProviderOrder, "posSide" | "tradeSide" | "holdMode" | "reduceOnly">> = {};
   placeFailure?: Error;
   private lastOrder?: BitgetPlaceOrderRequest;
   async assertOneWayMode() { this.positionModeReads += 1; if (!this.oneWay) throw new Error("one-way required"); }
   async placeOrder(request: BitgetPlaceOrderRequest) { this.placeRequests.push(request); this.lastOrder = request; if (this.placeFailure) throw this.placeFailure; return { category: request.category, symbol: request.symbol, orderId: "order-1", clientOid: request.clientOid }; }
   async getOrder(request: BitgetGetOrderRequest): Promise<BitgetProviderOrder> {
     this.getRequests.push(request); const placed = this.lastOrder; if (!placed) throw new Error("no order");
+    const posSide = placed.posSide;
+    const tradeSide = posSide === undefined ? undefined
+      : posSide === "long" ? placed.side === "buy" ? "open" as const : "close" as const
+        : placed.side === "sell" ? "open" as const : "close" as const;
     return { category: request.category, symbol: request.symbol, orderId: request.orderId ?? "order-1", clientOid: request.clientOid,
       side: placed.side, status: this.orderStatus, rawStatus: "fixture", requestedQuantity: placed.qty,
-      filledQuantity: this.filledQuantity, averagePrice: this.filledQuantity === "0" ? null : "0.085", fee: "0", feeCurrency: null, updatedAt: now };
+      filledQuantity: this.filledQuantity, averagePrice: this.filledQuantity === "0" ? null : "0.085", fee: "0", feeCurrency: null,
+      ...(posSide === undefined ? {} : { posSide, tradeSide, holdMode: "hedge_mode" as const }),
+      ...(request.category === "USDT-FUTURES" && posSide === undefined ? {
+        holdMode: "one_way_mode" as const,
+        reduceOnly: placed.reduceOnly,
+        tradeSide: placed.reduceOnly === "yes" ? "close" as const : "open" as const,
+      } : {}),
+      ...this.orderEvidenceOverride,
+      updatedAt: now };
   }
   async cancelOrder(request: BitgetCancelOrderRequest) { this.cancelRequests.push(request); return { category: request.category, symbol: request.symbol, orderId: request.orderId ?? "order-1", clientOid: request.clientOid }; }
 }

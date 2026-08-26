@@ -1,11 +1,28 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BybitClient } from "./BybitClient";
+import { BybitClient, BybitProviderError } from "./BybitClient";
 import { createBybitInstrumentQuantityRulesSource } from "./BybitInstrumentQuantityRulesSource";
 import { BybitInstrumentMappingAdapter } from "./BybitInstrumentMapping";
 import { bybitBaseQuantityToProvider, loadBybitQuantityRules } from "./BybitQuantitySemantics";
 
 const now = 1_800_000_000_000;
+
+test("Bybit private client preserves code/category without exposing Provider retMsg", async () => {
+  const rawMessage = "signature=provider-secret arbitrary upstream details";
+  const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ retCode: 10004, retMsg: rawMessage, result: {} })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => client.validateAccess(),
+    (error: unknown) => error instanceof BybitProviderError
+      && error.category === "credential_validation_failed"
+      && error.providerCode === 10004
+      && error.message === "Bybit credential validation failed."
+      && !error.message.includes(rawMessage),
+  );
+});
 
 test("Bybit private client performs place/query/cancel with exact orderLinkId identity and authoritative execution evidence", async () => {
   const calls: Array<{ path: string; method: string; query: URLSearchParams; body: Record<string, unknown> | null }> = [];
