@@ -354,7 +354,7 @@ export function ArbitrageExecutionDraftEntry({
           onAmountChange={setAmount}
           onCancel={close}
           onConfirm={() => void confirmInstance()}
-          onExecuteLeg={(legId) => void (resumeMode || instance?.executionReferences.length ? executeLeg(legId) : requestStartHedge(legId))}
+          onExecuteLeg={(legId) => void (shouldUseManualLegExecution(instance) ? executeLeg(legId) : requestStartHedge(legId))}
           onContinuePartial={() => void continuePartial()}
           onRestart={restartAfterFailedZero}
           onReconcileLeg={(legId) => void reconcileLeg(legId)}
@@ -628,6 +628,10 @@ export function ArbitrageExecutionDraftContent({
 export function canConfirmDraft(draft: ArbitrageExecutionDraft | null) {
   return draft?.allLegsExecutable === true
     && draft.legs.every((leg) => leg.executionAvailable && leg.planning.status === "PLANNED");
+}
+
+export function shouldUseManualLegExecution(instance: ArbitrageInstance | null) {
+  return Boolean(instance?.executionReferences.length);
 }
 
 export function canExecuteLeg(instance: ArbitrageInstance, legId: string) {

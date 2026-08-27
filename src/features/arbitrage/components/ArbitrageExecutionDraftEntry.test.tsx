@@ -13,6 +13,7 @@ import {
   canConfirmDraft,
   loadResumeContext,
   resumeDraftMatchesInstance,
+  shouldUseManualLegExecution,
   submitStartOnce,
 } from "./ArbitrageExecutionDraftEntry";
 import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
@@ -141,12 +142,19 @@ test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual af
   assert.equal(canExecuteLeg(confirmed, "short-leg"), true);
 });
 
-test("the initial Start click only opens final confirmation and does not call the Start API", () => {
+test("resume with no execution reference uses final Start confirmation instead of manual leg execution", () => {
+  assert.equal(shouldUseManualLegExecution(instance([])), false);
+
   const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
   const requestStart = source.slice(source.indexOf("function requestStartHedge"), source.indexOf("function cancelStartHedgeConfirmation"));
   assert.match(requestStart, /setPendingStartLegId\(firstLegId\)/u);
   assert.doesNotMatch(requestStart, /startHedge\(/u);
-  assert.match(source, /instance\?\.executionReferences\.length \? executeLeg\(legId\) : requestStartHedge\(legId\)/u);
+  assert.match(source, /shouldUseManualLegExecution\(instance\) \? executeLeg\(legId\) : requestStartHedge\(legId\)/u);
+  assert.doesNotMatch(source, /resumeMode \|\| instance\?\.executionReferences\.length/u);
+});
+
+test("an instance with an execution reference keeps the manual execute and continue route", () => {
+  assert.equal(shouldUseManualLegExecution(instance([reference("long-leg", "CONFIRMED", "0.001")])), true);
 });
 
 test("cancelling final confirmation only clears local state and does not call the Start API", () => {
