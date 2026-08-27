@@ -54,6 +54,18 @@ export class ArbitragePositionVerificationService {
     });
   }
 
+  /** Reads one exact leg without coupling its safety result to the other leg's Provider reads. */
+  async verifyLeg(userId: string, arbitrageId: string, legId: string): Promise<ArbitrageLegVerificationResult | null> {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalizedLegId = identifier(legId, "legId");
+    const instance = this.instances.getById(normalizedUserId, normalizedArbitrageId);
+    if (!instance) return null;
+    const leg = instance.legs.find((candidate) => candidate.legId === normalizedLegId);
+    if (!leg) return null;
+    return (await this.verifyGroup(instance, [leg], this.now()))[0] ?? null;
+  }
+
   private async verifyGroup(
     instance: ArbitrageInstance,
     legs: readonly ArbitrageInstanceLeg[],

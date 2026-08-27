@@ -16,8 +16,21 @@ import type {
 import type { SpotCloseAvailableBalanceSource } from "./BinanceSpotCloseBalanceSource";
 import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 
-type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
+type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify"> &
+  Partial<Pick<ArbitragePositionVerificationService, "verifyLeg">>;
 type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
+type PersistedAttributionStore = Readonly<{
+  readSpotOpeningAttributionEvidence(userId: string, arbitrageId: string, legId: string): readonly Readonly<{
+    arbitrageId: string;
+    legId: string;
+    executionIntentId: string;
+    executionRecordId: string;
+    attributableBaseQuantity: string;
+    venue: ArbitrageInstanceLeg["venue"];
+    accountId: string;
+    instrumentId: string;
+  }>[];
+}>;
 
 export type ArbitrageCloseSafetyReason =
   | "FULL_MANAGED_CLOSE_AVAILABLE"
@@ -62,6 +75,7 @@ export class ArbitrageCloseSafetyEvaluator {
     private readonly spotBalances: SpotSource<SpotCloseAvailableBalanceSource>,
     private readonly spotAttributions: SpotSource<SpotOpeningAttributionSource>,
     private readonly now: () => number = Date.now,
+    private readonly persistedAttributions?: PersistedAttributionStore,
   ) {}
 
   async evaluate(
@@ -76,31 +90,13 @@ export class ArbitrageCloseSafetyEvaluator {
       return assessment(result(activeQuantity, "0", false, "NO_ACTIVE_MANAGED_EXPOSURE", startedAt), side);
     }
 
-    let verifiedLeg: ArbitrageLegVerificationResult | null = null;
-    try {
-      const verification = await this.positions.verify(userId, instance.arbitrageId);
-      verifiedLeg = verification?.legs.find((candidate) => candidate.legId === leg.legId) ?? null;
-    } catch {
-      // A read failure is an explicit unknown safety result, never release eligibility.
-    }
-    if (!verifiedLeg || !reliableReality(verifiedLeg)) {
-      return assessment(result(
-        activeQuantity,
-        "0",
-        false,
-        "PROVIDER_REALITY_UNAVAILABLE",
-        verifiedLeg?.checkedAt ?? startedAt,
-        verifiedLeg,
-      ), side);
-    }
-
     let context: ArbitrageExecutionPlanningContext;
     try {
       context = await this.planningContexts.load(leg.venue, leg.instrumentId);
     } catch {
       return assessment(result(
         activeQuantity, "0", false, "CLOSE_CAPABILITY_UNAVAILABLE",
-        verifiedLeg.checkedAt, verifiedLeg,
+        startedAt,
       ), side);
     }
     const spot = context.instrument.marketType === "spot" && context.instrument.contractType === "spot";
@@ -110,7 +106,7 @@ export class ArbitrageCloseSafetyEvaluator {
     if (context.instrument.quoteAsset !== "USDT" || (!spot && !perpetual)) {
       return assessment(result(
         activeQuantity, "0", false, "CLOSE_CAPABILITY_UNAVAILABLE",
-        Math.max(verifiedLeg.checkedAt, context.quote.fetchedAt), verifiedLeg,
+        Math.max(startedAt, context.quote.fetchedAt),
       ), side, context);
     }
 
@@ -121,10 +117,27 @@ export class ArbitrageCloseSafetyEvaluator {
     );
     let candidate = activeQuantity;
     let unavailableReason: ArbitrageCloseSafetyReason = "TRADING_RULES_REJECT_FULL_QUANTITY";
-    let availableQuantity = verifiedLeg.availableQuantity;
-    let checkedAt = Math.max(verifiedLeg.checkedAt, context.quote.fetchedAt);
+    let verifiedLeg: ArbitrageLegVerificationResult | null = null;
+    let availableQuantity: string | null = null;
+    let checkedAt = Math.max(startedAt, context.quote.fetchedAt);
 
     if (perpetual) {
+      try {
+        verifiedLeg = this.positions.verifyLeg
+          ? await this.positions.verifyLeg(userId, instance.arbitrageId, leg.legId)
+          : (await this.positions.verify(userId, instance.arbitrageId))?.legs
+            .find((candidate) => candidate.legId === leg.legId) ?? null;
+      } catch {
+        // A read failure is an explicit unknown safety result, never release eligibility.
+      }
+      if (!verifiedLeg || !reliableReality(verifiedLeg)) {
+        return assessment(result(
+          activeQuantity, "0", false, "PROVIDER_REALITY_UNAVAILABLE",
+          verifiedLeg?.checkedAt ?? checkedAt, verifiedLeg,
+        ), side, context, planner, "PERPETUAL");
+      }
+      availableQuantity = verifiedLeg.availableQuantity;
+      checkedAt = Math.max(checkedAt, verifiedLeg.checkedAt);
       if (verifiedLeg.positionMode === "ONE_WAY") {
         candidate = sameDirectionOneWayQuantity(leg.role, verifiedLeg.actualSignedNetQuantity, activeQuantity);
         unavailableReason = "ONE_WAY_REALITY_INSUFFICIENT";
@@ -151,8 +164,21 @@ export class ArbitrageCloseSafetyEvaluator {
       }
       let attributableQuantity: string;
       try {
-        attributableQuantity = await resolveSpotSource(this.spotAttributions, leg.venue, "attribution")
-          .readAttributableBaseQuantity(userId, {
+        const persisted = this.persistedAttributions?.readSpotOpeningAttributionEvidence(
+          userId, instance.arbitrageId, leg.legId,
+        ).find((candidate) => candidate.executionIntentId === opening.executionIntentId);
+        if (persisted) {
+          if (persisted.arbitrageId !== instance.arbitrageId || persisted.legId !== leg.legId
+            || persisted.executionRecordId !== opening.executionRecordId || persisted.venue !== leg.venue
+            || persisted.accountId !== leg.accountId || persisted.instrumentId !== leg.instrumentId) {
+            throw new Error("Persisted Spot attribution identity is invalid.");
+          }
+          attributableQuantity = persisted.attributableBaseQuantity;
+        } else if (this.persistedAttributions) {
+          throw new Error("Persisted Spot attribution is unavailable.");
+        } else {
+          attributableQuantity = await resolveSpotSource(this.spotAttributions, leg.venue, "attribution")
+            .readAttributableBaseQuantity(userId, {
             accountId: leg.accountId,
             instrumentId: leg.instrumentId,
             providerSymbol: context.instrument.providerSymbol,
@@ -161,6 +187,7 @@ export class ArbitrageCloseSafetyEvaluator {
             executionRecordId: opening.executionRecordId!,
             grossConfirmedQuantity: opening.confirmedQuantity,
           });
+        }
       } catch {
         return assessment(result(
           activeQuantity, "0", false, "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE", checkedAt, verifiedLeg,
@@ -176,6 +203,14 @@ export class ArbitrageCloseSafetyEvaluator {
           });
         availableQuantity = balance.availableQuantity;
         checkedAt = Math.max(checkedAt, balance.checkedAt);
+        verifiedLeg = spotAccountReality(
+          instance.arbitrageId,
+          leg.legId,
+          activeQuantity,
+          balance.totalQuantity ?? balance.availableQuantity,
+          balance.availableQuantity,
+          checkedAt,
+        );
       } catch {
         return assessment(result(
           activeQuantity, "0", false, "SPOT_AVAILABLE_BALANCE_UNAVAILABLE", checkedAt, verifiedLeg,
@@ -291,6 +326,30 @@ function reliableReality(value: ArbitrageLegVerificationResult) {
     && value.positionMode !== null
     && value.actualLongQuantity !== null
     && value.actualShortQuantity !== null;
+}
+
+function spotAccountReality(
+  arbitrageId: string,
+  legId: string,
+  expectedManagedQuantity: string,
+  totalQuantity: string,
+  availableQuantity: string,
+  checkedAt: number,
+): ArbitrageLegVerificationResult {
+  return Object.freeze({
+    arbitrageId,
+    legId,
+    expectedManagedQuantity,
+    actualQuantity: totalQuantity,
+    actualSignedNetQuantity: totalQuantity,
+    positionMode: "ONE_WAY",
+    actualLongQuantity: totalQuantity,
+    actualShortQuantity: "0",
+    availableQuantity,
+    verificationStatus: "MATCHED",
+    reason: null,
+    checkedAt,
+  });
 }
 
 function sameDirectionOneWayQuantity(

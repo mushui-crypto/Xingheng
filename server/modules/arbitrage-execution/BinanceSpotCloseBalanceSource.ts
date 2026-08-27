@@ -1,5 +1,3 @@
-import type { BinanceGenericRiskSnapshotRequest } from "../binance/BinanceTypes";
-
 export type SpotCloseAvailableBalanceRequest = Readonly<{
   accountId: string;
   instrumentId: string;
@@ -8,6 +6,7 @@ export type SpotCloseAvailableBalanceRequest = Readonly<{
 }>;
 
 export type SpotCloseAvailableBalance = Readonly<{
+  totalQuantity?: string;
   availableQuantity: string;
   checkedAt: number;
 }>;
@@ -23,13 +22,11 @@ type Registry = Readonly<{
   run<T>(
     userId: string,
     operation: (service: Readonly<{
-      executionAccountIdentity(): Promise<Readonly<{ accountId: string }>>;
-      readExecutionRiskSnapshot(request: BinanceGenericRiskSnapshotRequest): Promise<Readonly<{
+      readSpotCloseBalance(baseAsset: string): Promise<Readonly<{
         accountId: string;
-        category: "spot" | "linear";
-        symbol: string;
         baseAsset: string;
-        availableBaseAsset: string | null;
+        totalQuantity: string;
+        availableQuantity: string;
         fetchedAt: number;
       }>>;
     }>) => Promise<T> | T,
@@ -42,24 +39,15 @@ export class BinanceSpotCloseBalanceSource implements SpotCloseAvailableBalanceS
 
   readAvailableBalance(userId: string, request: SpotCloseAvailableBalanceRequest) {
     return this.registry.run(userId, async (service) => {
-      const identity = await service.executionAccountIdentity();
-      if (identity.accountId !== request.accountId) {
-        throw new Error("Spot close account does not match the authenticated Binance account.");
-      }
-      const snapshot = await service.readExecutionRiskSnapshot({
-        category: "spot",
-        symbol: request.providerSymbol,
-        baseAsset: request.baseAsset,
-      });
+      const snapshot = await service.readSpotCloseBalance(request.baseAsset);
       if (snapshot.accountId !== request.accountId
-        || snapshot.category !== "spot"
-        || snapshot.symbol !== request.providerSymbol
         || snapshot.baseAsset !== request.baseAsset
-        || snapshot.availableBaseAsset === null) {
+      ) {
         throw new Error("Spot close available balance identity is invalid.");
       }
       return Object.freeze({
-        availableQuantity: positiveOrZeroDecimal(snapshot.availableBaseAsset),
+        totalQuantity: positiveOrZeroDecimal(snapshot.totalQuantity),
+        availableQuantity: positiveOrZeroDecimal(snapshot.availableQuantity),
         checkedAt: snapshot.fetchedAt,
       });
     });

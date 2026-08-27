@@ -13,7 +13,7 @@ export class BybitSpotCloseBalanceSource implements SpotCloseAvailableBalanceSou
   constructor(
     private readonly credentials: Credentials,
     private readonly now = Date.now,
-    private readonly clientFactory: (credential: BybitCredentials) => Pick<BybitClient, "getAccountIdentity" | "getSpotAvailableBalance"> =
+    private readonly clientFactory: (credential: BybitCredentials) => Pick<BybitClient, "getAccountIdentity" | "getSpotBalance"> =
       (credential) => new BybitClient(() => credential),
   ) {}
 
@@ -26,6 +26,7 @@ export class BybitSpotCloseBalanceSource implements SpotCloseAvailableBalanceSou
     const client = this.clientFactory(credential);
     const identity = await client.getAccountIdentity();
     if (identity.accountId !== request.accountId) throw new Error("Spot close Provider identity does not match the configured Bybit account.");
-    return Object.freeze({ availableQuantity: await client.getSpotAvailableBalance(request.baseAsset), checkedAt: this.now() });
+    const balance = await client.getSpotBalance(request.baseAsset);
+    return Object.freeze({ ...balance, checkedAt: this.now() });
   }
 }

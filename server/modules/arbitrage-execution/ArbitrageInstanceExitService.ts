@@ -7,11 +7,16 @@ import {
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import type { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
-import type { ArbitrageExecutionCloseService } from "./ArbitrageExecutionCloseService";
+import {
+  ArbitrageExecutionCloseError,
+  type ArbitrageExecutionCloseService,
+} from "./ArbitrageExecutionCloseService";
+import type { ArbitrageCloseSafetyResult } from "./ArbitrageCloseSafetyEvaluator";
 import type { ArbitrageManagementReleaseService } from "./ArbitrageManagementReleaseService";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
-type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety">;
+type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
+  Partial<Pick<ArbitrageExecutionCloseService, "closeLegForExit">>;
 type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
 type DustReleaseService = Pick<ArbitrageManagementReleaseService, "releaseDustAfterClose">;
@@ -34,6 +39,13 @@ export class ArbitrageInstanceExitService {
     private readonly managementRelease: DustReleaseService,
     private readonly reconciliationService: ReconciliationService,
     private readonly positions: PositionVerifier,
+    private readonly options: Readonly<{
+      now?: () => number;
+      sleep?: (milliseconds: number) => Promise<void>;
+      transientReadRetryBudgetMs?: number;
+      transientReadRetryIntervalMs?: number;
+      transientReadMaxAttempts?: number;
+    }> = {},
   ) {}
 
   async exit(authenticatedUserId: string, input: unknown) {
@@ -71,61 +83,79 @@ export class ArbitrageInstanceExitService {
   private async exitOnce(userId: string, request: ExitRequest): Promise<ArbitrageInstanceExitResult> {
     let instance = this.requireInstance(userId, request.arbitrageId);
     if (instance.status === "CLOSED") return result(instance, "CONFIRMED", []);
-    if (instance.status === "FAILED") return result(instance, "STOPPED", []);
-    if (hasUnresolvedExecution(instance)) return result(instance, "STOPPED", []);
+    if (instance.status === "FAILED") return stopped(instance, [], null, "INITIAL_STATE", "INSTANCE_TERMINAL");
+    if (hasUnresolvedExecution(instance)) {
+      return stopped(instance, [], null, "JOINT_PREFLIGHT", "UNRESOLVED_EXECUTION");
+    }
 
     const outcomes: ArbitrageInstanceExitLegResult[] = [];
-    for (const leg of orderedExitLegs(instance)) {
+    const orderedLegs = orderedExitLegs(instance);
+    for (const leg of orderedLegs) {
       const quantity = activeManagedQuantity(instance, leg);
       if (quantity === "0") continue;
       if (hasUnresolvedClosingReference(instance, leg.legId)) {
-        return result(instance, "STOPPED", outcomes);
+        return stopped(instance, outcomes, leg.legId, "JOINT_PREFLIGHT", "UNRESOLVED_EXECUTION");
       }
       const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
       if (!isExecutableExitSafety(instance, leg.legId, safety)) {
-        return result(instance, "STOPPED", outcomes);
+        return stopped(instance, outcomes, leg.legId, "JOINT_PREFLIGHT", safety.reason);
       }
     }
 
-    for (const leg of orderedExitLegs(instance)) {
+    const pendingDustReleaseLegIds: string[] = [];
+    let firstConfirmedAt: number | null = null;
+    let secondLegProviderDispatchAt: number | null = null;
+    let continuationReadDeadline: number | null = null;
+    for (const leg of orderedLegs) {
       if (instance.status === "CLOSED") break;
       const currentLeg = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
       const quantity = activeManagedQuantity(instance, currentLeg);
       if (quantity === "0") continue;
       if (hasUnresolvedClosingReference(instance, leg.legId)) {
-        return result(instance, "STOPPED", outcomes);
+        return stopped(instance, outcomes, leg.legId, phaseFor(leg, "CLOSE"), "UNRESOLVED_EXECUTION");
       }
-      const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+      const fresh = leg.instrumentId.endsWith("-SPOT")
+        ? { safety: await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId), attempts: 1 }
+        : await this.readPerpetualSafetyWithRetry(userId, instance, leg.legId, continuationReadDeadline);
+      const safety = fresh.safety;
       const dustCompletion = safety.reason === "QUANTITY_STEP_DUST";
       if (!safety.fullManagedCloseAvailable && !dustCompletion) {
-        return result(instance, "STOPPED", outcomes);
+        return stopped(instance, outcomes, leg.legId, phaseFor(leg, "FRESH_SAFETY"), safety.reason);
       }
       if (dustCompletion && safety.safeClosableQuantity === "0") {
         if (!hasConfirmedClosingReference(instance, leg.legId)) {
-          return result(instance, "STOPPED", outcomes);
+          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RELEASE", safety.reason);
         }
-        try {
-          instance = (await this.managementRelease.releaseDustAfterClose(userId, {
-            arbitrageId: instance.arbitrageId,
-            legId: leg.legId,
-            commandId: dustReleaseCommandId(request.commandId, leg.legId),
-          })).instance;
-        } catch {
-          return result(instance, "STOPPED", outcomes);
-        }
+        pendingDustReleaseLegIds.push(leg.legId);
         continue;
       }
       const closeQuantity = safety.fullManagedCloseAvailable
         ? quantity
         : safety.safeClosableQuantity;
-      const confirmation = await this.closeService.closeLeg(userId, {
-        arbitrageId: instance.arbitrageId,
-        legId: leg.legId,
-        commandId: legCommandId(request.commandId, leg.legId),
-        quantity: closeQuantity,
-        executionMode: request.executionMode,
-        confirmed: true,
-      });
+      let confirmation;
+      try {
+        const closeInput = {
+          arbitrageId: instance.arbitrageId,
+          legId: leg.legId,
+          commandId: legCommandId(request.commandId, leg.legId),
+          quantity: closeQuantity,
+          executionMode: request.executionMode,
+          confirmed: true,
+        };
+        confirmation = leg.instrumentId.endsWith("-SPOT")
+          ? await this.closeService.closeLeg(userId, closeInput)
+          : await this.closeWithTransientReadRetry(
+            userId, instance, leg.legId, closeInput, fresh.attempts, continuationReadDeadline,
+          );
+      } catch (error) {
+        return stopped(
+          this.instances.get(userId, instance.arbitrageId) ?? instance,
+          outcomes,
+          leg.legId,
+          phaseFor(leg, "CLOSE"),
+          safeCloseErrorReason(error),
+        );
+      }
       instance = confirmation.instance;
       outcomes.push(Object.freeze({
         legId: leg.legId,
@@ -138,21 +168,134 @@ export class ArbitrageInstanceExitService {
           confirmation.executionRecord.confirmedQuantity,
           confirmation.executionRecord.plannedQuantity,
         ) !== 0) {
-        return result(instance, "STOPPED", outcomes);
+        return stopped(instance, outcomes, leg.legId, phaseFor(leg, "CONFIRMATION"), confirmation.executionRecord.status);
       }
-      if (dustCompletion) {
-        try {
-          instance = (await this.managementRelease.releaseDustAfterClose(userId, {
-            arbitrageId: instance.arbitrageId,
-            legId: leg.legId,
-            commandId: dustReleaseCommandId(request.commandId, leg.legId),
-          })).instance;
-        } catch {
-          return result(instance, "STOPPED", outcomes);
+      if (firstConfirmedAt === null) {
+        firstConfirmedAt = confirmation.executionRecord.verifiedAt;
+        if (leg.instrumentId.endsWith("-SPOT") && instance.strategyType === "SPOT_PERPETUAL") {
+          continuationReadDeadline = this.now() + (this.options.transientReadRetryBudgetMs ?? 5_000);
         }
       }
+      else if (confirmation.providerDispatchStartedAt !== undefined) {
+        secondLegProviderDispatchAt = confirmation.providerDispatchStartedAt;
+      }
+      if (dustCompletion) {
+        const remaining = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
+        const dustSafety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+        if (activeManagedQuantity(instance, remaining) === "0") continue;
+        if (dustSafety.reason !== "QUANTITY_STEP_DUST" || dustSafety.safeClosableQuantity !== "0") {
+          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", dustSafety.reason);
+        }
+        pendingDustReleaseLegIds.push(leg.legId);
+      }
     }
-    return result(instance, instance.status === "CLOSED" ? "CONFIRMED" : "STOPPED", outcomes);
+
+    for (const legId of pendingDustReleaseLegIds) {
+      try {
+        instance = (await this.managementRelease.releaseDustAfterClose(userId, {
+          arbitrageId: instance.arbitrageId,
+          legId,
+          commandId: dustReleaseCommandId(request.commandId, legId),
+        })).instance;
+      } catch {
+        return stopped(instance, outcomes, legId, "SPOT_DUST_RELEASE", "DUST_RELEASE_UNAVAILABLE");
+      }
+    }
+    return result(
+      instance,
+      instance.status === "CLOSED" ? "CONFIRMED" : "STOPPED",
+      outcomes,
+      undefined,
+      timing(firstConfirmedAt, secondLegProviderDispatchAt),
+    );
+  }
+
+  private async readPerpetualSafetyWithRetry(
+    userId: string,
+    instance: ArbitrageInstance,
+    legId: string,
+    inheritedDeadline: number | null,
+  ) {
+    const startedAt = this.now();
+    const budget = this.options.transientReadRetryBudgetMs ?? 5_000;
+    const deadline = inheritedDeadline ?? startedAt + budget;
+    const maxAttempts = this.options.transientReadMaxAttempts ?? 3;
+    let attempts = 0;
+    let safety: ArbitrageCloseSafetyResult;
+    do {
+      attempts += 1;
+      safety = await this.evaluateSafetyBeforeDeadline(userId, instance, legId, deadline);
+      if (safety.reason !== "PROVIDER_REALITY_UNAVAILABLE") return { safety, attempts };
+      const remaining = deadline - this.now();
+      if (attempts >= maxAttempts || remaining <= 0) return { safety, attempts };
+      await this.sleep(Math.min(this.options.transientReadRetryIntervalMs ?? 150, remaining));
+    } while (true);
+  }
+
+  private async evaluateSafetyBeforeDeadline(
+    userId: string,
+    instance: ArbitrageInstance,
+    legId: string,
+    deadline: number,
+  ): Promise<ArbitrageCloseSafetyResult> {
+    const remaining = deadline - this.now();
+    if (remaining <= 0) return unavailableSafety(instance, legId, this.now());
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, legId),
+        new Promise<ArbitrageCloseSafetyResult>((resolve) => {
+          timeout = setTimeout(() => resolve(unavailableSafety(instance, legId, this.now())), remaining);
+        }),
+      ]);
+    } finally {
+      if (timeout !== undefined) clearTimeout(timeout);
+    }
+  }
+
+  private async closeWithTransientReadRetry(
+    userId: string,
+    instance: ArbitrageInstance,
+    legId: string,
+    input: Parameters<CloseService["closeLeg"]>[1],
+    attemptsAlreadyUsed: number,
+    inheritedDeadline: number | null,
+  ) {
+    const startedAt = this.now();
+    const budget = this.options.transientReadRetryBudgetMs ?? 5_000;
+    const deadline = inheritedDeadline ?? startedAt + budget;
+    const maxAttempts = this.options.transientReadMaxAttempts ?? 3;
+    let attempts = attemptsAlreadyUsed;
+    while (true) {
+      try {
+        return await (inheritedDeadline !== null && this.closeService.closeLegForExit
+          ? this.closeService.closeLegForExit(userId, input, inheritedDeadline)
+          : this.closeService.closeLeg(userId, input));
+      } catch (error) {
+        if (error instanceof ArbitrageExecutionCloseError
+          && error.category === "position_verification_unavailable"
+          && attempts < maxAttempts
+          && this.now() < deadline
+          && !hasUnresolvedClosingReference(this.instances.get(userId, instance.arbitrageId) ?? instance, legId)) {
+          attempts += 1;
+          await this.sleep(Math.min(
+            this.options.transientReadRetryIntervalMs ?? 150,
+            deadline - this.now(),
+          ));
+          continue;
+        }
+        throw error;
+      }
+    }
+  }
+
+  private now() {
+    return this.options.now?.() ?? Date.now();
+  }
+
+  private sleep(milliseconds: number) {
+    if (milliseconds <= 0) return Promise.resolve();
+    return this.options.sleep?.(milliseconds) ?? new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
   }
 
   private requireInstance(userId: string, arbitrageId: string) {
@@ -180,9 +323,29 @@ type ArbitrageInstanceExitResult = Readonly<{
   /** A pre-existing CLOSED instance is idempotently complete and may have no new leg outcomes. */
   status: "CONFIRMED" | "STOPPED";
   legs: readonly ArbitrageInstanceExitLegResult[];
+  stop?: ArbitrageInstanceExitStopDiagnostic;
+  timing?: Readonly<{
+    firstLegConfirmedAt: number;
+    secondLegProviderDispatchAt: number;
+    secondLegExitDelayMs: number;
+  }>;
+}>;
+
+type ArbitrageInstanceExitStopDiagnostic = Readonly<{
+  failedLegId: string | null;
+  phase: "INITIAL_STATE" | "JOINT_PREFLIGHT" | "SPOT_FRESH_SAFETY" | "SPOT_CLOSE"
+    | "SPOT_CONFIRMATION" | "SPOT_DUST_RECHECK" | "SPOT_DUST_RELEASE"
+    | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
+  reason: string;
+  completedLegIds: readonly string[];
+  currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
 }>;
 
 function orderedExitLegs(instance: ArbitrageInstance) {
+  if (instance.strategyType === "SPOT_PERPETUAL") {
+    return [...instance.legs].sort((left, right) => Number(!left.instrumentId.endsWith("-SPOT"))
+      - Number(!right.instrumentId.endsWith("-SPOT")));
+  }
   return [...instance.legs].sort((left, right) => exitPriority(left) - exitPriority(right));
 }
 
@@ -242,8 +405,73 @@ function parseReconcileRequest(input: unknown) {
   return Object.freeze({ arbitrageId: identifier(value.arbitrageId, "arbitrageId") });
 }
 
-function result(instance: ArbitrageInstance, status: ArbitrageInstanceExitResult["status"], legs: readonly ArbitrageInstanceExitLegResult[]) {
-  return Object.freeze({ instance, status, legs: Object.freeze([...legs]) });
+function result(
+  instance: ArbitrageInstance,
+  status: ArbitrageInstanceExitResult["status"],
+  legs: readonly ArbitrageInstanceExitLegResult[],
+  stop?: ArbitrageInstanceExitStopDiagnostic,
+  timingResult?: ArbitrageInstanceExitResult["timing"],
+) {
+  return Object.freeze({
+    instance,
+    status,
+    legs: Object.freeze([...legs]),
+    ...(stop === undefined ? {} : { stop }),
+    ...(timingResult === undefined ? {} : { timing: timingResult }),
+  });
+}
+
+function stopped(
+  instance: ArbitrageInstance,
+  legs: readonly ArbitrageInstanceExitLegResult[],
+  failedLegId: string | null,
+  phase: ArbitrageInstanceExitStopDiagnostic["phase"],
+  reason: string,
+) {
+  return result(instance, "STOPPED", legs, Object.freeze({
+    failedLegId,
+    phase,
+    reason,
+    completedLegIds: Object.freeze(legs.filter((leg) => leg.status === "CONFIRMED").map((leg) => leg.legId)),
+    currentManagedExposure: Object.freeze(instance.legs.map((leg) => Object.freeze({
+      legId: leg.legId,
+      quantity: activeManagedQuantity(instance, leg),
+    }))),
+  }));
+}
+
+function phaseFor(leg: ArbitrageInstance["legs"][number], suffix: "FRESH_SAFETY" | "CLOSE" | "CONFIRMATION") {
+  return `${leg.instrumentId.endsWith("-SPOT") ? "SPOT" : "PERPETUAL"}_${suffix}` as ArbitrageInstanceExitStopDiagnostic["phase"];
+}
+
+function safeCloseErrorReason(error: unknown) {
+  return error instanceof ArbitrageExecutionCloseError ? error.category.toUpperCase() : "CLOSE_UNAVAILABLE";
+}
+
+function timing(firstLegConfirmedAt: number | null, secondLegProviderDispatchAt: number | null) {
+  if (firstLegConfirmedAt === null || secondLegProviderDispatchAt === null) return undefined;
+  return Object.freeze({
+    firstLegConfirmedAt,
+    secondLegProviderDispatchAt,
+    secondLegExitDelayMs: Math.max(0, secondLegProviderDispatchAt - firstLegConfirmedAt),
+  });
+}
+
+function unavailableSafety(instance: ArbitrageInstance, legId: string, checkedAt: number): ArbitrageCloseSafetyResult {
+  const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+  return Object.freeze({
+    activeManagedQuantity: activeManagedQuantity(instance, leg),
+    safeClosableQuantity: "0",
+    fullManagedCloseAvailable: false,
+    reason: "PROVIDER_REALITY_UNAVAILABLE",
+    checkedAt,
+    positionMode: null,
+    actualQuantity: null,
+    actualSignedNetQuantity: null,
+    actualLongQuantity: null,
+    actualShortQuantity: null,
+    availableQuantity: null,
+  });
 }
 
 function legCommandId(commandId: string, legId: string) {

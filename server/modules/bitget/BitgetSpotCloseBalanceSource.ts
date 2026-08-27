@@ -8,7 +8,7 @@ import { BitgetClient } from "./BitgetClient";
 import type { BitgetCredentials } from "./BitgetTypes";
 
 type Credentials = Pick<UserExchangeCredentialStore, "findSummary" | "loadForExecution">;
-type BalanceClient = Pick<BitgetClient, "getAccountIdentity" | "getSpotAvailableBalance">;
+type BalanceClient = Pick<BitgetClient, "getAccountIdentity" | "getSpotBalance">;
 
 /** Reads one exact Decimal UTA Spot balance for a user-owned Bitget account. */
 export class BitgetSpotCloseBalanceSource implements SpotCloseAvailableBalanceSource {
@@ -38,10 +38,7 @@ export class BitgetSpotCloseBalanceSource implements SpotCloseAvailableBalanceSo
     }
     const checkedAt = this.now();
     if (!Number.isSafeInteger(checkedAt) || checkedAt < 0) throw new Error("Spot close balance clock is invalid.");
-    return Object.freeze({
-      availableQuantity: await client.getSpotAvailableBalance(request.baseAsset),
-      checkedAt,
-    });
+    return Object.freeze({ ...(await client.getSpotBalance(request.baseAsset)), checkedAt });
   }
 }
 

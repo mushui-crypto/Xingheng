@@ -135,6 +135,10 @@ export class BinancePersonalTradingService {
     return this.requireClient().readGenericRiskSnapshot(request);
   }
 
+  readSpotCloseBalance(baseAsset: string) {
+    return this.requireClient().readSpotCloseBalance(baseAsset);
+  }
+
   readSpotOrderFills(symbol: string, orderId: string, baseAsset: string) {
     return this.requireClient().readSpotOrderFills(symbol, orderId, baseAsset);
   }

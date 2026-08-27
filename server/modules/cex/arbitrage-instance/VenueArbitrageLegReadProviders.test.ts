@@ -169,6 +169,36 @@ test("one provider context coalesces same-instrument mode facts while preserving
   assert.equal(positionReads, 2);
 });
 
+test("Binance perpetual verification uses narrow identity, mode, and symbol position without an account-wide snapshot", async () => {
+  let accountReads = 0;
+  const provider = new VenueArbitrageLegReadProvider(
+    "binance",
+    {
+      readAccountSnapshot: async () => { throw new Error("broad account read must not run"); },
+      readAccountIdentity: async () => ({ accountId: "binance:account-a" }),
+      readPerpetualPosition: async () => { throw new Error("positionReader owns this read"); },
+    },
+    {
+      readAccount: async () => { accountReads += 1; throw new Error("broad account read must not run"); },
+      dispose: () => undefined,
+    },
+    { resolve: async () => ({ providerSymbol: "XAUTUSDT", contractSize: "1" }) },
+    {
+      venue: "binance",
+      readPosition: async (request) => ({
+        venue: "binance", accountId: request.accountId, instrumentId: request.instrumentId,
+        positionMode: "ONE_WAY", side: "SHORT", quantity: "1", signedNetQuantity: "-1",
+        longQuantity: "0", shortQuantity: "1", fetchedAt: 1_800_000_000_000,
+      }),
+    },
+    { read: async () => ({ positionMode: "ONE_WAY" as const }) },
+  );
+
+  const observed = await provider.readLeg(leg({ role: "SHORT" }));
+  assert.equal(observed.snapshot.signedNetQuantity, "-1");
+  assert.equal(accountReads, 0);
+});
+
 test("provider rejects mismatched account identity and spot short inference", async () => {
   const provider = new VenueArbitrageLegReadProvider(
     "bitget",

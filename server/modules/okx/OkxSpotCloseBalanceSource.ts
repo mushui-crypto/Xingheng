@@ -28,8 +28,11 @@ export class OkxSpotCloseBalanceSource implements SpotCloseAvailableBalanceSourc
     if (request.providerSymbol !== `${request.baseAsset}-USDT`) {
       throw new Error("Spot close instrument identity is invalid for OKX.");
     }
-    const availableQuantity = await client.getSpotAvailableBalance(request.baseAsset);
-    return Object.freeze({ availableQuantity, checkedAt: this.now() });
+    const [availableQuantity, balances] = await Promise.all([
+      client.getSpotAvailableBalance(request.baseAsset),
+      client.getSpotBalances(request.baseAsset, "USDT"),
+    ]);
+    return Object.freeze({ totalQuantity: balances.baseTotal, availableQuantity, checkedAt: this.now() });
   }
 }
 

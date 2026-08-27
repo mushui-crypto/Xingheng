@@ -42,6 +42,7 @@ type ProviderPositionSnapshot =
 type VerificationClient = Readonly<{
   readAccountSnapshot(): Promise<unknown>;
   readPerpetualPosition(providerSymbol: string, expectedSide?: "long" | "short"): Promise<ProviderPositionSnapshot>;
+  readAccountIdentity?(): Promise<Readonly<{ accountId: string }>>;
 }>;
 
 type BinanceVerificationClient = VerificationClient & Readonly<{
@@ -142,12 +143,10 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     const accountReader = this.accountReader;
     if (!client || !accountReader) throw new Error(`${this.venue} verification provider has been disposed.`);
     if (leg.venue !== this.venue) throw new Error("Arbitrage leg venue does not match verification provider.");
-    const account = await (this.accountSnapshot ??= accountReader.readAccount());
-    if (account.accountId !== leg.accountId && !isCredentialOnlyBinding(this.venue, leg.accountId)) {
-      throw new ArbitrageLegReadError("account_identity_mismatch", "Arbitrage leg account does not match the authenticated credential.");
-    }
     const instrument = canonicalInstrumentFromId(leg.instrumentId);
     if (instrument.contractType === "spot") {
+      const account = await (this.accountSnapshot ??= accountReader.readAccount());
+      assertAccountIdentity(this.venue, leg.accountId, account.accountId);
       if (leg.role !== "LONG") throw new Error("Spot short quantity cannot be verified from an account balance.");
       if (!account.accountTypes.some((accountType) => accountType === "spot" || accountType === "unified")) {
         throw new Error("Provider account data cannot reliably represent a spot balance.");
@@ -172,6 +171,13 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
         availableQuantity: balances.length ? available : "0",
       };
     }
+    if (typeof client.readAccountIdentity === "function") {
+      const identity = await client.readAccountIdentity();
+      assertAccountIdentity(this.venue, leg.accountId, identity.accountId);
+    } else {
+      const account = await (this.accountSnapshot ??= accountReader.readAccount());
+      assertAccountIdentity(this.venue, leg.accountId, account.accountId);
+    }
     if (this.positionReader) {
       const context = this.positionReadContext === undefined
         ? undefined
@@ -189,6 +195,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
     if (!binding) throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
     const position = await client.readPerpetualPosition(binding.providerSymbol);
+    const account = await (this.accountSnapshot ??= accountReader.readAccount());
     const rawQuantity = "contractQuantity" in position ? position.contractQuantity : position.baseQuantity;
     return {
       snapshot: createPositionSnapshot({
@@ -218,6 +225,12 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       this.positionContexts.set(instrumentId, context);
     }
     return context;
+  }
+}
+
+function assertAccountIdentity(venue: ExecutionVenue, expectedAccountId: string, actualAccountId: string) {
+  if (actualAccountId !== expectedAccountId && !isCredentialOnlyBinding(venue, expectedAccountId)) {
+    throw new ArbitrageLegReadError("account_identity_mismatch", "Arbitrage leg account does not match the authenticated credential.");
   }
 }
 

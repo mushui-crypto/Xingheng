@@ -132,8 +132,8 @@ test("one-click exit closes the legal quantity, releases quantity-step dust, and
   assert.equal(result.instance.status, "CLOSED");
   assert.equal(result.instance.maxResidualBaseQuantity, "0.94");
   assert.deepEqual(fixture.closeCalls.map((call) => [call.legId, call.quantity]), [
-    ["short-leg", "59"],
     ["long-leg", "59"],
+    ["short-leg", "59"],
   ]);
   assert.equal(result.instance.legs[1].confirmedClosedQuantity, "59");
   assert.equal(result.instance.legs[0].confirmedClosedQuantity, "59");
@@ -141,6 +141,99 @@ test("one-click exit closes the legal quantity, releases quantity-step dust, and
   assert.equal(subtractUnsignedDecimals("61.795", "59"), "2.795");
   assert.equal(subtractUnsignedDecimals("2.795", "0.94"), "1.855");
   assert.equal(fixture.releaseCalls.length, 1);
+  assert.equal(fixture.releaseCalls[0]?.legId, "long-leg");
+  assert.equal(result.timing?.secondLegExitDelayMs, 1);
+  assert.ok(result.timing!.secondLegExitDelayMs <= 3_000);
+});
+
+test("SPOT_PERPETUAL joint preflight rejects an unsafe perpetual before either Provider mutation", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    unsafeLegId: "short-leg",
+    unsafeReason: "PROVIDER_REALITY_UNAVAILABLE",
+  });
+
+  const result = await fixture.service.exit("user-a", exitRequest("joint-preflight-perp-unsafe"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "JOINT_PREFLIGHT");
+  assert.equal(result.stop?.failedLegId, "short-leg");
+  assert.equal(fixture.closeCalls.length, 0);
+});
+
+test("Spot confirmation failure stops before the perpetual protection leg is touched", async (t) => {
+  for (const status of ["FAILED", "UNKNOWN", "PENDING_CONFIRMATION"] as const) {
+    await t.test(status, async () => {
+      const fixture = setup({
+        longOpenedQuantity: "59.94",
+        shortOpenedQuantity: "59",
+        legalSpotCloseQuantity: "59",
+        residual: "0.94",
+        firstStatus: status,
+      });
+      const result = await fixture.service.exit("user-a", exitRequest(`spot-${status}`));
+      assert.equal(result.status, "STOPPED");
+      assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
+    });
+  }
+});
+
+test("temporary perpetual Reality failure retries reads only and dispatches one close", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    transientPerpetualReadFailuresAfterSpot: 1,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("temporary-perp-read"));
+  assert.equal(result.status, "CONFIRMED");
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg", "short-leg"]);
+  assert.ok(fixture.safetyCalls("short-leg") >= 3);
+});
+
+test("persistent perpetual Reality failure exhausts the bounded read budget without repeating Spot", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    transientPerpetualReadFailuresAfterSpot: 10,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("persistent-perp-read"));
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_FRESH_SAFETY");
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
+});
+
+test("a concrete perpetual position conflict after Spot confirmation is not retried", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    postSpotPerpetualReason: "ONE_WAY_REALITY_INSUFFICIENT",
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-business-conflict"));
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.reason, "ONE_WAY_REALITY_INSUFFICIENT");
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
+  assert.equal(fixture.safetyCalls("short-leg"), 2);
+});
+
+test("restart-like explicit Exit skips a historically closed perpetual and completes Spot dust without reopening it", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "0",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("residual-spot-only"));
+  assert.equal(result.status, "CONFIRMED");
+  assert.deepEqual(fixture.closeCalls.map((call) => [call.legId, call.quantity]), [["long-leg", "59"]]);
   assert.equal(fixture.releaseCalls[0]?.legId, "long-leg");
 });
 
@@ -203,6 +296,8 @@ function setup(options: Readonly<{
     secondSafetyReady(): void;
     secondDispatch(): void;
   }>;
+  transientPerpetualReadFailuresAfterSpot?: number;
+  postSpotPerpetualReason?: "ONE_WAY_REALITY_INSUFFICIENT" | "HEDGE_BUCKET_INSUFFICIENT";
 }> = {}) {
   let instance = baseInstance(
     options.longOpenedQuantity,
@@ -242,6 +337,7 @@ function setup(options: Readonly<{
     };
   }
   let lifecycleApplyCount = 0;
+  const safetyCallCounts = new Map<string, number>();
   const closeCalls: Array<{ legId: string; commandId: string; quantity: string }> = [];
   const releaseCalls: Array<{ legId: string; commandId: string }> = [];
   let releaseSecondLeg: () => void = () => undefined;
@@ -250,6 +346,7 @@ function setup(options: Readonly<{
   const firstLegCompleted = new Promise<void>((resolve) => { completeFirstLeg = resolve; });
   const closeService = {
     async evaluateCloseSafety(_userId: string, _arbitrageId: string, legId: string) {
+      safetyCallCounts.set(legId, (safetyCallCounts.get(legId) ?? 0) + 1);
       const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
       if (legId === options.unsafeLegId) {
         const active = String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
@@ -265,6 +362,27 @@ function setup(options: Readonly<{
           actualLongQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
           actualShortQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : "0",
           availableQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
+        } as const;
+      }
+      const spotHasClosed = instance.legs[0].confirmedClosedQuantity !== "0";
+      const perpetualReadNumber = safetyCallCounts.get(legId) ?? 0;
+      if (legId === "short-leg" && spotHasClosed && options.postSpotPerpetualReason) {
+        return {
+          activeManagedQuantity: activeManagedFor(leg), safeClosableQuantity: "0",
+          fullManagedCloseAvailable: false, reason: options.postSpotPerpetualReason,
+          checkedAt: 1_800_000_000_050, positionMode: "ONE_WAY", actualQuantity: "0",
+          actualSignedNetQuantity: "0", actualLongQuantity: "0", actualShortQuantity: "0",
+          availableQuantity: null,
+        } as const;
+      }
+      if (legId === "short-leg" && spotHasClosed
+        && perpetualReadNumber <= 1 + (options.transientPerpetualReadFailuresAfterSpot ?? 0)) {
+        return {
+          activeManagedQuantity: activeManagedFor(leg), safeClosableQuantity: "0",
+          fullManagedCloseAvailable: false, reason: "PROVIDER_REALITY_UNAVAILABLE",
+          checkedAt: 1_800_000_000_050, positionMode: null, actualQuantity: null,
+          actualSignedNetQuantity: null, actualLongQuantity: null, actualShortQuantity: null,
+          availableQuantity: null,
         } as const;
       }
       const residualLeg = options.residual !== undefined && legId === "long-leg";
@@ -288,8 +406,8 @@ function setup(options: Readonly<{
       } as const;
     },
     async closeLeg(_userId: string, input: any) {
+      const first = closeCalls.length === 0;
       closeCalls.push({ legId: input.legId, commandId: input.commandId, quantity: input.quantity });
-      const first = input.legId === "short-leg";
       if (!first) options.timing?.secondSafetyReady();
       const status = first ? (options.firstStatus ?? "CONFIRMED") : "CONFIRMED";
       if (first) options.timing?.firstAuthoritative();
@@ -302,10 +420,12 @@ function setup(options: Readonly<{
           ...leg,
           confirmedClosedQuantity: input.quantity,
         }) as unknown as ArbitrageInstance["legs"];
+        const allManagedComplete = legs.every((leg) => leg.confirmedOpenedQuantity === leg.confirmedClosedQuantity
+          || instance.managementReleases?.some((release) => release.legId === leg.legId));
         instance = {
           ...instance,
           legs,
-          status: first ? "CLOSING" : options.residual ? "RESIDUAL" : "CLOSED",
+          status: allManagedComplete ? "CLOSED" : first ? "CLOSING" : options.residual ? "RESIDUAL" : "CLOSED",
           maxResidualBaseQuantity: first ? instance.maxResidualBaseQuantity : (options.residual ?? "0"),
         };
       }
@@ -320,8 +440,9 @@ function setup(options: Readonly<{
           status,
           plannedQuantity: input.quantity,
           confirmedQuantity: options.firstConfirmedQuantity ?? (status === "CONFIRMED" ? input.quantity : "0"),
-          verifiedAt: 1_800_000_000_100,
+          verifiedAt: first ? 1_800_000_000_100 : 1_800_000_000_101,
         },
+        providerDispatchStartedAt: first ? 1_800_000_000_090 : 1_800_000_000_101,
         idempotentReplay: false,
         secondLegAllowed: false,
       };
@@ -371,12 +492,21 @@ function setup(options: Readonly<{
         })) as any,
       }),
     } as any,
+    { now: () => 1_800_000_000_000, sleep: async () => undefined },
   );
   if (options.firstStatus !== undefined && options.firstStatus !== "CONFIRMED") releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual !== undefined) releaseSecondLeg();
   if (options.verifiedActualQuantity !== undefined) releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual === undefined) queueMicrotask(releaseSecondLeg);
-  return { service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg, lifecycleApplyCount: () => lifecycleApplyCount };
+  return {
+    service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg,
+    lifecycleApplyCount: () => lifecycleApplyCount,
+    safetyCalls: (legId: string) => safetyCallCounts.get(legId) ?? 0,
+  };
+}
+
+function activeManagedFor(leg: ArbitrageInstance["legs"][number]) {
+  return String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
 }
 
 function baseInstance(
@@ -387,7 +517,7 @@ function baseInstance(
   return {
     arbitrageId: "arbitrage-exit-1",
     userId: "user-a",
-    strategyType: "PERPETUAL_PERPETUAL",
+    strategyType: longInstrumentId.endsWith("-SPOT") ? "SPOT_PERPETUAL" : "PERPETUAL_PERPETUAL",
     sourcePlanId: "plan-1",
     maxResidualBaseQuantity: "0",
     status: "HOLDING",

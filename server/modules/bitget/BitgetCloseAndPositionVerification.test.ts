@@ -69,15 +69,15 @@ test("Bitget Spot opening attribution subtracts only authoritative base fee and 
 test("Bitget Spot close balance source is user/account/provider scoped", async () => {
   const source = new BitgetSpotCloseBalanceSource(credentialStore(), () => now, () => ({
     getAccountIdentity: async () => ({ accountId, accountFingerprint: "fingerprint", uidHash: "hash" }),
-    getSpotAvailableBalance: async (asset) => {
+    getSpotBalance: async (asset) => {
       assert.equal(asset, "DOGE");
-      return "94.905";
+      return { totalQuantity: "95", availableQuantity: "94.905" };
     },
   }));
   const result = await source.readAvailableBalance("user-a", {
     accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",
   });
-  assert.deepEqual(result, { availableQuantity: "94.905", checkedAt: now });
+  assert.deepEqual(result, { totalQuantity: "95", availableQuantity: "94.905", checkedAt: now });
   await assert.rejects(
     () => source.readAvailableBalance("user-b", {
       accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",

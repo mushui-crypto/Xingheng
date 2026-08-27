@@ -78,6 +78,8 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
   diagnostic?: FormalExecutionDiagnostic;
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
+  /** Local timestamp immediately before handing the intent to the Provider runtime. */
+  providerDispatchStartedAt?: number;
 }>;
 
 export class ArbitrageExecutionCommandError extends Error {

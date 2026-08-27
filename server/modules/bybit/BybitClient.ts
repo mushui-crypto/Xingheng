@@ -162,6 +162,10 @@ export class BybitClient {
   }
 
   async getSpotAvailableBalance(assetInput: string) {
+    return (await this.getSpotBalance(assetInput)).availableQuantity;
+  }
+
+  async getSpotBalance(assetInput: string) {
     const coin = asset(assetInput);
     const payload = await this.signedRequest("GET", "/v5/account/wallet-balance", {
       accountType: "UNIFIED",
@@ -176,7 +180,7 @@ export class BybitClient {
     const wallet = unsignedDecimal(requiredString(matching[0]!.walletBalance, "Bybit walletBalance"), "Bybit walletBalance");
     const locked = unsignedDecimal(optionalString(matching[0]!.locked) ?? "0", "Bybit locked balance");
     if (compareDecimal(wallet, locked) < 0) throw new BybitProviderError("provider_response_invalid", "Bybit locked balance exceeds wallet balance.");
-    return subtractDecimal(wallet, locked);
+    return Object.freeze({ totalQuantity: formatDecimal(wallet), availableQuantity: subtractDecimal(wallet, locked) });
   }
 
   async readHistoricalOrderEvidence(input: Readonly<{

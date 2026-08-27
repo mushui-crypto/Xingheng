@@ -905,6 +905,17 @@ test("a close waiting behind another mutation re-reads Reality inside serializat
   assert.equal(fixture.runtime.calls.length, 0);
 });
 
+test("Exit continuation deadline is rechecked inside mutation ownership before Provider dispatch", async (t) => {
+  const fixture = setup(t, { quantity: "1", actualQuantity: "1" });
+  await assert.rejects(
+    fixture.service.closeLegForExit("user-a", request("long-leg", "1", "expired-exit"), now),
+    (error: unknown) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "position_verification_unavailable",
+  );
+  assert.equal(fixture.runtime.managedCloseCalls.length, 0);
+  assert.equal(fixture.store.get("user-a", fixture.arbitrageId)!.legs[0].confirmedClosedQuantity, "0");
+});
+
 test("shared close safety reports full availability from ONE_WAY, HEDGE, and Spot facts", async (t) => {
   for (const scenario of [
     { name: "SHORT exact", legId: "short-leg", actual: "100", signed: "-100", full: true, safe: "100" },
@@ -1021,6 +1032,37 @@ test("Spot close safety classifies only venue quantity-rule remainder as dust", 
   assert.equal(shortfallSafety.reason, "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT");
 });
 
+test("Spot CloseSafety is independent from unrelated perpetual verification reads", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "59.94",
+    quantityStep: "1",
+    minQuantity: "1",
+    minNotional: "0.01",
+    availableBaseQuantity: "61.795",
+    attributableBaseQuantity: "59.94",
+    verificationThrows: true,
+  });
+  const safety = await fixture.service.evaluateCloseSafety("user-a", fixture.arbitrageId, "long-leg");
+  assert.equal(safety.safeClosableQuantity, "59");
+  assert.equal(safety.reason, "QUANTITY_STEP_DUST");
+});
+
+test("Spot CloseSafety uses persisted opening attribution without querying historical fills", async (t) => {
+  const fixture = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "59.94",
+    quantityStep: "1",
+    minQuantity: "1",
+    minNotional: "0.01",
+    availableBaseQuantity: "61.795",
+    attributableBaseQuantity: "59.94",
+  });
+  const safety = await fixture.service.evaluateCloseSafety("user-a", fixture.arbitrageId, "long-leg");
+  assert.equal(safety.safeClosableQuantity, "59");
+  assert.equal(fixture.liveAttributionReads(), 0);
+});
+
 function setup(
   t: TestContext,
   options: Readonly<{
@@ -1042,6 +1084,7 @@ function setup(
     actualShortQuantity?: string;
     formalVenue?: "binance" | "okx" | "bitget";
     mutationSerializer?: ProviderMutationSerializer;
+    verificationThrows?: boolean;
   }> = {},
 ) {
   const directory = mkdtempSync(join(tmpdir(), "stellax-close-"));
@@ -1117,11 +1160,28 @@ function setup(
     attributableBaseQuantity: options.attributableBaseQuantity ?? quantity,
     attributionError: options.attributionError ?? false,
   };
+  const persistedSpotLeg = store.get("user-a", arbitrageId)!.legs[0];
+  if (persistedSpotLeg.instrumentId.endsWith("-SPOT") && !fixture.attributionError) {
+    store.recordSpotOpeningAttributionEvidence("user-a", {
+      arbitrageId,
+      legId: persistedSpotLeg.legId,
+      executionIntentId: `opening-${persistedSpotLeg.legId}`,
+      executionRecordId: `record-${persistedSpotLeg.legId}`,
+      attributableBaseQuantity: fixture.attributableBaseQuantity,
+      source: "PROVIDER_ORDER_FILLS",
+      confirmedAt: now - 12,
+      venue: persistedSpotLeg.venue,
+      accountId: persistedSpotLeg.accountId,
+      instrumentId: persistedSpotLeg.instrumentId,
+    });
+  }
   let closeClock = now;
+  let liveAttributionReads = 0;
   const service = new ArbitrageExecutionCloseService(
     store,
     {
       verify: async () => {
+        if (options.verificationThrows) throw new Error("unrelated futures read failed");
         const current = store.get("user-a", arbitrageId)!;
         return {
           arbitrageId,
@@ -1176,6 +1236,7 @@ function setup(
     },
     {
       readAttributableBaseQuantity: async (_userId, input) => {
+        liveAttributionReads += 1;
         if (fixture.attributionError) throw new Error("commission unavailable");
         assert.equal(input.accountId, "account-a");
         assert.equal(input.grossConfirmedQuantity, quantity);
@@ -1186,7 +1247,10 @@ function setup(
     { clock: () => closeClock += 10, createIntentId: (_user, _arbitrage, leg, command) => `close-${leg}-${command}`,
       mutationSerializer: options.mutationSerializer },
   );
-  return Object.assign(fixture, { service, store, runtime, arbitrageId, binanceService, binanceRecords, okxService, okxRecords, okxReferences, formalRuntime });
+  return Object.assign(fixture, {
+    service, store, runtime, arbitrageId, binanceService, binanceRecords, okxService, okxRecords,
+    okxReferences, formalRuntime, liveAttributionReads: () => liveAttributionReads,
+  });
 }
 
 function openLeg(store: ArbitrageInstanceStore, arbitrageId: string, legId: string, quantity: string, timestamp: number) {

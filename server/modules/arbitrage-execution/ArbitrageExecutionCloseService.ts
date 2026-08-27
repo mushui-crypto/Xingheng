@@ -40,7 +40,8 @@ type InstanceStore = Pick<
   ArbitrageInstanceStore,
   "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult" | "readCommandReplay"
 >;
-type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
+type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify"> &
+  Partial<Pick<ArbitragePositionVerificationService, "verifyLeg">>;
 type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
 
 export class ArbitrageExecutionCloseError extends Error {
@@ -83,6 +84,9 @@ export class ArbitrageExecutionCloseService {
       spotBalances,
       spotAttributions,
       () => this.now(),
+      "readSpotOpeningAttributionEvidence" in instances
+        ? instances as unknown as Pick<ArbitrageInstanceStore, "readSpotOpeningAttributionEvidence">
+        : undefined,
     );
   }
 
@@ -102,6 +106,26 @@ export class ArbitrageExecutionCloseService {
   }
 
   async closeLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
+    return this.closeLegWithinDeadline(authenticatedUserId, input, null);
+  }
+
+  /** Exit-only boundary: a fresh read that finishes after its continuation budget may not mutate. */
+  async closeLegForExit(
+    authenticatedUserId: string,
+    input: unknown,
+    mutationDeadline: number,
+  ): Promise<ArbitrageLegExecutionConfirmation> {
+    if (!Number.isSafeInteger(mutationDeadline) || mutationDeadline < 0) {
+      throw closeError("position_verification_unavailable", "退出仓位核验时限无效，不能提交退出。");
+    }
+    return this.closeLegWithinDeadline(authenticatedUserId, input, mutationDeadline);
+  }
+
+  private async closeLegWithinDeadline(
+    authenticatedUserId: string,
+    input: unknown,
+    mutationDeadline: number | null,
+  ) {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = parseCloseRequest(input);
     const instance = this.instances.get(userId, request.arbitrageId);
@@ -113,10 +137,14 @@ export class ArbitrageExecutionCloseService {
       venue: leg.venue,
       accountId: leg.accountId,
       canonicalInstrumentId: leg.instrumentId,
-    }, () => this.closeLegOnce(userId, request));
+    }, () => this.closeLegOnce(userId, request, mutationDeadline));
   }
 
-  private async closeLegOnce(userId: string, request: CloseRequest): Promise<ArbitrageLegExecutionConfirmation> {
+  private async closeLegOnce(
+    userId: string,
+    request: CloseRequest,
+    mutationDeadline: number | null,
+  ): Promise<ArbitrageLegExecutionConfirmation> {
     const instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw closeError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
@@ -142,7 +170,12 @@ export class ArbitrageExecutionCloseService {
     if (compareUnsignedDecimals(request.quantity, managedQuantity) > 0) {
       throw closeError("close_quantity_unavailable", "退出数量不能超过当前可减少的真实仓位。");
     }
-    const safety = await this.closeSafety.evaluate(userId, instance, leg);
+    const safety = await withinMutationDeadline(
+      () => this.closeSafety.evaluate(userId, instance, leg),
+      mutationDeadline,
+      () => this.now(),
+    );
+    assertMutationDeadline(this.now(), mutationDeadline);
     assertCloseSafetyAvailable(safety.result);
     const context = safety.context;
     const planner = safety.planner;
@@ -202,6 +235,7 @@ export class ArbitrageExecutionCloseService {
       createdAt: now,
       expiresAt: now + (this.options.intentTtlMs ?? 30_000),
     });
+    assertMutationDeadline(this.now(), mutationDeadline);
     try {
       this.instances.claimExecutionReference(userId, instance.arbitrageId, {
         legId: leg.legId,
@@ -223,6 +257,7 @@ export class ArbitrageExecutionCloseService {
     }
 
     let runtimeResult: FormalExecutionRuntimeResult;
+    const providerDispatchStartedAt = this.now();
     try {
       runtimeResult = await runtime.executeManagedClose(intent);
     } catch {
@@ -249,7 +284,7 @@ export class ArbitrageExecutionCloseService {
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
-    return closeResult(updated, reference, false, attributableStatus);
+    return closeResult(updated, reference, false, attributableStatus, providerDispatchStartedAt);
   }
 
   private now() {
@@ -276,6 +311,34 @@ export class ArbitrageExecutionCloseService {
     } catch {
       throw closeError("idempotency_conflict", "commandId 已用于不同的退出业务请求。");
     }
+  }
+}
+
+function assertMutationDeadline(now: number, deadline: number | null) {
+  if (deadline !== null && now > deadline) {
+    throw closeError("position_verification_unavailable", "退出仓位核验已超过本次安全时限，未提交订单。");
+  }
+}
+
+async function withinMutationDeadline<T>(operation: () => Promise<T>, deadline: number | null, now: () => number) {
+  if (deadline === null) return operation();
+  const remaining = deadline - now();
+  if (remaining <= 0) {
+    throw closeError("position_verification_unavailable", "退出仓位核验已超过本次安全时限，未提交订单。");
+  }
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(closeError(
+          "position_verification_unavailable",
+          "退出仓位核验已超过本次安全时限，未提交订单。",
+        )), remaining);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
   }
 }
 
@@ -390,6 +453,7 @@ function closeResult(
   reference: ArbitrageExecutionReference,
   idempotentReplay: boolean,
   recordStatus?: ExecutionRecord["status"],
+  providerDispatchStartedAt?: number,
 ): ArbitrageLegExecutionConfirmation {
   return Object.freeze({
     instance,
@@ -403,6 +467,7 @@ function closeResult(
     }),
     idempotentReplay,
     secondLegAllowed: false,
+    ...(providerDispatchStartedAt === undefined ? {} : { providerDispatchStartedAt }),
   });
 }
 

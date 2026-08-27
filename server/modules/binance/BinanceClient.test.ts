@@ -26,6 +26,35 @@ test("Binance HEDGE position mode is readiness-supported", async () => {
   assert.equal(access.permissions.positionModeSupported, true);
 });
 
+test("Spot close balance reads only Spot identity and the requested asset balance", async () => {
+  const paths: string[] = [];
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" },
+    (async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      if (path === "/api/v3/time") return Response.json({ serverTime: 1_800_000_000_000 });
+      if (path === "/api/v3/account") return Response.json({
+        uid: "spot-close-account",
+        balances: [{ asset: "DOGE", free: "59", locked: "2.795" }],
+      });
+      throw new Error(`Unrelated account request reached Spot close balance: ${path}`);
+    }) as typeof fetch,
+    () => 1_800_000_000_000,
+    ["203.0.113.10"],
+  );
+
+  const balance = await client.readSpotCloseBalance("DOGE");
+
+  assert.match(balance.accountId, /^binance:[a-f0-9]{16}$/u);
+  assert.deepEqual({
+    baseAsset: balance.baseAsset,
+    totalQuantity: balance.totalQuantity,
+    availableQuantity: balance.availableQuantity,
+  }, { baseAsset: "DOGE", totalQuantity: "61.795", availableQuantity: "59" });
+  assert.deepEqual(paths, ["/api/v3/time", "/api/v3/account"]);
+});
+
 test("production orders remain IOC while test orders use GTC", async () => {
   const timeInForce: string[] = [];
   let orderId = 0;

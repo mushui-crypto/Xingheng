@@ -45,6 +45,10 @@ export class BitgetClient {
   }
 
   async getSpotAvailableBalance(assetInput: string) {
+    return (await this.getSpotBalance(assetInput)).availableQuantity;
+  }
+
+  async getSpotBalance(assetInput: string) {
     const asset = assetSymbol(assetInput);
     const payload = await this.signedRequest("GET", "/api/v3/account/assets", {});
     const data = record(payload.data, "Bitget account assets");
@@ -56,7 +60,13 @@ export class BitgetClient {
     if (matching.length > 1) {
       throw new BitgetProviderError("provider_response_invalid", "Bitget account asset is not unique.");
     }
-    return matching.length === 0 ? "0" : decimal(matching[0]!.available, "Bitget available balance");
+    if (matching.length === 0) return Object.freeze({ totalQuantity: "0", availableQuantity: "0" });
+    const availableQuantity = decimal(matching[0]!.available, "Bitget available balance");
+    const lockedQuantity = decimal(matching[0]!.locked ?? "0", "Bitget locked balance");
+    return Object.freeze({
+      totalQuantity: addDecimals(availableQuantity, lockedQuantity),
+      availableQuantity,
+    });
   }
 
   async assertOneWayMode() {

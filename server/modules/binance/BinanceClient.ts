@@ -109,6 +109,12 @@ export class BinanceClient implements BinanceClientAdapter {
     return boolean(value.dualSidePosition) ? "HEDGE" : "ONE_WAY";
   }
 
+  /** Narrow authenticated identity used by mutation-stage position verification. */
+  async readAccountIdentity() {
+    const account = record(await this.signedRequest("spot", "/api/v3/account", { omitZeroBalances: "true" }));
+    return Object.freeze({ accountId: binanceAccountId(account.uid) });
+  }
+
   async readAccountSnapshot(): Promise<BinanceAllSymbolAccountReadSnapshot> {
     const [
       access,
@@ -229,6 +235,24 @@ export class BinanceClient implements BinanceClientAdapter {
       providerOrderId: normalizedOrderId,
       grossBaseQuantity,
       baseCommissionQuantity,
+    });
+  }
+
+  /** Narrow Spot close fact: authenticated account identity plus one asset's total/free balance. */
+  async readSpotCloseBalance(baseAssetInput: string) {
+    const baseAsset = requiredAsset(baseAssetInput);
+    const account = record(await this.signedRequest("spot", "/api/v3/account"));
+    const accountId = binanceAccountId(account.uid);
+    const balances = providerList(account.balances, "现货余额").map(record);
+    const base = balances.find((balance) => balance.asset === baseAsset);
+    const availableQuantity = providerNonNegativeDecimal(base?.free ?? "0", `现货 ${baseAsset} 可用余额`);
+    const lockedQuantity = providerNonNegativeDecimal(base?.locked ?? "0", `现货 ${baseAsset} 锁定余额`);
+    return Object.freeze({
+      accountId,
+      baseAsset,
+      totalQuantity: addDecimalStrings(availableQuantity, lockedQuantity),
+      availableQuantity,
+      fetchedAt: this.now(),
     });
   }
 
@@ -1409,6 +1433,14 @@ function requiredAsset(value: unknown) {
   const asset = String(value ?? "").trim().toUpperCase();
   if (!asset) throw new BinanceProviderError("provider_response_invalid", "Binance 返回了无效的资产标识。");
   return asset;
+}
+
+function binanceAccountId(value: unknown) {
+  const uid = String(value ?? "").trim();
+  if (!uid) {
+    throw new BinanceProviderError("provider_identity_unavailable", "Binance 未返回可核对的账户 UID。");
+  }
+  return `binance:${createHash("sha256").update(`binance:${uid}`).digest("hex").slice(0, 16)}`;
 }
 
 function requiredProviderCommissionAsset(value: unknown) {

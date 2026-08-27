@@ -8,15 +8,13 @@ test("reads the exact Spot free balance through the authenticated user-scoped se
     run: async (userId, operation) => {
       receivedUserId = userId;
       return operation({
-        executionAccountIdentity: async () => ({ accountId: "account-a" }),
-        readExecutionRiskSnapshot: async (request) => {
-          assert.deepEqual(request, { category: "spot", symbol: "BTCUSDT", baseAsset: "BTC" });
+        readSpotCloseBalance: async (baseAsset) => {
+          assert.equal(baseAsset, "BTC");
           return {
             accountId: "account-a",
-            category: "spot",
-            symbol: "BTCUSDT",
             baseAsset: "BTC",
-            availableBaseAsset: "0.123456789012345678",
+            totalQuantity: "0.223456789012345678",
+            availableQuantity: "0.123456789012345678",
             fetchedAt: 1_900_000_000_000,
           };
         },
@@ -30,6 +28,7 @@ test("reads the exact Spot free balance through the authenticated user-scoped se
     providerSymbol: "BTCUSDT",
     baseAsset: "BTC",
   }), {
+    totalQuantity: "0.223456789012345678",
     availableQuantity: "0.123456789012345678",
     checkedAt: 1_900_000_000_000,
   });
@@ -39,13 +38,11 @@ test("reads the exact Spot free balance through the authenticated user-scoped se
 test("fails closed on account, instrument binding, or available balance mismatch", async () => {
   const source = (snapshot: Record<string, unknown>, accountId = "account-a") => new BinanceSpotCloseBalanceSource({
     run: async (_userId, operation) => operation({
-      executionAccountIdentity: async () => ({ accountId }),
-      readExecutionRiskSnapshot: async () => ({
-        accountId: "account-a",
-        category: "spot",
-        symbol: "BTCUSDT",
+      readSpotCloseBalance: async () => ({
+        accountId,
         baseAsset: "BTC",
-        availableBaseAsset: "1",
+        totalQuantity: "1",
+        availableQuantity: "1",
         fetchedAt: 1,
         ...snapshot,
       } as never),
@@ -58,8 +55,7 @@ test("fails closed on account, instrument binding, or available balance mismatch
     baseAsset: "BTC",
   };
 
-  await assert.rejects(source({}, "account-b").readAvailableBalance("user-a", request), /account does not match/u);
-  await assert.rejects(source({ symbol: "ETHUSDT" }).readAvailableBalance("user-a", request), /identity is invalid/u);
-  await assert.rejects(source({ availableBaseAsset: null }).readAvailableBalance("user-a", request), /identity is invalid/u);
-  await assert.rejects(source({ availableBaseAsset: "NaN" }).readAvailableBalance("user-a", request), /not a Decimal/u);
+  await assert.rejects(source({}, "account-b").readAvailableBalance("user-a", request), /identity is invalid/u);
+  await assert.rejects(source({ baseAsset: "ETH" }).readAvailableBalance("user-a", request), /identity is invalid/u);
+  await assert.rejects(source({ availableQuantity: "NaN" }).readAvailableBalance("user-a", request), /not a Decimal/u);
 });
