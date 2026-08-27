@@ -81,7 +81,7 @@ services:
       BINANCE_USER_ORDER_DB_DIR: /app/data/binance-users
       BACKUP_RETENTION_DAYS: "${BACKUP_RETENTION_DAYS:-14}"
     volumes:
-      - sqlite_data:/app/data:ro
+      - sqlite_data:/app/data
       - sqlite_backups:/backups
     network_mode: none
     restart: "no"

@@ -18,6 +18,7 @@ const compose = source("../compose.yaml");
 test("backup stops API and captures all execution recovery data", () => {
   assert.ok(backupEntry.indexOf("docker compose -p xingheng stop api") < backupEntry.indexOf("sqlite-backup"));
   assert.match(backupEntry, /docker compose -p xingheng up -d --wait api web/u);
+  assert.match(backup, /sqlite3 "file:\$source_path\?mode=ro"/u);
   assert.match(backup, /\.backup '\$destination_path'/u);
   assert.match(backup, /PRAGMA integrity_check/u);
   assert.match(backup, /"\$user_order_dir"\/\*\.sqlite/u);
@@ -38,8 +39,8 @@ test("restore verifies and stages trading, user order, and receipt evidence", ()
 
 test("production composition keeps recovery data on the SQLite volume with private creation mode", () => {
   assert.match(compose, /BINANCE_USER_ORDER_DB_DIR: \/app\/data\/binance-users/u);
-  assert.match(compose, /sqlite_data:\/app\/data/u);
-  assert.match(compose, /sqlite_data:\/app\/data:ro/u);
+  assert.match(compose, /sqlite-backup:[\s\S]*?- sqlite_data:\/app\/data(?:\r?\n)/u);
+  assert.doesNotMatch(compose, /sqlite_data:\/app\/data:ro/u);
   assert.match(compose, /umask 077; exec node dist-server\/index\.js/u);
 });
 
@@ -61,6 +62,8 @@ test("the project SQLite .backup mechanism includes committed data that exists o
     assert.equal(writer.prepare("SELECT value FROM facts WHERE id = 'latest'").get()?.value, "committed-in-wal");
     assert.equal(existsSync(`${sourcePath}-wal`), true);
     assert.ok(statSync(`${sourcePath}-wal`).size > 0);
+    assert.equal(existsSync(`${sourcePath}-shm`), true);
+    assert.ok(statSync(`${sourcePath}-shm`).size > 0);
 
     execFileSync("sqlite3", [
       `file:${sourcePath}?mode=ro`,
