@@ -7,11 +7,13 @@ import type { ArbitrageExecutionDraft, ArbitrageHedgeWorkflow } from "../../../a
 import {
   ArbitrageExecutionDraftContent,
   ArbitrageExecutionDraftEntry,
+  StartHedgeConfirmationContent,
   canExecuteLeg,
   canReconcileLeg,
   canConfirmDraft,
   loadResumeContext,
   resumeDraftMatchesInstance,
+  submitStartOnce,
 } from "./ArbitrageExecutionDraftEntry";
 import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
 
@@ -126,6 +128,7 @@ test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual af
 
   const startHtml = renderToStaticMarkup(content(draft(true), created));
   assert.equal(startHtml.match(/以此腿开始对冲/gu)?.length, 1);
+  assert.match(startHtml, /aria-haspopup="dialog"/u);
   assert.match(startHtml, /永续合约腿将在现货成交后自动执行/u);
 
   const unknown = instance([reference("long-leg", "UNKNOWN", "0")]);
@@ -136,6 +139,86 @@ test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual af
   const confirmed = instance([reference("long-leg", "CONFIRMED", "0.001")]);
   assert.equal(canExecuteLeg(confirmed, "long-leg"), false);
   assert.equal(canExecuteLeg(confirmed, "short-leg"), true);
+});
+
+test("the initial Start click only opens final confirmation and does not call the Start API", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const requestStart = source.slice(source.indexOf("function requestStartHedge"), source.indexOf("function cancelStartHedgeConfirmation"));
+  assert.match(requestStart, /setPendingStartLegId\(firstLegId\)/u);
+  assert.doesNotMatch(requestStart, /startHedge\(/u);
+  assert.match(source, /instance\?\.executionReferences\.length \? executeLeg\(legId\) : requestStartHedge\(legId\)/u);
+});
+
+test("cancelling final confirmation only clears local state and does not call the Start API", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const cancelStart = source.slice(source.indexOf("function cancelStartHedgeConfirmation"), source.indexOf("async function confirmStartHedge"));
+  assert.match(cancelStart, /setPendingStartLegId\(null\)/u);
+  assert.doesNotMatch(cancelStart, /startHedge\(|startArbitrageHedge\(/u);
+});
+
+test("final confirmation submits Start exactly once and rejects a concurrent double submit", async () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const confirmStart = source.slice(source.indexOf("async function confirmStartHedge"), source.indexOf("async function continuePartial"));
+  assert.match(confirmStart, /submitStartOnce\(startSubmissionGuard, \(\) => startHedge\(firstLegId\)\)/u);
+
+  const guard = { current: false };
+  let startApiCalls = 0;
+  let releaseStart!: () => void;
+  const pendingStart = new Promise<void>((resolve) => { releaseStart = resolve; });
+  const submit = async () => {
+    startApiCalls += 1;
+    await pendingStart;
+  };
+
+  const firstClick = submitStartOnce(guard, submit);
+  const secondClick = submitStartOnce(guard, submit);
+  assert.equal(startApiCalls, 1);
+  assert.equal(await secondClick, false);
+  releaseStart();
+  assert.equal(await firstClick, true);
+  assert.equal(startApiCalls, 1);
+});
+
+test("final confirmation displays execution facts, real-funds warning, and automatic second-leg warning", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  assert.match(source, /title="确认开始真实对冲"/u);
+  const html = renderToStaticMarkup(
+    <StartHedgeConfirmationContent
+      draft={dogeDraft()}
+      firstLegId="long-leg"
+      instance={dogeInstance()}
+      onCancel={() => undefined}
+      onConfirm={() => undefined}
+      submitting={false}
+    />,
+  );
+  assert.match(html, /Binance（现货） \/ Binance（永续）/u);
+  assert.match(html, /DOGE-USDT-SPOT/u);
+  assert.match(html, /DOGE-USDT-PERP/u);
+  assert.match(html, /买入（BUY）/u);
+  assert.match(html, /卖出（SELL）/u);
+  assert.match(html, /72 DOGE/u);
+  assert.match(html, /第一腿/u);
+  assert.match(html, /现货 · Binance · DOGE-USDT-SPOT/u);
+  assert.match(html, /确认后将提交真实资金订单。/u);
+  assert.match(html, /第一腿完整成交并通过安全检查后，系统将自动执行第二腿。/u);
+  assert.match(html, /确认开始真实对冲/u);
+  assert.match(html, /取消/u);
+});
+
+test("submitting final confirmation disables both actions", () => {
+  const html = renderToStaticMarkup(
+    <StartHedgeConfirmationContent
+      draft={dogeDraft()}
+      firstLegId="long-leg"
+      instance={dogeInstance()}
+      onCancel={() => undefined}
+      onConfirm={() => undefined}
+      submitting
+    />,
+  );
+  assert.equal(html.match(/disabled=""/gu)?.length, 2);
+  assert.match(html, /正在提交/u);
 });
 
 test("pending and unknown legs render a Chinese reconciliation action and latest checked time", () => {

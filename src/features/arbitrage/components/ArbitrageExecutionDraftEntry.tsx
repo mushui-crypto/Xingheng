@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ShieldCheck } from "lucide-react";
 import {
   confirmArbitrageExecution,
@@ -47,6 +47,9 @@ export function ArbitrageExecutionDraftEntry({
   const [resumeValidated, setResumeValidated] = useState(false);
   const [workflow, setWorkflow] = useState<ArbitrageHedgeWorkflow | null>(null);
   const [workflowPolling, setWorkflowPolling] = useState(false);
+  const [pendingStartLegId, setPendingStartLegId] = useState<string | null>(null);
+  const [startSubmitting, setStartSubmitting] = useState(false);
+  const startSubmissionGuard = useRef(false);
 
   useEffect(() => {
     if (!open) return;
@@ -140,7 +143,7 @@ export function ArbitrageExecutionDraftEntry({
   }
 
   function close() {
-    if (loading) return;
+    if (loading || startSubmissionGuard.current) return;
     setOpen(false);
     setDraft(null);
     setError("");
@@ -151,6 +154,8 @@ export function ArbitrageExecutionDraftEntry({
     setResumeValidated(false);
     setWorkflow(null);
     setWorkflowPolling(false);
+    setPendingStartLegId(null);
+    setStartSubmitting(false);
   }
 
   function openConfirmation() {
@@ -215,6 +220,28 @@ export function ArbitrageExecutionDraftEntry({
     } finally {
       setWorkflowPolling(false);
       setLoading(false);
+    }
+  }
+
+  function requestStartHedge(firstLegId: string) {
+    if (!instance || instance.executionReferences.length !== 0 || !canExecuteLeg(instance, firstLegId)) return;
+    setPendingStartLegId(firstLegId);
+  }
+
+  function cancelStartHedgeConfirmation() {
+    if (startSubmissionGuard.current) return;
+    setPendingStartLegId(null);
+  }
+
+  async function confirmStartHedge() {
+    const firstLegId = pendingStartLegId;
+    if (!firstLegId || startSubmissionGuard.current) return;
+    setStartSubmitting(true);
+    try {
+      const submitted = await submitStartOnce(startSubmissionGuard, () => startHedge(firstLegId));
+      if (submitted) setPendingStartLegId(null);
+    } finally {
+      if (!startSubmissionGuard.current) setStartSubmitting(false);
     }
   }
 
@@ -305,8 +332,8 @@ export function ArbitrageExecutionDraftEntry({
       </Button>
       <Modal
         bodyClassName="max-h-[75vh] overflow-y-auto"
-        closeDisabled={loading}
-        description={resumeMode ? "继续使用现有套利实例；异常后的任何 mutation 都需要再次明确确认。" : "创建实例后只需一次“开始对冲”确认；第一腿完整确认时由服务端连续推进第二腿。"}
+        closeDisabled={loading || startSubmitting}
+        description={resumeMode ? "继续使用现有套利实例；异常后的任何 mutation 都需要再次明确确认。" : "创建实例后，选择第一腿并完成一次真钱执行确认；第一腿完整确认时由服务端连续推进第二腿。"}
         onClose={close}
         open={open}
         shellClassName="max-w-5xl"
@@ -327,7 +354,7 @@ export function ArbitrageExecutionDraftEntry({
           onAmountChange={setAmount}
           onCancel={close}
           onConfirm={() => void confirmInstance()}
-          onExecuteLeg={(legId) => void (resumeMode || instance?.executionReferences.length ? executeLeg(legId) : startHedge(legId))}
+          onExecuteLeg={(legId) => void (resumeMode || instance?.executionReferences.length ? executeLeg(legId) : requestStartHedge(legId))}
           onContinuePartial={() => void continuePartial()}
           onRestart={restartAfterFailedZero}
           onReconcileLeg={(legId) => void reconcileLeg(legId)}
@@ -341,7 +368,127 @@ export function ArbitrageExecutionDraftEntry({
           validationNotice={validationNotice}
         />
       </Modal>
+      <StartHedgeConfirmationDialog
+        draft={draft}
+        firstLegId={pendingStartLegId}
+        instance={instance}
+        onCancel={cancelStartHedgeConfirmation}
+        onConfirm={() => void confirmStartHedge()}
+        submitting={startSubmitting}
+      />
     </>
+  );
+}
+
+export async function submitStartOnce(
+  guard: { current: boolean },
+  submit: () => Promise<void>,
+) {
+  if (guard.current) return false;
+  guard.current = true;
+  try {
+    await submit();
+    return true;
+  } finally {
+    guard.current = false;
+  }
+}
+
+function StartHedgeConfirmationDialog({
+  draft,
+  firstLegId,
+  instance,
+  onCancel,
+  onConfirm,
+  submitting,
+}: {
+  draft: ArbitrageExecutionDraft | null;
+  firstLegId: string | null;
+  instance: ArbitrageInstance | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+  submitting: boolean;
+}) {
+  const firstDraftLeg = draft?.legs.find((leg) => leg.legId === firstLegId);
+  const firstInstanceLeg = instance?.legs.find((leg) => leg.legId === firstLegId);
+  const confirmationAvailable = Boolean(draft && instance && firstDraftLeg && firstInstanceLeg);
+  return (
+    <Modal
+      closeDisabled={submitting}
+      description="请核对本次真实资金交易的执行事实。"
+      focusKey={firstLegId ?? undefined}
+      onClose={onCancel}
+      open={confirmationAvailable}
+      shellClassName="max-w-2xl"
+      title="确认开始真实对冲"
+    >
+      {confirmationAvailable ? (
+        <StartHedgeConfirmationContent
+          draft={draft!}
+          firstLegId={firstLegId!}
+          instance={instance!}
+          onCancel={onCancel}
+          onConfirm={onConfirm}
+          submitting={submitting}
+        />
+      ) : null}
+    </Modal>
+  );
+}
+
+export function StartHedgeConfirmationContent({
+  draft,
+  firstLegId,
+  instance,
+  onCancel,
+  onConfirm,
+  submitting,
+}: {
+  draft: ArbitrageExecutionDraft;
+  firstLegId: string;
+  instance: ArbitrageInstance;
+  onCancel: () => void;
+  onConfirm: () => void;
+  submitting: boolean;
+}) {
+  const spotDraftLeg = draft.legs.find((leg) => leg.marketType === "spot");
+  const perpetualDraftLeg = draft.legs.find((leg) => leg.marketType === "perpetual");
+  const firstDraftLeg = draft.legs.find((leg) => leg.legId === firstLegId)!;
+  const firstInstanceLeg = instance.legs.find((leg) => leg.legId === firstLegId)!;
+  const spotInstanceLeg = instance.legs.find((leg) => leg.legId === spotDraftLeg?.legId);
+  const perpetualInstanceLeg = instance.legs.find((leg) => leg.legId === perpetualDraftLeg?.legId);
+  const assetSymbol = plannedAssetSymbol(draft) ?? firstDraftLeg.instrumentId.split("-")[0]!;
+  const quantities = [spotInstanceLeg?.plannedQuantity, perpetualInstanceLeg?.plannedQuantity].filter((value): value is string => Boolean(value));
+  const quantity = quantities.length === 2 && quantities[0] !== quantities[1]
+    ? `现货 ${quantities[0]} ${assetSymbol} / 永续 ${quantities[1]} ${assetSymbol}`
+    : `${firstInstanceLeg.plannedQuantity} ${assetSymbol}`;
+  const venues = draft.legs.map((leg) => `${venueLabel(leg.venue)}（${leg.marketType === "spot" ? "现货" : "永续"}）`);
+
+  return (
+    <div className="space-y-5">
+      <dl className="grid gap-3 border border-[#25282f] bg-black p-4 text-xs sm:grid-cols-2">
+        <DraftMetric label="交易所" value={venues.join(" / ")} />
+        <DraftMetric label="数量" value={quantity} mono />
+        <DraftMetric label="现货标的" value={spotDraftLeg?.instrumentId ?? "不适用"} mono />
+        <DraftMetric label="现货方向" value={spotDraftLeg ? executionDirectionLabel(spotDraftLeg.side) : "不适用"} />
+        <DraftMetric label="永续标的" value={perpetualDraftLeg?.instrumentId ?? "不适用"} mono />
+        <DraftMetric label="永续方向" value={perpetualDraftLeg ? executionDirectionLabel(perpetualDraftLeg.side) : "不适用"} />
+        <DraftMetric
+          label="第一腿"
+          value={`${firstDraftLeg.marketType === "spot" ? "现货" : "永续"} · ${venueLabel(firstDraftLeg.venue)} · ${firstDraftLeg.instrumentId} · ${executionDirectionLabel(firstDraftLeg.side)}`}
+        />
+      </dl>
+      <div className="border border-red-400/40 bg-red-500/[0.08] px-4 py-3 text-sm leading-6 text-red-100">
+        <p className="font-semibold">确认后将提交真实资金订单。</p>
+        <p>第一腿完整成交并通过安全检查后，系统将自动执行第二腿。</p>
+      </div>
+      <div className="flex justify-end gap-3 border-t border-[#25282f] pt-4">
+        <Button data-modal-initial-focus disabled={submitting} onClick={onCancel} type="button" variant="ghost">取消</Button>
+        <Button disabled={submitting} onClick={onConfirm} type="button">
+          {submitting ? "正在提交" : "确认开始真实对冲"}
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -679,6 +826,7 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
       {deferredPerpetual
         ? <p className="mt-4 border border-sky-400/25 px-3 py-2 text-center text-xs text-sky-100">永续合约腿将在现货成交后自动执行</p>
         : <Button
+            aria-haspopup={startMode ? "dialog" : undefined}
             className="mt-4 w-full"
             disabled={loading || (reconcilable ? reference?.executionRecordId === null : !permitted)}
             onClick={reconcilable ? onReconcile : onExecute}
@@ -801,6 +949,10 @@ function planningErrorLabel(leg: ArbitrageExecutionDraftLeg) {
 
 function venueLabel(venue: ArbitrageExecutionDraftLeg["venue"]) {
   return { binance: "Binance", okx: "OKX", bybit: "Bybit", bitget: "Bitget" }[venue];
+}
+
+function executionDirectionLabel(side: ArbitrageExecutionDraftLeg["side"]) {
+  return side === "buy" ? "买入（BUY）" : "卖出（SELL）";
 }
 
 function strategyLabel(strategy: ArbitrageExecutionDraft["strategyType"]) {
