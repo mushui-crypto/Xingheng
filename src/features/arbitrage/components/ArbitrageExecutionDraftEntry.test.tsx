@@ -33,6 +33,8 @@ test("resume content binds the existing instance and removes the create confirma
   assert.match(html, /LONG · 多头腿/u);
   assert.match(html, /SHORT · 空头腿/u);
   assert.match(html, /继续使用现有实例/u);
+  assert.match(html, /role="status"/u);
+  assert.doesNotMatch(html, /role="status"[^>]*\bborder\b/u);
   assert.doesNotMatch(html, /确认创建套利/u);
 });
 

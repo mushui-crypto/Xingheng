@@ -15,8 +15,10 @@ import {
   instanceExitAvailability,
   canResumeOpeningWorkflow,
   legActionAvailability,
+  managementReleaseCandidates,
   managementEndMethodLabel,
   ManagementHistory,
+  ManagementReleaseActions,
   reconcileArbitrageHedge,
   statusLabel,
   updateInstanceSections,
@@ -540,8 +542,25 @@ test("authoritative close safety controls full close, partial close, release, an
   assert.equal(instanceExitAvailability(instance!, matched, { "long-leg": partial, "short-leg": full }), false);
   assert.equal(instanceExitAvailability(instance!, matched, { "long-leg": dust, "short-leg": full }), true);
   assert.deepEqual(legActionAvailability("MISMATCH", partial), { partialClose: true, release: true });
+  assert.deepEqual(legActionAvailability("MISMATCH", partial, true), { partialClose: false, release: true });
   assert.deepEqual(legActionAvailability("MISMATCH", unavailable), { partialClose: false, release: true });
   assert.deepEqual(legActionAvailability("UNKNOWN", unknown), { partialClose: false, release: false });
+  assert.deepEqual(
+    managementReleaseCandidates(instance!, mismatch, { "long-leg": partial, "short-leg": full }).map((leg) => leg.legId),
+    ["long-leg"],
+  );
+  const hiddenRelease = renderToStaticMarkup(<ManagementReleaseActions
+    candidates={[instance!.legs[0]]}
+    instanceFullExitAvailable
+    onRelease={() => undefined}
+  />);
+  const exceptionalRelease = renderToStaticMarkup(<ManagementReleaseActions
+    candidates={[instance!.legs[0]]}
+    instanceFullExitAvailable={false}
+    onRelease={() => undefined}
+  />);
+  assert.equal(hiddenRelease, "");
+  assert.match(exceptionalRelease, /异常处置[\s\S]*XAUT-USDT-PERP[\s\S]*保留残余并结束跟踪/u);
   assert.equal(instanceExitAvailability({
     ...instance!,
     executionReferences: [{
@@ -590,12 +609,12 @@ test("management history distinguishes normal close, release, and mixed manageme
   const mixedHtml = renderToStaticMarkup(<ArbitrageInstanceSections active={[]} history={[mixed]} onPageChange={() => undefined} page={1} selectedSection="history" />);
 
   assert.equal(managementEndMethodLabel("NORMAL_CLOSE"), "正常退出完成");
-  assert.equal(managementEndMethodLabel("MANAGEMENT_RELEASE"), "用户确认停止管理");
-  assert.equal(managementEndMethodLabel("MIXED"), "部分正常退出 + 部分停止管理");
-  assert.match(releasedHtml, /已停止管理数量[\s\S]*0.4[\s\S]*历史快照/u);
+  assert.equal(managementEndMethodLabel("MANAGEMENT_RELEASE"), "保留残余并结束跟踪");
+  assert.equal(managementEndMethodLabel("MIXED"), "部分正常退出 + 保留残余结束跟踪");
+  assert.match(releasedHtml, /已保留残余数量[\s\S]*0.4[\s\S]*历史快照/u);
   assert.match(releasedHtml, /不代表 Xingheng 已执行平仓/u);
   assert.doesNotMatch(releasedHtml, /已清仓|全部仓位已平仓/u);
-  assert.match(mixedHtml, /部分正常退出 \+ 部分停止管理[\s\S]*正常确认退出数量[\s\S]*已停止管理数量/u);
+  assert.match(mixedHtml, /部分正常退出 \+ 保留残余结束跟踪[\s\S]*正常确认退出数量[\s\S]*已保留残余数量/u);
 });
 
 test("instance Delta UI keeps opening and active evidence independent and never turns residual into an order instruction", () => {
@@ -613,7 +632,7 @@ test("instance Delta UI keeps opening and active evidence independent and never 
   assert.doesNotMatch(unknownHtml, /当前管理 Delta[\s\S]*>0(?:\.0+)?</u);
 });
 
-test("second-leg workflow is informational and management release has an explicit no-mutation confirmation", () => {
+test("second-leg workflow is informational and residual release has an explicit no-mutation confirmation", () => {
   const [instance] = requireArbitrageInstanceList([arbitrageInstance("OPENING")]);
   const delta = { ...hedgeDelta(instance!, "KNOWN", "KNOWN"), openingWorkflow: {
     secondLegRequired: true, secondLegExecutionEligible: null, requiredSecondLegSignedExposure: "-1",
@@ -624,8 +643,14 @@ test("second-leg workflow is informational and management release has an explici
   assert.doesNotMatch(html, /执行第二腿|补单/u);
   assert.match(releaseSource, /不会向交易所提交平仓订单/u);
   assert.match(releaseSource, /历史 execution 记录不会修改/u);
+  assert.match(releaseSource, /确认保留残余并结束跟踪/u);
   assert.match(releaseSource, /releaseEligible/u);
   assert.doesNotMatch(releaseSource, /releasedQuantity.*input|quantity.*input/u);
+  const overviewSource = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const legActions = overviewSource.slice(overviewSource.indexOf("function LegCloseActions"), overviewSource.indexOf("export function legActionAvailability"));
+  const releaseActions = overviewSource.slice(overviewSource.indexOf("function ManagementReleaseActions"), overviewSource.indexOf("export function instanceExitAvailability"));
+  assert.doesNotMatch(legActions, /保留残余并结束跟踪|停止管理/u);
+  assert.match(releaseActions, /异常处置[\s\S]*保留残余并结束跟踪/u);
 });
 
 function arbitrageInstance(status: string) {

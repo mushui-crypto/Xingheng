@@ -369,6 +369,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
     .filter((entry): entry is [string, Extract<ReadState<ArbitrageCloseSafety>, { status: "success" }>] => entry[1].status === "success")
     .map(([legId, state]) => [legId, state.value]));
   const canExitFully = instanceExitAvailability(instance, verificationState, safetyValues);
+  const releaseCandidates = managementReleaseCandidates(instance, verificationState, safetyValues);
   const closeTargetVerification = closeTarget && verificationState?.status === "success"
     ? verificationState.verification.legs.find((item) => item.legId === closeTarget.legId)
     : null;
@@ -423,10 +424,10 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
             {!historical ? <LegCloseActions
               closeSafetyState={closeSafeties[leg.legId]}
               onClose={() => setCloseTarget(leg)}
-              onRelease={() => setReleaseTarget(leg)}
               verificationState={verificationState}
               legId={leg.legId}
               enabled={Boolean(onInstanceRefresh)}
+              instanceFullExitAvailable={canExitFully}
             /> : null}
           </div>;
         })}
@@ -441,6 +442,11 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         onExitHedge={onExitHedge}
         onReconcileHedge={onReconcileHedge}
         verificationState={verificationState}
+      /> : null}
+      {!historical && onInstanceRefresh ? <ManagementReleaseActions
+        candidates={releaseCandidates}
+        instanceFullExitAvailable={canExitFully}
+        onRelease={setReleaseTarget}
       /> : null}
     </article>
     {closeTarget && closeTargetSafety && closeTargetVerification && onInstanceRefresh ? <ArbitrageLegCloseDialog
@@ -482,36 +488,76 @@ function LiveCloseSafety({ state }: { state?: ReadState<ArbitrageCloseSafety> })
   </>;
 }
 
-function LegCloseActions({ closeSafetyState, enabled, legId, onClose, onRelease, verificationState }: {
+function LegCloseActions({ closeSafetyState, enabled, instanceFullExitAvailable, legId, onClose, verificationState }: {
   closeSafetyState?: ReadState<ArbitrageCloseSafety>;
   enabled: boolean;
+  instanceFullExitAvailable: boolean;
   legId: string;
   onClose: () => void;
-  onRelease: () => void;
   verificationState?: VerificationState;
 }) {
   const verification = verificationState?.status === "success"
     ? verificationState.verification.legs.find((item) => item.legId === legId)
     : null;
   const safety = closeSafetyState?.status === "success" ? closeSafetyState.value : null;
-  const actions = legActionAvailability(verification?.verificationStatus, safety);
-  if (!enabled || (!actions.partialClose && !actions.release)) return null;
+  const actions = legActionAvailability(verification?.verificationStatus, safety, instanceFullExitAvailable);
+  if (!enabled || !actions.partialClose) return null;
   return <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[#25282f] pt-3">
-    {actions.partialClose ? <Button onClick={onClose} type="button" variant="secondary">安全部分退出</Button> : null}
-    {actions.release ? <Button onClick={onRelease} type="button" variant="secondary">停止管理</Button> : null}
+    <Button onClick={onClose} type="button" variant="secondary">安全部分退出</Button>
   </div>;
 }
 
 export function legActionAvailability(
   verificationStatus: ArbitrageLegVerificationStatus | undefined,
   safety: ArbitrageCloseSafety | null,
+  instanceFullExitAvailable = false,
 ) {
   const reliable = verificationStatus !== undefined && verificationStatus !== "UNKNOWN"
     && safety?.realityReliable === true;
   return {
-    partialClose: reliable && !safety.fullManagedCloseAvailable && !isZeroDecimal(safety.safeClosableQuantity),
+    partialClose: reliable && !instanceFullExitAvailable
+      && !safety.fullManagedCloseAvailable && !isZeroDecimal(safety.safeClosableQuantity),
     release: reliable && safety.releaseEligible,
   };
+}
+
+export function managementReleaseCandidates(
+  instance: ArbitrageInstance,
+  verificationState: VerificationState | undefined,
+  safeties: Record<string, ArbitrageCloseSafety | undefined>,
+) {
+  if (verificationState?.status !== "success") return [];
+  return instance.legs.filter((leg) => {
+    const verification = verificationState.verification.legs.find((item) => item.legId === leg.legId);
+    const safety = safeties[leg.legId];
+    return verification?.verificationStatus !== undefined
+      && verification.verificationStatus !== "UNKNOWN"
+      && safety?.realityReliable === true
+      && safety.releaseEligible;
+  });
+}
+
+export function ManagementReleaseActions({ candidates, instanceFullExitAvailable, onRelease }: {
+  candidates: ArbitrageInstanceLeg[];
+  instanceFullExitAvailable: boolean;
+  onRelease: (leg: ArbitrageInstanceLeg) => void;
+}) {
+  if (instanceFullExitAvailable || candidates.length === 0) return null;
+  return <section className="mt-4 border-t border-[#25282f] pt-4">
+    <p className="text-xs font-semibold text-amber-100">异常处置</p>
+    <p className="mt-2 max-w-3xl text-xs leading-5 text-[#8f99a5]">
+      正常完整退出不可用时，可以保留交易所中的残余仓位并结束 Xingheng 对对应套利腿的跟踪。本操作不会提交平仓订单。
+    </p>
+    <div className="mt-3 grid gap-3">
+      {candidates.map((leg) => <div className="flex flex-wrap items-center justify-between gap-3" key={leg.legId}>
+        <div className="min-w-0 text-xs">
+          <p className="font-semibold text-[#c5ccd4]">{leg.role === "LONG" ? "多头腿" : "空头腿"}</p>
+          <p className="mt-1 break-all font-mono text-[#707985]">{leg.instrumentId}</p>
+        </div>
+        <Button onClick={() => onRelease(leg)} type="button" variant="danger">保留残余并结束跟踪</Button>
+      </div>)}
+    </div>
+  </section>;
 }
 
 export function instanceExitAvailability(
@@ -556,15 +602,15 @@ export function InstanceDeltaPanel({ instance, state }: { instance: ArbitrageIns
 export function ManagementHistory({ instance }: { instance: ArbitrageInstance }) {
   if (instance.managementReleases.length === 0) return null;
   return <section className="mt-4 border-t border-[#25282f] pt-4">
-    <h4 className="text-xs font-semibold text-white">停止管理记录</h4>
-    <p className="mt-2 text-xs leading-5 text-amber-200">以下记录表示用户确认停止系统管理，不代表 Xingheng 已执行平仓。</p>
+    <h4 className="text-xs font-semibold text-white">残余保留与跟踪结束记录</h4>
+    <p className="mt-2 text-xs leading-5 text-amber-200">以下记录表示用户保留交易所残余并结束系统跟踪，不代表 Xingheng 已执行平仓。</p>
     <div className="mt-3 grid gap-2">{instance.managementReleases.map((release) => {
       const leg = instance.legs.find((candidate) => candidate.legId === release.legId);
       return <dl className="grid gap-2 border border-[#25282f] bg-[#0b0d11] p-3 text-xs sm:grid-cols-2" key={release.releaseId}>
         <Metric label="套利腿" value={leg ? `${leg.role === "LONG" ? "多头腿" : "空头腿"} · ${leg.instrumentId}` : release.legId} />
-        <Metric label="已停止管理数量" value={release.releasedQuantity} />
+        <Metric label="已保留残余数量" value={release.releasedQuantity} />
         <Metric label="确认时间" value={formatTime(release.confirmedAt)} />
-        <Metric label="原因" value="用户确认停止管理" />
+        <Metric label="原因" value="用户确认保留残余并结束跟踪" />
         <Metric label="Release 时交易所真实数量（历史快照）" value={release.actualQuantity} />
         <Metric label="Reality 快照时间" value={formatTime(release.realityCheckedAt)} />
       </dl>;
@@ -574,8 +620,8 @@ export function ManagementHistory({ instance }: { instance: ArbitrageInstance })
 
 export function managementEndMethodLabel(method: ReturnType<typeof deriveArbitrageManagementEndMethod>) {
   return method === "NORMAL_CLOSE" ? "正常退出完成"
-    : method === "MANAGEMENT_RELEASE" ? "用户确认停止管理"
-      : method === "MIXED" ? "部分正常退出 + 部分停止管理" : "—";
+    : method === "MANAGEMENT_RELEASE" ? "保留残余并结束跟踪"
+      : method === "MIXED" ? "部分正常退出 + 保留残余结束跟踪" : "—";
 }
 
 function deltaValue(value: InstanceHedgeDelta["openingDelta"], asset: string | null) {

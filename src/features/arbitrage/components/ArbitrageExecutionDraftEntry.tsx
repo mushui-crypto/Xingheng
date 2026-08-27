@@ -617,7 +617,13 @@ export function ArbitrageExecutionDraftContent({
       <div className="flex flex-wrap justify-end gap-3 border-t border-[#25282f] pt-4">
         <Button disabled={loading} onClick={onCancel} type="button" variant="ghost">取消</Button>
         {resumeMode
-          ? <span className={`inline-flex min-h-9 items-center border px-3 text-xs ${resumeValidated ? "border-sky-400/30 text-sky-100" : "border-red-400/30 text-red-200"}`}>{resumeValidated ? "继续使用现有实例" : "已停止继续执行"}</span>
+          ? <span
+              className={`inline-flex items-center gap-2 text-xs ${resumeValidated ? "text-sky-100" : "text-red-200"}`}
+              role="status"
+            >
+              <span aria-hidden="true" className={`size-1.5 rounded-full ${resumeValidated ? "bg-sky-300" : "bg-red-300"}`} />
+              {resumeValidated ? "继续使用现有实例" : "已停止继续执行"}
+            </span>
           : <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>}
       </div>
       <p className="text-right text-[11px] leading-5 text-[#707985]">{resumeMode ? "异常恢复需要再次明确确认；UNKNOWN 或 live partial 只能先重新核验。" : "开始对冲只需一次确认；第一腿完整确认后由服务端连续推进第二腿。"}</p>
