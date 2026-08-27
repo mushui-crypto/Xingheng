@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import { BinanceClient } from "./BinanceClient";
 import { BinanceOrderStore } from "./BinanceOrderStore";
+import { assertBinanceProviderOrderIdentity } from "./BinanceProviderOrderIdentity";
 
 test("fresh stores persist explicit generic symbols and recover them after restart", () => {
   const root = mkdtempSync(join(tmpdir(), "binance-order-store-fresh-"));
@@ -30,6 +31,165 @@ test("fresh stores persist explicit generic symbols and recover them after resta
     assert.equal(symbolColumn?.notnull, 1);
     assert.equal(symbolColumn?.dflt_value, null);
     db.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy migration creates expectedReduceOnly with INTEGER affinity", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-reduce-only-migration-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const legacyDb = new DatabaseSync(dbPath);
+    createLegacyOrdersTable(legacyDb);
+    legacyDb.close();
+
+    new BinanceOrderStore(dbPath).close();
+
+    const migratedDb = new DatabaseSync(dbPath);
+    const column = (migratedDb.prepare("PRAGMA table_info(binance_personal_orders)").all() as Array<{
+      name: string;
+      type: string;
+    }>).find((candidate) => candidate.name === "expectedReduceOnly");
+    assert.equal(column?.type, "INTEGER");
+    migratedDb.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy TEXT expectedReduceOnly decodes exact zero and one representations", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-reduce-only-text-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const legacyDb = new DatabaseSync(dbPath);
+    createLegacyExpectedReduceOnlyTextOrdersTable(legacyDb);
+    legacyDb.close();
+    new BinanceOrderStore(dbPath).close();
+
+    const writableDb = new DatabaseSync(dbPath);
+    const insert = writableDb.prepare(`INSERT INTO binance_personal_orders (
+      idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol,
+      executionMode, expectedReduceOnly, status, orderJson, error, createdAt, updatedAt
+    ) VALUES (?, ?, ?, NULL, 'linear', 'DOGEUSDT', 'production_ioc', ?, 'processing', NULL, NULL, ?, ?)`);
+    const fixtures = [
+      { id: "number-zero", value: 0, expected: false },
+      { id: "number-zero-decimal", value: 0.0, expected: false },
+      { id: "text-zero", value: "0", expected: false },
+      { id: "text-zero-decimal", value: "0.0", expected: false },
+      { id: "number-one", value: 1, expected: true },
+      { id: "number-one-decimal", value: 1.0, expected: true },
+      { id: "text-one", value: "1", expected: true },
+      { id: "text-one-decimal", value: "1.0", expected: true },
+    ] as const;
+    for (const [index, fixture] of fixtures.entries()) {
+      insert.run(fixture.id, `${fixture.id}-fingerprint`, `${fixture.id}-client`, fixture.value, index + 1, index + 1);
+    }
+    writableDb.close();
+
+    const store = new BinanceOrderStore(dbPath);
+    for (const fixture of fixtures) {
+      assert.equal(store.find(fixture.id)?.expectedReduceOnly, fixture.expected, fixture.id);
+    }
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy expectedReduceOnly rejects invalid non-null values and preserves null as absent", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-reduce-only-invalid-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const legacyDb = new DatabaseSync(dbPath);
+    createLegacyExpectedReduceOnlyTextOrdersTable(legacyDb);
+    legacyDb.close();
+    new BinanceOrderStore(dbPath).close();
+
+    const writableDb = new DatabaseSync(dbPath);
+    const insert = writableDb.prepare(`INSERT INTO binance_personal_orders (
+      idempotencyKey, requestFingerprint, clientOrderId, providerOrderId, category, symbol,
+      executionMode, expectedReduceOnly, status, orderJson, error, createdAt, updatedAt
+    ) VALUES (?, ?, ?, NULL, 'linear', 'DOGEUSDT', 'production_ioc', ?, 'processing', NULL, NULL, ?, ?)`);
+    for (const [index, value] of ["false", "true", "abc", ""].entries()) {
+      insert.run(`invalid-${index}`, `invalid-${index}-fingerprint`, `invalid-${index}-client`, value, index + 1, index + 1);
+    }
+    insert.run("missing", "missing-fingerprint", "missing-client", null, 10, 10);
+    writableDb.close();
+
+    const store = new BinanceOrderStore(dbPath);
+    for (const index of [0, 1, 2, 3]) {
+      assert.throws(
+        () => store.find(`invalid-${index}`),
+        /Stored Binance expectedReduceOnly is invalid/u,
+      );
+    }
+    const missing = store.find("missing");
+    assert.equal(missing && Object.hasOwn(missing, "expectedReduceOnly"), false);
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy migration preserves ONE_WAY opening and CLOSE_ONLY reduceOnly semantics after restart", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-reduce-only-restart-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    const legacyDb = new DatabaseSync(dbPath);
+    createLegacyOrdersTable(legacyDb);
+    legacyDb.close();
+
+    let store = new BinanceOrderStore(dbPath);
+    store.reserve(reduceOnlyReservation("opening", false));
+    store.reserve(reduceOnlyReservation("closing", true));
+    store.close();
+
+    const rawDb = new DatabaseSync(dbPath);
+    const rows = rawDb.prepare(`SELECT idempotencyKey, expectedReduceOnly, typeof(expectedReduceOnly) AS storageType
+      FROM binance_personal_orders ORDER BY idempotencyKey`).all() as Array<{
+        idempotencyKey: string;
+        expectedReduceOnly: number;
+        storageType: string;
+      }>;
+    assert.deepEqual(rows.map((row) => ({ ...row })), [
+      { idempotencyKey: "closing", expectedReduceOnly: 1, storageType: "integer" },
+      { idempotencyKey: "opening", expectedReduceOnly: 0, storageType: "integer" },
+    ]);
+    rawDb.close();
+
+    store = new BinanceOrderStore(dbPath);
+    const opening = store.find("opening")!;
+    const closing = store.find("closing")!;
+    assert.equal(opening.expectedReduceOnly, false);
+    assert.equal(closing.expectedReduceOnly, true);
+    assert.doesNotThrow(() => assertBinanceProviderOrderIdentity(
+      providerReduceOnlyOrder("opening-client", "7001", "Sell", false),
+      { symbol: "DOGEUSDT", clientOrderId: "opening-client", reduceOnly: opening.expectedReduceOnly },
+    ));
+    assert.doesNotThrow(() => assertBinanceProviderOrderIdentity(
+      providerReduceOnlyOrder("closing-client", "7002", "Buy", true),
+      { symbol: "DOGEUSDT", clientOrderId: "closing-client", reduceOnly: closing.expectedReduceOnly },
+    ));
+    store.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fresh stores persist expectedReduceOnly as exact integer zero and one", () => {
+  const root = mkdtempSync(join(tmpdir(), "binance-order-store-reduce-only-fresh-"));
+  const dbPath = join(root, "orders.sqlite");
+  try {
+    let store = new BinanceOrderStore(dbPath);
+    store.reserve(reduceOnlyReservation("fresh-opening", false));
+    store.reserve(reduceOnlyReservation("fresh-closing", true));
+    store.close();
+
+    store = new BinanceOrderStore(dbPath);
+    assert.equal(store.find("fresh-opening")?.expectedReduceOnly, false);
+    assert.equal(store.find("fresh-closing")?.expectedReduceOnly, true);
+    store.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -591,6 +751,46 @@ function orderReservation(symbol: string) {
   };
 }
 
+function reduceOnlyReservation(idempotencyKey: string, expectedReduceOnly: boolean) {
+  return {
+    idempotencyKey,
+    requestFingerprint: `${idempotencyKey}-fingerprint`,
+    clientOrderId: `${idempotencyKey}-client`,
+    category: "linear" as const,
+    symbol: "DOGEUSDT",
+    executionMode: "production_ioc" as const,
+    positionMode: "ONE_WAY" as const,
+    positionDirection: "SHORT" as const,
+    expectedSide: expectedReduceOnly ? "Buy" as const : "Sell" as const,
+    expectedBaseQuantity: "59",
+    expectedReduceOnly,
+  };
+}
+
+function providerReduceOnlyOrder(
+  clientOrderId: string,
+  orderId: string,
+  side: "Buy" | "Sell",
+  reduceOnly: boolean,
+) {
+  return {
+    symbol: "DOGEUSDT",
+    orderId,
+    orderLinkId: clientOrderId,
+    status: "Filled" as const,
+    requestedQuantity: 59,
+    filledQuantity: 59,
+    side,
+    reduceOnly,
+    positionSide: "BOTH" as const,
+    requestedBaseQuantity: "59",
+    filledBaseQuantity: "59",
+    averagePrice: 0.088,
+    feeUsd: 0,
+    updatedAt: 3_000,
+  };
+}
+
 function persistedOrderJson(rawOrderId: string) {
   return `{"symbol":"BTCUSDT","orderId":${rawOrderId},"orderLinkId":"client-BTCUSDT","status":"New","requestedQuantity":0.001,"filledQuantity":0,"requestedBaseQuantity":"0.001","filledBaseQuantity":"0","averagePrice":null,"feeUsd":0,"updatedAt":3000}`;
 }
@@ -661,4 +861,9 @@ function createPreDispatchStateOrdersTable(db: DatabaseSync) {
       updatedAt INTEGER NOT NULL
     );
   `);
+}
+
+function createLegacyExpectedReduceOnlyTextOrdersTable(db: DatabaseSync) {
+  createPreDispatchStateOrdersTable(db);
+  db.exec("ALTER TABLE binance_personal_orders ADD COLUMN expectedReduceOnly TEXT;");
 }

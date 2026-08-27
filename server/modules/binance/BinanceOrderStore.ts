@@ -134,10 +134,13 @@ export class BinanceOrderStore {
         COMMIT;
       `);
     }
-    for (const column of ["positionMode", "positionDirection", "positionSide", "expectedSide", "expectedBaseQuantity", "expectedReduceOnly"] as const) {
+    for (const column of ["positionMode", "positionDirection", "positionSide", "expectedSide", "expectedBaseQuantity"] as const) {
       if (!this.columnExists("binance_personal_orders", column)) {
         this.db.exec(`ALTER TABLE binance_personal_orders ADD COLUMN ${column} TEXT;`);
       }
+    }
+    if (!this.columnExists("binance_personal_orders", "expectedReduceOnly")) {
+      this.db.exec("ALTER TABLE binance_personal_orders ADD COLUMN expectedReduceOnly INTEGER;");
     }
   }
 
@@ -348,7 +351,9 @@ function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
     ...(row.positionSide === null || row.positionSide === undefined ? {} : { positionSide: row.positionSide as "BOTH" | "LONG" | "SHORT" }),
     ...(row.expectedSide === null || row.expectedSide === undefined ? {} : { expectedSide: row.expectedSide as "Buy" | "Sell" }),
     ...(row.expectedBaseQuantity === null || row.expectedBaseQuantity === undefined ? {} : { expectedBaseQuantity: String(row.expectedBaseQuantity) }),
-    ...(row.expectedReduceOnly === null || row.expectedReduceOnly === undefined ? {} : { expectedReduceOnly: Boolean(row.expectedReduceOnly) }),
+    ...(row.expectedReduceOnly === null || row.expectedReduceOnly === undefined
+      ? {}
+      : { expectedReduceOnly: storedExpectedReduceOnly(row.expectedReduceOnly) }),
     status,
     order,
     error: row.error === null ? null : String(row.error),
@@ -357,6 +362,12 @@ function parseStoredOrder(row: Record<string, unknown>): BinanceStoredOrder {
     createdAt: storedTimestamp(row.createdAt, "created timestamp"),
     updatedAt: storedTimestamp(row.updatedAt, "updated timestamp"),
   };
+}
+
+function storedExpectedReduceOnly(value: unknown) {
+  if (value === 0 || value === "0" || value === "0.0") return false;
+  if (value === 1 || value === "1" || value === "1.0") return true;
+  throw new Error("Stored Binance expectedReduceOnly is invalid.");
 }
 
 function cancelDispatchState(value: unknown): BinanceCancelDispatchState | null {
