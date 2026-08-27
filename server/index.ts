@@ -368,9 +368,14 @@ const arbitrageExecutionCancel = new ArbitrageExecutionCancelService(
   formalExecutionRuntimes,
   arbitrageExecutionCommand,
 );
+const arbitrageManagementRelease = new ArbitrageManagementReleaseService(
+  arbitrageInstances,
+  arbitrageExecutionClose,
+);
 const arbitrageInstanceExit = new ArbitrageInstanceExitService(
   arbitrageInstances,
   arbitrageExecutionClose,
+  arbitrageManagementRelease,
   arbitrageExecutionCommand,
   arbitragePositionVerification,
 );
@@ -379,10 +384,6 @@ const arbitrageHedgeStart = new ArbitrageHedgeStartService(
   arbitrageExecutionCommand,
 );
 const arbitrageHedgeWorkflow = new ArbitrageHedgeWorkflowService(arbitrageInstances);
-const arbitrageManagementRelease = new ArbitrageManagementReleaseService(
-  arbitrageInstances,
-  arbitrageExecutionClose,
-);
 const instanceHedgeDelta = new InstanceHedgeDeltaService(
   arbitrageInstances,
   spotOpeningAttributions,

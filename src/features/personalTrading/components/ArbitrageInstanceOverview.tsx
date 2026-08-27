@@ -32,6 +32,7 @@ export type VerificationState =
   | { status: "error" };
 
 export type ReadState<T> = { status: "loading" } | { status: "success"; value: T } | { status: "error" };
+type ExitTarget = Readonly<{ instance: ArbitrageInstance; hasQuantityRuleDust: boolean }>;
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
@@ -43,9 +44,7 @@ export function ArbitrageInstanceOverview() {
   const [selectedSection, setSelectedSection] = useState<"active" | "history">("active");
   const [state, setState] = useState<ArbitrageInstanceLoadState>({ status: "loading" });
   const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
-  const [exitTarget, setExitTarget] = useState<Readonly<{
-    instance: ArbitrageInstance;
-  }> | null>(null);
+  const [exitTarget, setExitTarget] = useState<ExitTarget | null>(null);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -126,6 +125,7 @@ export function ArbitrageInstanceOverview() {
       verifications={verifications}
     />
     {exitTarget ? <ArbitrageHedgeExitDialog
+      hasQuantityRuleDust={exitTarget.hasQuantityRuleDust}
       instance={exitTarget.instance}
       onClose={() => setExitTarget(null)}
       onUpdated={(updated) => { void refreshInstance(updated.arbitrageId); }}
@@ -184,7 +184,7 @@ export function ArbitrageInstanceContent({
   state,
   verifications = {},
 }: {
-  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onPageChange: (page: number) => void;
@@ -237,7 +237,7 @@ export function ArbitrageInstanceSections({
   active: ArbitrageInstance[];
   history: ArbitrageInstance[];
   onPageChange: (page: number) => void;
-  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   onSectionChange?: (section: "active" | "history") => void;
@@ -313,7 +313,7 @@ function InstanceSection({
   emptyText: string;
   historical?: boolean;
   instances: ArbitrageInstance[];
-  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   title: string;
@@ -335,7 +335,7 @@ function InstanceSection({
 function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onReconcileHedge, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
-  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
@@ -436,6 +436,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       {!historical && instance.status === "RESIDUAL" ? <p className="mt-4 text-xs text-amber-200">存在管理残余；当前证据不足以进一步判断具体原因。</p> : null}
       {!historical ? <HedgeExitActions
         canExit={canExitFully}
+        hasQuantityRuleDust={Object.values(safetyValues).some((safety) => safety.reason === "QUANTITY_STEP_DUST")}
         instance={instance}
         onExitHedge={onExitHedge}
         onReconcileHedge={onReconcileHedge}
@@ -520,10 +521,14 @@ export function instanceExitAvailability(
 ) {
   if (verificationState?.status !== "success"
     || verificationState.verification.legs.some((leg) => leg.verificationStatus === "UNKNOWN")
-    || instance.legs.some((leg) => unresolvedClosingReference(instance, leg.legId))) return false;
+    || instance.executionReferences.some((reference) => reference.status === "CLAIMED"
+      || reference.status === "LINKED"
+      || reference.status === "PENDING_CONFIRMATION"
+      || reference.status === "UNKNOWN")) return false;
   const relevant = instance.legs.map((leg) => safeties[leg.legId])
     .filter((safety): safety is ArbitrageCloseSafety => Boolean(safety) && !isZeroDecimal(safety!.activeManagedQuantity));
-  return relevant.length > 0 && relevant.every((safety) => safety.realityReliable && safety.fullManagedCloseAvailable);
+  return relevant.length > 0 && relevant.every((safety) => safety.realityReliable
+    && (safety.fullManagedCloseAvailable || safety.reason === "QUANTITY_STEP_DUST"));
 }
 
 export function InstanceDeltaPanel({ instance, state }: { instance: ArbitrageInstance; state: ReadState<InstanceHedgeDelta> }) {
@@ -606,10 +611,11 @@ export async function reconcileArbitrageHedge(
   return reconcile(instance.arbitrageId);
 }
 
-function HedgeExitActions({ canExit, instance, onExitHedge, onReconcileHedge, verificationState }: {
+function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge, onReconcileHedge, verificationState }: {
   canExit: boolean;
+  hasQuantityRuleDust: boolean;
   instance: ArbitrageInstance;
-  onExitHedge?: (target: Readonly<{ instance: ArbitrageInstance }>) => void;
+  onExitHedge?: (target: ExitTarget) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void;
   verificationState?: VerificationState;
 }) {
@@ -632,7 +638,7 @@ function HedgeExitActions({ canExit, instance, onExitHedge, onReconcileHedge, ve
         {verificationState?.status === "loading" ? "正在核验…" : "重新核验"}
       </Button> : null}
       {summary.kind !== "ended" && canExit && onExitHedge ? <Button
-        onClick={() => onExitHedge({ instance })}
+        onClick={() => onExitHedge({ instance, hasQuantityRuleDust })}
         type="button"
       >
         完整退出

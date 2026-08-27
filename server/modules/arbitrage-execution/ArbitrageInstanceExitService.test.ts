@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
+import {
+  subtractUnsignedDecimals,
+  type ArbitrageInstance,
+} from "../cex/arbitrage-instance/ArbitrageInstance";
 import { ArbitrageInstanceExitService } from "./ArbitrageInstanceExitService";
 
 test("one instance command closes both legs through the existing close service in server order", async () => {
@@ -55,6 +58,7 @@ test("server continues the second leg without browser participation after the fi
   const fixture = setup();
   const operation = fixture.service.exit("user-a", exitRequest("browser-disconnected"));
   await fixture.firstLegCompleted;
+  await new Promise<void>((resolve) => setImmediate(resolve));
   assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["short-leg", "long-leg"]);
   fixture.releaseSecondLeg();
 
@@ -114,25 +118,70 @@ test("a defensive fake partial-CONFIRMED close stops before the next leg", async
   assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["short-leg"]);
 });
 
-test("accepted residual remains managed and cannot report a confirmed CLOSED exit", async () => {
-  const fixture = setup({ residual: "0.006" });
+test("one-click exit closes the legal quantity, releases quantity-step dust, and reaches CLOSED", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    verifiedActualQuantity: "61.795",
+  });
   const result = await fixture.service.exit("user-a", exitRequest("accepted-residual"));
 
-  assert.equal(result.status, "STOPPED");
-  assert.equal(result.instance.status, "RESIDUAL");
-  assert.equal(result.instance.maxResidualBaseQuantity, "0.006");
-  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "1");
-  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "0.994");
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.equal(result.instance.maxResidualBaseQuantity, "0.94");
+  assert.deepEqual(fixture.closeCalls.map((call) => [call.legId, call.quantity]), [
+    ["short-leg", "59"],
+    ["long-leg", "59"],
+  ]);
+  assert.equal(result.instance.legs[1].confirmedClosedQuantity, "59");
+  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "59");
+  assert.equal(result.instance.managementReleases?.[0]?.releasedQuantity, "0.94");
+  assert.equal(subtractUnsignedDecimals("61.795", "59"), "2.795");
+  assert.equal(subtractUnsignedDecimals("2.795", "0.94"), "1.855");
+  assert.equal(fixture.releaseCalls.length, 1);
+  assert.equal(fixture.releaseCalls[0]?.legId, "long-leg");
 });
 
-test("account dust does not erase an Active Managed residual", async () => {
+test("account dust remains independent while quantity-step dust is explicitly released", async () => {
   const fixture = setup({ residual: "0.006", verifiedActualQuantity: "0.011" });
   const closed = await fixture.service.exit("user-a", exitRequest("dust-independent"));
   const reconciled = await fixture.service.reconcile("user-a", { arbitrageId: closed.instance.arbitrageId });
 
-  assert.equal(closed.instance.status, "RESIDUAL");
-  assert.equal(reconciled.instance.status, "RESIDUAL");
+  assert.equal(closed.instance.status, "CLOSED");
+  assert.equal(reconciled.instance.status, "CLOSED");
   assert.equal(reconciled.verification.legs[0].actualQuantity, "0.011");
+  assert.equal(closed.instance.legs[0].confirmedClosedQuantity, "0.994");
+  assert.equal(closed.instance.managementReleases?.[0]?.releasedQuantity, "0.006");
+});
+
+test("instance preflight stops every Provider mutation for Reality, attribution, or rule conflicts", async (t) => {
+  for (const reason of [
+    "PROVIDER_REALITY_UNAVAILABLE",
+    "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT",
+    "SPOT_AVAILABLE_BALANCE_UNAVAILABLE",
+    "TRADING_RULES_REJECT_FULL_QUANTITY",
+  ] as const) {
+    await t.test(reason, async () => {
+      const fixture = setup({ unsafeLegId: "long-leg", unsafeReason: reason });
+      const result = await fixture.service.exit("user-a", exitRequest(`unsafe-${reason}`));
+
+      assert.equal(result.status, "STOPPED");
+      assert.equal(result.instance.status, "HOLDING");
+      assert.equal(fixture.closeCalls.length, 0);
+      assert.equal(fixture.releaseCalls.length, 0);
+    });
+  }
+});
+
+test("instance exit remains mutation-free while any opening or closing execution is unresolved", async () => {
+  const fixture = setup({ unresolvedStatus: "UNKNOWN" });
+  const result = await fixture.service.exit("user-a", exitRequest("unresolved-opening"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(fixture.closeCalls.length, 0);
+  assert.equal(fixture.releaseCalls.length, 0);
 });
 
 function setup(options: Readonly<{
@@ -140,6 +189,13 @@ function setup(options: Readonly<{
   firstConfirmedQuantity?: string;
   residual?: string;
   verifiedActualQuantity?: string;
+  longOpenedQuantity?: string;
+  shortOpenedQuantity?: string;
+  legalSpotCloseQuantity?: string;
+  unsafeLegId?: string;
+  unsafeReason?: "PROVIDER_REALITY_UNAVAILABLE" | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+    | "SPOT_AVAILABLE_BALANCE_UNAVAILABLE" | "TRADING_RULES_REJECT_FULL_QUANTITY";
+  unresolvedStatus?: "CLAIMED" | "LINKED" | "PENDING_CONFIRMATION" | "UNKNOWN";
   releasedShort?: boolean;
   timing?: Readonly<{
     firstAuthoritative(): void;
@@ -148,7 +204,29 @@ function setup(options: Readonly<{
     secondDispatch(): void;
   }>;
 }> = {}) {
-  let instance = baseInstance();
+  let instance = baseInstance(
+    options.longOpenedQuantity,
+    options.shortOpenedQuantity,
+    options.residual === undefined ? "DOGE-USDT-PERP" : "DOGE-USDT-SPOT",
+  );
+  if (options.unresolvedStatus) {
+    instance = {
+      ...instance,
+      executionReferences: [{
+        arbitrageId: instance.arbitrageId,
+        executionIntentId: "unresolved-opening-intent",
+        executionRecordId: "unresolved-opening-record",
+        legId: "long-leg",
+        phase: "OPENING",
+        quantityEffect: "INCREASE",
+        requestedQuantity: instance.legs[0].confirmedOpenedQuantity,
+        confirmedQuantity: "0",
+        status: options.unresolvedStatus,
+        createdAt: 1_800_000_000_021,
+        updatedAt: 1_800_000_000_022,
+      }],
+    };
+  }
   if (options.releasedShort) {
     instance = {
       ...instance,
@@ -164,14 +242,53 @@ function setup(options: Readonly<{
     };
   }
   let lifecycleApplyCount = 0;
-  const closeCalls: Array<{ legId: string; commandId: string }> = [];
+  const closeCalls: Array<{ legId: string; commandId: string; quantity: string }> = [];
+  const releaseCalls: Array<{ legId: string; commandId: string }> = [];
   let releaseSecondLeg: () => void = () => undefined;
   const secondLegGate = new Promise<void>((resolve) => { releaseSecondLeg = resolve; });
   let completeFirstLeg: () => void = () => undefined;
   const firstLegCompleted = new Promise<void>((resolve) => { completeFirstLeg = resolve; });
   const closeService = {
+    async evaluateCloseSafety(_userId: string, _arbitrageId: string, legId: string) {
+      const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+      if (legId === options.unsafeLegId) {
+        const active = String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
+        return {
+          activeManagedQuantity: active,
+          safeClosableQuantity: "0",
+          fullManagedCloseAvailable: false,
+          reason: options.unsafeReason!,
+          checkedAt: 1_800_000_000_050,
+          positionMode: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : "ONE_WAY",
+          actualQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
+          actualSignedNetQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
+          actualLongQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
+          actualShortQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : "0",
+          availableQuantity: options.unsafeReason === "PROVIDER_REALITY_UNAVAILABLE" ? null : active,
+        } as const;
+      }
+      const residualLeg = options.residual !== undefined && legId === "long-leg";
+      const active = residualLeg && leg.confirmedClosedQuantity === (options.legalSpotCloseQuantity ?? "0.994")
+        ? options.residual!
+        : String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
+      const dustAfterClose = residualLeg && active === options.residual;
+      const safe = residualLeg ? (dustAfterClose ? "0" : (options.legalSpotCloseQuantity ?? "0.994")) : active;
+      return {
+        activeManagedQuantity: active,
+        safeClosableQuantity: safe,
+        fullManagedCloseAvailable: !residualLeg,
+        reason: residualLeg ? "QUANTITY_STEP_DUST" : "FULL_MANAGED_CLOSE_AVAILABLE",
+        checkedAt: 1_800_000_000_050,
+        positionMode: "ONE_WAY",
+        actualQuantity: options.verifiedActualQuantity ?? active,
+        actualSignedNetQuantity: active,
+        actualLongQuantity: active,
+        actualShortQuantity: "0",
+        availableQuantity: options.verifiedActualQuantity ?? active,
+      } as const;
+    },
     async closeLeg(_userId: string, input: any) {
-      closeCalls.push({ legId: input.legId, commandId: input.commandId });
+      closeCalls.push({ legId: input.legId, commandId: input.commandId, quantity: input.quantity });
       const first = input.legId === "short-leg";
       if (!first) options.timing?.secondSafetyReady();
       const status = first ? (options.firstStatus ?? "CONFIRMED") : "CONFIRMED";
@@ -183,7 +300,7 @@ function setup(options: Readonly<{
         lifecycleApplyCount += 1;
         const legs = instance.legs.map((leg) => leg.legId !== input.legId ? leg : {
           ...leg,
-          confirmedClosedQuantity: first ? "1" : options.residual ? "0.994" : "1",
+          confirmedClosedQuantity: input.quantity,
         }) as unknown as ArbitrageInstance["legs"];
         instance = {
           ...instance,
@@ -210,9 +327,32 @@ function setup(options: Readonly<{
       };
     },
   };
+  const managementRelease = {
+    async releaseDustAfterClose(_userId: string, input: any) {
+      releaseCalls.push({ legId: input.legId, commandId: input.commandId });
+      const leg = instance.legs.find((candidate) => candidate.legId === input.legId)!;
+      const releasedQuantity = options.residual
+        ?? String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
+      instance = {
+        ...instance,
+        status: "CLOSED",
+        managementReleases: [{
+          releaseId: `release-${input.legId}`, arbitrageId: instance.arbitrageId, legId: input.legId,
+          releasedQuantity, reason: "USER_CONFIRMED_STOP_MANAGEMENT", source: "AUTHENTICATED_API",
+          requestedByUserId: "user-a", requestedAt: 1_800_000_000_110, confirmedAt: 1_800_000_000_120,
+          venue: leg.venue, accountId: leg.accountId, instrumentId: leg.instrumentId, positionMode: "ONE_WAY",
+          actualQuantity: options.verifiedActualQuantity ?? releasedQuantity, actualSignedNetQuantity: releasedQuantity,
+          actualLongQuantity: releasedQuantity, actualShortQuantity: "0", availableQuantity: releasedQuantity,
+          realityCheckedAt: 1_800_000_000_100,
+        }],
+      };
+      return { instance, release: instance.managementReleases![0], idempotentReplay: false };
+    },
+  };
   const service = new ArbitrageInstanceExitService(
     { get: () => instance } as any,
     closeService as any,
+    managementRelease as any,
     { reconcileLeg: async () => assert.fail("no unresolved reference") } as any,
     {
       verify: async () => ({
@@ -236,10 +376,14 @@ function setup(options: Readonly<{
   if (options.firstStatus === undefined && options.residual !== undefined) releaseSecondLeg();
   if (options.verifiedActualQuantity !== undefined) releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual === undefined) queueMicrotask(releaseSecondLeg);
-  return { service, closeCalls, firstLegCompleted, releaseSecondLeg, lifecycleApplyCount: () => lifecycleApplyCount };
+  return { service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg, lifecycleApplyCount: () => lifecycleApplyCount };
 }
 
-function baseInstance(): ArbitrageInstance {
+function baseInstance(
+  longOpenedQuantity = "1",
+  shortOpenedQuantity = "1",
+  longInstrumentId = "DOGE-USDT-PERP",
+): ArbitrageInstance {
   return {
     arbitrageId: "arbitrage-exit-1",
     userId: "user-a",
@@ -253,10 +397,12 @@ function baseInstance(): ArbitrageInstance {
     closedAt: null,
     legs: [{
       legId: "long-leg", role: "LONG", venue: "bybit", accountId: "account-a",
-      instrumentId: "DOGE-USDT-PERP", plannedQuantity: "1", confirmedOpenedQuantity: "1", confirmedClosedQuantity: "0",
+      instrumentId: longInstrumentId, plannedQuantity: longOpenedQuantity,
+      confirmedOpenedQuantity: longOpenedQuantity, confirmedClosedQuantity: "0",
     }, {
       legId: "short-leg", role: "SHORT", venue: "bybit", accountId: "account-a",
-      instrumentId: "DOGE-USDT-PERP", plannedQuantity: "1", confirmedOpenedQuantity: "1", confirmedClosedQuantity: "0",
+      instrumentId: "DOGE-USDT-PERP", plannedQuantity: shortOpenedQuantity,
+      confirmedOpenedQuantity: shortOpenedQuantity, confirmedClosedQuantity: "0",
     }],
     executionReferences: [],
     pnl: { asset: null, cumulativeFundingPnl: null, realizedTradingPnl: null, feesCosts: null, cumulativeNetPnl: null, updatedAt: null },

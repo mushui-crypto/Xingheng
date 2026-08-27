@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   activeManagedQuantity,
+  compareUnsignedDecimals,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
@@ -68,7 +69,27 @@ export class ArbitrageManagementReleaseService {
 
   async release(authenticatedUserId: string, input: unknown) {
     const userId = identifier(authenticatedUserId, "authenticated userId");
-    const request = parseRequest(input);
+    return this.releaseOnce(userId, parseRequest(input), "MANUAL");
+  }
+
+  async releaseDustAfterClose(
+    authenticatedUserId: string,
+    input: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+  ) {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const request = Object.freeze({
+      arbitrageId: identifier(input.arbitrageId, "arbitrageId"),
+      legId: identifier(input.legId, "legId"),
+      commandId: identifier(input.commandId, "commandId"),
+    });
+    return this.releaseOnce(userId, request, "QUANTITY_STEP_DUST");
+  }
+
+  private async releaseOnce(
+    userId: string,
+    request: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+    mode: "MANUAL" | "QUANTITY_STEP_DUST",
+  ) {
     const instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw releaseError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
@@ -99,8 +120,20 @@ export class ArbitrageManagementReleaseService {
       || safety.actualShortQuantity === null) {
       throw releaseError("position_verification_unavailable", "当前真实仓位无法可靠确认，不能释放管理责任。");
     }
-    if (eligibility.releaseEligibilityReason === "FULL_MANAGED_CLOSE_AVAILABLE") {
+    if (mode === "MANUAL" && eligibility.releaseEligibilityReason === "FULL_MANAGED_CLOSE_AVAILABLE") {
       throw releaseError("management_release_unavailable", "当前套利腿仍可通过正常退出完整关闭，不能释放管理责任。");
+    }
+    if (mode === "QUANTITY_STEP_DUST") {
+      const confirmedCloseExists = instance.executionReferences.some((reference) => reference.legId === leg.legId
+        && reference.phase === "CLOSING"
+        && reference.status === "CONFIRMED"
+        && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0);
+      if (!confirmedCloseExists || safety.reason !== "QUANTITY_STEP_DUST" || safety.safeClosableQuantity !== "0") {
+        throw releaseError(
+          "management_release_unavailable",
+          "剩余管理数量不满足交易所数量规则残余的自动责任终止条件。",
+        );
+      }
     }
 
     const confirmedAt = Math.max(requestedAt, safety.checkedAt, instance.updatedAt);
@@ -115,6 +148,7 @@ export class ArbitrageManagementReleaseService {
           instance.arbitrageId,
           leg.legId,
           "CONFIRMED_TRUE",
+          ...(mode === "QUANTITY_STEP_DUST" ? [mode] : []),
           leg.role,
           leg.venue,
           leg.accountId,

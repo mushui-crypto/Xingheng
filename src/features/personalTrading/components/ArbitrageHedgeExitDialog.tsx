@@ -4,7 +4,8 @@ import { fetchArbitrageInstanceById, type ArbitrageInstance } from "../../../api
 import { Button } from "../../../components/ui/Button";
 import { Modal } from "../../../components/ui/Modal";
 
-export function ArbitrageHedgeExitDialog({ instance, onClose, onUpdated }: {
+export function ArbitrageHedgeExitDialog({ hasQuantityRuleDust, instance, onClose, onUpdated }: {
+  hasQuantityRuleDust: boolean;
   instance: ArbitrageInstance;
   onClose: () => void;
   onUpdated: (instance: ArbitrageInstance) => void;
@@ -49,6 +50,9 @@ export function ArbitrageHedgeExitDialog({ instance, onClose, onUpdated }: {
     title="退出对冲"
   >
     <div className="space-y-4 text-sm text-[#c5ccd4]">
+      {hasQuantityRuleDust ? <p className="border border-amber-300/30 bg-amber-300/[0.06] px-3 py-2 text-xs leading-5 text-amber-100">
+        系统将关闭所有可交易数量，并停止管理因交易所数量规则无法继续交易的小额残余。小额残余不会记为交易成交。
+      </p> : null}
       <div className="border border-[#25282f] bg-black p-4">
         <p className="text-xs font-semibold text-white">{status === "done" ? "退出请求已完成" : "正在退出对冲"}</p>
         <div className="mt-3 space-y-2 text-xs">

@@ -141,11 +141,18 @@ test("the browser submits one instance command and renders persisted two-leg pro
   assert.match(source, /正在退出对冲/u);
   assert.match(source, /已退出/u);
   assert.match(source, /确认中/u);
+  assert.match(source, /系统将关闭所有可交易数量/u);
+  assert.match(source, /小额残余不会记为交易成交/u);
   assert.doesNotMatch(source, /closeArbitrageExecutionLeg|\.closeLeg\(|legId:|quantity:|UnifiedRealTradingTest|Provider/u);
   const polling = source.slice(source.indexOf("setInterval"), source.indexOf("const submit"));
   assert.match(polling, /fetchArbitrageInstanceById/u);
   assert.doesNotMatch(polling, /exitArbitrageInstance|closeArbitrageExecutionLeg|placeOrder/u);
   assert.match(source, /controller\.abort\(\);[\s\S]*clearInterval\(timer\)/u);
+  const overview = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const legActions = overview.slice(overview.indexOf("function LegCloseActions"), overview.indexOf("export function legActionAvailability"));
+  const instanceActions = overview.slice(overview.indexOf("function HedgeExitActions"), overview.indexOf("export function hedgeExitSummary"));
+  assert.doesNotMatch(legActions, /完整退出/u);
+  assert.match(instanceActions, /完整退出/u);
 });
 
 test("exit partial progress preserves and displays remaining Active Managed", () => {
@@ -506,6 +513,7 @@ test("my arbitrage page keeps the account area and adds the query-backed combina
   const source = readFileSync(new URL("../../../pages/app/PersonalTradingPage.tsx", import.meta.url), "utf8");
   assert.match(source, /<AccountReadOverview/u);
   assert.match(source, /<ArbitrageInstanceOverview \/>/u);
+  assert.match(source, /px-4 py-5 md:px-8 md:py-7/u);
   assert.doesNotMatch(source, /Position|OrderHistory|FundingRate|BinanceTradingWorkbench/u);
 });
 
@@ -524,14 +532,32 @@ test("authoritative close safety controls full close, partial close, release, an
   };
   const full = closeSafety({ fullManagedCloseAvailable: true, safeClosableQuantity: "1", releaseEligible: false });
   const partial = closeSafety({ safeClosableQuantity: "0.25", releaseEligible: true });
+  const dust = closeSafety({ safeClosableQuantity: "0.94", reason: "QUANTITY_STEP_DUST", releaseEligible: true });
   const unavailable = closeSafety({ safeClosableQuantity: "0", releaseEligible: true });
   const unknown = closeSafety({ realityReliable: false, reason: "PROVIDER_REALITY_UNAVAILABLE", safeClosableQuantity: "0", releaseEligible: false });
 
   assert.equal(instanceExitAvailability(instance!, matched, { "long-leg": full, "short-leg": full }), true);
   assert.equal(instanceExitAvailability(instance!, matched, { "long-leg": partial, "short-leg": full }), false);
+  assert.equal(instanceExitAvailability(instance!, matched, { "long-leg": dust, "short-leg": full }), true);
   assert.deepEqual(legActionAvailability("MISMATCH", partial), { partialClose: true, release: true });
   assert.deepEqual(legActionAvailability("MISMATCH", unavailable), { partialClose: false, release: true });
   assert.deepEqual(legActionAvailability("UNKNOWN", unknown), { partialClose: false, release: false });
+  assert.equal(instanceExitAvailability({
+    ...instance!,
+    executionReferences: [{
+      arbitrageId: instance!.arbitrageId,
+      executionIntentId: "pending-opening",
+      executionRecordId: "pending-record",
+      legId: "long-leg",
+      phase: "OPENING",
+      quantityEffect: "INCREASE",
+      requestedQuantity: "1",
+      confirmedQuantity: "0",
+      status: "UNKNOWN",
+      createdAt: 1_800_000_000_021,
+      updatedAt: 1_800_000_000_022,
+    }],
+  }, matched, { "long-leg": full, "short-leg": full }), false);
   assert.equal(instanceExitAvailability(instance!, mismatch, { "long-leg": full, "short-leg": full }), true);
   assert.equal(instanceExitAvailability(instance!, {
     ...matched,

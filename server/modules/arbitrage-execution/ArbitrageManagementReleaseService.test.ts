@@ -145,6 +145,53 @@ test("rejects partial quantity input instead of accepting a caller-selected rele
   assert.deepEqual(fixture.store.get("user-a", "arbitrage-1")?.managementReleases, []);
 });
 
+test("automatic dust release requires a confirmed close and preserves execution history", async (t) => {
+  const fixture = setup(t, {
+    spot: true,
+    safeClosableQuantity: "0",
+    safetyReason: "QUANTITY_STEP_DUST",
+  });
+  open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+
+  await assert.rejects(
+    () => fixture.service.releaseDustAfterClose("user-a", {
+      arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "dust-before-close",
+    }),
+    (error: unknown) => error instanceof ArbitrageManagementReleaseError
+      && error.category === "management_release_unavailable",
+  );
+
+  close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+  const result = await fixture.service.releaseDustAfterClose("user-a", {
+    arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "dust-after-close",
+  });
+
+  assert.equal(result.release.releasedQuantity, "0.06");
+  assert.equal(result.instance.legs[0].confirmedClosedQuantity, "0.94");
+  assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0.06");
+  assert.equal(activeManagedQuantity(result.instance, result.instance.legs[0]), "0");
+  assert.equal(result.instance.status, "CLOSED");
+});
+
+test("automatic dust release rejects Provider shortfall even after a confirmed partial close", async (t) => {
+  const fixture = setup(t, {
+    spot: true,
+    safeClosableQuantity: "0",
+    safetyReason: "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT",
+  });
+  open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+  close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+
+  await assert.rejects(
+    () => fixture.service.releaseDustAfterClose("user-a", {
+      arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "not-dust",
+    }),
+    (error: unknown) => error instanceof ArbitrageManagementReleaseError
+      && error.category === "management_release_unavailable",
+  );
+  assert.deepEqual(fixture.store.get("user-a", fixture.arbitrageId)?.managementReleases, []);
+});
+
 test("rejects Management Release while the full Active Managed leg remains safely closable", async (t) => {
   for (const scenario of [
     { name: "ONE_WAY exact", positionMode: "ONE_WAY" as const },
@@ -297,6 +344,7 @@ function setup(t: test.TestContext, options: Readonly<{
   fullManagedCloseAvailable?: boolean;
   safeClosableQuantity?: string;
   actualQuantity?: string;
+  safetyReason?: "QUANTITY_STEP_DUST" | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT";
 }> = {}) {
   const root = mkdtempSync(join(tmpdir(), "management-release-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -324,7 +372,9 @@ function setup(t: test.TestContext, options: Readonly<{
         safeClosableQuantity: unknown ? "0" : options.fullManagedCloseAvailable
           ? active : options.safeClosableQuantity ?? "20",
         fullManagedCloseAvailable: options.fullManagedCloseAvailable ?? false,
-        reason: unknown ? "PROVIDER_REALITY_UNAVAILABLE" as const : options.fullManagedCloseAvailable
+        reason: unknown ? "PROVIDER_REALITY_UNAVAILABLE" as const : options.safetyReason
+          ? options.safetyReason
+          : options.fullManagedCloseAvailable
           ? "FULL_MANAGED_CLOSE_AVAILABLE" as const : leg.role === "SHORT"
           ? "ONE_WAY_REALITY_INSUFFICIENT" as const
           : options.spot ? "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT" as const : "ONE_WAY_REALITY_INSUFFICIENT" as const,

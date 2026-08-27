@@ -111,6 +111,7 @@ export type ArbitrageCloseSafetyReason =
   | "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
   | "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
   | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+  | "QUANTITY_STEP_DUST"
   | "TRADING_RULES_REJECT_FULL_QUANTITY";
 
 export type ArbitrageManagementReleaseEligibilityReason =
@@ -550,6 +551,7 @@ function closeSafetyReason(value: unknown): ArbitrageCloseSafetyReason {
     || value === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
     || value === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
     || value === "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+    || value === "QUANTITY_STEP_DUST"
     || value === "TRADING_RULES_REJECT_FULL_QUANTITY") return value;
   throw invalidResponse();
 }

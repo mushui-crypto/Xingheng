@@ -786,6 +786,7 @@ test("unknown Spot opening commission fails closed before runtime", async (t) =>
     quantity: "20",
     quantityStep: "1",
     minQuantity: "1",
+    minNotional: "0.01",
     attributionError: true,
   });
   await assert.rejects(
@@ -801,6 +802,7 @@ test("a one-step residual that still satisfies current rules remains RESIDUAL", 
     quantity: "2",
     quantityStep: "1",
     minQuantity: "1",
+    minNotional: "0.01",
     attributableBaseQuantity: "2",
     availableBaseQuantity: "2",
   });
@@ -968,6 +970,55 @@ test("shared close safety reports full availability from ONE_WAY, HEDGE, and Spo
       assert.equal(fixture.runtime.calls.length, 0);
     });
   }
+});
+
+test("Spot close safety classifies only venue quantity-rule remainder as dust", async (t) => {
+  const dust = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "59.94",
+    quantityStep: "1",
+    minQuantity: "1",
+    minNotional: "0.01",
+    attributableBaseQuantity: "59.94",
+    availableBaseQuantity: "61.795",
+    actualQuantity: "61.795",
+  });
+  const dustSafety = await dust.service.evaluateCloseSafety("user-a", dust.arbitrageId, "long-leg");
+  assert.equal(dustSafety.safeClosableQuantity, "59");
+  assert.equal(dustSafety.fullManagedCloseAvailable, false);
+  assert.equal(dustSafety.reason, "QUANTITY_STEP_DUST");
+
+  const stillTradable = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "1.94",
+    quantityStep: "1",
+    minQuantity: "1",
+    minNotional: "0.01",
+    attributableBaseQuantity: "1.94",
+    availableBaseQuantity: "3.795",
+    actualQuantity: "3.795",
+  });
+  const tradableSafety = await stillTradable.service.evaluateCloseSafety(
+    "user-a", stillTradable.arbitrageId, "long-leg",
+  );
+  assert.equal(tradableSafety.safeClosableQuantity, "1");
+  assert.equal(tradableSafety.reason, "QUANTITY_STEP_DUST");
+
+  const attributionShortfall = setup(t, {
+    longInstrumentId: "DOGE-USDT-SPOT",
+    quantity: "59.94",
+    quantityStep: "1",
+    minQuantity: "1",
+    minNotional: "0.01",
+    attributableBaseQuantity: "20.94",
+    availableBaseQuantity: "61.795",
+    actualQuantity: "61.795",
+  });
+  const shortfallSafety = await attributionShortfall.service.evaluateCloseSafety(
+    "user-a", attributionShortfall.arbitrageId, "long-leg",
+  );
+  assert.equal(shortfallSafety.safeClosableQuantity, "20");
+  assert.equal(shortfallSafety.reason, "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT");
 });
 
 function setup(

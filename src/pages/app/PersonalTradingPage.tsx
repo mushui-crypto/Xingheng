@@ -4,7 +4,7 @@ import { ArbitrageInstanceOverview } from "../../features/personalTrading/compon
 
 export function PersonalTradingPage() {
   return (
-    <div className="xh-page min-w-0 pb-8">
+    <div className="xh-page w-full min-w-0 max-w-full px-4 py-5 md:px-8 md:py-7">
       <header className="xh-page-header">
         <div className="min-w-0">
           <div className="flex flex-wrap items-center gap-3">

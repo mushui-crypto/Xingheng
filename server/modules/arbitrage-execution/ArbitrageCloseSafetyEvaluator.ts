@@ -1,6 +1,7 @@
 import {
   activeManagedQuantity,
   compareUnsignedDecimals,
+  subtractUnsignedDecimals,
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
@@ -29,6 +30,7 @@ export type ArbitrageCloseSafetyReason =
   | "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
   | "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
   | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+  | "QUANTITY_STEP_DUST"
   | "TRADING_RULES_REJECT_FULL_QUANTITY";
 
 export type ArbitrageCloseSafetyResult = Readonly<{
@@ -196,23 +198,56 @@ export class ArbitrageCloseSafetyEvaluator {
       quote: context.quote,
     });
     if (!planned.ok) {
+      const quantityStepDust = spot
+        && candidate === activeQuantity
+        && isQuantityRuleDust(activeQuantity, context.tradingRules.quantityStep, context.tradingRules.minQuantity);
       return assessment(result(
-        activeQuantity, "0", false, "TRADING_RULES_REJECT_FULL_QUANTITY", checkedAt,
+        activeQuantity, "0", false,
+        quantityStepDust ? "QUANTITY_STEP_DUST" : "TRADING_RULES_REJECT_FULL_QUANTITY",
+        checkedAt,
         verifiedLeg, availableQuantity,
       ), side, context, planner, spot ? "SPOT" : "PERPETUAL");
     }
     const safeClosableQuantity = planned.plan.plannedAssetQuantity.quantity;
     const fullManagedCloseAvailable = safeClosableQuantity === activeQuantity;
+    const residualQuantity = fullManagedCloseAvailable
+      ? "0"
+      : subtractUnsignedDecimals(activeQuantity, safeClosableQuantity);
+    const quantityStepDust = spot
+      && candidate === activeQuantity
+      && residualQuantity !== "0"
+      && isQuantityRuleDust(residualQuantity, context.tradingRules.quantityStep, context.tradingRules.minQuantity);
     return assessment(result(
       activeQuantity,
       safeClosableQuantity,
       fullManagedCloseAvailable,
-      fullManagedCloseAvailable ? "FULL_MANAGED_CLOSE_AVAILABLE" : unavailableReason,
+      fullManagedCloseAvailable
+        ? "FULL_MANAGED_CLOSE_AVAILABLE"
+        : quantityStepDust
+          ? "QUANTITY_STEP_DUST"
+          : unavailableReason,
       checkedAt,
       verifiedLeg,
       availableQuantity,
     ), side, context, planner, spot ? "SPOT" : "PERPETUAL");
   }
+}
+
+function isQuantityRuleDust(quantity: string, quantityStep: string, minQuantity: string) {
+  if (compareUnsignedDecimals(quantity, minQuantity) < 0) return true;
+  const scale = Math.max(decimalPlaces(quantity), decimalPlaces(quantityStep));
+  const quantityValue = decimalInteger(quantity, scale);
+  const stepValue = decimalInteger(quantityStep, scale);
+  return stepValue > 0n && (quantityValue / stepValue) * stepValue === 0n;
+}
+
+function decimalInteger(value: string, scale: number) {
+  const [integer, fraction = ""] = value.split(".");
+  return BigInt(`${integer}${fraction.padEnd(scale, "0")}`);
+}
+
+function decimalPlaces(value: string) {
+  return value.includes(".") ? value.length - value.indexOf(".") - 1 : 0;
 }
 
 function result(

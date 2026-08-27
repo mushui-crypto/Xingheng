@@ -8,11 +8,13 @@ import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/Arbitrage
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import type { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
 import type { ArbitrageExecutionCloseService } from "./ArbitrageExecutionCloseService";
+import type { ArbitrageManagementReleaseService } from "./ArbitrageManagementReleaseService";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
-type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg">;
+type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety">;
 type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
+type DustReleaseService = Pick<ArbitrageManagementReleaseService, "releaseDustAfterClose">;
 
 export class ArbitrageInstanceExitError extends Error {
   constructor(
@@ -29,6 +31,7 @@ export class ArbitrageInstanceExitService {
   constructor(
     private readonly instances: InstanceStore,
     private readonly closeService: CloseService,
+    private readonly managementRelease: DustReleaseService,
     private readonly reconciliationService: ReconciliationService,
     private readonly positions: PositionVerifier,
   ) {}
@@ -69,8 +72,21 @@ export class ArbitrageInstanceExitService {
     let instance = this.requireInstance(userId, request.arbitrageId);
     if (instance.status === "CLOSED") return result(instance, "CONFIRMED", []);
     if (instance.status === "FAILED") return result(instance, "STOPPED", []);
+    if (hasUnresolvedExecution(instance)) return result(instance, "STOPPED", []);
 
     const outcomes: ArbitrageInstanceExitLegResult[] = [];
+    for (const leg of orderedExitLegs(instance)) {
+      const quantity = activeManagedQuantity(instance, leg);
+      if (quantity === "0") continue;
+      if (hasUnresolvedClosingReference(instance, leg.legId)) {
+        return result(instance, "STOPPED", outcomes);
+      }
+      const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+      if (!isExecutableExitSafety(instance, leg.legId, safety)) {
+        return result(instance, "STOPPED", outcomes);
+      }
+    }
+
     for (const leg of orderedExitLegs(instance)) {
       if (instance.status === "CLOSED") break;
       const currentLeg = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
@@ -79,11 +95,34 @@ export class ArbitrageInstanceExitService {
       if (hasUnresolvedClosingReference(instance, leg.legId)) {
         return result(instance, "STOPPED", outcomes);
       }
+      const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+      const dustCompletion = safety.reason === "QUANTITY_STEP_DUST";
+      if (!safety.fullManagedCloseAvailable && !dustCompletion) {
+        return result(instance, "STOPPED", outcomes);
+      }
+      if (dustCompletion && safety.safeClosableQuantity === "0") {
+        if (!hasConfirmedClosingReference(instance, leg.legId)) {
+          return result(instance, "STOPPED", outcomes);
+        }
+        try {
+          instance = (await this.managementRelease.releaseDustAfterClose(userId, {
+            arbitrageId: instance.arbitrageId,
+            legId: leg.legId,
+            commandId: dustReleaseCommandId(request.commandId, leg.legId),
+          })).instance;
+        } catch {
+          return result(instance, "STOPPED", outcomes);
+        }
+        continue;
+      }
+      const closeQuantity = safety.fullManagedCloseAvailable
+        ? quantity
+        : safety.safeClosableQuantity;
       const confirmation = await this.closeService.closeLeg(userId, {
         arbitrageId: instance.arbitrageId,
         legId: leg.legId,
         commandId: legCommandId(request.commandId, leg.legId),
-        quantity,
+        quantity: closeQuantity,
         executionMode: request.executionMode,
         confirmed: true,
       });
@@ -100,6 +139,17 @@ export class ArbitrageInstanceExitService {
           confirmation.executionRecord.plannedQuantity,
         ) !== 0) {
         return result(instance, "STOPPED", outcomes);
+      }
+      if (dustCompletion) {
+        try {
+          instance = (await this.managementRelease.releaseDustAfterClose(userId, {
+            arbitrageId: instance.arbitrageId,
+            legId: leg.legId,
+            commandId: dustReleaseCommandId(request.commandId, leg.legId),
+          })).instance;
+        } catch {
+          return result(instance, "STOPPED", outcomes);
+        }
       }
     }
     return result(instance, instance.status === "CLOSED" ? "CONFIRMED" : "STOPPED", outcomes);
@@ -148,6 +198,30 @@ function hasUnresolvedClosingReference(instance: ArbitrageInstance, legId: strin
       || reference.status === "PENDING_CONFIRMATION" || reference.status === "UNKNOWN"));
 }
 
+function hasUnresolvedExecution(instance: ArbitrageInstance) {
+  return instance.executionReferences.some((reference) => reference.status === "CLAIMED"
+    || reference.status === "LINKED"
+    || reference.status === "PENDING_CONFIRMATION"
+    || reference.status === "UNKNOWN");
+}
+
+function hasConfirmedClosingReference(instance: ArbitrageInstance, legId: string) {
+  return instance.executionReferences.some((reference) => reference.legId === legId
+    && reference.phase === "CLOSING"
+    && reference.status === "CONFIRMED"
+    && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0);
+}
+
+function isExecutableExitSafety(
+  instance: ArbitrageInstance,
+  legId: string,
+  safety: Awaited<ReturnType<CloseService["evaluateCloseSafety"]>>,
+) {
+  if (safety.fullManagedCloseAvailable) return true;
+  if (safety.reason !== "QUANTITY_STEP_DUST") return false;
+  return safety.safeClosableQuantity !== "0" || hasConfirmedClosingReference(instance, legId);
+}
+
 function parseExitRequest(input: unknown): ExitRequest {
   const value = object(input);
   exactKeys(value, ["arbitrageId", "commandId", "executionMode", "confirmed"]);
@@ -174,6 +248,10 @@ function result(instance: ArbitrageInstance, status: ArbitrageInstanceExitResult
 
 function legCommandId(commandId: string, legId: string) {
   return `hedge-exit-${createHash("sha256").update(`${commandId}\0${legId}`).digest("hex")}`;
+}
+
+function dustReleaseCommandId(commandId: string, legId: string) {
+  return `hedge-exit-dust-${createHash("sha256").update(`${commandId}\0${legId}`).digest("hex")}`;
 }
 
 function object(value: unknown) {
