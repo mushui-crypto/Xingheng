@@ -96,6 +96,80 @@ test("perpetual close preserves reduceOnly=true at the OKX order boundary", asyn
   assert.equal(client.placeRequests[0]?.ordType, "market");
 });
 
+test("verified managed-close facts remove the duplicate OKX position-mode read", async () => {
+  const client = new FakeOkxExecutionClient();
+  let positionModeReads = 0;
+  client.readPositionMode = async () => {
+    positionModeReads += 1;
+    throw Object.assign(new Error("duplicate account config read"), {
+      category: "provider_request_rejected",
+      providerCode: "50011",
+    });
+  };
+  const intent = executionIntent({
+    intentId: "intent-close-verified-one-way",
+    side: "buy",
+    positionDirection: "SHORT",
+    quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "10" },
+    orderConstraints: { reduceOnly: true },
+  });
+
+  await new OkxIntentExecutionService(client, {
+    ...serviceOptions({ ctVal: "1" }),
+    verifiedCloseContext: {
+      verifiedAt: now - 1,
+      positionMode: "ONE_WAY",
+      side: "buy",
+      positionDirection: "SHORT",
+      actualSignedNetQuantity: "-10",
+      actualLongQuantity: "0",
+      actualShortQuantity: "10",
+      safeClosableQuantity: "10",
+      managedQuantityCeiling: "10",
+      legalizedCloseQuantity: "10",
+      reduceOnly: true,
+    },
+  }).execute(intent);
+
+  assert.equal(positionModeReads, 0);
+  assert.equal(client.placeRequests.length, 1);
+  assert.equal(client.placeRequests[0]?.reduceOnly, true);
+  assert.equal(client.placeRequests[0]?.posSide, undefined);
+});
+
+test("unverified OKX position-mode read failures retain auth errors and classify transient reads", async () => {
+  for (const fixture of [
+    {
+      category: "provider_request_rejected",
+      expectedCategory: "position_mode_unavailable",
+      providerCode: "50011",
+    },
+    {
+      category: "credential_validation_failed",
+      expectedCategory: "credential_validation_failed",
+      providerCode: "50113",
+    },
+  ] as const) {
+    const client = new FakeOkxExecutionClient();
+    client.readPositionMode = async () => {
+      throw Object.assign(new Error("controlled read failure"), {
+        category: fixture.category,
+        providerCode: fixture.providerCode,
+      });
+    };
+    await assert.rejects(
+      () => new OkxIntentExecutionService(client, serviceOptions()).execute(executionIntent()),
+      (error: unknown) => Boolean(error && typeof error === "object"
+        && "originalError" in error
+        && (error as { originalError?: { category?: unknown; providerCode?: unknown } }).originalError?.category
+          === fixture.expectedCategory
+        && (error as { originalError?: { providerCode?: unknown } }).originalError?.providerCode
+          === fixture.providerCode),
+    );
+    assert.equal(client.placeRequests.length, 0);
+  }
+});
+
 test("OKX HEDGE close uses side plus posSide, omits net-mode reduceOnly, and rejects an opening side", async () => {
   const client = new FakeOkxExecutionClient();
   client.readPositionMode = async () => "HEDGE";

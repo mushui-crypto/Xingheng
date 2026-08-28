@@ -257,6 +257,7 @@ test("authoritative NOT_DISPATCHED perpetual close retries with fresh safety and
   assert.equal(fixture.outcomeAudits[0]?.mutationDisposition, "NOT_DISPATCHED");
   assert.equal(fixture.outcomeAudits[0]?.failureStage, "PRE_MUTATION");
   assert.equal(fixture.outcomeAudits[0]?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
+  assert.equal(fixture.outcomeAudits[0]?.providerCode, "50011");
 });
 
 test("repeated NOT_DISPATCHED perpetual closes exhaust bounded attempts without a Provider mutation", async () => {
@@ -299,8 +300,14 @@ test("UNKNOWN or dispatched-possible perpetual failure never retries a close mut
   }
 });
 
-test("business and non-transient pre-mutation failures are not retried", async (t) => {
-  for (const category of ["live_trading_disabled", "provider_identity_invalid", "provider_request_rejected"] as const) {
+test("business, authentication, and non-transient pre-mutation failures are not retried", async (t) => {
+  for (const category of [
+    "live_trading_disabled",
+    "provider_identity_invalid",
+    "credential_validation_failed",
+    "provider_permission_error",
+    "provider_request_rejected",
+  ] as const) {
     await t.test(category, async () => {
       const fixture = setup({
         longOpenedQuantity: "59.94",
@@ -812,6 +819,7 @@ function setup(options: Readonly<{
   perpetualPreMutationFailures?: number;
   perpetualFailureDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
   perpetualFailureCategory?: string;
+  perpetualFailureProviderCode?: string;
   safetyConflictAfterPreMutationFailure?: boolean;
   preMutationRetryInitialDelayMs?: number;
 }> = {}) {
@@ -955,6 +963,7 @@ function setup(options: Readonly<{
             failureStage: mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
             errorType: "Error",
             sanitizedMessage: "Controlled failure.",
+            providerCode: options.perpetualFailureProviderCode ?? "50011",
           },
           providerDispatchStartedAt: 1_800_000_000_101,
           idempotentReplay: false,

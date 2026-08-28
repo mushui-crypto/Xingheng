@@ -5,6 +5,7 @@ import {
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
 import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
+import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
 import { ExecutionCoordinator, type CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import {
@@ -63,7 +64,7 @@ export type OkxIntentExecutionRuntimeRegistry = Readonly<{
 export type OkxIntentExecutionRuntimeOptions = Readonly<
   Omit<
     OkxIntentExecutionServiceOptions,
-    "validateProviderIdentity" | "persistRecoveryReference"
+    "validateProviderIdentity" | "persistRecoveryReference" | "verifiedCloseContext"
   > & {
     spotQuantityRulesSource?: OkxSpotQuantityRulesSource;
     createExecutionId?: (intent: ExecutionIntent) => string;
@@ -129,10 +130,13 @@ export class OkxIntentExecutionRuntime {
     return this.executeIntent(intent, "INCREASE");
   }
 
-  async close(input: ExecutionIntent): Promise<OkxIntentExecutionRuntimeResult> {
+  async close(
+    input: ExecutionIntent,
+    closeContext?: FormalManagedCloseExecutionContext,
+  ): Promise<OkxIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "okx") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    return this.executeIntent(intent, "DECREASE");
+    return this.executeIntent(intent, "DECREASE", closeContext);
   }
 
   async query(
@@ -214,6 +218,7 @@ export class OkxIntentExecutionRuntime {
   private async executeIntent(
     intent: ExecutionIntent,
     mutationEffect: ExecutionMutationEffect,
+    closeContext?: FormalManagedCloseExecutionContext,
   ): Promise<OkxIntentExecutionRuntimeResult> {
     return this.registry.run(intent.userId, async (runtimeService) => {
       const account = await runtimeService.executionAccountIdentity();
@@ -245,7 +250,7 @@ export class OkxIntentExecutionRuntime {
             }),
             createdAt: initialRecord.createdAt,
             updatedAt: initialRecord.updatedAt,
-          })), mutationEffect);
+          })), mutationEffect, closeContext);
         const capability: ExecutionCapability<OkxIntentExecutionResult> = isSpotInstrumentId(intent.instrumentId)
           ? new OkxSpotExecutionCapability(intentService as OkxSpotIntentExecutionService)
           : this.options.createCapability?.(intentService as OkxIntentExecutionService)
@@ -347,6 +352,7 @@ export class OkxIntentExecutionRuntime {
       posSide?: "long" | "short";
     }>) => Promise<void> | void,
     mutationEffect: ExecutionMutationEffect = "INCREASE",
+    closeContext?: FormalManagedCloseExecutionContext,
   ): OkxIntentExecutionService | OkxSpotIntentExecutionService {
     const runtimeService = client as OkxIntentRuntimeService;
     if (isSpotInstrumentId(instrumentId)) {
@@ -364,6 +370,7 @@ export class OkxIntentExecutionRuntime {
     return new OkxIntentExecutionService(client, {
       ...this.options,
       mutationEffect,
+      ...(closeContext === undefined ? {} : { verifiedCloseContext: closeContext }),
       validateProviderIdentity: (context) =>
         runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),

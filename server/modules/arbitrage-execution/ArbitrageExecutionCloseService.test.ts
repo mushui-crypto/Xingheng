@@ -64,6 +64,19 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
 
   assert.equal(fixture.runtime.calls[0]?.side, "buy");
   assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
+  assert.deepEqual(fixture.runtime.managedCloseContexts[0], {
+    verifiedAt: now + 10,
+    positionMode: "ONE_WAY",
+    side: "buy",
+    positionDirection: "SHORT",
+    actualSignedNetQuantity: "-1",
+    actualLongQuantity: "1",
+    actualShortQuantity: "0",
+    safeClosableQuantity: "1",
+    managedQuantityCeiling: "1",
+    legalizedCloseQuantity: "1",
+    reduceOnly: true,
+  });
   assert.equal(result.instance.legs[1].confirmedClosedQuantity, "1");
   assert.notEqual(result.instance.status, "CLOSED", "one flat leg must not close the two-leg instance");
 });
@@ -451,6 +464,7 @@ test("OKX close recovery reuses the persisted execution identity without a secon
   };
   const first = await fixture.service.closeLeg("user-a", request("short-leg", "20", "okx-recovery-close"));
   const placeCount = fixture.okxService!.placeRequests.length;
+  assert.equal(fixture.okxService!.positionModeReads, 0, "mutation-time verified facts must avoid a second account/config read");
   const restartedRuntime = new OkxFormalArbitrageExecutionRuntime(new OkxIntentExecutionRuntime(
     new RealPathOkxRegistry(fixture.okxService!),
     fixture.okxRecords!,
@@ -1313,6 +1327,7 @@ function executionIdOf(record: Readonly<{ executionId: string | null }>) {
 class FakeRuntime implements FormalExecutionRuntime {
   readonly calls: import("../cex/ExecutionIntent").ExecutionIntent[] = [];
   readonly managedCloseCalls: import("../cex/ExecutionIntent").ExecutionIntent[] = [];
+  readonly managedCloseContexts: Array<import("./FormalExecutionRuntime").FormalManagedCloseExecutionContext | undefined> = [];
   resultStatus: ExecutionRecord["status"] = "CONFIRMED";
   confirmedQuantity: string | null = "0.5";
   delay = false;
@@ -1340,8 +1355,12 @@ class FakeRuntime implements FormalExecutionRuntime {
     };
   }
 
-  async executeManagedClose(intent: import("../cex/ExecutionIntent").ExecutionIntent) {
+  async executeManagedClose(
+    intent: import("../cex/ExecutionIntent").ExecutionIntent,
+    context?: import("./FormalExecutionRuntime").FormalManagedCloseExecutionContext,
+  ) {
     this.managedCloseCalls.push(intent);
+    this.managedCloseContexts.push(context);
     return this.execute(intent);
   }
 
@@ -1449,8 +1468,9 @@ class RealPathOkxService {
   providerMutations = 0;
   readonly positionMode = "net_mode" as const;
   identityValidations = 0;
+  positionModeReads = 0;
   executionAccountIdentity() { return { accountId: "account-a" }; }
-  async readPositionMode() { return "ONE_WAY" as const; }
+  async readPositionMode() { this.positionModeReads += 1; return "ONE_WAY" as const; }
   validateExecutionProviderIdentity() { this.identityValidations += 1; }
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request); this.providerMutations += 1;

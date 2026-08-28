@@ -301,6 +301,7 @@ export class ArbitrageInstanceExitService {
       mutationDisposition: outcome.executionDiagnostic?.mutationDisposition ?? null,
       diagnosticCategory: outcome.executionDiagnostic?.diagnosticCategory ?? null,
       failureStage: outcome.executionDiagnostic?.failureStage ?? null,
+      providerCode: outcome.executionDiagnostic?.providerCode ?? null,
       terminalAt: this.now(),
     });
   }
@@ -322,6 +323,7 @@ export class ArbitrageInstanceExitService {
       mutationDisposition: null,
       diagnosticCategory: null,
       failureStage: "ORCHESTRATION",
+      providerCode: null,
       terminalAt: this.now(),
     });
   }
@@ -537,6 +539,7 @@ type ExitExecutionDiagnostic = Readonly<{
   mutationDisposition: FormalExecutionMutationDisposition;
   diagnosticCategory: string;
   failureStage: ExitFailureStage;
+  providerCode?: string;
 }>;
 
 type ArbitrageInstanceExitStopDiagnostic = Readonly<{
@@ -750,6 +753,9 @@ function executionFailureDiagnostic(
     mutationDisposition,
     diagnosticCategory: controlledDiagnosticCategory(confirmation.diagnostic),
     failureStage,
+    ...(confirmation.diagnostic?.providerCode === undefined
+      ? {}
+      : { providerCode: confirmation.diagnostic.providerCode }),
   });
 }
 

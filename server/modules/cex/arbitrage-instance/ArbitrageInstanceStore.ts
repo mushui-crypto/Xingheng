@@ -103,6 +103,7 @@ export type ArbitrageCommandOutcomeAudit = Readonly<{
   mutationDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN" | null;
   diagnosticCategory?: string | null;
   failureStage?: string | null;
+  providerCode?: string | null;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -324,6 +325,7 @@ type CommandOutcomeAuditRow = Readonly<{
   mutationDisposition: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN" | null;
   diagnosticCategory: string | null;
   failureStage: string | null;
+  providerCode: string | null;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -492,8 +494,8 @@ export class ArbitrageInstanceStore {
         commandId, requestedByUserId, arbitrageId, operation, terminalStatus,
         stopPhase, stopReason, failedLegId, completedLegIdsJson,
         currentManagedExposureJson, mutationDisposition, diagnosticCategory,
-        failureStage, terminalAt, businessPayloadFingerprint
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        failureStage, providerCode, terminalAt, businessPayloadFingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         normalized.commandId,
         normalized.requestedByUserId,
         normalized.arbitrageId,
@@ -507,6 +509,7 @@ export class ArbitrageInstanceStore {
         normalized.mutationDisposition ?? null,
         normalized.diagnosticCategory ?? null,
         normalized.failureStage ?? null,
+        normalized.providerCode ?? null,
         normalized.terminalAt,
         normalized.businessPayloadFingerprint,
       );
@@ -2086,6 +2089,7 @@ export class ArbitrageInstanceStore {
       )),
       diagnosticCategory TEXT,
       failureStage TEXT,
+      providerCode TEXT,
       terminalAt INTEGER NOT NULL,
       businessPayloadFingerprint TEXT NOT NULL UNIQUE,
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
@@ -2165,6 +2169,9 @@ export class ArbitrageInstanceStore {
     }
     if (!outcomeColumns.has("failureStage")) {
       this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN failureStage TEXT");
+    }
+    if (!outcomeColumns.has("providerCode")) {
+      this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN providerCode TEXT");
     }
   }
 }
@@ -2274,6 +2281,9 @@ function normalizeCommandOutcomeAudit(
   const failureStage = outcome.failureStage == null
     ? null
     : controlledOutcomeCode(outcome.failureStage, "failureStage");
+  const providerCode = outcome.providerCode == null
+    ? null
+    : controlledProviderCode(outcome.providerCode);
   const businessPayloadFingerprint = createHash("sha256").update(JSON.stringify([
     "ARBITRAGE_COMMAND_OUTCOME", requestedByUserId, outcome.operation, arbitrageId, commandId,
   ])).digest("hex");
@@ -2291,6 +2301,7 @@ function normalizeCommandOutcomeAudit(
     mutationDisposition,
     diagnosticCategory,
     failureStage,
+    providerCode,
     terminalAt: timestamp(outcome.terminalAt, "terminalAt"),
     businessPayloadFingerprint,
   });
@@ -2322,6 +2333,7 @@ function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageComma
     mutationDisposition: row.mutationDisposition,
     diagnosticCategory: row.diagnosticCategory,
     failureStage: row.failureStage,
+    providerCode: row.providerCode,
     terminalAt: row.terminalAt,
   });
   if (normalized.businessPayloadFingerprint !== row.businessPayloadFingerprint) {
@@ -2335,6 +2347,14 @@ function controlledOutcomeCode(value: string, label: string) {
     throw new Error(`Arbitrage command outcome ${label} is not a controlled code.`);
   }
   return value;
+}
+
+function controlledProviderCode(value: string) {
+  const code = value.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$/u.test(code)) {
+    throw new Error("Arbitrage command outcome providerCode is not a controlled code.");
+  }
+  return code;
 }
 
 function normalizeUnstartedArbitrageAbandonmentClaim(

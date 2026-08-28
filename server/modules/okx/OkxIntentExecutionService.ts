@@ -10,6 +10,7 @@ import {
   type ExecutionQueryObservation,
 } from "../cex/ExecutionQueryCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
@@ -70,6 +71,7 @@ export type OkxIntentExecutionServiceOptions = Readonly<{
       posSide?: "long" | "short";
     }>,
   ) => Promise<void> | void;
+  verifiedCloseContext?: FormalManagedCloseExecutionContext;
 }>;
 
 export type OkxExecutionOrderIdentity = Readonly<OkxOrderIdentity>;
@@ -256,10 +258,7 @@ export class OkxIntentExecutionService {
     );
     let positionMode: "ONE_WAY" | "HEDGE" | undefined;
     if (instrument.venueInstrument.contractType !== "spot") {
-      if (typeof this.client.readPositionMode !== "function") {
-        throw new Error("OKX authoritative position mode is unavailable.");
-      }
-      positionMode = await this.client.readPositionMode();
+      positionMode = await this.positionModeFor(intent);
     }
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("OKX HEDGE execution requires positionDirection.");
@@ -292,6 +291,37 @@ export class OkxIntentExecutionService {
     }, positionMode);
   }
 
+  private async positionModeFor(intent: ExecutionIntent): Promise<"ONE_WAY" | "HEDGE"> {
+    const verified = this.options.verifiedCloseContext;
+    if (verified !== undefined) {
+      if (!intent.orderConstraints.reduceOnly
+        || verified.reduceOnly !== true
+        || verified.side !== intent.side
+        || verified.positionDirection !== intent.positionDirection
+        || verified.legalizedCloseQuantity !== intent.quantity.quantity) {
+        throw preparationError(
+          "verified_close_context_invalid",
+          "OKX verified close context does not match the execution intent.",
+        );
+      }
+      return verified.positionMode;
+    }
+    if (typeof this.client.readPositionMode !== "function") {
+      throw preparationError("position_mode_unavailable", "OKX authoritative position mode is unavailable.");
+    }
+    try {
+      return await this.client.readPositionMode();
+    } catch (error) {
+      const category = providerErrorCategory(error);
+      if (category === "credential_validation_failed" || category === "provider_permission_error") throw error;
+      throw preparationError(
+        "position_mode_unavailable",
+        "OKX authoritative position mode is temporarily unavailable.",
+        providerErrorCode(error),
+      );
+    }
+  }
+
   private now() {
     const value = this.clock();
     if (!Number.isSafeInteger(value) || value < 0) {
@@ -299,6 +329,39 @@ export class OkxIntentExecutionService {
     }
     return value;
   }
+}
+
+class OkxExecutionPreparationError extends Error {
+  constructor(
+    readonly category: string,
+    message: string,
+    readonly providerCode: string | null = null,
+  ) {
+    super(message);
+    this.name = "OkxExecutionPreparationError";
+  }
+}
+
+function preparationError(category: string, message: string, providerCode: string | null = null) {
+  return new OkxExecutionPreparationError(category, message, providerCode);
+}
+
+function providerErrorCategory(error: unknown) {
+  return error && typeof error === "object" && "category" in error
+    && typeof (error as { category?: unknown }).category === "string"
+    ? (error as { category: string }).category
+    : null;
+}
+
+function providerErrorCode(error: unknown) {
+  const value = error && typeof error === "object" && "providerCode" in error
+    ? (error as { providerCode?: unknown }).providerCode
+    : null;
+  return typeof value === "string" && /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$/u.test(value)
+    ? value
+    : typeof value === "number" && Number.isSafeInteger(value)
+      ? String(value)
+      : null;
 }
 
 function attachPositionMode<T extends object>(order: T, mode: "ONE_WAY" | "HEDGE" | undefined): T & { positionMode?: "ONE_WAY" | "HEDGE" } {

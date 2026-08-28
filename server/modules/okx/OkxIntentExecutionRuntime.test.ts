@@ -16,7 +16,8 @@ import {
   InMemoryOkxExecutionOrderReferenceStore,
   type OkxExecutionOrderReference,
 } from "./OkxExecutionOrderReferenceStore";
-import { OkxClient } from "./OkxClient";
+import { OkxClient, OkxProviderError } from "./OkxClient";
+import { OkxFormalArbitrageExecutionRuntime } from "./OkxFormalArbitrageExecutionRuntime";
 import { OkxIntentExecutionCapability } from "./OkxIntentExecutionCapability";
 import { OkxIntentExecutionRuntime } from "./OkxIntentExecutionRuntime";
 import { okxClientOrderIdFor } from "./OkxIntentExecutionService";
@@ -308,6 +309,47 @@ test("capability failure after Coordinator starts keeps the existing UNKNOWN sem
     mutationCount: service.placeRequests.length,
     expectedMutationCount: 0,
   });
+});
+
+test("an explicit OKX order POST rejection remains dispatched-possible and is never pre-mutation retryable", async () => {
+  const service = new FakeOkxRuntimeService("okx:account-user-a");
+  service.placeOrderDelegate = async () => {
+    throw new OkxProviderError("provider_request_rejected", "OKX order request was rejected.", "51008");
+  };
+  const runtime = new OkxIntentExecutionRuntime(
+    new FakeOkxRuntimeRegistry({ "user-a": service }),
+    new FakeExecutionRecordStore(),
+    new InMemoryOkxExecutionOrderReferenceStore(),
+    runtimeOptions("execution-okx-order-rejected"),
+  );
+  const formal = new OkxFormalArbitrageExecutionRuntime(runtime);
+  const intent = executionIntent({
+    intentId: "intent-okx-order-rejected",
+    positionDirection: "SHORT",
+    side: "buy",
+    orderConstraints: { reduceOnly: true },
+  });
+
+  const result = await formal.executeManagedClose(intent, {
+    verifiedAt: now - 1,
+    positionMode: "ONE_WAY",
+    side: "buy",
+    positionDirection: "SHORT",
+    actualSignedNetQuantity: "-12.5",
+    actualLongQuantity: "0",
+    actualShortQuantity: "12.5",
+    safeClosableQuantity: "12.5",
+    managedQuantityCeiling: "12.5",
+    legalizedCloseQuantity: "12.5",
+    reduceOnly: true,
+  });
+
+  assert.equal(service.placeRequests.length, 1);
+  assert.equal(result.executionRecord.status, "UNKNOWN");
+  assert.equal(result.mutationDisposition, "UNKNOWN");
+  assert.equal(result.diagnostic?.category, "provider_request_rejected");
+  assert.equal(result.diagnostic?.failureStage, "MUTATION_OR_RESPONSE");
+  assert.equal(result.diagnostic?.providerCode, "51008");
 });
 
 test("runtime close accepts non-reduceOnly reversal intents", async () => {

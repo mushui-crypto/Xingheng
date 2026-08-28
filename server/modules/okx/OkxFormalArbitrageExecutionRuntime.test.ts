@@ -58,6 +58,35 @@ test("uses the same diagnostic contract for rejected and credential errors", asy
   }
 });
 
+test("formal diagnostics retain only a controlled OKX provider code", async () => {
+  const intent = diagnosticExecutionIntent();
+  const adapter = new OkxFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({ ...createExecutionRecordFromIntent("record-provider-code", value), status: "FAILED" }),
+        execution: {
+          status: "CALL_FAILED",
+          step: {
+            status: "CALL_FAILED",
+            result: null,
+            error: new ExecutionPreMutationFailure("controlled", Object.assign(new Error("safe"), {
+              category: "position_mode_unavailable",
+              providerCode: "50011",
+            })),
+          },
+        },
+      } as any;
+    },
+  });
+
+  const result = await adapter.execute(intent);
+  assert.equal(result.diagnostic?.category, "position_mode_unavailable");
+  assert.equal(result.diagnostic?.providerCode, "50011");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+});
+
 test("exposes NOT_DISPATCHED only for a proven OKX pre-mutation FAILED result", async () => {
   const intent = diagnosticExecutionIntent();
   const adapter = new OkxFormalArbitrageExecutionRuntime({

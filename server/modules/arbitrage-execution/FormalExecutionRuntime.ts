@@ -9,6 +9,26 @@ export type FormalExecutionDiagnostic = Readonly<{
   failureStage: "PRE_MUTATION" | "MUTATION_OR_RESPONSE";
   errorType: string;
   sanitizedMessage: string;
+  providerCode?: string;
+}>;
+
+/**
+ * Fresh, attempt-scoped facts produced by the managed-close safety boundary.
+ * Runtimes may consume these facts while preparing the immediately following
+ * close mutation, but must never retain them across attempts or requests.
+ */
+export type FormalManagedCloseExecutionContext = Readonly<{
+  verifiedAt: number;
+  positionMode: "ONE_WAY" | "HEDGE";
+  side: ExecutionIntent["side"];
+  positionDirection: NonNullable<ExecutionIntent["positionDirection"]>;
+  actualSignedNetQuantity: string | null;
+  actualLongQuantity: string | null;
+  actualShortQuantity: string | null;
+  safeClosableQuantity: string;
+  managedQuantityCeiling: string;
+  legalizedCloseQuantity: string;
+  reduceOnly: true;
 }>;
 
 export type FormalExecutionMutationDisposition =
@@ -31,6 +51,7 @@ const CONTROLLED_PROVIDER_CATEGORIES = new Set([
   "provider_timestamp_error",
   "provider_transport_error",
   "provider_unavailable",
+  "position_mode_unavailable",
 ]);
 
 export type FormalExecutionRuntimeResult = Readonly<{
@@ -93,12 +114,18 @@ export function diagnosticFromExecution(execution: {
       : undefined,
     "Error",
   );
+  const providerCode = safeProviderCode(
+    diagnosticError && typeof diagnosticError === "object" && "providerCode" in diagnosticError
+      ? (diagnosticError as { providerCode?: unknown }).providerCode
+      : undefined,
+  );
   return Object.freeze({
     category,
     stage: "execution-capability",
     failureStage: isExecutionPreMutationFailure(error) ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
     errorType,
     sanitizedMessage: sanitizeDiagnosticMessage(error, isControlledProviderCategory(rawCategory)),
+    ...(providerCode === undefined ? {} : { providerCode }),
   });
 }
 
@@ -110,6 +137,15 @@ function safeToken(value: unknown, fallback: string) {
   if (typeof value !== "string") return fallback;
   const token = value.trim().slice(0, 80);
   return /^[a-zA-Z][a-zA-Z0-9_.:-]*$/u.test(token) ? token : fallback;
+}
+
+function safeProviderCode(value: unknown) {
+  const token = typeof value === "number" && Number.isSafeInteger(value)
+    ? String(value)
+    : typeof value === "string"
+      ? value.trim()
+      : "";
+  return /^[a-zA-Z0-9][a-zA-Z0-9_.:-]{0,79}$/u.test(token) ? token : undefined;
 }
 
 function sanitizeDiagnosticMessage(error: unknown, trustedCategory: boolean) {
@@ -150,7 +186,10 @@ export interface FormalExecutionRuntime {
   ): FormalOpeningExecutionCapability;
   execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult>;
   /** Trusted managed-close entry point. Only CloseService may use this mutation path. */
-  executeManagedClose?(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult>;
+  executeManagedClose?(
+    intent: ExecutionIntent,
+    context?: FormalManagedCloseExecutionContext,
+  ): Promise<FormalExecutionRuntimeResult>;
   reconcile(userId: string, executionId: string): Promise<FormalExecutionRuntimeResult>;
   cancel(userId: string, executionId: string): Promise<FormalExecutionCancelRuntimeResult>;
 }

@@ -20,6 +20,7 @@ import type {
 } from "./ArbitrageExecutionCommandService";
 import type {
   FormalExecutionDiagnostic,
+  FormalManagedCloseExecutionContext,
   FormalExecutionMutationDisposition,
   FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
@@ -263,7 +264,10 @@ export class ArbitrageExecutionCloseService {
     let runtimeResult: FormalExecutionRuntimeResult;
     const providerDispatchStartedAt = this.now();
     try {
-      runtimeResult = await runtime.executeManagedClose(intent);
+      const executionContext: FormalManagedCloseExecutionContext | undefined = perpetual
+        ? verifiedPerpetualCloseContext(safety.result, intent, managedQuantity, closeQuantity)
+        : undefined;
+      runtimeResult = await runtime.executeManagedClose(intent, executionContext);
     } catch {
       throw closeError("execution_state_unknown", "退出状态暂时无法确认；执行引用已保留，请勿重复提交。");
     }
@@ -327,6 +331,31 @@ export class ArbitrageExecutionCloseService {
       throw closeError("idempotency_conflict", "commandId 已用于不同的退出业务请求。");
     }
   }
+}
+
+function verifiedPerpetualCloseContext(
+  safety: ArbitrageCloseSafetyResult,
+  intent: ExecutionIntent,
+  managedQuantityCeiling: string,
+  legalizedCloseQuantity: string,
+): FormalManagedCloseExecutionContext {
+  if (safety.positionMode === null || intent.positionDirection === undefined
+    || !intent.orderConstraints.reduceOnly) {
+    throw closeError("position_verification_unavailable", "永续退出缺少可靠的持仓模式或 CLOSE_ONLY 语义。");
+  }
+  return Object.freeze({
+    verifiedAt: safety.checkedAt,
+    positionMode: safety.positionMode,
+    side: intent.side,
+    positionDirection: intent.positionDirection,
+    actualSignedNetQuantity: safety.actualSignedNetQuantity,
+    actualLongQuantity: safety.actualLongQuantity,
+    actualShortQuantity: safety.actualShortQuantity,
+    safeClosableQuantity: safety.safeClosableQuantity,
+    managedQuantityCeiling,
+    legalizedCloseQuantity,
+    reduceOnly: true,
+  });
 }
 
 function assertMutationDeadline(now: number, deadline: number | null) {

@@ -32,6 +32,7 @@ test("persists one append-only orchestration outcome per command with a producti
       mutationDisposition: "NOT_DISPATCHED" as const,
       diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
       failureStage: "PRE_MUTATION",
+      providerCode: "50011",
       terminalAt: start + 10,
     };
     const first = store.recordCommandOutcome("user-a", input);
@@ -47,6 +48,11 @@ test("persists one append-only orchestration outcome per command with a producti
       commandId: "unsafe-raw-outcome",
       stopReason: "provider says secret=abc",
     }), /controlled code/u);
+    assert.throws(() => store.recordCommandOutcome("user-a", {
+      ...input,
+      commandId: "unsafe-provider-code",
+      providerCode: "51008 raw provider response",
+    }), /controlled code/u);
     store.close();
 
     const db = new DatabaseSync(dbPath);
@@ -57,11 +63,13 @@ test("persists one append-only orchestration outcome per command with a producti
       assert.equal(columns.find(({ name }) => name === "mutationDisposition")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "diagnosticCategory")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "failureStage")?.type, "TEXT");
-      const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage
+      assert.equal(columns.find(({ name }) => name === "providerCode")?.type, "TEXT");
+      const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage, providerCode
         FROM arbitrage_command_outcome_audits`).get();
       assert.equal(audit?.mutationDisposition, "NOT_DISPATCHED");
       assert.equal(audit?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
       assert.equal(audit?.failureStage, "PRE_MUTATION");
+      assert.equal(audit?.providerCode, "50011");
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
     } finally {
       db.close();
@@ -97,6 +105,7 @@ test("adds controlled Exit disposition audit columns to the deployed legacy outc
       assert.equal(columns.has("mutationDisposition"), true);
       assert.equal(columns.has("diagnosticCategory"), true);
       assert.equal(columns.has("failureStage"), true);
+      assert.equal(columns.has("providerCode"), true);
     } finally {
       migrated.close();
     }
