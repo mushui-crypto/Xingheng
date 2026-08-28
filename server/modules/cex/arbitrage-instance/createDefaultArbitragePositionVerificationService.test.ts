@@ -274,7 +274,7 @@ test("OKX provider errors remain UNKNOWN after reader migration", async () => {
 
   assert.equal(result?.legs[0].verificationStatus, "MATCHED");
   assert.equal(result?.legs[1].verificationStatus, "UNKNOWN");
-  assert.equal(result?.legs[1].reason, "provider_read_failed");
+  assert.equal(result?.legs[1].reason, "position_reality_unavailable");
 });
 
 test("Binance DOGE verification preserves SHORT 73 and closed FLAT 0 behavior", async () => {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { VenueAccountReadSnapshot } from "../../account-read/AccountReadTypes";
-import { VenueArbitrageLegReadProvider } from "./VenueArbitrageLegReadProviders";
+import { OkxArbitrageLegReadProviderFactory, VenueArbitrageLegReadProvider } from "./VenueArbitrageLegReadProviders";
 import type { ArbitrageInstanceLeg } from "./ArbitrageInstance";
 
 test("perpetual provider preserves direction and converts OKX contracts to base quantity", async () => {
@@ -199,6 +199,90 @@ test("Binance perpetual verification uses narrow identity, mode, and symbol posi
   assert.equal(accountReads, 0);
 });
 
+test("OKX perpetual verification uses narrow identity and mode without a broad balance read", async () => {
+  let broadReads = 0;
+  let identityReads = 0;
+  let modeReads = 0;
+  let positionReads = 0;
+  const factory = new OkxArbitrageLegReadProviderFactory(
+    { resolve: async () => ({ providerSymbol: "XAUT-USDT-SWAP", contractSize: "0.1" }) },
+    () => ({
+      readAccountSnapshot: async () => { broadReads += 1; throw new Error("broad read must not run"); },
+      readAccountIdentity: async () => { identityReads += 1; return { accountId: "okx:account-a" }; },
+      readPositionMode: async () => { modeReads += 1; return "ONE_WAY" as const; },
+      readPerpetualPosition: async () => {
+        positionReads += 1;
+        return { instId: "XAUT-USDT-SWAP", side: "short", contractQuantity: "10", updatedAt: 1_800_000_000_000 };
+      },
+    }),
+  );
+  const provider = factory.create({ apiKey: "key", apiSecret: "secret", passphrase: "passphrase" });
+
+  const observed = await provider.readLeg(leg({
+    venue: "okx", role: "SHORT", accountId: "okx:account-a",
+  }));
+
+  assert.equal(observed.snapshot.signedNetQuantity, "-1");
+  assert.deepEqual({ broadReads, identityReads, modeReads, positionReads }, {
+    broadReads: 0, identityReads: 1, modeReads: 1, positionReads: 1,
+  });
+});
+
+test("perpetual verification preserves controlled read-stage failures", async (t) => {
+  const scenarios = [
+    {
+      name: "account identity",
+      expected: "account_identity_unavailable",
+      client: {
+        readAccountSnapshot: async () => ({}),
+        readAccountIdentity: async () => { throw new Error("sensitive identity failure"); },
+        readPerpetualPosition: async () => { throw new Error("not reached"); },
+      },
+      context: { read: async () => ({ positionMode: "ONE_WAY" as const }) },
+      position: positionReader(),
+    },
+    {
+      name: "position mode",
+      expected: "position_mode_unavailable",
+      client: {
+        readAccountSnapshot: async () => ({}),
+        readAccountIdentity: async () => ({ accountId: "okx:account-a" }),
+        readPerpetualPosition: async () => { throw new Error("not reached"); },
+      },
+      context: { read: async () => { throw new Error("sensitive mode failure"); } },
+      position: positionReader(),
+    },
+    {
+      name: "position reality",
+      expected: "position_reality_unavailable",
+      client: {
+        readAccountSnapshot: async () => ({}),
+        readAccountIdentity: async () => ({ accountId: "okx:account-a" }),
+        readPerpetualPosition: async () => { throw new Error("not reached"); },
+      },
+      context: { read: async () => ({ positionMode: "ONE_WAY" as const }) },
+      position: positionReader(true),
+    },
+  ] as const;
+
+  for (const scenario of scenarios) await t.test(scenario.name, async () => {
+    const provider = new VenueArbitrageLegReadProvider(
+      "okx",
+      scenario.client,
+      accountReader("okx:account-a", []),
+      { resolve: async () => ({ providerSymbol: "XAUT-USDT-SWAP", contractSize: "0.1" }) },
+      scenario.position,
+      scenario.context,
+    );
+    await assert.rejects(provider.readLeg(leg({ venue: "okx", accountId: "okx:account-a" })), (error: unknown) => (
+      error instanceof Error
+      && "reason" in error
+      && error.reason === scenario.expected
+      && !error.message.includes("sensitive")
+    ));
+  });
+});
+
 test("provider rejects mismatched account identity and spot short inference", async () => {
   const provider = new VenueArbitrageLegReadProvider(
     "bitget",
@@ -239,6 +323,27 @@ function accountReader(accountId: string, balances: VenueAccountReadSnapshot["ba
       latestSyncAt: 1_800_000_000_000,
     }),
     dispose: () => undefined,
+  };
+}
+
+function positionReader(fail = false) {
+  return {
+    venue: "okx" as const,
+    readPosition: async (request: { accountId: string; instrumentId: string }) => {
+      if (fail) throw new Error("sensitive position failure");
+      return {
+        venue: "okx" as const,
+        accountId: request.accountId,
+        instrumentId: request.instrumentId,
+        positionMode: "ONE_WAY" as const,
+        side: "SHORT" as const,
+        quantity: "1",
+        signedNetQuantity: "-1",
+        longQuantity: "0",
+        shortQuantity: "1",
+        fetchedAt: 1_800_000_000_000,
+      };
+    },
   };
 }
 

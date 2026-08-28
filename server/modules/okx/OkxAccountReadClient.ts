@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 const OKX_API_BASE_URL = "https://www.okx.com";
 
@@ -55,6 +55,7 @@ export class OkxAccountReadClient {
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => number;
   private readonly timeoutMs: number;
+  private accountConfigRead: Promise<Record<string, unknown>> | null = null;
 
   constructor(
     private readonly credentials: OkxAccountReadCredentials,
@@ -67,12 +68,11 @@ export class OkxAccountReadClient {
   }
 
   async readAccountSnapshot(): Promise<OkxAccountReadSnapshot> {
-    const [balancePayload, configPayload] = await Promise.all([
+    const [balancePayload, config] = await Promise.all([
       this.get("/api/v5/account/balance"),
-      this.get("/api/v5/account/config"),
+      this.readAccountConfig(),
     ]);
     const balance = requiredFirstRecord(balancePayload.data, "OKX account balance");
-    const config = requiredFirstRecord(configPayload.data, "OKX account config");
     const uid = requiredString(config.uid, "OKX uid");
     const accountLevel = requiredString(config.acctLv, "OKX acctLv");
     const balances = list(balance.details)
@@ -94,13 +94,24 @@ export class OkxAccountReadClient {
     };
   }
 
+  async readAccountIdentity(): Promise<Readonly<{ accountId: string }>> {
+    const config = await this.readAccountConfig();
+    const uid = requiredString(config.uid, "OKX uid");
+    const uidHash = createHash("sha256").update(`okx:${uid}`).digest("hex");
+    return Object.freeze({ accountId: `okx:${uidHash.slice(0, 16)}` });
+  }
+
   async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
-    const payload = await this.get("/api/v5/account/config");
-    const config = requiredFirstRecord(payload.data, "OKX account config");
+    const config = await this.readAccountConfig();
     const positionMode = requiredString(config.posMode, "OKX position mode");
     if (positionMode === "net_mode") return "ONE_WAY";
     if (positionMode === "long_short_mode") return "HEDGE";
     throw new OkxAccountReadError("provider_response_invalid", "OKX position mode is unsupported.");
+  }
+
+  private readAccountConfig() {
+    return this.accountConfigRead ??= this.get("/api/v5/account/config")
+      .then((payload) => requiredFirstRecord(payload.data, "OKX account config"));
   }
 
   async readPerpetualPosition(

@@ -18,6 +18,9 @@ export type ArbitrageLegVerificationUnknownReason =
   | "credential_load_failed"
   | "provider_initialization_failed"
   | "provider_read_failed"
+  | "account_identity_unavailable"
+  | "position_mode_unavailable"
+  | "position_reality_unavailable"
   | "account_identity_mismatch"
   | "instrument_mapping_unavailable";
 

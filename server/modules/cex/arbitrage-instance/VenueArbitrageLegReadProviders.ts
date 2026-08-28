@@ -172,24 +172,42 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       };
     }
     if (typeof client.readAccountIdentity === "function") {
-      const identity = await client.readAccountIdentity();
-      assertAccountIdentity(this.venue, leg.accountId, identity.accountId);
+      try {
+        const identity = await client.readAccountIdentity();
+        assertAccountIdentity(this.venue, leg.accountId, identity.accountId);
+      } catch (error) {
+        throw stageReadError(error, this.venue, "account_identity_unavailable", "Provider account identity is unavailable.");
+      }
     } else {
-      const account = await (this.accountSnapshot ??= accountReader.readAccount());
-      assertAccountIdentity(this.venue, leg.accountId, account.accountId);
+      try {
+        const account = await (this.accountSnapshot ??= accountReader.readAccount());
+        assertAccountIdentity(this.venue, leg.accountId, account.accountId);
+      } catch (error) {
+        throw stageReadError(error, this.venue, "account_identity_unavailable", "Provider account identity is unavailable.");
+      }
     }
     if (this.positionReader) {
-      const context = this.positionReadContext === undefined
-        ? undefined
-        : await this.readPositionContext(leg.instrumentId);
-      const position = await this.positionReader.readPosition({
-        accountId: leg.accountId,
-        instrumentId: leg.instrumentId,
-        ...(context === undefined ? {} : {
-          positionMode: context.positionMode,
-          expectedSide: leg.role,
-        }),
-      });
+      let context: Readonly<{ positionMode: PositionMode }> | undefined;
+      try {
+        context = this.positionReadContext === undefined
+          ? undefined
+          : await this.readPositionContext(leg.instrumentId);
+      } catch (error) {
+        throw stageReadError(error, this.venue, "position_mode_unavailable", "Provider position mode is unavailable.");
+      }
+      let position;
+      try {
+        position = await this.positionReader.readPosition({
+          accountId: leg.accountId,
+          instrumentId: leg.instrumentId,
+          ...(context === undefined ? {} : {
+            positionMode: context.positionMode,
+            expectedSide: leg.role,
+          }),
+        });
+      } catch (error) {
+        throw stageReadError(error, this.venue, "position_reality_unavailable", "Provider position reality is unavailable.");
+      }
       return { snapshot: position };
     }
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
@@ -226,6 +244,16 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
     }
     return context;
   }
+}
+
+function stageReadError(
+  error: unknown,
+  venue: ExecutionVenue,
+  reason: "account_identity_unavailable" | "position_mode_unavailable" | "position_reality_unavailable",
+  message: string,
+) {
+  if (error instanceof ArbitrageLegReadError) return error;
+  return venue === "okx" ? new ArbitrageLegReadError(reason, message) : error;
 }
 
 function assertAccountIdentity(venue: ExecutionVenue, expectedAccountId: string, actualAccountId: string) {

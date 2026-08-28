@@ -75,6 +75,32 @@ test("reads the authoritative OKX account position mode with strict domain mappi
   }
 });
 
+test("reuses one authoritative config read for narrow account identity and position mode", async () => {
+  const paths: string[] = [];
+  const client = new OkxAccountReadClient(credentials, {
+    baseUrl: "https://okx.example.test",
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const path = new URL(String(input)).pathname;
+      paths.push(path);
+      return Response.json({
+        code: "0",
+        data: [{ uid: "44705892343619584", posMode: "net_mode" }],
+      });
+    }) as typeof fetch,
+  });
+
+  const [identity, mode] = await Promise.all([
+    client.readAccountIdentity(),
+    client.readPositionMode(),
+  ]);
+
+  assert.match(identity.accountId, /^okx:[a-f0-9]{16}$/u);
+  assert.equal(mode, "ONE_WAY");
+  assert.deepEqual(paths, ["/api/v5/account/config"]);
+  assert.equal(paths.includes("/api/v5/account/balance"), false);
+});
+
 test("fails closed when the authoritative OKX position mode cannot be read", async (t) => {
   for (const scenario of [
     { name: "missing field", response: { code: "0", data: [{}] }, category: "provider_response_invalid" },

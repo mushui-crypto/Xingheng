@@ -605,6 +605,34 @@ test("exit capability refresh bounds persistent CloseSafety failures and stays f
   assert.equal(instanceExitAvailability(instance!, result.verification, {}), false);
 });
 
+test("exit capability refresh retries semantic Provider Reality UNKNOWN before exposing full exit", async () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const calls = new Map<string, number>();
+  const result = await loadExitCapabilities(instance!, new AbortController().signal, {
+    verification: async () => matchedVerification(instance!, "1", "1").verification,
+    delta: async () => hedgeDelta(instance!, "KNOWN", "KNOWN"),
+    closeSafety: async (_arbitrageId, legId) => {
+      const count = (calls.get(legId) ?? 0) + 1;
+      calls.set(legId, count);
+      if (count === 1) return closeSafety({
+        realityReliable: false,
+        reason: "PROVIDER_REALITY_UNAVAILABLE",
+        safeClosableQuantity: "0",
+        releaseEligible: false,
+      });
+      return closeSafety({ fullManagedCloseAvailable: true, safeClosableQuantity: "1", releaseEligible: false });
+    },
+    wait: async () => undefined,
+  });
+
+  assert.deepEqual(Object.fromEntries(calls), { "long-leg": 2, "short-leg": 2 });
+  const values = Object.fromEntries(Object.entries(result.closeSafeties).map(([legId, state]) => [
+    legId,
+    state.status === "success" ? state.value : undefined,
+  ]));
+  assert.equal(instanceExitAvailability(instance!, result.verification, values), true);
+});
+
 test("exit capability UI refreshes lifecycle and reconcile changes without exposing fallback actions while incomplete", () => {
   const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
   const effect = source.slice(source.indexOf("useEffect(() => {", source.indexOf("function InstanceCard")), source.indexOf("const safetyValues", source.indexOf("function InstanceCard")));
@@ -684,6 +712,18 @@ test("authoritative close safety controls full close, partial close, release, an
   assert.deepEqual(
     managementReleaseCandidates(instance!, mismatch, { "long-leg": partial, "short-leg": full }).map((leg) => leg.legId),
     ["long-leg"],
+  );
+  assert.deepEqual(
+    managementReleaseCandidates(instance!, {
+      ...matched,
+      verification: {
+        ...matched.verification,
+        legs: [matched.verification.legs[0], {
+          ...matched.verification.legs[1], verificationStatus: "UNKNOWN",
+        }],
+      },
+    }, { "long-leg": partial, "short-leg": unknown }),
+    [],
   );
   const hiddenRelease = renderToStaticMarkup(<ManagementReleaseActions
     candidates={[instance!.legs[0]]}

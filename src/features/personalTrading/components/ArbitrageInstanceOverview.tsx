@@ -189,6 +189,10 @@ export async function loadExitCapabilities(
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       try {
         const value = await loaders.closeSafety(instance.arbitrageId, leg.legId, signal);
+        if (value.reason === "PROVIDER_REALITY_UNAVAILABLE" && attempt < attempts) {
+          await loaders.wait(retryDelayMs * (2 ** (attempt - 1)), signal);
+          continue;
+        }
         return [leg.legId, { status: "success", value } satisfies ReadState<ArbitrageCloseSafety>] as const;
       } catch {
         if (signal.aborted || attempt === attempts) break;
@@ -417,7 +421,13 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
     .filter((entry): entry is [string, Extract<ReadState<ArbitrageCloseSafety>, { status: "success" }>] => entry[1].status === "success")
     .map(([legId, state]) => [legId, state.value]));
   const exitCapabilitiesComplete = effectiveVerification.status === "success"
-    && instance.legs.every((leg) => closeSafeties[leg.legId]?.status === "success");
+    && instance.legs.every((leg) => {
+      const safety = closeSafeties[leg.legId];
+      if (safety?.status !== "success") return false;
+      if (isZeroDecimal(safety.value.activeManagedQuantity)) return true;
+      const verification = effectiveVerification.verification.legs.find((item) => item.legId === leg.legId);
+      return verification?.verificationStatus !== "UNKNOWN" && safety.value.realityReliable;
+    });
   const canExitFully = exitCapabilitiesComplete && instanceExitAvailability(instance, effectiveVerification, safetyValues);
   const releaseCandidates = exitCapabilitiesComplete
     ? managementReleaseCandidates(instance, effectiveVerification, safetyValues)
@@ -610,6 +620,13 @@ export function managementReleaseCandidates(
   safeties: Record<string, ArbitrageCloseSafety | undefined>,
 ) {
   if (verificationState?.status !== "success") return [];
+  const activeLegsReliable = instance.legs.every((leg) => {
+    const safety = safeties[leg.legId];
+    if (!safety || isZeroDecimal(safety.activeManagedQuantity)) return true;
+    const verification = verificationState.verification.legs.find((item) => item.legId === leg.legId);
+    return verification?.verificationStatus !== "UNKNOWN" && safety.realityReliable;
+  });
+  if (!activeLegsReliable) return [];
   return instance.legs.filter((leg) => {
     const verification = verificationState.verification.legs.find((item) => item.legId === leg.legId);
     const safety = safeties[leg.legId];
