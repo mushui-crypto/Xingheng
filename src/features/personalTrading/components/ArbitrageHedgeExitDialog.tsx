@@ -156,6 +156,7 @@ function exitStopPhaseLabel(phase: ArbitrageInstanceExitStopPhase) {
     SPOT_DUST_RECHECK: "现货残余复核",
     SPOT_DUST_RELEASE: "现货残余责任处理",
     PERPETUAL_FRESH_SAFETY: "永续腿下单前安全检查",
+    PERPETUAL_PRE_MUTATION: "永续腿订单提交前准备",
     PERPETUAL_CLOSE: "永续腿退出",
     PERPETUAL_CONFIRMATION: "永续腿成交确认",
   };
@@ -189,6 +190,13 @@ function exitStopReasonLabel(reason: string) {
     DUST_RELEASE_ELIGIBILITY_CHANGED: "现货残余已不再满足停止管理条件",
     DUST_RELEASE_ATTRIBUTION_UNAVAILABLE: "现货残余的实例归属暂时无法可靠确认",
     DUST_RELEASE_PROVIDER_READ_FAILED: "现货残余复核暂时失败",
+    ACCOUNT_IDENTITY_UNAVAILABLE: "交易所账户身份暂时无法可靠确认，订单尚未提交",
+    POSITION_MODE_UNAVAILABLE: "交易所持仓模式暂时无法可靠确认，订单尚未提交",
+    POSITION_REALITY_UNAVAILABLE: "交易所真实仓位暂时无法可靠确认，订单尚未提交",
+    PROVIDER_TIMEOUT: "交易所只读安全检查暂时超时，订单尚未提交",
+    PROVIDER_TRANSPORT_ERROR: "交易所只读安全检查暂时不可用，订单尚未提交",
+    PROVIDER_UNAVAILABLE: "交易所安全检查服务暂时不可用，订单尚未提交",
+    OTHER_PRE_MUTATION_FAILURE: "订单提交前准备未能完成，本次订单尚未提交",
   };
   return labels[reason] ?? "当前安全条件未满足";
 }

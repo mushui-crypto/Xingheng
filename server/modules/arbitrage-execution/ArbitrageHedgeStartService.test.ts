@@ -32,6 +32,7 @@ test("Start STOPPED outcome is audited once with controlled diagnostics and idem
     operation: "START", terminalStatus: "STOPPED_FIRST_LEG_UNKNOWN", stopPhase: "FIRST_LEG",
     stopReason: "STOPPED_FIRST_LEG_UNKNOWN", failedLegId: "long-leg", completedLegIds: [],
     currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "0" }],
+    mutationDisposition: null, diagnosticCategory: null, failureStage: null,
     terminalAt: 0,
   });
   assert.equal(Number.isSafeInteger(fixture.outcomeAudits[0]?.terminalAt), true);

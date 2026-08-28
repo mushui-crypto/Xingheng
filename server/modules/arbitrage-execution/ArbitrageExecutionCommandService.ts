@@ -18,6 +18,7 @@ import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributi
 import { ManualReconciliationRequiredError } from "../cex/ManualReconciliationRequiredError";
 import type {
   FormalExecutionDiagnostic,
+  FormalExecutionMutationDisposition,
   FormalExecutionRuntime,
   FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
@@ -77,6 +78,8 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
     verifiedAt: number;
   }>;
   diagnostic?: FormalExecutionDiagnostic;
+  mutationDisposition?: FormalExecutionMutationDisposition;
+  failureStage?: FormalExecutionDiagnostic["failureStage"];
   idempotentReplay: boolean;
   secondLegAllowed: boolean;
   /** Local timestamp immediately before handing the intent to the Provider runtime. */
@@ -459,9 +462,9 @@ export class ArbitrageExecutionCommandService {
         executionIntentId: intent.intentId,
         status: attributableStatus,
         confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
-        ...(runtimeResult.mutationDisposition === undefined
-          ? {}
-          : { mutationDisposition: runtimeResult.mutationDisposition }),
+        ...(runtimeResult.mutationDisposition === "NOT_DISPATCHED"
+          ? { mutationDisposition: runtimeResult.mutationDisposition }
+          : {}),
         updatedAt: runtimeResult.executionRecord.updatedAt,
       });
       const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
@@ -474,7 +477,14 @@ export class ArbitrageExecutionCommandService {
           // second-leg planning or the read-only Delta service and must never fabricate net exposure.
         }
       }
-      return resultFromReference(updated, reference, false, attributableStatus, runtimeResult.diagnostic);
+      return resultFromReference(
+        updated,
+        reference,
+        false,
+        attributableStatus,
+        runtimeResult.diagnostic,
+        runtimeResult.mutationDisposition,
+      );
     });
   }
 
@@ -1158,6 +1168,7 @@ function resultFromReference(
   idempotentReplay: boolean,
   recordStatus?: ExecutionRecord["status"],
   diagnostic?: FormalExecutionDiagnostic,
+  mutationDisposition?: FormalExecutionMutationDisposition,
 ): ArbitrageLegExecutionConfirmation {
   return Object.freeze({
     instance,
@@ -1174,6 +1185,8 @@ function resultFromReference(
       && reference.status === "CONFIRMED"
       && reference.confirmedQuantity === reference.requestedQuantity,
     ...(diagnostic === undefined ? {} : { diagnostic }),
+    ...(mutationDisposition === undefined ? {} : { mutationDisposition }),
+    ...(diagnostic?.failureStage === undefined ? {} : { failureStage: diagnostic.failureStage }),
   });
 }
 

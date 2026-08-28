@@ -238,6 +238,126 @@ test("temporary perpetual Reality failure retries reads only and dispatches one 
   assert.deepEqual(fixture.mutationSafetyDeadlines("short-leg"), [1_800_000_015_000, 1_800_000_015_000]);
 });
 
+test("authoritative NOT_DISPATCHED perpetual close retries with fresh safety and completes the same Exit", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 1,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-not-dispatched-retry"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 2);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 2);
+  assert.equal(new Set(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").map(({ commandId }) => commandId)).size, 2);
+  assert.equal(fixture.outcomeAudits[0]?.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(fixture.outcomeAudits[0]?.failureStage, "PRE_MUTATION");
+  assert.equal(fixture.outcomeAudits[0]?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
+});
+
+test("repeated NOT_DISPATCHED perpetual closes exhaust bounded attempts without a Provider mutation", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 3,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-not-dispatched-exhausted"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_PRE_MUTATION");
+  assert.equal(result.stop?.reason, "POSITION_MODE_UNAVAILABLE");
+  assert.equal(result.stop?.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 3);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
+  assert.equal(fixture.outcomeAudits[0]?.stopPhase, "PERPETUAL_PRE_MUTATION");
+  assert.equal(fixture.outcomeAudits[0]?.mutationDisposition, "NOT_DISPATCHED");
+});
+
+test("UNKNOWN or dispatched-possible perpetual failure never retries a close mutation", async (t) => {
+  for (const disposition of ["UNKNOWN", "DISPATCHED_OR_POSSIBLE"] as const) {
+    await t.test(disposition, async () => {
+      const fixture = setup({
+        longOpenedQuantity: "59.94",
+        shortOpenedQuantity: "59",
+        legalSpotCloseQuantity: "59",
+        residual: "0.94",
+        perpetualPreMutationFailures: 1,
+        perpetualFailureDisposition: disposition,
+      });
+      const result = await fixture.service.exit("user-a", exitRequest(`perp-${disposition}`));
+      assert.equal(result.status, "STOPPED");
+      assert.equal(result.stop?.phase, "PERPETUAL_CONFIRMATION");
+      assert.equal(result.stop?.mutationDisposition, disposition);
+      assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
+    });
+  }
+});
+
+test("business and non-transient pre-mutation failures are not retried", async (t) => {
+  for (const category of ["live_trading_disabled", "provider_identity_invalid", "provider_request_rejected"] as const) {
+    await t.test(category, async () => {
+      const fixture = setup({
+        longOpenedQuantity: "59.94",
+        shortOpenedQuantity: "59",
+        legalSpotCloseQuantity: "59",
+        residual: "0.94",
+        perpetualPreMutationFailures: 1,
+        perpetualFailureCategory: category,
+      });
+      const result = await fixture.service.exit("user-a", exitRequest(`perp-business-${category}`));
+      assert.equal(result.status, "STOPPED");
+      assert.equal(result.stop?.phase, "PERPETUAL_PRE_MUTATION");
+      assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
+      assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
+    });
+  }
+});
+
+test("fresh mutation-time safety conflict after NOT_DISPATCHED stops before retry mutation", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 1,
+    postSpotPerpetualReason: "ONE_WAY_REALITY_INSUFFICIENT",
+    safetyConflictAfterPreMutationFailure: true,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-retry-reality-conflict"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_CLOSE");
+  assert.equal(result.stop?.reason, "CLOSE_QUANTITY_UNAVAILABLE");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 2);
+});
+
+test("NOT_DISPATCHED retry respects the shared continuation deadline", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 3,
+    transientReadRetryBudgetMs: 250,
+    preMutationRetryInitialDelayMs: 250,
+    advanceClockOnSleep: true,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-retry-deadline"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_PRE_MUTATION");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
+});
+
 test("persistent perpetual Reality failure exhausts the bounded read budget without repeating Spot", async () => {
   const fixture = setup({
     longOpenedQuantity: "59.94",
@@ -689,6 +809,11 @@ function setup(options: Readonly<{
   transientReadRetryIntervalMs?: number;
   advanceClockOnSleep?: boolean;
   releaseErrorCategory?: ArbitrageManagementReleaseError["category"];
+  perpetualPreMutationFailures?: number;
+  perpetualFailureDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
+  perpetualFailureCategory?: string;
+  safetyConflictAfterPreMutationFailure?: boolean;
+  preMutationRetryInitialDelayMs?: number;
 }> = {}) {
   const outcomeAudits: any[] = [];
   const auditedCommands = new Set<string>();
@@ -734,6 +859,8 @@ function setup(options: Readonly<{
   const mutationSafetyCallCounts = new Map<string, number>();
   const mutationSafetyDeadlineValues = new Map<string, number[]>();
   const closeCalls: Array<{ legId: string; commandId: string; quantity: string }> = [];
+  const providerMutationCalls: string[] = [];
+  const closeAttemptsByLeg = new Map<string, number>();
   let currentTime = 1_800_000_000_000;
   const releaseCalls: Array<{ legId: string; commandId: string }> = [];
   let releaseSecondLeg: () => void = () => undefined;
@@ -804,6 +931,37 @@ function setup(options: Readonly<{
     async closeLeg(_userId: string, input: any) {
       const first = closeCalls.length === 0;
       closeCalls.push({ legId: input.legId, commandId: input.commandId, quantity: input.quantity });
+      const legAttempt = (closeAttemptsByLeg.get(input.legId) ?? 0) + 1;
+      closeAttemptsByLeg.set(input.legId, legAttempt);
+      if (input.legId === "short-leg" && legAttempt <= (options.perpetualPreMutationFailures ?? 0)) {
+        const mutationDisposition = options.perpetualFailureDisposition ?? "NOT_DISPATCHED";
+        return {
+          instance: { ...instance, status: "CLOSING" },
+          executionRecord: {
+            executionId: `record-${input.legId}-${legAttempt}`,
+            intentId: `intent-${input.legId}-${legAttempt}`,
+            status: mutationDisposition === "DISPATCHED_OR_POSSIBLE" ? "FAILED" : mutationDisposition === "UNKNOWN" ? "UNKNOWN" : "FAILED",
+            plannedQuantity: input.quantity,
+            confirmedQuantity: "0",
+            verifiedAt: 1_800_000_000_100 + legAttempt,
+          },
+          mutationDisposition,
+          failureStage: mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
+          diagnostic: {
+            category: options.perpetualFailureCategory ?? (mutationDisposition === "NOT_DISPATCHED"
+              ? "position_mode_unavailable"
+              : "provider_transport_error"),
+            stage: "execution-capability",
+            failureStage: mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
+            errorType: "Error",
+            sanitizedMessage: "Controlled failure.",
+          },
+          providerDispatchStartedAt: 1_800_000_000_101,
+          idempotentReplay: false,
+          secondLegAllowed: false,
+        };
+      }
+      providerMutationCalls.push(input.legId);
       if (!first) options.timing?.secondSafetyReady();
       const status = first ? (options.firstStatus ?? "CONFIRMED") : "CONFIRMED";
       if (first) options.timing?.firstAuthoritative();
@@ -877,6 +1035,8 @@ function setup(options: Readonly<{
         );
       }
       if (input.legId === "short-leg" && spotHasClosed && options.postSpotPerpetualReason) {
+        if (options.safetyConflictAfterPreMutationFailure
+          && (closeAttemptsByLeg.get(input.legId) ?? 0) === 0) return this.closeLeg(userId, input);
         throw new ArbitrageExecutionCloseError(
           "close_quantity_unavailable",
           "当前真实仓位不足以安全完成退出。",
@@ -948,6 +1108,7 @@ function setup(options: Readonly<{
       },
       transientReadRetryBudgetMs: options.transientReadRetryBudgetMs,
       transientReadRetryIntervalMs: options.transientReadRetryIntervalMs,
+      preMutationRetryInitialDelayMs: options.preMutationRetryInitialDelayMs,
     },
   );
   if (options.firstStatus !== undefined && options.firstStatus !== "CONFIRMED") releaseSecondLeg();
@@ -955,7 +1116,7 @@ function setup(options: Readonly<{
   if (options.verifiedActualQuantity !== undefined) releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual === undefined) queueMicrotask(releaseSecondLeg);
   return {
-    service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg, outcomeAudits,
+    service, closeCalls, providerMutationCalls, releaseCalls, firstLegCompleted, releaseSecondLeg, outcomeAudits,
     lifecycleApplyCount: () => lifecycleApplyCount,
     safetyCalls: (legId: string) => safetyCallCounts.get(legId) ?? 0,
     mutationSafetyCalls: (legId: string) => mutationSafetyCallCounts.get(legId) ?? 0,

@@ -6,9 +6,15 @@ import type { ExecutionRecord } from "../cex/ExecutionRecord";
 export type FormalExecutionDiagnostic = Readonly<{
   category: string;
   stage: "execution-capability";
+  failureStage: "PRE_MUTATION" | "MUTATION_OR_RESPONSE";
   errorType: string;
   sanitizedMessage: string;
 }>;
+
+export type FormalExecutionMutationDisposition =
+  | "NOT_DISPATCHED"
+  | "DISPATCHED_OR_POSSIBLE"
+  | "UNKNOWN";
 
 const CONTROLLED_PROVIDER_CATEGORIES = new Set([
   "credential_validation_failed",
@@ -30,20 +36,22 @@ const CONTROLLED_PROVIDER_CATEGORIES = new Set([
 export type FormalExecutionRuntimeResult = Readonly<{
   executionRecord: ExecutionRecord;
   confirmedQuantity: string | null;
-  mutationDisposition?: "NOT_DISPATCHED";
+  mutationDisposition?: FormalExecutionMutationDisposition;
   diagnostic?: FormalExecutionDiagnostic;
 }>;
 
 export function mutationDispositionFromExecution(input: Readonly<{
   executionRecord: ExecutionRecord;
+  capabilityStepStatus?: "SUCCEEDED" | "CALL_FAILED" | "SKIPPED_EXPIRED";
   capabilityError?: unknown;
-}>): FormalExecutionRuntimeResult["mutationDisposition"] {
-  return input.executionRecord.status === "FAILED"
+}>): FormalExecutionMutationDisposition {
+  if (input.capabilityStepStatus === "SKIPPED_EXPIRED") return "NOT_DISPATCHED";
+  if (input.executionRecord.status === "FAILED"
     && input.executionRecord.executionAttemptId === undefined
     && input.executionRecord.remoteOrderId === undefined
-    && isExecutionPreMutationFailure(input.capabilityError)
-    ? "NOT_DISPATCHED"
-    : undefined;
+    && isExecutionPreMutationFailure(input.capabilityError)) return "NOT_DISPATCHED";
+  if (input.capabilityStepStatus === "SUCCEEDED") return "DISPATCHED_OR_POSSIBLE";
+  return "UNKNOWN";
 }
 
 export function hasPersistedNotDispatchedProof(record: ExecutionRecord) {
@@ -69,8 +77,11 @@ export function diagnosticFromExecution(execution: {
 }): FormalExecutionDiagnostic | undefined {
   if (execution.step.status !== "CALL_FAILED" || !("error" in execution.step)) return undefined;
   const error = execution.step.error;
-  const rawCategory = error && typeof error === "object" && "category" in error
-    ? (error as { category?: unknown }).category
+  const diagnosticError = isExecutionPreMutationFailure(error) && error.originalError !== undefined
+    ? error.originalError
+    : error;
+  const rawCategory = diagnosticError && typeof diagnosticError === "object" && "category" in diagnosticError
+    ? (diagnosticError as { category?: unknown }).category
     : undefined;
   const category = safeToken(
     rawCategory,
@@ -85,6 +96,7 @@ export function diagnosticFromExecution(execution: {
   return Object.freeze({
     category,
     stage: "execution-capability",
+    failureStage: isExecutionPreMutationFailure(error) ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
     errorType,
     sanitizedMessage: sanitizeDiagnosticMessage(error, isControlledProviderCategory(rawCategory)),
   });

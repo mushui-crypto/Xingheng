@@ -284,6 +284,9 @@ export class ArbitrageHedgeStartService {
       failedLegId: diagnostic.failedLegId,
       completedLegIds: completedOpeningLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
+      mutationDisposition: null,
+      diagnosticCategory: null,
+      failureStage: null,
       terminalAt: this.now(),
     });
   }
@@ -302,6 +305,9 @@ export class ArbitrageHedgeStartService {
       failedLegId: null,
       completedLegIds: completedOpeningLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
+      mutationDisposition: null,
+      diagnosticCategory: null,
+      failureStage: "ORCHESTRATION",
       terminalAt: this.now(),
     });
   }

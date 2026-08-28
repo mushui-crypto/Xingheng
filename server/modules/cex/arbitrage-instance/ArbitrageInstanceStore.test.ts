@@ -29,6 +29,9 @@ test("persists one append-only orchestration outcome per command with a producti
         { legId: "long-leg", quantity: "1" },
         { legId: "short-leg", quantity: "0" },
       ],
+      mutationDisposition: "NOT_DISPATCHED" as const,
+      diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
+      failureStage: "PRE_MUTATION",
       terminalAt: start + 10,
     };
     const first = store.recordCommandOutcome("user-a", input);
@@ -51,9 +54,51 @@ test("persists one append-only orchestration outcome per command with a producti
       const columns = db.prepare("PRAGMA table_info(arbitrage_command_outcome_audits)").all() as Array<{ name: string; type: string; notnull: number }>;
       assert.equal(columns.find(({ name }) => name === "commandId")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "currentManagedExposureJson")?.notnull, 1);
+      assert.equal(columns.find(({ name }) => name === "mutationDisposition")?.type, "TEXT");
+      assert.equal(columns.find(({ name }) => name === "diagnosticCategory")?.type, "TEXT");
+      assert.equal(columns.find(({ name }) => name === "failureStage")?.type, "TEXT");
+      const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage
+        FROM arbitrage_command_outcome_audits`).get();
+      assert.equal(audit?.mutationDisposition, "NOT_DISPATCHED");
+      assert.equal(audit?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
+      assert.equal(audit?.failureStage, "PRE_MUTATION");
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
     } finally {
       db.close();
+    }
+  });
+});
+
+test("adds controlled Exit disposition audit columns to the deployed legacy outcome table", () => {
+  withDatabase(({ dbPath }) => {
+    const legacy = new DatabaseSync(dbPath);
+    legacy.exec(`CREATE TABLE arbitrage_command_outcome_audits (
+      commandId TEXT PRIMARY KEY,
+      requestedByUserId TEXT NOT NULL,
+      arbitrageId TEXT NOT NULL,
+      operation TEXT NOT NULL,
+      terminalStatus TEXT NOT NULL,
+      stopPhase TEXT,
+      stopReason TEXT,
+      failedLegId TEXT,
+      completedLegIdsJson TEXT NOT NULL,
+      currentManagedExposureJson TEXT NOT NULL,
+      terminalAt INTEGER NOT NULL,
+      businessPayloadFingerprint TEXT NOT NULL UNIQUE
+    ) STRICT;`);
+    legacy.close();
+
+    const store = new ArbitrageInstanceStore({ dbPath });
+    store.close();
+    const migrated = new DatabaseSync(dbPath);
+    try {
+      const columns = new Set((migrated.prepare("PRAGMA table_info(arbitrage_command_outcome_audits)")
+        .all() as Array<{ name: string }>).map(({ name }) => name));
+      assert.equal(columns.has("mutationDisposition"), true);
+      assert.equal(columns.has("diagnosticCategory"), true);
+      assert.equal(columns.has("failureStage"), true);
+    } finally {
+      migrated.close();
     }
   });
 });

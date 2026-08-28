@@ -100,6 +100,9 @@ export type ArbitrageCommandOutcomeAudit = Readonly<{
   failedLegId: string | null;
   completedLegIds: readonly string[];
   currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
+  mutationDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN" | null;
+  diagnosticCategory?: string | null;
+  failureStage?: string | null;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -318,6 +321,9 @@ type CommandOutcomeAuditRow = Readonly<{
   failedLegId: string | null;
   completedLegIdsJson: string;
   currentManagedExposureJson: string;
+  mutationDisposition: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN" | null;
+  diagnosticCategory: string | null;
+  failureStage: string | null;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -485,8 +491,9 @@ export class ArbitrageInstanceStore {
       this.db.prepare(`INSERT INTO arbitrage_command_outcome_audits (
         commandId, requestedByUserId, arbitrageId, operation, terminalStatus,
         stopPhase, stopReason, failedLegId, completedLegIdsJson,
-        currentManagedExposureJson, terminalAt, businessPayloadFingerprint
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        currentManagedExposureJson, mutationDisposition, diagnosticCategory,
+        failureStage, terminalAt, businessPayloadFingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         normalized.commandId,
         normalized.requestedByUserId,
         normalized.arbitrageId,
@@ -497,6 +504,9 @@ export class ArbitrageInstanceStore {
         normalized.failedLegId,
         JSON.stringify(normalized.completedLegIds),
         JSON.stringify(normalized.currentManagedExposure),
+        normalized.mutationDisposition ?? null,
+        normalized.diagnosticCategory ?? null,
+        normalized.failureStage ?? null,
         normalized.terminalAt,
         normalized.businessPayloadFingerprint,
       );
@@ -2071,6 +2081,11 @@ export class ArbitrageInstanceStore {
       failedLegId TEXT,
       completedLegIdsJson TEXT NOT NULL,
       currentManagedExposureJson TEXT NOT NULL,
+      mutationDisposition TEXT CHECK (mutationDisposition IN (
+        'NOT_DISPATCHED', 'DISPATCHED_OR_POSSIBLE', 'UNKNOWN'
+      )),
+      diagnosticCategory TEXT,
+      failureStage TEXT,
       terminalAt INTEGER NOT NULL,
       businessPayloadFingerprint TEXT NOT NULL UNIQUE,
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
@@ -2137,6 +2152,19 @@ export class ArbitrageInstanceStore {
       // Existing rows cannot be truthfully backfilled from the former partial
       // fingerprint. NULL therefore means legacy/unverifiable and fails closed.
       this.db.exec("ALTER TABLE arbitrage_command_idempotency ADD COLUMN businessPayloadFingerprint TEXT");
+    }
+    const outcomeColumns = new Set((this.db.prepare(
+      "PRAGMA table_info(arbitrage_command_outcome_audits)",
+    ).all() as Array<{ name: string }>).map(({ name }) => name));
+    if (!outcomeColumns.has("mutationDisposition")) {
+      this.db.exec(`ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN mutationDisposition TEXT
+        CHECK (mutationDisposition IN ('NOT_DISPATCHED', 'DISPATCHED_OR_POSSIBLE', 'UNKNOWN'))`);
+    }
+    if (!outcomeColumns.has("diagnosticCategory")) {
+      this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN diagnosticCategory TEXT");
+    }
+    if (!outcomeColumns.has("failureStage")) {
+      this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN failureStage TEXT");
     }
   }
 }
@@ -2235,6 +2263,17 @@ function normalizeCommandOutcomeAudit(
   if (new Set(currentManagedExposure.map(({ legId }) => legId)).size !== currentManagedExposure.length) {
     throw new Error("Arbitrage command outcome managed exposure leg identities are duplicated.");
   }
+  const mutationDisposition = outcome.mutationDisposition ?? null;
+  if (mutationDisposition !== null && mutationDisposition !== "NOT_DISPATCHED"
+    && mutationDisposition !== "DISPATCHED_OR_POSSIBLE" && mutationDisposition !== "UNKNOWN") {
+    throw new Error("Arbitrage command outcome mutation disposition is invalid.");
+  }
+  const diagnosticCategory = outcome.diagnosticCategory == null
+    ? null
+    : controlledOutcomeCode(outcome.diagnosticCategory, "diagnosticCategory");
+  const failureStage = outcome.failureStage == null
+    ? null
+    : controlledOutcomeCode(outcome.failureStage, "failureStage");
   const businessPayloadFingerprint = createHash("sha256").update(JSON.stringify([
     "ARBITRAGE_COMMAND_OUTCOME", requestedByUserId, outcome.operation, arbitrageId, commandId,
   ])).digest("hex");
@@ -2249,6 +2288,9 @@ function normalizeCommandOutcomeAudit(
     failedLegId,
     completedLegIds,
     currentManagedExposure,
+    mutationDisposition,
+    diagnosticCategory,
+    failureStage,
     terminalAt: timestamp(outcome.terminalAt, "terminalAt"),
     businessPayloadFingerprint,
   });
@@ -2277,6 +2319,9 @@ function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageComma
     failedLegId: row.failedLegId,
     completedLegIds: completedLegIds as string[],
     currentManagedExposure: currentManagedExposure as Array<{ legId: string; quantity: string }>,
+    mutationDisposition: row.mutationDisposition,
+    diagnosticCategory: row.diagnosticCategory,
+    failureStage: row.failureStage,
     terminalAt: row.terminalAt,
   });
   if (normalized.businessPayloadFingerprint !== row.businessPayloadFingerprint) {

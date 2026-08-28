@@ -127,8 +127,9 @@ test("OKX formal adapter executes through the runtime and exposes only canonical
   assert.deepEqual(result, {
     executionRecord,
     confirmedQuantity: "12.500000000000000001",
+    mutationDisposition: "DISPATCHED_OR_POSSIBLE",
   });
-  assert.deepEqual(Object.keys(result).sort(), ["confirmedQuantity", "executionRecord"]);
+  assert.deepEqual(Object.keys(result).sort(), ["confirmedQuantity", "executionRecord", "mutationDisposition"]);
   assert.equal(JSON.stringify(result).includes("DOGE-USDT-SWAP"), false);
   assert.equal(JSON.stringify(result).includes("8001"), false);
   assertExecutionIdentityContract(result.executionRecord, intent);
@@ -201,7 +202,9 @@ function executeResult(
   return {
     executionRecord,
     execution: {
+      status: "SUCCEEDED",
       step: {
+        status: "SUCCEEDED",
         result: {
           confirmedQuantity,
           providerOrderId: "8001",

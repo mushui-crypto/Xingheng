@@ -108,6 +108,37 @@ test("deterministic FAILED without a Provider attempt carries authoritative zero
   assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
 });
 
+test("pre-mutation diagnostics preserve a controlled inner category and failure stage", async () => {
+  const intent = executionIntent();
+  const original = Object.assign(new Error("position mode unavailable"), { category: "position_mode_unavailable" });
+  const adapter = new BinanceFormalArbitrageExecutionRuntime({
+    async cancel() { throw new Error("unused"); },
+    async reconcile() { throw new Error("unused"); },
+    async execute(value) {
+      return {
+        executionRecord: createExecutionRecord({
+          ...createExecutionRecordFromIntent("record-pre-mutation-diagnostic", value),
+          status: "FAILED",
+        }),
+        execution: {
+          status: "CALL_FAILED",
+          step: {
+            status: "CALL_FAILED",
+            result: null,
+            error: new ExecutionPreMutationFailure("controlled", original),
+          },
+        },
+      } as any;
+    },
+  });
+
+  const result = await adapter.execute(intent);
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(result.diagnostic?.category, "position_mode_unavailable");
+  assert.equal(result.diagnostic?.failureStage, "PRE_MUTATION");
+  assert.doesNotMatch(result.diagnostic?.sanitizedMessage ?? "", /position mode unavailable/iu);
+});
+
 test("FAILED without explicit pre-mutation proof does not fabricate zero quantity", async () => {
   const intent = executionIntent();
   const adapter = new BinanceFormalArbitrageExecutionRuntime({
@@ -127,7 +158,7 @@ test("FAILED without explicit pre-mutation proof does not fabricate zero quantit
   const result = await adapter.execute(intent);
 
   assert.equal(result.confirmedQuantity, null);
-  assert.equal(result.mutationDisposition, undefined);
+  assert.equal(result.mutationDisposition, "UNKNOWN");
 });
 
 test("maps a failed capability to a safe shared diagnostic without changing UNKNOWN semantics", async () => {
@@ -155,6 +186,7 @@ test("maps a failed capability to a safe shared diagnostic without changing UNKN
   assert.deepEqual(result.diagnostic, {
     category: "provider_response_invalid",
     stage: "execution-capability",
+    failureStage: "MUTATION_OR_RESPONSE",
     errorType: "Error",
     sanitizedMessage: "authorization=[redacted]",
   });
@@ -192,6 +224,7 @@ test("reduces an unclassified Error to a generic safe diagnostic", async () => {
   assert.deepEqual(result.diagnostic, {
     category: "execution_failed",
     stage: "execution-capability",
+    failureStage: "MUTATION_OR_RESPONSE",
     errorType: "Error",
     sanitizedMessage: "Execution capability failed.",
   });

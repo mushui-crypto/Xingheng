@@ -293,6 +293,17 @@ test("exit stop copy exposes controlled phase and reason without leaking raw Pro
   });
   assert.equal(message, "退出流程已停止于永续腿成交确认：当前安全条件未满足。");
   assert.doesNotMatch(message, /provider|api-key|secret/iu);
+
+  assert.equal(exitStopMessage({
+    failedLegId: "short-leg",
+    phase: "PERPETUAL_PRE_MUTATION",
+    reason: "POSITION_MODE_UNAVAILABLE",
+    mutationDisposition: "NOT_DISPATCHED",
+    diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
+    failureStage: "PRE_MUTATION",
+    completedLegIds: ["long-leg"],
+    currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "10" }],
+  }), "退出流程已停止于永续腿订单提交前准备：交易所持仓模式暂时无法可靠确认，订单尚未提交。");
 });
 
 test("arbitrage records do not expose order cancellation controls", () => {

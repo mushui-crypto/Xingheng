@@ -18,7 +18,11 @@ import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributi
 import type {
   ArbitrageLegExecutionConfirmation,
 } from "./ArbitrageExecutionCommandService";
-import type { FormalExecutionRuntimeResult } from "./FormalExecutionRuntime";
+import type {
+  FormalExecutionDiagnostic,
+  FormalExecutionMutationDisposition,
+  FormalExecutionRuntimeResult,
+} from "./FormalExecutionRuntime";
 import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
@@ -281,10 +285,21 @@ export class ArbitrageExecutionCloseService {
       executionIntentId: intent.intentId,
       status: attributableStatus,
       confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
+      ...(runtimeResult.mutationDisposition === "NOT_DISPATCHED"
+        ? { mutationDisposition: runtimeResult.mutationDisposition }
+        : {}),
       updatedAt: runtimeResult.executionRecord.updatedAt,
     });
     const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
-    return closeResult(updated, reference, false, attributableStatus, providerDispatchStartedAt);
+    return closeResult(
+      updated,
+      reference,
+      false,
+      attributableStatus,
+      providerDispatchStartedAt,
+      runtimeResult.diagnostic,
+      runtimeResult.mutationDisposition,
+    );
   }
 
   private now() {
@@ -454,6 +469,8 @@ function closeResult(
   idempotentReplay: boolean,
   recordStatus?: ExecutionRecord["status"],
   providerDispatchStartedAt?: number,
+  diagnostic?: FormalExecutionDiagnostic,
+  mutationDisposition?: FormalExecutionMutationDisposition,
 ): ArbitrageLegExecutionConfirmation {
   return Object.freeze({
     instance,
@@ -468,6 +485,9 @@ function closeResult(
     idempotentReplay,
     secondLegAllowed: false,
     ...(providerDispatchStartedAt === undefined ? {} : { providerDispatchStartedAt }),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
+    ...(mutationDisposition === undefined ? {} : { mutationDisposition }),
+    ...(diagnostic?.failureStage === undefined ? {} : { failureStage: diagnostic.failureStage }),
   });
 }
 

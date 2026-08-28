@@ -28,6 +28,7 @@ export class BybitFormalArbitrageExecutionRuntime implements FormalExecutionRunt
     const diagnostic = diagnosticFromExecution(result.execution);
     const mutationDisposition = mutationDispositionFromExecution({
       executionRecord: result.executionRecord,
+      capabilityStepStatus: result.execution.step.status,
       ...(result.execution.step.status === "CALL_FAILED"
         ? { capabilityError: result.execution.step.error }
         : {}),
@@ -43,7 +44,7 @@ export class BybitFormalArbitrageExecutionRuntime implements FormalExecutionRunt
           ? { capabilityError: result.execution.step.error }
           : {}),
       }),
-      ...(mutationDisposition === undefined ? {} : { mutationDisposition }),
+      mutationDisposition,
       ...(diagnostic === undefined ? {} : { diagnostic }),
     });
   }

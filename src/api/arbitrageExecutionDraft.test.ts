@@ -215,6 +215,9 @@ test("instance exit preserves structured stop diagnostics and timing", async () 
       failedLegId: "short-leg",
       phase: "PERPETUAL_CLOSE",
       reason: "POSITION_VERIFICATION_UNAVAILABLE",
+      mutationDisposition: "NOT_DISPATCHED",
+      diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
+      failureStage: "PRE_MUTATION",
       completedLegIds: ["long-leg"],
       currentManagedExposure: [
         { legId: "long-leg", quantity: "0" },
@@ -243,6 +246,9 @@ test("instance exit preserves structured stop diagnostics and timing", async () 
       failedLegId: "short-leg",
       phase: "PERPETUAL_CLOSE",
       reason: "POSITION_VERIFICATION_UNAVAILABLE",
+      mutationDisposition: "NOT_DISPATCHED",
+      diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
+      failureStage: "PRE_MUTATION",
       completedLegIds: ["long-leg"],
       currentManagedExposure: [
         { legId: "long-leg", quantity: "0" },

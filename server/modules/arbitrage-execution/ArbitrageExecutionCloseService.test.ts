@@ -68,6 +68,28 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
   assert.notEqual(result.instance.status, "CLOSED", "one flat leg must not close the two-leg instance");
 });
 
+test("close result preserves authoritative NOT_DISPATCHED and controlled pre-mutation diagnostics", async (t) => {
+  const fixture = setup(t, { quantity: "1" });
+  fixture.runtime.resultStatus = "FAILED";
+  fixture.runtime.confirmedQuantity = "0";
+  fixture.runtime.mutationDisposition = "NOT_DISPATCHED";
+  fixture.runtime.diagnostic = {
+    category: "position_mode_unavailable",
+    stage: "execution-capability",
+    failureStage: "PRE_MUTATION",
+    errorType: "Error",
+    sanitizedMessage: "Execution capability failed.",
+  };
+
+  const result = await fixture.service.closeLeg("user-a", request("short-leg", "1", "not-dispatched-close"));
+
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(result.executionRecord.confirmedQuantity, "0");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(result.failureStage, "PRE_MUTATION");
+  assert.equal(result.diagnostic?.category, "position_mode_unavailable");
+});
+
 test("a released leg cannot create a later close Provider mutation", async (t) => {
   const fixture = setup(t);
   const instance = fixture.store.get("user-a", fixture.arbitrageId)!;
@@ -1294,6 +1316,8 @@ class FakeRuntime implements FormalExecutionRuntime {
   resultStatus: ExecutionRecord["status"] = "CONFIRMED";
   confirmedQuantity: string | null = "0.5";
   delay = false;
+  mutationDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
+  diagnostic?: import("./FormalExecutionRuntime").FormalExecutionDiagnostic;
 
   async execute(intent: import("../cex/ExecutionIntent").ExecutionIntent) {
     this.calls.push(intent);
@@ -1311,6 +1335,8 @@ class FakeRuntime implements FormalExecutionRuntime {
         updatedAt: intent.createdAt + 1,
       }),
       confirmedQuantity: this.confirmedQuantity,
+      ...(this.mutationDisposition === undefined ? {} : { mutationDisposition: this.mutationDisposition }),
+      ...(this.diagnostic === undefined ? {} : { diagnostic: this.diagnostic }),
     };
   }
 

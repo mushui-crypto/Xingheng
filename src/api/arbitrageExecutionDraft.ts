@@ -421,12 +421,16 @@ export type ArbitrageInstanceExitLegResult = Readonly<{
 export type ArbitrageInstanceExitStopPhase =
   | "INITIAL_STATE" | "JOINT_PREFLIGHT" | "SPOT_FRESH_SAFETY" | "SPOT_CLOSE"
   | "SPOT_CONFIRMATION" | "SPOT_DUST_RECHECK" | "SPOT_DUST_RELEASE"
-  | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
+  | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_PRE_MUTATION"
+  | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
 
 export type ArbitrageInstanceExitStopDiagnostic = Readonly<{
   failedLegId: string | null;
   phase: ArbitrageInstanceExitStopPhase;
   reason: string;
+  mutationDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
+  diagnosticCategory?: string;
+  failureStage?: "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
   completedLegIds: readonly string[];
   currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
 }>;
@@ -562,6 +566,15 @@ function exitStopDiagnostic(value: unknown): ArbitrageInstanceExitStopDiagnostic
     failedLegId,
     phase,
     reason: requiredString(stop.reason),
+    ...(stop.mutationDisposition === undefined
+      ? {}
+      : { mutationDisposition: exitMutationDisposition(stop.mutationDisposition) }),
+    ...(stop.diagnosticCategory === undefined
+      ? {}
+      : { diagnosticCategory: controlledDiagnosticCode(stop.diagnosticCategory) }),
+    ...(stop.failureStage === undefined
+      ? {}
+      : { failureStage: exitFailureStage(stop.failureStage) }),
     completedLegIds: Object.freeze(stop.completedLegIds.map(requiredString)),
     currentManagedExposure: Object.freeze(stop.currentManagedExposure.map((candidate) => {
       const exposure = record(candidate);
@@ -577,8 +590,26 @@ function exitStopPhase(value: unknown): ArbitrageInstanceExitStopPhase {
   if (value === "INITIAL_STATE" || value === "JOINT_PREFLIGHT" || value === "SPOT_FRESH_SAFETY"
     || value === "SPOT_CLOSE" || value === "SPOT_CONFIRMATION" || value === "SPOT_DUST_RECHECK"
     || value === "SPOT_DUST_RELEASE" || value === "PERPETUAL_FRESH_SAFETY"
-    || value === "PERPETUAL_CLOSE" || value === "PERPETUAL_CONFIRMATION") return value;
+    || value === "PERPETUAL_PRE_MUTATION" || value === "PERPETUAL_CLOSE"
+    || value === "PERPETUAL_CONFIRMATION") return value;
   throw invalidCommandResponse();
+}
+
+function exitMutationDisposition(value: unknown) {
+  if (value === "NOT_DISPATCHED" || value === "DISPATCHED_OR_POSSIBLE" || value === "UNKNOWN") return value;
+  throw invalidCommandResponse();
+}
+
+function exitFailureStage(value: unknown) {
+  if (value === "PRE_MUTATION" || value === "MUTATION_OR_RESPONSE"
+    || value === "CONFIRMATION" || value === "ORCHESTRATION") return value;
+  throw invalidCommandResponse();
+}
+
+function controlledDiagnosticCode(value: unknown) {
+  const code = requiredString(value);
+  if (!/^[A-Z][A-Z0-9_]{0,95}$/u.test(code)) throw invalidCommandResponse();
+  return code;
 }
 
 function exitTiming(value: unknown): ArbitrageInstanceExitTiming {

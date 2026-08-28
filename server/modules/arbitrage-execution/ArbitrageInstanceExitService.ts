@@ -7,6 +7,10 @@ import {
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import type { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
+import type {
+  FormalExecutionDiagnostic,
+  FormalExecutionMutationDisposition,
+} from "./FormalExecutionRuntime";
 import {
   ArbitrageExecutionCloseError,
   type ArbitrageExecutionCloseService,
@@ -28,6 +32,9 @@ const DEFAULT_CLOSE_FINALIZATION_INITIAL_POLL_MS = 250;
 const DEFAULT_CLOSE_FINALIZATION_MAX_POLL_MS = 2_000;
 const DEFAULT_CLOSE_FINALIZATION_MAX_ATTEMPTS = 10;
 const DEFAULT_TRANSIENT_READ_RETRY_BUDGET_MS = 15_000;
+const DEFAULT_PRE_MUTATION_RETRY_MAX_ATTEMPTS = 3;
+const DEFAULT_PRE_MUTATION_RETRY_INITIAL_DELAY_MS = 250;
+const DEFAULT_PRE_MUTATION_RETRY_MAX_DELAY_MS = 500;
 
 export class ArbitrageInstanceExitError extends Error {
   constructor(
@@ -57,6 +64,9 @@ export class ArbitrageInstanceExitService {
       closeFinalizationInitialPollMs?: number;
       closeFinalizationMaxPollMs?: number;
       closeFinalizationMaxAttempts?: number;
+      preMutationRetryMaxAttempts?: number;
+      preMutationRetryInitialDelayMs?: number;
+      preMutationRetryMaxDelayMs?: number;
     }> = {},
   ) {}
 
@@ -129,6 +139,7 @@ export class ArbitrageInstanceExitService {
     let firstConfirmedAt: number | null = null;
     let secondLegProviderDispatchAt: number | null = null;
     let continuationReadDeadline: number | null = null;
+    let lastExecutionDiagnostic: ExitExecutionDiagnostic | undefined;
     for (const leg of orderedLegs) {
       if (instance.status === "CLOSED") break;
       const currentLeg = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
@@ -157,7 +168,7 @@ export class ArbitrageInstanceExitService {
       }
       let confirmation;
       try {
-        const closeInput = {
+        const closeInput: ExitCloseInput = {
           arbitrageId: instance.arbitrageId,
           legId: leg.legId,
           commandId: legCommandId(request.commandId, leg.legId),
@@ -165,11 +176,15 @@ export class ArbitrageInstanceExitService {
           executionMode: request.executionMode,
           confirmed: true,
         };
-        confirmation = spotLeg
-          ? await this.closeService.closeLeg(userId, closeInput)
-          : await this.closeWithTransientReadRetry(
+        if (spotLeg) {
+          confirmation = await this.closeService.closeLeg(userId, closeInput);
+        } else {
+          const closeAttempt = await this.closePerpetualWithSafePreMutationRetry(
             userId, instance, leg.legId, closeInput, continuationReadDeadline,
           );
+          confirmation = closeAttempt.confirmation;
+          lastExecutionDiagnostic = closeAttempt.diagnostic ?? lastExecutionDiagnostic;
+        }
       } catch (error) {
         return stopped(
           this.instances.get(userId, instance.arbitrageId) ?? instance,
@@ -206,7 +221,18 @@ export class ArbitrageInstanceExitService {
           confirmation.executionRecord.confirmedQuantity,
           confirmation.executionRecord.plannedQuantity,
         ) !== 0) {
-        return stopped(instance, outcomes, leg.legId, phaseFor(leg, "CONFIRMATION"), confirmation.executionRecord.status);
+        const diagnostic = executionFailureDiagnostic(confirmation, leg.legId);
+        lastExecutionDiagnostic = diagnostic ?? lastExecutionDiagnostic;
+        return stopped(
+          instance,
+          outcomes,
+          leg.legId,
+          diagnostic?.failureStage === "PRE_MUTATION"
+            ? phaseFor(leg, "PRE_MUTATION")
+            : phaseFor(leg, "CONFIRMATION"),
+          diagnostic?.diagnosticCategory ?? confirmation.executionRecord.status,
+          diagnostic,
+        );
       }
       if (!dispatchedByThisExit && instance.status !== "CLOSED") {
         return stopped(
@@ -255,6 +281,7 @@ export class ArbitrageInstanceExitService {
       outcomes,
       undefined,
       timing(firstConfirmedAt, secondLegProviderDispatchAt),
+      lastExecutionDiagnostic,
     );
   }
 
@@ -271,6 +298,9 @@ export class ArbitrageInstanceExitService {
       failedLegId: outcome.stop?.failedLegId ?? null,
       completedLegIds: completedClosingLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
+      mutationDisposition: outcome.executionDiagnostic?.mutationDisposition ?? null,
+      diagnosticCategory: outcome.executionDiagnostic?.diagnosticCategory ?? null,
+      failureStage: outcome.executionDiagnostic?.failureStage ?? null,
       terminalAt: this.now(),
     });
   }
@@ -289,6 +319,9 @@ export class ArbitrageInstanceExitService {
       failedLegId: null,
       completedLegIds: completedClosingLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
+      mutationDisposition: null,
+      diagnosticCategory: null,
+      failureStage: "ORCHESTRATION",
       terminalAt: this.now(),
     });
   }
@@ -343,7 +376,7 @@ export class ArbitrageInstanceExitService {
     userId: string,
     instance: ArbitrageInstance,
     legId: string,
-    input: Parameters<CloseService["closeLeg"]>[1],
+    input: ExitCloseInput,
     inheritedDeadline: number | null,
   ) {
     const startedAt = this.now();
@@ -373,6 +406,65 @@ export class ArbitrageInstanceExitService {
         throw error;
       }
     }
+  }
+
+  private async closePerpetualWithSafePreMutationRetry(
+    userId: string,
+    instance: ArbitrageInstance,
+    legId: string,
+    input: ExitCloseInput,
+    inheritedDeadline: number | null,
+  ): Promise<Readonly<{
+    confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>;
+    diagnostic?: ExitExecutionDiagnostic;
+  }>> {
+    const budget = this.options.transientReadRetryBudgetMs ?? DEFAULT_TRANSIENT_READ_RETRY_BUDGET_MS;
+    const deadline = inheritedDeadline ?? this.now() + budget;
+    const maxAttempts = positiveInteger(
+      this.options.preMutationRetryMaxAttempts ?? DEFAULT_PRE_MUTATION_RETRY_MAX_ATTEMPTS,
+      "preMutationRetryMaxAttempts",
+    );
+    let delayMs = positiveInteger(
+      this.options.preMutationRetryInitialDelayMs ?? DEFAULT_PRE_MUTATION_RETRY_INITIAL_DELAY_MS,
+      "preMutationRetryInitialDelayMs",
+    );
+    const maxDelayMs = positiveInteger(
+      this.options.preMutationRetryMaxDelayMs ?? DEFAULT_PRE_MUTATION_RETRY_MAX_DELAY_MS,
+      "preMutationRetryMaxDelayMs",
+    );
+    let lastDiagnostic: ExitExecutionDiagnostic | undefined;
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const commandId = attempt === 0
+        ? String((input as { commandId: string }).commandId)
+        : retryLegCommandId(String((input as { commandId: string }).commandId), attempt);
+      const confirmation = await this.closeWithTransientReadRetry(
+        userId,
+        instance,
+        legId,
+        { ...input, commandId },
+        deadline,
+      );
+      const diagnostic = executionFailureDiagnostic(confirmation, legId);
+      if (diagnostic) lastDiagnostic = diagnostic;
+      if (!isAuthoritativeNotDispatchedFailure(confirmation)) {
+        return Object.freeze({ confirmation, ...(lastDiagnostic ? { diagnostic: lastDiagnostic } : {}) });
+      }
+      if (attempt + 1 >= maxAttempts || this.now() >= deadline) {
+        return Object.freeze({ confirmation, ...(lastDiagnostic ? { diagnostic: lastDiagnostic } : {}) });
+      }
+      const current = this.instances.get(userId, instance.arbitrageId) ?? confirmation.instance;
+      if (hasUnresolvedExecution(current)) {
+        return Object.freeze({ confirmation, ...(lastDiagnostic ? { diagnostic: lastDiagnostic } : {}) });
+      }
+      const remaining = deadline - this.now();
+      if (remaining <= 0) return Object.freeze({ confirmation, ...(lastDiagnostic ? { diagnostic: lastDiagnostic } : {}) });
+      await this.sleep(Math.min(delayMs, remaining));
+      delayMs = Math.min(delayMs * 2, maxDelayMs);
+      if (this.now() >= deadline) {
+        return Object.freeze({ confirmation, ...(lastDiagnostic ? { diagnostic: lastDiagnostic } : {}) });
+      }
+    }
+    throw new Error("Perpetual pre-mutation retry loop exhausted unexpectedly.");
   }
 
   private now() {
@@ -408,6 +500,15 @@ type ExitRequest = Readonly<{
   executionMode: "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
 }>;
 
+type ExitCloseInput = Readonly<{
+  arbitrageId: string;
+  legId: string;
+  commandId: string;
+  quantity: string;
+  executionMode: "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
+  confirmed: true;
+}>;
+
 type ArbitrageInstanceExitLegResult = Readonly<{
   legId: string;
   executionId: string | null;
@@ -426,14 +527,28 @@ type ArbitrageInstanceExitResult = Readonly<{
     secondLegProviderDispatchAt: number;
     secondLegExitDelayMs: number;
   }>;
+  executionDiagnostic?: ExitExecutionDiagnostic;
+}>;
+
+type ExitFailureStage = "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
+
+type ExitExecutionDiagnostic = Readonly<{
+  legId: string;
+  mutationDisposition: FormalExecutionMutationDisposition;
+  diagnosticCategory: string;
+  failureStage: ExitFailureStage;
 }>;
 
 type ArbitrageInstanceExitStopDiagnostic = Readonly<{
   failedLegId: string | null;
   phase: "INITIAL_STATE" | "JOINT_PREFLIGHT" | "SPOT_FRESH_SAFETY" | "SPOT_CLOSE"
     | "SPOT_CONFIRMATION" | "SPOT_DUST_RECHECK" | "SPOT_DUST_RELEASE"
-    | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
+    | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_PRE_MUTATION"
+    | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
   reason: string;
+  mutationDisposition?: FormalExecutionMutationDisposition;
+  diagnosticCategory?: string;
+  failureStage?: ExitFailureStage;
   completedLegIds: readonly string[];
   currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
 }>;
@@ -563,6 +678,7 @@ function result(
   legs: readonly ArbitrageInstanceExitLegResult[],
   stop?: ArbitrageInstanceExitStopDiagnostic,
   timingResult?: ArbitrageInstanceExitResult["timing"],
+  executionDiagnostic?: ExitExecutionDiagnostic,
 ) {
   return Object.freeze({
     instance,
@@ -570,6 +686,7 @@ function result(
     legs: Object.freeze([...legs]),
     ...(stop === undefined ? {} : { stop }),
     ...(timingResult === undefined ? {} : { timing: timingResult }),
+    ...(executionDiagnostic === undefined ? {} : { executionDiagnostic }),
   });
 }
 
@@ -579,21 +696,78 @@ function stopped(
   failedLegId: string | null,
   phase: ArbitrageInstanceExitStopDiagnostic["phase"],
   reason: string,
+  diagnostic?: ExitExecutionDiagnostic,
 ) {
   return result(instance, "STOPPED", legs, Object.freeze({
     failedLegId,
     phase,
     reason,
+    ...(diagnostic === undefined ? {} : {
+      mutationDisposition: diagnostic.mutationDisposition,
+      diagnosticCategory: diagnostic.diagnosticCategory,
+      failureStage: diagnostic.failureStage,
+    }),
     completedLegIds: Object.freeze(legs.filter((leg) => leg.status === "CONFIRMED").map((leg) => leg.legId)),
     currentManagedExposure: Object.freeze(instance.legs.map((leg) => Object.freeze({
       legId: leg.legId,
       quantity: activeManagedQuantity(instance, leg),
     }))),
-  }));
+  }), undefined, diagnostic);
 }
 
-function phaseFor(leg: ArbitrageInstance["legs"][number], suffix: "FRESH_SAFETY" | "CLOSE" | "CONFIRMATION") {
+function phaseFor(
+  leg: ArbitrageInstance["legs"][number],
+  suffix: "FRESH_SAFETY" | "PRE_MUTATION" | "CLOSE" | "CONFIRMATION",
+) {
   return `${leg.instrumentId.endsWith("-SPOT") ? "SPOT" : "PERPETUAL"}_${suffix}` as ArbitrageInstanceExitStopDiagnostic["phase"];
+}
+
+function isAuthoritativeNotDispatchedFailure(
+  confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>,
+) {
+  return !confirmation.idempotentReplay
+    && confirmation.mutationDisposition === "NOT_DISPATCHED"
+    && confirmation.failureStage === "PRE_MUTATION"
+    && confirmation.executionRecord.status === "FAILED"
+    && compareUnsignedDecimals(confirmation.executionRecord.confirmedQuantity, "0") === 0
+    && isRetryablePreMutationCategory(controlledDiagnosticCategory(confirmation.diagnostic));
+}
+
+function executionFailureDiagnostic(
+  confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>,
+  legId: string,
+): ExitExecutionDiagnostic | undefined {
+  if (confirmation.executionRecord.status === "CONFIRMED") return undefined;
+  const mutationDisposition = confirmation.mutationDisposition ?? "UNKNOWN";
+  const failureStage: ExitFailureStage = confirmation.failureStage
+    ?? (mutationDisposition === "NOT_DISPATCHED"
+      ? "PRE_MUTATION"
+      : mutationDisposition === "UNKNOWN"
+        ? "MUTATION_OR_RESPONSE"
+        : "CONFIRMATION");
+  return Object.freeze({
+    legId,
+    mutationDisposition,
+    diagnosticCategory: controlledDiagnosticCategory(confirmation.diagnostic),
+    failureStage,
+  });
+}
+
+function controlledDiagnosticCategory(diagnostic?: FormalExecutionDiagnostic) {
+  const category = diagnostic?.category?.trim().toUpperCase();
+  if (!category || !/^[A-Z][A-Z0-9_]{0,95}$/u.test(category) || category === "EXECUTION_FAILED") {
+    return "OTHER_PRE_MUTATION_FAILURE";
+  }
+  return category;
+}
+
+function isRetryablePreMutationCategory(category: string) {
+  return category === "ACCOUNT_IDENTITY_UNAVAILABLE"
+    || category === "POSITION_MODE_UNAVAILABLE"
+    || category === "POSITION_REALITY_UNAVAILABLE"
+    || category === "PROVIDER_TIMEOUT"
+    || category === "PROVIDER_TRANSPORT_ERROR"
+    || category === "PROVIDER_UNAVAILABLE";
 }
 
 function safeCloseErrorReason(error: unknown) {
@@ -623,6 +797,12 @@ function timing(firstLegConfirmedAt: number | null, secondLegProviderDispatchAt:
 
 function legCommandId(commandId: string, legId: string) {
   return `hedge-exit-${createHash("sha256").update(`${commandId}\0${legId}`).digest("hex")}`;
+}
+
+function retryLegCommandId(initialChildCommandId: string, attempt: number) {
+  return `hedge-exit-retry-${createHash("sha256")
+    .update(`${initialChildCommandId}\0${attempt}`)
+    .digest("hex")}`;
 }
 
 function dustReleaseCommandId(commandId: string, legId: string) {
