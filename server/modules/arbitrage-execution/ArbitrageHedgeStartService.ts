@@ -12,7 +12,12 @@ import {
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
-type LegExecutor = Pick<ArbitrageExecutionCommandService, "executeLeg">;
+type LegExecutor = Pick<ArbitrageExecutionCommandService, "executeLeg" | "reconcileLeg">;
+
+const DEFAULT_FIRST_LEG_FINALIZATION_BUDGET_MS = 15_000;
+const DEFAULT_FIRST_LEG_FINALIZATION_INITIAL_POLL_MS = 250;
+const DEFAULT_FIRST_LEG_FINALIZATION_MAX_POLL_MS = 2_000;
+const DEFAULT_FIRST_LEG_FINALIZATION_MAX_ATTEMPTS = 10;
 
 export type ArbitrageHedgeStartStatus =
   | "COMPLETED"
@@ -79,7 +84,14 @@ export class ArbitrageHedgeStartService {
   constructor(
     private readonly instances: InstanceStore,
     private readonly commands: LegExecutor,
-    private readonly options: Readonly<{ clock?: () => number }> = {},
+    private readonly options: Readonly<{
+      clock?: () => number;
+      sleep?: (milliseconds: number) => Promise<void>;
+      firstLegFinalizationBudgetMs?: number;
+      firstLegFinalizationInitialPollMs?: number;
+      firstLegFinalizationMaxPollMs?: number;
+      firstLegFinalizationMaxAttempts?: number;
+    }> = {},
   ) {}
 
   async start(authenticatedUserId: string, arbitrageIdInput: string, input: unknown) {
@@ -135,16 +147,37 @@ export class ArbitrageHedgeStartService {
     } catch (error) {
       return this.stoppedFromCommandError(userId, arbitrageId, request, request.firstLegId, null, error);
     }
+    const dispatchedByThisStart = !first.idempotentReplay;
+    if (dispatchedByThisStart && pendingWithoutFill(first)) {
+      try {
+        first = await this.finalizeFirstLeg(userId, arbitrageId, request.firstLegId, first);
+      } catch {
+        const current = this.currentFirstLegConfirmation(userId, arbitrageId, request.firstLegId, first);
+        return result(
+          arbitrageId,
+          request.hedgeCommandId,
+          "STOPPED_FIRST_LEG_UNKNOWN",
+          current,
+          null,
+          current.instance,
+          this.now(),
+          null,
+          "第一腿终态核验暂不可用；系统未重复下单，第二腿未执行。",
+        );
+      }
+    }
     const firstLegCompletedAt = this.now();
     const firstStop = stopStatus("FIRST", first);
     if (firstStop !== null) {
       return result(arbitrageId, request.hedgeCommandId, firstStop, first, null, first.instance,
-        firstLegCompletedAt, null);
+        firstLegCompletedAt, null, firstStop === "STOPPED_FIRST_LEG_PENDING" && dispatchedByThisStart
+          ? "第一腿在在线终态确认预算内仍未完成；系统未重复下单，第二腿未执行。"
+          : undefined);
     }
 
     const secondReferenceExists = first.instance.executionReferences.some((reference) =>
       reference.phase === "OPENING" && reference.legId === secondLegId);
-    if (first.idempotentReplay && !secondReferenceExists) {
+    if (!dispatchedByThisStart && first.idempotentReplay && !secondReferenceExists) {
       return result(
         arbitrageId,
         request.hedgeCommandId,
@@ -192,6 +225,66 @@ export class ArbitrageHedgeStartService {
     );
   }
 
+  private async finalizeFirstLeg(
+    userId: string,
+    arbitrageId: string,
+    firstLegId: string,
+    dispatched: ArbitrageLegExecutionConfirmation,
+  ) {
+    const identity = reliableExecutionIdentity(dispatched, firstLegId);
+    if (identity === null) throw new Error("First-leg execution identity is unavailable for online finalization.");
+    const budgetMs = positiveInteger(
+      this.options.firstLegFinalizationBudgetMs ?? DEFAULT_FIRST_LEG_FINALIZATION_BUDGET_MS,
+      "firstLegFinalizationBudgetMs",
+    );
+    const initialPollMs = positiveInteger(
+      this.options.firstLegFinalizationInitialPollMs ?? DEFAULT_FIRST_LEG_FINALIZATION_INITIAL_POLL_MS,
+      "firstLegFinalizationInitialPollMs",
+    );
+    const maxPollMs = positiveInteger(
+      this.options.firstLegFinalizationMaxPollMs ?? DEFAULT_FIRST_LEG_FINALIZATION_MAX_POLL_MS,
+      "firstLegFinalizationMaxPollMs",
+    );
+    const maxAttempts = positiveInteger(
+      this.options.firstLegFinalizationMaxAttempts ?? DEFAULT_FIRST_LEG_FINALIZATION_MAX_ATTEMPTS,
+      "firstLegFinalizationMaxAttempts",
+    );
+    const deadline = this.now() + budgetMs;
+    let confirmation = dispatched;
+    let pollMs = Math.min(initialPollMs, maxPollMs);
+    for (let attempt = 0; attempt < maxAttempts && this.now() < deadline; attempt += 1) {
+      if (attempt > 0) {
+        const remaining = deadline - this.now();
+        if (remaining <= 0) break;
+        await this.sleep(Math.min(pollMs, remaining));
+        pollMs = Math.min(pollMs * 2, maxPollMs);
+        if (this.now() >= deadline) break;
+      }
+      confirmation = await this.commands.reconcileLeg(userId, {
+        arbitrageId,
+        legId: firstLegId,
+        executionIntentId: identity.executionIntentId,
+      });
+      assertSameExecutionIdentity(confirmation, firstLegId, identity);
+      if (!pendingWithoutFill(confirmation)) return confirmation;
+    }
+    return confirmation;
+  }
+
+  private currentFirstLegConfirmation(
+    userId: string,
+    arbitrageId: string,
+    firstLegId: string,
+    fallback: ArbitrageLegExecutionConfirmation,
+  ) {
+    const instance = this.instances.get(userId, arbitrageId);
+    const reference = instance?.executionReferences.find((candidate) =>
+      candidate.phase === "OPENING"
+      && candidate.legId === firstLegId
+      && candidate.executionIntentId === fallback.executionRecord.intentId);
+    return instance && reference ? confirmationFromReference(instance, reference) : fallback;
+  }
+
   private stoppedFromCommandError(
     userId: string,
     arbitrageId: string,
@@ -233,6 +326,12 @@ export class ArbitrageHedgeStartService {
     const value = this.options.clock?.() ?? Date.now();
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Hedge start clock is invalid.");
     return value;
+  }
+
+  private sleep(milliseconds: number) {
+    if (milliseconds <= 0) return Promise.resolve();
+    return this.options.sleep?.(milliseconds)
+      ?? new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
   }
 }
 
@@ -305,6 +404,7 @@ function stopStatus(
   const record = confirmation.executionRecord;
   const prefix = `STOPPED_${phase}_LEG_` as const;
   if (record.status === "PENDING_CONFIRMATION" || record.status === "CREATED" || record.status === "SUBMITTED") {
+    if (compareUnsignedDecimals(record.confirmedQuantity, "0") > 0) return `${prefix}PARTIAL`;
     return `${prefix}PENDING`;
   }
   if (record.status === "UNKNOWN") return `${prefix}UNKNOWN`;
@@ -316,6 +416,49 @@ function stopStatus(
   }
   if (!full) return `${prefix}PARTIAL`;
   return record.status === "CONFIRMED" ? null : `${prefix}PENDING`;
+}
+
+function pendingWithoutFill(confirmation: ArbitrageLegExecutionConfirmation) {
+  const status = confirmation.executionRecord.status;
+  return (status === "PENDING_CONFIRMATION" || status === "SUBMITTED")
+    && compareUnsignedDecimals(confirmation.executionRecord.confirmedQuantity, "0") === 0;
+}
+
+type ReliableExecutionIdentity = Readonly<{
+  executionIntentId: string;
+  executionRecordId: string;
+}>;
+
+function reliableExecutionIdentity(
+  confirmation: ArbitrageLegExecutionConfirmation,
+  legId: string,
+): ReliableExecutionIdentity | null {
+  const executionIntentId = confirmation.executionRecord.intentId;
+  const executionRecordId = confirmation.executionRecord.executionId;
+  if (!executionRecordId) return null;
+  const reference = confirmation.instance.executionReferences.find((candidate) =>
+    candidate.phase === "OPENING"
+    && candidate.legId === legId
+    && candidate.executionIntentId === executionIntentId
+    && candidate.executionRecordId === executionRecordId);
+  return reference ? Object.freeze({ executionIntentId, executionRecordId }) : null;
+}
+
+function assertSameExecutionIdentity(
+  confirmation: ArbitrageLegExecutionConfirmation,
+  legId: string,
+  expected: ReliableExecutionIdentity,
+) {
+  if (confirmation.executionRecord.intentId !== expected.executionIntentId
+    || confirmation.executionRecord.executionId !== expected.executionRecordId
+    || reliableExecutionIdentity(confirmation, legId) === null) {
+    throw new Error("First-leg online finalization returned a different execution identity.");
+  }
+}
+
+function positiveInteger(value: number, label: string) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer.`);
+  return value;
 }
 
 function result(

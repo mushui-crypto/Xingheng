@@ -14,6 +14,105 @@ test("one confirmed start executes both full legs strictly in server order", asy
   assert.equal(new Set(fixture.executor.commandIds).size, 2);
   assert.equal(result.instanceStatus, "HOLDING");
   assert.ok(result.timing.secondLegDispatchStartedAt! >= result.timing.firstLegCompletedAt);
+  assert.equal(fixture.executor.reconcileCalls.length, 0);
+});
+
+test("an online first-leg pending acknowledgement is authoritatively finalized before automatic second-leg dispatch", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    { reconciliationOutcomes: [outcome("CONFIRMED", "100")] },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "COMPLETED");
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 1);
+  assert.equal(fixture.executor.reconcileCalls[0]?.executionIntentId, `intent-${childCommandId("hedge-start-1", "first")}`);
+});
+
+test("repeated zero-fill pending observations remain read-only until full confirmation", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    { reconciliationOutcomes: [
+      outcome("PENDING_CONFIRMATION", "0"),
+      outcome("PENDING_CONFIRMATION", "0"),
+      outcome("CONFIRMED", "100"),
+    ] },
+  );
+  assert.equal((await fixture.service.start("user-a", fixture.instance.arbitrageId, request())).status, "COMPLETED");
+  assert.equal(fixture.executor.reconcileCalls.length, 3);
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+  assert.deepEqual(fixture.sleeps, [1, 2]);
+});
+
+test("online finalization stops on partial, failed, unknown, or query error without second-leg mutation", async (context) => {
+  const scenarios = [
+    ["partial", { reconciliationOutcomes: [outcome("PENDING_CONFIRMATION", "40")] }, "STOPPED_FIRST_LEG_PARTIAL"],
+    ["failed", { reconciliationOutcomes: [outcome("FAILED", "0")] }, "STOPPED_FIRST_LEG_FAILED"],
+    ["unknown", { reconciliationOutcomes: [outcome("UNKNOWN", "0")] }, "STOPPED_FIRST_LEG_UNKNOWN"],
+    ["query error", { reconcileError: true }, "STOPPED_FIRST_LEG_UNKNOWN"],
+  ] as const;
+  for (const [name, options, expected] of scenarios) {
+    await context.test(name, async () => {
+      const fixture = setup([outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")], options);
+      const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request({ hedgeCommandId: `start-${name}` }));
+      assert.equal(result.status, expected);
+      assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+      assert.equal(result.secondLeg, null);
+    });
+  }
+});
+
+test("online finalization requires the exact persisted execution identity", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    { omitFirstExecutionRecordId: true, reconciliationOutcomes: [outcome("CONFIRMED", "100")] },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_FIRST_LEG_UNKNOWN");
+  assert.equal(fixture.executor.reconcileCalls.length, 0);
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+});
+
+test("online finalization exhausts its bounded budget without background work or duplicate mutation", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    { finalizationMaxAttempts: 3 },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_FIRST_LEG_PENDING");
+  assert.equal(fixture.executor.reconcileCalls.length, 3);
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+  const callsAtReturn = fixture.executor.reconcileCalls.length;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(fixture.executor.reconcileCalls.length, callsAtReturn);
+});
+
+test("a finalized first leg still runs the existing second-leg safety gate before mutation", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0")],
+    { reconciliationOutcomes: [outcome("CONFIRMED", "100")], throwSecond: "opening_attribution_unsafe" },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_SAFETY");
+  assert.equal(fixture.executor.reconcileCalls.length, 1);
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+});
+
+test("all venues reuse the same online first-leg finalization path", async (context) => {
+  for (const venue of ["binance", "okx", "bybit", "bitget"] as const) {
+    await context.test(venue, async () => {
+      const fixture = setup(
+        [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+        { reconciliationOutcomes: [outcome("CONFIRMED", "100")] },
+        baseInstance(venue, venue),
+      );
+      const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request({ hedgeCommandId: `delayed-${venue}` }));
+      assert.equal(result.status, "COMPLETED");
+      assert.equal(fixture.executor.reconcileCalls.length, 1);
+      assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+    });
+  }
 });
 
 test("SPOT_PERPETUAL rejects a Perpetual first leg before execution, including repeated illegal commands", async () => {
@@ -150,16 +249,45 @@ test("a restarted orchestration never auto-continues from an existing full first
   assert.equal(fixture.executor.mutationLegs.length, 0);
 });
 
+test("a restarted orchestration never resumes online finalization for an existing pending first leg", async () => {
+  const fixture = setup([]);
+  fixture.executor.seedPending(childCommandId("hedge-start-1", "first"), "long-leg");
+  const restarted = new ArbitrageHedgeStartService(fixture.store as never, fixture.executor as never, {
+    clock: clock(),
+    sleep: async () => undefined,
+    firstLegFinalizationBudgetMs: 100,
+    firstLegFinalizationInitialPollMs: 1,
+    firstLegFinalizationMaxPollMs: 4,
+    firstLegFinalizationMaxAttempts: 4,
+  });
+  const result = await restarted.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_FIRST_LEG_PENDING");
+  assert.equal(fixture.executor.reconcileCalls.length, 0);
+  assert.equal(fixture.executor.mutationLegs.length, 0);
+});
+
 function setup(outcomes: Outcome[], options: Readonly<{
   throwSecond?: ArbitrageExecutionCommandError["category"];
   firstGate?: Promise<void>;
+  reconciliationOutcomes?: readonly Outcome[];
+  reconcileError?: boolean;
+  finalizationMaxAttempts?: number;
+  omitFirstExecutionRecordId?: boolean;
 }> = {}, initialInstance: ArbitrageInstance = baseInstance()) {
   const state = { instance: initialInstance };
   const store = { get: (userId: string, arbitrageId: string) =>
     userId === state.instance.userId && arbitrageId === state.instance.arbitrageId ? state.instance : null };
   const executor = new FakeExecutor(state, outcomes, options);
-  const service = new ArbitrageHedgeStartService(store as never, executor as never, { clock: clock() });
-  return { service, store, executor, get instance() { return state.instance; } };
+  const sleeps: number[] = [];
+  const service = new ArbitrageHedgeStartService(store as never, executor as never, {
+    clock: clock(),
+    sleep: async (milliseconds) => { sleeps.push(milliseconds); },
+    firstLegFinalizationBudgetMs: 100,
+    firstLegFinalizationInitialPollMs: 1,
+    firstLegFinalizationMaxPollMs: 4,
+    firstLegFinalizationMaxAttempts: options.finalizationMaxAttempts ?? 4,
+  });
+  return { service, store, executor, sleeps, get instance() { return state.instance; } };
 }
 
 type Outcome = Readonly<{ status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN"; confirmedQuantity: string }>;
@@ -168,12 +296,19 @@ function outcome(status: Outcome["status"], confirmedQuantity: string): Outcome 
 class FakeExecutor {
   readonly mutationLegs: string[] = [];
   readonly commandIds: string[] = [];
+  readonly reconcileCalls: Array<{ arbitrageId: string; legId: string; executionIntentId?: string }> = [];
   private readonly byCommand = new Map<string, ArbitrageLegExecutionConfirmation>();
+  private readonly reconciliationOutcomes: Outcome[];
 
   constructor(private readonly state: { instance: ArbitrageInstance }, private readonly outcomes: Outcome[], private readonly options: Readonly<{
     throwSecond?: ArbitrageExecutionCommandError["category"];
     firstGate?: Promise<void>;
-  }>) {}
+    reconciliationOutcomes?: readonly Outcome[];
+    reconcileError?: boolean;
+    omitFirstExecutionRecordId?: boolean;
+  }>) {
+    this.reconciliationOutcomes = [...(options.reconciliationOutcomes ?? [])];
+  }
 
   async executeLeg(_userId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
     const request = input as { legId: string; commandId: string; opportunityId: string };
@@ -193,8 +328,39 @@ class FakeExecutor {
     return this.record(request.commandId, request.legId, next);
   }
 
+  async reconcileLeg(_userId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
+    const request = input as { arbitrageId: string; legId: string; executionIntentId?: string };
+    this.reconcileCalls.push(request);
+    if (this.options.reconcileError) throw new Error("provider query unavailable");
+    const reference = this.state.instance.executionReferences.find((candidate) =>
+      candidate.legId === request.legId && candidate.executionIntentId === request.executionIntentId);
+    if (!reference) throw new Error("missing fake execution reference");
+    const next = this.reconciliationOutcomes.shift();
+    if (!next) return confirmationFromFakeReference(this.state.instance, reference, true);
+    const updatedReference = { ...reference, status: next.status, confirmedQuantity: next.confirmedQuantity,
+      updatedAt: reference.updatedAt + 1 };
+    const legs = this.state.instance.legs.map((leg) => leg.legId === request.legId
+      ? { ...leg, confirmedOpenedQuantity: next.confirmedQuantity } : leg) as unknown as ArbitrageInstance["legs"];
+    this.state.instance = {
+      ...this.state.instance,
+      legs,
+      executionReferences: this.state.instance.executionReferences.map((candidate) =>
+        candidate.executionIntentId === reference.executionIntentId ? updatedReference : candidate),
+      status: legs.every((leg) => leg.confirmedOpenedQuantity === "100") ? "HOLDING"
+        : legs.some((leg) => leg.confirmedOpenedQuantity !== "0") ? "RESIDUAL" : "OPENING",
+      updatedAt: this.state.instance.updatedAt + 1,
+    };
+    return confirmationFromFakeReference(this.state.instance, updatedReference, false);
+  }
+
   seedConfirmed(commandId: string, legId: string, quantity: string) {
     this.record(commandId, legId, outcome("CONFIRMED", quantity));
+    this.mutationLegs.length = 0;
+    this.commandIds.length = 0;
+  }
+
+  seedPending(commandId: string, legId: string) {
+    this.record(commandId, legId, outcome("PENDING_CONFIRMATION", "0"));
     this.mutationLegs.length = 0;
     this.commandIds.length = 0;
   }
@@ -202,7 +368,8 @@ class FakeExecutor {
   private record(commandId: string, legId: string, next: Outcome) {
     const intentId = `intent-${commandId}`;
     const reference = { arbitrageId: this.state.instance.arbitrageId, legId, phase: "OPENING" as const,
-      quantityEffect: "INCREASE" as const, executionIntentId: intentId, executionRecordId: `record-${commandId}`,
+      quantityEffect: "INCREASE" as const, executionIntentId: intentId,
+      executionRecordId: legId === "long-leg" && this.options.omitFirstExecutionRecordId ? null : `record-${commandId}`,
       requestedQuantity: "100", confirmedQuantity: next.confirmedQuantity, status: next.status, createdAt: 10, updatedAt: 11 };
     const legs = this.state.instance.legs.map((leg) => leg.legId === legId
       ? { ...leg, confirmedOpenedQuantity: next.confirmedQuantity } : leg) as unknown as ArbitrageInstance["legs"];
@@ -220,17 +387,40 @@ class FakeExecutor {
   }
 }
 
+function confirmationFromFakeReference(
+  instance: ArbitrageInstance,
+  reference: ArbitrageInstance["executionReferences"][number],
+  idempotentReplay: boolean,
+): ArbitrageLegExecutionConfirmation {
+  return {
+    instance,
+    executionRecord: {
+      executionId: reference.executionRecordId,
+      intentId: reference.executionIntentId,
+      status: reference.status === "CLAIMED" || reference.status === "LINKED" ? "CREATED" : reference.status,
+      plannedQuantity: reference.requestedQuantity,
+      confirmedQuantity: reference.confirmedQuantity,
+      verifiedAt: reference.updatedAt,
+    },
+    idempotentReplay,
+    secondLegAllowed: reference.status === "CONFIRMED" && reference.confirmedQuantity === reference.requestedQuantity,
+  };
+}
+
 function request(overrides: Record<string, unknown> = {}) {
   return { hedgeCommandId: "hedge-start-1", firstLegId: "long-leg", confirmationId: "confirmation-1",
     opportunityId: "opportunity-1", horizonDays: 90, quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" },
     executionMode: "EXECUTION_PRIORITY", confirmed: true, ...overrides };
 }
 
-function baseInstance(perpetualVenue: "binance" | "okx" | "bybit" | "bitget" = "binance"): ArbitrageInstance {
+function baseInstance(
+  perpetualVenue: "binance" | "okx" | "bybit" | "bitget" = "binance",
+  spotVenue: "binance" | "okx" | "bybit" | "bitget" = "binance",
+): ArbitrageInstance {
   return { arbitrageId: "arbitrage-1", userId: "user-a", strategyType: "SPOT_PERPETUAL", sourcePlanId: "plan-1",
     maxResidualBaseQuantity: "0", status: "OPENING", createdAt: 1, openedAt: null, updatedAt: 1, closedAt: null,
     legs: [
-      { legId: "long-leg", role: "LONG", venue: "binance", accountId: "account-1", instrumentId: "BTC-USDT-SPOT",
+      { legId: "long-leg", role: "LONG", venue: spotVenue, accountId: `account-${spotVenue}`, instrumentId: "BTC-USDT-SPOT",
         plannedQuantity: "100", confirmedOpenedQuantity: "0", confirmedClosedQuantity: "0" },
       { legId: "short-leg", role: "SHORT", venue: perpetualVenue, accountId: `account-${perpetualVenue}`, instrumentId: "BTC-USDT-PERP",
         plannedQuantity: "100", confirmedOpenedQuantity: "0", confirmedClosedQuantity: "0" },
