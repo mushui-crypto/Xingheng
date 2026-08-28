@@ -1424,6 +1424,7 @@ class RealPathOkxService {
   readonly positionMode = "net_mode" as const;
   identityValidations = 0;
   executionAccountIdentity() { return { accountId: "account-a" }; }
+  async readPositionMode() { return "ONE_WAY" as const; }
   validateExecutionProviderIdentity() { this.identityValidations += 1; }
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request); this.providerMutations += 1;

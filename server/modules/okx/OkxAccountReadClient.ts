@@ -94,6 +94,15 @@ export class OkxAccountReadClient {
     };
   }
 
+  async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
+    const payload = await this.get("/api/v5/account/config");
+    const config = requiredFirstRecord(payload.data, "OKX account config");
+    const positionMode = requiredString(config.posMode, "OKX position mode");
+    if (positionMode === "net_mode") return "ONE_WAY";
+    if (positionMode === "long_short_mode") return "HEDGE";
+    throw new OkxAccountReadError("provider_response_invalid", "OKX position mode is unsupported.");
+  }
+
   async readPerpetualPosition(
     instId: string,
     expectedSide?: "long" | "short",

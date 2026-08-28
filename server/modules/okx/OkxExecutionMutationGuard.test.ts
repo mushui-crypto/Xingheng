@@ -261,6 +261,10 @@ class FakeClient {
   placeCalls = 0;
   cancelCalls = 0;
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeCalls += 1;
     return { instId: request.instId, ordId: "9001", clOrdId: request.clOrdId };

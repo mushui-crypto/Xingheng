@@ -246,6 +246,10 @@ class FakeOkxProvider {
 
   constructor(private readonly providerIdentity: OkxAccountIdentity) {}
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   async getAccountIdentity() {
     this.identityReads += 1;
     return this.providerIdentity;

@@ -180,6 +180,10 @@ function executionIntent() {
 class FakeOkxExecutionClient {
   readonly placeRequests: OkxPlaceOrderRequest[] = [];
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   executionAccountIdentity() {
     return { accountId: "okx:account-user-a" };
   }

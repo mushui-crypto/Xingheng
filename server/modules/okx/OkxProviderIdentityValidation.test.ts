@@ -152,6 +152,10 @@ class FakeOkxProviderClient {
 
   constructor(public identityResult: OkxAccountIdentity | Error) {}
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   async getAccountIdentity() {
     this.identityReads += 1;
     this.events.push("identity");

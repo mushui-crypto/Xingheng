@@ -84,6 +84,36 @@ test("fails closed before credential decrypt when OKX execution is not enabled",
   assert.deepEqual(credentials.executionCalls, []);
 });
 
+test("default execution service never guesses ONE_WAY when Provider position mode is unavailable", async () => {
+  const credentials = new MemoryCredentialStore();
+  let providerMutations = 0;
+  const registry = new OkxIntentExecutionServiceRegistry(credentials, {
+    clientFactory: () => ({
+      getAccountIdentity: async () => ({
+        accountId: "okx:account-user-a",
+        accountFingerprint: "fingerprint",
+        uidHash: "uid-hash",
+        accountLevel: "2",
+      }),
+      placeOrder: async () => {
+        providerMutations += 1;
+        throw new Error("must not mutate");
+      },
+      getOrder: async () => { throw new Error("must not query"); },
+      cancelOrder: async () => {
+        providerMutations += 1;
+        throw new Error("must not mutate");
+      },
+    }),
+  });
+
+  await assert.rejects(
+    registry.run("user-a", (service) => service.readPositionMode?.()),
+    /authoritative position mode is unavailable/u,
+  );
+  assert.equal(providerMutations, 0);
+});
+
 class MemoryCredentialStore {
   readonly summaryCalls: Array<{ userId: string; venue: "okx" }> = [];
   readonly executionCalls: Array<{ userId: string; venue: "okx" }> = [];

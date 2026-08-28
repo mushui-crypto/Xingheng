@@ -14,6 +14,7 @@ import {
   initialStartLegId,
   loadResumeContext,
   shouldUseManualLegExecution,
+  startHedgeOutcome,
   submitStartOnce,
 } from "./ArbitrageExecutionDraftEntry";
 import type { ArbitrageInstance } from "../../../api/arbitrageInstances";
@@ -197,6 +198,31 @@ test("final confirmation submits Start exactly once and rejects a concurrent dou
   releaseStart();
   assert.equal(await firstClick, true);
   assert.equal(startApiCalls, 1);
+});
+
+test("Start displays the sanitized server safety reason instead of appearing unresponsive", () => {
+  assert.deepEqual(startHedgeOutcome({
+    status: "STOPPED_SAFETY",
+    reason: "未能确认 OKX 当前持仓模式，系统已在下单前停止。本次没有提交交易订单。",
+    firstLeg: {},
+  }), {
+    kind: "stopped",
+    message: "未能确认 OKX 当前持仓模式，系统已在下单前停止。本次没有提交交易订单。",
+  });
+  assert.deepEqual(startHedgeOutcome({
+    status: "STOPPED_FIRST_LEG_FAILED",
+    firstLeg: { diagnostic: { category: "live_trading_disabled", sanitizedMessage: "真实交易当前已停止。" } },
+  }), {
+    kind: "stopped",
+    message: "live_trading_disabled：真实交易当前已停止。",
+  });
+});
+
+test("successful Start displays success and does not reuse a stopped safety message", () => {
+  assert.deepEqual(startHedgeOutcome({ status: "COMPLETED", firstLeg: {} }), {
+    kind: "success",
+    message: "两条套利腿已完成开仓确认。",
+  });
 });
 
 test("final confirmation displays execution facts, real-funds warning, and automatic second-leg warning", () => {

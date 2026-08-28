@@ -374,6 +374,10 @@ class FakeOkxProvider {
   readonly placeRequests: OkxPlaceOrderRequest[] = [];
   identityReads = 0;
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   async getAccountIdentity(): Promise<OkxAccountIdentity> {
     this.identityReads += 1;
     return {

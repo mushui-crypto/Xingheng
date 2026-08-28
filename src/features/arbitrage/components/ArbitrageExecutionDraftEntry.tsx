@@ -225,10 +225,13 @@ export function ArbitrageExecutionDraftEntry({
       });
       setInstance(await fetchArbitrageInstanceById(instance.arbitrageId));
       setWorkflow(await fetchArbitrageHedgeWorkflow(instance.arbitrageId));
-      const diagnostic = result.firstLeg.diagnostic;
-      setValidationNotice(diagnostic
-        ? `${diagnostic.category}：${diagnostic.sanitizedMessage}`
-        : "一键开始流程已停止在当前权威状态；不会自动重试未确认或部分成交订单。");
+      const outcome = startHedgeOutcome(result);
+      if (outcome.kind === "success") {
+        setValidationNotice(outcome.message);
+      } else {
+        setValidationNotice("");
+        setError(outcome.message);
+      }
     } catch {
       setError("一键开始对冲未能安全完成；请根据当前流程状态处理。");
     } finally {
@@ -392,6 +395,22 @@ export function ArbitrageExecutionDraftEntry({
       />
     </>
   );
+}
+
+export function startHedgeOutcome(result: Readonly<{
+  status: string;
+  reason?: string;
+  firstLeg: Readonly<{ diagnostic?: Readonly<{ category: string; sanitizedMessage: string }> }>;
+}>) {
+  if (result.status === "COMPLETED") {
+    return Object.freeze({ kind: "success" as const, message: "两条套利腿已完成开仓确认。" });
+  }
+  const diagnostic = result.firstLeg.diagnostic;
+  const specificReason = result.reason?.trim();
+  const message = diagnostic
+    ? `${diagnostic.category}：${diagnostic.sanitizedMessage}`
+    : specificReason || "一键开始流程已在安全检查阶段停止；请核对当前权威状态。";
+  return Object.freeze({ kind: "stopped" as const, message });
 }
 
 export async function submitStartOnce(

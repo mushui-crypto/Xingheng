@@ -594,7 +594,7 @@ class FakeOkxRuntimeService {
   orderOverride: Partial<OkxProviderOrder> = {};
   placeOrderDelegate?: (request: OkxPlaceOrderRequest) => Promise<OkxCancelOrderResult>;
   getOrderDelegate?: (request: OkxGetOrderRequest) => Promise<OkxProviderOrder>;
-  readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
+  readPositionMode: (() => Promise<"ONE_WAY" | "HEDGE">) | undefined = async () => "ONE_WAY";
 
   constructor(private readonly accountId: string) {}
 

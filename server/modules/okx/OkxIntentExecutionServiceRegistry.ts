@@ -65,7 +65,12 @@ function defaultService(
     placeOrder: (request) => client.placeOrder(request),
     getOrder: (request) => client.getOrder(request),
     cancelOrder: (request) => client.cancelOrder(request),
-    readPositionMode: () => client.readPositionMode?.() ?? Promise.resolve("ONE_WAY" as const),
+    readPositionMode: () => {
+      if (typeof client.readPositionMode !== "function") {
+        throw new Error("OKX authoritative position mode is unavailable.");
+      }
+      return client.readPositionMode();
+    },
     executionAccountIdentity: () => Object.freeze({ accountId }),
     validateExecutionProviderIdentity: (context) =>
       validateExecutionProviderIdentity(client, accountId, context),

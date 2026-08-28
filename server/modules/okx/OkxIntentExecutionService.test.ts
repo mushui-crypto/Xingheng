@@ -71,6 +71,17 @@ test("submits an OKX open short as a market sell", async () => {
   assert.equal(client.placeRequests[0]?.instId, "DOGE-USDT-SWAP");
 });
 
+test("fails closed before Provider mutation when authoritative position mode is unavailable", async () => {
+  const client = new FakeOkxExecutionClient();
+  client.readPositionMode = undefined;
+
+  await assert.rejects(
+    () => new OkxIntentExecutionService(client, serviceOptions()).execute(executionIntent()),
+    /authoritative position mode is unavailable/u,
+  );
+  assert.equal(client.placeRequests.length, 0);
+});
+
 test("perpetual close preserves reduceOnly=true at the OKX order boundary", async () => {
   const client = new FakeOkxExecutionClient();
   const intent = executionIntent({
@@ -309,7 +320,7 @@ class FakeOkxExecutionClient {
   orderState = "filled";
   filledQuantityOverride: string | null = null;
   orderOverride: Partial<OkxProviderOrder> = {};
-  readPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
+  readPositionMode: (() => Promise<"ONE_WAY" | "HEDGE">) | undefined = async () => "ONE_WAY";
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {
     this.placeRequests.push(request);

@@ -399,6 +399,10 @@ class FakeOkxRuntimeService {
     return { accountId: "okx:account-user-a" };
   }
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   validateExecutionProviderIdentity() {}
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {

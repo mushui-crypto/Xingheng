@@ -141,6 +141,10 @@ class StatefulOkxPerpExecutionService {
     return { accountId: this.accountId };
   }
 
+  async readPositionMode() {
+    return "ONE_WAY" as const;
+  }
+
   validateExecutionProviderIdentity() {}
 
   async placeOrder(request: OkxPlaceOrderRequest): Promise<OkxCancelOrderResult> {

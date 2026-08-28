@@ -254,9 +254,13 @@ export class OkxIntentExecutionService {
       () => this.now(),
       this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
     );
-    const positionMode = instrument.venueInstrument.contractType !== "spot"
-      ? await this.client.readPositionMode?.() ?? "ONE_WAY"
-      : undefined;
+    let positionMode: "ONE_WAY" | "HEDGE" | undefined;
+    if (instrument.venueInstrument.contractType !== "spot") {
+      if (typeof this.client.readPositionMode !== "function") {
+        throw new Error("OKX authoritative position mode is unavailable.");
+      }
+      positionMode = await this.client.readPositionMode();
+    }
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("OKX HEDGE execution requires positionDirection.");
     }

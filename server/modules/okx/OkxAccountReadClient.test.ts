@@ -53,6 +53,53 @@ test("maps OKX credential rejection to a stable validation failure", async () =>
   ));
 });
 
+test("reads the authoritative OKX account position mode with strict domain mapping", async (t) => {
+  for (const [providerMode, expected] of [
+    ["net_mode", "ONE_WAY"],
+    ["long_short_mode", "HEDGE"],
+  ] as const) {
+    await t.test(providerMode, async () => {
+      let requestPath = "";
+      const client = new OkxAccountReadClient(credentials, {
+        baseUrl: "https://okx.example.test",
+        now: () => now,
+        fetchImpl: (async (input: string | URL | Request) => {
+          requestPath = new URL(String(input)).pathname;
+          return Response.json({ code: "0", data: [{ posMode: providerMode }] });
+        }) as typeof fetch,
+      });
+
+      assert.equal(await client.readPositionMode(), expected);
+      assert.equal(requestPath, "/api/v5/account/config");
+    });
+  }
+});
+
+test("fails closed when the authoritative OKX position mode cannot be read", async (t) => {
+  for (const scenario of [
+    { name: "missing field", response: { code: "0", data: [{}] }, category: "provider_response_invalid" },
+    { name: "unknown value", response: { code: "0", data: [{ posMode: "future_mode" }] }, category: "provider_response_invalid" },
+    { name: "malformed data", response: { code: "0", data: "invalid" }, category: "provider_response_invalid" },
+    { name: "authentication failure", response: { code: "50113", data: [] }, category: "credential_validation_failed" },
+  ] as const) {
+    await t.test(scenario.name, async () => {
+      const client = clientWithResponse(() => scenario.response);
+      await assert.rejects(client.readPositionMode(), (error: unknown) => (
+        error instanceof OkxAccountReadError && error.category === scenario.category
+      ));
+    });
+  }
+
+  await t.test("timeout or transport failure", async () => {
+    const client = new OkxAccountReadClient(credentials, {
+      fetchImpl: (async () => { throw new DOMException("timed out", "TimeoutError"); }) as typeof fetch,
+    });
+    await assert.rejects(client.readPositionMode(), (error: unknown) => (
+      error instanceof OkxAccountReadError && error.category === "provider_read_failed"
+    ));
+  });
+});
+
 test("reads an OKX position with a signed GET query", async () => {
   let request: { url: URL; init?: RequestInit } | null = null;
   const client = new OkxAccountReadClient(credentials, {
