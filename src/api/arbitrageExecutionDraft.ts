@@ -110,6 +110,25 @@ export function previewArbitrageExecutionDraft(
 
 export type FormalExecutionMode = "PRICE_PRIORITY" | "EXECUTION_PRIORITY";
 
+export type ArbitrageUnstartedResumeContext = Readonly<{
+  instance: ArbitrageInstance;
+  setup: Readonly<{
+    opportunityId: string;
+    horizonDays: ArbitrageHorizon;
+    quantityInput: ExecutionQuantityInput;
+    executionMode: FormalExecutionMode;
+  }>;
+  draft: ArbitrageExecutionDraft;
+}>;
+
+export function fetchArbitrageUnstartedResumeContext(arbitrageId: string, signal?: AbortSignal) {
+  return requestJson<ArbitrageUnstartedResumeContext>(
+    `/api/arbitrage-instances/${encodeURIComponent(arbitrageId)}/resume-opening`,
+    "当前实例设置恢复失败。",
+    { init: { cache: "no-store", signal }, userAuthFailure: true },
+  );
+}
+
 export type ArbitrageExecutionConfirmation = Readonly<{
   instance: ArbitrageInstance;
   created: boolean;

@@ -7,6 +7,7 @@ import { registerAuthRoutes, registerUserAuthMiddleware } from "./modules/auth/a
 import { registerAdminTradingRoutes } from "./modules/api/adminTradingRoutes";
 import { registerArbitrageRoutes } from "./modules/api/arbitrageRoutes";
 import { registerArbitrageExecutionDraftRoutes } from "./modules/api/arbitrageExecutionDraftRoutes";
+import { registerArbitrageUnstartedResumeRoutes } from "./modules/api/arbitrageUnstartedResumeRoutes";
 import { registerArbitrageExecutionCommandRoutes } from "./modules/api/arbitrageExecutionCommandRoutes";
 import { registerArbitrageHedgeStartRoutes } from "./modules/api/arbitrageHedgeStartRoutes";
 import { registerArbitrageHedgeWorkflowRoutes } from "./modules/api/arbitrageHedgeWorkflowRoutes";
@@ -59,6 +60,7 @@ import { ArbitrageHedgeStartService } from "./modules/arbitrage-execution/Arbitr
 import { ArbitrageHedgeWorkflowService } from "./modules/arbitrage-execution/ArbitrageHedgeWorkflowService";
 import { ArbitrageManagementReleaseService } from "./modules/arbitrage-execution/ArbitrageManagementReleaseService";
 import { ArbitrageUnstartedAbandonService } from "./modules/arbitrage-execution/ArbitrageUnstartedAbandonService";
+import { ArbitrageUnstartedResumeService } from "./modules/arbitrage-execution/ArbitrageUnstartedResumeService";
 import { InstanceHedgeDeltaService } from "./modules/arbitrage-execution/InstanceHedgeDeltaService";
 import { HistoricalExecutionEvidenceRegistry } from "./modules/arbitrage-execution/HistoricalExecutionEvidence";
 import { HistoricalUnknownNotDispatchedRecoveryService } from "./modules/arbitrage-execution/HistoricalUnknownNotDispatchedRecoveryService";
@@ -297,6 +299,7 @@ const arbitrageExecutionDraft = new ArbitrageExecutionDraftService(
   userExchangeCredentials,
   formalExecutionRuntimes,
 );
+const arbitrageUnstartedResume = new ArbitrageUnstartedResumeService(arbitrageInstances, arbitrageExecutionDraft);
 const spotOpeningAttributions = {
   binance: new BinanceSpotOpeningAttributionSource(executionRecordStore, binancePersonalTrading),
   okx: new OkxSpotOpeningAttributionSource(
@@ -407,6 +410,7 @@ const userExchangeCredentialService = new UserExchangeCredentialService(userExch
 });
 registerArbitrageRoutes(app, arbitrageDashboard);
 registerArbitrageExecutionDraftRoutes(app, arbitrageExecutionDraft);
+registerArbitrageUnstartedResumeRoutes(app, arbitrageUnstartedResume);
 registerArbitrageExecutionCommandRoutes(app, arbitrageExecutionCommand);
 registerArbitrageHedgeStartRoutes(app, arbitrageHedgeStart);
 registerArbitrageHedgeWorkflowRoutes(app, arbitrageHedgeWorkflow, arbitrageExecutionCommand);

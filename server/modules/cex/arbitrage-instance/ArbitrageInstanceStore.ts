@@ -24,6 +24,10 @@ import {
   type NewArbitrageInstance,
 } from "./ArbitrageInstance";
 import { recoveryAuditSchema } from "./ArbitrageRecoveryAuditSchema";
+import {
+  openingSetupSourcePlanId,
+  type ArbitrageOpeningSetup,
+} from "../../arbitrage-execution/ArbitrageOpeningSetup";
 
 const ACTIVE_STATUSES: readonly ArbitrageInstanceStatus[] = ["OPENING", "HOLDING", "RESIDUAL", "CLOSING"];
 const HISTORY_STATUSES: readonly ArbitrageInstanceStatus[] = ["CLOSED", "FAILED"];
@@ -316,6 +320,16 @@ type SpotOpeningAttributionEvidenceRow = Readonly<{
   instrumentId: string;
 }>;
 
+type OpeningSetupRow = Readonly<{
+  arbitrageId: string;
+  sourcePlanId: string;
+  opportunityId: string;
+  horizonDays: number;
+  quantityInputJson: string;
+  executionMode: string;
+  createdAt: number;
+}>;
+
 export class ArbitrageInstanceStore {
   private readonly db: DatabaseSync;
 
@@ -329,8 +343,12 @@ export class ArbitrageInstanceStore {
     this.migrate();
   }
 
-  create(input: NewArbitrageInstance): ArbitrageInstance {
+  create(input: NewArbitrageInstance, openingSetup?: ArbitrageOpeningSetup): ArbitrageInstance {
     const instance = normalizeNewInstance(input);
+    const normalizedOpeningSetup = openingSetup === undefined ? null : normalizeOpeningSetup(openingSetup);
+    if (normalizedOpeningSetup && instance.sourcePlanId !== openingSetupSourcePlanId(normalizedOpeningSetup)) {
+      throw new Error("Arbitrage opening setup does not match source plan identity.");
+    }
     return this.transaction(() => {
       this.db.prepare(`INSERT INTO arbitrage_instances (
         arbitrageId, userId, strategyType, sourcePlanId, maxResidualBaseQuantity,
@@ -361,8 +379,55 @@ export class ArbitrageInstanceStore {
           leg.plannedQuantity,
         );
       }
+      if (normalizedOpeningSetup) {
+        this.db.prepare(`INSERT INTO arbitrage_instance_opening_setups (
+          arbitrageId, sourcePlanId, opportunityId, horizonDays,
+          quantityInputJson, executionMode, createdAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+          instance.arbitrageId,
+          instance.sourcePlanId,
+          normalizedOpeningSetup.opportunityId,
+          normalizedOpeningSetup.horizonDays,
+          JSON.stringify(normalizedOpeningSetup.quantityInput),
+          normalizedOpeningSetup.executionMode,
+          instance.createdAt,
+        );
+      }
       return this.requireForUser(instance.userId, instance.arbitrageId);
     });
+  }
+
+  readUnstartedOpeningSetup(userId: string, arbitrageId: string): ArbitrageOpeningSetup | null {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const instance = this.get(normalizedUserId, normalizedArbitrageId);
+    if (!instance || !this.isStrictlyUnstarted(instance)) return null;
+    const row = this.db.prepare(`SELECT setup.* FROM arbitrage_instance_opening_setups setup
+      JOIN arbitrage_instances owner ON owner.arbitrageId = setup.arbitrageId
+      WHERE owner.userId = ? AND setup.arbitrageId = ?`).get(
+        normalizedUserId,
+        normalizedArbitrageId,
+      ) as OpeningSetupRow | undefined;
+    if (!row || row.sourcePlanId !== instance.sourcePlanId) return null;
+    const setup = openingSetupFromRow(row);
+    if (openingSetupSourcePlanId(setup) !== row.sourcePlanId) {
+      throw new Error("Persisted arbitrage opening setup identity is invalid.");
+    }
+    return setup;
+  }
+
+  private isStrictlyUnstarted(instance: ArbitrageInstance) {
+    if (!isUnstartedEmptyOpening(instance)
+      || instance.legs.some((leg) => leg.confirmedOpenedQuantity !== "0"
+        || leg.confirmedClosedQuantity !== "0" || activeManagedQuantity(instance, leg) !== "0")
+      || (instance.managementReleases?.length ?? 0) !== 0) return false;
+    return !(
+      this.db.prepare(`SELECT 1 FROM arbitrage_execution_references WHERE arbitrageId = ? LIMIT 1`).get(instance.arbitrageId)
+      ?? this.db.prepare(`SELECT 1 FROM arbitrage_command_idempotency
+        WHERE arbitrageId = ? AND operationType IN ('EXECUTION_OPEN', 'EXECUTION_CLOSE') LIMIT 1`).get(instance.arbitrageId)
+      ?? this.db.prepare(`SELECT 1 FROM arbitrage_spot_opening_attribution_evidence
+        WHERE arbitrageId = ? LIMIT 1`).get(instance.arbitrageId)
+    );
   }
 
   get(userId: string, arbitrageId: string): ArbitrageInstance | null {
@@ -1843,6 +1908,17 @@ export class ArbitrageInstanceStore {
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS arbitrage_instance_opening_setups (
+      arbitrageId TEXT PRIMARY KEY,
+      sourcePlanId TEXT NOT NULL,
+      opportunityId TEXT NOT NULL,
+      horizonDays INTEGER NOT NULL CHECK (horizonDays IN (90, 365)),
+      quantityInputJson TEXT NOT NULL,
+      executionMode TEXT NOT NULL CHECK (executionMode IN ('PRICE_PRIORITY', 'EXECUTION_PRIORITY')),
+      createdAt INTEGER NOT NULL,
+      FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
+    ) STRICT;
+
     CREATE TABLE IF NOT EXISTS arbitrage_execution_references (
       arbitrageId TEXT NOT NULL,
       legId TEXT NOT NULL,
@@ -1962,6 +2038,58 @@ export class ArbitrageInstanceStore {
 
 function recoveryAuditId(action: string, arbitrageId: string, executionIntentId: string) {
   return `recovery:${createHash("sha256").update(`${action}\u0000${arbitrageId}\u0000${executionIntentId}`).digest("hex")}`;
+}
+
+function normalizeOpeningSetup(setup: ArbitrageOpeningSetup): ArbitrageOpeningSetup {
+  const quantityInput = setup.quantityInput.mode === "NOTIONAL_USDT"
+    ? (() => {
+        normalizePositiveDecimal(setup.quantityInput.amountUsdt, "opening amountUsdt");
+        return Object.freeze({ mode: "NOTIONAL_USDT" as const, amountUsdt: setup.quantityInput.amountUsdt });
+      })()
+    : (() => {
+        normalizePositiveDecimal(setup.quantityInput.quantity, "opening quantity");
+        return Object.freeze({ mode: "ASSET_QUANTITY" as const, quantity: setup.quantityInput.quantity });
+      })();
+  if (setup.horizonDays !== 90 && setup.horizonDays !== 365) {
+    throw new Error("Arbitrage opening setup horizon is invalid.");
+  }
+  if (setup.executionMode !== "PRICE_PRIORITY" && setup.executionMode !== "EXECUTION_PRIORITY") {
+    throw new Error("Arbitrage opening setup execution mode is invalid.");
+  }
+  return Object.freeze({
+    opportunityId: identifier(setup.opportunityId, "opening opportunityId"),
+    horizonDays: setup.horizonDays,
+    quantityInput,
+    executionMode: setup.executionMode,
+  });
+}
+
+function openingSetupFromRow(row: OpeningSetupRow): ArbitrageOpeningSetup {
+  let quantityInput: unknown;
+  try {
+    quantityInput = JSON.parse(row.quantityInputJson);
+  } catch {
+    throw new Error("Persisted arbitrage opening quantity input is invalid.");
+  }
+  if (!quantityInput || typeof quantityInput !== "object" || Array.isArray(quantityInput)) {
+    throw new Error("Persisted arbitrage opening quantity input is invalid.");
+  }
+  const value = quantityInput as Record<string, unknown>;
+  const parsed = value.mode === "NOTIONAL_USDT"
+    ? { mode: "NOTIONAL_USDT" as const, amountUsdt: value.amountUsdt }
+    : value.mode === "ASSET_QUANTITY"
+      ? { mode: "ASSET_QUANTITY" as const, quantity: value.quantity }
+      : null;
+  if (!parsed || ("amountUsdt" in parsed && typeof parsed.amountUsdt !== "string")
+    || ("quantity" in parsed && typeof parsed.quantity !== "string")) {
+    throw new Error("Persisted arbitrage opening quantity input is invalid.");
+  }
+  return normalizeOpeningSetup({
+    opportunityId: row.opportunityId,
+    horizonDays: row.horizonDays as 90 | 365,
+    quantityInput: parsed as ArbitrageOpeningSetup["quantityInput"],
+    executionMode: row.executionMode as ArbitrageOpeningSetup["executionMode"],
+  });
 }
 
 function isUnstartedEmptyOpening(instance: ArbitrageInstance) {

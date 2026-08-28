@@ -41,6 +41,7 @@ import {
   createArbitrageCommandPayloadFingerprint,
 } from "./ArbitrageCommandFingerprint";
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
+import { openingSetupSourcePlanId, type ArbitrageOpeningSetup } from "./ArbitrageOpeningSetup";
 
 type DraftService = Pick<ArbitrageExecutionDraftService, "createDraft" | "preview">;
 type InstanceStore = Pick<
@@ -165,7 +166,7 @@ export class ArbitrageExecutionCommandService {
           newInstanceLeg(planned[0].leg, planned[0].plan.plannedAssetQuantity.quantity, accounts),
           newInstanceLeg(planned[1].leg, planned[1].plan.plannedAssetQuantity.quantity, accounts),
         ],
-      });
+      }, openingSetup(request));
     } catch (error) {
       const raced = this.instances.get(userId, arbitrageId);
       if (!raced) throw error;
@@ -270,7 +271,6 @@ export class ArbitrageExecutionCommandService {
         confirmedFirstLeg !== null
           ? instance.sourcePlanId
           : sourcePlanIdentity(request),
-        confirmedFirstLeg === null,
       );
       const selectedDraftLeg = draft.legs.find((candidate) => candidate.legId === request.legId);
       if (!selectedDraftLeg || (confirmedFirstLeg === null && selectedDraftLeg.planning.status !== "PLANNED")) {
@@ -1037,7 +1037,6 @@ function assertInstanceMatches(
   draft: ArbitrageExecutionDraft,
   accounts: ReadonlyMap<string, string>,
   sourcePlanId: string | null,
-  requirePlannedQuantities = true,
 ) {
   const identityMatches = sourcePlanId !== null
     && instance.sourcePlanId === sourcePlanId
@@ -1050,12 +1049,8 @@ function assertInstanceMatches(
       && candidate.accountId === accounts.get(leg.legId)
       && candidate.instrumentId === leg.instrumentId
     )));
-  const quantitiesMatch = !requirePlannedQuantities
-    || draft.quantityInput?.mode === "NOTIONAL_USDT"
-    || plannedLegs(draft).every(({ leg, plan }) => instance.legs.some((candidate) => candidate.legId === leg.legId
-      && candidate.plannedQuantity === plan.plannedAssetQuantity.quantity));
-  if (!identityMatches || !quantitiesMatch) {
-    throw commandError("arbitrage_instance_mismatch", "当前权威机会或数量计划与套利实例不一致。");
+  if (!identityMatches) {
+    throw commandError("arbitrage_instance_mismatch", "当前权威机会或套利腿与实例不一致。");
   }
 }
 
@@ -1232,12 +1227,16 @@ function assertRecoveryIdentity(
 }
 
 function sourcePlanIdentity(request: FinalConfirmationRequest) {
-  return `execution-confirmation:${createHash("sha256").update(JSON.stringify({
+  return openingSetupSourcePlanId(openingSetup(request));
+}
+
+function openingSetup(request: FinalConfirmationRequest): ArbitrageOpeningSetup {
+  return Object.freeze({
     opportunityId: request.opportunityId,
     horizonDays: request.horizonDays,
     quantityInput: request.quantityInput,
     executionMode: request.executionMode,
-  })).digest("hex")}`;
+  });
 }
 
 function deterministicId(prefix: string, ...parts: string[]) {

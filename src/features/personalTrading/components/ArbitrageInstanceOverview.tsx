@@ -18,7 +18,7 @@ import {
 } from "../../../api/arbitrageInstances";
 import { reconcileArbitrageInstance } from "../../../api/arbitrageExecutionDraft";
 import { Button } from "../../../components/ui/Button";
-import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
+import { ArbitrageExecutionDraftEntry } from "../../arbitrage/components/ArbitrageExecutionDraftEntry";
 import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
 import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
 import { ArbitrageManagementReleaseDialog } from "./ArbitrageManagementReleaseDialog";
@@ -400,12 +400,9 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
           {canAbandon && onInstanceRefresh ? <Button onClick={() => setAbandonOpen(true)} type="button" variant="ghost">
             放弃套利
           </Button> : null}
-          {canResumeOpeningWorkflow(instance) ? <a
-              className="inline-flex min-h-11 items-center justify-center border border-white/25 px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
-              href={buildArbitrageResumeHref(instance.arbitrageId)}
-            >
-              继续开仓
-            </a> : null}
+          {canResumeOpeningWorkflow(instance)
+            ? <ArbitrageExecutionDraftEntry resumeArbitrageId={instance.arbitrageId} />
+            : null}
         </div>
       ) : null}
       <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
@@ -489,9 +486,11 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
 }
 
 export function canResumeOpeningWorkflow(instance: ArbitrageInstance) {
-  if (instance.status !== "OPENING" && instance.status !== "RESIDUAL") return false;
-  const opening = instance.executionReferences.filter((reference) => reference.phase === "OPENING");
-  return instance.status === "OPENING" ? opening.length <= 1 : opening.length === 1;
+  return instance.status === "OPENING"
+    && instance.executionReferences.length === 0
+    && instance.managementReleases.length === 0
+    && instance.legs.every((leg) => leg.confirmedOpenedQuantity === "0"
+      && leg.confirmedClosedQuantity === "0");
 }
 
 export function canAbandonUnstartedArbitrage(instance: ArbitrageInstance) {

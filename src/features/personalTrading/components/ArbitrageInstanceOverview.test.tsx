@@ -62,8 +62,8 @@ test("current and history sections render every lifecycle status in Chinese", ()
   assert.doesNotMatch(html, /PERPETUAL_PERPETUAL|OPENING|HOLDING|RESIDUAL|CLOSING|CLOSED|FAILED/u);
   assert.doesNotMatch(html, /okx:private-account-1234|binance:private-account-5678/u);
   assert.doesNotMatch(html, /收益|APR|APY|当前价格/u);
-  assert.equal((activeHtml.match(/继续开仓/gu) ?? []).length, 1);
-  assert.match(activeHtml, /href="\/app\/arbitrage\?resumeArbitrageId=arbitrage-opening"/u);
+  assert.equal((activeHtml.match(/继续开仓/gu) ?? []).length, 0);
+  assert.doesNotMatch(activeHtml, /href="\/app\/arbitrage|resumeArbitrageId=/u);
   assert.doesNotMatch(historyHtml, /继续开仓/u);
 });
 
@@ -151,14 +151,14 @@ test("an abandoned empty instance moves to history as unstarted and terminated",
   assert.doesNotMatch(html, /继续开仓|放弃套利/u);
 });
 
-test("a RESIDUAL instance with only one terminal-partial opening remains reachable for explicit recovery", () => {
+test("a RESIDUAL instance with execution facts never enters editable unstarted resume", () => {
   const [base] = requireArbitrageInstanceList([arbitrageInstance("RESIDUAL")]);
   const partial = { ...base!, executionReferences: [{
     arbitrageId: base!.arbitrageId, legId: base!.legs[0].legId, phase: "OPENING" as const,
     quantityEffect: "INCREASE" as const, executionIntentId: "partial-first", executionRecordId: "partial-record",
     requestedQuantity: "100", confirmedQuantity: "40", status: "FAILED" as const, createdAt: 1, updatedAt: 2,
   }] };
-  assert.equal(canResumeOpeningWorkflow(partial), true);
+  assert.equal(canResumeOpeningWorkflow(partial), false);
 });
 
 test("active legs render matched, mismatch, unknown and null quantities without mixing legs", () => {

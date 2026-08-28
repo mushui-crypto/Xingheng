@@ -7,8 +7,33 @@ import test from "node:test";
 import { activeManagedQuantity, managedCurrentQuantity, type NewArbitrageInstance } from "./ArbitrageInstance";
 import { ArbitrageInstanceStore } from "./ArbitrageInstanceStore";
 import { SqliteExecutionRecordStore } from "../ExecutionRecordStore";
+import { openingSetupSourcePlanId, type ArbitrageOpeningSetup } from "../../arbitrage-execution/ArbitrageOpeningSetup";
 
 const start = 1_800_000_000_000;
+
+test("persists the original unstarted opening setup and restores it after restart", () => {
+  withDatabase(({ dbPath }) => {
+    const setup: ArbitrageOpeningSetup = {
+      opportunityId: "op-doge",
+      horizonDays: 90,
+      quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "15" },
+      executionMode: "EXECUTION_PRIORITY",
+    };
+    const first = new ArbitrageInstanceStore({ dbPath });
+    first.create(instance({ sourcePlanId: openingSetupSourcePlanId(setup) }), setup);
+    first.close();
+
+    const reopened = new ArbitrageInstanceStore({ dbPath });
+    try {
+      assert.deepEqual(reopened.readUnstartedOpeningSetup("user-a", "arbitrage-1"), setup);
+      assert.equal(reopened.readUnstartedOpeningSetup("other-user", "arbitrage-1"), null);
+      reopened.claimExecutionReference("user-a", "arbitrage-1", claim("long-leg", "started-intent", start + 1));
+      assert.equal(reopened.readUnstartedOpeningSetup("user-a", "arbitrage-1"), null);
+    } finally {
+      reopened.close();
+    }
+  });
+});
 
 test("seals only an identity-less legacy UNKNOWN while preserving execution facts and clearing its opening gate", async () => {
   await withAsyncDatabase(async ({ dbPath }) => {

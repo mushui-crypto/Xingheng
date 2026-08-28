@@ -13,7 +13,6 @@ import {
   canConfirmDraft,
   initialStartLegId,
   loadResumeContext,
-  resumeDraftMatchesInstance,
   shouldUseManualLegExecution,
   submitStartOnce,
 } from "./ArbitrageExecutionDraftEntry";
@@ -33,42 +32,40 @@ test("resume content binds the existing instance and removes the create confirma
   assert.match(html, /DOGE/u);
   assert.match(html, /LONG · 多头腿/u);
   assert.match(html, /SHORT · 空头腿/u);
-  assert.match(html, /继续使用现有实例/u);
+  assert.match(html, /已恢复原实例设置/u);
+  assert.match(html, /确认开始真实对冲/u);
   assert.match(html, /role="status"/u);
   assert.doesNotMatch(html, /role="status"[^>]*\bborder\b/u);
   assert.doesNotMatch(html, /确认创建套利/u);
 });
 
-test("resume compatibility fails closed when opportunity legs or quantity no longer match", () => {
+test("resume loader uses the authenticated instance resume endpoint and preserves its original setup", async () => {
   const current = dogeInstance();
-  assert.equal(resumeDraftMatchesInstance(dogeDraft(), current), true);
-  const changed = dogeDraft();
-  const mismatched = { ...changed, legs: [{ ...changed.legs[0], instrumentId: "BTC-USDT-SPOT" }, changed.legs[1]] } as ArbitrageExecutionDraft;
-  assert.equal(resumeDraftMatchesInstance(mismatched, current), false);
-});
-
-test("resume loader uses instance GET and draft preview only, preserving the original arbitrage id", async () => {
-  const current = dogeInstance();
-  const payload = JSON.stringify({ opportunityId: "doge-op", horizonDays: 90, quantityInput: { mode: "ASSET_QUANTITY", quantity: "72" }, executionMode: "PRICE_PRIORITY" });
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(payload));
-  current.sourcePlanId = `execution-confirmation:${Buffer.from(digest).toString("hex")}`;
   const calls: Array<{ url: string; method: string }> = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     calls.push({ url: String(input), method: init?.method ?? "GET" });
-    return Response.json(calls.length === 1 ? current : dogeDraft());
+    return Response.json({
+      instance: current,
+      draft: dogeDraft(),
+      setup: {
+        opportunityId: "doge-op",
+        horizonDays: 90,
+        quantityInput: { mode: "NOTIONAL_USDT", amountUsdt: "15" },
+        executionMode: "PRICE_PRIORITY",
+      },
+    });
   };
   try {
-    const resumed = await loadResumeContext(current.arbitrageId, "doge-op", 90);
+    const resumed = await loadResumeContext(current.arbitrageId);
     assert.equal(resumed.instance.arbitrageId, current.arbitrageId);
-    assert.equal(resumed.quantity, "72");
+    assert.deepEqual(resumed.setup.quantityInput, { mode: "NOTIONAL_USDT", amountUsdt: "15" });
     assert.equal(resumed.executionMode, "PRICE_PRIORITY");
   } finally {
     globalThis.fetch = originalFetch;
   }
   assert.deepEqual(calls, [
-    { url: "/api/arbitrage-instances/arbitrage-existing", method: "GET" },
-    { url: "/api/arbitrage-execution/draft/preview", method: "POST" },
+    { url: "/api/arbitrage-instances/arbitrage-existing/resume-opening", method: "GET" },
   ]);
   assert.equal(calls.some((call) => call.url === "/api/arbitrage-execution/confirm"), false);
 });

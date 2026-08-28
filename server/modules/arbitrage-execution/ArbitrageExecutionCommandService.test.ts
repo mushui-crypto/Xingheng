@@ -58,6 +58,12 @@ test("final confirmation replans authoritatively, creates both real legs, and is
   ]);
   assert.equal(fixture.drafts.calls.length, 2);
   assert.equal(fixture.runtime.calls.length, 0);
+  assert.deepEqual(fixture.store.readUnstartedOpeningSetup("user-a", first.instance.arbitrageId), {
+    opportunityId: request.opportunityId,
+    horizonDays: request.horizonDays,
+    quantityInput: request.quantityInput,
+    executionMode: request.executionMode,
+  });
 });
 
 test("opening preflight blocks a Spot first leg when the ONE_WAY perpetual leg is opposite", async (t) => {
@@ -324,7 +330,7 @@ test("direct per-leg command cannot bypass SPOT_PERPETUAL Spot-first ordering", 
   assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
 });
 
-test("capability failure and stale replanning fail closed before provider mutation", async (t) => {
+test("capability failure fails closed while fresh replanning may change quantity without changing identity", async (t) => {
   const unavailable = setup(t, { draft: draft(false) });
   await assert.rejects(
     () => unavailable.service.confirm("user-a", finalRequest()),
@@ -336,13 +342,14 @@ test("capability failure and stale replanning fail closed before provider mutati
   const stale = setup(t);
   const created = await stale.service.confirm("user-a", finalRequest());
   stale.drafts.value = draft(true, "0.002");
-  await assert.rejects(
-    () => stale.service.executeLeg("user-a", legRequest(created.instance.arbitrageId, "long-leg")),
-    /不一致/u,
+  stale.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
+  const result = await stale.service.executeLeg(
+    "user-a",
+    legRequest(created.instance.arbitrageId, "long-leg"),
   );
-  assert.equal(stale.runtime.calls.length, 0);
-  assert.equal(stale.store.get("user-a", created.instance.arbitrageId)?.executionReferences.length, 0);
-  assert.equal(stale.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+  assert.equal(result.instance.arbitrageId, created.instance.arbitrageId);
+  assert.equal(stale.runtime.calls[0]?.quantity.quantity, "0.002");
+  assert.equal(stale.runtime.providerMutations, 0);
 });
 
 test("OKX PRICE_PRIORITY capability loss blocks Confirm and one-click Start before runtime mutation", async (t) => {
@@ -511,28 +518,28 @@ test("NOTIONAL_USDT rejects an execution plan that exceeds the confirmed budget"
   assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
 });
 
-test("BASE_QUANTITY remains frozen when the latest quote changes", async (t) => {
+test("ASSET_QUANTITY preserves original input identity while allowing a fresh legal plan", async (t) => {
   const fixture = setup(t, { draft: draft(true, "100") });
   const created = await fixture.service.confirm("user-a", finalRequest({
     quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" },
   }));
   fixture.drafts.value = draft(true, "90");
+  fixture.runtime.onExecute = (intent) => runtimeResult(intent, "CONFIRMED", intent.quantity.quantity);
 
-  await assert.rejects(
-    () => fixture.service.executeLeg("user-a", legRequest(
-      created.instance.arbitrageId,
-      "long-leg",
-      "base-quantity-drift",
-      { quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" } },
-    )),
-    /不一致/u,
-  );
-  assert.equal(fixture.runtime.calls.length, 0);
+  const result = await fixture.service.executeLeg("user-a", legRequest(
+    created.instance.arbitrageId,
+    "long-leg",
+    "base-quantity-drift",
+    { quantityInput: { mode: "ASSET_QUANTITY", quantity: "100" } },
+  ));
+
+  assert.equal(result.instance.arbitrageId, created.instance.arbitrageId);
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "90");
   assert.equal(fixture.runtime.providerMutations, 0);
-  assert.equal(fixture.store.get("user-a", created.instance.arbitrageId)?.status, "FAILED");
+  assert.equal(fixture.store.listActive("user-a").length, 1);
 });
 
-test("NOTIONAL_USDT keeps identity checks strict while ignoring only planned quantity drift", async (t) => {
+test("planned quantity drift never relaxes original setup or leg identity checks", async (t) => {
   const scenarios = [
     {
       name: "target notional",

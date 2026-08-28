@@ -6,6 +6,7 @@ import {
   continuePartialArbitrageHedge,
   fetchArbitrageExecutionDraft,
   fetchArbitrageHedgeWorkflow,
+  fetchArbitrageUnstartedResumeContext,
   previewArbitrageExecutionDraft,
   reconcileArbitrageExecutionLeg,
   startArbitrageHedge,
@@ -27,12 +28,12 @@ export function ArbitrageExecutionDraftEntry({
   opportunityId,
   resumeArbitrageId = null,
 }: {
-  horizonDays: ArbitrageHorizon;
-  opportunityId: string;
+  horizonDays?: ArbitrageHorizon;
+  opportunityId?: string;
   resumeArbitrageId?: string | null;
 }) {
   const resumeMode = Boolean(resumeArbitrageId);
-  const [open, setOpen] = useState(resumeMode);
+  const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<ArbitrageExecutionDraft | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -49,7 +50,14 @@ export function ArbitrageExecutionDraftEntry({
   const [workflowPolling, setWorkflowPolling] = useState(false);
   const [pendingStartLegId, setPendingStartLegId] = useState<string | null>(null);
   const [startSubmitting, setStartSubmitting] = useState(false);
+  const [resumeSetup, setResumeSetup] = useState<Readonly<{
+    opportunityId: string;
+    horizonDays: ArbitrageHorizon;
+    quantityInput: ExecutionQuantityInput;
+  }> | null>(null);
   const startSubmissionGuard = useRef(false);
+  const activeOpportunityId = resumeSetup?.opportunityId ?? opportunityId ?? "";
+  const activeHorizonDays = resumeSetup?.horizonDays ?? horizonDays ?? 90;
 
   useEffect(() => {
     if (!open) return;
@@ -58,10 +66,10 @@ export function ArbitrageExecutionDraftEntry({
     setError("");
     setValidationNotice("");
     const request = resumeArbitrageId
-      ? loadResumeContext(resumeArbitrageId, opportunityId, horizonDays, controller.signal)
+      ? loadResumeContext(resumeArbitrageId, controller.signal)
       : fetchArbitrageExecutionDraft(
-        opportunityId,
-        horizonDays,
+        opportunityId ?? "",
+        horizonDays ?? 90,
         executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
         controller.signal,
       ).then((nextDraft) => ({ draft: nextDraft }));
@@ -71,12 +79,15 @@ export function ArbitrageExecutionDraftEntry({
         setDraft(result.draft);
         if ("instance" in result) {
           setInstance(result.instance);
-          setMode("ASSET_QUANTITY");
-          setAmount(result.quantity);
+          setResumeSetup(result.setup);
+          setMode(result.setup.quantityInput.mode);
+          setAmount(result.setup.quantityInput.mode === "NOTIONAL_USDT"
+            ? result.setup.quantityInput.amountUsdt
+            : result.setup.quantityInput.quantity);
           setExecutionMode(result.executionMode);
           setConfirmationId(createClientCommandId("resume"));
           setResumeValidated(true);
-          setValidationNotice(`已进入继续现有实例模式。请重新核对机会、${result.quantity} ${result.assetSymbol} 数量和两条腿后，再人工确认待执行腿。`);
+          setValidationNotice("已恢复该实例的原始建仓设置，并按当前交易规则重新校验。请核对两条腿后完成最终真钱确认。");
         }
       })
       .catch(() => {
@@ -130,8 +141,8 @@ export function ArbitrageExecutionDraftEntry({
     setValidationNotice("");
     try {
       setDraft(await previewArbitrageExecutionDraft(
-        opportunityId,
-        horizonDays,
+        activeOpportunityId,
+        activeHorizonDays,
         quantityInput,
         executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       ));
@@ -152,6 +163,7 @@ export function ArbitrageExecutionDraftEntry({
     setExecutionResults({});
     setCommandIds({});
     setResumeValidated(false);
+    setResumeSetup(null);
     setWorkflow(null);
     setWorkflowPolling(false);
     setPendingStartLegId(null);
@@ -178,8 +190,8 @@ export function ArbitrageExecutionDraftEntry({
     try {
       const result = await confirmArbitrageExecution({
         confirmationId,
-        opportunityId,
-        horizonDays,
+        opportunityId: activeOpportunityId,
+        horizonDays: activeHorizonDays,
         quantityInput,
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       });
@@ -206,8 +218,8 @@ export function ArbitrageExecutionDraftEntry({
         hedgeCommandId: createClientCommandId("hedge-start"),
         firstLegId,
         confirmationId,
-        opportunityId,
-        horizonDays,
+        opportunityId: activeOpportunityId,
+        horizonDays: activeHorizonDays,
         quantityInput,
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       });
@@ -258,8 +270,8 @@ export function ArbitrageExecutionDraftEntry({
         arbitrageId: instance.arbitrageId,
         commandId: createClientCommandId("partial-continue"),
         confirmationId,
-        opportunityId,
-        horizonDays,
+        opportunityId: activeOpportunityId,
+        horizonDays: activeHorizonDays,
         quantityInput,
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       });
@@ -293,8 +305,8 @@ export function ArbitrageExecutionDraftEntry({
       const result = await confirmArbitrageExecutionLeg({
         confirmationId,
         commandId,
-        opportunityId,
-        horizonDays,
+        opportunityId: activeOpportunityId,
+        horizonDays: activeHorizonDays,
         quantityInput,
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
         arbitrageId: instance.arbitrageId,
@@ -564,6 +576,7 @@ export function ArbitrageExecutionDraftContent({
           value={amount}
         />
         <Select
+          disabled={resumeMode}
           label="执行模式"
           onChange={(event) => onExecutionModeChange(event.target.value)}
           options={[
@@ -611,7 +624,7 @@ export function ArbitrageExecutionDraftContent({
           onContinuePartial={onContinuePartial}
           onReconcileLeg={onReconcileLeg}
           onRestart={onRestart}
-          startFromCreateConfirmation={!resumeMode}
+          startFromCreateConfirmation={instance.executionReferences.length === 0}
           workflow={workflow}
         />
       ) : null}
@@ -620,13 +633,21 @@ export function ArbitrageExecutionDraftContent({
       <div className="flex flex-wrap justify-end gap-3 border-t border-[#25282f] pt-4">
         <Button disabled={loading} onClick={onCancel} type="button" variant="ghost">取消</Button>
         {resumeMode
-          ? <span
-              className={`inline-flex items-center gap-2 text-xs ${resumeValidated ? "text-sky-100" : "text-red-200"}`}
-              role="status"
-            >
-              <span aria-hidden="true" className={`size-1.5 rounded-full ${resumeValidated ? "bg-sky-300" : "bg-red-300"}`} />
-              {resumeValidated ? "继续使用现有实例" : "已停止继续执行"}
-            </span>
+          ? <>
+              <span
+                className={`inline-flex items-center gap-2 text-xs ${resumeValidated ? "text-sky-100" : "text-red-200"}`}
+                role="status"
+              >
+                <span aria-hidden="true" className={`size-1.5 rounded-full ${resumeValidated ? "bg-sky-300" : "bg-red-300"}`} />
+                {resumeValidated ? "已恢复原实例设置" : "已停止继续执行"}
+              </span>
+              {resumeValidated && instance && initialStartLegId(instance) ? <Button
+                aria-haspopup="dialog"
+                disabled={loading || !canConfirmDraft(draft)}
+                onClick={() => onExecuteLeg(initialStartLegId(instance)!)}
+                type="button"
+              >确认开始真实对冲</Button> : null}
+            </>
           : instance === null
             ? <Button disabled={loading || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>
             : initialStartLegId(instance)
@@ -678,61 +699,15 @@ export function canReconcileLeg(instance: ArbitrageInstance, legId: string) {
 
 export async function loadResumeContext(
   arbitrageId: string,
-  opportunityId: string,
-  horizonDays: ArbitrageHorizon,
   signal?: AbortSignal,
 ) {
-  const instance = await fetchArbitrageInstanceById(arbitrageId, signal);
-  if ((instance.status !== "OPENING" && instance.status !== "RESIDUAL") || !instance.sourcePlanId) {
-    throw new Error("resume instance is not an active opening workflow");
-  }
-  const [firstLeg, secondLeg] = instance.legs;
-  if (firstLeg.plannedQuantity !== secondLeg.plannedQuantity) throw new Error("resume quantities differ");
-  const quantityInput = { mode: "ASSET_QUANTITY" as const, quantity: firstLeg.plannedQuantity };
-  const firstOpening = instance.executionReferences.filter((reference) => reference.phase === "OPENING")[0];
-  const executionMode = firstOpening
-    ? "EXECUTION_PRIORITY" as const
-    : await matchingResumeExecutionMode(instance.sourcePlanId, opportunityId, horizonDays, quantityInput);
-  if (!executionMode) throw new Error("resume source plan does not match instance");
-  const draft = await previewArbitrageExecutionDraft(opportunityId, horizonDays, quantityInput, executionMode, signal);
-  if (!resumeDraftMatchesInstance(draft, instance)) throw new Error("resume draft does not match instance");
-  const assetSymbol = plannedAssetSymbol(draft);
-  if (!assetSymbol) throw new Error("resume asset is unavailable");
-  return Object.freeze({ draft, instance, quantity: firstLeg.plannedQuantity, assetSymbol, executionMode });
-}
-
-export function resumeDraftMatchesInstance(draft: ArbitrageExecutionDraft, instance: ArbitrageInstance) {
-  if (draft.strategyType !== instance.strategyType || draft.legs.length !== instance.legs.length) return false;
-  return draft.legs.every((draftLeg) => {
-    const plannedQuantity = draftLeg.planning.status === "PLANNED"
-      ? draftLeg.planning.plan.plannedAssetQuantity.quantity
-      : null;
-    return instance.legs.some((instanceLeg) => instanceLeg.legId === draftLeg.legId
-      && instanceLeg.role === draftLeg.role
-      && instanceLeg.venue === draftLeg.venue
-      && instanceLeg.instrumentId === draftLeg.instrumentId
-      && instanceLeg.plannedQuantity === plannedQuantity);
+  const result = await fetchArbitrageUnstartedResumeContext(arbitrageId, signal);
+  return Object.freeze({
+    draft: result.draft,
+    instance: result.instance,
+    setup: result.setup,
+    executionMode: result.setup.executionMode,
   });
-}
-
-async function matchingResumeExecutionMode(
-  sourcePlanId: string,
-  opportunityId: string,
-  horizonDays: ArbitrageHorizon,
-  quantityInput: ExecutionQuantityInput,
-) {
-  for (const executionMode of ["PRICE_PRIORITY", "EXECUTION_PRIORITY"] as const) {
-    const payload = JSON.stringify({ opportunityId, horizonDays, quantityInput, executionMode });
-    const digest = await sha256(payload);
-    if (sourcePlanId === `execution-confirmation:${digest}`) return executionMode;
-  }
-  return null;
-}
-
-async function sha256(value: string) {
-  const bytes = new TextEncoder().encode(value);
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function plannedAssetSymbol(draft: ArbitrageExecutionDraft) {
