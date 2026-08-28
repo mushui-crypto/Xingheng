@@ -277,6 +277,299 @@ test("instance exit remains mutation-free while any opening or closing execution
   assert.equal(fixture.releaseCalls.length, 0);
 });
 
+test("first close pending finalizes online and continues through fresh second-leg safety", async () => {
+  const fixture = setupOnlineFinalization({ firstInitial: outcome("PENDING_CONFIRMATION", "0"),
+    firstReconciles: [outcome("CONFIRMED", "1")] });
+  const result = await fixture.service.exit("user-a", exitRequest("pending-first-online"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.equal(fixture.reconcileCalls.filter((legId) => legId === "long-leg").length, 1);
+  assert.ok(fixture.safetyCalls("short-leg") >= 2);
+});
+
+test("repeated pending first-close observations never repeat its Provider mutation", async () => {
+  const fixture = setupOnlineFinalization({ firstInitial: outcome("PENDING_CONFIRMATION", "0"),
+    firstReconciles: [outcome("PENDING_CONFIRMATION", "0"), outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "1")] });
+  const result = await fixture.service.exit("user-a", exitRequest("repeated-pending-first"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.equal(fixture.reconcileCalls.filter((legId) => legId === "long-leg").length, 3);
+});
+
+test("partial, failed, unknown, query error, and exhausted pending all stop before second close", async (t) => {
+  const cases = [
+    { name: "partial", reconciles: [outcome("PENDING_CONFIRMATION", "0.4")] },
+    { name: "failed", reconciles: [outcome("FAILED", "0")] },
+    { name: "unknown", reconciles: [outcome("UNKNOWN", "0")] },
+    { name: "query-error", reconciles: [] as Outcome[], reconcileThrows: true },
+    { name: "timeout", reconciles: [outcome("PENDING_CONFIRMATION", "0"), outcome("PENDING_CONFIRMATION", "0")] },
+  ];
+  for (const candidate of cases) {
+    await t.test(candidate.name, async () => {
+      const fixture = setupOnlineFinalization({
+        firstInitial: outcome("PENDING_CONFIRMATION", "0"),
+        firstReconciles: candidate.reconciles,
+        reconcileThrows: candidate.reconcileThrows,
+        closeFinalizationMaxAttempts: 2,
+      });
+      const result = await fixture.service.exit("user-a", exitRequest(`first-${candidate.name}`));
+      assert.equal(result.status, "STOPPED");
+      assert.deepEqual(fixture.closeCalls, ["long-leg"]);
+    });
+  }
+});
+
+test("second close pending finalizes before dust release and reaches CLOSED", async () => {
+  const fixture = setupOnlineFinalization({
+    spotOpened: "1.0000005", spotLegalClose: "1", spotDust: "0.0000005",
+    secondInitial: outcome("PENDING_CONFIRMATION", "0"),
+    secondReconciles: [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "1")],
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("pending-second-dust"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.equal(fixture.closeCalls.filter((legId) => legId === "short-leg").length, 1);
+  assert.deepEqual(fixture.releaseCalls, ["long-leg"]);
+});
+
+test("second close timeout stops without duplicate mutation or dust release", async () => {
+  const fixture = setupOnlineFinalization({
+    spotOpened: "1.0000005", spotLegalClose: "1", spotDust: "0.0000005",
+    secondInitial: outcome("PENDING_CONFIRMATION", "0"),
+    secondReconciles: [outcome("PENDING_CONFIRMATION", "0"), outcome("PENDING_CONFIRMATION", "0")],
+    closeFinalizationMaxAttempts: 2,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("pending-second-timeout"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.deepEqual(fixture.releaseCalls, []);
+});
+
+test("idempotent or restart-like existing close never resumes an old Exit continuation", async () => {
+  const fixture = setupOnlineFinalization({
+    firstInitial: outcome("CONFIRMED", "1"),
+    firstIdempotentReplay: true,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("existing-close"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.reason, "EXISTING_CLOSING_EXECUTION_REQUIRES_USER_CONTINUE");
+  assert.deepEqual(fixture.closeCalls, ["long-leg"]);
+  assert.deepEqual(fixture.reconcileCalls, []);
+});
+
+test("Binance, OKX, Bybit, and Bitget share the same delayed close finalization", async (t) => {
+  for (const venue of ["binance", "okx", "bybit", "bitget"] as const) {
+    await t.test(venue, async () => {
+      const fixture = setupOnlineFinalization({ venue,
+        firstInitial: outcome("PENDING_CONFIRMATION", "0"), firstReconciles: [outcome("CONFIRMED", "1")] });
+      const result = await fixture.service.exit("user-a", exitRequest(`delayed-${venue}`));
+      assert.equal(result.status, "CONFIRMED");
+      assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+    });
+  }
+});
+
+test("Bitget unresolved not-found evidence remains UNKNOWN and never continues", async () => {
+  const fixture = setupOnlineFinalization({ venue: "bitget",
+    firstInitial: outcome("PENDING_CONFIRMATION", "0"), firstReconciles: [outcome("UNKNOWN", "0")] });
+  const result = await fixture.service.exit("user-a", exitRequest("bitget-25204-unknown"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.legs[0]?.status, "UNKNOWN");
+  assert.deepEqual(fixture.closeCalls, ["long-leg"]);
+});
+
+type Outcome = Readonly<{
+  status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN";
+  confirmedQuantity: string;
+}>;
+
+function outcome(status: Outcome["status"], confirmedQuantity: string): Outcome {
+  return Object.freeze({ status, confirmedQuantity });
+}
+
+function setupOnlineFinalization(options: Readonly<{
+  venue?: "binance" | "okx" | "bybit" | "bitget";
+  firstInitial?: Outcome;
+  firstReconciles?: readonly Outcome[];
+  firstIdempotentReplay?: boolean;
+  secondInitial?: Outcome;
+  secondReconciles?: readonly Outcome[];
+  reconcileThrows?: boolean;
+  closeFinalizationMaxAttempts?: number;
+  spotOpened?: string;
+  spotLegalClose?: string;
+  spotDust?: string;
+}> = {}) {
+  const venue = options.venue ?? "okx";
+  let instance = baseInstance(options.spotOpened ?? "1", "1", "DOGE-USDT-SPOT");
+  instance = { ...instance, legs: instance.legs.map((leg) => ({ ...leg, venue })) as unknown as ArbitrageInstance["legs"] };
+  const closeCalls: string[] = [];
+  const reconcileCalls: string[] = [];
+  const releaseCalls: string[] = [];
+  const safetyCallCounts = new Map<string, number>();
+  const reconciles = new Map<string, Outcome[]>([
+    ["long-leg", [...(options.firstReconciles ?? [])]],
+    ["short-leg", [...(options.secondReconciles ?? [])]],
+  ]);
+
+  function currentOutcome(legId: string, initial: Outcome) {
+    const reference = instance.executionReferences.find((candidate) => candidate.phase === "CLOSING" && candidate.legId === legId);
+    return reference ? outcome(reference.status as Outcome["status"], reference.confirmedQuantity) : initial;
+  }
+
+  function apply(legId: string, next: Outcome) {
+    const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+    const requestedQuantity = legId === "long-leg" ? (options.spotLegalClose ?? leg.confirmedOpenedQuantity) : leg.confirmedOpenedQuantity;
+    const executionIntentId = `intent-${legId}`;
+    const executionRecordId = `record-${legId}`;
+    const references = instance.executionReferences.filter((reference) => !(reference.phase === "CLOSING" && reference.legId === legId));
+    references.push({
+      arbitrageId: instance.arbitrageId,
+      legId,
+      phase: "CLOSING",
+      quantityEffect: "DECREASE",
+      executionIntentId,
+      executionRecordId,
+      requestedQuantity,
+      confirmedQuantity: next.confirmedQuantity,
+      status: next.status,
+      createdAt: 1_800_000_000_100,
+      updatedAt: 1_800_000_000_101,
+    });
+    const legs = instance.legs.map((candidate) => candidate.legId !== legId ? candidate : {
+      ...candidate,
+      confirmedClosedQuantity: next.confirmedQuantity,
+    }) as unknown as ArbitrageInstance["legs"];
+    const allClosed = legs.every((candidate) => candidate.confirmedOpenedQuantity === candidate.confirmedClosedQuantity);
+    instance = {
+      ...instance,
+      executionReferences: references,
+      legs,
+      status: allClosed ? "CLOSED" : next.status === "CONFIRMED" ? "CLOSING" : "CLOSING",
+    };
+    return confirmation(legId, next, false);
+  }
+
+  function confirmation(legId: string, next: Outcome, idempotentReplay: boolean) {
+    const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+    const plannedQuantity = legId === "long-leg" ? (options.spotLegalClose ?? leg.confirmedOpenedQuantity) : leg.confirmedOpenedQuantity;
+    return {
+      instance,
+      executionRecord: {
+        executionId: `record-${legId}`,
+        intentId: `intent-${legId}`,
+        status: next.status,
+        plannedQuantity,
+        confirmedQuantity: next.confirmedQuantity,
+        verifiedAt: 1_800_000_000_200,
+      },
+      providerDispatchStartedAt: 1_800_000_000_190,
+      idempotentReplay,
+      secondLegAllowed: false,
+    };
+  }
+
+  const closeService = {
+    async evaluateCloseSafety(_userId: string, _arbitrageId: string, legId: string) {
+      safetyCallCounts.set(legId, (safetyCallCounts.get(legId) ?? 0) + 1);
+      const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+      const active = subtractUnsignedDecimals(leg.confirmedOpenedQuantity, leg.confirmedClosedQuantity);
+      if (legId === "long-leg" && options.spotDust !== undefined) {
+        const beforeClose = leg.confirmedClosedQuantity === "0";
+        return {
+          activeManagedQuantity: active,
+          safeClosableQuantity: beforeClose ? options.spotLegalClose! : "0",
+          fullManagedCloseAvailable: false,
+          reason: "QUANTITY_STEP_DUST",
+          checkedAt: 1_800_000_000_050,
+          positionMode: "ONE_WAY",
+          actualQuantity: active,
+          actualSignedNetQuantity: active,
+          actualLongQuantity: active,
+          actualShortQuantity: "0",
+          availableQuantity: active,
+        } as const;
+      }
+      return {
+        activeManagedQuantity: active,
+        safeClosableQuantity: active,
+        fullManagedCloseAvailable: true,
+        reason: "FULL_MANAGED_CLOSE_AVAILABLE",
+        checkedAt: 1_800_000_000_050,
+        positionMode: "ONE_WAY",
+        actualQuantity: active,
+        actualSignedNetQuantity: leg.role === "SHORT" ? `-${active}` : active,
+        actualLongQuantity: leg.role === "LONG" ? active : "0",
+        actualShortQuantity: leg.role === "SHORT" ? active : "0",
+        availableQuantity: legId === "long-leg" ? active : null,
+      } as const;
+    },
+    async closeLeg(_userId: string, input: any) {
+      closeCalls.push(input.legId);
+      const first = input.legId === "long-leg";
+      const initial = first ? (options.firstInitial ?? outcome("CONFIRMED", input.quantity))
+        : (options.secondInitial ?? outcome("CONFIRMED", input.quantity));
+      apply(input.legId, initial);
+      return confirmation(input.legId, currentOutcome(input.legId, initial), first && options.firstIdempotentReplay === true);
+    },
+  };
+  const managementRelease = {
+    async releaseDustAfterClose(_userId: string, input: any) {
+      releaseCalls.push(input.legId);
+      const leg = instance.legs.find((candidate) => candidate.legId === input.legId)!;
+      instance = {
+        ...instance,
+        status: "CLOSED",
+        managementReleases: [{
+          releaseId: `release-${input.legId}`, arbitrageId: instance.arbitrageId, legId: input.legId,
+          releasedQuantity: options.spotDust!, reason: "USER_CONFIRMED_STOP_MANAGEMENT", source: "AUTHENTICATED_API",
+          requestedByUserId: "user-a", requestedAt: 1_800_000_000_210, confirmedAt: 1_800_000_000_211,
+          venue: leg.venue, accountId: leg.accountId, instrumentId: leg.instrumentId, positionMode: "ONE_WAY",
+          actualQuantity: options.spotDust!, actualSignedNetQuantity: options.spotDust!, actualLongQuantity: options.spotDust!,
+          actualShortQuantity: "0", availableQuantity: options.spotDust!, realityCheckedAt: 1_800_000_000_209,
+        }],
+      };
+      return { instance, release: instance.managementReleases![0], idempotentReplay: false };
+    },
+  };
+  const reconciliationService = {
+    async reconcileLeg(_userId: string, input: any) {
+      reconcileCalls.push(input.legId);
+      if (options.reconcileThrows) throw new Error("temporary query failure");
+      const queue = reconciles.get(input.legId)!;
+      const current = currentOutcome(input.legId, outcome("PENDING_CONFIRMATION", "0"));
+      return apply(input.legId, queue.shift() ?? current);
+    },
+  };
+  const service = new ArbitrageInstanceExitService(
+    { get: () => instance } as any,
+    closeService as any,
+    managementRelease as any,
+    reconciliationService as any,
+    { verify: async () => ({ arbitrageId: instance.arbitrageId, checkedAt: 1_800_000_000_300, legs: [] }) } as any,
+    {
+      now: () => 1_800_000_000_000,
+      sleep: async () => undefined,
+      closeFinalizationBudgetMs: 15_000,
+      closeFinalizationInitialPollMs: 250,
+      closeFinalizationMaxPollMs: 2_000,
+      closeFinalizationMaxAttempts: options.closeFinalizationMaxAttempts ?? 10,
+    },
+  );
+  return {
+    service, closeCalls, reconcileCalls, releaseCalls,
+    safetyCalls: (legId: string) => safetyCallCounts.get(legId) ?? 0,
+  };
+}
+
 function setup(options: Readonly<{
   firstStatus?: "CONFIRMED" | "FAILED" | "UNKNOWN" | "PENDING_CONFIRMATION";
   firstConfirmedQuantity?: string;

@@ -21,6 +21,11 @@ type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLe
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
 type DustReleaseService = Pick<ArbitrageManagementReleaseService, "releaseDustAfterClose">;
 
+const DEFAULT_CLOSE_FINALIZATION_BUDGET_MS = 15_000;
+const DEFAULT_CLOSE_FINALIZATION_INITIAL_POLL_MS = 250;
+const DEFAULT_CLOSE_FINALIZATION_MAX_POLL_MS = 2_000;
+const DEFAULT_CLOSE_FINALIZATION_MAX_ATTEMPTS = 10;
+
 export class ArbitrageInstanceExitError extends Error {
   constructor(
     readonly category: "invalid_exit_confirmation" | "arbitrage_instance_not_found" | "position_verification_unavailable",
@@ -45,6 +50,10 @@ export class ArbitrageInstanceExitService {
       transientReadRetryBudgetMs?: number;
       transientReadRetryIntervalMs?: number;
       transientReadMaxAttempts?: number;
+      closeFinalizationBudgetMs?: number;
+      closeFinalizationInitialPollMs?: number;
+      closeFinalizationMaxPollMs?: number;
+      closeFinalizationMaxAttempts?: number;
     }> = {},
   ) {}
 
@@ -156,6 +165,21 @@ export class ArbitrageInstanceExitService {
           safeCloseErrorReason(error),
         );
       }
+      const dispatchedByThisExit = !confirmation.idempotentReplay;
+      if (dispatchedByThisExit && pendingWithoutFill(confirmation)) {
+        try {
+          confirmation = await this.finalizeClosingLeg(userId, instance.arbitrageId, leg.legId, confirmation);
+        } catch {
+          instance = this.instances.get(userId, instance.arbitrageId) ?? confirmation.instance;
+          return stopped(
+            instance,
+            outcomes,
+            leg.legId,
+            phaseFor(leg, "CONFIRMATION"),
+            "CLOSE_FINALIZATION_UNAVAILABLE",
+          );
+        }
+      }
       instance = confirmation.instance;
       outcomes.push(Object.freeze({
         legId: leg.legId,
@@ -169,6 +193,15 @@ export class ArbitrageInstanceExitService {
           confirmation.executionRecord.plannedQuantity,
         ) !== 0) {
         return stopped(instance, outcomes, leg.legId, phaseFor(leg, "CONFIRMATION"), confirmation.executionRecord.status);
+      }
+      if (!dispatchedByThisExit && instance.status !== "CLOSED") {
+        return stopped(
+          instance,
+          outcomes,
+          leg.legId,
+          phaseFor(leg, "CONFIRMATION"),
+          "EXISTING_CLOSING_EXECUTION_REQUIRES_USER_CONTINUE",
+        );
       }
       if (firstConfirmedAt === null) {
         firstConfirmedAt = confirmation.executionRecord.verifiedAt;
@@ -208,6 +241,52 @@ export class ArbitrageInstanceExitService {
       undefined,
       timing(firstConfirmedAt, secondLegProviderDispatchAt),
     );
+  }
+
+  private async finalizeClosingLeg(
+    userId: string,
+    arbitrageId: string,
+    legId: string,
+    dispatched: Awaited<ReturnType<CloseService["closeLeg"]>>,
+  ) {
+    const identity = reliableClosingExecutionIdentity(dispatched, legId);
+    if (identity === null) throw new Error("Closing execution identity is unavailable for online finalization.");
+    const budgetMs = positiveInteger(
+      this.options.closeFinalizationBudgetMs ?? DEFAULT_CLOSE_FINALIZATION_BUDGET_MS,
+      "closeFinalizationBudgetMs",
+    );
+    const initialPollMs = positiveInteger(
+      this.options.closeFinalizationInitialPollMs ?? DEFAULT_CLOSE_FINALIZATION_INITIAL_POLL_MS,
+      "closeFinalizationInitialPollMs",
+    );
+    const maxPollMs = positiveInteger(
+      this.options.closeFinalizationMaxPollMs ?? DEFAULT_CLOSE_FINALIZATION_MAX_POLL_MS,
+      "closeFinalizationMaxPollMs",
+    );
+    const maxAttempts = positiveInteger(
+      this.options.closeFinalizationMaxAttempts ?? DEFAULT_CLOSE_FINALIZATION_MAX_ATTEMPTS,
+      "closeFinalizationMaxAttempts",
+    );
+    const deadline = this.now() + budgetMs;
+    let confirmation = dispatched;
+    let pollMs = Math.min(initialPollMs, maxPollMs);
+    for (let attempt = 0; attempt < maxAttempts && this.now() < deadline; attempt += 1) {
+      if (attempt > 0) {
+        const remaining = deadline - this.now();
+        if (remaining <= 0) break;
+        await this.sleep(Math.min(pollMs, remaining));
+        pollMs = Math.min(pollMs * 2, maxPollMs);
+        if (this.now() >= deadline) break;
+      }
+      confirmation = await this.reconciliationService.reconcileLeg(userId, {
+        arbitrageId,
+        legId,
+        executionIntentId: identity.executionIntentId,
+      });
+      assertSameClosingExecutionIdentity(confirmation, legId, identity);
+      if (!pendingWithoutFill(confirmation)) return confirmation;
+    }
+    return confirmation;
   }
 
   private async readPerpetualSafetyWithRetry(
@@ -375,6 +454,44 @@ function hasConfirmedClosingReference(instance: ArbitrageInstance, legId: string
     && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0);
 }
 
+function pendingWithoutFill(confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>) {
+  const record = confirmation.executionRecord;
+  return (record.status === "PENDING_CONFIRMATION" || record.status === "SUBMITTED")
+    && compareUnsignedDecimals(record.confirmedQuantity, "0") === 0;
+}
+
+type ReliableClosingExecutionIdentity = Readonly<{
+  executionIntentId: string;
+  executionRecordId: string;
+}>;
+
+function reliableClosingExecutionIdentity(
+  confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>,
+  legId: string,
+): ReliableClosingExecutionIdentity | null {
+  const executionIntentId = confirmation.executionRecord.intentId;
+  const executionRecordId = confirmation.executionRecord.executionId;
+  if (!executionRecordId) return null;
+  const reference = confirmation.instance.executionReferences.find((candidate) =>
+    candidate.phase === "CLOSING"
+    && candidate.legId === legId
+    && candidate.executionIntentId === executionIntentId
+    && candidate.executionRecordId === executionRecordId);
+  return reference ? Object.freeze({ executionIntentId, executionRecordId }) : null;
+}
+
+function assertSameClosingExecutionIdentity(
+  confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>,
+  legId: string,
+  expected: ReliableClosingExecutionIdentity,
+) {
+  if (confirmation.executionRecord.intentId !== expected.executionIntentId
+    || confirmation.executionRecord.executionId !== expected.executionRecordId
+    || reliableClosingExecutionIdentity(confirmation, legId) === null) {
+    throw new Error("Closing online finalization returned a different execution identity.");
+  }
+}
+
 function isExecutableExitSafety(
   instance: ArbitrageInstance,
   legId: string,
@@ -446,6 +563,11 @@ function phaseFor(leg: ArbitrageInstance["legs"][number], suffix: "FRESH_SAFETY"
 
 function safeCloseErrorReason(error: unknown) {
   return error instanceof ArbitrageExecutionCloseError ? error.category.toUpperCase() : "CLOSE_UNAVAILABLE";
+}
+
+function positiveInteger(value: number, label: string) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer.`);
+  return value;
 }
 
 function timing(firstLegConfirmedAt: number | null, secondLegProviderDispatchAt: number | null) {
