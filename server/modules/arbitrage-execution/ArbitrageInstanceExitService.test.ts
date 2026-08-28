@@ -5,6 +5,7 @@ import {
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { ArbitrageInstanceExitService } from "./ArbitrageInstanceExitService";
+import { ArbitrageManagementReleaseError } from "./ArbitrageManagementReleaseService";
 
 test("one instance command closes both legs through the existing close service in server order", async () => {
   const fixture = setup();
@@ -144,6 +145,30 @@ test("one-click exit closes the legal quantity, releases quantity-step dust, and
   assert.equal(fixture.releaseCalls[0]?.legId, "long-leg");
   assert.equal(result.timing?.secondLegExitDelayMs, 1);
   assert.ok(result.timing!.secondLegExitDelayMs <= 3_000);
+});
+
+test("one-click exit preserves structured dust release stop diagnostics", async (t) => {
+  for (const [category, reason] of [
+    ["dust_release_reality_unavailable", "DUST_RELEASE_REALITY_UNAVAILABLE"],
+    ["dust_release_eligibility_changed", "DUST_RELEASE_ELIGIBILITY_CHANGED"],
+    ["dust_release_attribution_unavailable", "DUST_RELEASE_ATTRIBUTION_UNAVAILABLE"],
+    ["dust_release_provider_read_failed", "DUST_RELEASE_PROVIDER_READ_FAILED"],
+  ] as const) {
+    await t.test(category, async () => {
+      const fixture = setup({
+        longOpenedQuantity: "59.94",
+        shortOpenedQuantity: "59",
+        legalSpotCloseQuantity: "59",
+        residual: "0.94",
+        releaseErrorCategory: category,
+      });
+      const result = await fixture.service.exit("user-a", exitRequest(category));
+      assert.equal(result.status, "STOPPED");
+      assert.equal(result.stop?.phase, "SPOT_DUST_RELEASE");
+      assert.equal(result.stop?.reason, reason);
+      assert.equal(fixture.releaseCalls.length, 1);
+    });
+  }
 });
 
 test("SPOT_PERPETUAL joint preflight rejects an unsafe perpetual before either Provider mutation", async () => {
@@ -591,6 +616,7 @@ function setup(options: Readonly<{
   }>;
   transientPerpetualReadFailuresAfterSpot?: number;
   postSpotPerpetualReason?: "ONE_WAY_REALITY_INSUFFICIENT" | "HEDGE_BUCKET_INSUFFICIENT";
+  releaseErrorCategory?: ArbitrageManagementReleaseError["category"];
 }> = {}) {
   let instance = baseInstance(
     options.longOpenedQuantity,
@@ -744,6 +770,9 @@ function setup(options: Readonly<{
   const managementRelease = {
     async releaseDustAfterClose(_userId: string, input: any) {
       releaseCalls.push({ legId: input.legId, commandId: input.commandId });
+      if (options.releaseErrorCategory) {
+        throw new ArbitrageManagementReleaseError(options.releaseErrorCategory, "safe controlled diagnostic");
+      }
       const leg = instance.legs.find((candidate) => candidate.legId === input.legId)!;
       const releasedQuantity = options.residual
         ?? String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));

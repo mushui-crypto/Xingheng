@@ -170,6 +170,26 @@ export class OkxClient {
     return available ?? "0";
   }
 
+  async getSpotBalance(asset: string) {
+    const normalizedAsset = exactAsset(asset, "OKX Spot balance asset");
+    const row = await this.signedRequest("GET", "/api/v5/account/balance", { ccy: normalizedAsset })
+      .then((payload) => firstRow(payload.data, "OKX Spot balance response"));
+    const details = row.details;
+    if (!Array.isArray(details)) throw invalid("OKX Spot balance details are invalid.");
+    let balance: Readonly<{ totalQuantity: string; availableQuantity: string }> | null = null;
+    for (const detail of details) {
+      const value = record(detail, "OKX Spot balance detail");
+      const currency = exactAsset(value.ccy, "OKX Spot balance currency");
+      if (currency !== normalizedAsset) throw invalid("OKX Spot balance response contains an unexpected currency.");
+      if (balance !== null) throw invalid("OKX Spot balance response contains a duplicate currency.");
+      balance = Object.freeze({
+        totalQuantity: positiveOrZeroDecimal(value.cashBal, "OKX Spot cash balance"),
+        availableQuantity: positiveOrZeroDecimal(value.availBal, "OKX Spot available balance"),
+      });
+    }
+    return balance ?? Object.freeze({ totalQuantity: "0", availableQuantity: "0" });
+  }
+
   async validateAccess(): Promise<OkxAccountAccess> {
     const row = await this.getAccountConfig();
     const identity = accountIdentity(row);

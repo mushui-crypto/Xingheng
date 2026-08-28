@@ -171,6 +171,95 @@ test("automatic dust release requires a confirmed close and preserves execution 
   assert.equal(managedCurrentQuantity(result.instance.legs[0]), "0.06");
   assert.equal(activeManagedQuantity(result.instance, result.instance.legs[0]), "0");
   assert.equal(result.instance.status, "CLOSED");
+
+  const replay = await fixture.service.releaseDustAfterClose("user-a", {
+    arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "dust-after-close",
+  });
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(replay.instance.managementReleases?.length, 1);
+});
+
+test("automatic dust release retries only transient Provider reads and then releases once", async (t) => {
+  const fixture = setup(t, {
+    spot: true,
+    safetySequence: ["SPOT_AVAILABLE_BALANCE_UNAVAILABLE", "QUANTITY_STEP_DUST"],
+  });
+  open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+  close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+
+  const result = await fixture.service.releaseDustAfterClose("user-a", {
+    arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "transient-dust-read",
+  });
+
+  assert.equal(result.release.releasedQuantity, "0.06");
+  assert.equal(fixture.safetyReads(), 2);
+  assert.deepEqual(fixture.sleepDelays, [250]);
+  assert.equal(result.instance.managementReleases?.length, 1);
+});
+
+test("automatic dust release exhausts bounded Provider reads without writing a release", async (t) => {
+  const fixture = setup(t, {
+    spot: true,
+    safetySequence: ["THROW", "SPOT_AVAILABLE_BALANCE_UNAVAILABLE", "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"],
+  });
+  open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+  close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+
+  await assert.rejects(
+    () => fixture.service.releaseDustAfterClose("user-a", {
+      arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "exhausted-dust-read",
+    }),
+    (error: unknown) => error instanceof ArbitrageManagementReleaseError
+      && error.category === "dust_release_provider_read_failed",
+  );
+  assert.equal(fixture.safetyReads(), 3);
+  assert.deepEqual(fixture.sleepDelays, [250, 500]);
+  assert.deepEqual(fixture.store.get("user-a", fixture.arbitrageId)?.managementReleases, []);
+});
+
+test("automatic dust release does not retry a non-transient Provider read conflict", async (t) => {
+  const fixture = setup(t, {
+    spot: true,
+    safetySequence: ["SPOT_AVAILABLE_BALANCE_UNAVAILABLE", "QUANTITY_STEP_DUST"],
+    transientSafetyRead: false,
+  });
+  open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+  close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+
+  await assert.rejects(
+    () => fixture.service.releaseDustAfterClose("user-a", {
+      arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "non-transient-read",
+    }),
+    (error: unknown) => error instanceof ArbitrageManagementReleaseError
+      && error.category === "dust_release_provider_read_failed",
+  );
+  assert.equal(fixture.safetyReads(), 1);
+  assert.deepEqual(fixture.sleepDelays, []);
+  assert.deepEqual(fixture.store.get("user-a", fixture.arbitrageId)?.managementReleases, []);
+});
+
+test("automatic dust release does not retry business, attribution, or Reality conflicts", async (t) => {
+  for (const scenario of [
+    { reason: "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT", category: "dust_release_eligibility_changed" },
+    { reason: "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE", category: "dust_release_attribution_unavailable" },
+    { reason: "PROVIDER_REALITY_UNAVAILABLE", category: "dust_release_reality_unavailable" },
+  ] as const) {
+    await t.test(scenario.reason, async (child) => {
+      const fixture = setup(child, { spot: true, safetySequence: [scenario.reason, "QUANTITY_STEP_DUST"] });
+      open(fixture.store, fixture.arbitrageId, "long-leg", "1", now + 10);
+      close(fixture.store, fixture.arbitrageId, "long-leg", "0.94", now + 20);
+      await assert.rejects(
+        () => fixture.service.releaseDustAfterClose("user-a", {
+          arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: scenario.reason,
+        }),
+        (error: unknown) => error instanceof ArbitrageManagementReleaseError
+          && error.category === scenario.category,
+      );
+      assert.equal(fixture.safetyReads(), 1);
+      assert.deepEqual(fixture.sleepDelays, []);
+      assert.deepEqual(fixture.store.get("user-a", fixture.arbitrageId)?.managementReleases, []);
+    });
+  }
 });
 
 test("automatic dust release rejects Provider shortfall even after a confirmed partial close", async (t) => {
@@ -187,7 +276,7 @@ test("automatic dust release rejects Provider shortfall even after a confirmed p
       arbitrageId: fixture.arbitrageId, legId: "long-leg", commandId: "not-dust",
     }),
     (error: unknown) => error instanceof ArbitrageManagementReleaseError
-      && error.category === "management_release_unavailable",
+      && error.category === "dust_release_eligibility_changed",
   );
   assert.deepEqual(fixture.store.get("user-a", fixture.arbitrageId)?.managementReleases, []);
 });
@@ -345,6 +434,15 @@ function setup(t: test.TestContext, options: Readonly<{
   safeClosableQuantity?: string;
   actualQuantity?: string;
   safetyReason?: "QUANTITY_STEP_DUST" | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT";
+  safetySequence?: readonly (
+    | "QUANTITY_STEP_DUST"
+    | "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT"
+    | "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE"
+    | "SPOT_AVAILABLE_BALANCE_UNAVAILABLE"
+    | "PROVIDER_REALITY_UNAVAILABLE"
+    | "THROW"
+  )[];
+  transientSafetyRead?: boolean;
 }> = {}) {
   const root = mkdtempSync(join(tmpdir(), "management-release-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
@@ -359,25 +457,37 @@ function setup(t: test.TestContext, options: Readonly<{
       { ...instance().legs[1], plannedQuantity: "1" },
     ],
   } : {}) }));
+  let safetyReadCount = 0;
+  const sleepDelays: number[] = [];
   const service = new ArbitrageManagementReleaseService(store, {
     evaluateCloseSafety: async (_userId: string, requestedArbitrageId: string, legId: string) => {
+      const sequenced = options.safetySequence?.[
+        Math.min(safetyReadCount, Math.max(0, options.safetySequence.length - 1))
+      ];
+      safetyReadCount += 1;
+      if (sequenced === "THROW") {
+        throw Object.assign(new Error("temporary provider read failed with private detail"), {
+          category: "provider_timeout",
+        });
+      }
       const current = store.get(_userId, requestedArbitrageId)!;
       const leg = current.legs.find((candidate) => candidate.legId === legId)!;
       const active = activeManagedQuantity(current, leg);
-      const unknown = options.verificationStatus === "UNKNOWN";
+      const reason = sequenced ?? options.safetyReason;
+      const unknown = options.verificationStatus === "UNKNOWN" || reason === "PROVIDER_REALITY_UNAVAILABLE"
+        || reason === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE" || reason === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE";
       const actual = options.actualQuantity
         ?? (options.spot && leg.legId === "long-leg" ? "1.4" : "20");
       return Object.freeze({
         activeManagedQuantity: active,
-        safeClosableQuantity: unknown ? "0" : options.fullManagedCloseAvailable
+        safeClosableQuantity: unknown || reason === "QUANTITY_STEP_DUST" ? "0" : options.fullManagedCloseAvailable
           ? active : options.safeClosableQuantity ?? "20",
         fullManagedCloseAvailable: options.fullManagedCloseAvailable ?? false,
-        reason: unknown ? "PROVIDER_REALITY_UNAVAILABLE" as const : options.safetyReason
-          ? options.safetyReason
+        reason: reason ?? (unknown ? "PROVIDER_REALITY_UNAVAILABLE" as const
           : options.fullManagedCloseAvailable
           ? "FULL_MANAGED_CLOSE_AVAILABLE" as const : leg.role === "SHORT"
           ? "ONE_WAY_REALITY_INSUFFICIENT" as const
-          : options.spot ? "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT" as const : "ONE_WAY_REALITY_INSUFFICIENT" as const,
+          : options.spot ? "SPOT_ATTRIBUTABLE_AVAILABLE_INSUFFICIENT" as const : "ONE_WAY_REALITY_INSUFFICIENT" as const),
         checkedAt: now + 90,
         positionMode: unknown ? null : options.positionMode ?? "ONE_WAY",
         actualQuantity: unknown ? null : actual,
@@ -387,10 +497,15 @@ function setup(t: test.TestContext, options: Readonly<{
         actualLongQuantity: unknown ? null : leg.role === "LONG" ? actual : "0",
         actualShortQuantity: unknown ? null : leg.role === "SHORT" ? actual : "0",
         availableQuantity: unknown ? null : options.spot && leg.legId === "long-leg" ? "1.4" : null,
+        ...(reason === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE" && options.transientSafetyRead !== false
+          ? { transientReadFailure: true as const }
+          : {}),
       });
     },
-  }, () => now + 100);
-  return { store, service, arbitrageId, dbPath };
+  }, () => now + 100, {
+    sleep: async (milliseconds) => { sleepDelays.push(milliseconds); },
+  });
+  return { store, service, arbitrageId, dbPath, sleepDelays, safetyReads: () => safetyReadCount };
 }
 
 function instance(overrides: Partial<NewArbitrageInstance> = {}): NewArbitrageInstance {

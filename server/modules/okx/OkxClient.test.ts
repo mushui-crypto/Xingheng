@@ -283,6 +283,27 @@ test("Spot balance read returns affected cash balances as Decimal strings", asyn
   });
 });
 
+test("narrow Spot close balance returns total and available from one Provider request", async () => {
+  const requests: URL[] = [];
+  const client = new OkxClient(() => credentials, {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      requests.push(new URL(String(input)));
+      return Response.json({ code: "0", data: [{ details: [
+        { ccy: "DOGE", cashBal: "12.300001", availBal: "12.2" },
+      ] }] });
+    }) as typeof fetch,
+  });
+
+  assert.deepEqual(await client.getSpotBalance("DOGE"), {
+    totalQuantity: "12.300001",
+    availableQuantity: "12.2",
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.pathname, "/api/v5/account/balance");
+  assert.equal(requests[0]?.search, "?ccy=DOGE");
+});
+
 test("Spot balance read treats omitted requested currencies as zero", async () => {
   for (const [details, expected] of [
     [

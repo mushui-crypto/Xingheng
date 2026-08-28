@@ -58,6 +58,7 @@ export type ArbitrageCloseSafetyResult = Readonly<{
   actualLongQuantity: string | null;
   actualShortQuantity: string | null;
   availableQuantity: string | null;
+  transientReadFailure?: true;
 }>;
 
 export type ArbitrageCloseSafetyAssessment = Readonly<{
@@ -211,9 +212,10 @@ export class ArbitrageCloseSafetyEvaluator {
           balance.availableQuantity,
           checkedAt,
         );
-      } catch {
+      } catch (error) {
         return assessment(result(
           activeQuantity, "0", false, "SPOT_AVAILABLE_BALANCE_UNAVAILABLE", checkedAt, verifiedLeg,
+          null, isTransientProviderReadFailure(error),
         ), side, context, planner, "SPOT");
       }
       candidate = minimum(activeQuantity, minimum(attributableQuantity, availableQuantity));
@@ -293,6 +295,7 @@ function result(
   checkedAt: number,
   reality: ArbitrageLegVerificationResult | null = null,
   availableQuantity: string | null = reality?.availableQuantity ?? null,
+  transientReadFailure = false,
 ): ArbitrageCloseSafetyResult {
   return Object.freeze({
     activeManagedQuantity,
@@ -306,7 +309,16 @@ function result(
     actualLongQuantity: reality?.actualLongQuantity ?? null,
     actualShortQuantity: reality?.actualShortQuantity ?? null,
     availableQuantity,
+    ...(transientReadFailure ? { transientReadFailure: true as const } : {}),
   });
+}
+
+function isTransientProviderReadFailure(error: unknown) {
+  if (!error || typeof error !== "object" || !("category" in error)) return false;
+  const category = (error as { category?: unknown }).category;
+  return category === "provider_timeout"
+    || category === "provider_transport_error"
+    || category === "provider_unavailable";
 }
 
 function assessment(

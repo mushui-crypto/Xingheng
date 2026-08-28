@@ -12,7 +12,10 @@ import {
   type ArbitrageExecutionCloseService,
 } from "./ArbitrageExecutionCloseService";
 import type { ArbitrageCloseSafetyResult } from "./ArbitrageCloseSafetyEvaluator";
-import type { ArbitrageManagementReleaseService } from "./ArbitrageManagementReleaseService";
+import {
+  ArbitrageManagementReleaseError,
+  type ArbitrageManagementReleaseService,
+} from "./ArbitrageManagementReleaseService";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
 type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
@@ -230,8 +233,8 @@ export class ArbitrageInstanceExitService {
           legId,
           commandId: dustReleaseCommandId(request.commandId, legId),
         })).instance;
-      } catch {
-        return stopped(instance, outcomes, legId, "SPOT_DUST_RELEASE", "DUST_RELEASE_UNAVAILABLE");
+      } catch (error) {
+        return stopped(instance, outcomes, legId, "SPOT_DUST_RELEASE", dustReleaseFailureReason(error));
       }
     }
     return result(
@@ -381,6 +384,17 @@ export class ArbitrageInstanceExitService {
     const instance = this.instances.get(userId, arbitrageId);
     if (!instance) throw exitError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
     return instance;
+  }
+}
+
+function dustReleaseFailureReason(error: unknown) {
+  if (!(error instanceof ArbitrageManagementReleaseError)) return "DUST_RELEASE_PROVIDER_READ_FAILED";
+  switch (error.category) {
+    case "dust_release_reality_unavailable": return "DUST_RELEASE_REALITY_UNAVAILABLE";
+    case "dust_release_eligibility_changed": return "DUST_RELEASE_ELIGIBILITY_CHANGED";
+    case "dust_release_attribution_unavailable": return "DUST_RELEASE_ATTRIBUTION_UNAVAILABLE";
+    case "dust_release_provider_read_failed": return "DUST_RELEASE_PROVIDER_READ_FAILED";
+    default: return "DUST_RELEASE_ELIGIBILITY_CHANGED";
   }
 }
 

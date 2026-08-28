@@ -20,6 +20,10 @@ export class ArbitrageManagementReleaseError extends Error {
       | "arbitrage_leg_not_found"
       | "management_release_unavailable"
       | "position_verification_unavailable"
+      | "dust_release_reality_unavailable"
+      | "dust_release_eligibility_changed"
+      | "dust_release_attribution_unavailable"
+      | "dust_release_provider_read_failed"
       | "execution_state_unknown"
       | "idempotency_conflict"
       | "authentication_required",
@@ -49,6 +53,11 @@ export class ArbitrageManagementReleaseService {
     private readonly instances: InstanceStore,
     private readonly closeSafety: CloseSafetyEvaluator,
     private readonly now: () => number = Date.now,
+    private readonly options: Readonly<{
+      sleep?: (milliseconds: number) => Promise<void>;
+      dustReadMaxAttempts?: number;
+      dustReadInitialDelayMs?: number;
+    }> = {},
   ) {}
 
   async evaluateEligibility(
@@ -90,9 +99,9 @@ export class ArbitrageManagementReleaseService {
     request: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
     mode: "MANUAL" | "QUANTITY_STEP_DUST",
   ) {
-    const instance = this.instances.get(userId, request.arbitrageId);
+    let instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw releaseError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
-    const leg = instance.legs.find((candidate) => candidate.legId === request.legId);
+    let leg = instance.legs.find((candidate) => candidate.legId === request.legId);
     if (!leg) throw releaseError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
 
     const releaseId = deterministicReleaseId(userId, request.arbitrageId, request.legId, request.commandId);
@@ -105,13 +114,22 @@ export class ArbitrageManagementReleaseService {
     if (staticReason === "UNRESOLVED_EXECUTION") {
       throw releaseError("execution_state_unknown", "套利实例存在未决执行，不能释放管理责任。");
     }
-    const activeQuantity = activeManagedQuantity(instance, leg);
+    let activeQuantity = activeManagedQuantity(instance, leg);
     if (staticReason === "NO_ACTIVE_MANAGED_EXPOSURE") {
       throw releaseError("management_release_unavailable", "该套利腿当前没有可释放的管理数量。");
     }
 
     const requestedAt = checkedTimestamp(this.now(), "release request time");
-    const safety = await this.closeSafety.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+    let safety: ArbitrageCloseSafetyResult;
+    if (mode === "QUANTITY_STEP_DUST") {
+      const dustRead = await this.readDustReleaseSafety(userId, instance.arbitrageId, leg.legId);
+      instance = dustRead.instance;
+      leg = dustRead.leg;
+      activeQuantity = activeManagedQuantity(instance, leg);
+      safety = dustRead.safety;
+    } else {
+      safety = await this.closeSafety.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+    }
     const eligibility = eligibilityResult(instance, leg.legId, safety);
     if (eligibility.releaseEligibilityReason === "PROVIDER_REALITY_UNAVAILABLE"
       || safety.actualQuantity === null
@@ -184,6 +202,99 @@ export class ArbitrageManagementReleaseService {
       throw releaseError("management_release_unavailable", message);
     }
   }
+
+  private async readDustReleaseSafety(
+    userId: string,
+    arbitrageId: string,
+    legId: string,
+  ) {
+    const maxAttempts = positiveInteger(this.options.dustReadMaxAttempts ?? 3, "dustReadMaxAttempts");
+    const initialDelayMs = positiveInteger(this.options.dustReadInitialDelayMs ?? 250, "dustReadInitialDelayMs");
+    const sleep = this.options.sleep ?? defaultSleep;
+    let lastReadFailure: ArbitrageManagementReleaseError | null = null;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const instance = this.instances.get(userId, arbitrageId);
+      const leg = instance?.legs.find((candidate) => candidate.legId === legId);
+      if (!instance || !leg || staticIneligibilityReason(instance, legId) !== null) {
+        throw releaseError(
+          "dust_release_eligibility_changed",
+          "残余管理责任终止条件已变化，未执行责任释放。",
+        );
+      }
+      let safety: ArbitrageCloseSafetyResult;
+      try {
+        safety = await this.closeSafety.evaluateCloseSafety(userId, arbitrageId, legId);
+      } catch (error) {
+        lastReadFailure = releaseError(
+          "dust_release_provider_read_failed",
+          "交易所现货事实读取暂时失败，未终止残余管理责任。",
+        );
+        if (isTransientProviderReadFailure(error) && attempt < maxAttempts) {
+          await sleep(initialDelayMs * (2 ** (attempt - 1)));
+          continue;
+        }
+        throw lastReadFailure;
+      }
+
+      const failure = dustReleaseSafetyFailure(instance, legId, safety);
+      if (failure === null) return Object.freeze({ instance, leg, safety });
+      if (failure.category !== "dust_release_provider_read_failed"
+        || safety.transientReadFailure !== true
+        || attempt === maxAttempts) throw failure;
+      lastReadFailure = failure;
+      await sleep(initialDelayMs * (2 ** (attempt - 1)));
+    }
+
+    throw lastReadFailure ?? releaseError(
+      "dust_release_provider_read_failed",
+      "交易所现货事实读取暂时失败，未终止残余管理责任。",
+    );
+  }
+}
+
+function isTransientProviderReadFailure(error: unknown) {
+  if (!error || typeof error !== "object" || !("category" in error)) return false;
+  const category = (error as { category?: unknown }).category;
+  return category === "provider_timeout"
+    || category === "provider_transport_error"
+    || category === "provider_unavailable";
+}
+
+function dustReleaseSafetyFailure(
+  instance: ArbitrageInstance,
+  legId: string,
+  safety: ArbitrageCloseSafetyResult,
+): ArbitrageManagementReleaseError | null {
+  if (safety.reason === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE") {
+    return releaseError(
+      "dust_release_provider_read_failed",
+      "交易所现货事实读取暂时失败，未终止残余管理责任。",
+    );
+  }
+  if (safety.reason === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE") {
+    return releaseError(
+      "dust_release_attribution_unavailable",
+      "现货开仓归属证据暂不可用，未终止残余管理责任。",
+    );
+  }
+  const eligibility = eligibilityResult(instance, legId, safety);
+  if (!eligibility.realityReliable) {
+    return releaseError(
+      "dust_release_reality_unavailable",
+      "当前交易所真实仓位无法可靠确认，未终止残余管理责任。",
+    );
+  }
+  if (eligibility.hasUnresolvedExecution
+    || !eligibility.releaseEligible
+    || safety.reason !== "QUANTITY_STEP_DUST"
+    || safety.safeClosableQuantity !== "0") {
+    return releaseError(
+      "dust_release_eligibility_changed",
+      "残余管理责任终止条件已变化，未执行责任释放。",
+    );
+  }
+  return null;
 }
 
 function hasUnresolvedExecution(instance: ArbitrageInstance) {
@@ -260,6 +371,15 @@ function identifier(value: unknown, name: string) {
 function checkedTimestamp(value: number, name: string) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} is invalid.`);
   return value;
+}
+
+function positiveInteger(value: number, name: string) {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} is invalid.`);
+  return value;
+}
+
+function defaultSleep(milliseconds: number) {
+  return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
 function releaseError(category: ArbitrageManagementReleaseError["category"], message: string) {
