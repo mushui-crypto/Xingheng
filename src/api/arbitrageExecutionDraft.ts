@@ -1,8 +1,14 @@
 import type { ArbitrageHorizon } from "../features/arbitrage/model/types";
 import {
+  fetchArbitrageCloseSafety,
+  fetchArbitrageInstanceById,
+  fetchArbitragePositionVerification,
+  fetchInstanceHedgeDelta,
   requireArbitrageInstance,
   requireArbitragePositionVerification,
+  type ArbitrageCloseSafety,
   type ArbitrageInstance,
+  type InstanceHedgeDelta,
   type ArbitragePositionVerification,
 } from "./arbitrageInstances";
 import { requestJson } from "./httpClient";
@@ -239,6 +245,68 @@ export async function fetchArbitrageHedgeWorkflow(arbitrageId: string, signal?: 
   return workflowSnapshot(payload);
 }
 
+export type ArbitrageTerminalAuthoritativeSnapshot = Readonly<{
+  instance: ArbitrageInstance;
+  workflow: ArbitrageHedgeWorkflow | null;
+  verification: ArbitragePositionVerification | null;
+  closeSafeties: Readonly<Record<string, ArbitrageCloseSafety>>;
+  delta: InstanceHedgeDelta | null;
+  complete: boolean;
+}>;
+
+/**
+ * Read-only terminal refresh shared by Start and Exit. The instance is fetched
+ * first so a secondary capability failure can never hide newer durable facts.
+ */
+export async function fetchArbitrageTerminalAuthoritativeSnapshot(
+  arbitrageId: string,
+  signal?: AbortSignal,
+): Promise<ArbitrageTerminalAuthoritativeSnapshot> {
+  const instance = await fetchArbitrageInstanceById(arbitrageId, signal);
+  const results = await Promise.allSettled([
+    fetchArbitrageHedgeWorkflow(arbitrageId, signal),
+    fetchArbitragePositionVerification(arbitrageId, signal),
+    fetchInstanceHedgeDelta(arbitrageId, signal),
+    ...instance.legs.map((leg) => fetchArbitrageCloseSafety(arbitrageId, leg.legId, signal)),
+  ]);
+  const [workflow, verification, delta, ...safeties] = results;
+  const closeSafeties: Record<string, ArbitrageCloseSafety> = {};
+  instance.legs.forEach((leg, index) => {
+    const safety = safeties[index];
+    if (safety?.status === "fulfilled") closeSafeties[leg.legId] = safety.value;
+  });
+  return Object.freeze({
+    instance,
+    workflow: workflow?.status === "fulfilled" ? workflow.value : null,
+    verification: verification?.status === "fulfilled" ? verification.value : null,
+    closeSafeties: Object.freeze(closeSafeties),
+    delta: delta?.status === "fulfilled" ? delta.value : null,
+    complete: results.every(({ status }) => status === "fulfilled"),
+  });
+}
+
+export function createTerminalAuthoritativeRefreshCoordinator(
+  load: typeof fetchArbitrageTerminalAuthoritativeSnapshot = fetchArbitrageTerminalAuthoritativeSnapshot,
+) {
+  let generation = 0;
+  let controller: AbortController | null = null;
+  return Object.freeze({
+    async refresh(arbitrageId: string) {
+      controller?.abort();
+      controller = new AbortController();
+      const currentController = controller;
+      const currentGeneration = ++generation;
+      const snapshot = await load(arbitrageId, currentController.signal);
+      return !currentController.signal.aborted && currentGeneration === generation ? snapshot : null;
+    },
+    cancel() {
+      generation += 1;
+      controller?.abort();
+      controller = null;
+    },
+  });
+}
+
 export async function confirmArbitrageExecution(
   input: Readonly<{
     confirmationId: string;
@@ -338,6 +406,35 @@ export type ArbitrageInstanceExitResult = Readonly<{
   instance: ArbitrageInstance;
   /** Command completion, not proof that this invocation created a new Provider close fill. */
   status: "CONFIRMED" | "STOPPED";
+  legs: readonly ArbitrageInstanceExitLegResult[];
+  stop?: ArbitrageInstanceExitStopDiagnostic;
+  timing?: ArbitrageInstanceExitTiming;
+}>;
+
+export type ArbitrageInstanceExitLegResult = Readonly<{
+  legId: string;
+  executionId: string | null;
+  status: "CREATED" | "SUBMITTED" | "PENDING_CONFIRMATION" | "CONFIRMED" | "FAILED" | "UNKNOWN";
+  confirmedQuantity: string;
+}>;
+
+export type ArbitrageInstanceExitStopPhase =
+  | "INITIAL_STATE" | "JOINT_PREFLIGHT" | "SPOT_FRESH_SAFETY" | "SPOT_CLOSE"
+  | "SPOT_CONFIRMATION" | "SPOT_DUST_RECHECK" | "SPOT_DUST_RELEASE"
+  | "PERPETUAL_FRESH_SAFETY" | "PERPETUAL_CLOSE" | "PERPETUAL_CONFIRMATION";
+
+export type ArbitrageInstanceExitStopDiagnostic = Readonly<{
+  failedLegId: string | null;
+  phase: ArbitrageInstanceExitStopPhase;
+  reason: string;
+  completedLegIds: readonly string[];
+  currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
+}>;
+
+export type ArbitrageInstanceExitTiming = Readonly<{
+  firstLegConfirmedAt: number;
+  secondLegProviderDispatchAt: number;
+  secondLegExitDelayMs: number;
 }>;
 
 export async function exitArbitrageInstance(input: Readonly<{
@@ -360,7 +457,15 @@ export async function exitArbitrageInstance(input: Readonly<{
   const value = record(payload);
   if (value.status !== "CONFIRMED" && value.status !== "STOPPED") throw invalidCommandResponse();
   if (!Array.isArray(value.legs)) throw invalidCommandResponse();
-  return Object.freeze({ instance: requireArbitrageInstance(value.instance), status: value.status });
+  const stop = value.stop === undefined ? undefined : exitStopDiagnostic(value.stop);
+  const timing = value.timing === undefined ? undefined : exitTiming(value.timing);
+  return Object.freeze({
+    instance: requireArbitrageInstance(value.instance),
+    status: value.status,
+    legs: Object.freeze(value.legs.map(exitLegResult)),
+    ...(stop === undefined ? {} : { stop }),
+    ...(timing === undefined ? {} : { timing }),
+  });
 }
 
 export async function reconcileArbitrageInstance(arbitrageId: string): Promise<Readonly<{
@@ -433,6 +538,56 @@ function executionStatus(value: unknown): ArbitrageLegExecutionConfirmation["exe
   if (value === "CREATED" || value === "SUBMITTED" || value === "PENDING_CONFIRMATION"
     || value === "CONFIRMED" || value === "FAILED" || value === "UNKNOWN") return value;
   throw invalidCommandResponse();
+}
+
+function exitLegResult(value: unknown): ArbitrageInstanceExitLegResult {
+  const leg = record(value);
+  const status = executionStatus(leg.status);
+  return Object.freeze({
+    legId: requiredString(leg.legId),
+    executionId: leg.executionId === null ? null : requiredString(leg.executionId),
+    status,
+    confirmedQuantity: decimalString(leg.confirmedQuantity),
+  });
+}
+
+function exitStopDiagnostic(value: unknown): ArbitrageInstanceExitStopDiagnostic {
+  const stop = record(value);
+  const phase = exitStopPhase(stop.phase);
+  if (!Array.isArray(stop.completedLegIds) || !Array.isArray(stop.currentManagedExposure)) {
+    throw invalidCommandResponse();
+  }
+  const failedLegId = stop.failedLegId === null ? null : requiredString(stop.failedLegId);
+  return Object.freeze({
+    failedLegId,
+    phase,
+    reason: requiredString(stop.reason),
+    completedLegIds: Object.freeze(stop.completedLegIds.map(requiredString)),
+    currentManagedExposure: Object.freeze(stop.currentManagedExposure.map((candidate) => {
+      const exposure = record(candidate);
+      return Object.freeze({
+        legId: requiredString(exposure.legId),
+        quantity: decimalString(exposure.quantity),
+      });
+    })),
+  });
+}
+
+function exitStopPhase(value: unknown): ArbitrageInstanceExitStopPhase {
+  if (value === "INITIAL_STATE" || value === "JOINT_PREFLIGHT" || value === "SPOT_FRESH_SAFETY"
+    || value === "SPOT_CLOSE" || value === "SPOT_CONFIRMATION" || value === "SPOT_DUST_RECHECK"
+    || value === "SPOT_DUST_RELEASE" || value === "PERPETUAL_FRESH_SAFETY"
+    || value === "PERPETUAL_CLOSE" || value === "PERPETUAL_CONFIRMATION") return value;
+  throw invalidCommandResponse();
+}
+
+function exitTiming(value: unknown): ArbitrageInstanceExitTiming {
+  const timing = record(value);
+  return Object.freeze({
+    firstLegConfirmedAt: timestamp(timing.firstLegConfirmedAt),
+    secondLegProviderDispatchAt: timestamp(timing.secondLegProviderDispatchAt),
+    secondLegExitDelayMs: timestamp(timing.secondLegExitDelayMs),
+  });
 }
 
 function invalidCommandResponse() {

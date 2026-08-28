@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { ShieldCheck } from "lucide-react";
+import { LoaderCircle, ShieldCheck } from "lucide-react";
 import {
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
   continuePartialArbitrageHedge,
+  createTerminalAuthoritativeRefreshCoordinator,
   fetchArbitrageExecutionDraft,
   fetchArbitrageHedgeWorkflow,
   fetchArbitrageUnstartedResumeContext,
@@ -56,6 +57,8 @@ export function ArbitrageExecutionDraftEntry({
     quantityInput: ExecutionQuantityInput;
   }> | null>(null);
   const startSubmissionGuard = useRef(false);
+  const workflowPollController = useRef<AbortController | null>(null);
+  const terminalRefreshCoordinator = useRef(createTerminalAuthoritativeRefreshCoordinator());
   const activeOpportunityId = resumeSetup?.opportunityId ?? opportunityId ?? "";
   const activeHorizonDays = resumeSetup?.horizonDays ?? horizonDays ?? 90;
 
@@ -105,6 +108,8 @@ export function ArbitrageExecutionDraftEntry({
   useEffect(() => {
     if (!open || !instance) return;
     const controller = new AbortController();
+    workflowPollController.current?.abort();
+    workflowPollController.current = controller;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const poll = async () => {
       try {
@@ -124,9 +129,12 @@ export function ArbitrageExecutionDraftEntry({
     void poll();
     return () => {
       controller.abort();
+      if (workflowPollController.current === controller) workflowPollController.current = null;
       if (timer) clearTimeout(timer);
     };
   }, [instance?.arbitrageId, open, workflowPolling]);
+
+  useEffect(() => () => terminalRefreshCoordinator.current.cancel(), []);
 
   async function planQuantity() {
     if (!amount.trim()) {
@@ -168,6 +176,8 @@ export function ArbitrageExecutionDraftEntry({
     setWorkflowPolling(false);
     setPendingStartLegId(null);
     setStartSubmitting(false);
+    workflowPollController.current?.abort();
+    terminalRefreshCoordinator.current.cancel();
   }
 
   function openConfirmation() {
@@ -212,6 +222,9 @@ export function ArbitrageExecutionDraftEntry({
     setLoading(true);
     setWorkflowPolling(true);
     setError("");
+    setValidationNotice("");
+    let terminalNotice = "";
+    let terminalError = "";
     try {
       const result = await startArbitrageHedge({
         arbitrageId: instance.arbitrageId,
@@ -223,19 +236,33 @@ export function ArbitrageExecutionDraftEntry({
         quantityInput,
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       });
-      setInstance(await fetchArbitrageInstanceById(instance.arbitrageId));
-      setWorkflow(await fetchArbitrageHedgeWorkflow(instance.arbitrageId));
       const outcome = startHedgeOutcome(result);
       if (outcome.kind === "success") {
-        setValidationNotice(outcome.message);
+        terminalNotice = outcome.message;
       } else {
-        setValidationNotice("");
-        setError(outcome.message);
+        terminalError = outcome.message;
       }
     } catch {
-      setError("一键开始对冲未能安全完成；请根据当前流程状态处理。");
+      terminalError = "一键开始对冲未能安全完成；系统不会自动重发交易命令。";
     } finally {
       setWorkflowPolling(false);
+      workflowPollController.current?.abort();
+      try {
+        const snapshot = await terminalRefreshCoordinator.current.refresh(instance.arbitrageId);
+        if (snapshot) {
+          setInstance(snapshot.instance);
+          if (snapshot.workflow) setWorkflow(snapshot.workflow);
+          if (!snapshot.complete) {
+            terminalError = appendRefreshFailure(terminalError);
+            terminalNotice = "";
+          }
+        }
+      } catch {
+        terminalError = appendRefreshFailure(terminalError);
+        terminalNotice = "";
+      }
+      setValidationNotice(terminalNotice);
+      setError(terminalError);
       setLoading(false);
     }
   }
@@ -365,6 +392,7 @@ export function ArbitrageExecutionDraftEntry({
           instance={instance}
           workflow={workflow}
           loading={loading}
+          commandProcessing={startSubmitting || workflowPolling}
           mode={mode}
           resumeMode={resumeMode}
           resumeValidated={resumeValidated}
@@ -425,6 +453,11 @@ export async function submitStartOnce(
   } finally {
     guard.current = false;
   }
+}
+
+export function appendRefreshFailure(existing: string) {
+  const message = "状态刷新失败，请手动刷新后查看最新状态；系统不会自动重发交易命令。";
+  return existing ? `${existing} ${message}` : message;
 }
 
 function StartHedgeConfirmationDialog({
@@ -515,10 +548,11 @@ export function StartHedgeConfirmationContent({
         <p className="font-semibold">确认后将提交真实资金订单。</p>
         <p>第一腿完整成交并通过安全检查后，系统将自动执行第二腿。</p>
       </div>
+      {submitting ? <OnlineTransactionProgress /> : null}
       <div className="flex justify-end gap-3 border-t border-[#25282f] pt-4">
         <Button data-modal-initial-focus disabled={submitting} onClick={onCancel} type="button" variant="ghost">取消</Button>
         <Button disabled={submitting} onClick={onConfirm} type="button">
-          {submitting ? "正在提交" : "确认开始真实对冲"}
+          {submitting ? "交易处理中" : "确认开始真实对冲"}
         </Button>
       </div>
     </div>
@@ -534,6 +568,7 @@ export function ArbitrageExecutionDraftContent({
   instance = null,
   workflow = null,
   loading,
+  commandProcessing = false,
   mode,
   resumeMode = false,
   resumeValidated = false,
@@ -557,6 +592,7 @@ export function ArbitrageExecutionDraftContent({
   instance?: ArbitrageInstance | null;
   workflow?: ArbitrageHedgeWorkflow | null;
   loading: boolean;
+  commandProcessing?: boolean;
   mode: ExecutionQuantityInput["mode"];
   resumeMode?: boolean;
   resumeValidated?: boolean;
@@ -614,6 +650,7 @@ export function ArbitrageExecutionDraftContent({
       </div>
 
       {error ? <p className="border border-red-400/35 bg-red-500/[0.06] px-4 py-3 text-sm text-red-200" role="alert">{error}</p> : null}
+      {commandProcessing ? <OnlineTransactionProgress /> : null}
       {draft ? (
         <>
           <section className="border border-[#25282f] bg-black p-4">
@@ -639,6 +676,7 @@ export function ArbitrageExecutionDraftContent({
           executionResults={executionResults}
           instance={instance}
           loading={loading}
+          commandProcessing={commandProcessing}
           onExecuteLeg={onExecuteLeg}
           onContinuePartial={onContinuePartial}
           onReconcileLeg={onReconcileLeg}
@@ -737,6 +775,7 @@ function plannedAssetSymbol(draft: ArbitrageExecutionDraft) {
 }
 
 function ExecutionInstancePanel({
+  commandProcessing,
   executionResults,
   instance,
   loading,
@@ -747,6 +786,7 @@ function ExecutionInstancePanel({
   startFromCreateConfirmation,
   workflow,
 }: {
+  commandProcessing: boolean;
   executionResults: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
   instance: ArbitrageInstance;
   loading: boolean;
@@ -772,6 +812,7 @@ function ExecutionInstancePanel({
             key={leg.legId}
             leg={leg}
             loading={loading}
+            commandProcessing={commandProcessing}
             onExecute={() => onExecuteLeg(leg.legId)}
             onReconcile={() => onReconcileLeg(leg.legId)}
             permitted={canExecuteLeg(instance, leg.legId)}
@@ -781,14 +822,14 @@ function ExecutionInstancePanel({
           />
         ))}
       </div>
-      {workflow?.riskAction === "CONTINUE_PARTIAL_HEDGE" ? (
+      {!commandProcessing && workflow?.riskAction === "CONTINUE_PARTIAL_HEDGE" ? (
         <div className="mt-4 border border-red-400/40 bg-red-500/[0.08] p-4">
           <p className="text-sm font-semibold text-red-100">Risk Action Required · 第一腿部分成交，对冲未完整建立</p>
           <p className="mt-2 text-xs text-red-200">继续操作只会针对已确认且仍受当前 Reality 支持的可归因 exposure 规划第二腿，不会重试第一腿剩余数量。</p>
           <Button className="mt-3" disabled={loading} onClick={onContinuePartial} type="button">继续对冲已成交部分</Button>
         </div>
       ) : null}
-      {workflow?.riskAction === "RESTART_HEDGE" ? (
+      {!commandProcessing && workflow?.riskAction === "RESTART_HEDGE" ? (
         <div className="mt-4 border border-amber-400/35 bg-amber-500/[0.06] p-4">
           <p className="text-sm text-amber-100">第一腿未成交，对冲未建立。</p>
           <Button className="mt-3" disabled={loading} onClick={onRestart} type="button" variant="secondary">重新开始对冲</Button>
@@ -825,7 +866,8 @@ function isWorkflowInFlight(phase: ArbitrageHedgeWorkflow["phase"]) {
     || phase === "SECOND_LEG_EXECUTING" || phase === "SECOND_LEG_PENDING";
 }
 
-function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference, startMode, suppressStartAction }: {
+function ExecutionInstanceLeg({ commandProcessing, execution, leg, loading, onExecute, onReconcile, permitted, reference, startMode, suppressStartAction }: {
+  commandProcessing: boolean;
   execution?: ArbitrageLegExecutionConfirmation["executionRecord"];
   leg: ArbitrageInstanceLeg;
   loading: boolean;
@@ -839,7 +881,7 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
   const status = execution?.status ?? reference?.status ?? "CREATED";
   const reconcilable = status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
   const verifiedAt = execution?.verifiedAt ?? reference?.updatedAt;
-  const showAction = !suppressStartAction && (!startMode || permitted || reconcilable);
+  const showAction = !commandProcessing && !suppressStartAction && (!startMode || permitted || reconcilable);
   return (
     <div className="border border-[#25282f] bg-black p-4">
       <div className="flex items-center justify-between gap-3"><strong className="text-xs text-white">{leg.role === "LONG" ? "LONG · 多头腿" : "SHORT · 空头腿"}</strong><span className="text-[11px] text-[#8f99a5]">{executionStatusLabel(status)}</span></div>
@@ -861,6 +903,17 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
           </Button> : null}
     </div>
   );
+}
+
+export function OnlineTransactionProgress() {
+  return <div
+    aria-live="polite"
+    className="flex items-start gap-3 border border-sky-400/30 bg-sky-500/[0.06] px-4 py-3 text-sm text-sky-100"
+    role="status"
+  >
+    <LoaderCircle aria-hidden="true" className="mt-0.5 size-4 shrink-0 animate-spin motion-reduce:animate-none" />
+    <p className="leading-6">交易处理中，正在等待交易所确认并同步最新仓位…</p>
+  </div>;
 }
 
 function LegExecutionMetric({ label, value }: { label: string; value: string }) {

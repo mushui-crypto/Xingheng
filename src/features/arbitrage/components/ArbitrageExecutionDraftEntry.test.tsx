@@ -8,6 +8,7 @@ import {
   ArbitrageExecutionDraftContent,
   ArbitrageExecutionDraftEntry,
   StartHedgeConfirmationContent,
+  appendRefreshFailure,
   canExecuteLeg,
   canReconcileLeg,
   canConfirmDraft,
@@ -264,7 +265,21 @@ test("submitting final confirmation disables both actions", () => {
     />,
   );
   assert.equal(html.match(/disabled=""/gu)?.length, 2);
-  assert.match(html, /正在提交/u);
+  assert.match(html, /交易处理中，正在等待交易所确认并同步最新仓位/u);
+  assert.match(html, /交易处理中/u);
+  assert.match(html, /animate-spin/u);
+});
+
+test("an active Start command hides recovery actions even when refreshed facts look pending or recoverable", () => {
+  const pending = instance([reference("long-leg", "PENDING_CONFIRMATION", "0")]);
+  const html = renderToStaticMarkup(content(draft(true), pending, false, false,
+    workflow("FIRST_LEG_PENDING", { riskAction: "RECONCILE", confirmedQuantity: "0" }), true));
+  assert.match(html, /交易处理中，正在等待交易所确认并同步最新仓位/u);
+  assert.doesNotMatch(html, /重新核验|继续对冲已成交部分|重新开始对冲/u);
+
+  const partial = renderToStaticMarkup(content(draft(true), pending, false, false,
+    workflow("FIRST_LEG_PARTIAL", { riskAction: "CONTINUE_PARTIAL_HEDGE", confirmedQuantity: "0.0004" }), true));
+  assert.doesNotMatch(partial, /继续对冲已成交部分/u);
 });
 
 test("pending and unknown legs render a Chinese reconciliation action and latest checked time", () => {
@@ -320,12 +335,24 @@ test("Start workflow polling is serial, recursive, abort-aware, and cleans up it
   assert.match(polling, /controller\.abort\(\);[\s\S]*clearTimeout\(timer\)/u);
 });
 
+test("Start keeps processing through terminal authoritative refresh on success, stop, or network error", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("async function startHedge"), source.indexOf("function requestStartHedge"));
+  assert.match(start, /catch[\s\S]*finally[\s\S]*terminalRefreshCoordinator\.current\.refresh/u);
+  assert.match(start, /terminalRefreshCoordinator\.current\.refresh[\s\S]*setLoading\(false\)/u);
+  assert.match(start, /workflowPollController\.current\?\.abort/u);
+  assert.match(start, /snapshot\.complete/u);
+  assert.doesNotMatch(start, /catch[\s\S]*startArbitrageHedge\(/u);
+  assert.match(appendRefreshFailure("交易已停止。"), /交易已停止。[\s\S]*状态刷新失败/u);
+});
+
 function content(
   value: ArbitrageExecutionDraft,
   currentInstance: ArbitrageInstance | null = null,
   resumeMode = false,
   resumeValidated = false,
   currentWorkflow: ArbitrageHedgeWorkflow | null = null,
+  commandProcessing = false,
 ) {
   return <ArbitrageExecutionDraftContent
     amount="20"
@@ -333,6 +360,7 @@ function content(
     error=""
     executionMode="PRICE_PRIORITY"
     loading={false}
+    commandProcessing={commandProcessing}
     instance={currentInstance}
     workflow={currentWorkflow}
     mode="NOTIONAL_USDT"

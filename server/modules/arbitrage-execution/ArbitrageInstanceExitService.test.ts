@@ -4,6 +4,7 @@ import {
   subtractUnsignedDecimals,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
+import { ArbitrageExecutionCloseError } from "./ArbitrageExecutionCloseService";
 import { ArbitrageInstanceExitService } from "./ArbitrageInstanceExitService";
 import { ArbitrageManagementReleaseError } from "./ArbitrageManagementReleaseService";
 
@@ -15,6 +16,21 @@ test("one instance command closes both legs through the existing close service i
   assert.equal(new Set(fixture.closeCalls.map((call) => call.commandId)).size, 2);
   assert.equal(result.status, "CONFIRMED");
   assert.equal(result.instance.status, "CLOSED");
+  assert.equal(fixture.outcomeAudits.length, 1);
+  assert.equal(fixture.outcomeAudits[0]?.terminalStatus, "CONFIRMED");
+});
+
+test("Exit STOPPED outcome is audited once with the structured stop snapshot", async () => {
+  const fixture = setup({ unsafeLegId: "short-leg", unsafeReason: "PROVIDER_REALITY_UNAVAILABLE" });
+  const request = exitRequest("stopped-audit");
+  const first = await fixture.service.exit("user-a", request);
+  const replay = await fixture.service.exit("user-a", request);
+  assert.equal(first.status, "STOPPED");
+  assert.equal(replay.status, "STOPPED");
+  assert.equal(fixture.outcomeAudits.length, 1);
+  assert.equal(fixture.outcomeAudits[0]?.stopPhase, "JOINT_PREFLIGHT");
+  assert.equal(fixture.outcomeAudits[0]?.stopReason, "PROVIDER_REALITY_UNAVAILABLE");
+  assert.equal(fixture.outcomeAudits[0]?.failedLegId, "short-leg");
 });
 
 test("instance exit skips a released leg and never asks CloseService to mutate it", async () => {
@@ -217,7 +233,9 @@ test("temporary perpetual Reality failure retries reads only and dispatches one 
   const result = await fixture.service.exit("user-a", exitRequest("temporary-perp-read"));
   assert.equal(result.status, "CONFIRMED");
   assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg", "short-leg"]);
-  assert.ok(fixture.safetyCalls("short-leg") >= 3);
+  assert.equal(fixture.safetyCalls("short-leg"), 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 2);
+  assert.deepEqual(fixture.mutationSafetyDeadlines("short-leg"), [1_800_000_015_000, 1_800_000_015_000]);
 });
 
 test("persistent perpetual Reality failure exhausts the bounded read budget without repeating Spot", async () => {
@@ -230,7 +248,28 @@ test("persistent perpetual Reality failure exhausts the bounded read budget with
   });
   const result = await fixture.service.exit("user-a", exitRequest("persistent-perp-read"));
   assert.equal(result.status, "STOPPED");
-  assert.equal(result.stop?.phase, "PERPETUAL_FRESH_SAFETY");
+  assert.equal(result.stop?.phase, "PERPETUAL_CLOSE");
+  assert.equal(result.stop?.reason, "POSITION_VERIFICATION_UNAVAILABLE");
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
+  assert.equal(fixture.safetyCalls("short-leg"), 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 3);
+});
+
+test("the transient read deadline stops before another mutation-time attempt", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    transientPerpetualReadFailuresAfterSpot: 10,
+    transientReadRetryBudgetMs: 15_000,
+    transientReadRetryIntervalMs: 15_000,
+    advanceClockOnSleep: true,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("perp-read-deadline"));
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.reason, "POSITION_VERIFICATION_UNAVAILABLE");
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 1);
   assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
 });
 
@@ -244,9 +283,27 @@ test("a concrete perpetual position conflict after Spot confirmation is not retr
   });
   const result = await fixture.service.exit("user-a", exitRequest("perp-business-conflict"));
   assert.equal(result.status, "STOPPED");
-  assert.equal(result.stop?.reason, "ONE_WAY_REALITY_INSUFFICIENT");
+  assert.equal(result.stop?.phase, "PERPETUAL_CLOSE");
+  assert.equal(result.stop?.reason, "CLOSE_QUANTITY_UNAVAILABLE");
   assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
-  assert.equal(fixture.safetyCalls("short-leg"), 2);
+  assert.equal(fixture.safetyCalls("short-leg"), 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 1);
+});
+
+test("a transient read failure after a closing reference is created is never retried", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    transientPerpetualReadFailuresAfterSpot: 1,
+    createClosingReferenceOnTransientFailure: true,
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("reference-before-read-failure"));
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_CLOSE");
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 1);
+  assert.deepEqual(fixture.closeCalls.map((call) => call.legId), ["long-leg"]);
 });
 
 test("restart-like explicit Exit skips a historically closed perpetual and completes Spot dust without reopening it", async () => {
@@ -311,7 +368,7 @@ test("first close pending finalizes online and continues through fresh second-le
   assert.equal(result.instance.status, "CLOSED");
   assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
   assert.equal(fixture.reconcileCalls.filter((legId) => legId === "long-leg").length, 1);
-  assert.ok(fixture.safetyCalls("short-leg") >= 2);
+  assert.equal(fixture.safetyCalls("short-leg"), 1);
 });
 
 test("repeated pending first-close observations never repeat its Provider mutation", async () => {
@@ -434,6 +491,8 @@ function setupOnlineFinalization(options: Readonly<{
   spotDust?: string;
 }> = {}) {
   const venue = options.venue ?? "okx";
+  const outcomeAudits: any[] = [];
+  const auditedCommands = new Set<string>();
   let instance = baseInstance(options.spotOpened ?? "1", "1", "DOGE-USDT-SPOT");
   instance = { ...instance, legs: instance.legs.map((leg) => ({ ...leg, venue })) as unknown as ArbitrageInstance["legs"] };
   const closeCalls: string[] = [];
@@ -575,7 +634,16 @@ function setupOnlineFinalization(options: Readonly<{
     },
   };
   const service = new ArbitrageInstanceExitService(
-    { get: () => instance } as any,
+    {
+      get: () => instance,
+      recordCommandOutcome: (_userId: string, audit: any) => {
+        if (!auditedCommands.has(audit.commandId)) {
+          auditedCommands.add(audit.commandId);
+          outcomeAudits.push(audit);
+        }
+        return audit;
+      },
+    } as any,
     closeService as any,
     managementRelease as any,
     reconciliationService as any,
@@ -590,7 +658,7 @@ function setupOnlineFinalization(options: Readonly<{
     },
   );
   return {
-    service, closeCalls, reconcileCalls, releaseCalls,
+    service, closeCalls, reconcileCalls, releaseCalls, outcomeAudits,
     safetyCalls: (legId: string) => safetyCallCounts.get(legId) ?? 0,
   };
 }
@@ -616,8 +684,14 @@ function setup(options: Readonly<{
   }>;
   transientPerpetualReadFailuresAfterSpot?: number;
   postSpotPerpetualReason?: "ONE_WAY_REALITY_INSUFFICIENT" | "HEDGE_BUCKET_INSUFFICIENT";
+  createClosingReferenceOnTransientFailure?: boolean;
+  transientReadRetryBudgetMs?: number;
+  transientReadRetryIntervalMs?: number;
+  advanceClockOnSleep?: boolean;
   releaseErrorCategory?: ArbitrageManagementReleaseError["category"];
 }> = {}) {
+  const outcomeAudits: any[] = [];
+  const auditedCommands = new Set<string>();
   let instance = baseInstance(
     options.longOpenedQuantity,
     options.shortOpenedQuantity,
@@ -657,7 +731,10 @@ function setup(options: Readonly<{
   }
   let lifecycleApplyCount = 0;
   const safetyCallCounts = new Map<string, number>();
+  const mutationSafetyCallCounts = new Map<string, number>();
+  const mutationSafetyDeadlineValues = new Map<string, number[]>();
   const closeCalls: Array<{ legId: string; commandId: string; quantity: string }> = [];
+  let currentTime = 1_800_000_000_000;
   const releaseCalls: Array<{ legId: string; commandId: string }> = [];
   let releaseSecondLeg: () => void = () => undefined;
   const secondLegGate = new Promise<void>((resolve) => { releaseSecondLeg = resolve; });
@@ -766,6 +843,47 @@ function setup(options: Readonly<{
         secondLegAllowed: false,
       };
     },
+    async closeLegForExit(userId: string, input: any, mutationDeadline: number) {
+      const attempts = (mutationSafetyCallCounts.get(input.legId) ?? 0) + 1;
+      mutationSafetyCallCounts.set(input.legId, attempts);
+      mutationSafetyDeadlineValues.set(input.legId, [
+        ...(mutationSafetyDeadlineValues.get(input.legId) ?? []),
+        mutationDeadline,
+      ]);
+      const spotHasClosed = instance.legs[0].confirmedClosedQuantity !== "0";
+      if (input.legId === "short-leg" && spotHasClosed
+        && attempts <= (options.transientPerpetualReadFailuresAfterSpot ?? 0)) {
+        if (options.createClosingReferenceOnTransientFailure) {
+          instance = {
+            ...instance,
+            executionReferences: [...instance.executionReferences, {
+              arbitrageId: instance.arbitrageId,
+              executionIntentId: "claimed-close-intent",
+              executionRecordId: "claimed-close-record",
+              legId: input.legId,
+              phase: "CLOSING",
+              quantityEffect: "DECREASE",
+              requestedQuantity: input.quantity,
+              confirmedQuantity: "0",
+              status: "CLAIMED",
+              createdAt: 1_800_000_000_090,
+              updatedAt: 1_800_000_000_090,
+            }],
+          };
+        }
+        throw new ArbitrageExecutionCloseError(
+          "position_verification_unavailable",
+          "受控的临时仓位读取失败。",
+        );
+      }
+      if (input.legId === "short-leg" && spotHasClosed && options.postSpotPerpetualReason) {
+        throw new ArbitrageExecutionCloseError(
+          "close_quantity_unavailable",
+          "当前真实仓位不足以安全完成退出。",
+        );
+      }
+      return this.closeLeg(userId, input);
+    },
   };
   const managementRelease = {
     async releaseDustAfterClose(_userId: string, input: any) {
@@ -793,7 +911,16 @@ function setup(options: Readonly<{
     },
   };
   const service = new ArbitrageInstanceExitService(
-    { get: () => instance } as any,
+    {
+      get: () => instance,
+      recordCommandOutcome: (_userId: string, audit: any) => {
+        if (!auditedCommands.has(audit.commandId)) {
+          auditedCommands.add(audit.commandId);
+          outcomeAudits.push(audit);
+        }
+        return audit;
+      },
+    } as any,
     closeService as any,
     managementRelease as any,
     { reconcileLeg: async () => assert.fail("no unresolved reference") } as any,
@@ -814,16 +941,25 @@ function setup(options: Readonly<{
         })) as any,
       }),
     } as any,
-    { now: () => 1_800_000_000_000, sleep: async () => undefined },
+    {
+      now: () => currentTime,
+      sleep: async (milliseconds) => {
+        if (options.advanceClockOnSleep) currentTime += milliseconds;
+      },
+      transientReadRetryBudgetMs: options.transientReadRetryBudgetMs,
+      transientReadRetryIntervalMs: options.transientReadRetryIntervalMs,
+    },
   );
   if (options.firstStatus !== undefined && options.firstStatus !== "CONFIRMED") releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual !== undefined) releaseSecondLeg();
   if (options.verifiedActualQuantity !== undefined) releaseSecondLeg();
   if (options.firstStatus === undefined && options.residual === undefined) queueMicrotask(releaseSecondLeg);
   return {
-    service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg,
+    service, closeCalls, releaseCalls, firstLegCompleted, releaseSecondLeg, outcomeAudits,
     lifecycleApplyCount: () => lifecycleApplyCount,
     safetyCalls: (legId: string) => safetyCallCounts.get(legId) ?? 0,
+    mutationSafetyCalls: (legId: string) => mutationSafetyCallCounts.get(legId) ?? 0,
+    mutationSafetyDeadlines: (legId: string) => mutationSafetyDeadlineValues.get(legId) ?? [],
   };
 }
 

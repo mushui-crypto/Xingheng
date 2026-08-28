@@ -89,6 +89,21 @@ export type ArbitrageCommandFingerprint = Readonly<{
   businessPayloadFingerprint: string;
 }>;
 
+export type ArbitrageCommandOutcomeAudit = Readonly<{
+  commandId: string;
+  requestedByUserId: string;
+  arbitrageId: string;
+  operation: "START" | "EXIT";
+  terminalStatus: string;
+  stopPhase: string | null;
+  stopReason: string | null;
+  failedLegId: string | null;
+  completedLegIds: readonly string[];
+  currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
+  terminalAt: number;
+  businessPayloadFingerprint: string;
+}>;
+
 export type ManagementReleaseResult = Readonly<{
   instance: ArbitrageInstance;
   release: ArbitrageLegManagementRelease;
@@ -292,6 +307,21 @@ type CommandIdempotencyRow = Readonly<{
   createdAt: number;
 }>;
 
+type CommandOutcomeAuditRow = Readonly<{
+  commandId: string;
+  requestedByUserId: string;
+  arbitrageId: string;
+  operation: "START" | "EXIT";
+  terminalStatus: string;
+  stopPhase: string | null;
+  stopReason: string | null;
+  failedLegId: string | null;
+  completedLegIdsJson: string;
+  currentManagedExposureJson: string;
+  terminalAt: number;
+  businessPayloadFingerprint: string;
+}>;
+
 type UnstartedArbitrageAbandonmentRow = Readonly<{
   commandId: string;
   operationType: "ABANDON_UNSTARTED_ARBITRAGE";
@@ -433,6 +463,57 @@ export class ArbitrageInstanceStore {
   get(userId: string, arbitrageId: string): ArbitrageInstance | null {
     const row = this.instanceRow(identifier(userId, "userId"), identifier(arbitrageId, "arbitrageId"));
     return row ? this.instanceFromRow(row) : null;
+  }
+
+  recordCommandOutcome(
+    userId: string,
+    outcome: Omit<ArbitrageCommandOutcomeAudit, "businessPayloadFingerprint">,
+  ): ArbitrageCommandOutcomeAudit {
+    const normalized = normalizeCommandOutcomeAudit(userId, outcome);
+    return this.transaction(() => {
+      const owner = this.requireForUser(normalized.requestedByUserId, normalized.arbitrageId);
+      if (owner.arbitrageId !== normalized.arbitrageId) {
+        throw new Error("Arbitrage command outcome owner is invalid.");
+      }
+      const existing = this.commandOutcomeByCommand(normalized.commandId);
+      if (existing) {
+        if (existing.businessPayloadFingerprint !== normalized.businessPayloadFingerprint) {
+          throw new Error("Arbitrage command outcome idempotency conflict.");
+        }
+        return commandOutcomeAuditFromRow(existing);
+      }
+      this.db.prepare(`INSERT INTO arbitrage_command_outcome_audits (
+        commandId, requestedByUserId, arbitrageId, operation, terminalStatus,
+        stopPhase, stopReason, failedLegId, completedLegIdsJson,
+        currentManagedExposureJson, terminalAt, businessPayloadFingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        normalized.commandId,
+        normalized.requestedByUserId,
+        normalized.arbitrageId,
+        normalized.operation,
+        normalized.terminalStatus,
+        normalized.stopPhase,
+        normalized.stopReason,
+        normalized.failedLegId,
+        JSON.stringify(normalized.completedLegIds),
+        JSON.stringify(normalized.currentManagedExposure),
+        normalized.terminalAt,
+        normalized.businessPayloadFingerprint,
+      );
+      const persisted = this.commandOutcomeByCommand(normalized.commandId);
+      if (!persisted) throw new Error("Arbitrage command outcome audit persistence failed.");
+      return commandOutcomeAuditFromRow(persisted);
+    });
+  }
+
+  listCommandOutcomesForUser(userId: string): readonly ArbitrageCommandOutcomeAudit[] {
+    const rows = this.db.prepare(`SELECT outcome.*
+      FROM arbitrage_command_outcome_audits outcome
+      JOIN arbitrage_instances owner ON owner.arbitrageId = outcome.arbitrageId
+      WHERE owner.userId = ? ORDER BY outcome.terminalAt DESC, outcome.commandId ASC`).all(
+        identifier(userId, "userId"),
+      ) as unknown as CommandOutcomeAuditRow[];
+    return Object.freeze(rows.map(commandOutcomeAuditFromRow));
   }
 
   readSpotOpeningAttributionEvidence(userId: string, arbitrageId: string, legId: string) {
@@ -1571,6 +1652,11 @@ export class ArbitrageInstanceStore {
       LIMIT 1`).get(commandId, commandId, commandId) as unknown as CommandIdempotencyRow | undefined;
   }
 
+  private commandOutcomeByCommand(commandId: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_command_outcome_audits
+      WHERE commandId = ?`).get(commandId) as unknown as CommandOutcomeAuditRow | undefined;
+  }
+
   private legacySealByCommand(commandId: string) {
     return this.db.prepare(`SELECT * FROM arbitrage_legacy_unresolved_execution_seals
       WHERE commandId = ?`).get(commandId) as unknown as LegacyUnresolvedExecutionSealRow | undefined;
@@ -1974,6 +2060,25 @@ export class ArbitrageInstanceStore {
       createdAt INTEGER NOT NULL
     ) STRICT;
 
+    CREATE TABLE IF NOT EXISTS arbitrage_command_outcome_audits (
+      commandId TEXT PRIMARY KEY,
+      requestedByUserId TEXT NOT NULL,
+      arbitrageId TEXT NOT NULL,
+      operation TEXT NOT NULL CHECK (operation IN ('START', 'EXIT')),
+      terminalStatus TEXT NOT NULL,
+      stopPhase TEXT,
+      stopReason TEXT,
+      failedLegId TEXT,
+      completedLegIdsJson TEXT NOT NULL,
+      currentManagedExposureJson TEXT NOT NULL,
+      terminalAt INTEGER NOT NULL,
+      businessPayloadFingerprint TEXT NOT NULL UNIQUE,
+      FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
+    ) STRICT;
+
+    CREATE INDEX IF NOT EXISTS arbitrage_command_outcomes_user_time
+      ON arbitrage_command_outcome_audits(requestedByUserId, terminalAt DESC);
+
     CREATE TABLE IF NOT EXISTS arbitrage_spot_opening_attribution_evidence (
       arbitrageId TEXT NOT NULL,
       legId TEXT NOT NULL,
@@ -2100,6 +2205,91 @@ function isUnstartedEmptyOpening(instance: ArbitrageInstance) {
       && leg.confirmedClosedQuantity === "0"
       && managedCurrentQuantity(leg) === "0"
       && activeManagedQuantity(instance, leg) === "0");
+}
+
+function normalizeCommandOutcomeAudit(
+  authenticatedUserId: string,
+  outcome: Omit<ArbitrageCommandOutcomeAudit, "businessPayloadFingerprint">,
+): ArbitrageCommandOutcomeAudit {
+  const requestedByUserId = identifier(outcome.requestedByUserId, "requestedByUserId");
+  if (requestedByUserId !== identifier(authenticatedUserId, "userId")) {
+    throw new Error("Arbitrage command outcome user scope is invalid.");
+  }
+  if (outcome.operation !== "START" && outcome.operation !== "EXIT") {
+    throw new Error("Arbitrage command outcome operation is invalid.");
+  }
+  const commandId = identifier(outcome.commandId, "commandId");
+  const arbitrageId = identifier(outcome.arbitrageId, "arbitrageId");
+  const terminalStatus = controlledOutcomeCode(outcome.terminalStatus, "terminalStatus");
+  const stopPhase = outcome.stopPhase === null ? null : controlledOutcomeCode(outcome.stopPhase, "stopPhase");
+  const stopReason = outcome.stopReason === null ? null : controlledOutcomeCode(outcome.stopReason, "stopReason");
+  const failedLegId = outcome.failedLegId === null ? null : identifier(outcome.failedLegId, "failedLegId");
+  const completedLegIds = Object.freeze(outcome.completedLegIds.map((legId) => identifier(legId, "completedLegId")));
+  if (new Set(completedLegIds).size !== completedLegIds.length) {
+    throw new Error("Arbitrage command outcome completed leg identities are duplicated.");
+  }
+  const currentManagedExposure = Object.freeze(outcome.currentManagedExposure.map((entry) => Object.freeze({
+    legId: identifier(entry.legId, "managed exposure legId"),
+    quantity: normalizeUnsignedDecimal(entry.quantity, "managed exposure quantity"),
+  })));
+  if (new Set(currentManagedExposure.map(({ legId }) => legId)).size !== currentManagedExposure.length) {
+    throw new Error("Arbitrage command outcome managed exposure leg identities are duplicated.");
+  }
+  const businessPayloadFingerprint = createHash("sha256").update(JSON.stringify([
+    "ARBITRAGE_COMMAND_OUTCOME", requestedByUserId, outcome.operation, arbitrageId, commandId,
+  ])).digest("hex");
+  return Object.freeze({
+    commandId,
+    requestedByUserId,
+    arbitrageId,
+    operation: outcome.operation,
+    terminalStatus,
+    stopPhase,
+    stopReason,
+    failedLegId,
+    completedLegIds,
+    currentManagedExposure,
+    terminalAt: timestamp(outcome.terminalAt, "terminalAt"),
+    businessPayloadFingerprint,
+  });
+}
+
+function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageCommandOutcomeAudit {
+  let completedLegIds: unknown;
+  let currentManagedExposure: unknown;
+  try {
+    completedLegIds = JSON.parse(row.completedLegIdsJson);
+    currentManagedExposure = JSON.parse(row.currentManagedExposureJson);
+  } catch {
+    throw new Error("Persisted arbitrage command outcome audit is invalid.");
+  }
+  if (!Array.isArray(completedLegIds) || !Array.isArray(currentManagedExposure)) {
+    throw new Error("Persisted arbitrage command outcome audit is invalid.");
+  }
+  const normalized = normalizeCommandOutcomeAudit(row.requestedByUserId, {
+    commandId: row.commandId,
+    requestedByUserId: row.requestedByUserId,
+    arbitrageId: row.arbitrageId,
+    operation: row.operation,
+    terminalStatus: row.terminalStatus,
+    stopPhase: row.stopPhase,
+    stopReason: row.stopReason,
+    failedLegId: row.failedLegId,
+    completedLegIds: completedLegIds as string[],
+    currentManagedExposure: currentManagedExposure as Array<{ legId: string; quantity: string }>,
+    terminalAt: row.terminalAt,
+  });
+  if (normalized.businessPayloadFingerprint !== row.businessPayloadFingerprint) {
+    throw new Error("Persisted arbitrage command outcome fingerprint is invalid.");
+  }
+  return normalized;
+}
+
+function controlledOutcomeCode(value: string, label: string) {
+  if (!/^[A-Z][A-Z0-9_]{0,95}$/u.test(value)) {
+    throw new Error(`Arbitrage command outcome ${label} is not a controlled code.`);
+  }
+  return value;
 }
 
 function normalizeUnstartedArbitrageAbandonmentClaim(

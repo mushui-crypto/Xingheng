@@ -11,6 +11,53 @@ import { openingSetupSourcePlanId, type ArbitrageOpeningSetup } from "../../arbi
 
 const start = 1_800_000_000_000;
 
+test("persists one append-only orchestration outcome per command with a production-compatible table", () => {
+  withDatabase(({ dbPath }) => {
+    const store = new ArbitrageInstanceStore({ dbPath });
+    store.create(instance());
+    const input = {
+      commandId: "start-outcome-1",
+      requestedByUserId: "user-a",
+      arbitrageId: "arbitrage-1",
+      operation: "START" as const,
+      terminalStatus: "STOPPED_SAFETY",
+      stopPhase: "SECOND_LEG",
+      stopReason: "PROVIDER_REALITY_UNKNOWN",
+      failedLegId: "short-leg",
+      completedLegIds: ["long-leg"],
+      currentManagedExposure: [
+        { legId: "long-leg", quantity: "1" },
+        { legId: "short-leg", quantity: "0" },
+      ],
+      terminalAt: start + 10,
+    };
+    const first = store.recordCommandOutcome("user-a", input);
+    const replay = store.recordCommandOutcome("user-a", { ...input, terminalAt: start + 20 });
+    assert.equal(replay.terminalAt, first.terminalAt);
+    assert.deepEqual(store.listCommandOutcomesForUser("user-a"), [first]);
+    assert.throws(() => store.recordCommandOutcome("user-a", {
+      ...input,
+      operation: "EXIT",
+    }), /idempotency conflict/u);
+    assert.throws(() => store.recordCommandOutcome("user-a", {
+      ...input,
+      commandId: "unsafe-raw-outcome",
+      stopReason: "provider says secret=abc",
+    }), /controlled code/u);
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const columns = db.prepare("PRAGMA table_info(arbitrage_command_outcome_audits)").all() as Array<{ name: string; type: string; notnull: number }>;
+      assert.equal(columns.find(({ name }) => name === "commandId")?.type, "TEXT");
+      assert.equal(columns.find(({ name }) => name === "currentManagedExposureJson")?.notnull, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
+    } finally {
+      db.close();
+    }
+  });
+});
+
 test("persists the original unstarted opening setup and restores it after restart", () => {
   withDatabase(({ dbPath }) => {
     const setup: ArbitrageOpeningSetup = {

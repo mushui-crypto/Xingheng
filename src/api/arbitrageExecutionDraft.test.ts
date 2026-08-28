@@ -4,12 +4,14 @@ import {
   closeArbitrageExecutionLeg,
   confirmArbitrageExecution,
   confirmArbitrageExecutionLeg,
+  createTerminalAuthoritativeRefreshCoordinator,
   exitArbitrageInstance,
   fetchArbitrageExecutionDraft,
   previewArbitrageExecutionDraft,
   reconcileArbitrageInstance,
   reconcileArbitrageExecutionLeg,
 } from "./arbitrageExecutionDraft";
+import { readFileSync } from "node:fs";
 
 test("draft API sends only opportunity identity, horizon, and explicit quantity input", async () => {
   const calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -196,6 +198,119 @@ test("instance exit and reconciliation APIs do not expose browser leg orchestrat
   assert.deepEqual(JSON.parse(String(calls[1]?.init?.body)), { arbitrageId: "arbitrage-1" });
   assert.equal("legId" in JSON.parse(String(calls[0]?.init?.body)), false);
   assert.equal("quantity" in JSON.parse(String(calls[0]?.init?.body)), false);
+});
+
+test("instance exit preserves structured stop diagnostics and timing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    instance: instancePayload("arbitrage-stopped"),
+    status: "STOPPED",
+    legs: [{
+      legId: "long-leg",
+      executionId: "record-close-1",
+      status: "CONFIRMED",
+      confirmedQuantity: "0.001",
+    }],
+    stop: {
+      failedLegId: "short-leg",
+      phase: "PERPETUAL_CLOSE",
+      reason: "POSITION_VERIFICATION_UNAVAILABLE",
+      completedLegIds: ["long-leg"],
+      currentManagedExposure: [
+        { legId: "long-leg", quantity: "0" },
+        { legId: "short-leg", quantity: "0.001" },
+      ],
+    },
+    timing: {
+      firstLegConfirmedAt: 1_800_000_000_100,
+      secondLegProviderDispatchAt: 1_800_000_000_700,
+      secondLegExitDelayMs: 600,
+    },
+  });
+  try {
+    const result = await exitArbitrageInstance({
+      arbitrageId: "arbitrage-stopped",
+      commandId: "exit-stopped",
+      executionMode: "EXECUTION_PRIORITY",
+    });
+    assert.deepEqual(result.legs, [{
+      legId: "long-leg",
+      executionId: "record-close-1",
+      status: "CONFIRMED",
+      confirmedQuantity: "0.001",
+    }]);
+    assert.deepEqual(result.stop, {
+      failedLegId: "short-leg",
+      phase: "PERPETUAL_CLOSE",
+      reason: "POSITION_VERIFICATION_UNAVAILABLE",
+      completedLegIds: ["long-leg"],
+      currentManagedExposure: [
+        { legId: "long-leg", quantity: "0" },
+        { legId: "short-leg", quantity: "0.001" },
+      ],
+    });
+    assert.deepEqual(result.timing, {
+      firstLegConfirmedAt: 1_800_000_000_100,
+      secondLegProviderDispatchAt: 1_800_000_000_700,
+      secondLegExitDelayMs: 600,
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("instance exit rejects malformed stop diagnostics instead of guessing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    instance: instancePayload("arbitrage-invalid-stop"),
+    status: "STOPPED",
+    legs: [],
+    stop: {
+      failedLegId: "short-leg",
+      phase: "PROVIDER_RAW_PHASE",
+      reason: { raw: "provider stack" },
+      completedLegIds: [],
+      currentManagedExposure: [],
+    },
+  });
+  try {
+    await assert.rejects(
+      exitArbitrageInstance({
+        arbitrageId: "arbitrage-invalid-stop",
+        commandId: "exit-invalid-stop",
+        executionMode: "EXECUTION_PRIORITY",
+      }),
+      /套利执行确认响应无效/u,
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("terminal authoritative refresh covers every page fact needed after Start or Exit", () => {
+  const source = readFileSync(new URL("./arbitrageExecutionDraft.ts", import.meta.url), "utf8");
+  const refresh = source.slice(
+    source.indexOf("export async function fetchArbitrageTerminalAuthoritativeSnapshot"),
+    source.indexOf("export function createTerminalAuthoritativeRefreshCoordinator"),
+  );
+  assert.match(refresh, /fetchArbitrageInstanceById/u);
+  assert.match(refresh, /fetchArbitrageHedgeWorkflow/u);
+  assert.match(refresh, /fetchArbitragePositionVerification/u);
+  assert.match(refresh, /fetchArbitrageCloseSafety/u);
+  assert.match(refresh, /fetchInstanceHedgeDelta/u);
+  assert.match(refresh, /Promise\.allSettled/u);
+});
+
+test("terminal refresh generation guard rejects a stale response that ignores cancellation", async () => {
+  const resolvers = new Map<string, (value: any) => void>();
+  const coordinator = createTerminalAuthoritativeRefreshCoordinator((arbitrageId) =>
+    new Promise((resolve) => { resolvers.set(arbitrageId, resolve); }));
+  const stale = coordinator.refresh("old-instance");
+  const latest = coordinator.refresh("new-instance");
+  resolvers.get("new-instance")?.({ instance: { arbitrageId: "new-instance" }, complete: true });
+  assert.equal((await latest)?.instance.arbitrageId, "new-instance");
+  resolvers.get("old-instance")?.({ instance: { arbitrageId: "old-instance" }, complete: true });
+  assert.equal(await stale, null);
 });
 
 function instancePayload(arbitrageId: string) {

@@ -15,6 +15,26 @@ test("one confirmed start executes both full legs strictly in server order", asy
   assert.equal(result.instanceStatus, "HOLDING");
   assert.ok(result.timing.secondLegDispatchStartedAt! >= result.timing.firstLegCompletedAt);
   assert.equal(fixture.executor.reconcileCalls.length, 0);
+  assert.equal(fixture.outcomeAudits.length, 1);
+  assert.equal(fixture.outcomeAudits[0]?.operation, "START");
+  assert.equal(fixture.outcomeAudits[0]?.terminalStatus, "COMPLETED");
+});
+
+test("Start STOPPED outcome is audited once with controlled diagnostics and idempotent replay", async () => {
+  const fixture = setup([outcome("UNKNOWN", "0")]);
+  const first = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  const replay = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(first.status, "STOPPED_FIRST_LEG_UNKNOWN");
+  assert.equal(replay.status, "STOPPED_FIRST_LEG_UNKNOWN");
+  assert.equal(fixture.outcomeAudits.length, 1);
+  assert.deepEqual({ ...fixture.outcomeAudits[0], terminalAt: 0 }, {
+    commandId: "hedge-start-1", requestedByUserId: "user-a", arbitrageId: "arbitrage-1",
+    operation: "START", terminalStatus: "STOPPED_FIRST_LEG_UNKNOWN", stopPhase: "FIRST_LEG",
+    stopReason: "STOPPED_FIRST_LEG_UNKNOWN", failedLegId: "long-leg", completedLegIds: [],
+    currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "0" }],
+    terminalAt: 0,
+  });
+  assert.equal(Number.isSafeInteger(fixture.outcomeAudits[0]?.terminalAt), true);
 });
 
 test("an online first-leg pending acknowledgement is authoritatively finalized before automatic second-leg dispatch", async () => {
@@ -42,6 +62,32 @@ test("repeated zero-fill pending observations remain read-only until full confir
   assert.equal(fixture.executor.reconcileCalls.length, 3);
   assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
   assert.deepEqual(fixture.sleeps, [1, 2]);
+});
+
+test("an online second-leg pending acknowledgement is finalized before Start returns", async () => {
+  const fixture = setup(
+    [outcome("CONFIRMED", "100"), outcome("PENDING_CONFIRMATION", "0")],
+    { reconciliationOutcomes: [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")] },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "COMPLETED");
+  assert.equal(result.instanceStatus, "HOLDING");
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 2);
+  assert.equal(fixture.executor.reconcileCalls[0]?.legId, "short-leg");
+  assert.equal(fixture.executor.reconcileCalls[0]?.executionIntentId, `intent-${childCommandId("hedge-start-1", "second")}`);
+});
+
+test("second-leg online finalization query failure stops without duplicate mutation", async () => {
+  const fixture = setup(
+    [outcome("CONFIRMED", "100"), outcome("PENDING_CONFIRMATION", "0")],
+    { reconcileError: true },
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_SECOND_LEG_UNKNOWN");
+  assert.match(result.reason ?? "", /第二腿终态核验暂不可用/u);
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 1);
 });
 
 test("online finalization stops on partial, failed, unknown, or query error without second-leg mutation", async (context) => {
@@ -99,17 +145,17 @@ test("a finalized first leg still runs the existing second-leg safety gate befor
   assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
 });
 
-test("all venues reuse the same online first-leg finalization path", async (context) => {
+test("all venues reuse the same online finalization path for both legs", async (context) => {
   for (const venue of ["binance", "okx", "bybit", "bitget"] as const) {
     await context.test(venue, async () => {
       const fixture = setup(
-        [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
-        { reconciliationOutcomes: [outcome("CONFIRMED", "100")] },
+        [outcome("PENDING_CONFIRMATION", "0"), outcome("PENDING_CONFIRMATION", "0")],
+        { reconciliationOutcomes: [outcome("CONFIRMED", "100"), outcome("CONFIRMED", "100")] },
         baseInstance(venue, venue),
       );
       const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request({ hedgeCommandId: `delayed-${venue}` }));
       assert.equal(result.status, "COMPLETED");
-      assert.equal(fixture.executor.reconcileCalls.length, 1);
+      assert.equal(fixture.executor.reconcileCalls.length, 2);
       assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
     });
   }
@@ -266,6 +312,24 @@ test("a restarted orchestration never resumes online finalization for an existin
   assert.equal(fixture.executor.mutationLegs.length, 0);
 });
 
+test("an idempotent pending second leg never restores a prior online continuation intent", async () => {
+  const fixture = setup([]);
+  fixture.executor.seedConfirmed(childCommandId("hedge-start-1", "first"), "long-leg", "100");
+  fixture.executor.seedPending(childCommandId("hedge-start-1", "second"), "short-leg");
+  const restarted = new ArbitrageHedgeStartService(fixture.store as never, fixture.executor as never, {
+    clock: clock(),
+    sleep: async () => undefined,
+    firstLegFinalizationBudgetMs: 100,
+    firstLegFinalizationInitialPollMs: 1,
+    firstLegFinalizationMaxPollMs: 4,
+    firstLegFinalizationMaxAttempts: 4,
+  });
+  const result = await restarted.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_SECOND_LEG_PENDING");
+  assert.equal(fixture.executor.reconcileCalls.length, 0);
+  assert.equal(fixture.executor.mutationLegs.length, 0);
+});
+
 function setup(outcomes: Outcome[], options: Readonly<{
   throwSecond?: ArbitrageExecutionCommandError["category"];
   firstGate?: Promise<void>;
@@ -275,8 +339,19 @@ function setup(outcomes: Outcome[], options: Readonly<{
   omitFirstExecutionRecordId?: boolean;
 }> = {}, initialInstance: ArbitrageInstance = baseInstance()) {
   const state = { instance: initialInstance };
-  const store = { get: (userId: string, arbitrageId: string) =>
-    userId === state.instance.userId && arbitrageId === state.instance.arbitrageId ? state.instance : null };
+  const outcomeAudits: any[] = [];
+  const auditCommands = new Set<string>();
+  const store = {
+    get: (userId: string, arbitrageId: string) =>
+      userId === state.instance.userId && arbitrageId === state.instance.arbitrageId ? state.instance : null,
+    recordCommandOutcome: (_userId: string, audit: any) => {
+      if (!auditCommands.has(audit.commandId)) {
+        auditCommands.add(audit.commandId);
+        outcomeAudits.push(audit);
+      }
+      return audit;
+    },
+  };
   const executor = new FakeExecutor(state, outcomes, options);
   const sleeps: number[] = [];
   const service = new ArbitrageHedgeStartService(store as never, executor as never, {
@@ -287,7 +362,7 @@ function setup(outcomes: Outcome[], options: Readonly<{
     firstLegFinalizationMaxPollMs: 4,
     firstLegFinalizationMaxAttempts: options.finalizationMaxAttempts ?? 4,
   });
-  return { service, store, executor, sleeps, get instance() { return state.instance; } };
+  return { service, store, executor, sleeps, outcomeAudits, get instance() { return state.instance; } };
 }
 
 type Outcome = Readonly<{ status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN"; confirmedQuantity: string }>;

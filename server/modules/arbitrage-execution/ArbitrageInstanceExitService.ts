@@ -11,13 +11,12 @@ import {
   ArbitrageExecutionCloseError,
   type ArbitrageExecutionCloseService,
 } from "./ArbitrageExecutionCloseService";
-import type { ArbitrageCloseSafetyResult } from "./ArbitrageCloseSafetyEvaluator";
 import {
   ArbitrageManagementReleaseError,
   type ArbitrageManagementReleaseService,
 } from "./ArbitrageManagementReleaseService";
 
-type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
+type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
 type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
   Partial<Pick<ArbitrageExecutionCloseService, "closeLegForExit">>;
 type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
@@ -28,6 +27,7 @@ const DEFAULT_CLOSE_FINALIZATION_BUDGET_MS = 15_000;
 const DEFAULT_CLOSE_FINALIZATION_INITIAL_POLL_MS = 250;
 const DEFAULT_CLOSE_FINALIZATION_MAX_POLL_MS = 2_000;
 const DEFAULT_CLOSE_FINALIZATION_MAX_ATTEMPTS = 10;
+const DEFAULT_TRANSIENT_READ_RETRY_BUDGET_MS = 15_000;
 
 export class ArbitrageInstanceExitError extends Error {
   constructor(
@@ -66,12 +66,23 @@ export class ArbitrageInstanceExitService {
     const key = `${userId}\0${request.arbitrageId}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const operation = this.exitOnce(userId, request);
+    const operation = this.exitWithOutcomeAudit(userId, request);
     this.inFlight.set(key, operation);
     try {
       return await operation;
     } finally {
       if (this.inFlight.get(key) === operation) this.inFlight.delete(key);
+    }
+  }
+
+  private async exitWithOutcomeAudit(userId: string, request: ExitRequest) {
+    try {
+      const outcome = await this.exitOnce(userId, request);
+      this.recordOutcome(userId, request, outcome);
+      return outcome;
+    } catch (error) {
+      this.recordExceptionalOutcome(userId, request, error);
+      throw error;
     }
   }
 
@@ -126,24 +137,24 @@ export class ArbitrageInstanceExitService {
       if (hasUnresolvedClosingReference(instance, leg.legId)) {
         return stopped(instance, outcomes, leg.legId, phaseFor(leg, "CLOSE"), "UNRESOLVED_EXECUTION");
       }
-      const fresh = leg.instrumentId.endsWith("-SPOT")
-        ? { safety: await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId), attempts: 1 }
-        : await this.readPerpetualSafetyWithRetry(userId, instance, leg.legId, continuationReadDeadline);
-      const safety = fresh.safety;
-      const dustCompletion = safety.reason === "QUANTITY_STEP_DUST";
-      if (!safety.fullManagedCloseAvailable && !dustCompletion) {
-        return stopped(instance, outcomes, leg.legId, phaseFor(leg, "FRESH_SAFETY"), safety.reason);
-      }
-      if (dustCompletion && safety.safeClosableQuantity === "0") {
-        if (!hasConfirmedClosingReference(instance, leg.legId)) {
-          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RELEASE", safety.reason);
+      const spotLeg = leg.instrumentId.endsWith("-SPOT");
+      let dustCompletion = false;
+      let closeQuantity = quantity;
+      if (spotLeg) {
+        const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+        dustCompletion = safety.reason === "QUANTITY_STEP_DUST";
+        if (!safety.fullManagedCloseAvailable && !dustCompletion) {
+          return stopped(instance, outcomes, leg.legId, phaseFor(leg, "FRESH_SAFETY"), safety.reason);
         }
-        pendingDustReleaseLegIds.push(leg.legId);
-        continue;
+        if (dustCompletion && safety.safeClosableQuantity === "0") {
+          if (!hasConfirmedClosingReference(instance, leg.legId)) {
+            return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RELEASE", safety.reason);
+          }
+          pendingDustReleaseLegIds.push(leg.legId);
+          continue;
+        }
+        closeQuantity = safety.fullManagedCloseAvailable ? quantity : safety.safeClosableQuantity;
       }
-      const closeQuantity = safety.fullManagedCloseAvailable
-        ? quantity
-        : safety.safeClosableQuantity;
       let confirmation;
       try {
         const closeInput = {
@@ -154,10 +165,10 @@ export class ArbitrageInstanceExitService {
           executionMode: request.executionMode,
           confirmed: true,
         };
-        confirmation = leg.instrumentId.endsWith("-SPOT")
+        confirmation = spotLeg
           ? await this.closeService.closeLeg(userId, closeInput)
           : await this.closeWithTransientReadRetry(
-            userId, instance, leg.legId, closeInput, fresh.attempts, continuationReadDeadline,
+            userId, instance, leg.legId, closeInput, continuationReadDeadline,
           );
       } catch (error) {
         return stopped(
@@ -208,8 +219,9 @@ export class ArbitrageInstanceExitService {
       }
       if (firstConfirmedAt === null) {
         firstConfirmedAt = confirmation.executionRecord.verifiedAt;
-        if (leg.instrumentId.endsWith("-SPOT") && instance.strategyType === "SPOT_PERPETUAL") {
-          continuationReadDeadline = this.now() + (this.options.transientReadRetryBudgetMs ?? 5_000);
+        if (spotLeg && instance.strategyType === "SPOT_PERPETUAL") {
+          continuationReadDeadline = this.now()
+            + (this.options.transientReadRetryBudgetMs ?? DEFAULT_TRANSIENT_READ_RETRY_BUDGET_MS);
         }
       }
       else if (confirmation.providerDispatchStartedAt !== undefined) {
@@ -244,6 +256,41 @@ export class ArbitrageInstanceExitService {
       undefined,
       timing(firstConfirmedAt, secondLegProviderDispatchAt),
     );
+  }
+
+  private recordOutcome(userId: string, request: ExitRequest, outcome: ArbitrageInstanceExitResult) {
+    const instance = this.instances.get(userId, request.arbitrageId) ?? outcome.instance;
+    this.instances.recordCommandOutcome(userId, {
+      commandId: request.commandId,
+      requestedByUserId: userId,
+      arbitrageId: request.arbitrageId,
+      operation: "EXIT",
+      terminalStatus: outcome.status,
+      stopPhase: outcome.stop?.phase ?? null,
+      stopReason: outcome.stop?.reason ?? null,
+      failedLegId: outcome.stop?.failedLegId ?? null,
+      completedLegIds: completedClosingLegIds(instance),
+      currentManagedExposure: managedExposureSnapshot(instance),
+      terminalAt: this.now(),
+    });
+  }
+
+  private recordExceptionalOutcome(userId: string, request: ExitRequest, error: unknown) {
+    const instance = this.instances.get(userId, request.arbitrageId);
+    if (!instance) return;
+    this.instances.recordCommandOutcome(userId, {
+      commandId: request.commandId,
+      requestedByUserId: userId,
+      arbitrageId: request.arbitrageId,
+      operation: "EXIT",
+      terminalStatus: "ERROR",
+      stopPhase: "ORCHESTRATION",
+      stopReason: controlledExitErrorCode(error),
+      failedLegId: null,
+      completedLegIds: completedClosingLegIds(instance),
+      currentManagedExposure: managedExposureSnapshot(instance),
+      terminalAt: this.now(),
+    });
   }
 
   private async finalizeClosingLeg(
@@ -292,78 +339,35 @@ export class ArbitrageInstanceExitService {
     return confirmation;
   }
 
-  private async readPerpetualSafetyWithRetry(
-    userId: string,
-    instance: ArbitrageInstance,
-    legId: string,
-    inheritedDeadline: number | null,
-  ) {
-    const startedAt = this.now();
-    const budget = this.options.transientReadRetryBudgetMs ?? 5_000;
-    const deadline = inheritedDeadline ?? startedAt + budget;
-    const maxAttempts = this.options.transientReadMaxAttempts ?? 3;
-    let attempts = 0;
-    let safety: ArbitrageCloseSafetyResult;
-    do {
-      attempts += 1;
-      safety = await this.evaluateSafetyBeforeDeadline(userId, instance, legId, deadline);
-      if (safety.reason !== "PROVIDER_REALITY_UNAVAILABLE") return { safety, attempts };
-      const remaining = deadline - this.now();
-      if (attempts >= maxAttempts || remaining <= 0) return { safety, attempts };
-      await this.sleep(Math.min(this.options.transientReadRetryIntervalMs ?? 150, remaining));
-    } while (true);
-  }
-
-  private async evaluateSafetyBeforeDeadline(
-    userId: string,
-    instance: ArbitrageInstance,
-    legId: string,
-    deadline: number,
-  ): Promise<ArbitrageCloseSafetyResult> {
-    const remaining = deadline - this.now();
-    if (remaining <= 0) return unavailableSafety(instance, legId, this.now());
-    let timeout: ReturnType<typeof setTimeout> | undefined;
-    try {
-      return await Promise.race([
-        this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, legId),
-        new Promise<ArbitrageCloseSafetyResult>((resolve) => {
-          timeout = setTimeout(() => resolve(unavailableSafety(instance, legId, this.now())), remaining);
-        }),
-      ]);
-    } finally {
-      if (timeout !== undefined) clearTimeout(timeout);
-    }
-  }
-
   private async closeWithTransientReadRetry(
     userId: string,
     instance: ArbitrageInstance,
     legId: string,
     input: Parameters<CloseService["closeLeg"]>[1],
-    attemptsAlreadyUsed: number,
     inheritedDeadline: number | null,
   ) {
     const startedAt = this.now();
-    const budget = this.options.transientReadRetryBudgetMs ?? 5_000;
+    const budget = this.options.transientReadRetryBudgetMs ?? DEFAULT_TRANSIENT_READ_RETRY_BUDGET_MS;
     const deadline = inheritedDeadline ?? startedAt + budget;
     const maxAttempts = this.options.transientReadMaxAttempts ?? 3;
-    let attempts = attemptsAlreadyUsed;
+    let attempts = 0;
     while (true) {
+      attempts += 1;
       try {
-        return await (inheritedDeadline !== null && this.closeService.closeLegForExit
-          ? this.closeService.closeLegForExit(userId, input, inheritedDeadline)
+        return await (this.closeService.closeLegForExit
+          ? this.closeService.closeLegForExit(userId, input, deadline)
           : this.closeService.closeLeg(userId, input));
       } catch (error) {
         if (error instanceof ArbitrageExecutionCloseError
           && error.category === "position_verification_unavailable"
           && attempts < maxAttempts
           && this.now() < deadline
-          && !hasUnresolvedClosingReference(this.instances.get(userId, instance.arbitrageId) ?? instance, legId)) {
-          attempts += 1;
+          && !hasClosingReference(this.instances.get(userId, instance.arbitrageId) ?? instance, legId)) {
           await this.sleep(Math.min(
             this.options.transientReadRetryIntervalMs ?? 150,
             deadline - this.now(),
           ));
+          if (this.now() >= deadline) throw error;
           continue;
         }
         throw error;
@@ -454,6 +458,11 @@ function hasUnresolvedClosingReference(instance: ArbitrageInstance, legId: strin
       || reference.status === "PENDING_CONFIRMATION" || reference.status === "UNKNOWN"));
 }
 
+function hasClosingReference(instance: ArbitrageInstance, legId: string) {
+  return instance.executionReferences.some((reference) => reference.legId === legId
+    && reference.phase === "CLOSING");
+}
+
 function hasUnresolvedExecution(instance: ArbitrageInstance) {
   return instance.executionReferences.some((reference) => reference.status === "CLAIMED"
     || reference.status === "LINKED"
@@ -466,6 +475,18 @@ function hasConfirmedClosingReference(instance: ArbitrageInstance, legId: string
     && reference.phase === "CLOSING"
     && reference.status === "CONFIRMED"
     && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0);
+}
+
+function completedClosingLegIds(instance: ArbitrageInstance) {
+  return Object.freeze(instance.legs.filter((leg) => hasConfirmedClosingReference(instance, leg.legId))
+    .map(({ legId }) => legId));
+}
+
+function managedExposureSnapshot(instance: ArbitrageInstance) {
+  return Object.freeze(instance.legs.map((leg) => Object.freeze({
+    legId: leg.legId,
+    quantity: activeManagedQuantity(instance, leg),
+  })));
 }
 
 function pendingWithoutFill(confirmation: Awaited<ReturnType<CloseService["closeLeg"]>>) {
@@ -579,6 +600,13 @@ function safeCloseErrorReason(error: unknown) {
   return error instanceof ArbitrageExecutionCloseError ? error.category.toUpperCase() : "CLOSE_UNAVAILABLE";
 }
 
+function controlledExitErrorCode(error: unknown) {
+  if (error instanceof ArbitrageInstanceExitError) return error.category.toUpperCase();
+  if (error instanceof ArbitrageExecutionCloseError) return error.category.toUpperCase();
+  if (error instanceof ArbitrageManagementReleaseError) return error.category.toUpperCase();
+  return "EXIT_INTERNAL_ERROR";
+}
+
 function positiveInteger(value: number, label: string) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${label} must be a positive integer.`);
   return value;
@@ -590,23 +618,6 @@ function timing(firstLegConfirmedAt: number | null, secondLegProviderDispatchAt:
     firstLegConfirmedAt,
     secondLegProviderDispatchAt,
     secondLegExitDelayMs: Math.max(0, secondLegProviderDispatchAt - firstLegConfirmedAt),
-  });
-}
-
-function unavailableSafety(instance: ArbitrageInstance, legId: string, checkedAt: number): ArbitrageCloseSafetyResult {
-  const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
-  return Object.freeze({
-    activeManagedQuantity: activeManagedQuantity(instance, leg),
-    safeClosableQuantity: "0",
-    fullManagedCloseAvailable: false,
-    reason: "PROVIDER_REALITY_UNAVAILABLE",
-    checkedAt,
-    positionMode: null,
-    actualQuantity: null,
-    actualSignedNetQuantity: null,
-    actualLongQuantity: null,
-    actualShortQuantity: null,
-    availableQuantity: null,
   });
 }
 

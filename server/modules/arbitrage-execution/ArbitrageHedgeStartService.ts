@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  activeManagedQuantity,
   compareUnsignedDecimals,
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
@@ -11,7 +12,7 @@ import {
 } from "./ArbitrageExecutionCommandService";
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
 
-type InstanceStore = Pick<ArbitrageInstanceStore, "get">;
+type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
 type LegExecutor = Pick<ArbitrageExecutionCommandService, "executeLeg" | "reconcileLeg">;
 
 const DEFAULT_FIRST_LEG_FINALIZATION_BUDGET_MS = 15_000;
@@ -120,12 +121,28 @@ export class ArbitrageHedgeStartService {
       return existing.operation;
     }
 
-    const operation = this.startOnce(userId, arbitrageId, instance, request);
+    const operation = this.startWithOutcomeAudit(userId, arbitrageId, instance, request);
     this.inFlight.set(key, { fingerprint, operation });
     try {
       return await operation;
     } finally {
       if (this.inFlight.get(key)?.operation === operation) this.inFlight.delete(key);
+    }
+  }
+
+  private async startWithOutcomeAudit(
+    userId: string,
+    arbitrageId: string,
+    initial: ArbitrageInstance,
+    request: StartRequest,
+  ) {
+    try {
+      const outcome = await this.startOnce(userId, arbitrageId, initial, request);
+      this.recordOutcome(userId, arbitrageId, request.hedgeCommandId, outcome);
+      return outcome;
+    } catch (error) {
+      this.recordExceptionalOutcome(userId, arbitrageId, request.hedgeCommandId, error);
+      throw error;
     }
   }
 
@@ -150,9 +167,9 @@ export class ArbitrageHedgeStartService {
     const dispatchedByThisStart = !first.idempotentReplay;
     if (dispatchedByThisStart && pendingWithoutFill(first)) {
       try {
-        first = await this.finalizeFirstLeg(userId, arbitrageId, request.firstLegId, first);
+        first = await this.finalizeDispatchedLeg(userId, arbitrageId, request.firstLegId, first);
       } catch {
-        const current = this.currentFirstLegConfirmation(userId, arbitrageId, request.firstLegId, first);
+        const current = this.currentLegConfirmation(userId, arbitrageId, request.firstLegId, first);
         return result(
           arbitrageId,
           request.hedgeCommandId,
@@ -212,6 +229,25 @@ export class ArbitrageHedgeStartService {
         secondLegDispatchStartedAt,
       );
     }
+    const secondDispatchedByThisStart = !second.idempotentReplay;
+    if (secondDispatchedByThisStart && pendingWithoutFill(second)) {
+      try {
+        second = await this.finalizeDispatchedLeg(userId, arbitrageId, secondLegId, second);
+      } catch {
+        const current = this.currentLegConfirmation(userId, arbitrageId, secondLegId, second);
+        return result(
+          arbitrageId,
+          request.hedgeCommandId,
+          "STOPPED_SECOND_LEG_UNKNOWN",
+          first,
+          current,
+          current.instance,
+          firstLegCompletedAt,
+          secondLegDispatchStartedAt,
+          "第二腿终态核验暂不可用；系统未重复下单。",
+        );
+      }
+    }
     const secondStop = stopStatus("SECOND", second);
     return result(
       arbitrageId,
@@ -222,17 +258,62 @@ export class ArbitrageHedgeStartService {
       second.instance,
       firstLegCompletedAt,
       secondLegDispatchStartedAt,
+      secondStop === "STOPPED_SECOND_LEG_PENDING" && secondDispatchedByThisStart
+        ? "第二腿在在线终态确认预算内仍未完成；系统未重复下单。"
+        : undefined,
     );
   }
 
-  private async finalizeFirstLeg(
+  private recordOutcome(
     userId: string,
     arbitrageId: string,
-    firstLegId: string,
+    commandId: string,
+    outcome: ArbitrageHedgeStartResult,
+  ) {
+    const instance = this.instances.get(userId, arbitrageId);
+    if (!instance) throw new Error("Arbitrage instance disappeared before Start outcome audit.");
+    const diagnostic = startOutcomeDiagnostic(outcome, instance);
+    this.instances.recordCommandOutcome(userId, {
+      commandId,
+      requestedByUserId: userId,
+      arbitrageId,
+      operation: "START",
+      terminalStatus: outcome.status,
+      stopPhase: diagnostic.phase,
+      stopReason: diagnostic.reason,
+      failedLegId: diagnostic.failedLegId,
+      completedLegIds: completedOpeningLegIds(instance),
+      currentManagedExposure: managedExposureSnapshot(instance),
+      terminalAt: this.now(),
+    });
+  }
+
+  private recordExceptionalOutcome(userId: string, arbitrageId: string, commandId: string, error: unknown) {
+    const instance = this.instances.get(userId, arbitrageId);
+    if (!instance) return;
+    this.instances.recordCommandOutcome(userId, {
+      commandId,
+      requestedByUserId: userId,
+      arbitrageId,
+      operation: "START",
+      terminalStatus: "ERROR",
+      stopPhase: "ORCHESTRATION",
+      stopReason: controlledStartErrorCode(error),
+      failedLegId: null,
+      completedLegIds: completedOpeningLegIds(instance),
+      currentManagedExposure: managedExposureSnapshot(instance),
+      terminalAt: this.now(),
+    });
+  }
+
+  private async finalizeDispatchedLeg(
+    userId: string,
+    arbitrageId: string,
+    legId: string,
     dispatched: ArbitrageLegExecutionConfirmation,
   ) {
-    const identity = reliableExecutionIdentity(dispatched, firstLegId);
-    if (identity === null) throw new Error("First-leg execution identity is unavailable for online finalization.");
+    const identity = reliableExecutionIdentity(dispatched, legId);
+    if (identity === null) throw new Error("Execution identity is unavailable for online finalization.");
     const budgetMs = positiveInteger(
       this.options.firstLegFinalizationBudgetMs ?? DEFAULT_FIRST_LEG_FINALIZATION_BUDGET_MS,
       "firstLegFinalizationBudgetMs",
@@ -262,25 +343,25 @@ export class ArbitrageHedgeStartService {
       }
       confirmation = await this.commands.reconcileLeg(userId, {
         arbitrageId,
-        legId: firstLegId,
+        legId,
         executionIntentId: identity.executionIntentId,
       });
-      assertSameExecutionIdentity(confirmation, firstLegId, identity);
+      assertSameExecutionIdentity(confirmation, legId, identity);
       if (!pendingWithoutFill(confirmation)) return confirmation;
     }
     return confirmation;
   }
 
-  private currentFirstLegConfirmation(
+  private currentLegConfirmation(
     userId: string,
     arbitrageId: string,
-    firstLegId: string,
+    legId: string,
     fallback: ArbitrageLegExecutionConfirmation,
   ) {
     const instance = this.instances.get(userId, arbitrageId);
     const reference = instance?.executionReferences.find((candidate) =>
       candidate.phase === "OPENING"
-      && candidate.legId === firstLegId
+      && candidate.legId === legId
       && candidate.executionIntentId === fallback.executionRecord.intentId);
     return instance && reference ? confirmationFromReference(instance, reference) : fallback;
   }
@@ -418,6 +499,48 @@ function stopStatus(
   return record.status === "CONFIRMED" ? null : `${prefix}PENDING`;
 }
 
+function startOutcomeDiagnostic(outcome: ArbitrageHedgeStartResult, instance: ArbitrageInstance) {
+  if (outcome.status === "COMPLETED") {
+    return Object.freeze({ phase: null, reason: null, failedLegId: null });
+  }
+  const firstLegFailed = outcome.status.includes("FIRST_LEG");
+  const secondLegFailed = outcome.status.includes("SECOND_LEG")
+    || outcome.status === "FIRST_LEG_CONFIRMED_REQUIRES_USER_CONTINUE"
+    || (outcome.status === "STOPPED_SAFETY" && outcome.firstLeg.status === "CONFIRMED");
+  const failedLegId = firstLegFailed
+    ? outcome.firstLeg.legId
+    : secondLegFailed
+      ? instance.legs.find(({ legId }) => legId !== outcome.firstLeg.legId)?.legId ?? null
+      : outcome.firstLeg.legId;
+  return Object.freeze({
+    phase: firstLegFailed ? "FIRST_LEG" : secondLegFailed ? "SECOND_LEG" : "SAFETY",
+    reason: outcome.status,
+    failedLegId,
+  });
+}
+
+function completedOpeningLegIds(instance: ArbitrageInstance) {
+  return Object.freeze(instance.legs.filter((leg) => instance.executionReferences.some((reference) =>
+    reference.legId === leg.legId
+    && reference.phase === "OPENING"
+    && reference.status === "CONFIRMED"
+    && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0))
+    .map(({ legId }) => legId));
+}
+
+function managedExposureSnapshot(instance: ArbitrageInstance) {
+  return Object.freeze(instance.legs.map((leg) => Object.freeze({
+    legId: leg.legId,
+    quantity: activeManagedQuantity(instance, leg),
+  })));
+}
+
+function controlledStartErrorCode(error: unknown) {
+  if (error instanceof ArbitrageExecutionCommandError) return error.category.toUpperCase();
+  if (error instanceof ArbitrageHedgeStartError) return error.category.toUpperCase();
+  return "START_INTERNAL_ERROR";
+}
+
 function pendingWithoutFill(confirmation: ArbitrageLegExecutionConfirmation) {
   const status = confirmation.executionRecord.status;
   return (status === "PENDING_CONFIRMATION" || status === "SUBMITTED")
@@ -452,7 +575,7 @@ function assertSameExecutionIdentity(
   if (confirmation.executionRecord.intentId !== expected.executionIntentId
     || confirmation.executionRecord.executionId !== expected.executionRecordId
     || reliableExecutionIdentity(confirmation, legId) === null) {
-    throw new Error("First-leg online finalization returned a different execution identity.");
+    throw new Error("Online finalization returned a different execution identity.");
   }
 }
 

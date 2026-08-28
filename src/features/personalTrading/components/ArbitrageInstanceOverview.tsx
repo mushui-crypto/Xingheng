@@ -113,7 +113,7 @@ export function ArbitrageInstanceOverview() {
       hasQuantityRuleDust={exitTarget.hasQuantityRuleDust}
       instance={exitTarget.instance}
       onClose={() => setExitTarget(null)}
-      onUpdated={(updated) => { void refreshInstance(updated.arbitrageId); }}
+      onUpdated={applyInstanceUpdate}
     /> : null}
   </>;
 }

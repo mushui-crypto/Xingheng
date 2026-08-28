@@ -29,7 +29,7 @@ import {
   verificationStatusLabel,
   type VerificationState,
 } from "./ArbitrageInstanceOverview";
-import { persistedExitProgress, remainingActiveManaged } from "./ArbitrageHedgeExitDialog";
+import { exitStopMessage, persistedExitProgress, remainingActiveManaged, submitExitOnce } from "./ArbitrageHedgeExitDialog";
 import { compareUnsignedDecimals } from "./ArbitrageLegCloseDialog";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -222,6 +222,8 @@ test("the browser submits one instance command and renders persisted two-leg pro
   assert.match(source, /确认中/u);
   assert.match(source, /系统将关闭所有可交易数量/u);
   assert.match(source, /小额残余不会记为交易成交/u);
+  assert.match(source, /交易处理中，正在等待交易所确认并同步最新仓位/u);
+  assert.match(source, /closeDisabled=\{busy\}/u);
   assert.doesNotMatch(source, /closeArbitrageExecutionLeg|\.closeLeg\(|legId:|quantity:|UnifiedRealTradingTest|Provider/u);
   const polling = source.slice(source.indexOf("setInterval"), source.indexOf("const submit"));
   assert.match(polling, /fetchArbitrageInstanceById/u);
@@ -234,6 +236,35 @@ test("the browser submits one instance command and renders persisted two-leg pro
   assert.match(instanceActions, /完整退出/u);
 });
 
+test("Exit keeps its dialog locked until terminal authoritative refresh completes", () => {
+  const source = readFileSync(new URL("./ArbitrageHedgeExitDialog.tsx", import.meta.url), "utf8");
+  const submit = source.slice(source.indexOf("const submit = async"), source.indexOf("const busy"));
+  assert.match(submit, /catch[\s\S]*finally[\s\S]*terminalRefreshCoordinator\.current\.refresh/u);
+  assert.match(submit, /terminalRefreshCoordinator\.current\.refresh[\s\S]*setStatus\(terminalStatus\)/u);
+  assert.match(source, /closeDisabled=\{busy\}/u);
+  assert.match(source, /状态刷新失败/u);
+  assert.match(source, /系统不会自动重发交易命令/u);
+  assert.doesNotMatch(submit, /catch[\s\S]*exitArbitrageInstance\(/u);
+});
+
+test("Exit uses a synchronous command guard so a double click cannot submit twice", async () => {
+  const guard = { current: false };
+  let requestCount = 0;
+  let release!: () => void;
+  const pending = new Promise<void>((resolve) => { release = resolve; });
+  const submit = async () => {
+    requestCount += 1;
+    await pending;
+  };
+  const first = submitExitOnce(guard, submit);
+  const duplicate = submitExitOnce(guard, submit);
+  assert.equal(requestCount, 1);
+  assert.equal(await duplicate, false);
+  release();
+  assert.equal(await first, true);
+  assert.equal(requestCount, 1);
+});
+
 test("exit partial progress preserves and displays remaining Active Managed", () => {
   const [current] = requireArbitrageInstanceList([arbitrageInstance("CLOSING")]);
   const partial = { ...current!, legs: [
@@ -241,6 +272,27 @@ test("exit partial progress preserves and displays remaining Active Managed", ()
     { ...current!.legs[1], confirmedOpenedQuantity: "100", confirmedClosedQuantity: "100" },
   ] as ArbitrageInstance["legs"] };
   assert.equal(remainingActiveManaged(partial), "30");
+});
+
+test("exit stop copy exposes controlled phase and reason without leaking raw Provider text", () => {
+  assert.equal(exitStopMessage({
+    failedLegId: "short-leg",
+    phase: "PERPETUAL_CLOSE",
+    reason: "POSITION_VERIFICATION_UNAVAILABLE",
+    completedLegIds: ["long-leg"],
+    currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "10" }],
+  }), "退出流程已停止于永续腿退出：当前交易所真实仓位暂时无法可靠确认。");
+
+  const rawProviderText = "provider stack: api-key=secret";
+  const message = exitStopMessage({
+    failedLegId: "short-leg",
+    phase: "PERPETUAL_CONFIRMATION",
+    reason: rawProviderText,
+    completedLegIds: [],
+    currentManagedExposure: [{ legId: "short-leg", quantity: "10" }],
+  });
+  assert.equal(message, "退出流程已停止于永续腿成交确认：当前安全条件未满足。");
+  assert.doesNotMatch(message, /provider|api-key|secret/iu);
 });
 
 test("arbitrage records do not expose order cancellation controls", () => {
