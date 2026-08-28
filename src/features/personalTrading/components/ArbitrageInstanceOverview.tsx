@@ -440,6 +440,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       </div>
       {historical ? null : <InstanceDeltaPanel instance={instance} state={deltaState} />}
       <ManagementHistory instance={instance} />
+      <LegacyUnresolvedSealHistory instance={instance} />
       {!historical && instance.status === "RESIDUAL" ? <p className="mt-4 text-xs text-amber-200">存在管理残余；当前证据不足以进一步判断具体原因。</p> : null}
       {!historical ? <HedgeExitActions
         canExit={canExitFully}
@@ -640,10 +641,28 @@ export function ManagementHistory({ instance }: { instance: ArbitrageInstance })
   </section>;
 }
 
+export function LegacyUnresolvedSealHistory({ instance }: { instance: ArbitrageInstance }) {
+  if (instance.legacyUnresolvedExecutionSeals.length === 0) return null;
+  return <section className="mt-4 border-t border-[#25282f] pt-4">
+    <h4 className="text-xs font-semibold text-white">历史异常封存记录</h4>
+    <p className="mt-2 text-xs leading-5 text-amber-200">封存仅终结该旧实例的管理责任；原始交易事实仍为 UNKNOWN，未被改写为成交、失败或未派发。</p>
+    <div className="mt-3 grid gap-2">{instance.legacyUnresolvedExecutionSeals.map((seal) => <dl
+      className="grid gap-2 border border-[#25282f] bg-[#0b0d11] p-3 text-xs sm:grid-cols-2"
+      key={seal.commandId}
+    >
+      <Metric label="交易状态" value="历史 UNKNOWN" />
+      <Metric label="处理状态" value="历史异常已封存" />
+      <Metric label="交易标的" value={seal.instrumentId} />
+      <Metric label="封存时间" value={formatTime(seal.sealedAt)} />
+    </dl>)}</div>
+  </section>;
+}
+
 export function managementEndMethodLabel(method: ReturnType<typeof deriveArbitrageManagementEndMethod>) {
   return method === "NORMAL_CLOSE" ? "正常退出完成"
     : method === "MANAGEMENT_RELEASE" ? "保留残余并结束跟踪"
-      : method === "MIXED" ? "部分正常退出 + 保留残余结束跟踪" : "—";
+      : method === "MIXED" ? "部分正常退出 + 保留残余结束跟踪"
+        : method === "LEGACY_UNRESOLVED_SEAL" ? "历史异常已封存" : "—";
 }
 
 function deltaValue(value: InstanceHedgeDelta["openingDelta"], asset: string | null) {

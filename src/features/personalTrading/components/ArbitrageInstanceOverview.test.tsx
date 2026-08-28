@@ -19,6 +19,7 @@ import {
   managementReleaseCandidates,
   managementEndMethodLabel,
   ManagementHistory,
+  LegacyUnresolvedSealHistory,
   ManagementReleaseActions,
   reconcileArbitrageHedge,
   statusLabel,
@@ -690,6 +691,33 @@ test("management history distinguishes normal close, release, and mixed manageme
   assert.match(releasedHtml, /不代表 Xingheng 已执行平仓/u);
   assert.doesNotMatch(releasedHtml, /已清仓|全部仓位已平仓/u);
   assert.match(mixedHtml, /部分正常退出 \+ 保留残余结束跟踪[\s\S]*正常确认退出数量[\s\S]*已保留残余数量/u);
+});
+
+test("sealed legacy UNKNOWN remains visible as UNKNOWN while lifecycle UI is terminal", () => {
+  const [closed] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
+  const sealed: ArbitrageInstance = {
+    ...closed!,
+    executionReferences: [{
+      arbitrageId: closed!.arbitrageId, legId: "long-leg", phase: "OPENING", quantityEffect: "INCREASE",
+      executionIntentId: "legacy-intent", executionRecordId: "legacy-record", requestedQuantity: "114.383757",
+      confirmedQuantity: "0", status: "UNKNOWN", createdAt: 1, updatedAt: 2,
+    }],
+    legacyUnresolvedExecutionSeals: [{
+      commandId: "seal-command", operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION", requestedByUserId: "user-a",
+      arbitrageId: closed!.arbitrageId, legId: "long-leg", executionIntentId: "legacy-intent",
+      executionRecordId: "legacy-record", venue: "okx", accountId: "account-a", instrumentId: "DOGE-USDT-SPOT",
+      originalStatus: "UNKNOWN", sealStatus: "LEGACY_UNRESOLVED_MANUALLY_SEALED",
+      reason: "LEGACY_RECOVERY_IDENTITY_GAP", businessPayloadFingerprint: "fingerprint", sealedAt: 3,
+    }],
+  };
+  const history = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[]} history={[sealed]} onPageChange={() => undefined} page={1} selectedSection="history"
+  />);
+  const audit = renderToStaticMarkup(<LegacyUnresolvedSealHistory instance={sealed} />);
+  assert.equal(managementEndMethodLabel("LEGACY_UNRESOLVED_SEAL"), "历史异常已封存");
+  assert.match(history, /实例管理已结束[\s\S]*历史异常已封存/u);
+  assert.match(audit, /交易状态[\s\S]*历史 UNKNOWN[\s\S]*处理状态[\s\S]*历史异常已封存/u);
+  assert.doesNotMatch(history, /继续开仓|确认开始真实对冲/u);
 });
 
 test("instance Delta UI keeps opening and active evidence independent and never turns residual into an order instruction", () => {

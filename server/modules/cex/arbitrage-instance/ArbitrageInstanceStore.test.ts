@@ -6,8 +6,59 @@ import { join } from "node:path";
 import test from "node:test";
 import { activeManagedQuantity, managedCurrentQuantity, type NewArbitrageInstance } from "./ArbitrageInstance";
 import { ArbitrageInstanceStore } from "./ArbitrageInstanceStore";
+import { SqliteExecutionRecordStore } from "../ExecutionRecordStore";
 
 const start = 1_800_000_000_000;
+
+test("seals only an identity-less legacy UNKNOWN while preserving execution facts and clearing its opening gate", async () => {
+  await withAsyncDatabase(async ({ dbPath }) => {
+    const store = new ArbitrageInstanceStore({ dbPath });
+    const records = new SqliteExecutionRecordStore({ dbPath });
+    try {
+      store.create(instance());
+      store.claimExecutionReference("user-a", "arbitrage-1", claim("long-leg", "legacy-intent", start + 1));
+      await records.create({
+        executionId: "legacy-record", intentId: "legacy-intent", userId: "user-a", venue: "okx",
+        accountId: "okx:account-a", instrumentId: "XAUT-USDT-PERP", status: "UNKNOWN",
+        createdAt: start + 1, updatedAt: start + 2,
+      });
+      store.linkExecutionRecord("user-a", "arbitrage-1", "legacy-intent", "legacy-record", start + 2);
+      store.applyExecutionResult("user-a", "arbitrage-1", {
+        executionIntentId: "legacy-intent", status: "UNKNOWN", confirmedQuantity: "0", updatedAt: start + 3,
+      });
+      const sealClaim = {
+        commandId: "seal-command", operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION" as const,
+        requestedByUserId: "user-a", arbitrageId: "arbitrage-1", legId: "long-leg",
+        executionIntentId: "legacy-intent", executionRecordId: "legacy-record", venue: "okx" as const,
+        accountId: "okx:account-a", instrumentId: "XAUT-USDT-PERP", originalStatus: "UNKNOWN" as const,
+        sealStatus: "LEGACY_UNRESOLVED_MANUALLY_SEALED" as const,
+        reason: "LEGACY_RECOVERY_IDENTITY_GAP" as const, businessPayloadFingerprint: "seal-fingerprint",
+        sealedAt: start + 4,
+      };
+      const result = store.sealLegacyUnresolvedExecution("user-a", "arbitrage-1", sealClaim);
+      assert.equal(result.instance.status, "CLOSED");
+      assert.equal(result.instance.closedAt, start + 4);
+      assert.equal(result.instance.executionReferences[0]?.status, "UNKNOWN");
+      assert.equal(result.instance.executionReferences[0]?.confirmedQuantity, "0");
+      assert.deepEqual(result.instance.legs.map((leg) => [leg.confirmedOpenedQuantity, leg.confirmedClosedQuantity]), [["0", "0"], ["0", "0"]]);
+      assert.equal(result.instance.legacyUnresolvedExecutionSeals?.[0]?.sealStatus, "LEGACY_UNRESOLVED_MANUALLY_SEALED");
+      assert.equal(store.listUnresolvedExecutionReferencesForRecovery().length, 0);
+      assert.equal(store.sealLegacyUnresolvedExecution("user-a", "arbitrage-1", sealClaim).idempotentReplay, true);
+
+      store.create(instance({ arbitrageId: "future-opening" }));
+      assert.doesNotThrow(() => store.claimExecutionReference(
+        "user-a", "future-opening", claim("long-leg", "future-intent", start + 5),
+      ));
+      const persisted = await records.loadForUser("user-a", "legacy-record");
+      assert.equal(persisted?.status, "UNKNOWN");
+      assert.equal(persisted?.executionAttemptId, undefined);
+      assert.equal(persisted?.remoteOrderId, undefined);
+    } finally {
+      records.close();
+      store.close();
+    }
+  });
+});
 
 test("creates and reads an isolated OPENING instance with exactly two legs and nullable PnL", () => {
   withStore(({ store }) => {
@@ -1732,6 +1783,15 @@ function withDatabase(operation: (fixture: { dbPath: string }) => void) {
   const root = mkdtempSync(join(tmpdir(), "arbitrage-instance-store-"));
   try {
     operation({ dbPath: join(root, "arbitrage-instances.sqlite") });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+async function withAsyncDatabase(operation: (fixture: { dbPath: string }) => Promise<void>) {
+  const root = mkdtempSync(join(tmpdir(), "arbitrage-instance-store-"));
+  try {
+    await operation({ dbPath: join(root, "arbitrage-instances.sqlite") });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

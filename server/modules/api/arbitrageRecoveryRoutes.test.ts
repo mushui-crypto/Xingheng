@@ -29,6 +29,10 @@ test("recovery routes expose owner-scoped summary, anomaly filters, and confirme
       calls.push({ method: "spot", userId, input });
       return { providerMutationCount: 0 } as never;
     },
+    async sealLegacyUnresolvedExecution(userId, input) {
+      calls.push({ method: "seal", userId, input });
+      return { providerMutationCount: 0 } as never;
+    },
   });
   const server = app.listen(0, "127.0.0.1");
   await new Promise<void>((resolve) => server.once("listening", resolve));
@@ -46,12 +50,16 @@ test("recovery routes expose owner-scoped summary, anomaly filters, and confirme
   assert.equal((await fetch(`${base}/api/arbitrage-recovery/spot-attribution`, {
     method: "POST", headers, body: JSON.stringify({ recoveryId: "r2", confirmed: true }),
   })).status, 200);
+  assert.equal((await fetch(`${base}/api/arbitrage-recovery/seal-legacy-unresolved`, {
+    method: "POST", headers, body: JSON.stringify({ commandId: "c1", confirmed: true }),
+  })).status, 200);
   assert.equal((await fetch(`${base}/api/arbitrage-recovery/summary`)).status, 400);
   assert.deepEqual(calls.map(({ method, userId }) => ({ method, userId })), [
     { method: "summary", userId: "user-a" },
     { method: "anomalies", userId: "user-a" },
     { method: "legacy", userId: "user-a" },
     { method: "spot", userId: "user-a" },
+    { method: "seal", userId: "user-a" },
   ]);
 });
 

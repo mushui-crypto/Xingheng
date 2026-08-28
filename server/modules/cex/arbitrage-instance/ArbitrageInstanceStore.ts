@@ -17,6 +17,7 @@ import {
   type ArbitrageInstance,
   type ArbitrageInstanceLeg,
   type ArbitrageLegManagementRelease,
+  type ArbitrageLegacyUnresolvedExecutionSeal,
   type ArbitrageInstanceStatus,
   type ArbitragePnlSummary,
   type ArbitrageQuantityEffect,
@@ -117,6 +118,14 @@ export type UnstartedArbitrageAbandonmentAudit = Readonly<{
 export type UnstartedArbitrageAbandonmentResult = Readonly<{
   instance: ArbitrageInstance;
   audit: UnstartedArbitrageAbandonmentAudit;
+  idempotentReplay: boolean;
+}>;
+
+export type LegacyUnresolvedExecutionSealClaim = ArbitrageLegacyUnresolvedExecutionSeal;
+
+export type LegacyUnresolvedExecutionSealResult = Readonly<{
+  instance: ArbitrageInstance;
+  seal: ArbitrageLegacyUnresolvedExecutionSeal;
   idempotentReplay: boolean;
 }>;
 
@@ -291,6 +300,8 @@ type UnstartedArbitrageAbandonmentRow = Readonly<{
   requestedAt: number;
   confirmedAt: number;
 }>;
+
+type LegacyUnresolvedExecutionSealRow = ArbitrageLegacyUnresolvedExecutionSeal;
 
 type SpotOpeningAttributionEvidenceRow = Readonly<{
   arbitrageId: string;
@@ -567,6 +578,121 @@ export class ArbitrageInstanceStore {
     return Object.freeze(rows.map(unstartedArbitrageAbandonmentFromRow));
   }
 
+  sealLegacyUnresolvedExecution(
+    userId: string,
+    arbitrageId: string,
+    claim: LegacyUnresolvedExecutionSealClaim,
+  ): LegacyUnresolvedExecutionSealResult {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalized = normalizeLegacyUnresolvedExecutionSealClaim(claim);
+    if (normalized.requestedByUserId !== normalizedUserId || normalized.arbitrageId !== normalizedArbitrageId) {
+      throw new Error("Legacy unresolved execution seal identity does not match the authenticated instance.");
+    }
+    return this.transaction(() => {
+      const byCommand = this.legacySealByCommand(normalized.commandId);
+      if (byCommand) {
+        if (!sameLegacyUnresolvedExecutionSeal(byCommand, normalized)) {
+          throw new Error("Legacy unresolved execution seal command idempotency conflict.");
+        }
+        return this.legacySealReplay(normalizedUserId, normalizedArbitrageId, byCommand);
+      }
+      if (this.commandFingerprint(normalized.commandId)) {
+        throw new Error("Legacy unresolved execution seal command idempotency conflict.");
+      }
+      const byFingerprint = this.legacySealByFingerprint(normalized.businessPayloadFingerprint);
+      if (byFingerprint) return this.legacySealReplay(normalizedUserId, normalizedArbitrageId, byFingerprint);
+
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      const leg = instance.legs.find((candidate) => candidate.legId === normalized.legId);
+      const reference = instance.executionReferences.find(
+        (candidate) => candidate.executionIntentId === normalized.executionIntentId,
+      );
+      if (instance.status !== "OPENING" || !leg || !reference || reference.legId !== normalized.legId
+        || reference.executionRecordId !== normalized.executionRecordId
+        || reference.phase !== "OPENING" || reference.quantityEffect !== "INCREASE"
+        || reference.status !== "UNKNOWN" || reference.confirmedQuantity !== "0") {
+        throw new Error("Legacy unresolved execution is not eligible for sealing.");
+      }
+      if (leg.venue !== normalized.venue || leg.accountId !== normalized.accountId
+        || leg.instrumentId !== normalized.instrumentId
+        || instance.legs.some((candidate) => candidate.confirmedOpenedQuantity !== "0"
+          || candidate.confirmedClosedQuantity !== "0" || activeManagedQuantity(instance, candidate) !== "0")
+        || (instance.managementReleases?.length ?? 0) !== 0
+        || instance.executionReferences.filter((candidate) => UNRESOLVED_REFERENCE_STATUSES.includes(candidate.status)).length !== 1) {
+        throw new Error("Legacy unresolved execution has managed exposure or conflicting unresolved facts.");
+      }
+      const record = this.db.prepare(`SELECT * FROM execution_records
+        WHERE executionId = ? AND userId = ? AND intentId = ?`).get(
+          normalized.executionRecordId, normalizedUserId, normalized.executionIntentId,
+        ) as Record<string, unknown> | undefined;
+      if (!record || record.state !== "UNKNOWN" || record.venue !== normalized.venue
+        || record.accountId !== normalized.accountId || record.instrumentId !== normalized.instrumentId
+        || record.executionAttemptId !== null || record.remoteOrderId !== null) {
+        throw new Error("Legacy unresolved execution still has recoverable identity or inconsistent facts.");
+      }
+      const hasOrderReference = this.tableExists("execution_order_references")
+        && Boolean(this.db.prepare(`SELECT 1 FROM execution_order_references
+          WHERE executionId = ? LIMIT 1`).get(normalized.executionRecordId));
+      if (hasOrderReference) throw new Error("Legacy unresolved execution has recoverable Provider identity.");
+      const hasAttribution = Boolean(this.db.prepare(`SELECT 1 FROM arbitrage_spot_opening_attribution_evidence
+        WHERE arbitrageId = ? LIMIT 1`).get(normalizedArbitrageId));
+      if (hasAttribution) throw new Error("Legacy unresolved execution already has opening attribution evidence.");
+      const otherDomainUnresolved = this.db.prepare(`SELECT 1
+        FROM arbitrage_execution_references candidateReference
+        JOIN arbitrage_instance_legs candidateLeg
+          ON candidateLeg.arbitrageId = candidateReference.arbitrageId
+          AND candidateLeg.legId = candidateReference.legId
+        JOIN arbitrage_instances owner ON owner.arbitrageId = candidateReference.arbitrageId
+        WHERE owner.userId = ? AND candidateLeg.venue = ? AND candidateLeg.accountId = ?
+          AND candidateLeg.instrumentId = ? AND candidateReference.phase = 'OPENING'
+          AND candidateReference.quantityEffect = 'INCREASE'
+          AND candidateReference.status IN ('CLAIMED', 'LINKED', 'PENDING_CONFIRMATION', 'UNKNOWN')
+          AND NOT (candidateReference.arbitrageId = ? AND candidateReference.executionIntentId = ?)
+          AND NOT EXISTS (SELECT 1 FROM arbitrage_legacy_unresolved_execution_seals priorSeal
+            WHERE priorSeal.arbitrageId = candidateReference.arbitrageId
+              AND priorSeal.executionIntentId = candidateReference.executionIntentId)
+        LIMIT 1`).get(
+          normalizedUserId, normalized.venue, normalized.accountId, normalized.instrumentId,
+          normalizedArbitrageId, normalized.executionIntentId,
+        );
+      if (otherDomainUnresolved) {
+        throw new Error("Legacy unresolved execution domain has a newer unresolved execution.");
+      }
+
+      const sealedAt = Math.max(normalized.sealedAt, instance.updatedAt, reference.updatedAt);
+      this.db.prepare(`INSERT INTO arbitrage_legacy_unresolved_execution_seals (
+        commandId, operationType, requestedByUserId, arbitrageId, legId, executionIntentId,
+        executionRecordId, venue, accountId, instrumentId, originalStatus, sealStatus,
+        reason, businessPayloadFingerprint, sealedAt
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        normalized.commandId, normalized.operationType, normalized.requestedByUserId,
+        normalized.arbitrageId, normalized.legId, normalized.executionIntentId,
+        normalized.executionRecordId, normalized.venue, normalized.accountId,
+        normalized.instrumentId, normalized.originalStatus, normalized.sealStatus,
+        normalized.reason, normalized.businessPayloadFingerprint, sealedAt,
+      );
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, {
+        status: "CLOSED", openedAt: instance.openedAt, closedAt: sealedAt, updatedAt: sealedAt,
+      });
+      const row = this.legacySealByCommand(normalized.commandId);
+      if (!row) throw new Error("Legacy unresolved execution seal audit persistence failed.");
+      return Object.freeze({
+        instance: this.requireForUser(normalizedUserId, normalizedArbitrageId),
+        seal: legacyUnresolvedExecutionSealFromRow(row), idempotentReplay: false,
+      });
+    });
+  }
+
+  listLegacyUnresolvedExecutionSealsForUser(userId: string) {
+    const rows = this.db.prepare(`SELECT seal.* FROM arbitrage_legacy_unresolved_execution_seals seal
+      JOIN arbitrage_instances owner ON owner.arbitrageId = seal.arbitrageId
+      WHERE owner.userId = ? ORDER BY seal.sealedAt DESC, seal.commandId ASC`).all(
+        identifier(userId, "userId"),
+      ) as unknown as LegacyUnresolvedExecutionSealRow[];
+    return Object.freeze(rows.map(legacyUnresolvedExecutionSealFromRow));
+  }
+
   listActive(userId: string) {
     return this.listForStatuses(identifier(userId, "userId"), ACTIVE_STATUSES);
   }
@@ -602,6 +728,9 @@ export class ArbitrageInstanceStore {
       JOIN arbitrage_instance_legs leg
         ON leg.arbitrageId = reference.arbitrageId AND leg.legId = reference.legId
       WHERE reference.status IN ('CLAIMED', 'LINKED', 'PENDING_CONFIRMATION', 'UNKNOWN')
+        AND NOT EXISTS (SELECT 1 FROM arbitrage_legacy_unresolved_execution_seals seal
+          WHERE seal.arbitrageId = reference.arbitrageId
+            AND seal.executionIntentId = reference.executionIntentId)
       ORDER BY reference.createdAt ASC, reference.executionIntentId ASC`).all() as unknown as UnresolvedRecoveryCandidateRow[];
     return Object.freeze(rows.map(unresolvedRecoveryCandidateFromRow));
   }
@@ -1369,7 +1498,42 @@ export class ArbitrageInstanceStore {
         'INSTANCE' AS legId, arbitrageId AS referenceId, businessPayloadFingerprint,
         confirmedAt AS createdAt
       FROM arbitrage_unstarted_abandonments WHERE commandId = ?
-      LIMIT 1`).get(commandId, commandId) as unknown as CommandIdempotencyRow | undefined;
+      UNION ALL
+      SELECT commandId, operationType, requestedByUserId, arbitrageId,
+        legId, executionRecordId AS referenceId, businessPayloadFingerprint,
+        sealedAt AS createdAt
+      FROM arbitrage_legacy_unresolved_execution_seals WHERE commandId = ?
+      LIMIT 1`).get(commandId, commandId, commandId) as unknown as CommandIdempotencyRow | undefined;
+  }
+
+  private legacySealByCommand(commandId: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_legacy_unresolved_execution_seals
+      WHERE commandId = ?`).get(commandId) as unknown as LegacyUnresolvedExecutionSealRow | undefined;
+  }
+
+  private legacySealByFingerprint(businessPayloadFingerprint: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_legacy_unresolved_execution_seals
+      WHERE businessPayloadFingerprint = ?`).get(
+        businessPayloadFingerprint,
+      ) as unknown as LegacyUnresolvedExecutionSealRow | undefined;
+  }
+
+  private legacySealReplay(userId: string, arbitrageId: string, row: LegacyUnresolvedExecutionSealRow) {
+    const instance = this.requireForUser(userId, arbitrageId);
+    const reference = instance.executionReferences.find(
+      (candidate) => candidate.executionIntentId === row.executionIntentId,
+    );
+    if (instance.status !== "CLOSED" || instance.closedAt !== row.sealedAt
+      || !reference || reference.status !== "UNKNOWN" || reference.confirmedQuantity !== "0"
+      || instance.legs.some((leg) => leg.confirmedOpenedQuantity !== "0"
+        || leg.confirmedClosedQuantity !== "0" || activeManagedQuantity(instance, leg) !== "0")) {
+      throw new Error("Legacy unresolved execution seal audit does not match its lifecycle projection.");
+    }
+    return Object.freeze({ instance, seal: legacyUnresolvedExecutionSealFromRow(row), idempotentReplay: true });
+  }
+
+  private tableExists(name: string) {
+    return Boolean(this.db.prepare(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`).get(name));
   }
 
   private unstartedAbandonmentByCommand(commandId: string) {
@@ -1437,6 +1601,10 @@ export class ArbitrageInstanceStore {
       WHERE arbitrageId = ? ORDER BY confirmedAt ASC, releaseId ASC`).all(
       row.arbitrageId,
     ) as unknown as ManagementReleaseRow[];
+    const legacySeals = this.db.prepare(`SELECT * FROM arbitrage_legacy_unresolved_execution_seals
+      WHERE arbitrageId = ? ORDER BY sealedAt ASC, commandId ASC`).all(
+        row.arbitrageId,
+      ) as unknown as LegacyUnresolvedExecutionSealRow[];
     return Object.freeze({
       arbitrageId: row.arbitrageId,
       userId: row.userId,
@@ -1451,6 +1619,7 @@ export class ArbitrageInstanceStore {
       legs: Object.freeze(legs.map(legFromRow)) as unknown as readonly [ArbitrageInstanceLeg, ArbitrageInstanceLeg],
       executionReferences: Object.freeze(references.map(referenceFromRow)),
       managementReleases: Object.freeze(releases.map(managementReleaseFromRow)),
+      legacyUnresolvedExecutionSeals: Object.freeze(legacySeals.map(legacyUnresolvedExecutionSealFromRow)),
       pnl: Object.freeze({
         asset: row.pnlAsset,
         cumulativeFundingPnl: row.cumulativeFundingPnl,
@@ -1495,6 +1664,9 @@ export class ArbitrageInstanceStore {
         AND candidate.instrumentId = ? AND reference.phase = 'OPENING'
         AND reference.quantityEffect = 'INCREASE'
         AND reference.status IN ('CLAIMED', 'LINKED', 'PENDING_CONFIRMATION', 'UNKNOWN')
+        AND NOT EXISTS (SELECT 1 FROM arbitrage_legacy_unresolved_execution_seals seal
+          WHERE seal.arbitrageId = reference.arbitrageId
+            AND seal.executionIntentId = reference.executionIntentId)
       LIMIT 1`).get(instance.userId, leg.venue, leg.accountId, leg.instrumentId);
     if (unresolvedForMutationDomain) {
       throw new Error("Provider mutation domain already has an unresolved risk-increasing opening execution.");
@@ -1755,6 +1927,27 @@ export class ArbitrageInstanceStore {
       requestedAt INTEGER NOT NULL,
       confirmedAt INTEGER NOT NULL,
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS arbitrage_legacy_unresolved_execution_seals (
+      commandId TEXT PRIMARY KEY,
+      operationType TEXT NOT NULL CHECK (operationType = 'SEAL_LEGACY_UNRESOLVED_EXECUTION'),
+      requestedByUserId TEXT NOT NULL,
+      arbitrageId TEXT NOT NULL UNIQUE,
+      legId TEXT NOT NULL,
+      executionIntentId TEXT NOT NULL UNIQUE,
+      executionRecordId TEXT NOT NULL UNIQUE,
+      venue TEXT NOT NULL CHECK (venue IN ('binance', 'okx', 'bybit', 'bitget')),
+      accountId TEXT NOT NULL,
+      instrumentId TEXT NOT NULL,
+      originalStatus TEXT NOT NULL CHECK (originalStatus = 'UNKNOWN'),
+      sealStatus TEXT NOT NULL CHECK (sealStatus = 'LEGACY_UNRESOLVED_MANUALLY_SEALED'),
+      reason TEXT NOT NULL CHECK (reason = 'LEGACY_RECOVERY_IDENTITY_GAP'),
+      businessPayloadFingerprint TEXT NOT NULL UNIQUE,
+      sealedAt INTEGER NOT NULL,
+      FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId),
+      FOREIGN KEY (arbitrageId, executionIntentId)
+        REFERENCES arbitrage_execution_references(arbitrageId, executionIntentId)
     ) STRICT;`);
     const commandColumns = new Set((this.db.prepare(
       "PRAGMA table_info(arbitrage_command_idempotency)",
@@ -1806,6 +1999,60 @@ function normalizeUnstartedArbitrageAbandonmentClaim(
     requestedAt,
     confirmedAt,
   });
+}
+
+function normalizeLegacyUnresolvedExecutionSealClaim(
+  claim: LegacyUnresolvedExecutionSealClaim,
+): LegacyUnresolvedExecutionSealClaim {
+  if (claim.operationType !== "SEAL_LEGACY_UNRESOLVED_EXECUTION"
+    || claim.originalStatus !== "UNKNOWN"
+    || claim.sealStatus !== "LEGACY_UNRESOLVED_MANUALLY_SEALED"
+    || claim.reason !== "LEGACY_RECOVERY_IDENTITY_GAP") {
+    throw new Error("Legacy unresolved execution seal semantics are invalid.");
+  }
+  return Object.freeze({
+    commandId: identifier(claim.commandId, "commandId"),
+    operationType: claim.operationType,
+    requestedByUserId: identifier(claim.requestedByUserId, "requestedByUserId"),
+    arbitrageId: identifier(claim.arbitrageId, "arbitrageId"),
+    legId: identifier(claim.legId, "legId"),
+    executionIntentId: identifier(claim.executionIntentId, "executionIntentId"),
+    executionRecordId: identifier(claim.executionRecordId, "executionRecordId"),
+    venue: venue(claim.venue),
+    accountId: identifier(claim.accountId, "accountId"),
+    instrumentId: identifier(claim.instrumentId, "instrumentId"),
+    originalStatus: claim.originalStatus,
+    sealStatus: claim.sealStatus,
+    reason: claim.reason,
+    businessPayloadFingerprint: identifier(claim.businessPayloadFingerprint, "businessPayloadFingerprint"),
+    sealedAt: timestamp(claim.sealedAt, "sealedAt"),
+  });
+}
+
+function legacyUnresolvedExecutionSealFromRow(
+  row: LegacyUnresolvedExecutionSealRow,
+): ArbitrageLegacyUnresolvedExecutionSeal {
+  return normalizeLegacyUnresolvedExecutionSealClaim(row);
+}
+
+function sameLegacyUnresolvedExecutionSeal(
+  row: LegacyUnresolvedExecutionSealRow,
+  claim: LegacyUnresolvedExecutionSealClaim,
+) {
+  return row.commandId === claim.commandId
+    && row.operationType === claim.operationType
+    && row.requestedByUserId === claim.requestedByUserId
+    && row.arbitrageId === claim.arbitrageId
+    && row.legId === claim.legId
+    && row.executionIntentId === claim.executionIntentId
+    && row.executionRecordId === claim.executionRecordId
+    && row.venue === claim.venue
+    && row.accountId === claim.accountId
+    && row.instrumentId === claim.instrumentId
+    && row.originalStatus === claim.originalStatus
+    && row.sealStatus === claim.sealStatus
+    && row.reason === claim.reason
+    && row.businessPayloadFingerprint === claim.businessPayloadFingerprint;
 }
 
 function unstartedArbitrageAbandonmentFromRow(

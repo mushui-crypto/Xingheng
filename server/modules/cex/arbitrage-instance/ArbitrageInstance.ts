@@ -66,6 +66,24 @@ export type ArbitrageLegManagementRelease = Readonly<{
   realityCheckedAt: number;
 }>;
 
+export type ArbitrageLegacyUnresolvedExecutionSeal = Readonly<{
+  commandId: string;
+  operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION";
+  requestedByUserId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string;
+  venue: ExecutionVenue;
+  accountId: string;
+  instrumentId: string;
+  originalStatus: "UNKNOWN";
+  sealStatus: "LEGACY_UNRESOLVED_MANUALLY_SEALED";
+  reason: "LEGACY_RECOVERY_IDENTITY_GAP";
+  businessPayloadFingerprint: string;
+  sealedAt: number;
+}>;
+
 export type ArbitragePnlSummary = Readonly<{
   asset: string | null;
   cumulativeFundingPnl: string | null;
@@ -91,6 +109,8 @@ export type ArbitrageInstance = Readonly<{
   executionReferences: readonly ArbitrageExecutionReference[];
   /** Explicit user decisions to stop managing a leg; never execution evidence. */
   managementReleases?: readonly ArbitrageLegManagementRelease[];
+  /** Audit-only resolution of a legacy UNKNOWN; never Provider execution evidence. */
+  legacyUnresolvedExecutionSeals?: readonly ArbitrageLegacyUnresolvedExecutionSeal[];
   pnl: ArbitragePnlSummary;
 }>;
 

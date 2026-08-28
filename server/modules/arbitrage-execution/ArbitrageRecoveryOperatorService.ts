@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExecutionVenue } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
@@ -21,6 +22,8 @@ type InstanceStore = Pick<ArbitrageInstanceStore,
   | "repairLegacyPartialConfirmed"
   | "readSpotOpeningAttributionEvidence"
   | "recordSpotOpeningAttributionEvidence"
+  | "sealLegacyUnresolvedExecution"
+  | "listLegacyUnresolvedExecutionSealsForUser"
 >;
 
 type RuntimeResolver = Readonly<{
@@ -74,7 +77,58 @@ export class ArbitrageRecoveryOperatorService {
       manualReviewCount: anomaly.manualReview + anomaly.integrityErrors,
       recoverableCount: anomaly.recoverable,
       recoveryAudit: this.audits.listForUser(userId),
+      legacyUnresolvedExecutionSeals: this.instances.listLegacyUnresolvedExecutionSealsForUser(userId),
     });
+  }
+
+  async sealLegacyUnresolvedExecution(authenticatedUserId: string, input: unknown) {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const request = parseLegacySealRequest(input);
+    const target = this.requireTarget(userId, request);
+    if (!target.reference.executionRecordId) {
+      throw operatorError("manual_review_required", "Legacy UNKNOWN has no ExecutionRecord linkage.");
+    }
+    const record = await this.requireExecutionRecord(userId, target);
+    if (target.reference.phase !== "OPENING"
+      || target.reference.quantityEffect !== "INCREASE" || target.reference.status !== "UNKNOWN"
+      || target.reference.confirmedQuantity !== "0" || record.status !== "UNKNOWN") {
+      throw operatorError("recovery_conflict", "Legacy UNKNOWN no longer matches seal eligibility.");
+    }
+    const sealedAt = now(this.clock);
+    const fingerprint = createHash("sha256").update(JSON.stringify({
+      operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION",
+      userId,
+      arbitrageId: request.arbitrageId,
+      legId: request.legId,
+      executionIntentId: request.executionIntentId,
+      executionRecordId: record.executionId,
+      venue: target.leg.venue,
+      accountId: target.leg.accountId,
+      instrumentId: target.leg.instrumentId,
+      reason: request.reason,
+    })).digest("hex");
+    try {
+      const result = this.instances.sealLegacyUnresolvedExecution(userId, request.arbitrageId, {
+        commandId: request.commandId,
+        operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION",
+        requestedByUserId: userId,
+        arbitrageId: request.arbitrageId,
+        legId: request.legId,
+        executionIntentId: request.executionIntentId,
+        executionRecordId: record.executionId,
+        venue: target.leg.venue,
+        accountId: target.leg.accountId,
+        instrumentId: target.leg.instrumentId,
+        originalStatus: "UNKNOWN",
+        sealStatus: "LEGACY_UNRESOLVED_MANUALLY_SEALED",
+        reason: request.reason,
+        businessPayloadFingerprint: fingerprint,
+        sealedAt,
+      });
+      return Object.freeze({ ...result, providerMutationCount: 0 });
+    } catch (error) {
+      throw operatorError("recovery_conflict", safeStoreConflict(error));
+    }
   }
 
   readAnomalies(authenticatedUserId: string, input: unknown = {}) {
@@ -193,7 +247,10 @@ export class ArbitrageRecoveryOperatorService {
     return Object.freeze({ evidence, providerMutationCount: 0 });
   }
 
-  private requireTarget(userId: string, request: RepairRequest) {
+  private requireTarget(
+    userId: string,
+    request: Pick<RepairRequest, "arbitrageId" | "legId" | "executionIntentId">,
+  ) {
     const instance = this.instances.get(userId, request.arbitrageId);
     if (!instance) throw operatorError("recovery_target_not_found", "Recovery instance was not found.");
     const leg = instance.legs.find(({ legId }) => legId === request.legId);
@@ -235,6 +292,30 @@ type RepairRequest = Readonly<{
   executionIntentId: string;
   confirmed: true;
 }>;
+
+type LegacySealRequest = Readonly<{
+  commandId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  reason: "LEGACY_RECOVERY_IDENTITY_GAP";
+  confirmed: true;
+}>;
+
+function parseLegacySealRequest(input: unknown): LegacySealRequest {
+  const value = object(input);
+  if (value.confirmed !== true || value.reason !== "LEGACY_RECOVERY_IDENTITY_GAP") {
+    throw operatorError("invalid_recovery_request", "Legacy UNKNOWN seal requires explicit confirmation and reason.");
+  }
+  return Object.freeze({
+    commandId: identifier(value.commandId, "commandId"),
+    arbitrageId: identifier(value.arbitrageId, "arbitrageId"),
+    legId: identifier(value.legId, "legId"),
+    executionIntentId: identifier(value.executionIntentId, "executionIntentId"),
+    reason: value.reason,
+    confirmed: true,
+  });
+}
 
 function parseRepairRequest(input: unknown): RepairRequest {
   const value = object(input);
@@ -318,4 +399,10 @@ function operatorError(
   message: string,
 ) {
   return new ArbitrageRecoveryOperatorError(category, message);
+}
+
+function safeStoreConflict(error: unknown) {
+  return error instanceof Error && /idempotency conflict/iu.test(error.message)
+    ? "Legacy UNKNOWN seal command conflicts with an existing operation."
+    : "Legacy UNKNOWN no longer satisfies the strict seal eligibility boundary.";
 }

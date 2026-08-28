@@ -424,6 +424,7 @@ function instance(executionReferences: ArbitrageInstance["executionReferences"])
     ],
     executionReferences,
     managementReleases: [],
+    legacyUnresolvedExecutionSeals: [],
     pnl: { asset: null, cumulativeFundingPnl: null, realizedTradingPnl: null, feesCosts: null, cumulativeNetPnl: null, updatedAt: null },
   };
 }

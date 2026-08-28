@@ -172,6 +172,73 @@ test("LOCAL_PRE_DISPATCH FAILED0 persists audit in the same store transaction", 
   assert.equal(audit.newQuantity, "0");
 });
 
+test("legacy UNKNOWN seal is explicit, idempotent, preserves UNKNOWN, and never calls Provider runtime", async (t) => {
+  const fixture = baseFixture(t);
+  fixture.instances.claimExecutionReference("user-a", "arbitrage-1", {
+    legId: "long-leg", phase: "OPENING", quantityEffect: "INCREASE",
+    executionIntentId: "legacy-unknown-intent", requestedQuantity: "100", createdAt: 2,
+  });
+  await fixture.records.create(createExecutionRecord({
+    executionId: "legacy-unknown-record", intentId: "legacy-unknown-intent", userId: "user-a",
+    venue: "okx", accountId: "account-a", instrumentId: "BTC-USDT-SPOT", status: "UNKNOWN",
+    createdAt: 2, updatedAt: 3,
+  }));
+  fixture.instances.linkExecutionRecord(
+    "user-a", "arbitrage-1", "legacy-unknown-intent", "legacy-unknown-record", 3,
+  );
+  fixture.instances.applyExecutionResult("user-a", "arbitrage-1", {
+    executionIntentId: "legacy-unknown-intent", status: "UNKNOWN", confirmedQuantity: "0", updatedAt: 4,
+  });
+  const runtimeCalls = { count: 0 };
+  const service = operatorService(fixture, { runtime: async () => {
+    runtimeCalls.count += 1;
+    throw new Error("must not run");
+  } });
+  const request = {
+    commandId: "legacy-seal-command", arbitrageId: "arbitrage-1", legId: "long-leg",
+    executionIntentId: "legacy-unknown-intent", reason: "LEGACY_RECOVERY_IDENTITY_GAP", confirmed: true,
+  } as const;
+  const first = await service.sealLegacyUnresolvedExecution("user-a", request);
+  const replay = await service.sealLegacyUnresolvedExecution("user-a", request);
+  assert.equal(first.instance.status, "CLOSED");
+  assert.equal(first.instance.executionReferences[0]?.status, "UNKNOWN");
+  assert.equal(first.instance.executionReferences[0]?.confirmedQuantity, "0");
+  assert.deepEqual(first.instance.legs.map(({ confirmedOpenedQuantity, confirmedClosedQuantity }) =>
+    [confirmedOpenedQuantity, confirmedClosedQuantity]), [["0", "0"], ["0", "0"]]);
+  assert.equal(first.seal.sealStatus, "LEGACY_UNRESOLVED_MANUALLY_SEALED");
+  assert.equal(replay.idempotentReplay, true);
+  assert.equal(runtimeCalls.count, 0);
+  assert.equal(service.readSummary("user-a").unresolvedExecutions.length, 0);
+  assert.equal(service.readSummary("user-a").legacyUnresolvedExecutionSeals.length, 1);
+});
+
+test("legacy UNKNOWN seal rejects recoverable identity and explicit-confirmation omissions", async (t) => {
+  const fixture = baseFixture(t);
+  fixture.instances.claimExecutionReference("user-a", "arbitrage-1", {
+    legId: "long-leg", phase: "OPENING", quantityEffect: "INCREASE",
+    executionIntentId: "recoverable-intent", requestedQuantity: "100", createdAt: 2,
+  });
+  await fixture.records.create(createExecutionRecord({
+    executionId: "recoverable-record", intentId: "recoverable-intent", executionAttemptId: "attempt-1",
+    userId: "user-a", venue: "okx", accountId: "account-a", instrumentId: "BTC-USDT-SPOT",
+    status: "UNKNOWN", createdAt: 2, updatedAt: 3,
+  }));
+  fixture.instances.linkExecutionRecord("user-a", "arbitrage-1", "recoverable-intent", "recoverable-record", 3);
+  fixture.instances.applyExecutionResult("user-a", "arbitrage-1", {
+    executionIntentId: "recoverable-intent", status: "UNKNOWN", confirmedQuantity: "0", updatedAt: 4,
+  });
+  const service = operatorService(fixture);
+  const request = {
+    commandId: "reject-seal", arbitrageId: "arbitrage-1", legId: "long-leg",
+    executionIntentId: "recoverable-intent", reason: "LEGACY_RECOVERY_IDENTITY_GAP", confirmed: true,
+  } as const;
+  await assert.rejects(service.sealLegacyUnresolvedExecution("user-a", request),
+    (error: unknown) => error instanceof ArbitrageRecoveryOperatorError && error.category === "recovery_conflict");
+  await assert.rejects(service.sealLegacyUnresolvedExecution("user-a", { ...request, confirmed: false }),
+    (error: unknown) => error instanceof ArbitrageRecoveryOperatorError && error.category === "invalid_recovery_request");
+  assert.equal(fixture.instances.get("user-a", "arbitrage-1")?.status, "OPENING");
+});
+
 function legacyFixture(
   t: test.TestContext,
   provider: Readonly<{ status: ExecutionRecord["status"]; confirmedQuantity: string | null }>,

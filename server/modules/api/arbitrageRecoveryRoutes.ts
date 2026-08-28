@@ -7,7 +7,8 @@ import {
 export function registerArbitrageRecoveryRoutes(
   app: express.Express,
   service: Pick<ArbitrageRecoveryOperatorService,
-    "readSummary" | "readAnomalies" | "repairLegacyPartialConfirmed" | "backfillSpotAttribution">,
+    "readSummary" | "readAnomalies" | "repairLegacyPartialConfirmed" | "backfillSpotAttribution"
+    | "sealLegacyUnresolvedExecution">,
 ) {
   app.get("/api/arbitrage-recovery/summary", (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -40,6 +41,15 @@ export function registerArbitrageRecoveryRoutes(
     response.setHeader("Cache-Control", "no-store");
     try {
       response.json(await service.backfillSpotAttribution(userId(request), request.body));
+    } catch (error) {
+      sendError(response, error);
+    }
+  });
+
+  app.post("/api/arbitrage-recovery/seal-legacy-unresolved", async (request, response) => {
+    response.setHeader("Cache-Control", "no-store");
+    try {
+      response.json(await service.sealLegacyUnresolvedExecution(userId(request), request.body));
     } catch (error) {
       sendError(response, error);
     }

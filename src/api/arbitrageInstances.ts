@@ -56,6 +56,24 @@ export type ArbitrageManagementRelease = {
   realityCheckedAt: number;
 };
 
+export type ArbitrageLegacyUnresolvedExecutionSeal = {
+  commandId: string;
+  operationType: "SEAL_LEGACY_UNRESOLVED_EXECUTION";
+  requestedByUserId: string;
+  arbitrageId: string;
+  legId: string;
+  executionIntentId: string;
+  executionRecordId: string;
+  venue: ExchangeVenue;
+  accountId: string;
+  instrumentId: string;
+  originalStatus: "UNKNOWN";
+  sealStatus: "LEGACY_UNRESOLVED_MANUALLY_SEALED";
+  reason: "LEGACY_RECOVERY_IDENTITY_GAP";
+  businessPayloadFingerprint: string;
+  sealedAt: number;
+};
+
 export type ArbitrageInstance = {
   arbitrageId: string;
   userId: string;
@@ -70,6 +88,7 @@ export type ArbitrageInstance = {
   legs: [ArbitrageInstanceLeg, ArbitrageInstanceLeg];
   executionReferences: ArbitrageExecutionReference[];
   managementReleases: ArbitrageManagementRelease[];
+  legacyUnresolvedExecutionSeals: ArbitrageLegacyUnresolvedExecutionSeal[];
   pnl: {
     asset: string | null;
     cumulativeFundingPnl: string | null;
@@ -80,7 +99,8 @@ export type ArbitrageInstance = {
   };
 };
 
-export type ArbitrageManagementEndMethod = "NORMAL_CLOSE" | "MANAGEMENT_RELEASE" | "MIXED";
+export type ArbitrageManagementEndMethod = "NORMAL_CLOSE" | "MANAGEMENT_RELEASE" | "MIXED"
+  | "LEGACY_UNRESOLVED_SEAL";
 
 export type ArbitrageLegVerificationStatus = "MATCHED" | "MISMATCH" | "UNKNOWN";
 
@@ -333,6 +353,7 @@ export function deriveArbitrageManagementEndMethod(
   value: ArbitrageInstance,
 ): ArbitrageManagementEndMethod | null {
   if (value.status !== "CLOSED") return null;
+  if (value.legacyUnresolvedExecutionSeals.length > 0) return "LEGACY_UNRESOLVED_SEAL";
   if (value.managementReleases.length === 0) return "NORMAL_CLOSE";
   const hasConfirmedCloseExecution = value.executionReferences.some((reference) =>
     reference.phase === "CLOSING"
@@ -372,6 +393,11 @@ function instance(payload: unknown): ArbitrageInstance {
       : Array.isArray(value.managementReleases)
         ? value.managementReleases.map(managementRelease)
         : invalidResponse(),
+    legacyUnresolvedExecutionSeals: value.legacyUnresolvedExecutionSeals === undefined
+      ? []
+      : Array.isArray(value.legacyUnresolvedExecutionSeals)
+        ? value.legacyUnresolvedExecutionSeals.map(legacyUnresolvedExecutionSeal)
+        : invalidResponse(),
     pnl: {
       asset: nullableString(pnl.asset),
       cumulativeFundingPnl: nullableDecimal(pnl.cumulativeFundingPnl),
@@ -380,6 +406,27 @@ function instance(payload: unknown): ArbitrageInstance {
       cumulativeNetPnl: nullableDecimal(pnl.cumulativeNetPnl),
       updatedAt: nullableTimestamp(pnl.updatedAt),
     },
+  };
+}
+
+function legacyUnresolvedExecutionSeal(payload: unknown): ArbitrageLegacyUnresolvedExecutionSeal {
+  const value = requiredRecord(payload);
+  return {
+    commandId: requiredString(value.commandId),
+    operationType: value.operationType === "SEAL_LEGACY_UNRESOLVED_EXECUTION" ? value.operationType : invalidResponse(),
+    requestedByUserId: requiredString(value.requestedByUserId),
+    arbitrageId: requiredString(value.arbitrageId),
+    legId: requiredString(value.legId),
+    executionIntentId: requiredString(value.executionIntentId),
+    executionRecordId: requiredString(value.executionRecordId),
+    venue: venue(value.venue),
+    accountId: requiredString(value.accountId),
+    instrumentId: requiredString(value.instrumentId),
+    originalStatus: value.originalStatus === "UNKNOWN" ? value.originalStatus : invalidResponse(),
+    sealStatus: value.sealStatus === "LEGACY_UNRESOLVED_MANUALLY_SEALED" ? value.sealStatus : invalidResponse(),
+    reason: value.reason === "LEGACY_RECOVERY_IDENTITY_GAP" ? value.reason : invalidResponse(),
+    businessPayloadFingerprint: requiredString(value.businessPayloadFingerprint),
+    sealedAt: timestamp(value.sealedAt),
   };
 }
 
