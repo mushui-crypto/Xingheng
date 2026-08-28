@@ -81,6 +81,8 @@ test("production composition exposes only the formal arbitrage mutation boundary
   assert.match(productionSource, /registerArbitrageHedgeStartRoutes\(app, arbitrageHedgeStart\)/u);
   assert.match(productionSource, /new ArbitrageInstanceExitService\(\s*arbitrageInstances,\s*arbitrageExecutionClose,\s*arbitrageManagementRelease,\s*arbitrageExecutionCommand,\s*arbitragePositionVerification,\s*\)/u);
   assert.match(productionSource, /registerArbitrageInstanceExitRoutes\(app, arbitrageInstanceExit\)/u);
+  assert.match(productionSource, /new ArbitrageUnstartedAbandonService\(arbitrageInstances\)/u);
+  assert.match(productionSource, /registerArbitrageUnstartedAbandonRoutes\(app, arbitrageUnstartedAbandon\)/u);
   assert.match(productionSource, /registerFundingArbitrageRoutes\(app, fundingOpportunityQuery\)/u);
 });
 

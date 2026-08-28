@@ -13,6 +13,7 @@ import {
   canonicalBaseAsset,
   InstanceDeltaPanel,
   instanceExitAvailability,
+  canAbandonUnstartedArbitrage,
   canResumeOpeningWorkflow,
   legActionAvailability,
   managementReleaseCandidates,
@@ -73,6 +74,80 @@ test("only OPENING instances expose the resume action", () => {
   ]);
   const html = renderToStaticMarkup(<ArbitrageInstanceSections active={active} history={[]} onPageChange={() => undefined} page={1} />);
   assert.doesNotMatch(html, /继续开仓|resumeArbitrageId/u);
+});
+
+test("only an empty unstarted OPENING instance exposes the instance-level abandon action", () => {
+  const empty = emptyUnstartedInstance();
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[empty]}
+    history={[]}
+    onInstanceRefresh={async () => empty}
+    onPageChange={() => undefined}
+    page={1}
+  />);
+
+  assert.equal(canAbandonUnstartedArbitrage(empty), true);
+  assert.match(html, /放弃套利/u);
+  assert.match(html, /继续开仓/u);
+  assert.doesNotMatch(html, /退出套利/u);
+});
+
+test("UNKNOWN and any execution fact hide unstarted abandonment", () => {
+  const empty = emptyUnstartedInstance();
+  const unknown: ArbitrageInstance = {
+    ...empty,
+    arbitrageId: "arbitrage-unknown",
+    executionReferences: [{
+      arbitrageId: "arbitrage-unknown",
+      legId: empty.legs[0].legId,
+      phase: "OPENING",
+      quantityEffect: "INCREASE",
+      executionIntentId: "intent-unknown",
+      executionRecordId: "record-unknown",
+      requestedQuantity: "1",
+      confirmedQuantity: "0",
+      status: "UNKNOWN",
+      createdAt: 1_800_000_000_100,
+      updatedAt: 1_800_000_000_200,
+    }],
+  };
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[unknown]}
+    history={[]}
+    onInstanceRefresh={async () => unknown}
+    onPageChange={() => undefined}
+    page={1}
+  />);
+
+  assert.equal(canAbandonUnstartedArbitrage(unknown), false);
+  assert.doesNotMatch(html, /放弃套利/u);
+});
+
+test("abandon confirmation copy is explicit, no-mutation, and duplicate-submit guarded", () => {
+  const source = readFileSync(new URL("./ArbitrageUnstartedAbandonDialog.tsx", import.meta.url), "utf8");
+  assert.match(source, /该套利尚未开始真实交易。确认后将终止此实例，不会提交任何交易订单/u);
+  assert.match(source, /不会生成成交、仓位或 Provider 事实/u);
+  assert.match(source, /确认放弃套利/u);
+  assert.match(source, /submitting\.current/u);
+  assert.doesNotMatch(source, /placeOrder|closeLeg|startHedge|releaseArbitrageLegManagement/u);
+});
+
+test("an abandoned empty instance moves to history as unstarted and terminated", () => {
+  const empty = emptyUnstartedInstance();
+  const failed = { ...empty, status: "FAILED" as const, updatedAt: empty.updatedAt + 1 };
+  const updated = updateInstanceSections({ status: "success", active: [empty], history: [] }, failed);
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={updated.active}
+    history={updated.history}
+    onPageChange={() => undefined}
+    page={1}
+    selectedSection="history"
+  />);
+
+  assert.deepEqual(updated.active, []);
+  assert.equal(updated.history[0]?.status, "FAILED");
+  assert.match(html, /未开始 \/ 已终止/u);
+  assert.doesNotMatch(html, /继续开仓|放弃套利/u);
 });
 
 test("a RESIDUAL instance with only one terminal-partial opening remains reachable for explicit recovery", () => {
@@ -697,6 +772,21 @@ function arbitrageInstance(status: string) {
       cumulativeNetPnl: null,
       updatedAt: null,
     },
+  };
+}
+
+function emptyUnstartedInstance(): ArbitrageInstance {
+  const [base] = requireArbitrageInstanceList([arbitrageInstance("OPENING")]);
+  return {
+    ...base!,
+    arbitrageId: "arbitrage-empty-unstarted",
+    legs: base!.legs.map((leg) => ({
+      ...leg,
+      confirmedOpenedQuantity: "0",
+      confirmedClosedQuantity: "0",
+    })) as ArbitrageInstance["legs"],
+    executionReferences: [],
+    managementReleases: [],
   };
 }
 

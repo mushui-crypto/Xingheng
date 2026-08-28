@@ -22,6 +22,7 @@ import { buildArbitrageResumeHref } from "../../arbitrage/lib/analysisRoute";
 import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
 import { ArbitrageLegCloseDialog } from "./ArbitrageLegCloseDialog";
 import { ArbitrageManagementReleaseDialog } from "./ArbitrageManagementReleaseDialog";
+import { ArbitrageUnstartedAbandonDialog } from "./ArbitrageUnstartedAbandonDialog";
 
 const HISTORY_LIMIT = 50;
 const VERIFICATION_CONCURRENCY = 4;
@@ -344,6 +345,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
   const [deltaState, setDeltaState] = useState<ReadState<InstanceHedgeDelta>>({ status: "loading" });
   const [closeTarget, setCloseTarget] = useState<ArbitrageInstanceLeg | null>(null);
   const [releaseTarget, setReleaseTarget] = useState<ArbitrageInstanceLeg | null>(null);
+  const [abandonOpen, setAbandonOpen] = useState(false);
 
   useEffect(() => {
     if (historical) return;
@@ -375,6 +377,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
     : null;
   const closeTargetSafety = closeTarget ? safetyValues[closeTarget.legId] : null;
   const releaseTargetSafety = releaseTarget ? safetyValues[releaseTarget.legId] : null;
+  const canAbandon = canAbandonUnstartedArbitrage(instance);
   return <>
     <article className="min-w-0 border border-[#25282f] bg-black p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -382,7 +385,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
           <p className="text-[11px] text-[#707985]">套利 ID</p>
           <p className="mt-1 break-all font-mono text-xs text-white">{instance.arbitrageId}</p>
         </div>
-        <StatusBadge status={instance.status} />
+        <StatusBadge instance={instance} />
       </div>
       <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2">
         <Metric label="策略类型" value={strategyTypeLabel(instance.strategyType)} />
@@ -392,14 +395,17 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         {historical ? <Metric label="管理结束时间" value={formatOptionalTime(instance.closedAt)} /> : null}
         {historical ? <Metric label="管理结束方式" value={managementEndMethodLabel(deriveArbitrageManagementEndMethod(instance))} /> : null}
       </dl>
-      {!historical && canResumeOpeningWorkflow(instance) ? (
-        <div className="mt-4 flex justify-end border-t border-[#25282f] pt-4">
-          <a
-            className="inline-flex min-h-9 items-center justify-center border border-white/25 px-4 text-xs font-semibold text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
-            href={buildArbitrageResumeHref(instance.arbitrageId)}
-          >
-            继续开仓
-          </a>
+      {!historical && (canResumeOpeningWorkflow(instance) || canAbandon) ? (
+        <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[#25282f] pt-4">
+          {canAbandon && onInstanceRefresh ? <Button onClick={() => setAbandonOpen(true)} type="button" variant="ghost">
+            放弃套利
+          </Button> : null}
+          {canResumeOpeningWorkflow(instance) ? <a
+              className="inline-flex min-h-11 items-center justify-center border border-white/25 px-4 py-2.5 text-sm font-semibold uppercase tracking-[0.08em] text-white transition hover:border-white hover:bg-white/[0.04] focus-visible:outline focus-visible:outline-1 focus-visible:outline-offset-2 focus-visible:outline-white"
+              href={buildArbitrageResumeHref(instance.arbitrageId)}
+            >
+              继续开仓
+            </a> : null}
         </div>
       ) : null}
       <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
@@ -470,6 +476,14 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         setReleaseTarget(null);
       }}
     /> : null}
+    {abandonOpen && canAbandon && onInstanceRefresh ? <ArbitrageUnstartedAbandonDialog
+      instance={instance}
+      onAbandoned={async (updated) => {
+        await onInstanceRefresh(updated.arbitrageId);
+        setAbandonOpen(false);
+      }}
+      onClose={() => setAbandonOpen(false)}
+    /> : null}
   </>;
 }
 
@@ -477,6 +491,14 @@ export function canResumeOpeningWorkflow(instance: ArbitrageInstance) {
   if (instance.status !== "OPENING" && instance.status !== "RESIDUAL") return false;
   const opening = instance.executionReferences.filter((reference) => reference.phase === "OPENING");
   return instance.status === "OPENING" ? opening.length <= 1 : opening.length === 1;
+}
+
+export function canAbandonUnstartedArbitrage(instance: ArbitrageInstance) {
+  return instance.status === "OPENING"
+    && instance.executionReferences.length === 0
+    && instance.managementReleases.length === 0
+    && instance.legs.every((leg) => leg.confirmedOpenedQuantity === "0"
+      && leg.confirmedClosedQuantity === "0");
 }
 
 function LiveCloseSafety({ state }: { state?: ReadState<ArbitrageCloseSafety> }) {
@@ -776,11 +798,18 @@ export function verificationStatusLabel(status: ArbitrageLegVerificationStatus) 
   }[status];
 }
 
-function StatusBadge({ status }: { status: ArbitrageInstanceStatus }) {
+function StatusBadge({ instance }: { instance: ArbitrageInstance }) {
+  const status = instance.status;
   const warning = status === "RESIDUAL" || status === "FAILED";
+  const label = status === "FAILED"
+    && instance.executionReferences.length === 0
+    && instance.legs.every((leg) => leg.confirmedOpenedQuantity === "0"
+      && leg.confirmedClosedQuantity === "0")
+    ? "未开始 / 已终止"
+    : statusLabel(status);
   return (
     <span className={`border px-2 py-1 text-[11px] font-medium ${warning ? "border-amber-400/30 text-amber-200" : "border-white/20 text-[#c5ccd4]"}`}>
-      {statusLabel(status)}
+      {label}
     </span>
   );
 }

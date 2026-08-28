@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  abandonUnstartedArbitrage,
   deriveArbitrageManagementEndMethod,
   fetchActiveArbitrageInstances,
   fetchArbitrageCloseSafety,
@@ -160,6 +161,43 @@ test("management release client sends only command identity and explicit confirm
     assert.equal(result.instance.status, "CLOSED");
     assert.equal(result.release.releasedQuantity, "0.75");
     assert.equal(result.idempotentReplay, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("unstarted abandonment client sends only scoped command identity and explicit confirmation", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "/api/arbitrage-execution/abandon-unstarted");
+    assert.equal(init?.method, "POST");
+    assert.deepEqual(JSON.parse(String(init?.body)), {
+      arbitrageId: "arb-1",
+      commandId: "abandon-command-1",
+      confirmed: true,
+    });
+    return Response.json({
+      instance: {
+        ...arbitrageInstance("FAILED"),
+        arbitrageId: "arb-1",
+        legs: arbitrageInstance("FAILED").legs.map((leg) => ({
+          ...leg,
+          confirmedOpenedQuantity: "0",
+          confirmedClosedQuantity: "0",
+        })),
+      },
+      idempotentReplay: false,
+      providerMutationCount: 0,
+    });
+  };
+  try {
+    const result = await abandonUnstartedArbitrage({
+      arbitrageId: "arb-1",
+      commandId: "abandon-command-1",
+    });
+    assert.equal(result.instance.status, "FAILED");
+    assert.equal(result.idempotentReplay, false);
+    assert.equal(result.providerMutationCount, 0);
   } finally {
     globalThis.fetch = originalFetch;
   }

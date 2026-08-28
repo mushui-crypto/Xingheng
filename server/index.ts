@@ -14,6 +14,7 @@ import { registerArbitrageExecutionCloseRoutes } from "./modules/api/arbitrageEx
 import { registerArbitrageExecutionCancelRoutes } from "./modules/api/arbitrageExecutionCancelRoutes";
 import { registerArbitrageInstanceExitRoutes } from "./modules/api/arbitrageInstanceExitRoutes";
 import { registerArbitrageManagementReleaseRoutes } from "./modules/api/arbitrageManagementReleaseRoutes";
+import { registerArbitrageUnstartedAbandonRoutes } from "./modules/api/arbitrageUnstartedAbandonRoutes";
 import { registerHistoricalUnknownRecoveryRoutes } from "./modules/api/historicalUnknownRecoveryRoutes";
 import { registerArbitrageRecoveryRoutes } from "./modules/api/arbitrageRecoveryRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
@@ -57,6 +58,7 @@ import { ArbitrageInstanceExitService } from "./modules/arbitrage-execution/Arbi
 import { ArbitrageHedgeStartService } from "./modules/arbitrage-execution/ArbitrageHedgeStartService";
 import { ArbitrageHedgeWorkflowService } from "./modules/arbitrage-execution/ArbitrageHedgeWorkflowService";
 import { ArbitrageManagementReleaseService } from "./modules/arbitrage-execution/ArbitrageManagementReleaseService";
+import { ArbitrageUnstartedAbandonService } from "./modules/arbitrage-execution/ArbitrageUnstartedAbandonService";
 import { InstanceHedgeDeltaService } from "./modules/arbitrage-execution/InstanceHedgeDeltaService";
 import { HistoricalExecutionEvidenceRegistry } from "./modules/arbitrage-execution/HistoricalExecutionEvidence";
 import { HistoricalUnknownNotDispatchedRecoveryService } from "./modules/arbitrage-execution/HistoricalUnknownNotDispatchedRecoveryService";
@@ -372,6 +374,7 @@ const arbitrageManagementRelease = new ArbitrageManagementReleaseService(
   arbitrageInstances,
   arbitrageExecutionClose,
 );
+const arbitrageUnstartedAbandon = new ArbitrageUnstartedAbandonService(arbitrageInstances);
 const arbitrageInstanceExit = new ArbitrageInstanceExitService(
   arbitrageInstances,
   arbitrageExecutionClose,
@@ -411,6 +414,7 @@ registerArbitrageExecutionCloseRoutes(app, arbitrageExecutionClose);
 registerArbitrageExecutionCancelRoutes(app, arbitrageExecutionCancel);
 registerArbitrageInstanceExitRoutes(app, arbitrageInstanceExit);
 registerArbitrageManagementReleaseRoutes(app, arbitrageManagementRelease);
+registerArbitrageUnstartedAbandonRoutes(app, arbitrageUnstartedAbandon);
 registerHistoricalUnknownRecoveryRoutes(app, historicalUnknownRecovery);
 registerArbitrageRecoveryRoutes(app, arbitrageRecoveryOperator);
 registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification, instanceHedgeDelta);

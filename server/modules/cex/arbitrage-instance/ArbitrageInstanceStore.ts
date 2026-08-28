@@ -90,6 +90,36 @@ export type ManagementReleaseResult = Readonly<{
   idempotentReplay: boolean;
 }>;
 
+export type UnstartedArbitrageAbandonmentClaim = Readonly<{
+  commandId: string;
+  operationType: "ABANDON_UNSTARTED_ARBITRAGE";
+  requestedByUserId: string;
+  arbitrageId: string;
+  reason: "USER_ABANDONED_BEFORE_EXECUTION";
+  businessPayloadFingerprint: string;
+  requestedAt: number;
+  confirmedAt: number;
+}>;
+
+export type UnstartedArbitrageAbandonmentAudit = Readonly<{
+  commandId: string;
+  operationType: "ABANDON_UNSTARTED_ARBITRAGE";
+  requestedByUserId: string;
+  arbitrageId: string;
+  previousStatus: "OPENING";
+  newStatus: "FAILED";
+  reason: "USER_ABANDONED_BEFORE_EXECUTION";
+  businessPayloadFingerprint: string;
+  requestedAt: number;
+  confirmedAt: number;
+}>;
+
+export type UnstartedArbitrageAbandonmentResult = Readonly<{
+  instance: ArbitrageInstance;
+  audit: UnstartedArbitrageAbandonmentAudit;
+  idempotentReplay: boolean;
+}>;
+
 export type TargetQuantityUpdate = Readonly<{
   legId: string;
   plannedQuantity: string;
@@ -247,6 +277,19 @@ type CommandIdempotencyRow = Readonly<{
   referenceId: string;
   businessPayloadFingerprint: string | null;
   createdAt: number;
+}>;
+
+type UnstartedArbitrageAbandonmentRow = Readonly<{
+  commandId: string;
+  operationType: "ABANDON_UNSTARTED_ARBITRAGE";
+  requestedByUserId: string;
+  arbitrageId: string;
+  previousStatus: "OPENING";
+  newStatus: "FAILED";
+  reason: "USER_ABANDONED_BEFORE_EXECUTION";
+  businessPayloadFingerprint: string;
+  requestedAt: number;
+  confirmedAt: number;
 }>;
 
 type SpotOpeningAttributionEvidenceRow = Readonly<{
@@ -418,9 +461,7 @@ export class ArbitrageInstanceStore {
     const timestampValue = timestamp(updatedAt, "updatedAt");
     return this.transaction(() => {
       const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
-      const empty = instance.status === "OPENING"
-        && instance.executionReferences.length === 0
-        && instance.legs.every((leg) => managedCurrentQuantity(leg) === "0");
+      const empty = isUnstartedEmptyOpening(instance);
       if (!empty) return null;
       this.persistLifecycle(normalizedUserId, normalizedArbitrageId, {
         status: "FAILED",
@@ -430,6 +471,100 @@ export class ArbitrageInstanceStore {
       });
       return this.requireForUser(normalizedUserId, normalizedArbitrageId);
     });
+  }
+
+  abandonUnstarted(
+    userId: string,
+    arbitrageId: string,
+    claim: UnstartedArbitrageAbandonmentClaim,
+  ): UnstartedArbitrageAbandonmentResult {
+    const normalizedUserId = identifier(userId, "userId");
+    const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
+    const normalized = normalizeUnstartedArbitrageAbandonmentClaim(claim);
+    if (normalized.requestedByUserId !== normalizedUserId
+      || normalized.arbitrageId !== normalizedArbitrageId) {
+      throw new Error("Unstarted arbitrage abandonment identity does not match the authenticated instance.");
+    }
+    return this.transaction(() => {
+      const byCommand = this.unstartedAbandonmentByCommand(normalized.commandId);
+      if (byCommand) {
+        if (!sameUnstartedArbitrageAbandonment(byCommand, normalized)) {
+          throw new Error("Unstarted arbitrage abandonment command idempotency conflict.");
+        }
+        return this.unstartedAbandonmentReplay(normalizedUserId, normalizedArbitrageId, byCommand);
+      }
+      if (this.commandFingerprint(normalized.commandId)) {
+        throw new Error("Unstarted arbitrage abandonment command idempotency conflict.");
+      }
+      const byFingerprint = this.unstartedAbandonmentByFingerprint(normalized.businessPayloadFingerprint);
+      if (byFingerprint) {
+        if (!sameUnstartedArbitrageAbandonment(byFingerprint, normalized, false)) {
+          throw new Error("Unstarted arbitrage abandonment fingerprint conflict.");
+        }
+        return this.unstartedAbandonmentReplay(normalizedUserId, normalizedArbitrageId, byFingerprint);
+      }
+      if (this.unstartedAbandonmentByArbitrageId(normalizedArbitrageId)) {
+        throw new Error("Arbitrage instance already has a conflicting abandonment audit.");
+      }
+
+      const instance = this.requireForUser(normalizedUserId, normalizedArbitrageId);
+      if (!isUnstartedEmptyOpening(instance)
+        || instance.legs.some((leg) => leg.confirmedOpenedQuantity !== "0"
+          || leg.confirmedClosedQuantity !== "0" || activeManagedQuantity(instance, leg) !== "0")
+        || (instance.managementReleases?.length ?? 0) !== 0) {
+        throw new Error("Arbitrage instance has execution or managed-position facts and cannot be abandoned.");
+      }
+      const persistedExecutionFacts = this.db.prepare(`SELECT 1
+        FROM arbitrage_execution_references WHERE arbitrageId = ? LIMIT 1`).get(normalizedArbitrageId)
+        ?? this.db.prepare(`SELECT 1 FROM arbitrage_command_idempotency
+          WHERE arbitrageId = ? AND operationType IN ('EXECUTION_OPEN', 'EXECUTION_CLOSE') LIMIT 1`).get(
+            normalizedArbitrageId,
+          )
+        ?? this.db.prepare(`SELECT 1 FROM arbitrage_spot_opening_attribution_evidence
+          WHERE arbitrageId = ? LIMIT 1`).get(normalizedArbitrageId);
+      if (persistedExecutionFacts) {
+        throw new Error("Arbitrage instance has an execution intent, record, or Provider identity and cannot be abandoned.");
+      }
+      const confirmedAt = Math.max(normalized.confirmedAt, normalized.requestedAt, instance.updatedAt);
+      this.db.prepare(`INSERT INTO arbitrage_unstarted_abandonments (
+        commandId, operationType, requestedByUserId, arbitrageId, previousStatus,
+        newStatus, reason, businessPayloadFingerprint, requestedAt, confirmedAt
+      ) VALUES (?, ?, ?, ?, 'OPENING', 'FAILED', ?, ?, ?, ?)`).run(
+        normalized.commandId,
+        normalized.operationType,
+        normalized.requestedByUserId,
+        normalized.arbitrageId,
+        normalized.reason,
+        normalized.businessPayloadFingerprint,
+        normalized.requestedAt,
+        confirmedAt,
+      );
+      this.persistLifecycle(normalizedUserId, normalizedArbitrageId, {
+        status: "FAILED",
+        openedAt: instance.openedAt,
+        closedAt: null,
+        updatedAt: confirmedAt,
+      });
+      const row = this.unstartedAbandonmentByCommand(normalized.commandId);
+      if (!row) throw new Error("Unstarted arbitrage abandonment audit persistence failed.");
+      return Object.freeze({
+        instance: this.requireForUser(normalizedUserId, normalizedArbitrageId),
+        audit: unstartedArbitrageAbandonmentFromRow(row),
+        idempotentReplay: false,
+      });
+    });
+  }
+
+  listUnstartedArbitrageAbandonmentsForUser(
+    userId: string,
+  ): readonly UnstartedArbitrageAbandonmentAudit[] {
+    const rows = this.db.prepare(`SELECT abandonment.*
+      FROM arbitrage_unstarted_abandonments abandonment
+      JOIN arbitrage_instances owner ON owner.arbitrageId = abandonment.arbitrageId
+      WHERE owner.userId = ? ORDER BY abandonment.confirmedAt DESC, abandonment.commandId ASC`).all(
+        identifier(userId, "userId"),
+      ) as unknown as UnstartedArbitrageAbandonmentRow[];
+    return Object.freeze(rows.map(unstartedArbitrageAbandonmentFromRow));
   }
 
   listActive(userId: string) {
@@ -1226,8 +1361,50 @@ export class ArbitrageInstanceStore {
   }
 
   private commandFingerprint(commandId: string) {
-    return this.db.prepare(`SELECT * FROM arbitrage_command_idempotency
-      WHERE commandId = ?`).get(commandId) as unknown as CommandIdempotencyRow | undefined;
+    return this.db.prepare(`SELECT commandId, operationType, requestedByUserId, arbitrageId,
+        legId, referenceId, businessPayloadFingerprint, createdAt
+      FROM arbitrage_command_idempotency WHERE commandId = ?
+      UNION ALL
+      SELECT commandId, operationType, requestedByUserId, arbitrageId,
+        'INSTANCE' AS legId, arbitrageId AS referenceId, businessPayloadFingerprint,
+        confirmedAt AS createdAt
+      FROM arbitrage_unstarted_abandonments WHERE commandId = ?
+      LIMIT 1`).get(commandId, commandId) as unknown as CommandIdempotencyRow | undefined;
+  }
+
+  private unstartedAbandonmentByCommand(commandId: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_unstarted_abandonments
+      WHERE commandId = ?`).get(commandId) as unknown as UnstartedArbitrageAbandonmentRow | undefined;
+  }
+
+  private unstartedAbandonmentByFingerprint(businessPayloadFingerprint: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_unstarted_abandonments
+      WHERE businessPayloadFingerprint = ?`).get(
+      businessPayloadFingerprint,
+    ) as unknown as UnstartedArbitrageAbandonmentRow | undefined;
+  }
+
+  private unstartedAbandonmentByArbitrageId(arbitrageId: string) {
+    return this.db.prepare(`SELECT * FROM arbitrage_unstarted_abandonments
+      WHERE arbitrageId = ?`).get(arbitrageId) as unknown as UnstartedArbitrageAbandonmentRow | undefined;
+  }
+
+  private unstartedAbandonmentReplay(
+    userId: string,
+    arbitrageId: string,
+    row: UnstartedArbitrageAbandonmentRow,
+  ): UnstartedArbitrageAbandonmentResult {
+    const instance = this.requireForUser(userId, arbitrageId);
+    if (instance.status !== "FAILED" || instance.executionReferences.length !== 0
+      || instance.legs.some((leg) => leg.confirmedOpenedQuantity !== "0"
+        || leg.confirmedClosedQuantity !== "0" || managedCurrentQuantity(leg) !== "0")) {
+      throw new Error("Unstarted arbitrage abandonment audit does not match its lifecycle projection.");
+    }
+    return Object.freeze({
+      instance,
+      audit: unstartedArbitrageAbandonmentFromRow(row),
+      idempotentReplay: true,
+    });
   }
 
   private insertCommandFingerprint(row: CommandIdempotencyRow) {
@@ -1564,6 +1741,20 @@ export class ArbitrageInstanceStore {
       FOREIGN KEY (arbitrageId, legId) REFERENCES arbitrage_instance_legs(arbitrageId, legId),
       FOREIGN KEY (arbitrageId, executionIntentId)
         REFERENCES arbitrage_execution_references(arbitrageId, executionIntentId)
+    ) STRICT;
+
+    CREATE TABLE IF NOT EXISTS arbitrage_unstarted_abandonments (
+      commandId TEXT PRIMARY KEY,
+      operationType TEXT NOT NULL CHECK (operationType = 'ABANDON_UNSTARTED_ARBITRAGE'),
+      requestedByUserId TEXT NOT NULL,
+      arbitrageId TEXT NOT NULL UNIQUE,
+      previousStatus TEXT NOT NULL CHECK (previousStatus = 'OPENING'),
+      newStatus TEXT NOT NULL CHECK (newStatus = 'FAILED'),
+      reason TEXT NOT NULL CHECK (reason = 'USER_ABANDONED_BEFORE_EXECUTION'),
+      businessPayloadFingerprint TEXT NOT NULL UNIQUE,
+      requestedAt INTEGER NOT NULL,
+      confirmedAt INTEGER NOT NULL,
+      FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
     ) STRICT;`);
     const commandColumns = new Set((this.db.prepare(
       "PRAGMA table_info(arbitrage_command_idempotency)",
@@ -1578,6 +1769,81 @@ export class ArbitrageInstanceStore {
 
 function recoveryAuditId(action: string, arbitrageId: string, executionIntentId: string) {
   return `recovery:${createHash("sha256").update(`${action}\u0000${arbitrageId}\u0000${executionIntentId}`).digest("hex")}`;
+}
+
+function isUnstartedEmptyOpening(instance: ArbitrageInstance) {
+  return instance.status === "OPENING"
+    && instance.executionReferences.length === 0
+    && (instance.managementReleases?.length ?? 0) === 0
+    && instance.legs.every((leg) => leg.confirmedOpenedQuantity === "0"
+      && leg.confirmedClosedQuantity === "0"
+      && managedCurrentQuantity(leg) === "0"
+      && activeManagedQuantity(instance, leg) === "0");
+}
+
+function normalizeUnstartedArbitrageAbandonmentClaim(
+  claim: UnstartedArbitrageAbandonmentClaim,
+): UnstartedArbitrageAbandonmentClaim {
+  if (claim.operationType !== "ABANDON_UNSTARTED_ARBITRAGE"
+    || claim.reason !== "USER_ABANDONED_BEFORE_EXECUTION") {
+    throw new Error("Unstarted arbitrage abandonment semantics are invalid.");
+  }
+  const requestedAt = timestamp(claim.requestedAt, "requestedAt");
+  const confirmedAt = timestamp(claim.confirmedAt, "confirmedAt");
+  if (confirmedAt < requestedAt) {
+    throw new Error("Unstarted arbitrage abandonment confirmation cannot predate its request.");
+  }
+  return Object.freeze({
+    commandId: identifier(claim.commandId, "commandId"),
+    operationType: claim.operationType,
+    requestedByUserId: identifier(claim.requestedByUserId, "requestedByUserId"),
+    arbitrageId: identifier(claim.arbitrageId, "arbitrageId"),
+    reason: claim.reason,
+    businessPayloadFingerprint: identifier(
+      claim.businessPayloadFingerprint,
+      "businessPayloadFingerprint",
+    ),
+    requestedAt,
+    confirmedAt,
+  });
+}
+
+function unstartedArbitrageAbandonmentFromRow(
+  row: UnstartedArbitrageAbandonmentRow,
+): UnstartedArbitrageAbandonmentAudit {
+  if (row.operationType !== "ABANDON_UNSTARTED_ARBITRAGE"
+    || row.previousStatus !== "OPENING" || row.newStatus !== "FAILED"
+    || row.reason !== "USER_ABANDONED_BEFORE_EXECUTION") {
+    throw new Error("Unstarted arbitrage abandonment audit is invalid.");
+  }
+  return Object.freeze({
+    commandId: identifier(row.commandId, "commandId"),
+    operationType: row.operationType,
+    requestedByUserId: identifier(row.requestedByUserId, "requestedByUserId"),
+    arbitrageId: identifier(row.arbitrageId, "arbitrageId"),
+    previousStatus: row.previousStatus,
+    newStatus: row.newStatus,
+    reason: row.reason,
+    businessPayloadFingerprint: identifier(
+      row.businessPayloadFingerprint,
+      "businessPayloadFingerprint",
+    ),
+    requestedAt: timestamp(row.requestedAt, "requestedAt"),
+    confirmedAt: timestamp(row.confirmedAt, "confirmedAt"),
+  });
+}
+
+function sameUnstartedArbitrageAbandonment(
+  row: UnstartedArbitrageAbandonmentRow,
+  claim: UnstartedArbitrageAbandonmentClaim,
+  includeCommandId = true,
+) {
+  return (!includeCommandId || row.commandId === claim.commandId)
+    && row.operationType === claim.operationType
+    && row.requestedByUserId === claim.requestedByUserId
+    && row.arbitrageId === claim.arbitrageId
+    && row.reason === claim.reason
+    && row.businessPayloadFingerprint === claim.businessPayloadFingerprint;
 }
 
 function normalizeCommandFingerprint(fingerprint: ArbitrageCommandFingerprint): ArbitrageCommandFingerprint {

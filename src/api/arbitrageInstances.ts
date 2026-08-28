@@ -284,6 +284,39 @@ export async function releaseArbitrageLegManagement(input: Readonly<{
   });
 }
 
+export type ArbitrageUnstartedAbandonmentConfirmation = Readonly<{
+  instance: ArbitrageInstance;
+  idempotentReplay: boolean;
+  providerMutationCount: 0;
+}>;
+
+export async function abandonUnstartedArbitrage(input: Readonly<{
+  arbitrageId: string;
+  commandId: string;
+}>): Promise<ArbitrageUnstartedAbandonmentConfirmation> {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-execution/abandon-unstarted",
+    "未开始套利终止失败，请重新加载实例状态后再试。",
+    {
+      userAuthFailure: true,
+      init: {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...input, confirmed: true }),
+      },
+    },
+  );
+  const value = requiredRecord(payload);
+  if (value.providerMutationCount !== 0) {
+    throw new Error("Unstarted arbitrage abandonment mutation count is invalid.");
+  }
+  return Object.freeze({
+    instance: instance(value.instance),
+    idempotentReplay: booleanValue(value.idempotentReplay),
+    providerMutationCount: 0,
+  });
+}
+
 export function requireArbitrageInstanceList(payload: unknown) {
   return instanceList(payload);
 }
