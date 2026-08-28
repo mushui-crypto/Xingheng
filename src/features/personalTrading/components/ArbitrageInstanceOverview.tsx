@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { AlertTriangle, CheckCircle2, CircleHelp, Layers3 } from "lucide-react";
 import {
   deriveArbitrageManagementEndMethod,
@@ -26,6 +26,8 @@ import { ArbitrageUnstartedAbandonDialog } from "./ArbitrageUnstartedAbandonDial
 
 const HISTORY_LIMIT = 50;
 const VERIFICATION_CONCURRENCY = 4;
+const CLOSE_SAFETY_READ_ATTEMPTS = 3;
+const CLOSE_SAFETY_RETRY_DELAY_MS = 250;
 
 export type VerificationState =
   | { status: "loading" }
@@ -34,6 +36,19 @@ export type VerificationState =
 
 export type ReadState<T> = { status: "loading" } | { status: "success"; value: T } | { status: "error" };
 type ExitTarget = Readonly<{ instance: ArbitrageInstance; hasQuantityRuleDust: boolean }>;
+
+export type ExitCapabilitiesState = Readonly<{
+  verification: VerificationState;
+  closeSafeties: Record<string, ReadState<ArbitrageCloseSafety>>;
+  delta: ReadState<InstanceHedgeDelta>;
+}>;
+
+type ExitCapabilityLoaders = Readonly<{
+  verification: typeof fetchArbitragePositionVerification;
+  closeSafety: typeof fetchArbitrageCloseSafety;
+  delta: typeof fetchInstanceHedgeDelta;
+  wait: (delayMs: number, signal: AbortSignal) => Promise<void>;
+}>;
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
@@ -44,7 +59,6 @@ export function ArbitrageInstanceOverview() {
   const [page, setPage] = useState(1);
   const [selectedSection, setSelectedSection] = useState<"active" | "history">("active");
   const [state, setState] = useState<ArbitrageInstanceLoadState>({ status: "loading" });
-  const [verifications, setVerifications] = useState<Record<string, VerificationState>>({});
   const [exitTarget, setExitTarget] = useState<ExitTarget | null>(null);
 
   useEffect(() => {
@@ -56,10 +70,6 @@ export function ArbitrageInstanceOverview() {
     ]).then(([active, history]) => {
       if (controller.signal.aborted) return;
       setState({ status: "success", active, history });
-      setVerifications(Object.fromEntries(active.map((item) => [item.arbitrageId, { status: "loading" }])));
-      void loadVerifications(active, controller.signal, (arbitrageId, verificationState) => {
-        setVerifications((current) => ({ ...current, [arbitrageId]: verificationState }));
-      });
     }).catch(() => {
       if (!controller.signal.aborted) setState({ status: "error" });
     });
@@ -70,20 +80,6 @@ export function ArbitrageInstanceOverview() {
     setState((current) => current.status === "success"
       ? updateInstanceSections(current, updated)
       : current);
-    if (updated.status === "CLOSED" || updated.status === "FAILED") {
-      setVerifications((current) => {
-        const next = { ...current };
-        delete next[updated.arbitrageId];
-        return next;
-      });
-      return updated;
-    }
-    setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "loading" } }));
-    void fetchArbitragePositionVerification(updated.arbitrageId).then((verification) => {
-      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "success", verification } }));
-    }).catch(() => {
-      setVerifications((current) => ({ ...current, [updated.arbitrageId]: { status: "error" } }));
-    });
     return updated;
   };
 
@@ -94,36 +90,24 @@ export function ArbitrageInstanceOverview() {
   };
 
   const reconcileHedge = async (instance: ArbitrageInstance) => {
-    setVerifications((current) => ({ ...current, [instance.arbitrageId]: { status: "loading" } }));
     try {
-      const { instance: updated, verification } = await reconcileArbitrageHedge(instance);
+      const { instance: updated } = await reconcileArbitrageHedge(instance);
       setState((current) => current.status === "success"
         ? updateInstanceSections(current, updated)
         : current);
-      setVerifications((current) => {
-        if (updated.status !== "CLOSED" && updated.status !== "FAILED") {
-          return { ...current, [updated.arbitrageId]: { status: "success", verification } };
-        }
-        const next = { ...current };
-        delete next[updated.arbitrageId];
-        return next;
-      });
-    } catch {
-      setVerifications((current) => ({ ...current, [instance.arbitrageId]: { status: "error" } }));
-    }
+    } catch {}
   };
 
   return <>
     <ArbitrageInstanceContent
       onExitHedge={setExitTarget}
       onInstanceRefresh={refreshInstance}
-      onReconcileHedge={(instance) => void reconcileHedge(instance)}
+      onReconcileHedge={reconcileHedge}
       onPageChange={setPage}
       onSectionChange={setSelectedSection}
       page={page}
       selectedSection={selectedSection}
       state={state}
-      verifications={verifications}
     />
     {exitTarget ? <ArbitrageHedgeExitDialog
       hasQuantityRuleDust={exitTarget.hasQuantityRuleDust}
@@ -174,6 +158,63 @@ export async function loadVerifications(
   await Promise.all(Array.from({ length: Math.min(VERIFICATION_CONCURRENCY, active.length) }, worker));
 }
 
+export function loadingExitCapabilities(instance: ArbitrageInstance): ExitCapabilitiesState {
+  return {
+    verification: { status: "loading" },
+    closeSafeties: Object.fromEntries(instance.legs.map((leg) => [leg.legId, { status: "loading" }])),
+    delta: { status: "loading" },
+  };
+}
+
+export async function loadExitCapabilities(
+  instance: ArbitrageInstance,
+  signal: AbortSignal,
+  options: Partial<ExitCapabilityLoaders> & { closeSafetyAttempts?: number; retryDelayMs?: number } = {},
+): Promise<ExitCapabilitiesState> {
+  const loaders: ExitCapabilityLoaders = {
+    verification: options.verification ?? fetchArbitragePositionVerification,
+    closeSafety: options.closeSafety ?? fetchArbitrageCloseSafety,
+    delta: options.delta ?? fetchInstanceHedgeDelta,
+    wait: options.wait ?? waitForExitCapabilityRetry,
+  };
+  const attempts = options.closeSafetyAttempts ?? CLOSE_SAFETY_READ_ATTEMPTS;
+  const retryDelayMs = options.retryDelayMs ?? CLOSE_SAFETY_RETRY_DELAY_MS;
+  const verification = loaders.verification(instance.arbitrageId, signal)
+    .then((value): VerificationState => ({ status: "success", verification: value }))
+    .catch((): VerificationState => ({ status: "error" }));
+  const delta = loaders.delta(instance.arbitrageId, signal)
+    .then((value): ReadState<InstanceHedgeDelta> => ({ status: "success", value }))
+    .catch((): ReadState<InstanceHedgeDelta> => ({ status: "error" }));
+  const safetyEntries = await Promise.all(instance.legs.map(async (leg) => {
+    for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      try {
+        const value = await loaders.closeSafety(instance.arbitrageId, leg.legId, signal);
+        return [leg.legId, { status: "success", value } satisfies ReadState<ArbitrageCloseSafety>] as const;
+      } catch {
+        if (signal.aborted || attempt === attempts) break;
+        await loaders.wait(retryDelayMs * (2 ** (attempt - 1)), signal);
+      }
+    }
+    return [leg.legId, { status: "error" } satisfies ReadState<ArbitrageCloseSafety>] as const;
+  }));
+  return {
+    verification: await verification,
+    closeSafeties: Object.fromEntries(safetyEntries),
+    delta: await delta,
+  };
+}
+
+function waitForExitCapabilityRetry(delayMs: number, signal: AbortSignal) {
+  return new Promise<void>((resolve) => {
+    if (signal.aborted) return resolve();
+    const timer = setTimeout(resolve, delayMs);
+    signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      resolve();
+    }, { once: true });
+  });
+}
+
 export function ArbitrageInstanceContent({
   onExitHedge,
   onInstanceRefresh,
@@ -187,7 +228,7 @@ export function ArbitrageInstanceContent({
 }: {
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
-  onReconcileHedge?: (instance: ArbitrageInstance) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   onPageChange: (page: number) => void;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -240,7 +281,7 @@ export function ArbitrageInstanceSections({
   onPageChange: (page: number) => void;
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
-  onReconcileHedge?: (instance: ArbitrageInstance) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
   selectedSection?: "active" | "history";
@@ -316,7 +357,7 @@ function InstanceSection({
   instances: ArbitrageInstance[];
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
-  onReconcileHedge?: (instance: ArbitrageInstance) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   title: string;
   verifications?: Record<string, VerificationState>;
 }) {
@@ -338,42 +379,51 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
   instance: ArbitrageInstance;
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
-  onReconcileHedge?: (instance: ArbitrageInstance) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   verificationState?: VerificationState;
 }) {
-  const [closeSafeties, setCloseSafeties] = useState<Record<string, ReadState<ArbitrageCloseSafety>>>({});
-  const [deltaState, setDeltaState] = useState<ReadState<InstanceHedgeDelta>>({ status: "loading" });
+  const [capabilities, setCapabilities] = useState<ExitCapabilitiesState>(() => ({
+    ...loadingExitCapabilities(instance),
+    verification: verificationState ?? { status: "loading" },
+  }));
   const [closeTarget, setCloseTarget] = useState<ArbitrageInstanceLeg | null>(null);
   const [releaseTarget, setReleaseTarget] = useState<ArbitrageInstanceLeg | null>(null);
   const [abandonOpen, setAbandonOpen] = useState(false);
+  const refreshController = useRef<AbortController | null>(null);
+  const refreshGeneration = useRef(0);
+  const legIds = instance.legs.map((leg) => leg.legId).join("\0");
+
+  const refreshExitCapabilities = useCallback(async () => {
+    refreshController.current?.abort();
+    const controller = new AbortController();
+    const generation = ++refreshGeneration.current;
+    refreshController.current = controller;
+    setCapabilities(loadingExitCapabilities(instance));
+    const refreshed = await loadExitCapabilities(instance, controller.signal);
+    if (!controller.signal.aborted && generation === refreshGeneration.current) setCapabilities(refreshed);
+  }, [instance.arbitrageId, legIds]);
 
   useEffect(() => {
     if (historical) return;
-    const controller = new AbortController();
-    setCloseSafeties(Object.fromEntries(instance.legs.map((leg) => [leg.legId, { status: "loading" }])));
-    setDeltaState({ status: "loading" });
-    for (const leg of instance.legs) {
-      void fetchArbitrageCloseSafety(instance.arbitrageId, leg.legId, controller.signal).then((value) => {
-        if (!controller.signal.aborted) setCloseSafeties((current) => ({ ...current, [leg.legId]: { status: "success", value } }));
-      }).catch(() => {
-        if (!controller.signal.aborted) setCloseSafeties((current) => ({ ...current, [leg.legId]: { status: "error" } }));
-      });
-    }
-    void fetchInstanceHedgeDelta(instance.arbitrageId, controller.signal).then((value) => {
-      if (!controller.signal.aborted) setDeltaState({ status: "success", value });
-    }).catch(() => {
-      if (!controller.signal.aborted) setDeltaState({ status: "error" });
-    });
-    return () => controller.abort();
-  }, [historical, instance.arbitrageId, instance.updatedAt]);
+    void refreshExitCapabilities();
+    return () => refreshController.current?.abort();
+  }, [historical, instance.arbitrageId, instance.status, instance.updatedAt, refreshExitCapabilities]);
+
+  const closeSafeties = capabilities.closeSafeties;
+  const deltaState = capabilities.delta;
+  const effectiveVerification = capabilities.verification;
 
   const safetyValues = Object.fromEntries(Object.entries(closeSafeties)
     .filter((entry): entry is [string, Extract<ReadState<ArbitrageCloseSafety>, { status: "success" }>] => entry[1].status === "success")
     .map(([legId, state]) => [legId, state.value]));
-  const canExitFully = instanceExitAvailability(instance, verificationState, safetyValues);
-  const releaseCandidates = managementReleaseCandidates(instance, verificationState, safetyValues);
-  const closeTargetVerification = closeTarget && verificationState?.status === "success"
-    ? verificationState.verification.legs.find((item) => item.legId === closeTarget.legId)
+  const exitCapabilitiesComplete = effectiveVerification.status === "success"
+    && instance.legs.every((leg) => closeSafeties[leg.legId]?.status === "success");
+  const canExitFully = exitCapabilitiesComplete && instanceExitAvailability(instance, effectiveVerification, safetyValues);
+  const releaseCandidates = exitCapabilitiesComplete
+    ? managementReleaseCandidates(instance, effectiveVerification, safetyValues)
+    : [];
+  const closeTargetVerification = closeTarget && effectiveVerification.status === "success"
+    ? effectiveVerification.verification.legs.find((item) => item.legId === closeTarget.legId)
     : null;
   const closeTargetSafety = closeTarget ? safetyValues[closeTarget.legId] : null;
   const releaseTargetSafety = releaseTarget ? safetyValues[releaseTarget.legId] : null;
@@ -421,15 +471,16 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
                   <LegRow label="已确认开仓数量" value={leg.confirmedOpenedQuantity} />
                   <LegRow label="正常确认退出数量" value={leg.confirmedClosedQuantity} />
                 </>
-              ) : <LiveLegVerification legId={leg.legId} state={verificationState} />}
+              ) : <LiveLegVerification legId={leg.legId} state={effectiveVerification} />}
               {!historical ? <LiveCloseSafety state={closeSafeties[leg.legId]} /> : null}
             </dl>
             {!historical ? <LegCloseActions
               closeSafetyState={closeSafeties[leg.legId]}
               onClose={() => setCloseTarget(leg)}
-              verificationState={verificationState}
+              verificationState={effectiveVerification}
               legId={leg.legId}
               enabled={Boolean(onInstanceRefresh)}
+              exitCapabilitiesComplete={exitCapabilitiesComplete}
               instanceFullExitAvailable={canExitFully}
             /> : null}
           </div>;
@@ -444,8 +495,17 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         hasQuantityRuleDust={Object.values(safetyValues).some((safety) => safety.reason === "QUANTITY_STEP_DUST")}
         instance={instance}
         onExitHedge={onExitHedge}
-        onReconcileHedge={onReconcileHedge}
-        verificationState={verificationState}
+        onReconcileHedge={onReconcileHedge ? async () => {
+          setCapabilities(loadingExitCapabilities(instance));
+          try {
+            await onReconcileHedge(instance);
+          } finally {
+            await refreshExitCapabilities();
+          }
+        } : undefined}
+        onRefreshExitCapabilities={() => void refreshExitCapabilities()}
+        refreshing={!exitCapabilitiesComplete}
+        verificationState={effectiveVerification}
       /> : null}
       {!historical && onInstanceRefresh ? <ManagementReleaseActions
         candidates={releaseCandidates}
@@ -510,9 +570,10 @@ function LiveCloseSafety({ state }: { state?: ReadState<ArbitrageCloseSafety> })
   </>;
 }
 
-function LegCloseActions({ closeSafetyState, enabled, instanceFullExitAvailable, legId, onClose, verificationState }: {
+function LegCloseActions({ closeSafetyState, enabled, exitCapabilitiesComplete, instanceFullExitAvailable, legId, onClose, verificationState }: {
   closeSafetyState?: ReadState<ArbitrageCloseSafety>;
   enabled: boolean;
+  exitCapabilitiesComplete: boolean;
   instanceFullExitAvailable: boolean;
   legId: string;
   onClose: () => void;
@@ -523,7 +584,7 @@ function LegCloseActions({ closeSafetyState, enabled, instanceFullExitAvailable,
     : null;
   const safety = closeSafetyState?.status === "success" ? closeSafetyState.value : null;
   const actions = legActionAvailability(verification?.verificationStatus, safety, instanceFullExitAvailable);
-  if (!enabled || !actions.partialClose) return null;
+  if (!enabled || !exitCapabilitiesComplete || !actions.partialClose) return null;
   return <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[#25282f] pt-3">
     <Button onClick={onClose} type="button" variant="secondary">安全部分退出</Button>
   </div>;
@@ -697,12 +758,14 @@ export async function reconcileArbitrageHedge(
   return reconcile(instance.arbitrageId);
 }
 
-function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge, onReconcileHedge, verificationState }: {
+function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge, onReconcileHedge, onRefreshExitCapabilities, refreshing, verificationState }: {
   canExit: boolean;
   hasQuantityRuleDust: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: ExitTarget) => void;
-  onReconcileHedge?: (instance: ArbitrageInstance) => void;
+  onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
+  onRefreshExitCapabilities: () => void;
+  refreshing: boolean;
   verificationState?: VerificationState;
 }) {
   const summary = hedgeExitSummary(instance, verificationState);
@@ -715,13 +778,16 @@ function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge,
       {summary.progress.map((item) => <p key={item}>{item}</p>)}
     </div> : null}
     <div className="mt-4 flex flex-wrap justify-end gap-2">
-      {summary.kind !== "ended" && onReconcileHedge ? <Button
-        disabled={verificationState?.status === "loading"}
-        onClick={() => onReconcileHedge(instance)}
+      {summary.kind !== "ended" ? <Button
+        disabled={refreshing}
+        onClick={() => {
+          if (onReconcileHedge) void onReconcileHedge(instance);
+          else onRefreshExitCapabilities();
+        }}
         type="button"
         variant="secondary"
       >
-        {verificationState?.status === "loading" ? "正在核验…" : "重新核验"}
+        {refreshing ? "正在刷新…" : "刷新退出状态"}
       </Button> : null}
       {summary.kind !== "ended" && canExit && onExitHedge ? <Button
         onClick={() => onExitHedge({ instance, hasQuantityRuleDust })}

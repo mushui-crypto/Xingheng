@@ -13,6 +13,7 @@ import {
   canonicalBaseAsset,
   InstanceDeltaPanel,
   instanceExitAvailability,
+  loadExitCapabilities,
   canAbandonUnstartedArbitrage,
   canResumeOpeningWorkflow,
   legActionAvailability,
@@ -207,7 +208,7 @@ test("Binance, OKX, Bybit and Bitget hide mutation entries until close safety is
   />);
 
   assert.equal((html.match(/>完整退出</gu) ?? []).length, 0);
-  assert.equal((html.match(/>重新核验</gu) ?? []).length, 4);
+  assert.equal((html.match(/>正在刷新…</gu) ?? []).length, 4);
   assert.doesNotMatch(html, /退出该腿|重新核验退出/u);
 });
 
@@ -341,7 +342,7 @@ test("reopening restores two-leg exit progress from persisted execution referenc
 
   assert.equal((html.match(/✓ 多头永续腿已退出/gu) ?? []).length, 4);
   assert.equal((html.match(/○ 空头永续腿确认中/gu) ?? []).length, 4);
-  assert.equal((html.match(/>重新核验</gu) ?? []).length, 4);
+  assert.equal((html.match(/>正在刷新…</gu) ?? []).length, 4);
   assert.doesNotMatch(html, /退出该腿|重新核验退出/u);
 });
 
@@ -396,7 +397,7 @@ test("active managed lifecycle wins over flat Account Reality", () => {
     page={1}
     verifications={{ [instance!.arbitrageId]: flatReality }}
   />);
-  assert.match(html, />重新核验</u);
+  assert.match(html, />正在刷新…</u);
   assert.doesNotMatch(html, />完整退出|>安全部分退出|>停止管理/u);
   assert.doesNotMatch(html, /对冲已结束/u);
   const overviewSource = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
@@ -555,6 +556,65 @@ test("verification requests only active ids and isolates a single failure", asyn
     "/api/arbitrage-instances/arbitrage-opening/verification",
   ]);
   assert.deepEqual(states.sort(), ["arbitrage-holding:success", "arbitrage-opening:error"]);
+});
+
+test("exit capability refresh retries transient CloseSafety failures and returns one complete snapshot", async () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const calls = new Map<string, number>();
+  const result = await loadExitCapabilities(instance!, new AbortController().signal, {
+    verification: async () => matchedVerification(instance!, "1", "1").verification,
+    delta: async () => hedgeDelta(instance!, "KNOWN", "KNOWN"),
+    closeSafety: async (_arbitrageId, legId) => {
+      const count = (calls.get(legId) ?? 0) + 1;
+      calls.set(legId, count);
+      if (count === 1) throw new Error("temporary read failure");
+      return closeSafety({ fullManagedCloseAvailable: true, safeClosableQuantity: "1", releaseEligible: false });
+    },
+    wait: async () => undefined,
+  });
+
+  assert.equal(result.verification.status, "success");
+  assert.equal(result.delta.status, "success");
+  assert.equal(Object.values(result.closeSafeties).every((state) => state.status === "success"), true);
+  assert.deepEqual(Object.fromEntries(calls), { "long-leg": 2, "short-leg": 2 });
+  assert.equal(instanceExitAvailability(
+    instance!,
+    result.verification,
+    Object.fromEntries(Object.entries(result.closeSafeties).map(([legId, state]) => [
+      legId,
+      state.status === "success" ? state.value : undefined,
+    ])),
+  ), true);
+});
+
+test("exit capability refresh bounds persistent CloseSafety failures and stays fail closed", async () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  let calls = 0;
+  const result = await loadExitCapabilities(instance!, new AbortController().signal, {
+    verification: async () => matchedVerification(instance!, "1", "1").verification,
+    delta: async () => hedgeDelta(instance!, "KNOWN", "KNOWN"),
+    closeSafety: async () => {
+      calls += 1;
+      throw new Error("still unavailable");
+    },
+    wait: async () => undefined,
+  });
+
+  assert.equal(calls, instance!.legs.length * 3);
+  assert.equal(Object.values(result.closeSafeties).every((state) => state.status === "error"), true);
+  assert.equal(instanceExitAvailability(instance!, result.verification, {}), false);
+});
+
+test("exit capability UI refreshes lifecycle and reconcile changes without exposing fallback actions while incomplete", () => {
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const effect = source.slice(source.indexOf("useEffect(() => {", source.indexOf("function InstanceCard")), source.indexOf("const safetyValues", source.indexOf("function InstanceCard")));
+  assert.match(effect, /refreshExitCapabilities/u);
+  assert.match(effect, /instance\.status/u);
+  assert.match(effect, /instance\.updatedAt/u);
+  assert.match(source, /await onReconcileHedge\(instance\)[\s\S]*await refreshExitCapabilities\(\)/u);
+  assert.match(source, /exitCapabilitiesComplete[\s\S]*LegCloseActions/u);
+  assert.match(source, /exitCapabilitiesComplete[\s\S]*managementReleaseCandidates/u);
+  assert.match(source, /刷新退出状态/u);
 });
 
 test("empty and failed states use stable Chinese product messages", () => {
