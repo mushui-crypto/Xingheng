@@ -11,6 +11,7 @@ import {
   canExecuteLeg,
   canReconcileLeg,
   canConfirmDraft,
+  initialStartLegId,
   loadResumeContext,
   resumeDraftMatchesInstance,
   shouldUseManualLegExecution,
@@ -123,16 +124,19 @@ test("final confirmation is enabled only after both legs have planned and availa
   assert.equal(canConfirmDraft(draft(true)), true);
 });
 
-test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual after full confirmation", () => {
+test("SPOT_PERPETUAL resolves Spot as the instance-level first leg and keeps both leg cards action-free", () => {
   const created = instance([]);
   assert.equal(canExecuteLeg(created, "long-leg"), true);
   assert.equal(canExecuteLeg(created, "short-leg"), false);
   assert.equal(canExecuteLeg(created, "foreign-leg"), false);
+  assert.equal(initialStartLegId(created), "long-leg");
 
   const startHtml = renderToStaticMarkup(content(draft(true), created));
-  assert.equal(startHtml.match(/以此腿开始对冲/gu)?.length, 1);
+  assert.doesNotMatch(startHtml, /以此腿开始对冲/u);
+  assert.doesNotMatch(startHtml, /永续合约腿将在现货成交后自动执行/u);
+  assert.equal(startHtml.match(/确认开始真实对冲/gu)?.length, 1);
   assert.match(startHtml, /aria-haspopup="dialog"/u);
-  assert.match(startHtml, /永续合约腿将在现货成交后自动执行/u);
+  assert.equal((startHtml.match(/border border-\[#25282f\] bg-black p-4/gu) ?? []).length >= 2, true);
 
   const unknown = instance([reference("long-leg", "UNKNOWN", "0")]);
   assert.equal(canExecuteLeg(unknown, "short-leg"), false);
@@ -140,8 +144,17 @@ test("SPOT_PERPETUAL exposes only Spot as the first leg and unlocks Perpetual af
   assert.equal(canExecuteLeg(partial, "short-leg"), false);
   assert.equal(canReconcileLeg(partial, "long-leg"), true);
   const confirmed = instance([reference("long-leg", "CONFIRMED", "0.001")]);
+  assert.equal(initialStartLegId(confirmed), null);
   assert.equal(canExecuteLeg(confirmed, "long-leg"), false);
   assert.equal(canExecuteLeg(confirmed, "short-leg"), true);
+});
+
+test("confirming a fresh instance opens the existing final Start dialog from the create action", () => {
+  const source = readFileSync(new URL("./ArbitrageExecutionDraftEntry.tsx", import.meta.url), "utf8");
+  const confirmInstance = source.slice(source.indexOf("async function confirmInstance"), source.indexOf("async function startHedge"));
+  assert.match(confirmInstance, /const firstLegId = initialStartLegId\(result\.instance\)/u);
+  assert.match(confirmInstance, /if \(firstLegId\) setPendingStartLegId\(firstLegId\)/u);
+  assert.doesNotMatch(confirmInstance, /startHedge\(|startArbitrageHedge\(/u);
 });
 
 test("resume with no execution reference uses final Start confirmation instead of manual leg execution", () => {

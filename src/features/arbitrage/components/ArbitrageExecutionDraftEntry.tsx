@@ -184,7 +184,9 @@ export function ArbitrageExecutionDraftEntry({
         executionMode: executionMode as "PRICE_PRIORITY" | "EXECUTION_PRIORITY",
       });
       setInstance(result.instance);
-      setValidationNotice(result.created ? "套利实例已创建。请选择要先执行的套利腿。" : "已恢复此前创建的套利实例。");
+      const firstLegId = initialStartLegId(result.instance);
+      if (firstLegId) setPendingStartLegId(firstLegId);
+      setValidationNotice(result.created ? "套利实例已创建。请完成最终真钱确认。" : "已恢复此前创建的套利实例。");
     } catch {
       setError("最终确认未通过；服务端已重新校验机会、规则、报价和执行能力。");
     } finally {
@@ -333,7 +335,7 @@ export function ArbitrageExecutionDraftEntry({
       <Modal
         bodyClassName="max-h-[75vh] overflow-y-auto"
         closeDisabled={loading || startSubmitting}
-        description={resumeMode ? "继续使用现有套利实例；异常后的任何 mutation 都需要再次明确确认。" : "创建实例后，选择第一腿并完成一次真钱执行确认；第一腿完整确认时由服务端连续推进第二腿。"}
+        description={resumeMode ? "继续使用现有套利实例；异常后的任何 mutation 都需要再次明确确认。" : "创建实例后完成一次真钱执行确认；现货第一腿完整确认时由服务端连续推进永续第二腿。"}
         onClose={close}
         open={open}
         shellClassName="max-w-5xl"
@@ -609,6 +611,7 @@ export function ArbitrageExecutionDraftContent({
           onContinuePartial={onContinuePartial}
           onReconcileLeg={onReconcileLeg}
           onRestart={onRestart}
+          startFromCreateConfirmation={!resumeMode}
           workflow={workflow}
         />
       ) : null}
@@ -624,7 +627,16 @@ export function ArbitrageExecutionDraftContent({
               <span aria-hidden="true" className={`size-1.5 rounded-full ${resumeValidated ? "bg-sky-300" : "bg-red-300"}`} />
               {resumeValidated ? "继续使用现有实例" : "已停止继续执行"}
             </span>
-          : <Button disabled={loading || instance !== null || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>}
+          : instance === null
+            ? <Button disabled={loading || !canConfirmDraft(draft)} onClick={onConfirm} type="button">确认创建套利</Button>
+            : initialStartLegId(instance)
+              ? <Button
+                  aria-haspopup="dialog"
+                  disabled={loading}
+                  onClick={() => onExecuteLeg(initialStartLegId(instance)!)}
+                  type="button"
+                >确认开始真实对冲</Button>
+              : null}
       </div>
       <p className="text-right text-[11px] leading-5 text-[#707985]">{resumeMode ? "异常恢复需要再次明确确认；UNKNOWN 或 live partial 只能先重新核验。" : "开始对冲只需一次确认；第一腿完整确认后由服务端连续推进第二腿。"}</p>
     </div>
@@ -638,6 +650,11 @@ export function canConfirmDraft(draft: ArbitrageExecutionDraft | null) {
 
 export function shouldUseManualLegExecution(instance: ArbitrageInstance | null) {
   return Boolean(instance?.executionReferences.length);
+}
+
+export function initialStartLegId(instance: ArbitrageInstance) {
+  if (instance.executionReferences.length !== 0 || instance.strategyType !== "SPOT_PERPETUAL") return null;
+  return instance.legs.find((leg) => leg.instrumentId.endsWith("-SPOT") && canExecuteLeg(instance, leg.legId))?.legId ?? null;
 }
 
 export function canExecuteLeg(instance: ArbitrageInstance, legId: string) {
@@ -733,6 +750,7 @@ function ExecutionInstancePanel({
   onContinuePartial,
   onReconcileLeg,
   onRestart,
+  startFromCreateConfirmation,
   workflow,
 }: {
   executionResults: Record<string, ArbitrageLegExecutionConfirmation["executionRecord"]>;
@@ -742,8 +760,10 @@ function ExecutionInstancePanel({
   onContinuePartial: () => void;
   onReconcileLeg: (legId: string) => void;
   onRestart: () => void;
+  startFromCreateConfirmation: boolean;
   workflow: ArbitrageHedgeWorkflow | null;
 }) {
+  const instanceLevelStart = startFromCreateConfirmation && initialStartLegId(instance) !== null;
   return (
     <section className="border border-sky-400/30 bg-sky-500/[0.04] p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -762,6 +782,7 @@ function ExecutionInstancePanel({
             onReconcile={() => onReconcileLeg(leg.legId)}
             permitted={canExecuteLeg(instance, leg.legId)}
             reference={instance.executionReferences.find((reference) => reference.legId === leg.legId)}
+            suppressStartAction={instanceLevelStart}
             startMode={instance.executionReferences.length === 0}
           />
         ))}
@@ -810,7 +831,7 @@ function isWorkflowInFlight(phase: ArbitrageHedgeWorkflow["phase"]) {
     || phase === "SECOND_LEG_EXECUTING" || phase === "SECOND_LEG_PENDING";
 }
 
-function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference, startMode }: {
+function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile, permitted, reference, startMode, suppressStartAction }: {
   execution?: ArbitrageLegExecutionConfirmation["executionRecord"];
   leg: ArbitrageInstanceLeg;
   loading: boolean;
@@ -819,11 +840,12 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
   permitted: boolean;
   reference?: ArbitrageInstance["executionReferences"][number];
   startMode: boolean;
+  suppressStartAction: boolean;
 }) {
   const status = execution?.status ?? reference?.status ?? "CREATED";
   const reconcilable = status === "PENDING_CONFIRMATION" || status === "UNKNOWN";
   const verifiedAt = execution?.verifiedAt ?? reference?.updatedAt;
-  const deferredPerpetual = startMode && !permitted && leg.instrumentId.endsWith("-PERP");
+  const showAction = !suppressStartAction && (!startMode || permitted || reconcilable);
   return (
     <div className="border border-[#25282f] bg-black p-4">
       <div className="flex items-center justify-between gap-3"><strong className="text-xs text-white">{leg.role === "LONG" ? "LONG · 多头腿" : "SHORT · 空头腿"}</strong><span className="text-[11px] text-[#8f99a5]">{executionStatusLabel(status)}</span></div>
@@ -833,9 +855,7 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
         <LegExecutionMetric label="执行状态" value={executionStatusLabel(status)} />
         <LegExecutionMetric label="最近核验时间" value={verifiedAt === undefined ? "尚未核验" : formatCheckedAt(verifiedAt)} />
       </dl>
-      {deferredPerpetual
-        ? <p className="mt-4 border border-sky-400/25 px-3 py-2 text-center text-xs text-sky-100">永续合约腿将在现货成交后自动执行</p>
-        : <Button
+      {showAction ? <Button
             aria-haspopup={startMode ? "dialog" : undefined}
             className="mt-4 w-full"
             disabled={loading || (reconcilable ? reference?.executionRecordId === null : !permitted)}
@@ -844,7 +864,7 @@ function ExecutionInstanceLeg({ execution, leg, loading, onExecute, onReconcile,
             variant="secondary"
           >
             {reconcilable ? "重新核验" : startMode ? "以此腿开始对冲" : instanceLegButtonLabel(reference?.status)}
-          </Button>}
+          </Button> : null}
     </div>
   );
 }
