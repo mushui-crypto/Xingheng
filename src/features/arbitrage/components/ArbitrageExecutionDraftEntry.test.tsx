@@ -341,6 +341,8 @@ test("Start keeps processing through terminal authoritative refresh on success, 
   assert.match(start, /catch[\s\S]*finally[\s\S]*terminalRefreshCoordinator\.current\.refresh/u);
   assert.match(start, /terminalRefreshCoordinator\.current\.refresh[\s\S]*setLoading\(false\)/u);
   assert.match(start, /workflowPollController\.current\?\.abort/u);
+  assert.match(start, /await onTerminalSnapshot\?\.\(snapshot\)/u);
+  assert.match(start, /onTerminalSnapshot\?\.\(snapshot\)[\s\S]*setLoading\(false\)/u);
   assert.match(start, /snapshot\.complete/u);
   assert.doesNotMatch(start, /catch[\s\S]*startArbitrageHedge\(/u);
   assert.match(appendRefreshFailure("交易已停止。"), /交易已停止。[\s\S]*状态刷新失败/u);

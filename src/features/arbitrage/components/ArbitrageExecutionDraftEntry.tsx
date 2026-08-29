@@ -13,6 +13,7 @@ import {
   startArbitrageHedge,
   type ArbitrageExecutionDraft,
   type ArbitrageExecutionDraftLeg,
+  type ArbitrageTerminalAuthoritativeSnapshot,
   type ArbitrageLegExecutionConfirmation,
   type ArbitrageHedgeWorkflow,
   type ExecutionQuantityInput,
@@ -26,10 +27,12 @@ import type { ArbitrageHorizon } from "../model/types";
 
 export function ArbitrageExecutionDraftEntry({
   horizonDays,
+  onTerminalSnapshot,
   opportunityId,
   resumeArbitrageId = null,
 }: {
   horizonDays?: ArbitrageHorizon;
+  onTerminalSnapshot?: (snapshot: ArbitrageTerminalAuthoritativeSnapshot) => void | Promise<void>;
   opportunityId?: string;
   resumeArbitrageId?: string | null;
 }) {
@@ -252,6 +255,7 @@ export function ArbitrageExecutionDraftEntry({
         if (snapshot) {
           setInstance(snapshot.instance);
           if (snapshot.workflow) setWorkflow(snapshot.workflow);
+          await onTerminalSnapshot?.(snapshot);
           if (!snapshot.complete) {
             terminalError = appendRefreshFailure(terminalError);
             terminalNotice = "";

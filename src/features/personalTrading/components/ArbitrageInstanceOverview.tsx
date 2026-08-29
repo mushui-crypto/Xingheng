@@ -16,7 +16,10 @@ import {
   type ArbitragePositionVerification,
   type InstanceHedgeDelta,
 } from "../../../api/arbitrageInstances";
-import { reconcileArbitrageInstance } from "../../../api/arbitrageExecutionDraft";
+import {
+  reconcileArbitrageInstance,
+  type ArbitrageTerminalAuthoritativeSnapshot,
+} from "../../../api/arbitrageExecutionDraft";
 import { Button } from "../../../components/ui/Button";
 import { ArbitrageExecutionDraftEntry } from "../../arbitrage/components/ArbitrageExecutionDraftEntry";
 import { ArbitrageHedgeExitDialog } from "./ArbitrageHedgeExitDialog";
@@ -102,6 +105,7 @@ export function ArbitrageInstanceOverview() {
     <ArbitrageInstanceContent
       onExitHedge={setExitTarget}
       onInstanceRefresh={refreshInstance}
+      onInstanceUpdated={applyInstanceUpdate}
       onReconcileHedge={reconcileHedge}
       onPageChange={setPage}
       onSectionChange={setSelectedSection}
@@ -166,6 +170,25 @@ export function loadingExitCapabilities(instance: ArbitrageInstance): ExitCapabi
   };
 }
 
+export function terminalSnapshotExitCapabilities(
+  snapshot: ArbitrageTerminalAuthoritativeSnapshot,
+): ExitCapabilitiesState {
+  return {
+    verification: snapshot.verification
+      ? { status: "success", verification: snapshot.verification }
+      : { status: "error" },
+    closeSafeties: Object.fromEntries(snapshot.instance.legs.map((leg) => {
+      const safety = snapshot.closeSafeties[leg.legId];
+      return [leg.legId, safety ? { status: "success", value: safety } : { status: "error" }];
+    })),
+    delta: snapshot.delta ? { status: "success", value: snapshot.delta } : { status: "error" },
+  };
+}
+
+function terminalSnapshotKey(instance: ArbitrageInstance) {
+  return `${instance.arbitrageId}\0${instance.status}\0${instance.updatedAt}`;
+}
+
 export async function loadExitCapabilities(
   instance: ArbitrageInstance,
   signal: AbortSignal,
@@ -222,6 +245,7 @@ function waitForExitCapabilityRetry(delayMs: number, signal: AbortSignal) {
 export function ArbitrageInstanceContent({
   onExitHedge,
   onInstanceRefresh,
+  onInstanceUpdated,
   onReconcileHedge,
   onPageChange,
   onSectionChange = () => undefined,
@@ -232,6 +256,7 @@ export function ArbitrageInstanceContent({
 }: {
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
+  onInstanceUpdated?: (instance: ArbitrageInstance) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   onPageChange: (page: number) => void;
   onSectionChange?: (section: "active" | "history") => void;
@@ -259,6 +284,7 @@ export function ArbitrageInstanceContent({
       onPageChange={onPageChange}
       onExitHedge={onExitHedge}
       onInstanceRefresh={onInstanceRefresh}
+      onInstanceUpdated={onInstanceUpdated}
       onReconcileHedge={onReconcileHedge}
       onSectionChange={onSectionChange}
       page={page}
@@ -274,6 +300,7 @@ export function ArbitrageInstanceSections({
   onPageChange,
   onExitHedge,
   onInstanceRefresh,
+  onInstanceUpdated,
   onReconcileHedge,
   onSectionChange = () => undefined,
   page,
@@ -285,6 +312,7 @@ export function ArbitrageInstanceSections({
   onPageChange: (page: number) => void;
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
+  onInstanceUpdated?: (instance: ArbitrageInstance) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   onSectionChange?: (section: "active" | "history") => void;
   page: number;
@@ -304,6 +332,7 @@ export function ArbitrageInstanceSections({
           instances={active}
           onExitHedge={onExitHedge}
           onInstanceRefresh={onInstanceRefresh}
+          onInstanceUpdated={onInstanceUpdated}
           onReconcileHedge={onReconcileHedge}
           title="当前套利"
           verifications={verifications}
@@ -352,6 +381,7 @@ function InstanceSection({
   instances,
   onExitHedge,
   onInstanceRefresh,
+  onInstanceUpdated,
   onReconcileHedge,
   title,
   verifications = {},
@@ -361,6 +391,7 @@ function InstanceSection({
   instances: ArbitrageInstance[];
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
+  onInstanceUpdated?: (instance: ArbitrageInstance) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   title: string;
   verifications?: Record<string, VerificationState>;
@@ -373,16 +404,17 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onInstanceRefresh={onInstanceRefresh} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onInstanceRefresh={onInstanceRefresh} onInstanceUpdated={onInstanceUpdated} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onReconcileHedge, verificationState }: {
+function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onInstanceUpdated, onReconcileHedge, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
+  onInstanceUpdated?: (instance: ArbitrageInstance) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   verificationState?: VerificationState;
 }) {
@@ -393,8 +425,10 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
   const [closeTarget, setCloseTarget] = useState<ArbitrageInstanceLeg | null>(null);
   const [releaseTarget, setReleaseTarget] = useState<ArbitrageInstanceLeg | null>(null);
   const [abandonOpen, setAbandonOpen] = useState(false);
+  const [capabilityRefreshError, setCapabilityRefreshError] = useState(false);
   const refreshController = useRef<AbortController | null>(null);
   const refreshGeneration = useRef(0);
+  const appliedTerminalSnapshotKey = useRef<string | null>(null);
   const legIds = instance.legs.map((leg) => leg.legId).join("\0");
 
   const refreshExitCapabilities = useCallback(async () => {
@@ -402,13 +436,21 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
     const controller = new AbortController();
     const generation = ++refreshGeneration.current;
     refreshController.current = controller;
+    setCapabilityRefreshError(false);
     setCapabilities(loadingExitCapabilities(instance));
     const refreshed = await loadExitCapabilities(instance, controller.signal);
-    if (!controller.signal.aborted && generation === refreshGeneration.current) setCapabilities(refreshed);
+    if (!controller.signal.aborted && generation === refreshGeneration.current) {
+      setCapabilities(refreshed);
+      setCapabilityRefreshError(!exitCapabilityReadsComplete(instance, refreshed));
+    }
   }, [instance.arbitrageId, legIds]);
 
   useEffect(() => {
     if (historical) return;
+    if (appliedTerminalSnapshotKey.current === terminalSnapshotKey(instance)) {
+      appliedTerminalSnapshotKey.current = null;
+      return;
+    }
     void refreshExitCapabilities();
     return () => refreshController.current?.abort();
   }, [historical, instance.arbitrageId, instance.status, instance.updatedAt, refreshExitCapabilities]);
@@ -428,6 +470,9 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       const verification = effectiveVerification.verification.legs.find((item) => item.legId === leg.legId);
       return verification?.verificationStatus !== "UNKNOWN" && safety.value.realityReliable;
     });
+  const exitCapabilitiesLoading = effectiveVerification.status === "loading"
+    || deltaState.status === "loading"
+    || instance.legs.some((leg) => closeSafeties[leg.legId]?.status === "loading");
   const canExitFully = exitCapabilitiesComplete && instanceExitAvailability(instance, effectiveVerification, safetyValues);
   const releaseCandidates = exitCapabilitiesComplete
     ? managementReleaseCandidates(instance, effectiveVerification, safetyValues)
@@ -461,7 +506,18 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
             放弃套利
           </Button> : null}
           {canResumeOpeningWorkflow(instance)
-            ? <ArbitrageExecutionDraftEntry resumeArbitrageId={instance.arbitrageId} />
+            ? <ArbitrageExecutionDraftEntry
+                onTerminalSnapshot={(snapshot) => {
+                  if (snapshot.instance.arbitrageId !== instance.arbitrageId) return;
+                  refreshController.current?.abort();
+                  refreshGeneration.current += 1;
+                  appliedTerminalSnapshotKey.current = terminalSnapshotKey(snapshot.instance);
+                  setCapabilities(terminalSnapshotExitCapabilities(snapshot));
+                  setCapabilityRefreshError(!snapshot.complete);
+                  onInstanceUpdated?.(snapshot.instance);
+                }}
+                resumeArbitrageId={instance.arbitrageId}
+              />
             : null}
         </div>
       ) : null}
@@ -514,7 +570,8 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
           }
         } : undefined}
         onRefreshExitCapabilities={() => void refreshExitCapabilities()}
-        refreshing={!exitCapabilitiesComplete}
+        refreshError={capabilityRefreshError}
+        refreshing={exitCapabilitiesLoading}
         verificationState={effectiveVerification}
       /> : null}
       {!historical && onInstanceRefresh ? <ManagementReleaseActions
@@ -775,13 +832,14 @@ export async function reconcileArbitrageHedge(
   return reconcile(instance.arbitrageId);
 }
 
-function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge, onReconcileHedge, onRefreshExitCapabilities, refreshing, verificationState }: {
+function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge, onReconcileHedge, onRefreshExitCapabilities, refreshError, refreshing, verificationState }: {
   canExit: boolean;
   hasQuantityRuleDust: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: ExitTarget) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   onRefreshExitCapabilities: () => void;
+  refreshError: boolean;
   refreshing: boolean;
   verificationState?: VerificationState;
 }) {
@@ -794,6 +852,7 @@ function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge,
     {summary.progress.length > 0 ? <div className="mt-3 space-y-1 text-xs text-[#c5ccd4]">
       {summary.progress.map((item) => <p key={item}>{item}</p>)}
     </div> : null}
+    {refreshError ? <p className="mt-3 text-xs text-amber-200" role="alert">状态刷新失败，请重新刷新。系统不会自动重发交易命令。</p> : null}
     <div className="mt-4 flex flex-wrap justify-end gap-2">
       {summary.kind !== "ended" ? <Button
         disabled={refreshing}
@@ -814,6 +873,12 @@ function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge,
       </Button> : null}
     </div>
   </div>;
+}
+
+export function exitCapabilityReadsComplete(instance: ArbitrageInstance, state: ExitCapabilitiesState) {
+  return state.verification.status === "success"
+    && state.delta.status === "success"
+    && instance.legs.every((leg) => state.closeSafeties[leg.legId]?.status === "success");
 }
 
 export function hedgeExitSummary(instance: ArbitrageInstance, state?: VerificationState) {

@@ -13,6 +13,7 @@ import {
   canonicalBaseAsset,
   InstanceDeltaPanel,
   instanceExitAvailability,
+  exitCapabilityReadsComplete,
   loadExitCapabilities,
   canAbandonUnstartedArbitrage,
   canResumeOpeningWorkflow,
@@ -24,6 +25,7 @@ import {
   ManagementReleaseActions,
   reconcileArbitrageHedge,
   statusLabel,
+  terminalSnapshotExitCapabilities,
   updateInstanceSections,
   unresolvedClosingReference,
   verificationStatusLabel,
@@ -706,6 +708,50 @@ test("exit capability UI refreshes lifecycle and reconcile changes without expos
   assert.match(source, /exitCapabilitiesComplete[\s\S]*LegCloseActions/u);
   assert.match(source, /exitCapabilitiesComplete[\s\S]*managementReleaseCandidates/u);
   assert.match(source, /刷新退出状态/u);
+});
+
+test("Start terminal snapshot atomically supplies HOLDING instance facts and full Exit capability", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const verification = matchedVerification(instance!, "1", "1").verification;
+  const safety = closeSafety({
+    activeManagedQuantity: "1",
+    safeClosableQuantity: "1",
+    fullManagedCloseAvailable: true,
+    releaseEligible: false,
+  });
+  const capabilities = terminalSnapshotExitCapabilities({
+    instance: instance!,
+    workflow: null,
+    verification,
+    closeSafeties: { "long-leg": safety, "short-leg": safety },
+    delta: hedgeDelta(instance!, "KNOWN", "KNOWN"),
+    complete: true,
+  });
+
+  assert.equal(exitCapabilityReadsComplete(instance!, capabilities), true);
+  assert.equal(capabilities.verification.status, "success");
+  assert.equal(capabilities.delta.status, "success");
+  assert.equal(Object.values(capabilities.closeSafeties).every((state) => state.status === "success"), true);
+  assert.equal(instanceExitAvailability(
+    instance!,
+    capabilities.verification,
+    Object.fromEntries(Object.entries(capabilities.closeSafeties).map(([legId, state]) => [
+      legId,
+      state.status === "success" ? state.value : undefined,
+    ])),
+  ), true);
+});
+
+test("Start terminal snapshot handoff invalidates stale capability reads and avoids an immediate duplicate refresh", () => {
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const card = source.slice(source.indexOf("function InstanceCard"), source.indexOf("function StatusBadge"));
+  assert.match(card, /onTerminalSnapshot/u);
+  assert.match(card, /refreshController\.current\?\.abort\(\)/u);
+  assert.match(card, /refreshGeneration\.current \+= 1/u);
+  assert.match(card, /setCapabilities\(terminalSnapshotExitCapabilities\(snapshot\)\)/u);
+  assert.match(card, /onInstanceUpdated\?\.\(snapshot\.instance\)/u);
+  assert.match(card, /appliedTerminalSnapshotKey\.current === terminalSnapshotKey\(instance\)[\s\S]*return/u);
+  assert.match(source, /状态刷新失败，请重新刷新。系统不会自动重发交易命令/u);
 });
 
 test("empty and failed states use stable Chinese product messages", () => {
