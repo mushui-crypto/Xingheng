@@ -5,6 +5,7 @@ import {
   type ArbitrageInstance,
 } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { ArbitrageExecutionCloseError } from "./ArbitrageExecutionCloseService";
+import { ArbitrageExecutionCommandError } from "./ArbitrageExecutionCommandService";
 import { ArbitrageInstanceExitService } from "./ArbitrageInstanceExitService";
 import { ArbitrageManagementReleaseError } from "./ArbitrageManagementReleaseService";
 
@@ -554,6 +555,37 @@ test("repeated pending first-close observations never repeat its Provider mutati
   assert.equal(fixture.reconcileCalls.filter((legId) => legId === "long-leg").length, 3);
 });
 
+test("transient Bybit evidence lag is retried read-only and continues the same Exit", async () => {
+  const fixture = setupOnlineFinalization({
+    venue: "bybit",
+    firstInitial: outcome("PENDING_CONFIRMATION", "0"),
+    firstReconciles: [outcome("CONFIRMED", "1")],
+    reconcileErrors: [transientReconcileError("EXECUTION_LIST"), transientReconcileError("EXECUTION_EVIDENCE_COMPARE")],
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("bybit-evidence-converges"));
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.equal(fixture.reconcileCalls.filter((legId) => legId === "long-leg").length, 3);
+  assert.equal(fixture.outcomeAudits[0]?.reconcileAttempts.length, 3);
+});
+
+test("Bybit Perp close evidence lag finalizes in the same Exit before dust release", async () => {
+  const fixture = setupOnlineFinalization({
+    venue: "bybit",
+    spotOpened: "1.0000005", spotLegalClose: "1", spotDust: "0.0000005",
+    secondInitial: outcome("PENDING_CONFIRMATION", "0"),
+    secondReconciles: [outcome("CONFIRMED", "1")],
+    reconcileErrors: [transientReconcileError("EXECUTION_EVIDENCE_COMPARE")],
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("bybit-perp-evidence-converges"));
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(result.instance.status, "CLOSED");
+  assert.deepEqual(fixture.closeCalls, ["long-leg", "short-leg"]);
+  assert.deepEqual(fixture.releaseCalls, ["long-leg"]);
+  assert.equal(fixture.closeCalls.filter((legId) => legId === "short-leg").length, 1);
+});
+
 test("partial, failed, unknown, query error, and exhausted pending all stop before second close", async (t) => {
   const cases = [
     { name: "partial", reconciles: [outcome("PENDING_CONFIRMATION", "0.4")] },
@@ -658,6 +690,7 @@ function setupOnlineFinalization(options: Readonly<{
   secondInitial?: Outcome;
   secondReconciles?: readonly Outcome[];
   reconcileThrows?: boolean;
+  reconcileErrors?: readonly ArbitrageExecutionCommandError[];
   closeFinalizationMaxAttempts?: number;
   spotOpened?: string;
   spotLegalClose?: string;
@@ -676,6 +709,7 @@ function setupOnlineFinalization(options: Readonly<{
     ["long-leg", [...(options.firstReconciles ?? [])]],
     ["short-leg", [...(options.secondReconciles ?? [])]],
   ]);
+  const reconcileErrors = [...(options.reconcileErrors ?? [])];
 
   function currentOutcome(legId: string, initial: Outcome) {
     const reference = instance.executionReferences.find((candidate) => candidate.phase === "CLOSING" && candidate.legId === legId);
@@ -811,6 +845,8 @@ function setupOnlineFinalization(options: Readonly<{
     async reconcileLeg(_userId: string, input: any) {
       reconcileCalls.push(input.legId);
       if (options.reconcileThrows) throw new Error("temporary query failure");
+      const reconcileError = reconcileErrors.shift();
+      if (reconcileError) throw reconcileError;
       const queue = reconciles.get(input.legId)!;
       const current = currentOutcome(input.legId, outcome("PENDING_CONFIRMATION", "0"));
       return apply(input.legId, queue.shift() ?? current);
@@ -1234,6 +1270,15 @@ function dustAssessment(instance: ArbitrageInstance, legId: string, result: any)
       }),
     }),
   });
+}
+
+function transientReconcileError(substage: "EXECUTION_LIST" | "EXECUTION_EVIDENCE_COMPARE") {
+  return new ArbitrageExecutionCommandError(
+    "execution_state_unknown",
+    "execution evidence pending",
+    undefined,
+    Object.freeze({ venue: "bybit", substage, category: "EXECUTION_EVIDENCE_PENDING", providerCode: null, retryable: true }),
+  );
 }
 
 function baseInstance(

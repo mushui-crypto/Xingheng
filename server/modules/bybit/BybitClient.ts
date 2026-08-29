@@ -15,8 +15,19 @@ import type {
 const BYBIT_API_BASE_URL = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
+export type BybitReconcileSubstage =
+  | "ORDER_REALTIME"
+  | "ORDER_HISTORY"
+  | "EXECUTION_LIST"
+  | "EXECUTION_EVIDENCE_COMPARE";
+
 export class BybitProviderError extends Error {
-  constructor(readonly category: string, message: string, readonly providerCode?: number) {
+  constructor(
+    readonly category: string,
+    message: string,
+    readonly providerCode?: number,
+    readonly reconcileSubstage?: BybitReconcileSubstage,
+  ) {
     super(message);
   }
 }
@@ -130,11 +141,20 @@ export class BybitClient {
       ...(request.orderId === undefined ? {} : { orderId: request.orderId }),
       orderLinkId: request.orderLinkId,
     };
-    let rows = await this.orderRows("/v5/order/realtime", query);
-    if (!rows.length) rows = await this.orderRows("/v5/order/history", query);
+    let substage: BybitReconcileSubstage = "ORDER_REALTIME";
+    let rows = await this.orderRows("/v5/order/realtime", query, substage);
+    if (!rows.length) {
+      substage = "ORDER_HISTORY";
+      rows = await this.orderRows("/v5/order/history", query, substage);
+    }
     const matching = rows.filter((row) => orderMatches(row, request));
     if (matching.length !== 1) {
-      throw new BybitProviderError("provider_response_invalid", "Bybit order response does not uniquely match the execution order.");
+      throw new BybitProviderError(
+        "provider_response_invalid",
+        "Bybit order response does not uniquely match the execution order.",
+        undefined,
+        substage,
+      );
     }
     const row = matching[0]!;
     const identity = orderIdentity(row, request.category);
@@ -219,40 +239,52 @@ export class BybitClient {
     return rows.filter((row) => row.symbol === symbol).length;
   }
 
-  private async orderRows(path: string, query: Record<string, string>) {
-    const payload = await this.signedRequest("GET", path, query);
-    const result = record(payload.result, "Bybit order result");
-    return array(result.list, "Bybit order list").map((item) => record(item, "Bybit order"));
+  private async orderRows(
+    path: string,
+    query: Record<string, string>,
+    reconcileSubstage?: BybitReconcileSubstage,
+  ) {
+    try {
+      const payload = await this.signedRequest("GET", path, query);
+      const result = record(payload.result, "Bybit order result");
+      return array(result.list, "Bybit order list").map((item) => record(item, "Bybit order"));
+    } catch (error) {
+      throw withReconcileSubstage(error, reconcileSubstage);
+    }
   }
 
   private async executionEvidence(identity: BybitOrderIdentity) {
-    const payload = await this.signedRequest("GET", "/v5/execution/list", {
-      category: identity.category,
-      symbol: identity.symbol,
-      orderId: identity.orderId,
-    });
-    const result = record(payload.result, "Bybit execution result");
-    const rows = array(result.list, "Bybit execution list")
-      .map((item) => record(item, "Bybit execution"))
-      .filter((item) => item.orderId === identity.orderId
-        && item.orderLinkId === identity.orderLinkId
-        && item.symbol === identity.symbol);
-    let fee = "0";
-    let filled = "0";
-    let feeCurrency: string | null = null;
-    for (const row of rows) {
-      fee = addDecimal(fee, unsignedDecimal(requiredString(row.execFee, "Bybit execFee"), "Bybit execFee"));
-      filled = addDecimal(filled, unsignedDecimal(requiredString(row.execQty, "Bybit execQty"), "Bybit execQty"));
-      const currency = optionalString(row.feeCurrency);
-      if (currency !== null) {
-        const normalized = asset(currency);
-        if (feeCurrency !== null && feeCurrency !== normalized) {
-          throw new BybitProviderError("provider_response_invalid", "Bybit execution fee currencies are inconsistent.");
+    try {
+      const payload = await this.signedRequest("GET", "/v5/execution/list", {
+        category: identity.category,
+        symbol: identity.symbol,
+        orderId: identity.orderId,
+      });
+      const result = record(payload.result, "Bybit execution result");
+      const rows = array(result.list, "Bybit execution list")
+        .map((item) => record(item, "Bybit execution"))
+        .filter((item) => item.orderId === identity.orderId
+          && item.orderLinkId === identity.orderLinkId
+          && item.symbol === identity.symbol);
+      let fee = "0";
+      let filled = "0";
+      let feeCurrency: string | null = null;
+      for (const row of rows) {
+        fee = addDecimal(fee, unsignedDecimal(requiredString(row.execFee, "Bybit execFee"), "Bybit execFee"));
+        filled = addDecimal(filled, unsignedDecimal(requiredString(row.execQty, "Bybit execQty"), "Bybit execQty"));
+        const currency = optionalString(row.feeCurrency);
+        if (currency !== null) {
+          const normalized = asset(currency);
+          if (feeCurrency !== null && feeCurrency !== normalized) {
+            throw new BybitProviderError("provider_response_invalid", "Bybit execution fee currencies are inconsistent.");
+          }
+          feeCurrency = normalized;
         }
-        feeCurrency = normalized;
       }
+      return Object.freeze({ fee, filled, feeCurrency });
+    } catch (error) {
+      throw withReconcileSubstage(error, "EXECUTION_LIST");
     }
-    return Object.freeze({ fee, filled, feeCurrency });
   }
 
   private async executionRows(query: Record<string, unknown>) {
@@ -329,10 +361,27 @@ function providerOrder(
 ): BybitProviderOrder {
   const requestedQuantity = decimalString(row.qty, "Bybit order qty");
   const orderFilled = decimalString(row.cumExecQty, "Bybit cumulative executed quantity");
-  if (!decimalEquals(orderFilled, executions.filled)) {
-    throw new BybitProviderError("provider_response_invalid", "Bybit order and execution cumulative fills do not match.");
-  }
   const rawStatus = requiredString(row.orderStatus, "Bybit orderStatus");
+  const fillComparison = compareDecimal(
+    unsignedDecimal(orderFilled, "Bybit cumulative executed quantity"),
+    unsignedDecimal(executions.filled, "Bybit execution evidence quantity"),
+  );
+  if (fillComparison > 0 && executionEvidenceMayStillConverge(rawStatus)) {
+    throw new BybitProviderError(
+      "execution_evidence_pending",
+      "Bybit execution evidence has not reached the authoritative order cumulative fill.",
+      undefined,
+      "EXECUTION_EVIDENCE_COMPARE",
+    );
+  }
+  if (fillComparison !== 0) {
+    throw new BybitProviderError(
+      "provider_response_invalid",
+      "Bybit order and execution cumulative fills conflict.",
+      undefined,
+      "EXECUTION_EVIDENCE_COMPARE",
+    );
+  }
   return Object.freeze({
     ...identity,
     side: orderSide(row.side),
@@ -349,6 +398,22 @@ function providerOrder(
     ...(row.marketUnit === undefined || row.marketUnit === "" ? {} : { marketUnit: marketUnit(row.marketUnit) }),
     updatedAt: optionalTimestamp(row.updatedTime),
   });
+}
+
+function executionEvidenceMayStillConverge(rawStatus: string) {
+  return rawStatus === "Filled"
+    || rawStatus === "New"
+    || rawStatus === "Created"
+    || rawStatus === "PartiallyFilled"
+    || rawStatus === "Untriggered"
+    || rawStatus === "Triggered";
+}
+
+function withReconcileSubstage(error: unknown, substage?: BybitReconcileSubstage): unknown {
+  if (!(error instanceof BybitProviderError) || substage === undefined || error.reconcileSubstage !== undefined) {
+    return error;
+  }
+  return new BybitProviderError(error.category, error.message, error.providerCode, substage);
 }
 
 function providerBoolean(value: unknown) {

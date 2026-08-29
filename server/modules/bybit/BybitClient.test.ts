@@ -100,6 +100,65 @@ test("Bybit order recovery falls back from realtime to history using determinist
   assert.deepEqual(paths, ["/v5/order/realtime", "/v5/order/history", "/v5/execution/list"]);
 });
 
+test("Bybit classifies lagging execution evidence as transient without accepting Filled alone", async () => {
+  let evidenceRead = 0;
+  const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v5/order/realtime") return Response.json({ retCode: 0, result: { list: [{
+        symbol: "DOGEUSDT", orderId: "303", orderLinkId: "sxby-lag", side: "Buy", orderStatus: "Filled",
+        qty: "60.1", cumExecQty: "60.1", avgPrice: "0.1", updatedTime: String(now),
+      }] } });
+      if (url.pathname === "/v5/execution/list") {
+        evidenceRead += 1;
+        return Response.json({ retCode: 0, result: { list: evidenceRead === 1 ? [] : [{
+          symbol: "DOGEUSDT", orderId: "303", orderLinkId: "sxby-lag",
+          execQty: "60.1", execFee: "0.0601", feeCurrency: "DOGE",
+        }] } });
+      }
+      throw new Error(`Unexpected path ${url.pathname}`);
+    }) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => client.getOrder({ category: "spot", symbol: "DOGEUSDT", orderId: "303", orderLinkId: "sxby-lag" }),
+    (error: unknown) => error instanceof BybitProviderError
+      && error.category === "execution_evidence_pending"
+      && error.reconcileSubstage === "EXECUTION_EVIDENCE_COMPARE",
+  );
+  const confirmed = await client.getOrder({
+    category: "spot", symbol: "DOGEUSDT", orderId: "303", orderLinkId: "sxby-lag",
+  });
+  assert.equal(confirmed.status, "CONFIRMED");
+  assert.equal(confirmed.filledQuantity, "60.1");
+  assert.equal(confirmed.feeCurrency, "DOGE");
+});
+
+test("Bybit treats execution evidence exceeding the order cumulative fill as invalid", async () => {
+  const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/v5/order/realtime") return Response.json({ retCode: 0, result: { list: [{
+        symbol: "DOGEUSDT", orderId: "304", orderLinkId: "sxby-conflict", side: "Sell", orderStatus: "Filled",
+        qty: "10", cumExecQty: "10", avgPrice: "0.1", updatedTime: String(now),
+      }] } });
+      if (url.pathname === "/v5/execution/list") return Response.json({ retCode: 0, result: { list: [{
+        symbol: "DOGEUSDT", orderId: "304", orderLinkId: "sxby-conflict",
+        execQty: "11", execFee: "0.01", feeCurrency: "USDT",
+      }] } });
+      throw new Error(`Unexpected path ${url.pathname}`);
+    }) as typeof fetch,
+  });
+  await assert.rejects(
+    () => client.getOrder({ category: "linear", symbol: "DOGEUSDT", orderId: "304", orderLinkId: "sxby-conflict" }),
+    (error: unknown) => error instanceof BybitProviderError
+      && error.category === "provider_response_invalid"
+      && error.reconcileSubstage === "EXECUTION_EVIDENCE_COMPARE",
+  );
+});
+
 test("Bybit historical evidence scans realtime, order history, executions, and active orders without mutation", async () => {
   const calls: Array<{ method: string; path: string; orderLinkId: string | null }> = [];
   const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {

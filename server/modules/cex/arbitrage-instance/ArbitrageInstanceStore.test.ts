@@ -40,6 +40,14 @@ test("persists one append-only orchestration outcome per command with a producti
         attempt: 2, substage: "SPOT_BALANCE" as const, result: "SUCCESS" as const,
         retryDecision: "COMPLETE" as const, delayMs: 0, category: null, providerCode: null,
       }],
+      reconcileAttempts: [{
+        attempt: 1, venue: "bybit", substage: "EXECUTION_LIST", result: "FAILED" as const,
+        retryDecision: "RETRY" as const, delayMs: 250,
+        category: "EXECUTION_EVIDENCE_PENDING", providerCode: null,
+      }, {
+        attempt: 2, venue: "bybit", substage: null, result: "SUCCESS" as const,
+        retryDecision: "COMPLETE" as const, delayMs: 0, category: null, providerCode: null,
+      }],
       terminalAt: start + 10,
     };
     const first = store.recordCommandOutcome("user-a", input);
@@ -72,6 +80,7 @@ test("persists one append-only orchestration outcome per command with a producti
       assert.equal(columns.find(({ name }) => name === "failureStage")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "providerCode")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "dustReadAttemptsJson")?.notnull, 1);
+      assert.equal(columns.find(({ name }) => name === "reconcileAttemptsJson")?.notnull, 1);
       const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage, providerCode
         FROM arbitrage_command_outcome_audits`).get();
       assert.equal(audit?.mutationDisposition, "NOT_DISPATCHED");
@@ -79,6 +88,7 @@ test("persists one append-only orchestration outcome per command with a producti
       assert.equal(audit?.failureStage, "PRE_MUTATION");
       assert.equal(audit?.providerCode, "50011");
       assert.deepEqual(first.dustReadAttempts, input.dustReadAttempts);
+      assert.deepEqual(first.reconcileAttempts, input.reconcileAttempts.map((entry) => ({ ...entry, venue: "BYBIT" })));
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
     } finally {
       db.close();
@@ -116,6 +126,7 @@ test("adds controlled Exit disposition audit columns to the deployed legacy outc
       assert.equal(columns.has("failureStage"), true);
       assert.equal(columns.has("providerCode"), true);
       assert.equal(columns.has("dustReadAttemptsJson"), true);
+      assert.equal(columns.has("reconcileAttemptsJson"), true);
     } finally {
       migrated.close();
     }

@@ -23,6 +23,11 @@ import {
   type ArbitrageManagementReleaseService,
 } from "./ArbitrageManagementReleaseService";
 import type { ArbitrageCloseSafetyAssessment } from "./ArbitrageCloseSafetyEvaluator";
+import {
+  finalizeExecutionOnline,
+  OnlineReconcileFinalizationError,
+  type OnlineReconcileAttempt,
+} from "./OnlineReconcileFinalization";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
 type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
@@ -145,6 +150,7 @@ export class ArbitrageInstanceExitService {
     let secondLegProviderDispatchAt: number | null = null;
     let continuationReadDeadline: number | null = null;
     let lastExecutionDiagnostic: ExitExecutionDiagnostic | undefined;
+    let reconcileAttempts: readonly OnlineReconcileAttempt[] = Object.freeze([]);
     for (const leg of orderedLegs) {
       if (instance.status === "CLOSED") break;
       const currentLeg = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
@@ -209,8 +215,13 @@ export class ArbitrageInstanceExitService {
       const dispatchedByThisExit = !confirmation.idempotentReplay;
       if (dispatchedByThisExit && pendingWithoutFill(confirmation)) {
         try {
-          confirmation = await this.finalizeClosingLeg(userId, instance.arbitrageId, leg.legId, confirmation);
-        } catch {
+          const finalized = await this.finalizeClosingLeg(userId, instance.arbitrageId, leg.legId, confirmation);
+          confirmation = finalized.confirmation;
+          reconcileAttempts = Object.freeze([...reconcileAttempts, ...finalized.attempts]);
+        } catch (error) {
+          if (error instanceof OnlineReconcileFinalizationError) {
+            reconcileAttempts = Object.freeze([...reconcileAttempts, ...error.attempts]);
+          }
           instance = this.instances.get(userId, instance.arbitrageId) ?? confirmation.instance;
           return stopped(
             instance,
@@ -218,6 +229,9 @@ export class ArbitrageInstanceExitService {
             leg.legId,
             phaseFor(leg, "CONFIRMATION"),
             "CLOSE_FINALIZATION_UNAVAILABLE",
+            undefined,
+            undefined,
+            reconcileAttempts,
           );
         }
       }
@@ -244,6 +258,8 @@ export class ArbitrageInstanceExitService {
             : phaseFor(leg, "CONFIRMATION"),
           diagnostic?.diagnosticCategory ?? confirmation.executionRecord.status,
           diagnostic,
+          undefined,
+          reconcileAttempts,
         );
       }
       if (!dispatchedByThisExit && instance.status !== "CLOSED") {
@@ -253,6 +269,9 @@ export class ArbitrageInstanceExitService {
           leg.legId,
           phaseFor(leg, "CONFIRMATION"),
           "EXISTING_CLOSING_EXECUTION_REQUIRES_USER_CONTINUE",
+          undefined,
+          undefined,
+          reconcileAttempts,
         );
       }
       if (firstConfirmedAt === null) {
@@ -271,10 +290,12 @@ export class ArbitrageInstanceExitService {
         const dustSafety = dustAssessment.result;
         if (activeManagedQuantity(instance, remaining) === "0") continue;
         if (dustSafety.reason !== "QUANTITY_STEP_DUST" || dustSafety.safeClosableQuantity !== "0") {
-          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", dustSafety.reason);
+          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", dustSafety.reason,
+            undefined, undefined, reconcileAttempts);
         }
         if (!dustAssessment.verifiedDustReleaseFacts) {
-          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", "DUST_RELEASE_CONTEXT_UNAVAILABLE");
+          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", "DUST_RELEASE_CONTEXT_UNAVAILABLE",
+            undefined, undefined, reconcileAttempts);
         }
         const releaseCommandId = dustReleaseCommandId(request.commandId, leg.legId);
         pendingDustReleases.set(leg.legId, createVerifiedDustReleaseContext(
@@ -298,6 +319,7 @@ export class ArbitrageInstanceExitService {
           ? error.dustReadAttempts : Object.freeze([]);
         return stopped(
           instance, outcomes, legId, "SPOT_DUST_RELEASE", dustReleaseFailureReason(error), undefined, dustReadAttempts,
+          reconcileAttempts,
         );
       }
     }
@@ -309,6 +331,7 @@ export class ArbitrageInstanceExitService {
       timing(firstConfirmedAt, secondLegProviderDispatchAt),
       lastExecutionDiagnostic,
       dustReadAttempts,
+      reconcileAttempts,
     );
   }
 
@@ -326,6 +349,8 @@ export class ArbitrageInstanceExitService {
 
   private recordOutcome(userId: string, request: ExitRequest, outcome: ArbitrageInstanceExitResult) {
     const instance = this.instances.get(userId, request.arbitrageId) ?? outcome.instance;
+    const reconcileFailure = outcome.status === "CONFIRMED" ? undefined
+      : [...(outcome.reconcileAttempts ?? [])].reverse().find((attempt) => attempt.result === "FAILED");
     this.instances.recordCommandOutcome(userId, {
       commandId: request.commandId,
       requestedByUserId: userId,
@@ -338,10 +363,11 @@ export class ArbitrageInstanceExitService {
       completedLegIds: completedClosingLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
       mutationDisposition: outcome.executionDiagnostic?.mutationDisposition ?? null,
-      diagnosticCategory: outcome.executionDiagnostic?.diagnosticCategory ?? null,
-      failureStage: outcome.executionDiagnostic?.failureStage ?? null,
-      providerCode: outcome.executionDiagnostic?.providerCode ?? null,
+      diagnosticCategory: outcome.executionDiagnostic?.diagnosticCategory ?? reconcileFailure?.category ?? null,
+      failureStage: outcome.executionDiagnostic?.failureStage ?? (reconcileFailure ? "RECONCILIATION" : null),
+      providerCode: outcome.executionDiagnostic?.providerCode ?? reconcileFailure?.providerCode ?? null,
       dustReadAttempts: outcome.dustReadAttempts ?? Object.freeze([]),
+      reconcileAttempts: outcome.reconcileAttempts ?? Object.freeze([]),
       terminalAt: this.now(),
     });
   }
@@ -366,6 +392,7 @@ export class ArbitrageInstanceExitService {
       providerCode: null,
       dustReadAttempts: error instanceof ArbitrageManagementReleaseError
         ? error.dustReadAttempts : Object.freeze([]),
+      reconcileAttempts: Object.freeze([]),
       terminalAt: this.now(),
     });
   }
@@ -394,26 +421,23 @@ export class ArbitrageInstanceExitService {
       this.options.closeFinalizationMaxAttempts ?? DEFAULT_CLOSE_FINALIZATION_MAX_ATTEMPTS,
       "closeFinalizationMaxAttempts",
     );
-    const deadline = this.now() + budgetMs;
-    let confirmation = dispatched;
-    let pollMs = Math.min(initialPollMs, maxPollMs);
-    for (let attempt = 0; attempt < maxAttempts && this.now() < deadline; attempt += 1) {
-      if (attempt > 0) {
-        const remaining = deadline - this.now();
-        if (remaining <= 0) break;
-        await this.sleep(Math.min(pollMs, remaining));
-        pollMs = Math.min(pollMs * 2, maxPollMs);
-        if (this.now() >= deadline) break;
-      }
-      confirmation = await this.reconciliationService.reconcileLeg(userId, {
+    return finalizeExecutionOnline({
+      venue: dispatched.instance.legs.find((leg) => leg.legId === legId)?.venue ?? "unknown",
+      initial: dispatched,
+      budgetMs,
+      initialPollMs,
+      maxPollMs,
+      maxAttempts,
+      now: () => this.now(),
+      sleep: (milliseconds) => this.sleep(milliseconds),
+      reconcile: () => this.reconciliationService.reconcileLeg(userId, {
         arbitrageId,
         legId,
         executionIntentId: identity.executionIntentId,
-      });
-      assertSameClosingExecutionIdentity(confirmation, legId, identity);
-      if (!pendingWithoutFill(confirmation)) return confirmation;
-    }
-    return confirmation;
+      }),
+      assertIdentity: (confirmation) => assertSameClosingExecutionIdentity(confirmation, legId, identity),
+      isPendingWithoutFill: pendingWithoutFill,
+    });
   }
 
   private async closeWithTransientReadRetry(
@@ -574,6 +598,7 @@ type ArbitrageInstanceExitResult = Readonly<{
   }>;
   executionDiagnostic?: ExitExecutionDiagnostic;
   dustReadAttempts?: readonly DustReleaseReadAttempt[];
+  reconcileAttempts?: readonly OnlineReconcileAttempt[];
 }>;
 
 type ExitFailureStage = "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
@@ -727,6 +752,7 @@ function result(
   timingResult?: ArbitrageInstanceExitResult["timing"],
   executionDiagnostic?: ExitExecutionDiagnostic,
   dustReadAttempts?: readonly DustReleaseReadAttempt[],
+  reconcileAttempts?: readonly OnlineReconcileAttempt[],
 ) {
   return Object.freeze({
     instance,
@@ -736,6 +762,7 @@ function result(
     ...(timingResult === undefined ? {} : { timing: timingResult }),
     ...(executionDiagnostic === undefined ? {} : { executionDiagnostic }),
     ...(dustReadAttempts === undefined ? {} : { dustReadAttempts: Object.freeze([...dustReadAttempts]) }),
+    ...(reconcileAttempts === undefined ? {} : { reconcileAttempts: Object.freeze([...reconcileAttempts]) }),
   });
 }
 
@@ -747,6 +774,7 @@ function stopped(
   reason: string,
   diagnostic?: ExitExecutionDiagnostic,
   dustReadAttempts?: readonly DustReleaseReadAttempt[],
+  reconcileAttempts?: readonly OnlineReconcileAttempt[],
 ) {
   return result(instance, "STOPPED", legs, Object.freeze({
     failedLegId,
@@ -762,7 +790,7 @@ function stopped(
       legId: leg.legId,
       quantity: activeManagedQuantity(instance, leg),
     }))),
-  }), undefined, diagnostic, dustReadAttempts);
+  }), undefined, diagnostic, dustReadAttempts, reconcileAttempts);
 }
 
 function phaseFor(

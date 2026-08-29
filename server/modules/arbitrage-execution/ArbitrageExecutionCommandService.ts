@@ -86,6 +86,21 @@ export type ArbitrageLegExecutionConfirmation = Readonly<{
   providerDispatchStartedAt?: number;
 }>;
 
+export type ReconcileSubstage =
+  | "ORDER_REALTIME"
+  | "ORDER_HISTORY"
+  | "EXECUTION_LIST"
+  | "EXECUTION_EVIDENCE_COMPARE"
+  | "PROVIDER_QUERY";
+
+export type ReconcileFailureDiagnostic = Readonly<{
+  venue: ExecutionIntent["venue"];
+  substage: ReconcileSubstage;
+  category: string;
+  providerCode: string | null;
+  retryable: boolean;
+}>;
+
 export class ArbitrageExecutionCommandError extends Error {
   constructor(
     readonly category:
@@ -108,6 +123,7 @@ export class ArbitrageExecutionCommandError extends Error {
       idempotencyKey: string;
       reason: string;
     }>,
+    readonly reconcileFailure?: ReconcileFailureDiagnostic,
   ) {
     super(message);
   }
@@ -573,7 +589,12 @@ export class ArbitrageExecutionCommandService {
       if (error instanceof ManualReconciliationRequiredError) {
         throw manualReconciliationCommandError(error);
       }
-      throw commandError("execution_state_unknown", "执行状态核验暂不可用；未提交任何新订单。");
+      throw new ArbitrageExecutionCommandError(
+        "execution_state_unknown",
+        "执行状态核验暂不可用；未提交任何新订单。",
+        undefined,
+        controlledReconcileFailure(leg.venue, error),
+      );
     }
     assertReconciliationIdentity(runtimeResult.executionRecord, userId, leg, reference);
     const attributableStatus = runtimeResult.confirmedQuantity === null
@@ -1286,6 +1307,58 @@ function invalid(message: string) {
 
 function commandError(category: ArbitrageExecutionCommandError["category"], message: string) {
   return new ArbitrageExecutionCommandError(category, message);
+}
+
+function controlledReconcileFailure(
+  venue: ExecutionIntent["venue"],
+  error: unknown,
+): ReconcileFailureDiagnostic {
+  const rawCategory = error && typeof error === "object" && "category" in error
+    ? (error as { category?: unknown }).category : undefined;
+  const rawSubstage = error && typeof error === "object" && "reconcileSubstage" in error
+    ? (error as { reconcileSubstage?: unknown }).reconcileSubstage : undefined;
+  const category = controlledReconcileCategory(rawCategory);
+  return Object.freeze({
+    venue,
+    substage: controlledReconcileSubstage(rawSubstage),
+    category,
+    providerCode: controlledReconcileProviderCode(error),
+    retryable: category === "EXECUTION_EVIDENCE_PENDING"
+      || category === "PROVIDER_TIMEOUT"
+      || category === "PROVIDER_TRANSPORT_ERROR"
+      || category === "PROVIDER_UNAVAILABLE",
+  });
+}
+
+function controlledReconcileCategory(value: unknown) {
+  const category = typeof value === "string" ? value.trim().toUpperCase() : "PROVIDER_QUERY_UNAVAILABLE";
+  if (category === "CREDENTIAL_VALIDATION_FAILED" || category === "PROVIDER_PERMISSION_ERROR") {
+    return "AUTH_OR_PERMISSION_FAILED";
+  }
+  if (category === "PROVIDER_RESPONSE_INVALID") return "PROVIDER_RESPONSE_INVALID";
+  if (category === "IDENTITY_MISMATCH") return "IDENTITY_MISMATCH";
+  if (category === "EXECUTION_EVIDENCE_PENDING") return category;
+  if (category === "PROVIDER_TIMEOUT" || category === "PROVIDER_TRANSPORT_ERROR" || category === "PROVIDER_UNAVAILABLE") {
+    return category;
+  }
+  return "PROVIDER_QUERY_UNAVAILABLE";
+}
+
+function controlledReconcileSubstage(value: unknown): ReconcileSubstage {
+  return value === "ORDER_REALTIME"
+    || value === "ORDER_HISTORY"
+    || value === "EXECUTION_LIST"
+    || value === "EXECUTION_EVIDENCE_COMPARE"
+    ? value
+    : "PROVIDER_QUERY";
+}
+
+function controlledReconcileProviderCode(error: unknown) {
+  const value = error && typeof error === "object" && "providerCode" in error
+    ? (error as { providerCode?: unknown }).providerCode : undefined;
+  const code = typeof value === "number" && Number.isSafeInteger(value) ? String(value)
+    : typeof value === "string" ? value.trim() : "";
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,79}$/u.test(code) ? code : null;
 }
 
 function manualReconciliationCommandError(error: ManualReconciliationRequiredError) {

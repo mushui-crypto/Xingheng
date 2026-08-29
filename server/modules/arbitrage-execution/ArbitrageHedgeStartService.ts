@@ -11,6 +11,11 @@ import {
   type ArbitrageLegExecutionConfirmation,
 } from "./ArbitrageExecutionCommandService";
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
+import {
+  finalizeExecutionOnline,
+  OnlineReconcileFinalizationError,
+  type OnlineReconcileAttempt,
+} from "./OnlineReconcileFinalization";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
 type LegExecutor = Pick<ArbitrageExecutionCommandService, "executeLeg" | "reconcileLeg">;
@@ -46,6 +51,7 @@ export type ArbitrageHedgeStartResult = Readonly<{
     firstLegCompletedAt: number;
     secondLegDispatchStartedAt: number | null;
   }>;
+  reconcileAttempts: readonly OnlineReconcileAttempt[];
 }>;
 
 type ArbitrageHedgeStartLegResult = Readonly<{
@@ -153,6 +159,7 @@ export class ArbitrageHedgeStartService {
     request: StartRequest,
   ): Promise<ArbitrageHedgeStartResult> {
     const secondLegId = initial.legs.find(({ legId }) => legId !== request.firstLegId)!.legId;
+    let reconcileAttempts: readonly OnlineReconcileAttempt[] = Object.freeze([]);
     let first: ArbitrageLegExecutionConfirmation;
     try {
       first = await this.commands.executeLeg(userId, childRequest(
@@ -167,8 +174,13 @@ export class ArbitrageHedgeStartService {
     const dispatchedByThisStart = !first.idempotentReplay;
     if (dispatchedByThisStart && pendingWithoutFill(first)) {
       try {
-        first = await this.finalizeDispatchedLeg(userId, arbitrageId, request.firstLegId, first);
-      } catch {
+        const finalized = await this.finalizeDispatchedLeg(userId, arbitrageId, request.firstLegId, first);
+        first = finalized.confirmation;
+        reconcileAttempts = Object.freeze([...reconcileAttempts, ...finalized.attempts]);
+      } catch (error) {
+        if (error instanceof OnlineReconcileFinalizationError) {
+          reconcileAttempts = Object.freeze([...reconcileAttempts, ...error.attempts]);
+        }
         const current = this.currentLegConfirmation(userId, arbitrageId, request.firstLegId, first);
         return result(
           arbitrageId,
@@ -180,6 +192,7 @@ export class ArbitrageHedgeStartService {
           this.now(),
           null,
           "第一腿终态核验暂不可用；系统未重复下单，第二腿未执行。",
+          reconcileAttempts,
         );
       }
     }
@@ -189,7 +202,7 @@ export class ArbitrageHedgeStartService {
       return result(arbitrageId, request.hedgeCommandId, firstStop, first, null, first.instance,
         firstLegCompletedAt, null, firstStop === "STOPPED_FIRST_LEG_PENDING" && dispatchedByThisStart
           ? "第一腿在在线终态确认预算内仍未完成；系统未重复下单，第二腿未执行。"
-          : undefined);
+          : undefined, reconcileAttempts);
     }
 
     const secondReferenceExists = first.instance.executionReferences.some((reference) =>
@@ -205,6 +218,7 @@ export class ArbitrageHedgeStartService {
         firstLegCompletedAt,
         null,
         "第一腿来自既有执行事实；本次请求不是原始连续编排，第二腿需要用户重新明确触发。",
+        reconcileAttempts,
       );
     }
 
@@ -232,8 +246,13 @@ export class ArbitrageHedgeStartService {
     const secondDispatchedByThisStart = !second.idempotentReplay;
     if (secondDispatchedByThisStart && pendingWithoutFill(second)) {
       try {
-        second = await this.finalizeDispatchedLeg(userId, arbitrageId, secondLegId, second);
-      } catch {
+        const finalized = await this.finalizeDispatchedLeg(userId, arbitrageId, secondLegId, second);
+        second = finalized.confirmation;
+        reconcileAttempts = Object.freeze([...reconcileAttempts, ...finalized.attempts]);
+      } catch (error) {
+        if (error instanceof OnlineReconcileFinalizationError) {
+          reconcileAttempts = Object.freeze([...reconcileAttempts, ...error.attempts]);
+        }
         const current = this.currentLegConfirmation(userId, arbitrageId, secondLegId, second);
         return result(
           arbitrageId,
@@ -245,6 +264,7 @@ export class ArbitrageHedgeStartService {
           firstLegCompletedAt,
           secondLegDispatchStartedAt,
           "第二腿终态核验暂不可用；系统未重复下单。",
+          reconcileAttempts,
         );
       }
     }
@@ -261,6 +281,7 @@ export class ArbitrageHedgeStartService {
       secondStop === "STOPPED_SECOND_LEG_PENDING" && secondDispatchedByThisStart
         ? "第二腿在在线终态确认预算内仍未完成；系统未重复下单。"
         : undefined,
+      reconcileAttempts,
     );
   }
 
@@ -273,6 +294,8 @@ export class ArbitrageHedgeStartService {
     const instance = this.instances.get(userId, arbitrageId);
     if (!instance) throw new Error("Arbitrage instance disappeared before Start outcome audit.");
     const diagnostic = startOutcomeDiagnostic(outcome, instance);
+    const reconcileFailure = outcome.status === "COMPLETED" ? undefined
+      : [...outcome.reconcileAttempts].reverse().find((attempt) => attempt.result === "FAILED");
     this.instances.recordCommandOutcome(userId, {
       commandId,
       requestedByUserId: userId,
@@ -285,8 +308,10 @@ export class ArbitrageHedgeStartService {
       completedLegIds: completedOpeningLegIds(instance),
       currentManagedExposure: managedExposureSnapshot(instance),
       mutationDisposition: null,
-      diagnosticCategory: null,
-      failureStage: null,
+      diagnosticCategory: reconcileFailure?.category ?? null,
+      failureStage: reconcileFailure ? "RECONCILIATION" : null,
+      providerCode: reconcileFailure?.providerCode ?? null,
+      reconcileAttempts: outcome.reconcileAttempts,
       terminalAt: this.now(),
     });
   }
@@ -308,6 +333,7 @@ export class ArbitrageHedgeStartService {
       mutationDisposition: null,
       diagnosticCategory: null,
       failureStage: "ORCHESTRATION",
+      reconcileAttempts: Object.freeze([]),
       terminalAt: this.now(),
     });
   }
@@ -336,26 +362,23 @@ export class ArbitrageHedgeStartService {
       this.options.firstLegFinalizationMaxAttempts ?? DEFAULT_FIRST_LEG_FINALIZATION_MAX_ATTEMPTS,
       "firstLegFinalizationMaxAttempts",
     );
-    const deadline = this.now() + budgetMs;
-    let confirmation = dispatched;
-    let pollMs = Math.min(initialPollMs, maxPollMs);
-    for (let attempt = 0; attempt < maxAttempts && this.now() < deadline; attempt += 1) {
-      if (attempt > 0) {
-        const remaining = deadline - this.now();
-        if (remaining <= 0) break;
-        await this.sleep(Math.min(pollMs, remaining));
-        pollMs = Math.min(pollMs * 2, maxPollMs);
-        if (this.now() >= deadline) break;
-      }
-      confirmation = await this.commands.reconcileLeg(userId, {
+    return finalizeExecutionOnline({
+      venue: dispatched.instance.legs.find((leg) => leg.legId === legId)?.venue ?? "unknown",
+      initial: dispatched,
+      budgetMs,
+      initialPollMs,
+      maxPollMs,
+      maxAttempts,
+      now: () => this.now(),
+      sleep: (milliseconds) => this.sleep(milliseconds),
+      reconcile: () => this.commands.reconcileLeg(userId, {
         arbitrageId,
         legId,
         executionIntentId: identity.executionIntentId,
-      });
-      assertSameExecutionIdentity(confirmation, legId, identity);
-      if (!pendingWithoutFill(confirmation)) return confirmation;
-    }
-    return confirmation;
+      }),
+      assertIdentity: (confirmation) => assertSameExecutionIdentity(confirmation, legId, identity),
+      isPendingWithoutFill: pendingWithoutFill,
+    });
   }
 
   private currentLegConfirmation(
@@ -600,9 +623,10 @@ function result(
   firstLegCompletedAt: number,
   secondLegDispatchStartedAt: number | null,
   reason?: string,
+  reconcileAttempts: readonly OnlineReconcileAttempt[] = Object.freeze([]),
 ) {
   return resultFromLegs(arbitrageId, hedgeCommandId, status, legResult(first), second && legResult(second), instance,
-    firstLegCompletedAt, secondLegDispatchStartedAt, reason);
+    firstLegCompletedAt, secondLegDispatchStartedAt, reason, reconcileAttempts);
 }
 
 function resultFromLegs(
@@ -615,6 +639,7 @@ function resultFromLegs(
   firstLegCompletedAt: number,
   secondLegDispatchStartedAt: number | null,
   reason?: string,
+  reconcileAttempts: readonly OnlineReconcileAttempt[] = Object.freeze([]),
 ): ArbitrageHedgeStartResult {
   return Object.freeze({
     arbitrageId,
@@ -626,6 +651,7 @@ function resultFromLegs(
     requiresUserAction: status !== "COMPLETED",
     ...(reason === undefined ? {} : { reason }),
     timing: Object.freeze({ firstLegCompletedAt, secondLegDispatchStartedAt }),
+    reconcileAttempts: Object.freeze([...reconcileAttempts]),
   });
 }
 

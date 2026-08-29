@@ -33,6 +33,7 @@ test("Start STOPPED outcome is audited once with controlled diagnostics and idem
     stopReason: "STOPPED_FIRST_LEG_UNKNOWN", failedLegId: "long-leg", completedLegIds: [],
     currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "0" }],
     mutationDisposition: null, diagnosticCategory: null, failureStage: null,
+    providerCode: null, reconcileAttempts: [],
     terminalAt: 0,
   });
   assert.equal(Number.isSafeInteger(fixture.outcomeAudits[0]?.terminalAt), true);
@@ -63,6 +64,77 @@ test("repeated zero-fill pending observations remain read-only until full confir
   assert.equal(fixture.executor.reconcileCalls.length, 3);
   assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
   assert.deepEqual(fixture.sleeps, [1, 2]);
+});
+
+test("transient Bybit execution evidence converges inside one Start and automatically continues", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    {
+      reconcileErrors: [transientReconcileError("EXECUTION_LIST"), transientReconcileError("EXECUTION_EVIDENCE_COMPARE")],
+      reconciliationOutcomes: [outcome("CONFIRMED", "100")],
+    },
+    baseInstance("bybit", "bybit"),
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "COMPLETED");
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg", "short-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 3);
+  assert.deepEqual(fixture.sleeps, [1, 2]);
+  assert.deepEqual(result.reconcileAttempts.map(({ retryDecision, category }) => [retryDecision, category]), [
+    ["RETRY", "EXECUTION_EVIDENCE_PENDING"],
+    ["RETRY", "EXECUTION_EVIDENCE_PENDING"],
+    ["COMPLETE", null],
+  ]);
+  assert.equal(fixture.outcomeAudits[0]?.reconcileAttempts.length, 3);
+});
+
+test("invalid Bybit execution evidence stops immediately and never dispatches the second leg", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    { reconcileErrors: [nonRetryableReconcileError("PROVIDER_RESPONSE_INVALID")] },
+    baseInstance("bybit", "bybit"),
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_FIRST_LEG_UNKNOWN");
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 1);
+  assert.equal(result.reconcileAttempts[0]?.retryDecision, "STOP");
+});
+
+test("Bybit transient evidence exhaustion stops bounded without a second-leg mutation", async () => {
+  const fixture = setup(
+    [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+    {
+      finalizationMaxAttempts: 3,
+      reconcileErrors: [
+        transientReconcileError("EXECUTION_LIST"),
+        transientReconcileError("EXECUTION_EVIDENCE_COMPARE"),
+        transientReconcileError("EXECUTION_EVIDENCE_COMPARE"),
+      ],
+    },
+    baseInstance("bybit", "bybit"),
+  );
+  const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+  assert.equal(result.status, "STOPPED_FIRST_LEG_UNKNOWN");
+  assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+  assert.equal(fixture.executor.reconcileCalls.length, 3);
+  assert.equal(result.reconcileAttempts.at(-1)?.retryDecision, "STOP");
+});
+
+test("Bybit identity and auth reconcile failures never retry", async (context) => {
+  for (const category of ["IDENTITY_MISMATCH", "AUTH_OR_PERMISSION_FAILED"] as const) {
+    await context.test(category, async () => {
+      const fixture = setup(
+        [outcome("PENDING_CONFIRMATION", "0"), outcome("CONFIRMED", "100")],
+        { reconcileErrors: [nonRetryableReconcileError(category)] },
+        baseInstance("bybit", "bybit"),
+      );
+      const result = await fixture.service.start("user-a", fixture.instance.arbitrageId, request());
+      assert.equal(result.status, "STOPPED_FIRST_LEG_UNKNOWN");
+      assert.equal(fixture.executor.reconcileCalls.length, 1);
+      assert.deepEqual(fixture.executor.mutationLegs, ["long-leg"]);
+    });
+  }
 });
 
 test("an online second-leg pending acknowledgement is finalized before Start returns", async () => {
@@ -336,6 +408,7 @@ function setup(outcomes: Outcome[], options: Readonly<{
   firstGate?: Promise<void>;
   reconciliationOutcomes?: readonly Outcome[];
   reconcileError?: boolean;
+  reconcileErrors?: readonly ArbitrageExecutionCommandError[];
   finalizationMaxAttempts?: number;
   omitFirstExecutionRecordId?: boolean;
 }> = {}, initialInstance: ArbitrageInstance = baseInstance()) {
@@ -381,10 +454,14 @@ class FakeExecutor {
     firstGate?: Promise<void>;
     reconciliationOutcomes?: readonly Outcome[];
     reconcileError?: boolean;
+    reconcileErrors?: readonly ArbitrageExecutionCommandError[];
     omitFirstExecutionRecordId?: boolean;
   }>) {
     this.reconciliationOutcomes = [...(options.reconciliationOutcomes ?? [])];
+    this.reconcileErrors = [...(options.reconcileErrors ?? [])];
   }
+
+  private readonly reconcileErrors: ArbitrageExecutionCommandError[];
 
   async executeLeg(_userId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
     const request = input as { legId: string; commandId: string; opportunityId: string };
@@ -408,6 +485,8 @@ class FakeExecutor {
     const request = input as { arbitrageId: string; legId: string; executionIntentId?: string };
     this.reconcileCalls.push(request);
     if (this.options.reconcileError) throw new Error("provider query unavailable");
+    const reconcileError = this.reconcileErrors.shift();
+    if (reconcileError) throw reconcileError;
     const reference = this.state.instance.executionReferences.find((candidate) =>
       candidate.legId === request.legId && candidate.executionIntentId === request.executionIntentId);
     if (!reference) throw new Error("missing fake execution reference");
@@ -461,6 +540,24 @@ class FakeExecutor {
     this.byCommand.set(commandId, confirmation);
     return confirmation;
   }
+}
+
+function transientReconcileError(substage: "EXECUTION_LIST" | "EXECUTION_EVIDENCE_COMPARE") {
+  return new ArbitrageExecutionCommandError(
+    "execution_state_unknown",
+    "execution evidence pending",
+    undefined,
+    Object.freeze({ venue: "bybit", substage, category: "EXECUTION_EVIDENCE_PENDING", providerCode: null, retryable: true }),
+  );
+}
+
+function nonRetryableReconcileError(category: string) {
+  return new ArbitrageExecutionCommandError(
+    "execution_state_unknown",
+    "reconcile failed",
+    undefined,
+    Object.freeze({ venue: "bybit", substage: "EXECUTION_EVIDENCE_COMPARE", category, providerCode: null, retryable: false }),
+  );
 }
 
 function confirmationFromFakeReference(

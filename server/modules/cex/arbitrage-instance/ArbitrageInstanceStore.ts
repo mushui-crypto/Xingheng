@@ -113,6 +113,16 @@ export type ArbitrageCommandOutcomeAudit = Readonly<{
     category: string | null;
     providerCode: string | null;
   }>[];
+  reconcileAttempts?: readonly Readonly<{
+    attempt: number;
+    venue: string;
+    substage: string | null;
+    result: "SUCCESS" | "FAILED";
+    retryDecision: "COMPLETE" | "RETRY" | "STOP";
+    delayMs: number;
+    category: string | null;
+    providerCode: string | null;
+  }>[];
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -336,6 +346,7 @@ type CommandOutcomeAuditRow = Readonly<{
   failureStage: string | null;
   providerCode: string | null;
   dustReadAttemptsJson: string;
+  reconcileAttemptsJson: string;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -504,8 +515,9 @@ export class ArbitrageInstanceStore {
         commandId, requestedByUserId, arbitrageId, operation, terminalStatus,
         stopPhase, stopReason, failedLegId, completedLegIdsJson,
         currentManagedExposureJson, mutationDisposition, diagnosticCategory,
-        failureStage, providerCode, dustReadAttemptsJson, terminalAt, businessPayloadFingerprint
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        failureStage, providerCode, dustReadAttemptsJson, reconcileAttemptsJson,
+        terminalAt, businessPayloadFingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         normalized.commandId,
         normalized.requestedByUserId,
         normalized.arbitrageId,
@@ -521,6 +533,7 @@ export class ArbitrageInstanceStore {
         normalized.failureStage ?? null,
         normalized.providerCode ?? null,
         JSON.stringify(normalized.dustReadAttempts ?? []),
+        JSON.stringify(normalized.reconcileAttempts ?? []),
         normalized.terminalAt,
         normalized.businessPayloadFingerprint,
       );
@@ -2102,6 +2115,7 @@ export class ArbitrageInstanceStore {
       failureStage TEXT,
       providerCode TEXT,
       dustReadAttemptsJson TEXT NOT NULL DEFAULT '[]',
+      reconcileAttemptsJson TEXT NOT NULL DEFAULT '[]',
       terminalAt INTEGER NOT NULL,
       businessPayloadFingerprint TEXT NOT NULL UNIQUE,
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
@@ -2187,6 +2201,9 @@ export class ArbitrageInstanceStore {
     }
     if (!outcomeColumns.has("dustReadAttemptsJson")) {
       this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN dustReadAttemptsJson TEXT NOT NULL DEFAULT '[]'");
+    }
+    if (!outcomeColumns.has("reconcileAttemptsJson")) {
+      this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN reconcileAttemptsJson TEXT NOT NULL DEFAULT '[]'");
     }
   }
 }
@@ -2317,6 +2334,24 @@ function normalizeCommandOutcomeAudit(
       providerCode: entry.providerCode === null ? null : controlledProviderCode(entry.providerCode),
     });
   }));
+  const reconcileAttempts = Object.freeze((outcome.reconcileAttempts ?? []).map((entry) => {
+    if (!Number.isSafeInteger(entry.attempt) || entry.attempt <= 0
+      || (entry.result !== "SUCCESS" && entry.result !== "FAILED")
+      || (entry.retryDecision !== "COMPLETE" && entry.retryDecision !== "RETRY" && entry.retryDecision !== "STOP")
+      || !Number.isSafeInteger(entry.delayMs) || entry.delayMs < 0) {
+      throw new Error("Arbitrage command outcome reconcile attempt is invalid.");
+    }
+    return Object.freeze({
+      attempt: entry.attempt,
+      venue: controlledOutcomeCode(entry.venue.toUpperCase(), "reconcileVenue"),
+      substage: entry.substage === null ? null : controlledOutcomeCode(entry.substage, "reconcileSubstage"),
+      result: entry.result,
+      retryDecision: entry.retryDecision,
+      delayMs: entry.delayMs,
+      category: entry.category === null ? null : controlledOutcomeCode(entry.category, "reconcileCategory"),
+      providerCode: entry.providerCode === null ? null : controlledProviderCode(entry.providerCode),
+    });
+  }));
   const businessPayloadFingerprint = createHash("sha256").update(JSON.stringify([
     "ARBITRAGE_COMMAND_OUTCOME", requestedByUserId, outcome.operation, arbitrageId, commandId,
   ])).digest("hex");
@@ -2336,6 +2371,7 @@ function normalizeCommandOutcomeAudit(
     failureStage,
     providerCode,
     dustReadAttempts,
+    reconcileAttempts,
     terminalAt: timestamp(outcome.terminalAt, "terminalAt"),
     businessPayloadFingerprint,
   });
@@ -2345,14 +2381,17 @@ function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageComma
   let completedLegIds: unknown;
   let currentManagedExposure: unknown;
   let dustReadAttempts: unknown;
+  let reconcileAttempts: unknown;
   try {
     completedLegIds = JSON.parse(row.completedLegIdsJson);
     currentManagedExposure = JSON.parse(row.currentManagedExposureJson);
     dustReadAttempts = JSON.parse(row.dustReadAttemptsJson ?? "[]");
+    reconcileAttempts = JSON.parse(row.reconcileAttemptsJson ?? "[]");
   } catch {
     throw new Error("Persisted arbitrage command outcome audit is invalid.");
   }
-  if (!Array.isArray(completedLegIds) || !Array.isArray(currentManagedExposure) || !Array.isArray(dustReadAttempts)) {
+  if (!Array.isArray(completedLegIds) || !Array.isArray(currentManagedExposure)
+    || !Array.isArray(dustReadAttempts) || !Array.isArray(reconcileAttempts)) {
     throw new Error("Persisted arbitrage command outcome audit is invalid.");
   }
   const normalized = normalizeCommandOutcomeAudit(row.requestedByUserId, {
@@ -2371,6 +2410,7 @@ function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageComma
     failureStage: row.failureStage,
     providerCode: row.providerCode,
     dustReadAttempts: dustReadAttempts as NonNullable<ArbitrageCommandOutcomeAudit["dustReadAttempts"]>,
+    reconcileAttempts: reconcileAttempts as NonNullable<ArbitrageCommandOutcomeAudit["reconcileAttempts"]>,
     terminalAt: row.terminalAt,
   });
   if (normalized.businessPayloadFingerprint !== row.businessPayloadFingerprint) {
