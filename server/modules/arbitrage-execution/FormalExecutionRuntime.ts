@@ -49,6 +49,7 @@ export type VerifiedManagedCloseNativeExecutionRules = Readonly<{
   contractValue: string;
   lotSize: string;
   minimumSize: string;
+  minimumNotional: string | null;
   canonicalSafeCloseQuantity: string;
   legalizedCanonicalCloseQuantity: string;
   providerNativeQuantity: string;
@@ -60,7 +61,8 @@ export type VerifiedManagedCloseNativeExecutionRules = Readonly<{
 const verifiedNativeExecutionRules = new WeakSet<VerifiedManagedCloseNativeExecutionRules>();
 
 export function createVerifiedManagedCloseNativeExecutionRules(
-  input: Omit<VerifiedManagedCloseNativeExecutionRules, "contextFingerprint" | "source">,
+  input: Omit<VerifiedManagedCloseNativeExecutionRules, "contextFingerprint" | "source" | "minimumNotional">
+    & Readonly<{ minimumNotional?: string | null }>,
 ): VerifiedManagedCloseNativeExecutionRules {
   const facts = {
     userId: nativeText(input.userId, "native rules userId"),
@@ -76,6 +78,9 @@ export function createVerifiedManagedCloseNativeExecutionRules(
     contractValue: nativeDecimal(input.contractValue, "native rules contract value"),
     lotSize: nativeDecimal(input.lotSize, "native rules lot size"),
     minimumSize: nativeDecimal(input.minimumSize, "native rules minimum size"),
+    minimumNotional: input.minimumNotional === undefined || input.minimumNotional === null
+      ? null
+      : nativeDecimal(input.minimumNotional, "native rules minimum notional"),
     canonicalSafeCloseQuantity: nativeDecimal(input.canonicalSafeCloseQuantity, "native rules safe close quantity"),
     legalizedCanonicalCloseQuantity: nativeDecimal(input.legalizedCanonicalCloseQuantity, "native rules legalized close quantity"),
     providerNativeQuantity: nativeDecimal(input.providerNativeQuantity, "native rules provider quantity"),

@@ -16,12 +16,13 @@ import { BitgetIntentExecutionRuntime, type BitgetIntentRuntimeService } from ".
 import { BitgetIntentExecutionServiceRegistry } from "./BitgetIntentExecutionServiceRegistry";
 import { BitgetRealTradingTestVenuePreparation } from "./BitgetRealTradingTestVenuePreparation";
 import type { BitgetGetOrderRequest, BitgetPlaceOrderRequest, BitgetProviderOrder } from "./BitgetTypes";
-import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
+import { createVerifiedExecutionProviderIdentity, ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import { SqliteExecutionRecordStore, type ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { SqliteExecutionOrderReferenceStore } from "../cex/ExecutionOrderReferenceStore";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
+import { createVerifiedManagedCloseNativeExecutionRules, type FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
 import { createTradingRules } from "../cex/TradingRules";
 import {
   UnifiedRealTradingTestCommand,
@@ -30,6 +31,51 @@ import {
 import { bitgetBaseQuantityToProvider } from "./BitgetQuantitySemantics";
 
 const now = 1_800_000_000_000;
+
+test("Bitget formal/runtime managed close preserves verified facts through the Provider mutation boundary", async () => {
+  const provider = new FakeBitgetRuntimeService();
+  provider.positionMode = "HEDGE";
+  const records = new MemoryExecutionRecordStore();
+  const references = new InMemoryBitgetExecutionOrderReferenceStore();
+  let rulesReads = 0;
+  const execution = new BitgetFormalArbitrageExecutionRuntime(new BitgetIntentExecutionRuntime(
+    { run: async (_userId, operation) => operation(provider) },
+    records,
+    references,
+    {
+      createExecutionId: () => "execution-verified-close",
+      clock: () => now,
+      mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: false, killSwitchActive: true }),
+      quantityRulesSource: async () => { rulesReads += 1; throw new Error("duplicate rules read"); },
+    },
+  ));
+  const closeIntent = createExecutionIntent({
+    intentId: "intent-verified-close",
+    userId: "user-a",
+    venue: "bitget",
+    accountId: "bitget:account-a",
+    instrumentId: "DOGE-USDT-PERP",
+    side: "buy",
+    positionDirection: "SHORT",
+    quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "59" },
+    orderConstraints: { reduceOnly: true },
+    executionMode: "EXECUTION_PRIORITY",
+    createdAt: now,
+    expiresAt: now + 60_000,
+  });
+
+  const result = await execution.executeManagedClose(closeIntent, verifiedRuntimeCloseContext(closeIntent));
+
+  assert.equal(result.executionRecord.status, "PENDING_CONFIRMATION");
+  assert.equal(provider.placeRequests.length, 1);
+  assert.equal(provider.placeRequests[0]?.qty, "59");
+  assert.equal(provider.placeRequests[0]?.side, "buy");
+  assert.equal(provider.placeRequests[0]?.posSide, "short");
+  assert.equal(provider.placeRequests[0]?.reduceOnly, undefined);
+  assert.equal(provider.positionModeReads, 0);
+  assert.equal(provider.identityValidations, 0);
+  assert.equal(rulesReads, 0);
+});
 
 test("Bitget recovery anchor is durable before place and upgrades to exact order identity after restart", async () => {
   const provider = new FakeBitgetRuntimeService();
@@ -509,12 +555,14 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
   fee = "0";
   feeCurrency: string | null = null;
   positionMode: "ONE_WAY" | "HEDGE" = "ONE_WAY";
+  positionModeReads = 0;
+  identityValidations = 0;
   posSideOverride?: "long" | "short";
   private placed?: BitgetPlaceOrderRequest;
   executionAccountIdentity() { return { accountId: "bitget:account-a" }; }
-  validateExecutionProviderIdentity() {}
+  validateExecutionProviderIdentity() { this.identityValidations += 1; }
   async assertOneWayMode() {}
-  async readPositionMode() { return this.positionMode; }
+  async readPositionMode() { this.positionModeReads += 1; return this.positionMode; }
   async placeOrder(request: BitgetPlaceOrderRequest) {
     this.placeRequests.push(request); this.placed = request;
     if (this.placeFailure) throw this.placeFailure;
@@ -545,6 +593,49 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
     this.cancelCount += 1;
     return { category: request.category, symbol: request.symbol, orderId: request.orderId ?? "order-1", clientOid: request.clientOid };
   }
+}
+
+function verifiedRuntimeCloseContext(intent: ExecutionIntent): FormalManagedCloseExecutionContext {
+  return Object.freeze({
+    verifiedAt: now,
+    positionMode: "HEDGE",
+    side: intent.side,
+    positionDirection: "SHORT",
+    actualSignedNetQuantity: null,
+    actualLongQuantity: "0",
+    actualShortQuantity: "59",
+    safeClosableQuantity: "59",
+    managedQuantityCeiling: "59",
+    legalizedCloseQuantity: "59",
+    reduceOnly: true,
+    verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+      userId: intent.userId,
+      venue: intent.venue,
+      accountId: intent.accountId,
+      executionIntentId: intent.intentId,
+      verifiedAt: now,
+    }),
+    verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId,
+      accountId: intent.accountId,
+      venue: intent.venue,
+      canonicalInstrumentId: intent.instrumentId,
+      providerInstrumentId: "DOGEUSDT",
+      executionIntentId: intent.intentId,
+      instrumentState: "live",
+      contractType: "linear",
+      contractValueCurrency: "DOGE",
+      settlementAsset: "USDT",
+      contractValue: "1",
+      lotSize: "1",
+      minimumSize: "1",
+      minimumNotional: "5",
+      canonicalSafeCloseQuantity: "59",
+      legalizedCanonicalCloseQuantity: "59",
+      providerNativeQuantity: "59",
+      verifiedAt: now,
+    }),
+  });
 }
 
 class MemoryExecutionRecordStore implements ExecutionRecordStore {

@@ -1,4 +1,9 @@
 import { createHash } from "node:crypto";
+import {
+  isTrustedVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
+  type VerifiedManagedCloseNativeExecutionRules,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import { createExecutionCancelObservation, type ExecutionCancelObservation } from "../cex/ExecutionCancelCapability";
 import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
@@ -12,6 +17,7 @@ import {
   bitgetProviderQuantityToBase,
   loadBitgetQuantityRules,
   type BitgetQuantityRulesSource,
+  type BitgetQuantityRulesSnapshot,
 } from "./BitgetQuantitySemantics";
 import type {
   BitgetCancelOrderRequest,
@@ -55,7 +61,10 @@ export type BitgetIntentExecutionServiceOptions = Readonly<{
     positionDirection?: "LONG" | "SHORT";
     posSide?: "long" | "short";
   }>) => Promise<void> | void;
+  verifiedCloseContext?: FormalManagedCloseExecutionContext;
 }>;
+
+const VERIFIED_MANAGED_CLOSE_RULES_MAX_AGE_MS = 15_000;
 
 export type BitgetIntentExecutionResult = Readonly<{
   executionAttemptId: string;
@@ -116,6 +125,11 @@ export class BitgetIntentExecutionService {
       await this.mutationSafetyGuard.assertAllowed({
         venue: "bitget", operation: "placeOrder", userId: intent.userId, accountId: intent.accountId,
         instrumentId: intent.instrumentId, providerInstrumentId: value.symbol,
+        executionIntentId: intent.intentId,
+        mutationPreparedAt: this.now(),
+        ...(this.options.verifiedCloseContext === undefined ? {} : {
+          verifiedProviderIdentity: this.options.verifiedCloseContext.verifiedProviderIdentity,
+        }),
         ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, validateProviderIdentity);
       await persistRecoveryReference({
@@ -194,7 +208,10 @@ export class BitgetIntentExecutionService {
     }
     const category = instrument.venueInstrument.category;
     if (category === "SPOT" && intent.orderConstraints.reduceOnly) throw new Error("Bitget Spot execution must not use reduceOnly.");
-    const positionMode = category === "USDT-FUTURES" ? await this.readPositionMode() : undefined;
+    const verifiedNativeRules = category === "USDT-FUTURES"
+      ? this.verifiedNativeRulesFor(intent, instrument)
+      : null;
+    const positionMode = category === "USDT-FUTURES" ? await this.positionModeFor(intent) : undefined;
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Bitget HEDGE execution requires positionDirection.");
     }
@@ -203,13 +220,19 @@ export class BitgetIntentExecutionService {
         || (intent.positionDirection === "SHORT" && intent.side !== "buy"))) {
       throw new Error("Bitget HEDGE close side does not reduce the selected position bucket.");
     }
-    const rules = await loadBitgetQuantityRules(this.options.quantityRulesSource, instrument, () => this.now(),
-      this.options.quantityRulesMaxAgeMs ?? BITGET_QUANTITY_RULES_MAX_AGE_MS);
+    const rules = verifiedNativeRules === null
+      ? await loadBitgetQuantityRules(this.options.quantityRulesSource, instrument, () => this.now(),
+        this.options.quantityRulesMaxAgeMs ?? BITGET_QUANTITY_RULES_MAX_AGE_MS)
+      : bitgetRulesFromVerifiedFacts(verifiedNativeRules, instrument);
+    const providerQuantity = bitgetBaseQuantityToProvider(intent.quantity.quantity, rules);
+    if (verifiedNativeRules !== null && providerQuantity !== verifiedNativeRules.providerNativeQuantity) {
+      throw new Error("Bitget verified native quantity does not match the canonical close quantity.");
+    }
     const base = {
       category,
       symbol: instrument.venueInstrument.symbol,
       side: intent.side,
-      qty: bitgetBaseQuantityToProvider(intent.quantity.quantity, rules),
+      qty: verifiedNativeRules?.providerNativeQuantity ?? providerQuantity,
       clientOid: bitgetClientOrderIdFor(intent),
       // Bitget UTA HEDGE closes are expressed by side + posSide. reduceOnly is
       // a ONE_WAY-only field, so it is omitted for HEDGE requests.
@@ -240,6 +263,51 @@ export class BitgetIntentExecutionService {
     if (!this.options.validateProviderIdentity) throw new Error("Bitget Provider credential identity validation is required before mutation.");
     return this.options.validateProviderIdentity;
   }
+  private verifiedNativeRulesFor(
+    intent: ExecutionIntent,
+    instrument: BitgetInstrumentResolution,
+  ): VerifiedManagedCloseNativeExecutionRules | null {
+    const close = this.options.verifiedCloseContext;
+    if (close === undefined) return null;
+    const rules = close.verifiedNativeExecutionRules;
+    const now = this.now();
+    if (rules === undefined
+      || !isTrustedVerifiedManagedCloseNativeExecutionRules(rules)
+      || rules.source !== "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY"
+      || rules.userId !== intent.userId
+      || rules.accountId !== intent.accountId
+      || rules.venue !== "bitget"
+      || rules.canonicalInstrumentId !== intent.instrumentId
+      || rules.providerInstrumentId !== instrument.venueInstrument.symbol
+      || rules.executionIntentId !== intent.intentId
+      || rules.instrumentState !== "live"
+      || rules.contractType !== "linear"
+      || rules.contractValueCurrency !== instrument.canonicalInstrument.baseAsset
+      || rules.settlementAsset !== instrument.canonicalInstrument.quoteAsset
+      || rules.contractValue !== "1"
+      || rules.canonicalSafeCloseQuantity !== close.safeClosableQuantity
+      || rules.legalizedCanonicalCloseQuantity !== close.legalizedCloseQuantity
+      || rules.legalizedCanonicalCloseQuantity !== intent.quantity.quantity
+      || rules.verifiedAt > now
+      || now - rules.verifiedAt > VERIFIED_MANAGED_CLOSE_RULES_MAX_AGE_MS) {
+      throw new Error("Bitget verified native execution rules are invalid, stale, or outside this mutation attempt.");
+    }
+    return rules;
+  }
+  private async positionModeFor(intent: ExecutionIntent): Promise<"ONE_WAY" | "HEDGE"> {
+    const verified = this.options.verifiedCloseContext;
+    if (verified !== undefined) {
+      if (!intent.orderConstraints.reduceOnly
+        || verified.reduceOnly !== true
+        || verified.side !== intent.side
+        || verified.positionDirection !== intent.positionDirection
+        || verified.legalizedCloseQuantity !== intent.quantity.quantity) {
+        throw new Error("Bitget verified close context does not match the execution intent.");
+      }
+      return verified.positionMode;
+    }
+    return this.readPositionMode();
+  }
   private async readPositionMode(): Promise<"ONE_WAY" | "HEDGE"> {
     if (this.client.readPositionMode) return this.client.readPositionMode();
     await this.client.assertOneWayMode();
@@ -247,6 +315,25 @@ export class BitgetIntentExecutionService {
   }
   private async assertPositionMode() { await this.readPositionMode(); }
   private now() { const value = this.clock(); if (!Number.isSafeInteger(value) || value < 0) throw new Error("Bitget execution clock is invalid."); return value; }
+}
+
+function bitgetRulesFromVerifiedFacts(
+  rules: VerifiedManagedCloseNativeExecutionRules,
+  instrument: BitgetInstrumentResolution,
+): BitgetQuantityRulesSnapshot {
+  return Object.freeze({
+    category: instrument.venueInstrument.category,
+    symbol: rules.providerInstrumentId,
+    status: "online",
+    baseCoin: rules.contractValueCurrency,
+    quoteCoin: rules.settlementAsset,
+    quantityStep: rules.lotSize,
+    minOrderQty: rules.minimumSize,
+    minNotional: rules.minimumNotional,
+    contractSize: rules.contractValue,
+    quantityUnit: "base",
+    fetchedAt: rules.verifiedAt,
+  });
 }
 
 export function bitgetClientOrderIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">) {

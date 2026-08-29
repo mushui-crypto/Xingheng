@@ -783,6 +783,16 @@ test("Bitget Spot attribution and Perp reduceOnly close reuse the shared residua
   assert.equal(fixture.runtime.calls[1]?.venue, "bitget");
   assert.equal(fixture.runtime.calls[1]?.side, "buy");
   assert.equal(fixture.runtime.calls[1]?.orderConstraints.reduceOnly, true);
+  const verifiedRules = fixture.runtime.managedCloseContexts[1]?.verifiedNativeExecutionRules;
+  assert.ok(verifiedRules);
+  assert.equal(verifiedRules.venue, "bitget");
+  assert.equal(verifiedRules.providerInstrumentId, "DOGEUSDT");
+  assert.equal(verifiedRules.contractValue, "1");
+  assert.equal(verifiedRules.lotSize, "0.1");
+  assert.equal(verifiedRules.minimumSize, "0.1");
+  assert.equal(verifiedRules.minimumNotional, "5");
+  assert.equal(verifiedRules.legalizedCanonicalCloseQuantity, "95");
+  assert.equal(verifiedRules.providerNativeQuantity, "95");
   assert.equal(closed.instance.status, "RESIDUAL");
 });
 

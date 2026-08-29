@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { createVerifiedManagedCloseNativeExecutionRules, type FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
 import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
-import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
+import { createVerifiedExecutionProviderIdentity, ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
 import { BitgetClient, BitgetProviderError } from "./BitgetClient";
 import { BitgetIntentCancellationCapability } from "./BitgetIntentCancellationCapability";
@@ -197,6 +198,91 @@ test("Bitget UTA HEDGE close uses side plus posSide, omits one-way reduceOnly, a
   assert.equal(invalid.placeRequests.length, 0);
 });
 
+test("Bitget managed close consumes attempt-scoped verified facts with zero post-safety Provider reads", async (t) => {
+  for (const fixture of [
+    { direction: "SHORT" as const, side: "buy" as const, posSide: "short" as const },
+    { direction: "LONG" as const, side: "sell" as const, posSide: "long" as const },
+  ]) await t.test(fixture.direction, async () => {
+    const provider = new FakeBitgetService();
+    provider.readPositionMode = async () => { provider.positionModeReads += 1; return "HEDGE"; };
+    let rulesReads = 0;
+    let identityReads = 0;
+    const intent = executionIntent({
+      instrumentId: "DOGE-USDT-PERP",
+      side: fixture.side,
+      positionDirection: fixture.direction,
+      reduceOnly: true,
+      quantity: "59",
+    });
+    const service = new BitgetIntentExecutionService(provider, {
+      ...serviceOptions(),
+      mutationEffect: "DECREASE",
+      quantityRulesSource: async () => { rulesReads += 1; throw new Error("duplicate rules read"); },
+      validateProviderIdentity: async () => { identityReads += 1; throw new Error("duplicate identity read"); },
+      verifiedCloseContext: verifiedCloseContext(intent, fixture.direction),
+    });
+
+    await service.execute(intent);
+
+    const request = provider.placeRequests[0]!;
+    assert.equal(request.qty, "59");
+    assert.equal(request.side, fixture.side);
+    assert.equal(request.posSide, fixture.posSide);
+    assert.equal(request.reduceOnly, undefined);
+    assert.equal(provider.positionModeReads, 0);
+    assert.equal(rulesReads, 0);
+    assert.equal(identityReads, 0);
+  });
+});
+
+test("Bitget managed close rejects mismatched verified bucket without falling back to Provider reads", async () => {
+  const provider = new FakeBitgetService();
+  provider.readPositionMode = async () => { provider.positionModeReads += 1; return "HEDGE"; };
+  let rulesReads = 0;
+  let identityReads = 0;
+  const intent = executionIntent({
+    instrumentId: "DOGE-USDT-PERP", side: "buy", positionDirection: "SHORT", reduceOnly: true, quantity: "59",
+  });
+  const context = Object.freeze({ ...verifiedCloseContext(intent, "SHORT"), positionDirection: "LONG" as const });
+  const service = new BitgetIntentExecutionService(provider, {
+    ...serviceOptions(),
+    mutationEffect: "DECREASE",
+    quantityRulesSource: async () => { rulesReads += 1; throw new Error("must not fall back"); },
+    validateProviderIdentity: async () => { identityReads += 1; },
+    verifiedCloseContext: context,
+  });
+
+  await assert.rejects(() => service.execute(intent), /verified close context/u);
+  assert.equal(provider.placeRequests.length, 0);
+  assert.equal(provider.positionModeReads, 0);
+  assert.equal(rulesReads, 0);
+  assert.equal(identityReads, 0);
+});
+
+test("Bitget managed close rejects stale verified rules without Provider fallback", async () => {
+  const provider = new FakeBitgetService();
+  let rulesReads = 0;
+  const intent = executionIntent({
+    instrumentId: "DOGE-USDT-PERP", side: "buy", positionDirection: "SHORT", reduceOnly: true, quantity: "59",
+  });
+  const fresh = verifiedCloseContext(intent, "SHORT");
+  const staleRules = createVerifiedManagedCloseNativeExecutionRules({
+    ...fresh.verifiedNativeExecutionRules!,
+    verifiedAt: now - 15_001,
+  });
+  const service = new BitgetIntentExecutionService(provider, {
+    ...serviceOptions(),
+    mutationEffect: "DECREASE",
+    clock: () => now,
+    quantityRulesSource: async () => { rulesReads += 1; throw new Error("must not fall back"); },
+    verifiedCloseContext: Object.freeze({ ...fresh, verifiedNativeExecutionRules: staleRules }),
+  });
+
+  await assert.rejects(() => service.execute(intent), /invalid, stale/u);
+  assert.equal(provider.placeRequests.length, 0);
+  assert.equal(rulesReads, 0);
+});
+
 test("Bitget UTA HEDGE LONG and SHORT openings preserve the target posSide without Classic tradeSide request fields", async () => {
   for (const fixture of [
     { direction: "LONG" as const, side: "buy" as const, posSide: "long" as const },
@@ -371,6 +457,7 @@ function serviceOptions() {
 }
 function executionIntent(input: Partial<{
   instrumentId: string; side: "buy" | "sell"; reduceOnly: boolean; positionDirection: "LONG" | "SHORT";
+  quantity: string;
 }> = {}): ExecutionIntent {
   const instrumentId = input.instrumentId ?? "DOGE-USDT-PERP";
   return createExecutionIntent({
@@ -379,9 +466,55 @@ function executionIntent(input: Partial<{
     ...(instrumentId.endsWith("-PERP")
       ? { positionDirection: input.positionDirection ?? (input.side === "sell" ? "SHORT" as const : "LONG" as const) }
       : {}),
-    side: input.side ?? "buy", quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "95.12345678" },
+    side: input.side ?? "buy", quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: input.quantity ?? "95.12345678" },
     orderConstraints: { reduceOnly: input.reduceOnly ?? false }, executionMode: "EXECUTION_PRIORITY",
     createdAt: now, expiresAt: now + 60_000,
+  });
+}
+
+function verifiedCloseContext(
+  intent: ExecutionIntent,
+  positionDirection: "LONG" | "SHORT",
+): FormalManagedCloseExecutionContext {
+  return Object.freeze({
+    verifiedAt: now,
+    positionMode: "HEDGE",
+    side: intent.side,
+    positionDirection,
+    actualSignedNetQuantity: null,
+    actualLongQuantity: positionDirection === "LONG" ? intent.quantity.quantity : "0",
+    actualShortQuantity: positionDirection === "SHORT" ? intent.quantity.quantity : "0",
+    safeClosableQuantity: intent.quantity.quantity,
+    managedQuantityCeiling: intent.quantity.quantity,
+    legalizedCloseQuantity: intent.quantity.quantity,
+    reduceOnly: true,
+    verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+      userId: intent.userId,
+      venue: intent.venue,
+      accountId: intent.accountId,
+      executionIntentId: intent.intentId,
+      verifiedAt: now,
+    }),
+    verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId,
+      accountId: intent.accountId,
+      venue: intent.venue,
+      canonicalInstrumentId: intent.instrumentId,
+      providerInstrumentId: "DOGEUSDT",
+      executionIntentId: intent.intentId,
+      instrumentState: "live",
+      contractType: "linear",
+      contractValueCurrency: "DOGE",
+      settlementAsset: "USDT",
+      contractValue: "1",
+      lotSize: "1",
+      minimumSize: "1",
+      minimumNotional: "5",
+      canonicalSafeCloseQuantity: intent.quantity.quantity,
+      legalizedCanonicalCloseQuantity: intent.quantity.quantity,
+      providerNativeQuantity: intent.quantity.quantity,
+      verifiedAt: now,
+    }),
   });
 }
 

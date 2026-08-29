@@ -4,6 +4,7 @@ import {
   diagnosticFromExecution,
   mutationDispositionFromExecution,
   type FormalExecutionRuntime,
+  type FormalManagedCloseExecutionContext,
   type FormalExecutionRuntimeResult,
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import type { BitgetIntentExecutionRuntime } from "./BitgetIntentExecutionRuntime";
@@ -18,9 +19,12 @@ export class BitgetFormalArbitrageExecutionRuntime implements FormalExecutionRun
     return this.executeWith(() => this.runtime.execute(intent));
   }
 
-  async executeManagedClose(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
+  async executeManagedClose(
+    intent: ExecutionIntent,
+    context?: FormalManagedCloseExecutionContext,
+  ): Promise<FormalExecutionRuntimeResult> {
     if (!this.runtime.close) throw new Error("Bitget managed-close runtime is unavailable.");
-    return this.executeWith(() => this.runtime.close!(intent));
+    return this.executeWith(() => this.runtime.close!(intent, context));
   }
 
   private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {

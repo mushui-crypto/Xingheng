@@ -410,8 +410,8 @@ function verifiedPerpetualCloseContext(
     managedQuantityCeiling,
     legalizedCloseQuantity,
     reduceOnly: true,
-    ...(intent.venue !== "okx" ? {} : {
-      verifiedNativeExecutionRules: verifiedOkxNativeExecutionRules(
+    ...(intent.venue !== "okx" && intent.venue !== "bitget" ? {} : {
+      verifiedNativeExecutionRules: verifiedNativeExecutionRulesForVenue(
         safety,
         intent,
         planningContext,
@@ -430,12 +430,48 @@ function verifiedPerpetualCloseContext(
   });
 }
 
-function verifiedOkxNativeExecutionRules(
+function verifiedNativeExecutionRulesForVenue(
   safety: ArbitrageCloseSafetyResult,
   intent: ExecutionIntent,
   planningContext: ArbitrageExecutionPlanningContext,
   plan: ExecutionQuantityPlan,
 ) {
+  if (intent.venue === "bitget") {
+    const rules = planningContext.tradingRules;
+    if (planningContext.instrument.instrumentId !== intent.instrumentId
+      || planningContext.instrument.providerSymbol !== plan.providerSymbol
+      || planningContext.instrument.marketType !== "perpetual"
+      || planningContext.instrument.contractType !== "linear_perpetual"
+      || planningContext.instrument.quantityUnit !== "base"
+      || planningContext.instrument.status !== "trading"
+      || planningContext.instrument.baseAsset.symbol !== plan.baseAsset
+      || planningContext.instrument.quoteAsset !== "USDT"
+      || planningContext.instrument.settlementAsset !== "USDT"
+      || rules.contractSize !== "1"
+      || plan.plannedVenueQuantity !== undefined) {
+      throw closeError("close_capability_unavailable", "Bitget永续退出缺少可靠的原生数量规则。");
+    }
+    return createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId,
+      accountId: intent.accountId,
+      venue: intent.venue,
+      canonicalInstrumentId: intent.instrumentId,
+      providerInstrumentId: plan.providerSymbol,
+      executionIntentId: intent.intentId,
+      instrumentState: "live",
+      contractType: "linear",
+      contractValueCurrency: planningContext.instrument.baseAsset.symbol,
+      settlementAsset: planningContext.instrument.settlementAsset,
+      contractValue: rules.contractSize,
+      lotSize: rules.quantityStep,
+      minimumSize: rules.minQuantity,
+      minimumNotional: rules.minNotional ?? null,
+      canonicalSafeCloseQuantity: safety.safeClosableQuantity,
+      legalizedCanonicalCloseQuantity: plan.plannedAssetQuantity.quantity,
+      providerNativeQuantity: plan.plannedAssetQuantity.quantity,
+      verifiedAt: Math.max(safety.checkedAt, plan.generatedAt),
+    });
+  }
   const rules = planningContext.nativeExecutionRules;
   if (!rules || rules.venue !== "okx" || rules.canonicalInstrumentId !== intent.instrumentId
     || rules.providerInstrumentId !== plan.providerSymbol

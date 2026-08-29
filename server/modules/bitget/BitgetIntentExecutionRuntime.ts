@@ -10,6 +10,7 @@ import { attachExecutionAttempt, createExecutionRecordFromIntent, type Execution
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
+import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
 import {
   createBitgetExecutionOrderRecoveryReference,
   createBitgetExecutionOrderReference,
@@ -36,7 +37,7 @@ export type BitgetIntentExecutionRuntimeRegistry = Readonly<{
   run<T>(userId: string, operation: (service: BitgetIntentRuntimeService) => Promise<T> | T): Promise<T>;
 }>;
 export type BitgetIntentExecutionRuntimeOptions = Readonly<
-  Omit<BitgetIntentExecutionServiceOptions, "validateProviderIdentity" | "persistRecoveryReference"> & {
+  Omit<BitgetIntentExecutionServiceOptions, "validateProviderIdentity" | "persistRecoveryReference" | "verifiedCloseContext"> & {
     createExecutionId?: (intent: ExecutionIntent) => string;
     createCapability?: (service: BitgetIntentExecutionService) => BitgetIntentExecutionCapability<BitgetIntentExecutionResult>;
     createCancelCapability?: (service: import("./BitgetIntentCancellationCapability").BoundBitgetIntentCancellationService, reference: BitgetExecutionOrderReference) => ExecutionCancelCapability;
@@ -71,13 +72,14 @@ export class BitgetIntentExecutionRuntime {
     return this.executeWithEffect(input, "INCREASE");
   }
 
-  close(input: ExecutionIntent) {
-    return this.executeWithEffect(input, "DECREASE");
+  close(input: ExecutionIntent, closeContext?: FormalManagedCloseExecutionContext) {
+    return this.executeWithEffect(input, "DECREASE", closeContext);
   }
 
   private async executeWithEffect(
     input: ExecutionIntent,
     mutationEffect: ExecutionMutationEffect,
+    closeContext?: FormalManagedCloseExecutionContext,
   ): Promise<BitgetIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "bitget") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
@@ -94,7 +96,7 @@ export class BitgetIntentExecutionRuntime {
             accountId: initial.accountId, instrumentId: initial.instrumentId, ...reference,
             createdAt: initial.createdAt, updatedAt: initial.updatedAt,
           }),
-        ), mutationEffect);
+        ), mutationEffect, closeContext);
         const capability = this.options.createCapability?.(service) ?? new BitgetIntentExecutionCapability(service);
         coordinatedCapability = new RegistryBackedExecutionCapability(
           new ExecutionCapabilityRegistry<BitgetIntentExecutionResult>().register(executionCapability("bitget", capability)),
@@ -202,10 +204,12 @@ export class BitgetIntentExecutionRuntime {
     runtimeService: BitgetIntentRuntimeService,
     persistRecoveryReference?: BitgetIntentExecutionServiceOptions["persistRecoveryReference"],
     mutationEffect: ExecutionMutationEffect = "INCREASE",
+    closeContext?: FormalManagedCloseExecutionContext,
   ) {
     return new BitgetIntentExecutionService(runtimeService, {
       ...this.options,
       mutationEffect,
+      ...(closeContext === undefined ? {} : { verifiedCloseContext: closeContext }),
       validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
     });
