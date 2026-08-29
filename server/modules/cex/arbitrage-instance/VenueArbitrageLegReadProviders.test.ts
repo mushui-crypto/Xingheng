@@ -35,6 +35,7 @@ test("perpetual provider preserves direction and converts OKX contracts to base 
       shortQuantity: "1",
       fetchedAt: 1_800_000_000_000,
     },
+    verifiedAccountId: "okx:account-a",
   });
 });
 

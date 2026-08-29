@@ -9,6 +9,17 @@ export interface PublicTradingRulesClient {
   get(path: string, query: Record<string, string>): Promise<unknown>;
 }
 
+export type OkxNativePerpetualExecutionRules = Readonly<{
+  providerInstrumentId: string;
+  instrumentState: "live";
+  contractType: "linear";
+  contractValueCurrency: string;
+  settlementAsset: string;
+  contractValue: string;
+  lotSize: string;
+  minimumSize: string;
+}>;
+
 export class HttpPublicTradingRulesClient implements PublicTradingRulesClient {
   constructor(
     private readonly baseUrl: string,
@@ -63,12 +74,91 @@ export class OkxTradingRulesAdapter implements TradingRulesAdapter {
 
   async getTradingRules(instrument: VenueInstrument): Promise<TradingRules> {
     requireVenue(instrument, "okx");
-    const payload = await this.client.get("/api/v5/public/instruments", {
-      instType: instrument.category === "spot" ? "SPOT" : "SWAP",
-      instId: instrument.instId,
-    });
-    const row = firstDataItem(payload, instrument.instId, "OKX");
+    return rulesForOkxRow(await this.loadRow(instrument));
+  }
 
+  async getPerpetualTradingRulesWithNativeFacts(instrument: VenueInstrument): Promise<Readonly<{
+    tradingRules: TradingRules;
+    nativeRules: OkxNativePerpetualExecutionRules;
+  }>> {
+    requireVenue(instrument, "okx");
+    if (instrument.category !== "swap") {
+      throw new Error("OKX native perpetual execution rules require a SWAP instrument.");
+    }
+    const row = await this.loadRow(instrument);
+    try {
+      const assets = okxSwapAssets(instrument.instId);
+      const instrumentState = requiredString(row.state, "OKX instrument state");
+      if (instrumentState !== "live") {
+        throw new OkxInstrumentRulesError("instrument_not_tradable", "OKX instrument is not currently tradeable.");
+      }
+      if (requiredString(row.instType, "OKX instrument type") !== "SWAP"
+        || requiredString(row.ctType, "OKX contract type") !== "linear"
+        || requiredString(row.ctValCcy, "OKX contract value currency") !== assets.baseAsset
+        || requiredString(row.settleCcy, "OKX settlement asset") !== assets.quoteAsset) {
+        throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX native instrument rules do not match the canonical instrument.");
+      }
+      const tradingRules = rulesForOkxRow(row);
+      if (tradingRules.contractSize === undefined) {
+        throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX contract value is unavailable.");
+      }
+      return Object.freeze({
+        tradingRules,
+        nativeRules: Object.freeze({
+          providerInstrumentId: instrument.instId,
+          instrumentState: "live" as const,
+          contractType: "linear" as const,
+          contractValueCurrency: assets.baseAsset,
+          settlementAsset: assets.quoteAsset,
+          contractValue: tradingRules.contractSize,
+          lotSize: tradingRules.quantityStep,
+          minimumSize: tradingRules.minQuantity,
+        }),
+      });
+    } catch (error) {
+      if (error instanceof OkxInstrumentRulesError) throw error;
+      throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX native instrument rules are incomplete or invalid.");
+    }
+  }
+
+  private async loadRow(instrument: VenueInstrument) {
+    let payload: unknown;
+    try {
+      payload = await this.client.get("/api/v5/public/instruments", {
+        instType: instrument.category === "spot" ? "SPOT" : "SWAP",
+        instId: instrument.instId,
+      });
+    } catch {
+      throw new OkxInstrumentRulesError("instrument_rules_unavailable", "OKX instrument rules are temporarily unavailable.");
+    }
+    try {
+      const value = record(payload, "OKX response");
+      const data = array(value.data, "OKX data");
+      const row = data.map((item) => record(item, "OKX instrument"))
+        .find((item) => item.instId === instrument.instId);
+      if (!row) {
+        throw new OkxInstrumentRulesError("instrument_not_tradable", "OKX instrument is unavailable or not tradeable.");
+      }
+      return row;
+    } catch (error) {
+      if (error instanceof OkxInstrumentRulesError) throw error;
+      throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX instrument rules response is invalid.");
+    }
+  }
+}
+
+export class OkxInstrumentRulesError extends Error {
+  constructor(
+    readonly category: "instrument_rules_unavailable" | "instrument_not_tradable" | "instrument_rules_invalid",
+    message: string,
+  ) {
+    super(message);
+    this.name = "OkxInstrumentRulesError";
+  }
+}
+
+function rulesForOkxRow(row: Record<string, unknown>) {
+  try {
     return createTradingRules({
       quantityStep: requiredString(row.lotSz, "OKX lot size"),
       minQuantity: requiredString(row.minSz, "OKX min size"),
@@ -76,7 +166,15 @@ export class OkxTradingRulesAdapter implements TradingRulesAdapter {
       contractSize: optionalString(row.ctVal),
       precision: {},
     });
+  } catch {
+    throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX instrument quantity or price rules are invalid.");
   }
+}
+
+function okxSwapAssets(instId: string) {
+  const match = /^([A-Z0-9]{2,12})-([A-Z0-9]{2,12})-SWAP$/u.exec(instId);
+  if (!match) throw new OkxInstrumentRulesError("instrument_rules_invalid", "OKX SWAP instrument identity is invalid.");
+  return Object.freeze({ baseAsset: match[1]!, quoteAsset: match[2]! });
 }
 
 export class BybitTradingRulesAdapter implements TradingRulesAdapter {

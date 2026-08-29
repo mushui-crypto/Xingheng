@@ -11,8 +11,10 @@ import type { ArbitrageCommandFingerprint } from "../cex/arbitrage-instance/Arbi
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
-import { ExecutionQuantityPlanner } from "../cex/ExecutionQuantityPlanner";
+import { createVerifiedExecutionProviderIdentity } from "../cex/ExecutionMutationSafetyGuard";
+import { ExecutionQuantityPlanner, type ExecutionQuantityPlan } from "../cex/ExecutionQuantityPlanner";
 import type { ArbitrageExecutionPlanningContextSource } from "./ArbitrageExecutionPlanningContext";
+import type { ArbitrageExecutionPlanningContext } from "./ArbitrageExecutionPlanningContext";
 import type { SpotCloseAvailableBalanceSource } from "./BinanceSpotCloseBalanceSource";
 import type { SpotOpeningAttributionSource } from "./BinanceSpotOpeningAttributionSource";
 import type {
@@ -24,6 +26,7 @@ import type {
   FormalExecutionMutationDisposition,
   FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
+import { createVerifiedManagedCloseNativeExecutionRules } from "./FormalExecutionRuntime";
 import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
@@ -56,6 +59,9 @@ export class ArbitrageExecutionCloseError extends Error {
       | "arbitrage_instance_not_found"
       | "arbitrage_leg_not_found"
       | "close_capability_unavailable"
+      | "instrument_rules_unavailable"
+      | "instrument_not_tradable"
+      | "instrument_rules_invalid"
       | "position_verification_unavailable"
       | "close_quantity_unavailable"
       | "execution_state_unknown"
@@ -265,7 +271,14 @@ export class ArbitrageExecutionCloseService {
     const providerDispatchStartedAt = this.now();
     try {
       const executionContext: FormalManagedCloseExecutionContext | undefined = perpetual
-        ? verifiedPerpetualCloseContext(safety.result, intent, managedQuantity, closeQuantity)
+        ? verifiedPerpetualCloseContext(
+          safety.result,
+          intent,
+          managedQuantity,
+          closeQuantity,
+          context,
+          planned.plan,
+        )
         : undefined;
       runtimeResult = await runtime.executeManagedClose(intent, executionContext);
     } catch {
@@ -338,6 +351,8 @@ function verifiedPerpetualCloseContext(
   intent: ExecutionIntent,
   managedQuantityCeiling: string,
   legalizedCloseQuantity: string,
+  planningContext: ArbitrageExecutionPlanningContext,
+  plan: ExecutionQuantityPlan,
 ): FormalManagedCloseExecutionContext {
   if (safety.positionMode === null || intent.positionDirection === undefined
     || !intent.orderConstraints.reduceOnly) {
@@ -355,6 +370,60 @@ function verifiedPerpetualCloseContext(
     managedQuantityCeiling,
     legalizedCloseQuantity,
     reduceOnly: true,
+    ...(intent.venue !== "okx" ? {} : {
+      verifiedNativeExecutionRules: verifiedOkxNativeExecutionRules(
+        safety,
+        intent,
+        planningContext,
+        plan,
+      ),
+    }),
+    ...(safety.verifiedAccountId !== intent.accountId ? {} : {
+      verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+        userId: intent.userId,
+        venue: intent.venue,
+        accountId: intent.accountId,
+        executionIntentId: intent.intentId,
+        verifiedAt: safety.checkedAt,
+      }),
+    }),
+  });
+}
+
+function verifiedOkxNativeExecutionRules(
+  safety: ArbitrageCloseSafetyResult,
+  intent: ExecutionIntent,
+  planningContext: ArbitrageExecutionPlanningContext,
+  plan: ExecutionQuantityPlan,
+) {
+  const rules = planningContext.nativeExecutionRules;
+  if (!rules || rules.venue !== "okx" || rules.canonicalInstrumentId !== intent.instrumentId
+    || rules.providerInstrumentId !== plan.providerSymbol
+    || rules.instrumentState !== "live" || rules.contractType !== "linear"
+    || rules.settlementAsset !== "USDT" || plan.plannedVenueQuantity === undefined
+    || planningContext.tradingRules.contractSize !== rules.contractValue
+    || planningContext.tradingRules.quantityStep !== rules.lotSize
+    || planningContext.tradingRules.minQuantity !== rules.minimumSize) {
+    throw closeError("close_capability_unavailable", "OKX永续退出缺少可靠的原生合约规则。");
+  }
+  return createVerifiedManagedCloseNativeExecutionRules({
+    userId: intent.userId,
+    accountId: intent.accountId,
+    venue: intent.venue,
+    canonicalInstrumentId: intent.instrumentId,
+    providerInstrumentId: rules.providerInstrumentId,
+    executionIntentId: intent.intentId,
+    instrumentState: rules.instrumentState,
+    contractType: rules.contractType,
+    contractValueCurrency: rules.contractValueCurrency,
+    settlementAsset: rules.settlementAsset,
+    contractValue: rules.contractValue,
+    lotSize: rules.lotSize,
+    minimumSize: rules.minimumSize,
+    canonicalSafeCloseQuantity: safety.safeClosableQuantity,
+    legalizedCanonicalCloseQuantity: plan.plannedAssetQuantity.quantity,
+    providerNativeQuantity: plan.plannedVenueQuantity,
+    verifiedAt: Math.max(safety.checkedAt, rules.verifiedAt, plan.generatedAt),
   });
 }
 
@@ -480,6 +549,15 @@ function assertCloseSafetyAvailable(safety: ArbitrageCloseSafetyResult) {
   }
   if (safety.reason === "CLOSE_CAPABILITY_UNAVAILABLE" || safety.reason === "SPOT_ROLE_UNSUPPORTED") {
     throw closeError("close_capability_unavailable", "当前交易品种不支持安全退出。");
+  }
+  if (safety.reason === "INSTRUMENT_RULES_UNAVAILABLE") {
+    throw closeError("instrument_rules_unavailable", "当前交易规则暂时无法可靠读取，不能提交退出。");
+  }
+  if (safety.reason === "INSTRUMENT_NOT_TRADABLE") {
+    throw closeError("instrument_not_tradable", "当前交易品种不可交易，不能提交退出。");
+  }
+  if (safety.reason === "INSTRUMENT_RULES_INVALID") {
+    throw closeError("instrument_rules_invalid", "当前交易规则无效，不能提交退出。");
   }
   if (safety.reason === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE") {
     throw closeError("position_verification_unavailable", "现货开仓成交与手续费无法可靠归因，不能提交退出。");

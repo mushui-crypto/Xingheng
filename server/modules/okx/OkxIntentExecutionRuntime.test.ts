@@ -4,7 +4,11 @@ import test from "node:test";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
-import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
+import {
+  createVerifiedExecutionProviderIdentity,
+  ExecutionMutationSafetyGuard,
+} from "../cex/ExecutionMutationSafetyGuard";
+import { createVerifiedManagedCloseNativeExecutionRules } from "../arbitrage-execution/FormalExecutionRuntime";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import { SqliteExecutionRecordStore, type ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import {
@@ -342,6 +346,32 @@ test("an explicit OKX order POST rejection remains dispatched-possible and is ne
     managedQuantityCeiling: "12.5",
     legalizedCloseQuantity: "12.5",
     reduceOnly: true,
+    verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+      userId: intent.userId,
+      venue: intent.venue,
+      accountId: intent.accountId,
+      executionIntentId: intent.intentId,
+      verifiedAt: now - 1,
+    }),
+    verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId,
+      accountId: intent.accountId,
+      venue: intent.venue,
+      canonicalInstrumentId: intent.instrumentId,
+      providerInstrumentId: "DOGE-USDT-SWAP",
+      executionIntentId: intent.intentId,
+      instrumentState: "live",
+      contractType: "linear",
+      contractValueCurrency: "DOGE",
+      settlementAsset: "USDT",
+      contractValue: "0.1",
+      lotSize: "1",
+      minimumSize: "1",
+      canonicalSafeCloseQuantity: "12.5",
+      legalizedCanonicalCloseQuantity: "12.5",
+      providerNativeQuantity: "125",
+      verifiedAt: now - 1,
+    }),
   });
 
   assert.equal(service.placeRequests.length, 1);

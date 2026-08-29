@@ -260,6 +260,42 @@ test("authoritative NOT_DISPATCHED perpetual close retries with fresh safety and
   assert.equal(fixture.outcomeAudits[0]?.providerCode, "50011");
 });
 
+test("IDENTITY_READ_UNAVAILABLE retries only after fresh CloseSafety and completes the same Exit", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 1,
+    perpetualFailureCategory: "identity_read_unavailable",
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("identity-read-retry"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 2);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 2);
+  assert.equal(fixture.outcomeAudits[0]?.diagnosticCategory, "IDENTITY_READ_UNAVAILABLE");
+});
+
+test("INSTRUMENT_RULES_UNAVAILABLE retries only after fresh CloseSafety and completes the same Exit", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 1,
+    perpetualFailureCategory: "instrument_rules_unavailable",
+  });
+  const result = await fixture.service.exit("user-a", exitRequest("instrument-rules-read-retry"));
+
+  assert.equal(result.status, "CONFIRMED");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 2);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 1);
+  assert.equal(fixture.mutationSafetyCalls("short-leg"), 2);
+  assert.equal(fixture.outcomeAudits[0]?.diagnosticCategory, "INSTRUMENT_RULES_UNAVAILABLE");
+});
+
 test("repeated NOT_DISPATCHED perpetual closes exhaust bounded attempts without a Provider mutation", async () => {
   const fixture = setup({
     longOpenedQuantity: "59.94",
@@ -307,6 +343,11 @@ test("business, authentication, and non-transient pre-mutation failures are not 
     "credential_validation_failed",
     "provider_permission_error",
     "provider_request_rejected",
+    "identity_mismatch",
+    "identity_auth_or_permission_failed",
+    "identity_context_invalid",
+    "instrument_not_tradable",
+    "instrument_rules_invalid",
   ] as const) {
     await t.test(category, async () => {
       const fixture = setup({
@@ -320,6 +361,7 @@ test("business, authentication, and non-transient pre-mutation failures are not 
       const result = await fixture.service.exit("user-a", exitRequest(`perp-business-${category}`));
       assert.equal(result.status, "STOPPED");
       assert.equal(result.stop?.phase, "PERPETUAL_PRE_MUTATION");
+      assert.equal(result.stop?.mutationDisposition, "NOT_DISPATCHED");
       assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
       assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
     });

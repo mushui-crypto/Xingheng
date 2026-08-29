@@ -10,7 +10,11 @@ import {
   type ExecutionQueryObservation,
 } from "../cex/ExecutionQueryCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
-import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  isTrustedVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
+  type VerifiedManagedCloseNativeExecutionRules,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
   ExecutionMutationSafetyGuard,
@@ -37,6 +41,8 @@ import type {
   OkxPlaceOrderRequest,
   OkxProviderOrder,
 } from "./OkxTypes";
+
+const VERIFIED_MANAGED_CLOSE_RULES_MAX_AGE_MS = 15_000;
 
 export type OkxIntentExecutionClient = Readonly<{
   readPositionMode?(): Promise<"ONE_WAY" | "HEDGE">;
@@ -140,6 +146,11 @@ export class OkxIntentExecutionService {
         accountId: intent.accountId,
         instrumentId: intent.instrumentId,
         providerInstrumentId: value.instId,
+        executionIntentId: intent.intentId,
+        mutationPreparedAt: this.clock(),
+        ...(this.options.verifiedCloseContext === undefined ? {} : {
+          verifiedProviderIdentity: this.options.verifiedCloseContext.verifiedProviderIdentity,
+        }),
         ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, this.options.validateProviderIdentity);
       await this.options.persistRecoveryReference?.({
@@ -250,12 +261,15 @@ export class OkxIntentExecutionService {
   private async prepare(intent: ExecutionIntent): Promise<OkxPlaceOrderRequest> {
     const instrument = this.instrumentMapping.resolve(intent.instrumentId);
     assertIntentMatchesInstrument(intent, instrument);
-    const rules = await loadOkxQuantityRules(
-      this.options.quantityRulesSource,
-      instrument,
-      () => this.now(),
-      this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
-    );
+    const verifiedNativeRules = this.verifiedNativeRulesFor(intent, instrument);
+    const rules = verifiedNativeRules === null
+      ? await loadOkxQuantityRules(
+        this.options.quantityRulesSource,
+        instrument,
+        () => this.now(),
+        this.options.quantityRulesMaxAgeMs ?? OKX_QUANTITY_RULES_MAX_AGE_MS,
+      )
+      : null;
     let positionMode: "ONE_WAY" | "HEDGE" | undefined;
     if (instrument.venueInstrument.contractType !== "spot") {
       positionMode = await this.positionModeFor(intent);
@@ -272,7 +286,8 @@ export class OkxIntentExecutionService {
       instId: instrument.venueInstrument.instId,
       tdMode: this.tdMode,
       side: intent.side,
-      quantity: okxBaseQuantityToContracts(intent.quantity.quantity, rules),
+      quantity: verifiedNativeRules?.providerNativeQuantity
+        ?? okxBaseQuantityToContracts(intent.quantity.quantity, rules!),
       clOrdId: okxClientOrderIdFor(intent),
       ...(positionMode === "HEDGE"
         ? { posSide: intent.positionDirection === "LONG" ? "long" as const : "short" as const }
@@ -289,6 +304,59 @@ export class OkxIntentExecutionService {
       ordType: "limit",
       price: decimalQuantity(await this.options.limitPriceResolver(intent, instrument)),
     }, positionMode);
+  }
+
+  private verifiedNativeRulesFor(
+    intent: ExecutionIntent,
+    instrument: OkxInstrumentResolution,
+  ): VerifiedManagedCloseNativeExecutionRules | null {
+    const close = this.options.verifiedCloseContext;
+    if (close === undefined) return null;
+    const rules = close.verifiedNativeExecutionRules;
+    const now = this.now();
+    if (rules === undefined
+      || !isTrustedVerifiedManagedCloseNativeExecutionRules(rules)
+      || rules.source !== "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY"
+      || rules.userId !== intent.userId
+      || rules.accountId !== intent.accountId
+      || rules.venue !== intent.venue
+      || rules.canonicalInstrumentId !== intent.instrumentId
+      || rules.providerInstrumentId !== instrument.venueInstrument.instId
+      || rules.executionIntentId !== intent.intentId
+      || rules.instrumentState !== "live"
+      || rules.contractType !== "linear"
+      || rules.contractValueCurrency !== instrument.canonicalInstrument.baseAsset
+      || rules.settlementAsset !== instrument.canonicalInstrument.quoteAsset
+      || rules.canonicalSafeCloseQuantity !== close.safeClosableQuantity
+      || rules.legalizedCanonicalCloseQuantity !== close.legalizedCloseQuantity
+      || rules.legalizedCanonicalCloseQuantity !== intent.quantity.quantity
+      || rules.verifiedAt > now
+      || now - rules.verifiedAt > VERIFIED_MANAGED_CLOSE_RULES_MAX_AGE_MS) {
+      throw preparationError(
+        "instrument_rules_invalid",
+        "OKX verified native execution rules are invalid, stale, or outside this mutation attempt.",
+      );
+    }
+    const recomputed = okxBaseQuantityToContracts(intent.quantity.quantity, {
+      instType: "SWAP",
+      instId: rules.providerInstrumentId,
+      uly: `${instrument.canonicalInstrument.baseAsset}-${instrument.canonicalInstrument.quoteAsset}`,
+      ctType: "linear",
+      ctValCcy: rules.contractValueCurrency,
+      settleCcy: rules.settlementAsset,
+      lotSz: rules.lotSize,
+      minSz: rules.minimumSize,
+      ctVal: rules.contractValue,
+      state: "live",
+      fetchedAt: rules.verifiedAt,
+    });
+    if (recomputed !== rules.providerNativeQuantity) {
+      throw preparationError(
+        "instrument_rules_invalid",
+        "OKX verified native quantity does not match the canonical close quantity.",
+      );
+    }
+    return rules;
   }
 
   private async positionModeFor(intent: ExecutionIntent): Promise<"ONE_WAY" | "HEDGE"> {

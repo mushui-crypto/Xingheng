@@ -1,6 +1,9 @@
 import type { UserExchangeCredentialStore } from "../credentials/UserExchangeCredentialStore";
-import type { ExecutionMutationContext } from "../cex/ExecutionMutationSafetyGuard";
-import { OkxClient } from "./OkxClient";
+import {
+  ExecutionMutationSafetyError,
+  type ExecutionMutationContext,
+} from "../cex/ExecutionMutationSafetyGuard";
+import { OkxClient, OkxProviderError } from "./OkxClient";
 import type { OkxAccountIdentity, OkxCredentials } from "./OkxTypes";
 import type { OkxIntentRuntimeService } from "./OkxIntentExecutionRuntime";
 
@@ -83,11 +86,33 @@ async function validateExecutionProviderIdentity(
   context: ExecutionMutationContext,
 ) {
   if (context.venue !== "okx" || context.accountId !== expectedAccountId) {
-    throw new Error("OKX execution account binding does not match the mutation context.");
+    throw new ExecutionMutationSafetyError(
+      "identity_context_invalid",
+      "OKX execution account binding does not match the mutation context.",
+    );
   }
-  const providerIdentity: OkxAccountIdentity = await client.getAccountIdentity();
+  let providerIdentity: OkxAccountIdentity;
+  try {
+    providerIdentity = await client.getAccountIdentity();
+  } catch (error) {
+    if (error instanceof OkxProviderError && error.category === "credential_validation_failed") {
+      throw new ExecutionMutationSafetyError(
+        "identity_auth_or_permission_failed",
+        "OKX Provider identity authentication or permission validation failed.",
+        error.providerCode ?? undefined,
+      );
+    }
+    throw new ExecutionMutationSafetyError(
+      "identity_read_unavailable",
+      "OKX Provider identity could not be read authoritatively.",
+      error instanceof OkxProviderError ? error.providerCode ?? undefined : undefined,
+    );
+  }
   if (providerIdentity.accountId !== expectedAccountId) {
-    throw new Error("OKX Provider UID does not match the configured execution account.");
+    throw new ExecutionMutationSafetyError(
+      "identity_mismatch",
+      "OKX Provider identity does not match the configured execution account.",
+    );
   }
 }
 

@@ -150,6 +150,7 @@ function result(
     actualLongQuantity: observed.snapshot.longQuantity,
     actualShortQuantity: observed.snapshot.shortQuantity,
     availableQuantity: observed.availableQuantity ?? null,
+    ...(observed.verifiedAccountId === undefined ? {} : { verifiedAccountId: observed.verifiedAccountId }),
     verificationStatus,
     reason: null,
     checkedAt,

@@ -26,6 +26,8 @@ export type ArbitrageLegVerificationUnknownReason =
 
 export type ArbitrageLegObservedState = Readonly<{
   snapshot: PositionSnapshot;
+  /** Exact Provider account binding observed by this read, when available. */
+  verifiedAccountId?: string;
   /** Reliable provider-reported available balance for Spot; not used as total position identity. */
   availableQuantity?: string | null;
 }>;
@@ -41,6 +43,7 @@ export type ArbitrageLegVerificationResult = Readonly<{
   actualLongQuantity: string | null;
   actualShortQuantity: string | null;
   availableQuantity: string | null;
+  verifiedAccountId?: string;
   verificationStatus: ArbitrageLegVerificationStatus;
   reason: ArbitrageLegVerificationUnknownReason | null;
   checkedAt: number;

@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { OkxIntentExecutionService, okxClientOrderIdFor } from "./OkxIntentExecutionService";
-import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
+import { createVerifiedManagedCloseNativeExecutionRules } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  createVerifiedExecutionProviderIdentity,
+  ExecutionMutationSafetyGuard,
+} from "../cex/ExecutionMutationSafetyGuard";
 import { createExecutionIntent } from "../cex/ExecutionIntent";
 import { okxTestQuantityRules, okxTestQuantityRulesSource } from "./OkxTestFixtures";
 import type { OkxQuantityRulesSnapshot, OkxQuantityRulesSource } from "./OkxQuantitySemantics";
@@ -99,6 +103,7 @@ test("perpetual close preserves reduceOnly=true at the OKX order boundary", asyn
 test("verified managed-close facts remove the duplicate OKX position-mode read", async () => {
   const client = new FakeOkxExecutionClient();
   let positionModeReads = 0;
+  let instrumentRulesReads = 0;
   client.readPositionMode = async () => {
     positionModeReads += 1;
     throw Object.assign(new Error("duplicate account config read"), {
@@ -115,7 +120,11 @@ test("verified managed-close facts remove the duplicate OKX position-mode read",
   });
 
   await new OkxIntentExecutionService(client, {
-    ...serviceOptions({ ctVal: "1" }),
+    ...serviceOptions({ ctVal: "1000", lotSz: "0.01", minSz: "0.01" }),
+    quantityRulesSource: async () => {
+      instrumentRulesReads += 1;
+      throw new Error("duplicate instrument rules read");
+    },
     verifiedCloseContext: {
       verifiedAt: now - 1,
       positionMode: "ONE_WAY",
@@ -128,13 +137,122 @@ test("verified managed-close facts remove the duplicate OKX position-mode read",
       managedQuantityCeiling: "10",
       legalizedCloseQuantity: "10",
       reduceOnly: true,
+      verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+        userId: intent.userId,
+        venue: intent.venue,
+        accountId: intent.accountId,
+        executionIntentId: intent.intentId,
+        verifiedAt: now - 1,
+      }),
+      verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+        userId: intent.userId,
+        accountId: intent.accountId,
+        venue: intent.venue,
+        canonicalInstrumentId: intent.instrumentId,
+        providerInstrumentId: "DOGE-USDT-SWAP",
+        executionIntentId: intent.intentId,
+        instrumentState: "live",
+        contractType: "linear",
+        contractValueCurrency: "DOGE",
+        settlementAsset: "USDT",
+        contractValue: "1000",
+        lotSize: "0.01",
+        minimumSize: "0.01",
+        canonicalSafeCloseQuantity: "10",
+        legalizedCanonicalCloseQuantity: "10",
+        providerNativeQuantity: "0.01",
+        verifiedAt: now - 1,
+      }),
     },
   }).execute(intent);
 
   assert.equal(positionModeReads, 0);
+  assert.equal(instrumentRulesReads, 0);
   assert.equal(client.placeRequests.length, 1);
+  assert.equal(client.placeRequests[0]?.quantity, "0.01");
   assert.equal(client.placeRequests[0]?.reduceOnly, true);
   assert.equal(client.placeRequests[0]?.posSide, undefined);
+});
+
+test("managed-close verified native rules fail closed when stale or outside the attempt scope", async (t) => {
+  for (const fixture of [
+    { name: "stale", verifiedAt: now - 15_001, providerInstrumentId: "DOGE-USDT-SWAP" },
+    { name: "instrument mismatch", verifiedAt: now - 1, providerInstrumentId: "BTC-USDT-SWAP" },
+  ] as const) {
+    await t.test(fixture.name, async () => {
+      const client = new FakeOkxExecutionClient();
+      let instrumentRulesReads = 0;
+      const intent = executionIntent({
+        intentId: `intent-close-${fixture.name}`,
+        side: "buy",
+        positionDirection: "SHORT",
+        quantity: { asset: { symbol: "DOGE", type: "DIGITAL_ASSET" }, quantity: "10" },
+        orderConstraints: { reduceOnly: true },
+      });
+      await assert.rejects(
+        () => new OkxIntentExecutionService(client, {
+          ...serviceOptions(),
+          quantityRulesSource: async () => {
+            instrumentRulesReads += 1;
+            return okxTestQuantityRules(now);
+          },
+          verifiedCloseContext: {
+            verifiedAt: fixture.verifiedAt,
+            positionMode: "ONE_WAY",
+            side: "buy",
+            positionDirection: "SHORT",
+            actualSignedNetQuantity: "-10",
+            actualLongQuantity: "0",
+            actualShortQuantity: "10",
+            safeClosableQuantity: "10",
+            managedQuantityCeiling: "10",
+            legalizedCloseQuantity: "10",
+            reduceOnly: true,
+            verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+              userId: intent.userId,
+              accountId: intent.accountId,
+              venue: intent.venue,
+              canonicalInstrumentId: intent.instrumentId,
+              providerInstrumentId: fixture.providerInstrumentId,
+              executionIntentId: intent.intentId,
+              instrumentState: "live",
+              contractType: "linear",
+              contractValueCurrency: "DOGE",
+              settlementAsset: "USDT",
+              contractValue: "1000",
+              lotSize: "0.01",
+              minimumSize: "0.01",
+              canonicalSafeCloseQuantity: "10",
+              legalizedCanonicalCloseQuantity: "10",
+              providerNativeQuantity: "0.01",
+              verifiedAt: fixture.verifiedAt,
+            }),
+          },
+        }).execute(intent),
+        (error: unknown) => Boolean(error && typeof error === "object"
+          && "originalError" in error
+          && (error as { originalError?: { category?: unknown } }).originalError?.category
+            === "instrument_rules_invalid"),
+      );
+      assert.equal(instrumentRulesReads, 0, "invalid managed-close context must not fall back to a fresh unbound rules read");
+      assert.equal(client.placeRequests.length, 0);
+    });
+  }
+});
+
+test("non-managed-close execution retains the authoritative instrument-rules read fallback", async () => {
+  const client = new FakeOkxExecutionClient();
+  let instrumentRulesReads = 0;
+  await new OkxIntentExecutionService(client, {
+    ...serviceOptions(),
+    quantityRulesSource: async () => {
+      instrumentRulesReads += 1;
+      return okxTestQuantityRules(now);
+    },
+  }).execute(executionIntent());
+
+  assert.equal(instrumentRulesReads, 1);
+  assert.equal(client.placeRequests.length, 1);
 });
 
 test("unverified OKX position-mode read failures retain auth errors and classify transient reads", async () => {
@@ -350,7 +468,7 @@ test("fails closed before provider mutation for unavailable, stale, invalid, or 
     { name: "instrument identity mismatch", source: okxTestQuantityRulesSource(now, { uly: "BTC-USDT" }), pattern: /identity/u },
     { name: "instId mismatch", source: okxTestQuantityRulesSource(now, { instId: "BTC-USDT-SWAP" }), pattern: /identity/u },
     { name: "unsupported contract type", source: okxTestQuantityRulesSource(now, { ctType: "inverse" }), pattern: /identity/u },
-    { name: "instrument not live", source: okxTestQuantityRulesSource(now, { state: "suspend" }), pattern: /identity/u },
+    { name: "instrument not live", source: okxTestQuantityRulesSource(now, { state: "suspend" }), pattern: /tradeable/u },
   ] as const) {
     await t.test(fixture.name, async () => {
       const client = new FakeOkxExecutionClient();

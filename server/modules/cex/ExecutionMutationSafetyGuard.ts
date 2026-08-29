@@ -11,9 +11,39 @@ export type ExecutionMutationContext = Readonly<{
   instrumentId: string;
   providerInstrumentId: string;
   providerAccountId?: string;
+  executionIntentId?: string;
+  mutationPreparedAt?: number;
+  verifiedProviderIdentity?: VerifiedExecutionProviderIdentity;
   /** Internal server-owned semantic. Missing or unrecognized values fail safe as INCREASE. */
   mutationEffect?: ExecutionMutationEffect;
 }>;
+
+export type VerifiedExecutionProviderIdentity = Readonly<{
+  userId: string;
+  venue: string;
+  accountId: string;
+  executionIntentId: string;
+  verifiedAt: number;
+  source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY";
+}>;
+
+const verifiedProviderIdentities = new WeakSet<VerifiedExecutionProviderIdentity>();
+const DEFAULT_VERIFIED_IDENTITY_MAX_AGE_MS = 15_000;
+
+export function createVerifiedExecutionProviderIdentity(
+  input: Omit<VerifiedExecutionProviderIdentity, "source">,
+): VerifiedExecutionProviderIdentity {
+  const identity = Object.freeze({
+    userId: nonEmptyValue(input.userId, "verified identity userId"),
+    venue: nonEmptyValue(input.venue, "verified identity venue"),
+    accountId: nonEmptyValue(input.accountId, "verified identity accountId"),
+    executionIntentId: nonEmptyValue(input.executionIntentId, "verified identity executionIntentId"),
+    verifiedAt: nonNegativeSafeInteger(input.verifiedAt, "verified identity timestamp"),
+    source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY" as const,
+  });
+  verifiedProviderIdentities.add(identity);
+  return identity;
+}
 
 export type ExecutionProviderIdentityValidator = (
   context: ExecutionMutationContext,
@@ -29,6 +59,7 @@ export type ExecutionMutationSafetyState = Readonly<{
 export type ExecutionMutationSafetyConfig = ExecutionMutationSafetyState & Readonly<{
   venues?: Readonly<Record<string, ExecutionMutationSafetyState>>;
   validateProviderIdentity?: ExecutionProviderIdentityValidator;
+  verifiedIdentityMaxAgeMs?: number;
 }>;
 
 type ExecutionMutationSafetyEnvironment = Readonly<Record<string, string | undefined>>;
@@ -44,8 +75,13 @@ export class ExecutionMutationSafetyError extends ExecutionPreMutationFailure {
       | "live_trading_disabled"
       | "kill_switch_active"
       | "identity_invalid"
-      | "provider_identity_invalid",
+      | "provider_identity_invalid"
+      | "identity_read_unavailable"
+      | "identity_auth_or_permission_failed"
+      | "identity_mismatch"
+      | "identity_context_invalid",
     message: string,
+    readonly providerCode?: string,
   ) {
     super(message);
     this.name = "ExecutionMutationSafetyError";
@@ -83,16 +119,7 @@ export class ExecutionMutationSafetyGuard {
         "Execution mutation identity is incomplete.",
       );
     }
-    try {
-      await this.config.validateProviderIdentity?.(context);
-      await validateProviderIdentity?.(context);
-    } catch (error) {
-      if (error instanceof ExecutionMutationSafetyError) throw error;
-      throw new ExecutionMutationSafetyError(
-        "provider_identity_invalid",
-        "Provider identity validation failed before mutation.",
-      );
-    }
+    await this.validateProviderIdentity(context, validateProviderIdentity);
   }
 
   status(venue?: string) {
@@ -107,6 +134,51 @@ export class ExecutionMutationSafetyGuard {
     if (!this.config.venues) return this.config;
     if (!nonEmpty(venue)) return this.config;
     return this.config.venues[venue] ?? FAIL_CLOSED_STATE;
+  }
+
+  private async validateProviderIdentity(
+    context: ExecutionMutationContext,
+    validateProviderIdentity?: ExecutionProviderIdentityValidator,
+  ) {
+    try {
+      await this.config.validateProviderIdentity?.(context);
+      if (context.verifiedProviderIdentity !== undefined) {
+        assertVerifiedProviderIdentityContext(
+          context,
+          context.verifiedProviderIdentity,
+          this.config.verifiedIdentityMaxAgeMs ?? DEFAULT_VERIFIED_IDENTITY_MAX_AGE_MS,
+        );
+        return;
+      }
+      await validateProviderIdentity?.(context);
+    } catch (error) {
+      if (error instanceof ExecutionMutationSafetyError) throw error;
+      throw new ExecutionMutationSafetyError(
+        "provider_identity_invalid",
+        "Provider identity validation failed before mutation.",
+      );
+    }
+  }
+}
+
+function assertVerifiedProviderIdentityContext(
+  context: ExecutionMutationContext,
+  identity: VerifiedExecutionProviderIdentity,
+  maxAgeMs: number,
+) {
+  if (!verifiedProviderIdentities.has(identity)
+    || identity.source !== "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY"
+    || identity.userId !== context.userId
+    || identity.venue !== context.venue
+    || identity.accountId !== context.accountId
+    || identity.executionIntentId !== context.executionIntentId
+    || !Number.isSafeInteger(context.mutationPreparedAt)
+    || context.mutationPreparedAt! < identity.verifiedAt
+    || context.mutationPreparedAt! - identity.verifiedAt > positiveSafeInteger(maxAgeMs, "verified identity max age")) {
+    throw new ExecutionMutationSafetyError(
+      "identity_context_invalid",
+      "Verified Provider identity context is invalid or stale.",
+    );
   }
 }
 
@@ -165,4 +237,20 @@ function state(
 
 function nonEmpty(value: string) {
   return typeof value === "string" && value.trim().length > 0;
+}
+
+function nonEmptyValue(value: unknown, label: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 300) throw new Error(`${label} is invalid.`);
+  return text;
+}
+
+function nonNegativeSafeInteger(value: unknown, label: string) {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${label} is invalid.`);
+  return Number(value);
+}
+
+function positiveSafeInteger(value: unknown, label: string) {
+  if (!Number.isSafeInteger(value) || Number(value) <= 0) throw new Error(`${label} is invalid.`);
+  return Number(value);
 }

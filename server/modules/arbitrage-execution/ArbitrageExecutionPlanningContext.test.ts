@@ -8,7 +8,10 @@ test("loads Decimal read-only planning contexts for OKX, Bybit, and Bitget", asy
     const url = new URL(String(input));
     calls.push({ method: String(init?.method ?? "GET"), url });
     if (url.hostname === "www.okx.com" && url.pathname === "/api/v5/public/instruments") {
-      return Response.json({ code: "0", data: [{ instId: "BTC-USDT-SWAP", lotSz: "1", minSz: "1", tickSz: "0.1", ctVal: "0.01" }] });
+      return Response.json({ code: "0", data: [{
+        instType: "SWAP", instId: "BTC-USDT-SWAP", state: "live", ctType: "linear",
+        ctValCcy: "BTC", settleCcy: "USDT", lotSz: "1", minSz: "1", tickSz: "0.1", ctVal: "0.01",
+      }] });
     }
     if (url.hostname === "www.okx.com" && url.pathname === "/api/v5/market/ticker") {
       return Response.json({ code: "0", data: [{ instId: "BTC-USDT-SWAP", bidPx: "99999.123456789", askPx: "100000.123456789" }] });
@@ -38,6 +41,19 @@ test("loads Decimal read-only planning contexts for OKX, Bybit, and Bitget", asy
 
   assert.equal(okx.instrument.quantityUnit, "contract");
   assert.equal(okx.tradingRules.contractSize, "0.01");
+  assert.deepEqual(okx.nativeExecutionRules, {
+    venue: "okx",
+    canonicalInstrumentId: "BTC-USDT-PERP",
+    providerInstrumentId: "BTC-USDT-SWAP",
+    instrumentState: "live",
+    contractType: "linear",
+    contractValueCurrency: "BTC",
+    settlementAsset: "USDT",
+    contractValue: "0.01",
+    lotSize: "1",
+    minimumSize: "1",
+    verifiedAt: 1_800_000_000_000,
+  });
   assert.equal(okx.quote.bid, "99999.123456789");
   assert.equal(bybit.instrument.quantityUnit, "base");
   assert.equal(bybit.quote.ask, "100001.123456789");
@@ -53,7 +69,10 @@ test("fails closed when quote identity or Decimal shape is invalid", async () =>
   const source = new DefaultArbitrageExecutionPlanningContextSource(async (input) => {
     const url = new URL(String(input));
     if (url.pathname === "/api/v5/public/instruments") {
-      return Response.json({ code: "0", data: [{ instId: "BTC-USDT-SWAP", lotSz: "1", minSz: "1", tickSz: "0.1", ctVal: "0.01" }] });
+      return Response.json({ code: "0", data: [{
+        instType: "SWAP", instId: "BTC-USDT-SWAP", state: "live", ctType: "linear",
+        ctValCcy: "BTC", settleCcy: "USDT", lotSz: "1", minSz: "1", tickSz: "0.1", ctVal: "0.01",
+      }] });
     }
     return Response.json({ code: "0", data: [{ instId: "ETH-USDT-SWAP", bidPx: "99999", askPx: "not-decimal" }] });
   });

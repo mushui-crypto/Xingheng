@@ -1,7 +1,9 @@
+import { createHash } from "node:crypto";
 import type { ExecutionCancelObservation } from "../cex/ExecutionCancelCapability";
 import { isExecutionPreMutationFailure } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
+import type { VerifiedExecutionProviderIdentity } from "../cex/ExecutionMutationSafetyGuard";
 
 export type FormalExecutionDiagnostic = Readonly<{
   category: string;
@@ -29,7 +31,73 @@ export type FormalManagedCloseExecutionContext = Readonly<{
   managedQuantityCeiling: string;
   legalizedCloseQuantity: string;
   reduceOnly: true;
+  verifiedProviderIdentity?: VerifiedExecutionProviderIdentity;
+  verifiedNativeExecutionRules?: VerifiedManagedCloseNativeExecutionRules;
 }>;
+
+export type VerifiedManagedCloseNativeExecutionRules = Readonly<{
+  userId: string;
+  accountId: string;
+  venue: string;
+  canonicalInstrumentId: string;
+  providerInstrumentId: string;
+  executionIntentId: string;
+  instrumentState: "live";
+  contractType: "linear";
+  contractValueCurrency: string;
+  settlementAsset: string;
+  contractValue: string;
+  lotSize: string;
+  minimumSize: string;
+  canonicalSafeCloseQuantity: string;
+  legalizedCanonicalCloseQuantity: string;
+  providerNativeQuantity: string;
+  verifiedAt: number;
+  contextFingerprint: string;
+  source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY";
+}>;
+
+const verifiedNativeExecutionRules = new WeakSet<VerifiedManagedCloseNativeExecutionRules>();
+
+export function createVerifiedManagedCloseNativeExecutionRules(
+  input: Omit<VerifiedManagedCloseNativeExecutionRules, "contextFingerprint" | "source">,
+): VerifiedManagedCloseNativeExecutionRules {
+  const facts = {
+    userId: nativeText(input.userId, "native rules userId"),
+    accountId: nativeText(input.accountId, "native rules accountId"),
+    venue: nativeText(input.venue, "native rules venue"),
+    canonicalInstrumentId: nativeText(input.canonicalInstrumentId, "native rules canonical instrument"),
+    providerInstrumentId: nativeText(input.providerInstrumentId, "native rules provider instrument"),
+    executionIntentId: nativeText(input.executionIntentId, "native rules execution intent"),
+    instrumentState: input.instrumentState,
+    contractType: input.contractType,
+    contractValueCurrency: nativeText(input.contractValueCurrency, "native rules contract value currency"),
+    settlementAsset: nativeText(input.settlementAsset, "native rules settlement asset"),
+    contractValue: nativeDecimal(input.contractValue, "native rules contract value"),
+    lotSize: nativeDecimal(input.lotSize, "native rules lot size"),
+    minimumSize: nativeDecimal(input.minimumSize, "native rules minimum size"),
+    canonicalSafeCloseQuantity: nativeDecimal(input.canonicalSafeCloseQuantity, "native rules safe close quantity"),
+    legalizedCanonicalCloseQuantity: nativeDecimal(input.legalizedCanonicalCloseQuantity, "native rules legalized close quantity"),
+    providerNativeQuantity: nativeDecimal(input.providerNativeQuantity, "native rules provider quantity"),
+    verifiedAt: nativeTimestamp(input.verifiedAt),
+    source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY" as const,
+  };
+  if (facts.instrumentState !== "live" || facts.contractType !== "linear") {
+    throw new Error("Verified native execution rules are not tradeable linear contract facts.");
+  }
+  const value = Object.freeze({
+    ...facts,
+    contextFingerprint: createHash("sha256").update(JSON.stringify(facts)).digest("hex"),
+  });
+  verifiedNativeExecutionRules.add(value);
+  return value;
+}
+
+export function isTrustedVerifiedManagedCloseNativeExecutionRules(
+  value: VerifiedManagedCloseNativeExecutionRules,
+) {
+  return verifiedNativeExecutionRules.has(value);
+}
 
 export type FormalExecutionMutationDisposition =
   | "NOT_DISPATCHED"
@@ -52,6 +120,13 @@ const CONTROLLED_PROVIDER_CATEGORIES = new Set([
   "provider_transport_error",
   "provider_unavailable",
   "position_mode_unavailable",
+  "identity_read_unavailable",
+  "identity_auth_or_permission_failed",
+  "identity_mismatch",
+  "identity_context_invalid",
+  "instrument_rules_unavailable",
+  "instrument_not_tradable",
+  "instrument_rules_invalid",
 ]);
 
 export type FormalExecutionRuntimeResult = Readonly<{
@@ -162,6 +237,27 @@ function sanitizeDiagnosticMessage(error: unknown, trustedCategory: boolean) {
     .trim()
     .slice(0, 240);
   return sanitized || "Execution capability failed.";
+}
+
+function nativeText(value: unknown, label: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!text || text.length > 300) throw new Error(`${label} is invalid.`);
+  return text;
+}
+
+function nativeDecimal(value: unknown, label: string) {
+  const text = typeof value === "string" ? value.trim() : "";
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(text) || /^0(?:\.0+)?$/u.test(text)) {
+    throw new Error(`${label} is invalid.`);
+  }
+  return text;
+}
+
+function nativeTimestamp(value: unknown) {
+  if (!Number.isSafeInteger(value) || Number(value) < 0) {
+    throw new Error("native rules verification timestamp is invalid.");
+  }
+  return Number(value);
 }
 
 export type FormalExecutionCancelRuntimeResult = Readonly<{

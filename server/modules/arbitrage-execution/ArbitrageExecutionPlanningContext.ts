@@ -9,6 +9,7 @@ import {
   BitgetTradingRulesAdapter,
   BybitTradingRulesAdapter,
   HttpPublicTradingRulesClient,
+  type OkxNativePerpetualExecutionRules,
   OkxTradingRulesAdapter,
 } from "../cex/TradingRulesAdapter";
 import type { TradingRules } from "../cex/TradingRules";
@@ -22,6 +23,11 @@ export type ArbitrageExecutionPlanningContext = Readonly<{
   instrument: ExecutionQuantityPlanningInstrument;
   tradingRules: TradingRules;
   quote: ExecutionQuantityDecimalQuote;
+  nativeExecutionRules?: Readonly<OkxNativePerpetualExecutionRules & {
+    venue: "okx";
+    canonicalInstrumentId: string;
+    verifiedAt: number;
+  }>;
 }>;
 
 export interface ArbitrageExecutionPlanningContextSource {
@@ -51,7 +57,10 @@ implements ArbitrageExecutionPlanningContextSource {
     );
   }
 
-  async load(venue: ArbitrageExecutionDraftVenue, instrumentId: string) {
+  async load(
+    venue: ArbitrageExecutionDraftVenue,
+    instrumentId: string,
+  ): Promise<ArbitrageExecutionPlanningContext> {
     if (venue === "binance") return this.binance.load(instrumentId);
 
     const canonical = canonicalInstrumentFromId(instrumentId);
@@ -60,7 +69,12 @@ implements ArbitrageExecutionPlanningContextSource {
     if (!asset) throw new Error("Canonical asset mapping is unavailable.");
     const venueInstrument = this.instruments.resolveVenueInstrument(canonical, venue);
     const client = new HttpPublicTradingRulesClient(BASE_URLS[venue], this.fetchFn);
-    const tradingRules = await rulesAdapter(venue, client).getTradingRules(venueInstrument);
+    const okxRules = venue === "okx" && canonical.contractType === "perpetual"
+      ? await new OkxTradingRulesAdapter(client).getPerpetualTradingRulesWithNativeFacts(venueInstrument)
+      : null;
+    const nativeRulesVerifiedAt = okxRules === null ? null : this.now();
+    const tradingRules = okxRules?.tradingRules
+      ?? await rulesAdapter(venue, client).getTradingRules(venueInstrument);
     const quote = await readDecimalQuote(venue, venueInstrument.symbol, venueInstrument.category, this.fetchFn, this.now);
     const instrument: ExecutionQuantityPlanningInstrument = Object.freeze({
       instrumentId: canonical.instrumentId,
@@ -73,7 +87,19 @@ implements ArbitrageExecutionPlanningContextSource {
       quantityUnit: venue === "okx" && canonical.contractType === "perpetual" ? "contract" : "base",
       status: "trading",
     });
-    return Object.freeze({ instrument, tradingRules, quote });
+    return Object.freeze({
+      instrument,
+      tradingRules,
+      quote,
+      ...(okxRules === null ? {} : {
+        nativeExecutionRules: Object.freeze({
+          ...okxRules.nativeRules,
+          venue: "okx" as const,
+          canonicalInstrumentId: canonical.instrumentId,
+          verifiedAt: nativeRulesVerifiedAt!,
+        }),
+      }),
+    });
   }
 }
 

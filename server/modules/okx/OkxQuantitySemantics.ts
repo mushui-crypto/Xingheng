@@ -20,6 +20,16 @@ export type OkxQuantityRulesSource = (
   instId: string,
 ) => Promise<OkxQuantityRulesSnapshot | null> | OkxQuantityRulesSnapshot | null;
 
+export class OkxQuantityRulesError extends Error {
+  constructor(
+    readonly category: "instrument_rules_unavailable" | "instrument_not_tradable" | "instrument_rules_invalid",
+    message: string,
+  ) {
+    super(message);
+    this.name = "OkxQuantityRulesError";
+  }
+}
+
 type Decimal = Readonly<{ coefficient: bigint; scale: number }>;
 
 export async function loadOkxQuantityRules(
@@ -28,16 +38,36 @@ export async function loadOkxQuantityRules(
   now: number | (() => number),
   maxAgeMs = OKX_QUANTITY_RULES_MAX_AGE_MS,
 ): Promise<OkxQuantityRulesSnapshot> {
-  if (!source) throw new Error("OKX quantity rules are unavailable.");
-  const snapshot = await source(instrument.venueInstrument.instId);
-  if (!snapshot) throw new Error("OKX quantity rules are unavailable.");
-  assertRulesIdentity(snapshot, instrument);
-  assertRulesFreshness(snapshot, typeof now === "function" ? now() : now, maxAgeMs);
-  positiveDecimal(snapshot.lotSz, "OKX lotSz");
-  positiveDecimal(snapshot.minSz, "OKX minSz");
-  positiveDecimal(snapshot.ctVal, "OKX ctVal");
-  integerMultiple(decimal(snapshot.minSz, "OKX minSz"), decimal(snapshot.lotSz, "OKX lotSz"), "OKX minSz");
-  return snapshot;
+  if (!source) throw new OkxQuantityRulesError("instrument_rules_unavailable", "OKX quantity rules are unavailable.");
+  let snapshot: OkxQuantityRulesSnapshot | null;
+  try {
+    snapshot = await source(instrument.venueInstrument.instId);
+  } catch (error) {
+    if (error instanceof OkxQuantityRulesError) throw error;
+    throw new OkxQuantityRulesError(
+      "instrument_rules_unavailable",
+      error instanceof Error ? error.message : "OKX quantity rules could not be read.",
+    );
+  }
+  if (!snapshot) throw new OkxQuantityRulesError("instrument_rules_unavailable", "OKX quantity rules are unavailable.");
+  try {
+    assertRulesIdentity(snapshot, instrument);
+    if (snapshot.state !== "live") {
+      throw new OkxQuantityRulesError("instrument_not_tradable", "OKX instrument is not currently tradeable.");
+    }
+    assertRulesFreshness(snapshot, typeof now === "function" ? now() : now, maxAgeMs);
+    positiveDecimal(snapshot.lotSz, "OKX lotSz");
+    positiveDecimal(snapshot.minSz, "OKX minSz");
+    positiveDecimal(snapshot.ctVal, "OKX ctVal");
+    integerMultiple(decimal(snapshot.minSz, "OKX minSz"), decimal(snapshot.lotSz, "OKX lotSz"), "OKX minSz");
+    return snapshot;
+  } catch (error) {
+    if (error instanceof OkxQuantityRulesError) throw error;
+    throw new OkxQuantityRulesError(
+      "instrument_rules_invalid",
+      error instanceof Error ? error.message : "OKX quantity rules are invalid.",
+    );
+  }
 }
 
 export function okxBaseQuantityToContracts(
@@ -76,7 +106,6 @@ function assertRulesIdentity(snapshot: OkxQuantityRulesSnapshot, instrument: Okx
     || snapshot.ctType !== "linear"
     || snapshot.ctValCcy !== instrument.canonicalInstrument.baseAsset
     || snapshot.settleCcy !== instrument.canonicalInstrument.quoteAsset
-    || snapshot.state !== "live"
   ) {
     throw new Error("OKX quantity rules instrument identity or trading state does not match the execution instrument.");
   }

@@ -76,6 +76,14 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
     managedQuantityCeiling: "1",
     legalizedCloseQuantity: "1",
     reduceOnly: true,
+    verifiedProviderIdentity: {
+      userId: "user-a",
+      venue: "binance",
+      accountId: "account-a",
+      executionIntentId: "close-short-leg-close-command",
+      verifiedAt: now + 10,
+      source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY",
+    },
   });
   assert.equal(result.instance.legs[1].confirmedClosedQuantity, "1");
   assert.notEqual(result.instance.status, "CLOSED", "one flat leg must not close the two-leg instance");
@@ -101,6 +109,26 @@ test("close result preserves authoritative NOT_DISPATCHED and controlled pre-mut
   assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
   assert.equal(result.failureStage, "PRE_MUTATION");
   assert.equal(result.diagnostic?.category, "position_mode_unavailable");
+});
+
+test("a new managed-close retry receives a new attempt-bound verified identity fact", async (t) => {
+  const fixture = setup(t);
+  fixture.runtime.resultStatus = "FAILED";
+  fixture.runtime.confirmedQuantity = "0";
+  fixture.runtime.mutationDisposition = "NOT_DISPATCHED";
+
+  await fixture.service.closeLeg("user-a", request("short-leg", "1", "identity-attempt-1"));
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "1";
+  fixture.runtime.mutationDisposition = undefined;
+  await fixture.service.closeLeg("user-a", request("short-leg", "1", "identity-attempt-2"));
+
+  const [first, second] = fixture.runtime.managedCloseContexts;
+  assert.ok(first?.verifiedProviderIdentity);
+  assert.ok(second?.verifiedProviderIdentity);
+  assert.notEqual(first?.verifiedProviderIdentity, second?.verifiedProviderIdentity);
+  assert.equal(first.verifiedProviderIdentity.executionIntentId, "close-short-leg-identity-attempt-1");
+  assert.equal(second.verifiedProviderIdentity.executionIntentId, "close-short-leg-identity-attempt-2");
 });
 
 test("a released leg cannot create a later close Provider mutation", async (t) => {
@@ -465,6 +493,8 @@ test("OKX close recovery reuses the persisted execution identity without a secon
   const first = await fixture.service.closeLeg("user-a", request("short-leg", "20", "okx-recovery-close"));
   const placeCount = fixture.okxService!.placeRequests.length;
   assert.equal(fixture.okxService!.positionModeReads, 0, "mutation-time verified facts must avoid a second account/config read");
+  assert.equal(fixture.okxService!.identityValidations, 0, "mutation-time verified identity must avoid a second account identity read");
+  assert.equal(fixture.okxService!.executionRulesReads, 0, "mutation-time verified native rules must avoid a second instruments read");
   const restartedRuntime = new OkxFormalArbitrageExecutionRuntime(new OkxIntentExecutionRuntime(
     new RealPathOkxRegistry(fixture.okxService!),
     fixture.okxRecords!,
@@ -1179,7 +1209,10 @@ function setup(
             clock: () => now + 1_000,
             createExecutionId: () => `okx-close-${options.formalVenue}`,
             mutationSafetyGuard: new ExecutionMutationSafetyGuard({ liveTradingEnabled: true, killSwitchActive: false }),
-            quantityRulesSource: okxTestQuantityRulesSource(now),
+            quantityRulesSource: async (instId) => {
+              okxService!.executionRulesReads += 1;
+              return okxTestQuantityRulesSource(now)(instId);
+            },
           },
         ))
       : runtime;
@@ -1232,6 +1265,7 @@ function setup(
             positionMode: fixture.positionMode,
             actualLongQuantity: fixture.actualLongQuantity,
             actualShortQuantity: fixture.actualShortQuantity,
+            verifiedAccountId: leg.accountId,
             verificationStatus: fixture.verificationStatus,
             checkedAt: now,
           })) as any,
@@ -1239,28 +1273,51 @@ function setup(
       },
     },
     {
-      load: async (_venue, instrumentId) => ({
+      load: async (venue, instrumentId) => {
+        const okxPerpetual = venue === "okx" && instrumentId.endsWith("-PERP");
+        const baseAsset = instrumentId.startsWith("DOGE-") ? "DOGE" : "BTC";
+        const providerSymbol = okxPerpetual ? `${baseAsset}-USDT-SWAP` : `${baseAsset}USDT`;
+        const quantityStep = okxPerpetual ? "1" : options.quantityStep ?? "0.0001";
+        const minimumQuantity = okxPerpetual ? "1" : options.minQuantity ?? "0.0001";
+        const contractSize = okxPerpetual ? "0.1" : "1";
+        return {
         instrument: {
           instrumentId,
-          providerSymbol: instrumentId.startsWith("DOGE-") ? "DOGEUSDT" : "BTCUSDT",
-          baseAsset: createAsset({ symbol: instrumentId.startsWith("DOGE-") ? "DOGE" : "BTC", type: "DIGITAL_ASSET" }),
+          providerSymbol,
+          baseAsset: createAsset({ symbol: baseAsset, type: "DIGITAL_ASSET" }),
           quoteAsset: "USDT",
           settlementAsset: "USDT",
           marketType: instrumentId.endsWith("-SPOT") ? "spot" : "perpetual",
           contractType: instrumentId.endsWith("-SPOT") ? "spot" : "linear_perpetual",
-          quantityUnit: "base",
+          quantityUnit: okxPerpetual ? "contract" : "base",
           status: "trading",
         },
         tradingRules: createTradingRules({
-          quantityStep: options.quantityStep ?? "0.0001",
-          minQuantity: options.minQuantity ?? "0.0001",
+          quantityStep,
+          minQuantity: minimumQuantity,
           priceTick: "0.01",
           minNotional: options.minNotional ?? "1",
-          contractSize: "1",
+          contractSize,
           precision: { quantity: options.quantityPrecision ?? (instrumentId.startsWith("DOGE-") ? 0 : 4), price: 2 },
         }),
         quote: { bid: instrumentId.startsWith("DOGE-") ? "0.07" : "60000", ask: instrumentId.startsWith("DOGE-") ? "0.071" : "60001", fetchedAt: now },
-      }),
+        ...(okxPerpetual ? {
+          nativeExecutionRules: {
+            venue: "okx" as const,
+            canonicalInstrumentId: instrumentId,
+            providerInstrumentId: providerSymbol,
+            instrumentState: "live" as const,
+            contractType: "linear" as const,
+            contractValueCurrency: baseAsset,
+            settlementAsset: "USDT",
+            contractValue: contractSize,
+            lotSize: quantityStep,
+            minimumSize: minimumQuantity,
+            verifiedAt: now,
+          },
+        } : {}),
+      };
+      },
     },
     {
       readAvailableBalance: async (_userId, input) => {
@@ -1469,6 +1526,7 @@ class RealPathOkxService {
   readonly positionMode = "net_mode" as const;
   identityValidations = 0;
   positionModeReads = 0;
+  executionRulesReads = 0;
   executionAccountIdentity() { return { accountId: "account-a" }; }
   async readPositionMode() { this.positionModeReads += 1; return "ONE_WAY" as const; }
   validateExecutionProviderIdentity() { this.identityValidations += 1; }

@@ -9,6 +9,7 @@ import {
   BinanceTradingRulesAdapter,
   BitgetTradingRulesAdapter,
   BybitTradingRulesAdapter,
+  OkxInstrumentRulesError,
   OkxTradingRulesAdapter,
   type PublicTradingRulesClient,
 } from "./TradingRulesAdapter";
@@ -96,6 +97,97 @@ test("uses OKX adapter min size as venue contract quantity during conversion", a
   assert.deepEqual(converted, { quantity: "0.2" });
 });
 
+test("OKX managed-close planning reads generic and native SWAP facts in one public request", async () => {
+  const instrument = createCanonicalInstrument({ baseAsset: "DOGE", quoteAsset: "USDT", contractType: "perpetual" });
+  const venueInstrument = new InstrumentCapability().resolveVenueInstrument(instrument, "okx");
+  const client = new FakePublicRulesClient(okxNativePayload("DOGE-USDT-SWAP"));
+
+  const result = await new OkxTradingRulesAdapter(client)
+    .getPerpetualTradingRulesWithNativeFacts(venueInstrument);
+
+  assert.equal(client.calls.length, 1);
+  assert.equal(result.tradingRules.contractSize, "1000");
+  assert.deepEqual(result.nativeRules, {
+    providerInstrumentId: "DOGE-USDT-SWAP",
+    instrumentState: "live",
+    contractType: "linear",
+    contractValueCurrency: "DOGE",
+    settlementAsset: "USDT",
+    contractValue: "1000",
+    lotSize: "0.01",
+    minimumSize: "0.01",
+  });
+});
+
+test("OKX native SWAP rule reads distinguish unavailable, non-tradeable, and invalid facts", async (t) => {
+  const instrument = createCanonicalInstrument({ baseAsset: "DOGE", quoteAsset: "USDT", contractType: "perpetual" });
+  const venueInstrument = new InstrumentCapability().resolveVenueInstrument(instrument, "okx");
+  const fixtures = [
+    {
+      name: "unavailable",
+      client: { get: async () => { throw new Error("temporary read failure"); } },
+      category: "instrument_rules_unavailable",
+    },
+    {
+      name: "not tradeable",
+      client: new FakePublicRulesClient(okxNativePayload("DOGE-USDT-SWAP", { state: "suspend" })),
+      category: "instrument_not_tradable",
+    },
+    {
+      name: "instrument absent",
+      client: new FakePublicRulesClient({ code: "0", data: [] }),
+      category: "instrument_not_tradable",
+    },
+    {
+      name: "invalid",
+      client: new FakePublicRulesClient(okxNativePayload("DOGE-USDT-SWAP", { ctType: "inverse" })),
+      category: "instrument_rules_invalid",
+    },
+  ] as const;
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      await assert.rejects(
+        () => new OkxTradingRulesAdapter(fixture.client)
+          .getPerpetualTradingRulesWithNativeFacts(venueInstrument),
+        (error: unknown) => error instanceof OkxInstrumentRulesError
+          && error.category === fixture.category,
+      );
+    });
+  }
+});
+
+test("every incomplete or inconsistent OKX native SWAP rule is classified as invalid", async (t) => {
+  const instrument = createCanonicalInstrument({ baseAsset: "DOGE", quoteAsset: "USDT", contractType: "perpetual" });
+  const venueInstrument = new InstrumentCapability().resolveVenueInstrument(instrument, "okx");
+  const fixtures = [
+    { name: "missing state", payload: okxNativePayloadWithout("state") },
+    { name: "missing instType", payload: okxNativePayloadWithout("instType") },
+    { name: "wrong instType", payload: okxNativePayload("DOGE-USDT-SWAP", { instType: "FUTURES" }) },
+    { name: "missing ctType", payload: okxNativePayloadWithout("ctType") },
+    { name: "wrong ctType", payload: okxNativePayload("DOGE-USDT-SWAP", { ctType: "inverse" }) },
+    { name: "missing ctVal", payload: okxNativePayloadWithout("ctVal") },
+    { name: "malformed ctVal", payload: okxNativePayload("DOGE-USDT-SWAP", { ctVal: "not-a-decimal" }) },
+    { name: "missing ctValCcy", payload: okxNativePayloadWithout("ctValCcy") },
+    { name: "missing settleCcy", payload: okxNativePayloadWithout("settleCcy") },
+    { name: "malformed lotSz", payload: okxNativePayload("DOGE-USDT-SWAP", { lotSz: "not-a-decimal" }) },
+    { name: "malformed minSz", payload: okxNativePayload("DOGE-USDT-SWAP", { minSz: "0" }) },
+    { name: "missing tickSz", payload: okxNativePayloadWithout("tickSz") },
+    { name: "inconsistent base currency", payload: okxNativePayload("DOGE-USDT-SWAP", { ctValCcy: "BTC" }) },
+    { name: "inconsistent settlement currency", payload: okxNativePayload("DOGE-USDT-SWAP", { settleCcy: "USDC" }) },
+  ] as const;
+
+  for (const fixture of fixtures) {
+    await t.test(fixture.name, async () => {
+      await assert.rejects(
+        () => new OkxTradingRulesAdapter(new FakePublicRulesClient(fixture.payload))
+          .getPerpetualTradingRulesWithNativeFacts(venueInstrument),
+        (error: unknown) => error instanceof OkxInstrumentRulesError
+          && error.category === "instrument_rules_invalid",
+      );
+    });
+  }
+});
+
 test("keeps venue rule differences isolated", async () => {
   const instrument = createCanonicalInstrument({ baseAsset: "BTC", quoteAsset: "USDT", contractType: "perpetual" });
   const capability = new InstrumentCapability();
@@ -174,6 +266,32 @@ function okxPayload(instId: string) {
       ctVal: "0.01",
     }],
   };
+}
+
+function okxNativePayload(instId: string, overrides: Record<string, string> = {}) {
+  return {
+    code: "0",
+    data: [{
+      instId,
+      instType: "SWAP",
+      state: "live",
+      ctType: "linear",
+      ctValCcy: "DOGE",
+      settleCcy: "USDT",
+      lotSz: "0.01",
+      minSz: "0.01",
+      tickSz: "0.00001",
+      ctVal: "1000",
+      ...overrides,
+    }],
+  };
+}
+
+function okxNativePayloadWithout(field: string) {
+  const payload = okxNativePayload("DOGE-USDT-SWAP");
+  const row = { ...payload.data[0] } as Record<string, string>;
+  delete row[field];
+  return { code: "0", data: [row] };
 }
 
 function bybitPayload(symbol: string) {

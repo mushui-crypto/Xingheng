@@ -37,6 +37,9 @@ export type ArbitrageCloseSafetyReason =
   | "NO_ACTIVE_MANAGED_EXPOSURE"
   | "PROVIDER_REALITY_UNAVAILABLE"
   | "CLOSE_CAPABILITY_UNAVAILABLE"
+  | "INSTRUMENT_RULES_UNAVAILABLE"
+  | "INSTRUMENT_NOT_TRADABLE"
+  | "INSTRUMENT_RULES_INVALID"
   | "ONE_WAY_REALITY_INSUFFICIENT"
   | "HEDGE_BUCKET_INSUFFICIENT"
   | "SPOT_ROLE_UNSUPPORTED"
@@ -58,6 +61,7 @@ export type ArbitrageCloseSafetyResult = Readonly<{
   actualLongQuantity: string | null;
   actualShortQuantity: string | null;
   availableQuantity: string | null;
+  verifiedAccountId?: string;
   transientReadFailure?: true;
 }>;
 
@@ -94,9 +98,9 @@ export class ArbitrageCloseSafetyEvaluator {
     let context: ArbitrageExecutionPlanningContext;
     try {
       context = await this.planningContexts.load(leg.venue, leg.instrumentId);
-    } catch {
+    } catch (error) {
       return assessment(result(
-        activeQuantity, "0", false, "CLOSE_CAPABILITY_UNAVAILABLE",
+        activeQuantity, "0", false, planningContextFailureReason(error),
         startedAt,
       ), side);
     }
@@ -270,6 +274,16 @@ export class ArbitrageCloseSafetyEvaluator {
   }
 }
 
+function planningContextFailureReason(error: unknown): ArbitrageCloseSafetyReason {
+  const category = error && typeof error === "object" && "category" in error
+    ? (error as { category?: unknown }).category
+    : undefined;
+  if (category === "instrument_rules_unavailable") return "INSTRUMENT_RULES_UNAVAILABLE";
+  if (category === "instrument_not_tradable") return "INSTRUMENT_NOT_TRADABLE";
+  if (category === "instrument_rules_invalid") return "INSTRUMENT_RULES_INVALID";
+  return "CLOSE_CAPABILITY_UNAVAILABLE";
+}
+
 function isQuantityRuleDust(quantity: string, quantityStep: string, minQuantity: string) {
   if (compareUnsignedDecimals(quantity, minQuantity) < 0) return true;
   const scale = Math.max(decimalPlaces(quantity), decimalPlaces(quantityStep));
@@ -309,6 +323,7 @@ function result(
     actualLongQuantity: reality?.actualLongQuantity ?? null,
     actualShortQuantity: reality?.actualShortQuantity ?? null,
     availableQuantity,
+    ...(reality?.verifiedAccountId === undefined ? {} : { verifiedAccountId: reality.verifiedAccountId }),
     ...(transientReadFailure ? { transientReadFailure: true as const } : {}),
   });
 }

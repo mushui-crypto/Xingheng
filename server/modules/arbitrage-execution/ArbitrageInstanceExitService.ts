@@ -394,7 +394,8 @@ export class ArbitrageInstanceExitService {
           : this.closeService.closeLeg(userId, input));
       } catch (error) {
         if (error instanceof ArbitrageExecutionCloseError
-          && error.category === "position_verification_unavailable"
+          && (error.category === "position_verification_unavailable"
+            || error.category === "instrument_rules_unavailable")
           && attempts < maxAttempts
           && this.now() < deadline
           && !hasClosingReference(this.instances.get(userId, instance.arbitrageId) ?? instance, legId)) {
@@ -769,8 +770,10 @@ function controlledDiagnosticCategory(diagnostic?: FormalExecutionDiagnostic) {
 
 function isRetryablePreMutationCategory(category: string) {
   return category === "ACCOUNT_IDENTITY_UNAVAILABLE"
+    || category === "IDENTITY_READ_UNAVAILABLE"
     || category === "POSITION_MODE_UNAVAILABLE"
     || category === "POSITION_REALITY_UNAVAILABLE"
+    || category === "INSTRUMENT_RULES_UNAVAILABLE"
     || category === "PROVIDER_TIMEOUT"
     || category === "PROVIDER_TRANSPORT_ERROR"
     || category === "PROVIDER_UNAVAILABLE";

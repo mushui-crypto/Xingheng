@@ -171,10 +171,12 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
         availableQuantity: balances.length ? available : "0",
       };
     }
+    let verifiedAccountId: string | null = null;
     if (typeof client.readAccountIdentity === "function") {
       try {
         const identity = await client.readAccountIdentity();
         assertAccountIdentity(this.venue, leg.accountId, identity.accountId);
+        verifiedAccountId = identity.accountId;
       } catch (error) {
         throw stageReadError(error, this.venue, "account_identity_unavailable", "Provider account identity is unavailable.");
       }
@@ -182,6 +184,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       try {
         const account = await (this.accountSnapshot ??= accountReader.readAccount());
         assertAccountIdentity(this.venue, leg.accountId, account.accountId);
+        verifiedAccountId = account.accountId;
       } catch (error) {
         throw stageReadError(error, this.venue, "account_identity_unavailable", "Provider account identity is unavailable.");
       }
@@ -208,7 +211,10 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
       } catch (error) {
         throw stageReadError(error, this.venue, "position_reality_unavailable", "Provider position reality is unavailable.");
       }
-      return { snapshot: position };
+      return {
+        snapshot: position,
+        ...(verifiedAccountId === null ? {} : { verifiedAccountId }),
+      };
     }
     const binding = await this.instruments.resolve(this.venue, leg.instrumentId);
     if (!binding) throw new ArbitrageLegReadError("instrument_mapping_unavailable", "Provider instrument mapping is unavailable.");
@@ -224,6 +230,7 @@ export class VenueArbitrageLegReadProvider implements ArbitrageLegReadProvider {
         quantity: multiplyDecimals(rawQuantity, binding.contractSize),
         fetchedAt: position.updatedAt ?? account.latestSyncAt,
       }),
+      ...(verifiedAccountId === null ? {} : { verifiedAccountId }),
     };
   }
 
