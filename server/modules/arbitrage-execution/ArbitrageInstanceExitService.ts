@@ -17,12 +17,16 @@ import {
 } from "./ArbitrageExecutionCloseService";
 import {
   ArbitrageManagementReleaseError,
+  createVerifiedDustReleaseContext,
+  type DustReleaseReadAttempt,
+  type VerifiedDustReleaseContext,
   type ArbitrageManagementReleaseService,
 } from "./ArbitrageManagementReleaseService";
+import type { ArbitrageCloseSafetyAssessment } from "./ArbitrageCloseSafetyEvaluator";
 
 type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
 type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
-  Partial<Pick<ArbitrageExecutionCloseService, "closeLegForExit">>;
+  Partial<Pick<ArbitrageExecutionCloseService, "closeLegForExit" | "evaluateCloseSafetyAssessment">>;
 type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify">;
 type DustReleaseService = Pick<ArbitrageManagementReleaseService, "releaseDustAfterClose">;
@@ -135,7 +139,8 @@ export class ArbitrageInstanceExitService {
       }
     }
 
-    const pendingDustReleaseLegIds: string[] = [];
+    const pendingDustReleases = new Map<string, VerifiedDustReleaseContext>();
+    let dustReadAttempts: readonly DustReleaseReadAttempt[] = Object.freeze([]);
     let firstConfirmedAt: number | null = null;
     let secondLegProviderDispatchAt: number | null = null;
     let continuationReadDeadline: number | null = null;
@@ -152,7 +157,8 @@ export class ArbitrageInstanceExitService {
       let dustCompletion = false;
       let closeQuantity = quantity;
       if (spotLeg) {
-        const safety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+        const assessment = await this.spotCloseSafetyAssessment(userId, instance, leg.legId);
+        const safety = assessment.result;
         dustCompletion = safety.reason === "QUANTITY_STEP_DUST";
         if (!safety.fullManagedCloseAvailable && !dustCompletion) {
           return stopped(instance, outcomes, leg.legId, phaseFor(leg, "FRESH_SAFETY"), safety.reason);
@@ -161,7 +167,13 @@ export class ArbitrageInstanceExitService {
           if (!hasConfirmedClosingReference(instance, leg.legId)) {
             return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RELEASE", safety.reason);
           }
-          pendingDustReleaseLegIds.push(leg.legId);
+          const releaseCommandId = dustReleaseCommandId(request.commandId, leg.legId);
+          if (!assessment.verifiedDustReleaseFacts) {
+            return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", "DUST_RELEASE_CONTEXT_UNAVAILABLE");
+          }
+          pendingDustReleases.set(leg.legId, createVerifiedDustReleaseContext(
+            releaseCommandId, assessment.verifiedDustReleaseFacts, this.now(),
+          ));
           continue;
         }
         closeQuantity = safety.fullManagedCloseAvailable ? quantity : safety.safeClosableQuantity;
@@ -255,24 +267,38 @@ export class ArbitrageInstanceExitService {
       }
       if (dustCompletion) {
         const remaining = instance.legs.find((candidate) => candidate.legId === leg.legId)!;
-        const dustSafety = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
+        const dustAssessment = await this.spotCloseSafetyAssessment(userId, instance, leg.legId);
+        const dustSafety = dustAssessment.result;
         if (activeManagedQuantity(instance, remaining) === "0") continue;
         if (dustSafety.reason !== "QUANTITY_STEP_DUST" || dustSafety.safeClosableQuantity !== "0") {
           return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", dustSafety.reason);
         }
-        pendingDustReleaseLegIds.push(leg.legId);
+        if (!dustAssessment.verifiedDustReleaseFacts) {
+          return stopped(instance, outcomes, leg.legId, "SPOT_DUST_RECHECK", "DUST_RELEASE_CONTEXT_UNAVAILABLE");
+        }
+        const releaseCommandId = dustReleaseCommandId(request.commandId, leg.legId);
+        pendingDustReleases.set(leg.legId, createVerifiedDustReleaseContext(
+          releaseCommandId, dustAssessment.verifiedDustReleaseFacts, this.now(),
+        ));
       }
     }
 
-    for (const legId of pendingDustReleaseLegIds) {
+    for (const [legId, verifiedContext] of pendingDustReleases) {
       try {
-        instance = (await this.managementRelease.releaseDustAfterClose(userId, {
+        const release = await this.managementRelease.releaseDustAfterClose(userId, {
           arbitrageId: instance.arbitrageId,
           legId,
           commandId: dustReleaseCommandId(request.commandId, legId),
-        })).instance;
+          verifiedContext,
+        });
+        instance = release.instance;
+        dustReadAttempts = release.dustReadAttempts;
       } catch (error) {
-        return stopped(instance, outcomes, legId, "SPOT_DUST_RELEASE", dustReleaseFailureReason(error));
+        dustReadAttempts = error instanceof ArbitrageManagementReleaseError
+          ? error.dustReadAttempts : Object.freeze([]);
+        return stopped(
+          instance, outcomes, legId, "SPOT_DUST_RELEASE", dustReleaseFailureReason(error), undefined, dustReadAttempts,
+        );
       }
     }
     return result(
@@ -282,7 +308,20 @@ export class ArbitrageInstanceExitService {
       undefined,
       timing(firstConfirmedAt, secondLegProviderDispatchAt),
       lastExecutionDiagnostic,
+      dustReadAttempts,
     );
+  }
+
+  private async spotCloseSafetyAssessment(
+    userId: string,
+    instance: ArbitrageInstance,
+    legId: string,
+  ): Promise<ArbitrageCloseSafetyAssessment> {
+    if (!this.closeService.evaluateCloseSafetyAssessment) {
+      const result = await this.closeService.evaluateCloseSafety(userId, instance.arbitrageId, legId);
+      return Object.freeze({ result, context: null, planner: null, market: "SPOT", side: "sell" });
+    }
+    return this.closeService.evaluateCloseSafetyAssessment(userId, instance.arbitrageId, legId);
   }
 
   private recordOutcome(userId: string, request: ExitRequest, outcome: ArbitrageInstanceExitResult) {
@@ -302,6 +341,7 @@ export class ArbitrageInstanceExitService {
       diagnosticCategory: outcome.executionDiagnostic?.diagnosticCategory ?? null,
       failureStage: outcome.executionDiagnostic?.failureStage ?? null,
       providerCode: outcome.executionDiagnostic?.providerCode ?? null,
+      dustReadAttempts: outcome.dustReadAttempts ?? Object.freeze([]),
       terminalAt: this.now(),
     });
   }
@@ -324,6 +364,8 @@ export class ArbitrageInstanceExitService {
       diagnosticCategory: null,
       failureStage: "ORCHESTRATION",
       providerCode: null,
+      dustReadAttempts: error instanceof ArbitrageManagementReleaseError
+        ? error.dustReadAttempts : Object.freeze([]),
       terminalAt: this.now(),
     });
   }
@@ -531,6 +573,7 @@ type ArbitrageInstanceExitResult = Readonly<{
     secondLegExitDelayMs: number;
   }>;
   executionDiagnostic?: ExitExecutionDiagnostic;
+  dustReadAttempts?: readonly DustReleaseReadAttempt[];
 }>;
 
 type ExitFailureStage = "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
@@ -683,6 +726,7 @@ function result(
   stop?: ArbitrageInstanceExitStopDiagnostic,
   timingResult?: ArbitrageInstanceExitResult["timing"],
   executionDiagnostic?: ExitExecutionDiagnostic,
+  dustReadAttempts?: readonly DustReleaseReadAttempt[],
 ) {
   return Object.freeze({
     instance,
@@ -691,6 +735,7 @@ function result(
     ...(stop === undefined ? {} : { stop }),
     ...(timingResult === undefined ? {} : { timing: timingResult }),
     ...(executionDiagnostic === undefined ? {} : { executionDiagnostic }),
+    ...(dustReadAttempts === undefined ? {} : { dustReadAttempts: Object.freeze([...dustReadAttempts]) }),
   });
 }
 
@@ -701,6 +746,7 @@ function stopped(
   phase: ArbitrageInstanceExitStopDiagnostic["phase"],
   reason: string,
   diagnostic?: ExitExecutionDiagnostic,
+  dustReadAttempts?: readonly DustReleaseReadAttempt[],
 ) {
   return result(instance, "STOPPED", legs, Object.freeze({
     failedLegId,
@@ -716,7 +762,7 @@ function stopped(
       legId: leg.legId,
       quantity: activeManagedQuantity(instance, leg),
     }))),
-  }), undefined, diagnostic);
+  }), undefined, diagnostic, dustReadAttempts);
 }
 
 function phaseFor(

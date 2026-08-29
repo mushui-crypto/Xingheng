@@ -34,8 +34,33 @@ import {
   ArbitrageExecutionCloseService,
 } from "./ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
+import { SpotCloseBalanceReadError } from "./BinanceSpotCloseBalanceSource";
 
 const now = 1_900_000_000_000;
+
+test("final dust balance read fails closed when the venue capability is missing and never falls back", async (t) => {
+  const fixture = setup(t);
+  let legacyReads = 0;
+  (fixture.service as unknown as { spotBalances: unknown }).spotBalances = {
+    readAvailableBalance: async () => {
+      legacyReads += 1;
+      return { totalQuantity: "1", availableQuantity: "1", checkedAt: now };
+    },
+  };
+  await assert.rejects(
+    () => fixture.service.readFreshDustReleaseBalance("user-a", {
+      userId: "user-a", arbitrageId: "arb-a", legId: "long-leg", venue: "binance",
+      accountId: "account-a", instrumentId: "BTC-USDT-SPOT", providerSymbol: "BTCUSDT",
+      baseAsset: "BTC", verifiedAccountId: "account-a", executionIntentId: "intent-open-long",
+      executionRecordId: "execution-open-long", attributableQuantity: "1", activeManagedQuantity: "1",
+      totalQuantity: "1", availableQuantity: "1", quantityStep: "0.0001", minQuantity: "0.0001",
+      verifiedAt: now,
+    }),
+    (error: unknown) => error instanceof SpotCloseBalanceReadError
+      && error.category === "BALANCE_READER_UNAVAILABLE",
+  );
+  assert.equal(legacyReads, 0);
+});
 
 test("LONG perpetual close is authoritative SELL reduceOnly and decreases managed quantity", async (t) => {
   const fixture = setup(t);
@@ -1326,6 +1351,11 @@ function setup(
         assert.equal(input.baseAsset, options.longInstrumentId?.startsWith("DOGE-") ? "DOGE" : "BTC");
         return { availableQuantity: fixture.availableBaseQuantity, checkedAt: now };
       },
+      readFreshBalance: async () => ({
+        totalQuantity: fixture.availableBaseQuantity,
+        availableQuantity: fixture.availableBaseQuantity,
+        checkedAt: now,
+      }),
     },
     {
       readAttributableBaseQuantity: async (_userId, input) => {

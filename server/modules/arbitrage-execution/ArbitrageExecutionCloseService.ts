@@ -33,7 +33,9 @@ import {
 } from "./FormalExecutionRuntimeRegistry";
 import {
   ArbitrageCloseSafetyEvaluator,
+  type ArbitrageCloseSafetyAssessment,
   type ArbitrageCloseSafetyResult,
+  type VerifiedDustReleaseFacts,
 } from "./ArbitrageCloseSafetyEvaluator";
 import {
   processProviderMutationSerializer,
@@ -43,11 +45,12 @@ import {
   canonicalCommandDecimal,
   createArbitrageCommandPayloadFingerprint,
 } from "./ArbitrageCommandFingerprint";
+import { SpotCloseBalanceReadError } from "./BinanceSpotCloseBalanceSource";
 
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
   "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult" | "readCommandReplay"
->;
+> & Partial<Pick<ArbitrageInstanceStore, "readSpotOpeningAttributionEvidence">>;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify"> &
   Partial<Pick<ArbitragePositionVerificationService, "verifyLeg">>;
 type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
@@ -114,6 +117,43 @@ export class ArbitrageExecutionCloseService {
     const leg = instance.legs.find((candidate) => candidate.legId === legId);
     if (!leg) throw closeError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
     return (await this.closeSafety.evaluate(userId, instance, leg)).result;
+  }
+
+  async evaluateCloseSafetyAssessment(
+    authenticatedUserId: string,
+    arbitrageIdInput: string,
+    legIdInput: string,
+  ): Promise<ArbitrageCloseSafetyAssessment> {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    const arbitrageId = identifier(arbitrageIdInput, "arbitrageId");
+    const legId = identifier(legIdInput, "legId");
+    const instance = this.instances.get(userId, arbitrageId);
+    if (!instance) throw closeError("arbitrage_instance_not_found", "套利实例不存在或不属于当前用户。");
+    const leg = instance.legs.find((candidate) => candidate.legId === legId);
+    if (!leg) throw closeError("arbitrage_leg_not_found", "所选套利腿不属于当前套利实例。");
+    return this.closeSafety.evaluate(userId, instance, leg);
+  }
+
+  async readFreshDustReleaseBalance(authenticatedUserId: string, facts: VerifiedDustReleaseFacts) {
+    const userId = identifier(authenticatedUserId, "authenticated userId");
+    if (facts.userId !== userId) {
+      throw closeError("position_verification_unavailable", "残余核验用户范围无效。");
+    }
+    const source = resolveSpotSource(this.spotBalances, facts.venue, "balance");
+    const request = Object.freeze({
+      accountId: facts.accountId,
+      instrumentId: facts.instrumentId,
+      providerSymbol: facts.providerSymbol,
+      baseAsset: facts.baseAsset,
+    });
+    if (typeof source.readFreshBalance !== "function") {
+      throw new SpotCloseBalanceReadError(
+        "BALANCE_READER_UNAVAILABLE",
+        "Final Spot balance reader is unavailable.",
+        false,
+      );
+    }
+    return source.readFreshBalance(userId, request);
   }
 
   async closeLeg(authenticatedUserId: string, input: unknown): Promise<ArbitrageLegExecutionConfirmation> {
@@ -646,6 +686,13 @@ function referenceStatus(status: ExecutionRecord["status"]) {
 function recordStatusFromReference(status: ArbitrageExecutionReference["status"]): ExecutionRecord["status"] | "CREATED" {
   if (status === "CLAIMED" || status === "LINKED") return "UNKNOWN";
   return status;
+}
+
+function resolveSpotSource<T extends object>(source: SpotSource<T>, venue: ExecutionIntent["venue"], kind: string): T {
+  if (kind === "balance" && "readAvailableBalance" in source) return source as T;
+  const selected = (source as Partial<Record<ExecutionIntent["venue"], T>>)[venue];
+  if (!selected) throw closeError("position_verification_unavailable", `Spot ${kind} source is not configured.`);
+  return selected;
 }
 
 function assertRuntimeIdentity(record: ExecutionRecord, intent: ExecutionIntent) {

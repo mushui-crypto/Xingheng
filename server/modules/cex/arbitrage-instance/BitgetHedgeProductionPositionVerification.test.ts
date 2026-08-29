@@ -241,7 +241,10 @@ function closeService(shortQuantity: string, calls: ExecutionIntent[]) {
         quote: { bid: "1", ask: "1.01", fetchedAt: now },
       }),
     },
-    { readAvailableBalance: async () => { throw new Error("not used"); } },
+    {
+      readAvailableBalance: async () => { throw new Error("not used"); },
+      readFreshBalance: async () => { throw new Error("not used"); },
+    },
     { readAttributableBaseQuantity: async () => { throw new Error("not used"); } },
     new FormalExecutionRuntimeRegistry().register(formalExecutionRuntime("bitget", runtime)),
     { clock: () => now },

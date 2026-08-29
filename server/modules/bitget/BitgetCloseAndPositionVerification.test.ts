@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { createExecutionRecord } from "../cex/ExecutionRecord";
-import { BitgetClient } from "./BitgetClient";
+import { SpotCloseBalanceReadError } from "../arbitrage-execution/BinanceSpotCloseBalanceSource";
+import { BitgetClient, BitgetProviderError } from "./BitgetClient";
 import { createBitgetExecutionOrderReference } from "./BitgetExecutionOrderReferenceStore";
 import { BitgetPositionReader } from "./BitgetPositionReader";
 import { BitgetSpotCloseBalanceSource } from "./BitgetSpotCloseBalanceSource";
@@ -67,9 +68,15 @@ test("Bitget Spot opening attribution subtracts only authoritative base fee and 
 });
 
 test("Bitget Spot close balance source is user/account/provider scoped", async () => {
+  let identityReads = 0;
+  let balanceReads = 0;
   const source = new BitgetSpotCloseBalanceSource(credentialStore(), () => now, () => ({
-    getAccountIdentity: async () => ({ accountId, accountFingerprint: "fingerprint", uidHash: "hash" }),
+    getAccountIdentity: async () => {
+      identityReads += 1;
+      return { accountId, accountFingerprint: "fingerprint", uidHash: "hash" };
+    },
     getSpotBalance: async (asset) => {
+      balanceReads += 1;
       assert.equal(asset, "DOGE");
       return { totalQuantity: "95", availableQuantity: "94.905" };
     },
@@ -77,13 +84,42 @@ test("Bitget Spot close balance source is user/account/provider scoped", async (
   const result = await source.readAvailableBalance("user-a", {
     accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",
   });
-  assert.deepEqual(result, { totalQuantity: "95", availableQuantity: "94.905", checkedAt: now });
+  assert.deepEqual(result, {
+    totalQuantity: "95", availableQuantity: "94.905", checkedAt: now, verifiedAccountId: accountId,
+  });
+  assert.deepEqual(await source.readFreshBalance("user-a", {
+    accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",
+  }), { totalQuantity: "95", availableQuantity: "94.905", checkedAt: now });
+  assert.equal(identityReads, 1);
+  assert.equal(balanceReads, 2);
   await assert.rejects(
     () => source.readAvailableBalance("user-b", {
       accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",
     }),
     /authenticated/u,
   );
+});
+
+test("Bitget final dust refresh maps transient, invalid, and auth errors", async () => {
+  for (const scenario of [
+    { provider: "provider_transport_error", expected: "SPOT_BALANCE_UNAVAILABLE", transient: true },
+    { provider: "provider_response_invalid", expected: "PROVIDER_RESPONSE_INVALID", transient: false },
+    { provider: "credential_validation_failed", expected: "AUTH_OR_PERMISSION_FAILED", transient: false },
+  ] as const) {
+    const source = new BitgetSpotCloseBalanceSource(credentialStore(), () => now, () => ({
+      getAccountIdentity: async () => ({ accountId, accountFingerprint: "fingerprint", uidHash: "hash" }),
+      getSpotBalance: async () => { throw new BitgetProviderError(scenario.provider, "raw", "40001"); },
+    }));
+    await assert.rejects(
+      () => source.readFreshBalance("user-a", {
+        accountId, instrumentId: "DOGE-USDT-SPOT", providerSymbol: "DOGEUSDT", baseAsset: "DOGE",
+      }),
+      (error: unknown) => error instanceof SpotCloseBalanceReadError
+        && error.category === scenario.expected
+        && error.transient === scenario.transient
+        && error.providerCode === "40001",
+    );
+  }
 });
 
 function attributionSource(order: BitgetProviderOrder) {

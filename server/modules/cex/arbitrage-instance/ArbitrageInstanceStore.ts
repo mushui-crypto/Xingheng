@@ -104,6 +104,15 @@ export type ArbitrageCommandOutcomeAudit = Readonly<{
   diagnosticCategory?: string | null;
   failureStage?: string | null;
   providerCode?: string | null;
+  dustReadAttempts?: readonly Readonly<{
+    attempt: number;
+    substage: "LOCAL_STATE" | "SPOT_BALANCE";
+    result: "SUCCESS" | "FAILED";
+    retryDecision: "COMPLETE" | "RETRY" | "STOP";
+    delayMs: number;
+    category: string | null;
+    providerCode: string | null;
+  }>[];
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -326,6 +335,7 @@ type CommandOutcomeAuditRow = Readonly<{
   diagnosticCategory: string | null;
   failureStage: string | null;
   providerCode: string | null;
+  dustReadAttemptsJson: string;
   terminalAt: number;
   businessPayloadFingerprint: string;
 }>;
@@ -494,8 +504,8 @@ export class ArbitrageInstanceStore {
         commandId, requestedByUserId, arbitrageId, operation, terminalStatus,
         stopPhase, stopReason, failedLegId, completedLegIdsJson,
         currentManagedExposureJson, mutationDisposition, diagnosticCategory,
-        failureStage, providerCode, terminalAt, businessPayloadFingerprint
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
+        failureStage, providerCode, dustReadAttemptsJson, terminalAt, businessPayloadFingerprint
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(
         normalized.commandId,
         normalized.requestedByUserId,
         normalized.arbitrageId,
@@ -510,6 +520,7 @@ export class ArbitrageInstanceStore {
         normalized.diagnosticCategory ?? null,
         normalized.failureStage ?? null,
         normalized.providerCode ?? null,
+        JSON.stringify(normalized.dustReadAttempts ?? []),
         normalized.terminalAt,
         normalized.businessPayloadFingerprint,
       );
@@ -2090,6 +2101,7 @@ export class ArbitrageInstanceStore {
       diagnosticCategory TEXT,
       failureStage TEXT,
       providerCode TEXT,
+      dustReadAttemptsJson TEXT NOT NULL DEFAULT '[]',
       terminalAt INTEGER NOT NULL,
       businessPayloadFingerprint TEXT NOT NULL UNIQUE,
       FOREIGN KEY (arbitrageId) REFERENCES arbitrage_instances(arbitrageId)
@@ -2172,6 +2184,9 @@ export class ArbitrageInstanceStore {
     }
     if (!outcomeColumns.has("providerCode")) {
       this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN providerCode TEXT");
+    }
+    if (!outcomeColumns.has("dustReadAttemptsJson")) {
+      this.db.exec("ALTER TABLE arbitrage_command_outcome_audits ADD COLUMN dustReadAttemptsJson TEXT NOT NULL DEFAULT '[]'");
     }
   }
 }
@@ -2284,6 +2299,24 @@ function normalizeCommandOutcomeAudit(
   const providerCode = outcome.providerCode == null
     ? null
     : controlledProviderCode(outcome.providerCode);
+  const dustReadAttempts = Object.freeze((outcome.dustReadAttempts ?? []).map((entry) => {
+    if (!Number.isSafeInteger(entry.attempt) || entry.attempt <= 0
+      || (entry.substage !== "LOCAL_STATE" && entry.substage !== "SPOT_BALANCE")
+      || (entry.result !== "SUCCESS" && entry.result !== "FAILED")
+      || (entry.retryDecision !== "COMPLETE" && entry.retryDecision !== "RETRY" && entry.retryDecision !== "STOP")
+      || !Number.isSafeInteger(entry.delayMs) || entry.delayMs < 0) {
+      throw new Error("Arbitrage command outcome dust read attempt is invalid.");
+    }
+    return Object.freeze({
+      attempt: entry.attempt,
+      substage: entry.substage,
+      result: entry.result,
+      retryDecision: entry.retryDecision,
+      delayMs: entry.delayMs,
+      category: entry.category === null ? null : controlledOutcomeCode(entry.category, "dustReadCategory"),
+      providerCode: entry.providerCode === null ? null : controlledProviderCode(entry.providerCode),
+    });
+  }));
   const businessPayloadFingerprint = createHash("sha256").update(JSON.stringify([
     "ARBITRAGE_COMMAND_OUTCOME", requestedByUserId, outcome.operation, arbitrageId, commandId,
   ])).digest("hex");
@@ -2302,6 +2335,7 @@ function normalizeCommandOutcomeAudit(
     diagnosticCategory,
     failureStage,
     providerCode,
+    dustReadAttempts,
     terminalAt: timestamp(outcome.terminalAt, "terminalAt"),
     businessPayloadFingerprint,
   });
@@ -2310,13 +2344,15 @@ function normalizeCommandOutcomeAudit(
 function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageCommandOutcomeAudit {
   let completedLegIds: unknown;
   let currentManagedExposure: unknown;
+  let dustReadAttempts: unknown;
   try {
     completedLegIds = JSON.parse(row.completedLegIdsJson);
     currentManagedExposure = JSON.parse(row.currentManagedExposureJson);
+    dustReadAttempts = JSON.parse(row.dustReadAttemptsJson ?? "[]");
   } catch {
     throw new Error("Persisted arbitrage command outcome audit is invalid.");
   }
-  if (!Array.isArray(completedLegIds) || !Array.isArray(currentManagedExposure)) {
+  if (!Array.isArray(completedLegIds) || !Array.isArray(currentManagedExposure) || !Array.isArray(dustReadAttempts)) {
     throw new Error("Persisted arbitrage command outcome audit is invalid.");
   }
   const normalized = normalizeCommandOutcomeAudit(row.requestedByUserId, {
@@ -2334,6 +2370,7 @@ function commandOutcomeAuditFromRow(row: CommandOutcomeAuditRow): ArbitrageComma
     diagnosticCategory: row.diagnosticCategory,
     failureStage: row.failureStage,
     providerCode: row.providerCode,
+    dustReadAttempts: dustReadAttempts as NonNullable<ArbitrageCommandOutcomeAudit["dustReadAttempts"]>,
     terminalAt: row.terminalAt,
   });
   if (normalized.businessPayloadFingerprint !== row.businessPayloadFingerprint) {

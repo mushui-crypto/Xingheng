@@ -161,6 +161,10 @@ test("one-click exit closes the legal quantity, releases quantity-step dust, and
   assert.equal(fixture.releaseCalls[0]?.legId, "long-leg");
   assert.equal(result.timing?.secondLegExitDelayMs, 1);
   assert.ok(result.timing!.secondLegExitDelayMs <= 3_000);
+  assert.deepEqual(fixture.outcomeAudits[0]?.dustReadAttempts, [{
+    attempt: 1, substage: "SPOT_BALANCE", result: "SUCCESS", retryDecision: "COMPLETE",
+    delayMs: 0, category: null, providerCode: null,
+  }]);
 });
 
 test("one-click exit preserves structured dust release stop diagnostics", async (t) => {
@@ -765,6 +769,10 @@ function setupOnlineFinalization(options: Readonly<{
         availableQuantity: legId === "long-leg" ? active : null,
       } as const;
     },
+    async evaluateCloseSafetyAssessment(userId: string, arbitrageId: string, legId: string) {
+      const result = await this.evaluateCloseSafety(userId, arbitrageId, legId);
+      return dustAssessment(instance, legId, result);
+    },
     async closeLeg(_userId: string, input: any) {
       closeCalls.push(input.legId);
       const first = input.legId === "long-leg";
@@ -790,7 +798,13 @@ function setupOnlineFinalization(options: Readonly<{
           actualShortQuantity: "0", availableQuantity: options.spotDust!, realityCheckedAt: 1_800_000_000_209,
         }],
       };
-      return { instance, release: instance.managementReleases![0], idempotentReplay: false };
+      return {
+        instance, release: instance.managementReleases![0], idempotentReplay: false,
+        dustReadAttempts: [{
+          attempt: 1, substage: "SPOT_BALANCE", result: "SUCCESS", retryDecision: "COMPLETE",
+          delayMs: 0, category: null, providerCode: null,
+        }],
+      };
     },
   };
   const reconciliationService = {
@@ -978,6 +992,10 @@ function setup(options: Readonly<{
         availableQuantity: options.verifiedActualQuantity ?? active,
       } as const;
     },
+    async evaluateCloseSafetyAssessment(userId: string, arbitrageId: string, legId: string) {
+      const result = await this.evaluateCloseSafety(userId, arbitrageId, legId);
+      return dustAssessment(instance, legId, result);
+    },
     async closeLeg(_userId: string, input: any) {
       const first = closeCalls.length === 0;
       closeCalls.push({ legId: input.legId, commandId: input.commandId, quantity: input.quantity });
@@ -1118,7 +1136,13 @@ function setup(options: Readonly<{
           realityCheckedAt: 1_800_000_000_100,
         }],
       };
-      return { instance, release: instance.managementReleases![0], idempotentReplay: false };
+      return {
+        instance, release: instance.managementReleases![0], idempotentReplay: false,
+        dustReadAttempts: [{
+          attempt: 1, substage: "SPOT_BALANCE", result: "SUCCESS", retryDecision: "COMPLETE",
+          delayMs: 0, category: null, providerCode: null,
+        }],
+      };
     },
   };
   const service = new ArbitrageInstanceExitService(
@@ -1177,6 +1201,39 @@ function setup(options: Readonly<{
 
 function activeManagedFor(leg: ArbitrageInstance["legs"][number]) {
   return String(Number(leg.confirmedOpenedQuantity) - Number(leg.confirmedClosedQuantity));
+}
+
+function dustAssessment(instance: ArbitrageInstance, legId: string, result: any) {
+  const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+  return Object.freeze({
+    result,
+    context: null,
+    planner: null,
+    market: leg.instrumentId.endsWith("-SPOT") ? "SPOT" as const : "PERPETUAL" as const,
+    side: leg.role === "LONG" ? "sell" as const : "buy" as const,
+    ...(result.reason !== "QUANTITY_STEP_DUST" ? {} : {
+      verifiedDustReleaseFacts: Object.freeze({
+        userId: "user-a",
+        arbitrageId: instance.arbitrageId,
+        legId,
+        venue: leg.venue,
+        accountId: leg.accountId,
+        instrumentId: leg.instrumentId,
+        providerSymbol: "DOGEUSDT",
+        baseAsset: "DOGE",
+        verifiedAccountId: leg.accountId,
+        executionIntentId: "opening-intent",
+        executionRecordId: "opening-record",
+        attributableQuantity: leg.confirmedOpenedQuantity,
+        activeManagedQuantity: result.activeManagedQuantity,
+        totalQuantity: result.actualQuantity,
+        availableQuantity: result.availableQuantity,
+        quantityStep: "1",
+        minQuantity: "1",
+        verifiedAt: result.checkedAt,
+      }),
+    }),
+  });
 }
 
 function baseInstance(

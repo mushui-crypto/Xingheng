@@ -7,10 +7,44 @@ import {
 import type { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import type { ArbitrageExecutionCloseService } from "./ArbitrageExecutionCloseService";
 import type { ArbitrageCloseSafetyResult } from "./ArbitrageCloseSafetyEvaluator";
+import type { VerifiedDustReleaseFacts } from "./ArbitrageCloseSafetyEvaluator";
+import type { SpotCloseAvailableBalance } from "./BinanceSpotCloseBalanceSource";
+import { SpotCloseBalanceReadError } from "./BinanceSpotCloseBalanceSource";
 import { createArbitrageCommandPayloadFingerprint } from "./ArbitrageCommandFingerprint";
 
-type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "releaseLegManagement">;
-type CloseSafetyEvaluator = Pick<ArbitrageExecutionCloseService, "evaluateCloseSafety">;
+type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "releaseLegManagement" | "readSpotOpeningAttributionEvidence">;
+type CloseSafetyEvaluator = Pick<
+  ArbitrageExecutionCloseService,
+  "evaluateCloseSafety" | "readFreshDustReleaseBalance"
+>;
+
+export type DustReleaseReadAttempt = Readonly<{
+  attempt: number;
+  substage: "LOCAL_STATE" | "SPOT_BALANCE";
+  result: "SUCCESS" | "FAILED";
+  retryDecision: "COMPLETE" | "RETRY" | "STOP";
+  delayMs: number;
+  category: string | null;
+  providerCode: string | null;
+}>;
+
+export type VerifiedDustReleaseContext = Readonly<{
+  commandId: string;
+  facts: VerifiedDustReleaseFacts;
+  createdAt: number;
+  fingerprint: string;
+}>;
+
+export function createVerifiedDustReleaseContext(
+  commandId: string,
+  facts: VerifiedDustReleaseFacts,
+  createdAt: number,
+): VerifiedDustReleaseContext {
+  const normalizedCommandId = identifier(commandId, "commandId");
+  const normalizedCreatedAt = checkedTimestamp(createdAt, "dust context time");
+  const fingerprint = dustContextFingerprint(normalizedCommandId, facts, normalizedCreatedAt);
+  return Object.freeze({ commandId: normalizedCommandId, facts, createdAt: normalizedCreatedAt, fingerprint });
+}
 
 export class ArbitrageManagementReleaseError extends Error {
   constructor(
@@ -24,10 +58,17 @@ export class ArbitrageManagementReleaseError extends Error {
       | "dust_release_eligibility_changed"
       | "dust_release_attribution_unavailable"
       | "dust_release_provider_read_failed"
+      | "account_identity_unavailable"
+      | "spot_balance_unavailable"
+      | "provider_response_invalid"
+      | "identity_mismatch"
+      | "auth_or_permission_failed"
+      | "balance_reader_unavailable"
       | "execution_state_unknown"
       | "idempotency_conflict"
       | "authentication_required",
     message: string,
+    readonly dustReadAttempts: readonly DustReleaseReadAttempt[] = Object.freeze([]),
   ) {
     super(message);
   }
@@ -57,6 +98,7 @@ export class ArbitrageManagementReleaseService {
       sleep?: (milliseconds: number) => Promise<void>;
       dustReadMaxAttempts?: number;
       dustReadInitialDelayMs?: number;
+      dustContextMaxAgeMs?: number;
     }> = {},
   ) {}
 
@@ -83,20 +125,31 @@ export class ArbitrageManagementReleaseService {
 
   async releaseDustAfterClose(
     authenticatedUserId: string,
-    input: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+    input: Readonly<{
+      arbitrageId: string;
+      legId: string;
+      commandId: string;
+      verifiedContext: VerifiedDustReleaseContext;
+    }>,
   ) {
     const userId = identifier(authenticatedUserId, "authenticated userId");
     const request = Object.freeze({
       arbitrageId: identifier(input.arbitrageId, "arbitrageId"),
       legId: identifier(input.legId, "legId"),
       commandId: identifier(input.commandId, "commandId"),
+      verifiedContext: input.verifiedContext,
     });
     return this.releaseOnce(userId, request, "QUANTITY_STEP_DUST");
   }
 
   private async releaseOnce(
     userId: string,
-    request: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+    request: Readonly<{
+      arbitrageId: string;
+      legId: string;
+      commandId: string;
+      verifiedContext?: VerifiedDustReleaseContext;
+    }>,
     mode: "MANUAL" | "QUANTITY_STEP_DUST",
   ) {
     let instance = this.instances.get(userId, request.arbitrageId);
@@ -106,7 +159,9 @@ export class ArbitrageManagementReleaseService {
 
     const releaseId = deterministicReleaseId(userId, request.arbitrageId, request.legId, request.commandId);
     const replay = instance.managementReleases?.find((candidate) => candidate.releaseId === releaseId);
-    if (replay) return Object.freeze({ instance, release: replay, idempotentReplay: true });
+    if (replay) return Object.freeze({
+      instance, release: replay, idempotentReplay: true, dustReadAttempts: Object.freeze([]),
+    });
     const staticReason = staticIneligibilityReason(instance, leg.legId);
     if (staticReason === "INSTANCE_TERMINAL") {
       throw releaseError("management_release_unavailable", "已结束的套利实例不能释放管理责任。");
@@ -121,12 +176,17 @@ export class ArbitrageManagementReleaseService {
 
     const requestedAt = checkedTimestamp(this.now(), "release request time");
     let safety: ArbitrageCloseSafetyResult;
+    let dustReadAttempts: readonly DustReleaseReadAttempt[] = Object.freeze([]);
     if (mode === "QUANTITY_STEP_DUST") {
-      const dustRead = await this.readDustReleaseSafety(userId, instance.arbitrageId, leg.legId);
+      if (!request.verifiedContext) {
+        throw releaseError("dust_release_reality_unavailable", "残余核验上下文缺失，未终止管理责任。");
+      }
+      const dustRead = await this.readDustReleaseSafety(userId, request, request.verifiedContext);
       instance = dustRead.instance;
       leg = dustRead.leg;
       activeQuantity = activeManagedQuantity(instance, leg);
       safety = dustRead.safety;
+      dustReadAttempts = dustRead.attempts;
     } else {
       safety = await this.closeSafety.evaluateCloseSafety(userId, instance.arbitrageId, leg.legId);
     }
@@ -156,7 +216,7 @@ export class ArbitrageManagementReleaseService {
 
     const confirmedAt = Math.max(requestedAt, safety.checkedAt, instance.updatedAt);
     try {
-      return this.instances.releaseLegManagement(userId, instance.arbitrageId, {
+      const released = this.instances.releaseLegManagement(userId, instance.arbitrageId, {
         releaseId,
         commandId: request.commandId,
         operationType: "MANAGEMENT_RELEASE",
@@ -191,110 +251,210 @@ export class ArbitrageManagementReleaseService {
         availableQuantity: safety.availableQuantity,
         realityCheckedAt: safety.checkedAt,
       });
+      return Object.freeze({ ...released, dustReadAttempts });
     } catch (error) {
       const message = error instanceof Error ? error.message : "Management release failed.";
       if (/execution reference|execution state/iu.test(message)) {
-        throw releaseError("execution_state_unknown", "套利实例存在未决执行，不能释放管理责任。");
+        throw releaseError("execution_state_unknown", "套利实例存在未决执行，不能释放管理责任。", dustReadAttempts);
       }
       if (/idempotency conflict/iu.test(message)) {
-        throw releaseError("idempotency_conflict", "commandId 已用于不同的管理责任释放请求。");
+        throw releaseError("idempotency_conflict", "commandId 已用于不同的管理责任释放请求。", dustReadAttempts);
       }
-      throw releaseError("management_release_unavailable", message);
+      throw releaseError("management_release_unavailable", message, dustReadAttempts);
     }
   }
 
   private async readDustReleaseSafety(
     userId: string,
-    arbitrageId: string,
-    legId: string,
+    request: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+    verifiedContext: VerifiedDustReleaseContext,
   ) {
     const maxAttempts = positiveInteger(this.options.dustReadMaxAttempts ?? 3, "dustReadMaxAttempts");
     const initialDelayMs = positiveInteger(this.options.dustReadInitialDelayMs ?? 250, "dustReadInitialDelayMs");
     const sleep = this.options.sleep ?? defaultSleep;
-    let lastReadFailure: ArbitrageManagementReleaseError | null = null;
+    const attempts: DustReleaseReadAttempt[] = [];
+    validateDustContext(userId, request, verifiedContext, this.now(), this.options.dustContextMaxAgeMs ?? 60_000);
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-      const instance = this.instances.get(userId, arbitrageId);
-      const leg = instance?.legs.find((candidate) => candidate.legId === legId);
-      if (!instance || !leg || staticIneligibilityReason(instance, legId) !== null) {
+      const instance = this.instances.get(userId, request.arbitrageId);
+      const leg = instance?.legs.find((candidate) => candidate.legId === request.legId);
+      const localFailure = instance && leg
+        ? validateFreshLocalDustState(this.instances, userId, instance, leg.legId, verifiedContext.facts)
+        : "INSTANCE_OR_LEG_MISSING";
+      if (!instance || !leg || localFailure !== null) {
+        attempts.push(readAttempt(attempt, "LOCAL_STATE", "FAILED", "STOP", 0, localFailure, null));
         throw releaseError(
-          "dust_release_eligibility_changed",
+          localFailure?.startsWith("ATTRIBUTION_")
+            ? "dust_release_attribution_unavailable"
+            : "dust_release_eligibility_changed",
           "残余管理责任终止条件已变化，未执行责任释放。",
+          attempts,
         );
       }
-      let safety: ArbitrageCloseSafetyResult;
+      let balance: SpotCloseAvailableBalance;
       try {
-        safety = await this.closeSafety.evaluateCloseSafety(userId, arbitrageId, legId);
+        balance = await this.closeSafety.readFreshDustReleaseBalance(userId, verifiedContext.facts);
       } catch (error) {
-        lastReadFailure = releaseError(
-          "dust_release_provider_read_failed",
-          "交易所现货事实读取暂时失败，未终止残余管理责任。",
-        );
-        if (isTransientProviderReadFailure(error) && attempt < maxAttempts) {
-          await sleep(initialDelayMs * (2 ** (attempt - 1)));
+        const classified = classifyDustBalanceError(error);
+        const delayMs = classified.retryable && attempt < maxAttempts
+          ? initialDelayMs * (2 ** (attempt - 1)) : 0;
+        attempts.push(readAttempt(
+          attempt, "SPOT_BALANCE", "FAILED", delayMs > 0 ? "RETRY" : "STOP",
+          delayMs, classified.category, classified.providerCode,
+        ));
+        if (delayMs > 0) {
+          await sleep(delayMs);
           continue;
         }
-        throw lastReadFailure;
+        throw releaseError(classified.releaseCategory, classified.message, attempts);
       }
-
-      const failure = dustReleaseSafetyFailure(instance, legId, safety);
-      if (failure === null) return Object.freeze({ instance, leg, safety });
-      if (failure.category !== "dust_release_provider_read_failed"
-        || safety.transientReadFailure !== true
-        || attempt === maxAttempts) throw failure;
-      lastReadFailure = failure;
-      await sleep(initialDelayMs * (2 ** (attempt - 1)));
+      if (compareUnsignedDecimals(balance.totalQuantity ?? balance.availableQuantity, verifiedContext.facts.activeManagedQuantity) < 0
+        || compareUnsignedDecimals(balance.availableQuantity, verifiedContext.facts.activeManagedQuantity) < 0) {
+        attempts.push(readAttempt(attempt, "SPOT_BALANCE", "FAILED", "STOP", 0, "REALITY_CONFLICT", null));
+        throw releaseError(
+          "dust_release_eligibility_changed",
+          "现货余额已变化，未终止残余管理责任。",
+          attempts,
+        );
+      }
+      attempts.push(readAttempt(attempt, "SPOT_BALANCE", "SUCCESS", "COMPLETE", 0, null, null));
+      const totalQuantity = balance.totalQuantity ?? balance.availableQuantity;
+      const safety = Object.freeze({
+        activeManagedQuantity: verifiedContext.facts.activeManagedQuantity,
+        safeClosableQuantity: "0",
+        fullManagedCloseAvailable: false,
+        reason: "QUANTITY_STEP_DUST" as const,
+        checkedAt: balance.checkedAt,
+        positionMode: "ONE_WAY" as const,
+        actualQuantity: totalQuantity,
+        actualSignedNetQuantity: totalQuantity,
+        actualLongQuantity: totalQuantity,
+        actualShortQuantity: "0",
+        availableQuantity: balance.availableQuantity,
+        verifiedAccountId: verifiedContext.facts.verifiedAccountId,
+      });
+      return Object.freeze({ instance, leg, safety, attempts: Object.freeze([...attempts]) });
     }
-
-    throw lastReadFailure ?? releaseError(
-      "dust_release_provider_read_failed",
-      "交易所现货事实读取暂时失败，未终止残余管理责任。",
-    );
+    throw releaseError("dust_release_provider_read_failed", "交易所现货余额读取失败。", attempts);
   }
 }
 
-function isTransientProviderReadFailure(error: unknown) {
-  if (!error || typeof error !== "object" || !("category" in error)) return false;
-  const category = (error as { category?: unknown }).category;
-  return category === "provider_timeout"
-    || category === "provider_transport_error"
-    || category === "provider_unavailable";
+function validateDustContext(
+  userId: string,
+  request: Readonly<{ arbitrageId: string; legId: string; commandId: string }>,
+  context: VerifiedDustReleaseContext,
+  now: number,
+  maxAgeMs: number,
+) {
+  if (!context || context.commandId !== request.commandId
+    || context.facts.userId !== userId
+    || context.facts.arbitrageId !== request.arbitrageId
+    || context.facts.legId !== request.legId
+    || context.fingerprint !== dustContextFingerprint(context.commandId, context.facts, context.createdAt)
+    || context.facts.verifiedAt > context.createdAt
+    || now < context.createdAt || now - context.createdAt > positiveInteger(maxAgeMs, "dustContextMaxAgeMs")
+    || now - context.facts.verifiedAt > maxAgeMs) {
+    throw releaseError("dust_release_reality_unavailable", "残余核验上下文无效或已过期，未终止管理责任。");
+  }
 }
 
-function dustReleaseSafetyFailure(
+function validateFreshLocalDustState(
+  store: InstanceStore,
+  userId: string,
   instance: ArbitrageInstance,
   legId: string,
-  safety: ArbitrageCloseSafetyResult,
-): ArbitrageManagementReleaseError | null {
-  if (safety.reason === "SPOT_AVAILABLE_BALANCE_UNAVAILABLE") {
-    return releaseError(
-      "dust_release_provider_read_failed",
-      "交易所现货事实读取暂时失败，未终止残余管理责任。",
-    );
-  }
-  if (safety.reason === "SPOT_OPENING_ATTRIBUTION_UNAVAILABLE") {
-    return releaseError(
-      "dust_release_attribution_unavailable",
-      "现货开仓归属证据暂不可用，未终止残余管理责任。",
-    );
-  }
-  const eligibility = eligibilityResult(instance, legId, safety);
-  if (!eligibility.realityReliable) {
-    return releaseError(
-      "dust_release_reality_unavailable",
-      "当前交易所真实仓位无法可靠确认，未终止残余管理责任。",
-    );
-  }
-  if (eligibility.hasUnresolvedExecution
-    || !eligibility.releaseEligible
-    || safety.reason !== "QUANTITY_STEP_DUST"
-    || safety.safeClosableQuantity !== "0") {
-    return releaseError(
-      "dust_release_eligibility_changed",
-      "残余管理责任终止条件已变化，未执行责任释放。",
-    );
+  facts: VerifiedDustReleaseFacts,
+): string | null {
+  if (staticIneligibilityReason(instance, legId) !== null) return "LOCAL_ELIGIBILITY_CHANGED";
+  const leg = instance.legs.find((candidate) => candidate.legId === legId)!;
+  if (leg.venue !== facts.venue || leg.accountId !== facts.accountId || leg.instrumentId !== facts.instrumentId
+    || facts.verifiedAccountId !== facts.accountId
+    || activeManagedQuantity(instance, leg) !== facts.activeManagedQuantity) return "CONTEXT_SCOPE_CHANGED";
+  if (!hasConfirmedClosingReference(instance, legId)) return "CONFIRMED_CLOSE_MISSING";
+  const evidence = store.readSpotOpeningAttributionEvidence(userId, instance.arbitrageId, legId)
+    .filter((candidate) => candidate.executionIntentId === facts.executionIntentId);
+  if (evidence.length !== 1) return "ATTRIBUTION_UNAVAILABLE";
+  const attribution = evidence[0]!;
+  if (attribution.executionRecordId !== facts.executionRecordId
+    || attribution.venue !== facts.venue || attribution.accountId !== facts.accountId
+    || attribution.instrumentId !== facts.instrumentId
+    || attribution.attributableBaseQuantity !== facts.attributableQuantity
+    || compareUnsignedDecimals(attribution.attributableBaseQuantity, facts.activeManagedQuantity) < 0) {
+    return "ATTRIBUTION_CHANGED";
   }
   return null;
+}
+
+function hasConfirmedClosingReference(instance: ArbitrageInstance, legId: string) {
+  return instance.executionReferences.some((reference) => reference.legId === legId
+    && reference.phase === "CLOSING"
+    && reference.status === "CONFIRMED"
+    && compareUnsignedDecimals(reference.confirmedQuantity, reference.requestedQuantity) === 0);
+}
+
+function classifyDustBalanceError(error: unknown): Readonly<{
+  category: string;
+  providerCode: string | null;
+  retryable: boolean;
+  releaseCategory: ArbitrageManagementReleaseError["category"];
+  message: string;
+}> {
+  if (error instanceof SpotCloseBalanceReadError) {
+    const retryable = error.category === "SPOT_BALANCE_UNAVAILABLE" && error.transient;
+    return Object.freeze({
+      category: error.category,
+      providerCode: controlledProviderCode(error.providerCode),
+      retryable,
+      releaseCategory: error.category === "SPOT_BALANCE_UNAVAILABLE"
+        ? "spot_balance_unavailable"
+        : error.category === "BALANCE_READER_UNAVAILABLE"
+          ? "balance_reader_unavailable"
+          : error.category === "ACCOUNT_IDENTITY_UNAVAILABLE"
+            ? "account_identity_unavailable"
+            : error.category === "PROVIDER_RESPONSE_INVALID"
+              ? "provider_response_invalid"
+              : error.category === "IDENTITY_MISMATCH"
+                ? "identity_mismatch"
+                : "auth_or_permission_failed",
+      message: error.category === "SPOT_BALANCE_UNAVAILABLE"
+        ? "交易所现货余额读取失败，未终止残余管理责任。"
+        : "交易所现货账户事实无法可靠确认，未终止残余管理责任。",
+    });
+  }
+  return Object.freeze({
+    category: "OTHER_PROVIDER_READ_FAILURE",
+    providerCode: null,
+    retryable: false,
+    releaseCategory: "dust_release_provider_read_failed" as const,
+    message: "交易所现货余额读取失败，未终止残余管理责任。",
+  });
+}
+
+function readAttempt(
+  attempt: number,
+  substage: DustReleaseReadAttempt["substage"],
+  result: DustReleaseReadAttempt["result"],
+  retryDecision: DustReleaseReadAttempt["retryDecision"],
+  delayMs: number,
+  category: string | null,
+  providerCode: string | null,
+): DustReleaseReadAttempt {
+  return Object.freeze({ attempt, substage, result, retryDecision, delayMs, category, providerCode });
+}
+
+function dustContextFingerprint(commandId: string, facts: VerifiedDustReleaseFacts, createdAt: number) {
+  return createHash("sha256").update(JSON.stringify([
+    "VERIFIED_DUST_RELEASE_CONTEXT", commandId, createdAt,
+    facts.userId, facts.arbitrageId, facts.legId, facts.venue, facts.accountId,
+    facts.instrumentId, facts.providerSymbol, facts.baseAsset, facts.verifiedAccountId,
+    facts.executionIntentId, facts.executionRecordId, facts.attributableQuantity,
+    facts.activeManagedQuantity, facts.totalQuantity, facts.availableQuantity,
+    facts.quantityStep, facts.minQuantity, facts.verifiedAt,
+  ])).digest("hex");
+}
+
+function controlledProviderCode(value: string | null) {
+  return value !== null && /^[A-Za-z0-9_.:-]{1,80}$/u.test(value) ? value : null;
 }
 
 function hasUnresolvedExecution(instance: ArbitrageInstance) {
@@ -382,6 +542,10 @@ function defaultSleep(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function releaseError(category: ArbitrageManagementReleaseError["category"], message: string) {
-  return new ArbitrageManagementReleaseError(category, message);
+function releaseError(
+  category: ArbitrageManagementReleaseError["category"],
+  message: string,
+  attempts: readonly DustReleaseReadAttempt[] = Object.freeze([]),
+) {
+  return new ArbitrageManagementReleaseError(category, message, Object.freeze([...attempts]));
 }

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { BinanceSpotCloseBalanceSource } from "./BinanceSpotCloseBalanceSource";
+import {
+  BinanceSpotCloseBalanceSource,
+  SpotCloseBalanceReadError,
+} from "./BinanceSpotCloseBalanceSource";
 
 test("reads the exact Spot free balance through the authenticated user-scoped service", async () => {
   let receivedUserId: string | null = null;
@@ -31,8 +34,20 @@ test("reads the exact Spot free balance through the authenticated user-scoped se
     totalQuantity: "0.223456789012345678",
     availableQuantity: "0.123456789012345678",
     checkedAt: 1_900_000_000_000,
+    verifiedAccountId: "account-a",
   });
   assert.equal(receivedUserId, "user-a");
+
+  assert.deepEqual(await source.readFreshBalance("user-a", {
+    accountId: "account-a",
+    instrumentId: "BTC-USDT-SPOT",
+    providerSymbol: "BTCUSDT",
+    baseAsset: "BTC",
+  }), {
+    totalQuantity: "0.223456789012345678",
+    availableQuantity: "0.123456789012345678",
+    checkedAt: 1_900_000_000_000,
+  });
 });
 
 test("fails closed on account, instrument binding, or available balance mismatch", async () => {
@@ -55,7 +70,33 @@ test("fails closed on account, instrument binding, or available balance mismatch
     baseAsset: "BTC",
   };
 
-  await assert.rejects(source({}, "account-b").readAvailableBalance("user-a", request), /identity is invalid/u);
-  await assert.rejects(source({ baseAsset: "ETH" }).readAvailableBalance("user-a", request), /identity is invalid/u);
-  await assert.rejects(source({ availableQuantity: "NaN" }).readAvailableBalance("user-a", request), /not a Decimal/u);
+  await assert.rejects(source({}, "account-b").readAvailableBalance("user-a", request), /scope is invalid/u);
+  await assert.rejects(source({ baseAsset: "ETH" }).readAvailableBalance("user-a", request), /scope is invalid/u);
+  await assert.rejects(source({ availableQuantity: "NaN" }).readAvailableBalance("user-a", request), /response is invalid/u);
+});
+
+test("classifies Binance final balance-only failures without exposing the raw error", async () => {
+  for (const scenario of [
+    { provider: "provider_timeout", expected: "SPOT_BALANCE_UNAVAILABLE", transient: true },
+    { provider: "provider_response_invalid", expected: "PROVIDER_RESPONSE_INVALID", transient: false },
+    { provider: "credential_validation_failed", expected: "AUTH_OR_PERMISSION_FAILED", transient: false },
+  ] as const) {
+    const source = new BinanceSpotCloseBalanceSource({
+      run: async (_userId, operation) => operation({
+        readSpotCloseBalance: async () => {
+          throw Object.assign(new Error("raw secret detail"), { category: scenario.provider, providerCode: "-1000" });
+        },
+      }),
+    });
+    await assert.rejects(
+      () => source.readFreshBalance("user-a", {
+        accountId: "account-a", instrumentId: "BTC-USDT-SPOT", providerSymbol: "BTCUSDT", baseAsset: "BTC",
+      }),
+      (error: unknown) => error instanceof SpotCloseBalanceReadError
+        && error.category === scenario.expected
+        && error.transient === scenario.transient
+        && error.providerCode === "-1000"
+        && !error.message.includes("secret"),
+    );
+  }
 });

@@ -33,6 +33,13 @@ test("persists one append-only orchestration outcome per command with a producti
       diagnosticCategory: "POSITION_MODE_UNAVAILABLE",
       failureStage: "PRE_MUTATION",
       providerCode: "50011",
+      dustReadAttempts: [{
+        attempt: 1, substage: "SPOT_BALANCE" as const, result: "FAILED" as const,
+        retryDecision: "RETRY" as const, delayMs: 250, category: "SPOT_BALANCE_UNAVAILABLE", providerCode: "50011",
+      }, {
+        attempt: 2, substage: "SPOT_BALANCE" as const, result: "SUCCESS" as const,
+        retryDecision: "COMPLETE" as const, delayMs: 0, category: null, providerCode: null,
+      }],
       terminalAt: start + 10,
     };
     const first = store.recordCommandOutcome("user-a", input);
@@ -64,12 +71,14 @@ test("persists one append-only orchestration outcome per command with a producti
       assert.equal(columns.find(({ name }) => name === "diagnosticCategory")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "failureStage")?.type, "TEXT");
       assert.equal(columns.find(({ name }) => name === "providerCode")?.type, "TEXT");
+      assert.equal(columns.find(({ name }) => name === "dustReadAttemptsJson")?.notnull, 1);
       const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage, providerCode
         FROM arbitrage_command_outcome_audits`).get();
       assert.equal(audit?.mutationDisposition, "NOT_DISPATCHED");
       assert.equal(audit?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
       assert.equal(audit?.failureStage, "PRE_MUTATION");
       assert.equal(audit?.providerCode, "50011");
+      assert.deepEqual(first.dustReadAttempts, input.dustReadAttempts);
       assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
     } finally {
       db.close();
@@ -106,6 +115,7 @@ test("adds controlled Exit disposition audit columns to the deployed legacy outc
       assert.equal(columns.has("diagnosticCategory"), true);
       assert.equal(columns.has("failureStage"), true);
       assert.equal(columns.has("providerCode"), true);
+      assert.equal(columns.has("dustReadAttemptsJson"), true);
     } finally {
       migrated.close();
     }
