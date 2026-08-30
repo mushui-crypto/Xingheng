@@ -111,7 +111,13 @@ export class BinanceRiskGuard {
         );
       }
     }
-    positiveDecimal(position.leverage, "Perpetual leverage");
+    if (context.verifiedManagedClose === undefined) {
+      const leverage = position.leverage;
+      if (leverage === null) {
+        throw new BinanceRiskError("position_unavailable", "Binance perpetual leverage is unavailable.");
+      }
+      positiveDecimal(leverage, "Perpetual leverage");
+    }
 
     if (request.reduceOnly) {
       assertReduceOnly(request, position.side, nonNegativeDecimal(position.quantity, "Perpetual position quantity"), quantity);

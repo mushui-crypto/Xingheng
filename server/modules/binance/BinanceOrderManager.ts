@@ -118,6 +118,9 @@ export class BinanceOrderManager {
             symbol: request.symbol,
             baseAsset: genericRiskContext.baseAsset,
             ...(request.positionSide === undefined ? {} : { positionSide: request.positionSide }),
+            ...(genericRiskContext.verifiedManagedClose === undefined ? {} : {
+              verifiedManagedClose: genericRiskContext.verifiedManagedClose,
+            }),
           });
           this.risk.assertGenericOrderAllowed(request, genericRiskContext, snapshot);
         }

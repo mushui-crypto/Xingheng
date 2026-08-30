@@ -907,6 +907,39 @@ test("generic HEDGE risk snapshot reads the explicitly requested Binance bucket"
   });
 });
 
+test("verified managed close risk read retains permissions and open orders without duplicate identity, mode, or position reads", async () => {
+  const paths: string[] = [];
+  const fetchFn = (async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    paths.push(url.pathname);
+    const response = snapshotResponse(url.pathname, "cross");
+    if (response === undefined) throw new Error(`Unhandled Binance fixture request: ${url.pathname}`);
+    return Response.json(response);
+  }) as typeof fetch;
+  const client = new BinanceClient(
+    { apiKey: "test-key", apiSecret: "test-secret" }, fetchFn,
+    () => 1_800_000_000_000, ["203.0.113.10"],
+  );
+
+  const snapshot = await client.readGenericRiskSnapshot({
+    category: "linear", symbol: "DOGEUSDT", baseAsset: "DOGE", positionSide: "SHORT",
+    verifiedManagedClose: {
+      accountId: "binance:verified", positionMode: "HEDGE",
+      positionDirection: "SHORT", positionQuantity: "60",
+    },
+  });
+
+  assert.deepEqual(snapshot.position, { side: "short", quantity: "60", leverage: null, marginMode: null });
+  assert.ok(paths.includes("/api/v3/time"));
+  assert.ok(paths.includes("/sapi/v1/account/apiRestrictions"));
+  assert.ok(paths.includes("/fapi/v2/account"));
+  assert.ok(paths.includes("/fapi/v1/openOrders"));
+  assert.ok(!paths.includes("/api/v3/account"));
+  assert.ok(!paths.includes("/fapi/v1/positionSide/dual"));
+  assert.ok(!paths.includes("/fapi/v2/positionRisk"));
+  assert.ok(!paths.includes("/fapi/v1/exchangeInfo"));
+});
+
 function orderResponse(overrides: Record<string, unknown> = {}) {
   return {
     symbol: "BTCUSDT",

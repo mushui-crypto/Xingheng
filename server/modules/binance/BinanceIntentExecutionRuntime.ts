@@ -26,6 +26,8 @@ import {
   isFormalManagedClosePreMutationFailure,
   managedClosePreMutationFailure,
   runManagedClosePreMutationStage,
+  isTrustedVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import { BinanceIntentExecutionCapability } from "./BinanceIntentExecutionCapability";
 import { BinanceIntentExecutionCancelCapability } from "./BinanceIntentExecutionCancelCapability";
@@ -104,13 +106,17 @@ export class BinanceIntentExecutionRuntime {
     return this.executeWithEffect(input, "INCREASE");
   }
 
-  close(input: ExecutionIntent): Promise<BinanceIntentExecutionRuntimeResult> {
-    return this.executeWithEffect(input, "DECREASE");
+  close(
+    input: ExecutionIntent,
+    closeContext?: FormalManagedCloseExecutionContext,
+  ): Promise<BinanceIntentExecutionRuntimeResult> {
+    return this.executeWithEffect(input, "DECREASE", closeContext);
   }
 
   private async executeWithEffect(
     input: ExecutionIntent,
     mutationEffect: ExecutionMutationEffect,
+    closeContext?: FormalManagedCloseExecutionContext,
   ): Promise<BinanceIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "binance") {
@@ -122,7 +128,9 @@ export class BinanceIntentExecutionRuntime {
     try {
       return await this.registry.run(intent.userId, async (service) => {
       runtimeServiceEntered = true;
-      const account = managedClose
+      const account = managedClose && trustedCloseAccount(intent, closeContext)
+        ? Object.freeze({ accountId: intent.accountId })
+        : managedClose
         ? await runManagedClosePreMutationStage(
           "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_validation_failed",
           () => service.executionAccountIdentity(),
@@ -158,6 +166,8 @@ export class BinanceIntentExecutionRuntime {
           this.options.assertSubmitAllowed,
           undefined,
           mutationEffect,
+          closeContext,
+          this.options.clock,
         );
         capability = this.options.createCapability?.(intentService)
           ?? new BinanceIntentExecutionCapability(intentService);
@@ -325,6 +335,17 @@ export class BinanceIntentExecutionRuntime {
     }
     return record;
   }
+}
+
+function trustedCloseAccount(intent: ExecutionIntent, context?: FormalManagedCloseExecutionContext) {
+  const rules = context?.verifiedNativeExecutionRules;
+  return rules !== undefined
+    && isTrustedVerifiedManagedCloseNativeExecutionRules(rules)
+    && rules.userId === intent.userId
+    && rules.accountId === intent.accountId
+    && rules.venue === "binance"
+    && rules.canonicalInstrumentId === intent.instrumentId
+    && rules.executionIntentId === intent.intentId;
 }
 
 function identifier(value: unknown, name: string) {

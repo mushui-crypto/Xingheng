@@ -7,13 +7,17 @@ import type { ArbitrageDashboardSnapshot, ArbitrageOpportunity } from "../arbitr
 import { ArbitrageExecutionCommandService } from "../arbitrage-execution/ArbitrageExecutionCommandService";
 import { ArbitrageExecutionDraftService } from "../arbitrage-execution/ArbitrageExecutionDraftService";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
-import type { FormalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  createVerifiedManagedCloseNativeExecutionRules,
+  type FormalExecutionRuntime,
+  type FormalManagedCloseExecutionContext,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import type { ArbitrageExecutionPlanningContextSource } from "../arbitrage-execution/ArbitrageExecutionPlanningContext";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionRecord, type ExecutionRecord } from "../cex/ExecutionRecord";
 import type { ExecutionRecordRecoveryStore, ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
-import { ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
+import { createVerifiedExecutionProviderIdentity, ExecutionMutationSafetyGuard } from "../cex/ExecutionMutationSafetyGuard";
 import { ArbitrageInstanceStore } from "../cex/arbitrage-instance/ArbitrageInstanceStore";
 import { createAsset } from "../cex/Asset";
 import type { ExecutionQuantityPlanningInstrument } from "../cex/ExecutionQuantityPlanner";
@@ -90,6 +94,43 @@ test("Bybit HEDGE close uses reduceOnly plus the target positionIdx and rejects 
     side: "buy", positionDirection: "LONG", reduceOnly: true,
   })), /does not reduce/u);
   assert.equal(invalid.placeRequests.length, 0);
+});
+
+test("Bybit managed close consumes verified rules, mode, bucket, and identity without duplicate Provider reads", async () => {
+  const provider = new FakeBybitRuntimeService("bybit:account-a");
+  provider.readLinearPositionMode = async () => { provider.positionModeReads += 1; return "HEDGE"; };
+  let rulesReads = 0;
+  const intent = executionIntent({ side: "buy", positionDirection: "SHORT", reduceOnly: true });
+  const service = new BybitIntentExecutionService(provider, {
+    ...serviceOptions(),
+    quantityRulesSource: async () => { rulesReads += 1; return null; },
+    mutationEffect: "DECREASE",
+    verifiedCloseContext: verifiedBybitCloseContext(intent),
+  });
+
+  await service.execute(intent);
+
+  assert.equal(rulesReads, 0);
+  assert.equal(provider.positionModeReads, 0);
+  assert.equal(provider.identityValidations, 0);
+  assert.equal(provider.placeRequests.length, 1);
+  assert.equal(provider.placeRequests[0]?.positionIdx, 2);
+  assert.equal(provider.placeRequests[0]?.qty, "100");
+});
+
+test("Bybit managed close fails closed on stale or scope-mismatched verified context without dispatch", async () => {
+  for (const context of [
+    verifiedBybitCloseContext(executionIntent({ side: "buy", positionDirection: "SHORT", reduceOnly: true }), now - 15_001),
+    verifiedBybitCloseContext(executionIntent({ side: "buy", positionDirection: "SHORT", reduceOnly: true }), now, "other-account"),
+  ]) {
+    const provider = new FakeBybitRuntimeService("bybit:account-a");
+    const intent = executionIntent({ side: "buy", positionDirection: "SHORT", reduceOnly: true });
+    const service = new BybitIntentExecutionService(provider, {
+      ...serviceOptions(), mutationEffect: "DECREASE", verifiedCloseContext: context,
+    });
+    await assert.rejects(() => service.execute(intent), /invalid|stale|outside/u);
+    assert.equal(provider.placeRequests.length, 0);
+  }
 });
 
 test("Bybit HEDGE LONG and SHORT openings preserve positionIdx and omit close semantics", async () => {
@@ -566,6 +607,39 @@ function serviceOptions() {
     }),
     persistRecoveryReference: () => undefined,
   } as const;
+}
+
+function verifiedBybitCloseContext(
+  intent: ExecutionIntent,
+  verifiedAt = now,
+  accountId = intent.accountId,
+): FormalManagedCloseExecutionContext {
+  return Object.freeze({
+    verifiedAt,
+    positionMode: "HEDGE",
+    side: intent.side,
+    positionDirection: "SHORT",
+    actualSignedNetQuantity: null,
+    actualLongQuantity: "0",
+    actualShortQuantity: "100",
+    safeClosableQuantity: "100",
+    managedQuantityCeiling: "100",
+    legalizedCloseQuantity: "100",
+    reduceOnly: true,
+    verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
+      userId: intent.userId, venue: "bybit", accountId,
+      executionIntentId: intent.intentId, verifiedAt,
+    }),
+    verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId, accountId, venue: "bybit",
+      canonicalInstrumentId: intent.instrumentId, providerInstrumentId: "DOGEUSDT",
+      executionIntentId: intent.intentId, instrumentState: "live", contractType: "linear",
+      contractValueCurrency: "DOGE", settlementAsset: "USDT", contractValue: "1",
+      lotSize: "1", minimumSize: "1", minimumNotional: "5",
+      canonicalSafeCloseQuantity: "100", legalizedCanonicalCloseQuantity: "100",
+      providerNativeQuantity: "100", verifiedAt,
+    }),
+  });
 }
 
 function executionIntent(input: Partial<{

@@ -21,6 +21,7 @@ type PersonalTradingService = Pick<
   | "market"
   | "placeExecutionOrder"
   | "loadExecutionReadContext"
+  | "loadExecutionQuote"
   | "readExecutionRiskSnapshot"
   | "readSpotCloseBalance"
   | "readSpotOrderFills"

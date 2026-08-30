@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { ExecutionCoordinator } from "../cex/ExecutionCoordinator";
+import {
+  createVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import { BinanceIntentExecutionService } from "./BinanceIntentExecutionService";
 import type { BinanceOrderInput } from "./BinanceOrderManager";
@@ -76,6 +80,34 @@ test("Binance HEDGE close maps the selected bucket and rejects an opening side b
     side: "buy", positionDirection: "LONG", orderConstraints: { reduceOnly: true },
   })), /does not reduce/u);
   assert.equal(invalid.providerMutations, 0);
+});
+
+test("Binance managed close consumes verified rules, mode, identity scope, and position facts while retaining quote", async () => {
+  const binding = new FakeBinancePersonalTradingBinding();
+  let modeReads = 0;
+  binding.readExecutionPositionMode = async () => { modeReads += 1; return "ONE_WAY"; };
+  const intent = executionIntent({
+    side: "sell",
+    positionDirection: "LONG",
+    orderConstraints: { reduceOnly: true },
+  });
+  const service = new BinanceIntentExecutionService(
+    binding,
+    { maxSlippageBps: 20 },
+    undefined,
+    undefined,
+    "DECREASE",
+    verifiedBinanceCloseContext(intent),
+    () => now,
+  );
+
+  await service.execute(intent);
+
+  assert.deepEqual(binding.contextInstrumentIds, []);
+  assert.equal(binding.quoteReads, 1);
+  assert.equal(modeReads, 0);
+  assert.equal(binding.riskContexts[0]?.verifiedManagedClose?.positionQuantity, "0.002");
+  assert.equal(binding.providerMutations, 1);
 });
 
 test("Binance HEDGE opening maps LONG and SHORT without reduce-only semantics", async (t) => {
@@ -302,6 +334,7 @@ class FakeBinancePersonalTradingBinding {
   readonly riskRoutings: string[] = [];
   placeCalls = 0;
   providerMutations = 0;
+  quoteReads = 0;
   placeResult: BinanceProviderOrder = providerOrder({ status: "Filled" });
   failure: Error | null = null;
   contextFailure: Error | null = null;
@@ -312,6 +345,13 @@ class FakeBinancePersonalTradingBinding {
     this.contextInstrumentIds.push(instrumentId);
     if (this.contextFailure) throw this.contextFailure;
     return this.contextFactory(instrumentId);
+  }
+
+  async loadExecutionQuote(instrumentId: string, providerSymbol: string) {
+    this.quoteReads += 1;
+    const context = this.contextFactory(instrumentId);
+    assert.equal(providerSymbol, context.instrument.providerSymbol);
+    return context.quote;
   }
 
   async placeExecutionOrder(
@@ -329,6 +369,31 @@ class FakeBinancePersonalTradingBinding {
     if (genericRiskContext) this.riskContexts.push(genericRiskContext);
     return this.placeResult;
   }
+}
+
+function verifiedBinanceCloseContext(intent: ReturnType<typeof executionIntent>): FormalManagedCloseExecutionContext {
+  return Object.freeze({
+    verifiedAt: now,
+    positionMode: "ONE_WAY",
+    side: intent.side,
+    positionDirection: "LONG",
+    actualSignedNetQuantity: "0.002",
+    actualLongQuantity: "0.002",
+    actualShortQuantity: "0",
+    safeClosableQuantity: "0.002",
+    managedQuantityCeiling: "0.002",
+    legalizedCloseQuantity: "0.002",
+    reduceOnly: true,
+    verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({
+      userId: intent.userId, accountId: intent.accountId, venue: "binance",
+      canonicalInstrumentId: intent.instrumentId, providerInstrumentId: "XAUTUSDT",
+      executionIntentId: intent.intentId, instrumentState: "live", contractType: "linear",
+      contractValueCurrency: "XAUT", settlementAsset: "USDT", contractValue: "1",
+      lotSize: "0.00000001", minimumSize: "0.00000001", minimumNotional: "5",
+      canonicalSafeCloseQuantity: "0.002", legalizedCanonicalCloseQuantity: "0.002",
+      providerNativeQuantity: "0.002", verifiedAt: now,
+    }),
+  });
 }
 
 function executionContextWithQuote(

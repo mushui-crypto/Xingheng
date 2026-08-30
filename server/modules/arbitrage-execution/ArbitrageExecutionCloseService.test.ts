@@ -94,7 +94,10 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
 
   assert.equal(fixture.runtime.calls[0]?.side, "buy");
   assert.equal(fixture.runtime.calls[0]?.orderConstraints.reduceOnly, true);
-  assert.deepEqual(fixture.runtime.managedCloseContexts[0], {
+  const closeContext = fixture.runtime.managedCloseContexts[0]!;
+  assert.equal(closeContext.verifiedNativeExecutionRules?.venue, "binance");
+  assert.equal(closeContext.verifiedNativeExecutionRules?.providerNativeQuantity, "1");
+  assert.deepEqual({ ...closeContext, verifiedNativeExecutionRules: undefined }, {
     verifiedAt: now + 10,
     positionMode: "ONE_WAY",
     side: "buy",
@@ -106,6 +109,7 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
     managedQuantityCeiling: "1",
     legalizedCloseQuantity: "1",
     reduceOnly: true,
+    verifiedNativeExecutionRules: undefined,
     verifiedProviderIdentity: {
       userId: "user-a",
       venue: "binance",
@@ -310,7 +314,7 @@ test("Bitget verified native-rule normalization accepts explicit one and rejects
   assert.equal(nonBase.runtime.managedCloseCalls.length, 0);
 });
 
-test("Bitget missing-contract normalization is not applied to other venues", async (t) => {
+test("Bybit base-quantity close builds attempt-scoped verified native rules", async (t) => {
   const fixture = setup(t, {
     venue: "bybit",
     longInstrumentId: "DOGE-USDT-PERP",
@@ -329,7 +333,9 @@ test("Bitget missing-contract normalization is not applied to other venues", asy
   );
 
   assert.equal(result.executionRecord.status, "CONFIRMED");
-  assert.equal(fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules, undefined);
+  assert.equal(fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules?.venue, "bybit");
+  assert.equal(fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules?.contractValue, "1");
+  assert.equal(fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules?.providerNativeQuantity, "95");
 });
 
 test("a new managed-close retry receives a new attempt-bound verified identity fact", async (t) => {

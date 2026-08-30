@@ -474,7 +474,8 @@ function verifiedPerpetualCloseContext(
     managedQuantityCeiling,
     legalizedCloseQuantity,
     reduceOnly: true,
-    ...(intent.venue !== "okx" && intent.venue !== "bitget" ? {} : {
+    ...(intent.venue !== "okx" && intent.venue !== "bitget"
+      && intent.venue !== "binance" && intent.venue !== "bybit" ? {} : {
       verifiedNativeExecutionRules: verifiedNativeExecutionRulesForVenue(
         safety,
         intent,
@@ -500,7 +501,7 @@ function verifiedNativeExecutionRulesForVenue(
   planningContext: ArbitrageExecutionPlanningContext,
   plan: ExecutionQuantityPlan,
 ) {
-  if (intent.venue === "bitget") {
+  if (intent.venue === "bitget" || intent.venue === "binance" || intent.venue === "bybit") {
     const rules = planningContext.tradingRules;
     if (planningContext.instrument.instrumentId !== intent.instrumentId
       || planningContext.instrument.providerSymbol !== plan.providerSymbol
@@ -512,11 +513,11 @@ function verifiedNativeExecutionRulesForVenue(
       || planningContext.instrument.quoteAsset !== "USDT"
       || planningContext.instrument.settlementAsset !== "USDT"
       || plan.plannedVenueQuantity !== undefined) {
-      throw closeError("close_capability_unavailable", "Bitget永续退出缺少可靠的原生数量规则。");
+      throw closeError("close_capability_unavailable", `${intent.venue}永续退出缺少可靠的原生数量规则。`);
     }
     const contractValue = rules.contractSize ?? "1";
     if (contractValue !== "1") {
-      throw closeError("close_capability_unavailable", "Bitget永续退出缺少可靠的原生数量规则。");
+      throw closeError("close_capability_unavailable", `${intent.venue}永续退出缺少可靠的原生数量规则。`);
     }
     return createVerifiedManagedCloseNativeExecutionRules({
       userId: intent.userId,

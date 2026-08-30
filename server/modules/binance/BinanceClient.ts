@@ -262,6 +262,9 @@ export class BinanceClient implements BinanceClientAdapter {
   ): Promise<BinanceGenericRiskSnapshot> {
     const symbol = requiredProviderSymbol(request.symbol);
     const baseAsset = requiredAsset(request.baseAsset);
+    if (request.category === "linear" && request.verifiedManagedClose !== undefined) {
+      return this.readVerifiedManagedCloseRiskSnapshot(request, symbol, baseAsset);
+    }
     const access = await this.validateAccess();
     if (request.category === "spot") {
       const [accountValue, ordersValue] = await Promise.all([
@@ -330,6 +333,57 @@ export class BinanceClient implements BinanceClientAdapter {
         quantity: quantity.magnitude,
         leverage: providerPositiveDecimal(positionRow.leverage, "永续合约杠杆"),
         marginMode,
+      }),
+    });
+  }
+
+  private async readVerifiedManagedCloseRiskSnapshot(
+    request: BinanceGenericRiskSnapshotRequest,
+    symbol: string,
+    baseAsset: string,
+  ): Promise<BinanceGenericRiskSnapshot> {
+    const verified = request.verifiedManagedClose!;
+    const [restrictionsValue, accountValue, ordersValue] = await Promise.all([
+      this.signedRequest("spot", "/sapi/v1/account/apiRestrictions"),
+      this.signedRequest("futures", "/fapi/v2/account"),
+      this.signedRequest("futures", "/fapi/v1/openOrders", { symbol }),
+    ]);
+    const restrictions = record(restrictionsValue);
+    assertProviderIpWhitelist(restrictions, requireConfiguredEgressIps(this.allowedEgressIps));
+    const account = record(accountValue);
+    const multiAssetsMargin = boolean(account.multiAssetsMargin);
+    const accountMode: BinanceAccountIdentity["accountMode"] = multiAssetsMargin
+      ? verified.positionMode === "HEDGE" ? "multi_assets_hedge" : "multi_assets_one_way"
+      : verified.positionMode === "HEDGE" ? "single_asset_hedge" : "single_asset_one_way";
+    const permissions: BinancePermissions = {
+      read: boolean(restrictions.enableReading),
+      spotTrade: boolean(restrictions.enableSpotAndMarginTrading),
+      contractTrade: boolean(restrictions.enableFutures) && boolean(account.canTrade),
+      withdraw: boolean(restrictions.enableWithdrawals),
+      ipRestricted: true,
+      spotAccount: true,
+      futuresAccount: true,
+      positionModeSupported: true,
+    };
+    const expectedQuantity = providerNonNegativeDecimal(verified.positionQuantity, "verified close position quantity");
+    const usdt = providerList(account.assets, "永续合约资产").map(record).find((asset) => asset.asset === "USDT");
+    return Object.freeze({
+      accountId: verified.accountId,
+      accountFingerprint: verified.accountId.split(":").at(-1) ?? verified.accountId,
+      fetchedAt: this.now(),
+      accountMode,
+      permissions,
+      category: "linear",
+      symbol,
+      baseAsset,
+      availableUsdt: providerNonNegativeDecimal(usdt?.availableBalance ?? account.availableBalance, "永续合约 USDT 可用保证金"),
+      availableBaseAsset: null,
+      openOrderCount: providerList(ordersValue, "永续合约活动订单").length,
+      position: Object.freeze({
+        side: verified.positionDirection === "SHORT" ? "short" : "long",
+        quantity: expectedQuantity,
+        leverage: null,
+        marginMode: null,
       }),
     });
   }

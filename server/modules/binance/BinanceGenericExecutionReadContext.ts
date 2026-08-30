@@ -140,6 +140,20 @@ export class BinanceGenericExecutionReadContextService {
 
     return Object.freeze({ instrument, tradingRules, quote });
   }
+
+  async loadQuote(instrumentId: string, providerSymbol: string): Promise<ExecutionQuantityDecimalQuote> {
+    const canonical = parseSupportedInstrumentId(instrumentId);
+    const market: BinanceExecutionMarket = canonical.contractType === "spot" ? "spot" : "usdm_perpetual";
+    const expectedSymbol = providerSymbolValue(`${canonical.baseAsset}${canonical.quoteAsset}`);
+    if (providerSymbolValue(providerSymbol) !== expectedSymbol) {
+      throw new BinanceGenericExecutionReadError("INSTRUMENT_UNSUPPORTED", "Binance Provider symbol does not match the canonical instrument.");
+    }
+    return quoteFromBookTicker(
+      await this.client.readBookTicker(market, expectedSymbol),
+      expectedSymbol,
+      this.now(),
+    );
+  }
 }
 
 function parseSupportedInstrumentId(instrumentId: string) {

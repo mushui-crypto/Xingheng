@@ -112,6 +112,12 @@ export type BinanceGenericRiskSnapshotRequest = Readonly<{
   symbol: string;
   baseAsset: string;
   positionSide?: "BOTH" | "LONG" | "SHORT";
+  verifiedManagedClose?: Readonly<{
+    accountId: string;
+    positionMode: "ONE_WAY" | "HEDGE";
+    positionDirection: "LONG" | "SHORT";
+    positionQuantity: string;
+  }>;
 }>;
 
 export type BinanceGenericRiskSnapshot = Readonly<{
@@ -129,8 +135,8 @@ export type BinanceGenericRiskSnapshot = Readonly<{
   position: Readonly<{
     side: "long" | "short" | "flat";
     quantity: string;
-    leverage: string;
-    marginMode: "cross" | "isolated";
+    leverage: string | null;
+    marginMode: "cross" | "isolated" | null;
   }> | null;
 }>;
 
@@ -146,6 +152,7 @@ export type BinanceGenericRiskContext = Readonly<{
   quoteFetchedAt: number;
   /** Server-owned mutation semantic; never parsed from an ExecutionIntent request. */
   mutationEffect?: "INCREASE" | "DECREASE";
+  verifiedManagedClose?: BinanceGenericRiskSnapshotRequest["verifiedManagedClose"];
 }>;
 
 export type BinanceProductAvailability = {

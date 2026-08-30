@@ -131,6 +131,10 @@ export class BinancePersonalTradingService {
     return this.executionReadContext.load(instrumentId);
   }
 
+  loadExecutionQuote(instrumentId: string, providerSymbol: string) {
+    return this.executionReadContext.loadQuote(instrumentId, providerSymbol);
+  }
+
   readExecutionRiskSnapshot(request: BinanceGenericRiskSnapshotRequest) {
     return this.requireClient().readGenericRiskSnapshot(request);
   }

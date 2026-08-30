@@ -18,6 +18,7 @@ import {
   isFormalManagedClosePreMutationFailure,
   managedClosePreMutationFailure,
   runManagedClosePreMutationStage,
+  type FormalManagedCloseExecutionContext,
 } from "../arbitrage-execution/FormalExecutionRuntime";
 import {
   createBybitExecutionOrderRecoveryReference,
@@ -96,10 +97,10 @@ export class BybitIntentExecutionRuntime {
     return this.executeIntent(intent, "INCREASE");
   }
 
-  close(input: ExecutionIntent) {
+  close(input: ExecutionIntent, closeContext?: FormalManagedCloseExecutionContext) {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "bybit") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    return this.executeIntent(intent, "DECREASE");
+    return this.executeIntent(intent, "DECREASE", closeContext);
   }
 
   async query(authenticatedUserId: string, executionId: string): Promise<BybitIntentExecutionQueryRuntimeResult> {
@@ -172,6 +173,7 @@ export class BybitIntentExecutionRuntime {
   private async executeIntent(
     intent: ExecutionIntent,
     mutationEffect: ExecutionMutationEffect,
+    closeContext?: FormalManagedCloseExecutionContext,
   ): Promise<BybitIntentExecutionRuntimeResult> {
     const managedClose = mutationEffect === "DECREASE";
     let runtimeServiceEntered = false;
@@ -218,7 +220,7 @@ export class BybitIntentExecutionRuntime {
             createdAt: initialRecord.createdAt,
             updatedAt: initialRecord.updatedAt,
           }),
-        ), mutationEffect);
+        ), mutationEffect, closeContext);
         const capability = this.options.createCapability?.(service) ?? new BybitIntentExecutionCapability(service);
         const capabilities = new ExecutionCapabilityRegistry<BybitIntentExecutionResult>()
           .register(executionCapability("bybit", capability));
@@ -286,10 +288,12 @@ export class BybitIntentExecutionRuntime {
     runtimeService: BybitIntentRuntimeService,
     persistRecoveryReference?: BybitIntentExecutionServiceOptions["persistRecoveryReference"],
     mutationEffect: ExecutionMutationEffect = "INCREASE",
+    closeContext?: FormalManagedCloseExecutionContext,
   ) {
     return new BybitIntentExecutionService(runtimeService, {
       ...this.options,
       mutationEffect,
+      ...(closeContext === undefined ? {} : { verifiedCloseContext: closeContext }),
       validateProviderIdentity: (context) => runtimeService.validateExecutionProviderIdentity(context),
       ...(persistRecoveryReference === undefined ? {} : { persistRecoveryReference }),
     });

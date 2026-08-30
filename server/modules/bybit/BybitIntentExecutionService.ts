@@ -5,6 +5,11 @@ import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import { createExecutionQueryObservation, type ExecutionQueryObservation } from "../cex/ExecutionQueryCapability";
 import type { ExecutionStatus } from "../cex/ExecutionState";
 import {
+  isTrustedVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
+  type VerifiedManagedCloseNativeExecutionRules,
+} from "../arbitrage-execution/FormalExecutionRuntime";
+import {
   ExecutionMutationSafetyGuard,
   type ExecutionMutationContext,
   type ExecutionMutationEffect,
@@ -63,6 +68,7 @@ export type BybitIntentExecutionServiceOptions = Readonly<{
     positionMode?: "ONE_WAY" | "HEDGE";
     positionDirection?: "LONG" | "SHORT";
   }>) => Promise<void> | void;
+  verifiedCloseContext?: FormalManagedCloseExecutionContext;
 }>;
 
 export type BybitExecutionOrderIdentity = Readonly<BybitOrderIdentity>;
@@ -134,6 +140,11 @@ export class BybitIntentExecutionService {
         accountId: intent.accountId,
         instrumentId: intent.instrumentId,
         providerInstrumentId: value.symbol,
+        executionIntentId: intent.intentId,
+        mutationPreparedAt: this.now(),
+        ...(this.options.verifiedCloseContext === undefined ? {} : {
+          verifiedProviderIdentity: this.options.verifiedCloseContext.verifiedProviderIdentity,
+        }),
         ...(this.options.mutationEffect === undefined ? {} : { mutationEffect: this.options.mutationEffect }),
       }, this.options.validateProviderIdentity);
       await persistRecoveryReference({
@@ -235,15 +246,18 @@ export class BybitIntentExecutionService {
     if (instrument.venueInstrument.category === "spot" && intent.orderConstraints.reduceOnly) {
       throw new Error("Bybit Spot execution must not use reduceOnly.");
     }
-    const rules = await loadBybitQuantityRules(
-      this.options.quantityRulesSource,
-      instrument,
-      () => this.now(),
-      this.options.quantityRulesMaxAgeMs ?? BYBIT_QUANTITY_RULES_MAX_AGE_MS,
-    );
+    const verifiedRules = this.verifiedNativeRulesFor(intent, instrument);
+    const rules = verifiedRules === null
+      ? await loadBybitQuantityRules(
+        this.options.quantityRulesSource,
+        instrument,
+        () => this.now(),
+        this.options.quantityRulesMaxAgeMs ?? BYBIT_QUANTITY_RULES_MAX_AGE_MS,
+      )
+      : bybitRulesFromVerifiedFacts(verifiedRules, instrument);
     const category = instrument.venueInstrument.category;
-    const positionMode = category === "linear" && this.client.readLinearPositionMode
-      ? await this.client.readLinearPositionMode(instrument.venueInstrument.symbol)
+    const positionMode = category === "linear"
+      ? await this.positionModeFor(intent, instrument.venueInstrument.symbol)
       : undefined;
     if (positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Bybit HEDGE execution requires positionDirection.");
@@ -263,7 +277,9 @@ export class BybitIntentExecutionService {
         reduceOnly: intent.orderConstraints.reduceOnly,
         positionIdx: positionMode === "HEDGE"
           ? intent.positionDirection === "LONG" ? 1 as const : 2 as const
-          : await this.client.getLinearPositionIdx(instrument.venueInstrument.symbol),
+          : this.options.verifiedCloseContext === undefined
+            ? await this.client.getLinearPositionIdx(instrument.venueInstrument.symbol)
+            : 0 as const,
         positionMode,
         ...(positionMode === undefined ? {} : { positionDirection: intent.positionDirection }),
       } : {}),
@@ -288,6 +304,74 @@ export class BybitIntentExecutionService {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error("Bybit execution clock is invalid.");
     return value;
   }
+
+  private async positionModeFor(intent: ExecutionIntent, symbol: string) {
+    const verified = this.options.verifiedCloseContext;
+    if (verified === undefined) {
+      return this.client.readLinearPositionMode
+        ? this.client.readLinearPositionMode(symbol)
+        : undefined;
+    }
+    if (!intent.orderConstraints.reduceOnly
+      || verified.reduceOnly !== true
+      || verified.side !== intent.side
+      || verified.positionDirection !== intent.positionDirection
+      || verified.legalizedCloseQuantity !== intent.quantity.quantity) {
+      throw new Error("Bybit verified close context does not match the execution intent.");
+    }
+    return verified.positionMode;
+  }
+
+  private verifiedNativeRulesFor(
+    intent: ExecutionIntent,
+    instrument: BybitInstrumentResolution,
+  ): VerifiedManagedCloseNativeExecutionRules | null {
+    const close = this.options.verifiedCloseContext;
+    if (close === undefined) return null;
+    const rules = close.verifiedNativeExecutionRules;
+    const now = this.now();
+    if (rules === undefined
+      || !isTrustedVerifiedManagedCloseNativeExecutionRules(rules)
+      || rules.source !== "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY"
+      || rules.userId !== intent.userId
+      || rules.accountId !== intent.accountId
+      || rules.venue !== "bybit"
+      || rules.canonicalInstrumentId !== intent.instrumentId
+      || rules.providerInstrumentId !== instrument.venueInstrument.symbol
+      || rules.executionIntentId !== intent.intentId
+      || rules.instrumentState !== "live"
+      || rules.contractType !== "linear"
+      || rules.contractValueCurrency !== instrument.canonicalInstrument.baseAsset
+      || rules.settlementAsset !== instrument.canonicalInstrument.quoteAsset
+      || rules.contractValue !== "1"
+      || rules.canonicalSafeCloseQuantity !== close.safeClosableQuantity
+      || rules.legalizedCanonicalCloseQuantity !== close.legalizedCloseQuantity
+      || rules.legalizedCanonicalCloseQuantity !== intent.quantity.quantity
+      || rules.providerNativeQuantity !== intent.quantity.quantity
+      || rules.verifiedAt > now
+      || now - rules.verifiedAt > 15_000) {
+      throw new Error("Bybit verified native execution rules are invalid, stale, or outside this mutation attempt.");
+    }
+    return rules;
+  }
+}
+
+function bybitRulesFromVerifiedFacts(
+  rules: VerifiedManagedCloseNativeExecutionRules,
+  instrument: BybitInstrumentResolution,
+) {
+  return Object.freeze({
+    category: instrument.venueInstrument.category,
+    symbol: rules.providerInstrumentId,
+    status: "Trading",
+    baseCoin: rules.contractValueCurrency,
+    quoteCoin: rules.settlementAsset,
+    settleCoin: rules.settlementAsset,
+    qtyStep: rules.lotSize,
+    minOrderQty: rules.minimumSize,
+    minNotionalValue: rules.minimumNotional,
+    fetchedAt: rules.verifiedAt,
+  });
 }
 
 export function bybitOrderLinkIdFor(intent: Pick<ExecutionIntent, "userId" | "accountId" | "intentId" | "positionDirection">) {

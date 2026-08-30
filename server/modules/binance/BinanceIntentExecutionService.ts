@@ -3,6 +3,11 @@ import { runExecutionPreMutationPhase } from "../cex/ExecutionCapability";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import type { ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import type { ExecutionStatus } from "../cex/ExecutionState";
+import {
+  isTrustedVerifiedManagedCloseNativeExecutionRules,
+  type FormalManagedCloseExecutionContext,
+  type VerifiedManagedCloseNativeExecutionRules,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import type { BinanceGenericExecutionContext } from "./BinanceGenericExecutionReadContext";
 import type { BinanceProviderMutationGuard } from "./BinanceOrderManager";
 import type { BinancePersonalTradingService } from "./BinancePersonalTradingService";
@@ -13,7 +18,10 @@ import { toBinanceExecutionPriceMode } from "./BinanceExecutionPolicy";
 export type BinanceIntentExecutionServiceBinding = Pick<
   BinancePersonalTradingService,
   "loadExecutionReadContext" | "placeExecutionOrder"
-> & Readonly<{ readExecutionPositionMode?: () => Promise<"ONE_WAY" | "HEDGE"> }>;
+> & Readonly<{
+  readExecutionPositionMode?: () => Promise<"ONE_WAY" | "HEDGE">;
+  loadExecutionQuote?: BinancePersonalTradingService["loadExecutionQuote"];
+}>;
 
 export type BinanceIntentExecutionResult = Readonly<{
   executionAttemptId: string;
@@ -54,6 +62,8 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     ) => void | Promise<void>) | undefined = undefined,
     private readonly mapResult: (result: BinanceIntentExecutionResult) => TResult = (result) => result as TResult,
     private readonly mutationEffect: ExecutionMutationEffect = "INCREASE",
+    private readonly verifiedCloseContext?: FormalManagedCloseExecutionContext,
+    private readonly clock: () => number = Date.now,
   ) {
     if (!Number.isFinite(config.maxSlippageBps) || config.maxSlippageBps < 0) {
       throw new Error("Binance max slippage must be a non-negative number.");
@@ -89,14 +99,26 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     order: BinanceIntentPreparedOrder;
     riskContext: BinanceGenericRiskContext;
   }>> {
-    const context = await this.service.loadExecutionReadContext(intent.instrumentId);
-    assertExecutionContext(intent, context);
-    const category = context.instrument.marketType === "spot" ? "spot" : "linear";
+    const verifiedRules = this.verifiedNativeRulesFor(intent);
+    const useVerified = verifiedRules !== null
+      && intent.executionMode === "EXECUTION_PRIORITY"
+      && this.service.loadExecutionQuote !== undefined;
+    const context = useVerified ? null : await this.service.loadExecutionReadContext(intent.instrumentId);
+    if (context !== null) assertExecutionContext(intent, context);
+    const category = context?.instrument.marketType === "spot" ? "spot" : "linear";
+    const providerSymbol = verifiedRules?.providerInstrumentId ?? context!.instrument.providerSymbol;
+    const baseAsset = verifiedRules?.contractValueCurrency ?? context!.instrument.baseAsset.symbol;
+    const instrumentStatus = verifiedRules === null ? context!.instrument.status : "trading" as const;
+    const quote = useVerified
+      ? await this.service.loadExecutionQuote!(intent.instrumentId, providerSymbol)
+      : context!.quote;
     const side = intent.side === "buy" ? "Buy" : "Sell";
     const quantity = decimalQuantity(intent.quantity.quantity);
     const executionPriceMode = toBinanceExecutionPriceMode(intent.executionMode);
     const positionMode = category === "linear"
-      ? await this.service.readExecutionPositionMode?.() ?? "ONE_WAY"
+      ? this.verifiedCloseContext === undefined
+        ? await this.service.readExecutionPositionMode?.() ?? "ONE_WAY"
+        : this.verifiedPositionModeFor(intent)
       : undefined;
     if (category === "linear" && positionMode === "HEDGE" && intent.positionDirection === undefined) {
       throw new Error("Binance HEDGE execution requires positionDirection.");
@@ -108,8 +130,8 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     }
     const limitPrice = executionPriceMode === "IOC_LIMIT"
       ? protectionPrice({
-        referencePrice: side === "Buy" ? context.quote.ask : context.quote.bid,
-        priceTick: context.tradingRules.priceTick,
+        referencePrice: side === "Buy" ? quote.ask : quote.bid,
+        priceTick: context!.tradingRules.priceTick,
         maxSlippageBps: this.config.maxSlippageBps,
         side,
       })
@@ -118,7 +140,7 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
     const base = {
       idempotencyKey: binanceExecutionIdempotencyKeyFor(intent),
       category,
-      symbol: context.instrument.providerSymbol,
+      symbol: providerSymbol,
       side,
       quantity,
       reduceOnly: intent.orderConstraints.reduceOnly,
@@ -138,19 +160,74 @@ export class BinanceIntentExecutionService<TResult extends BinanceIntentExecutio
       riskContext: Object.freeze({
         userId: intent.userId,
         accountId: intent.accountId,
-        instrumentId: context.instrument.instrumentId,
+        instrumentId: intent.instrumentId,
         category,
-        providerSymbol: context.instrument.providerSymbol,
-        baseAsset: context.instrument.baseAsset.symbol,
-        instrumentStatus: context.instrument.status,
+        providerSymbol,
+        baseAsset,
+        instrumentStatus,
         valuationPrice: executionPriceMode === "IOC_LIMIT"
           ? limitPrice!
-          : side === "Buy" ? context.quote.ask : context.quote.bid,
-        quoteFetchedAt: context.quote.fetchedAt,
+          : side === "Buy" ? quote.ask : quote.bid,
+        quoteFetchedAt: quote.fetchedAt,
         mutationEffect: this.mutationEffect,
+        ...(this.verifiedCloseContext === undefined ? {} : {
+          verifiedManagedClose: Object.freeze({
+            accountId: intent.accountId,
+            positionMode: this.verifiedCloseContext.positionMode,
+            positionDirection: this.verifiedCloseContext.positionDirection,
+            positionQuantity: verifiedPositionQuantity(this.verifiedCloseContext),
+          }),
+        }),
       }),
     });
   }
+
+  private verifiedPositionModeFor(intent: ExecutionIntent) {
+    const close = this.verifiedCloseContext!;
+    if (!intent.orderConstraints.reduceOnly || close.reduceOnly !== true
+      || close.side !== intent.side
+      || close.positionDirection !== intent.positionDirection
+      || close.legalizedCloseQuantity !== intent.quantity.quantity) {
+      throw new Error("Binance verified close context does not match the execution intent.");
+    }
+    return close.positionMode;
+  }
+
+  private verifiedNativeRulesFor(intent: ExecutionIntent): VerifiedManagedCloseNativeExecutionRules | null {
+    const close = this.verifiedCloseContext;
+    if (close === undefined) return null;
+    const rules = close.verifiedNativeExecutionRules;
+    const now = this.clock();
+    if (rules === undefined
+      || !isTrustedVerifiedManagedCloseNativeExecutionRules(rules)
+      || rules.source !== "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY"
+      || rules.userId !== intent.userId
+      || rules.accountId !== intent.accountId
+      || rules.venue !== "binance"
+      || rules.canonicalInstrumentId !== intent.instrumentId
+      || rules.executionIntentId !== intent.intentId
+      || rules.instrumentState !== "live"
+      || rules.contractType !== "linear"
+      || rules.settlementAsset !== "USDT"
+      || rules.contractValue !== "1"
+      || rules.canonicalSafeCloseQuantity !== close.safeClosableQuantity
+      || rules.legalizedCanonicalCloseQuantity !== close.legalizedCloseQuantity
+      || rules.legalizedCanonicalCloseQuantity !== intent.quantity.quantity
+      || rules.providerNativeQuantity !== intent.quantity.quantity
+      || rules.verifiedAt > now
+      || now - rules.verifiedAt > 15_000) {
+      throw new Error("Binance verified native execution rules are invalid, stale, or outside this mutation attempt.");
+    }
+    return rules;
+  }
+}
+
+function verifiedPositionQuantity(context: FormalManagedCloseExecutionContext) {
+  const value = context.positionMode === "HEDGE"
+    ? context.positionDirection === "LONG" ? context.actualLongQuantity : context.actualShortQuantity
+    : context.actualSignedNetQuantity;
+  if (value === null) throw new Error("Binance verified close position quantity is unavailable.");
+  return value.startsWith("-") ? value.slice(1) : value;
 }
 
 function attachPositionMode<T extends object>(order: T, mode: "ONE_WAY" | "HEDGE" | undefined): T & { positionMode?: "ONE_WAY" | "HEDGE" } {
