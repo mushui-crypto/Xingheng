@@ -373,7 +373,6 @@ class FakeBinancePersonalTradingBinding {
 
 function verifiedBinanceCloseContext(intent: ReturnType<typeof executionIntent>): FormalManagedCloseExecutionContext {
   return Object.freeze({
-    verifiedAt: now,
     positionMode: "ONE_WAY",
     side: intent.side,
     positionDirection: "LONG",
@@ -381,7 +380,6 @@ function verifiedBinanceCloseContext(intent: ReturnType<typeof executionIntent>)
     actualLongQuantity: "0.002",
     actualShortQuantity: "0",
     safeClosableQuantity: "0.002",
-    managedQuantityCeiling: "0.002",
     legalizedCloseQuantity: "0.002",
     reduceOnly: true,
     verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({

@@ -565,7 +565,6 @@ function verifiedCloseContext(
   positionDirection: "LONG" | "SHORT",
 ): FormalManagedCloseExecutionContext {
   return Object.freeze({
-    verifiedAt: now,
     positionMode: "HEDGE",
     side: intent.side,
     positionDirection,
@@ -573,7 +572,6 @@ function verifiedCloseContext(
     actualLongQuantity: positionDirection === "LONG" ? intent.quantity.quantity : "0",
     actualShortQuantity: positionDirection === "SHORT" ? intent.quantity.quantity : "0",
     safeClosableQuantity: intent.quantity.quantity,
-    managedQuantityCeiling: intent.quantity.quantity,
     legalizedCloseQuantity: intent.quantity.quantity,
     reduceOnly: true,
     verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({

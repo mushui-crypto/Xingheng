@@ -673,7 +673,6 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
 
 function verifiedRuntimeCloseContext(intent: ExecutionIntent): FormalManagedCloseExecutionContext {
   return Object.freeze({
-    verifiedAt: now,
     positionMode: "HEDGE",
     side: intent.side,
     positionDirection: "SHORT",
@@ -681,7 +680,6 @@ function verifiedRuntimeCloseContext(intent: ExecutionIntent): FormalManagedClos
     actualLongQuantity: "0",
     actualShortQuantity: "59",
     safeClosableQuantity: "59",
-    managedQuantityCeiling: "59",
     legalizedCloseQuantity: "59",
     reduceOnly: true,
     verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({

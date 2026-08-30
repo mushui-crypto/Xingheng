@@ -338,7 +338,6 @@ export class ArbitrageExecutionCloseService {
           ? verifiedPerpetualCloseContext(
             safety.result,
             intent,
-            managedQuantity,
             closeQuantity,
             context,
             planned.plan,
@@ -453,7 +452,6 @@ export class ArbitrageExecutionCloseService {
 function verifiedPerpetualCloseContext(
   safety: ArbitrageCloseSafetyResult,
   intent: ExecutionIntent,
-  managedQuantityCeiling: string,
   legalizedCloseQuantity: string,
   planningContext: ArbitrageExecutionPlanningContext,
   plan: ExecutionQuantityPlan,
@@ -463,7 +461,6 @@ function verifiedPerpetualCloseContext(
     throw closeError("position_verification_unavailable", "永续退出缺少可靠的持仓模式或 CLOSE_ONLY 语义。");
   }
   return Object.freeze({
-    verifiedAt: safety.checkedAt,
     positionMode: safety.positionMode,
     side: intent.side,
     positionDirection: intent.positionDirection,
@@ -471,7 +468,6 @@ function verifiedPerpetualCloseContext(
     actualLongQuantity: safety.actualLongQuantity,
     actualShortQuantity: safety.actualShortQuantity,
     safeClosableQuantity: safety.safeClosableQuantity,
-    managedQuantityCeiling,
     legalizedCloseQuantity,
     reduceOnly: true,
     ...(intent.venue !== "okx" && intent.venue !== "bitget"

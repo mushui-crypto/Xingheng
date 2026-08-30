@@ -615,7 +615,6 @@ function verifiedBybitCloseContext(
   accountId = intent.accountId,
 ): FormalManagedCloseExecutionContext {
   return Object.freeze({
-    verifiedAt,
     positionMode: "HEDGE",
     side: intent.side,
     positionDirection: "SHORT",
@@ -623,7 +622,6 @@ function verifiedBybitCloseContext(
     actualLongQuantity: "0",
     actualShortQuantity: "100",
     safeClosableQuantity: "100",
-    managedQuantityCeiling: "100",
     legalizedCloseQuantity: "100",
     reduceOnly: true,
     verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({

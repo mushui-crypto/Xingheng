@@ -1,7 +1,8 @@
-import { createHash } from "node:crypto";
 import type { ExecutionCancelObservation } from "../cex/ExecutionCancelCapability";
 import { isExecutionPreMutationFailure } from "../cex/ExecutionCapability";
+import type { CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
+import type { ExecutionReconciliationObservation } from "../cex/ExecutionReconciliationCapability";
 import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import type { VerifiedExecutionProviderIdentity } from "../cex/ExecutionMutationSafetyGuard";
 
@@ -106,7 +107,6 @@ export async function runManagedClosePreMutationStage<TResult>(
  * close mutation, but must never retain them across attempts or requests.
  */
 export type FormalManagedCloseExecutionContext = Readonly<{
-  verifiedAt: number;
   positionMode: "ONE_WAY" | "HEDGE";
   side: ExecutionIntent["side"];
   positionDirection: NonNullable<ExecutionIntent["positionDirection"]>;
@@ -114,7 +114,6 @@ export type FormalManagedCloseExecutionContext = Readonly<{
   actualLongQuantity: string | null;
   actualShortQuantity: string | null;
   safeClosableQuantity: string;
-  managedQuantityCeiling: string;
   legalizedCloseQuantity: string;
   reduceOnly: true;
   verifiedProviderIdentity?: VerifiedExecutionProviderIdentity;
@@ -140,14 +139,13 @@ export type VerifiedManagedCloseNativeExecutionRules = Readonly<{
   legalizedCanonicalCloseQuantity: string;
   providerNativeQuantity: string;
   verifiedAt: number;
-  contextFingerprint: string;
   source: "MUTATION_TIME_AUTHORITATIVE_CLOSE_SAFETY";
 }>;
 
 const verifiedNativeExecutionRules = new WeakSet<VerifiedManagedCloseNativeExecutionRules>();
 
 export function createVerifiedManagedCloseNativeExecutionRules(
-  input: Omit<VerifiedManagedCloseNativeExecutionRules, "contextFingerprint" | "source" | "minimumNotional">
+  input: Omit<VerifiedManagedCloseNativeExecutionRules, "source" | "minimumNotional">
     & Readonly<{ minimumNotional?: string | null }>,
 ): VerifiedManagedCloseNativeExecutionRules {
   const facts = {
@@ -176,10 +174,7 @@ export function createVerifiedManagedCloseNativeExecutionRules(
   if (facts.instrumentState !== "live" || facts.contractType !== "linear") {
     throw new Error("Verified native execution rules are not tradeable linear contract facts.");
   }
-  const value = Object.freeze({
-    ...facts,
-    contextFingerprint: createHash("sha256").update(JSON.stringify(facts)).digest("hex"),
-  });
+  const value = Object.freeze(facts);
   verifiedNativeExecutionRules.add(value);
   return value;
 }
@@ -226,6 +221,56 @@ export type FormalExecutionRuntimeResult = Readonly<{
   mutationDisposition?: FormalExecutionMutationDisposition;
   diagnostic?: FormalExecutionDiagnostic;
 }>;
+
+export function mapFormalExecutionRuntimeResult(
+  result: Readonly<{
+    executionRecord: ExecutionRecord;
+    execution: CoordinatedExecutionResult<Readonly<{ confirmedQuantity?: string }>>;
+  }>,
+): FormalExecutionRuntimeResult {
+  const diagnostic = diagnosticFromExecution(result.execution);
+  const capabilityError = result.execution.step.status === "CALL_FAILED"
+    ? result.execution.step.error
+    : undefined;
+  return Object.freeze({
+    executionRecord: result.executionRecord,
+    confirmedQuantity: confirmedQuantityFromExecution({
+      executionRecord: result.executionRecord,
+      ...(result.execution.step.result?.confirmedQuantity === undefined
+        ? {}
+        : { capabilityConfirmedQuantity: result.execution.step.result.confirmedQuantity }),
+      ...(capabilityError === undefined ? {} : { capabilityError }),
+    }),
+    mutationDisposition: mutationDispositionFromExecution({
+      executionRecord: result.executionRecord,
+      capabilityStepStatus: result.execution.step.status,
+      ...(capabilityError === undefined ? {} : { capabilityError }),
+    }),
+    ...(diagnostic === undefined ? {} : { diagnostic }),
+  });
+}
+
+export function mapFormalReconcileRuntimeResult(result: Readonly<{
+  executionRecord: ExecutionRecord;
+  observation: ExecutionReconciliationObservation | null;
+}>): FormalExecutionRuntimeResult {
+  return Object.freeze({
+    executionRecord: result.executionRecord,
+    confirmedQuantity: result.observation?.state === "UNKNOWN"
+      ? null
+      : result.observation?.filledBaseQuantity ?? null,
+  });
+}
+
+export function mapFormalCancelRuntimeResult(result: Readonly<{
+  executionRecord: ExecutionRecord;
+  observation: ExecutionCancelObservation;
+}>): FormalExecutionCancelRuntimeResult {
+  return Object.freeze({
+    executionRecord: result.executionRecord,
+    observation: result.observation,
+  });
+}
 
 export function mutationDispositionFromExecution(input: Readonly<{
   executionRecord: ExecutionRecord;

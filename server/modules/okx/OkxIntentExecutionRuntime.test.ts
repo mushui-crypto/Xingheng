@@ -335,7 +335,6 @@ test("an explicit OKX order POST rejection remains dispatched-possible and is ne
   });
 
   const result = await formal.executeManagedClose(intent, {
-    verifiedAt: now - 1,
     positionMode: "ONE_WAY",
     side: "buy",
     positionDirection: "SHORT",
@@ -343,7 +342,6 @@ test("an explicit OKX order POST rejection remains dispatched-possible and is ne
     actualLongQuantity: "0",
     actualShortQuantity: "12.5",
     safeClosableQuantity: "12.5",
-    managedQuantityCeiling: "12.5",
     legalizedCloseQuantity: "12.5",
     reduceOnly: true,
     verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({

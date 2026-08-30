@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -98,7 +97,6 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
   assert.equal(closeContext.verifiedNativeExecutionRules?.venue, "binance");
   assert.equal(closeContext.verifiedNativeExecutionRules?.providerNativeQuantity, "1");
   assert.deepEqual({ ...closeContext, verifiedNativeExecutionRules: undefined }, {
-    verifiedAt: now + 10,
     positionMode: "ONE_WAY",
     side: "buy",
     positionDirection: "SHORT",
@@ -106,7 +104,6 @@ test("SHORT perpetual close is authoritative BUY reduceOnly", async (t) => {
     actualLongQuantity: "1",
     actualShortQuantity: "0",
     safeClosableQuantity: "1",
-    managedQuantityCeiling: "1",
     legalizedCloseQuantity: "1",
     reduceOnly: true,
     verifiedNativeExecutionRules: undefined,
@@ -244,12 +241,6 @@ test("production-shaped Bitget base rules derive verified contract value without
   assert.equal(verifiedRules?.minimumNotional, "5");
   assert.equal(verifiedRules?.legalizedCanonicalCloseQuantity, "95");
   assert.equal(verifiedRules?.providerNativeQuantity, "95");
-  assert.match(verifiedRules?.contextFingerprint ?? "", /^[a-f0-9]{64}$/u);
-  const { contextFingerprint, ...fingerprintedFacts } = verifiedRules!;
-  assert.equal(
-    contextFingerprint,
-    createHash("sha256").update(JSON.stringify(fingerprintedFacts)).digest("hex"),
-  );
   assert.equal(calls.filter(({ pathname }) => pathname === "/api/v3/market/instruments").length, 1);
   assert.equal(calls.filter(({ pathname }) => pathname === "/api/v3/market/tickers").length, 1);
 });

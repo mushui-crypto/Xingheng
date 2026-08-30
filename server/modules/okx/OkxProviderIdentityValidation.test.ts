@@ -115,7 +115,6 @@ test("managed close consumes fresh CloseSafety identity without a duplicate Prov
     orderConstraints: { reduceOnly: true },
   });
   const result = await runtime.close(closeIntent, {
-    verifiedAt: now,
     positionMode: "ONE_WAY",
     side: "buy",
     positionDirection: "SHORT",
@@ -123,7 +122,6 @@ test("managed close consumes fresh CloseSafety identity without a duplicate Prov
     actualLongQuantity: "0",
     actualShortQuantity: "10",
     safeClosableQuantity: "10",
-    managedQuantityCeiling: "10",
     legalizedCloseQuantity: "10",
     reduceOnly: true,
     verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({

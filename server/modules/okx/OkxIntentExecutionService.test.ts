@@ -126,7 +126,6 @@ test("verified managed-close facts remove the duplicate OKX position-mode read",
       throw new Error("duplicate instrument rules read");
     },
     verifiedCloseContext: {
-      verifiedAt: now - 1,
       positionMode: "ONE_WAY",
       side: "buy",
       positionDirection: "SHORT",
@@ -134,7 +133,6 @@ test("verified managed-close facts remove the duplicate OKX position-mode read",
       actualLongQuantity: "0",
       actualShortQuantity: "10",
       safeClosableQuantity: "10",
-      managedQuantityCeiling: "10",
       legalizedCloseQuantity: "10",
       reduceOnly: true,
       verifiedProviderIdentity: createVerifiedExecutionProviderIdentity({
@@ -197,7 +195,6 @@ test("managed-close verified native rules fail closed when stale or outside the 
             return okxTestQuantityRules(now);
           },
           verifiedCloseContext: {
-            verifiedAt: fixture.verifiedAt,
             positionMode: "ONE_WAY",
             side: "buy",
             positionDirection: "SHORT",
@@ -205,7 +202,6 @@ test("managed-close verified native rules fail closed when stale or outside the 
             actualLongQuantity: "0",
             actualShortQuantity: "10",
             safeClosableQuantity: "10",
-            managedQuantityCeiling: "10",
             legalizedCloseQuantity: "10",
             reduceOnly: true,
             verifiedNativeExecutionRules: createVerifiedManagedCloseNativeExecutionRules({

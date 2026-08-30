@@ -1,8 +1,8 @@
 import type { ExecutionIntent } from "../cex/ExecutionIntent";
 import {
-  confirmedQuantityFromExecution,
-  diagnosticFromExecution,
-  mutationDispositionFromExecution,
+  mapFormalCancelRuntimeResult,
+  mapFormalExecutionRuntimeResult,
+  mapFormalReconcileRuntimeResult,
   type FormalExecutionRuntime,
   type FormalManagedCloseExecutionContext,
   type FormalExecutionRuntimeResult,
@@ -16,7 +16,7 @@ export class BitgetFormalArbitrageExecutionRuntime implements FormalExecutionRun
   constructor(private readonly runtime: Runtime) {}
 
   async execute(intent: ExecutionIntent): Promise<FormalExecutionRuntimeResult> {
-    return this.executeWith(() => this.runtime.execute(intent));
+    return mapFormalExecutionRuntimeResult(await this.runtime.execute(intent));
   }
 
   async executeManagedClose(
@@ -24,41 +24,14 @@ export class BitgetFormalArbitrageExecutionRuntime implements FormalExecutionRun
     context?: FormalManagedCloseExecutionContext,
   ): Promise<FormalExecutionRuntimeResult> {
     if (!this.runtime.close) throw new Error("Bitget managed-close runtime is unavailable.");
-    return this.executeWith(() => this.runtime.close!(intent, context));
-  }
-
-  private async executeWith(run: () => ReturnType<Runtime["execute"]>): Promise<FormalExecutionRuntimeResult> {
-    const result = await run();
-    const diagnostic = diagnosticFromExecution(result.execution);
-    const mutationDisposition = mutationDispositionFromExecution({
-      executionRecord: result.executionRecord,
-      capabilityStepStatus: result.execution.step.status,
-      ...(result.execution.step.status === "CALL_FAILED" ? { capabilityError: result.execution.step.error } : {}),
-    });
-    return Object.freeze({
-      executionRecord: result.executionRecord,
-      confirmedQuantity: confirmedQuantityFromExecution({
-        executionRecord: result.executionRecord,
-        ...(result.execution.step.result?.confirmedQuantity === undefined ? {} : {
-          capabilityConfirmedQuantity: result.execution.step.result.confirmedQuantity,
-        }),
-        ...(result.execution.step.status === "CALL_FAILED" ? { capabilityError: result.execution.step.error } : {}),
-      }),
-      mutationDisposition,
-      ...(diagnostic === undefined ? {} : { diagnostic }),
-    });
+    return mapFormalExecutionRuntimeResult(await this.runtime.close(intent, context));
   }
 
   async reconcile(userId: string, executionId: string): Promise<FormalExecutionRuntimeResult> {
-    const result = await this.runtime.reconcile(userId, executionId);
-    return Object.freeze({
-      executionRecord: result.executionRecord,
-      confirmedQuantity: result.observation?.state === "UNKNOWN" ? null : result.observation?.filledBaseQuantity ?? null,
-    });
+    return mapFormalReconcileRuntimeResult(await this.runtime.reconcile(userId, executionId));
   }
 
   async cancel(userId: string, executionId: string) {
-    const result = await this.runtime.cancel(userId, executionId);
-    return Object.freeze({ executionRecord: result.executionRecord, observation: result.observation });
+    return mapFormalCancelRuntimeResult(await this.runtime.cancel(userId, executionId));
   }
 }
