@@ -504,8 +504,11 @@ function verifiedNativeExecutionRulesForVenue(
       || planningContext.instrument.baseAsset.symbol !== plan.baseAsset
       || planningContext.instrument.quoteAsset !== "USDT"
       || planningContext.instrument.settlementAsset !== "USDT"
-      || rules.contractSize !== "1"
       || plan.plannedVenueQuantity !== undefined) {
+      throw closeError("close_capability_unavailable", "Bitget永续退出缺少可靠的原生数量规则。");
+    }
+    const contractValue = rules.contractSize ?? "1";
+    if (contractValue !== "1") {
       throw closeError("close_capability_unavailable", "Bitget永续退出缺少可靠的原生数量规则。");
     }
     return createVerifiedManagedCloseNativeExecutionRules({
@@ -519,7 +522,7 @@ function verifiedNativeExecutionRulesForVenue(
       contractType: "linear",
       contractValueCurrency: planningContext.instrument.baseAsset.symbol,
       settlementAsset: planningContext.instrument.settlementAsset,
-      contractValue: rules.contractSize,
+      contractValue,
       lotSize: rules.quantityStep,
       minimumSize: rules.minQuantity,
       minimumNotional: rules.minNotional ?? null,

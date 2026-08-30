@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -34,6 +35,10 @@ import {
   ArbitrageExecutionCloseService,
 } from "./ArbitrageExecutionCloseService";
 import { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
+import {
+  DefaultArbitrageExecutionPlanningContextSource,
+  type ArbitrageExecutionPlanningContextSource,
+} from "./ArbitrageExecutionPlanningContext";
 import { SpotCloseBalanceReadError } from "./BinanceSpotCloseBalanceSource";
 
 const now = 1_900_000_000_000;
@@ -165,6 +170,166 @@ test("verified close context build failure is terminalized as proven NOT_DISPATC
   );
   assert.equal(reference?.status, "FAILED");
   assert.equal(reference?.executionRecordId, null);
+});
+
+test("production-shaped Bitget base rules derive verified contract value without a Provider contractSize", async (t) => {
+  const calls: URL[] = [];
+  const defaultSource = new DefaultArbitrageExecutionPlanningContextSource(async (input) => {
+    const url = new URL(String(input));
+    calls.push(url);
+    if (url.pathname === "/api/v3/market/instruments") {
+      return Response.json({ code: "00000", data: [{
+        symbol: "DOGEUSDT",
+        category: "USDT-FUTURES",
+        baseCoin: "DOGE",
+        quoteCoin: "USDT",
+        minOrderQty: "1",
+        pricePrecision: "5",
+        quantityPrecision: "0",
+        priceMultiplier: "0.00001",
+        quantityMultiplier: "1",
+        type: "perpetual",
+        minOrderAmount: "5",
+        status: "online",
+      }] });
+    }
+    if (url.pathname === "/api/v3/market/tickers") {
+      return Response.json({ code: "00000", data: [{
+        symbol: "DOGEUSDT",
+        bid1Price: "0.084",
+        ask1Price: "0.085",
+      }] });
+    }
+    return new Response(null, { status: 404 });
+  }, undefined, () => now);
+  let adapterOutput: Awaited<ReturnType<ArbitrageExecutionPlanningContextSource["load"]>> | undefined;
+  const planningContextSource: ArbitrageExecutionPlanningContextSource = {
+    load: async (venue, instrumentId) => {
+      adapterOutput = await defaultSource.load(venue, instrumentId);
+      return adapterOutput;
+    },
+  };
+
+  const fixture = setup(t, {
+    formalVenue: "bitget",
+    longInstrumentId: "DOGE-USDT-PERP",
+    quantity: "95",
+    positionMode: "HEDGE",
+    actualQuantity: "95",
+    actualLongQuantity: "0",
+    actualShortQuantity: "95",
+    planningContextSource,
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "95";
+
+  const result = await fixture.service.closeLeg(
+    "user-a",
+    request("short-leg", "95", "bitget-production-shaped-rules"),
+  );
+
+  const verifiedRules = fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules;
+  assert.ok(adapterOutput);
+  assert.equal(adapterOutput.instrument.quantityUnit, "base");
+  assert.equal(adapterOutput.tradingRules.contractSize, undefined);
+  assert.equal(result.executionRecord.status, "CONFIRMED");
+  assert.equal(fixture.runtime.calls[0]?.quantity.quantity, "95");
+  assert.equal(verifiedRules?.contractValue, "1");
+  assert.equal(verifiedRules?.lotSize, "1");
+  assert.equal(verifiedRules?.minimumSize, "1");
+  assert.equal(verifiedRules?.minimumNotional, "5");
+  assert.equal(verifiedRules?.legalizedCanonicalCloseQuantity, "95");
+  assert.equal(verifiedRules?.providerNativeQuantity, "95");
+  assert.match(verifiedRules?.contextFingerprint ?? "", /^[a-f0-9]{64}$/u);
+  const { contextFingerprint, ...fingerprintedFacts } = verifiedRules!;
+  assert.equal(
+    contextFingerprint,
+    createHash("sha256").update(JSON.stringify(fingerprintedFacts)).digest("hex"),
+  );
+  assert.equal(calls.filter(({ pathname }) => pathname === "/api/v3/market/instruments").length, 1);
+  assert.equal(calls.filter(({ pathname }) => pathname === "/api/v3/market/tickers").length, 1);
+});
+
+test("Bitget verified native-rule normalization accepts explicit one and rejects non-base omission", async (t) => {
+  const explicitOne = setup(t, {
+    formalVenue: "bitget",
+    longInstrumentId: "DOGE-USDT-PERP",
+    quantity: "95",
+    contractSize: "1",
+    positionMode: "HEDGE",
+    actualQuantity: "95",
+    actualLongQuantity: "0",
+    actualShortQuantity: "95",
+  });
+  explicitOne.runtime.resultStatus = "CONFIRMED";
+  explicitOne.runtime.confirmedQuantity = "95";
+  const confirmed = await explicitOne.service.closeLeg(
+    "user-a",
+    request("short-leg", "95", "bitget-explicit-contract-one"),
+  );
+  assert.equal(confirmed.executionRecord.status, "CONFIRMED");
+  assert.equal(explicitOne.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules?.contractValue, "1");
+
+  const nonBase = setup(t, {
+    formalVenue: "bitget",
+    longInstrumentId: "DOGE-USDT-PERP",
+    quantity: "95",
+    positionMode: "HEDGE",
+    actualQuantity: "95",
+    actualLongQuantity: "0",
+    actualShortQuantity: "95",
+    planningContextSource: {
+      load: async () => ({
+        instrument: {
+          instrumentId: "DOGE-USDT-PERP",
+          providerSymbol: "DOGEUSDT",
+          baseAsset: createAsset({ symbol: "DOGE", type: "DIGITAL_ASSET" }),
+          quoteAsset: "USDT",
+          settlementAsset: "USDT",
+          marketType: "perpetual",
+          contractType: "linear_perpetual",
+          quantityUnit: "contract",
+          status: "trading",
+        },
+        tradingRules: createTradingRules({
+          quantityStep: "1",
+          minQuantity: "1",
+          priceTick: "0.00001",
+          minNotional: "5",
+          precision: { quantity: 0, price: 5 },
+        }),
+        quote: { bid: "0.084", ask: "0.085", fetchedAt: now },
+      }),
+    },
+  });
+  await assert.rejects(
+    () => nonBase.service.closeLeg("user-a", request("short-leg", "95", "bitget-non-base-missing-contract")),
+    (error: unknown) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "close_quantity_unavailable",
+  );
+  assert.equal(nonBase.runtime.managedCloseCalls.length, 0);
+});
+
+test("Bitget missing-contract normalization is not applied to other venues", async (t) => {
+  const fixture = setup(t, {
+    venue: "bybit",
+    longInstrumentId: "DOGE-USDT-PERP",
+    quantity: "95",
+    positionMode: "HEDGE",
+    actualQuantity: "95",
+    actualLongQuantity: "0",
+    actualShortQuantity: "95",
+  });
+  fixture.runtime.resultStatus = "CONFIRMED";
+  fixture.runtime.confirmedQuantity = "95";
+
+  const result = await fixture.service.closeLeg(
+    "user-a",
+    request("short-leg", "95", "bybit-no-bitget-normalization"),
+  );
+
+  assert.equal(result.executionRecord.status, "CONFIRMED");
+  assert.equal(fixture.runtime.managedCloseContexts[0]?.verifiedNativeExecutionRules, undefined);
 });
 
 test("a new managed-close retry receives a new attempt-bound verified identity fact", async (t) => {
@@ -1220,6 +1385,7 @@ function setup(
     actualLongQuantity?: string;
     actualShortQuantity?: string;
     formalVenue?: "binance" | "okx" | "bitget";
+    planningContextSource?: ArbitrageExecutionPlanningContextSource;
     mutationSerializer?: ProviderMutationSerializer;
     verificationThrows?: boolean;
   }> = {},
@@ -1343,7 +1509,7 @@ function setup(
         };
       },
     },
-    {
+    options.planningContextSource ?? {
       load: async (venue, instrumentId) => {
         const okxPerpetual = venue === "okx" && instrumentId.endsWith("-PERP");
         const baseAsset = instrumentId.startsWith("DOGE-") ? "DOGE" : "BTC";
