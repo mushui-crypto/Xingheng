@@ -265,6 +265,40 @@ test("instance exit preserves structured stop diagnostics and timing", async () 
   }
 });
 
+test("instance exit parser preserves exact shared pre-mutation setup stage", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => Response.json({
+    instance: instancePayload("arbitrage-pre-mutation-stage"),
+    status: "STOPPED",
+    legs: [],
+    stop: {
+      failedLegId: "short-leg",
+      phase: "PERPETUAL_PRE_MUTATION",
+      reason: "PRE_MUTATION_LOCAL_FAILURE",
+      mutationDisposition: "NOT_DISPATCHED",
+      diagnosticCategory: "EXECUTION_RECORD_PERSIST_FAILED",
+      failureStage: "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
+      completedLegIds: ["long-leg"],
+      currentManagedExposure: [
+        { legId: "long-leg", quantity: "0" },
+        { legId: "short-leg", quantity: "95" },
+      ],
+    },
+  });
+  try {
+    const result = await exitArbitrageInstance({
+      arbitrageId: "arbitrage-pre-mutation-stage",
+      commandId: "exit-pre-mutation-stage",
+      executionMode: "EXECUTION_PRIORITY",
+    });
+    assert.equal(result.stop?.reason, "PRE_MUTATION_LOCAL_FAILURE");
+    assert.equal(result.stop?.failureStage, "PRE_MUTATION_EXECUTION_RECORD_PERSIST");
+    assert.equal(result.stop?.diagnosticCategory, "EXECUTION_RECORD_PERSIST_FAILED");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("instance exit rejects malformed stop diagnostics instead of guessing", async () => {
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => Response.json({

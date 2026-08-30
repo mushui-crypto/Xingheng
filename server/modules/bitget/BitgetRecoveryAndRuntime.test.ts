@@ -22,7 +22,11 @@ import type { ExecutionRecord } from "../cex/ExecutionRecord";
 import { SqliteExecutionRecordStore, type ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import { SqliteExecutionOrderReferenceStore } from "../cex/ExecutionOrderReferenceStore";
 import { FormalExecutionRuntimeRegistry, formalExecutionRuntime } from "../arbitrage-execution/FormalExecutionRuntimeRegistry";
-import { createVerifiedManagedCloseNativeExecutionRules, type FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  createVerifiedManagedCloseNativeExecutionRules,
+  FormalManagedClosePreMutationFailure,
+  type FormalManagedCloseExecutionContext,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import { createTradingRules } from "../cex/TradingRules";
 import {
   UnifiedRealTradingTestCommand,
@@ -75,6 +79,78 @@ test("Bitget formal/runtime managed close preserves verified facts through the P
   assert.equal(provider.positionModeReads, 0);
   assert.equal(provider.identityValidations, 0);
   assert.equal(rulesReads, 0);
+});
+
+test("Bitget managed close classifies credential acquisition before the runtime service is entered", async () => {
+  const records = new MemoryExecutionRecordStore();
+  const runtime = new BitgetIntentExecutionRuntime(
+    { run: async () => { throw new Error("credential unavailable"); } },
+    records,
+    new InMemoryBitgetExecutionOrderReferenceStore(),
+  );
+  const closeIntent = intent("DOGE-USDT-PERP", "buy");
+
+  await assert.rejects(
+    () => runtime.close(closeIntent, verifiedRuntimeCloseContext(closeIntent)),
+    (error: unknown) => error instanceof FormalManagedClosePreMutationFailure
+      && error.failureStage === "PRE_MUTATION_CREDENTIAL_ACQUISITION"
+      && error.diagnosticCategory === "credential_acquisition_failed"
+      && error.executionRecordPersisted === false,
+  );
+});
+
+test("Bitget managed close classifies account binding, ExecutionRecord build, and persist before dispatch", async () => {
+  const scenarios = [
+    {
+      name: "account",
+      stage: "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION",
+      category: "account_binding_mismatch",
+      registry: { run: async <T>(_userId: string, operation: (service: BitgetIntentRuntimeService) => Promise<T> | T) =>
+        operation(Object.assign(new FakeBitgetRuntimeService(), {
+          executionAccountIdentity: () => ({ accountId: "bitget:other-account" }),
+        })) },
+      records: new MemoryExecutionRecordStore(),
+      createExecutionId: undefined,
+    },
+    {
+      name: "build",
+      stage: "PRE_MUTATION_EXECUTION_RECORD_BUILD",
+      category: "execution_record_build_failed",
+      registry: { run: async <T>(_userId: string, operation: (service: BitgetIntentRuntimeService) => Promise<T> | T) =>
+        operation(new FakeBitgetRuntimeService()) },
+      records: new MemoryExecutionRecordStore(),
+      createExecutionId: () => { throw new Error("id unavailable"); },
+    },
+    {
+      name: "persist",
+      stage: "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
+      category: "execution_record_persist_failed",
+      registry: { run: async <T>(_userId: string, operation: (service: BitgetIntentRuntimeService) => Promise<T> | T) =>
+        operation(new FakeBitgetRuntimeService()) },
+      records: Object.assign(new MemoryExecutionRecordStore(), {
+        create: () => { throw new Error("sqlite unavailable"); },
+      }),
+      createExecutionId: () => "execution-pre-record",
+    },
+  ] as const;
+
+  for (const scenario of scenarios) {
+    const runtime = new BitgetIntentExecutionRuntime(
+      scenario.registry,
+      scenario.records,
+      new InMemoryBitgetExecutionOrderReferenceStore(),
+      scenario.createExecutionId === undefined ? {} : { createExecutionId: scenario.createExecutionId },
+    );
+    const closeIntent = intent("DOGE-USDT-PERP", "buy");
+    await assert.rejects(
+      () => runtime.close(closeIntent, verifiedRuntimeCloseContext(closeIntent)),
+      (error: unknown) => error instanceof FormalManagedClosePreMutationFailure
+        && error.failureStage === scenario.stage
+        && error.diagnosticCategory === scenario.category
+        && error.dispatchStarted === false,
+      scenario.name,
+    );
+  }
 });
 
 test("Bitget recovery anchor is durable before place and upgrades to exact order identity after restart", async () => {

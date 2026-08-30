@@ -430,10 +430,22 @@ export type ArbitrageInstanceExitStopDiagnostic = Readonly<{
   reason: string;
   mutationDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
   diagnosticCategory?: string;
-  failureStage?: "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
+  failureStage?: ExitFailureStage;
   completedLegIds: readonly string[];
   currentManagedExposure: readonly Readonly<{ legId: string; quantity: string }>[];
 }>;
+
+export type ExitFailureStage =
+  | "PRE_MUTATION"
+  | "PRE_MUTATION_VERIFIED_CONTEXT_BUILD"
+  | "PRE_MUTATION_RUNTIME_RESOLUTION"
+  | "PRE_MUTATION_CREDENTIAL_ACQUISITION"
+  | "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION"
+  | "PRE_MUTATION_EXECUTION_RECORD_BUILD"
+  | "PRE_MUTATION_EXECUTION_RECORD_PERSIST"
+  | "MUTATION_OR_RESPONSE"
+  | "CONFIRMATION"
+  | "ORCHESTRATION";
 
 export type ArbitrageInstanceExitTiming = Readonly<{
   firstLegConfirmedAt: number;
@@ -602,6 +614,12 @@ function exitMutationDisposition(value: unknown) {
 
 function exitFailureStage(value: unknown) {
   if (value === "PRE_MUTATION" || value === "MUTATION_OR_RESPONSE"
+    || value === "PRE_MUTATION_VERIFIED_CONTEXT_BUILD"
+    || value === "PRE_MUTATION_RUNTIME_RESOLUTION"
+    || value === "PRE_MUTATION_CREDENTIAL_ACQUISITION"
+    || value === "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION"
+    || value === "PRE_MUTATION_EXECUTION_RECORD_BUILD"
+    || value === "PRE_MUTATION_EXECUTION_RECORD_PERSIST"
     || value === "CONFIRMATION" || value === "ORCHESTRATION") return value;
   throw invalidCommandResponse();
 }

@@ -9,6 +9,7 @@ import type { ArbitragePositionVerificationService } from "../cex/arbitrage-inst
 import type { ArbitrageExecutionCommandService } from "./ArbitrageExecutionCommandService";
 import type {
   FormalExecutionDiagnostic,
+  FormalExecutionFailureStage,
   FormalExecutionMutationDisposition,
 } from "./FormalExecutionRuntime";
 import {
@@ -204,12 +205,14 @@ export class ArbitrageInstanceExitService {
           lastExecutionDiagnostic = closeAttempt.diagnostic ?? lastExecutionDiagnostic;
         }
       } catch (error) {
+        const diagnostic = closeErrorExecutionDiagnostic(error, leg.legId);
         return stopped(
           this.instances.get(userId, instance.arbitrageId) ?? instance,
           outcomes,
           leg.legId,
-          phaseFor(leg, "CLOSE"),
-          safeCloseErrorReason(error),
+          diagnostic ? phaseFor(leg, "PRE_MUTATION") : phaseFor(leg, "CLOSE"),
+          diagnostic ? "PRE_MUTATION_LOCAL_FAILURE" : safeCloseErrorReason(error),
+          diagnostic,
         );
       }
       const dispatchedByThisExit = !confirmation.idempotentReplay;
@@ -253,10 +256,13 @@ export class ArbitrageInstanceExitService {
           instance,
           outcomes,
           leg.legId,
-          diagnostic?.failureStage === "PRE_MUTATION"
+          isPreMutationFailureStage(diagnostic?.failureStage)
             ? phaseFor(leg, "PRE_MUTATION")
             : phaseFor(leg, "CONFIRMATION"),
-          diagnostic?.diagnosticCategory ?? confirmation.executionRecord.status,
+          diagnostic && diagnostic.failureStage !== "PRE_MUTATION"
+            && isPreMutationFailureStage(diagnostic.failureStage)
+            ? "PRE_MUTATION_LOCAL_FAILURE"
+            : diagnostic?.diagnosticCategory ?? confirmation.executionRecord.status,
           diagnostic,
           undefined,
           reconcileAttempts,
@@ -601,7 +607,7 @@ type ArbitrageInstanceExitResult = Readonly<{
   reconcileAttempts?: readonly OnlineReconcileAttempt[];
 }>;
 
-type ExitFailureStage = "PRE_MUTATION" | "MUTATION_OR_RESPONSE" | "CONFIRMATION" | "ORCHESTRATION";
+type ExitFailureStage = FormalExecutionFailureStage | "CONFIRMATION" | "ORCHESTRATION";
 
 type ExitExecutionDiagnostic = Readonly<{
   legId: string;
@@ -832,6 +838,27 @@ function executionFailureDiagnostic(
       ? {}
       : { providerCode: confirmation.diagnostic.providerCode }),
   });
+}
+
+function closeErrorExecutionDiagnostic(
+  error: unknown,
+  legId: string,
+): ExitExecutionDiagnostic | undefined {
+  if (!(error instanceof ArbitrageExecutionCloseError)
+    || error.mutationDisposition !== "NOT_DISPATCHED"
+    || !error.diagnostic
+    || !isPreMutationFailureStage(error.diagnostic.failureStage)) return undefined;
+  return Object.freeze({
+    legId,
+    mutationDisposition: "NOT_DISPATCHED",
+    diagnosticCategory: controlledDiagnosticCategory(error.diagnostic),
+    failureStage: error.diagnostic.failureStage,
+    ...(error.diagnostic.providerCode === undefined ? {} : { providerCode: error.diagnostic.providerCode }),
+  });
+}
+
+function isPreMutationFailureStage(stage: ExitFailureStage | undefined) {
+  return stage === "PRE_MUTATION" || stage?.startsWith("PRE_MUTATION_") === true;
 }
 
 function controlledDiagnosticCategory(diagnostic?: FormalExecutionDiagnostic) {

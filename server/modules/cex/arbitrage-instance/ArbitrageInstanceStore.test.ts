@@ -54,6 +54,17 @@ test("persists one append-only orchestration outcome per command with a producti
     const replay = store.recordCommandOutcome("user-a", { ...input, terminalAt: start + 20 });
     assert.equal(replay.terminalAt, first.terminalAt);
     assert.deepEqual(store.listCommandOutcomesForUser("user-a"), [first]);
+    const independent = store.recordCommandOutcome("user-a", {
+      ...input,
+      commandId: "exit-outcome-2",
+      operation: "EXIT",
+      terminalAt: start + 30,
+    });
+    assert.equal(independent.commandId, "exit-outcome-2");
+    assert.deepEqual(
+      store.listCommandOutcomesForUser("user-a").map(({ commandId }) => commandId),
+      ["exit-outcome-2", "start-outcome-1"],
+    );
     assert.throws(() => store.recordCommandOutcome("user-a", {
       ...input,
       operation: "EXIT",
@@ -82,14 +93,14 @@ test("persists one append-only orchestration outcome per command with a producti
       assert.equal(columns.find(({ name }) => name === "dustReadAttemptsJson")?.notnull, 1);
       assert.equal(columns.find(({ name }) => name === "reconcileAttemptsJson")?.notnull, 1);
       const audit = db.prepare(`SELECT mutationDisposition, diagnosticCategory, failureStage, providerCode
-        FROM arbitrage_command_outcome_audits`).get();
+        FROM arbitrage_command_outcome_audits WHERE commandId = ?`).get("start-outcome-1");
       assert.equal(audit?.mutationDisposition, "NOT_DISPATCHED");
       assert.equal(audit?.diagnosticCategory, "POSITION_MODE_UNAVAILABLE");
       assert.equal(audit?.failureStage, "PRE_MUTATION");
       assert.equal(audit?.providerCode, "50011");
       assert.deepEqual(first.dustReadAttempts, input.dustReadAttempts);
       assert.deepEqual(first.reconcileAttempts, input.reconcileAttempts.map((entry) => ({ ...entry, venue: "BYBIT" })));
-      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 1);
+      assert.equal(db.prepare("SELECT COUNT(*) AS count FROM arbitrage_command_outcome_audits").get()?.count, 2);
     } finally {
       db.close();
     }

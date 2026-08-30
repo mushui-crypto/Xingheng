@@ -5,7 +5,12 @@ import {
   type ExecutionCancelObservation,
 } from "../cex/ExecutionCancelCapability";
 import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
-import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  isFormalManagedClosePreMutationFailure,
+  managedClosePreMutationFailure,
+  runManagedClosePreMutationStage,
+  type FormalManagedCloseExecutionContext,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import { ExecutionCoordinator, type CoordinatedExecutionResult } from "../cex/ExecutionCoordinator";
 import { createExecutionIntent, type ExecutionIntent } from "../cex/ExecutionIntent";
 import {
@@ -220,16 +225,38 @@ export class OkxIntentExecutionRuntime {
     mutationEffect: ExecutionMutationEffect,
     closeContext?: FormalManagedCloseExecutionContext,
   ): Promise<OkxIntentExecutionRuntimeResult> {
-    return this.registry.run(intent.userId, async (runtimeService) => {
-      const account = await runtimeService.executionAccountIdentity();
+    const managedClose = mutationEffect === "DECREASE";
+    let runtimeServiceEntered = false;
+    try {
+      return await this.registry.run(intent.userId, async (runtimeService) => {
+      runtimeServiceEntered = true;
+      const account = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_validation_failed",
+          () => runtimeService.executionAccountIdentity(),
+        )
+        : await runtimeService.executionAccountIdentity();
       if (account.accountId !== intent.accountId) {
-        throw new Error("ExecutionIntent accountId does not match the OKX execution account.");
+        const error = new Error("ExecutionIntent accountId does not match the OKX execution account.");
+        if (managedClose) throw managedClosePreMutationFailure(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_mismatch", error,
+        );
+        throw error;
       }
-      const initialRecord = createExecutionRecordFromIntent(
-        this.options.createExecutionId?.(intent) ?? randomUUID(),
-        intent,
-      );
-      await this.recordStore.create(initialRecord);
+      const initialRecord = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_BUILD", "execution_record_build_failed",
+          () => createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent),
+        )
+        : createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
+      if (managedClose) {
+        await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_PERSIST", "execution_record_persist_failed",
+          () => this.recordStore.create(initialRecord),
+        );
+      } else {
+        await this.recordStore.create(initialRecord);
+      }
       let coordinatedCapability: ExecutionCapability<OkxIntentExecutionResult>;
       try {
         const intentService = this.intentServiceFor(intent.instrumentId, runtimeService, (reference) =>
@@ -312,7 +339,13 @@ export class OkxIntentExecutionRuntime {
       }
       await this.recordStore.update(executionRecord, initialRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
-    });
+      });
+    } catch (error) {
+      if (!managedClose || runtimeServiceEntered || isFormalManagedClosePreMutationFailure(error)) throw error;
+      throw managedClosePreMutationFailure(
+        "PRE_MUTATION_CREDENTIAL_ACQUISITION", "credential_acquisition_failed", error,
+      );
+    }
   }
 
   private async failPreMutationRecordIfSafe(record: ExecutionRecord) {

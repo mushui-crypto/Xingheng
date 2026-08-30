@@ -373,6 +373,34 @@ test("business, authentication, and non-transient pre-mutation failures are not 
   }
 });
 
+test("structured local setup failure stops with a shared reason and persists its exact pre-mutation stage", async () => {
+  const fixture = setup({
+    longOpenedQuantity: "59.94",
+    shortOpenedQuantity: "59",
+    legalSpotCloseQuantity: "59",
+    residual: "0.94",
+    perpetualPreMutationFailures: 1,
+    perpetualFailureCategory: "execution_record_persist_failed",
+    perpetualFailureStage: "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
+  });
+
+  const result = await fixture.service.exit("user-a", exitRequest("structured-local-setup"));
+
+  assert.equal(result.status, "STOPPED");
+  assert.equal(result.stop?.phase, "PERPETUAL_PRE_MUTATION");
+  assert.equal(result.stop?.reason, "PRE_MUTATION_LOCAL_FAILURE");
+  assert.equal(result.stop?.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(result.stop?.diagnosticCategory, "EXECUTION_RECORD_PERSIST_FAILED");
+  assert.equal(result.stop?.failureStage, "PRE_MUTATION_EXECUTION_RECORD_PERSIST");
+  assert.equal(fixture.closeCalls.filter(({ legId }) => legId === "short-leg").length, 1);
+  assert.equal(fixture.providerMutationCalls.filter((legId) => legId === "short-leg").length, 0);
+  assert.equal(fixture.outcomeAudits[0]?.commandId, "structured-local-setup");
+  assert.equal(fixture.outcomeAudits[0]?.stopReason, "PRE_MUTATION_LOCAL_FAILURE");
+  assert.equal(fixture.outcomeAudits[0]?.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(fixture.outcomeAudits[0]?.diagnosticCategory, "EXECUTION_RECORD_PERSIST_FAILED");
+  assert.equal(fixture.outcomeAudits[0]?.failureStage, "PRE_MUTATION_EXECUTION_RECORD_PERSIST");
+});
+
 test("fresh mutation-time safety conflict after NOT_DISPATCHED stops before retry mutation", async () => {
   const fixture = setup({
     longOpenedQuantity: "59.94",
@@ -911,6 +939,7 @@ function setup(options: Readonly<{
   perpetualPreMutationFailures?: number;
   perpetualFailureDisposition?: "NOT_DISPATCHED" | "DISPATCHED_OR_POSSIBLE" | "UNKNOWN";
   perpetualFailureCategory?: string;
+  perpetualFailureStage?: import("./FormalExecutionRuntime").FormalExecutionFailureStage;
   perpetualFailureProviderCode?: string;
   safetyConflictAfterPreMutationFailure?: boolean;
   preMutationRetryInitialDelayMs?: number;
@@ -1039,6 +1068,8 @@ function setup(options: Readonly<{
       closeAttemptsByLeg.set(input.legId, legAttempt);
       if (input.legId === "short-leg" && legAttempt <= (options.perpetualPreMutationFailures ?? 0)) {
         const mutationDisposition = options.perpetualFailureDisposition ?? "NOT_DISPATCHED";
+        const failureStage = options.perpetualFailureStage
+          ?? (mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE");
         return {
           instance: { ...instance, status: "CLOSING" },
           executionRecord: {
@@ -1050,13 +1081,13 @@ function setup(options: Readonly<{
             verifiedAt: 1_800_000_000_100 + legAttempt,
           },
           mutationDisposition,
-          failureStage: mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
+          failureStage,
           diagnostic: {
             category: options.perpetualFailureCategory ?? (mutationDisposition === "NOT_DISPATCHED"
               ? "position_mode_unavailable"
               : "provider_transport_error"),
             stage: "execution-capability",
-            failureStage: mutationDisposition === "NOT_DISPATCHED" ? "PRE_MUTATION" : "MUTATION_OR_RESPONSE",
+            failureStage,
             errorType: "Error",
             sanitizedMessage: "Controlled failure.",
             providerCode: options.perpetualFailureProviderCode ?? "50011",

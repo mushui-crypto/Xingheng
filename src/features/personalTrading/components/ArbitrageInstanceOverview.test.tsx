@@ -306,6 +306,17 @@ test("exit stop copy exposes controlled phase and reason without leaking raw Pro
     completedLegIds: ["long-leg"],
     currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "10" }],
   }), "退出流程已停止于永续腿订单提交前准备：交易所持仓模式暂时无法可靠确认，订单尚未提交。");
+
+  assert.equal(exitStopMessage({
+    failedLegId: "short-leg",
+    phase: "PERPETUAL_PRE_MUTATION",
+    reason: "PRE_MUTATION_LOCAL_FAILURE",
+    mutationDisposition: "NOT_DISPATCHED",
+    diagnosticCategory: "EXECUTION_RECORD_PERSIST_FAILED",
+    failureStage: "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
+    completedLegIds: ["long-leg"],
+    currentManagedExposure: [{ legId: "long-leg", quantity: "0" }, { legId: "short-leg", quantity: "95" }],
+  }), "退出流程已停止于永续腿订单提交前准备：订单提交前的本地准备未能完成，本次订单尚未提交。");
 });
 
 test("arbitrage records do not expose order cancellation controls", () => {

@@ -22,11 +22,17 @@ import type {
 } from "./ArbitrageExecutionCommandService";
 import type {
   FormalExecutionDiagnostic,
+  FormalManagedClosePreMutationStage,
   FormalManagedCloseExecutionContext,
   FormalExecutionMutationDisposition,
   FormalExecutionRuntimeResult,
 } from "./FormalExecutionRuntime";
-import { createVerifiedManagedCloseNativeExecutionRules } from "./FormalExecutionRuntime";
+import {
+  createVerifiedManagedCloseNativeExecutionRules,
+  diagnosticFromManagedClosePreMutationFailure,
+  isFormalManagedClosePreMutationFailure,
+  managedClosePreMutationFailure,
+} from "./FormalExecutionRuntime";
 import {
   FormalExecutionRuntimeRegistryError,
   type FormalExecutionRuntimeResolver,
@@ -50,7 +56,9 @@ import { SpotCloseBalanceReadError } from "./BinanceSpotCloseBalanceSource";
 type InstanceStore = Pick<
   ArbitrageInstanceStore,
   "get" | "claimExecutionReference" | "linkExecutionRecord" | "applyExecutionResult" | "readCommandReplay"
-> & Partial<Pick<ArbitrageInstanceStore, "readSpotOpeningAttributionEvidence">>;
+> & Partial<Pick<ArbitrageInstanceStore,
+  "readSpotOpeningAttributionEvidence" | "terminalizeClaimedReferenceWithLocalNotDispatchedProof"
+>>;
 type PositionVerifier = Pick<ArbitragePositionVerificationService, "verify"> &
   Partial<Pick<ArbitragePositionVerificationService, "verifyLeg">>;
 type SpotSource<T> = T | Partial<Record<ExecutionIntent["venue"], T>>;
@@ -70,6 +78,8 @@ export class ArbitrageExecutionCloseError extends Error {
       | "execution_state_unknown"
       | "idempotency_conflict",
     message: string,
+    readonly diagnostic?: FormalExecutionDiagnostic,
+    readonly mutationDisposition?: FormalExecutionMutationDisposition,
   ) {
     super(message);
   }
@@ -213,7 +223,12 @@ export class ArbitrageExecutionCloseService {
     assertCloseCapability(instance);
     const runtime = this.resolveRuntime(leg.venue);
     if (!runtime.executeManagedClose) {
-      throw closeError("close_capability_unavailable", "当前执行运行时不支持可信的管理仓位退出。");
+      throw localPreMutationCloseError(
+        "close_capability_unavailable",
+        "PRE_MUTATION_RUNTIME_RESOLUTION",
+        "runtime_resolution_failed",
+        new Error("Managed-close runtime is unavailable."),
+      );
     }
     assertNoUnresolvedClose(instance, leg.legId);
     const managedQuantity = activeManagedQuantity(instance, leg);
@@ -310,18 +325,55 @@ export class ArbitrageExecutionCloseService {
     let runtimeResult: FormalExecutionRuntimeResult;
     const providerDispatchStartedAt = this.now();
     try {
-      const executionContext: FormalManagedCloseExecutionContext | undefined = perpetual
-        ? verifiedPerpetualCloseContext(
-          safety.result,
-          intent,
-          managedQuantity,
-          closeQuantity,
-          context,
-          planned.plan,
-        )
-        : undefined;
+      let executionContext: FormalManagedCloseExecutionContext | undefined;
+      try {
+        executionContext = perpetual
+          ? verifiedPerpetualCloseContext(
+            safety.result,
+            intent,
+            managedQuantity,
+            closeQuantity,
+            context,
+            planned.plan,
+          )
+          : undefined;
+      } catch (error) {
+        throw managedClosePreMutationFailure(
+          "PRE_MUTATION_VERIFIED_CONTEXT_BUILD",
+          "verified_context_build_failed",
+          error,
+        );
+      }
       runtimeResult = await runtime.executeManagedClose(intent, executionContext);
-    } catch {
+    } catch (error) {
+      if (isFormalManagedClosePreMutationFailure(error)
+        && error.executionRecordPersisted === false) {
+        if (!this.instances.terminalizeClaimedReferenceWithLocalNotDispatchedProof) {
+          throw closeError("execution_state_unknown", "本地未派发退出事实无法可靠持久化，请勿重复提交。");
+        }
+        const failed = this.instances.terminalizeClaimedReferenceWithLocalNotDispatchedProof(
+          userId,
+          instance.arbitrageId,
+          intent.intentId,
+          this.now(),
+          { source: "AUTHENTICATED_API", actorId: userId },
+        );
+        const reference = failed.executionReferences.find(
+          (candidate) => candidate.executionIntentId === intent.intentId,
+        );
+        if (!reference || reference.status !== "FAILED" || reference.executionRecordId !== null) {
+          throw closeError("execution_state_unknown", "本地未派发退出事实无法可靠持久化，请勿重复提交。");
+        }
+        return closeResult(
+          failed,
+          reference,
+          false,
+          "FAILED",
+          undefined,
+          diagnosticFromManagedClosePreMutationFailure(error),
+          "NOT_DISPATCHED",
+        );
+      }
       throw closeError("execution_state_unknown", "退出状态暂时无法确认；执行引用已保留，请勿重复提交。");
     }
     assertRuntimeIdentity(runtimeResult.executionRecord, intent);
@@ -371,7 +423,12 @@ export class ArbitrageExecutionCloseService {
     } catch (error) {
       if (error instanceof FormalExecutionRuntimeRegistryError
         && error.category === "runtime_not_registered") {
-        throw closeError("close_capability_unavailable", "该交易所尚未接入正式退出能力。");
+        throw localPreMutationCloseError(
+          "close_capability_unavailable",
+          "PRE_MUTATION_RUNTIME_RESOLUTION",
+          "runtime_resolution_failed",
+          error,
+        );
       }
       throw error;
     }
@@ -773,4 +830,23 @@ function decimal(value: unknown, name: string) {
 
 function closeError(category: ArbitrageExecutionCloseError["category"], message: string) {
   return new ArbitrageExecutionCloseError(category, message);
+}
+
+function localPreMutationCloseError(
+  category: ArbitrageExecutionCloseError["category"],
+  failureStage: FormalManagedClosePreMutationStage,
+  diagnosticCategory: string,
+  originalError: unknown,
+) {
+  const structured = managedClosePreMutationFailure(
+    failureStage,
+    diagnosticCategory,
+    originalError,
+  );
+  return new ArbitrageExecutionCloseError(
+    category,
+    "退出订单尚未派发；本地执行准备未能完成。",
+    diagnosticFromManagedClosePreMutationFailure(structured),
+    "NOT_DISPATCHED",
+  );
 }

@@ -22,6 +22,11 @@ import {
   type ExecutionRecord,
 } from "../cex/ExecutionRecord";
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
+import {
+  isFormalManagedClosePreMutationFailure,
+  managedClosePreMutationFailure,
+  runManagedClosePreMutationStage,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import { BinanceIntentExecutionCapability } from "./BinanceIntentExecutionCapability";
 import { BinanceIntentExecutionCancelCapability } from "./BinanceIntentExecutionCancelCapability";
 import { BinanceIntentExecutionCancelService } from "./BinanceIntentExecutionCancelService";
@@ -112,17 +117,39 @@ export class BinanceIntentExecutionRuntime {
       throw new Error(`Unsupported execution venue: ${intent.venue}.`);
     }
 
-    return this.registry.run(intent.userId, async (service) => {
-      const account = await service.executionAccountIdentity();
+    const managedClose = mutationEffect === "DECREASE";
+    let runtimeServiceEntered = false;
+    try {
+      return await this.registry.run(intent.userId, async (service) => {
+      runtimeServiceEntered = true;
+      const account = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_validation_failed",
+          () => service.executionAccountIdentity(),
+        )
+        : await service.executionAccountIdentity();
       if (account.accountId !== intent.accountId) {
-        throw new Error("ExecutionIntent accountId does not match the Binance execution account.");
+        const error = new Error("ExecutionIntent accountId does not match the Binance execution account.");
+        if (managedClose) throw managedClosePreMutationFailure(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_mismatch", error,
+        );
+        throw error;
       }
 
-      const initialRecord = createExecutionRecordFromIntent(
-        this.options.createExecutionId?.(intent) ?? randomUUID(),
-        intent,
-      );
-      await this.recordStore.create(initialRecord);
+      const initialRecord = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_BUILD", "execution_record_build_failed",
+          () => createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent),
+        )
+        : createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
+      if (managedClose) {
+        await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_PERSIST", "execution_record_persist_failed",
+          () => this.recordStore.create(initialRecord),
+        );
+      } else {
+        await this.recordStore.create(initialRecord);
+      }
       let capability: ExecutionCapability<BinanceIntentExecutionResult>;
       try {
         const intentService = new BinanceIntentExecutionService(
@@ -154,7 +181,13 @@ export class BinanceIntentExecutionRuntime {
       await this.recordStore.update(executionRecord, initialRecord);
 
       return Object.freeze({ executionRecord, execution });
-    });
+      });
+    } catch (error) {
+      if (!managedClose || runtimeServiceEntered || isFormalManagedClosePreMutationFailure(error)) throw error;
+      throw managedClosePreMutationFailure(
+        "PRE_MUTATION_CREDENTIAL_ACQUISITION", "credential_acquisition_failed", error,
+      );
+    }
   }
 
   private async failPreMutationRecordIfSafe(

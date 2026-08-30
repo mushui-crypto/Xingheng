@@ -197,6 +197,7 @@ function exitStopReasonLabel(reason: string) {
     PROVIDER_TRANSPORT_ERROR: "交易所只读安全检查暂时不可用，订单尚未提交",
     PROVIDER_UNAVAILABLE: "交易所安全检查服务暂时不可用，订单尚未提交",
     OTHER_PRE_MUTATION_FAILURE: "订单提交前准备未能完成，本次订单尚未提交",
+    PRE_MUTATION_LOCAL_FAILURE: "订单提交前的本地准备未能完成，本次订单尚未提交",
   };
   return labels[reason] ?? "当前安全条件未满足";
 }

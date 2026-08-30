@@ -136,6 +136,37 @@ test("close result preserves authoritative NOT_DISPATCHED and controlled pre-mut
   assert.equal(result.diagnostic?.category, "position_mode_unavailable");
 });
 
+test("verified close context build failure is terminalized as proven NOT_DISPATCHED with its exact stage", async (t) => {
+  const fixture = setup(t, {
+    formalVenue: "bitget",
+    longInstrumentId: "DOGE-USDT-PERP",
+    quantity: "95",
+    contractSize: "2",
+    positionMode: "HEDGE",
+    actualQuantity: "95",
+    actualLongQuantity: "0",
+    actualShortQuantity: "95",
+  });
+
+  const result = await fixture.service.closeLeg(
+    "user-a",
+    request("short-leg", "95", "invalid-verified-context"),
+  );
+
+  assert.equal(result.executionRecord.executionId, null);
+  assert.equal(result.executionRecord.status, "FAILED");
+  assert.equal(result.executionRecord.confirmedQuantity, "0");
+  assert.equal(result.mutationDisposition, "NOT_DISPATCHED");
+  assert.equal(result.failureStage, "PRE_MUTATION_VERIFIED_CONTEXT_BUILD");
+  assert.equal(result.diagnostic?.category, "verified_context_build_failed");
+  assert.equal(fixture.runtime.managedCloseCalls.length, 0);
+  const reference = result.instance.executionReferences.find(
+    ({ executionIntentId }) => executionIntentId === result.executionRecord.intentId,
+  );
+  assert.equal(reference?.status, "FAILED");
+  assert.equal(reference?.executionRecordId, null);
+});
+
 test("a new managed-close retry receives a new attempt-bound verified identity fact", async (t) => {
   const fixture = setup(t);
   fixture.runtime.resultStatus = "FAILED";
@@ -923,7 +954,11 @@ test("unsupported venues fail closed before provider mutation", async (t) => {
   const venue = setup(t, { longVenue: "okx" });
   await assert.rejects(
     () => venue.service.closeLeg("user-a", request("long-leg", "0.5")),
-    (error) => error instanceof ArbitrageExecutionCloseError && error.category === "close_capability_unavailable",
+    (error) => error instanceof ArbitrageExecutionCloseError
+      && error.category === "close_capability_unavailable"
+      && error.mutationDisposition === "NOT_DISPATCHED"
+      && error.diagnostic?.failureStage === "PRE_MUTATION_RUNTIME_RESOLUTION"
+      && error.diagnostic.category === "runtime_resolution_failed",
   );
   assert.equal(venue.runtime.calls.length, 0);
 });
@@ -1175,6 +1210,7 @@ function setup(
     quantityPrecision?: number;
     minQuantity?: string;
     minNotional?: string;
+    contractSize?: string;
     availableBaseQuantity?: string;
     attributableBaseQuantity?: string;
     attributionError?: boolean;
@@ -1314,7 +1350,7 @@ function setup(
         const providerSymbol = okxPerpetual ? `${baseAsset}-USDT-SWAP` : `${baseAsset}USDT`;
         const quantityStep = okxPerpetual ? "1" : options.quantityStep ?? "0.0001";
         const minimumQuantity = okxPerpetual ? "1" : options.minQuantity ?? "0.0001";
-        const contractSize = okxPerpetual ? "0.1" : "1";
+        const contractSize = okxPerpetual ? "0.1" : options.contractSize ?? "1";
         return {
         instrument: {
           instrumentId,

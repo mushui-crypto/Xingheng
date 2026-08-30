@@ -15,6 +15,11 @@ import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
 import {
+  isFormalManagedClosePreMutationFailure,
+  managedClosePreMutationFailure,
+  runManagedClosePreMutationStage,
+} from "../arbitrage-execution/FormalExecutionRuntime";
+import {
   createBybitExecutionOrderRecoveryReference,
   createBybitExecutionOrderReference,
   type BybitExecutionOrderRecoveryReference,
@@ -168,11 +173,38 @@ export class BybitIntentExecutionRuntime {
     intent: ExecutionIntent,
     mutationEffect: ExecutionMutationEffect,
   ): Promise<BybitIntentExecutionRuntimeResult> {
-    return this.registry.run(intent.userId, async (runtimeService) => {
-      const account = await runtimeService.executionAccountIdentity();
-      if (account.accountId !== intent.accountId) throw new Error("ExecutionIntent accountId does not match the Bybit execution account.");
-      const initialRecord = createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
-      await this.recordStore.create(initialRecord);
+    const managedClose = mutationEffect === "DECREASE";
+    let runtimeServiceEntered = false;
+    try {
+      return await this.registry.run(intent.userId, async (runtimeService) => {
+      runtimeServiceEntered = true;
+      const account = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_validation_failed",
+          () => runtimeService.executionAccountIdentity(),
+        )
+        : await runtimeService.executionAccountIdentity();
+      if (account.accountId !== intent.accountId) {
+        const error = new Error("ExecutionIntent accountId does not match the Bybit execution account.");
+        if (managedClose) throw managedClosePreMutationFailure(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION", "account_binding_mismatch", error,
+        );
+        throw error;
+      }
+      const initialRecord = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_BUILD", "execution_record_build_failed",
+          () => createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent),
+        )
+        : createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
+      if (managedClose) {
+        await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_PERSIST", "execution_record_persist_failed",
+          () => this.recordStore.create(initialRecord),
+        );
+      } else {
+        await this.recordStore.create(initialRecord);
+      }
       let coordinatedCapability: ExecutionCapability<BybitIntentExecutionResult>;
       try {
         const service = this.service(runtimeService, (reference) => this.orderReferences.createRecovery(
@@ -241,7 +273,13 @@ export class BybitIntentExecutionRuntime {
       }
       await this.recordStore.update(executionRecord, initialRecord);
       return Object.freeze({ executionRecord, execution, orderReference });
-    });
+      });
+    } catch (error) {
+      if (!managedClose || runtimeServiceEntered || isFormalManagedClosePreMutationFailure(error)) throw error;
+      throw managedClosePreMutationFailure(
+        "PRE_MUTATION_CREDENTIAL_ACQUISITION", "credential_acquisition_failed", error,
+      );
+    }
   }
 
   private service(

@@ -923,6 +923,10 @@ export class ArbitrageInstanceStore {
     arbitrageId: string,
     executionIntentId: string,
     checkedAt: number,
+    auditActor: Readonly<{
+      source: "AUTHENTICATED_API" | "SYSTEM_RECOVERY";
+      actorId: string;
+    }> = { source: "SYSTEM_RECOVERY", actorId: "SYSTEM_RECOVERY" },
   ): ArbitrageInstance {
     const normalizedUserId = identifier(userId, "userId");
     const normalizedArbitrageId = identifier(arbitrageId, "arbitrageId");
@@ -953,10 +957,12 @@ export class ArbitrageInstanceStore {
         recoveryId, source, actorId, arbitrageId, legId, executionIntentId,
         action, oldStatus, oldQuantity, newStatus, newQuantity, evidenceCategory,
         checkedAt, completedAt, result
-      ) VALUES (?, 'SYSTEM_RECOVERY', 'SYSTEM_RECOVERY', ?, ?, ?,
+      ) VALUES (?, ?, ?, ?, ?, ?,
         'LOCAL_NOT_DISPATCHED_TERMINALIZATION', 'CLAIMED', '0', 'FAILED', '0',
         'LOCAL_PRE_DISPATCH_PROOF', ?, ?, 'COMPLETED')`).run(
           recoveryAuditId("LOCAL_NOT_DISPATCHED_TERMINALIZATION", normalizedArbitrageId, normalizedIntentId),
+          auditActor.source,
+          identifier(auditActor.actorId, "audit actorId"),
           normalizedArbitrageId,
           reference.legId,
           normalizedIntentId,

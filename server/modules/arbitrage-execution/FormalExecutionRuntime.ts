@@ -8,11 +8,97 @@ import type { VerifiedExecutionProviderIdentity } from "../cex/ExecutionMutation
 export type FormalExecutionDiagnostic = Readonly<{
   category: string;
   stage: "execution-capability";
-  failureStage: "PRE_MUTATION" | "MUTATION_OR_RESPONSE";
+  failureStage: FormalExecutionFailureStage;
   errorType: string;
   sanitizedMessage: string;
   providerCode?: string;
 }>;
+
+export type FormalManagedClosePreMutationStage =
+  | "PRE_MUTATION_VERIFIED_CONTEXT_BUILD"
+  | "PRE_MUTATION_RUNTIME_RESOLUTION"
+  | "PRE_MUTATION_CREDENTIAL_ACQUISITION"
+  | "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION"
+  | "PRE_MUTATION_EXECUTION_RECORD_BUILD"
+  | "PRE_MUTATION_EXECUTION_RECORD_PERSIST";
+
+export type FormalExecutionFailureStage =
+  | "PRE_MUTATION"
+  | FormalManagedClosePreMutationStage
+  | "MUTATION_OR_RESPONSE";
+
+export class FormalManagedClosePreMutationFailure extends Error {
+  readonly mutationDisposition = "NOT_DISPATCHED" as const;
+  readonly executionAttemptId = null;
+  readonly clientOidPersisted = false;
+  readonly dispatchStarted = false;
+
+  constructor(
+    readonly failureStage: FormalManagedClosePreMutationStage,
+    readonly diagnosticCategory: string,
+    readonly executionRecordPersisted: boolean,
+    readonly originalError?: unknown,
+  ) {
+    super("Managed close failed before Provider dispatch.");
+    this.name = "FormalManagedClosePreMutationFailure";
+  }
+}
+
+export function managedClosePreMutationFailure(
+  failureStage: FormalManagedClosePreMutationStage,
+  diagnosticCategory: string,
+  error: unknown,
+  executionRecordPersisted = false,
+) {
+  if (error instanceof FormalManagedClosePreMutationFailure) return error;
+  return new FormalManagedClosePreMutationFailure(
+    failureStage,
+    safeToken(diagnosticCategory, "pre_mutation_local_failure"),
+    executionRecordPersisted,
+    error,
+  );
+}
+
+export function isFormalManagedClosePreMutationFailure(
+  error: unknown,
+): error is FormalManagedClosePreMutationFailure {
+  return error instanceof FormalManagedClosePreMutationFailure
+    && error.mutationDisposition === "NOT_DISPATCHED"
+    && error.dispatchStarted === false;
+}
+
+export function diagnosticFromManagedClosePreMutationFailure(
+  error: FormalManagedClosePreMutationFailure,
+): FormalExecutionDiagnostic {
+  return Object.freeze({
+    category: error.diagnosticCategory,
+    stage: "execution-capability",
+    failureStage: error.failureStage,
+    errorType: safeToken(
+      error.originalError instanceof Error ? error.originalError.constructor.name : undefined,
+      "Error",
+    ),
+    sanitizedMessage: "Managed close failed before Provider dispatch.",
+  });
+}
+
+export async function runManagedClosePreMutationStage<TResult>(
+  failureStage: FormalManagedClosePreMutationStage,
+  diagnosticCategory: string,
+  operation: () => Promise<TResult> | TResult,
+  executionRecordPersisted = false,
+): Promise<TResult> {
+  try {
+    return await operation();
+  } catch (error) {
+    throw managedClosePreMutationFailure(
+      failureStage,
+      diagnosticCategory,
+      error,
+      executionRecordPersisted,
+    );
+  }
+}
 
 /**
  * Fresh, attempt-scoped facts produced by the managed-close safety boundary.

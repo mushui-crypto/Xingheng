@@ -10,7 +10,12 @@ import { attachExecutionAttempt, createExecutionRecordFromIntent, type Execution
 import type { ExecutionRecordStore } from "../cex/ExecutionRecordStore";
 import type { ExecutionMutationContext, ExecutionMutationEffect } from "../cex/ExecutionMutationSafetyGuard";
 import { RegistryBackedExecutionCapability } from "../cex/RegistryBackedExecutionCapability";
-import type { FormalManagedCloseExecutionContext } from "../arbitrage-execution/FormalExecutionRuntime";
+import {
+  isFormalManagedClosePreMutationFailure,
+  managedClosePreMutationFailure,
+  runManagedClosePreMutationStage,
+  type FormalManagedCloseExecutionContext,
+} from "../arbitrage-execution/FormalExecutionRuntime";
 import {
   createBitgetExecutionOrderRecoveryReference,
   createBitgetExecutionOrderReference,
@@ -83,11 +88,43 @@ export class BitgetIntentExecutionRuntime {
   ): Promise<BitgetIntentExecutionRuntimeResult> {
     const intent = createExecutionIntent(input);
     if (intent.venue !== "bitget") throw new Error(`Unsupported execution venue: ${intent.venue}.`);
-    return this.registry.run(intent.userId, async (runtimeService) => {
-      const account = await runtimeService.executionAccountIdentity();
-      if (account.accountId !== intent.accountId) throw new Error("ExecutionIntent accountId does not match the Bitget execution account.");
-      const initial = createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
-      await this.recordStore.create(initial);
+    const managedClose = mutationEffect === "DECREASE";
+    let runtimeServiceEntered = false;
+    try {
+      return await this.registry.run(intent.userId, async (runtimeService) => {
+      runtimeServiceEntered = true;
+      const account = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION",
+          "account_binding_validation_failed",
+          () => runtimeService.executionAccountIdentity(),
+        )
+        : await runtimeService.executionAccountIdentity();
+      if (account.accountId !== intent.accountId) {
+        const error = new Error("ExecutionIntent accountId does not match the Bitget execution account.");
+        if (managedClose) throw managedClosePreMutationFailure(
+          "PRE_MUTATION_ACCOUNT_BINDING_VALIDATION",
+          "account_binding_mismatch",
+          error,
+        );
+        throw error;
+      }
+      const initial = managedClose
+        ? await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_BUILD",
+          "execution_record_build_failed",
+          () => createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent),
+        )
+        : createExecutionRecordFromIntent(this.options.createExecutionId?.(intent) ?? randomUUID(), intent);
+      if (managedClose) {
+        await runManagedClosePreMutationStage(
+          "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
+          "execution_record_persist_failed",
+          () => this.recordStore.create(initial),
+        );
+      } else {
+        await this.recordStore.create(initial);
+      }
       let coordinatedCapability: ExecutionCapability<BitgetIntentExecutionResult>;
       try {
         const service = this.service(runtimeService, (reference) => this.orderReferences.createRecovery(
@@ -144,7 +181,15 @@ export class BitgetIntentExecutionRuntime {
       }
       await this.recordStore.update(executionRecord, initial);
       return Object.freeze({ executionRecord, execution, orderReference });
-    });
+      });
+    } catch (error) {
+      if (!managedClose || runtimeServiceEntered || isFormalManagedClosePreMutationFailure(error)) throw error;
+      throw managedClosePreMutationFailure(
+        "PRE_MUTATION_CREDENTIAL_ACQUISITION",
+        "credential_acquisition_failed",
+        error,
+      );
+    }
   }
 
   async query(authenticatedUserId: string, executionId: string): Promise<BitgetIntentExecutionQueryRuntimeResult> {
