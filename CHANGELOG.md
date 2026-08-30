@@ -2,6 +2,67 @@
 
 本文档记录星衡项目的阶段版本。
 
+## Production Baseline — 2026-08-31
+
+- Production SHA: `2a9ad650eeae532c65a5e5323aada3f9c2164a9d`
+- Status: `STABLE_BASELINE`
+- Core venues: Binance / OKX / Bybit / Bitget
+- Funds execution: `Validated`
+- All-venues live Stage A: `PASS`
+- Provider duplicate mutations: `0`
+- Cross-venue / account / instance routing incidents: `0`
+- Active production trade gates: 四家全部 `live=false / kill=true`
+
+本条记录当前稳定运行基线；以下旧日期条目保留为历史，不代表当前部署状态。
+真钱验收结论沿用已完成并由用户确认的验收，不代表本次文档整理重新执行了交易或压力测试。
+本次只读复核生产 health、revision 和四家 gate；文档提交不改变上述 Production SHA，亦不需要部署。
+
+### 本阶段版本摘要
+
+范围：最近冻结基线 `20c9aa5c051337576e119fde6be79d262d6a83af` 至当前 Production SHA。
+
+1. **Four-venue funds execution**：Binance、OKX、Bybit、Bitget 核心 Start → Exit 已通过真钱验收；
+   execution identity、账户和实例归因继续保持隔离。
+2. **Start / Exit UX**：一次正式 Start 确认、Spot 权威成交与 attribution 后自动执行第二腿；
+   一次正式 Exit 确认完成两腿退出与 dust finalization。`974ff51` 将 Start terminal 后的实例、
+   verification / CloseSafety / Delta / Exit capability 纳入共享 authoritative refresh，loading 覆盖刷新提交。
+3. **Provider eventual consistency**：`88cb8bd` 支持 Bybit execution evidence 暂未同步时，
+   在同一 command 内继续有界只读 reconcile；不重复 Start 或 Provider mutation。
+4. **Managed-close safety / final reliability cleanup**：fresh CloseSafety 的 attempt-scoped
+   verified facts 传递至 mutation boundary；`1787893` / `d82d800` 收口 OKX，`5212dab` 收口 Bitget，
+   `99dfc88` 清理 Binance / Bybit 重复 pre-dispatch safety reads。保留必要权限、open-orders、
+   signing time 和 final pricing 读取及既有安全 fallback，不将所有 Provider GET 一概视为重复。
+5. **Bitget fixes**：`f8c2e05` 支持并严格校验 HEDGE `open_long/open_short/close_long/close_short`；
+   `d12e67a` 在权威 linear perpetual / base-quantity 条件下，对缺失 contractSize 派生内部
+   contractValue=1，显式非1仍 fail closed，canonical/native base quantity 语义不变。
+6. **Dust / Management Release**：`034f578` 完成 verified dust context 后的 fresh Spot balance-only
+   final release；release 不触发 Provider mutation，releasedQuantity 独立记录，不伪造 confirmed close。
+7. **Recovery / failure authority**：`26e05dc` 保留 pre-mutation failureStage 和受控诊断，区分
+   `NOT_DISPATCHED` 与 `DISPATCHED_OR_POSSIBLE`。不确定派发继续 fail closed；旧 intent 不自动恢复交易。
+8. **Lightweight observability**：`6667627` 提供 SQLite 轻量 per-command GET/place/cancel/amend
+   trace、post-safety window 和跨 venue/account/instance mutation 归属；best-effort，不记录敏感原始载荷。
+9. **All-venues live Stage A**：四家同时 live，逐 venue Start，再顺序完成 Exit；总计16笔 Provider
+   place orders，duplicates=0，cross venue/account/instance=0，Stage A 已 PASS。后续 cleanup
+   发布采用只读/隔离 smoke，没有将其描述成在新 SHA 上重新运行整轮真钱 Stage A。
+10. **Code reduction**：Batch 1（`2a9ad65`）已部署：删除无消费者 outer verifiedAt、
+    outer managedQuantityCeiling、native-rules contextFingerprint；共享 Formal execute/reconcile/cancel
+    纯 mapper，保留内部 freshness、scope authority 和 WeakSet provenance。受影响生产文件物理行净减89。
+    Batch 2 候选收益仅22行，低于30行门槛，未落地，FILES_CHANGED=0，无代码 commit 或部署。
+
+### 验证与后续边界
+
+- Batch 1 全量测试 `2348/2348 PASS`，typecheck、Web/API build、diff check 通过；生产 revision 与
+  commit 一致，health=true、API writers=1，WAL-aware backup/checksum/SQLite quick/integrity checks 通过，
+  历史 execution/reference/ledger 与订单库摘要不变，发布期间 Provider mutation=0。
+- Batch 2 保留原实现；基线定向测试 `304/304 PASS`、全量 `2348/2348 PASS`，typecheck/build/diff check 通过。
+- **Known legacy items**：5条已审查的历史 CLOSED-managed 记录属于 legacy residual model，
+  明确不属于当前版本新 Exit 路径产生；仅保留已批准的验收白名单，不补 release、不修改历史数据，
+  不将该豁免扩展到任何新实例。
+- **Deferred**：Stage B/C/D concurrency stress tests 已取消；Perp context-missing fallback cleanup、
+  manual recovery route cleanup、legacy migrations/rebind cleanup、diagnostic mapping cleanup 延期。
+- **Current strategy**：稳定运行观察，只处理真实 bug；不继续主动增加执行层复杂度。
+  后续代码修改、部署与真钱执行仍分别需要对应授权。
+
 ## Unreleased - OKX Spot/Perpetual real-money closed loop and handoff cleanup
 
 日期：2026-08-18
