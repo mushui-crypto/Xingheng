@@ -378,8 +378,8 @@ function observationForOrder(
       return unknown("Bitget Provider posSide does not match the execution bucket.", observedAt);
     }
     const expectedTradeSide = lookup.posSide === "long"
-      ? lookup.expectedSide === "buy" ? "open" : "close"
-      : lookup.expectedSide === "sell" ? "open" : "close";
+      ? lookup.expectedSide === "buy" ? "open_long" : "close_long"
+      : lookup.expectedSide === "sell" ? "open_short" : "close_short";
     if (order.tradeSide !== expectedTradeSide) {
       return unknown("Bitget Provider tradeSide does not match the execution semantic.", observedAt);
     }

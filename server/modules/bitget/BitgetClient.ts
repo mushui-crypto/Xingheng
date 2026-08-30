@@ -239,7 +239,11 @@ function providerOrder(row: Record<string, unknown>, category: BitgetProviderOrd
   const rawStatus = orderStatus(row);
   const fee = feeDetail(row.feeDetail);
   const posSide = providerEnum(row.posSide, ["long", "short"], "Bitget order posSide");
-  const tradeSide = providerEnum(row.tradeSide, ["open", "close"], "Bitget order tradeSide");
+  const tradeSide = providerEnum(
+    row.tradeSide,
+    ["open", "close", "open_long", "open_short", "close_long", "close_short"],
+    "Bitget order tradeSide",
+  );
   const holdMode = providerEnum(row.holdMode, ["one_way_mode", "hedge_mode"], "Bitget order holdMode");
   const reduceOnly = providerEnum(typeof row.reduceOnly === "string" ? row.reduceOnly.toLowerCase() : row.reduceOnly, ["yes", "no"], "Bitget order reduceOnly");
   return Object.freeze({

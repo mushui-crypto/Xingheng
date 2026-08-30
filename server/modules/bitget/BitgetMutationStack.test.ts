@@ -50,7 +50,7 @@ test("Bitget UTA client signs Spot/Perp place, exact query, and known-order canc
       if (url.pathname === "/api/v3/trade/order-info") {
         return Response.json({ code: "00000", data: {
           symbol: "DOGEUSDT", orderId: "90071992547409931234", clientOid: "sxbg-test", side: "sell",
-          posSide: "short", tradeSide: "open", holdMode: "hedge_mode",
+          posSide: "short", tradeSide: "open_short", holdMode: "hedge_mode",
           orderStatus: "partially_filled", qty: "95.12345678", cumExecQty: "40.12345678", avgPrice: "0.0842",
           feeDetail: [{ fee: "0.002", feeCoin: "USDT" }, { fee: "0.001", feeCoin: "USDT" }], updatedTime: String(now),
         } });
@@ -76,12 +76,56 @@ test("Bitget UTA client signs Spot/Perp place, exact query, and known-order canc
   assert.equal(order.fee, "0.003");
   assert.equal(order.feeCurrency, "USDT");
   assert.equal(order.posSide, "short");
-  assert.equal(order.tradeSide, "open");
+  assert.equal(order.tradeSide, "open_short");
   assert.equal(order.holdMode, "hedge_mode");
   await client.cancelOrder({ category: "USDT-FUTURES", symbol: "DOGEUSDT", orderId: accepted.orderId, clientOid: "sxbg-test" });
   assert.deepEqual(calls.map(({ method, path }) => [method, path]), [
     ["POST", "/api/v3/trade/place-order"], ["GET", "/api/v3/trade/order-info"], ["POST", "/api/v3/trade/cancel-order"],
   ]);
+});
+
+test("Bitget UTA client replays production HEDGE open_short filled evidence", async () => {
+  const client = new BitgetClient(() => ({ apiKey: "key", apiSecret: "secret", passphrase: "pass" }), {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ code: "00000", data: {
+      orderId: "1477865537739440128", clientOid: "sxbga6f126be4669155fd212e6e366ec",
+      category: "USDT-FUTURES", symbol: "DOGEUSDT", side: "sell",
+      orderStatus: "filled", qty: "95", cumExecQty: "95", avgPrice: "0.0847",
+      posSide: "short", tradeSide: "open_short", holdMode: "hedge_mode", reduceOnly: "NO",
+      feeDetail: [{ fee: "0.0048279", feeCoin: "USDT" }], updatedTime: String(now),
+    } })) as typeof fetch,
+  });
+
+  const order = await client.getOrder({
+    category: "USDT-FUTURES", symbol: "DOGEUSDT", orderId: "1477865537739440128",
+    clientOid: "sxbga6f126be4669155fd212e6e366ec",
+  });
+
+  assert.equal(order.status, "CONFIRMED");
+  assert.equal(order.requestedQuantity, "95");
+  assert.equal(order.filledQuantity, "95");
+  assert.equal(order.posSide, "short");
+  assert.equal(order.tradeSide, "open_short");
+  assert.equal(order.holdMode, "hedge_mode");
+});
+
+test("Bitget UTA client rejects an unknown tradeSide enum", async () => {
+  const client = new BitgetClient(() => ({ apiKey: "key", apiSecret: "secret", passphrase: "pass" }), {
+    now: () => now,
+    fetchImpl: (async () => Response.json({ code: "00000", data: {
+      orderId: "order-unknown", clientOid: "sxbg-unknown", category: "USDT-FUTURES", symbol: "DOGEUSDT",
+      side: "sell", orderStatus: "filled", qty: "95", cumExecQty: "95", avgPrice: "0.0847",
+      posSide: "short", tradeSide: "unexpected_short", holdMode: "hedge_mode", reduceOnly: "NO",
+      feeDetail: [], updatedTime: String(now),
+    } })) as typeof fetch,
+  });
+
+  await assert.rejects(
+    () => client.getOrder({
+      category: "USDT-FUTURES", symbol: "DOGEUSDT", orderId: "order-unknown", clientOid: "sxbg-unknown",
+    }),
+    (error: unknown) => error instanceof BitgetProviderError && error.category === "provider_response_invalid",
+  );
 });
 
 test("Bitget UTA quantity rules prove Spot and USDT Perp size are base quantity with contractSize=1", async () => {
@@ -308,7 +352,48 @@ test("Bitget UTA HEDGE LONG and SHORT openings preserve the target posSide witho
   }
 });
 
-test("Bitget UTA HEDGE query requires matching holdMode, posSide, and open semantic", async () => {
+test("Bitget UTA HEDGE query accepts direction-qualified opening and closing tradeSide evidence", async () => {
+  for (const fixture of [
+    { direction: "SHORT" as const, side: "sell" as const, reduceOnly: false, tradeSide: "open_short" as const },
+    { direction: "SHORT" as const, side: "buy" as const, reduceOnly: true, tradeSide: "close_short" as const },
+    { direction: "LONG" as const, side: "buy" as const, reduceOnly: false, tradeSide: "open_long" as const },
+    { direction: "LONG" as const, side: "sell" as const, reduceOnly: true, tradeSide: "close_long" as const },
+  ]) {
+    const provider = new FakeBitgetService();
+    provider.readPositionMode = async () => "HEDGE";
+    const intent = executionIntent({
+      instrumentId: "DOGE-USDT-PERP",
+      side: fixture.side,
+      positionDirection: fixture.direction,
+      reduceOnly: fixture.reduceOnly,
+      quantity: "95",
+    });
+    const service = new BitgetIntentExecutionService(provider, fixture.reduceOnly
+      ? { ...serviceOptions(), mutationEffect: "DECREASE", verifiedCloseContext: verifiedCloseContext(intent, fixture.direction) }
+      : serviceOptions());
+    const accepted = await service.execute(intent);
+    provider.orderStatus = "CONFIRMED";
+    provider.filledQuantity = "95";
+
+    const result = await service.query({
+      instrumentId: "DOGE-USDT-PERP",
+      category: accepted.category,
+      symbol: accepted.symbol,
+      orderId: accepted.providerOrderId,
+      clientOid: accepted.clientOrderId,
+      expectedProviderQuantity: accepted.expectedProviderQuantity,
+      expectedSide: accepted.expectedSide,
+      positionMode: accepted.positionMode,
+      positionDirection: accepted.positionDirection,
+      posSide: accepted.posSide,
+    });
+
+    assert.equal(provider.lastTradeSide, fixture.tradeSide);
+    assert.equal(result.observation.state, "CONFIRMED");
+  }
+});
+
+test("Bitget UTA HEDGE query rejects tradeSide conflicts and unqualified open/close evidence", async () => {
   const provider = new FakeBitgetService();
   provider.readPositionMode = async () => "HEDGE";
   const service = new BitgetIntentExecutionService(provider, serviceOptions());
@@ -336,6 +421,9 @@ test("Bitget UTA HEDGE query requires matching holdMode, posSide, and open seman
   assert.equal((await service.query(lookup)).observation.state, "CONFIRMED");
   for (const fixture of [
     { posSide: "long" as const, reason: /posSide/u },
+    { tradeSide: "close_long" as const, reason: /tradeSide/u },
+    { tradeSide: "close_short" as const, reason: /tradeSide/u },
+    { tradeSide: "open" as const, reason: /tradeSide/u },
     { tradeSide: "close" as const, reason: /tradeSide/u },
     { holdMode: "one_way_mode" as const, reason: /holdMode/u },
   ]) {
@@ -531,14 +619,20 @@ class FakeBitgetService {
   orderEvidenceOverride: Partial<Pick<BitgetProviderOrder, "posSide" | "tradeSide" | "holdMode" | "reduceOnly">> = {};
   placeFailure?: Error;
   private lastOrder?: BitgetPlaceOrderRequest;
+  get lastTradeSide() {
+    const placed = this.lastOrder;
+    if (placed?.posSide === undefined) return undefined;
+    const operation = placed.posSide === "long"
+      ? placed.side === "buy" ? "open" : "close"
+      : placed.side === "sell" ? "open" : "close";
+    return `${operation}_${placed.posSide}` as const;
+  }
   async assertOneWayMode() { this.positionModeReads += 1; if (!this.oneWay) throw new Error("one-way required"); }
   async placeOrder(request: BitgetPlaceOrderRequest) { this.placeRequests.push(request); this.lastOrder = request; if (this.placeFailure) throw this.placeFailure; return { category: request.category, symbol: request.symbol, orderId: "order-1", clientOid: request.clientOid }; }
   async getOrder(request: BitgetGetOrderRequest): Promise<BitgetProviderOrder> {
     this.getRequests.push(request); const placed = this.lastOrder; if (!placed) throw new Error("no order");
     const posSide = placed.posSide;
-    const tradeSide = posSide === undefined ? undefined
-      : posSide === "long" ? placed.side === "buy" ? "open" as const : "close" as const
-        : placed.side === "sell" ? "open" as const : "close" as const;
+    const tradeSide = this.lastTradeSide;
     return { category: request.category, symbol: request.symbol, orderId: request.orderId ?? "order-1", clientOid: request.clientOid,
       side: placed.side, status: this.orderStatus, rawStatus: "fixture", requestedQuantity: placed.qty,
       filledQuantity: this.filledQuantity, averagePrice: this.filledQuantity === "0" ? null : "0.085", fee: "0", feeCurrency: null,

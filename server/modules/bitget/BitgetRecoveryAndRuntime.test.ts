@@ -575,8 +575,8 @@ class FakeBitgetRuntimeService implements BitgetIntentRuntimeService {
     if (!placed) throw new Error("No fake Bitget order exists.");
     const posSide = this.posSideOverride ?? placed.posSide;
     const tradeSide = placed.posSide === undefined ? undefined
-      : placed.posSide === "long" ? placed.side === "buy" ? "open" as const : "close" as const
-        : placed.side === "sell" ? "open" as const : "close" as const;
+      : placed.posSide === "long" ? placed.side === "buy" ? "open_long" as const : "close_long" as const
+        : placed.side === "sell" ? "open_short" as const : "close_short" as const;
     return { category: placed.category, symbol: placed.symbol, orderId: "order-1", clientOid: placed.clientOid,
       side: placed.side, status: this.status, rawStatus: this.status, requestedQuantity: placed.qty,
       filledQuantity: this.filled, averagePrice: this.filled === "0" ? null : "0.085",
