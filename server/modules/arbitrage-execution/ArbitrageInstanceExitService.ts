@@ -1,3 +1,4 @@
+import { withProviderCommandTrace, providerTraceBindings } from "../cex/ProviderRequestTrace";
 import { createHash } from "node:crypto";
 import {
   activeManagedQuantity,
@@ -30,7 +31,8 @@ import {
   type OnlineReconcileAttempt,
 } from "./OnlineReconcileFinalization";
 
-type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
+type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome"> &
+  Partial<Pick<ArbitrageInstanceStore, "recordProviderTrace">>;
 type CloseService = Pick<ArbitrageExecutionCloseService, "closeLeg" | "evaluateCloseSafety"> &
   Partial<Pick<ArbitrageExecutionCloseService, "closeLegForExit" | "evaluateCloseSafetyAssessment">>;
 type ReconciliationService = Pick<ArbitrageExecutionCommandService, "reconcileLeg">;
@@ -86,7 +88,11 @@ export class ArbitrageInstanceExitService {
     const key = `${userId}\0${request.arbitrageId}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing;
-    const operation = this.exitWithOutcomeAudit(userId, request);
+    const operation = withProviderCommandTrace({ userId, instanceId: request.arbitrageId,
+      commandId: request.commandId, phase: "EXIT",
+      bindings: providerTraceBindings(() => this.instances.get(userId, request.arbitrageId)?.legs ?? []) },
+    trace => this.instances.recordProviderTrace?.(trace),
+    () => this.exitWithOutcomeAudit(userId, request));
     this.inFlight.set(key, operation);
     try {
       return await operation;

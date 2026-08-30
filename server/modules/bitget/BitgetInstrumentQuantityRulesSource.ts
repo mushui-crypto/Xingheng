@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { decimalStepFromPrecision } from "../cex/TradingRules";
 import type { BitgetQuantityRulesSource } from "./BitgetQuantitySemantics";
 
@@ -14,7 +15,7 @@ export function createBitgetInstrumentQuantityRulesSource(
   options: BitgetInstrumentQuantityRulesSourceOptions = {},
 ): BitgetQuantityRulesSource {
   const baseUrl = options.baseUrl ?? BITGET_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bitget", options.fetchImpl ?? fetch);
   const clock = options.clock ?? Date.now;
   const timeoutMs = options.timeoutMs ?? 10_000;
   return async (category, symbol) => {
@@ -23,7 +24,7 @@ export function createBitgetInstrumentQuantityRulesSource(
     url.searchParams.set("symbol", symbol);
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`Bitget instrument request failed: ${response.status}.`);
-    const payload = record(await response.json(), "Bitget instrument response");
+    const payload = record(await tracedProviderJson(response), "Bitget instrument response");
     if (payload.code !== "00000") throw new Error(`Bitget instrument response rejected: ${String(payload.code)}.`);
     const rows = array(payload.data, "Bitget instrument data").map((item) => record(item, "Bitget instrument"));
     const matches = rows.filter((row) => row.symbol === symbol);

@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createHash, createHmac } from "node:crypto";
 
 const OKX_API_BASE_URL = "https://www.okx.com";
@@ -62,7 +63,7 @@ export class OkxAccountReadClient {
     options: OkxAccountReadClientOptions = {},
   ) {
     this.baseUrl = options.baseUrl ?? OKX_API_BASE_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = tracedProviderFetch("okx", options.fetchImpl ?? fetch);
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
@@ -177,7 +178,7 @@ export class OkxAccountReadClient {
     }
     let payload: OkxResponse;
     try {
-      payload = await response.json() as OkxResponse;
+      payload = await tracedProviderJson(response) as OkxResponse;
     } catch {
       throw new OkxAccountReadError("provider_response_invalid", "OKX account read response is not valid JSON.");
     }

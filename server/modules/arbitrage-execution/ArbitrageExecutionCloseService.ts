@@ -1,3 +1,4 @@
+import { markPerpCloseSafetyPass, endPerpCloseTraceAttempt } from "../cex/ProviderRequestTrace";
 import { createHash } from "node:crypto";
 import {
   compareUnsignedDecimals,
@@ -198,7 +199,10 @@ export class ArbitrageExecutionCloseService {
       venue: leg.venue,
       accountId: leg.accountId,
       canonicalInstrumentId: leg.instrumentId,
-    }, () => this.closeLegOnce(userId, request, mutationDeadline));
+    }, async () => {
+      try { return await this.closeLegOnce(userId, request, mutationDeadline); }
+      finally { endPerpCloseTraceAttempt(leg); }
+    });
   }
 
   private async closeLegOnce(
@@ -243,6 +247,9 @@ export class ArbitrageExecutionCloseService {
     );
     assertMutationDeadline(this.now(), mutationDeadline);
     assertCloseSafetyAvailable(safety.result);
+    if (safety.market === "PERPETUAL") {
+      markPerpCloseSafetyPass({ venue: leg.venue, accountId: leg.accountId, executionIntentId: intentId });
+    }
     const context = safety.context;
     const planner = safety.planner;
     if (!context || !planner || safety.market === null) {

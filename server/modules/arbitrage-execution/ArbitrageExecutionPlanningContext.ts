@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createExecutionCanonicalAssetSource, type CanonicalAssetSource } from "../cex/CanonicalAssetSource";
 import type {
   ExecutionQuantityDecimalQuote,
@@ -68,14 +69,15 @@ implements ArbitrageExecutionPlanningContextSource {
     const asset = this.assets.getAsset(canonical.baseAsset);
     if (!asset) throw new Error("Canonical asset mapping is unavailable.");
     const venueInstrument = this.instruments.resolveVenueInstrument(canonical, venue);
-    const client = new HttpPublicTradingRulesClient(BASE_URLS[venue], this.fetchFn);
+    const tracedFetch = tracedProviderFetch(venue, this.fetchFn);
+    const client = new HttpPublicTradingRulesClient(BASE_URLS[venue], tracedFetch);
     const okxRules = venue === "okx" && canonical.contractType === "perpetual"
       ? await new OkxTradingRulesAdapter(client).getPerpetualTradingRulesWithNativeFacts(venueInstrument)
       : null;
     const nativeRulesVerifiedAt = okxRules === null ? null : this.now();
     const tradingRules = okxRules?.tradingRules
       ?? await rulesAdapter(venue, client).getTradingRules(venueInstrument);
-    const quote = await readDecimalQuote(venue, venueInstrument.symbol, venueInstrument.category, this.fetchFn, this.now);
+    const quote = await readDecimalQuote(venue, venueInstrument.symbol, venueInstrument.category, tracedFetch, this.now);
     const instrument: ExecutionQuantityPlanningInstrument = Object.freeze({
       instrumentId: canonical.instrumentId,
       providerSymbol: venueInstrument.symbol,
@@ -126,7 +128,7 @@ async function readDecimalQuote(
     signal: AbortSignal.timeout(5_000),
   });
   if (!response.ok) throw new Error("Venue quote request failed.");
-  const payload = await response.json();
+  const payload = await tracedProviderJson(response);
   const values = quoteValues(venue, payload, symbol);
   const fetchedAt = now();
   if (!Number.isSafeInteger(fetchedAt) || fetchedAt < 0) throw new Error("Quote timestamp is invalid.");

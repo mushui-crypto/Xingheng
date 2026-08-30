@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createHash, createHmac } from "node:crypto";
 import type {
   BybitAccountAccess,
@@ -56,7 +57,7 @@ export class BybitClient {
     options: BybitClientOptions = {},
   ) {
     this.baseUrl = options.baseUrl ?? BYBIT_API_BASE_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = tracedProviderFetch("bybit", options.fetchImpl ?? fetch);
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
@@ -334,7 +335,7 @@ export class BybitClient {
     if (!response.ok) throw new BybitProviderError("provider_transport_error", `Bybit request failed with HTTP ${response.status}.`);
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await tracedProviderJson(response);
     } catch {
       throw new BybitProviderError("provider_response_invalid", "Bybit response is not valid JSON.");
     }

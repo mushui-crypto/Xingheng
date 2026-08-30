@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type {
   OkxQuantityRulesSnapshot,
   OkxQuantityRulesSource,
@@ -17,7 +18,7 @@ export function createOkxInstrumentQuantityRulesSource(
   options: OkxInstrumentQuantityRulesSourceOptions = {},
 ): OkxQuantityRulesSource {
   const baseUrl = options.baseUrl ?? OKX_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("okx", options.fetchImpl ?? fetch);
   const clock = options.clock ?? Date.now;
   const timeoutMs = positiveSafeInteger(options.timeoutMs ?? 5_000, "OKX quantity rules timeoutMs");
 
@@ -43,7 +44,7 @@ export function createOkxInstrumentQuantityRulesSource(
 
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await tracedProviderJson(response);
     } catch {
       throw new Error("OKX quantity rules response is not valid JSON.");
     }

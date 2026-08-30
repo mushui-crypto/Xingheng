@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { BybitQuantityRulesSnapshot, BybitQuantityRulesSource } from "./BybitQuantitySemantics";
 import type { BybitCategory } from "./BybitTypes";
 
@@ -14,7 +15,7 @@ export function createBybitInstrumentQuantityRulesSource(
   options: BybitInstrumentQuantityRulesSourceOptions = {},
 ): BybitQuantityRulesSource {
   const baseUrl = options.baseUrl ?? BYBIT_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bybit", options.fetchImpl ?? fetch);
   const clock = options.clock ?? Date.now;
   const timeoutMs = positiveSafeInteger(options.timeoutMs ?? 5_000, "Bybit quantity rules timeoutMs");
 
@@ -37,7 +38,7 @@ export function createBybitInstrumentQuantityRulesSource(
     if (!response.ok) throw new Error(`Bybit quantity rules request failed with HTTP ${response.status}.`);
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await tracedProviderJson(response);
     } catch {
       throw new Error("Bybit quantity rules response is not valid JSON.");
     }

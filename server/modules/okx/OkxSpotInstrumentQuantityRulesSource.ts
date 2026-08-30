@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { OkxSpotQuantityRulesSource, OkxSpotQuantityRulesSnapshot } from "./OkxSpotQuantitySemantics";
 
 const OKX_API_BASE_URL = "https://www.okx.com";
@@ -8,7 +9,7 @@ export function createOkxSpotInstrumentQuantityRulesSource(options: Readonly<{
   clock?: () => number;
   timeoutMs?: number;
 }> = {}): OkxSpotQuantityRulesSource {
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("okx", options.fetchImpl ?? fetch);
   const baseUrl = options.baseUrl ?? OKX_API_BASE_URL;
   const clock = options.clock ?? Date.now;
   const timeoutMs = options.timeoutMs ?? 5_000;
@@ -23,7 +24,7 @@ export function createOkxSpotInstrumentQuantityRulesSource(options: Readonly<{
       response = await fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
     } catch { throw new Error("OKX Spot quantity rules request failed."); }
     if (!response.ok) throw new Error(`OKX Spot quantity rules request failed with HTTP ${response.status}.`);
-    const payload = await response.json().catch(() => { throw new Error("OKX Spot quantity rules response is not valid JSON."); });
+    const payload = await tracedProviderJson(response).catch(() => { throw new Error("OKX Spot quantity rules response is not valid JSON."); });
     const root = object(payload, "OKX Spot quantity rules response");
     if (text(root.code, "OKX Spot quantity rules response code") !== "0") throw new Error("OKX Spot quantity rules response was rejected.");
     const data = root.data;

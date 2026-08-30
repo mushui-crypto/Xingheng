@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createHash, createHmac } from "node:crypto";
 
 const BITGET_API_BASE_URL = "https://api.bitget.com";
@@ -90,7 +91,7 @@ export class BitgetAccountReadClient {
     options: BitgetAccountReadClientOptions = {},
   ) {
     this.baseUrl = options.baseUrl ?? BITGET_API_BASE_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = tracedProviderFetch("bitget", options.fetchImpl ?? fetch);
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
@@ -251,7 +252,7 @@ export class BitgetAccountReadClient {
     }
     let payload: BitgetResponse;
     try {
-      payload = await response.json() as BitgetResponse;
+      payload = await tracedProviderJson(response) as BitgetResponse;
     } catch {
       if (!response.ok) {
         throw new BitgetAccountReadError("provider_read_failed", `Bitget account read request failed: ${response.status}.`);

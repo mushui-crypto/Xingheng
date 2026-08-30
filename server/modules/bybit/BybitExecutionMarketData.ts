@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { BybitCategory } from "./BybitTypes";
 
 export type BybitExecutionTicker = Readonly<{
@@ -20,7 +21,7 @@ export function createBybitExecutionTickerSource(options: Readonly<{
   clock?: () => number;
 }> = {}): BybitExecutionTickerSource {
   const baseUrl = options.baseUrl ?? "https://api.bybit.com";
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bybit", options.fetchImpl ?? fetch);
   const timeoutMs = options.timeoutMs ?? 5_000;
   const clock = options.clock ?? Date.now;
   return async (category, symbol) => {
@@ -29,7 +30,7 @@ export function createBybitExecutionTickerSource(options: Readonly<{
     url.searchParams.set("symbol", symbol);
     const response = await fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`Bybit ticker request failed with HTTP ${response.status}.`);
-    const root = record(await response.json(), "Bybit ticker response");
+    const root = record(await tracedProviderJson(response), "Bybit ticker response");
     if (root.retCode !== 0) throw new Error(`Bybit ticker response rejected: ${String(root.retCode)}.`);
     const result = record(root.result, "Bybit ticker result");
     const rows = array(result.list, "Bybit ticker list").map((item) => record(item, "Bybit ticker"))

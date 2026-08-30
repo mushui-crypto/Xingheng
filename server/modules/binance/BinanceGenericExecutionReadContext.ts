@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { CanonicalAssetSource } from "../cex/CanonicalAssetSource";
 import type {
   ExecutionQuantityDecimalQuote,
@@ -69,7 +70,7 @@ export class HttpBinanceGenericExecutionReadClient implements BinanceGenericExec
     for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
     let response: Response;
     try {
-      response = await this.fetchFn(url, {
+      response = await tracedProviderFetch("binance", this.fetchFn)(url, {
         method: "GET",
         headers: { Accept: "application/json" },
         signal: AbortSignal.timeout(5_000),
@@ -84,7 +85,7 @@ export class HttpBinanceGenericExecutionReadClient implements BinanceGenericExec
       );
     }
     try {
-      return await response.json();
+      return await tracedProviderJson(response);
     } catch {
       throw new BinanceGenericExecutionReadError("PROVIDER_RESPONSE_INVALID", "Binance returned invalid JSON.");
     }

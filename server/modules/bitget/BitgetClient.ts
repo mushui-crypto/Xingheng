@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createHash, createHmac } from "node:crypto";
 import type {
   BitgetCancelOrderRequest,
@@ -30,7 +31,7 @@ export class BitgetClient {
 
   constructor(private readonly credentialProvider: () => BitgetCredentials, options: BitgetClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? BITGET_API_BASE_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = tracedProviderFetch("bitget", options.fetchImpl ?? fetch);
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
@@ -171,7 +172,7 @@ export class BitgetClient {
       throw new BitgetProviderError("provider_transport_error", "Bitget request failed.");
     }
     let payload: unknown;
-    try { payload = await response.json(); } catch {
+    try { payload = await tracedProviderJson(response); } catch {
       throw new BitgetProviderError("provider_response_invalid", "Bitget response is not valid JSON.");
     }
     const root = record(payload, "Bitget response");

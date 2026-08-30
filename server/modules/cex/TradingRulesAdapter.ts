@@ -1,3 +1,4 @@
+import { tracedProviderJson } from "./ProviderRequestTrace";
 import type { VenueInstrument } from "./Instrument";
 import { createTradingRules, decimalStepFromPrecision, type TradingRules } from "./TradingRules";
 
@@ -39,7 +40,7 @@ export class HttpPublicTradingRulesClient implements PublicTradingRulesClient {
     if (!response.ok) {
       throw new Error(`Trading rules HTTP ${response.status}: ${response.statusText}.`);
     }
-    return response.json();
+    return tracedProviderJson(response);
   }
 }
 

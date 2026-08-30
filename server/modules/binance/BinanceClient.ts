@@ -1,3 +1,4 @@
+import { tracedProviderFetch, recordProviderResponseCode } from "../cex/ProviderRequestTrace";
 import { createHash, createHmac } from "node:crypto";
 import { isIP } from "node:net";
 import JSONBig from "json-bigint";
@@ -827,7 +828,7 @@ export class BinanceClient implements BinanceClientAdapter {
 
   private async fetchResponse(url: URL, init: RequestInit, onDispatch?: () => void) {
     try {
-      const response = this.fetchFn(url, init);
+      const response = tracedProviderFetch("binance", this.fetchFn)(url, init);
       // The request promise now exists: transport dispatch has started. Persisting before this point
       // would incorrectly treat a pre-dispatch failure as an ambiguous provider mutation.
       onDispatch?.();
@@ -850,6 +851,7 @@ export class BinanceClient implements BinanceClientAdapter {
     }
     const root = record(payload);
     const code = Number(root.code ?? response.status);
+    recordProviderResponseCode(response, root.code);
     if (response.ok && !(Number.isFinite(code) && code < 0)) return payload;
     const category = categoryFromBinanceFailure(response.status, code);
     throw new BinanceProviderError(category, humanMessageForBinanceFailure(category, code), Number.isFinite(code) ? code : null);

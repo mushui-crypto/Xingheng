@@ -1,3 +1,4 @@
+import { withProviderCommandTrace } from "../cex/ProviderRequestTrace";
 import { createHash } from "node:crypto";
 import {
   activeManagedQuantity,
@@ -17,7 +18,8 @@ import {
   type OnlineReconcileAttempt,
 } from "./OnlineReconcileFinalization";
 
-type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome">;
+type InstanceStore = Pick<ArbitrageInstanceStore, "get" | "recordCommandOutcome"> &
+  Partial<Pick<ArbitrageInstanceStore, "recordProviderTrace">>;
 type LegExecutor = Pick<ArbitrageExecutionCommandService, "executeLeg" | "reconcileLeg">;
 
 const DEFAULT_FIRST_LEG_FINALIZATION_BUDGET_MS = 15_000;
@@ -127,7 +129,10 @@ export class ArbitrageHedgeStartService {
       return existing.operation;
     }
 
-    const operation = this.startWithOutcomeAudit(userId, arbitrageId, instance, request);
+    const operation = withProviderCommandTrace({ userId, instanceId: arbitrageId,
+      commandId: request.hedgeCommandId, phase: "START", bindings: instance.legs },
+    trace => this.instances.recordProviderTrace?.(trace),
+    () => this.startWithOutcomeAudit(userId, arbitrageId, instance, request));
     this.inFlight.set(key, { fingerprint, operation });
     try {
       return await operation;

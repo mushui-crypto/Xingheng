@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import { createHmac } from "node:crypto";
 import type { AccountReadAccountType } from "../account-read/AccountReadTypes";
 
@@ -85,7 +86,7 @@ export class BybitAccountReadClient {
     options: BybitAccountReadClientOptions = {},
   ) {
     this.baseUrl = options.baseUrl ?? BYBIT_API_BASE_URL;
-    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.fetchImpl = tracedProviderFetch("bybit", options.fetchImpl ?? fetch);
     this.now = options.now ?? Date.now;
     this.timeoutMs = options.timeoutMs ?? 10_000;
   }
@@ -246,7 +247,7 @@ export class BybitAccountReadClient {
     }
     let payload: BybitResponse;
     try {
-      payload = await response.json() as BybitResponse;
+      payload = await tracedProviderJson(response) as BybitResponse;
     } catch {
       throw new BybitAccountReadError("provider_response_invalid", "Bybit account read response is not valid JSON.");
     }

@@ -1,3 +1,4 @@
+import { type ProviderCommandTrace, summarizeProviderTraces } from "../ProviderRequestTrace";
 import { mkdirSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { dirname, resolve } from "node:path";
@@ -400,6 +401,34 @@ export class ArbitrageInstanceStore {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;");
     this.migrate();
+    // Optional observability must not block execution/store startup.
+    try {
+      this.db.exec(`CREATE TABLE IF NOT EXISTS provider_command_traces (
+        traceId TEXT PRIMARY KEY, userId TEXT NOT NULL, instanceId TEXT NOT NULL,
+        commandId TEXT NOT NULL, startedAt INTEGER NOT NULL, traceJson TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS provider_traces_command ON provider_command_traces(userId, commandId);
+      CREATE INDEX IF NOT EXISTS provider_traces_instance ON provider_command_traces(userId, instanceId);`);
+    } catch { /* best effort; missing trace means incomplete evidence */ }
+  }
+
+  recordProviderTrace(trace: ProviderCommandTrace) {
+    this.db.prepare(`INSERT OR IGNORE INTO provider_command_traces
+      (traceId,userId,instanceId,commandId,startedAt,traceJson) VALUES (?,?,?,?,?,?)`)
+      .run(trace.traceId, trace.userId, trace.instanceId, trace.commandId, trace.startedAt, JSON.stringify(trace));
+    // Only this observational table is pruned; never execution/reference/ledger/outcome audit.
+    this.db.prepare("DELETE FROM provider_command_traces WHERE startedAt < ?")
+      .run(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    this.db.exec(`DELETE FROM provider_command_traces WHERE traceId IN
+      (SELECT traceId FROM provider_command_traces ORDER BY startedAt DESC LIMIT -1 OFFSET 5000)`);
+  }
+
+  readProviderTraces(userId: string, instanceId: string, commandId?: string) {
+    const rows = this.db.prepare(`SELECT traceJson FROM provider_command_traces
+      WHERE userId=? AND instanceId=? ${commandId === undefined ? "" : "AND commandId=?"} ORDER BY startedAt`)
+      .all(...(commandId === undefined ? [userId, instanceId] : [userId, instanceId, commandId])) as { traceJson: string }[];
+    const traces = rows.map(row => JSON.parse(row.traceJson) as ProviderCommandTrace);
+    return { traces, summary: summarizeProviderTraces(traces) };
   }
 
   create(input: NewArbitrageInstance, openingSetup?: ArbitrageOpeningSetup): ArbitrageInstance {

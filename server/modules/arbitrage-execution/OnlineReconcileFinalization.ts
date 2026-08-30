@@ -1,3 +1,4 @@
+import { withProviderReconcileAttempt } from "../cex/ProviderRequestTrace";
 import {
   ArbitrageExecutionCommandError,
   type ArbitrageLegExecutionConfirmation,
@@ -46,7 +47,7 @@ export async function finalizeExecutionOnline(input: Readonly<{
 
   for (let attempt = 1; attempt <= input.maxAttempts && input.now() < deadline; attempt += 1) {
     try {
-      confirmation = await input.reconcile();
+      confirmation = await withProviderReconcileAttempt(attempt, input.reconcile);
       input.assertIdentity(confirmation);
       if (!input.isPendingWithoutFill(confirmation)) {
         attempts.push(attemptAudit(attempt, input.venue, "SUCCESS", "COMPLETE", 0, null));

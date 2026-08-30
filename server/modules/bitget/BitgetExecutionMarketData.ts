@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { BitgetCategory } from "./BitgetTypes";
 
 export type BitgetExecutionTicker = Readonly<{
@@ -13,7 +14,7 @@ export function createBitgetExecutionTickerSource(options: Readonly<{
   baseUrl?: string; fetchImpl?: typeof fetch; timeoutMs?: number; clock?: () => number;
 }> = {}): BitgetExecutionTickerSource {
   const baseUrl = options.baseUrl ?? "https://api.bitget.com";
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bitget", options.fetchImpl ?? fetch);
   const timeoutMs = options.timeoutMs ?? 5_000;
   const clock = options.clock ?? Date.now;
   return async (category, symbol) => {
@@ -22,7 +23,7 @@ export function createBitgetExecutionTickerSource(options: Readonly<{
     url.searchParams.set("symbol", symbol);
     const response = await fetchImpl(url, { method: "GET", headers: { Accept: "application/json" }, signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`Bitget ticker request failed with HTTP ${response.status}.`);
-    const root = record(await response.json(), "Bitget ticker response");
+    const root = record(await tracedProviderJson(response), "Bitget ticker response");
     if (root.code !== "00000") throw new Error(`Bitget ticker response rejected: ${String(root.code)}.`);
     const rows = array(root.data, "Bitget ticker list").map((item) => record(item, "Bitget ticker"))
       .filter((item) => item.category === category && item.symbol === symbol);

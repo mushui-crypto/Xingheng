@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { MarketDataPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalTopOfBook } from "../cex/CexCanonicalModels";
 import type { BybitInstrumentBinding, BybitMarketTicker } from "./BybitReadTypes";
@@ -25,7 +26,7 @@ type BybitTickerResponse = {
 
 export function createBybitTickerSource(options: BybitTickerSourceOptions = {}): BybitTickerSource {
   const baseUrl = options.baseUrl ?? BYBIT_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bybit", options.fetchImpl ?? fetch);
   const timeoutMs = options.timeoutMs ?? 10_000;
 
   return async (symbol) => {
@@ -34,7 +35,7 @@ export function createBybitTickerSource(options: BybitTickerSourceOptions = {}):
     url.searchParams.set("symbol", symbol);
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`Bybit ticker request failed: ${response.status}.`);
-    const payload = await response.json() as BybitTickerResponse;
+    const payload = await tracedProviderJson(response) as BybitTickerResponse;
     if (payload.retCode !== undefined && payload.retCode !== 0) {
       throw new Error(`Bybit ticker response rejected: ${payload.retCode}.`);
     }

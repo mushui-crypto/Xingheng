@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { MarketDataPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalTopOfBook } from "../cex/CexCanonicalModels";
 import type { OkxInstrumentBinding, OkxTickerRecord } from "./OkxReadTypes";
@@ -20,7 +21,7 @@ type OkxTickerResponse = {
 
 export function createOkxTickerSource(options: OkxTickerSourceOptions = {}): OkxTickerSource {
   const baseUrl = options.baseUrl ?? OKX_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("okx", options.fetchImpl ?? fetch);
   const timeoutMs = options.timeoutMs ?? 10_000;
 
   return async (symbol) => {
@@ -28,7 +29,7 @@ export function createOkxTickerSource(options: OkxTickerSourceOptions = {}): Okx
     url.searchParams.set("instId", symbol);
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`OKX ticker request failed: ${response.status}.`);
-    const payload = await response.json() as OkxTickerResponse;
+    const payload = await tracedProviderJson(response) as OkxTickerResponse;
     if (payload.code && payload.code !== "0") {
       throw new Error(`OKX ticker response rejected: ${payload.code}.`);
     }

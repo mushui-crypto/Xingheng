@@ -1,3 +1,4 @@
+import { tracedProviderFetch, tracedProviderJson } from "../cex/ProviderRequestTrace";
 import type { MarketDataPort } from "../cex/CexCapabilityPorts";
 import type { CanonicalTopOfBook } from "../cex/CexCanonicalModels";
 import type { BitgetInstrumentBinding, BitgetMarketTicker } from "./BitgetReadTypes";
@@ -23,7 +24,7 @@ type BitgetTickerResponse = {
 
 export function createBitgetTickerSource(options: BitgetTickerSourceOptions = {}): BitgetTickerSource {
   const baseUrl = options.baseUrl ?? BITGET_API_BASE_URL;
-  const fetchImpl = options.fetchImpl ?? fetch;
+  const fetchImpl = tracedProviderFetch("bitget", options.fetchImpl ?? fetch);
   const timeoutMs = options.timeoutMs ?? 10_000;
 
   return async (symbol) => {
@@ -32,7 +33,7 @@ export function createBitgetTickerSource(options: BitgetTickerSourceOptions = {}
     url.searchParams.set("productType", "USDT-FUTURES");
     const response = await fetchImpl(url, { signal: AbortSignal.timeout(timeoutMs) });
     if (!response.ok) throw new Error(`Bitget ticker request failed: ${response.status}.`);
-    const payload = await response.json() as BitgetTickerResponse;
+    const payload = await tracedProviderJson(response) as BitgetTickerResponse;
     if (payload.code && payload.code !== "00000") {
       throw new Error(`Bitget ticker response rejected: ${payload.code}.`);
     }
