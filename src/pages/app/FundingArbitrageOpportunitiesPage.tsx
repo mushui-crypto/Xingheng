@@ -1,5 +1,5 @@
 import { AlertTriangle, ArrowLeft, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useReducer } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { ArbitrageOpportunityAnalysis } from "../../features/arbitrage/components/ArbitrageOpportunityAnalysis";
@@ -8,13 +8,17 @@ import {
   findArbitrageAnalysisOpportunity,
   parseArbitrageAnalysisHorizon,
 } from "../../features/arbitrage/lib/analysisRoute";
+import {
+  ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS,
+  startVisibilityAwarePolling,
+} from "../../features/arbitrage/lib/visibilityPolling";
 import type {
   ArbitrageDashboardSnapshot,
   ArbitrageHorizon,
 } from "../../features/arbitrage/model/types";
 
 const horizons: ArbitrageHorizon[] = [90, 365];
-export const ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
+export { ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS } from "../../features/arbitrage/lib/visibilityPolling";
 
 export type ArbitrageDashboardRefreshState = {
   snapshot: ArbitrageDashboardSnapshot | null;
@@ -81,8 +85,17 @@ export function FundingArbitrageOpportunitiesPage() {
   );
   const loading = status === "loading" || (Boolean(opportunityId) && !snapshot && !error);
   const refreshing = status === "refreshing";
+  const lifecycleGeneration = useRef(0);
+
+  useEffect(() => {
+    lifecycleGeneration.current += 1;
+    return () => {
+      lifecycleGeneration.current += 1;
+    };
+  }, []);
 
   const load = useCallback(async (forceRefresh = false) => {
+    const generation = lifecycleGeneration.current;
     if (!opportunityId) {
       dispatchRefresh({ type: "reset" });
       return;
@@ -90,12 +103,15 @@ export function FundingArbitrageOpportunitiesPage() {
 
     dispatchRefresh({ type: "load-started", selectedOpportunityId: opportunityId });
     try {
+      const nextSnapshot = await fetchArbitrageDashboard(horizonDays, forceRefresh);
+      if (lifecycleGeneration.current !== generation) return;
       dispatchRefresh({
         type: "load-succeeded",
-        snapshot: await fetchArbitrageDashboard(horizonDays, forceRefresh),
+        snapshot: nextSnapshot,
         selectedOpportunityId: opportunityId,
       });
     } catch (loadError) {
+      if (lifecycleGeneration.current !== generation) return;
       dispatchRefresh({
         type: "load-failed",
         error: loadError instanceof Error ? loadError.message : "套利分析数据加载失败。",
@@ -109,8 +125,10 @@ export function FundingArbitrageOpportunitiesPage() {
 
   useEffect(() => {
     if (!opportunityId) return;
-    const timer = window.setInterval(() => void load(), ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    return startVisibilityAwarePolling(
+      () => void load(),
+      ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS,
+    );
   }, [load, opportunityId]);
 
   const opportunity = findArbitrageAnalysisOpportunity(snapshot, opportunityId);

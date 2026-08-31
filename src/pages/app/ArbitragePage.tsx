@@ -1,5 +1,5 @@
 import { AlertTriangle, ChevronLeft, ChevronRight, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { fetchArbitrageDashboard } from "../../api/arbitrage";
 import { HttpRequestError } from "../../api/httpClient";
@@ -10,6 +10,10 @@ import { ArbitrageHelp } from "../../features/arbitrage/components/ArbitrageHelp
 import { ArbitrageSummaryBar } from "../../features/arbitrage/components/ArbitrageSummaryBar";
 import { equivalentNetYield } from "../../features/arbitrage/lib/formatters";
 import { buildArbitrageAnalysisHref } from "../../features/arbitrage/lib/analysisRoute";
+import {
+  ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS,
+  startVisibilityAwarePolling,
+} from "../../features/arbitrage/lib/visibilityPolling";
 import {
   matchesOpportunityEntryStatus,
   matchesOpportunityProductType,
@@ -104,6 +108,14 @@ export function ArbitragePage() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
+  const lifecycleGeneration = useRef(0);
+
+  useEffect(() => {
+    lifecycleGeneration.current += 1;
+    return () => {
+      lifecycleGeneration.current += 1;
+    };
+  }, []);
 
   const assetOptions = useMemo<Array<{ value: AssetFilter; label: string }>>(() => {
     const available = new Set(snapshot?.markets.map((market) => market.asset) ?? ARBITRAGE_ASSET_ORDER);
@@ -129,13 +141,18 @@ export function ArbitragePage() {
   ), [snapshot]);
 
   const load = useCallback(async (forceRefresh = false) => {
+    const generation = lifecycleGeneration.current;
     forceRefresh ? setRefreshing(true) : setLoading(true);
     setError("");
     try {
-      setSnapshot(await fetchArbitrageDashboard(horizonDays, forceRefresh));
+      const nextSnapshot = await fetchArbitrageDashboard(horizonDays, forceRefresh);
+      if (lifecycleGeneration.current !== generation) return;
+      setSnapshot(nextSnapshot);
     } catch (loadError) {
+      if (lifecycleGeneration.current !== generation) return;
       setError(formatArbitrageError(loadError));
     } finally {
+      if (lifecycleGeneration.current !== generation) return;
       setLoading(false);
       setRefreshing(false);
     }
@@ -146,8 +163,10 @@ export function ArbitragePage() {
   }, [load]);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void load(), 30_000);
-    return () => window.clearInterval(timer);
+    return startVisibilityAwarePolling(
+      () => void load(),
+      ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS,
+    );
   }, [load]);
 
   const filteredMarkets = useMemo(() => {

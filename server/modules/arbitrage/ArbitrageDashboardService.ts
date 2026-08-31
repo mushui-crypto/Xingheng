@@ -1,4 +1,11 @@
+import { performance } from "node:perf_hooks";
 import { buildArbitrageOpportunities, calculateHistoricalFundingMetrics } from "./arbitrageScoring";
+import {
+  createArbitrageRawRefreshTiming,
+  providerAndCategory,
+  roundMs,
+  type ArbitrageRawRefreshTimingContext,
+} from "./ArbitrageDashboardTiming";
 import type {
   ArbitrageAsset,
   ArbitrageDashboardSnapshot,
@@ -14,6 +21,7 @@ const requestTimeoutMs = 10_000;
 const snapshotTtlMs = 20_000;
 const forcedRefreshCooldownMs = 10_000;
 const fundingHistoryTtlMs = 15 * 60_000;
+export const ORDERBOOK_CACHE_TTL_MS = 30_000;
 const millisecondsPerDay = 24 * 60 * 60 * 1000;
 const fundingLookbackDays = 90;
 const marketLoadConcurrency = 8;
@@ -62,11 +70,30 @@ type CurrentMarketBatches = {
   okxPerpetualTickers: Promise<Map<string, any>>;
 };
 
+type OrderbookSnapshot = {
+  bids: readonly Readonly<OrderbookLevel>[];
+  asks: readonly Readonly<OrderbookLevel>[];
+  timestamp: number;
+};
+
+type RawMarketSnapshot = {
+  generatedAt: number;
+  markets: InternalArbitrageMarket[];
+  stablecoin: {
+    price: number | null;
+    warnings: string[];
+  };
+};
+
 type ArbitrageDashboardServiceOptions = {
   now?: () => number;
+  monotonicNow?: () => number;
+  timingEnabled?: boolean;
+  timingLogger?: (event: string, facts: Record<string, unknown>) => void;
   snapshotTtlMs?: number;
+  orderbookCacheTtlMs?: number;
   forcedRefreshCooldownMs?: number;
-  snapshotLoader?: (horizonDays: 90 | 365) => Promise<ArbitrageDashboardSnapshot>;
+  rawMarketLoader?: (forceRefresh?: boolean) => Promise<RawMarketSnapshot>;
 };
 
 export class ArbitrageRefreshCooldownError extends Error {
@@ -167,18 +194,31 @@ function mainstreamCryptoInstruments(): InstrumentConfig[] {
 export class ArbitrageDashboardService {
   private snapshots = new Map<number, { expiresAt: number; value: ArbitrageDashboardSnapshot }>();
   private history = new Map<string, { expiresAt: number; value: FundingPoint[] }>();
-  private inFlight = new Map<number, Promise<ArbitrageDashboardSnapshot>>();
+  private orderbooks = new Map<string, { fetchedAt: number; value: OrderbookSnapshot }>();
+  private dashboardInFlight = new Map<number, Promise<ArbitrageDashboardSnapshot>>();
+  private forcedDashboardInFlight = new Set<number>();
+  private rawMarketSnapshot: { expiresAt: number; value: RawMarketSnapshot } | null = null;
+  private rawMarketInFlight: Promise<RawMarketSnapshot> | null = null;
+  private forcedRawMarketInFlight: Promise<RawMarketSnapshot> | null = null;
   private lastForcedRefreshAt: number | null = null;
   private readonly now: () => number;
+  private readonly monotonicNow: () => number;
+  private readonly timingEnabled: boolean;
+  private readonly timingLogger: (event: string, facts: Record<string, unknown>) => void;
   private readonly snapshotTtl: number;
+  private readonly orderbookCacheTtl: number;
   private readonly forcedRefreshCooldown: number;
-  private readonly snapshotLoader: (horizonDays: 90 | 365) => Promise<ArbitrageDashboardSnapshot>;
+  private readonly rawMarketLoader: (forceRefresh?: boolean) => Promise<RawMarketSnapshot>;
 
   constructor(options: ArbitrageDashboardServiceOptions = {}) {
     this.now = options.now ?? Date.now;
+    this.monotonicNow = options.monotonicNow ?? (() => performance.now());
+    this.timingEnabled = options.timingEnabled ?? options.rawMarketLoader === undefined;
+    this.timingLogger = options.timingLogger ?? ((event, facts) => console.info(event, facts));
     this.snapshotTtl = options.snapshotTtlMs ?? snapshotTtlMs;
+    this.orderbookCacheTtl = options.orderbookCacheTtlMs ?? ORDERBOOK_CACHE_TTL_MS;
     this.forcedRefreshCooldown = options.forcedRefreshCooldownMs ?? forcedRefreshCooldownMs;
-    this.snapshotLoader = options.snapshotLoader ?? ((horizonDays) => this.loadSnapshot(horizonDays));
+    this.rawMarketLoader = options.rawMarketLoader ?? ((forceRefresh) => this.loadRawMarketSnapshot(forceRefresh));
   }
 
   async getSnapshot(horizonDays: 90 | 365, forceRefresh = false): Promise<ArbitrageDashboardSnapshot> {
@@ -186,33 +226,58 @@ export class ArbitrageDashboardService {
     const now = this.now();
     if (!forceRefresh && cached && cached.expiresAt > now) return cached.value;
 
-    const pending = this.inFlight.get(horizonDays);
-    if (pending) {
-      if (forceRefresh && !this.isForcedRefreshCoolingDown(now)) {
-        this.lastForcedRefreshAt = now;
-      }
-      return pending;
-    }
-
     if (forceRefresh) {
+      const pending = this.dashboardInFlight.get(horizonDays);
+      if (pending) {
+        if (!this.isForcedRefreshCoolingDown(now)) this.lastForcedRefreshAt = now;
+        if (this.forcedDashboardInFlight.has(horizonDays)) return pending;
+        return pending.then(() => this.refreshSnapshot(horizonDays, true, "force_refresh"));
+      }
+      if (this.rawMarketInFlight) {
+        if (!this.isForcedRefreshCoolingDown(now)) this.lastForcedRefreshAt = now;
+        return this.refreshSnapshot(horizonDays, true, "force_refresh");
+      }
       const retryAfterMs = this.forcedRefreshRetryAfterMs(now);
       if (retryAfterMs > 0) {
         if (cached) return cached.value;
         throw new ArbitrageRefreshCooldownError(retryAfterMs);
       }
       this.lastForcedRefreshAt = now;
+      return this.refreshSnapshot(horizonDays, true, "force_refresh");
     }
 
-    const request = Promise.resolve()
-      .then(() => this.snapshotLoader(horizonDays))
+    if (cached) {
+      void this.refreshSnapshot(horizonDays, false, "dashboard_cache_stale_served").catch((error) => {
+        console.warn(
+          "[arbitrage-dashboard] background snapshot refresh failed",
+          error instanceof Error ? error.message : "unknown error",
+        );
+      });
+      return cached.value;
+    }
+
+    return this.refreshSnapshot(horizonDays, false, "dashboard_cold");
+  }
+
+  private refreshSnapshot(
+    horizonDays: 90 | 365,
+    forceRawMarketRefresh = false,
+    trigger: "dashboard_cold" | "dashboard_cache_stale_served" | "force_refresh" = "dashboard_cold",
+  ) {
+    const pending = this.dashboardInFlight.get(horizonDays);
+    if (pending) return pending;
+
+    const request = this.loadSnapshot(horizonDays, forceRawMarketRefresh, trigger)
       .then((snapshot) => {
         this.snapshots.set(horizonDays, { expiresAt: this.now() + this.snapshotTtl, value: snapshot });
         return snapshot;
       })
       .finally(() => {
-        if (this.inFlight.get(horizonDays) === request) this.inFlight.delete(horizonDays);
+        if (this.dashboardInFlight.get(horizonDays) === request) this.dashboardInFlight.delete(horizonDays);
+        if (forceRawMarketRefresh) this.forcedDashboardInFlight.delete(horizonDays);
       });
-    this.inFlight.set(horizonDays, request);
+    this.dashboardInFlight.set(horizonDays, request);
+    if (forceRawMarketRefresh) this.forcedDashboardInFlight.add(horizonDays);
     return request;
   }
 
@@ -225,19 +290,32 @@ export class ArbitrageDashboardService {
     return Math.max(0, this.lastForcedRefreshAt + this.forcedRefreshCooldown - now);
   }
 
-  private async loadSnapshot(horizonDays: 90 | 365): Promise<ArbitrageDashboardSnapshot> {
-    const currentBatches = createCurrentMarketBatches();
-    const [markets, stablecoin] = await Promise.all([
-      mapWithConcurrency(instruments, marketLoadConcurrency, (config) => this.loadMarket(config, currentBatches)),
-      this.loadStablecoinPrice(),
-    ]);
+  private async loadSnapshot(
+    horizonDays: 90 | 365,
+    forceRawMarketRefresh: boolean,
+    trigger: "dashboard_cold" | "dashboard_cache_stale_served" | "force_refresh",
+  ): Promise<ArbitrageDashboardSnapshot> {
+    const dashboardStartedAt = this.monotonicNow();
+    const rawMarketState = forceRawMarketRefresh
+      ? "force_refresh"
+      : this.rawMarketSnapshot && this.rawMarketSnapshot.expiresAt > this.now()
+        ? "raw_cache_fresh"
+        : this.rawMarketInFlight
+          ? "raw_refresh_inflight"
+          : "raw_cache_refresh";
+    const rawMarketStartedAt = this.monotonicNow();
+    const { generatedAt, markets, stablecoin } = await this.getRawMarketSnapshot(forceRawMarketRefresh);
+    const rawMarketMs = this.monotonicNow() - rawMarketStartedAt;
+    const scoringStartedAt = this.monotonicNow();
     const opportunities = buildArbitrageOpportunities(markets, horizonDays, fundingLookbackDays);
+    const scoringMs = this.monotonicNow() - scoringStartedAt;
+    const assemblyStartedAt = this.monotonicNow();
     const active = opportunities.filter((item) => item.recommendation !== "blocked");
     const connectedVenues = new Set(markets.filter((market) => market.status !== "disconnected").map((market) => market.venue));
     const unavailableVenues = [...new Set(markets.filter((market) => market.status === "disconnected").map((market) => market.venueLabel))];
     const snapshot: ArbitrageDashboardSnapshot = {
       horizonDays,
-      generatedAt: this.now(),
+      generatedAt,
       markets: markets.map(({ fundingHistory: _fundingHistory, ...market }) => market),
       opportunities,
       summary: {
@@ -255,14 +333,112 @@ export class ArbitrageDashboardService {
         ...stablecoin.warnings,
       ],
     };
+    const assemblyMs = this.monotonicNow() - assemblyStartedAt;
+    this.emitTiming("[arbitrage-dashboard] dashboard refresh complete", {
+      trigger,
+      rawMarketState,
+      horizonDays,
+      rawMarketMs: roundMs(rawMarketMs),
+      opportunityScoringMs: roundMs(scoringMs),
+      dashboardAssemblyMs: roundMs(assemblyMs),
+      totalMs: roundMs(this.monotonicNow() - dashboardStartedAt),
+      markets: markets.length,
+      opportunities: opportunities.length,
+    });
     return snapshot;
   }
 
-  private async loadMarket(config: InstrumentConfig, currentBatches: CurrentMarketBatches): Promise<InternalArbitrageMarket> {
+  private getRawMarketSnapshot(forceRefresh: boolean) {
+    const cached = this.rawMarketSnapshot;
+    if (!forceRefresh && cached && cached.expiresAt > this.now()) return Promise.resolve(cached.value);
+    return this.refreshRawMarketSnapshot(forceRefresh);
+  }
+
+  private refreshRawMarketSnapshot(forceRefresh = false) {
+    if (forceRefresh && this.forcedRawMarketInFlight) return this.forcedRawMarketInFlight;
+    if (this.rawMarketInFlight) {
+      if (!forceRefresh) return this.rawMarketInFlight;
+      const current = this.rawMarketInFlight;
+      let queued: Promise<RawMarketSnapshot>;
+      const refreshAfterCurrent = () => {
+        if (this.forcedRawMarketInFlight === queued) this.forcedRawMarketInFlight = null;
+        return this.refreshRawMarketSnapshot(true);
+      };
+      queued = current.then(
+        refreshAfterCurrent,
+        refreshAfterCurrent,
+      ).finally(() => {
+        if (this.forcedRawMarketInFlight === queued) this.forcedRawMarketInFlight = null;
+      });
+      this.forcedRawMarketInFlight = queued;
+      return queued;
+    }
+
+    const request = Promise.resolve()
+      .then(() => this.rawMarketLoader(forceRefresh))
+      .then((snapshot) => {
+        this.rawMarketSnapshot = { expiresAt: this.now() + this.snapshotTtl, value: snapshot };
+        return snapshot;
+      })
+      .finally(() => {
+        if (this.rawMarketInFlight === request) this.rawMarketInFlight = null;
+        if (this.forcedRawMarketInFlight === request) this.forcedRawMarketInFlight = null;
+      });
+    this.rawMarketInFlight = request;
+    if (forceRefresh) this.forcedRawMarketInFlight = request;
+    return request;
+  }
+
+  private async loadRawMarketSnapshot(forceRefresh = false): Promise<RawMarketSnapshot> {
+    const timing = this.timingEnabled ? createArbitrageRawRefreshTiming(this.monotonicNow) : undefined;
+    const rawStartedAt = this.monotonicNow();
+    const currentBatches = createCurrentMarketBatches(timing);
+    let currentMarketMs = 0;
+    let stablecoinMs = 0;
+    const [markets, stablecoin] = await Promise.all([
+      this.timePhase(
+        () => mapWithConcurrency(
+          instruments,
+          marketLoadConcurrency,
+          (config) => this.loadMarket(config, currentBatches, forceRefresh, timing),
+        ),
+        (durationMs) => { currentMarketMs = durationMs; },
+      ),
+      this.timePhase(
+        () => this.loadStablecoinPrice(timing),
+        (durationMs) => { stablecoinMs = durationMs; },
+      ),
+    ]);
+    const totalMs = this.monotonicNow() - rawStartedAt;
+    if (timing) {
+      this.emitTiming("[arbitrage-dashboard] raw market refresh complete", {
+        forceRefresh,
+        totalMs: roundMs(totalMs),
+        currentMarketLoadingMs: roundMs(currentMarketMs),
+        stablecoinLoadingMs: roundMs(stablecoinMs),
+        markets: markets.length,
+        marketSuccesses: markets.filter((market) => market.status !== "disconnected").length,
+        marketFailures: markets.filter((market) => market.status === "disconnected").length,
+        ...timing.report(),
+      });
+    }
+    return {
+      generatedAt: this.now(),
+      markets,
+      stablecoin,
+    };
+  }
+
+  private async loadMarket(
+    config: InstrumentConfig,
+    currentBatches: CurrentMarketBatches,
+    forceRefresh: boolean,
+    timing?: ArbitrageRawRefreshTimingContext,
+  ): Promise<InternalArbitrageMarket> {
     try {
       const [current, fundingHistory] = await Promise.all([
-        loadCurrentMarket(config, currentBatches),
-        config.kind === "perpetual" ? this.loadFundingHistory(config) : Promise.resolve([]),
+        loadCurrentMarket(config, currentBatches, this.loadOrderbook(config, forceRefresh, timing), timing),
+        config.kind === "perpetual" ? this.loadFundingHistory(config, timing) : Promise.resolve([]),
       ]);
       const intervalHours = current.fundingIntervalHours ?? inferFundingIntervalHours(fundingHistory) ?? config.fundingIntervalHours ?? null;
       const fundingMetrics = config.kind === "spot"
@@ -316,17 +492,43 @@ export class ArbitrageDashboardService {
     }
   }
 
-  private async loadFundingHistory(config: InstrumentConfig) {
+  private async loadOrderbook(
+    config: InstrumentConfig,
+    forceRefresh: boolean,
+    timing?: ArbitrageRawRefreshTimingContext,
+  ) {
+    const key = orderbookCacheKey(config);
+    const cached = this.orderbooks.get(key);
+    const now = this.now();
+    const fresh = cached && cached.fetchedAt + this.orderbookCacheTtl > now;
+    if (!forceRefresh && fresh) {
+      timing?.orderbookHit();
+      return cached.value;
+    }
+    if (forceRefresh && fresh) timing?.orderbookForceBypass();
+    else timing?.orderbookMiss();
+
+    timing?.orderbookProviderFetch();
+    const value = await fetchOrderbook(config, now, timing);
+    this.orderbooks.set(key, { fetchedAt: now, value });
+    return value;
+  }
+
+  private async loadFundingHistory(config: InstrumentConfig, timing?: ArbitrageRawRefreshTimingContext) {
     const cached = this.history.get(config.id);
-    if (cached && cached.expiresAt > Date.now()) return cached.value;
-    const value = await loadFundingHistory(config, fundingLookbackDays);
+    if (cached && cached.expiresAt > Date.now()) {
+      timing?.fundingHistoryHit();
+      return cached.value;
+    }
+    timing?.fundingHistoryMiss();
+    const value = await loadFundingHistory(config, fundingLookbackDays, timing);
     this.history.set(config.id, { expiresAt: Date.now() + fundingHistoryTtlMs, value });
     return value;
   }
 
-  private async loadStablecoinPrice() {
+  private async loadStablecoinPrice(timing?: ArbitrageRawRefreshTimingContext) {
     try {
-      const payload = await fetchJson(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=USDCUSDT`);
+      const payload = await fetchJson(`https://api.binance.com/api/v3/ticker/bookTicker?symbol=USDCUSDT`, undefined, timing);
       const bid = numberValue(payload?.bidPrice);
       const ask = numberValue(payload?.askPrice);
       return { price: bid && ask ? (bid + ask) / 2 : null, warnings: [] as string[] };
@@ -334,41 +536,59 @@ export class ArbitrageDashboardService {
       return { price: null, warnings: ["USDC/USDT 参考汇率暂不可用"] };
     }
   }
+
+  private async timePhase<T>(load: () => Promise<T>, record: (durationMs: number) => void) {
+    const startedAt = this.monotonicNow();
+    try {
+      return await load();
+    } finally {
+      record(Math.max(0, this.monotonicNow() - startedAt));
+    }
+  }
+
+  private emitTiming(event: string, facts: Record<string, unknown>) {
+    if (!this.timingEnabled) return;
+    try {
+      this.timingLogger(event, facts);
+    } catch {
+      // Observability must never affect dashboard availability.
+    }
+  }
 }
 
-function createCurrentMarketBatches(): CurrentMarketBatches {
+function createCurrentMarketBatches(timing?: ArbitrageRawRefreshTimingContext): CurrentMarketBatches {
   const binanceSpotSymbols = configuredSymbols("binance", "spot");
   const binancePerpetualSymbols = configuredSymbols("binance", "perpetual");
   return {
-    binanceSpotTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://api.binance.com/api/v3/ticker/24hr", binanceSpotSymbols)), "symbol"),
-    binancePerpetualTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://fapi.binance.com/fapi/v1/ticker/24hr", binancePerpetualSymbols)), "symbol"),
-    binancePremiums: safeBatch(() => fetchJson("https://fapi.binance.com/fapi/v1/premiumIndex"), "symbol"),
+    binanceSpotTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://api.binance.com/api/v3/ticker/24hr", binanceSpotSymbols), undefined, timing), "symbol"),
+    binancePerpetualTickers: safeBatch(() => fetchJson(binanceSymbolsUrl("https://fapi.binance.com/fapi/v1/ticker/24hr", binancePerpetualSymbols), undefined, timing), "symbol"),
+    binancePremiums: safeBatch(() => fetchJson("https://fapi.binance.com/fapi/v1/premiumIndex", undefined, timing), "symbol"),
     bybitSpotTickers: safeBatch(
-      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=spot"))?.result?.list,
+      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=spot", undefined, timing))?.result?.list,
       "symbol",
     ),
     bybitPerpetualTickers: safeBatch(
-      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=linear"))?.result?.list,
+      async () => (await fetchJson("https://api.bybit.com/v5/market/tickers?category=linear", undefined, timing))?.result?.list,
       "symbol",
     ),
     bitgetSpotTickers: safeBatch(
-      async () => (await fetchJson("https://api.bitget.com/api/v2/spot/market/tickers"))?.data,
+      async () => (await fetchJson("https://api.bitget.com/api/v2/spot/market/tickers", undefined, timing))?.data,
       "symbol",
     ),
     bitgetPerpetualTickers: safeBatch(
-      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES"))?.data,
+      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/tickers?productType=USDT-FUTURES", undefined, timing))?.data,
       "symbol",
     ),
     bitgetFunding: safeBatch(
-      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES"))?.data,
+      async () => (await fetchJson("https://api.bitget.com/api/v2/mix/market/current-fund-rate?productType=USDT-FUTURES", undefined, timing))?.data,
       "symbol",
     ),
     okxSpotTickers: safeBatch(
-      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SPOT"))?.data,
+      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SPOT", undefined, timing))?.data,
       "instId",
     ),
     okxPerpetualTickers: safeBatch(
-      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SWAP"))?.data,
+      async () => (await fetchJson("https://www.okx.com/api/v5/market/tickers?instType=SWAP", undefined, timing))?.data,
       "instId",
     ),
   };
@@ -384,6 +604,69 @@ function binanceSymbolsUrl(baseUrl: string, symbols: string[]) {
   const url = new URL(baseUrl);
   url.searchParams.set("symbols", JSON.stringify(symbols));
   return url.toString();
+}
+
+export function orderbookCacheKey(
+  config: Pick<InstrumentConfig, "venue" | "kind" | "symbol">,
+) {
+  return `${config.venue}:${config.kind}:${config.symbol}`;
+}
+
+async function fetchOrderbook(
+  config: InstrumentConfig,
+  fallbackTimestamp: number,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<OrderbookSnapshot> {
+  let bids: unknown;
+  let asks: unknown;
+  let timestamp: unknown;
+
+  if (config.venue === "binance") {
+    const baseUrl = config.kind === "spot" ? "https://api.binance.com/api/v3" : "https://fapi.binance.com/fapi/v1";
+    const payload = await fetchJson(`${baseUrl}/depth?symbol=${config.symbol}&limit=100`, undefined, timing);
+    bids = payload?.bids;
+    asks = payload?.asks;
+  } else if (config.venue === "bybit") {
+    const category = config.kind === "spot" ? "spot" : "linear";
+    const payload = (await fetchJson(
+      `https://api.bybit.com/v5/market/orderbook?category=${category}&symbol=${config.symbol}&limit=200`, undefined, timing,
+    ))?.result;
+    bids = payload?.b;
+    asks = payload?.a;
+    timestamp = payload?.ts;
+  } else if (config.venue === "bitget") {
+    const payload = config.kind === "spot"
+      ? (await fetchJson(
+        `https://api.bitget.com/api/v2/spot/market/orderbook?symbol=${config.symbol}&type=step0&limit=100`, undefined, timing,
+      ))?.data
+      : (await fetchJson(
+        `https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${config.symbol}&productType=USDT-FUTURES&precision=scale0&limit=100`, undefined, timing,
+      ))?.data;
+    bids = payload?.bids;
+    asks = payload?.asks;
+    timestamp = payload?.ts;
+  } else if (config.venue === "okx") {
+    const payload = (await fetchJson(
+      `https://www.okx.com/api/v5/market/books?instId=${config.symbol}&sz=100`, undefined, timing,
+    ))?.data?.[0];
+    bids = payload?.bids;
+    asks = payload?.asks;
+    timestamp = payload?.ts;
+  } else {
+    const payload = await postHyperliquid({ type: "l2Book", coin: config.symbol }, timing);
+    bids = payload?.levels?.[0];
+    asks = payload?.levels?.[1];
+    timestamp = payload?.time;
+  }
+
+  const freezeLevels = (levels: OrderbookLevel[]) => Object.freeze(
+    levels.map((level) => Object.freeze(level)),
+  );
+  return Object.freeze({
+    bids: freezeLevels(normalizeBook(bids, config.sizeMultiplier)),
+    asks: freezeLevels(normalizeBook(asks, config.sizeMultiplier)),
+    timestamp: numberValue(timestamp) ?? fallbackTimestamp,
+  });
 }
 
 async function safeBatch(load: () => Promise<unknown>, symbolKey: string) {
@@ -402,32 +685,42 @@ async function marketBatchValue(batch: Promise<Map<string, any>>, symbol: string
   return (await batch).get(symbol) ?? fallback();
 }
 
-async function loadCurrentMarket(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
-  if (config.venue === "binance") return loadBinanceCurrent(config, batches);
-  if (config.venue === "bybit") return loadBybitCurrent(config, batches);
-  if (config.venue === "bitget") return loadBitgetCurrent(config, batches);
-  if (config.venue === "okx") return loadOkxCurrent(config, batches);
-  return loadTradeXyzCurrent(config);
+async function loadCurrentMarket(
+  config: InstrumentConfig,
+  batches: CurrentMarketBatches,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
+  if (config.venue === "binance") return loadBinanceCurrent(config, batches, orderbook, timing);
+  if (config.venue === "bybit") return loadBybitCurrent(config, batches, orderbook, timing);
+  if (config.venue === "bitget") return loadBitgetCurrent(config, batches, orderbook, timing);
+  if (config.venue === "okx") return loadOkxCurrent(config, batches, orderbook, timing);
+  return loadTradeXyzCurrent(config, orderbook, timing);
 }
 
-async function loadBinanceCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
+async function loadBinanceCurrent(
+  config: InstrumentConfig,
+  batches: CurrentMarketBatches,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
   const baseUrl = config.kind === "spot" ? "https://api.binance.com/api/v3" : "https://fapi.binance.com/fapi/v1";
   const [ticker, depth, premium] = await Promise.all([
     marketBatchValue(
       config.kind === "spot" ? batches.binanceSpotTickers : batches.binancePerpetualTickers,
       config.symbol,
-      () => fetchJson(`${baseUrl}/ticker/24hr?symbol=${config.symbol}`),
+      () => fetchJson(`${baseUrl}/ticker/24hr?symbol=${config.symbol}`, undefined, timing),
     ),
-    fetchJson(`${baseUrl}/depth?symbol=${config.symbol}&limit=100`),
+    orderbook,
     config.kind === "perpetual"
-      ? marketBatchValue(batches.binancePremiums, config.symbol, () => fetchJson(`${baseUrl}/premiumIndex?symbol=${config.symbol}`))
+      ? marketBatchValue(batches.binancePremiums, config.symbol, () => fetchJson(`${baseUrl}/premiumIndex?symbol=${config.symbol}`, undefined, timing))
       : Promise.resolve(null),
   ]);
   const bid = config.kind === "perpetual"
-    ? depth?.bids?.[0]?.[0] ?? ticker?.bidPrice
+    ? depth.bids[0]?.price ?? ticker?.bidPrice
     : ticker?.bidPrice;
   const ask = config.kind === "perpetual"
-    ? depth?.asks?.[0]?.[0] ?? ticker?.askPrice
+    ? depth.asks[0]?.price ?? ticker?.askPrice
     : ticker?.askPrice;
   return currentPayload({
     bid,
@@ -439,24 +732,28 @@ async function loadBinanceCurrent(config: InstrumentConfig, batches: CurrentMark
     volume24h: ticker?.quoteVolume,
     openInterest: null,
     nextFundingTime: premium?.nextFundingTime,
-    bids: depth?.bids,
-    asks: depth?.asks,
-    sizeMultiplier: config.sizeMultiplier,
+    bids: depth.bids,
+    asks: depth.asks,
+    timestamp: depth.timestamp,
   });
 }
 
-async function loadBybitCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
+async function loadBybitCurrent(
+  config: InstrumentConfig,
+  batches: CurrentMarketBatches,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
   const category = config.kind === "spot" ? "spot" : "linear";
-  const [tickerPayload, depthPayload] = await Promise.all([
+  const [tickerPayload, depth] = await Promise.all([
     marketBatchValue(
       config.kind === "spot" ? batches.bybitSpotTickers : batches.bybitPerpetualTickers,
       config.symbol,
-      async () => (await fetchJson(`https://api.bybit.com/v5/market/tickers?category=${category}&symbol=${config.symbol}`))?.result?.list?.[0],
+      async () => (await fetchJson(`https://api.bybit.com/v5/market/tickers?category=${category}&symbol=${config.symbol}`, undefined, timing))?.result?.list?.[0],
     ),
-    fetchJson(`https://api.bybit.com/v5/market/orderbook?category=${category}&symbol=${config.symbol}&limit=200`),
+    orderbook,
   ]);
   const ticker = tickerPayload;
-  const depth = depthPayload?.result;
   if (!ticker) throw new Error("Bybit ticker returned no market");
   return currentPayload({
     bid: ticker.bid1Price,
@@ -468,25 +765,28 @@ async function loadBybitCurrent(config: InstrumentConfig, batches: CurrentMarket
     volume24h: ticker.turnover24h,
     openInterest: ticker.openInterestValue ?? ticker.openInterest,
     nextFundingTime: ticker.nextFundingTime,
-    bids: depth?.b,
-    asks: depth?.a,
-    sizeMultiplier: config.sizeMultiplier,
-    timestamp: depth?.ts,
+    bids: depth.bids,
+    asks: depth.asks,
+    timestamp: depth.timestamp,
   });
 }
 
-async function loadBitgetCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
+async function loadBitgetCurrent(
+  config: InstrumentConfig,
+  batches: CurrentMarketBatches,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
   if (config.kind === "spot") {
-    const [tickerPayload, depthPayload] = await Promise.all([
+    const [tickerPayload, depth] = await Promise.all([
       marketBatchValue(
         batches.bitgetSpotTickers,
         config.symbol,
-        async () => (await fetchJson(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${config.symbol}`))?.data?.[0],
+        async () => (await fetchJson(`https://api.bitget.com/api/v2/spot/market/tickers?symbol=${config.symbol}`, undefined, timing))?.data?.[0],
       ),
-      fetchJson(`https://api.bitget.com/api/v2/spot/market/orderbook?symbol=${config.symbol}&type=step0&limit=100`),
+      orderbook,
     ]);
     const ticker = tickerPayload;
-    const depth = depthPayload?.data;
     if (!ticker) throw new Error("Bitget spot ticker returned no market");
     return currentPayload({
       bid: ticker.bidPr,
@@ -494,26 +794,25 @@ async function loadBitgetCurrent(config: InstrumentConfig, batches: CurrentMarke
       markPrice: ticker.lastPr,
       indexPrice: ticker.lastPr,
       volume24h: ticker.usdtVolume ?? ticker.quoteVolume,
-      bids: depth?.bids,
-      asks: depth?.asks,
-      timestamp: depth?.ts,
+      bids: depth.bids,
+      asks: depth.asks,
+      timestamp: depth.timestamp,
     });
   }
-  const [tickerPayload, depthPayload, fundingPayload] = await Promise.all([
+  const [tickerPayload, depth, fundingPayload] = await Promise.all([
     marketBatchValue(
       batches.bitgetPerpetualTickers,
       config.symbol,
-      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${config.symbol}&productType=USDT-FUTURES`))?.data?.[0],
+      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/ticker?symbol=${config.symbol}&productType=USDT-FUTURES`, undefined, timing))?.data?.[0],
     ),
-    fetchJson(`https://api.bitget.com/api/v2/mix/market/merge-depth?symbol=${config.symbol}&productType=USDT-FUTURES&precision=scale0&limit=100`),
+    orderbook,
     marketBatchValue(
       batches.bitgetFunding,
       config.symbol,
-      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES`))?.data?.[0],
+      async () => (await fetchJson(`https://api.bitget.com/api/v2/mix/market/current-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES`, undefined, timing))?.data?.[0],
     ),
   ]);
   const ticker = tickerPayload;
-  const depth = depthPayload?.data;
   const funding = fundingPayload;
   if (!ticker) throw new Error("Bitget futures ticker returned no market");
   return currentPayload({
@@ -526,26 +825,30 @@ async function loadBitgetCurrent(config: InstrumentConfig, batches: CurrentMarke
     volume24h: ticker.usdtVolume ?? ticker.quoteVolume,
     openInterest: ticker.holdingAmount,
     nextFundingTime: funding?.nextUpdate,
-    bids: depth?.bids,
-    asks: depth?.asks,
-    timestamp: depth?.ts,
+    bids: depth.bids,
+    asks: depth.asks,
+    timestamp: depth.timestamp,
   });
 }
 
-async function loadOkxCurrent(config: InstrumentConfig, batches: CurrentMarketBatches): Promise<CurrentMarketPayload> {
-  const [tickerPayload, depthPayload, fundingPayload] = await Promise.all([
+async function loadOkxCurrent(
+  config: InstrumentConfig,
+  batches: CurrentMarketBatches,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
+  const [tickerPayload, depth, fundingPayload] = await Promise.all([
     marketBatchValue(
       config.kind === "spot" ? batches.okxSpotTickers : batches.okxPerpetualTickers,
       config.symbol,
-      async () => (await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${config.symbol}`))?.data?.[0],
+      async () => (await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${config.symbol}`, undefined, timing))?.data?.[0],
     ),
-    fetchJson(`https://www.okx.com/api/v5/market/books?instId=${config.symbol}&sz=100`),
+    orderbook,
     config.kind === "perpetual"
-      ? fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${config.symbol}`)
+      ? fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${config.symbol}`, undefined, timing)
       : Promise.resolve(null),
   ]);
   const ticker = tickerPayload;
-  const depth = depthPayload?.data?.[0];
   const funding = fundingPayload?.data?.[0];
   if (!ticker) throw new Error("OKX ticker returned no market");
   return currentPayload({
@@ -560,17 +863,20 @@ async function loadOkxCurrent(config: InstrumentConfig, batches: CurrentMarketBa
     volume24h: ticker.volCcy24h ? numberValue(ticker.volCcy24h)! * numberValue(ticker.last)! : null,
     openInterest: null,
     nextFundingTime: funding?.fundingTime,
-    bids: depth?.bids,
-    asks: depth?.asks,
-    sizeMultiplier: config.sizeMultiplier,
-    timestamp: depth?.ts,
+    bids: depth.bids,
+    asks: depth.asks,
+    timestamp: depth.timestamp,
   });
 }
 
-async function loadTradeXyzCurrent(config: InstrumentConfig): Promise<CurrentMarketPayload> {
-  const [meta, book] = await Promise.all([
-    postHyperliquid({ type: "metaAndAssetCtxs", dex: "xyz" }),
-    postHyperliquid({ type: "l2Book", coin: config.symbol }),
+async function loadTradeXyzCurrent(
+  config: InstrumentConfig,
+  orderbook: Promise<OrderbookSnapshot>,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<CurrentMarketPayload> {
+  const [meta, depth] = await Promise.all([
+    postHyperliquid({ type: "metaAndAssetCtxs", dex: "xyz" }, timing),
+    orderbook,
   ]);
   const universe = Array.isArray(meta?.[0]?.universe) ? meta[0].universe : [];
   const contexts = Array.isArray(meta?.[1]) ? meta[1] : [];
@@ -578,8 +884,8 @@ async function loadTradeXyzCurrent(config: InstrumentConfig): Promise<CurrentMar
   const context = contexts[index];
   if (index < 0 || !context) throw new Error("tradeXYZ GOLD market is unavailable");
   return currentPayload({
-    bid: book?.levels?.[0]?.[0]?.px,
-    ask: book?.levels?.[1]?.[0]?.px,
+    bid: depth.bids[0]?.price,
+    ask: depth.asks[0]?.price,
     markPrice: context.markPx,
     indexPrice: context.oraclePx,
     fundingRate: context.funding,
@@ -589,23 +895,27 @@ async function loadTradeXyzCurrent(config: InstrumentConfig): Promise<CurrentMar
       ? numberValue(context.openInterest)! * numberValue(context.oraclePx)!
       : null,
     nextFundingTime: nextWholeHour(),
-    bids: book?.levels?.[0]?.map((level: any) => [level.px, level.sz]),
-    asks: book?.levels?.[1]?.map((level: any) => [level.px, level.sz]),
-    timestamp: book?.time,
+    bids: depth.bids,
+    asks: depth.asks,
+    timestamp: depth.timestamp,
   });
 }
 
-async function loadFundingHistory(config: InstrumentConfig, days: number): Promise<FundingPoint[]> {
+async function loadFundingHistory(
+  config: InstrumentConfig,
+  days: number,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<FundingPoint[]> {
   const startTime = Date.now() - days * millisecondsPerDay;
   if (config.venue === "binance") {
-    const payload = await fetchJson(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${config.symbol}&startTime=${startTime}&limit=1000`);
+    const payload = await fetchJson(`https://fapi.binance.com/fapi/v1/fundingRate?symbol=${config.symbol}&startTime=${startTime}&limit=1000`, undefined, timing);
     return normalizeFundingRows(payload, "fundingRate", "fundingTime");
   }
   if (config.venue === "bybit") {
     const rows: FundingPoint[] = [];
     let endTime = Date.now();
     for (let page = 0; page < 4 && endTime > startTime; page += 1) {
-      const payload = await fetchJson(`https://api.bybit.com/v5/market/funding/history?category=linear&symbol=${config.symbol}&limit=200&endTime=${endTime}`);
+      const payload = await fetchJson(`https://api.bybit.com/v5/market/funding/history?category=linear&symbol=${config.symbol}&limit=200&endTime=${endTime}`, undefined, timing);
       const batch = normalizeFundingRows(payload?.result?.list, "fundingRate", "fundingRateTimestamp");
       if (batch.length === 0) break;
       rows.push(...batch);
@@ -616,7 +926,7 @@ async function loadFundingHistory(config: InstrumentConfig, days: number): Promi
   if (config.venue === "bitget") {
     const rows: FundingPoint[] = [];
     for (let pageNo = 1; pageNo <= 6; pageNo += 1) {
-      const payload = await fetchJson(`https://api.bitget.com/api/v2/mix/market/history-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES&pageSize=100&pageNo=${pageNo}`);
+      const payload = await fetchJson(`https://api.bitget.com/api/v2/mix/market/history-fund-rate?symbol=${config.symbol}&productType=USDT-FUTURES&pageSize=100&pageNo=${pageNo}`, undefined, timing);
       const batch = normalizeFundingRows(payload?.data, "fundingRate", "fundingTime");
       if (batch.length === 0) break;
       rows.push(...batch);
@@ -625,14 +935,14 @@ async function loadFundingHistory(config: InstrumentConfig, days: number): Promi
     return uniqueFundingRows(rows).filter((point) => point.timestamp >= startTime);
   }
   if (config.venue === "okx") {
-    const payload = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate-history?instId=${config.symbol}&limit=400`);
+    const payload = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate-history?instId=${config.symbol}&limit=400`, undefined, timing);
     return normalizeFundingRows(payload?.data, "realizedRate", "fundingTime")
       .filter((point) => point.timestamp >= startTime);
   }
   const rows: FundingPoint[] = [];
   let cursor = startTime;
   for (let page = 0; page < 6 && cursor < Date.now(); page += 1) {
-    const payload = await postHyperliquid({ type: "fundingHistory", coin: config.symbol, startTime: cursor });
+    const payload = await postHyperliquid({ type: "fundingHistory", coin: config.symbol, startTime: cursor }, timing);
     const batch = normalizeFundingRows(payload, "fundingRate", "time");
     if (batch.length === 0) break;
     rows.push(...batch);
@@ -760,8 +1070,8 @@ function instrument(
 function normalizeBook(input: unknown, sizeMultiplier = 1): OrderbookLevel[] {
   if (!Array.isArray(input)) return [];
   return input.map((row: any) => {
-    const price = numberValue(Array.isArray(row) ? row[0] : row?.px);
-    const size = numberValue(Array.isArray(row) ? row[1] : row?.sz);
+    const price = numberValue(Array.isArray(row) ? row[0] : row?.px ?? row?.price);
+    const size = numberValue(Array.isArray(row) ? row[1] : row?.sz ?? row?.size);
     return price && size ? { price, size: size * sizeMultiplier } : null;
   }).filter((row): row is OrderbookLevel => row !== null);
 }
@@ -788,36 +1098,52 @@ function inferFundingIntervalHours(history: FundingPoint[]) {
   return differences[Math.floor(differences.length / 2)] ?? null;
 }
 
-async function fetchJson(url: string, init?: RequestInit): Promise<any> {
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
-    let response: Response;
-    try {
-      response = await fetch(url, { ...init, signal: controller.signal });
-    } catch (error) {
-      if (attempt === 1) throw error;
-      await delay(150);
-      continue;
-    } finally {
-      clearTimeout(timer);
+async function fetchJson(
+  url: string,
+  init?: RequestInit,
+  timing?: ArbitrageRawRefreshTimingContext,
+): Promise<any> {
+  const identity = timing ? providerAndCategory(url, init) : null;
+  const requestTiming = identity ? timing!.startProviderRequest(identity.provider, identity.category) : null;
+  try {
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      if (attempt > 0) requestTiming?.retry();
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), requestTimeoutMs);
+      let response: Response;
+      try {
+        response = await fetch(url, { ...init, signal: controller.signal });
+      } catch (error) {
+        if (attempt === 1) throw error;
+        await delay(150);
+        continue;
+      } finally {
+        clearTimeout(timer);
+      }
+      if (response.ok) {
+        const payload = await response.json();
+        requestTiming?.success();
+        return payload;
+      }
+      if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
+        await delay(150);
+        continue;
+      }
+      throw new Error(`公开行情请求失败 (${response.status})`);
     }
-    if (response.ok) return await response.json();
-    if (attempt === 0 && (response.status === 429 || response.status >= 500)) {
-      await delay(150);
-      continue;
-    }
-    throw new Error(`公开行情请求失败 (${response.status})`);
+    throw new Error("公开行情请求失败");
+  } catch (error) {
+    requestTiming?.failure();
+    throw error;
   }
-  throw new Error("公开行情请求失败");
 }
 
-function postHyperliquid(body: unknown) {
+function postHyperliquid(body: unknown, timing?: ArbitrageRawRefreshTimingContext) {
   return fetchJson("https://api.hyperliquid.xyz/info", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
-  });
+  }, timing);
 }
 
 function numberValue(value: unknown) {
