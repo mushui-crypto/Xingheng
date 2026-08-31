@@ -34,6 +34,10 @@ export type ProviderTimingReport = Readonly<{
 
 export type ArbitrageRawRefreshTimingContext = ReturnType<typeof createArbitrageRawRefreshTiming>;
 
+export function formatArbitrageDashboardTimingLog(event: string, facts: Record<string, unknown>) {
+  return `${event} ${JSON.stringify(facts)}`;
+}
+
 const providerNames: ArbitrageProviderName[] = ["binance", "bybit", "bitget", "okx", "hyperliquid", "other"];
 
 export function createArbitrageRawRefreshTiming(monotonicNow: () => number) {

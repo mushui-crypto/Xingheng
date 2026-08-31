@@ -1,8 +1,34 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createArbitrageRawRefreshTiming, providerAndCategory } from "./ArbitrageDashboardTiming";
+import {
+  createArbitrageRawRefreshTiming,
+  formatArbitrageDashboardTimingLog,
+  providerAndCategory,
+} from "./ArbitrageDashboardTiming";
 
 describe("ArbitrageDashboardTiming", () => {
+  it("serializes nested provider categories into one production log line", () => {
+    const line = formatArbitrageDashboardTimingLog("dashboard timing", {
+      providers: {
+        binance: {
+          categories: {
+            orderbook: 2,
+          },
+        },
+      },
+    });
+
+    assert.deepEqual(JSON.parse(line.slice("dashboard timing ".length)), {
+      providers: {
+        binance: {
+          categories: {
+            orderbook: 2,
+          },
+        },
+      },
+    });
+  });
+
   it("aggregates logical requests, retries, cumulative duration, and concurrent provider wall time", () => {
     let now = 0;
     const timing = createArbitrageRawRefreshTiming(() => now);

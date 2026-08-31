@@ -2,6 +2,7 @@ import { performance } from "node:perf_hooks";
 import { buildArbitrageOpportunities, calculateHistoricalFundingMetrics } from "./arbitrageScoring";
 import {
   createArbitrageRawRefreshTiming,
+  formatArbitrageDashboardTimingLog,
   providerAndCategory,
   roundMs,
   type ArbitrageRawRefreshTimingContext,
@@ -214,7 +215,7 @@ export class ArbitrageDashboardService {
     this.now = options.now ?? Date.now;
     this.monotonicNow = options.monotonicNow ?? (() => performance.now());
     this.timingEnabled = options.timingEnabled ?? options.rawMarketLoader === undefined;
-    this.timingLogger = options.timingLogger ?? ((event, facts) => console.info(event, facts));
+    this.timingLogger = options.timingLogger ?? ((event, facts) => console.info(formatArbitrageDashboardTimingLog(event, facts)));
     this.snapshotTtl = options.snapshotTtlMs ?? snapshotTtlMs;
     this.orderbookCacheTtl = options.orderbookCacheTtlMs ?? ORDERBOOK_CACHE_TTL_MS;
     this.forcedRefreshCooldown = options.forcedRefreshCooldownMs ?? forcedRefreshCooldownMs;
