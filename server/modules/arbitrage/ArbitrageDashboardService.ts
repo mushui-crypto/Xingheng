@@ -11,6 +11,7 @@ import type {
   ArbitrageAsset,
   ArbitrageDashboardSnapshot,
   ArbitrageInstrumentKind,
+  ArbitrageMarket,
   ArbitrageQuoteAsset,
   ArbitrageVenue,
   FundingPoint,
@@ -258,6 +259,15 @@ export class ArbitrageDashboardService {
     }
 
     return this.refreshSnapshot(horizonDays, false, "dashboard_cold");
+  }
+
+  /** Shares the existing Raw Market Snapshot without scoring or adding a Provider read path. */
+  async getCurrentMarketSnapshot(): Promise<Readonly<{ generatedAt: number; markets: readonly ArbitrageMarket[] }>> {
+    const { generatedAt, markets } = await this.getRawMarketSnapshot(false);
+    return Object.freeze({
+      generatedAt,
+      markets: Object.freeze(markets.map(({ fundingHistory: _fundingHistory, ...market }) => Object.freeze(market))),
+    });
   }
 
   private refreshSnapshot(

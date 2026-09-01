@@ -2,12 +2,14 @@ import type express from "express";
 import type { ArbitrageInstanceQueryService } from "../cex/arbitrage-instance/ArbitrageInstanceQueryService";
 import type { ArbitragePositionVerificationService } from "../cex/arbitrage-instance/ArbitragePositionVerificationService";
 import type { InstanceHedgeDeltaService } from "../arbitrage-execution/InstanceHedgeDeltaService";
+import type { ArbitragePositionPresentationService } from "../arbitrage-position/ArbitragePositionPresentationService";
 
 export function registerArbitrageInstanceRoutes(
   app: express.Express,
   query: ArbitrageInstanceQueryService,
   verification?: Pick<ArbitragePositionVerificationService, "verify">,
   hedgeDelta?: Pick<InstanceHedgeDeltaService, "derive">,
+  presentation?: Pick<ArbitragePositionPresentationService, "present">,
 ) {
   app.get("/api/arbitrage-instances/active", (request, response) => {
     response.setHeader("Cache-Control", "no-store");
@@ -29,6 +31,25 @@ export function registerArbitrageInstanceRoutes(
       sendError(response, error);
     }
   });
+
+  if (presentation) {
+    app.get("/api/arbitrage-instances/presentation", async (request, response) => {
+      response.setHeader("Cache-Control", "no-store");
+      try {
+        const authenticatedUserId = userId(request);
+        response.json(await presentation.present(query.listActive(authenticatedUserId)));
+      } catch (error) {
+        if (error instanceof ArbitrageInstanceRouteError) {
+          sendError(response, error);
+          return;
+        }
+        response.status(503).json({
+          category: "arbitrage_position_presentation_unavailable",
+          message: "Arbitrage position presentation is temporarily unavailable.",
+        });
+      }
+    });
+  }
 
   if (verification) {
     app.get("/api/arbitrage-instances/:arbitrageId/verification", async (request, response) => {

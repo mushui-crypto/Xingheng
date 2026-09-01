@@ -19,6 +19,7 @@ import { registerArbitrageUnstartedAbandonRoutes } from "./modules/api/arbitrage
 import { registerHistoricalUnknownRecoveryRoutes } from "./modules/api/historicalUnknownRecoveryRoutes";
 import { registerArbitrageRecoveryRoutes } from "./modules/api/arbitrageRecoveryRoutes";
 import { registerArbitrageInstanceRoutes } from "./modules/api/arbitrageInstanceRoutes";
+import { ArbitragePositionPresentationService } from "./modules/arbitrage-position/ArbitragePositionPresentationService";
 import { registerFundingArbitrageRoutes } from "./modules/api/fundingArbitrageRoutes";
 import { registerBinancePersonalTradingRoutes } from "./modules/api/binancePersonalTradingRoutes";
 import { registerAccountReadRoutes } from "./modules/api/accountReadRoutes";
@@ -238,6 +239,7 @@ const executionOrderReferenceStore = new SqliteExecutionOrderReferenceStore({
 });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
+const arbitragePositionPresentation = new ArbitragePositionPresentationService(arbitrageDashboard);
 const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
   query: arbitrageInstanceQuery,
   credentials: userExchangeCredentials,
@@ -421,7 +423,13 @@ registerArbitrageManagementReleaseRoutes(app, arbitrageManagementRelease);
 registerArbitrageUnstartedAbandonRoutes(app, arbitrageUnstartedAbandon);
 registerHistoricalUnknownRecoveryRoutes(app, historicalUnknownRecovery);
 registerArbitrageRecoveryRoutes(app, arbitrageRecoveryOperator);
-registerArbitrageInstanceRoutes(app, arbitrageInstanceQuery, arbitragePositionVerification, instanceHedgeDelta);
+registerArbitrageInstanceRoutes(
+  app,
+  arbitrageInstanceQuery,
+  arbitragePositionVerification,
+  instanceHedgeDelta,
+  arbitragePositionPresentation,
+);
 registerFundingArbitrageRoutes(app, fundingOpportunityQuery);
 registerBinancePersonalTradingRoutes(app, binancePersonalTrading);
 registerAccountReadRoutes(app, accountRead);

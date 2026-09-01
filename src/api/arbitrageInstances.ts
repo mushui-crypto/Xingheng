@@ -99,6 +99,29 @@ export type ArbitrageInstance = {
   };
 };
 
+export type ArbitragePositionPresentation = Readonly<{
+  arbitrageId: string;
+  market: Readonly<{
+    fundingRate: number | null;
+    fundingIntervalHours: number | null;
+    nextFundingTime: number | null;
+    nextEstimatedFundingFee: string | null;
+    nextEstimatedFundingFeeAsset: string | null;
+    spreadQuotePerBase: number | null;
+    spreadBps: number | null;
+    quotedAt: number | null;
+    marketDataAsOf: number | null;
+    completeness: "COMPLETE" | "INCOMPLETE";
+  }>;
+  revenue: Readonly<{
+    cumulativeFundingIncome: null;
+    incurredFees: null;
+    estimatedExitFees: null;
+    currentArbitrageNetProfit: null;
+    completeness: "INCOMPLETE";
+  }>;
+}>;
+
 export type ArbitrageManagementEndMethod = "NORMAL_CLOSE" | "MANAGEMENT_RELEASE" | "MIXED"
   | "LEGACY_UNRESOLVED_SEAL";
 
@@ -222,6 +245,16 @@ export async function fetchActiveArbitrageInstances(signal?: AbortSignal) {
     { userAuthFailure: true, init: { cache: "no-store", signal } },
   );
   return instanceList(payload);
+}
+
+export async function fetchArbitragePositionPresentations(signal?: AbortSignal) {
+  const payload = await requestJson<unknown>(
+    "/api/arbitrage-instances/presentation",
+    "套利展示行情加载失败，请稍后重试",
+    { userAuthFailure: true, init: { cache: "no-store", signal } },
+  );
+  if (!Array.isArray(payload)) throw invalidResponse();
+  return payload.map(positionPresentation);
 }
 
 export async function fetchArbitrageInstanceHistory(page = 1, limit = 50, signal?: AbortSignal) {
@@ -366,6 +399,42 @@ export function deriveArbitrageManagementEndMethod(
 function instanceList(payload: unknown) {
   if (!Array.isArray(payload)) throw invalidResponse();
   return payload.map(instance);
+}
+
+function positionPresentation(payload: unknown): ArbitragePositionPresentation {
+  const value = requiredRecord(payload);
+  const market = requiredRecord(value.market);
+  const revenue = requiredRecord(value.revenue);
+  const completeness = market.completeness === "COMPLETE" || market.completeness === "INCOMPLETE"
+    ? market.completeness : invalidResponse();
+  if (revenue.completeness !== "INCOMPLETE"
+    || revenue.cumulativeFundingIncome !== null || revenue.incurredFees !== null
+    || revenue.estimatedExitFees !== null || revenue.currentArbitrageNetProfit !== null) throw invalidResponse();
+  return {
+    arbitrageId: requiredString(value.arbitrageId),
+    market: {
+      fundingRate: nullableFiniteNumber(market.fundingRate),
+      fundingIntervalHours: nullableFiniteNumber(market.fundingIntervalHours),
+      nextFundingTime: nullableTimestamp(market.nextFundingTime),
+      nextEstimatedFundingFee: nullableDecimal(market.nextEstimatedFundingFee),
+      nextEstimatedFundingFeeAsset: nullableString(market.nextEstimatedFundingFeeAsset),
+      spreadQuotePerBase: nullableFiniteNumber(market.spreadQuotePerBase),
+      spreadBps: nullableFiniteNumber(market.spreadBps),
+      quotedAt: nullableTimestamp(market.quotedAt),
+      marketDataAsOf: nullableTimestamp(market.marketDataAsOf),
+      completeness,
+    },
+    revenue: {
+      cumulativeFundingIncome: null, incurredFees: null, estimatedExitFees: null,
+      currentArbitrageNetProfit: null, completeness: "INCOMPLETE",
+    },
+  };
+}
+
+function nullableFiniteNumber(value: unknown) {
+  if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw invalidResponse();
+  return value;
 }
 
 function instance(payload: unknown): ArbitrageInstance {

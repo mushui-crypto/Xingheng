@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { AlertTriangle, CheckCircle2, CircleHelp, Layers3 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown, CircleHelp, Layers3 } from "lucide-react";
 import {
   deriveArbitrageManagementEndMethod,
   fetchActiveArbitrageInstances,
+  fetchArbitragePositionPresentations,
   fetchArbitrageCloseSafety,
   fetchArbitrageInstanceById,
   fetchArbitrageInstanceHistory,
@@ -14,8 +15,10 @@ import {
   type ArbitrageInstanceStatus,
   type ArbitrageLegVerificationStatus,
   type ArbitragePositionVerification,
+  type ArbitragePositionPresentation,
   type InstanceHedgeDelta,
 } from "../../../api/arbitrageInstances";
+import { formatFundingCountdown } from "../../arbitrage/lib/formatters";
 import {
   reconcileArbitrageInstance,
   type ArbitrageTerminalAuthoritativeSnapshot,
@@ -55,7 +58,7 @@ type ExitCapabilityLoaders = Readonly<{
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
-  | { status: "success"; active: ArbitrageInstance[]; history: ArbitrageInstance[] }
+  | { status: "success"; active: ArbitrageInstance[]; history: ArbitrageInstance[]; presentations?: ArbitragePositionPresentation[] }
   | { status: "error" };
 
 export function ArbitrageInstanceOverview() {
@@ -70,9 +73,10 @@ export function ArbitrageInstanceOverview() {
     void Promise.all([
       fetchActiveArbitrageInstances(controller.signal),
       fetchArbitrageInstanceHistory(page, HISTORY_LIMIT, controller.signal),
-    ]).then(([active, history]) => {
+      fetchArbitragePositionPresentations(controller.signal).catch(() => []),
+    ]).then(([active, history, presentations]) => {
       if (controller.signal.aborted) return;
-      setState({ status: "success", active, history });
+      setState({ status: "success", active, history, presentations });
     }).catch(() => {
       if (!controller.signal.aborted) setState({ status: "error" });
     });
@@ -281,6 +285,7 @@ export function ArbitrageInstanceContent({
     <ArbitrageInstanceSections
       active={state.active}
       history={state.history}
+      presentations={state.presentations ?? []}
       onPageChange={onPageChange}
       onExitHedge={onExitHedge}
       onInstanceRefresh={onInstanceRefresh}
@@ -306,6 +311,7 @@ export function ArbitrageInstanceSections({
   page,
   selectedSection = "active",
   verifications = {},
+  presentations = [],
 }: {
   active: ArbitrageInstance[];
   history: ArbitrageInstance[];
@@ -318,6 +324,7 @@ export function ArbitrageInstanceSections({
   page: number;
   selectedSection?: "active" | "history";
   verifications?: Record<string, VerificationState>;
+  presentations?: ArbitragePositionPresentation[];
 }) {
   return (
     <ArbitrageInstanceShell>
@@ -335,6 +342,7 @@ export function ArbitrageInstanceSections({
           onInstanceUpdated={onInstanceUpdated}
           onReconcileHedge={onReconcileHedge}
           title="当前套利"
+          presentations={presentations}
           verifications={verifications}
         /> : <InstanceSection
           emptyText="暂无历史套利记录"
@@ -385,6 +393,7 @@ function InstanceSection({
   onReconcileHedge,
   title,
   verifications = {},
+  presentations = [],
 }: {
   emptyText: string;
   historical?: boolean;
@@ -395,6 +404,7 @@ function InstanceSection({
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
   title: string;
   verifications?: Record<string, VerificationState>;
+  presentations?: ArbitragePositionPresentation[];
 }) {
   return (
     <section>
@@ -404,20 +414,22 @@ function InstanceSection({
       </div>
       {instances.length === 0
         ? <p className="border border-[#25282f] bg-black p-5 text-center text-sm text-[#8f99a5]">{emptyText}</p>
-        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onInstanceRefresh={onInstanceRefresh} onInstanceUpdated={onInstanceUpdated} onReconcileHedge={onReconcileHedge} verificationState={verifications[item.arbitrageId]} />)}</div>}
+        : <div className="grid gap-3">{instances.map((item) => <InstanceCard historical={historical} instance={item} key={item.arbitrageId} onExitHedge={onExitHedge} onInstanceRefresh={onInstanceRefresh} onInstanceUpdated={onInstanceUpdated} onReconcileHedge={onReconcileHedge} presentation={presentations.find((value) => value.arbitrageId === item.arbitrageId)} verificationState={verifications[item.arbitrageId]} />)}</div>}
     </section>
   );
 }
 
-function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onInstanceUpdated, onReconcileHedge, verificationState }: {
+function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, onInstanceUpdated, onReconcileHedge, presentation, verificationState }: {
   historical: boolean;
   instance: ArbitrageInstance;
   onExitHedge?: (target: ExitTarget) => void;
   onInstanceRefresh?: (arbitrageId: string) => Promise<ArbitrageInstance>;
   onInstanceUpdated?: (instance: ArbitrageInstance) => void;
   onReconcileHedge?: (instance: ArbitrageInstance) => void | Promise<void>;
+  presentation?: ArbitragePositionPresentation;
   verificationState?: VerificationState;
 }) {
+  const [expanded, setExpanded] = useState(false);
   const [capabilities, setCapabilities] = useState<ExitCapabilitiesState>(() => ({
     ...loadingExitCapabilities(instance),
     verification: verificationState ?? { status: "loading" },
@@ -483,25 +495,45 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
   const closeTargetSafety = closeTarget ? safetyValues[closeTarget.legId] : null;
   const releaseTargetSafety = releaseTarget ? safetyValues[releaseTarget.legId] : null;
   const canAbandon = canAbandonUnstartedArbitrage(instance);
+  const pair = instancePair(instance);
+  const longLeg = instance.legs.find((leg) => leg.role === "LONG")!;
+  const shortLeg = instance.legs.find((leg) => leg.role === "SHORT")!;
+  const managedQuantity = firstLevelManagedQuantity(instance, effectiveVerification, safetyValues);
+  const exitPresentation = currentExitPresentation(instance, canExitFully, exitCapabilitiesLoading, effectiveVerification, safetyValues);
   return <>
-    <article className="min-w-0 border border-[#25282f] bg-black p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
+    <article className="min-w-0 overflow-hidden border border-[#25282f] bg-black">
+      <button
+        aria-controls={`arbitrage-details-${instance.arbitrageId}`}
+        aria-expanded={expanded}
+        className="group flex w-full min-w-0 items-start justify-between gap-4 px-4 py-4 text-left outline-none transition-colors hover:bg-white/[0.025] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/50 sm:px-5"
+        onClick={() => setExpanded((current) => !current)}
+        type="button"
+      >
         <div className="min-w-0">
-          <p className="text-[11px] text-[#707985]">套利 ID</p>
-          <p className="mt-1 break-all font-mono text-xs text-white">{instance.arbitrageId}</p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h4 className="text-base font-semibold tracking-[-0.01em] text-white">{pair.base} / {pair.quote}</h4>
+            <span className="text-xs text-[#c5ccd4]">资金费率套利</span>
+            <span className="border border-white/15 px-1.5 py-0.5 text-[10px] text-[#8f99a5]">{instance.legs[0].venue === instance.legs[1].venue ? "同所" : "跨所"}</span>
+            <StatusBadge instance={instance} />
+          </div>
+          <p className="mt-2 truncate text-xs text-[#8f99a5]">{venuePath(instance)}</p>
+          <p className="mt-1 font-mono text-[10px] text-[#5f6874]">{truncateInstanceId(instance.arbitrageId)}</p>
         </div>
-        <StatusBadge instance={instance} />
-      </div>
-      <dl className="mt-4 grid gap-3 text-xs sm:grid-cols-2">
-        <Metric label="策略类型" value={strategyTypeLabel(instance.strategyType)} />
-        <Metric label="创建时间" value={formatTime(instance.createdAt)} />
-        <Metric label="更新时间" value={formatTime(instance.updatedAt)} />
-        <Metric label="建仓完成时间" value={formatOptionalTime(instance.openedAt)} />
-        {historical ? <Metric label="管理结束时间" value={formatOptionalTime(instance.closedAt)} /> : null}
-        {historical ? <Metric label="管理结束方式" value={managementEndMethodLabel(deriveArbitrageManagementEndMethod(instance))} /> : null}
+        <ChevronDown className={`mt-1 shrink-0 text-[#8f99a5] transition-transform duration-200 motion-reduce:transition-none ${expanded ? "rotate-180" : ""}`} size={18} aria-hidden="true" />
+      </button>
+
+      <dl className="grid grid-cols-2 gap-px border-y border-[#25282f] bg-[#25282f] text-xs md:grid-cols-3 xl:grid-cols-6">
+        <PrimaryMetric label="当前资金费率" value={fundingRateValue(presentation)} />
+        <PrimaryMetric label="下次预计资金费" value={estimatedFundingValue(presentation)} />
+        <PrimaryMetric label="距下次结算" value={presentation?.market.nextFundingTime == null ? "暂无可靠数据" : formatFundingCountdown(presentation.market.nextFundingTime, Date.now()).replace("距结算 ", "")} />
+        <PrimaryMetric label={instance.legs[0].venue === instance.legs[1].venue ? "当前基差" : "跨所退出价差"} value={spreadValue(presentation, pair.quote)} />
+        <PrimaryMetric label="管理数量" value={managedQuantity} />
+        <PrimaryMetric label="当前退出状态" tone={exitPresentation.tone} value={exitPresentation.label} />
       </dl>
+      <p className="border-b border-[#25282f] px-4 py-2 text-[10px] text-[#707985] sm:px-5">{marketFreshnessValue(presentation)}</p>
+
       {!historical && (canResumeOpeningWorkflow(instance) || canAbandon) ? (
-        <div className="mt-4 flex flex-wrap justify-end gap-2 border-t border-[#25282f] pt-4">
+        <div className="flex flex-wrap justify-end gap-2 px-4 py-3 sm:px-5" onClick={(event) => event.stopPropagation()}>
           {canAbandon && onInstanceRefresh ? <Button onClick={() => setAbandonOpen(true)} type="button" variant="ghost">
             放弃套利
           </Button> : null}
@@ -521,41 +553,43 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
             : null}
         </div>
       ) : null}
-      <div className="mt-4 grid gap-px bg-[#25282f] lg:grid-cols-2">
-        {instance.legs.map((leg) => {
-          return <div className="bg-[#0b0d11] p-4" key={leg.legId}>
-            <div className="flex items-center justify-between gap-2">
-              <span className="text-xs font-semibold text-white">{leg.role === "LONG" ? "多头腿" : "空头腿"}</span>
-              <span className="text-[11px] text-[#8f99a5]">{venueLabel(leg.venue)}</span>
-            </div>
-            <dl className="mt-3 space-y-2 text-xs">
-              <LegRow label="交易所" value={venueLabel(leg.venue)} />
-              <LegRow label="交易标的" value={leg.instrumentId} />
-              <LegRow label="方向" value={leg.role === "LONG" ? "多头" : "空头"} />
-              {historical ? (
-                <>
-                  <LegRow label="已确认开仓数量" value={leg.confirmedOpenedQuantity} />
-                  <LegRow label="正常确认退出数量" value={leg.confirmedClosedQuantity} />
-                </>
-              ) : <LiveLegVerification legId={leg.legId} state={effectiveVerification} />}
-              {!historical ? <LiveCloseSafety state={closeSafeties[leg.legId]} /> : null}
-            </dl>
-            {!historical ? <LegCloseActions
-              closeSafetyState={closeSafeties[leg.legId]}
-              onClose={() => setCloseTarget(leg)}
-              verificationState={effectiveVerification}
-              legId={leg.legId}
-              enabled={Boolean(onInstanceRefresh)}
-              exitCapabilitiesComplete={exitCapabilitiesComplete}
-              instanceFullExitAvailable={canExitFully}
-            /> : null}
-          </div>;
-        })}
+      <div hidden={!expanded} id={`arbitrage-details-${instance.arbitrageId}`}>
+        <div className="grid gap-px bg-[#25282f] md:grid-cols-2 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(260px,0.9fr)]">
+          <PositionLegPanel historical={historical} instance={instance} leg={longLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[longLeg.legId]}>
+            {!historical ? <LegCloseActions closeSafetyState={closeSafeties[longLeg.legId]} onClose={() => setCloseTarget(longLeg)} verificationState={effectiveVerification} legId={longLeg.legId} enabled={Boolean(onInstanceRefresh)} exitCapabilitiesComplete={exitCapabilitiesComplete} instanceFullExitAvailable={canExitFully} /> : null}
+          </PositionLegPanel>
+          <PositionLegPanel historical={historical} instance={instance} leg={shortLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[shortLeg.legId]}>
+            {!historical ? <LegCloseActions closeSafetyState={closeSafeties[shortLeg.legId]} onClose={() => setCloseTarget(shortLeg)} verificationState={effectiveVerification} legId={shortLeg.legId} enabled={Boolean(onInstanceRefresh)} exitCapabilitiesComplete={exitCapabilitiesComplete} instanceFullExitAvailable={canExitFully} /> : null}
+          </PositionLegPanel>
+          <PositionHealthPanel canExitFully={canExitFully} closeSafeties={safetyValues} deltaState={deltaState} instance={instance} verificationState={effectiveVerification} />
+        </div>
+
+        <RevenueDetails presentation={presentation} />
+
+        <details className="border-t border-[#25282f] px-4 py-3 text-xs sm:px-5">
+          <summary className="cursor-pointer select-none text-[#8f99a5] outline-none hover:text-white focus-visible:ring-1 focus-visible:ring-white/50">技术与价格详情</summary>
+          <dl className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Metric label="Instance ID" value={instance.arbitrageId} />
+            <Metric label="创建时间" value={formatTime(instance.createdAt)} />
+            <Metric label="建仓完成时间" value={formatOptionalTime(instance.openedAt)} />
+            <Metric label="最后更新时间" value={formatTime(instance.updatedAt)} />
+            {historical ? <Metric label="管理结束时间" value={formatOptionalTime(instance.closedAt)} /> : null}
+            {historical ? <Metric label="管理结束方式" value={managementEndMethodLabel(deriveArbitrageManagementEndMethod(instance))} /> : null}
+            <Metric label="开仓均价" value="暂无可靠数据" />
+            <Metric label="当前价格" value="暂无可靠数据" />
+            <Metric label="标记价格" value="暂无可靠数据" />
+            <Metric label="基差变动影响" value="暂无可靠数据" />
+            <Metric label="Position Mode" value={instance.legs.map((leg) => safetyValues[leg.legId]?.positionMode ?? "暂无可靠数据").join(" / ")} />
+            <Metric label="Position Bucket" value={instance.legs.map((leg) => leg.role).join(" / ")} />
+            <Metric label="Execution / Reference / Audit" value={`${instance.executionReferences.length} 条执行引用`} />
+            <Metric label="Verification" value={effectiveVerification.status === "success" ? formatTime(effectiveVerification.verification.checkedAt) : "暂无可靠数据"} />
+          </dl>
+          {!historical ? <InstanceDeltaPanel instance={instance} state={deltaState} /> : null}
+          <ManagementHistory instance={instance} />
+          <LegacyUnresolvedSealHistory instance={instance} />
+        </details>
       </div>
-      {historical ? null : <InstanceDeltaPanel instance={instance} state={deltaState} />}
-      <ManagementHistory instance={instance} />
-      <LegacyUnresolvedSealHistory instance={instance} />
-      {!historical && instance.status === "RESIDUAL" ? <p className="mt-4 text-xs text-amber-200">存在管理残余；当前证据不足以进一步判断具体原因。</p> : null}
+
       {!historical ? <HedgeExitActions
         canExit={canExitFully}
         hasQuantityRuleDust={Object.values(safetyValues).some((safety) => safety.reason === "QUANTITY_STEP_DUST")}
@@ -610,6 +644,199 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       onClose={() => setAbandonOpen(false)}
     /> : null}
   </>;
+}
+
+function PrimaryMetric({ label, tone = "neutral", value }: { label: string; tone?: "neutral" | "success" | "warning" | "risk"; value: string }) {
+  const toneClass = tone === "success" ? "text-emerald-200" : tone === "warning" ? "text-amber-200" : tone === "risk" ? "text-red-200" : "text-[#d7dce2]";
+  return <div className="min-w-0 bg-black px-3 py-3 sm:px-4"><dt className="text-[11px] text-[#707985]">{label}</dt><dd className={`mt-1.5 break-words font-mono text-xs font-medium ${toneClass}`}>{value}</dd></div>;
+}
+
+function PositionLegPanel({ children, closeSafetyState, historical, instance, leg, verificationState }: {
+  children?: ReactNode;
+  closeSafetyState?: ReadState<ArbitrageCloseSafety>;
+  historical: boolean;
+  instance: ArbitrageInstance;
+  leg: ArbitrageInstanceLeg;
+  verificationState: VerificationState;
+}) {
+  const spot = leg.instrumentId.endsWith("-SPOT");
+  const verification = verificationState.status === "success"
+    ? verificationState.verification.legs.find((item) => item.legId === leg.legId)
+    : null;
+  const safety = closeSafetyState?.status === "success" ? closeSafetyState.value : null;
+  const providerReality = spot
+    ? verification?.actualQuantity ?? "暂无可靠数据"
+    : leg.role === "LONG"
+      ? safety?.actualLongQuantity ?? verification?.actualQuantity ?? "暂无可靠数据"
+      : safety?.actualShortQuantity ?? verification?.actualQuantity ?? "暂无可靠数据";
+  const managed = safety?.activeManagedQuantity ?? verification?.expectedManagedQuantity ?? activeManagedFallback(leg);
+  const exitQuantity = historical ? "—" : safety?.safeClosableQuantity ?? "暂无可靠数据";
+  const exitStatus = historical ? statusLabel(instance.status)
+    : !safety || !safety.realityReliable ? "需同步确认"
+      : safety.fullManagedCloseAvailable ? "可安全退出"
+        : !isZeroDecimal(safety.safeClosableQuantity) ? "存在可交易偏差" : "当前不可完整退出";
+  return <section className="min-w-0 bg-[#0b0d11] p-4 sm:p-5">
+    <div className="flex items-center justify-between gap-3">
+      <h5 className="text-xs font-semibold text-white">{leg.role === "LONG" ? "多头腿" : "空头腿"}</h5>
+      <span className="text-[11px] text-[#8f99a5]">{spot ? "现货" : "永续"}</span>
+    </div>
+    <dl className="mt-3 space-y-2.5 text-xs">
+      <LegRow label="交易所" value={venueLabel(leg.venue)} />
+      <LegRow label={spot ? "交易标的" : "合约标的"} value={leg.instrumentId} />
+      <LegRow label="方向" value={spot ? "买入现货 / 多头" : leg.role} />
+      <LegRow label="管理数量" value={managed} />
+      <LegRow label={`Provider Reality${spot ? "" : ` ${leg.role} quantity`}`} value={providerReality} />
+      <LegRow label={spot ? "可安全退出数量" : "可安全平仓数量"} value={exitQuantity} />
+      <LegRow label="退出状态" value={exitStatus} />
+      {historical ? <>
+        <LegRow label="已确认开仓数量" value={leg.confirmedOpenedQuantity} />
+        <LegRow label="正常确认退出数量" value={leg.confirmedClosedQuantity} />
+      </> : null}
+    </dl>
+    {!historical && verification ? <VerificationNotice status={verification.verificationStatus} /> : null}
+    {children}
+  </section>;
+}
+
+function PositionHealthPanel({ canExitFully, closeSafeties, deltaState, instance, verificationState }: {
+  canExitFully: boolean;
+  closeSafeties: Record<string, ArbitrageCloseSafety | undefined>;
+  deltaState: ReadState<InstanceHedgeDelta>;
+  instance: ArbitrageInstance;
+  verificationState: VerificationState;
+}) {
+  const health = derivePositionHealth(instance, verificationState, closeSafeties, deltaState, canExitFully);
+  const delta = deltaState.status === "success" ? deltaValue(deltaState.value.activeManagedDelta, canonicalBaseAsset(instance)) : "暂无可靠数据";
+  const status = { ALIGNED: "仓位已对齐", NON_TRADEABLE_RESIDUAL: "存在不可交易残余", HEDGE_DEVIATION: "存在对冲偏差", NEEDS_SYNC: "需同步确认" }[health.status];
+  const tone = health.status === "ALIGNED" ? "text-emerald-200" : health.status === "HEDGE_DEVIATION" ? "text-red-200" : "text-amber-200";
+  return <section className="min-w-0 bg-[#0b0d11] p-4 md:col-span-2 sm:p-5 xl:col-span-1">
+    <h5 className="text-xs font-semibold text-white">仓位健康</h5>
+    <p className={`mt-2 text-xs font-medium ${tone}`}>{status}</p>
+    <dl className="mt-3 space-y-2.5 text-xs">
+      <LegRow label="净 Delta" value={delta} />
+      <LegRow label="残余来源" value={health.residualReason ?? "无明显残余"} />
+      <LegRow label="残余可交易" value={health.residualTradeable === null ? "暂无可靠数据" : health.residualTradeable ? "是" : "否"} />
+      <LegRow label="影响退出" value={health.affectsFullExit === null ? "暂无可靠数据" : health.affectsFullExit ? "是" : "否"} />
+      <LegRow label="最后同步时间" value={health.lastSyncedAt === null ? "暂无可靠数据" : formatTime(health.lastSyncedAt)} />
+    </dl>
+  </section>;
+}
+
+export function derivePositionHealth(
+  instance: ArbitrageInstance,
+  verification: VerificationState,
+  closeSafeties: Record<string, ArbitrageCloseSafety | undefined>,
+  delta: ReadState<InstanceHedgeDelta>,
+  canExitFully: boolean,
+) {
+  const timestamps = [
+    verification.status === "success" ? verification.verification.checkedAt : null,
+    delta.status === "success" ? delta.value.derivedAt : null,
+    ...Object.values(closeSafeties).map((value) => value?.checkedAt ?? null),
+  ].filter((value): value is number => value !== null);
+  const lastSyncedAt = timestamps.length > 0 ? Math.min(...timestamps) : null;
+  const complete = verification.status === "success" && delta.status === "success"
+    && delta.value.activeManagedDelta.status === "KNOWN"
+    && instance.legs.every((leg) => closeSafeties[leg.legId]?.realityReliable)
+    && !instance.executionReferences.some((reference) => reference.status === "UNKNOWN" || reference.status === "PENDING_CONFIRMATION");
+  if (!complete || verification.status !== "success" || verification.verification.legs.some((leg) => leg.verificationStatus === "UNKNOWN")) {
+    return { status: "NEEDS_SYNC" as const, residualReason: null, residualTradeable: null, affectsFullExit: null, lastSyncedAt };
+  }
+  if (verification.verification.legs.some((leg) => leg.verificationStatus === "MISMATCH")) {
+    return { status: "HEDGE_DEVIATION" as const, residualReason: null, residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
+  }
+  if (Object.values(closeSafeties).some((safety) => safety?.reason === "QUANTITY_STEP_DUST")) {
+    return { status: "NON_TRADEABLE_RESIDUAL" as const, residualReason: "手续费 / 数量步长", residualTradeable: false, affectsFullExit: false, lastSyncedAt };
+  }
+  return { status: "ALIGNED" as const, residualReason: null, residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
+}
+
+function RevenueDetails({ presentation: _presentation }: { presentation?: ArbitragePositionPresentation }) {
+  return <section className="border-t border-[#25282f]">
+    <h5 className="px-4 pt-4 text-xs font-semibold text-white sm:px-5">收益明细</h5>
+    <dl className="mt-3 grid grid-cols-1 gap-px bg-[#25282f] sm:grid-cols-2 lg:grid-cols-4">
+      <RevenueMetric label="累计资金费收入" value="暂无可靠数据" />
+      <RevenueMetric label="已发生手续费" tone="cost" value="暂无可靠数据" />
+      <RevenueMetric label="预计退出手续费" tone="cost" value="暂无可靠数据" />
+      <RevenueMetric label="当前套利净收益" tone="profit" value="暂无可靠数据" />
+    </dl>
+  </section>;
+}
+
+function RevenueMetric({ label, tone = "neutral", value }: { label: string; tone?: "neutral" | "profit" | "cost"; value: string }) {
+  const valueClass = value === "暂无可靠数据" ? "text-[#8f99a5]" : tone === "profit" ? "text-emerald-200" : tone === "cost" ? "text-red-200" : "text-[#d7dce2]";
+  return <div className="min-w-0 bg-black px-4 py-3"><dt className="text-[11px] text-[#707985]">{label}</dt><dd className={`mt-1.5 break-words font-mono text-xs ${valueClass}`}>{value}</dd></div>;
+}
+
+function fundingRateValue(presentation?: ArbitragePositionPresentation) {
+  const { fundingRate, fundingIntervalHours } = presentation?.market ?? {};
+  if (fundingRate == null) return "暂无可靠数据";
+  const interval = fundingIntervalHours == null ? "" : ` / ${fundingIntervalHours}h`;
+  return `${fundingRate >= 0 ? "+" : ""}${(fundingRate * 100).toFixed(4)}%${interval}`;
+}
+
+function estimatedFundingValue(presentation?: ArbitragePositionPresentation) {
+  const value = presentation?.market.nextEstimatedFundingFee;
+  if (value == null) return "暂无可靠数据";
+  const asset = presentation?.market.nextEstimatedFundingFeeAsset;
+  return asset ? `${value} ${asset}` : value;
+}
+
+function spreadValue(presentation: ArbitragePositionPresentation | undefined, quoteAsset: string) {
+  const value = presentation?.market.spreadQuotePerBase;
+  const bps = presentation?.market.spreadBps;
+  if (value == null || bps == null) return "暂无可靠数据";
+  return `${value.toFixed(6)} ${quoteAsset} / ${bps.toFixed(2)} bps`;
+}
+
+function marketFreshnessValue(presentation?: ArbitragePositionPresentation) {
+  if (!presentation || presentation.market.completeness !== "COMPLETE" || presentation.market.marketDataAsOf == null) {
+    return "行情展示数据不完整";
+  }
+  return `行情截至 ${formatTime(presentation.market.marketDataAsOf)} · 数据完整`;
+}
+
+function instancePair(instance: ArbitrageInstance) {
+  const parts = instance.legs[0].instrumentId.split("-");
+  return { base: parts[0] || "—", quote: parts[1] || "—" };
+}
+
+function venuePath(instance: ArbitrageInstance) {
+  const long = instance.legs.find((leg) => leg.role === "LONG")!;
+  const short = instance.legs.find((leg) => leg.role === "SHORT")!;
+  return `${venueLabel(long.venue)} ${long.instrumentId.endsWith("-SPOT") ? "现货" : "永续"} → ${venueLabel(short.venue)} 永续`;
+}
+
+function truncateInstanceId(arbitrageId: string) {
+  return arbitrageId.length <= 20 ? arbitrageId : `${arbitrageId.slice(0, 12)}…${arbitrageId.slice(-6)}`;
+}
+
+function activeManagedFallback(leg: ArbitrageInstanceLeg) {
+  return leg.confirmedOpenedQuantity === leg.confirmedClosedQuantity ? "0" : leg.confirmedOpenedQuantity;
+}
+
+function firstLevelManagedQuantity(instance: ArbitrageInstance, verification: VerificationState, safeties: Record<string, ArbitrageCloseSafety | undefined>) {
+  const values = instance.legs.map((leg) => safeties[leg.legId]?.activeManagedQuantity
+    ?? (verification.status === "success" ? verification.verification.legs.find((item) => item.legId === leg.legId)?.expectedManagedQuantity : null)
+    ?? activeManagedFallback(leg));
+  const display = values[0] === values[1] ? values[0] : values.join(" / ");
+  return withAsset(display, canonicalBaseAsset(instance));
+}
+
+function currentExitPresentation(
+  instance: ArbitrageInstance,
+  canExitFully: boolean,
+  loading: boolean,
+  verification: VerificationState,
+  safeties: Record<string, ArbitrageCloseSafety | undefined>,
+): { label: string; tone: "neutral" | "success" | "warning" | "risk" } {
+  if (instance.status === "CLOSED") return { label: "管理已结束", tone: "neutral" };
+  if (instance.status === "CLOSING") return { label: "退出中", tone: "warning" };
+  if (loading) return { label: "同步中", tone: "neutral" };
+  if (canExitFully) return { label: "可安全退出", tone: "success" };
+  if (verification.status !== "success" || verification.verification.legs.some((leg) => leg.verificationStatus === "UNKNOWN")) return { label: "需同步后退出", tone: "warning" };
+  if (Object.values(safeties).some((safety) => safety && !safety.fullManagedCloseAvailable && !isZeroDecimal(safety.safeClosableQuantity))) return { label: "存在可交易偏差", tone: "warning" };
+  return { label: "当前不可完整退出", tone: "risk" };
 }
 
 export function canResumeOpeningWorkflow(instance: ArbitrageInstance) {
@@ -700,7 +927,7 @@ export function ManagementReleaseActions({ candidates, instanceFullExitAvailable
   onRelease: (leg: ArbitrageInstanceLeg) => void;
 }) {
   if (instanceFullExitAvailable || candidates.length === 0) return null;
-  return <section className="mt-4 border-t border-[#25282f] pt-4">
+  return <section className="border-t border-[#25282f] px-4 py-4 sm:px-5">
     <p className="text-xs font-semibold text-amber-100">异常处置</p>
     <p className="mt-2 max-w-3xl text-xs leading-5 text-[#8f99a5]">
       正常完整退出不可用时，可以保留交易所中的残余仓位并结束 Xingheng 对对应套利腿的跟踪。本操作不会提交平仓订单。
@@ -844,7 +1071,7 @@ function HedgeExitActions({ canExit, hasQuantityRuleDust, instance, onExitHedge,
   verificationState?: VerificationState;
 }) {
   const summary = hedgeExitSummary(instance, verificationState);
-  return <div className="mt-4 border-t border-[#25282f] pt-4">
+  return <div className="border-t border-[#25282f] px-4 py-4 sm:px-5" onClick={(event) => event.stopPropagation()}>
     <p className={`text-xs font-semibold ${summary.kind === "ended" ? "text-emerald-200" : summary.kind === "unknown" ? "text-amber-200" : "text-white"}`}>
       {summary.label}
     </p>
@@ -972,7 +1199,10 @@ function StatusBadge({ instance }: { instance: ArbitrageInstance }) {
     && instance.legs.every((leg) => leg.confirmedOpenedQuantity === "0"
       && leg.confirmedClosedQuantity === "0")
     ? "未开始 / 已终止"
-    : statusLabel(status);
+    : status === "HOLDING" ? "持有中"
+      : status === "CLOSING" ? "退出中"
+        : status === "CLOSED" ? "管理已结束"
+          : status === "OPENING" ? "建仓中" : "需检查";
   return (
     <span className={`border px-2 py-1 text-[11px] font-medium ${warning ? "border-amber-400/30 text-amber-200" : "border-white/20 text-[#c5ccd4]"}`}>
       {label}

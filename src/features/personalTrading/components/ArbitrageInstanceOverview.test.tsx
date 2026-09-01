@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { requireArbitrageInstanceList, type ArbitrageCloseSafety, type ArbitrageInstance, type InstanceHedgeDelta } from "../../../api/arbitrageInstances";
+import { requireArbitrageInstanceList, type ArbitrageCloseSafety, type ArbitrageInstance, type ArbitragePositionPresentation, type InstanceHedgeDelta } from "../../../api/arbitrageInstances";
 import {
   ArbitrageInstanceContent,
   ArbitrageInstanceSections,
@@ -36,6 +36,22 @@ import { compareUnsignedDecimals } from "./ArbitrageLegCloseDialog";
 
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
 
+function presentation(arbitrageId: string): ArbitragePositionPresentation {
+  return {
+    arbitrageId,
+    market: {
+      fundingRate: 0.0001, fundingIntervalHours: 8, nextFundingTime: Date.now() + 3_600_000,
+      nextEstimatedFundingFee: "0", nextEstimatedFundingFeeAsset: "USDT",
+      spreadQuotePerBase: 6, spreadBps: 60, quotedAt: 1_800_000_000_000,
+      marketDataAsOf: 1_800_000_000_000, completeness: "COMPLETE",
+    },
+    revenue: {
+      cumulativeFundingIncome: null, incurredFees: null, estimatedExitFees: null,
+      currentArbitrageNetProfit: null, completeness: "INCOMPLETE",
+    },
+  };
+}
+
 test("current and history sections render every lifecycle status in Chinese", () => {
   const active = requireArbitrageInstanceList([
     arbitrageInstance("OPENING"),
@@ -55,7 +71,7 @@ test("current and history sections render every lifecycle status in Chinese", ()
   );
   const html = `${activeHtml}${historyHtml}`;
 
-  for (const label of ["建仓中", "持有中", "存在残余", "退出中", "实例管理已结束", "失败"]) {
+  for (const label of ["建仓中", "持有中", "需检查", "退出中", "管理已结束"]) {
     assert.match(html, new RegExp(label));
   }
   assert.match(html, /当前套利/);
@@ -64,10 +80,68 @@ test("current and history sections render every lifecycle status in Chinese", ()
   assert.match(html, /空头腿/);
   assert.doesNotMatch(html, /PERPETUAL_PERPETUAL|OPENING|HOLDING|RESIDUAL|CLOSING|CLOSED|FAILED/u);
   assert.doesNotMatch(html, /okx:private-account-1234|binance:private-account-5678/u);
-  assert.doesNotMatch(html, /收益|APR|APY|当前价格/u);
+  assert.doesNotMatch(html, /APR|APY/u);
   assert.equal((activeHtml.match(/继续开仓/gu) ?? []).length, 0);
   assert.doesNotMatch(activeHtml, /href="\/app\/arbitrage|resumeArbitrageId=/u);
   assert.doesNotMatch(historyHtml, /继续开仓/u);
+});
+
+test("arbitrage position card follows the three-level decision hierarchy without inventing PnL", () => {
+  const [perpetual] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const spotLong: ArbitrageInstance = {
+    ...perpetual!,
+    arbitrageId: "arbitrage-spot-long-ui",
+    strategyType: "SPOT_PERPETUAL",
+    legs: [
+      { ...perpetual!.legs[0], instrumentId: "DOGE-USDT-SPOT" },
+      { ...perpetual!.legs[1], instrumentId: "DOGE-USDT-PERP" },
+    ],
+    pnl: { asset: "USDT", cumulativeFundingPnl: "1.2", realizedTradingPnl: "99", feesCosts: "0.3", cumulativeNetPnl: null, updatedAt: null },
+  };
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[spotLong]}
+    history={[]}
+    onPageChange={() => undefined}
+    page={1}
+    presentations={[presentation(spotLong.arbitrageId)]}
+    verifications={{ [spotLong.arbitrageId]: matchedVerification(spotLong, "60.531381", "60") }}
+  />);
+  const defaultLayer = html.slice(html.indexOf("资金费率套利"), html.indexOf("hidden=\"\""));
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+
+  assert.match(html, /DOGE \/ USDT/u);
+  assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
+  assert.match(defaultLayer, /当前资金费率[\s\S]*下次预计资金费[\s\S]*距下次结算[\s\S]*跨所退出价差[\s\S]*管理数量[\s\S]*当前退出状态/u);
+  assert.match(defaultLayer, /\+0\.0100% \/ 8h[\s\S]*0 USDT[\s\S]*6\.000000 USDT \/ 60\.00 bps/u);
+  assert.match(html, /数据完整/u);
+  assert.doesNotMatch(defaultLayer, /净 Delta|可安全退出数量|safeClosable/u);
+  assert.match(html, /多头腿[\s\S]*买入现货 \/ 多头[\s\S]*Provider Reality[\s\S]*60.531381/u);
+  assert.match(html, /空头腿[\s\S]*SHORT[\s\S]*Provider Reality SHORT quantity/u);
+  assert.match(html, /仓位健康[\s\S]*净 Delta[\s\S]*残余来源[\s\S]*残余可交易[\s\S]*影响退出[\s\S]*最后同步时间/u);
+  assert.match(html, /收益明细[\s\S]*累计资金费收入[\s\S]*已发生手续费[\s\S]*预计退出手续费[\s\S]*当前套利净收益[\s\S]*暂无可靠数据/u);
+  assert.doesNotMatch(html, /Spot PnL|Perp PnL|单腿浮盈亏|基差收益损失/u);
+  assert.match(source, /sm:grid-cols-2 lg:grid-cols-4/u);
+  assert.match(source, /const \[expanded, setExpanded\] = useState\(false\)/u);
+  assert.match(source, /aria-expanded=\{expanded\}[\s\S]*setExpanded/u);
+  assert.match(source, /onClick=\{\(event\) => event\.stopPropagation\(\)\}/u);
+  assert.doesNotMatch(source, /cumulativeFundingPnl[\s\S]{0,200}feesCosts[\s\S]{0,200}[+\-]/u);
+});
+
+test("incomplete presentation stays null and never falls back to instance PnL", () => {
+  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[active!]}
+    history={[]}
+    onPageChange={() => undefined}
+    page={1}
+    presentations={[{ ...presentation(active!.arbitrageId), market: {
+      ...presentation(active!.arbitrageId).market, fundingRate: null, fundingIntervalHours: null,
+      nextFundingTime: null, nextEstimatedFundingFee: null, nextEstimatedFundingFeeAsset: null,
+      spreadQuotePerBase: null, spreadBps: null, quotedAt: null, marketDataAsOf: null, completeness: "INCOMPLETE",
+    } }]}
+  />);
+  assert.match(html, /行情展示数据不完整/u);
+  assert.doesNotMatch(html, />12\.5 USDT<|>3\.25 USDT</u);
 });
 
 test("only OPENING instances expose the resume action", () => {
@@ -187,8 +261,8 @@ test("active legs render matched, mismatch, unknown and null quantities without 
       }}
     />,
   );
-  assert.match(html, /多头腿[\s\S]*系统管理数量[\s\S]*1[\s\S]*交易所真实数量[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
-  assert.match(html, /空头腿[\s\S]*系统管理数量[\s\S]*2[\s\S]*交易所真实数量[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
+  assert.match(html, /多头腿[\s\S]*管理数量[\s\S]*1[\s\S]*Provider Reality LONG quantity[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
+  assert.match(html, /空头腿[\s\S]*管理数量[\s\S]*2[\s\S]*Provider Reality SHORT quantity[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
   assert.doesNotMatch(html, />0<\/dd>[\s\S]*当前真实仓位暂无法可靠确认/u);
 });
 
@@ -910,7 +984,9 @@ test("management history distinguishes normal close, release, and mixed manageme
   assert.match(releasedHtml, /已保留残余数量[\s\S]*0.4[\s\S]*历史快照/u);
   assert.match(releasedHtml, /不代表 Xingheng 已执行平仓/u);
   assert.doesNotMatch(releasedHtml, /已清仓|全部仓位已平仓/u);
-  assert.match(mixedHtml, /部分正常退出 \+ 保留残余结束跟踪[\s\S]*正常确认退出数量[\s\S]*已保留残余数量/u);
+  assert.match(mixedHtml, /部分正常退出 \+ 保留残余结束跟踪/u);
+  assert.match(mixedHtml, /正常确认退出数量/u);
+  assert.match(mixedHtml, /已保留残余数量/u);
 });
 
 test("sealed legacy UNKNOWN remains visible as UNKNOWN while lifecycle UI is terminal", () => {

@@ -9,6 +9,15 @@ import {
 import type { InternalArbitrageMarket } from "./arbitrageTypes";
 
 describe("ArbitrageDashboardService cache and refresh control", () => {
+  it("shares the existing raw market snapshot with position presentation reads", async () => {
+    let loads = 0;
+    const service = new ArbitrageDashboardService({ rawMarketLoader: async () => rawSnapshot(++loads) });
+    const market = await service.getCurrentMarketSnapshot();
+    await service.getSnapshot(90);
+    assert.equal(loads, 1);
+    assert.equal(market.generatedAt, 1);
+    assert.deepEqual(market.markets, []);
+  });
   it("reuses a fresh 20 second snapshot for ordinary requests", async () => {
     let now = 1_000;
     let loads = 0;

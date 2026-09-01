@@ -5,6 +5,27 @@ import test from "node:test";
 import express from "express";
 import { registerArbitrageInstanceRoutes } from "./arbitrageInstanceRoutes";
 
+test("presentation route batches the authenticated user's active instances", async () => {
+  const calls: unknown[] = [];
+  const app = authenticatedApp("user-a");
+  registerArbitrageInstanceRoutes(app, {
+    listActive(userId: string) { calls.push({ operation: "active", userId }); return [{ arbitrageId: "arb-1" }]; },
+    listHistory: () => [], getById: () => null,
+  } as never, undefined, undefined, {
+    async present(instances: readonly unknown[]) { calls.push({ operation: "present", instances }); return [{ arbitrageId: "arb-1" }]; },
+  } as never);
+  const result = await request(app, "/api/arbitrage-instances/presentation");
+  try {
+    assert.equal(result.response.status, 200);
+    assert.equal(result.response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await result.response.json(), [{ arbitrageId: "arb-1" }]);
+    assert.deepEqual(calls, [
+      { operation: "active", userId: "user-a" },
+      { operation: "present", instances: [{ arbitrageId: "arb-1" }] },
+    ]);
+  } finally { await result.close(); }
+});
+
 test("arbitrage instance routes bind active, history, and detail queries to the authenticated user", async () => {
   const calls: unknown[] = [];
   const app = authenticatedApp("user-a");
