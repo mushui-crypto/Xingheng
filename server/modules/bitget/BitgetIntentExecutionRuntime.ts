@@ -16,6 +16,7 @@ import {
   runManagedClosePreMutationStage,
   type FormalManagedCloseExecutionContext,
 } from "../arbitrage-execution/FormalExecutionRuntime";
+import { persistHedgeStartExecutionRecord } from "../arbitrage-execution/ArbitrageHedgeStartTiming";
 import {
   createBitgetExecutionOrderRecoveryReference,
   createBitgetExecutionOrderReference,
@@ -120,10 +121,10 @@ export class BitgetIntentExecutionRuntime {
         await runManagedClosePreMutationStage(
           "PRE_MUTATION_EXECUTION_RECORD_PERSIST",
           "execution_record_persist_failed",
-          () => this.recordStore.create(initial),
+          () => persistHedgeStartExecutionRecord(() => this.recordStore.create(initial)),
         );
       } else {
-        await this.recordStore.create(initial);
+        await persistHedgeStartExecutionRecord(() => this.recordStore.create(initial));
       }
       let coordinatedCapability: ExecutionCapability<BitgetIntentExecutionResult>;
       try {

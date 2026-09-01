@@ -13,6 +13,15 @@ import {
 } from "./ArbitrageExecutionCommandService";
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
 import {
+  markHedgeStartTiming,
+  measureHedgeStartTiming,
+  recordHedgeReconcileAttempt,
+  recordHedgeStartOutcome,
+  withHedgeStartLegTiming,
+  withHedgeStartTiming,
+  type HedgeStartTimingLogger,
+} from "./ArbitrageHedgeStartTiming";
+import {
   finalizeExecutionOnline,
   OnlineReconcileFinalizationError,
   type OnlineReconcileAttempt,
@@ -100,6 +109,7 @@ export class ArbitrageHedgeStartService {
       firstLegFinalizationInitialPollMs?: number;
       firstLegFinalizationMaxPollMs?: number;
       firstLegFinalizationMaxAttempts?: number;
+      timingLogger?: HedgeStartTimingLogger | null;
     }> = {},
   ) {}
 
@@ -132,7 +142,11 @@ export class ArbitrageHedgeStartService {
     const operation = withProviderCommandTrace({ userId, instanceId: arbitrageId,
       commandId: request.hedgeCommandId, phase: "START", bindings: instance.legs },
     trace => this.instances.recordProviderTrace?.(trace),
-    () => this.startWithOutcomeAudit(userId, arbitrageId, instance, request));
+    () => withHedgeStartTiming(
+      { instanceId: arbitrageId, commandId: request.hedgeCommandId },
+      this.options.timingLogger,
+      () => this.startWithOutcomeAudit(userId, arbitrageId, instance, request),
+    ));
     this.inFlight.set(key, { fingerprint, operation });
     try {
       return await operation;
@@ -150,9 +164,13 @@ export class ArbitrageHedgeStartService {
     try {
       const outcome = await this.startOnce(userId, arbitrageId, initial, request);
       this.recordOutcome(userId, arbitrageId, request.hedgeCommandId, outcome);
+      recordHedgeStartOutcome(outcome.status, startTimingStoppedStage(outcome.status));
+      markHedgeStartTiming("apiResponseReady");
       return outcome;
     } catch (error) {
       this.recordExceptionalOutcome(userId, arbitrageId, request.hedgeCommandId, error);
+      recordHedgeStartOutcome("ERROR", "ORCHESTRATION");
+      markHedgeStartTiming("apiResponseReady");
       throw error;
     }
   }
@@ -164,22 +182,24 @@ export class ArbitrageHedgeStartService {
     request: StartRequest,
   ): Promise<ArbitrageHedgeStartResult> {
     const secondLegId = initial.legs.find(({ legId }) => legId !== request.firstLegId)!.legId;
+    const firstChildCommandId = childCommandId(request.hedgeCommandId, "first");
+    const secondChildCommandId = childCommandId(request.hedgeCommandId, "second");
+    const firstTimingIdentity = legTimingIdentity(initial, request.firstLegId, firstChildCommandId, "LEG1");
+    const secondTimingIdentity = legTimingIdentity(initial, secondLegId, secondChildCommandId, "LEG2");
     let reconcileAttempts: readonly OnlineReconcileAttempt[] = Object.freeze([]);
     let first: ArbitrageLegExecutionConfirmation;
     try {
-      first = await this.commands.executeLeg(userId, childRequest(
-        arbitrageId,
-        request.firstLegId,
-        childCommandId(request.hedgeCommandId, "first"),
-        request,
-      ));
+      first = await withHedgeStartLegTiming(firstTimingIdentity, () => this.commands.executeLeg(userId, childRequest(
+        arbitrageId, request.firstLegId, firstChildCommandId, request,
+      )));
     } catch (error) {
       return this.stoppedFromCommandError(userId, arbitrageId, request, request.firstLegId, null, error);
     }
     const dispatchedByThisStart = !first.idempotentReplay;
     if (dispatchedByThisStart && pendingWithoutFill(first)) {
       try {
-        const finalized = await this.finalizeDispatchedLeg(userId, arbitrageId, request.firstLegId, first);
+        const finalized = await withHedgeStartLegTiming(firstTimingIdentity,
+          () => this.finalizeDispatchedLeg(userId, arbitrageId, request.firstLegId, first));
         first = finalized.confirmation;
         reconcileAttempts = Object.freeze([...reconcileAttempts, ...finalized.attempts]);
       } catch (error) {
@@ -209,6 +229,7 @@ export class ArbitrageHedgeStartService {
           ? "第一腿在在线终态确认预算内仍未完成；系统未重复下单，第二腿未执行。"
           : undefined, reconcileAttempts);
     }
+    markHedgeStartTiming("leg1TerminalConfirmed");
 
     const secondReferenceExists = first.instance.executionReferences.some((reference) =>
       reference.phase === "OPENING" && reference.legId === secondLegId);
@@ -230,12 +251,9 @@ export class ArbitrageHedgeStartService {
     const secondLegDispatchStartedAt = this.now();
     let second: ArbitrageLegExecutionConfirmation;
     try {
-      second = await this.commands.executeLeg(userId, childRequest(
-        arbitrageId,
-        secondLegId,
-        childCommandId(request.hedgeCommandId, "second"),
-        request,
-      ));
+      second = await withHedgeStartLegTiming(secondTimingIdentity, () => this.commands.executeLeg(userId, childRequest(
+        arbitrageId, secondLegId, secondChildCommandId, request,
+      )));
     } catch (error) {
       return this.stoppedFromCommandError(
         userId,
@@ -251,7 +269,8 @@ export class ArbitrageHedgeStartService {
     const secondDispatchedByThisStart = !second.idempotentReplay;
     if (secondDispatchedByThisStart && pendingWithoutFill(second)) {
       try {
-        const finalized = await this.finalizeDispatchedLeg(userId, arbitrageId, secondLegId, second);
+        const finalized = await withHedgeStartLegTiming(secondTimingIdentity,
+          () => this.finalizeDispatchedLeg(userId, arbitrageId, secondLegId, second));
         second = finalized.confirmation;
         reconcileAttempts = Object.freeze([...reconcileAttempts, ...finalized.attempts]);
       } catch (error) {
@@ -274,6 +293,10 @@ export class ArbitrageHedgeStartService {
       }
     }
     const secondStop = stopStatus("SECOND", second);
+    if (secondStop === null) {
+      markHedgeStartTiming("leg2TerminalConfirmed");
+      markHedgeStartTiming("lifecycleCommitted");
+    }
     return result(
       arbitrageId,
       request.hedgeCommandId,
@@ -376,11 +399,14 @@ export class ArbitrageHedgeStartService {
       maxAttempts,
       now: () => this.now(),
       sleep: (milliseconds) => this.sleep(milliseconds),
-      reconcile: () => this.commands.reconcileLeg(userId, {
-        arbitrageId,
-        legId,
-        executionIntentId: identity.executionIntentId,
-      }),
+      reconcile: () => {
+        recordHedgeReconcileAttempt();
+        return measureHedgeStartTiming("reconcileMs", () => this.commands.reconcileLeg(userId, {
+          arbitrageId,
+          legId,
+          executionIntentId: identity.executionIntentId,
+        }));
+      },
       assertIdentity: (confirmation) => assertSameExecutionIdentity(confirmation, legId, identity),
       isPendingWithoutFill: pendingWithoutFill,
     });
@@ -573,6 +599,31 @@ function controlledStartErrorCode(error: unknown) {
   if (error instanceof ArbitrageExecutionCommandError) return error.category.toUpperCase();
   if (error instanceof ArbitrageHedgeStartError) return error.category.toUpperCase();
   return "START_INTERNAL_ERROR";
+}
+
+function legTimingIdentity(
+  instance: ArbitrageInstance,
+  legId: string,
+  childCommandId: string,
+  leg: "LEG1" | "LEG2",
+) {
+  const selected = instance.legs.find((candidate) => candidate.legId === legId);
+  if (!selected) throw new Error("Start timing leg identity is unavailable.");
+  return Object.freeze({
+    leg,
+    childCommandId,
+    venue: selected.venue,
+    legType: selected.instrumentId.endsWith("-PERP") ? "PERPETUAL" as const : "SPOT" as const,
+  });
+}
+
+function startTimingStoppedStage(status: ArbitrageHedgeStartStatus) {
+  if (status === "COMPLETED") return null;
+  if (status === "STOPPED_SAFETY") return "SAFETY";
+  if (status.startsWith("STOPPED_FIRST_LEG") || status === "FIRST_LEG_CONFIRMED_REQUIRES_USER_CONTINUE") {
+    return "LEG1_CONFIRM";
+  }
+  return "LEG2_CONFIRM";
 }
 
 function pendingWithoutFill(confirmation: ArbitrageLegExecutionConfirmation) {

@@ -2,6 +2,7 @@ import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { measureHedgeStartTiming } from "../arbitrage-execution/ArbitrageHedgeStartTiming";
 import {
   USER_EXCHANGE_CREDENTIAL_AAD_SCHEMA,
   USER_EXCHANGE_CREDENTIAL_ENVELOPE_VERSION,
@@ -257,12 +258,12 @@ export class UserExchangeCredentialStore {
       throw new UserExchangeCredentialStoreError("credential_envelope_invalid", "Credential envelope is invalid.");
     }
     const context = this.context(normalizedUserId, normalizedVenue, row.accountId);
-    const dataKey = await this.keyProvider.unwrapDataKey({
+    const dataKey = await measureHedgeStartTiming("credentialUnwrapMs", () => this.keyProvider.unwrapDataKey({
       provider: row.keyProvider,
       keyName: row.keyName,
       wrapReference: row.wrapReference,
       wrappedDek: row.wrappedDek,
-    }, context);
+    }, context));
     let plaintext: Buffer | null = null;
     try {
       const decipher = createDecipheriv("aes-256-gcm", dataKey, Buffer.from(row.nonce, "base64url"));

@@ -1,4 +1,6 @@
 import type { ExecutionVenue } from "../cex/ExecutionIntent";
+import { performance } from "node:perf_hooks";
+import { recordHedgeStartDuration } from "./ArbitrageHedgeStartTiming";
 
 export type ProviderMutationKey = Readonly<{
   userId: string;
@@ -20,7 +22,11 @@ export class ProviderMutationSerializer {
 
   async runExclusiveMany<T>(keys: readonly ProviderMutationKey[], operation: () => Promise<T>): Promise<T> {
     const normalized = [...new Set(keys.map(providerMutationKey))].sort();
-    return this.acquire(normalized, 0, operation);
+    const waitingSince = performance.now();
+    return this.acquire(normalized, 0, () => {
+      recordHedgeStartDuration("mutationSerializerWaitMs", performance.now() - waitingSince);
+      return operation();
+    });
   }
 
   private async acquire<T>(keys: readonly string[], index: number, operation: () => Promise<T>): Promise<T> {

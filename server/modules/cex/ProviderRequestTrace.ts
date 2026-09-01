@@ -1,5 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
+import {
+  acknowledgeHedgeProviderTiming,
+  beginHedgeProviderTiming,
+  finishHedgeProviderTiming,
+  type HedgeProviderTimingToken,
+} from "../arbitrage-execution/ArbitrageHedgeStartTiming";
 
 type Venue = "binance" | "okx" | "bybit" | "bitget";
 type Action = "READ" | "PLACE_ORDER" | "CANCEL" | "AMEND" | "OTHER_MUTATION";
@@ -25,6 +31,7 @@ export type ProviderCommandTrace = {
 type Context = { trace: ProviderCommandTrace; reconcileAttempt: number | null };
 const context = new AsyncLocalStorage<Context>();
 const responses = new WeakMap<Response, ProviderRequestTrace>();
+const hedgeTiming = new WeakMap<ProviderRequestTrace, HedgeProviderTimingToken>();
 const MAX_REQUESTS = 512;
 
 export function providerTraceBindings(read: () => readonly Binding[]): readonly Binding[] {
@@ -127,6 +134,12 @@ export function tracedProviderFetch(venue: Venue, transport: typeof fetch): type
     } catch {
       try { const trace = context.getStore()?.trace; if (trace) trace.droppedRequests += 1; } catch { /* best effort */ }
     }
+    try {
+      if (entry) {
+        const token = beginHedgeProviderTiming(entry.action, entry.substage);
+        if (token) hedgeTiming.set(entry, token);
+      }
+    } catch { /* best effort */ }
     let pending: Promise<Response>;
     try { pending = transport(input, init); }
     catch (error) { finish(entry); throw error; }
@@ -139,7 +152,12 @@ export function tracedProviderFetch(venue: Venue, transport: typeof fetch): type
 }
 
 function finish(entry?: ProviderRequestTrace) {
-  try { if (entry) entry.durationMs = Math.max(0, Date.now() - entry.startedAt); } catch { /* best effort */ }
+  try {
+    if (entry) {
+      entry.durationMs = Math.max(0, Date.now() - entry.startedAt);
+      finishHedgeProviderTiming(hedgeTiming.get(entry) ?? null);
+    }
+  } catch { /* best effort */ }
 }
 
 export function recordProviderResponseCode(response: Response, code: unknown) {
@@ -150,6 +168,7 @@ export function recordProviderResponseCode(response: Response, code: unknown) {
     // Current four venues use numeric codes. Never persist arbitrary provider messages.
     entry.providerCode = /^-?\d{1,10}$/.test(text) ? text : null;
     finish(entry);
+    acknowledgeHedgeProviderTiming(hedgeTiming.get(entry) ?? null);
   } catch { /* best effort */ }
 }
 
@@ -182,6 +201,7 @@ function substageFor(endpoint: string, action: Action) {
   if (/order/.test(endpoint)) return "ORDER_REALTIME";
   if (/instruments|exchangeInfo/.test(endpoint)) return "INSTRUMENT_RULES";
   if (/ticker/.test(endpoint)) return "QUOTE";
+  if (/positionSide|position-mode|settings/.test(endpoint)) return "POSITION_MODE";
   if (/position/.test(endpoint)) return "POSITION_REALITY";
   if (/balance|assets|wallet/.test(endpoint)) return "BALANCE";
   if (/account|query-api/.test(endpoint)) return "ACCOUNT";

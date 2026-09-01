@@ -4,6 +4,7 @@ import test from "node:test";
 import type { ArbitrageInstance } from "../cex/arbitrage-instance/ArbitrageInstance";
 import { ArbitrageExecutionCommandError, type ArbitrageLegExecutionConfirmation } from "./ArbitrageExecutionCommandService";
 import { ArbitrageHedgeStartError, ArbitrageHedgeStartService } from "./ArbitrageHedgeStartService";
+import type { HedgeStartTimingSummary } from "./ArbitrageHedgeStartTiming";
 
 test("one confirmed start executes both full legs strictly in server order", async () => {
   const fixture = setup([outcome("CONFIRMED", "100"), outcome("CONFIRMED", "100")]);
@@ -18,6 +19,8 @@ test("one confirmed start executes both full legs strictly in server order", asy
   assert.equal(fixture.outcomeAudits.length, 1);
   assert.equal(fixture.outcomeAudits[0]?.operation, "START");
   assert.equal(fixture.outcomeAudits[0]?.terminalStatus, "COMPLETED");
+  assert.equal(fixture.timingSummaries[0]?.outcome, "COMPLETED");
+  assert.equal(typeof (fixture.timingSummaries[0]?.milestonesMs as Record<string, number>).lifecycleCommitted, "number");
 });
 
 test("Start STOPPED outcome is audited once with controlled diagnostics and idempotent replay", async () => {
@@ -37,6 +40,8 @@ test("Start STOPPED outcome is audited once with controlled diagnostics and idem
     terminalAt: 0,
   });
   assert.equal(Number.isSafeInteger(fixture.outcomeAudits[0]?.terminalAt), true);
+  assert.equal(fixture.timingSummaries[0]?.stoppedStage, "LEG1_CONFIRM");
+  assert.equal((fixture.timingSummaries[0]?.milestonesMs as Record<string, number>).leg2RequestSent, undefined);
 });
 
 test("an online first-leg pending acknowledgement is authoritatively finalized before automatic second-leg dispatch", async () => {
@@ -414,6 +419,7 @@ function setup(outcomes: Outcome[], options: Readonly<{
 }> = {}, initialInstance: ArbitrageInstance = baseInstance()) {
   const state = { instance: initialInstance };
   const outcomeAudits: any[] = [];
+  const timingSummaries: HedgeStartTimingSummary[] = [];
   const auditCommands = new Set<string>();
   const store = {
     get: (userId: string, arbitrageId: string) =>
@@ -435,8 +441,10 @@ function setup(outcomes: Outcome[], options: Readonly<{
     firstLegFinalizationInitialPollMs: 1,
     firstLegFinalizationMaxPollMs: 4,
     firstLegFinalizationMaxAttempts: options.finalizationMaxAttempts ?? 4,
+    timingLogger: (_event, facts) => { timingSummaries.push(facts); },
   });
-  return { service, store, executor, sleeps, outcomeAudits, get instance() { return state.instance; } };
+  return { service, store, executor, sleeps, outcomeAudits, timingSummaries,
+    get instance() { return state.instance; } };
 }
 
 type Outcome = Readonly<{ status: "CONFIRMED" | "PENDING_CONFIRMATION" | "FAILED" | "UNKNOWN"; confirmedQuantity: string }>;

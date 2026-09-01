@@ -29,6 +29,7 @@ import {
   isTrustedVerifiedManagedCloseNativeExecutionRules,
   type FormalManagedCloseExecutionContext,
 } from "../arbitrage-execution/FormalExecutionRuntime";
+import { persistHedgeStartExecutionRecord } from "../arbitrage-execution/ArbitrageHedgeStartTiming";
 import { BinanceIntentExecutionCapability } from "./BinanceIntentExecutionCapability";
 import { BinanceIntentExecutionCancelCapability } from "./BinanceIntentExecutionCancelCapability";
 import { BinanceIntentExecutionCancelService } from "./BinanceIntentExecutionCancelService";
@@ -153,10 +154,10 @@ export class BinanceIntentExecutionRuntime {
       if (managedClose) {
         await runManagedClosePreMutationStage(
           "PRE_MUTATION_EXECUTION_RECORD_PERSIST", "execution_record_persist_failed",
-          () => this.recordStore.create(initialRecord),
+          () => persistHedgeStartExecutionRecord(() => this.recordStore.create(initialRecord)),
         );
       } else {
-        await this.recordStore.create(initialRecord);
+        await persistHedgeStartExecutionRecord(() => this.recordStore.create(initialRecord));
       }
       let capability: ExecutionCapability<BinanceIntentExecutionResult>;
       try {

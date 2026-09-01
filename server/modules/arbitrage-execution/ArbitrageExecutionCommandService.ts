@@ -43,6 +43,11 @@ import {
 } from "./ArbitrageCommandFingerprint";
 import { validOpeningFirstLeg } from "./ArbitrageOpeningLegOrder";
 import { openingSetupSourcePlanId, type ArbitrageOpeningSetup } from "./ArbitrageOpeningSetup";
+import {
+  currentHedgeStartTimingLeg,
+  markHedgeStartTiming,
+  measureHedgeStartTimingSync,
+} from "./ArbitrageHedgeStartTiming";
 
 type DraftService = Pick<ArbitrageExecutionDraftService, "createDraft" | "preview">;
 type InstanceStore = Pick<
@@ -265,6 +270,7 @@ export class ArbitrageExecutionCommandService {
       );
     }
     let draft: ArbitrageExecutionDraft;
+    if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2ContextLoadStart");
     try {
       draft = confirmedFirstLeg === null
         ? await this.revalidateDraft(userId, request)
@@ -312,7 +318,9 @@ export class ArbitrageExecutionCommandService {
       if (confirmedFirstLeg === null) this.failEmptyOpeningIfSafe(userId, instance.arbitrageId);
       throw error;
     }
+    if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2ContextLoadDone");
 
+    if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2QuantityPlanStart");
     const preparedHedge = confirmedFirstLeg === null
       ? null
       : this.instances.readPreparedSecondLegHedge(
@@ -326,6 +334,7 @@ export class ArbitrageExecutionCommandService {
       : preparedHedge
         ? restorePreparedHedge(selected.instrumentId, preparedHedge)
         : await this.planSecondLegQuantity(userId, instance, selected, draft, draftLeg, confirmedFirstLeg);
+    if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2QuantityPlanDone");
     const quantity = hedge?.quantity ?? (draftLeg as PlannedDraftLeg).planning.plan.plannedAssetQuantity;
     let now: number;
     try {
@@ -335,13 +344,13 @@ export class ArbitrageExecutionCommandService {
       throw error;
     }
     if (hedge !== null && preparedHedge === null) {
-      this.instances.prepareSecondLegHedge(userId, instance.arbitrageId, {
+      measureHedgeStartTimingSync("persistenceMs", () => this.instances.prepareSecondLegHedge(userId, instance.arbitrageId, {
         firstExecutionIntentId: confirmedFirstLeg!.executionIntentId,
         secondLegId: selected.legId,
         targetBaseQuantity: hedge.targetBaseQuantity,
         executableBaseQuantity: quantity.quantity,
         updatedAt: now,
-      });
+      }));
     }
     let intent: ExecutionIntent;
     try {
@@ -391,6 +400,7 @@ export class ArbitrageExecutionCommandService {
       if (serializedReplayReferenceId !== null) {
         return resultFromCommandReplay(currentInstance, serializedReplayReferenceId);
       }
+      if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2SafetyStart");
       const freshVerification = confirmedFirstLeg === null
         ? undefined
         : await this.hedgePlanning.continuationSafety.loadFreshVerification(userId, currentInstance);
@@ -417,8 +427,9 @@ export class ArbitrageExecutionCommandService {
         const currentSafety = await this.openingSafety.evaluate(userId, currentInstance, freshVerification);
         this.assertOpeningSafety(currentSafety, openingSafetyLegIds);
       }
+      if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2SafetyDone");
       try {
-        this.instances.claimExecutionReference(userId, instance.arbitrageId, {
+        measureHedgeStartTimingSync("executionReferencePersistMs", () => this.instances.claimExecutionReference(userId, instance.arbitrageId, {
           legId: selected.legId,
           phase: "OPENING",
           quantityEffect: "INCREASE",
@@ -428,7 +439,8 @@ export class ArbitrageExecutionCommandService {
           operationType: "EXECUTION_OPEN",
           businessPayloadFingerprint: commandFingerprint.businessPayloadFingerprint,
           createdAt: now,
-        });
+        }));
+        if (confirmedFirstLeg !== null) markHedgeStartTiming("leg2ReferenceClaimed");
       } catch (error) {
         const raced = this.instances.get(userId, instance.arbitrageId);
         let replayId: string | null = null;
@@ -457,13 +469,14 @@ export class ArbitrageExecutionCommandService {
         );
       }
       assertRuntimeIdentity(runtimeResult.executionRecord, intent);
-      this.instances.linkExecutionRecord(
+      markTerminalConfirmationIfFull(runtimeResult, intent.quantity.quantity);
+      measureHedgeStartTimingSync("executionReferencePersistMs", () => this.instances.linkExecutionRecord(
         userId,
         instance.arbitrageId,
         intent.intentId,
         runtimeResult.executionRecord.executionId,
         runtimeResult.executionRecord.updatedAt,
-      );
+      ));
       const linked = this.instances.get(userId, instance.arbitrageId);
       const linkedReference = linked?.executionReferences.find(
         (candidate) => candidate.executionIntentId === intent.intentId,
@@ -474,7 +487,7 @@ export class ArbitrageExecutionCommandService {
       const attributableStatus = runtimeResult.confirmedQuantity === null
         ? "UNKNOWN" as const
         : referenceStatus(runtimeResult.executionRecord.status);
-      const updated = this.instances.applyExecutionResult(userId, instance.arbitrageId, {
+      const updated = measureHedgeStartTimingSync("projectionCommitMs", () => this.instances.applyExecutionResult(userId, instance.arbitrageId, {
         executionIntentId: intent.intentId,
         status: attributableStatus,
         confirmedQuantity: runtimeResult.confirmedQuantity ?? linkedReference.confirmedQuantity,
@@ -482,15 +495,22 @@ export class ArbitrageExecutionCommandService {
           ? { mutationDisposition: runtimeResult.mutationDisposition }
           : {}),
         updatedAt: runtimeResult.executionRecord.updatedAt,
-      });
+      }));
+      if (currentHedgeStartTimingLeg() === "LEG1") markHedgeStartTiming("leg1ProjectionCommitted");
+      if (currentHedgeStartTimingLeg() === "LEG2" && updated.status === "HOLDING") {
+        markHedgeStartTiming("lifecycleCommitted");
+      }
       const reference = updated.executionReferences.find((candidate) => candidate.executionIntentId === intent.intentId)!;
       if (draftLeg.marketType === "spot" && attributableStatus === "CONFIRMED") {
         const canonical = canonicalInstrumentFromId(selected.instrumentId);
+        markHedgeStartTiming("spotAttributionStart");
         try {
           await this.readSpotExposure(userId, selected, draftLeg, canonical.baseAsset, reference);
         } catch {
           // The execution fact remains confirmed. Missing attribution evidence is recovered by later
           // second-leg planning or the read-only Delta service and must never fabricate net exposure.
+        } finally {
+          markHedgeStartTiming("spotAttributionDone");
         }
       }
       return resultFromReference(
@@ -597,6 +617,7 @@ export class ArbitrageExecutionCommandService {
       );
     }
     assertReconciliationIdentity(runtimeResult.executionRecord, userId, leg, reference);
+    markTerminalConfirmationIfFull(runtimeResult, reference.requestedQuantity);
     const attributableStatus = runtimeResult.confirmedQuantity === null
       ? "UNKNOWN" as const
       : referenceStatus(runtimeResult.executionRecord.status);
@@ -608,7 +629,7 @@ export class ArbitrageExecutionCommandService {
       confirmedQuantity: runtimeResult.confirmedQuantity ?? reference.confirmedQuantity,
       updatedAt: runtimeResult.executionRecord.updatedAt,
     } as const;
-    const updated = historicalCorrection
+    const updated = measureHedgeStartTimingSync("projectionCommitMs", () => historicalCorrection
       ? this.instances.applyHistoricalExecutionCorrection(userId, currentInstance.arbitrageId, projectionUpdate, {
           recoveryId: deterministicId(
             "recovery",
@@ -622,7 +643,11 @@ export class ArbitrageExecutionCommandService {
           actorId: userId,
           checkedAt: runtimeResult.executionRecord.updatedAt,
         })
-      : this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, projectionUpdate);
+      : this.instances.applyExecutionResult(userId, currentInstance.arbitrageId, projectionUpdate));
+    if (currentHedgeStartTimingLeg() === "LEG1") markHedgeStartTiming("leg1ProjectionCommitted");
+    if (currentHedgeStartTimingLeg() === "LEG2" && updated.status === "HOLDING") {
+      markHedgeStartTiming("lifecycleCommitted");
+    }
     const updatedReference = updated.executionReferences.find(
       (candidate) => candidate.executionIntentId === reference.executionIntentId,
     )!;
@@ -1227,6 +1252,14 @@ function assertRuntimeIdentity(record: ExecutionRecord, intent: ExecutionIntent)
     || record.instrumentId !== intent.instrumentId) {
     throw commandError("execution_state_unknown", "执行记录身份与套利执行意图不一致。");
   }
+}
+
+function markTerminalConfirmationIfFull(result: FormalExecutionRuntimeResult, requestedQuantity: string) {
+  if (result.executionRecord.status !== "CONFIRMED" || result.confirmedQuantity === null
+    || compareUnsignedDecimals(result.confirmedQuantity, requestedQuantity) !== 0) return;
+  const leg = currentHedgeStartTimingLeg();
+  if (leg === "LEG1") markHedgeStartTiming("leg1TerminalConfirmed");
+  if (leg === "LEG2") markHedgeStartTiming("leg2TerminalConfirmed");
 }
 
 function assertReconciliationIdentity(
