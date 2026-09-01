@@ -56,14 +56,14 @@ test("initial analysis load renders loading while no snapshot is available", () 
   assert.doesNotMatch(html, /该套利机会当前已不可用/);
 });
 
-test("30 second background refresh retains the last valid snapshot and mounted execution context", () => {
+test("automatic background refresh retains the last valid snapshot and mounted execution context", () => {
   const snapshot = makeSnapshot(1, 0.084);
   const refreshing = reduceArbitrageDashboardRefreshState(
     { snapshot, executionOpportunityId: "op-1", status: "idle", error: "" },
     { type: "load-started", selectedOpportunityId: "op-1" },
   );
 
-  assert.equal(ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS, 30_000);
+  assert.equal(ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS, 25_000);
   assert.equal(refreshing.status, "refreshing");
   assert.strictEqual(refreshing.snapshot, snapshot);
   assert.equal(refreshing.executionOpportunityId, "op-1");

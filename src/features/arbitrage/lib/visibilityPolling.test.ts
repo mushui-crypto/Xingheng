@@ -47,7 +47,42 @@ class FakeVisibilityPollingRuntime implements VisibilityPollingRuntime {
   }
 }
 
-test("visible polling starts one 30-second timer and polls on the interval", () => {
+function simulateDashboardPolling(durationMs: number, pollingIntervalMs: number) {
+  const rawSnapshotTtlMs = 20_000;
+  const orderbookCacheTtlMs = 30_000;
+  const orderbookCount = 90;
+  let rawExpiresAt = Number.NEGATIVE_INFINITY;
+  let orderbookExpiresAt = Number.NEGATIVE_INFINITY;
+  let rawRefreshes = 0;
+  let orderbookHits = 0;
+  let orderbookMisses = 0;
+
+  for (let now = 0; now < durationMs; now += pollingIntervalMs) {
+    if (rawExpiresAt > now) continue;
+    rawRefreshes += 1;
+    rawExpiresAt = now + rawSnapshotTtlMs;
+    if (orderbookExpiresAt > now) {
+      orderbookHits += orderbookCount;
+      continue;
+    }
+    orderbookMisses += orderbookCount;
+    orderbookExpiresAt = now + orderbookCacheTtlMs;
+  }
+
+  return {
+    httpPolls: Math.ceil(durationMs / pollingIntervalMs),
+    orderbookHits,
+    orderbookMisses,
+    orderbookProviderFetches: orderbookMisses,
+    rawRefreshes,
+  };
+}
+
+test("dashboard automatic polling interval is 25 seconds", () => {
+  assert.equal(ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS, 25_000);
+});
+
+test("visible polling starts one 25-second timer and polls on the interval", () => {
   const runtime = new FakeVisibilityPollingRuntime();
   let requests = 0;
 
@@ -63,6 +98,25 @@ test("visible polling starts one 30-second timer and polls on the interval", () 
   runtime.tick();
   assert.equal(requests, 1);
   dispose();
+});
+
+test("25-second polling avoids the 30-second orderbook expiry boundary", () => {
+  const durationMs = 10 * 60_000;
+
+  assert.deepEqual(simulateDashboardPolling(durationMs, 30_000), {
+    httpPolls: 20,
+    orderbookHits: 0,
+    orderbookMisses: 1_800,
+    orderbookProviderFetches: 1_800,
+    rawRefreshes: 20,
+  });
+  assert.deepEqual(simulateDashboardPolling(durationMs, 25_000), {
+    httpPolls: 24,
+    orderbookHits: 1_080,
+    orderbookMisses: 1_080,
+    orderbookProviderFetches: 1_080,
+    rawRefreshes: 24,
+  });
 });
 
 test("hidden pages pause automatic polling for multiple intervals", () => {

@@ -1,4 +1,4 @@
-export const ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS = 30_000;
+export const ARBITRAGE_DASHBOARD_REFRESH_INTERVAL_MS = 25_000;
 
 export type VisibilityPollingRuntime = {
   isVisible: () => boolean;
