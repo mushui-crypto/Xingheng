@@ -114,11 +114,11 @@ export type ArbitragePositionPresentation = Readonly<{
     completeness: "COMPLETE" | "INCOMPLETE";
   }>;
   revenue: Readonly<{
-    cumulativeFundingIncome: null;
-    incurredFees: null;
-    estimatedExitFees: null;
-    currentArbitrageNetProfit: null;
-    completeness: "INCOMPLETE";
+    cumulativeFundingIncome: string | null;
+    incurredFees: string | null;
+    estimatedExitFees: string | null;
+    currentArbitrageNetProfit: string | null;
+    completeness: "COMPLETE" | "INCOMPLETE";
   }>;
 }>;
 
@@ -407,9 +407,8 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
   const revenue = requiredRecord(value.revenue);
   const completeness = market.completeness === "COMPLETE" || market.completeness === "INCOMPLETE"
     ? market.completeness : invalidResponse();
-  if (revenue.completeness !== "INCOMPLETE"
-    || revenue.cumulativeFundingIncome !== null || revenue.incurredFees !== null
-    || revenue.estimatedExitFees !== null || revenue.currentArbitrageNetProfit !== null) throw invalidResponse();
+  const revenueCompleteness = revenue.completeness === "COMPLETE" || revenue.completeness === "INCOMPLETE"
+    ? revenue.completeness : invalidResponse();
   return {
     arbitrageId: requiredString(value.arbitrageId),
     market: {
@@ -425,8 +424,11 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
       completeness,
     },
     revenue: {
-      cumulativeFundingIncome: null, incurredFees: null, estimatedExitFees: null,
-      currentArbitrageNetProfit: null, completeness: "INCOMPLETE",
+      cumulativeFundingIncome: nullableDecimal(revenue.cumulativeFundingIncome),
+      incurredFees: nullableDecimal(revenue.incurredFees),
+      estimatedExitFees: nullableDecimal(revenue.estimatedExitFees),
+      currentArbitrageNetProfit: nullableDecimal(revenue.currentArbitrageNetProfit),
+      completeness: revenueCompleteness,
     },
   };
 }

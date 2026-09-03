@@ -7,10 +7,14 @@ import { requireArbitrageInstanceList, type ArbitrageCloseSafety, type Arbitrage
 import {
   ArbitrageInstanceContent,
   ArbitrageInstanceSections,
+  POSITION_COUNTDOWN_REFRESH_INTERVAL_MS,
+  POSITION_PRESENTATION_REFRESH_INTERVAL_MS,
   loadVerifications,
   maskAccountId,
   hedgeExitSummary,
   canonicalBaseAsset,
+  estimatedFundingTone,
+  firstLevelManagedQuantity,
   InstanceDeltaPanel,
   instanceExitAvailability,
   exitCapabilityReadsComplete,
@@ -26,6 +30,8 @@ import {
   reconcileArbitrageHedge,
   statusLabel,
   terminalSnapshotExitCapabilities,
+  positionFundingCountdownValue,
+  updatePositionPresentations,
   updateInstanceSections,
   unresolvedClosingReference,
   verificationStatusLabel,
@@ -76,8 +82,8 @@ test("current and history sections render every lifecycle status in Chinese", ()
   }
   assert.match(html, /当前套利/);
   assert.match(html, /历史记录/);
-  assert.match(html, /多头腿/);
-  assert.match(html, /空头腿/);
+  assert.match(html, /合约多头 · LONG/);
+  assert.match(html, /合约空头 · SHORT/);
   assert.doesNotMatch(html, /PERPETUAL_PERPETUAL|OPENING|HOLDING|RESIDUAL|CLOSING|CLOSED|FAILED/u);
   assert.doesNotMatch(html, /okx:private-account-1234|binance:private-account-5678/u);
   assert.doesNotMatch(html, /APR|APY/u);
@@ -112,13 +118,14 @@ test("arbitrage position card follows the three-level decision hierarchy without
   assert.match(html, /DOGE \/ USDT/u);
   assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
   assert.match(defaultLayer, /当前资金费率[\s\S]*下次预计资金费[\s\S]*距下次结算[\s\S]*跨所退出价差[\s\S]*管理数量[\s\S]*当前退出状态/u);
-  assert.match(defaultLayer, /\+0\.0100% \/ 8h[\s\S]*0 USDT[\s\S]*6\.000000 USDT \/ 60\.00 bps/u);
+  assert.match(defaultLayer, /\+0\.0100%[\s\S]*\/ 8h[\s\S]*0[\s\S]*USDT[\s\S]*6\.000000[\s\S]*60\.00 bps/u);
   assert.match(html, /数据完整/u);
   assert.doesNotMatch(defaultLayer, /净 Delta|可安全退出数量|safeClosable/u);
-  assert.match(html, /多头腿[\s\S]*买入现货 \/ 多头[\s\S]*Provider Reality[\s\S]*60.531381/u);
-  assert.match(html, /空头腿[\s\S]*SHORT[\s\S]*Provider Reality SHORT quantity/u);
-  assert.match(html, /仓位健康[\s\S]*净 Delta[\s\S]*残余来源[\s\S]*残余可交易[\s\S]*影响退出[\s\S]*最后同步时间/u);
-  assert.match(html, /收益明细[\s\S]*累计资金费收入[\s\S]*已发生手续费[\s\S]*预计退出手续费[\s\S]*当前套利净收益[\s\S]*暂无可靠数据/u);
+  assert.match(html, /现货多头[\s\S]*交易所实际数量[\s\S]*60.531381/u);
+  assert.match(html, /合约空头 · SHORT[\s\S]*交易所实际仓位/u);
+  assert.doesNotMatch(html, /Provider Reality/u);
+  assert.match(html, /仓位健康[\s\S]*净 Delta[\s\S]*来源[\s\S]*可交易[\s\S]*影响退出[\s\S]*最后同步时间/u);
+  assert.match(html, /收益明细[\s\S]*暂无可靠收益数据/u);
   assert.doesNotMatch(html, /Spot PnL|Perp PnL|单腿浮盈亏|基差收益损失/u);
   assert.match(source, /sm:grid-cols-2 lg:grid-cols-4/u);
   assert.match(source, /const \[expanded, setExpanded\] = useState\(false\)/u);
@@ -140,8 +147,113 @@ test("incomplete presentation stays null and never falls back to instance PnL", 
       spreadQuotePerBase: null, spreadBps: null, quotedAt: null, marketDataAsOf: null, completeness: "INCOMPLETE",
     } }]}
   />);
-  assert.match(html, /行情展示数据不完整/u);
+  assert.match(html, /行情数据更新中[\s\S]*数据更新中/u);
   assert.doesNotMatch(html, />12\.5 USDT<|>3\.25 USDT</u);
+});
+
+test("first-level metrics use one canonical hedge quantity and stronger typography", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const managed = firstLevelManagedQuantity(instance!, matchedVerification(instance!, "97.902", "97"), {});
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+
+  assert.deepEqual(managed, { value: "97", unit: "XAUT" });
+  assert.match(source, /compact \? "text-\[15px\]" : "text-xl"/u);
+  assert.match(source, /text-\[13px\] leading-5/u);
+  assert.match(source, /tabular-nums/u);
+  assert.doesNotMatch(source.slice(source.indexOf("function firstLevelManagedQuantity"), source.indexOf("function currentExitPresentation")), /join\(" \/ "\)/u);
+});
+
+test("funding fee color follows the signed estimated amount and fails neutral when stale", () => {
+  const base = presentation("arb-color");
+  const withFee = (value: string | null, completeness: "COMPLETE" | "INCOMPLETE" = "COMPLETE") => ({
+    ...base,
+    market: { ...base.market, nextEstimatedFundingFee: value, completeness },
+  });
+
+  assert.equal(estimatedFundingTone(withFee("1.25")), "success");
+  assert.equal(estimatedFundingTone(withFee("-1.25")), "risk");
+  assert.equal(estimatedFundingTone(withFee("0")), "neutral");
+  assert.equal(estimatedFundingTone(withFee(null)), "neutral");
+  assert.equal(estimatedFundingTone(withFee("1.25", "INCOMPLETE")), "neutral");
+});
+
+test("countdown changes locally each second and never becomes negative", () => {
+  const base = presentation("arb-countdown");
+  const nextFundingTime = 1_800_000_010_000;
+  const value = { ...base, market: { ...base.market, nextFundingTime } };
+
+  assert.equal(POSITION_COUNTDOWN_REFRESH_INTERVAL_MS, 1_000);
+  assert.deepEqual(positionFundingCountdownValue(value, nextFundingTime - 2_000), { value: "00:00:02", detail: null });
+  assert.deepEqual(positionFundingCountdownValue(value, nextFundingTime - 1_000), { value: "00:00:01", detail: null });
+  assert.deepEqual(positionFundingCountdownValue(value, nextFundingTime), { value: "--", detail: "等待下一周期数据" });
+});
+
+test("one page-level presentation refresh replaces all live market fields without provider polling", () => {
+  const before = presentation("arb-live");
+  const after = {
+    ...before,
+    market: {
+      ...before.market,
+      fundingRate: 0.0002,
+      nextEstimatedFundingFee: "1.5",
+      spreadQuotePerBase: 7,
+      spreadBps: 70,
+    },
+  };
+  const updated = updatePositionPresentations({ status: "success", active: [], history: [], presentations: [before] }, [after]);
+  assert.equal(POSITION_PRESENTATION_REFRESH_INTERVAL_MS, 20_000);
+  assert.equal(updated.status, "success");
+  if (updated.status === "success") assert.deepEqual(updated.presentations?.[0]?.market, after.market);
+
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const polling = source.slice(source.indexOf("useEffect(() => {\n    if (selectedSection"), source.indexOf("const applyInstanceUpdate"));
+  assert.match(polling, /fetchArbitragePositionPresentations/u);
+  assert.doesNotMatch(polling, /fetchArbitragePositionVerification|fetchArbitrageCloseSafety|fetchInstanceHedgeDelta|Provider|WebSocket|EventSource/u);
+});
+
+test("revenue collapses when unreliable and restores a four-column grid for reliable values", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const emptyHtml = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[instance!]}
+    history={[]}
+    onPageChange={() => undefined}
+    page={1}
+    presentations={[presentation(instance!.arbitrageId)]}
+  />);
+  const populated = {
+    ...presentation(instance!.arbitrageId),
+    revenue: {
+      cumulativeFundingIncome: "0",
+      incurredFees: null,
+      estimatedExitFees: "0.25",
+      currentArbitrageNetProfit: "1.5",
+      completeness: "COMPLETE" as const,
+    },
+  };
+  const populatedHtml = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[instance!]}
+    history={[]}
+    onPageChange={() => undefined}
+    page={1}
+    presentations={[populated]}
+  />);
+
+  assert.match(emptyHtml, /收益明细[\s\S]*暂无可靠收益数据/u);
+  assert.doesNotMatch(emptyHtml, /累计资金费收入/u);
+  assert.match(populatedHtml, /累计资金费收入[\s\S]*>0<[\s\S]*预计退出手续费[\s\S]*0\.25/u);
+  assert.match(populatedHtml, /lg:grid-cols-4/u);
+});
+
+test("leg exit copy only describes exit capability and primary actions stay outside the expand button", () => {
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const legPanel = source.slice(source.indexOf("function PositionLegPanel"), source.indexOf("function PositionHealthPanel"));
+  const card = source.slice(source.indexOf("function InstanceCard"), source.indexOf("function PrimaryMetric"));
+  for (const label of ["可安全退出", "可部分安全退出", "需同步确认", "当前不可安全退出"]) {
+    assert.match(legPanel, new RegExp(label, "u"));
+  }
+  assert.doesNotMatch(legPanel, /存在可交易偏差|存在不可交易残余|对冲偏差/u);
+  assert.match(card, /<\/button>[\s\S]*<HedgeExitActions[\s\S]*<dl/u);
+  assert.match(source, /onClick=\{\(event\) => event\.stopPropagation\(\)\}/u);
 });
 
 test("only OPENING instances expose the resume action", () => {
@@ -261,8 +373,8 @@ test("active legs render matched, mismatch, unknown and null quantities without 
       }}
     />,
   );
-  assert.match(html, /多头腿[\s\S]*管理数量[\s\S]*1[\s\S]*Provider Reality LONG quantity[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
-  assert.match(html, /空头腿[\s\S]*管理数量[\s\S]*2[\s\S]*Provider Reality SHORT quantity[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
+  assert.match(html, /合约多头 · LONG[\s\S]*管理数量[\s\S]*1[\s\S]*交易所实际仓位[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
+  assert.match(html, /合约空头 · SHORT[\s\S]*管理数量[\s\S]*2[\s\S]*交易所实际仓位[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
   assert.doesNotMatch(html, />0<\/dd>[\s\S]*当前真实仓位暂无法可靠确认/u);
 });
 
@@ -575,7 +687,7 @@ test("persisted CLOSED status wins over accepted residual and unrelated account 
 
   assert.equal(summary.kind, "ended");
   assert.equal(summary.label, "实例管理已结束");
-  assert.match(html, /实例管理已结束/u);
+  assert.match(html, /管理已结束/u);
   assert.doesNotMatch(html, />退出对冲<|>重新核验</u);
 });
 
