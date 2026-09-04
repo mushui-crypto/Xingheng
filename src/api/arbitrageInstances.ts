@@ -102,6 +102,12 @@ export type ArbitrageInstance = {
 export type ArbitragePositionPresentation = Readonly<{
   arbitrageId: string;
   market: Readonly<{
+    legs?: readonly [ArbitragePositionFundingLeg, ArbitragePositionFundingLeg];
+    netFundingRate8h?: number | null;
+    nextFundingEvent?: ArbitrageNextFundingEvent;
+    managedScaleUsdt?: string | null;
+    managedScaleAsOf?: number | null;
+    managedScaleCompleteness?: "COMPLETE" | "INCOMPLETE";
     fundingRate: number | null;
     fundingIntervalHours: number | null;
     nextFundingTime: number | null;
@@ -114,12 +120,38 @@ export type ArbitragePositionPresentation = Readonly<{
     completeness: "COMPLETE" | "INCOMPLETE";
   }>;
   revenue: Readonly<{
+    expectedArbitrageNetProfit?: string | null;
     cumulativeFundingIncome: string | null;
     incurredFees: string | null;
     estimatedExitFees: string | null;
-    currentArbitrageNetProfit: string | null;
+    exitSpreadProfit?: string | null;
+    currentArbitrageNetProfit?: string | null;
     completeness: "COMPLETE" | "INCOMPLETE";
   }>;
+}>;
+
+export type ArbitragePositionFundingLeg = Readonly<{
+  legId: string;
+  venue: ExchangeVenue;
+  legRole: "LONG" | "SHORT";
+  marketType: "SPOT" | "PERPETUAL";
+  fundingRate: number | null;
+  fundingIntervalHours: number | null;
+  cashflowDirection: "INCOME" | "EXPENSE" | "NEUTRAL" | "NOT_APPLICABLE";
+  completeness: "COMPLETE" | "INCOMPLETE";
+}>;
+
+export type ArbitrageNextFundingEvent = Readonly<{
+  time: number | null;
+  estimatedNetFee: string | null;
+  eventLegs: readonly Readonly<{
+    venue: ExchangeVenue;
+    legRole: "LONG" | "SHORT";
+    fundingRate: number;
+    fundingIntervalHours: number;
+    estimatedCashflow: string;
+  }>[];
+  completeness: "COMPLETE" | "INCOMPLETE";
 }>;
 
 export type ArbitrageManagementEndMethod = "NORMAL_CLOSE" | "MANAGEMENT_RELEASE" | "MIXED"
@@ -409,9 +441,21 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
     ? market.completeness : invalidResponse();
   const revenueCompleteness = revenue.completeness === "COMPLETE" || revenue.completeness === "INCOMPLETE"
     ? revenue.completeness : invalidResponse();
+  const legs = Array.isArray(market.legs) && market.legs.length === 2
+    ? market.legs.map(positionFundingLeg) as [ArbitragePositionFundingLeg, ArbitragePositionFundingLeg]
+    : invalidResponse();
+  const nextFundingEvent = parseNextFundingEvent(market.nextFundingEvent);
+  const managedScaleCompleteness = market.managedScaleCompleteness === "COMPLETE" || market.managedScaleCompleteness === "INCOMPLETE"
+    ? market.managedScaleCompleteness : invalidResponse();
   return {
     arbitrageId: requiredString(value.arbitrageId),
     market: {
+      legs,
+      netFundingRate8h: nullableFiniteNumber(market.netFundingRate8h),
+      nextFundingEvent,
+      managedScaleUsdt: nullableDecimal(market.managedScaleUsdt),
+      managedScaleAsOf: nullableTimestamp(market.managedScaleAsOf),
+      managedScaleCompleteness,
       fundingRate: nullableFiniteNumber(market.fundingRate),
       fundingIntervalHours: nullableFiniteNumber(market.fundingIntervalHours),
       nextFundingTime: nullableTimestamp(market.nextFundingTime),
@@ -424,17 +468,62 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
       completeness,
     },
     revenue: {
+      expectedArbitrageNetProfit: nullableDecimal(revenue.expectedArbitrageNetProfit),
       cumulativeFundingIncome: nullableDecimal(revenue.cumulativeFundingIncome),
       incurredFees: nullableDecimal(revenue.incurredFees),
       estimatedExitFees: nullableDecimal(revenue.estimatedExitFees),
-      currentArbitrageNetProfit: nullableDecimal(revenue.currentArbitrageNetProfit),
+      exitSpreadProfit: nullableDecimal(revenue.exitSpreadProfit),
       completeness: revenueCompleteness,
     },
   };
 }
 
+function positionFundingLeg(payload: unknown): ArbitragePositionFundingLeg {
+  const value = requiredRecord(payload);
+  const marketType = value.marketType === "SPOT" || value.marketType === "PERPETUAL" ? value.marketType : invalidResponse();
+  const legRole = value.legRole === "LONG" || value.legRole === "SHORT" ? value.legRole : invalidResponse();
+  const cashflowDirection = value.cashflowDirection === "INCOME" || value.cashflowDirection === "EXPENSE"
+    || value.cashflowDirection === "NEUTRAL" || value.cashflowDirection === "NOT_APPLICABLE"
+    ? value.cashflowDirection : invalidResponse();
+  const completeness = value.completeness === "COMPLETE" || value.completeness === "INCOMPLETE"
+    ? value.completeness : invalidResponse();
+  return {
+    legId: requiredString(value.legId), venue: venue(value.venue), legRole, marketType,
+    fundingRate: nullableFiniteNumber(value.fundingRate),
+    fundingIntervalHours: nullableFiniteNumber(value.fundingIntervalHours),
+    cashflowDirection, completeness,
+  };
+}
+
+function parseNextFundingEvent(payload: unknown): ArbitrageNextFundingEvent {
+  const value = requiredRecord(payload);
+  if (!Array.isArray(value.eventLegs)) throw invalidResponse();
+  const completeness = value.completeness === "COMPLETE" || value.completeness === "INCOMPLETE"
+    ? value.completeness : invalidResponse();
+  return {
+    time: nullableTimestamp(value.time),
+    estimatedNetFee: nullableDecimal(value.estimatedNetFee),
+    eventLegs: value.eventLegs.map((payload) => {
+      const leg = requiredRecord(payload);
+      const legRole = leg.legRole === "LONG" || leg.legRole === "SHORT" ? leg.legRole : invalidResponse();
+      return {
+        venue: venue(leg.venue), legRole,
+        fundingRate: requiredFiniteNumber(leg.fundingRate),
+        fundingIntervalHours: requiredFiniteNumber(leg.fundingIntervalHours),
+        estimatedCashflow: decimal(leg.estimatedCashflow),
+      };
+    }),
+    completeness,
+  };
+}
+
 function nullableFiniteNumber(value: unknown) {
   if (value === null) return null;
+  if (typeof value !== "number" || !Number.isFinite(value)) throw invalidResponse();
+  return value;
+}
+
+function requiredFiniteNumber(value: unknown) {
   if (typeof value !== "number" || !Number.isFinite(value)) throw invalidResponse();
   return value;
 }

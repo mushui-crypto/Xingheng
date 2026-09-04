@@ -533,7 +533,6 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
   const pair = instancePair(instance);
   const longLeg = instance.legs.find((leg) => leg.role === "LONG")!;
   const shortLeg = instance.legs.find((leg) => leg.role === "SHORT")!;
-  const managedQuantity = firstLevelManagedQuantity(instance, effectiveVerification, safetyValues);
   const exitPresentation = currentExitPresentation(instance, canExitFully, exitCapabilitiesLoading, effectiveVerification, safetyValues);
   return <>
     <article className="min-w-0 overflow-hidden border border-[#25282f] bg-black">
@@ -582,11 +581,11 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       </div>
 
       <dl className="grid grid-cols-2 gap-px bg-[#25282f] md:grid-cols-3 xl:grid-cols-6">
-        <PrimaryMetric label="当前资金费率" {...fundingRatePresentation(presentation)} />
-        <PrimaryMetric label="下次预计资金费" {...estimatedFundingPresentation(presentation)} />
+        <PrimaryMetric label="净资金费率" {...fundingRatePresentation(presentation)} />
+        <PrimaryMetric label="下次预计净资金费用" {...estimatedFundingPresentation(presentation)} />
         <PrimaryMetric label="距下次结算" value={<PositionFundingCountdown presentation={presentation} />} valueClassName="tabular-nums" />
-        <PrimaryMetric label={instance.legs[0].venue === instance.legs[1].venue ? "当前基差" : "跨所退出价差"} {...spreadPresentation(presentation, pair.quote)} />
-        <PrimaryMetric detail="管理中" label="管理数量" unit={managedQuantity.unit} value={managedQuantity.value} />
+        <PrimaryMetric label="当前退出价差" {...spreadPresentation(presentation, pair.quote)} />
+        <PrimaryMetric label="管理规模" {...managedScalePresentation(presentation)} />
         <PrimaryMetric compact label="当前退出状态" tone={exitPresentation.tone} value={exitPresentation.label} />
       </dl>
 
@@ -613,10 +612,10 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
       ) : null}
       <div hidden={!expanded} id={`arbitrage-details-${instance.arbitrageId}`}>
         <div className="grid gap-px bg-[#25282f] md:grid-cols-2 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(240px,0.9fr)]">
-          <PositionLegPanel historical={historical} instance={instance} leg={longLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[longLeg.legId]}>
+          <PositionLegPanel funding={presentation?.market.legs?.find((leg) => leg.legId === longLeg.legId)} historical={historical} instance={instance} leg={longLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[longLeg.legId]}>
             {!historical ? <LegCloseActions closeSafetyState={closeSafeties[longLeg.legId]} onClose={() => setCloseTarget(longLeg)} verificationState={effectiveVerification} legId={longLeg.legId} enabled={Boolean(onInstanceRefresh)} exitCapabilitiesComplete={exitCapabilitiesComplete} instanceFullExitAvailable={canExitFully} /> : null}
           </PositionLegPanel>
-          <PositionLegPanel historical={historical} instance={instance} leg={shortLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[shortLeg.legId]}>
+          <PositionLegPanel funding={presentation?.market.legs?.find((leg) => leg.legId === shortLeg.legId)} historical={historical} instance={instance} leg={shortLeg} verificationState={effectiveVerification} closeSafetyState={closeSafeties[shortLeg.legId]}>
             {!historical ? <LegCloseActions closeSafetyState={closeSafeties[shortLeg.legId]} onClose={() => setCloseTarget(shortLeg)} verificationState={effectiveVerification} legId={shortLeg.legId} enabled={Boolean(onInstanceRefresh)} exitCapabilitiesComplete={exitCapabilitiesComplete} instanceFullExitAvailable={canExitFully} /> : null}
           </PositionLegPanel>
           <PositionHealthPanel canExitFully={canExitFully} closeSafeties={safetyValues} deltaState={deltaState} instance={instance} verificationState={effectiveVerification} />
@@ -707,9 +706,10 @@ function PrimaryMetric({ compact = false, detail, label, tone = "neutral", unit,
   </div>;
 }
 
-function PositionLegPanel({ children, closeSafetyState, historical, instance, leg, verificationState }: {
+function PositionLegPanel({ children, closeSafetyState, funding, historical, instance, leg, verificationState }: {
   children?: ReactNode;
   closeSafetyState?: ReadState<ArbitrageCloseSafety>;
+  funding?: NonNullable<ArbitragePositionPresentation["market"]["legs"]>[number];
   historical: boolean;
   instance: ArbitrageInstance;
   leg: ArbitrageInstanceLeg;
@@ -737,9 +737,10 @@ function PositionLegPanel({ children, closeSafetyState, historical, instance, le
       <h5 className="text-sm font-semibold text-white">{title}</h5>
     </div>
     <dl className="mt-2.5 space-y-1.5 text-[13px] leading-5">
-      <LegRow label="交易所" value={venueLabel(leg.venue)} />
-      <LegRow label={spot ? "交易标的" : "合约标的"} value={leg.instrumentId} />
+      <LegRow label="交易所" value={<VenueValue venue={leg.venue} />} />
+      <LegRow label="交易类型" value={spot ? "现货" : "永续合约"} />
       <LegRow label="管理数量" value={managed} />
+      <LegRow label="本腿资金费率" value={legFundingValue(spot, funding)} />
       <LegRow label={spot ? "交易所实际数量" : "交易所实际仓位"} value={providerReality} />
       <LegRow label={spot ? "可安全退出" : "可安全平仓"} value={exitQuantity} />
       <LegRow label="退出状态" value={exitStatus} />
@@ -768,11 +769,10 @@ function PositionHealthPanel({ canExitFully, closeSafeties, deltaState, instance
     <h5 className="text-xs font-semibold text-[#c5ccd4]">仓位健康</h5>
     <p className={`mt-1.5 text-[15px] font-semibold leading-5 ${tone}`}>{status}</p>
     <dl className="mt-2.5 space-y-1.5 text-[13px] leading-5">
-      <LegRow emphasized label="净 Delta" value={delta} />
-      <LegRow label="来源" value={health.residualReason ?? "无明显残余"} />
-      <LegRow label="可交易" value={health.residualTradeable === null ? "暂无可靠数据" : health.residualTradeable ? "是" : "否"} />
-      <LegRow label="影响退出" value={health.affectsFullExit === null ? "暂无可靠数据" : health.affectsFullExit ? "是" : "否"} />
-      <LegRow label="最后同步时间" value={health.lastSyncedAt === null ? "暂无可靠数据" : formatTime(health.lastSyncedAt)} />
+      <LegRow emphasized label="两腿数量差" value={delta} />
+      <LegRow label="差额原因" value={health.residualReason ?? "无明显差额"} />
+      <LegRow label="影响完整退出" value={health.affectsFullExit === null ? "暂无可靠数据" : health.affectsFullExit ? "是" : "否"} />
+      <LegRow label="数据同步状态" value={health.status === "NEEDS_SYNC" || health.lastSyncedAt === null ? "数据待同步" : `已同步 · ${formatTime(health.lastSyncedAt)}`} />
     </dl>
   </section>;
 }
@@ -795,20 +795,22 @@ export function derivePositionHealth(
     && instance.legs.every((leg) => closeSafeties[leg.legId]?.realityReliable)
     && !instance.executionReferences.some((reference) => reference.status === "UNKNOWN" || reference.status === "PENDING_CONFIRMATION");
   if (!complete || verification.status !== "success" || verification.verification.legs.some((leg) => leg.verificationStatus === "UNKNOWN")) {
-    return { status: "NEEDS_SYNC" as const, residualReason: null, residualTradeable: null, affectsFullExit: null, lastSyncedAt };
+    const unresolved = instance.executionReferences.some((reference) => reference.status === "UNKNOWN" || reference.status === "PENDING_CONFIRMATION");
+    return { status: "NEEDS_SYNC" as const, residualReason: unresolved ? "存在未确认执行" : "数据待同步", residualTradeable: null, affectsFullExit: null, lastSyncedAt };
   }
   if (verification.verification.legs.some((leg) => leg.verificationStatus === "MISMATCH")) {
-    return { status: "HEDGE_DEVIATION" as const, residualReason: null, residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
+    return { status: "HEDGE_DEVIATION" as const, residualReason: "仓位发生变化", residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
   }
   if (Object.values(closeSafeties).some((safety) => safety?.reason === "QUANTITY_STEP_DUST")) {
-    return { status: "NON_TRADEABLE_RESIDUAL" as const, residualReason: "手续费 / 数量步长", residualTradeable: false, affectsFullExit: false, lastSyncedAt };
+    return { status: "NON_TRADEABLE_RESIDUAL" as const, residualReason: "数量精度限制 / 交易规则残余", residualTradeable: false, affectsFullExit: false, lastSyncedAt };
   }
   return { status: "ALIGNED" as const, residualReason: null, residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
 }
 
 function RevenueDetails({ presentation }: { presentation?: ArbitragePositionPresentation }) {
   const revenue = presentation?.revenue;
-  const values = revenue ? [revenue.cumulativeFundingIncome, revenue.incurredFees, revenue.estimatedExitFees, revenue.currentArbitrageNetProfit] : [];
+  const expectedNetProfit = revenue?.expectedArbitrageNetProfit ?? null;
+  const values = revenue ? [expectedNetProfit, revenue.cumulativeFundingIncome, revenue.incurredFees, revenue.estimatedExitFees, revenue.exitSpreadProfit] : [];
   const hasReliableValue = revenue?.completeness === "COMPLETE" && values.some((value) => value !== null);
   if (!hasReliableValue) return <section className="flex items-center justify-between gap-3 border-t border-[#25282f] px-4 py-3 sm:px-5">
     <h5 className="text-xs font-semibold text-[#c5ccd4]">收益明细</h5>
@@ -816,49 +818,71 @@ function RevenueDetails({ presentation }: { presentation?: ArbitragePositionPres
   </section>;
   return <section className="border-t border-[#25282f]">
     <h5 className="px-4 pt-3 text-xs font-semibold text-white sm:px-5">收益明细</h5>
-    <dl className="mt-2 grid grid-cols-1 gap-px bg-[#25282f] sm:grid-cols-2 lg:grid-cols-4">
+    <dl className="mt-2 grid grid-cols-1 gap-px bg-[#25282f] sm:grid-cols-2 lg:grid-cols-5">
+      <RevenueMetric label="预计套利净收益" tone="profit" value={expectedNetProfit ?? "暂无可靠数据"} />
       <RevenueMetric label="累计资金费收入" value={revenue.cumulativeFundingIncome ?? "暂无可靠数据"} />
       <RevenueMetric label="已发生手续费" tone="cost" value={revenue.incurredFees ?? "暂无可靠数据"} />
       <RevenueMetric label="预计退出手续费" tone="cost" value={revenue.estimatedExitFees ?? "暂无可靠数据"} />
-      <RevenueMetric label="当前套利净收益" tone="profit" value={revenue.currentArbitrageNetProfit ?? "暂无可靠数据"} />
+      <RevenueMetric label="退出价差收益" value={revenue.exitSpreadProfit ?? "暂无可靠数据"} />
     </dl>
   </section>;
 }
 
 function RevenueMetric({ label, tone = "neutral", value }: { label: string; tone?: "neutral" | "profit" | "cost"; value: string }) {
   const valueClass = value === "暂无可靠数据" ? "text-[#8f99a5]" : tone === "profit" ? "text-emerald-200" : tone === "cost" ? "text-red-200" : "text-[#d7dce2]";
-  return <div className="min-w-0 bg-black px-4 py-3"><dt className="text-[11px] text-[#707985]">{label}</dt><dd className={`mt-1.5 break-words font-mono text-xs ${valueClass}`}>{value}</dd></div>;
-}
-
-function marketPresentationComplete(presentation?: ArbitragePositionPresentation) {
-  return presentation?.market.completeness === "COMPLETE" && presentation.market.quotedAt !== null;
+  const displayValue = tone === "cost" && value !== "暂无可靠数据" && Number(value) > 0 ? `-${value}` : value;
+  return <div className="min-w-0 bg-black px-4 py-3"><dt className="text-[11px] text-[#707985]">{label}</dt><dd className={`mt-1.5 break-words font-mono text-xs ${valueClass}`}>{displayValue}</dd></div>;
 }
 
 function fundingRatePresentation(presentation?: ArbitragePositionPresentation) {
-  if (!marketPresentationComplete(presentation) || presentation!.market.fundingRate == null) return { value: "--", detail: "数据更新中" };
-  const { fundingRate, fundingIntervalHours } = presentation!.market;
+  const fundingRate = presentation?.market.netFundingRate8h ?? presentation?.market.fundingRate;
+  if (fundingRate == null) return { value: "--", detail: "数据更新中" };
   return {
     value: `${fundingRate >= 0 ? "+" : ""}${(fundingRate * 100).toFixed(4)}%`,
-    unit: fundingIntervalHours == null ? undefined : `/ ${fundingIntervalHours}h`,
+    unit: "/ 8h",
   };
 }
 
 export function estimatedFundingTone(presentation?: ArbitragePositionPresentation): MetricTone {
-  if (!marketPresentationComplete(presentation) || presentation!.market.nextEstimatedFundingFee == null) return "neutral";
-  const value = Number(presentation!.market.nextEstimatedFundingFee);
+  const event = presentation?.market.nextFundingEvent;
+  const estimated = event ? event.estimatedNetFee : presentation?.market.nextEstimatedFundingFee;
+  if (event?.completeness === "INCOMPLETE" || estimated == null) return "neutral";
+  const value = Number(estimated);
   return value > 0 ? "success" : value < 0 ? "risk" : "neutral";
 }
 
+function managedScalePresentation(presentation?: ArbitragePositionPresentation) {
+  const market = presentation?.market;
+  if (market?.managedScaleCompleteness !== "COMPLETE" || market.managedScaleUsdt == null) {
+    return { value: "暂无可靠数据", tone: "neutral" as const };
+  }
+  return { value: market.managedScaleUsdt, unit: "USDT", detail: "当前配对名义规模", tone: "neutral" as const };
+}
+
+function legFundingValue(
+  spot: boolean,
+  funding?: NonNullable<ArbitragePositionPresentation["market"]["legs"]>[number],
+) {
+  if (spot) return "不适用";
+  if (!funding || funding.completeness !== "COMPLETE" || funding.fundingRate == null || funding.fundingIntervalHours == null) {
+    return "暂无可靠数据";
+  }
+  const direction = funding.cashflowDirection === "INCOME" ? "收入"
+    : funding.cashflowDirection === "EXPENSE" ? "支出" : "收支为零";
+  return `${funding.fundingRate >= 0 ? "+" : ""}${(funding.fundingRate * 100).toFixed(4)}% / ${funding.fundingIntervalHours}h · ${direction}`;
+}
+
 function estimatedFundingPresentation(presentation?: ArbitragePositionPresentation) {
-  const value = presentation?.market.nextEstimatedFundingFee;
-  if (!marketPresentationComplete(presentation) || value == null) return { value: "--", detail: "数据更新中", tone: "neutral" as const };
-  return { value, unit: presentation!.market.nextEstimatedFundingFeeAsset ?? undefined, tone: estimatedFundingTone(presentation) };
+  const event = presentation?.market.nextFundingEvent;
+  const value = event ? event.estimatedNetFee : presentation?.market.nextEstimatedFundingFee;
+  if (event?.completeness === "INCOMPLETE" || value == null) return { value: "--", detail: "数据更新中", tone: "neutral" as const };
+  return { value, unit: "USDT", tone: estimatedFundingTone(presentation) };
 }
 
 function spreadPresentation(presentation: ArbitragePositionPresentation | undefined, quoteAsset: string) {
   const value = presentation?.market.spreadQuotePerBase;
   const bps = presentation?.market.spreadBps;
-  if (!marketPresentationComplete(presentation) || value == null || bps == null) return { value: "--", detail: "数据更新中" };
+  if (presentation?.market.quotedAt == null || value == null || bps == null) return { value: "--", detail: "数据更新中" };
   return { value: value.toFixed(6), unit: quoteAsset, detail: `${bps.toFixed(2)} bps` };
 }
 
@@ -880,8 +904,10 @@ export function PositionFundingCountdown({ presentation }: { presentation?: Arbi
 }
 
 export function positionFundingCountdownValue(presentation: ArbitragePositionPresentation | undefined, now: number) {
-  if (!marketPresentationComplete(presentation) || presentation!.market.nextFundingTime == null) return { value: "--", detail: "等待更新" };
-  const label = formatFundingCountdown(presentation!.market.nextFundingTime, now).replace("距结算 ", "");
+  const event = presentation?.market.nextFundingEvent;
+  const nextFundingTime = event ? event.time : presentation?.market.nextFundingTime;
+  if (event?.completeness === "INCOMPLETE" || nextFundingTime == null) return { value: "--", detail: "等待更新" };
+  const label = formatFundingCountdown(nextFundingTime, now).replace("距结算 ", "");
   return label === "等待结算更新"
     ? { value: "--", detail: "等待下一周期数据" }
     : { value: label, detail: null };
@@ -1314,8 +1340,18 @@ function Metric({ label, value }: { label: string; value: string }) {
   return <div><dt className="text-[#707985]">{label}</dt><dd className="mt-1 font-mono text-[#c5ccd4]">{value}</dd></div>;
 }
 
-function LegRow({ emphasized = false, label, value }: { emphasized?: boolean; label: string; value: string }) {
+function LegRow({ emphasized = false, label, value }: { emphasized?: boolean; label: string; value: ReactNode }) {
   return <div className="flex min-w-0 items-start justify-between gap-3"><dt className="shrink-0 text-[#8f99a5]">{label}</dt><dd className={`min-w-0 break-words text-right font-mono ${emphasized ? "text-sm font-semibold text-[#d7dce2]" : "text-[#c5ccd4]"}`}>{value}</dd></div>;
+}
+
+function VenueValue({ venue }: { venue: ArbitrageInstance["legs"][number]["venue"] }) {
+  const meta = {
+    binance: { label: "Binance", icon: "https://cdn.simpleicons.org/binance/F0B90B" },
+    bybit: { label: "Bybit", icon: "https://cdn.simpleicons.org/bybit/F7A600" },
+    bitget: { label: "Bitget", icon: "https://cdn.simpleicons.org/bitget/00C2A8" },
+    okx: { label: "OKX", icon: "https://cdn.simpleicons.org/okx/FFFFFF" },
+  }[venue];
+  return <span className="inline-flex items-center gap-2"><img className="h-4 w-4 object-contain" src={meta.icon} alt="" />{meta.label}</span>;
 }
 
 export function statusLabel(status: ArbitrageInstanceStatus) {
