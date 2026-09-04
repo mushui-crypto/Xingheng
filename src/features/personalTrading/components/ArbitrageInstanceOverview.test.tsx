@@ -96,8 +96,8 @@ test("current and history sections render every lifecycle status in Chinese", ()
   }
   assert.match(html, /当前套利/);
   assert.match(html, /历史记录/);
-  assert.match(html, /合约多头 · LONG/);
-  assert.match(html, /合约空头 · SHORT/);
+  assert.match(html, /LONG LEG[\s\S]*多头腿/u);
+  assert.match(html, /SHORT LEG[\s\S]*空头腿/u);
   assert.doesNotMatch(html, /PERPETUAL_PERPETUAL|OPENING|HOLDING|RESIDUAL|CLOSING|CLOSED|FAILED/u);
   assert.doesNotMatch(html, /okx:private-account-1234|binance:private-account-5678/u);
   assert.doesNotMatch(html, /APR|APY/u);
@@ -132,13 +132,12 @@ test("arbitrage position card follows the three-level decision hierarchy without
   assert.match(html, /DOGE \/ USDT/u);
   assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
   assert.match(defaultLayer, /净资金费率[\s\S]*下次预计净资金费用[\s\S]*距下次结算[\s\S]*当前退出价差[\s\S]*管理规模[\s\S]*当前退出状态/u);
-  assert.match(defaultLayer, /\+0\.0100%[\s\S]*\/ 8h[\s\S]*0[\s\S]*USDT[\s\S]*6\.000000[\s\S]*60\.00 bps/u);
-  assert.match(html, /数据完整/u);
+  assert.match(defaultLayer, /\+0\.0100%[\s\S]*0[\s\S]*USDT[\s\S]*60\.00 bps[\s\S]*6\.000000 USDT \/ base/u);
   assert.doesNotMatch(defaultLayer, /两腿数量差|管理数量|可安全退出数量|safeClosable/u);
-  assert.match(html, /现货多头[\s\S]*交易类型[\s\S]*现货[\s\S]*本腿资金费率[\s\S]*不适用[\s\S]*交易所实际数量[\s\S]*60.531381/u);
-  assert.match(html, /合约空头 · SHORT[\s\S]*本腿资金费率[\s\S]*\+0\.0150% \/ 8h · 收入[\s\S]*交易所实际仓位/u);
+  assert.match(html, /LONG LEG[\s\S]*多头腿[\s\S]*交易类型[\s\S]*现货[\s\S]*本腿资金费率[\s\S]*不适用[\s\S]*交易所实际数量[\s\S]*60.531381/u);
+  assert.match(html, /SHORT LEG[\s\S]*空头腿[\s\S]*本腿资金费率[\s\S]*\+0\.0150% \/ 8h · 收入[\s\S]*交易所实际仓位/u);
   assert.doesNotMatch(html, /Provider Reality/u);
-  assert.match(html, /仓位健康[\s\S]*两腿数量差[\s\S]*差额原因[\s\S]*影响完整退出[\s\S]*数据同步状态/u);
+  assert.match(html, /仓位状态[\s\S]*健康状态[\s\S]*两腿数量差[\s\S]*差额原因[\s\S]*影响完整退出[\s\S]*数据同步状态/u);
   assert.match(html, /收益明细[\s\S]*暂无可靠收益数据/u);
   assert.doesNotMatch(html, /Spot PnL|Perp PnL|单腿浮盈亏|基差收益损失/u);
   assert.match(source, /sm:grid-cols-2 lg:grid-cols-5/u);
@@ -161,7 +160,7 @@ test("incomplete presentation stays null and never falls back to instance PnL", 
       spreadQuotePerBase: null, spreadBps: null, quotedAt: null, marketDataAsOf: null, completeness: "INCOMPLETE",
     } }]}
   />);
-  assert.match(html, /行情数据更新中[\s\S]*数据更新中/u);
+  assert.match(html, /数据更新中/u);
   assert.doesNotMatch(html, />12\.5 USDT<|>3\.25 USDT</u);
 });
 
@@ -172,9 +171,9 @@ test("first-level uses USDT paired managed scale while leg quantities remain sec
 
   assert.deepEqual(managed, { value: "97", unit: "XAUT" });
   assert.match(source, /label="管理规模"[\s\S]*managedScalePresentation/u);
-  assert.match(source, /label="管理数量" value=\{managed\}/u);
-  assert.match(source, /compact \? "text-\[15px\]" : "text-xl"/u);
-  assert.match(source, /text-\[13px\] leading-5/u);
+  assert.match(source, /label="管理数量" value=\{quantityWithAsset\(managed, quantityAsset\)\}/u);
+  assert.match(source, /compact \? "text-\[15px\]" : "text-\[17px\]"/u);
+  assert.match(source, /text-\[12px\] leading-none/u);
   assert.match(source, /tabular-nums/u);
   assert.doesNotMatch(source.slice(source.indexOf("function firstLevelManagedQuantity"), source.indexOf("function currentExitPresentation")), /join\(" \/ "\)/u);
 });
@@ -278,7 +277,7 @@ test("leg exit copy only describes exit capability and primary actions stay outs
     assert.match(legPanel, new RegExp(label, "u"));
   }
   assert.doesNotMatch(legPanel, /存在可交易偏差|存在不可交易残余|对冲偏差/u);
-  assert.match(card, /<\/button>[\s\S]*<HedgeExitActions[\s\S]*<dl/u);
+  assert.match(card, /<\/button>[\s\S]*<HedgeExitActions/u);
   assert.match(source, /onClick=\{\(event\) => event\.stopPropagation\(\)\}/u);
 });
 
@@ -399,8 +398,8 @@ test("active legs render matched, mismatch, unknown and null quantities without 
       }}
     />,
   );
-  assert.match(html, /合约多头 · LONG[\s\S]*管理数量[\s\S]*1[\s\S]*交易所实际仓位[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
-  assert.match(html, /合约空头 · SHORT[\s\S]*管理数量[\s\S]*2[\s\S]*交易所实际仓位[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
+  assert.match(html, /LONG LEG[\s\S]*多头腿[\s\S]*管理数量[\s\S]*1[\s\S]*交易所实际仓位[\s\S]*0.8[\s\S]*无法完整支持系统管理数量/u);
+  assert.match(html, /SHORT LEG[\s\S]*空头腿[\s\S]*管理数量[\s\S]*2[\s\S]*交易所实际仓位[\s\S]*暂无可靠数据[\s\S]*当前真实仓位暂无法可靠确认/u);
   assert.doesNotMatch(html, />0<\/dd>[\s\S]*当前真实仓位暂无法可靠确认/u);
 });
 
