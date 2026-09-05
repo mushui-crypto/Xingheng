@@ -9,6 +9,9 @@ import {
   ArbitrageInstanceSections,
   POSITION_COUNTDOWN_REFRESH_INTERVAL_MS,
   POSITION_PRESENTATION_REFRESH_INTERVAL_MS,
+  beginPositionPresentationLoad,
+  coreArbitrageDataLoaded,
+  failPositionPresentationLoad,
   loadVerifications,
   maskAccountId,
   hedgeExitSummary,
@@ -233,6 +236,91 @@ test("one page-level presentation refresh replaces all live market fields withou
   const polling = source.slice(source.indexOf("useEffect(() => {\n    if (selectedSection"), source.indexOf("const applyInstanceUpdate"));
   assert.match(polling, /fetchArbitragePositionPresentations/u);
   assert.doesNotMatch(polling, /fetchArbitragePositionVerification|fetchArbitrageCloseSafety|fetchInstanceHedgeDelta|Provider|WebSocket|EventSource/u);
+});
+
+test("core instances render before the presentation request settles", () => {
+  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const state = coreArbitrageDataLoaded([active!], []);
+  const html = renderToStaticMarkup(<ArbitrageInstanceContent
+    onPageChange={() => undefined}
+    page={1}
+    state={state}
+  />);
+
+  assert.equal(state.status, "success");
+  if (state.status === "success") assert.equal(state.presentationStatus, "loading");
+  assert.match(html, /XAUT \/ USDT/u);
+  assert.match(html, /净资金费率[\s\S]*数据更新中/u);
+  assert.doesNotMatch(html, /正在加载套利组合/u);
+});
+
+test("presentation progressively enriches an already rendered core card", () => {
+  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const pending = coreArbitrageDataLoaded([active!], []);
+  const ready = updatePositionPresentations(pending, [presentation(active!.arbitrageId)]);
+  const html = renderToStaticMarkup(<ArbitrageInstanceContent
+    onPageChange={() => undefined}
+    page={1}
+    state={ready}
+  />);
+
+  assert.equal(ready.status, "success");
+  if (ready.status === "success") assert.equal(ready.presentationStatus, "success");
+  assert.match(html, /XAUT \/ USDT/u);
+  assert.match(html, /\+0\.0100%[\s\S]*60\.00 bps/u);
+});
+
+test("presentation failure stays isolated from active and history core data", () => {
+  const [active] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const [historical] = requireArbitrageInstanceList([arbitrageInstance("CLOSED")]);
+  const failed = failPositionPresentationLoad(coreArbitrageDataLoaded([active!], [historical!]));
+  const activeHtml = renderToStaticMarkup(<ArbitrageInstanceContent
+    onPageChange={() => undefined}
+    page={1}
+    state={failed}
+  />);
+  const historyHtml = renderToStaticMarkup(<ArbitrageInstanceContent
+    onPageChange={() => undefined}
+    page={1}
+    selectedSection="history"
+    state={failed}
+  />);
+
+  assert.equal(failed.status, "success");
+  if (failed.status === "success") assert.equal(failed.presentationStatus, "error");
+  assert.match(activeHtml, /XAUT \/ USDT[\s\S]*数据更新中/u);
+  assert.match(historyHtml, /历史记录[\s\S]*XAUT \/ USDT/u);
+  assert.doesNotMatch(`${activeHtml}${historyHtml}`, /套利组合加载失败/u);
+});
+
+test("presentation refresh keeps the last successful values while loading or failing", () => {
+  const before = presentation("arb-preserve");
+  const ready = updatePositionPresentations(coreArbitrageDataLoaded([], []), [before]);
+  const refreshing = beginPositionPresentationLoad(ready);
+  const failed = failPositionPresentationLoad(refreshing);
+
+  assert.equal(refreshing.status, "success");
+  assert.equal(failed.status, "success");
+  if (refreshing.status === "success" && failed.status === "success") {
+    assert.equal(refreshing.presentationStatus, "loading");
+    assert.deepEqual(refreshing.presentations, [before]);
+    assert.equal(failed.presentationStatus, "error");
+    assert.deepEqual(failed.presentations, [before]);
+  }
+});
+
+test("first-paint decoupling keeps the existing endpoint and polling request count", () => {
+  const source = readFileSync(new URL("./ArbitrageInstanceOverview.tsx", import.meta.url), "utf8");
+  const orchestration = source.slice(source.indexOf("export function ArbitrageInstanceOverview"), source.indexOf("const applyInstanceUpdate"));
+  const initialBatch = orchestration.slice(orchestration.indexOf("void Promise.all"), orchestration.indexOf("]).then(([active, history])"));
+
+  assert.match(orchestration, /const presentationRequest = fetchArbitragePositionPresentations/u);
+  assert.match(initialBatch, /fetchActiveArbitrageInstances/u);
+  assert.match(initialBatch, /fetchArbitrageInstanceHistory/u);
+  assert.doesNotMatch(initialBatch, /fetchArbitragePositionPresentations/u);
+  assert.equal((orchestration.match(/fetchArbitragePositionPresentations/gu) ?? []).length, 2);
+  assert.doesNotMatch(orchestration, /fetchArbitragePositionVerification|fetchArbitrageCloseSafety|fetchInstanceHedgeDelta|WebSocket|EventSource/u);
+  assert.equal(POSITION_PRESENTATION_REFRESH_INTERVAL_MS, 20_000);
 });
 
 test("revenue collapses when unreliable and restores the five frozen fields for reliable values", () => {

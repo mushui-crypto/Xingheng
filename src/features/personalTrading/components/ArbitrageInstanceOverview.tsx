@@ -61,14 +61,41 @@ type ExitCapabilityLoaders = Readonly<{
 
 export type ArbitrageInstanceLoadState =
   | { status: "loading" }
-  | { status: "success"; active: ArbitrageInstance[]; history: ArbitrageInstance[]; presentations?: ArbitragePositionPresentation[] }
+  | {
+      status: "success";
+      active: ArbitrageInstance[];
+      history: ArbitrageInstance[];
+      presentations?: ArbitragePositionPresentation[];
+      presentationStatus?: "loading" | "success" | "error";
+    }
   | { status: "error" };
+
+export function coreArbitrageDataLoaded(
+  active: ArbitrageInstance[],
+  history: ArbitrageInstance[],
+): ArbitrageInstanceLoadState {
+  return { status: "success", active, history, presentations: [], presentationStatus: "loading" };
+}
+
+export function beginPositionPresentationLoad(
+  current: ArbitrageInstanceLoadState,
+): ArbitrageInstanceLoadState {
+  return current.status === "success" ? { ...current, presentationStatus: "loading" } : current;
+}
 
 export function updatePositionPresentations(
   current: ArbitrageInstanceLoadState,
   presentations: ArbitragePositionPresentation[],
 ): ArbitrageInstanceLoadState {
-  return current.status === "success" ? { ...current, presentations } : current;
+  return current.status === "success"
+    ? { ...current, presentations, presentationStatus: "success" }
+    : current;
+}
+
+export function failPositionPresentationLoad(
+  current: ArbitrageInstanceLoadState,
+): ArbitrageInstanceLoadState {
+  return current.status === "success" ? { ...current, presentationStatus: "error" } : current;
 }
 
 export function ArbitrageInstanceOverview() {
@@ -80,13 +107,23 @@ export function ArbitrageInstanceOverview() {
   useEffect(() => {
     const controller = new AbortController();
     setState({ status: "loading" });
+    const presentationRequest = fetchArbitragePositionPresentations(controller.signal).then(
+      (presentations) => ({ status: "success" as const, presentations }),
+      () => ({ status: "error" as const }),
+    );
     void Promise.all([
       fetchActiveArbitrageInstances(controller.signal),
       fetchArbitrageInstanceHistory(page, HISTORY_LIMIT, controller.signal),
-      fetchArbitragePositionPresentations(controller.signal).catch(() => []),
-    ]).then(([active, history, presentations]) => {
+    ]).then(([active, history]) => {
       if (controller.signal.aborted) return;
-      setState({ status: "success", active, history, presentations });
+      setState(coreArbitrageDataLoaded(active, history));
+      void presentationRequest
+        .then((result) => {
+          if (controller.signal.aborted) return;
+          setState((current) => result.status === "success"
+            ? updatePositionPresentations(current, result.presentations)
+            : failPositionPresentationLoad(current));
+        });
     }).catch(() => {
       if (!controller.signal.aborted) setState({ status: "error" });
     });
@@ -100,12 +137,17 @@ export function ArbitrageInstanceOverview() {
     const refreshPresentations = () => {
       if (refreshing) return;
       refreshing = true;
+      setState((current) => beginPositionPresentationLoad(current));
       void fetchArbitragePositionPresentations(controller.signal)
         .then((presentations) => {
           if (controller.signal.aborted) return;
           setState((current) => updatePositionPresentations(current, presentations));
         })
-        .catch(() => undefined)
+        .catch(() => {
+          if (!controller.signal.aborted) {
+            setState((current) => failPositionPresentationLoad(current));
+          }
+        })
         .finally(() => { refreshing = false; });
     };
     const stopPolling = startVisibilityAwarePolling(
