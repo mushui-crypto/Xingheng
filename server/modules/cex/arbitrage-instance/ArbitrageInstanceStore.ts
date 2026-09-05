@@ -938,6 +938,28 @@ export class ArbitrageInstanceStore {
     return this.listForStatuses(identifier(userId, "userId"), ACTIVE_STATUSES);
   }
 
+  listFundingAttributionCandidates(venue: string, accountId: string, instrumentId: string) {
+    const rows = this.db.prepare(`SELECT DISTINCT owner.* FROM arbitrage_instances owner
+      JOIN arbitrage_instance_legs leg ON leg.arbitrageId = owner.arbitrageId
+      WHERE leg.venue = ? AND leg.accountId = ? AND leg.instrumentId = ?
+      ORDER BY owner.createdAt ASC, owner.arbitrageId ASC`).all(
+      identifier(venue, "venue"), identifier(accountId, "accountId"), identifier(instrumentId, "instrumentId"),
+    ) as unknown as InstanceRow[];
+    return Object.freeze(rows.map((row) => this.instanceFromRow(row)));
+  }
+
+  listFundingManagedPerpContexts(updatedSince: number) {
+    const rows = this.db.prepare(`SELECT DISTINCT owner.userId, leg.venue, leg.accountId, leg.instrumentId
+      FROM arbitrage_instances owner
+      JOIN arbitrage_instance_legs leg ON leg.arbitrageId = owner.arbitrageId
+      WHERE leg.instrumentId LIKE '%-PERP'
+        AND (owner.status IN ('OPENING','HOLDING','RESIDUAL','CLOSING') OR owner.updatedAt >= ?)
+      ORDER BY owner.userId, leg.venue, leg.accountId, leg.instrumentId`).all(
+      timestamp(updatedSince, "updatedSince"),
+    ) as unknown as Array<{ userId: string; venue: string; accountId: string; instrumentId: string }>;
+    return Object.freeze(rows.map((row) => Object.freeze(row)));
+  }
+
   listHistory(userId: string, pagination?: ArbitrageHistoryPageQuery) {
     return this.listForStatuses(
       identifier(userId, "userId"),

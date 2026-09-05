@@ -60,6 +60,7 @@ export type ArbitrageMarket = {
   volume24h: number | null;
   openInterest: number | null;
   nextFundingTime: number | null;
+  fundingScheduleCompleteness?: "COMPLETE" | "INCOMPLETE";
   takerFeeBps: number;
   status: ArbitrageMarketStatus;
   fetchedAt: number;

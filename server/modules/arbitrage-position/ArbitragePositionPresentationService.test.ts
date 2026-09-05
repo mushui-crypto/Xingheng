@@ -181,6 +181,39 @@ test("presents reliable fees and realized spread independently while funding and
   });
 });
 
+test("presents authoritative pre-settlement funding zero and calculates realized net from complete numeric zero spread", async () => {
+  const base = instance("bybit", "bybit", "DOGE-USDT-SPOT");
+  const value = { ...base, executionReferences: [
+    accountingReference("lo", "long", "OPENING", "2"),
+    accountingReference("so", "short", "OPENING", "2"),
+  ] } as ArbitrageInstance;
+  const service = new ArbitragePositionPresentationService({ async getCurrentMarketSnapshot() {
+    return { generatedAt: now, markets: [
+      market("bybit", "spot", 0.1, 0.101),
+      market("bybit", "perpetual", 0.1, 0.101, {
+        fundingRate: -0.00005, markPrice: 0.1, fundingScheduleCompleteness: "COMPLETE",
+      }),
+    ] };
+  } }, () => now, 20_000, {
+    listExecutionAccountingFacts: () => [
+      accountingFact("lo", "long", "OPENING", "2", "0.1", "0.004"),
+      accountingFact("so", "short", "OPENING", "2", "0.1", "0.00526821"),
+    ],
+  }, {
+    listFacts: () => [],
+    readCoverage: () => null,
+  });
+
+  const [result] = await service.present([value]);
+  assert.equal(result?.revenue.cumulativeFundingIncome, "0");
+  assert.equal(result?.revenue.cumulativeFundingIncomeCompleteness, "COMPLETE");
+  assert.equal(result?.revenue.realizedSpreadProfit, "0");
+  assert.equal(result?.revenue.realizedSpreadDisplayState, "NO_REALIZED_CLOSE");
+  assert.equal(result?.revenue.incurredFees, "0.00926821");
+  assert.equal(result?.revenue.realizedNetProfit, "-0.00926821");
+  assert.equal(result?.revenue.realizedNetProfitCompleteness, "COMPLETE");
+});
+
 test("presentation recovers from a missing expected fact after a later authoritative upsert", async () => {
   const value = { ...instance("binance", "bitget", "DOGE-USDT-PERP"), executionReferences: [
     accountingReference("lo", "long", "OPENING", "2"),
@@ -245,7 +278,7 @@ function accountingFact(id: string, legId: string, executionPhase: "OPENING" | "
   };
 }
 
-function instance(longVenue: "binance" | "bitget", shortVenue: "binance" | "bitget", longInstrument: string, id = "arb-1") {
+function instance(longVenue: "binance" | "bitget" | "bybit", shortVenue: "binance" | "bitget" | "bybit", longInstrument: string, id = "arb-1") {
   return {
     arbitrageId: id, userId: "user-a", strategyType: longInstrument.endsWith("SPOT") ? "SPOT_PERPETUAL" : "PERPETUAL_PERPETUAL",
     sourcePlanId: null, maxResidualBaseQuantity: "0", status: "HOLDING", createdAt: now, openedAt: now, updatedAt: now, closedAt: null,
@@ -258,11 +291,11 @@ function instance(longVenue: "binance" | "bitget", shortVenue: "binance" | "bitg
 }
 
 function market(
-  venue: "binance" | "bitget",
+  venue: "binance" | "bitget" | "bybit",
   kind: "spot" | "perpetual",
   bid: number,
   ask: number,
-  options: Partial<Pick<ArbitrageMarket, "fundingRate" | "fundingIntervalHours" | "markPrice" | "nextFundingTime">>
+  options: Partial<Pick<ArbitrageMarket, "fundingRate" | "fundingIntervalHours" | "markPrice" | "nextFundingTime" | "fundingScheduleCompleteness">>
     & { quoteAsset?: ArbitrageQuoteAsset } = {},
 ): ArbitrageMarket {
   const quoteAsset = options.quoteAsset ?? "USDT";
@@ -274,6 +307,7 @@ function market(
     currentFundingApr: null, historicalFundingApr: null, fundingPositiveRatio: null, fundingCoverageRatio: null,
     slippageBps10k: null, slippageBps100k: null, depthUsd: null, volume24h: null, openInterest: null,
     nextFundingTime: options.nextFundingTime ?? (kind === "perpetual" ? now + 3_600_000 : null),
+    fundingScheduleCompleteness: options.fundingScheduleCompleteness,
     takerFeeBps: 10, status: "connected", fetchedAt: now, warnings: [],
   };
 }

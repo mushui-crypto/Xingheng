@@ -186,6 +186,52 @@ test("Bybit historical evidence scans realtime, order history, executions, and a
   ]));
 });
 
+test("Bybit funding history paginates settlement transactions and preserves signed funding and position size", async () => {
+  const calls: Array<{ method: string; path: string; cursor: string | null }> = [];
+  const client = new BybitClient(() => ({ apiKey: "key", apiSecret: "secret" }), {
+    now: () => now,
+    fetchImpl: (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = new URL(String(input));
+      calls.push({ method: init?.method ?? "GET", path: url.pathname, cursor: url.searchParams.get("cursor") });
+      const cursor = url.searchParams.get("cursor");
+      return Response.json({ retCode: 0, result: cursor === null ? {
+        list: [{
+          id: "funding-1", symbol: "DOGEUSDT", category: "linear", side: "Sell",
+          transactionTime: String(now - 10), type: "SETTLEMENT", funding: "-0.003000",
+          currency: "USDT", size: "-68.000",
+        }, {
+          id: "other", symbol: "BTCUSDT", category: "linear", side: "Buy",
+          transactionTime: String(now - 10), type: "SETTLEMENT", funding: "0.01",
+          currency: "USDT", size: "1",
+        }],
+        nextPageCursor: "next",
+      } : {
+        list: [{
+          id: "funding-2", symbol: "DOGEUSDT", category: "linear", side: "Sell",
+          transactionTime: String(now), type: "SETTLEMENT", funding: "0.001",
+          currency: "USDT", size: "-68",
+        }],
+        nextPageCursor: "",
+      } });
+    }) as typeof fetch,
+  });
+
+  const rows = await client.readFundingTransactions({
+    symbol: "DOGEUSDT", startTime: now - 60_000, endTime: now,
+  });
+  assert.deepEqual(rows, [{
+    id: "funding-1", symbol: "DOGEUSDT", side: "Sell", transactionTime: now - 10,
+    funding: "-0.003", currency: "USDT", size: "-68",
+  }, {
+    id: "funding-2", symbol: "DOGEUSDT", side: "Sell", transactionTime: now,
+    funding: "0.001", currency: "USDT", size: "-68",
+  }]);
+  assert.deepEqual(calls, [
+    { method: "GET", path: "/v5/account/transaction-log", cursor: null },
+    { method: "GET", path: "/v5/account/transaction-log", cursor: "next" },
+  ]);
+});
+
 test("Bybit dynamic instrument rules preserve base quantity for Spot and Linear without symbol allow-lists", async () => {
   const requested: string[] = [];
   const source = createBybitInstrumentQuantityRulesSource({

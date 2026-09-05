@@ -96,6 +96,8 @@ import { loadBinanceTradingConfig } from "./modules/binance/BinanceTradingConfig
 import { SqliteExecutionRecordStore } from "./modules/cex/ExecutionRecordStore";
 import { SqliteExecutionOrderReferenceStore } from "./modules/cex/ExecutionOrderReferenceStore";
 import { ArbitrageInstanceStore } from "./modules/cex/arbitrage-instance/ArbitrageInstanceStore";
+import { ArbitrageFundingStore } from "./modules/cex/arbitrage-instance/ArbitrageFundingStore";
+import { BybitFundingIngestionService, createBybitFundingReader } from "./modules/arbitrage-funding/BybitFundingIngestionService";
 import { ArbitrageInstanceQueryService } from "./modules/cex/arbitrage-instance/ArbitrageInstanceQueryService";
 import { createDefaultArbitragePositionVerificationService } from "./modules/cex/arbitrage-instance/createDefaultArbitragePositionVerificationService";
 import { GcpKmsCredentialKeyProvider } from "./modules/credentials/GcpKmsCredentialKeyProvider";
@@ -238,13 +240,22 @@ const executionOrderReferenceStore = new SqliteExecutionOrderReferenceStore({
   dbPath: process.env.TRADING_DB_PATH,
 });
 const arbitrageInstances = new ArbitrageInstanceStore({ dbPath: process.env.TRADING_DB_PATH });
+const arbitrageFunding = new ArbitrageFundingStore({ dbPath: process.env.TRADING_DB_PATH });
 const arbitrageInstanceQuery = new ArbitrageInstanceQueryService(arbitrageInstances);
 const arbitragePositionPresentation = new ArbitragePositionPresentationService(
   arbitrageDashboard,
   Date.now,
   undefined,
   arbitrageInstances,
+  arbitrageFunding,
 );
+const bybitFundingIngestion = new BybitFundingIngestionService(
+  arbitrageInstances,
+  arbitrageFunding,
+  arbitrageDashboard,
+  createBybitFundingReader(userExchangeCredentials),
+);
+bybitFundingIngestion.start();
 const arbitragePositionVerification = createDefaultArbitragePositionVerificationService({
   query: arbitrageInstanceQuery,
   credentials: userExchangeCredentials,
@@ -635,6 +646,7 @@ async function shutdown(signal: string) {
     fixedGridPaperWorker.stop();
     strategyRuntime.stop();
     realTradingReconciliation.stop();
+    bybitFundingIngestion.stop();
     await realTradingUserStreams.stop();
     await market.stop();
     for (const client of socketHub.clients) client.terminate();
@@ -651,6 +663,7 @@ async function shutdown(signal: string) {
       });
     });
     userExchangeCredentials.close();
+    arbitrageFunding.close();
     executionRecordStore.close();
     tradingStore.close();
     clearTimeout(forceExit);

@@ -510,6 +510,9 @@ describe("ArbitrageDashboardService cache and refresh control", () => {
       assert.equal(binanceBtcPerpetual?.ask, 101);
       assert.notEqual(binanceBtcPerpetual?.status, "disconnected");
       assert.ok(!binanceBtcPerpetual?.warnings.includes("缺少可执行买卖报价"));
+      const bybitDogePerpetual = snapshot.markets.find((market) => market.id === "bybit-doge-perp");
+      assert.equal(bybitDogePerpetual?.fundingIntervalHours, 6);
+      assert.equal(bybitDogePerpetual?.fundingScheduleCompleteness, "COMPLETE");
       assert.equal(countMatching(requestedUrls, "api.binance.com/api/v3/ticker/24hr?symbols="), 1);
       assert.equal(countMatching(requestedUrls, "fapi.binance.com/fapi/v1/ticker/24hr?symbols="), 1);
       assert.equal(countMatching(requestedUrls, "fapi.binance.com/fapi/v1/premiumIndex"), 1);
@@ -1059,6 +1062,7 @@ function bybitTickerRows() {
     markPrice: "100.5",
     indexPrice: "100.4",
     fundingRate: "0.0001",
+    ...(symbol === "DOGEUSDT" ? { fundingIntervalHour: "6" } : {}),
     turnover24h: "1000000",
     openInterest: "10000",
     nextFundingTime: "1800028800000",

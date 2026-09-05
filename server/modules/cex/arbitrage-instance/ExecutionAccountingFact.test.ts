@@ -53,6 +53,39 @@ test("complete opening coverage and no close produces a real zero spread result"
   assert.equal(result.realizedSpreadDisplayState, "NO_REALIZED_CLOSE");
 });
 
+test("complete zero funding and zero spread produce an explicit net result after fees", () => {
+  const instance = fixture([
+    reference("lo", "long", "OPENING", "10"), reference("so", "short", "OPENING", "10"),
+  ]);
+  const result = deriveRealizedAccounting(instance, [
+    fact("lo", "long", "OPENING", "10", "100", "0.006"),
+    fact("so", "short", "OPENING", "10", "110", "0.00326821"),
+  ], { cumulativeFundingIncome: "0", cumulativeFundingIncomeCompleteness: "COMPLETE" });
+  assert.equal(result.cumulativeFundingIncome, "0");
+  assert.equal(result.realizedSpreadProfit, "0");
+  assert.equal(result.tradingFeeNetCostUsdt, "0.00926821");
+  assert.equal(result.realizedNetProfit, "-0.00926821");
+  assert.equal(result.realizedNetProfitCompleteness, "COMPLETE");
+});
+
+test("realized net recovers from incomplete to complete when observed funding becomes available", () => {
+  const instance = fixture([
+    reference("lo", "long", "OPENING", "10"), reference("so", "short", "OPENING", "10"),
+  ]);
+  const facts = [
+    fact("lo", "long", "OPENING", "10", "100", "0.006"),
+    fact("so", "short", "OPENING", "10", "110", "0.004"),
+  ];
+  const pending = deriveRealizedAccounting(instance, facts);
+  assert.equal(pending.realizedNetProfit, null);
+  assert.equal(pending.realizedNetProfitCompleteness, "INCOMPLETE");
+  const observed = deriveRealizedAccounting(instance, facts, {
+    cumulativeFundingIncome: "0.025", cumulativeFundingIncomeCompleteness: "COMPLETE",
+  });
+  assert.equal(observed.realizedNetProfit, "0.015");
+  assert.equal(observed.realizedNetProfitCompleteness, "COMPLETE");
+});
+
 test("base-asset fee uses the same authoritative fill price and preserves cost and rebate signs", () => {
   const base = fixture([
     reference("lo", "long", "OPENING", "68.6"), reference("so", "short", "OPENING", "68"),

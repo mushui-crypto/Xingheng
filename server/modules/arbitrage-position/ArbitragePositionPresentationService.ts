@@ -7,6 +7,11 @@ import {
   deriveRealizedAccounting,
   type ExecutionAccountingFact,
 } from "../cex/arbitrage-instance/ExecutionAccountingFact";
+import {
+  deriveCumulativeFundingIncome,
+  type ArbitrageFundingFact,
+  type FundingHistoryCoverage,
+} from "../cex/arbitrage-instance/FundingAccounting";
 
 const DEFAULT_MARKET_MAX_AGE_MS = 20_000;
 const NORMALIZED_FUNDING_INTERVAL_HOURS = 8;
@@ -35,16 +40,16 @@ export type ArbitragePositionPresentation = Readonly<{
     completeness: Completeness;
   }>;
   revenue: Readonly<{
-    cumulativeFundingIncome: null;
-    cumulativeFundingIncomeCompleteness: "INCOMPLETE";
+    cumulativeFundingIncome: string | null;
+    cumulativeFundingIncomeCompleteness: Completeness;
     incurredFees: string | null;
     incurredFeesCompleteness: Completeness;
     realizedSpreadProfit: string | null;
     realizedSpreadProfitCompleteness: Completeness;
     realizedSpreadDisplayState: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE";
-    realizedNetProfit: null;
-    realizedNetProfitCompleteness: "INCOMPLETE";
-    completeness: "INCOMPLETE";
+    realizedNetProfit: string | null;
+    realizedNetProfitCompleteness: Completeness;
+    completeness: Completeness;
   }>;
 }>;
 
@@ -82,6 +87,11 @@ export type ExecutionAccountingFactSource = Readonly<{
   listExecutionAccountingFacts(userId: string, arbitrageId: string): readonly ExecutionAccountingFact[];
 }>;
 
+export type FundingAccountingFactSource = Readonly<{
+  listFacts(venue: string, accountId: string, instrumentId: string): readonly ArbitrageFundingFact[];
+  readCoverage(venue: string, accountId: string, instrumentId: string): FundingHistoryCoverage | null;
+}>;
+
 type MappedLeg = Readonly<{
   leg: ArbitrageInstanceLeg;
   canonical: ReturnType<typeof canonicalInstrumentFromId>;
@@ -97,38 +107,70 @@ export class ArbitragePositionPresentationService {
     private readonly now: () => number = Date.now,
     private readonly marketMaxAgeMs = DEFAULT_MARKET_MAX_AGE_MS,
     private readonly accountingSource?: ExecutionAccountingFactSource,
+    private readonly fundingSource?: FundingAccountingFactSource,
   ) {}
 
   async present(instances: readonly ArbitrageInstance[]) {
     const snapshot = await this.marketSource.getCurrentMarketSnapshot();
     return Object.freeze(instances.map((instance) => {
-      const revenue = this.presentRevenue(instance);
       try {
-        return this.presentInstance(instance, snapshot.markets, revenue);
+        return this.presentInstance(instance, snapshot.markets);
       } catch {
-        return incomplete(instance, revenue);
+        return incomplete(instance);
       }
     }));
   }
 
-  private presentRevenue(instance: ArbitrageInstance): ArbitragePositionPresentation["revenue"] {
+  private presentRevenue(
+    instance: ArbitrageInstance,
+    mapped: readonly MappedLeg[],
+  ): ArbitragePositionPresentation["revenue"] {
     if (!this.accountingSource) return incompleteRevenue();
     try {
+      const executionFacts = this.accountingSource.listExecutionAccountingFacts(instance.userId, instance.arbitrageId);
+      const perpetuals = mapped.filter(({ canonical }) => canonical.contractType === "perpetual");
+      const fundingFacts = this.fundingSource
+        ? perpetuals.flatMap(({ leg }) => this.fundingSource!.listFacts(leg.venue, leg.accountId, leg.instrumentId))
+        : [];
+      const fundingCoverage = this.fundingSource
+        ? perpetuals.flatMap(({ leg }) => {
+          const coverage = this.fundingSource!.readCoverage(leg.venue, leg.accountId, leg.instrumentId);
+          return coverage ? [coverage] : [];
+        })
+        : [];
+      const funding = deriveCumulativeFundingIncome({
+        instance,
+        executionFacts,
+        fundingFacts,
+        coverage: fundingCoverage,
+        schedules: perpetuals.map(({ leg, market, fresh }) => ({
+          legId: leg.legId,
+          nextFundingTime: fresh ? market?.nextFundingTime ?? null : null,
+          fundingIntervalHours: fresh ? market?.fundingIntervalHours ?? null : null,
+          authoritative: Boolean(fresh && market?.fundingScheduleCompleteness === "COMPLETE"),
+        })),
+        now: this.now(),
+      });
       const summary = deriveRealizedAccounting(
         instance,
-        this.accountingSource.listExecutionAccountingFacts(instance.userId, instance.arbitrageId),
+        executionFacts,
+        funding,
       );
+      const complete = summary.cumulativeFundingIncomeCompleteness === "COMPLETE"
+        && summary.tradingFeeCompleteness === "COMPLETE"
+        && summary.realizedSpreadProfitCompleteness === "COMPLETE"
+        && summary.realizedNetProfitCompleteness === "COMPLETE";
       return Object.freeze({
-        cumulativeFundingIncome: null,
-        cumulativeFundingIncomeCompleteness: "INCOMPLETE" as const,
+        cumulativeFundingIncome: summary.cumulativeFundingIncome,
+        cumulativeFundingIncomeCompleteness: summary.cumulativeFundingIncomeCompleteness,
         incurredFees: summary.tradingFeeNetCostUsdt,
         incurredFeesCompleteness: summary.tradingFeeCompleteness,
         realizedSpreadProfit: summary.realizedSpreadProfit,
         realizedSpreadProfitCompleteness: summary.realizedSpreadProfitCompleteness,
         realizedSpreadDisplayState: summary.realizedSpreadDisplayState,
-        realizedNetProfit: null,
-        realizedNetProfitCompleteness: "INCOMPLETE" as const,
-        completeness: "INCOMPLETE" as const,
+        realizedNetProfit: summary.realizedNetProfit,
+        realizedNetProfitCompleteness: summary.realizedNetProfitCompleteness,
+        completeness: complete ? "COMPLETE" as const : "INCOMPLETE" as const,
       });
     } catch {
       return incompleteRevenue();
@@ -138,7 +180,6 @@ export class ArbitragePositionPresentationService {
   private presentInstance(
     instance: ArbitrageInstance,
     markets: readonly ArbitrageMarket[],
-    revenue: ArbitragePositionPresentation["revenue"],
   ): ArbitragePositionPresentation {
     const now = this.now();
     const mapped: readonly MappedLeg[] = instance.legs.map((leg) => {
@@ -152,6 +193,7 @@ export class ArbitragePositionPresentationService {
         && now - market.fetchedAt <= this.marketMaxAgeMs);
       return { leg, canonical, market, fresh };
     });
+    const revenue = this.presentRevenue(instance, mapped);
 
     const legs = mapped.map(fundingLegPresentation) as unknown as readonly [FundingLegPresentation, FundingLegPresentation];
     const netFundingRate8h = normalizedNetFundingRate(mapped);

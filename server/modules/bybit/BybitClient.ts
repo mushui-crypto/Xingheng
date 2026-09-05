@@ -46,6 +46,16 @@ export type BybitHistoricalOrderEvidence = Readonly<{
   checkedAt: number;
 }>;
 
+export type BybitFundingTransaction = Readonly<{
+  id: string;
+  symbol: string;
+  side: "Buy" | "Sell";
+  transactionTime: number;
+  funding: string;
+  currency: string;
+  size: string;
+}>;
+
 export class BybitClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
@@ -238,6 +248,46 @@ export class BybitClient {
     const symbol = providerSymbol(symbolInput);
     const rows = await this.orderRows("/v5/order/realtime", { category, symbol });
     return rows.filter((row) => row.symbol === symbol).length;
+  }
+
+  async readFundingTransactions(input: Readonly<{ symbol: string; startTime: number; endTime: number }>) {
+    const symbol = providerSymbol(input.symbol);
+    const startTime = timestamp(input.startTime, "Bybit funding history start");
+    const endTime = timestamp(input.endTime, "Bybit funding history end");
+    if (endTime < startTime || endTime - startTime > 7 * 24 * 60 * 60 * 1000) {
+      throw new Error("Bybit funding history window is invalid.");
+    }
+    const rows: BybitFundingTransaction[] = [];
+    const seenCursors = new Set<string>();
+    let cursor: string | undefined;
+    for (let page = 0; page < 10_000; page += 1) {
+      const payload = await this.signedRequest("GET", "/v5/account/transaction-log", {
+        accountType: "UNIFIED", category: "linear", type: "SETTLEMENT",
+        startTime, endTime, limit: 50, ...(cursor === undefined ? {} : { cursor }),
+      });
+      const result = record(payload.result, "Bybit transaction log result");
+      for (const item of array(result.list, "Bybit transaction log")) {
+        const row = record(item, "Bybit transaction");
+        if (row.type !== "SETTLEMENT" || row.category !== "linear" || row.symbol !== symbol) continue;
+        const funding = optionalString(row.funding);
+        if (funding === null) continue;
+        rows.push(Object.freeze({
+          id: requiredIdentifier(row.id, "Bybit transaction id"),
+          symbol,
+          side: orderSide(row.side),
+          transactionTime: providerTimestamp(row.transactionTime, "Bybit transaction time"),
+          funding: signedDecimalString(funding, "Bybit funding amount"),
+          currency: asset(row.currency),
+          size: signedDecimalString(row.size, "Bybit funding position size"),
+        }));
+      }
+      const next = optionalString(result.nextPageCursor);
+      if (next === null) return Object.freeze(rows);
+      if (seenCursors.has(next)) throw new BybitProviderError("provider_response_invalid", "Bybit transaction cursor repeated.");
+      seenCursors.add(next);
+      cursor = next;
+    }
+    throw new BybitProviderError("provider_response_invalid", "Bybit transaction pagination exceeded its safety bound.");
   }
 
   private async orderRows(
@@ -641,6 +691,22 @@ function optionalString(value: unknown) {
 function optionalTimestamp(value: unknown) {
   const numeric = typeof value === "string" && value.trim() ? Number(value) : value;
   return typeof numeric === "number" && Number.isSafeInteger(numeric) && numeric >= 0 ? numeric : null;
+}
+
+function providerTimestamp(value: unknown, label: string) {
+  const parsed = optionalTimestamp(value);
+  if (parsed === null) throw new BybitProviderError("provider_response_invalid", `${label} is invalid.`);
+  return parsed;
+}
+
+function signedDecimalString(value: unknown, label: string) {
+  const text = typeof value === "number" ? String(value) : typeof value === "string" ? value.trim() : "";
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(text)) {
+    throw new BybitProviderError("provider_response_invalid", `${label} is invalid.`);
+  }
+  const negative = text.startsWith("-");
+  const normalized = normalizeDecimal(negative ? text.slice(1) : text);
+  return negative && normalized !== "0" ? `-${normalized}` : normalized;
 }
 
 function decimalString(value: unknown, label: string) {

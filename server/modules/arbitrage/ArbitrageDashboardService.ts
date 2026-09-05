@@ -53,6 +53,7 @@ type CurrentMarketPayload = {
   volume24h: number | null;
   openInterest: number | null;
   nextFundingTime: number | null;
+  fundingScheduleAuthoritative?: boolean;
   timestamp: number;
   bids: OrderbookLevel[];
   asks: OrderbookLevel[];
@@ -451,7 +452,10 @@ export class ArbitrageDashboardService {
         loadCurrentMarket(config, currentBatches, this.loadOrderbook(config, forceRefresh, timing), timing),
         config.kind === "perpetual" ? this.loadFundingHistory(config, timing) : Promise.resolve([]),
       ]);
-      const intervalHours = current.fundingIntervalHours ?? inferFundingIntervalHours(fundingHistory) ?? config.fundingIntervalHours ?? null;
+      const inferredFundingIntervalHours = inferFundingIntervalHours(fundingHistory);
+      const intervalHours = current.fundingIntervalHours ?? inferredFundingIntervalHours ?? config.fundingIntervalHours ?? null;
+      const fundingScheduleComplete = config.kind === "spot" || Boolean(current.nextFundingTime !== null
+        && intervalHours !== null && (current.fundingScheduleAuthoritative || inferredFundingIntervalHours !== null));
       const fundingMetrics = config.kind === "spot"
         ? { apr: 0, positiveRatio: null, coverageRatio: 1 }
         : calculateHistoricalFundingMetrics(fundingHistory, fundingLookbackDays);
@@ -491,6 +495,7 @@ export class ArbitrageDashboardService {
         volume24h: current.volume24h,
         openInterest: current.openInterest,
         nextFundingTime: current.nextFundingTime,
+        fundingScheduleCompleteness: fundingScheduleComplete ? "COMPLETE" : "INCOMPLETE",
         takerFeeBps: config.takerFeeBps,
         status: warnings.length > 0 ? "degraded" : "connected",
         fetchedAt: current.timestamp,
@@ -739,10 +744,11 @@ async function loadBinanceCurrent(
     markPrice: premium?.markPrice ?? ticker?.lastPrice,
     indexPrice: premium?.indexPrice ?? ticker?.lastPrice,
     fundingRate: premium?.lastFundingRate,
-    fundingIntervalHours: config.fundingIntervalHours,
+    fundingIntervalHours: null,
     volume24h: ticker?.quoteVolume,
     openInterest: null,
     nextFundingTime: premium?.nextFundingTime,
+    fundingScheduleAuthoritative: false,
     bids: depth.bids,
     asks: depth.asks,
     timestamp: depth.timestamp,
@@ -772,10 +778,11 @@ async function loadBybitCurrent(
     markPrice: ticker.markPrice ?? ticker.lastPrice,
     indexPrice: ticker.indexPrice ?? ticker.lastPrice,
     fundingRate: ticker.fundingRate,
-    fundingIntervalHours: config.fundingIntervalHours,
+    fundingIntervalHours: ticker.fundingIntervalHour,
     volume24h: ticker.turnover24h,
     openInterest: ticker.openInterestValue ?? ticker.openInterest,
     nextFundingTime: ticker.nextFundingTime,
+    fundingScheduleAuthoritative: ticker.fundingIntervalHour !== undefined && ticker.fundingIntervalHour !== null,
     bids: depth.bids,
     asks: depth.asks,
     timestamp: depth.timestamp,
@@ -836,6 +843,7 @@ async function loadBitgetCurrent(
     volume24h: ticker.usdtVolume ?? ticker.quoteVolume,
     openInterest: ticker.holdingAmount,
     nextFundingTime: funding?.nextUpdate,
+    fundingScheduleAuthoritative: funding?.fundingRateInterval !== undefined && funding?.nextUpdate !== undefined,
     bids: depth.bids,
     asks: depth.asks,
     timestamp: depth.timestamp,
@@ -874,6 +882,7 @@ async function loadOkxCurrent(
     volume24h: ticker.volCcy24h ? numberValue(ticker.volCcy24h)! * numberValue(ticker.last)! : null,
     openInterest: null,
     nextFundingTime: funding?.fundingTime,
+    fundingScheduleAuthoritative: funding?.fundingTime !== undefined && funding?.nextFundingTime !== undefined,
     bids: depth.bids,
     asks: depth.asks,
     timestamp: depth.timestamp,
@@ -906,6 +915,7 @@ async function loadTradeXyzCurrent(
       ? numberValue(context.openInterest)! * numberValue(context.oraclePx)!
       : null,
     nextFundingTime: nextWholeHour(),
+    fundingScheduleAuthoritative: true,
     bids: depth.bids,
     asks: depth.asks,
     timestamp: depth.timestamp,
@@ -975,6 +985,7 @@ function currentPayload(input: Record<string, any>): CurrentMarketPayload {
     volume24h: numberValue(input.volume24h),
     openInterest: numberValue(input.openInterest),
     nextFundingTime: numberValue(input.nextFundingTime),
+    fundingScheduleAuthoritative: input.fundingScheduleAuthoritative === true,
     timestamp: numberValue(input.timestamp) ?? Date.now(),
     bids: normalizeBook(input.bids, input.sizeMultiplier),
     asks: normalizeBook(input.asks, input.sizeMultiplier),
@@ -1045,6 +1056,7 @@ function disconnectedMarket(config: InstrumentConfig, error: unknown): InternalA
     volume24h: null,
     openInterest: null,
     nextFundingTime: null,
+    fundingScheduleCompleteness: "INCOMPLETE",
     takerFeeBps: config.takerFeeBps,
     status: "disconnected",
     fetchedAt: Date.now(),

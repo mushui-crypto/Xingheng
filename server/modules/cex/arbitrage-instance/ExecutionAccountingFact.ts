@@ -27,20 +27,24 @@ export type ExecutionAccountingFact = Readonly<{
 export type ExecutionAccountingFactCandidate = ExecutionAccountingEvidence;
 
 export type RealizedAccountingSummary = Readonly<{
-  cumulativeFundingIncome: null;
-  cumulativeFundingIncomeCompleteness: "INCOMPLETE";
+  cumulativeFundingIncome: string | null;
+  cumulativeFundingIncomeCompleteness: "COMPLETE" | "INCOMPLETE";
   tradingFeeNetCostUsdt: string | null;
   tradingFeeCompleteness: "COMPLETE" | "INCOMPLETE";
   realizedSpreadProfit: string | null;
   realizedSpreadProfitCompleteness: "COMPLETE" | "INCOMPLETE";
   realizedSpreadDisplayState: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE";
-  realizedNetProfit: null;
-  realizedNetProfitCompleteness: "INCOMPLETE";
+  realizedNetProfit: string | null;
+  realizedNetProfitCompleteness: "COMPLETE" | "INCOMPLETE";
 }>;
 
 export function deriveRealizedAccounting(
   instance: ArbitrageInstance,
   facts: readonly ExecutionAccountingFact[],
+  funding: Readonly<{
+    cumulativeFundingIncome: string | null;
+    cumulativeFundingIncomeCompleteness: "COMPLETE" | "INCOMPLETE";
+  }> = { cumulativeFundingIncome: null, cumulativeFundingIncomeCompleteness: "INCOMPLETE" },
 ): RealizedAccountingSummary {
   const references = instance.executionReferences.filter((reference) => reference.phase === "OPENING"
     || reference.phase === "CLOSING");
@@ -87,16 +91,25 @@ export function deriveRealizedAccounting(
     ? "INCOMPLETE" as const
     : pairedClosingQuantity(instance, closingReferences, factByIntent).numerator === 0n
       ? "NO_REALIZED_CLOSE" as const : "REALIZED" as const;
+  const realizedNetComplete = funding.cumulativeFundingIncomeCompleteness === "COMPLETE"
+    && funding.cumulativeFundingIncome !== null && feeComplete && tradingFeeNetCostUsdt !== null
+    && spreadComplete && realizedSpreadProfit !== null;
+  const realizedNetProfit = realizedNetComplete
+    ? formatRational(subtractRational(
+      addRational(parseDecimal(funding.cumulativeFundingIncome!), parseDecimal(realizedSpreadProfit!)),
+      parseDecimal(tradingFeeNetCostUsdt!),
+    ))
+    : null;
   return Object.freeze({
-    cumulativeFundingIncome: null,
-    cumulativeFundingIncomeCompleteness: "INCOMPLETE",
+    cumulativeFundingIncome: funding.cumulativeFundingIncome,
+    cumulativeFundingIncomeCompleteness: funding.cumulativeFundingIncomeCompleteness,
     tradingFeeNetCostUsdt,
     tradingFeeCompleteness: feeComplete ? "COMPLETE" : "INCOMPLETE",
     realizedSpreadProfit,
     realizedSpreadProfitCompleteness: spreadComplete ? "COMPLETE" : "INCOMPLETE",
     realizedSpreadDisplayState,
-    realizedNetProfit: null,
-    realizedNetProfitCompleteness: "INCOMPLETE",
+    realizedNetProfit,
+    realizedNetProfitCompleteness: realizedNetComplete ? "COMPLETE" : "INCOMPLETE",
   });
 }
 
