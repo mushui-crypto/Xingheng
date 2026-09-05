@@ -29,8 +29,11 @@ import {
   openingSetupSourcePlanId,
   type ArbitrageOpeningSetup,
 } from "../../arbitrage-execution/ArbitrageOpeningSetup";
-import type { ExecutionAccountingFactCandidate } from "./ExecutionAccountingFact";
-import type { ExecutionAccountingFact } from "./ExecutionAccountingFact";
+import {
+  deriveHistoricalExecutionFeeNetCostUsdt,
+  type ExecutionAccountingFact,
+  type ExecutionAccountingFactCandidate,
+} from "./ExecutionAccountingFact";
 import { createExecutionAccountingEvidence } from "../ExecutionAccountingEvidence";
 
 const ACTIVE_STATUSES: readonly ArbitrageInstanceStatus[] = ["OPENING", "HOLDING", "RESIDUAL", "CLOSING"];
@@ -1261,12 +1264,26 @@ export class ArbitrageInstanceStore {
     evidence: ExecutionAccountingFactCandidate,
     authoritativeCorrection: boolean,
   ) {
-    const normalizedEvidence = createExecutionAccountingEvidence(evidence);
+    const rawEvidence = createExecutionAccountingEvidence(evidence);
     const instance = this.requireForUser(identifier(userId, "userId"), identifier(arbitrageId, "arbitrageId"));
     const reference = instance.executionReferences.find((candidate) => candidate.executionIntentId === executionIntentId);
     if (!reference?.executionRecordId || (reference.phase !== "OPENING" && reference.phase !== "CLOSING")
       || (reference.status !== "CONFIRMED" && reference.status !== "FAILED")
       || reference.confirmedQuantity === "0") return;
+    const leg = instance.legs.find((candidate) => candidate.legId === reference.legId);
+    if (!leg) throw new Error("Accounting execution reference leg is missing.");
+    const priceCompleteness = rawEvidence.averageFillPrice === null ? "INCOMPLETE" as const : "COMPLETE" as const;
+    const tradingFeeNetCostUsdt = deriveHistoricalExecutionFeeNetCostUsdt(leg.instrumentId, {
+      ...rawEvidence,
+      priceCompleteness,
+    });
+    const normalizedEvidence = Object.freeze({
+      ...rawEvidence,
+      tradingFeeNetCostUsdt,
+      completeness: priceCompleteness === "COMPLETE"
+        && rawEvidence.feeAmountProvider !== null && tradingFeeNetCostUsdt !== null
+        ? "COMPLETE" as const : "INCOMPLETE" as const,
+    });
     if (normalizeUnsignedDecimal(normalizedEvidence.filledQuantity, "accounting filledQuantity")
       !== normalizeUnsignedDecimal(reference.confirmedQuantity, "reference confirmedQuantity")) {
       throw new Error("Accounting evidence quantity does not match the terminal execution reference.");
@@ -1286,7 +1303,6 @@ export class ArbitrageInstanceStore {
       this.updateExecutionAccountingFact(existing, normalizedEvidence, reference.status, authoritativeCorrection);
       return;
     }
-    const priceCompleteness = normalizedEvidence.averageFillPrice === null ? "INCOMPLETE" : "COMPLETE";
     const feeCompleteness = normalizedEvidence.feeAmountProvider === null
       || normalizedEvidence.tradingFeeNetCostUsdt === null ? "INCOMPLETE" : "COMPLETE";
     const completeness = priceCompleteness === "COMPLETE" && feeCompleteness === "COMPLETE"

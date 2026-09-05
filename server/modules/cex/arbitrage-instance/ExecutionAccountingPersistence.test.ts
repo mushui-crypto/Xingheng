@@ -95,6 +95,24 @@ test("late fee evidence enriches a fact without using a current market conversio
   });
 });
 
+test("base-asset fee persists its historical USDT equivalent from the same authoritative fill", () => {
+  withFixture(({ instances, records }) => {
+    prepareReference(instances, records, { intentId: "open-long", recordId: "record-long", orderId: "order-long", requested: "10" });
+    instances.applyExecutionResult("user", "arb", {
+      executionIntentId: "open-long", status: "CONFIRMED", confirmedQuantity: "10", updatedAt: 4,
+      accountingEvidence: {
+        providerOrderId: "order-long", filledQuantity: "10", averageFillPrice: "0.08745",
+        feeAmountProvider: "0.0686", feeAsset: "DOGE", tradingFeeNetCostUsdt: null,
+        confirmedAt: 4, completeness: "INCOMPLETE",
+      },
+    });
+    const [fact] = instances.listExecutionAccountingFacts("user", "arb");
+    assert.equal(fact?.tradingFeeNetCostUsdt, "0.00599907");
+    assert.equal(fact?.feeCompleteness, "COMPLETE");
+    assert.equal(fact?.completeness, "COMPLETE");
+  });
+});
+
 test("a weaker replay cannot downgrade a complete fact", () => {
   withFixture(({ instances, records }) => {
     prepareReference(instances, records, { intentId: "open-long", recordId: "record-long", orderId: "order-long", requested: "10" });

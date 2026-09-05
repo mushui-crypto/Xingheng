@@ -41,6 +41,7 @@ export type ArbitragePositionPresentation = Readonly<{
     incurredFeesCompleteness: Completeness;
     realizedSpreadProfit: string | null;
     realizedSpreadProfitCompleteness: Completeness;
+    realizedSpreadDisplayState: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE";
     realizedNetProfit: null;
     realizedNetProfitCompleteness: "INCOMPLETE";
     completeness: "INCOMPLETE";
@@ -124,6 +125,7 @@ export class ArbitragePositionPresentationService {
         incurredFeesCompleteness: summary.tradingFeeCompleteness,
         realizedSpreadProfit: summary.realizedSpreadProfit,
         realizedSpreadProfitCompleteness: summary.realizedSpreadProfitCompleteness,
+        realizedSpreadDisplayState: summary.realizedSpreadDisplayState,
         realizedNetProfit: null,
         realizedNetProfitCompleteness: "INCOMPLETE" as const,
         completeness: "INCOMPLETE" as const,
@@ -315,6 +317,7 @@ function incompleteRevenue() {
     cumulativeFundingIncome: null, cumulativeFundingIncomeCompleteness: "INCOMPLETE" as const,
     incurredFees: null, incurredFeesCompleteness: "INCOMPLETE" as const,
     realizedSpreadProfit: null, realizedSpreadProfitCompleteness: "INCOMPLETE" as const,
+    realizedSpreadDisplayState: "INCOMPLETE" as const,
     realizedNetProfit: null, realizedNetProfitCompleteness: "INCOMPLETE" as const,
     completeness: "INCOMPLETE" as const,
   });

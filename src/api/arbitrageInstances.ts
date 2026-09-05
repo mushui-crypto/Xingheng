@@ -126,6 +126,7 @@ export type ArbitragePositionPresentation = Readonly<{
     incurredFeesCompleteness: "COMPLETE" | "INCOMPLETE";
     realizedSpreadProfit: string | null;
     realizedSpreadProfitCompleteness: "COMPLETE" | "INCOMPLETE";
+    realizedSpreadDisplayState?: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE";
     realizedNetProfit: string | null;
     realizedNetProfitCompleteness: "COMPLETE" | "INCOMPLETE";
     completeness: "COMPLETE" | "INCOMPLETE";
@@ -476,6 +477,7 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
       incurredFeesCompleteness: completenessValue(revenue.incurredFeesCompleteness),
       realizedSpreadProfit: nullableDecimal(revenue.realizedSpreadProfit),
       realizedSpreadProfitCompleteness: completenessValue(revenue.realizedSpreadProfitCompleteness),
+      realizedSpreadDisplayState: realizedSpreadDisplayStateValue(revenue.realizedSpreadDisplayState),
       realizedNetProfit: nullableDecimal(revenue.realizedNetProfit),
       realizedNetProfitCompleteness: completenessValue(revenue.realizedNetProfitCompleteness),
       completeness: revenueCompleteness,
@@ -485,6 +487,12 @@ function positionPresentation(payload: unknown): ArbitragePositionPresentation {
 
 function completenessValue(value: unknown) {
   return value === "COMPLETE" || value === "INCOMPLETE" ? value : invalidResponse();
+}
+
+function realizedSpreadDisplayStateValue(value: unknown) {
+  if (value === undefined) return undefined;
+  return value === "REALIZED" || value === "NO_REALIZED_CLOSE" || value === "INCOMPLETE"
+    ? value : invalidResponse();
 }
 
 function positionFundingLeg(payload: unknown): ArbitragePositionFundingLeg {

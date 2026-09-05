@@ -71,6 +71,7 @@ function presentation(arbitrageId: string): ArbitragePositionPresentation {
       cumulativeFundingIncome: null, cumulativeFundingIncomeCompleteness: "INCOMPLETE",
       incurredFees: null, incurredFeesCompleteness: "INCOMPLETE",
       realizedSpreadProfit: null, realizedSpreadProfitCompleteness: "INCOMPLETE",
+      realizedSpreadDisplayState: "INCOMPLETE",
       realizedNetProfit: null, realizedNetProfitCompleteness: "INCOMPLETE",
       completeness: "INCOMPLETE",
     },
@@ -136,7 +137,8 @@ test("arbitrage position card follows the three-level decision hierarchy without
 
   assert.match(html, /DOGE \/ USDT/u);
   assert.match(defaultLayer, /资金费率套利[\s\S]*OKX 现货 → Binance 永续/u);
-  assert.match(defaultLayer, /净资金费率[\s\S]*下次预计净资金费用[\s\S]*距下次结算[\s\S]*当前退出价差[\s\S]*管理规模[\s\S]*当前退出状态/u);
+  assert.match(defaultLayer, /净资金费率[\s\S]*下次预计净资金费用[\s\S]*距下次结算[\s\S]*当前退出价差[\s\S]*管理规模[\s\S]*累计资金费收入/u);
+  assert.doesNotMatch(defaultLayer, /当前退出状态/u);
   assert.match(defaultLayer, /\+0\.0100%[\s\S]*0[\s\S]*USDT[\s\S]*60\.00 bps[\s\S]*6\.000000 USDT \/ base/u);
   assert.doesNotMatch(defaultLayer, /两腿数量差|管理数量|可安全退出数量|safeClosable/u);
   assert.match(html, /LONG LEG[\s\S]*多头腿[\s\S]*交易类型[\s\S]*现货[\s\S]*本腿资金费率[\s\S]*不适用[\s\S]*交易所实际数量[\s\S]*60.531381/u);
@@ -343,6 +345,7 @@ test("revenue collapses when all values are unreliable and renders the four real
       incurredFeesCompleteness: "COMPLETE" as const,
       realizedSpreadProfit: "0.005",
       realizedSpreadProfitCompleteness: "COMPLETE" as const,
+      realizedSpreadDisplayState: "REALIZED" as const,
       realizedNetProfit: null,
       realizedNetProfitCompleteness: "INCOMPLETE" as const,
       completeness: "INCOMPLETE" as const,
@@ -356,11 +359,61 @@ test("revenue collapses when all values are unreliable and renders the four real
     presentations={[populated]}
   />);
 
-  assert.match(emptyHtml, /收益明细[\s\S]*暂无可靠收益数据/u);
-  assert.doesNotMatch(emptyHtml, /累计资金费收入/u);
+  assert.match(emptyHtml, /累计资金费收入[\s\S]*暂无可靠数据[\s\S]*收益明细[\s\S]*暂无可靠收益数据/u);
+  assert.equal((emptyHtml.match(/累计资金费收入/gu) ?? []).length, 1);
   assert.match(populatedHtml, /累计资金费收入[\s\S]*暂无可靠数据[\s\S]*已发生手续费[\s\S]*-0\.003 USDT[\s\S]*已实现价差收益[\s\S]*\+0\.005 USDT[\s\S]*已实现净收益[\s\S]*暂无可靠数据/u);
   assert.match(populatedHtml, /lg:grid-cols-4/u);
   assert.doesNotMatch(populatedHtml, /预计套利净收益|预计退出手续费|退出价差收益/u);
+});
+
+test("realized spread distinguishes no paired close, a realized amount, and incomplete evidence", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const base = presentation(instance!.arbitrageId);
+  const renderRevenue = (realizedSpreadProfit: string | null, realizedSpreadProfitCompleteness: "COMPLETE" | "INCOMPLETE", realizedSpreadDisplayState: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE") => renderToStaticMarkup(
+    <ArbitrageInstanceSections
+      active={[instance!]}
+      history={[]}
+      onPageChange={() => undefined}
+      page={1}
+      presentations={[{ ...base, revenue: {
+        ...base.revenue,
+        incurredFees: "0.01",
+        incurredFeesCompleteness: "COMPLETE",
+        realizedSpreadProfit,
+        realizedSpreadProfitCompleteness,
+        realizedSpreadDisplayState,
+      } }]}
+    />,
+  );
+
+  assert.match(renderRevenue("0", "COMPLETE", "NO_REALIZED_CLOSE"), /已实现价差收益[\s\S]*尚未产生已实现收益/u);
+  assert.match(renderRevenue("0.0123", "COMPLETE", "REALIZED"), /已实现价差收益[\s\S]*\+0\.0123 USDT/u);
+  assert.match(renderRevenue(null, "INCOMPLETE", "INCOMPLETE"), /已实现价差收益[\s\S]*暂无可靠数据/u);
+});
+
+test("first-level shows cumulative funding income while the third-level field remains unchanged", () => {
+  const [instance] = requireArbitrageInstanceList([arbitrageInstance("HOLDING")]);
+  const base = presentation(instance!.arbitrageId);
+  const withFundingIncome = {
+    ...base,
+    revenue: {
+      ...base.revenue,
+      cumulativeFundingIncome: "0.0125",
+      cumulativeFundingIncomeCompleteness: "COMPLETE" as const,
+    },
+  };
+  const html = renderToStaticMarkup(<ArbitrageInstanceSections
+    active={[instance!]}
+    history={[]}
+    onPageChange={() => undefined}
+    page={1}
+    presentations={[withFundingIncome]}
+  />);
+  const defaultLayer = html.slice(html.indexOf("资金费率套利"), html.indexOf("hidden=\"\""));
+
+  assert.match(defaultLayer, /累计资金费收入[\s\S]*\+0\.0125 USDT/u);
+  assert.doesNotMatch(defaultLayer, /当前退出状态/u);
+  assert.equal((html.match(/累计资金费收入/gu) ?? []).length, 2);
 });
 
 test("leg exit copy only describes exit capability and primary actions stay outside the expand button", () => {

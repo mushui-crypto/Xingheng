@@ -608,7 +608,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
         <PrimaryMetric label="距下次结算" value={<PositionFundingCountdown presentation={presentation} />} valueClassName="tabular-nums" />
         <PrimaryMetric label="当前退出价差" {...spreadPresentation(presentation, pair.quote)} />
         <PrimaryMetric label="管理规模" {...managedScalePresentation(presentation)} />
-        <PrimaryMetric compact label="当前退出状态" tone={exitPresentation.tone} value={exitPresentation.label} />
+        <PrimaryMetric label="累计资金费收入" {...cumulativeFundingPresentation(presentation)} />
       </dl>
 
       {!historical && (canResumeOpeningWorkflow(instance) || canAbandon) ? (
@@ -649,7 +649,7 @@ function InstanceCard({ historical, instance, onExitHedge, onInstanceRefresh, on
           </div>
         </section>
 
-        <RevenueDetails presentation={presentation} />
+        <RevenueDetails instance={instance} presentation={presentation} />
 
         <details className="border-t border-[#232830] px-[18px] py-3 text-xs">
           <summary className="cursor-pointer select-none text-[#8f99a5] outline-none hover:text-white focus-visible:ring-1 focus-visible:ring-white/50">技术与价格详情</summary>
@@ -861,7 +861,7 @@ export function derivePositionHealth(
   return { status: "ALIGNED" as const, residualReason: null, residualTradeable: null, affectsFullExit: !canExitFully, lastSyncedAt };
 }
 
-function RevenueDetails({ presentation }: { presentation?: ArbitragePositionPresentation }) {
+function RevenueDetails({ instance, presentation }: { instance: ArbitrageInstance; presentation?: ArbitragePositionPresentation }) {
   const revenue = presentation?.revenue;
   const hasReliableValue = revenue !== undefined && (
     revenue.cumulativeFundingIncomeCompleteness === "COMPLETE"
@@ -878,10 +878,22 @@ function RevenueDetails({ presentation }: { presentation?: ArbitragePositionPres
     <dl className="mt-3 grid grid-cols-1 gap-[10px] sm:grid-cols-2 lg:grid-cols-4">
       <RevenueMetric label="累计资金费收入" value={revenueValue(revenue.cumulativeFundingIncome, revenue.cumulativeFundingIncomeCompleteness)} />
       <RevenueMetric label="已发生手续费" tone="cost" value={feeRevenueValue(revenue.incurredFees, revenue.incurredFeesCompleteness)} />
-      <RevenueMetric label="已实现价差收益" value={revenueValue(revenue.realizedSpreadProfit, revenue.realizedSpreadProfitCompleteness)} />
+      <RevenueMetric label="已实现价差收益" value={realizedSpreadRevenueValue(instance, revenue)} />
       <RevenueMetric label="已实现净收益" tone="profit" value={revenueValue(revenue.realizedNetProfit, revenue.realizedNetProfitCompleteness)} />
     </dl>
   </section>;
+}
+
+function realizedSpreadRevenueValue(
+  instance: ArbitrageInstance,
+  revenue: ArbitragePositionPresentation["revenue"],
+) {
+  if (revenue.realizedSpreadProfitCompleteness !== "COMPLETE" || revenue.realizedSpreadProfit === null
+    || revenue.realizedSpreadDisplayState === "INCOMPLETE") return "暂无可靠数据";
+  const state = revenue.realizedSpreadDisplayState
+    ?? (instance.legs.every((leg) => !isZeroDecimal(leg.confirmedClosedQuantity)) ? "REALIZED" : "NO_REALIZED_CLOSE");
+  if (state === "NO_REALIZED_CLOSE") return "尚未产生已实现收益";
+  return revenueValue(revenue.realizedSpreadProfit, revenue.realizedSpreadProfitCompleteness);
 }
 
 function RevenueMetric({ label, tone = "neutral", value }: { label: string; tone?: "neutral" | "profit" | "cost"; value: string }) {
@@ -925,6 +937,16 @@ function managedScalePresentation(presentation?: ArbitragePositionPresentation) 
     return { value: "暂无可靠数据", tone: "neutral" as const };
   }
   return { value: compactDecimal(market.managedScaleUsdt, 4), unit: "USDT", detail: "当前配对名义规模", tone: "neutral" as const, valueClassName: "whitespace-nowrap" };
+}
+
+function cumulativeFundingPresentation(presentation?: ArbitragePositionPresentation) {
+  const revenue = presentation?.revenue;
+  if (revenue === undefined) return { value: "--", detail: "数据更新中", tone: "neutral" as const };
+  return {
+    value: revenueValue(revenue.cumulativeFundingIncome, revenue.cumulativeFundingIncomeCompleteness),
+    tone: "neutral" as const,
+    valueClassName: "whitespace-nowrap",
+  };
 }
 
 function legFundingValue(

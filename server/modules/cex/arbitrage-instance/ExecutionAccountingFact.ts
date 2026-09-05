@@ -1,4 +1,5 @@
 import type { ExecutionAccountingEvidence } from "../ExecutionAccountingEvidence";
+import { canonicalInstrumentFromId } from "../Instrument";
 import type { ArbitrageInstance } from "./ArbitrageInstance";
 
 export type ExecutionAccountingFact = Readonly<{
@@ -32,6 +33,7 @@ export type RealizedAccountingSummary = Readonly<{
   tradingFeeCompleteness: "COMPLETE" | "INCOMPLETE";
   realizedSpreadProfit: string | null;
   realizedSpreadProfitCompleteness: "COMPLETE" | "INCOMPLETE";
+  realizedSpreadDisplayState: "REALIZED" | "NO_REALIZED_CLOSE" | "INCOMPLETE";
   realizedNetProfit: null;
   realizedNetProfitCompleteness: "INCOMPLETE";
 }>;
@@ -66,20 +68,25 @@ export function deriveRealizedAccounting(
     return fact?.priceCompleteness === "COMPLETE" && fact.averageFillPrice !== null;
   });
 
+  const feeNetCostByIntent = new Map(terminalWithFill.map((reference) => {
+    const fact = factByIntent.get(reference.executionIntentId);
+    return [reference.executionIntentId, fact ? executionFeeNetCostUsdt(instance, fact) : null] as const;
+  }));
+
   const feeComplete = allTerminalFactsPresent && !unresolvedWithFill && openingReferences.length > 0
-    && terminalWithFill.every((reference) => {
-      const fact = factByIntent.get(reference.executionIntentId);
-      return fact?.feeCompleteness === "COMPLETE" && fact.tradingFeeNetCostUsdt !== null;
-    });
+    && terminalWithFill.every((reference) => feeNetCostByIntent.get(reference.executionIntentId) !== null);
   const tradingFeeNetCostUsdt = feeComplete
-    ? sumSignedDecimals(terminalWithFill.map((reference) =>
-      factByIntent.get(reference.executionIntentId)!.tradingFeeNetCostUsdt!))
+    ? sumSignedDecimals(terminalWithFill.map((reference) => feeNetCostByIntent.get(reference.executionIntentId)!))
     : null;
 
   const spreadComplete = allTerminalFactsPresent && !unresolvedWithFill && openingCoverage && closingPriceCoverage;
   const realizedSpreadProfit = spreadComplete
     ? realizedSpread(instance, openingReferences, closingReferences, factByIntent)
     : null;
+  const realizedSpreadDisplayState = !spreadComplete || realizedSpreadProfit === null
+    ? "INCOMPLETE" as const
+    : pairedClosingQuantity(instance, closingReferences, factByIntent).numerator === 0n
+      ? "NO_REALIZED_CLOSE" as const : "REALIZED" as const;
   return Object.freeze({
     cumulativeFundingIncome: null,
     cumulativeFundingIncomeCompleteness: "INCOMPLETE",
@@ -87,9 +94,49 @@ export function deriveRealizedAccounting(
     tradingFeeCompleteness: feeComplete ? "COMPLETE" : "INCOMPLETE",
     realizedSpreadProfit,
     realizedSpreadProfitCompleteness: spreadComplete ? "COMPLETE" : "INCOMPLETE",
+    realizedSpreadDisplayState,
     realizedNetProfit: null,
     realizedNetProfitCompleteness: "INCOMPLETE",
   });
+}
+
+function executionFeeNetCostUsdt(instance: ArbitrageInstance, fact: ExecutionAccountingFact) {
+  if (fact.feeCompleteness === "COMPLETE" && fact.tradingFeeNetCostUsdt !== null) {
+    return fact.tradingFeeNetCostUsdt;
+  }
+  const leg = instance.legs.find((candidate) => candidate.legId === fact.legId);
+  if (!leg) return null;
+  return deriveHistoricalExecutionFeeNetCostUsdt(leg.instrumentId, fact);
+}
+
+export function deriveHistoricalExecutionFeeNetCostUsdt(
+  instrumentId: string,
+  evidence: Pick<ExecutionAccountingFact, "averageFillPrice" | "feeAmountProvider" | "feeAsset" | "priceCompleteness" | "tradingFeeNetCostUsdt">,
+) {
+  if (evidence.tradingFeeNetCostUsdt !== null) return evidence.tradingFeeNetCostUsdt;
+  if (evidence.feeAmountProvider === null || evidence.feeAsset === null) return null;
+  const instrument = canonicalInstrumentFromId(instrumentId);
+  if (instrument.quoteAsset !== "USDT") return null;
+  if (evidence.feeAsset === instrument.quoteAsset) return evidence.feeAmountProvider;
+  if (evidence.feeAsset !== instrument.baseAsset || evidence.priceCompleteness !== "COMPLETE"
+    || evidence.averageFillPrice === null) return null;
+  return formatRational(multiplyRational(
+    parseDecimal(evidence.feeAmountProvider),
+    parseDecimal(evidence.averageFillPrice),
+  ));
+}
+
+function pairedClosingQuantity(
+  instance: ArbitrageInstance,
+  closingReferences: ArbitrageInstance["executionReferences"],
+  facts: ReadonlyMap<string, ExecutionAccountingFact>,
+) {
+  const longLeg = instance.legs.find((leg) => leg.role === "LONG")!;
+  const shortLeg = instance.legs.find((leg) => leg.role === "SHORT")!;
+  return minRational(
+    aggregate(closingReferences, facts, longLeg.legId).quantity,
+    aggregate(closingReferences, facts, shortLeg.legId).quantity,
+  );
 }
 
 function realizedSpread(
